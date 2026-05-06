@@ -41,61 +41,62 @@ fn specialize_term(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdS
         return term;
     };
 
-    match &func.kind {
-        // Simple application: Var("sign")(x, ...) → Var("f32.sign")(x, ...)
-        // Specialize based on the first argument's type.
-        TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
-            if args.is_empty() {
-                return term;
-            }
-            let name = symbols.get(*sym).expect("BUG: symbol not in table");
+    if args.is_empty() {
+        return term;
+    }
 
-            // Check for "mul" → BinOp("*") rewrite
-            if name == "mul" && args.len() == 2 {
-                let binop = Term {
-                    id: term_ids.next_id(),
-                    ty: func.ty.clone(),
-                    span: func.span,
-                    kind: TermKind::BinOp(crate::ast::BinaryOp { op: "*".to_string() }),
-                };
-                let TermKind::App { func: _, args } = term.kind else {
-                    unreachable!()
-                };
-                return Term {
-                    id: term_ids.next_id(),
-                    kind: TermKind::App {
-                        func: Box::new(binop),
-                        args,
-                    },
-                    ..term
-                };
-            }
+    // Resolve the func's canonical name regardless of whether it's a
+    // `Var(Symbol)` or `Var(Builtin)` — `var_term_canonical_name`
+    // returns the catalog's surface_name for builtins and the
+    // symbol's name for user-defined symbols.
+    let Some(name) = crate::tlc::var_term_canonical_name(func, symbols) else {
+        return term;
+    };
 
-            if let Some(specialized_name) = specialize_name(name, &args[0].ty) {
-                let specialized_sym = symbols.alloc(specialized_name);
-                let new_func = Term {
-                    id: term_ids.next_id(),
-                    ty: func.ty.clone(),
-                    span: func.span,
-                    kind: TermKind::Var(crate::tlc::VarRef::Symbol(specialized_sym)),
-                };
-                let TermKind::App { func: _, args } = term.kind else {
-                    unreachable!()
-                };
-                Term {
-                    id: term_ids.next_id(),
-                    kind: TermKind::App {
-                        func: Box::new(new_func),
-                        args,
-                    },
-                    ..term
-                }
-            } else {
-                term
-            }
+    // `mul` → `BinOp("*")` rewrite (works for both scalar and
+    // vec/matrix overloads — overload selection at the catalog
+    // level becomes irrelevant once it's a BinOp).
+    if name == "mul" && args.len() == 2 {
+        let binop = Term {
+            id: term_ids.next_id(),
+            ty: func.ty.clone(),
+            span: func.span,
+            kind: TermKind::BinOp(crate::ast::BinaryOp { op: "*".to_string() }),
+        };
+        let TermKind::App { func: _, args } = term.kind else {
+            unreachable!()
+        };
+        return Term {
+            id: term_ids.next_id(),
+            kind: TermKind::App {
+                func: Box::new(binop),
+                args,
+            },
+            ..term
+        };
+    }
+
+    if let Some(specialized_name) = specialize_name(name, &args[0].ty) {
+        let specialized_sym = symbols.alloc(specialized_name);
+        let new_func = Term {
+            id: term_ids.next_id(),
+            ty: func.ty.clone(),
+            span: func.span,
+            kind: TermKind::Var(crate::tlc::VarRef::Symbol(specialized_sym)),
+        };
+        let TermKind::App { func: _, args } = term.kind else {
+            unreachable!()
+        };
+        Term {
+            id: term_ids.next_id(),
+            kind: TermKind::App {
+                func: Box::new(new_func),
+                args,
+            },
+            ..term
         }
-
-        _ => term,
+    } else {
+        term
     }
 }
 

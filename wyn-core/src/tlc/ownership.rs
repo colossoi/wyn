@@ -649,30 +649,25 @@ pub(super) fn alias_target_of(term: &Term, model: &OwnershipModel, program: &Pro
     match &term.kind {
         TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => model.owner_of(*sym),
         TermKind::App { func, args } => {
-            let TermKind::Var(crate::tlc::VarRef::Symbol(s)) = &func.kind else {
-                return None;
-            };
-            let name = program.symbols.get(*s)?;
-            let i = intrinsic_aliasing_arg(name)?;
+            let i = ALIASING_INTRINSICS.iter().find_map(|(n, idx)| {
+                if crate::tlc::var_term_matches_name(func, &program.symbols, n) { Some(*idx) } else { None }
+            })?;
             alias_target_of(args.get(i)?, model, program)
         }
         _ => None,
     }
 }
 
-/// Intrinsics whose result aliases one of their arguments. The
-/// returned index is the arg position the result aliases.
-fn intrinsic_aliasing_arg(name: &str) -> Option<usize> {
-    match name {
-        // arr[i] — view into arr
-        "_w_index" => Some(0),
-        // tuple_proj(t, idx) — projection into t
-        "_w_tuple_proj" => Some(0),
-        // in-place with returns the same buffer it consumed
-        "_w_intrinsic_array_with_inplace" => Some(0),
-        _ => None,
-    }
-}
+/// Intrinsics whose result aliases one of their arguments — `(name,
+/// arg_index_aliased)`.
+const ALIASING_INTRINSICS: &[(&str, usize)] = &[
+    // arr[i] — view into arr
+    ("_w_index", 0),
+    // tuple_proj(t, idx) — projection into t
+    ("_w_tuple_proj", 0),
+    // in-place with returns the same buffer it consumed
+    ("_w_intrinsic_array_with_inplace", 0),
+];
 
 /// Recognize forms that *definitely* produce a fresh non-copy value.
 /// Used by `origin_for_unaliased` to keep promotion paths open for
@@ -680,12 +675,9 @@ fn intrinsic_aliasing_arg(name: &str) -> Option<usize> {
 fn rhs_is_fresh_producer(term: &Term, program: &Program) -> bool {
     match &term.kind {
         TermKind::ArrayExpr(_) => true,
-        TermKind::App { func, .. } => {
-            let TermKind::Var(crate::tlc::VarRef::Symbol(s)) = &func.kind else {
-                return false;
-            };
-            program.symbols.get(*s).map(|name| is_fresh_producer_intrinsic(name)).unwrap_or(false)
-        }
+        TermKind::App { func, .. } => FRESH_PRODUCER_INTRINSICS
+            .iter()
+            .any(|n| crate::tlc::var_term_matches_name(func, &program.symbols, n)),
         _ => false,
     }
 }
@@ -693,12 +685,12 @@ fn rhs_is_fresh_producer(term: &Term, program: &Program) -> bool {
 /// Compiler-internal intrinsics that build a fresh non-copy value.
 /// Functional `with` allocates a new array; aliasing intrinsics like
 /// `_w_index` are deliberately absent.
-fn is_fresh_producer_intrinsic(name: &str) -> bool {
-    matches!(
-        name,
-        "_w_array_lit" | "_w_vec_lit" | "_w_tuple" | "_w_intrinsic_array_with"
-    )
-}
+const FRESH_PRODUCER_INTRINSICS: &[&str] = &[
+    "_w_array_lit",
+    "_w_vec_lit",
+    "_w_tuple",
+    "_w_intrinsic_array_with",
+];
 
 /// Walk a curried function type `a1 -> a2 -> ... -> aN -> ret`, returning
 /// the parameter types `[a1, a2, ..., aN]` (one per applied argument).
@@ -1062,31 +1054,16 @@ pub fn apply_ownership(mut program: Program) -> crate::error::Result<Program> {
     }
     let consuming_soacs: HashSet<TermId> = eligible_consuming_soacs(&program, &model).into_iter().collect();
 
-    let functional_sym = program.def_syms.get(crate::builtins::names::INTRINSIC_ARRAY_WITH).copied();
-    let inplace_sym = match (functional_sym, consuming_soacs.is_empty()) {
-        // No array_with calls and no consuming SOACs to mark — nothing to do.
-        (None, true) => return Ok(program),
-        _ => match program.def_syms.get(crate::builtins::names::INTRINSIC_ARRAY_WITH_INPLACE).copied() {
-            Some(s) => Some(s),
-            None if functional_sym.is_some() => {
-                let s =
-                    program.symbols.alloc(crate::builtins::names::INTRINSIC_ARRAY_WITH_INPLACE.to_string());
-                program.def_syms.insert(
-                    crate::builtins::names::INTRINSIC_ARRAY_WITH_INPLACE.to_string(),
-                    s,
-                );
-                Some(s)
-            }
-            None => None,
-        },
-    };
+    // Promotion of `array_with` → `array_with_inplace` is keyed by the
+    // catalog (BuiltinId for the in-place form is looked up at the
+    // rewrite site), not by symbol-table identity. We always run the
+    // rewriter — even with no consuming SOACs, an `array_with` whose
+    // source is a unique single-use binding is still promotable.
 
     let defs_in = std::mem::take(&mut program.defs);
     let mut rewriter = Rewriter {
         model: &model,
         program: &program,
-        functional_sym,
-        inplace_sym,
         consuming_soacs: &consuming_soacs,
     };
     let new_defs: Vec<Def> = defs_in
@@ -1148,38 +1125,48 @@ fn check_use_after_move(program: &Program, model: &OwnershipModel) -> Option<cra
 struct Rewriter<'m> {
     model: &'m OwnershipModel,
     program: &'m Program,
-    functional_sym: Option<SymbolId>,
-    inplace_sym: Option<SymbolId>,
     consuming_soacs: &'m HashSet<TermId>,
 }
 
 impl<'m> Rewriter<'m> {
     fn rewrite(&mut self, term: Term) -> Term {
         // array_with → array_with_inplace: rewrite the App's `func`
-        // before descending, since the rewrite swaps the function
-        // var.
-        if let (Some(functional_sym), Some(inplace_sym)) = (self.functional_sym, self.inplace_sym) {
-            if let TermKind::App { func, args } = &term.kind {
-                let calls_functional = matches!(&func.kind, TermKind::Var(crate::tlc::VarRef::Symbol(s)) if *s == functional_sym);
-                if calls_functional && args.len() == 3 && self.is_promotable(term.id, &args[0]) {
-                    let TermKind::App { func, args } = term.kind else {
-                        unreachable!()
-                    };
-                    let new_func = Term {
-                        kind: TermKind::Var(crate::tlc::VarRef::Symbol(inplace_sym)),
-                        ..*func
-                    };
-                    let new_args: Vec<Term> = args.into_iter().map(|a| self.rewrite(a)).collect();
-                    return Term {
-                        id: term.id,
-                        ty: term.ty,
-                        span: term.span,
-                        kind: TermKind::App {
-                            func: Box::new(new_func),
-                            args: new_args,
-                        },
-                    };
-                }
+        // before descending, since the rewrite swaps the function var.
+        // Match by name so the rewrite fires whether the call site is a
+        // `Var(Symbol("_w_intrinsic_array_with"))` (older synthesised
+        // paths) or a `Var(Builtin(ARRAY_WITH_ID))` (post-Phase-3.5
+        // user code).
+        if let TermKind::App { func, args } = &term.kind {
+            let calls_functional = crate::tlc::var_term_matches_name(
+                func,
+                &self.program.symbols,
+                crate::builtins::names::INTRINSIC_ARRAY_WITH,
+            );
+            if calls_functional && args.len() == 3 && self.is_promotable(term.id, &args[0]) {
+                let inplace_id = crate::builtins::catalog()
+                    .lookup_by_any_name(crate::builtins::names::INTRINSIC_ARRAY_WITH_INPLACE)
+                    .expect("array_with_inplace missing from catalog")
+                    .id;
+                let TermKind::App { func, args } = term.kind else {
+                    unreachable!()
+                };
+                let new_func = Term {
+                    kind: TermKind::Var(crate::tlc::VarRef::Builtin {
+                        id: inplace_id,
+                        overload_idx: 0,
+                    }),
+                    ..*func
+                };
+                let new_args: Vec<Term> = args.into_iter().map(|a| self.rewrite(a)).collect();
+                return Term {
+                    id: term.id,
+                    ty: term.ty,
+                    span: term.span,
+                    kind: TermKind::App {
+                        func: Box::new(new_func),
+                        args: new_args,
+                    },
+                };
             }
         }
         // Recurse children first; any consuming-Map mark is a leaf

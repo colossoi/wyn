@@ -351,78 +351,69 @@ impl BufferSpecializer {
             }
 
             TermKind::App { func, args } => {
+                // Catalog-name dispatches first — these recognise the
+                // call regardless of whether the func is a `Var(Symbol)`
+                // or a `Var(Builtin)`.
+
+                // `_w_index(data, i)` where `data` is a buffer-backed
+                // entry param: rewrite to
+                // `_w_intrinsic_storage_index(set, binding, i)` so the
+                // indexed load goes through the storage view path
+                // rather than being lowered later as
+                // `materialize + dynamic_extract` on a runtime-sized
+                // buffer (which is invalid — runtime-sized storage
+                // arrays aren't copyable into a local composite).
+                if crate::tlc::var_term_matches_name(func, &self.symbols, "_w_index") && args.len() == 2 {
+                    if let TermKind::Var(crate::tlc::VarRef::Symbol(data_sym)) = &args[0].kind {
+                        if let Some(binding) = self.resolve_buffer(data_sym).cloned() {
+                            let span = term.span;
+                            let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
+                            let idx = self.rewrite_term(&args[1]);
+                            let set_lit = self.make_int_lit(&binding.set.to_string(), u32_ty.clone(), span);
+                            let binding_lit =
+                                self.make_int_lit(&binding.binding.to_string(), u32_ty.clone(), span);
+                            return self.make_app(
+                                INTRINSIC_STORAGE_INDEX,
+                                vec![set_lit, binding_lit, idx],
+                                binding.elem_ty,
+                                span,
+                            );
+                        }
+                    }
+                }
+
+                // `_w_intrinsic_length(data)` on a buffer-backed entry
+                // param: rewrite to `_w_intrinsic_storage_len(set,
+                // binding)`, matching how the specialized-function
+                // path handles view lengths.
+                if crate::tlc::var_term_matches_name(func, &self.symbols, INTRINSIC_LENGTH)
+                    && args.len() == 1
+                {
+                    if let TermKind::Var(crate::tlc::VarRef::Symbol(data_sym)) = &args[0].kind {
+                        if let Some(binding) = self.resolve_buffer(data_sym).cloned() {
+                            let span = term.span;
+                            let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
+                            let set_lit = self.make_int_lit(&binding.set.to_string(), u32_ty.clone(), span);
+                            let binding_lit =
+                                self.make_int_lit(&binding.binding.to_string(), u32_ty.clone(), span);
+                            let storage_len = self.make_app(
+                                INTRINSIC_STORAGE_LEN,
+                                vec![set_lit, binding_lit],
+                                u32_ty.clone(),
+                                span,
+                            );
+                            if term.ty == u32_ty {
+                                return storage_len;
+                            }
+                            return self.make_app("i32.u32", vec![storage_len], term.ty.clone(), span);
+                        }
+                    }
+                }
+
+                // User-defined function specialization (only meaningful
+                // when the func is a SymbolId-bound user function).
                 match &func.kind {
                     TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
-                        let name = self.symbols.get(*sym).cloned().unwrap_or_default();
-
-                        // `_w_index(data, i)` where `data` is a buffer-backed
-                        // entry param: rewrite to
-                        // `_w_intrinsic_storage_index(set, binding, i)` so the
-                        // indexed load goes through the storage view path
-                        // rather than being lowered later as
-                        // `materialize + dynamic_extract` on a runtime-sized
-                        // buffer (which is invalid — runtime-sized storage
-                        // arrays aren't copyable into a local composite).
-                        if name == "_w_index" && args.len() == 2 {
-                            if let TermKind::Var(crate::tlc::VarRef::Symbol(data_sym)) = &args[0].kind {
-                                if let Some(binding) = self.resolve_buffer(data_sym).cloned() {
-                                    let span = term.span;
-                                    let u32_ty: Type<TypeName> =
-                                        Type::Constructed(TypeName::UInt(32), vec![]);
-                                    let idx = self.rewrite_term(&args[1]);
-                                    let set_lit =
-                                        self.make_int_lit(&binding.set.to_string(), u32_ty.clone(), span);
-                                    let binding_lit = self.make_int_lit(
-                                        &binding.binding.to_string(),
-                                        u32_ty.clone(),
-                                        span,
-                                    );
-                                    return self.make_app(
-                                        INTRINSIC_STORAGE_INDEX,
-                                        vec![set_lit, binding_lit, idx],
-                                        binding.elem_ty,
-                                        span,
-                                    );
-                                }
-                            }
-                        }
-
-                        // `_w_intrinsic_length(data)` on a buffer-backed entry
-                        // param: rewrite to `_w_intrinsic_storage_len(set,
-                        // binding)`, matching how the specialized-function
-                        // path handles view lengths.
-                        if name == INTRINSIC_LENGTH && args.len() == 1 {
-                            if let TermKind::Var(crate::tlc::VarRef::Symbol(data_sym)) = &args[0].kind {
-                                if let Some(binding) = self.resolve_buffer(data_sym).cloned() {
-                                    let span = term.span;
-                                    let u32_ty: Type<TypeName> =
-                                        Type::Constructed(TypeName::UInt(32), vec![]);
-                                    let set_lit =
-                                        self.make_int_lit(&binding.set.to_string(), u32_ty.clone(), span);
-                                    let binding_lit = self.make_int_lit(
-                                        &binding.binding.to_string(),
-                                        u32_ty.clone(),
-                                        span,
-                                    );
-                                    let storage_len = self.make_app(
-                                        INTRINSIC_STORAGE_LEN,
-                                        vec![set_lit, binding_lit],
-                                        u32_ty.clone(),
-                                        span,
-                                    );
-                                    if term.ty == u32_ty {
-                                        return storage_len;
-                                    }
-                                    return self.make_app(
-                                        "i32.u32",
-                                        vec![storage_len],
-                                        term.ty.clone(),
-                                        span,
-                                    );
-                                }
-                            }
-                        }
-
                         // Check if any arguments are buffer-backed (clone to avoid borrow).
                         // Consults both the per-def `buffer_map` (view params) and
                         // the module-scope storage map so `helper(board, i)` where
@@ -868,134 +859,118 @@ impl BufferSpecializer {
     ) -> Term {
         match &term.kind {
             TermKind::App { func, args } => {
-                match &func.kind {
-                    TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
-                        let name = self.symbols.get(*sym).cloned().unwrap_or_default();
+                // Catalog-name dispatches first — match both
+                // `Var(Symbol)` and `Var(Builtin)` references.
 
-                        // _w_index(arr_expr, i) where arr_expr resolves to a view
-                        if name == "_w_index" && args.len() == 2 {
-                            if let Some(view) = self.try_resolve_view_expr(&args[0], view_params) {
-                                let span = term.span;
-                                let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
-                                let idx = self.rewrite_specialized_body(&args[1], view_params);
-                                let set_lit =
-                                    self.make_int_lit(&view.set.to_string(), u32_ty.clone(), span);
-                                let binding_lit =
-                                    self.make_int_lit(&view.binding.to_string(), u32_ty.clone(), span);
-                                // Coerce idx to match view.offset's u32
-                                // type; the downstream BinOp operands must
-                                // agree.
-                                let idx = if idx.ty == u32_ty {
-                                    idx
+                // _w_index(arr_expr, i) where arr_expr resolves to a view
+                if crate::tlc::var_term_matches_name(func, &self.symbols, "_w_index") && args.len() == 2 {
+                    if let Some(view) = self.try_resolve_view_expr(&args[0], view_params) {
+                        let span = term.span;
+                        let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
+                        let idx = self.rewrite_specialized_body(&args[1], view_params);
+                        let set_lit = self.make_int_lit(&view.set.to_string(), u32_ty.clone(), span);
+                        let binding_lit =
+                            self.make_int_lit(&view.binding.to_string(), u32_ty.clone(), span);
+                        // Coerce idx to match view.offset's u32 type;
+                        // the downstream BinOp operands must agree.
+                        let idx = if idx.ty == u32_ty {
+                            idx
+                        } else {
+                            self.make_app("u32.i32", vec![idx], u32_ty.clone(), span)
+                        };
+                        let add_result = self.make_binop_app(
+                            ast::BinaryOp { op: "+".to_string() },
+                            view.offset,
+                            idx,
+                            u32_ty.clone(),
+                            span,
+                        );
+                        return self.make_app(
+                            INTRINSIC_STORAGE_INDEX,
+                            vec![set_lit, binding_lit, add_result],
+                            view.elem_ty,
+                            span,
+                        );
+                    }
+                }
+
+                // _w_intrinsic_length(arr_expr) where arr_expr resolves to a view
+                if crate::tlc::var_term_matches_name(func, &self.symbols, INTRINSIC_LENGTH)
+                    && args.len() == 1
+                {
+                    if let Some(view) = self.try_resolve_view_expr(&args[0], view_params) {
+                        if view.len.ty == term.ty {
+                            return view.len;
+                        }
+                        return self.make_app("i32.u32", vec![view.len], term.ty.clone(), term.span);
+                    }
+                }
+
+                // _w_intrinsic_slice(arr_expr, start, end) where arr_expr resolves to a view
+                // The slice itself produces a view — it can only be consumed by
+                // _w_index or _w_intrinsic_length above. If it appears bare
+                // (e.g. passed to a function), we fall through to default recursion.
+                // But we should NOT recurse into the arr_expr of the slice, because
+                // that would hit the bare Var case and fail. Instead we leave it for
+                // the outer consumer (_w_index, _w_intrinsic_length, or Let) to resolve.
+
+                // User-defined function specialization (only meaningful
+                // for SymbolId-bound user functions).
+                if let TermKind::Var(crate::tlc::VarRef::Symbol(sym)) = &func.kind {
+                    // Check for calls to functions that themselves take view args
+                    // (recursive specialization)
+                    let inner_buffer_args: Vec<Option<BufferBinding>> = args
+                        .iter()
+                        .map(|a| {
+                            if let TermKind::Var(crate::tlc::VarRef::Symbol(s)) = &a.kind {
+                                if view_params.contains_key(s) {
+                                    // This is a view param — build a BufferBinding for it
+                                    let (_, _, set, binding, elem_ty) = &view_params[s];
+                                    Some(BufferBinding {
+                                        set: *set,
+                                        binding: *binding,
+                                        elem_ty: elem_ty.clone(),
+                                    })
                                 } else {
-                                    self.make_app("u32.i32", vec![idx], u32_ty.clone(), span)
-                                };
-                                let add_result = self.make_binop_app(
-                                    ast::BinaryOp { op: "+".to_string() },
-                                    view.offset,
-                                    idx,
-                                    u32_ty.clone(),
-                                    span,
-                                );
-                                return self.make_app(
-                                    INTRINSIC_STORAGE_INDEX,
-                                    vec![set_lit, binding_lit, add_result],
-                                    view.elem_ty,
-                                    span,
-                                );
-                            }
-                        }
-
-                        // _w_intrinsic_length(arr_expr) where arr_expr resolves to a view
-                        if name == INTRINSIC_LENGTH && args.len() == 1 {
-                            if let Some(view) = self.try_resolve_view_expr(&args[0], view_params) {
-                                if view.len.ty == term.ty {
-                                    return view.len;
+                                    self.resolve_buffer(s).cloned()
                                 }
-                                return self.make_app(
-                                    "i32.u32",
-                                    vec![view.len],
-                                    term.ty.clone(),
-                                    term.span,
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+
+                    let has_inner_buf = inner_buffer_args.iter().any(|b| b.is_some());
+                    if has_inner_buf {
+                        if let Some(target_def) = self.def_map.get(sym).cloned() {
+                            if matches!(target_def.meta, DefMeta::Function) {
+                                let rewritten_args: Vec<Term> = args
+                                    .iter()
+                                    .map(|a| self.rewrite_specialized_body(a, view_params))
+                                    .collect();
+                                let rewritten_refs: Vec<&Term> = rewritten_args.iter().collect();
+                                return self.specialize_call(
+                                    *sym,
+                                    &target_def,
+                                    &rewritten_refs,
+                                    &inner_buffer_args,
+                                    term,
                                 );
                             }
-                        }
-
-                        // _w_intrinsic_slice(arr_expr, start, end) where arr_expr resolves to a view
-                        // The slice itself produces a view — it can only be consumed by
-                        // _w_index or _w_intrinsic_length above. If it appears bare
-                        // (e.g. passed to a function), we fall through to default recursion.
-                        // But we should NOT recurse into the arr_expr of the slice, because
-                        // that would hit the bare Var case and fail. Instead we leave it for
-                        // the outer consumer (_w_index, _w_intrinsic_length, or Let) to resolve.
-
-                        // Check for calls to functions that themselves take view args
-                        // (recursive specialization)
-                        let inner_buffer_args: Vec<Option<BufferBinding>> = args
-                            .iter()
-                            .map(|a| {
-                                if let TermKind::Var(crate::tlc::VarRef::Symbol(s)) = &a.kind {
-                                    if view_params.contains_key(s) {
-                                        // This is a view param — build a BufferBinding for it
-                                        let (_, _, set, binding, elem_ty) = &view_params[s];
-                                        Some(BufferBinding {
-                                            set: *set,
-                                            binding: *binding,
-                                            elem_ty: elem_ty.clone(),
-                                        })
-                                    } else {
-                                        self.resolve_buffer(s).cloned()
-                                    }
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect();
-
-                        let has_inner_buf = inner_buffer_args.iter().any(|b| b.is_some());
-                        if has_inner_buf {
-                            if let Some(target_def) = self.def_map.get(sym).cloned() {
-                                if matches!(target_def.meta, DefMeta::Function) {
-                                    let rewritten_args: Vec<Term> = args
-                                        .iter()
-                                        .map(|a| self.rewrite_specialized_body(a, view_params))
-                                        .collect();
-                                    let rewritten_refs: Vec<&Term> = rewritten_args.iter().collect();
-                                    return self.specialize_call(
-                                        *sym,
-                                        &target_def,
-                                        &rewritten_refs,
-                                        &inner_buffer_args,
-                                        term,
-                                    );
-                                }
-                            }
-                        }
-
-                        // Default: recurse into func and args
-                        let new_func = self.rewrite_specialized_body(func, view_params);
-                        let new_args: Vec<Term> =
-                            args.iter().map(|a| self.rewrite_specialized_body(a, view_params)).collect();
-                        Term {
-                            kind: TermKind::App {
-                                func: Box::new(new_func),
-                                args: new_args,
-                            },
-                            ..term.clone()
                         }
                     }
-                    _ => {
-                        let new_func = self.rewrite_specialized_body(func, view_params);
-                        let new_args: Vec<Term> =
-                            args.iter().map(|a| self.rewrite_specialized_body(a, view_params)).collect();
-                        Term {
-                            kind: TermKind::App {
-                                func: Box::new(new_func),
-                                args: new_args,
-                            },
-                            ..term.clone()
-                        }
-                    }
+                }
+
+                // Default: recurse into func and args.
+                let new_func = self.rewrite_specialized_body(func, view_params);
+                let new_args: Vec<Term> =
+                    args.iter().map(|a| self.rewrite_specialized_body(a, view_params)).collect();
+                Term {
+                    kind: TermKind::App {
+                        func: Box::new(new_func),
+                        args: new_args,
+                    },
+                    ..term.clone()
                 }
             }
 
@@ -1429,10 +1404,12 @@ impl BufferSpecializer {
                 })
             }
             TermKind::App { func, args } => {
-                // Check for _w_intrinsic_slice(expr, start, end)
-                if let TermKind::Var(crate::tlc::VarRef::Symbol(sym)) = &func.kind {
-                    let name = self.symbols.get(*sym).cloned().unwrap_or_default();
-                    if name == INTRINSIC_SLICE && args.len() == 3 {
+                // Check for _w_intrinsic_slice(expr, start, end). The
+                // func may arrive as either `Var(Symbol)` (synthesized
+                // paths) or `Var(Builtin)` (post-NameResolution user
+                // code) — `var_term_matches_name` handles both.
+                if crate::tlc::var_term_matches_name(func, &self.symbols, INTRINSIC_SLICE) {
+                    if args.len() == 3 {
                         let parent = self.try_resolve_view_expr(&args[0], view_params)?;
                         let span = term.span;
                         let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);

@@ -1304,10 +1304,15 @@ fn array_with_promotes_when_source_is_aliasing_intrinsic() {
     let TermKind::App { func, .. } = &lam.body.kind else {
         panic!("expected lambda body to be an App after rewrite");
     };
-    let TermKind::Var(crate::tlc::VarRef::Symbol(s)) = &func.kind else {
-        panic!("expected rewritten App's func to be a Var");
+    let post_func_name = match &func.kind {
+        TermKind::Var(crate::tlc::VarRef::Symbol(s)) => {
+            rewritten.symbols.get(*s).cloned().unwrap_or_default()
+        }
+        TermKind::Var(crate::tlc::VarRef::Builtin { id, .. }) => {
+            crate::builtins::by_id(*id).raw.surface_name.to_string()
+        }
+        _ => panic!("expected rewritten App's func to be a Var"),
     };
-    let post_func_name = rewritten.symbols.get(*s).cloned().unwrap_or_default();
     assert_eq!(
         post_func_name,
         crate::builtins::names::INTRINSIC_ARRAY_WITH_INPLACE,
