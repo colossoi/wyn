@@ -3155,7 +3155,7 @@ impl<'a> TypeChecker<'a> {
                 }
             };
 
-            if let Some(field_type) = crate::impl_source::vec_field_type(&type_name_str, field) {
+            if let Some(field_type) = crate::types::vec_field_type(&type_name_str, field) {
                 return Ok(field_type);
             }
             if let Some(field_type) = self.record_field_map.get(&(type_name_str.clone(), field.to_string()))
