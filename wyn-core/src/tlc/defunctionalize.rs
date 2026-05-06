@@ -1136,7 +1136,9 @@ impl<'a> Defunctionalizer<'a> {
 /// - Captures become extra parameters (appended at end)
 /// - All call sites have captures flattened as trailing arguments
 pub fn run(program: Program, known_defs: &HashSet<String>) -> Program {
-    Defunctionalizer::run(program, known_defs)
+    let result = Defunctionalizer::run(program, known_defs);
+    result.assert_flat_apps();
+    result
 }
 
 #[cfg(test)]

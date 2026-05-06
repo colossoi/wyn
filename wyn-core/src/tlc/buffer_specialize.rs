@@ -183,13 +183,15 @@ pub fn run(program: Program) -> Program {
     // Append newly generated specialized defs
     processed_defs.extend(specializer.new_defs.drain(..));
 
-    Program {
+    let result = Program {
         defs: processed_defs,
         uniforms: program.uniforms,
         storage: program.storage,
         symbols: specializer.symbols,
         def_syms: program.def_syms,
-    }
+    };
+    result.assert_flat_apps();
+    result
 }
 
 impl BufferSpecializer {

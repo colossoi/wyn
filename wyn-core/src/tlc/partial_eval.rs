@@ -85,6 +85,7 @@ pub struct PartialEvaluator {
 
 impl PartialEvaluator {
     pub fn partial_eval(program: Program) -> Program {
+        program.assert_flat_apps();
         let mut eval = Self {
             symbols: program.symbols,
             defs: program.defs.iter().map(|d| (d.name, d.clone())).collect(),
@@ -102,13 +103,15 @@ impl PartialEvaluator {
             })
             .collect();
 
-        Program {
+        let result = Program {
             defs,
             uniforms: program.uniforms,
             storage: program.storage,
             symbols: eval.symbols,
             def_syms: program.def_syms,
-        }
+        };
+        result.assert_flat_apps();
+        result
     }
 
     /// Evaluate a term to a Value.

@@ -779,9 +779,7 @@ impl TlcTransformed {
     /// Constant folding and algebraic simplifications.
     pub fn partial_eval(self) -> TlcPartialEvaled {
         let mut inner = self.0;
-        inner.tlc.assert_flat_apps();
         inner.tlc = tlc::partial_eval::PartialEvaluator::partial_eval(inner.tlc);
-        inner.tlc.assert_flat_apps();
         TlcPartialEvaled(inner)
     }
 }
@@ -893,7 +891,6 @@ impl TlcOwnershipApplied {
             fill_hole_errors: _,
         } = self.0;
         let defunc = tlc::defunctionalize::run(tlc, &known_defs);
-        defunc.assert_flat_apps();
         tlc::closure_convert::verify_closure_converted(&defunc).unwrap_or_else(|e| {
             panic!(
                 "closure-conversion verifier failed after defunctionalize: {:?}",
@@ -939,7 +936,6 @@ impl TlcDefunctionalized {
 
         // Monomorphize polymorphic user functions
         let monomorphized = tlc::monomorphize::run(specialized, &schemes_by_sym);
-        monomorphized.assert_flat_apps();
         TlcMonomorphized(TlcLateInner {
             tlc: monomorphized,
             type_table: self.type_table,
@@ -971,7 +967,6 @@ impl TlcMonomorphized {
     pub fn buffer_specialize(self) -> TlcBufferSpecialized {
         let mut inner = self.0;
         inner.tlc = tlc::buffer_specialize::run(inner.tlc);
-        inner.tlc.assert_flat_apps();
         TlcBufferSpecialized(inner)
     }
 }
@@ -992,7 +987,6 @@ impl TlcBufferSpecialized {
     pub fn fold_generated_lambdas(self) -> TlcGeneratedLambdasFolded {
         let mut inner = self.0;
         inner.tlc = tlc::inline::run_large(inner.tlc);
-        inner.tlc.assert_flat_apps();
         TlcGeneratedLambdasFolded(inner)
     }
 }

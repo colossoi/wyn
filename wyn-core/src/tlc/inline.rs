@@ -96,13 +96,15 @@ pub fn run_large(program: Program) -> Program {
     // DCE: remove defs no longer referenced by any entry point or reachable def.
     let defs = dead_code_eliminate(defs);
 
-    Program {
+    let result = Program {
         defs,
         uniforms: program.uniforms,
         storage: program.storage,
         symbols: program.symbols,
         def_syms: program.def_syms,
-    }
+    };
+    result.assert_flat_apps();
+    result
 }
 
 // =============================================================================

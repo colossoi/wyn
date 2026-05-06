@@ -30,7 +30,9 @@ pub(crate) type Substitution = HashMap<usize, Type<TypeName>>;
 /// to polymorphic functions, and creates specialized versions with concrete types.
 pub fn run(program: Program, schemes: &HashMap<SymbolId, TypeScheme>) -> Program {
     let mono = Monomorphizer::new(program, schemes);
-    mono.run()
+    let result = mono.run();
+    result.assert_flat_apps();
+    result
 }
 
 pub(crate) struct Monomorphizer<'a> {
