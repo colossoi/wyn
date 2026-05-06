@@ -25,21 +25,21 @@ use polytype::Type;
 /// returning the EGraph for the (single) entry point so tests can
 /// introspect node structure.
 fn compile_to_expanded_egraph(input: &str) -> crate::egir::types::EGraph {
-    let mut frontend = crate::cached_frontend();
-    let type_checked = Compiler::parse(input, &mut frontend.node_counter)
+    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
+    let type_checked = Compiler::parse(input, &mut node_counter)
         .expect("parse")
-        .elaborate_modules(&mut frontend.module_manager)
+        .elaborate_modules(&mut module_manager)
         .expect("elaborate")
-        .desugar(&mut frontend.node_counter)
+        .desugar(&mut node_counter)
         .expect("desugar")
-        .resolve(&mut frontend.module_manager)
+        .resolve(&mut module_manager)
         .expect("resolve")
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager)
+        .type_check(&mut module_manager)
         .expect("type check");
 
     let expanded = type_checked
-        .to_tlc(&frontend.module_manager, false)
+        .to_tlc(&module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()

@@ -282,20 +282,20 @@ fn validate_wgsl(source: &str) {
 
 /// Compile a Wyn source through the full pipeline to WGSL text.
 fn compile_to_wgsl(source: &str) -> crate::error::Result<String> {
-    let mut frontend = crate::cached_frontend();
-    let parsed = crate::Compiler::parse(source, &mut frontend.node_counter).expect("Parsing failed");
-    let parsed = parsed.elaborate_modules(&mut frontend.module_manager).expect("Module elaboration failed");
+    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
+    let parsed = crate::Compiler::parse(source, &mut node_counter).expect("Parsing failed");
+    let parsed = parsed.elaborate_modules(&mut module_manager).expect("Module elaboration failed");
     let type_checked = parsed
-        .desugar(&mut frontend.node_counter)
+        .desugar(&mut node_counter)
         .expect("Desugaring failed")
-        .resolve(&mut frontend.module_manager)
+        .resolve(&mut module_manager)
         .expect("Name resolution failed")
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager)
+        .type_check(&mut module_manager)
         .expect("Type checking failed");
 
     type_checked
-        .to_tlc(&frontend.module_manager, false)
+        .to_tlc(&module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()

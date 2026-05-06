@@ -51,7 +51,7 @@ use indexmap::IndexMap;
 
 use ast::{NodeCounter, NodeId};
 use error::Result;
-use polytype::{Context, TypeScheme};
+use polytype::TypeScheme;
 
 // =============================================================================
 // Generic ID allocation
@@ -250,118 +250,73 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
 }
 
 // =============================================================================
-// Two-Level Typestate Compiler Pipeline
+// Typestate Compiler Pipeline
 // =============================================================================
 //
 // The compiler uses a typestate pattern where each struct represents a stage.
 // Methods consume `self` and return the next stage, enforcing valid ordering.
 //
-// Shared state is held at two top levels and passed as &mut to passes that need it:
-//   - FrontEnd: holds module_manager (used by resolve, type_check, flatten)
-//   - BackEnd: holds node_counter (used by normalize)
+//   let (mut node_counter, mut module_manager) = init_compiler();
+//   let parsed = Compiler::parse(source, &mut node_counter)?;
 //
-// FrontEnd Pipeline (AST):
-//   let parsed = Compiler::parse(source)?;
-//   let mut frontend = FrontEnd::new(module_manager);
-//     -> parsed.desugar(&mut node_counter)              -> Desugared
-//       -> .resolve(&frontend.module_manager)           -> Resolved
-//       -> .fold_ast_constants()                        -> AstConstFoldedEarly
-//       -> .type_check(&frontend.module_manager)        -> TypeChecked
+// FrontEnd (AST) stages:
+//     parsed.desugar(&mut node_counter)            -> Desugared
+//       .resolve(&module_manager)                  -> Resolved
+//       .fold_ast_constants()                      -> AstConstFoldedEarly
+//       .type_check(&mut module_manager)           -> TypeChecked
 //
-// TLC Pipeline (AST -> SSA):
-//       -> .to_tlc()                                    -> TlcTransformed
-//       -> .partial_eval()                              -> TlcPartialEvaled
-//       -> .normalize_soacs()                             -> TlcSoaNormalized
-//       -> .fuse_maps()                                 -> TlcFused
-//       -> .apply_ownership()                           -> TlcOwnershipApplied
-//       -> .defunctionalize()                           -> TlcDefunctionalized
-//       -> .monomorphize()                              -> TlcMonomorphized
-//       -> .buffer_specialize()                         -> TlcBufferSpecialized
-//       -> .fold_generated_lambdas()                    -> TlcGeneratedLambdasFolded
-//       -> .inline_small()                              -> TlcSmallInlined
-//       -> .parallelize_soacs(false)                         -> TlcParallelized
-//       -> .filter_reachable()                          -> TlcReachable
-//       -> .to_egir()                                   -> SsaConverted
+// TLC stages (AST → SSA):
+//       .to_tlc(&module_manager, fill_holes)       -> TlcTransformed
+//       .partial_eval()                            -> TlcPartialEvaled
+//       .normalize_soacs()                         -> TlcSoaNormalized
+//       .fuse_maps()                               -> TlcFused
+//       .apply_ownership()                         -> TlcOwnershipApplied
+//       .defunctionalize()                         -> TlcDefunctionalized
+//       .monomorphize()                            -> TlcMonomorphized
+//       .buffer_specialize()                       -> TlcBufferSpecialized
+//       .fold_generated_lambdas()                  -> TlcGeneratedLambdasFolded
+//       .inline_small()                            -> TlcSmallInlined
+//       .parallelize_soacs(disable)                -> TlcParallelized
+//       .filter_reachable()                        -> TlcReachable
+//       .to_egraph()                               -> EgirRaw
 //
-// BackEnd Pipeline (SSA -> output):
-//       -> .lower()                                     -> Lowered
+// EGIR stages:
+//       .expand_soacs(unroll)                      -> EgirSoacExpanded
+//       [.materialize()]                           -> EgirMaterialized
+//       .optimize_skeleton()                       -> EgirSkelOptimized
+//       .elaborate()                               -> SsaConverted
+//
+// Backend:
+//       .lower() | .lower_glsl() | .lower_wgsl()
+//
+// Tests should prefer the `compile_thru_*` helpers below, which subsume
+// the chain up to a milestone and centralize updates as new passes land.
 
-// =============================================================================
-// Top-level state containers
-// =============================================================================
-
-/// Shared state for FrontEnd (AST) passes.
-/// Holds the node counter and module manager used by parse, resolve, type_check, and flatten.
-pub struct FrontEnd {
-    pub node_counter: NodeCounter,
-    pub module_manager: module_manager::ModuleManager,
-    /// Type variable allocator for polymorphic types
-    pub context: Context<TypeName>,
-    /// Maps AST nodes to their inferred type schemes
-    pub type_table: TypeTable,
-    /// Per-module function type schemes cache (populated on first use)
-    pub module_schemes: HashMap<String, HashMap<String, TypeScheme<TypeName>>>,
-}
-
-impl Default for FrontEnd {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl FrontEnd {
-    /// Create a new FrontEnd with fresh state.
-    /// The node counter is shared between user code parsing and prelude loading
-    /// to ensure unique NodeIds across all AST nodes.
-    pub fn new() -> Self {
-        let mut node_counter = NodeCounter::new();
-
-        let module_manager = match module_manager::ModuleManager::create_prelude(&mut node_counter) {
-            Ok(prelude) => module_manager::ModuleManager::from_prelude(prelude),
-            Err(e) => {
-                eprintln!("ERROR creating prelude: {:?}", e);
-                module_manager::ModuleManager::new_empty()
-            }
-        };
-
-        FrontEnd {
-            node_counter,
-            module_manager,
-            context: Context::default(),
-            type_table: HashMap::new(),
-            module_schemes: HashMap::new(),
+/// Build a fresh `(NodeCounter, ModuleManager)` pair. The node counter is
+/// shared between user code parsing and prelude loading so all NodeIds
+/// stay unique. The module manager comes pre-loaded with the parsed
+/// prelude.
+pub fn init_compiler() -> (NodeCounter, module_manager::ModuleManager) {
+    let mut node_counter = NodeCounter::new();
+    let module_manager = match module_manager::ModuleManager::create_prelude(&mut node_counter) {
+        Ok(prelude) => module_manager::ModuleManager::from_prelude(prelude),
+        Err(e) => {
+            eprintln!("ERROR creating prelude: {:?}", e);
+            module_manager::ModuleManager::new_empty()
         }
-    }
-
-    /// Create a FrontEnd from a pre-elaborated prelude.
-    /// This is faster than `new()` as it reuses an already-parsed prelude.
-    pub fn new_from_prelude(
-        prelude: module_manager::PreElaboratedPrelude,
-        node_counter: NodeCounter,
-    ) -> Self {
-        let module_manager = module_manager::ModuleManager::from_prelude(prelude);
-
-        FrontEnd {
-            node_counter,
-            module_manager,
-            context: Context::default(),
-            type_table: HashMap::new(),
-            module_schemes: HashMap::new(),
-        }
-    }
+    };
+    (node_counter, module_manager)
 }
 
-/// Shared state for BackEnd (MIR) passes.
-/// Holds the node counter which is used by normalize.
-pub struct BackEnd {
-    pub node_counter: NodeCounter,
-}
-
-impl BackEnd {
-    /// Create a new BackEnd with the given node counter.
-    pub fn new(node_counter: NodeCounter) -> Self {
-        BackEnd { node_counter }
-    }
+/// Build a `(NodeCounter, ModuleManager)` pair from an already-elaborated
+/// prelude. Faster than `init_compiler()` when callers can amortize the
+/// prelude across multiple compiles.
+pub fn init_compiler_from_prelude(
+    prelude: module_manager::PreElaboratedPrelude,
+    node_counter: NodeCounter,
+) -> (NodeCounter, module_manager::ModuleManager) {
+    let module_manager = module_manager::ModuleManager::from_prelude(prelude);
+    (node_counter, module_manager)
 }
 
 // =============================================================================
@@ -1068,9 +1023,9 @@ pub fn cached_module_manager() -> (module_manager::ModuleManager, NodeCounter) {
     )
 }
 
-/// Create a FrontEnd using the cached prelude (test-only)
+/// Build a `(NodeCounter, ModuleManager)` pair using the cached prelude (test-only).
 #[cfg(test)]
-pub fn cached_frontend() -> FrontEnd {
+pub fn cached_compiler_init() -> (NodeCounter, module_manager::ModuleManager) {
     let (prelude, node_counter) = get_prelude_cache();
-    FrontEnd::new_from_prelude(prelude.clone(), node_counter)
+    init_compiler_from_prelude(prelude.clone(), node_counter)
 }

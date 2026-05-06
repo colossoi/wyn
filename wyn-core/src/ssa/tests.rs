@@ -184,17 +184,17 @@ fn spirv_storage_write_chain_lowers_cleanly() {
     // surface as `resolve_buffer_by_id: not a u32 constant`.
     let source = "#[compute]\nentry double(arr: []f32) []f32 = map(|x: f32| x * 2.0, arr)\n";
 
-    let mut frontend = crate::cached_frontend();
-    let parsed = crate::Compiler::parse(source, &mut frontend.node_counter).unwrap();
+    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
+    let parsed = crate::Compiler::parse(source, &mut node_counter).unwrap();
     let spirv = parsed
-        .desugar(&mut frontend.node_counter)
+        .desugar(&mut node_counter)
         .unwrap()
-        .resolve(&mut frontend.module_manager)
+        .resolve(&mut module_manager)
         .unwrap()
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager)
+        .type_check(&mut module_manager)
         .unwrap()
-        .to_tlc(&frontend.module_manager, false)
+        .to_tlc(&module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()

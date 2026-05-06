@@ -1,4 +1,4 @@
-use wyn_core::{Compiler, FrontEnd, tlc};
+use wyn_core::{Compiler, init_compiler};
 
 fn main() {
     let source = r#"
@@ -8,14 +8,17 @@ def compute(x:i32, y:i32) i32 =
   sum + product
 
 "#;
-    let mut frontend = FrontEnd::new();
-    let parsed = Compiler::parse(source, &mut frontend.node_counter).expect("parse failed");
-    let desugared = parsed.desugar(&mut frontend.node_counter).expect("desugar failed");
-    let resolved = desugared.resolve(&mut frontend.module_manager).expect("resolve failed");
-    let folded = resolved.fold_ast_constants();
-    let typed = folded.type_check(&mut frontend.module_manager).expect("type check failed");
+    let (mut node_counter, mut module_manager) = init_compiler();
+    let typed = Compiler::parse(source, &mut node_counter)
+        .expect("parse failed")
+        .desugar(&mut node_counter)
+        .expect("desugar failed")
+        .resolve(&module_manager)
+        .expect("resolve failed")
+        .fold_ast_constants()
+        .type_check(&mut module_manager)
+        .expect("type check failed");
 
-    let mut fill_hole_errors = Vec::new();
-    let tlc_program = tlc::transform(&typed.ast, &typed.type_table, false, &mut fill_hole_errors);
-    println!("{}", tlc_program);
+    let tlc = typed.to_tlc(&module_manager, false);
+    println!("{}", tlc.0.tlc);
 }

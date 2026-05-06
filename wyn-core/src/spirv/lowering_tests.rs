@@ -2,19 +2,19 @@ use crate::error::Result;
 
 fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
     // Use the typestate API to ensure proper compilation pipeline
-    let mut frontend = crate::cached_frontend();
-    let parsed = crate::Compiler::parse(source, &mut frontend.node_counter).expect("Parsing failed");
+    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
+    let parsed = crate::Compiler::parse(source, &mut node_counter).expect("Parsing failed");
     let type_checked = parsed
-        .desugar(&mut frontend.node_counter)
+        .desugar(&mut node_counter)
         .expect("Desugaring failed")
-        .resolve(&mut frontend.module_manager)
+        .resolve(&mut module_manager)
         .expect("Name resolution failed")
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager)
+        .type_check(&mut module_manager)
         .expect("Type checking failed");
 
     let ssa = type_checked
-        .to_tlc(&frontend.module_manager, false)
+        .to_tlc(&module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -333,18 +333,18 @@ def test(x: f32) f32 =
 
 /// Compile source to SPIR-V through the full pipeline including TLC partial_eval
 fn compile_to_spirv_with_partial_eval(source: &str) -> Result<Vec<u32>> {
-    let mut frontend = crate::cached_frontend();
-    let parsed = crate::Compiler::parse(source, &mut frontend.node_counter).expect("Parsing failed");
+    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
+    let parsed = crate::Compiler::parse(source, &mut node_counter).expect("Parsing failed");
     let type_checked = parsed
-        .desugar(&mut frontend.node_counter)
+        .desugar(&mut node_counter)
         .expect("Desugaring failed")
-        .resolve(&mut frontend.module_manager)
+        .resolve(&mut module_manager)
         .expect("Name resolution failed")
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager)
+        .type_check(&mut module_manager)
         .expect("Type checking failed");
     let ssa = type_checked
-        .to_tlc(&frontend.module_manager, false)
+        .to_tlc(&module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()

@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use wasm_bindgen::prelude::*;
-use wyn_core::FrontEnd;
 use wyn_core::ast::NodeCounter;
 use wyn_core::error::CompilerError;
 use wyn_core::module_manager::{ModuleManager, PreElaboratedPrelude};
@@ -205,12 +204,12 @@ pub fn init_compiler() -> bool {
     })
 }
 
-/// Create a fresh FrontEnd using the cached prelude
-fn create_frontend() -> Option<FrontEnd> {
+/// Build a fresh `(NodeCounter, ModuleManager)` pair from the cached prelude.
+fn create_compiler_init() -> Option<(NodeCounter, ModuleManager)> {
     PRELUDE_CACHE.with(|cache| {
         let cache_ref = cache.borrow();
         let cached = cache_ref.as_ref()?;
-        Some(FrontEnd::new_from_prelude(
+        Some(wyn_core::init_compiler_from_prelude(
             cached.prelude.clone(),
             cached.start_node_counter.clone(),
         ))
@@ -610,7 +609,7 @@ pub fn compile_to_wgsl(source: &str) -> JsValue {
 }
 
 fn compile_to_wgsl_impl(source: &str) -> CompileResultWgsl {
-    let mut frontend = match create_frontend() {
+    let (mut node_counter, mut module_manager) = match create_compiler_init() {
         Some(f) => f,
         None => return CompileResultWgsl::err_msg("Compiler not initialized".to_string()),
     };
@@ -619,24 +618,24 @@ fn compile_to_wgsl_impl(source: &str) -> CompileResultWgsl {
     // alias-check, diverging at EGIR (WGSL uses the SPIR-V-parity
     // pipeline: `expand_soacs(true) → materialize → optimize_skeleton
     // → elaborate`).
-    let parsed = match wyn_core::Compiler::parse(source, &mut frontend.node_counter) {
+    let parsed = match wyn_core::Compiler::parse(source, &mut node_counter) {
         Ok(p) => p,
         Err(e) => return CompileResultWgsl::err(e),
     };
-    let parsed = match parsed.elaborate_modules(&mut frontend.module_manager) {
+    let parsed = match parsed.elaborate_modules(&mut module_manager) {
         Ok(p) => p,
         Err(e) => return CompileResultWgsl::err(e),
     };
-    let desugared = match parsed.desugar(&mut frontend.node_counter) {
+    let desugared = match parsed.desugar(&mut node_counter) {
         Ok(d) => d,
         Err(e) => return CompileResultWgsl::err(e),
     };
-    let resolved = match desugared.resolve(&frontend.module_manager) {
+    let resolved = match desugared.resolve(&module_manager) {
         Ok(r) => r,
         Err(e) => return CompileResultWgsl::err(e),
     };
     let ast_folded = resolved.fold_ast_constants();
-    let type_checked = match ast_folded.type_check(&mut frontend.module_manager, &mut frontend.schemes) {
+    let type_checked = match ast_folded.type_check(&mut module_manager) {
         Ok(t) => t,
         Err(e) => return CompileResultWgsl::err(e),
     };
@@ -648,7 +647,7 @@ fn compile_to_wgsl_impl(source: &str) -> CompileResultWgsl {
         return CompileResultWgsl::err_msg("Alias checking failed".to_string());
     }
 
-    let tlc_program = alias_checked.to_tlc(&frontend.schemes, &frontend.module_manager, false);
+    let tlc_program = alias_checked.to_tlc(&module_manager, false);
     let tlc_after_partial_eval = tlc_program.partial_eval();
     let tlc_tree = tlc_tree::program_to_tree(&tlc_after_partial_eval.tlc);
 
@@ -742,31 +741,31 @@ pub fn compile_to_shadertoy(source: &str) -> JsValue {
 
 fn compile_impl(source: &str) -> CompileResult {
     // Create frontend from cached prelude
-    let mut frontend = match create_frontend() {
+    let (mut node_counter, mut module_manager) = match create_compiler_init() {
         Some(f) => f,
         None => return CompileResult::err_msg("Compiler not initialized".to_string()),
     };
 
     // Parse
-    let parsed = match wyn_core::Compiler::parse(source, &mut frontend.node_counter) {
+    let parsed = match wyn_core::Compiler::parse(source, &mut node_counter) {
         Ok(p) => p,
         Err(e) => return CompileResult::err(e),
     };
 
     // Elaborate modules
-    let parsed = match parsed.elaborate_modules(&mut frontend.module_manager) {
+    let parsed = match parsed.elaborate_modules(&mut module_manager) {
         Ok(p) => p,
         Err(e) => return CompileResult::err(e),
     };
 
     // Desugar
-    let desugared = match parsed.desugar(&mut frontend.node_counter) {
+    let desugared = match parsed.desugar(&mut node_counter) {
         Ok(d) => d,
         Err(e) => return CompileResult::err(e),
     };
 
     // Resolve names
-    let resolved = match desugared.resolve(&frontend.module_manager) {
+    let resolved = match desugared.resolve(&module_manager) {
         Ok(r) => r,
         Err(e) => return CompileResult::err(e),
     };
@@ -775,7 +774,7 @@ fn compile_impl(source: &str) -> CompileResult {
     let ast_folded = resolved.fold_ast_constants();
 
     // Type check
-    let type_checked = match ast_folded.type_check(&mut frontend.module_manager, &mut frontend.schemes) {
+    let type_checked = match ast_folded.type_check(&mut module_manager) {
         Ok(t) => t,
         Err(e) => return CompileResult::err(e),
     };
@@ -793,7 +792,7 @@ fn compile_impl(source: &str) -> CompileResult {
     // Full TLC pipeline, then the EGIR chain (skipping `materialize` —
     // GLSL supports dynamic indexing natively).
     let raw = match alias_checked
-        .to_tlc(&frontend.schemes, &frontend.module_manager, false)
+        .to_tlc(&module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -834,31 +833,31 @@ pub fn compile_with_ir(source: &str) -> JsValue {
 }
 
 fn compile_with_ir_impl(source: &str) -> CompileResultWithIR {
-    let mut frontend = match create_frontend() {
+    let (mut node_counter, mut module_manager) = match create_compiler_init() {
         Some(f) => f,
         None => return CompileResultWithIR::err_msg("Compiler not initialized".to_string()),
     };
 
     // Parse
-    let parsed = match wyn_core::Compiler::parse(source, &mut frontend.node_counter) {
+    let parsed = match wyn_core::Compiler::parse(source, &mut node_counter) {
         Ok(p) => p,
         Err(e) => return CompileResultWithIR::err(e),
     };
 
     // Elaborate modules
-    let parsed = match parsed.elaborate_modules(&mut frontend.module_manager) {
+    let parsed = match parsed.elaborate_modules(&mut module_manager) {
         Ok(p) => p,
         Err(e) => return CompileResultWithIR::err(e),
     };
 
     // Desugar
-    let desugared = match parsed.desugar(&mut frontend.node_counter) {
+    let desugared = match parsed.desugar(&mut node_counter) {
         Ok(d) => d,
         Err(e) => return CompileResultWithIR::err(e),
     };
 
     // Resolve names
-    let resolved = match desugared.resolve(&frontend.module_manager) {
+    let resolved = match desugared.resolve(&module_manager) {
         Ok(r) => r,
         Err(e) => return CompileResultWithIR::err(e),
     };
@@ -867,7 +866,7 @@ fn compile_with_ir_impl(source: &str) -> CompileResultWithIR {
     let ast_folded = resolved.fold_ast_constants();
 
     // Type check
-    let type_checked = match ast_folded.type_check(&mut frontend.module_manager, &mut frontend.schemes) {
+    let type_checked = match ast_folded.type_check(&mut module_manager) {
         Ok(t) => t,
         Err(e) => return CompileResultWithIR::err(e),
     };
@@ -883,7 +882,7 @@ fn compile_with_ir_impl(source: &str) -> CompileResultWithIR {
     }
 
     // Transform to TLC
-    let tlc_program = alias_checked.to_tlc(&frontend.schemes, &frontend.module_manager, false);
+    let tlc_program = alias_checked.to_tlc(&module_manager, false);
 
     // Capture TLC tree (after partial eval, before defunctionalization)
     let tlc_after_partial_eval = tlc_program.partial_eval();

@@ -10,19 +10,19 @@ use crate::ssa::types::Program;
 
 /// Run source through the pipeline up to SSA.
 fn compile_to_ssa(input: &str) -> Program {
-    let mut frontend = crate::cached_frontend();
-    let parsed = crate::Compiler::parse(input, &mut frontend.node_counter).expect("Parsing failed");
+    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
+    let parsed = crate::Compiler::parse(input, &mut node_counter).expect("Parsing failed");
     let type_checked = parsed
-        .desugar(&mut frontend.node_counter)
+        .desugar(&mut node_counter)
         .expect("Desugaring failed")
-        .resolve(&mut frontend.module_manager)
+        .resolve(&mut module_manager)
         .expect("Name resolution failed")
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager)
+        .type_check(&mut module_manager)
         .expect("Type checking failed");
 
     type_checked
-        .to_tlc(&frontend.module_manager, false)
+        .to_tlc(&module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -46,12 +46,12 @@ fn compile_to_ssa(input: &str) -> Program {
 
 /// Helper to check that code fails type checking (for testing error cases).
 fn should_fail_type_check(input: &str) -> bool {
-    let mut frontend = crate::cached_frontend();
-    let result = crate::Compiler::parse(input, &mut frontend.node_counter)
-        .and_then(|parsed| parsed.desugar(&mut frontend.node_counter))
-        .and_then(|desugared| desugared.resolve(&mut frontend.module_manager))
+    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
+    let result = crate::Compiler::parse(input, &mut node_counter)
+        .and_then(|parsed| parsed.desugar(&mut node_counter))
+        .and_then(|desugared| desugared.resolve(&mut module_manager))
         .map(|resolved| resolved.fold_ast_constants())
-        .and_then(|folded| folded.type_check(&mut frontend.module_manager));
+        .and_then(|folded| folded.type_check(&mut module_manager));
     result.is_err()
 }
 
@@ -62,18 +62,18 @@ fn has_function(ssa: &Program, name: &str) -> bool {
 
 /// Helper to compile up through TLC fusion (stops before defunctionalization).
 fn compile_to_fused_tlc(input: &str) -> crate::tlc::Program {
-    let mut frontend = crate::cached_frontend();
-    let parsed = crate::Compiler::parse(input, &mut frontend.node_counter).expect("Parsing failed");
+    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
+    let parsed = crate::Compiler::parse(input, &mut node_counter).expect("Parsing failed");
     let type_checked = parsed
-        .desugar(&mut frontend.node_counter)
+        .desugar(&mut node_counter)
         .expect("Desugaring failed")
-        .resolve(&mut frontend.module_manager)
+        .resolve(&mut module_manager)
         .expect("Name resolution failed")
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager)
+        .type_check(&mut module_manager)
         .expect("Type checking failed");
 
-    let tlc = type_checked.to_tlc(&frontend.module_manager, false);
+    let tlc = type_checked.to_tlc(&module_manager, false);
     let fused =
         tlc.partial_eval().normalize_soacs().fuse_maps().apply_ownership().expect("apply_ownership");
     fused.0.tlc
@@ -784,16 +784,16 @@ entry vertex_main() #[builtin(position)] vec4f32 =
     @[f32.i32(result), 0.0, 0.0, 1.0]
 "#;
 
-    let mut frontend = crate::cached_frontend();
-    let type_checked = crate::Compiler::parse(source, &mut frontend.node_counter)
-        .and_then(|p| p.desugar(&mut frontend.node_counter))
-        .and_then(|d| d.resolve(&mut frontend.module_manager))
+    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
+    let type_checked = crate::Compiler::parse(source, &mut node_counter)
+        .and_then(|p| p.desugar(&mut node_counter))
+        .and_then(|d| d.resolve(&mut module_manager))
         .map(|r| r.fold_ast_constants())
-        .and_then(|f| f.type_check(&mut frontend.module_manager))
+        .and_then(|f| f.type_check(&mut module_manager))
         .expect("Failed before TLC transform");
 
     let result = type_checked
-        .to_tlc(&frontend.module_manager, false)
+        .to_tlc(&module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -831,16 +831,16 @@ entry compute_main(data: []i32) i32 =
     from_storage + from_literal
 "#;
 
-    let mut frontend = crate::cached_frontend();
-    let type_checked = crate::Compiler::parse(source, &mut frontend.node_counter)
-        .and_then(|p| p.desugar(&mut frontend.node_counter))
-        .and_then(|d| d.resolve(&mut frontend.module_manager))
+    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
+    let type_checked = crate::Compiler::parse(source, &mut node_counter)
+        .and_then(|p| p.desugar(&mut node_counter))
+        .and_then(|d| d.resolve(&mut module_manager))
         .map(|r| r.fold_ast_constants())
-        .and_then(|f| f.type_check(&mut frontend.module_manager))
+        .and_then(|f| f.type_check(&mut module_manager))
         .expect("Failed before TLC transform");
 
     let result = type_checked
-        .to_tlc(&frontend.module_manager, false)
+        .to_tlc(&module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -881,16 +881,16 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     @[s + iTime, 0.0, 0.0, 1.0]
 "#;
 
-    let mut frontend = crate::cached_frontend();
-    let type_checked = crate::Compiler::parse(source, &mut frontend.node_counter)
-        .and_then(|p| p.desugar(&mut frontend.node_counter))
-        .and_then(|d| d.resolve(&mut frontend.module_manager))
+    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
+    let type_checked = crate::Compiler::parse(source, &mut node_counter)
+        .and_then(|p| p.desugar(&mut node_counter))
+        .and_then(|d| d.resolve(&mut module_manager))
         .map(|r| r.fold_ast_constants())
-        .and_then(|f| f.type_check(&mut frontend.module_manager))
+        .and_then(|f| f.type_check(&mut module_manager))
         .expect("Failed before TLC transform");
 
     let result = type_checked
-        .to_tlc(&frontend.module_manager, false)
+        .to_tlc(&module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -975,16 +975,16 @@ entry compute_main(data: []i32) i32 =
 
 /// Compile source all the way through SPIR-V and return Ok/Err.
 fn compile_to_spirv(input: &str) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
-    let mut frontend = crate::cached_frontend();
-    let type_checked = crate::Compiler::parse(input, &mut frontend.node_counter)?
-        .elaborate_modules(&mut frontend.module_manager)?
-        .desugar(&mut frontend.node_counter)?
-        .resolve(&mut frontend.module_manager)?
+    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
+    let type_checked = crate::Compiler::parse(input, &mut node_counter)?
+        .elaborate_modules(&mut module_manager)?
+        .desugar(&mut node_counter)?
+        .resolve(&mut module_manager)?
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager)?;
+        .type_check(&mut module_manager)?;
 
     let result = type_checked
-        .to_tlc(&frontend.module_manager, false)
+        .to_tlc(&module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -1009,20 +1009,20 @@ fn compile_to_spirv(input: &str) -> Result<Vec<u32>, Box<dyn std::error::Error>>
 
 /// Helper: compile source that may have modules (like raytrace.wyn)
 fn compile_to_ssa_with_modules(input: &str) -> Program {
-    let mut frontend = crate::cached_frontend();
-    let parsed = crate::Compiler::parse(input, &mut frontend.node_counter).expect("Parse failed");
-    let parsed = parsed.elaborate_modules(&mut frontend.module_manager).expect("Module elaboration failed");
+    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
+    let parsed = crate::Compiler::parse(input, &mut node_counter).expect("Parse failed");
+    let parsed = parsed.elaborate_modules(&mut module_manager).expect("Module elaboration failed");
     let type_checked = parsed
-        .desugar(&mut frontend.node_counter)
+        .desugar(&mut node_counter)
         .expect("Desugar failed")
-        .resolve(&mut frontend.module_manager)
+        .resolve(&mut module_manager)
         .expect("Resolve failed")
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager)
+        .type_check(&mut module_manager)
         .expect("Type check failed");
 
     type_checked
-        .to_tlc(&frontend.module_manager, false)
+        .to_tlc(&module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -1302,19 +1302,19 @@ entry frag(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
 
 /// Pipeline that includes TLC inline_small (the new pass).
 fn compile_to_ssa_with_inline_small(input: &str) -> Program {
-    let mut frontend = crate::cached_frontend();
-    let parsed = crate::Compiler::parse(input, &mut frontend.node_counter).expect("Parsing failed");
+    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
+    let parsed = crate::Compiler::parse(input, &mut node_counter).expect("Parsing failed");
     let type_checked = parsed
-        .desugar(&mut frontend.node_counter)
+        .desugar(&mut node_counter)
         .expect("Desugaring failed")
-        .resolve(&mut frontend.module_manager)
+        .resolve(&mut module_manager)
         .expect("Name resolution failed")
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager)
+        .type_check(&mut module_manager)
         .expect("Type checking failed");
 
     type_checked
-        .to_tlc(&frontend.module_manager, false)
+        .to_tlc(&module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -1387,17 +1387,17 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
 /// `TlcTransformed` so tests can inspect `fill_hole_errors` and the
 /// program shape.
 fn compile_tlc_with_fill_holes(input: &str) -> crate::TlcTransformed {
-    let mut frontend = crate::cached_frontend();
-    let parsed = crate::Compiler::parse(input, &mut frontend.node_counter).expect("parse");
+    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
+    let parsed = crate::Compiler::parse(input, &mut node_counter).expect("parse");
     let type_checked = parsed
-        .desugar(&mut frontend.node_counter)
+        .desugar(&mut node_counter)
         .expect("desugar")
-        .resolve(&mut frontend.module_manager)
+        .resolve(&mut module_manager)
         .expect("resolve")
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager)
+        .type_check(&mut module_manager)
         .expect("type_check");
-    type_checked.to_tlc(&frontend.module_manager, true)
+    type_checked.to_tlc(&module_manager, true)
 }
 
 #[test]

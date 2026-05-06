@@ -6,7 +6,6 @@ use std::sync::{Arc, OnceLock, RwLock};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
-use wyn_core::FrontEnd;
 use wyn_core::TypeTable;
 use wyn_core::ast::{self, NodeCounter, NodeId, Span};
 use wyn_core::interface;
@@ -36,9 +35,9 @@ fn get_prelude() -> (&'static PreElaboratedPrelude, NodeCounter) {
     (prelude, counter.clone())
 }
 
-fn get_frontend() -> FrontEnd {
+fn init_compiler_cached() -> (NodeCounter, ModuleManager) {
     let (prelude, node_counter) = get_prelude();
-    FrontEnd::new_from_prelude(prelude.clone(), node_counter)
+    wyn_core::init_compiler_from_prelude(prelude.clone(), node_counter)
 }
 
 /// Cached document state after successful type checking
@@ -436,13 +435,13 @@ impl Backend {
     fn check_document(&self, text: &str) -> (Vec<Diagnostic>, Option<DocumentState>) {
         let mut diagnostics = Vec::new();
 
-        let mut frontend = get_frontend();
-        let result = wyn_core::Compiler::parse(text, &mut frontend.node_counter).and_then(|parsed| {
+        let (mut node_counter, mut module_manager) = init_compiler_cached();
+        let result = wyn_core::Compiler::parse(text, &mut node_counter).and_then(|parsed| {
             parsed
-                .desugar(&mut frontend.node_counter)?
-                .resolve(&frontend.module_manager)?
+                .desugar(&mut node_counter)?
+                .resolve(&module_manager)?
                 .fold_ast_constants()
-                .type_check(&mut frontend.module_manager)
+                .type_check(&mut module_manager)
         });
 
         match result {

@@ -15,14 +15,14 @@ fn typecheck_program(input: &str) {
 /// Helper to parse and type check source code, returning Result
 fn try_typecheck_program(input: &str) -> Result<(), CompilerError> {
     // Use the typestate API to ensure proper pipeline setup
-    let mut frontend = crate::cached_frontend();
-    let parsed = crate::Compiler::parse(input, &mut frontend.node_counter)?;
+    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
+    let parsed = crate::Compiler::parse(input, &mut node_counter)?;
     let _type_checked = parsed
-        .elaborate_modules(&mut frontend.module_manager)?
-        .desugar(&mut frontend.node_counter)?
-        .resolve(&mut frontend.module_manager)?
+        .elaborate_modules(&mut module_manager)?
+        .desugar(&mut node_counter)?
+        .resolve(&mut module_manager)?
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager)?;
+        .type_check(&mut module_manager)?;
     Ok(())
 }
 

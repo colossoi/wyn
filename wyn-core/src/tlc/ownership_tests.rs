@@ -24,17 +24,17 @@ fn empty_model_lookups() {
 }
 
 fn compile_to_tlc(source: &str) -> Program {
-    let mut frontend = crate::cached_frontend();
-    let parsed = Compiler::parse(source, &mut frontend.node_counter).expect("parse");
+    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
+    let parsed = Compiler::parse(source, &mut node_counter).expect("parse");
     let type_checked = parsed
-        .desugar(&mut frontend.node_counter)
+        .desugar(&mut node_counter)
         .expect("desugar")
-        .resolve(&mut frontend.module_manager)
+        .resolve(&mut module_manager)
         .expect("resolve")
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager)
+        .type_check(&mut module_manager)
         .expect("type_check");
-    let tlc = type_checked.to_tlc(&frontend.module_manager, false).partial_eval().normalize_soacs();
+    let tlc = type_checked.to_tlc(&module_manager, false).partial_eval().normalize_soacs();
     tlc.0.tlc
 }
 
@@ -509,17 +509,17 @@ def f(a: [4]i32, n: i32) i32 =
 /// can be invoked, then return whether the program has a
 /// use-after-move violation.
 fn has_use_after_move(source: &str) -> bool {
-    let mut frontend = crate::cached_frontend();
-    let parsed = Compiler::parse(source, &mut frontend.node_counter).expect("parse");
+    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
+    let parsed = Compiler::parse(source, &mut node_counter).expect("parse");
     let type_checked = parsed
-        .desugar(&mut frontend.node_counter)
+        .desugar(&mut node_counter)
         .expect("desugar")
-        .resolve(&mut frontend.module_manager)
+        .resolve(&mut module_manager)
         .expect("resolve")
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager)
+        .type_check(&mut module_manager)
         .expect("type_check");
-    let tlc = type_checked.to_tlc(&frontend.module_manager, false).partial_eval().normalize_soacs();
+    let tlc = type_checked.to_tlc(&module_manager, false).partial_eval().normalize_soacs();
     super::check(&tlc.0.tlc).is_err()
 }
 
@@ -990,18 +990,18 @@ entry double(arr: []i32) []i32 = map(|x: i32| x + 1, arr)
 /// post-apply_ownership). Returns the post-rewrite Program for
 /// inspecting `SoacOp::Map { consumes_input, .. }`.
 fn compile_to_owned(source: &str) -> Program {
-    let mut frontend = crate::cached_frontend();
-    let parsed = Compiler::parse(source, &mut frontend.node_counter).expect("parse");
+    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
+    let parsed = Compiler::parse(source, &mut node_counter).expect("parse");
     let type_checked = parsed
-        .desugar(&mut frontend.node_counter)
+        .desugar(&mut node_counter)
         .expect("desugar")
-        .resolve(&mut frontend.module_manager)
+        .resolve(&mut module_manager)
         .expect("resolve")
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager)
+        .type_check(&mut module_manager)
         .expect("type_check");
     let owned = type_checked
-        .to_tlc(&frontend.module_manager, false)
+        .to_tlc(&module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()

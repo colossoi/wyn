@@ -6,21 +6,21 @@ use super::*;
 /// `compile_to_wgsl_impl` and return the SSA program so tests can inspect
 /// the interface shape without going through JSON serialization.
 fn compile_to_ssa(source: &str) -> wyn_core::ssa::types::Program {
-    let mut frontend = wyn_core::FrontEnd::new();
-    let parsed = wyn_core::Compiler::parse(source, &mut frontend.node_counter).expect("parse failed");
-    let parsed = parsed.elaborate_modules(&mut frontend.module_manager).expect("elaborate_modules failed");
+    let (mut node_counter, mut module_manager) = wyn_core::init_compiler();
+    let parsed = wyn_core::Compiler::parse(source, &mut node_counter).expect("parse failed");
+    let parsed = parsed.elaborate_modules(&mut module_manager).expect("elaborate_modules failed");
     let alias_checked = parsed
-        .desugar(&mut frontend.node_counter)
+        .desugar(&mut node_counter)
         .expect("desugar failed")
-        .resolve(&mut frontend.module_manager)
+        .resolve(&module_manager)
         .expect("resolve failed")
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager, &mut frontend.schemes)
+        .type_check(&mut module_manager)
         .expect("type_check failed")
         .alias_check()
         .expect("alias_check failed");
     let ssa = alias_checked
-        .to_tlc(&frontend.schemes, &frontend.module_manager, false)
+        .to_tlc(&module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()

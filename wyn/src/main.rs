@@ -227,30 +227,25 @@ fn compile_file(
     // Read source file
     let source = fs::read_to_string(&input)?;
 
-    // Compile through the pipeline
-    // Create FrontEnd first - it owns the node counter and loads prelude
-    let mut frontend = time("frontend", verbose, wyn_core::FrontEnd::new);
-    // Parse user code using the same counter (so IDs don't collide with prelude)
-    let parsed = time("parse", verbose, || {
-        Compiler::parse(&source, &mut frontend.node_counter)
-    })?;
+    let (mut node_counter, mut module_manager) = time("frontend", verbose, wyn_core::init_compiler);
+    let parsed = time("parse", verbose, || Compiler::parse(&source, &mut node_counter))?;
     // Resolve `import "..."` against the entry file's directory so
     // user code can split across files. Imports are looked up
     // relative to the file containing the import statement.
     let base_dir = input.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
     let parsed = time("resolve_imports", verbose, || {
-        parsed.resolve_imports(&base_dir, &mut frontend.node_counter)
+        parsed.resolve_imports(&base_dir, &mut node_counter)
     })?;
     // Elaborate inline modules so they're available during resolution
     let parsed = time("elaborate_modules", verbose, || {
-        parsed.elaborate_modules(&mut frontend.module_manager)
+        parsed.elaborate_modules(&mut module_manager)
     })?;
     // Desugar ranges/slices early, before name resolution and type checking
-    let desugared = time("desugar", verbose, || parsed.desugar(&mut frontend.node_counter))?;
-    let resolved = time("resolve", verbose, || desugared.resolve(&frontend.module_manager))?;
+    let desugared = time("desugar", verbose, || parsed.desugar(&mut node_counter))?;
+    let resolved = time("resolve", verbose, || desugared.resolve(&module_manager))?;
     let ast_folded = time("fold_ast_constants", verbose, || resolved.fold_ast_constants());
     let type_checked = time("type_check", verbose, || {
-        ast_folded.type_check(&mut frontend.module_manager)
+        ast_folded.type_check(&mut module_manager)
     })?;
 
     type_checked.print_warnings();
@@ -263,7 +258,7 @@ fn compile_file(
 
     // Transform to TLC (including prelude code - transformed here for consistent type variables)
     let tlc_transformed = time("to_tlc", verbose, || {
-        type_checked.to_tlc(&frontend.module_manager, fill_holes)
+        type_checked.to_tlc(&module_manager, fill_holes)
     });
 
     // Surface any hole-fill errors collected during TLC transform.
@@ -460,18 +455,17 @@ fn check_file(input: PathBuf, verbose: bool) -> Result<(), DriverError> {
     let source = fs::read_to_string(&input)?;
 
     // Type check and alias check, don't generate code
-    let mut frontend = wyn_core::FrontEnd::new();
-    let parsed = Compiler::parse(&source, &mut frontend.node_counter)?;
+    let (mut node_counter, mut module_manager) = wyn_core::init_compiler();
+    let parsed = Compiler::parse(&source, &mut node_counter)?;
     let base_dir = input.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
-    let parsed = parsed.resolve_imports(&base_dir, &mut frontend.node_counter)?;
-    let desugared = parsed.desugar(&mut frontend.node_counter)?;
-    let resolved = desugared.resolve(&frontend.module_manager)?;
-    let type_checked = resolved.fold_ast_constants().type_check(&mut frontend.module_manager)?;
+    let parsed = parsed.resolve_imports(&base_dir, &mut node_counter)?;
+    let desugared = parsed.desugar(&mut node_counter)?;
+    let resolved = desugared.resolve(&module_manager)?;
+    let type_checked = resolved.fold_ast_constants().type_check(&mut module_manager)?;
 
     type_checked.print_warnings();
 
-    let tlc_after_norm =
-        type_checked.to_tlc(&frontend.module_manager, false).partial_eval().normalize_soacs();
+    let tlc_after_norm = type_checked.to_tlc(&module_manager, false).partial_eval().normalize_soacs();
     wyn_core::tlc::ownership::check(&tlc_after_norm.0.tlc)?;
 
     if verbose {

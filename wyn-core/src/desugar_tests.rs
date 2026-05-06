@@ -10,16 +10,16 @@ use crate::ssa::types::Program;
 
 /// Helper to run full pipeline through lowering, including desugar step
 fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
-    let mut frontend = crate::cached_frontend();
-    let parsed = crate::Compiler::parse(input, &mut frontend.node_counter)?;
+    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
+    let parsed = crate::Compiler::parse(input, &mut node_counter)?;
     let type_checked = parsed
-        .desugar(&mut frontend.node_counter)?
-        .resolve(&mut frontend.module_manager)?
+        .desugar(&mut node_counter)?
+        .resolve(&mut module_manager)?
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager)?;
+        .type_check(&mut module_manager)?;
 
     type_checked
-        .to_tlc(&frontend.module_manager, false)
+        .to_tlc(&module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -44,16 +44,16 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
 
 /// Helper to run pipeline through SSA (checks desugar correctness)
 fn compile_through_ssa(input: &str) -> Result<Program, CompilerError> {
-    let mut frontend = crate::cached_frontend();
-    let parsed = crate::Compiler::parse(input, &mut frontend.node_counter)?;
+    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
+    let parsed = crate::Compiler::parse(input, &mut node_counter)?;
     let type_checked = parsed
-        .desugar(&mut frontend.node_counter)?
-        .resolve(&mut frontend.module_manager)?
+        .desugar(&mut node_counter)?
+        .resolve(&mut module_manager)?
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager)?;
+        .type_check(&mut module_manager)?;
 
     let ssa = type_checked
-        .to_tlc(&frontend.module_manager, false)
+        .to_tlc(&module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -494,21 +494,21 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     let x = first([1, 2, 3, 4]) in
     @[f32.i32(x), 0.0f32, 0.0f32, 1.0f32]
 "#;
-    let mut frontend = crate::cached_frontend();
-    let parsed = crate::Compiler::parse(source, &mut frontend.node_counter).expect("parse");
+    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
+    let parsed = crate::Compiler::parse(source, &mut node_counter).expect("parse");
     eprintln!("=== parse OK ===");
 
     let type_checked = parsed
-        .desugar(&mut frontend.node_counter)
+        .desugar(&mut node_counter)
         .expect("desugar")
-        .resolve(&mut frontend.module_manager)
+        .resolve(&mut module_manager)
         .expect("resolve")
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager)
+        .type_check(&mut module_manager)
         .expect("typecheck");
     eprintln!("=== frontend OK ===");
 
-    let tlc = type_checked.to_tlc(&frontend.module_manager, false);
+    let tlc = type_checked.to_tlc(&module_manager, false);
     eprintln!("=== to_tlc OK ===");
 
     let tlc = tlc.partial_eval();
@@ -555,21 +555,21 @@ def first(arr: []i32) i32 = arr[0]
 #[compute]
 entry main(data: []i32) []i32 = [first(data)]
 "#;
-    let mut frontend = crate::cached_frontend();
-    let parsed = crate::Compiler::parse(source, &mut frontend.node_counter).expect("parse");
+    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
+    let parsed = crate::Compiler::parse(source, &mut node_counter).expect("parse");
     eprintln!("=== parse OK ===");
 
     let type_checked = parsed
-        .desugar(&mut frontend.node_counter)
+        .desugar(&mut node_counter)
         .expect("desugar")
-        .resolve(&mut frontend.module_manager)
+        .resolve(&mut module_manager)
         .expect("resolve")
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager)
+        .type_check(&mut module_manager)
         .expect("typecheck");
     eprintln!("=== frontend OK ===");
 
-    let tlc = type_checked.to_tlc(&frontend.module_manager, false);
+    let tlc = type_checked.to_tlc(&module_manager, false);
     eprintln!("=== to_tlc OK ===");
 
     let tlc = tlc.partial_eval();
