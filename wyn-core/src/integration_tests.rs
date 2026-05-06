@@ -10,49 +10,12 @@ use crate::ssa::types::Program;
 
 /// Run source through the pipeline up to SSA.
 fn compile_to_ssa(input: &str) -> Program {
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = crate::Compiler::parse(input, &mut node_counter).expect("Parsing failed");
-    let type_checked = parsed
-        .desugar(&mut node_counter)
-        .expect("Desugaring failed")
-        .resolve(&mut module_manager)
-        .expect("Name resolution failed")
-        .fold_ast_constants()
-        .type_check(&mut module_manager)
-        .expect("Type checking failed");
-
-    type_checked
-        .to_tlc(&module_manager, false)
-        .partial_eval()
-        .normalize_soacs()
-        .fuse_maps()
-        .apply_ownership()
-        .expect("apply_ownership")
-        .defunctionalize()
-        .monomorphize()
-        .buffer_specialize()
-        .fold_generated_lambdas()
-        .inline_small()
-        .parallelize_soacs(false)
-        .filter_reachable()
-        .to_egraph()
-        .expect("SSA conversion failed")
-        .expand_soacs(true)
-        .materialize()
-        .optimize_skeleton()
-        .elaborate()
-        .ssa
+    crate::compile_thru_ssa(input).expect("compile to SSA").ssa
 }
 
 /// Helper to check that code fails type checking (for testing error cases).
 fn should_fail_type_check(input: &str) -> bool {
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let result = crate::Compiler::parse(input, &mut node_counter)
-        .and_then(|parsed| parsed.desugar(&mut node_counter))
-        .and_then(|desugared| desugared.resolve(&mut module_manager))
-        .map(|resolved| resolved.fold_ast_constants())
-        .and_then(|folded| folded.type_check(&mut module_manager));
-    result.is_err()
+    crate::compile_thru_frontend(input).is_err()
 }
 
 /// Check that a function with the given name exists in the SSA program.
@@ -61,18 +24,19 @@ fn has_function(ssa: &Program, name: &str) -> bool {
 }
 
 /// Helper to compile up through TLC fusion (stops before defunctionalization).
+/// Off-milestone stop — drives the typestate API directly so the same
+/// `module_manager` covers both `type_check` and `to_tlc`.
 fn compile_to_fused_tlc(input: &str) -> crate::tlc::Program {
     let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = crate::Compiler::parse(input, &mut node_counter).expect("Parsing failed");
-    let type_checked = parsed
+    let type_checked = crate::Compiler::parse(input, &mut node_counter)
+        .expect("parse")
         .desugar(&mut node_counter)
-        .expect("Desugaring failed")
-        .resolve(&mut module_manager)
-        .expect("Name resolution failed")
+        .expect("desugar")
+        .resolve(&module_manager)
+        .expect("resolve")
         .fold_ast_constants()
         .type_check(&mut module_manager)
-        .expect("Type checking failed");
-
+        .expect("type_check");
     let tlc = type_checked.to_tlc(&module_manager, false);
     let fused =
         tlc.partial_eval().normalize_soacs().fuse_maps().apply_ownership().expect("apply_ownership");
@@ -784,35 +748,7 @@ entry vertex_main() #[builtin(position)] vec4f32 =
     @[f32.i32(result), 0.0, 0.0, 1.0]
 "#;
 
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let type_checked = crate::Compiler::parse(source, &mut node_counter)
-        .and_then(|p| p.desugar(&mut node_counter))
-        .and_then(|d| d.resolve(&mut module_manager))
-        .map(|r| r.fold_ast_constants())
-        .and_then(|f| f.type_check(&mut module_manager))
-        .expect("Failed before TLC transform");
-
-    let result = type_checked
-        .to_tlc(&module_manager, false)
-        .partial_eval()
-        .normalize_soacs()
-        .fuse_maps()
-        .apply_ownership()
-        .expect("apply_ownership")
-        .defunctionalize()
-        .monomorphize()
-        .buffer_specialize()
-        .fold_generated_lambdas()
-        .inline_small()
-        .parallelize_soacs(false)
-        .filter_reachable()
-        .to_egraph()
-        .expect("SSA conversion failed")
-        .expand_soacs(true)
-        .materialize()
-        .optimize_skeleton()
-        .elaborate()
-        .lower();
+    let result = crate::compile_thru_spirv(source);
 
     assert!(result.is_ok(), "SPIR-V compilation failed: {:?}", result.err());
 }
@@ -831,35 +767,7 @@ entry compute_main(data: []i32) i32 =
     from_storage + from_literal
 "#;
 
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let type_checked = crate::Compiler::parse(source, &mut node_counter)
-        .and_then(|p| p.desugar(&mut node_counter))
-        .and_then(|d| d.resolve(&mut module_manager))
-        .map(|r| r.fold_ast_constants())
-        .and_then(|f| f.type_check(&mut module_manager))
-        .expect("Failed before TLC transform");
-
-    let result = type_checked
-        .to_tlc(&module_manager, false)
-        .partial_eval()
-        .normalize_soacs()
-        .fuse_maps()
-        .apply_ownership()
-        .expect("apply_ownership")
-        .defunctionalize()
-        .monomorphize()
-        .buffer_specialize()
-        .fold_generated_lambdas()
-        .inline_small()
-        .parallelize_soacs(false)
-        .filter_reachable()
-        .to_egraph()
-        .expect("SSA conversion failed")
-        .expand_soacs(true)
-        .materialize()
-        .optimize_skeleton()
-        .elaborate()
-        .lower();
+    let result = crate::compile_thru_spirv(source);
 
     assert!(result.is_ok(), "SPIR-V compilation failed: {:?}", result.err());
 }
@@ -881,35 +789,7 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     @[s + iTime, 0.0, 0.0, 1.0]
 "#;
 
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let type_checked = crate::Compiler::parse(source, &mut node_counter)
-        .and_then(|p| p.desugar(&mut node_counter))
-        .and_then(|d| d.resolve(&mut module_manager))
-        .map(|r| r.fold_ast_constants())
-        .and_then(|f| f.type_check(&mut module_manager))
-        .expect("Failed before TLC transform");
-
-    let result = type_checked
-        .to_tlc(&module_manager, false)
-        .partial_eval()
-        .normalize_soacs()
-        .fuse_maps()
-        .apply_ownership()
-        .expect("apply_ownership")
-        .defunctionalize()
-        .monomorphize()
-        .buffer_specialize()
-        .fold_generated_lambdas()
-        .inline_small()
-        .parallelize_soacs(false)
-        .filter_reachable()
-        .to_egraph()
-        .expect("SSA conversion failed")
-        .expand_soacs(true)
-        .materialize()
-        .optimize_skeleton()
-        .elaborate()
-        .lower();
+    let result = crate::compile_thru_spirv(source);
 
     assert!(result.is_ok(), "SPIR-V compilation failed: {:?}", result.err());
 }
@@ -975,73 +855,14 @@ entry compute_main(data: []i32) i32 =
 
 /// Compile source all the way through SPIR-V and return Ok/Err.
 fn compile_to_spirv(input: &str) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let type_checked = crate::Compiler::parse(input, &mut node_counter)?
-        .elaborate_modules(&mut module_manager)?
-        .desugar(&mut node_counter)?
-        .resolve(&mut module_manager)?
-        .fold_ast_constants()
-        .type_check(&mut module_manager)?;
-
-    let result = type_checked
-        .to_tlc(&module_manager, false)
-        .partial_eval()
-        .normalize_soacs()
-        .fuse_maps()
-        .apply_ownership()
-        .expect("apply_ownership")
-        .defunctionalize()
-        .monomorphize()
-        .buffer_specialize()
-        .fold_generated_lambdas()
-        .inline_small()
-        .parallelize_soacs(false)
-        .filter_reachable()
-        .to_egraph()?
-        .expand_soacs(true)
-        .materialize()
-        .optimize_skeleton()
-        .elaborate()
-        .lower()?;
-
-    Ok(result.spirv)
+    Ok(crate::compile_thru_spirv(input)?.spirv)
 }
 
-/// Helper: compile source that may have modules (like raytrace.wyn)
+/// Helper: compile source through SSA. Same as `compile_to_ssa`; kept as
+/// a separate name because some legacy tests distinguished module-bearing
+/// programs from non-module ones — `compile_thru_frontend` handles both.
 fn compile_to_ssa_with_modules(input: &str) -> Program {
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = crate::Compiler::parse(input, &mut node_counter).expect("Parse failed");
-    let parsed = parsed.elaborate_modules(&mut module_manager).expect("Module elaboration failed");
-    let type_checked = parsed
-        .desugar(&mut node_counter)
-        .expect("Desugar failed")
-        .resolve(&mut module_manager)
-        .expect("Resolve failed")
-        .fold_ast_constants()
-        .type_check(&mut module_manager)
-        .expect("Type check failed");
-
-    type_checked
-        .to_tlc(&module_manager, false)
-        .partial_eval()
-        .normalize_soacs()
-        .fuse_maps()
-        .apply_ownership()
-        .expect("apply_ownership")
-        .defunctionalize()
-        .monomorphize()
-        .buffer_specialize()
-        .fold_generated_lambdas()
-        .inline_small()
-        .parallelize_soacs(false)
-        .filter_reachable()
-        .to_egraph()
-        .expect("SSA conversion failed")
-        .expand_soacs(true)
-        .materialize()
-        .optimize_skeleton()
-        .elaborate()
-        .ssa
+    crate::compile_thru_ssa(input).expect("compile to SSA").ssa
 }
 
 /// Verify that nested if/else chains compile to SPIR-V.

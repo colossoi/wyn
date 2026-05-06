@@ -14,16 +14,7 @@ fn typecheck_program(input: &str) {
 
 /// Helper to parse and type check source code, returning Result
 fn try_typecheck_program(input: &str) -> Result<(), CompilerError> {
-    // Use the typestate API to ensure proper pipeline setup
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = crate::Compiler::parse(input, &mut node_counter)?;
-    let _type_checked = parsed
-        .elaborate_modules(&mut module_manager)?
-        .desugar(&mut node_counter)?
-        .resolve(&mut module_manager)?
-        .fold_ast_constants()
-        .type_check(&mut module_manager)?;
-    Ok(())
+    crate::compile_thru_frontend(input).map(|_| ())
 }
 
 #[test]

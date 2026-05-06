@@ -1029,3 +1029,62 @@ pub fn cached_compiler_init() -> (NodeCounter, module_manager::ModuleManager) {
     let (prelude, node_counter) = get_prelude_cache();
     init_compiler_from_prelude(prelude.clone(), node_counter)
 }
+
+// =============================================================================
+// Test-only milestone helpers
+// =============================================================================
+//
+// `compile_thru_*` helpers run the pipeline up to a milestone and return
+// just the milestone value. Each subsumes the previous one:
+//
+//   compile_thru_frontend  →  TypeChecked          (AST passes done)
+//   compile_thru_tlc       →  TlcReachable         (TLC pipeline done)
+//   compile_thru_ssa       →  SsaConverted         (EGIR + elaborate done)
+//   compile_thru_spirv     →  Lowered              (final SPIR-V binary)
+//
+// These exist so test files don't have to enumerate every pass — when a
+// new pass lands, only the helper that owns its milestone needs updating.
+// Tests that need an off-milestone stop call the typestate methods directly.
+
+/// Run AST passes through type checking. Uses the cached prelude.
+#[cfg(test)]
+pub fn compile_thru_frontend(source: &str) -> error::Result<TypeChecked> {
+    let (mut node_counter, mut module_manager) = cached_compiler_init();
+    Compiler::parse(source, &mut node_counter)?
+        .elaborate_modules(&mut module_manager)?
+        .desugar(&mut node_counter)?
+        .resolve(&module_manager)?
+        .fold_ast_constants()
+        .type_check(&mut module_manager)
+}
+
+/// Run the canonical TLC optimization pipeline (no compute parallelization,
+/// no hole-filling) through `filter_reachable`.
+#[cfg(test)]
+pub fn compile_thru_tlc(source: &str) -> error::Result<TlcReachable> {
+    let (mut node_counter, mut module_manager) = cached_compiler_init();
+    let type_checked = Compiler::parse(source, &mut node_counter)?
+        .elaborate_modules(&mut module_manager)?
+        .desugar(&mut node_counter)?
+        .resolve(&module_manager)?
+        .fold_ast_constants()
+        .type_check(&mut module_manager)?;
+    Ok(type_checked.to_tlc(&module_manager, false).optimize_for_test(false))
+}
+
+/// Run all the way through EGIR + elaborate to SSA. Materialize is enabled
+/// (matches the SPIR-V backend's requirements). Returns the boxed
+/// `Result<_, dyn Error>` so callers see both compiler errors and EGIR
+/// conversion errors uniformly.
+#[cfg(test)]
+pub fn compile_thru_ssa(source: &str) -> std::result::Result<SsaConverted, Box<dyn std::error::Error>> {
+    let tlc = compile_thru_tlc(source)?;
+    let raw = tlc.to_egraph()?;
+    Ok(raw.expand_soacs(true).materialize().optimize_skeleton().elaborate())
+}
+
+/// Run the full pipeline to a final SPIR-V binary.
+#[cfg(test)]
+pub fn compile_thru_spirv(source: &str) -> std::result::Result<Lowered, Box<dyn std::error::Error>> {
+    Ok(compile_thru_ssa(source)?.lower()?)
+}
