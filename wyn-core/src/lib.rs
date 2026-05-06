@@ -1001,12 +1001,6 @@ impl TlcGeneratedLambdasFolded {
     pub fn filter_reachable(self) -> TlcReachable {
         let TlcLateInner { tlc, type_table } = self.0;
         let tlc = tlc::inline::run_reachable(tlc);
-        tlc::hof_specialize::verify_hof_specialized(&tlc).unwrap_or_else(|e| {
-            panic!(
-                "hof-specialization verifier failed after filter_reachable: {:?}",
-                e
-            )
-        });
         TlcReachable(TlcPipelineInner {
             tlc,
             pipeline: pipeline_descriptor::PipelineDescriptor::default(),
@@ -1053,12 +1047,6 @@ impl TlcSmallInlined {
     pub fn filter_reachable(self) -> TlcReachable {
         let TlcLateInner { tlc, type_table } = self.0;
         let tlc = tlc::inline::run_reachable(tlc);
-        tlc::hof_specialize::verify_hof_specialized(&tlc).unwrap_or_else(|e| {
-            panic!(
-                "hof-specialization verifier failed after filter_reachable: {:?}",
-                e
-            )
-        });
         TlcReachable(TlcPipelineInner {
             tlc,
             pipeline: pipeline_descriptor::PipelineDescriptor::default(),

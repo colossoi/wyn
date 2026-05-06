@@ -24,13 +24,20 @@ const INLINE_SIZE_THRESHOLD: usize = 30;
 /// Preserves entry points, extern defs, and their transitive dependencies.
 pub fn run_reachable(program: Program) -> Program {
     let defs = dead_code_eliminate(program.defs);
-    Program {
+    let result = Program {
         defs,
         uniforms: program.uniforms,
         storage: program.storage,
         symbols: program.symbols,
         def_syms: program.def_syms,
-    }
+    };
+    super::hof_specialize::verify_hof_specialized(&result).unwrap_or_else(|e| {
+        panic!(
+            "hof-specialization verifier failed after filter_reachable: {:?}",
+            e
+        )
+    });
+    result
 }
 
 /// Inline small user functions and constants at their call/reference sites.
