@@ -87,6 +87,42 @@ fn unlifted_lambda_in_body_fails_verifier() {
 }
 
 #[test]
+fn append_capture_params_extends_param_list() {
+    let mut symbols = SymbolTable::new();
+    let mut ids = crate::tlc::TermIdSource::new();
+
+    let x = symbols.alloc("x".into());
+    let cap_a = symbols.alloc("a".into());
+    let cap_b = symbols.alloc("b".into());
+
+    let inner_body = term(TermKind::Var(x), unit_ty());
+    let lam_ty = Type::Constructed(TypeName::Arrow, vec![unit_ty(), unit_ty()]);
+    let lam = Term {
+        id: ids.next_id(),
+        ty: lam_ty,
+        span: span(),
+        kind: TermKind::Lambda(Lambda {
+            params: vec![(x, unit_ty())],
+            body: Box::new(inner_body),
+            ret_ty: unit_ty(),
+        }),
+    };
+
+    let captures: Vec<(crate::SymbolId, Type<TypeName>)> = vec![(cap_a, unit_ty()), (cap_b, unit_ty())];
+
+    let out = append_capture_params(lam, &captures, span(), &mut ids);
+
+    let TermKind::Lambda(Lambda { params, body, .. }) = out.kind else {
+        panic!("expected Lambda result");
+    };
+    assert_eq!(
+        params,
+        vec![(x, unit_ty()), (cap_a, unit_ty()), (cap_b, unit_ty())]
+    );
+    assert!(matches!(body.kind, TermKind::Var(s) if s == x));
+}
+
+#[test]
 fn param_spine_lambdas_are_skipped() {
     let mut program = empty_program();
     let sym = program.symbols.alloc("f".to_string());

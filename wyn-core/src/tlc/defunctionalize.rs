@@ -451,9 +451,19 @@ impl<'a> Defunctionalizer<'a> {
         } else {
             // Has captures: append captures as additional parameters at the end
             // Build: |original_params...| |captures...| body
+            let cap_params: Vec<(SymbolId, Type<TypeName>)> = captures
+                .iter()
+                .map(|cap_term| match &cap_term.kind {
+                    TermKind::Var(sym) => (*sym, cap_term.ty.clone()),
+                    other => panic!(
+                        "compute_free_vars contract violated: capture is not a Var: {:?}",
+                        other
+                    ),
+                })
+                .collect();
             let wrapped = super::closure_convert::append_capture_params(
                 rebuilt_lam,
-                &captures,
+                &cap_params,
                 span,
                 &mut self.term_ids,
             );

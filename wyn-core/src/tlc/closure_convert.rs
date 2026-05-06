@@ -118,33 +118,21 @@ pub fn build_app_with_term(
 }
 
 /// Append capture parameters to a (possibly nested-Lambda) term and
-/// re-flatten into a single Lambda. Each capture term must be a
-/// `TermKind::Var`; the symbol/type pair is used as the new
-/// parameter slot.
+/// re-flatten into a single Lambda. Captures are supplied as
+/// `(SymbolId, Type)` pairs so non-Var captures are unrepresentable.
 ///
-/// Given `|x, y| body` and captures `[a, b]` (Var-shaped terms),
-/// produces `|x, y, a, b| body`.
+/// Given `|x, y| body` and captures `[(a, A), (b, B)]`, produces
+/// `|x, y, a, b| body` typed `X -> Y -> A -> B -> ret`.
 pub fn append_capture_params(
     lam: Term,
-    captures: &[Term],
+    captures: &[(SymbolId, Type<TypeName>)],
     span: Span,
     term_ids: &mut TermIdSource,
 ) -> Term {
     let (orig_params, inner_body) = super::extract_lambda_params(&lam);
 
-    let cap_params: Vec<(SymbolId, Type<TypeName>)> = captures
-        .iter()
-        .map(|cap_term| {
-            let cap_sym = match &cap_term.kind {
-                TermKind::Var(sym) => *sym,
-                _ => panic!("BUG: capture term is not a Var: {:?}", cap_term.kind),
-            };
-            (cap_sym, cap_term.ty.clone())
-        })
-        .collect();
-
     let mut all_params = orig_params;
-    all_params.extend(cap_params);
+    all_params.extend(captures.iter().cloned());
 
     let ret_ty = inner_body.ty.clone();
     let mut lam_ty = ret_ty.clone();
