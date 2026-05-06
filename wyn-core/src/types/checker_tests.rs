@@ -22,7 +22,7 @@ fn try_typecheck_program(input: &str) -> Result<(), CompilerError> {
         .desugar(&mut frontend.node_counter)?
         .resolve(&mut frontend.module_manager)?
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager, &mut frontend.schemes)?;
+        .type_check(&mut frontend.module_manager)?;
     Ok(())
 }
 

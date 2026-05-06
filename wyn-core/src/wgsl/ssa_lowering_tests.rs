@@ -291,11 +291,11 @@ fn compile_to_wgsl(source: &str) -> crate::error::Result<String> {
         .resolve(&mut frontend.module_manager)
         .expect("Name resolution failed")
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager, &mut frontend.schemes)
+        .type_check(&mut frontend.module_manager)
         .expect("Type checking failed");
 
     type_checked
-        .to_tlc(&frontend.schemes, &frontend.module_manager, false)
+        .to_tlc(&frontend.module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()

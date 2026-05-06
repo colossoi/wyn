@@ -442,7 +442,7 @@ impl Backend {
                 .desugar(&mut frontend.node_counter)?
                 .resolve(&frontend.module_manager)?
                 .fold_ast_constants()
-                .type_check(&mut frontend.module_manager, &mut frontend.schemes)
+                .type_check(&mut frontend.module_manager)
         });
 
         match result {
@@ -450,7 +450,7 @@ impl Backend {
                 let state = DocumentState {
                     ast: type_checked.ast,
                     type_table: type_checked.type_table,
-                    schemes: frontend.schemes,
+                    schemes: type_checked.schemes,
                 };
                 (diagnostics, Some(state))
             }

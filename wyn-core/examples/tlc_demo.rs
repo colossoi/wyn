@@ -13,8 +13,7 @@ def compute(x:i32, y:i32) i32 =
     let desugared = parsed.desugar(&mut frontend.node_counter).expect("desugar failed");
     let resolved = desugared.resolve(&mut frontend.module_manager).expect("resolve failed");
     let folded = resolved.fold_ast_constants();
-    let typed =
-        folded.type_check(&mut frontend.module_manager, &mut frontend.schemes).expect("type check failed");
+    let typed = folded.type_check(&mut frontend.module_manager).expect("type check failed");
 
     let mut fill_hole_errors = Vec::new();
     let tlc_program = tlc::transform(&typed.ast, &typed.type_table, false, &mut fill_hole_errors);

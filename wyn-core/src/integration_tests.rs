@@ -18,11 +18,11 @@ fn compile_to_ssa(input: &str) -> Program {
         .resolve(&mut frontend.module_manager)
         .expect("Name resolution failed")
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager, &mut frontend.schemes)
+        .type_check(&mut frontend.module_manager)
         .expect("Type checking failed");
 
     type_checked
-        .to_tlc(&frontend.schemes, &frontend.module_manager, false)
+        .to_tlc(&frontend.module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -51,7 +51,7 @@ fn should_fail_type_check(input: &str) -> bool {
         .and_then(|parsed| parsed.desugar(&mut frontend.node_counter))
         .and_then(|desugared| desugared.resolve(&mut frontend.module_manager))
         .map(|resolved| resolved.fold_ast_constants())
-        .and_then(|folded| folded.type_check(&mut frontend.module_manager, &mut frontend.schemes));
+        .and_then(|folded| folded.type_check(&mut frontend.module_manager));
     result.is_err()
 }
 
@@ -70,10 +70,10 @@ fn compile_to_fused_tlc(input: &str) -> crate::tlc::Program {
         .resolve(&mut frontend.module_manager)
         .expect("Name resolution failed")
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager, &mut frontend.schemes)
+        .type_check(&mut frontend.module_manager)
         .expect("Type checking failed");
 
-    let tlc = type_checked.to_tlc(&frontend.schemes, &frontend.module_manager, false);
+    let tlc = type_checked.to_tlc(&frontend.module_manager, false);
     let fused =
         tlc.partial_eval().normalize_soacs().fuse_maps().apply_ownership().expect("apply_ownership");
     fused.0.tlc
@@ -789,11 +789,11 @@ entry vertex_main() #[builtin(position)] vec4f32 =
         .and_then(|p| p.desugar(&mut frontend.node_counter))
         .and_then(|d| d.resolve(&mut frontend.module_manager))
         .map(|r| r.fold_ast_constants())
-        .and_then(|f| f.type_check(&mut frontend.module_manager, &mut frontend.schemes))
+        .and_then(|f| f.type_check(&mut frontend.module_manager))
         .expect("Failed before TLC transform");
 
     let result = type_checked
-        .to_tlc(&frontend.schemes, &frontend.module_manager, false)
+        .to_tlc(&frontend.module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -836,11 +836,11 @@ entry compute_main(data: []i32) i32 =
         .and_then(|p| p.desugar(&mut frontend.node_counter))
         .and_then(|d| d.resolve(&mut frontend.module_manager))
         .map(|r| r.fold_ast_constants())
-        .and_then(|f| f.type_check(&mut frontend.module_manager, &mut frontend.schemes))
+        .and_then(|f| f.type_check(&mut frontend.module_manager))
         .expect("Failed before TLC transform");
 
     let result = type_checked
-        .to_tlc(&frontend.schemes, &frontend.module_manager, false)
+        .to_tlc(&frontend.module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -886,11 +886,11 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
         .and_then(|p| p.desugar(&mut frontend.node_counter))
         .and_then(|d| d.resolve(&mut frontend.module_manager))
         .map(|r| r.fold_ast_constants())
-        .and_then(|f| f.type_check(&mut frontend.module_manager, &mut frontend.schemes))
+        .and_then(|f| f.type_check(&mut frontend.module_manager))
         .expect("Failed before TLC transform");
 
     let result = type_checked
-        .to_tlc(&frontend.schemes, &frontend.module_manager, false)
+        .to_tlc(&frontend.module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -981,10 +981,10 @@ fn compile_to_spirv(input: &str) -> Result<Vec<u32>, Box<dyn std::error::Error>>
         .desugar(&mut frontend.node_counter)?
         .resolve(&mut frontend.module_manager)?
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager, &mut frontend.schemes)?;
+        .type_check(&mut frontend.module_manager)?;
 
     let result = type_checked
-        .to_tlc(&frontend.schemes, &frontend.module_manager, false)
+        .to_tlc(&frontend.module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -1018,11 +1018,11 @@ fn compile_to_ssa_with_modules(input: &str) -> Program {
         .resolve(&mut frontend.module_manager)
         .expect("Resolve failed")
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager, &mut frontend.schemes)
+        .type_check(&mut frontend.module_manager)
         .expect("Type check failed");
 
     type_checked
-        .to_tlc(&frontend.schemes, &frontend.module_manager, false)
+        .to_tlc(&frontend.module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -1310,11 +1310,11 @@ fn compile_to_ssa_with_inline_small(input: &str) -> Program {
         .resolve(&mut frontend.module_manager)
         .expect("Name resolution failed")
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager, &mut frontend.schemes)
+        .type_check(&mut frontend.module_manager)
         .expect("Type checking failed");
 
     type_checked
-        .to_tlc(&frontend.schemes, &frontend.module_manager, false)
+        .to_tlc(&frontend.module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -1395,9 +1395,9 @@ fn compile_tlc_with_fill_holes(input: &str) -> crate::TlcTransformed {
         .resolve(&mut frontend.module_manager)
         .expect("resolve")
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager, &mut frontend.schemes)
+        .type_check(&mut frontend.module_manager)
         .expect("type_check");
-    type_checked.to_tlc(&frontend.schemes, &frontend.module_manager, true)
+    type_checked.to_tlc(&frontend.module_manager, true)
 }
 
 #[test]

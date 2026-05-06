@@ -35,11 +35,11 @@ fn compile_to_expanded_egraph(input: &str) -> crate::egir::types::EGraph {
         .resolve(&mut frontend.module_manager)
         .expect("resolve")
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager, &mut frontend.schemes)
+        .type_check(&mut frontend.module_manager)
         .expect("type check");
 
     let expanded = type_checked
-        .to_tlc(&frontend.schemes, &frontend.module_manager, false)
+        .to_tlc(&frontend.module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()

@@ -16,10 +16,10 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
         .desugar(&mut frontend.node_counter)?
         .resolve(&mut frontend.module_manager)?
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager, &mut frontend.schemes)?;
+        .type_check(&mut frontend.module_manager)?;
 
     type_checked
-        .to_tlc(&frontend.schemes, &frontend.module_manager, false)
+        .to_tlc(&frontend.module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -50,10 +50,10 @@ fn compile_through_ssa(input: &str) -> Result<Program, CompilerError> {
         .desugar(&mut frontend.node_counter)?
         .resolve(&mut frontend.module_manager)?
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager, &mut frontend.schemes)?;
+        .type_check(&mut frontend.module_manager)?;
 
     let ssa = type_checked
-        .to_tlc(&frontend.schemes, &frontend.module_manager, false)
+        .to_tlc(&frontend.module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -504,11 +504,11 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
         .resolve(&mut frontend.module_manager)
         .expect("resolve")
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager, &mut frontend.schemes)
+        .type_check(&mut frontend.module_manager)
         .expect("typecheck");
     eprintln!("=== frontend OK ===");
 
-    let tlc = type_checked.to_tlc(&frontend.schemes, &frontend.module_manager, false);
+    let tlc = type_checked.to_tlc(&frontend.module_manager, false);
     eprintln!("=== to_tlc OK ===");
 
     let tlc = tlc.partial_eval();
@@ -565,11 +565,11 @@ entry main(data: []i32) []i32 = [first(data)]
         .resolve(&mut frontend.module_manager)
         .expect("resolve")
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager, &mut frontend.schemes)
+        .type_check(&mut frontend.module_manager)
         .expect("typecheck");
     eprintln!("=== frontend OK ===");
 
-    let tlc = type_checked.to_tlc(&frontend.schemes, &frontend.module_manager, false);
+    let tlc = type_checked.to_tlc(&frontend.module_manager, false);
     eprintln!("=== to_tlc OK ===");
 
     let tlc = tlc.partial_eval();

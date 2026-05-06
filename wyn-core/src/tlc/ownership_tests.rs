@@ -32,12 +32,9 @@ fn compile_to_tlc(source: &str) -> Program {
         .resolve(&mut frontend.module_manager)
         .expect("resolve")
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager, &mut frontend.schemes)
+        .type_check(&mut frontend.module_manager)
         .expect("type_check");
-    let tlc = type_checked
-        .to_tlc(&frontend.schemes, &frontend.module_manager, false)
-        .partial_eval()
-        .normalize_soacs();
+    let tlc = type_checked.to_tlc(&frontend.module_manager, false).partial_eval().normalize_soacs();
     tlc.0.tlc
 }
 
@@ -520,12 +517,9 @@ fn has_use_after_move(source: &str) -> bool {
         .resolve(&mut frontend.module_manager)
         .expect("resolve")
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager, &mut frontend.schemes)
+        .type_check(&mut frontend.module_manager)
         .expect("type_check");
-    let tlc = type_checked
-        .to_tlc(&frontend.schemes, &frontend.module_manager, false)
-        .partial_eval()
-        .normalize_soacs();
+    let tlc = type_checked.to_tlc(&frontend.module_manager, false).partial_eval().normalize_soacs();
     super::check(&tlc.0.tlc).is_err()
 }
 
@@ -1004,10 +998,10 @@ fn compile_to_owned(source: &str) -> Program {
         .resolve(&mut frontend.module_manager)
         .expect("resolve")
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager, &mut frontend.schemes)
+        .type_check(&mut frontend.module_manager)
         .expect("type_check");
     let owned = type_checked
-        .to_tlc(&frontend.schemes, &frontend.module_manager, false)
+        .to_tlc(&frontend.module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()

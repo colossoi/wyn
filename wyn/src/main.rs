@@ -250,7 +250,7 @@ fn compile_file(
     let resolved = time("resolve", verbose, || desugared.resolve(&frontend.module_manager))?;
     let ast_folded = time("fold_ast_constants", verbose, || resolved.fold_ast_constants());
     let type_checked = time("type_check", verbose, || {
-        ast_folded.type_check(&mut frontend.module_manager, &mut frontend.schemes)
+        ast_folded.type_check(&mut frontend.module_manager)
     })?;
 
     type_checked.print_warnings();
@@ -263,7 +263,7 @@ fn compile_file(
 
     // Transform to TLC (including prelude code - transformed here for consistent type variables)
     let tlc_transformed = time("to_tlc", verbose, || {
-        type_checked.to_tlc(&frontend.schemes, &frontend.module_manager, fill_holes)
+        type_checked.to_tlc(&frontend.module_manager, fill_holes)
     });
 
     // Surface any hole-fill errors collected during TLC transform.
@@ -466,15 +466,12 @@ fn check_file(input: PathBuf, verbose: bool) -> Result<(), DriverError> {
     let parsed = parsed.resolve_imports(&base_dir, &mut frontend.node_counter)?;
     let desugared = parsed.desugar(&mut frontend.node_counter)?;
     let resolved = desugared.resolve(&frontend.module_manager)?;
-    let type_checked =
-        resolved.fold_ast_constants().type_check(&mut frontend.module_manager, &mut frontend.schemes)?;
+    let type_checked = resolved.fold_ast_constants().type_check(&mut frontend.module_manager)?;
 
     type_checked.print_warnings();
 
-    let tlc_after_norm = type_checked
-        .to_tlc(&frontend.schemes, &frontend.module_manager, false)
-        .partial_eval()
-        .normalize_soacs();
+    let tlc_after_norm =
+        type_checked.to_tlc(&frontend.module_manager, false).partial_eval().normalize_soacs();
     wyn_core::tlc::ownership::check(&tlc_after_norm.0.tlc)?;
 
     if verbose {

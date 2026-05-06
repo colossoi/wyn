@@ -299,8 +299,6 @@ pub struct FrontEnd {
     pub context: Context<TypeName>,
     /// Maps AST nodes to their inferred type schemes
     pub type_table: TypeTable,
-    /// Top-level function type schemes (includes prelude and user-defined functions)
-    pub schemes: HashMap<String, TypeScheme<TypeName>>,
     /// Per-module function type schemes cache (populated on first use)
     pub module_schemes: HashMap<String, HashMap<String, TypeScheme<TypeName>>>,
 }
@@ -318,7 +316,6 @@ impl FrontEnd {
     pub fn new() -> Self {
         let mut node_counter = NodeCounter::new();
 
-        // Create prelude (parsed/elaborated ASTs only - type-checking happens later)
         let module_manager = match module_manager::ModuleManager::create_prelude(&mut node_counter) {
             Ok(prelude) => module_manager::ModuleManager::from_prelude(prelude),
             Err(e) => {
@@ -327,15 +324,11 @@ impl FrontEnd {
             }
         };
 
-        // Type-related state is populated during type_check()
-        let context = Context::default();
-
         FrontEnd {
             node_counter,
             module_manager,
-            context,
+            context: Context::default(),
             type_table: HashMap::new(),
-            schemes: HashMap::new(),
             module_schemes: HashMap::new(),
         }
     }
@@ -347,14 +340,12 @@ impl FrontEnd {
         node_counter: NodeCounter,
     ) -> Self {
         let module_manager = module_manager::ModuleManager::from_prelude(prelude);
-        let context = Context::default();
 
         FrontEnd {
             node_counter,
             module_manager,
-            context,
+            context: Context::default(),
             type_table: HashMap::new(),
-            schemes: HashMap::new(),
             module_schemes: HashMap::new(),
         }
     }
@@ -480,55 +471,16 @@ pub struct AstConstFoldedEarly(FrontInner);
 
 impl AstConstFoldedEarly {
     /// Type check the program
-    pub fn type_check(
-        mut self,
-        module_manager: &mut module_manager::ModuleManager,
-        schemes: &mut HashMap<String, TypeScheme<TypeName>>,
-    ) -> Result<TypeChecked> {
-        // Resolve type placeholders to type variables before type checking
-        let mut resolver = resolve_placeholders::PlaceholderResolver::new();
-        resolver.resolve(module_manager, &mut self.0.ast);
-        let (context, spec_schemes) = resolver.into_parts();
-
-        // `open M` name resolution. Builds the open index from the
-        // union of (a) module-spec schemes (keyed `M.name`) and (b)
-        // catalog per-type and per-intrinsic names (`f32.cos`,
-        // `_w_intrinsic_*`, …), then rewrites bare names that uniquely
-        // match one open.
-        let scheme_keys = spec_schemes.keys().cloned();
-        let catalog_keys: Vec<String> = crate::builtins::catalog()
-            .defs()
-            .iter()
-            .flat_map(|d| {
-                d.impl_source_names()
-                    .iter()
-                    .copied()
-                    .chain(d.intrinsic_source_names().iter().copied())
-                    .map(|s| s.to_string())
-            })
-            .collect();
-        resolve_opens::run(&mut self.0.ast, scheme_keys.chain(catalog_keys))?;
-
-        let mut checker =
-            type_checker::TypeChecker::with_context_and_schemes(module_manager, context, spec_schemes);
-        checker.set_name_resolution(crate::name_resolution::build_name_resolution(
-            &self.0.ast,
-            crate::builtins::catalog(),
-        ));
-        checker.load_builtins()?;
-        let type_table = checker.check_program(&self.0.ast)?;
-        // Populate schemes with function type schemes from type checking
-        *schemes = checker.get_function_schemes();
-        let checker_builtins = checker.builtin_names();
-        let warnings: Vec<_> = checker.warnings().to_vec();
+    pub fn type_check(mut self, module_manager: &mut module_manager::ModuleManager) -> Result<TypeChecked> {
+        let out = types::run::run(&mut self.0.ast, module_manager)?;
         let span_table = build_span_table(&self.0.ast);
-
         Ok(TypeChecked {
             ast: self.0.ast,
-            type_table,
+            type_table: out.type_table,
             span_table,
-            warnings,
-            checker_builtins,
+            warnings: out.warnings,
+            checker_builtins: out.builtin_names,
+            schemes: out.schemes,
         })
     }
 }
@@ -540,6 +492,7 @@ pub struct TypeChecked {
     pub span_table: SpanTable,
     pub warnings: Vec<type_checker::TypeWarning>,
     pub checker_builtins: Vec<String>,
+    pub schemes: HashMap<String, TypeScheme<TypeName>>,
 }
 
 impl TypeChecked {
@@ -598,7 +551,6 @@ impl TypeChecked {
     /// returned program's `fill_hole_errors`.
     pub fn to_tlc(
         mut self,
-        schemes: &HashMap<String, types::TypeScheme>,
         module_manager: &module_manager::ModuleManager,
         fill_holes: bool,
     ) -> TlcTransformed {
@@ -680,7 +632,8 @@ impl TypeChecked {
 
         // Schemes the type checker recorded for non-top-level bindings
         // have no SymbolId in `top_level_symbols`; filter them out.
-        let schemes_by_sym: HashMap<SymbolId, types::TypeScheme> = schemes
+        let schemes_by_sym: HashMap<SymbolId, types::TypeScheme> = self
+            .schemes
             .iter()
             .filter_map(|(name, scheme)| top_level_symbols.get(name).map(|&sym| (sym, scheme.clone())))
             .collect();
