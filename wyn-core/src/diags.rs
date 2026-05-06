@@ -774,7 +774,7 @@ impl tlc::Term {
     fn fmt_prec(&self, f: &mut Formatter<'_>, prec: usize) -> fmt::Result {
         match &self.kind {
             tlc::TermKind::Var(crate::tlc::VarRef::Symbol(name)) => write!(f, "{}", name),
-            tlc::TermKind::Var(crate::tlc::VarRef::Builtin(id)) => {
+            tlc::TermKind::Var(crate::tlc::VarRef::Builtin { id, .. }) => {
                 write!(f, "{}", crate::builtins::by_id(*id).raw.surface_name)
             }
 

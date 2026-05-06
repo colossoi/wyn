@@ -79,7 +79,11 @@ macro_rules! hof_intrinsic {
     };
 }
 
-// Compiler-internal intrinsic: emitted by the codegen pipeline.
+// Compiler-internal intrinsic: emitted by the codegen pipeline. The
+// 2-arg form leaves lowering as `NotLowered` (transitional — backend
+// dispatches by name). The 3-arg form takes a typed
+// `BuiltinLowering::Intrinsic(_)` variant so backends can dispatch
+// structurally.
 macro_rules! compiler_internal {
     ($name:expr) => {
         compiler_internal!($name, Purity::Pure)
@@ -94,6 +98,19 @@ macro_rules! compiler_internal {
             overloads: &[BuiltinOverload {
                 scheme: None,
                 lowering: BuiltinLowering::NotLowered,
+            }],
+        }
+    };
+    ($name:expr, $purity:expr, $intrinsic:expr) => {
+        BuiltinDefRaw {
+            surface_name: $name,
+            intrinsic_source_names: &[],
+            impl_source_names: &[],
+            kind: BuiltinKind::InternalIntrinsic,
+            purity: $purity,
+            overloads: &[BuiltinOverload {
+                scheme: None,
+                lowering: BuiltinLowering::Intrinsic($intrinsic),
             }],
         }
     };
@@ -433,9 +450,14 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
                 scheme: Some(crate::builtins::scheme::scalar_ternary),
                 lowering: BuiltinLowering::PrimOp(PrimOp::GlslExt(43)),
             },
+            // `clamp(vec, scalar, scalar)` — splat lo and hi to vec
+            // width before `OpExtInst FClamp`.
             BuiltinOverload {
                 scheme: Some(vec_clamp_scalar_lohi),
-                lowering: BuiltinLowering::PrimOp(PrimOp::GlslExt(43)),
+                lowering: BuiltinLowering::Intrinsic(crate::builtins::lowering::Intrinsic::ExtInstSplat {
+                    ext: 43,
+                    splat_args: &[1, 2],
+                }),
             },
         ],
     },
@@ -450,9 +472,15 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
                 scheme: Some(crate::builtins::scheme::scalar_ternary),
                 lowering: BuiltinLowering::PrimOp(PrimOp::GlslExt(46)),
             },
+            // `mix(vec, vec, scalar)` — splat the scalar `t` to vec
+            // width before `OpExtInst FMix`, which requires every
+            // operand to match the result type.
             BuiltinOverload {
                 scheme: Some(vec_mix_scalar_interp),
-                lowering: BuiltinLowering::PrimOp(PrimOp::GlslExt(46)),
+                lowering: BuiltinLowering::Intrinsic(crate::builtins::lowering::Intrinsic::ExtInstSplat {
+                    ext: 46,
+                    splat_args: &[2],
+                }),
             },
         ],
     },
@@ -467,16 +495,24 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
                 scheme: Some(crate::builtins::scheme::scalar_ternary),
                 lowering: BuiltinLowering::PrimOp(PrimOp::GlslExt(49)),
             },
+            // `smoothstep(scalar, scalar, vec)` — splat edge0/edge1 to
+            // vec width before `OpExtInst SmoothStep`.
             BuiltinOverload {
                 scheme: Some(vec_smoothstep_scalar_edges),
-                lowering: BuiltinLowering::PrimOp(PrimOp::GlslExt(49)),
+                lowering: BuiltinLowering::Intrinsic(crate::builtins::lowering::Intrinsic::ExtInstSplat {
+                    ext: 49,
+                    splat_args: &[0, 1],
+                }),
             },
         ],
     },
     // ---- Internal intrinsics with real backend lowerings ----
+    // `length` is user-callable as `length(arr)` — surface name distinct
+    // from the internal `_w_intrinsic_length` so NameResolution can
+    // classify the surface form.
     BuiltinDefRaw {
-        surface_name: INTRINSIC_LENGTH,
-        intrinsic_source_names: &[INTRINSIC_LENGTH],
+        surface_name: "length",
+        intrinsic_source_names: &["length"],
         impl_source_names: &[INTRINSIC_LENGTH],
         kind: BuiltinKind::InternalIntrinsic,
         purity: Purity::Pure,
@@ -569,11 +605,23 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
     // synthesises type-correct calls) and lowering is special-cased per
     // backend. Their presence in the catalog gives every PureOp::Intrinsic
     // emission a `BuiltinId`. ----
-    compiler_internal!(INTRINSIC_STORAGE_LEN, Purity::Pure),
+    compiler_internal!(
+        INTRINSIC_STORAGE_LEN,
+        Purity::Pure,
+        crate::builtins::lowering::Intrinsic::StorageLen
+    ),
     compiler_internal!(INTRINSIC_STORAGE_INDEX, Purity::Pure),
     compiler_internal!(INTRINSIC_STORAGE_STORE, Purity::Effectful),
-    compiler_internal!(INTRINSIC_SLICE, Purity::Pure),
-    compiler_internal!(INTRINSIC_THREAD_ID, Purity::Pure),
+    compiler_internal!(
+        INTRINSIC_SLICE,
+        Purity::Pure,
+        crate::builtins::lowering::Intrinsic::Slice
+    ),
+    compiler_internal!(
+        INTRINSIC_THREAD_ID,
+        Purity::Pure,
+        crate::builtins::lowering::Intrinsic::ThreadId
+    ),
     compiler_internal!(INTRINSIC_COS, Purity::Pure),
 ];
 

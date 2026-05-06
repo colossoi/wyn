@@ -250,9 +250,12 @@ pub enum InstKind {
     /// External function reference (linked SPIR-V).
     Extern(String),
 
-    /// Compiler intrinsic call.
+    /// Compiler intrinsic call. `overload_idx` selects the entry in
+    /// `BuiltinDef::overloads()`; backends dispatch via
+    /// `def.overloads()[overload_idx].lowering`.
     Intrinsic {
         id: crate::builtins::BuiltinId,
+        overload_idx: usize,
         args: Vec<ValueRef>,
     },
 

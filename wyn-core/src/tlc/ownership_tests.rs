@@ -293,19 +293,24 @@ def f(a: *[4]i32) i32 = a[0]
 /// given names. Accepts both array_with intrinsic variants so the
 /// helper works whether or not promotion has fired.
 fn find_app_call_to<'a>(body: &'a Term, names: &[&str], program: &Program) -> Option<&'a Term> {
-    fn name_of_var<'a>(t: &Term, program: &'a Program) -> Option<&'a str> {
-        if let TermKind::Var(crate::tlc::VarRef::Symbol(sym)) = &t.kind {
-            program.symbols.get(*sym).map(|s| s.as_str())
-        } else {
-            None
+    fn func_matches(t: &Term, names: &[&str], program: &Program) -> bool {
+        match &t.kind {
+            TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
+                program.symbols.get(*sym).map(|s| names.contains(&s.as_str())).unwrap_or(false)
+            }
+            TermKind::Var(crate::tlc::VarRef::Builtin { id, .. }) => {
+                let def = crate::builtins::by_id(*id);
+                names.contains(&def.raw.surface_name)
+                    || def.intrinsic_source_names().iter().any(|n| names.contains(n))
+                    || def.impl_source_names().iter().any(|n| names.contains(n))
+            }
+            _ => false,
         }
     }
     fn walk<'a>(t: &'a Term, names: &[&str], program: &Program) -> Option<&'a Term> {
         if let TermKind::App { func, args } = &t.kind {
-            if let Some(n) = name_of_var(func, program) {
-                if names.contains(&n) {
-                    return Some(t);
-                }
+            if func_matches(func, names, program) {
+                return Some(t);
             }
             if let Some(hit) = walk(func, names, program) {
                 return Some(hit);

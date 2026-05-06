@@ -734,7 +734,10 @@ impl<'a> Converter<'a> {
             .expect("INTRINSIC_STORAGE_LEN missing from catalog")
             .id;
         let len_nid = self.intern_pure(
-            PureOp::Intrinsic(storage_len_id),
+            PureOp::Intrinsic {
+                id: storage_len_id,
+                overload_idx: 0,
+            },
             smallvec![set_nid, binding_nid],
             u32_ty.clone(),
         );
@@ -874,9 +877,14 @@ impl<'a> Converter<'a> {
             TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => self.convert_var(*sym, ty),
             // Catalog builtin reference: emit PureOp::Intrinsic directly,
             // bypassing the string-keyed lookup path in `convert_var`.
-            TermKind::Var(crate::tlc::VarRef::Builtin(id)) => {
-                Ok(self.intern_pure(PureOp::Intrinsic(*id), smallvec![], ty))
-            }
+            TermKind::Var(crate::tlc::VarRef::Builtin { id, overload_idx }) => Ok(self.intern_pure(
+                PureOp::Intrinsic {
+                    id: *id,
+                    overload_idx: *overload_idx,
+                },
+                smallvec![],
+                ty,
+            )),
 
             // --- Let bindings (scope only, no instruction) ---
             TermKind::Let {
@@ -999,15 +1007,23 @@ impl<'a> Converter<'a> {
                 let name = self.symbols.get(*sym).expect("BUG").clone();
                 self.convert_named_app(&name, *sym, args, ty)
             }
-            TermKind::Var(crate::tlc::VarRef::Builtin(id)) => {
+            TermKind::Var(crate::tlc::VarRef::Builtin { id, overload_idx }) => {
                 // Catalog-resolved builtin call. Emit
-                // `PureOp::Intrinsic(id)` directly — the BuiltinId is
-                // already the canonical identifier; no string lookup
-                // needed. Backends dispatch on the id via
-                // `catalog.get(id).overloads()[0].lowering`.
+                // `PureOp::Intrinsic { id, overload_idx }` directly —
+                // the BuiltinId is the canonical identifier and the
+                // overload index was chosen by the type checker.
+                // Backends dispatch via
+                // `catalog.get(id).overloads()[overload_idx].lowering`.
                 let arg_nids: SmallVec<[NodeId; 4]> =
                     args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
-                Ok(self.intern_pure(PureOp::Intrinsic(*id), arg_nids, ty))
+                Ok(self.intern_pure(
+                    PureOp::Intrinsic {
+                        id: *id,
+                        overload_idx: *overload_idx,
+                    },
+                    arg_nids,
+                    ty,
+                ))
             }
             _ => {
                 // General application: convert func, then call
@@ -1151,20 +1167,6 @@ impl<'a> Converter<'a> {
                 // Result is unit.
                 let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
                 Ok(self.intern_pure(PureOp::Unit, smallvec![], unit_ty))
-            }
-            name if name.starts_with("_w_intrinsic_") => {
-                // Default: treat intrinsics as pure (hash-consable). Effectful
-                // intrinsics (loads/stores/scatters) get explicit earlier arms
-                // (e.g. `_w_intrinsic_storage_index` above lowers to a Load).
-                // Known-effectful names that reach here would need a blacklist
-                // branch; at present all remaining intrinsics are pure.
-                let arg_nids: SmallVec<[NodeId; 4]> =
-                    args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
-                let id = crate::builtins::catalog()
-                    .lookup_by_any_name(name)
-                    .unwrap_or_else(|| panic!("intrinsic `{}` missing from catalog", name))
-                    .id;
-                Ok(self.intern_pure(PureOp::Intrinsic(id), arg_nids, ty))
             }
             _ => {
                 // Function call
@@ -1807,6 +1809,7 @@ impl<'a> Converter<'a> {
                     .lookup_by_any_name(INTRINSIC_FILTER)
                     .expect("INTRINSIC_FILTER missing from catalog")
                     .id,
+                overload_idx: 0,
                 args: dummy_vrefs,
             }),
             operand_nodes: operands,

@@ -1982,7 +1982,11 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 Ok(format!("{}({})", mangled, arg_strs.join(", ")))
             }
 
-            InstKind::Intrinsic { id, args } => {
+            InstKind::Intrinsic {
+                id,
+                overload_idx: _,
+                args,
+            } => {
                 let name = crate::builtins::by_id(*id).dispatch_name();
                 let arg_strs: Result<Vec<_>> = args.iter().map(|a| self.get_value(*a)).collect();
                 let arg_strs = arg_strs?;

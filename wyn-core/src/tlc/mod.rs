@@ -157,8 +157,13 @@ pub struct Term {
 /// re-deriving builtin identity by string-matching `_w_intrinsic_*`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VarRef {
-    /// Catalog builtin — identified by `BuiltinId`.
-    Builtin(crate::builtins::BuiltinId),
+    /// Catalog builtin — identified by `BuiltinId` plus the overload
+    /// index resolved by the type checker. Backends dispatch using
+    /// `def.overloads()[overload_idx].lowering`.
+    Builtin {
+        id: crate::builtins::BuiltinId,
+        overload_idx: usize,
+    },
     /// Symbol-table reference — locals, user-defined functions,
     /// prelude functions, top-level constants.
     Symbol(SymbolId),
@@ -1609,7 +1614,7 @@ impl<'a> Transformer<'a> {
             span,
             TermKind::IntLit(index.to_string()),
         );
-        self.build_app("_w_tuple_proj", vec![var_term, index_lit], result_ty, span)
+        self.build_call("_w_tuple_proj", &[var_term, index_lit], result_ty, span)
     }
 
     /// Apply a list of bindings around a body term, creating nested let expressions.
@@ -1707,10 +1712,26 @@ impl<'a> Transformer<'a> {
                 // catalog builtin, emit `Var(Builtin(id))` directly —
                 // no SymbolId allocation, no surface→internal name
                 // rename, no later string-matching at the EGIR boundary.
-                if let Some(crate::name_resolution::ResolvedValueRef::Builtin(id)) =
+                if let Some(crate::name_resolution::ResolvedValueRef::Builtin { id, overload_idx }) =
                     self.name_resolution.get(expr.h.id)
                 {
-                    return self.mk_term(ty, span, TermKind::Var(crate::tlc::VarRef::Builtin(*id)));
+                    let overload_idx = overload_idx.unwrap_or_else(|| {
+                        let def = crate::builtins::by_id(*id);
+                        panic!(
+                            "BUG: builtin '{}' (id={:?}) reached TLC with unresolved overload — \
+                             type checker must call NameResolution::set_overload_idx after \
+                             overload resolution",
+                            def.raw.surface_name, id
+                        )
+                    });
+                    return self.mk_term(
+                        ty,
+                        span,
+                        TermKind::Var(crate::tlc::VarRef::Builtin {
+                            id: *id,
+                            overload_idx,
+                        }),
+                    );
                 }
                 let resolved_name = if qualifiers.is_empty() {
                     name.clone()
@@ -1746,7 +1767,7 @@ impl<'a> Transformer<'a> {
             ast::ExprKind::ArrayIndex(array, index) => {
                 let arr = self.transform_expr(array);
                 let idx = self.transform_expr(index);
-                self.build_app("_w_index", vec![arr, idx], ty, span)
+                self.build_call("_w_index", &[arr, idx], ty, span)
             }
 
             ast::ExprKind::ArrayWith {
@@ -1755,7 +1776,7 @@ impl<'a> Transformer<'a> {
                 let arr = self.transform_expr(array);
                 let idx = self.transform_expr(index);
                 let val = self.transform_expr(value);
-                self.build_app(INTRINSIC_ARRAY_WITH, vec![arr, idx, val], ty, span)
+                self.build_call(INTRINSIC_ARRAY_WITH, &[arr, idx, val], ty, span)
             }
 
             ast::ExprKind::VecWith {
@@ -1856,12 +1877,7 @@ impl<'a> Transformer<'a> {
                                 span,
                                 TermKind::IntLit(idx.to_string()),
                             );
-                            self.build_app(
-                                "_w_tuple_proj",
-                                vec![rec.clone(), idx_lit],
-                                elem_ty.clone(),
-                                span,
-                            )
+                            self.build_call("_w_tuple_proj", &[rec.clone(), idx_lit], elem_ty.clone(), span)
                         })
                         .collect();
                     if components.len() == 1 {
@@ -1878,7 +1894,7 @@ impl<'a> Transformer<'a> {
                     span,
                     TermKind::IntLit(field_idx.to_string()),
                 );
-                self.build_app("_w_tuple_proj", vec![rec, index_lit], ty, span)
+                self.build_call("_w_tuple_proj", &[rec, index_lit], ty, span)
             }
 
             ast::ExprKind::If(if_expr) => {
@@ -1958,11 +1974,11 @@ impl<'a> Transformer<'a> {
                     Some(step_expr) => {
                         let step = self.transform_expr(step_expr);
                         // _w_range_step start step end kind
-                        self.build_app("_w_range_step", vec![start, step, end, kind_lit], ty, span)
+                        self.build_call("_w_range_step", &[start, step, end, kind_lit], ty, span)
                     }
                     None => {
                         // _w_range start end kind
-                        self.build_app("_w_range", vec![start, end, kind_lit], ty, span)
+                        self.build_call("_w_range", &[start, end, kind_lit], ty, span)
                     }
                 }
             }
@@ -1985,19 +2001,20 @@ impl<'a> Transformer<'a> {
                 // `buffer_specialize` / SPIR-V passes rewrite it into the
                 // right per-flavor lowering.
                 let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
-                let end =
-                    slice.end.as_ref().map(|e| self.transform_expr(e)).unwrap_or_else(|| {
-                        self.build_app(INTRINSIC_LENGTH, vec![arr.clone()], i32_ty, span)
-                    });
+                let end = slice
+                    .end
+                    .as_ref()
+                    .map(|e| self.transform_expr(e))
+                    .unwrap_or_else(|| self.build_call(INTRINSIC_LENGTH, &[arr.clone()], i32_ty, span));
 
-                self.build_app(INTRINSIC_SLICE, vec![arr, start, end], ty, span)
+                self.build_call(INTRINSIC_SLICE, &[arr, start, end], ty, span)
             }
 
             ast::ExprKind::TypeAscription(inner, _) => self.transform_expr(inner),
 
             ast::ExprKind::TypeCoercion(inner, _) => {
                 let term = self.transform_expr(inner);
-                self.build_app("_w_coerce", vec![term], ty, span)
+                self.build_call("_w_coerce", &[term], ty, span)
             }
 
             ast::ExprKind::TypeHole => {
@@ -2501,7 +2518,7 @@ impl<'a> Transformer<'a> {
                 span,
                 TermKind::IntLit(idx.to_string()),
             );
-            current = self.build_app("_w_tuple_proj", vec![current, index_lit], elem_ty.clone(), span);
+            current = self.build_call("_w_tuple_proj", &[current, index_lit], elem_ty.clone(), span);
             current_ty = elem_ty;
         }
 
@@ -2761,9 +2778,9 @@ impl<'a> Transformer<'a> {
             span,
             TermKind::IntLit(idx.to_string()),
         );
-        self.build_app(
+        self.build_call(
             "_w_tuple_proj",
-            vec![target.clone(), idx_lit],
+            &[target.clone(), idx_lit],
             result_ty.clone(),
             span,
         )
@@ -2865,9 +2882,9 @@ impl<'a> Transformer<'a> {
         for (i, sub_pat) in sub_patterns.iter().enumerate() {
             let lowered_payload_ty = Self::lower_type(payload_types[i].clone());
             let idx_lit = self.mk_i32((payload_offset + i) as i32, span);
-            let proj = self.build_app(
+            let proj = self.build_call(
                 "_w_tuple_proj",
-                vec![scrut_var.clone(), idx_lit],
+                &[scrut_var.clone(), idx_lit],
                 lowered_payload_ty,
                 span,
             );
@@ -2887,9 +2904,9 @@ impl<'a> Transformer<'a> {
 
         // Otherwise: if scrut.tag == tag_value then arm_body else <rest>
         let zero_idx = self.mk_i32(0, span);
-        let tag_proj = self.build_app(
+        let tag_proj = self.build_call(
             "_w_tuple_proj",
-            vec![scrut_var.clone(), zero_idx],
+            &[scrut_var.clone(), zero_idx],
             Type::Constructed(TypeName::UInt(32), vec![]),
             span,
         );
@@ -2940,25 +2957,6 @@ impl<'a> Transformer<'a> {
             }
             _ => todo!("zero-fill for sum-payload type {:?}", ty),
         }
-    }
-
-    // Helper: build App(Var(name), args)
-    fn build_app(&mut self, name: &str, args: Vec<Term>, result_ty: Type<TypeName>, span: Span) -> Term {
-        // Build the function type: arg1_ty -> arg2_ty -> ... -> result_ty (right-associative)
-        let mut func_ty = result_ty.clone();
-        for arg in args.iter().rev() {
-            func_ty = Type::Constructed(TypeName::Arrow, vec![arg.ty.clone(), func_ty]);
-        }
-        let name_sym = self.resolve_or_define(name);
-        let func_term = self.mk_term(func_ty, span, TermKind::Var(crate::tlc::VarRef::Symbol(name_sym)));
-        self.mk_term(
-            result_ty,
-            span,
-            TermKind::App {
-                func: Box::new(func_term),
-                args,
-            },
-        )
     }
 
     // Helper: build binary op application
@@ -3013,13 +3011,37 @@ impl<'a> Transformer<'a> {
         result_ty: Type<TypeName>,
         span: Span,
     ) -> Term {
-        let func_sym = self.resolve_or_define(func_name);
-        if args.is_empty() {
-            return self.mk_term(
-                result_ty,
-                span,
-                TermKind::Var(crate::tlc::VarRef::Symbol(func_sym)),
+        // Catalog-resolved builtins emit `Var(Builtin(id))` directly so
+        // TLC→EGIR dispatches structurally (no later string match against
+        // `_w_intrinsic_*`). Names that aren't in the catalog (e.g.
+        // `_w_tuple`, `_w_vec_lit`, `_w_index` — TLC-level pseudo-ops
+        // handled by dedicated `convert_named_app` arms) keep the
+        // SymbolId path.
+        let func_var = if let Some(def) = crate::builtins::catalog().lookup_by_any_name(func_name) {
+            // Compiler-emitted catalog calls go through `build_call`
+            // with the internal `_w_intrinsic_*` name; these are
+            // pre-resolved (the IR site picked the exact builtin), and
+            // they target single-overload entries today, so
+            // `overload_idx = 0` is correct. If a future caller targets
+            // a multi-overload entry from a synthesised TLC site, this
+            // assertion will fire and the caller must specify the
+            // overload explicitly.
+            assert_eq!(
+                def.overloads().len(),
+                1,
+                "build_call({:?}) targets a multi-overload catalog entry; \
+                 callers must specify overload_idx explicitly",
+                func_name
             );
+            crate::tlc::VarRef::Builtin {
+                id: def.id,
+                overload_idx: 0,
+            }
+        } else {
+            crate::tlc::VarRef::Symbol(self.resolve_or_define(func_name))
+        };
+        if args.is_empty() {
+            return self.mk_term(result_ty, span, TermKind::Var(func_var));
         }
 
         // Build the function type: arg1_ty -> arg2_ty -> ... -> result_ty (right-associative)
@@ -3027,7 +3049,7 @@ impl<'a> Transformer<'a> {
         for arg in args.iter().rev() {
             func_ty = Type::Constructed(TypeName::Arrow, vec![arg.ty.clone(), func_ty]);
         }
-        let func_term = self.mk_term(func_ty, span, TermKind::Var(crate::tlc::VarRef::Symbol(func_sym)));
+        let func_term = self.mk_term(func_ty, span, TermKind::Var(func_var));
         self.mk_term(
             result_ty,
             span,

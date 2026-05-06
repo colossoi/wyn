@@ -1296,7 +1296,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
 
                 // Check if it's a builtin function first
                 if let Some(builtin_impl) = crate::builtins::catalog().lookup_lowering(func) {
-                    self.lower_builtin_call(builtin_impl, args, &arg_ids, result_ty)?
+                    self.lower_builtin_call(builtin_impl, func, args, &arg_ids, result_ty, inst)?
                 } else if let Some(&func_id) = self.constructor.functions.get(func) {
                     // User-defined function
                     self.constructor.builder.function_call(result_ty, None, func_id, arg_ids)?
@@ -1343,23 +1343,34 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 .copied()
                 .ok_or_else(|| err_spirv_at!(self.blame_span(), "Unknown extern: {}", linkage_name))?,
 
-            InstKind::Intrinsic { id, args } => {
+            InstKind::Intrinsic {
+                id,
+                overload_idx,
+                args,
+            } => {
                 let arg_ids: Vec<_> = args.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
                 let def = crate::builtins::by_id(*id);
-                let lowering = &def.overloads()[0].lowering;
-                // PrimOp / LinkedSpirv: route through `lower_builtin_call`.
-                // Genuine `Intrinsic(_)` entries with non-trivial lowering
-                // logic (Length, ArrayWith, Uninit, …) still fall through
-                // to the name-keyed `lower_intrinsic` to preserve
-                // intrinsic-specific patterns.
-                match lowering {
-                    BuiltinLowering::PrimOp(_) | BuiltinLowering::LinkedSpirv(_) => {
-                        self.lower_builtin_call(lowering, args, &arg_ids, result_ty)?
-                    }
-                    BuiltinLowering::Intrinsic(_) | BuiltinLowering::NotLowered => {
-                        let name = def.dispatch_name();
-                        self.lower_intrinsic(name, args, &arg_ids, result_ty, inst)?
-                    }
+                let lowering = &def.overloads()[*overload_idx].lowering;
+                // Variants with a structural arm in `lower_builtin_call`
+                // dispatch by id; the rest still fall through to the
+                // name-keyed `lower_intrinsic` until they're promoted.
+                use crate::builtins::lowering::Intrinsic as IntrinsicV;
+                let typed_dispatch = matches!(
+                    lowering,
+                    BuiltinLowering::PrimOp(_)
+                        | BuiltinLowering::LinkedSpirv(_)
+                        | BuiltinLowering::Intrinsic(
+                            IntrinsicV::Slice
+                                | IntrinsicV::StorageLen
+                                | IntrinsicV::ThreadId
+                                | IntrinsicV::ExtInstSplat { .. },
+                        )
+                );
+                if typed_dispatch {
+                    self.lower_builtin_call(lowering, def.dispatch_name(), args, &arg_ids, result_ty, inst)?
+                } else {
+                    let name = def.dispatch_name();
+                    self.lower_intrinsic(name, args, &arg_ids, result_ty, inst)?
                 }
             }
 
@@ -2148,133 +2159,9 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 }
             }
 
-            "slice" => {
-                // Slice an array: _w_slice(arr, start, end) -> new array or view
-                if args.len() != 3 {
-                    bail_spirv!("_w_slice requires 3 arguments (arr, start, end)");
-                }
-                let arr = args[0];
-                let start_id = args[1];
-                let end_id = args[2];
-
-                // Dispatch based on input array variant
-                let arr_ty = self.get_value_type_ref(value_refs[0]);
-                let is_view = arr_ty
-                    .array_variant()
-                    .map(|v| matches!(v, PolyType::Constructed(TypeName::ArrayVariantView, _)))
-                    .unwrap_or(false);
-
-                if is_view {
-                    let elem_ty = arr_ty.elem_type().expect("Array has elem").clone();
-                    let u32_ty = self.constructor.u32_type;
-
-                    // Extract buffer_id and base_offset from view struct
-                    let buffer_id_val =
-                        self.constructor.builder.composite_extract(u32_ty, None, arr, [0u32])?;
-                    let base_offset =
-                        self.constructor.builder.composite_extract(u32_ty, None, arr, [1u32])?;
-
-                    // Check result type to decide materialization vs sub-view
-                    let result_is_composite = inst
-                        .result
-                        .map(|v| self.body.get_value_type(v))
-                        .map(|t| {
-                            t.array_variant().map(|v| types::is_array_variant_composite(v)).unwrap_or(false)
-                        })
-                        .unwrap_or(false);
-
-                    if result_is_composite {
-                        let (buffer_var, _) = if let Some(&buf_id) =
-                            value_refs[0].as_ssa().and_then(|id| self.view_buffer_id.get(&id))
-                        {
-                            self.constructor.buffer_vars.get(buf_id as usize).copied().ok_or_else(|| {
-                                err_spirv!("slice_to_composite: unknown buffer_id {}", buf_id)
-                            })?
-                        } else {
-                            self.constructor.resolve_buffer_by_id(buffer_id_val, "slice_to_composite")?
-                        };
-                        self.slice_view_to_composite(
-                            arr,
-                            buffer_var,
-                            base_offset,
-                            start_id,
-                            end_id,
-                            &elem_ty,
-                            result_ty,
-                        )
-                    } else {
-                        self.slice_view_to_view(arr, buffer_id_val, base_offset, start_id, end_id)
-                    }
-                } else {
-                    self.slice_composite(arr, start_id, end_id, result_ty)
-                }
-            }
-
             "slice_storage_view" => {
                 // Slicing storage views is not yet implemented
                 bail_spirv!("_w_slice_storage_view is not yet implemented");
-            }
-
-            "thread_id" => {
-                // Load GlobalInvocationId.x as the thread ID
-                let gid_var = self
-                    .constructor
-                    .global_invocation_id
-                    .ok_or_else(|| err_spirv!("GlobalInvocationId not set for compute shader"))?;
-                let uvec3_type = self.constructor.get_or_create_vec_type(self.constructor.u32_type, 3);
-                let gid = self.constructor.builder.load(uvec3_type, None, gid_var, None, [])?;
-                // Extract x component (flattened thread ID)
-                let thread_id_u32 = self.constructor.builder.composite_extract(
-                    self.constructor.u32_type,
-                    None,
-                    gid,
-                    [0],
-                )?;
-                Ok(thread_id_u32)
-            }
-
-            "storage_len" => {
-                // Get the length of a storage buffer via OpArrayLength
-                // Args: [set_id, binding_id] (as u32 constants)
-                if args.len() != 2 {
-                    bail_spirv!("_w_storage_len requires 2 arguments (set, binding)");
-                }
-                let set = match value_refs[0].as_const() {
-                    Some(ConstantValue::U32(v)) => v,
-                    _ => self
-                        .constructor
-                        .uint_const_reverse
-                        .get(&args[0])
-                        .copied()
-                        .ok_or_else(|| err_spirv!("_w_storage_len: set must be a u32 constant"))?,
-                };
-                let binding = match value_refs[1].as_const() {
-                    Some(ConstantValue::U32(v)) => v,
-                    _ => self
-                        .constructor
-                        .uint_const_reverse
-                        .get(&args[1])
-                        .copied()
-                        .ok_or_else(|| err_spirv!("_w_storage_len: binding must be a u32 constant"))?,
-                };
-
-                let &(buffer_var, _, _) =
-                    self.constructor.storage_buffers.get(&(set, binding)).ok_or_else(|| {
-                        err_spirv!("Storage buffer not found for set={}, binding={}", set, binding)
-                    })?;
-
-                // OpArrayLength returns u32 length of a runtime array in a struct
-                // The struct is at index 0 (the buffer block), the array is member 0
-                let len_u32 = self.constructor.builder.array_length(
-                    self.constructor.u32_type,
-                    None,
-                    buffer_var,
-                    0, // Member index of the runtime array in the struct
-                )?;
-
-                // Defense-in-depth: caller's `result_ty` is u32 in every
-                // current synthesis path, so the bitcast is a no-op.
-                Ok(self.constructor.builder.bitcast(result_ty, None, len_u32)?)
             }
 
             "view_len" => {
@@ -2554,9 +2441,11 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
     fn lower_builtin_call(
         &mut self,
         builtin: &BuiltinLowering,
+        dispatch_name: &str,
         value_refs: &[ValueRef],
         arg_ids: &[spirv::Word],
         result_ty: spirv::Word,
+        inst: &WynInstNode,
     ) -> Result<spirv::Word> {
         match builtin {
             BuiltinLowering::PrimOp(prim_op) => self.lower_primop(prim_op, arg_ids, result_ty),
@@ -2570,7 +2459,11 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 Ok(self.constructor.builder.function_call(result_ty, None, func_id, arg_ids.to_vec())?)
             }
             BuiltinLowering::NotLowered => {
-                bail_spirv!("NotLowered builtin should not reach backend dispatch")
+                bail_spirv!(
+                    "NotLowered builtin '{}' reached backend dispatch — \
+                     promote it to a typed `BuiltinLowering::Intrinsic(_)` variant",
+                    dispatch_name
+                )
             }
             BuiltinLowering::Intrinsic(intrinsic) => {
                 use crate::builtins::lowering::Intrinsic;
@@ -2652,6 +2545,148 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         bail_spirv!(
                             "Intrinsic::Length should be lowered via lower_intrinsic, not lower_builtin_call"
                         )
+                    }
+                    Intrinsic::Slice => {
+                        // Slice an array: _w_slice(arr, start, end) -> new array or view.
+                        if arg_ids.len() != 3 {
+                            bail_spirv!("_w_slice requires 3 arguments (arr, start, end)");
+                        }
+                        let arr = arg_ids[0];
+                        let start_id = arg_ids[1];
+                        let end_id = arg_ids[2];
+
+                        // Dispatch based on input array variant.
+                        let arr_ty = self.get_value_type_ref(value_refs[0]);
+                        let is_view = arr_ty
+                            .array_variant()
+                            .map(|v| matches!(v, PolyType::Constructed(TypeName::ArrayVariantView, _)))
+                            .unwrap_or(false);
+
+                        if is_view {
+                            let elem_ty = arr_ty.elem_type().expect("Array has elem").clone();
+                            let u32_ty = self.constructor.u32_type;
+
+                            // Extract buffer_id and base_offset from view struct.
+                            let buffer_id_val =
+                                self.constructor.builder.composite_extract(u32_ty, None, arr, [0u32])?;
+                            let base_offset =
+                                self.constructor.builder.composite_extract(u32_ty, None, arr, [1u32])?;
+
+                            // Result variant decides materialization vs sub-view.
+                            let result_is_composite = inst
+                                .result
+                                .map(|v| self.body.get_value_type(v))
+                                .map(|t| {
+                                    t.array_variant()
+                                        .map(|v| types::is_array_variant_composite(v))
+                                        .unwrap_or(false)
+                                })
+                                .unwrap_or(false);
+
+                            if result_is_composite {
+                                let (buffer_var, _) = if let Some(&buf_id) =
+                                    value_refs[0].as_ssa().and_then(|id| self.view_buffer_id.get(&id))
+                                {
+                                    self.constructor.buffer_vars.get(buf_id as usize).copied().ok_or_else(
+                                        || err_spirv!("slice_to_composite: unknown buffer_id {}", buf_id),
+                                    )?
+                                } else {
+                                    self.constructor
+                                        .resolve_buffer_by_id(buffer_id_val, "slice_to_composite")?
+                                };
+                                self.slice_view_to_composite(
+                                    arr,
+                                    buffer_var,
+                                    base_offset,
+                                    start_id,
+                                    end_id,
+                                    &elem_ty,
+                                    result_ty,
+                                )
+                            } else {
+                                self.slice_view_to_view(arr, buffer_id_val, base_offset, start_id, end_id)
+                            }
+                        } else {
+                            self.slice_composite(arr, start_id, end_id, result_ty)
+                        }
+                    }
+                    Intrinsic::StorageLen => {
+                        // Length of a storage buffer via OpArrayLength.
+                        // Args: [set_id, binding_id] as u32 constants.
+                        if arg_ids.len() != 2 {
+                            bail_spirv!("_w_storage_len requires 2 arguments (set, binding)");
+                        }
+                        let set = match value_refs[0].as_const() {
+                            Some(ConstantValue::U32(v)) => v,
+                            _ => {
+                                self.constructor.uint_const_reverse.get(&arg_ids[0]).copied().ok_or_else(
+                                    || err_spirv!("_w_storage_len: set must be a u32 constant"),
+                                )?
+                            }
+                        };
+                        let binding = match value_refs[1].as_const() {
+                            Some(ConstantValue::U32(v)) => v,
+                            _ => self.constructor.uint_const_reverse.get(&arg_ids[1]).copied().ok_or_else(
+                                || err_spirv!("_w_storage_len: binding must be a u32 constant"),
+                            )?,
+                        };
+
+                        let &(buffer_var, _, _) =
+                            self.constructor.storage_buffers.get(&(set, binding)).ok_or_else(|| {
+                                err_spirv!("Storage buffer not found for set={}, binding={}", set, binding)
+                            })?;
+
+                        // OpArrayLength returns u32 length of the runtime array
+                        // member 0 of the storage buffer struct.
+                        let len_u32 = self.constructor.builder.array_length(
+                            self.constructor.u32_type,
+                            None,
+                            buffer_var,
+                            0,
+                        )?;
+
+                        // Defense-in-depth: callers' `result_ty` is u32 in every
+                        // current synthesis path, so the bitcast is a no-op.
+                        Ok(self.constructor.builder.bitcast(result_ty, None, len_u32)?)
+                    }
+                    Intrinsic::ThreadId => {
+                        // Load GlobalInvocationId.x as the flattened thread ID.
+                        let gid_var = self
+                            .constructor
+                            .global_invocation_id
+                            .ok_or_else(|| err_spirv!("GlobalInvocationId not set for compute shader"))?;
+                        let uvec3_type =
+                            self.constructor.get_or_create_vec_type(self.constructor.u32_type, 3);
+                        let gid = self.constructor.builder.load(uvec3_type, None, gid_var, None, [])?;
+                        Ok(self.constructor.builder.composite_extract(
+                            self.constructor.u32_type,
+                            None,
+                            gid,
+                            [0],
+                        )?)
+                    }
+                    Intrinsic::ExtInstSplat { ext, splat_args } => {
+                        // GLSL.std.450 ext-inst with operand splatting.
+                        // Splat each scalar at the named positions to vec
+                        // width before emitting `OpExtInst` — required
+                        // because the instruction expects every operand
+                        // to match the result type.
+                        let mut operands: Vec<Operand> =
+                            arg_ids.iter().map(|&id| Operand::IdRef(id)).collect();
+                        let result_ssa_ty = inst.result.map(|r| self.body.inner.value_type(r).clone());
+                        let result_is_vec = result_ssa_ty.as_ref().is_some_and(|t| t.is_vec());
+                        if result_is_vec {
+                            let result_ssa_ty = result_ssa_ty.as_ref().unwrap();
+                            for &pos in *splat_args {
+                                if self.get_value_type_ref(value_refs[pos]).is_scalar() {
+                                    let splatted =
+                                        self.splat_scalar(arg_ids[pos], result_ssa_ty, result_ty)?;
+                                    operands[pos] = Operand::IdRef(splatted);
+                                }
+                            }
+                        }
+                        let glsl = self.constructor.glsl_ext_inst_id;
+                        Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, *ext, operands)?)
                     }
                 }
             }

@@ -124,4 +124,28 @@ pub enum Intrinsic {
     /// `PrimOp` because GLSL uses method-call syntax `arr.length()` and
     /// SPIR-V uses `OpArrayLength` with variant-specific handling.
     Length,
+    /// `_w_intrinsic_slice(arr, start, end)` — sub-array. Three cases at
+    /// the backend: view→view (new handle), view→composite (materialize
+    /// elements), composite→composite (also materialize). Result variant
+    /// is read from the SSA result type.
+    Slice,
+    /// `_w_intrinsic_storage_len(set, binding) -> i32` — runtime length
+    /// of a storage buffer at the given (set, binding) coordinates. Both
+    /// args are constant `u32` literals. SPIR-V lowers via `OpArrayLength`
+    /// on the runtime array member of the storage buffer struct.
+    StorageLen,
+    /// `_w_intrinsic_thread_id() -> u32` — flattened compute-shader
+    /// thread index. SPIR-V loads `GlobalInvocationId.x`.
+    ThreadId,
+    /// GLSL.std.450 extended instruction with operand splatting. For
+    /// each position in `splat_args`, if that operand is a scalar but
+    /// the result is a vec, splat it to result-vec width before emitting
+    /// `OpExtInst`. Covers vec overloads of `mix`, `clamp`, `smoothstep`
+    /// — where the scalar overload is a plain `PrimOp(GlslExt(N))` but
+    /// the vec overload's mixed scalar args need splatting because
+    /// `OpExtInst` requires operand types to match the result type.
+    ExtInstSplat {
+        ext: u32,
+        splat_args: &'static [usize],
+    },
 }

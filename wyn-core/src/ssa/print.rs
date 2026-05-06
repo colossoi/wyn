@@ -245,9 +245,13 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
         InstKind::Extern(name) => {
             let _ = write!(out, "extern @{name}");
         }
-        InstKind::Intrinsic { id, args } => {
+        InstKind::Intrinsic {
+            id,
+            overload_idx,
+            args,
+        } => {
             let name = crate::builtins::by_id(*id).dispatch_name();
-            let _ = write!(out, "intrinsic @{name}({})", format_refs(args));
+            let _ = write!(out, "intrinsic @{name}#{overload_idx}({})", format_refs(args));
         }
         InstKind::Alloca { elem_ty, result } => {
             let _ = write!(out, "alloca {} -> {}", format_type(elem_ty), fmt_place(*result));

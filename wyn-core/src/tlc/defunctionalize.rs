@@ -209,7 +209,7 @@ impl<'a> Defunctionalizer<'a> {
 
             // Catalog builtin reference: not a static lambda for defunc
             // purposes; flows through as `Dynamic`.
-            TermKind::Var(crate::tlc::VarRef::Builtin(_)) => DefuncResult {
+            TermKind::Var(crate::tlc::VarRef::Builtin { .. }) => DefuncResult {
                 term,
                 sv: StaticVal::Dynamic,
             },

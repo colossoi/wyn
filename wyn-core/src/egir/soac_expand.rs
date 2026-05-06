@@ -1156,7 +1156,14 @@ fn emit_length(
         .lookup_by_any_name(INTRINSIC_LENGTH)
         .expect("INTRINSIC_LENGTH missing from catalog")
         .id;
-    graph.intern_pure(PureOp::Intrinsic(length_id), smallvec![arr_nid], i32_ty.clone())
+    graph.intern_pure(
+        PureOp::Intrinsic {
+            id: length_id,
+            overload_idx: 0,
+        },
+        smallvec![arr_nid],
+        i32_ty.clone(),
+    )
 }
 
 /// Emit a per-iteration read of `arr[idx]` at the given body block.

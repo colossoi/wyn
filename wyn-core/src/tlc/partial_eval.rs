@@ -148,7 +148,7 @@ impl PartialEvaluator {
             }
 
             // Builtin reference: not constant-foldable on its own.
-            TermKind::Var(crate::tlc::VarRef::Builtin(_)) => Value::Unknown(term.clone()),
+            TermKind::Var(crate::tlc::VarRef::Builtin { .. }) => Value::Unknown(term.clone()),
 
             // Let binding
             TermKind::Let { name, rhs, body, .. } => {
@@ -231,7 +231,7 @@ impl PartialEvaluator {
 
             TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => self.apply_var(*sym, args, original),
 
-            TermKind::Var(crate::tlc::VarRef::Builtin(_)) => {
+            TermKind::Var(crate::tlc::VarRef::Builtin { .. }) => {
                 // Catalog builtin — opaque to partial_eval, but we
                 // still residualize via the args so let-binding
                 // substitutions performed by the inner `eval(arg)`

@@ -281,11 +281,18 @@ fn resolve_declaration(decl: &mut Declaration, module_manager: &ModuleManager) -
 
 #[derive(Debug, Clone)]
 pub enum ResolvedValueRef {
-    /// Catalog entry matching this identifier's surface name. The
-    /// entry's `overloads` slice may contain one or many overloads;
-    /// overload selection happens later (Phase 3) once arg types are
-    /// known.
-    Builtin(BuiltinId),
+    /// Catalog entry matching this identifier's surface name.
+    /// `overload_idx` is the index into `BuiltinDef::overloads()` chosen
+    /// by the type checker after resolving the call against actual
+    /// argument types. Set at classification time for single-overload
+    /// entries (`Some(0)`); `None` for multi-overload entries until the
+    /// type checker resolves the call site (`resolve_overload`) and
+    /// writes back `Some(idx)`. Consumers downstream of type-checking
+    /// (TLC → backends) unwrap it; `None` at that stage is a bug.
+    Builtin {
+        id: BuiltinId,
+        overload_idx: Option<usize>,
+    },
 }
 
 /// Side table populated by `build_name_resolution`. Maps Identifier
@@ -300,21 +307,63 @@ impl NameResolution {
     pub fn get(&self, id: NodeId) -> Option<&ResolvedValueRef> {
         self.values.get(&id)
     }
+
+    /// Record the type checker's choice of overload index for a Builtin
+    /// resolution. No-op for entries not in `values`. Panics if the
+    /// resolved entry isn't `Builtin` (the only variant with overloads).
+    pub fn set_overload_idx(&mut self, id: NodeId, idx: usize) {
+        if let Some(entry) = self.values.get_mut(&id) {
+            match entry {
+                ResolvedValueRef::Builtin { overload_idx, .. } => {
+                    *overload_idx = Some(idx);
+                }
+            }
+        }
+    }
 }
 
 /// Walk the program after module-qualification rewrite and build the
 /// side table. Top-level def names are pushed into scope first, so
 /// user code that shadows a builtin (e.g. `def length = ...`) is
 /// classified as a non-builtin.
-pub fn build_name_resolution(program: &Program, catalog: &BuiltinCatalog) -> NameResolution {
+///
+/// Recurses into user-source `module foo = { ... }` decls (looked up
+/// from the module manager's `user_module_names`) so calls inside
+/// module bodies get classified the same way as top-level user code.
+/// Prelude modules are intentionally skipped — their identifier
+/// resolution still goes through the existing scope/module_schemes
+/// path in the type checker, and walking them changes the inferred
+/// schemes.
+pub fn build_name_resolution(
+    program: &Program,
+    module_manager: &crate::module_manager::ModuleManager,
+    catalog: &BuiltinCatalog,
+) -> NameResolution {
     let mut nr = NameResolution::default();
     let mut top_level: ScopeStack<()> = ScopeStack::new();
     collect_top_level_names(&program.declarations, &mut top_level);
 
-    for decl in &program.declarations {
-        let mut scope = top_level.clone();
-        match decl {
-            Declaration::Decl(d) => {
+    walk_decls(&program.declarations, &top_level, catalog, &mut nr);
+
+    // Walk user-defined module decl bodies. After `elaborate_modules`
+    // these have been moved out of `program.declarations` into
+    // `module_manager.elaborated_modules`. We only walk modules
+    // whose names are in `user_module_names` so prelude modules stay
+    // out of NameResolution (their existing type-check path is
+    // load-bearing).
+    for module_name in &module_manager.user_module_names {
+        let Some(elaborated) = module_manager.elaborated_modules.get(module_name) else {
+            continue;
+        };
+        let mut module_scope: ScopeStack<()> = ScopeStack::new();
+        for item in &elaborated.items {
+            if let crate::module_manager::ElaboratedItem::Decl(d) = item {
+                module_scope.insert(d.name.clone(), ());
+            }
+        }
+        for item in &elaborated.items {
+            if let crate::module_manager::ElaboratedItem::Decl(d) = item {
+                let mut scope = module_scope.clone();
                 scope.push_scope();
                 for p in &d.params {
                     collect_pattern_bindings(p, &mut scope);
@@ -322,18 +371,76 @@ pub fn build_name_resolution(program: &Program, catalog: &BuiltinCatalog) -> Nam
                 walk_resolution(&d.body, catalog, &mut scope, &mut nr);
                 scope.pop_scope();
             }
+        }
+    }
+
+    nr
+}
+
+/// Walk a list of declarations (program-level or module-body), classifying
+/// every catalog reference in their bodies. `outer_scope` provides the
+/// shadowing context (top-level user names, or surrounding module's
+/// scope plus its sibling decls).
+fn walk_decls(
+    decls: &[Declaration],
+    outer_scope: &ScopeStack<()>,
+    catalog: &BuiltinCatalog,
+    nr: &mut NameResolution,
+) {
+    // Build a sibling scope that includes the names of all decls at this
+    // level — needed so a module-local `def length = ...` shadows the
+    // catalog within its sibling decls' bodies.
+    let mut sibling_scope = outer_scope.clone();
+    collect_top_level_names(decls, &mut sibling_scope);
+
+    for decl in decls {
+        match decl {
+            Declaration::Decl(d) => {
+                let mut scope = sibling_scope.clone();
+                scope.push_scope();
+                for p in &d.params {
+                    collect_pattern_bindings(p, &mut scope);
+                }
+                walk_resolution(&d.body, catalog, &mut scope, nr);
+                scope.pop_scope();
+            }
             Declaration::Entry(entry) => {
+                let mut scope = sibling_scope.clone();
                 scope.push_scope();
                 for p in &entry.params {
                     collect_pattern_bindings(p, &mut scope);
                 }
-                walk_resolution(&entry.body, catalog, &mut scope, &mut nr);
+                walk_resolution(&entry.body, catalog, &mut scope, nr);
                 scope.pop_scope();
             }
+            Declaration::Module(md) => match md {
+                crate::ast::ModuleDecl::Module { body, .. }
+                | crate::ast::ModuleDecl::Functor { body, .. } => {
+                    walk_module_expression(body, &sibling_scope, catalog, nr);
+                }
+            },
             _ => {}
         }
     }
-    nr
+}
+
+fn walk_module_expression(
+    me: &crate::ast::ModuleExpression,
+    outer_scope: &ScopeStack<()>,
+    catalog: &BuiltinCatalog,
+    nr: &mut NameResolution,
+) {
+    use crate::ast::ModuleExpression;
+    match me {
+        ModuleExpression::Struct(decls) => walk_decls(decls, outer_scope, catalog, nr),
+        ModuleExpression::Ascription(inner, _) => walk_module_expression(inner, outer_scope, catalog, nr),
+        ModuleExpression::Lambda(_, _, body) => walk_module_expression(body, outer_scope, catalog, nr),
+        ModuleExpression::Application(f, a) => {
+            walk_module_expression(f, outer_scope, catalog, nr);
+            walk_module_expression(a, outer_scope, catalog, nr);
+        }
+        ModuleExpression::Name(_) | ModuleExpression::Import(_) => {}
+    }
 }
 
 fn collect_top_level_names(decls: &[Declaration], scope: &mut ScopeStack<()>) {
@@ -368,7 +475,14 @@ fn walk_resolution(
             let full_name =
                 if quals.is_empty() { name.clone() } else { format!("{}.{}", quals.join("."), name) };
             if let Some(def) = catalog.lookup_by_surface_name(&full_name) {
-                nr.values.insert(expr.h.id, ResolvedValueRef::Builtin(def.id));
+                let overload_idx = if def.overloads().len() == 1 { Some(0) } else { None };
+                nr.values.insert(
+                    expr.h.id,
+                    ResolvedValueRef::Builtin {
+                        id: def.id,
+                        overload_idx,
+                    },
+                );
             }
         }
         ExprKind::Application(func, args) => {

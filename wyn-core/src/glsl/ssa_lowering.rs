@@ -1199,7 +1199,11 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 }
             }
 
-            InstKind::Intrinsic { id, args } => {
+            InstKind::Intrinsic {
+                id,
+                overload_idx: _,
+                args,
+            } => {
                 let arg_strs: Result<Vec<_>> = args.iter().map(|a| self.get_value_ref(*a)).collect();
                 let ssa_args: Vec<ValueId> = args.iter().filter_map(|a| a.as_ssa()).collect();
                 let name = crate::builtins::by_id(*id).dispatch_name();
@@ -1433,6 +1437,27 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         self.blame_span(),
                         "Intrinsic {:?} must be handled at Node::Inst level",
                         intr
+                    )
+                }
+                Intrinsic::Slice => {
+                    bail_glsl_at!(self.blame_span(), "GLSL backend does not support array slicing")
+                }
+                Intrinsic::StorageLen => {
+                    bail_glsl_at!(
+                        self.blame_span(),
+                        "GLSL backend does not support storage-buffer length queries"
+                    )
+                }
+                Intrinsic::ExtInstSplat { .. } => {
+                    bail_glsl_at!(
+                        self.blame_span(),
+                        "GLSL backend does not support ExtInstSplat (vec mix/clamp/smoothstep)"
+                    )
+                }
+                Intrinsic::ThreadId => {
+                    bail_glsl_at!(
+                        self.blame_span(),
+                        "GLSL backend does not support compute-shader thread ID"
                     )
                 }
             },

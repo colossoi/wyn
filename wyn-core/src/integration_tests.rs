@@ -76,7 +76,7 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::Program, stage: &str) {
                     symbols.get(*sym)
                 );
             }
-            TermKind::Var(crate::tlc::VarRef::Builtin(_))
+            TermKind::Var(crate::tlc::VarRef::Builtin { .. })
             | TermKind::BinOp(_)
             | TermKind::UnOp(_)
             | TermKind::IntLit(_)

@@ -590,7 +590,7 @@ impl<'a> TypeChecker<'a> {
         node_id: Option<NodeId>,
     ) -> Option<ResolvedValue> {
         if let Some(id) = node_id {
-            if let Some(crate::name_resolution::ResolvedValueRef::Builtin(builtin_id)) =
+            if let Some(crate::name_resolution::ResolvedValueRef::Builtin { id: builtin_id, .. }) =
                 self.name_resolution.get(id)
             {
                 let bid = *builtin_id;
@@ -736,6 +736,13 @@ impl<'a> TypeChecker<'a> {
     /// program that uses builtin identifiers.
     pub fn set_name_resolution(&mut self, nr: crate::name_resolution::NameResolution) {
         self.name_resolution = nr;
+    }
+
+    /// Borrow the (post-inference) NameResolution. The checker writes
+    /// overload-resolution results into it during inference; downstream
+    /// IR (TLC) reads them.
+    pub fn name_resolution(&self) -> &crate::name_resolution::NameResolution {
+        &self.name_resolution
     }
 
     /// Get all warnings collected during type checking
@@ -2252,6 +2259,10 @@ impl<'a> TypeChecker<'a> {
                                 .insert(func.h.id, TypeScheme::Monotype(resolved_func_ty));
                             self.type_table
                                 .insert(expr.h.id, TypeScheme::Monotype(r.return_type.clone()));
+                            // Record the chosen overload so downstream IR
+                            // (TLC `Var(Builtin)`, `PureOp::Intrinsic`, ...) can
+                            // dispatch on the right `BuiltinDef::overloads()` entry.
+                            self.name_resolution.set_overload_idx(func.h.id, r.winner_index);
                             return Ok(r.return_type);
                         }
                         Err(_) => bail_type_at!(

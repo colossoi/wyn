@@ -252,12 +252,18 @@ fn test_hash_cons_distinguishes_by_result_type() {
         .expect("INTRINSIC_STORAGE_LEN missing from catalog")
         .id;
     let a = g.intern_pure(
-        PureOp::Intrinsic(storage_len_id),
+        PureOp::Intrinsic {
+            id: storage_len_id,
+            overload_idx: 0,
+        },
         smallvec![zero_u32, zero_u32],
         i32_ty,
     );
     let b = g.intern_pure(
-        PureOp::Intrinsic(storage_len_id),
+        PureOp::Intrinsic {
+            id: storage_len_id,
+            overload_idx: 0,
+        },
         smallvec![zero_u32, zero_u32],
         u32_ty,
     );

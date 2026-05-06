@@ -1161,7 +1161,7 @@ impl BufferSpecializer {
                 // are only used via index/length, but return it as-is.
                 term.clone()
             }
-            TermKind::Var(crate::tlc::VarRef::Builtin(_))
+            TermKind::Var(crate::tlc::VarRef::Builtin { .. })
             | TermKind::BinOp(_)
             | TermKind::UnOp(_)
             | TermKind::IntLit(_)

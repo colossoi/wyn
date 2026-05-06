@@ -51,15 +51,19 @@ pub fn run(ast: &mut ast::Program, module_manager: &mut ModuleManager) -> Result
         }
     }
 
-    let name_resolution = crate::name_resolution::build_name_resolution(ast, crate::builtins::catalog());
+    let name_resolution =
+        crate::name_resolution::build_name_resolution(ast, module_manager, crate::builtins::catalog());
 
     let mut checker = TypeChecker::with_context_and_schemes(module_manager, context, spec_schemes);
-    checker.set_name_resolution(name_resolution.clone());
+    checker.set_name_resolution(name_resolution);
     checker.load_builtins()?;
     let type_table = checker.check_program(ast)?;
     let schemes = checker.get_function_schemes();
     let builtin_names = checker.builtin_names();
     let warnings: Vec<_> = checker.warnings().to_vec();
+    // Read the NameResolution back: the checker may have written
+    // overload-index resolutions into it during inference.
+    let name_resolution = checker.name_resolution().clone();
 
     Ok(TypeCheckOutput {
         type_table,

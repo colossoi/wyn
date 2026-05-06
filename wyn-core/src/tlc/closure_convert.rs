@@ -263,7 +263,7 @@ pub fn collect_free_vars(
             }
             collect_free_vars(body, &inner_bound, top_level, known_defs, symbols, free, seen);
         }
-        TermKind::Var(crate::tlc::VarRef::Builtin(_))
+        TermKind::Var(crate::tlc::VarRef::Builtin { .. })
         | TermKind::IntLit(_)
         | TermKind::FloatLit(_)
         | TermKind::BoolLit(_)

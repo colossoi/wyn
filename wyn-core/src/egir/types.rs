@@ -70,7 +70,10 @@ pub enum PureOp {
     Materialize,
     DynamicExtract,
     Call(String),
-    Intrinsic(crate::builtins::BuiltinId),
+    Intrinsic {
+        id: crate::builtins::BuiltinId,
+        overload_idx: usize,
+    },
     /// Storage buffer view creation. The `Inherited` parent (if any) is
     /// carried in the operands tail, not in this tag, so equivalent views
     /// with the same backing source hash-cons together.
@@ -478,7 +481,10 @@ pub fn extract_pure_op(kind: &InstKind, ty: &Type<TypeName>) -> Option<PureOp> {
         InstKind::Materialize { .. } => Some(PureOp::Materialize),
         InstKind::DynamicExtract { .. } => Some(PureOp::DynamicExtract),
         InstKind::Call { func, .. } => Some(PureOp::Call(func.clone())),
-        InstKind::Intrinsic { id, .. } => Some(PureOp::Intrinsic(*id)),
+        InstKind::Intrinsic { id, overload_idx, .. } => Some(PureOp::Intrinsic {
+            id: *id,
+            overload_idx: *overload_idx,
+        }),
         InstKind::StorageView { source, .. } => {
             let src = match source {
                 ViewSource::Storage { set, binding } => PureViewSource::Storage {
@@ -563,8 +569,9 @@ pub fn rebuild_inst_kind(op: &PureOp, operands: &[crate::ssa::framework::ValueId
             func: func.clone(),
             args: (0..operands.len()).map(|i| vr(i)).collect(),
         },
-        PureOp::Intrinsic(id) => InstKind::Intrinsic {
+        PureOp::Intrinsic { id, overload_idx } => InstKind::Intrinsic {
             id: *id,
+            overload_idx: *overload_idx,
             args: (0..operands.len()).map(|i| vr(i)).collect(),
         },
         PureOp::StorageView(src) => {

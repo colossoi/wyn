@@ -155,6 +155,10 @@ pub struct ModuleManager {
     /// Top-level prelude function declarations (auto-imported)
     /// Uses IndexMap to preserve insertion order (file order) for proper type-checking
     prelude_functions: IndexMap<String, Decl>,
+    /// Names of modules elaborated from a user program (`module foo = { ... }`
+    /// declarations in the user's source), as opposed to the prelude /
+    /// imported modules. Populated by `elaborate_modules`.
+    pub user_module_names: HashSet<String>,
 }
 
 impl ModuleManager {
@@ -181,6 +185,7 @@ impl ModuleManager {
             known_modules,
             type_aliases: HashMap::new(),
             prelude_functions: IndexMap::new(),
+            user_module_names: HashSet::new(),
         }
     }
 
@@ -234,6 +239,7 @@ impl ModuleManager {
             known_modules: prelude.known_modules,
             type_aliases: prelude.type_aliases,
             prelude_functions: prelude.prelude_functions,
+            user_module_names: HashSet::new(),
         }
     }
 
@@ -361,6 +367,11 @@ impl ModuleManager {
         // Elaborate each module declaration
         for decl in &program.declarations {
             if let Declaration::Module(md) = decl {
+                let name = match md {
+                    crate::ast::ModuleDecl::Module { name, .. } => name.clone(),
+                    crate::ast::ModuleDecl::Functor { name, .. } => name.clone(),
+                };
+                self.user_module_names.insert(name);
                 self.elaborate_module_decl(md)?;
             }
         }

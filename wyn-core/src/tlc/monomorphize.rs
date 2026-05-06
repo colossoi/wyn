@@ -457,7 +457,7 @@ impl<'a> Monomorphizer<'a> {
             }
 
             // Catalog builtin reference: passes through unchanged.
-            TermKind::Var(v @ crate::tlc::VarRef::Builtin(_)) => TermKind::Var(*v),
+            TermKind::Var(v @ crate::tlc::VarRef::Builtin { .. }) => TermKind::Var(*v),
 
             TermKind::Lambda(Lambda { params, body, ret_ty }) => TermKind::Lambda(Lambda {
                 params: params.clone(),
