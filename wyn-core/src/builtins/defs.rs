@@ -1,19 +1,19 @@
 use crate::builtins::catalog::{BuiltinDefRaw, BuiltinKind, BuiltinOverload, Purity};
 use crate::builtins::lowering::BuiltinLowering;
 use crate::builtins::lowering::PrimOp;
-use crate::builtins::scheme::{
-    array_to_i32, mat_square_to_mat, mat_square_to_scalar, mat_x_mat, mat_x_vec, scalar_unary, unit_to_t,
-    vec_binary_same, vec_binary_to_scalar, vec_clamp_scalar_lohi, vec_mix_scalar_interp,
-    vec_smoothstep_scalar_edges, vec_ternary_same, vec_to_scalar, vec_unary_same, vec_vec_outer,
-    vec_vec_scalar_to_vec, vec_x_mat, vec3f32_binary,
-};
-use crate::intrinsics::{
+use crate::builtins::names::{
     INTRINSIC_ABS, INTRINSIC_ARRAY_WITH, INTRINSIC_ARRAY_WITH_INPLACE, INTRINSIC_CEIL, INTRINSIC_CLAMP,
     INTRINSIC_COS, INTRINSIC_CROSS, INTRINSIC_DETERMINANT, INTRINSIC_DISTANCE, INTRINSIC_DOT,
     INTRINSIC_FLOOR, INTRINSIC_FRACT, INTRINSIC_INVERSE, INTRINSIC_LENGTH, INTRINSIC_MAGNITUDE,
     INTRINSIC_MIX, INTRINSIC_NORMALIZE, INTRINSIC_OUTER, INTRINSIC_REFLECT, INTRINSIC_REFRACT,
     INTRINSIC_SLICE, INTRINSIC_SMOOTHSTEP, INTRINSIC_STORAGE_INDEX, INTRINSIC_STORAGE_LEN,
     INTRINSIC_STORAGE_STORE, INTRINSIC_THREAD_ID, INTRINSIC_UNINIT,
+};
+use crate::builtins::scheme::{
+    array_to_i32, mat_square_to_mat, mat_square_to_scalar, mat_x_mat, mat_x_vec, scalar_unary, unit_to_t,
+    vec_binary_same, vec_binary_to_scalar, vec_clamp_scalar_lohi, vec_mix_scalar_interp,
+    vec_smoothstep_scalar_edges, vec_ternary_same, vec_to_scalar, vec_unary_same, vec_vec_outer,
+    vec_vec_scalar_to_vec, vec_x_mat, vec3f32_binary,
 };
 
 // ---------------------------------------------------------------------------

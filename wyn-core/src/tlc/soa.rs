@@ -16,7 +16,7 @@
 use super::{ArrayExpr, Def, Lambda, LoopKind, Place, Program, SoacOp, Term, TermIdSource, TermKind};
 use crate::SymbolTable;
 use crate::ast::{Span, TypeName};
-use crate::intrinsics::{
+use crate::builtins::names::{
     INTRINSIC_ARRAY_WITH, INTRINSIC_ARRAY_WITH_INPLACE, INTRINSIC_LENGTH, INTRINSIC_UNINIT,
 };
 use crate::types::TypeExt;

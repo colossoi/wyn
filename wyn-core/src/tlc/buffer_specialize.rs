@@ -17,10 +17,10 @@ use super::{
     ArrayExpr, Def, DefMeta, Lambda, LoopKind, Place, Program, SoacOp, Term, TermIdSource, TermKind,
 };
 use crate::ast::{self, Span, TypeName};
-use crate::interface;
-use crate::intrinsics::{
+use crate::builtins::names::{
     INTRINSIC_LENGTH, INTRINSIC_SLICE, INTRINSIC_STORAGE_INDEX, INTRINSIC_STORAGE_LEN,
 };
+use crate::interface;
 use crate::types::TypeExt;
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;

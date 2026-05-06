@@ -7,11 +7,11 @@
 //! Loop creation and storage lowering stay in SSA (`to_ssa` + `soac_lower`).
 
 use crate::ast::{self, TypeName};
-use crate::egir::from_tlc::AUTO_STORAGE_SET;
-use crate::interface::{self, Attribute};
-use crate::intrinsics::{
+use crate::builtins::names::{
     INTRINSIC_STORAGE_INDEX, INTRINSIC_STORAGE_LEN, INTRINSIC_STORAGE_STORE, INTRINSIC_THREAD_ID,
 };
+use crate::egir::from_tlc::AUTO_STORAGE_SET;
+use crate::interface::{self, Attribute};
 use crate::pipeline_descriptor::*;
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;

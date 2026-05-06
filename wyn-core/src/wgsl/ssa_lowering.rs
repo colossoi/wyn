@@ -17,11 +17,11 @@ use polytype::Type as PolyType;
 
 use crate::ast::{Span, TypeName};
 use crate::builtins::lowering::{BuiltinLowering, PrimOp};
-use crate::error::Result;
-use crate::intrinsics::{
+use crate::builtins::names::{
     INTRINSIC_ARRAY_WITH, INTRINSIC_ARRAY_WITH_INPLACE, INTRINSIC_LENGTH, INTRINSIC_SLICE,
     INTRINSIC_STORAGE_LEN, INTRINSIC_THREAD_ID, INTRINSIC_UNINIT,
 };
+use crate::error::Result;
 use crate::ssa::types::{
     EntryPoint, ExecutionModel, FuncBody, Function, InstKind, IoDecoration, Program, ValueId, ValueRef,
     ViewSource, WynInstNode,

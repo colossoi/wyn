@@ -1129,8 +1129,8 @@ fn synth_program_with_with_through_index() -> Program {
     // Top-level symbols
     let f_sym = symbols.alloc("f".to_string());
     def_syms.insert("f".to_string(), f_sym);
-    let with_sym = symbols.alloc(crate::intrinsics::INTRINSIC_ARRAY_WITH.to_string());
-    def_syms.insert(crate::intrinsics::INTRINSIC_ARRAY_WITH.to_string(), with_sym);
+    let with_sym = symbols.alloc(crate::builtins::names::INTRINSIC_ARRAY_WITH.to_string());
+    def_syms.insert(crate::builtins::names::INTRINSIC_ARRAY_WITH.to_string(), with_sym);
     let index_sym = symbols.alloc("_w_index".to_string());
     def_syms.insert("_w_index".to_string(), index_sym);
 
@@ -1282,7 +1282,7 @@ fn array_with_promotes_when_source_is_aliasing_intrinsic() {
     };
     assert_eq!(
         pre_func_name,
-        crate::intrinsics::INTRINSIC_ARRAY_WITH,
+        crate::builtins::names::INTRINSIC_ARRAY_WITH,
         "test setup: outer App must call the functional with intrinsic"
     );
 
@@ -1301,7 +1301,7 @@ fn array_with_promotes_when_source_is_aliasing_intrinsic() {
     let post_func_name = rewritten.symbols.get(*s).cloned().unwrap_or_default();
     assert_eq!(
         post_func_name,
-        crate::intrinsics::INTRINSIC_ARRAY_WITH_INPLACE,
+        crate::builtins::names::INTRINSIC_ARRAY_WITH_INPLACE,
         "promotion must thread through `_w_index` to grid's owner — \
          source-arg is `_w_index(grid, 0)`, which aliases grid \
          (UniqueParam, dead-after); is_promotable should follow \

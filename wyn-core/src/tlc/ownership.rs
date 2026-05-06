@@ -1062,15 +1062,19 @@ pub fn apply_ownership(mut program: Program) -> crate::error::Result<Program> {
     }
     let consuming_soacs: HashSet<TermId> = eligible_consuming_soacs(&program, &model).into_iter().collect();
 
-    let functional_sym = program.def_syms.get(crate::intrinsics::INTRINSIC_ARRAY_WITH).copied();
+    let functional_sym = program.def_syms.get(crate::builtins::names::INTRINSIC_ARRAY_WITH).copied();
     let inplace_sym = match (functional_sym, consuming_soacs.is_empty()) {
         // No array_with calls and no consuming SOACs to mark — nothing to do.
         (None, true) => return Ok(program),
-        _ => match program.def_syms.get(crate::intrinsics::INTRINSIC_ARRAY_WITH_INPLACE).copied() {
+        _ => match program.def_syms.get(crate::builtins::names::INTRINSIC_ARRAY_WITH_INPLACE).copied() {
             Some(s) => Some(s),
             None if functional_sym.is_some() => {
-                let s = program.symbols.alloc(crate::intrinsics::INTRINSIC_ARRAY_WITH_INPLACE.to_string());
-                program.def_syms.insert(crate::intrinsics::INTRINSIC_ARRAY_WITH_INPLACE.to_string(), s);
+                let s =
+                    program.symbols.alloc(crate::builtins::names::INTRINSIC_ARRAY_WITH_INPLACE.to_string());
+                program.def_syms.insert(
+                    crate::builtins::names::INTRINSIC_ARRAY_WITH_INPLACE.to_string(),
+                    s,
+                );
                 Some(s)
             }
             None => None,

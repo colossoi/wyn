@@ -9,11 +9,11 @@ use std::collections::{HashMap, HashSet};
 
 use super::types::EffectToken;
 use crate::ast::{Span, TypeName};
-use crate::interface;
-use crate::intrinsics::{
+use crate::builtins::names::{
     INTRINSIC_FILTER, INTRINSIC_LENGTH, INTRINSIC_STORAGE_INDEX, INTRINSIC_STORAGE_LEN,
     INTRINSIC_STORAGE_STORE,
 };
+use crate::interface;
 use crate::ssa::framework::BlockId;
 use crate::ssa::types::ViewSource;
 use crate::ssa::types::{ControlHeader, FuncBody, Function, InstKind, ValueRef};

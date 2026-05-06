@@ -15,7 +15,7 @@ use smallvec::{SmallVec, smallvec};
 use super::program::EgirInner;
 use super::types::EffectToken;
 use crate::ast::TypeName;
-use crate::intrinsics::{INTRINSIC_ARRAY_WITH_INPLACE, INTRINSIC_LENGTH, INTRINSIC_UNINIT};
+use crate::builtins::names::{INTRINSIC_ARRAY_WITH_INPLACE, INTRINSIC_LENGTH, INTRINSIC_UNINIT};
 use crate::ssa::types::{ControlHeader, InstKind, ValueRef};
 use crate::types::TypeExt;
 use crate::types::{is_array_variant_composite, is_array_variant_view, is_virtual_array};

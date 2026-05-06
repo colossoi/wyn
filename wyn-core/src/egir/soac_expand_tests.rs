@@ -17,8 +17,8 @@
 
 use crate::Compiler;
 use crate::ast::TypeName;
+use crate::builtins::names::INTRINSIC_ARRAY_WITH_INPLACE;
 use crate::egir::types::{ENode, PureOp};
-use crate::intrinsics::INTRINSIC_ARRAY_WITH_INPLACE;
 use polytype::Type;
 
 /// Compile source through the pipeline to just-past `expand_soacs`,

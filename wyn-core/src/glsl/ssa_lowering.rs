@@ -9,8 +9,8 @@ mod ssa_lowering_tests;
 
 use crate::ast::{Span, TypeName};
 use crate::builtins::lowering::{BuiltinLowering, Intrinsic, PrimOp};
+use crate::builtins::names::{INTRINSIC_ARRAY_WITH, INTRINSIC_ARRAY_WITH_INPLACE, INTRINSIC_UNINIT};
 use crate::error::Result;
-use crate::intrinsics::{INTRINSIC_ARRAY_WITH, INTRINSIC_ARRAY_WITH_INPLACE, INTRINSIC_UNINIT};
 use crate::lowering_common::ShaderStage;
 use crate::ssa::types::{ConstantValue, FuncBody, InstKind, ValueId, ValueRef, WynInstNode};
 use crate::ssa::types::{EntryPoint, ExecutionModel, Function, IoDecoration, Program};

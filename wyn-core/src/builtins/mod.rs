@@ -9,6 +9,7 @@
 pub mod catalog;
 pub mod defs;
 pub mod lowering;
+pub mod names;
 pub mod overload;
 pub mod scheme;
 
@@ -70,7 +71,7 @@ fn count_arrows(ty: &crate::ast::Type) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::intrinsics::{INTRINSIC_DOT, INTRINSIC_LENGTH};
+    use crate::builtins::names::{INTRINSIC_DOT, INTRINSIC_LENGTH};
 
     #[test]
     fn intrinsic_arity_for_length_is_one() {

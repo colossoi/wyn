@@ -5,7 +5,7 @@
 use super::{Converter, run};
 use crate::SymbolId;
 use crate::ast::TypeName;
-use crate::intrinsics::INTRINSIC_STORAGE_LEN;
+use crate::builtins::names::INTRINSIC_STORAGE_LEN;
 use crate::pipeline_descriptor::PipelineDescriptor;
 use crate::ssa::types::{FuncBody, InstKind, Program};
 use crate::tlc::{Term, TermKind};

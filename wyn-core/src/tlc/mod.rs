@@ -23,14 +23,14 @@ pub mod soa;
 pub mod specialize;
 
 use crate::ast::{self, NodeId, Span, TypeName};
-use crate::interface;
-use crate::intrinsics::{
+use crate::builtins::names::{
     INTRINSIC_ABS, INTRINSIC_ARRAY_WITH, INTRINSIC_CEIL, INTRINSIC_CLAMP, INTRINSIC_CROSS,
     INTRINSIC_DETERMINANT, INTRINSIC_DISTANCE, INTRINSIC_DOT, INTRINSIC_FLOOR, INTRINSIC_FRACT,
     INTRINSIC_INVERSE, INTRINSIC_LENGTH, INTRINSIC_MAGNITUDE, INTRINSIC_MIX, INTRINSIC_NORMALIZE,
     INTRINSIC_OUTER, INTRINSIC_REFLECT, INTRINSIC_REFRACT, INTRINSIC_REPLICATE, INTRINSIC_SLICE,
     INTRINSIC_SMOOTHSTEP,
 };
+use crate::interface;
 use crate::types::TypeExt;
 use crate::{SymbolId, SymbolTable, TypeTable};
 use polytype::Type;
