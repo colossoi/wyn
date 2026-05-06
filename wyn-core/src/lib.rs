@@ -30,6 +30,7 @@ pub mod glsl;
 /// crate so host runtimes (e.g. `extra/viz`) can deserialize the
 /// JSON without pulling in the whole compiler.
 pub use wyn_pipeline_descriptor as pipeline_descriptor;
+pub mod resolve_imports;
 pub mod resolve_opens;
 pub mod resolve_placeholders;
 pub mod spirv;
@@ -424,9 +425,7 @@ impl Parsed {
         base_dir: &std::path::Path,
         node_counter: &mut NodeCounter,
     ) -> Result<Self> {
-        let mut visited: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
-        self.0.ast.declarations =
-            resolve_imports_inner(self.0.ast.declarations, base_dir, node_counter, &mut visited)?;
+        self.0.ast.declarations = resolve_imports::run(self.0.ast.declarations, base_dir, node_counter)?;
         Ok(self)
     }
 
@@ -452,55 +451,6 @@ impl Parsed {
     pub fn desugar(mut self, nc: &mut ast::NodeCounter) -> Result<Desugared> {
         desugar::run(&mut self.0.ast, nc).map(|()| Desugared(self.0))
     }
-}
-
-/// Recursively expand `Declaration::Import` nodes against the
-/// filesystem. Each imported file's declarations replace the import
-/// node in-place; transitive imports inside the loaded file are
-/// resolved relative to that file's directory. A canonical-path
-/// dedup set prevents infinite loops on cyclic imports and dedupes
-/// diamond imports.
-fn resolve_imports_inner(
-    decls: Vec<ast::Declaration>,
-    base_dir: &std::path::Path,
-    node_counter: &mut NodeCounter,
-    visited: &mut std::collections::HashSet<std::path::PathBuf>,
-) -> Result<Vec<ast::Declaration>> {
-    let mut out: Vec<ast::Declaration> = Vec::with_capacity(decls.len());
-    for decl in decls {
-        let ast::Declaration::Import(rel_path) = decl else {
-            out.push(decl);
-            continue;
-        };
-
-        // Resolve `import "foo"` to `<base_dir>/foo.wyn`. If the user
-        // already wrote a `.wyn` extension, don't double-add it.
-        let mut joined = base_dir.join(&rel_path);
-        if joined.extension().is_none() {
-            joined.set_extension("wyn");
-        }
-        let canonical = joined.canonicalize().map_err(|e| {
-            err_module!(
-                "import: cannot resolve `{}` (looked for `{}`): {}",
-                rel_path,
-                joined.display(),
-                e
-            )
-        })?;
-        if !visited.insert(canonical.clone()) {
-            // Already loaded — diamond import; silently dedupe.
-            continue;
-        }
-
-        let source = std::fs::read_to_string(&canonical)
-            .map_err(|e| err_module!("import: failed to read `{}`: {}", canonical.display(), e))?;
-        let imported = Compiler::parse(&source, node_counter)?;
-        let imported_dir = canonical.parent().unwrap_or(base_dir);
-        let resolved =
-            resolve_imports_inner(imported.0.ast.declarations, imported_dir, node_counter, visited)?;
-        out.extend(resolved);
-    }
-    Ok(out)
 }
 
 /// Range and slice expressions have been desugared to map/iota
