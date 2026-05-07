@@ -581,24 +581,37 @@ impl<'a> TypeChecker<'a> {
         lookup.map(|scheme_lookup| self.resolve_scheme_lookup(full_name, scheme_lookup))
     }
 
+    /// Look up the prelude-module-supplied scheme for a non-catalog
+    /// qualified name (e.g. `materials.pbrCookTorrance`). Used by
+    /// `resolve_value_name` Path B.
     fn lookup_module_scheme(&self, qualified_name: &str) -> Option<SchemeLookup> {
         self.module_schemes.get(qualified_name).cloned().map(SchemeLookup::Single)
+    }
+
+    /// Look up the prelude-module-supplied scheme for a catalog
+    /// per-type op by `BuiltinId`. The catalog stores the canonical
+    /// surface_name on the `BuiltinDef`; we route through that to the
+    /// `module_schemes` map. This is the BuiltinId-keyed counterpart
+    /// to `lookup_module_scheme(qualified_name)` — same data, but the
+    /// dispatch token is structural rather than a string.
+    fn lookup_module_scheme_by_id(&self, id: crate::builtins::BuiltinId) -> Option<TypeScheme> {
+        let surface_name = crate::builtins::by_id(id).raw.surface_name;
+        self.module_schemes.get(surface_name).cloned()
     }
 
     /// Build a `SchemeLookup` from a `BuiltinId` by invoking each
     /// overload's scheme builder against the current context.
     ///
     /// Overloads whose scheme is `None` (per-type ops `f32.add`,
-    /// `f32.i32`, …) get their schemes from prelude module signatures;
-    /// route through `module_schemes` keyed by the catalog's surface
-    /// name.
+    /// `f32.i32`, …) get their schemes from prelude module signatures
+    /// via `lookup_module_scheme_by_id`.
     fn scheme_lookup_for_builtin(&mut self, id: crate::builtins::BuiltinId) -> SchemeLookup {
         let catalog = crate::builtins::catalog();
         let def = catalog.get(id);
         let schemes: Vec<TypeScheme> = (0..def.overloads().len())
             .map(|i| {
                 catalog.build_scheme(id, i, &mut self.context).unwrap_or_else(|| {
-                    self.module_schemes.get(def.raw.surface_name).cloned().unwrap_or_else(|| {
+                    self.lookup_module_scheme_by_id(id).unwrap_or_else(|| {
                         panic!(
                             "BUG: builtin {:?} (`{}`) has no scheme builder and no module_schemes entry",
                             id, def.raw.surface_name
