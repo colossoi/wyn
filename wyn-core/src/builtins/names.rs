@@ -43,13 +43,6 @@ pub const INTRINSIC_STORAGE_INDEX: &str = "_w_intrinsic_storage_index";
 pub const INTRINSIC_STORAGE_STORE: &str = "_w_intrinsic_storage_store";
 
 // ---------------------------------------------------------------------------
-// SOACs that survive past TLC normalization
-// ---------------------------------------------------------------------------
-
-/// `filter(pred, arr)` — predicate-driven array compaction.
-pub const INTRINSIC_FILTER: &str = "_w_intrinsic_filter";
-
-// ---------------------------------------------------------------------------
 // Geometric / vector
 // ---------------------------------------------------------------------------
 

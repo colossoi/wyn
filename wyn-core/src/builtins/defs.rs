@@ -555,11 +555,6 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         Purity::Pure
     ),
     hof_intrinsic!(
-        "_w_intrinsic_filter",
-        crate::builtins::scheme::filter_scheme,
-        Purity::Pure
-    ),
-    hof_intrinsic!(
         "_w_intrinsic_scan",
         crate::builtins::scheme::scan_scheme,
         Purity::Pure
@@ -573,16 +568,6 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         "_w_intrinsic_map_into",
         crate::builtins::scheme::map_into_scheme,
         Purity::Effectful
-    ),
-    hof_intrinsic!(
-        "_w_intrinsic_scatter",
-        crate::builtins::scheme::scatter_scheme,
-        Purity::Pure
-    ),
-    hof_intrinsic!(
-        "_w_intrinsic_hist_1d",
-        crate::builtins::scheme::hist_1d_scheme,
-        Purity::Pure
     ),
     hof_intrinsic!(
         "_w_intrinsic_rotr32",

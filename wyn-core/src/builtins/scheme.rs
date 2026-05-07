@@ -71,9 +71,6 @@ fn arrow_chain(params: &[Type], ret: Type) -> Type {
 fn unit_ty() -> Type {
     Type::Constructed(TypeName::Unit, vec![])
 }
-fn bool_ty() -> Type {
-    Type::Constructed(TypeName::Bool, vec![])
-}
 fn i32_ty() -> Type {
     Type::Constructed(TypeName::Int(32), vec![])
 }
@@ -270,18 +267,6 @@ pub fn reduce_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     quantify(arrow_chain(&[op, a.clone(), arr], a))
 }
 
-/// `∀a n s. (a -> bool) -> Array[a, s, n] -> ?k. Array[a, s, k]` — filter.
-pub fn filter_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
-    let (a, n, s) = (ctx.new_variable(), ctx.new_variable(), ctx.new_variable());
-    let pred = arrow_chain(&[a.clone()], bool_ty());
-    let arr = array_type(a.clone(), s.clone(), n);
-    let k = "k".to_string();
-    let k_var = Type::Constructed(TypeName::SizeVar(k.clone()), vec![]);
-    let result_arr = array_type(a, s, k_var);
-    let existential = Type::Constructed(TypeName::Existential(vec![k]), vec![result_arr]);
-    quantify(arrow_chain(&[pred, arr], existential))
-}
-
 /// `∀a n s. (a -> a -> a) -> a -> Array[a, s, n] -> Array[a, s, n]` — scan.
 pub fn scan_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     let (a, n, s) = (ctx.new_variable(), ctx.new_variable(), ctx.new_variable());
@@ -322,43 +307,6 @@ pub fn map_into_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
         &[f, array_type(a, s1, n), array_type(b, s2, m), i32_ty()],
         unit_ty(),
     ))
-}
-
-/// `∀a n m s1 s2 s3. Array[a, s1, n] -> Array[i32, s2, m] -> Array[a, s3, m] -> Array[a, s1, n]`
-/// — scatter.
-pub fn scatter_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
-    let (a, n, m, s1, s2, s3) = (
-        ctx.new_variable(),
-        ctx.new_variable(),
-        ctx.new_variable(),
-        ctx.new_variable(),
-        ctx.new_variable(),
-        ctx.new_variable(),
-    );
-    let dest = array_type(a.clone(), s1.clone(), n.clone());
-    let indices = array_type(i32_ty(), s2, m.clone());
-    let values = array_type(a.clone(), s3, m);
-    let result = array_type(a, s1, n);
-    quantify(arrow_chain(&[dest, indices, values], result))
-}
-
-/// `∀a n m s1 s2 s3. Array[a, s1, n] -> (a -> a -> a) -> a -> Array[i32, s2, m] -> Array[a, s3, m] -> Array[a, s1, n]`
-/// — hist_1d.
-pub fn hist_1d_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
-    let (a, n, m, s1, s2, s3) = (
-        ctx.new_variable(),
-        ctx.new_variable(),
-        ctx.new_variable(),
-        ctx.new_variable(),
-        ctx.new_variable(),
-        ctx.new_variable(),
-    );
-    let op = arrow_chain(&[a.clone(), a.clone()], a.clone());
-    let dest = array_type(a.clone(), s1.clone(), n.clone());
-    let indices = array_type(i32_ty(), s2, m.clone());
-    let values = array_type(a.clone(), s3, m);
-    let result = array_type(a.clone(), s1, n);
-    quantify(arrow_chain(&[dest, op, a, indices, values], result))
 }
 
 /// `u32 -> u32 -> u32` — rotr32.

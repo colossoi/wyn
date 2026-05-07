@@ -10,8 +10,7 @@ use std::collections::{HashMap, HashSet};
 use super::types::EffectToken;
 use crate::ast::{Span, TypeName};
 use crate::builtins::names::{
-    INTRINSIC_FILTER, INTRINSIC_LENGTH, INTRINSIC_STORAGE_INDEX, INTRINSIC_STORAGE_LEN,
-    INTRINSIC_STORAGE_STORE,
+    INTRINSIC_LENGTH, INTRINSIC_STORAGE_INDEX, INTRINSIC_STORAGE_LEN, INTRINSIC_STORAGE_STORE,
 };
 use crate::interface;
 use crate::ssa::framework::BlockId;
@@ -1606,7 +1605,7 @@ impl<'a> Converter<'a> {
                 ..
             } => self.convert_soac_redomap(op, reduce_op, ne, inputs, ty),
             SoacOp::Scan { op, ne, input } => self.convert_soac_scan(op, ne, input, ty),
-            SoacOp::Filter { pred, input } => self.convert_soac_filter(pred, input, ty),
+            SoacOp::Filter { .. } => Err(ConvertError::Unsupported("SOAC filter".into())),
             SoacOp::Scatter { .. } => Err(ConvertError::Unsupported("SOAC scatter".into())),
             SoacOp::ReduceByIndex { .. } => Err(ConvertError::Unsupported("SOAC reduce_by_index".into())),
         }
@@ -1791,51 +1790,6 @@ impl<'a> Converter<'a> {
             operands,
             result_ty,
         ))
-    }
-
-    fn convert_soac_filter(
-        &mut self,
-        pred: &super::super::tlc::SoacBody,
-        input: &ArrayExpr,
-        result_ty: Type<TypeName>,
-    ) -> Result<NodeId, ConvertError> {
-        let pred_name = self.lambda_fn_name(&pred.lam)?;
-        let capture_nids: Vec<NodeId> =
-            pred.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
-        let arr_nid = self.convert_array_expr_value(input)?;
-        let pred_ref = self.intern_pure(
-            PureOp::Global(pred_name),
-            smallvec![],
-            Type::Constructed(TypeName::Unit, vec![]),
-        );
-
-        let mut operands: SmallVec<[NodeId; 4]> = smallvec![pred_ref, arr_nid];
-        operands.extend(capture_nids.iter().copied());
-
-        // Filter is not a SOAC that soac_expand handles; emit it as a regular
-        // effectful Intrinsic side-effect. (Upstream compilation typically
-        // lowers Filter before reaching here, but we keep the fallback for
-        // completeness.)
-        let dummy_vrefs: Vec<ValueRef> =
-            (0..operands.len()).map(|_| ValueRef::Ssa(Default::default())).collect();
-        let result_nid = self.graph.alloc_side_effect_result(result_ty);
-        let effect_in = EffectToken(0);
-        let effect_out = self.alloc_effect();
-        self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
-            kind: SideEffectKind::Inst(InstKind::Intrinsic {
-                id: crate::builtins::catalog()
-                    .lookup_by_any_name(INTRINSIC_FILTER)
-                    .expect("INTRINSIC_FILTER missing from catalog")
-                    .id,
-                overload_idx: 0,
-                args: dummy_vrefs,
-            }),
-            operand_nodes: operands,
-            result: Some(result_nid),
-            effects: Some((effect_in, effect_out)),
-            span: self.current_span,
-        });
-        Ok(result_nid)
     }
 
     // ========================================================================

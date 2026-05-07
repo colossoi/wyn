@@ -1,0 +1,18 @@
+-- Exercises the `filter` SOAC end-to-end. Predicate is named (so the
+-- HOF specializer has to lower it through the same route a closure
+-- would use) and the existential output length is observed via
+-- `length` so the result can't be DCE'd.
+
+def is_even(x: i32) bool = x % 2 == 0
+
+def evens(arr: [8]i32) ?k. [k]i32 =
+    filter(is_even, arr)
+
+#[vertex]
+entry vertex_main() (#[builtin(position)] vec4f32) =
+    let e = evens([1, 2, 3, 4, 5, 6, 7, 8]) in
+    @[f32.i32(length(e)), 0.0, 0.0, 1.0]
+
+#[fragment]
+entry fragment_main() #[location(0)] vec4f32 =
+    @[1.0, 0.0, 0.0, 1.0]
