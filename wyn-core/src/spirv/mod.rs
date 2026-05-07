@@ -2688,6 +2688,13 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         let glsl = self.constructor.glsl_ext_inst_id;
                         Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, *ext, operands)?)
                     }
+                    Intrinsic::StorageIndex | Intrinsic::StorageStore => {
+                        bail_spirv!(
+                            "{:?} reached backend dispatch — should be lowered to \
+                             an InstKind::Load/Store side effect during EGIR conversion",
+                            intrinsic
+                        )
+                    }
                 }
             }
         }

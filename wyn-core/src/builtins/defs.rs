@@ -610,8 +610,16 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         Purity::Pure,
         crate::builtins::lowering::Intrinsic::StorageLen
     ),
-    compiler_internal!(INTRINSIC_STORAGE_INDEX, Purity::Pure),
-    compiler_internal!(INTRINSIC_STORAGE_STORE, Purity::Effectful),
+    compiler_internal!(
+        INTRINSIC_STORAGE_INDEX,
+        Purity::Pure,
+        crate::builtins::lowering::Intrinsic::StorageIndex
+    ),
+    compiler_internal!(
+        INTRINSIC_STORAGE_STORE,
+        Purity::Effectful,
+        crate::builtins::lowering::Intrinsic::StorageStore
+    ),
     compiler_internal!(
         INTRINSIC_SLICE,
         Purity::Pure,

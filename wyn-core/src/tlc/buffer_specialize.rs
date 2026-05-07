@@ -1471,12 +1471,31 @@ impl BufferSpecializer {
         ret_ty: Type<TypeName>,
         span: Span,
     ) -> Term {
-        let func_sym = self.symbols.alloc(intrinsic_name.to_string());
+        // Catalog-resolved builtins emit `Var(Builtin(id))` so downstream
+        // passes dispatch structurally, not by string. The assert mirrors
+        // `tlc::build_call`: synthesised IR sites target single-overload
+        // entries — a multi-overload target requires the caller to pick
+        // an overload explicitly.
+        let func_var = if let Some(def) = crate::builtins::catalog().lookup_by_any_name(intrinsic_name) {
+            assert_eq!(
+                def.overloads().len(),
+                1,
+                "buffer_specialize::make_app({:?}) targets a multi-overload catalog entry; \
+                 caller must specify overload_idx explicitly",
+                intrinsic_name
+            );
+            crate::tlc::VarRef::Builtin {
+                id: def.id,
+                overload_idx: 0,
+            }
+        } else {
+            crate::tlc::VarRef::Symbol(self.symbols.alloc(intrinsic_name.to_string()))
+        };
         let func_term = Term {
             id: self.term_ids.next_id(),
             ty: ret_ty.clone(), // approximate
             span,
-            kind: TermKind::Var(crate::tlc::VarRef::Symbol(func_sym)),
+            kind: TermKind::Var(func_var),
         };
 
         if args.is_empty() {

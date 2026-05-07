@@ -1008,22 +1008,37 @@ impl<'a> Converter<'a> {
                 self.convert_named_app(&name, *sym, args, ty)
             }
             TermKind::Var(crate::tlc::VarRef::Builtin { id, overload_idx }) => {
-                // Catalog-resolved builtin call. Emit
-                // `PureOp::Intrinsic { id, overload_idx }` directly —
-                // the BuiltinId is the canonical identifier and the
-                // overload index was chosen by the type checker.
-                // Backends dispatch via
-                // `catalog.get(id).overloads()[overload_idx].lowering`.
-                let arg_nids: SmallVec<[NodeId; 4]> =
-                    args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
-                Ok(self.intern_pure(
-                    PureOp::Intrinsic {
-                        id: *id,
-                        overload_idx: *overload_idx,
-                    },
-                    arg_nids,
-                    ty,
-                ))
+                // Catalog-resolved builtin call. Most catalog entries lower
+                // to a pure `PureOp::Intrinsic` and the backend dispatches
+                // on `catalog.get(id).overloads()[overload_idx].lowering`.
+                // A small set of entries (StorageIndex, StorageStore) is
+                // side-effectful and must emit a Load/Store side effect at
+                // EGIR conversion — mirror the legacy Symbol path's
+                // special cases here so structural dispatch reaches the
+                // same place.
+                use crate::builtins::lowering::{BuiltinLowering, Intrinsic};
+                let def = crate::builtins::catalog().get(*id);
+                let lowering = &def.overloads()[*overload_idx].lowering;
+                match lowering {
+                    BuiltinLowering::Intrinsic(Intrinsic::StorageIndex) if args.len() == 3 => {
+                        self.lower_storage_index(args, ty)
+                    }
+                    BuiltinLowering::Intrinsic(Intrinsic::StorageStore) if args.len() == 4 => {
+                        self.lower_storage_store(args)
+                    }
+                    _ => {
+                        let arg_nids: SmallVec<[NodeId; 4]> =
+                            args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
+                        Ok(self.intern_pure(
+                            PureOp::Intrinsic {
+                                id: *id,
+                                overload_idx: *overload_idx,
+                            },
+                            arg_nids,
+                            ty,
+                        ))
+                    }
+                }
             }
             _ => {
                 // General application: convert func, then call
@@ -1094,80 +1109,12 @@ impl<'a> Converter<'a> {
             // _w_intrinsic_storage_index(set_const, binding_const, index) → load
             // from a storage view. Emitted by buffer_specialize for functions
             // that index directly into a bound buffer.
-            INTRINSIC_STORAGE_INDEX if args.len() == 3 => {
-                let set = match &args[0].kind {
-                    TermKind::IntLit(s) => s.parse::<u32>().map_err(|_| {
-                        ConvertError::GraphError("_w_intrinsic_storage_index: set not a u32".into())
-                    })?,
-                    _ => {
-                        return Err(ConvertError::GraphError(
-                            "_w_intrinsic_storage_index: set must be int literal".into(),
-                        ));
-                    }
-                };
-                let binding = match &args[1].kind {
-                    TermKind::IntLit(s) => s.parse::<u32>().map_err(|_| {
-                        ConvertError::GraphError("_w_intrinsic_storage_index: binding not a u32".into())
-                    })?,
-                    _ => {
-                        return Err(ConvertError::GraphError(
-                            "_w_intrinsic_storage_index: binding must be int literal".into(),
-                        ));
-                    }
-                };
-                let index_nid = self.convert_term(&args[2])?;
-                let view_nid = self.emit_storage_view(set, binding, ty.clone());
-                let place_nid =
-                    self.intern_pure(PureOp::ViewIndex, smallvec![view_nid, index_nid], ty.clone());
-                // Load the element; Load is effectful.
-                let result_nid = self.graph.alloc_side_effect_result(ty.clone());
-                let effect_in = EffectToken(0);
-                let effect_out = self.alloc_effect();
-                self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
-                    kind: SideEffectKind::Inst(InstKind::Load {
-                        place: Default::default(),
-                    }),
-                    operand_nodes: smallvec![place_nid],
-                    result: Some(result_nid),
-                    effects: Some((effect_in, effect_out)),
-                    span: self.current_span,
-                });
-                Ok(result_nid)
-            }
+            INTRINSIC_STORAGE_INDEX if args.len() == 3 => self.lower_storage_index(args, ty),
             // _w_intrinsic_storage_store(set_lit, binding_lit, index, value) → effectful
             // Store into storage_view(set, binding) at `index`. Emitted by
             // parallelize.rs for phase-entry output writes where index depends
             // on thread_id (and can't be expressed as a Map→MapInto).
-            INTRINSIC_STORAGE_STORE if args.len() == 4 => {
-                let set = match &args[0].kind {
-                    TermKind::IntLit(s) => s.parse::<u32>().map_err(|_| {
-                        ConvertError::GraphError("_w_intrinsic_storage_store: set not a u32".into())
-                    })?,
-                    _ => {
-                        return Err(ConvertError::GraphError(
-                            "_w_intrinsic_storage_store: set must be int literal".into(),
-                        ));
-                    }
-                };
-                let binding = match &args[1].kind {
-                    TermKind::IntLit(s) => s.parse::<u32>().map_err(|_| {
-                        ConvertError::GraphError("_w_intrinsic_storage_store: binding not a u32".into())
-                    })?,
-                    _ => {
-                        return Err(ConvertError::GraphError(
-                            "_w_intrinsic_storage_store: binding must be int literal".into(),
-                        ));
-                    }
-                };
-                let index_nid = self.convert_term(&args[2])?;
-                let value_nid = self.convert_term(&args[3])?;
-                let value_ty = args[3].ty.clone();
-                let view_nid = self.emit_storage_view(set, binding, value_ty.clone());
-                self.emit_storage_store(view_nid, index_nid, value_nid, value_ty);
-                // Result is unit.
-                let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
-                Ok(self.intern_pure(PureOp::Unit, smallvec![], unit_ty))
-            }
+            INTRINSIC_STORAGE_STORE if args.len() == 4 => self.lower_storage_store(args),
             _ => {
                 // Function call
                 if let Some(def) = self.top_level.get(&sym) {
@@ -1225,6 +1172,83 @@ impl<'a> Converter<'a> {
                 }
             }
         }
+    }
+
+    // ========================================================================
+    // Side-effectful intrinsic helpers — called from both convert_named_app
+    // (Symbol-arm of convert_app) and the Builtin-arm dispatch on
+    // `BuiltinLowering::Intrinsic(StorageIndex|StorageStore)`. The Symbol
+    // path is the legacy in-progress route; the Builtin path is the
+    // structural one.
+    // ========================================================================
+
+    fn lower_storage_index(&mut self, args: &[Term], ty: Type<TypeName>) -> Result<NodeId, ConvertError> {
+        let set = match &args[0].kind {
+            TermKind::IntLit(s) => s.parse::<u32>().map_err(|_| {
+                ConvertError::GraphError("_w_intrinsic_storage_index: set not a u32".into())
+            })?,
+            _ => {
+                return Err(ConvertError::GraphError(
+                    "_w_intrinsic_storage_index: set must be int literal".into(),
+                ));
+            }
+        };
+        let binding = match &args[1].kind {
+            TermKind::IntLit(s) => s.parse::<u32>().map_err(|_| {
+                ConvertError::GraphError("_w_intrinsic_storage_index: binding not a u32".into())
+            })?,
+            _ => {
+                return Err(ConvertError::GraphError(
+                    "_w_intrinsic_storage_index: binding must be int literal".into(),
+                ));
+            }
+        };
+        let index_nid = self.convert_term(&args[2])?;
+        let view_nid = self.emit_storage_view(set, binding, ty.clone());
+        let place_nid = self.intern_pure(PureOp::ViewIndex, smallvec![view_nid, index_nid], ty.clone());
+        let result_nid = self.graph.alloc_side_effect_result(ty.clone());
+        let effect_in = EffectToken(0);
+        let effect_out = self.alloc_effect();
+        self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
+            kind: SideEffectKind::Inst(InstKind::Load {
+                place: Default::default(),
+            }),
+            operand_nodes: smallvec![place_nid],
+            result: Some(result_nid),
+            effects: Some((effect_in, effect_out)),
+            span: self.current_span,
+        });
+        Ok(result_nid)
+    }
+
+    fn lower_storage_store(&mut self, args: &[Term]) -> Result<NodeId, ConvertError> {
+        let set = match &args[0].kind {
+            TermKind::IntLit(s) => s.parse::<u32>().map_err(|_| {
+                ConvertError::GraphError("_w_intrinsic_storage_store: set not a u32".into())
+            })?,
+            _ => {
+                return Err(ConvertError::GraphError(
+                    "_w_intrinsic_storage_store: set must be int literal".into(),
+                ));
+            }
+        };
+        let binding = match &args[1].kind {
+            TermKind::IntLit(s) => s.parse::<u32>().map_err(|_| {
+                ConvertError::GraphError("_w_intrinsic_storage_store: binding not a u32".into())
+            })?,
+            _ => {
+                return Err(ConvertError::GraphError(
+                    "_w_intrinsic_storage_store: binding must be int literal".into(),
+                ));
+            }
+        };
+        let index_nid = self.convert_term(&args[2])?;
+        let value_nid = self.convert_term(&args[3])?;
+        let value_ty = args[3].ty.clone();
+        let view_nid = self.emit_storage_view(set, binding, value_ty.clone());
+        self.emit_storage_store(view_nid, index_nid, value_nid, value_ty);
+        let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
+        Ok(self.intern_pure(PureOp::Unit, smallvec![], unit_ty))
     }
 
     // ========================================================================

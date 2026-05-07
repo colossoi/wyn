@@ -1460,6 +1460,14 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         "GLSL backend does not support compute-shader thread ID"
                     )
                 }
+                Intrinsic::StorageIndex | Intrinsic::StorageStore => {
+                    bail_glsl_at!(
+                        self.blame_span(),
+                        "{:?} reached backend dispatch — should be lowered to a \
+                         Load/Store side effect during EGIR conversion",
+                        intr
+                    )
+                }
             },
             BuiltinLowering::LinkedSpirv(name) => {
                 bail_glsl_at!(

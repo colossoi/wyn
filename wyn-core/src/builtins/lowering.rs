@@ -137,6 +137,19 @@ pub enum Intrinsic {
     /// `_w_intrinsic_thread_id() -> u32` — flattened compute-shader
     /// thread index. SPIR-V loads `GlobalInvocationId.x`.
     ThreadId,
+    /// `_w_intrinsic_storage_index(set_const, binding_const, index) -> T`
+    /// — load element T from the storage view at `(set, binding)[index]`.
+    /// Effectful: emitted as an `InstKind::Load` side effect through a
+    /// `ViewIndex` place during EGIR conversion, never reaches the
+    /// pure-`Intrinsic` lowering path. The variant exists so EGIR's
+    /// `VarRef::Builtin` arm can dispatch this side-effect structurally
+    /// without reflecting on the surface name.
+    StorageIndex,
+    /// `_w_intrinsic_storage_store(set_const, binding_const, index, value)`
+    /// — store `value` at `(set, binding)[index]`. Effectful: emitted as
+    /// an `InstKind::Store` side effect during EGIR conversion. Same
+    /// structural-dispatch motivation as `StorageIndex`.
+    StorageStore,
     /// GLSL.std.450 extended instruction with operand splatting. For
     /// each position in `splat_args`, if that operand is a scalar but
     /// the result is a vec, splat it to result-vec width before emitting
