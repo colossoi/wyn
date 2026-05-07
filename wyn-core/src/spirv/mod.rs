@@ -1363,7 +1363,13 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         | BuiltinLowering::LinkedSpirv(_)
                         | BuiltinLowering::ExtInstSplat { .. }
                 ) || (matches!(lowering, BuiltinLowering::ByBuiltinId)
-                    && (*id == known.slice || *id == known.storage_len || *id == known.thread_id));
+                    && (*id == known.slice
+                        || *id == known.storage_len
+                        || *id == known.thread_id
+                        || *id == known.length
+                        || *id == known.uninit
+                        || *id == known.array_with
+                        || *id == known.array_with_in_place));
                 if typed_dispatch {
                     self.lower_builtin_call(
                         *id,
@@ -1375,8 +1381,15 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         inst,
                     )?
                 } else {
-                    let name = def.dispatch_name();
-                    self.lower_intrinsic(name, args, &arg_ids, result_ty, inst)?
+                    bail_spirv!(
+                        "InstKind::Intrinsic with no SPIR-V backend dispatch: '{}' \
+                         (id={:?}, lowering={:?}). HOF / SOAC intrinsics should be \
+                         lowered at EGIR; everything else needs an arm in \
+                         lower_builtin_call and an entry in the typed_dispatch list.",
+                        def.dispatch_name(),
+                        id,
+                        lowering
+                    )
                 }
             }
 
@@ -2015,174 +2028,6 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
         }
     }
 
-    fn lower_intrinsic(
-        &mut self,
-        name: &str,
-        value_refs: &[ValueRef],
-        args: &[spirv::Word],
-        result_ty: spirv::Word,
-        inst: &WynInstNode,
-    ) -> Result<spirv::Word> {
-        let ssa_rty = inst.result.map(|r| self.body.inner.value_type(r).clone());
-        let glsl = self.constructor.glsl_ext_inst_id;
-
-        // Convert args to Operands for ext_inst
-        let operands: Vec<Operand> = args.iter().map(|&id| Operand::IdRef(id)).collect();
-
-        // Strip _w_intrinsic_ prefix for builtin dispatch
-        let base_name = name.strip_prefix("_w_intrinsic_").unwrap_or(name);
-
-        match base_name {
-            "sin" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 13, operands)?),
-            "cos" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 14, operands)?),
-            "tan" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 15, operands)?),
-            "sqrt" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 31, operands)?),
-            "abs" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 4, operands)?),
-            "floor" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 8, operands)?),
-            "ceil" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 9, operands)?),
-            "min" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 37, operands)?),
-            "max" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 40, operands)?),
-            "clamp" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 43, operands)?),
-            "mix" => {
-                // FMix requires all operands to match the result type.
-                // When mix(vec, vec, scalar), splat the scalar t to a vec.
-                if args.len() == 3 && ssa_rty.as_ref().is_some_and(|t| t.is_vec()) {
-                    let t_ty = self.get_value_type_ref(value_refs[2]);
-                    if t_ty.is_scalar() {
-                        let splatted = self.splat_scalar(
-                            args[2],
-                            ssa_rty.as_ref().expect("mix intrinsic must have result type"),
-                            result_ty,
-                        )?;
-                        let operands = vec![
-                            Operand::IdRef(args[0]),
-                            Operand::IdRef(args[1]),
-                            Operand::IdRef(splatted),
-                        ];
-                        return Ok(self
-                            .constructor
-                            .builder
-                            .ext_inst(result_ty, None, glsl, 46, operands)?);
-                    }
-                }
-                Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 46, operands)?)
-            }
-            "pow" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 26, operands)?),
-            "exp" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 27, operands)?),
-            "log" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 28, operands)?),
-            "radians" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 11, operands)?),
-            "degrees" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 12, operands)?),
-            "atan" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 18, operands)?),
-            "asin" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 16, operands)?),
-            "acos" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 17, operands)?),
-            "atan2" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 25, operands)?),
-            "mod" => {
-                if args.len() != 2 {
-                    bail_spirv!("mod requires 2 arguments");
-                }
-                Ok(self.constructor.builder.f_mod(result_ty, None, args[0], args[1])?)
-            }
-            "dot" => {
-                if args.len() != 2 {
-                    bail_spirv!("dot requires 2 arguments");
-                }
-                Ok(self.constructor.builder.dot(result_ty, None, args[0], args[1])?)
-            }
-            "normalize" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 69, operands)?),
-            "magnitude" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 66, operands)?),
-            "cross" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 68, operands)?),
-            "reflect" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 71, operands)?),
-            "smoothstep" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 49, operands)?),
-            "distance" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 67, operands)?),
-            "refract" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 72, operands)?),
-            "fract" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 10, operands)?),
-            "determinant" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 33, operands)?),
-            "inverse" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 34, operands)?),
-            "outer" => {
-                if args.len() != 2 {
-                    bail_spirv!("outer requires 2 arguments");
-                }
-                Ok(self.constructor.builder.outer_product(result_ty, None, args[0], args[1])?)
-            }
-
-            "length" => {
-                if args.len() != 1 {
-                    bail_spirv!("length requires 1 argument");
-                }
-
-                let arr_ty = self.get_value_type_ref(value_refs[0]);
-                let variant = arr_ty
-                    .array_variant()
-                    .ok_or_else(|| err_spirv!("length: expected array type, got {:?}", arr_ty))?;
-                match variant {
-                    // View: struct {buffer_ptr, offset, len} — len is u32 in the struct
-                    // but the SSA result type is i32. Extract as u32 then bitcast.
-                    // TODO: view struct should use i32 to match language conventions.
-                    PolyType::Constructed(TypeName::ArrayVariantView, _) => {
-                        let u32_ty = self.constructor.u32_type;
-                        let len_u32 =
-                            self.constructor.builder.composite_extract(u32_ty, None, args[0], [2u32])?;
-                        Ok(self.constructor.builder.bitcast(result_ty, None, len_u32)?)
-                    }
-                    // Virtual (range): struct {start, step, len} — len field type
-                    // matches element type (may be u32), but SSA result is i32.
-                    // Extract with the actual field type, then bitcast if needed.
-                    PolyType::Constructed(TypeName::ArrayVariantVirtual, _) => {
-                        let elem_spirv = self
-                            .constructor
-                            .polytype_to_spirv(arr_ty.elem_type().expect("virtual array has elem"));
-                        if elem_spirv == result_ty {
-                            Ok(self.constructor.builder.composite_extract(
-                                result_ty,
-                                None,
-                                args[0],
-                                [2u32],
-                            )?)
-                        } else {
-                            let len_raw = self.constructor.builder.composite_extract(
-                                elem_spirv,
-                                None,
-                                args[0],
-                                [2u32],
-                            )?;
-                            Ok(self.constructor.builder.bitcast(result_ty, None, len_raw)?)
-                        }
-                    }
-                    // Composite: sized SPIR-V array — length is known from the type
-                    PolyType::Constructed(TypeName::ArrayVariantComposite, _) => {
-                        match arr_ty.array_size().expect("Array has size") {
-                            PolyType::Constructed(TypeName::Size(n), _) => {
-                                Ok(self.constructor.const_i32(*n as i32))
-                            }
-                            _ => {
-                                bail_spirv!("length: composite array has unknown size")
-                            }
-                        }
-                    }
-                    _ => {
-                        bail_spirv!("length: unknown array variant: {:?}", variant)
-                    }
-                }
-            }
-
-            "slice_storage_view" => {
-                // Slicing storage views is not yet implemented
-                bail_spirv!("_w_slice_storage_view is not yet implemented");
-            }
-
-            "view_len" => {
-                // Get the length of a view: extract field 2 from {buffer_id, offset, len}
-                if args.len() != 1 {
-                    bail_spirv!("_w_intrinsic_view_len requires 1 argument (view)");
-                }
-                let u32_ty = self.constructor.u32_type;
-                Ok(self.constructor.builder.composite_extract(u32_ty, None, args[0], [2u32])?)
-            }
-
-            _ => bail_spirv!("Unknown intrinsic: {}", name),
-        }
-    }
-
     /// Slice a storage view, materializing into a composite array.
     /// Loads each element from the buffer via AccessChain+Load.
     fn slice_view_to_composite(
@@ -2552,13 +2397,64 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         Ok(self.constructor.builder.load(result_ty, None, arr_var, None, [])?)
                     }
                 } else if id == known.length {
-                    // InstKind::Intrinsic for `_w_intrinsic_length` is
-                    // dispatched through `lower_intrinsic`'s name-stripped
-                    // "length" arm (which knows how to extract the size
-                    // from each array variant). Reaching here means a
-                    // Call instruction routed via `lower_builtin_call`,
-                    // which shouldn't happen under normal SOAC lowering.
-                    bail_spirv!("length should be lowered via lower_intrinsic, not lower_builtin_call")
+                    if arg_ids.len() != 1 {
+                        bail_spirv!("length requires 1 argument");
+                    }
+                    let arr_ty = self.get_value_type_ref(value_refs[0]);
+                    let variant = arr_ty
+                        .array_variant()
+                        .ok_or_else(|| err_spirv!("length: expected array type, got {:?}", arr_ty))?;
+                    match variant {
+                        // View: struct {buffer_ptr, offset, len} — len is u32 in
+                        // the struct but the SSA result type is i32. Extract as
+                        // u32 then bitcast.
+                        // TODO: view struct should use i32 to match language conventions.
+                        PolyType::Constructed(TypeName::ArrayVariantView, _) => {
+                            let u32_ty = self.constructor.u32_type;
+                            let len_u32 = self.constructor.builder.composite_extract(
+                                u32_ty,
+                                None,
+                                arg_ids[0],
+                                [2u32],
+                            )?;
+                            Ok(self.constructor.builder.bitcast(result_ty, None, len_u32)?)
+                        }
+                        // Virtual (range): struct {start, step, len} — len field
+                        // type matches element type (may be u32), but SSA result
+                        // is i32. Extract with the actual field type, then
+                        // bitcast if needed.
+                        PolyType::Constructed(TypeName::ArrayVariantVirtual, _) => {
+                            let elem_spirv = self
+                                .constructor
+                                .polytype_to_spirv(arr_ty.elem_type().expect("virtual array has elem"));
+                            if elem_spirv == result_ty {
+                                Ok(self.constructor.builder.composite_extract(
+                                    result_ty,
+                                    None,
+                                    arg_ids[0],
+                                    [2u32],
+                                )?)
+                            } else {
+                                let len_raw = self.constructor.builder.composite_extract(
+                                    elem_spirv,
+                                    None,
+                                    arg_ids[0],
+                                    [2u32],
+                                )?;
+                                Ok(self.constructor.builder.bitcast(result_ty, None, len_raw)?)
+                            }
+                        }
+                        // Composite: sized SPIR-V array — length is known from the type.
+                        PolyType::Constructed(TypeName::ArrayVariantComposite, _) => {
+                            match arr_ty.array_size().expect("Array has size") {
+                                PolyType::Constructed(TypeName::Size(n), _) => {
+                                    Ok(self.constructor.const_i32(*n as i32))
+                                }
+                                _ => bail_spirv!("length: composite array has unknown size"),
+                            }
+                        }
+                        _ => bail_spirv!("length: unknown array variant: {:?}", variant),
+                    }
                 } else if id == known.slice {
                     if arg_ids.len() != 3 {
                         bail_spirv!("_w_slice requires 3 arguments (arr, start, end)");

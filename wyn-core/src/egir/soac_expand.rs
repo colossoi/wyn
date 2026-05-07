@@ -15,7 +15,7 @@ use smallvec::{SmallVec, smallvec};
 use super::program::EgirInner;
 use super::types::EffectToken;
 use crate::ast::TypeName;
-use crate::builtins::names::{INTRINSIC_ARRAY_WITH_INPLACE, INTRINSIC_LENGTH, INTRINSIC_UNINIT};
+use crate::builtins::names::INTRINSIC_LENGTH;
 use crate::ssa::types::{ControlHeader, InstKind, ValueRef};
 use crate::types::TypeExt;
 use crate::types::{is_array_variant_composite, is_array_variant_view, is_virtual_array};
@@ -310,8 +310,12 @@ fn expand_one(
                     let captures: Vec<NodeId> = se.operand_nodes[n_inputs..].to_vec();
                     let out_arr_ty = graph.types[&result_nid].clone();
 
+                    let uninit_id = crate::builtins::catalog().known().uninit;
                     let init_out_nid = graph.intern_pure(
-                        PureOp::Call(INTRINSIC_UNINIT.into()),
+                        PureOp::Intrinsic {
+                            id: uninit_id,
+                            overload_idx: 0,
+                        },
                         smallvec![],
                         out_arr_ty.clone(),
                     );
@@ -862,8 +866,12 @@ fn build_scan_loop(
     // Preheader initial for the output array: a pure `_w_intrinsic_uninit` call
     // returning an array of the result type. The per-iteration array_with chain
     // fills it. (The SPIR-V backend recognizes the pattern for in-place update.)
+    let uninit_id = crate::builtins::catalog().known().uninit;
     let init_out_nid = graph.intern_pure(
-        PureOp::Call(INTRINSIC_UNINIT.into()),
+        PureOp::Intrinsic {
+            id: uninit_id,
+            overload_idx: 0,
+        },
         smallvec![],
         spec.out_arr_ty.clone(),
     );
@@ -1311,8 +1319,12 @@ fn emit_write_element(
         );
     }
 
+    let inplace_id = crate::builtins::catalog().known().array_with_in_place;
     graph.intern_pure(
-        PureOp::Call(INTRINSIC_ARRAY_WITH_INPLACE.into()),
+        PureOp::Intrinsic {
+            id: inplace_id,
+            overload_idx: 0,
+        },
         smallvec![arr_nid, idx_nid, val_nid],
         arr_ty.clone(),
     )

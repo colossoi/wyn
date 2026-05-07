@@ -17,7 +17,7 @@ use polytype::Type as PolyType;
 
 use crate::ast::{Span, TypeName};
 use crate::builtins::lowering::{BuiltinLowering, PrimOp};
-use crate::builtins::names::{INTRINSIC_ARRAY_WITH, INTRINSIC_ARRAY_WITH_INPLACE, INTRINSIC_UNINIT};
+use crate::builtins::names::{INTRINSIC_ARRAY_WITH, INTRINSIC_ARRAY_WITH_INPLACE};
 use crate::error::Result;
 use crate::ssa::types::{
     EntryPoint, ExecutionModel, FuncBody, Function, InstKind, IoDecoration, Program, ValueId, ValueRef,
@@ -1550,7 +1550,9 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         // uninitialized composite. In WGSL that's just a
                         // `var<function> x: T;` — no initializer, no
                         // function call.
-                        InstKind::Call { func, .. } if func == INTRINSIC_UNINIT => {
+                        InstKind::Intrinsic { id, .. }
+                            if *id == crate::builtins::catalog().known().uninit =>
+                        {
                             let result_id = inst.result.ok_or_else(|| {
                                 crate::err_wgsl_at!(
                                     self.blame_span(),
@@ -1576,14 +1578,22 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         // `_w_intrinsic_array_with(arr, i, v)`:
                         // functional update. Declare a fresh `var` copy
                         // of the source, then patch the one element.
-                        InstKind::Call { func, args }
-                            if func == INTRINSIC_ARRAY_WITH_INPLACE || func == INTRINSIC_ARRAY_WITH =>
+                        InstKind::Intrinsic { id, args, .. }
+                            if *id == crate::builtins::catalog().known().array_with_in_place
+                                || *id == crate::builtins::catalog().known().array_with =>
                         {
+                            let known = crate::builtins::catalog().known();
+                            let is_inplace = *id == known.array_with_in_place;
+                            let func_name = if is_inplace {
+                                INTRINSIC_ARRAY_WITH_INPLACE
+                            } else {
+                                INTRINSIC_ARRAY_WITH
+                            };
                             if args.len() != 3 {
                                 return Err(crate::err_wgsl_at!(
                                     self.blame_span(),
                                     "{} expects 3 args, got {}",
-                                    func,
+                                    func_name,
                                     args.len()
                                 ));
                             }
@@ -1591,9 +1601,9 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             let idx = self.get_value(args[1])?;
                             let val = self.get_value(args[2])?;
                             let result_id = inst.result.ok_or_else(|| {
-                                crate::err_wgsl_at!(self.blame_span(), "{} must have a result", func)
+                                crate::err_wgsl_at!(self.blame_span(), "{} must have a result", func_name)
                             })?;
-                            if func == INTRINSIC_ARRAY_WITH_INPLACE {
+                            if is_inplace {
                                 writeln!(
                                     output,
                                     "{}{}[{}] = {};",

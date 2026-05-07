@@ -67,14 +67,15 @@ fn compile_to_expanded_egraph(input: &str) -> crate::egir::types::EGraph {
 
 /// Collect all `_w_intrinsic_array_with_inplace` nodes in the graph.
 fn array_with_nodes(graph: &crate::egir::types::EGraph) -> Vec<crate::egir::types::NodeId> {
+    let inplace_id = crate::builtins::catalog().known().array_with_in_place;
     graph
         .nodes
         .iter()
         .filter_map(|(id, node)| match node {
             ENode::Pure {
-                op: PureOp::Call(name),
+                op: PureOp::Intrinsic { id: bid, .. },
                 ..
-            } if name == INTRINSIC_ARRAY_WITH_INPLACE => Some(id),
+            } if *bid == inplace_id => Some(id),
             _ => None,
         })
         .collect()
