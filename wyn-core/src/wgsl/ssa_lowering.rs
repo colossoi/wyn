@@ -17,10 +17,7 @@ use polytype::Type as PolyType;
 
 use crate::ast::{Span, TypeName};
 use crate::builtins::lowering::{BuiltinLowering, PrimOp};
-use crate::builtins::names::{
-    INTRINSIC_ARRAY_WITH, INTRINSIC_ARRAY_WITH_INPLACE, INTRINSIC_LENGTH, INTRINSIC_SLICE,
-    INTRINSIC_STORAGE_LEN, INTRINSIC_THREAD_ID, INTRINSIC_UNINIT,
-};
+use crate::builtins::names::{INTRINSIC_ARRAY_WITH, INTRINSIC_ARRAY_WITH_INPLACE, INTRINSIC_UNINIT};
 use crate::error::Result;
 use crate::ssa::types::{
     EntryPoint, ExecutionModel, FuncBody, Function, InstKind, IoDecoration, Program, ValueId, ValueRef,
@@ -1987,7 +1984,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 overload_idx: _,
                 args,
             } => {
-                let name = crate::builtins::by_id(*id).dispatch_name();
+                let known = crate::builtins::catalog().known();
                 let arg_strs: Result<Vec<_>> = args.iter().map(|a| self.get_value(*a)).collect();
                 let arg_strs = arg_strs?;
                 // `_w_intrinsic_storage_len(set, binding)` → runtime
@@ -2007,10 +2004,10 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 // SSA result type is always `u32` (see
                 // `parallelize::intrinsic_term(..., u32_ty)`), so no
                 // cast is needed.
-                if name == INTRINSIC_THREAD_ID && args.is_empty() {
+                if *id == known.thread_id && args.is_empty() {
                     return Ok("_wgsl_gid.x".to_string());
                 }
-                if name == INTRINSIC_STORAGE_LEN && args.len() == 2 {
+                if *id == known.storage_len && args.len() == 2 {
                     let set = self.resolve_const_u32(args[0]);
                     let binding = self.resolve_const_u32(args[1]);
                     match (set, binding) {
@@ -2040,7 +2037,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 // composite→composite (also a literal). Start/end are
                 // constants for the materialization cases; runtime
                 // start/end are allowed for view→view.
-                if name == INTRINSIC_SLICE && args.len() == 3 {
+                if *id == known.slice && args.len() == 3 {
                     let arr_id = args[0].as_ssa().ok_or_else(|| {
                         crate::err_wgsl_at!(
                             self.blame_span(),
@@ -2132,7 +2129,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         "_w_intrinsic_slice: unsupported slice shape (src not view, dst not composite)"
                     ));
                 }
-                if name == INTRINSIC_LENGTH && args.len() == 1 {
+                if *id == known.length && args.len() == 1 {
                     if let Some(id) = args[0].as_ssa() {
                         let ty = self.body.get_value_type(id);
                         // Virtual arrays carry their length in the `f2`
@@ -2154,6 +2151,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         "_w_intrinsic_length requires an SSA array argument"
                     ));
                 }
+                let name = crate::builtins::by_id(*id).dispatch_name();
                 self.lower_intrinsic(name, &arg_strs, result_ty.as_ref())
             }
 
