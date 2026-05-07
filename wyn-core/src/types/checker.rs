@@ -194,8 +194,6 @@ struct Candidate {
 struct ResolvedValue {
     /// Display name for error messages
     display_name: String,
-    /// Type scheme to store in type_table at the identifier node
-    scheme_for_table: TypeScheme,
     /// Instantiated monotype (with fresh type variables)
     instantiated: Type,
     /// For overloaded intrinsics: all available schemes (for callee resolution)
@@ -541,36 +539,6 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    /// Try to extract a qualified name from a FieldAccess expression chain
-    /// Returns Some(QualName) if the expression is a chain of Identifier + FieldAccess
-    /// E.g., M.N.x -> QualName { qualifiers: ["M", "N"], name: "x" }
-    ///       f32.cos -> QualName { qualifiers: ["f32"], name: "cos" }
-    fn try_extract_qual_name(expr: &Expression, final_field: &str) -> Option<crate::ast::QualName> {
-        let mut qualifiers = Vec::new();
-        let mut current = expr;
-
-        // Walk up the FieldAccess chain collecting qualifiers
-        loop {
-            match &current.kind {
-                ExprKind::Identifier(quals, name) if quals.is_empty() => {
-                    // Base case: found the root identifier
-                    qualifiers.push(name.clone());
-                    qualifiers.reverse();
-                    return Some(crate::ast::QualName::new(qualifiers, final_field.to_string()));
-                }
-                ExprKind::FieldAccess(base, field) => {
-                    // Intermediate field access - this is a qualifier
-                    qualifiers.push(field.clone());
-                    current = base;
-                }
-                _ => {
-                    // Not a simple qualified name chain (e.g., function call, literal, etc.)
-                    return None;
-                }
-            }
-        }
-    }
-
     /// Unified name resolution for identifiers and qualified names.
     ///
     /// Precedence: locals/top-level shadow builtins (`def length = ...`
@@ -581,32 +549,33 @@ impl<'a> TypeChecker<'a> {
     /// through to scope/module lookup.
     ///
     /// `node_id` is the AST id of the Identifier expression being
-    /// resolved; pass `None` for synthetic lookups (e.g. recovered
-    /// qualified names from FieldAccess chains).
+    /// resolved. After Phase 4, callers must always supply a real
+    /// NodeId — the `Option<NodeId>` branch (and the synthetic
+    /// FieldAccess recovery) is gone.
     fn resolve_value_name(
         &mut self,
         full_name: &str,
         is_qualified: bool,
-        node_id: Option<NodeId>,
+        node_id: NodeId,
     ) -> Option<ResolvedValue> {
-        if let Some(id) = node_id {
-            if let Some(crate::name_resolution::ResolvedValueRef::Builtin { id: builtin_id, .. }) =
-                self.name_resolution.get(id)
-            {
-                let bid = *builtin_id;
-                let lookup = self.scheme_lookup_for_builtin(bid);
-                let def_name = crate::builtins::by_id(bid).raw.surface_name;
-                return Some(self.resolve_scheme_lookup(def_name, lookup));
-            }
+        // Path A: NameResolution side table covers every catalog
+        // identifier (Phases 1 + 3.5 + the prelude-walk in
+        // `name_resolution::build_name_resolution`).
+        if let Some(crate::name_resolution::ResolvedValueRef::Builtin { id: builtin_id, .. }) =
+            self.name_resolution.get(node_id)
+        {
+            let bid = *builtin_id;
+            let lookup = self.scheme_lookup_for_builtin(bid);
+            let def_name = crate::builtins::by_id(bid).raw.surface_name;
+            return Some(self.resolve_scheme_lookup(def_name, lookup));
         }
 
+        // Path B: non-catalog names — locals, user-defined functions,
+        // user-module-scope functions (`materials.pbrCookTorrance` etc).
         let lookup = if is_qualified {
-            self.lookup_intrinsic(full_name).or_else(|| self.lookup_module_scheme(full_name))
+            self.lookup_module_scheme(full_name)
         } else {
-            self.scope_stack
-                .lookup(full_name)
-                .map(|e| SchemeLookup::Single(e.value.clone()))
-                .or_else(|| self.lookup_intrinsic(full_name))
+            self.scope_stack.lookup(full_name).map(|e| SchemeLookup::Single(e.value.clone()))
         };
 
         lookup.map(|scheme_lookup| self.resolve_scheme_lookup(full_name, scheme_lookup))
@@ -614,18 +583,6 @@ impl<'a> TypeChecker<'a> {
 
     fn lookup_module_scheme(&self, qualified_name: &str) -> Option<SchemeLookup> {
         self.module_schemes.get(qualified_name).cloned().map(SchemeLookup::Single)
-    }
-
-    fn lookup_intrinsic(&mut self, name: &str) -> Option<SchemeLookup> {
-        let def = crate::builtins::catalog().lookup_by_surface_name(name)?;
-        // Per-type ops (`f32.+`, `f32.i32`, etc.) get their schemes from
-        // prelude module signatures, not the catalog. They're recorded
-        // here for ImplSource lowering only — `intrinsic_source_names`
-        // is empty.
-        if def.intrinsic_source_names().is_empty() {
-            return None;
-        }
-        Some(self.scheme_lookup_for_builtin(def.id))
     }
 
     /// Build a `SchemeLookup` from a `BuiltinId` by invoking each
@@ -663,7 +620,6 @@ impl<'a> TypeChecker<'a> {
                 let ty = scheme.instantiate(&mut self.context);
                 ResolvedValue {
                     display_name: name.to_string(),
-                    scheme_for_table: scheme,
                     instantiated: ty,
                     overloads: None,
                 }
@@ -672,7 +628,6 @@ impl<'a> TypeChecker<'a> {
                 let ty = self.context.new_variable();
                 ResolvedValue {
                     display_name: name.to_string(),
-                    scheme_for_table: TypeScheme::Monotype(ty.clone()),
                     instantiated: ty,
                     overloads: Some(schemes),
                 }
@@ -1861,7 +1816,7 @@ impl<'a> TypeChecker<'a> {
 
                 debug!("Looking up identifier '{}'", full_name);
 
-                if let Some(resolved) = self.resolve_value_name(&full_name, is_qualified, Some(expr.h.id)) {
+                if let Some(resolved) = self.resolve_value_name(&full_name, is_qualified, expr.h.id) {
                     // Store instantiated type with substitutions applied
                     let applied = resolved.instantiated.apply(&self.context);
                     self.type_table
@@ -2279,18 +2234,12 @@ impl<'a> TypeChecker<'a> {
                 }
             }
             ExprKind::FieldAccess(inner_expr, field) => {
-                // Try to extract a qualified name (e.g., f32.cos, M.N.x)
-                if let Some(qual_name) = Self::try_extract_qual_name(inner_expr, field) {
-                    let dotted = qual_name.to_dotted();
-
-                    if let Some(resolved) = self.resolve_value_name(&dotted, true, None) {
-                        self.type_table.insert(expr.h.id, resolved.scheme_for_table);
-                        return Ok(resolved.instantiated);
-                    }
-                    // Qualified name not found - fall through to field access
-                }
-
-                // Infer base expression type
+                // `name_resolution::run` rewrites every module-style
+                // `mod.name` chain into `Identifier([mod], name)` before
+                // type-check, so by the time we see `FieldAccess` here
+                // it's a genuine record field access. (The previous
+                // `try_extract_qual_name` recovery path was a defensive
+                // shim from before that rewrite; it's now unreachable.)
                 let base_type = self.infer_expression(inner_expr)?;
 
                 // Apply context and strip uniqueness
@@ -2697,7 +2646,7 @@ impl<'a> TypeChecker<'a> {
                     if quals.is_empty() { name.clone() } else { format!("{}.{}", quals.join("."), name) };
                 let is_qualified = !quals.is_empty();
 
-                if let Some(resolved) = self.resolve_value_name(&full_name, is_qualified, Some(func.h.id)) {
+                if let Some(resolved) = self.resolve_value_name(&full_name, is_qualified, func.h.id) {
                     // For overloaded intrinsics, expand into multiple candidates
                     let candidates = if let Some(overloads) = resolved.overloads {
                         overloads
