@@ -64,7 +64,7 @@ What you get "for free":
 | **TlcSoaNormalized** | `tlc::soa` | SoA transform (`[n](A,B)` → `([n]A, [n]B)`) + Map+Zip flattening + standalone Zip elimination |
 | **TlcFused** | `tlc::fusion` | SOAC fusion: map-map, interprocedural producer-consumer |
 | **TlcOwnershipApplied** | `tlc::ownership` | Backward ownership-liveness analysis with fixed-point over loops/SOAC bodies. Reports use-after-move; rewrites `_w_intrinsic_array_with` → `_w_intrinsic_array_with_inplace` where the source's owner is mutable and dead-after the call |
-| **TlcDefunctionalized** | `tlc::defunctionalize` (orchestration) + `tlc::closure_convert` + `tlc::hof_specialize` | Lambda lifting + HOF specialization. Captures for SOAC-position lambdas land on a `SoacBody { lam, captures }` wrapper, not on the `Lambda` struct. Three verifiers (`verify_closure_converted`, `verify_hof_specialized`, `verify_closure_calls_lowered` from `tlc::closure_calls_lower`) guard the architectural seams |
+| **TlcDefunctionalized** | `tlc::closure_convert` → `tlc::hof_specialize` → `tlc::closure_calls_lower` (composed inside `TlcOwnershipApplied::defunctionalize`) | Three sequential passes communicating through a `ClosureInfo` side-table. Lambdas lifted to top-level defs, HOFs specialized away, captures threaded into call sites. Captures for SOAC-position lambdas land on a `SoacBody { lam, captures }` wrapper. `verify_closure_converted`, `verify_hof_specialized`, and `verify_closure_calls_lowered` guard each phase boundary |
 | **TlcMonomorphized** | `tlc::specialize`, `tlc::monomorphize` | Polymorphic intrinsics specialized; user functions monomorphized |
 | **TlcBufferSpecialized** | `tlc::buffer_specialize` | Storage buffer parameter specialization |
 | **TlcGeneratedLambdasFolded** | `tlc::inline` | Fold compiler-generated `_w_lambda_*` defs (from defunctionalization) back at call sites + DCE |
@@ -102,27 +102,59 @@ Key properties:
 
 ### Defunctionalization
 
-The defunctionalization stage spans four sibling modules under `tlc::`:
-`closure_convert` (lambda lifting + free-variable analysis),
-`hof_specialize` (HOF specialization runtime), `closure_calls_lower`
-(post-pass verifier), and `defunctionalize` (orchestration).
+The `defunctionalize()` typestate transition composes three sequential
+passes under `tlc::`. They communicate through a `ClosureInfo`
+side-table — every callable `Var`-position in the IR resolves through
+a single `closure_info.resolve_callable(sym)` lookup that returns
+either `Direct(sym)` (no captures) or
+`Closure { code, captures, param_count }`.
 
-What each step does:
-1. **Lambda lifting** (`closure_convert`): Every standalone `TermKind::Lambda` is hoisted to a top-level `Def`, replacing the lambda site with a `Var` referring to the lifted symbol. Free variables of the lifted lambda become extra trailing parameters on the lifted def, threaded as args at every call site. The `Lambda` struct is `{ params, body, ret_ty }` — a clean function abstraction with no closure baggage.
-2. **HOF specialization** (`hof_specialize`): User-defined higher-order functions get specialized per-callsite — every reachable top-level def ends with no function-typed parameters.
-3. **SOAC envelope captures**: Lambdas embedded in `SoacOp` envelopes (`Map`, `Reduce`, `Scan`, …) are also lifted, but the SOAC keeps a `SoacBody { lam: Lambda, captures: Vec<(SymbolId, Type, Term)> }` payload so the loop body and its closed-over values stay together for later expansion. The same shape is used for `ArrayExpr::Generate`.
+1. **`closure_convert`** — lifts every standalone `TermKind::Lambda` to
+   a top-level `Def`, replacing the lambda site with a `Var` referring
+   to the lifted symbol. Free variables become trailing parameters on
+   the lifted def. Let-bound lambdas are substituted away (`let g =
+   |…| body in rest` → `rest[g/lifted_sym]`) so no callable aliases
+   survive into later passes. Transitive captures are pulled in: if a
+   lifted lambda's body calls another closure, that closure's captures
+   are added to the outer lambda's capture list. Output: `(Program,
+   ClosureInfo)`.
+
+2. **`hof_specialize`** — clones each user-defined higher-order
+   function for every concrete callable that flows in, eliminating
+   function-typed parameters. Single dispatch point: at each
+   `App(Var(hof), args)`, look up the func-arg-slot's symbol via
+   `closure_info.resolve_callable`. The cloned body has its captures
+   pre-threaded (using the same logic the next pass applies globally)
+   before the per-specialization renaming step rewrites outer-scope
+   capture symbols to fresh local params. After this pass, every
+   reachable top-level def has zero function-typed parameters.
+
+3. **`closure_calls_lower`** — global tree walk. At each
+   `App(Var(sym), args)` where `closure_info` reports
+   `Closure { code, captures, param_count }`, threads captures by
+   rewriting to `App(Var(code), args ++ captures)`. Idempotent — only
+   triggers when `args.len() == param_count`, so calls that
+   `hof_specialize` already pre-threaded inside specialized HOF bodies
+   are skipped.
+
+SOAC envelope captures: lambdas embedded in `SoacOp` envelopes
+(`Map`, `Reduce`, `Scan`, …) are lifted by `closure_convert` like any
+other lambda, but the SOAC keeps a `SoacBody { lam: Lambda,
+captures: Vec<(SymbolId, Type, Term)> }` payload so the loop body and
+its closed-over values stay together for later expansion. The same
+shape is used for `ArrayExpr::Generate`.
 
 Example transformation:
 ```
 -- Input (lambda with capture y):
 map(|x| x + y, arr)
 
--- After defunctionalization:
-_lambda_0 = λ(x, y). x + y       -- y is a regular param of the lifted def
-map(SoacBody { lam: _lambda_0, captures: [(y_sym, ty, Var(y))] }, arr)
+-- After closure_convert:
+_w_lambda_0 = λ(x, y). x + y       -- y is a regular param of the lifted def
+map(SoacBody { lam: _w_lambda_0, captures: [(y_sym, ty, Var(y))] }, arr)
 ```
 
-Three verifier-checked invariants run between phases:
+Three verifier-checked invariants run at each phase boundary:
 `verify_closure_converted` (no `TermKind::Lambda` outside SOAC envelopes),
 `verify_hof_specialized` (no reachable top-level def has a function-typed
 parameter), and `verify_closure_calls_lowered` (every `App.func` is a `Var`
