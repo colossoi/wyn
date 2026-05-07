@@ -1,9 +1,16 @@
-use super::run as defunctionalize;
 use crate::ast::{BinaryOp, Span, TypeName};
 use crate::tlc::{Def, DefMeta, Lambda, LoopKind, Program, Term, TermId, TermIdSource, TermKind};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
 use std::collections::{HashMap, HashSet};
+
+/// End-to-end runner for the three-phase closure pipeline. Mirrors what
+/// `TlcOwnershipApplied::defunctionalize` does in production.
+fn defunctionalize(program: Program, known_defs: &HashSet<String>) -> Program {
+    let (cc, closure_info) = super::super::closure_convert::run(program, known_defs);
+    let hof_free = super::super::hof_specialize::run(cc, &closure_info, known_defs);
+    super::super::closure_calls_lower::run(hof_free, &closure_info)
+}
 
 /// Test helper that manages symbol table and term ID generation.
 struct TestBuilder {

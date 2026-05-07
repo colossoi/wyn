@@ -1,22 +1,25 @@
-//! HOF-specialization phase boundary (phase 2 of the defunctionalization split).
+//! HOF-specialization pass (phase 2 of the closure pipeline).
 //!
-//! Owns the post-condition verifier for HOF specialization: every
-//! reachable top-level def has zero function-typed parameters. Wired in
-//! post-`filter_reachable`, where dead unspecialized HOF definitions
-//! have already been removed.
+//! Consumes the closure-converted program + `ClosureInfo` produced by
+//! `closure_convert::run`. Specialises every higher-order function call
+//! by cloning the HOF body and substituting the function-typed parameter
+//! with the resolved callable symbol. After this pass, every top-level
+//! def has zero function-typed parameters.
 //!
-//! The actual specialization logic still lives inside
-//! `tlc::defunctionalize` (tightly coupled with lambda lifting and
-//! StaticVal tracking). This module owns the architectural seam — the
-//! verifier guarantees the existing pipeline produces well-shaped output
-//! and gives a target shape for any future extraction of the
-//! specialization phase.
+//! Single dispatch point: for each `App(Var(hof_sym), args)` whose
+//! `hof_sym` is a HOF, the func-arg-slot's symbol is resolved via
+//! `closure_info.resolve_callable(sym)`. No `Lambda` discovery, no
+//! let-alias tracking, no four-source extract — those concerns are
+//! handled by `closure_convert` upstream.
 
-use super::{ArrayExpr, Def, Lambda, LoopKind, Place, Program, SoacOp, Term, TermIdSource, TermKind};
-use crate::SymbolId;
+use super::closure_convert::{CallableValue, ClosureInfo};
+use super::{
+    ArrayExpr, Def, DefMeta, Lambda, LoopKind, Place, Program, SoacOp, Term, TermIdSource, TermKind,
+};
 use crate::ast::{Span, TypeName};
+use crate::{SymbolId, SymbolTable};
 use polytype::Type;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // =============================================================================
 // Verifier
@@ -801,6 +804,365 @@ fn substitute_var_array_expr(
             unreachable!("StorageBuffer introduced after defunctionalization")
         }
     }
+}
+
+// =============================================================================
+// HofSpecializer pass
+// =============================================================================
+
+struct HofSpecializer<'a> {
+    symbols: SymbolTable,
+    top_level: HashSet<SymbolId>,
+    #[allow(dead_code)]
+    known_defs: &'a HashSet<String>,
+    closure_info: &'a ClosureInfo,
+    hof_info: HashMap<SymbolId, HofInfo>,
+    specialized_defs: Vec<Def>,
+    specialization_cache: HashMap<(SymbolId, SymbolId, Vec<String>), SymbolId>,
+    specialization_counter: usize,
+    term_ids: TermIdSource,
+}
+
+impl<'a> HofSpecializer<'a> {
+    fn run(program: Program, closure_info: &'a ClosureInfo, known_defs: &'a HashSet<String>) -> Program {
+        let hof_info = detect_hofs(&program.defs);
+        let top_level: HashSet<SymbolId> = program.defs.iter().map(|d| d.name).collect();
+
+        let mut hs = Self {
+            symbols: program.symbols,
+            top_level,
+            known_defs,
+            closure_info,
+            hof_info,
+            specialized_defs: vec![],
+            specialization_cache: HashMap::new(),
+            specialization_counter: 0,
+            term_ids: TermIdSource::new(),
+        };
+
+        let transformed: Vec<Def> = program
+            .defs
+            .into_iter()
+            .map(|def| Def {
+                body: hs.rewrite_def_body(def.body),
+                ..def
+            })
+            .collect();
+
+        Program {
+            defs: transformed.into_iter().chain(hs.specialized_defs).collect(),
+            uniforms: program.uniforms,
+            storage: program.storage,
+            symbols: hs.symbols,
+            def_syms: program.def_syms,
+        }
+    }
+
+    /// Walk a def body, preserving the outer parameter-spine `Lambda`
+    /// nodes (those carry the def's named parameters). Anything below
+    /// the spine routes through `rewrite_term`, which scans App nodes
+    /// for HOF calls.
+    fn rewrite_def_body(&mut self, term: Term) -> Term {
+        match term.kind {
+            TermKind::Lambda(Lambda { params, body, ret_ty }) => {
+                let new_body = self.rewrite_def_body(*body);
+                Term {
+                    id: self.term_ids.next_id(),
+                    ty: term.ty,
+                    span: term.span,
+                    kind: TermKind::Lambda(Lambda {
+                        params,
+                        body: Box::new(new_body),
+                        ret_ty,
+                    }),
+                }
+            }
+            _ => self.rewrite_term(term),
+        }
+    }
+
+    /// Recursively walk a term. At every `App(Var(hof_sym), args)` whose
+    /// `hof_sym` is a HOF and whose func-arg-slot resolves through
+    /// `ClosureInfo` to a callable, dispatch to `specialize_call`.
+    fn rewrite_term(&mut self, term: Term) -> Term {
+        let ty = term.ty.clone();
+        let span = term.span;
+        match term.kind {
+            TermKind::App { func, args } => {
+                let new_func = self.rewrite_term(*func);
+                let new_args: Vec<Term> = args.into_iter().map(|a| self.rewrite_term(a)).collect();
+
+                if let TermKind::Var(crate::tlc::VarRef::Symbol(sym)) = &new_func.kind {
+                    let hof_sym = *sym;
+                    if let Some(hof_info) = self.hof_info.get(&hof_sym).cloned() {
+                        for &func_param_idx in &hof_info.func_param_indices {
+                            if func_param_idx >= new_args.len() {
+                                continue;
+                            }
+                            let arg_sym = match &new_args[func_param_idx].kind {
+                                TermKind::Var(crate::tlc::VarRef::Symbol(s)) => *s,
+                                _ => continue,
+                            };
+                            let (code, captures) = match self.closure_info.resolve_callable(arg_sym) {
+                                Some(CallableValue::Direct(code)) => (*code, Vec::new()),
+                                Some(CallableValue::Closure { code, captures, .. }) => {
+                                    (*code, captures.clone())
+                                }
+                                None => continue,
+                            };
+                            let hof_def =
+                                hof_info.def.as_ref().expect("BUG: user HOF should have def in hof_info");
+                            return self.specialize_call(
+                                hof_sym,
+                                hof_def,
+                                func_param_idx,
+                                code,
+                                &captures,
+                                &new_args,
+                                ty,
+                                span,
+                            );
+                        }
+                    }
+                }
+
+                Term {
+                    id: self.term_ids.next_id(),
+                    ty,
+                    span,
+                    kind: TermKind::App {
+                        func: Box::new(new_func),
+                        args: new_args,
+                    },
+                }
+            }
+
+            TermKind::Let {
+                name,
+                name_ty,
+                rhs,
+                body,
+            } => Term {
+                id: self.term_ids.next_id(),
+                ty,
+                span,
+                kind: TermKind::Let {
+                    name,
+                    name_ty,
+                    rhs: Box::new(self.rewrite_term(*rhs)),
+                    body: Box::new(self.rewrite_term(*body)),
+                },
+            },
+
+            TermKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => Term {
+                id: self.term_ids.next_id(),
+                ty,
+                span,
+                kind: TermKind::If {
+                    cond: Box::new(self.rewrite_term(*cond)),
+                    then_branch: Box::new(self.rewrite_term(*then_branch)),
+                    else_branch: Box::new(self.rewrite_term(*else_branch)),
+                },
+            },
+
+            TermKind::Loop {
+                loop_var,
+                loop_var_ty,
+                init,
+                init_bindings,
+                kind,
+                body,
+            } => {
+                let init = self.rewrite_term(*init);
+                let init_bindings: Vec<_> =
+                    init_bindings.into_iter().map(|(n, ty, e)| (n, ty, self.rewrite_term(e))).collect();
+                let kind = match kind {
+                    LoopKind::For { var, var_ty, iter } => LoopKind::For {
+                        var,
+                        var_ty,
+                        iter: Box::new(self.rewrite_term(*iter)),
+                    },
+                    LoopKind::ForRange { var, var_ty, bound } => LoopKind::ForRange {
+                        var,
+                        var_ty,
+                        bound: Box::new(self.rewrite_term(*bound)),
+                    },
+                    LoopKind::While { cond } => LoopKind::While {
+                        cond: Box::new(self.rewrite_term(*cond)),
+                    },
+                };
+                let body = self.rewrite_term(*body);
+                Term {
+                    id: self.term_ids.next_id(),
+                    ty,
+                    span,
+                    kind: TermKind::Loop {
+                        loop_var,
+                        loop_var_ty,
+                        init: Box::new(init),
+                        init_bindings,
+                        kind,
+                        body: Box::new(body),
+                    },
+                }
+            }
+
+            TermKind::Force(inner) => Term {
+                id: self.term_ids.next_id(),
+                ty,
+                span,
+                kind: TermKind::Force(Box::new(self.rewrite_term(*inner))),
+            },
+
+            // SOAC envelopes don't trigger HOF specialization — their
+            // bodies are already lifted top-level defs (closure-convert
+            // post-condition). Pass through.
+            TermKind::Soac(_)
+            | TermKind::ArrayExpr(_)
+            | TermKind::Lambda(_)
+            | TermKind::Var(_)
+            | TermKind::IntLit(_)
+            | TermKind::FloatLit(_)
+            | TermKind::BoolLit(_)
+            | TermKind::BinOp(_)
+            | TermKind::UnOp(_)
+            | TermKind::Extern(_) => Term {
+                id: self.term_ids.next_id(),
+                ty,
+                span,
+                kind: term.kind,
+            },
+        }
+    }
+
+    /// Specialize one HOF call by cloning the HOF body, substituting
+    /// the function-typed parameter with `code`, dropping the
+    /// function-typed param from the spine, appending capture params,
+    /// and recursively rewriting the cloned body so further nested
+    /// HOF calls get specialized too.
+    #[allow(clippy::too_many_arguments)]
+    fn specialize_call(
+        &mut self,
+        hof_sym: SymbolId,
+        hof_def: &Def,
+        func_param_idx: usize,
+        code: SymbolId,
+        captures: &[Term],
+        arg_terms: &[Term],
+        ty: Type<TypeName>,
+        span: Span,
+    ) -> Term {
+        let arg_type_keys: Vec<String> = arg_terms.iter().map(|a| format_type_for_key(&a.ty)).collect();
+        let cache_key = (hof_sym, code, arg_type_keys);
+        if let Some(specialized_sym) = self.specialization_cache.get(&cache_key).cloned() {
+            return build_specialized_call(
+                specialized_sym,
+                func_param_idx,
+                arg_terms,
+                captures,
+                ty,
+                span,
+                &mut self.term_ids,
+            );
+        }
+
+        let mut type_subst = TypeSubst::new();
+        let poly_param_types = extract_param_types(&hof_def.ty);
+        for (i, poly_ty) in poly_param_types.iter().enumerate() {
+            if i < arg_terms.len() {
+                build_type_subst(poly_ty, &arg_terms[i].ty, &mut type_subst);
+            }
+        }
+
+        let hof_name = self.symbols.get(hof_sym).expect("BUG: HOF symbol not in table");
+        let specialized_name = format!("{}${}", hof_name, self.specialization_counter);
+        self.specialization_counter += 1;
+        let specialized_sym = self.symbols.alloc(specialized_name.clone());
+        self.specialization_cache.insert(cache_key, specialized_sym);
+
+        let func_param_sym = get_func_param_sym(hof_def, func_param_idx);
+        let (params, inner_body) = super::extract_lambda_params(&hof_def.body);
+        let substituted_inner = substitute_var(&inner_body, func_param_sym, code, &mut self.term_ids);
+
+        let mut new_params: Vec<(SymbolId, Type<TypeName>)> =
+            params.into_iter().enumerate().filter(|(i, _)| *i != func_param_idx).map(|(_, p)| p).collect();
+
+        let mut capture_subst: Vec<(SymbolId, SymbolId)> = Vec::with_capacity(captures.len());
+        for cap_term in captures {
+            let outer_sym = match &cap_term.kind {
+                TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => *sym,
+                _ => panic!("BUG: capture term is not a Var: {:?}", cap_term.kind),
+            };
+            let outer_name =
+                self.symbols.get(outer_sym).cloned().unwrap_or_else(|| format!("cap{}", outer_sym.0));
+            let fresh_sym = self.symbols.alloc(format!("{}__cap_{}", specialized_name, outer_name));
+            capture_subst.push((outer_sym, fresh_sym));
+            new_params.push((fresh_sym, cap_term.ty.clone()));
+        }
+
+        // Recursively rewrite for any nested HOF calls in the cloned
+        // body, then thread captures (using the same logic
+        // `closure_calls_lower` applies globally). Capture threading
+        // happens BEFORE the outer→fresh capture renaming below: the
+        // threaded calls reference outer-scope capture syms, which the
+        // renaming then rewrites to the specialization's fresh local
+        // params. Threading is idempotent — when
+        // `closure_calls_lower::run` later walks this body, it sees
+        // `args.len() == param_count + captures.len()` and skips.
+        let rewritten_inner = self.rewrite_term(substituted_inner);
+        let threaded_inner = super::closure_calls_lower::thread_captures_in_term(
+            rewritten_inner,
+            self.closure_info,
+            &mut self.term_ids,
+        );
+        let mut rewritten_inner = threaded_inner;
+        for (outer_sym, fresh_sym) in &capture_subst {
+            rewritten_inner = substitute_var(&rewritten_inner, *outer_sym, *fresh_sym, &mut self.term_ids);
+        }
+
+        let rewritten_inner = apply_type_subst_to_term(&rewritten_inner, &type_subst, &mut self.term_ids);
+        let new_params: Vec<(SymbolId, Type<TypeName>)> =
+            new_params.into_iter().map(|(sym, ty)| (sym, apply_type_subst(&ty, &type_subst))).collect();
+
+        let rebuilt = super::closure_convert::rebuild_nested_lam(
+            &new_params,
+            rewritten_inner,
+            hof_def.body.span,
+            &mut self.term_ids,
+        );
+
+        let specialized_def = Def {
+            name: specialized_sym,
+            ty: rebuilt.ty.clone(),
+            body: rebuilt,
+            meta: DefMeta::Function,
+            arity: new_params.len(),
+        };
+
+        self.top_level.insert(specialized_sym);
+        self.specialized_defs.push(specialized_def);
+
+        build_specialized_call(
+            specialized_sym,
+            func_param_idx,
+            arg_terms,
+            captures,
+            ty,
+            span,
+            &mut self.term_ids,
+        )
+    }
+}
+
+/// Run HOF specialization. Consumes the closure-converted program and
+/// the closure-info side-table; returns a program in which every
+/// reachable top-level def has zero function-typed parameters.
+pub fn run(program: Program, closure_info: &ClosureInfo, known_defs: &HashSet<String>) -> Program {
+    HofSpecializer::run(program, closure_info, known_defs)
 }
 
 // =============================================================================

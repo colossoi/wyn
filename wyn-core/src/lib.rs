@@ -672,7 +672,15 @@ impl std::ops::Deref for TlcOwnershipApplied {
 }
 
 impl TlcOwnershipApplied {
-    /// Defunctionalize: lift lambdas and flatten SOAC closure captures.
+    /// Run the three-phase closure pipeline:
+    /// 1. `closure_convert::run` lifts every lambda to a top-level def
+    ///    and produces a `ClosureInfo` side-table describing captures
+    ///    per callable symbol.
+    /// 2. `hof_specialize::run` clones each HOF for the concrete
+    ///    callable that flows in, eliminating function-typed params.
+    /// 3. `closure_calls_lower::run` threads captures into call sites
+    ///    and verifies every call resolves to a direct, fully-applied
+    ///    `Var`-position callee.
     pub fn defunctionalize(self) -> TlcDefunctionalized {
         let TlcEarlyInner {
             tlc,
@@ -681,9 +689,11 @@ impl TlcOwnershipApplied {
             schemes,
             fill_hole_errors: _,
         } = self.0;
-        let defunc = tlc::defunctionalize::run(tlc, &known_defs);
+        let (cc, closure_info) = tlc::closure_convert::run(tlc, &known_defs);
+        let hof_free = tlc::hof_specialize::run(cc, &closure_info, &known_defs);
+        let lowered = tlc::closure_calls_lower::run(hof_free, &closure_info);
         TlcDefunctionalized {
-            tlc: defunc,
+            tlc: lowered,
             type_table,
             schemes,
         }
