@@ -1,14 +1,21 @@
 //! Backend lowering shapes for builtins.
 //!
 //! `BuiltinLowering` is what the catalog stores per overload and what
-//! the backends consume. Three shapes:
-//! - `PrimOp` — direct mapping to a SPIR-V op or GLSL.std.450
+//! the backends consume. Five variants:
+//! - `PrimOp(PrimOp)` — direct mapping to a SPIR-V op or GLSL.std.450
 //!   extended instruction.
-//! - `Intrinsic` — needs backend-specific lowering (e.g. `array_with`,
-//!   `length`, `uninit`).
-//! - `LinkedSpirv` — function imported from a pre-compiled SPIR-V
-//!   module, the inner string is the `OpDecorate LinkageAttributes`
-//!   linkage name.
+//! - `LinkedSpirv(&str)` — function imported from a pre-compiled
+//!   SPIR-V module; the string is the linkage name.
+//! - `ExtInstSplat { ext, splat_args }` — GLSL.std.450 ext-inst with
+//!   per-call operand splatting. Data-bearing because the splat
+//!   metadata varies per catalog entry.
+//! - `ByBuiltinId` — "ask the backend for this entry by its
+//!   `BuiltinId`." Backends maintain explicit handlers keyed off
+//!   `catalog::known_ids()`; this avoids a parallel `Intrinsic` enum
+//!   that would shadow `BuiltinId` for the same set of entries.
+//! - `NotLowered` — sentinel; reaching this at backend dispatch is a
+//!   bug (HOFs, compiler-internal intrinsics consumed before backend
+//!   dispatch).
 
 /// How a builtin lowers to backend operations.
 #[derive(Debug, Clone)]
@@ -16,8 +23,6 @@ pub enum BuiltinLowering {
     /// Direct mapping to a `PrimOp` (GLSL.std.450 extended instruction
     /// or core SPIR-V op).
     PrimOp(PrimOp),
-    /// Genuine intrinsic that needs backend-specific lowering.
-    Intrinsic(Intrinsic),
     /// Function imported from a pre-compiled SPIR-V module — the string
     /// is the linkage name in `OpDecorate LinkageAttributes`.
     LinkedSpirv(&'static str),
@@ -26,6 +31,22 @@ pub enum BuiltinLowering {
     /// builtins (emitted/consumed before backend dispatch). Backend
     /// dispatch reaching this is a bug.
     NotLowered,
+    /// Dispatch by `BuiltinId`. The catalog's `known_ids()` exposes
+    /// cached BuiltinIds for each well-known entry; backends compare
+    /// the dispatch site's id against those constants and route to a
+    /// per-id handler. This replaces a previous `Intrinsic` enum that
+    /// duplicated `BuiltinId`-style identity.
+    ByBuiltinId,
+    /// GLSL.std.450 extended instruction with operand splatting. For
+    /// each position in `splat_args`, if that operand is a scalar but
+    /// the result is a vec, splat it to result-vec width before
+    /// emitting `OpExtInst`. Covers vec overloads of `mix`, `clamp`,
+    /// `smoothstep`. Inline data because each catalog entry has its
+    /// own ext index and splat positions.
+    ExtInstSplat {
+        ext: u32,
+        splat_args: &'static [usize],
+    },
 }
 
 /// Core primitive operations that map fairly directly to SPIR-V/backend ops.
@@ -102,63 +123,4 @@ pub enum PrimOp {
     UConvert,
     // Bitcast (reinterpret bits)
     Bitcast,
-}
-
-/// Genuine intrinsics that need backend-specific lowering.
-/// These cannot be written in the language itself.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Intrinsic {
-    /// Uninitialized/poison value for allocation bootstrapping.
-    /// SAFETY: Must be fully overwritten before being read.
-    Uninit,
-    /// Functional array update: immutable copy-with-update. Backend must
-    /// preserve the source array (emit copy + patch). User-surface default.
-    ArrayWith,
-    /// In-place variant of `ArrayWith`. Caller guarantees the source array
-    /// is dead after this operation (loop-carried phi, or alias-checker
-    /// proved released). Backend may mutate the source buffer directly
-    /// instead of copying.
-    ArrayWithInPlace,
-    /// `_w_intrinsic_length(arr) -> i32` — array size, distinct from
-    /// vector `magnitude` (which lowers through `GlslExt(66)`). Can't be a
-    /// `PrimOp` because GLSL uses method-call syntax `arr.length()` and
-    /// SPIR-V uses `OpArrayLength` with variant-specific handling.
-    Length,
-    /// `_w_intrinsic_slice(arr, start, end)` — sub-array. Three cases at
-    /// the backend: view→view (new handle), view→composite (materialize
-    /// elements), composite→composite (also materialize). Result variant
-    /// is read from the SSA result type.
-    Slice,
-    /// `_w_intrinsic_storage_len(set, binding) -> i32` — runtime length
-    /// of a storage buffer at the given (set, binding) coordinates. Both
-    /// args are constant `u32` literals. SPIR-V lowers via `OpArrayLength`
-    /// on the runtime array member of the storage buffer struct.
-    StorageLen,
-    /// `_w_intrinsic_thread_id() -> u32` — flattened compute-shader
-    /// thread index. SPIR-V loads `GlobalInvocationId.x`.
-    ThreadId,
-    /// `_w_intrinsic_storage_index(set_const, binding_const, index) -> T`
-    /// — load element T from the storage view at `(set, binding)[index]`.
-    /// Effectful: emitted as an `InstKind::Load` side effect through a
-    /// `ViewIndex` place during EGIR conversion, never reaches the
-    /// pure-`Intrinsic` lowering path. The variant exists so EGIR's
-    /// `VarRef::Builtin` arm can dispatch this side-effect structurally
-    /// without reflecting on the surface name.
-    StorageIndex,
-    /// `_w_intrinsic_storage_store(set_const, binding_const, index, value)`
-    /// — store `value` at `(set, binding)[index]`. Effectful: emitted as
-    /// an `InstKind::Store` side effect during EGIR conversion. Same
-    /// structural-dispatch motivation as `StorageIndex`.
-    StorageStore,
-    /// GLSL.std.450 extended instruction with operand splatting. For
-    /// each position in `splat_args`, if that operand is a scalar but
-    /// the result is a vec, splat it to result-vec width before emitting
-    /// `OpExtInst`. Covers vec overloads of `mix`, `clamp`, `smoothstep`
-    /// — where the scalar overload is a plain `PrimOp(GlslExt(N))` but
-    /// the vec overload's mixed scalar args need splatting because
-    /// `OpExtInst` requires operand types to match the result type.
-    ExtInstSplat {
-        ext: u32,
-        splat_args: &'static [usize],
-    },
 }

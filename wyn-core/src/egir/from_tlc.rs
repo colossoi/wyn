@@ -1013,31 +1013,25 @@ impl<'a> Converter<'a> {
                 // on `catalog.get(id).overloads()[overload_idx].lowering`.
                 // A small set of entries (StorageIndex, StorageStore) is
                 // side-effectful and must emit a Load/Store side effect at
-                // EGIR conversion — mirror the legacy Symbol path's
-                // special cases here so structural dispatch reaches the
-                // same place.
-                use crate::builtins::lowering::{BuiltinLowering, Intrinsic};
-                let def = crate::builtins::catalog().get(*id);
-                let lowering = &def.overloads()[*overload_idx].lowering;
-                match lowering {
-                    BuiltinLowering::Intrinsic(Intrinsic::StorageIndex) if args.len() == 3 => {
-                        self.lower_storage_index(args, ty)
-                    }
-                    BuiltinLowering::Intrinsic(Intrinsic::StorageStore) if args.len() == 4 => {
-                        self.lower_storage_store(args)
-                    }
-                    _ => {
-                        let arg_nids: SmallVec<[NodeId; 4]> =
-                            args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
-                        Ok(self.intern_pure(
-                            PureOp::Intrinsic {
-                                id: *id,
-                                overload_idx: *overload_idx,
-                            },
-                            arg_nids,
-                            ty,
-                        ))
-                    }
+                // EGIR conversion — dispatch by id against
+                // `catalog.known()` so we never reflect on the surface
+                // name.
+                let known = crate::builtins::catalog().known();
+                if *id == known.storage_index && args.len() == 3 {
+                    self.lower_storage_index(args, ty)
+                } else if *id == known.storage_store && args.len() == 4 {
+                    self.lower_storage_store(args)
+                } else {
+                    let arg_nids: SmallVec<[NodeId; 4]> =
+                        args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
+                    Ok(self.intern_pure(
+                        PureOp::Intrinsic {
+                            id: *id,
+                            overload_idx: *overload_idx,
+                        },
+                        arg_nids,
+                        ty,
+                    ))
                 }
             }
             _ => {

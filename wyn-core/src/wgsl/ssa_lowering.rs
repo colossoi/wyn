@@ -2310,7 +2310,8 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         let prim_op = match builtin {
             BuiltinLowering::PrimOp(p) => p,
             BuiltinLowering::LinkedSpirv(_)
-            | BuiltinLowering::Intrinsic(_)
+            | BuiltinLowering::ByBuiltinId
+            | BuiltinLowering::ExtInstSplat { .. }
             | BuiltinLowering::NotLowered => return Ok(None),
         };
         let result_ty_str = match result_ty {

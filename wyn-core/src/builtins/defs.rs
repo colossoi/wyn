@@ -80,10 +80,11 @@ macro_rules! hof_intrinsic {
 }
 
 // Compiler-internal intrinsic: emitted by the codegen pipeline. The
-// 2-arg form leaves lowering as `NotLowered` (transitional — backend
-// dispatches by name). The 3-arg form takes a typed
-// `BuiltinLowering::Intrinsic(_)` variant so backends can dispatch
-// structurally.
+// `id_dispatched!` form sets `lowering = ByBuiltinId`, signalling that
+// backends dispatch via `catalog.known()` rather than a structural
+// match. The `not_lowered!` form is for entries that should never
+// reach backend dispatch (HOF/SOAC scaffolding consumed earlier);
+// reaching it surfaces as a bug.
 macro_rules! compiler_internal {
     ($name:expr) => {
         compiler_internal!($name, Purity::Pure)
@@ -97,20 +98,7 @@ macro_rules! compiler_internal {
             purity: $purity,
             overloads: &[BuiltinOverload {
                 scheme: None,
-                lowering: BuiltinLowering::NotLowered,
-            }],
-        }
-    };
-    ($name:expr, $purity:expr, $intrinsic:expr) => {
-        BuiltinDefRaw {
-            surface_name: $name,
-            intrinsic_source_names: &[],
-            impl_source_names: &[],
-            kind: BuiltinKind::InternalIntrinsic,
-            purity: $purity,
-            overloads: &[BuiltinOverload {
-                scheme: None,
-                lowering: BuiltinLowering::Intrinsic($intrinsic),
+                lowering: BuiltinLowering::ByBuiltinId,
             }],
         }
     };
@@ -454,10 +442,10 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
             // width before `OpExtInst FClamp`.
             BuiltinOverload {
                 scheme: Some(vec_clamp_scalar_lohi),
-                lowering: BuiltinLowering::Intrinsic(crate::builtins::lowering::Intrinsic::ExtInstSplat {
+                lowering: BuiltinLowering::ExtInstSplat {
                     ext: 43,
                     splat_args: &[1, 2],
-                }),
+                },
             },
         ],
     },
@@ -477,10 +465,10 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
             // operand to match the result type.
             BuiltinOverload {
                 scheme: Some(vec_mix_scalar_interp),
-                lowering: BuiltinLowering::Intrinsic(crate::builtins::lowering::Intrinsic::ExtInstSplat {
+                lowering: BuiltinLowering::ExtInstSplat {
                     ext: 46,
                     splat_args: &[2],
-                }),
+                },
             },
         ],
     },
@@ -499,10 +487,10 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
             // vec width before `OpExtInst SmoothStep`.
             BuiltinOverload {
                 scheme: Some(vec_smoothstep_scalar_edges),
-                lowering: BuiltinLowering::Intrinsic(crate::builtins::lowering::Intrinsic::ExtInstSplat {
+                lowering: BuiltinLowering::ExtInstSplat {
                     ext: 49,
                     splat_args: &[0, 1],
-                }),
+                },
             },
         ],
     },
@@ -518,7 +506,7 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         purity: Purity::Pure,
         overloads: &[BuiltinOverload {
             scheme: Some(array_to_i32),
-            lowering: BuiltinLowering::Intrinsic(crate::builtins::lowering::Intrinsic::Length),
+            lowering: BuiltinLowering::ByBuiltinId,
         }],
     },
     BuiltinDefRaw {
@@ -529,7 +517,7 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         purity: Purity::Pure,
         overloads: &[BuiltinOverload {
             scheme: Some(unit_to_t),
-            lowering: BuiltinLowering::Intrinsic(crate::builtins::lowering::Intrinsic::Uninit),
+            lowering: BuiltinLowering::ByBuiltinId,
         }],
     },
     BuiltinDefRaw {
@@ -540,7 +528,7 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         purity: Purity::Pure,
         overloads: &[BuiltinOverload {
             scheme: Some(crate::builtins::scheme::array_index_value_to_array),
-            lowering: BuiltinLowering::Intrinsic(crate::builtins::lowering::Intrinsic::ArrayWith),
+            lowering: BuiltinLowering::ByBuiltinId,
         }],
     },
     BuiltinDefRaw {
@@ -551,7 +539,7 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         purity: Purity::Effectful,
         overloads: &[BuiltinOverload {
             scheme: Some(crate::builtins::scheme::array_index_value_to_array),
-            lowering: BuiltinLowering::Intrinsic(crate::builtins::lowering::Intrinsic::ArrayWithInPlace),
+            lowering: BuiltinLowering::ByBuiltinId,
         }],
     },
     // ---- HOF / SOAC intrinsics: scheme only, lowered earlier in the pipeline ----
@@ -605,31 +593,11 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
     // synthesises type-correct calls) and lowering is special-cased per
     // backend. Their presence in the catalog gives every PureOp::Intrinsic
     // emission a `BuiltinId`. ----
-    compiler_internal!(
-        INTRINSIC_STORAGE_LEN,
-        Purity::Pure,
-        crate::builtins::lowering::Intrinsic::StorageLen
-    ),
-    compiler_internal!(
-        INTRINSIC_STORAGE_INDEX,
-        Purity::Pure,
-        crate::builtins::lowering::Intrinsic::StorageIndex
-    ),
-    compiler_internal!(
-        INTRINSIC_STORAGE_STORE,
-        Purity::Effectful,
-        crate::builtins::lowering::Intrinsic::StorageStore
-    ),
-    compiler_internal!(
-        INTRINSIC_SLICE,
-        Purity::Pure,
-        crate::builtins::lowering::Intrinsic::Slice
-    ),
-    compiler_internal!(
-        INTRINSIC_THREAD_ID,
-        Purity::Pure,
-        crate::builtins::lowering::Intrinsic::ThreadId
-    ),
+    compiler_internal!(INTRINSIC_STORAGE_LEN, Purity::Pure),
+    compiler_internal!(INTRINSIC_STORAGE_INDEX, Purity::Pure),
+    compiler_internal!(INTRINSIC_STORAGE_STORE, Purity::Effectful),
+    compiler_internal!(INTRINSIC_SLICE, Purity::Pure),
+    compiler_internal!(INTRINSIC_THREAD_ID, Purity::Pure),
     compiler_internal!(INTRINSIC_COS, Purity::Pure),
 ];
 

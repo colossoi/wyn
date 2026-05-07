@@ -8,7 +8,8 @@
 mod ssa_lowering_tests;
 
 use crate::ast::{Span, TypeName};
-use crate::builtins::lowering::{BuiltinLowering, Intrinsic, PrimOp};
+use crate::builtins::BuiltinId;
+use crate::builtins::lowering::{BuiltinLowering, PrimOp};
 use crate::builtins::names::{INTRINSIC_ARRAY_WITH, INTRINSIC_ARRAY_WITH_INPLACE, INTRINSIC_UNINIT};
 use crate::error::Result;
 use crate::lowering_common::ShaderStage;
@@ -1191,8 +1192,14 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 let arg_strs = arg_strs?;
 
                 // Check if it's a builtin
-                if let Some(impl_) = crate::builtins::catalog().lookup_lowering(func) {
-                    self.lower_builtin_call(&impl_, &arg_strs, result_ty.expect("Call must have result"))
+                if let Some(def) = crate::builtins::catalog().lookup_by_any_name(func) {
+                    let impl_ = def.overloads()[0].lowering.clone();
+                    self.lower_builtin_call(
+                        def.id,
+                        &impl_,
+                        &arg_strs,
+                        result_ty.expect("Call must have result"),
+                    )
                 } else {
                     let mangled = self.ctx.glsl_mangle_tracked(func)?;
                     Ok(format!("{}({})", mangled, arg_strs.join(", ")))
@@ -1328,84 +1335,89 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             InstKind::Call { func, args } => (func.as_str(), args),
             _ => return Ok(false),
         };
-        let intr = match intrinsic_name {
-            INTRINSIC_UNINIT => Intrinsic::Uninit,
-            INTRINSIC_ARRAY_WITH => Intrinsic::ArrayWith,
-            INTRINSIC_ARRAY_WITH_INPLACE => Intrinsic::ArrayWithInPlace,
-            _ => return Ok(false),
+        let known = crate::builtins::catalog().known();
+        let id = match crate::builtins::catalog().lookup_by_any_name(intrinsic_name) {
+            Some(def) => def.id,
+            None => return Ok(false),
+        };
+        let kind = if id == known.uninit {
+            "uninit"
+        } else if id == known.array_with {
+            "array_with"
+        } else if id == known.array_with_in_place {
+            "array_with_in_place"
+        } else {
+            return Ok(false);
         };
         let result = inst.result.ok_or_else(|| {
-            crate::err_glsl_at!(self.blame_span(), "Array intrinsic {:?} missing result", intr)
+            crate::err_glsl_at!(self.blame_span(), "Array intrinsic {:?} missing result", kind)
         })?;
         let var_name = glsl_var(result);
         let result_ty = self.body.inner.value_type(result).clone();
         let sized_decl_prefix =
             self.sized_array_decl_prefix(&result_ty).unwrap_or_else(|| self.ctx.type_to_glsl(&result_ty));
-        match intr {
-            Intrinsic::Uninit => {
-                // GLSL ES 3.00+ allows uninitialized locals; matches SPIR-V
-                // Function-storage semantics (contents undefined until written).
-                // The SOAC contract is that the array is fully overwritten before
-                // it's read.
-                writeln!(
-                    output,
-                    "{}{} {};",
-                    self.ctx.indent_str(),
-                    sized_decl_prefix,
-                    var_name
-                )
-                .unwrap();
-                self.declared.insert(var_name.clone());
-                self.value_map.insert(result, var_name);
-                Ok(true)
+        if id == known.uninit {
+            // GLSL ES 3.00+ allows uninitialized locals; matches SPIR-V
+            // Function-storage semantics (contents undefined until written).
+            // The SOAC contract is that the array is fully overwritten before
+            // it's read.
+            writeln!(
+                output,
+                "{}{} {};",
+                self.ctx.indent_str(),
+                sized_decl_prefix,
+                var_name
+            )
+            .unwrap();
+            self.declared.insert(var_name.clone());
+            self.value_map.insert(result, var_name);
+            Ok(true)
+        } else if id == known.array_with_in_place {
+            // Alias the result's GLSL var to the source array's GLSL var:
+            // we're mutating in place. The subsequent Node::Assign that
+            // would have copied this result into the loop-carried variable
+            // becomes a self-copy and is elided.
+            if args.len() != 3 {
+                bail_glsl_at!(self.blame_span(), "ArrayWithInPlace expects 3 args");
             }
-            Intrinsic::ArrayWithInPlace => {
-                // Alias the result's GLSL var to the source array's GLSL var:
-                // we're mutating in place. The subsequent Node::Assign that
-                // would have copied this result into the loop-carried variable
-                // becomes a self-copy and is elided.
-                if args.len() != 3 {
-                    bail_glsl_at!(self.blame_span(), "ArrayWithInPlace expects 3 args");
-                }
-                let arr = self.get_value_ref(args[0])?;
-                let idx = self.get_value_ref(args[1])?;
-                let val = self.get_value_ref(args[2])?;
-                writeln!(output, "{}{}[{}] = {};", self.ctx.indent_str(), arr, idx, val).unwrap();
-                self.value_map.insert(result, arr);
-                Ok(true)
+            let arr = self.get_value_ref(args[0])?;
+            let idx = self.get_value_ref(args[1])?;
+            let val = self.get_value_ref(args[2])?;
+            writeln!(output, "{}{}[{}] = {};", self.ctx.indent_str(), arr, idx, val).unwrap();
+            self.value_map.insert(result, arr);
+            Ok(true)
+        } else if id == known.array_with {
+            // Functional update: declare a fresh local, copy the source
+            // array into it, then patch the one element.
+            if args.len() != 3 {
+                bail_glsl_at!(self.blame_span(), "ArrayWith expects 3 args");
             }
-            Intrinsic::ArrayWith => {
-                // Functional update: declare a fresh local, copy the source
-                // array into it, then patch the one element.
-                if args.len() != 3 {
-                    bail_glsl_at!(self.blame_span(), "ArrayWith expects 3 args");
-                }
-                let arr = self.get_value_ref(args[0])?;
-                let idx = self.get_value_ref(args[1])?;
-                let val = self.get_value_ref(args[2])?;
-                writeln!(
-                    output,
-                    "{}{} {} = {};",
-                    self.ctx.indent_str(),
-                    sized_decl_prefix,
-                    var_name,
-                    arr
-                )
-                .unwrap();
-                writeln!(
-                    output,
-                    "{}{}[{}] = {};",
-                    self.ctx.indent_str(),
-                    var_name,
-                    idx,
-                    val
-                )
-                .unwrap();
-                self.declared.insert(var_name.clone());
-                self.value_map.insert(result, var_name);
-                Ok(true)
-            }
-            _ => Ok(false),
+            let arr = self.get_value_ref(args[0])?;
+            let idx = self.get_value_ref(args[1])?;
+            let val = self.get_value_ref(args[2])?;
+            writeln!(
+                output,
+                "{}{} {} = {};",
+                self.ctx.indent_str(),
+                sized_decl_prefix,
+                var_name,
+                arr
+            )
+            .unwrap();
+            writeln!(
+                output,
+                "{}{}[{}] = {};",
+                self.ctx.indent_str(),
+                var_name,
+                idx,
+                val
+            )
+            .unwrap();
+            self.declared.insert(var_name.clone());
+            self.value_map.insert(result, var_name);
+            Ok(true)
+        } else {
+            Ok(false)
         }
     }
 
@@ -1424,51 +1436,56 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
 
     fn lower_builtin_call(
         &mut self,
+        id: BuiltinId,
         impl_: &BuiltinLowering,
         args: &[String],
         ret_ty: &PolyType<TypeName>,
     ) -> Result<String> {
         match impl_ {
             BuiltinLowering::PrimOp(op) => self.lower_primop(op, args, ret_ty),
-            BuiltinLowering::Intrinsic(intr) => match intr {
-                Intrinsic::Length => Ok(format!("int({}.length())", args[0])),
-                Intrinsic::Uninit | Intrinsic::ArrayWith | Intrinsic::ArrayWithInPlace => {
+            BuiltinLowering::ExtInstSplat { .. } => {
+                bail_glsl_at!(
+                    self.blame_span(),
+                    "GLSL backend does not support ExtInstSplat (vec mix/clamp/smoothstep)"
+                )
+            }
+            BuiltinLowering::ByBuiltinId => {
+                let known = crate::builtins::catalog().known();
+                if id == known.length {
+                    Ok(format!("int({}.length())", args[0]))
+                } else if id == known.uninit || id == known.array_with || id == known.array_with_in_place {
                     bail_glsl_at!(
                         self.blame_span(),
-                        "Intrinsic {:?} must be handled at Node::Inst level",
-                        intr
+                        "{} must be handled at Node::Inst level",
+                        crate::builtins::catalog().get(id).dispatch_name()
                     )
-                }
-                Intrinsic::Slice => {
+                } else if id == known.slice {
                     bail_glsl_at!(self.blame_span(), "GLSL backend does not support array slicing")
-                }
-                Intrinsic::StorageLen => {
+                } else if id == known.storage_len {
                     bail_glsl_at!(
                         self.blame_span(),
                         "GLSL backend does not support storage-buffer length queries"
                     )
-                }
-                Intrinsic::ExtInstSplat { .. } => {
-                    bail_glsl_at!(
-                        self.blame_span(),
-                        "GLSL backend does not support ExtInstSplat (vec mix/clamp/smoothstep)"
-                    )
-                }
-                Intrinsic::ThreadId => {
+                } else if id == known.thread_id {
                     bail_glsl_at!(
                         self.blame_span(),
                         "GLSL backend does not support compute-shader thread ID"
                     )
-                }
-                Intrinsic::StorageIndex | Intrinsic::StorageStore => {
+                } else if id == known.storage_index || id == known.storage_store {
                     bail_glsl_at!(
                         self.blame_span(),
-                        "{:?} reached backend dispatch — should be lowered to a \
+                        "{} reached backend dispatch — should be lowered to a \
                          Load/Store side effect during EGIR conversion",
-                        intr
+                        crate::builtins::catalog().get(id).dispatch_name()
+                    )
+                } else {
+                    bail_glsl_at!(
+                        self.blame_span(),
+                        "ByBuiltinId dispatch: unknown builtin id={:?}",
+                        id
                     )
                 }
-            },
+            }
             BuiltinLowering::LinkedSpirv(name) => {
                 bail_glsl_at!(
                     self.blame_span(),
@@ -1559,8 +1576,9 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         ret_ty: &PolyType<TypeName>,
     ) -> Result<String> {
         // Catalog-driven dispatch for `_w_intrinsic_*` builtins.
-        if let Some(impl_) = crate::builtins::catalog().lookup_lowering(name) {
-            return self.lower_builtin_call(&impl_, args, ret_ty);
+        if let Some(def) = crate::builtins::catalog().lookup_by_any_name(name) {
+            let impl_ = def.overloads()[0].lowering.clone();
+            return self.lower_builtin_call(def.id, &impl_, args, ret_ty);
         }
         bail_glsl_at!(self.blame_span(), "Unknown intrinsic: {}", name)
     }

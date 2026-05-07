@@ -103,6 +103,28 @@ impl BuiltinDef {
     }
 }
 
+/// Cached `BuiltinId`s for catalog entries that the IR/backends reach
+/// for by name. Populated once at catalog construction; consumers
+/// compare a dispatch-site id against these constants instead of
+/// matching on a parallel `Intrinsic` enum.
+///
+/// Each field is an `Option` because the corresponding catalog entry
+/// is registered by name; `None` means the catalog didn't include it
+/// at construction (which would itself be a bug for any field listed
+/// here, but we surface it via `expect()` in the named accessors).
+#[derive(Debug)]
+pub struct KnownBuiltinIds {
+    pub uninit: BuiltinId,
+    pub array_with: BuiltinId,
+    pub array_with_in_place: BuiltinId,
+    pub length: BuiltinId,
+    pub slice: BuiltinId,
+    pub storage_len: BuiltinId,
+    pub thread_id: BuiltinId,
+    pub storage_index: BuiltinId,
+    pub storage_store: BuiltinId,
+}
+
 /// Indexed view over the catalog table. Built once at program startup
 /// (via `OnceLock`); consumers take a `&BuiltinCatalog`.
 #[derive(Debug)]
@@ -110,6 +132,7 @@ pub struct BuiltinCatalog {
     defs: Vec<BuiltinDef>,
     by_surface_name: HashMap<&'static str, BuiltinId>,
     by_internal_name: HashMap<&'static str, BuiltinId>,
+    known: KnownBuiltinIds,
 }
 
 impl BuiltinCatalog {
@@ -133,11 +156,41 @@ impl BuiltinCatalog {
             }
             defs.push(BuiltinDef { id, raw });
         }
+
+        // Resolve well-known intrinsic names → BuiltinIds. Any miss
+        // here is a catalog construction bug — these names are required
+        // by the IR/backends for `ByBuiltinId` dispatch.
+        let resolve = |n: &'static str| -> BuiltinId {
+            by_surface_name
+                .get(n)
+                .or_else(|| by_internal_name.get(n))
+                .copied()
+                .unwrap_or_else(|| panic!("known intrinsic {:?} missing from catalog", n))
+        };
+        use crate::builtins::names as N;
+        let known = KnownBuiltinIds {
+            uninit: resolve(N::INTRINSIC_UNINIT),
+            array_with: resolve(N::INTRINSIC_ARRAY_WITH),
+            array_with_in_place: resolve(N::INTRINSIC_ARRAY_WITH_INPLACE),
+            length: resolve(N::INTRINSIC_LENGTH),
+            slice: resolve(N::INTRINSIC_SLICE),
+            storage_len: resolve(N::INTRINSIC_STORAGE_LEN),
+            thread_id: resolve(N::INTRINSIC_THREAD_ID),
+            storage_index: resolve(N::INTRINSIC_STORAGE_INDEX),
+            storage_store: resolve(N::INTRINSIC_STORAGE_STORE),
+        };
+
         BuiltinCatalog {
             defs,
             by_surface_name,
             by_internal_name,
+            known,
         }
+    }
+
+    /// Cached `BuiltinId`s for entries that the IR/backends dispatch on.
+    pub fn known(&self) -> &KnownBuiltinIds {
+        &self.known
     }
 
     pub fn defs(&self) -> &[BuiltinDef] {
