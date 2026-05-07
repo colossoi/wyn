@@ -1,4 +1,5 @@
 pub mod ast;
+pub mod ast_renumber;
 pub mod builtins;
 pub mod diags;
 pub mod error;
@@ -377,8 +378,12 @@ impl Parsed {
     /// This registers modules with the module_manager so they're available during resolution,
     /// then removes the Module declarations from the AST (they've been copied to module_manager).
     /// Should be called before desugar() if the program contains module definitions.
-    pub fn elaborate_modules(mut self, module_manager: &mut module_manager::ModuleManager) -> Result<Self> {
-        module_manager.elaborate_modules(&self.0.ast)?;
+    pub fn elaborate_modules(
+        mut self,
+        module_manager: &mut module_manager::ModuleManager,
+        node_counter: &mut ast::NodeCounter,
+    ) -> Result<Self> {
+        module_manager.elaborate_modules(&self.0.ast, node_counter)?;
         // Remove Module and ModuleTypeBind declarations - they've been elaborated
         self.0.ast.declarations.retain(|decl| {
             !matches!(
@@ -1052,7 +1057,7 @@ pub fn cached_compiler_init() -> (NodeCounter, module_manager::ModuleManager) {
 pub fn compile_thru_frontend(source: &str) -> error::Result<TypeChecked> {
     let (mut node_counter, mut module_manager) = cached_compiler_init();
     Compiler::parse(source, &mut node_counter)?
-        .elaborate_modules(&mut module_manager)?
+        .elaborate_modules(&mut module_manager, &mut node_counter)?
         .desugar(&mut node_counter)?
         .resolve(&module_manager)?
         .fold_ast_constants()
@@ -1065,7 +1070,7 @@ pub fn compile_thru_frontend(source: &str) -> error::Result<TypeChecked> {
 pub fn compile_thru_tlc(source: &str) -> error::Result<TlcReachable> {
     let (mut node_counter, mut module_manager) = cached_compiler_init();
     let type_checked = Compiler::parse(source, &mut node_counter)?
-        .elaborate_modules(&mut module_manager)?
+        .elaborate_modules(&mut module_manager, &mut node_counter)?
         .desugar(&mut node_counter)?
         .resolve(&module_manager)?
         .fold_ast_constants()

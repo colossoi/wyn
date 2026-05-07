@@ -268,13 +268,17 @@ impl ModuleManager {
         self.register_module_types(&program)?;
 
         // Elaborate all modules from the program
-        self.elaborate_all_modules(&program)?;
+        self.elaborate_all_modules(&program, node_counter)?;
 
         Ok(())
     }
 
     /// Elaborate a single module or functor declaration
-    fn elaborate_module_decl(&mut self, md: &crate::ast::ModuleDecl) -> Result<()> {
+    fn elaborate_module_decl(
+        &mut self,
+        md: &crate::ast::ModuleDecl,
+        node_counter: &mut NodeCounter,
+    ) -> Result<()> {
         match md {
             crate::ast::ModuleDecl::Functor { name, params, body } => {
                 if self.elaborated_modules.contains_key(name) {
@@ -322,7 +326,8 @@ impl ModuleManager {
                 }
 
                 // Elaborate the module body
-                let body_items = self.elaborate_module_body(body, name, &substitutions, &HashMap::new())?;
+                let body_items =
+                    self.elaborate_module_body(body, name, &substitutions, &HashMap::new(), node_counter)?;
                 items.extend(body_items);
 
                 // Add type aliases from `with` substitutions in the signature
@@ -360,7 +365,7 @@ impl ModuleManager {
 
     /// Elaborate all module bindings from a parsed program
     /// This is the public entry point for elaborating modules from any source
-    pub fn elaborate_modules(&mut self, program: &Program) -> Result<()> {
+    pub fn elaborate_modules(&mut self, program: &Program, node_counter: &mut NodeCounter) -> Result<()> {
         // Register module types first
         self.register_module_types(program)?;
 
@@ -372,14 +377,14 @@ impl ModuleManager {
                     crate::ast::ModuleDecl::Functor { name, .. } => name.clone(),
                 };
                 self.user_module_names.insert(name);
-                self.elaborate_module_decl(md)?;
+                self.elaborate_module_decl(md, node_counter)?;
             }
         }
         Ok(())
     }
 
     /// Elaborate all module bindings and collect top-level declarations (for prelude files)
-    fn elaborate_all_modules(&mut self, program: &Program) -> Result<()> {
+    fn elaborate_all_modules(&mut self, program: &Program, node_counter: &mut NodeCounter) -> Result<()> {
         for decl in &program.declarations {
             // Collect top-level function declarations for prelude
             if let Declaration::Decl(d) = decl {
@@ -388,7 +393,7 @@ impl ModuleManager {
             }
 
             if let Declaration::Module(md) = decl {
-                self.elaborate_module_decl(md)?;
+                self.elaborate_module_decl(md, node_counter)?;
             }
         }
         Ok(())
@@ -715,6 +720,7 @@ impl ModuleManager {
         module_name: &str,
         substitutions: &HashMap<String, Type>,
         param_bindings: &HashMap<String, ElaboratedModule>,
+        node_counter: &mut NodeCounter,
     ) -> Result<Vec<ElaboratedItem>> {
         match module_expr {
             ModuleExpression::Struct(declarations) => {
@@ -745,6 +751,7 @@ impl ModuleManager {
                                 &module_functions,
                                 substitutions,
                                 param_bindings,
+                                node_counter,
                             );
                             items.push(ElaboratedItem::Decl(elaborated_decl));
                         }
@@ -860,6 +867,7 @@ impl ModuleManager {
                     module_name,
                     &new_substitutions,
                     &new_param_bindings,
+                    node_counter,
                 )
             }
             _ => {
@@ -879,10 +887,21 @@ impl ModuleManager {
         module_functions: &HashSet<String>,
         substitutions: &HashMap<String, Type>,
         param_bindings: &HashMap<String, ElaboratedModule>,
+        node_counter: &mut NodeCounter,
     ) -> Decl {
-        // Apply type substitutions to params
-        let new_params: Vec<Pattern> =
-            decl.params.iter().map(|p| self.substitute_in_pattern(p, substitutions)).collect();
+        use crate::ast_renumber::{clone_expr_fresh_ids, clone_pattern_fresh_ids};
+
+        // Deep-clone params with fresh NodeIds so functor instantiations
+        // don't share Header.id with the source. Type substitutions apply
+        // to the cloned copy.
+        let new_params: Vec<Pattern> = decl
+            .params
+            .iter()
+            .map(|p| {
+                let cloned = clone_pattern_fresh_ids(p, node_counter);
+                self.substitute_in_pattern(&cloned, substitutions)
+            })
+            .collect();
 
         // Apply type substitutions to return type
         let new_ty = decl.ty.as_ref().map(|ty| self.substitute_in_type(ty, substitutions));
@@ -892,8 +911,11 @@ impl ModuleManager {
             decl.params.iter().flat_map(|p| self.collect_pattern_names(p)).collect();
 
         // Resolve names in body (convert FieldAccess to QualifiedName, qualify intra-module refs)
-        // Also handle parameter module references (e.g., n.add -> my_f32_num.add)
-        let mut new_body = decl.body.clone();
+        // Also handle parameter module references (e.g., n.add -> my_f32_num.add).
+        // Clone with fresh NodeIds — the same body shape may be elaborated
+        // multiple times (functor instantiations), and each instantiation
+        // needs its own NodeId space.
+        let mut new_body = clone_expr_fresh_ids(&decl.body, node_counter);
         self.resolve_names_in_expr(
             &mut new_body,
             module_name,

@@ -345,16 +345,13 @@ pub fn build_name_resolution(
 
     walk_decls(&program.declarations, &top_level, catalog, &mut nr);
 
-    // Walk user-defined module decl bodies. After `elaborate_modules`
-    // these have been moved out of `program.declarations` into
-    // `module_manager.elaborated_modules`. We only walk modules
-    // whose names are in `user_module_names` so prelude modules stay
-    // out of NameResolution (their existing type-check path is
-    // load-bearing).
-    for module_name in &module_manager.user_module_names {
-        let Some(elaborated) = module_manager.elaborated_modules.get(module_name) else {
-            continue;
-        };
+    // Walk every elaborated module body — both user-source and
+    // prelude. Functor instantiations now produce per-instance fresh
+    // NodeIds (via `clone_expr_fresh_ids` in
+    // `module_manager::elaborate_decl_signature`), so the previous
+    // collision risk is gone and prelude bodies can safely be
+    // covered by NameResolution.
+    for elaborated in module_manager.elaborated_modules.values() {
         let mut module_scope: ScopeStack<()> = ScopeStack::new();
         for item in &elaborated.items {
             if let crate::module_manager::ElaboratedItem::Decl(d) = item {

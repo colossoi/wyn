@@ -28,7 +28,7 @@ fn compile_to_expanded_egraph(input: &str) -> crate::egir::types::EGraph {
     let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
     let type_checked = Compiler::parse(input, &mut node_counter)
         .expect("parse")
-        .elaborate_modules(&mut module_manager)
+        .elaborate_modules(&mut module_manager, &mut node_counter)
         .expect("elaborate")
         .desugar(&mut node_counter)
         .expect("desugar")

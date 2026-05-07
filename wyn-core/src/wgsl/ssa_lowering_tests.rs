@@ -284,7 +284,9 @@ fn validate_wgsl(source: &str) {
 fn compile_to_wgsl(source: &str) -> crate::error::Result<String> {
     let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
     let parsed = crate::Compiler::parse(source, &mut node_counter).expect("Parsing failed");
-    let parsed = parsed.elaborate_modules(&mut module_manager).expect("Module elaboration failed");
+    let parsed = parsed
+        .elaborate_modules(&mut module_manager, &mut node_counter)
+        .expect("Module elaboration failed");
     let type_checked = parsed
         .desugar(&mut node_counter)
         .expect("Desugaring failed")

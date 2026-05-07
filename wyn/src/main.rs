@@ -238,7 +238,7 @@ fn compile_file(
     })?;
     // Elaborate inline modules so they're available during resolution
     let parsed = time("elaborate_modules", verbose, || {
-        parsed.elaborate_modules(&mut module_manager)
+        parsed.elaborate_modules(&mut module_manager, &mut node_counter)
     })?;
     // Desugar ranges/slices early, before name resolution and type checking
     let desugared = time("desugar", verbose, || parsed.desugar(&mut node_counter))?;

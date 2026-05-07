@@ -19,9 +19,9 @@ fn parse_program(src: &str) -> (Program, NodeCounter) {
 
 /// Create a ModuleManager with the given source elaborated (no prelude)
 fn module_manager_with(src: &str) -> ModuleManager {
-    let (prog, _nc) = parse_program(src);
+    let (prog, mut nc) = parse_program(src);
     let mut mm = ModuleManager::new_empty();
-    mm.elaborate_modules(&prog).unwrap();
+    mm.elaborate_modules(&prog, &mut nc).unwrap();
     mm
 }
 
