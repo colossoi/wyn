@@ -18,7 +18,7 @@
 //!      `Identifier([M], name)`.
 //!    * multiple candidates → ambiguous-name error.
 //! 4. **None of the above**: leave bare. Downstream passes resolve via
-//!    the top-level `INTRINSIC_RENAMES` shortcut, prelude defs, or
+//!    `NameResolution` (catalog identifiers), prelude defs, or
 //!    surface "undefined variable".
 //!
 //! `open M` itself is validated: an unknown module name errors at the

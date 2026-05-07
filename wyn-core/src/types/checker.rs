@@ -1307,8 +1307,6 @@ impl<'a> TypeChecker<'a> {
         self.define_builtin("dot", Self::forall(&[n, t], body));
 
         // Math functions: ∀t. t -> t (works on f32, vec2f32, vec3f32, vec4f32).
-        // `sqrt`/`abs`/`floor`/`ceil`/`fract` keep a top-level binding because
-        // they're still in `INTRINSIC_RENAMES` (no per-type-only home).
         let t = self.fresh_var();
         let math_unary = Self::forall(&[t], Type::arrow(Self::var(t), Self::var(t)));
         for name in &["abs", "floor", "ceil", "fract"] {

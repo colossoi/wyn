@@ -290,11 +290,12 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         BuiltinLowering::PrimOp(PrimOp::GlslExt(49))
     ),
     // -----------------------------------------------------------------------
-    // Polymorphic intrinsics — surface name (e.g. "magnitude") published
-    // for type-check-time resolution; `_w_intrinsic_*` form (e.g.
-    // "_w_intrinsic_magnitude") published for backend lowering. TLC's
-    // INTRINSIC_RENAMES translates user calls to the internal name
-    // before backend dispatch.
+    // Polymorphic intrinsics — `surface_name` (e.g. "magnitude") is the
+    // user-facing form classified by NameResolution. The `_w_intrinsic_*`
+    // form sits in `impl_source_names` and surfaces as `dispatch_name`
+    // for diagnostics and `lookup_by_any_name` callers (synthesised IR
+    // sites that key calls by name; SSA `InstKind::Call.func` is a
+    // String, so the catalog needs to be reachable from either form).
     // -----------------------------------------------------------------------
     polymorphic_intrinsic!(
         "magnitude",
