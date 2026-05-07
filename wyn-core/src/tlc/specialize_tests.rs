@@ -92,13 +92,18 @@ fn test_specialize_sign_f32() {
 
     // Check that sign became f32.sign
     match &specialized.defs[0].body.kind {
-        TermKind::App { func, .. } => match &func.kind {
-            TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
-                let name = specialized.symbols.get(*sym).expect("BUG: symbol not in table");
-                assert_eq!(name, "f32.sign");
-            }
-            _ => panic!("Expected Var, got {:?}", func.kind),
-        },
+        TermKind::App { func, .. } => {
+            let name = match &func.kind {
+                TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
+                    specialized.symbols.get(*sym).expect("BUG: symbol not in table").clone()
+                }
+                TermKind::Var(crate::tlc::VarRef::Builtin { id, .. }) => {
+                    crate::builtins::by_id(*id).raw.surface_name.to_string()
+                }
+                _ => panic!("Expected Var, got {:?}", func.kind),
+            };
+            assert_eq!(name, "f32.sign");
+        }
         _ => panic!("Expected App"),
     }
 }
@@ -169,13 +174,16 @@ fn test_specialize_min_i32() {
     // Check that min became i32.min in the application
     match &specialized.defs[0].body.kind {
         TermKind::App { func, args } => {
-            match &func.kind {
+            let name = match &func.kind {
                 TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
-                    let name = specialized.symbols.get(*sym).expect("BUG: symbol not in table");
-                    assert_eq!(name, "i32.min");
+                    specialized.symbols.get(*sym).expect("BUG: symbol not in table").clone()
+                }
+                TermKind::Var(crate::tlc::VarRef::Builtin { id, .. }) => {
+                    crate::builtins::by_id(*id).raw.surface_name.to_string()
                 }
                 _ => panic!("Expected Var, got {:?}", func.kind),
-            }
+            };
+            assert_eq!(name, "i32.min");
             assert_eq!(args.len(), 2, "Expected 2 args in flattened App");
         }
         _ => panic!("Expected App"),

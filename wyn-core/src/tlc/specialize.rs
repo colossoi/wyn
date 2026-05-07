@@ -77,12 +77,26 @@ fn specialize_term(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdS
     }
 
     if let Some(specialized_name) = specialize_name(name, &args[0].ty) {
-        let specialized_sym = symbols.alloc(specialized_name);
+        // Prefer `Var(Builtin)` for catalog-known per-type ops so the
+        // backend dispatches structurally on `BuiltinId`. Fall back to
+        // a fresh SymbolId (e.g. for synthesised names that aren't yet
+        // catalog entries) so `InstKind::Call`'s legacy
+        // `lookup_by_any_name(func)` path still resolves them.
+        let new_func_kind =
+            if let Some(def) = crate::builtins::catalog().lookup_by_surface_name(&specialized_name) {
+                TermKind::Var(crate::tlc::VarRef::Builtin {
+                    id: def.id,
+                    overload_idx: 0,
+                })
+            } else {
+                let specialized_sym = symbols.alloc(specialized_name);
+                TermKind::Var(crate::tlc::VarRef::Symbol(specialized_sym))
+            };
         let new_func = Term {
             id: term_ids.next_id(),
             ty: func.ty.clone(),
             span: func.span,
-            kind: TermKind::Var(crate::tlc::VarRef::Symbol(specialized_sym)),
+            kind: new_func_kind,
         };
         let TermKind::App { func: _, args } = term.kind else {
             unreachable!()

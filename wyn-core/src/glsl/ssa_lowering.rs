@@ -10,7 +10,6 @@ mod ssa_lowering_tests;
 use crate::ast::{Span, TypeName};
 use crate::builtins::BuiltinId;
 use crate::builtins::lowering::{BuiltinLowering, PrimOp};
-use crate::builtins::names::{INTRINSIC_ARRAY_WITH, INTRINSIC_ARRAY_WITH_INPLACE, INTRINSIC_UNINIT};
 use crate::error::Result;
 use crate::lowering_common::ShaderStage;
 use crate::ssa::types::{ConstantValue, FuncBody, InstKind, ValueId, ValueRef, WynInstNode};
@@ -1331,14 +1330,16 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
     /// generic path), `false` otherwise.
     fn try_emit_array_intrinsic(&mut self, inst: &WynInstNode, output: &mut String) -> Result<bool> {
         use crate::ssa::types::InstKind;
-        let (intrinsic_name, args) = match &inst.data {
-            InstKind::Call { func, args } => (func.as_str(), args),
-            _ => return Ok(false),
-        };
         let known = crate::builtins::catalog().known();
-        let id = match crate::builtins::catalog().lookup_by_any_name(intrinsic_name) {
-            Some(def) => def.id,
-            None => return Ok(false),
+        let (id, args) = match &inst.data {
+            InstKind::Intrinsic { id, args, .. } => (*id, args),
+            // Legacy: catalog-named Call instructions (synthesised paths
+            // that haven't been migrated to `Var(Builtin)` yet).
+            InstKind::Call { func, args } => match crate::builtins::catalog().lookup_by_any_name(func) {
+                Some(def) => (def.id, args),
+                None => return Ok(false),
+            },
+            _ => return Ok(false),
         };
         let kind = if id == known.uninit {
             "uninit"

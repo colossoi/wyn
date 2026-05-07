@@ -1293,13 +1293,15 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
 
             InstKind::Call { func, args } => {
                 let arg_ids: Vec<_> = args.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
-
-                // Check if it's a builtin function first
+                // Catalog-named calls (e.g. per-type ops like `f32.clamp`
+                // emitted by `specialize.rs`) still arrive here as Call
+                // because their func is a SymbolId allocated for the
+                // specialized name. Compiler-internal intrinsics
+                // (`_w_intrinsic_*`) now go through `InstKind::Intrinsic`.
                 if let Some(def) = crate::builtins::catalog().lookup_by_any_name(func) {
                     let builtin_impl = &def.overloads()[0].lowering;
                     self.lower_builtin_call(def.id, builtin_impl, func, args, &arg_ids, result_ty, inst)?
                 } else if let Some(&func_id) = self.constructor.functions.get(func) {
-                    // User-defined function
                     self.constructor.builder.function_call(result_ty, None, func_id, arg_ids)?
                 } else {
                     bail_spirv_at!(self.blame_span(), "Unknown function: {}", func)
