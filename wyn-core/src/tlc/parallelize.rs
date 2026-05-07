@@ -2257,19 +2257,44 @@ fn intrinsic_term(
     span: ast::Span,
     program: &mut Program,
 ) -> Term {
-    let sym = if let Some(&existing) = program.def_syms.get(name) {
-        existing
+    // Catalog-resolved builtins emit `Var(Builtin(id))` so downstream
+    // passes dispatch structurally. The assert mirrors `tlc::build_call`
+    // and `buffer_specialize::make_app`: synthesised IR sites target
+    // single-overload entries.
+    let func_var = if let Some(def) = crate::builtins::catalog().lookup_by_any_name(name) {
+        assert_eq!(
+            def.overloads().len(),
+            1,
+            "parallelize::intrinsic_term({:?}) targets a multi-overload catalog entry; \
+             caller must specify overload_idx explicitly",
+            name
+        );
+        crate::tlc::VarRef::Builtin {
+            id: def.id,
+            overload_idx: 0,
+        }
     } else {
-        let sym = program.symbols.alloc(name.to_string());
-        program.def_syms.insert(name.to_string(), sym);
-        sym
+        let sym = if let Some(&existing) = program.def_syms.get(name) {
+            existing
+        } else {
+            let sym = program.symbols.alloc(name.to_string());
+            program.def_syms.insert(name.to_string(), sym);
+            sym
+        };
+        crate::tlc::VarRef::Symbol(sym)
+    };
+    let func_term = Term {
+        id: TermId(0),
+        ty: Type::Variable(0),
+        span,
+        kind: TermKind::Var(func_var),
     };
     Term {
         id: TermId(0),
         ty: ret_ty,
         span,
         kind: TermKind::App {
-            func: Box::new(var_term(sym, Type::Variable(0), span)),
+            func: Box::new(func_term),
             args,
         },
     }
