@@ -9,8 +9,7 @@ use crate::SymbolTable;
 use std::collections::HashMap;
 
 use super::{
-    ArrayExpr, Def, Lambda, Place, Program, ReduceProps, Shape, SoacBody, SoacOp, Term, TermKind,
-    extract_lambda_params,
+    ArrayExpr, Def, Lambda, Place, Program, Shape, SoacBody, SoacOp, Term, TermKind, extract_lambda_params,
 };
 use crate::SymbolId;
 use crate::ast::TypeName;
@@ -37,7 +36,6 @@ pub enum ArraySemantics {
         input: ArrayExpr,
         op: SoacBody,
         init: Box<Term>,
-        props: ReduceProps,
     },
 
     /// Prefix scan: output[i] = fold(op, init, input[0..=i]).
@@ -67,7 +65,6 @@ pub enum ArraySemantics {
         values: ArrayExpr,
         op: SoacBody,
         init: Box<Term>,
-        props: ReduceProps,
     },
 
     /// Materialized constant array.
@@ -245,8 +242,8 @@ pub fn compose_map_into_reduce(
         ArraySemantics::Elementwise { inputs, body } => (inputs, body),
         _ => return None,
     };
-    let (cons_op, cons_init, cons_props) = match consumer {
-        ArraySemantics::Reduction { op, init, props, .. } => (op, init, props),
+    let (cons_op, cons_init) = match consumer {
+        ArraySemantics::Reduction { op, init, .. } => (op, init),
         _ => return None,
     };
 
@@ -257,7 +254,6 @@ pub fn compose_map_into_reduce(
         input: prod_inputs.first().cloned().unwrap_or(ArrayExpr::Literal(vec![])),
         op: composed_op,
         init: cons_init.clone(),
-        props: cons_props.clone(),
     })
 }
 
@@ -373,11 +369,10 @@ pub fn classify_soac(soac: &SoacOp) -> ArraySemantics {
             inputs: inputs.clone(),
             body: lam.clone(),
         },
-        SoacOp::Reduce { op, ne, input, props } => ArraySemantics::Reduction {
+        SoacOp::Reduce { op, ne, input } => ArraySemantics::Reduction {
             input: input.clone(),
             op: op.clone(),
             init: ne.clone(),
-            props: props.clone(),
         },
         SoacOp::Scan { op, ne, input } => ArraySemantics::PrefixScan {
             input: input.clone(),
@@ -403,14 +398,12 @@ pub fn classify_soac(soac: &SoacOp) -> ArraySemantics {
             ne,
             indices,
             values,
-            props,
         } => ArraySemantics::IndexedReduction {
             dest: classify_place(dest),
             indices: indices.clone(),
             values: values.clone(),
             op: op.clone(),
             init: ne.clone(),
-            props: props.clone(),
         },
         // Redomap is a fused map+reduce produced by fusion; classified as opaque
         // because it is not analyzed further by the semantic framework.

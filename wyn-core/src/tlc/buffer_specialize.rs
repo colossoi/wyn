@@ -602,11 +602,10 @@ impl BufferSpecializer {
                 inputs: inputs.iter().map(|ae| self.rewrite_array_expr(ae)).collect(),
                 consumes_input: *consumes_input,
             },
-            SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
+            SoacOp::Reduce { op, ne, input } => SoacOp::Reduce {
                 op: self.rewrite_soac_body(op),
                 ne: Box::new(self.rewrite_term(ne)),
                 input: self.rewrite_array_expr(input),
-                props: props.clone(),
             },
             SoacOp::Scan { op, ne, input } => SoacOp::Scan {
                 op: self.rewrite_soac_body(op),
@@ -632,27 +631,23 @@ impl BufferSpecializer {
                 ne,
                 indices,
                 values,
-                props,
             } => SoacOp::ReduceByIndex {
                 dest: self.rewrite_place(dest),
                 op: self.rewrite_soac_body(op),
                 ne: Box::new(self.rewrite_term(ne)),
                 indices: self.rewrite_array_expr(indices),
                 values: self.rewrite_array_expr(values),
-                props: props.clone(),
             },
             SoacOp::Redomap {
                 op,
                 reduce_op,
                 ne,
                 inputs,
-                props,
             } => SoacOp::Redomap {
                 op: self.rewrite_soac_body(op),
                 reduce_op: self.rewrite_soac_body(reduce_op),
                 ne: Box::new(self.rewrite_term(ne)),
                 inputs: inputs.iter().map(|ae| self.rewrite_array_expr(ae)).collect(),
-                props: props.clone(),
             },
         }
     }
@@ -1240,11 +1235,10 @@ impl BufferSpecializer {
                     .collect(),
                 consumes_input: *consumes_input,
             },
-            SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
+            SoacOp::Reduce { op, ne, input } => SoacOp::Reduce {
                 op: self.rewrite_specialized_soac_body(op, view_params),
                 ne: Box::new(self.rewrite_specialized_body(ne, view_params)),
                 input: self.rewrite_specialized_array_expr(input, view_params),
-                props: props.clone(),
             },
             SoacOp::Scan { op, ne, input } => SoacOp::Scan {
                 op: self.rewrite_specialized_soac_body(op, view_params),
@@ -1270,21 +1264,18 @@ impl BufferSpecializer {
                 ne,
                 indices,
                 values,
-                props,
             } => SoacOp::ReduceByIndex {
                 dest: self.rewrite_specialized_place(dest, view_params),
                 op: self.rewrite_specialized_soac_body(op, view_params),
                 ne: Box::new(self.rewrite_specialized_body(ne, view_params)),
                 indices: self.rewrite_specialized_array_expr(indices, view_params),
                 values: self.rewrite_specialized_array_expr(values, view_params),
-                props: props.clone(),
             },
             SoacOp::Redomap {
                 op,
                 reduce_op,
                 ne,
                 inputs,
-                props,
             } => SoacOp::Redomap {
                 op: self.rewrite_specialized_soac_body(op, view_params),
                 reduce_op: self.rewrite_specialized_soac_body(reduce_op, view_params),
@@ -1293,7 +1284,6 @@ impl BufferSpecializer {
                     .iter()
                     .map(|ae| self.rewrite_specialized_array_expr(ae, view_params))
                     .collect(),
-                props: props.clone(),
             },
         }
     }

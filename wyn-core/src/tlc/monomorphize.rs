@@ -595,11 +595,10 @@ impl<'a> Monomorphizer<'a> {
                 inputs: inputs.iter().map(|ae| self.process_array_expr(ae)).collect(),
                 consumes_input: *consumes_input,
             },
-            SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
+            SoacOp::Reduce { op, ne, input } => SoacOp::Reduce {
                 op: self.process_soac_body(op),
                 ne: Box::new(self.process_term(ne)),
                 input: self.process_array_expr(input),
-                props: props.clone(),
             },
             SoacOp::Scan { op, ne, input } => SoacOp::Scan {
                 op: self.process_soac_body(op),
@@ -625,27 +624,23 @@ impl<'a> Monomorphizer<'a> {
                 ne,
                 indices,
                 values,
-                props,
             } => SoacOp::ReduceByIndex {
                 dest: dest.clone(),
                 op: self.process_soac_body(op),
                 ne: Box::new(self.process_term(ne)),
                 indices: self.process_array_expr(indices),
                 values: self.process_array_expr(values),
-                props: props.clone(),
             },
             SoacOp::Redomap {
                 op,
                 reduce_op,
                 ne,
                 inputs,
-                props,
             } => SoacOp::Redomap {
                 op: self.process_soac_body(op),
                 reduce_op: self.process_soac_body(reduce_op),
                 ne: Box::new(self.process_term(ne)),
                 inputs: inputs.iter().map(|ae| self.process_array_expr(ae)).collect(),
-                props: props.clone(),
             },
         }
     }
@@ -958,11 +953,10 @@ impl<'a> Monomorphizer<'a> {
                 inputs: inputs.iter().map(|ae| self.apply_subst_array_expr(ae, subst)).collect(),
                 consumes_input: *consumes_input,
             },
-            SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
+            SoacOp::Reduce { op, ne, input } => SoacOp::Reduce {
                 op: self.apply_subst_soac_body(op, subst),
                 ne: Box::new(self.apply_subst_term(ne, subst)),
                 input: self.apply_subst_array_expr(input, subst),
-                props: props.clone(),
             },
             SoacOp::Scan { op, ne, input } => SoacOp::Scan {
                 op: self.apply_subst_soac_body(op, subst),
@@ -988,27 +982,23 @@ impl<'a> Monomorphizer<'a> {
                 ne,
                 indices,
                 values,
-                props,
             } => SoacOp::ReduceByIndex {
                 dest: dest.clone(),
                 op: self.apply_subst_soac_body(op, subst),
                 ne: Box::new(self.apply_subst_term(ne, subst)),
                 indices: self.apply_subst_array_expr(indices, subst),
                 values: self.apply_subst_array_expr(values, subst),
-                props: props.clone(),
             },
             SoacOp::Redomap {
                 op,
                 reduce_op,
                 ne,
                 inputs,
-                props,
             } => SoacOp::Redomap {
                 op: self.apply_subst_soac_body(op, subst),
                 reduce_op: self.apply_subst_soac_body(reduce_op, subst),
                 ne: Box::new(self.apply_subst_term(ne, subst)),
                 inputs: inputs.iter().map(|ae| self.apply_subst_array_expr(ae, subst)).collect(),
-                props: props.clone(),
             },
         }
     }

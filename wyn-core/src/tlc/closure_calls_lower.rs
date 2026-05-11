@@ -394,7 +394,7 @@ impl<'a> CallLowerer<'a> {
                 inputs: inputs.into_iter().map(|ae| self.lower_array_expr(ae)).collect(),
                 consumes_input,
             },
-            SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
+            SoacOp::Reduce { op, ne, input } => SoacOp::Reduce {
                 op: super::SoacBody {
                     lam: op.lam,
                     captures: op
@@ -405,7 +405,6 @@ impl<'a> CallLowerer<'a> {
                 },
                 ne: Box::new(self.lower_term(*ne)),
                 input: self.lower_array_expr(input),
-                props,
             },
             SoacOp::Scan { op, ne, input } => SoacOp::Scan {
                 op: super::SoacBody {
@@ -445,7 +444,6 @@ impl<'a> CallLowerer<'a> {
                 ne,
                 indices,
                 values,
-                props,
             } => SoacOp::ReduceByIndex {
                 dest,
                 op: super::SoacBody {
@@ -459,14 +457,12 @@ impl<'a> CallLowerer<'a> {
                 ne: Box::new(self.lower_term(*ne)),
                 indices: self.lower_array_expr(indices),
                 values: self.lower_array_expr(values),
-                props,
             },
             SoacOp::Redomap {
                 op,
                 reduce_op,
                 ne,
                 inputs,
-                props,
             } => SoacOp::Redomap {
                 op: super::SoacBody {
                     lam: op.lam,
@@ -486,7 +482,6 @@ impl<'a> CallLowerer<'a> {
                 },
                 ne: Box::new(self.lower_term(*ne)),
                 inputs: inputs.into_iter().map(|ae| self.lower_array_expr(ae)).collect(),
-                props,
             },
         }
     }

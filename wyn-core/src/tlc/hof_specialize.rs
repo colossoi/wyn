@@ -343,11 +343,10 @@ pub(super) fn apply_type_subst_to_soac(
             inputs: inputs.iter().map(|ae| apply_type_subst_to_array_expr(ae, subst, term_ids)).collect(),
             consumes_input: *consumes_input,
         },
-        SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
+        SoacOp::Reduce { op, ne, input } => SoacOp::Reduce {
             op: apply_type_subst_to_soac_body(op, subst, term_ids),
             ne: Box::new(apply_type_subst_to_term(ne, subst, term_ids)),
             input: apply_type_subst_to_array_expr(input, subst, term_ids),
-            props: props.clone(),
         },
         SoacOp::Scan { op, ne, input } => SoacOp::Scan {
             op: apply_type_subst_to_soac_body(op, subst, term_ids),
@@ -373,27 +372,23 @@ pub(super) fn apply_type_subst_to_soac(
             ne,
             indices,
             values,
-            props,
         } => SoacOp::ReduceByIndex {
             dest: apply_type_subst_to_place(dest, subst, term_ids),
             op: apply_type_subst_to_soac_body(op, subst, term_ids),
             ne: Box::new(apply_type_subst_to_term(ne, subst, term_ids)),
             indices: apply_type_subst_to_array_expr(indices, subst, term_ids),
             values: apply_type_subst_to_array_expr(values, subst, term_ids),
-            props: props.clone(),
         },
         SoacOp::Redomap {
             op,
             reduce_op,
             ne,
             inputs,
-            props,
         } => SoacOp::Redomap {
             op: apply_type_subst_to_soac_body(op, subst, term_ids),
             reduce_op: apply_type_subst_to_soac_body(reduce_op, subst, term_ids),
             ne: Box::new(apply_type_subst_to_term(ne, subst, term_ids)),
             inputs: inputs.iter().map(|ae| apply_type_subst_to_array_expr(ae, subst, term_ids)).collect(),
-            props: props.clone(),
         },
     }
 }
@@ -779,11 +774,10 @@ fn substitute_var_soac(
                 .collect(),
             consumes_input: *consumes_input,
         },
-        SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
+        SoacOp::Reduce { op, ne, input } => SoacOp::Reduce {
             op: substitute_var_soac_body(op, old_sym, new_sym, term_ids),
             ne: Box::new(substitute_var(ne, old_sym, new_sym, term_ids)),
             input: substitute_var_array_expr(input, old_sym, new_sym, term_ids),
-            props: props.clone(),
         },
         SoacOp::Scan { op, ne, input } => SoacOp::Scan {
             op: substitute_var_soac_body(op, old_sym, new_sym, term_ids),
@@ -809,21 +803,18 @@ fn substitute_var_soac(
             ne,
             indices,
             values,
-            props,
         } => SoacOp::ReduceByIndex {
             dest: dest.clone(),
             op: substitute_var_soac_body(op, old_sym, new_sym, term_ids),
             ne: Box::new(substitute_var(ne, old_sym, new_sym, term_ids)),
             indices: substitute_var_array_expr(indices, old_sym, new_sym, term_ids),
             values: substitute_var_array_expr(values, old_sym, new_sym, term_ids),
-            props: props.clone(),
         },
         SoacOp::Redomap {
             op,
             reduce_op,
             ne,
             inputs,
-            props,
         } => SoacOp::Redomap {
             op: substitute_var_soac_body(op, old_sym, new_sym, term_ids),
             reduce_op: substitute_var_soac_body(reduce_op, old_sym, new_sym, term_ids),
@@ -832,7 +823,6 @@ fn substitute_var_soac(
                 .iter()
                 .map(|ae| substitute_var_array_expr(ae, old_sym, new_sym, term_ids))
                 .collect(),
-            props: props.clone(),
         },
     }
 }

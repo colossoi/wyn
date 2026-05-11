@@ -613,7 +613,7 @@ impl SoaTransformer {
                     consumes_input: *consumes_input,
                 }
             }
-            SoacOp::Reduce { op, ne, input, props } => {
+            SoacOp::Reduce { op, ne, input } => {
                 let new_op = self.transform_soac_body(op);
                 let new_ne = self.transform_term(ne);
                 let new_input = self.transform_array_expr(input);
@@ -621,7 +621,6 @@ impl SoaTransformer {
                     op: new_op,
                     ne: Box::new(new_ne),
                     input: new_input,
-                    props: props.clone(),
                 }
             }
             SoacOp::Scan { op, ne, input } => {
@@ -662,7 +661,6 @@ impl SoaTransformer {
                 ne,
                 indices,
                 values,
-                props,
             } => {
                 let new_dest = self.transform_place(dest);
                 let new_op = self.transform_soac_body(op);
@@ -675,7 +673,6 @@ impl SoaTransformer {
                     ne: Box::new(new_ne),
                     indices: new_indices,
                     values: new_values,
-                    props: props.clone(),
                 }
             }
             SoacOp::Redomap {
@@ -683,7 +680,6 @@ impl SoaTransformer {
                 reduce_op,
                 ne,
                 inputs,
-                props,
             } => {
                 let new_op = self.transform_soac_body(op);
                 let new_reduce_op = self.transform_soac_body(reduce_op);
@@ -695,7 +691,6 @@ impl SoaTransformer {
                     reduce_op: new_reduce_op,
                     ne: Box::new(new_ne),
                     inputs: new_inputs,
-                    props: props.clone(),
                 }
             }
         }

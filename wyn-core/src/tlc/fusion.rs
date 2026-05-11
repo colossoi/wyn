@@ -240,7 +240,7 @@ fn build_fused_from_semantics(
             })
         }
 
-        (FusionKind::MapIntoReduce, ArraySemantics::Reduction { op, init, props, .. }) => {
+        (FusionKind::MapIntoReduce, ArraySemantics::Reduction { op, init, .. }) => {
             if op.lam.params.len() != 2 {
                 return None;
             }
@@ -257,7 +257,6 @@ fn build_fused_from_semantics(
                     reduce_op: op.clone(),
                     ne: init.clone(),
                     inputs: input_exprs,
-                    props: props.clone(),
                 }),
             })
         }

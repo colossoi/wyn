@@ -423,6 +423,12 @@ pub enum ArrayExpr {
 }
 
 /// A second-order array combinator (SOAC) operation.
+///
+/// `Reduce`, `Redomap`, `Scan`, and `ReduceByIndex` parallelize freely on
+/// the assumption that their reducer is associative (Futhark convention:
+/// the caller asserts associativity by using the SOAC). The compiler
+/// never verifies this — float reductions are reordered just like int
+/// reductions, so the user accepts non-determinism on `+/f32` etc.
 #[derive(Debug, Clone)]
 pub enum SoacOp {
     Map {
@@ -440,7 +446,6 @@ pub enum SoacOp {
         op: SoacBody,
         ne: Box<Term>,
         input: ArrayExpr,
-        props: ReduceProps,
     },
     /// Fused map+reduce: `op(acc, x1, ..., xn) -> acc'` over parallel inputs.
     /// Produced by fusion when a Map feeds directly into a Reduce.
@@ -455,7 +460,6 @@ pub enum SoacOp {
         ne: Box<Term>,
         /// Parallel input arrays (one per element param in op).
         inputs: Vec<ArrayExpr>,
-        props: ReduceProps,
     },
     Scan {
         op: SoacBody,
@@ -477,7 +481,6 @@ pub enum SoacOp {
         ne: Box<Term>,
         indices: ArrayExpr,
         values: ArrayExpr,
-        props: ReduceProps,
     },
 }
 
@@ -495,24 +498,6 @@ pub enum Place {
         shape: Shape,
         elem_ty: Type<TypeName>,
     },
-}
-
-/// Properties of a reduction operator.
-#[derive(Debug, Clone)]
-pub struct ReduceProps {
-    pub commutative: bool,
-    pub associative: bool,
-    pub requires_atomic: bool,
-}
-
-impl Default for ReduceProps {
-    fn default() -> Self {
-        Self {
-            commutative: false,
-            associative: false,
-            requires_atomic: false,
-        }
-    }
 }
 
 // =============================================================================
@@ -994,11 +979,10 @@ where
             inputs: inputs.into_iter().map(|ae| map_array_expr_children(ae, f)).collect(),
             consumes_input,
         },
-        SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
+        SoacOp::Reduce { op, ne, input } => SoacOp::Reduce {
             op: map_soac_body_children(op, f),
             ne: Box::new(f(*ne)),
             input: map_array_expr_children(input, f),
-            props,
         },
         SoacOp::Scan { op, ne, input } => SoacOp::Scan {
             op: map_soac_body_children(op, f),
@@ -1024,27 +1008,23 @@ where
             ne,
             indices,
             values,
-            props,
         } => SoacOp::ReduceByIndex {
             dest: map_place_children(dest, f),
             op: map_soac_body_children(op, f),
             ne: Box::new(f(*ne)),
             indices: map_array_expr_children(indices, f),
             values: map_array_expr_children(values, f),
-            props,
         },
         SoacOp::Redomap {
             op,
             reduce_op,
             ne,
             inputs,
-            props,
         } => SoacOp::Redomap {
             op: map_soac_body_children(op, f),
             reduce_op: map_soac_body_children(reduce_op, f),
             ne: Box::new(f(*ne)),
             inputs: inputs.into_iter().map(|ae| map_array_expr_children(ae, f)).collect(),
-            props,
         },
     }
 }
@@ -2273,7 +2253,7 @@ impl<'a> Transformer<'a> {
         )
     }
 
-    /// Transform `reduce(op, ne, arr)` → `Soac(Reduce { op, ne, input, props })`.
+    /// Transform `reduce(op, ne, arr)` → `Soac(Reduce { op, ne, input })`.
     fn transform_soac_reduce(&mut self, args: &[ast::Expression], ty: Type<TypeName>, span: Span) -> Term {
         assert!(args.len() >= 3, "reduce requires 3 arguments");
         let op_term = self.transform_expr(&args[0]);
@@ -2289,7 +2269,6 @@ impl<'a> Transformer<'a> {
                 op,
                 ne: Box::new(ne_term),
                 input: ArrayExpr::Ref(Box::new(arr_term)),
-                props: ReduceProps::default(),
             }),
         )
     }
@@ -2379,7 +2358,6 @@ impl<'a> Transformer<'a> {
                 ne: Box::new(ne_term),
                 indices: ArrayExpr::Ref(Box::new(indices_term)),
                 values: ArrayExpr::Ref(Box::new(values_term)),
-                props: ReduceProps::default(),
             }),
         )
     }

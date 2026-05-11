@@ -1006,11 +1006,10 @@ impl<'a> ClosureConverter<'a> {
                 inputs: inputs.into_iter().map(|ae| self.convert_array_expr(ae, span)).collect(),
                 consumes_input,
             },
-            SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
+            SoacOp::Reduce { op, ne, input } => SoacOp::Reduce {
                 op: self.lift_soac_lambda(op.lam, span),
                 ne: Box::new(self.convert_term(*ne)),
                 input: self.convert_array_expr(input, span),
-                props,
             },
             SoacOp::Scan { op, ne, input } => SoacOp::Scan {
                 op: self.lift_soac_lambda(op.lam, span),
@@ -1036,27 +1035,23 @@ impl<'a> ClosureConverter<'a> {
                 ne,
                 indices,
                 values,
-                props,
             } => SoacOp::ReduceByIndex {
                 dest,
                 op: self.lift_soac_lambda(op.lam, span),
                 ne: Box::new(self.convert_term(*ne)),
                 indices: self.convert_array_expr(indices, span),
                 values: self.convert_array_expr(values, span),
-                props,
             },
             SoacOp::Redomap {
                 op,
                 reduce_op,
                 ne,
                 inputs,
-                props,
             } => SoacOp::Redomap {
                 op: self.lift_soac_lambda(op.lam, span),
                 reduce_op: self.lift_soac_lambda(reduce_op.lam, span),
                 ne: Box::new(self.convert_term(*ne)),
                 inputs: inputs.into_iter().map(|ae| self.convert_array_expr(ae, span)).collect(),
-                props,
             },
         }
     }

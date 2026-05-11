@@ -17,9 +17,7 @@ use crate::{SymbolId, SymbolTable};
 use polytype::Type;
 use std::collections::{HashMap, HashSet};
 
-use super::{
-    ArrayExpr, Def, DefMeta, Lambda, LoopKind, Program, ReduceProps, SoacOp, Term, TermId, TermKind,
-};
+use super::{ArrayExpr, Def, DefMeta, Lambda, LoopKind, Program, SoacOp, Term, TermId, TermKind};
 
 // =============================================================================
 // Analysis types
@@ -358,13 +356,12 @@ fn analyze_soac(
                 consumes_input: *consumes_input,
             }
         }
-        SoacOp::Reduce { op, ne, input, props } => {
+        SoacOp::Reduce { op, ne, input } => {
             classify_input(input)?;
             SoacOp::Reduce {
                 op: op.clone(),
                 ne: ne.clone(),
                 input: input.clone(),
-                props: props.clone(),
             }
         }
         SoacOp::Redomap {
@@ -372,7 +369,6 @@ fn analyze_soac(
             reduce_op,
             ne,
             inputs,
-            props,
         } => {
             for input in inputs {
                 classify_input(input)?;
@@ -382,7 +378,6 @@ fn analyze_soac(
                 reduce_op: reduce_op.clone(),
                 ne: ne.clone(),
                 inputs: inputs.clone(),
-                props: props.clone(),
             }
         }
         SoacOp::Scan { op, ne, input } => {
@@ -1112,7 +1107,6 @@ fn build_two_phase_entries(
         op: reduce_op.clone(),
         ne: Box::new(ne.clone()),
         input: partials_input,
-        props: ReduceProps::default(),
     };
     let phase2_soac_term = soac_term(phase2_soac, elem_type.clone(), span);
     let r_sym = program.symbols.alloc("_par_out".into());
@@ -2008,18 +2002,16 @@ fn build_chunked_soac_body(
                 consumes_input: *consumes_input,
             }
         }
-        SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
+        SoacOp::Reduce { op, ne, input } => SoacOp::Reduce {
             op: op.clone(),
             ne: ne.clone(),
             input: chunk_array_expr(input, &chunk_start_var, &chunk_len_var),
-            props: props.clone(),
         },
         SoacOp::Redomap {
             op,
             reduce_op,
             ne,
             inputs,
-            props,
         } => {
             let chunked_inputs = inputs
                 .iter()
@@ -2030,7 +2022,6 @@ fn build_chunked_soac_body(
                 reduce_op: reduce_op.clone(),
                 ne: ne.clone(),
                 inputs: chunked_inputs,
-                props: props.clone(),
             }
         }
         SoacOp::Scan { .. } => {

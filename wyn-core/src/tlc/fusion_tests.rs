@@ -1,6 +1,5 @@
 use super::super::{DefMeta, SoacOp};
 use crate::ast::Span;
-use crate::tlc::ReduceProps;
 use crate::tlc::SoacBody;
 use crate::tlc::fusion::*;
 use std::collections::HashMap;
@@ -96,7 +95,6 @@ fn mk_reduce(
             op: mk_soac_body(op),
             ne: Box::new(ne),
             input: ArrayExpr::Ref(Box::new(input)),
-            props: ReduceProps::default(),
         }),
         result_ty,
         term_ids,
