@@ -21,8 +21,6 @@ fn compile_via_egir(src: &str) -> Program {
     let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
     let parsed = crate::Compiler::parse(src, &mut node_counter).expect("Parsing failed");
     let type_checked = parsed
-        .desugar(&mut node_counter)
-        .expect("Desugaring failed")
         .resolve(&mut module_manager)
         .expect("Name resolution failed")
         .fold_ast_constants()

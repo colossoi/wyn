@@ -6,8 +6,6 @@ fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
     let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
     let parsed = Compiler::parse(source, &mut node_counter).expect("Parsing failed");
     let type_checked = parsed
-        .desugar(&mut node_counter)
-        .expect("Desugaring failed")
         .resolve(&mut module_manager)
         .expect("Name resolution failed")
         .fold_ast_constants()
@@ -337,8 +335,6 @@ fn compile_to_spirv_with_partial_eval(source: &str) -> Result<Vec<u32>> {
     let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
     let parsed = Compiler::parse(source, &mut node_counter).expect("Parsing failed");
     let type_checked = parsed
-        .desugar(&mut node_counter)
-        .expect("Desugaring failed")
         .resolve(&mut module_manager)
         .expect("Name resolution failed")
         .fold_ast_constants()

@@ -31,8 +31,6 @@ fn compile_to_tlc(source: &str) -> Program {
     let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
     let parsed = Compiler::parse(source, &mut node_counter).expect("parse");
     let type_checked = parsed
-        .desugar(&mut node_counter)
-        .expect("desugar")
         .resolve(&mut module_manager)
         .expect("resolve")
         .fold_ast_constants()
@@ -525,8 +523,6 @@ fn has_use_after_move(source: &str) -> bool {
     let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
     let parsed = Compiler::parse(source, &mut node_counter).expect("parse");
     let type_checked = parsed
-        .desugar(&mut node_counter)
-        .expect("desugar")
         .resolve(&mut module_manager)
         .expect("resolve")
         .fold_ast_constants()
@@ -1006,8 +1002,6 @@ fn compile_to_owned(source: &str) -> Program {
     let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
     let parsed = Compiler::parse(source, &mut node_counter).expect("parse");
     let type_checked = parsed
-        .desugar(&mut node_counter)
-        .expect("desugar")
         .resolve(&mut module_manager)
         .expect("resolve")
         .fold_ast_constants()

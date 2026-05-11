@@ -18,7 +18,6 @@ pub mod visitor;
 pub use types::checker as type_checker;
 
 pub mod ast_const_fold;
-pub mod desugar;
 pub mod lowering_common;
 pub mod name_registry;
 pub mod tlc;
@@ -38,6 +37,9 @@ pub mod wgsl;
 
 #[cfg(test)]
 mod integration_tests;
+
+#[cfg(test)]
+mod desugar_tests;
 
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -229,8 +231,7 @@ pub type TypeTable = HashMap<NodeId, TypeScheme<TypeName>>;
 //   let parsed = Compiler::parse(source, &mut node_counter)?;
 //
 // FrontEnd (AST) stages:
-//     parsed.desugar(&mut node_counter)            -> Desugared
-//       .resolve(&module_manager)                  -> Resolved
+//     parsed.resolve(&module_manager)              -> Resolved
 //       .fold_ast_constants()                      -> AstConstFoldedEarly
 //       .type_check(&mut module_manager)           -> TypeChecked
 //
@@ -364,18 +365,6 @@ impl Parsed {
         Ok(self)
     }
 
-    /// Desugar range and slice expressions into map/iota constructs.
-    /// Should be called before resolve() to ensure the generated identifiers
-    /// (iota, map) get properly resolved.
-    pub fn desugar(mut self, nc: &mut ast::NodeCounter) -> Result<Desugared> {
-        desugar::run(&mut self.0.ast, nc).map(|()| Desugared(self.0))
-    }
-}
-
-/// Range and slice expressions have been desugared to map/iota
-pub struct Desugared(FrontInner);
-
-impl Desugared {
     /// Resolve names: rewrite FieldAccess -> QualifiedName and load modules
     pub fn resolve(mut self, module_manager: &module_manager::ModuleManager) -> Result<Resolved> {
         name_resolution::run(&mut self.0.ast, module_manager)?;
@@ -1035,7 +1024,6 @@ pub fn compile_thru_frontend(source: &str) -> error::Result<TypeChecked> {
     let (mut node_counter, mut module_manager) = cached_compiler_init();
     Compiler::parse(source, &mut node_counter)?
         .elaborate_modules(&mut module_manager, &mut node_counter)?
-        .desugar(&mut node_counter)?
         .resolve(&module_manager)?
         .fold_ast_constants()
         .type_check(&mut module_manager)
@@ -1048,7 +1036,6 @@ pub fn compile_thru_tlc(source: &str) -> error::Result<TlcReachable> {
     let (mut node_counter, mut module_manager) = cached_compiler_init();
     let type_checked = Compiler::parse(source, &mut node_counter)?
         .elaborate_modules(&mut module_manager, &mut node_counter)?
-        .desugar(&mut node_counter)?
         .resolve(&module_manager)?
         .fold_ast_constants()
         .type_check(&mut module_manager)?;

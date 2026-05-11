@@ -30,8 +30,6 @@ fn compile_to_fused_tlc(input: &str) -> crate::tlc::Program {
     let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
     let type_checked = Compiler::parse(input, &mut node_counter)
         .expect("parse")
-        .desugar(&mut node_counter)
-        .expect("desugar")
         .resolve(&module_manager)
         .expect("resolve")
         .fold_ast_constants()
@@ -1388,8 +1386,6 @@ fn compile_to_ssa_with_inline_small(input: &str) -> Program {
     let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
     let parsed = Compiler::parse(input, &mut node_counter).expect("Parsing failed");
     let type_checked = parsed
-        .desugar(&mut node_counter)
-        .expect("Desugaring failed")
         .resolve(&mut module_manager)
         .expect("Name resolution failed")
         .fold_ast_constants()
@@ -1473,8 +1469,6 @@ fn compile_tlc_with_fill_holes(input: &str) -> crate::TlcTransformed {
     let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
     let parsed = Compiler::parse(input, &mut node_counter).expect("parse");
     let type_checked = parsed
-        .desugar(&mut node_counter)
-        .expect("desugar")
         .resolve(&mut module_manager)
         .expect("resolve")
         .fold_ast_constants()

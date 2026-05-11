@@ -288,8 +288,6 @@ fn compile_to_wgsl(source: &str) -> crate::error::Result<String> {
         .elaborate_modules(&mut module_manager, &mut node_counter)
         .expect("Module elaboration failed");
     let type_checked = parsed
-        .desugar(&mut node_counter)
-        .expect("Desugaring failed")
         .resolve(&mut module_manager)
         .expect("Name resolution failed")
         .fold_ast_constants()

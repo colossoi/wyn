@@ -11,8 +11,6 @@ def compute(x:i32, y:i32) i32 =
     let (mut node_counter, mut module_manager) = init_compiler();
     let typed = Compiler::parse(source, &mut node_counter)
         .expect("parse failed")
-        .desugar(&mut node_counter)
-        .expect("desugar failed")
         .resolve(&module_manager)
         .expect("resolve failed")
         .fold_ast_constants()

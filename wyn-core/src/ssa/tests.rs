@@ -187,8 +187,6 @@ fn spirv_storage_write_chain_lowers_cleanly() {
     let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
     let parsed = crate::Compiler::parse(source, &mut node_counter).unwrap();
     let spirv = parsed
-        .desugar(&mut node_counter)
-        .unwrap()
         .resolve(&mut module_manager)
         .unwrap()
         .fold_ast_constants()

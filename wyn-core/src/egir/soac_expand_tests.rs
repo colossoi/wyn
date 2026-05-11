@@ -29,8 +29,6 @@ fn compile_to_expanded_egraph(input: &str) -> crate::egir::types::EGraph {
         .expect("parse")
         .elaborate_modules(&mut module_manager, &mut node_counter)
         .expect("elaborate")
-        .desugar(&mut node_counter)
-        .expect("desugar")
         .resolve(&mut module_manager)
         .expect("resolve")
         .fold_ast_constants()

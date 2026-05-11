@@ -234,34 +234,6 @@ impl Parser<'_> {
         Ok(self.node_counter.mk_node(PatternKind::Constructor(constructor, args), span))
     }
 
-    fn can_start_pattern(&self) -> bool {
-        matches!(
-            self.peek(),
-            Some(Token::Identifier(_))
-                | Some(Token::Underscore)
-                | Some(Token::LeftParen)
-                | Some(Token::LeftBrace)
-                | Some(Token::IntLiteral(_))
-                | Some(Token::FloatLiteral(_))
-                | Some(Token::True)
-                | Some(Token::False)
-                | Some(Token::Minus)
-        )
-    }
-
-    fn is_pattern_terminator(&self) -> bool {
-        matches!(
-            self.peek(),
-            Some(Token::Assign)
-                | Some(Token::In)
-                | Some(Token::Arrow)
-                | Some(Token::RightParen)
-                | Some(Token::RightBrace)
-                | Some(Token::Comma)
-                | Some(Token::Colon)
-        )
-    }
-
     /// Parse a pattern literal:
     /// ```text
     /// pat_literal ::= [ "-" ] intnumber

@@ -4,7 +4,6 @@ use crate::ast::{
     Decl, Declaration, ModuleExpression, ModuleTypeExpression, Node, NodeCounter, Pattern, PatternKind,
     Program, Spec, Type,
 };
-use crate::desugar;
 use crate::error::Result;
 use crate::lexer;
 use crate::parser::Parser;
@@ -12,83 +11,6 @@ use crate::scope::ScopeStack;
 use crate::{bail_module, err_module, err_parse};
 use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet};
-
-/// Name resolver for tracking opened modules and resolving unqualified names
-/// TODO: Integrate with elaboration to handle `open` declarations
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-struct NameResolver {
-    /// Modules currently opened (via `open` declarations)
-    opened_modules: Vec<String>,
-    /// Local definitions in scope (for shadowing)
-    local_scope: ScopeStack<()>,
-}
-
-#[allow(dead_code)]
-impl NameResolver {
-    fn new() -> Self {
-        NameResolver {
-            opened_modules: Vec::new(),
-            local_scope: ScopeStack::new(),
-        }
-    }
-
-    /// Resolve an unqualified name by checking opened modules
-    /// Returns None if the name can't be resolved, or Some(qualified_name) if found
-    fn resolve_name(&self, name: &str, module_manager: &ModuleManager) -> Option<String> {
-        // 1. Check if it's locally defined (shadows everything)
-        if self.local_scope.is_defined(name) {
-            return None; // Keep unqualified, it's a local binding
-        }
-
-        // 2. Try each opened module in reverse order (most recent first)
-        for module_name in self.opened_modules.iter().rev() {
-            // Check if this module has this function
-            if let Some(elaborated) = module_manager.elaborated_modules.get(module_name) {
-                for item in &elaborated.items {
-                    let item_name = match item {
-                        ElaboratedItem::Spec(Spec::Sig(n, _, _)) => Some(n.as_str()),
-                        ElaboratedItem::Spec(Spec::SigOp(op, _)) => Some(op.as_str()),
-                        ElaboratedItem::Decl(decl) => Some(decl.name.as_str()),
-                        _ => None,
-                    };
-
-                    if item_name == Some(name) {
-                        return Some(format!("{}.{}", module_name, name));
-                    }
-                }
-            }
-        }
-
-        // 3. Not found in any opened module
-        None
-    }
-
-    /// Open a module (bring its names into scope)
-    fn open_module(&mut self, module_name: String) {
-        self.opened_modules.push(module_name);
-    }
-
-    /// Close the most recently opened module
-    fn close_module(&mut self) {
-        self.opened_modules.pop();
-    }
-
-    /// Push a new scope for local definitions
-    fn push_scope(&mut self) {
-        self.local_scope.push_scope();
-    }
-
-    /// Pop the current scope
-    fn pop_scope(&mut self) {
-        self.local_scope.pop_scope();
-    }
-
-    /// Add a local definition (for shadowing)
-    fn add_local(&mut self, name: String) {
-        self.local_scope.insert(name, ());
-    }
-}
 
 /// Represents a single item in an elaborated module
 #[derive(Debug, Clone)]
@@ -258,11 +180,7 @@ impl ModuleManager {
         // Parse the source
         let tokens = lexer::tokenize(source).map_err(|e| err_parse!("{}", e))?;
         let mut parser = Parser::new(tokens, node_counter);
-        let mut program = parser.parse()?;
-
-        // Desugar range/slice expressions before elaboration
-        // This ensures prelude functions like `iota` don't have unexpanded range expressions
-        desugar::run(&mut program, node_counter)?;
+        let program = parser.parse()?;
 
         // Register module types first
         self.register_module_types(&program)?;

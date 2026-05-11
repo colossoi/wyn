@@ -240,9 +240,7 @@ fn compile_file(
     let parsed = time("elaborate_modules", verbose, || {
         parsed.elaborate_modules(&mut module_manager, &mut node_counter)
     })?;
-    // Desugar ranges/slices early, before name resolution and type checking
-    let desugared = time("desugar", verbose, || parsed.desugar(&mut node_counter))?;
-    let resolved = time("resolve", verbose, || desugared.resolve(&module_manager))?;
+    let resolved = time("resolve", verbose, || parsed.resolve(&module_manager))?;
     let ast_folded = time("fold_ast_constants", verbose, || resolved.fold_ast_constants());
     let type_checked = time("type_check", verbose, || {
         ast_folded.type_check(&mut module_manager)
@@ -459,8 +457,7 @@ fn check_file(input: PathBuf, verbose: bool) -> Result<(), DriverError> {
     let parsed = Compiler::parse(&source, &mut node_counter)?;
     let base_dir = input.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
     let parsed = parsed.resolve_imports(&base_dir, &mut node_counter)?;
-    let desugared = parsed.desugar(&mut node_counter)?;
-    let resolved = desugared.resolve(&module_manager)?;
+    let resolved = parsed.resolve(&module_manager)?;
     let type_checked = resolved.fold_ast_constants().type_check(&mut module_manager)?;
 
     type_checked.print_warnings();

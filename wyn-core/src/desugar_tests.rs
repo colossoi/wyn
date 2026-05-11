@@ -1,23 +1,18 @@
-//! Tests for slices and ranges in the TLC pipeline
-//!
-//! These tests verify that:
-//! 1. Slices and ranges compile correctly through SSA
-//! 2. The full pipeline works end-to-end with slices/ranges
-//! 3. Constant folding in slice indices works correctly
+//! End-to-end tests for slice and range expressions in the compilation
+//! pipeline. They verify that slices and ranges (which are handled at
+//! the TLC level, not by an AST-level desugar pass) compile correctly
+//! through SSA, and that constant folding in slice indices works.
 
 use crate::Compiler;
 use crate::error::CompilerError;
 use crate::ssa::types::Program;
 
-/// Helper to run full pipeline through lowering, including desugar step
+/// Helper to run full pipeline through lowering.
 fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
     let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
     let parsed = Compiler::parse(input, &mut node_counter)?;
-    let type_checked = parsed
-        .desugar(&mut node_counter)?
-        .resolve(&mut module_manager)?
-        .fold_ast_constants()
-        .type_check(&mut module_manager)?;
+    let type_checked =
+        parsed.resolve(&mut module_manager)?.fold_ast_constants().type_check(&mut module_manager)?;
 
     type_checked
         .to_tlc(&module_manager, false)
@@ -43,15 +38,12 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
     Ok(())
 }
 
-/// Helper to run pipeline through SSA (checks desugar correctness)
+/// Helper to run pipeline through SSA.
 fn compile_through_ssa(input: &str) -> Result<Program, CompilerError> {
     let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
     let parsed = Compiler::parse(input, &mut node_counter)?;
-    let type_checked = parsed
-        .desugar(&mut node_counter)?
-        .resolve(&mut module_manager)?
-        .fold_ast_constants()
-        .type_check(&mut module_manager)?;
+    let type_checked =
+        parsed.resolve(&mut module_manager)?.fold_ast_constants().type_check(&mut module_manager)?;
 
     let ssa = type_checked
         .to_tlc(&module_manager, false)
@@ -500,8 +492,6 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     eprintln!("=== parse OK ===");
 
     let type_checked = parsed
-        .desugar(&mut node_counter)
-        .expect("desugar")
         .resolve(&mut module_manager)
         .expect("resolve")
         .fold_ast_constants()
@@ -561,8 +551,6 @@ entry main(data: []i32) []i32 = [first(data)]
     eprintln!("=== parse OK ===");
 
     let type_checked = parsed
-        .desugar(&mut node_counter)
-        .expect("desugar")
         .resolve(&mut module_manager)
         .expect("resolve")
         .fold_ast_constants()
