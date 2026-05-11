@@ -1068,10 +1068,6 @@ impl<'a> Converter<'a> {
         args: &[Term],
         ty: Type<TypeName>,
     ) -> Result<NodeId, ConvertError> {
-        // Intrinsic patterns. `_w_tuple`, `_w_tuple_proj`, `_w_index`,
-        // `_w_array_lit`, `_w_vec_lit` no longer appear here — those
-        // are first-class TermKind variants handled in
-        // `convert_term_kind`.
         match name {
             "_w_range" => {
                 let start = self.convert_term(&args[0])?;
@@ -1138,11 +1134,8 @@ impl<'a> Converter<'a> {
     }
 
     // ========================================================================
-    // Side-effectful intrinsic helpers — called from both convert_named_app
-    // (Symbol-arm of convert_app) and the Builtin-arm dispatch on
-    // `BuiltinLowering::Intrinsic(StorageIndex|StorageStore)`. The Symbol
-    // path is the legacy in-progress route; the Builtin path is the
-    // structural one.
+    // Side-effectful intrinsic helpers — called from the Builtin-arm
+    // dispatch on `BuiltinLowering::Intrinsic(StorageIndex|StorageStore)`.
     // ========================================================================
 
     fn lower_storage_index(&mut self, args: &[Term], ty: Type<TypeName>) -> Result<NodeId, ConvertError> {

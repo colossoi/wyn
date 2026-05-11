@@ -353,12 +353,9 @@ impl SoaTransformer {
         new_result_ty: Type<TypeName>,
         span: Span,
     ) -> Term {
-        // Catalog-entry dispatch via BuiltinId (works for both
-        // `VarRef::Symbol` legacy paths and `VarRef::Builtin` modern
-        // user code).
         let known = crate::builtins::catalog().known();
         if let Some(id) = crate::tlc::var_term_builtin_id(func, &self.symbols) {
-            // _w_intrinsic_array_with(arr, i, val) where arr was [n](A,B)
+            // array_with(arr, i, val) where arr was [n](A,B)
             if (id == known.array_with || id == known.array_with_in_place) && args.len() == 3 {
                 let arr_orig_ty = &args[0].ty;
                 if let Some(n) = is_array_of_tuple(arr_orig_ty) {
@@ -400,10 +397,6 @@ impl SoaTransformer {
             }
         }
 
-        // `_w_index` and `_w_array_lit` (compiler-generated operators)
-        // are now `TermKind::Index` and `TermKind::ArrayExpr(Literal)`
-        // — handled directly in `transform_term`.
-
         // Default: recursively transform all parts.
         let _ = orig_result_ty;
         let new_func = self.transform_term(func);
@@ -422,8 +415,9 @@ impl SoaTransformer {
     // Array-of-Tuple rewrite helpers
     // =========================================================================
 
-    /// `_w_index(arr, i)` where arr was `[n](A,B)`, now `([n]A, [n]B)`:
-    /// -> `_w_tuple(_w_index(proj(arr,0), i), _w_index(proj(arr,1), i))`
+    /// Distribute an index over an array-of-tuple input. For
+    /// `arr: [n](A,B)` distributed to `([n]A, [n]B)`, rewrites
+    /// `arr[i]` to `(proj(arr,0)[i], proj(arr,1)[i])`.
     fn rewrite_index_aot(
         &mut self,
         arr: &Term,

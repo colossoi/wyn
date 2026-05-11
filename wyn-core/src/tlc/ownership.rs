@@ -1141,9 +1141,6 @@ impl<'m> Rewriter<'m> {
     fn rewrite(&mut self, term: Term) -> Term {
         // array_with → array_with_inplace: rewrite the App's `func`
         // before descending, since the rewrite swaps the function var.
-        // `var_term_builtin_id` handles both `VarRef::Symbol` (older
-        // synthesised paths) and `VarRef::Builtin` (post-Phase-3.5
-        // user code) uniformly.
         if let TermKind::App { func, args } = &term.kind {
             let known = crate::builtins::catalog().known();
             let calls_functional =

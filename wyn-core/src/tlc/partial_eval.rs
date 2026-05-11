@@ -210,9 +210,9 @@ impl PartialEvaluator {
 
             // Structural ops: evaluate children so let-bound `Var`s
             // get substituted through, then rebuild the variant. Without
-            // this the env-substitution that the eval-pass relies on
-            // would leave a dangling `Var(name)` reference after the
-            // surrounding `Let` is dissolved.
+            // this an enclosing `Let` whose body references one of these
+            // would leave a dangling `Var(name)` after the let is
+            // dissolved by the eval pass.
             TermKind::Tuple(parts) => {
                 let part_vals: Vec<Value> = parts.iter().map(|p| self.eval(p)).collect();
                 let part_terms: Vec<Term> =
@@ -321,12 +321,6 @@ impl PartialEvaluator {
 
     /// Apply a named function to arguments.
     fn apply_var(&mut self, sym: SymbolId, args: Vec<Value>, original: &Term) -> Value {
-        // Check for intrinsics first (clone name to avoid borrow conflict)
-        let name = self.symbols.get(sym).expect("BUG: symbol not in table").clone();
-        if let Some(val) = self.try_intrinsic(&name, &args, original) {
-            return val;
-        }
-
         // Check if this is a let-bound variable aliasing a function.
         // This handles cases like `let f = g in f x` where g is a known function.
         if let Some(Value::Partial {
@@ -375,13 +369,6 @@ impl PartialEvaluator {
             // Unknown function - residualize
             self.reify_call(sym, args, original)
         }
-    }
-
-    /// Try to evaluate an intrinsic. `_w_tuple_proj` and `_w_index` are
-    /// no longer App calls (they're first-class TermKind variants); their
-    /// constant-folding lives directly in `eval` for those variants.
-    fn try_intrinsic(&mut self, _name: &str, _args: &[Value], _original: &Term) -> Option<Value> {
-        None
     }
 
     /// Inline a function call.

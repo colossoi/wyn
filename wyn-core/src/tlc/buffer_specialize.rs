@@ -17,7 +17,6 @@ use super::{
     ArrayExpr, Def, DefMeta, Lambda, LoopKind, Place, Program, SoacOp, Term, TermIdSource, TermKind,
 };
 use crate::ast::{self, Span, TypeName};
-use crate::builtins::names::{INTRINSIC_STORAGE_INDEX, INTRINSIC_STORAGE_LEN};
 use crate::interface;
 use crate::types::TypeExt;
 use crate::{SymbolId, SymbolTable};
@@ -231,9 +230,9 @@ impl BufferSpecializer {
     /// Rewrite a def body with no per-def `buffer_map` — used for
     /// vertex/fragment entries that don't have auto-bound view
     /// parameters but may still read module-scope `#[storage]`
-    /// bindings. The module-scope map is always in scope (populated
-    /// once in `run()`), so rewrites of `_w_index(storage_def, i)`
-    /// and `_w_intrinsic_length(storage_def)` still fire.
+    /// bindings. The module-scope map is always in scope, so
+    /// rewrites of `storage_def[i]` and `length(storage_def)`
+    /// still fire.
     fn rewrite_def_body(&mut self, def: &Def) -> Def {
         let old_buffer_map = self.buffer_map.clone();
         self.buffer_map.clear();
@@ -349,22 +348,10 @@ impl BufferSpecializer {
             }
 
             TermKind::App { func, args } => {
-                // Catalog-name dispatches first — these recognise the
-                // call regardless of whether the func is a `Var(Symbol)`
-                // or a `Var(Builtin)`.
-
-                // `_w_index(data, i)` where `data` is a buffer-backed
-                // entry param: rewrite to
-                // `_w_intrinsic_storage_index(set, binding, i)` so the
-                // indexed load goes through the storage view path
-                // rather than being lowered later as
-                // `materialize + dynamic_extract` on a runtime-sized
-                // buffer (which is invalid — runtime-sized storage
-                // arrays aren't copyable into a local composite).
-                // `_w_intrinsic_length(data)` on a buffer-backed entry
-                // param: rewrite to `_w_intrinsic_storage_len(set,
-                // binding)`, matching how the specialized-function
-                // path handles view lengths.
+                // `length(data)` on a buffer-backed entry param: rewrite
+                // to `storage_len(set, binding)` so the load goes through
+                // the storage view path. Indexed loads are handled in
+                // the `TermKind::Index` arm above.
                 if crate::tlc::var_term_builtin_id(func, &self.symbols)
                     == Some(crate::builtins::catalog().known().length)
                     && args.len() == 1
@@ -376,8 +363,8 @@ impl BufferSpecializer {
                             let set_lit = self.make_int_lit(&binding.set.to_string(), u32_ty.clone(), span);
                             let binding_lit =
                                 self.make_int_lit(&binding.binding.to_string(), u32_ty.clone(), span);
-                            let storage_len = self.make_app(
-                                INTRINSIC_STORAGE_LEN,
+                            let storage_len = self.make_app_by_id(
+                                crate::builtins::catalog().known().storage_len,
                                 vec![set_lit, binding_lit],
                                 u32_ty.clone(),
                                 span,
@@ -552,8 +539,8 @@ impl BufferSpecializer {
                         let set_lit = self.make_int_lit(&binding.set.to_string(), u32_ty.clone(), span);
                         let binding_lit =
                             self.make_int_lit(&binding.binding.to_string(), u32_ty.clone(), span);
-                        return self.make_app(
-                            INTRINSIC_STORAGE_INDEX,
+                        return self.make_app_by_id(
+                            crate::builtins::catalog().known().storage_index,
                             vec![set_lit, binding_lit, idx],
                             binding.elem_ty,
                             span,
@@ -768,8 +755,8 @@ impl BufferSpecializer {
                 let zero = self.make_int_lit("0", u32_ty.clone(), span);
                 let set_lit = self.make_int_lit(&binding.set.to_string(), u32_ty.clone(), span);
                 let binding_lit = self.make_int_lit(&binding.binding.to_string(), u32_ty.clone(), span);
-                let storage_len = self.make_app(
-                    INTRINSIC_STORAGE_LEN,
+                let storage_len = self.make_app_by_id(
+                    crate::builtins::catalog().known().storage_len,
                     vec![set_lit, binding_lit],
                     u32_ty.clone(),
                     span,
@@ -885,12 +872,7 @@ impl BufferSpecializer {
     ) -> Term {
         match &term.kind {
             TermKind::App { func, args } => {
-                // Catalog-name dispatches — match both `Var(Symbol)` and
-                // `Var(Builtin)` references. `_w_index` is no longer an
-                // App (it's `TermKind::Index`) and is handled in that
-                // arm below.
-
-                // _w_intrinsic_length(arr_expr) where arr_expr resolves to a view
+                // `length(arr_expr)` where arr_expr resolves to a view.
                 if crate::tlc::var_term_builtin_id(func, &self.symbols)
                     == Some(crate::builtins::catalog().known().length)
                     && args.len() == 1
@@ -1174,8 +1156,8 @@ impl BufferSpecializer {
                         u32_ty.clone(),
                         span,
                     );
-                    return self.make_app(
-                        INTRINSIC_STORAGE_INDEX,
+                    return self.make_app_by_id(
+                        crate::builtins::catalog().known().storage_index,
                         vec![set_lit, binding_lit, add_result],
                         view.elem_ty,
                         span,
@@ -1518,6 +1500,22 @@ impl BufferSpecializer {
         }
     }
 
+    /// Build an `App(Var(Builtin{id}), args)` for a catalog `BuiltinId`.
+    fn make_app_by_id(
+        &mut self,
+        id: crate::builtins::BuiltinId,
+        args: Vec<Term>,
+        ret_ty: Type<TypeName>,
+        span: Span,
+    ) -> Term {
+        self.build_app_call(
+            crate::tlc::VarRef::Builtin { id, overload_idx: 0 },
+            args,
+            ret_ty,
+            span,
+        )
+    }
+
     fn make_app(
         &mut self,
         intrinsic_name: &str,
@@ -1525,11 +1523,9 @@ impl BufferSpecializer {
         ret_ty: Type<TypeName>,
         span: Span,
     ) -> Term {
-        // Catalog-resolved builtins emit `Var(Builtin(id))` so downstream
-        // passes dispatch structurally, not by string. The assert mirrors
-        // `tlc::build_call`: synthesised IR sites target single-overload
-        // entries — a multi-overload target requires the caller to pick
-        // an overload explicitly.
+        // Catalog targets are emitted as `Var(Builtin(id))`. The assert
+        // requires single-overload entries — multi-overload targets
+        // need an explicit overload index from the caller.
         let func_var = if let Some(def) = crate::builtins::catalog().lookup_by_any_name(intrinsic_name) {
             assert_eq!(
                 def.overloads().len(),
@@ -1545,6 +1541,17 @@ impl BufferSpecializer {
         } else {
             crate::tlc::VarRef::Symbol(self.symbols.alloc(intrinsic_name.to_string()))
         };
+        self.build_app_call(func_var, args, ret_ty, span)
+    }
+
+    /// Shared App-builder used by `make_app` and `make_app_by_id`.
+    fn build_app_call(
+        &mut self,
+        func_var: crate::tlc::VarRef,
+        args: Vec<Term>,
+        ret_ty: Type<TypeName>,
+        span: Span,
+    ) -> Term {
         let func_term = Term {
             id: self.term_ids.next_id(),
             ty: ret_ty.clone(), // approximate

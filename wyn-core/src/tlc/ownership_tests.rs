@@ -1140,8 +1140,6 @@ fn synth_program_with_with_through_index() -> Program {
     def_syms.insert("f".to_string(), f_sym);
     let with_sym = symbols.alloc(crate::builtins::names::INTRINSIC_ARRAY_WITH.to_string());
     def_syms.insert(crate::builtins::names::INTRINSIC_ARRAY_WITH.to_string(), with_sym);
-    let index_sym = symbols.alloc("_w_index".to_string());
-    def_syms.insert("_w_index".to_string(), index_sym);
 
     // Local symbols
     let grid_sym = symbols.alloc("grid".to_string());
@@ -1152,14 +1150,6 @@ fn synth_program_with_with_through_index() -> Program {
     let outer_arr_ty = Type::Constructed(TypeName::Array, vec![inner_arr_ty.clone()]);
     let unique_outer_ty = Type::Constructed(TypeName::Unique, vec![outer_arr_ty.clone()]);
 
-    // _w_index : *[2][4]i32 -> i32 -> [4]i32
-    let index_fn_ty = Type::Constructed(
-        TypeName::Arrow,
-        vec![
-            unique_outer_ty.clone(),
-            Type::Constructed(TypeName::Arrow, vec![i32_ty.clone(), inner_arr_ty.clone()]),
-        ],
-    );
     // _w_intrinsic_array_with : [4]i32 -> i32 -> i32 -> [4]i32
     let with_fn_ty = Type::Constructed(
         TypeName::Arrow,
@@ -1175,13 +1165,7 @@ fn synth_program_with_with_through_index() -> Program {
         ],
     );
 
-    // _w_index(grid, 0)
-    // The legacy `_w_index` symbol is unused now that indexing is a
-    // first-class TermKind variant; keep it allocated so the symbol
-    // table arrangement matches the broader test setup but reference
-    // it via `TermKind::Index { array, index }`.
-    let _ = index_fn_ty;
-    let _ = index_sym;
+    // grid[0]
     let var_grid = Term {
         id: ids.next_id(),
         ty: unique_outer_ty.clone(),

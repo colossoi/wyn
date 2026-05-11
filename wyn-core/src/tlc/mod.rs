@@ -167,39 +167,10 @@ pub enum VarRef {
     Symbol(SymbolId),
 }
 
-/// True iff the given term is a `Var` whose target is the catalog/symbol
-/// entry with the given name. Handles both `VarRef::Symbol` (matches the
-/// symbol-table name) and `VarRef::Builtin` (matches any of the catalog
-/// entry's names: surface, intrinsic-source, or impl-source). Use this
-/// in TLC passes that need to dispatch on a known builtin name without
-/// caring whether the call site has been classified through
-/// NameResolution yet.
-pub fn var_term_matches_name(term: &Term, symbols: &SymbolTable, name: &str) -> bool {
-    match &term.kind {
-        TermKind::Var(VarRef::Symbol(sym)) => {
-            symbols.get(*sym).map(|s| s.as_str() == name).unwrap_or(false)
-        }
-        TermKind::Var(VarRef::Builtin { id, .. }) => {
-            let def = crate::builtins::by_id(*id);
-            def.raw.surface_name == name
-                || def.intrinsic_source_names().iter().any(|&n| n == name)
-                || def.impl_source_names().iter().any(|&n| n == name)
-        }
-        _ => false,
-    }
-}
-
 /// Resolve a `Var`-position term to its `BuiltinId`, if any. Handles
-/// both `VarRef::Builtin { id, .. }` (the fast path — id is already
-/// in the IR) and `VarRef::Symbol` (the legacy path — the symbol-table
-/// name is looked up in the catalog via `lookup_by_any_name`).
-/// Returns `None` for non-`Var` terms and for symbol references that
-/// don't name a catalog entry.
-///
-/// Use this in IR passes that need to dispatch on a known catalog
-/// entry. Compare the result against fields on
-/// `catalog.known()` (a `KnownBuiltinIds`) instead of string-matching
-/// against an `INTRINSIC_*` constant.
+/// `VarRef::Builtin { id, .. }` directly and looks up `VarRef::Symbol`
+/// by name in the catalog. Returns `None` for non-`Var` terms and for
+/// symbol references that don't name a catalog entry.
 pub fn var_term_builtin_id(term: &Term, symbols: &SymbolTable) -> Option<crate::builtins::BuiltinId> {
     match &term.kind {
         TermKind::Var(VarRef::Builtin { id, .. }) => Some(*id),
@@ -307,25 +278,22 @@ pub enum TermKind {
     Force(Box<Term>),
 
     /// Tuple constructor: `(a, b, c)` or record literal in tuple form.
-    /// Replaces `App(Var(Symbol("_w_tuple")), parts)`.
     Tuple(Vec<Term>),
 
     /// Tuple projection: `t.idx`. `idx` is the structural field index.
-    /// Replaces `App(Var(Symbol("_w_tuple_proj")), [t, IntLit(idx)])`.
     TupleProj {
         tuple: Box<Term>,
         idx: usize,
     },
 
     /// Array indexing: `arr[idx]`. The result aliases `array` for
-    /// ownership analysis. Replaces `App(Var(Symbol("_w_index")), [array, index])`.
+    /// ownership analysis.
     Index {
         array: Box<Term>,
         index: Box<Term>,
     },
 
     /// Vector literal: `@[x, y, z, w]`.
-    /// Replaces `App(Var(Symbol("_w_vec_lit")), components)`.
     VecLit(Vec<Term>),
 }
 
@@ -3136,9 +3104,7 @@ impl<'a> Transformer<'a> {
         )
     }
 
-    /// Build a flat call against a catalog `BuiltinId`. Prefer this
-    /// over `build_call(&str, …)` for catalog targets so the emission
-    /// site stays free of `_w_intrinsic_*` string constants.
+    /// Build a flat call against a catalog `BuiltinId`.
     fn build_call_by_id(
         &mut self,
         id: crate::builtins::BuiltinId,
@@ -3210,10 +3176,8 @@ impl<'a> Transformer<'a> {
         self.mk_term(result_ty, span, TermKind::VecLit(parts))
     }
 
-    /// Construct a `TermKind::ArrayExpr(ArrayExpr::Literal(parts))` directly,
-    /// for array literals `[a, b, c]`. Replaces the synthesised
-    /// `App(Var(Symbol("_w_array_lit")), parts)` shape that used to flow
-    /// through EGIR conversion's named-app dispatch.
+    /// Construct an array literal `[a, b, c]` as
+    /// `TermKind::ArrayExpr(ArrayExpr::Literal(parts))`.
     fn mk_array_lit(&mut self, parts: Vec<Term>, result_ty: Type<TypeName>, span: Span) -> Term {
         self.mk_term(result_ty, span, TermKind::ArrayExpr(ArrayExpr::Literal(parts)))
     }

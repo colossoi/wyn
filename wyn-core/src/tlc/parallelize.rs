@@ -2245,10 +2245,8 @@ fn let_term(name: SymbolId, name_ty: Type<TypeName>, rhs: Term, body: Term, span
     }
 }
 
-/// Build an intrinsic call term. Creates a symbol for the intrinsic name.
 /// Build an `App(Var(Builtin { id, overload_idx: 0 }), args)` term for
-/// a catalog intrinsic. Prefer this over `intrinsic_term(&str, ...)` so
-/// downstream passes never see a `VarRef::Symbol` for catalog entries.
+/// a catalog intrinsic.
 fn intrinsic_term_by_id(
     id: crate::builtins::BuiltinId,
     args: Vec<Term>,
