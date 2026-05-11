@@ -15,7 +15,6 @@ use smallvec::{SmallVec, smallvec};
 use super::program::EgirInner;
 use super::types::EffectToken;
 use crate::ast::TypeName;
-use crate::builtins::names::INTRINSIC_LENGTH;
 use crate::ssa::types::{ControlHeader, InstKind, ValueRef};
 use crate::types::TypeExt;
 use crate::types::{is_array_variant_composite, is_array_variant_view, is_virtual_array};
@@ -1160,10 +1159,7 @@ fn emit_length(
         );
         return emit_length(graph, first_arr, &components[0], i32_ty);
     }
-    let length_id = crate::builtins::catalog()
-        .lookup_by_any_name(INTRINSIC_LENGTH)
-        .expect("INTRINSIC_LENGTH missing from catalog")
-        .id;
+    let length_id = crate::builtins::catalog().known().length;
     graph.intern_pure(
         PureOp::Intrinsic {
             id: length_id,

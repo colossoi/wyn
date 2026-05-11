@@ -649,48 +649,56 @@ pub(super) fn alias_target_of(term: &Term, model: &OwnershipModel, program: &Pro
     match &term.kind {
         TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => model.owner_of(*sym),
         TermKind::App { func, args } => {
-            let i = ALIASING_INTRINSICS.iter().find_map(|(n, idx)| {
-                if crate::tlc::var_term_matches_name(func, &program.symbols, n) { Some(*idx) } else { None }
-            })?;
+            let i = aliasing_arg_index(func, &program.symbols)?;
             alias_target_of(args.get(i)?, model, program)
         }
         _ => None,
     }
 }
 
-/// Intrinsics whose result aliases one of their arguments — `(name,
-/// arg_index_aliased)`.
-const ALIASING_INTRINSICS: &[(&str, usize)] = &[
-    // arr[i] — view into arr
-    ("_w_index", 0),
-    // tuple_proj(t, idx) — projection into t
-    ("_w_tuple_proj", 0),
-    // in-place with returns the same buffer it consumed
-    ("_w_intrinsic_array_with_inplace", 0),
-];
+/// Aliasing-arg index for forms whose result aliases one of their
+/// arguments. The in-place `array_with` catalog entry returns the
+/// buffer it consumed (arg 0). Compiler-generated projection
+/// operators (`_w_index`, `_w_tuple_proj`) also alias their first
+/// arg but aren't catalog entries, so they're matched by name.
+fn aliasing_arg_index(func: &Term, symbols: &crate::SymbolTable) -> Option<usize> {
+    if let Some(id) = crate::tlc::var_term_builtin_id(func, symbols) {
+        if id == crate::builtins::catalog().known().array_with_in_place {
+            return Some(0);
+        }
+    }
+    if crate::tlc::var_term_matches_name(func, symbols, "_w_index")
+        || crate::tlc::var_term_matches_name(func, symbols, "_w_tuple_proj")
+    {
+        return Some(0);
+    }
+    None
+}
 
 /// Recognize forms that *definitely* produce a fresh non-copy value.
 /// Used by `origin_for_unaliased` to keep promotion paths open for
 /// known fresh-producers while staying conservative about unknowns.
+///
+/// Functional `array_with` (catalog `BuiltinId`) allocates a new array;
+/// the in-place variant is deliberately absent — that one aliases its
+/// input. Compiler-generated literal constructors (`_w_array_lit`,
+/// `_w_vec_lit`, `_w_tuple`) also allocate fresh and aren't catalog
+/// entries, so they're matched by name.
 fn rhs_is_fresh_producer(term: &Term, program: &Program) -> bool {
     match &term.kind {
         TermKind::ArrayExpr(_) => true,
-        TermKind::App { func, .. } => FRESH_PRODUCER_INTRINSICS
-            .iter()
-            .any(|n| crate::tlc::var_term_matches_name(func, &program.symbols, n)),
+        TermKind::App { func, .. } => {
+            if let Some(id) = crate::tlc::var_term_builtin_id(func, &program.symbols) {
+                if id == crate::builtins::catalog().known().array_with {
+                    return true;
+                }
+            }
+            const FRESH_LITERAL_CTORS: &[&str] = &["_w_array_lit", "_w_vec_lit", "_w_tuple"];
+            FRESH_LITERAL_CTORS.iter().any(|n| crate::tlc::var_term_matches_name(func, &program.symbols, n))
+        }
         _ => false,
     }
 }
-
-/// Compiler-internal intrinsics that build a fresh non-copy value.
-/// Functional `with` allocates a new array; aliasing intrinsics like
-/// `_w_index` are deliberately absent.
-const FRESH_PRODUCER_INTRINSICS: &[&str] = &[
-    "_w_array_lit",
-    "_w_vec_lit",
-    "_w_tuple",
-    "_w_intrinsic_array_with",
-];
 
 /// Walk a curried function type `a1 -> a2 -> ... -> aN -> ret`, returning
 /// the parameter types `[a1, a2, ..., aN]` (one per applied argument).
@@ -1132,21 +1140,15 @@ impl<'m> Rewriter<'m> {
     fn rewrite(&mut self, term: Term) -> Term {
         // array_with → array_with_inplace: rewrite the App's `func`
         // before descending, since the rewrite swaps the function var.
-        // Match by name so the rewrite fires whether the call site is a
-        // `Var(Symbol("_w_intrinsic_array_with"))` (older synthesised
-        // paths) or a `Var(Builtin(ARRAY_WITH_ID))` (post-Phase-3.5
-        // user code).
+        // `var_term_builtin_id` handles both `VarRef::Symbol` (older
+        // synthesised paths) and `VarRef::Builtin` (post-Phase-3.5
+        // user code) uniformly.
         if let TermKind::App { func, args } = &term.kind {
-            let calls_functional = crate::tlc::var_term_matches_name(
-                func,
-                &self.program.symbols,
-                crate::builtins::names::INTRINSIC_ARRAY_WITH,
-            );
+            let known = crate::builtins::catalog().known();
+            let calls_functional =
+                crate::tlc::var_term_builtin_id(func, &self.program.symbols) == Some(known.array_with);
             if calls_functional && args.len() == 3 && self.is_promotable(term.id, &args[0]) {
-                let inplace_id = crate::builtins::catalog()
-                    .lookup_by_any_name(crate::builtins::names::INTRINSIC_ARRAY_WITH_INPLACE)
-                    .expect("array_with_inplace missing from catalog")
-                    .id;
+                let inplace_id = known.array_with_in_place;
                 let TermKind::App { func, args } = term.kind else {
                     unreachable!()
                 };

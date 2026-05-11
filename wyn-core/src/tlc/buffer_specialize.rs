@@ -17,9 +17,7 @@ use super::{
     ArrayExpr, Def, DefMeta, Lambda, LoopKind, Place, Program, SoacOp, Term, TermIdSource, TermKind,
 };
 use crate::ast::{self, Span, TypeName};
-use crate::builtins::names::{
-    INTRINSIC_LENGTH, INTRINSIC_SLICE, INTRINSIC_STORAGE_INDEX, INTRINSIC_STORAGE_LEN,
-};
+use crate::builtins::names::{INTRINSIC_STORAGE_INDEX, INTRINSIC_STORAGE_LEN};
 use crate::interface;
 use crate::types::TypeExt;
 use crate::{SymbolId, SymbolTable};
@@ -386,7 +384,8 @@ impl BufferSpecializer {
                 // param: rewrite to `_w_intrinsic_storage_len(set,
                 // binding)`, matching how the specialized-function
                 // path handles view lengths.
-                if crate::tlc::var_term_matches_name(func, &self.symbols, INTRINSIC_LENGTH)
+                if crate::tlc::var_term_builtin_id(func, &self.symbols)
+                    == Some(crate::builtins::catalog().known().length)
                     && args.len() == 1
                 {
                     if let TermKind::Var(crate::tlc::VarRef::Symbol(data_sym)) = &args[0].kind {
@@ -895,7 +894,8 @@ impl BufferSpecializer {
                 }
 
                 // _w_intrinsic_length(arr_expr) where arr_expr resolves to a view
-                if crate::tlc::var_term_matches_name(func, &self.symbols, INTRINSIC_LENGTH)
+                if crate::tlc::var_term_builtin_id(func, &self.symbols)
+                    == Some(crate::builtins::catalog().known().length)
                     && args.len() == 1
                 {
                     if let Some(view) = self.try_resolve_view_expr(&args[0], view_params) {
@@ -1407,8 +1407,10 @@ impl BufferSpecializer {
                 // Check for _w_intrinsic_slice(expr, start, end). The
                 // func may arrive as either `Var(Symbol)` (synthesized
                 // paths) or `Var(Builtin)` (post-NameResolution user
-                // code) — `var_term_matches_name` handles both.
-                if crate::tlc::var_term_matches_name(func, &self.symbols, INTRINSIC_SLICE) {
+                // code) — `var_term_builtin_id` handles both.
+                if crate::tlc::var_term_builtin_id(func, &self.symbols)
+                    == Some(crate::builtins::catalog().known().slice)
+                {
                     if args.len() == 3 {
                         let parent = self.try_resolve_view_expr(&args[0], view_params)?;
                         let span = term.span;

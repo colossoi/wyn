@@ -22,7 +22,6 @@ pub mod soa;
 pub mod specialize;
 
 use crate::ast::{self, NodeId, Span, TypeName};
-use crate::builtins::names::{INTRINSIC_ARRAY_WITH, INTRINSIC_LENGTH, INTRINSIC_SLICE};
 use crate::interface;
 use crate::types::TypeExt;
 use crate::{SymbolId, SymbolTable, TypeTable};
@@ -187,6 +186,28 @@ pub fn var_term_matches_name(term: &Term, symbols: &SymbolTable, name: &str) -> 
                 || def.impl_source_names().iter().any(|&n| n == name)
         }
         _ => false,
+    }
+}
+
+/// Resolve a `Var`-position term to its `BuiltinId`, if any. Handles
+/// both `VarRef::Builtin { id, .. }` (the fast path — id is already
+/// in the IR) and `VarRef::Symbol` (the legacy path — the symbol-table
+/// name is looked up in the catalog via `lookup_by_any_name`).
+/// Returns `None` for non-`Var` terms and for symbol references that
+/// don't name a catalog entry.
+///
+/// Use this in IR passes that need to dispatch on a known catalog
+/// entry. Compare the result against fields on
+/// `catalog.known()` (a `KnownBuiltinIds`) instead of string-matching
+/// against an `INTRINSIC_*` constant.
+pub fn var_term_builtin_id(term: &Term, symbols: &SymbolTable) -> Option<crate::builtins::BuiltinId> {
+    match &term.kind {
+        TermKind::Var(VarRef::Builtin { id, .. }) => Some(*id),
+        TermKind::Var(VarRef::Symbol(sym)) => {
+            let name = symbols.get(*sym)?;
+            crate::builtins::catalog().lookup_by_any_name(name).map(|def| def.id)
+        }
+        _ => None,
     }
 }
 
@@ -1816,7 +1837,8 @@ impl<'a> Transformer<'a> {
                 let arr = self.transform_expr(array);
                 let idx = self.transform_expr(index);
                 let val = self.transform_expr(value);
-                self.build_call(INTRINSIC_ARRAY_WITH, &[arr, idx, val], ty, span)
+                let aw_id = crate::builtins::catalog().known().array_with;
+                self.build_call_by_id(aw_id, &[arr, idx, val], ty, span)
             }
 
             ast::ExprKind::VecWith {
@@ -2041,13 +2063,13 @@ impl<'a> Transformer<'a> {
                 // `buffer_specialize` / SPIR-V passes rewrite it into the
                 // right per-flavor lowering.
                 let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
-                let end = slice
-                    .end
-                    .as_ref()
-                    .map(|e| self.transform_expr(e))
-                    .unwrap_or_else(|| self.build_call(INTRINSIC_LENGTH, &[arr.clone()], i32_ty, span));
+                let known = crate::builtins::catalog().known();
+                let end =
+                    slice.end.as_ref().map(|e| self.transform_expr(e)).unwrap_or_else(|| {
+                        self.build_call_by_id(known.length, &[arr.clone()], i32_ty, span)
+                    });
 
-                self.build_call(INTRINSIC_SLICE, &[arr, start, end], ty, span)
+                self.build_call_by_id(known.slice, &[arr, start, end], ty, span)
             }
 
             ast::ExprKind::TypeAscription(inner, _) => self.transform_expr(inner),
@@ -3085,6 +3107,35 @@ impl<'a> Transformer<'a> {
         }
 
         // Build the function type: arg1_ty -> arg2_ty -> ... -> result_ty (right-associative)
+        let mut func_ty = result_ty.clone();
+        for arg in args.iter().rev() {
+            func_ty = Type::Constructed(TypeName::Arrow, vec![arg.ty.clone(), func_ty]);
+        }
+        let func_term = self.mk_term(func_ty, span, TermKind::Var(func_var));
+        self.mk_term(
+            result_ty,
+            span,
+            TermKind::App {
+                func: Box::new(func_term),
+                args: args.to_vec(),
+            },
+        )
+    }
+
+    /// Build a flat call against a catalog `BuiltinId`. Prefer this
+    /// over `build_call(&str, …)` for catalog targets so the emission
+    /// site stays free of `_w_intrinsic_*` string constants.
+    fn build_call_by_id(
+        &mut self,
+        id: crate::builtins::BuiltinId,
+        args: &[Term],
+        result_ty: Type<TypeName>,
+        span: Span,
+    ) -> Term {
+        let func_var = crate::tlc::VarRef::Builtin { id, overload_idx: 0 };
+        if args.is_empty() {
+            return self.mk_term(result_ty, span, TermKind::Var(func_var));
+        }
         let mut func_ty = result_ty.clone();
         for arg in args.iter().rev() {
             func_ty = Type::Constructed(TypeName::Arrow, vec![arg.ty.clone(), func_ty]);

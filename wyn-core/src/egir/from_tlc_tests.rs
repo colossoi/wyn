@@ -5,7 +5,6 @@
 use super::{Converter, run};
 use crate::SymbolId;
 use crate::ast::TypeName;
-use crate::builtins::names::INTRINSIC_STORAGE_LEN;
 use crate::pipeline_descriptor::PipelineDescriptor;
 use crate::ssa::types::{FuncBody, InstKind, Program};
 use crate::tlc::{Term, TermKind};
@@ -247,10 +246,7 @@ fn test_hash_cons_distinguishes_by_result_type() {
         u32_ty.clone(),
     );
 
-    let storage_len_id = crate::builtins::catalog()
-        .lookup_by_any_name(INTRINSIC_STORAGE_LEN)
-        .expect("INTRINSIC_STORAGE_LEN missing from catalog")
-        .id;
+    let storage_len_id = crate::builtins::catalog().known().storage_len;
     let a = g.intern_pure(
         PureOp::Intrinsic {
             id: storage_len_id,

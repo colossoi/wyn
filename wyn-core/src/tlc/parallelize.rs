@@ -7,9 +7,6 @@
 //! Loop creation and storage lowering stay in SSA (`to_ssa` + `soac_lower`).
 
 use crate::ast::{self, TypeName};
-use crate::builtins::names::{
-    INTRINSIC_STORAGE_INDEX, INTRINSIC_STORAGE_LEN, INTRINSIC_STORAGE_STORE, INTRINSIC_THREAD_ID,
-};
 use crate::egir::from_tlc::AUTO_STORAGE_SET;
 use crate::interface::{self, Attribute};
 use crate::pipeline_descriptor::*;
@@ -763,8 +760,8 @@ fn maybe_hoist(
     });
 
     // Rewrite the let RHS to a storage load at position 0.
-    intrinsic_term(
-        INTRINSIC_STORAGE_INDEX,
+    intrinsic_term_by_id(
+        crate::builtins::catalog().known().storage_index,
         vec![
             uint_lit(binding.0 as u64, span),
             uint_lit(binding.1 as u64, span),
@@ -772,7 +769,6 @@ fn maybe_hoist(
         ],
         name_ty.clone(),
         span,
-        program,
     )
 }
 
@@ -1189,8 +1185,8 @@ fn build_two_phase_entries(
     };
     let phase2_soac_term = soac_term(phase2_soac, elem_type.clone(), span);
     let r_sym = program.symbols.alloc("_par_out".into());
-    let phase2_store = intrinsic_term(
-        INTRINSIC_STORAGE_STORE,
+    let phase2_store = intrinsic_term_by_id(
+        crate::builtins::catalog().known().storage_store,
         vec![
             uint_lit(result_binding.0 as u64, span),
             uint_lit(result_binding.1 as u64, span),
@@ -1199,7 +1195,6 @@ fn build_two_phase_entries(
         ],
         unit_ty.clone(),
         span,
-        program,
     );
     let phase2_body = let_term(r_sym, elem_type.clone(), phase2_soac_term, phase2_store, span);
     // Phase 2 storage interface: reads `partials` (as an Intermediate) and
@@ -1500,7 +1495,12 @@ impl ChunkArithmetic {
         let body = let_term(self.input_len_sym, ity.clone(), input_len_term, body, span);
         let body = let_term(self.total_sym, ity, total_lit, body, span);
 
-        let tid_rhs = intrinsic_term(INTRINSIC_THREAD_ID, vec![], u32_ty(), span, program);
+        let tid_rhs = intrinsic_term_by_id(
+            crate::builtins::catalog().known().thread_id,
+            vec![],
+            u32_ty(),
+            span,
+        );
         let_term(self.tid_sym, u32_ty(), tid_rhs, body, span)
     }
 }
@@ -1634,9 +1634,9 @@ fn invoke_soac_lambda(sb: &super::SoacBody, args: Vec<Term>, span: ast::Span) ->
     }
 }
 
-fn emit_storage_load(buf: &BufferRef, index: Term, span: ast::Span, program: &mut Program) -> Term {
-    intrinsic_term(
-        INTRINSIC_STORAGE_INDEX,
+fn emit_storage_load(buf: &BufferRef, index: Term, span: ast::Span, _program: &mut Program) -> Term {
+    intrinsic_term_by_id(
+        crate::builtins::catalog().known().storage_index,
         vec![
             uint_lit(buf.set as u64, span),
             uint_lit(buf.binding as u64, span),
@@ -1644,7 +1644,6 @@ fn emit_storage_load(buf: &BufferRef, index: Term, span: ast::Span, program: &mu
         ],
         buf.elem_ty.clone(),
         span,
-        program,
     )
 }
 
@@ -1653,11 +1652,11 @@ fn emit_storage_store(
     index: Term,
     value: Term,
     span: ast::Span,
-    program: &mut Program,
+    _program: &mut Program,
 ) -> Term {
     let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
-    intrinsic_term(
-        INTRINSIC_STORAGE_STORE,
+    intrinsic_term_by_id(
+        crate::builtins::catalog().known().storage_store,
         vec![
             uint_lit(buf.set as u64, span),
             uint_lit(buf.binding as u64, span),
@@ -1666,17 +1665,15 @@ fn emit_storage_store(
         ],
         unit_ty,
         span,
-        program,
     )
 }
 
-fn emit_storage_len(buf: &BufferRef, span: ast::Span, program: &mut Program) -> Term {
-    intrinsic_term(
-        INTRINSIC_STORAGE_LEN,
+fn emit_storage_len(buf: &BufferRef, span: ast::Span, _program: &mut Program) -> Term {
+    intrinsic_term_by_id(
+        crate::builtins::catalog().known().storage_len,
         vec![uint_lit(buf.set as u64, span), uint_lit(buf.binding as u64, span)],
         u32_ty(),
         span,
-        program,
     )
 }
 
@@ -2128,8 +2125,8 @@ fn build_chunked_soac_body(
         let r_sym = program.symbols.alloc("_par_out".into());
         let tid_var = chunk.tid_u32(span);
         let r_var = var_term(r_sym, result_ty.clone(), span);
-        let store = intrinsic_term(
-            INTRINSIC_STORAGE_STORE,
+        let store = intrinsic_term_by_id(
+            crate::builtins::catalog().known().storage_store,
             vec![
                 uint_lit(set as u64, span),
                 uint_lit(binding as u64, span),
@@ -2138,7 +2135,6 @@ fn build_chunked_soac_body(
             ],
             unit_ty,
             span,
-            program,
         );
         body = let_term(r_sym, result_ty.clone(), body, store, span);
     }
@@ -2250,6 +2246,32 @@ fn let_term(name: SymbolId, name_ty: Type<TypeName>, rhs: Term, body: Term, span
 }
 
 /// Build an intrinsic call term. Creates a symbol for the intrinsic name.
+/// Build an `App(Var(Builtin { id, overload_idx: 0 }), args)` term for
+/// a catalog intrinsic. Prefer this over `intrinsic_term(&str, ...)` so
+/// downstream passes never see a `VarRef::Symbol` for catalog entries.
+fn intrinsic_term_by_id(
+    id: crate::builtins::BuiltinId,
+    args: Vec<Term>,
+    ret_ty: Type<TypeName>,
+    span: ast::Span,
+) -> Term {
+    let func_term = Term {
+        id: TermId(0),
+        ty: Type::Variable(0),
+        span,
+        kind: TermKind::Var(crate::tlc::VarRef::Builtin { id, overload_idx: 0 }),
+    };
+    Term {
+        id: TermId(0),
+        ty: ret_ty,
+        span,
+        kind: TermKind::App {
+            func: Box::new(func_term),
+            args,
+        },
+    }
+}
+
 fn intrinsic_term(
     name: &str,
     args: Vec<Term>,

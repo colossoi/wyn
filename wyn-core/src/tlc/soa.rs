@@ -16,9 +16,6 @@
 use super::{ArrayExpr, Def, Lambda, LoopKind, Place, Program, SoacOp, Term, TermIdSource, TermKind};
 use crate::SymbolTable;
 use crate::ast::{Span, TypeName};
-use crate::builtins::names::{
-    INTRINSIC_ARRAY_WITH, INTRINSIC_ARRAY_WITH_INPLACE, INTRINSIC_LENGTH, INTRINSIC_UNINIT,
-};
 use crate::types::TypeExt;
 use polytype::Type;
 
@@ -315,72 +312,77 @@ impl SoaTransformer {
         new_result_ty: Type<TypeName>,
         span: Span,
     ) -> Term {
-        // Use func directly as the base to detect intrinsic patterns
-        let base = func;
-
-        match &base.kind {
-            TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
-                let name = self.symbols.get(*sym).cloned().unwrap_or_default();
-                match name.as_str() {
-                    // _w_index(arr, i) where arr was [n](A,B)
-                    "_w_index" if args.len() == 2 => {
-                        let arr_orig_ty = &args[0].ty;
-                        if let Some(n) = is_array_of_tuple(arr_orig_ty) {
-                            let (comp_tys, variant, size) = array_of_tuple_parts(arr_orig_ty).unwrap();
-                            let new_arr = self.transform_term(&args[0]);
-                            let new_idx = self.transform_term(&args[1]);
-                            return self.rewrite_index_aot(
-                                &new_arr, &new_idx, &comp_tys, &variant, &size, n, span,
-                            );
-                        }
-                    }
-
-                    // _w_intrinsic_array_with(arr, i, val) where arr was [n](A,B)
-                    INTRINSIC_ARRAY_WITH | INTRINSIC_ARRAY_WITH_INPLACE if args.len() == 3 => {
-                        let arr_orig_ty = &args[0].ty;
-                        if let Some(n) = is_array_of_tuple(arr_orig_ty) {
-                            let (comp_tys, variant, size) = array_of_tuple_parts(arr_orig_ty).unwrap();
-                            let new_arr = self.transform_term(&args[0]);
-                            let new_idx = self.transform_term(&args[1]);
-                            let new_val = self.transform_term(&args[2]);
-                            return self.rewrite_array_with_aot(
-                                &new_arr, &new_idx, &new_val, &comp_tys, &variant, &size, n, span,
-                            );
-                        }
-                    }
-
-                    // _w_array_lit(e1, e2, ...) where result was [n](A,B)
-                    "_w_array_lit" if !args.is_empty() => {
-                        if is_array_of_tuple(orig_result_ty).is_some() {
-                            let (comp_tys, variant, size) = array_of_tuple_parts(orig_result_ty).unwrap();
-                            let new_elems: Vec<Term> =
-                                args.iter().map(|a| self.transform_term(a)).collect();
-                            return self
-                                .rewrite_array_lit_aot(&new_elems, &comp_tys, &variant, &size, span);
-                        }
-                    }
-
-                    // _w_intrinsic_uninit() where result was [n](A,B)
-                    INTRINSIC_UNINIT if args.is_empty() => {
-                        if is_array_of_tuple(orig_result_ty).is_some() {
-                            let soa_ty = soa_type(orig_result_ty);
-                            return self.rewrite_uninit_aot(&soa_ty, *sym, span);
-                        }
-                    }
-
-                    // _w_intrinsic_length(arr) where arr was [n](A,B)
-                    INTRINSIC_LENGTH if args.len() == 1 => {
-                        let arr_orig_ty = &args[0].ty;
-                        if is_array_of_tuple(arr_orig_ty).is_some() {
-                            let new_arr = self.transform_term(&args[0]);
-                            return self.rewrite_length_aot(&new_arr, *sym, new_result_ty, span);
-                        }
-                    }
-
-                    _ => {}
+        // Catalog-entry dispatch via BuiltinId (works for both
+        // `VarRef::Symbol` legacy paths and `VarRef::Builtin` modern
+        // user code).
+        let known = crate::builtins::catalog().known();
+        if let Some(id) = crate::tlc::var_term_builtin_id(func, &self.symbols) {
+            // _w_intrinsic_array_with(arr, i, val) where arr was [n](A,B)
+            if (id == known.array_with || id == known.array_with_in_place) && args.len() == 3 {
+                let arr_orig_ty = &args[0].ty;
+                if let Some(n) = is_array_of_tuple(arr_orig_ty) {
+                    let (comp_tys, variant, size) = array_of_tuple_parts(arr_orig_ty).unwrap();
+                    let new_arr = self.transform_term(&args[0]);
+                    let new_idx = self.transform_term(&args[1]);
+                    let new_val = self.transform_term(&args[2]);
+                    return self.rewrite_array_with_aot(
+                        &new_arr, &new_idx, &new_val, &comp_tys, &variant, &size, n, span,
+                    );
                 }
             }
-            _ => {}
+
+            // _w_intrinsic_uninit() where result was [n](A,B)
+            if id == known.uninit && args.is_empty() {
+                if is_array_of_tuple(orig_result_ty).is_some() {
+                    let sym = match &func.kind {
+                        TermKind::Var(crate::tlc::VarRef::Symbol(s)) => *s,
+                        // For Builtin form, we need a Symbol for `rewrite_uninit_aot`.
+                        // Look up the surface name and intern it.
+                        _ => self.symbols.alloc(crate::builtins::by_id(id).raw.surface_name.to_string()),
+                    };
+                    let soa_ty = soa_type(orig_result_ty);
+                    return self.rewrite_uninit_aot(&soa_ty, sym, span);
+                }
+            }
+
+            // _w_intrinsic_length(arr) where arr was [n](A,B)
+            if id == known.length && args.len() == 1 {
+                let arr_orig_ty = &args[0].ty;
+                if is_array_of_tuple(arr_orig_ty).is_some() {
+                    let sym = match &func.kind {
+                        TermKind::Var(crate::tlc::VarRef::Symbol(s)) => *s,
+                        _ => self.symbols.alloc(crate::builtins::by_id(id).raw.surface_name.to_string()),
+                    };
+                    let new_arr = self.transform_term(&args[0]);
+                    return self.rewrite_length_aot(&new_arr, sym, new_result_ty, span);
+                }
+            }
+        }
+
+        // Compiler-generated `_w_*` operators (not catalog entries) —
+        // match on `VarRef::Symbol` name directly.
+        if let TermKind::Var(crate::tlc::VarRef::Symbol(sym)) = &func.kind {
+            let name = self.symbols.get(*sym).cloned().unwrap_or_default();
+            match name.as_str() {
+                "_w_index" if args.len() == 2 => {
+                    let arr_orig_ty = &args[0].ty;
+                    if let Some(n) = is_array_of_tuple(arr_orig_ty) {
+                        let (comp_tys, variant, size) = array_of_tuple_parts(arr_orig_ty).unwrap();
+                        let new_arr = self.transform_term(&args[0]);
+                        let new_idx = self.transform_term(&args[1]);
+                        return self
+                            .rewrite_index_aot(&new_arr, &new_idx, &comp_tys, &variant, &size, n, span);
+                    }
+                }
+                "_w_array_lit" if !args.is_empty() => {
+                    if is_array_of_tuple(orig_result_ty).is_some() {
+                        let (comp_tys, variant, size) = array_of_tuple_parts(orig_result_ty).unwrap();
+                        let new_elems: Vec<Term> = args.iter().map(|a| self.transform_term(a)).collect();
+                        return self.rewrite_array_lit_aot(&new_elems, &comp_tys, &variant, &size, span);
+                    }
+                }
+                _ => {}
+            }
         }
 
         // Default: recursively transform all parts
@@ -1047,7 +1049,8 @@ impl SoaTransformer {
         )
     }
 
-    /// Build `_w_array_with(arr, idx, val)`.
+    /// Build `_w_intrinsic_array_with(arr, idx, val)` as a
+    /// `VarRef::Builtin` call so downstream passes dispatch by id.
     fn mk_array_with(
         &mut self,
         arr: Term,
@@ -1056,11 +1059,18 @@ impl SoaTransformer {
         result_ty: Type<TypeName>,
         span: Span,
     ) -> Term {
-        let aw_sym = self.resolve_or_alloc(INTRINSIC_ARRAY_WITH);
+        let aw_id = crate::builtins::catalog().known().array_with;
         let t3 = Type::Constructed(TypeName::Arrow, vec![val.ty.clone(), result_ty.clone()]);
         let t2 = Type::Constructed(TypeName::Arrow, vec![idx.ty.clone(), t3.clone()]);
         let t1 = Type::Constructed(TypeName::Arrow, vec![arr.ty.clone(), t2.clone()]);
-        let func = self.mk_term(t1, span, TermKind::Var(crate::tlc::VarRef::Symbol(aw_sym)));
+        let func = self.mk_term(
+            t1,
+            span,
+            TermKind::Var(crate::tlc::VarRef::Builtin {
+                id: aw_id,
+                overload_idx: 0,
+            }),
+        );
 
         self.mk_term(
             result_ty,

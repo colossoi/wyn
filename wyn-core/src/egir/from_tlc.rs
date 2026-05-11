@@ -9,9 +9,6 @@ use std::collections::{HashMap, HashSet};
 
 use super::types::EffectToken;
 use crate::ast::{Span, TypeName};
-use crate::builtins::names::{
-    INTRINSIC_LENGTH, INTRINSIC_STORAGE_INDEX, INTRINSIC_STORAGE_LEN, INTRINSIC_STORAGE_STORE,
-};
 use crate::interface;
 use crate::ssa::framework::BlockId;
 use crate::ssa::types::ViewSource;
@@ -728,10 +725,7 @@ impl<'a> Converter<'a> {
         let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
         let set_nid = self.intern_u32(set);
         let binding_nid = self.intern_u32(binding);
-        let storage_len_id = crate::builtins::catalog()
-            .lookup_by_any_name(INTRINSIC_STORAGE_LEN)
-            .expect("INTRINSIC_STORAGE_LEN missing from catalog")
-            .id;
+        let storage_len_id = crate::builtins::catalog().known().storage_len;
         let len_nid = self.intern_pure(
             PureOp::Intrinsic {
                 id: storage_len_id,
@@ -1099,15 +1093,6 @@ impl<'a> Converter<'a> {
                 let len = self.convert_term(&args[1])?;
                 Ok(self.intern_pure(PureOp::ArrayRange { has_step: false }, smallvec![start, len], ty))
             }
-            // _w_intrinsic_storage_index(set_const, binding_const, index) → load
-            // from a storage view. Emitted by buffer_specialize for functions
-            // that index directly into a bound buffer.
-            INTRINSIC_STORAGE_INDEX if args.len() == 3 => self.lower_storage_index(args, ty),
-            // _w_intrinsic_storage_store(set_lit, binding_lit, index, value) → effectful
-            // Store into storage_view(set, binding) at `index`. Emitted by
-            // parallelize.rs for phase-entry output writes where index depends
-            // on thread_id (and can't be expressed as a Map→MapInto).
-            INTRINSIC_STORAGE_STORE if args.len() == 4 => self.lower_storage_store(args),
             _ => {
                 // Function call
                 if let Some(def) = self.top_level.get(&sym) {
@@ -1534,9 +1519,12 @@ impl<'a> Converter<'a> {
         let init_nid = self.convert_term(init)?;
         let iter_nid = self.convert_term(iter)?;
 
-        // Length intrinsic
+        // Length intrinsic. PureOp::UnaryOp keys by op-name string;
+        // the catalog-internal `_w_intrinsic_length` is the agreed
+        // string the lowering layer dispatches on.
+        let length_name = crate::builtins::by_id(crate::builtins::catalog().known().length).dispatch_name();
         let len_nid = self.intern_pure(
-            PureOp::UnaryOp(INTRINSIC_LENGTH.into()),
+            PureOp::UnaryOp(length_name.into()),
             smallvec![iter_nid],
             i32_ty.clone(),
         );

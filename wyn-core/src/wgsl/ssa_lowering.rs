@@ -17,7 +17,6 @@ use polytype::Type as PolyType;
 
 use crate::ast::{Span, TypeName};
 use crate::builtins::lowering::{BuiltinLowering, PrimOp};
-use crate::builtins::names::{INTRINSIC_ARRAY_WITH, INTRINSIC_ARRAY_WITH_INPLACE};
 use crate::error::Result;
 use crate::ssa::types::{
     EntryPoint, ExecutionModel, FuncBody, Function, InstKind, IoDecoration, Program, ValueId, ValueRef,
@@ -1584,11 +1583,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         {
                             let known = crate::builtins::catalog().known();
                             let is_inplace = *id == known.array_with_in_place;
-                            let func_name = if is_inplace {
-                                INTRINSIC_ARRAY_WITH_INPLACE
-                            } else {
-                                INTRINSIC_ARRAY_WITH
-                            };
+                            let func_name = crate::builtins::by_id(*id).dispatch_name();
                             if args.len() != 3 {
                                 return Err(crate::err_wgsl_at!(
                                     self.blame_span(),
