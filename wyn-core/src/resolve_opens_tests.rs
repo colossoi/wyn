@@ -5,7 +5,7 @@
 //! the expected identifier rewrites or error.
 
 use super::*;
-use crate::ast::{self, Declaration, ExprKind, Expression, Pattern, Program};
+use crate::ast::{self, Declaration, ExprKind, Expression, Program};
 use crate::lexer;
 use crate::parser;
 
@@ -389,8 +389,3 @@ fn innermost_open_wins_when_unique() {
     let cos = find_ident(body, "cos");
     assert_eq!(ident_quals(cos), &["f32".to_string()]);
 }
-
-// Suppress unused-import warnings for items only referenced by the
-// helper closures above.
-#[allow(dead_code)]
-fn _silence(_p: Pattern) {}

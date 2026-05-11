@@ -1,45 +1,8 @@
 #![cfg(test)]
 
 use super::{SpecKey, Substitution, format_type_compact};
-use crate::ast::{Span, TypeName};
-use crate::tlc::{TermId, TermIdSource};
-use crate::{SymbolId, SymbolTable};
+use crate::ast::TypeName;
 use polytype::Type;
-
-/// Test helper that manages symbol table and term ID generation.
-struct TestBuilder {
-    symbols: SymbolTable,
-    ids: TermIdSource,
-}
-
-impl TestBuilder {
-    fn new() -> Self {
-        TestBuilder {
-            symbols: SymbolTable::new(),
-            ids: TermIdSource::new(),
-        }
-    }
-
-    fn sym(&mut self, name: &str) -> SymbolId {
-        self.symbols.alloc(name.to_string())
-    }
-
-    fn next_id(&mut self) -> TermId {
-        self.ids.next_id()
-    }
-
-    fn span(&self) -> Span {
-        Span::dummy()
-    }
-
-    fn lookup(&self, sym: SymbolId) -> &str {
-        self.symbols.get(sym).expect("BUG: symbol not in table")
-    }
-
-    fn finish(self) -> SymbolTable {
-        self.symbols
-    }
-}
 
 #[test]
 fn test_format_type_compact() {

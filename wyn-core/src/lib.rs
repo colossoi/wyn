@@ -217,36 +217,6 @@ impl<'a, Id: From<u32> + Copy + Eq + Hash, T> IntoIterator for &'a mut IdArena<I
 pub use ast::TypeName;
 pub use polytype::Context as PolytypeContext;
 pub type TypeTable = HashMap<NodeId, TypeScheme<TypeName>>;
-pub type SpanTable = HashMap<NodeId, ast::Span>;
-
-/// Build a SpanTable from an AST by collecting all NodeId -> Span mappings
-pub fn build_span_table(program: &ast::Program) -> SpanTable {
-    use std::ops::ControlFlow;
-    use visitor::Visitor;
-
-    struct SpanCollector {
-        spans: SpanTable,
-    }
-
-    impl Visitor for SpanCollector {
-        type Break = ();
-
-        fn visit_expression(&mut self, e: &ast::Expression) -> ControlFlow<Self::Break> {
-            self.spans.insert(e.h.id, e.h.span);
-            visitor::walk_expression(self, e)
-        }
-    }
-
-    let mut collector = SpanCollector {
-        spans: HashMap::new(),
-    };
-
-    for decl in &program.declarations {
-        let _ = visitor::walk_declaration(&mut collector, decl);
-    }
-
-    collector.spans
-}
 
 // =============================================================================
 // Typestate Compiler Pipeline
@@ -431,11 +401,9 @@ impl AstConstFoldedEarly {
     /// Type check the program
     pub fn type_check(mut self, module_manager: &mut module_manager::ModuleManager) -> Result<TypeChecked> {
         let out = types::run::run(&mut self.0.ast, module_manager)?;
-        let span_table = build_span_table(&self.0.ast);
         Ok(TypeChecked {
             ast: self.0.ast,
             type_table: out.type_table,
-            span_table,
             warnings: out.warnings,
             checker_builtins: out.builtin_names,
             schemes: out.schemes,
@@ -448,7 +416,6 @@ impl AstConstFoldedEarly {
 pub struct TypeChecked {
     pub ast: ast::Program,
     pub type_table: TypeTable,
-    pub span_table: SpanTable,
     pub warnings: Vec<type_checker::TypeWarning>,
     pub checker_builtins: Vec<String>,
     pub schemes: HashMap<String, TypeScheme<TypeName>>,
@@ -690,7 +657,7 @@ impl TlcOwnershipApplied {
             fill_hole_errors: _,
         } = self.0;
         let (cc, closure_info) = tlc::closure_convert::run(tlc, &known_defs);
-        let hof_free = tlc::hof_specialize::run(cc, &closure_info, &known_defs);
+        let hof_free = tlc::hof_specialize::run(cc, &closure_info);
         let lowered = tlc::closure_calls_lower::run(hof_free, &closure_info);
         TlcDefunctionalized {
             tlc: lowered,

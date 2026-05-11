@@ -645,7 +645,6 @@ pub struct Program {
 pub struct Constant {
     pub name: String,
     pub body: FuncBody,
-    pub result_ty: Type<TypeName>,
 }
 
 /// A function definition.

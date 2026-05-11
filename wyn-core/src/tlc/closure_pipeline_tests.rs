@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 /// `TlcOwnershipApplied::defunctionalize` does in production.
 fn defunctionalize(program: Program, known_defs: &HashSet<String>) -> Program {
     let (cc, closure_info) = super::super::closure_convert::run(program, known_defs);
-    let hof_free = super::super::hof_specialize::run(cc, &closure_info, known_defs);
+    let hof_free = super::super::hof_specialize::run(cc, &closure_info);
     super::super::closure_calls_lower::run(hof_free, &closure_info)
 }
 
@@ -37,10 +37,6 @@ impl TestBuilder {
 
     fn span(&self) -> Span {
         Span::dummy()
-    }
-
-    fn lookup(&self, sym: SymbolId) -> &str {
-        self.symbols.get(sym).expect("BUG: symbol not in table")
     }
 
     fn finish(self) -> SymbolTable {

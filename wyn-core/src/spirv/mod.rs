@@ -43,8 +43,6 @@ struct InterfaceBlockKey {
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 enum InterfaceBlockKind {
     PushConstant,
-    #[allow(dead_code)]
-    StorageBuffer,
 }
 
 /// - Block management with implicit branch from variables block to code

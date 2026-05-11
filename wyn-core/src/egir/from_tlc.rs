@@ -111,11 +111,7 @@ pub fn run(program: &TlcProgram, mut pipeline: PipelineDescriptor) -> Result<Egi
             if let Some(body) = converter.probe_constant_body(def.body.ty.clone()) {
                 if is_purely_constant_body(&body) {
                     pure_constant_names.insert(def_name.clone());
-                    constants.push(crate::ssa::types::Constant {
-                        name: def_name,
-                        body,
-                        result_ty: def.body.ty.clone(),
-                    });
+                    constants.push(crate::ssa::types::Constant { name: def_name, body });
                     continue;
                 }
             }

@@ -881,8 +881,6 @@ fn substitute_var_array_expr(
 struct HofSpecializer<'a> {
     symbols: SymbolTable,
     top_level: HashSet<SymbolId>,
-    #[allow(dead_code)]
-    known_defs: &'a HashSet<String>,
     closure_info: &'a ClosureInfo,
     hof_info: HashMap<SymbolId, HofInfo>,
     specialized_defs: Vec<Def>,
@@ -892,14 +890,13 @@ struct HofSpecializer<'a> {
 }
 
 impl<'a> HofSpecializer<'a> {
-    fn run(program: Program, closure_info: &'a ClosureInfo, known_defs: &'a HashSet<String>) -> Program {
+    fn run(program: Program, closure_info: &'a ClosureInfo) -> Program {
         let hof_info = detect_hofs(&program.defs);
         let top_level: HashSet<SymbolId> = program.defs.iter().map(|d| d.name).collect();
 
         let mut hs = Self {
             symbols: program.symbols,
             top_level,
-            known_defs,
             closure_info,
             hof_info,
             specialized_defs: vec![],
@@ -1271,8 +1268,8 @@ impl<'a> HofSpecializer<'a> {
 /// Run HOF specialization. Consumes the closure-converted program and
 /// the closure-info side-table; returns a program in which every
 /// reachable top-level def has zero function-typed parameters.
-pub fn run(program: Program, closure_info: &ClosureInfo, known_defs: &HashSet<String>) -> Program {
-    HofSpecializer::run(program, closure_info, known_defs)
+pub fn run(program: Program, closure_info: &ClosureInfo) -> Program {
+    HofSpecializer::run(program, closure_info)
 }
 
 // =============================================================================

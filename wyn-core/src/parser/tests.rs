@@ -3,13 +3,6 @@ use crate::ast::NodeCounter;
 use crate::error::CompilerError;
 use crate::lexer::tokenize;
 
-/// Parse tokens with a fresh node counter (for parser tests that don't need prelude)
-#[allow(dead_code)]
-fn parse_tokens(tokens: Vec<LocatedToken>) -> crate::error::Result<Program> {
-    let mut nc = NodeCounter::new();
-    Parser::new(tokens, &mut nc).parse()
-}
-
 /// Helper function that expects parsing to fail with a specific error.
 /// If parsing succeeds when it shouldn't, outputs the parsed AST.
 fn expect_parse_error<F>(input: &str, error_check: F)

@@ -145,11 +145,6 @@ fn mk_app(func: Term, arg: Term, result_ty: Type<TypeName>, term_ids: &mut TermI
     )
 }
 
-/// Tuple type helper
-fn tuple_ty(fields: Vec<Type<TypeName>>) -> Type<TypeName> {
-    Type::Constructed(TypeName::Tuple(fields.len()), fields)
-}
-
 // -------------------------------------------------------------------------
 // Test: simple map(g, map(f, a)) → map(g∘f, a)
 // -------------------------------------------------------------------------

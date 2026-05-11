@@ -23,11 +23,6 @@ fn should_fail_type_check(input: &str) -> bool {
     crate::compile_thru_frontend(input).is_err()
 }
 
-/// Check that a function with the given name exists in the SSA program.
-fn has_function(ssa: &Program, name: &str) -> bool {
-    ssa.functions.iter().any(|f| f.name == name)
-}
-
 /// Helper to compile up through TLC fusion (stops before defunctionalization).
 /// Off-milestone stop — drives the typestate API directly so the same
 /// `module_manager` covers both `type_check` and `to_tlc`.

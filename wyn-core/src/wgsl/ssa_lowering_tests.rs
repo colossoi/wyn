@@ -436,7 +436,6 @@ fn wgsl_testfile_reduce_compute() {
 /// and naga-validate the result. Used for testfile sweeps. Resolves
 /// paths relative to the workspace root so tests work regardless of
 /// the crate under `-p`.
-#[allow(dead_code)]
 fn validate_testfile_wgsl(rel_path: &str) {
     let manifest = env!("CARGO_MANIFEST_DIR");
     let path = format!("{}/../{}", manifest, rel_path);
