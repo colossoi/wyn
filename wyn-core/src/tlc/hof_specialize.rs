@@ -415,9 +415,10 @@ pub(super) fn apply_type_subst_to_array_expr(
         ArrayExpr::Literal(terms) => {
             ArrayExpr::Literal(terms.iter().map(|t| apply_type_subst_to_term(t, subst, term_ids)).collect())
         }
-        ArrayExpr::Range { start, len } => ArrayExpr::Range {
+        ArrayExpr::Range { start, len, step } => ArrayExpr::Range {
             start: Box::new(apply_type_subst_to_term(start, subst, term_ids)),
             len: Box::new(apply_type_subst_to_term(len, subst, term_ids)),
+            step: step.as_ref().map(|s| Box::new(apply_type_subst_to_term(s, subst, term_ids))),
         },
         ArrayExpr::StorageBuffer { .. } => {
             unreachable!("StorageBuffer introduced after defunctionalization")
@@ -845,9 +846,10 @@ fn substitute_var_array_expr(
         ArrayExpr::Literal(terms) => ArrayExpr::Literal(
             terms.iter().map(|t| substitute_var(t, old_sym, new_sym, term_ids)).collect(),
         ),
-        ArrayExpr::Range { start, len } => ArrayExpr::Range {
+        ArrayExpr::Range { start, len, step } => ArrayExpr::Range {
             start: Box::new(substitute_var(start, old_sym, new_sym, term_ids)),
             len: Box::new(substitute_var(len, old_sym, new_sym, term_ids)),
+            step: step.as_ref().map(|s| Box::new(substitute_var(s, old_sym, new_sym, term_ids))),
         },
         ArrayExpr::StorageBuffer { .. } => {
             unreachable!("StorageBuffer introduced after defunctionalization")

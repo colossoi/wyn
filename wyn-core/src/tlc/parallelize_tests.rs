@@ -107,6 +107,7 @@ impl B {
         let input = ArrayExpr::Range {
             start: Box::new(start),
             len: Box::new(len),
+            step: None,
         };
         self.term(
             TermKind::Soac(SoacOp::Map {
@@ -379,6 +380,7 @@ fn t11_required_params_closure() {
     let input = ArrayExpr::Range {
         start: Box::new(start),
         len: Box::new(len),
+        step: None,
     };
     let body = b.term(
         TermKind::Soac(SoacOp::Map {

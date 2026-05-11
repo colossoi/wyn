@@ -662,9 +662,10 @@ impl<'a> Monomorphizer<'a> {
             ArrayExpr::Literal(terms) => {
                 ArrayExpr::Literal(terms.iter().map(|t| self.process_term(t)).collect())
             }
-            ArrayExpr::Range { start, len } => ArrayExpr::Range {
+            ArrayExpr::Range { start, len, step } => ArrayExpr::Range {
                 start: Box::new(self.process_term(start)),
                 len: Box::new(self.process_term(len)),
+                step: step.as_ref().map(|s| Box::new(self.process_term(s))),
             },
             ArrayExpr::StorageBuffer { .. } => unreachable!("StorageBuffer introduced after monomorphize"),
         }
@@ -1019,9 +1020,10 @@ impl<'a> Monomorphizer<'a> {
             ArrayExpr::Literal(terms) => {
                 ArrayExpr::Literal(terms.iter().map(|t| self.apply_subst_term(t, subst)).collect())
             }
-            ArrayExpr::Range { start, len } => ArrayExpr::Range {
+            ArrayExpr::Range { start, len, step } => ArrayExpr::Range {
                 start: Box::new(self.apply_subst_term(start, subst)),
                 len: Box::new(self.apply_subst_term(len, subst)),
+                step: step.as_ref().map(|s| Box::new(self.apply_subst_term(s, subst))),
             },
             ArrayExpr::StorageBuffer { .. } => unreachable!("StorageBuffer introduced after monomorphize"),
         }

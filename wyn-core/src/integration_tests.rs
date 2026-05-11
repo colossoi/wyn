@@ -255,9 +255,12 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::Program, stage: &str) {
                     walk(e, bound, symbols, stage, def_name);
                 }
             }
-            ArrayExpr::Range { start, len } => {
+            ArrayExpr::Range { start, len, step } => {
                 walk(start, bound, symbols, stage, def_name);
                 walk(len, bound, symbols, stage, def_name);
+                if let Some(s) = step {
+                    walk(s, bound, symbols, stage, def_name);
+                }
             }
             ArrayExpr::StorageBuffer { offset, len, .. } => {
                 walk(offset, bound, symbols, stage, def_name);

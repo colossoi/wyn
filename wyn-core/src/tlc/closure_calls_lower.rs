@@ -503,9 +503,10 @@ impl<'a> CallLowerer<'a> {
             ArrayExpr::Literal(terms) => {
                 ArrayExpr::Literal(terms.into_iter().map(|t| self.lower_term(t)).collect())
             }
-            ArrayExpr::Range { start, len } => ArrayExpr::Range {
+            ArrayExpr::Range { start, len, step } => ArrayExpr::Range {
                 start: Box::new(self.lower_term(*start)),
                 len: Box::new(self.lower_term(*len)),
+                step: step.map(|s| Box::new(self.lower_term(*s))),
             },
             ArrayExpr::StorageBuffer { .. } => {
                 unreachable!("StorageBuffer introduced after defunctionalization")

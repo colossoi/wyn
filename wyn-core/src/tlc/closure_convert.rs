@@ -416,9 +416,12 @@ pub fn collect_free_vars_array_expr(
                 collect_free_vars(t, bound, top_level, known_defs, symbols, free, seen);
             }
         }
-        ArrayExpr::Range { start, len } => {
+        ArrayExpr::Range { start, len, step } => {
             collect_free_vars(start, bound, top_level, known_defs, symbols, free, seen);
             collect_free_vars(len, bound, top_level, known_defs, symbols, free, seen);
+            if let Some(s) = step {
+                collect_free_vars(s, bound, top_level, known_defs, symbols, free, seen);
+            }
         }
         ArrayExpr::StorageBuffer { offset, len, .. } => {
             // set/binding are compile-time u32s; only offset/len carry refs.
@@ -1061,9 +1064,10 @@ impl<'a> ClosureConverter<'a> {
             ArrayExpr::Literal(terms) => {
                 ArrayExpr::Literal(terms.into_iter().map(|t| self.convert_term(t)).collect())
             }
-            ArrayExpr::Range { start, len } => ArrayExpr::Range {
+            ArrayExpr::Range { start, len, step } => ArrayExpr::Range {
                 start: Box::new(self.convert_term(*start)),
                 len: Box::new(self.convert_term(*len)),
+                step: step.map(|s| Box::new(self.convert_term(*s))),
             },
             ArrayExpr::StorageBuffer { .. } => {
                 unreachable!("StorageBuffer introduced after defunctionalization")

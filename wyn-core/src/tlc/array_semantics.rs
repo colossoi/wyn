@@ -427,7 +427,7 @@ pub fn classify_array_expr(ae: &ArrayExpr) -> ArraySemantics {
             index_fn: index_fn.clone(),
         },
         ArrayExpr::Literal(terms) => ArraySemantics::Literal(terms.clone()),
-        ArrayExpr::Range { start, len } => ArraySemantics::Range {
+        ArrayExpr::Range { start, len, .. } => ArraySemantics::Range {
             start: start.clone(),
             len: len.clone(),
         },

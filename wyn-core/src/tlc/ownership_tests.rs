@@ -1418,6 +1418,7 @@ fn synth_program_with_populated_soac_captures() -> Program {
     let range_input = crate::tlc::ArrayExpr::Range {
         start: Box::new(zero_lit),
         len: Box::new(one_lit),
+        step: None,
     };
 
     // SoacBody carries (cap_sym, *[4]i32, Var(outer_sym)) — the capture
@@ -1577,6 +1578,7 @@ fn soac_capture_term_is_analyzed_for_liveness() {
     let range_input = crate::tlc::ArrayExpr::Range {
         start: Box::new(zero_lit),
         len: Box::new(one_lit),
+        step: None,
     };
 
     let map_term = Term {

@@ -751,9 +751,10 @@ impl SoaTransformer {
                 let new_terms: Vec<Term> = terms.iter().map(|t| self.transform_term(t)).collect();
                 ArrayExpr::Literal(new_terms)
             }
-            ArrayExpr::Range { start, len } => ArrayExpr::Range {
+            ArrayExpr::Range { start, len, step } => ArrayExpr::Range {
                 start: Box::new(self.transform_term(start)),
                 len: Box::new(self.transform_term(len)),
+                step: step.as_ref().map(|s| Box::new(self.transform_term(s))),
             },
             ArrayExpr::StorageBuffer {
                 set,

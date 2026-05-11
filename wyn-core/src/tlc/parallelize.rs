@@ -331,31 +331,34 @@ fn compute_required_params(
 }
 
 /// Analyze a SOAC, rejecting non-parallelizable variants (Filter,
-/// Scatter, ReduceByIndex). Inputs that are `Ref(App(_w_range, ...))`
-/// get normalized into `ArrayExpr::Range` so Stage B's builders can use
-/// their existing Range-aware paths. Returns a `SoacAnalysis` that
-/// holds the (possibly-normalized) `SoacOp` plus one provenance per
-/// input.
-fn analyze_soac(soac: &SoacOp, _result_ty: &Type<TypeName>, symbols: &SymbolTable) -> Option<SoacAnalysis> {
+/// Scatter, ReduceByIndex). Returns a `SoacAnalysis` holding the
+/// `SoacOp` plus one provenance per input.
+fn analyze_soac(
+    soac: &SoacOp,
+    _result_ty: &Type<TypeName>,
+    _symbols: &SymbolTable,
+) -> Option<SoacAnalysis> {
     let normalized: SoacOp = match soac {
         SoacOp::Map {
             lam,
             inputs,
             consumes_input,
         } => {
-            let (norm_inputs, _) = classify_inputs(inputs, symbols)?;
+            for input in inputs {
+                classify_input(input)?;
+            }
             SoacOp::Map {
                 lam: lam.clone(),
-                inputs: norm_inputs,
+                inputs: inputs.clone(),
                 consumes_input: *consumes_input,
             }
         }
         SoacOp::Reduce { op, ne, input, props } => {
-            let (norm_input, _) = classify_single(input, symbols)?;
+            classify_input(input)?;
             SoacOp::Reduce {
                 op: op.clone(),
                 ne: ne.clone(),
-                input: norm_input,
+                input: input.clone(),
                 props: props.clone(),
             }
         }
@@ -366,21 +369,23 @@ fn analyze_soac(soac: &SoacOp, _result_ty: &Type<TypeName>, symbols: &SymbolTabl
             inputs,
             props,
         } => {
-            let (norm_inputs, _) = classify_inputs(inputs, symbols)?;
+            for input in inputs {
+                classify_input(input)?;
+            }
             SoacOp::Redomap {
                 op: op.clone(),
                 reduce_op: reduce_op.clone(),
                 ne: ne.clone(),
-                inputs: norm_inputs,
+                inputs: inputs.clone(),
                 props: props.clone(),
             }
         }
         SoacOp::Scan { op, ne, input } => {
-            let (norm_input, _) = classify_single(input, symbols)?;
+            classify_input(input)?;
             SoacOp::Scan {
                 op: op.clone(),
                 ne: ne.clone(),
-                input: norm_input,
+                input: input.clone(),
             }
         }
         _ => return None,
@@ -394,83 +399,6 @@ fn analyze_soac(soac: &SoacOp, _result_ty: &Type<TypeName>, symbols: &SymbolTabl
         original: normalized,
         provenances,
     })
-}
-
-/// Classify a list of inputs and return their normalized ArrayExprs
-/// along with their provenances. Normalization rewrites
-/// `Ref(App(_w_range, [start, end, kind]))` → `Range { start, len }`.
-fn classify_inputs(
-    inputs: &[ArrayExpr],
-    symbols: &SymbolTable,
-) -> Option<(Vec<ArrayExpr>, Vec<ArrayProvenance>)> {
-    let mut norm_inputs = Vec::with_capacity(inputs.len());
-    let mut provenances = Vec::with_capacity(inputs.len());
-    for input in inputs {
-        let (ni, pv) = classify_single(input, symbols)?;
-        norm_inputs.push(ni);
-        provenances.push(pv);
-    }
-    Some((norm_inputs, provenances))
-}
-
-fn classify_single(input: &ArrayExpr, symbols: &SymbolTable) -> Option<(ArrayExpr, ArrayProvenance)> {
-    // First, try to normalize Ref(App(_w_range, ...)) into Range.
-    let normalized = normalize_range_ref(input, symbols).unwrap_or_else(|| input.clone());
-    let provenance = classify_input(&normalized)?;
-    Some((normalized, provenance))
-}
-
-/// If `input` is `Ref(App(Var(sym), args))` with sym named `_w_range` or
-/// `_w_range_step`, synthesize `ArrayExpr::Range { start, len }` where
-/// `len` is `end - start` (or a step-aware variant for `_w_range_step`).
-///
-/// Returns `None` if `input` doesn't match the range-App shape; the caller
-/// keeps the original ArrayExpr.
-fn normalize_range_ref(input: &ArrayExpr, symbols: &SymbolTable) -> Option<ArrayExpr> {
-    let inner = match input {
-        ArrayExpr::Ref(t) => t.as_ref(),
-        _ => return None,
-    };
-    // Peel off leading `let` wrappers so we can recognize `let N = 256 in
-    // _w_range(0, N, ...)` that inline_small doesn't always fold.
-    let mut inner = inner;
-    while let TermKind::Let { body, .. } = &inner.kind {
-        inner = body.as_ref();
-    }
-    let (func, args) = match &inner.kind {
-        TermKind::App { func, args } => (func, args),
-        _ => return None,
-    };
-    let sym = match &func.kind {
-        TermKind::Var(crate::tlc::VarRef::Symbol(s)) => *s,
-        _ => return None,
-    };
-    let name = symbols.get(sym)?;
-    match name.as_str() {
-        "_w_range" if args.len() == 3 => {
-            // args = [start, end, kind]. len = end - start.
-            let start = args[0].clone();
-            let end = &args[1];
-            let len = binop("-", end.clone(), start.clone(), end.ty.clone(), end.span);
-            Some(ArrayExpr::Range {
-                start: Box::new(start),
-                len: Box::new(len),
-            })
-        }
-        "_w_range_step" if args.len() == 4 => {
-            // args = [start, step, end, kind]. len = (end - start) / step.
-            let start = args[0].clone();
-            let step = &args[1];
-            let end = &args[2];
-            let diff = binop("-", end.clone(), start.clone(), end.ty.clone(), end.span);
-            let len = binop("/", diff, step.clone(), end.ty.clone(), end.span);
-            Some(ArrayExpr::Range {
-                start: Box::new(start),
-                len: Box::new(len),
-            })
-        }
-        _ => None,
-    }
 }
 
 fn binop(op: &str, lhs: Term, rhs: Term, ty: Type<TypeName>, span: ast::Span) -> Term {
@@ -2177,7 +2105,7 @@ fn chunk_array_expr(input: &ArrayExpr, chunk_start: &Term, chunk_len: &Term) -> 
                 elem_ty: elem_ty.clone(),
             }
         }
-        ArrayExpr::Range { start, len: _ } => {
+        ArrayExpr::Range { start, len: _, step } => {
             // Range: chunk_start..chunk_len starting from original start.
             // Chunk values are u32 (from ChunkArithmetic); the original
             // range is typically i32. Coercion to match the range's type
@@ -2194,6 +2122,7 @@ fn chunk_array_expr(input: &ArrayExpr, chunk_start: &Term, chunk_len: &Term) -> 
             ArrayExpr::Range {
                 start: Box::new(new_start),
                 len: Box::new(chunk_len.clone()),
+                step: step.clone(),
             }
         }
         other => other.clone(), // shouldn't happen for parallelizable inputs

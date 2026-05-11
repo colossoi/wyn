@@ -599,9 +599,12 @@ impl<'p> Builder<'p> {
                     self.visit_term(t);
                 }
             }
-            ArrayExpr::Range { start, len } => {
+            ArrayExpr::Range { start, len, step } => {
                 self.visit_term(start);
                 self.visit_term(len);
+                if let Some(s) = step {
+                    self.visit_term(s);
+                }
             }
             ArrayExpr::StorageBuffer { offset, len, .. } => {
                 self.visit_term(offset);
@@ -1002,8 +1005,9 @@ impl<'m> Liveness<'m> {
                 }
                 live
             }
-            ArrayExpr::Range { start, len } => {
-                let after_start = self.analyze(len, live_after);
+            ArrayExpr::Range { start, len, step } => {
+                let after = if let Some(s) = step { self.analyze(s, live_after) } else { live_after };
+                let after_start = self.analyze(len, after);
                 self.analyze(start, after_start)
             }
             ArrayExpr::StorageBuffer { offset, len, .. } => {

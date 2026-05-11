@@ -678,9 +678,10 @@ impl BufferSpecializer {
             ArrayExpr::Literal(terms) => {
                 ArrayExpr::Literal(terms.iter().map(|t| self.rewrite_term(t)).collect())
             }
-            ArrayExpr::Range { start, len } => ArrayExpr::Range {
+            ArrayExpr::Range { start, len, step } => ArrayExpr::Range {
                 start: Box::new(self.rewrite_term(start)),
                 len: Box::new(self.rewrite_term(len)),
+                step: step.as_ref().map(|s| Box::new(self.rewrite_term(s))),
             },
             ArrayExpr::StorageBuffer {
                 set,
@@ -1355,9 +1356,10 @@ impl BufferSpecializer {
             ArrayExpr::Literal(terms) => ArrayExpr::Literal(
                 terms.iter().map(|t| self.rewrite_specialized_body(t, view_params)).collect(),
             ),
-            ArrayExpr::Range { start, len } => ArrayExpr::Range {
+            ArrayExpr::Range { start, len, step } => ArrayExpr::Range {
                 start: Box::new(self.rewrite_specialized_body(start, view_params)),
                 len: Box::new(self.rewrite_specialized_body(len, view_params)),
+                step: step.as_ref().map(|s| Box::new(self.rewrite_specialized_body(s, view_params))),
             },
             ArrayExpr::StorageBuffer {
                 set,

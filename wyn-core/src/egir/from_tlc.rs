@@ -1069,11 +1069,6 @@ impl<'a> Converter<'a> {
         ty: Type<TypeName>,
     ) -> Result<NodeId, ConvertError> {
         match name {
-            "_w_range" => {
-                let start = self.convert_term(&args[0])?;
-                let len = self.convert_term(&args[1])?;
-                Ok(self.intern_pure(PureOp::ArrayRange { has_step: false }, smallvec![start, len], ty))
-            }
             _ => {
                 // Function call
                 if let Some(def) = self.top_level.get(&sym) {
@@ -1774,14 +1769,17 @@ impl<'a> Converter<'a> {
                 let n = operands.len();
                 Ok(self.intern_pure(PureOp::ArrayLit(n), operands, ty))
             }
-            ArrayExpr::Range { start, len } => {
+            ArrayExpr::Range { start, len, step } => {
                 let start_nid = self.convert_term(start)?;
                 let len_nid = self.convert_term(len)?;
-                Ok(self.intern_pure(
-                    PureOp::ArrayRange { has_step: false },
-                    smallvec![start_nid, len_nid],
-                    ty,
-                ))
+                let mut operands: SmallVec<[NodeId; 4]> = smallvec![start_nid, len_nid];
+                let has_step = if let Some(step_term) = step {
+                    operands.push(self.convert_term(step_term)?);
+                    true
+                } else {
+                    false
+                };
+                Ok(self.intern_pure(PureOp::ArrayRange { has_step }, operands, ty))
             }
             ArrayExpr::StorageBuffer {
                 set,

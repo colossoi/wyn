@@ -392,10 +392,11 @@ pub enum ArrayExpr {
     },
     /// Literal small array.
     Literal(Vec<Term>),
-    /// Range / iota.
+    /// Range / iota. `step` defaults to 1 when `None`.
     Range {
         start: Box<Term>,
         len: Box<Term>,
+        step: Option<Box<Term>>,
     },
     /// Storage buffer reference (introduced by buffer_specialize).
     /// Represents elements from a storage buffer at (set, binding),
@@ -896,9 +897,12 @@ where
                 f(t);
             }
         }
-        ArrayExpr::Range { start, len } => {
+        ArrayExpr::Range { start, len, step } => {
             f(start);
             f(len);
+            if let Some(s) = step {
+                f(s);
+            }
         }
         ArrayExpr::StorageBuffer { offset, len, .. } => {
             f(offset);
@@ -1040,9 +1044,10 @@ where
             elem_ty,
         },
         ArrayExpr::Literal(terms) => ArrayExpr::Literal(terms.into_iter().map(f).collect()),
-        ArrayExpr::Range { start, len } => ArrayExpr::Range {
+        ArrayExpr::Range { start, len, step } => ArrayExpr::Range {
             start: Box::new(f(*start)),
             len: Box::new(f(*len)),
+            step: step.map(|s| Box::new(f(*s))),
         },
         ArrayExpr::StorageBuffer {
             set,
@@ -2022,32 +2027,43 @@ impl<'a> Transformer<'a> {
             }
 
             ast::ExprKind::Range(range) => {
-                // Transform range to _w_range intrinsic
                 let start = self.transform_expr(&range.start);
                 let end = self.transform_expr(&range.end);
-                let kind_val = match range.kind {
-                    ast::RangeKind::Inclusive => 0,
-                    ast::RangeKind::Exclusive => 1,
-                    ast::RangeKind::ExclusiveLt => 2,
-                    ast::RangeKind::ExclusiveGt => 3,
-                };
-                let kind_lit = self.mk_term(
-                    Type::Constructed(TypeName::Int(32), vec![]),
-                    span,
-                    TermKind::IntLit(kind_val.to_string()),
-                );
+                let step = range.step.as_ref().map(|s| self.transform_expr(s));
+                let elem_ty = end.ty.clone();
+                let minus = ast::BinaryOp { op: "-".to_string() };
+                let plus = ast::BinaryOp { op: "+".to_string() };
+                let div = ast::BinaryOp { op: "/".to_string() };
 
-                match &range.step {
-                    Some(step_expr) => {
-                        let step = self.transform_expr(step_expr);
-                        // _w_range_step start step end kind
-                        self.build_call("_w_range_step", &[start, step, end, kind_lit], ty, span)
+                // Element count per range kind:
+                //   `a..b`   (Exclusive)   → b - a
+                //   `a..<b`  (ExclusiveLt) → b - a
+                //   `a..>b`  (ExclusiveGt) → a - b   (descending half-open)
+                //   `a...b`  (Inclusive)   → b - a + 1
+                let mut len = match range.kind {
+                    ast::RangeKind::Exclusive | ast::RangeKind::ExclusiveLt => {
+                        self.build_binop(minus.clone(), end.clone(), start.clone(), elem_ty.clone(), span)
                     }
-                    None => {
-                        // _w_range start end kind
-                        self.build_call("_w_range", &[start, end, kind_lit], ty, span)
+                    ast::RangeKind::ExclusiveGt => {
+                        self.build_binop(minus.clone(), start.clone(), end.clone(), elem_ty.clone(), span)
                     }
+                    ast::RangeKind::Inclusive => {
+                        let one = self.mk_term(elem_ty.clone(), span, TermKind::IntLit("1".to_string()));
+                        let diff =
+                            self.build_binop(minus, end.clone(), start.clone(), elem_ty.clone(), span);
+                        self.build_binop(plus, diff, one, elem_ty.clone(), span)
+                    }
+                };
+                if let Some(ref step_term) = step {
+                    len = self.build_binop(div, len, step_term.clone(), elem_ty.clone(), span);
                 }
+
+                let range_ae = ArrayExpr::Range {
+                    start: Box::new(start),
+                    len: Box::new(len),
+                    step: step.map(Box::new),
+                };
+                self.mk_term(ty, span, TermKind::ArrayExpr(range_ae))
             }
 
             ast::ExprKind::Slice(slice) => {
