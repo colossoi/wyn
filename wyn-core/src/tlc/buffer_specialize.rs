@@ -170,7 +170,7 @@ pub fn run(program: Program) -> Program {
                 };
                 processed_defs.push(processed);
             }
-            DefMeta::Function => {
+            DefMeta::Function | DefMeta::LiftedLambda => {
                 let processed = specializer.specialize_function_body(def);
                 processed_defs.push(processed);
             }
@@ -400,7 +400,7 @@ impl BufferSpecializer {
                         let has_buffer_args = buffer_args.iter().any(|b| b.is_some());
                         if has_buffer_args {
                             if let Some(target_def) = self.def_map.get(sym).cloned() {
-                                if matches!(target_def.meta, DefMeta::Function) {
+                                if matches!(target_def.meta, DefMeta::Function | DefMeta::LiftedLambda) {
                                     return self.specialize_call(
                                         *sym,
                                         &target_def,
@@ -512,7 +512,16 @@ impl BufferSpecializer {
             | TermKind::IntLit(_)
             | TermKind::FloatLit(_)
             | TermKind::BoolLit(_)
+            | TermKind::UnitLit
             | TermKind::Extern(_) => term.clone(),
+
+            TermKind::Coerce { inner, target_ty } => Term {
+                kind: TermKind::Coerce {
+                    inner: Box::new(self.rewrite_term(inner)),
+                    target_ty: target_ty.clone(),
+                },
+                ..term.clone()
+            },
 
             TermKind::Tuple(parts) => Term {
                 kind: TermKind::Tuple(parts.iter().map(|p| self.rewrite_term(p)).collect()),
@@ -1122,7 +1131,16 @@ impl BufferSpecializer {
             | TermKind::IntLit(_)
             | TermKind::FloatLit(_)
             | TermKind::BoolLit(_)
+            | TermKind::UnitLit
             | TermKind::Extern(_) => term.clone(),
+
+            TermKind::Coerce { inner, target_ty } => Term {
+                kind: TermKind::Coerce {
+                    inner: Box::new(self.rewrite_specialized_body(inner, view_params)),
+                    target_ty: target_ty.clone(),
+                },
+                ..term.clone()
+            },
 
             TermKind::Tuple(parts) => Term {
                 kind: TermKind::Tuple(

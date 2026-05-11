@@ -189,6 +189,11 @@ pub(super) fn apply_type_subst_to_term(
         TermKind::IntLit(s) => TermKind::IntLit(s.clone()),
         TermKind::FloatLit(f) => TermKind::FloatLit(*f),
         TermKind::BoolLit(b) => TermKind::BoolLit(*b),
+        TermKind::UnitLit => TermKind::UnitLit,
+        TermKind::Coerce { inner, target_ty } => TermKind::Coerce {
+            inner: Box::new(apply_type_subst_to_term(inner, subst, term_ids)),
+            target_ty: apply_type_subst(target_ty, subst),
+        },
         TermKind::Extern(linkage) => TermKind::Extern(linkage.clone()),
         TermKind::App { func, args } => TermKind::App {
             func: Box::new(apply_type_subst_to_term(func, subst, term_ids)),
@@ -525,9 +530,20 @@ pub(super) fn substitute_var(
         | TermKind::IntLit(_)
         | TermKind::FloatLit(_)
         | TermKind::BoolLit(_)
+        | TermKind::UnitLit
         | TermKind::BinOp(_)
         | TermKind::UnOp(_)
         | TermKind::Extern(_) => term.clone(),
+
+        TermKind::Coerce { inner, target_ty } => Term {
+            id: term_ids.next_id(),
+            ty: term.ty.clone(),
+            span: term.span,
+            kind: TermKind::Coerce {
+                inner: Box::new(substitute_var(inner, old_sym, new_sym, term_ids)),
+                target_ty: target_ty.clone(),
+            },
+        },
 
         TermKind::App { func, args } => Term {
             id: term_ids.next_id(),
@@ -1079,6 +1095,7 @@ impl<'a> HofSpecializer<'a> {
             | TermKind::IntLit(_)
             | TermKind::FloatLit(_)
             | TermKind::BoolLit(_)
+            | TermKind::UnitLit
             | TermKind::BinOp(_)
             | TermKind::UnOp(_)
             | TermKind::Extern(_) => Term {
@@ -1086,6 +1103,16 @@ impl<'a> HofSpecializer<'a> {
                 ty,
                 span,
                 kind: term.kind,
+            },
+
+            TermKind::Coerce { inner, target_ty } => Term {
+                id: self.term_ids.next_id(),
+                ty,
+                span,
+                kind: TermKind::Coerce {
+                    inner: Box::new(self.rewrite_term(*inner)),
+                    target_ty,
+                },
             },
 
             TermKind::Tuple(parts) => Term {

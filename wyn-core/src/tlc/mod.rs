@@ -239,6 +239,15 @@ pub enum TermKind {
     /// Boolean literal.
     BoolLit(bool),
 
+    /// Unit literal: `()`.
+    UnitLit,
+
+    /// Numeric type coercion: `expr :> target_ty`.
+    Coerce {
+        inner: Box<Term>,
+        target_ty: Type<TypeName>,
+    },
+
     /// External function reference (linked SPIR-V).
     /// The string is the linkage name for spirv-link.
     /// The Wyn-visible name comes from the parent Def.
@@ -514,6 +523,10 @@ pub enum DefMeta {
     Function,
     /// A shader entry point - stores the original AST entry for metadata.
     EntryPoint(Box<interface::EntryDecl>),
+    /// A lifted lambda produced by `closure_convert`. Marks the def so
+    /// later passes (inlining, etc.) can recognise it structurally
+    /// instead of sniffing the symbol name.
+    LiftedLambda,
 }
 
 /// A top-level definition in TLC.
@@ -653,7 +666,13 @@ impl Term {
             | TermKind::IntLit(_)
             | TermKind::FloatLit(_)
             | TermKind::BoolLit(_)
+            | TermKind::UnitLit
             | TermKind::Extern(_) => self.kind,
+
+            TermKind::Coerce { inner, target_ty } => TermKind::Coerce {
+                inner: Box::new(f(*inner)),
+                target_ty,
+            },
 
             TermKind::App { func, args } => TermKind::App {
                 func: Box::new(f(*func)),
@@ -738,7 +757,10 @@ impl Term {
             | TermKind::IntLit(_)
             | TermKind::FloatLit(_)
             | TermKind::BoolLit(_)
+            | TermKind::UnitLit
             | TermKind::Extern(_) => {}
+
+            TermKind::Coerce { inner, .. } => f(inner),
 
             TermKind::App { func, args } => {
                 f(func);
@@ -1777,10 +1799,7 @@ impl<'a> Transformer<'a> {
 
             ast::ExprKind::BoolLiteral(b) => self.mk_term(ty, span, TermKind::BoolLit(*b)),
 
-            ast::ExprKind::Unit => {
-                // Unit value represented as _w_unit intrinsic call
-                self.build_intrinsic_call("_w_unit", &[], ty, span)
-            }
+            ast::ExprKind::Unit => self.mk_term(ty, span, TermKind::UnitLit),
 
             ast::ExprKind::Identifier(qualifiers, name) => {
                 // First consult the NameResolution side table built at
@@ -2097,7 +2116,15 @@ impl<'a> Transformer<'a> {
 
             ast::ExprKind::TypeCoercion(inner, _) => {
                 let term = self.transform_expr(inner);
-                self.build_call("_w_coerce", &[term], ty, span)
+                let target_ty = ty.clone();
+                self.mk_term(
+                    ty,
+                    span,
+                    TermKind::Coerce {
+                        inner: Box::new(term),
+                        target_ty,
+                    },
+                )
             }
 
             ast::ExprKind::TypeHole => {
@@ -2430,7 +2457,7 @@ impl<'a> Transformer<'a> {
         // Get the init expression and accumulator type
         let init_term = loop_expr.init.as_ref().map(|e| self.transform_expr(e)).unwrap_or_else(|| {
             // No accumulator - use unit
-            self.build_intrinsic_call("_w_unit", &[], Type::Constructed(TypeName::Unit, vec![]), span)
+            self.mk_term(Type::Constructed(TypeName::Unit, vec![]), span, TermKind::UnitLit)
         });
         let acc_ty = init_term.ty.clone();
 
@@ -3009,7 +3036,7 @@ impl<'a> Transformer<'a> {
             Type::Constructed(TypeName::Bool, _) => {
                 self.mk_term(ty.clone(), span, TermKind::BoolLit(false))
             }
-            Type::Constructed(TypeName::Unit, _) => self.build_call("_w_unit", &[], ty.clone(), span),
+            Type::Constructed(TypeName::Unit, _) => self.mk_term(ty.clone(), span, TermKind::UnitLit),
             Type::Constructed(TypeName::Tuple(_), elems)
             | Type::Constructed(TypeName::Record(_), elems) => {
                 let zero_terms: Vec<Term> = elems.iter().map(|t| self.build_zero(t, span)).collect();
@@ -3061,65 +3088,6 @@ impl<'a> Transformer<'a> {
         )
     }
 
-    // Helper: build flat application for variable number of args
-    /// Build a flat call from a function name and already-transformed argument terms.
-    /// For f(a, b, c) with result R: builds App { func: Var(f), args: [a, b, c] }
-    fn build_call(
-        &mut self,
-        func_name: &str,
-        args: &[Term],
-        result_ty: Type<TypeName>,
-        span: Span,
-    ) -> Term {
-        // Catalog-resolved builtins emit `Var(Builtin(id))` directly so
-        // TLC→EGIR dispatches structurally (no later string match against
-        // `_w_intrinsic_*`). Names that aren't in the catalog (e.g.
-        // `_w_tuple`, `_w_vec_lit`, `_w_index` — TLC-level pseudo-ops
-        // handled by dedicated `convert_named_app` arms) keep the
-        // SymbolId path.
-        let func_var = if let Some(def) = crate::builtins::catalog().lookup_by_any_name(func_name) {
-            // Compiler-emitted catalog calls go through `build_call`
-            // with the internal `_w_intrinsic_*` name; these are
-            // pre-resolved (the IR site picked the exact builtin), and
-            // they target single-overload entries today, so
-            // `overload_idx = 0` is correct. If a future caller targets
-            // a multi-overload entry from a synthesised TLC site, this
-            // assertion will fire and the caller must specify the
-            // overload explicitly.
-            assert_eq!(
-                def.overloads().len(),
-                1,
-                "build_call({:?}) targets a multi-overload catalog entry; \
-                 callers must specify overload_idx explicitly",
-                func_name
-            );
-            crate::tlc::VarRef::Builtin {
-                id: def.id,
-                overload_idx: 0,
-            }
-        } else {
-            crate::tlc::VarRef::Symbol(self.resolve_or_define(func_name))
-        };
-        if args.is_empty() {
-            return self.mk_term(result_ty, span, TermKind::Var(func_var));
-        }
-
-        // Build the function type: arg1_ty -> arg2_ty -> ... -> result_ty (right-associative)
-        let mut func_ty = result_ty.clone();
-        for arg in args.iter().rev() {
-            func_ty = Type::Constructed(TypeName::Arrow, vec![arg.ty.clone(), func_ty]);
-        }
-        let func_term = self.mk_term(func_ty, span, TermKind::Var(func_var));
-        self.mk_term(
-            result_ty,
-            span,
-            TermKind::App {
-                func: Box::new(func_term),
-                args: args.to_vec(),
-            },
-        )
-    }
-
     /// Build a flat call against a catalog `BuiltinId`.
     fn build_call_by_id(
         &mut self,
@@ -3145,17 +3113,6 @@ impl<'a> Transformer<'a> {
                 args: args.to_vec(),
             },
         )
-    }
-
-    fn build_intrinsic_call(
-        &mut self,
-        name: &str,
-        args: &[ast::Expression],
-        result_ty: Type<TypeName>,
-        span: Span,
-    ) -> Term {
-        let arg_terms: Vec<Term> = args.iter().map(|a| self.transform_expr(a)).collect();
-        self.build_call(name, &arg_terms, result_ty, span)
     }
 
     /// Construct a `TermKind::Tuple` directly.

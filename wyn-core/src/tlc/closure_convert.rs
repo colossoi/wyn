@@ -267,9 +267,13 @@ pub fn collect_free_vars(
         | TermKind::IntLit(_)
         | TermKind::FloatLit(_)
         | TermKind::BoolLit(_)
+        | TermKind::UnitLit
         | TermKind::BinOp(_)
         | TermKind::UnOp(_)
         | TermKind::Extern(_) => {}
+        TermKind::Coerce { inner, .. } => {
+            collect_free_vars(inner, bound, top_level, known_defs, symbols, free, seen);
+        }
         TermKind::Soac(soac) => {
             collect_free_vars_soac(soac, bound, top_level, known_defs, symbols, free, seen);
         }
@@ -814,6 +818,7 @@ impl<'a> ClosureConverter<'a> {
             | TermKind::IntLit(_)
             | TermKind::FloatLit(_)
             | TermKind::BoolLit(_)
+            | TermKind::UnitLit
             | TermKind::BinOp(_)
             | TermKind::UnOp(_)
             | TermKind::Extern(_) => Term {
@@ -821,6 +826,16 @@ impl<'a> ClosureConverter<'a> {
                 ty,
                 span,
                 kind: term.kind,
+            },
+
+            TermKind::Coerce { inner, target_ty } => Term {
+                id: self.term_ids.next_id(),
+                ty,
+                span,
+                kind: TermKind::Coerce {
+                    inner: Box::new(self.convert_term(*inner)),
+                    target_ty,
+                },
             },
 
             TermKind::Tuple(parts) => Term {
@@ -880,7 +895,7 @@ impl<'a> ClosureConverter<'a> {
                 name: lifted_sym,
                 ty: rebuilt.ty.clone(),
                 body: rebuilt,
-                meta: DefMeta::Function,
+                meta: DefMeta::LiftedLambda,
                 arity: params.len(),
             });
             self.callable_values.insert(lifted_sym, CallableValue::Direct(lifted_sym));
@@ -902,7 +917,7 @@ impl<'a> ClosureConverter<'a> {
                 name: lifted_sym,
                 ty: wrapped.ty.clone(),
                 body: wrapped,
-                meta: DefMeta::Function,
+                meta: DefMeta::LiftedLambda,
                 arity,
             });
             self.callable_values.insert(

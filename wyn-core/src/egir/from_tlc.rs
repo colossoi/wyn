@@ -124,7 +124,7 @@ pub fn run(program: &TlcProgram, mut pipeline: PipelineDescriptor) -> Result<Egi
 
     for def in &program.defs {
         match &def.meta {
-            DefMeta::Function => {
+            DefMeta::Function | DefMeta::LiftedLambda => {
                 let def_name = symbols.get(def.name).expect("BUG: symbol not in table");
                 if pure_constant_names.contains(def_name) {
                     continue;
@@ -865,6 +865,10 @@ impl<'a> Converter<'a> {
             }
             TermKind::FloatLit(f) => Ok(self.intern_pure(PureOp::Float(f.to_string()), smallvec![], ty)),
             TermKind::BoolLit(b) => Ok(self.intern_pure(PureOp::Bool(*b), smallvec![], ty)),
+            TermKind::UnitLit => Ok(self.intern_pure(PureOp::Unit, smallvec![], ty)),
+            TermKind::Coerce { .. } => Err(ConvertError::Unsupported(
+                "type coercion (:>) is not yet supported".into(),
+            )),
 
             // --- Variables ---
             TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => self.convert_var(*sym, ty),

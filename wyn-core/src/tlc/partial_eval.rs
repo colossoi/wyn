@@ -123,6 +123,19 @@ impl PartialEvaluator {
             ),
             TermKind::FloatLit(f) => Value::Float(*f as f64),
             TermKind::BoolLit(b) => Value::Bool(*b),
+            TermKind::UnitLit => Value::Unknown(term.clone()),
+            TermKind::Coerce { inner, target_ty } => {
+                let inner_val = self.eval(inner);
+                let inner_term = self.reify(inner_val, &inner.ty, inner.span);
+                Value::Unknown(self.mk_term(
+                    term.ty.clone(),
+                    term.span,
+                    TermKind::Coerce {
+                        inner: Box::new(inner_term),
+                        target_ty: target_ty.clone(),
+                    },
+                ))
+            }
 
             // Variable lookup
             TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {

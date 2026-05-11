@@ -82,7 +82,9 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::Program, stage: &str) {
             | TermKind::IntLit(_)
             | TermKind::FloatLit(_)
             | TermKind::BoolLit(_)
+            | TermKind::UnitLit
             | TermKind::Extern(_) => {}
+            TermKind::Coerce { inner, .. } => walk(inner, bound, symbols, stage, def_name),
             TermKind::App { func, args } => {
                 walk(func, bound, symbols, stage, def_name);
                 for a in args {

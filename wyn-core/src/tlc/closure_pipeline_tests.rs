@@ -309,12 +309,9 @@ fn test_defunc_lambda_with_capture() {
     // Should have lifted the inner lambda
     assert!(result.defs.len() >= 2, "Expected lifted lambda def");
 
-    // Find the lifted lambda
-    let lifted = result.defs.iter().find(|d| {
-        let name = result.symbols.get(d.name).expect("BUG: symbol not in table");
-        name.starts_with("_w_lambda_")
-    });
-    assert!(lifted.is_some(), "Should have a _w_lambda_ definition");
+    // Find the lifted lambda by its DefMeta marker.
+    let lifted = result.defs.iter().find(|d| matches!(d.meta, crate::tlc::DefMeta::LiftedLambda));
+    assert!(lifted.is_some(), "Should have a LiftedLambda definition");
 }
 
 /// Test that specialized HOF bodies are properly defunctionalized.

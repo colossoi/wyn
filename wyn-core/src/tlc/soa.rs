@@ -199,9 +199,22 @@ impl SoaTransformer {
             | TermKind::IntLit(_)
             | TermKind::FloatLit(_)
             | TermKind::BoolLit(_)
+            | TermKind::UnitLit
             | TermKind::BinOp(_)
             | TermKind::UnOp(_)
             | TermKind::Extern(_) => self.mk_term(new_ty, span, term.kind.clone()),
+
+            TermKind::Coerce { inner, target_ty } => {
+                let new_inner = self.transform_term(inner);
+                self.mk_term(
+                    new_ty,
+                    span,
+                    TermKind::Coerce {
+                        inner: Box::new(new_inner),
+                        target_ty: soa_type(target_ty),
+                    },
+                )
+            }
 
             TermKind::Lambda(lam) => {
                 let new_lam = self.transform_lambda(lam);

@@ -1138,8 +1138,7 @@ fn synth_program_with_with_through_index() -> Program {
     // Top-level symbols
     let f_sym = symbols.alloc("f".to_string());
     def_syms.insert("f".to_string(), f_sym);
-    let with_sym = symbols.alloc(crate::builtins::names::INTRINSIC_ARRAY_WITH.to_string());
-    def_syms.insert(crate::builtins::names::INTRINSIC_ARRAY_WITH.to_string(), with_sym);
+    let array_with_id = crate::builtins::catalog().known().array_with;
 
     // Local symbols
     let grid_sym = symbols.alloc("grid".to_string());
@@ -1188,12 +1187,15 @@ fn synth_program_with_with_through_index() -> Program {
         },
     };
 
-    // _w_intrinsic_array_with(index_call, 0, 99)
+    // array_with(index_call, 0, 99) — catalog-resolved Builtin form.
     let var_with = Term {
         id: ids.next_id(),
         ty: with_fn_ty.clone(),
         span: Span::dummy(),
-        kind: TermKind::Var(crate::tlc::VarRef::Symbol(with_sym)),
+        kind: TermKind::Var(crate::tlc::VarRef::Builtin {
+            id: array_with_id,
+            overload_idx: 0,
+        }),
     };
     let zero_with_idx = Term {
         id: ids.next_id(),
@@ -1259,7 +1261,8 @@ fn array_with_promotes_when_source_is_aliasing_intrinsic() {
     let program = synth_program_with_with_through_index();
 
     // Sanity: pre-rewrite uses the functional form.
-    let pre_func_name = {
+    let known = crate::builtins::catalog().known();
+    let pre_id = {
         let f_def = find_def(&program, "f");
         let lam = match &f_def.body.kind {
             TermKind::Lambda(l) => l,
@@ -1268,15 +1271,14 @@ fn array_with_promotes_when_source_is_aliasing_intrinsic() {
         let TermKind::App { func, .. } = &lam.body.kind else {
             panic!("expected lambda body to be an App");
         };
-        let TermKind::Var(crate::tlc::VarRef::Symbol(s)) = &func.kind else {
-            panic!("expected App's func to be a Var");
+        let TermKind::Var(crate::tlc::VarRef::Builtin { id, .. }) = &func.kind else {
+            panic!("expected App's func to be a catalog Builtin Var");
         };
-        program.symbols.get(*s).cloned().unwrap_or_default()
+        *id
     };
     assert_eq!(
-        pre_func_name,
-        crate::builtins::names::INTRINSIC_ARRAY_WITH,
-        "test setup: outer App must call the functional with intrinsic"
+        pre_id, known.array_with,
+        "test setup: outer App must call the functional array_with intrinsic"
     );
 
     let rewritten = super::apply_ownership(program).expect("apply_ownership");
@@ -1288,18 +1290,11 @@ fn array_with_promotes_when_source_is_aliasing_intrinsic() {
     let TermKind::App { func, .. } = &lam.body.kind else {
         panic!("expected lambda body to be an App after rewrite");
     };
-    let post_func_name = match &func.kind {
-        TermKind::Var(crate::tlc::VarRef::Symbol(s)) => {
-            rewritten.symbols.get(*s).cloned().unwrap_or_default()
-        }
-        TermKind::Var(crate::tlc::VarRef::Builtin { id, .. }) => {
-            crate::builtins::by_id(*id).raw.surface_name.to_string()
-        }
-        _ => panic!("expected rewritten App's func to be a Var"),
+    let TermKind::Var(crate::tlc::VarRef::Builtin { id: post_id, .. }) = &func.kind else {
+        panic!("expected rewritten App's func to be a catalog Builtin Var");
     };
     assert_eq!(
-        post_func_name,
-        crate::builtins::names::INTRINSIC_ARRAY_WITH_INPLACE,
+        *post_id, known.array_with_in_place,
         "promotion must thread through `_w_index` to grid's owner — \
          source-arg is `_w_index(grid, 0)`, which aliases grid \
          (UniqueParam, dead-after); is_promotable should follow \

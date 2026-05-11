@@ -832,6 +832,11 @@ impl tlc::Term {
             tlc::TermKind::IntLit(n) => write!(f, "{}", n),
             tlc::TermKind::FloatLit(n) => write!(f, "{}", n),
             tlc::TermKind::BoolLit(b) => write!(f, "{}", b),
+            tlc::TermKind::UnitLit => write!(f, "()"),
+            tlc::TermKind::Coerce { inner, target_ty } => {
+                inner.fmt_prec(f, 2)?;
+                write!(f, " :> {}", format_type(target_ty))
+            }
 
             tlc::TermKind::If {
                 cond,

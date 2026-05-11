@@ -760,9 +760,12 @@ impl<'m> Liveness<'m> {
             | TermKind::IntLit(_)
             | TermKind::FloatLit(_)
             | TermKind::BoolLit(_)
+            | TermKind::UnitLit
             | TermKind::BinOp(_)
             | TermKind::UnOp(_)
             | TermKind::Extern(_) => self.transfer(term.id, live_after),
+
+            TermKind::Coerce { inner, .. } => self.analyze(inner, live_after),
 
             TermKind::Let { rhs, body, .. } => {
                 let live_in_body = self.analyze(body, live_after);

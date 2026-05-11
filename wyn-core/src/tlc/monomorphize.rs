@@ -528,9 +528,15 @@ impl<'a> Monomorphizer<'a> {
             k @ (TermKind::IntLit(_)
             | TermKind::FloatLit(_)
             | TermKind::BoolLit(_)
+            | TermKind::UnitLit
             | TermKind::BinOp(_)
             | TermKind::UnOp(_)
             | TermKind::Extern(_)) => k.clone(),
+
+            TermKind::Coerce { inner, target_ty } => TermKind::Coerce {
+                inner: Box::new(self.process_term(inner)),
+                target_ty: target_ty.clone(),
+            },
 
             TermKind::Soac(ref soac) => TermKind::Soac(self.process_soac(soac)),
 
@@ -806,6 +812,11 @@ impl<'a> Monomorphizer<'a> {
             TermKind::IntLit(s) => TermKind::IntLit(s.clone()),
             TermKind::FloatLit(f) => TermKind::FloatLit(*f),
             TermKind::BoolLit(b) => TermKind::BoolLit(*b),
+            TermKind::UnitLit => TermKind::UnitLit,
+            TermKind::Coerce { inner, target_ty } => TermKind::Coerce {
+                inner: Box::new(self.apply_subst_term(inner, subst)),
+                target_ty: apply_subst(target_ty, subst),
+            },
             TermKind::BinOp(op) => TermKind::BinOp(op.clone()),
             TermKind::UnOp(op) => TermKind::UnOp(op.clone()),
             TermKind::Extern(s) => TermKind::Extern(s.clone()),

@@ -123,6 +123,8 @@ fn discriminant_name(kind: &TermKind) -> &'static str {
         TermKind::TupleProj { .. } => "TupleProj",
         TermKind::Index { .. } => "Index",
         TermKind::VecLit(_) => "VecLit",
+        TermKind::UnitLit => "UnitLit",
+        TermKind::Coerce { .. } => "Coerce",
     }
 }
 
@@ -318,6 +320,7 @@ impl<'a> CallLowerer<'a> {
             | TermKind::IntLit(_)
             | TermKind::FloatLit(_)
             | TermKind::BoolLit(_)
+            | TermKind::UnitLit
             | TermKind::BinOp(_)
             | TermKind::UnOp(_)
             | TermKind::Extern(_) => Term {
@@ -325,6 +328,16 @@ impl<'a> CallLowerer<'a> {
                 ty,
                 span,
                 kind: term.kind,
+            },
+
+            TermKind::Coerce { inner, target_ty } => Term {
+                id: self.term_ids.next_id(),
+                ty,
+                span,
+                kind: TermKind::Coerce {
+                    inner: Box::new(self.lower_term(*inner)),
+                    target_ty,
+                },
             },
 
             TermKind::Tuple(parts) => Term {

@@ -47,7 +47,7 @@ pub fn run_reachable(program: Program) -> Program {
 /// - Small user functions (term size ≤ threshold, no control flow or SOACs)
 /// - Constants (arity-0 defs, substituted at Var reference sites)
 ///
-/// Skips `_w_lambda_*` defs (SOAC bodies) — handled by `inline()`.
+/// Skips `LiftedLambda` defs (SOAC bodies) — handled by `inline()`.
 pub fn run_small(program: Program) -> Program {
     let all_constants = find_all_constants(&program);
     let mut small_candidates = find_small_candidates(&program.defs, &program.symbols);
@@ -86,7 +86,7 @@ pub fn run_small(program: Program) -> Program {
     }
 }
 
-/// Inline compiler-generated lambda defs (`_w_lambda_*`) in a TLC program.
+/// Inline compiler-generated lifted-lambda defs (`DefMeta::LiftedLambda`) in a TLC program.
 pub fn run_large(program: Program) -> Program {
     let inline_candidates = find_inline_candidates(&program.defs, &program.symbols);
 
@@ -128,26 +128,15 @@ struct InlineBody {
 /// Find small user functions suitable for inlining.
 ///
 /// A function qualifies if:
-/// - It's not a `_w_lambda_*` (those are handled by `inline()`)
-/// - It's not an entry point
+/// - It's a `DefMeta::Function` (lifted lambdas are handled by `run_large`)
 /// - It has parameters (not a constant)
 /// - Its body is small (term_size ≤ threshold)
 /// - Its body has no control flow (If, Loop) or SOACs
-fn find_small_candidates(defs: &[Def], symbols: &SymbolTable) -> HashMap<SymbolId, InlineBody> {
+fn find_small_candidates(defs: &[Def], _symbols: &SymbolTable) -> HashMap<SymbolId, InlineBody> {
     let mut candidates = HashMap::new();
 
     for def in defs {
         if !matches!(def.meta, DefMeta::Function) {
-            continue;
-        }
-
-        let name = match symbols.get(def.name) {
-            Some(n) => n,
-            None => continue,
-        };
-
-        // Skip lambda defs — handled by inline().
-        if name.starts_with("_w_lambda_") {
             continue;
         }
 
@@ -246,18 +235,13 @@ fn inline_constants(term: Term, constants: &HashMap<SymbolId, Term>) -> Term {
 }
 
 /// Determine which defs are candidates for inlining.
-/// Inlines all `_w_lambda_*` defs — these are compiler-generated lifted lambdas
-/// from defunctionalization that we're putting back where they came from.
-fn find_inline_candidates(defs: &[Def], symbols: &SymbolTable) -> HashMap<SymbolId, InlineBody> {
+/// Inlines all `DefMeta::LiftedLambda` defs — closure_convert-produced lifted
+/// lambdas that we're putting back where they came from.
+fn find_inline_candidates(defs: &[Def], _symbols: &SymbolTable) -> HashMap<SymbolId, InlineBody> {
     let mut candidates = HashMap::new();
 
     for def in defs {
-        let name = match symbols.get(def.name) {
-            Some(n) => n,
-            None => continue,
-        };
-
-        if !name.starts_with("_w_lambda_") {
+        if !matches!(def.meta, DefMeta::LiftedLambda) {
             continue;
         }
 

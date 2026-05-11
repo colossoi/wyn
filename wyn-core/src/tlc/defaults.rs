@@ -119,7 +119,7 @@ pub(super) fn default_term_for_type(tr: &mut Transformer<'_>, ty: &Type<TypeName
         Type::Constructed(TypeName::Bool, args) if args.is_empty() => {
             tr.mk_term(ty.clone(), span, TermKind::BoolLit(false))
         }
-        Type::Constructed(TypeName::Unit, _) => tr.build_call("_w_unit", &[], ty.clone(), span),
+        Type::Constructed(TypeName::Unit, _) => tr.mk_term(ty.clone(), span, TermKind::UnitLit),
         Type::Constructed(TypeName::Tuple(_), args) => {
             let elems: Vec<Term> = args.iter().map(|a| default_term_for_type(tr, a, span)).collect();
             tr.mk_tuple(elems, ty.clone(), span)
