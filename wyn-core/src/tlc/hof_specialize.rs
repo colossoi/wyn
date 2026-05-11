@@ -266,6 +266,20 @@ pub(super) fn apply_type_subst_to_term(
         TermKind::Force(inner) => {
             TermKind::Force(Box::new(apply_type_subst_to_term(inner, subst, term_ids)))
         }
+        TermKind::Tuple(parts) => {
+            TermKind::Tuple(parts.iter().map(|p| apply_type_subst_to_term(p, subst, term_ids)).collect())
+        }
+        TermKind::TupleProj { tuple, idx } => TermKind::TupleProj {
+            tuple: Box::new(apply_type_subst_to_term(tuple, subst, term_ids)),
+            idx: *idx,
+        },
+        TermKind::Index { array, index } => TermKind::Index {
+            array: Box::new(apply_type_subst_to_term(array, subst, term_ids)),
+            index: Box::new(apply_type_subst_to_term(index, subst, term_ids)),
+        },
+        TermKind::VecLit(parts) => {
+            TermKind::VecLit(parts.iter().map(|p| apply_type_subst_to_term(p, subst, term_ids)).collect())
+        }
     };
     Term {
         id: term_ids.next_id(),
@@ -657,6 +671,41 @@ pub(super) fn substitute_var(
             span: term.span,
             kind: TermKind::Force(Box::new(substitute_var(inner, old_sym, new_sym, term_ids))),
         },
+
+        TermKind::Tuple(parts) => Term {
+            id: term_ids.next_id(),
+            ty: term.ty.clone(),
+            span: term.span,
+            kind: TermKind::Tuple(
+                parts.iter().map(|p| substitute_var(p, old_sym, new_sym, term_ids)).collect(),
+            ),
+        },
+        TermKind::TupleProj { tuple, idx } => Term {
+            id: term_ids.next_id(),
+            ty: term.ty.clone(),
+            span: term.span,
+            kind: TermKind::TupleProj {
+                tuple: Box::new(substitute_var(tuple, old_sym, new_sym, term_ids)),
+                idx: *idx,
+            },
+        },
+        TermKind::Index { array, index } => Term {
+            id: term_ids.next_id(),
+            ty: term.ty.clone(),
+            span: term.span,
+            kind: TermKind::Index {
+                array: Box::new(substitute_var(array, old_sym, new_sym, term_ids)),
+                index: Box::new(substitute_var(index, old_sym, new_sym, term_ids)),
+            },
+        },
+        TermKind::VecLit(parts) => Term {
+            id: term_ids.next_id(),
+            ty: term.ty.clone(),
+            span: term.span,
+            kind: TermKind::VecLit(
+                parts.iter().map(|p| substitute_var(p, old_sym, new_sym, term_ids)).collect(),
+            ),
+        },
     }
 }
 
@@ -1035,6 +1084,37 @@ impl<'a> HofSpecializer<'a> {
                 ty,
                 span,
                 kind: term.kind,
+            },
+
+            TermKind::Tuple(parts) => Term {
+                id: self.term_ids.next_id(),
+                ty,
+                span,
+                kind: TermKind::Tuple(parts.into_iter().map(|p| self.rewrite_term(p)).collect()),
+            },
+            TermKind::TupleProj { tuple, idx } => Term {
+                id: self.term_ids.next_id(),
+                ty,
+                span,
+                kind: TermKind::TupleProj {
+                    tuple: Box::new(self.rewrite_term(*tuple)),
+                    idx,
+                },
+            },
+            TermKind::Index { array, index } => Term {
+                id: self.term_ids.next_id(),
+                ty,
+                span,
+                kind: TermKind::Index {
+                    array: Box::new(self.rewrite_term(*array)),
+                    index: Box::new(self.rewrite_term(*index)),
+                },
+            },
+            TermKind::VecLit(parts) => Term {
+                id: self.term_ids.next_id(),
+                ty,
+                span,
+                kind: TermKind::VecLit(parts.into_iter().map(|p| self.rewrite_term(p)).collect()),
             },
         }
     }

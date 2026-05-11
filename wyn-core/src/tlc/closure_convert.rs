@@ -279,6 +279,18 @@ pub fn collect_free_vars(
         TermKind::Force(inner) => {
             collect_free_vars(inner, bound, top_level, known_defs, symbols, free, seen);
         }
+        TermKind::Tuple(parts) | TermKind::VecLit(parts) => {
+            for p in parts {
+                collect_free_vars(p, bound, top_level, known_defs, symbols, free, seen);
+            }
+        }
+        TermKind::TupleProj { tuple, .. } => {
+            collect_free_vars(tuple, bound, top_level, known_defs, symbols, free, seen);
+        }
+        TermKind::Index { array, index } => {
+            collect_free_vars(array, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars(index, bound, top_level, known_defs, symbols, free, seen);
+        }
     }
 }
 
@@ -806,6 +818,37 @@ impl<'a> ClosureConverter<'a> {
                 ty,
                 span,
                 kind: term.kind,
+            },
+
+            TermKind::Tuple(parts) => Term {
+                id: self.term_ids.next_id(),
+                ty,
+                span,
+                kind: TermKind::Tuple(parts.into_iter().map(|p| self.convert_term(p)).collect()),
+            },
+            TermKind::TupleProj { tuple, idx } => Term {
+                id: self.term_ids.next_id(),
+                ty,
+                span,
+                kind: TermKind::TupleProj {
+                    tuple: Box::new(self.convert_term(*tuple)),
+                    idx,
+                },
+            },
+            TermKind::Index { array, index } => Term {
+                id: self.term_ids.next_id(),
+                ty,
+                span,
+                kind: TermKind::Index {
+                    array: Box::new(self.convert_term(*array)),
+                    index: Box::new(self.convert_term(*index)),
+                },
+            },
+            TermKind::VecLit(parts) => Term {
+                id: self.term_ids.next_id(),
+                ty,
+                span,
+                kind: TermKind::VecLit(parts.into_iter().map(|p| self.convert_term(p)).collect()),
             },
         }
     }

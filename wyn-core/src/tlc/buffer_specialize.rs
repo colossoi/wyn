@@ -361,25 +361,6 @@ impl BufferSpecializer {
                 // `materialize + dynamic_extract` on a runtime-sized
                 // buffer (which is invalid — runtime-sized storage
                 // arrays aren't copyable into a local composite).
-                if crate::tlc::var_term_matches_name(func, &self.symbols, "_w_index") && args.len() == 2 {
-                    if let TermKind::Var(crate::tlc::VarRef::Symbol(data_sym)) = &args[0].kind {
-                        if let Some(binding) = self.resolve_buffer(data_sym).cloned() {
-                            let span = term.span;
-                            let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
-                            let idx = self.rewrite_term(&args[1]);
-                            let set_lit = self.make_int_lit(&binding.set.to_string(), u32_ty.clone(), span);
-                            let binding_lit =
-                                self.make_int_lit(&binding.binding.to_string(), u32_ty.clone(), span);
-                            return self.make_app(
-                                INTRINSIC_STORAGE_INDEX,
-                                vec![set_lit, binding_lit, idx],
-                                binding.elem_ty,
-                                span,
-                            );
-                        }
-                    }
-                }
-
                 // `_w_intrinsic_length(data)` on a buffer-backed entry
                 // param: rewrite to `_w_intrinsic_storage_len(set,
                 // binding)`, matching how the specialized-function
@@ -545,6 +526,52 @@ impl BufferSpecializer {
             | TermKind::FloatLit(_)
             | TermKind::BoolLit(_)
             | TermKind::Extern(_) => term.clone(),
+
+            TermKind::Tuple(parts) => Term {
+                kind: TermKind::Tuple(parts.iter().map(|p| self.rewrite_term(p)).collect()),
+                ..term.clone()
+            },
+            TermKind::TupleProj { tuple, idx } => Term {
+                kind: TermKind::TupleProj {
+                    tuple: Box::new(self.rewrite_term(tuple)),
+                    idx: *idx,
+                },
+                ..term.clone()
+            },
+            TermKind::Index { array, index } => {
+                // Buffer-backed indexed load: rewrite `arr[i]` to
+                // `_w_intrinsic_storage_index(set, binding, i)` so the
+                // load goes through the storage view path rather than
+                // being lowered as `materialize + dynamic_extract` on
+                // a runtime-sized buffer (which is invalid).
+                if let TermKind::Var(crate::tlc::VarRef::Symbol(data_sym)) = &array.kind {
+                    if let Some(binding) = self.resolve_buffer(data_sym).cloned() {
+                        let span = term.span;
+                        let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
+                        let idx = self.rewrite_term(index);
+                        let set_lit = self.make_int_lit(&binding.set.to_string(), u32_ty.clone(), span);
+                        let binding_lit =
+                            self.make_int_lit(&binding.binding.to_string(), u32_ty.clone(), span);
+                        return self.make_app(
+                            INTRINSIC_STORAGE_INDEX,
+                            vec![set_lit, binding_lit, idx],
+                            binding.elem_ty,
+                            span,
+                        );
+                    }
+                }
+                Term {
+                    kind: TermKind::Index {
+                        array: Box::new(self.rewrite_term(array)),
+                        index: Box::new(self.rewrite_term(index)),
+                    },
+                    ..term.clone()
+                }
+            }
+            TermKind::VecLit(parts) => Term {
+                kind: TermKind::VecLit(parts.iter().map(|p| self.rewrite_term(p)).collect()),
+                ..term.clone()
+            },
         }
     }
 
@@ -858,40 +885,10 @@ impl BufferSpecializer {
     ) -> Term {
         match &term.kind {
             TermKind::App { func, args } => {
-                // Catalog-name dispatches first — match both
-                // `Var(Symbol)` and `Var(Builtin)` references.
-
-                // _w_index(arr_expr, i) where arr_expr resolves to a view
-                if crate::tlc::var_term_matches_name(func, &self.symbols, "_w_index") && args.len() == 2 {
-                    if let Some(view) = self.try_resolve_view_expr(&args[0], view_params) {
-                        let span = term.span;
-                        let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
-                        let idx = self.rewrite_specialized_body(&args[1], view_params);
-                        let set_lit = self.make_int_lit(&view.set.to_string(), u32_ty.clone(), span);
-                        let binding_lit =
-                            self.make_int_lit(&view.binding.to_string(), u32_ty.clone(), span);
-                        // Coerce idx to match view.offset's u32 type;
-                        // the downstream BinOp operands must agree.
-                        let idx = if idx.ty == u32_ty {
-                            idx
-                        } else {
-                            self.make_app("u32.i32", vec![idx], u32_ty.clone(), span)
-                        };
-                        let add_result = self.make_binop_app(
-                            ast::BinaryOp { op: "+".to_string() },
-                            view.offset,
-                            idx,
-                            u32_ty.clone(),
-                            span,
-                        );
-                        return self.make_app(
-                            INTRINSIC_STORAGE_INDEX,
-                            vec![set_lit, binding_lit, add_result],
-                            view.elem_ty,
-                            span,
-                        );
-                    }
-                }
+                // Catalog-name dispatches — match both `Var(Symbol)` and
+                // `Var(Builtin)` references. `_w_index` is no longer an
+                // App (it's `TermKind::Index`) and is handled in that
+                // arm below.
 
                 // _w_intrinsic_length(arr_expr) where arr_expr resolves to a view
                 if crate::tlc::var_term_builtin_id(func, &self.symbols)
@@ -1143,6 +1140,61 @@ impl BufferSpecializer {
             | TermKind::FloatLit(_)
             | TermKind::BoolLit(_)
             | TermKind::Extern(_) => term.clone(),
+
+            TermKind::Tuple(parts) => Term {
+                kind: TermKind::Tuple(
+                    parts.iter().map(|p| self.rewrite_specialized_body(p, view_params)).collect(),
+                ),
+                ..term.clone()
+            },
+            TermKind::TupleProj { tuple, idx } => Term {
+                kind: TermKind::TupleProj {
+                    tuple: Box::new(self.rewrite_specialized_body(tuple, view_params)),
+                    idx: *idx,
+                },
+                ..term.clone()
+            },
+            TermKind::Index { array, index } => {
+                // View-param index: rewrite to storage_index(set, binding, offset + i).
+                if let Some(view) = self.try_resolve_view_expr(array, view_params) {
+                    let span = term.span;
+                    let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
+                    let idx = self.rewrite_specialized_body(index, view_params);
+                    let set_lit = self.make_int_lit(&view.set.to_string(), u32_ty.clone(), span);
+                    let binding_lit = self.make_int_lit(&view.binding.to_string(), u32_ty.clone(), span);
+                    let idx = if idx.ty == u32_ty {
+                        idx
+                    } else {
+                        self.make_app("u32.i32", vec![idx], u32_ty.clone(), span)
+                    };
+                    let add_result = self.make_binop_app(
+                        ast::BinaryOp { op: "+".to_string() },
+                        view.offset,
+                        idx,
+                        u32_ty.clone(),
+                        span,
+                    );
+                    return self.make_app(
+                        INTRINSIC_STORAGE_INDEX,
+                        vec![set_lit, binding_lit, add_result],
+                        view.elem_ty,
+                        span,
+                    );
+                }
+                Term {
+                    kind: TermKind::Index {
+                        array: Box::new(self.rewrite_specialized_body(array, view_params)),
+                        index: Box::new(self.rewrite_specialized_body(index, view_params)),
+                    },
+                    ..term.clone()
+                }
+            }
+            TermKind::VecLit(parts) => Term {
+                kind: TermKind::VecLit(
+                    parts.iter().map(|p| self.rewrite_specialized_body(p, view_params)).collect(),
+                ),
+                ..term.clone()
+            },
         }
     }
 

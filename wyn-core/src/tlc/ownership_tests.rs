@@ -1176,12 +1176,12 @@ fn synth_program_with_with_through_index() -> Program {
     );
 
     // _w_index(grid, 0)
-    let var_index = Term {
-        id: ids.next_id(),
-        ty: index_fn_ty.clone(),
-        span: Span::dummy(),
-        kind: TermKind::Var(crate::tlc::VarRef::Symbol(index_sym)),
-    };
+    // The legacy `_w_index` symbol is unused now that indexing is a
+    // first-class TermKind variant; keep it allocated so the symbol
+    // table arrangement matches the broader test setup but reference
+    // it via `TermKind::Index { array, index }`.
+    let _ = index_fn_ty;
+    let _ = index_sym;
     let var_grid = Term {
         id: ids.next_id(),
         ty: unique_outer_ty.clone(),
@@ -1198,9 +1198,9 @@ fn synth_program_with_with_through_index() -> Program {
         id: ids.next_id(),
         ty: inner_arr_ty.clone(),
         span: Span::dummy(),
-        kind: TermKind::App {
-            func: Box::new(var_index),
-            args: vec![var_grid, zero_idx],
+        kind: TermKind::Index {
+            array: Box::new(var_grid),
+            index: Box::new(zero_idx),
         },
     };
 

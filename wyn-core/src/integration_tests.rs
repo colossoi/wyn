@@ -143,6 +143,17 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::Program, stage: &str) {
             TermKind::Soac(soac) => walk_soac(soac, bound, symbols, stage, def_name),
             TermKind::ArrayExpr(ae) => walk_array_expr(ae, bound, symbols, stage, def_name),
             TermKind::Force(inner) => walk(inner, bound, symbols, stage, def_name),
+
+            TermKind::Tuple(parts) | TermKind::VecLit(parts) => {
+                for p in parts {
+                    walk(p, bound, symbols, stage, def_name);
+                }
+            }
+            TermKind::TupleProj { tuple, .. } => walk(tuple, bound, symbols, stage, def_name),
+            TermKind::Index { array, index } => {
+                walk(array, bound, symbols, stage, def_name);
+                walk(index, bound, symbols, stage, def_name);
+            }
         }
     }
 
@@ -488,6 +499,9 @@ fn has_soac_kind(term: &crate::tlc::Term, kind: &str) -> bool {
         TermKind::App { func, args } => {
             has_soac_kind(func, kind) || args.iter().any(|a| has_soac_kind(a, kind))
         }
+        TermKind::Tuple(parts) | TermKind::VecLit(parts) => parts.iter().any(|p| has_soac_kind(p, kind)),
+        TermKind::TupleProj { tuple, .. } => has_soac_kind(tuple, kind),
+        TermKind::Index { array, index } => has_soac_kind(array, kind) || has_soac_kind(index, kind),
         _ => false,
     }
 }

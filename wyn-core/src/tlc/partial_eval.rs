@@ -207,6 +207,50 @@ impl PartialEvaluator {
 
             // SOAC nodes are opaque to partial evaluation — residualize
             TermKind::Soac(_) | TermKind::ArrayExpr(_) | TermKind::Force(_) => Value::Unknown(term.clone()),
+
+            // Structural ops: evaluate children so let-bound `Var`s
+            // get substituted through, then rebuild the variant. Without
+            // this the env-substitution that the eval-pass relies on
+            // would leave a dangling `Var(name)` reference after the
+            // surrounding `Let` is dissolved.
+            TermKind::Tuple(parts) => {
+                let part_vals: Vec<Value> = parts.iter().map(|p| self.eval(p)).collect();
+                let part_terms: Vec<Term> =
+                    parts.iter().zip(part_vals).map(|(p, v)| self.reify(v, &p.ty, p.span)).collect();
+                Value::Unknown(self.mk_term(term.ty.clone(), term.span, TermKind::Tuple(part_terms)))
+            }
+            TermKind::TupleProj { tuple, idx } => {
+                let tuple_val = self.eval(tuple);
+                let tuple_term = self.reify(tuple_val, &tuple.ty, tuple.span);
+                Value::Unknown(self.mk_term(
+                    term.ty.clone(),
+                    term.span,
+                    TermKind::TupleProj {
+                        tuple: Box::new(tuple_term),
+                        idx: *idx,
+                    },
+                ))
+            }
+            TermKind::Index { array, index } => {
+                let array_val = self.eval(array);
+                let index_val = self.eval(index);
+                let array_term = self.reify(array_val, &array.ty, array.span);
+                let index_term = self.reify(index_val, &index.ty, index.span);
+                Value::Unknown(self.mk_term(
+                    term.ty.clone(),
+                    term.span,
+                    TermKind::Index {
+                        array: Box::new(array_term),
+                        index: Box::new(index_term),
+                    },
+                ))
+            }
+            TermKind::VecLit(parts) => {
+                let part_vals: Vec<Value> = parts.iter().map(|p| self.eval(p)).collect();
+                let part_terms: Vec<Term> =
+                    parts.iter().zip(part_vals).map(|(p, v)| self.reify(v, &p.ty, p.span)).collect();
+                Value::Unknown(self.mk_term(term.ty.clone(), term.span, TermKind::VecLit(part_terms)))
+            }
         }
     }
 
@@ -333,32 +377,11 @@ impl PartialEvaluator {
         }
     }
 
-    /// Try to evaluate an intrinsic.
-    fn try_intrinsic(&mut self, name: &str, args: &[Value], _original: &Term) -> Option<Value> {
-        match name {
-            "_w_tuple_proj" if args.len() >= 2 => {
-                if let (Value::Tuple(elems), Value::Int(idx)) = (&args[0], &args[1]) {
-                    let i = *idx as usize;
-                    if i < elems.len() {
-                        return Some(elems[i].clone());
-                    }
-                }
-                None
-            }
-            "_w_index" if args.len() >= 2 => {
-                match (&args[0], &args[1]) {
-                    (Value::Array(elems), Value::Int(idx)) | (Value::Vector(elems), Value::Int(idx)) => {
-                        let i = *idx as usize;
-                        if i < elems.len() {
-                            return Some(elems[i].clone());
-                        }
-                    }
-                    _ => {}
-                }
-                None
-            }
-            _ => None,
-        }
+    /// Try to evaluate an intrinsic. `_w_tuple_proj` and `_w_index` are
+    /// no longer App calls (they're first-class TermKind variants); their
+    /// constant-folding lives directly in `eval` for those variants.
+    fn try_intrinsic(&mut self, _name: &str, _args: &[Value], _original: &Term) -> Option<Value> {
+        None
     }
 
     /// Inline a function call.
@@ -593,13 +616,7 @@ impl PartialEvaluator {
             _ => vec![],
         };
         let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
-        let tuple_sym = self.symbols.alloc("_w_tuple".to_string());
-        let func_term = self.mk_term(
-            ty.clone(),
-            span,
-            TermKind::Var(crate::tlc::VarRef::Symbol(tuple_sym)),
-        );
-        let arg_terms: Vec<Term> = elems
+        let part_terms: Vec<Term> = elems
             .into_iter()
             .enumerate()
             .map(|(i, elem)| {
@@ -607,14 +624,7 @@ impl PartialEvaluator {
                 self.reify(elem, elem_ty, span)
             })
             .collect();
-        self.mk_term(
-            ty.clone(),
-            span,
-            TermKind::App {
-                func: Box::new(func_term),
-                args: arg_terms,
-            },
-        )
+        self.mk_term(ty.clone(), span, TermKind::Tuple(part_terms))
     }
 
     fn reify_array(&mut self, elems: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {
@@ -623,40 +633,20 @@ impl PartialEvaluator {
             .filter(|_| ty.is_array())
             .cloned()
             .unwrap_or_else(|| Type::Constructed(TypeName::Unit, vec![]));
-        let array_sym = self.symbols.alloc("_w_array_lit".to_string());
-        let func_term = self.mk_term(
-            ty.clone(),
-            span,
-            TermKind::Var(crate::tlc::VarRef::Symbol(array_sym)),
-        );
-        let arg_terms: Vec<Term> = elems.into_iter().map(|elem| self.reify(elem, &elem_ty, span)).collect();
+        let part_terms: Vec<Term> =
+            elems.into_iter().map(|elem| self.reify(elem, &elem_ty, span)).collect();
         self.mk_term(
             ty.clone(),
             span,
-            TermKind::App {
-                func: Box::new(func_term),
-                args: arg_terms,
-            },
+            TermKind::ArrayExpr(super::ArrayExpr::Literal(part_terms)),
         )
     }
 
     fn reify_vector(&mut self, elems: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {
         let elem_ty = ty.elem_type().cloned().unwrap_or_else(|| Type::Constructed(TypeName::Unit, vec![]));
-        let vec_sym = self.symbols.alloc("_w_vec_lit".to_string());
-        let func_term = self.mk_term(
-            ty.clone(),
-            span,
-            TermKind::Var(crate::tlc::VarRef::Symbol(vec_sym)),
-        );
-        let arg_terms: Vec<Term> = elems.into_iter().map(|elem| self.reify(elem, &elem_ty, span)).collect();
-        self.mk_term(
-            ty.clone(),
-            span,
-            TermKind::App {
-                func: Box::new(func_term),
-                args: arg_terms,
-            },
-        )
+        let part_terms: Vec<Term> =
+            elems.into_iter().map(|elem| self.reify(elem, &elem_ty, span)).collect();
+        self.mk_term(ty.clone(), span, TermKind::VecLit(part_terms))
     }
 
     fn reify_partial(&mut self, sym: SymbolId, args: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {

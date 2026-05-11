@@ -299,6 +299,47 @@ impl SoaTransformer {
                 let new_inner = self.transform_term(inner);
                 self.mk_term(new_ty, span, TermKind::Force(Box::new(new_inner)))
             }
+
+            TermKind::Tuple(parts) => {
+                let new_parts: Vec<Term> = parts.iter().map(|p| self.transform_term(p)).collect();
+                self.mk_term(new_ty, span, TermKind::Tuple(new_parts))
+            }
+            TermKind::TupleProj { tuple, idx } => {
+                let idx = *idx;
+                let new_tuple = self.transform_term(tuple);
+                self.mk_term(
+                    new_ty,
+                    span,
+                    TermKind::TupleProj {
+                        tuple: Box::new(new_tuple),
+                        idx,
+                    },
+                )
+            }
+            TermKind::Index { array, index } => {
+                // Array-of-tuple index: distribute over per-component arrays.
+                let arr_orig_ty = &array.ty;
+                if let Some(n) = is_array_of_tuple(arr_orig_ty) {
+                    let (comp_tys, variant, size) = array_of_tuple_parts(arr_orig_ty).unwrap();
+                    let new_arr = self.transform_term(array);
+                    let new_idx = self.transform_term(index);
+                    return self.rewrite_index_aot(&new_arr, &new_idx, &comp_tys, &variant, &size, n, span);
+                }
+                let new_array = self.transform_term(array);
+                let new_index = self.transform_term(index);
+                self.mk_term(
+                    new_ty,
+                    span,
+                    TermKind::Index {
+                        array: Box::new(new_array),
+                        index: Box::new(new_index),
+                    },
+                )
+            }
+            TermKind::VecLit(parts) => {
+                let new_parts: Vec<Term> = parts.iter().map(|p| self.transform_term(p)).collect();
+                self.mk_term(new_ty, span, TermKind::VecLit(new_parts))
+            }
         }
     }
 
@@ -359,33 +400,12 @@ impl SoaTransformer {
             }
         }
 
-        // Compiler-generated `_w_*` operators (not catalog entries) —
-        // match on `VarRef::Symbol` name directly.
-        if let TermKind::Var(crate::tlc::VarRef::Symbol(sym)) = &func.kind {
-            let name = self.symbols.get(*sym).cloned().unwrap_or_default();
-            match name.as_str() {
-                "_w_index" if args.len() == 2 => {
-                    let arr_orig_ty = &args[0].ty;
-                    if let Some(n) = is_array_of_tuple(arr_orig_ty) {
-                        let (comp_tys, variant, size) = array_of_tuple_parts(arr_orig_ty).unwrap();
-                        let new_arr = self.transform_term(&args[0]);
-                        let new_idx = self.transform_term(&args[1]);
-                        return self
-                            .rewrite_index_aot(&new_arr, &new_idx, &comp_tys, &variant, &size, n, span);
-                    }
-                }
-                "_w_array_lit" if !args.is_empty() => {
-                    if is_array_of_tuple(orig_result_ty).is_some() {
-                        let (comp_tys, variant, size) = array_of_tuple_parts(orig_result_ty).unwrap();
-                        let new_elems: Vec<Term> = args.iter().map(|a| self.transform_term(a)).collect();
-                        return self.rewrite_array_lit_aot(&new_elems, &comp_tys, &variant, &size, span);
-                    }
-                }
-                _ => {}
-            }
-        }
+        // `_w_index` and `_w_array_lit` (compiler-generated operators)
+        // are now `TermKind::Index` and `TermKind::ArrayExpr(Literal)`
+        // — handled directly in `transform_term`.
 
-        // Default: recursively transform all parts
+        // Default: recursively transform all parts.
+        let _ = orig_result_ty;
         let new_func = self.transform_term(func);
         let new_args: Vec<Term> = args.iter().map(|a| self.transform_term(a)).collect();
         self.mk_term(
@@ -762,11 +782,11 @@ impl SoaTransformer {
     fn transform_array_expr_term(
         &mut self,
         ae: &ArrayExpr,
-        _orig_ty: &Type<TypeName>,
+        orig_ty: &Type<TypeName>,
         new_ty: Type<TypeName>,
         span: Span,
     ) -> Term {
-        // Standalone Zip -> tuple construction: zip(a, b) becomes _w_tuple(a, b).
+        // Standalone Zip -> tuple construction: zip(a, b) becomes a Tuple term.
         if let ArrayExpr::Zip(exprs) = ae {
             if !exprs.is_empty() {
                 let components: Vec<Term> = exprs
@@ -780,6 +800,15 @@ impl SoaTransformer {
                     })
                     .collect();
                 return self.mk_tuple(components, new_ty, span);
+            }
+        }
+
+        // Array-of-tuple literal: distribute into per-component arrays.
+        if let ArrayExpr::Literal(elems) = ae {
+            if !elems.is_empty() && is_array_of_tuple(orig_ty).is_some() {
+                let (comp_tys, variant, size) = array_of_tuple_parts(orig_ty).unwrap();
+                let new_elems: Vec<Term> = elems.iter().map(|t| self.transform_term(t)).collect();
+                return self.rewrite_array_lit_aot(&new_elems, &comp_tys, &variant, &size, span);
             }
         }
 
@@ -975,76 +1004,31 @@ impl SoaTransformer {
         }
     }
 
-    /// Build `_w_tuple(c0, c1, ...)`.
+    /// Build a `TermKind::Tuple` term.
     fn mk_tuple(&mut self, components: Vec<Term>, result_ty: Type<TypeName>, span: Span) -> Term {
-        let tuple_sym = self.resolve_or_alloc("_w_tuple");
-        if components.is_empty() {
-            return self.mk_term(
-                result_ty,
-                span,
-                TermKind::Var(crate::tlc::VarRef::Symbol(tuple_sym)),
-            );
-        }
-
-        // Build flat application: _w_tuple(c0, c1, ...)
-        let mut func_ty = result_ty.clone();
-        for comp in components.iter().rev() {
-            func_ty = Type::Constructed(TypeName::Arrow, vec![comp.ty.clone(), func_ty]);
-        }
-        let func = self.mk_term(
-            func_ty,
-            span,
-            TermKind::Var(crate::tlc::VarRef::Symbol(tuple_sym)),
-        );
-
-        self.mk_term(
-            result_ty,
-            span,
-            TermKind::App {
-                func: Box::new(func),
-                args: components,
-            },
-        )
+        self.mk_term(result_ty, span, TermKind::Tuple(components))
     }
 
-    /// Build `_w_tuple_proj(term, index)`.
+    /// Build a `TermKind::TupleProj` term.
     fn mk_tuple_proj(&mut self, term: Term, index: usize, result_ty: Type<TypeName>, span: Span) -> Term {
-        let proj_sym = self.resolve_or_alloc("_w_tuple_proj");
-        let idx_ty = Type::Constructed(TypeName::Int(32), vec![]);
-        let idx_term = self.mk_term(idx_ty.clone(), span, TermKind::IntLit(index.to_string()));
-
-        // _w_tuple_proj : term.ty -> i32 -> result_ty
-        let inner_ty = Type::Constructed(TypeName::Arrow, vec![idx_ty, result_ty.clone()]);
-        let func_ty = Type::Constructed(TypeName::Arrow, vec![term.ty.clone(), inner_ty.clone()]);
-        let func = self.mk_term(func_ty, span, TermKind::Var(crate::tlc::VarRef::Symbol(proj_sym)));
-
         self.mk_term(
             result_ty,
             span,
-            TermKind::App {
-                func: Box::new(func),
-                args: vec![term, idx_term],
+            TermKind::TupleProj {
+                tuple: Box::new(term),
+                idx: index,
             },
         )
     }
 
-    /// Build `_w_index(arr, idx)`.
+    /// Build a `TermKind::Index` term.
     fn mk_index(&mut self, arr: Term, idx: Term, result_ty: Type<TypeName>, span: Span) -> Term {
-        let index_sym = self.resolve_or_alloc("_w_index");
-        let inner_ty = Type::Constructed(TypeName::Arrow, vec![idx.ty.clone(), result_ty.clone()]);
-        let func_ty = Type::Constructed(TypeName::Arrow, vec![arr.ty.clone(), inner_ty.clone()]);
-        let func = self.mk_term(
-            func_ty,
-            span,
-            TermKind::Var(crate::tlc::VarRef::Symbol(index_sym)),
-        );
-
         self.mk_term(
             result_ty,
             span,
-            TermKind::App {
-                func: Box::new(func),
-                args: vec![arr, idx],
+            TermKind::Index {
+                array: Box::new(arr),
+                index: Box::new(idx),
             },
         )
     }
@@ -1082,35 +1066,9 @@ impl SoaTransformer {
         )
     }
 
-    /// Build `_w_array_lit(e0, e1, ...)`.
+    /// Build a `TermKind::ArrayExpr(ArrayExpr::Literal(elems))` term.
     fn mk_array_lit(&mut self, elems: Vec<Term>, result_ty: Type<TypeName>, span: Span) -> Term {
-        let al_sym = self.resolve_or_alloc("_w_array_lit");
-        if elems.is_empty() {
-            return self.mk_term(result_ty, span, TermKind::Var(crate::tlc::VarRef::Symbol(al_sym)));
-        }
-
-        let func_ty = Type::Constructed(TypeName::Arrow, vec![elems[0].ty.clone(), result_ty.clone()]);
-        let func = self.mk_term(func_ty, span, TermKind::Var(crate::tlc::VarRef::Symbol(al_sym)));
-
-        self.mk_term(
-            result_ty,
-            span,
-            TermKind::App {
-                func: Box::new(func),
-                args: elems,
-            },
-        )
-    }
-
-    /// Resolve a symbol name or allocate a new one.
-    fn resolve_or_alloc(&mut self, name: &str) -> crate::SymbolId {
-        // Search existing symbols
-        for (id, existing_name) in self.symbols.iter() {
-            if existing_name == name {
-                return *id;
-            }
-        }
-        self.symbols.alloc(name.to_string())
+        self.mk_term(result_ty, span, TermKind::ArrayExpr(ArrayExpr::Literal(elems)))
     }
 }
 

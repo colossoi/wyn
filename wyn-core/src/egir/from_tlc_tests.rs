@@ -161,27 +161,10 @@ fn test_gvn_via_let() {
     let mut symbols = crate::SymbolTable::new();
     let x_sym = symbols.alloc("x".into());
     let y_sym = symbols.alloc("y".into());
-    let tuple_sym = symbols.alloc("_w_tuple".into());
 
-    let tuple_op = mk_term(
-        Type::Constructed(
-            TypeName::Arrow,
-            vec![
-                i32_ty(),
-                Type::Constructed(TypeName::Arrow, vec![i32_ty(), pair_ty.clone()]),
-            ],
-        ),
-        TermKind::Var(crate::tlc::VarRef::Symbol(tuple_sym)),
-    );
     let x_ref = mk_term(i32_ty(), TermKind::Var(crate::tlc::VarRef::Symbol(x_sym)));
     let y_ref = mk_term(i32_ty(), TermKind::Var(crate::tlc::VarRef::Symbol(y_sym)));
-    let pair_app = mk_term(
-        pair_ty.clone(),
-        TermKind::App {
-            func: Box::new(tuple_op),
-            args: vec![x_ref, y_ref],
-        },
-    );
+    let pair_app = mk_term(pair_ty.clone(), TermKind::Tuple(vec![x_ref, y_ref]));
 
     let inner_let = mk_term(
         pair_ty.clone(),

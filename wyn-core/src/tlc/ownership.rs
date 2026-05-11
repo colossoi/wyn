@@ -648,31 +648,21 @@ impl<'p> Builder<'p> {
 pub(super) fn alias_target_of(term: &Term, model: &OwnershipModel, program: &Program) -> Option<OwnerId> {
     match &term.kind {
         TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => model.owner_of(*sym),
+        // `Index` and `TupleProj` are projection variants whose result
+        // aliases the base.
+        TermKind::Index { array, .. } => alias_target_of(array, model, program),
+        TermKind::TupleProj { tuple, .. } => alias_target_of(tuple, model, program),
+        // In-place `array_with` returns the buffer it consumed.
         TermKind::App { func, args } => {
-            let i = aliasing_arg_index(func, &program.symbols)?;
-            alias_target_of(args.get(i)?, model, program)
+            if crate::tlc::var_term_builtin_id(func, &program.symbols)
+                == Some(crate::builtins::catalog().known().array_with_in_place)
+            {
+                return alias_target_of(args.first()?, model, program);
+            }
+            None
         }
         _ => None,
     }
-}
-
-/// Aliasing-arg index for forms whose result aliases one of their
-/// arguments. The in-place `array_with` catalog entry returns the
-/// buffer it consumed (arg 0). Compiler-generated projection
-/// operators (`_w_index`, `_w_tuple_proj`) also alias their first
-/// arg but aren't catalog entries, so they're matched by name.
-fn aliasing_arg_index(func: &Term, symbols: &crate::SymbolTable) -> Option<usize> {
-    if let Some(id) = crate::tlc::var_term_builtin_id(func, symbols) {
-        if id == crate::builtins::catalog().known().array_with_in_place {
-            return Some(0);
-        }
-    }
-    if crate::tlc::var_term_matches_name(func, symbols, "_w_index")
-        || crate::tlc::var_term_matches_name(func, symbols, "_w_tuple_proj")
-    {
-        return Some(0);
-    }
-    None
 }
 
 /// Recognize forms that *definitely* produce a fresh non-copy value.
@@ -681,20 +671,14 @@ fn aliasing_arg_index(func: &Term, symbols: &crate::SymbolTable) -> Option<usize
 ///
 /// Functional `array_with` (catalog `BuiltinId`) allocates a new array;
 /// the in-place variant is deliberately absent — that one aliases its
-/// input. Compiler-generated literal constructors (`_w_array_lit`,
-/// `_w_vec_lit`, `_w_tuple`) also allocate fresh and aren't catalog
-/// entries, so they're matched by name.
+/// input. Structural literal/tuple constructors (`Tuple`, `VecLit`,
+/// `ArrayExpr`) also allocate fresh.
 fn rhs_is_fresh_producer(term: &Term, program: &Program) -> bool {
     match &term.kind {
-        TermKind::ArrayExpr(_) => true,
+        TermKind::ArrayExpr(_) | TermKind::Tuple(_) | TermKind::VecLit(_) => true,
         TermKind::App { func, .. } => {
-            if let Some(id) = crate::tlc::var_term_builtin_id(func, &program.symbols) {
-                if id == crate::builtins::catalog().known().array_with {
-                    return true;
-                }
-            }
-            const FRESH_LITERAL_CTORS: &[&str] = &["_w_array_lit", "_w_vec_lit", "_w_tuple"];
-            FRESH_LITERAL_CTORS.iter().any(|n| crate::tlc::var_term_matches_name(func, &program.symbols, n))
+            crate::tlc::var_term_builtin_id(func, &program.symbols)
+                == Some(crate::builtins::catalog().known().array_with)
         }
         _ => false,
     }
@@ -840,6 +824,23 @@ impl<'m> Liveness<'m> {
             TermKind::ArrayExpr(ae) => self.analyze_array_expr(ae, live_after),
 
             TermKind::Force(inner) => self.analyze(inner, live_after),
+
+            TermKind::Tuple(parts) | TermKind::VecLit(parts) => {
+                let mut live = self.transfer(term.id, live_after);
+                for p in parts.iter().rev() {
+                    live = self.analyze(p, live);
+                }
+                live
+            }
+            TermKind::TupleProj { tuple, .. } => {
+                let live = self.transfer(term.id, live_after);
+                self.analyze(tuple, live)
+            }
+            TermKind::Index { array, index } => {
+                let live = self.transfer(term.id, live_after);
+                let live = self.analyze(index, live);
+                self.analyze(array, live)
+            }
         }
     }
 

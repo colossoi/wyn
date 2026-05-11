@@ -119,6 +119,10 @@ fn discriminant_name(kind: &TermKind) -> &'static str {
         TermKind::Soac(_) => "Soac",
         TermKind::ArrayExpr(_) => "ArrayExpr",
         TermKind::Force(_) => "Force",
+        TermKind::Tuple(_) => "Tuple",
+        TermKind::TupleProj { .. } => "TupleProj",
+        TermKind::Index { .. } => "Index",
+        TermKind::VecLit(_) => "VecLit",
     }
 }
 
@@ -321,6 +325,37 @@ impl<'a> CallLowerer<'a> {
                 ty,
                 span,
                 kind: term.kind,
+            },
+
+            TermKind::Tuple(parts) => Term {
+                id: self.term_ids.next_id(),
+                ty,
+                span,
+                kind: TermKind::Tuple(parts.into_iter().map(|p| self.lower_term(p)).collect()),
+            },
+            TermKind::TupleProj { tuple, idx } => Term {
+                id: self.term_ids.next_id(),
+                ty,
+                span,
+                kind: TermKind::TupleProj {
+                    tuple: Box::new(self.lower_term(*tuple)),
+                    idx,
+                },
+            },
+            TermKind::Index { array, index } => Term {
+                id: self.term_ids.next_id(),
+                ty,
+                span,
+                kind: TermKind::Index {
+                    array: Box::new(self.lower_term(*array)),
+                    index: Box::new(self.lower_term(*index)),
+                },
+            },
+            TermKind::VecLit(parts) => Term {
+                id: self.term_ids.next_id(),
+                ty,
+                span,
+                kind: TermKind::VecLit(parts.into_iter().map(|p| self.lower_term(p)).collect()),
             },
         }
     }

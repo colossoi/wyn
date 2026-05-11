@@ -537,6 +537,21 @@ impl<'a> Monomorphizer<'a> {
             TermKind::ArrayExpr(ref ae) => TermKind::ArrayExpr(self.process_array_expr(ae)),
 
             TermKind::Force(ref inner) => TermKind::Force(Box::new(self.process_term(inner))),
+
+            TermKind::Tuple(ref parts) => {
+                TermKind::Tuple(parts.iter().map(|p| self.process_term(p)).collect())
+            }
+            TermKind::TupleProj { ref tuple, idx } => TermKind::TupleProj {
+                tuple: Box::new(self.process_term(tuple)),
+                idx: *idx,
+            },
+            TermKind::Index { ref array, ref index } => TermKind::Index {
+                array: Box::new(self.process_term(array)),
+                index: Box::new(self.process_term(index)),
+            },
+            TermKind::VecLit(ref parts) => {
+                TermKind::VecLit(parts.iter().map(|p| self.process_term(p)).collect())
+            }
         };
 
         Term {
@@ -799,6 +814,21 @@ impl<'a> Monomorphizer<'a> {
             TermKind::ArrayExpr(ref ae) => TermKind::ArrayExpr(self.apply_subst_array_expr(ae, subst)),
 
             TermKind::Force(ref inner) => TermKind::Force(Box::new(self.apply_subst_term(inner, subst))),
+
+            TermKind::Tuple(parts) => {
+                TermKind::Tuple(parts.iter().map(|p| self.apply_subst_term(p, subst)).collect())
+            }
+            TermKind::TupleProj { tuple, idx } => TermKind::TupleProj {
+                tuple: Box::new(self.apply_subst_term(tuple, subst)),
+                idx: *idx,
+            },
+            TermKind::Index { array, index } => TermKind::Index {
+                array: Box::new(self.apply_subst_term(array, subst)),
+                index: Box::new(self.apply_subst_term(index, subst)),
+            },
+            TermKind::VecLit(parts) => {
+                TermKind::VecLit(parts.iter().map(|p| self.apply_subst_term(p, subst)).collect())
+            }
 
             TermKind::Lambda(Lambda { params, body, ret_ty }) => TermKind::Lambda(Lambda {
                 params: params.iter().map(|(p, ty)| (*p, apply_subst(ty, subst))).collect(),

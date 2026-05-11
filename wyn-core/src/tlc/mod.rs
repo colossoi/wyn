@@ -305,6 +305,28 @@ pub enum TermKind {
 
     /// Materialization barrier — forces an array expression to be computed.
     Force(Box<Term>),
+
+    /// Tuple constructor: `(a, b, c)` or record literal in tuple form.
+    /// Replaces `App(Var(Symbol("_w_tuple")), parts)`.
+    Tuple(Vec<Term>),
+
+    /// Tuple projection: `t.idx`. `idx` is the structural field index.
+    /// Replaces `App(Var(Symbol("_w_tuple_proj")), [t, IntLit(idx)])`.
+    TupleProj {
+        tuple: Box<Term>,
+        idx: usize,
+    },
+
+    /// Array indexing: `arr[idx]`. The result aliases `array` for
+    /// ownership analysis. Replaces `App(Var(Symbol("_w_index")), [array, index])`.
+    Index {
+        array: Box<Term>,
+        index: Box<Term>,
+    },
+
+    /// Vector literal: `@[x, y, z, w]`.
+    /// Replaces `App(Var(Symbol("_w_vec_lit")), components)`.
+    VecLit(Vec<Term>),
 }
 
 /// The kind of loop (mirrors MIR::LoopKind).
@@ -714,6 +736,20 @@ impl Term {
             TermKind::ArrayExpr(ae) => TermKind::ArrayExpr(map_array_expr_children(ae, f)),
 
             TermKind::Force(inner) => TermKind::Force(Box::new(f(*inner))),
+
+            TermKind::Tuple(parts) => TermKind::Tuple(parts.into_iter().map(&mut *f).collect()),
+
+            TermKind::TupleProj { tuple, idx } => TermKind::TupleProj {
+                tuple: Box::new(f(*tuple)),
+                idx,
+            },
+
+            TermKind::Index { array, index } => TermKind::Index {
+                array: Box::new(f(*array)),
+                index: Box::new(f(*index)),
+            },
+
+            TermKind::VecLit(parts) => TermKind::VecLit(parts.into_iter().map(&mut *f).collect()),
         };
 
         Term { kind, ..self }
@@ -777,6 +813,17 @@ impl Term {
             TermKind::Soac(soac) => visit_soac_children(soac, f),
             TermKind::ArrayExpr(ae) => visit_array_expr_children(ae, f),
             TermKind::Force(inner) => f(inner),
+
+            TermKind::Tuple(parts) | TermKind::VecLit(parts) => {
+                for p in parts {
+                    f(p);
+                }
+            }
+            TermKind::TupleProj { tuple, .. } => f(tuple),
+            TermKind::Index { array, index } => {
+                f(array);
+                f(index);
+            }
         }
     }
 }
@@ -1670,12 +1717,7 @@ impl<'a> Transformer<'a> {
             span,
             TermKind::Var(crate::tlc::VarRef::Symbol(var_sym)),
         );
-        let index_lit = self.mk_term(
-            Type::Constructed(TypeName::Int(32), vec![]),
-            span,
-            TermKind::IntLit(index.to_string()),
-        );
-        self.build_call("_w_tuple_proj", &[var_term, index_lit], result_ty, span)
+        self.mk_tuple_proj(var_term, index, result_ty, span)
     }
 
     /// Apply a list of bindings around a body term, creating nested let expressions.
@@ -1804,9 +1846,9 @@ impl<'a> Transformer<'a> {
             }
 
             ast::ExprKind::ArrayLiteral(elements) => {
-                // array_lit(e1, e2, ...) as flat application
                 log::debug!("ArrayLiteral with {} elements", elements.len());
-                self.build_intrinsic_call("_w_array_lit", elements, ty, span)
+                let terms: Vec<Term> = elements.iter().map(|e| self.transform_expr(e)).collect();
+                self.mk_array_lit(terms, ty, span)
             }
 
             ast::ExprKind::VecMatLiteral(elements) => {
@@ -1822,13 +1864,14 @@ impl<'a> Transformer<'a> {
                         return self.build_vec_lit_from_terms(&col_terms, ty, span);
                     }
                 }
-                self.build_intrinsic_call("_w_vec_lit", elements, ty, span)
+                let terms: Vec<Term> = elements.iter().map(|e| self.transform_expr(e)).collect();
+                self.mk_vec_lit(terms, ty, span)
             }
 
             ast::ExprKind::ArrayIndex(array, index) => {
                 let arr = self.transform_expr(array);
                 let idx = self.transform_expr(index);
-                self.build_call("_w_index", &[arr, idx], ty, span)
+                self.mk_index(arr, idx, ty, span)
             }
 
             ast::ExprKind::ArrayWith {
@@ -1863,7 +1906,10 @@ impl<'a> Transformer<'a> {
                 self.build_unop(op.clone(), arg, ty, span)
             }
 
-            ast::ExprKind::Tuple(elements) => self.build_intrinsic_call("_w_tuple", elements, ty, span),
+            ast::ExprKind::Tuple(elements) => {
+                let terms: Vec<Term> = elements.iter().map(|e| self.transform_expr(e)).collect();
+                self.mk_tuple(terms, ty, span)
+            }
 
             ast::ExprKind::RecordLiteral(fields) => {
                 // Records are tuples - reorder fields to match type's field order
@@ -1878,7 +1924,8 @@ impl<'a> Transformer<'a> {
                     _ => fields.iter().map(|(_, e)| e.clone()).collect(),
                 };
 
-                self.build_intrinsic_call("_w_tuple", &ordered_exprs, ty, span)
+                let terms: Vec<Term> = ordered_exprs.iter().map(|e| self.transform_expr(e)).collect();
+                self.mk_tuple(terms, ty, span)
             }
 
             ast::ExprKind::Lambda(lam) => self.transform_lambda(&lam.params, &lam.body, ty, span),
@@ -1934,12 +1981,7 @@ impl<'a> Transformer<'a> {
                         .map(|c| {
                             let idx = crate::types::swizzle_component_index(c)
                                 .expect("is_swizzle_field already accepted this letter");
-                            let idx_lit = self.mk_term(
-                                Type::Constructed(TypeName::Int(32), vec![]),
-                                span,
-                                TermKind::IntLit(idx.to_string()),
-                            );
-                            self.build_call("_w_tuple_proj", &[rec.clone(), idx_lit], elem_ty.clone(), span)
+                            self.mk_tuple_proj(rec.clone(), idx as usize, elem_ty.clone(), span)
                         })
                         .collect();
                     if components.len() == 1 {
@@ -1951,12 +1993,7 @@ impl<'a> Transformer<'a> {
                 let field_idx = self
                     .resolve_field_index(&rec.ty, field)
                     .unwrap_or_else(|| panic!("BUG: field '{}' not in record type", field));
-                let index_lit = self.mk_term(
-                    Type::Constructed(TypeName::Int(32), vec![]),
-                    span,
-                    TermKind::IntLit(field_idx.to_string()),
-                );
-                self.build_call("_w_tuple_proj", &[rec, index_lit], ty, span)
+                self.mk_tuple_proj(rec, field_idx, ty, span)
             }
 
             ast::ExprKind::If(if_expr) => {
@@ -2013,7 +2050,7 @@ impl<'a> Transformer<'a> {
                         slot_terms.push(self.build_zero(slot_ty, span));
                     }
                 }
-                self.build_call("_w_tuple", &slot_terms, ty, span)
+                self.mk_tuple(slot_terms, ty, span)
             }
 
             ast::ExprKind::Range(range) => {
@@ -2575,12 +2612,7 @@ impl<'a> Transformer<'a> {
 
         for &idx in path {
             let elem_ty = self.type_at_path(&current_ty, &[idx]);
-            let index_lit = self.mk_term(
-                Type::Constructed(TypeName::Int(32), vec![]),
-                span,
-                TermKind::IntLit(idx.to_string()),
-            );
-            current = self.build_call("_w_tuple_proj", &[current, index_lit], elem_ty.clone(), span);
+            current = self.mk_tuple_proj(current, idx, elem_ty.clone(), span);
             current_ty = elem_ty;
         }
 
@@ -2802,7 +2834,7 @@ impl<'a> Transformer<'a> {
             })
             .collect();
 
-        self.build_call("_w_tuple", &field_terms, record_ty.clone(), span)
+        self.mk_tuple(field_terms, record_ty.clone(), span)
     }
 
     /// Build a swizzle read on a Var term: emits per-letter
@@ -2832,20 +2864,9 @@ impl<'a> Transformer<'a> {
         }
     }
 
-    /// Build `_w_tuple_proj(target, idx)` returning `result_ty`. Thin
-    /// wrapper that handles the index-literal Term construction.
+    /// Build `TermKind::TupleProj` returning `result_ty`.
     fn build_proj(&mut self, target: &Term, idx: usize, result_ty: &Type<TypeName>, span: Span) -> Term {
-        let idx_lit = self.mk_term(
-            Type::Constructed(TypeName::Int(32), vec![]),
-            span,
-            TermKind::IntLit(idx.to_string()),
-        );
-        self.build_call(
-            "_w_tuple_proj",
-            &[target.clone(), idx_lit],
-            result_ty.clone(),
-            span,
-        )
+        self.mk_tuple_proj(target.clone(), idx, result_ty.clone(), span)
     }
 
     fn transform_match(&mut self, match_expr: &ast::MatchExpr, ty: Type<TypeName>, span: Span) -> Term {
@@ -2943,13 +2964,7 @@ impl<'a> Transformer<'a> {
         let mut bindings = Vec::new();
         for (i, sub_pat) in sub_patterns.iter().enumerate() {
             let lowered_payload_ty = Self::lower_type(payload_types[i].clone());
-            let idx_lit = self.mk_i32((payload_offset + i) as i32, span);
-            let proj = self.build_call(
-                "_w_tuple_proj",
-                &[scrut_var.clone(), idx_lit],
-                lowered_payload_ty,
-                span,
-            );
+            let proj = self.mk_tuple_proj(scrut_var.clone(), payload_offset + i, lowered_payload_ty, span);
             let (_, sub_bindings) = self.compute_pattern_bindings_inner(sub_pat, proj, span, false);
             bindings.extend(sub_bindings);
         }
@@ -2965,10 +2980,9 @@ impl<'a> Transformer<'a> {
         }
 
         // Otherwise: if scrut.tag == tag_value then arm_body else <rest>
-        let zero_idx = self.mk_i32(0, span);
-        let tag_proj = self.build_call(
-            "_w_tuple_proj",
-            &[scrut_var.clone(), zero_idx],
+        let tag_proj = self.mk_tuple_proj(
+            scrut_var.clone(),
+            0,
             Type::Constructed(TypeName::UInt(32), vec![]),
             span,
         );
@@ -3015,7 +3029,7 @@ impl<'a> Transformer<'a> {
             Type::Constructed(TypeName::Tuple(_), elems)
             | Type::Constructed(TypeName::Record(_), elems) => {
                 let zero_terms: Vec<Term> = elems.iter().map(|t| self.build_zero(t, span)).collect();
-                self.build_call("_w_tuple", &zero_terms, ty.clone(), span)
+                self.mk_tuple(zero_terms, ty.clone(), span)
             }
             _ => todo!("zero-fill for sum-payload type {:?}", ty),
         }
@@ -3162,6 +3176,48 @@ impl<'a> Transformer<'a> {
         self.build_call(name, &arg_terms, result_ty, span)
     }
 
+    /// Construct a `TermKind::Tuple` directly.
+    fn mk_tuple(&mut self, parts: Vec<Term>, result_ty: Type<TypeName>, span: Span) -> Term {
+        self.mk_term(result_ty, span, TermKind::Tuple(parts))
+    }
+
+    /// Construct a `TermKind::TupleProj` directly.
+    fn mk_tuple_proj(&mut self, tuple: Term, idx: usize, result_ty: Type<TypeName>, span: Span) -> Term {
+        self.mk_term(
+            result_ty,
+            span,
+            TermKind::TupleProj {
+                tuple: Box::new(tuple),
+                idx,
+            },
+        )
+    }
+
+    /// Construct a `TermKind::Index` directly.
+    fn mk_index(&mut self, array: Term, index: Term, result_ty: Type<TypeName>, span: Span) -> Term {
+        self.mk_term(
+            result_ty,
+            span,
+            TermKind::Index {
+                array: Box::new(array),
+                index: Box::new(index),
+            },
+        )
+    }
+
+    /// Construct a `TermKind::VecLit` directly.
+    fn mk_vec_lit(&mut self, parts: Vec<Term>, result_ty: Type<TypeName>, span: Span) -> Term {
+        self.mk_term(result_ty, span, TermKind::VecLit(parts))
+    }
+
+    /// Construct a `TermKind::ArrayExpr(ArrayExpr::Literal(parts))` directly,
+    /// for array literals `[a, b, c]`. Replaces the synthesised
+    /// `App(Var(Symbol("_w_array_lit")), parts)` shape that used to flow
+    /// through EGIR conversion's named-app dispatch.
+    fn mk_array_lit(&mut self, parts: Vec<Term>, result_ty: Type<TypeName>, span: Span) -> Term {
+        self.mk_term(result_ty, span, TermKind::ArrayExpr(ArrayExpr::Literal(parts)))
+    }
+
     fn lookup_type(&self, node_id: NodeId) -> Option<Type<TypeName>> {
         self.lookup_type_raw(node_id).map(Self::lower_type)
     }
@@ -3235,23 +3291,20 @@ impl<'a> Transformer<'a> {
         )
     }
 
-    /// Transform an expression as a vector, converting ArrayLiteral to _w_vec_lit
+    /// Transform an expression as a vector, converting ArrayLiteral to a VecLit term.
     fn transform_as_vector(&mut self, expr: &ast::Expression, vec_ty: Type<TypeName>) -> Term {
         let span = expr.h.span;
         match &expr.kind {
             ast::ExprKind::ArrayLiteral(elements) => {
-                // Convert array literal syntax to vector literal
-                self.build_intrinsic_call("_w_vec_lit", elements, vec_ty, span)
+                let terms: Vec<Term> = elements.iter().map(|e| self.transform_expr(e)).collect();
+                self.mk_vec_lit(terms, vec_ty, span)
             }
-            _ => {
-                // For other expressions, just transform normally
-                self.transform_expr(expr)
-            }
+            _ => self.transform_expr(expr),
         }
     }
 
-    /// Build a _w_vec_lit from already-transformed terms
+    /// Build a `TermKind::VecLit` from already-transformed terms.
     fn build_vec_lit_from_terms(&mut self, terms: &[Term], result_ty: Type<TypeName>, span: Span) -> Term {
-        self.build_call("_w_vec_lit", terms, result_ty, span)
+        self.mk_vec_lit(terms.to_vec(), result_ty, span)
     }
 }

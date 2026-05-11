@@ -925,6 +925,29 @@ impl<'a> Converter<'a> {
             // --- Array expressions ---
             TermKind::ArrayExpr(ae) => self.convert_array_expr(ae, ty),
 
+            // --- Projection / construction operators ---
+            TermKind::Tuple(parts) => {
+                let operands: SmallVec<[NodeId; 4]> =
+                    parts.iter().map(|p| self.convert_term(p)).collect::<Result<_, _>>()?;
+                let n = operands.len();
+                Ok(self.intern_pure(PureOp::Tuple(n), operands, ty))
+            }
+            TermKind::TupleProj { tuple, idx } => {
+                let base = self.convert_term(tuple)?;
+                Ok(self.intern_pure(PureOp::Project { index: *idx as u32 }, smallvec![base], ty))
+            }
+            TermKind::Index { array, index } => {
+                let base = self.convert_term(array)?;
+                let idx = self.convert_term(index)?;
+                Ok(self.intern_pure(PureOp::Index, smallvec![base, idx], ty))
+            }
+            TermKind::VecLit(parts) => {
+                let operands: SmallVec<[NodeId; 4]> =
+                    parts.iter().map(|p| self.convert_term(p)).collect::<Result<_, _>>()?;
+                let n = operands.len();
+                Ok(self.intern_pure(PureOp::Vector(n), operands, ty))
+            }
+
             // --- Should not appear after defunctionalization ---
             TermKind::Lambda(_) => {
                 panic!("ICE: bare Lambda in to_egir (should be lifted)")
@@ -1045,49 +1068,11 @@ impl<'a> Converter<'a> {
         args: &[Term],
         ty: Type<TypeName>,
     ) -> Result<NodeId, ConvertError> {
-        // Intrinsic patterns
+        // Intrinsic patterns. `_w_tuple`, `_w_tuple_proj`, `_w_index`,
+        // `_w_array_lit`, `_w_vec_lit` no longer appear here — those
+        // are first-class TermKind variants handled in
+        // `convert_term_kind`.
         match name {
-            "_w_tuple" => {
-                let operands: SmallVec<[NodeId; 4]> =
-                    args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
-                let n = operands.len();
-                Ok(self.intern_pure(PureOp::Tuple(n), operands, ty))
-            }
-            "_w_vec_lit" => {
-                let operands: SmallVec<[NodeId; 4]> =
-                    args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
-                let n = operands.len();
-                Ok(self.intern_pure(PureOp::Vector(n), operands, ty))
-            }
-            "_w_tuple_proj" => {
-                if args.len() != 2 {
-                    return Err(ConvertError::GraphError("_w_tuple_proj expects 2 args".into()));
-                }
-                let base = self.convert_term(&args[0])?;
-                let index = match &args[1].kind {
-                    TermKind::IntLit(s) => s.parse::<u32>().unwrap_or(0),
-                    _ => {
-                        return Err(ConvertError::GraphError(
-                            "_w_tuple_proj index must be literal".into(),
-                        ));
-                    }
-                };
-                Ok(self.intern_pure(PureOp::Project { index }, smallvec![base], ty))
-            }
-            "_w_index" => {
-                if args.len() != 2 {
-                    return Err(ConvertError::GraphError("_w_index expects 2 args".into()));
-                }
-                let base = self.convert_term(&args[0])?;
-                let index = self.convert_term(&args[1])?;
-                Ok(self.intern_pure(PureOp::Index, smallvec![base, index], ty))
-            }
-            "_w_array_lit" => {
-                let operands: SmallVec<[NodeId; 4]> =
-                    args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
-                let n = operands.len();
-                Ok(self.intern_pure(PureOp::ArrayLit(n), operands, ty))
-            }
             "_w_range" => {
                 let start = self.convert_term(&args[0])?;
                 let len = self.convert_term(&args[1])?;

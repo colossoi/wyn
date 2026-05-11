@@ -891,6 +891,37 @@ impl tlc::Term {
             tlc::TermKind::Soac(_) | tlc::TermKind::ArrayExpr(_) | tlc::TermKind::Force(_) => {
                 write!(f, "<soac>")
             }
+
+            tlc::TermKind::Tuple(parts) => {
+                write!(f, "(")?;
+                for (i, p) in parts.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    p.fmt_prec(f, 0)?;
+                }
+                write!(f, ")")
+            }
+            tlc::TermKind::TupleProj { tuple, idx } => {
+                tuple.fmt_prec(f, 2)?;
+                write!(f, ".{}", idx)
+            }
+            tlc::TermKind::Index { array, index } => {
+                array.fmt_prec(f, 2)?;
+                write!(f, "[")?;
+                index.fmt_prec(f, 0)?;
+                write!(f, "]")
+            }
+            tlc::TermKind::VecLit(parts) => {
+                write!(f, "@[")?;
+                for (i, p) in parts.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    p.fmt_prec(f, 0)?;
+                }
+                write!(f, "]")
+            }
         }
     }
 }

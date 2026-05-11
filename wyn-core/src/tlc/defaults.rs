@@ -122,7 +122,7 @@ pub(super) fn default_term_for_type(tr: &mut Transformer<'_>, ty: &Type<TypeName
         Type::Constructed(TypeName::Unit, _) => tr.build_call("_w_unit", &[], ty.clone(), span),
         Type::Constructed(TypeName::Tuple(_), args) => {
             let elems: Vec<Term> = args.iter().map(|a| default_term_for_type(tr, a, span)).collect();
-            tr.build_call("_w_tuple", &elems, ty.clone(), span)
+            tr.mk_tuple(elems, ty.clone(), span)
         }
         Type::Constructed(TypeName::Vec, args) if args.len() == 2 => {
             // Vec[elem, size] — args[0] is elem, args[1] is size.
@@ -131,7 +131,7 @@ pub(super) fn default_term_for_type(tr: &mut Transformer<'_>, ty: &Type<TypeName
                 Some(n) => {
                     let elem = default_term_for_type(tr, elem_ty, span);
                     let elems: Vec<Term> = (0..n).map(|_| elem.clone()).collect();
-                    tr.build_call("_w_vec_lit", &elems, ty.clone(), span)
+                    tr.mk_vec_lit(elems, ty.clone(), span)
                 }
                 None => hole_fill_error(tr, span, ty, "vector size is not a literal"),
             }
@@ -147,7 +147,7 @@ pub(super) fn default_term_for_type(tr: &mut Transformer<'_>, ty: &Type<TypeName
                 (true, Some(n)) => {
                     let elem = default_term_for_type(tr, elem_ty, span);
                     let elems: Vec<Term> = (0..n).map(|_| elem.clone()).collect();
-                    tr.build_call("_w_array_lit", &elems, ty.clone(), span)
+                    tr.mk_array_lit(elems, ty.clone(), span)
                 }
                 (true, None) => hole_fill_error(tr, span, ty, "array size is not a literal"),
                 (false, _) => hole_fill_error(

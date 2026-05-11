@@ -2340,35 +2340,33 @@ fn uint_lit(val: u64, span: ast::Span) -> Term {
     }
 }
 
-fn int_lit(val: i64, span: ast::Span) -> Term {
+/// Construct a `TermKind::Tuple` term with the given tuple type.
+fn tuple_term(components: Vec<Term>, ty: Type<TypeName>, span: ast::Span, _program: &mut Program) -> Term {
     Term {
         id: TermId(0),
-        ty: Type::Constructed(TypeName::Int(32), vec![]),
+        ty,
         span,
-        kind: TermKind::IntLit(val.to_string()),
+        kind: TermKind::Tuple(components),
     }
 }
 
-/// Construct a `_w_tuple(components…)` term with the given tuple type.
-fn tuple_term(components: Vec<Term>, ty: Type<TypeName>, span: ast::Span, program: &mut Program) -> Term {
-    intrinsic_term("_w_tuple", components, ty, span, program)
-}
-
-/// Project `base.index` via `_w_tuple_proj(base, IntLit(index))`.
+/// Project `base.index` via `TermKind::TupleProj`.
 fn tuple_proj(
     base: Term,
     index: u32,
     elem_ty: Type<TypeName>,
     span: ast::Span,
-    program: &mut Program,
+    _program: &mut Program,
 ) -> Term {
-    intrinsic_term(
-        "_w_tuple_proj",
-        vec![base, int_lit(index as i64, span)],
-        elem_ty,
+    Term {
+        id: TermId(0),
+        ty: elem_ty,
         span,
-        program,
-    )
+        kind: TermKind::TupleProj {
+            tuple: Box::new(base),
+            idx: index as usize,
+        },
+    }
 }
 
 fn make_entry_def(
