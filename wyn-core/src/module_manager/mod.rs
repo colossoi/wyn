@@ -1004,7 +1004,7 @@ impl ModuleManager {
         // Seed a ScopeStack from the caller-provided locals so the shared
         // walker sees them as "visible locals that should shadow intra-module
         // rewrites". All further pushes/pops happen inside the walker.
-        let mut scope = crate::scope::ScopeStack::new();
+        let mut scope = ScopeStack::new();
         for name in local_bindings {
             scope.insert(name.clone(), ());
         }
@@ -1035,12 +1035,7 @@ struct ModuleElaborationResolver<'a> {
 }
 
 impl<'a> crate::name_resolution::ResolveContext for ModuleElaborationResolver<'a> {
-    fn resolve_identifier(
-        &self,
-        quals: &mut Vec<String>,
-        name: &mut String,
-        scope: &crate::scope::ScopeStack<()>,
-    ) {
+    fn resolve_identifier(&self, quals: &mut Vec<String>, name: &mut String, scope: &ScopeStack<()>) {
         // Intra-module function reference: bare name that's in the current
         // module's function set AND not shadowed by a local binding.
         if quals.is_empty() && scope.lookup(name).is_none() && self.module_functions.contains(name) {
@@ -1053,7 +1048,7 @@ impl<'a> crate::name_resolution::ResolveContext for ModuleElaborationResolver<'a
         obj_quals: &[String],
         obj_name: &str,
         field: &str,
-        _scope: &crate::scope::ScopeStack<()>,
+        _scope: &ScopeStack<()>,
     ) -> Option<crate::ast::ExprKind> {
         if !obj_quals.is_empty() {
             return None;

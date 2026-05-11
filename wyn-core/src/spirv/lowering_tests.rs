@@ -1,9 +1,10 @@
+use crate::Compiler;
 use crate::error::Result;
 
 fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
     // Use the typestate API to ensure proper compilation pipeline
     let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = crate::Compiler::parse(source, &mut node_counter).expect("Parsing failed");
+    let parsed = Compiler::parse(source, &mut node_counter).expect("Parsing failed");
     let type_checked = parsed
         .desugar(&mut node_counter)
         .expect("Desugaring failed")
@@ -334,7 +335,7 @@ def test(x: f32) f32 =
 /// Compile source to SPIR-V through the full pipeline including TLC partial_eval
 fn compile_to_spirv_with_partial_eval(source: &str) -> Result<Vec<u32>> {
     let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = crate::Compiler::parse(source, &mut node_counter).expect("Parsing failed");
+    let parsed = Compiler::parse(source, &mut node_counter).expect("Parsing failed");
     let type_checked = parsed
         .desugar(&mut node_counter)
         .expect("Desugaring failed")

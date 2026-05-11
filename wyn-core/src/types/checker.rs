@@ -1,7 +1,10 @@
 use super::{SkolemId, Type, TypeExt, TypeName, TypeScheme};
 use crate::ast::*;
+use crate::builtins::{BuiltinId, by_id};
 use crate::error::{CompilerError, Result};
 use crate::interface::{StorageDecl, UniformDecl};
+use crate::module_manager::ModuleManager;
+use crate::name_resolution::NameResolution;
 use crate::scope::{IdentifierKind, ScopeEntry, ScopeStack};
 use crate::{bail_type_at, err_module, err_type, err_type_at, err_undef_at};
 use log::debug;
@@ -74,8 +77,8 @@ pub struct TypeChecker<'a> {
     scope_stack: ScopeStack<ScopeEntry<TypeScheme>>,
     context: Context<TypeName>, // Polytype unification context
     record_field_map: HashMap<(String, String), Type>, // Map (type_name, field_name) -> field_type
-    module_manager: &'a crate::module_manager::ModuleManager, // Lazy module loading
-    type_table: HashMap<crate::ast::NodeId, TypeScheme>, // Maps NodeId to type scheme
+    module_manager: &'a ModuleManager, // Lazy module loading
+    type_table: HashMap<NodeId, TypeScheme>, // Maps NodeId to type scheme
     warnings: Vec<TypeWarning>, // Collected warnings
     type_holes: Vec<(NodeId, Span)>, // Track type hole locations for warning emission
     arity_map: HashMap<String, usize>, // function name -> required arity (number of params)
@@ -90,7 +93,7 @@ pub struct TypeChecker<'a> {
     /// Side table: maps `Identifier` NodeIds to their builtin classification.
     /// Built once before type-check by `name_resolution::build_name_resolution`.
     /// Identifiers absent from this table are resolved via scope/module lookup.
-    name_resolution: crate::name_resolution::NameResolution,
+    name_resolution: NameResolution,
     /// First type-alias cycle error encountered during alias resolution.
     /// Recorded under `&self` via interior mutability; surfaced as a fatal
     /// error at the next public entry point (check_program /
@@ -566,7 +569,7 @@ impl<'a> TypeChecker<'a> {
         {
             let bid = *builtin_id;
             let lookup = self.scheme_lookup_for_builtin(bid);
-            let def_name = crate::builtins::by_id(bid).raw.surface_name;
+            let def_name = by_id(bid).raw.surface_name;
             return Some(self.resolve_scheme_lookup(def_name, lookup));
         }
 
@@ -594,8 +597,8 @@ impl<'a> TypeChecker<'a> {
     /// `module_schemes` map. This is the BuiltinId-keyed counterpart
     /// to `lookup_module_scheme(qualified_name)` — same data, but the
     /// dispatch token is structural rather than a string.
-    fn lookup_module_scheme_by_id(&self, id: crate::builtins::BuiltinId) -> Option<TypeScheme> {
-        let surface_name = crate::builtins::by_id(id).raw.surface_name;
+    fn lookup_module_scheme_by_id(&self, id: BuiltinId) -> Option<TypeScheme> {
+        let surface_name = by_id(id).raw.surface_name;
         self.module_schemes.get(surface_name).cloned()
     }
 
@@ -605,7 +608,7 @@ impl<'a> TypeChecker<'a> {
     /// Overloads whose scheme is `None` (per-type ops `f32.add`,
     /// `f32.i32`, …) get their schemes from prelude module signatures
     /// via `lookup_module_scheme_by_id`.
-    fn scheme_lookup_for_builtin(&mut self, id: crate::builtins::BuiltinId) -> SchemeLookup {
+    fn scheme_lookup_for_builtin(&mut self, id: BuiltinId) -> SchemeLookup {
         let catalog = crate::builtins::catalog();
         let def = catalog.get(id);
         let schemes: Vec<TypeScheme> = (0..def.overloads().len())
@@ -649,18 +652,18 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Create a new TypeChecker with a reference to a ModuleManager
-    pub fn new(module_manager: &'a crate::module_manager::ModuleManager) -> Self {
+    pub fn new(module_manager: &'a ModuleManager) -> Self {
         Self::with_type_table(module_manager, HashMap::new())
     }
 
     /// Create a TypeChecker with an empty type table (for building prelude)
-    pub fn new_empty(module_manager: &'a crate::module_manager::ModuleManager) -> Self {
+    pub fn new_empty(module_manager: &'a ModuleManager) -> Self {
         Self::with_type_table(module_manager, HashMap::new())
     }
 
     /// Create a TypeChecker with an existing Context and spec_schemes (from resolve_placeholders pass).
     pub fn with_context_and_schemes(
-        module_manager: &'a crate::module_manager::ModuleManager,
+        module_manager: &'a ModuleManager,
         context: Context<TypeName>,
         spec_schemes: HashMap<String, TypeScheme>,
     ) -> Self {
@@ -668,16 +671,13 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Create a TypeChecker with a given initial type table
-    fn with_type_table(
-        module_manager: &'a crate::module_manager::ModuleManager,
-        type_table: HashMap<NodeId, TypeScheme>,
-    ) -> Self {
+    fn with_type_table(module_manager: &'a ModuleManager, type_table: HashMap<NodeId, TypeScheme>) -> Self {
         Self::with_context_and_type_table(module_manager, Context::default(), type_table, HashMap::new())
     }
 
     /// Create a TypeChecker with both an existing Context and type table.
     fn with_context_and_type_table(
-        module_manager: &'a crate::module_manager::ModuleManager,
+        module_manager: &'a ModuleManager,
         context: Context<TypeName>,
         type_table: HashMap<NodeId, TypeScheme>,
         spec_schemes: HashMap<String, TypeScheme>,
@@ -694,7 +694,7 @@ impl<'a> TypeChecker<'a> {
             skolem_ids: crate::IdSource::new(),
             current_module: None,
             module_schemes: spec_schemes,
-            name_resolution: crate::name_resolution::NameResolution::default(),
+            name_resolution: NameResolution::default(),
             pending_cycle_error: std::cell::RefCell::new(None),
         }
     }
@@ -702,14 +702,14 @@ impl<'a> TypeChecker<'a> {
     /// Inject the side table populated by `build_name_resolution`. Must
     /// be called between construction and `check_program` for any
     /// program that uses builtin identifiers.
-    pub fn set_name_resolution(&mut self, nr: crate::name_resolution::NameResolution) {
+    pub fn set_name_resolution(&mut self, nr: NameResolution) {
         self.name_resolution = nr;
     }
 
     /// Borrow the (post-inference) NameResolution. The checker writes
     /// overload-resolution results into it during inference; downstream
     /// IR (TLC) reads them.
-    pub fn name_resolution(&self) -> &crate::name_resolution::NameResolution {
+    pub fn name_resolution(&self) -> &NameResolution {
         &self.name_resolution
     }
 
@@ -1342,7 +1342,7 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    pub fn check_program(&mut self, program: &Program) -> Result<HashMap<crate::ast::NodeId, TypeScheme>> {
+    pub fn check_program(&mut self, program: &Program) -> Result<HashMap<NodeId, TypeScheme>> {
         // Type-check module functions first to populate the module_schemes cache.
         // This must happen before prelude functions since they may reference module functions.
         self.check_module_functions()?;
@@ -1363,7 +1363,7 @@ impl<'a> TypeChecker<'a> {
         self.emit_hole_warnings();
 
         // Apply the context to all types in the type table to resolve type variables
-        let resolved_table: HashMap<crate::ast::NodeId, TypeScheme> =
+        let resolved_table: HashMap<NodeId, TypeScheme> =
             self.type_table.iter().map(|(node_id, scheme)| (*node_id, self.apply_scheme(scheme))).collect();
 
         Ok(resolved_table)
@@ -1532,7 +1532,7 @@ impl<'a> TypeChecker<'a> {
 
     /// Consume the type checker and return the type table.
     /// Used to extract the prelude type table after type-checking prelude functions.
-    pub fn into_type_table(self) -> std::collections::HashMap<crate::ast::NodeId, TypeScheme> {
+    pub fn into_type_table(self) -> std::collections::HashMap<NodeId, TypeScheme> {
         self.type_table
     }
 

@@ -41,7 +41,7 @@ fn direct_call_passes() {
     let f = p.symbols.alloc("f".into());
     let g = p.symbols.alloc("g".into());
     let body = term(TermKind::App {
-        func: Box::new(term(TermKind::Var(crate::tlc::VarRef::Symbol(g)))),
+        func: Box::new(term(TermKind::Var(VarRef::Symbol(g)))),
         args: vec![term(TermKind::IntLit("0".into()))],
     });
     p.defs.push(Def {
@@ -69,7 +69,7 @@ fn arity_mismatch_fails() {
     });
     // f calls g with only 1 arg — wrong.
     let body = term(TermKind::App {
-        func: Box::new(term(TermKind::Var(crate::tlc::VarRef::Symbol(g)))),
+        func: Box::new(term(TermKind::Var(VarRef::Symbol(g)))),
         args: vec![term(TermKind::IntLit("0".into()))],
     });
     p.defs.push(Def {
@@ -100,7 +100,7 @@ fn nested_app_in_func_position_fails() {
     let f = p.symbols.alloc("f".into());
     let g = p.symbols.alloc("g".into());
     let nested = term(TermKind::App {
-        func: Box::new(term(TermKind::Var(crate::tlc::VarRef::Symbol(g)))),
+        func: Box::new(term(TermKind::Var(VarRef::Symbol(g)))),
         args: vec![],
     });
     let body = term(TermKind::App {

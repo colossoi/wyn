@@ -3,6 +3,7 @@
 //! Specializes polymorphic intrinsic names based on argument types.
 //! For example: `sign(x)` where `x: f32` becomes `f32.sign(x)`.
 
+use super::VarRef;
 use super::{Def, Program, Term, TermIdSource, TermKind};
 use crate::SymbolTable;
 use crate::ast::TypeName;
@@ -84,13 +85,13 @@ fn specialize_term(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdS
         // `lookup_by_any_name(func)` path still resolves them.
         let new_func_kind =
             if let Some(def) = crate::builtins::catalog().lookup_by_surface_name(&specialized_name) {
-                TermKind::Var(crate::tlc::VarRef::Builtin {
+                TermKind::Var(VarRef::Builtin {
                     id: def.id,
                     overload_idx: 0,
                 })
             } else {
                 let specialized_sym = symbols.alloc(specialized_name);
-                TermKind::Var(crate::tlc::VarRef::Symbol(specialized_sym))
+                TermKind::Var(VarRef::Symbol(specialized_sym))
             };
         let new_func = Term {
             id: term_ids.next_id(),

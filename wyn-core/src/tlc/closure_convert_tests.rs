@@ -95,7 +95,7 @@ fn append_capture_params_extends_param_list() {
     let cap_a = symbols.alloc("a".into());
     let cap_b = symbols.alloc("b".into());
 
-    let inner_body = term(TermKind::Var(crate::tlc::VarRef::Symbol(x)), unit_ty());
+    let inner_body = term(TermKind::Var(VarRef::Symbol(x)), unit_ty());
     let lam_ty = Type::Constructed(TypeName::Arrow, vec![unit_ty(), unit_ty()]);
     let lam = Term {
         id: ids.next_id(),
@@ -119,7 +119,7 @@ fn append_capture_params_extends_param_list() {
         params,
         vec![(x, unit_ty()), (cap_a, unit_ty()), (cap_b, unit_ty())]
     );
-    assert!(matches!(body.kind, TermKind::Var(crate::tlc::VarRef::Symbol(s)) if s == x));
+    assert!(matches!(body.kind, TermKind::Var(VarRef::Symbol(s)) if s == x));
 }
 
 #[test]
@@ -127,7 +127,7 @@ fn param_spine_lambdas_are_skipped() {
     let mut program = empty_program();
     let sym = program.symbols.alloc("f".to_string());
     let p = program.symbols.alloc("p".to_string());
-    let inner = term(TermKind::Var(crate::tlc::VarRef::Symbol(p)), unit_ty());
+    let inner = term(TermKind::Var(VarRef::Symbol(p)), unit_ty());
     let body = term(
         TermKind::Lambda(Lambda {
             params: vec![(p, unit_ty())],

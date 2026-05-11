@@ -6,7 +6,12 @@
 //!
 //! All tests include entry points to ensure monomorphization can find reachable code.
 
+use crate::Compiler;
+use crate::SymbolTable;
 use crate::ssa::types::Program;
+use crate::tlc::TermKind;
+use crate::tlc::VarRef;
+use crate::tlc::extract_lambda_params;
 
 /// Run source through the pipeline up to SSA.
 fn compile_to_ssa(input: &str) -> Program {
@@ -28,7 +33,7 @@ fn has_function(ssa: &Program, name: &str) -> bool {
 /// `module_manager` covers both `type_check` and `to_tlc`.
 fn compile_to_fused_tlc(input: &str) -> crate::tlc::Program {
     let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let type_checked = crate::Compiler::parse(input, &mut node_counter)
+    let type_checked = Compiler::parse(input, &mut node_counter)
         .expect("parse")
         .desugar(&mut node_counter)
         .expect("desugar")
@@ -60,15 +65,9 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::Program, stage: &str) {
     use crate::tlc::{ArrayExpr, Lambda, LoopKind, SoacOp, Term, TermKind};
     use std::collections::HashSet;
 
-    fn walk(
-        term: &Term,
-        bound: &HashSet<SymbolId>,
-        symbols: &crate::SymbolTable,
-        stage: &str,
-        def_name: &str,
-    ) {
+    fn walk(term: &Term, bound: &HashSet<SymbolId>, symbols: &SymbolTable, stage: &str, def_name: &str) {
         match &term.kind {
-            TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
+            TermKind::Var(VarRef::Symbol(sym)) => {
                 assert!(
                     bound.contains(sym),
                     "[{stage}] def `{def_name}`: unbound Var(sym{:?}) name={:?}",
@@ -76,7 +75,7 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::Program, stage: &str) {
                     symbols.get(*sym)
                 );
             }
-            TermKind::Var(crate::tlc::VarRef::Builtin { .. })
+            TermKind::Var(VarRef::Builtin { .. })
             | TermKind::BinOp(_)
             | TermKind::UnOp(_)
             | TermKind::IntLit(_)
@@ -162,7 +161,7 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::Program, stage: &str) {
     fn walk_lambda(
         lam: &crate::tlc::Lambda,
         bound: &HashSet<SymbolId>,
-        symbols: &crate::SymbolTable,
+        symbols: &SymbolTable,
         stage: &str,
         def_name: &str,
     ) {
@@ -176,7 +175,7 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::Program, stage: &str) {
     fn walk_soac(
         soac: &SoacOp,
         bound: &HashSet<SymbolId>,
-        symbols: &crate::SymbolTable,
+        symbols: &SymbolTable,
         stage: &str,
         def_name: &str,
     ) {
@@ -237,7 +236,7 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::Program, stage: &str) {
     fn walk_array_expr(
         ae: &ArrayExpr,
         bound: &HashSet<SymbolId>,
-        symbols: &crate::SymbolTable,
+        symbols: &SymbolTable,
         stage: &str,
         def_name: &str,
     ) {
@@ -420,17 +419,17 @@ entry fragment_main() #[location(0)] vec4f32 =
 
     // After fusion, check that myMap's body is no longer a standalone map
     // or that some def contains a fused reduce
-    let my_map_has_map = tlc.defs.iter().any(|def| {
+    let _my_map_has_map = tlc.defs.iter().any(|def| {
         let name = tlc.symbols.get(def.name).cloned().unwrap_or_default();
         if name != "myMap" {
             return false;
         }
-        let (_, body) = crate::tlc::extract_lambda_params(&def.body);
+        let (_, body) = extract_lambda_params(&def.body);
         has_soac_kind(&body, "Map")
     });
 
-    let any_has_reduce = tlc.defs.iter().any(|def| {
-        let (_, body) = crate::tlc::extract_lambda_params(&def.body);
+    let _any_has_reduce = tlc.defs.iter().any(|def| {
+        let (_, body) = extract_lambda_params(&def.body);
         has_soac_kind(&body, "Reduce")
     });
 
@@ -441,7 +440,7 @@ entry fragment_main() #[location(0)] vec4f32 =
         .find(|def| tlc.symbols.get(def.name).map(|s| s.as_str()) == Some("fragment_main"))
         .expect("fragment_main not found");
 
-    let (_, frag_body) = crate::tlc::extract_lambda_params(&fragment_main.body);
+    let (_, frag_body) = extract_lambda_params(&fragment_main.body);
     let frag_has_redomap = has_soac_kind(&frag_body, "Redomap");
     let frag_has_reduce = has_soac_kind(&frag_body, "Reduce");
     let frag_has_map = has_soac_kind(&frag_body, "Map");
@@ -455,26 +454,26 @@ entry fragment_main() #[location(0)] vec4f32 =
     );
 
     // Print the Let chain structure
-    fn print_term(term: &crate::tlc::Term, syms: &crate::SymbolTable, depth: usize) {
+    fn print_term(term: &crate::tlc::Term, syms: &SymbolTable, depth: usize) {
         let indent = "  ".repeat(depth);
         match &term.kind {
-            crate::tlc::TermKind::Let { name, rhs, body, .. } => {
+            TermKind::Let { name, rhs, body, .. } => {
                 let n = syms.get(*name).cloned().unwrap_or_else(|| format!("{:?}", name));
                 eprintln!("{indent}let {n} = ...");
                 print_term(rhs, syms, depth + 1);
                 print_term(body, syms, depth);
             }
-            crate::tlc::TermKind::Soac(soac) => {
+            TermKind::Soac(soac) => {
                 eprintln!("{indent}SOAC {:?}", std::mem::discriminant(soac));
             }
-            crate::tlc::TermKind::App { func, args } => {
+            TermKind::App { func, args } => {
                 eprintln!("{indent}App:");
                 print_term(func, syms, depth + 1);
                 for a in args {
                     print_term(a, syms, depth + 1);
                 }
             }
-            crate::tlc::TermKind::Var(crate::tlc::VarRef::Symbol(s)) => {
+            TermKind::Var(VarRef::Symbol(s)) => {
                 let n = syms.get(*s).cloned().unwrap_or_else(|| format!("{:?}", s));
                 eprintln!("{indent}Var({n})");
             }
@@ -518,7 +517,7 @@ fn has_soac_kind(term: &crate::tlc::Term, kind: &str) -> bool {
 #[test]
 fn test_basic_expressions() {
     // Tests: functions, let bindings, if expressions, binary/unary ops
-    let ssa = compile_to_ssa(
+    let _ssa = compile_to_ssa(
         r#"
 def add(x: i32, y: i32) i32 = x + y
 
@@ -1392,7 +1391,7 @@ entry frag(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
 /// Pipeline that includes TLC inline_small (the new pass).
 fn compile_to_ssa_with_inline_small(input: &str) -> Program {
     let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = crate::Compiler::parse(input, &mut node_counter).expect("Parsing failed");
+    let parsed = Compiler::parse(input, &mut node_counter).expect("Parsing failed");
     let type_checked = parsed
         .desugar(&mut node_counter)
         .expect("Desugaring failed")
@@ -1477,7 +1476,7 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
 /// program shape.
 fn compile_tlc_with_fill_holes(input: &str) -> crate::TlcTransformed {
     let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = crate::Compiler::parse(input, &mut node_counter).expect("parse");
+    let parsed = Compiler::parse(input, &mut node_counter).expect("parse");
     let type_checked = parsed
         .desugar(&mut node_counter)
         .expect("desugar")

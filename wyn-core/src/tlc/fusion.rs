@@ -9,6 +9,7 @@
 //! let b = map(f, a) in reduce(op, ne, b) =>  reduce(op∘f, ne, a)
 //! ```
 
+use super::VarRef;
 use crate::ast::{Span, TypeName};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
@@ -587,13 +588,13 @@ fn compose_map_reduce(
 /// respecting shadowing by Let names, Lambda params, and Loop vars.
 pub fn substitute_sym(term: Term, old: SymbolId, new: SymbolId, term_ids: &mut TermIdSource) -> Term {
     match term.kind {
-        TermKind::Var(crate::tlc::VarRef::Symbol(s)) if s == old => Term {
+        TermKind::Var(VarRef::Symbol(s)) if s == old => Term {
             id: term_ids.next_id(),
-            kind: TermKind::Var(crate::tlc::VarRef::Symbol(new)),
+            kind: TermKind::Var(VarRef::Symbol(new)),
             ..term
         },
 
-        TermKind::Var(crate::tlc::VarRef::Symbol(_))
+        TermKind::Var(VarRef::Symbol(_))
         | TermKind::BinOp(_)
         | TermKind::UnOp(_)
         | TermKind::IntLit(_)

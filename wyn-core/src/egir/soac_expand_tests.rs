@@ -17,7 +17,6 @@
 
 use crate::Compiler;
 use crate::ast::TypeName;
-use crate::builtins::names::INTRINSIC_ARRAY_WITH_INPLACE;
 use crate::egir::types::{ENode, PureOp};
 use polytype::Type;
 

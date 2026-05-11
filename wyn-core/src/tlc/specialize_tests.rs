@@ -1,7 +1,9 @@
 #![cfg(test)]
 
+use super::VarRef;
 use super::run;
 use crate::ast::{Span, TypeName};
+use crate::builtins::by_id;
 use crate::tlc::{Def, DefMeta, Program, Term, TermId, TermIdSource, TermKind};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
@@ -52,14 +54,14 @@ fn test_specialize_sign_f32() {
         id: b.next_id(),
         ty: f32_ty.clone(),
         span: b.span(),
-        kind: TermKind::Var(crate::tlc::VarRef::Symbol(x_sym)),
+        kind: TermKind::Var(VarRef::Symbol(x_sym)),
     };
 
     let sign_var = Term {
         id: b.next_id(),
         ty: Type::Constructed(TypeName::Arrow, vec![f32_ty.clone(), f32_ty.clone()]),
         span: b.span(),
-        kind: TermKind::Var(crate::tlc::VarRef::Symbol(sign_sym)),
+        kind: TermKind::Var(VarRef::Symbol(sign_sym)),
     };
 
     let sign_call = Term {
@@ -94,12 +96,10 @@ fn test_specialize_sign_f32() {
     match &specialized.defs[0].body.kind {
         TermKind::App { func, .. } => {
             let name = match &func.kind {
-                TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
+                TermKind::Var(VarRef::Symbol(sym)) => {
                     specialized.symbols.get(*sym).expect("BUG: symbol not in table").clone()
                 }
-                TermKind::Var(crate::tlc::VarRef::Builtin { id, .. }) => {
-                    crate::builtins::by_id(*id).raw.surface_name.to_string()
-                }
+                TermKind::Var(VarRef::Builtin { id, .. }) => by_id(*id).raw.surface_name.to_string(),
                 _ => panic!("Expected Var, got {:?}", func.kind),
             };
             assert_eq!(name, "f32.sign");
@@ -123,14 +123,14 @@ fn test_specialize_min_i32() {
         id: b.next_id(),
         ty: i32_ty.clone(),
         span: b.span(),
-        kind: TermKind::Var(crate::tlc::VarRef::Symbol(a_sym)),
+        kind: TermKind::Var(VarRef::Symbol(a_sym)),
     };
 
     let b_var = Term {
         id: b.next_id(),
         ty: i32_ty.clone(),
         span: b.span(),
-        kind: TermKind::Var(crate::tlc::VarRef::Symbol(b_sym)),
+        kind: TermKind::Var(VarRef::Symbol(b_sym)),
     };
 
     let partial_ty = Type::Constructed(TypeName::Arrow, vec![i32_ty.clone(), i32_ty.clone()]);
@@ -140,7 +140,7 @@ fn test_specialize_min_i32() {
         id: b.next_id(),
         ty: func_ty,
         span: b.span(),
-        kind: TermKind::Var(crate::tlc::VarRef::Symbol(min_sym)),
+        kind: TermKind::Var(VarRef::Symbol(min_sym)),
     };
 
     let min_a_b = Term {
@@ -175,12 +175,10 @@ fn test_specialize_min_i32() {
     match &specialized.defs[0].body.kind {
         TermKind::App { func, args } => {
             let name = match &func.kind {
-                TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
+                TermKind::Var(VarRef::Symbol(sym)) => {
                     specialized.symbols.get(*sym).expect("BUG: symbol not in table").clone()
                 }
-                TermKind::Var(crate::tlc::VarRef::Builtin { id, .. }) => {
-                    crate::builtins::by_id(*id).raw.surface_name.to_string()
-                }
+                TermKind::Var(VarRef::Builtin { id, .. }) => by_id(*id).raw.surface_name.to_string(),
                 _ => panic!("Expected Var, got {:?}", func.kind),
             };
             assert_eq!(name, "i32.min");

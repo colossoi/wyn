@@ -3,6 +3,7 @@
 use super::*;
 use crate::ast::TypeName;
 use crate::egir::types::{EGraph, NodeId, PureOp, SkeletonTerminator};
+use crate::ssa::framework::BlockId;
 use crate::ssa::types::ConstantValue;
 use polytype::Type;
 use smallvec::smallvec;
@@ -55,11 +56,7 @@ fn build_condbranch_skel(
     cond: NodeId,
     then_arg: Option<NodeId>,
     else_arg: Option<NodeId>,
-) -> (
-    crate::ssa::framework::BlockId,
-    crate::ssa::framework::BlockId,
-    crate::ssa::framework::BlockId,
-) {
+) -> (BlockId, BlockId, BlockId) {
     let entry = graph.skeleton.entry;
     let then_bid = graph.skeleton.create_block();
     let else_bid = graph.skeleton.create_block();
@@ -140,11 +137,7 @@ fn build_merge_skel(
     graph: &mut EGraph,
     merge_arg_left: NodeId,
     merge_arg_right: NodeId,
-) -> (
-    crate::ssa::framework::BlockId,
-    crate::ssa::framework::BlockId,
-    NodeId,
-) {
+) -> (BlockId, BlockId, NodeId) {
     let entry = graph.skeleton.entry;
     let b1 = graph.skeleton.create_block();
     let b2 = graph.skeleton.create_block();

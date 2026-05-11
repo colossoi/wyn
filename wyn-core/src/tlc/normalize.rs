@@ -10,6 +10,7 @@
 //! f(map(g, xs))  =>  let tmp = map(g, xs) in f(tmp)
 //! ```
 
+use super::VarRef;
 use crate::SymbolTable;
 
 use super::{Def, Program, Term, TermIdSource, TermKind};
@@ -60,7 +61,7 @@ fn normalize_term(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdSo
                         id: term_ids.next_id(),
                         ty: arg_ty,
                         span,
-                        kind: TermKind::Var(crate::tlc::VarRef::Symbol(fresh)),
+                        kind: TermKind::Var(VarRef::Symbol(fresh)),
                     });
                 } else {
                     new_args.push(arg);

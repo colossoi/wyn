@@ -9,8 +9,10 @@
 //! T11 additionally verifies `required_params` — the subset of outer
 //! Lambda params that the restructured body actually references.
 
+use super::VarRef;
 use super::analyze_entry;
 use crate::ast::{self, Span, TypeName};
+use crate::tlc::SoacBody;
 use crate::tlc::{ArrayExpr, Def, DefMeta, Lambda, LoopKind, SoacOp, Term, TermId, TermIdSource, TermKind};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
@@ -77,7 +79,7 @@ impl B {
     }
 
     fn var(&mut self, sym: SymbolId, ty: Type<TypeName>) -> Term {
-        self.term(TermKind::Var(crate::tlc::VarRef::Symbol(sym)), ty)
+        self.term(TermKind::Var(VarRef::Symbol(sym)), ty)
     }
 
     fn let_(&mut self, name: SymbolId, name_ty: Type<TypeName>, rhs: Term, body: Term) -> Term {
@@ -111,7 +113,7 @@ impl B {
         };
         self.term(
             TermKind::Soac(SoacOp::Map {
-                lam: crate::tlc::SoacBody {
+                lam: SoacBody {
                     lam,
                     captures: vec![],
                 },
@@ -384,7 +386,7 @@ fn t11_required_params_closure() {
     };
     let body = b.term(
         TermKind::Soac(SoacOp::Map {
-            lam: crate::tlc::SoacBody {
+            lam: SoacBody {
                 lam,
                 captures: vec![],
             },
@@ -454,7 +456,7 @@ fn binding_registry_finds_storage_buffer_in_soac_input() {
     };
     let soac = b.term(
         TermKind::Soac(SoacOp::Map {
-            lam: crate::tlc::SoacBody {
+            lam: SoacBody {
                 lam,
                 captures: vec![],
             },
@@ -505,7 +507,7 @@ fn binding_registry_finds_nested_storage_buffers() {
     let zip = ArrayExpr::Zip(vec![sb_a, sb_b]);
     let soac = b.term(
         TermKind::Soac(SoacOp::Map {
-            lam: crate::tlc::SoacBody {
+            lam: SoacBody {
                 lam: inner_lam,
                 captures: vec![],
             },

@@ -5,13 +5,14 @@
 //! 2. The full pipeline works end-to-end with slices/ranges
 //! 3. Constant folding in slice indices works correctly
 
+use crate::Compiler;
 use crate::error::CompilerError;
 use crate::ssa::types::Program;
 
 /// Helper to run full pipeline through lowering, including desugar step
 fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
     let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = crate::Compiler::parse(input, &mut node_counter)?;
+    let parsed = Compiler::parse(input, &mut node_counter)?;
     let type_checked = parsed
         .desugar(&mut node_counter)?
         .resolve(&mut module_manager)?
@@ -45,7 +46,7 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
 /// Helper to run pipeline through SSA (checks desugar correctness)
 fn compile_through_ssa(input: &str) -> Result<Program, CompilerError> {
     let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = crate::Compiler::parse(input, &mut node_counter)?;
+    let parsed = Compiler::parse(input, &mut node_counter)?;
     let type_checked = parsed
         .desugar(&mut node_counter)?
         .resolve(&mut module_manager)?
@@ -495,7 +496,7 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     @[f32.i32(x), 0.0f32, 0.0f32, 1.0f32]
 "#;
     let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = crate::Compiler::parse(source, &mut node_counter).expect("parse");
+    let parsed = Compiler::parse(source, &mut node_counter).expect("parse");
     eprintln!("=== parse OK ===");
 
     let type_checked = parsed
@@ -556,7 +557,7 @@ def first(arr: []i32) i32 = arr[0]
 entry main(data: []i32) []i32 = [first(data)]
 "#;
     let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = crate::Compiler::parse(source, &mut node_counter).expect("parse");
+    let parsed = Compiler::parse(source, &mut node_counter).expect("parse");
     eprintln!("=== parse OK ===");
 
     let type_checked = parsed

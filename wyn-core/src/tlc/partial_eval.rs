@@ -3,6 +3,7 @@
 //! Simpler than NBE-style: collect application spines, evaluate args,
 //! apply when we have enough arguments (using arity metadata).
 
+use super::VarRef;
 use super::{Def, Lambda, Program, Term, TermIdSource, TermKind};
 use crate::ast::{BinaryOp, Span, TypeName, UnaryOp};
 use crate::types::TypeExt;
@@ -138,7 +139,7 @@ impl PartialEvaluator {
             }
 
             // Variable lookup
-            TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
+            TermKind::Var(VarRef::Symbol(sym)) => {
                 let sym = *sym;
                 if let Some(val) = self.env.get(&sym) {
                     val.clone()
@@ -161,7 +162,7 @@ impl PartialEvaluator {
             }
 
             // Builtin reference: not constant-foldable on its own.
-            TermKind::Var(crate::tlc::VarRef::Builtin { .. }) => Value::Unknown(term.clone()),
+            TermKind::Var(VarRef::Builtin { .. }) => Value::Unknown(term.clone()),
 
             // Let binding
             TermKind::Let { name, rhs, body, .. } => {
@@ -286,9 +287,9 @@ impl PartialEvaluator {
                 }
             }
 
-            TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => self.apply_var(*sym, args, original),
+            TermKind::Var(VarRef::Symbol(sym)) => self.apply_var(*sym, args, original),
 
-            TermKind::Var(crate::tlc::VarRef::Builtin { .. }) => {
+            TermKind::Var(VarRef::Builtin { .. }) => {
                 // Catalog builtin — opaque to partial_eval, but we
                 // still residualize via the args so let-binding
                 // substitutions performed by the inner `eval(arg)`
@@ -352,7 +353,7 @@ impl PartialEvaluator {
         // Check if this is a let-bound variable aliasing a function name
         // (intrinsic, builtin, or top-level def). Handles `let f = f32.sin in f x`.
         if let Some(Value::Unknown(Term {
-            kind: TermKind::Var(crate::tlc::VarRef::Symbol(real_sym)),
+            kind: TermKind::Var(VarRef::Symbol(real_sym)),
             ..
         })) = self.env.get(&sym)
         {
@@ -652,7 +653,7 @@ impl PartialEvaluator {
     fn reify_partial(&mut self, sym: SymbolId, args: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {
         let param_types = self.defs.get(&sym).map(|d| extract_param_types(&d.ty));
         let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
-        let func_term = self.mk_term(ty.clone(), span, TermKind::Var(crate::tlc::VarRef::Symbol(sym)));
+        let func_term = self.mk_term(ty.clone(), span, TermKind::Var(VarRef::Symbol(sym)));
         let arg_terms: Vec<Term> = args
             .into_iter()
             .enumerate()
@@ -678,7 +679,7 @@ impl PartialEvaluator {
         let func_term = self.mk_term(
             original.ty.clone(),
             original.span,
-            TermKind::Var(crate::tlc::VarRef::Symbol(sym)),
+            TermKind::Var(VarRef::Symbol(sym)),
         );
         let arg_terms: Vec<Term> = args
             .into_iter()

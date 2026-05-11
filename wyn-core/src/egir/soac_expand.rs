@@ -6,6 +6,7 @@
 //! the final `FuncBody`. Every variant must be handled here — there is no
 //! fallback. Any `Pending` left in the skeleton at elaboration time is a bug.
 
+use crate::builtins::catalog;
 use std::collections::HashMap;
 
 use crate::ssa::framework::BlockId;
@@ -309,7 +310,7 @@ fn expand_one(
                     let captures: Vec<NodeId> = se.operand_nodes[n_inputs..].to_vec();
                     let out_arr_ty = graph.types[&result_nid].clone();
 
-                    let uninit_id = crate::builtins::catalog().known().uninit;
+                    let uninit_id = catalog().known().uninit;
                     let init_out_nid = graph.intern_pure(
                         PureOp::Intrinsic {
                             id: uninit_id,
@@ -865,7 +866,7 @@ fn build_scan_loop(
     // Preheader initial for the output array: a pure `_w_intrinsic_uninit` call
     // returning an array of the result type. The per-iteration array_with chain
     // fills it. (The SPIR-V backend recognizes the pattern for in-place update.)
-    let uninit_id = crate::builtins::catalog().known().uninit;
+    let uninit_id = catalog().known().uninit;
     let init_out_nid = graph.intern_pure(
         PureOp::Intrinsic {
             id: uninit_id,
@@ -1159,7 +1160,7 @@ fn emit_length(
         );
         return emit_length(graph, first_arr, &components[0], i32_ty);
     }
-    let length_id = crate::builtins::catalog().known().length;
+    let length_id = catalog().known().length;
     graph.intern_pure(
         PureOp::Intrinsic {
             id: length_id,
@@ -1315,7 +1316,7 @@ fn emit_write_element(
         );
     }
 
-    let inplace_id = crate::builtins::catalog().known().array_with_in_place;
+    let inplace_id = catalog().known().array_with_in_place;
     graph.intern_pure(
         PureOp::Intrinsic {
             id: inplace_id,

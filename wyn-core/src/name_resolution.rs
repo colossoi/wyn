@@ -336,7 +336,7 @@ impl NameResolution {
 /// schemes.
 pub fn build_name_resolution(
     program: &Program,
-    module_manager: &crate::module_manager::ModuleManager,
+    module_manager: &ModuleManager,
     catalog: &BuiltinCatalog,
 ) -> NameResolution {
     let mut nr = NameResolution::default();

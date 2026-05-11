@@ -4,6 +4,7 @@
 
 #[cfg(test)]
 mod lowering_tests;
+use crate::builtins::catalog;
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::Span;
@@ -1298,7 +1299,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 // because their func is a SymbolId allocated for the
                 // specialized name. Compiler-internal intrinsics
                 // (`_w_intrinsic_*`) now go through `InstKind::Intrinsic`.
-                if let Some(def) = crate::builtins::catalog().lookup_by_any_name(func) {
+                if let Some(def) = catalog().lookup_by_any_name(func) {
                     let builtin_impl = &def.overloads()[0].lowering;
                     self.lower_builtin_call(def.id, builtin_impl, func, args, &arg_ids, result_ty, inst)?
                 } else if let Some(&func_id) = self.constructor.functions.get(func) {
@@ -1358,7 +1359,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 // dispatch via the BuiltinLowering value or the entry
                 // id; the rest still fall through to the name-keyed
                 // `lower_intrinsic` until they're promoted.
-                let known = crate::builtins::catalog().known();
+                let known = catalog().known();
                 let typed_dispatch = matches!(
                     lowering,
                     BuiltinLowering::PrimOp(_)
@@ -2341,7 +2342,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, *ext, operands)?)
             }
             BuiltinLowering::ByBuiltinId => {
-                let known = crate::builtins::catalog().known();
+                let known = catalog().known();
                 if id == known.uninit {
                     // Zero-initialized value (OpConstantNull), cached by type.
                     if let Some(&cached) = self.constructor.null_const_cache.get(&result_ty) {

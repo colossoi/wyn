@@ -1,8 +1,8 @@
 #![cfg(test)]
 
-use super::{Monomorphizer, SpecKey, Substitution, format_type_compact};
+use super::{SpecKey, Substitution, format_type_compact};
 use crate::ast::{Span, TypeName};
-use crate::tlc::{Term, TermId, TermIdSource, TermKind};
+use crate::tlc::{TermId, TermIdSource};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
 

@@ -8,6 +8,7 @@
 //! This is intentionally limited to integer constants for simplicity.
 //! Float and boolean constants can be added later if needed.
 
+use crate::ast::UnaryOp;
 use crate::ast::{
     Decl, Declaration, ExprKind, Expression, IfExpr, LetInExpr, LoopExpr, LoopForm, MatchExpr, Program,
     RangeExpr,
@@ -397,7 +398,7 @@ impl AstConstFolder {
             expr.kind = match binop.op.as_str() {
                 // 0 - x → -x
                 "-" if Self::is_zero(&lhs) => {
-                    let unop = crate::ast::UnaryOp { op: binop.op };
+                    let unop = UnaryOp { op: binop.op };
                     ExprKind::UnaryOp(unop, rhs)
                 }
                 // 0 + x → x
@@ -413,12 +414,12 @@ impl AstConstFolder {
                 "*" | "/" if Self::is_one(&rhs) => lhs.kind,
                 // -1 * x → -x
                 "*" if Self::is_neg_one(&lhs) => {
-                    let unop = crate::ast::UnaryOp { op: "-".to_string() };
+                    let unop = UnaryOp { op: "-".to_string() };
                     ExprKind::UnaryOp(unop, rhs)
                 }
                 // x * -1 → -x
                 "*" if Self::is_neg_one(&rhs) => {
-                    let unop = crate::ast::UnaryOp { op: "-".to_string() };
+                    let unop = UnaryOp { op: "-".to_string() };
                     ExprKind::UnaryOp(unop, lhs)
                 }
                 // Shouldn't reach here, but restore original if we do

@@ -6,7 +6,10 @@
 //!
 //! Loop creation and storage lowering stay in SSA (`to_ssa` + `soac_lower`).
 
+use super::VarRef;
+use super::closure_convert::collect_free_vars;
 use crate::ast::{self, TypeName};
+use crate::builtins::catalog;
 use crate::egir::from_tlc::AUTO_STORAGE_SET;
 use crate::interface::{self, Attribute};
 use crate::pipeline_descriptor::*;
@@ -252,7 +255,7 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
                     required_params,
                 });
             }
-            TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
+            TermKind::Var(VarRef::Symbol(sym)) => {
                 // Var-follow: the tail is an alias. If `sym` is an entry
                 // param, the entry returns a param — not a SOAC, reject.
                 if scope.is_lambda_param(sym) {
@@ -293,7 +296,7 @@ fn compute_required_params(
     // Each prefix RHS is evaluated with all *previous* prefix names in
     // scope. The SOAC sees the full prefix in scope.
     for (name, _ty, rhs) in prefix_lets {
-        super::closure_convert::collect_free_vars(
+        collect_free_vars(
             rhs,
             &bound,
             &empty_top,
@@ -311,7 +314,7 @@ fn compute_required_params(
         span: ast::Span::new(0, 0, 0, 0),
         kind: TermKind::Soac(soac.original.clone()),
     };
-    super::closure_convert::collect_free_vars(
+    collect_free_vars(
         &soac_term,
         &bound,
         &empty_top,
@@ -323,9 +326,11 @@ fn compute_required_params(
 
     let free_syms: HashSet<SymbolId> = free
         .iter()
-        .filter_map(|t| {
-            if let TermKind::Var(crate::tlc::VarRef::Symbol(s)) = &t.kind { Some(*s) } else { None }
-        })
+        .filter_map(
+            |t| {
+                if let TermKind::Var(VarRef::Symbol(s)) = &t.kind { Some(*s) } else { None }
+            },
+        )
         .collect();
     captured_params.iter().filter(|(s, _)| free_syms.contains(s)).cloned().collect()
 }
@@ -689,7 +694,7 @@ fn maybe_hoist(
 
     // Rewrite the let RHS to a storage load at position 0.
     intrinsic_term_by_id(
-        crate::builtins::catalog().known().storage_index,
+        catalog().known().storage_index,
         vec![
             uint_lit(binding.0 as u64, span),
             uint_lit(binding.1 as u64, span),
@@ -715,7 +720,7 @@ fn rhs_references_entry_param(
     let empty_defs: HashSet<String> = HashSet::new();
     let mut free: Vec<Term> = Vec::new();
     let mut seen: HashSet<SymbolId> = HashSet::new();
-    super::closure_convert::collect_free_vars(
+    collect_free_vars(
         term,
         &bound,
         &empty_top,
@@ -724,9 +729,7 @@ fn rhs_references_entry_param(
         &mut free,
         &mut seen,
     );
-    free.iter().any(
-        |t| matches!(&t.kind, TermKind::Var(crate::tlc::VarRef::Symbol(s)) if entry_params.contains(s)),
-    )
+    free.iter().any(|t| matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if entry_params.contains(s)))
 }
 
 /// Panic if any free variable of `term` has a type that carries an
@@ -744,7 +747,7 @@ fn assert_hoist_free_vars_are_grounded(
     let empty_defs: HashSet<String> = HashSet::new();
     let mut free: Vec<Term> = Vec::new();
     let mut seen: HashSet<SymbolId> = HashSet::new();
-    super::closure_convert::collect_free_vars(
+    collect_free_vars(
         term,
         &bound,
         &empty_top,
@@ -754,7 +757,7 @@ fn assert_hoist_free_vars_are_grounded(
         &mut seen,
     );
     for t in &free {
-        if let TermKind::Var(crate::tlc::VarRef::Symbol(sym)) = &t.kind {
+        if let TermKind::Var(VarRef::Symbol(sym)) = &t.kind {
             if entry_params.contains(sym) {
                 continue;
             }
@@ -1114,7 +1117,7 @@ fn build_two_phase_entries(
     let phase2_soac_term = soac_term(phase2_soac, elem_type.clone(), span);
     let r_sym = program.symbols.alloc("_par_out".into());
     let phase2_store = intrinsic_term_by_id(
-        crate::builtins::catalog().known().storage_store,
+        catalog().known().storage_store,
         vec![
             uint_lit(result_binding.0 as u64, span),
             uint_lit(result_binding.1 as u64, span),
@@ -1423,12 +1426,7 @@ impl ChunkArithmetic {
         let body = let_term(self.input_len_sym, ity.clone(), input_len_term, body, span);
         let body = let_term(self.total_sym, ity, total_lit, body, span);
 
-        let tid_rhs = intrinsic_term_by_id(
-            crate::builtins::catalog().known().thread_id,
-            vec![],
-            u32_ty(),
-            span,
-        );
+        let tid_rhs = intrinsic_term_by_id(catalog().known().thread_id, vec![], u32_ty(), span);
         let_term(self.tid_sym, u32_ty(), tid_rhs, body, span)
     }
 }
@@ -1564,7 +1562,7 @@ fn invoke_soac_lambda(sb: &super::SoacBody, args: Vec<Term>, span: ast::Span) ->
 
 fn emit_storage_load(buf: &BufferRef, index: Term, span: ast::Span, _program: &mut Program) -> Term {
     intrinsic_term_by_id(
-        crate::builtins::catalog().known().storage_index,
+        catalog().known().storage_index,
         vec![
             uint_lit(buf.set as u64, span),
             uint_lit(buf.binding as u64, span),
@@ -1584,7 +1582,7 @@ fn emit_storage_store(
 ) -> Term {
     let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
     intrinsic_term_by_id(
-        crate::builtins::catalog().known().storage_store,
+        catalog().known().storage_store,
         vec![
             uint_lit(buf.set as u64, span),
             uint_lit(buf.binding as u64, span),
@@ -1598,7 +1596,7 @@ fn emit_storage_store(
 
 fn emit_storage_len(buf: &BufferRef, span: ast::Span, _program: &mut Program) -> Term {
     intrinsic_term_by_id(
-        crate::builtins::catalog().known().storage_len,
+        catalog().known().storage_len,
         vec![uint_lit(buf.set as u64, span), uint_lit(buf.binding as u64, span)],
         u32_ty(),
         span,
@@ -2054,7 +2052,7 @@ fn build_chunked_soac_body(
         let tid_var = chunk.tid_u32(span);
         let r_var = var_term(r_sym, result_ty.clone(), span);
         let store = intrinsic_term_by_id(
-            crate::builtins::catalog().known().storage_store,
+            catalog().known().storage_store,
             vec![
                 uint_lit(set as u64, span),
                 uint_lit(binding as u64, span),
@@ -2155,7 +2153,7 @@ fn var_term(sym: SymbolId, ty: Type<TypeName>, span: ast::Span) -> Term {
         id: TermId(0),
         ty,
         span,
-        kind: TermKind::Var(crate::tlc::VarRef::Symbol(sym)),
+        kind: TermKind::Var(VarRef::Symbol(sym)),
     }
 }
 
@@ -2186,7 +2184,7 @@ fn intrinsic_term_by_id(
         id: TermId(0),
         ty: Type::Variable(0),
         span,
-        kind: TermKind::Var(crate::tlc::VarRef::Builtin { id, overload_idx: 0 }),
+        kind: TermKind::Var(VarRef::Builtin { id, overload_idx: 0 }),
     };
     Term {
         id: TermId(0),
@@ -2210,7 +2208,7 @@ fn intrinsic_term(
     // passes dispatch structurally. The assert mirrors `tlc::build_call`
     // and `buffer_specialize::make_app`: synthesised IR sites target
     // single-overload entries.
-    let func_var = if let Some(def) = crate::builtins::catalog().lookup_by_any_name(name) {
+    let func_var = if let Some(def) = catalog().lookup_by_any_name(name) {
         assert_eq!(
             def.overloads().len(),
             1,
@@ -2218,7 +2216,7 @@ fn intrinsic_term(
              caller must specify overload_idx explicitly",
             name
         );
-        crate::tlc::VarRef::Builtin {
+        VarRef::Builtin {
             id: def.id,
             overload_idx: 0,
         }
@@ -2230,7 +2228,7 @@ fn intrinsic_term(
             program.def_syms.insert(name.to_string(), sym);
             sym
         };
-        crate::tlc::VarRef::Symbol(sym)
+        VarRef::Symbol(sym)
     };
     let func_term = Term {
         id: TermId(0),

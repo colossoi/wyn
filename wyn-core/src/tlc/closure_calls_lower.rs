@@ -14,6 +14,7 @@
 //! forbids nested `App` in func position): it additionally rejects
 //! every non-`Var` func.
 
+use super::VarRef;
 use super::closure_convert::{CallableValue, ClosureInfo};
 use super::{ArrayExpr, Lambda, LoopKind, Program, SoacOp, Term, TermIdSource, TermKind};
 use crate::{SymbolId, SymbolTable};
@@ -65,7 +66,7 @@ fn walk(
                 func_kind: discriminant_name(&func.kind),
             });
         }
-        if let TermKind::Var(crate::tlc::VarRef::Symbol(target)) = &func.kind {
+        if let TermKind::Var(VarRef::Symbol(target)) = &func.kind {
             let expected = arities
                 .get(target)
                 .copied()
@@ -175,7 +176,7 @@ impl<'a> CallLowerer<'a> {
                 let new_func = self.lower_term(*func);
                 let mut new_args: Vec<Term> = args.into_iter().map(|a| self.lower_term(a)).collect();
 
-                if let TermKind::Var(crate::tlc::VarRef::Symbol(sym)) = &new_func.kind {
+                if let TermKind::Var(VarRef::Symbol(sym)) = &new_func.kind {
                     if let Some(CallableValue::Closure {
                         code,
                         captures,
@@ -195,7 +196,7 @@ impl<'a> CallLowerer<'a> {
                                 id: self.term_ids.next_id(),
                                 ty: new_func.ty.clone(),
                                 span: new_func.span,
-                                kind: TermKind::Var(crate::tlc::VarRef::Symbol(*code)),
+                                kind: TermKind::Var(VarRef::Symbol(*code)),
                             };
                             return Term {
                                 id: self.term_ids.next_id(),

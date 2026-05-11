@@ -12,6 +12,7 @@
 //! let-alias tracking, no four-source extract — those concerns are
 //! handled by `closure_convert` upstream.
 
+use super::VarRef;
 use super::closure_convert::{CallableValue, ClosureInfo};
 use super::{
     ArrayExpr, Def, DefMeta, Lambda, LoopKind, Place, Program, SoacOp, Term, TermIdSource, TermKind,
@@ -519,11 +520,11 @@ pub(super) fn substitute_var(
     term_ids: &mut TermIdSource,
 ) -> Term {
     match &term.kind {
-        TermKind::Var(crate::tlc::VarRef::Symbol(sym)) if *sym == old_sym => Term {
+        TermKind::Var(VarRef::Symbol(sym)) if *sym == old_sym => Term {
             id: term_ids.next_id(),
             ty: term.ty.clone(),
             span: term.span,
-            kind: TermKind::Var(crate::tlc::VarRef::Symbol(new_sym)),
+            kind: TermKind::Var(VarRef::Symbol(new_sym)),
         },
 
         TermKind::Var(_)
@@ -959,7 +960,7 @@ impl<'a> HofSpecializer<'a> {
                 let new_func = self.rewrite_term(*func);
                 let new_args: Vec<Term> = args.into_iter().map(|a| self.rewrite_term(a)).collect();
 
-                if let TermKind::Var(crate::tlc::VarRef::Symbol(sym)) = &new_func.kind {
+                if let TermKind::Var(VarRef::Symbol(sym)) = &new_func.kind {
                     let hof_sym = *sym;
                     if let Some(hof_info) = self.hof_info.get(&hof_sym).cloned() {
                         for &func_param_idx in &hof_info.func_param_indices {
@@ -967,7 +968,7 @@ impl<'a> HofSpecializer<'a> {
                                 continue;
                             }
                             let arg_sym = match &new_args[func_param_idx].kind {
-                                TermKind::Var(crate::tlc::VarRef::Symbol(s)) => *s,
+                                TermKind::Var(VarRef::Symbol(s)) => *s,
                                 _ => continue,
                             };
                             let (code, captures) = match self.closure_info.resolve_callable(arg_sym) {
@@ -1203,7 +1204,7 @@ impl<'a> HofSpecializer<'a> {
         let mut capture_subst: Vec<(SymbolId, SymbolId)> = Vec::with_capacity(captures.len());
         for cap_term in captures {
             let outer_sym = match &cap_term.kind {
-                TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => *sym,
+                TermKind::Var(VarRef::Symbol(sym)) => *sym,
                 _ => panic!("BUG: capture term is not a Var: {:?}", cap_term.kind),
             };
             let outer_name =

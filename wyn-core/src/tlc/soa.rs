@@ -13,9 +13,11 @@
 //!
 //! Runs before fusion and defunctionalization.
 
+use super::VarRef;
 use super::{ArrayExpr, Def, Lambda, LoopKind, Place, Program, SoacOp, Term, TermIdSource, TermKind};
 use crate::SymbolTable;
 use crate::ast::{Span, TypeName};
+use crate::builtins::{by_id, catalog};
 use crate::types::TypeExt;
 use polytype::Type;
 
@@ -366,7 +368,7 @@ impl SoaTransformer {
         new_result_ty: Type<TypeName>,
         span: Span,
     ) -> Term {
-        let known = crate::builtins::catalog().known();
+        let known = catalog().known();
         if let Some(id) = crate::tlc::var_term_builtin_id(func, &self.symbols) {
             // array_with(arr, i, val) where arr was [n](A,B)
             if (id == known.array_with || id == known.array_with_in_place) && args.len() == 3 {
@@ -386,10 +388,10 @@ impl SoaTransformer {
             if id == known.uninit && args.is_empty() {
                 if is_array_of_tuple(orig_result_ty).is_some() {
                     let sym = match &func.kind {
-                        TermKind::Var(crate::tlc::VarRef::Symbol(s)) => *s,
+                        TermKind::Var(VarRef::Symbol(s)) => *s,
                         // For Builtin form, we need a Symbol for `rewrite_uninit_aot`.
                         // Look up the surface name and intern it.
-                        _ => self.symbols.alloc(crate::builtins::by_id(id).raw.surface_name.to_string()),
+                        _ => self.symbols.alloc(by_id(id).raw.surface_name.to_string()),
                     };
                     let soa_ty = soa_type(orig_result_ty);
                     return self.rewrite_uninit_aot(&soa_ty, sym, span);
@@ -401,8 +403,8 @@ impl SoaTransformer {
                 let arr_orig_ty = &args[0].ty;
                 if is_array_of_tuple(arr_orig_ty).is_some() {
                     let sym = match &func.kind {
-                        TermKind::Var(crate::tlc::VarRef::Symbol(s)) => *s,
-                        _ => self.symbols.alloc(crate::builtins::by_id(id).raw.surface_name.to_string()),
+                        TermKind::Var(VarRef::Symbol(s)) => *s,
+                        _ => self.symbols.alloc(by_id(id).raw.surface_name.to_string()),
                     };
                     let new_arr = self.transform_term(&args[0]);
                     return self.rewrite_length_aot(&new_arr, sym, new_result_ty, span);
@@ -554,20 +556,12 @@ impl SoaTransformer {
                     .iter()
                     .map(|ct| {
                         // Each component is a call to _w_intrinsic_uninit with the component type
-                        self.mk_term(
-                            ct.clone(),
-                            span,
-                            TermKind::Var(crate::tlc::VarRef::Symbol(uninit_sym)),
-                        )
+                        self.mk_term(ct.clone(), span, TermKind::Var(VarRef::Symbol(uninit_sym)))
                     })
                     .collect();
                 self.mk_tuple(components, soa_ty.clone(), span)
             }
-            _ => self.mk_term(
-                soa_ty.clone(),
-                span,
-                TermKind::Var(crate::tlc::VarRef::Symbol(uninit_sym)),
-            ),
+            _ => self.mk_term(soa_ty.clone(), span, TermKind::Var(VarRef::Symbol(uninit_sym))),
         }
     }
 
@@ -588,11 +582,7 @@ impl SoaTransformer {
         let first_arr = self.mk_tuple_proj(arr.clone(), 0, first_comp_ty, span);
 
         let func_ty = Type::Constructed(TypeName::Arrow, vec![first_arr.ty.clone(), result_ty.clone()]);
-        let func = self.mk_term(
-            func_ty,
-            span,
-            TermKind::Var(crate::tlc::VarRef::Symbol(length_sym)),
-        );
+        let func = self.mk_term(func_ty, span, TermKind::Var(VarRef::Symbol(length_sym)));
         self.mk_term(
             result_ty,
             span,
@@ -951,7 +941,7 @@ impl SoaTransformer {
         tuple_ty: &Type<TypeName>,
         span: Span,
     ) -> Term {
-        if let TermKind::Var(crate::tlc::VarRef::Symbol(sym)) = &term.kind {
+        if let TermKind::Var(VarRef::Symbol(sym)) = &term.kind {
             if *sym == old_sym {
                 return self.build_tuple_reconstruction(new_params, tuple_ty, span);
             }
@@ -994,7 +984,7 @@ impl SoaTransformer {
                 // Leaf -- single param.
                 assert_eq!(new_params.len(), 1);
                 let (sym, ty) = &new_params[0];
-                self.mk_term(ty.clone(), span, TermKind::Var(crate::tlc::VarRef::Symbol(*sym)))
+                self.mk_term(ty.clone(), span, TermKind::Var(VarRef::Symbol(*sym)))
             }
         }
     }
@@ -1051,14 +1041,14 @@ impl SoaTransformer {
         result_ty: Type<TypeName>,
         span: Span,
     ) -> Term {
-        let aw_id = crate::builtins::catalog().known().array_with;
+        let aw_id = catalog().known().array_with;
         let t3 = Type::Constructed(TypeName::Arrow, vec![val.ty.clone(), result_ty.clone()]);
         let t2 = Type::Constructed(TypeName::Arrow, vec![idx.ty.clone(), t3.clone()]);
         let t1 = Type::Constructed(TypeName::Arrow, vec![arr.ty.clone(), t2.clone()]);
         let func = self.mk_term(
             t1,
             span,
-            TermKind::Var(crate::tlc::VarRef::Builtin {
+            TermKind::Var(VarRef::Builtin {
                 id: aw_id,
                 overload_idx: 0,
             }),

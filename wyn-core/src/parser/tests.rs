@@ -977,7 +977,7 @@ fn test_parse_unique_type() {
     assert_eq!(decl.params.len(), 1);
     let param_ty = decl.params[0].pattern_type().expect("Expected typed parameter");
     assert!(types::is_unique(param_ty));
-    assert_eq!(types::strip_unique(param_ty), types::i32());
+    assert_eq!(types::strip_unique(param_ty), crate::types::i32());
 }
 
 #[test]
@@ -989,7 +989,7 @@ fn test_parse_unique_array_type() {
     assert!(types::is_unique(param_ty));
     assert_eq!(
         types::strip_unique(param_ty),
-        types::sized_array_placeholder(3, types::f32())
+        crate::types::sized_array_placeholder(3, crate::types::f32())
     );
 }
 
@@ -1003,7 +1003,10 @@ fn test_parse_nested_unique() {
     assert!(types::is_unique(param_ty));
     assert_eq!(
         types::strip_unique(param_ty),
-        types::sized_array_placeholder(2, types::sized_array_placeholder(3, types::i32()))
+        crate::types::sized_array_placeholder(
+            2,
+            crate::types::sized_array_placeholder(3, crate::types::i32())
+        )
     );
 }
 
@@ -1400,7 +1403,7 @@ fn test_parse_pattern_typed() {
                 _ => panic!("Expected Name pattern"),
             }
 
-            assert_eq!(ty, types::i32(), "Expected i32 type");
+            assert_eq!(ty, crate::types::i32(), "Expected i32 type");
         }
         _ => panic!("Expected Typed pattern, got {:?}", pattern.kind),
     }

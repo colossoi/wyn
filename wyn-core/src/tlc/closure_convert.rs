@@ -13,6 +13,7 @@
 //! lambda lifting and free-variable analysis. HOF specialization and
 //! call-site capture threading are downstream concerns (phases 2 and 3).
 
+use super::VarRef;
 use super::{ArrayExpr, Def, DefMeta, Lambda, LoopKind, Program, SoacOp, Term, TermIdSource, TermKind};
 use crate::ast::{Span, TypeName};
 use crate::{SymbolId, SymbolTable};
@@ -73,7 +74,7 @@ pub fn build_app_call(
         id: term_ids.next_id(),
         ty: fn_ty,
         span,
-        kind: TermKind::Var(crate::tlc::VarRef::Symbol(func_sym)),
+        kind: TermKind::Var(VarRef::Symbol(func_sym)),
     };
 
     if args.is_empty() {
@@ -187,7 +188,7 @@ pub fn collect_free_vars(
     seen: &mut HashSet<SymbolId>,
 ) {
     match &term.kind {
-        TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
+        TermKind::Var(VarRef::Symbol(sym)) => {
             let name = symbols.get(*sym).expect("BUG: symbol not in table");
             if !bound.contains(sym)
                 && !top_level.contains(sym)
@@ -263,7 +264,7 @@ pub fn collect_free_vars(
             }
             collect_free_vars(body, &inner_bound, top_level, known_defs, symbols, free, seen);
         }
-        TermKind::Var(crate::tlc::VarRef::Builtin { .. })
+        TermKind::Var(VarRef::Builtin { .. })
         | TermKind::IntLit(_)
         | TermKind::FloatLit(_)
         | TermKind::BoolLit(_)
@@ -542,7 +543,7 @@ fn check_array_expr_envelopes(
 }
 
 fn is_lifted_body(body: &Term, top_level: &HashSet<SymbolId>) -> bool {
-    matches!(&body.kind, TermKind::Var(crate::tlc::VarRef::Symbol(sym)) if top_level.contains(sym))
+    matches!(&body.kind, TermKind::Var(VarRef::Symbol(sym)) if top_level.contains(sym))
 }
 
 // =============================================================================
@@ -712,7 +713,7 @@ impl<'a> ClosureConverter<'a> {
                 // identifier) into its captures list, which gets frozen
                 // in `callable_values`. Threading that stale name into
                 // call sites later yields a dangling reference.
-                if let TermKind::Var(crate::tlc::VarRef::Symbol(target_sym)) = &new_rhs.kind {
+                if let TermKind::Var(VarRef::Symbol(target_sym)) = &new_rhs.kind {
                     if self.callable_values.contains_key(target_sym) {
                         let target = *target_sym;
                         let substituted_body =
@@ -903,7 +904,7 @@ impl<'a> ClosureConverter<'a> {
             let cap_params: Vec<(SymbolId, Type<TypeName>)> = captures
                 .iter()
                 .map(|cap_term| match &cap_term.kind {
-                    TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => (*sym, cap_term.ty.clone()),
+                    TermKind::Var(VarRef::Symbol(sym)) => (*sym, cap_term.ty.clone()),
                     other => panic!(
                         "compute_free_vars contract violated: capture is not a Var: {:?}",
                         other
@@ -934,7 +935,7 @@ impl<'a> ClosureConverter<'a> {
             id: self.term_ids.next_id(),
             ty,
             span,
-            kind: TermKind::Var(crate::tlc::VarRef::Symbol(lifted_sym)),
+            kind: TermKind::Var(VarRef::Symbol(lifted_sym)),
         };
         (var_term, captures)
     }
@@ -965,14 +966,14 @@ impl<'a> ClosureConverter<'a> {
         let (var_term, capture_terms) = self.lift_lambda(lam_term);
 
         let lifted_sym = match &var_term.kind {
-            TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => *sym,
+            TermKind::Var(VarRef::Symbol(sym)) => *sym,
             _ => panic!("BUG: lift_lambda did not return Var"),
         };
 
         let captures: Vec<(SymbolId, Type<TypeName>, Term)> = capture_terms
             .into_iter()
             .map(|t| match &t.kind {
-                TermKind::Var(crate::tlc::VarRef::Symbol(s)) => (*s, t.ty.clone(), t.clone()),
+                TermKind::Var(VarRef::Symbol(s)) => (*s, t.ty.clone(), t.clone()),
                 _ => panic!("BUG: capture term is not a Var: {:?}", t.kind),
             })
             .collect();
@@ -981,7 +982,7 @@ impl<'a> ClosureConverter<'a> {
             id: self.term_ids.next_id(),
             ty: var_term.ty.clone(),
             span,
-            kind: TermKind::Var(crate::tlc::VarRef::Symbol(lifted_sym)),
+            kind: TermKind::Var(VarRef::Symbol(lifted_sym)),
         };
 
         super::SoacBody {
@@ -1111,7 +1112,7 @@ impl<'a> ClosureConverter<'a> {
         let mut seen: HashSet<SymbolId> = result
             .iter()
             .filter_map(|t| match &t.kind {
-                TermKind::Var(crate::tlc::VarRef::Symbol(s)) => Some(*s),
+                TermKind::Var(VarRef::Symbol(s)) => Some(*s),
                 _ => None,
             })
             .collect();
@@ -1128,7 +1129,7 @@ impl<'a> ClosureConverter<'a> {
             };
             for cap_term in captures {
                 let cap_sym = match &cap_term.kind {
-                    TermKind::Var(crate::tlc::VarRef::Symbol(s)) => *s,
+                    TermKind::Var(VarRef::Symbol(s)) => *s,
                     _ => continue,
                 };
                 if bound.contains(&cap_sym) || seen.contains(&cap_sym) {

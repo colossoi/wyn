@@ -9,7 +9,9 @@ mod ssa_lowering_tests;
 
 use crate::ast::{Span, TypeName};
 use crate::builtins::BuiltinId;
+use crate::builtins::catalog;
 use crate::builtins::lowering::{BuiltinLowering, PrimOp};
+use crate::error::CompilerError;
 use crate::error::Result;
 use crate::lowering_common::ShaderStage;
 use crate::ssa::types::{ConstantValue, FuncBody, InstKind, ValueId, ValueRef, WynInstNode};
@@ -334,9 +336,7 @@ impl<'a> LowerCtx<'a> {
             .entry_points
             .iter()
             .find(|e| matches!(e.execution_model, ExecutionModel::Fragment))
-            .ok_or_else(|| {
-                crate::error::CompilerError::GlslError("No fragment entry point found".to_string(), None)
-            })?;
+            .ok_or_else(|| CompilerError::GlslError("No fragment entry point found".to_string(), None))?;
 
         // Clear state
         self.tuple_structs.clear();
@@ -465,7 +465,7 @@ impl<'a> LowerCtx<'a> {
 
         // Find and lower entry point
         let entry = self.program.entry_points.iter().find(|e| e.name == entry_name).ok_or_else(|| {
-            crate::error::CompilerError::GlslError(format!("Entry point '{}' not found", entry_name), None)
+            CompilerError::GlslError(format!("Entry point '{}' not found", entry_name), None)
         })?;
 
         self.lower_entry_point(entry, stage, &mut code)?;
@@ -540,9 +540,7 @@ impl<'a> LowerCtx<'a> {
             for &inst_id in &block.insts {
                 let inst = body.get_inst(inst_id);
                 if let InstKind::Call { func, .. } = &inst.data {
-                    if self.func_index.contains_key(func)
-                        && crate::builtins::catalog().lookup_lowering(func).is_none()
-                    {
+                    if self.func_index.contains_key(func) && catalog().lookup_lowering(func).is_none() {
                         self.collect_deps_recursive(func, deps, visited)?;
                     }
                 }
@@ -1191,7 +1189,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 let arg_strs = arg_strs?;
 
                 // Check if it's a builtin
-                if let Some(def) = crate::builtins::catalog().lookup_by_any_name(func) {
+                if let Some(def) = catalog().lookup_by_any_name(func) {
                     let impl_ = def.overloads()[0].lowering.clone();
                     self.lower_builtin_call(
                         def.id,
@@ -1330,12 +1328,12 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
     /// generic path), `false` otherwise.
     fn try_emit_array_intrinsic(&mut self, inst: &WynInstNode, output: &mut String) -> Result<bool> {
         use crate::ssa::types::InstKind;
-        let known = crate::builtins::catalog().known();
+        let known = catalog().known();
         let (id, args) = match &inst.data {
             InstKind::Intrinsic { id, args, .. } => (*id, args),
             // Legacy: catalog-named Call instructions (synthesised paths
             // that haven't been migrated to `Var(Builtin)` yet).
-            InstKind::Call { func, args } => match crate::builtins::catalog().lookup_by_any_name(func) {
+            InstKind::Call { func, args } => match catalog().lookup_by_any_name(func) {
                 Some(def) => (def.id, args),
                 None => return Ok(false),
             },
@@ -1451,14 +1449,14 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 )
             }
             BuiltinLowering::ByBuiltinId => {
-                let known = crate::builtins::catalog().known();
+                let known = catalog().known();
                 if id == known.length {
                     Ok(format!("int({}.length())", args[0]))
                 } else if id == known.uninit || id == known.array_with || id == known.array_with_in_place {
                     bail_glsl_at!(
                         self.blame_span(),
                         "{} must be handled at Node::Inst level",
-                        crate::builtins::catalog().get(id).dispatch_name()
+                        catalog().get(id).dispatch_name()
                     )
                 } else if id == known.slice {
                     bail_glsl_at!(self.blame_span(), "GLSL backend does not support array slicing")
@@ -1477,7 +1475,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         self.blame_span(),
                         "{} reached backend dispatch — should be lowered to a \
                          Load/Store side effect during EGIR conversion",
-                        crate::builtins::catalog().get(id).dispatch_name()
+                        catalog().get(id).dispatch_name()
                     )
                 } else {
                     bail_glsl_at!(
@@ -1577,7 +1575,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         ret_ty: &PolyType<TypeName>,
     ) -> Result<String> {
         // Catalog-driven dispatch for `_w_intrinsic_*` builtins.
-        if let Some(def) = crate::builtins::catalog().lookup_by_any_name(name) {
+        if let Some(def) = catalog().lookup_by_any_name(name) {
             let impl_ = def.overloads()[0].lowering.clone();
             return self.lower_builtin_call(def.id, &impl_, args, ret_ty);
         }

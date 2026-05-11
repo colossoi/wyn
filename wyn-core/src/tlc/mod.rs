@@ -22,7 +22,10 @@ pub mod soa;
 pub mod specialize;
 
 use crate::ast::{self, NodeId, Span, TypeName};
+use crate::builtins::{BuiltinId, by_id, catalog};
+use crate::error::CompilerError;
 use crate::interface;
+use crate::name_resolution::NameResolution;
 use crate::types::TypeExt;
 use crate::{SymbolId, SymbolTable, TypeTable};
 use polytype::Type;
@@ -75,7 +78,7 @@ pub fn term_size(term: &Term) -> usize {
     count
 }
 
-/// Collect all `TermKind::Var(crate::tlc::VarRef::Symbol(sym))` SymbolIds referenced anywhere in a term tree.
+/// Collect all `TermKind::Var(VarRef::Symbol(sym))` SymbolIds referenced anywhere in a term tree.
 /// This is a raw collection with no scope tracking — used for DCE reachability.
 pub fn collect_var_refs(term: &Term) -> Vec<SymbolId> {
     let mut refs = Vec::new();
@@ -85,7 +88,7 @@ pub fn collect_var_refs(term: &Term) -> Vec<SymbolId> {
 
 fn collect_var_refs_inner(term: &Term, refs: &mut Vec<SymbolId>) {
     // Var leaf: the only TermKind that directly contributes a ref.
-    if let TermKind::Var(crate::tlc::VarRef::Symbol(sym)) = &term.kind {
+    if let TermKind::Var(VarRef::Symbol(sym)) = &term.kind {
         refs.push(*sym);
     }
 
@@ -159,7 +162,7 @@ pub enum VarRef {
     /// index resolved by the type checker. Backends dispatch using
     /// `def.overloads()[overload_idx].lowering`.
     Builtin {
-        id: crate::builtins::BuiltinId,
+        id: BuiltinId,
         overload_idx: usize,
     },
     /// Symbol-table reference — locals, user-defined functions,
@@ -171,12 +174,12 @@ pub enum VarRef {
 /// `VarRef::Builtin { id, .. }` directly and looks up `VarRef::Symbol`
 /// by name in the catalog. Returns `None` for non-`Var` terms and for
 /// symbol references that don't name a catalog entry.
-pub fn var_term_builtin_id(term: &Term, symbols: &SymbolTable) -> Option<crate::builtins::BuiltinId> {
+pub fn var_term_builtin_id(term: &Term, symbols: &SymbolTable) -> Option<BuiltinId> {
     match &term.kind {
         TermKind::Var(VarRef::Builtin { id, .. }) => Some(*id),
         TermKind::Var(VarRef::Symbol(sym)) => {
             let name = symbols.get(*sym)?;
-            crate::builtins::catalog().lookup_by_any_name(name).map(|def| def.id)
+            catalog().lookup_by_any_name(name).map(|def| def.id)
         }
         _ => None,
     }
@@ -194,7 +197,7 @@ pub fn var_term_canonical_name<'a>(term: &'a Term, symbols: &'a SymbolTable) -> 
             // used by name-keyed dispatch (`_w_intrinsic_*`). Fall back
             // to surface_name when impl_source_names is empty (per-type
             // ops, compiler-internal entries).
-            let def = crate::builtins::by_id(*id);
+            let def = by_id(*id);
             def.impl_source_names().first().copied().or(Some(def.raw.surface_name))
         }
         _ => None,
@@ -615,7 +618,7 @@ impl Term {
     pub fn as_direct_call(&self) -> Option<(SymbolId, &[Term])> {
         match &self.kind {
             TermKind::App { func, args } => match &func.kind {
-                TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => Some((*sym, args.as_slice())),
+                TermKind::Var(VarRef::Symbol(sym)) => Some((*sym, args.as_slice())),
                 _ => None,
             },
             _ => None,
@@ -1169,7 +1172,7 @@ pub struct Transformer<'a> {
     /// catalog-resolved identifiers. Lets `Var`-position idents be
     /// classified as `VarRef::Builtin(id)` directly without round-
     /// tripping through name strings.
-    name_resolution: &'a crate::name_resolution::NameResolution,
+    name_resolution: &'a NameResolution,
     /// Optional namespace prefix for definition names (e.g., "f32" -> "f32.pi")
     namespace: Option<String>,
     /// Shared placeholder symbol for pattern matching scrutinees.
@@ -1187,7 +1190,7 @@ pub struct Transformer<'a> {
     /// unresolved type variable). Owned by the caller so errors
     /// from every Transformer that runs during `to_tlc` accumulate
     /// into one list.
-    fill_hole_errors: &'a mut Vec<crate::error::CompilerError>,
+    fill_hole_errors: &'a mut Vec<CompilerError>,
 }
 
 impl<'a> Transformer<'a> {
@@ -1195,9 +1198,9 @@ impl<'a> Transformer<'a> {
         type_table: &'a TypeTable,
         symbols: &'a mut SymbolTable,
         top_level_symbols: &'a mut HashMap<String, SymbolId>,
-        name_resolution: &'a crate::name_resolution::NameResolution,
+        name_resolution: &'a NameResolution,
         fill_holes: bool,
-        fill_hole_errors: &'a mut Vec<crate::error::CompilerError>,
+        fill_hole_errors: &'a mut Vec<CompilerError>,
     ) -> Self {
         let placeholder_sym = symbols.alloc("_w_placeholder".to_string());
         Self {
@@ -1219,10 +1222,10 @@ impl<'a> Transformer<'a> {
         type_table: &'a TypeTable,
         symbols: &'a mut SymbolTable,
         top_level_symbols: &'a mut HashMap<String, SymbolId>,
-        name_resolution: &'a crate::name_resolution::NameResolution,
+        name_resolution: &'a NameResolution,
         namespace: &str,
         fill_holes: bool,
-        fill_hole_errors: &'a mut Vec<crate::error::CompilerError>,
+        fill_hole_errors: &'a mut Vec<CompilerError>,
     ) -> Self {
         let placeholder_sym = symbols.alloc("_w_placeholder".to_string());
         Self {
@@ -1475,7 +1478,7 @@ impl<'a> Transformer<'a> {
             let placeholder = self.mk_term(
                 param_ty.clone(),
                 span,
-                TermKind::Var(crate::tlc::VarRef::Symbol(placeholder_sym)),
+                TermKind::Var(VarRef::Symbol(placeholder_sym)),
             );
             let (param_sym, mut bindings) = self.compute_pattern_bindings(param, placeholder, span);
 
@@ -1707,11 +1710,7 @@ impl<'a> Transformer<'a> {
         result_ty: Type<TypeName>,
         span: Span,
     ) -> Term {
-        let var_term = self.mk_term(
-            var_ty.clone(),
-            span,
-            TermKind::Var(crate::tlc::VarRef::Symbol(var_sym)),
-        );
+        let var_term = self.mk_term(var_ty.clone(), span, TermKind::Var(VarRef::Symbol(var_sym)));
         self.mk_tuple_proj(var_term, index, result_ty, span)
     }
 
@@ -1811,7 +1810,7 @@ impl<'a> Transformer<'a> {
                     self.name_resolution.get(expr.h.id)
                 {
                     let overload_idx = overload_idx.unwrap_or_else(|| {
-                        let def = crate::builtins::by_id(*id);
+                        let def = by_id(*id);
                         panic!(
                             "BUG: builtin '{}' (id={:?}) reached TLC with unresolved overload — \
                              type checker must call NameResolution::set_overload_idx after \
@@ -1822,7 +1821,7 @@ impl<'a> Transformer<'a> {
                     return self.mk_term(
                         ty,
                         span,
-                        TermKind::Var(crate::tlc::VarRef::Builtin {
+                        TermKind::Var(VarRef::Builtin {
                             id: *id,
                             overload_idx,
                         }),
@@ -1834,7 +1833,7 @@ impl<'a> Transformer<'a> {
                     format!("{}.{}", qualifiers.join("."), name)
                 };
                 let sym = self.resolve_or_define(&resolved_name);
-                self.mk_term(ty, span, TermKind::Var(crate::tlc::VarRef::Symbol(sym)))
+                self.mk_term(ty, span, TermKind::Var(VarRef::Symbol(sym)))
             }
 
             ast::ExprKind::ArrayLiteral(elements) => {
@@ -1872,7 +1871,7 @@ impl<'a> Transformer<'a> {
                 let arr = self.transform_expr(array);
                 let idx = self.transform_expr(index);
                 let val = self.transform_expr(value);
-                let aw_id = crate::builtins::catalog().known().array_with;
+                let aw_id = catalog().known().array_with;
                 self.build_call_by_id(aw_id, &[arr, idx, val], ty, span)
             }
 
@@ -2103,7 +2102,7 @@ impl<'a> Transformer<'a> {
                 // `buffer_specialize` / SPIR-V passes rewrite it into the
                 // right per-flavor lowering.
                 let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
-                let known = crate::builtins::catalog().known();
+                let known = catalog().known();
                 let end =
                     slice.end.as_ref().map(|e| self.transform_expr(e)).unwrap_or_else(|| {
                         self.build_call_by_id(known.length, &[arr.clone()], i32_ty, span)
@@ -2360,7 +2359,7 @@ impl<'a> Transformer<'a> {
         let dest_elem_ty = self.get_array_element_type(&dest_term.ty);
         let dest = Place::LocalArray {
             id: match &dest_term.kind {
-                TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => *sym,
+                TermKind::Var(VarRef::Symbol(sym)) => *sym,
                 _ => {
                     // Bind dest to a fresh name
                     let fresh = self.define("_w_rbi_dest");
@@ -2428,9 +2427,7 @@ impl<'a> Transformer<'a> {
                 let span = term.span;
                 let arg_terms: Vec<Term> = params
                     .iter()
-                    .map(|(sym, ty)| {
-                        self.mk_term(ty.clone(), span, TermKind::Var(crate::tlc::VarRef::Symbol(*sym)))
-                    })
+                    .map(|(sym, ty)| self.mk_term(ty.clone(), span, TermKind::Var(VarRef::Symbol(*sym))))
                     .collect();
                 let body = self.mk_term(
                     ret_ty.clone(),
@@ -2615,11 +2612,7 @@ impl<'a> Transformer<'a> {
         span: Span,
     ) -> Term {
         let mut current_ty = var_ty.clone();
-        let mut current = self.mk_term(
-            current_ty.clone(),
-            span,
-            TermKind::Var(crate::tlc::VarRef::Symbol(var_sym)),
-        );
+        let mut current = self.mk_term(current_ty.clone(), span, TermKind::Var(VarRef::Symbol(var_sym)));
 
         for &idx in path {
             let elem_ty = self.type_at_path(&current_ty, &[idx]);
@@ -2666,11 +2659,7 @@ impl<'a> Transformer<'a> {
         // same evaluated value.
         let t_id = self.term_ids.next_id().0;
         let t_sym = self.define(&format!("_w_vw_t_{}", t_id));
-        let t_var = self.mk_term(
-            target_ty.clone(),
-            span,
-            TermKind::Var(crate::tlc::VarRef::Symbol(t_sym)),
-        );
+        let t_var = self.mk_term(target_ty.clone(), span, TermKind::Var(VarRef::Symbol(t_sym)));
 
         // Compute the RHS term. For plain `=`, that's just `value`.
         // For compound `op=`, build `_t.swizzle <op> value` so the
@@ -2698,11 +2687,7 @@ impl<'a> Transformer<'a> {
         // Bind `_r = <rhs>` so per-slot reads share one evaluation.
         let r_id = self.term_ids.next_id().0;
         let r_sym = self.define(&format!("_w_vw_r_{}", r_id));
-        let r_var = self.mk_term(
-            rhs_term.ty.clone(),
-            span,
-            TermKind::Var(crate::tlc::VarRef::Symbol(r_sym)),
-        );
+        let r_var = self.mk_term(rhs_term.ty.clone(), span, TermKind::Var(VarRef::Symbol(r_sym)));
 
         // Locate each component's position in `components` so we know
         // which RHS slot supplies each target slot.
@@ -2772,11 +2757,7 @@ impl<'a> Transformer<'a> {
 
         let r_id = self.term_ids.next_id().0;
         let r_sym = self.define(&format!("_w_rw_r_{}", r_id));
-        let r_var = self.mk_term(
-            record_ty.clone(),
-            span,
-            TermKind::Var(crate::tlc::VarRef::Symbol(r_sym)),
-        );
+        let r_var = self.mk_term(record_ty.clone(), span, TermKind::Var(VarRef::Symbol(r_sym)));
 
         let body = self.build_record_with_body(&r_var, &record_ty, path, new_value, span);
 
@@ -2816,11 +2797,7 @@ impl<'a> Transformer<'a> {
             let inner_proj = self.build_proj(target, idx, &inner_ty, span);
             let inner_id = self.term_ids.next_id().0;
             let inner_sym = self.define(&format!("_w_rw_inner_{}", inner_id));
-            let inner_var = self.mk_term(
-                inner_ty.clone(),
-                span,
-                TermKind::Var(crate::tlc::VarRef::Symbol(inner_sym)),
-            );
+            let inner_var = self.mk_term(inner_ty.clone(), span, TermKind::Var(VarRef::Symbol(inner_sym)));
             let inner_body =
                 self.build_record_with_body(&inner_var, &inner_ty, &path[1..], new_value, span);
             self.mk_term(
@@ -2921,7 +2898,7 @@ impl<'a> Transformer<'a> {
         let scrut_var = self.mk_term(
             scrutinee_ty.clone(),
             span,
-            TermKind::Var(crate::tlc::VarRef::Symbol(scrut_sym)),
+            TermKind::Var(VarRef::Symbol(scrut_sym)),
         );
 
         let body = self.build_sum_match_chain(&scrut_var, &layout, variants, cases, ty.clone(), span);
@@ -3091,12 +3068,12 @@ impl<'a> Transformer<'a> {
     /// Build a flat call against a catalog `BuiltinId`.
     fn build_call_by_id(
         &mut self,
-        id: crate::builtins::BuiltinId,
+        id: BuiltinId,
         args: &[Term],
         result_ty: Type<TypeName>,
         span: Span,
     ) -> Term {
-        let func_var = crate::tlc::VarRef::Builtin { id, overload_idx: 0 };
+        let func_var = VarRef::Builtin { id, overload_idx: 0 };
         if args.is_empty() {
             return self.mk_term(result_ty, span, TermKind::Var(func_var));
         }

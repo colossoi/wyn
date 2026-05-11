@@ -4,9 +4,11 @@
 
 use super::{Converter, run};
 use crate::SymbolId;
+use crate::SymbolTable;
 use crate::ast::TypeName;
 use crate::pipeline_descriptor::PipelineDescriptor;
 use crate::ssa::types::{FuncBody, InstKind, Program};
+use crate::tlc::VarRef;
 use crate::tlc::{Term, TermKind};
 use polytype::Type;
 use std::collections::{HashMap, HashSet};
@@ -67,7 +69,7 @@ fn mk_term(ty: Type<TypeName>, kind: TermKind) -> Term {
 
 /// Build a minimal TLC def and convert it via EGraph.
 fn convert_simple_def(body: Term, params: Vec<(SymbolId, Type<TypeName>)>) -> FuncBody {
-    let symbols = crate::SymbolTable::new();
+    let symbols = SymbolTable::new();
     let top_level = HashMap::new();
     let constants_by_name = HashMap::new();
     let pure_constants = HashSet::new();
@@ -102,13 +104,13 @@ fn test_int_literal_roundtrip() {
 
 #[test]
 fn test_add_roundtrip() {
-    let mut symbols = crate::SymbolTable::new();
+    let mut symbols = SymbolTable::new();
     let a_sym = symbols.alloc("a".into());
     let b_sym = symbols.alloc("b".into());
 
     // Build: a + b
-    let a_var = mk_term(i32_ty(), TermKind::Var(crate::tlc::VarRef::Symbol(a_sym)));
-    let b_var = mk_term(i32_ty(), TermKind::Var(crate::tlc::VarRef::Symbol(b_sym)));
+    let a_var = mk_term(i32_ty(), TermKind::Var(VarRef::Symbol(a_sym)));
+    let b_var = mk_term(i32_ty(), TermKind::Var(VarRef::Symbol(b_sym)));
     let add_op = mk_term(
         i32_ty(), // simplified — real type would be arrow
         TermKind::BinOp(crate::ast::BinaryOp { op: "+".into() }),
@@ -158,12 +160,12 @@ fn test_gvn_via_let() {
     let lit42 = mk_term(i32_ty(), TermKind::IntLit("42".into()));
     let lit42b = mk_term(i32_ty(), TermKind::IntLit("42".into()));
 
-    let mut symbols = crate::SymbolTable::new();
+    let mut symbols = SymbolTable::new();
     let x_sym = symbols.alloc("x".into());
     let y_sym = symbols.alloc("y".into());
 
-    let x_ref = mk_term(i32_ty(), TermKind::Var(crate::tlc::VarRef::Symbol(x_sym)));
-    let y_ref = mk_term(i32_ty(), TermKind::Var(crate::tlc::VarRef::Symbol(y_sym)));
+    let x_ref = mk_term(i32_ty(), TermKind::Var(VarRef::Symbol(x_sym)));
+    let y_ref = mk_term(i32_ty(), TermKind::Var(VarRef::Symbol(y_sym)));
     let pair_app = mk_term(pair_ty.clone(), TermKind::Tuple(vec![x_ref, y_ref]));
 
     let inner_let = mk_term(
@@ -255,11 +257,11 @@ fn test_hash_cons_distinguishes_by_result_type() {
 #[test]
 fn test_if_else_roundtrip() {
     // if cond then 1 else 0
-    let mut symbols = crate::SymbolTable::new();
+    let mut symbols = SymbolTable::new();
     let c_sym = symbols.alloc("c".into());
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
 
-    let cond = mk_term(bool_ty.clone(), TermKind::Var(crate::tlc::VarRef::Symbol(c_sym)));
+    let cond = mk_term(bool_ty.clone(), TermKind::Var(VarRef::Symbol(c_sym)));
     let then_br = mk_term(i32_ty(), TermKind::IntLit("1".into()));
     let else_br = mk_term(i32_ty(), TermKind::IntLit("0".into()));
     let if_term = mk_term(
@@ -370,7 +372,7 @@ fn emit_compute_output_stores_panics_on_unsized_array() {
     let f32_ty = Type::Constructed(TypeName::Float(32), vec![]);
     let unsized_arr_ty = Type::Constructed(TypeName::Array, vec![f32_ty.clone(), Type::Variable(99)]);
 
-    let symbols = crate::SymbolTable::new();
+    let symbols = SymbolTable::new();
     let top_level = HashMap::new();
     let constants_by_name = HashMap::new();
     let mut converter = Converter::new(&top_level, &constants_by_name, &symbols, HashSet::new());

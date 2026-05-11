@@ -13,11 +13,14 @@
 //!     _w_intrinsic_storage_index(0, 0, offset + 0)
 //! ```
 
+use super::VarRef;
 use super::{
     ArrayExpr, Def, DefMeta, Lambda, LoopKind, Place, Program, SoacOp, Term, TermIdSource, TermKind,
 };
 use crate::ast::{self, Span, TypeName};
+use crate::builtins::catalog;
 use crate::interface;
+use crate::tlc::var_term_builtin_id;
 use crate::types::TypeExt;
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
@@ -318,7 +321,7 @@ impl BufferSpecializer {
                 // If the let-binding aliases a buffer-backed variable, propagate.
                 // Consult the module-scope storage map too — a `let local = board
                 // in ...` where `board` is a `#[storage]` def should propagate.
-                let was_buffer = if let TermKind::Var(crate::tlc::VarRef::Symbol(sym)) = &rhs.kind {
+                let was_buffer = if let TermKind::Var(VarRef::Symbol(sym)) = &rhs.kind {
                     if let Some(binding) = self.resolve_buffer(sym) {
                         let b = binding.clone();
                         self.buffer_map.insert(*name, b);
@@ -352,11 +355,10 @@ impl BufferSpecializer {
                 // to `storage_len(set, binding)` so the load goes through
                 // the storage view path. Indexed loads are handled in
                 // the `TermKind::Index` arm above.
-                if crate::tlc::var_term_builtin_id(func, &self.symbols)
-                    == Some(crate::builtins::catalog().known().length)
+                if var_term_builtin_id(func, &self.symbols) == Some(catalog().known().length)
                     && args.len() == 1
                 {
-                    if let TermKind::Var(crate::tlc::VarRef::Symbol(data_sym)) = &args[0].kind {
+                    if let TermKind::Var(VarRef::Symbol(data_sym)) = &args[0].kind {
                         if let Some(binding) = self.resolve_buffer(data_sym).cloned() {
                             let span = term.span;
                             let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
@@ -364,7 +366,7 @@ impl BufferSpecializer {
                             let binding_lit =
                                 self.make_int_lit(&binding.binding.to_string(), u32_ty.clone(), span);
                             let storage_len = self.make_app_by_id(
-                                crate::builtins::catalog().known().storage_len,
+                                catalog().known().storage_len,
                                 vec![set_lit, binding_lit],
                                 u32_ty.clone(),
                                 span,
@@ -380,7 +382,7 @@ impl BufferSpecializer {
                 // User-defined function specialization (only meaningful
                 // when the func is a SymbolId-bound user function).
                 match &func.kind {
-                    TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
+                    TermKind::Var(VarRef::Symbol(sym)) => {
                         // Check if any arguments are buffer-backed (clone to avoid borrow).
                         // Consults both the per-def `buffer_map` (view params) and
                         // the module-scope storage map so `helper(board, i)` where
@@ -389,7 +391,7 @@ impl BufferSpecializer {
                         let buffer_args: Vec<Option<BufferBinding>> = args
                             .iter()
                             .map(|a| {
-                                if let TermKind::Var(crate::tlc::VarRef::Symbol(s)) = &a.kind {
+                                if let TermKind::Var(VarRef::Symbol(s)) = &a.kind {
                                     self.resolve_buffer(s).cloned()
                                 } else {
                                     None
@@ -540,7 +542,7 @@ impl BufferSpecializer {
                 // load goes through the storage view path rather than
                 // being lowered as `materialize + dynamic_extract` on
                 // a runtime-sized buffer (which is invalid).
-                if let TermKind::Var(crate::tlc::VarRef::Symbol(data_sym)) = &array.kind {
+                if let TermKind::Var(VarRef::Symbol(data_sym)) = &array.kind {
                     if let Some(binding) = self.resolve_buffer(data_sym).cloned() {
                         let span = term.span;
                         let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
@@ -549,7 +551,7 @@ impl BufferSpecializer {
                         let binding_lit =
                             self.make_int_lit(&binding.binding.to_string(), u32_ty.clone(), span);
                         return self.make_app_by_id(
-                            crate::builtins::catalog().known().storage_index,
+                            catalog().known().storage_index,
                             vec![set_lit, binding_lit, idx],
                             binding.elem_ty,
                             span,
@@ -766,7 +768,7 @@ impl BufferSpecializer {
                 let set_lit = self.make_int_lit(&binding.set.to_string(), u32_ty.clone(), span);
                 let binding_lit = self.make_int_lit(&binding.binding.to_string(), u32_ty.clone(), span);
                 let storage_len = self.make_app_by_id(
-                    crate::builtins::catalog().known().storage_len,
+                    catalog().known().storage_len,
                     vec![set_lit, binding_lit],
                     u32_ty.clone(),
                     span,
@@ -783,7 +785,7 @@ impl BufferSpecializer {
             id: self.term_ids.next_id(),
             ty: target_def.ty.clone(), // approximate — not critical
             span,
-            kind: TermKind::Var(crate::tlc::VarRef::Symbol(spec_sym)),
+            kind: TermKind::Var(VarRef::Symbol(spec_sym)),
         };
 
         if new_args.is_empty() {
@@ -883,8 +885,7 @@ impl BufferSpecializer {
         match &term.kind {
             TermKind::App { func, args } => {
                 // `length(arr_expr)` where arr_expr resolves to a view.
-                if crate::tlc::var_term_builtin_id(func, &self.symbols)
-                    == Some(crate::builtins::catalog().known().length)
+                if var_term_builtin_id(func, &self.symbols) == Some(catalog().known().length)
                     && args.len() == 1
                 {
                     if let Some(view) = self.try_resolve_view_expr(&args[0], view_params) {
@@ -905,13 +906,13 @@ impl BufferSpecializer {
 
                 // User-defined function specialization (only meaningful
                 // for SymbolId-bound user functions).
-                if let TermKind::Var(crate::tlc::VarRef::Symbol(sym)) = &func.kind {
+                if let TermKind::Var(VarRef::Symbol(sym)) = &func.kind {
                     // Check for calls to functions that themselves take view args
                     // (recursive specialization)
                     let inner_buffer_args: Vec<Option<BufferBinding>> = args
                         .iter()
                         .map(|a| {
-                            if let TermKind::Var(crate::tlc::VarRef::Symbol(s)) = &a.kind {
+                            if let TermKind::Var(VarRef::Symbol(s)) = &a.kind {
                                 if view_params.contains_key(s) {
                                     // This is a view param — build a BufferBinding for it
                                     let (_, _, set, binding, elem_ty) = &view_params[s];
@@ -1118,14 +1119,14 @@ impl BufferSpecializer {
             }
 
             // Leaves
-            TermKind::Var(crate::tlc::VarRef::Symbol(_)) => {
+            TermKind::Var(VarRef::Symbol(_)) => {
                 // If this var refers to a view param that was replaced,
                 // this is a bare reference (not in _w_index or _w_intrinsic_length).
                 // This shouldn't happen in well-formed code since view arrays
                 // are only used via index/length, but return it as-is.
                 term.clone()
             }
-            TermKind::Var(crate::tlc::VarRef::Builtin { .. })
+            TermKind::Var(VarRef::Builtin { .. })
             | TermKind::BinOp(_)
             | TermKind::UnOp(_)
             | TermKind::IntLit(_)
@@ -1176,7 +1177,7 @@ impl BufferSpecializer {
                         span,
                     );
                     return self.make_app_by_id(
-                        crate::builtins::catalog().known().storage_index,
+                        catalog().known().storage_index,
                         vec![set_lit, binding_lit, add_result],
                         view.elem_ty,
                         span,
@@ -1332,7 +1333,7 @@ impl BufferSpecializer {
         match ae {
             ArrayExpr::Ref(t) => {
                 // If the ref is a bare Var pointing to a view param, emit StorageBuffer
-                if let TermKind::Var(crate::tlc::VarRef::Symbol(sym)) = &t.kind {
+                if let TermKind::Var(VarRef::Symbol(sym)) = &t.kind {
                     if let Some((offset_sym, len_sym, set, binding, elem_ty)) = view_params.get(sym) {
                         let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
                         return ArrayExpr::StorageBuffer {
@@ -1342,13 +1343,13 @@ impl BufferSpecializer {
                                 id: self.term_ids.next_id(),
                                 ty: u32_ty.clone(),
                                 span: t.span,
-                                kind: TermKind::Var(crate::tlc::VarRef::Symbol(*offset_sym)),
+                                kind: TermKind::Var(VarRef::Symbol(*offset_sym)),
                             }),
                             len: Box::new(Term {
                                 id: self.term_ids.next_id(),
                                 ty: u32_ty,
                                 span: t.span,
-                                kind: TermKind::Var(crate::tlc::VarRef::Symbol(*len_sym)),
+                                kind: TermKind::Var(VarRef::Symbol(*len_sym)),
                             }),
                             elem_ty: elem_ty.clone(),
                         };
@@ -1436,7 +1437,7 @@ impl BufferSpecializer {
         view_params: &HashMap<SymbolId, (SymbolId, SymbolId, u32, u32, Type<TypeName>)>,
     ) -> Option<ViewInfo> {
         match &term.kind {
-            TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
+            TermKind::Var(VarRef::Symbol(sym)) => {
                 let (offset_sym, len_sym, set, binding, elem_ty) = view_params.get(sym)?;
                 let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
                 Some(ViewInfo {
@@ -1444,13 +1445,13 @@ impl BufferSpecializer {
                         id: self.term_ids.next_id(),
                         ty: u32_ty.clone(),
                         span: term.span,
-                        kind: TermKind::Var(crate::tlc::VarRef::Symbol(*offset_sym)),
+                        kind: TermKind::Var(VarRef::Symbol(*offset_sym)),
                     },
                     len: Term {
                         id: self.term_ids.next_id(),
                         ty: u32_ty,
                         span: term.span,
-                        kind: TermKind::Var(crate::tlc::VarRef::Symbol(*len_sym)),
+                        kind: TermKind::Var(VarRef::Symbol(*len_sym)),
                     },
                     set: *set,
                     binding: *binding,
@@ -1462,9 +1463,7 @@ impl BufferSpecializer {
                 // func may arrive as either `Var(Symbol)` (synthesized
                 // paths) or `Var(Builtin)` (post-NameResolution user
                 // code) — `var_term_builtin_id` handles both.
-                if crate::tlc::var_term_builtin_id(func, &self.symbols)
-                    == Some(crate::builtins::catalog().known().slice)
-                {
+                if var_term_builtin_id(func, &self.symbols) == Some(catalog().known().slice) {
                     if args.len() == 3 {
                         let parent = self.try_resolve_view_expr(&args[0], view_params)?;
                         let span = term.span;
@@ -1528,12 +1527,7 @@ impl BufferSpecializer {
         ret_ty: Type<TypeName>,
         span: Span,
     ) -> Term {
-        self.build_app_call(
-            crate::tlc::VarRef::Builtin { id, overload_idx: 0 },
-            args,
-            ret_ty,
-            span,
-        )
+        self.build_app_call(VarRef::Builtin { id, overload_idx: 0 }, args, ret_ty, span)
     }
 
     fn make_app(
@@ -1546,7 +1540,7 @@ impl BufferSpecializer {
         // Catalog targets are emitted as `Var(Builtin(id))`. The assert
         // requires single-overload entries — multi-overload targets
         // need an explicit overload index from the caller.
-        let func_var = if let Some(def) = crate::builtins::catalog().lookup_by_any_name(intrinsic_name) {
+        let func_var = if let Some(def) = catalog().lookup_by_any_name(intrinsic_name) {
             assert_eq!(
                 def.overloads().len(),
                 1,
@@ -1554,12 +1548,12 @@ impl BufferSpecializer {
                  caller must specify overload_idx explicitly",
                 intrinsic_name
             );
-            crate::tlc::VarRef::Builtin {
+            VarRef::Builtin {
                 id: def.id,
                 overload_idx: 0,
             }
         } else {
-            crate::tlc::VarRef::Symbol(self.symbols.alloc(intrinsic_name.to_string()))
+            VarRef::Symbol(self.symbols.alloc(intrinsic_name.to_string()))
         };
         self.build_app_call(func_var, args, ret_ty, span)
     }

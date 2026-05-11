@@ -12,6 +12,7 @@
 //! When called with [4]f32, creates:
 //!   def sum$n4 (arr:[4]f32) : f32 = ...
 
+use super::VarRef;
 use super::{ArrayExpr, Def, DefMeta, Lambda, LoopKind, Program, SoacOp, Term, TermIdSource, TermKind};
 use crate::ast::TypeName;
 use crate::interface;
@@ -384,7 +385,7 @@ impl<'a> Monomorphizer<'a> {
         let kind = match &term.kind {
             TermKind::App { func, args } => {
                 // Check if func is a variable referencing a known function
-                if let TermKind::Var(crate::tlc::VarRef::Symbol(sym)) = &func.kind {
+                if let TermKind::Var(VarRef::Symbol(sym)) = &func.kind {
                     let sym = *sym;
                     if let Some(poly_def) = self.poly_functions.get(&sym).cloned() {
                         // Infer substitution from argument types
@@ -400,7 +401,7 @@ impl<'a> Monomorphizer<'a> {
                                 id: self.term_ids.next_id(),
                                 ty: func.ty.clone(),
                                 span: func.span,
-                                kind: TermKind::Var(crate::tlc::VarRef::Symbol(specialized_sym)),
+                                kind: TermKind::Var(VarRef::Symbol(specialized_sym)),
                             };
                             let processed_args: Vec<_> =
                                 args.iter().map(|a| self.process_term(a)).collect();
@@ -429,7 +430,7 @@ impl<'a> Monomorphizer<'a> {
                 }
             }
 
-            TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
+            TermKind::Var(VarRef::Symbol(sym)) => {
                 let sym = *sym;
                 // Check if this is a reference to a polymorphic function
                 // This handles cases like `let f = some_poly_fn in ...`
@@ -444,7 +445,7 @@ impl<'a> Monomorphizer<'a> {
                                 id: self.term_ids.next_id(),
                                 ty: term.ty.clone(),
                                 span: term.span,
-                                kind: TermKind::Var(crate::tlc::VarRef::Symbol(specialized_sym)),
+                                kind: TermKind::Var(VarRef::Symbol(specialized_sym)),
                             };
                         } else {
                             self.ensure_in_worklist(sym, poly_def);
@@ -453,11 +454,11 @@ impl<'a> Monomorphizer<'a> {
                         self.ensure_in_worklist(sym, poly_def);
                     }
                 }
-                TermKind::Var(crate::tlc::VarRef::Symbol(sym))
+                TermKind::Var(VarRef::Symbol(sym))
             }
 
             // Catalog builtin reference: passes through unchanged.
-            TermKind::Var(v @ crate::tlc::VarRef::Builtin { .. }) => TermKind::Var(*v),
+            TermKind::Var(v @ VarRef::Builtin { .. }) => TermKind::Var(*v),
 
             TermKind::Lambda(Lambda { params, body, ret_ty }) => TermKind::Lambda(Lambda {
                 params: params.clone(),

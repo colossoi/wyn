@@ -7,6 +7,7 @@
 //!    union of module specs and the builtins catalog.
 //! 3. `TypeChecker` — load builtins, run inference, collect schemes/warnings.
 
+use crate::builtins::catalog;
 use std::collections::HashMap;
 
 use polytype::TypeScheme;
@@ -32,27 +33,26 @@ pub fn run(ast: &mut ast::Program, module_manager: &mut ModuleManager) -> Result
     resolver.resolve(module_manager, ast);
     let (context, spec_schemes) = resolver.into_parts();
 
-    resolve_opens::run(ast, &spec_schemes, crate::builtins::catalog())?;
+    resolve_opens::run(ast, &spec_schemes, catalog())?;
 
     // Prelude module decl bodies don't go through `resolve_opens::run`
     // (they aren't in the user `Program`), but their bodies reference
     // sibling defs by unqualified name (e.g. `log10`'s body calls `log`,
     // which is `f32.log` from outside). Qualify them here as if each
     // body were inside an implicit `open <module_name>`.
-    let catalog = crate::builtins::catalog();
+    let cat = catalog();
     let module_names: Vec<String> = module_manager.elaborated_modules_mut().keys().cloned().collect();
     for module_name in module_names {
         let elaborated =
             module_manager.elaborated_modules_mut().get_mut(&module_name).expect("module exists");
         for item in &mut elaborated.items {
             if let crate::module_manager::ElaboratedItem::Decl(decl) = item {
-                resolve_opens::run_in_module(&mut decl.body, &module_name, &spec_schemes, catalog)?;
+                resolve_opens::run_in_module(&mut decl.body, &module_name, &spec_schemes, cat)?;
             }
         }
     }
 
-    let name_resolution =
-        crate::name_resolution::build_name_resolution(ast, module_manager, crate::builtins::catalog());
+    let name_resolution = crate::name_resolution::build_name_resolution(ast, module_manager, catalog());
 
     let mut checker = TypeChecker::with_context_and_schemes(module_manager, context, spec_schemes);
     checker.set_name_resolution(name_resolution);

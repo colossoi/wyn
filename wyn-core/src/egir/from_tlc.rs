@@ -5,6 +5,11 @@
 //! are hash-consed (giving GVN for free), and the result is elaborated
 //! back to `FuncBody` via demand-driven scheduling (giving DCE for free).
 
+use crate::builtins::catalog;
+use crate::ssa::types::EntryOutput;
+use crate::ssa::types::IoDecoration;
+use crate::tlc::SoacBody;
+use crate::tlc::VarRef;
 use std::collections::{HashMap, HashSet};
 
 use super::types::EffectToken;
@@ -570,11 +575,7 @@ fn rewrite_map_scan_to_into(graph: &mut EGraph, target_result: NodeId, output_vi
 
 /// Compute entry with a non-view result: store the result (or its tuple
 /// components) into the output storage buffers.
-fn emit_compute_output_stores(
-    converter: &mut Converter<'_>,
-    result_nid: NodeId,
-    outputs: &[crate::ssa::types::EntryOutput],
-) {
+fn emit_compute_output_stores(converter: &mut Converter<'_>, result_nid: NodeId, outputs: &[EntryOutput]) {
     for (i, output) in outputs.iter().enumerate() {
         let (set, binding) = output.storage_binding.expect("BUG: compute output without storage binding");
         let value_nid = if outputs.len() == 1 {
@@ -619,7 +620,7 @@ fn emit_compute_output_stores(
 fn emit_vertex_fragment_output_stores(
     converter: &mut Converter<'_>,
     result_nid: NodeId,
-    outputs: &[crate::ssa::types::EntryOutput],
+    outputs: &[EntryOutput],
 ) {
     if outputs.len() == 1 {
         let place_nid = converter.emit_output_slot(0, outputs[0].ty.clone());
@@ -725,7 +726,7 @@ impl<'a> Converter<'a> {
         let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
         let set_nid = self.intern_u32(set);
         let binding_nid = self.intern_u32(binding);
-        let storage_len_id = crate::builtins::catalog().known().storage_len;
+        let storage_len_id = catalog().known().storage_len;
         let len_nid = self.intern_pure(
             PureOp::Intrinsic {
                 id: storage_len_id,
@@ -871,10 +872,10 @@ impl<'a> Converter<'a> {
             )),
 
             // --- Variables ---
-            TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => self.convert_var(*sym, ty),
+            TermKind::Var(VarRef::Symbol(sym)) => self.convert_var(*sym, ty),
             // Catalog builtin reference: emit PureOp::Intrinsic directly,
             // bypassing the string-keyed lookup path in `convert_var`.
-            TermKind::Var(crate::tlc::VarRef::Builtin { id, overload_idx }) => Ok(self.intern_pure(
+            TermKind::Var(VarRef::Builtin { id, overload_idx }) => Ok(self.intern_pure(
                 PureOp::Intrinsic {
                     id: *id,
                     overload_idx: *overload_idx,
@@ -1023,11 +1024,11 @@ impl<'a> Converter<'a> {
                 let operand = self.convert_term(&args[0])?;
                 Ok(self.intern_pure(PureOp::UnaryOp(op.op.clone()), smallvec![operand], ty))
             }
-            TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
+            TermKind::Var(VarRef::Symbol(sym)) => {
                 let name = self.symbols.get(*sym).expect("BUG").clone();
                 self.convert_named_app(&name, *sym, args, ty)
             }
-            TermKind::Var(crate::tlc::VarRef::Builtin { id, overload_idx }) => {
+            TermKind::Var(VarRef::Builtin { id, overload_idx }) => {
                 // Catalog-resolved builtin call. Most catalog entries lower
                 // to a pure `PureOp::Intrinsic` and the backend dispatches
                 // on `catalog.get(id).overloads()[overload_idx].lowering`.
@@ -1036,7 +1037,7 @@ impl<'a> Converter<'a> {
                 // EGIR conversion — dispatch by id against
                 // `catalog.known()` so we never reflect on the surface
                 // name.
-                let known = crate::builtins::catalog().known();
+                let known = catalog().known();
                 if *id == known.storage_index && args.len() == 3 {
                     self.lower_storage_index(args, ty)
                 } else if *id == known.storage_store && args.len() == 4 {
@@ -1499,7 +1500,7 @@ impl<'a> Converter<'a> {
         // Length intrinsic. PureOp::UnaryOp keys by op-name string;
         // the catalog-internal `_w_intrinsic_length` is the agreed
         // string the lowering layer dispatches on.
-        let length_name = crate::builtins::by_id(crate::builtins::catalog().known().length).dispatch_name();
+        let length_name = crate::builtins::by_id(catalog().known().length).dispatch_name();
         let len_nid = self.intern_pure(
             PureOp::UnaryOp(length_name.into()),
             smallvec![iter_nid],
@@ -1578,7 +1579,7 @@ impl<'a> Converter<'a> {
 
     fn lambda_fn_name(&self, lam: &Lambda) -> Result<String, ConvertError> {
         match &lam.body.kind {
-            TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
+            TermKind::Var(VarRef::Symbol(sym)) => {
                 Ok(self.symbols.get(*sym).expect("BUG: symbol not in table").clone())
             }
             _ => Err(ConvertError::GraphError(
@@ -1610,7 +1611,7 @@ impl<'a> Converter<'a> {
 
     fn convert_soac_map(
         &mut self,
-        sb: &super::super::tlc::SoacBody,
+        sb: &SoacBody,
         inputs: &[ArrayExpr],
         consumes_input: bool,
         result_ty: Type<TypeName>,
@@ -1660,7 +1661,7 @@ impl<'a> Converter<'a> {
 
     fn convert_soac_reduce(
         &mut self,
-        op: &super::super::tlc::SoacBody,
+        op: &SoacBody,
         ne: &Term,
         input: &ArrayExpr,
         result_ty: Type<TypeName>,
@@ -1689,8 +1690,8 @@ impl<'a> Converter<'a> {
 
     fn convert_soac_redomap(
         &mut self,
-        op: &super::super::tlc::SoacBody,
-        reduce_op: &super::super::tlc::SoacBody,
+        op: &SoacBody,
+        reduce_op: &SoacBody,
         ne: &Term,
         inputs: &[ArrayExpr],
         result_ty: Type<TypeName>,
@@ -1729,7 +1730,7 @@ impl<'a> Converter<'a> {
 
     fn convert_soac_scan(
         &mut self,
-        op: &super::super::tlc::SoacBody,
+        op: &SoacBody,
         ne: &Term,
         input: &ArrayExpr,
         result_ty: Type<TypeName>,
@@ -1952,9 +1953,9 @@ fn is_unsized_array(ty: &Type<TypeName>) -> bool {
 }
 
 /// Extract an IO decoration (builtin or location attribute) from a pattern.
-fn extract_io_decoration(pattern: &crate::ast::Pattern) -> Option<crate::ssa::types::IoDecoration> {
+fn extract_io_decoration(pattern: &crate::ast::Pattern) -> Option<IoDecoration> {
     use crate::ast;
-    use crate::ssa::types::IoDecoration;
+    use IoDecoration;
     match &pattern.kind {
         ast::PatternKind::Attributed(attrs, inner) => {
             for attr in attrs {
@@ -1993,8 +1994,8 @@ fn extract_size_hint(pattern: &crate::ast::Pattern) -> Option<u32> {
 }
 
 /// Convert an AST attribute to an IO decoration.
-fn convert_to_io_decoration(attr: &interface::Attribute) -> Option<crate::ssa::types::IoDecoration> {
-    use crate::ssa::types::IoDecoration;
+fn convert_to_io_decoration(attr: &interface::Attribute) -> Option<IoDecoration> {
+    use IoDecoration;
     match attr {
         interface::Attribute::BuiltIn(b) => Some(IoDecoration::BuiltIn(*b)),
         interface::Attribute::Location(l) => Some(IoDecoration::Location(*l)),
@@ -2009,8 +2010,8 @@ fn build_entry_outputs(
     ret_type: &Type<TypeName>,
     is_compute: bool,
     binding_start: u32,
-) -> Vec<crate::ssa::types::EntryOutput> {
-    use crate::ssa::types::EntryOutput;
+) -> Vec<EntryOutput> {
+    use EntryOutput;
     let mut binding_num = binding_start;
     let mut storage_binding_for = |ty: &Type<TypeName>, is_compute: bool| -> Option<(u32, u32)> {
         if is_compute && !matches!(ty, Type::Constructed(TypeName::Unit, _)) {

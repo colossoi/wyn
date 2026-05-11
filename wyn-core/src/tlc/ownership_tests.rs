@@ -1,5 +1,9 @@
+use super::super::SoacOp;
+use super::VarRef;
 use super::{Origin, OwnershipModel, analyze, build, eligible_consuming_soacs};
 use crate::Compiler;
+use crate::SymbolTable;
+use crate::builtins::catalog;
 use crate::tlc::{Program, Term, TermKind};
 
 #[test]
@@ -48,7 +52,7 @@ fn find_def<'a>(program: &'a Program, name: &str) -> &'a crate::tlc::Def {
 
 fn param_origin(model: &OwnershipModel, def: &crate::tlc::Def, param_index: usize) -> Origin {
     let lam = match &def.body.kind {
-        crate::tlc::TermKind::Lambda(l) => l,
+        TermKind::Lambda(l) => l,
         _ => panic!("def body is not a lambda"),
     };
     let (sym, _) = lam.params[param_index];
@@ -90,7 +94,7 @@ def f(x: i32) i32 = x + 1
     let model = build(&program);
     let def = find_def(&program, "f");
     let lam = match &def.body.kind {
-        crate::tlc::TermKind::Lambda(l) => l,
+        TermKind::Lambda(l) => l,
         _ => panic!("def body is not a lambda"),
     };
     let (sym, _) = lam.params[0];
@@ -105,7 +109,7 @@ fn synth_program_with_alias_let() -> (Program, crate::SymbolId, crate::SymbolId)
     use crate::tlc::{Def, DefMeta, Lambda, Term, TermIdSource, TermKind};
     use polytype::Type;
 
-    let mut symbols = crate::SymbolTable::new();
+    let mut symbols = SymbolTable::new();
     let mut ids = TermIdSource::new();
 
     let f_sym = symbols.alloc("f".to_string());
@@ -122,7 +126,7 @@ fn synth_program_with_alias_let() -> (Program, crate::SymbolId, crate::SymbolId)
         id: ids.next_id(),
         ty: unique_arr_ty.clone(),
         span: Span::dummy(),
-        kind: TermKind::Var(crate::tlc::VarRef::Symbol(a_sym)),
+        kind: TermKind::Var(VarRef::Symbol(a_sym)),
     };
     let body_zero = Term {
         id: ids.next_id(),
@@ -204,7 +208,7 @@ def main(a: *[4]i32) i32 = consume(a)
 
     let main_def = find_def(&program, "main");
     let lam = match &main_def.body.kind {
-        crate::tlc::TermKind::Lambda(l) => l,
+        TermKind::Lambda(l) => l,
         _ => panic!(),
     };
     let a_owner = model.owner_of(lam.params[0].0).unwrap();
@@ -229,7 +233,7 @@ def main(a: *[4]i32) i32 = borrow(a)
 
     let main_def = find_def(&program, "main");
     let lam = match &main_def.body.kind {
-        crate::tlc::TermKind::Lambda(l) => l,
+        TermKind::Lambda(l) => l,
         _ => panic!(),
     };
     let a_owner = model.owner_of(lam.params[0].0).unwrap();
@@ -275,7 +279,7 @@ def f(a: *[4]i32) i32 = a[0]
 
     let def = find_def(&program, "f");
     let lam = match &def.body.kind {
-        crate::tlc::TermKind::Lambda(l) => l,
+        TermKind::Lambda(l) => l,
         _ => panic!(),
     };
     let owner = model.owner_of(lam.params[0].0).unwrap();
@@ -295,10 +299,10 @@ def f(a: *[4]i32) i32 = a[0]
 fn find_app_call_to<'a>(body: &'a Term, names: &[&str], program: &Program) -> Option<&'a Term> {
     fn func_matches(t: &Term, names: &[&str], program: &Program) -> bool {
         match &t.kind {
-            TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
+            TermKind::Var(VarRef::Symbol(sym)) => {
                 program.symbols.get(*sym).map(|s| names.contains(&s.as_str())).unwrap_or(false)
             }
-            TermKind::Var(crate::tlc::VarRef::Builtin { id, .. }) => {
+            TermKind::Var(VarRef::Builtin { id, .. }) => {
                 let def = crate::builtins::by_id(*id);
                 names.contains(&def.raw.surface_name)
                     || def.intrinsic_source_names().iter().any(|n| names.contains(n))
@@ -810,7 +814,7 @@ def main(arr: *[3][4]i32) [3][4]i32 = map(|row| row, arr)
     let model = build(&program);
     let main_def = find_def(&program, "main");
     fn first_map_elem_param(t: &Term) -> Option<crate::SymbolId> {
-        if let TermKind::Soac(crate::tlc::SoacOp::Map { lam, .. }) = &t.kind {
+        if let TermKind::Soac(SoacOp::Map { lam, .. }) = &t.kind {
             return Some(lam.lam.params[0].0);
         }
         let mut found = None;
@@ -847,7 +851,7 @@ def main(arr: [3][4]i32) [3][4]i32 = map(|row| row, arr)
     // Walk main's body looking for a Soac::Map and inspect its
     // first lambda param's owner.
     fn first_map_elem_param(t: &Term) -> Option<crate::SymbolId> {
-        if let TermKind::Soac(crate::tlc::SoacOp::Map { lam, .. }) = &t.kind {
+        if let TermKind::Soac(SoacOp::Map { lam, .. }) = &t.kind {
             return Some(lam.lam.params[0].0);
         }
         let mut found = None;
@@ -1021,7 +1025,7 @@ fn compile_to_owned(source: &str) -> Program {
 
 fn map_consumes_input(program: &Program, fn_name: &str) -> Option<bool> {
     fn walk(t: &Term) -> Option<bool> {
-        if let TermKind::Soac(crate::tlc::SoacOp::Map { consumes_input, .. }) = &t.kind {
+        if let TermKind::Soac(SoacOp::Map { consumes_input, .. }) = &t.kind {
             return Some(*consumes_input);
         }
         let mut found = None;
@@ -1131,14 +1135,14 @@ fn synth_program_with_with_through_index() -> Program {
     use crate::tlc::{Def, DefMeta, Lambda, Term, TermIdSource, TermKind};
     use polytype::Type;
 
-    let mut symbols = crate::SymbolTable::new();
+    let mut symbols = SymbolTable::new();
     let mut def_syms = std::collections::HashMap::new();
     let mut ids = TermIdSource::new();
 
     // Top-level symbols
     let f_sym = symbols.alloc("f".to_string());
     def_syms.insert("f".to_string(), f_sym);
-    let array_with_id = crate::builtins::catalog().known().array_with;
+    let array_with_id = catalog().known().array_with;
 
     // Local symbols
     let grid_sym = symbols.alloc("grid".to_string());
@@ -1169,7 +1173,7 @@ fn synth_program_with_with_through_index() -> Program {
         id: ids.next_id(),
         ty: unique_outer_ty.clone(),
         span: Span::dummy(),
-        kind: TermKind::Var(crate::tlc::VarRef::Symbol(grid_sym)),
+        kind: TermKind::Var(VarRef::Symbol(grid_sym)),
     };
     let zero_idx = Term {
         id: ids.next_id(),
@@ -1192,7 +1196,7 @@ fn synth_program_with_with_through_index() -> Program {
         id: ids.next_id(),
         ty: with_fn_ty.clone(),
         span: Span::dummy(),
-        kind: TermKind::Var(crate::tlc::VarRef::Builtin {
+        kind: TermKind::Var(VarRef::Builtin {
             id: array_with_id,
             overload_idx: 0,
         }),
@@ -1261,7 +1265,7 @@ fn array_with_promotes_when_source_is_aliasing_intrinsic() {
     let program = synth_program_with_with_through_index();
 
     // Sanity: pre-rewrite uses the functional form.
-    let known = crate::builtins::catalog().known();
+    let known = catalog().known();
     let pre_id = {
         let f_def = find_def(&program, "f");
         let lam = match &f_def.body.kind {
@@ -1271,7 +1275,7 @@ fn array_with_promotes_when_source_is_aliasing_intrinsic() {
         let TermKind::App { func, .. } = &lam.body.kind else {
             panic!("expected lambda body to be an App");
         };
-        let TermKind::Var(crate::tlc::VarRef::Builtin { id, .. }) = &func.kind else {
+        let TermKind::Var(VarRef::Builtin { id, .. }) = &func.kind else {
             panic!("expected App's func to be a catalog Builtin Var");
         };
         *id
@@ -1290,7 +1294,7 @@ fn array_with_promotes_when_source_is_aliasing_intrinsic() {
     let TermKind::App { func, .. } = &lam.body.kind else {
         panic!("expected lambda body to be an App after rewrite");
     };
-    let TermKind::Var(crate::tlc::VarRef::Builtin { id: post_id, .. }) = &func.kind else {
+    let TermKind::Var(VarRef::Builtin { id: post_id, .. }) = &func.kind else {
         panic!("expected rewritten App's func to be a catalog Builtin Var");
     };
     assert_eq!(
@@ -1318,7 +1322,7 @@ fn synth_program_with_populated_soac_captures() -> Program {
     use crate::tlc::{Def, DefMeta, Lambda, SoacBody, Term, TermIdSource, TermKind};
     use polytype::Type;
 
-    let mut symbols = crate::SymbolTable::new();
+    let mut symbols = SymbolTable::new();
     let mut ids = TermIdSource::new();
     let mut def_syms = std::collections::HashMap::new();
 
@@ -1367,13 +1371,13 @@ fn synth_program_with_populated_soac_captures() -> Program {
         id: ids.next_id(),
         ty: consume_ty.clone(),
         span: Span::dummy(),
-        kind: TermKind::Var(crate::tlc::VarRef::Symbol(consume_sym)),
+        kind: TermKind::Var(VarRef::Symbol(consume_sym)),
     };
     let var_cap = Term {
         id: ids.next_id(),
         ty: unique_arr_ty.clone(),
         span: Span::dummy(),
-        kind: TermKind::Var(crate::tlc::VarRef::Symbol(cap_sym)),
+        kind: TermKind::Var(VarRef::Symbol(cap_sym)),
     };
     let consume_call = Term {
         id: ids.next_id(),
@@ -1389,7 +1393,7 @@ fn synth_program_with_populated_soac_captures() -> Program {
         id: ids.next_id(),
         ty: unique_arr_ty.clone(),
         span: Span::dummy(),
-        kind: TermKind::Var(crate::tlc::VarRef::Symbol(outer_sym)),
+        kind: TermKind::Var(VarRef::Symbol(outer_sym)),
     };
 
     let lambda = Lambda {
@@ -1422,7 +1426,7 @@ fn synth_program_with_populated_soac_captures() -> Program {
         id: ids.next_id(),
         ty: Type::Constructed(TypeName::Array, vec![i32_ty.clone()]),
         span: Span::dummy(),
-        kind: TermKind::Soac(crate::tlc::SoacOp::Map {
+        kind: TermKind::Soac(SoacOp::Map {
             lam: SoacBody {
                 lam: lambda,
                 captures: vec![(cap_sym, unique_arr_ty.clone(), var_outer)],
@@ -1525,7 +1529,7 @@ fn soac_capture_term_is_analyzed_for_liveness() {
     use crate::tlc::{Def, DefMeta, Lambda, SoacBody, Term, TermIdSource, TermKind};
     use polytype::Type;
 
-    let mut symbols = crate::SymbolTable::new();
+    let mut symbols = SymbolTable::new();
     let mut ids = TermIdSource::new();
 
     let main_sym = symbols.alloc("main".to_string());
@@ -1541,7 +1545,7 @@ fn soac_capture_term_is_analyzed_for_liveness() {
         id: ids.next_id(),
         ty: arr_ty.clone(),
         span: Span::dummy(),
-        kind: TermKind::Var(crate::tlc::VarRef::Symbol(outer_sym)),
+        kind: TermKind::Var(VarRef::Symbol(outer_sym)),
     };
     let capture_term_id = var_outer.id;
 
@@ -1580,7 +1584,7 @@ fn soac_capture_term_is_analyzed_for_liveness() {
         id: ids.next_id(),
         ty: arr_ty.clone(),
         span: Span::dummy(),
-        kind: TermKind::Soac(crate::tlc::SoacOp::Map {
+        kind: TermKind::Soac(SoacOp::Map {
             lam: SoacBody {
                 lam: lambda,
                 captures: vec![(cap_sym, arr_ty.clone(), var_outer)],

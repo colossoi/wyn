@@ -18,6 +18,10 @@
 //!      promote to `_w_intrinsic_array_with_inplace` when the source's
 //!      owner is mutable and absent from `live_out`.
 
+use super::VarRef;
+use crate::builtins::catalog;
+use crate::error::CompilerError;
+use crate::tlc::var_term_builtin_id;
 use std::collections::{HashMap, HashSet};
 
 use crate::SymbolId;
@@ -231,7 +235,7 @@ impl<'p> Builder<'p> {
     fn visit_term(&mut self, term: &Term) {
         self.model.term_spans.insert(term.id, term.span);
         match &term.kind {
-            TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
+            TermKind::Var(VarRef::Symbol(sym)) => {
                 if let Some(owner) = self.model.owner_of(*sym) {
                     self.model.uses.entry(term.id).or_default().insert(owner);
                 }
@@ -650,16 +654,14 @@ impl<'p> Builder<'p> {
 /// indexing expression rather than a plain `Var`).
 pub(super) fn alias_target_of(term: &Term, model: &OwnershipModel, program: &Program) -> Option<OwnerId> {
     match &term.kind {
-        TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => model.owner_of(*sym),
+        TermKind::Var(VarRef::Symbol(sym)) => model.owner_of(*sym),
         // `Index` and `TupleProj` are projection variants whose result
         // aliases the base.
         TermKind::Index { array, .. } => alias_target_of(array, model, program),
         TermKind::TupleProj { tuple, .. } => alias_target_of(tuple, model, program),
         // In-place `array_with` returns the buffer it consumed.
         TermKind::App { func, args } => {
-            if crate::tlc::var_term_builtin_id(func, &program.symbols)
-                == Some(crate::builtins::catalog().known().array_with_in_place)
-            {
+            if var_term_builtin_id(func, &program.symbols) == Some(catalog().known().array_with_in_place) {
                 return alias_target_of(args.first()?, model, program);
             }
             None
@@ -680,8 +682,7 @@ fn rhs_is_fresh_producer(term: &Term, program: &Program) -> bool {
     match &term.kind {
         TermKind::ArrayExpr(_) | TermKind::Tuple(_) | TermKind::VecLit(_) => true,
         TermKind::App { func, .. } => {
-            crate::tlc::var_term_builtin_id(func, &program.symbols)
-                == Some(crate::builtins::catalog().known().array_with)
+            var_term_builtin_id(func, &program.symbols) == Some(catalog().known().array_with)
         }
         _ => false,
     }
@@ -1111,8 +1112,8 @@ pub fn check(program: &Program) -> crate::error::Result<()> {
 /// Returns the first such violation as a CompilerError; later
 /// violations are not reported in this pass (one diagnostic per
 /// compile is consistent with how the rest of the pipeline reports).
-fn check_use_after_move(program: &Program, model: &OwnershipModel) -> Option<crate::error::CompilerError> {
-    use crate::error::CompilerError;
+fn check_use_after_move(program: &Program, model: &OwnershipModel) -> Option<CompilerError> {
+    use CompilerError;
     if let Some((msg, span)) = model.build_errors.first() {
         return Some(CompilerError::AliasError(msg.clone(), *span));
     }
@@ -1149,16 +1150,16 @@ impl<'m> Rewriter<'m> {
         // array_with → array_with_inplace: rewrite the App's `func`
         // before descending, since the rewrite swaps the function var.
         if let TermKind::App { func, args } = &term.kind {
-            let known = crate::builtins::catalog().known();
+            let known = catalog().known();
             let calls_functional =
-                crate::tlc::var_term_builtin_id(func, &self.program.symbols) == Some(known.array_with);
+                var_term_builtin_id(func, &self.program.symbols) == Some(known.array_with);
             if calls_functional && args.len() == 3 && self.is_promotable(term.id, &args[0]) {
                 let inplace_id = known.array_with_in_place;
                 let TermKind::App { func, args } = term.kind else {
                     unreachable!()
                 };
                 let new_func = Term {
-                    kind: TermKind::Var(crate::tlc::VarRef::Builtin {
+                    kind: TermKind::Var(VarRef::Builtin {
                         id: inplace_id,
                         overload_idx: 0,
                     }),
@@ -1321,7 +1322,7 @@ fn map_is_eligible(
         _ => return false,
     };
     let input_sym = match &input_term.kind {
-        TermKind::Var(crate::tlc::VarRef::Symbol(s)) => *s,
+        TermKind::Var(VarRef::Symbol(s)) => *s,
         _ => return false,
     };
     let owner = match model.owner_of(input_sym) {
@@ -1360,7 +1361,7 @@ fn map_is_eligible(
 }
 
 fn body_references_sym(term: &Term, sym: SymbolId) -> bool {
-    if let TermKind::Var(crate::tlc::VarRef::Symbol(s)) = &term.kind {
+    if let TermKind::Var(VarRef::Symbol(s)) = &term.kind {
         if *s == sym {
             return true;
         }

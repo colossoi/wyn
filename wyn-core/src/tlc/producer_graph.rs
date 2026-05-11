@@ -8,6 +8,8 @@
 //! `let name = SOAC(...) in body` creates a node, and references to `name`
 //! in downstream SOAC inputs create edges.
 
+use super::VarRef;
+use crate::SymbolTable;
 use std::collections::HashMap;
 
 use super::array_semantics::{ArraySemantics, FunctionSummary, ResultSemantics, classify_term};
@@ -103,7 +105,7 @@ pub fn build_producer_graph(
     body: &Term,
     _params: &[SymbolId],
     summaries: &HashMap<SymbolId, FunctionSummary>,
-    symbols: &crate::SymbolTable,
+    symbols: &SymbolTable,
     def_syms: &HashMap<String, SymbolId>,
 ) -> ProducerGraph {
     // Build callee_sym → def_sym resolver
@@ -160,7 +162,7 @@ impl<'a> GraphBuilder<'a> {
 
         // For App nodes, check if the callee has a known summary
         if let TermKind::App { func, args } = &term.kind {
-            if let TermKind::Var(crate::tlc::VarRef::Symbol(callee_sym)) = &func.kind {
+            if let TermKind::Var(VarRef::Symbol(callee_sym)) = &func.kind {
                 // Resolve call-site symbol to canonical def symbol
                 let def_sym = self.sym_to_def.get(callee_sym).unwrap_or(callee_sym);
                 if let Some(summary) = self.summaries.get(def_sym) {
@@ -189,7 +191,7 @@ impl<'a> GraphBuilder<'a> {
             .iter()
             .zip(call_args)
             .filter_map(|((param_sym, _), arg)| {
-                if let TermKind::Var(crate::tlc::VarRef::Symbol(arg_sym)) = &arg.kind {
+                if let TermKind::Var(VarRef::Symbol(arg_sym)) = &arg.kind {
                     Some((*param_sym, *arg_sym))
                 } else {
                     None
@@ -253,7 +255,7 @@ impl<'a> GraphBuilder<'a> {
             .enumerate()
             .filter_map(|(i, ae)| {
                 if let super::ArrayExpr::Ref(t) = ae {
-                    if let TermKind::Var(crate::tlc::VarRef::Symbol(sym)) = &t.kind {
+                    if let TermKind::Var(VarRef::Symbol(sym)) = &t.kind {
                         return Some((i, *sym));
                     }
                 }
@@ -355,7 +357,7 @@ fn subst_in_semantics(
 
 impl ProducerGraph {
     /// Pretty-print the graph for debugging.
-    pub fn debug_print(&self, symbols: &crate::SymbolTable) {
+    pub fn debug_print(&self, symbols: &SymbolTable) {
         eprintln!(
             "ProducerGraph ({} nodes, {} edges):",
             self.nodes.len(),

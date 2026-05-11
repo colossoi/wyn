@@ -10,6 +10,7 @@
 //! - [`TypeEmitter`]: Wyn polytype → WGSL type string, with cached tuple structs.
 //! - [`lower`]: entry point.
 
+use crate::builtins::{by_id, catalog};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
@@ -1549,9 +1550,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         // uninitialized composite. In WGSL that's just a
                         // `var<function> x: T;` — no initializer, no
                         // function call.
-                        InstKind::Intrinsic { id, .. }
-                            if *id == crate::builtins::catalog().known().uninit =>
-                        {
+                        InstKind::Intrinsic { id, .. } if *id == catalog().known().uninit => {
                             let result_id = inst.result.ok_or_else(|| {
                                 crate::err_wgsl_at!(
                                     self.blame_span(),
@@ -1578,12 +1577,12 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         // functional update. Declare a fresh `var` copy
                         // of the source, then patch the one element.
                         InstKind::Intrinsic { id, args, .. }
-                            if *id == crate::builtins::catalog().known().array_with_in_place
-                                || *id == crate::builtins::catalog().known().array_with =>
+                            if *id == catalog().known().array_with_in_place
+                                || *id == catalog().known().array_with =>
                         {
-                            let known = crate::builtins::catalog().known();
+                            let known = catalog().known();
                             let is_inplace = *id == known.array_with_in_place;
-                            let func_name = crate::builtins::by_id(*id).dispatch_name();
+                            let func_name = by_id(*id).dispatch_name();
                             if args.len() != 3 {
                                 return Err(crate::err_wgsl_at!(
                                     self.blame_span(),
@@ -1989,7 +1988,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 overload_idx: _,
                 args,
             } => {
-                let known = crate::builtins::catalog().known();
+                let known = catalog().known();
                 let arg_strs: Result<Vec<_>> = args.iter().map(|a| self.get_value(*a)).collect();
                 let arg_strs = arg_strs?;
                 // `_w_intrinsic_storage_len(set, binding)` → runtime
@@ -2156,7 +2155,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         "_w_intrinsic_length requires an SSA array argument"
                     ));
                 }
-                let name = crate::builtins::by_id(*id).dispatch_name();
+                let name = by_id(*id).dispatch_name();
                 self.lower_intrinsic(name, &arg_strs, result_ty.as_ref())
             }
 
@@ -2307,7 +2306,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         args: &[String],
         result_ty: Option<&PolyType<TypeName>>,
     ) -> Result<Option<String>> {
-        let Some(builtin) = crate::builtins::catalog().lookup_lowering(name) else {
+        let Some(builtin) = catalog().lookup_lowering(name) else {
             return Ok(None);
         };
         let prim_op = match builtin {

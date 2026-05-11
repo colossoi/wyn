@@ -4,6 +4,8 @@
 //! by what it *does*, not what syntax produced it. This enables fusion rules
 //! based on semantic compatibility rather than syntactic pattern matching.
 
+use super::VarRef;
+use crate::SymbolTable;
 use std::collections::HashMap;
 
 use super::{
@@ -213,7 +215,7 @@ pub fn can_fuse(producer: &ArraySemantics, consumer: &ArraySemantics) -> FusionK
 pub fn compose_elementwise(
     producer: &ArraySemantics,
     consumer: &ArraySemantics,
-    symbols: &mut crate::SymbolTable,
+    symbols: &mut SymbolTable,
     term_ids: &mut super::TermIdSource,
 ) -> Option<ArraySemantics> {
     let (prod_inputs, prod_body) = match producer {
@@ -236,7 +238,7 @@ pub fn compose_elementwise(
 pub fn compose_map_into_reduce(
     producer: &ArraySemantics,
     consumer: &ArraySemantics,
-    symbols: &mut crate::SymbolTable,
+    symbols: &mut SymbolTable,
     term_ids: &mut super::TermIdSource,
 ) -> Option<ArraySemantics> {
     let (prod_inputs, prod_body) = match producer {
@@ -263,7 +265,7 @@ pub fn compose_map_into_reduce(
 pub fn compose_map_into_scan(
     producer: &ArraySemantics,
     consumer: &ArraySemantics,
-    symbols: &mut crate::SymbolTable,
+    symbols: &mut SymbolTable,
     term_ids: &mut super::TermIdSource,
 ) -> Option<ArraySemantics> {
     let (prod_inputs, prod_body) = match producer {
@@ -289,7 +291,7 @@ pub fn compose_map_into_scan(
 fn compose_lambda_bodies(
     f: &SoacBody,
     g: &SoacBody,
-    symbols: &mut crate::SymbolTable,
+    symbols: &mut SymbolTable,
     term_ids: &mut super::TermIdSource,
 ) -> SoacBody {
     let fresh_sym = symbols.alloc("_fused".to_string());
@@ -327,7 +329,7 @@ fn compose_lambda_bodies(
 fn compose_map_into_op(
     map_body: &SoacBody,
     op: &SoacBody,
-    symbols: &mut crate::SymbolTable,
+    symbols: &mut SymbolTable,
     term_ids: &mut super::TermIdSource,
 ) -> SoacBody {
     let fresh_sym = symbols.alloc("_fused".to_string());
@@ -571,7 +573,7 @@ fn analyze_body(body: &Term, params: &[SymbolId]) -> ResultSemantics {
         TermKind::Let { body, .. } => analyze_body(body, params),
 
         // Variable — might be a parameter passthrough
-        TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
+        TermKind::Var(VarRef::Symbol(sym)) => {
             if let Some(idx) = params.iter().position(|p| p == sym) {
                 ResultSemantics::PassesThrough(idx)
             } else {
@@ -601,7 +603,7 @@ fn analyze_body_with_summaries(
 
         TermKind::Let { body, .. } => analyze_body_with_summaries(body, params, summaries),
 
-        TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
+        TermKind::Var(VarRef::Symbol(sym)) => {
             if let Some(idx) = params.iter().position(|p| p == sym) {
                 ResultSemantics::PassesThrough(idx)
             } else {
@@ -611,7 +613,7 @@ fn analyze_body_with_summaries(
 
         // Function call: look up callee summary
         TermKind::App { func, args } => {
-            if let TermKind::Var(crate::tlc::VarRef::Symbol(callee_sym)) = &func.kind {
+            if let TermKind::Var(VarRef::Symbol(callee_sym)) = &func.kind {
                 if let Some(callee_summary) = summaries.get(callee_sym) {
                     match &callee_summary.result {
                         ResultSemantics::Produces(semantics) => {
@@ -624,8 +626,7 @@ fn analyze_body_with_summaries(
                             // Callee passes through one of its params — check if the
                             // corresponding call arg is one of OUR params.
                             if *idx < args.len() {
-                                if let TermKind::Var(crate::tlc::VarRef::Symbol(arg_sym)) = &args[*idx].kind
-                                {
+                                if let TermKind::Var(VarRef::Symbol(arg_sym)) = &args[*idx].kind {
                                     if let Some(our_idx) = params.iter().position(|p| p == arg_sym) {
                                         return ResultSemantics::PassesThrough(our_idx);
                                     }

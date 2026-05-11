@@ -1,3 +1,4 @@
+use super::VarRef;
 use crate::ast::{BinaryOp, Span, TypeName};
 use crate::tlc::{Def, DefMeta, Lambda, LoopKind, Program, Term, TermId, TermIdSource, TermKind};
 use crate::{SymbolId, SymbolTable};
@@ -66,7 +67,7 @@ fn print_term(term: &Term, symbols: &SymbolTable, indent: usize) -> String {
     let unknown = "<unknown>".to_string();
     let pad = "  ".repeat(indent);
     match &term.kind {
-        TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
+        TermKind::Var(VarRef::Symbol(sym)) => {
             let name = symbols.get(*sym).unwrap_or(&unknown);
             format!("{}Var({})", pad, name)
         }
@@ -188,7 +189,7 @@ fn test_defunc_simple_lambda_no_capture() {
                 id: b.next_id(),
                 ty: i32_ty(),
                 span: b.span(),
-                kind: TermKind::Var(crate::tlc::VarRef::Symbol(x_sym)),
+                kind: TermKind::Var(VarRef::Symbol(x_sym)),
             }),
             ret_ty: i32_ty(),
         }),
@@ -249,7 +250,7 @@ fn test_defunc_lambda_with_capture() {
                         id: b.next_id(),
                         ty: i32_ty(),
                         span: b.span(),
-                        kind: TermKind::Var(crate::tlc::VarRef::Symbol(y_sym)),
+                        kind: TermKind::Var(VarRef::Symbol(y_sym)),
                     }],
                 },
             }),
@@ -270,7 +271,7 @@ fn test_defunc_lambda_with_capture() {
                 id: b.next_id(),
                 ty: arrow(i32_ty(), i32_ty()),
                 span: b.span(),
-                kind: TermKind::Var(crate::tlc::VarRef::Symbol(g_sym)),
+                kind: TermKind::Var(VarRef::Symbol(g_sym)),
             }),
         },
     };
@@ -310,7 +311,7 @@ fn test_defunc_lambda_with_capture() {
     assert!(result.defs.len() >= 2, "Expected lifted lambda def");
 
     // Find the lifted lambda by its DefMeta marker.
-    let lifted = result.defs.iter().find(|d| matches!(d.meta, crate::tlc::DefMeta::LiftedLambda));
+    let lifted = result.defs.iter().find(|d| matches!(d.meta, DefMeta::LiftedLambda));
     assert!(lifted.is_some(), "Should have a LiftedLambda definition");
 }
 
@@ -354,13 +355,13 @@ fn test_nested_hof_passthrough() {
                 id: b.next_id(),
                 ty: arrow(i32_ty(), i32_ty()),
                 span,
-                kind: TermKind::Var(crate::tlc::VarRef::Symbol(f_sym)),
+                kind: TermKind::Var(VarRef::Symbol(f_sym)),
             }),
             args: vec![Term {
                 id: b.next_id(),
                 ty: i32_ty(),
                 span,
-                kind: TermKind::Var(crate::tlc::VarRef::Symbol(x_sym)),
+                kind: TermKind::Var(VarRef::Symbol(x_sym)),
             }],
         },
     };
@@ -387,20 +388,20 @@ fn test_nested_hof_passthrough() {
                 id: b.next_id(),
                 ty: arrow(arrow(i32_ty(), i32_ty()), arrow(i32_ty(), i32_ty())),
                 span,
-                kind: TermKind::Var(crate::tlc::VarRef::Symbol(hof_inner_sym)),
+                kind: TermKind::Var(VarRef::Symbol(hof_inner_sym)),
             }),
             args: vec![
                 Term {
                     id: b.next_id(),
                     ty: arrow(i32_ty(), i32_ty()),
                     span,
-                    kind: TermKind::Var(crate::tlc::VarRef::Symbol(g_sym)), // <-- Just passes g, no lambda
+                    kind: TermKind::Var(VarRef::Symbol(g_sym)), // <-- Just passes g, no lambda
                 },
                 Term {
                     id: b.next_id(),
                     ty: i32_ty(),
                     span,
-                    kind: TermKind::Var(crate::tlc::VarRef::Symbol(y_sym)),
+                    kind: TermKind::Var(VarRef::Symbol(y_sym)),
                 },
             ],
         },
@@ -434,13 +435,13 @@ fn test_nested_hof_passthrough() {
                     id: b.next_id(),
                     ty: i32_ty(),
                     span,
-                    kind: TermKind::Var(crate::tlc::VarRef::Symbol(a_sym)),
+                    kind: TermKind::Var(VarRef::Symbol(a_sym)),
                 },
                 Term {
                     id: b.next_id(),
                     ty: i32_ty(),
                     span,
-                    kind: TermKind::Var(crate::tlc::VarRef::Symbol(cap_sym)),
+                    kind: TermKind::Var(VarRef::Symbol(cap_sym)),
                 },
             ],
         },
@@ -466,7 +467,7 @@ fn test_nested_hof_passthrough() {
                 id: b.next_id(),
                 ty: arrow(arrow(i32_ty(), i32_ty()), arrow(i32_ty(), i32_ty())),
                 span,
-                kind: TermKind::Var(crate::tlc::VarRef::Symbol(hof_outer_sym)),
+                kind: TermKind::Var(VarRef::Symbol(hof_outer_sym)),
             }),
             args: vec![
                 capturing_lambda,

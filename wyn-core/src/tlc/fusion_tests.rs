@@ -1,5 +1,7 @@
+use super::super::{DefMeta, SoacOp};
 use crate::ast::Span;
 use crate::tlc::ReduceProps;
+use crate::tlc::SoacBody;
 use crate::tlc::fusion::*;
 use std::collections::HashMap;
 
@@ -74,8 +76,8 @@ fn mk_lambda2(
 }
 
 /// Wrap a Lambda in a SoacBody with empty captures (test helper).
-fn mk_soac_body(lam: Lambda) -> crate::tlc::SoacBody {
-    crate::tlc::SoacBody {
+fn mk_soac_body(lam: Lambda) -> SoacBody {
+    SoacBody {
         lam,
         captures: vec![],
     }
@@ -126,7 +128,7 @@ fn mk_func_def(
         name,
         ty: ret_ty,
         body: lam_body,
-        meta: super::super::DefMeta::Function,
+        meta: DefMeta::Function,
         arity: params.len(),
     }
 }
@@ -163,24 +165,16 @@ fn test_simple_map_fusion() {
     let y_sym = symbols.alloc("y".to_string()); // g's param
 
     // f: i32 → i32 (identity-like, just returns x)
-    let f_body = mk_term(
-        TermKind::Var(crate::tlc::VarRef::Symbol(x_sym)),
-        i32_ty(),
-        &mut term_ids,
-    );
+    let f_body = mk_term(TermKind::Var(VarRef::Symbol(x_sym)), i32_ty(), &mut term_ids);
     let f = mk_lambda1(x_sym, i32_ty(), f_body, i32_ty());
 
     // g: i32 → i32 (identity-like, just returns y)
-    let g_body = mk_term(
-        TermKind::Var(crate::tlc::VarRef::Symbol(y_sym)),
-        i32_ty(),
-        &mut term_ids,
-    );
+    let g_body = mk_term(TermKind::Var(VarRef::Symbol(y_sym)), i32_ty(), &mut term_ids);
     let g = mk_lambda1(y_sym, i32_ty(), g_body, i32_ty());
 
     // a: [i32]
     let a = mk_term(
-        TermKind::Var(crate::tlc::VarRef::Symbol(a_sym)),
+        TermKind::Var(VarRef::Symbol(a_sym)),
         array_ty(i32_ty()),
         &mut term_ids,
     );
@@ -190,7 +184,7 @@ fn test_simple_map_fusion() {
 
     // Consumer: map(g, b)
     let b_ref = mk_term(
-        TermKind::Var(crate::tlc::VarRef::Symbol(b_sym)),
+        TermKind::Var(VarRef::Symbol(b_sym)),
         array_ty(i32_ty()),
         &mut term_ids,
     );
@@ -213,7 +207,7 @@ fn test_simple_map_fusion() {
             name: symbols.alloc("main".to_string()),
             ty: array_ty(i32_ty()),
             body: program_body,
-            meta: super::super::DefMeta::Function,
+            meta: DefMeta::Function,
             arity: 0,
         }],
         uniforms: vec![],
@@ -231,7 +225,7 @@ fn test_simple_map_fusion() {
             assert_eq!(inputs.len(), 1);
             match &inputs[0] {
                 ArrayExpr::Ref(t) => match &t.kind {
-                    TermKind::Var(crate::tlc::VarRef::Symbol(s)) => assert_eq!(*s, a_sym),
+                    TermKind::Var(VarRef::Symbol(s)) => assert_eq!(*s, a_sym),
                     other => panic!("Expected Var(a), got {:?}", other),
                 },
                 other => panic!("Expected Ref, got {:?}", other),
@@ -246,11 +240,9 @@ fn test_simple_map_fusion() {
             match &lam.lam.body.kind {
                 TermKind::Let { rhs, body, .. } => {
                     // rhs is f's body (Var(x))
-                    assert!(
-                        matches!(&rhs.kind, TermKind::Var(crate::tlc::VarRef::Symbol(s)) if *s == x_sym)
-                    );
+                    assert!(matches!(&rhs.kind, TermKind::Var(VarRef::Symbol(s)) if *s == x_sym));
                     // body should be Var(_fused) — the fresh symbol
-                    assert!(matches!(&body.kind, TermKind::Var(crate::tlc::VarRef::Symbol(_))));
+                    assert!(matches!(&body.kind, TermKind::Var(VarRef::Symbol(_))));
                 }
                 other => panic!("Expected Let (composed body), got {:?}", other),
             }
@@ -278,50 +270,38 @@ fn test_chain_of_three_maps() {
     let f = mk_lambda1(
         x_sym,
         i32_ty(),
-        mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(x_sym)),
-            i32_ty(),
-            &mut term_ids,
-        ),
+        mk_term(TermKind::Var(VarRef::Symbol(x_sym)), i32_ty(), &mut term_ids),
         i32_ty(),
     );
     let g = mk_lambda1(
         y_sym,
         i32_ty(),
-        mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(y_sym)),
-            i32_ty(),
-            &mut term_ids,
-        ),
+        mk_term(TermKind::Var(VarRef::Symbol(y_sym)), i32_ty(), &mut term_ids),
         i32_ty(),
     );
     let h = mk_lambda1(
         z_sym,
         i32_ty(),
-        mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(z_sym)),
-            i32_ty(),
-            &mut term_ids,
-        ),
+        mk_term(TermKind::Var(VarRef::Symbol(z_sym)), i32_ty(), &mut term_ids),
         i32_ty(),
     );
 
     let a = mk_term(
-        TermKind::Var(crate::tlc::VarRef::Symbol(a_sym)),
+        TermKind::Var(VarRef::Symbol(a_sym)),
         array_ty(i32_ty()),
         &mut term_ids,
     );
     let producer = mk_map(f, a, array_ty(i32_ty()), &mut term_ids);
 
     let b_ref = mk_term(
-        TermKind::Var(crate::tlc::VarRef::Symbol(b_sym)),
+        TermKind::Var(VarRef::Symbol(b_sym)),
         array_ty(i32_ty()),
         &mut term_ids,
     );
     let middle = mk_map(g, b_ref, array_ty(i32_ty()), &mut term_ids);
 
     let c_ref = mk_term(
-        TermKind::Var(crate::tlc::VarRef::Symbol(c_sym)),
+        TermKind::Var(VarRef::Symbol(c_sym)),
         array_ty(i32_ty()),
         &mut term_ids,
     );
@@ -355,7 +335,7 @@ fn test_chain_of_three_maps() {
             name: symbols.alloc("main".to_string()),
             ty: array_ty(i32_ty()),
             body: outer_let,
-            meta: super::super::DefMeta::Function,
+            meta: DefMeta::Function,
             arity: 0,
         }],
         uniforms: vec![],
@@ -372,7 +352,7 @@ fn test_chain_of_three_maps() {
             assert_eq!(inputs.len(), 1);
             match &inputs[0] {
                 ArrayExpr::Ref(t) => {
-                    assert!(matches!(&t.kind, TermKind::Var(crate::tlc::VarRef::Symbol(s)) if *s == a_sym))
+                    assert!(matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == a_sym))
                 }
                 other => panic!("Expected Ref(a), got {:?}", other),
             }
@@ -399,26 +379,18 @@ fn test_multi_use_no_fusion() {
     let f = mk_lambda1(
         x_sym,
         i32_ty(),
-        mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(x_sym)),
-            i32_ty(),
-            &mut term_ids,
-        ),
+        mk_term(TermKind::Var(VarRef::Symbol(x_sym)), i32_ty(), &mut term_ids),
         i32_ty(),
     );
     let g = mk_lambda1(
         y_sym,
         i32_ty(),
-        mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(y_sym)),
-            i32_ty(),
-            &mut term_ids,
-        ),
+        mk_term(TermKind::Var(VarRef::Symbol(y_sym)), i32_ty(), &mut term_ids),
         i32_ty(),
     );
 
     let a = mk_term(
-        TermKind::Var(crate::tlc::VarRef::Symbol(a_sym)),
+        TermKind::Var(VarRef::Symbol(a_sym)),
         array_ty(i32_ty()),
         &mut term_ids,
     );
@@ -426,7 +398,7 @@ fn test_multi_use_no_fusion() {
 
     // Consumer uses b
     let b_ref1 = mk_term(
-        TermKind::Var(crate::tlc::VarRef::Symbol(b_sym)),
+        TermKind::Var(VarRef::Symbol(b_sym)),
         array_ty(i32_ty()),
         &mut term_ids,
     );
@@ -434,7 +406,7 @@ fn test_multi_use_no_fusion() {
 
     // Second use of b (in an App, making count_uses == 2)
     let b_ref2 = mk_term(
-        TermKind::Var(crate::tlc::VarRef::Symbol(b_sym)),
+        TermKind::Var(VarRef::Symbol(b_sym)),
         array_ty(i32_ty()),
         &mut term_ids,
     );
@@ -465,7 +437,7 @@ fn test_multi_use_no_fusion() {
             name: symbols.alloc("main".to_string()),
             ty: array_ty(i32_ty()),
             body: program_body,
-            meta: super::super::DefMeta::Function,
+            meta: DefMeta::Function,
             arity: 0,
         }],
         uniforms: vec![],
@@ -501,7 +473,7 @@ fn test_zip_fused_producer() {
     let f = Lambda {
         params: vec![(x1_sym, i32_ty()), (x2_sym, f32_ty())],
         body: Box::new(mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(x1_sym)),
+            TermKind::Var(VarRef::Symbol(x1_sym)),
             i32_ty(),
             &mut term_ids,
         )),
@@ -510,12 +482,12 @@ fn test_zip_fused_producer() {
 
     // Producer: map(f, [a, b]) with zip-fused inputs
     let a = mk_term(
-        TermKind::Var(crate::tlc::VarRef::Symbol(a_sym)),
+        TermKind::Var(VarRef::Symbol(a_sym)),
         array_ty(i32_ty()),
         &mut term_ids,
     );
     let b = mk_term(
-        TermKind::Var(crate::tlc::VarRef::Symbol(b_sym)),
+        TermKind::Var(VarRef::Symbol(b_sym)),
         array_ty(f32_ty()),
         &mut term_ids,
     );
@@ -533,17 +505,13 @@ fn test_zip_fused_producer() {
     let g = mk_lambda1(
         y_sym,
         i32_ty(),
-        mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(y_sym)),
-            i32_ty(),
-            &mut term_ids,
-        ),
+        mk_term(TermKind::Var(VarRef::Symbol(y_sym)), i32_ty(), &mut term_ids),
         i32_ty(),
     );
 
     // Consumer: map(g, inter) with single input
     let inter_ref = mk_term(
-        TermKind::Var(crate::tlc::VarRef::Symbol(intermediate_sym)),
+        TermKind::Var(VarRef::Symbol(intermediate_sym)),
         array_ty(i32_ty()),
         &mut term_ids,
     );
@@ -566,7 +534,7 @@ fn test_zip_fused_producer() {
             name: symbols.alloc("main".to_string()),
             ty: array_ty(i32_ty()),
             body: program_body,
-            meta: super::super::DefMeta::Function,
+            meta: DefMeta::Function,
             arity: 0,
         }],
         uniforms: vec![],
@@ -608,16 +576,12 @@ fn test_consumer_multi_input_no_fusion() {
     let f = mk_lambda1(
         x_sym,
         i32_ty(),
-        mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(x_sym)),
-            i32_ty(),
-            &mut term_ids,
-        ),
+        mk_term(TermKind::Var(VarRef::Symbol(x_sym)), i32_ty(), &mut term_ids),
         i32_ty(),
     );
 
     let a = mk_term(
-        TermKind::Var(crate::tlc::VarRef::Symbol(a_sym)),
+        TermKind::Var(VarRef::Symbol(a_sym)),
         array_ty(i32_ty()),
         &mut term_ids,
     );
@@ -627,7 +591,7 @@ fn test_consumer_multi_input_no_fusion() {
     let g = Lambda {
         params: vec![(y1_sym, i32_ty()), (y2_sym, i32_ty())],
         body: Box::new(mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(y1_sym)),
+            TermKind::Var(VarRef::Symbol(y1_sym)),
             i32_ty(),
             &mut term_ids,
         )),
@@ -636,12 +600,12 @@ fn test_consumer_multi_input_no_fusion() {
 
     // Consumer: map(g, [b, other]) — b plus another array
     let b_ref = mk_term(
-        TermKind::Var(crate::tlc::VarRef::Symbol(b_sym)),
+        TermKind::Var(VarRef::Symbol(b_sym)),
         array_ty(i32_ty()),
         &mut term_ids,
     );
     let other = mk_term(
-        TermKind::Var(crate::tlc::VarRef::Symbol(other_sym)),
+        TermKind::Var(VarRef::Symbol(other_sym)),
         array_ty(i32_ty()),
         &mut term_ids,
     );
@@ -671,7 +635,7 @@ fn test_consumer_multi_input_no_fusion() {
             name: symbols.alloc("main".to_string()),
             ty: array_ty(i32_ty()),
             body: program_body,
-            meta: super::super::DefMeta::Function,
+            meta: DefMeta::Function,
             arity: 0,
         }],
         uniforms: vec![],
@@ -702,15 +666,11 @@ fn test_inline_map_fusion() {
     let g = mk_lambda1(
         x_sym,
         i32_ty(),
-        mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(x_sym)),
-            i32_ty(),
-            &mut term_ids,
-        ),
+        mk_term(TermKind::Var(VarRef::Symbol(x_sym)), i32_ty(), &mut term_ids),
         i32_ty(),
     );
     let a = mk_term(
-        TermKind::Var(crate::tlc::VarRef::Symbol(a_sym)),
+        TermKind::Var(VarRef::Symbol(a_sym)),
         array_ty(i32_ty()),
         &mut term_ids,
     );
@@ -720,11 +680,7 @@ fn test_inline_map_fusion() {
     let f = mk_lambda1(
         y_sym,
         i32_ty(),
-        mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(y_sym)),
-            i32_ty(),
-            &mut term_ids,
-        ),
+        mk_term(TermKind::Var(VarRef::Symbol(y_sym)), i32_ty(), &mut term_ids),
         i32_ty(),
     );
     let outer = mk_term(
@@ -742,7 +698,7 @@ fn test_inline_map_fusion() {
             name: symbols.alloc("main".to_string()),
             ty: array_ty(i32_ty()),
             body: outer,
-            meta: super::super::DefMeta::Function,
+            meta: DefMeta::Function,
             arity: 0,
         }],
         uniforms: vec![],
@@ -759,7 +715,7 @@ fn test_inline_map_fusion() {
             assert_eq!(inputs.len(), 1);
             match &inputs[0] {
                 ArrayExpr::Ref(t) => {
-                    assert!(matches!(&t.kind, TermKind::Var(crate::tlc::VarRef::Symbol(s)) if *s == a_sym))
+                    assert!(matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == a_sym))
                 }
                 other => panic!("Expected Ref(a), got {:?}", other),
             }
@@ -788,15 +744,11 @@ fn test_inline_chain_of_three() {
     let h = mk_lambda1(
         x_sym,
         i32_ty(),
-        mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(x_sym)),
-            i32_ty(),
-            &mut term_ids,
-        ),
+        mk_term(TermKind::Var(VarRef::Symbol(x_sym)), i32_ty(), &mut term_ids),
         i32_ty(),
     );
     let a = mk_term(
-        TermKind::Var(crate::tlc::VarRef::Symbol(a_sym)),
+        TermKind::Var(VarRef::Symbol(a_sym)),
         array_ty(i32_ty()),
         &mut term_ids,
     );
@@ -806,11 +758,7 @@ fn test_inline_chain_of_three() {
     let g = mk_lambda1(
         y_sym,
         i32_ty(),
-        mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(y_sym)),
-            i32_ty(),
-            &mut term_ids,
-        ),
+        mk_term(TermKind::Var(VarRef::Symbol(y_sym)), i32_ty(), &mut term_ids),
         i32_ty(),
     );
     let middle = mk_term(
@@ -827,11 +775,7 @@ fn test_inline_chain_of_three() {
     let f = mk_lambda1(
         z_sym,
         i32_ty(),
-        mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(z_sym)),
-            i32_ty(),
-            &mut term_ids,
-        ),
+        mk_term(TermKind::Var(VarRef::Symbol(z_sym)), i32_ty(), &mut term_ids),
         i32_ty(),
     );
     let outer = mk_term(
@@ -849,7 +793,7 @@ fn test_inline_chain_of_three() {
             name: symbols.alloc("main".to_string()),
             ty: array_ty(i32_ty()),
             body: outer,
-            meta: super::super::DefMeta::Function,
+            meta: DefMeta::Function,
             arity: 0,
         }],
         uniforms: vec![],
@@ -866,7 +810,7 @@ fn test_inline_chain_of_three() {
             assert_eq!(inputs.len(), 1);
             match &inputs[0] {
                 ArrayExpr::Ref(t) => {
-                    assert!(matches!(&t.kind, TermKind::Var(crate::tlc::VarRef::Symbol(s)) if *s == a_sym))
+                    assert!(matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == a_sym))
                 }
                 other => panic!("Expected Ref(a), got {:?}", other),
             }
@@ -897,15 +841,11 @@ fn test_zip_fused_consumer_inline() {
     let g = mk_lambda1(
         x_sym,
         i32_ty(),
-        mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(x_sym)),
-            i32_ty(),
-            &mut term_ids,
-        ),
+        mk_term(TermKind::Var(VarRef::Symbol(x_sym)), i32_ty(), &mut term_ids),
         i32_ty(),
     );
     let a = mk_term(
-        TermKind::Var(crate::tlc::VarRef::Symbol(a_sym)),
+        TermKind::Var(VarRef::Symbol(a_sym)),
         array_ty(i32_ty()),
         &mut term_ids,
     );
@@ -916,14 +856,14 @@ fn test_zip_fused_consumer_inline() {
     let f = Lambda {
         params: vec![(y1_sym, i32_ty()), (y2_sym, f32_ty())],
         body: Box::new(mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(y1_sym)),
+            TermKind::Var(VarRef::Symbol(y1_sym)),
             i32_ty(),
             &mut term_ids,
         )),
         ret_ty: i32_ty(),
     };
     let b = mk_term(
-        TermKind::Var(crate::tlc::VarRef::Symbol(b_sym)),
+        TermKind::Var(VarRef::Symbol(b_sym)),
         array_ty(f32_ty()),
         &mut term_ids,
     );
@@ -945,7 +885,7 @@ fn test_zip_fused_consumer_inline() {
             name: symbols.alloc("main".to_string()),
             ty: array_ty(i32_ty()),
             body: outer,
-            meta: super::super::DefMeta::Function,
+            meta: DefMeta::Function,
             arity: 0,
         }],
         uniforms: vec![],
@@ -964,14 +904,14 @@ fn test_zip_fused_consumer_inline() {
             // First input: a (was map(g, a), now fused)
             match &inputs[0] {
                 ArrayExpr::Ref(t) => {
-                    assert!(matches!(&t.kind, TermKind::Var(crate::tlc::VarRef::Symbol(s)) if *s == a_sym))
+                    assert!(matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == a_sym))
                 }
                 other => panic!("Expected Ref(a), got {:?}", other),
             }
             // Second input: b (unchanged)
             match &inputs[1] {
                 ArrayExpr::Ref(t) => {
-                    assert!(matches!(&t.kind, TermKind::Var(crate::tlc::VarRef::Symbol(s)) if *s == b_sym))
+                    assert!(matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == b_sym))
                 }
                 other => panic!("Expected Ref(b), got {:?}", other),
             }
@@ -1004,15 +944,11 @@ fn test_map_zip_map() {
     let g = mk_lambda1(
         x_sym,
         i32_ty(),
-        mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(x_sym)),
-            i32_ty(),
-            &mut term_ids,
-        ),
+        mk_term(TermKind::Var(VarRef::Symbol(x_sym)), i32_ty(), &mut term_ids),
         i32_ty(),
     );
     let a = mk_term(
-        TermKind::Var(crate::tlc::VarRef::Symbol(a_sym)),
+        TermKind::Var(VarRef::Symbol(a_sym)),
         array_ty(i32_ty()),
         &mut term_ids,
     );
@@ -1022,15 +958,11 @@ fn test_map_zip_map() {
     let h = mk_lambda1(
         w_sym,
         f32_ty(),
-        mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(w_sym)),
-            f32_ty(),
-            &mut term_ids,
-        ),
+        mk_term(TermKind::Var(VarRef::Symbol(w_sym)), f32_ty(), &mut term_ids),
         f32_ty(),
     );
     let b = mk_term(
-        TermKind::Var(crate::tlc::VarRef::Symbol(b_sym)),
+        TermKind::Var(VarRef::Symbol(b_sym)),
         array_ty(f32_ty()),
         &mut term_ids,
     );
@@ -1040,7 +972,7 @@ fn test_map_zip_map() {
     let f = Lambda {
         params: vec![(y1_sym, i32_ty()), (y2_sym, f32_ty())],
         body: Box::new(mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(y1_sym)),
+            TermKind::Var(VarRef::Symbol(y1_sym)),
             i32_ty(),
             &mut term_ids,
         )),
@@ -1066,7 +998,7 @@ fn test_map_zip_map() {
             name: symbols.alloc("main".to_string()),
             ty: array_ty(i32_ty()),
             body: outer,
-            meta: super::super::DefMeta::Function,
+            meta: DefMeta::Function,
             arity: 0,
         }],
         uniforms: vec![],
@@ -1083,13 +1015,13 @@ fn test_map_zip_map() {
             assert_eq!(inputs.len(), 2);
             match &inputs[0] {
                 ArrayExpr::Ref(t) => {
-                    assert!(matches!(&t.kind, TermKind::Var(crate::tlc::VarRef::Symbol(s)) if *s == a_sym))
+                    assert!(matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == a_sym))
                 }
                 other => panic!("Expected Ref(a), got {:?}", other),
             }
             match &inputs[1] {
                 ArrayExpr::Ref(t) => {
-                    assert!(matches!(&t.kind, TermKind::Var(crate::tlc::VarRef::Symbol(s)) if *s == b_sym))
+                    assert!(matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == b_sym))
                 }
                 other => panic!("Expected Ref(b), got {:?}", other),
             }
@@ -1122,11 +1054,7 @@ fn test_raytrace_step1_local_map_reduce() {
     let f = mk_lambda1(
         x_sym,
         i32_ty(),
-        mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(x_sym)),
-            i32_ty(),
-            &mut term_ids,
-        ),
+        mk_term(TermKind::Var(VarRef::Symbol(x_sym)), i32_ty(), &mut term_ids),
         i32_ty(),
     );
     let op = mk_lambda2(
@@ -1134,23 +1062,19 @@ fn test_raytrace_step1_local_map_reduce() {
         i32_ty(),
         elem_sym,
         i32_ty(),
-        mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(acc_sym)),
-            i32_ty(),
-            &mut term_ids,
-        ),
+        mk_term(TermKind::Var(VarRef::Symbol(acc_sym)), i32_ty(), &mut term_ids),
         i32_ty(),
     );
 
     let xs = mk_term(
-        TermKind::Var(crate::tlc::VarRef::Symbol(xs_sym)),
+        TermKind::Var(VarRef::Symbol(xs_sym)),
         array_ty(i32_ty()),
         &mut term_ids,
     );
     let ne = mk_term(TermKind::IntLit("0".to_string()), i32_ty(), &mut term_ids);
     let producer = mk_map(f, xs, array_ty(i32_ty()), &mut term_ids);
     let tmp_ref = mk_term(
-        TermKind::Var(crate::tlc::VarRef::Symbol(tmp_sym)),
+        TermKind::Var(VarRef::Symbol(tmp_sym)),
         array_ty(i32_ty()),
         &mut term_ids,
     );
@@ -1172,7 +1096,7 @@ fn test_raytrace_step1_local_map_reduce() {
             name: symbols.alloc("main".to_string()),
             ty: i32_ty(),
             body,
-            meta: super::super::DefMeta::Function,
+            meta: DefMeta::Function,
             arity: 0,
         }],
         uniforms: vec![],
@@ -1187,7 +1111,7 @@ fn test_raytrace_step1_local_map_reduce() {
             assert_eq!(inputs.len(), 1);
             match &inputs[0] {
                 ArrayExpr::Ref(t) => {
-                    assert!(matches!(&t.kind, TermKind::Var(crate::tlc::VarRef::Symbol(s)) if *s == xs_sym))
+                    assert!(matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == xs_sym))
                 }
                 other => panic!("Expected Ref(xs), got {:?}", other),
             }
@@ -1222,11 +1146,7 @@ fn test_raytrace_step2_interprocedural_reduce_consumer() {
         i32_ty(),
         elem_sym,
         i32_ty(),
-        mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(acc_sym)),
-            i32_ty(),
-            &mut term_ids,
-        ),
+        mk_term(TermKind::Var(VarRef::Symbol(acc_sym)), i32_ty(), &mut term_ids),
         i32_ty(),
     );
     let ne = mk_term(TermKind::IntLit("0".to_string()), i32_ty(), &mut term_ids);
@@ -1234,7 +1154,7 @@ fn test_raytrace_step2_interprocedural_reduce_consumer() {
         op,
         ne,
         mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(xs_sym)),
+            TermKind::Var(VarRef::Symbol(xs_sym)),
             array_ty(i32_ty()),
             &mut term_ids,
         ),
@@ -1252,27 +1172,23 @@ fn test_raytrace_step2_interprocedural_reduce_consumer() {
     let f = mk_lambda1(
         x_sym,
         i32_ty(),
-        mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(x_sym)),
-            i32_ty(),
-            &mut term_ids,
-        ),
+        mk_term(TermKind::Var(VarRef::Symbol(x_sym)), i32_ty(), &mut term_ids),
         i32_ty(),
     );
     let arr = mk_term(
-        TermKind::Var(crate::tlc::VarRef::Symbol(arr_sym)),
+        TermKind::Var(VarRef::Symbol(arr_sym)),
         array_ty(i32_ty()),
         &mut term_ids,
     );
     let producer = mk_map(f, arr, array_ty(i32_ty()), &mut term_ids);
     let consumer_call = mk_app(
         mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(my_reduce_sym)),
+            TermKind::Var(VarRef::Symbol(my_reduce_sym)),
             i32_ty(),
             &mut term_ids,
         ),
         mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(tmp_sym)),
+            TermKind::Var(VarRef::Symbol(tmp_sym)),
             array_ty(i32_ty()),
             &mut term_ids,
         ),
@@ -1294,7 +1210,7 @@ fn test_raytrace_step2_interprocedural_reduce_consumer() {
         name: main_sym,
         ty: i32_ty(),
         body: main_body,
-        meta: super::super::DefMeta::Function,
+        meta: DefMeta::Function,
         arity: 0,
     };
 
@@ -1312,9 +1228,9 @@ fn test_raytrace_step2_interprocedural_reduce_consumer() {
         TermKind::Soac(SoacOp::Redomap { op, inputs, .. }) => {
             assert_eq!(inputs.len(), 1);
             match &inputs[0] {
-                ArrayExpr::Ref(t) => assert!(
-                    matches!(&t.kind, TermKind::Var(crate::tlc::VarRef::Symbol(s)) if *s == arr_sym)
-                ),
+                ArrayExpr::Ref(t) => {
+                    assert!(matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == arr_sym))
+                }
                 other => panic!("Expected Ref(arr), got {:?}", other),
             }
             assert_eq!(op.lam.params.len(), 2);
@@ -1344,17 +1260,13 @@ fn test_raytrace_step3_interprocedural_map_producer() {
     let f = mk_lambda1(
         x_sym,
         i32_ty(),
-        mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(x_sym)),
-            i32_ty(),
-            &mut term_ids,
-        ),
+        mk_term(TermKind::Var(VarRef::Symbol(x_sym)), i32_ty(), &mut term_ids),
         i32_ty(),
     );
     let map_body = mk_map(
         f,
         mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(xs_sym)),
+            TermKind::Var(VarRef::Symbol(xs_sym)),
             array_ty(i32_ty()),
             &mut term_ids,
         ),
@@ -1371,12 +1283,12 @@ fn test_raytrace_step3_interprocedural_map_producer() {
     // main: let tmp = myMap(arr) in reduce(op, ne, tmp)
     let producer_call = mk_app(
         mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(my_map_sym)),
+            TermKind::Var(VarRef::Symbol(my_map_sym)),
             array_ty(i32_ty()),
             &mut term_ids,
         ),
         mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(arr_sym)),
+            TermKind::Var(VarRef::Symbol(arr_sym)),
             array_ty(i32_ty()),
             &mut term_ids,
         ),
@@ -1388,11 +1300,7 @@ fn test_raytrace_step3_interprocedural_map_producer() {
         i32_ty(),
         elem_sym,
         i32_ty(),
-        mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(acc_sym)),
-            i32_ty(),
-            &mut term_ids,
-        ),
+        mk_term(TermKind::Var(VarRef::Symbol(acc_sym)), i32_ty(), &mut term_ids),
         i32_ty(),
     );
     let ne = mk_term(TermKind::IntLit("0".to_string()), i32_ty(), &mut term_ids);
@@ -1400,7 +1308,7 @@ fn test_raytrace_step3_interprocedural_map_producer() {
         op,
         ne,
         mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(tmp_sym)),
+            TermKind::Var(VarRef::Symbol(tmp_sym)),
             array_ty(i32_ty()),
             &mut term_ids,
         ),
@@ -1422,7 +1330,7 @@ fn test_raytrace_step3_interprocedural_map_producer() {
         name: main_sym,
         ty: i32_ty(),
         body: main_body,
-        meta: super::super::DefMeta::Function,
+        meta: DefMeta::Function,
         arity: 0,
     };
 
@@ -1440,9 +1348,9 @@ fn test_raytrace_step3_interprocedural_map_producer() {
         TermKind::Soac(SoacOp::Redomap { op, inputs, .. }) => {
             assert_eq!(inputs.len(), 1);
             match &inputs[0] {
-                ArrayExpr::Ref(t) => assert!(
-                    matches!(&t.kind, TermKind::Var(crate::tlc::VarRef::Symbol(s)) if *s == arr_sym)
-                ),
+                ArrayExpr::Ref(t) => {
+                    assert!(matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == arr_sym))
+                }
                 other => panic!("Expected Ref(arr), got {:?}", other),
             }
             assert_eq!(op.lam.params.len(), 2);
@@ -1475,17 +1383,13 @@ fn test_raytrace_step4_both_interprocedural() {
     let f = mk_lambda1(
         x_sym,
         i32_ty(),
-        mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(x_sym)),
-            i32_ty(),
-            &mut term_ids,
-        ),
+        mk_term(TermKind::Var(VarRef::Symbol(x_sym)), i32_ty(), &mut term_ids),
         i32_ty(),
     );
     let map_body = mk_map(
         f,
         mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(xs_sym)),
+            TermKind::Var(VarRef::Symbol(xs_sym)),
             array_ty(i32_ty()),
             &mut term_ids,
         ),
@@ -1505,11 +1409,7 @@ fn test_raytrace_step4_both_interprocedural() {
         i32_ty(),
         elem_sym,
         i32_ty(),
-        mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(acc_sym)),
-            i32_ty(),
-            &mut term_ids,
-        ),
+        mk_term(TermKind::Var(VarRef::Symbol(acc_sym)), i32_ty(), &mut term_ids),
         i32_ty(),
     );
     let ne = mk_term(TermKind::IntLit("0".to_string()), i32_ty(), &mut term_ids);
@@ -1517,7 +1417,7 @@ fn test_raytrace_step4_both_interprocedural() {
         op,
         ne,
         mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(xs2_sym)),
+            TermKind::Var(VarRef::Symbol(xs2_sym)),
             array_ty(i32_ty()),
             &mut term_ids,
         ),
@@ -1534,12 +1434,12 @@ fn test_raytrace_step4_both_interprocedural() {
     // main: let tmp = myMap(arr) in myReduce(tmp)
     let producer_call = mk_app(
         mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(my_map_sym)),
+            TermKind::Var(VarRef::Symbol(my_map_sym)),
             array_ty(i32_ty()),
             &mut term_ids,
         ),
         mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(arr_sym)),
+            TermKind::Var(VarRef::Symbol(arr_sym)),
             array_ty(i32_ty()),
             &mut term_ids,
         ),
@@ -1548,12 +1448,12 @@ fn test_raytrace_step4_both_interprocedural() {
     );
     let consumer_call = mk_app(
         mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(my_reduce_sym)),
+            TermKind::Var(VarRef::Symbol(my_reduce_sym)),
             i32_ty(),
             &mut term_ids,
         ),
         mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(tmp_sym)),
+            TermKind::Var(VarRef::Symbol(tmp_sym)),
             array_ty(i32_ty()),
             &mut term_ids,
         ),
@@ -1575,7 +1475,7 @@ fn test_raytrace_step4_both_interprocedural() {
         name: main_sym,
         ty: i32_ty(),
         body: main_body,
-        meta: super::super::DefMeta::Function,
+        meta: DefMeta::Function,
         arity: 0,
     };
 
@@ -1593,9 +1493,9 @@ fn test_raytrace_step4_both_interprocedural() {
         TermKind::Soac(SoacOp::Redomap { op, inputs, .. }) => {
             assert_eq!(inputs.len(), 1);
             match &inputs[0] {
-                ArrayExpr::Ref(t) => assert!(
-                    matches!(&t.kind, TermKind::Var(crate::tlc::VarRef::Symbol(s)) if *s == arr_sym)
-                ),
+                ArrayExpr::Ref(t) => {
+                    assert!(matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == arr_sym))
+                }
                 other => panic!("Expected Ref(arr), got {:?}", other),
             }
             assert_eq!(op.lam.params.len(), 2);
@@ -1631,15 +1531,11 @@ fn test_raytrace_step5_globals_pattern_fused() {
     let f = mk_lambda1(
         x_sym,
         i32_ty(),
-        mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(x_sym)),
-            i32_ty(),
-            &mut term_ids,
-        ),
+        mk_term(TermKind::Var(VarRef::Symbol(x_sym)), i32_ty(), &mut term_ids),
         i32_ty(),
     );
     let global_ref = mk_term(
-        TermKind::Var(crate::tlc::VarRef::Symbol(global_arr_sym)),
+        TermKind::Var(VarRef::Symbol(global_arr_sym)),
         array_ty(i32_ty()),
         &mut term_ids,
     );
@@ -1657,11 +1553,7 @@ fn test_raytrace_step5_globals_pattern_fused() {
         i32_ty(),
         elem_sym,
         i32_ty(),
-        mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(acc_sym)),
-            i32_ty(),
-            &mut term_ids,
-        ),
+        mk_term(TermKind::Var(VarRef::Symbol(acc_sym)), i32_ty(), &mut term_ids),
         i32_ty(),
     );
     let ne = mk_term(TermKind::IntLit("0".to_string()), i32_ty(), &mut term_ids);
@@ -1669,7 +1561,7 @@ fn test_raytrace_step5_globals_pattern_fused() {
         op,
         ne,
         mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(hits_sym)),
+            TermKind::Var(VarRef::Symbol(hits_sym)),
             array_ty(i32_ty()),
             &mut term_ids,
         ),
@@ -1687,21 +1579,13 @@ fn test_raytrace_step5_globals_pattern_fused() {
     let producer_call = mk_term(
         TermKind::App {
             func: Box::new(mk_term(
-                TermKind::Var(crate::tlc::VarRef::Symbol(intersect_sym)),
+                TermKind::Var(VarRef::Symbol(intersect_sym)),
                 array_ty(i32_ty()),
                 &mut term_ids,
             )),
             args: vec![
-                mk_term(
-                    TermKind::Var(crate::tlc::VarRef::Symbol(ro_sym)),
-                    f32_ty(),
-                    &mut term_ids,
-                ),
-                mk_term(
-                    TermKind::Var(crate::tlc::VarRef::Symbol(rd_sym)),
-                    f32_ty(),
-                    &mut term_ids,
-                ),
+                mk_term(TermKind::Var(VarRef::Symbol(ro_sym)), f32_ty(), &mut term_ids),
+                mk_term(TermKind::Var(VarRef::Symbol(rd_sym)), f32_ty(), &mut term_ids),
             ],
         },
         array_ty(i32_ty()),
@@ -1709,12 +1593,12 @@ fn test_raytrace_step5_globals_pattern_fused() {
     );
     let consumer_call = mk_app(
         mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(find_closest_sym)),
+            TermKind::Var(VarRef::Symbol(find_closest_sym)),
             i32_ty(),
             &mut term_ids,
         ),
         mk_term(
-            TermKind::Var(crate::tlc::VarRef::Symbol(tmp_sym)),
+            TermKind::Var(VarRef::Symbol(tmp_sym)),
             array_ty(i32_ty()),
             &mut term_ids,
         ),
@@ -1736,7 +1620,7 @@ fn test_raytrace_step5_globals_pattern_fused() {
         name: main_sym,
         ty: i32_ty(),
         body: main_body,
-        meta: super::super::DefMeta::Function,
+        meta: DefMeta::Function,
         arity: 0,
     };
 
