@@ -446,32 +446,32 @@ fn validate_testfile_wgsl(rel_path: &str) {
 
 #[test]
 fn wgsl_testfile_creation() {
-    validate_testfile_wgsl("testfiles/creation.wyn");
+    validate_testfile_wgsl("testfiles/playground/creation.wyn");
 }
 
 #[test]
 fn wgsl_testfile_lava() {
-    validate_testfile_wgsl("testfiles/lava.wyn");
+    validate_testfile_wgsl("testfiles/playground/lava.wyn");
 }
 
 #[test]
 fn wgsl_testfile_seascape() {
-    validate_testfile_wgsl("testfiles/seascape.wyn");
+    validate_testfile_wgsl("testfiles/playground/seascape.wyn");
 }
 
 #[test]
 fn wgsl_testfile_raytrace() {
-    validate_testfile_wgsl("testfiles/raytrace.wyn");
+    validate_testfile_wgsl("testfiles/playground/raytrace.wyn");
 }
 
 #[test]
 fn wgsl_testfile_mandelbulb() {
-    validate_testfile_wgsl("testfiles/mandelbulb.wyn");
+    validate_testfile_wgsl("testfiles/playground/mandelbulb.wyn");
 }
 
 #[test]
 fn wgsl_testfile_da_rasterizer() {
-    validate_testfile_wgsl("testfiles/da_rasterizer.wyn");
+    validate_testfile_wgsl("testfiles/playground/da_rasterizer.wyn");
 }
 
 #[test]
@@ -493,7 +493,7 @@ fn wgsl_testfile_swizzle_with_demo() {
 
 #[test]
 fn wgsl_testfile_loopingspline() {
-    validate_testfile_wgsl("testfiles/loopingspline.wyn");
+    validate_testfile_wgsl("testfiles/playground/loopingspline.wyn");
 }
 
 #[test]

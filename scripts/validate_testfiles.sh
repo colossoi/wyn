@@ -67,8 +67,12 @@ FAIL=0
 PASS=0
 SKIP=0
 
-# Non-recursive: only files directly in testfiles/.
-for f in testfiles/*.wyn; do
+# Files directly in testfiles/ (compiler-feature tests) and
+# testfiles/playground/ (visual shader demos / shadertoy ports).
+# Walk both, not deeper — anything nested under playground/ is the
+# canonical playground gallery, and any future subdirs should be
+# added explicitly.
+for f in testfiles/*.wyn testfiles/playground/*.wyn; do
     base=$(basename "$f" .wyn)
 
     # `filter` SOAC is broken end-to-end: the predicate-driven output
