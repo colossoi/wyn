@@ -842,6 +842,8 @@ impl<'a> Parser<'a> {
                 let hint = self.expect_integer()?;
                 self.expect(Token::RightParen)?;
                 self.expect(Token::RightBracket)?;
+                let hint = std::num::NonZeroU32::new(hint)
+                    .ok_or_else(|| err_parse!("#[size_hint(N)] requires N > 0"))?;
                 Ok(Attribute::SizeHint(hint))
             }
             "linked" => {

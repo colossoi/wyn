@@ -204,6 +204,7 @@ fn spirv_storage_write_chain_lowers_cleanly() {
         .fold_generated_lambdas()
         .inline_small()
         .parallelize_soacs(false)
+        .expect("parallelize_soacs")
         .filter_reachable()
         .to_egraph()
         .unwrap()

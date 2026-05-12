@@ -307,6 +307,7 @@ fn compile_to_wgsl(source: &str) -> crate::error::Result<String> {
         .fold_generated_lambdas()
         .inline_small()
         .parallelize_soacs(false)
+        .expect("parallelize_soacs")
         .filter_reachable()
         .to_egraph()
         .expect("SSA conversion failed")
@@ -602,4 +603,43 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     // identifier appearing verbatim. The entry wrapper is always emitted.
     assert!(wgsl.contains("@fragment"));
     assert!(wgsl.contains("@location(0)"));
+}
+
+#[test]
+fn size_hint_large_bumps_workgroup_to_256() {
+    // size_hint > 64K should pick a workgroup of 256 (per
+    // `pick_workgroup_size`); the choice has to land on the shader's
+    // `@workgroup_size` directive, not just the host descriptor.
+    let wgsl = compile_to_wgsl(
+        r#"
+#[compute]
+entry sum_array(#[size_hint(100000)] data: []f32) f32 =
+    reduce(|a: f32, b: f32| a + b, 0.0, data)
+"#,
+    )
+    .expect("compile");
+    assert!(
+        wgsl.contains("@workgroup_size(256, 1, 1)"),
+        "size_hint(100000) should select workgroup_size=256 in the emitted WGSL, \
+         got:\n{}",
+        wgsl
+    );
+}
+
+#[test]
+fn size_hint_default_stays_workgroup_64() {
+    // No hint → workgroup remains the default 64 (current behaviour).
+    let wgsl = compile_to_wgsl(
+        r#"
+#[compute]
+entry sum_array(data: []f32) f32 =
+    reduce(|a: f32, b: f32| a + b, 0.0, data)
+"#,
+    )
+    .expect("compile");
+    assert!(
+        wgsl.contains("@workgroup_size(64, 1, 1)"),
+        "no size_hint should keep workgroup_size=64, got:\n{}",
+        wgsl
+    );
 }

@@ -137,6 +137,7 @@ pub fn run(program: &TlcProgram, mut pipeline: PipelineDescriptor) -> Result<Egi
                 }
             }
             DefMeta::EntryPoint(entry) => {
+                let workgroup = lookup_workgroup_size(&pipeline, &entry.name);
                 let ep = convert_entry_point(
                     def,
                     entry,
@@ -144,6 +145,7 @@ pub fn run(program: &TlcProgram, mut pipeline: PipelineDescriptor) -> Result<Egi
                     &constants_by_name,
                     symbols,
                     &pure_constant_names,
+                    workgroup,
                 )?;
                 entry_points.push(ep);
             }
@@ -319,6 +321,26 @@ fn convert_function(
 }
 
 /// Convert an entry point directly via the EGraph Converter.
+/// Look up the workgroup size the parallelizer chose for this entry in
+/// the pipeline descriptor. Returns the default `(64, 1, 1)` when the
+/// entry isn't in the descriptor (e.g. graphics entries; non-compute
+/// `entry` calls below skip this anyway).
+fn lookup_workgroup_size(pipeline: &PipelineDescriptor, entry_name: &str) -> (u32, u32, u32) {
+    use crate::pipeline_descriptor::Pipeline;
+    for p in &pipeline.pipelines {
+        match p {
+            Pipeline::Compute(cp) if cp.entry_point == entry_name => return cp.workgroup_size,
+            Pipeline::MultiCompute(mp) => {
+                if let Some(stage) = mp.stages.iter().find(|s| s.entry_point == entry_name) {
+                    return stage.workgroup_size;
+                }
+            }
+            _ => {}
+        }
+    }
+    (64, 1, 1)
+}
+
 fn convert_entry_point(
     def: &TlcDef,
     entry: &interface::EntryDecl,
@@ -326,6 +348,7 @@ fn convert_entry_point(
     constants_by_name: &HashMap<String, SymbolId>,
     symbols: &SymbolTable,
     pure_constants: &HashSet<String>,
+    workgroup: (u32, u32, u32),
 ) -> Result<EgirEntry, ConvertError> {
     use crate::ssa::types::{EntryInput, ExecutionModel, IoDecoration};
 
@@ -431,7 +454,7 @@ fn convert_entry_point(
         interface::Attribute::Vertex => ExecutionModel::Vertex,
         interface::Attribute::Fragment => ExecutionModel::Fragment,
         interface::Attribute::Compute => ExecutionModel::Compute {
-            local_size: (64, 1, 1),
+            local_size: workgroup,
         },
         _ => panic!("Invalid entry type attribute: {:?}", entry.entry_type),
     };
@@ -1973,7 +1996,7 @@ fn extract_io_decoration(pattern: &crate::ast::Pattern) -> Option<IoDecoration> 
 }
 
 /// Extract a `#[size_hint(N)]` attribute from a pattern.
-fn extract_size_hint(pattern: &crate::ast::Pattern) -> Option<u32> {
+pub fn extract_size_hint(pattern: &crate::ast::Pattern) -> Option<std::num::NonZeroU32> {
     use crate::ast;
     match &pattern.kind {
         ast::PatternKind::Attributed(attrs, inner) => {

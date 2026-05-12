@@ -37,6 +37,15 @@ pub struct ComputePipeline {
     pub workgroup_size: (u32, u32, u32),
     pub dispatch_size: DispatchSize,
     pub bindings: Vec<Binding>,
+    /// Host-runtime default for the total work size, sourced from
+    /// `#[size_hint(N)]` on an input parameter. When the application
+    /// doesn't supply an explicit dispatch count, a thin host can
+    /// dispatch `ceil(default_total_threads / workgroup_size.0)`
+    /// workgroups without inspecting buffer length. The compiled
+    /// shader does not assume the actual length equals this hint —
+    /// it remains dynamic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_total_threads: Option<std::num::NonZeroU32>,
 }
 
 /// Multi-dispatch compute pipeline.
@@ -46,6 +55,11 @@ pub struct MultiComputePipeline {
     pub bindings: Vec<Binding>,
     /// Stages to execute in order.
     pub stages: Vec<ComputeStage>,
+    /// Host-runtime default for the total work size; same semantics as
+    /// `ComputePipeline::default_total_threads`, applied to whichever
+    /// stages dispatch `DerivedFromInputLength`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_total_threads: Option<std::num::NonZeroU32>,
 }
 
 /// A single stage in a multi-dispatch compute pipeline.

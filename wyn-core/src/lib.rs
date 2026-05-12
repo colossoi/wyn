@@ -549,6 +549,7 @@ impl TlcTransformed {
             .fold_generated_lambdas()
             .inline_small()
             .parallelize_soacs(parallelize_compute)
+            .expect("parallelize_soacs")
             .filter_reachable()
     }
 }
@@ -778,14 +779,14 @@ impl TlcSmallInlined {
     /// remain as single-threaded sequential loops in their original
     /// entries, graphical entries get no restructuring, and the pipeline
     /// descriptor is built as if every entry runs in one stage.
-    pub fn parallelize_soacs(self, disable: bool) -> TlcParallelized {
+    pub fn parallelize_soacs(self, disable: bool) -> Result<TlcParallelized> {
         let TlcLateInner { tlc, type_table } = self.0;
-        let result = tlc::parallelize::run(tlc, disable);
-        TlcParallelized(TlcPipelineInner {
+        let result = tlc::parallelize::run(tlc, disable)?;
+        Ok(TlcParallelized(TlcPipelineInner {
             tlc: result.program,
             pipeline: result.pipeline,
             type_table,
-        })
+        }))
     }
 
     /// Eliminate unreachable defs (dead code elimination at TLC level).

@@ -40,6 +40,7 @@ fn compile_via_egir(src: &str) -> Program {
         .fold_generated_lambdas()
         .inline_small()
         .parallelize_soacs(false)
+        .expect("parallelize_soacs")
         .filter_reachable();
 
     crate::EgirRaw(run(&tlc.tlc, PipelineDescriptor::default()).expect("egir::from_tlc conversion failed"))

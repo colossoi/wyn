@@ -27,6 +27,7 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
         .fold_generated_lambdas()
         .inline_small()
         .parallelize_soacs(false)
+        .expect("parallelize_soacs")
         .filter_reachable()
         .to_egraph()
         .map_err(|e| crate::err_spirv!("{}", e))?
@@ -58,6 +59,7 @@ fn compile_through_ssa(input: &str) -> Result<Program, CompilerError> {
         .fold_generated_lambdas()
         .inline_small()
         .parallelize_soacs(false)
+        .expect("parallelize_soacs")
         .filter_reachable()
         .to_egraph()
         .map_err(|e| crate::err_spirv!("{}", e))?
@@ -523,7 +525,7 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     let tlc = tlc.inline_small();
     eprintln!("=== inline_small OK ===");
 
-    let tlc = tlc.parallelize_soacs(false);
+    let tlc = tlc.parallelize_soacs(false).expect("parallelize_soacs");
     eprintln!("=== parallelize_soacs OK ===");
 
     let tlc = tlc.filter_reachable();
@@ -582,7 +584,7 @@ entry main(data: []i32) []i32 = [first(data)]
     let tlc = tlc.inline_small();
     eprintln!("=== inline_small OK ===");
 
-    let tlc = tlc.parallelize_soacs(false);
+    let tlc = tlc.parallelize_soacs(false).expect("parallelize_soacs");
     eprintln!("=== parallelize_soacs OK ===");
 
     let tlc = tlc.filter_reachable();

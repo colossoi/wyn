@@ -445,8 +445,128 @@ fn classify_input(input: &ArrayExpr) -> Option<ArrayProvenance> {
 // Stage B: Restructuring
 // =============================================================================
 
-const LOCAL_SIZE: (u32, u32, u32) = (64, 1, 1);
-const TOTAL_THREADS: u32 = 64;
+const DEFAULT_WORKGROUP_X: u32 = 64;
+
+/// Per-entry pipeline sizing derived from `#[size_hint(N)]`. The
+/// `workgroup` drives the shader's `local_size` and the chunk-arithmetic
+/// `total_threads`; `default_total_threads` ships to the pipeline
+/// descriptor as a host-runtime dispatch default.
+#[derive(Clone, Copy)]
+struct PipelineSizing {
+    workgroup: (u32, u32, u32),
+    default_total_threads: Option<std::num::NonZeroU32>,
+}
+
+impl PipelineSizing {
+    /// Sizing for an entry being parallelized — `analysis` lets us
+    /// pick the size_hint of the array that actually drives the
+    /// dispatch (the SOAC's input).
+    fn for_analyzed_entry(program: &Program, analysis: &EntryAnalysis) -> Self {
+        let hint = entry_size_hint(program, analysis.def_name, Some(analysis));
+        PipelineSizing {
+            workgroup: pick_workgroup_size(hint),
+            default_total_threads: hint,
+        }
+    }
+
+    /// Sizing for an entry with no SOAC analysis (a non-parallelized
+    /// compute entry or the `disable=true` fast path). Falls back to
+    /// the first view-array param's hint.
+    fn for_default_entry(program: &Program, def_name: SymbolId) -> Self {
+        let hint = entry_size_hint(program, def_name, None);
+        PipelineSizing {
+            workgroup: pick_workgroup_size(hint),
+            default_total_threads: hint,
+        }
+    }
+}
+
+/// Pick the compute-shader workgroup size (X, 1, 1) for a parallelized
+/// entry based on its (optional) `#[size_hint(N)]`. Interpretation A
+/// from `issues/size-hint-design.md`: the hint is a host-runtime
+/// default for dispatch sizing and a compile-time signal for
+/// workgroup-size selection. The hint is not load-bearing for
+/// correctness; only for picking a better workgroup size.
+///
+/// Buckets:
+/// - hint < 64       → `next_power_of_two(hint)`
+/// - hint in 64..=64K → 64 (current default)
+/// - hint > 64K       → 256 for better occupancy
+/// - None            → 64
+fn pick_workgroup_size(size_hint: Option<std::num::NonZeroU32>) -> (u32, u32, u32) {
+    let x = match size_hint.map(|n| n.get()) {
+        Some(n) if n < 64 => n.next_power_of_two(),
+        Some(n) if n <= 65_536 => 64,
+        Some(_) => 256,
+        None => DEFAULT_WORKGROUP_X,
+    };
+    (x, 1, 1)
+}
+
+/// Lookup the `#[size_hint(N)]` of the array that drives this entry's
+/// dispatch — i.e., the SOAC's input array. Other params' hints (e.g.
+/// `#[size_hint(8)]` on a small lookup table alongside the main input)
+/// are intentionally ignored, since they don't drive workgroup-size
+/// selection or the host-runtime default thread count.
+///
+/// Identification: `buffer_specialize` assigns set=0, binding=k to the
+/// k-th view-array entry param in source order. The SOAC's input
+/// provenance reports the (set, binding) it reads from. Match the two.
+fn entry_size_hint(
+    program: &Program,
+    def_name: SymbolId,
+    analysis: Option<&EntryAnalysis>,
+) -> Option<std::num::NonZeroU32> {
+    let def = program.defs.iter().find(|d| d.name == def_name)?;
+    let decl = match &def.meta {
+        DefMeta::EntryPoint(decl) => decl,
+        _ => return None,
+    };
+    // If we have a SOAC analysis, prefer the param that maps to the
+    // SOAC's first storage input. Use buffer_specialize's binding-
+    // assignment scheme (view-array params get sequential bindings on
+    // set=0 in source order) to translate.
+    if let Some(analysis) = analysis {
+        if let Some(ArrayProvenance::Storage { set, binding, .. }) = analysis.soac.provenances.first() {
+            if *set == 0 {
+                let mut idx: u32 = 0;
+                for p in &decl.params {
+                    if pattern_binds_view_array(p) {
+                        if idx == *binding {
+                            return crate::egir::from_tlc::extract_size_hint(p);
+                        }
+                        idx += 1;
+                    }
+                }
+            }
+        }
+        // No matching storage param (Range input, or non-storage set):
+        // no array drives the dispatch in a way size_hint applies to.
+        return None;
+    }
+    // No analysis (non-parallelized compute entry): fall back to the
+    // first view-array param's hint. There's no canonical "SOAC input"
+    // here; this is the most conservative choice.
+    decl.params.iter().filter_map(crate::egir::from_tlc::extract_size_hint).next()
+}
+
+/// True iff the pattern declares a view-typed array (i.e. `[]T` in
+/// source — the param shape that `buffer_specialize` rewrites into an
+/// `(offset, len)` pair). Mirrors `buffer_specialize::is_view_array`
+/// at the AST level.
+fn pattern_binds_view_array(p: &crate::ast::Pattern) -> bool {
+    use crate::types::TypeExt;
+    let Some(ty) = p.pattern_type() else { return false };
+    if !ty.is_array() {
+        return false;
+    }
+    let is_view = ty
+        .array_variant()
+        .map(|v| matches!(v, Type::Constructed(TypeName::ArrayVariantView, _)))
+        .unwrap_or(false);
+    let is_unsized = ty.array_size().map(|s| matches!(s, Type::Variable(_))).unwrap_or(false);
+    is_view && is_unsized
+}
 
 pub struct ParallelizationResult {
     pub program: Program,
@@ -804,10 +924,10 @@ fn build_prepass_def(
 /// lifting, and the pipeline descriptor is built from the untouched
 /// program. Useful for debugging (keeps the SSA close to the source)
 /// and for backends that can't handle multi-entry pipelines.
-pub fn run(mut program: Program, disable: bool) -> ParallelizationResult {
+pub fn run(mut program: Program, disable: bool) -> crate::error::Result<ParallelizationResult> {
     if disable {
         let pipeline = build_default_pipeline(&program);
-        return ParallelizationResult { program, pipeline };
+        return Ok(ParallelizationResult { program, pipeline });
     }
 
     // Track max binding across every `(set, binding)` the program already
@@ -837,7 +957,7 @@ pub fn run(mut program: Program, disable: bool) -> ParallelizationResult {
 
     if analyses.is_empty() {
         let pipeline = build_default_pipeline(&program);
-        return ParallelizationResult { program, pipeline };
+        return Ok(ParallelizationResult { program, pipeline });
     }
 
     let mut pipelines = Vec::new();
@@ -854,13 +974,15 @@ pub fn run(mut program: Program, disable: bool) -> ParallelizationResult {
                 // types. No binding info is extractable at this TLC
                 // stage, so we emit an empty vec.
                 let input_bindings: Vec<Binding> = vec![];
+                let sizing = PipelineSizing::for_default_entry(&program, def.name);
                 pipelines.push(Pipeline::Compute(ComputePipeline {
                     entry_point: name,
-                    workgroup_size: LOCAL_SIZE,
+                    workgroup_size: sizing.workgroup,
                     dispatch_size: DispatchSize::DerivedFromInputLength {
-                        workgroup_size: TOTAL_THREADS,
+                        workgroup_size: sizing.workgroup.0,
                     },
                     bindings: input_bindings,
+                    default_total_threads: sizing.default_total_threads,
                 }));
             }
         }
@@ -904,10 +1026,10 @@ pub fn run(mut program: Program, disable: bool) -> ParallelizationResult {
     program.defs.retain(|d| !removed_entries.contains(&d.name));
     program.defs.extend(new_defs);
 
-    ParallelizationResult {
+    Ok(ParallelizationResult {
         program,
         pipeline: PipelineDescriptor { pipelines },
-    }
+    })
 }
 
 // =============================================================================
@@ -928,8 +1050,9 @@ fn make_lowering_plan(
     forced_result_binding: Option<(u32, u32)>,
     program: &mut Program,
 ) -> LoweringPlan {
+    let sizing = PipelineSizing::for_analyzed_entry(program, analysis);
     match &analysis.soac.original {
-        SoacOp::Map { .. } => make_map_plan(analysis, entry_name),
+        SoacOp::Map { .. } => make_map_plan(analysis, entry_name, sizing),
         SoacOp::Reduce { op, ne, .. } => make_two_phase_plan(
             analysis,
             entry_name,
@@ -938,6 +1061,7 @@ fn make_lowering_plan(
             next_binding,
             forced_result_binding,
             program,
+            sizing,
         ),
         SoacOp::Redomap { reduce_op, ne, .. } => make_two_phase_plan(
             analysis,
@@ -947,21 +1071,25 @@ fn make_lowering_plan(
             next_binding,
             forced_result_binding,
             program,
+            sizing,
         ),
-        SoacOp::Scan { op, ne, .. } => make_scan_plan(analysis, entry_name, op, ne, next_binding, program),
+        SoacOp::Scan { op, ne, .. } => {
+            make_scan_plan(analysis, entry_name, op, ne, next_binding, program, sizing)
+        }
         _ => unreachable!("analyze_soac rejected non-parallelizable variants"),
     }
 }
 
-fn make_map_plan(analysis: &EntryAnalysis, entry_name: &str) -> LoweringPlan {
+fn make_map_plan(analysis: &EntryAnalysis, entry_name: &str, sizing: PipelineSizing) -> LoweringPlan {
     let input_bindings = collect_soac_bindings(&analysis.soac);
     let pipeline = Pipeline::Compute(ComputePipeline {
         entry_point: entry_name.to_string(),
-        workgroup_size: LOCAL_SIZE,
+        workgroup_size: sizing.workgroup,
         dispatch_size: DispatchSize::DerivedFromInputLength {
-            workgroup_size: TOTAL_THREADS,
+            workgroup_size: sizing.workgroup.0,
         },
         bindings: input_bindings,
+        default_total_threads: sizing.default_total_threads,
     });
     LoweringPlan {
         removed_entry: None,
@@ -979,6 +1107,7 @@ fn make_two_phase_plan(
     next_binding: u32,
     forced_result_binding: Option<(u32, u32)>,
     program: &mut Program,
+    sizing: PipelineSizing,
 ) -> LoweringPlan {
     // Partials always consumes one fresh binding. When the caller has
     // pre-allocated a result binding (graphical-entry lift), use it; the
@@ -1003,6 +1132,7 @@ fn make_two_phase_plan(
         partials_binding,
         result_binding,
         program,
+        sizing,
     );
     LoweringPlan {
         removed_entry: Some(analysis.def_name),
@@ -1019,6 +1149,7 @@ fn make_scan_plan(
     ne: &Term,
     next_binding: u32,
     program: &mut Program,
+    sizing: PipelineSizing,
 ) -> LoweringPlan {
     let output_binding = (0, next_binding);
     let block_sums_binding = (0, next_binding + 1);
@@ -1034,6 +1165,7 @@ fn make_scan_plan(
         block_sums_binding,
         block_offsets_binding,
         program,
+        sizing,
     );
     LoweringPlan {
         removed_entry: Some(analysis.def_name),
@@ -1056,7 +1188,9 @@ fn build_two_phase_entries(
     partials_binding: (u32, u32),
     result_binding: (u32, u32),
     program: &mut Program,
+    sizing: PipelineSizing,
 ) -> (Vec<Def>, Pipeline) {
+    let workgroup = sizing.workgroup;
     let span = ne.span;
 
     let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
@@ -1070,6 +1204,7 @@ fn build_two_phase_entries(
         span,
         program,
         Some(partials_binding),
+        workgroup.0,
     );
     // Phase 1 storage interface: reads whatever the input SOAC declares
     // (Input role), writes `partials` at `tid` (Intermediate). Input
@@ -1100,7 +1235,7 @@ fn build_two_phase_entries(
         set: partials_binding.0,
         binding: partials_binding.1,
         offset: Box::new(uint_lit(0, span)),
-        len: Box::new(uint_lit(TOTAL_THREADS as u64, span)),
+        len: Box::new(uint_lit(workgroup.0 as u64, span)),
         elem_ty: elem_type.clone(),
     };
     let phase2_soac = SoacOp::Reduce {
@@ -1167,9 +1302,10 @@ fn build_two_phase_entries(
     let pipeline = Pipeline::MultiCompute(MultiComputePipeline {
         bindings: all_bindings,
         stages: vec![
-            derived_stage(phase1_name.clone(), input_indices, vec![partials_idx]),
+            derived_stage(phase1_name.clone(), input_indices, vec![partials_idx], workgroup),
             fixed_stage(phase2_name.clone(), vec![partials_idx], vec![result_idx]),
         ],
+        default_total_threads: sizing.default_total_threads,
     });
 
     (vec![phase1_def, phase2_def], pipeline)
@@ -1189,7 +1325,9 @@ fn build_scan_entries(
     block_sums_binding: (u32, u32),
     block_offsets_binding: (u32, u32),
     program: &mut Program,
+    sizing: PipelineSizing,
 ) -> (Vec<Def>, Pipeline) {
+    let workgroup = sizing.workgroup;
     let span = ne.span;
 
     // Resolve the input BufferRef from the SOAC's storage provenance.
@@ -1224,11 +1362,21 @@ fn build_scan_entries(
     let phase3_name = format!("{}_phase3_add_offsets", entry_name);
 
     let (phase1_def, _phase1_bindings) =
-        build_scan_phase_def(&plan, ScanPhase::LocalScan, &phase1_name, program);
-    let (phase2_def, _phase2_bindings) =
-        build_scan_phase_def(&plan, ScanPhase::SumsPrefixScan, &phase2_name, program);
-    let (phase3_def, _phase3_bindings) =
-        build_scan_phase_def(&plan, ScanPhase::ApplyBlockOffsets, &phase3_name, program);
+        build_scan_phase_def(&plan, ScanPhase::LocalScan, &phase1_name, program, workgroup.0);
+    let (phase2_def, _phase2_bindings) = build_scan_phase_def(
+        &plan,
+        ScanPhase::SumsPrefixScan,
+        &phase2_name,
+        program,
+        workgroup.0,
+    );
+    let (phase3_def, _phase3_bindings) = build_scan_phase_def(
+        &plan,
+        ScanPhase::ApplyBlockOffsets,
+        &phase3_name,
+        program,
+        workgroup.0,
+    );
 
     // Pipeline descriptor — indexes into a shared bindings Vec the host
     // uses to set up the WebGPU pipeline layout.
@@ -1259,10 +1407,16 @@ fn build_scan_entries(
     let pipeline = Pipeline::MultiCompute(MultiComputePipeline {
         bindings: all_bindings,
         stages: vec![
-            derived_stage(phase1_name, input_indices, vec![output_idx, block_sums_idx]),
+            derived_stage(
+                phase1_name,
+                input_indices,
+                vec![output_idx, block_sums_idx],
+                workgroup,
+            ),
             fixed_stage(phase2_name, vec![block_sums_idx], vec![block_offsets_idx]),
-            derived_stage(phase3_name, vec![block_offsets_idx], vec![output_idx]),
+            derived_stage(phase3_name, vec![block_offsets_idx], vec![output_idx], workgroup),
         ],
+        default_total_threads: sizing.default_total_threads,
     });
 
     (vec![phase1_def, phase2_def, phase3_def], pipeline)
@@ -1295,6 +1449,10 @@ struct ChunkArithmetic {
     /// and is cast to `index_ty` at the `chunk_start = tid * chunk_size`
     /// site when the two types differ.
     index_ty: Type<TypeName>,
+    /// Total thread count for this phase. Equals the workgroup X
+    /// dimension under the single-workgroup design used by reduce /
+    /// redomap / scan today; chosen from `pick_workgroup_size`.
+    total_threads: u32,
     tid_sym: SymbolId,
     total_sym: SymbolId,
     input_len_sym: SymbolId,
@@ -1304,9 +1462,10 @@ struct ChunkArithmetic {
 }
 
 impl ChunkArithmetic {
-    fn alloc_for(index_ty: Type<TypeName>, program: &mut Program) -> Self {
+    fn alloc_for(index_ty: Type<TypeName>, total_threads: u32, program: &mut Program) -> Self {
         ChunkArithmetic {
             index_ty,
+            total_threads,
             tid_sym: program.symbols.alloc("_par_tid".into()),
             total_sym: program.symbols.alloc("_par_total".into()),
             input_len_sym: program.symbols.alloc("_par_input_len".into()),
@@ -1346,7 +1505,7 @@ impl ChunkArithmetic {
         let ity = self.index_ty.clone();
         let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
         let one_lit = int_lit_of(1, &ity, span);
-        let total_lit = int_lit_of(TOTAL_THREADS as i64, &ity, span);
+        let total_lit = int_lit_of(self.total_threads as i64, &ity, span);
 
         let len_minus_start = binop(
             "-",
@@ -1654,12 +1813,13 @@ fn build_scan_phase_def(
     phase: ScanPhase,
     entry_name: &str,
     program: &mut Program,
+    total_threads: u32,
 ) -> (Def, Vec<interface::StorageBindingDecl>) {
     let span = plan.span;
     let (body, bindings) = match phase {
-        ScanPhase::LocalScan => build_scan_local_body(plan, span, program),
-        ScanPhase::SumsPrefixScan => build_scan_sums_body(plan, span, program),
-        ScanPhase::ApplyBlockOffsets => build_scan_apply_body(plan, span, program),
+        ScanPhase::LocalScan => build_scan_local_body(plan, span, program, total_threads),
+        ScanPhase::SumsPrefixScan => build_scan_sums_body(plan, span, program, total_threads),
+        ScanPhase::ApplyBlockOffsets => build_scan_apply_body(plan, span, program, total_threads),
     };
     // Wrap with the entry's prefix_lets (outer-scope bindings the phase
     // body may reference).
@@ -1686,8 +1846,9 @@ fn build_scan_local_body(
     plan: &ScanPlan,
     span: ast::Span,
     program: &mut Program,
+    total_threads: u32,
 ) -> (Term, Vec<interface::StorageBindingDecl>) {
-    let chunk = ChunkArithmetic::alloc_for(u32_ty(), program);
+    let chunk = ChunkArithmetic::alloc_for(u32_ty(), total_threads, program);
 
     let final_acc = emit_u32_counter_scan_loop(
         &plan.elem_ty,
@@ -1829,8 +1990,9 @@ fn build_scan_sums_body(
     plan: &ScanPlan,
     span: ast::Span,
     program: &mut Program,
+    total_threads: u32,
 ) -> (Term, Vec<interface::StorageBindingDecl>) {
-    let num_blocks = TOTAL_THREADS as u64;
+    let num_blocks = total_threads as u64;
 
     let final_acc = emit_u32_counter_scan_loop(
         &plan.elem_ty,
@@ -1885,8 +2047,9 @@ fn build_scan_apply_body(
     plan: &ScanPlan,
     span: ast::Span,
     program: &mut Program,
+    total_threads: u32,
 ) -> (Term, Vec<interface::StorageBindingDecl>) {
-    let chunk = ChunkArithmetic::alloc_for(u32_ty(), program);
+    let chunk = ChunkArithmetic::alloc_for(u32_ty(), total_threads, program);
     let off_sym = program.symbols.alloc("_apply_off".into());
 
     let final_acc = emit_u32_counter_scan_loop(
@@ -1975,6 +2138,7 @@ fn build_chunked_soac_body(
     // so each thread's partial lands at partials[tid]. Return type then
     // becomes Unit rather than `result_ty`.
     write_partial_to: Option<(u32, u32)>,
+    total_threads: u32,
 ) -> Term {
     // ChunkArithmetic's `index_ty` matches the SOAC input's index type:
     // storage-view inputs use u32 (from `_w_intrinsic_storage_len`);
@@ -1982,7 +2146,7 @@ fn build_chunked_soac_body(
     // This keeps `chunk_array_expr`'s rebuilt Range consistent with the
     // original source-level types, avoiding a bitcast boundary.
     let index_ty = soac_input_index_ty(&soac.original);
-    let chunk = ChunkArithmetic::alloc_for(index_ty, program);
+    let chunk = ChunkArithmetic::alloc_for(index_ty, total_threads, program);
     let chunk_start_var = chunk.chunk_start(span);
     let chunk_len_var = chunk.chunk_len(span);
 
@@ -2397,15 +2561,20 @@ fn push_storage_binding(
     idx
 }
 
-/// A `ComputeStage` with the default workgroup + DerivedFromInputLength
+/// A `ComputeStage` with `workgroup` + `DerivedFromInputLength`
 /// dispatch. Used by per-element phases (phase 1 of reduce; phases 1+3
 /// of scan).
-fn derived_stage(entry_point: String, reads: Vec<usize>, writes: Vec<usize>) -> ComputeStage {
+fn derived_stage(
+    entry_point: String,
+    reads: Vec<usize>,
+    writes: Vec<usize>,
+    workgroup: (u32, u32, u32),
+) -> ComputeStage {
     ComputeStage {
         entry_point,
-        workgroup_size: LOCAL_SIZE,
+        workgroup_size: workgroup,
         dispatch_size: DispatchSize::DerivedFromInputLength {
-            workgroup_size: TOTAL_THREADS,
+            workgroup_size: workgroup.0,
         },
         reads,
         writes,
@@ -2571,12 +2740,14 @@ fn build_default_pipeline(program: &Program) -> PipelineDescriptor {
         if let DefMeta::EntryPoint(ref decl) = def.meta {
             let name = program.symbols.get(def.name).cloned().unwrap_or_default();
             if decl.entry_type.is_compute() {
+                let sizing = PipelineSizing::for_default_entry(program, def.name);
                 pipelines.push(Pipeline::Compute(ComputePipeline {
                     entry_point: name,
-                    workgroup_size: LOCAL_SIZE,
+                    workgroup_size: sizing.workgroup,
                     dispatch_size: DispatchSize::DerivedFromInputLength {
-                        workgroup_size: TOTAL_THREADS,
+                        workgroup_size: sizing.workgroup.0,
                     },
+                    default_total_threads: sizing.default_total_threads,
                     bindings: resource_bindings.clone(),
                 }));
             } else {

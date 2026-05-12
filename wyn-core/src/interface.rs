@@ -45,8 +45,10 @@ pub enum Attribute {
         access: StorageAccess,
     },
     /// Hint for the expected size of a dynamic array (in elements).
-    /// Used for parallelization decisions. Ignored on non-arrays or statically sized arrays.
-    SizeHint(u32),
+    /// Used for parallelization decisions. Ignored on non-arrays or
+    /// statically sized arrays. `NonZeroU32` encodes that
+    /// `#[size_hint(0)]` is meaningless and rejected by the parser.
+    SizeHint(std::num::NonZeroU32),
     /// Linked SPIR-V function - the string is the linkage name for spirv-link
     Linked(String),
 }

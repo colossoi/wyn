@@ -522,3 +522,40 @@ fn binding_registry_finds_nested_storage_buffers() {
     assert!(used.contains(&(0, 5)), "missing (0, 5): {:?}", used);
     assert!(used.contains(&(0, 7)), "missing (0, 7): {:?}", used);
 }
+
+// =============================================================================
+// pick_workgroup_size — bucket policy for #[size_hint(N)]
+// =============================================================================
+
+#[test]
+fn pick_workgroup_size_no_hint_is_64() {
+    assert_eq!(super::pick_workgroup_size(None), (64, 1, 1));
+}
+
+#[test]
+fn pick_workgroup_size_tiny_rounds_up_to_power_of_two() {
+    let nz = |n| std::num::NonZeroU32::new(n).unwrap();
+    // 1 → next_power_of_two(1) = 1
+    assert_eq!(super::pick_workgroup_size(Some(nz(1))), (1, 1, 1));
+    // 3 → 4
+    assert_eq!(super::pick_workgroup_size(Some(nz(3))), (4, 1, 1));
+    // 16 → 16
+    assert_eq!(super::pick_workgroup_size(Some(nz(16))), (16, 1, 1));
+    // 63 → 64
+    assert_eq!(super::pick_workgroup_size(Some(nz(63))), (64, 1, 1));
+}
+
+#[test]
+fn pick_workgroup_size_medium_stays_64() {
+    let nz = |n| std::num::NonZeroU32::new(n).unwrap();
+    assert_eq!(super::pick_workgroup_size(Some(nz(64))), (64, 1, 1));
+    assert_eq!(super::pick_workgroup_size(Some(nz(1024))), (64, 1, 1));
+    assert_eq!(super::pick_workgroup_size(Some(nz(65_536))), (64, 1, 1));
+}
+
+#[test]
+fn pick_workgroup_size_large_picks_256() {
+    let nz = |n| std::num::NonZeroU32::new(n).unwrap();
+    assert_eq!(super::pick_workgroup_size(Some(nz(65_537))), (256, 1, 1));
+    assert_eq!(super::pick_workgroup_size(Some(nz(1_000_000))), (256, 1, 1));
+}

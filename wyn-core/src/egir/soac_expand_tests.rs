@@ -48,6 +48,7 @@ fn compile_to_expanded_egraph(input: &str) -> crate::egir::types::EGraph {
         .fold_generated_lambdas()
         .inline_small()
         .parallelize_soacs(false)
+        .expect("parallelize_soacs")
         .filter_reachable()
         .to_egraph()
         .expect("to_egraph")

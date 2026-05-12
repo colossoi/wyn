@@ -397,7 +397,10 @@ fn test_parse_parameter_with_size_hint_attribute() {
     if let PatternKind::Typed(inner, _ty) = &param.kind {
         if let PatternKind::Attributed(attrs, name_pat) = &inner.kind {
             assert_eq!(attrs.len(), 1);
-            assert_eq!(attrs[0], Attribute::SizeHint(1024));
+            assert_eq!(
+                attrs[0],
+                Attribute::SizeHint(std::num::NonZeroU32::new(1024).unwrap())
+            );
             assert!(matches!(&name_pat.kind, PatternKind::Name(_)));
         } else {
             panic!("Expected Attributed pattern inside Typed, got {:?}", inner);

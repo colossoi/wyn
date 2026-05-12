@@ -308,7 +308,7 @@ fn compile_file(
     // restructured.
     let tlc_parallel = time("tlc_parallelize", verbose, || {
         tlc_inlined.parallelize_soacs(single_stage)
-    });
+    })?;
 
     // Eliminate dead TLC defs
     let tlc_reachable = time("tlc_filter_reachable", verbose, || {

@@ -689,7 +689,7 @@ pub struct EntryInput {
     pub name: String,
     pub ty: Type<TypeName>,
     pub decoration: Option<IoDecoration>,
-    pub size_hint: Option<u32>,
+    pub size_hint: Option<std::num::NonZeroU32>,
     pub storage_binding: Option<(u32, u32)>,
     /// For compute shader broadcast inputs: byte offset within the push constant block.
     pub push_constant_offset: Option<u32>,
