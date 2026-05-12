@@ -1,17 +1,8 @@
--- KNOWN-FAILING. Reminder that constructing a sum-typed value whose
--- active variant carries an array payload (e.g. `#big([1,2,3,4])`)
--- currently fails type unification:
---
---   Type mismatch: expected Array[i32, 4, ?addrspace],
---                  got Array[i32, 4, composite]
---
--- The sum-payload array type carries an unresolved
--- `AddressPlaceholder` (`?addrspace`) that the type checker should
--- replace with a type variable before unification — entry-point
--- params get this treatment but sum-variant payloads don't. The
--- blank-fill path itself works (see `sum_payload_array.wyn`); this
--- is a separate type-checker gap on the active-variant construction
--- side. Listed in scripts/validate_testfiles.sh skip set until fixed.
+-- Exercises constructing a sum-typed value whose active variant
+-- carries an array payload (`#big([1,2,3,4])`). The companion file
+-- `sum_payload_array.wyn` exercises the dead-variant blank-fill path
+-- (constructing `#small` / `#empty`); this file exercises the live
+-- side.
 
 def verts: [3]vec4f32 =
   [@[-1.0f32, -1.0f32, 0.0f32, 1.0f32],

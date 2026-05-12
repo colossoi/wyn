@@ -468,6 +468,21 @@ impl PlaceholderResolver {
                     ty.clone()
                 }
             }
+            // Sum carries its variant payload types as enum data inside
+            // TypeName, not in the outer `args` list, so the generic
+            // Constructed arm below would skip right over them. Recurse
+            // into each payload explicitly.
+            Type::Constructed(TypeName::Sum(variants), args) => {
+                let new_variants: Vec<(String, Vec<Type<TypeName>>)> = variants
+                    .iter()
+                    .map(|(ctor, payload)| {
+                        let resolved_payload: Vec<_> =
+                            payload.iter().map(|p| self.resolve_type(p)).collect();
+                        (ctor.clone(), resolved_payload)
+                    })
+                    .collect();
+                Type::Constructed(TypeName::Sum(new_variants), args.clone())
+            }
             Type::Constructed(name, args) => {
                 let new_args: Vec<_> = args.iter().map(|a| self.resolve_type(a)).collect();
                 Type::Constructed(name.clone(), new_args)
