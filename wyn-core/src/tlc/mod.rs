@@ -1990,7 +1990,7 @@ impl<'a> Transformer<'a> {
                 // Lower `#ck(a1..am)` to a flat tuple
                 // `(tag=k, slot_1, ..., slot_total-1)` where the active
                 // constructor's payload occupies slots [offset_k, offset_k+m)
-                // and dead slots get zero-filled.
+                // and dead slots get blank-filled.
                 let raw_sum_ty = self
                     .lookup_type_raw(expr.h.id)
                     .expect("BUG: Constructor expression must have type in type table");
@@ -2018,7 +2018,7 @@ impl<'a> Transformer<'a> {
                     if slot_idx >= payload_offset && slot_idx < payload_offset + arg_terms.len() {
                         slot_terms.push(arg_terms[slot_idx - payload_offset].clone());
                     } else {
-                        slot_terms.push(self.build_zero(slot_ty, span));
+                        slot_terms.push(self.build_blank(slot_ty, span));
                     }
                 }
                 self.mk_tuple(slot_terms, ty, span)
@@ -2978,9 +2978,9 @@ impl<'a> Transformer<'a> {
         )
     }
 
-    /// Produce a typed-zero Term for `ty`. Used to fill dead
+    /// Produce a typed-blank Term for `ty`. Used to fill dead
     /// constructor-payload slots in a flattened sum-type tuple.
-    fn build_zero(&mut self, ty: &Type<TypeName>, span: Span) -> Term {
+    fn build_blank(&mut self, ty: &Type<TypeName>, span: Span) -> Term {
         match ty {
             Type::Constructed(TypeName::Int(_), _) | Type::Constructed(TypeName::UInt(_), _) => {
                 self.mk_term(ty.clone(), span, TermKind::IntLit("0".to_string()))
@@ -2994,10 +2994,58 @@ impl<'a> Transformer<'a> {
             Type::Constructed(TypeName::Unit, _) => self.mk_term(ty.clone(), span, TermKind::UnitLit),
             Type::Constructed(TypeName::Tuple(_), elems)
             | Type::Constructed(TypeName::Record(_), elems) => {
-                let zero_terms: Vec<Term> = elems.iter().map(|t| self.build_zero(t, span)).collect();
-                self.mk_tuple(zero_terms, ty.clone(), span)
+                let blank_terms: Vec<Term> = elems.iter().map(|t| self.build_blank(t, span)).collect();
+                self.mk_tuple(blank_terms, ty.clone(), span)
             }
-            _ => todo!("zero-fill for sum-payload type {:?}", ty),
+            Type::Constructed(TypeName::Array, args) => {
+                debug_assert_eq!(args.len(), 3, "Array type must have [elem, size, variant] args");
+                let elem_ty = &args[0];
+                let n = match &args[1] {
+                    Type::Constructed(TypeName::Size(n), _) => *n,
+                    other => panic!(
+                        "BUG: array-typed sum payload must have constant size (got {:?}); \
+                         the type checker should reject symbolic-size sum payloads upstream",
+                        other
+                    ),
+                };
+                let elem_blank = self.build_blank(elem_ty, span);
+                let elems: Vec<Term> = std::iter::repeat(elem_blank).take(n).collect();
+                self.mk_term(ty.clone(), span, TermKind::ArrayExpr(ArrayExpr::Literal(elems)))
+            }
+            Type::Constructed(TypeName::Vec, args) => {
+                debug_assert_eq!(args.len(), 2, "Vec type must have [elem, size] args");
+                let elem_ty = &args[0];
+                let n = match &args[1] {
+                    Type::Constructed(TypeName::Size(n), _) => *n,
+                    other => panic!("BUG: Vec sum payload must have constant size (got {:?})", other),
+                };
+                let elem_blank = self.build_blank(elem_ty, span);
+                let elems: Vec<Term> = std::iter::repeat(elem_blank).take(n).collect();
+                self.mk_term(ty.clone(), span, TermKind::VecLit(elems))
+            }
+            Type::Constructed(TypeName::Arrow, _) => {
+                panic!(
+                    "BUG: function-typed sum payloads are not supported, but reached \
+                     build_blank. The type checker should reject this at the Constructor \
+                     or Match site."
+                );
+            }
+            Type::Variable(_)
+            | Type::Constructed(TypeName::Size(_), _)
+            | Type::Constructed(TypeName::SizeVar(_), _)
+            | Type::Constructed(TypeName::SizePlaceholder, _)
+            | Type::Constructed(TypeName::AddressPlaceholder, _)
+            | Type::Constructed(TypeName::ArrayVariantView, _)
+            | Type::Constructed(TypeName::ArrayVariantComposite, _)
+            | Type::Constructed(TypeName::ArrayVariantVirtual, _)
+            | Type::Constructed(TypeName::Skolem(_), _) => {
+                panic!(
+                    "BUG: build_blank reached a non-value-level type {:?}; \
+                     these shouldn't appear in sum payload slot positions",
+                    ty
+                );
+            }
+            _ => panic!("blank for sum-payload type {:?} is not yet implemented", ty),
         }
     }
 
@@ -3142,7 +3190,7 @@ impl<'a> Transformer<'a> {
     /// Slot 0 is always the u32 tag; slots 1..end are each
     /// constructor's payloads laid out in source order with no
     /// sharing between variants. The dead slots for an inactive
-    /// variant are zero-filled at construction.
+    /// variant are blank-filled at construction.
     fn sum_layout(variants: &[(String, Vec<Type<TypeName>>)]) -> SumLayout {
         let tag_ty = Type::Constructed(TypeName::UInt(32), vec![]);
         let mut slot_types = vec![tag_ty];
@@ -3200,3 +3248,7 @@ impl<'a> Transformer<'a> {
         self.mk_vec_lit(terms.to_vec(), result_ty, span)
     }
 }
+
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod mod_tests;

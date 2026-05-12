@@ -437,11 +437,7 @@ impl Backend {
 
         let (mut node_counter, mut module_manager) = init_compiler_cached();
         let result = wyn_core::Compiler::parse(text, &mut node_counter).and_then(|parsed| {
-            parsed
-                .desugar(&mut node_counter)?
-                .resolve(&module_manager)?
-                .fold_ast_constants()
-                .type_check(&mut module_manager)
+            parsed.resolve(&module_manager)?.fold_ast_constants().type_check(&mut module_manager)
         });
 
         match result {
