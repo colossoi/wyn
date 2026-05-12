@@ -2,4 +2,5 @@
 //! bindings. Generates sequential test chains (no decision-tree
 //! compilation — see `crate::types::patterns::coverage` for rationale).
 
+pub mod bindings;
 pub mod match_lowering;
