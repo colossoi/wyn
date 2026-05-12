@@ -1586,7 +1586,7 @@ impl<'a> Converter<'a> {
                 ..
             } => self.convert_soac_redomap(op, reduce_op, ne, inputs, ty),
             SoacOp::Scan { op, ne, input } => self.convert_soac_scan(op, ne, input, ty),
-            SoacOp::Filter { .. } => Err(ConvertError::Unsupported("SOAC filter".into())),
+            SoacOp::Filter { pred, input } => self.convert_soac_filter(pred, input, ty),
             // TODO(scatter): no producer in to_tlc yet (no surface name dispatched here).
             // Variant exists to anchor the place-passing SOAC shape; remove if a wider
             // audit confirms no future use.
@@ -1777,6 +1777,60 @@ impl<'a> Converter<'a> {
             },
             operands,
             result_ty,
+        ))
+    }
+
+    fn convert_soac_filter(
+        &mut self,
+        pred: &SoacBody,
+        input: &ArrayExpr,
+        _result_ty: Type<TypeName>,
+    ) -> Result<NodeId, ConvertError> {
+        let pred_name = self.lambda_fn_name(&pred.lam)?;
+        let capture_nids: Vec<NodeId> =
+            pred.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
+        let elem_ty = self.array_expr_elem_type(input);
+        let arr_ty = self.array_expr_type(input);
+        let arr_nid = self.convert_array_expr_value(input)?;
+
+        // Filter requires a statically-sized input — N is the upper
+        // bound on the output count. The TLC-level result type is an
+        // existential `?k. [k]T`; after `open_existential` it becomes
+        // `Array[T, Skolem(k), Composite]`. We rewrite the EGIR-level
+        // result type to `Array[T, Size(N), Bounded]` so downstream
+        // (elaborate, backends) see a concrete Bounded struct with
+        // both a buffer and a runtime length.
+        let size = arr_ty
+            .array_size()
+            .ok_or_else(|| ConvertError::GraphError("filter: input has no array_size".into()))?
+            .clone();
+        if !matches!(&size, Type::Constructed(TypeName::Size(_), _)) {
+            return Err(ConvertError::GraphError(format!(
+                "filter: input must be statically sized, got size {:?}",
+                size
+            )));
+        }
+        let bounded_result_ty = Type::Constructed(
+            TypeName::Array,
+            vec![
+                elem_ty.clone(),
+                size.clone(),
+                Type::Constructed(TypeName::ArrayVariantBounded, vec![]),
+            ],
+        );
+
+        let mut operands: SmallVec<[NodeId; 4]> = smallvec![arr_nid];
+        operands.extend(capture_nids.iter().copied());
+
+        Ok(self.emit_soac(
+            PendingSoac::Filter {
+                pred_func: pred_name,
+                input_array_type: arr_ty,
+                input_elem_type: elem_ty,
+                output_capacity_size: size,
+            },
+            operands,
+            bounded_result_ty,
         ))
     }
 

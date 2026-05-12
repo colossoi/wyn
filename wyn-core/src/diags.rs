@@ -162,6 +162,7 @@ fn format_constructed_type(name: &TypeName, args: &[PolyType<TypeName>]) -> Stri
         TypeName::ArrayVariantView => "view".to_string(),
         TypeName::ArrayVariantComposite => "composite".to_string(),
         TypeName::ArrayVariantVirtual => "virtual".to_string(),
+        TypeName::ArrayVariantBounded => "bounded".to_string(),
         TypeName::AddressPlaceholder => "?variant".to_string(),
         TypeName::Skolem(id) => format!("{}", id),
     }

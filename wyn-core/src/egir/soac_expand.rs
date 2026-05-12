@@ -115,6 +115,7 @@ fn is_handleable_soac(kind: &SideEffectKind) -> bool {
         PendingSoac::Map {
             input_array_types, ..
         } => input_array_types.iter().all(is_plain_array_source),
+        PendingSoac::Filter { input_array_type, .. } => is_plain_array_source(input_array_type),
     }
 }
 
@@ -532,6 +533,39 @@ fn expand_one(
                 }
             }
         }
+        SideEffectKind::Pending(PendingSoac::Filter {
+            pred_func,
+            input_array_type,
+            input_elem_type,
+            output_capacity_size,
+        }) => {
+            let pred_func = pred_func.clone();
+            let arr_ty = input_array_type.clone();
+            let elem_ty = input_elem_type.clone();
+            let capacity_size = output_capacity_size.clone();
+
+            // Operand layout: [input, ...pred_captures].
+            let arr_nid = se.operand_nodes[0];
+            let captures: Vec<NodeId> = se.operand_nodes[1..].to_vec();
+            let result_nid = se.result.expect("Filter has a result");
+
+            build_filter_loop(
+                graph,
+                control_headers,
+                bid,
+                idx,
+                FilterLoop {
+                    arr_nid,
+                    arr_ty,
+                    elem_ty,
+                    capacity_size,
+                    pred_func,
+                    captures,
+                    result_node: result_nid,
+                },
+                next_effect,
+            );
+        }
         _ => unreachable!("is_handleable_soac filtered to supported variants"),
     }
 }
@@ -920,6 +954,208 @@ fn build_scan_loop(
         target: handles.header,
         args: vec![new_out_nid, new_acc_nid, next_i_nid],
     };
+}
+
+/// Filter: per iteration `keep = pred(elem, ...caps); buf' = array_with(buf, count, elem);
+/// count' = if keep then count+1 else count`. The buffer write is unconditional —
+/// non-passing iterations overwrite the same slot on the next iteration that
+/// advances `count`. Two loop-carried values: the buffer and the runtime count.
+struct FilterLoop {
+    /// The input array node, used both for the read path and for length.
+    arr_nid: NodeId,
+    arr_ty: Type<TypeName>,
+    elem_ty: Type<TypeName>,
+    /// `Size(N)` — the input's static capacity, reused as the output buffer's
+    /// capacity (the upper bound on filtered count).
+    capacity_size: Type<TypeName>,
+    pred_func: String,
+    captures: Vec<NodeId>,
+    /// The original SOAC result NodeId. After expansion this becomes a
+    /// `Tuple(buffer, count)` whose type is `Array[T, Size(N), Bounded]`.
+    result_node: NodeId,
+}
+
+fn build_filter_loop(
+    graph: &mut EGraph,
+    control_headers: &mut HashMap<BlockId, ControlHeader>,
+    bid: BlockId,
+    idx_in_block: usize,
+    spec: FilterLoop,
+    next_effect: &mut u32,
+) {
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+    // Composite buffer type — the underlying storage of the Bounded result.
+    let buf_ty = Type::Constructed(
+        TypeName::Array,
+        vec![
+            spec.elem_ty.clone(),
+            spec.capacity_size.clone(),
+            Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
+        ],
+    );
+
+    // Split `bid` into preheader (bid) + after.
+    let after = graph.skeleton.create_block();
+    let suffix: Vec<SideEffect> = graph.skeleton.blocks[bid].side_effects.drain(idx_in_block..).collect();
+    let old_term = std::mem::replace(
+        &mut graph.skeleton.blocks[bid].term,
+        SkeletonTerminator::Unreachable,
+    );
+    graph.skeleton.blocks[after].side_effects = suffix;
+    graph.skeleton.blocks[after].term = old_term;
+    if let Some(header_meta) = control_headers.remove(&bid) {
+        control_headers.insert(after, header_meta);
+    }
+
+    // Allocate fresh after-block params for the two carries (buffer + count).
+    // The original spec.result_node will be rebound below to a Tuple of these.
+    // The count is carried as `i32` throughout — matches the index type
+    // expected by `array_with` and the result type of `length()` at the
+    // backend boundary; `Bounded`'s on-disk `len` field is also i32.
+    let after_buf_nid = graph.alloc_side_effect_result(buf_ty.clone());
+    graph.nodes[after_buf_nid] = ENode::BlockParam {
+        block: after,
+        index: 0,
+    };
+    graph.skeleton.blocks[after].params.push(after_buf_nid);
+    let after_count_nid = graph.alloc_side_effect_result(i32_ty.clone());
+    graph.nodes[after_count_nid] = ENode::BlockParam {
+        block: after,
+        index: 1,
+    };
+    graph.skeleton.blocks[after].params.push(after_count_nid);
+
+    // Build header, body, then, else_, sel_merge, continue blocks. The
+    // SPIR-V structured-control-flow rules need the inner selection's
+    // merge to be distinct from the loop's continue target, so this loop
+    // uses a separate continue block that's just a forwarder back to the
+    // header.
+    let header = graph.skeleton.create_block();
+    let body = graph.skeleton.create_block();
+    let then_blk = graph.skeleton.create_block();
+    let else_blk = graph.skeleton.create_block();
+    let sel_merge = graph.skeleton.create_block();
+    let continue_blk = graph.skeleton.create_block();
+
+    // Header block params: buf_in, count_in, i_in.
+    let buf_in_nid = graph.add_block_param(header, 0, buf_ty.clone());
+    graph.skeleton.blocks[header].params.push(buf_in_nid);
+    let count_in_nid = graph.add_block_param(header, 1, i32_ty.clone());
+    graph.skeleton.blocks[header].params.push(count_in_nid);
+    let i_in_nid = graph.add_block_param(header, 2, i32_ty.clone());
+    graph.skeleton.blocks[header].params.push(i_in_nid);
+
+    // Preheader → header(uninit_buf, 0i32, 0i32).
+    let uninit_id = catalog().known().uninit;
+    let init_buf_nid = graph.intern_pure(
+        PureOp::Intrinsic {
+            id: uninit_id,
+            overload_idx: 0,
+        },
+        smallvec![],
+        buf_ty.clone(),
+    );
+    let zero_i32_nid = graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty.clone());
+    graph.skeleton.blocks[bid].term = SkeletonTerminator::Branch {
+        target: header,
+        args: vec![init_buf_nid, zero_i32_nid, zero_i32_nid],
+    };
+
+    // Header → cond_br(i<N, body, after(buf, count)).
+    let len_nid = emit_length(graph, spec.arr_nid, &spec.arr_ty, &i32_ty);
+    let cond_nid = graph.intern_pure(
+        PureOp::BinOp("<".into()),
+        smallvec![i_in_nid, len_nid],
+        bool_ty.clone(),
+    );
+    graph.skeleton.blocks[header].term = SkeletonTerminator::CondBranch {
+        cond: cond_nid,
+        then_target: body,
+        then_args: vec![],
+        else_target: after,
+        else_args: vec![buf_in_nid, count_in_nid],
+    };
+    control_headers.insert(
+        header,
+        ControlHeader::Loop {
+            merge: after,
+            continue_block: continue_blk,
+        },
+    );
+
+    // Body: elem = arr[i]; pred = pred_func(elem, captures); new_buf = array_with(buf, count, elem).
+    let elem_nid = emit_read_element(
+        graph,
+        body,
+        spec.arr_nid,
+        i_in_nid,
+        &spec.arr_ty,
+        &spec.elem_ty,
+        next_effect,
+    );
+    let mut pred_operands: SmallVec<[NodeId; 4]> = smallvec![elem_nid];
+    pred_operands.extend(spec.captures.iter().copied());
+    let pred_nid = graph.intern_pure(PureOp::Call(spec.pred_func), pred_operands, bool_ty.clone());
+
+    let new_buf_nid = emit_write_element(graph, buf_in_nid, count_in_nid, elem_nid, &buf_ty, &spec.elem_ty);
+
+    // Body → cond_br(pred, then, else_).
+    graph.skeleton.blocks[body].term = SkeletonTerminator::CondBranch {
+        cond: pred_nid,
+        then_target: then_blk,
+        then_args: vec![],
+        else_target: else_blk,
+        else_args: vec![],
+    };
+    control_headers.insert(body, ControlHeader::Selection { merge: sel_merge });
+
+    // then: count_bumped = count + 1; Branch(sel_merge, [count_bumped]).
+    let one_i32_nid = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty.clone());
+    let count_bumped_nid = graph.intern_pure(
+        PureOp::BinOp("+".into()),
+        smallvec![count_in_nid, one_i32_nid],
+        i32_ty.clone(),
+    );
+    graph.skeleton.blocks[then_blk].term = SkeletonTerminator::Branch {
+        target: sel_merge,
+        args: vec![count_bumped_nid],
+    };
+
+    // else_: Branch(sel_merge, [count_in]).
+    graph.skeleton.blocks[else_blk].term = SkeletonTerminator::Branch {
+        target: sel_merge,
+        args: vec![count_in_nid],
+    };
+
+    // sel_merge: param count_next; Branch(continue, [new_buf, count_next]).
+    let count_next_nid = graph.add_block_param(sel_merge, 0, i32_ty.clone());
+    graph.skeleton.blocks[sel_merge].params.push(count_next_nid);
+    graph.skeleton.blocks[sel_merge].term = SkeletonTerminator::Branch {
+        target: continue_blk,
+        args: vec![new_buf_nid, count_next_nid],
+    };
+
+    // continue: params (buf_for_continue, count_for_continue);
+    // i_next = i+1; Branch(header, [buf_for_continue, count_for_continue, i_next]).
+    let cont_buf_nid = graph.add_block_param(continue_blk, 0, buf_ty.clone());
+    graph.skeleton.blocks[continue_blk].params.push(cont_buf_nid);
+    let cont_count_nid = graph.add_block_param(continue_blk, 1, i32_ty.clone());
+    graph.skeleton.blocks[continue_blk].params.push(cont_count_nid);
+    let next_i_nid = increment(graph, i_in_nid);
+    graph.skeleton.blocks[continue_blk].term = SkeletonTerminator::Branch {
+        target: header,
+        args: vec![cont_buf_nid, cont_count_nid, next_i_nid],
+    };
+
+    // Rebind the original result NodeId to `Tuple(after_buf, after_count)`.
+    // The Tuple's type is `Array[T, Size(N), Bounded]` — the backends see
+    // it as a 2-field struct {f0: buffer, f1: u32}.
+    graph.nodes[spec.result_node] = ENode::Pure {
+        op: PureOp::Tuple(2),
+        operands: smallvec![after_buf_nid, after_count_nid],
+    };
+    let _ = next_effect;
 }
 
 /// Description of an accumulator-only SOAC (Reduce, Redomap): loop over one or

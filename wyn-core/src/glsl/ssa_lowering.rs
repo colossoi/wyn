@@ -60,6 +60,14 @@ struct LowerCtx<'a> {
     tuple_counter: usize,
     /// Cache from tuple type signature to struct name
     tuple_type_cache: HashMap<String, String>,
+    /// Bounded-array struct definitions keyed by struct name. Each
+    /// entry holds `(elem_ty_glsl, capacity)`; the struct lays out as
+    /// `{ T f0[N]; uint f1; }`.
+    bounded_structs: HashMap<String, (String, u32)>,
+    /// Cache from `(elem_glsl, capacity)` to struct name to dedup.
+    bounded_type_cache: HashMap<(String, u32), String>,
+    /// Counter for unique Bounded struct names.
+    bounded_counter: usize,
     /// Tracks every compiler-internal name that's been mangled this
     /// compilation (mangled → original). Detects collisions as a defensive
     /// invariant — the sanitizer is injective by construction, but this
@@ -301,6 +309,9 @@ impl<'a> LowerCtx<'a> {
             tuple_structs: HashMap::new(),
             tuple_counter: 0,
             tuple_type_cache: HashMap::new(),
+            bounded_structs: HashMap::new(),
+            bounded_type_cache: HashMap::new(),
+            bounded_counter: 0,
             mangled_names: HashMap::new(),
         }
     }
@@ -342,6 +353,9 @@ impl<'a> LowerCtx<'a> {
         self.tuple_structs.clear();
         self.tuple_type_cache.clear();
         self.tuple_counter = 0;
+        self.bounded_structs.clear();
+        self.bounded_type_cache.clear();
+        self.bounded_counter = 0;
         self.lowered.clear();
 
         let mut code = String::new();
@@ -371,6 +385,17 @@ impl<'a> LowerCtx<'a> {
                 for (i, field_type) in field_types.iter().enumerate() {
                     writeln!(output, "    {} f{};", field_type, i).unwrap();
                 }
+                writeln!(output, "}};").unwrap();
+            }
+            writeln!(output).unwrap();
+        }
+
+        // Emit struct definitions for Bounded arrays.
+        if !self.bounded_structs.is_empty() {
+            for (struct_name, (elem_ty, n)) in &self.bounded_structs {
+                writeln!(output, "struct {} {{", struct_name).unwrap();
+                writeln!(output, "    {} f0[{}];", elem_ty, n).unwrap();
+                writeln!(output, "    int f1;").unwrap();
                 writeln!(output, "}};").unwrap();
             }
             writeln!(output).unwrap();
@@ -432,6 +457,9 @@ impl<'a> LowerCtx<'a> {
         self.tuple_structs.clear();
         self.tuple_type_cache.clear();
         self.tuple_counter = 0;
+        self.bounded_structs.clear();
+        self.bounded_type_cache.clear();
+        self.bounded_counter = 0;
         self.lowered.clear();
 
         let mut code = String::new();
@@ -486,6 +514,20 @@ impl<'a> LowerCtx<'a> {
                 for (i, field_type) in field_types.iter().enumerate() {
                     writeln!(output, "    {} f{};", field_type, i).unwrap();
                 }
+                writeln!(output, "}};").unwrap();
+            }
+            writeln!(output).unwrap();
+        }
+
+        // Bounded-array struct definitions.
+        if !self.bounded_structs.is_empty() {
+            writeln!(output, "// Bounded-array struct definitions").unwrap();
+            let mut structs: Vec<_> = self.bounded_structs.iter().collect();
+            structs.sort_by_key(|(name, _)| *name);
+            for (struct_name, (elem_ty, n)) in structs {
+                writeln!(output, "struct {} {{", struct_name).unwrap();
+                writeln!(output, "    {} f0[{}];", elem_ty, n).unwrap();
+                writeln!(output, "    int f1;").unwrap();
                 writeln!(output, "}};").unwrap();
             }
             writeln!(output).unwrap();
@@ -792,6 +834,26 @@ impl<'a> LowerCtx<'a> {
                 }
                 TypeName::Array => {
                     let elem = self.type_to_glsl(ty.elem_type().expect("Array has elem"));
+                    // Bounded variant: `{ T f0[N]; uint f1; }` struct. The
+                    // capacity is required to be a `Size(N)` literal.
+                    if matches!(
+                        ty.array_variant(),
+                        Some(PolyType::Constructed(TypeName::ArrayVariantBounded, _))
+                    ) {
+                        let n = match ty.array_size() {
+                            Some(PolyType::Constructed(TypeName::Size(n), _)) => *n as u32,
+                            _ => panic!("BUG: Bounded array must have Size(N) capacity: {:?}", ty),
+                        };
+                        let key = (elem.clone(), n);
+                        if let Some(name) = self.bounded_type_cache.get(&key) {
+                            return name.clone();
+                        }
+                        let name = format!("Bounded{}", self.bounded_counter);
+                        self.bounded_counter += 1;
+                        self.bounded_type_cache.insert(key, name.clone());
+                        self.bounded_structs.insert(name.clone(), (elem, n));
+                        return name;
+                    }
                     // GLSL requires function-parameter arrays to be sized, and
                     // sized constructors need the size too. Emit `T[N]` when
                     // the array size is a concrete `Size(N)`; fall back to
@@ -1163,6 +1225,16 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 crate::op::OpTag::Index => {
                     let base_val = self.get_value_ref(operands[0])?;
                     let index_val = self.get_value_ref(operands[1])?;
+                    // Bounded arrays subscript the inner `f0[N]` buffer.
+                    if let Some(base_id) = operands[0].as_ssa() {
+                        let base_ty = self.body.get_value_type(base_id);
+                        if matches!(
+                            base_ty.array_variant(),
+                            Some(PolyType::Constructed(TypeName::ArrayVariantBounded, _))
+                        ) {
+                            return Ok(format!("{}.f0[{}]", base_val, index_val));
+                        }
+                    }
                     Ok(format!("{}[{}]", base_val, index_val))
                 }
 
@@ -1215,11 +1287,27 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 crate::op::OpTag::Intrinsic { id, overload_idx: _ } => {
                     let arg_strs: Result<Vec<_>> =
                         operands.iter().map(|a| self.get_value_ref(*a)).collect();
+                    let arg_strs = arg_strs?;
                     let ssa_args: Vec<ValueId> = operands.iter().filter_map(|a| a.as_ssa()).collect();
+                    // Bounded arrays carry their runtime length in the
+                    // `f1` field of the generated struct, so `length()`
+                    // can't go through GLSL's array-method `.length()`.
+                    if *id == catalog().known().length && arg_strs.len() == 1 {
+                        if let Some(arg0_id) = operands[0].as_ssa() {
+                            let arg_ty = self.body.get_value_type(arg0_id);
+                            if matches!(
+                                arg_ty.array_variant(),
+                                Some(PolyType::Constructed(TypeName::ArrayVariantBounded, _))
+                            ) {
+                                // `.f1` is already int.
+                                return Ok(format!("{}.f1", arg_strs[0]));
+                            }
+                        }
+                    }
                     let name = crate::builtins::by_id(*id).dispatch_name();
                     self.lower_intrinsic(
                         name,
-                        &arg_strs?,
+                        &arg_strs,
                         &ssa_args,
                         result_ty.expect("Intrinsic must have result"),
                     )

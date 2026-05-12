@@ -229,6 +229,14 @@ pub enum TypeName {
     ArrayVariantComposite,
     /// Virtual variant - computed on-the-fly (e.g., ranges). No storage.
     ArrayVariantVirtual,
+    /// Bounded variant - function-local fixed-capacity buffer plus a
+    /// runtime length. Runtime layout: `{buffer: [N]T, len: u32}` where
+    /// `N` is the capacity (the upper bound, encoded as `Size(N)` in the
+    /// array type's size slot) and `len ≤ N` is the actual count of
+    /// valid elements. Produced by `filter` and similar SOACs whose
+    /// output count is data-dependent but whose upper bound is
+    /// statically known.
+    ArrayVariantBounded,
     /// Array variant placeholder. Replaced with type variable before type checking.
     /// Entry point params are constrained to Storage, others remain polymorphic.
     AddressPlaceholder,
@@ -292,6 +300,7 @@ impl std::fmt::Display for TypeName {
             TypeName::PointerStorage => write!(f, "PtrStorage"),
             TypeName::ArrayVariantView => write!(f, "view"),
             TypeName::ArrayVariantComposite => write!(f, "composite"),
+            TypeName::ArrayVariantBounded => write!(f, "bounded"),
             TypeName::ArrayVariantVirtual => write!(f, "virtual"),
             TypeName::AddressPlaceholder => write!(f, "?addrspace"),
             TypeName::Skolem(id) => write!(f, "{}", id),
@@ -352,6 +361,7 @@ impl polytype::Name for TypeName {
             TypeName::ArrayVariantView => "view".to_string(),
             TypeName::ArrayVariantComposite => "composite".to_string(),
             TypeName::ArrayVariantVirtual => "virtual".to_string(),
+            TypeName::ArrayVariantBounded => "bounded".to_string(),
             TypeName::AddressPlaceholder => "?variant".to_string(),
             TypeName::Skolem(id) => format!("{}", id),
         }
@@ -652,6 +662,7 @@ impl TypeExt for Type {
                         TypeName::ArrayVariantComposite
                             | TypeName::ArrayVariantView
                             | TypeName::ArrayVariantVirtual
+                            | TypeName::ArrayVariantBounded
                             | TypeName::AddressPlaceholder,
                         _
                     ) | Type::Variable(_)
@@ -958,6 +969,17 @@ pub fn is_array_variant_virtual(ty: &Type) -> bool {
     matches!(ty, Type::Constructed(TypeName::ArrayVariantVirtual, _))
 }
 
+/// Create the Bounded array variant marker — a function-local
+/// fixed-capacity buffer plus a runtime length.
+pub fn array_variant_bounded() -> Type {
+    Type::Constructed(TypeName::ArrayVariantBounded, vec![])
+}
+
+/// Check if a type is the Bounded array variant marker.
+pub fn is_array_variant_bounded(ty: &Type) -> bool {
+    matches!(ty, Type::Constructed(TypeName::ArrayVariantBounded, _))
+}
+
 /// Get the array variant from an array type (returns the variant type argument)
 pub fn get_array_variant(ty: &Type) -> Option<&TypeName> {
     match ty.array_variant()? {
@@ -976,6 +998,7 @@ pub fn is_array_variant(ty: &Type) -> bool {
             TypeName::ArrayVariantView
                 | TypeName::ArrayVariantComposite
                 | TypeName::ArrayVariantVirtual
+                | TypeName::ArrayVariantBounded
                 | TypeName::AddressPlaceholder,
             _
         )

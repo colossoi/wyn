@@ -413,3 +413,30 @@ entry main() #[builtin(position)] vec4f32 =
     // 'sum_to' may be inlined — just verify compilation succeeds
     assert!(!program.entry_points.is_empty(), "Should have entry points");
 }
+
+#[test]
+fn test_filter_compiles_end_to_end() {
+    // Exercises the EGIR Filter path:
+    //   * surface `filter(...)` is reachable (not eliminated by
+    //     partial_eval / inline_small for this shape),
+    //   * `convert_soac_filter` rewrites the existential `?k. [k]T`
+    //     result to `Array[T, Size(N), Bounded]`,
+    //   * `expand_one`'s Filter arm builds the loop with a Selection
+    //     inside the loop body,
+    //   * `length()` projects the runtime count from member 1 of the
+    //     resulting Bounded struct.
+    let program = compile_via_egir(
+        r#"
+def is_even(x: i32) bool = x % 2 == 0
+
+def evens(arr: [4]i32) ?k. [k]i32 =
+    filter(is_even, arr)
+
+#[vertex]
+entry vertex_main() #[builtin(position)] vec4f32 =
+    let e = evens([1, 2, 3, 4]) in
+    @[f32.i32(length(e)), 0.0, 0.0, 1.0]
+"#,
+    );
+    assert!(!program.entry_points.is_empty(), "Should have entry points");
+}

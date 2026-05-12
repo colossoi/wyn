@@ -208,6 +208,21 @@ pub enum PendingSoac {
         input_array_types: Vec<Type<TypeName>>,
         input_elem_types: Vec<Type<TypeName>>,
     },
+    /// `filter pred input` → Bounded array carrying the elements of
+    /// `input` that satisfied the predicate, plus a runtime count.
+    /// Operands: `[input, ...pred_captures]`. The result type set on
+    /// the result NodeId is `Array[T, Size(N), Bounded]` where N is
+    /// the input's static size (the upper bound). The runtime `len`
+    /// field of the resulting struct is the actual count of accepted
+    /// elements.
+    Filter {
+        pred_func: String,
+        input_array_type: Type<TypeName>,
+        input_elem_type: Type<TypeName>,
+        /// `Size(N)` — the input's static capacity, reused as the
+        /// output buffer's capacity.
+        output_capacity_size: Type<TypeName>,
+    },
 }
 
 /// Terminator using NodeIds for value references.

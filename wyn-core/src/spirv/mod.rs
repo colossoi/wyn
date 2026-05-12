@@ -337,6 +337,20 @@ impl Constructor {
                             // Virtual variant: struct { start, step, len } for range representation
                             // Use the element type so u32 ranges get {u32, u32, u32}.
                             self.get_or_create_struct_type(vec![elem_type, elem_type, elem_type])
+                        } else if let PolyType::Constructed(TypeName::ArrayVariantBounded, _) = variant {
+                            // Bounded variant: struct { buffer: [N]T, len: i32 } —
+                            // function-local fixed-capacity buffer plus a runtime count.
+                            // The buffer member is a Composite [N]T (sized SPIR-V array).
+                            // The len field is i32 to match the language's `length()`
+                            // result type and the index type expected by `array_with`.
+                            let n = match size {
+                                PolyType::Constructed(TypeName::Size(n), _) => *n as u32,
+                                _ => panic!("BUG: Bounded array requires Size(N) capacity, got {:?}", size),
+                            };
+                            let size_const = self.const_u32(n);
+                            let buf_type = self.builder.type_array(elem_type, size_const);
+                            self.array_elem_cache.insert(buf_type, elem_type);
+                            self.get_or_create_struct_type(vec![buf_type, self.i32_type])
                         } else {
                             // Composite variant (or placeholder): sized array value
                             match size {
@@ -2195,6 +2209,37 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 } else if types::is_array_variant_virtual(variant) {
                     // Virtual variant: {start, step, len} - computed array
                     self.lower_virtual_index(base_id, index_id, result_ty)
+                } else if types::is_array_variant_bounded(variant) {
+                    // Bounded variant: {buffer: [N]T, len: u32} struct.
+                    // Extract the buffer (member 0), then index it as a Composite.
+                    let n = match base_ty.array_size().expect("Array has size") {
+                        PolyType::Constructed(TypeName::Size(n), _) => *n as u32,
+                        _ => bail_spirv!("Bounded array must have Size(N) capacity"),
+                    };
+                    let size_const = self.constructor.const_u32(n);
+                    let buf_ty = self.constructor.builder.type_array(result_ty, size_const);
+                    self.constructor.array_elem_cache.insert(buf_ty, result_ty);
+                    let buf_id =
+                        self.constructor.builder.composite_extract(buf_ty, None, base_id, [0u32])?;
+                    if let Some(const_idx) = self.try_resolve_const_index(index) {
+                        Ok(self.constructor.builder.composite_extract(
+                            result_ty,
+                            None,
+                            buf_id,
+                            [const_idx],
+                        )?)
+                    } else {
+                        // Synthesize a composite [N]T base type for the helper.
+                        let composite_ty = PolyType::Constructed(
+                            TypeName::Array,
+                            vec![
+                                elem.clone(),
+                                base_ty.array_size().expect("Array has size").clone(),
+                                PolyType::Constructed(TypeName::ArrayVariantComposite, vec![]),
+                            ],
+                        );
+                        self.lower_composite_index(buf_id, index_id, result_ty, &composite_ty)
+                    }
                 } else {
                     // Composite variant: SPIR-V array value
                     // Check for compile-time constant index for OpCompositeExtract
@@ -2484,6 +2529,13 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                                 _ => bail_spirv!("length: composite array has unknown size"),
                             }
                         }
+                        // Bounded: struct {buffer, len} — extract member 1 (the
+                        // runtime count). The `len` field is already i32, matching
+                        // SSA's length() result type.
+                        PolyType::Constructed(TypeName::ArrayVariantBounded, _) => Ok(self
+                            .constructor
+                            .builder
+                            .composite_extract(result_ty, None, arg_ids[0], [1u32])?),
                         _ => bail_spirv!("length: unknown array variant: {:?}", variant),
                     }
                 } else if id == known.slice {

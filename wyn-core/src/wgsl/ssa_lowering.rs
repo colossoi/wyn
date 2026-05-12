@@ -335,6 +335,13 @@ pub struct TypeEmitter {
     virtual_range_cache: HashMap<String, String>,
     pub virtual_range_structs: Vec<(String, String)>, // (struct_name, elem_ty)
     virtual_range_counter: usize,
+    /// `array_variant_bounded` arrays — function-local fixed-capacity
+    /// buffer plus a runtime length. Lowers to `{ buffer: array<T, N>,
+    /// len: u32 }`. Key: `(elem_wgsl_ty, capacity)`.
+    bounded_cache: HashMap<(String, u32), String>,
+    /// `(struct_name, elem_ty, capacity)` for emission.
+    pub bounded_structs: Vec<(String, String, u32)>,
+    bounded_counter: usize,
 }
 
 impl Default for TypeEmitter {
@@ -352,7 +359,24 @@ impl TypeEmitter {
             virtual_range_cache: HashMap::new(),
             virtual_range_structs: Vec::new(),
             virtual_range_counter: 0,
+            bounded_cache: HashMap::new(),
+            bounded_structs: Vec::new(),
+            bounded_counter: 0,
         }
+    }
+
+    /// Look up or create the WGSL struct name for a bounded array with
+    /// element type `elem` (already WGSL-lowered) and capacity `n`.
+    fn bounded_struct(&mut self, elem: &str, n: u32) -> String {
+        let key = (elem.to_string(), n);
+        if let Some(name) = self.bounded_cache.get(&key) {
+            return name.clone();
+        }
+        let name = format!("Bounded{}", self.bounded_counter);
+        self.bounded_counter += 1;
+        self.bounded_cache.insert(key, name.clone());
+        self.bounded_structs.push((name.clone(), elem.to_string(), n));
+        name
     }
 
     /// Look up or create the WGSL struct name for a virtual-array range
@@ -433,6 +457,23 @@ impl TypeEmitter {
                         ty.array_variant()
                     {
                         return Ok(self.virtual_range_struct(&elem));
+                    }
+                    // Bounded arrays are `{buffer: array<T, N>, len: u32}` —
+                    // function-local fixed-capacity buffer plus a runtime
+                    // count.
+                    if let Some(PolyType::Constructed(TypeName::ArrayVariantBounded, _)) =
+                        ty.array_variant()
+                    {
+                        let n = match ty.array_size() {
+                            Some(PolyType::Constructed(TypeName::Size(n), _)) => *n as u32,
+                            _ => {
+                                return Err(crate::err_wgsl!(
+                                    "Bounded array must have Size(N) capacity, got {:?}",
+                                    ty
+                                ));
+                            }
+                        };
+                        return Ok(self.bounded_struct(&elem, n));
                     }
                     match ty.array_size() {
                         Some(PolyType::Constructed(TypeName::Size(n), _)) => {
@@ -614,6 +655,18 @@ impl<'a> LowerCtx<'a> {
             writeln!(output, "    f0: {},", elem).unwrap();
             writeln!(output, "    f1: {},", elem).unwrap();
             writeln!(output, "    f2: {},", elem).unwrap();
+            writeln!(output, "}}").unwrap();
+            writeln!(output).unwrap();
+        }
+
+        // Bounded-array struct declarations. Field layout mirrors the
+        // tuple `f0`/`f1` convention so `Project` reaches buffer/len via
+        // `.f0`/`.f1` without special-casing, matching SPIR-V's
+        // `composite_extract` indices 0/1.
+        for (name, elem, n) in &self.type_emitter.bounded_structs {
+            writeln!(output, "struct {} {{", name).unwrap();
+            writeln!(output, "    f0: array<{}, {}>,", elem, n).unwrap();
+            writeln!(output, "    f1: i32,").unwrap();
             writeln!(output, "}}").unwrap();
             writeln!(output).unwrap();
         }
@@ -1957,6 +2010,14 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         {
                             return Ok(format!("({}.f0 + {} * {}.f1)", base_val, index_val, base_val));
                         }
+                        if let Some(PolyType::Constructed(TypeName::ArrayVariantBounded, _)) =
+                            base_ty.array_variant()
+                        {
+                            // Bounded `{buffer, len}`: index into the buffer
+                            // member (no bounds check against `len` — same
+                            // contract as Composite).
+                            return Ok(format!("{}.f0[{}]", base_val, index_val));
+                        }
                     }
                     Ok(format!("{}[{}]", base_val, index_val))
                 }
@@ -2172,6 +2233,15 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                 ty.array_variant()
                             {
                                 return Ok(format!("{}.f2", arg_strs[0]));
+                            }
+                            // Bounded arrays carry their runtime length in
+                            // the `f1` field of the `{buffer, len}` struct
+                            // (already i32).
+                            if let Some(PolyType::Constructed(TypeName::ArrayVariantBounded, _)) =
+                                ty.array_variant()
+                            {
+                                let expr = format!("{}.f1", arg_strs[0]);
+                                return Ok(if wants_i32 { expr } else { format!("u32({})", expr) });
                             }
                             if let Some(PolyType::Constructed(TypeName::Size(n), _)) = ty.array_size() {
                                 return Ok(if wants_i32 { format!("{}i", n) } else { format!("{}u", n) });
