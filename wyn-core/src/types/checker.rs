@@ -75,18 +75,18 @@ impl TypeWarning {
 
 pub struct TypeChecker<'a> {
     scope_stack: ScopeStack<ScopeEntry<TypeScheme>>,
-    context: Context<TypeName>, // Polytype unification context
+    pub(super) context: Context<TypeName>, // Polytype unification context
     record_field_map: HashMap<(String, String), Type>, // Map (type_name, field_name) -> field_type
-    module_manager: &'a ModuleManager, // Lazy module loading
-    type_table: HashMap<NodeId, TypeScheme>, // Maps NodeId to type scheme
-    warnings: Vec<TypeWarning>, // Collected warnings
-    type_holes: Vec<(NodeId, Span)>, // Track type hole locations for warning emission
-    arity_map: HashMap<String, usize>, // function name -> required arity (number of params)
+    module_manager: &'a ModuleManager,     // Lazy module loading
+    pub(super) type_table: HashMap<NodeId, TypeScheme>, // Maps NodeId to type scheme
+    warnings: Vec<TypeWarning>,            // Collected warnings
+    type_holes: Vec<(NodeId, Span)>,       // Track type hole locations for warning emission
+    arity_map: HashMap<String, usize>,     // function name -> required arity (number of params)
     /// ID source for generating unique skolem constants when opening existential types.
     skolem_ids: crate::IdSource<SkolemId>,
     /// Current module context for resolving unqualified type aliases in expressions.
     /// Set during check_decl_as_in_module for module function checking.
-    current_module: Option<String>,
+    pub(super) current_module: Option<String>,
     /// Cached module function schemes (key: "module.function", e.g., "rand.init").
     /// Populated during check_module_functions to avoid rebuilding schemes on each lookup.
     module_schemes: HashMap<String, TypeScheme>,
@@ -472,7 +472,7 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Insert a name into the scope with a given identifier kind.
-    fn define(&mut self, name: String, kind: IdentifierKind, value: TypeScheme) {
+    pub(super) fn define(&mut self, name: String, kind: IdentifierKind, value: TypeScheme) {
         self.scope_stack.insert(name, ScopeEntry { kind, value });
     }
 
@@ -498,7 +498,7 @@ impl<'a> TypeChecker<'a> {
     /// HM-style generalization at let: ∀(fv(ty) \ fv(env) \ ascription_vars). ty
     /// Quantifies over type variables that are free in ty but not free in the environment
     /// and not in the set of ascription variables (which must remain monomorphic)
-    fn generalize(&self, ty: &Type) -> TypeScheme {
+    pub(super) fn generalize(&self, ty: &Type) -> TypeScheme {
         // Always generalize the *solved* view
         let applied = ty.apply(&self.context);
 
@@ -718,185 +718,9 @@ impl<'a> TypeChecker<'a> {
         &self.warnings
     }
 
-    /// Create a fresh type for a pattern based on its structure
-    /// For tuple patterns, creates a tuple of fresh type variables
-    /// For simple patterns, creates a single fresh type variable
-    fn fresh_type_for_pattern(&mut self, pattern: &Pattern) -> Type {
-        match &pattern.kind {
-            PatternKind::Tuple(patterns) => {
-                // Create a tuple type with fresh type variable for each element
-                let elem_types: Vec<Type> =
-                    patterns.iter().map(|p| self.fresh_type_for_pattern(p)).collect();
-                tuple(elem_types)
-            }
-            PatternKind::Typed(_, annotated_type) => {
-                self.normalize_annotation_type(annotated_type, self.current_module.as_deref())
-            }
-            PatternKind::Attributed(_, inner_pattern) => {
-                // Ignore attributes, recurse on inner pattern
-                self.fresh_type_for_pattern(inner_pattern)
-            }
-            _ => {
-                // For simple patterns (Name, Wildcard, etc.), create a fresh type variable
-                self.context.new_variable()
-            }
-        }
-    }
-
-    /// Bind a pattern with a given type, adding bindings to the current scope
-    /// Returns the actual type that the pattern matches (for type checking)
-    /// If generalize is true, generalizes types for polymorphism (used in let bindings)
-    fn bind_pattern(&mut self, pattern: &Pattern, expected_type: &Type, generalize: bool) -> Result<Type> {
-        match &pattern.kind {
-            PatternKind::Name(name) => {
-                // Simple name binding
-                let type_scheme = if generalize {
-                    self.generalize(expected_type)
-                } else {
-                    TypeScheme::Monotype(expected_type.clone())
-                };
-                self.define(name.clone(), IdentifierKind::Local, type_scheme);
-                // Store resolved type in type_table for mirize
-                self.type_table.insert(
-                    pattern.h.id,
-                    TypeScheme::Monotype(expected_type.apply(&self.context)),
-                );
-                Ok(expected_type.clone())
-            }
-            PatternKind::Wildcard => {
-                // Wildcard doesn't bind anything
-                self.type_table.insert(
-                    pattern.h.id,
-                    TypeScheme::Monotype(expected_type.apply(&self.context)),
-                );
-                Ok(expected_type.clone())
-            }
-            PatternKind::Tuple(patterns) => {
-                // Expected type should be a tuple with matching arity
-                let expected_applied = expected_type.apply(&self.context);
-
-                match expected_applied {
-                    Type::Constructed(TypeName::Tuple(_), ref elem_types) => {
-                        if elem_types.len() != patterns.len() {
-                            bail_type_at!(
-                                pattern.h.span,
-                                "Tuple pattern has {} elements but type has {}",
-                                patterns.len(),
-                                elem_types.len()
-                            );
-                        }
-
-                        // Bind each sub-pattern with its corresponding element type
-                        for (sub_pattern, elem_type) in patterns.iter().zip(elem_types.iter()) {
-                            self.bind_pattern(sub_pattern, elem_type, generalize)?;
-                        }
-
-                        self.type_table.insert(
-                            pattern.h.id,
-                            TypeScheme::Monotype(expected_type.apply(&self.context)),
-                        );
-                        Ok(expected_type.clone())
-                    }
-                    _ => Err(err_type_at!(
-                        pattern.h.span,
-                        "Expected tuple type for tuple pattern, got {}",
-                        self.format_type(&expected_applied)
-                    )),
-                }
-            }
-            PatternKind::Typed(inner_pattern, annotated_type) => {
-                let normalized =
-                    self.normalize_annotation_type(annotated_type, self.current_module.as_deref());
-                // Unify annotation with expected type
-                self.context.unify(&normalized, expected_type).map_err(|_| {
-                    err_type_at!(
-                        pattern.h.span,
-                        "Pattern type annotation {} doesn't match expected type {}",
-                        self.format_type(&normalized),
-                        self.format_type(expected_type)
-                    )
-                })?;
-                // Bind the inner pattern
-                let result = self.bind_pattern(inner_pattern, &normalized, generalize)?;
-                let resolved = normalized.apply(&self.context);
-                self.type_table.insert(pattern.h.id, TypeScheme::Monotype(resolved));
-                Ok(result)
-            }
-            PatternKind::Attributed(_, inner_pattern) => {
-                // Ignore attributes, bind the inner pattern
-                let result = self.bind_pattern(inner_pattern, expected_type, generalize)?;
-                // Also store type for the outer Attributed pattern
-                self.type_table.insert(
-                    pattern.h.id,
-                    TypeScheme::Monotype(expected_type.apply(&self.context)),
-                );
-                Ok(result)
-            }
-            PatternKind::Unit => {
-                // Unit pattern should match unit type
-                let unit_type = tuple(vec![]);
-                self.context.unify(&unit_type, expected_type).map_err(|_| {
-                    err_type_at!(
-                        pattern.h.span,
-                        "Unit pattern doesn't match expected type {}",
-                        self.format_type(expected_type)
-                    )
-                })?;
-                self.type_table.insert(pattern.h.id, TypeScheme::Monotype(unit_type.apply(&self.context)));
-                Ok(unit_type)
-            }
-            PatternKind::Constructor(name, args) => {
-                // The expected type must be a sum that contains this
-                // constructor at matching payload arity.
-                let expected_applied = expected_type.apply(&self.context);
-                match expected_applied {
-                    Type::Constructed(TypeName::Sum(ref variants), _) => {
-                        let payload_types = match variants.iter().find(|(n, _)| n == name) {
-                            Some((_, payload)) => payload,
-                            None => bail_type_at!(
-                                pattern.h.span,
-                                "constructor `#{}` not found in sum type {}",
-                                name,
-                                self.format_type(&expected_applied)
-                            ),
-                        };
-                        if args.len() != payload_types.len() {
-                            bail_type_at!(
-                                pattern.h.span,
-                                "constructor `#{}` expects {} payload value{}, got {}",
-                                name,
-                                payload_types.len(),
-                                if payload_types.len() == 1 { "" } else { "s" },
-                                args.len()
-                            );
-                        }
-                        for (sub_pattern, payload_ty) in args.iter().zip(payload_types.iter()) {
-                            self.bind_pattern(sub_pattern, payload_ty, generalize)?;
-                        }
-                        self.type_table.insert(
-                            pattern.h.id,
-                            TypeScheme::Monotype(expected_type.apply(&self.context)),
-                        );
-                        Ok(expected_type.clone())
-                    }
-                    _ => Err(err_type_at!(
-                        pattern.h.span,
-                        "constructor pattern `#{}` requires a sum-typed scrutinee, got {}",
-                        name,
-                        self.format_type(&expected_applied)
-                    )),
-                }
-            }
-            _ => {
-                // Other patterns not yet supported in lambda parameters
-                Err(err_type_at!(
-                    pattern.h.span,
-                    "Pattern {:?} not yet supported in lambda parameters",
-                    pattern.kind
-                ))
-            }
-        }
-    }
+    // `fresh_type_for_pattern` and `bind_pattern` live in
+    // `super::patterns::bind` (extends this type via an `impl` block
+    // there). Pattern logic is its own subsystem.
 
     /// Check an expression against an expected type (bidirectional checking mode)
     /// Returns the actual type (which should unify with expected_type)
@@ -1008,7 +832,7 @@ impl<'a> TypeChecker<'a> {
 
     /// Resolve type aliases in a type annotation. SizeVar/UserVar
     /// substitution is handled upstream by `resolve_placeholders`.
-    fn normalize_annotation_type(&self, ty: &Type, module: Option<&str>) -> Type {
+    pub(super) fn normalize_annotation_type(&self, ty: &Type, module: Option<&str>) -> Type {
         self.resolve_type_aliases_scoped(ty, module)
     }
 

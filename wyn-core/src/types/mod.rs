@@ -6,6 +6,7 @@
 //! - The type checker (`checker` submodule)
 
 pub mod checker;
+pub mod patterns;
 pub mod run;
 
 use std::collections::HashMap;
