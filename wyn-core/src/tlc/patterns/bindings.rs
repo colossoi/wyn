@@ -194,6 +194,15 @@ impl<'a> Transformer<'a> {
                     layout.constructor_info.get(name).expect("BUG: constructor name not in sum layout");
                 let payload_types =
                     &variants.iter().find(|(n, _)| n == name).expect("BUG: constructor must exist").1;
+                debug_assert_eq!(
+                    sub_patterns.len(),
+                    payload_types.len(),
+                    "constructor `#{}` pattern arity ({}) must match payload arity ({}); \
+                     the type checker should reject this upstream",
+                    name,
+                    sub_patterns.len(),
+                    payload_types.len()
+                );
 
                 let fresh_name = format!("_w_ctor_{}", self.term_ids.next_id().0);
                 let fresh_sym = self.define(&fresh_name);

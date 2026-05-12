@@ -864,7 +864,14 @@ impl ModuleManager {
         crate::scope::pattern_bound_names(pattern)
     }
 
-    /// Apply type substitutions to a pattern
+    /// Apply type substitutions to a pattern.
+    ///
+    /// Preserves the input pattern's NodeId via `pattern.h.clone()`.
+    /// Callers that duplicate source patterns across elaborated
+    /// instances (e.g. functor instantiations) MUST freshen NodeIds
+    /// first via `clone_pattern_fresh_ids`; calling this directly on a
+    /// source pattern reintroduces the cross-instance NodeId collision
+    /// bug that motivated functor-instance ID freshening.
     fn substitute_in_pattern(&self, pattern: &Pattern, substitutions: &HashMap<String, Type>) -> Pattern {
         let new_kind = match &pattern.kind {
             PatternKind::Typed(inner, ty) => {

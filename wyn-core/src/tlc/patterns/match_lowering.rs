@@ -153,6 +153,15 @@ impl<'a> Transformer<'a> {
 
                 let payload_types =
                     &variants.iter().find(|(n, _)| n == name).expect("BUG: constructor must exist").1;
+                debug_assert_eq!(
+                    sub_patterns.len(),
+                    payload_types.len(),
+                    "constructor `#{}` arity ({}) must match payload arity ({}); \
+                     the type checker should reject this upstream",
+                    name,
+                    sub_patterns.len(),
+                    payload_types.len()
+                );
                 let mut bindings = Vec::new();
                 for (i, sub) in sub_patterns.iter().enumerate() {
                     let payload_ty = Self::lower_type(payload_types[i].clone());

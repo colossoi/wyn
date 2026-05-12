@@ -704,3 +704,30 @@ fn missing_payload_witness_is_wild() {
         other => panic!("expected NonExhaustive #left(_), got {:?}", other),
     }
 }
+
+// ----- Integer-literal canonicalization -----
+
+#[test]
+fn int_literal_with_leading_zero_canonicalizes() {
+    // Two arms `case 01 -> ...` and `case 1 -> ...` denote the same
+    // numeric value; the second must be flagged redundant.
+    let cases = arms(vec![lit_int("01"), lit_int("1"), wild()]);
+    let result = check_match(&i32_ty(), &cases, dummy_span());
+    assert!(
+        matches!(result, Err(CoverageError::Redundant { arm_index: 1, .. })),
+        "leading-zero literal should compare equal to plain literal, got {:?}",
+        result
+    );
+}
+
+#[test]
+fn int_literal_negative_zero_canonicalizes() {
+    // `-0` and `0` denote the same numeric value.
+    let cases = arms(vec![lit_int("-0"), lit_int("0"), wild()]);
+    let result = check_match(&i32_ty(), &cases, dummy_span());
+    assert!(
+        matches!(result, Err(CoverageError::Redundant { arm_index: 1, .. })),
+        "negative-zero literal should compare equal to zero, got {:?}",
+        result
+    );
+}

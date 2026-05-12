@@ -368,3 +368,56 @@ def f(t: #yes | #no) i32 =
         other => panic!("expected App for cond, got {:?}", other),
     }
 }
+
+/// Regression test for the eager-AND lowering of nested constructor
+/// patterns. With `match outer case #pair(#left(_), ...) -> ...`, the
+/// lowering eagerly evaluates the outer tag check AND the inner
+/// payload tag check; on a value whose outer tag mismatches, the
+/// inner projection reads the blank-filled dead slot. Correctness
+/// depends on blank-fill (commits f8131a5/f3d2fc7) guaranteeing dead
+/// payload slots carry well-typed zero values, so an inner test
+/// against a non-zero tag is `false` and the AND structurally yields
+/// `false` — the arm correctly skips and the chain falls through.
+///
+/// This test pins the IR shape end-to-end: the first-arm condition
+/// must be an AND of the outer-tag test and the inner-tag test,
+/// confirming the eager-AND lowering is in place and not being
+/// silently regressed to short-circuit form (which would only paper
+/// over the blank-fill dependency).
+#[test]
+fn nested_ctor_with_outer_mismatch_emits_eager_and_chain() {
+    let program = compile_to_tlc_raw(
+        r#"
+def go(t: #pair(#left(i32) | #right(i32)) | #solo(i32)) i32 =
+  match t
+  case #pair(#left(x))  -> x + 100
+  case #pair(#right(y)) -> y + 200
+  case #solo(z)         -> z + 300
+"#,
+    );
+    let lam_body = match &find_def_body(&program, "go").kind {
+        TermKind::Lambda(l) => &*l.body,
+        other => panic!("expected Lambda, got {:?}", other),
+    };
+    let outer_if = unwrap_match_let(lam_body);
+    assert!(
+        matches!(&outer_if.kind, TermKind::If { .. }),
+        "outer should be If for #pair(#left) test, got {:?}",
+        outer_if.kind
+    );
+    // First-arm cond: AND of outer-tag test and inner-tag test.
+    let first_cond = match &outer_if.kind {
+        TermKind::If { cond, .. } => cond.as_ref(),
+        _ => unreachable!(),
+    };
+    match &first_cond.kind {
+        TermKind::App { func, .. } => {
+            assert!(
+                matches!(&func.kind, TermKind::BinOp(op) if op.op == "&&"),
+                "first-arm cond should be `outer_tag == ... && inner_tag == ...`, got {:?}",
+                func.kind
+            );
+        }
+        other => panic!("expected App for AND cond, got {:?}", other),
+    }
+}

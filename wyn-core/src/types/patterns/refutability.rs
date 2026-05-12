@@ -104,6 +104,18 @@ pub fn is_irrefutable(pat: &ast::Pattern, ty: &Type) -> Result<(), RefutabilityE
                             ),
                         });
                     }
+                    // Arity is the checker's invariant; assert at the
+                    // boundary so a future checker regression surfaces
+                    // here rather than as a silent truncated zip.
+                    debug_assert_eq!(
+                        sub.len(),
+                        payload_tys.len(),
+                        "constructor `#{}` pattern arity ({}) must match payload arity ({}); \
+                         the type checker should reject this upstream",
+                        name,
+                        sub.len(),
+                        payload_tys.len()
+                    );
                     for (s, t) in sub.iter().zip(payload_tys.iter()) {
                         is_irrefutable(s, t)?;
                     }

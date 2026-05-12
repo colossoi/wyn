@@ -327,13 +327,11 @@ impl NameResolution {
 /// user code that shadows a builtin (e.g. `def length = ...`) is
 /// classified as a non-builtin.
 ///
-/// Recurses into user-source `module foo = { ... }` decls (looked up
-/// from the module manager's `user_module_names`) so calls inside
-/// module bodies get classified the same way as top-level user code.
-/// Prelude modules are intentionally skipped — their identifier
-/// resolution still goes through the existing scope/module_schemes
-/// path in the type checker, and walking them changes the inferred
-/// schemes.
+/// Walks all elaborated modules, including prelude modules. This is
+/// safe because functor instantiation freshens NodeIds (via
+/// `clone_expr_fresh_ids` / `clone_pattern_fresh_ids` in
+/// `module_manager::elaborate_decl_signature`), so per-instance bodies
+/// have their own NodeId space and the previous collision risk is gone.
 pub fn build_name_resolution(
     program: &Program,
     module_manager: &ModuleManager,

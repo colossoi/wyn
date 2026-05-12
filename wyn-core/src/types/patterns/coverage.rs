@@ -155,10 +155,22 @@ pub fn lower(pat: &ast::Pattern) -> CovPat {
 
 fn lower_literal(lit: &PatternLiteral) -> CovLit {
     match lit {
-        PatternLiteral::Int(s) => CovLit::Int(s.0.clone()),
+        PatternLiteral::Int(s) => CovLit::Int(canonicalize_int_literal(&s.0)),
         PatternLiteral::Float(v) => CovLit::Float(v.to_bits()),
         PatternLiteral::Bool(b) => CovLit::Bool(*b),
     }
+}
+
+/// Normalize an integer literal's text so two arms whose patterns
+/// denote the same numeric value compare equal in coverage. The lexer
+/// already maps hex / binary / underscored forms to a plain-decimal
+/// string, but doesn't strip leading zeros or normalize `-0` vs `0`,
+/// and a future lexer change could widen the surface forms further.
+/// Parse-and-reformat as i128 for canonical decimal. On parse failure
+/// (out-of-range, surprising form), fall back to the raw text — the
+/// type checker will reject the literal at the boundary anyway.
+fn canonicalize_int_literal(s: &str) -> String {
+    s.parse::<i128>().map(|n| n.to_string()).unwrap_or_else(|_| s.to_string())
 }
 
 /// Maranget's U(M, q): is the query row `q` useful against matrix `M`?
