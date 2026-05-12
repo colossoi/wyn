@@ -1,0 +1,178 @@
+-- "fractal pyramid" — Wyn port of the Shadertoy shader by bradjamesgrant.
+-- Iterated-function-system fractal rendered with volumetric glow
+-- ray-marching: 8-fold IFS folding loop drives the SDF, and 64 steps
+-- of sphere-tracing accumulate palette-colored fog along each ray.
+-- The original GLSL is preserved commented-out below.
+
+open f32
+
+------------------------------------------------------------
+-- Uniforms
+------------------------------------------------------------
+#[uniform(set=1, binding=0)] def iResolution: vec3f32
+#[uniform(set=1, binding=1)] def iTime: f32
+
+------------------------------------------------------------
+-- Full-screen triangle vertex shader
+------------------------------------------------------------
+def verts: [3]vec4f32 =
+  [@[-1.0, -1.0, 0.0, 1.0],
+   @[3.0,  -1.0, 0.0, 1.0],
+   @[-1.0,  3.0, 0.0, 1.0]]
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vertex_id: i32)
+  #[builtin(position)] vec4f32 = verts[vertex_id]
+
+------------------------------------------------------------
+-- palette: mix two colors by scalar d in [0,1]
+------------------------------------------------------------
+def palette(d: f32) vec3f32 =
+  mix(@[0.2, 0.7, 0.9], @[1.0, 0.0, 1.0], d)
+
+------------------------------------------------------------
+-- rotate: rotate a vec2 by angle a
+------------------------------------------------------------
+-- `@[[c, s], [-s, c]]` — outer arrays are SPIR-V columns
+-- (composite_construct takes column-vectors), so this represents
+-- the matrix [[c, -s], [s, c]] — identical to GLSL `mat2(c, s, -s, c)`.
+def rotate(p: vec2f32, a: f32) vec2f32 =
+  let c = cos(a) in
+  let s = sin(a) in
+  p * @[[c, s], [0.0 - s, c]]
+
+-- Helper: subtract 0.5 from each component of a vec2.
+def sub_half(v: vec2f32) vec2f32 = v - @[0.5, 0.5]
+
+------------------------------------------------------------
+-- sdf: 8-fold IFS distance estimator for the fractal pyramid.
+--
+-- Each iteration: rotate xz, rotate xy, fold (abs) xz, subtract 0.5
+-- from xz. Final distance: dot(sign(p), p) / 5.
+------------------------------------------------------------
+def sdf(p_in: vec3f32) f32 =
+  let t = iTime * 0.2 in
+  let p =
+    loop q = p_in for i < 8 do
+      let q1 = q  with .xz = rotate(q.xz,  t) in
+      let q2 = q1 with .xy = rotate(q1.xy, t * 1.89) in
+      let q3 = q2 with .xz = vec.abs(q2.xz) in
+      let q4 = q3 with .xz = sub_half(q3.xz) in
+      q4
+  in
+  dot(vec.sign(p), p) / 5.0
+
+------------------------------------------------------------
+-- rm: volumetric ray-march, up to 64 steps.
+--
+-- Accumulates palette-colored glow along the ray; early-exits when
+-- the SDF sample is < 0.02 (surface hit) or > 100 (escaped).
+-- Returns (r, g, b, alpha) where alpha encodes the final step size.
+------------------------------------------------------------
+def rm(ro: vec3f32, rd: vec3f32) vec4f32 =
+  let (_, _, cr, cg, cb, d_final, _) =
+    loop (i, t, cr, cg, cb, d, stop) = (0, 0.0, 0.0, 0.0, 0.0, 1.0, false)
+    while i < 64 && !stop do
+      let p = ro + rd * t in
+      let d2 = sdf(p) * 0.5 in
+      let hit  = d2 < 0.02 in
+      let miss = d2 > 100.0 in
+      let done = hit || miss in
+      let pal = palette(magnitude(p) * 0.1) in
+      let contrib = 1.0 / (400.0 * d2) in
+      let (cr2, cg2, cb2) =
+        if done then (cr, cg, cb)
+        else (cr + pal.x * contrib, cg + pal.y * contrib, cb + pal.z * contrib)
+      in
+      (i + 1, t + d2, cr2, cg2, cb2, d2, done)
+  in
+  @[cr, cg, cb, 1.0 / (d_final * 100.0)]
+
+------------------------------------------------------------
+-- Fragment shader
+------------------------------------------------------------
+#[fragment]
+entry fragment_main(#[builtin(position)] fragCoord: vec4f32)
+  #[location(0)] vec4f32 =
+  let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
+  let half_res = iResolution.xy * 0.5 in
+  let uv = @[(fc.x - half_res.x) / iResolution.x, (fc.y - half_res.y) / iResolution.x] in
+  let ro0: vec3f32 = @[0.0, 0.0, 0.0 - 50.0] in
+  let ro  = ro0 with .xz = rotate(ro0.xz, iTime) in
+  let cf  = normalize(@[0.0 - ro.x, 0.0 - ro.y, 0.0 - ro.z]) in
+  let cs  = normalize(cross(cf, @[0.0, 1.0, 0.0])) in
+  let cu  = normalize(cross(cf, cs)) in
+  let uuv = ro + cf * 3.0 + cs * uv.x + cu * uv.y in
+  let rd  = normalize(uuv - ro) in
+  rm(ro, rd)
+
+------------------------------------------------------------
+-- Original GLSL (commented out)
+------------------------------------------------------------
+
+-- vec3 palette(float d){
+-- 	return mix(vec3(0.2,0.7,0.9),vec3(1.,0.,1.),d);
+-- }
+--
+-- vec2 rotate(vec2 p,float a){
+-- 	float c = cos(a);
+--     float s = sin(a);
+--     return p*mat2(c,s,-s,c);
+-- }
+--
+-- float map(vec3 p){
+--     for( int i = 0; i<8; ++i){
+--         float t = iTime*0.2;
+--         p.xz =rotate(p.xz,t);
+--         p.xy =rotate(p.xy,t*1.89);
+--         p.xz = abs(p.xz);
+--         p.xz-=.5;
+-- 	}
+-- 	return dot(sign(p),p)/5.;
+-- }
+--
+-- vec4 rm (vec3 ro, vec3 rd){
+--     float t = 0.;
+--     vec3 col = vec3(0.);
+--     float d;
+--     for(float i =0.; i<64.; i++){
+-- 		vec3 p = ro + rd*t;
+--         d = map(p)*.5;
+--         if(d<0.02){
+--             break;
+--         }
+--         if(d>100.){
+--         	break;
+--         }
+--         //col+=vec3(0.6,0.8,0.8)/(400.*(d));
+--         col+=palette(length(p)*.1)/(400.*(d));
+--         t+=d;
+--     }
+--     return vec4(col,1./(d*100.));
+-- }
+-- void mainImage( out vec4 fragColor, in vec2 fragCoord )
+-- {
+--     vec2 uv = (fragCoord-(iResolution.xy/2.))/iResolution.x;
+-- 	vec3 ro = vec3(0.,0.,-50.);
+--     ro.xz = rotate(ro.xz,iTime);
+--     vec3 cf = normalize(-ro);
+--     vec3 cs = normalize(cross(cf,vec3(0.,1.,0.)));
+--     vec3 cu = normalize(cross(cf,cs));
+--
+--     vec3 uuv = ro+cf*3. + uv.x*cs + uv.y*cu;
+--
+--     vec3 rd = normalize(uuv-ro);
+--
+--     vec4 col = rm(ro,rd);
+--
+--
+--     fragColor = col;
+-- }
+--
+-- /** SHADERDATA
+-- {
+-- 	"title": "fractal pyramid",
+-- 	"description": "",
+-- 	"model": "car"
+-- }
+-- */

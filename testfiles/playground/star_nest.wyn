@@ -1,0 +1,212 @@
+-- "Star Nest" by Pablo Roman Andrioli — Wyn port of the Shadertoy shader.
+-- Volumetric star-field rendered by marching through a tiled fractal space,
+-- accumulating colour based on distance and self-similarity at each step.
+-- Original: https://www.shadertoy.com/view/XlfGRj
+-- License: MIT
+-- The original GLSL is preserved commented-out below.
+
+open f32
+
+------------------------------------------------------------
+-- Uniforms
+------------------------------------------------------------
+#[uniform(set=1, binding=0)] def iResolution: vec3f32
+#[uniform(set=1, binding=1)] def iTime: f32
+#[uniform(set=1, binding=5)] def iMouse: vec4f32
+
+------------------------------------------------------------
+-- Constants
+------------------------------------------------------------
+def iterations: i32  = 17
+def formuparam: f32  = 0.53
+def volsteps:   i32  = 20
+def stepsize:   f32  = 0.1
+def zoom:       f32  = 0.800
+def tile:       f32  = 0.850
+def speed:      f32  = 0.010
+def brightness: f32  = 0.0015
+def darkmatter: f32  = 0.300
+def distfading: f32  = 0.730
+def saturation: f32  = 0.850
+
+------------------------------------------------------------
+-- Full-screen triangle vertex shader
+------------------------------------------------------------
+def verts: [3]vec4f32 =
+  [@[-1.0, -1.0, 0.0, 1.0],
+   @[3.0, -1.0, 0.0, 1.0],
+   @[-1.0, 3.0, 0.0, 1.0]]
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 = verts[vertex_id]
+
+------------------------------------------------------------
+-- 2×2 rotation matrix.
+-- `@[[c, s], [-s, c]]` — outer arrays become SPIR-V columns at
+-- emission, so this represents the matrix [[c, -s], [s, c]] —
+-- identical to GLSL `mat2(c, s, -s, c)`.
+------------------------------------------------------------
+def rot2(a: f32) mat2f32 =
+  let c = cos(a) in
+  let s = sin(a) in
+  @[[c, s], [0.0 - s, c]]
+
+------------------------------------------------------------
+-- Inner fractal kernel: run `iterations` steps of the
+-- "magic formula" accumulation starting from point p0.
+-- Returns (final_p, accumulated_a).
+------------------------------------------------------------
+def fractal_iter(p0: vec3f32) (vec3f32, f32) =
+  let (p, a, _) =
+    loop (p, a, pa) = (p0, 0.0, 0.0) for i < iterations do
+      -- the magic formula
+      let len2 = dot(p, p) in
+      let p2   = vec.abs(p) / len2 - formuparam in
+      let l    = magnitude(p2) in
+      let a2   = a + abs(l - pa) in
+      (p2, a2, l)
+  in
+  (p, a)
+
+------------------------------------------------------------
+-- Fragment shader
+------------------------------------------------------------
+#[fragment]
+entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
+  -- Flip Y for Vulkan NDC
+  let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
+
+  -- UV and ray direction
+  let uv_raw = fc / iResolution.xy - @[0.5, 0.5] in
+  let uv     = @[uv_raw.x, uv_raw.y * iResolution.y / iResolution.x] in
+  let dir0   = @[uv.x * zoom, uv.y * zoom, 1.0] in
+
+  -- Time
+  let time = iTime * speed + 0.25 in
+
+  -- Mouse-controlled rotations
+  let a1   = 0.5 + iMouse.x / iResolution.x * 2.0 in
+  let a2   = 0.8 + iMouse.y / iResolution.y * 2.0 in
+  let rot1 = rot2(a1) in
+  let rot2m = rot2(a2) in
+
+  -- Apply rotations to direction: dir.xz *= rot1, dir.xy *= rot2
+  let dir1 = dir0 with .xz *= rot1 in
+  let dir  = dir1 with .xy *= rot2m in
+
+  -- Ray origin
+  let from0 = @[1.0, 0.5, 0.5] in
+  let from1 = from0 + @[time * 2.0, time, 0.0 - 2.0] in
+  let from2 = from1 with .xz *= rot1 in
+  let from  = from2 with .xy *= rot2m in
+
+  -- Volumetric ray-march: accumulate colour over volsteps steps.
+  -- State: (step_idx, s, fade, v)
+  -- NOTE: the GLSL uses early-fade gating (r > 6) for dark matter;
+  -- ported as a conditional on the step index.
+  let tile2    = tile * 2.0 in
+  let tile_v   = @[tile, tile, tile] in
+  let tile2_v  = @[tile2, tile2, tile2] in
+
+  let (_, _, v_acc) =
+    loop (s, fade, v) = (0.1, 1.0, @[0.0, 0.0, 0.0]) for r < volsteps do
+      -- Current sample position with tiling fold
+      let p_raw  = from + s * dir * 0.5 in
+      let p_fold = vec.abs(tile_v - vec.mod(p_raw, tile2_v)) in
+
+      -- Fractal accumulation for this sample
+      let (_, a) = fractal_iter(p_fold) in
+
+      -- Dark matter amount
+      let dm = max(0.0, darkmatter - a * a * 0.001) in
+
+      -- Contrast boost
+      let a3 = a * a * a in
+
+      -- Apply dark matter fading only after step 6
+      let fade2 = if r > 6 then fade * (1.0 - dm) else fade in
+
+      -- Accumulate: base fade glow + distance-coloured emission
+      let emit = @[s, s * s, s * s * s * s] * a3 * brightness * fade2 in
+      let v2   = v + @[fade2, fade2, fade2] + emit in
+
+      -- Distance fading for next step
+      let fade3 = fade2 * distfading in
+      let s2    = s + stepsize in
+
+      (s2, fade3, v2)
+  in
+
+  -- Colour saturation adjust: mix(grey, colour, saturation)
+  let grey = magnitude(v_acc) in
+  let color = mix(@[grey, grey, grey], v_acc, saturation) in
+  @[color.x * 0.01, color.y * 0.01, color.z * 0.01, 1.0]
+
+------------------------------------------------------------
+-- Original GLSL (commented out below)
+------------------------------------------------------------
+
+-- // Star Nest by Pablo Roman Andrioli
+-- // License: MIT
+--
+-- #define iterations 17
+-- #define formuparam 0.53
+--
+-- #define volsteps 20
+-- #define stepsize 0.1
+--
+-- #define zoom   0.800
+-- #define tile   0.850
+-- #define speed  0.010
+--
+-- #define brightness 0.0015
+-- #define darkmatter 0.300
+-- #define distfading 0.730
+-- #define saturation 0.850
+--
+--
+-- void mainImage( out vec4 fragColor, in vec2 fragCoord )
+-- {
+-- 	//get coords and direction
+-- 	vec2 uv=fragCoord.xy/iResolution.xy-.5;
+-- 	uv.y*=iResolution.y/iResolution.x;
+-- 	vec3 dir=vec3(uv*zoom,1.);
+-- 	float time=iTime*speed+.25;
+--
+-- 	//mouse rotation
+-- 	float a1=.5+iMouse.x/iResolution.x*2.;
+-- 	float a2=.8+iMouse.y/iResolution.y*2.;
+-- 	mat2 rot1=mat2(cos(a1),sin(a1),-sin(a1),cos(a1));
+-- 	mat2 rot2=mat2(cos(a2),sin(a2),-sin(a2),cos(a2));
+-- 	dir.xz*=rot1;
+-- 	dir.xy*=rot2;
+-- 	vec3 from=vec3(1.,.5,0.5);
+-- 	from+=vec3(time*2.,time,-2.);
+-- 	from.xz*=rot1;
+-- 	from.xy*=rot2;
+--
+-- 	//volumetric rendering
+-- 	float s=0.1,fade=1.;
+-- 	vec3 v=vec3(0.);
+-- 	for (int r=0; r<volsteps; r++) {
+-- 		vec3 p=from+s*dir*.5;
+-- 		p = abs(vec3(tile)-mod(p,vec3(tile*2.))); // tiling fold
+-- 		float pa,a=pa=0.;
+-- 		for (int i=0; i<iterations; i++) {
+-- 			p=abs(p)/dot(p,p)-formuparam; // the magic formula
+-- 			a+=abs(length(p)-pa); // absolute sum of average change
+-- 			pa=length(p);
+-- 		}
+-- 		float dm=max(0.,darkmatter-a*a*.001); //dark matter
+-- 		a*=a*a; // add contrast
+-- 		if (r>6) fade*=1.-dm; // dark matter, don't render near
+-- 		//v+=vec3(dm,dm*.5,0.);
+-- 		v+=fade;
+-- 		v+=vec3(s,s*s,s*s*s*s)*a*brightness*fade; // coloring based on distance
+-- 		fade*=distfading; // distance fading
+-- 		s+=stepsize;
+-- 	}
+-- 	v=mix(vec3(length(v)),v,saturation); //color adjust
+-- 	fragColor = vec4(v*.01,1.);
+--
+-- }

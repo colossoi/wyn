@@ -1,0 +1,618 @@
+-- "Full Spectrum Cyber" by Shane — Wyn port of the Shadertoy shader.
+-- Raymarched cyber-tunnel with hexagonal walls, a rotating icosphere
+-- (simplified to plain unit sphere), and glowing sphere-light accumulation.
+-- Two-pass march: primary sphere-trace + reflection bounce; the
+-- reflection bounce drives the bright tunnel-edge highlights via the
+-- two step(.3,…)*step(.9,fract(…)) modulations.
+-- NOTE: The icosahedron sphere-line pattern from the original has been
+-- simplified to a plain unit sphere — the icosahedronVerts + sphereLineAB
+-- network requires variable-length arrays and `out` params not available
+-- in Wyn at this complexity.
+-- NOTE: fparam is 0 throughout the original (never written), so it is
+-- omitted here.
+-- The original GLSL is preserved commented-out below.
+
+open f32
+
+#[uniform(set=1, binding=0)] def iResolution: vec3f32
+#[uniform(set=1, binding=1)] def iTime: f32
+
+------------------------------------------------------------
+-- Full-screen triangle
+------------------------------------------------------------
+def verts: [3]vec4f32 =
+  [@[-1.0, -1.0, 0.0, 1.0],
+   @[3.0, -1.0, 0.0, 1.0],
+   @[-1.0, 3.0, 0.0, 1.0]]
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 = verts[vertex_id]
+
+------------------------------------------------------------
+-- rot2D: 2×2 rotation matrix
+------------------------------------------------------------
+-- `@[[c, s], [-s, c]]` — the outer arrays are SPIR-V columns
+-- (composite_construct takes column-vectors), so this represents
+-- the matrix [[c, -s], [s, c]] — identical to GLSL `mat2(c, s, -s, c)`.
+def rot2D(a: f32) mat2f32 =
+  let s = sin(a) in
+  let c = cos(a) in
+  @[[c, s], [0.0 - s, c]]
+
+------------------------------------------------------------
+-- path: camera fly-through spline
+------------------------------------------------------------
+def path(t: f32) vec3f32 =
+  @[sin(t * 0.3 + cos(t * 0.2) * 0.5) * 4.0,
+    cos(t * 0.2) * 3.0,
+    t]
+
+------------------------------------------------------------
+-- hexagon SDF: signed distance to a regular hexagon of radius r
+------------------------------------------------------------
+def hexagonSdf(p: vec2f32, r: f32) f32 =
+  let kx = 0.0 - 0.866025404 in
+  let ky =  0.5 in
+  let kz =  0.577350269 in
+  let pa = @[abs(p.x), abs(p.y)] in
+  let dt = dot(@[kx, ky], pa) in
+  let s  = min(dt, 0.0) in
+  let p2 = @[pa.x - 2.0 * s * kx,
+             pa.y - 2.0 * s * ky] in
+  let p3 = @[p2.x - clamp(p2.x, 0.0 - kz * r, kz * r),
+             p2.y - r] in
+  magnitude(p3) * (if p3.y >= 0.0 then 1.0 else 0.0 - 1.0)
+
+------------------------------------------------------------
+-- hex: hex-grid pattern value in [0,1] (wall tile mask)
+------------------------------------------------------------
+def hex(p: vec2f32) f32 =
+  let px = p.x * 0.57735 * 2.0 in
+  let py = p.y + (mod(floor(px), 2.0)) * 0.5 in
+  let q  = @[abs(mod(px, 1.0) - 0.5),
+             abs(mod(py, 1.0) - 0.5)] in
+  abs(max(q.x * 1.5 + q.y, q.y * 2.0) - 1.0)
+
+------------------------------------------------------------
+-- lookat: build a camera basis mat3 from a forward direction.
+-- Wyn mat3 is row-major so to rotate a column vector v we use
+-- v * M (row-vector convention).
+-- GLSL mat3(rt, cross(rt,dir), dir) with column-major layout
+-- corresponds to rows [rt, cross(rt,dir), dir] here.
+------------------------------------------------------------
+def lookat(dir: vec3f32) mat3f32 =
+  let up = @[0.0, 1.0, 0.0] in
+  let rt = normalize(cross(dir, up)) in
+  let up2 = cross(rt, dir) in
+  -- Row-major: row0=rt, row1=up2, row2=dir
+  @[[rt.x,  rt.y,  rt.z ],
+    [up2.x, up2.y, up2.z],
+    [dir.x, dir.y, dir.z]]
+
+------------------------------------------------------------
+-- erot: rotate p around unit axis ax by angle ro
+-- (Blackle / https://suricrasia.online/demoscene/functions/)
+------------------------------------------------------------
+def erot(p: vec3f32, ax: vec3f32, ro: f32) vec3f32 =
+  let c = cos(ro) in
+  let s = sin(ro) in
+  ax * dot(ax, p) * (1.0 - c) + p * c + s * cross(ax, p)
+
+------------------------------------------------------------
+-- icosahedron_verts: closest icosahedral face center and three face
+-- verts, given a point `p`. Mirror of the GLSL `icosahedronVerts`
+-- out-param function (TdHooper / Shane). Returns (face, a, b, c).
+------------------------------------------------------------
+def icosahedron_verts(p: vec3f32) (vec3f32, vec3f32, vec3f32, vec3f32) =
+  let phi = (1.0 + sqrt(5.0)) / 2.0 in
+  let v0  = @[phi, 1.0, 0.0] in
+  let ap  = vec.abs(p) in
+  -- Step through cyclic permutations of v0 to pick the nearest icosahedron vertex.
+  let v_yzx = @[v0.y, v0.z, v0.x] in
+  let v1    = if dot(ap, v_yzx - v0) > 0.0 then v_yzx else v0 in
+  let v_zxy = @[v0.z, v0.x, v0.y] in
+  let v2    = if dot(ap, v_zxy - v1) > 0.0 then v_zxy else v1 in
+  let a     = normalize(v2) * vec.sign(p) in
+  -- Dodecahedral vertices align to icosahedron face centres.
+  let dv0   = @[v0.x, v0.x, v0.x] in
+  let dvn   = @[v0.z, v0.y, v0.x + v0.y] in
+  let f1    = if dot(ap, dvn - dv0)                       > 0.0 then dvn                       else dv0 in
+  let dvn_yzx = @[dvn.y, dvn.z, dvn.x] in
+  let f2    = if dot(ap, dvn_yzx - f1)                    > 0.0 then dvn_yzx                   else f1  in
+  let dvn_zxy = @[dvn.z, dvn.x, dvn.y] in
+  let f3    = if dot(ap, dvn_zxy - f2)                    > 0.0 then dvn_zxy                   else f2  in
+  let face  = normalize(f3) * vec.sign(p) in
+  let r     = 2.0 * pi / 3.0 in
+  let b     = erot(a, face, 0.0 - r) in
+  let c     = erot(a, face, r) in
+  (face, a, b, c)
+
+------------------------------------------------------------
+-- sphere_line_ab: signed distance from p (unit sphere) to the great
+-- circle arc between unit vectors a and b. No end caps.
+------------------------------------------------------------
+def sphere_line_ab(p: vec3f32, a: vec3f32, b: vec3f32) f32 =
+  dot(normalize(p), cross(a, b)) / magnitude(a - b)
+
+------------------------------------------------------------
+-- de: distance estimator.
+-- Returns (dist, tcol, bcol, hitbol) where:
+--   dist   = scene SDF value
+--   tcol   = tunnel colour mask
+--   bcol   = sphere border colour mask
+--   hitbol = 1 if nearest object is the sphere, 0 if tunnel
+------------------------------------------------------------
+def de(p: vec3f32, hpos: vec3f32, point_dir: vec3f32) (f32, f32, f32, f32) =
+  -- Tunnel: warp position along camera path
+  let ppath  = path(p.z) in
+  let pt    = @[p.x - ppath.x, p.y - ppath.y, p.z] in
+  let h_raw = abs(hexagonSdf(pt.xy, 3.0)) in
+  let hexpos = hex(pt.yz) in
+  let tcol   = smoothstep(0.0, 0.15, hexpos) in
+  let h      = h_raw - tcol * 0.1 in
+
+  -- Sphere: transform into its local frame
+  let pp0  = p - hpos in
+  let la   = lookat(point_dir) in
+  -- apply lookat: pp0 is treated as a row-vector, multiply by mat3
+  let pp1  = pp0 * la in
+  -- GLSL: pp.y -= abs(sin(iTime))*3. + (fparam-(2.-fparam))
+  -- With fparam = 0 → pp.y -= 3*|sin(iTime)| - 2, i.e. + 2 after the
+  -- subtraction. Keeps the sphere centred inside the tunnel rather
+  -- than 2 units below it (which clips through walls).
+  let pp2  = pp1 with .y = pp1.y - abs(sin(iTime)) * 3.0 + 2.0 in
+  let rot_yz = rot2D(0.0 - iTime) in
+  let pp   = pp2 with .yz *= rot_yz in
+  let bola_base = magnitude(pp) - 1.0 in
+
+  -- Icosahedron sphere-line pattern. When near the sphere, draw a
+  -- hexagonal great-circle network on its surface; the resulting
+  -- `bcol_lines` mask both colors the sphere (bcol return) and
+  -- thickens the SDF (+ bc*0.1) so the lines stand proud of the
+  -- unit-sphere base.
+  let (bola, bcol_lines) =
+    if magnitude(pp) < 1.5 then
+      let (_face, va, vb, vc) = icosahedron_verts(pp) in
+      -- Six midpoints around the closest face's triangle (two per edge).
+      let m0 = mix(va, vb, 1.0 / 3.0) in
+      let m1 = mix(va, vb, 2.0 / 3.0) in
+      let m2 = mix(vb, vc, 1.0 / 3.0) in
+      let m3 = mix(vb, vc, 2.0 / 3.0) in
+      let m4 = mix(vc, va, 1.0 / 3.0) in
+      let m5 = mix(vc, va, 2.0 / 3.0) in
+      let poly0 = 0.0 - 1.0e5 in
+      let poly1 = max(poly0, sphere_line_ab(pp, m0, m1)) in
+      let poly2 = max(poly1, sphere_line_ab(pp, m1, m2)) in
+      let poly3 = max(poly2, sphere_line_ab(pp, m2, m3)) in
+      let poly4 = max(poly3, sphere_line_ab(pp, m3, m4)) in
+      let poly5 = max(poly4, sphere_line_ab(pp, m4, m5)) in
+      let poly  = max(poly5, sphere_line_ab(pp, m5, m0)) in
+      let bc    = smoothstep(0.0, 0.05, abs(poly)) in
+      (bola_base + bc * 0.1, bc)
+    else
+      (bola_base, 1.0)
+  in
+
+  -- Combine
+  let d = min(h, bola) in
+  let on_sphere = d == bola in
+  let (hit_sphere, tcol2) = if on_sphere then (1.0, 1.0) else (0.0, tcol) in
+  (d * 0.5, tcol2, bcol_lines, hit_sphere)
+
+------------------------------------------------------------
+-- normal: central-difference surface normal
+------------------------------------------------------------
+def normal(p: vec3f32, hpos: vec3f32, point_dir: vec3f32) vec3f32 =
+  let eps = 0.005 in
+  let (d0, _, _, _) = de(p,                                     hpos, point_dir) in
+  let (dx, _, _, _) = de(@[p.x + eps, p.y,       p.z      ], hpos, point_dir) in
+  let (dy, _, _, _) = de(@[p.x,       p.y + eps, p.z      ], hpos, point_dir) in
+  let (dz, _, _, _) = de(@[p.x,       p.y,       p.z + eps], hpos, point_dir) in
+  normalize(@[dx - d0, dy - d0, dz - d0])
+
+------------------------------------------------------------
+-- march: primary sphere-trace + reflection bounce.
+-- Glow `g` is accumulated across both marches (primary gates on
+-- hitbol; reflection accumulates unconditionally — matches GLSL).
+-- Reflection contribution is masked by a 10-iter IFS fractal value
+-- `m` over the primary-hit tunnel-local point and modulated by two
+-- edge patterns driven by `hp` and `hexpos`.
+------------------------------------------------------------
+def march(from: vec3f32, dir: vec3f32, hpos: vec3f32, point_dir: vec3f32) vec3f32 =
+  let odir = dir in
+  let nd = normalize(point_dir) in
+  let nd_abs = @[abs(nd.x), abs(nd.y), abs(nd.z)] in
+
+  -- Primary march: terminate on hit (d < 0.001) or escape (td >= 200).
+  let (p_hit, d_hit, _, g1, _) =
+    loop (p, d, td, g, done) = (from, 1.0, 0.0, @[0.0, 0.0, 0.0], false)
+    while td < 200.0 && !done do
+      let (d2, _tc, _bc, hitbol) = de(p, hpos, point_dir) in
+      if d2 < 0.001
+      then (p, d2, td, g, true)
+      else
+        let glow = nd_abs * (0.1 / (0.1 + d2) * hitbol) in
+        (p + dir * d2, d2, td + d2, g + glow, false)
+  in
+
+  -- Step back slightly before normal sampling — matches GLSL p -= dir*.01.
+  let p_back = p_hit - dir * 0.01 in
+  let n = normal(p_back, hpos, point_dir) in
+  let (_, tcol, bcol, hitbol_hit) = de(p_back, hpos, point_dir) in
+
+  -- Tunnel-local point at the primary hit, and hexpos/hp derived from it
+  -- (used by the reflection-pass edge patterns).
+  let ppath_hit = path(p_back.z) in
+  let pr = @[p_back.x - ppath_hit.x, p_back.y - ppath_hit.y, p_back.z] in
+  let hexpos = hex(pr.yz) in
+  let hp = hexpos * (1.0 - hitbol_hit) in
+
+  -- Primary surface diffuse.
+  let col0 =
+    if d_hit < 0.001
+    then
+      let diff = pow(max(0.0, dot(0.0 - dir, n)), 2.0) in
+      @[diff, diff, diff] * @[0.6, 0.7, 0.8] * tcol * bcol
+    else
+      @[0.0, 0.0, 0.0]
+  in
+
+  -- Reflection march. Glow accumulates without hitbol gating.
+  let dir_refl = reflect(dir, n) in
+  let (p_refl, d_refl, _, g2, _) =
+    loop (p, d, td, g, done) = (p_back, 1.0, 0.0, g1, false)
+    while td < 200.0 && !done do
+      let (d2, _tc, _bc, _hb) = de(p, hpos, point_dir) in
+      if d2 < 0.001
+      then (p, d2, td, g, true)
+      else
+        let glow = nd_abs * (0.1 / (0.1 + d2)) in
+        (p + dir_refl * d2, d2, td + d2, g + glow, false)
+  in
+  let zz = p_refl.z in
+
+  -- Reflection contribution: fractal-IFS-masked refcol blend + edge highlights.
+  let col1 =
+    if d_refl < 0.001
+    then
+      let diff_r = pow(max(0.0, dot(0.0 - odir, n)), 2.0) in
+      let refcol = @[diff_r, diff_r, diff_r] * @[0.6, 0.7, 0.8] * tcol * bcol in
+      -- 10-iter IFS fractal mask over the primary-hit tunnel-local point.
+      let ifs_start = vec.abs(@[0.5, 0.5, 0.5] - vec.fract(pr * 0.1)) in
+      let (_, m_final) =
+        loop (q, m) = (ifs_start, 100.0) for i < 10 do
+          let q_next = vec.abs(q) / dot(q, q) - @[0.8, 0.8, 0.8] in
+          (q_next, min(m, magnitude(q_next)))
+      in
+      let mixed = mix(col0, refcol, m_final) - @[m_final * 0.3, m_final * 0.3, m_final * 0.3] in
+      -- step(0.3, hp) * step(0.9, fract(...)) * 0.7 — primary-tunnel edge pattern
+      let edge1 =
+        if hp >= 0.3 && fract(pr.z * 0.05 + iTime * 0.5 + hp * 0.1) >= 0.9
+        then 0.7 else 0.0 in
+      -- step(0.3, hexpos) * step(0.9, fract(...)) * 0.3 — reflection-tunnel edge pattern
+      let edge2 =
+        if hexpos >= 0.3 && fract(zz * 0.05 + iTime + hexpos * 0.1) >= 0.9
+        then 0.3 else 0.0 in
+      let edge = edge1 + edge2 in
+      mixed + @[edge, edge, edge]
+    else
+      col0
+  in
+
+  -- Add glow + rb channel twist (uses the original ray direction).
+  let col_glow = col1 + g2 * 0.03 in
+  let rot_rb = rot2D(odir.y * 0.5) in
+  let rb2 = @[col_glow.x, col_glow.z] * rot_rb in
+  @[rb2.x, col_glow.y, rb2.y]
+
+------------------------------------------------------------
+-- Fragment shader
+------------------------------------------------------------
+#[fragment]
+entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
+  -- Flip Y for Vulkan conventions
+  let coord = @[fragCoord.x, iResolution.y - fragCoord.y] in
+
+  -- UV in [-0.5, 0.5] corrected for aspect ratio
+  let uv_raw = coord / iResolution.xy - @[0.5, 0.5] in
+  let uv = @[uv_raw.x * (iResolution.x / iResolution.y), uv_raw.y] in
+
+  let t    = iTime * 2.0 in
+
+  -- Camera position: follow path, optionally detach if iTime cycles
+  let detach = mod(iTime - 10.0, 20.0) > 10.0 in
+  let from_base = path(t) in
+  let t_freeze = floor(t / 20.0) * 20.0 + 10.0 in
+  let from_freeze = path(t_freeze) in
+  let from = if detach
+             then @[from_freeze.x + 2.0, from_freeze.y, from_freeze.z]
+             else from_base in
+
+  let hpos  = path(t + 3.0) in
+  let adv   = path(t + 2.0) in
+
+  let dd    = normalize(adv - from) in
+
+  -- Point toward next-look target with small time-varying spin
+  let point_raw = normalize(adv - hpos) in
+  let rot_xz   = rot2D(sin(iTime) * 0.2) in
+  let point_xz2 = @[point_raw.x, point_raw.z] * rot_xz in
+  let point_dir  = @[point_xz2.x, point_raw.y, point_xz2.y] in
+
+  -- Build ray direction through lookat camera
+  let dir_local = normalize(@[uv.x, uv.y, 0.7]) in
+  let cam_mat   = lookat(dd) in
+  let dir       = dir_local * cam_mat in
+
+  -- March and apply warm tint
+  let col_raw = march(from, dir, hpos, point_dir) in
+  let col     = col_raw * @[1.0, 0.9, 0.8] in
+  @[col.x, col.y, col.z, 1.0]
+
+------------------------------------------------------------
+-- Original GLSL (commented out below)
+------------------------------------------------------------
+-- // comments below are by Shane, thanks!
+--
+-- int hexid;
+-- vec3 hpos, point, pt;
+-- float tcol, bcol, hitbol, hexpos, fparam=0.;
+--
+-- mat2 rot(float a) {
+--     float s=sin(a),c=cos(a);
+--     return mat2(c,s,-s,c);
+-- }
+--
+-- vec3 path(float t) {
+--     return vec3(sin(t*.3+cos(t*.2)*.5)*4.,cos(t*.2)*3.,t);
+-- }
+--
+-- float hexagon( in vec2 p, in float r )
+-- {
+--     const vec3 k = vec3(-0.866025404,0.5,0.577350269);
+--     p = abs(p);
+--     p -= 2.0*min(dot(k.xy,p),0.0)*k.xy;
+--     p -= vec2(clamp(p.x, -k.z*r, k.z*r), r);
+--     return length(p)*sign(p.y);
+-- }
+--
+-- float hex(vec2 p) {
+--     p.x *= 0.57735*2.0;
+-- 	p.y+=mod(floor(p.x),2.0)*0.5;
+-- 	p=abs((mod(p,1.0)-0.5));
+-- 	return abs(max(p.x*1.5 + p.y, p.y*2.0) - 1.0);
+-- }
+--
+-- mat3 lookat(vec3 dir) {
+--     vec3 up=vec3(0.,1.,0.);
+--     vec3 rt=normalize(cross(dir,up));
+--     return mat3(rt, cross(rt,dir), dir);
+-- }
+--
+-- float hash12(vec2 p)
+-- {
+-- 	p*=1000.;
+-- 	vec3 p3  = fract(vec3(p.xyx) * .1031);
+--     p3 += dot(p3, p3.yzx + 33.33);
+--     return fract((p3.x + p3.y) * p3.z);
+-- }
+--
+-- /////////////////
+-- /*
+-- // Renders a line between points A and B on a sphere. Very handy.
+-- // I have a faster function without caps, but this will do.
+-- float sphereLineCapAB2(vec3 p, vec3 a, vec3 b, float rad){
+--
+--
+--      p /= rad; // Normalize p.
+--
+--      float ln = dot(p, cross(a, b))/length(a - b);
+--
+--      vec3 perpA = a + cross(b - a, a);
+--      vec3 perpB = b + cross(a - b, b);
+--      float endA = dot(p, cross(perpA, a))/length(perpA - a);
+--      float endB = dot(p, cross(perpB, b))/length(perpB - b);
+--
+--      return sign(ln)*max(max(abs(ln), endA), endB);
+--
+-- }
+-- */
+--
+-- // Renders a line between points A and B on a sphere with no capping.
+-- float sphereLineAB(vec3 p, vec3 a, vec3 b, float rad){
+--
+--      p = normalize(p); // Normalize p. // Set radius: p /= rad;
+--      return dot(p, cross(a, b))/length(a - b);
+--
+-- }
+--
+--
+-- // Rotate on axis.
+-- // Blackle https://suricrasia.online/demoscene/functions/
+-- // Point to rotate, point to rotate around, and rotation angle.
+-- vec3 erot(vec3 p, vec3 ax, float ro) {
+--   return mix(dot(ax, p)*ax, p, cos(ro)) + sin(ro)*cross(ax, p);
+-- }
+--
+-- #define PI 3.14159265359
+-- #define PHI (1. + sqrt(5.))/2.
+-- // Closest icosahedron face center, and face verts. Just a slight rewriting
+-- // of one of TdHooper's function -- Actually, he was kind enough to write this
+-- // one for me. Obviously, it's more complicated than selecting cube faces, but
+-- // it involves the same process, which is stepping on either side of planes.
+-- void icosahedronVerts(in vec3 p, out vec3 face, out vec3 a, out vec3 b, out vec3 c) {
+--
+--     // Icosaheral Vertices.
+--     vec3 V = vec3(PHI, 1,  0);
+--     vec3 ap = abs(p), v = V;
+--     if (dot(ap, V.yzx - v) > 0.) v = V.yzx;
+--     if (dot(ap, V.zxy - v) > 0.) v = V.zxy;
+--     a = normalize(v)*sign(p);
+--
+--     // Dodecahedron vertices. Icosahedrons and dodecahedrons are duals, so
+--     // the dodecahedral vertices align to the center of the icosahedron cells,
+--     // which is pretty handy, since we need the cell center. :)
+--     v = V.xxx;
+--     V = vec3(V.zy, V.x + V.y);
+--     if (dot(ap, V - v) > 0.) v = V;
+--     if (dot(ap, V.yzx - v) > 0.) v = V.yzx;
+--     if (dot(ap, V.zxy - v) > 0.) v = V.zxy;
+--     face = normalize(v)*sign(p);
+--
+--     float r = PI*2./3.;
+--
+--     // You can skip this if you don't care about the 2nd vert
+--     // always being the 2nd closest
+--     //float side = boolSign(dot(p, cross(a, face))); r *= side;
+--
+--     // Rotating the icosahedron vertex around the cell center by TAU/3 will
+--     // give you one of the other vertices, and rotating the other way produces
+--     // the other. Obvious... once someone provides the answer. :D
+--     //
+--     // Point to rotate, point to rotate around, and rotation angle.
+--     b = erot(a, face, -r);
+--     c = erot(a, face, r);
+--
+--
+-- }
+-- //////////////////////
+-- float de(vec3 p) {
+--     pt=vec3(p.xy-path(p.z).xy,p.z);
+--     float h=abs(hexagon(pt.xy,3.+fparam));
+--     hexpos=hex(pt.yz);
+--     tcol=smoothstep(.0,.15,hexpos);
+--     h-=tcol*.1;
+--     vec3 pp=p-hpos;
+--     pp=lookat(point)*pp;
+--     pp.y-=abs(sin(iTime))*3.+(fparam-(2.-fparam));
+--     pp.yz*=rot(-iTime);
+--
+--     float bola=length(pp)-1.;
+--
+--     // This is a hack to gain some extra speed. The idea being that
+--     // we shouldn't attempt to map the sphere, if we're not close
+--     // enough to it. I don't quite trust it, but it seems to work.
+--     if(length(pp)<1.5){
+--
+--         ////////////////////
+--         // Icosahedron face and vertices.
+--         vec3 face;
+--         vec3[3] v;
+--         icosahedronVerts(pp, face, v[0], v[1], v[2]);
+--         float rad = 1.; // Sphere radius.
+--
+--         // Two points on either side of each triangle edge midpoint. There
+--         // are six in all. Connecting all six lines will form a hexagon in
+--         // the middle of the icosahedral triangle.
+--         //
+--         // I made this up on the spot, so there are probably better ways
+--         // to do it. However, I'm not aware of space folding techniques
+--         // that can achieve this pattern. Someone like TdHooper, knighty,
+--         // MLA, or Djinn Kahn might, however.
+--         vec3[6] mid;
+--         for(int i = 0; i<3; i++){
+--             mid[i*2] = mix(v[i], v[(i + 1)%3], 1./3.);
+--             mid[i*2 + 1] = mix(v[i], v[(i + 1)%3], 2./3.);
+--         }
+--         // Constructing a hexagon in the triangle face center.
+--         float poly = -1e5;
+--         for(int i = 0; i<6; i++){
+--            poly = max(poly, sphereLineAB(pp, mid[i], mid[(i + 1)%6], rad));
+--
+--         }
+--         // Taking the absolute will fill in the outside. This saves rendering
+--         // more polygons.
+--         bcol = smoothstep(0., .05, abs(poly));
+--         bola += bcol*.1;
+--
+--     }
+--     /////////////////
+--     vec3 pr=p;
+--     pr.z=mod(p.z,6.)-3.;
+--     float d=min(h,bola);
+--     if (d==bola) {
+--         tcol=1.;
+--         hitbol=1.;
+--     }
+--     else {
+--         hitbol=0.;
+--         bcol=1.;
+--     }
+--     return d*.5;
+-- }
+--
+-- vec3 normal(vec3 p) {
+--     vec2 e=vec2(0.,.005);
+--     return normalize(vec3(de(p+e.yxx),de(p+e.xyx),de(p+e.xxy))-de(p));
+-- }
+--
+-- vec3 march(vec3 from, vec3 dir) {
+--     vec3 odir=dir;
+--     vec3 p=from,col=vec3(0.);
+--     float d,td=0.;
+--     vec3 g=vec3(0.);
+--     for (int i=0; i<200; i++) {
+--         d=de(p);
+--         if (d<.001||td>200.) break;
+--         p+=dir*d;
+--         td+=d;
+--         g+=.1/(.1+d)*hitbol*abs(normalize(point));
+--     }
+--     float hp=hexpos*(1.-hitbol);
+--     p-=dir*.01;
+--     vec3 n=normal(p);
+--     if (d<.001) {
+--         col=pow(max(0.,dot(-dir,n)),2.)*vec3(.6,.7,.8)*tcol*bcol;
+--     }
+--     col+=float(hexid);
+--     vec3 pr=pt;
+--     dir=reflect(dir,n);
+--     td=0.;
+--     for (int i=0; i<200; i++) {
+--         d=de(p);
+--         if (d<.001||td>200.) break;
+--         p+=dir*d;
+--         td+=d;
+--         g+=.1/(.1+d)*abs(normalize(point));
+--     }
+--     float zz=p.z;
+--     if (d<.001) {
+--         vec3 refcol=pow(max(0.,dot(-odir,n)),2.)*vec3(.6,.7,.8)*tcol*bcol;
+--         p=pr;
+--         p=abs(.5-fract(p*.1));
+--         float m=100.;
+--         for (int i=0; i<10; i++) {
+--             p=abs(p)/dot(p,p)-.8;
+--             m=min(m,length(p));
+--         }
+--         col=mix(col,refcol,m)-m*.3;
+--         col+=step(.3,hp)*step(.9,fract(pr.z*.05+iTime*.5+hp*.1))*.7;
+--         col+=step(.3,hexpos)*step(.9,fract(zz*.05+iTime+hexpos*.1))*.3;
+--     }
+--     col+=g*.03;
+-- 	col.rb*=rot(odir.y*.5);
+-- 	return col;
+-- }
+--
+--
+-- void mainImage( out vec4 fragColor, in vec2 fragCoord )
+-- {
+--     vec2 uv = fragCoord/iResolution.xy-.5;
+--     uv.x*=iResolution.x/iResolution.y;
+--     float t=iTime*2.;
+--     vec3 from=path(t);
+--     if (mod(iTime-10.,20.)>10.) {
+--         from=path(floor(t/20.)*20.+10.);
+--         from.x+=2.;
+--     }
+--     hpos=path(t+3.);
+--     vec3 adv=path(t+2.);
+--     vec3 dir=normalize(vec3(uv,.7));
+--     vec3 dd=normalize(adv-from);
+--     point=normalize(adv-hpos);
+--     point.xz*=rot(sin(iTime)*.2);
+--     dir=lookat(dd)*dir;
+--     vec3 col = march(from, dir);
+-- 	col*=vec3(1.,.9,.8);
+--     fragColor = vec4(col,1.0);
+-- }

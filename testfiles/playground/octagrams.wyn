@@ -1,0 +1,236 @@
+-- "Octgrams" by whisky_shusuky — Wyn port of the Shadertoy shader.
+-- Raymarched box-SDF scene that creates animated octagram-like patterns
+-- with a volumetric glow accumulation loop (99 steps).
+-- The original GLSL is preserved commented-out below.
+
+open f32
+
+------------------------------------------------------------
+-- Uniforms
+------------------------------------------------------------
+#[uniform(set=1, binding=0)] def iResolution: vec3f32
+#[uniform(set=1, binding=1)] def iTime: f32
+
+------------------------------------------------------------
+-- Full-screen triangle vertex shader
+------------------------------------------------------------
+def verts: [3]vec4f32 =
+  [@[-1.0, -1.0, 0.0, 1.0],
+   @[3.0,  -1.0, 0.0, 1.0],
+   @[-1.0,  3.0, 0.0, 1.0]]
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vertex_id: i32)
+  #[builtin(position)] vec4f32 = verts[vertex_id]
+
+------------------------------------------------------------
+-- sdBox: signed distance to a box centered at origin with half-extents b
+------------------------------------------------------------
+def sdBox(p: vec3f32, b: vec3f32) f32 =
+  let q = vec.abs(p) - b in
+  magnitude(vec.max(q, @[0.0, 0.0, 0.0])) + min(max(q.x, max(q.y, q.z)), 0.0)
+
+------------------------------------------------------------
+-- rot2_xy: rotate the xy components of a vec3 by angle a, matching
+-- the GLSL `v.xy * mat2(c, s, -s, c)` convention (i.e. result.x =
+-- p.x*c + p.y*s, result.y = -p.x*s + p.y*c).
+------------------------------------------------------------
+def rot2_xy(p: vec3f32, a: f32) vec3f32 =
+  let c = cos(a) in
+  let s = sin(a) in
+  let x = p.x * c + p.y * s in
+  let y = p.y * c - p.x * s in
+  @[x, y, p.z]
+
+------------------------------------------------------------
+-- rot2_yz: rotate the yz components of a vec3 by angle a (matches GLSL).
+------------------------------------------------------------
+def rot2_yz(p: vec3f32, a: f32) vec3f32 =
+  let c = cos(a) in
+  let s = sin(a) in
+  let y = p.y * c + p.z * s in
+  let z = p.z * c - p.y * s in
+  @[p.x, y, z]
+
+------------------------------------------------------------
+-- box_sdf: evaluates one rotated/scaled box and returns its negated SDF.
+------------------------------------------------------------
+def box_sdf(pos_in: vec3f32, scale: f32) f32 =
+  let pos = pos_in * scale in
+  let base = sdBox(pos, @[0.4, 0.4, 0.1]) / 1.5 in
+  0.0 - base
+
+------------------------------------------------------------
+-- box_set: combine 6 box evaluations using different per-step gtime offsets.
+-- gtime replaces the mutable global gTime from the original.
+------------------------------------------------------------
+def box_set(pos: vec3f32, gtime: f32) f32 =
+  let swing = sin(gtime * 0.4) * 2.5 in
+  let scale_anim = 2.0 - abs(sin(gtime * 0.4)) * 1.5 in
+  -- box1: pos shifted +y, then rotated xy
+  let p1 = rot2_xy(pos with .y = pos.y + swing, 0.8) in
+  let box1 = box_sdf(p1, scale_anim) in
+  -- box2: pos shifted -y, then rotated xy
+  let p2 = rot2_xy(pos with .y = pos.y - swing, 0.8) in
+  let box2 = box_sdf(p2, scale_anim) in
+  -- box3: pos shifted +x, then rotated xy
+  let p3 = rot2_xy(pos with .x = pos.x + swing, 0.8) in
+  let box3 = box_sdf(p3, scale_anim) in
+  -- box4: pos shifted -x, then rotated xy
+  let p4 = rot2_xy(pos with .x = pos.x - swing, 0.8) in
+  let box4 = box_sdf(p4, scale_anim) in
+  -- box5: just rotated xy
+  let p5 = rot2_xy(pos, 0.8) in
+  let box5 = box_sdf(p5, 0.5) * 6.0 in
+  -- box6: no rotation
+  let box6 = box_sdf(pos, 0.5) * 6.0 in
+  max(max(max(max(max(box1, box2), box3), box4), box5), box6)
+
+------------------------------------------------------------
+-- scene_map: SDF of the full scene at point pos with given gtime
+------------------------------------------------------------
+def scene_map(pos: vec3f32, gtime: f32) f32 =
+  box_set(pos, gtime)
+
+------------------------------------------------------------
+-- Fragment shader
+------------------------------------------------------------
+#[fragment]
+entry fragment_main(#[builtin(position)] fragCoord: vec4f32)
+  #[location(0)] vec4f32 =
+  -- Flip Y for Vulkan
+  let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
+  -- Normalized screen coords
+  let p = (fc * 2.0 - iResolution.xy) / min(iResolution.x, iResolution.y) in
+  -- Ray origin moves along Z with time
+  let ro: vec3f32 = @[0.0, 0.0 - 0.2, iTime * 4.0] in
+  -- Ray direction: normalize and apply two slow rotations
+  let ray0: vec3f32 = normalize(@[p.x, p.y, 1.5]) in
+  let ray1 = rot2_xy(ray0, sin(iTime * 0.03) * 5.0) in
+  let ray  = rot2_yz(ray1, sin(iTime * 0.05) * 0.2) in
+  -- Raymarching loop: 99 steps accumulating glow
+  let (t_final, ac_final) =
+    loop (t, ac) = (0.1, 0.0) for i < 99 do
+      let pos = ro + ray * t in
+      -- Tile space with period 4
+      let pos_tiled = vec.mod(pos - @[2.0, 2.0, 2.0], @[4.0, 4.0, 4.0]) - @[2.0, 2.0, 2.0] in
+      -- Per-step time offset replaces mutable gTime global
+      let gtime = iTime - f32.i32(i) * 0.01 in
+      let d_raw = scene_map(pos_tiled, gtime) in
+      let d = max(abs(d_raw), 0.01) in
+      (t + d * 0.55, ac + exp(0.0 - d * 23.0))
+  in
+  -- Assemble colour
+  let grey = ac_final * 0.02 in
+  let col: vec3f32 = @[grey, grey, grey] in
+  let tint: vec3f32 = @[0.0, 0.2 * abs(sin(iTime)), 0.5 + sin(iTime) * 0.2] in
+  let col2 = col + tint in
+  let alpha = 1.0 - t_final * (0.02 + 0.02 * sin(iTime)) in
+  @[col2.x, col2.y, col2.z, alpha]
+
+------------------------------------------------------------
+-- Original GLSL (commented out below)
+------------------------------------------------------------
+
+-- precision highp float;
+--
+--
+-- float gTime = 0.;
+-- const float REPEAT = 5.0;
+--
+-- // 回転行列
+-- mat2 rot(float a) {
+-- 	float c = cos(a), s = sin(a);
+-- 	return mat2(c,s,-s,c);
+-- }
+--
+-- float sdBox( vec3 p, vec3 b )
+-- {
+-- 	vec3 q = abs(p) - b;
+-- 	return length(max(q,0.0)) + min(max(q.x,max(q.y,q.z)),0.0);
+-- }
+--
+-- float box(vec3 pos, float scale) {
+-- 	pos *= scale;
+-- 	float base = sdBox(pos, vec3(.4,.4,.1)) /1.5;
+-- 	pos.xy *= 5.;
+-- 	pos.y -= 3.5;
+-- 	pos.xy *= rot(.75);
+-- 	float result = -base;
+-- 	return result;
+-- }
+--
+-- float box_set(vec3 pos, float iTime) {
+-- 	vec3 pos_origin = pos;
+-- 	pos = pos_origin;
+-- 	pos .y += sin(gTime * 0.4) * 2.5;
+-- 	pos.xy *=   rot(.8);
+-- 	float box1 = box(pos,2. - abs(sin(gTime * 0.4)) * 1.5);
+-- 	pos = pos_origin;
+-- 	pos .y -=sin(gTime * 0.4) * 2.5;
+-- 	pos.xy *=   rot(.8);
+-- 	float box2 = box(pos,2. - abs(sin(gTime * 0.4)) * 1.5);
+-- 	pos = pos_origin;
+-- 	pos .x +=sin(gTime * 0.4) * 2.5;
+-- 	pos.xy *=   rot(.8);
+-- 	float box3 = box(pos,2. - abs(sin(gTime * 0.4)) * 1.5);
+-- 	pos = pos_origin;
+-- 	pos .x -=sin(gTime * 0.4) * 2.5;
+-- 	pos.xy *=   rot(.8);
+-- 	float box4 = box(pos,2. - abs(sin(gTime * 0.4)) * 1.5);
+-- 	pos = pos_origin;
+-- 	pos.xy *=   rot(.8);
+-- 	float box5 = box(pos,.5) * 6.;
+-- 	pos = pos_origin;
+-- 	float box6 = box(pos,.5) * 6.;
+-- 	float result = max(max(max(max(max(box1,box2),box3),box4),box5),box6);
+-- 	return result;
+-- }
+--
+-- float map(vec3 pos, float iTime) {
+-- 	vec3 pos_origin = pos;
+-- 	float box_set1 = box_set(pos, iTime);
+--
+-- 	return box_set1;
+-- }
+--
+--
+-- void mainImage( out vec4 fragColor, in vec2 fragCoord ) {
+-- 	vec2 p = (fragCoord.xy * 2. - iResolution.xy) / min(iResolution.x, iResolution.y);
+-- 	vec3 ro = vec3(0., -0.2 ,iTime * 4.);
+-- 	vec3 ray = normalize(vec3(p, 1.5));
+-- 	ray.xy = ray.xy * rot(sin(iTime * .03) * 5.);
+-- 	ray.yz = ray.yz * rot(sin(iTime * .05) * .2);
+-- 	float t = 0.1;
+-- 	vec3 col = vec3(0.);
+-- 	float ac = 0.0;
+--
+--
+-- 	for (int i = 0; i < 99; i++){
+-- 		vec3 pos = ro + ray * t;
+-- 		pos = mod(pos-2., 4.) -2.;
+-- 		gTime = iTime -float(i) * 0.01;
+--
+-- 		float d = map(pos, iTime);
+--
+-- 		d = max(abs(d), 0.01);
+-- 		ac += exp(-d*23.);
+--
+-- 		t += d* 0.55;
+-- 	}
+--
+-- 	col = vec3(ac * 0.02);
+--
+-- 	col +=vec3(0.,0.2 * abs(sin(iTime)),0.5 + sin(iTime) * 0.2);
+--
+--
+-- 	fragColor = vec4(col ,1.0 - t * (0.02 + 0.02 * sin (iTime)));
+-- }
+--
+-- /** SHADERDATA
+-- {
+-- 	"title": "Octgrams",
+-- 	"description": "Lorem ipsum dolor",
+-- 	"model": "person"
+-- }
+-- */

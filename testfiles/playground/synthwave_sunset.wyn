@@ -1,0 +1,533 @@
+-- "another synthwave sunset thing" by fad (Shadertoy) — Wyn port of the Shadertoy shader.
+-- Procedural synthwave landscape: triangular-grid terrain noise, ray-marched ground,
+-- star field, purple sky with animated sun disc, and retro magenta terrain coloring.
+-- Original: https://www.shadertoy.com/view/WXsGzs (author: fad)
+-- The original GLSL is preserved commented-out below.
+--
+-- NOTE: `disable_sound_texture_sampling` is active in the original, so all
+-- textureMirror calls return zero — dropped entirely in this port.
+-- NOTE: `iTimeDelta` is not a standard Wyn uniform; we use a fixed dt=0.0 for
+-- the motion-blur jitter (no per-frame temporal delta available).
+-- NOTE: The ray-march loop is capped at 100 iterations (original: 500).
+-- NOTE: The starnoise mat3 rotation is inlined as a closed-form linear transform.
+-- NOTE: AA (anti-aliasing) and stereo modes are disabled (as in the original defaults).
+
+open f32
+
+#[uniform(set=1, binding=0)] def iResolution: vec3f32
+#[uniform(set=1, binding=1)] def iTime: f32
+
+def SPEED: f32 = 10.0
+
+------------------------------------------------------------
+-- Full-screen triangle vertex shader
+------------------------------------------------------------
+def verts: [3]vec4f32 =
+  [@[-1.0, -1.0, 0.0, 1.0],
+   @[3.0,  -1.0, 0.0, 1.0],
+   @[-1.0,  3.0, 0.0, 1.0]]
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 =
+  verts[vertex_id]
+
+------------------------------------------------------------
+-- Math helpers
+------------------------------------------------------------
+
+-- a^512 via repeated squaring (used for sharp star/sun cutoffs)
+def pow512(a: f32) f32 =
+  let a2  = a   * a   in
+  let a4  = a2  * a2  in
+  let a8  = a4  * a4  in
+  let a16 = a8  * a8  in
+  let a32 = a16 * a16 in
+  let a64 = a32 * a32 in
+  let a128 = a64 * a64 in
+  let a256 = a128 * a128 in
+  a256 * a256
+
+-- a^1.5 = a * sqrt(a)
+def pow1d5(a: f32) f32 = a * sqrt(a)
+
+-- 2D hash → [0,1)
+def hash21(co: vec2f32) f32 =
+  fract(sin(dot(co, @[1.9898, 7.233])) * 45758.5433)
+
+-- exp2(x) = 2^x via exp/log identity (scalar)
+def exp2s(x: f32) f32 = exp(x * 0.6931471805599453)
+
+-- Vectorised exp2 for vec3
+def exp2v3(v: vec3f32) vec3f32 =
+  @[exp2s(v.x), exp2s(v.y), exp2s(v.z)]
+
+------------------------------------------------------------
+-- Terrain noise (triangular grid)
+------------------------------------------------------------
+
+-- Amplitude envelope: zero inside [-1,1] in x, ramps to full outside ±8
+def amp_fn(p: vec2f32) f32 =
+  smoothstep(1.0, 8.0, abs(p.x))
+
+-- Hash with wave-modulation (wave_thing enabled)
+def hash_terrain(uv: vec2f32, jt: f32) f32 =
+  let a = amp_fn(uv) in
+  if a > 0.0
+  then
+    let wave_phase = (0.02 * (uv.y + 0.5 * uv.x) - jt) * 2.0 in
+    let w = 1.0 - 0.4 * pow512(0.51 + 0.49 * sin(wave_phase)) in
+    a * pow1d5(hash21(uv)) * w
+  else 0.0
+
+-- Edge sharpness for the triangular grid wireframe.
+-- The original used `textureMirror` lookups on the three triangle-corner
+-- hashes to colour-tint the edges; with sound-texture sampling
+-- disabled, those all return zero, the a-weights collapse to 1, and
+-- the corner-hash computation is dead. Only the geometric edge
+-- distance remains.
+def edgeMin(dx: f32, da: vec2f32, db: vec2f32, _uv: vec2f32) f32 =
+  min(min((1.0 - dx) * db.y, da.x), da.y)
+
+-- Triangular-grid value noise: returns (height, edge_mask)
+def trinoise(uv_in: vec2f32, jt: f32) (f32, f32) =
+  let sq = sqrt(1.5) in
+  let uv0 = @[uv_in.x * sq, uv_in.y - 0.5 * uv_in.x * sq] in
+  let d  = vec.fract(uv0) in
+  let uv = @[uv0.x - d.x, uv0.y - d.y] in
+  let is_upper = dot(d, @[1.0, 1.0]) > 1.0 in
+  let dd = @[1.0 - d.x, 1.0 - d.y] in
+  let n2 = hash_terrain(@[uv.x + 1.0, uv.y], jt) in
+  let n3 = hash_terrain(@[uv.x, uv.y + 1.0], jt) in
+  let (da, db, corner_off, n_alt) =
+    if is_upper then (dd, d, 1.0, n2)
+    else (d, dd, 0.0, n3) in
+  let nn = hash_terrain(@[uv.x + corner_off, uv.y + corner_off], jt) in
+  let nmid = mix(n2, n3, d.y) in
+  let ns   = mix(nn, n_alt, da.y) in
+  let dx   = da.x / db.y in
+  (mix(ns, nmid, dx), edgeMin(dx, da, db, @[uv.x + d.x, uv.y + d.y]))
+
+------------------------------------------------------------
+-- Scene SDF (terrain)
+------------------------------------------------------------
+
+-- Returns (signed-distance, edge_mask)
+def scene_map(p: vec3f32, jt: f32) (f32, f32) =
+  let (h, e) = trinoise(@[p.x, p.z], jt) in
+  (p.y - 2.0 * h, e)
+
+-- Gradient via central finite differences (for surface normal)
+def grad3(p: vec3f32, jt: f32) vec3f32 =
+  let e = 0.005 in
+  let a = (scene_map(p, jt)).0 in
+  let gx = (scene_map(@[p.x + e, p.y, p.z], jt)).0 - a in
+  let gy = (scene_map(@[p.x, p.y + e, p.z], jt)).0 - a in
+  let gz = (scene_map(@[p.x, p.y, p.z + e], jt)).0 - a in
+  @[gx / e, gy / e, gz / e]
+
+------------------------------------------------------------
+-- Ray-marcher (500 steps to match the original).
+------------------------------------------------------------
+
+-- Returns (ray_t, edge_mask); ray_t < 0 means sky.
+def intersect(ro: vec3f32, rd: vec3f32, jt: f32) (f32, f32) =
+  let (_, d_final, _, edge_final, hit, _) =
+    loop (i, d, h, edge, hit, done) = (0, 0.0, 0.0, 0.0, false, false)
+    while i < 500 && !done do
+      let p = @[ro.x + d * rd.x, ro.y + d * rd.y, ro.z + d * rd.z] in
+      let (s, e) = scene_map(p, jt) in
+      let d2 = d + s * 0.5 in
+      let converged = abs(s) < 0.003 * d2 in
+      let escaped   = d2 > 150.0 || p.y > 2.0 in
+      (i + 1, d2, s, e, converged, converged || escaped)
+  in
+  if hit then (d_final, edge_final) else (-1.0, -1.0)
+
+------------------------------------------------------------
+-- Sun disc
+------------------------------------------------------------
+
+def addsun(rd: vec3f32, ld: vec3f32, col: vec3f32) vec3f32 =
+  let sun = smoothstep(0.21, 0.2, distance(rd, ld)) in
+  if sun > 0.0
+  then
+    let yd  = rd.y - ld.y in
+    let a   = sin(3.1 * exp(-yd * 14.0)) in
+    let sun2 = sun * smoothstep(-0.8, 0.0, a) in
+    mix(col, @[0.75, 0.6, 0.3], sun2)
+  else col
+
+------------------------------------------------------------
+-- Star-field noise (4 octaves of cellular noise)
+------------------------------------------------------------
+
+def starnoise(rd: vec3f32) f32 =
+  let p0 = normalize(rd) * 300.0 in
+  -- mat3 rotation: [[3/5,0,4/5],[0,1,0],[-4/5,0,3/5]] applied as: p = p*0.6 + 0.5*p*M
+  -- Combined: p_new = p*(0.6 + 0.5*M) where M is that mat3
+  -- We inline the matrix-vector product directly
+  let (_, c_acc) =
+    loop (p, c) = (p0, 0.0) for i < 4 do
+      let q  = vec.fract(p) - @[0.5, 0.5, 0.5] in
+      let id = vec.floor(p) in
+      let c2_raw = smoothstep(0.5, 0.0, magnitude(q)) in
+      let fi = f32.i32(i) in
+      let thresh = 0.06 - fi * fi * 0.005 in
+      let h_val  = hash21(@[id.x / id.y, id.z / id.y]) in
+      -- step(h, thresh) = 1 if h <= thresh else 0
+      let in_star = if h_val <= thresh then 1.0 else 0.0 in
+      let c2 = c2_raw * in_star in
+      -- Apply rotation: p_new.x = p.x*(0.6 + 0.5*3/5) + p.z*(0.5*4/5)
+      --                 p_new.y = p.y*(0.6 + 0.5*1)
+      --                 p_new.z = p.x*(0.5*(-4/5)) + p.z*(0.6 + 0.5*3/5)
+      let nx = p.x * 0.9 + p.z * 0.4 in
+      let ny = p.y * 1.1 in
+      let nz = p.x * (-0.4) + p.z * 0.9 in
+      (@[nx, ny, nz], c + c2)
+  in
+  let c1   = c_acc * c_acc in
+  -- Galactic-plane modulation
+  let g    = dot(@[sin(rd.x * 10.512), sin(rd.y * 10.512), sin(rd.z * 10.512)],
+                 @[cos(rd.y * 10.512), cos(rd.z * 10.512), cos(rd.x * 10.512)]) in
+  let mod1 = smoothstep(-3.14, -0.9, g) * 0.5 + 0.5 * smoothstep(-0.3, 1.0, g) in
+  let c2   = c1 * mod1 in
+  c2 * c2
+
+------------------------------------------------------------
+-- Sky color
+------------------------------------------------------------
+
+def gsky(rd: vec3f32, ld: vec3f32, show_sun: bool) vec3f32 =
+  -- Haze = exp2(-5*(|rd.y| - 0.2*dot(rd,ld)))
+  let haze_exp = -5.0 * (abs(rd.y) - 0.2 * dot(rd, ld)) in
+  let haze     = exp2s(haze_exp) in
+  -- Stars (only when looking at sky)
+  let st   = if show_sun then starnoise(rd) * (1.0 - min(haze, 1.0)) else 0.0 in
+  -- Background: purple gradient; textureMirror=0 so no audio modulation
+  let back = @[0.4, 0.1, 0.7] in
+  let mixed = mix(back, @[0.7, 0.1, 0.4], haze) in
+  let col0_r = clamp(mixed.x + st, 0.0, 1.0) in
+  let col0_g = clamp(mixed.y + st, 0.0, 1.0) in
+  let col0_b = clamp(mixed.z + st, 0.0, 1.0) in
+  let col0   = @[col0_r, col0_g, col0_b] in
+  if show_sun then addsun(rd, ld, col0) else col0
+
+------------------------------------------------------------
+-- Fragment shader
+------------------------------------------------------------
+
+#[fragment]
+entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
+  -- Flip Y for Vulkan
+  let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
+
+  -- Camera time (jTime in original; iTimeDelta not available, dt ≈ 0)
+  let jt = mod(iTime, 4000.0) in
+
+  -- Screen UV
+  let uv = (2.0 * fc - iResolution.xy) / iResolution.y in
+
+  -- Ray origin: scrolling forward at SPEED
+  let ro = @[0.0, 1.0, -20000.0 + jt * SPEED] in
+  -- Ray direction
+  let rd = normalize(@[uv.x, uv.y, 4.0 / 3.0]) in
+
+  -- Intersect terrain
+  let (d, edge) = intersect(ro, rd, jt) in
+
+  -- Light direction: slightly animated sun elevation
+  let ld = normalize(@[0.0, 0.125 + 0.05 * sin(0.1 * jt), 1.0]) in
+
+  -- Fog (exp2 per-channel, only when terrain was hit)
+  let fog = if d > 0.0
+            then exp2v3(d * @[-0.14, -0.1, -0.28])
+            else @[0.0, 0.0, 0.0] in
+
+  -- Sky / terrain color
+  let sky = gsky(rd, ld, d < 0.0) in
+  let p   = @[ro.x + d * rd.x, ro.y + d * rd.y, ro.z + d * rd.z] in
+  let n   = normalize(grad3(p, jt)) in
+  let diff = dot(n, ld) + 0.1 * n.y in
+  let terrain_col = diff * @[0.1, 0.11, 0.18] in
+  -- Fresnel-blended reflection
+  let rfd    = reflect(rd, n) in
+  let rfcol  = gsky(rfd, ld, true) in
+  let fres   = 0.05 + 0.95 * (max(1.0 + dot(rd, n), 0.0) ** 5.0) in
+  let col0   = mix(terrain_col, rfcol, fres) in
+  -- Edge highlight: magenta tint on wireframe edges
+  let col1   = mix(col0, @[0.8, 0.1, 0.92], smoothstep(0.05, 0.0, edge)) in
+  -- Apply per-channel fog (lerp toward sky)
+  let col2   = mix(sky, col1, fog) in
+
+  -- Final: clamp + depth-based alpha
+  let alpha = if d < 0.0 then 0.0 else 0.1 + exp2s(0.0 - d) in
+  @[clamp(col2.x, 0.0, 1.0),
+    clamp(col2.y, 0.0, 1.0),
+    clamp(col2.z, 0.0, 1.0),
+    alpha]
+
+------------------------------------------------------------
+-- Original GLSL (commented out below)
+------------------------------------------------------------
+
+-- //#define AA 4
+-- //#define VAPORWAVE
+-- //#define stereo 1. // -1. for cross-eyed (defaults to parallel view)
+-- #define speed 10.
+-- #define wave_thing
+-- //#define city
+--
+-- //you can add any sound texture in iChannel0 to turn it into a cool audio visualizer
+-- // (it looks better with lower speeds though)
+-- //you should commment out or remove the following line to enable it (it's disabled mainly for performance reasons):
+-- #define disable_sound_texture_sampling
+--
+-- #ifndef disable_sound_texture_sampling
+--     #undef speed
+--     // lower value of speed when using as audio visualizer
+--     #define speed 5.
+-- #endif
+--
+-- //self-explainatory
+-- #define audio_vibration_amplitude .125
+--
+-- float jTime;
+--
+--
+-- #ifdef disable_sound_texture_sampling
+-- #define textureMirror(a, b) vec4(0)
+-- #else
+-- vec4 textureMirror(sampler2D tex, vec2 c){
+--     vec2 cf = fract(c);
+--     return texture(tex,mix(cf,1.-cf,mod(floor(c),2.)));
+-- }
+-- #endif
+--
+--
+-- float amp(vec2 p){
+--     return smoothstep(1.,8.,abs(p.x));
+-- }
+--
+-- float pow512(float a){
+--     a*=a;//^2
+--     a*=a;//^4
+--     a*=a;//^8
+--     a*=a;//^16
+--     a*=a;//^32
+--     a*=a;//^64
+--     a*=a;//^128
+--     a*=a;//^256
+--     return a*a;
+-- }
+-- float pow1d5(float a){
+--     return a*sqrt(a);
+-- }
+-- float hash21(vec2 co){
+--     return fract(sin(dot(co.xy,vec2(1.9898,7.233)))*45758.5433);
+-- }
+-- float hash(vec2 uv){
+--     float a = amp(uv);
+--     #ifdef wave_thing
+--     float w = a>0.?(1.-.4*pow512(.51+.49*sin((.02*(uv.y+.5*uv.x)-jTime)*2.))):0.;
+--     #else
+--     float w=1.;
+--     #endif
+--     return (a>0.?
+--         a*pow1d5(
+--         //texture(iChannel0,uv/iChannelResolution[0].xy).r
+--         hash21(uv)
+--         )*w
+--         :0.)-(textureMirror(iChannel0,vec2((uv.x*29.+uv.y)*.03125,1.)).x)*audio_vibration_amplitude;
+-- }
+--
+-- float edgeMin(float dx,vec2 da, vec2 db,vec2 uv){
+--     uv.x+=5.;
+--     vec3 c = fract((round(vec3(uv,uv.x+uv.y)))*(vec3(0,1,2)+0.61803398875));
+--     float a1 = textureMirror(iChannel0,vec2(c.y,0.)).x>.6?.15:1.;
+--     float a2 = textureMirror(iChannel0,vec2(c.x,0.)).x>.6?.15:1.;
+--     float a3 = textureMirror(iChannel0,vec2(c.z,0.)).x>.6?.15:1.;
+--
+--     return min(min((1.-dx)*db.y*a3,da.x*a2),da.y*a1);
+-- }
+--
+-- vec2 trinoise(vec2 uv){
+--     const float sq = sqrt(3./2.);
+--     uv.x *= sq;
+--     uv.y -= .5*uv.x;
+--     vec2 d = fract(uv);
+--     uv -= d;
+--
+--     bool c = dot(d,vec2(1))>1.;
+--
+--     vec2 dd = 1.-d;
+--     vec2 da = c?dd:d,db = c?d:dd;
+--
+--     float nn = hash(uv+float(c));
+--     float n2 = hash(uv+vec2(1,0));
+--     float n3 = hash(uv+vec2(0,1));
+--
+--
+--     float nmid = mix(n2,n3,d.y);
+--     float ns = mix(nn,c?n2:n3,da.y);
+--     float dx = da.x/db.y;
+--     return vec2(mix(ns,nmid,dx),edgeMin(dx,da, db,uv+d));
+-- }
+--
+--
+-- vec2 map(vec3 p){
+--     vec2 n = trinoise(p.xz);
+--     return vec2(p.y-2.*n.x,n.y);
+-- }
+--
+-- vec3 grad(vec3 p){
+--     const vec2 e = vec2(.005,0);
+--     float a =map(p).x;
+--     return vec3(map(p+e.xyy).x-a
+--                 ,map(p+e.yxy).x-a
+--                 ,map(p+e.yyx).x-a)/e.x;
+-- }
+--
+-- vec2 intersect(vec3 ro,vec3 rd){
+--     float d =0.,h=0.;
+--     for(int i = 0;i<500;i++){ //look nice with 50 iterations
+--         vec3 p = ro+d*rd;
+--         vec2 s = map(p);
+--         h = s.x;
+--         d+= h*.5;
+--         if(abs(h)<.003*d)
+--             return vec2(d,s.y);
+--         if(d>150.|| p.y>2.) break;
+--     }
+--
+--     return vec2(-1);
+-- }
+--
+--
+-- void addsun(vec3 rd,vec3 ld,inout vec3 col){
+--
+-- 	float sun = smoothstep(.21,.2,distance(rd,ld));
+--
+--     if(sun>0.){
+--         float yd = (rd.y-ld.y);
+--
+--         float a =sin(3.1*exp(-(yd)*14.));
+--
+--         sun*=smoothstep(-.8,0.,a);
+--
+--         col = mix(col,vec3(1.,.8,.4)*.75,sun);
+--     }
+-- }
+--
+--
+-- float starnoise(vec3 rd){
+--     float c = 0.;
+--     vec3 p = normalize(rd)*300.;
+-- 	for (float i=0.;i<4.;i++)
+--     {
+--         vec3 q = fract(p)-.5;
+--         vec3 id = floor(p);
+--         float c2 = smoothstep(.5,0.,length(q));
+--         c2 *= step(hash21(id.xz/id.y),.06-i*i*0.005);
+--         c += c2;
+--         p = p*.6+.5*p*mat3(3./5.,0,4./5.,0,1,0,-4./5.,0,3./5.);
+--     }
+--     c*=c;
+--     float g = dot(sin(rd*10.512),cos(rd.yzx*10.512));
+--     c*=smoothstep(-3.14,-.9,g)*.5+.5*smoothstep(-.3,1.,g);
+--     return c*c;
+-- }
+--
+-- vec3 gsky(vec3 rd,vec3 ld,bool mask){
+--     float haze = exp2(-5.*(abs(rd.y)-.2*dot(rd,ld)));
+--
+--
+--     //float st = mask?pow512(texture(iChannel0,(rd.xy+vec2(300.1,100)*rd.z)*10.).r)*(1.-min(haze,1.)):0.;
+--     //float st = mask?pow512(hash21((rd.xy+vec2(300.1,100)*rd.z)*10.))*(1.-min(haze,1.)):0.;
+--     float st = mask?(starnoise(rd))*(1.-min(haze,1.)):0.;
+--     vec3 back = vec3(.4,.1,.7)*(1.-.5*textureMirror(iChannel0,vec2(.5+.05*rd.x/rd.y,0.)).x
+--     *exp2(-.1*abs(length(rd.xz)/rd.y))
+--     *max(sign(rd.y),0.));
+--     #ifdef city
+--     float x = round(rd.x*30.);
+--     float h = hash21(vec2(x-166.));
+--     bool building = (h*h*.125*exp2(-x*x*x*x*.0025)>rd.y);
+--     if(mask && building)
+--         back*=0.,haze=.8, mask=mask && !building;
+--     #endif
+--     vec3 col=clamp(mix(back,vec3(.7,.1,.4),haze)+st,0.,1.);
+--     if(mask)addsun(rd,ld,col);
+--     return col;
+-- }
+--
+--
+-- void mainImage( out vec4 fragColor, in vec2 fragCoord )
+-- {
+--     fragColor=vec4(0);
+--     #ifdef AA
+--     for(float x = 0.;x<1.;x+=1./float(AA)){
+--     for(float y = 0.;y<1.;y+=1./float(AA)){
+--     #else
+--         const float AA=1.,x=0.,y=0.;
+--     #endif
+--     vec2 uv = (2.*(fragCoord+vec2(x,y))-iResolution.xy)/iResolution.y;
+--
+--     const float shutter_speed = .25; // for motion blur
+-- 	//float dt = fract(texture(iChannel0,float(AA)*(fragCoord+vec2(x,y))/iChannelResolution[0].xy).r+iTime)*shutter_speed;
+--     float dt = fract(hash21(float(AA)*(fragCoord+vec2(x,y)))+iTime)*shutter_speed;
+--     jTime = mod(iTime-dt*iTimeDelta,4000.);
+--     vec3 ro = vec3(0.,1,(-20000.+jTime*speed));
+--
+--     #ifdef stereo
+--         ro+=stereo*vec3(.2*(float(uv.x>0.)-.5),0.,0.);
+--         const float de = .9;
+--         uv.x=uv.x+.5*(uv.x>0.?-de:de);
+--         uv*=2.;
+--     #endif
+--
+--     vec3 rd = normalize(vec3(uv,4./3.));//vec3(uv,sqrt(1.-dot(uv,uv)));
+--
+--     vec2 i = intersect(ro,rd);
+--     float d = i.x;
+--
+--     vec3 ld = normalize(vec3(0,.125+.05*sin(.1*jTime),1));
+--
+--     vec3 fog = d>0.?exp2(-d*vec3(.14,.1,.28)):vec3(0.);
+--     vec3 sky = gsky(rd,ld,d<0.);
+--
+--     vec3 p = ro+d*rd;
+--     vec3 n = normalize(grad(p));
+--
+--     float diff = dot(n,ld)+.1*n.y;
+--     vec3 col = vec3(.1,.11,.18)*diff;
+--
+--     vec3 rfd = reflect(rd,n);
+--     vec3 rfcol = gsky(rfd,ld,true);
+--
+--     col = mix(col,rfcol,.05+.95*pow(max(1.+dot(rd,n),0.),5.));
+--     #ifdef VAPORWAVE
+--         col = mix(col,vec3(.4,.5,1.),smoothstep(.05,.0,i.y));
+--         col = mix(sky,col,fog);
+--         col = sqrt(col);
+--     #else
+--         col = mix(col,vec3(.8,.1,.92),smoothstep(.05,.0,i.y));
+--         col = mix(sky,col,fog);
+--         //no gamma for that old cg look
+--     #endif
+--     if(d<0.)
+--         d=1e6;
+--     d=min(d,10.);
+--     fragColor += vec4(clamp(col,0.,1.),d<0.?0.:.1+exp2(-d));
+--     #ifdef AA
+--     }
+--     }
+--     fragColor/=float(AA*AA);
+--     #endif
+-- }
+--
+-- /** SHADERDATA
+-- {
+-- 	"title": "another synthwave sunset thing",
+-- 	"description": "I was thinking of a way to make pseudo tesselation noise and i made this to illustrate it, i might not be the first one to come up with this solution.",
+-- 	"model": "car"
+-- }
+-- */
