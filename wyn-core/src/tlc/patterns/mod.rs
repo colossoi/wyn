@@ -4,3 +4,7 @@
 
 pub mod bindings;
 pub mod match_lowering;
+
+#[cfg(test)]
+#[path = "bindings_tests.rs"]
+mod bindings_tests;

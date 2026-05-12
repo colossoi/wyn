@@ -380,3 +380,327 @@ fn unit_match_with_unit_pattern_is_exhaustive() {
     )];
     assert!(check_match(&unit_ty(), &arms, dummy_span()).is_ok());
 }
+
+// =========================================================================
+// Compact helpers + additional tests
+// =========================================================================
+
+fn pat(kind: ast::PatternKind) -> ast::Pattern {
+    ast::Pattern {
+        h: ast::Header {
+            id: ast::NodeId(0),
+            span: dummy_span(),
+        },
+        kind,
+    }
+}
+
+fn name(n: &str) -> ast::Pattern {
+    pat(ast::PatternKind::Name(n.to_string()))
+}
+fn wild() -> ast::Pattern {
+    pat(ast::PatternKind::Wildcard)
+}
+fn ctor(n: &str, sub: Vec<ast::Pattern>) -> ast::Pattern {
+    pat(ast::PatternKind::Constructor(n.to_string(), sub))
+}
+fn lit_int(s: &str) -> ast::Pattern {
+    pat(ast::PatternKind::Literal(ast::PatternLiteral::Int(
+        crate::lexer::IntString(s.to_string()),
+    )))
+}
+fn lit_bool(b: bool) -> ast::Pattern {
+    pat(ast::PatternKind::Literal(ast::PatternLiteral::Bool(b)))
+}
+fn tup_pat(sub: Vec<ast::Pattern>) -> ast::Pattern {
+    pat(ast::PatternKind::Tuple(sub))
+}
+fn arms(pats: Vec<ast::Pattern>) -> Vec<(ast::Pattern, ast::Span)> {
+    pats.into_iter().map(|p| (p, dummy_span())).collect()
+}
+
+fn sum_abc() -> Type {
+    sum(vec![
+        ("a".to_string(), vec![]),
+        ("b".to_string(), vec![]),
+        ("c".to_string(), vec![]),
+    ])
+}
+
+fn f32_ty() -> Type {
+    Type::Constructed(TypeName::Float(32), vec![])
+}
+
+// ----- Three-variant sum coverage -----
+
+#[test]
+fn three_variant_sum_all_arms_is_exhaustive() {
+    let result = check_match(
+        &sum_abc(),
+        &arms(vec![ctor("a", vec![]), ctor("b", vec![]), ctor("c", vec![])]),
+        dummy_span(),
+    );
+    assert!(result.is_ok(), "got {:?}", result);
+}
+
+#[test]
+fn three_variant_sum_missing_c_witness_names_c() {
+    let result = check_match(
+        &sum_abc(),
+        &arms(vec![ctor("a", vec![]), ctor("b", vec![])]),
+        dummy_span(),
+    );
+    match result {
+        Err(CoverageError::NonExhaustive {
+            missing: CovPat::Ctor(n, _),
+            ..
+        }) => {
+            assert_eq!(n, "c", "witness should name #c");
+        }
+        other => panic!("expected NonExhaustive(#c), got {:?}", other),
+    }
+}
+
+#[test]
+fn three_variant_sum_only_one_arm_is_non_exhaustive() {
+    let result = check_match(&sum_abc(), &arms(vec![ctor("a", vec![])]), dummy_span());
+    assert!(matches!(result, Err(CoverageError::NonExhaustive { .. })));
+}
+
+#[test]
+fn three_variant_sum_with_wildcard_covers_all() {
+    let result = check_match(&sum_abc(), &arms(vec![ctor("a", vec![]), wild()]), dummy_span());
+    assert!(result.is_ok(), "got {:?}", result);
+}
+
+// ----- Nested constructor coverage -----
+
+#[test]
+fn nested_ctor_with_inner_wildcard_covers_inner_sum() {
+    // outer: #left(i32 | bool) | #right(bool). Inner is a sum we
+    // approximate with #right(bool) on the outer here. We test:
+    //   case #left(_)  -> ...   -- covers all of #left's payload
+    //   case #right(_) -> ...   -- covers all of #right's payload
+    let result = check_match(
+        &sum_ab_payload(),
+        &arms(vec![ctor("left", vec![wild()]), ctor("right", vec![wild()])]),
+        dummy_span(),
+    );
+    assert!(result.is_ok(), "got {:?}", result);
+}
+
+#[test]
+fn nested_ctor_with_inner_literal_is_non_exhaustive_for_other_lit() {
+    // #left(0) covers only #left(0); #left(other-int) is missing.
+    let result = check_match(
+        &sum_ab_payload(),
+        &arms(vec![
+            ctor("left", vec![lit_int("0")]),
+            ctor("right", vec![wild()]),
+        ]),
+        dummy_span(),
+    );
+    assert!(matches!(result, Err(CoverageError::NonExhaustive { .. })));
+}
+
+#[test]
+fn nested_ctor_with_name_binds_covers_payload() {
+    // #left(x) treats x as a name binding (effective wildcard for
+    // coverage). Covers all of #left.
+    let result = check_match(
+        &sum_ab_payload(),
+        &arms(vec![ctor("left", vec![name("x")]), ctor("right", vec![wild()])]),
+        dummy_span(),
+    );
+    assert!(result.is_ok(), "got {:?}", result);
+}
+
+// ----- Tuple coverage -----
+
+#[test]
+fn tuple_bool_bool_cartesian_is_exhaustive() {
+    let scrut = tuple(vec![bool_ty(), bool_ty()]);
+    let cases = arms(vec![
+        tup_pat(vec![lit_bool(true), lit_bool(true)]),
+        tup_pat(vec![lit_bool(true), lit_bool(false)]),
+        tup_pat(vec![lit_bool(false), lit_bool(true)]),
+        tup_pat(vec![lit_bool(false), lit_bool(false)]),
+    ]);
+    let result = check_match(&scrut, &cases, dummy_span());
+    assert!(result.is_ok(), "got {:?}", result);
+}
+
+#[test]
+fn tuple_bool_bool_missing_corner_is_non_exhaustive() {
+    let scrut = tuple(vec![bool_ty(), bool_ty()]);
+    let cases = arms(vec![
+        tup_pat(vec![lit_bool(true), lit_bool(true)]),
+        tup_pat(vec![lit_bool(true), lit_bool(false)]),
+        tup_pat(vec![lit_bool(false), lit_bool(true)]),
+    ]);
+    let result = check_match(&scrut, &cases, dummy_span());
+    assert!(matches!(result, Err(CoverageError::NonExhaustive { .. })));
+}
+
+#[test]
+fn tuple_with_wildcard_second_covers_everything_for_first() {
+    let scrut = tuple(vec![bool_ty(), i32_ty()]);
+    let cases = arms(vec![
+        tup_pat(vec![lit_bool(true), wild()]),
+        tup_pat(vec![lit_bool(false), wild()]),
+    ]);
+    let result = check_match(&scrut, &cases, dummy_span());
+    assert!(result.is_ok(), "got {:?}", result);
+}
+
+#[test]
+fn tuple_with_wildcard_first_covers_everything() {
+    let scrut = tuple(vec![bool_ty(), i32_ty()]);
+    let cases = arms(vec![tup_pat(vec![wild(), wild()])]);
+    assert!(check_match(&scrut, &cases, dummy_span()).is_ok());
+}
+
+// ----- Redundancy -----
+
+#[test]
+fn exact_duplicate_arm_is_redundant() {
+    let cases = arms(vec![ctor("a", vec![]), ctor("a", vec![]), ctor("b", vec![])]);
+    let result = check_match(&sum_ab(), &cases, dummy_span());
+    match result {
+        Err(CoverageError::Redundant { arm_index, .. }) => {
+            assert_eq!(arm_index, 1, "second #a should be redundant");
+        }
+        other => panic!("expected Redundant, got {:?}", other),
+    }
+}
+
+#[test]
+fn strictly_narrower_arm_after_wildcard_payload_is_redundant() {
+    let cases = arms(vec![
+        ctor("left", vec![wild()]),
+        ctor("left", vec![lit_int("0")]),
+        ctor("right", vec![wild()]),
+    ]);
+    let result = check_match(&sum_ab_payload(), &cases, dummy_span());
+    assert!(matches!(
+        result,
+        Err(CoverageError::Redundant { arm_index: 1, .. })
+    ));
+}
+
+#[test]
+fn wildcard_first_makes_all_later_arms_redundant() {
+    let cases = arms(vec![wild(), ctor("a", vec![])]);
+    let result = check_match(&sum_ab(), &cases, dummy_span());
+    assert!(matches!(
+        result,
+        Err(CoverageError::Redundant { arm_index: 1, .. })
+    ));
+}
+
+#[test]
+fn redundant_literal_after_same_literal() {
+    let cases = arms(vec![lit_int("0"), lit_int("0"), wild()]);
+    let result = check_match(&i32_ty(), &cases, dummy_span());
+    assert!(matches!(
+        result,
+        Err(CoverageError::Redundant { arm_index: 1, .. })
+    ));
+}
+
+// ----- Float infinite universe -----
+
+#[test]
+fn float_only_literals_is_non_exhaustive() {
+    let cases = arms(vec![pat(ast::PatternKind::Literal(ast::PatternLiteral::Float(
+        0.0,
+    )))]);
+    let result = check_match(&f32_ty(), &cases, dummy_span());
+    assert!(matches!(result, Err(CoverageError::NonExhaustive { .. })));
+}
+
+#[test]
+fn float_literal_then_wildcard_is_exhaustive() {
+    let cases = arms(vec![
+        pat(ast::PatternKind::Literal(ast::PatternLiteral::Float(0.0))),
+        wild(),
+    ]);
+    let result = check_match(&f32_ty(), &cases, dummy_span());
+    assert!(result.is_ok(), "got {:?}", result);
+}
+
+// ----- lower() function -----
+
+#[test]
+fn lower_strips_typed_wrapper() {
+    use crate::ast::Type as AstType;
+    let inner = name("x");
+    let typed = pat(ast::PatternKind::Typed(
+        Box::new(inner),
+        AstType::Constructed(crate::ast::TypeName::Bool, vec![]),
+    ));
+    let cp = lower(&typed);
+    assert!(matches!(cp, CovPat::Wild));
+}
+
+#[test]
+fn lower_collapses_name_to_wild() {
+    assert!(matches!(lower(&name("x")), CovPat::Wild));
+}
+
+#[test]
+fn lower_constructor_keeps_name_and_sub_arity() {
+    let cp = lower(&ctor("foo", vec![wild(), name("y")]));
+    match cp {
+        CovPat::Ctor(n, sub) => {
+            assert_eq!(n, "foo");
+            assert_eq!(sub.len(), 2);
+            assert!(matches!(sub[0], CovPat::Wild));
+            assert!(matches!(sub[1], CovPat::Wild));
+        }
+        other => panic!("expected Ctor, got {:?}", other),
+    }
+}
+
+#[test]
+fn lower_literal_int_carries_text() {
+    let cp = lower(&lit_int("42"));
+    match cp {
+        CovPat::Lit(CovLit::Int(s)) => assert_eq!(s, "42"),
+        other => panic!("expected Int lit, got {:?}", other),
+    }
+}
+
+#[test]
+fn lower_literal_bool() {
+    let cp = lower(&lit_bool(true));
+    assert!(matches!(cp, CovPat::Lit(CovLit::Bool(true))));
+}
+
+#[test]
+fn lower_unit_pattern() {
+    assert!(matches!(lower(&pat(ast::PatternKind::Unit)), CovPat::UnitP));
+}
+
+// ----- Witness shape sanity -----
+
+#[test]
+fn missing_payload_witness_is_wild() {
+    // #left missing entirely; witness is #left(_).
+    let cases = arms(vec![ctor("right", vec![wild()])]);
+    let result = check_match(&sum_ab_payload(), &cases, dummy_span());
+    match result {
+        Err(CoverageError::NonExhaustive {
+            missing: CovPat::Ctor(n, sub),
+            ..
+        }) => {
+            assert_eq!(n, "left");
+            assert_eq!(sub.len(), 1, "missing #left witness has one payload slot");
+            assert!(
+                matches!(sub[0], CovPat::Wild),
+                "payload slot witness should be wild"
+            );
+        }
+        other => panic!("expected NonExhaustive #left(_), got {:?}", other),
+    }
+}

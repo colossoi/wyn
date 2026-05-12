@@ -186,3 +186,185 @@ def f(n: i32) i32 =
         chain.kind
     );
 }
+
+// =========================================================================
+// Additional coverage
+// =========================================================================
+
+#[test]
+fn match_three_arm_chain_has_two_ifs_then_bare_last() {
+    let program = compile_to_tlc_raw(
+        r#"
+def f(t: #a | #b | #c) i32 =
+  match t
+  case #a -> 1
+  case #b -> 2
+  case #c -> 3
+"#,
+    );
+    let lam_body = match &find_def_body(&program, "f").kind {
+        TermKind::Lambda(l) => &*l.body,
+        other => panic!("expected Lambda, got {:?}", other),
+    };
+    let outer_if = unwrap_match_let(lam_body);
+    let (then1, else1) = match &outer_if.kind {
+        TermKind::If {
+            then_branch,
+            else_branch,
+            ..
+        } => (then_branch.as_ref(), else_branch.as_ref()),
+        other => panic!("expected outer If, got {:?}", other),
+    };
+    assert!(matches!(&then1.kind, TermKind::IntLit(s) if s == "1"));
+    let (then2, else2) = match &else1.kind {
+        TermKind::If {
+            then_branch,
+            else_branch,
+            ..
+        } => (then_branch.as_ref(), else_branch.as_ref()),
+        other => panic!("expected nested If, got {:?}", other),
+    };
+    assert!(matches!(&then2.kind, TermKind::IntLit(s) if s == "2"));
+    assert!(matches!(&else2.kind, TermKind::IntLit(s) if s == "3"));
+}
+
+#[test]
+fn match_on_tuple_scrutinee() {
+    let program = compile_to_tlc_raw(
+        r#"
+def f(p: (i32, bool)) i32 =
+  match p
+  case (0, _)    -> 1
+  case (_, true) -> 2
+  case _         -> 3
+"#,
+    );
+    let lam_body = match &find_def_body(&program, "f").kind {
+        TermKind::Lambda(l) => &*l.body,
+        other => panic!("expected Lambda, got {:?}", other),
+    };
+    let outer_if = unwrap_match_let(lam_body);
+    assert!(
+        matches!(&outer_if.kind, TermKind::If { .. }),
+        "outer should be If"
+    );
+}
+
+#[test]
+fn match_with_name_arm_binds_scrutinee_name() {
+    let program = compile_to_tlc_raw(
+        r#"
+def f(n: i32) i32 =
+  match n
+  case 0 -> 0
+  case x -> x + 1
+"#,
+    );
+    let lam_body = match &find_def_body(&program, "f").kind {
+        TermKind::Lambda(l) => &*l.body,
+        other => panic!("expected Lambda, got {:?}", other),
+    };
+    let outer_if = unwrap_match_let(lam_body);
+    let else_b = match &outer_if.kind {
+        TermKind::If { else_branch, .. } => else_branch.as_ref(),
+        other => panic!("expected If, got {:?}", other),
+    };
+    match &else_b.kind {
+        TermKind::Let { body, .. } => {
+            assert!(
+                matches!(&body.kind, TermKind::App { .. }),
+                "Let body should be App, got {:?}",
+                body.kind
+            );
+        }
+        other => panic!("expected Let for name binding, got {:?}", other),
+    }
+}
+
+#[test]
+fn match_scrutinee_bound_to_fresh_symbol() {
+    let program = compile_to_tlc_raw(
+        r#"
+def f(n: i32) i32 =
+  match n
+  case 0 -> 0
+  case _ -> 1
+"#,
+    );
+    let lam_body = match &find_def_body(&program, "f").kind {
+        TermKind::Lambda(l) => &*l.body,
+        other => panic!("expected Lambda, got {:?}", other),
+    };
+    let outer_let_name = match &lam_body.kind {
+        TermKind::Let { name, .. } => *name,
+        other => panic!("expected outer Let, got {:?}", other),
+    };
+    let resolved = program.symbols.get(outer_let_name).map(|s| s.as_str()).unwrap_or("?");
+    assert!(
+        resolved.starts_with("_w_match_scrut_"),
+        "scrutinee should be bound to a fresh _w_match_scrut_* symbol, got '{}'",
+        resolved
+    );
+}
+
+#[test]
+fn match_with_constructor_payload_binding_emits_let() {
+    let program = compile_to_tlc_raw(
+        r#"
+def f(t: #boxed(i32) | #empty) i32 =
+  match t
+  case #boxed(x) -> x + 1
+  case #empty    -> 0
+"#,
+    );
+    let lam_body = match &find_def_body(&program, "f").kind {
+        TermKind::Lambda(l) => &*l.body,
+        other => panic!("expected Lambda, got {:?}", other),
+    };
+    let outer_if = unwrap_match_let(lam_body);
+    let then_b = match &outer_if.kind {
+        TermKind::If { then_branch, .. } => then_branch.as_ref(),
+        other => panic!("expected If, got {:?}", other),
+    };
+    assert!(
+        matches!(&then_b.kind, TermKind::Let { .. }),
+        "then should be Let for payload x: {:?}",
+        then_b.kind
+    );
+}
+
+#[test]
+fn match_constructor_arm_cond_is_tag_equality() {
+    let program = compile_to_tlc_raw(
+        r#"
+def f(t: #yes | #no) i32 =
+  match t
+  case #yes -> 1
+  case #no  -> 0
+"#,
+    );
+    let lam_body = match &find_def_body(&program, "f").kind {
+        TermKind::Lambda(l) => &*l.body,
+        other => panic!("expected Lambda, got {:?}", other),
+    };
+    let outer_if = unwrap_match_let(lam_body);
+    let cond = match &outer_if.kind {
+        TermKind::If { cond, .. } => cond.as_ref(),
+        other => panic!("expected If, got {:?}", other),
+    };
+    match &cond.kind {
+        TermKind::App { func, args } => {
+            assert!(
+                matches!(&func.kind, TermKind::BinOp(_)),
+                "func should be BinOp, got {:?}",
+                func.kind
+            );
+            assert_eq!(args.len(), 2, "== takes two args");
+            assert!(
+                matches!(&args[1].kind, TermKind::IntLit(_)),
+                "rhs should be tag literal"
+            );
+        }
+        other => panic!("expected App for cond, got {:?}", other),
+    }
+}
