@@ -136,7 +136,6 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::Program, stage: &str) {
             }
             TermKind::Soac(soac) => walk_soac(soac, bound, symbols, stage, def_name),
             TermKind::ArrayExpr(ae) => walk_array_expr(ae, bound, symbols, stage, def_name),
-            TermKind::Force(inner) => walk(inner, bound, symbols, stage, def_name),
 
             TermKind::Tuple(parts) | TermKind::VecLit(parts) => {
                 for p in parts {
@@ -241,9 +240,6 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::Program, stage: &str) {
                 }
             }
             ArrayExpr::Soac(soac) => walk_soac(soac, bound, symbols, stage, def_name),
-            ArrayExpr::Generate { index_fn, .. } => {
-                walk_lambda(&index_fn.lam, bound, symbols, stage, def_name)
-            }
             ArrayExpr::Literal(elems) => {
                 for e in elems {
                     walk(e, bound, symbols, stage, def_name);

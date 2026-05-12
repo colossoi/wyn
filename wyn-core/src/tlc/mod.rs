@@ -287,9 +287,6 @@ pub enum TermKind {
     /// Array producer expression.
     ArrayExpr(ArrayExpr),
 
-    /// Materialization barrier — forces an array expression to be computed.
-    Force(Box<Term>),
-
     /// Tuple constructor: `(a, b, c)` or record literal in tuple form.
     Tuple(Vec<Term>),
 
@@ -397,12 +394,6 @@ pub enum ArrayExpr {
     Zip(Vec<ArrayExpr>),
     /// SOAC producing an array.
     Soac(Box<SoacOp>),
-    /// Generator: `elem = index_fn(i)` for `i` in `0..shape`.
-    Generate {
-        shape: Shape,
-        index_fn: SoacBody,
-        elem_ty: Type<TypeName>,
-    },
     /// Literal small array.
     Literal(Vec<Term>),
     /// Range / iota. `step` defaults to 1 when `None`.
@@ -471,11 +462,18 @@ pub enum SoacOp {
         pred: SoacBody,
         input: ArrayExpr,
     },
+    // TODO(scatter): no producer in to_tlc yet. EGIR rejects this variant
+    // (`egir::from_tlc::convert_soac`). Kept so the SoacOp enum carries the
+    // place-passing SOAC shape — useful once Scatter is implemented.
     Scatter {
         dest: Place,
         indices: ArrayExpr,
         values: ArrayExpr,
     },
+    // TODO(reduce_by_index): produced by to_tlc but EGIR rejects
+    // (`egir::from_tlc::convert_soac`). Sequential lowering would be a
+    // straightforward read-combine-write loop; the parallel path needs
+    // atomic-op emission in the backends, which doesn't exist yet.
     ReduceByIndex {
         dest: Place,
         op: SoacBody,
@@ -712,8 +710,6 @@ impl Term {
 
             TermKind::ArrayExpr(ae) => TermKind::ArrayExpr(map_array_expr_children(ae, f)),
 
-            TermKind::Force(inner) => TermKind::Force(Box::new(f(*inner))),
-
             TermKind::Tuple(parts) => TermKind::Tuple(parts.into_iter().map(&mut *f).collect()),
 
             TermKind::TupleProj { tuple, idx } => TermKind::TupleProj {
@@ -792,7 +788,6 @@ impl Term {
 
             TermKind::Soac(soac) => visit_soac_children(soac, f),
             TermKind::ArrayExpr(ae) => visit_array_expr_children(ae, f),
-            TermKind::Force(inner) => f(inner),
 
             TermKind::Tuple(parts) | TermKind::VecLit(parts) => {
                 for p in parts {
@@ -902,7 +897,6 @@ where
             }
         }
         ArrayExpr::Soac(op) => visit_soac_children(op, f),
-        ArrayExpr::Generate { index_fn, .. } => visit_soac_body_children(index_fn, f),
         ArrayExpr::Literal(terms) => {
             for t in terms {
                 f(t);
@@ -1040,15 +1034,6 @@ where
             ArrayExpr::Zip(aes.into_iter().map(|ae| map_array_expr_children(ae, f)).collect())
         }
         ArrayExpr::Soac(op) => ArrayExpr::Soac(Box::new(map_soac_children(*op, f))),
-        ArrayExpr::Generate {
-            shape,
-            index_fn,
-            elem_ty,
-        } => ArrayExpr::Generate {
-            shape,
-            index_fn: map_soac_body_children(index_fn, f),
-            elem_ty,
-        },
         ArrayExpr::Literal(terms) => ArrayExpr::Literal(terms.into_iter().map(f).collect()),
         ArrayExpr::Range { start, len, step } => ArrayExpr::Range {
             start: Box::new(f(*start)),

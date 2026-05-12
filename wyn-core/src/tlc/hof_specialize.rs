@@ -269,9 +269,6 @@ pub(super) fn apply_type_subst_to_term(
         }
         TermKind::Soac(soac) => TermKind::Soac(apply_type_subst_to_soac(soac, subst, term_ids)),
         TermKind::ArrayExpr(ae) => TermKind::ArrayExpr(apply_type_subst_to_array_expr(ae, subst, term_ids)),
-        TermKind::Force(inner) => {
-            TermKind::Force(Box::new(apply_type_subst_to_term(inner, subst, term_ids)))
-        }
         TermKind::Tuple(parts) => {
             TermKind::Tuple(parts.iter().map(|p| apply_type_subst_to_term(p, subst, term_ids)).collect())
         }
@@ -404,15 +401,6 @@ pub(super) fn apply_type_subst_to_array_expr(
             exprs.iter().map(|e| apply_type_subst_to_array_expr(e, subst, term_ids)).collect(),
         ),
         ArrayExpr::Soac(op) => ArrayExpr::Soac(Box::new(apply_type_subst_to_soac(op, subst, term_ids))),
-        ArrayExpr::Generate {
-            shape,
-            index_fn,
-            elem_ty,
-        } => ArrayExpr::Generate {
-            shape: shape.clone(),
-            index_fn: apply_type_subst_to_soac_body(index_fn, subst, term_ids),
-            elem_ty: apply_type_subst(elem_ty, subst),
-        },
         ArrayExpr::Literal(terms) => {
             ArrayExpr::Literal(terms.iter().map(|t| apply_type_subst_to_term(t, subst, term_ids)).collect())
         }
@@ -678,13 +666,6 @@ pub(super) fn substitute_var(
             kind: TermKind::ArrayExpr(substitute_var_array_expr(ae, old_sym, new_sym, term_ids)),
         },
 
-        TermKind::Force(inner) => Term {
-            id: term_ids.next_id(),
-            ty: term.ty.clone(),
-            span: term.span,
-            kind: TermKind::Force(Box::new(substitute_var(inner, old_sym, new_sym, term_ids))),
-        },
-
         TermKind::Tuple(parts) => Term {
             id: term_ids.next_id(),
             ty: term.ty.clone(),
@@ -841,15 +822,6 @@ fn substitute_var_array_expr(
         ArrayExpr::Soac(op) => {
             ArrayExpr::Soac(Box::new(substitute_var_soac(op, old_sym, new_sym, term_ids)))
         }
-        ArrayExpr::Generate {
-            shape,
-            index_fn,
-            elem_ty,
-        } => ArrayExpr::Generate {
-            shape: shape.clone(),
-            index_fn: substitute_var_soac_body(index_fn, old_sym, new_sym, term_ids),
-            elem_ty: elem_ty.clone(),
-        },
         ArrayExpr::Literal(terms) => ArrayExpr::Literal(
             terms.iter().map(|t| substitute_var(t, old_sym, new_sym, term_ids)).collect(),
         ),
@@ -1065,13 +1037,6 @@ impl<'a> HofSpecializer<'a> {
                     },
                 }
             }
-
-            TermKind::Force(inner) => Term {
-                id: self.term_ids.next_id(),
-                ty,
-                span,
-                kind: TermKind::Force(Box::new(self.rewrite_term(*inner))),
-            },
 
             // SOAC envelopes don't trigger HOF specialization — their
             // bodies are already lifted top-level defs (closure-convert

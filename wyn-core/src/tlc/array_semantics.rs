@@ -70,12 +70,6 @@ pub enum ArraySemantics {
     /// Materialized constant array.
     Literal(Vec<Term>),
 
-    /// Generated sequence: output[i] = index_fn(i).
-    Generate {
-        shape: Shape,
-        index_fn: SoacBody,
-    },
-
     /// Range/iota: output[i] = start + i (with implicit step of 1).
     Range {
         start: Box<Term>,
@@ -145,7 +139,6 @@ impl ArraySemantics {
             ArraySemantics::ScatterOp { indices, values, .. } => vec![indices, values],
             ArraySemantics::IndexedReduction { indices, values, .. } => vec![indices, values],
             ArraySemantics::Literal(_)
-            | ArraySemantics::Generate { .. }
             | ArraySemantics::Range { .. }
             | ArraySemantics::StorageBuffer { .. }
             | ArraySemantics::Opaque => vec![],
@@ -166,8 +159,6 @@ pub enum FusionKind {
     MapIntoReduce,
     /// Compose map into scan: scan(op, ne, map(f, a)) → scan(op∘f, ne, a)
     MapIntoScan,
-    /// Inline a generator into an elementwise consumer
-    GenerateIntoMap,
     /// Inline a range into an elementwise consumer
     RangeIntoMap,
     /// Not fusible
@@ -187,11 +178,6 @@ pub fn can_fuse(producer: &ArraySemantics, consumer: &ArraySemantics) -> FusionK
 
         // Elementwise → PrefixScan: compose map into scan body
         (ArraySemantics::Elementwise { .. }, ArraySemantics::PrefixScan { .. }) => FusionKind::MapIntoScan,
-
-        // Generate → Elementwise: inline generator into map body
-        (ArraySemantics::Generate { .. }, ArraySemantics::Elementwise { .. }) => {
-            FusionKind::GenerateIntoMap
-        }
 
         // Range → Elementwise: inline range into map body
         (ArraySemantics::Range { .. }, ArraySemantics::Elementwise { .. }) => FusionKind::RangeIntoMap,
@@ -417,10 +403,6 @@ pub fn classify_array_expr(ae: &ArrayExpr) -> ArraySemantics {
         ArrayExpr::Ref(_) => ArraySemantics::Opaque, // just a reference, not a producer
         ArrayExpr::Zip(_) => ArraySemantics::Opaque, // zip is consumed by enclosing Map
         ArrayExpr::Soac(op) => classify_soac(op),
-        ArrayExpr::Generate { shape, index_fn, .. } => ArraySemantics::Generate {
-            shape: shape.clone(),
-            index_fn: index_fn.clone(),
-        },
         ArrayExpr::Literal(terms) => ArraySemantics::Literal(terms.clone()),
         ArrayExpr::Range { start, len, .. } => ArraySemantics::Range {
             start: start.clone(),

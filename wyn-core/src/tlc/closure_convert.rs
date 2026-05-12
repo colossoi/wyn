@@ -281,9 +281,6 @@ pub fn collect_free_vars(
         TermKind::ArrayExpr(ae) => {
             collect_free_vars_array_expr(ae, bound, top_level, known_defs, symbols, free, seen);
         }
-        TermKind::Force(inner) => {
-            collect_free_vars(inner, bound, top_level, known_defs, symbols, free, seen);
-        }
         TermKind::Tuple(parts) | TermKind::VecLit(parts) => {
             for p in parts {
                 collect_free_vars(p, bound, top_level, known_defs, symbols, free, seen);
@@ -413,9 +410,6 @@ pub fn collect_free_vars_array_expr(
         ArrayExpr::Soac(op) => {
             collect_free_vars_soac(op, bound, top_level, known_defs, symbols, free, seen)
         }
-        ArrayExpr::Generate { index_fn, .. } => {
-            collect_free_vars_soac_body(index_fn, bound, top_level, known_defs, symbols, free, seen);
-        }
         ArrayExpr::Literal(terms) => {
             for t in terms {
                 collect_free_vars(t, bound, top_level, known_defs, symbols, free, seen);
@@ -495,7 +489,7 @@ fn walk_no_lambdas(
     match &term.kind {
         TermKind::Lambda(_) => return Err(ClosureConvertError::UnliftedLambda { def: def_name }),
         TermKind::Soac(soac) => check_soac_envelopes(soac, def_name, top_level)?,
-        TermKind::ArrayExpr(ae) => check_array_expr_envelopes(ae, def_name, top_level)?,
+        TermKind::ArrayExpr(_) => {}
         _ => {}
     }
     let mut result = Ok(());
@@ -523,19 +517,6 @@ fn check_soac_envelopes(
     };
     for sb in bodies {
         if !is_lifted_body(&sb.lam.body, top_level) {
-            return Err(ClosureConvertError::SoacLambdaNotLifted { def: def_name });
-        }
-    }
-    Ok(())
-}
-
-fn check_array_expr_envelopes(
-    ae: &ArrayExpr,
-    def_name: SymbolId,
-    top_level: &HashSet<SymbolId>,
-) -> Result<(), ClosureConvertError> {
-    if let ArrayExpr::Generate { index_fn, .. } = ae {
-        if !is_lifted_body(&index_fn.lam.body, top_level) {
             return Err(ClosureConvertError::SoacLambdaNotLifted { def: def_name });
         }
     }
@@ -807,13 +788,6 @@ impl<'a> ClosureConverter<'a> {
                 kind: TermKind::ArrayExpr(self.convert_array_expr(ae, span)),
             },
 
-            TermKind::Force(inner) => Term {
-                id: self.term_ids.next_id(),
-                ty,
-                span,
-                kind: TermKind::Force(Box::new(self.convert_term(*inner))),
-            },
-
             // Leaf kinds — no rewriting.
             TermKind::Var(_)
             | TermKind::IntLit(_)
@@ -1063,15 +1037,6 @@ impl<'a> ClosureConverter<'a> {
                 ArrayExpr::Zip(exprs.into_iter().map(|e| self.convert_array_expr(e, span)).collect())
             }
             ArrayExpr::Soac(op) => ArrayExpr::Soac(Box::new(self.convert_soac(*op, span))),
-            ArrayExpr::Generate {
-                shape,
-                index_fn,
-                elem_ty,
-            } => ArrayExpr::Generate {
-                shape,
-                index_fn: self.lift_soac_lambda(index_fn.lam, span),
-                elem_ty,
-            },
             ArrayExpr::Literal(terms) => {
                 ArrayExpr::Literal(terms.into_iter().map(|t| self.convert_term(t)).collect())
             }

@@ -310,11 +310,6 @@ impl SoaTransformer {
 
             TermKind::ArrayExpr(ae) => self.transform_array_expr_term(ae, orig_ty, new_ty, span),
 
-            TermKind::Force(inner) => {
-                let new_inner = self.transform_term(inner);
-                self.mk_term(new_ty, span, TermKind::Force(Box::new(new_inner)))
-            }
-
             TermKind::Tuple(parts) => {
                 let new_parts: Vec<Term> = parts.iter().map(|p| self.transform_term(p)).collect();
                 self.mk_term(new_ty, span, TermKind::Tuple(new_parts))
@@ -736,15 +731,6 @@ impl SoaTransformer {
                 let new_op = self.transform_soac(op);
                 ArrayExpr::Soac(Box::new(new_op))
             }
-            ArrayExpr::Generate {
-                shape,
-                index_fn,
-                elem_ty,
-            } => ArrayExpr::Generate {
-                shape: shape.clone(),
-                index_fn: self.transform_soac_body(index_fn),
-                elem_ty: soa_type(elem_ty),
-            },
             ArrayExpr::Literal(terms) => {
                 let new_terms: Vec<Term> = terms.iter().map(|t| self.transform_term(t)).collect();
                 ArrayExpr::Literal(new_terms)

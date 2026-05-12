@@ -245,21 +245,6 @@ fn t5_nested_let_in_rhs() {
     assert_eq!(a.prefix_lets[0].0, y);
 }
 
-/// T6: Force wrapper — transparent.
-#[test]
-fn t6_force_wrapper() {
-    let mut b = B::new();
-    let p = b.sym("p");
-    let soac = b.trivial_map();
-    let soac_ty = soac.ty.clone();
-    let body = b.term(TermKind::Force(Box::new(soac)), soac_ty);
-    let name = b.sym("entry");
-    let def = b.entry_def(name, vec![(p, i32_ty())], body);
-    let a = analyze_entry(&def, &b.symbols).expect("should find SOAC through Force");
-    assert!(a.prefix_lets.is_empty());
-    assert!(matches!(a.soac.original, SoacOp::Map { .. }));
-}
-
 /// T7: SOAC inside an If arm — If is the tail, reject.
 #[test]
 fn t7_if_arm_rejected() {

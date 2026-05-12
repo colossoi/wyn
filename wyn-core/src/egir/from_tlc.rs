@@ -920,9 +920,6 @@ impl<'a> Converter<'a> {
             // --- Extern ---
             TermKind::Extern(name) => Ok(self.intern_pure(PureOp::Extern(name.clone()), smallvec![], ty)),
 
-            // --- Force (pass-through) ---
-            TermKind::Force(inner) => self.convert_term(inner),
-
             // --- If/else (Step 3) ---
             TermKind::If {
                 cond,
@@ -1591,7 +1588,14 @@ impl<'a> Converter<'a> {
             } => self.convert_soac_redomap(op, reduce_op, ne, inputs, ty),
             SoacOp::Scan { op, ne, input } => self.convert_soac_scan(op, ne, input, ty),
             SoacOp::Filter { .. } => Err(ConvertError::Unsupported("SOAC filter".into())),
+            // TODO(scatter): no producer in to_tlc yet (no surface name dispatched here).
+            // Variant exists to anchor the place-passing SOAC shape; remove if a wider
+            // audit confirms no future use.
             SoacOp::Scatter { .. } => Err(ConvertError::Unsupported("SOAC scatter".into())),
+            // TODO(reduce_by_index): parallel path needs atomic-op emission
+            // (atomicAdd/atomicMin/etc.) in spirv/wgsl/glsl backends — not yet wired.
+            // Sequential lowering is straightforward (read-combine-write loop) but
+            // also not yet wired. Produced by `to_tlc::transform_soac_reduce_by_index`.
             SoacOp::ReduceByIndex { .. } => Err(ConvertError::Unsupported("SOAC reduce_by_index".into())),
         }
     }
@@ -1786,7 +1790,6 @@ impl<'a> Converter<'a> {
             ArrayExpr::Ref(term) => self.convert_term(term),
             ArrayExpr::Zip(_) => panic!("ArrayExpr::Zip should have been eliminated by soa::normalize"),
             ArrayExpr::Soac(op) => self.convert_soac(op, ty),
-            ArrayExpr::Generate { .. } => Err(ConvertError::Unsupported("ArrayExpr::Generate".into())),
             ArrayExpr::Literal(terms) => {
                 let operands: SmallVec<[NodeId; 4]> =
                     terms.iter().map(|t| self.convert_term(t)).collect::<Result<_, _>>()?;
@@ -1862,7 +1865,6 @@ impl<'a> Converter<'a> {
             ArrayExpr::Ref(t) => crate::types::strip_unique(&t.ty),
             ArrayExpr::Zip(_) => unreachable!("Zip eliminated"),
             ArrayExpr::Soac(_) => Type::Constructed(TypeName::Unit, vec![]),
-            ArrayExpr::Generate { elem_ty, .. } => elem_ty.clone(),
             ArrayExpr::Literal(_) => Type::Constructed(TypeName::Unit, vec![]),
             ArrayExpr::Range { start, .. } => Type::Constructed(
                 TypeName::Array,
@@ -1898,7 +1900,6 @@ impl<'a> Converter<'a> {
             },
             ArrayExpr::Zip(_) => unreachable!("Zip eliminated"),
             ArrayExpr::Soac(_) => Type::Constructed(TypeName::Unit, vec![]),
-            ArrayExpr::Generate { elem_ty, .. } => elem_ty.clone(),
             ArrayExpr::Literal(terms) => {
                 terms.first().map(|t| t.ty.clone()).unwrap_or(Type::Constructed(TypeName::Unit, vec![]))
             }

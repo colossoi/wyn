@@ -352,7 +352,6 @@ fn find_app_call_to<'a>(body: &'a Term, names: &[&str], program: &Program) -> Op
                 }
                 walk(body, names, program)
             }
-            TermKind::Force(inner) => walk(inner, names, program),
             _ => None,
         }
     }
@@ -680,9 +679,6 @@ fn binder_origin(program: &Program, fn_name: &str, var_name: &str) -> (super::Ow
             TermKind::Loop { init, body, .. } => {
                 found =
                     find_let_sym(init, var_name, program).or_else(|| find_let_sym(body, var_name, program));
-            }
-            TermKind::Force(inner) => {
-                found = find_let_sym(inner, var_name, program);
             }
             _ => {}
         }

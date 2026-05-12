@@ -543,8 +543,6 @@ impl<'a> Monomorphizer<'a> {
 
             TermKind::ArrayExpr(ref ae) => TermKind::ArrayExpr(self.process_array_expr(ae)),
 
-            TermKind::Force(ref inner) => TermKind::Force(Box::new(self.process_term(inner))),
-
             TermKind::Tuple(ref parts) => {
                 TermKind::Tuple(parts.iter().map(|p| self.process_term(p)).collect())
             }
@@ -652,15 +650,6 @@ impl<'a> Monomorphizer<'a> {
                 ArrayExpr::Zip(exprs.iter().map(|e| self.process_array_expr(e)).collect())
             }
             ArrayExpr::Soac(op) => ArrayExpr::Soac(Box::new(self.process_soac(op))),
-            ArrayExpr::Generate {
-                shape,
-                index_fn,
-                elem_ty,
-            } => ArrayExpr::Generate {
-                shape: shape.clone(),
-                index_fn: self.process_soac_body(index_fn),
-                elem_ty: elem_ty.clone(),
-            },
             ArrayExpr::Literal(terms) => {
                 ArrayExpr::Literal(terms.iter().map(|t| self.process_term(t)).collect())
             }
@@ -820,8 +809,6 @@ impl<'a> Monomorphizer<'a> {
             TermKind::Soac(ref soac) => TermKind::Soac(self.apply_subst_soac(soac, subst)),
 
             TermKind::ArrayExpr(ref ae) => TermKind::ArrayExpr(self.apply_subst_array_expr(ae, subst)),
-
-            TermKind::Force(ref inner) => TermKind::Force(Box::new(self.apply_subst_term(inner, subst))),
 
             TermKind::Tuple(parts) => {
                 TermKind::Tuple(parts.iter().map(|p| self.apply_subst_term(p, subst)).collect())
@@ -1010,15 +997,6 @@ impl<'a> Monomorphizer<'a> {
                 ArrayExpr::Zip(exprs.iter().map(|e| self.apply_subst_array_expr(e, subst)).collect())
             }
             ArrayExpr::Soac(op) => ArrayExpr::Soac(Box::new(self.apply_subst_soac(op, subst))),
-            ArrayExpr::Generate {
-                shape,
-                index_fn,
-                elem_ty,
-            } => ArrayExpr::Generate {
-                shape: shape.clone(),
-                index_fn: self.apply_subst_soac_body(index_fn, subst),
-                elem_ty: apply_subst(elem_ty, subst),
-            },
             ArrayExpr::Literal(terms) => {
                 ArrayExpr::Literal(terms.iter().map(|t| self.apply_subst_term(t, subst)).collect())
             }

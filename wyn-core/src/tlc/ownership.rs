@@ -568,12 +568,11 @@ impl<'p> Builder<'p> {
                 // No tracked owner — fall back to the term's static type.
                 if types::is_unique(&t.ty) { Origin::BorrowedMutableElement } else { Origin::Borrowed }
             }
-            // Fresh-producer ArrayExprs: literal/generate/range/soac
-            // synthesize a new array, so element views are mutable.
-            ArrayExpr::Literal(_)
-            | ArrayExpr::Generate { .. }
-            | ArrayExpr::Range { .. }
-            | ArrayExpr::Soac(_) => Origin::BorrowedMutableElement,
+            // Fresh-producer ArrayExprs: literal/range/soac synthesize
+            // a new array, so element views are mutable.
+            ArrayExpr::Literal(_) | ArrayExpr::Range { .. } | ArrayExpr::Soac(_) => {
+                Origin::BorrowedMutableElement
+            }
             // Storage-buffer-backed views: conservative borrow.
             ArrayExpr::StorageBuffer { .. } => Origin::Borrowed,
             // Zip is a phase-scoped sentinel that should be absorbed
@@ -597,7 +596,6 @@ impl<'p> Builder<'p> {
             // `lambda_body_fixed_point` looks up by the call site's
             // own id, so this sentinel collision is harmless.
             ArrayExpr::Soac(op) => self.visit_soac(op, TermId(u32::MAX)),
-            ArrayExpr::Generate { index_fn, .. } => self.visit_soac_body(index_fn),
             ArrayExpr::Literal(terms) => {
                 for t in terms {
                     self.visit_term(t);
@@ -830,8 +828,6 @@ impl<'m> Liveness<'m> {
 
             TermKind::ArrayExpr(ae) => self.analyze_array_expr(ae, live_after),
 
-            TermKind::Force(inner) => self.analyze(inner, live_after),
-
             TermKind::Tuple(parts) | TermKind::VecLit(parts) => {
                 let mut live = self.transfer(term.id, live_after);
                 for p in parts.iter().rev() {
@@ -1001,7 +997,6 @@ impl<'m> Liveness<'m> {
                 live
             }
             ArrayExpr::Soac(op) => self.analyze_soac(op, live_after, TermId(u32::MAX)),
-            ArrayExpr::Generate { index_fn, .. } => self.analyze_soac_body(index_fn, live_after),
             ArrayExpr::Literal(terms) => {
                 let mut live = live_after;
                 for t in terms.iter().rev() {
@@ -1272,7 +1267,6 @@ fn collect_tail_soac_ids(term: &Term, out: &mut HashSet<TermId>) {
             out.insert(term.id);
         }
         TermKind::Let { body, .. } => collect_tail_soac_ids(body, out),
-        TermKind::Force(inner) => collect_tail_soac_ids(inner, out),
         TermKind::If {
             then_branch,
             else_branch,

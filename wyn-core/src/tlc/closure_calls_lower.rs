@@ -119,7 +119,6 @@ fn discriminant_name(kind: &TermKind) -> &'static str {
         TermKind::Loop { .. } => "Loop",
         TermKind::Soac(_) => "Soac",
         TermKind::ArrayExpr(_) => "ArrayExpr",
-        TermKind::Force(_) => "Force",
         TermKind::Tuple(_) => "Tuple",
         TermKind::TupleProj { .. } => "TupleProj",
         TermKind::Index { .. } => "Index",
@@ -309,13 +308,6 @@ impl<'a> CallLowerer<'a> {
                 kind: TermKind::ArrayExpr(self.lower_array_expr(ae)),
             },
 
-            TermKind::Force(inner) => Term {
-                id: self.term_ids.next_id(),
-                ty,
-                span,
-                kind: TermKind::Force(Box::new(self.lower_term(*inner))),
-            },
-
             TermKind::Lambda(_)
             | TermKind::Var(_)
             | TermKind::IntLit(_)
@@ -493,22 +485,6 @@ impl<'a> CallLowerer<'a> {
                 ArrayExpr::Zip(exprs.into_iter().map(|e| self.lower_array_expr(e)).collect())
             }
             ArrayExpr::Soac(op) => ArrayExpr::Soac(Box::new(self.lower_soac(*op))),
-            ArrayExpr::Generate {
-                shape,
-                index_fn,
-                elem_ty,
-            } => ArrayExpr::Generate {
-                shape,
-                index_fn: super::SoacBody {
-                    lam: index_fn.lam,
-                    captures: index_fn
-                        .captures
-                        .into_iter()
-                        .map(|(s, ty, t)| (s, ty, self.lower_term(t)))
-                        .collect(),
-                },
-                elem_ty,
-            },
             ArrayExpr::Literal(terms) => {
                 ArrayExpr::Literal(terms.into_iter().map(|t| self.lower_term(t)).collect())
             }

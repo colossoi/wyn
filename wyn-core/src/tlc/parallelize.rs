@@ -228,9 +228,6 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
                 scope.push_lambda_params(&lam.params);
                 current = *lam.body;
             }
-            TermKind::Force(inner) => {
-                current = *inner;
-            }
             TermKind::Let {
                 name,
                 name_ty,

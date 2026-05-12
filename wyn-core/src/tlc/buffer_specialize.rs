@@ -499,14 +499,6 @@ impl BufferSpecializer {
                 }
             }
 
-            TermKind::Force(inner) => {
-                let new_inner = self.rewrite_term(inner);
-                Term {
-                    kind: TermKind::Force(Box::new(new_inner)),
-                    ..term.clone()
-                }
-            }
-
             // Leaves — no rewriting needed
             TermKind::Var(_)
             | TermKind::BinOp(_)
@@ -672,15 +664,6 @@ impl BufferSpecializer {
             ArrayExpr::Ref(t) => ArrayExpr::Ref(Box::new(self.rewrite_term(t))),
             ArrayExpr::Zip(aes) => ArrayExpr::Zip(aes.iter().map(|a| self.rewrite_array_expr(a)).collect()),
             ArrayExpr::Soac(op) => ArrayExpr::Soac(Box::new(self.rewrite_soac(op))),
-            ArrayExpr::Generate {
-                shape,
-                index_fn,
-                elem_ty,
-            } => ArrayExpr::Generate {
-                shape: shape.clone(),
-                index_fn: self.rewrite_soac_body(index_fn),
-                elem_ty: elem_ty.clone(),
-            },
             ArrayExpr::Literal(terms) => {
                 ArrayExpr::Literal(terms.iter().map(|t| self.rewrite_term(t)).collect())
             }
@@ -1105,14 +1088,6 @@ impl BufferSpecializer {
                 }
             }
 
-            TermKind::Force(inner) => {
-                let new_inner = self.rewrite_specialized_body(inner, view_params);
-                Term {
-                    kind: TermKind::Force(Box::new(new_inner)),
-                    ..term.clone()
-                }
-            }
-
             // Leaves
             TermKind::Var(VarRef::Symbol(_)) => {
                 // If this var refers to a view param that was replaced,
@@ -1353,15 +1328,6 @@ impl BufferSpecializer {
             ArrayExpr::Soac(op) => {
                 ArrayExpr::Soac(Box::new(self.rewrite_specialized_soac(op, view_params)))
             }
-            ArrayExpr::Generate {
-                shape,
-                index_fn,
-                elem_ty,
-            } => ArrayExpr::Generate {
-                shape: shape.clone(),
-                index_fn: self.rewrite_specialized_soac_body(index_fn, view_params),
-                elem_ty: elem_ty.clone(),
-            },
             ArrayExpr::Literal(terms) => ArrayExpr::Literal(
                 terms.iter().map(|t| self.rewrite_specialized_body(t, view_params)).collect(),
             ),

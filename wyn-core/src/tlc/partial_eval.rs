@@ -220,7 +220,7 @@ impl PartialEvaluator {
             TermKind::Extern(_) => Value::Unknown(term.clone()),
 
             // SOAC nodes are opaque to partial evaluation — residualize
-            TermKind::Soac(_) | TermKind::ArrayExpr(_) | TermKind::Force(_) => Value::Unknown(term.clone()),
+            TermKind::Soac(_) | TermKind::ArrayExpr(_) => Value::Unknown(term.clone()),
 
             // Structural ops: evaluate children so let-bound `Var`s
             // get substituted through, then rebuild the variant. Without
