@@ -1301,8 +1301,11 @@ entry main(x: []f32) [4]f32 = f(x[0])
 /// Test the specific raytrace.wyn file compiles to SPIR-V.
 #[test]
 fn test_spirv_raytrace() {
-    let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../testfiles/playground/raytrace.wyn"))
-        .expect("Could not read testfiles/playground/raytrace.wyn");
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../testfiles/playground/raytrace.wyn"
+    ))
+    .expect("Could not read testfiles/playground/raytrace.wyn");
     compile_to_spirv(&source).expect("raytrace.wyn should compile to SPIR-V");
 }
 
@@ -1343,8 +1346,11 @@ entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f3
 /// enough that compile_to_ssa_with_modules succeeds.)
 #[test]
 fn test_ssa_raytrace_well_formed() {
-    let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../testfiles/playground/raytrace.wyn"))
-        .expect("Could not read testfiles/playground/raytrace.wyn");
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../testfiles/playground/raytrace.wyn"
+    ))
+    .expect("Could not read testfiles/playground/raytrace.wyn");
 
     let ssa = compile_to_ssa_with_modules(&source);
 
