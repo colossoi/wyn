@@ -283,8 +283,11 @@ def trace(ro: vec3f32, rd: vec3f32, maxBounces: i32) vec3f32 =
 ------------------------------------------------------------
 
 def getCamera(time: f32, mouse: vec4f32, resolution: vec2f32) (vec3f32, vec3f32, vec3f32, vec3f32) =
-  let mouseAngleX = if mouse.z > 0.0 then (mouse.x / resolution.x - 0.5) * pi * 2.0 else 0.0 in
-  let mouseAngleY = if mouse.z > 0.0 then (mouse.y / resolution.y - 0.5) * pi * 0.5 else 0.0 in
+  let (mouseAngleX, mouseAngleY) =
+    if mouse.z > 0.0
+    then ((mouse.x / resolution.x - 0.5) * pi * 2.0,
+          (mouse.y / resolution.y - 0.5) * pi * 0.5)
+    else (0.0, 0.0) in
 
   let baseAngle = time * 0.3 in
   let angle = baseAngle + mouseAngleX in
