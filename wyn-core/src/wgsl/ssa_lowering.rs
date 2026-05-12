@@ -2316,6 +2316,18 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     let index = operands[1];
                     let base_val = self.get_value(base)?;
                     let index_val = self.get_value(index)?;
+                    // For a Bounded base the materialized value is a
+                    // `{f0: array<T,N>, f1: i32}` struct, so the dynamic
+                    // index has to traverse the `f0` member first.
+                    if let Some(id) = base.as_ssa() {
+                        let base_ty = self.body.get_value_type(id);
+                        if matches!(
+                            base_ty.array_variant(),
+                            Some(PolyType::Constructed(TypeName::ArrayVariantBounded, _))
+                        ) {
+                            return Ok(format!("{}.f0[{}]", base_val, index_val));
+                        }
+                    }
                     Ok(format!("{}[{}]", base_val, index_val))
                 }
 

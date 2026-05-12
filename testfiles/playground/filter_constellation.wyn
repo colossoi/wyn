@@ -1,0 +1,88 @@
+-- "Filter constellation"
+--
+-- 12 candidate points placed evenly around a circle. A time-varying
+-- predicate decides which are "alive" each frame (phase-staggered
+-- sine gate), and `filter(...)` produces a Bounded array of the
+-- active indices. We then sample two indices out of the filtered
+-- result — the first and (one past) the middle — to position two
+-- glow centers, and use `length(active)` (the runtime count) to
+-- modulate overall brightness.
+--
+-- Exercises the new `ArrayVariantBounded` array variant end-to-end:
+--   * filter result observed via `length(...)` (member-1 extract)
+--   * filter result indexed via `active[k]` (member-0 access)
+--   * Bounded values flow into pure arithmetic alongside non-Bounded
+--     i32s without coercion drama.
+
+open f32
+
+#[uniform(set=1, binding=0)] def iResolution: vec3f32
+#[uniform(set=1, binding=1)] def iTime: f32
+
+------------------------------------------------------------
+-- Vertex: full-screen triangle.
+------------------------------------------------------------
+def verts: [3]vec4f32 =
+  [@[-1.0, -1.0, 0.0, 1.0],
+   @[3.0, -1.0, 0.0, 1.0],
+   @[-1.0, 3.0, 0.0, 1.0]]
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vid: i32)
+  #[builtin(position)] vec4f32 = verts[vid]
+
+------------------------------------------------------------
+-- Candidate set: 12 point indices.
+------------------------------------------------------------
+def candidate_ids: [12]i32 = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+
+-- Polar position of candidate `i`, inscribed on a 0.65-radius circle.
+def angle_of(i: i32) f32 = 6.28318 / 12.0 * f32.i32(i)
+def point_of(i: i32) vec2f32 =
+  @[0.65 * cos(angle_of(i)), 0.65 * sin(angle_of(i))]
+
+------------------------------------------------------------
+-- Iñigo Quilez cosine palette.
+------------------------------------------------------------
+def palette(t: f32) vec3f32 =
+  let k = 6.28318 * (@[1.0, 1.0, 1.0] * t + @[0.0, 0.18, 0.42]) in
+  @[0.5, 0.5, 0.5] + @[0.5, 0.5, 0.5] * @[cos(k.x), cos(k.y), cos(k.z)]
+
+------------------------------------------------------------
+-- Fragment.
+------------------------------------------------------------
+#[fragment]
+entry fragment_main(#[builtin(position)] fragCoord: vec4f32)
+  #[location(0)] vec4f32 =
+  let coord  = @[fragCoord.x, iResolution.y - fragCoord.y] in
+  let uv01   = coord / iResolution.xy in
+  let aspect = iResolution.x / iResolution.y in
+  let uv     = @[(uv01.x * 2.0 - 1.0) * aspect, uv01.y * 2.0 - 1.0] in
+
+  -- Predicate captures `iTime`. Each candidate has its own phase
+  -- offset so the 12 points blink on and off at staggered intervals.
+  let active = filter(|i: i32|
+                        sin(iTime * 0.9 + f32.i32(i) * 0.523) > 0.0,
+                      candidate_ids) in
+
+  let n      = length(active) in
+  let n_f    = f32.i32(n) in
+  let pulse  = n_f / 12.0 in
+
+  -- Two glow centers picked out of the filtered list. Guarded against
+  -- the all-dead frame with `if n > 0 ...` so we never read past the
+  -- valid prefix of the buffer.
+  let id_a   = if n > 0 then active[0]     else 0 in
+  let id_b   = if n > 1 then active[n / 2] else id_a in
+  let pa     = point_of(id_a) in
+  let pb     = point_of(id_b) in
+
+  let da     = magnitude(uv - pa) in
+  let db     = magnitude(uv - pb) in
+  let glow_a = pulse / (32.0 * da * da + 0.18) in
+  let glow_b = pulse / (32.0 * db * db + 0.18) in
+  let glow   = glow_a + 0.55 * glow_b in
+
+  -- Hue cycles with the count, so the screen color tracks "how busy".
+  let tint   = palette(pulse + iTime * 0.07) in
+  @[tint.x * glow, tint.y * glow, tint.z * glow, 1.0]

@@ -1508,13 +1508,32 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     let index = operands[1];
                     let base_var = self.get_value_ref(base)?;
                     let index_id = self.get_value_ref(index)?;
+                    let base_ty = self.get_value_type_ref(base);
+                    // For a Bounded base, the underlying value is a struct
+                    // `{buffer: [N]T, len: i32}`, so the access chain has to
+                    // index member 0 first (constant) before the dynamic
+                    // index reaches the array element. Other variants
+                    // (Composite/View/Virtual) chain directly to the
+                    // element.
                     let elem_ptr_type = self.constructor.builder.type_pointer(
                         None,
                         spirv::StorageClass::Function,
                         result_ty,
                     );
-                    let elem_ptr =
-                        self.constructor.builder.access_chain(elem_ptr_type, None, base_var, [index_id])?;
+                    let elem_ptr = if matches!(
+                        base_ty.array_variant(),
+                        Some(PolyType::Constructed(TypeName::ArrayVariantBounded, _))
+                    ) {
+                        let zero = self.constructor.const_u32(0);
+                        self.constructor.builder.access_chain(
+                            elem_ptr_type,
+                            None,
+                            base_var,
+                            [zero, index_id],
+                        )?
+                    } else {
+                        self.constructor.builder.access_chain(elem_ptr_type, None, base_var, [index_id])?
+                    };
                     self.constructor.builder.load(result_ty, None, elem_ptr, None, [])?
                 }
 
