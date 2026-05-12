@@ -3380,6 +3380,39 @@ def f(v: vec3f32, m: mat2f32) vec3f32 =
 }
 
 #[test]
+fn test_parse_vec_with_swizzle_value_captures_full_binop() {
+    // Regression: `v with .y = v.y + s` must parse with the `+` *inside*
+    // the VecWith's `value`, so only the y component is updated. Earlier
+    // the value RHS was parsed at precedence 11 — higher than `+` at 6 —
+    // so the parser closed the VecWith at `v.y` and then attached `+ s`
+    // outside, producing `(v with .y = v.y) + s`. That second AST type-
+    // checks as a vec3+f32 broadcast: every component gets `+ s`, which
+    // is the wrong semantics and the source of the octagrams flicker.
+    let src = "def f(v: vec3f32, s: f32) vec3f32 = v with .y = v.y + s";
+    let decl = single_decl(src);
+    match &decl.body.kind {
+        ExprKind::VecWith {
+            components, value, ..
+        } => {
+            assert_eq!(components, &[1u8], "swizzle should be .y");
+            match &value.kind {
+                ExprKind::BinaryOp(op, _, _) => assert_eq!(op.op, "+"),
+                other => panic!(
+                    "value of `with .y =` must be the full `v.y + s` BinaryOp; \
+                     got {:?} — the `+` leaked outside the VecWith",
+                    other
+                ),
+            }
+        }
+        other => panic!(
+            "top-level expression must be VecWith (the `+` must be nested \
+             inside `value`); got {:?}",
+            other
+        ),
+    }
+}
+
+#[test]
 fn test_parse_vec_with_swizzle_duplicate_components_rejected() {
     let src = "def f(v: vec3f32, e: vec2f32) vec3f32 = v with .xx = e";
     expect_parse_error(src, |err| match err {

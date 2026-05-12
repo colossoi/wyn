@@ -1511,6 +1511,16 @@ impl<'a> Parser<'a> {
         self.parse_binary_expression_with_precedence(0)
     }
 
+    /// Parse the RHS of `with [i] = e`, `with .swizzle [op]= e`, or
+    /// `with field = e`. Accepts the full binary expression (so
+    /// `v with .y = v.y + s` lowers `s` *inside* the with-value), but
+    /// rejects a trailing `with` at the same level so chained forms
+    /// like `a with .x = e1 with .y = e2` retain their left-
+    /// associative interpretation `(a with .x = e1) with .y = e2`.
+    fn parse_with_value(&mut self) -> Result<Expression> {
+        self.parse_binary_expression_with_precedence_ex(0, false)
+    }
+
     fn get_operator_precedence(op: &str) -> Option<(u32, bool)> {
         // Returns (precedence, is_left_associative)
         // Dominating precedence (higher number) binds tighter than dominated precedence
@@ -1531,6 +1541,19 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_binary_expression_with_precedence(&mut self, dominated_by: u32) -> Result<Expression> {
+        self.parse_binary_expression_with_precedence_ex(dominated_by, true)
+    }
+
+    /// Like `parse_binary_expression_with_precedence`, but `allow_with`
+    /// gates whether a top-level `with` operator is consumed here.
+    /// Setting it to `false` keeps `with` from being swallowed when we're
+    /// already inside the RHS of an outer `with`, preserving the left-
+    /// associative chained semantics — see `parse_with_value`.
+    fn parse_binary_expression_with_precedence_ex(
+        &mut self,
+        dominated_by: u32,
+        allow_with: bool,
+    ) -> Result<Expression> {
         trace!(
             "parse_binary_expression_with_precedence({}): next token = {:?}",
             dominated_by,
@@ -1544,7 +1567,7 @@ impl<'a> Parser<'a> {
             // Two LHS forms are accepted:
             //   array form:    a with [i] = e
             //   swizzle form:  v with .yz = e   (or `.yz *= e` for compound)
-            if self.check(&Token::With) && dominated_by <= 10 {
+            if allow_with && self.check(&Token::With) && dominated_by <= 10 {
                 let start_span = left.h.span;
                 self.advance(); // consume 'with'
 
@@ -1554,8 +1577,7 @@ impl<'a> Parser<'a> {
                     self.expect(Token::RightBracket)?;
                     self.expect(Token::Assign)?;
 
-                    // Parse value dominated by 11 for left-associativity
-                    let value = self.parse_binary_expression_with_precedence(11)?;
+                    let value = self.parse_with_value()?;
                     let end_span = self.previous_span();
                     let span = start_span.merge(&end_span);
 
@@ -1635,7 +1657,7 @@ impl<'a> Parser<'a> {
                         ),
                     };
 
-                    let value = self.parse_binary_expression_with_precedence(11)?;
+                    let value = self.parse_with_value()?;
                     let end_span = self.previous_span();
                     let span = start_span.merge(&end_span);
 
@@ -1675,7 +1697,7 @@ impl<'a> Parser<'a> {
                     }
                     self.expect(Token::Assign)?;
 
-                    let value = self.parse_binary_expression_with_precedence(11)?;
+                    let value = self.parse_with_value()?;
                     let end_span = self.previous_span();
                     let span = start_span.merge(&end_span);
 
@@ -1725,7 +1747,7 @@ impl<'a> Parser<'a> {
                 precedence // Right-assoc: right side at same level
             };
 
-            let right = self.parse_binary_expression_with_precedence(right_dominated_by)?;
+            let right = self.parse_binary_expression_with_precedence_ex(right_dominated_by, allow_with)?;
 
             // Build the appropriate operation with span from left to right
             let span = left.h.span.merge(&right.h.span);
