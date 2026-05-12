@@ -29,6 +29,7 @@
 
 use crate::ast::{Span, TypeName};
 use crate::interface;
+use crate::op::OpTag;
 use polytype::Type;
 use rspirv::spirv;
 use slotmap::SlotMap;
@@ -176,87 +177,19 @@ impl TerminatorExt for Terminator {
 // =============================================================================
 
 /// The kind of operation an instruction performs.
+///
+/// Pure operations (literals, arithmetic, calls, intrinsics, view ops,
+/// materialize/extract) all collapse into a single `Op { tag, operands }`
+/// variant carrying an `OpTag` from `crate::op`. The five effectful
+/// variants stay separate because they carry a `PlaceId`, which can't
+/// fold into an operand list.
 #[derive(Debug, Clone)]
 pub enum InstKind {
-    // =========================================================================
-    // Pure Operations (no effect tokens needed)
-    // =========================================================================
-    /// Integer literal.
-    Int(String),
-    /// Float literal.
-    Float(String),
-    /// Boolean literal.
-    Bool(bool),
-    /// Unit value.
-    Unit,
-
-    /// Binary operation.
-    BinOp {
-        op: String,
-        lhs: ValueRef,
-        rhs: ValueRef,
-    },
-
-    /// Unary operation.
-    UnaryOp {
-        op: String,
-        operand: ValueRef,
-    },
-
-    /// Tuple construction.
-    Tuple(Vec<ValueRef>),
-
-    /// Array construction with literal elements.
-    ArrayLit {
-        elements: Vec<ValueRef>,
-    },
-
-    /// Array from range (virtual, computed on demand).
-    ArrayRange {
-        start: ValueRef,
-        /// Length of the range.
-        len: ValueRef,
-        /// Step (None means 1).
-        step: Option<ValueRef>,
-    },
-
-    /// Vector construction (@[x, y, z]).
-    Vector(Vec<ValueRef>),
-
-    /// Matrix construction (@[[a, b], [c, d]]).
-    Matrix(Vec<Vec<ValueRef>>),
-
-    /// Tuple/struct field projection.
-    Project {
-        base: ValueRef,
-        index: u32,
-    },
-
-    /// Array/vector indexing (for fixed-size arrays).
-    Index {
-        base: ValueRef,
-        index: ValueRef,
-    },
-
-    /// Function call.
-    Call {
-        func: String,
-        args: Vec<ValueRef>,
-    },
-
-    /// Reference to a global constant or function.
-    Global(String),
-
-    /// External function reference (linked SPIR-V).
-    Extern(String),
-
-    /// Compiler intrinsic call. `overload_idx` selects the entry in
-    /// `BuiltinDef::overloads()`; backends dispatch via
-    /// `def.overloads()[overload_idx].lowering`.
-    Intrinsic {
-        id: crate::builtins::BuiltinId,
-        overload_idx: usize,
-        args: Vec<ValueRef>,
+    /// A pure operation. Operand layout per tag is documented on
+    /// `OpTag` in `crate::op`.
+    Op {
+        tag: OpTag,
+        operands: Vec<ValueRef>,
     },
 
     // =========================================================================
@@ -279,13 +212,6 @@ pub enum InstKind {
         value: ValueRef,
     },
 
-    /// Create a storage buffer view.
-    StorageView {
-        source: ViewSource,
-        offset: ValueRef,
-        len: ValueRef,
-    },
-
     /// Index into a storage view. Produces an addressable place
     /// (see `PlaceId` — registered in `FuncBody.places` at emit time).
     ViewIndex {
@@ -294,38 +220,12 @@ pub enum InstKind {
         result: PlaceId,
     },
 
-    /// Get the length of a storage view.
-    StorageViewLen {
-        view: ValueRef,
-    },
-
-    // =========================================================================
-    // Entry Point I/O
-    // =========================================================================
     /// An entry-point output slot — a Place that `Store` writes into before
     /// returning. Registered in `FuncBody.places` at emit time.
     OutputSlot {
         /// Index of the output (0 for single output, 0..n for tuple outputs).
         index: usize,
         result: PlaceId,
-    },
-
-    // =========================================================================
-    // Late lowering forms (introduced by backend-specific prep passes)
-    // =========================================================================
-    /// Produce an addressable representation of a composite value, suitable for
-    /// backends that require memory-backed access for dynamic indexing.
-    /// The result is an opaque immutable handle — never written to after creation.
-    /// Pure and hoistable: two Materialize of the same value are equivalent.
-    Materialize {
-        value: ValueRef,
-    },
-
-    /// Read element at a dynamic index from a materialized composite.
-    /// `base` must be a Materialize result. `index` is a runtime integer.
-    DynamicExtract {
-        base: ValueRef,
-        index: ValueRef,
     },
 }
 
@@ -334,44 +234,10 @@ impl InstKind {
     /// Place operands (see `place_uses`) are traversed separately.
     pub fn value_uses(&self) -> Vec<ValueRef> {
         match self {
-            InstKind::Int(_)
-            | InstKind::Float(_)
-            | InstKind::Bool(_)
-            | InstKind::Unit
-            | InstKind::Global(_)
-            | InstKind::Extern(_)
-            | InstKind::Alloca { .. }
-            | InstKind::OutputSlot { .. }
-            | InstKind::Load { .. } => vec![],
-
-            InstKind::BinOp { lhs, rhs, .. } => vec![*lhs, *rhs],
-            InstKind::UnaryOp { operand, .. } => vec![*operand],
-            InstKind::Tuple(elems) | InstKind::Vector(elems) | InstKind::ArrayLit { elements: elems } => {
-                elems.clone()
-            }
-            InstKind::ArrayRange { start, len, step } => {
-                let mut u = vec![*start, *len];
-                if let Some(s) = step {
-                    u.push(*s);
-                }
-                u
-            }
-            InstKind::Matrix(rows) => rows.iter().flatten().copied().collect(),
-            InstKind::Project { base, .. } => vec![*base],
-            InstKind::Index { base, index } => vec![*base, *index],
-            InstKind::Call { args, .. } | InstKind::Intrinsic { args, .. } => args.clone(),
+            InstKind::Op { operands, .. } => operands.clone(),
+            InstKind::Alloca { .. } | InstKind::OutputSlot { .. } | InstKind::Load { .. } => vec![],
             InstKind::Store { value, .. } => vec![*value],
-            InstKind::StorageView { source, offset, len } => {
-                let mut u = vec![*offset, *len];
-                if let ViewSource::Inherited { parent } = source {
-                    u.push(ValueRef::Ssa(*parent));
-                }
-                u
-            }
             InstKind::ViewIndex { view, index, .. } => vec![*view, *index],
-            InstKind::StorageViewLen { view } => vec![*view],
-            InstKind::Materialize { value } => vec![*value],
-            InstKind::DynamicExtract { base, index } => vec![*base, *index],
         }
     }
 
@@ -405,71 +271,17 @@ impl InstKind {
     /// Apply a substitution function to all ValueRef references in place.
     pub fn substitute_values(&mut self, sub: &mut impl FnMut(&mut ValueRef)) {
         match self {
-            InstKind::BinOp { lhs, rhs, .. } => {
-                sub(lhs);
-                sub(rhs);
-            }
-            InstKind::UnaryOp { operand, .. } => sub(operand),
-            InstKind::Tuple(elems) | InstKind::Vector(elems) | InstKind::ArrayLit { elements: elems } => {
-                for e in elems {
-                    sub(e);
-                }
-            }
-            InstKind::Matrix(rows) => {
-                for row in rows {
-                    for e in row {
-                        sub(e);
-                    }
-                }
-            }
-            InstKind::Project { base, .. } => sub(base),
-            InstKind::Index { base, index } => {
-                sub(base);
-                sub(index);
-            }
-            InstKind::Call { args, .. } | InstKind::Intrinsic { args, .. } => {
-                for a in args {
-                    sub(a);
+            InstKind::Op { operands, .. } => {
+                for o in operands {
+                    sub(o);
                 }
             }
             InstKind::Store { value, .. } => sub(value),
-            InstKind::ArrayRange { start, len, step } => {
-                sub(start);
-                sub(len);
-                if let Some(s) = step {
-                    sub(s);
-                }
-            }
-            InstKind::StorageView { source, offset, len } => {
-                if let ViewSource::Inherited { parent } = source {
-                    let mut vr = ValueRef::Ssa(*parent);
-                    sub(&mut vr);
-                    if let ValueRef::Ssa(new_id) = vr {
-                        *parent = new_id;
-                    }
-                }
-                sub(offset);
-                sub(len);
-            }
             InstKind::ViewIndex { view, index, .. } => {
                 sub(view);
                 sub(index);
             }
-            InstKind::StorageViewLen { view } => sub(view),
-            InstKind::Materialize { value } => sub(value),
-            InstKind::DynamicExtract { base, index } => {
-                sub(base);
-                sub(index);
-            }
-            InstKind::Int(_)
-            | InstKind::Float(_)
-            | InstKind::Bool(_)
-            | InstKind::Unit
-            | InstKind::Global(_)
-            | InstKind::Extern(_)
-            | InstKind::Alloca { .. }
-            | InstKind::OutputSlot { .. }
-            | InstKind::Load { .. } => {}
+            InstKind::Alloca { .. } | InstKind::OutputSlot { .. } | InstKind::Load { .. } => {}
         }
     }
 
@@ -482,14 +294,11 @@ impl InstKind {
             InstKind::Alloca { result, .. }
             | InstKind::OutputSlot { result, .. }
             | InstKind::ViewIndex { result, .. } => sub(result),
-            _ => {}
+            InstKind::Op { .. } => {}
         }
     }
 
     /// Create a new InstKind with all ValueIds remapped.
-    ///
-    /// Effects are tracked on InstNode, not in InstKind, so they are not remapped here.
-    /// Panics on `Soac` — SOAC lowering expands those rather than remapping.
     pub fn remap(&self, rv: &impl Fn(ValueId) -> ValueId) -> InstKind {
         let mut result = self.clone();
         result.substitute_values(&mut |vr| {

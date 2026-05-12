@@ -2,7 +2,7 @@
 
 use crate::ast::{Span, TypeName};
 use crate::ssa::framework::BlockId;
-use crate::ssa::types::{ConstantValue, InstKind, ViewSource};
+use crate::ssa::types::{ConstantValue, InstKind};
 
 /// Effect token for ordering effectful ops during EGIR passes.
 ///
@@ -31,71 +31,12 @@ new_key_type! {
 }
 
 // ---------------------------------------------------------------------------
-// PureOp — the operator identity for hash-consing (no operands, Hash+Eq)
+// PureOp — operator identity for hash-consing (re-exported from `crate::op`)
 // ---------------------------------------------------------------------------
 
-/// The operator part of a pure instruction, without its operands.
-/// Operands are stored separately in `ENode::Pure { operands }`.
-///
-/// This mirrors the pure subset of `InstKind` but:
-/// - Strips out `ValueRef` operands (they become `NodeId` in `ENode`)
-/// - Derives `Hash + Eq` for hash-consing
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum PureOp {
-    /// Signed integer literal (i8, i16, i32, i64).
-    Int(String),
-    /// Unsigned integer literal (u8, u16, u32, u64).
-    Uint(String),
-    Float(String),
-    Bool(bool),
-    Unit,
-    Global(String),
-    Extern(String),
-    BinOp(String),
-    UnaryOp(String),
-    Tuple(usize),
-    Vector(usize),
-    Matrix {
-        rows: usize,
-        cols: usize,
-    },
-    ArrayLit(usize),
-    ArrayRange {
-        has_step: bool,
-    },
-    Project {
-        index: u32,
-    },
-    Index,
-    Materialize,
-    DynamicExtract,
-    Call(String),
-    Intrinsic {
-        id: crate::builtins::BuiltinId,
-        overload_idx: usize,
-    },
-    /// Storage buffer view creation. The `Inherited` parent (if any) is
-    /// carried in the operands tail, not in this tag, so equivalent views
-    /// with the same backing source hash-cons together.
-    StorageView(PureViewSource),
-    ViewIndex,
-    StorageViewLen,
-    OutputSlot {
-        index: usize,
-    },
-}
-
-/// Hashable variant of `ViewSource` for use inside a `PureOp`.
-/// Drops the `ValueId` from `Inherited` — that parent is stored as an
-/// operand in the `ENode::Pure`.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum PureViewSource {
-    Storage {
-        set: u32,
-        binding: u32,
-    },
-    Inherited,
-}
+/// Alias for the shared `OpTag` enum (operator identity without operands).
+/// Operands live in `ENode::Pure { operands }`.
+pub use crate::op::{OpTag as PureOp, PureViewSource};
 
 // ---------------------------------------------------------------------------
 // NodeKey — hash-cons key = operator + operands + result type
@@ -448,154 +389,21 @@ impl EGraph {
 // Conversion helpers: InstKind ↔ PureOp
 // ---------------------------------------------------------------------------
 
-/// Extract a `PureOp` from a pure `InstKind`, returning `None` if the
-/// instruction is not pure/hoistable.
-pub fn extract_pure_op(kind: &InstKind, ty: &Type<TypeName>) -> Option<PureOp> {
-    match kind {
-        InstKind::Int(s) => {
-            let is_unsigned = matches!(ty, Type::Constructed(TypeName::UInt(_), _));
-            if is_unsigned { Some(PureOp::Uint(s.clone())) } else { Some(PureOp::Int(s.clone())) }
-        }
-        InstKind::Float(s) => Some(PureOp::Float(s.clone())),
-        InstKind::Bool(b) => Some(PureOp::Bool(*b)),
-        InstKind::Unit => Some(PureOp::Unit),
-        InstKind::Global(s) => Some(PureOp::Global(s.clone())),
-        InstKind::Extern(s) => Some(PureOp::Extern(s.clone())),
-        InstKind::BinOp { op, .. } => Some(PureOp::BinOp(op.clone())),
-        InstKind::UnaryOp { op, .. } => Some(PureOp::UnaryOp(op.clone())),
-        InstKind::Tuple(elems) => Some(PureOp::Tuple(elems.len())),
-        InstKind::Vector(elems) => Some(PureOp::Vector(elems.len())),
-        InstKind::Matrix(rows) => {
-            let cols = rows.first().map_or(0, |r| r.len());
-            Some(PureOp::Matrix {
-                rows: rows.len(),
-                cols,
-            })
-        }
-        InstKind::ArrayLit { elements } => Some(PureOp::ArrayLit(elements.len())),
-        InstKind::ArrayRange { step, .. } => Some(PureOp::ArrayRange {
-            has_step: step.is_some(),
-        }),
-        InstKind::Project { index, .. } => Some(PureOp::Project { index: *index }),
-        InstKind::Index { .. } => Some(PureOp::Index),
-        InstKind::Materialize { .. } => Some(PureOp::Materialize),
-        InstKind::DynamicExtract { .. } => Some(PureOp::DynamicExtract),
-        InstKind::Call { func, .. } => Some(PureOp::Call(func.clone())),
-        InstKind::Intrinsic { id, overload_idx, .. } => Some(PureOp::Intrinsic {
-            id: *id,
-            overload_idx: *overload_idx,
-        }),
-        InstKind::StorageView { source, .. } => {
-            let src = match source {
-                ViewSource::Storage { set, binding } => PureViewSource::Storage {
-                    set: *set,
-                    binding: *binding,
-                },
-                ViewSource::Inherited { .. } => PureViewSource::Inherited,
-            };
-            Some(PureOp::StorageView(src))
-        }
-        InstKind::ViewIndex { .. } => Some(PureOp::ViewIndex),
-        InstKind::StorageViewLen { .. } => Some(PureOp::StorageViewLen),
-        InstKind::OutputSlot { index, .. } => Some(PureOp::OutputSlot { index: *index }),
-        // Blacklist: the only truly effectful InstKinds. Everything else above
-        // is treated as pure (hash-consable, hoistable).
-        InstKind::Alloca { .. } | InstKind::Load { .. } | InstKind::Store { .. } => None,
-    }
-}
-
-/// Rebuild an `InstKind` from a `PureOp` + operands as `ValueRef::Ssa(ValueId)`.
-///
-/// The `operands` must be in the same order as `InstKind::value_uses()` returns
-/// for the original instruction.
+/// Build an `InstKind::Op` from a `PureOp` + operands as `ValueRef::Ssa(ValueId)`.
+/// Panics on the place-producing tags (`ViewIndex`, `OutputSlot`) — those need
+/// `elaborate`'s place-aware path which allocates a fresh `PlaceId`.
 pub fn rebuild_inst_kind(op: &PureOp, operands: &[crate::ssa::framework::ValueId]) -> InstKind {
     use crate::ssa::types::ValueRef;
-    let vr = |i: usize| -> ValueRef { ValueRef::Ssa(operands[i]) };
-    match op {
-        PureOp::Int(s) | PureOp::Uint(s) => InstKind::Int(s.clone()),
-        PureOp::Float(s) => InstKind::Float(s.clone()),
-        PureOp::Bool(b) => InstKind::Bool(*b),
-        PureOp::Unit => InstKind::Unit,
-        PureOp::Global(s) => InstKind::Global(s.clone()),
-        PureOp::Extern(s) => InstKind::Extern(s.clone()),
-        PureOp::BinOp(op_name) => InstKind::BinOp {
-            op: op_name.clone(),
-            lhs: vr(0),
-            rhs: vr(1),
-        },
-        PureOp::UnaryOp(op_name) => InstKind::UnaryOp {
-            op: op_name.clone(),
-            operand: vr(0),
-        },
-        PureOp::Tuple(n) => InstKind::Tuple((0..*n).map(|i| vr(i)).collect()),
-        PureOp::Vector(n) => InstKind::Vector((0..*n).map(|i| vr(i)).collect()),
-        PureOp::Matrix { rows, cols } => {
-            let mut mat = Vec::with_capacity(*rows);
-            let mut idx = 0;
-            for _ in 0..*rows {
-                let row: Vec<ValueRef> = (0..*cols)
-                    .map(|_| {
-                        let v = vr(idx);
-                        idx += 1;
-                        v
-                    })
-                    .collect();
-                mat.push(row);
-            }
-            InstKind::Matrix(mat)
-        }
-        PureOp::ArrayLit(n) => InstKind::ArrayLit {
-            elements: (0..*n).map(|i| vr(i)).collect(),
-        },
-        PureOp::ArrayRange { has_step } => InstKind::ArrayRange {
-            start: vr(0),
-            len: vr(1),
-            step: if *has_step { Some(vr(2)) } else { None },
-        },
-        PureOp::Project { index } => InstKind::Project {
-            base: vr(0),
-            index: *index,
-        },
-        PureOp::Index => InstKind::Index {
-            base: vr(0),
-            index: vr(1),
-        },
-        PureOp::Materialize => InstKind::Materialize { value: vr(0) },
-        PureOp::DynamicExtract => InstKind::DynamicExtract {
-            base: vr(0),
-            index: vr(1),
-        },
-        PureOp::Call(func) => InstKind::Call {
-            func: func.clone(),
-            args: (0..operands.len()).map(|i| vr(i)).collect(),
-        },
-        PureOp::Intrinsic { id, overload_idx } => InstKind::Intrinsic {
-            id: *id,
-            overload_idx: *overload_idx,
-            args: (0..operands.len()).map(|i| vr(i)).collect(),
-        },
-        PureOp::StorageView(src) => {
-            let source = match src {
-                PureViewSource::Storage { set, binding } => ViewSource::Storage {
-                    set: *set,
-                    binding: *binding,
-                },
-                PureViewSource::Inherited => ViewSource::Inherited { parent: operands[2] },
-            };
-            InstKind::StorageView {
-                source,
-                offset: vr(0),
-                len: vr(1),
-            }
-        }
-        PureOp::StorageViewLen => InstKind::StorageViewLen { view: vr(0) },
-        PureOp::ViewIndex | PureOp::OutputSlot { .. } => {
-            panic!(
-                "rebuild_inst_kind: place-producing op {:?} must be built via elaborate's \
-                 place-aware path (allocates a fresh PlaceId from FuncBody.places)",
-                op
-            );
-        }
+    if matches!(op, PureOp::ViewIndex | PureOp::OutputSlot { .. }) {
+        panic!(
+            "rebuild_inst_kind: place-producing op {:?} must be built via elaborate's \
+             place-aware path (allocates a fresh PlaceId from FuncBody.places)",
+            op
+        );
+    }
+    InstKind::Op {
+        tag: op.clone(),
+        operands: operands.iter().map(|&id| ValueRef::Ssa(id)).collect(),
     }
 }
 

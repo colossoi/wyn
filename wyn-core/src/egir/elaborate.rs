@@ -596,11 +596,16 @@ impl<'a> Elaborator<'a> {
 use crate::ssa::types::ConstantValue;
 
 fn const_to_inst_kind(c: &ConstantValue) -> InstKind {
-    match c {
-        ConstantValue::I32(v) => InstKind::Int(v.to_string()),
-        ConstantValue::U32(v) => InstKind::Int(v.to_string()),
-        ConstantValue::F32(bits) => InstKind::Float(f32::from_bits(*bits).to_string()),
-        ConstantValue::Bool(v) => InstKind::Bool(*v),
+    use crate::op::OpTag;
+    let tag = match c {
+        ConstantValue::I32(v) => OpTag::Int(v.to_string()),
+        ConstantValue::U32(v) => OpTag::Uint(v.to_string()),
+        ConstantValue::F32(bits) => OpTag::Float(f32::from_bits(*bits).to_string()),
+        ConstantValue::Bool(v) => OpTag::Bool(*v),
+    };
+    InstKind::Op {
+        tag,
+        operands: vec![],
     }
 }
 

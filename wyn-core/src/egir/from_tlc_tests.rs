@@ -93,12 +93,9 @@ fn test_int_literal_roundtrip() {
     let func = convert_simple_def(body, vec![]);
     let entry = func.get_block(func.entry_block());
     // Should have one Int instruction.
-    assert!(
-        entry
-            .insts
-            .iter()
-            .any(|&iid| { matches!(&func.get_inst(iid).data, InstKind::Int(s) if s == "42") })
-    );
+    assert!(entry.insts.iter().any(|&iid| {
+        matches!(&func.get_inst(iid).data, InstKind::Op { tag: crate::op::OpTag::Int(s), .. } if s == "42")
+    }));
 }
 
 #[test]
@@ -144,7 +141,7 @@ fn test_add_roundtrip() {
         entry
             .insts
             .iter()
-            .any(|&iid| { matches!(&func.get_inst(iid).data, InstKind::BinOp { op, .. } if op == "+") })
+            .any(|&iid| { matches!(&func.get_inst(iid).data, InstKind::Op { tag: crate::op::OpTag::BinOp(op), .. } if op == "+") })
     );
 }
 
@@ -201,7 +198,7 @@ fn test_gvn_via_let() {
     let const_count = entry
         .insts
         .iter()
-        .filter(|&&iid| matches!(&func.get_inst(iid).data, InstKind::Int(s) if s == "42"))
+        .filter(|&&iid| matches!(&func.get_inst(iid).data, InstKind::Op { tag: crate::op::OpTag::Int(s), .. } if s == "42"))
         .count();
     assert_eq!(
         const_count, 1,

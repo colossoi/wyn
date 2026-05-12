@@ -13,8 +13,7 @@ use crate::builtins::lowering::{BuiltinLowering, PrimOp};
 use crate::error::Result;
 use crate::ssa::layout::{buffer_array_strides, type_byte_size};
 use crate::ssa::types::{
-    BlockId, ConstantValue, ControlHeader, FuncBody, InstKind, Terminator, ValueId, ValueRef, ViewSource,
-    WynInstNode,
+    BlockId, ConstantValue, ControlHeader, FuncBody, InstKind, Terminator, ValueId, ValueRef, WynInstNode,
 };
 use crate::ssa::types::{EntryPoint, ExecutionModel, Function, IoDecoration, Program};
 use crate::types;
@@ -1179,67 +1178,73 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
         self.current_span = inst.span;
 
         let spirv_result = match &inst.data {
-            InstKind::Int(s) => match ssa_result_ty.as_ref() {
-                Some(PolyType::Constructed(TypeName::UInt(32), _)) => {
-                    let val: u32 =
-                        s.parse().map_err(|_| err_spirv_at!(self.blame_span(), "Invalid u32: {}", s))?;
-                    self.constructor.const_u32(val)
+            InstKind::Op { tag, operands } => match tag {
+                crate::op::OpTag::Int(s) | crate::op::OpTag::Uint(s) => match ssa_result_ty.as_ref() {
+                    Some(PolyType::Constructed(TypeName::UInt(32), _)) => {
+                        let val: u32 = s
+                            .parse()
+                            .map_err(|_| err_spirv_at!(self.blame_span(), "Invalid u32: {}", s))?;
+                        self.constructor.const_u32(val)
+                    }
+                    _ => {
+                        let val: i32 = s
+                            .parse()
+                            .map_err(|_| err_spirv_at!(self.blame_span(), "Invalid i32: {}", s))?;
+                        self.constructor.const_i32(val)
+                    }
+                },
+
+                crate::op::OpTag::Float(s) => {
+                    let val: f32 =
+                        s.parse().map_err(|_| err_spirv_at!(self.blame_span(), "Invalid f32: {}", s))?;
+                    self.constructor.const_f32(val)
                 }
-                _ => {
-                    let val: i32 =
-                        s.parse().map_err(|_| err_spirv_at!(self.blame_span(), "Invalid i32: {}", s))?;
-                    self.constructor.const_i32(val)
+
+                crate::op::OpTag::Bool(b) => self.constructor.const_bool(*b),
+
+                crate::op::OpTag::Unit => {
+                    unreachable!(
+                        "OpTag::Unit should never reach SPIR-V codegen; unit values are not materializable"
+                    )
                 }
-            },
 
-            InstKind::Float(s) => {
-                let val: f32 =
-                    s.parse().map_err(|_| err_spirv_at!(self.blame_span(), "Invalid f32: {}", s))?;
-                self.constructor.const_f32(val)
-            }
+                crate::op::OpTag::BinOp(op) => {
+                    let lhs = operands[0];
+                    let rhs = operands[1];
+                    let lhs_id = self.get_value_ref(lhs)?;
+                    let rhs_id = self.get_value_ref(rhs)?;
+                    let lhs_ty = self.get_value_type_ref(lhs);
+                    let rhs_ty = self.get_value_type_ref(rhs);
+                    self.lower_binop(op, lhs_id, rhs_id, &lhs_ty, &rhs_ty, result_ty)?
+                }
 
-            InstKind::Bool(b) => self.constructor.const_bool(*b),
+                crate::op::OpTag::UnaryOp(op) => {
+                    let operand = operands[0];
+                    let operand_id = self.get_value_ref(operand)?;
+                    let operand_ty = self.get_value_type_ref(operand);
+                    self.lower_unaryop(op, operand_id, &operand_ty, result_ty)?
+                }
 
-            InstKind::Unit => {
-                unreachable!(
-                    "InstKind::Unit should never reach SPIR-V codegen; unit values are not materializable"
-                )
-            }
+                crate::op::OpTag::Tuple(_) => {
+                    let elem_ids: Vec<_> =
+                        operands.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
+                    self.constructor.composite_or_constant(result_ty, elem_ids)?
+                }
 
-            InstKind::BinOp { op, lhs, rhs } => {
-                let lhs_id = self.get_value_ref(*lhs)?;
-                let rhs_id = self.get_value_ref(*rhs)?;
-                let lhs_ty = self.get_value_type_ref(*lhs);
-                let rhs_ty = self.get_value_type_ref(*rhs);
-                self.lower_binop(op, lhs_id, rhs_id, &lhs_ty, &rhs_ty, result_ty)?
-            }
+                crate::op::OpTag::ArrayLit(_) => {
+                    let elem_ids: Vec<_> =
+                        operands.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
+                    self.constructor.composite_or_constant(result_ty, elem_ids)?
+                }
 
-            InstKind::UnaryOp { op, operand } => {
-                let operand_id = self.get_value_ref(*operand)?;
-                let operand_ty = self.get_value_type_ref(*operand);
-                self.lower_unaryop(op, operand_id, &operand_ty, result_ty)?
-            }
-
-            InstKind::Tuple(elems) => {
-                let elem_ids: Vec<_> =
-                    elems.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
-                self.constructor.composite_or_constant(result_ty, elem_ids)?
-            }
-
-            InstKind::ArrayLit { elements } => {
-                let elem_ids: Vec<_> =
-                    elements.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
-                self.constructor.composite_or_constant(result_ty, elem_ids)?
-            }
-
-            InstKind::ArrayRange { start, len, step } => {
-                // Virtual array represented as {start, step, len} struct
-                // This matches the layout expected by lower_virtual_index
-                let start_id = self.get_value_ref(*start)?;
-                let len_id = self.get_value_ref(*len)?;
-                let step_id = match step {
-                    Some(s) => self.get_value_ref(*s)?,
-                    None => {
+                crate::op::OpTag::ArrayRange { has_step } => {
+                    // Virtual array represented as {start, step, len} struct
+                    // This matches the layout expected by lower_virtual_index
+                    let start_id = self.get_value_ref(operands[0])?;
+                    let len_id = self.get_value_ref(operands[1])?;
+                    let step_id = if *has_step {
+                        self.get_value_ref(operands[2])?
+                    } else {
                         // Default step = 1, matching the element type of the range.
                         let elem_ty = ssa_result_ty.as_ref().and_then(|t| t.elem_type());
                         if matches!(elem_ty, Some(PolyType::Constructed(TypeName::UInt(_), _))) {
@@ -1247,152 +1252,262 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         } else {
                             self.constructor.const_i32(1)
                         }
-                    }
-                };
+                    };
 
-                // Construct the struct: {start, step, len}
-                self.constructor.builder.composite_construct(
-                    result_ty,
-                    None,
-                    vec![start_id, step_id, len_id],
-                )?
-            }
-
-            InstKind::Vector(elems) => {
-                let elem_ids: Vec<_> =
-                    elems.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
-                self.constructor.composite_or_constant(result_ty, elem_ids)?
-            }
-
-            InstKind::Matrix(rows) => {
-                // Matrix is constructed as an array of vectors (columns)
-                // For now, flatten and construct
-                let all_elems: Vec<_> =
-                    rows.iter().flatten().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
-                self.constructor.composite_or_constant(result_ty, all_elems)?
-            }
-
-            InstKind::Project { base, index } => {
-                let base_ty = self.get_value_type_ref(*base);
-                let base_id = self.get_value_ref(*base)?;
-
-                // If base is a pointer, load it first
-                let composite_id = if types::is_pointer(&base_ty) {
-                    let pointee_ty = types::pointee(&base_ty).expect("Pointer should have pointee");
-                    let value_type = self.constructor.polytype_to_spirv(pointee_ty);
-                    self.constructor.builder.load(value_type, None, base_id, None, [])?
-                } else {
-                    base_id
-                };
-
-                self.constructor.builder.composite_extract(result_ty, None, composite_id, [*index])?
-            }
-
-            InstKind::Index { base, index } => self.lower_index(*base, *index, result_ty)?,
-
-            InstKind::Call { func, args } => {
-                let arg_ids: Vec<_> = args.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
-                // Catalog-named calls (e.g. per-type ops like `f32.clamp`
-                // emitted by `specialize.rs`) still arrive here as Call
-                // because their func is a SymbolId allocated for the
-                // specialized name. Compiler-internal intrinsics
-                // (`_w_intrinsic_*`) now go through `InstKind::Intrinsic`.
-                if let Some(def) = catalog().lookup_by_any_name(func) {
-                    let builtin_impl = &def.overloads()[0].lowering;
-                    self.lower_builtin_call(def.id, builtin_impl, func, args, &arg_ids, result_ty, inst)?
-                } else if let Some(&func_id) = self.constructor.functions.get(func) {
-                    self.constructor.builder.function_call(result_ty, None, func_id, arg_ids)?
-                } else {
-                    bail_spirv_at!(self.blame_span(), "Unknown function: {}", func)
-                }
-            }
-
-            InstKind::Global(name) => {
-                if let Some(&var_id) = self.constructor.uniform_variables.get(name) {
-                    // Load uniform value
-                    let value_type =
-                        self.constructor.uniform_types.get(name).copied().ok_or_else(|| {
-                            err_spirv_at!(self.blame_span(), "Unknown uniform type: {}", name)
-                        })?;
-                    let member_ptr_type = self.constructor.builder.type_pointer(
-                        None,
-                        spirv::StorageClass::Uniform,
-                        value_type,
-                    );
-                    let zero = self.constructor.const_i32(0);
-                    let member_ptr =
-                        self.constructor.builder.access_chain(member_ptr_type, None, var_id, [zero])?;
-                    self.constructor.builder.load(value_type, None, member_ptr, None, [])?
-                } else if self.constructor.storage_variables.contains_key(name) {
-                    bail_spirv_at!(
-                        self.blame_span(),
-                        "Direct global access to storage buffer '{}' is invalid; use array indexing",
-                        name
-                    )
-                } else if let Some(&func_id) = self.constructor.functions.get(name) {
-                    // Global constant function - call it with no args to get the value.
-                    // This handles `def verts: [3]vec4f32 = [...]` referenced as just `verts`.
-                    self.constructor.builder.function_call(result_ty, None, func_id, [])?
-                } else {
-                    bail_spirv_at!(self.blame_span(), "Unknown global: {}", name)
-                }
-            }
-
-            InstKind::Extern(linkage_name) => self
-                .constructor
-                .linked_functions
-                .get(linkage_name)
-                .copied()
-                .ok_or_else(|| err_spirv_at!(self.blame_span(), "Unknown extern: {}", linkage_name))?,
-
-            InstKind::Intrinsic {
-                id,
-                overload_idx,
-                args,
-            } => {
-                let arg_ids: Vec<_> = args.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
-                let def = crate::builtins::by_id(*id);
-                let lowering = &def.overloads()[*overload_idx].lowering;
-                // Variants with a structural arm in `lower_builtin_call`
-                // dispatch via the BuiltinLowering value or the entry
-                // id; the rest still fall through to the name-keyed
-                // `lower_intrinsic` until they're promoted.
-                let known = catalog().known();
-                let typed_dispatch = matches!(
-                    lowering,
-                    BuiltinLowering::PrimOp(_)
-                        | BuiltinLowering::LinkedSpirv(_)
-                        | BuiltinLowering::ExtInstSplat { .. }
-                ) || (matches!(lowering, BuiltinLowering::ByBuiltinId)
-                    && (*id == known.slice
-                        || *id == known.storage_len
-                        || *id == known.thread_id
-                        || *id == known.length
-                        || *id == known.uninit
-                        || *id == known.array_with
-                        || *id == known.array_with_in_place));
-                if typed_dispatch {
-                    self.lower_builtin_call(
-                        *id,
-                        lowering,
-                        def.dispatch_name(),
-                        args,
-                        &arg_ids,
+                    // Construct the struct: {start, step, len}
+                    self.constructor.builder.composite_construct(
                         result_ty,
-                        inst,
+                        None,
+                        vec![start_id, step_id, len_id],
                     )?
-                } else {
-                    bail_spirv!(
-                        "InstKind::Intrinsic with no SPIR-V backend dispatch: '{}' \
-                         (id={:?}, lowering={:?}). HOF / SOAC intrinsics should be \
-                         lowered at EGIR; everything else needs an arm in \
-                         lower_builtin_call and an entry in the typed_dispatch list.",
-                        def.dispatch_name(),
-                        id,
-                        lowering
-                    )
                 }
-            }
+
+                crate::op::OpTag::Vector(_) => {
+                    let elem_ids: Vec<_> =
+                        operands.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
+                    self.constructor.composite_or_constant(result_ty, elem_ids)?
+                }
+
+                crate::op::OpTag::Matrix { .. } => {
+                    // Matrix is constructed as an array of vectors (columns)
+                    // For now, flatten and construct
+                    let all_elems: Vec<_> =
+                        operands.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
+                    self.constructor.composite_or_constant(result_ty, all_elems)?
+                }
+
+                crate::op::OpTag::Project { index } => {
+                    let base = operands[0];
+                    let base_ty = self.get_value_type_ref(base);
+                    let base_id = self.get_value_ref(base)?;
+
+                    // If base is a pointer, load it first
+                    let composite_id = if types::is_pointer(&base_ty) {
+                        let pointee_ty = types::pointee(&base_ty).expect("Pointer should have pointee");
+                        let value_type = self.constructor.polytype_to_spirv(pointee_ty);
+                        self.constructor.builder.load(value_type, None, base_id, None, [])?
+                    } else {
+                        base_id
+                    };
+
+                    self.constructor.builder.composite_extract(result_ty, None, composite_id, [*index])?
+                }
+
+                crate::op::OpTag::Index => self.lower_index(operands[0], operands[1], result_ty)?,
+
+                crate::op::OpTag::Call(func) => {
+                    let args: Vec<ValueRef> = operands.clone();
+                    let arg_ids: Vec<_> =
+                        args.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
+                    // Catalog-named calls (e.g. per-type ops like `f32.clamp`
+                    // emitted by `specialize.rs`) still arrive here as Call
+                    // because their func is a SymbolId allocated for the
+                    // specialized name. Compiler-internal intrinsics
+                    // (`_w_intrinsic_*`) now go through `OpTag::Intrinsic`.
+                    if let Some(def) = catalog().lookup_by_any_name(func) {
+                        let builtin_impl = &def.overloads()[0].lowering;
+                        self.lower_builtin_call(
+                            def.id,
+                            builtin_impl,
+                            func,
+                            &args,
+                            &arg_ids,
+                            result_ty,
+                            inst,
+                        )?
+                    } else if let Some(&func_id) = self.constructor.functions.get(func) {
+                        self.constructor.builder.function_call(result_ty, None, func_id, arg_ids)?
+                    } else {
+                        bail_spirv_at!(self.blame_span(), "Unknown function: {}", func)
+                    }
+                }
+
+                crate::op::OpTag::Global(name) => {
+                    if let Some(&var_id) = self.constructor.uniform_variables.get(name) {
+                        // Load uniform value
+                        let value_type =
+                            self.constructor.uniform_types.get(name).copied().ok_or_else(|| {
+                                err_spirv_at!(self.blame_span(), "Unknown uniform type: {}", name)
+                            })?;
+                        let member_ptr_type = self.constructor.builder.type_pointer(
+                            None,
+                            spirv::StorageClass::Uniform,
+                            value_type,
+                        );
+                        let zero = self.constructor.const_i32(0);
+                        let member_ptr =
+                            self.constructor.builder.access_chain(member_ptr_type, None, var_id, [zero])?;
+                        self.constructor.builder.load(value_type, None, member_ptr, None, [])?
+                    } else if self.constructor.storage_variables.contains_key(name) {
+                        bail_spirv_at!(
+                            self.blame_span(),
+                            "Direct global access to storage buffer '{}' is invalid; use array indexing",
+                            name
+                        )
+                    } else if let Some(&func_id) = self.constructor.functions.get(name) {
+                        // Global constant function - call it with no args to get the value.
+                        // This handles `def verts: [3]vec4f32 = [...]` referenced as just `verts`.
+                        self.constructor.builder.function_call(result_ty, None, func_id, [])?
+                    } else {
+                        bail_spirv_at!(self.blame_span(), "Unknown global: {}", name)
+                    }
+                }
+
+                crate::op::OpTag::Extern(linkage_name) => {
+                    self.constructor.linked_functions.get(linkage_name).copied().ok_or_else(|| {
+                        err_spirv_at!(self.blame_span(), "Unknown extern: {}", linkage_name)
+                    })?
+                }
+
+                crate::op::OpTag::Intrinsic { id, overload_idx } => {
+                    let args: Vec<ValueRef> = operands.clone();
+                    let arg_ids: Vec<_> =
+                        args.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
+                    let def = crate::builtins::by_id(*id);
+                    let lowering = &def.overloads()[*overload_idx].lowering;
+                    // Variants with a structural arm in `lower_builtin_call`
+                    // dispatch via the BuiltinLowering value or the entry
+                    // id; the rest still fall through to the name-keyed
+                    // `lower_intrinsic` until they're promoted.
+                    let known = catalog().known();
+                    let typed_dispatch = matches!(
+                        lowering,
+                        BuiltinLowering::PrimOp(_)
+                            | BuiltinLowering::LinkedSpirv(_)
+                            | BuiltinLowering::ExtInstSplat { .. }
+                    ) || (matches!(lowering, BuiltinLowering::ByBuiltinId)
+                        && (*id == known.slice
+                            || *id == known.storage_len
+                            || *id == known.thread_id
+                            || *id == known.length
+                            || *id == known.uninit
+                            || *id == known.array_with
+                            || *id == known.array_with_in_place));
+                    if typed_dispatch {
+                        self.lower_builtin_call(
+                            *id,
+                            lowering,
+                            def.dispatch_name(),
+                            &args,
+                            &arg_ids,
+                            result_ty,
+                            inst,
+                        )?
+                    } else {
+                        bail_spirv!(
+                            "OpTag::Intrinsic with no SPIR-V backend dispatch: '{}' \
+                             (id={:?}, lowering={:?}). HOF / SOAC intrinsics should be \
+                             lowered at EGIR; everything else needs an arm in \
+                             lower_builtin_call and an entry in the typed_dispatch list.",
+                            def.dispatch_name(),
+                            id,
+                            lowering
+                        )
+                    }
+                }
+
+                crate::op::OpTag::StorageView(src) => {
+                    let offset = operands[0];
+                    let len = operands[1];
+                    let offset_id = self.get_value_ref(offset)?;
+                    let len_id = self.get_value_ref(len)?;
+
+                    match src {
+                        crate::op::PureViewSource::Storage { set, binding } => {
+                            if self.constructor.storage_buffers.contains_key(&(*set, *binding)) {
+                                let buffer_id = self.constructor.get_or_assign_buffer_id(*set, *binding);
+                                // Record the buffer_id for this view (if we have an SSA result)
+                                if let Some(result) = inst.result {
+                                    self.view_buffer_id.insert(result, buffer_id);
+                                }
+                                let buffer_id_const = self.constructor.const_u32(buffer_id);
+                                let u32_ty = self.constructor.u32_type;
+                                let view_struct_type = self
+                                    .constructor
+                                    .get_or_create_struct_type(vec![u32_ty, u32_ty, u32_ty]);
+                                self.constructor.builder.composite_construct(
+                                    view_struct_type,
+                                    None,
+                                    [buffer_id_const, offset_id, len_id],
+                                )?
+                            } else {
+                                bail_spirv_at!(
+                                    self.blame_span(),
+                                    "Unknown storage buffer: set={}, binding={}",
+                                    set,
+                                    binding
+                                )
+                            }
+                        }
+                        crate::op::PureViewSource::Inherited => {
+                            let parent =
+                                operands[2].as_ssa().expect("StorageView Inherited parent must be SSA");
+                            // Propagate buffer_id from parent view
+                            if let (Some(result), Some(&parent_buf_id)) =
+                                (inst.result, self.view_buffer_id.get(&parent))
+                            {
+                                self.view_buffer_id.insert(result, parent_buf_id);
+                            }
+                            let parent_id = self.get_value(parent)?;
+                            let u32_ty = self.constructor.u32_type;
+                            let view_struct_type =
+                                self.constructor.get_or_create_struct_type(vec![u32_ty, u32_ty, u32_ty]);
+
+                            // Extract buffer_id (field 0) and parent_offset (field 1) from parent view
+                            let buffer_id =
+                                self.constructor.builder.composite_extract(u32_ty, None, parent_id, [0])?;
+                            let parent_offset =
+                                self.constructor.builder.composite_extract(u32_ty, None, parent_id, [1])?;
+
+                            // new_offset = parent_offset + offset
+                            let new_offset =
+                                self.constructor.builder.i_add(u32_ty, None, parent_offset, offset_id)?;
+
+                            self.constructor.builder.composite_construct(
+                                view_struct_type,
+                                None,
+                                [buffer_id, new_offset, len_id],
+                            )?
+                        }
+                    }
+                }
+
+                crate::op::OpTag::StorageViewLen => {
+                    let view = operands[0];
+                    let view_id = self.get_value_ref(view)?;
+                    // Extract len from view struct (index 2)
+                    self.constructor.builder.composite_extract(result_ty, None, view_id, [2u32])?
+                }
+
+                crate::op::OpTag::Materialize => {
+                    let value = operands[0];
+                    let value_id = self.get_value_ref(value)?;
+                    let value_ty = self.get_value_type_ref(value);
+                    let spirv_type = self.constructor.polytype_to_spirv(&value_ty);
+                    let var = self.constructor.declare_variable("_materialize", spirv_type)?;
+                    self.constructor.builder.store(var, value_id, None, [])?;
+                    var
+                }
+
+                crate::op::OpTag::DynamicExtract => {
+                    let base = operands[0];
+                    let index = operands[1];
+                    let base_var = self.get_value_ref(base)?;
+                    let index_id = self.get_value_ref(index)?;
+                    let elem_ptr_type = self.constructor.builder.type_pointer(
+                        None,
+                        spirv::StorageClass::Function,
+                        result_ty,
+                    );
+                    let elem_ptr =
+                        self.constructor.builder.access_chain(elem_ptr_type, None, base_var, [index_id])?;
+                    self.constructor.builder.load(result_ty, None, elem_ptr, None, [])?
+                }
+
+                crate::op::OpTag::ViewIndex | crate::op::OpTag::OutputSlot { .. } => {
+                    unreachable!("OpTag::{:?} is EGIR-only and must not reach SSA backend", tag)
+                }
+            },
 
             InstKind::Alloca { elem_ty, result } => {
                 let elem_spirv_ty = self.constructor.polytype_to_spirv(elem_ty);
@@ -1413,67 +1528,6 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 self.constructor.builder.store(ptr_id, val_id, None, [])?;
                 // Store doesn't produce a value, but we return dummy
                 self.constructor.const_i32(0)
-            }
-
-            InstKind::StorageView { source, offset, len } => {
-                let offset_id = self.get_value_ref(*offset)?;
-                let len_id = self.get_value_ref(*len)?;
-
-                match source {
-                    ViewSource::Storage { set, binding } => {
-                        if self.constructor.storage_buffers.contains_key(&(*set, *binding)) {
-                            let buffer_id = self.constructor.get_or_assign_buffer_id(*set, *binding);
-                            // Record the buffer_id for this view (if we have an SSA result)
-                            if let Some(result) = inst.result {
-                                self.view_buffer_id.insert(result, buffer_id);
-                            }
-                            let buffer_id_const = self.constructor.const_u32(buffer_id);
-                            let u32_ty = self.constructor.u32_type;
-                            let view_struct_type =
-                                self.constructor.get_or_create_struct_type(vec![u32_ty, u32_ty, u32_ty]);
-                            self.constructor.builder.composite_construct(
-                                view_struct_type,
-                                None,
-                                [buffer_id_const, offset_id, len_id],
-                            )?
-                        } else {
-                            bail_spirv_at!(
-                                self.blame_span(),
-                                "Unknown storage buffer: set={}, binding={}",
-                                set,
-                                binding
-                            )
-                        }
-                    }
-                    ViewSource::Inherited { parent } => {
-                        // Propagate buffer_id from parent view
-                        if let (Some(result), Some(&parent_buf_id)) =
-                            (inst.result, self.view_buffer_id.get(parent))
-                        {
-                            self.view_buffer_id.insert(result, parent_buf_id);
-                        }
-                        let parent_id = self.get_value(*parent)?;
-                        let u32_ty = self.constructor.u32_type;
-                        let view_struct_type =
-                            self.constructor.get_or_create_struct_type(vec![u32_ty, u32_ty, u32_ty]);
-
-                        // Extract buffer_id (field 0) and parent_offset (field 1) from parent view
-                        let buffer_id =
-                            self.constructor.builder.composite_extract(u32_ty, None, parent_id, [0])?;
-                        let parent_offset =
-                            self.constructor.builder.composite_extract(u32_ty, None, parent_id, [1])?;
-
-                        // new_offset = parent_offset + offset
-                        let new_offset =
-                            self.constructor.builder.i_add(u32_ty, None, parent_offset, offset_id)?;
-
-                        self.constructor.builder.composite_construct(
-                            view_struct_type,
-                            None,
-                            [buffer_id, new_offset, len_id],
-                        )?
-                    }
-                }
             }
 
             InstKind::ViewIndex { view, index, result } => {
@@ -1519,12 +1573,6 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 self.constructor.const_i32(0)
             }
 
-            InstKind::StorageViewLen { view } => {
-                let view_id = self.get_value_ref(*view)?;
-                // Extract len from view struct (index 2)
-                self.constructor.builder.composite_extract(result_ty, None, view_id, [2u32])?
-            }
-
             InstKind::OutputSlot { index, result } => {
                 // Each output was wired up in `lower_ssa_entry_point`; bind
                 // the place to its output variable pointer.
@@ -1540,25 +1588,6 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 self.place_ptr_id.insert(*result, ptr);
                 // Void instruction.
                 self.constructor.const_i32(0)
-            }
-
-            InstKind::Materialize { value } => {
-                let value_id = self.get_value_ref(*value)?;
-                let value_ty = self.get_value_type_ref(*value);
-                let spirv_type = self.constructor.polytype_to_spirv(&value_ty);
-                let var = self.constructor.declare_variable("_materialize", spirv_type)?;
-                self.constructor.builder.store(var, value_id, None, [])?;
-                var
-            }
-
-            InstKind::DynamicExtract { base, index } => {
-                let base_var = self.get_value_ref(*base)?;
-                let index_id = self.get_value_ref(*index)?;
-                let elem_ptr_type =
-                    self.constructor.builder.type_pointer(None, spirv::StorageClass::Function, result_ty);
-                let elem_ptr =
-                    self.constructor.builder.access_chain(elem_ptr_type, None, base_var, [index_id])?;
-                self.constructor.builder.load(result_ty, None, elem_ptr, None, [])?
             }
         };
 
@@ -2204,9 +2233,10 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     _ => return None,
                 };
                 match &self.body.inner.insts.get(inst_id)?.data {
-                    InstKind::Int(s) => {
-                        s.parse::<u32>().ok().or_else(|| s.parse::<i32>().ok().map(|i| i as u32))
-                    }
+                    InstKind::Op {
+                        tag: crate::op::OpTag::Int(s) | crate::op::OpTag::Uint(s),
+                        ..
+                    } => s.parse::<u32>().ok().or_else(|| s.parse::<i32>().ok().map(|i| i as u32)),
                     _ => None,
                 }
             }

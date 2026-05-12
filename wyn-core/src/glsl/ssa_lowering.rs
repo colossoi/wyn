@@ -539,7 +539,11 @@ impl<'a> LowerCtx<'a> {
         for (_bid, block) in &body.inner.blocks {
             for &inst_id in &block.insts {
                 let inst = body.get_inst(inst_id);
-                if let InstKind::Call { func, .. } = &inst.data {
+                if let InstKind::Op {
+                    tag: crate::op::OpTag::Call(func),
+                    ..
+                } = &inst.data
+                {
                     if self.func_index.contains_key(func) && catalog().lookup_lowering(func).is_none() {
                         self.collect_deps_recursive(func, deps, visited)?;
                     }
@@ -1098,162 +1102,181 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         let result_ty = inst.result.map(|r| self.body.inner.value_type(r));
         self.current_span = inst.span;
         match &inst.data {
-            InstKind::Int(s) => Ok(s.clone()),
-            InstKind::Float(s) => {
-                if s.contains('.') || s.contains('e') || s.contains('E') {
-                    Ok(s.clone())
-                } else {
-                    Ok(format!("{}.0", s))
+            InstKind::Op { tag, operands } => match tag {
+                crate::op::OpTag::Int(s) | crate::op::OpTag::Uint(s) => Ok(s.clone()),
+                crate::op::OpTag::Float(s) => {
+                    if s.contains('.') || s.contains('e') || s.contains('E') {
+                        Ok(s.clone())
+                    } else {
+                        Ok(format!("{}.0", s))
+                    }
                 }
-            }
-            InstKind::Bool(b) => Ok(if *b { "true" } else { "false" }.to_string()),
-            InstKind::Unit => {
-                unreachable!(
-                    "InstKind::Unit should never reach GLSL codegen; unit values are not materializable"
-                )
-            }
-
-            InstKind::BinOp { op, lhs, rhs } => {
-                let l = self.get_value_ref(*lhs)?;
-                let r = self.get_value_ref(*rhs)?;
-                match op.as_str() {
-                    "**" => Ok(format!("pow({}, {})", l, r)),
-                    _ => Ok(format!("({} {} {})", l, op, r)),
-                }
-            }
-
-            InstKind::UnaryOp { op, operand } => {
-                let inner = self.get_value_ref(*operand)?;
-                Ok(format!("({}{})", op, inner))
-            }
-
-            InstKind::Tuple(elems) => {
-                if elems.is_empty() {
-                    bail_glsl_at!(self.blame_span(), "Empty tuple in GLSL lowering");
-                }
-                let parts: Result<Vec<_>> = elems.iter().map(|e| self.get_value_ref(*e)).collect();
-                let struct_name = self.ctx.type_to_glsl(result_ty.expect("Tuple must have result"));
-                Ok(format!("{}({})", struct_name, parts?.join(", ")))
-            }
-
-            InstKind::ArrayLit { elements } => {
-                let parts: Result<Vec<_>> = elements.iter().map(|e| self.get_value_ref(*e)).collect();
-                // GLSL array literal syntax is `ElemType[](v0, v1, ...)` —
-                // note the `[]` belongs to the literal, not the type. If
-                // we used type_to_glsl on the array type it would already
-                // include a `[]` suffix, producing `Elem[][](...)` which
-                // is arrays-of-arrays.
-                let arr_ty = result_ty.expect("ArrayLit must have result");
-                let elem_ty = arr_ty.elem_type().expect("ArrayLit result is an array");
-                let elem_str = self.ctx.type_to_glsl(elem_ty);
-                Ok(format!("{}[]({})", elem_str, parts?.join(", ")))
-            }
-
-            InstKind::Vector(elems) => {
-                let parts: Result<Vec<_>> = elems.iter().map(|e| self.get_value_ref(*e)).collect();
-                let ty = self.ctx.type_to_glsl(result_ty.expect("Vector must have result"));
-                Ok(format!("{}({})", ty, parts?.join(", ")))
-            }
-
-            InstKind::Index { base, index } => {
-                let base_val = self.get_value_ref(*base)?;
-                let index_val = self.get_value_ref(*index)?;
-                Ok(format!("{}[{}]", base_val, index_val))
-            }
-
-            InstKind::Project { base, index } => {
-                let base_val = self.get_value_ref(*base)?;
-                let base_ty = match base.as_ssa() {
-                    Some(id) => self.body.get_value_type(id),
-                    None => bail_glsl_at!(self.blame_span(), "Project base must be SSA value"),
-                };
-
-                // Check if it's a vector type - use swizzle
-                if matches!(base_ty, PolyType::Constructed(TypeName::Vec, _)) {
-                    let swizzle = match index {
-                        0 => "x",
-                        1 => "y",
-                        2 => "z",
-                        3 => "w",
-                        _ => bail_glsl_at!(self.blame_span(), "Invalid vector swizzle index: {}", index),
-                    };
-                    Ok(format!("{}.{}", base_val, swizzle))
-                } else {
-                    // Struct field access
-                    Ok(format!("{}.f{}", base_val, index))
-                }
-            }
-
-            InstKind::Call { func, args } => {
-                let arg_strs: Result<Vec<_>> = args.iter().map(|a| self.get_value_ref(*a)).collect();
-                let arg_strs = arg_strs?;
-
-                // Check if it's a builtin
-                if let Some(def) = catalog().lookup_by_any_name(func) {
-                    let impl_ = def.overloads()[0].lowering.clone();
-                    self.lower_builtin_call(
-                        def.id,
-                        &impl_,
-                        &arg_strs,
-                        result_ty.expect("Call must have result"),
+                crate::op::OpTag::Bool(b) => Ok(if *b { "true" } else { "false" }.to_string()),
+                crate::op::OpTag::Unit => {
+                    unreachable!(
+                        "OpTag::Unit should never reach GLSL codegen; unit values are not materializable"
                     )
-                } else {
-                    let mangled = self.ctx.glsl_mangle_tracked(func)?;
-                    Ok(format!("{}({})", mangled, arg_strs.join(", ")))
                 }
-            }
 
-            InstKind::Intrinsic {
-                id,
-                overload_idx: _,
-                args,
-            } => {
-                let arg_strs: Result<Vec<_>> = args.iter().map(|a| self.get_value_ref(*a)).collect();
-                let ssa_args: Vec<ValueId> = args.iter().filter_map(|a| a.as_ssa()).collect();
-                let name = crate::builtins::by_id(*id).dispatch_name();
-                self.lower_intrinsic(
-                    name,
-                    &arg_strs?,
-                    &ssa_args,
-                    result_ty.expect("Intrinsic must have result"),
-                )
-            }
+                crate::op::OpTag::BinOp(op) => {
+                    let l = self.get_value_ref(operands[0])?;
+                    let r = self.get_value_ref(operands[1])?;
+                    match op.as_str() {
+                        "**" => Ok(format!("pow({}, {})", l, r)),
+                        _ => Ok(format!("({} {} {})", l, op, r)),
+                    }
+                }
 
-            InstKind::ArrayRange { .. } => {
-                bail_glsl_at!(self.blame_span(), "ArrayRange not supported in GLSL")
-            }
+                crate::op::OpTag::UnaryOp(op) => {
+                    let inner = self.get_value_ref(operands[0])?;
+                    Ok(format!("({}{})", op, inner))
+                }
 
-            InstKind::Global(name) => Ok(name.clone()),
+                crate::op::OpTag::Tuple(_) => {
+                    if operands.is_empty() {
+                        bail_glsl_at!(self.blame_span(), "Empty tuple in GLSL lowering");
+                    }
+                    let parts: Result<Vec<_>> = operands.iter().map(|e| self.get_value_ref(*e)).collect();
+                    let struct_name = self.ctx.type_to_glsl(result_ty.expect("Tuple must have result"));
+                    Ok(format!("{}({})", struct_name, parts?.join(", ")))
+                }
 
-            InstKind::Extern(linkage) => {
+                crate::op::OpTag::ArrayLit(_) => {
+                    let parts: Result<Vec<_>> = operands.iter().map(|e| self.get_value_ref(*e)).collect();
+                    // GLSL array literal syntax is `ElemType[](v0, v1, ...)` —
+                    // note the `[]` belongs to the literal, not the type. If
+                    // we used type_to_glsl on the array type it would already
+                    // include a `[]` suffix, producing `Elem[][](...)` which
+                    // is arrays-of-arrays.
+                    let arr_ty = result_ty.expect("ArrayLit must have result");
+                    let elem_ty = arr_ty.elem_type().expect("ArrayLit result is an array");
+                    let elem_str = self.ctx.type_to_glsl(elem_ty);
+                    Ok(format!("{}[]({})", elem_str, parts?.join(", ")))
+                }
+
+                crate::op::OpTag::Vector(_) => {
+                    let parts: Result<Vec<_>> = operands.iter().map(|e| self.get_value_ref(*e)).collect();
+                    let ty = self.ctx.type_to_glsl(result_ty.expect("Vector must have result"));
+                    Ok(format!("{}({})", ty, parts?.join(", ")))
+                }
+
+                crate::op::OpTag::Index => {
+                    let base_val = self.get_value_ref(operands[0])?;
+                    let index_val = self.get_value_ref(operands[1])?;
+                    Ok(format!("{}[{}]", base_val, index_val))
+                }
+
+                crate::op::OpTag::Project { index } => {
+                    let base = operands[0];
+                    let base_val = self.get_value_ref(base)?;
+                    let base_ty = match base.as_ssa() {
+                        Some(id) => self.body.get_value_type(id),
+                        None => bail_glsl_at!(self.blame_span(), "Project base must be SSA value"),
+                    };
+
+                    // Check if it's a vector type - use swizzle
+                    if matches!(base_ty, PolyType::Constructed(TypeName::Vec, _)) {
+                        let swizzle = match index {
+                            0 => "x",
+                            1 => "y",
+                            2 => "z",
+                            3 => "w",
+                            _ => {
+                                bail_glsl_at!(self.blame_span(), "Invalid vector swizzle index: {}", index)
+                            }
+                        };
+                        Ok(format!("{}.{}", base_val, swizzle))
+                    } else {
+                        // Struct field access
+                        Ok(format!("{}.f{}", base_val, index))
+                    }
+                }
+
+                crate::op::OpTag::Call(func) => {
+                    let arg_strs: Result<Vec<_>> =
+                        operands.iter().map(|a| self.get_value_ref(*a)).collect();
+                    let arg_strs = arg_strs?;
+
+                    // Check if it's a builtin
+                    if let Some(def) = catalog().lookup_by_any_name(func) {
+                        let impl_ = def.overloads()[0].lowering.clone();
+                        self.lower_builtin_call(
+                            def.id,
+                            &impl_,
+                            &arg_strs,
+                            result_ty.expect("Call must have result"),
+                        )
+                    } else {
+                        let mangled = self.ctx.glsl_mangle_tracked(func)?;
+                        Ok(format!("{}({})", mangled, arg_strs.join(", ")))
+                    }
+                }
+
+                crate::op::OpTag::Intrinsic { id, overload_idx: _ } => {
+                    let arg_strs: Result<Vec<_>> =
+                        operands.iter().map(|a| self.get_value_ref(*a)).collect();
+                    let ssa_args: Vec<ValueId> = operands.iter().filter_map(|a| a.as_ssa()).collect();
+                    let name = crate::builtins::by_id(*id).dispatch_name();
+                    self.lower_intrinsic(
+                        name,
+                        &arg_strs?,
+                        &ssa_args,
+                        result_ty.expect("Intrinsic must have result"),
+                    )
+                }
+
+                crate::op::OpTag::ArrayRange { .. } => {
+                    bail_glsl_at!(self.blame_span(), "ArrayRange not supported in GLSL")
+                }
+
+                crate::op::OpTag::Global(name) => Ok(name.clone()),
+
+                crate::op::OpTag::Extern(linkage) => {
+                    bail_glsl_at!(
+                        self.blame_span(),
+                        "Extern functions not supported in GLSL: {}",
+                        linkage
+                    )
+                }
+
+                crate::op::OpTag::Matrix { .. } => {
+                    bail_glsl_at!(
+                        self.blame_span(),
+                        "Matrix literals not yet implemented in GLSL lowering"
+                    )
+                }
+
+                // TODO: GLSL backend does not support storage places today. To
+                // lift this, route `Alloca` to a function-scope GLSL array,
+                // teach `Load` / `Store` to walk `PlaceId` → place expression
+                // (mirror WGSL's `place_targets`), and implement StorageView
+                // via SSBO syntax. Until then the GLSL target rejects any
+                // view / Alloca / Load path.
+                crate::op::OpTag::StorageView(_) | crate::op::OpTag::StorageViewLen => {
+                    bail_glsl_at!(
+                        self.blame_span(),
+                        "GLSL target does not support storage views (StorageView / StorageViewLen)"
+                    )
+                }
+
+                crate::op::OpTag::Materialize | crate::op::OpTag::DynamicExtract => {
+                    bail_glsl_at!(
+                        self.blame_span(),
+                        "Materialize/DynamicExtract not supported in GLSL (SPIR-V-specific lowering)"
+                    )
+                }
+
+                crate::op::OpTag::ViewIndex | crate::op::OpTag::OutputSlot { .. } => {
+                    unreachable!("OpTag::{:?} is EGIR-only and must not reach SSA backend", tag)
+                }
+            },
+
+            InstKind::ViewIndex { .. } | InstKind::Alloca { .. } | InstKind::Load { .. } => {
                 bail_glsl_at!(
                     self.blame_span(),
-                    "Extern functions not supported in GLSL: {}",
-                    linkage
+                    "GLSL target does not support storage places (ViewIndex / Alloca / Load)"
                 )
             }
-
-            InstKind::Matrix(_) => {
-                bail_glsl_at!(
-                    self.blame_span(),
-                    "Matrix literals not yet implemented in GLSL lowering"
-                )
-            }
-
-            // TODO: GLSL backend does not support storage places today. To
-            // lift this, route `Alloca` to a function-scope GLSL array,
-            // teach `Load` / `Store` to walk `PlaceId` → place expression
-            // (mirror WGSL's `place_targets`), and implement StorageView
-            // via SSBO syntax. Until then the GLSL target rejects any
-            // view / Alloca / Load path.
-            InstKind::StorageView { .. }
-            | InstKind::StorageViewLen { .. }
-            | InstKind::ViewIndex { .. }
-            | InstKind::Alloca { .. }
-            | InstKind::Load { .. } => bail_glsl_at!(
-                self.blame_span(),
-                "GLSL target does not support storage places (StorageView / ViewIndex / Alloca / Load)"
-            ),
 
             InstKind::Store { place, value } => {
                 if let Some(out_name) = self.output_ptrs.get(place) {
@@ -1280,13 +1303,6 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         index
                     )
                 }
-            }
-
-            InstKind::Materialize { .. } | InstKind::DynamicExtract { .. } => {
-                bail_glsl_at!(
-                    self.blame_span(),
-                    "Materialize/DynamicExtract not supported in GLSL (SPIR-V-specific lowering)"
-                )
             }
         }
     }
@@ -1330,11 +1346,17 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         use crate::ssa::types::InstKind;
         let known = catalog().known();
         let (id, args) = match &inst.data {
-            InstKind::Intrinsic { id, args, .. } => (*id, args),
+            InstKind::Op {
+                tag: crate::op::OpTag::Intrinsic { id, .. },
+                operands,
+            } => (*id, operands),
             // Legacy: catalog-named Call instructions (synthesised paths
             // that haven't been migrated to `Var(Builtin)` yet).
-            InstKind::Call { func, args } => match catalog().lookup_by_any_name(func) {
-                Some(def) => (def.id, args),
+            InstKind::Op {
+                tag: crate::op::OpTag::Call(func),
+                operands,
+            } => match catalog().lookup_by_any_name(func) {
+                Some(def) => (def.id, operands),
                 None => return Ok(false),
             },
             _ => return Ok(false),

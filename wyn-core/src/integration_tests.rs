@@ -328,19 +328,21 @@ fn count_uninit_in_program(ssa: &Program) -> usize {
         .chain(ssa.entry_points.iter().map(|e| &e.body.inner.insts));
     for insts in bodies {
         for (_id, inst) in insts {
-            match &inst.data {
-                crate::ssa::types::InstKind::Call { func: f, .. } => {
-                    if f == "_w_intrinsic_uninit" {
-                        count += 1;
+            if let crate::ssa::types::InstKind::Op { tag, .. } = &inst.data {
+                match tag {
+                    crate::op::OpTag::Call(f) => {
+                        if f == "_w_intrinsic_uninit" {
+                            count += 1;
+                        }
                     }
-                }
-                crate::ssa::types::InstKind::Intrinsic { id, .. } => {
-                    let name = crate::builtins::by_id(*id).raw.surface_name;
-                    if name == "_w_intrinsic_uninit" {
-                        count += 1;
+                    crate::op::OpTag::Intrinsic { id, .. } => {
+                        let name = crate::builtins::by_id(*id).raw.surface_name;
+                        if name == "_w_intrinsic_uninit" {
+                            count += 1;
+                        }
                     }
+                    _ => {}
                 }
-                _ => {}
             }
         }
     }
@@ -1085,10 +1087,16 @@ entry compute_main(data: []i32) i32 =
         // Show all instructions that involve indexing or storage views
         for inst in f.body.inner.insts.values() {
             match &inst.data {
-                crate::ssa::types::InstKind::Index { .. } => {
+                crate::ssa::types::InstKind::Op {
+                    tag: crate::op::OpTag::Index,
+                    ..
+                } => {
                     eprintln!("    inst {:?}: Index", inst.result);
                 }
-                crate::ssa::types::InstKind::StorageView { .. } => {
+                crate::ssa::types::InstKind::Op {
+                    tag: crate::op::OpTag::StorageView(_),
+                    ..
+                } => {
                     eprintln!("    inst {:?}: StorageView", inst.result);
                 }
                 crate::ssa::types::InstKind::ViewIndex { .. } => {
@@ -1438,7 +1446,11 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     // Check that no Global("PI") instruction exists — it should have been inlined.
     for func in &ssa.functions {
         for (_id, inst) in &func.body.inner.insts {
-            if let crate::ssa::types::InstKind::Global(name) = &inst.data {
+            if let crate::ssa::types::InstKind::Op {
+                tag: crate::op::OpTag::Global(name),
+                ..
+            } = &inst.data
+            {
                 assert_ne!(
                     name, "PI",
                     "Global @PI should have been inlined, but survived in function '{}'",
@@ -1449,7 +1461,11 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     }
     for ep in &ssa.entry_points {
         for (_id, inst) in &ep.body.inner.insts {
-            if let crate::ssa::types::InstKind::Global(name) = &inst.data {
+            if let crate::ssa::types::InstKind::Op {
+                tag: crate::op::OpTag::Global(name),
+                ..
+            } = &inst.data
+            {
                 assert_ne!(
                     name, "PI",
                     "Global @PI should have been inlined, but survived in entry '{}'",

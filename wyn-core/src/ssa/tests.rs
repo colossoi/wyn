@@ -17,10 +17,9 @@ fn test_func_body_params() {
     let y = builder.get_param(1);
     let sum = builder
         .push_inst(
-            InstKind::BinOp {
-                op: "+".to_string(),
-                lhs: ValueRef::Ssa(x),
-                rhs: ValueRef::Ssa(y),
+            InstKind::Op {
+                tag: crate::op::OpTag::BinOp("+".to_string()),
+                operands: vec![ValueRef::Ssa(x), ValueRef::Ssa(y)],
             },
             i32_ty(),
         )

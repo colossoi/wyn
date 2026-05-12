@@ -186,73 +186,125 @@ fn format_function(out: &mut String, name: &str, body: &FuncBody) {
 }
 
 fn format_inst_kind(out: &mut String, kind: &InstKind) {
+    use crate::op::{OpTag, PureViewSource};
     match kind {
-        InstKind::Int(s) => {
-            let _ = write!(out, "int {s}");
-        }
-        InstKind::Float(s) => {
-            let _ = write!(out, "float {s}");
-        }
-        InstKind::Bool(b) => {
-            let _ = write!(out, "bool {b}");
-        }
-        InstKind::Unit => {
-            let _ = write!(out, "unit");
-        }
-        InstKind::BinOp { op, lhs, rhs } => {
-            let _ = write!(out, "binop {op} {}, {}", format_ref(lhs), format_ref(rhs));
-        }
-        InstKind::UnaryOp { op, operand } => {
-            let _ = write!(out, "unaryop {op} {}", format_ref(operand));
-        }
-        InstKind::Tuple(vals) => {
-            let _ = write!(out, "tuple ({})", format_refs(vals));
-        }
-        InstKind::ArrayLit { elements } => {
-            let _ = write!(out, "array [{}]", format_refs(elements));
-        }
-        InstKind::ArrayRange { start, len, step } => {
-            let _ = write!(out, "range {}..{}", format_ref(start), format_ref(len));
-            if let Some(step) = step {
-                let _ = write!(out, " step {}", format_ref(step));
+        InstKind::Op { tag, operands } => match tag {
+            OpTag::Int(s) => {
+                let _ = write!(out, "int {s}");
             }
-        }
-        InstKind::Vector(vals) => {
-            let _ = write!(out, "vector @[{}]", format_refs(vals));
-        }
-        InstKind::Matrix(rows) => {
-            let _ = write!(out, "matrix @[");
-            for (i, row) in rows.iter().enumerate() {
-                if i > 0 {
-                    let _ = write!(out, ", ");
+            OpTag::Uint(s) => {
+                let _ = write!(out, "uint {s}");
+            }
+            OpTag::Float(s) => {
+                let _ = write!(out, "float {s}");
+            }
+            OpTag::Bool(b) => {
+                let _ = write!(out, "bool {b}");
+            }
+            OpTag::Unit => {
+                let _ = write!(out, "unit");
+            }
+            OpTag::BinOp(op) => {
+                let _ = write!(
+                    out,
+                    "binop {op} {}, {}",
+                    format_ref(&operands[0]),
+                    format_ref(&operands[1])
+                );
+            }
+            OpTag::UnaryOp(op) => {
+                let _ = write!(out, "unaryop {op} {}", format_ref(&operands[0]));
+            }
+            OpTag::Tuple(_) => {
+                let _ = write!(out, "tuple ({})", format_refs(operands));
+            }
+            OpTag::ArrayLit(_) => {
+                let _ = write!(out, "array [{}]", format_refs(operands));
+            }
+            OpTag::ArrayRange { has_step } => {
+                let _ = write!(
+                    out,
+                    "range {}..{}",
+                    format_ref(&operands[0]),
+                    format_ref(&operands[1])
+                );
+                if *has_step {
+                    let _ = write!(out, " step {}", format_ref(&operands[2]));
                 }
-                let _ = write!(out, "[{}]", format_refs(row));
             }
-            let _ = write!(out, "]");
-        }
-        InstKind::Project { base, index } => {
-            let _ = write!(out, "project {}.{index}", format_ref(base));
-        }
-        InstKind::Index { base, index } => {
-            let _ = write!(out, "index {}[{}]", format_ref(base), format_ref(index));
-        }
-        InstKind::Call { func, args } => {
-            let _ = write!(out, "call @{func}({})", format_refs(args));
-        }
-        InstKind::Global(name) => {
-            let _ = write!(out, "global @{name}");
-        }
-        InstKind::Extern(name) => {
-            let _ = write!(out, "extern @{name}");
-        }
-        InstKind::Intrinsic {
-            id,
-            overload_idx,
-            args,
-        } => {
-            let name = crate::builtins::by_id(*id).dispatch_name();
-            let _ = write!(out, "intrinsic @{name}#{overload_idx}({})", format_refs(args));
-        }
+            OpTag::Vector(_) => {
+                let _ = write!(out, "vector @[{}]", format_refs(operands));
+            }
+            OpTag::Matrix { rows, cols } => {
+                let _ = write!(out, "matrix @[");
+                for r in 0..*rows {
+                    if r > 0 {
+                        let _ = write!(out, ", ");
+                    }
+                    let row = &operands[r * cols..(r + 1) * cols];
+                    let _ = write!(out, "[{}]", format_refs(row));
+                }
+                let _ = write!(out, "]");
+            }
+            OpTag::Project { index } => {
+                let _ = write!(out, "project {}.{index}", format_ref(&operands[0]));
+            }
+            OpTag::Index => {
+                let _ = write!(
+                    out,
+                    "index {}[{}]",
+                    format_ref(&operands[0]),
+                    format_ref(&operands[1])
+                );
+            }
+            OpTag::Call(func) => {
+                let _ = write!(out, "call @{func}({})", format_refs(operands));
+            }
+            OpTag::Global(name) => {
+                let _ = write!(out, "global @{name}");
+            }
+            OpTag::Extern(name) => {
+                let _ = write!(out, "extern @{name}");
+            }
+            OpTag::Intrinsic { id, overload_idx } => {
+                let name = crate::builtins::by_id(*id).dispatch_name();
+                let _ = write!(out, "intrinsic @{name}#{overload_idx}({})", format_refs(operands));
+            }
+            OpTag::StorageView(src) => {
+                let src_str = match src {
+                    PureViewSource::Storage { set, binding } => {
+                        format!("storage({set}, {binding})")
+                    }
+                    PureViewSource::Inherited => format_ref(&operands[2]),
+                };
+                let _ = write!(
+                    out,
+                    "storage_view {src_str} {} {}",
+                    format_ref(&operands[0]),
+                    format_ref(&operands[1])
+                );
+            }
+            OpTag::StorageViewLen => {
+                let _ = write!(out, "storage_view_len {}", format_ref(&operands[0]));
+            }
+            OpTag::Materialize => {
+                let _ = write!(out, "materialize {}", format_ref(&operands[0]));
+            }
+            OpTag::DynamicExtract => {
+                let _ = write!(
+                    out,
+                    "dynamic_extract {}[{}]",
+                    format_ref(&operands[0]),
+                    format_ref(&operands[1])
+                );
+            }
+            OpTag::ViewIndex | OpTag::OutputSlot { .. } => {
+                unreachable!(
+                    "OpTag::{:?} is EGIR-only and must not appear in InstKind::Op",
+                    tag
+                );
+            }
+        },
         InstKind::Alloca { elem_ty, result } => {
             let _ = write!(out, "alloca {} -> {}", format_type(elem_ty), fmt_place(*result));
         }
@@ -261,18 +313,6 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
         }
         InstKind::Store { place, value } => {
             let _ = write!(out, "store {}, {}", fmt_place(*place), format_ref(value));
-        }
-        InstKind::StorageView { source, offset, len } => {
-            let src = match source {
-                ViewSource::Storage { set, binding } => format!("storage({set}, {binding})"),
-                ViewSource::Inherited { parent } => fmt_val(*parent),
-            };
-            let _ = write!(
-                out,
-                "storage_view {src} {} {}",
-                format_ref(offset),
-                format_ref(len)
-            );
         }
         InstKind::ViewIndex { view, index, result } => {
             let _ = write!(
@@ -283,17 +323,8 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
                 fmt_place(*result)
             );
         }
-        InstKind::StorageViewLen { view } => {
-            let _ = write!(out, "storage_view_len {}", format_ref(view));
-        }
         InstKind::OutputSlot { index, result } => {
             let _ = write!(out, "output_slot {index} -> {}", fmt_place(*result));
-        }
-        InstKind::Materialize { value } => {
-            let _ = write!(out, "materialize {}", format_ref(value));
-        }
-        InstKind::DynamicExtract { base, index } => {
-            let _ = write!(out, "dynamic_extract {}[{}]", format_ref(base), format_ref(index));
         }
     }
 }

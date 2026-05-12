@@ -7,6 +7,7 @@ pub mod interface;
 pub mod lexer;
 pub mod module_manager;
 pub mod name_resolution;
+pub mod op;
 pub mod parser;
 pub mod pattern;
 pub mod scope;

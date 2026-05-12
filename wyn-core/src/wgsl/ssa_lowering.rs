@@ -21,7 +21,7 @@ use crate::builtins::lowering::{BuiltinLowering, PrimOp};
 use crate::error::Result;
 use crate::ssa::types::{
     EntryPoint, ExecutionModel, FuncBody, Function, InstKind, IoDecoration, Program, ValueId, ValueRef,
-    ViewSource, WynInstNode,
+    WynInstNode,
 };
 use crate::types::TypeExt;
 
@@ -1293,7 +1293,11 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 // binding args, which monomorphization folds to constants.
                 for (_, inst) in self.body.inner.insts.iter() {
                     if inst.result == Some(id) {
-                        if let InstKind::Int(s) = &inst.data {
+                        if let InstKind::Op {
+                            tag: crate::op::OpTag::Int(s) | crate::op::OpTag::Uint(s),
+                            ..
+                        } = &inst.data
+                        {
                             return s.parse::<u32>().ok();
                         }
                     }
@@ -1550,7 +1554,10 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         // uninitialized composite. In WGSL that's just a
                         // `var<function> x: T;` — no initializer, no
                         // function call.
-                        InstKind::Intrinsic { id, .. } if *id == catalog().known().uninit => {
+                        InstKind::Op {
+                            tag: crate::op::OpTag::Intrinsic { id, .. },
+                            ..
+                        } if *id == catalog().known().uninit => {
                             let result_id = inst.result.ok_or_else(|| {
                                 crate::err_wgsl_at!(
                                     self.blame_span(),
@@ -1576,24 +1583,26 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         // `_w_intrinsic_array_with(arr, i, v)`:
                         // functional update. Declare a fresh `var` copy
                         // of the source, then patch the one element.
-                        InstKind::Intrinsic { id, args, .. }
-                            if *id == catalog().known().array_with_in_place
-                                || *id == catalog().known().array_with =>
+                        InstKind::Op {
+                            tag: crate::op::OpTag::Intrinsic { id, .. },
+                            operands,
+                        } if *id == catalog().known().array_with_in_place
+                            || *id == catalog().known().array_with =>
                         {
                             let known = catalog().known();
                             let is_inplace = *id == known.array_with_in_place;
                             let func_name = by_id(*id).dispatch_name();
-                            if args.len() != 3 {
+                            if operands.len() != 3 {
                                 return Err(crate::err_wgsl_at!(
                                     self.blame_span(),
                                     "{} expects 3 args, got {}",
                                     func_name,
-                                    args.len()
+                                    operands.len()
                                 ));
                             }
-                            let arr_src = self.get_value(args[0])?;
-                            let idx = self.get_value(args[1])?;
-                            let val = self.get_value(args[2])?;
+                            let arr_src = self.get_value(operands[0])?;
+                            let idx = self.get_value(operands[1])?;
+                            let val = self.get_value(operands[2])?;
                             let result_id = inst.result.ok_or_else(|| {
                                 crate::err_wgsl_at!(self.blame_span(), "{} must have a result", func_name)
                             })?;
@@ -1638,14 +1647,17 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         // DynamicExtract's `x[i]`. WGSL forbids dynamic
                         // indexing of `let`-bound values, so this must
                         // be a `var`.
-                        InstKind::Materialize { value } => {
+                        InstKind::Op {
+                            tag: crate::op::OpTag::Materialize,
+                            operands,
+                        } => {
                             let result_id = inst.result.ok_or_else(|| {
                                 crate::err_wgsl_at!(self.blame_span(), "Materialize must have a result")
                             })?;
                             let ty =
                                 self.ctx.type_emitter.type_to_wgsl(self.body.get_value_type(result_id))?;
                             let var = wgsl_var(result_id);
-                            let val = self.get_value(*value)?;
+                            let val = self.get_value(operands[0])?;
                             writeln!(output, "{}var {}: {} = {};", self.ctx.indent_str(), var, ty, val)
                                 .unwrap();
                             self.declared.insert(var.clone());
@@ -1662,7 +1674,13 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         // name captures the buffer identity; alias it so
                         // later ViewIndex lookups can resolve via
                         // `view_handles`.
-                        if matches!(inst.data, InstKind::StorageView { .. }) {
+                        if matches!(
+                            inst.data,
+                            InstKind::Op {
+                                tag: crate::op::OpTag::StorageView(_),
+                                ..
+                            }
+                        ) {
                             self.value_map.insert(result, ValueBinding::Alias(expr));
                             continue;
                         }
@@ -1764,7 +1782,13 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         self.current_span = inst.span;
                         let expr = self.lower_inst(inst)?;
                         if let Some(result) = inst.result {
-                            if matches!(inst.data, InstKind::StorageView { .. }) {
+                            if matches!(
+                                inst.data,
+                                InstKind::Op {
+                                    tag: crate::op::OpTag::StorageView(_),
+                                    ..
+                                }
+                            ) {
                                 self.value_map.insert(result, ValueBinding::Alias(expr));
                                 continue;
                             }
@@ -1808,398 +1832,490 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         self.current_span = inst.span;
 
         match &inst.data {
-            // Integer literals carry their type in the suffix:
-            //   `Nu` for `u32`, `Ni` for `i32`. WGSL has no implicit
-            //   int conversion, so respecting the SSA value's type is
-            //   load-bearing for subsequent uses.
-            InstKind::Int(s) => match result_ty.as_ref() {
-                Some(PolyType::Constructed(TypeName::UInt(32), _)) => Ok(format!("{}u", s)),
-                Some(PolyType::Constructed(TypeName::Int(32), _)) | _ => Ok(format!("{}i", s)),
-            },
-            InstKind::Float(s) => {
-                let suffix = "f";
-                if s.contains('.') || s.contains('e') || s.contains('E') {
-                    Ok(format!("{}{}", s, suffix))
-                } else {
-                    Ok(format!("{}.0{}", s, suffix))
-                }
-            }
-            InstKind::Bool(b) => Ok((if *b { "true" } else { "false" }).to_string()),
-            InstKind::Unit => Err(crate::err_wgsl_at!(
-                self.blame_span(),
-                "unit values aren't materializable in WGSL"
-            )),
-
-            InstKind::BinOp { op, lhs, rhs } => {
-                // WGSL has no implicit numeric coercion (`i32 + u32` is an
-                // error), so when an operand's type doesn't match the
-                // BinOp's declared result type we wrap it in an explicit
-                // cast. This comes up e.g. when a slice's offset (i32
-                // literal) gets added to a parent `StorageView` offset
-                // (u32 arrayLength result).
-                let l = self.coerce_operand_to_result_ty(*lhs, result_ty.as_ref())?;
-                let r = self.coerce_operand_to_result_ty(*rhs, result_ty.as_ref())?;
-                match op.as_str() {
-                    "**" => Ok(format!("pow({}, {})", l, r)),
-                    _ => Ok(format!("({} {} {})", l, op, r)),
-                }
-            }
-
-            InstKind::UnaryOp { op, operand } => {
-                let inner = self.get_value(*operand)?;
-                Ok(format!("({}{})", op, inner))
-            }
-
-            InstKind::Tuple(elems) => {
-                if elems.is_empty() {
-                    return Err(crate::err_wgsl_at!(
-                        self.blame_span(),
-                        "empty tuple not supported in WGSL"
-                    ));
-                }
-                let parts: Result<Vec<_>> = elems.iter().map(|e| self.get_value(*e)).collect();
-                let ty = result_ty.as_ref().ok_or_else(|| {
-                    crate::err_wgsl_at!(self.blame_span(), "Tuple must have a result type")
-                })?;
-                let struct_name = self.ctx.type_emitter.type_to_wgsl(ty)?;
-                Ok(format!("{}({})", struct_name, parts?.join(", ")))
-            }
-
-            InstKind::Vector(elems) => {
-                let parts: Result<Vec<_>> = elems.iter().map(|e| self.get_value(*e)).collect();
-                let ty = result_ty.as_ref().ok_or_else(|| {
-                    crate::err_wgsl_at!(self.blame_span(), "Vector must have a result type")
-                })?;
-                let wgsl_ty = self.ctx.type_emitter.type_to_wgsl(ty)?;
-                Ok(format!("{}({})", wgsl_ty, parts?.join(", ")))
-            }
-
-            InstKind::ArrayLit { elements } => {
-                let parts: Result<Vec<_>> = elements.iter().map(|e| self.get_value(*e)).collect();
-                let ty = result_ty.as_ref().ok_or_else(|| {
-                    crate::err_wgsl_at!(self.blame_span(), "ArrayLit must have a result type")
-                })?;
-                let wgsl_ty = self.ctx.type_emitter.type_to_wgsl(ty)?;
-                // `array<T, N>(e0, e1, ...)` constructor.
-                Ok(format!("{}({})", wgsl_ty, parts?.join(", ")))
-            }
-
-            InstKind::Project { base, index } => {
-                let base_val = self.get_value(*base)?;
-                // Determine base type: SSA → look up via body; Const's type
-                // isn't accessible that way so we error (projects on consts
-                // would be folded earlier).
-                let base_id = base.as_ssa().ok_or_else(|| {
-                    crate::err_wgsl_at!(self.blame_span(), "Project base must be an SSA value")
-                })?;
-                let base_ty = self.body.get_value_type(base_id);
-                if matches!(base_ty, PolyType::Constructed(TypeName::Vec, _)) {
-                    let swizzle = match index {
-                        0 => "x",
-                        1 => "y",
-                        2 => "z",
-                        3 => "w",
-                        _ => {
-                            return Err(crate::err_wgsl_at!(
-                                self.blame_span(),
-                                "invalid vector swizzle index: {}",
-                                index
-                            ));
-                        }
-                    };
-                    Ok(format!("{}.{}", base_val, swizzle))
-                } else {
-                    Ok(format!("{}.f{}", base_val, index))
-                }
-            }
-
-            InstKind::Index { base, index } => {
-                let base_val = self.get_value(*base)?;
-                let index_val = self.get_value(*index)?;
-                // Virtual arrays are `{start, step, len}` triples in a
-                // generated struct; indexing computes `start + i*step`
-                // (matching SPIR-V's `lower_virtual_index`). Composite
-                // and view arrays just subscript normally.
-                if let Some(id) = base.as_ssa() {
-                    let base_ty = self.body.get_value_type(id);
-                    if let Some(PolyType::Constructed(TypeName::ArrayVariantVirtual, _)) =
-                        base_ty.array_variant()
-                    {
-                        return Ok(format!("({}.f0 + {} * {}.f1)", base_val, index_val, base_val));
+            InstKind::Op { tag, operands } => match tag {
+                // Integer literals carry their type in the suffix:
+                //   `Nu` for `u32`, `Ni` for `i32`. WGSL has no implicit
+                //   int conversion, so respecting the SSA value's type is
+                //   load-bearing for subsequent uses.
+                crate::op::OpTag::Int(s) | crate::op::OpTag::Uint(s) => match result_ty.as_ref() {
+                    Some(PolyType::Constructed(TypeName::UInt(32), _)) => Ok(format!("{}u", s)),
+                    Some(PolyType::Constructed(TypeName::Int(32), _)) | _ => Ok(format!("{}i", s)),
+                },
+                crate::op::OpTag::Float(s) => {
+                    let suffix = "f";
+                    if s.contains('.') || s.contains('e') || s.contains('E') {
+                        Ok(format!("{}{}", s, suffix))
+                    } else {
+                        Ok(format!("{}.0{}", s, suffix))
                     }
                 }
-                Ok(format!("{}[{}]", base_val, index_val))
-            }
+                crate::op::OpTag::Bool(b) => Ok((if *b { "true" } else { "false" }).to_string()),
+                crate::op::OpTag::Unit => Err(crate::err_wgsl_at!(
+                    self.blame_span(),
+                    "unit values aren't materializable in WGSL"
+                )),
 
-            InstKind::Global(name) => {
-                // Constants like iResolution/iTime are emitted at module scope
-                // and referenced by their user-facing names (validated as
-                // legal WGSL identifiers). Wyn-internal defs go through the
-                // mangler.
-                if self.ctx.program.uniforms.iter().any(|u| u.name == *name)
-                    || self.ctx.program.constants.iter().any(|c| c.name == *name)
-                {
-                    Ok(name.clone())
-                } else {
-                    self.ctx.mangle_tracked(name)
+                crate::op::OpTag::BinOp(op) => {
+                    let lhs = operands[0];
+                    let rhs = operands[1];
+                    // WGSL has no implicit numeric coercion (`i32 + u32` is an
+                    // error), so when an operand's type doesn't match the
+                    // BinOp's declared result type we wrap it in an explicit
+                    // cast. This comes up e.g. when a slice's offset (i32
+                    // literal) gets added to a parent `StorageView` offset
+                    // (u32 arrayLength result).
+                    let l = self.coerce_operand_to_result_ty(lhs, result_ty.as_ref())?;
+                    let r = self.coerce_operand_to_result_ty(rhs, result_ty.as_ref())?;
+                    match op.as_str() {
+                        "**" => Ok(format!("pow({}, {})", l, r)),
+                        _ => Ok(format!("({} {} {})", l, op, r)),
+                    }
                 }
-            }
 
-            InstKind::Call { func, args } => {
-                // Route well-known builtins (type casts, math functions)
-                // through the same dispatch as `InstKind::Intrinsic`; fall
-                // back to a mangled user-function call.
-                let raw_strs: Result<Vec<_>> = args.iter().map(|a| self.get_value(*a)).collect();
-                let raw_strs = raw_strs?;
-                // Structural dispatch first: if this name is registered
-                // in `impl_source`, route through the `BuiltinLowering` so
-                // the qualifier prefix doesn't matter (`f32.cos`,
-                // `vec.cos`, `_w_intrinsic_cos` all share a `PrimOp`).
-                if let Some(lowered) =
-                    self.try_lower_via_impl_source(func, &raw_strs, result_ty.as_ref())?
-                {
-                    return Ok(lowered);
+                crate::op::OpTag::UnaryOp(op) => {
+                    let inner = self.get_value(operands[0])?;
+                    Ok(format!("({}{})", op, inner))
                 }
-                if let Some(lowered) = try_lower_wgsl_builtin(func, &raw_strs) {
-                    return Ok(lowered);
+
+                crate::op::OpTag::Tuple(_) => {
+                    if operands.is_empty() {
+                        return Err(crate::err_wgsl_at!(
+                            self.blame_span(),
+                            "empty tuple not supported in WGSL"
+                        ));
+                    }
+                    let parts: Result<Vec<_>> = operands.iter().map(|e| self.get_value(*e)).collect();
+                    let ty = result_ty.as_ref().ok_or_else(|| {
+                        crate::err_wgsl_at!(self.blame_span(), "Tuple must have a result type")
+                    })?;
+                    let struct_name = self.ctx.type_emitter.type_to_wgsl(ty)?;
+                    Ok(format!("{}({})", struct_name, parts?.join(", ")))
                 }
-                // Mirror `lower_function`: drop arguments whose parameter
-                // slot on the callee is a view-array. The callee's
-                // signature has those params filtered out, so we skip
-                // the corresponding args here too.
-                let callee = self.ctx.program.functions.iter().find(|f| f.name == *func);
-                let arg_strs: Vec<String> = match callee {
-                    Some(f) => {
-                        args.iter()
+
+                crate::op::OpTag::Vector(_) => {
+                    let parts: Result<Vec<_>> = operands.iter().map(|e| self.get_value(*e)).collect();
+                    let ty = result_ty.as_ref().ok_or_else(|| {
+                        crate::err_wgsl_at!(self.blame_span(), "Vector must have a result type")
+                    })?;
+                    let wgsl_ty = self.ctx.type_emitter.type_to_wgsl(ty)?;
+                    Ok(format!("{}({})", wgsl_ty, parts?.join(", ")))
+                }
+
+                crate::op::OpTag::ArrayLit(_) => {
+                    let parts: Result<Vec<_>> = operands.iter().map(|e| self.get_value(*e)).collect();
+                    let ty = result_ty.as_ref().ok_or_else(|| {
+                        crate::err_wgsl_at!(self.blame_span(), "ArrayLit must have a result type")
+                    })?;
+                    let wgsl_ty = self.ctx.type_emitter.type_to_wgsl(ty)?;
+                    // `array<T, N>(e0, e1, ...)` constructor.
+                    Ok(format!("{}({})", wgsl_ty, parts?.join(", ")))
+                }
+
+                crate::op::OpTag::Project { index } => {
+                    let base = operands[0];
+                    let base_val = self.get_value(base)?;
+                    // Determine base type: SSA → look up via body; Const's type
+                    // isn't accessible that way so we error (projects on consts
+                    // would be folded earlier).
+                    let base_id = base.as_ssa().ok_or_else(|| {
+                        crate::err_wgsl_at!(self.blame_span(), "Project base must be an SSA value")
+                    })?;
+                    let base_ty = self.body.get_value_type(base_id);
+                    if matches!(base_ty, PolyType::Constructed(TypeName::Vec, _)) {
+                        let swizzle = match index {
+                            0 => "x",
+                            1 => "y",
+                            2 => "z",
+                            3 => "w",
+                            _ => {
+                                return Err(crate::err_wgsl_at!(
+                                    self.blame_span(),
+                                    "invalid vector swizzle index: {}",
+                                    index
+                                ));
+                            }
+                        };
+                        Ok(format!("{}.{}", base_val, swizzle))
+                    } else {
+                        Ok(format!("{}.f{}", base_val, index))
+                    }
+                }
+
+                crate::op::OpTag::Index => {
+                    let base = operands[0];
+                    let index = operands[1];
+                    let base_val = self.get_value(base)?;
+                    let index_val = self.get_value(index)?;
+                    // Virtual arrays are `{start, step, len}` triples in a
+                    // generated struct; indexing computes `start + i*step`
+                    // (matching SPIR-V's `lower_virtual_index`). Composite
+                    // and view arrays just subscript normally.
+                    if let Some(id) = base.as_ssa() {
+                        let base_ty = self.body.get_value_type(id);
+                        if let Some(PolyType::Constructed(TypeName::ArrayVariantVirtual, _)) =
+                            base_ty.array_variant()
+                        {
+                            return Ok(format!("({}.f0 + {} * {}.f1)", base_val, index_val, base_val));
+                        }
+                    }
+                    Ok(format!("{}[{}]", base_val, index_val))
+                }
+
+                crate::op::OpTag::Global(name) => {
+                    // Constants like iResolution/iTime are emitted at module scope
+                    // and referenced by their user-facing names (validated as
+                    // legal WGSL identifiers). Wyn-internal defs go through the
+                    // mangler.
+                    if self.ctx.program.uniforms.iter().any(|u| u.name == *name)
+                        || self.ctx.program.constants.iter().any(|c| c.name == *name)
+                    {
+                        Ok(name.clone())
+                    } else {
+                        self.ctx.mangle_tracked(name)
+                    }
+                }
+
+                crate::op::OpTag::Call(func) => {
+                    let args: &[ValueRef] = operands;
+                    // Route well-known builtins (type casts, math functions)
+                    // through the same dispatch as `OpTag::Intrinsic`; fall
+                    // back to a mangled user-function call.
+                    let raw_strs: Result<Vec<_>> = args.iter().map(|a| self.get_value(*a)).collect();
+                    let raw_strs = raw_strs?;
+                    // Structural dispatch first: if this name is registered
+                    // in `impl_source`, route through the `BuiltinLowering` so
+                    // the qualifier prefix doesn't matter (`f32.cos`,
+                    // `vec.cos`, `_w_intrinsic_cos` all share a `PrimOp`).
+                    if let Some(lowered) =
+                        self.try_lower_via_impl_source(func, &raw_strs, result_ty.as_ref())?
+                    {
+                        return Ok(lowered);
+                    }
+                    if let Some(lowered) = try_lower_wgsl_builtin(func, &raw_strs) {
+                        return Ok(lowered);
+                    }
+                    // Mirror `lower_function`: drop arguments whose parameter
+                    // slot on the callee is a view-array. The callee's
+                    // signature has those params filtered out, so we skip
+                    // the corresponding args here too.
+                    let callee = self.ctx.program.functions.iter().find(|f| f.name == *func);
+                    let arg_strs: Vec<String> = match callee {
+                        Some(f) => args
+                            .iter()
                             .zip(f.body.params.iter())
                             .filter_map(|(arg, (_, pty, _))| {
                                 if is_view_array_ty(pty) { None } else { Some(self.get_value(*arg)) }
                             })
-                            .collect::<Result<Vec<_>>>()?
-                    }
-                    None => raw_strs,
-                };
-                let mangled = self.ctx.mangle_tracked(func)?;
-                Ok(format!("{}({})", mangled, arg_strs.join(", ")))
-            }
+                            .collect::<Result<Vec<_>>>()?,
+                        None => raw_strs,
+                    };
+                    let mangled = self.ctx.mangle_tracked(func)?;
+                    Ok(format!("{}({})", mangled, arg_strs.join(", ")))
+                }
 
-            InstKind::Intrinsic {
-                id,
-                overload_idx: _,
-                args,
-            } => {
-                let known = catalog().known();
-                let arg_strs: Result<Vec<_>> = args.iter().map(|a| self.get_value(*a)).collect();
-                let arg_strs = arg_strs?;
-                // `_w_intrinsic_storage_len(set, binding)` → runtime
-                // length of the storage buffer at those coordinates.
-                // Both args are compile-time integer constants.
-                // WGSL's `arrayLength(&x)` returns `u32`. We cast to `i32`
-                // only when the result slot actually wants `i32`, which
-                // keeps the emitted declaration type consistent with the
-                // expression type (a mismatch is a naga parse error, not
-                // just a style issue).
-                let wants_i32 = matches!(
-                    result_ty.as_ref(),
-                    Some(PolyType::Constructed(TypeName::Int(32), _))
-                );
-                // `_w_intrinsic_thread_id()` → `_wgsl_gid.x` from the
-                // compute entry's auto-injected builtin parameter. The
-                // SSA result type is always `u32` (see
-                // `parallelize::intrinsic_term(..., u32_ty)`), so no
-                // cast is needed.
-                if *id == known.thread_id && args.is_empty() {
-                    return Ok("_wgsl_gid.x".to_string());
-                }
-                if *id == known.storage_len && args.len() == 2 {
-                    let set = self.resolve_const_u32(args[0]);
-                    let binding = self.resolve_const_u32(args[1]);
-                    match (set, binding) {
-                        (Some(s), Some(b)) => {
-                            let name = self.storage_name(s, b)?;
-                            let expr = format!("arrayLength(&{})", name);
-                            return Ok(if wants_i32 { format!("i32({})", expr) } else { expr });
-                        }
-                        _ => {
-                            return Err(crate::err_wgsl_at!(
-                                self.blame_span(),
-                                "_w_intrinsic_storage_len expects const set/binding args"
-                            ));
+                crate::op::OpTag::Intrinsic { id, overload_idx: _ } => {
+                    let args: &[ValueRef] = operands;
+                    let known = catalog().known();
+                    let arg_strs: Result<Vec<_>> = args.iter().map(|a| self.get_value(*a)).collect();
+                    let arg_strs = arg_strs?;
+                    // `_w_intrinsic_storage_len(set, binding)` → runtime
+                    // length of the storage buffer at those coordinates.
+                    // Both args are compile-time integer constants.
+                    // WGSL's `arrayLength(&x)` returns `u32`. We cast to `i32`
+                    // only when the result slot actually wants `i32`, which
+                    // keeps the emitted declaration type consistent with the
+                    // expression type (a mismatch is a naga parse error, not
+                    // just a style issue).
+                    let wants_i32 = matches!(
+                        result_ty.as_ref(),
+                        Some(PolyType::Constructed(TypeName::Int(32), _))
+                    );
+                    // `_w_intrinsic_thread_id()` → `_wgsl_gid.x` from the
+                    // compute entry's auto-injected builtin parameter. The
+                    // SSA result type is always `u32` (see
+                    // `parallelize::intrinsic_term(..., u32_ty)`), so no
+                    // cast is needed.
+                    if *id == known.thread_id && args.is_empty() {
+                        return Ok("_wgsl_gid.x".to_string());
+                    }
+                    if *id == known.storage_len && args.len() == 2 {
+                        let set = self.resolve_const_u32(args[0]);
+                        let binding = self.resolve_const_u32(args[1]);
+                        match (set, binding) {
+                            (Some(s), Some(b)) => {
+                                let name = self.storage_name(s, b)?;
+                                let expr = format!("arrayLength(&{})", name);
+                                return Ok(if wants_i32 { format!("i32({})", expr) } else { expr });
+                            }
+                            _ => {
+                                return Err(crate::err_wgsl_at!(
+                                    self.blame_span(),
+                                    "_w_intrinsic_storage_len expects const set/binding args"
+                                ));
+                            }
                         }
                     }
-                }
-                // `_w_intrinsic_length(arr)` is array length, semantically
-                // distinct from WGSL's vector-magnitude `length`. For a
-                // fixed-size composite array we emit the statically-known
-                // size as a literal; runtime-sized (storage) arrays route
-                // through WGSL's `arrayLength(&x)` (u32). Cast only when
-                // the SSA result expects `i32`.
-                // `_w_intrinsic_slice(arr, start, end)` → sub-view or
-                // materialized sub-array. Three cases mirror SPIR-V's
-                // `"slice"` arm: view→view (new handle), view→composite
-                // (materialize a `array<T,N>(...)` literal), and
-                // composite→composite (also a literal). Start/end are
-                // constants for the materialization cases; runtime
-                // start/end are allowed for view→view.
-                if *id == known.slice && args.len() == 3 {
-                    let arr_id = args[0].as_ssa().ok_or_else(|| {
-                        crate::err_wgsl_at!(
-                            self.blame_span(),
-                            "_w_intrinsic_slice: array arg must be an SSA value"
-                        )
-                    })?;
-                    let result_ty_ref = result_ty.as_ref().ok_or_else(|| {
-                        crate::err_wgsl_at!(self.blame_span(), "_w_intrinsic_slice must have a result type")
-                    })?;
-                    let result_is_composite = matches!(
-                        result_ty_ref.array_variant(),
-                        Some(PolyType::Constructed(TypeName::ArrayVariantComposite, _))
-                    );
-                    // Source is a view iff we've tracked a ViewHandle
-                    // for its SSA id.
-                    if let Some(handle) = self.view_handles.get(&arr_id).cloned() {
+                    // `_w_intrinsic_length(arr)` is array length, semantically
+                    // distinct from WGSL's vector-magnitude `length`. For a
+                    // fixed-size composite array we emit the statically-known
+                    // size as a literal; runtime-sized (storage) arrays route
+                    // through WGSL's `arrayLength(&x)` (u32). Cast only when
+                    // the SSA result expects `i32`.
+                    // `_w_intrinsic_slice(arr, start, end)` → sub-view or
+                    // materialized sub-array. Three cases mirror SPIR-V's
+                    // `"slice"` arm: view→view (new handle), view→composite
+                    // (materialize a `array<T,N>(...)` literal), and
+                    // composite→composite (also a literal). Start/end are
+                    // constants for the materialization cases; runtime
+                    // start/end are allowed for view→view.
+                    if *id == known.slice && args.len() == 3 {
+                        let arr_id = args[0].as_ssa().ok_or_else(|| {
+                            crate::err_wgsl_at!(
+                                self.blame_span(),
+                                "_w_intrinsic_slice: array arg must be an SSA value"
+                            )
+                        })?;
+                        let result_ty_ref = result_ty.as_ref().ok_or_else(|| {
+                            crate::err_wgsl_at!(
+                                self.blame_span(),
+                                "_w_intrinsic_slice must have a result type"
+                            )
+                        })?;
+                        let result_is_composite = matches!(
+                            result_ty_ref.array_variant(),
+                            Some(PolyType::Constructed(TypeName::ArrayVariantComposite, _))
+                        );
+                        // Source is a view iff we've tracked a ViewHandle
+                        // for its SSA id.
+                        if let Some(handle) = self.view_handles.get(&arr_id).cloned() {
+                            if result_is_composite {
+                                // View → Composite: materialize as
+                                // `array<T,N>(buf[off+s], buf[off+s+1], ...)`.
+                                let start = self.resolve_const_u32(args[1]).ok_or_else(|| {
+                                    crate::err_wgsl_at!(
+                                        self.blame_span(),
+                                        "_w_intrinsic_slice(view → composite): start must be a constant"
+                                    )
+                                })?;
+                                let end = self.resolve_const_u32(args[2]).ok_or_else(|| {
+                                    crate::err_wgsl_at!(
+                                        self.blame_span(),
+                                        "_w_intrinsic_slice(view → composite): end must be a constant"
+                                    )
+                                })?;
+                                let ty_str = self.ctx.type_emitter.type_to_wgsl(result_ty_ref)?;
+                                let elems: Vec<String> = (start..end)
+                                    .map(|i| {
+                                        format!(
+                                            "{}[(i32({}) + {}i)]",
+                                            handle.buffer_name, handle.offset_expr, i
+                                        )
+                                    })
+                                    .collect();
+                                return Ok(format!("{}({})", ty_str, elems.join(", ")));
+                            } else {
+                                // View → View: register a new handle whose
+                                // offset is `base_offset + start` and len is
+                                // `end - start`; return the buffer name so
+                                // downstream StorageViewIndex resolves
+                                // through the new handle.
+                                let result_id = inst.result.ok_or_else(|| {
+                                    crate::err_wgsl_at!(
+                                        self.blame_span(),
+                                        "_w_intrinsic_slice must have a result"
+                                    )
+                                })?;
+                                let new_offset =
+                                    format!("(i32({}) + i32({}))", handle.offset_expr, arg_strs[1]);
+                                let new_len = format!("(i32({}) - i32({}))", arg_strs[2], arg_strs[1]);
+                                self.view_handles.insert(
+                                    result_id,
+                                    ViewHandle {
+                                        buffer_name: handle.buffer_name.clone(),
+                                        offset_expr: new_offset,
+                                        len_expr: new_len,
+                                    },
+                                );
+                                return Ok(handle.buffer_name);
+                            }
+                        }
+                        // Composite → Composite: `array<T,N>(arr[s], arr[s+1], ...)`.
                         if result_is_composite {
-                            // View → Composite: materialize as
-                            // `array<T,N>(buf[off+s], buf[off+s+1], ...)`.
                             let start = self.resolve_const_u32(args[1]).ok_or_else(|| {
                                 crate::err_wgsl_at!(
                                     self.blame_span(),
-                                    "_w_intrinsic_slice(view → composite): start must be a constant"
+                                    "_w_intrinsic_slice: start must be a constant for composite slice"
                                 )
                             })?;
                             let end = self.resolve_const_u32(args[2]).ok_or_else(|| {
                                 crate::err_wgsl_at!(
                                     self.blame_span(),
-                                    "_w_intrinsic_slice(view → composite): end must be a constant"
+                                    "_w_intrinsic_slice: end must be a constant for composite slice"
                                 )
                             })?;
                             let ty_str = self.ctx.type_emitter.type_to_wgsl(result_ty_ref)?;
-                            let elems: Vec<String> = (start..end)
-                                .map(|i| {
-                                    format!(
-                                        "{}[(i32({}) + {}i)]",
-                                        handle.buffer_name, handle.offset_expr, i
-                                    )
-                                })
-                                .collect();
+                            let elems: Vec<String> =
+                                (start..end).map(|i| format!("{}[{}i]", arg_strs[0], i)).collect();
                             return Ok(format!("{}({})", ty_str, elems.join(", ")));
-                        } else {
-                            // View → View: register a new handle whose
-                            // offset is `base_offset + start` and len is
-                            // `end - start`; return the buffer name so
-                            // downstream StorageViewIndex resolves
-                            // through the new handle.
-                            let result_id = inst.result.ok_or_else(|| {
+                        }
+                        return Err(crate::err_wgsl_at!(
+                            self.blame_span(),
+                            "_w_intrinsic_slice: unsupported slice shape (src not view, dst not composite)"
+                        ));
+                    }
+                    if *id == known.length && args.len() == 1 {
+                        if let Some(id) = args[0].as_ssa() {
+                            let ty = self.body.get_value_type(id);
+                            // Virtual arrays carry their length in the `f2`
+                            // field of the range struct.
+                            if let Some(PolyType::Constructed(TypeName::ArrayVariantVirtual, _)) =
+                                ty.array_variant()
+                            {
+                                return Ok(format!("{}.f2", arg_strs[0]));
+                            }
+                            if let Some(PolyType::Constructed(TypeName::Size(n), _)) = ty.array_size() {
+                                return Ok(if wants_i32 { format!("{}i", n) } else { format!("{}u", n) });
+                            }
+                            // Runtime-sized storage array: `arrayLength(&x)` is u32.
+                            let expr = format!("arrayLength(&{})", arg_strs[0]);
+                            return Ok(if wants_i32 { format!("i32({})", expr) } else { expr });
+                        }
+                        return Err(crate::err_wgsl_at!(
+                            self.blame_span(),
+                            "_w_intrinsic_length requires an SSA array argument"
+                        ));
+                    }
+                    let name = by_id(*id).dispatch_name();
+                    self.lower_intrinsic(name, &arg_strs, result_ty.as_ref())
+                }
+
+                crate::op::OpTag::Extern(linkage) => Err(crate::err_wgsl_at!(
+                    self.blame_span(),
+                    "Extern functions are not supported in WGSL (linkage: {})",
+                    linkage
+                )),
+
+                crate::op::OpTag::ArrayRange { has_step } => {
+                    let start = operands[0];
+                    let len = operands[1];
+                    // Virtual array lowered as a `VirtRangeN` struct whose
+                    // fields are (start, step, len) — field order matches
+                    // SPIR-V's composite_construct so `Project { index: 0/1/2 }`
+                    // extracts start/step/len naturally. Default step is `1`
+                    // in the element's type when absent.
+                    let start_s = self.get_value(start)?;
+                    let len_s = self.get_value(len)?;
+                    let ty = result_ty.as_ref().ok_or_else(|| {
+                        crate::err_wgsl_at!(self.blame_span(), "ArrayRange must have a result type")
+                    })?;
+                    let elem_ty = ty.elem_type().ok_or_else(|| {
+                        crate::err_wgsl_at!(self.blame_span(), "ArrayRange result missing elem type")
+                    })?;
+                    let elem_str = self.ctx.type_emitter.type_to_wgsl(elem_ty)?;
+                    let struct_name = self.ctx.type_emitter.type_to_wgsl(ty)?;
+                    let step_s = if *has_step {
+                        self.get_value(operands[2])?
+                    } else {
+                        match elem_ty {
+                            PolyType::Constructed(TypeName::UInt(_), _) => "1u".to_string(),
+                            PolyType::Constructed(TypeName::Float(_), _) => "1.0f".to_string(),
+                            _ => "1i".to_string(),
+                        }
+                    };
+                    // Fields emit in struct order: f0=start, f1=step, f2=len.
+                    // `elem_str` is used only for its existence (ensures the
+                    // type is cached before constructor emits).
+                    let _ = elem_str;
+                    Ok(format!("{}({}, {}, {})", struct_name, start_s, step_s, len_s))
+                }
+
+                crate::op::OpTag::Matrix { .. } => Err(crate::err_wgsl_at!(
+                    self.blame_span(),
+                    "Matrix literals are not yet implemented in WGSL lowering"
+                )),
+
+                // Materialize is handled in emit_nodes so it becomes a
+                // `var<function>` (subscriptable) instead of a `let`.
+                crate::op::OpTag::Materialize => Err(crate::err_wgsl_at!(
+                    self.blame_span(),
+                    "internal: Materialize should be handled in emit_nodes"
+                )),
+
+                crate::op::OpTag::DynamicExtract => {
+                    let base = operands[0];
+                    let index = operands[1];
+                    let base_val = self.get_value(base)?;
+                    let index_val = self.get_value(index)?;
+                    Ok(format!("{}[{}]", base_val, index_val))
+                }
+
+                // Storage view: remember (buffer_name, offset, len) against
+                // the view's ValueId so subsequent StorageViewIndex /
+                // StorageViewLen can resolve through it. The "value" of a
+                // view node is the buffer name — uses outside of
+                // Index/Len (rare) get the binding directly.
+                crate::op::OpTag::StorageView(src) => {
+                    let offset = operands[0];
+                    let len = operands[1];
+                    let buffer_name = match src {
+                        crate::op::PureViewSource::Storage { set, binding } => {
+                            self.storage_name(*set, *binding)?
+                        }
+                        crate::op::PureViewSource::Inherited => {
+                            let parent = operands[2].as_ssa().ok_or_else(|| {
                                 crate::err_wgsl_at!(
                                     self.blame_span(),
-                                    "_w_intrinsic_slice must have a result"
+                                    "StorageView Inherited parent must be SSA"
                                 )
                             })?;
-                            let new_offset =
-                                format!("(i32({}) + i32({}))", handle.offset_expr, arg_strs[1]);
-                            let new_len = format!("(i32({}) - i32({}))", arg_strs[2], arg_strs[1]);
-                            self.view_handles.insert(
-                                result_id,
-                                ViewHandle {
-                                    buffer_name: handle.buffer_name.clone(),
-                                    offset_expr: new_offset,
-                                    len_expr: new_len,
+                            // Inherit the parent view's underlying binding
+                            // name (offset/len come fresh from this Node).
+                            self.view_handles.get(&parent).map(|h| h.buffer_name.clone()).ok_or_else(
+                                || {
+                                    crate::err_wgsl_at!(
+                                        self.blame_span(),
+                                        "Inherited view's parent has no handle"
+                                    )
                                 },
-                            );
-                            return Ok(handle.buffer_name);
+                            )?
                         }
-                    }
-                    // Composite → Composite: `array<T,N>(arr[s], arr[s+1], ...)`.
-                    if result_is_composite {
-                        let start = self.resolve_const_u32(args[1]).ok_or_else(|| {
-                            crate::err_wgsl_at!(
-                                self.blame_span(),
-                                "_w_intrinsic_slice: start must be a constant for composite slice"
-                            )
-                        })?;
-                        let end = self.resolve_const_u32(args[2]).ok_or_else(|| {
-                            crate::err_wgsl_at!(
-                                self.blame_span(),
-                                "_w_intrinsic_slice: end must be a constant for composite slice"
-                            )
-                        })?;
-                        let ty_str = self.ctx.type_emitter.type_to_wgsl(result_ty_ref)?;
-                        let elems: Vec<String> =
-                            (start..end).map(|i| format!("{}[{}i]", arg_strs[0], i)).collect();
-                        return Ok(format!("{}({})", ty_str, elems.join(", ")));
-                    }
-                    return Err(crate::err_wgsl_at!(
-                        self.blame_span(),
-                        "_w_intrinsic_slice: unsupported slice shape (src not view, dst not composite)"
-                    ));
+                    };
+                    let offset_expr = self.get_value(offset)?;
+                    let len_expr = self.get_value(len)?;
+                    let result_id = inst.result.ok_or_else(|| {
+                        crate::err_wgsl_at!(self.blame_span(), "StorageView must have a result")
+                    })?;
+                    self.view_handles.insert(
+                        result_id,
+                        ViewHandle {
+                            buffer_name: buffer_name.clone(),
+                            offset_expr,
+                            len_expr,
+                        },
+                    );
+                    // Return the buffer name itself. Downstream uses resolve
+                    // through view_handles for offset/len.
+                    Ok(buffer_name)
                 }
-                if *id == known.length && args.len() == 1 {
-                    if let Some(id) = args[0].as_ssa() {
-                        let ty = self.body.get_value_type(id);
-                        // Virtual arrays carry their length in the `f2`
-                        // field of the range struct.
-                        if let Some(PolyType::Constructed(TypeName::ArrayVariantVirtual, _)) =
-                            ty.array_variant()
-                        {
-                            return Ok(format!("{}.f2", arg_strs[0]));
-                        }
-                        if let Some(PolyType::Constructed(TypeName::Size(n), _)) = ty.array_size() {
-                            return Ok(if wants_i32 { format!("{}i", n) } else { format!("{}u", n) });
-                        }
-                        // Runtime-sized storage array: `arrayLength(&x)` is u32.
-                        let expr = format!("arrayLength(&{})", arg_strs[0]);
-                        return Ok(if wants_i32 { format!("i32({})", expr) } else { expr });
-                    }
-                    return Err(crate::err_wgsl_at!(
-                        self.blame_span(),
-                        "_w_intrinsic_length requires an SSA array argument"
-                    ));
+
+                crate::op::OpTag::StorageViewLen => {
+                    let view = operands[0];
+                    let view_id = view.as_ssa().ok_or_else(|| {
+                        crate::err_wgsl_at!(self.blame_span(), "StorageViewLen view must be SSA")
+                    })?;
+                    let handle = self.view_handles.get(&view_id).cloned().ok_or_else(|| {
+                        crate::err_wgsl_at!(
+                            self.blame_span(),
+                            "StorageViewLen references view without a known handle"
+                        )
+                    })?;
+                    Ok(handle.len_expr)
                 }
-                let name = by_id(*id).dispatch_name();
-                self.lower_intrinsic(name, &arg_strs, result_ty.as_ref())
-            }
 
-            InstKind::Extern(linkage) => Err(crate::err_wgsl_at!(
-                self.blame_span(),
-                "Extern functions are not supported in WGSL (linkage: {})",
-                linkage
-            )),
-
-            InstKind::ArrayRange { start, len, step } => {
-                // Virtual array lowered as a `VirtRangeN` struct whose
-                // fields are (start, step, len) — field order matches
-                // SPIR-V's composite_construct so `Project { index: 0/1/2 }`
-                // extracts start/step/len naturally. Default step is `1`
-                // in the element's type when absent.
-                let start_s = self.get_value(*start)?;
-                let len_s = self.get_value(*len)?;
-                let ty = result_ty.as_ref().ok_or_else(|| {
-                    crate::err_wgsl_at!(self.blame_span(), "ArrayRange must have a result type")
-                })?;
-                let elem_ty = ty.elem_type().ok_or_else(|| {
-                    crate::err_wgsl_at!(self.blame_span(), "ArrayRange result missing elem type")
-                })?;
-                let elem_str = self.ctx.type_emitter.type_to_wgsl(elem_ty)?;
-                let struct_name = self.ctx.type_emitter.type_to_wgsl(ty)?;
-                let step_s = match step {
-                    Some(s) => self.get_value(*s)?,
-                    None => match elem_ty {
-                        PolyType::Constructed(TypeName::UInt(_), _) => "1u".to_string(),
-                        PolyType::Constructed(TypeName::Float(_), _) => "1.0f".to_string(),
-                        _ => "1i".to_string(),
-                    },
-                };
-                // Fields emit in struct order: f0=start, f1=step, f2=len.
-                // `elem_str` is used only for its existence (ensures the
-                // type is cached before constructor emits).
-                let _ = elem_str;
-                Ok(format!("{}({}, {}, {})", struct_name, start_s, step_s, len_s))
-            }
-
-            InstKind::Matrix(_) => Err(crate::err_wgsl_at!(
-                self.blame_span(),
-                "Matrix literals are not yet implemented in WGSL lowering"
-            )),
+                crate::op::OpTag::ViewIndex | crate::op::OpTag::OutputSlot { .. } => {
+                    unreachable!("OpTag::{:?} is EGIR-only and must not reach SSA backend", tag)
+                }
+            },
 
             // OutputSlot / Alloca / ViewIndex / Load / Store are all
             // handled specially in `emit_nodes` (they produce places or
@@ -2214,66 +2330,6 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 "internal: {:?} should be handled in emit_nodes",
                 inst.data
             )),
-
-            // Materialize is handled in emit_nodes so it becomes a
-            // `var<function>` (subscriptable) instead of a `let`.
-            InstKind::Materialize { .. } => Err(crate::err_wgsl_at!(
-                self.blame_span(),
-                "internal: Materialize should be handled in emit_nodes"
-            )),
-
-            InstKind::DynamicExtract { base, index } => {
-                let base_val = self.get_value(*base)?;
-                let index_val = self.get_value(*index)?;
-                Ok(format!("{}[{}]", base_val, index_val))
-            }
-
-            // Storage view: remember (buffer_name, offset, len) against
-            // the view's ValueId so subsequent StorageViewIndex /
-            // StorageViewLen can resolve through it. The "value" of a
-            // view node is the buffer name — uses outside of
-            // Index/Len (rare) get the binding directly.
-            InstKind::StorageView { source, offset, len } => {
-                let buffer_name = match source {
-                    ViewSource::Storage { set, binding } => self.storage_name(*set, *binding)?,
-                    ViewSource::Inherited { parent } => {
-                        // Inherit the parent view's underlying binding
-                        // name (offset/len come fresh from this Node).
-                        self.view_handles.get(parent).map(|h| h.buffer_name.clone()).ok_or_else(|| {
-                            crate::err_wgsl_at!(self.blame_span(), "Inherited view's parent has no handle")
-                        })?
-                    }
-                };
-                let offset_expr = self.get_value(*offset)?;
-                let len_expr = self.get_value(*len)?;
-                let result_id = inst.result.ok_or_else(|| {
-                    crate::err_wgsl_at!(self.blame_span(), "StorageView must have a result")
-                })?;
-                self.view_handles.insert(
-                    result_id,
-                    ViewHandle {
-                        buffer_name: buffer_name.clone(),
-                        offset_expr,
-                        len_expr,
-                    },
-                );
-                // Return the buffer name itself. Downstream uses resolve
-                // through view_handles for offset/len.
-                Ok(buffer_name)
-            }
-
-            InstKind::StorageViewLen { view } => {
-                let view_id = view.as_ssa().ok_or_else(|| {
-                    crate::err_wgsl_at!(self.blame_span(), "StorageViewLen view must be SSA")
-                })?;
-                let handle = self.view_handles.get(&view_id).cloned().ok_or_else(|| {
-                    crate::err_wgsl_at!(
-                        self.blame_span(),
-                        "StorageViewLen references view without a known handle"
-                    )
-                })?;
-                Ok(handle.len_expr)
-            }
         }
     }
 

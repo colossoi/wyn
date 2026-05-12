@@ -16,7 +16,6 @@ use super::types::EffectToken;
 use crate::ast::{Span, TypeName};
 use crate::interface;
 use crate::ssa::framework::BlockId;
-use crate::ssa::types::ViewSource;
 use crate::ssa::types::{ControlHeader, FuncBody, Function, InstKind, ValueRef};
 use crate::tlc::{
     ArrayExpr, Def as TlcDef, DefMeta, Lambda, LoopKind, Program as TlcProgram, SoacOp, Term, TermKind,
@@ -1103,9 +1102,9 @@ impl<'a> Converter<'a> {
                         let effect_in = EffectToken(0);
                         let effect_out = self.alloc_effect();
                         self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
-                            kind: SideEffectKind::Inst(InstKind::Call {
-                                func: name.to_string(),
-                                args: arg_vrefs,
+                            kind: SideEffectKind::Inst(InstKind::Op {
+                                tag: crate::op::OpTag::Call(name.to_string()),
+                                operands: arg_vrefs,
                             }),
                             operand_nodes: arg_nids,
                             result: Some(result_nid),
@@ -1129,9 +1128,9 @@ impl<'a> Converter<'a> {
                     let effect_in = EffectToken(0);
                     let effect_out = self.alloc_effect();
                     self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
-                        kind: SideEffectKind::Inst(InstKind::Call {
-                            func: name.to_string(),
-                            args: arg_vrefs,
+                        kind: SideEffectKind::Inst(InstKind::Op {
+                            tag: crate::op::OpTag::Call(name.to_string()),
+                            operands: arg_vrefs,
                         }),
                         operand_nodes: arg_nids,
                         result: Some(result_nid),
@@ -1829,13 +1828,15 @@ impl<'a> Converter<'a> {
                 let effect_in = EffectToken(0);
                 let effect_out = self.alloc_effect();
                 self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
-                    kind: SideEffectKind::Inst(InstKind::StorageView {
-                        source: ViewSource::Storage {
+                    kind: SideEffectKind::Inst(InstKind::Op {
+                        tag: crate::op::OpTag::StorageView(crate::op::PureViewSource::Storage {
                             set: *set,
                             binding: *binding,
-                        },
-                        offset: ValueRef::Ssa(Default::default()),
-                        len: ValueRef::Ssa(Default::default()),
+                        }),
+                        operands: vec![
+                            ValueRef::Ssa(Default::default()),
+                            ValueRef::Ssa(Default::default()),
+                        ],
                     }),
                     operand_nodes: smallvec![offset_nid, len_nid],
                     result: Some(result_nid),
@@ -1915,19 +1916,22 @@ impl<'a> Converter<'a> {
 
 /// Check whether a FuncBody contains only purely constant instructions.
 fn is_purely_constant_body(body: &FuncBody) -> bool {
-    body.inner.insts.values().all(|inst| {
-        matches!(
-            &inst.data,
-            InstKind::Int(_)
-                | InstKind::Float(_)
-                | InstKind::Bool(_)
-                | InstKind::Unit
-                | InstKind::Tuple(_)
-                | InstKind::Vector(_)
-                | InstKind::Matrix(_)
-                | InstKind::ArrayLit { .. }
-                | InstKind::Global(_)
-        )
+    use crate::op::OpTag;
+    body.inner.insts.values().all(|inst| match &inst.data {
+        InstKind::Op { tag, .. } => matches!(
+            tag,
+            OpTag::Int(_)
+                | OpTag::Uint(_)
+                | OpTag::Float(_)
+                | OpTag::Bool(_)
+                | OpTag::Unit
+                | OpTag::Tuple(_)
+                | OpTag::Vector(_)
+                | OpTag::Matrix { .. }
+                | OpTag::ArrayLit(_)
+                | OpTag::Global(_)
+        ),
+        _ => false,
     })
 }
 
