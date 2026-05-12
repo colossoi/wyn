@@ -2,6 +2,7 @@
 //! `fresh_type_for_pattern` (used by lambda parameter inference) and
 //! `bind_pattern` (used by `let` and `match` arms).
 
+use super::refutability::is_irrefutable;
 use crate::ast::{Pattern, PatternKind, PatternLiteral};
 use crate::error::CompilerError;
 use crate::scope::IdentifierKind;
@@ -29,6 +30,29 @@ impl<'a> TypeChecker<'a> {
             PatternKind::Attributed(_, inner_pattern) => self.fresh_type_for_pattern(inner_pattern),
             _ => self.context.new_variable(),
         }
+    }
+
+    /// Bind a pattern that must be irrefutable against `expected_type`.
+    /// Used at let-binding, lambda-parameter, and loop-variable sites
+    /// where the pattern may not fail to match. Refutable patterns
+    /// produce a compile error pointing at the smallest offending
+    /// sub-pattern.
+    pub(crate) fn bind_irrefutable_pattern(
+        &mut self,
+        pattern: &Pattern,
+        expected_type: &Type,
+        generalize: bool,
+    ) -> Result<Type> {
+        let result = self.bind_pattern(pattern, expected_type, generalize)?;
+        let applied = expected_type.apply(&self.context);
+        if let Err(e) = is_irrefutable(pattern, &applied) {
+            bail_type_at!(
+                e.culprit,
+                "refutable pattern in irrefutable position: {}",
+                e.reason
+            );
+        }
+        Ok(result)
     }
 
     /// Bind a pattern at the given type, adding the bound names to the

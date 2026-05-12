@@ -1,0 +1,21 @@
+-- Irrefutable single-variant constructor pattern in `let`. The
+-- refutability gate accepts this because the sum has exactly one
+-- variant, so the pattern can't fail.
+
+def verts: [3]vec4f32 =
+  [@[-1.0f32, -1.0f32, 0.0f32, 1.0f32],
+   @[3.0f32, -1.0f32, 0.0f32, 1.0f32],
+   @[-1.0f32, 3.0f32, 0.0f32, 1.0f32]]
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 =
+  verts[vertex_id]
+
+def unpack(b: #boxed(i32)) i32 =
+  let #boxed(x) = b in
+  x + 1
+
+#[fragment]
+entry fragment_main(#[builtin(position)] _fc: vec4f32) #[location(0)] vec4f32 =
+  let v = unpack(#boxed(41)) in
+  @[f32.i32(v) / 255.0f32, 0.0f32, 0.0f32, 1.0f32]

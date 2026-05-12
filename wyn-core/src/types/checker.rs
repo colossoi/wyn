@@ -960,7 +960,7 @@ impl<'a> TypeChecker<'a> {
             };
 
             param_types.push(param_type.clone());
-            self.bind_pattern(param, &param_type, false)?;
+            self.bind_irrefutable_pattern(param, &param_type, false)?;
         }
 
         // Type check the body
@@ -1993,9 +1993,11 @@ impl<'a> TypeChecker<'a> {
                 // Open existential types: ?k. T becomes T[k'/k] where k' is fresh
                 let bound_type = self.open_existential(bound_type);
 
-                // Bind all names in the pattern
-                // Let bindings should be generalized for polymorphism
-                self.bind_pattern(&let_in.pattern, &bound_type, true)?;
+                // Bind all names in the pattern.
+                // Let bindings should be generalized for polymorphism.
+                // Refutability is enforced — refutable patterns must use
+                // `match` instead.
+                self.bind_irrefutable_pattern(&let_in.pattern, &bound_type, true)?;
 
                 // Infer type of body expression
                 let body_type = self.infer_expression(&let_in.body)?;
@@ -2178,8 +2180,8 @@ impl<'a> TypeChecker<'a> {
                     );
                 }
 
-                // Bind pattern to the loop variable type
-                self.bind_pattern(&loop_expr.pattern, &loop_var_type, false)?;
+                // Bind pattern to the loop variable type.
+                self.bind_irrefutable_pattern(&loop_expr.pattern, &loop_var_type, false)?;
 
                 // Type check the loop form
                 match &loop_expr.form {
@@ -2214,8 +2216,8 @@ impl<'a> TypeChecker<'a> {
                         let (elem_type, _, _) =
                             self.constrain_array_type(&arr_type, &arr.h.span, "for-in requires an array")?;
 
-                        // Bind pattern to element type
-                        self.bind_pattern(pat, &elem_type, false)?;
+                        // Bind pattern to element type.
+                        self.bind_irrefutable_pattern(pat, &elem_type, false)?;
                     }
                 }
 

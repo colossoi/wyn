@@ -143,13 +143,80 @@ impl<'a> Transformer<'a> {
                 (fresh_sym, bindings)
             }
             PatternKind::Unit => {
-                todo!("Unit patterns")
+                // Single-inhabitant type: bind a fresh symbol to the
+                // scrutinee so any downstream `Let` chain has somewhere
+                // to anchor. No sub-bindings.
+                let fresh_name = format!("_w_unit_{}", self.term_ids.next_id().0);
+                let sym = self.define(&fresh_name);
+                if is_top_level {
+                    (sym, vec![])
+                } else {
+                    let binding = PendingBinding {
+                        name: sym,
+                        ty: scrutinee.ty.clone(),
+                        expr: scrutinee,
+                    };
+                    (sym, vec![binding])
+                }
             }
             PatternKind::Literal(_) => {
-                todo!("Literal patterns in lambdas")
+                unreachable!(
+                    "refutable Literal pattern reached TLC lowering — \
+                     refutability gate should reject this in the checker"
+                )
             }
-            PatternKind::Constructor(_, _) => {
-                todo!("Constructor patterns in lambdas")
+            PatternKind::Constructor(name, sub_patterns) => {
+                // Refutability gate guarantees this is a single-variant
+                // sum; the tag is statically known and no test is
+                // emitted. Project each payload slot and bind it.
+                let sum_ty = scrutinee.ty.clone();
+                let variants = match &sum_ty {
+                    Type::Constructed(TypeName::Sum(v), _) => v.clone(),
+                    Type::Constructed(TypeName::Tuple(_), _) => {
+                        // Scrutinee already lowered from a sum to a flat
+                        // tuple. Recover the original variant list from
+                        // the pattern's type-table entry.
+                        match self.lookup_type_raw(pattern.h.id) {
+                            Some(Type::Constructed(TypeName::Sum(v), _)) => v,
+                            _ => panic!(
+                                "BUG: Constructor pattern lacks Sum type in type table for NodeId {:?}",
+                                pattern.h.id
+                            ),
+                        }
+                    }
+                    other => panic!(
+                        "BUG: Constructor pattern against non-sum scrutinee type {:?}",
+                        other
+                    ),
+                };
+                let layout = Self::sum_layout(&variants);
+                let &(_tag, payload_offset) =
+                    layout.constructor_info.get(name).expect("BUG: constructor name not in sum layout");
+                let payload_types =
+                    &variants.iter().find(|(n, _)| n == name).expect("BUG: constructor must exist").1;
+
+                let fresh_name = format!("_w_ctor_{}", self.term_ids.next_id().0);
+                let fresh_sym = self.define(&fresh_name);
+                let mut bindings = vec![PendingBinding {
+                    name: fresh_sym,
+                    ty: sum_ty.clone(),
+                    expr: scrutinee,
+                }];
+
+                for (i, sub_pat) in sub_patterns.iter().enumerate() {
+                    let payload_ty = Self::lower_type(payload_types[i].clone());
+                    let proj = self.build_tuple_projection(
+                        fresh_sym,
+                        &sum_ty,
+                        payload_offset + i,
+                        payload_ty,
+                        span,
+                    );
+                    let (_, sub_bindings) = self.compute_pattern_bindings_inner(sub_pat, proj, span, false);
+                    bindings.extend(sub_bindings);
+                }
+
+                (fresh_sym, bindings)
             }
         }
     }
