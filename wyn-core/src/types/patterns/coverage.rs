@@ -105,6 +105,32 @@ pub enum CoverageError {
     },
 }
 
+/// Render a `CovPat` as a user-facing pattern string. Used for
+/// non-exhaustive-match error messages.
+pub fn format_cov_pat(pat: &CovPat) -> String {
+    match pat {
+        CovPat::Wild => "_".to_string(),
+        CovPat::UnitP => "()".to_string(),
+        CovPat::Lit(CovLit::Int(s)) => s.clone(),
+        CovPat::Lit(CovLit::Float(bits)) => format!("{}f32", f32::from_bits(*bits)),
+        CovPat::Lit(CovLit::Bool(b)) => b.to_string(),
+        CovPat::Tuple(sub) => {
+            let parts: Vec<String> = sub.iter().map(format_cov_pat).collect();
+            format!("({})", parts.join(", "))
+        }
+        CovPat::Record(fields) => {
+            let parts: Vec<String> =
+                fields.iter().map(|(n, p)| format!("{} = {}", n, format_cov_pat(p))).collect();
+            format!("{{{}}}", parts.join(", "))
+        }
+        CovPat::Ctor(name, sub) if sub.is_empty() => format!("#{}", name),
+        CovPat::Ctor(name, sub) => {
+            let parts: Vec<String> = sub.iter().map(format_cov_pat).collect();
+            format!("#{}({})", name, parts.join(", "))
+        }
+    }
+}
+
 /// Translate an AST pattern into coverage form. Strips
 /// `Typed`/`Attributed` and collapses `Name` to `Wild`.
 pub fn lower(pat: &ast::Pattern) -> CovPat {

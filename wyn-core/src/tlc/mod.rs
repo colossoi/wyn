@@ -16,6 +16,7 @@ pub mod normalize;
 pub mod ownership;
 pub mod parallelize;
 pub mod partial_eval;
+pub mod patterns;
 pub mod producer_graph;
 pub mod run;
 pub mod soa;
@@ -1117,29 +1118,29 @@ where
 
 /// A pending let-binding to be applied after all lambdas are created.
 #[derive(Debug, Clone)]
-struct PendingBinding {
-    name: SymbolId,
-    ty: Type<TypeName>,
-    expr: Term,
+pub(super) struct PendingBinding {
+    pub(super) name: SymbolId,
+    pub(super) ty: Type<TypeName>,
+    pub(super) expr: Term,
 }
 
 /// Flattened-no-sharing layout for a structural sum type. Computed
 /// once per sum and then consulted by the Constructor and Match
 /// transforms for tag values and per-payload slot offsets.
-struct SumLayout {
+pub(super) struct SumLayout {
     /// All slot types of the lowered tuple, lowered. Index 0 is the
     /// u32 tag; indices 1.. are the variant payloads concatenated
     /// in source order.
-    slot_types: Vec<Type<TypeName>>,
+    pub(super) slot_types: Vec<Type<TypeName>>,
     /// For each constructor name: its tag value (source-order index)
     /// and the starting slot index of its payload in `slot_types`.
-    constructor_info: std::collections::HashMap<String, (u32, usize)>,
+    pub(super) constructor_info: std::collections::HashMap<String, (u32, usize)>,
 }
 
 /// Context for transforming AST to TLC.
 pub struct Transformer<'a> {
     type_table: &'a TypeTable,
-    term_ids: TermIdSource,
+    pub(super) term_ids: TermIdSource,
     /// Shared symbol table: maps SymbolId to original name (for errors/debugging).
     symbols: &'a mut SymbolTable,
     /// Current scope for name resolution: maps string name to SymbolId.
@@ -1224,7 +1225,7 @@ impl<'a> Transformer<'a> {
 
     /// Define a new symbol, returning its unique ID.
     /// This adds the name to the symbol table and current scope.
-    fn define(&mut self, name: &str) -> SymbolId {
+    pub(super) fn define(&mut self, name: &str) -> SymbolId {
         let id = self.symbols.alloc(name.to_string());
         self.scope.insert(name.to_string(), id);
         id
@@ -1543,7 +1544,7 @@ impl<'a> Transformer<'a> {
     /// Inner implementation that tracks whether we're at the top level.
     /// At top level, Name/Wildcard don't create bindings (caller handles).
     /// Nested Name/Wildcard DO create bindings (needed for tuple component extraction).
-    fn compute_pattern_bindings_inner(
+    pub(super) fn compute_pattern_bindings_inner(
         &mut self,
         pattern: &ast::Pattern,
         scrutinee: Term,
@@ -1696,7 +1697,12 @@ impl<'a> Transformer<'a> {
 
     /// Apply a list of bindings around a body term, creating nested let expressions.
     /// Bindings are applied in reverse order so the first binding is outermost.
-    fn apply_bindings_around(&mut self, bindings: Vec<PendingBinding>, body: Term, span: Span) -> Term {
+    pub(super) fn apply_bindings_around(
+        &mut self,
+        bindings: Vec<PendingBinding>,
+        body: Term,
+        span: Span,
+    ) -> Term {
         bindings.into_iter().rev().fold(body, |acc, b| {
             self.mk_term(
                 acc.ty.clone(),
@@ -1762,7 +1768,7 @@ impl<'a> Transformer<'a> {
         }
     }
 
-    fn transform_expr(&mut self, expr: &ast::Expression) -> Term {
+    pub(super) fn transform_expr(&mut self, expr: &ast::Expression) -> Term {
         let ty = self.lookup_type(expr.h.id).unwrap_or_else(|| {
             panic!(
                 "BUG: Expression must have type in type table. NodeId={:?}, kind={:?}, span={:?}",
@@ -2836,146 +2842,11 @@ impl<'a> Transformer<'a> {
     }
 
     fn transform_match(&mut self, match_expr: &ast::MatchExpr, ty: Type<TypeName>, span: Span) -> Term {
-        let raw_scrutinee_ty = self
-            .lookup_type_raw(match_expr.scrutinee.h.id)
-            .expect("BUG: match scrutinee must have type in type table");
-        let scrutinee = self.transform_expr(&match_expr.scrutinee);
-
-        if match_expr.cases.is_empty() {
-            todo!("Empty match")
-        }
-
-        // Phase B requires a sum-typed scrutinee with all-Constructor
-        // arms. Route every match through the sum-aware path; the
-        // legacy `compile_match_cases` is no longer reached.
-        let variants = match &raw_scrutinee_ty {
-            Type::Constructed(TypeName::Sum(v), _) => v.clone(),
-            _ => panic!(
-                "BUG: match scrutinee must be a sum type after Phase B, got {:?}",
-                raw_scrutinee_ty
-            ),
-        };
-        self.compile_sum_match(scrutinee, &variants, &match_expr.cases, ty, span)
-    }
-
-    fn compile_sum_match(
-        &mut self,
-        scrutinee: Term,
-        variants: &[(String, Vec<Type<TypeName>>)],
-        cases: &[ast::MatchCase],
-        ty: Type<TypeName>,
-        span: Span,
-    ) -> Term {
-        let layout = Self::sum_layout(variants);
-        let scrutinee_ty = scrutinee.ty.clone();
-
-        // Bind the scrutinee to a fresh symbol so each arm can read
-        // it without re-evaluating the input expression.
-        let scrut_name = format!("_w_match_scrut_{}", self.term_ids.next_id().0);
-        let scrut_sym = self.define(&scrut_name);
-        let scrut_var = self.mk_term(
-            scrutinee_ty.clone(),
-            span,
-            TermKind::Var(VarRef::Symbol(scrut_sym)),
+        debug_assert!(
+            !match_expr.cases.is_empty(),
+            "checker rejects empty match upstream"
         );
-
-        let body = self.build_sum_match_chain(&scrut_var, &layout, variants, cases, ty.clone(), span);
-
-        self.mk_term(
-            ty,
-            span,
-            TermKind::Let {
-                name: scrut_sym,
-                name_ty: scrutinee_ty,
-                rhs: Box::new(scrutinee),
-                body: Box::new(body),
-            },
-        )
-    }
-
-    fn build_sum_match_chain(
-        &mut self,
-        scrut_var: &Term,
-        layout: &SumLayout,
-        variants: &[(String, Vec<Type<TypeName>>)],
-        cases: &[ast::MatchCase],
-        ty: Type<TypeName>,
-        span: Span,
-    ) -> Term {
-        debug_assert!(!cases.is_empty(), "Phase B exhaustiveness guarantees ≥1 arm");
-        let case = &cases[0];
-        let rest = &cases[1..];
-
-        let (ctor_name, sub_patterns) = match &case.pattern.kind {
-            ast::PatternKind::Constructor(n, ps) => (n, ps),
-            other => panic!(
-                "BUG: Phase B should have rejected non-Constructor arm: {:?}",
-                other
-            ),
-        };
-        let &(tag_value, payload_offset) = layout
-            .constructor_info
-            .get(ctor_name)
-            .expect("BUG: Phase B should have validated constructor name");
-        let payload_types = &variants
-            .iter()
-            .find(|(n, _)| n == ctor_name)
-            .expect("BUG: constructor must exist in variants")
-            .1;
-
-        // Project each payload slot and bind it via the regular
-        // pattern-binding machinery. Sub-patterns are nested
-        // (is_top_level=false) so simple `Name` sub-patterns also
-        // produce real bindings.
-        let mut bindings = Vec::new();
-        for (i, sub_pat) in sub_patterns.iter().enumerate() {
-            let lowered_payload_ty = Self::lower_type(payload_types[i].clone());
-            let proj = self.mk_tuple_proj(scrut_var.clone(), payload_offset + i, lowered_payload_ty, span);
-            let (_, sub_bindings) = self.compute_pattern_bindings_inner(sub_pat, proj, span, false);
-            bindings.extend(sub_bindings);
-        }
-
-        let body_term = self.transform_expr(&case.body);
-        let arm_body = self.apply_bindings_around(bindings, body_term, span);
-
-        // Last arm: Phase B exhaustiveness guarantees we reach it,
-        // so emit the body directly with no tag check. This avoids
-        // needing an `_w_match_fail` fallthrough on the bottom arm.
-        if rest.is_empty() {
-            return arm_body;
-        }
-
-        // Otherwise: if scrut.tag == tag_value then arm_body else <rest>
-        let tag_proj = self.mk_tuple_proj(
-            scrut_var.clone(),
-            0,
-            Type::Constructed(TypeName::UInt(32), vec![]),
-            span,
-        );
-        let tag_lit = self.mk_term(
-            Type::Constructed(TypeName::UInt(32), vec![]),
-            span,
-            TermKind::IntLit(tag_value.to_string()),
-        );
-        let cond = self.build_binop(
-            ast::BinaryOp { op: "==".to_string() },
-            tag_proj,
-            tag_lit,
-            Type::Constructed(TypeName::Bool, vec![]),
-            span,
-        );
-
-        let else_branch = self.build_sum_match_chain(scrut_var, layout, variants, rest, ty.clone(), span);
-
-        self.mk_term(
-            ty,
-            span,
-            TermKind::If {
-                cond: Box::new(cond),
-                then_branch: Box::new(arm_body),
-                else_branch: Box::new(else_branch),
-            },
-        )
+        self.compile_match(match_expr, ty, span)
     }
 
     /// Produce a typed-blank Term for `ty`. Used to fill dead
@@ -3050,7 +2921,7 @@ impl<'a> Transformer<'a> {
     }
 
     // Helper: build binary op application
-    fn build_binop(
+    pub(super) fn build_binop(
         &mut self,
         op: ast::BinaryOp,
         lhs: Term,
@@ -3124,7 +2995,13 @@ impl<'a> Transformer<'a> {
     }
 
     /// Construct a `TermKind::TupleProj` directly.
-    fn mk_tuple_proj(&mut self, tuple: Term, idx: usize, result_ty: Type<TypeName>, span: Span) -> Term {
+    pub(super) fn mk_tuple_proj(
+        &mut self,
+        tuple: Term,
+        idx: usize,
+        result_ty: Type<TypeName>,
+        span: Span,
+    ) -> Term {
         self.mk_term(
             result_ty,
             span,
@@ -3172,7 +3049,7 @@ impl<'a> Transformer<'a> {
     /// Recursively rewrite `Sum(variants)` types into a flattened tuple
     /// `(tag: u32, ...all_variant_payload_slots)`. Sum types do not
     /// survive past AST→TLC; downstream passes only see tuples.
-    fn lower_type(ty: Type<TypeName>) -> Type<TypeName> {
+    pub(super) fn lower_type(ty: Type<TypeName>) -> Type<TypeName> {
         match ty {
             Type::Constructed(TypeName::Sum(variants), _) => {
                 let layout = Self::sum_layout(&variants);
@@ -3191,7 +3068,7 @@ impl<'a> Transformer<'a> {
     /// constructor's payloads laid out in source order with no
     /// sharing between variants. The dead slots for an inactive
     /// variant are blank-filled at construction.
-    fn sum_layout(variants: &[(String, Vec<Type<TypeName>>)]) -> SumLayout {
+    pub(super) fn sum_layout(variants: &[(String, Vec<Type<TypeName>>)]) -> SumLayout {
         let tag_ty = Type::Constructed(TypeName::UInt(32), vec![]);
         let mut slot_types = vec![tag_ty];
         let mut constructor_info = std::collections::HashMap::new();
@@ -3214,7 +3091,7 @@ impl<'a> Transformer<'a> {
         }
     }
 
-    fn mk_term(&mut self, ty: Type<TypeName>, span: Span, kind: TermKind) -> Term {
+    pub(super) fn mk_term(&mut self, ty: Type<TypeName>, span: Span, kind: TermKind) -> Term {
         Term {
             id: self.term_ids.next_id(),
             ty,

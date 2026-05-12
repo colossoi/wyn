@@ -1,0 +1,20 @@
+-- Match on a bool with literal arms. Both true and false present
+-- makes coverage exhaustive without a wildcard.
+
+def verts: [3]vec4f32 =
+  [@[-1.0f32, -1.0f32, 0.0f32, 1.0f32],
+   @[3.0f32, -1.0f32, 0.0f32, 1.0f32],
+   @[-1.0f32, 3.0f32, 0.0f32, 1.0f32]]
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 =
+  verts[vertex_id]
+
+def to_f(b: bool) f32 =
+  match b
+  case true  -> 1.0f32
+  case false -> 0.0f32
+
+#[fragment]
+entry fragment_main(#[builtin(position)] _fc: vec4f32) #[location(0)] vec4f32 =
+  @[to_f(true), to_f(false), 0.5f32, 1.0f32]

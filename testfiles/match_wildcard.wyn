@@ -1,0 +1,20 @@
+-- Match arm with wildcard catch-all. Exercises non-exhaustive sum
+-- arms followed by `_` to cover the remaining variants.
+
+def verts: [3]vec4f32 =
+  [@[-1.0f32, -1.0f32, 0.0f32, 1.0f32],
+   @[3.0f32, -1.0f32, 0.0f32, 1.0f32],
+   @[-1.0f32, 3.0f32, 0.0f32, 1.0f32]]
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 =
+  verts[vertex_id]
+
+def channel(c: #red | #green | #blue) f32 =
+  match c
+  case #red -> 1.0f32
+  case _    -> 0.0f32
+
+#[fragment]
+entry fragment_main(#[builtin(position)] _fc: vec4f32) #[location(0)] vec4f32 =
+  @[channel(#red), channel(#green), channel(#blue), 1.0f32]

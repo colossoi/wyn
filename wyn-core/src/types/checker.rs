@@ -12,6 +12,7 @@ use polytype::Context;
 use std::collections::{BTreeSet, HashMap};
 
 // Import type helper functions from parent module
+use super::patterns::coverage::{CoverageError, check_match, format_cov_pat};
 use super::{
     as_arrow, bool_type, f32, function, i32, mat, record, sized_array, strip_unique, tuple, unit, vec,
 };
@@ -2236,57 +2237,41 @@ impl<'a> TypeChecker<'a> {
             }
 
             ExprKind::Match(match_expr) => {
-                // Type the scrutinee. It must resolve to a sum type so we
-                // can check arms against its variants.
+                // Type the scrutinee. Any type is permitted — coverage
+                // analysis (Maranget) handles the per-type universe.
                 let scrutinee_ty = self.infer_expression(&match_expr.scrutinee)?;
-                let scrutinee_applied = scrutinee_ty.apply(&self.context);
-                let variants = match &scrutinee_applied {
-                    Type::Constructed(TypeName::Sum(variants), _) => variants,
-                    _ => bail_type_at!(
-                        match_expr.scrutinee.h.span,
-                        "match scrutinee must be a sum type, got {}",
-                        self.format_type(&scrutinee_applied)
-                    ),
-                };
 
                 // All arms produce the same type; pick a fresh variable
                 // and unify each arm's body against it.
                 let result_var = self.context.new_variable();
 
-                let mut covered: std::collections::HashSet<&str> =
-                    std::collections::HashSet::new();
+                if match_expr.cases.is_empty() {
+                    bail_type_at!(expr.h.span, "match expression must have at least one arm");
+                }
+
                 for case in &match_expr.cases {
                     self.scope_stack.push_scope();
-
-                    // Track top-level constructor coverage for the
-                    // exhaustiveness check below. (Wildcards / nested
-                    // patterns aren't supported yet, so anything other
-                    // than a top-level Constructor pattern is rejected.)
-                    match &case.pattern.kind {
-                        PatternKind::Constructor(name, _) => {
-                            covered.insert(name.as_str());
-                        }
-                        _ => bail_type_at!(
-                            case.pattern.h.span,
-                            "match arms must be top-level `#name(...)` constructor patterns"
-                        ),
-                    }
-
                     self.bind_pattern(&case.pattern, &scrutinee_ty, false)?;
                     self.check_expression(&case.body, &result_var)?;
-
                     self.scope_stack.pop_scope();
                 }
 
-                // Exhaustiveness: every constructor in the scrutinee's
-                // sum type must appear in some arm.
-                for (name, _) in variants {
-                    if !covered.contains(name.as_str()) {
-                        bail_type_at!(
-                            expr.h.span,
-                            "non-exhaustive match: missing constructor `#{}`",
-                            name
-                        );
+                // Coverage analysis: exhaustiveness + redundancy.
+                let arms: Vec<(Pattern, Span)> = match_expr
+                    .cases
+                    .iter()
+                    .map(|c| (c.pattern.clone(), c.pattern.h.span))
+                    .collect();
+                let scrutinee_applied = scrutinee_ty.apply(&self.context);
+                match check_match(&scrutinee_applied, &arms, expr.h.span) {
+                    Ok(()) => {}
+                    Err(CoverageError::NonExhaustive { missing, .. }) => bail_type_at!(
+                        expr.h.span,
+                        "non-exhaustive match: missing case {}",
+                        format_cov_pat(&missing)
+                    ),
+                    Err(CoverageError::Redundant { arm_span, .. }) => {
+                        bail_type_at!(arm_span, "unreachable match arm")
                     }
                 }
 

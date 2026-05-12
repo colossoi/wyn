@@ -2,11 +2,11 @@
 //! `fresh_type_for_pattern` (used by lambda parameter inference) and
 //! `bind_pattern` (used by `let` and `match` arms).
 
-use crate::ast::{Pattern, PatternKind};
+use crate::ast::{Pattern, PatternKind, PatternLiteral};
 use crate::error::CompilerError;
 use crate::scope::IdentifierKind;
 use crate::types::checker::TypeChecker;
-use crate::types::{Type, TypeName, TypeScheme, tuple};
+use crate::types::{Type, TypeName, TypeScheme, bool_type, f32, i32, tuple};
 use crate::{bail_type_at, err_type_at};
 
 type Result<T> = std::result::Result<T, CompilerError>;
@@ -165,10 +165,59 @@ impl<'a> TypeChecker<'a> {
                     )),
                 }
             }
-            _ => Err(err_type_at!(
+            PatternKind::Literal(lit) => {
+                // Literal patterns bind no names; they constrain the
+                // value at runtime. Type-check by unifying the literal's
+                // numeric tower / bool with the expected scrutinee type.
+                let applied = expected_type.apply(&self.context);
+                let lit_ty = match lit {
+                    PatternLiteral::Int(_) => match &applied {
+                        Type::Constructed(TypeName::Int(_), _)
+                        | Type::Constructed(TypeName::UInt(_), _) => expected_type.clone(),
+                        _ => {
+                            let inferred = i32();
+                            self.context.unify(&inferred, expected_type).map_err(|_| {
+                                err_type_at!(
+                                    pattern.h.span,
+                                    "Int literal pattern doesn't match expected type {}",
+                                    self.format_type(expected_type)
+                                )
+                            })?;
+                            inferred
+                        }
+                    },
+                    PatternLiteral::Float(_) => match &applied {
+                        Type::Constructed(TypeName::Float(_), _) => expected_type.clone(),
+                        _ => {
+                            let inferred = f32();
+                            self.context.unify(&inferred, expected_type).map_err(|_| {
+                                err_type_at!(
+                                    pattern.h.span,
+                                    "Float literal pattern doesn't match expected type {}",
+                                    self.format_type(expected_type)
+                                )
+                            })?;
+                            inferred
+                        }
+                    },
+                    PatternLiteral::Bool(_) => {
+                        let inferred = bool_type();
+                        self.context.unify(&inferred, expected_type).map_err(|_| {
+                            err_type_at!(
+                                pattern.h.span,
+                                "Bool literal pattern doesn't match expected type {}",
+                                self.format_type(expected_type)
+                            )
+                        })?;
+                        inferred
+                    }
+                };
+                self.type_table.insert(pattern.h.id, TypeScheme::Monotype(lit_ty.apply(&self.context)));
+                Ok(lit_ty)
+            }
+            PatternKind::Record(_) => Err(err_type_at!(
                 pattern.h.span,
-                "Pattern {:?} not yet supported in lambda parameters",
-                pattern.kind
+                "Record patterns in match/let are not yet supported"
             )),
         }
     }

@@ -1,0 +1,21 @@
+-- Match on an integer scrutinee with literal arms. The wildcard arm
+-- closes coverage over the infinite int universe.
+
+def verts: [3]vec4f32 =
+  [@[-1.0f32, -1.0f32, 0.0f32, 1.0f32],
+   @[3.0f32, -1.0f32, 0.0f32, 1.0f32],
+   @[-1.0f32, 3.0f32, 0.0f32, 1.0f32]]
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 =
+  verts[vertex_id]
+
+def step(n: i32) f32 =
+  match n
+  case 0 -> 0.0f32
+  case 1 -> 0.5f32
+  case _ -> 1.0f32
+
+#[fragment]
+entry fragment_main(#[builtin(position)] _fc: vec4f32) #[location(0)] vec4f32 =
+  @[step(0), step(1), step(2), 1.0f32]
