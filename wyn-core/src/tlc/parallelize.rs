@@ -360,7 +360,11 @@ fn analyze_soac(
             }
         }
         SoacOp::Reduce { op, ne, input } => {
-            classify_input(input)?;
+            // The EGIR-side reduce migration rediscovers concrete input
+            // shapes from the entry body, just like Map. Accept whatever
+            // `input` is; non-StorageBuffer cases get `Opaque` provenance
+            // and the EGIR pass walks the actual EgirEntry's StorageView
+            // node for set/binding extraction.
             SoacOp::Reduce {
                 op: op.clone(),
                 ne: ne.clone(),
@@ -537,8 +541,8 @@ fn entry_size_hint(
     // assignment scheme (view-array params get sequential bindings on
     // set=0 in source order) to translate.
     if let Some(analysis) = analysis {
-        if let Some(ArrayProvenance::Storage { set, binding, .. }) = analysis.soac.provenances.first() {
-            if *set == 0 {
+        match analysis.soac.provenances.first() {
+            Some(ArrayProvenance::Storage { set, binding, .. }) if *set == 0 => {
                 let mut idx: u32 = 0;
                 for p in &decl.params {
                     if pattern_binds_view_array(p) {
@@ -548,11 +552,13 @@ fn entry_size_hint(
                         idx += 1;
                     }
                 }
+                return None;
             }
+            Some(ArrayProvenance::Opaque) => {
+                return decl.params.iter().filter_map(crate::egir::from_tlc::extract_size_hint).next();
+            }
+            _ => return None,
         }
-        // No matching storage param (Range input, or non-storage set):
-        // no array drives the dispatch in a way size_hint applies to.
-        return None;
     }
     // No analysis (non-parallelized compute entry): fall back to the
     // first view-array param's hint. There's no canonical "SOAC input"
@@ -1285,6 +1291,51 @@ fn make_two_phase_plan(
         ),
     };
     let elem_type = analysis.soac.result_elem_type();
+
+    let egir_native = forced_result_binding.is_none()
+        && matches!(&analysis.soac.original, SoacOp::Reduce { .. })
+        && reduce_op.captures.is_empty()
+        && is_simple_constant_term(ne);
+
+    if egir_native {
+        // `from_tlc::convert_entry_point` allocates one auto-storage
+        // binding per view-typed entry param; partials/result for the
+        // EGIR path have to live above that range to avoid colliding
+        // with the input buffers.
+        let auto_input_count = count_view_param_bindings(program, analysis.def_name);
+        let partials_binding = (AUTO_STORAGE_SET, next_binding + auto_input_count);
+        let result_binding = (AUTO_STORAGE_SET, next_binding + auto_input_count + 1);
+        let pipeline = build_two_phase_pipeline_descriptor(
+            entry_name,
+            &analysis.soac,
+            &elem_type,
+            partials_binding,
+            result_binding,
+            sizing,
+        );
+        let parallel_plan = ParallelizationPlan {
+            entry: entry_name.to_string(),
+            strategy: ParallelStrategy::Reduce,
+            dispatch: DispatchModel::Fixed {
+                groups: [1, 1, 1],
+                local_size: [sizing.workgroup.0, sizing.workgroup.1, sizing.workgroup.2],
+            },
+            bindings: PlannedBindings::Reduce {
+                partials: partials_binding,
+                result: result_binding,
+            },
+        };
+        return LoweringPlan {
+            removed_entry: None,
+            new_defs: Vec::new(),
+            pipeline,
+            extra_bindings_used: extra_used,
+            parallel_plan: Some(parallel_plan),
+        };
+    }
+
+    // Legacy TLC-side synthesis (still used by Redomap and complex
+    // Reduce shapes pending EGIR support).
     let (entries, pipeline) = build_two_phase_entries(
         entry_name,
         analysis,
@@ -1303,6 +1354,92 @@ fn make_two_phase_plan(
         extra_bindings_used: extra_used,
         parallel_plan: None,
     }
+}
+
+/// Count the storage bindings `from_tlc::convert_entry_point` will
+/// auto-allocate for this entry's view-typed params. Plain unsized
+/// arrays contribute 1; tuples-of-unsized-arrays contribute one per
+/// component. Mirrors the allocator at `from_tlc.rs:395`+.
+fn count_view_param_bindings(program: &Program, def_sym: SymbolId) -> u32 {
+    let def = match program.defs.iter().find(|d| d.name == def_sym) {
+        Some(d) => d,
+        None => return 0,
+    };
+    let (params, _) = super::extract_lambda_params(&def.body);
+    let mut count = 0u32;
+    for (_, ty) in params {
+        if is_unsized_array_local(&ty) {
+            count += 1;
+        } else if let Type::Constructed(TypeName::Tuple(_), field_tys) = &ty {
+            if !field_tys.is_empty() && field_tys.iter().all(is_unsized_array_local) {
+                count += field_tys.len() as u32;
+            }
+        }
+    }
+    count
+}
+
+fn is_unsized_array_local(ty: &Type<TypeName>) -> bool {
+    use crate::types::TypeExt;
+    if !ty.is_array() {
+        return false;
+    }
+    ty.array_size().map(|s| matches!(s, Type::Variable(_))).unwrap_or(false)
+}
+
+/// True for `Term`s whose value at EGIR time will be a `ConstantValue`
+/// EGIR can reconstruct (`IntLit`, `FloatLit`, `BoolLit`). Used by the
+/// EGIR-side reduce path to gate on initializers it can re-emit.
+fn is_simple_constant_term(t: &Term) -> bool {
+    matches!(
+        t.kind,
+        TermKind::IntLit(_) | TermKind::FloatLit(_) | TermKind::BoolLit(_)
+    )
+}
+
+/// Build the `Pipeline::MultiCompute` descriptor for an EGIR-side
+/// two-phase reduce. Phase 1 stage keeps the entry's original name
+/// (the EGIR pass rewrites the body in place); phase 2 is named
+/// `<entry>_phase2_combine`.
+fn build_two_phase_pipeline_descriptor(
+    entry_name: &str,
+    analysis: &SoacAnalysis,
+    _elem_type: &Type<TypeName>,
+    partials_binding: (u32, u32),
+    result_binding: (u32, u32),
+    sizing: PipelineSizing,
+) -> Pipeline {
+    let workgroup = sizing.workgroup;
+    let phase2_name = format!("{}_phase2_combine", entry_name);
+    let mut all_bindings = collect_soac_bindings(analysis);
+    let input_indices: Vec<usize> = (0..all_bindings.len()).collect();
+    let partials_idx = push_storage_binding(
+        &mut all_bindings,
+        partials_binding,
+        Access::ReadWrite,
+        BufferUsage::Intermediate,
+        format!("{}_partials", entry_name),
+    );
+    let result_idx = push_storage_binding(
+        &mut all_bindings,
+        result_binding,
+        Access::WriteOnly,
+        BufferUsage::Output,
+        format!("{}_result", entry_name),
+    );
+    Pipeline::MultiCompute(MultiComputePipeline {
+        bindings: all_bindings,
+        stages: vec![
+            derived_stage(
+                entry_name.to_string(),
+                input_indices,
+                vec![partials_idx],
+                workgroup,
+            ),
+            fixed_stage(phase2_name, vec![partials_idx], vec![result_idx]),
+        ],
+        default_total_threads: sizing.default_total_threads,
+    })
 }
 
 fn make_scan_plan(

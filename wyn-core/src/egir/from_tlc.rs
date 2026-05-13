@@ -742,9 +742,7 @@ impl<'a> Converter<'a> {
     }
 
     fn alloc_effect(&mut self) -> EffectToken {
-        let t = EffectToken(self.next_effect);
-        self.next_effect += 1;
-        t
+        super::graph_ops::alloc_effect(&mut self.next_effect)
     }
 
     /// Set the return terminator on the current block.
@@ -752,73 +750,28 @@ impl<'a> Converter<'a> {
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Return(result);
     }
 
-    // -- Entry-point emission helpers --
-    //
-    // These build the shader-entry-point glue (storage views, output ptrs,
-    // stores) as EGraph nodes + skeleton side-effects. Pure pieces go through
-    // intern_pure; memory writes go into the current skeleton block.
+    // -- Entry-point emission helpers (thin delegations to `graph_ops`) --
 
     fn intern_u32(&mut self, n: u32) -> NodeId {
-        let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
-        self.intern_pure(PureOp::Uint(n.to_string()), smallvec![], u32_ty)
+        super::graph_ops::intern_u32(&mut self.graph, n, self.current_span)
     }
 
-    /// Create a pure `StorageView(Storage { set, binding })` node. Builds the
-    /// implicit `offset=0` and `len=_w_intrinsic_storage_len(set, binding)`
-    /// operands as pure ops. Offset and len are u32 by contract; the
-    /// `debug_assert`s below catch future drift.
     fn emit_storage_view(&mut self, set: u32, binding: u32, view_ty: Type<TypeName>) -> NodeId {
-        let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
-        let set_nid = self.intern_u32(set);
-        let binding_nid = self.intern_u32(binding);
-        let storage_len_id = catalog().known().storage_len;
-        let len_nid = self.intern_pure(
-            PureOp::Intrinsic {
-                id: storage_len_id,
-                overload_idx: 0,
-            },
-            smallvec![set_nid, binding_nid],
-            u32_ty.clone(),
-        );
-        let zero_nid = self.intern_u32(0);
-        debug_assert_eq!(
-            self.graph.types.get(&zero_nid),
-            Some(&u32_ty),
-            "StorageView offset operand must be u32"
-        );
-        debug_assert_eq!(
-            self.graph.types.get(&len_nid),
-            Some(&u32_ty),
-            "StorageView len operand must be u32"
-        );
-        self.intern_pure(
-            PureOp::StorageView(PureViewSource::Storage { set, binding }),
-            smallvec![zero_nid, len_nid],
-            view_ty,
+        super::graph_ops::intern_storage_view(&mut self.graph, set, binding, view_ty, self.current_span)
+    }
+
+    fn emit_store(&mut self, place_nid: NodeId, value_nid: NodeId) -> EffectToken {
+        let span = self.current_span;
+        super::graph_ops::emit_store(
+            &mut self.graph,
+            self.current_block,
+            place_nid,
+            value_nid,
+            &mut self.next_effect,
+            span,
         )
     }
 
-    /// Emit a `Store` side-effect in the current block. `place_nid` must
-    /// be a place-producing pure op (`ViewIndex`, `OutputSlot`).
-    fn emit_store(&mut self, place_nid: NodeId, value_nid: NodeId) -> EffectToken {
-        let effect_in = EffectToken(0); // placeholder; real chain is built by elaborate
-        let effect_out = self.alloc_effect();
-        let kind = InstKind::Store {
-            place: Default::default(),
-            value: ValueRef::Ssa(Default::default()),
-        };
-        self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
-            kind: SideEffectKind::Inst(kind),
-            operand_nodes: smallvec![place_nid, value_nid],
-            result: None,
-            effects: Some((effect_in, effect_out)),
-            span: self.current_span,
-        });
-        effect_out
-    }
-
-    /// Emit a store through a StorageView at `index`. `ViewIndex` produces
-    /// the place; the Store consumes it.
     fn emit_storage_store(
         &mut self,
         view_nid: NodeId,
@@ -826,8 +779,17 @@ impl<'a> Converter<'a> {
         value_nid: NodeId,
         elem_ty: Type<TypeName>,
     ) {
-        let place_nid = self.intern_pure(PureOp::ViewIndex, smallvec![view_nid, index_nid], elem_ty);
-        let _ = self.emit_store(place_nid, value_nid);
+        let span = self.current_span;
+        super::graph_ops::emit_storage_store(
+            &mut self.graph,
+            self.current_block,
+            view_nid,
+            index_nid,
+            value_nid,
+            elem_ty,
+            &mut self.next_effect,
+            span,
+        );
     }
 
     /// Emit a pure `OutputSlot(index)` node (produces a `PlaceId`).
@@ -1645,17 +1607,16 @@ impl<'a> Converter<'a> {
         operands: SmallVec<[NodeId; 4]>,
         ty: Type<TypeName>,
     ) -> NodeId {
-        let result_nid = self.graph.alloc_side_effect_result(ty);
-        let effect_in = EffectToken(0);
-        let effect_out = self.alloc_effect();
-        self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
-            kind: SideEffectKind::Pending(soac),
-            operand_nodes: operands,
-            result: Some(result_nid),
-            effects: Some((effect_in, effect_out)),
-            span: self.current_span,
-        });
-        result_nid
+        let span = self.current_span;
+        super::graph_ops::emit_pending_soac(
+            &mut self.graph,
+            self.current_block,
+            soac,
+            operands,
+            ty,
+            &mut self.next_effect,
+            span,
+        )
     }
 
     fn convert_soac_map(

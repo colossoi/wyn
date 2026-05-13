@@ -13,8 +13,8 @@ use crate::ssa::framework::BlockId;
 use polytype::Type;
 use smallvec::{SmallVec, smallvec};
 
+use super::graph_ops::{alloc_effect, next_effect_token};
 use super::program::EgirInner;
-use super::types::EffectToken;
 use crate::ast::TypeName;
 use crate::ssa::types::{ControlHeader, InstKind, ValueRef};
 use crate::types::TypeExt;
@@ -69,24 +69,8 @@ pub fn run_one_body(
     let _ = next_effect; // silence unused when no view-array reductions
 }
 
-/// Find the next unused EffectToken by scanning all existing skeleton side-effects.
-fn next_effect_token(graph: &EGraph) -> u32 {
-    let mut max = 0u32;
-    for (_, block) in &graph.skeleton.blocks {
-        for se in &block.side_effects {
-            if let Some((a, b)) = se.effects {
-                max = max.max(a.0).max(b.0);
-            }
-        }
-    }
-    max + 1
-}
-
-fn alloc_effect(next: &mut u32) -> EffectToken {
-    let t = EffectToken(*next);
-    *next += 1;
-    t
-}
+// Effect-token helpers (`next_effect_token`, `alloc_effect`) live in
+// `graph_ops` and are imported up top.
 
 /// Does this SOAC kind have a TLC→EGIR expansion implemented here?
 fn is_handleable_soac(kind: &SideEffectKind) -> bool {

@@ -19,5 +19,7 @@ pub(crate) mod skel_opt;
 pub(crate) mod soac_expand;
 pub mod types;
 
+pub mod builder;
 pub mod from_tlc;
+pub mod graph_ops;
 pub mod parallelize;
