@@ -248,9 +248,9 @@ enum Command {
         /// Run naga validation on the SPIR-V before sending to the GPU driver
         #[arg(long)]
         validate: bool,
-        /// Print verbose output
-        #[arg(short, long)]
-        verbose: bool,
+        /// Print verbose output. `-v` adds per-chunk progress; `-vv` also dumps phase-1 partials each chunk.
+        #[arg(short, long, action = clap::ArgAction::Count)]
+        verbose: u8,
     },
     /// Render a built-in test pattern (no shader file needed, always validates)
     #[command(name = "testpattern")]

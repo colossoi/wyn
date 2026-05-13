@@ -50,7 +50,8 @@ struct MinerConfig {
     num_chunks: u32,
     descriptor: PipelineDescriptor,
     validate: bool,
-    verbose: bool,
+    /// 0 = quiet, 1 = `-v` per-chunk progress, 2 = `-vv` also dumps partials each chunk.
+    verbose: u8,
 }
 
 impl MinerConfig {
@@ -61,7 +62,7 @@ impl MinerConfig {
         workgroups_override: Option<u32>,
         chunk_size: u32,
         validate: bool,
-        verbose: bool,
+        verbose: u8,
         descriptor_path: &Path,
     ) -> Result<Self> {
         let chunk = chunk_size.max(WORKGROUP_SIZE);
@@ -105,7 +106,7 @@ impl MinerConfig {
     }
 
     fn print_intro(&self) {
-        if !self.verbose {
+        if self.verbose == 0 {
             return;
         }
         println!("Miner configuration:");
@@ -394,7 +395,7 @@ fn run_chunk(
     let chunk_n = cfg.chunk.min(cfg.nonces - chunk_idx * cfg.chunk);
     let num_workgroups = cfg.workgroups_for(chunk_idx);
 
-    if cfg.verbose {
+    if cfg.verbose >= 1 {
         println!(
             "  Chunk {}/{}: {} workgroups × {} threads = {} threads ({} nonces)",
             chunk_idx + 1,
@@ -423,10 +424,11 @@ fn run_chunk(
     }
     .record(&mut encoder);
 
-    // Optional debug: dump partials between phase 1 and phase 2. Splits
-    // the encoder so the readback's queue.submit doesn't carry phase 2
-    // along with it.
-    if cfg.verbose {
+    // Optional debug (`-vv` only): dump partials between phase 1 and
+    // phase 2. Splits the encoder so the readback's queue.submit doesn't
+    // carry phase 2 along with it. This adds a multi-hundred-KB
+    // map_async + CPU round-trip per chunk, so it stays off at `-v`.
+    if cfg.verbose >= 2 {
         dump_partials(device, queue, buffers, encoder, num_workgroups)?;
         encoder = device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("miner_encoder_phase2"),
@@ -551,7 +553,7 @@ async fn print_timing(
         let gap_ns = p2_begin - p1_end;
         total_phase1_ns += p1_ns;
         total_phase2_ns += p2_ns;
-        if cfg.verbose || p1_times.len() <= 4 {
+        if cfg.verbose >= 1 || p1_times.len() <= 4 {
             let chunk_n = cfg.chunk.min(cfg.nonces - i as u32 * cfg.chunk);
             let nwg =
                 cfg.workgroups_override.unwrap_or_else(|| (chunk_n + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE);
@@ -616,8 +618,9 @@ pub async fn run_miner(
     workgroups_override: Option<u32>,
     chunk_size: u32,
     validate: bool,
-    verbose: bool,
+    verbose: u8,
 ) -> Result<()> {
+    let chatty = verbose >= 1;
     let descriptor_path = path.with_extension("json");
     let cfg = MinerConfig::new(
         header_hex,
@@ -631,7 +634,7 @@ pub async fn run_miner(
     )?;
     cfg.print_intro();
 
-    let (device, queue) = create_headless_device(verbose).await?;
+    let (device, queue) = create_headless_device(chatty).await?;
 
     if cfg.validate {
         naga_validate_spirv(&device, &path).await?;
@@ -643,16 +646,16 @@ pub async fn run_miner(
         let spv_bytes = fs::read(&path)?;
         let spv_words: Vec<u32> =
             spv_bytes.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
-        MinerPipeline::validate_against_spirv(&spv_words, cfg.mp(), verbose)?;
+        MinerPipeline::validate_against_spirv(&spv_words, cfg.mp(), chatty)?;
     }
 
-    let buffers = MinerBuffers::new(&device, cfg.mp(), cfg.chunk, verbose)?;
-    let pipeline = MinerPipeline::new(&device, &module, cfg.mp(), &buffers, verbose)?;
+    let buffers = MinerBuffers::new(&device, cfg.mp(), cfg.chunk, chatty)?;
+    let pipeline = MinerPipeline::new(&device, &module, cfg.mp(), &buffers, chatty)?;
 
     // Two-slot timestamp profiler per chunk: phase1 + phase2.
     let gpu_phase1 = GpuTimestamps::new(&device, &queue, cfg.num_chunks);
     let gpu_phase2 = GpuTimestamps::new(&device, &queue, cfg.num_chunks);
-    if gpu_phase1.is_none() && verbose {
+    if gpu_phase1.is_none() && chatty {
         eprintln!("  Warning: TIMESTAMP_QUERY not supported, no GPU timing available");
     }
 
@@ -670,7 +673,7 @@ pub async fn run_miner(
             chunk_idx,
         )?;
 
-        if verbose {
+        if chatty {
             print!("  chunk {:>4}: nonce {:>10} -> ", chunk_idx + 1, outcome.nonce);
             for word in &outcome.hash {
                 print!("{:08x}", word);
@@ -683,7 +686,7 @@ pub async fn run_miner(
             break;
         }
 
-        if verbose && cfg.num_chunks > 1 {
+        if chatty && cfg.num_chunks > 1 {
             let elapsed = start_time.elapsed();
             let computed = (chunk_idx + 1) as u64 * cfg.chunk as u64;
             let rate = computed as f64 / elapsed.as_secs_f64();
@@ -697,7 +700,7 @@ pub async fn run_miner(
         }
     }
 
-    if verbose && cfg.num_chunks > 1 {
+    if chatty && cfg.num_chunks > 1 {
         eprintln!();
     }
 
