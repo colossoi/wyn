@@ -2148,56 +2148,39 @@ def pick(v: #left(i32) | #right(i32)) f32 =
 }
 
 // =============================================================================
-// Pinned failing tests for GLSL builtins Wyn doesn't expose yet.
-//
-// Each test type-checks a tiny program that *should* succeed once the builtin
-// lands in the catalog. While it's missing, the resolver / type-checker errors
-// out — the `#[ignore]` keeps that visible without breaking CI. Remove the
-// `#[ignore]` when the builtin is added. Workarounds for both live in
-// `GLSL-PORTING.md`.
+// GLSL builtins added late: `exp2` (base-2 exponential, GLSL.std.450 #29)
+// and `step` (heaviside step, #48). Both have a scalar form and a
+// scalar-edge / vec broadcast; per-type entries cover the all-vec form.
 // =============================================================================
 
-/// GLSL `exp2(x)` scalar. Workaround: `exp(x * 0.6931471805599453)`.
+/// GLSL `exp2` — scalar `f32 -> f32` (per-type op via `open f32`) and
+/// per-component on vectors via `vec.exp2`.
 #[test]
-#[ignore = "exp2 builtin not yet exposed; remove ignore when added"]
-fn missing_builtin_exp2_scalar_f32() {
-    let result = try_typecheck_program("def f(x: f32) f32 = exp2(x)");
+fn builtin_exp2() {
+    let scalar = try_typecheck_program("open f32\ndef f(x: f32) f32 = exp2(x)");
     assert!(
-        result.is_ok(),
+        scalar.is_ok(),
         "exp2 should be a scalar f32 builtin: {:?}",
-        result
+        scalar
     );
-}
-
-/// GLSL `exp2(v)` per-component on a vec3.
-#[test]
-#[ignore = "exp2 builtin not yet exposed; remove ignore when added"]
-fn missing_builtin_exp2_vec3f32() {
-    let result = try_typecheck_program("def f(v: vec3f32) vec3f32 = exp2(v)");
-    assert!(result.is_ok(), "exp2 should accept vec3f32: {:?}", result);
+    let vec3 = try_typecheck_program("def f(v: vec3f32) vec3f32 = vec.exp2(v)");
+    assert!(vec3.is_ok(), "vec.exp2 should accept vec3f32: {:?}", vec3);
 }
 
 /// GLSL `step(edge, x)` returns 1.0 if `x >= edge` else 0.0.
-/// Workaround: `if x >= edge then 1.0 else 0.0`.
+/// Covers the scalar form and the scalar-edge / vec-x broadcast.
 #[test]
-#[ignore = "step builtin not yet exposed; remove ignore when added"]
-fn missing_builtin_step_scalar_f32() {
-    let result = try_typecheck_program("def f(edge: f32, x: f32) f32 = step(edge, x)");
+fn builtin_step() {
+    let scalar = try_typecheck_program("def f(edge: f32, x: f32) f32 = step(edge, x)");
     assert!(
-        result.is_ok(),
+        scalar.is_ok(),
         "step should be a scalar f32 builtin: {:?}",
-        result
+        scalar
     );
-}
-
-/// GLSL `step(edge, v)` broadcasts a scalar edge across a vector.
-#[test]
-#[ignore = "step builtin not yet exposed; remove ignore when added"]
-fn missing_builtin_step_scalar_edge_vec3f32() {
-    let result = try_typecheck_program("def f(edge: f32, v: vec3f32) vec3f32 = step(edge, v)");
+    let vec3 = try_typecheck_program("def f(edge: f32, v: vec3f32) vec3f32 = step(edge, v)");
     assert!(
-        result.is_ok(),
+        vec3.is_ok(),
         "step should accept (f32 edge, vec3f32 x): {:?}",
-        result
+        vec3
     );
 }

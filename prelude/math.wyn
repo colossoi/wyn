@@ -68,6 +68,7 @@ module type real = {
   sig rsqrt : t -> t
   sig cbrt : t -> t
   sig exp : t -> t
+  sig exp2 : t -> t
   sig sin : t -> t
   sig cos : t -> t
   sig tan : t -> t

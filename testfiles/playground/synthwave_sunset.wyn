@@ -54,13 +54,6 @@ def pow1d5(a: f32) f32 = a * sqrt(a)
 def hash21(co: vec2f32) f32 =
   fract(sin(dot(co, @[1.9898, 7.233])) * 45758.5433)
 
--- exp2(x) = 2^x via exp/log identity (scalar)
-def exp2s(x: f32) f32 = exp(x * 0.6931471805599453)
-
--- Vectorised exp2 for vec3
-def exp2v3(v: vec3f32) vec3f32 =
-  @[exp2s(v.x), exp2s(v.y), exp2s(v.z)]
-
 ------------------------------------------------------------
 -- Terrain noise (triangular grid)
 ------------------------------------------------------------
@@ -200,7 +193,7 @@ def starnoise(rd: vec3f32) f32 =
 def gsky(rd: vec3f32, ld: vec3f32, show_sun: bool) vec3f32 =
   -- Haze = exp2(-5*(|rd.y| - 0.2*dot(rd,ld)))
   let haze_exp = -5.0 * (abs(rd.y) - 0.2 * dot(rd, ld)) in
-  let haze     = exp2s(haze_exp) in
+  let haze     = exp2(haze_exp) in
   -- Stars (only when looking at sky)
   let st   = if show_sun then starnoise(rd) * (1.0 - min(haze, 1.0)) else 0.0 in
   -- Background: purple gradient; textureMirror=0 so no audio modulation
@@ -240,7 +233,7 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4
 
   -- Fog (exp2 per-channel, only when terrain was hit)
   let fog = if d > 0.0
-            then exp2v3(d * @[-0.14, -0.1, -0.28])
+            then vec.exp2(d * @[-0.14, -0.1, -0.28])
             else @[0.0, 0.0, 0.0] in
 
   -- Sky / terrain color
@@ -260,7 +253,7 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4
   let col2   = mix(sky, col1, fog) in
 
   -- Final: clamp + depth-based alpha
-  let alpha = if d < 0.0 then 0.0 else 0.1 + exp2s(0.0 - d) in
+  let alpha = if d < 0.0 then 0.0 else 0.1 + exp2(0.0 - d) in
   @[clamp(col2.x, 0.0, 1.0),
     clamp(col2.y, 0.0, 1.0),
     clamp(col2.z, 0.0, 1.0),

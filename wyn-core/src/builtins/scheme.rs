@@ -154,6 +154,14 @@ pub fn vec_vec_scalar_to_vec(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     quantify(arrow_chain(&[v.clone(), v.clone(), a], v))
 }
 
+/// `∀n a. a -> vec<n,a> -> vec<n,a>` — step(edge, x) with a scalar
+/// edge that broadcasts across a vector x.
+pub fn vec_scalar_edge_to_vec(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+    let (n, a) = (ctx.new_variable(), ctx.new_variable());
+    let v = vec_type(a.clone(), n);
+    quantify(arrow_chain(&[a, v.clone()], v))
+}
+
 /// `∀n a. a -> a -> vec<n,a> -> vec<n,a>` — clamp(lo, hi, x) /
 /// smoothstep(edge0, edge1, x) with scalar bounds.
 pub fn vec_clamp_scalar_lohi(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {

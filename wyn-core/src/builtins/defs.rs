@@ -12,8 +12,8 @@ use crate::builtins::names::{
 use crate::builtins::scheme::{
     array_to_i32, mat_square_to_mat, mat_square_to_scalar, mat_x_mat, mat_x_vec, scalar_unary, unit_to_t,
     vec_binary_same, vec_binary_to_scalar, vec_clamp_scalar_lohi, vec_mix_scalar_interp,
-    vec_smoothstep_scalar_edges, vec_ternary_same, vec_to_scalar, vec_unary_same, vec_vec_outer,
-    vec_vec_scalar_to_vec, vec_x_mat, vec3f32_binary,
+    vec_scalar_edge_to_vec, vec_smoothstep_scalar_edges, vec_ternary_same, vec_to_scalar, vec_unary_same,
+    vec_vec_outer, vec_vec_scalar_to_vec, vec_x_mat, vec3f32_binary,
 };
 
 // ---------------------------------------------------------------------------
@@ -495,6 +495,32 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
             },
         ],
     },
+    BuiltinDefRaw {
+        surface_name: "step",
+        intrinsic_source_names: &["step"],
+        impl_source_names: &["step"],
+        kind: BuiltinKind::UserVisible,
+        purity: Purity::Pure,
+        overloads: &[
+            // Polymorphic `a -> a -> a`: scalar/scalar and (incidentally)
+            // vec/vec both unify against this scheme. GLSL.std.450 `Step`
+            // (#48) accepts matching scalar or vec operand types.
+            BuiltinOverload {
+                scheme: Some(crate::builtins::scheme::scalar_binary),
+                lowering: BuiltinLowering::PrimOp(PrimOp::GlslExt(48)),
+            },
+            // `step(scalar_edge, vec)` — splat the scalar edge to vec
+            // width before `OpExtInst Step`, which requires both
+            // operands to match the result type.
+            BuiltinOverload {
+                scheme: Some(vec_scalar_edge_to_vec),
+                lowering: BuiltinLowering::ExtInstSplat {
+                    ext: 48,
+                    splat_args: &[0],
+                },
+            },
+        ],
+    },
     // ---- Internal intrinsics with real backend lowerings ----
     // `length` is user-callable as `length(arr)` — surface name distinct
     // from the internal `_w_intrinsic_length` so NameResolution can
@@ -804,6 +830,7 @@ fn generate_per_type_ops() -> Vec<BuiltinDefRaw> {
             ("sqrt", 31),
             ("rsqrt", 32),
             ("exp", 27),
+            ("exp2", 29),
             ("log", 28),
             ("log2", 30),
             ("radians", 11),

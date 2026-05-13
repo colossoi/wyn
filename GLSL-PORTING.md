@@ -130,8 +130,10 @@ SDFs.
 | `fract(v)` (vector)   | `vec.fract(v)`                |
 | `floor(v)` (vector)   | `vec.floor(v)`                |
 | `sign(v)` (vector)    | `vec.sign(v)`                 |
+| `exp2(v)` (vector)    | `vec.exp2(v)`                 |
 | `max(a, b)` (vec×vec) | `vec.max(a, b)`               |
 | `atan(y, x)` (2-arg)  | `atan2(y, x)`                 |
+| `step(edge, x)`       | `step(edge, x)` *(scalar edge splats to a vec x; vec-vec also accepted)* |
 
 Implicit scalar→vector broadcasts in GLSL (`v + 1.0`) don't exist in
 Wyn — write `v + @[1.0, 1.0, 1.0]` (or whatever shape matches).
