@@ -116,6 +116,10 @@ fn is_handleable_soac(kind: &SideEffectKind) -> bool {
             input_array_types, ..
         } => input_array_types.iter().all(is_plain_array_source),
         PendingSoac::Filter { input_array_type, .. } => is_plain_array_source(input_array_type),
+        // Peel the wrapper and re-check; the inner SOAC's source rules apply.
+        PendingSoac::Parallel { serial } => {
+            is_handleable_soac(&SideEffectKind::Pending((**serial).clone()))
+        }
     }
 }
 
@@ -566,6 +570,56 @@ fn expand_one(
                 next_effect,
             );
         }
+        SideEffectKind::Pending(PendingSoac::Parallel { serial }) => {
+            // Peel the wrapper. Today only the OutputView Map case is
+            // wired up; other parallel strategies are skipped by the
+            // egir::parallelize pass for now.
+            match (**serial).clone() {
+                PendingSoac::Map {
+                    func,
+                    input_array_types,
+                    input_elem_types,
+                    output_elem_type,
+                    destination: SoacDestination::OutputView,
+                } => {
+                    let n_inputs = input_array_types.len();
+                    let input_nids: Vec<NodeId> = se.operand_nodes[..n_inputs].to_vec();
+                    let view_nid =
+                        *se.operand_nodes.last().expect("Parallel Map[OutputView] has output_view operand");
+                    let captures: Vec<NodeId> =
+                        se.operand_nodes[n_inputs..se.operand_nodes.len() - 1].to_vec();
+                    let result_nid = se.result.expect("Map has a result");
+
+                    let read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)> = input_nids
+                        .iter()
+                        .zip(input_array_types.iter().zip(input_elem_types.iter()))
+                        .map(|(n, (a, e))| (*n, a.clone(), e.clone()))
+                        .collect();
+                    let len_input = (input_nids[0], input_array_types[0].clone());
+
+                    build_parallel_map(
+                        graph,
+                        control_headers,
+                        bid,
+                        idx,
+                        MapIntoLoop {
+                            len_input,
+                            read_inputs,
+                            view_nid,
+                            out_elem_ty: output_elem_type,
+                            result_node: result_nid,
+                            func,
+                            captures,
+                        },
+                        next_effect,
+                    );
+                }
+                other => unreachable!(
+                    "PendingSoac::Parallel wrapping unsupported variant: {:?}",
+                    std::mem::discriminant(&other)
+                ),
+            }
+        }
         _ => unreachable!("is_handleable_soac filtered to supported variants"),
     }
 }
@@ -872,6 +926,111 @@ fn build_map_into_loop(
     graph.skeleton.blocks[handles.body].term = SkeletonTerminator::Branch {
         target: handles.header,
         args: vec![next_i_nid],
+    };
+}
+
+/// Parallel `MapInto`: one lane per input element, guarded by
+/// `if tid < len then body else ()`. No loop, no phi — replaces the
+/// per-iteration serial walk with `_w_intrinsic_thread_id`-keyed
+/// scalar work.
+///
+/// The body is the same per-iteration shape `build_map_into_loop`
+/// emits inside its loop body:
+///   read each input at `i`, call the lifted lambda with per-element
+///   args + captures, write the result via the OutputView.
+fn build_parallel_map(
+    graph: &mut EGraph,
+    control_headers: &mut HashMap<BlockId, ControlHeader>,
+    bid: BlockId,
+    idx_in_block: usize,
+    spec: MapIntoLoop,
+    next_effect: &mut u32,
+) {
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+    let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+
+    // Split bid into preheader (= bid) + after (suffix + old terminator).
+    let after = graph.skeleton.create_block();
+    let suffix: Vec<SideEffect> = graph.skeleton.blocks[bid].side_effects.drain(idx_in_block..).collect();
+    let old_term = std::mem::replace(
+        &mut graph.skeleton.blocks[bid].term,
+        SkeletonTerminator::Unreachable,
+    );
+    graph.skeleton.blocks[after].side_effects = suffix;
+    graph.skeleton.blocks[after].term = old_term;
+    if let Some(header_meta) = control_headers.remove(&bid) {
+        control_headers.insert(after, header_meta);
+    }
+
+    // The SOAC's result is a dummy (effect-only OutputView destination),
+    // rebound to a `Bool(false)` constant — same convention as
+    // `build_map_into_loop`'s DummyBool ResultBinding.
+    graph.nodes[spec.result_node] = ENode::Constant(crate::ssa::types::ConstantValue::Bool(false));
+
+    let body = graph.skeleton.create_block();
+
+    // Preheader: compute tid, cast to i32, read length, build the guard.
+    let known = catalog().known();
+    let tid_nid = graph.intern_pure(
+        PureOp::Intrinsic {
+            id: known.thread_id,
+            overload_idx: 0,
+        },
+        smallvec![],
+        u32_ty,
+    );
+    // `i32.u32` is the per-type bitcast registered by per_type_conv.
+    let i32_from_u32 = catalog().lookup_by_any_name("i32.u32").expect("catalog has i32.u32 bitcast");
+    let i_nid = graph.intern_pure(
+        PureOp::Intrinsic {
+            id: i32_from_u32.id,
+            overload_idx: 0,
+        },
+        smallvec![tid_nid],
+        i32_ty.clone(),
+    );
+    let len_nid = emit_length(graph, spec.len_input.0, &spec.len_input.1, &i32_ty);
+    let cond_nid = graph.intern_pure(PureOp::BinOp("<".into()), smallvec![i_nid, len_nid], bool_ty);
+
+    graph.skeleton.blocks[bid].term = SkeletonTerminator::CondBranch {
+        cond: cond_nid,
+        then_target: body,
+        then_args: vec![],
+        else_target: after,
+        else_args: vec![],
+    };
+    control_headers.insert(bid, ControlHeader::Selection { merge: after });
+
+    // Body: emit per-input reads using `i`, call the lifted lambda,
+    // store via the bound output view.
+    let mut call_operands: smallvec::SmallVec<[NodeId; 4]> = SmallVec::new();
+    for (arr, arr_ty, elem_ty) in &spec.read_inputs {
+        let elem_nid = emit_read_element(graph, body, *arr, i_nid, arr_ty, elem_ty, next_effect);
+        call_operands.push(elem_nid);
+    }
+    call_operands.extend(spec.captures.iter().copied());
+    let y_nid = graph.intern_pure(PureOp::Call(spec.func), call_operands, spec.out_elem_ty.clone());
+    let ptr_nid = graph.intern_pure(
+        PureOp::ViewIndex,
+        smallvec![spec.view_nid, i_nid],
+        spec.out_elem_ty,
+    );
+    let eff_in = alloc_effect(next_effect);
+    let eff_out = alloc_effect(next_effect);
+    graph.skeleton.blocks[body].side_effects.push(SideEffect {
+        kind: SideEffectKind::Inst(InstKind::Store {
+            place: Default::default(),
+            value: ValueRef::Ssa(Default::default()),
+        }),
+        operand_nodes: smallvec![ptr_nid, y_nid],
+        result: None,
+        effects: Some((eff_in, eff_out)),
+        span: None,
+    });
+    graph.skeleton.blocks[body].term = SkeletonTerminator::Branch {
+        target: after,
+        args: vec![],
     };
 }
 

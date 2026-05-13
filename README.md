@@ -69,14 +69,15 @@ What you get "for free":
 | **TlcBufferSpecialized** | `tlc::buffer_specialize` | Storage buffer parameter specialization |
 | **TlcGeneratedLambdasFolded** | `tlc::inline` | Fold compiler-generated `_w_lambda_*` defs (from defunctionalization) back at call sites + DCE |
 | **TlcSmallInlined** | `tlc::inline` | Inline small user functions and constants |
-| **TlcParallelized** | `tlc::parallelize` | Structural parallelization of compute shader SOACs (chunked entries, pipeline descriptors) |
+| **TlcParallelized** | `tlc::parallelize` | Per-entry SOAC parallelization **analysis**: pick strategy + workgroup + dispatch shape, reserve intermediate bindings, build the host `PipelineDescriptor`, and emit a declarative `ParallelizationPlan` per parallelized entry on the `ParallelizationResult.plans` map for EGIR to consume. Kernel lowering moved out — see `egir::parallelize` below. For reduce/redomap/scan this stage also still synthesizes the TLC-side phase entries (migration to EGIR pending) |
 | **TlcReachable** | `tlc::inline` | Dead definition elimination |
 
 ### EGIR (Acyclic E-Graph IR)
 | Stage | Module | Description |
 |-------|--------|-------------|
 | **EgirRaw** | `egir::from_tlc` | TLC term → EGraph; `_w_intrinsic_*` calls lowered as pure `PureOp::Intrinsic` (effectful intrinsics like `_w_intrinsic_storage_index` handled by explicit arms) |
-| **EgirSoacExpanded** | `egir::soac_expand` | Every `PendingSoac` rewritten into an explicit loop subgraph (block-split + header/body/after, alloca/store for output arrays, view loads, SoA-aware reads). Map with a statically-sized input of ≤16 elements is unrolled via a shared `try_unroll` / `build_loop` / `expand_loop` core |
+| **EgirParallelized** | `egir::parallelize` | Consumes `tlc::parallelize`'s per-entry `ParallelizationPlan` map and tags each planned compute entry's tail SOAC with `PendingSoac::Parallel { serial: Box<PendingSoac> }`. No-op when the plan map is empty (graphics-only programs, non-parallelized compute entries) |
+| **EgirSoacExpanded** | `egir::soac_expand` | Every `PendingSoac` rewritten into an explicit loop subgraph (block-split + header/body/after, alloca/store for output arrays, view loads, SoA-aware reads). Map with a statically-sized input of ≤16 elements is unrolled via a shared `try_unroll` / `build_loop` / `expand_loop` core. `PendingSoac::Parallel` (compute-entry SOAC) dispatches to lane-indexed builders (`build_parallel_map`) — preheader loads `gl_GlobalInvocationID`, body is gated by `OpSelectionMerge` rather than `OpLoopMerge` |
 | **EgirMaterialized** | `egir::materialize` | (optional, SPIR-V only) dynamic `Index` → `Materialize` + `DynamicExtract`, then LICM-hoisted out of loops |
 | **EgirSkelOptimized** | `egir::skel_opt` | Skeleton CFG rewrites: branch folding, redundant-phi elimination |
 
@@ -93,6 +94,35 @@ Key properties:
 - No effect tokens at the SSA layer — instruction order is fixed by elaboration
 - `ValueDef::FunctionParam` distinct from `ValueDef::Param` (block params)
 - `ControlHeader` metadata stored in a side-map on `FuncBody`, not on blocks
+
+### SOAC Parallelization Boundary
+
+Parallelization of compute-entry SOACs splits cleanly across the two
+mid-end passes. **TLC `parallelize` is analysis-only**: it identifies the
+tail SOAC of each compute entry, chooses a strategy + workgroup +
+dispatch model, reserves intermediate binding numbers, and emits a
+declarative `ParallelizationPlan` per entry (plus the host-facing
+`PipelineDescriptor`). It does **not** hand-roll kernel bodies for Map
+or wire up storage views — those duplicate work EGIR already does
+well (SoA-tuple aware reads via `as_soa_tuple` / `emit_read_element`,
+OutputView wiring, storage-view construction).
+
+**EGIR `parallelize` consumes the plans** and tags planned entries'
+tail `PendingSoac` with a `Parallel { serial: Box<PendingSoac> }`
+wrapper. `egir::soac_expand` then dispatches on the wrapper:
+`Parallel { Map }` is emitted as a lane-indexed scalar kernel (load
+`gl_GlobalInvocationID`, bounds-check, single guarded scalar body),
+reusing all the existing element-read / OutputView machinery. The
+serial-loop builder remains in place for non-entry Maps (e.g. an
+intermediate `map` inside a function body) — those legitimately want
+a per-thread sequential walk.
+
+For reduce / redomap / scan the kernel synthesis still lives in TLC
+parallelize (chunked-per-lane bodies emitted as fresh phase Defs that
+re-enter the normal EGIR pipeline). Their migration to the same
+EGIR-side boundary is pending; the `ParallelizationPlan` shape already
+accommodates them (`PlannedBindings::Reduce` / `::Redomap` / `::Scan`
+variants).
 
 ### SPIR-V Backend Optimizations
 

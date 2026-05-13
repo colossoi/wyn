@@ -223,6 +223,16 @@ pub enum PendingSoac {
         /// output buffer's capacity.
         output_capacity_size: Type<TypeName>,
     },
+    /// Wrapper marking a SOAC as parallelized at the entry boundary. The
+    /// `egir::parallelize` pass tags a planned compute entry's tail SOAC
+    /// with this; `soac_expand` dispatches to a parallel builder (e.g.
+    /// `build_parallel_map`) instead of the serial-loop builder, and
+    /// reads the entry's `ParallelizationPlan` to pick dispatch / bindings.
+    /// Operand layout is identical to the inner variant's — soac_expand
+    /// peels the wrapper before consuming operands.
+    Parallel {
+        serial: Box<PendingSoac>,
+    },
 }
 
 /// Terminator using NodeIds for value references.

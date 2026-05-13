@@ -43,11 +43,15 @@ fn compile_via_egir(src: &str) -> Program {
         .expect("parallelize_soacs")
         .filter_reachable();
 
-    crate::EgirRaw(run(&tlc.tlc, PipelineDescriptor::default()).expect("egir::from_tlc conversion failed"))
-        .expand_soacs(true)
-        .optimize_skeleton()
-        .elaborate()
-        .ssa
+    let empty = std::collections::HashMap::new();
+    crate::EgirRaw(
+        run(&tlc.tlc, PipelineDescriptor::default(), &empty).expect("egir::from_tlc conversion failed"),
+    )
+    .parallelize(&empty)
+    .expand_soacs(true)
+    .optimize_skeleton()
+    .elaborate()
+    .ssa
 }
 
 use crate::ast::Span;

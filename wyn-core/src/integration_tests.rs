@@ -1791,3 +1791,114 @@ fn assert_spirv_call_arities_match(spirv_words: &[u32]) {
         }
     }
 }
+
+// =============================================================================
+// EGIR-side Map parallelization regression tests
+// =============================================================================
+
+/// A compute entry whose body is `map(f, xs)` should emit a kernel that
+/// loads `gl_GlobalInvocationID` (lane-indexed access) — not a serial
+/// driver loop over `0..N`.
+#[test]
+fn compute_map_loads_global_invocation_id() {
+    use rspirv::binary::parse_words;
+    use rspirv::dr::{Loader, Operand};
+    use rspirv::spirv::Op;
+    let src = r#"
+#[compute]
+entry sq(xs: []f32) []f32 = map(|x: f32| x * x, xs)
+"#;
+    let spirv = compile_to_spirv(src).expect("map compute compiles");
+
+    let mut loader = Loader::new();
+    parse_words(&spirv, &mut loader).expect("parse spirv");
+    let module = loader.module();
+
+    // Find the gl_GlobalInvocationID input variable's id from the
+    // EntryPoint interface (3rd-and-later operands of OpEntryPoint).
+    let entry = module.entry_points.iter().find(|i| {
+        if let Some(Operand::LiteralString(name)) = i.operands.get(2) { name == "sq" } else { false }
+    });
+    let entry = entry.expect("entry sq present");
+    let func_id = match entry.operands.get(1) {
+        Some(Operand::IdRef(id)) => *id,
+        _ => panic!("entry has function id"),
+    };
+
+    // gl_GlobalInvocationID is the Input variable decorated with
+    // BuiltIn GlobalInvocationId.
+    // OpDecorate operand layout: [target_id, Decoration, *literals].
+    // For BuiltIn the literal at operand 2 is the BuiltIn kind.
+    let gid_var = module
+        .annotations
+        .iter()
+        .find(|inst| {
+            inst.class.opcode == Op::Decorate
+                && matches!(
+                    inst.operands.get(2),
+                    Some(Operand::BuiltIn(rspirv::spirv::BuiltIn::GlobalInvocationId))
+                )
+        })
+        .and_then(|inst| match inst.operands.first() {
+            Some(Operand::IdRef(id)) => Some(*id),
+            _ => None,
+        })
+        .expect("gl_GlobalInvocationID decoration present");
+
+    // The entry function body must contain an OpLoad whose pointer is
+    // the gl_GlobalInvocationID variable.
+    let func = module
+        .functions
+        .iter()
+        .find(|f| f.def.as_ref().and_then(|d| d.result_id) == Some(func_id))
+        .expect("entry function present");
+    let loads_gid = func.blocks.iter().any(|b| {
+        b.instructions.iter().any(|inst| {
+            inst.class.opcode == Op::Load
+                && matches!(inst.operands.first(), Some(Operand::IdRef(id)) if *id == gid_var)
+        })
+    });
+    assert!(
+        loads_gid,
+        "compute Map entry must OpLoad gl_GlobalInvocationID; got serial loop instead"
+    );
+}
+
+/// A compute entry whose body is `map(f, xs)` should not contain an
+/// `OpLoopMerge` — the parallel kernel is a single guarded scalar
+/// branch. Inner function loops (e.g. raymarch) are not affected.
+#[test]
+fn compute_map_has_no_full_serial_loop() {
+    use rspirv::binary::parse_words;
+    use rspirv::dr::{Loader, Operand};
+    use rspirv::spirv::Op;
+    let src = r#"
+#[compute]
+entry sq(xs: []f32) []f32 = map(|x: f32| x * x, xs)
+"#;
+    let spirv = compile_to_spirv(src).expect("map compute compiles");
+
+    let mut loader = Loader::new();
+    parse_words(&spirv, &mut loader).expect("parse spirv");
+    let module = loader.module();
+
+    let entry = module
+        .entry_points
+        .iter()
+        .find(|i| matches!(i.operands.get(2), Some(Operand::LiteralString(n)) if n == "sq"));
+    let func_id = match entry.and_then(|i| i.operands.get(1)) {
+        Some(Operand::IdRef(id)) => *id,
+        _ => panic!("entry sq not found"),
+    };
+    let func = module
+        .functions
+        .iter()
+        .find(|f| f.def.as_ref().and_then(|d| d.result_id) == Some(func_id))
+        .expect("entry function present");
+    let has_loop_merge =
+        func.blocks.iter().any(|b| b.instructions.iter().any(|inst| inst.class.opcode == Op::LoopMerge));
+    assert!(
+        !has_loop_merge,
+        "compute Map entry must NOT contain OpLoopMerge — the parallel kernel is loop-free"
+    );
+}

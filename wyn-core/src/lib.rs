@@ -752,6 +752,7 @@ impl TlcGeneratedLambdasFolded {
             tlc,
             pipeline: pipeline_descriptor::PipelineDescriptor::default(),
             type_table,
+            plans: std::collections::HashMap::new(),
         })
     }
 
@@ -759,8 +760,14 @@ impl TlcGeneratedLambdasFolded {
     /// (`expand_soacs → [materialize →] optimize_skeleton → elaborate`)
     /// explicitly — materialize is the only optional pass and is required for
     /// SPIR-V but not GLSL.
-    pub fn to_egraph(self) -> std::result::Result<EgirRaw, ConvertError> {
-        egir::from_tlc::run(&self.0.tlc, pipeline_descriptor::PipelineDescriptor::default()).map(EgirRaw)
+    pub fn to_egraph(self) -> std::result::Result<EgirParallelized, ConvertError> {
+        let empty = std::collections::HashMap::new();
+        egir::from_tlc::run(
+            &self.0.tlc,
+            pipeline_descriptor::PipelineDescriptor::default(),
+            &empty,
+        )
+        .map(|inner| EgirRaw(inner).parallelize(&empty))
     }
 }
 
@@ -787,6 +794,7 @@ impl TlcSmallInlined {
             tlc: result.program,
             pipeline: result.pipeline,
             type_table,
+            plans: result.plans,
         }))
     }
 
@@ -798,6 +806,7 @@ impl TlcSmallInlined {
             tlc,
             pipeline: pipeline_descriptor::PipelineDescriptor::default(),
             type_table,
+            plans: std::collections::HashMap::new(),
         })
     }
 
@@ -805,8 +814,14 @@ impl TlcSmallInlined {
     /// (`expand_soacs → [materialize →] optimize_skeleton → elaborate`)
     /// explicitly — materialize is the only optional pass and is required for
     /// SPIR-V but not GLSL.
-    pub fn to_egraph(self) -> std::result::Result<EgirRaw, ConvertError> {
-        egir::from_tlc::run(&self.0.tlc, pipeline_descriptor::PipelineDescriptor::default()).map(EgirRaw)
+    pub fn to_egraph(self) -> std::result::Result<EgirParallelized, ConvertError> {
+        let empty = std::collections::HashMap::new();
+        egir::from_tlc::run(
+            &self.0.tlc,
+            pipeline_descriptor::PipelineDescriptor::default(),
+            &empty,
+        )
+        .map(|inner| EgirRaw(inner).parallelize(&empty))
     }
 }
 
@@ -816,6 +831,11 @@ pub struct TlcPipelineInner {
     pub tlc: tlc::Program,
     pub pipeline: pipeline_descriptor::PipelineDescriptor,
     pub type_table: TypeTable,
+    /// Compiler-internal per-entry parallelization plans for EGIR to
+    /// consume. Empty for the `disable=true` fast path and for entries
+    /// whose strategies haven't migrated to EGIR-side lowering yet
+    /// (reduce / scan / redomap today). Keyed by entry surface name.
+    pub plans: std::collections::HashMap<String, tlc::parallelize::ParallelizationPlan>,
 }
 
 /// TLC after SOAC parallelization
@@ -836,9 +856,11 @@ impl TlcParallelized {
         TlcReachable(inner)
     }
 
-    pub fn to_egraph(self) -> std::result::Result<EgirRaw, ConvertError> {
-        let TlcPipelineInner { tlc, pipeline, .. } = self.0;
-        egir::from_tlc::run(&tlc, pipeline).map(EgirRaw)
+    pub fn to_egraph(self) -> std::result::Result<EgirParallelized, ConvertError> {
+        let TlcPipelineInner {
+            tlc, pipeline, plans, ..
+        } = self.0;
+        egir::from_tlc::run(&tlc, pipeline, &plans).map(|inner| EgirRaw(inner).parallelize(&plans))
     }
 }
 
@@ -854,9 +876,11 @@ impl std::ops::Deref for TlcReachable {
 }
 
 impl TlcReachable {
-    pub fn to_egraph(self) -> std::result::Result<EgirRaw, ConvertError> {
-        let TlcPipelineInner { tlc, pipeline, .. } = self.0;
-        egir::from_tlc::run(&tlc, pipeline).map(EgirRaw)
+    pub fn to_egraph(self) -> std::result::Result<EgirParallelized, ConvertError> {
+        let TlcPipelineInner {
+            tlc, pipeline, plans, ..
+        } = self.0;
+        egir::from_tlc::run(&tlc, pipeline, &plans).map(|inner| EgirRaw(inner).parallelize(&plans))
     }
 }
 
@@ -872,6 +896,12 @@ impl TlcReachable {
 /// Raw EGIR program, directly produced by TLC → EGIR conversion.
 pub struct EgirRaw(EgirInner);
 
+/// EGIR after compute-entry SOAC parallelization tagging. Tail SOACs on
+/// planned compute entries are wrapped in `PendingSoac::Parallel` so
+/// `soac_expand` dispatches to the lane-indexed builder. A no-op when
+/// the plan map is empty (graphics-only programs, `disable=true`, etc.).
+pub struct EgirParallelized(EgirInner);
+
 /// EGIR after SOAC lowering: every `PendingSoac::{Map, Scan, Reduce, …}` in
 /// the skeleton has been expanded to explicit loops / unrolled code.
 pub struct EgirSoacExpanded(EgirInner);
@@ -884,11 +914,26 @@ pub struct EgirMaterialized(EgirInner);
 pub struct EgirSkelOptimized(EgirInner);
 
 impl EgirRaw {
+    /// EGIR-side SOAC parallelization. Consumes `plans` from TLC analysis
+    /// and tags each planned compute entry's tail SOAC for lane-indexed
+    /// lowering downstream. Always called before `expand_soacs` — see the
+    /// SOAC Parallelization Boundary section in the README.
+    pub fn parallelize(
+        self,
+        plans: &std::collections::HashMap<String, tlc::parallelize::ParallelizationPlan>,
+    ) -> EgirParallelized {
+        let EgirRaw(mut inner) = self;
+        egir::parallelize::run(&mut inner, plans);
+        EgirParallelized(inner)
+    }
+}
+
+impl EgirParallelized {
     /// `unroll_maps`: whether to unroll small-constant-length Maps into
     /// straight-line code. Typically `true` for SPIR-V and `false` for GLSL
     /// (where drivers unroll themselves and the structurizer prefers loops).
     pub fn expand_soacs(self, unroll_maps: bool) -> EgirSoacExpanded {
-        let EgirRaw(mut inner) = self;
+        let EgirParallelized(mut inner) = self;
         egir::soac_expand::run(&mut inner, unroll_maps);
         EgirSoacExpanded(inner)
     }

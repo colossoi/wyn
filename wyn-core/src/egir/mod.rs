@@ -20,3 +20,4 @@ pub(crate) mod soac_expand;
 pub mod types;
 
 pub mod from_tlc;
+pub mod parallelize;

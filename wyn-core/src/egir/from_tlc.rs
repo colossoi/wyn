@@ -72,7 +72,11 @@ impl std::error::Error for ConvertError {}
 /// point becomes a per-body `EGraph` + metadata, waiting for the caller to
 /// chain the pipeline (`expand_soacs → [materialize →] optimize_skeleton →
 /// elaborate`).
-pub fn run(program: &TlcProgram, mut pipeline: PipelineDescriptor) -> Result<EgirInner, ConvertError> {
+pub fn run(
+    program: &TlcProgram,
+    mut pipeline: PipelineDescriptor,
+    plans: &HashMap<String, crate::tlc::parallelize::ParallelizationPlan>,
+) -> Result<EgirInner, ConvertError> {
     let top_level: HashMap<SymbolId, &TlcDef> = program.defs.iter().map(|d| (d.name, d)).collect();
     let symbols = &program.symbols;
 
@@ -137,6 +141,18 @@ pub fn run(program: &TlcProgram, mut pipeline: PipelineDescriptor) -> Result<Egi
             }
             DefMeta::EntryPoint(entry) => {
                 let workgroup = lookup_workgroup_size(&pipeline, &entry.name);
+                // If TLC parallelize reserved a specific output binding
+                // for this entry, honor it; otherwise auto-allocate.
+                let forced_output_binding = plans.get(&entry.name).and_then(|p| {
+                    use crate::tlc::parallelize::PlannedBindings;
+                    match &p.bindings {
+                        PlannedBindings::Map { output } => *output,
+                        // Reduce/Scan/Redomap haven't migrated yet — they
+                        // still come through the old TLC path with their
+                        // own bindings, so don't override.
+                        _ => None,
+                    }
+                });
                 let ep = convert_entry_point(
                     def,
                     entry,
@@ -145,6 +161,7 @@ pub fn run(program: &TlcProgram, mut pipeline: PipelineDescriptor) -> Result<Egi
                     symbols,
                     &pure_constant_names,
                     workgroup,
+                    forced_output_binding,
                 )?;
                 entry_points.push(ep);
             }
@@ -159,6 +176,9 @@ pub fn run(program: &TlcProgram, mut pipeline: PipelineDescriptor) -> Result<Egi
     // compiler injected.
     enrich_pipeline_with_auto_bindings(&mut pipeline, &entry_points);
 
+    // `plans` is consumed inline above (output-binding routing); the
+    // EGIR-side parallelization pass runs as a separate typestate stage
+    // on `EgirRaw` — see `lib::EgirRaw::parallelize`.
     Ok(EgirInner::new(
         functions,
         externs,
@@ -348,6 +368,7 @@ fn convert_entry_point(
     symbols: &SymbolTable,
     pure_constants: &HashSet<String>,
     workgroup: (u32, u32, u32),
+    forced_output_binding: Option<(u32, u32)>,
 ) -> Result<EgirEntry, ConvertError> {
     use crate::ssa::types::{EntryInput, ExecutionModel, IoDecoration};
 
@@ -458,7 +479,13 @@ fn convert_entry_point(
         _ => panic!("Invalid entry type attribute: {:?}", entry.entry_type),
     };
 
-    let outputs = build_entry_outputs(entry, &inner_body.ty, is_compute, binding_num);
+    let outputs = build_entry_outputs(
+        entry,
+        &inner_body.ty,
+        is_compute,
+        binding_num,
+        forced_output_binding,
+    );
     let is_unit_return = matches!(ret_type, Type::Constructed(TypeName::Unit, _));
 
     // Pre-create the output StorageView for compute+storage-output entries so
@@ -2088,11 +2115,19 @@ fn build_entry_outputs(
     ret_type: &Type<TypeName>,
     is_compute: bool,
     binding_start: u32,
+    forced_output_binding: Option<(u32, u32)>,
 ) -> Vec<EntryOutput> {
     use EntryOutput;
     let mut binding_num = binding_start;
+    let mut forced_remaining = forced_output_binding;
     let mut storage_binding_for = |ty: &Type<TypeName>, is_compute: bool| -> Option<(u32, u32)> {
         if is_compute && !matches!(ty, Type::Constructed(TypeName::Unit, _)) {
+            // Honor the planned binding for the first storage output if
+            // present; subsequent outputs (tuple-return entries) keep
+            // auto-allocating.
+            if let Some(b) = forced_remaining.take() {
+                return Some(b);
+            }
             let b = (AUTO_STORAGE_SET, binding_num);
             binding_num += 1;
             Some(b)

@@ -34,6 +34,12 @@ pub enum ArrayProvenance {
     },
     /// From a range/iota.
     Range,
+    /// Anything else (entry-param array vars, SoA-tuple references, etc.).
+    /// TLC analysis can't pin down `(set, binding)` for these, but EGIR
+    /// can — the from_tlc / soac_expand machinery already handles
+    /// `Ref(Var(sym))` and `as_soa_tuple` shapes correctly. Used only
+    /// for Map (today); reduce/scan still demand Storage/Range.
+    Opaque,
 }
 
 /// A parallelizable SOAC found in a compute entry point.
@@ -344,9 +350,9 @@ fn analyze_soac(
             inputs,
             consumes_input,
         } => {
-            for input in inputs {
-                classify_input(input)?;
-            }
+            // Map is migrated to the EGIR-side lowering path, which
+            // rediscovers input shapes natively (storage buffers, SoA
+            // tuples, ranges, view refs). No TLC-side input gate needed.
             SoacOp::Map {
                 lam: lam.clone(),
                 inputs: inputs.clone(),
@@ -389,9 +395,16 @@ fn analyze_soac(
     };
 
     // Re-derive provenances from the normalized inputs. `soac_inputs`
-    // is the single source of truth for "what are the inputs".
-    let provenances: Vec<ArrayProvenance> =
-        soac_inputs(&normalized).iter().map(|ae| classify_input(ae)).collect::<Option<Vec<_>>>()?;
+    // is the single source of truth for "what are the inputs". Map
+    // inputs that don't classify (e.g. `Ref(Var(tuple_sym))` for SoA
+    // tuple entry params) fall back to `Opaque` — the EGIR lowering
+    // path rediscovers their concrete shape. Reduce/Scan/Redomap reject
+    // such inputs at their own gates above; reaching this loop with
+    // Opaque can only happen for Map.
+    let provenances: Vec<ArrayProvenance> = soac_inputs(&normalized)
+        .iter()
+        .map(|ae| classify_input(ae).unwrap_or(ArrayProvenance::Opaque))
+        .collect();
     Some(SoacAnalysis {
         original: normalized,
         provenances,
@@ -568,6 +581,76 @@ fn pattern_binds_view_array(p: &crate::ast::Pattern) -> bool {
 pub struct ParallelizationResult {
     pub program: Program,
     pub pipeline: PipelineDescriptor,
+    /// Compiler-internal per-entry plans for EGIR to consume. Keyed by the
+    /// entry's surface name (matches `egir::EgirEntry::name`). Empty for
+    /// graphics entries, non-parallelized compute entries, and (today)
+    /// reduce/redomap/scan entries — those still lower through the old
+    /// TLC path. Map planning is the only strategy populated until the
+    /// EGIR migration broadens.
+    pub plans: HashMap<String, ParallelizationPlan>,
+}
+
+/// Per-entry, compiler-internal description of how EGIR should lower a
+/// parallelized SOAC. The plan stays declarative: it picks a strategy,
+/// declares the dispatch shape, and reserves binding numbers. It does
+/// not encode element access — EGIR rediscovers the SOAC's inputs,
+/// captures, lambda, and output view from the entry body itself.
+#[derive(Debug, Clone)]
+pub struct ParallelizationPlan {
+    /// Entry surface name; matches `egir::EgirEntry::name`.
+    pub entry: String,
+    pub strategy: ParallelStrategy,
+    pub dispatch: DispatchModel,
+    pub bindings: PlannedBindings,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParallelStrategy {
+    Map,
+    Reduce,
+    Redomap,
+    Scan,
+}
+
+/// Dispatch shape from the strategy + sizing. Carried explicitly so
+/// the host pipeline descriptor, the planning record, and the generated
+/// kernel can be verified to agree.
+#[derive(Debug, Clone, Copy)]
+pub enum DispatchModel {
+    /// Host computes `ceil(N / workgroup_size)` groups at submit time,
+    /// where `N` is the length of the SOAC's `input_index`th input.
+    DerivedFromInputLength {
+        input_index: usize,
+        workgroup_size: u32,
+    },
+    /// Fixed group + local size. Used by reduce/scan combine phases.
+    Fixed {
+        groups: [u32; 3],
+        local_size: [u32; 3],
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum PlannedBindings {
+    Map {
+        /// `None` means TLC defers to EGIR's `build_entry_outputs` for
+        /// the result binding. For first-cut Map we always defer; future
+        /// migrations may reserve specific bindings here.
+        output: Option<(u32, u32)>,
+    },
+    Reduce {
+        partials: (u32, u32),
+        result: (u32, u32),
+    },
+    Redomap {
+        partials: (u32, u32),
+        result: (u32, u32),
+    },
+    Scan {
+        output: (u32, u32),
+        block_sums: (u32, u32),
+        block_offsets: (u32, u32),
+    },
 }
 
 // =============================================================================
@@ -960,7 +1043,11 @@ fn build_prepass_def(
 pub fn run(mut program: Program, disable: bool) -> crate::error::Result<ParallelizationResult> {
     if disable {
         let pipeline = build_default_pipeline(&program);
-        return Ok(ParallelizationResult { program, pipeline });
+        return Ok(ParallelizationResult {
+            program,
+            pipeline,
+            plans: HashMap::new(),
+        });
     }
 
     // Track max binding across every `(set, binding)` the program already
@@ -990,12 +1077,17 @@ pub fn run(mut program: Program, disable: bool) -> crate::error::Result<Parallel
 
     if analyses.is_empty() {
         let pipeline = build_default_pipeline(&program);
-        return Ok(ParallelizationResult { program, pipeline });
+        return Ok(ParallelizationResult {
+            program,
+            pipeline,
+            plans: HashMap::new(),
+        });
     }
 
     let mut pipelines = Vec::new();
     let mut new_defs = Vec::new();
     let mut removed_entries: Vec<SymbolId> = Vec::new();
+    let mut plans: HashMap<String, ParallelizationPlan> = HashMap::new();
 
     // Default pipelines for non-parallelized compute entries.
     for def in &program.defs {
@@ -1031,6 +1123,9 @@ pub fn run(mut program: Program, disable: bool) -> crate::error::Result<Parallel
         }
         new_defs.extend(plan.new_defs);
         pipelines.push(plan.pipeline);
+        if let Some(parallel_plan) = plan.parallel_plan {
+            plans.insert(parallel_plan.entry.clone(), parallel_plan);
+        }
     }
 
     // Graphics pipelines.
@@ -1062,6 +1157,7 @@ pub fn run(mut program: Program, disable: bool) -> crate::error::Result<Parallel
     Ok(ParallelizationResult {
         program,
         pipeline: PipelineDescriptor { pipelines },
+        plans,
     })
 }
 
@@ -1074,6 +1170,10 @@ struct LoweringPlan {
     new_defs: Vec<Def>,
     pipeline: Pipeline,
     extra_bindings_used: u32,
+    /// EGIR-bound parallelization plan, if this strategy migrated to the
+    /// EGIR-side path. Populated for Map today; None for reduce / scan /
+    /// redomap (still TLC-lowered until their EGIR migration).
+    parallel_plan: Option<ParallelizationPlan>,
 }
 
 fn make_lowering_plan(
@@ -1085,7 +1185,7 @@ fn make_lowering_plan(
 ) -> LoweringPlan {
     let sizing = PipelineSizing::for_analyzed_entry(program, analysis);
     match &analysis.soac.original {
-        SoacOp::Map { .. } => make_map_plan(analysis, entry_name, sizing),
+        SoacOp::Map { .. } => make_map_plan(analysis, entry_name, next_binding, program, sizing),
         SoacOp::Reduce { op, ne, .. } => make_two_phase_plan(
             analysis,
             entry_name,
@@ -1113,22 +1213,51 @@ fn make_lowering_plan(
     }
 }
 
-fn make_map_plan(analysis: &EntryAnalysis, entry_name: &str, sizing: PipelineSizing) -> LoweringPlan {
-    let input_bindings = collect_soac_bindings(&analysis.soac);
+fn make_map_plan(
+    analysis: &EntryAnalysis,
+    entry_name: &str,
+    _next_binding: u32,
+    program: &Program,
+    sizing: PipelineSizing,
+) -> LoweringPlan {
+    // Plan: don't pre-allocate the output binding. The EGIR side already
+    // auto-allocates it via `build_entry_outputs` and walks the entry's
+    // params to lay out input bindings; predicting either at TLC requires
+    // mirroring buffer_specialize + from_tlc layout logic. The plan just
+    // tags the entry as a parallel Map; the pipeline descriptor's binding
+    // list gets enriched post-EGIR by `enrich_pipeline_with_auto_bindings`
+    // (see `from_tlc.rs:164`).
+    //
+    // Seed the descriptor with uniforms/storage from `program.uniforms`
+    // and `program.storage`. They aren't claimed by the SOAC's inputs
+    // but the shader still references them (captured-by-name) and
+    // `enrich_pipeline_with_auto_bindings` only fills storage buffers.
+    let mut bindings = collect_program_resource_bindings(program);
+    bindings.extend(collect_soac_bindings(&analysis.soac));
     let pipeline = Pipeline::Compute(ComputePipeline {
         entry_point: entry_name.to_string(),
         workgroup_size: sizing.workgroup,
         dispatch_size: DispatchSize::DerivedFromInputLength {
             workgroup_size: sizing.workgroup.0,
         },
-        bindings: input_bindings,
+        bindings,
         default_total_threads: sizing.default_total_threads,
     });
+    let parallel_plan = ParallelizationPlan {
+        entry: entry_name.to_string(),
+        strategy: ParallelStrategy::Map,
+        dispatch: DispatchModel::DerivedFromInputLength {
+            input_index: 0,
+            workgroup_size: sizing.workgroup.0,
+        },
+        bindings: PlannedBindings::Map { output: None },
+    };
     LoweringPlan {
         removed_entry: None,
         new_defs: Vec::new(),
         pipeline,
         extra_bindings_used: 0,
+        parallel_plan: Some(parallel_plan),
     }
 }
 
@@ -1172,6 +1301,7 @@ fn make_two_phase_plan(
         new_defs: entries,
         pipeline,
         extra_bindings_used: extra_used,
+        parallel_plan: None,
     }
 }
 
@@ -1205,6 +1335,7 @@ fn make_scan_plan(
         new_defs: entries,
         pipeline,
         extra_bindings_used: 3,
+        parallel_plan: None,
     }
 }
 
