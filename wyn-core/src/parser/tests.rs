@@ -952,6 +952,31 @@ fn test_parse_array_literal() {
 }
 
 #[test]
+fn test_parse_array_literal_trailing_comma() {
+    let tokens = tokenize("[1, 2, 3,]").expect("Failed to tokenize");
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
+    let expr = parser.parse_expression().expect("Failed to parse array literal with trailing comma");
+    match &expr.kind {
+        ExprKind::ArrayLiteral(elems) => assert_eq!(elems.len(), 3),
+        other => panic!("Expected ArrayLiteral, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_array_literal_rejects_junk_before_bracket() {
+    // The trailing-comma allowance must not let arbitrary tokens
+    // slip between the last element and the closing `]`.
+    let tokens = tokenize("[1, 2, 3 f]").expect("Failed to tokenize");
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
+    assert!(
+        parser.parse_expression().is_err(),
+        "Expected parse error for `[1, 2, 3 f]`",
+    );
+}
+
+#[test]
 fn test_parse_attributed_return_type() {
     let entry = single_entry(
         r#"#[vertex]
@@ -2568,6 +2593,30 @@ fn test_parse_vector_literal_simple() {
         }
         other => panic!("Expected VecMatLiteral, got {:?}", other),
     }
+}
+
+#[test]
+fn test_parse_vector_literal_trailing_comma() {
+    let tokens = tokenize("@[1.0f32, 2.0f32, 3.0f32,]").expect("Failed to tokenize");
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
+    let expr = parser.parse_expression().expect("Failed to parse vector literal with trailing comma");
+    match &expr.kind {
+        ExprKind::VecMatLiteral(elems) => assert_eq!(elems.len(), 3),
+        other => panic!("Expected VecMatLiteral, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_vector_literal_rejects_junk_before_bracket() {
+    // Trailing-comma allowance must not let arbitrary tokens through.
+    let tokens = tokenize("@[1, 2, 3 f]").expect("Failed to tokenize");
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
+    assert!(
+        parser.parse_expression().is_err(),
+        "Expected parse error for `@[1, 2, 3 f]`",
+    );
 }
 
 #[test]

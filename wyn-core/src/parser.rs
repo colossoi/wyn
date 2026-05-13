@@ -2263,6 +2263,10 @@ impl<'a> Parser<'a> {
                     break;
                 }
                 self.advance();
+                // Allow trailing comma before `]`.
+                if self.check(&Token::RightBracket) {
+                    break;
+                }
             }
         }
 
@@ -2288,6 +2292,10 @@ impl<'a> Parser<'a> {
                     break;
                 }
                 self.advance();
+                // Allow trailing comma before `]`.
+                if self.check(&Token::RightBracket) {
+                    break;
+                }
             }
         }
 
