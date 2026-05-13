@@ -1,18 +1,27 @@
 -- "Filter constellation"
 --
--- 12 candidate points placed evenly around a circle. A time-varying
--- predicate decides which are "alive" each frame (phase-staggered
--- sine gate), and `filter(...)` produces a Bounded array of the
--- active indices. We then sample two indices out of the filtered
--- result — the first and (one past) the middle — to position two
--- glow centers, and use `length(active)` (the runtime count) to
--- modulate overall brightness.
+-- 12 candidate points sit evenly around a circle. Each one glows
+-- with intensity `max(sin(phase), 0)` — phases are staggered by index
+-- so the ring fades in and out continuously rather than blinking.
 --
--- Exercises the new `ArrayVariantBounded` array variant end-to-end:
---   * filter result observed via `length(...)` (member-1 extract)
---   * filter result indexed via `active[k]` (member-0 access)
---   * Bounded values flow into pure arithmetic alongside non-Bounded
---     i32s without coercion drama.
+-- A `filter` over the same phases (threshold > 0.5) produces a
+-- Bounded array of the currently-bright points. Its `length(...)` —
+-- read off member 1 of the Bounded struct — drives two visible
+-- non-positional features: the radius of a central halo and a hue
+-- offset on the cosine palette. Filter is load-bearing (you can't
+-- compute either feature without it) but never used to *position*
+-- anything, so points never teleport.
+--
+-- Per-point glow uses `map + reduce` over the candidate id array;
+-- fuse_maps lowers that pair into a single redomap loop.
+--
+-- TODO: the natural form would be `reduce(g, init, map(f, active))`
+-- using the filter result as the map source — fusion would collapse
+-- it to a single Bounded-iterating loop. Today fuse_maps doesn't
+-- fire across a filter binding, and map's output type doesn't carry
+-- the Bounded variant through, so the intermediate `[Skolem]f32`
+-- array reaches the backend and SPIR-V refuses it. That's the next
+-- step for the filter feature.
 
 open f32
 
@@ -36,10 +45,12 @@ entry vertex_main(#[builtin(vertex_index)] vid: i32)
 ------------------------------------------------------------
 def candidate_ids: [12]i32 = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
 
--- Polar position of candidate `i`, inscribed on a 0.65-radius circle.
 def angle_of(i: i32) f32 = 6.28318 / 12.0 * f32.i32(i)
 def point_of(i: i32) vec2f32 =
   @[0.65 * cos(angle_of(i)), 0.65 * sin(angle_of(i))]
+
+-- Same phase the filter predicate uses, so the two stay in sync.
+def phase_of(i: i32) f32 = sin(iTime * 0.9 + f32.i32(i) * 0.523)
 
 ------------------------------------------------------------
 -- Iñigo Quilez cosine palette.
@@ -59,30 +70,28 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32)
   let aspect = iResolution.x / iResolution.y in
   let uv     = @[(uv01.x * 2.0 - 1.0) * aspect, uv01.y * 2.0 - 1.0] in
 
-  -- Predicate captures `iTime`. Each candidate has its own phase
-  -- offset so the 12 points blink on and off at staggered intervals.
-  let active = filter(|i: i32|
-                        sin(iTime * 0.9 + f32.i32(i) * 0.523) > 0.0,
-                      candidate_ids) in
+  -- Continuous glow contribution from each candidate, summed.
+  -- map+reduce over candidate_ids fuses into a single redomap loop.
+  let glows  = map(|i: i32|
+                     let p         = phase_of(i) in
+                     let intensity = if p > 0.0 then p else 0.0 in
+                     let d         = magnitude(uv - point_of(i)) in
+                     intensity / (40.0 * d * d + 0.22),
+                   candidate_ids) in
+  let glow   = reduce(|a: f32, b: f32| a + b, 0.0, glows) in
 
+  -- Filter: which candidates are above the 0.5 threshold *right now*.
+  -- Drives the central halo's radius and the palette hue offset.
+  let active = filter(|i: i32| phase_of(i) > 0.5, candidate_ids) in
   let n      = length(active) in
-  let n_f    = f32.i32(n) in
-  let pulse  = n_f / 12.0 in
+  let pulse  = f32.i32(n) / 12.0 in
 
-  -- Two glow centers picked out of the filtered list. Guarded against
-  -- the all-dead frame with `if n > 0 ...` so we never read past the
-  -- valid prefix of the buffer.
-  let id_a   = if n > 0 then active[0]     else 0 in
-  let id_b   = if n > 1 then active[n / 2] else id_a in
-  let pa     = point_of(id_a) in
-  let pb     = point_of(id_b) in
+  -- Central halo: thin ring whose radius grows with the active count.
+  let r           = magnitude(uv) in
+  let halo_radius = 0.18 + 0.55 * pulse in
+  let halo_band   = halo_radius - r in
+  let halo        = 0.04 / (200.0 * halo_band * halo_band + 0.7) in
 
-  let da     = magnitude(uv - pa) in
-  let db     = magnitude(uv - pb) in
-  let glow_a = pulse / (32.0 * da * da + 0.18) in
-  let glow_b = pulse / (32.0 * db * db + 0.18) in
-  let glow   = glow_a + 0.55 * glow_b in
-
-  -- Hue cycles with the count, so the screen color tracks "how busy".
-  let tint   = palette(pulse + iTime * 0.07) in
-  @[tint.x * glow, tint.y * glow, tint.z * glow, 1.0]
+  let tint   = palette(pulse * 0.5 + iTime * 0.06) in
+  let bright = glow + halo in
+  @[tint.x * bright, tint.y * bright, tint.z * bright, 1.0]

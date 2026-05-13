@@ -830,6 +830,35 @@ entry main(x: []f32) [4]f32 = f(x[0])
     );
 }
 
+/// Regression: `lift_graphical_invariant_soacs` used to look only at the
+/// direct free vars of a candidate SOAC for entry-param refs. A
+/// fragment-shader-local `let uv = fragCoord.x` introduces `uv` as a
+/// fresh symbol that's *not* an entry param but transitively depends on
+/// one. A reduce/redomap whose body reads `uv` would then be wrongly
+/// classified as graphical-invariant and hoisted into a compute prepass
+/// that references `@uv` as an unbound global — SPIR-V codegen panics
+/// with `Unknown global: uv`. The check needs to follow let bindings
+/// transitively.
+#[test]
+fn test_no_overhoist_redomap_through_let_bound_dependency() {
+    let source = r#"
+def cands: [12]i32 = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+
+#[fragment]
+entry fragment_main(#[builtin(position)] fragCoord: vec4f32)
+  #[location(0)] vec4f32 =
+  let uv = fragCoord.x in
+  let glows = map(|i: i32| uv + f32.i32(i), cands) in
+  let total = reduce(|a: f32, b: f32| a + b, 0.0, glows) in
+  @[total, 0.0, 0.0, 1.0]
+"#;
+    compile_to_spirv(source).expect(
+        "redomap whose body reads a let-bound local that transitively \
+         depends on an entry param must remain in the fragment shader; \
+         the lift pass must not classify it as graphical-invariant",
+    );
+}
+
 // =============================================================================
 // Materialization Optimization
 // =============================================================================

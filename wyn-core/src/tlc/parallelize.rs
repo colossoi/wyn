@@ -624,10 +624,14 @@ fn lift_graphical_invariant_soacs(
 
         let body = program.defs[idx].body.clone();
         let mut added_decls: Vec<interface::StorageBindingDecl> = Vec::new();
+        // Compute the *transitive* set of symbols that depend on entry
+        // params. The lift pass should not hoist any SOAC whose free
+        // vars intersect this set — they're per-invocation values.
+        let tainted = compute_taint_set(&body, &entry_params, &program.symbols);
         let new_body = lift_in_term(
             body,
             &entry_name,
-            &entry_params,
+            &tainted,
             next_binding,
             &mut added_decls,
             &mut new_defs,
@@ -817,7 +821,39 @@ fn maybe_hoist(
     )
 }
 
-/// True if `term` has any free SymbolId that names an entry param.
+/// Compute the *transitive* taint set of symbols that depend on entry
+/// params. Starts from `entry_params` and grows by walking the body's
+/// `Let` chain in source order: a let-bound symbol joins the set iff
+/// its RHS has any free var already in the set. Stops descending once
+/// the term is no longer a Lambda or Let — the tail isn't a hoist
+/// site, so taint propagation past it doesn't matter.
+fn compute_taint_set(
+    term: &Term,
+    entry_params: &std::collections::HashSet<SymbolId>,
+    symbols: &SymbolTable,
+) -> std::collections::HashSet<SymbolId> {
+    let mut tainted = entry_params.clone();
+    walk_taint(term, &mut tainted, symbols);
+    tainted
+}
+
+fn walk_taint(term: &Term, tainted: &mut std::collections::HashSet<SymbolId>, symbols: &SymbolTable) {
+    match &term.kind {
+        TermKind::Lambda(lam) => {
+            walk_taint(&lam.body, tainted, symbols);
+        }
+        TermKind::Let { name, rhs, body, .. } => {
+            if rhs_references_entry_param(rhs, tainted, symbols) {
+                tainted.insert(*name);
+            }
+            walk_taint(body, tainted, symbols);
+        }
+        _ => {}
+    }
+}
+
+/// True if `term` has any free SymbolId that's in the given taint set
+/// (entry params plus everything transitively derived from them).
 /// Uses `closure_convert::collect_free_vars` with empty
 /// `top_level`/`known_defs` sets (same style as
 /// `compute_required_params`).
