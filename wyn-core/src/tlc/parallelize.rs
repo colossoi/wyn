@@ -376,17 +376,12 @@ fn analyze_soac(
             reduce_op,
             ne,
             inputs,
-        } => {
-            for input in inputs {
-                classify_input(input)?;
-            }
-            SoacOp::Redomap {
-                op: op.clone(),
-                reduce_op: reduce_op.clone(),
-                ne: ne.clone(),
-                inputs: inputs.clone(),
-            }
-        }
+        } => SoacOp::Redomap {
+            op: op.clone(),
+            reduce_op: reduce_op.clone(),
+            ne: ne.clone(),
+            inputs: inputs.clone(),
+        },
         SoacOp::Scan { op, ne, input } => {
             classify_input(input)?;
             SoacOp::Scan {
@@ -1292,10 +1287,32 @@ fn make_two_phase_plan(
     };
     let elem_type = analysis.soac.result_elem_type();
 
-    let egir_native = forced_result_binding.is_none()
-        && matches!(&analysis.soac.original, SoacOp::Reduce { .. })
-        && reduce_op.captures.is_empty()
-        && is_simple_constant_term(ne);
+    // Reduce / Redomap both qualify for the EGIR-side migration when
+    // their combiner has no captures and the result is a scalar (for
+    // tuple results, `emit_compute_output_stores` emits per-component
+    // Stores that phase1's `find_store_of` doesn't yet locate).
+    // Reduce additionally requires a scalar-literal NE (phase2 re-emits
+    // via `intern_constant`); Redomap clones the NE subgraph at EGIR,
+    // so any pure NE works.
+    let scalar_result = matches!(
+        &elem_type,
+        Type::Constructed(TypeName::Int(_), _)
+            | Type::Constructed(TypeName::UInt(_), _)
+            | Type::Constructed(TypeName::Float(_), _)
+            | Type::Constructed(TypeName::Bool, _),
+    );
+    let (strategy, can_route) = match &analysis.soac.original {
+        SoacOp::Reduce { .. } => (
+            ParallelStrategy::Reduce,
+            scalar_result && reduce_op.captures.is_empty() && is_simple_constant_term(ne),
+        ),
+        SoacOp::Redomap { .. } => (
+            ParallelStrategy::Redomap,
+            scalar_result && reduce_op.captures.is_empty(),
+        ),
+        _ => (ParallelStrategy::Reduce, false),
+    };
+    let egir_native = forced_result_binding.is_none() && can_route;
 
     if egir_native {
         // `from_tlc::convert_entry_point` allocates one auto-storage
@@ -1313,17 +1330,24 @@ fn make_two_phase_plan(
             result_binding,
             sizing,
         );
+        let bindings = match strategy {
+            ParallelStrategy::Redomap => PlannedBindings::Redomap {
+                partials: partials_binding,
+                result: result_binding,
+            },
+            _ => PlannedBindings::Reduce {
+                partials: partials_binding,
+                result: result_binding,
+            },
+        };
         let parallel_plan = ParallelizationPlan {
             entry: entry_name.to_string(),
-            strategy: ParallelStrategy::Reduce,
+            strategy,
             dispatch: DispatchModel::Fixed {
                 groups: [1, 1, 1],
                 local_size: [sizing.workgroup.0, sizing.workgroup.1, sizing.workgroup.2],
             },
-            bindings: PlannedBindings::Reduce {
-                partials: partials_binding,
-                result: result_binding,
-            },
+            bindings,
         };
         return LoweringPlan {
             removed_entry: None,

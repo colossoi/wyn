@@ -205,22 +205,24 @@ fn enrich_pipeline_with_auto_bindings(pipeline: &mut PipelineDescriptor, entries
             continue;
         }
 
-        // Find the matching ComputePipeline. MultiCompute pipelines
-        // already carry their full binding list from parallelize and
-        // don't need enrichment.
-        let cp = pipeline.pipelines.iter_mut().find_map(|p| match p {
-            Pipeline::Compute(cp) if cp.entry_point == entry.name => Some(cp),
-            _ => None,
-        });
-        let Some(cp) = cp else {
-            continue;
+        // Find the bindings list backing this entry: a single-stage
+        // `Compute` matched by entry_point, or any stage of a
+        // `MultiCompute`. MultiCompute's bindings are shared across
+        // its stages, so enriching once handles both phases of a
+        // parallel reduce / redomap / scan.
+        let bindings: &mut Vec<Binding> = match pipeline.pipelines.iter_mut().find(|p| match p {
+            Pipeline::Compute(cp) => cp.entry_point == entry.name,
+            Pipeline::MultiCompute(mc) => mc.stages.iter().any(|s| s.entry_point == entry.name),
+            _ => false,
+        }) {
+            Some(Pipeline::Compute(cp)) => &mut cp.bindings,
+            Some(Pipeline::MultiCompute(mc)) => &mut mc.bindings,
+            _ => continue,
         };
 
-        // Snapshot existing (set, binding) keys so the appended
-        // entries don't duplicate slots that parallelize already
-        // surfaced.
-        let claimed: HashSet<(u32, u32)> = cp
-            .bindings
+        // Snapshot existing (set, binding) and push-constant offsets to
+        // skip what `parallelize` already surfaced.
+        let claimed: HashSet<(u32, u32)> = bindings
             .iter()
             .filter_map(|b| match b {
                 Binding::StorageBuffer { set, binding, .. } => Some((*set, *binding)),
@@ -228,21 +230,37 @@ fn enrich_pipeline_with_auto_bindings(pipeline: &mut PipelineDescriptor, entries
                 _ => None,
             })
             .collect();
+        let claimed_pc_offsets: HashSet<u32> = bindings
+            .iter()
+            .filter_map(|b| match b {
+                Binding::PushConstant { offset, .. } => Some(*offset),
+                _ => None,
+            })
+            .collect();
 
         for input in &entry.inputs {
-            let Some((set, binding)) = input.storage_binding else {
-                continue;
-            };
-            if claimed.contains(&(set, binding)) {
-                continue;
+            if let Some((set, binding)) = input.storage_binding {
+                if claimed.contains(&(set, binding)) {
+                    continue;
+                }
+                bindings.push(Binding::StorageBuffer {
+                    set,
+                    binding,
+                    access: Access::ReadOnly,
+                    usage: BufferUsage::Input,
+                    name: input.name.clone(),
+                });
+            } else if let Some(offset) = input.push_constant_offset {
+                if claimed_pc_offsets.contains(&offset) {
+                    continue;
+                }
+                let size = crate::ssa::layout::type_byte_size(&input.ty).unwrap_or(4) as u32;
+                bindings.push(Binding::PushConstant {
+                    offset,
+                    size,
+                    name: input.name.clone(),
+                });
             }
-            cp.bindings.push(Binding::StorageBuffer {
-                set,
-                binding,
-                access: Access::ReadOnly,
-                usage: BufferUsage::Input,
-                name: input.name.clone(),
-            });
         }
 
         for (i, output) in entry.outputs.iter().enumerate() {
@@ -260,7 +278,7 @@ fn enrich_pipeline_with_auto_bindings(pipeline: &mut PipelineDescriptor, entries
             } else {
                 format!("{}_output_{}", entry.name, i)
             };
-            cp.bindings.push(Binding::StorageBuffer {
+            bindings.push(Binding::StorageBuffer {
                 set,
                 binding,
                 access: Access::WriteOnly,

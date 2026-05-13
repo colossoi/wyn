@@ -117,6 +117,14 @@ impl EntryBuilder {
         Some(self.span)
     }
 
+    /// Direct mutable access to the underlying EGraph — used when a
+    /// caller needs `graph_ops` operations not yet wrapped on the
+    /// builder (e.g. `clone_pure_subgraph` for copying a Redomap
+    /// neutral-element subgraph across entries).
+    pub fn graph_mut(&mut self) -> &mut EGraph {
+        &mut self.graph
+    }
+
     pub fn emit_u32(&mut self, n: u32) -> NodeId {
         let span = self.span();
         graph_ops::intern_u32(&mut self.graph, n, span)

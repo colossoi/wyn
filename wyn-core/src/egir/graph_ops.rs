@@ -229,3 +229,70 @@ pub fn extract_storage_view_source(graph: &EGraph, view_nid: NodeId) -> Option<(
         _ => None,
     }
 }
+
+/// If `nid` is a `PureOp::ArrayRange`, return `(start, len, step?)`
+/// NodeIds. Otherwise `None`.
+pub fn extract_array_range_operands(
+    graph: &EGraph,
+    nid: NodeId,
+) -> Option<(NodeId, NodeId, Option<NodeId>)> {
+    match &graph.nodes[nid] {
+        ENode::Pure {
+            op: PureOp::ArrayRange { has_step },
+            operands,
+            ..
+        } => {
+            let step = if *has_step { Some(operands[2]) } else { None };
+            Some((operands[0], operands[1], step))
+        }
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cross-graph cloning
+// ---------------------------------------------------------------------------
+
+/// Recursively clone a pure subgraph rooted at `root` from `src` into
+/// `dst`, returning the new root `NodeId`. Used to copy a reduce's
+/// neutral element (or any pure value) from one entry's EGraph into
+/// another's — phase2 needs a fresh copy of phase1's NE since EGraph
+/// NodeIds don't cross entries.
+///
+/// Only pure nodes and constants are cloned; encountering a
+/// `SideEffectResult` or a `BlockParam` returns `Err` because those
+/// reference cross-block / cross-effect data that doesn't translate.
+pub fn clone_pure_subgraph(src: &EGraph, dst: &mut EGraph, root: NodeId) -> Result<NodeId, String> {
+    let mut memo: std::collections::HashMap<NodeId, NodeId> = std::collections::HashMap::new();
+    clone_inner(src, dst, root, &mut memo)
+}
+
+fn clone_inner(
+    src: &EGraph,
+    dst: &mut EGraph,
+    nid: NodeId,
+    memo: &mut std::collections::HashMap<NodeId, NodeId>,
+) -> Result<NodeId, String> {
+    if let Some(&existing) = memo.get(&nid) {
+        return Ok(existing);
+    }
+    let ty = src.types[&nid].clone();
+    let new_nid = match &src.nodes[nid] {
+        ENode::Constant(c) => dst.intern_constant(*c, ty),
+        ENode::Pure { op, operands, .. } => {
+            let new_ops: SmallVec<[NodeId; 4]> = operands
+                .iter()
+                .map(|&op_nid| clone_inner(src, dst, op_nid, memo))
+                .collect::<Result<_, _>>()?;
+            dst.intern_pure(op.clone(), new_ops, ty)
+        }
+        other => {
+            return Err(format!(
+                "clone_pure_subgraph: non-pure node {:?}",
+                std::mem::discriminant(other)
+            ));
+        }
+    };
+    memo.insert(nid, new_nid);
+    Ok(new_nid)
+}
