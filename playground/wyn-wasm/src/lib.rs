@@ -73,6 +73,7 @@ mod tlc_tree {
         let meta = match &def.meta {
             DefMeta::Function => "fn",
             DefMeta::EntryPoint(_) => "entry",
+            DefMeta::LiftedLambda => "lifted",
         };
         let label = format!("{} {} : {}", meta, def.name, fmt_ty(&def.ty));
         TreeNode::branch(label, vec![term_to_tree(&def.body)])
@@ -81,7 +82,7 @@ mod tlc_tree {
     fn term_to_tree(term: &Term) -> TreeNode {
         let ty = fmt_ty(&term.ty);
         match &term.kind {
-            TermKind::Var(crate::tlc::VarRef::Symbol(name)) => TreeNode::leaf(format!("Var({}) : {}", name, ty)),
+            TermKind::Var(wyn_core::tlc::VarRef::Symbol(name)) => TreeNode::leaf(format!("Var({}) : {}", name, ty)),
             TermKind::BinOp(op) => TreeNode::leaf(format!("BinOp({:?}) : {}", op, ty)),
             TermKind::UnOp(op) => TreeNode::leaf(format!("UnOp({:?}) : {}", op, ty)),
             TermKind::Lambda(ref lam) => {
@@ -151,9 +152,10 @@ mod tlc_tree {
                 children.push(TreeNode::branch("body", vec![term_to_tree(body)]));
                 TreeNode::branch(label, children)
             }
-            TermKind::Soac(_) | TermKind::ArrayExpr(_) | TermKind::Force(_) => {
+            TermKind::Soac(_) | TermKind::ArrayExpr(_) => {
                 TreeNode::leaf(format!("<soac> : {}", ty))
             }
+            other => TreeNode::leaf(format!("{:?} : {}", other, ty)),
         }
     }
 
@@ -622,15 +624,11 @@ fn compile_to_wgsl_impl(source: &str) -> CompileResultWgsl {
         Ok(p) => p,
         Err(e) => return CompileResultWgsl::err(e),
     };
-    let parsed = match parsed.elaborate_modules(&mut module_manager) {
+    let parsed = match parsed.elaborate_modules(&mut module_manager, &mut node_counter) {
         Ok(p) => p,
         Err(e) => return CompileResultWgsl::err(e),
     };
-    let desugared = match parsed.desugar(&mut node_counter) {
-        Ok(d) => d,
-        Err(e) => return CompileResultWgsl::err(e),
-    };
-    let resolved = match desugared.resolve(&module_manager) {
+    let resolved = match parsed.resolve(&module_manager) {
         Ok(r) => r,
         Err(e) => return CompileResultWgsl::err(e),
     };
@@ -639,30 +637,31 @@ fn compile_to_wgsl_impl(source: &str) -> CompileResultWgsl {
         Ok(t) => t,
         Err(e) => return CompileResultWgsl::err(e),
     };
-    let alias_checked = match type_checked.alias_check() {
-        Ok(a) => a,
-        Err(e) => return CompileResultWgsl::err(e),
-    };
-    if alias_checked.has_alias_errors() {
-        return CompileResultWgsl::err_msg("Alias checking failed".to_string());
-    }
 
-    let tlc_program = alias_checked.to_tlc(&module_manager, false);
+    let tlc_program = type_checked.to_tlc(&module_manager, false);
     let tlc_after_partial_eval = tlc_program.partial_eval();
     let tlc_tree = tlc_tree::program_to_tree(&tlc_after_partial_eval.tlc);
 
-    let raw = match tlc_after_partial_eval
+    let tlc_with_ownership = match tlc_after_partial_eval
         .normalize_soacs()
         .fuse_maps()
+        .apply_ownership()
+    {
+        Ok(t) => t,
+        Err(e) => return CompileResultWgsl::err_msg(format!("apply_ownership: {:?}", e)),
+    };
+    let tlc_parallelized = match tlc_with_ownership
         .defunctionalize()
         .monomorphize()
         .buffer_specialize()
         .fold_generated_lambdas()
         .inline_small()
         .parallelize_soacs(false)
-        .filter_reachable()
-        .to_egraph()
     {
+        Ok(t) => t,
+        Err(e) => return CompileResultWgsl::err_msg(format!("parallelize_soacs: {:?}", e)),
+    };
+    let raw = match tlc_parallelized.filter_reachable().to_egraph() {
         Ok(s) => s,
         Err(e) => return CompileResultWgsl::err_msg(format!("SSA conversion error: {:?}", e)),
     };
@@ -753,19 +752,13 @@ fn compile_impl(source: &str) -> CompileResult {
     };
 
     // Elaborate modules
-    let parsed = match parsed.elaborate_modules(&mut module_manager) {
+    let parsed = match parsed.elaborate_modules(&mut module_manager, &mut node_counter) {
         Ok(p) => p,
         Err(e) => return CompileResult::err(e),
     };
 
-    // Desugar
-    let desugared = match parsed.desugar(&mut node_counter) {
-        Ok(d) => d,
-        Err(e) => return CompileResult::err(e),
-    };
-
     // Resolve names
-    let resolved = match desugared.resolve(&module_manager) {
+    let resolved = match parsed.resolve(&module_manager) {
         Ok(r) => r,
         Err(e) => return CompileResult::err(e),
     };
@@ -779,32 +772,30 @@ fn compile_impl(source: &str) -> CompileResult {
         Err(e) => return CompileResult::err(e),
     };
 
-    // Alias check
-    let alias_checked = match type_checked.alias_check() {
-        Ok(a) => a,
-        Err(e) => return CompileResult::err(e),
-    };
-
-    if alias_checked.has_alias_errors() {
-        return CompileResult::err_msg("Alias checking failed".to_string());
-    }
-
     // Full TLC pipeline, then the EGIR chain (skipping `materialize` —
     // GLSL supports dynamic indexing natively).
-    let raw = match alias_checked
+    let tlc_with_ownership = match type_checked
         .to_tlc(&module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
+        .apply_ownership()
+    {
+        Ok(t) => t,
+        Err(e) => return CompileResult::err_msg(format!("apply_ownership: {:?}", e)),
+    };
+    let tlc_parallelized = match tlc_with_ownership
         .defunctionalize()
         .monomorphize()
         .buffer_specialize()
         .fold_generated_lambdas()
         .inline_small()
         .parallelize_soacs(false)
-        .filter_reachable()
-        .to_egraph()
     {
+        Ok(t) => t,
+        Err(e) => return CompileResult::err_msg(format!("parallelize_soacs: {:?}", e)),
+    };
+    let raw = match tlc_parallelized.filter_reachable().to_egraph() {
         Ok(s) => s,
         Err(e) => return CompileResult::err_msg(format!("SSA conversion error: {:?}", e)),
     };
@@ -845,19 +836,13 @@ fn compile_with_ir_impl(source: &str) -> CompileResultWithIR {
     };
 
     // Elaborate modules
-    let parsed = match parsed.elaborate_modules(&mut module_manager) {
+    let parsed = match parsed.elaborate_modules(&mut module_manager, &mut node_counter) {
         Ok(p) => p,
         Err(e) => return CompileResultWithIR::err(e),
     };
 
-    // Desugar
-    let desugared = match parsed.desugar(&mut node_counter) {
-        Ok(d) => d,
-        Err(e) => return CompileResultWithIR::err(e),
-    };
-
     // Resolve names
-    let resolved = match desugared.resolve(&module_manager) {
+    let resolved = match parsed.resolve(&module_manager) {
         Ok(r) => r,
         Err(e) => return CompileResultWithIR::err(e),
     };
@@ -871,36 +856,34 @@ fn compile_with_ir_impl(source: &str) -> CompileResultWithIR {
         Err(e) => return CompileResultWithIR::err(e),
     };
 
-    // Alias check
-    let alias_checked = match type_checked.alias_check() {
-        Ok(a) => a,
-        Err(e) => return CompileResultWithIR::err(e),
-    };
-
-    if alias_checked.has_alias_errors() {
-        return CompileResultWithIR::err_msg("Alias checking failed".to_string());
-    }
-
     // Transform to TLC
-    let tlc_program = alias_checked.to_tlc(&module_manager, false);
+    let tlc_program = type_checked.to_tlc(&module_manager, false);
 
     // Capture TLC tree (after partial eval, before defunctionalization)
     let tlc_after_partial_eval = tlc_program.partial_eval();
     let tlc_tree = tlc_tree::program_to_tree(&tlc_after_partial_eval.tlc);
 
     // Full TLC pipeline, then the EGIR chain (GLSL skips materialize).
-    let raw = match tlc_after_partial_eval
+    let tlc_with_ownership = match tlc_after_partial_eval
         .normalize_soacs()
         .fuse_maps()
+        .apply_ownership()
+    {
+        Ok(t) => t,
+        Err(e) => return CompileResultWithIR::err_msg(format!("apply_ownership: {:?}", e)),
+    };
+    let tlc_parallelized = match tlc_with_ownership
         .defunctionalize()
         .monomorphize()
         .buffer_specialize()
         .fold_generated_lambdas()
         .inline_small()
         .parallelize_soacs(false)
-        .filter_reachable()
-        .to_egraph()
     {
+        Ok(t) => t,
+        Err(e) => return CompileResultWithIR::err_msg(format!("parallelize_soacs: {:?}", e)),
+    };
+    let raw = match tlc_parallelized.filter_reachable().to_egraph() {
         Ok(s) => s,
         Err(e) => return CompileResultWithIR::err_msg(format!("SSA conversion error: {:?}", e)),
     };
