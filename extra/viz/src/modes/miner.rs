@@ -148,13 +148,23 @@ struct MinerBuffers {
     /// All storage bindings keyed by binding number.
     storage: HashMap<u32, (wgpu::Buffer, u64)>,
     result_staging: wgpu::Buffer,
-    partials_staging: wgpu::Buffer,
+    /// Only allocated when `-vv` is set; the `dump_partials` debug path
+    /// is the sole consumer. Skipping the allocation avoids holding a
+    /// chunk-sized MAP_READ buffer in CPU-visible memory whose sync
+    /// state the driver may touch on every submit.
+    partials_staging: Option<wgpu::Buffer>,
     result_binding: u32,
     partials_binding: u32,
 }
 
 impl MinerBuffers {
-    fn new(device: &wgpu::Device, mp: &MultiComputePipeline, chunk: u32, verbose: bool) -> Result<Self> {
+    fn new(
+        device: &wgpu::Device,
+        mp: &MultiComputePipeline,
+        chunk: u32,
+        dump_partials: bool,
+        verbose: bool,
+    ) -> Result<Self> {
         let partials_size = chunk as u64 * RESULT_BYTES;
 
         let mut storage: HashMap<u32, (wgpu::Buffer, u64)> = HashMap::new();
@@ -215,11 +225,13 @@ impl MinerBuffers {
             usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let partials_staging = device.create_buffer(&BufferDescriptor {
-            label: Some("partials_staging"),
-            size: partials_size,
-            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
+        let partials_staging = dump_partials.then(|| {
+            device.create_buffer(&BufferDescriptor {
+                label: Some("partials_staging"),
+                size: partials_size,
+                usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
         });
 
         Ok(Self {
@@ -492,12 +504,16 @@ fn dump_partials(
     num_workgroups: u32,
 ) -> Result<()> {
     let (partials_buf, partials_buf_size) = buffers.partials_buffer();
+    let staging = buffers
+        .partials_staging
+        .as_ref()
+        .expect("dump_partials called without -vv: partials_staging not allocated");
     let read_size = (num_workgroups as u64 * WORKGROUP_SIZE as u64 * RESULT_BYTES).min(*partials_buf_size);
-    encoder.copy_buffer_to_buffer(partials_buf, 0, &buffers.partials_staging, 0, read_size);
+    encoder.copy_buffer_to_buffer(partials_buf, 0, staging, 0, read_size);
     queue.submit(Some(encoder.finish()));
     let _ = device.poll(wgpu::PollType::Wait);
 
-    let slice = buffers.partials_staging.slice(..read_size);
+    let slice = staging.slice(..read_size);
     let (tx, rx) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |r| {
         tx.send(r).unwrap();
@@ -520,7 +536,7 @@ fn dump_partials(
         println!();
     }
     drop(data);
-    buffers.partials_staging.unmap();
+    staging.unmap();
     Ok(())
 }
 
@@ -649,7 +665,7 @@ pub async fn run_miner(
         MinerPipeline::validate_against_spirv(&spv_words, cfg.mp(), chatty)?;
     }
 
-    let buffers = MinerBuffers::new(&device, cfg.mp(), cfg.chunk, chatty)?;
+    let buffers = MinerBuffers::new(&device, cfg.mp(), cfg.chunk, verbose >= 2, chatty)?;
     let pipeline = MinerPipeline::new(&device, &module, cfg.mp(), &buffers, chatty)?;
 
     // Two-slot timestamp profiler per chunk: phase1 + phase2.
