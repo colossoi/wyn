@@ -419,7 +419,7 @@ fn run_chunk(
         bind_groups: &[&pipeline.bind_group],
         push_constant_bytes: &pc_bytes,
         dispatch: (num_workgroups, 1, 1),
-        timestamps: timestamps.map(|(p1, _)| p1.writes_for(chunk_idx)),
+        timestamps: timestamps.and_then(|(p1, _)| p1.writes_for(chunk_idx)),
     }
     .record(&mut encoder);
 
@@ -440,7 +440,7 @@ fn run_chunk(
         bind_groups: &[&pipeline.bind_group],
         push_constant_bytes: &pc_bytes,
         dispatch: (1, 1, 1),
-        timestamps: timestamps.map(|(_, p2)| p2.writes_for(chunk_idx)),
+        timestamps: timestamps.and_then(|(_, p2)| p2.writes_for(chunk_idx)),
     }
     .record(&mut encoder);
 

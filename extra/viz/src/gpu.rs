@@ -201,14 +201,21 @@ pub struct GpuTimestamps {
     queries_per_slot: u32, // 2 queries per slot (begin + end)
 }
 
+/// wgpu hard limit on queries per QuerySet (see `wgpu_core::QUERY_SET_MAX_QUERIES`).
+const MAX_QUERIES_PER_SET: u32 = 4096;
+
 impl GpuTimestamps {
     /// Create a new profiler with `num_slots` slots. Returns None if the device
-    /// doesn't support TIMESTAMP_QUERY.
+    /// doesn't support TIMESTAMP_QUERY. If `num_slots` would exceed wgpu's
+    /// 4096-query cap, the slot count is clamped — `writes_for` returns
+    /// `None` for any chunk index past the cap, so those dispatches simply
+    /// run untimed.
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, num_slots: u32) -> Option<Self> {
         if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
             return None;
         }
         let queries_per_slot = 2;
+        let num_slots = num_slots.min(MAX_QUERIES_PER_SET / queries_per_slot);
         let total_queries = num_slots * queries_per_slot;
         let byte_size = total_queries as u64 * 8;
         Some(Self {
@@ -235,14 +242,18 @@ impl GpuTimestamps {
         })
     }
 
-    /// Returns the `ComputePassTimestampWrites` for the given slot index.
-    pub fn writes_for(&self, slot: u32) -> wgpu::ComputePassTimestampWrites<'_> {
+    /// Returns the `ComputePassTimestampWrites` for the given slot index,
+    /// or `None` if `slot` is past the QuerySet cap (see `MAX_QUERIES_PER_SET`).
+    pub fn writes_for(&self, slot: u32) -> Option<wgpu::ComputePassTimestampWrites<'_>> {
+        if slot >= self.num_slots {
+            return None;
+        }
         let base = slot * self.queries_per_slot;
-        wgpu::ComputePassTimestampWrites {
+        Some(wgpu::ComputePassTimestampWrites {
             query_set: &self.query_set,
             beginning_of_pass_write_index: Some(base),
             end_of_pass_write_index: Some(base + 1),
-        }
+        })
     }
 
     /// Resolve all queries and read back the timestamps. Returns a Vec of
