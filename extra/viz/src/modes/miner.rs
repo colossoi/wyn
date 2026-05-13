@@ -663,6 +663,7 @@ pub async fn run_miner(
     let mut hit: Option<ChunkOutcome> = None;
 
     for chunk_idx in 0..cfg.num_chunks {
+        let chunk_start = Instant::now();
         let outcome = run_chunk(
             &device,
             &queue,
@@ -672,9 +673,15 @@ pub async fn run_miner(
             gpu_phase1.as_ref().zip(gpu_phase2.as_ref()),
             chunk_idx,
         )?;
+        let chunk_elapsed = chunk_start.elapsed();
 
         if chatty {
-            print!("  chunk {:>4}: nonce {:>10} -> ", chunk_idx + 1, outcome.nonce);
+            print!(
+                "  chunk {:>4}: {:>7.1}ms  nonce {:>10} -> ",
+                chunk_idx + 1,
+                chunk_elapsed.as_secs_f64() * 1000.0,
+                outcome.nonce
+            );
             for word in &outcome.hash {
                 print!("{:08x}", word);
             }
