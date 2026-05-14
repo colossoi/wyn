@@ -54,6 +54,28 @@ impl From<PresentModeArg> for PresentMode {
     }
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default)]
+enum TopologyArg {
+    #[default]
+    TriangleList,
+    TriangleStrip,
+    LineList,
+    LineStrip,
+    PointList,
+}
+
+impl From<TopologyArg> for wgpu::PrimitiveTopology {
+    fn from(arg: TopologyArg) -> Self {
+        match arg {
+            TopologyArg::TriangleList => wgpu::PrimitiveTopology::TriangleList,
+            TopologyArg::TriangleStrip => wgpu::PrimitiveTopology::TriangleStrip,
+            TopologyArg::LineList => wgpu::PrimitiveTopology::LineList,
+            TopologyArg::LineStrip => wgpu::PrimitiveTopology::LineStrip,
+            TopologyArg::PointList => wgpu::PrimitiveTopology::PointList,
+        }
+    }
+}
+
 /// Parse 76-byte raw header hex into 19 big-endian u32 words for SHA256.
 fn parse_header_hex(s: &str) -> std::result::Result<[u32; 19], String> {
     let s = s.trim();
@@ -125,6 +147,21 @@ enum Command {
         /// Window size as WxH (e.g. --size 256x256)
         #[arg(long, value_parser = parse_size)]
         size: Option<(u32, u32)>,
+        /// Vertex count for the draw call. Default 3 matches a fullscreen-triangle
+        /// or basic-triangle shader; bump to the number of indices a
+        /// `vertex_index`-driven vertex shader expects to dispatch.
+        #[arg(long, default_value = "3")]
+        vertex_count: u32,
+        /// Primitive topology for the draw call.
+        #[arg(long, value_enum, default_value = "triangle-list")]
+        topology: TopologyArg,
+        /// Directory of per-binding storage-buffer files. For each
+        /// `storage_buffer` binding the sidecar declares, viz loads
+        /// `<dir>/<name>.bin` — a flat little-endian byte file — and
+        /// uploads it. Requires `--shadertoy` (the storage buffers
+        /// share its bind group).
+        #[arg(long)]
+        storage_dir: Option<PathBuf>,
     },
     /// Run a compute shader (headless)
     #[command(name = "compute")]
@@ -282,6 +319,9 @@ fn main() -> Result<()> {
             present_mode,
             difficulty,
             size,
+            vertex_count,
+            topology,
+            storage_dir,
         } => {
             let (vertex_name, fragment_name) = resolve_entry_points(&path, vertex, fragment)?;
             modes::vf::run_vertex_fragment(
@@ -295,6 +335,9 @@ fn main() -> Result<()> {
                 present_mode.into(),
                 difficulty,
                 size,
+                vertex_count,
+                topology.into(),
+                storage_dir,
             )?;
         }
         Command::Compute {

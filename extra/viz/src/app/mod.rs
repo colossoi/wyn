@@ -43,6 +43,14 @@ pub struct PipelineSpec {
     pub present_mode: PresentMode,
     pub difficulty: i32,
     pub size: Option<(u32, u32)>,
+    /// Number of vertex-shader invocations per draw (`rpass.draw(0..vertex_count, 0..1)`).
+    pub vertex_count: u32,
+    /// Primitive topology for the draw call.
+    pub topology: wgpu::PrimitiveTopology,
+    /// Optional directory of per-binding `.bin` files uploaded into the
+    /// shader's `storage_buffer` bindings. Requires `--shadertoy`
+    /// (the storage buffers share its bind group).
+    pub storage_dir: Option<PathBuf>,
 }
 
 /// Where the WGSL/SPIR-V module comes from.
@@ -88,6 +96,11 @@ struct State {
     frame_times: [f64; 60], // Recent frame times in ms (ring buffer)
     frame_time_idx: usize,
     verbose: bool,
+    /// Number of vertex-shader invocations per draw call.
+    vertex_count: u32,
+    /// Host-uploaded storage buffers; held only to keep them alive for
+    /// the bind group's lifetime.
+    _storage_buffers: Vec<wgpu::Buffer>,
 }
 
 impl State {
@@ -187,7 +200,13 @@ impl State {
         // test pattern builds its own resolution uniform inside
         // `build_wgsl_render_pipeline`.
         let shadertoy = if let (true, Shader::Spirv(path)) = (spec.shadertoy, &spec.shader) {
-            Some(uniforms::build_shadertoy(&device, &queue, path, spec.difficulty)?)
+            Some(uniforms::build_shadertoy(
+                &device,
+                &queue,
+                path,
+                spec.difficulty,
+                spec.storage_dir.as_deref(),
+            )?)
         } else {
             None
         };
@@ -213,47 +232,64 @@ impl State {
 
         let max_frames = spec.max_frames;
 
-        let (pipeline, resolution_buffer, time_buffer, mouse_buffer, difficulty_buffer, uniform_bind_group) =
-            match &spec.shader {
-                Shader::Spirv(path) => {
-                    let pipeline = render::build_spirv_render_pipeline(
-                        &device,
-                        config.format,
-                        path,
-                        &spec.vertex_entry,
-                        &spec.fragment_entry,
-                        shadertoy.as_ref().map(|s| {
-                            (
-                                &s.bind_group_layout,
-                                empty_bind_group_layout.as_ref(),
-                                s.bind_group_set,
-                            )
-                        }),
-                    )?;
-                    let (rb, tb, mb, db, bg) = match shadertoy {
-                        Some(s) => (
-                            s.resolution_buffer,
-                            s.time_buffer,
-                            s.mouse_buffer,
-                            s.difficulty_buffer,
-                            Some(s.bind_group),
-                        ),
-                        None => (None, None, None, None, None),
-                    };
-                    (pipeline, rb, tb, mb, db, bg)
-                }
-                Shader::Wgsl(source) => {
-                    let (pipeline, res_buffer, bind_group) = render::build_wgsl_render_pipeline(
-                        &device,
-                        &queue,
-                        config.format,
-                        config.width,
-                        config.height,
-                        source,
-                    );
-                    (pipeline, Some(res_buffer), None, None, None, Some(bind_group))
-                }
-            };
+        let (
+            pipeline,
+            resolution_buffer,
+            time_buffer,
+            mouse_buffer,
+            difficulty_buffer,
+            storage_buffers,
+            uniform_bind_group,
+        ) = match &spec.shader {
+            Shader::Spirv(path) => {
+                let pipeline = render::build_spirv_render_pipeline(
+                    &device,
+                    config.format,
+                    path,
+                    &spec.vertex_entry,
+                    &spec.fragment_entry,
+                    shadertoy.as_ref().map(|s| {
+                        (
+                            &s.bind_group_layout,
+                            empty_bind_group_layout.as_ref(),
+                            s.bind_group_set,
+                        )
+                    }),
+                    spec.topology,
+                )?;
+                let (rb, tb, mb, db, sb, bg) = match shadertoy {
+                    Some(s) => (
+                        s.resolution_buffer,
+                        s.time_buffer,
+                        s.mouse_buffer,
+                        s.difficulty_buffer,
+                        s.storage_buffers,
+                        Some(s.bind_group),
+                    ),
+                    None => (None, None, None, None, Vec::new(), None),
+                };
+                (pipeline, rb, tb, mb, db, sb, bg)
+            }
+            Shader::Wgsl(source) => {
+                let (pipeline, res_buffer, bind_group) = render::build_wgsl_render_pipeline(
+                    &device,
+                    &queue,
+                    config.format,
+                    config.width,
+                    config.height,
+                    source,
+                );
+                (
+                    pipeline,
+                    Some(res_buffer),
+                    None,
+                    None,
+                    None,
+                    Vec::new(),
+                    Some(bind_group),
+                )
+            }
+        };
 
         let now = std::time::Instant::now();
 
@@ -280,6 +316,8 @@ impl State {
             frame_times: [0.0; 60],
             frame_time_idx: 0,
             verbose,
+            vertex_count: spec.vertex_count,
+            _storage_buffers: storage_buffers,
         })
     }
 
@@ -377,7 +415,7 @@ impl State {
                         }
                         rpass.set_bind_group(self.uniform_bind_group_set, bind_group, &[]);
                     }
-                    rpass.draw(0..3, 0..1);
+                    rpass.draw(0..self.vertex_count, 0..1);
                 }
 
                 self.queue.submit(Some(encoder.finish()));

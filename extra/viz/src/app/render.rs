@@ -70,6 +70,7 @@ pub fn build_spirv_render_pipeline(
     vertex_entry: &str,
     fragment_entry: &str,
     shadertoy_uniforms: Option<(&BindGroupLayout, Option<&BindGroupLayout>, u32)>,
+    topology: wgpu::PrimitiveTopology,
 ) -> Result<RenderPipeline> {
     let module =
         load_spirv_module(device, path).with_context(|| format!("load SPIR-V module {:?}", path))?;
@@ -112,7 +113,10 @@ pub fn build_spirv_render_pipeline(
             })],
             compilation_options: Default::default(),
         }),
-        primitive: PrimitiveState::default(),
+        primitive: PrimitiveState {
+            topology,
+            ..PrimitiveState::default()
+        },
         depth_stencil: None,
         multisample: wgpu::MultisampleState::default(),
         multiview: None,

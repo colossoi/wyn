@@ -14,7 +14,7 @@
 use std::fs;
 use std::path::Path;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingResource, BindingType, Buffer, BufferBindingType, BufferDescriptor,
@@ -66,6 +66,14 @@ struct UniformDecl {
     name: String,
 }
 
+/// One storage-buffer binding declared in the sidecar.
+#[derive(Debug, Clone)]
+struct StorageDecl {
+    set: u32,
+    binding: u32,
+    name: String,
+}
+
 /// Read `<spv_path>.json` and extract the uniforms declared by the
 /// first graphics pipeline. Empty vec when no sidecar is present.
 fn load_sidecar_uniforms(spv_path: &Path) -> Vec<UniformDecl> {
@@ -98,6 +106,39 @@ fn load_sidecar_uniforms(spv_path: &Path) -> Vec<UniformDecl> {
     Vec::new()
 }
 
+/// Read `<spv_path>.json` and extract the storage-buffer bindings
+/// declared by the first graphics pipeline. Empty vec when no sidecar
+/// is present or the pipeline declares no storage buffers.
+fn load_sidecar_storage(spv_path: &Path) -> Vec<StorageDecl> {
+    let json_path = spv_path.with_extension("json");
+    let Ok(content) = fs::read_to_string(&json_path) else {
+        return Vec::new();
+    };
+    let Ok(desc) = serde_json::from_str::<PipelineDescriptor>(&content) else {
+        return Vec::new();
+    };
+    for p in &desc.pipelines {
+        if let Pipeline::Graphics(g) = p {
+            return g
+                .bindings
+                .iter()
+                .filter_map(|b| {
+                    if let Binding::StorageBuffer { set, binding, name, .. } = b {
+                        Some(StorageDecl {
+                            set: *set,
+                            binding: *binding,
+                            name: name.clone(),
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+        }
+    }
+    Vec::new()
+}
+
 // ---------------------------------------------------------------------------
 // Shadertoy uniforms (vf --shadertoy)
 // ---------------------------------------------------------------------------
@@ -110,6 +151,9 @@ pub struct ShadertoyBindings {
     pub time_buffer: Option<Buffer>,
     pub mouse_buffer: Option<Buffer>,
     pub difficulty_buffer: Option<Buffer>,
+    /// Host-uploaded storage buffers, kept alive for the lifetime of
+    /// the bind group. Populated only when `--storage-dir` was supplied.
+    pub storage_buffers: Vec<Buffer>,
     pub bind_group: BindGroup,
     pub bind_group_layout: BindGroupLayout,
     /// Descriptor-set index where the shader expects this bind group
@@ -121,11 +165,19 @@ pub struct ShadertoyBindings {
 /// Build shadertoy uniform buffers + bind group for a SPIR-V shader.
 /// Errors if no sidecar is found, or if the declared uniforms span
 /// more than one descriptor set.
+///
+/// When `storage_dir` is `Some(dir)`, each `storage_buffer` binding the
+/// sidecar declares is filled from `<dir>/<binding_name>.bin` — a flat
+/// little-endian byte file. Name-matched, so file order and size are
+/// never guessed; a missing file is a hard error. The storage buffers
+/// join the shadertoy uniforms in the same bind group (they must share
+/// a descriptor set).
 pub fn build_shadertoy(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     spv_path: &Path,
     difficulty: i32,
+    storage_dir: Option<&Path>,
 ) -> Result<ShadertoyBindings> {
     /// Where the shader expects one of the four shadertoy uniforms.
     /// `actual_*` come from the sidecar; `present` is set if the
@@ -266,9 +318,73 @@ pub fn build_shadertoy(
     .into_iter()
     .flatten()
     .collect();
-    let layout_entries: Vec<BindGroupLayoutEntry> =
+
+    // Storage buffers, if a `--storage-dir <dir>` was supplied. Each
+    // `storage_buffer` binding the sidecar declares is filled from
+    // `<dir>/<binding_name>.bin` — name-matched, one file per buffer.
+    let storage_decls = if storage_dir.is_some() {
+        load_sidecar_storage(spv_path)
+    } else {
+        Vec::new()
+    };
+    let storage_buffers: Vec<Buffer> = if let Some(dir) = storage_dir {
+        if storage_decls.is_empty() {
+            return Err(anyhow!(
+                "viz vf --storage-dir: shader's sidecar declares no storage_buffer bindings; \
+                 nothing to upload"
+            ));
+        }
+        if let Some(stray) = storage_decls.iter().find(|s| s.set != bind_group_set) {
+            return Err(anyhow!(
+                "viz vf --storage-dir: storage binding '{}' is in descriptor set {} but the \
+                 uniforms are in set {}; only a single set is supported",
+                stray.name,
+                stray.set,
+                bind_group_set,
+            ));
+        }
+        storage_decls
+            .iter()
+            .map(|decl| {
+                let path = dir.join(format!("{}.bin", decl.name));
+                let data = fs::read(&path).with_context(|| {
+                    format!(
+                        "viz vf --storage-dir: storage binding '{}' expects {:?}",
+                        decl.name, path,
+                    )
+                })?;
+                let buf = device.create_buffer(&BufferDescriptor {
+                    label: Some(&format!("storage_{}", decl.name)),
+                    size: data.len() as u64,
+                    usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                queue.write_buffer(&buf, 0, &data);
+                Ok(buf)
+            })
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        Vec::new()
+    };
+    let storage_layout: Vec<BindGroupLayoutEntry> = storage_decls
+        .iter()
+        .map(|d| BindGroupLayoutEntry {
+            binding: d.binding,
+            visibility: ShaderStages::VERTEX_FRAGMENT,
+            ty: BindingType::Buffer {
+                ty: BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        })
+        .collect();
+
+    let mut layout_entries: Vec<BindGroupLayoutEntry> =
         slots.iter().map(|(binding, _)| buf_layout(*binding)).collect();
-    let group_entries: Vec<BindGroupEntry> = slots
+    layout_entries.extend(storage_layout);
+
+    let mut group_entries: Vec<BindGroupEntry> = slots
         .iter()
         .map(|(binding, buffer)| BindGroupEntry {
             binding: *binding,
@@ -279,6 +395,16 @@ pub fn build_shadertoy(
             }),
         })
         .collect();
+    group_entries.extend(storage_decls.iter().zip(&storage_buffers).map(|(d, buf)| {
+        BindGroupEntry {
+            binding: d.binding,
+            resource: BindingResource::Buffer(wgpu::BufferBinding {
+                buffer: buf,
+                offset: 0,
+                size: None,
+            }),
+        }
+    }));
 
     let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
         label: Some("uniform_bind_group_layout"),
@@ -295,6 +421,7 @@ pub fn build_shadertoy(
         time_buffer,
         mouse_buffer,
         difficulty_buffer,
+        storage_buffers,
         bind_group,
         bind_group_layout,
         bind_group_set,

@@ -10,6 +10,7 @@ use winit::event_loop::EventLoop;
 
 use crate::app::{App, PipelineSpec, Shader};
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_vertex_fragment(
     path: PathBuf,
     vertex: String,
@@ -21,6 +22,9 @@ pub fn run_vertex_fragment(
     present_mode: PresentMode,
     difficulty: i32,
     size: Option<(u32, u32)>,
+    vertex_count: u32,
+    topology: wgpu::PrimitiveTopology,
+    storage_dir: Option<PathBuf>,
 ) -> Result<()> {
     let spec = PipelineSpec {
         shader: Shader::Spirv(path),
@@ -33,6 +37,9 @@ pub fn run_vertex_fragment(
         present_mode,
         difficulty,
         size,
+        vertex_count,
+        topology,
+        storage_dir,
     };
 
     let event_loop = EventLoop::new().context("failed to create event loop")?;
