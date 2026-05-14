@@ -201,8 +201,19 @@ fn enrich_pipeline_with_auto_bindings(pipeline: &mut PipelineDescriptor, entries
     use crate::ssa::types::ExecutionModel;
 
     for entry in entries {
-        if !matches!(entry.execution_model, ExecutionModel::Compute { .. }) {
-            continue;
+        match &entry.execution_model {
+            // Vertex entries: surface `#[location(n)]` params as vertex
+            // buffer attributes in the matching Graphics pipeline.
+            ExecutionModel::Vertex => {
+                enrich_vertex_inputs(pipeline, entry);
+                continue;
+            }
+            // Fragment `#[location(n)]` params are varyings, not vertex
+            // buffers — nothing to surface in the descriptor.
+            ExecutionModel::Fragment => continue,
+            // Compute entries fall through to the binding-enrichment
+            // logic below.
+            ExecutionModel::Compute { .. } => {}
         }
 
         // Find the bindings list backing this entry: a single-stage
@@ -286,6 +297,40 @@ fn enrich_pipeline_with_auto_bindings(pipeline: &mut PipelineDescriptor, entries
                 name,
             });
         }
+    }
+}
+
+/// Populate the `vertex_inputs` of the Graphics pipeline backing a
+/// vertex entry from its `#[location(n)]` parameters. Each
+/// `IoDecoration::Location` input becomes a `VertexAttribute` carrying
+/// the location, name, and the format derived from the input's type.
+/// The type checker guarantees every such input has a valid vertex
+/// format, so `vertex_format` returning `None` here is a compiler bug.
+fn enrich_vertex_inputs(pipeline: &mut PipelineDescriptor, entry: &EgirEntry) {
+    use crate::pipeline_descriptor::{Pipeline, VertexAttribute};
+    use crate::ssa::types::IoDecoration;
+
+    let vertex_inputs = match pipeline.pipelines.iter_mut().find(|p| match p {
+        Pipeline::Graphics(gp) => gp.stages.iter().any(|s| s.entry_point == entry.name),
+        _ => false,
+    }) {
+        Some(Pipeline::Graphics(gp)) => &mut gp.vertex_inputs,
+        _ => return,
+    };
+
+    for input in &entry.inputs {
+        let Some(IoDecoration::Location(location)) = input.decoration else {
+            continue;
+        };
+        let format = crate::ssa::layout::vertex_format(&input.ty).expect(
+            "vertex #[location] param must have a valid vertex format \
+             (the type checker enforces this)",
+        );
+        vertex_inputs.push(VertexAttribute {
+            location,
+            name: input.name.clone(),
+            format,
+        });
     }
 }
 

@@ -1,0 +1,12 @@
+-- Vertex-shader input attributes: #[location(n)] params fed by
+-- vertex buffers. The vertex entry takes per-vertex position + color
+-- attributes; the fragment entry consumes the color as a varying.
+
+#[vertex]
+entry vertex_main(#[location(0)] position: vec3f32, #[location(1)] color: vec3f32)
+  (#[builtin(position)] vec4f32, #[location(0)] vec3f32) =
+  (@[position.x, position.y, position.z, 1.0], color)
+
+#[fragment]
+entry fragment_main(#[location(0)] color: vec3f32) #[location(0)] vec4f32 =
+  @[color.x, color.y, color.z, 1.0]

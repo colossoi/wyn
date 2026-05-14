@@ -185,11 +185,49 @@ pub enum BufferUsage {
     Intermediate,
 }
 
-/// Vertex input attribute.
+/// Scalar/vector format of a vertex-buffer attribute. Mirrors the
+/// wgpu `VertexFormat` subset Wyn can currently produce — 32-bit
+/// float / signed-int / unsigned-int scalars and 2-4 wide vectors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VertexFormat {
+    Float32,
+    Float32x2,
+    Float32x3,
+    Float32x4,
+    Sint32,
+    Sint32x2,
+    Sint32x3,
+    Sint32x4,
+    Uint32,
+    Uint32x2,
+    Uint32x3,
+    Uint32x4,
+}
+
+impl VertexFormat {
+    /// Byte size of one attribute element: 4 bytes per 32-bit component.
+    pub fn byte_size(self) -> u32 {
+        use VertexFormat::*;
+        match self {
+            Float32 | Sint32 | Uint32 => 4,
+            Float32x2 | Sint32x2 | Uint32x2 => 8,
+            Float32x3 | Sint32x3 | Uint32x3 => 12,
+            Float32x4 | Sint32x4 | Uint32x4 => 16,
+        }
+    }
+}
+
+/// Vertex input attribute. One attribute == one vertex buffer: the
+/// host uploads a tightly-packed buffer per attribute (offset 0,
+/// stride = `format.byte_size()`), mirroring viz's one-`.bin`-per-
+/// binding `--storage-dir` convention. Interleaved buffers (explicit
+/// offset/stride) are a later extension.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VertexAttribute {
     pub location: u32,
     pub name: String,
+    pub format: VertexFormat,
 }
 
 /// Fragment output.
@@ -197,4 +235,36 @@ pub struct VertexAttribute {
 pub struct FragmentOutput {
     pub location: u32,
     pub name: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vertex_format_byte_size() {
+        assert_eq!(VertexFormat::Float32.byte_size(), 4);
+        assert_eq!(VertexFormat::Sint32.byte_size(), 4);
+        assert_eq!(VertexFormat::Uint32.byte_size(), 4);
+        assert_eq!(VertexFormat::Float32x2.byte_size(), 8);
+        assert_eq!(VertexFormat::Float32x3.byte_size(), 12);
+        assert_eq!(VertexFormat::Float32x4.byte_size(), 16);
+        assert_eq!(VertexFormat::Uint32x4.byte_size(), 16);
+    }
+
+    #[test]
+    fn vertex_attribute_serde_round_trip() {
+        let attr = VertexAttribute {
+            location: 1,
+            name: "color".to_string(),
+            format: VertexFormat::Float32x3,
+        };
+        let json = serde_json::to_string(&attr).unwrap();
+        // Format serializes snake_case.
+        assert!(json.contains("\"float32x3\""), "got: {json}");
+        let back: VertexAttribute = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.location, 1);
+        assert_eq!(back.name, "color");
+        assert_eq!(back.format, VertexFormat::Float32x3);
+    }
 }

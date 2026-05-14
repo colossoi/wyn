@@ -2,7 +2,7 @@ use super::{SkolemId, Type, TypeExt, TypeName, TypeScheme};
 use crate::ast::*;
 use crate::builtins::{BuiltinId, by_id};
 use crate::error::{CompilerError, Result};
-use crate::interface::{StorageDecl, UniformDecl};
+use crate::interface::{Attribute, StorageDecl, UniformDecl};
 use crate::module_manager::ModuleManager;
 use crate::name_resolution::NameResolution;
 use crate::scope::{IdentifierKind, ScopeEntry, ScopeStack};
@@ -1216,15 +1216,16 @@ impl<'a> TypeChecker<'a> {
         body: &Expression,
         module_name: Option<&str>,
     ) -> Result<(Vec<Type>, Type)> {
-        self.check_function_with_params_inner(params, body, module_name, false)
+        self.check_function_with_params_inner(params, body, module_name, false, None)
     }
 
     fn check_entry_with_params(
         &mut self,
         params: &[Pattern],
         body: &Expression,
+        entry_type: &Attribute,
     ) -> Result<(Vec<Type>, Type)> {
-        self.check_function_with_params_inner(params, body, None, true)
+        self.check_function_with_params_inner(params, body, None, true, Some(entry_type))
     }
 
     fn check_function_with_params_inner(
@@ -1233,6 +1234,10 @@ impl<'a> TypeChecker<'a> {
         body: &Expression,
         module_name: Option<&str>,
         is_entry: bool,
+        // The entry's stage attribute (`Vertex` / `Fragment` / `Compute`)
+        // when `is_entry`; `None` for ordinary functions. Drives
+        // stage-specific parameter validation.
+        entry_stage: Option<&Attribute>,
     ) -> Result<(Vec<Type>, Type)> {
         // Create type variables or use explicit types for parameters
         let param_types: Vec<Type> = params
@@ -1258,6 +1263,63 @@ impl<'a> TypeChecker<'a> {
                     param.h.span,
                     "Existential types (?k. ...) are only allowed in return types, not parameter types"
                 );
+            }
+        }
+
+        // Vertex entries: validate `#[location(n)]` input parameters.
+        // Each must carry a GPU vertex-buffer format (32-bit scalar or
+        // 2-4 wide vector of f32/i32/u32), locations must be unique, and
+        // every non-builtin vertex param must be explicitly located —
+        // the pipeline descriptor needs a stable location per attribute.
+        // Fragment `#[location(n)]` params are varyings and unaffected.
+        if matches!(entry_stage, Some(Attribute::Vertex)) {
+            // `parse_entry_params` builds `Typed(Attributed([attrs], Name), ty)`
+            // — `Typed` outermost — so peel through `Typed` to reach the attrs.
+            fn param_attrs(p: &Pattern) -> &[Attribute] {
+                match &p.kind {
+                    PatternKind::Attributed(attrs, _) => attrs,
+                    PatternKind::Typed(inner, _) => param_attrs(inner),
+                    _ => &[],
+                }
+            }
+            let mut seen_locations = std::collections::HashSet::new();
+            for (param, param_type) in params.iter().zip(param_types.iter()) {
+                if matches!(param.kind, PatternKind::Unit) {
+                    continue;
+                }
+                let attrs = param_attrs(param);
+                let location = attrs.iter().find_map(|a| match a {
+                    Attribute::Location(n) => Some(*n),
+                    _ => None,
+                });
+                let is_builtin = attrs.iter().any(|a| matches!(a, Attribute::BuiltIn(_)));
+                match location {
+                    Some(loc) => {
+                        if crate::ssa::layout::vertex_format(param_type).is_none() {
+                            bail_type_at!(
+                                param.h.span,
+                                "vertex shader #[location({})] input must be an explicitly-typed \
+                                 32-bit scalar or vec2/3/4 of f32/i32/u32; got {:?}",
+                                loc,
+                                param_type
+                            );
+                        }
+                        if !seen_locations.insert(loc) {
+                            bail_type_at!(
+                                param.h.span,
+                                "duplicate vertex shader input #[location({})]",
+                                loc
+                            );
+                        }
+                    }
+                    None if is_builtin => {}
+                    None => {
+                        bail_type_at!(
+                            param.h.span,
+                            "vertex shader input parameter must have #[location(n)] or #[builtin(...)]"
+                        );
+                    }
+                }
             }
         }
 
@@ -1418,7 +1480,8 @@ impl<'a> TypeChecker<'a> {
             }
             Declaration::Entry(entry) => {
                 debug!("Checking entry point: {}", entry.name);
-                let (_param_types, body_type) = self.check_entry_with_params(&entry.params, &entry.body)?;
+                let (_param_types, body_type) =
+                    self.check_entry_with_params(&entry.params, &entry.body, &entry.entry_type)?;
                 debug!("Entry point '{}' body type: {:?}", entry.name, body_type);
 
                 // Build expected return type from declared outputs

@@ -444,3 +444,41 @@ entry vertex_main() #[builtin(position)] vec4f32 =
     );
     assert!(!program.entry_points.is_empty(), "Should have entry points");
 }
+
+// --- vertex_inputs population from #[location(n)] params ---------------
+
+#[test]
+fn vertex_inputs_populated_from_location_params() {
+    use crate::pipeline_descriptor::{Pipeline, VertexFormat};
+
+    let src = "#[vertex]\n\
+               entry vs(#[location(0)] position: vec3f32, #[location(1)] color: vec3f32)\n\
+                 (#[builtin(position)] vec4f32, #[location(0)] vec3f32) =\n\
+                 (@[position.x, position.y, position.z, 1.0], color)\n\
+               #[fragment]\n\
+               entry fs(#[location(0)] color: vec3f32) #[location(0)] vec4f32 =\n\
+                 @[color.x, color.y, color.z, 1.0]";
+    let converted = crate::compile_thru_ssa(src).expect("compile thru ssa");
+
+    let find = |name: &str| {
+        converted.pipeline.pipelines.iter().find_map(|p| match p {
+            Pipeline::Graphics(gp) if gp.stages.iter().any(|s| s.entry_point == name) => Some(gp),
+            _ => None,
+        })
+    };
+
+    // Vertex stage: both #[location] params surface as vertex_inputs.
+    let vs = find("vs").expect("vertex graphics pipeline");
+    assert_eq!(vs.vertex_inputs.len(), 2);
+    assert_eq!(vs.vertex_inputs[0].location, 0);
+    assert_eq!(vs.vertex_inputs[0].name, "position");
+    assert_eq!(vs.vertex_inputs[0].format, VertexFormat::Float32x3);
+    assert_eq!(vs.vertex_inputs[1].location, 1);
+    assert_eq!(vs.vertex_inputs[1].name, "color");
+    assert_eq!(vs.vertex_inputs[1].format, VertexFormat::Float32x3);
+
+    // Fragment stage: #[location] params there are varyings, not vertex
+    // buffers — vertex_inputs stays empty.
+    let fs = find("fs").expect("fragment graphics pipeline");
+    assert!(fs.vertex_inputs.is_empty());
+}

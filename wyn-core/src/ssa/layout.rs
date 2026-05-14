@@ -2,6 +2,58 @@
 
 use crate::ast::{Type, TypeName};
 use crate::types::TypeExt;
+use wyn_pipeline_descriptor::VertexFormat;
+
+#[cfg(test)]
+#[path = "layout_tests.rs"]
+mod layout_tests;
+
+/// Map a Wyn type to its vertex-buffer attribute format, for
+/// `#[location(n)]` vertex-shader input parameters. Only 32-bit
+/// float / signed / unsigned scalars and 2-4 wide vectors of them are
+/// valid vertex formats; everything else (arrays, tuples, matrices,
+/// non-32-bit scalars, `vec1`) returns `None`. This is the single
+/// source of truth keeping the SPIR-V `Input` variable's type and the
+/// pipeline descriptor's `VertexFormat` consistent.
+pub fn vertex_format(ty: &Type) -> Option<VertexFormat> {
+    use VertexFormat::*;
+
+    // Component scalar class: 0 = f32, 1 = i32, 2 = u32. None for
+    // anything else (f16/f64, i8/i16/i64, bool, ...).
+    fn scalar_class(t: &Type) -> Option<u8> {
+        match t {
+            Type::Constructed(TypeName::Float(32), _) => Some(0),
+            Type::Constructed(TypeName::Int(32), _) => Some(1),
+            Type::Constructed(TypeName::UInt(32), _) => Some(2),
+            _ => None,
+        }
+    }
+
+    if let Some(class) = scalar_class(ty) {
+        return Some(match class {
+            0 => Float32,
+            1 => Sint32,
+            _ => Uint32,
+        });
+    }
+    if ty.is_vec() {
+        let n = ty.vec_size()?;
+        let class = scalar_class(ty.elem_type()?)?;
+        return match (class, n) {
+            (0, 2) => Some(Float32x2),
+            (0, 3) => Some(Float32x3),
+            (0, 4) => Some(Float32x4),
+            (1, 2) => Some(Sint32x2),
+            (1, 3) => Some(Sint32x3),
+            (1, 4) => Some(Sint32x4),
+            (2, 2) => Some(Uint32x2),
+            (2, 3) => Some(Uint32x3),
+            (2, 4) => Some(Uint32x4),
+            _ => None,
+        };
+    }
+    None
+}
 
 /// Calculate the byte size of a type for buffer layout purposes.
 /// Returns None for types that don't have a fixed size (e.g., runtime arrays).
