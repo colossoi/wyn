@@ -12,9 +12,11 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use wgpu::{
-    BindGroup, BindGroupDescriptor, BindGroupLayoutDescriptor, Color, CommandEncoderDescriptor,
+    BindGroup, BindGroupDescriptor, BindGroupLayoutDescriptor, Color, CommandEncoderDescriptor, Extent3d,
     InstanceFlags, LoadOp, Operations, PresentMode, RenderPipeline, StoreOp, SurfaceConfiguration,
+    TextureDescriptor, TextureDimension, TextureUsages, TextureView, TextureViewDescriptor,
 };
+
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::WindowEvent;
@@ -22,6 +24,7 @@ use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowAttributes};
 
 use crate::gpu::{DeviceRequest, GpuContext};
+use render::DEPTH_FORMAT;
 use uniforms::{MouseUniform, ResolutionUniform, TimeUniform};
 
 // --- Pipeline spec passed to the app -----------------------------------------
@@ -112,6 +115,29 @@ struct State {
     /// Optional u32 index buffer + its element count; when `Some`,
     /// render() uses `draw_indexed` and `vertex_count` is ignored.
     index_buffer: Option<(wgpu::Buffer, u32)>,
+    /// Per-frame depth attachment, recreated on resize. Sized to
+    /// `config.width × config.height`, format `DEPTH_FORMAT`.
+    depth_view: TextureView,
+}
+
+/// Allocate a depth texture matching `config.width × config.height` and
+/// return a default view. Called at startup and on every resize.
+fn create_depth_view(device: &wgpu::Device, config: &SurfaceConfiguration) -> TextureView {
+    let tex = device.create_texture(&TextureDescriptor {
+        label: Some("depth"),
+        size: Extent3d {
+            width: config.width.max(1),
+            height: config.height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: DEPTH_FORMAT,
+        usage: TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    tex.create_view(&TextureViewDescriptor::default())
 }
 
 impl State {
@@ -340,6 +366,7 @@ impl State {
         };
 
         let now = std::time::Instant::now();
+        let depth_view = create_depth_view(&device, &config);
 
         Ok(Self {
             window,
@@ -368,6 +395,7 @@ impl State {
             _storage_buffers: storage_buffers,
             vertex_buffers: vertex_buffers.buffers,
             index_buffer,
+            depth_view,
         })
     }
 
@@ -376,6 +404,7 @@ impl State {
             self.config.width = size.width;
             self.config.height = size.height;
             self.surface.configure(&self.device, &self.config);
+            self.depth_view = create_depth_view(&self.device, &self.config);
         }
     }
 
@@ -448,7 +477,14 @@ impl State {
                             },
                             depth_slice: None,
                         })],
-                        depth_stencil_attachment: None,
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &self.depth_view,
+                            depth_ops: Some(Operations {
+                                load: LoadOp::Clear(1.0),
+                                store: StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        }),
                         ..Default::default()
                     });
 

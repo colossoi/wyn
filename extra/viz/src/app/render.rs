@@ -6,13 +6,28 @@ use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
 use wgpu::{
-    Adapter, BindGroup, BindGroupLayout, Buffer, ColorTargetState, FragmentState, PipelineLayoutDescriptor,
-    PresentMode, PrimitiveState, RenderPipeline, Surface, SurfaceConfiguration, TextureFormat,
-    TextureUsages, VertexState,
+    Adapter, BindGroup, BindGroupLayout, Buffer, ColorTargetState, CompareFunction, DepthStencilState,
+    FragmentState, PipelineLayoutDescriptor, PresentMode, PrimitiveState, RenderPipeline, Surface,
+    SurfaceConfiguration, TextureFormat, TextureUsages, VertexState,
 };
 
 use crate::app::uniforms::build_test_pattern_uniforms;
 use crate::spirv::load_spirv_module;
+
+/// Depth attachment format for every render pipeline. `Depth32Float` is
+/// universally supported on Vulkan/D3D/Metal and gives ample precision
+/// for the masthead's `near=2, far=17000` projection range.
+pub const DEPTH_FORMAT: TextureFormat = TextureFormat::Depth32Float;
+
+fn default_depth_state() -> DepthStencilState {
+    DepthStencilState {
+        format: DEPTH_FORMAT,
+        depth_write_enabled: true,
+        depth_compare: CompareFunction::Less,
+        stencil: Default::default(),
+        bias: Default::default(),
+    }
+}
 
 /// Pick a non-sRGB 8-bit surface format. Shadertoy-style shaders
 /// apply their own gamma (`pow(col, 0.45)`) and expect the
@@ -144,7 +159,7 @@ pub fn build_spirv_render_pipeline(
             topology,
             ..PrimitiveState::default()
         },
-        depth_stencil: None,
+        depth_stencil: Some(default_depth_state()),
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
         cache: None,
@@ -199,7 +214,7 @@ pub fn build_wgsl_render_pipeline(
             compilation_options: Default::default(),
         }),
         primitive: PrimitiveState::default(),
-        depth_stencil: None,
+        depth_stencil: Some(default_depth_state()),
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
         cache: None,
