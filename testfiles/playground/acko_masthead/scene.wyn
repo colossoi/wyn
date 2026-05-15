@@ -16,32 +16,94 @@ open f32
 #[uniform(set = 1, binding = 1)] def iTime: f32
 
 ------------------------------------------------------------
--- Camera (no rotation, fov = 30°)
+-- Camera — Acko.Effect.Camera at the first-load at-rest state.
 --
--- Matches Acko.Effect.Camera defaults: fov 30°, position ≈ (0, 0, 1200)
--- looking at origin, plus the `visibleHolder` group offset of
--- (0, -10, +200) the original applies to every track vertex. No
--- camera or tracks-group rotation at rest (the original sets
--- `o.rotation = 0` when not playing); the 3D depth comes entirely
--- from perspective foreshortening of the tracks' z-spread
--- (-820..+800). wgpu clip-space is y-up per the WebGPU spec, so
--- positive world y maps directly to positive clip.y (no flip).
+-- For a first-time visitor, the page sits at scroll y=0 (the
+-- `a.set(0, pageStart-200)` auto-scroll is gated by `if(!p ...)`
+-- and only fires on the returning-visitor non-intro path). That
+-- means the camera-update's `j = max(0, min(1, (T.y-100)/...))`
+-- evaluates to 0, hence `J = 0`, and the camera lives at its
+-- maximally-tilted intro endpoint, not the straight-on state:
+--
+--   thetaB     = 0.27  (constructor default — I missed it the first
+--                       time; this is the elevation angle)
+--   phiC       = -0.64 (azimuth contribution, scaled by 1-J)
+--   theta      = thetaB * (1-J)        = 0.27
+--   phi        = phiB + phiC * (1-J)   = -0.64
+--   M          = J*0.8 + 0.2           = 0.2
+--   Y          = orbit + (perspective - orbit) * M
+--              = 1200 + (1.866*V - 1200) * 0.2
+--
+--   position   = Y * z_cam + (140, 0, 0)  -- +140 is (1-J)*140 at J=0
+--   lookAt(0,0,0), up=(0,1,0)
+--
+-- where the camera basis (theta, phi → world):
+--
+--   x_cam = ( cos(phi),                 0,           -sin(phi)        )
+--   y_cam = (-sin(theta)*sin(phi),  cos(theta),  -sin(theta)*cos(phi) )
+--   z_cam = ( sin(phi)*cos(theta),  sin(theta),   cos(phi)*cos(theta) )
+--
+-- For (theta, phi) = (0.27, -0.64) those evaluate to the constants
+-- below. The camera ends up at roughly (-Y*0.575 + 140, Y*0.267,
+-- Y*0.773) — up and to the left of origin, tilted down-right toward
+-- it. That's the 3/4 view in scr-orig.jpg.
+--
+-- Plus the `visibleHolder` group offset of (0, -10, +200) the
+-- original applies to every track vertex. wgpu clip-space is y-up
+-- per the WebGPU spec, so positive world y maps to positive clip.y
+-- with no extra flip.
 ------------------------------------------------------------
 
-def view_project(p: vec3f32, aspect: f32) vec4f32 =
-  -- visibleHolder position offset (0, -10, +200) applied to every
-  -- track vertex by the original's three.js scene graph.
-  let tx = p.x in
-  let ty = p.y - 10.0 in
-  let tz = p.z + 200.0 - 1200.0 in   -- holder offset, then camera at z=1200
-  -- f = 1 / tan(fov/2) for fov = 30°.
-  let f = 3.7320508 in
+-- Camera basis precomputed for theta=0.27, phi=-0.64.
+def x_cam_x: f32 =  0.8021    -- cos(phi)
+def x_cam_z: f32 =  0.5972    -- -sin(phi)
+def y_cam_x: f32 =  0.1592    -- -sin(theta)*sin(phi)
+def y_cam_y: f32 =  0.9636    -- cos(theta)
+def y_cam_z: f32 = -0.2140    -- -sin(theta)*cos(phi)
+def z_cam_x: f32 = -0.5754    -- sin(phi)*cos(theta)
+def z_cam_y: f32 =  0.2667    -- sin(theta)
+def z_cam_z: f32 =  0.7731    -- cos(phi)*cos(theta)
+
+-- World-space x of the post-lookAt camera shift (the +140 in
+-- ap.position.x at J=0).
+def cam_shift_x: f32 = 140.0
+
+-- 1 / tan(fov/2) for fov = 30°.
+def fov_f: f32 = 3.7320508
+
+-- Standalone-viz zoom-out factor. The original masthead's camera
+-- positions it so 1 world unit = 1 pixel at z=0, which keeps the
+-- masthead pixel-perfect inside the browser's hero area. In our
+-- standalone window the same calibration only fits the middle ~half
+-- of the model; this multiplier pulls the camera back to fit more.
+-- Pure camera-distance change (no FOV tweak) so parallax matches the
+-- original.
+def zoom_out: f32 = 1.5
+
+def view_project(p: vec3f32, view_width: f32, view_height: f32) vec4f32 =
+  -- visibleHolder offset (0, -10, +200).
+  let w_x = p.x in
+  let w_y = p.y - 10.0 in
+  let w_z = p.z + 200.0 in
+
+  -- Camera distance Y at J=0, M=0.2, then scaled by zoom_out.
+  let perspective_v = 1.866 * view_height in
+  let cam_dist      = (1200.0 + (perspective_v - 1200.0) * 0.2) * zoom_out in
+
+  -- View = R^T * (world - cam_pos), with cam_pos = Y*z_cam + (140,0,0).
+  -- R^T*z_cam = (0,0,1), so the Y term only shifts view.z by -Y.
+  -- R^T*(140,0,0) = 140 * (x_cam.x, y_cam.x, z_cam.x).
+  let view_x = x_cam_x * w_x                 + x_cam_z * w_z - cam_shift_x * x_cam_x in
+  let view_y = y_cam_x * w_x + y_cam_y * w_y + y_cam_z * w_z - cam_shift_x * y_cam_x in
+  let view_z = z_cam_x * w_x + z_cam_y * w_y + z_cam_z * w_z - cam_dist - cam_shift_x * z_cam_x in
+
+  let aspect = view_width / view_height in
   let near = 2.0 in
   let far = 17000.0 in
-  let cx = f * tx / aspect in
-  let cy = f * ty in
-  -- Vulkan clip-space z ∈ [0, w]; w = -tz for perspective divide.
-  let neg_tz = 0.0 - tz in
+  let cx = fov_f * view_x / aspect in
+  let cy = fov_f * view_y in
+  -- Vulkan clip-space z ∈ [0, w]; w = -view_z for perspective divide.
+  let neg_tz = 0.0 - view_z in
   let cz = (far / (far - near)) * neg_tz + (0.0 - far * near / (far - near)) in
   let cw = neg_tz in
   @[cx, cy, cz, cw]
@@ -105,14 +167,13 @@ entry vertex_main
   let world  = @[position.x, position.y, position.z] in
   let n3     = @[normal.x, normal.y, normal.z] in
   let color  = @[vertex_color.x, vertex_color.y, vertex_color.z] in
-  let aspect = iResolution.x / iResolution.y in
   let speed    = track_meta.x in
   let bend     = track_meta.y in
   let duration = track_meta.z in
   let length   = track_meta.w in
   let off      = t_offset(iTime, speed, bend, duration) in
   let in_window = vert_s >= off && vert_s <= off + length in
-  let clip     = view_project(world, aspect) in
+  let clip     = view_project(world, iResolution.x, iResolution.y) in
   let cull_z   = if in_window then clip.z else 1.0e8 * clip.w in
   (@[clip.x, clip.y, cull_z, clip.w], n3, color, position.w)
 
