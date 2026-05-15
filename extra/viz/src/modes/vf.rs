@@ -25,6 +25,7 @@ pub fn run_vertex_fragment(
     vertex_count: u32,
     topology: wgpu::PrimitiveTopology,
     storage_dir: Option<PathBuf>,
+    index_buffer: Option<PathBuf>,
 ) -> Result<()> {
     let spec = PipelineSpec {
         shader: Shader::Spirv(path),
@@ -40,6 +41,7 @@ pub fn run_vertex_fragment(
         vertex_count,
         topology,
         storage_dir,
+        index_buffer,
     };
 
     let event_loop = EventLoop::new().context("failed to create event loop")?;

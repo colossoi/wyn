@@ -162,6 +162,12 @@ enum Command {
         /// share its bind group).
         #[arg(long)]
         storage_dir: Option<PathBuf>,
+        /// Flat little-endian u32 index buffer file. When present, viz
+        /// sets it via `set_index_buffer` and dispatches `draw_indexed`
+        /// with `file_size / 4` indices (`--vertex-count` is ignored).
+        /// Without this, viz does a non-indexed `draw(0..vertex_count)`.
+        #[arg(long)]
+        index_buffer: Option<PathBuf>,
     },
     /// Run a compute shader (headless)
     #[command(name = "compute")]
@@ -322,6 +328,7 @@ fn main() -> Result<()> {
             vertex_count,
             topology,
             storage_dir,
+            index_buffer,
         } => {
             let (vertex_name, fragment_name) = resolve_entry_points(&path, vertex, fragment)?;
             modes::vf::run_vertex_fragment(
@@ -338,6 +345,7 @@ fn main() -> Result<()> {
                 vertex_count,
                 topology.into(),
                 storage_dir,
+                index_buffer,
             )?;
         }
         Command::Compute {

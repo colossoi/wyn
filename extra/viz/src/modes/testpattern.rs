@@ -68,6 +68,7 @@ pub fn run_test_pattern(max_frames: Option<u32>, verbose: bool) -> Result<()> {
         vertex_count: 3,
         topology: wgpu::PrimitiveTopology::TriangleList,
         storage_dir: None,
+        index_buffer: None,
     };
     let event_loop = EventLoop::new().context("failed to create event loop")?;
     let mut app = App::new(spec);

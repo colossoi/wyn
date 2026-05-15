@@ -15,8 +15,9 @@ echo OK: scene.spv built and validated
 echo.
 echo To render:
 echo   target\release\viz.exe vf testfiles\playground\acko_masthead\scene.spv ^
---vertex-count 62792 --topology point-list --shadertoy ^
---storage-dir testfiles\playground\acko_masthead -v
+--topology triangle-list --shadertoy ^
+--storage-dir testfiles\playground\acko_masthead ^
+--index-buffer testfiles\playground\acko_masthead\indices.bin -v
 goto :eof
 
 :fail

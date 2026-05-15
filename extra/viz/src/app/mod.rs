@@ -52,6 +52,10 @@ pub struct PipelineSpec {
     /// shader's `storage_buffer` bindings. Requires `--shadertoy`
     /// (the storage buffers share its bind group).
     pub storage_dir: Option<PathBuf>,
+    /// Optional flat little-endian u32 index buffer. When present, viz
+    /// uses `draw_indexed(0..(file_size/4))`; when absent, falls back
+    /// to non-indexed `draw(0..vertex_count)`.
+    pub index_buffer: Option<PathBuf>,
 }
 
 /// Where the WGSL/SPIR-V module comes from.
@@ -105,6 +109,9 @@ struct State {
     /// Per-attribute vertex buffers; bound in order via
     /// `set_vertex_buffer` each frame.
     vertex_buffers: Vec<wgpu::Buffer>,
+    /// Optional u32 index buffer + its element count; when `Some`,
+    /// render() uses `draw_indexed` and `vertex_count` is ignored.
+    index_buffer: Option<(wgpu::Buffer, u32)>,
 }
 
 impl State {
@@ -227,6 +234,31 @@ impl State {
             Shader::Wgsl(_) => vertex_buffers::VertexBuffers::empty(),
         };
 
+        // Optional index buffer — flat little-endian u32. Indexed draws
+        // when present; non-indexed `draw(0..vertex_count)` otherwise.
+        let index_buffer = if let Some(path) = spec.index_buffer.as_deref() {
+            let data = std::fs::read(path)
+                .with_context(|| format!("viz vf --index-buffer: reading {:?}", path))?;
+            if data.len() % 4 != 0 {
+                return Err(anyhow::anyhow!(
+                    "viz vf --index-buffer: {:?} is {} bytes, not a multiple of 4 (u32 indices)",
+                    path,
+                    data.len(),
+                ));
+            }
+            let count = (data.len() / 4) as u32;
+            let buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("index_buffer"),
+                size: data.len() as u64,
+                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            queue.write_buffer(&buf, 0, &data);
+            Some((buf, count))
+        } else {
+            None
+        };
+
         // wgpu requires set indices in the pipeline layout to be
         // contiguous from 0; if the shadertoy uniforms live at set > 0,
         // we need an empty bind group at every lower set.
@@ -335,6 +367,7 @@ impl State {
             vertex_count: spec.vertex_count,
             _storage_buffers: storage_buffers,
             vertex_buffers: vertex_buffers.buffers,
+            index_buffer,
         })
     }
 
@@ -435,7 +468,15 @@ impl State {
                     for (slot, buf) in self.vertex_buffers.iter().enumerate() {
                         rpass.set_vertex_buffer(slot as u32, buf.slice(..));
                     }
-                    rpass.draw(0..self.vertex_count, 0..1);
+                    match &self.index_buffer {
+                        Some((buf, count)) => {
+                            rpass.set_index_buffer(buf.slice(..), wgpu::IndexFormat::Uint32);
+                            rpass.draw_indexed(0..*count, 0, 0..1);
+                        }
+                        None => {
+                            rpass.draw(0..self.vertex_count, 0..1);
+                        }
+                    }
                 }
 
                 self.queue.submit(Some(encoder.finish()));
