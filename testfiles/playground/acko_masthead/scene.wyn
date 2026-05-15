@@ -226,9 +226,11 @@ entry vertex_main
 def sat_clamp(x: f32) f32 = clamp(x, 0.0, 1.0)
 
 -- Sun + zenith in view space, precomputed: R^T applied to world
--- direction. Sun world (0.416, 0.371, 0.619) normalized, zenith
--- world (0, 1, 0).
-def sun_view: vec3f32 = @[0.8443, 0.3497, 0.4059]
+-- direction. Sun world (0.416, 0.371, 0.619) is intentionally NOT
+-- normalized — the original TrackShader uses `vec3(.416, .371, .619)`
+-- as a length-0.833 vector, so all diffuse dots scale by that factor.
+-- Zenith world (0, 1, 0) is unit.
+def sun_view: vec3f32 = @[0.7034, 0.2912, 0.3380]
 def zenith_view: vec3f32 = @[0.0, 0.9636, 0.2667]
 
 #[fragment]
