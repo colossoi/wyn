@@ -80,7 +80,7 @@ def fov_f: f32 = 3.7320508
 -- original.
 def zoom_out: f32 = 1.5
 
-def view_project(p: vec3f32, view_width: f32, view_height: f32) vec4f32 =
+def view_transform(p: vec3f32, view_height: f32) vec3f32 =
   -- visibleHolder offset (0, -10, +200).
   let w_x = p.x in
   let w_y = p.y - 10.0 in
@@ -96,17 +96,26 @@ def view_project(p: vec3f32, view_width: f32, view_height: f32) vec4f32 =
   let view_x = x_cam_x * w_x                 + x_cam_z * w_z - cam_shift_x * x_cam_x in
   let view_y = y_cam_x * w_x + y_cam_y * w_y + y_cam_z * w_z - cam_shift_x * y_cam_x in
   let view_z = z_cam_x * w_x + z_cam_y * w_y + z_cam_z * w_z - cam_dist - cam_shift_x * z_cam_x in
+  @[view_x, view_y, view_z]
 
-  let aspect = view_width / view_height in
+def perspective_project(v: vec3f32, aspect: f32) vec4f32 =
   let near = 2.0 in
   let far = 17000.0 in
-  let cx = fov_f * view_x / aspect in
-  let cy = fov_f * view_y in
+  let cx = fov_f * v.x / aspect in
+  let cy = fov_f * v.y in
   -- Vulkan clip-space z ∈ [0, w]; w = -view_z for perspective divide.
-  let neg_tz = 0.0 - view_z in
+  let neg_tz = 0.0 - v.z in
   let cz = (far / (far - near)) * neg_tz + (0.0 - far * near / (far - near)) in
   let cw = neg_tz in
   @[cx, cy, cz, cw]
+
+-- Transform a direction (sun, zenith, etc.) from world to view space.
+-- For a pure-rotation R, R^T * d gives the direction in the camera's frame.
+def world_to_view_dir(d: vec3f32) vec3f32 =
+  let x = x_cam_x * d.x                 + x_cam_z * d.z in
+  let y = y_cam_x * d.x + y_cam_y * d.y + y_cam_z * d.z in
+  let z = z_cam_x * d.x + z_cam_y * d.y + z_cam_z * d.z in
+  @[x, y, z]
 
 ------------------------------------------------------------
 -- Intro animation: the H(t) curve from combo.min.js's Track.update
@@ -139,17 +148,29 @@ def t_offset(time: f32, speed: f32, bend: f32, duration: f32) f32 =
 ------------------------------------------------------------
 -- Vertex shader
 --
---   location 0: position     (x, y, z, ao)
---   location 1: normal       (nx, ny, nz, _)
---   location 2: vertex_color (r, g, b, _)
---   location 3: vert_s       arc-length offset from this track's `initial`
---   location 4: track_meta   (speed, bend, duration, length)
+--   Inputs (per-vertex):
+--     location 0: position     (x, y, z, ao)
+--     location 1: normal       (nx, ny, nz, _)
+--     location 2: vertex_color (r, g, b, _)
+--     location 3: vert_s       arc-length offset from track's `initial`
+--     location 4: track_meta   (speed, bend, duration, length)
+--
+--   Outputs (varyings):
+--     location 0: view-space normal (un-normalized — the rasterizer's
+--                 interpolation produces nlen < 1 across facets, which
+--                 the fragment shader uses for the silhouette/outline
+--                 term and for silhouette darkening on the zenith dot).
+--     location 1: vertex color
+--     location 2: AO factor
+--     location 3: view-space position (camera at origin in this frame,
+--                 so length(view_pos) is the per-fragment distance —
+--                 used for fog).
 --
 -- For visible vertices (vert_s ∈ [t_offset, t_offset + length]),
--- output normal clip-space position. For culled vertices, push
--- clip.z to a huge multiple of clip.w so the GPU's far-plane clip
--- collapses every boundary triangle to (effectively) zero area —
--- the cleanest cull achievable without a fragment-discard intrinsic.
+-- output normal clip-space position. For culled vertices, push clip.z
+-- to a huge multiple of clip.w so the GPU's far-plane clip collapses
+-- every boundary triangle to ~zero area — the cleanest cull achievable
+-- without a fragment-discard intrinsic.
 ------------------------------------------------------------
 #[vertex]
 entry vertex_main
@@ -160,53 +181,115 @@ entry vertex_main
   , #[location(4)] track_meta  : vec4f32
   )
   ( #[builtin(position)] vec4f32
-  , #[location(0)] vec3f32  -- world-space normal (rotated)
-  , #[location(1)] vec3f32  -- per-vertex color
-  , #[location(2)] f32      -- AO factor
+  , #[location(0)] vec3f32  -- view-space normal (un-normalized)
+  , #[location(1)] vec3f32  -- color
+  , #[location(2)] f32      -- AO
+  , #[location(3)] vec3f32  -- view-space position
   ) =
-  let world  = @[position.x, position.y, position.z] in
-  let n3     = @[normal.x, normal.y, normal.z] in
-  let color  = @[vertex_color.x, vertex_color.y, vertex_color.z] in
+  let world    = @[position.x, position.y, position.z] in
+  let n_world  = @[normal.x, normal.y, normal.z] in
+  let n_view   = world_to_view_dir(n_world) in
+  let color    = @[vertex_color.x, vertex_color.y, vertex_color.z] in
   let speed    = track_meta.x in
   let bend     = track_meta.y in
   let duration = track_meta.z in
   let length   = track_meta.w in
   let off      = t_offset(iTime, speed, bend, duration) in
   let in_window = vert_s >= off && vert_s <= off + length in
-  let clip     = view_project(world, iResolution.x, iResolution.y) in
+  let view_pos = view_transform(world, iResolution.y) in
+  let aspect   = iResolution.x / iResolution.y in
+  let clip     = perspective_project(view_pos, aspect) in
   let cull_z   = if in_window then clip.z else 1.0e8 * clip.w in
-  (@[clip.x, clip.y, cull_z, clip.w], n3, color, position.w)
+  (@[clip.x, clip.y, cull_z, clip.w], n_view, color, position.w, view_pos)
 
 ------------------------------------------------------------
--- Fragment shader (TrackShader-style lighting) — unchanged.
+-- Fragment shader — port of Acko.TrackShader (combo.min.js).
+--
+-- Lighting in view space: the rasterizer hands us interpolated
+-- un-normalized normals (length < 1 between vertices with
+-- differing normals — i.e., at silhouettes), which the shader
+-- exploits for two effects:
+--   1. `dz` uses the un-normalized normal so silhouettes get less
+--      zenith contribution (darker silhouette band).
+--   2. `outline = clamp(3 - nlen²·3, 0, 1)` ramps up at nlen<1 and
+--      brightens the body color, the comic-book outline look.
+--
+-- Diffuse range is compressed (`d*0.5 + 0.5`) so the shaded side
+-- floors at 0.5 rather than going to black — gives the bright,
+-- desaturated look of the original instead of harsh Lambert.
+--
+-- Fog mixes the lit color toward white (= the viz clear color)
+-- starting at distance 2200, so distant geometry fades into the
+-- background.
 ------------------------------------------------------------
 
-def sat_dot(a: vec3f32, b: vec3f32) f32 = clamp(dot(a, b), 0.0, 1.0)
+def sat_clamp(x: f32) f32 = clamp(x, 0.0, 1.0)
+
+-- Sun + zenith in view space, precomputed: R^T applied to world
+-- direction. Sun world (0.416, 0.371, 0.619) normalized, zenith
+-- world (0, 1, 0).
+def sun_view: vec3f32 = @[0.8443, 0.3497, 0.4059]
+def zenith_view: vec3f32 = @[0.0, 0.9636, 0.2667]
 
 #[fragment]
 entry fragment_main
-  ( #[location(0)] n_in: vec3f32
-  , #[location(1)] color: vec3f32
-  , #[location(2)] ao: f32
+  ( #[location(0)] n_in    : vec3f32
+  , #[location(1)] color   : vec3f32
+  , #[location(2)] ao      : f32
+  , #[location(3)] view_pos: vec3f32
   ) #[location(0)] vec4f32 =
-  let n = normalize(n_in) in
-  let sun    = normalize(@[0.416, 0.371, 0.619]) in
-  let zenith = @[0.0, 1.0, 0.0] in
+  let n_norm = normalize(n_in) in
 
-  let ds = sat_dot(n, sun) in
-  let dz = sat_dot(n, zenith) in
-  let diff_r = ds * 1.5 + dz * 0.1 in
-  let diff_g = ds * 1.0 + dz * 0.4 in
-  let diff_b = ds * 0.7 + dz * 0.5 in
+  -- Diffuse: sun with normalized N, zenith with un-normalized N
+  -- (silhouettes darken because nlen < 1 reduces the dot product).
+  let ds = sat_clamp(dot(n_norm, sun_view)) in
+  let dz = sat_clamp(dot(n_in,   zenith_view)) in
+  let diff0_r = ds * 1.5 + dz * 0.1 in
+  let diff0_g = ds * 1.0 + dz * 0.4 in
+  let diff0_b = ds * 0.7 + dz * 0.5 in
 
-  let view_dir = @[0.0, 0.0, 1.0] in
-  let half     = normalize(@[sun.x + view_dir.x, sun.y + view_dir.y, sun.z + view_dir.z]) in
-  let spec     = pow(sat_dot(n, half), 4.0) * 0.15 in
-  let spec_col = @[sqrt(color.x), sqrt(color.y), sqrt(color.z)] in
+  -- Range compression (original's `diffuse = diffuse*0.5 + 0.5`,
+  -- with ambientCorrection=0): floors the dark side at 0.5.
+  let diff_r = diff0_r * 0.5 + 0.5 in
+  let diff_g = diff0_g * 0.5 + 0.5 in
+  let diff_b = diff0_b * 0.5 + 0.5 in
 
-  let ao_term = 0.5 + 0.5 * ao in
+  -- Silhouette outline boost.
+  let nlen2 = dot(n_in, n_in) in
+  let outline = clamp(3.0 - nlen2 * 3.0, 0.0, 1.0) in
+  let outline_mult = 1.0 + outline * 0.35 in
 
-  let lit_r = diff_r * color.x * ao_term + spec * spec_col.x in
-  let lit_g = diff_g * color.y * ao_term + spec * spec_col.y in
-  let lit_b = diff_b * color.z * ao_term + spec * spec_col.z in
-  @[sqrt(lit_r), sqrt(lit_g), sqrt(lit_b), 1.0]
+  -- Half-vector specular. Camera is at origin in view space, so the
+  -- direction toward the camera is normalize(-view_pos).
+  let view_dir = normalize(@[0.0 - view_pos.x, 0.0 - view_pos.y, 0.0 - view_pos.z]) in
+  let half     = normalize(@[sun_view.x + view_dir.x, sun_view.y + view_dir.y, sun_view.z + view_dir.z]) in
+  let spec     = pow(sat_clamp(dot(n_norm, half)), 4.0) in
+  let spec_r   = sqrt(color.x) * 0.15 in
+  let spec_g   = sqrt(color.y) * 0.15 in
+  let spec_b   = sqrt(color.z) * 0.15 in
+
+  -- AO mix by luminance: dark regions get tinted by the base color,
+  -- lit regions stay near-white.
+  let lum     = diff_r * 0.299 + diff_g * 0.587 + diff_b * 0.114 in
+  let ao_dark = (ao * ao + ao) * 0.5 in
+  let inv_lum = 1.0 - lum in
+  let ao_r = color.x * ao_dark * inv_lum + ao * lum in
+  let ao_g = color.y * ao_dark * inv_lum + ao * lum in
+  let ao_b = color.z * ao_dark * inv_lum + ao * lum in
+
+  -- Combine: ao · (diffuse · color · outline_boost + specular · spec_col).
+  let lit_r = ao_r * (diff_r * color.x * outline_mult + spec * spec_r) in
+  let lit_g = ao_g * (diff_g * color.y * outline_mult + spec * spec_g) in
+  let lit_b = ao_b * (diff_b * color.z * outline_mult + spec * spec_b) in
+
+  -- Fog toward white. exp(-(d-2200)·0.00022): no fog at d=2200,
+  -- ramps to ~0.18 at d=10000.
+  let view_dist = sqrt(view_pos.x * view_pos.x + view_pos.y * view_pos.y + view_pos.z * view_pos.z) in
+  let fog       = sat_clamp(exp(0.0 - (view_dist - 2200.0) * 0.00022)) in
+  let inv_fog   = 1.0 - fog in
+  let fog_r     = inv_fog + lit_r * fog in
+  let fog_g     = inv_fog + lit_g * fog in
+  let fog_b     = inv_fog + lit_b * fog in
+
+  -- Gamma.
+  @[sqrt(fog_r), sqrt(fog_g), sqrt(fog_b), 1.0]

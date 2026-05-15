@@ -468,9 +468,13 @@ impl State {
                             resolve_target: None,
                             ops: Operations {
                                 load: LoadOp::Clear(Color {
-                                    r: 0.02,
-                                    g: 0.02,
-                                    b: 0.02,
+                                    // Linear white — surface is non-sRGB, so clear
+                                    // values display directly. Matches the original
+                                    // masthead's background (and lets its fog math,
+                                    // ported below, fade distant geometry into it).
+                                    r: 1.0,
+                                    g: 1.0,
+                                    b: 1.0,
                                     a: 1.0,
                                 }),
                                 store: StoreOp::Store,
