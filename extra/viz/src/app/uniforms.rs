@@ -123,7 +123,10 @@ fn load_sidecar_storage(spv_path: &Path) -> Vec<StorageDecl> {
                 .bindings
                 .iter()
                 .filter_map(|b| {
-                    if let Binding::StorageBuffer { set, binding, name, .. } = b {
+                    if let Binding::StorageBuffer {
+                        set, binding, name, ..
+                    } = b
+                    {
                         Some(StorageDecl {
                             set: *set,
                             binding: *binding,
@@ -322,18 +325,12 @@ pub fn build_shadertoy(
     // Storage buffers, if a `--storage-dir <dir>` was supplied. Each
     // `storage_buffer` binding the sidecar declares is filled from
     // `<dir>/<binding_name>.bin` — name-matched, one file per buffer.
-    let storage_decls = if storage_dir.is_some() {
-        load_sidecar_storage(spv_path)
-    } else {
-        Vec::new()
-    };
+    let storage_decls = if storage_dir.is_some() { load_sidecar_storage(spv_path) } else { Vec::new() };
+    // It's fine for a shader to declare no storage buffers at all —
+    // a vertex-attribute shader puts its data in vertex buffers, not
+    // storage. `build_vertex_buffers` covers that side. An empty
+    // `storage_decls` here just produces an empty `storage_buffers`.
     let storage_buffers: Vec<Buffer> = if let Some(dir) = storage_dir {
-        if storage_decls.is_empty() {
-            return Err(anyhow!(
-                "viz vf --storage-dir: shader's sidecar declares no storage_buffer bindings; \
-                 nothing to upload"
-            ));
-        }
         if let Some(stray) = storage_decls.iter().find(|s| s.set != bind_group_set) {
             return Err(anyhow!(
                 "viz vf --storage-dir: storage binding '{}' is in descriptor set {} but the \
@@ -395,16 +392,16 @@ pub fn build_shadertoy(
             }),
         })
         .collect();
-    group_entries.extend(storage_decls.iter().zip(&storage_buffers).map(|(d, buf)| {
-        BindGroupEntry {
+    group_entries.extend(
+        storage_decls.iter().zip(&storage_buffers).map(|(d, buf)| BindGroupEntry {
             binding: d.binding,
             resource: BindingResource::Buffer(wgpu::BufferBinding {
                 buffer: buf,
                 offset: 0,
                 size: None,
             }),
-        }
-    }));
+        }),
+    );
 
     let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
         label: Some("uniform_bind_group_layout"),

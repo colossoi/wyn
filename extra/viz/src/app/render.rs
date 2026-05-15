@@ -71,6 +71,12 @@ pub fn build_spirv_render_pipeline(
     fragment_entry: &str,
     shadertoy_uniforms: Option<(&BindGroupLayout, Option<&BindGroupLayout>, u32)>,
     topology: wgpu::PrimitiveTopology,
+    // One per `#[location(n)]` vertex-shader input attribute, in
+    // declaration order: `(format, shader_location)`. Each becomes its
+    // own `VertexBufferLayout` (one buffer per attribute, offset 0,
+    // stride = format byte size). Empty for shaders without vertex
+    // attributes.
+    vertex_attribs: &[(wyn_pipeline_descriptor::VertexFormat, u32)],
 ) -> Result<RenderPipeline> {
     let module =
         load_spirv_module(device, path).with_context(|| format!("load SPIR-V module {:?}", path))?;
@@ -94,13 +100,34 @@ pub fn build_spirv_render_pipeline(
         push_constant_ranges: &[],
     });
 
+    // One `wgpu::VertexAttribute` + matching `VertexBufferLayout` per
+    // declared `#[location(n)]` attribute. Owned locally so both arrays
+    // live until `create_render_pipeline` returns.
+    let wgpu_attribs: Vec<wgpu::VertexAttribute> = vertex_attribs
+        .iter()
+        .map(|(fmt, location)| wgpu::VertexAttribute {
+            format: super::vertex_buffers::wgpu_vertex_format(*fmt),
+            offset: 0,
+            shader_location: *location,
+        })
+        .collect();
+    let vertex_buffer_layouts: Vec<wgpu::VertexBufferLayout> = wgpu_attribs
+        .iter()
+        .zip(vertex_attribs.iter())
+        .map(|(attr, (fmt, _))| wgpu::VertexBufferLayout {
+            array_stride: fmt.byte_size() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: std::slice::from_ref(attr),
+        })
+        .collect();
+
     Ok(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("pipeline"),
         layout: Some(&layout),
         vertex: VertexState {
             module: &module,
             entry_point: Some(vertex_entry),
-            buffers: &[],
+            buffers: &vertex_buffer_layouts,
             compilation_options: Default::default(),
         },
         fragment: Some(FragmentState {

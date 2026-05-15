@@ -5,6 +5,7 @@
 
 mod render;
 mod uniforms;
+mod vertex_buffers;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -101,6 +102,9 @@ struct State {
     /// Host-uploaded storage buffers; held only to keep them alive for
     /// the bind group's lifetime.
     _storage_buffers: Vec<wgpu::Buffer>,
+    /// Per-attribute vertex buffers; bound in order via
+    /// `set_vertex_buffer` each frame.
+    vertex_buffers: Vec<wgpu::Buffer>,
 }
 
 impl State {
@@ -212,6 +216,17 @@ impl State {
         };
         let uniform_bind_group_set = shadertoy.as_ref().map(|s| s.bind_group_set).unwrap_or(0);
 
+        // Vertex buffers from the sidecar's `vertex_inputs`. Loaded
+        // from the same `--storage-dir` as the storage buffers, one
+        // `.bin` per attribute. Empty for shaders without
+        // `#[location(n)]` vertex inputs.
+        let vertex_buffers = match &spec.shader {
+            Shader::Spirv(path) => {
+                vertex_buffers::build_vertex_buffers(&device, &queue, path, spec.storage_dir.as_deref())?
+            }
+            Shader::Wgsl(_) => vertex_buffers::VertexBuffers::empty(),
+        };
+
         // wgpu requires set indices in the pipeline layout to be
         // contiguous from 0; if the shadertoy uniforms live at set > 0,
         // we need an empty bind group at every lower set.
@@ -256,6 +271,7 @@ impl State {
                         )
                     }),
                     spec.topology,
+                    &vertex_buffers.attribs,
                 )?;
                 let (rb, tb, mb, db, sb, bg) = match shadertoy {
                     Some(s) => (
@@ -318,6 +334,7 @@ impl State {
             verbose,
             vertex_count: spec.vertex_count,
             _storage_buffers: storage_buffers,
+            vertex_buffers: vertex_buffers.buffers,
         })
     }
 
@@ -414,6 +431,9 @@ impl State {
                             }
                         }
                         rpass.set_bind_group(self.uniform_bind_group_set, bind_group, &[]);
+                    }
+                    for (slot, buf) in self.vertex_buffers.iter().enumerate() {
+                        rpass.set_vertex_buffer(slot as u32, buf.slice(..));
                     }
                     rpass.draw(0..self.vertex_count, 0..1);
                 }

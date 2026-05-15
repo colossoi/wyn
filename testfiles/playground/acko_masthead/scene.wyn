@@ -1,56 +1,38 @@
 -- Scene pass: lit 3D ribbons of acko.net's track geometry.
 --
--- Geometry comes from host-uploaded storage buffers (`positions`,
--- `normals`, `vertex_colors`), filled by viz from a `geometry.bin`
--- the M1 extractor produces. Keeping the geometry out of the SPIR-V
--- module keeps this shader tiny no matter how many vertices there are.
+-- Geometry comes in as per-vertex attributes from vertex buffers viz
+-- uploads — the way the original's `BufferGeometry` does it. Camera
+-- orbits the model around Y at iTime · 0.3 rad/s; geometry size never
+-- touches the SPIR-V module.
 --
 -- Original: Acko.TrackShader, reverse-engineered from combo.min.js —
---           sun + zenith diffuse, half-vector specular, fog, AO blend.
---
--- This first cut renders one vertex per cross-section ring vertex
--- (PointList topology) — proper tube triangles come later. Camera
--- orbits the model around Y at iTime · 0.3 rad/s.
+--           sun + zenith diffuse, half-vector specular, AO blend.
 
 open f32
 
 #[uniform(set = 1, binding = 0)] def iResolution: vec3f32
 #[uniform(set = 1, binding = 1)] def iTime: f32
 
--- Host-uploaded geometry. Each is N entries long (N = --vertex-count).
--- set 0 is compiler-reserved, so these sit alongside the uniforms in
--- set 1, just past the two uniform bindings.
---   positions[i]     = (x, y, z, ao)
---   normals[i]       = (nx, ny, nz, 1.0)
---   vertex_colors[i] = (r, g, b, 1.0)
-#[storage(set = 1, binding = 2, access = read)] def positions: []vec4f32
-#[storage(set = 1, binding = 3, access = read)] def normals: []vec4f32
-#[storage(set = 1, binding = 4, access = read)] def vertex_colors: []vec4f32
-
 ------------------------------------------------------------
 -- Camera + projection
 --
 -- Inlined view × projection as a function of iTime so we don't
--- need a host-side MVP upload. The model space spans roughly
--- (±450 in x, -100..+500 in y, ±400 in z); we pull the camera
--- back along z, rotate the model around y, and apply a 60° fov
--- perspective.
+-- need a host-side MVP upload. The model spans roughly
+-- (±450 in x, -100..+500 in y, ±400 in z); pull the camera back
+-- along z, rotate the model around y, apply a 60° fov perspective.
 ------------------------------------------------------------
 
--- Rotate (x, z) by angle. Used both for vertex positions and normals.
+-- Rotate (x, z) by (c, s) = (cos θ, sin θ). Used for positions + normals.
 def rotate_y(v: vec3f32, c: f32, s: f32) vec3f32 =
   @[c * v.x + s * v.z, v.y, 0.0 - s * v.x + c * v.z]
 
--- View × projection of a world-space point. Returns clip-space vec4.
 def view_project(p: vec3f32, t: f32, aspect: f32) vec4f32 =
   let c = cos(t * 0.3) in
   let s = sin(t * 0.3) in
   let r = rotate_y(p, c, s) in
-  -- Translate so the model centers around z = -1500 (in front of camera).
   let tx = r.x in
   let ty = r.y in
   let tz = r.z - 1500.0 in
-  -- Perspective projection. fov_y = 60° → f = 1 / tan(30°) ≈ 1.732.
   let f = 1.732 in
   let near = 1.0 in
   let far = 5000.0 in
@@ -63,33 +45,41 @@ def view_project(p: vec3f32, t: f32, aspect: f32) vec4f32 =
   @[cx, cy, cz, cw]
 
 ------------------------------------------------------------
--- Vertex shader
+-- Vertex shader — per-vertex attributes from vertex buffers.
+--
+--   #[location(0)] position     : vec4f32  (x, y, z, ao)
+--   #[location(1)] normal       : vec4f32  (nx, ny, nz, _)
+--   #[location(2)] vertex_color : vec4f32  (r, g, b, _)
+--
+-- Each attribute is its own vertex buffer (one .bin per attribute,
+-- the descriptor's vertex_inputs convention). viz binds them at
+-- locations 0/1/2 via set_vertex_buffer.
 ------------------------------------------------------------
 #[vertex]
-entry vertex_main(#[builtin(vertex_index)] i: i32)
+entry vertex_main
+  ( #[location(0)] position: vec4f32
+  , #[location(1)] normal: vec4f32
+  , #[location(2)] vertex_color: vec4f32
+  )
   ( #[builtin(position)] vec4f32
   , #[location(0)] vec3f32      -- world-space normal (rotated)
   , #[location(1)] vec3f32      -- per-vertex color
   , #[location(2)] f32          -- AO factor
   ) =
-  let pos4   = positions[i] in
-  let nrm4   = normals[i]   in
-  let col4   = vertex_colors[i] in
-  let world  = @[pos4.x, pos4.y, pos4.z] in
-  let normal = @[nrm4.x, nrm4.y, nrm4.z] in
-  let color  = @[col4.x, col4.y, col4.z] in
+  let world  = @[position.x, position.y, position.z] in
+  let n3     = @[normal.x, normal.y, normal.z] in
+  let color  = @[vertex_color.x, vertex_color.y, vertex_color.z] in
   let aspect = iResolution.x / iResolution.y in
   let clip   = view_project(world, iTime, aspect) in
   let c      = cos(iTime * 0.3) in
   let s      = sin(iTime * 0.3) in
-  let n_rot  = rotate_y(normal, c, s) in
-  (clip, n_rot, color, pos4.w)
+  let n_rot  = rotate_y(n3, c, s) in
+  (clip, n_rot, color, position.w)
 
 ------------------------------------------------------------
--- Fragment shader (TrackShader-style lighting)
+-- Fragment shader (TrackShader-style lighting) — unchanged.
 ------------------------------------------------------------
 
--- Saturated dot product (matches the original's `leClamp`).
 def sat_dot(a: vec3f32, b: vec3f32) f32 = clamp(dot(a, b), 0.0, 1.0)
 
 #[fragment]
@@ -102,23 +92,19 @@ entry fragment_main
   let sun    = normalize(@[0.416, 0.371, 0.619]) in
   let zenith = @[0.0, 1.0, 0.0] in
 
-  -- Sun-side diffuse (warm) + zenith fill (cool teal).
   let ds = sat_dot(n, sun) in
   let dz = sat_dot(n, zenith) in
   let diff_r = ds * 1.5 + dz * 0.1 in
   let diff_g = ds * 1.0 + dz * 0.4 in
   let diff_b = ds * 0.7 + dz * 0.5 in
 
-  -- Half-vector specular against an eye-along-+z view.
   let view_dir = @[0.0, 0.0, 1.0] in
   let half     = normalize(@[sun.x + view_dir.x, sun.y + view_dir.y, sun.z + view_dir.z]) in
   let spec     = pow(sat_dot(n, half), 4.0) * 0.15 in
   let spec_col = @[sqrt(color.x), sqrt(color.y), sqrt(color.z)] in
 
-  -- AO modulates ambient term: full at ao=1, half at ao=0.
   let ao_term = 0.5 + 0.5 * ao in
 
-  -- Final color: diffuse · color · ao + specular highlight, gamma-corrected.
   let lit_r = diff_r * color.x * ao_term + spec * spec_col.x in
   let lit_g = diff_g * color.y * ao_term + spec * spec_col.y in
   let lit_b = diff_b * color.z * ao_term + spec * spec_col.z in
