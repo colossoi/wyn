@@ -1,12 +1,14 @@
 -- Scene pass: lit 3D ribbons of acko.net's track geometry.
 --
 -- Geometry comes in as per-vertex attributes from vertex buffers viz
--- uploads — the way the original's `BufferGeometry` does it. Camera
--- orbits the model around Y at iTime · 0.3 rad/s; geometry size never
--- touches the SPIR-V module.
+-- uploads — the way the original's `BufferGeometry` does it. Each
+-- track's bake covers an extended arc-length range so the shader can
+-- slide the visible window through the intro animation without
+-- re-baking (the original re-bakes geometry every frame; we cull
+-- per-vertex instead).
 --
--- Original: Acko.TrackShader, reverse-engineered from combo.min.js —
---           sun + zenith diffuse, half-vector specular, AO blend.
+-- Original: Acko.TrackShader + Track.update, reverse-engineered from
+-- combo.min.js. Sun + zenith diffuse, half-vector specular, AO blend.
 
 open f32
 
@@ -14,22 +16,23 @@ open f32
 #[uniform(set = 1, binding = 1)] def iTime: f32
 
 ------------------------------------------------------------
--- Camera + projection
+-- Camera + static rotation
 --
--- Inlined view × projection as a function of iTime so we don't
--- need a host-side MVP upload. The model spans roughly
--- (±450 in x, -100..+500 in y, ±400 in z); pull the camera back
--- along z, rotate the model around y, apply a 60° fov perspective.
+-- Static off-axis Y rotation (0.4 rad) gives the masthead its
+-- characteristic 3/4 view. The model spans roughly ±450 in x,
+-- -100..+500 in y, ±400 in z; we pull the camera back along z with
+-- a 60° fov perspective. No camera animation — the animation is
+-- entirely in the per-track `travel` window slide (below).
 ------------------------------------------------------------
 
--- Rotate (x, z) by (c, s) = (cos θ, sin θ). Used for positions + normals.
 def rotate_y(v: vec3f32, c: f32, s: f32) vec3f32 =
   @[c * v.x + s * v.z, v.y, 0.0 - s * v.x + c * v.z]
 
-def view_project(p: vec3f32, t: f32, aspect: f32) vec4f32 =
-  let c = cos(t * 0.3) in
-  let s = sin(t * 0.3) in
-  let r = rotate_y(p, c, s) in
+def view_cos: f32 = cos(0.4)
+def view_sin: f32 = sin(0.4)
+
+def view_project(p: vec3f32, aspect: f32) vec4f32 =
+  let r = rotate_y(p, view_cos, view_sin) in
   let tx = r.x in
   let ty = r.y in
   let tz = r.z - 1500.0 in
@@ -45,36 +48,75 @@ def view_project(p: vec3f32, t: f32, aspect: f32) vec4f32 =
   @[cx, cy, cz, cw]
 
 ------------------------------------------------------------
--- Vertex shader — per-vertex attributes from vertex buffers.
+-- Intro animation: the H(t) curve from combo.min.js's Track.update
 --
---   #[location(0)] position     : vec4f32  (x, y, z, ao)
---   #[location(1)] normal       : vec4f32  (nx, ny, nz, _)
---   #[location(2)] vertex_color : vec4f32  (r, g, b, _)
+--   H_raw = max(0, (duration - t) / bend)
+--   H     = (H_raw < 0.5 ? H_raw^2 : H_raw - 0.25) * bend
+--   travel(t) = initial - H(t) * speed
 --
--- Each attribute is its own vertex buffer (one .bin per attribute,
--- the descriptor's vertex_inputs convention). viz binds them at
--- locations 0/1/2 via set_vertex_buffer.
+-- The smoothing is C1 at H_raw = 0.5 (both halves give 0.25 * bend
+-- there with matching slopes). At t=0, H = duration - 0.25*bend, so
+-- the visible window starts (duration - 0.25*bend) * speed worth of
+-- arc-length BEFORE `initial`. After `duration`, H = 0 and the
+-- masthead is static forever (the original zeros out speed/distance
+-- at that point; we just leave the formula at H=0).
+--
+-- Per-vertex `vert_s` is arc-length relative to the track's `initial`
+-- (so 0 means "at the rest start"). Per-vertex `track_meta` holds
+-- (speed, bend, duration, length) for that vertex's track.
+------------------------------------------------------------
+
+def smooth_h(h_raw: f32, bend: f32) f32 =
+  if h_raw < 0.5 then h_raw * h_raw * bend
+  else (h_raw - 0.25) * bend
+
+def t_offset(time: f32, speed: f32, bend: f32, duration: f32) f32 =
+  let h_raw  = max(0.0, (duration - time) / bend) in
+  let h      = smooth_h(h_raw, bend) in
+  0.0 - h * speed
+
+------------------------------------------------------------
+-- Vertex shader
+--
+--   location 0: position     (x, y, z, ao)
+--   location 1: normal       (nx, ny, nz, _)
+--   location 2: vertex_color (r, g, b, _)
+--   location 3: vert_s       arc-length offset from this track's `initial`
+--   location 4: track_meta   (speed, bend, duration, length)
+--
+-- For visible vertices (vert_s ∈ [t_offset, t_offset + length]),
+-- output normal clip-space position. For culled vertices, push
+-- clip.z to a huge multiple of clip.w so the GPU's far-plane clip
+-- collapses every boundary triangle to (effectively) zero area —
+-- the cleanest cull achievable without a fragment-discard intrinsic.
 ------------------------------------------------------------
 #[vertex]
 entry vertex_main
-  ( #[location(0)] position: vec4f32
-  , #[location(1)] normal: vec4f32
+  ( #[location(0)] position    : vec4f32
+  , #[location(1)] normal      : vec4f32
   , #[location(2)] vertex_color: vec4f32
+  , #[location(3)] vert_s      : f32
+  , #[location(4)] track_meta  : vec4f32
   )
   ( #[builtin(position)] vec4f32
-  , #[location(0)] vec3f32      -- world-space normal (rotated)
-  , #[location(1)] vec3f32      -- per-vertex color
-  , #[location(2)] f32          -- AO factor
+  , #[location(0)] vec3f32  -- world-space normal (rotated)
+  , #[location(1)] vec3f32  -- per-vertex color
+  , #[location(2)] f32      -- AO factor
   ) =
   let world  = @[position.x, position.y, position.z] in
   let n3     = @[normal.x, normal.y, normal.z] in
   let color  = @[vertex_color.x, vertex_color.y, vertex_color.z] in
   let aspect = iResolution.x / iResolution.y in
-  let clip   = view_project(world, iTime, aspect) in
-  let c      = cos(iTime * 0.3) in
-  let s      = sin(iTime * 0.3) in
-  let n_rot  = rotate_y(n3, c, s) in
-  (clip, n_rot, color, position.w)
+  let speed    = track_meta.x in
+  let bend     = track_meta.y in
+  let duration = track_meta.z in
+  let length   = track_meta.w in
+  let off      = t_offset(iTime, speed, bend, duration) in
+  let in_window = vert_s >= off && vert_s <= off + length in
+  let clip     = view_project(world, aspect) in
+  let cull_z   = if in_window then clip.z else 1.0e8 * clip.w in
+  let n_rot    = rotate_y(n3, view_cos, view_sin) in
+  (@[clip.x, clip.y, cull_z, clip.w], n_rot, color, position.w)
 
 ------------------------------------------------------------
 -- Fragment shader (TrackShader-style lighting) — unchanged.
