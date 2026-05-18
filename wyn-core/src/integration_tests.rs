@@ -489,6 +489,141 @@ entry frag(c: vec4f32) vec4f32 =
     );
 }
 
+/// Multiset of `(category, identifier)` pairs across every instruction
+/// in `ssa.functions` + `ssa.entry_points`. Used by structural-equivalence
+/// tests that need to compare two SSA programs while ignoring value-id
+/// renumbering, block-ordering, and other low-level details.
+fn inst_signature_multiset(ssa: &Program) -> std::collections::BTreeMap<String, usize> {
+    use crate::op::OpTag;
+    use crate::ssa::types::InstKind;
+    use std::collections::BTreeMap;
+
+    let signature = |kind: &InstKind| -> String {
+        match kind {
+            InstKind::Alloca { .. } => "Alloca".to_string(),
+            InstKind::Load { .. } => "Load".to_string(),
+            InstKind::Store { .. } => "Store".to_string(),
+            InstKind::ViewIndex { .. } => "ViewIndex".to_string(),
+            InstKind::OutputSlot { .. } => "OutputSlot".to_string(),
+            InstKind::Op { tag, .. } => format!(
+                "Op:{}",
+                match tag {
+                    OpTag::Call(name) => format!("Call({})", name),
+                    OpTag::Intrinsic { id, .. } => {
+                        let name = crate::builtins::by_id(*id).raw.surface_name;
+                        format!("Intrinsic({})", name)
+                    }
+                    OpTag::BinOp(s) => format!("BinOp({})", s),
+                    OpTag::UnaryOp(s) => format!("UnaryOp({})", s),
+                    // Literal values intentionally NOT included in the
+                    // signature — a constant-folding refactor shouldn't
+                    // make the test flake. Variant name alone is the
+                    // structural signal.
+                    OpTag::Int(_) => "Int".to_string(),
+                    OpTag::Uint(_) => "Uint".to_string(),
+                    OpTag::Float(_) => "Float".to_string(),
+                    OpTag::Bool(_) => "Bool".to_string(),
+                    OpTag::Unit => "Unit".to_string(),
+                    OpTag::Global(_) => "Global".to_string(),
+                    OpTag::Extern(_) => "Extern".to_string(),
+                    OpTag::Tuple(_) => "Tuple".to_string(),
+                    OpTag::Vector(_) => "Vector".to_string(),
+                    OpTag::Matrix { .. } => "Matrix".to_string(),
+                    OpTag::ArrayLit(_) => "ArrayLit".to_string(),
+                    OpTag::ArrayRange { .. } => "ArrayRange".to_string(),
+                    OpTag::Project { .. } => "Project".to_string(),
+                    OpTag::Index => "Index".to_string(),
+                    OpTag::Materialize => "Materialize".to_string(),
+                    OpTag::DynamicExtract => "DynamicExtract".to_string(),
+                    OpTag::StorageView(_) => "StorageView".to_string(),
+                    OpTag::StorageViewLen => "StorageViewLen".to_string(),
+                    OpTag::ViewIndex => "ViewIndex(pure)".to_string(),
+                    OpTag::OutputSlot { .. } => "OutputSlot(pure)".to_string(),
+                }
+            ),
+        }
+    };
+
+    let mut out: BTreeMap<String, usize> = BTreeMap::new();
+    let bodies = ssa
+        .functions
+        .iter()
+        .map(|f| &f.body.inner.insts)
+        .chain(ssa.entry_points.iter().map(|e| &e.body.inner.insts));
+    for insts in bodies {
+        for (_id, inst) in insts {
+            *out.entry(signature(&inst.data)).or_insert(0) += 1;
+        }
+    }
+    out
+}
+
+#[test]
+fn consuming_filter_length_matches_borrowing() {
+    // Sharpening `consuming_filter_skips_fresh_allocation`: that test
+    // only asserts on the uninit count, not on the indexed reads or
+    // `length(r)` extraction path. If the bounded result's `len` field
+    // gets the input's static capacity instead of the runtime
+    // write-cursor count, `length(r)` silently returns N rather than
+    // the actual positive-count — r[0] and r[1] still produce the
+    // first two kept elements (those slots were written), masking the
+    // bug. Anything that iterates `0..length(r)` would then read
+    // garbage past the real count.
+    //
+    // Test shape: same fragment against consuming (`*[N]T`) and
+    // borrowing (`[N]T`) inputs. Assert the lowered SSA instruction
+    // multisets are equal modulo the one extra `_w_intrinsic_uninit`
+    // call in the borrowing variant. If the consuming bounded wrapper
+    // short-circuits the length lookup to a constant, the consuming
+    // side will be missing the `_w_intrinsic_length` intrinsic the
+    // borrowing side has — multisets diverge, test fails.
+    let consuming = compile_to_ssa(
+        r#"
+def keep_pos(a: *[4]i32) ?k.[k]i32 = filter(|x: i32| x > 0, a)
+
+#[fragment]
+entry frag(c: vec4f32) vec4f32 =
+    let r = keep_pos([1, -2, 3, -4]) in
+    @[f32.i32(length(r)), f32.i32(r[0]), f32.i32(r[1]), 1.0]
+"#,
+    );
+    let borrowing = compile_to_ssa(
+        r#"
+def keep_pos(a: [4]i32) ?k.[k]i32 = filter(|x: i32| x > 0, a)
+
+#[fragment]
+entry frag(c: vec4f32) vec4f32 =
+    let r = keep_pos([1, -2, 3, -4]) in
+    @[f32.i32(length(r)), f32.i32(r[0]), f32.i32(r[1]), 1.0]
+"#,
+    );
+
+    let mut c_tags = inst_signature_multiset(&consuming);
+    let b_tags = inst_signature_multiset(&borrowing);
+
+    // Mod out the expected allocation-strategy difference: borrowing
+    // has one extra `_w_intrinsic_uninit` call.
+    let uninit = "Op:Intrinsic(_w_intrinsic_uninit)".to_string();
+    let c_uninit = c_tags.get(&uninit).copied().unwrap_or(0);
+    let b_uninit = b_tags.get(&uninit).copied().unwrap_or(0);
+    assert!(
+        b_uninit > c_uninit,
+        "expected borrowing to allocate more buffers than consuming \
+         (c={}, b={}) — consuming-filter probably regressed",
+        c_uninit,
+        b_uninit,
+    );
+    *c_tags.entry(uninit).or_insert(0) += b_uninit - c_uninit;
+
+    assert_eq!(
+        c_tags, b_tags,
+        "consuming vs borrowing filter SSA differs in non-allocation ops — \
+         likely a bounded-wrapper / length-extraction soundness bug. \
+         The two programs differ only in whether the filter result aliases \
+         the input buffer; the user-visible computation should be identical."
+    );
+}
+
 #[test]
 fn test_map_reduce_fusion_end_to_end() {
     let source = r#"
