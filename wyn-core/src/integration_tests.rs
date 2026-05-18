@@ -439,6 +439,57 @@ entry frag(c: vec4f32) vec4f32 =
 }
 
 #[test]
+fn consuming_filter_compiles_end_to_end() {
+    // `*[N]T` filter whose input is dead-after: ownership sets
+    // `consumes_input = true`, EGIR emits
+    // `SoacDestination::InputBuffer`, and `build_filter_loop`
+    // carries the input array as the destination buffer.
+    let _ssa = compile_to_ssa(
+        r#"
+def keep_pos(a: *[8]i32) ?k.[k]i32 = filter(|x: i32| x > 0, a)
+"#,
+    );
+}
+
+#[test]
+fn consuming_filter_skips_fresh_allocation() {
+    // Parallel of the Map / Scan allocation-count tests. Consuming
+    // filter carries the input as the destination buffer — no
+    // `_w_intrinsic_uninit` call. Non-consuming filter still
+    // allocates the destination.
+    let consuming_ssa = compile_to_ssa(
+        r#"
+def keep_pos(a: *[8]i32) ?k.[k]i32 = filter(|x: i32| x > 0, a)
+
+#[fragment]
+entry frag(c: vec4f32) vec4f32 =
+    let r = keep_pos([1, -2, 3, -4, 5, -6, 7, -8]) in
+    @[f32.i32(r[0]), 0.0, 0.0, 1.0]
+"#,
+    );
+    assert_eq!(
+        count_uninit_in_program(&consuming_ssa),
+        0,
+        "consuming filter (`*[N]T` input, dead-after) should not allocate a fresh buffer",
+    );
+
+    let borrowing_ssa = compile_to_ssa(
+        r#"
+def keep_pos(a: [8]i32) ?k.[k]i32 = filter(|x: i32| x > 0, a)
+
+#[fragment]
+entry frag(c: vec4f32) vec4f32 =
+    let r = keep_pos([1, -2, 3, -4, 5, -6, 7, -8]) in
+    @[f32.i32(r[0]), 0.0, 0.0, 1.0]
+"#,
+    );
+    assert!(
+        count_uninit_in_program(&borrowing_ssa) >= 1,
+        "non-consuming filter (caller-borrowed input) should allocate a fresh buffer",
+    );
+}
+
+#[test]
 fn test_map_reduce_fusion_end_to_end() {
     let source = r#"
 def globalArr: [4]f32 = [10.0, 20.0, 30.0, 40.0]

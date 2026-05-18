@@ -578,12 +578,13 @@ fn expand_one(
             input_array_type,
             input_elem_type,
             output_capacity_size,
-            destination: _,
+            destination,
         }) => {
             let pred_func = pred_func.clone();
             let arr_ty = input_array_type.clone();
             let elem_ty = input_elem_type.clone();
             let capacity_size = output_capacity_size.clone();
+            let destination = *destination;
 
             // Operand layout: [input, ...pred_captures].
             let arr_nid = se.operand_nodes[0];
@@ -603,6 +604,7 @@ fn expand_one(
                     pred_func,
                     captures,
                     result_node: result_nid,
+                    destination,
                 },
                 next_effect,
             );
@@ -1169,6 +1171,10 @@ struct FilterLoop {
     /// The original SOAC result NodeId. After expansion this becomes a
     /// `Tuple(buffer, count)` whose type is `Array[T, Size(N), Bounded]`.
     result_node: NodeId,
+    /// `Fresh` allocates a new capacity-N buffer via `uninit`. `InputBuffer`
+    /// reuses the input as the output buffer (the result `View` aliases
+    /// the input's backing slot). Ownership analysis decides which.
+    destination: SoacDestination,
 }
 
 fn build_filter_loop(
@@ -1242,16 +1248,27 @@ fn build_filter_loop(
     let i_in_nid = graph.add_block_param(header, 2, i32_ty.clone());
     graph.skeleton.blocks[header].params.push(i_in_nid);
 
-    // Preheader → header(uninit_buf, 0i32, 0i32).
-    let uninit_id = catalog().known().uninit;
-    let init_buf_nid = graph.intern_pure(
-        PureOp::Intrinsic {
-            id: uninit_id,
-            overload_idx: 0,
-        },
-        smallvec![],
-        buf_ty.clone(),
-    );
+    // Preheader → header(init_buf, 0i32, 0i32).
+    // The initial carried buffer differs by destination:
+    //   Fresh        → allocate a new capacity-N buffer via `uninit()`.
+    //   InputBuffer  → carry the input array directly (write-back in place).
+    let init_buf_nid = match spec.destination {
+        SoacDestination::Fresh => {
+            let uninit_id = catalog().known().uninit;
+            graph.intern_pure(
+                PureOp::Intrinsic {
+                    id: uninit_id,
+                    overload_idx: 0,
+                },
+                smallvec![],
+                buf_ty.clone(),
+            )
+        }
+        SoacDestination::InputBuffer => spec.arr_nid,
+        SoacDestination::OutputView => {
+            panic!("Filter[OutputView] not supported — see filter-consuming-input.md")
+        }
+    };
     let zero_i32_nid = graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty.clone());
     graph.skeleton.blocks[bid].term = SkeletonTerminator::Branch {
         target: header,
