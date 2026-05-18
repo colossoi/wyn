@@ -69,7 +69,7 @@ What you get "for free":
 | **TlcBufferSpecialized** | `tlc::buffer_specialize` | Storage buffer parameter specialization |
 | **TlcGeneratedLambdasFolded** | `tlc::inline` | Fold compiler-generated `_w_lambda_*` defs (from defunctionalization) back at call sites + DCE |
 | **TlcSmallInlined** | `tlc::inline` | Inline small user functions and constants |
-| **TlcParallelized** | `tlc::parallelize` | Per-entry SOAC parallelization **analysis**: pick strategy + workgroup + dispatch shape, reserve intermediate bindings, build the host `PipelineDescriptor`, and emit a declarative `ParallelizationPlan` per parallelized entry on the `ParallelizationResult.plans` map for EGIR to consume. Kernel lowering moved out — see `egir::parallelize` below. For reduce/redomap/scan this stage also still synthesizes the TLC-side phase entries (migration to EGIR pending) |
+| **TlcParallelized** | `tlc::parallelize` | Per-entry SOAC parallelization **analysis**: pick strategy + workgroup + dispatch shape, reserve intermediate bindings, build the host `PipelineDescriptor`, and emit a declarative `ParallelizationPlan` per parallelized entry on the `ParallelizationResult.plans` map for EGIR to consume. Kernel lowering happens EGIR-side — see `egir::parallelize` below |
 | **TlcReachable** | `tlc::inline` | Dead definition elimination |
 
 ### EGIR (Acyclic E-Graph IR)
@@ -107,22 +107,72 @@ or wire up storage views — those duplicate work EGIR already does
 well (SoA-tuple aware reads via `as_soa_tuple` / `emit_read_element`,
 OutputView wiring, storage-view construction).
 
-**EGIR `parallelize` consumes the plans** and tags planned entries'
-tail `PendingSoac` with a `Parallel { serial: Box<PendingSoac> }`
-wrapper. `egir::soac_expand` then dispatches on the wrapper:
-`Parallel { Map }` is emitted as a lane-indexed scalar kernel (load
-`gl_GlobalInvocationID`, bounds-check, single guarded scalar body),
-reusing all the existing element-read / OutputView machinery. The
-serial-loop builder remains in place for non-entry Maps (e.g. an
-intermediate `map` inside a function body) — those legitimately want
-a per-thread sequential walk.
+**EGIR `parallelize` consumes the plans** and rewrites planned entries
+according to each strategy. Per-SOAC shape:
 
-For reduce / redomap / scan the kernel synthesis still lives in TLC
-parallelize (chunked-per-lane bodies emitted as fresh phase Defs that
-re-enter the normal EGIR pipeline). Their migration to the same
-EGIR-side boundary is pending; the `ParallelizationPlan` shape already
-accommodates them (`PlannedBindings::Reduce` / `::Redomap` / `::Scan`
-variants).
+- **Map** — the tail `PendingSoac::Map` is wrapped in
+  `Parallel { serial: Box<PendingSoac> }`. `soac_expand` dispatches on
+  the wrapper to a lane-indexed scalar kernel (load
+  `gl_GlobalInvocationID`, bounds-check, single guarded scalar body),
+  reusing all the existing element-read / OutputView machinery. The
+  serial-loop builder remains in place for non-entry Maps (e.g. an
+  intermediate `map` inside a function body) — those legitimately want
+  a per-thread sequential walk.
+- **Reduce** — the original entry is rewritten in place as phase 1
+  (chunked input + store-to-`partials[tid]`) and a fresh phase 2
+  combine entry is synthesized via `EntryBuilder` from a `PendingSoac::
+  Reduce` over the partials array.
+- **Redomap** — same shape as Reduce phase 1 / phase 2, but phase 2
+  uses Redomap's pure `reduce_func` combiner; the NE subgraph is cloned
+  across EGraphs via `graph_ops::clone_pure_subgraph`.
+- **Scan** — three-phase structure. Phase 1 (in-place rewrite of the
+  original entry): chunks the scan's input + output views and appends a
+  chunked `PendingSoac::Reduce` plus a `Store` so each thread also
+  writes its final accumulator to `block_sums[tid]`. Phase 2 (synthesized,
+  1×1×1 dispatch): sequential `PendingSoac::Scan` over `block_sums` into
+  `block_offsets`. Phase 3 (synthesized, chunked): `PendingSoac::Map`
+  applying `op(elem, off)` to each element of `output[chunk]` with `off`
+  loaded from `block_offsets[tid]`. When the ownership pass marks the
+  scan's input as consumable (`*[]T`), phase 1 and phase 3 reroute
+  writes back to the input binding and the pipeline descriptor skips
+  the auto-output slot.
+
+### SOAC Implementation Status
+
+The seven SOAC variants (`SoacOp` in `tlc/mod.rs`) at varying stages of
+the pipeline. "Serial" = correct sequential lowering through
+`soac_expand`. "Consuming-input DPS" = the ownership pass marks a
+unique-and-dead input and the SOAC rewrites to write back in place
+instead of allocating a fresh output buffer. "Parallel" = EGIR-side
+parallelization fires on a compute-entry tail SOAC matching the
+strategy's shape.
+
+| SOAC               | Surface syntax                          | Serial | Consuming-input DPS | Parallel  |
+|--------------------|-----------------------------------------|--------|---------------------|-----------|
+| `Map`              | `map f xs`                              | ✓      | ✓                   | ✓ (lane-indexed) |
+| `Reduce`           | `reduce op ne xs`                       | ✓      | n/a (scalar result) | ✓ (chunked + combine) |
+| `Redomap`          | `reduce op ne (map f xs)` (fused)       | ✓      | n/a (scalar result) | ✓ (chunked + combine) |
+| `Scan`             | `scan op ne xs`                         | ✓      | ✓ wired (dormant — see below) | ✓ (3-phase Blelloch-style) |
+| `Filter`           | `filter pred xs`                        | ✓      | ✓                   | ✗ (no parallel impl) |
+| `Scatter`          | `scatter dest indices values`           | ✗ EGIR `convert_soac` rejects with `Unsupported` | n/a | ✗ |
+| `ReduceByIndex`    | histogram-style indexed reduction       | ✗ EGIR `convert_soac` rejects with `Unsupported` | n/a | ✗ (atomics not yet implemented) |
+
+Notes:
+- `Scan` consuming-input DPS is wired through Path B
+  (`egir::parallelize::transform_scan_entry` reroutes phase 1 + phase 3
+  writes back to the input binding when destination is `InputBuffer`),
+  but does not fire end-to-end today: it requires a `*[]T` entry param
+  to make the input look mutable to ownership, and `*[]T` for compute-
+  entry params currently mis-types as `Composite + Unsized` (panics in
+  the SPIR-V backend). Once that upstream type issue is fixed the
+  wiring activates with no further changes.
+- `Filter` parallelization would build on parallel `Scan` (prefix-sum
+  over the predicate mask to compute write offsets) — not yet wired.
+- The non-commutative-scan limitation: phase 3's call order is
+  `op(elem, off)` rather than the Futhark-correct `op(off, elem)`.
+  Sound for commutative associative ops (sum, max, min, AND, OR, XOR,
+  multiply). Non-commutative associative ops (string concat, matmul)
+  would need a `<op>_swap` wrapper function — not yet wired.
 
 ### SPIR-V Backend Optimizations
 
