@@ -37,8 +37,9 @@ pub enum ArrayProvenance {
     /// Anything else (entry-param array vars, SoA-tuple references, etc.).
     /// TLC analysis can't pin down `(set, binding)` for these, but EGIR
     /// can — the from_tlc / soac_expand machinery already handles
-    /// `Ref(Var(sym))` and `as_soa_tuple` shapes correctly. Used only
-    /// for Map (today); reduce/scan still demand Storage/Range.
+    /// `Ref(Var(sym))` and `as_soa_tuple` shapes correctly. Accepted
+    /// by every SOAC's parallelization gate post-EGIR-migration of
+    /// Map / Reduce / Redomap / Scan.
     Opaque,
 }
 
