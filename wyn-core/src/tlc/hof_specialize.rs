@@ -356,9 +356,14 @@ pub(super) fn apply_type_subst_to_soac(
             input: apply_type_subst_to_array_expr(input, subst, term_ids),
             consumes_input: *consumes_input,
         },
-        SoacOp::Filter { pred, input } => SoacOp::Filter {
+        SoacOp::Filter {
+            pred,
+            input,
+            consumes_input,
+        } => SoacOp::Filter {
             pred: apply_type_subst_to_soac_body(pred, subst, term_ids),
             input: apply_type_subst_to_array_expr(input, subst, term_ids),
+            consumes_input: *consumes_input,
         },
         SoacOp::Scatter {
             dest,
@@ -777,9 +782,14 @@ fn substitute_var_soac(
             input: substitute_var_array_expr(input, old_sym, new_sym, term_ids),
             consumes_input: *consumes_input,
         },
-        SoacOp::Filter { pred, input } => SoacOp::Filter {
+        SoacOp::Filter {
+            pred,
+            input,
+            consumes_input,
+        } => SoacOp::Filter {
             pred: substitute_var_soac_body(pred, old_sym, new_sym, term_ids),
             input: substitute_var_array_expr(input, old_sym, new_sym, term_ids),
+            consumes_input: *consumes_input,
         },
         SoacOp::Scatter {
             dest,

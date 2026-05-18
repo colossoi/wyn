@@ -222,6 +222,11 @@ pub enum PendingSoac {
         /// `Size(N)` — the input's static capacity, reused as the
         /// output buffer's capacity.
         output_capacity_size: Type<TypeName>,
+        /// `Fresh` (allocate a new `[N]T` buffer) or `InputBuffer`
+        /// (reuse the input array's backing slot as the output —
+        /// the result `View` aliases the input). `OutputView` is
+        /// not yet supported for Filter.
+        destination: SoacDestination,
     },
     /// Wrapper marking a SOAC as parallelized at the entry boundary. The
     /// `egir::parallelize` pass tags a planned compute entry's tail SOAC

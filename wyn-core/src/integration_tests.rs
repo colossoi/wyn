@@ -202,7 +202,7 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::Program, stage: &str) {
                 walk_lambda(&op.lam, bound, symbols, stage, def_name);
                 walk_lambda(&reduce_op.lam, bound, symbols, stage, def_name);
             }
-            SoacOp::Filter { pred, input } => {
+            SoacOp::Filter { pred, input, .. } => {
                 walk_array_expr(input, bound, symbols, stage, def_name);
                 walk_lambda(&pred.lam, bound, symbols, stage, def_name);
             }

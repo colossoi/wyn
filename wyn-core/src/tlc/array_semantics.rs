@@ -365,7 +365,7 @@ pub fn classify_soac(soac: &SoacOp) -> ArraySemantics {
             op: op.clone(),
             init: ne.clone(),
         },
-        SoacOp::Filter { pred, input } => ArraySemantics::Filter {
+        SoacOp::Filter { pred, input, .. } => ArraySemantics::Filter {
             input: input.clone(),
             pred: pred.clone(),
         },

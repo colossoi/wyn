@@ -452,7 +452,7 @@ impl<'p> Builder<'p> {
                 self.bind_reducer_params(&op.lam, input, soac_id);
                 self.visit_soac_body(op);
             }
-            SoacOp::Filter { pred, input } => {
+            SoacOp::Filter { pred, input, .. } => {
                 self.visit_array_expr(input);
                 if let Some((sym, ty)) = pred.lam.params.first() {
                     if !types::is_copy(ty) {
@@ -908,7 +908,7 @@ impl<'m> Liveness<'m> {
                 let after_input = self.analyze_array_expr(input, after_op);
                 self.analyze(ne, after_input)
             }
-            SoacOp::Filter { pred, input } => {
+            SoacOp::Filter { pred, input, .. } => {
                 let after_pred = self.soac_envelope_fixed_point(pred, &per_call_defs, live_after);
                 self.analyze_array_expr(input, after_pred)
             }

@@ -634,12 +634,17 @@ impl SoaTransformer {
                     consumes_input: *consumes_input,
                 }
             }
-            SoacOp::Filter { pred, input } => {
+            SoacOp::Filter {
+                pred,
+                input,
+                consumes_input,
+            } => {
                 let new_pred = self.transform_soac_body(pred);
                 let new_input = self.transform_array_expr(input);
                 SoacOp::Filter {
                     pred: new_pred,
                     input: new_input,
+                    consumes_input: *consumes_input,
                 }
             }
             SoacOp::Scatter {

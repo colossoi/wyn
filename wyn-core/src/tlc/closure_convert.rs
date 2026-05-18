@@ -361,7 +361,7 @@ pub fn collect_free_vars_soac(
             collect_free_vars(ne, bound, top_level, known_defs, symbols, free, seen);
             collect_free_vars_array_expr(input, bound, top_level, known_defs, symbols, free, seen);
         }
-        SoacOp::Filter { pred, input } => {
+        SoacOp::Filter { pred, input, .. } => {
             collect_free_vars_soac_body(pred, bound, top_level, known_defs, symbols, free, seen);
             collect_free_vars_array_expr(input, bound, top_level, known_defs, symbols, free, seen);
         }
@@ -996,9 +996,14 @@ impl<'a> ClosureConverter<'a> {
                 input: self.convert_array_expr(input, span),
                 consumes_input,
             },
-            SoacOp::Filter { pred, input } => SoacOp::Filter {
+            SoacOp::Filter {
+                pred,
+                input,
+                consumes_input,
+            } => SoacOp::Filter {
                 pred: self.lift_soac_lambda(pred.lam, span),
                 input: self.convert_array_expr(input, span),
+                consumes_input,
             },
             SoacOp::Scatter {
                 dest,

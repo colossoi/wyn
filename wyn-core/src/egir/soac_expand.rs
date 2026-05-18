@@ -578,6 +578,7 @@ fn expand_one(
             input_array_type,
             input_elem_type,
             output_capacity_size,
+            destination: _,
         }) => {
             let pred_func = pred_func.clone();
             let arr_ty = input_array_type.clone();

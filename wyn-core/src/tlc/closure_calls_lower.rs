@@ -416,7 +416,11 @@ impl<'a> CallLowerer<'a> {
                 input: self.lower_array_expr(input),
                 consumes_input,
             },
-            SoacOp::Filter { pred, input } => SoacOp::Filter {
+            SoacOp::Filter {
+                pred,
+                input,
+                consumes_input,
+            } => SoacOp::Filter {
                 pred: super::SoacBody {
                     lam: pred.lam,
                     captures: pred
@@ -426,6 +430,7 @@ impl<'a> CallLowerer<'a> {
                         .collect(),
                 },
                 input: self.lower_array_expr(input),
+                consumes_input,
             },
             SoacOp::Scatter {
                 dest,

@@ -610,9 +610,14 @@ impl BufferSpecializer {
                 input: self.rewrite_array_expr(input),
                 consumes_input: *consumes_input,
             },
-            SoacOp::Filter { pred, input } => SoacOp::Filter {
+            SoacOp::Filter {
+                pred,
+                input,
+                consumes_input,
+            } => SoacOp::Filter {
                 pred: self.rewrite_soac_body(pred),
                 input: self.rewrite_array_expr(input),
+                consumes_input: *consumes_input,
             },
             SoacOp::Scatter {
                 dest,
@@ -1232,9 +1237,14 @@ impl BufferSpecializer {
                 input: self.rewrite_specialized_array_expr(input, view_params),
                 consumes_input: *consumes_input,
             },
-            SoacOp::Filter { pred, input } => SoacOp::Filter {
+            SoacOp::Filter {
+                pred,
+                input,
+                consumes_input,
+            } => SoacOp::Filter {
                 pred: self.rewrite_specialized_soac_body(pred, view_params),
                 input: self.rewrite_specialized_array_expr(input, view_params),
+                consumes_input: *consumes_input,
             },
             SoacOp::Scatter {
                 dest,

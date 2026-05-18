@@ -611,9 +611,14 @@ impl<'a> Monomorphizer<'a> {
                 input: self.process_array_expr(input),
                 consumes_input: *consumes_input,
             },
-            SoacOp::Filter { pred, input } => SoacOp::Filter {
+            SoacOp::Filter {
+                pred,
+                input,
+                consumes_input,
+            } => SoacOp::Filter {
                 pred: self.process_soac_body(pred),
                 input: self.process_array_expr(input),
+                consumes_input: *consumes_input,
             },
             SoacOp::Scatter {
                 dest,
@@ -964,9 +969,14 @@ impl<'a> Monomorphizer<'a> {
                 input: self.apply_subst_array_expr(input, subst),
                 consumes_input: *consumes_input,
             },
-            SoacOp::Filter { pred, input } => SoacOp::Filter {
+            SoacOp::Filter {
+                pred,
+                input,
+                consumes_input,
+            } => SoacOp::Filter {
                 pred: self.apply_subst_soac_body(pred, subst),
                 input: self.apply_subst_array_expr(input, subst),
+                consumes_input: *consumes_input,
             },
             SoacOp::Scatter {
                 dest,

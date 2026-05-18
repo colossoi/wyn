@@ -467,6 +467,11 @@ pub enum SoacOp {
     Filter {
         pred: SoacBody,
         input: ArrayExpr,
+        /// Set by the ownership pass when the filter's input is
+        /// mutable and dead-after. Read by `egir::from_tlc` to reuse
+        /// the input as the output buffer (the result `View` aliases
+        /// it).
+        consumes_input: bool,
     },
     // TODO(scatter): no producer in to_tlc yet. EGIR rejects this variant
     // (`egir::from_tlc::convert_soac`). Kept so the SoacOp enum carries the
@@ -847,7 +852,7 @@ where
             f(ne);
             visit_array_expr_children(input, f);
         }
-        SoacOp::Filter { pred, input } => {
+        SoacOp::Filter { pred, input, .. } => {
             visit_soac_body_children(pred, f);
             visit_array_expr_children(input, f);
         }
@@ -996,9 +1001,14 @@ where
             input: map_array_expr_children(input, f),
             consumes_input,
         },
-        SoacOp::Filter { pred, input } => SoacOp::Filter {
+        SoacOp::Filter {
+            pred,
+            input,
+            consumes_input,
+        } => SoacOp::Filter {
             pred: map_soac_body_children(pred, f),
             input: map_array_expr_children(input, f),
+            consumes_input,
         },
         SoacOp::Scatter {
             dest,
@@ -2100,6 +2110,8 @@ impl<'a> Transformer<'a> {
             TermKind::Soac(SoacOp::Filter {
                 pred,
                 input: ArrayExpr::Ref(Box::new(arr_term)),
+                // Initial construction; apply_ownership may flip later.
+                consumes_input: false,
             }),
         )
     }

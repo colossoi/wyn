@@ -1643,7 +1643,11 @@ impl<'a> Converter<'a> {
                 input,
                 consumes_input,
             } => self.convert_soac_scan(op, ne, input, *consumes_input, ty),
-            SoacOp::Filter { pred, input } => self.convert_soac_filter(pred, input, ty),
+            SoacOp::Filter {
+                pred,
+                input,
+                consumes_input,
+            } => self.convert_soac_filter(pred, input, *consumes_input, ty),
             // TODO(scatter): no producer in to_tlc yet (no surface name dispatched here).
             // Variant exists to anchor the place-passing SOAC shape; remove if a wider
             // audit confirms no future use.
@@ -1853,6 +1857,7 @@ impl<'a> Converter<'a> {
         &mut self,
         pred: &SoacBody,
         input: &ArrayExpr,
+        consumes_input: bool,
         _result_ty: Type<TypeName>,
     ) -> Result<NodeId, ConvertError> {
         let pred_name = self.lambda_fn_name(&pred.lam)?;
@@ -1891,12 +1896,16 @@ impl<'a> Converter<'a> {
         let mut operands: SmallVec<[NodeId; 4]> = smallvec![arr_nid];
         operands.extend(capture_nids.iter().copied());
 
+        let destination =
+            if consumes_input { SoacDestination::InputBuffer } else { SoacDestination::Fresh };
+
         Ok(self.emit_soac(
             PendingSoac::Filter {
                 pred_func: pred_name,
                 input_array_type: arr_ty,
                 input_elem_type: elem_ty,
                 output_capacity_size: size,
+                destination,
             },
             operands,
             bounded_result_ty,
