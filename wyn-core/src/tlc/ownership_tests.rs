@@ -1103,6 +1103,51 @@ def f(a: [8]i32) [8]i32 = scan(|acc: i32, x: i32| acc + x, 0, a)
     );
 }
 
+fn filter_consumes_input(program: &Program, fn_name: &str) -> Option<bool> {
+    fn walk(t: &Term) -> Option<bool> {
+        if let TermKind::Soac(SoacOp::Filter { consumes_input, .. }) = &t.kind {
+            return Some(*consumes_input);
+        }
+        let mut found = None;
+        t.for_each_child(&mut |child| {
+            if found.is_none() {
+                found = walk(child);
+            }
+        });
+        found
+    }
+    let def = find_def(program, fn_name);
+    walk(&def.body)
+}
+
+#[test]
+fn consumes_input_flag_set_for_eligible_filter() {
+    let program = compile_to_owned(
+        r#"
+def f(a: *[8]i32) ?k.[k]i32 = filter(|x: i32| x > 0, a)
+"#,
+    );
+    assert_eq!(
+        filter_consumes_input(&program, "f"),
+        Some(true),
+        "eligible Filter should have consumes_input = true after apply_ownership",
+    );
+}
+
+#[test]
+fn consumes_input_flag_not_set_for_non_unique_filter() {
+    let program = compile_to_owned(
+        r#"
+def f(a: [8]i32) ?k.[k]i32 = filter(|x: i32| x > 0, a)
+"#,
+    );
+    assert_eq!(
+        filter_consumes_input(&program, "f"),
+        Some(false),
+        "Filter over non-unique input should keep consumes_input = false",
+    );
+}
+
 // =============================================================================
 // SoacBody captures (SOAC envelope shape)
 // =============================================================================

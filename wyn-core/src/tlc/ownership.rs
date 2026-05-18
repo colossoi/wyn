@@ -1179,7 +1179,8 @@ impl<'m> Rewriter<'m> {
         if self.consuming_soacs.contains(&id) {
             match &mut rewritten.kind {
                 TermKind::Soac(SoacOp::Map { consumes_input, .. })
-                | TermKind::Soac(SoacOp::Scan { consumes_input, .. }) => {
+                | TermKind::Soac(SoacOp::Scan { consumes_input, .. })
+                | TermKind::Soac(SoacOp::Filter { consumes_input, .. }) => {
                     *consumes_input = true;
                 }
                 _ => {}
@@ -1294,31 +1295,28 @@ fn walk_for_eligible_soacs(
         TermKind::Soac(SoacOp::Map { lam, inputs, .. }) => {
             // Multi-input map isn't eligible (the body reads parallel
             // streams; the consume rewrite would only own one of them).
-            if inputs.len() == 1
-                && single_input_consume_eligible(
-                    term.id,
-                    &inputs[0],
-                    &lam.lam,
-                    /* elem_param_idx */ 0,
-                    /* expected_param_count */ 1,
-                    model,
-                    entry_output_soacs,
-                )
-            {
-                out.push(term.id);
+            if inputs.len() == 1 {
+                if let Some(input_sym) =
+                    input_is_dead_unique_var(term.id, &inputs[0], model, entry_output_soacs)
+                {
+                    if map_body_ok(&lam.lam) && !body_references_sym(&lam.lam.body, input_sym) {
+                        out.push(term.id);
+                    }
+                }
             }
         }
         TermKind::Soac(SoacOp::Scan { op, input, .. }) => {
-            if single_input_consume_eligible(
-                term.id,
-                input,
-                &op.lam,
-                /* elem_param_idx */ 1, // op: |acc, elem| _
-                /* expected_param_count */ 2,
-                model,
-                entry_output_soacs,
-            ) {
-                out.push(term.id);
+            if let Some(input_sym) = input_is_dead_unique_var(term.id, input, model, entry_output_soacs) {
+                if scan_body_ok(&op.lam) && !body_references_sym(&op.lam.body, input_sym) {
+                    out.push(term.id);
+                }
+            }
+        }
+        TermKind::Soac(SoacOp::Filter { pred, input, .. }) => {
+            if let Some(input_sym) = input_is_dead_unique_var(term.id, input, model, entry_output_soacs) {
+                if filter_body_ok(&pred.lam) && !body_references_sym(&pred.lam.body, input_sym) {
+                    out.push(term.id);
+                }
             }
         }
         _ => {}
@@ -1328,67 +1326,58 @@ fn walk_for_eligible_soacs(
     });
 }
 
-/// Shared eligibility check for the consuming-input rewrite over a
-/// single-input SOAC. Caller supplies the lambda's expected param
-/// count and which param is the element (Map: only param, index 0;
-/// Scan: second of `|acc, elem| _`, index 1).
-fn single_input_consume_eligible(
+/// Shared input-side eligibility check: returns the input's
+/// SymbolId if the SOAC's input is a single `Var` reference whose
+/// owner is mutable and absent from `live_out`, and the SOAC isn't
+/// in tail position of an entry with bound outputs. The caller
+/// applies the SOAC-specific body-shape and pointwise checks.
+fn input_is_dead_unique_var(
     soac_id: TermId,
     input: &ArrayExpr,
-    lam: &Lambda,
-    elem_param_idx: usize,
-    expected_param_count: usize,
     model: &OwnershipModel,
     entry_output_soacs: &HashSet<TermId>,
-) -> bool {
-    // 4 — output-bound check first: cheap.
+) -> Option<SymbolId> {
     if entry_output_soacs.contains(&soac_id) {
-        return false;
+        return None;
     }
-    // 1 — single Var input, owner mutable, dead-after.
     let input_term = match input {
         ArrayExpr::Ref(t) => &**t,
-        _ => return false,
+        _ => return None,
     };
     let input_sym = match &input_term.kind {
         TermKind::Var(VarRef::Symbol(s)) => *s,
-        _ => return false,
+        _ => return None,
     };
-    let owner = match model.owner_of(input_sym) {
-        Some(o) => o,
-        None => return false,
-    };
-    let origin = match model.origin(owner) {
-        Some(o) => o,
-        None => return false,
-    };
+    let owner = model.owner_of(input_sym)?;
+    let origin = model.origin(owner)?;
     if !origin.is_mutable() {
-        return false;
+        return None;
     }
-    let live_out = match model.live_out.get(&soac_id) {
-        Some(l) => l,
-        None => return false,
-    };
+    let live_out = model.live_out.get(&soac_id)?;
     if live_out.contains(&owner) {
-        return false;
+        return None;
     }
-    // 2 — body shape: expected param count + element-param type
-    //     matches the lambda's return (so the per-iteration write
-    //     fits back into the input buffer's element slot).
-    if lam.params.len() != expected_param_count {
-        return false;
-    }
-    if lam.params[elem_param_idx].1 != lam.ret_ty {
-        return false;
-    }
-    // 3 — pointwise: body does not reference the input symbol
-    //     outside the element-param substitution. Since the element
-    //     param has its own SymbolId distinct from `input_sym`,
-    //     scanning for any `Var(input_sym)` in the body suffices.
-    if body_references_sym(&lam.body, input_sym) {
-        return false;
-    }
-    true
+    Some(input_sym)
+}
+
+/// Map's body shape: single param whose type matches the lambda's
+/// return — so the per-iteration write fits back into the input's
+/// element slot.
+fn map_body_ok(lam: &Lambda) -> bool {
+    lam.params.len() == 1 && lam.params[0].1 == lam.ret_ty
+}
+
+/// Scan's body shape: `|acc, elem| _` where the elem-param type
+/// matches the lambda's return (= accumulator type = element type).
+fn scan_body_ok(lam: &Lambda) -> bool {
+    lam.params.len() == 2 && lam.params[1].1 == lam.ret_ty
+}
+
+/// Filter's body shape: single param, returns `bool`. The pred's
+/// param type already matches the input's element type by
+/// type-checking; we just confirm the boolean return.
+fn filter_body_ok(lam: &Lambda) -> bool {
+    lam.params.len() == 1 && matches!(&lam.ret_ty, Type::Constructed(TypeName::Bool, _))
 }
 
 fn body_references_sym(term: &Term, sym: SymbolId) -> bool {
