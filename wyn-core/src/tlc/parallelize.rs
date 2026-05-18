@@ -387,15 +387,12 @@ fn analyze_soac(
             ne,
             input,
             consumes_input,
-        } => {
-            classify_input(input)?;
-            SoacOp::Scan {
-                op: op.clone(),
-                ne: ne.clone(),
-                input: input.clone(),
-                consumes_input: *consumes_input,
-            }
-        }
+        } => SoacOp::Scan {
+            op: op.clone(),
+            ne: ne.clone(),
+            input: input.clone(),
+            consumes_input: *consumes_input,
+        },
         _ => return None,
     };
 
@@ -654,7 +651,6 @@ pub enum PlannedBindings {
         result: (u32, u32),
     },
     Scan {
-        output: (u32, u32),
         block_sums: (u32, u32),
         block_offsets: (u32, u32),
     },
@@ -1476,34 +1472,153 @@ fn make_scan_plan(
     analysis: &EntryAnalysis,
     entry_name: &str,
     op: &super::SoacBody,
-    ne: &Term,
+    _ne: &Term,
     next_binding: u32,
     program: &mut Program,
     sizing: PipelineSizing,
 ) -> LoweringPlan {
-    let output_binding = (0, next_binding);
-    let block_sums_binding = (0, next_binding + 1);
-    let block_offsets_binding = (0, next_binding + 2);
     let elem_type = analysis.soac.result_elem_type();
-    let (entries, pipeline) = build_scan_entries(
+
+    // Path B (EGIR-side) gate: scan with no combiner captures, where
+    // the input is either an explicit `ArrayExpr::StorageBuffer` or a
+    // bare `Var(entry_param)` that `from_tlc` will convert into a
+    // `PureOp::StorageView`. Captures fail today because phase 2/3
+    // don't plumb them through; non-Var/non-Storage inputs (Range,
+    // literal, etc.) fail because phase 1 needs a `(set, binding)`
+    // pair to chunk.
+    let input_likely_storage = match analysis.soac.inputs().first() {
+        Some(ArrayExpr::StorageBuffer { .. }) => true,
+        Some(ArrayExpr::Ref(t)) => matches!(&t.kind, TermKind::Var(VarRef::Symbol(_))),
+        _ => false,
+    };
+    let can_route = op.captures.is_empty() && input_likely_storage;
+
+    if !can_route {
+        // Fall through to the default single-dispatch compute pipeline.
+        // `egir::parallelize` will not see a plan for this entry, so the
+        // scan stays as a serial loop inside a single-thread kernel.
+        let pipeline = Pipeline::Compute(ComputePipeline {
+            entry_point: entry_name.to_string(),
+            workgroup_size: sizing.workgroup,
+            dispatch_size: DispatchSize::DerivedFromInputLength {
+                workgroup_size: sizing.workgroup.0,
+            },
+            bindings: vec![],
+            default_total_threads: sizing.default_total_threads,
+        });
+        return LoweringPlan {
+            removed_entry: None,
+            new_defs: Vec::new(),
+            pipeline,
+            extra_bindings_used: 0,
+            parallel_plan: None,
+        };
+    }
+
+    // `from_tlc::convert_entry_point` auto-allocates one binding per
+    // view-typed entry param plus one for the array output. Our
+    // intermediates have to live above that range.
+    let auto_input_count = count_view_param_bindings(program, analysis.def_name);
+    let output_binding = (AUTO_STORAGE_SET, next_binding + auto_input_count);
+    let block_sums_binding = (AUTO_STORAGE_SET, next_binding + auto_input_count + 1);
+    let block_offsets_binding = (AUTO_STORAGE_SET, next_binding + auto_input_count + 2);
+
+    let pipeline = build_scan_pipeline_descriptor(
         entry_name,
-        analysis,
-        op,
-        ne,
+        &analysis.soac,
         &elem_type,
         output_binding,
         block_sums_binding,
         block_offsets_binding,
-        program,
         sizing,
     );
+
+    let bindings = PlannedBindings::Scan {
+        block_sums: block_sums_binding,
+        block_offsets: block_offsets_binding,
+    };
+    let parallel_plan = ParallelizationPlan {
+        entry: entry_name.to_string(),
+        strategy: ParallelStrategy::Scan,
+        dispatch: DispatchModel::Fixed {
+            groups: [1, 1, 1],
+            local_size: [sizing.workgroup.0, sizing.workgroup.1, sizing.workgroup.2],
+        },
+        bindings,
+    };
     LoweringPlan {
-        removed_entry: Some(analysis.def_name),
-        new_defs: entries,
+        removed_entry: None,
+        new_defs: Vec::new(),
         pipeline,
-        extra_bindings_used: 3,
-        parallel_plan: None,
+        extra_bindings_used: 2,
+        parallel_plan: Some(parallel_plan),
     }
+}
+
+/// Build the `Pipeline::MultiCompute` descriptor for a parallel scan.
+/// Three stages share four bindings: the scan's storage inputs (one),
+/// the entry's auto-bound output (one), and the two synthesized
+/// intermediates (block_sums, block_offsets). Phase 1 reads the input
+/// and writes output + block_sums; phase 2 reads block_sums and writes
+/// block_offsets (1×1×1); phase 3 reads block_offsets and writes the
+/// output in place.
+fn build_scan_pipeline_descriptor(
+    entry_name: &str,
+    soac: &SoacAnalysis,
+    elem_type: &Type<TypeName>,
+    output_binding: (u32, u32),
+    block_sums_binding: (u32, u32),
+    block_offsets_binding: (u32, u32),
+    sizing: PipelineSizing,
+) -> Pipeline {
+    let workgroup = sizing.workgroup;
+    let _ = elem_type;
+    let mut all_bindings = collect_soac_bindings(soac);
+    let input_indices: Vec<usize> = (0..all_bindings.len()).collect();
+    // Phase 1 writes to the entry's auto-bound output. `from_tlc`
+    // assigns input view params binding numbers in order, then the
+    // output; `next_binding + auto_input_count` is the predicted
+    // output binding.
+    let output_idx = push_storage_binding(
+        &mut all_bindings,
+        output_binding,
+        Access::ReadWrite,
+        BufferUsage::Output,
+        format!("{}_output", entry_name),
+    );
+    let block_sums_idx = push_storage_binding(
+        &mut all_bindings,
+        block_sums_binding,
+        Access::ReadWrite,
+        BufferUsage::Intermediate,
+        format!("{}_block_sums", entry_name),
+    );
+    let block_offsets_idx = push_storage_binding(
+        &mut all_bindings,
+        block_offsets_binding,
+        Access::ReadWrite,
+        BufferUsage::Intermediate,
+        format!("{}_block_offsets", entry_name),
+    );
+
+    let phase1_name = entry_name.to_string();
+    let phase2_name = format!("{}_phase2_scan_sums", entry_name);
+    let phase3_name = format!("{}_phase3_add_offsets", entry_name);
+
+    Pipeline::MultiCompute(MultiComputePipeline {
+        bindings: all_bindings,
+        stages: vec![
+            derived_stage(
+                phase1_name,
+                input_indices,
+                vec![output_idx, block_sums_idx],
+                workgroup,
+            ),
+            fixed_stage(phase2_name, vec![block_sums_idx], vec![block_offsets_idx]),
+            derived_stage(phase3_name, vec![block_offsets_idx], vec![output_idx], workgroup),
+        ],
+        default_total_threads: sizing.default_total_threads,
+    })
 }
 
 // =============================================================================

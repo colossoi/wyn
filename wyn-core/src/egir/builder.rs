@@ -32,7 +32,7 @@ use crate::ssa::types::{ConstantValue, ControlHeader, ExecutionModel};
 
 use super::graph_ops;
 use super::program::EgirEntry;
-use super::types::{EGraph, NodeId, PendingSoac, SkeletonTerminator};
+use super::types::{EGraph, NodeId, PendingSoac, SkeletonTerminator, SoacDestination};
 use crate::ssa::types::{EntryInput, EntryOutput};
 
 /// Build a synthesized `EgirEntry` programmatically. Mirrors the primitive
@@ -170,6 +170,96 @@ impl EntryBuilder {
             &mut self.next_effect,
             span,
         )
+    }
+
+    /// Emit a `PendingSoac::Scan { destination: OutputView }`. Operand layout
+    /// matches the post-`rewrite_map_scan_to_into` shape:
+    /// `[input_array, init, ...captures, output_view]`. Result is unit.
+    pub fn emit_pending_scan_into(
+        &mut self,
+        func: String,
+        input_array_nid: NodeId,
+        input_array_ty: Type<TypeName>,
+        input_elem_ty: Type<TypeName>,
+        init_nid: NodeId,
+        captures: Vec<NodeId>,
+        output_view_nid: NodeId,
+    ) -> NodeId {
+        let mut operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![input_array_nid, init_nid];
+        operands.extend(captures.into_iter());
+        operands.push(output_view_nid);
+        let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
+        let span = self.span();
+        graph_ops::emit_pending_soac(
+            &mut self.graph,
+            self.current_block,
+            PendingSoac::Scan {
+                func,
+                input_array_type: input_array_ty,
+                input_elem_type: input_elem_ty,
+                destination: SoacDestination::OutputView,
+            },
+            operands,
+            unit_ty,
+            &mut self.next_effect,
+            span,
+        )
+    }
+
+    /// Emit a single-input `PendingSoac::Map { destination: OutputView }`.
+    /// Operand layout: `[input_array, ...captures, output_view]`. Result is unit.
+    pub fn emit_pending_map_into(
+        &mut self,
+        func: String,
+        input_array_nid: NodeId,
+        input_array_ty: Type<TypeName>,
+        input_elem_ty: Type<TypeName>,
+        output_elem_ty: Type<TypeName>,
+        captures: Vec<NodeId>,
+        output_view_nid: NodeId,
+    ) -> NodeId {
+        let mut operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![input_array_nid];
+        operands.extend(captures.into_iter());
+        operands.push(output_view_nid);
+        let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
+        let span = self.span();
+        graph_ops::emit_pending_soac(
+            &mut self.graph,
+            self.current_block,
+            PendingSoac::Map {
+                func,
+                input_array_types: vec![input_array_ty],
+                input_elem_types: vec![input_elem_ty],
+                output_elem_type: output_elem_ty,
+                destination: SoacDestination::OutputView,
+            },
+            operands,
+            unit_ty,
+            &mut self.next_effect,
+            span,
+        )
+    }
+
+    /// Emit a `Load` from a place (typically a `ViewIndex` node).
+    /// Returns the loaded value's NodeId.
+    pub fn emit_load(&mut self, place_nid: NodeId, elem_ty: Type<TypeName>) -> NodeId {
+        use super::graph_ops::alloc_effect;
+        use super::types::{SideEffect, SideEffectKind};
+        use crate::ssa::types::InstKind;
+        let span = self.span();
+        let result = self.graph.alloc_side_effect_result(elem_ty);
+        let eff_in = alloc_effect(&mut self.next_effect);
+        let eff_out = alloc_effect(&mut self.next_effect);
+        self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
+            kind: SideEffectKind::Inst(InstKind::Load {
+                place: Default::default(),
+            }),
+            operand_nodes: smallvec![place_nid],
+            result: Some(result),
+            effects: Some((eff_in, eff_out)),
+            span,
+        });
+        result
     }
 
     /// Emit a `Store` of `value` to `storage[set, binding][index]`.

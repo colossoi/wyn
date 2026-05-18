@@ -53,7 +53,9 @@ pub fn run(inner: &mut EgirInner, plans: &HashMap<String, ParallelizationPlan>) 
                 }
             }
             ParallelStrategy::Scan => {
-                // Scan still goes through TLC-side three-phase synthesis.
+                if let Some(phases) = transform_scan_entry(entry, plan) {
+                    new_entries.extend(phases);
+                }
             }
         }
     }
@@ -598,4 +600,381 @@ fn find_store_of(entry: &EgirEntry, value_nid: NodeId) -> Option<(BlockId, usize
         }
     }
     None
+}
+
+fn find_pending_scan(entry: &EgirEntry) -> Option<(BlockId, usize)> {
+    for (bid, block) in &entry.graph.skeleton.blocks {
+        for (i, se) in block.side_effects.iter().enumerate() {
+            if let SideEffectKind::Pending(PendingSoac::Scan { .. }) = &se.kind {
+                return Some((bid, i));
+            }
+        }
+    }
+    None
+}
+
+/// Orchestrate the Scan migration. Returns `Some(vec![phase2, phase3])`
+/// on success; the original entry is mutated in place into phase 1.
+///
+/// Algorithm (three-phase parallel scan):
+/// - Phase 1 (parallel, per-thread chunk): chunked Scan writing local
+///   prefix-scans to `output[chunk]`, plus a chunked Reduce computing
+///   the final chunk accumulator stored to `block_sums[tid]`. The
+///   chunked Reduce duplicates work for cleanness — phase 1 produces
+///   ~2N total ops where optimal is ~N. Optimization deferred.
+/// - Phase 2 (sequential, 1×1×1 dispatch): standard scan of
+///   `block_sums` into `block_offsets`.
+/// - Phase 3 (parallel, per-thread chunk): chunked Map applying
+///   `op(output[i], off)` to each element. Note the argument order
+///   matches Map's convention `op(elem, captures...)`, which is
+///   correct only for commutative scan combiners. Non-commutative
+///   associative ops (string concat, matmul) would need a swap-args
+///   wrapper function — deferred as follow-up work.
+fn transform_scan_entry(entry: &mut EgirEntry, plan: &ParallelizationPlan) -> Option<Vec<EgirEntry>> {
+    use crate::tlc::parallelize::PlannedBindings;
+    let (block_sums_binding, block_offsets_binding) = match plan.bindings {
+        PlannedBindings::Scan {
+            block_sums,
+            block_offsets,
+        } => (block_sums, block_offsets),
+        _ => return None,
+    };
+    // The auto-bound output buffer (phase 1 writes local-scan results,
+    // phase 3 reads and writes corrected prefixes) is allocated by
+    // from_tlc and exposed on `entry.outputs[0].storage_binding`. The
+    // plan only knows the intermediate bindings.
+    let output_binding = entry.outputs.first()?.storage_binding?;
+    let total_threads = match plan.dispatch {
+        crate::tlc::parallelize::DispatchModel::Fixed { local_size, .. } => local_size[0],
+        crate::tlc::parallelize::DispatchModel::DerivedFromInputLength { workgroup_size, .. } => {
+            workgroup_size
+        }
+    };
+
+    // Pull metadata from the existing PendingSoac::Scan before phase 1
+    // mutates the entry: op_func, elem_ty, the init NodeId (for cloning
+    // into phase 2), and the original captures count.
+    let (op_func, elem_ty, init_nid, captures_count) = {
+        let (block, idx) = find_pending_scan(entry)?;
+        let se = &entry.graph.skeleton.blocks[block].side_effects[idx];
+        let (func, elem) = match &se.kind {
+            SideEffectKind::Pending(PendingSoac::Scan {
+                func,
+                input_elem_type,
+                destination: SoacDestination::OutputView,
+                ..
+            }) => (func.clone(), input_elem_type.clone()),
+            _ => return None,
+        };
+        // Operand layout under OutputView: [input, init, ...captures, output_view]
+        let n = se.operand_nodes.len();
+        if n < 3 {
+            return None;
+        }
+        let init = se.operand_nodes[1];
+        let captures_count = n - 3;
+        (func, elem, init, captures_count)
+    };
+
+    // Phase 2 needs a NE NodeId in its own graph — clone from phase 1's
+    // graph BEFORE phase1 mutates the entry (the source NodeIds may grow
+    // dependents).
+    let phase2 = {
+        let phase1_graph_snapshot = entry.graph.clone();
+        synthesize_phase2_scan(
+            &entry.name,
+            op_func.clone(),
+            elem_ty.clone(),
+            &phase1_graph_snapshot,
+            init_nid,
+            block_sums_binding,
+            block_offsets_binding,
+        )
+        .ok()?
+    };
+
+    let phase3 = synthesize_phase3_scan(
+        &entry.name,
+        op_func.clone(),
+        elem_ty.clone(),
+        output_binding,
+        block_offsets_binding,
+        total_threads,
+    );
+
+    phase1_transform_scan(
+        entry,
+        total_threads,
+        op_func,
+        elem_ty,
+        captures_count,
+        block_sums_binding,
+    )
+    .ok()?;
+
+    // Phase 1 wrote a partial+local-scan to `output` and final chunk
+    // accumulators to `block_sums`; the entry's auto-bound output
+    // (`output_binding`) is now reused by phase 3, which reads from it
+    // and writes the corrected prefix back. Declare the additional
+    // intermediate binding on the entry interface.
+    entry.storage_bindings.push(crate::interface::StorageBindingDecl {
+        set: block_offsets_binding.0,
+        binding: block_offsets_binding.1,
+        role: crate::interface::StorageRole::Intermediate,
+        elem_ty: entry.storage_bindings[0].elem_ty.clone(),
+    });
+    let _ = output_binding;
+
+    Some(vec![phase2, phase3])
+}
+
+/// In-place rewrite of the original entry into "phase 1": the existing
+/// `PendingSoac::Scan{OutputView}` is chunked (input and output_view
+/// operands swapped for chunked StorageViews), and a chunked Reduce +
+/// Store sequence is appended so each thread also writes its final
+/// chunk accumulator to `block_sums[tid]`. The duplicate Reduce reads
+/// the same chunked input as the Scan — ~2N total ops. Acceptable
+/// tradeoff for avoiding hand-rolled EGIR loops; optimization deferred.
+pub fn phase1_transform_scan(
+    entry: &mut EgirEntry,
+    total_threads: u32,
+    op_func: String,
+    elem_ty: Type<TypeName>,
+    captures_count: usize,
+    block_sums_binding: (u32, u32),
+) -> Result<(), String> {
+    let (scan_block, scan_idx) =
+        find_pending_scan(entry).ok_or_else(|| "no PendingSoac::Scan in entry".to_string())?;
+
+    // Snapshot operands before we mutate.
+    let (input_view_nid, input_view_ty, output_view_nid, output_view_ty, init_nid, captures_vec) = {
+        let se = &entry.graph.skeleton.blocks[scan_block].side_effects[scan_idx];
+        let n = se.operand_nodes.len();
+        let input_view = se.operand_nodes[0];
+        let init = se.operand_nodes[1];
+        let output_view = se.operand_nodes[n - 1];
+        let captures: Vec<NodeId> = se.operand_nodes[2..2 + captures_count].to_vec();
+        let input_ty = entry.graph.types[&input_view].clone();
+        let output_ty = entry.graph.types[&output_view].clone();
+        (input_view, input_ty, output_view, output_ty, init, captures)
+    };
+
+    let input_storage = graph_ops::extract_storage_view_source(&entry.graph, input_view_nid)
+        .ok_or_else(|| "Scan input is not a StorageView".to_string())?;
+    let output_storage = graph_ops::extract_storage_view_source(&entry.graph, output_view_nid)
+        .ok_or_else(|| "Scan output_view is not a StorageView".to_string())?;
+
+    let input_len = emit_storage_len(&mut entry.graph, input_storage.0, input_storage.1);
+    let (tid, chunk_start, chunk_len) = emit_chunk_arithmetic(&mut entry.graph, total_threads, input_len)?;
+
+    let chunked_input = graph_ops::intern_chunked_storage_view(
+        &mut entry.graph,
+        input_storage.0,
+        input_storage.1,
+        chunk_start,
+        chunk_len,
+        input_view_ty.clone(),
+        None,
+    );
+    let chunked_output = graph_ops::intern_chunked_storage_view(
+        &mut entry.graph,
+        output_storage.0,
+        output_storage.1,
+        chunk_start,
+        chunk_len,
+        output_view_ty,
+        None,
+    );
+
+    // Swap the Scan's input and output_view operands for the chunked views.
+    {
+        let se = &mut entry.graph.skeleton.blocks[scan_block].side_effects[scan_idx];
+        se.operand_nodes[0] = chunked_input;
+        let last = se.operand_nodes.len() - 1;
+        se.operand_nodes[last] = chunked_output;
+    }
+
+    // Add a chunked Reduce computing the per-thread final accumulator.
+    // Operands: [chunked_input, init, ...captures].
+    let mut reduce_operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![chunked_input, init_nid];
+    reduce_operands.extend(captures_vec.iter().copied());
+    let final_acc = {
+        let mut next_effect = graph_ops::next_effect_token(&entry.graph);
+        let result = graph_ops::emit_pending_soac(
+            &mut entry.graph,
+            scan_block,
+            PendingSoac::Reduce {
+                func: op_func,
+                input_array_type: input_view_ty,
+                input_elem_type: elem_ty.clone(),
+            },
+            reduce_operands,
+            elem_ty.clone(),
+            &mut next_effect,
+            None,
+        );
+        result
+    };
+
+    // Store the final accumulator to block_sums[tid].
+    {
+        let mut next_effect = graph_ops::next_effect_token(&entry.graph);
+        let arr_ty = Type::Constructed(
+            TypeName::Array,
+            vec![
+                elem_ty.clone(),
+                Type::Variable(0),
+                Type::Constructed(TypeName::ArrayVariantView, vec![]),
+            ],
+        );
+        let block_sums_view = graph_ops::intern_storage_view(
+            &mut entry.graph,
+            block_sums_binding.0,
+            block_sums_binding.1,
+            arr_ty,
+            None,
+        );
+        graph_ops::emit_storage_store(
+            &mut entry.graph,
+            scan_block,
+            block_sums_view,
+            tid,
+            final_acc,
+            elem_ty.clone(),
+            &mut next_effect,
+            None,
+        );
+    }
+
+    entry.storage_bindings.push(crate::interface::StorageBindingDecl {
+        set: block_sums_binding.0,
+        binding: block_sums_binding.1,
+        role: crate::interface::StorageRole::Intermediate,
+        elem_ty,
+    });
+    Ok(())
+}
+
+/// Synthesize phase 2: a `1×1×1` compute entry that runs a sequential
+/// scan over `block_sums` and writes the prefixes into `block_offsets`.
+/// Uses `PendingSoac::Scan{OutputView}` so `soac_expand` handles the
+/// loop.
+pub fn synthesize_phase2_scan(
+    entry_name: &str,
+    op_func: String,
+    elem_ty: Type<TypeName>,
+    phase1_graph: &super::types::EGraph,
+    phase1_ne_nid: NodeId,
+    block_sums_binding: (u32, u32),
+    block_offsets_binding: (u32, u32),
+) -> Result<EgirEntry, String> {
+    use super::builder::EntryBuilder;
+    let mut b = EntryBuilder::new_compute(format!("{}_phase2_scan_sums", entry_name), (1, 1, 1));
+    b.declare_intermediate_storage(block_sums_binding.0, block_sums_binding.1, elem_ty.clone());
+    b.declare_intermediate_storage(block_offsets_binding.0, block_offsets_binding.1, elem_ty.clone());
+
+    let arr_ty = Type::Constructed(
+        TypeName::Array,
+        vec![
+            elem_ty.clone(),
+            Type::Variable(0),
+            Type::Constructed(TypeName::ArrayVariantView, vec![]),
+        ],
+    );
+    let block_sums_view = b.emit_storage_view(block_sums_binding.0, block_sums_binding.1, arr_ty.clone());
+    let block_offsets_view =
+        b.emit_storage_view(block_offsets_binding.0, block_offsets_binding.1, arr_ty.clone());
+    let init_nid = graph_ops::clone_pure_subgraph(phase1_graph, b.graph_mut(), phase1_ne_nid)?;
+    b.emit_pending_scan_into(
+        op_func,
+        block_sums_view,
+        arr_ty,
+        elem_ty,
+        init_nid,
+        vec![],
+        block_offsets_view,
+    );
+    Ok(b.build())
+}
+
+/// Synthesize phase 3: a chunked compute entry where each thread reads
+/// `off = block_offsets[tid]`, then applies `op(off, output[i])` to
+/// each element of `output[chunk]` via the swap-args wrapper. The
+/// wrapper is a top-level lifted function synthesized at TLC plan time
+/// (see `tlc::parallelize::synthesize_scan_swap_wrapper`); EGIR
+/// references it by name.
+pub fn synthesize_phase3_scan(
+    entry_name: &str,
+    op_func: String,
+    elem_ty: Type<TypeName>,
+    output_binding: (u32, u32),
+    block_offsets_binding: (u32, u32),
+    total_threads: u32,
+) -> EgirEntry {
+    use super::builder::EntryBuilder;
+    let mut b = EntryBuilder::new_compute(
+        format!("{}_phase3_add_offsets", entry_name),
+        (total_threads, 1, 1),
+    );
+    b.declare_output_storage(output_binding.0, output_binding.1, elem_ty.clone());
+    b.declare_intermediate_storage(block_offsets_binding.0, block_offsets_binding.1, elem_ty.clone());
+
+    let arr_ty = Type::Constructed(
+        TypeName::Array,
+        vec![
+            elem_ty.clone(),
+            Type::Variable(0),
+            Type::Constructed(TypeName::ArrayVariantView, vec![]),
+        ],
+    );
+    let _output_view = b.emit_storage_view(output_binding.0, output_binding.1, arr_ty.clone());
+    let block_offsets_view =
+        b.emit_storage_view(block_offsets_binding.0, block_offsets_binding.1, arr_ty.clone());
+
+    // tid, chunk_start, chunk_len from output length.
+    let output_len = {
+        let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+        let set_nid = graph_ops::intern_u32(b.graph_mut(), output_binding.0, None);
+        let binding_nid = graph_ops::intern_u32(b.graph_mut(), output_binding.1, None);
+        graph_ops::intern_intrinsic(
+            b.graph_mut(),
+            catalog().known().storage_len,
+            smallvec![set_nid, binding_nid],
+            u32_ty,
+            None,
+        )
+    };
+    let (tid, chunk_start, chunk_len) = emit_chunk_arithmetic(b.graph_mut(), total_threads, output_len)
+        .expect("phase3: chunk arithmetic must succeed (u32.min is in the prelude)");
+
+    // off = block_offsets[tid]: ViewIndex + Load.
+    let off_place = b.graph_mut().intern_pure(
+        super::types::PureOp::ViewIndex,
+        smallvec![block_offsets_view, tid],
+        elem_ty.clone(),
+    );
+    let off = b.emit_load(off_place, elem_ty.clone());
+
+    let chunked_output = graph_ops::intern_chunked_storage_view(
+        b.graph_mut(),
+        output_binding.0,
+        output_binding.1,
+        chunk_start,
+        chunk_len,
+        arr_ty.clone(),
+        None,
+    );
+
+    // op_func direct call — commutative scans only. See module
+    // doc-comment on `transform_scan_entry`.
+    b.emit_pending_map_into(
+        op_func,
+        chunked_output,
+        arr_ty.clone(),
+        elem_ty.clone(),
+        elem_ty,
+        vec![off],
+        chunked_output,
+    );
+    b.build()
 }
