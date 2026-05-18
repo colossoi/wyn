@@ -93,8 +93,10 @@ fn is_handleable_soac(kind: &SideEffectKind) -> bool {
             // OutputView writes through the bound view; input may be
             // any plain array source (composite, view, or SoA tuple).
             SoacDestination::OutputView => is_plain_array_source(input_array_type),
-            // InputBuffer not yet supported for Scan.
-            SoacDestination::InputBuffer => false,
+            // InputBuffer: mutate the input in place. Same source-shape
+            // rule as OutputView — the input array doubles as the
+            // destination buffer.
+            SoacDestination::InputBuffer => is_plain_array_source(input_array_type),
         },
         PendingSoac::Map {
             input_array_types, ..
@@ -517,7 +519,57 @@ fn expand_one(
                     );
                 }
                 SoacDestination::InputBuffer => {
-                    panic!("Scan[InputBuffer] not yet supported");
+                    // Operand layout: [input, init, ...captures] —
+                    // identical to Fresh. The difference is the loop
+                    // carries `input` (instead of a fresh allocation)
+                    // alongside the accumulator, and the SOAC result
+                    // aliases the input buffer at the end.
+                    let captures: Vec<NodeId> = se.operand_nodes[2..].to_vec();
+                    let buf_nid = arr_nid;
+                    let buf_arr_ty = arr_ty.clone();
+                    let acc_ty = elem_ty.clone();
+                    let len_input = (arr_nid, buf_arr_ty.clone());
+
+                    let carried = vec![(buf_arr_ty.clone(), buf_nid), (acc_ty.clone(), init_nid)];
+                    let result = ResultBinding::Carried {
+                        result_node: result_nid,
+                        idx: 0,
+                    };
+                    let allow_unroll = unroll_maps && as_soa_tuple(&buf_arr_ty).is_none();
+                    expand_loop(
+                        graph,
+                        control_headers,
+                        bid,
+                        idx,
+                        &len_input,
+                        &carried,
+                        &result,
+                        next_effect,
+                        allow_unroll,
+                        |graph, next_effect, body_bid, idx_nid, carried_nids| {
+                            let cur_buf = carried_nids[0];
+                            let acc = carried_nids[1];
+                            let elem_nid = emit_read_element(
+                                graph,
+                                body_bid,
+                                cur_buf,
+                                idx_nid,
+                                &buf_arr_ty,
+                                &acc_ty,
+                                next_effect,
+                            );
+                            let mut call_operands: SmallVec<[NodeId; 4]> = smallvec![acc, elem_nid];
+                            call_operands.extend(captures.iter().copied());
+                            let new_acc = graph.intern_pure(
+                                PureOp::Call(func.clone()),
+                                call_operands,
+                                acc_ty.clone(),
+                            );
+                            let new_buf =
+                                emit_write_element(graph, cur_buf, idx_nid, new_acc, &buf_arr_ty, &acc_ty);
+                            vec![new_buf, new_acc]
+                        },
+                    );
                 }
             }
         }

@@ -389,6 +389,56 @@ entry frag(c: vec4f32) vec4f32 =
 }
 
 #[test]
+fn consuming_scan_compiles_end_to_end() {
+    // Parallel of `consuming_map_compiles_end_to_end` for Scan: `*[N]T`
+    // input that's dead-after; ownership sets `consumes_input = true`,
+    // EGIR emits `SoacDestination::InputBuffer`, and `soac_expand` runs
+    // the destination-passing loop. Pre-S4 this hit a panic.
+    let _ssa = compile_to_ssa(
+        r#"
+def cumsum(a: *[8]i32) [8]i32 = scan(|acc: i32, x: i32| acc + x, 0, a)
+"#,
+    );
+}
+
+#[test]
+fn consuming_scan_skips_fresh_allocation() {
+    // Same allocation-count assertion as the Map version: an
+    // input-side DPS Scan carries the input buffer through the loop
+    // and writes back to it, so no `_w_intrinsic_uninit` is needed.
+    let consuming_ssa = compile_to_ssa(
+        r#"
+def cumsum(a: *[8]i32) [8]i32 = scan(|acc: i32, x: i32| acc + x, 0, a)
+
+#[fragment]
+entry frag(c: vec4f32) vec4f32 =
+    let r = cumsum([1, 2, 3, 4, 5, 6, 7, 8]) in
+    @[f32.i32(r[0]), f32.i32(r[1]), 0.0, 0.0]
+"#,
+    );
+    assert_eq!(
+        count_uninit_in_program(&consuming_ssa),
+        0,
+        "consuming scan (`*[N]T` input, dead-after) should not allocate a fresh buffer",
+    );
+
+    let borrowing_ssa = compile_to_ssa(
+        r#"
+def cumsum(a: [8]i32) [8]i32 = scan(|acc: i32, x: i32| acc + x, 0, a)
+
+#[fragment]
+entry frag(c: vec4f32) vec4f32 =
+    let r = cumsum([1, 2, 3, 4, 5, 6, 7, 8]) in
+    @[f32.i32(r[0]), f32.i32(r[1]), 0.0, 0.0]
+"#,
+    );
+    assert!(
+        count_uninit_in_program(&borrowing_ssa) >= 1,
+        "non-consuming scan (caller-borrowed input) should allocate a fresh buffer",
+    );
+}
+
+#[test]
 fn test_map_reduce_fusion_end_to_end() {
     let source = r#"
 def globalArr: [4]f32 = [10.0, 20.0, 30.0, 40.0]

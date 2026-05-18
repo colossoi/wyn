@@ -1817,7 +1817,16 @@ impl<'a> Converter<'a> {
         let op_name = self.lambda_fn_name(&op.lam)?;
         let capture_nids: Vec<NodeId> =
             op.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
-        let elem_ty = self.array_expr_elem_type(input);
+        // Take the elem type from the result, not the input — for a
+        // `*[N]T` input the input-side helper returns `Unique<[N]T>`
+        // rather than `T` (see convert_soac_map's `output_elem_ty`
+        // for the same workaround). Scan's accumulator type equals
+        // the output element type.
+        let elem_ty = if result_ty.is_array() {
+            result_ty.elem_type().expect("Array has elem").clone()
+        } else {
+            self.array_expr_elem_type(input)
+        };
         let arr_ty = self.array_expr_type(input);
         let arr_nid = self.convert_array_expr_value(input)?;
         let init_nid = self.convert_term(ne)?;
