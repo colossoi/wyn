@@ -575,11 +575,19 @@ fn convert_entry_point(
     } else if is_compute && !outputs.is_empty() {
         // Map/Scan producing an array → flip the destination to
         // OutputView so the streaming writes land directly in the
-        // bound view. Everything else (Reduce/Redomap returning a
-        // scalar or tuple, or a plain expression) → compute the
-        // value, then store it explicitly.
-        let soac_produces_array = result_soac_is_map_or_scan(&converter.graph, result_nid);
-        if let (true, Some(output_view_nid)) = (soac_produces_array, compute_output_view) {
+        // bound view. Scan that's already `InputBuffer` (consumes its
+        // input in place) is intentionally NOT retargeted: the result
+        // lives in the input buffer, and the parallel-scan path
+        // reroutes the pipeline descriptor's writes to that binding.
+        // Everything else (Reduce/Redomap returning a scalar or tuple,
+        // or a plain expression) → compute the value, then store it
+        // explicitly.
+        if result_soac_is_consuming_scan(&converter.graph, result_nid) {
+            converter.set_return(None);
+        } else if let (true, Some(output_view_nid)) = (
+            result_soac_is_map_or_scan(&converter.graph, result_nid),
+            compute_output_view,
+        ) {
             rewrite_map_scan_to_into(&mut converter.graph, result_nid, output_view_nid);
             converter.set_return(None);
         } else {
@@ -609,9 +617,32 @@ fn convert_entry_point(
     ))
 }
 
-/// True iff the side-effect producing `result` is a Map or Scan SOAC —
-/// i.e. a SOAC that streams elements to an output array. Reduce/Redomap
-/// produce a scalar/tuple instead.
+/// True iff the side-effect producing `result` is a `PendingSoac::Scan`
+/// with `destination: InputBuffer` — i.e. the scan writes its
+/// prefix-scan back into its input buffer. The auto-bound entry output
+/// is unused; the caller (the parallel-scan reroute or the host
+/// pipeline) reads the result from the input binding.
+fn result_soac_is_consuming_scan(graph: &EGraph, result: NodeId) -> bool {
+    for (_bid, block) in &graph.skeleton.blocks {
+        for se in &block.side_effects {
+            if se.result == Some(result) {
+                return matches!(
+                    &se.kind,
+                    SideEffectKind::Pending(PendingSoac::Scan {
+                        destination: SoacDestination::InputBuffer,
+                        ..
+                    })
+                );
+            }
+        }
+    }
+    false
+}
+
+/// True iff the side-effect producing `result` is a Map or Scan SOAC
+/// that can be retargeted to an OutputView. Scans already at
+/// `InputBuffer` are skipped — those are handled by
+/// `result_soac_is_consuming_scan`.
 fn result_soac_is_map_or_scan(graph: &EGraph, result: NodeId) -> bool {
     for (_bid, block) in &graph.skeleton.blocks {
         for se in &block.side_effects {
@@ -619,7 +650,10 @@ fn result_soac_is_map_or_scan(graph: &EGraph, result: NodeId) -> bool {
                 return matches!(
                     &se.kind,
                     SideEffectKind::Pending(PendingSoac::Map { .. })
-                        | SideEffectKind::Pending(PendingSoac::Scan { .. })
+                        | SideEffectKind::Pending(PendingSoac::Scan {
+                            destination: SoacDestination::Fresh,
+                            ..
+                        })
                 );
             }
         }

@@ -4,8 +4,10 @@
 //! Map entries get their tail SOAC wrapped in `PendingSoac::Parallel`
 //! for the lane-indexed kernel; Reduce and Redomap entries get an
 //! in-place phase1 rewrite (chunked input + store-to-partials) plus a
-//! freshly-synthesized phase2-combine EgirEntry. Scan still flows
-//! through the TLC-side three-phase synthesis path.
+//! freshly-synthesized phase2-combine EgirEntry; Scan gets an in-place
+//! phase1 (chunked scan + chunked reduce → block_sums) plus two
+//! synthesized entries (phase 2: sequential scan of block_sums into
+//! block_offsets; phase 3: chunked apply of block_offsets to output).
 use std::collections::HashMap;
 
 use polytype::Type;
@@ -31,7 +33,9 @@ use crate::tlc::parallelize::{ParallelStrategy, ParallelizationPlan};
 /// Redomap → same shape as Reduce phase1/phase2, but phase2 uses the
 ///            redomap's pure `reduce_func` combiner and the NE
 ///            subgraph is cloned across EGraphs.
-/// Scan    → still flows through TLC-side three-phase synthesis.
+/// Scan    → in-place phase1 rewrite (chunked scan + chunked reduce →
+///            block_sums) and two synthesized entries (phase 2 +
+///            phase 3). See `transform_scan_entry`.
 pub fn run(inner: &mut EgirInner, plans: &HashMap<String, ParallelizationPlan>) {
     // Collect entries-to-add separately so we don't mutate
     // `inner.entry_points` while iterating it.
@@ -639,11 +643,6 @@ fn transform_scan_entry(entry: &mut EgirEntry, plan: &ParallelizationPlan) -> Op
         } => (block_sums, block_offsets),
         _ => return None,
     };
-    // The auto-bound output buffer (phase 1 writes local-scan results,
-    // phase 3 reads and writes corrected prefixes) is allocated by
-    // from_tlc and exposed on `entry.outputs[0].storage_binding`. The
-    // plan only knows the intermediate bindings.
-    let output_binding = entry.outputs.first()?.storage_binding?;
     let total_threads = match plan.dispatch {
         crate::tlc::parallelize::DispatchModel::Fixed { local_size, .. } => local_size[0],
         crate::tlc::parallelize::DispatchModel::DerivedFromInputLength { workgroup_size, .. } => {
@@ -653,27 +652,51 @@ fn transform_scan_entry(entry: &mut EgirEntry, plan: &ParallelizationPlan) -> Op
 
     // Pull metadata from the existing PendingSoac::Scan before phase 1
     // mutates the entry: op_func, elem_ty, the init NodeId (for cloning
-    // into phase 2), and the original captures count.
-    let (op_func, elem_ty, init_nid, captures_count) = {
+    // into phase 2), original captures count, and the destination kind.
+    // `OutputView` means a separate auto-bound output buffer; `InputBuffer`
+    // means writes route back to the input.
+    let (op_func, elem_ty, init_nid, captures_count, consuming) = {
         let (block, idx) = find_pending_scan(entry)?;
         let se = &entry.graph.skeleton.blocks[block].side_effects[idx];
-        let (func, elem) = match &se.kind {
+        let (func, elem, dest) = match &se.kind {
             SideEffectKind::Pending(PendingSoac::Scan {
                 func,
                 input_elem_type,
-                destination: SoacDestination::OutputView,
+                destination,
                 ..
-            }) => (func.clone(), input_elem_type.clone()),
+            }) => (func.clone(), input_elem_type.clone(), destination.clone()),
             _ => return None,
         };
-        // Operand layout under OutputView: [input, init, ...captures, output_view]
         let n = se.operand_nodes.len();
-        if n < 3 {
-            return None;
-        }
+        let (captures_count, is_consuming) = match dest {
+            SoacDestination::OutputView => {
+                // [input, init, ...captures, output_view]
+                if n < 3 {
+                    return None;
+                }
+                (n - 3, false)
+            }
+            SoacDestination::InputBuffer => {
+                // [input, init, ...captures] — no output_view appended
+                if n < 2 {
+                    return None;
+                }
+                (n - 2, true)
+            }
+            SoacDestination::Fresh => return None,
+        };
         let init = se.operand_nodes[1];
-        let captures_count = n - 3;
-        (func, elem, init, captures_count)
+        (func, elem, init, captures_count, is_consuming)
+    };
+
+    // Output binding: for consuming scans, write back to the input
+    // binding; otherwise use the entry's auto-bound output.
+    let output_binding = if consuming {
+        let (block, idx) = find_pending_scan(entry)?;
+        let input_view_nid = entry.graph.skeleton.blocks[block].side_effects[idx].operand_nodes[0];
+        graph_ops::extract_storage_view_source(&entry.graph, input_view_nid)?
+    } else {
+        entry.outputs.first()?.storage_binding?
     };
 
     // Phase 2 needs a NE NodeId in its own graph — clone from phase 1's
@@ -746,23 +769,25 @@ pub fn phase1_transform_scan(
     let (scan_block, scan_idx) =
         find_pending_scan(entry).ok_or_else(|| "no PendingSoac::Scan in entry".to_string())?;
 
-    // Snapshot operands before we mutate.
-    let (input_view_nid, input_view_ty, output_view_nid, output_view_ty, init_nid, captures_vec) = {
+    // Snapshot operands and destination before we mutate.
+    let (input_view_nid, input_view_ty, init_nid, captures_vec, consuming) = {
         let se = &entry.graph.skeleton.blocks[scan_block].side_effects[scan_idx];
-        let n = se.operand_nodes.len();
+        let consuming = matches!(
+            &se.kind,
+            SideEffectKind::Pending(PendingSoac::Scan {
+                destination: SoacDestination::InputBuffer,
+                ..
+            }),
+        );
         let input_view = se.operand_nodes[0];
         let init = se.operand_nodes[1];
-        let output_view = se.operand_nodes[n - 1];
         let captures: Vec<NodeId> = se.operand_nodes[2..2 + captures_count].to_vec();
         let input_ty = entry.graph.types[&input_view].clone();
-        let output_ty = entry.graph.types[&output_view].clone();
-        (input_view, input_ty, output_view, output_ty, init, captures)
+        (input_view, input_ty, init, captures, consuming)
     };
 
     let input_storage = graph_ops::extract_storage_view_source(&entry.graph, input_view_nid)
         .ok_or_else(|| "Scan input is not a StorageView".to_string())?;
-    let output_storage = graph_ops::extract_storage_view_source(&entry.graph, output_view_nid)
-        .ok_or_else(|| "Scan output_view is not a StorageView".to_string())?;
 
     let input_len = emit_storage_len(&mut entry.graph, input_storage.0, input_storage.1);
     let (tid, chunk_start, chunk_len) = emit_chunk_arithmetic(&mut entry.graph, total_threads, input_len)?;
@@ -776,20 +801,35 @@ pub fn phase1_transform_scan(
         input_view_ty.clone(),
         None,
     );
-    let chunked_output = graph_ops::intern_chunked_storage_view(
-        &mut entry.graph,
-        output_storage.0,
-        output_storage.1,
-        chunk_start,
-        chunk_len,
-        output_view_ty,
-        None,
-    );
 
-    // Swap the Scan's input and output_view operands for the chunked views.
+    // Replace the Scan's input operand with the chunked view. For
+    // `OutputView` destination, also chunk the appended `output_view`
+    // operand. For `InputBuffer` destination, soac_expand writes back
+    // to chunked_input[i] (which IS output[chunk_start+i]) automatically
+    // — no separate output_view to chunk.
     {
         let se = &mut entry.graph.skeleton.blocks[scan_block].side_effects[scan_idx];
         se.operand_nodes[0] = chunked_input;
+    }
+    if !consuming {
+        let (output_view_nid, output_view_ty) = {
+            let se = &entry.graph.skeleton.blocks[scan_block].side_effects[scan_idx];
+            let n = se.operand_nodes.len();
+            let v = se.operand_nodes[n - 1];
+            (v, entry.graph.types[&v].clone())
+        };
+        let output_storage = graph_ops::extract_storage_view_source(&entry.graph, output_view_nid)
+            .ok_or_else(|| "Scan output_view is not a StorageView".to_string())?;
+        let chunked_output = graph_ops::intern_chunked_storage_view(
+            &mut entry.graph,
+            output_storage.0,
+            output_storage.1,
+            chunk_start,
+            chunk_len,
+            output_view_ty,
+            None,
+        );
+        let se = &mut entry.graph.skeleton.blocks[scan_block].side_effects[scan_idx];
         let last = se.operand_nodes.len() - 1;
         se.operand_nodes[last] = chunked_output;
     }

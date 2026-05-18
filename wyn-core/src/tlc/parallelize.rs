@@ -1515,6 +1515,18 @@ fn make_scan_plan(
         };
     }
 
+    // When the original scan has `consumes_input = true`, phase 1 and
+    // phase 3 write back to the input buffer; the auto-bound output
+    // binding is unused. The pipeline descriptor reroutes
+    // accordingly.
+    let consuming = matches!(
+        &analysis.soac.original,
+        SoacOp::Scan {
+            consumes_input: true,
+            ..
+        },
+    );
+
     // `from_tlc::convert_entry_point` auto-allocates one binding per
     // view-typed entry param plus one for the array output. Our
     // intermediates have to live above that range.
@@ -1527,6 +1539,7 @@ fn make_scan_plan(
         entry_name,
         &analysis.soac,
         &elem_type,
+        consuming,
         output_binding,
         block_sums_binding,
         block_offsets_binding,
@@ -1556,16 +1569,25 @@ fn make_scan_plan(
 }
 
 /// Build the `Pipeline::MultiCompute` descriptor for a parallel scan.
-/// Three stages share four bindings: the scan's storage inputs (one),
-/// the entry's auto-bound output (one), and the two synthesized
-/// intermediates (block_sums, block_offsets). Phase 1 reads the input
-/// and writes output + block_sums; phase 2 reads block_sums and writes
-/// block_offsets (1×1×1); phase 3 reads block_offsets and writes the
-/// output in place.
+/// Three stages share three or four bindings depending on whether the
+/// scan consumes its input:
+///
+/// - Non-consuming (`consuming = false`): four bindings — input, the
+///   entry's auto-bound output, and the two synthesized intermediates
+///   (block_sums, block_offsets). Phase 1 reads input, writes output +
+///   block_sums; phase 2 (1×1×1) reads block_sums, writes
+///   block_offsets; phase 3 reads block_offsets, writes output in
+///   place.
+/// - Consuming (`consuming = true`): three bindings — input (promoted
+///   to ReadWrite), block_sums, and block_offsets. The auto-output
+///   slot is unused. All phase writes that would have hit the output
+///   binding land on the input binding instead; the host reads the
+///   result from the input buffer.
 fn build_scan_pipeline_descriptor(
     entry_name: &str,
     soac: &SoacAnalysis,
     elem_type: &Type<TypeName>,
+    consuming: bool,
     output_binding: (u32, u32),
     block_sums_binding: (u32, u32),
     block_offsets_binding: (u32, u32),
@@ -1574,18 +1596,42 @@ fn build_scan_pipeline_descriptor(
     let workgroup = sizing.workgroup;
     let _ = elem_type;
     let mut all_bindings = collect_soac_bindings(soac);
+    // When `collect_soac_bindings` returned no Storage bindings (the
+    // SoAC's input was a bare `Var(entry_param)` whose provenance fell
+    // through to Opaque), but the consuming path needs the input
+    // binding's index, synthesize it now. from_tlc allocates view
+    // entry params at (AUTO_STORAGE_SET, 0..auto_input_count); the
+    // scan's input is the first view input, so binding 0. Enrichment
+    // later deduplicates against the entry's real `storage_binding`.
+    if consuming && all_bindings.is_empty() {
+        push_storage_binding(
+            &mut all_bindings,
+            (AUTO_STORAGE_SET, 0),
+            Access::ReadWrite,
+            BufferUsage::Input,
+            "input_0".to_string(),
+        );
+    }
     let input_indices: Vec<usize> = (0..all_bindings.len()).collect();
-    // Phase 1 writes to the entry's auto-bound output. `from_tlc`
-    // assigns input view params binding numbers in order, then the
-    // output; `next_binding + auto_input_count` is the predicted
-    // output binding.
-    let output_idx = push_storage_binding(
-        &mut all_bindings,
-        output_binding,
-        Access::ReadWrite,
-        BufferUsage::Output,
-        format!("{}_output", entry_name),
-    );
+    let output_idx = if consuming {
+        // Phase 1 + phase 3 write back to the input binding. Promote
+        // the input's access to ReadWrite and reuse its index for
+        // every spot the separate output binding would have occupied.
+        let idx = input_indices[0];
+        if let Binding::StorageBuffer { access, .. } = &mut all_bindings[idx] {
+            *access = Access::ReadWrite;
+        }
+        idx
+    } else {
+        // Phase 1 writes to the entry's auto-bound output binding.
+        push_storage_binding(
+            &mut all_bindings,
+            output_binding,
+            Access::ReadWrite,
+            BufferUsage::Output,
+            format!("{}_output", entry_name),
+        )
+    };
     let block_sums_idx = push_storage_binding(
         &mut all_bindings,
         block_sums_binding,

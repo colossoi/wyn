@@ -214,7 +214,15 @@ impl<'p> Builder<'p> {
             if types::is_copy(ty) {
                 continue;
             }
-            let origin = if is_entry {
+            // Entry params are mutable iff explicitly marked unique
+            // (`*[]T`). Non-unique entry-typed inputs (e.g. plain
+            // `[]T` view arrays read by a compute entry) are
+            // immutable, mirroring non-unique function params; an
+            // unsoundly-mutable `Origin::Entry` here would let
+            // ownership mark non-tail SOACs as consuming and rewrite
+            // them to InputBuffer destinations that clobber the
+            // caller's data.
+            let origin = if is_entry && types::is_unique(ty) {
                 Origin::Entry
             } else if types::is_unique(ty) {
                 Origin::UniqueParam
@@ -1295,10 +1303,8 @@ fn walk_for_eligible_soacs(
         TermKind::Soac(SoacOp::Map { lam, inputs, .. }) => {
             // Multi-input map isn't eligible (the body reads parallel
             // streams; the consume rewrite would only own one of them).
-            if inputs.len() == 1 {
-                if let Some(input_sym) =
-                    input_is_dead_unique_var(term.id, &inputs[0], model, entry_output_soacs)
-                {
+            if inputs.len() == 1 && !entry_output_soacs.contains(&term.id) {
+                if let Some(input_sym) = input_is_dead_unique_var(term.id, &inputs[0], model) {
                     if map_body_ok(&lam.lam) && !body_references_sym(&lam.lam.body, input_sym) {
                         out.push(term.id);
                     }
@@ -1306,16 +1312,26 @@ fn walk_for_eligible_soacs(
             }
         }
         TermKind::Soac(SoacOp::Scan { op, input, .. }) => {
-            if let Some(input_sym) = input_is_dead_unique_var(term.id, input, model, entry_output_soacs) {
+            // No tail-of-compute-entry exclusion. The parallel-scan
+            // Path B in `egir::parallelize::transform_scan_entry` knows
+            // how to consume an `InputBuffer` destination: phase 1 and
+            // phase 3 route their writes back to the input binding,
+            // and the pipeline descriptor skips the auto-output slot.
+            // For the serial-fallback path (when parallel scan doesn't
+            // fire), `rewrite_map_scan_to_into` overrides any stray
+            // `consumes_input` to `OutputView`.
+            if let Some(input_sym) = input_is_dead_unique_var(term.id, input, model) {
                 if scan_body_ok(&op.lam) && !body_references_sym(&op.lam.body, input_sym) {
                     out.push(term.id);
                 }
             }
         }
         TermKind::Soac(SoacOp::Filter { pred, input, .. }) => {
-            if let Some(input_sym) = input_is_dead_unique_var(term.id, input, model, entry_output_soacs) {
-                if filter_body_ok(&pred.lam) && !body_references_sym(&pred.lam.body, input_sym) {
-                    out.push(term.id);
+            if !entry_output_soacs.contains(&term.id) {
+                if let Some(input_sym) = input_is_dead_unique_var(term.id, input, model) {
+                    if filter_body_ok(&pred.lam) && !body_references_sym(&pred.lam.body, input_sym) {
+                        out.push(term.id);
+                    }
                 }
             }
         }
@@ -1328,18 +1344,14 @@ fn walk_for_eligible_soacs(
 
 /// Shared input-side eligibility check: returns the input's
 /// SymbolId if the SOAC's input is a single `Var` reference whose
-/// owner is mutable and absent from `live_out`, and the SOAC isn't
-/// in tail position of an entry with bound outputs. The caller
-/// applies the SOAC-specific body-shape and pointwise checks.
+/// owner is mutable and absent from `live_out`. Each caller applies
+/// the entry-output exclusion separately where applicable and the
+/// SOAC-specific body-shape and pointwise checks.
 fn input_is_dead_unique_var(
     soac_id: TermId,
     input: &ArrayExpr,
     model: &OwnershipModel,
-    entry_output_soacs: &HashSet<TermId>,
 ) -> Option<SymbolId> {
-    if entry_output_soacs.contains(&soac_id) {
-        return None;
-    }
     let input_term = match input {
         ArrayExpr::Ref(t) => &**t,
         _ => return None,
