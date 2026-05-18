@@ -360,7 +360,7 @@ pub fn classify_soac(soac: &SoacOp) -> ArraySemantics {
             op: op.clone(),
             init: ne.clone(),
         },
-        SoacOp::Scan { op, ne, input } => ArraySemantics::PrefixScan {
+        SoacOp::Scan { op, ne, input, .. } => ArraySemantics::PrefixScan {
             input: input.clone(),
             op: op.clone(),
             init: ne.clone(),

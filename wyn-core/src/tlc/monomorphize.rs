@@ -600,10 +600,16 @@ impl<'a> Monomorphizer<'a> {
                 ne: Box::new(self.process_term(ne)),
                 input: self.process_array_expr(input),
             },
-            SoacOp::Scan { op, ne, input } => SoacOp::Scan {
+            SoacOp::Scan {
+                op,
+                ne,
+                input,
+                consumes_input,
+            } => SoacOp::Scan {
                 op: self.process_soac_body(op),
                 ne: Box::new(self.process_term(ne)),
                 input: self.process_array_expr(input),
+                consumes_input: *consumes_input,
             },
             SoacOp::Filter { pred, input } => SoacOp::Filter {
                 pred: self.process_soac_body(pred),
@@ -947,10 +953,16 @@ impl<'a> Monomorphizer<'a> {
                 ne: Box::new(self.apply_subst_term(ne, subst)),
                 input: self.apply_subst_array_expr(input, subst),
             },
-            SoacOp::Scan { op, ne, input } => SoacOp::Scan {
+            SoacOp::Scan {
+                op,
+                ne,
+                input,
+                consumes_input,
+            } => SoacOp::Scan {
                 op: self.apply_subst_soac_body(op, subst),
                 ne: Box::new(self.apply_subst_term(ne, subst)),
                 input: self.apply_subst_array_expr(input, subst),
+                consumes_input: *consumes_input,
             },
             SoacOp::Filter { pred, input } => SoacOp::Filter {
                 pred: self.apply_subst_soac_body(pred, subst),

@@ -398,7 +398,12 @@ impl<'a> CallLowerer<'a> {
                 ne: Box::new(self.lower_term(*ne)),
                 input: self.lower_array_expr(input),
             },
-            SoacOp::Scan { op, ne, input } => SoacOp::Scan {
+            SoacOp::Scan {
+                op,
+                ne,
+                input,
+                consumes_input,
+            } => SoacOp::Scan {
                 op: super::SoacBody {
                     lam: op.lam,
                     captures: op
@@ -409,6 +414,7 @@ impl<'a> CallLowerer<'a> {
                 },
                 ne: Box::new(self.lower_term(*ne)),
                 input: self.lower_array_expr(input),
+                consumes_input,
             },
             SoacOp::Filter { pred, input } => SoacOp::Filter {
                 pred: super::SoacBody {

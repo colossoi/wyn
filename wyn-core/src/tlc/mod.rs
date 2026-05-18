@@ -457,6 +457,12 @@ pub enum SoacOp {
         op: SoacBody,
         ne: Box<Term>,
         input: ArrayExpr,
+        /// Set by the ownership pass when the scan's input is mutable
+        /// and dead-after the SOAC. Read by `egir::from_tlc` to lower
+        /// the scan to an in-place loop (a[i] = op(a[i-1], a[i]))
+        /// instead of allocating a fresh output buffer. Mirrors the
+        /// flag of the same name on `Map`.
+        consumes_input: bool,
     },
     Filter {
         pred: SoacBody,
@@ -836,7 +842,7 @@ where
             f(ne);
             visit_array_expr_children(input, f);
         }
-        SoacOp::Scan { op, ne, input } => {
+        SoacOp::Scan { op, ne, input, .. } => {
             visit_soac_body_children(op, f);
             f(ne);
             visit_array_expr_children(input, f);
@@ -979,10 +985,16 @@ where
             ne: Box::new(f(*ne)),
             input: map_array_expr_children(input, f),
         },
-        SoacOp::Scan { op, ne, input } => SoacOp::Scan {
+        SoacOp::Scan {
+            op,
+            ne,
+            input,
+            consumes_input,
+        } => SoacOp::Scan {
             op: map_soac_body_children(op, f),
             ne: Box::new(f(*ne)),
             input: map_array_expr_children(input, f),
+            consumes_input,
         },
         SoacOp::Filter { pred, input } => SoacOp::Filter {
             pred: map_soac_body_children(pred, f),
@@ -2068,6 +2080,8 @@ impl<'a> Transformer<'a> {
                 op,
                 ne: Box::new(ne_term),
                 input: ArrayExpr::Ref(Box::new(arr_term)),
+                // Initial construction; apply_ownership may flip later.
+                consumes_input: false,
             }),
         )
     }

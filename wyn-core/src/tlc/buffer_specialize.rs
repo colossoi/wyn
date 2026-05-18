@@ -599,10 +599,16 @@ impl BufferSpecializer {
                 ne: Box::new(self.rewrite_term(ne)),
                 input: self.rewrite_array_expr(input),
             },
-            SoacOp::Scan { op, ne, input } => SoacOp::Scan {
+            SoacOp::Scan {
+                op,
+                ne,
+                input,
+                consumes_input,
+            } => SoacOp::Scan {
                 op: self.rewrite_soac_body(op),
                 ne: Box::new(self.rewrite_term(ne)),
                 input: self.rewrite_array_expr(input),
+                consumes_input: *consumes_input,
             },
             SoacOp::Filter { pred, input } => SoacOp::Filter {
                 pred: self.rewrite_soac_body(pred),
@@ -1215,10 +1221,16 @@ impl BufferSpecializer {
                 ne: Box::new(self.rewrite_specialized_body(ne, view_params)),
                 input: self.rewrite_specialized_array_expr(input, view_params),
             },
-            SoacOp::Scan { op, ne, input } => SoacOp::Scan {
+            SoacOp::Scan {
+                op,
+                ne,
+                input,
+                consumes_input,
+            } => SoacOp::Scan {
                 op: self.rewrite_specialized_soac_body(op, view_params),
                 ne: Box::new(self.rewrite_specialized_body(ne, view_params)),
                 input: self.rewrite_specialized_array_expr(input, view_params),
+                consumes_input: *consumes_input,
             },
             SoacOp::Filter { pred, input } => SoacOp::Filter {
                 pred: self.rewrite_specialized_soac_body(pred, view_params),

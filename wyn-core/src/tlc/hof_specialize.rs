@@ -345,10 +345,16 @@ pub(super) fn apply_type_subst_to_soac(
             ne: Box::new(apply_type_subst_to_term(ne, subst, term_ids)),
             input: apply_type_subst_to_array_expr(input, subst, term_ids),
         },
-        SoacOp::Scan { op, ne, input } => SoacOp::Scan {
+        SoacOp::Scan {
+            op,
+            ne,
+            input,
+            consumes_input,
+        } => SoacOp::Scan {
             op: apply_type_subst_to_soac_body(op, subst, term_ids),
             ne: Box::new(apply_type_subst_to_term(ne, subst, term_ids)),
             input: apply_type_subst_to_array_expr(input, subst, term_ids),
+            consumes_input: *consumes_input,
         },
         SoacOp::Filter { pred, input } => SoacOp::Filter {
             pred: apply_type_subst_to_soac_body(pred, subst, term_ids),
@@ -760,10 +766,16 @@ fn substitute_var_soac(
             ne: Box::new(substitute_var(ne, old_sym, new_sym, term_ids)),
             input: substitute_var_array_expr(input, old_sym, new_sym, term_ids),
         },
-        SoacOp::Scan { op, ne, input } => SoacOp::Scan {
+        SoacOp::Scan {
+            op,
+            ne,
+            input,
+            consumes_input,
+        } => SoacOp::Scan {
             op: substitute_var_soac_body(op, old_sym, new_sym, term_ids),
             ne: Box::new(substitute_var(ne, old_sym, new_sym, term_ids)),
             input: substitute_var_array_expr(input, old_sym, new_sym, term_ids),
+            consumes_input: *consumes_input,
         },
         SoacOp::Filter { pred, input } => SoacOp::Filter {
             pred: substitute_var_soac_body(pred, old_sym, new_sym, term_ids),

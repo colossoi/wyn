@@ -277,6 +277,9 @@ fn build_fused_from_semantics(
                     },
                     ne: init.clone(),
                     input: input_exprs[0].clone(),
+                    // Fusion runs before apply_ownership; ownership pass
+                    // will (re-)decide consumes_input on this fused Scan.
+                    consumes_input: false,
                 }),
             })
         }

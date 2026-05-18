@@ -446,7 +446,7 @@ impl<'p> Builder<'p> {
                 self.bind_reducer_params(&op.lam, input, soac_id);
                 self.visit_soac_body(op);
             }
-            SoacOp::Scan { op, ne, input } => {
+            SoacOp::Scan { op, ne, input, .. } => {
                 self.visit_term(ne);
                 self.visit_array_expr(input);
                 self.bind_reducer_params(&op.lam, input, soac_id);
@@ -903,7 +903,7 @@ impl<'m> Liveness<'m> {
                 let after_input = self.analyze_array_expr(input, after_op);
                 self.analyze(ne, after_input)
             }
-            SoacOp::Scan { op, ne, input } => {
+            SoacOp::Scan { op, ne, input, .. } => {
                 let after_op = self.soac_envelope_fixed_point(op, &per_call_defs, live_after);
                 let after_input = self.analyze_array_expr(input, after_op);
                 self.analyze(ne, after_input)

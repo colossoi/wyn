@@ -382,12 +382,18 @@ fn analyze_soac(
             ne: ne.clone(),
             inputs: inputs.clone(),
         },
-        SoacOp::Scan { op, ne, input } => {
+        SoacOp::Scan {
+            op,
+            ne,
+            input,
+            consumes_input,
+        } => {
             classify_input(input)?;
             SoacOp::Scan {
                 op: op.clone(),
                 ne: ne.clone(),
                 input: input.clone(),
+                consumes_input: *consumes_input,
             }
         }
         _ => return None,

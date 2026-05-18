@@ -1637,7 +1637,12 @@ impl<'a> Converter<'a> {
                 inputs,
                 ..
             } => self.convert_soac_redomap(op, reduce_op, ne, inputs, ty),
-            SoacOp::Scan { op, ne, input } => self.convert_soac_scan(op, ne, input, ty),
+            SoacOp::Scan {
+                op,
+                ne,
+                input,
+                consumes_input,
+            } => self.convert_soac_scan(op, ne, input, *consumes_input, ty),
             SoacOp::Filter { pred, input } => self.convert_soac_filter(pred, input, ty),
             // TODO(scatter): no producer in to_tlc yet (no surface name dispatched here).
             // Variant exists to anchor the place-passing SOAC shape; remove if a wider
@@ -1806,6 +1811,7 @@ impl<'a> Converter<'a> {
         op: &SoacBody,
         ne: &Term,
         input: &ArrayExpr,
+        consumes_input: bool,
         result_ty: Type<TypeName>,
     ) -> Result<NodeId, ConvertError> {
         let op_name = self.lambda_fn_name(&op.lam)?;
@@ -1819,12 +1825,15 @@ impl<'a> Converter<'a> {
         let mut operands: SmallVec<[NodeId; 4]> = smallvec![arr_nid, init_nid];
         operands.extend(capture_nids.iter().copied());
 
+        let destination =
+            if consumes_input { SoacDestination::InputBuffer } else { SoacDestination::Fresh };
+
         Ok(self.emit_soac(
             PendingSoac::Scan {
                 func: op_name,
                 input_array_type: arr_ty,
                 input_elem_type: elem_ty,
-                destination: SoacDestination::Fresh,
+                destination,
             },
             operands,
             result_ty,
