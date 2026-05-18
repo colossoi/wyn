@@ -1177,8 +1177,12 @@ impl<'m> Rewriter<'m> {
         let id = term.id;
         let mut rewritten = term.map_children(&mut |child| self.rewrite(child));
         if self.consuming_soacs.contains(&id) {
-            if let TermKind::Soac(SoacOp::Map { consumes_input, .. }) = &mut rewritten.kind {
-                *consumes_input = true;
+            match &mut rewritten.kind {
+                TermKind::Soac(SoacOp::Map { consumes_input, .. })
+                | TermKind::Soac(SoacOp::Scan { consumes_input, .. }) => {
+                    *consumes_input = true;
+                }
+                _ => {}
             }
         }
         rewritten
@@ -1235,7 +1239,7 @@ pub fn eligible_consuming_soacs(program: &Program, model: &OwnershipModel) -> Ve
     let entry_output_soacs = collect_entry_output_soac_ids(program);
     let mut out = Vec::new();
     for def in &program.defs {
-        walk_for_eligible_maps(&def.body, model, program, &entry_output_soacs, &mut out);
+        walk_for_eligible_soacs(&def.body, model, program, &entry_output_soacs, &mut out);
     }
     out
 }
@@ -1279,27 +1283,61 @@ fn collect_tail_soac_ids(term: &Term, out: &mut HashSet<TermId>) {
     }
 }
 
-fn walk_for_eligible_maps(
+fn walk_for_eligible_soacs(
     term: &Term,
     model: &OwnershipModel,
     program: &Program,
     entry_output_soacs: &HashSet<TermId>,
     out: &mut Vec<TermId>,
 ) {
-    if let TermKind::Soac(SoacOp::Map { lam, inputs, .. }) = &term.kind {
-        if map_is_eligible(term.id, &lam.lam, inputs, model, entry_output_soacs) {
-            out.push(term.id);
+    match &term.kind {
+        TermKind::Soac(SoacOp::Map { lam, inputs, .. }) => {
+            // Multi-input map isn't eligible (the body reads parallel
+            // streams; the consume rewrite would only own one of them).
+            if inputs.len() == 1
+                && single_input_consume_eligible(
+                    term.id,
+                    &inputs[0],
+                    &lam.lam,
+                    /* elem_param_idx */ 0,
+                    /* expected_param_count */ 1,
+                    model,
+                    entry_output_soacs,
+                )
+            {
+                out.push(term.id);
+            }
         }
+        TermKind::Soac(SoacOp::Scan { op, input, .. }) => {
+            if single_input_consume_eligible(
+                term.id,
+                input,
+                &op.lam,
+                /* elem_param_idx */ 1, // op: |acc, elem| _
+                /* expected_param_count */ 2,
+                model,
+                entry_output_soacs,
+            ) {
+                out.push(term.id);
+            }
+        }
+        _ => {}
     }
     term.for_each_child(&mut |child| {
-        walk_for_eligible_maps(child, model, program, entry_output_soacs, out)
+        walk_for_eligible_soacs(child, model, program, entry_output_soacs, out)
     });
 }
 
-fn map_is_eligible(
+/// Shared eligibility check for the consuming-input rewrite over a
+/// single-input SOAC. Caller supplies the lambda's expected param
+/// count and which param is the element (Map: only param, index 0;
+/// Scan: second of `|acc, elem| _`, index 1).
+fn single_input_consume_eligible(
     soac_id: TermId,
+    input: &ArrayExpr,
     lam: &Lambda,
-    inputs: &[ArrayExpr],
+    elem_param_idx: usize,
+    expected_param_count: usize,
     model: &OwnershipModel,
     entry_output_soacs: &HashSet<TermId>,
 ) -> bool {
@@ -1308,10 +1346,7 @@ fn map_is_eligible(
         return false;
     }
     // 1 — single Var input, owner mutable, dead-after.
-    if inputs.len() != 1 {
-        return false;
-    }
-    let input_term = match &inputs[0] {
+    let input_term = match input {
         ArrayExpr::Ref(t) => &**t,
         _ => return false,
     };
@@ -1337,11 +1372,13 @@ fn map_is_eligible(
     if live_out.contains(&owner) {
         return false;
     }
-    // 2 — body type matches element param.
-    if lam.params.len() != 1 {
+    // 2 — body shape: expected param count + element-param type
+    //     matches the lambda's return (so the per-iteration write
+    //     fits back into the input buffer's element slot).
+    if lam.params.len() != expected_param_count {
         return false;
     }
-    if lam.params[0].1 != lam.ret_ty {
+    if lam.params[elem_param_idx].1 != lam.ret_ty {
         return false;
     }
     // 3 — pointwise: body does not reference the input symbol
