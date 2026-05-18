@@ -18,85 +18,54 @@ open f32
 ------------------------------------------------------------
 -- Camera — Acko.Effect.Camera at the first-load at-rest state.
 --
--- For a first-time visitor, the page sits at scroll y=0 (the
+-- For a first-time visitor the page sits at scroll y=0 (the
 -- `a.set(0, pageStart-200)` auto-scroll is gated by `if(!p ...)`
--- and only fires on the returning-visitor non-intro path). That
--- means the camera-update's `j = max(0, min(1, (T.y-100)/...))`
--- evaluates to 0, hence `J = 0`, and the camera lives at its
--- maximally-tilted intro endpoint, not the straight-on state:
+-- and only fires on the returning-visitor non-intro path). The
+-- camera-update's `j` clamps to 0, so `J = 0` and the camera lives
+-- at its maximally-tilted intro endpoint rather than the
+-- straight-on state. Net: position = Y·z_cam + (cam_shift_x, 0, 0)
+-- looking at origin, where Y mixes the orbit distance with the
+-- perspective constant by M = J*0.8 + 0.2.
 --
---   thetaB     = 0.27  (constructor default — I missed it the first
---                       time; this is the elevation angle)
---   phiC       = -0.64 (azimuth contribution, scaled by 1-J)
---   theta      = thetaB * (1-J)        = 0.27
---   phi        = phiB + phiC * (1-J)   = -0.64
---   M          = J*0.8 + 0.2           = 0.2
---   Y          = orbit + (perspective - orbit) * M
---              = 1200 + (1.866*V - 1200) * 0.2
+-- Camera basis rows derived from elevation θ and azimuth φ:
 --
---   position   = Y * z_cam + (140, 0, 0)  -- +140 is (1-J)*140 at J=0
---   lookAt(0,0,0), up=(0,1,0)
+--   x_cam = ( cos φ,            0,           -sin φ          )
+--   y_cam = (-sin θ·sin φ,    cos θ,         -sin θ·cos φ    )
+--   z_cam = ( sin φ·cos θ,    sin θ,          cos φ·cos θ    )
 --
--- where the camera basis (theta, phi → world):
---
---   x_cam = ( cos(phi),                 0,           -sin(phi)        )
---   y_cam = (-sin(theta)*sin(phi),  cos(theta),  -sin(theta)*cos(phi) )
---   z_cam = ( sin(phi)*cos(theta),  sin(theta),   cos(phi)*cos(theta) )
---
--- For (theta, phi) = (0.27, -0.64) those evaluate to the constants
--- below. The camera ends up at roughly (-Y*0.575 + 140, Y*0.267,
--- Y*0.773) — up and to the left of origin, tilted down-right toward
--- it. That's the 3/4 view in scr-orig.jpg.
---
--- Plus the `visibleHolder` group offset of (0, -10, +200) the
--- original applies to every track vertex. wgpu clip-space is y-up
--- per the WebGPU spec, so positive world y maps to positive clip.y
--- with no extra flip.
+-- Tracks are children of the original's `visibleHolder` group, so
+-- every track vertex picks up its (0, -10, +200) offset. wgpu
+-- clip-space is y-up per the WebGPU spec — positive world y maps
+-- straight through to positive clip.y.
 ------------------------------------------------------------
 
--- Camera basis precomputed for theta=0.27, phi=-0.64.
-def x_cam_x: f32 =  0.8021    -- cos(phi)
-def x_cam_z: f32 =  0.5972    -- -sin(phi)
-def y_cam_x: f32 =  0.1592    -- -sin(theta)*sin(phi)
-def y_cam_y: f32 =  0.9636    -- cos(theta)
-def y_cam_z: f32 = -0.2140    -- -sin(theta)*cos(phi)
-def z_cam_x: f32 = -0.5754    -- sin(phi)*cos(theta)
-def z_cam_y: f32 =  0.2667    -- sin(theta)
-def z_cam_z: f32 =  0.7731    -- cos(phi)*cos(theta)
+def x_cam: vec3f32 = @[ 0.8021, 0.0,     0.5972]
+def y_cam: vec3f32 = @[ 0.1592, 0.9636, -0.2140]
+def z_cam: vec3f32 = @[-0.5754, 0.2667,  0.7731]
 
--- World-space x of the post-lookAt camera shift (the +140 in
--- ap.position.x at J=0).
+-- The `(1-J)*140` shift the original adds to camera x post-lookAt.
 def cam_shift_x: f32 = 140.0
 
 -- 1 / tan(fov/2) for fov = 30°.
 def fov_f: f32 = 3.7320508
 
--- Standalone-viz zoom-out factor. The original masthead's camera
--- positions it so 1 world unit = 1 pixel at z=0, which keeps the
--- masthead pixel-perfect inside the browser's hero area. In our
--- standalone window the same calibration only fits the middle ~half
--- of the model; this multiplier pulls the camera back to fit more.
--- Pure camera-distance change (no FOV tweak) so parallax matches the
--- original.
+-- Standalone-viz zoom-out factor. The original positions the camera
+-- so 1 world unit = 1 pixel at z=0, which keeps the masthead
+-- pixel-perfect inside the browser's hero area. In our window that
+-- calibration fits only the middle ~half of the model; we pull the
+-- camera back. Pure distance change so parallax matches the original.
 def zoom_out: f32 = 1.5
 
-def view_transform(p: vec3f32, view_height: f32) vec3f32 =
-  -- visibleHolder offset (0, -10, +200).
-  let w_x = p.x in
-  let w_y = p.y - 10.0 in
-  let w_z = p.z + 200.0 in
+-- R^T * v: project a world-space vector onto the camera's basis rows.
+def r_transpose_mul(v: vec3f32) vec3f32 =
+  @[dot(x_cam, v), dot(y_cam, v), dot(z_cam, v)]
 
-  -- Camera distance Y at J=0, M=0.2, then scaled by zoom_out.
+def view_transform(p: vec3f32, view_height: f32) vec3f32 =
   let perspective_v = 1.866 * view_height in
   let cam_dist      = (1200.0 + (perspective_v - 1200.0) * 0.2) * zoom_out in
-
-  -- View = R^T * (world - cam_pos), with cam_pos = Y*z_cam + (140,0,0).
-  -- R^T*z_cam = (0,0,1), so the Y term only shifts view.z by -Y.
-  -- R^T*(140,0,0) = 140 * (x_cam.x, y_cam.x, z_cam.x).
-  let view_x = x_cam_x * w_x                 + x_cam_z * w_z - cam_shift_x * x_cam_x in
-  let view_y = y_cam_x * w_x + y_cam_y * w_y + y_cam_z * w_z - cam_shift_x * y_cam_x in
-  let view_z = z_cam_x * w_x + z_cam_y * w_y + z_cam_z * w_z - cam_dist - cam_shift_x * z_cam_x in
-  @[view_x, view_y, view_z]
+  let cam_pos       = cam_dist * z_cam + @[cam_shift_x, 0.0, 0.0] in
+  let w             = @[p.x, p.y - 10.0, p.z + 200.0] in
+  r_transpose_mul(w - cam_pos)
 
 def perspective_project(v: vec3f32, aspect: f32) vec4f32 =
   let near = 2.0 in
@@ -109,13 +78,8 @@ def perspective_project(v: vec3f32, aspect: f32) vec4f32 =
   let cw = neg_tz in
   @[cx, cy, cz, cw]
 
--- Transform a direction (sun, zenith, etc.) from world to view space.
--- For a pure-rotation R, R^T * d gives the direction in the camera's frame.
-def world_to_view_dir(d: vec3f32) vec3f32 =
-  let x = x_cam_x * d.x                 + x_cam_z * d.z in
-  let y = y_cam_x * d.x + y_cam_y * d.y + y_cam_z * d.z in
-  let z = z_cam_x * d.x + z_cam_y * d.y + z_cam_z * d.z in
-  @[x, y, z]
+-- For a pure-rotation R, R^T·d gives the direction in the camera's frame.
+def world_to_view_dir(d: vec3f32) vec3f32 = r_transpose_mul(d)
 
 ------------------------------------------------------------
 -- Intro animation: the H(t) curve from combo.min.js's Track.update
@@ -243,15 +207,11 @@ entry fragment_main
   -- (silhouettes darken because nlen < 1 reduces the dot product).
   let ds = sat_clamp(dot(n_norm, sun_view)) in
   let dz = sat_clamp(dot(n_in,   zenith_view)) in
-  let diff0_r = ds * 1.5 + dz * 0.1 in
-  let diff0_g = ds * 1.0 + dz * 0.4 in
-  let diff0_b = ds * 0.7 + dz * 0.5 in
+  let diff0 = ds * @[1.5, 1.0, 0.7] + dz * @[0.1, 0.4, 0.5] in
 
   -- Range compression (original's `diffuse = diffuse*0.5 + 0.5`,
   -- with ambientCorrection=0): floors the dark side at 0.5.
-  let diff_r = diff0_r * 0.5 + 0.5 in
-  let diff_g = diff0_g * 0.5 + 0.5 in
-  let diff_b = diff0_b * 0.5 + 0.5 in
+  let diff = diff0 * 0.5 + @[0.5, 0.5, 0.5] in
 
   -- Silhouette outline boost.
   let nlen2 = dot(n_in, n_in) in
@@ -260,35 +220,28 @@ entry fragment_main
 
   -- Half-vector specular. Camera is at origin in view space, so the
   -- direction toward the camera is normalize(-view_pos).
-  let view_dir = normalize(@[0.0 - view_pos.x, 0.0 - view_pos.y, 0.0 - view_pos.z]) in
-  let half     = normalize(@[sun_view.x + view_dir.x, sun_view.y + view_dir.y, sun_view.z + view_dir.z]) in
+  let view_dir = normalize(0.0 - view_pos) in
+  let half     = normalize(sun_view + view_dir) in
   let spec     = pow(sat_clamp(dot(n_norm, half)), 4.0) in
-  let spec_r   = sqrt(color.x) * 0.15 in
-  let spec_g   = sqrt(color.y) * 0.15 in
-  let spec_b   = sqrt(color.z) * 0.15 in
+  let spec_col = vec.sqrt(color) * 0.15 in
 
   -- AO mix by luminance: dark regions get tinted by the base color,
   -- lit regions stay near-white.
-  let lum     = diff_r * 0.299 + diff_g * 0.587 + diff_b * 0.114 in
+  let lum     = dot(diff, @[0.299, 0.587, 0.114]) in
   let ao_dark = (ao * ao + ao) * 0.5 in
-  let inv_lum = 1.0 - lum in
-  let ao_r = color.x * ao_dark * inv_lum + ao * lum in
-  let ao_g = color.y * ao_dark * inv_lum + ao * lum in
-  let ao_b = color.z * ao_dark * inv_lum + ao * lum in
+  let bright  = ao * lum in
+  let ao_vec  = color * (ao_dark * (1.0 - lum)) + @[bright, bright, bright] in
 
-  -- Combine: ao · (diffuse · color · outline_boost + specular · spec_col).
-  let lit_r = ao_r * (diff_r * color.x * outline_mult + spec * spec_r) in
-  let lit_g = ao_g * (diff_g * color.y * outline_mult + spec * spec_g) in
-  let lit_b = ao_b * (diff_b * color.z * outline_mult + spec * spec_b) in
+  let lit = ao_vec * (diff * color * outline_mult + spec * spec_col) in
 
-  -- Fog toward white. exp(-(d-2200)·0.00022): no fog at d=2200,
-  -- ramps to ~0.18 at d=10000.
-  let view_dist = sqrt(view_pos.x * view_pos.x + view_pos.y * view_pos.y + view_pos.z * view_pos.z) in
+  -- Distance-based fog blending the lit color toward white. The
+  -- 2200 cut-in / 0.00022 falloff are the original's tunings — fog
+  -- begins around the model's far edge and reaches the background
+  -- at typical screen-edge distances.
+  let view_dist = sqrt(dot(view_pos, view_pos)) in
   let fog       = sat_clamp(exp(0.0 - (view_dist - 2200.0) * 0.00022)) in
-  let inv_fog   = 1.0 - fog in
-  let fog_r     = inv_fog + lit_r * fog in
-  let fog_g     = inv_fog + lit_g * fog in
-  let fog_b     = inv_fog + lit_b * fog in
+  let fog_col   = @[1.0 - fog, 1.0 - fog, 1.0 - fog] + lit * fog in
 
-  -- Gamma.
-  @[sqrt(fog_r), sqrt(fog_g), sqrt(fog_b), 1.0]
+  -- sqrt = pow(x, 1/2): cheap linear→sRGB gamma encoding.
+  let out = vec.sqrt(fog_col) in
+  @[out.x, out.y, out.z, 1.0]
