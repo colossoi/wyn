@@ -78,7 +78,7 @@ fn extract_bindings_inner<T: PatternValue>(
             Ok(())
         }
 
-        PatternKind::Tuple(patterns) => {
+        PatternKind::Tuple(patterns) | PatternKind::Vec(patterns) => {
             let len = value.tuple_len().ok_or(PatternError::NotATuple)?;
             if len != patterns.len() {
                 return Err(PatternError::TupleLengthMismatch {
@@ -173,7 +173,7 @@ fn collect_binding_paths(pattern: &Pattern, path: &[usize], bindings: &mut Vec<B
             // These don't bind anything
         }
 
-        PatternKind::Tuple(patterns) => {
+        PatternKind::Tuple(patterns) | PatternKind::Vec(patterns) => {
             for (i, p) in patterns.iter().enumerate() {
                 let mut new_path = path.to_vec();
                 new_path.push(i);
@@ -217,7 +217,7 @@ fn collect_names(pattern: &Pattern, names: &mut Vec<String>) {
             names.push(name.clone());
         }
         PatternKind::Wildcard | PatternKind::Unit | PatternKind::Literal(_) => {}
-        PatternKind::Tuple(patterns) => {
+        PatternKind::Tuple(patterns) | PatternKind::Vec(patterns) => {
             for p in patterns {
                 collect_names(p, names);
             }

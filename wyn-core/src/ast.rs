@@ -502,11 +502,13 @@ pub struct SliceExpr {
 // Pattern types for match expressions and let bindings
 #[derive(Debug, Clone, PartialEq)]
 pub enum PatternKind {
-    Name(String),                             // Simple name binding
-    Wildcard,                                 // _ wildcard
-    Literal(PatternLiteral),                  // Literal patterns
-    Unit,                                     // () unit pattern
-    Tuple(Vec<Pattern>),                      // (pat1, pat2, ...)
+    Name(String),            // Simple name binding
+    Wildcard,                // _ wildcard
+    Literal(PatternLiteral), // Literal patterns
+    Unit,                    // () unit pattern
+    Tuple(Vec<Pattern>),     // (pat1, pat2, ...)
+    Vec(Vec<Pattern>),       // @[pat1, pat2, ...] — vec destructure
+
     Record(Vec<RecordPatternField>),          // { field1, field2 = pat, ... }
     Constructor(String, Vec<Pattern>),        // Constructor application
     Typed(Box<Pattern>, Type),                // pat : type
@@ -542,7 +544,7 @@ impl Pattern {
             PatternKind::Name(name) => names.push(name.clone()),
             PatternKind::Typed(inner, _) => inner.collect_bound_names(names),
             PatternKind::Attributed(_, inner) => inner.collect_bound_names(names),
-            PatternKind::Tuple(patterns) => {
+            PatternKind::Tuple(patterns) | PatternKind::Vec(patterns) => {
                 for pat in patterns {
                     pat.collect_bound_names(names);
                 }
@@ -582,7 +584,9 @@ impl Pattern {
     pub fn collect_names(&self) -> Vec<String> {
         match &self.kind {
             PatternKind::Name(name) => vec![name.clone()],
-            PatternKind::Tuple(patterns) => patterns.iter().flat_map(|p| p.collect_names()).collect(),
+            PatternKind::Tuple(patterns) | PatternKind::Vec(patterns) => {
+                patterns.iter().flat_map(|p| p.collect_names()).collect()
+            }
             PatternKind::Typed(inner, _) => inner.collect_names(),
             PatternKind::Attributed(_, inner) => inner.collect_names(),
             PatternKind::Record(fields) => fields

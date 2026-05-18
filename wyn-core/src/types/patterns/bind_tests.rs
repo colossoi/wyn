@@ -186,3 +186,45 @@ def f(t: #a | #b) i32 =
     let msg = result.unwrap_err();
     assert!(msg.contains("unreachable") || msg.contains("redundant"));
 }
+
+// ----- vec destructuring (positional inverse of the `@[…]` ctor) -----
+
+#[test]
+fn vec_pattern_in_let_destructures_vec2() {
+    let result = type_check_source("def f(v: vec2f32) f32 = let @[a, b] = v in a + b");
+    assert!(result.is_ok(), "got {:?}", result);
+}
+
+#[test]
+fn vec_pattern_in_let_destructures_vec4() {
+    let result = type_check_source("def f(v: vec4f32) f32 = let @[a, b, c, d] = v in a + b + c + d");
+    assert!(result.is_ok(), "got {:?}", result);
+}
+
+#[test]
+fn vec_pattern_supports_wildcards() {
+    let result = type_check_source("def f(v: vec3f32) f32 = let @[a, _, c] = v in a + c");
+    assert!(result.is_ok(), "got {:?}", result);
+}
+
+#[test]
+fn vec_pattern_arity_mismatch_is_rejected() {
+    // vec2 scrutinee, 3-element pattern.
+    let result = type_check_source("def f(v: vec2f32) f32 = let @[a, b, c] = v in a + b + c");
+    assert!(
+        result.is_err(),
+        "3-pattern destructure of vec2 should be flagged, got {:?}",
+        result
+    );
+}
+
+#[test]
+fn vec_pattern_on_non_vec_is_rejected() {
+    // Scrutinee is a scalar; vec destructure should not match.
+    let result = type_check_source("def f(n: f32) f32 = let @[a, b] = n in a + b");
+    assert!(
+        result.is_err(),
+        "vec destructure of scalar should be flagged, got {:?}",
+        result
+    );
+}

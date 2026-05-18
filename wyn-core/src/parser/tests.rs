@@ -1209,6 +1209,24 @@ fn test_parse_pattern_tuple_with_trailing_comma() {
     }
 }
 
+/// Parser should accept `@[a, b, c, d]` as a vec-destructuring pattern —
+/// the positional inverse of the `@[…]` vec constructor. Shape assertion
+/// will be tightened once `PatternKind::Vec` lands; for now this only
+/// pins down "the parser doesn't reject the syntax". Currently fails
+/// because `@` isn't recognised at the pattern position.
+#[test]
+fn test_parse_pattern_vec_destructure() {
+    let tokens = tokenize("@[a, b, c, d]").expect("Failed to tokenize");
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
+    let result = parser.parse_pattern();
+    assert!(
+        result.is_ok(),
+        "expected `@[a, b, c, d]` to parse as a vec pattern, got {:?}",
+        result.err()
+    );
+}
+
 #[test]
 fn test_parse_pattern_single_in_parens() {
     let tokens = tokenize("(x)").expect("Failed to tokenize");

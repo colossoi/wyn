@@ -52,8 +52,7 @@ def traceSimple(fragCoord: vec2f32, mx: f32, my: f32, z_offset: f32, use_mouse: 
     else
       -- Apply rotation rx to xz
       let p_xz = @[p_x, p_z] * rx in
-      let p2_x = p_xz.x in
-      let p2_z = p_xz.y in
+      let @[p2_x, p2_z] = p_xz in
 
       -- Apply rotation ry based on mouse
       let (p3_x, p3_y, p3_z) = if use_mouse > 0.5 then

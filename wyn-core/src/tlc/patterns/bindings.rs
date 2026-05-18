@@ -12,6 +12,7 @@
 use crate::SymbolId;
 use crate::ast::{self, PatternKind, Span, TypeName};
 use crate::tlc::{PendingBinding, Term, TermKind, Transformer, VarRef};
+use crate::types::TypeExt;
 use polytype::Type;
 use std::collections::HashMap;
 
@@ -89,6 +90,31 @@ impl<'a> Transformer<'a> {
                         .expect("BUG: Tuple pattern has more elements than tuple type");
 
                     let proj = self.build_tuple_projection(fresh_sym, &tuple_ty, i, comp_ty, span);
+                    let (_, sub_bindings) =
+                        self.compute_pattern_bindings_inner(sub_pattern, proj, span, false);
+                    bindings.extend(sub_bindings);
+                }
+
+                (fresh_sym, bindings)
+            }
+            PatternKind::Vec(patterns) => {
+                // Bind the vec to a fresh symbol, then build .x/.y/.z/.w
+                // projections for each sub-pattern. All sub-patterns
+                // share the same element type (vec's element).
+                let fresh_name = format!("_w_vec_{}", self.term_ids.next_id().0);
+                let fresh_sym = self.define(&fresh_name);
+                let vec_ty = scrutinee.ty.clone();
+                let elem_ty =
+                    vec_ty.elem_type().cloned().expect("BUG: Vec pattern scrutinee is not a vec type");
+
+                let mut bindings = vec![PendingBinding {
+                    name: fresh_sym,
+                    ty: vec_ty.clone(),
+                    expr: scrutinee,
+                }];
+
+                for (i, sub_pattern) in patterns.iter().enumerate() {
+                    let proj = self.build_tuple_projection(fresh_sym, &vec_ty, i, elem_ty.clone(), span);
                     let (_, sub_bindings) =
                         self.compute_pattern_bindings_inner(sub_pattern, proj, span, false);
                     bindings.extend(sub_bindings);
@@ -242,6 +268,7 @@ impl<'a> Transformer<'a> {
                 self.simple_pattern_name(inner)
             }
             PatternKind::Tuple(_)
+            | PatternKind::Vec(_)
             | PatternKind::Record(_)
             | PatternKind::Unit
             | PatternKind::Literal(_)

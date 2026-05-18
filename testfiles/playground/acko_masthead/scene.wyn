@@ -190,10 +190,7 @@ entry vertex_main
   let n_world  = @[normal.x, normal.y, normal.z] in
   let n_view   = world_to_view_dir(n_world) in
   let color    = @[vertex_color.x, vertex_color.y, vertex_color.z] in
-  let speed    = track_meta.x in
-  let bend     = track_meta.y in
-  let duration = track_meta.z in
-  let length   = track_meta.w in
+  let @[speed, bend, duration, length] = track_meta in
   let off      = t_offset(iTime, speed, bend, duration) in
   let in_window = vert_s >= off && vert_s <= off + length in
   let view_pos = view_transform(world, iResolution.y) in

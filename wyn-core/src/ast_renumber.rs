@@ -167,6 +167,9 @@ pub fn clone_pattern_fresh_ids(pat: &Pattern, nc: &mut NodeCounter) -> Pattern {
         PatternKind::Tuple(pats) => {
             PatternKind::Tuple(pats.iter().map(|p| clone_pattern_fresh_ids(p, nc)).collect())
         }
+        PatternKind::Vec(pats) => {
+            PatternKind::Vec(pats.iter().map(|p| clone_pattern_fresh_ids(p, nc)).collect())
+        }
         PatternKind::Record(fields) => PatternKind::Record(
             fields
                 .iter()

@@ -120,6 +120,26 @@ impl<'a> Transformer<'a> {
                 }
                 (cond, bindings)
             }
+            PatternKind::Vec(sub_patterns) => {
+                // Vec patterns in `match`: all sub-patterns share the
+                // single element type and the size is fixed by the type,
+                // so the pattern is irrefutable (always matches once
+                // the type checker has confirmed arity). Project each
+                // component as a `.x`/`.y`/`.z`/`.w` swizzle.
+                let mut cond = self.bool_lit(true, span);
+                let mut bindings = Vec::new();
+                let elem_ty = match &scrut.ty {
+                    Type::Constructed(TypeName::Vec, args) if args.len() == 2 => args[0].clone(),
+                    other => panic!("BUG: vec pattern against non-vec type {:?}", other),
+                };
+                for (i, sub) in sub_patterns.iter().enumerate() {
+                    let proj = self.mk_tuple_proj(scrut.clone(), i, elem_ty.clone(), span);
+                    let (sub_cond, sub_bindings) = self.compile_pattern_test(&proj, sub);
+                    cond = self.and_cond(cond, sub_cond, span);
+                    bindings.extend(sub_bindings);
+                }
+                (cond, bindings)
+            }
             PatternKind::Constructor(name, sub_patterns) => {
                 let variants = match &scrut.ty {
                     Type::Constructed(TypeName::Tuple(_), _) => {

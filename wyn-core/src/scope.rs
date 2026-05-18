@@ -194,7 +194,7 @@ pub fn for_each_pattern_name(pattern: &crate::ast::Pattern, f: &mut impl FnMut(&
     use crate::ast::PatternKind;
     match &pattern.kind {
         PatternKind::Name(name) => f(name),
-        PatternKind::Tuple(pats) | PatternKind::Constructor(_, pats) => {
+        PatternKind::Tuple(pats) | PatternKind::Vec(pats) | PatternKind::Constructor(_, pats) => {
             for p in pats {
                 for_each_pattern_name(p, f);
             }

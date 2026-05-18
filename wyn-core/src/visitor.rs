@@ -326,7 +326,7 @@ pub fn walk_pattern<V: Visitor>(v: &mut V, pat: &Pattern) -> ControlFlow<V::Brea
         PatternKind::Wildcard => v.visit_pattern_wildcard(id),
         PatternKind::Unit => v.visit_pattern_unit(id),
         PatternKind::Literal(lit) => v.visit_pattern_literal(id, lit),
-        PatternKind::Tuple(patterns) => v.visit_pattern_tuple(id, patterns),
+        PatternKind::Tuple(patterns) | PatternKind::Vec(patterns) => v.visit_pattern_tuple(id, patterns),
         PatternKind::Record(fields) => v.visit_pattern_record(id, fields),
         PatternKind::Constructor(name, patterns) => v.visit_pattern_constructor(id, name, patterns),
         PatternKind::Typed(inner, ty) => v.visit_pattern_typed(id, inner, ty),

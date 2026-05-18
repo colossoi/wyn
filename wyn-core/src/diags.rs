@@ -701,6 +701,10 @@ impl AstFormatter {
                 let items: Vec<String> = patterns.iter().map(|p| self.format_pattern(p)).collect();
                 format!("({})", items.join(", "))
             }
+            PatternKind::Vec(patterns) => {
+                let items: Vec<String> = patterns.iter().map(|p| self.format_pattern(p)).collect();
+                format!("@[{}]", items.join(", "))
+            }
             PatternKind::Record(fields) => {
                 let items: Vec<String> = fields
                     .iter()

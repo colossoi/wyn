@@ -139,7 +139,7 @@ pub fn lower(pat: &ast::Pattern) -> CovPat {
         PatternKind::Typed(inner, _) | PatternKind::Attributed(_, inner) => lower(inner),
         PatternKind::Unit => CovPat::UnitP,
         PatternKind::Literal(lit) => CovPat::Lit(lower_literal(lit)),
-        PatternKind::Tuple(sub) => CovPat::Tuple(sub.iter().map(lower).collect()),
+        PatternKind::Tuple(sub) | PatternKind::Vec(sub) => CovPat::Tuple(sub.iter().map(lower).collect()),
         PatternKind::Record(fields) => CovPat::Record(
             fields
                 .iter()

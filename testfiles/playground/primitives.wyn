@@ -335,8 +335,7 @@ def render(ro:vec3f32, rd:vec3f32, rdx:vec3f32, rdy:vec3f32) vec3f32 =
 
   -- raycast scene
   let res = raycast(ro, rd) in
-  let t = res.x in
-  let m = res.y in
+  let @[t, m] = res in
 
   if m > 0.0 - 0.5 then
     let pos = ro + rd * t in

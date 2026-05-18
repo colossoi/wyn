@@ -69,6 +69,31 @@ pub fn is_irrefutable(pat: &ast::Pattern, ty: &Type) -> Result<(), RefutabilityE
                 })
             }
         }
+        PatternKind::Vec(sub) => {
+            // Vec patterns are irrefutable when the arity matches the
+            // type's vec size — the type checker already enforces that,
+            // so here we just recurse into the sub-patterns against the
+            // element type. All sub-patterns share the same elem type.
+            if let Type::Constructed(TypeName::Vec, args) = ty {
+                if args.len() == 2 {
+                    let elem_ty = &args[0];
+                    for s in sub {
+                        is_irrefutable(s, elem_ty)?;
+                    }
+                    Ok(())
+                } else {
+                    Err(RefutabilityError {
+                        culprit: pat.h.span,
+                        reason: format!("malformed vec type {:?}", ty),
+                    })
+                }
+            } else {
+                Err(RefutabilityError {
+                    culprit: pat.h.span,
+                    reason: format!("vec pattern against non-vec type {:?}", ty),
+                })
+            }
+        }
         PatternKind::Record(fields) => {
             if let Type::Constructed(TypeName::Record(record_names), args) = ty {
                 for f in fields {

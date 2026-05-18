@@ -87,6 +87,8 @@ impl Parser<'_> {
 
             Some(Token::LeftBrace) => self.parse_record_pattern(),
 
+            Some(Token::AtBracket) => self.parse_vec_pattern(),
+
             Some(Token::Identifier(_)) => {
                 // Simple name binding. (Sum-type constructor patterns
                 // start with `Token::Constructor`, not an identifier.)
@@ -147,6 +149,35 @@ impl Parser<'_> {
             self.expect(Token::RightParen)?;
             Ok(first)
         }
+    }
+
+    /// Parse `@[pat1, pat2, …]` — the positional inverse of the `@[…]`
+    /// vec constructor. All sub-patterns bind components of a vec
+    /// scrutinee in order; the type checker validates arity against
+    /// the scrutinee's vec size.
+    fn parse_vec_pattern(&mut self) -> Result<Pattern> {
+        let start_span = self.current_span();
+        self.expect(Token::AtBracket)?;
+
+        let mut patterns = Vec::new();
+        if !self.check(&Token::RightBracket) {
+            loop {
+                patterns.push(self.parse_pattern()?);
+                if !self.check(&Token::Comma) {
+                    break;
+                }
+                self.advance();
+                // Allow trailing comma before `]`.
+                if self.check(&Token::RightBracket) {
+                    break;
+                }
+            }
+        }
+
+        let end_span = self.current_span();
+        self.expect(Token::RightBracket)?;
+        let span = start_span.merge(&end_span);
+        Ok(self.node_counter.mk_node(PatternKind::Vec(patterns), span))
     }
 
     fn parse_record_pattern(&mut self) -> Result<Pattern> {

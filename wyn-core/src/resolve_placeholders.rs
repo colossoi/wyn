@@ -278,7 +278,7 @@ impl PlaceholderResolver {
                 self.resolve_pattern(inner);
                 *ty = self.resolve_type(ty);
             }
-            PatternKind::Tuple(patterns) => {
+            PatternKind::Tuple(patterns) | PatternKind::Vec(patterns) => {
                 for p in patterns {
                     self.resolve_pattern(p);
                 }

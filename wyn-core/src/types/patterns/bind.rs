@@ -7,7 +7,7 @@ use crate::ast::{Pattern, PatternKind, PatternLiteral};
 use crate::error::CompilerError;
 use crate::scope::IdentifierKind;
 use crate::types::checker::TypeChecker;
-use crate::types::{Type, TypeName, TypeScheme, bool_type, f32, i32, tuple};
+use crate::types::{Type, TypeName, TypeScheme, bool_type, f32, i32, tuple, vec};
 use crate::{bail_type_at, err_type_at};
 
 type Result<T> = std::result::Result<T, CompilerError>;
@@ -23,6 +23,12 @@ impl<'a> TypeChecker<'a> {
                 let elem_types: Vec<Type> =
                     patterns.iter().map(|p| self.fresh_type_for_pattern(p)).collect();
                 tuple(elem_types)
+            }
+            PatternKind::Vec(patterns) => {
+                // All sub-patterns share the same scalar element type;
+                // make a fresh tvar and a vec of the pattern's arity.
+                let elem = self.context.new_variable();
+                vec(patterns.len(), elem)
             }
             PatternKind::Typed(_, annotated_type) => {
                 self.normalize_annotation_type(annotated_type, self.current_module.as_deref())
@@ -112,6 +118,32 @@ impl<'a> TypeChecker<'a> {
                         self.format_type(&expected_applied)
                     )),
                 }
+            }
+            PatternKind::Vec(patterns) => {
+                // Force the scrutinee to be a vec of this pattern's arity
+                // with a fresh element tvar. Unify so the user can write
+                // `let @[a, b] = some_polymorphic_value in …` and have
+                // inference propagate.
+                let elem_tvar = self.context.new_variable();
+                let pattern_vec_ty = vec(patterns.len(), elem_tvar.clone());
+                self.context.unify(&pattern_vec_ty, expected_type).map_err(|_| {
+                    err_type_at!(
+                        pattern.h.span,
+                        "`@[{}]` pattern requires a vec{} but got {}",
+                        std::iter::repeat("_").take(patterns.len()).collect::<Vec<_>>().join(", "),
+                        patterns.len(),
+                        self.format_type(&expected_type.apply(&self.context))
+                    )
+                })?;
+                let elem_ty = elem_tvar.apply(&self.context);
+                for sub_pattern in patterns {
+                    self.bind_pattern(sub_pattern, &elem_ty, generalize)?;
+                }
+                self.type_table.insert(
+                    pattern.h.id,
+                    TypeScheme::Monotype(expected_type.apply(&self.context)),
+                );
+                Ok(expected_type.clone())
             }
             PatternKind::Typed(inner_pattern, annotated_type) => {
                 let normalized =
