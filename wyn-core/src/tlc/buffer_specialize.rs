@@ -80,6 +80,23 @@ impl BufferSpecializer {
     }
 }
 
+/// Populate `EntryDecl::param_bindings` on every entry-point def.
+/// Done once at the start of buffer specialization; the result is
+/// read by this pass, `tlc::parallelize`, and `egir::from_tlc`.
+fn populate_entry_param_bindings(program: &mut Program) {
+    for def in program.defs.iter_mut() {
+        let DefMeta::EntryPoint(entry) = &mut def.meta else {
+            continue;
+        };
+        let (params, _) = extract_params(&def.body);
+        entry.param_bindings = crate::binding_layout::compute_entry_binding_layout(
+            &params,
+            entry,
+            crate::egir::from_tlc::AUTO_STORAGE_SET,
+        );
+    }
+}
+
 /// Check if a type is a view array (unsized, ArrayVariantView).
 fn is_view_array(ty: &Type<TypeName>) -> bool {
     if !ty.is_array() {
@@ -111,8 +128,14 @@ fn extract_params(term: &Term) -> (Vec<(SymbolId, Type<TypeName>)>, &Term) {
     }
 }
 
-/// Run buffer specialization on a TLC program.
-pub fn run(program: Program) -> Program {
+/// Run buffer specialization on a TLC program. Before doing anything
+/// else, populate `EntryDecl::param_bindings` on every entry — the
+/// auto-storage binding layout becomes data that every downstream
+/// consumer (this pass, `parallelize`, `from_tlc`) reads instead of
+/// re-deriving.
+pub fn run(mut program: Program) -> Program {
+    populate_entry_param_bindings(&mut program);
+
     let mut specializer = BufferSpecializer {
         symbols: program.symbols,
         term_ids: TermIdSource::new(),
@@ -197,29 +220,29 @@ pub fn run(program: Program) -> Program {
 impl BufferSpecializer {
     /// Process a compute entry point: compute buffer bindings for its params,
     /// then walk the body rewriting calls to functions that receive buffer args.
-    fn process_entry_point(&mut self, def: &Def, _entry: &interface::EntryDecl) -> Def {
-        // Compute buffer bindings for entry params (same logic as to_ssa.rs)
-        let (params, _inner_body) = extract_params(&def.body);
-        let mut binding_num = 0u32;
+    fn process_entry_point(&mut self, def: &Def, entry: &interface::EntryDecl) -> Def {
         let old_buffer_map = self.buffer_map.clone();
         self.buffer_map.clear();
 
-        for (sym, ty) in &params {
-            if is_view_array(ty) {
-                let elem_ty = array_elem_type(ty);
-                self.buffer_map.insert(
-                    *sym,
-                    BufferBinding {
-                        set: 0,
-                        binding: binding_num,
-                        elem_ty,
-                    },
-                );
-                binding_num += 1;
+        // Read the cached layout from `entry.param_bindings` (populated by
+        // `populate_entry_param_bindings` at the start of `run`). The body
+        // rewriter handles only bare `Var(sym)` references — skip
+        // tuple-of-views slots since `t.0`/`t.1` projections aren't
+        // recognized.
+        for slot in &entry.param_bindings {
+            if slot.tuple_field.is_some() {
+                continue;
             }
+            self.buffer_map.insert(
+                slot.param_sym,
+                BufferBinding {
+                    set: slot.set,
+                    binding: slot.binding,
+                    elem_ty: slot.elem_ty.clone(),
+                },
+            );
         }
 
-        // Rewrite the body
         let new_body = self.rewrite_term(&def.body);
 
         self.buffer_map = old_buffer_map;

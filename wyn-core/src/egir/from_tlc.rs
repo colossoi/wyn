@@ -452,12 +452,17 @@ fn convert_entry_point(
     // array needs its own buffer). The body still references the original
     // tuple symbol, so we reconstruct it as a `Tuple(views…)` node.
     let mut inputs: Vec<EntryInput> = Vec::with_capacity(params.len());
-    let mut binding_num: u32 = 0;
     let mut pc_offset: u32 = 0;
+
+    // The layout was computed once at the start of buffer specialization
+    // and stored on `entry.param_bindings`. Index it by (param_sym,
+    // tuple_field) so the loop can do an O(1) lookup per param/field.
+    let binding_for_param: std::collections::HashMap<(SymbolId, Option<usize>), (u32, u32)> =
+        entry.param_bindings.iter().map(|s| ((s.param_sym, s.tuple_field), (s.set, s.binding))).collect();
 
     for (i, (sym, ty)) in params.iter().enumerate() {
         let name = symbols.get(*sym).expect("BUG: symbol not in table").clone();
-        let decoration = entry.params.get(i).and_then(extract_io_decoration);
+        let decoration = entry.params.get(i).and_then(crate::binding_layout::extract_io_decoration);
         let size_hint = entry.params.get(i).and_then(extract_size_hint);
 
         // Always register a FuncParam placeholder so param indexing stays
@@ -465,14 +470,13 @@ fn convert_entry_point(
         let fp_nid = converter.graph.add_func_param(i, ty.clone());
         converter.locals.insert(*sym, fp_nid);
 
-        // Tuple-of-unsized-arrays: split into N EntryInputs + bind the
-        // symbol to a reconstructed tuple of the N storage views.
+        // Tuple-of-unsized-arrays: the layout already decided which
+        // (set, binding) goes to each field. The presence of
+        // `(sym, Some(0))` in the index means the param was classified
+        // as tuple-of-views.
         let tuple_of_views_fields: Option<&[Type<TypeName>]> = match ty {
             Type::Constructed(TypeName::Tuple(_), field_tys)
-                if is_compute
-                    && !matches!(&decoration, Some(IoDecoration::BuiltIn(_)))
-                    && !field_tys.is_empty()
-                    && field_tys.iter().all(|t| is_unsized_array(t)) =>
+                if binding_for_param.contains_key(&(*sym, Some(0))) =>
             {
                 Some(field_tys.as_slice())
             }
@@ -482,8 +486,10 @@ fn convert_entry_point(
         if let Some(field_tys) = tuple_of_views_fields {
             let mut view_nids: SmallVec<[NodeId; 4]> = SmallVec::new();
             for (field_idx, field_ty) in field_tys.iter().enumerate() {
-                let set_binding = (AUTO_STORAGE_SET, binding_num);
-                binding_num += 1;
+                let set_binding = binding_for_param
+                    .get(&(*sym, Some(field_idx)))
+                    .copied()
+                    .expect("BUG: param_bindings missing tuple-of-views slot");
                 inputs.push(EntryInput {
                     name: format!("{}_{}", name, field_idx),
                     ty: field_ty.clone(),
@@ -499,13 +505,7 @@ fn convert_entry_point(
             continue;
         }
 
-        let storage_binding = if is_compute && is_unsized_array(ty) {
-            let b = (AUTO_STORAGE_SET, binding_num);
-            binding_num += 1;
-            Some(b)
-        } else {
-            None
-        };
+        let storage_binding = binding_for_param.get(&(*sym, None)).copied();
 
         let push_constant_offset = if is_compute
             && storage_binding.is_none()
@@ -532,6 +532,7 @@ fn convert_entry_point(
             push_constant_offset,
         });
     }
+    let binding_num: u32 = entry.param_bindings.len() as u32;
 
     let execution_model = match &entry.entry_type {
         interface::Attribute::Vertex => ExecutionModel::Vertex,
@@ -2140,30 +2141,6 @@ fn is_unsized_array(ty: &Type<TypeName>) -> bool {
             )
         })
         .unwrap_or(false)
-}
-
-/// Extract an IO decoration (builtin or location attribute) from a pattern.
-fn extract_io_decoration(pattern: &crate::ast::Pattern) -> Option<IoDecoration> {
-    use crate::ast;
-    use IoDecoration;
-    match &pattern.kind {
-        ast::PatternKind::Attributed(attrs, inner) => {
-            for attr in attrs {
-                match attr {
-                    interface::Attribute::BuiltIn(builtin) => {
-                        return Some(IoDecoration::BuiltIn(*builtin));
-                    }
-                    interface::Attribute::Location(loc) => {
-                        return Some(IoDecoration::Location(*loc));
-                    }
-                    _ => {}
-                }
-            }
-            extract_io_decoration(inner)
-        }
-        ast::PatternKind::Typed(inner, _) => extract_io_decoration(inner),
-        _ => None,
-    }
 }
 
 /// Extract a `#[size_hint(N)]` attribute from a pattern.

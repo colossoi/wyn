@@ -1392,26 +1392,10 @@ fn count_view_param_bindings(program: &Program, def_sym: SymbolId) -> u32 {
         Some(d) => d,
         None => return 0,
     };
-    let (params, _) = super::extract_lambda_params(&def.body);
-    let mut count = 0u32;
-    for (_, ty) in params {
-        if is_unsized_array_local(&ty) {
-            count += 1;
-        } else if let Type::Constructed(TypeName::Tuple(_), field_tys) = &ty {
-            if !field_tys.is_empty() && field_tys.iter().all(is_unsized_array_local) {
-                count += field_tys.len() as u32;
-            }
-        }
+    match &def.meta {
+        DefMeta::EntryPoint(entry) => entry.param_bindings.len() as u32,
+        _ => 0,
     }
-    count
-}
-
-fn is_unsized_array_local(ty: &Type<TypeName>) -> bool {
-    use crate::types::TypeExt;
-    if !ty.is_array() {
-        return false;
-    }
-    ty.array_size().map(|s| matches!(s, Type::Variable(_))).unwrap_or(false)
 }
 
 /// True for `Term`s whose value at EGIR time will be a `ConstantValue`
@@ -2385,6 +2369,7 @@ fn make_entry_def(
             params: ast_params,
             outputs,
             storage_bindings,
+            param_bindings: vec![],
             body: dummy_expr,
         })),
         arity: required_params.len(),

@@ -1,5 +1,6 @@
 pub mod ast;
 pub mod ast_renumber;
+pub mod binding_layout;
 pub mod builtins;
 pub mod diags;
 pub mod error;

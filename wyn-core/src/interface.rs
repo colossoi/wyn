@@ -100,6 +100,21 @@ pub struct EntryOutput {
     pub attribute: Option<Attribute>,
 }
 
+/// One auto-allocated storage-buffer binding slot for a compute entry
+/// param. Tuple-of-views entry params expand to one slot per field.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntryBindingSlot {
+    pub set: u32,
+    pub binding: u32,
+    /// The body-level symbol the slot is allocated for.
+    pub param_sym: crate::SymbolId,
+    /// For tuple-of-views entry params: which tuple field. `None` for
+    /// plain view-array params.
+    pub tuple_field: Option<usize>,
+    /// Element type stored at each index of the buffer.
+    pub elem_ty: Type,
+}
+
 /// Entry point declaration (vertex/fragment/compute shader).
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntryDecl {
@@ -114,6 +129,12 @@ pub struct EntryDecl {
     /// intermediates). Parsers leave this empty; later passes fill it in so
     /// downstream stages have one source of truth for the entry interface.
     pub storage_bindings: Vec<StorageBindingDecl>,
+    /// Auto-allocated bindings for this entry's view-typed params,
+    /// computed once and consulted by every pass that cares (buffer
+    /// specialization, parallelize sizing, EGIR conversion). Empty
+    /// for non-compute entries and for entries before the populate
+    /// pass has run.
+    pub param_bindings: Vec<EntryBindingSlot>,
     pub body: Expression,
 }
 
