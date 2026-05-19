@@ -92,6 +92,7 @@ struct Constructor {
     ptr_type_cache: HashMap<(spirv::StorageClass, spirv::Word), spirv::Word>,
     runtime_array_cache: HashMap<(spirv::Word, u32), spirv::Word>, // (elem_type, stride) -> decorated type
     buffer_block_cache: HashMap<spirv::Word, spirv::Word>, // runtime_array_type -> Block-decorated struct
+    uniform_block_cache: HashMap<spirv::Word, spirv::Word>, // value_type -> Block-decorated struct with member offset 0
     interface_block_cache: HashMap<InterfaceBlockKey, spirv::Word>,
     array_elem_cache: HashMap<spirv::Word, spirv::Word>, // array_type -> element_type
 
@@ -173,6 +174,7 @@ impl Constructor {
             ptr_type_cache: HashMap::new(),
             runtime_array_cache: HashMap::new(),
             buffer_block_cache: HashMap::new(),
+            uniform_block_cache: HashMap::new(),
             interface_block_cache: HashMap::new(),
             array_elem_cache: HashMap::new(),
             entry_point_interfaces: HashMap::new(),
@@ -545,6 +547,21 @@ impl Constructor {
         self.builder.decorate(ty, spirv::Decoration::Block, []);
         self.builder.member_decorate(ty, 0, spirv::Decoration::Offset, [Operand::LiteralBit32(0)]);
         self.buffer_block_cache.insert(runtime_array_type, ty);
+        ty
+    }
+
+    /// `{value_type}` struct decorated with `Block` and `MemberDecorate Offset 0`
+    /// — the Vulkan shape for a uniform-buffer block. Cached per value_type so
+    /// two `#[uniform]` params with the same type don't double-decorate
+    /// (spirv-val rejects member decorated with Offset twice).
+    fn get_or_create_uniform_block_type(&mut self, value_type: spirv::Word) -> spirv::Word {
+        if let Some(&ty) = self.uniform_block_cache.get(&value_type) {
+            return ty;
+        }
+        let ty = self.builder.type_struct([value_type]);
+        self.builder.decorate(ty, spirv::Decoration::Block, []);
+        self.builder.member_decorate(ty, 0, spirv::Decoration::Offset, [Operand::LiteralBit32(0)]);
+        self.uniform_block_cache.insert(value_type, ty);
         ty
     }
 
@@ -1259,12 +1276,16 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     let args: Vec<ValueRef> = operands.clone();
                     let arg_ids: Vec<_> =
                         args.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
-                    // Catalog-named calls (e.g. per-type ops like `f32.clamp`
-                    // emitted by `specialize.rs`) still arrive here as Call
-                    // because their func is a SymbolId allocated for the
-                    // specialized name. Compiler-internal intrinsics
-                    // (`_w_intrinsic_*`) now go through `OpTag::Intrinsic`.
-                    if let Some(def) = catalog().lookup_by_any_name(func) {
+                    // User-defined functions shadow same-named catalog
+                    // builtins. Most catalog names that flow through here
+                    // are specialized per-type ops (`f32.clamp`,
+                    // `_w_intrinsic_*` etc.) that can't collide with user
+                    // identifiers — but plain names like `step` can, and
+                    // checking the user table first lets the user's `def
+                    // step` win the resolution.
+                    if let Some(&func_id) = self.constructor.functions.get(func) {
+                        self.constructor.builder.function_call(result_ty, None, func_id, arg_ids)?
+                    } else if let Some(def) = catalog().lookup_by_any_name(func) {
                         let builtin_impl = &def.overloads()[0].lowering;
                         self.lower_builtin_call(
                             def.id,
@@ -1275,8 +1296,6 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                             result_ty,
                             inst,
                         )?
-                    } else if let Some(&func_id) = self.constructor.functions.get(func) {
-                        self.constructor.builder.function_call(result_ty, None, func_id, arg_ids)?
                     } else {
                         bail_spirv_at!(self.blame_span(), "Unknown function: {}", func)
                     }
@@ -3353,17 +3372,11 @@ fn lower_ssa_entry_point(
                 constructor.global_invocation_id = Some(var_id);
             }
         } else if let Some((set, binding)) = input.uniform_binding {
-            // `#[uniform(set, binding)]` → Block-decorated struct in
-            // Uniform storage class. Per Vulkan rules the struct must
-            // wrap the value; member 0 carries the actual data.
-            let block_struct = constructor.builder.type_struct(vec![input_type]);
-            constructor.builder.decorate(block_struct, spirv::Decoration::Block, []);
-            constructor.builder.member_decorate(
-                block_struct,
-                0,
-                spirv::Decoration::Offset,
-                [Operand::LiteralBit32(0)],
-            );
+            // `#[uniform(set, binding)]` → Block-decorated `{value}` struct
+            // in Uniform storage class; the helper caches the struct so
+            // two params with the same value type don't double-decorate
+            // (spirv-val rejects member-Offset applied twice).
+            let block_struct = constructor.get_or_create_uniform_block_type(input_type);
             let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::Uniform, block_struct);
             let var_id = constructor.builder.variable(ptr_type, None, spirv::StorageClass::Uniform, None);
             constructor.builder.decorate(

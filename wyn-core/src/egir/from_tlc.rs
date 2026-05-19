@@ -1055,7 +1055,34 @@ impl<'a> Converter<'a> {
             TermKind::Index { array, index } => {
                 let base = self.convert_term(array)?;
                 let idx = self.convert_term(index)?;
-                Ok(self.intern_pure(PureOp::Index, smallvec![base, idx], ty))
+                // View-variant arrays index via OpAccessChain into the
+                // backing storage buffer — `Materialize + DynamicExtract`
+                // (the path the materialize pass would generate for a
+                // pure `Index`) tries to spill the view's `{offset,len}`
+                // struct to a function-local array, which crashes the
+                // SPIR-V backend. Emit `ViewIndex + Load` directly so
+                // the side-effect pipeline handles it.
+                let arr_ty = self.graph.types[&base].clone();
+                let is_view =
+                    arr_ty.array_variant().map(crate::types::is_array_variant_view).unwrap_or(false);
+                if is_view {
+                    let place_nid = self.intern_pure(PureOp::ViewIndex, smallvec![base, idx], ty.clone());
+                    let result_nid = self.graph.alloc_side_effect_result(ty.clone());
+                    let effect_in = EffectToken(0);
+                    let effect_out = self.alloc_effect();
+                    self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
+                        kind: SideEffectKind::Inst(InstKind::Load {
+                            place: Default::default(),
+                        }),
+                        operand_nodes: smallvec![place_nid],
+                        result: Some(result_nid),
+                        effects: Some((effect_in, effect_out)),
+                        span: self.current_span,
+                    });
+                    Ok(result_nid)
+                } else {
+                    Ok(self.intern_pure(PureOp::Index, smallvec![base, idx], ty))
+                }
             }
             TermKind::VecLit(parts) => {
                 let operands: SmallVec<[NodeId; 4]> =
