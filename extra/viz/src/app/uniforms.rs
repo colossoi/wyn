@@ -75,71 +75,67 @@ struct StorageDecl {
 }
 
 /// Read `<spv_path>.json` and extract the uniforms declared by the
-/// first graphics pipeline. Empty vec when no sidecar is present.
-fn load_sidecar_uniforms(spv_path: &Path) -> Vec<UniformDecl> {
+/// first graphics pipeline. Each error branch reports a distinct
+/// reason so callers can tell "sidecar missing" from "sidecar
+/// present but declares no uniforms".
+fn load_sidecar_uniforms(spv_path: &Path) -> Result<Vec<UniformDecl>> {
     let json_path = spv_path.with_extension("json");
-    let Ok(content) = fs::read_to_string(&json_path) else {
-        return Vec::new();
-    };
-    let Ok(desc) = serde_json::from_str::<PipelineDescriptor>(&content) else {
-        return Vec::new();
-    };
-    for p in &desc.pipelines {
-        if let Pipeline::Graphics(g) = p {
-            return g
-                .bindings
-                .iter()
-                .filter_map(|b| {
-                    if let Binding::Uniform { set, binding, name } = b {
-                        Some(UniformDecl {
-                            set: *set,
-                            binding: *binding,
-                            name: name.clone(),
-                        })
-                    } else {
-                        None
-                    }
+    let content = fs::read_to_string(&json_path)
+        .map_err(|e| anyhow!("sidecar read failed for {:?}: {}", json_path, e))?;
+    let desc: PipelineDescriptor = serde_json::from_str(&content)
+        .map_err(|e| anyhow!("sidecar parse failed for {:?}: {}", json_path, e))?;
+    let g = desc
+        .pipelines
+        .iter()
+        .find_map(|p| if let Pipeline::Graphics(g) = p { Some(g) } else { None })
+        .ok_or_else(|| anyhow!("sidecar {:?} contains no graphics pipeline", json_path))?;
+    Ok(g.bindings
+        .iter()
+        .filter_map(|b| {
+            if let Binding::Uniform { set, binding, name } = b {
+                Some(UniformDecl {
+                    set: *set,
+                    binding: *binding,
+                    name: name.clone(),
                 })
-                .collect();
-        }
-    }
-    Vec::new()
+            } else {
+                None
+            }
+        })
+        .collect())
 }
 
 /// Read `<spv_path>.json` and extract the storage-buffer bindings
-/// declared by the first graphics pipeline. Empty vec when no sidecar
-/// is present or the pipeline declares no storage buffers.
-fn load_sidecar_storage(spv_path: &Path) -> Vec<StorageDecl> {
+/// declared by the first graphics pipeline. See `load_sidecar_uniforms`
+/// for the error-branch contract.
+fn load_sidecar_storage(spv_path: &Path) -> Result<Vec<StorageDecl>> {
     let json_path = spv_path.with_extension("json");
-    let Ok(content) = fs::read_to_string(&json_path) else {
-        return Vec::new();
-    };
-    let Ok(desc) = serde_json::from_str::<PipelineDescriptor>(&content) else {
-        return Vec::new();
-    };
-    for p in &desc.pipelines {
-        if let Pipeline::Graphics(g) = p {
-            return g
-                .bindings
-                .iter()
-                .filter_map(|b| {
-                    if let Binding::StorageBuffer {
-                        set, binding, name, ..
-                    } = b
-                    {
-                        Some(StorageDecl {
-                            set: *set,
-                            binding: *binding,
-                            name: name.clone(),
-                        })
-                    } else {
-                        None
-                    }
+    let content = fs::read_to_string(&json_path)
+        .map_err(|e| anyhow!("sidecar read failed for {:?}: {}", json_path, e))?;
+    let desc: PipelineDescriptor = serde_json::from_str(&content)
+        .map_err(|e| anyhow!("sidecar parse failed for {:?}: {}", json_path, e))?;
+    let g = desc
+        .pipelines
+        .iter()
+        .find_map(|p| if let Pipeline::Graphics(g) = p { Some(g) } else { None })
+        .ok_or_else(|| anyhow!("sidecar {:?} contains no graphics pipeline", json_path))?;
+    Ok(g.bindings
+        .iter()
+        .filter_map(|b| {
+            if let Binding::StorageBuffer {
+                set, binding, name, ..
+            } = b
+            {
+                Some(StorageDecl {
+                    set: *set,
+                    binding: *binding,
+                    name: name.clone(),
                 })
-                .collect();
-        }
-    }
-    Vec::new()
+            } else {
+                None
+            }
+        })
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -211,11 +207,12 @@ pub fn build_shadertoy(
         present: false,
     };
 
-    let sidecar = load_sidecar_uniforms(spv_path);
+    let sidecar = load_sidecar_uniforms(spv_path)
+        .map_err(|e| anyhow!("viz vf --shadertoy: {}", e))?;
     if sidecar.is_empty() {
         return Err(anyhow!(
-            "viz vf --shadertoy: no sidecar pipeline descriptor found next to {:?}. \
-             Recompile the shader with `wyn compile` to emit the `.json` alongside the `.spv`.",
+            "viz vf --shadertoy: sidecar next to {:?} declares no Uniform bindings on its first graphics pipeline. \
+             The shader's entry-param `#[uniform(...)]` attributes aren't being exported into the pipeline descriptor.",
             spv_path
         ));
     }
@@ -325,7 +322,11 @@ pub fn build_shadertoy(
     // Storage buffers, if a `--storage-dir <dir>` was supplied. Each
     // `storage_buffer` binding the sidecar declares is filled from
     // `<dir>/<binding_name>.bin` — name-matched, one file per buffer.
-    let storage_decls = if storage_dir.is_some() { load_sidecar_storage(spv_path) } else { Vec::new() };
+    let storage_decls = if storage_dir.is_some() {
+        load_sidecar_storage(spv_path).map_err(|e| anyhow!("viz vf --storage-dir: {}", e))?
+    } else {
+        Vec::new()
+    };
     // It's fine for a shader to declare no storage buffers at all —
     // a vertex-attribute shader puts its data in vertex buffers, not
     // storage. `build_vertex_buffers` covers that side. An empty
