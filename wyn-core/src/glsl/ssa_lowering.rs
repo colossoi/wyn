@@ -626,6 +626,23 @@ impl<'a> LowerCtx<'a> {
         let mut builtin_assignments = Vec::new();
         for input in &entry.inputs {
             self.validate_io_name(&input.name)?;
+            // `#[uniform(set, binding)]` becomes a uniform block whose
+            // single member shares the param name. The block has no
+            // instance name, so the member is reachable as a bare
+            // identifier in the body.
+            if let Some((set, binding)) = input.uniform_binding {
+                writeln!(
+                    output,
+                    "layout(set = {}, binding = {}) uniform _UBlock_{} {{ {} {}; }};",
+                    set,
+                    binding,
+                    input.name,
+                    self.type_to_glsl(&input.ty),
+                    input.name
+                )
+                .unwrap();
+                continue;
+            }
             match &input.decoration {
                 Some(IoDecoration::Location(loc)) => {
                     writeln!(
