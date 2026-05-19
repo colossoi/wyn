@@ -74,23 +74,24 @@ struct StorageDecl {
     name: String,
 }
 
-/// Read `<spv_path>.json` and extract the uniforms declared by the
-/// first graphics pipeline. Each error branch reports a distinct
-/// reason so callers can tell "sidecar missing" from "sidecar
-/// present but declares no uniforms".
+/// Read `<spv_path>.json` and extract the uniforms declared across
+/// every graphics pipeline. The compiler emits one `Graphics`
+/// pipeline per entry point, so a typical vertex+fragment shader has
+/// two — only the fragment's typically lists the uniforms.
 fn load_sidecar_uniforms(spv_path: &Path) -> Result<Vec<UniformDecl>> {
     let json_path = spv_path.with_extension("json");
     let content = fs::read_to_string(&json_path)
         .map_err(|e| anyhow!("sidecar read failed for {:?}: {}", json_path, e))?;
     let desc: PipelineDescriptor = serde_json::from_str(&content)
         .map_err(|e| anyhow!("sidecar parse failed for {:?}: {}", json_path, e))?;
-    let g = desc
+    if !desc.pipelines.iter().any(|p| matches!(p, Pipeline::Graphics(_))) {
+        return Err(anyhow!("sidecar {:?} contains no graphics pipeline", json_path));
+    }
+    Ok(desc
         .pipelines
         .iter()
-        .find_map(|p| if let Pipeline::Graphics(g) = p { Some(g) } else { None })
-        .ok_or_else(|| anyhow!("sidecar {:?} contains no graphics pipeline", json_path))?;
-    Ok(g.bindings
-        .iter()
+        .filter_map(|p| if let Pipeline::Graphics(g) = p { Some(&g.bindings) } else { None })
+        .flat_map(|bs| bs.iter())
         .filter_map(|b| {
             if let Binding::Uniform { set, binding, name } = b {
                 Some(UniformDecl {
@@ -105,22 +106,23 @@ fn load_sidecar_uniforms(spv_path: &Path) -> Result<Vec<UniformDecl>> {
         .collect())
 }
 
-/// Read `<spv_path>.json` and extract the storage-buffer bindings
-/// declared by the first graphics pipeline. See `load_sidecar_uniforms`
-/// for the error-branch contract.
+/// Read `<spv_path>.json` and extract storage-buffer bindings across
+/// every graphics pipeline. See `load_sidecar_uniforms` for the
+/// error-branch contract.
 fn load_sidecar_storage(spv_path: &Path) -> Result<Vec<StorageDecl>> {
     let json_path = spv_path.with_extension("json");
     let content = fs::read_to_string(&json_path)
         .map_err(|e| anyhow!("sidecar read failed for {:?}: {}", json_path, e))?;
     let desc: PipelineDescriptor = serde_json::from_str(&content)
         .map_err(|e| anyhow!("sidecar parse failed for {:?}: {}", json_path, e))?;
-    let g = desc
+    if !desc.pipelines.iter().any(|p| matches!(p, Pipeline::Graphics(_))) {
+        return Err(anyhow!("sidecar {:?} contains no graphics pipeline", json_path));
+    }
+    Ok(desc
         .pipelines
         .iter()
-        .find_map(|p| if let Pipeline::Graphics(g) = p { Some(g) } else { None })
-        .ok_or_else(|| anyhow!("sidecar {:?} contains no graphics pipeline", json_path))?;
-    Ok(g.bindings
-        .iter()
+        .filter_map(|p| if let Pipeline::Graphics(g) = p { Some(&g.bindings) } else { None })
+        .flat_map(|bs| bs.iter())
         .filter_map(|b| {
             if let Binding::StorageBuffer {
                 set, binding, name, ..

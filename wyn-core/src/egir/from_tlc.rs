@@ -199,33 +199,23 @@ fn enrich_pipeline_with_auto_bindings(pipeline: &mut PipelineDescriptor, entries
     use crate::ssa::types::ExecutionModel;
 
     for entry in entries {
-        match &entry.execution_model {
-            // Vertex entries: surface `#[location(n)]` params as vertex
-            // buffer attributes in the matching Graphics pipeline.
-            ExecutionModel::Vertex => {
-                enrich_vertex_inputs(pipeline, entry);
-                continue;
-            }
-            // Fragment `#[location(n)]` params are varyings, not vertex
-            // buffers — nothing to surface in the descriptor.
-            ExecutionModel::Fragment => continue,
-            // Compute entries fall through to the binding-enrichment
-            // logic below.
-            ExecutionModel::Compute { .. } => {}
+        if matches!(entry.execution_model, ExecutionModel::Vertex) {
+            enrich_vertex_inputs(pipeline, entry);
         }
 
-        // Find the bindings list backing this entry: a single-stage
-        // `Compute` matched by entry_point, or any stage of a
-        // `MultiCompute`. MultiCompute's bindings are shared across
-        // its stages, so enriching once handles both phases of a
-        // parallel reduce / redomap / scan.
+        // Find the bindings list backing this entry. Compute entries
+        // match a single-stage `Compute` by `entry_point` or any stage
+        // of a `MultiCompute` (whose bindings are shared across stages,
+        // covering parallel reduce / redomap / scan phases). Graphics
+        // entries match a single-stage `Graphics` by stage entry_point.
         let bindings: &mut Vec<Binding> = match pipeline.pipelines.iter_mut().find(|p| match p {
             Pipeline::Compute(cp) => cp.entry_point == entry.name,
             Pipeline::MultiCompute(mc) => mc.stages.iter().any(|s| s.entry_point == entry.name),
-            _ => false,
+            Pipeline::Graphics(gp) => gp.stages.iter().any(|s| s.entry_point == entry.name),
         }) {
             Some(Pipeline::Compute(cp)) => &mut cp.bindings,
             Some(Pipeline::MultiCompute(mc)) => &mut mc.bindings,
+            Some(Pipeline::Graphics(gp)) => &mut gp.bindings,
             _ => continue,
         };
 
@@ -248,7 +238,16 @@ fn enrich_pipeline_with_auto_bindings(pipeline: &mut PipelineDescriptor, entries
             .collect();
 
         for input in &entry.inputs {
-            if let Some((set, binding)) = input.storage_binding {
+            if let Some((set, binding)) = input.uniform_binding {
+                if claimed.contains(&(set, binding)) {
+                    continue;
+                }
+                bindings.push(Binding::Uniform {
+                    set,
+                    binding,
+                    name: input.name.clone(),
+                });
+            } else if let Some((set, binding)) = input.storage_binding {
                 if claimed.contains(&(set, binding)) {
                     continue;
                 }
