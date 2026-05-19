@@ -171,8 +171,11 @@ pub fn auto_detect_entry_points(path: &Path) -> Result<(String, String)> {
         .filter(|(_, m)| *m != ExecutionModel::Vertex && *m != ExecutionModel::Fragment)
         .collect();
 
-    match (vertex_entries.len(), fragment_entries.len(), other_entries.len()) {
-        (1, 1, 0) => {
+    // `vf` mode renders a vertex+fragment pair; non-graphics entries in
+    // the same module (e.g. conway.spv's `step` compute kernel that the
+    // host dispatches separately) are irrelevant to the auto-detect.
+    match (vertex_entries.len(), fragment_entries.len()) {
+        (1, 1) => {
             let vertex_name = vertex_entries[0].0.clone();
             let fragment_name = fragment_entries[0].0.clone();
             eprintln!(
