@@ -18,8 +18,10 @@ use crate::types::TypeExt;
 /// Runtime-sized array: either an unresolved polytype variable in
 /// size position (the normal type-inference chain) or a
 /// `SizePlaceholder` (when `--fill-holes` substituted a hole there).
+/// Sees through `Unique` (`*[]T` is still a runtime-sized array).
 fn is_runtime_sized_array(ty: &Type<TypeName>) -> bool {
-    ty.array_size()
+    crate::types::strip_unique(ty)
+        .array_size()
         .map(|s| {
             matches!(
                 s,
@@ -59,8 +61,12 @@ pub fn compute_entry_binding_layout(
         let decoration = entry.params.get(i).and_then(extract_io_decoration);
         let has_builtin = matches!(decoration, Some(IoDecoration::BuiltIn(_)));
 
+        // Uniqueness is an ownership marker; for binding allocation, `*[]T`
+        // and `[]T` lower identically.
+        let ty = crate::types::strip_unique(ty);
+
         // Tuple-of-views: one slot per field.
-        if let Type::Constructed(TypeName::Tuple(_), field_tys) = ty {
+        if let Type::Constructed(TypeName::Tuple(_), field_tys) = &ty {
             if !has_builtin && !field_tys.is_empty() && field_tys.iter().all(is_runtime_sized_array) {
                 for (field_idx, field_ty) in field_tys.iter().enumerate() {
                     out.push(EntryBindingSlot {
@@ -81,7 +87,7 @@ pub fn compute_entry_binding_layout(
         // (no builtin produces an array), but the allocator still
         // assigns a binding rather than silently routing to push
         // constants where the type wouldn't fit.
-        if is_runtime_sized_array(ty) {
+        if is_runtime_sized_array(&ty) {
             out.push(EntryBindingSlot {
                 set,
                 binding: binding_num,

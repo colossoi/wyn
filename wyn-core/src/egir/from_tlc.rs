@@ -466,6 +466,12 @@ fn convert_entry_point(
         let attr_storage_binding =
             entry.params.get(i).and_then(crate::binding_layout::extract_storage_binding);
 
+        // Uniqueness is an ownership-tracking concept that's already been
+        // consumed by `apply_ownership`; codegen operates on the stripped
+        // shape so `*[N]T` and `[N]T` lower identically.
+        let ty = crate::types::strip_unique(ty);
+        let ty = &ty;
+
         // Always register a FuncParam placeholder so param indexing stays
         // stable; the binding below may override it.
         let fp_nid = converter.graph.add_func_param(i, ty.clone());

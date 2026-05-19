@@ -253,6 +253,7 @@ impl<'a> TypeChecker<'a> {
     /// Sized arrays (e.g. [19]u32) stay Composite — only unsized arrays become View.
     fn constrain_array_to_storage(&mut self, ty: &Type) -> Result<()> {
         let resolved = ty.apply(&self.context);
+        let resolved = strip_unique(&resolved);
         if !resolved.is_array() {
             return Ok(());
         }

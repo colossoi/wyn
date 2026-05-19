@@ -204,23 +204,6 @@ impl Constructor {
         id
     }
 
-    /// Resolve a buffer_id (u32 SPIR-V constant) to (buffer_var, elem_type).
-    fn resolve_buffer_by_id(
-        &self,
-        buffer_id_spirv: spirv::Word,
-        context: &str,
-    ) -> Result<(spirv::Word, spirv::Word)> {
-        let buffer_id = self
-            .uint_const_reverse
-            .get(&buffer_id_spirv)
-            .copied()
-            .ok_or_else(|| err_spirv!("resolve_buffer_by_id: not a u32 constant (in {})", context))?;
-        self.buffer_vars
-            .get(buffer_id as usize)
-            .copied()
-            .ok_or_else(|| err_spirv!("resolve_buffer_by_id: unknown buffer_id {}", buffer_id))
-    }
-
     /// Resolve a pointer address-space type to a SPIR-V StorageClass.
     fn resolve_storage_class(addrspace: &PolyType<TypeName>) -> StorageClass {
         match addrspace {
@@ -308,16 +291,15 @@ impl Constructor {
                         let size = ty.array_size().expect("Array has size");
                         let variant = ty.array_variant().expect("Array has variant");
 
-                        // Dispatch on variant first - View arrays are always {buffer_id, offset, len} structs
+                        // Dispatch on variant first - View arrays are always {offset, len} structs
                         if let PolyType::Constructed(TypeName::ArrayVariantView, _) = variant {
-                            // View variant: struct { buffer_id: u32, offset: u32, len: u32 }
-                            // Matches what StorageView lowering actually emits (buffer_id is an
-                            // index, not a pointer).
-                            self.get_or_create_struct_type(vec![
-                                self.u32_type,
-                                self.u32_type,
-                                self.u32_type,
-                            ])
+                            // View variant: struct { offset: u32, len: u32 }. The
+                            // backing storage buffer is identified by compile-time
+                            // `view_buffer_id` provenance on the SSA value, not a
+                            // runtime field — so the provenance survives phis and
+                            // view-preserving intrinsics where reverse-mapping a
+                            // runtime constant can't recover it.
+                            self.get_or_create_struct_type(vec![self.u32_type, self.u32_type])
                         } else if let PolyType::Constructed(TypeName::ArrayVariantVirtual, _) = variant {
                             // Virtual variant: struct { start, step, len } for range representation
                             // Use the element type so u32 ranges get {u32, u32, u32}.
@@ -1371,19 +1353,16 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         crate::op::PureViewSource::Storage { set, binding } => {
                             if self.constructor.storage_buffers.contains_key(&(*set, *binding)) {
                                 let buffer_id = self.constructor.get_or_assign_buffer_id(*set, *binding);
-                                // Record the buffer_id for this view (if we have an SSA result)
                                 if let Some(result) = inst.result {
                                     self.view_buffer_id.insert(result, buffer_id);
                                 }
-                                let buffer_id_const = self.constructor.const_u32(buffer_id);
                                 let u32_ty = self.constructor.u32_type;
-                                let view_struct_type = self
-                                    .constructor
-                                    .get_or_create_struct_type(vec![u32_ty, u32_ty, u32_ty]);
+                                let view_struct_type =
+                                    self.constructor.get_or_create_struct_type(vec![u32_ty, u32_ty]);
                                 self.constructor.builder.composite_construct(
                                     view_struct_type,
                                     None,
-                                    [buffer_id_const, offset_id, len_id],
+                                    [offset_id, len_id],
                                 )?
                             } else {
                                 bail_spirv_at!(
@@ -1397,7 +1376,6 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         crate::op::PureViewSource::Inherited => {
                             let parent =
                                 operands[2].as_ssa().expect("StorageView Inherited parent must be SSA");
-                            // Propagate buffer_id from parent view
                             if let (Some(result), Some(&parent_buf_id)) =
                                 (inst.result, self.view_buffer_id.get(&parent))
                             {
@@ -1406,13 +1384,11 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                             let parent_id = self.get_value(parent)?;
                             let u32_ty = self.constructor.u32_type;
                             let view_struct_type =
-                                self.constructor.get_or_create_struct_type(vec![u32_ty, u32_ty, u32_ty]);
+                                self.constructor.get_or_create_struct_type(vec![u32_ty, u32_ty]);
 
-                            // Extract buffer_id (field 0) and parent_offset (field 1) from parent view
-                            let buffer_id =
-                                self.constructor.builder.composite_extract(u32_ty, None, parent_id, [0])?;
+                            // Extract parent_offset (field 0) from parent view
                             let parent_offset =
-                                self.constructor.builder.composite_extract(u32_ty, None, parent_id, [1])?;
+                                self.constructor.builder.composite_extract(u32_ty, None, parent_id, [0])?;
 
                             // new_offset = parent_offset + offset
                             let new_offset =
@@ -1421,7 +1397,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                             self.constructor.builder.composite_construct(
                                 view_struct_type,
                                 None,
-                                [buffer_id, new_offset, len_id],
+                                [new_offset, len_id],
                             )?
                         }
                     }
@@ -1430,8 +1406,8 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 crate::op::OpTag::StorageViewLen => {
                     let view = operands[0];
                     let view_id = self.get_value_ref(view)?;
-                    // Extract len from view struct (index 2)
-                    self.constructor.builder.composite_extract(result_ty, None, view_id, [2u32])?
+                    // Extract len from view struct (field 1 in {offset, len})
+                    self.constructor.builder.composite_extract(result_ty, None, view_id, [1u32])?
                 }
 
                 crate::op::OpTag::Materialize => {
@@ -1509,24 +1485,25 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 let index_id = self.get_value_ref(*index)?;
                 let u32_ty = self.constructor.u32_type;
 
-                // Extract buffer_id (field 0) and offset (field 1) from view struct
-                let buffer_id_val =
-                    self.constructor.builder.composite_extract(u32_ty, None, view_id, [0u32])?;
+                // Extract offset (field 0) from view struct {offset, len}.
+                // Buffer-var provenance comes from `view_buffer_id`.
                 let base_offset =
-                    self.constructor.builder.composite_extract(u32_ty, None, view_id, [1u32])?;
+                    self.constructor.builder.composite_extract(u32_ty, None, view_id, [0u32])?;
 
-                // Recover buffer_var: prefer the SSA-level provenance map for
-                // views produced in this function; otherwise reverse-map the
-                // extracted buffer_id constant.
-                let (buffer_var, elem_spirv_ty) =
-                    if let Some(&buf_id) = view.as_ssa().and_then(|id| self.view_buffer_id.get(&id)) {
-                        self.constructor.buffer_vars.get(buf_id as usize).copied().ok_or_else(|| {
-                            err_spirv_at!(self.blame_span(), "view_buffer_id: unknown buffer_id {}", buf_id)
-                        })?
-                    } else {
-                        self.constructor.resolve_buffer_by_id(buffer_id_val, "ViewIndex")?
-                    };
-                let _ = elem_spirv_ty;
+                let view_ssa = view.as_ssa().ok_or_else(|| {
+                    err_spirv_at!(self.blame_span(), "ViewIndex view operand must be SSA")
+                })?;
+                let buf_id = self.view_buffer_id.get(&view_ssa).copied().ok_or_else(|| {
+                    err_spirv_at!(
+                        self.blame_span(),
+                        "ViewIndex: no buffer provenance for value {:?}",
+                        view_ssa
+                    )
+                })?;
+                let (buffer_var, _elem_spirv_ty) =
+                    self.constructor.buffer_vars.get(buf_id as usize).copied().ok_or_else(|| {
+                        err_spirv_at!(self.blame_span(), "view_buffer_id: unknown buffer_id {}", buf_id)
+                    })?;
 
                 let actual_index = self.constructor.builder.i_add(u32_ty, None, base_offset, index_id)?;
                 let zero = self.constructor.const_i32(0);
@@ -1585,6 +1562,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 for (param_idx, &arg) in args.iter().enumerate() {
                     let arg_id = self.get_value(arg)?;
                     self.phi_inputs.push((*target, param_idx, arg_id, current_block));
+                    self.propagate_view_provenance(*target, param_idx, arg);
                 }
 
                 let target_label = self.block_map[target];
@@ -1605,10 +1583,12 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 for (param_idx, &arg) in then_args.iter().enumerate() {
                     let arg_id = self.get_value(arg)?;
                     self.phi_inputs.push((*then_target, param_idx, arg_id, current_block));
+                    self.propagate_view_provenance(*then_target, param_idx, arg);
                 }
                 for (param_idx, &arg) in else_args.iter().enumerate() {
                     let arg_id = self.get_value(arg)?;
                     self.phi_inputs.push((*else_target, param_idx, arg_id, current_block));
+                    self.propagate_view_provenance(*else_target, param_idx, arg);
                 }
 
                 // Emit structured control flow merge instructions if this is a header block
@@ -1660,6 +1640,30 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
         }
 
         Ok(())
+    }
+
+    /// Propagate `view_buffer_id` along a branch edge: if `arg` is a view
+    /// value with known buffer provenance, attach the same provenance to the
+    /// target block's parameter at `param_idx`. Required for views threaded
+    /// through loop block params (e.g. scan-DPS phase 1), where the consumer
+    /// (`ViewIndex`) sees the block-param ValueId rather than the original
+    /// `StorageView` result.
+    fn propagate_view_provenance(&mut self, target: BlockId, param_idx: usize, arg: ValueId) {
+        let Some(&buf_id) = self.view_buffer_id.get(&arg) else {
+            return;
+        };
+        let target_block = &self.body.inner.blocks[target];
+        let Some(&target_param) = target_block.params.get(param_idx) else {
+            return;
+        };
+        if let Some(&existing) = self.view_buffer_id.get(&target_param) {
+            debug_assert_eq!(
+                existing, buf_id,
+                "block param view provenance must agree across incoming edges"
+            );
+        } else {
+            self.view_buffer_id.insert(target_param, buf_id);
+        }
     }
 
     fn insert_phi_nodes(&mut self) -> Result<()> {
@@ -2080,7 +2084,6 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
     fn slice_view_to_view(
         &mut self,
         _view_id: spirv::Word,
-        buffer_id_val: spirv::Word,
         base_offset: spirv::Word,
         start_id: spirv::Word,
         end_id: spirv::Word,
@@ -2088,12 +2091,8 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
         let u32_ty = self.constructor.u32_type;
         let new_offset = self.constructor.builder.i_add(u32_ty, None, base_offset, start_id)?;
         let new_len = self.constructor.builder.i_sub(u32_ty, None, end_id, start_id)?;
-        let view_struct_type = self.constructor.get_or_create_struct_type(vec![u32_ty, u32_ty, u32_ty]);
-        Ok(self.constructor.builder.composite_construct(
-            view_struct_type,
-            None,
-            [buffer_id_val, new_offset, new_len],
-        )?)
+        let view_struct_type = self.constructor.get_or_create_struct_type(vec![u32_ty, u32_ty]);
+        Ok(self.constructor.builder.composite_construct(view_struct_type, None, [new_offset, new_len])?)
     }
 
     /// Slice a value (composite) array by extracting elements and constructing a new array.
@@ -2251,7 +2250,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
 
     fn lower_view_index(
         &mut self,
-        _view_ssa: ValueId,
+        view_ssa: ValueId,
         view_id: spirv::Word,
         index_id: spirv::Word,
         result_ty: spirv::Word,
@@ -2259,10 +2258,20 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
     ) -> Result<spirv::Word> {
         let u32_ty = self.constructor.u32_type;
 
-        // Extract buffer_id (field 0) and offset (field 1) from view struct
-        let buffer_id_val = self.constructor.builder.composite_extract(u32_ty, None, view_id, [0u32])?;
-        let (buffer_var, _) = self.constructor.resolve_buffer_by_id(buffer_id_val, "lower_view_index")?;
-        let offset_val = self.constructor.builder.composite_extract(u32_ty, None, view_id, [1u32])?;
+        // Buffer-var lookup goes through compile-time provenance, not runtime
+        // struct extraction — field 0 of the view is redundant scaffolding.
+        let buf_id = self.view_buffer_id.get(&view_ssa).copied().ok_or_else(|| {
+            err_spirv_at!(
+                self.blame_span(),
+                "lower_view_index: no buffer provenance for value {:?}",
+                view_ssa
+            )
+        })?;
+        let (buffer_var, _) =
+            self.constructor.buffer_vars.get(buf_id as usize).copied().ok_or_else(|| {
+                err_spirv_at!(self.blame_span(), "view_buffer_id: unknown buffer_id {}", buf_id)
+            })?;
+        let offset_val = self.constructor.builder.composite_extract(u32_ty, None, view_id, [0u32])?;
 
         // TODO: The view struct stores {u32, u32, u32} but the language uses i32 for
         // indices everywhere. This bitcast papers over the mismatch. The view struct
@@ -2399,6 +2408,53 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     let idx = arg_ids[1];
                     let val = arg_ids[2];
 
+                    // View-variant arrays write back into the backing storage
+                    // buffer via OpAccessChain+OpStore. The "result" view is
+                    // structurally the same as the input; carry the input's
+                    // SPIR-V word and propagate buffer provenance to the
+                    // result ValueId so downstream `ViewIndex` consumers
+                    // resolve it.
+                    let arr_ty = self.get_value_type_ref(value_refs[0]);
+                    let is_view = arr_ty
+                        .array_variant()
+                        .map(|v| matches!(v, PolyType::Constructed(TypeName::ArrayVariantView, _)))
+                        .unwrap_or(false);
+                    if is_view {
+                        let view_ssa = value_refs[0]
+                            .as_ssa()
+                            .ok_or_else(|| err_spirv!("array_with on view must take SSA view value"))?;
+                        let buf_id = self.view_buffer_id.get(&view_ssa).copied().ok_or_else(|| {
+                            err_spirv!("array_with view: no buffer provenance for {:?}", view_ssa)
+                        })?;
+                        let (buffer_var, _) =
+                            self.constructor.buffer_vars.get(buf_id as usize).copied().ok_or_else(
+                                || err_spirv!("array_with view: unknown buffer_id {}", buf_id),
+                            )?;
+                        let u32_ty = self.constructor.u32_type;
+                        let base_offset =
+                            self.constructor.builder.composite_extract(u32_ty, None, arr, [0u32])?;
+                        let idx_u32 = self.constructor.builder.bitcast(u32_ty, None, idx)?;
+                        let final_index =
+                            self.constructor.builder.i_add(u32_ty, None, base_offset, idx_u32)?;
+                        let elem_ty = arr_ty.elem_type().expect("View has elem").clone();
+                        let elem_spirv = self.constructor.polytype_to_spirv(&elem_ty);
+                        let elem_ptr_type = self
+                            .constructor
+                            .get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_spirv);
+                        let zero = self.constructor.const_u32(0);
+                        let elem_ptr = self.constructor.builder.access_chain(
+                            elem_ptr_type,
+                            None,
+                            buffer_var,
+                            [zero, final_index],
+                        )?;
+                        self.constructor.builder.store(elem_ptr, val, None, [])?;
+                        if let Some(result_ssa) = inst.result {
+                            self.view_buffer_id.insert(result_ssa, buf_id);
+                        }
+                        return Ok(arr);
+                    }
+
                     let literal_idx = match value_refs.get(1).and_then(|vr| vr.as_const()) {
                         Some(ConstantValue::I32(v)) => Some(v as i32),
                         Some(ConstantValue::U32(v)) => Some(v as i32),
@@ -2447,11 +2503,12 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         // TODO: view struct should use i32 to match language conventions.
                         PolyType::Constructed(TypeName::ArrayVariantView, _) => {
                             let u32_ty = self.constructor.u32_type;
+                            // View struct is {offset, len}; len is field 1.
                             let len_u32 = self.constructor.builder.composite_extract(
                                 u32_ty,
                                 None,
                                 arg_ids[0],
-                                [2u32],
+                                [1u32],
                             )?;
                             Ok(self.constructor.builder.bitcast(result_ty, None, len_u32)?)
                         }
@@ -2515,10 +2572,8 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     if is_view {
                         let elem_ty = arr_ty.elem_type().expect("Array has elem").clone();
                         let u32_ty = self.constructor.u32_type;
-                        let buffer_id_val =
-                            self.constructor.builder.composite_extract(u32_ty, None, arr, [0u32])?;
                         let base_offset =
-                            self.constructor.builder.composite_extract(u32_ty, None, arr, [1u32])?;
+                            self.constructor.builder.composite_extract(u32_ty, None, arr, [0u32])?;
                         let result_is_composite = inst
                             .result
                             .map(|v| self.body.get_value_type(v))
@@ -2530,16 +2585,19 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                             .unwrap_or(false);
 
                         if result_is_composite {
-                            let (buffer_var, _) = if let Some(&buf_id) =
-                                value_refs[0].as_ssa().and_then(|id| self.view_buffer_id.get(&id))
-                            {
+                            let view_ssa = value_refs[0]
+                                .as_ssa()
+                                .ok_or_else(|| err_spirv!("slice_to_composite view operand must be SSA"))?;
+                            let buf_id = self.view_buffer_id.get(&view_ssa).copied().ok_or_else(|| {
+                                err_spirv!(
+                                    "slice_to_composite: no buffer provenance for value {:?}",
+                                    view_ssa
+                                )
+                            })?;
+                            let (buffer_var, _) =
                                 self.constructor.buffer_vars.get(buf_id as usize).copied().ok_or_else(
                                     || err_spirv!("slice_to_composite: unknown buffer_id {}", buf_id),
-                                )?
-                            } else {
-                                self.constructor
-                                    .resolve_buffer_by_id(buffer_id_val, "slice_to_composite")?
-                            };
+                                )?;
                             self.slice_view_to_composite(
                                 arr,
                                 buffer_var,
@@ -2550,7 +2608,24 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                                 result_ty,
                             )
                         } else {
-                            self.slice_view_to_view(arr, buffer_id_val, base_offset, start_id, end_id)
+                            // View-to-view slice: provenance carries through
+                            // to the result; emit the runtime struct without
+                            // a buffer_id field.
+                            let view_ssa = value_refs[0]
+                                .as_ssa()
+                                .ok_or_else(|| err_spirv!("slice_view_to_view view operand must be SSA"))?;
+                            let buf_id = self.view_buffer_id.get(&view_ssa).copied().ok_or_else(|| {
+                                err_spirv!(
+                                    "slice_view_to_view: no buffer provenance for value {:?}",
+                                    view_ssa
+                                )
+                            })?;
+                            let result_word =
+                                self.slice_view_to_view(arr, base_offset, start_id, end_id)?;
+                            if let Some(result_ssa) = inst.result {
+                                self.view_buffer_id.insert(result_ssa, buf_id);
+                            }
+                            Ok(result_word)
                         }
                     } else {
                         self.slice_composite(arr, start_id, end_id, result_ty)

@@ -152,7 +152,7 @@ strategy's shape.
 | `Map`              | `map f xs`                              | ✓      | ✓                   | ✓ (lane-indexed) |
 | `Reduce`           | `reduce op ne xs`                       | ✓      | n/a (scalar result) | ✓ (chunked + combine) |
 | `Redomap`          | `reduce op ne (map f xs)` (fused)       | ✓      | n/a (scalar result) | ✓ (chunked + combine) |
-| `Scan`             | `scan op ne xs`                         | ✓      | ✓ wired (dormant — see below) | ✓ (3-phase Blelloch-style) |
+| `Scan`             | `scan op ne xs`                         | ✓      | ✓                   | ✓ (3-phase Blelloch-style) |
 | `Filter`           | `filter pred xs`                        | ✓      | ✓                   | ✗ (no parallel impl) |
 | `Scatter`          | `scatter dest indices values`           | ✗ EGIR `convert_soac` rejects with `Unsupported` | n/a | ✗ |
 | `ReduceByIndex`    | histogram-style indexed reduction       | ✗ EGIR `convert_soac` rejects with `Unsupported` | n/a | ✗ (atomics not yet implemented) |
@@ -160,12 +160,11 @@ strategy's shape.
 Notes:
 - `Scan` consuming-input DPS is wired through Path B
   (`egir::parallelize::transform_scan_entry` reroutes phase 1 + phase 3
-  writes back to the input binding when destination is `InputBuffer`),
-  but does not fire end-to-end today: it requires a `*[]T` entry param
-  to make the input look mutable to ownership, and `*[]T` for compute-
-  entry params currently mis-types as `Composite + Unsized` (panics in
-  the SPIR-V backend). Once that upstream type issue is fixed the
-  wiring activates with no further changes.
+  writes back to the input binding when destination is `InputBuffer`).
+  View provenance threads through loop block params and
+  `array_with_inplace` via the `view_buffer_id` map on the SPIR-V
+  side, so `ViewIndex` resolves the backing storage buffer from
+  compile-time metadata rather than a runtime struct field.
 - `Filter` parallelization would build on parallel `Scan` (prefix-sum
   over the predicate mask to compute write offsets) — not yet wired.
 - The non-commutative-scan limitation: phase 3's call order is

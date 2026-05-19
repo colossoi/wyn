@@ -439,6 +439,33 @@ entry frag(c: vec4f32) vec4f32 =
 }
 
 #[test]
+fn consuming_scan_compute_entry_compiles_to_spirv() {
+    // Compute entry with `*[]T` param. Exercises the Scan-DPS path
+    // end-to-end through SPIR-V emission. Regression guards:
+    //
+    // 1. Type-checker: `*[]T` on a compute-entry param must constrain
+    //    the array variant to `View`, not default to `Composite`.
+    //    Otherwise `polytype_to_spirv` panics with "Composite variant
+    //    unsized arrays not supported".
+    //
+    // 2. SPIR-V backend: views threaded through loop block params
+    //    (`%phi = phi(orig_view, array_with_inplace_result)`) must
+    //    keep their buffer provenance. `view_buffer_id` is propagated
+    //    across branch edges and through `array_with_inplace`, so
+    //    `ViewIndex` can resolve the backing buffer without
+    //    extracting buffer_id from a runtime struct field.
+    let spv = compile_to_spirv(
+        r#"
+#[compute]
+entry scan_inplace(a: *[]i32) []i32 =
+  scan(|acc: i32, x: i32| acc + x, 0, a)
+"#,
+    )
+    .expect("compute scan_inplace should compile end-to-end");
+    assert!(!spv.is_empty(), "compute scan_inplace emitted empty SPIR-V");
+}
+
+#[test]
 fn consuming_filter_compiles_end_to_end() {
     // `*[N]T` filter whose input is dead-after: ownership sets
     // `consumes_input = true`, EGIR emits
