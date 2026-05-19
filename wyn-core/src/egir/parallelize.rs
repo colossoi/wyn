@@ -19,8 +19,10 @@ use crate::ssa::framework::BlockId;
 use crate::ssa::types::{ConstantValue, InstKind};
 
 use super::graph_ops;
-use super::program::{EgirEntry, EgirInner};
-use super::types::{NodeId, PendingSoac, SideEffectKind, SoacDestination};
+use super::program::{EgirEntry, EgirFunc, EgirInner};
+use super::types::{
+    EGraph, NodeId, PendingSoac, PureOp, SideEffectKind, SkeletonTerminator, SoacDestination,
+};
 use crate::tlc::parallelize::{ParallelStrategy, ParallelizationPlan};
 
 /// Walk every entry; for each entry that has a plan, do the EGIR-side
@@ -40,6 +42,7 @@ pub fn run(inner: &mut EgirInner, plans: &HashMap<String, ParallelizationPlan>) 
     // Collect entries-to-add separately so we don't mutate
     // `inner.entry_points` while iterating it.
     let mut new_entries: Vec<EgirEntry> = Vec::new();
+    let mut new_functions: Vec<EgirFunc> = Vec::new();
     for entry in inner.entry_points.iter_mut() {
         let Some(plan) = plans.get(&entry.name) else {
             continue;
@@ -57,13 +60,15 @@ pub fn run(inner: &mut EgirInner, plans: &HashMap<String, ParallelizationPlan>) 
                 }
             }
             ParallelStrategy::Scan => {
-                if let Some(phases) = transform_scan_entry(entry, plan) {
+                if let Some((phases, swap_wrapper)) = transform_scan_entry(entry, plan) {
                     new_entries.extend(phases);
+                    new_functions.push(swap_wrapper);
                 }
             }
         }
     }
     inner.entry_points.extend(new_entries);
+    inner.functions.extend(new_functions);
 }
 
 fn rewrite_tail_map(entry: &mut super::program::EgirEntry) {
@@ -634,7 +639,10 @@ fn find_pending_scan(entry: &EgirEntry) -> Option<(BlockId, usize)> {
 ///   correct only for commutative scan combiners. Non-commutative
 ///   associative ops (string concat, matmul) would need a swap-args
 ///   wrapper function — deferred as follow-up work.
-fn transform_scan_entry(entry: &mut EgirEntry, plan: &ParallelizationPlan) -> Option<Vec<EgirEntry>> {
+fn transform_scan_entry(
+    entry: &mut EgirEntry,
+    plan: &ParallelizationPlan,
+) -> Option<(Vec<EgirEntry>, EgirFunc)> {
     use crate::tlc::parallelize::PlannedBindings;
     let (block_sums_binding, block_offsets_binding) = match plan.bindings {
         PlannedBindings::Scan {
@@ -716,9 +724,17 @@ fn transform_scan_entry(entry: &mut EgirEntry, plan: &ParallelizationPlan) -> Op
         .ok()?
     };
 
+    let swap_wrapper_name = format!("{}_scan_op_swap", entry.name);
+    let swap_wrapper = synthesize_swap_wrapper(
+        swap_wrapper_name.clone(),
+        op_func.clone(),
+        elem_ty.clone(),
+        entry.span,
+    );
+
     let phase3 = synthesize_phase3_scan(
         &entry.name,
-        op_func.clone(),
+        swap_wrapper_name,
         elem_ty.clone(),
         output_binding,
         block_offsets_binding,
@@ -748,7 +764,7 @@ fn transform_scan_entry(entry: &mut EgirEntry, plan: &ParallelizationPlan) -> Op
     });
     let _ = output_binding;
 
-    Some(vec![phase2, phase3])
+    Some((vec![phase2, phase3], swap_wrapper))
 }
 
 /// In-place rewrite of the original entry into "phase 1": the existing
@@ -939,13 +955,16 @@ pub fn synthesize_phase2_scan(
 
 /// Synthesize phase 3: a chunked compute entry where each thread reads
 /// `off = block_offsets[tid]`, then applies `op(off, output[i])` to
-/// each element of `output[chunk]` via the swap-args wrapper. The
-/// wrapper is a top-level lifted function synthesized at TLC plan time
-/// (see `tlc::parallelize::synthesize_scan_swap_wrapper`); EGIR
-/// references it by name.
+/// each element of `output[chunk]`. Map's body-call convention is
+/// `func(elem, ...captures)`, which would give `op(elem, off)` —
+/// silently wrong for non-commutative associative ops (string concat,
+/// matmul). Caller supplies the name of a swap-args wrapper synthesized
+/// alongside this entry (see `synthesize_scan_swap_wrapper`); the
+/// wrapper's body is `\(elem, off) -> op(off, elem)`, so Map's normal
+/// convention combined with the wrapper yields the correct order.
 pub fn synthesize_phase3_scan(
     entry_name: &str,
-    op_func: String,
+    swap_wrapper_name: String,
     elem_ty: Type<TypeName>,
     output_binding: (u32, u32),
     block_offsets_binding: (u32, u32),
@@ -1005,10 +1024,10 @@ pub fn synthesize_phase3_scan(
         None,
     );
 
-    // op_func direct call — commutative scans only. See module
-    // doc-comment on `transform_scan_entry`.
+    // Call the swap-args wrapper instead of `op` directly: Map emits
+    // `wrapper(elem, off)`, which the wrapper rewrites to `op(off, elem)`.
     b.emit_pending_map_into(
-        op_func,
+        swap_wrapper_name,
         chunked_output,
         arr_ty.clone(),
         elem_ty.clone(),
@@ -1017,4 +1036,33 @@ pub fn synthesize_phase3_scan(
         chunked_output,
     );
     b.build()
+}
+
+/// Build a two-argument helper EgirFunc named `wrapper_name` whose body
+/// is `inner(b, a)` — a swap-args wrapper around an existing
+/// `T -> T -> T` function.
+fn synthesize_swap_wrapper(
+    wrapper_name: String,
+    inner: String,
+    elem_ty: Type<TypeName>,
+    span: crate::ast::Span,
+) -> EgirFunc {
+    let mut graph = EGraph::new();
+    let a_nid = graph.add_func_param(0, elem_ty.clone());
+    let b_nid = graph.add_func_param(1, elem_ty.clone());
+    let call_nid = graph.intern_pure(PureOp::Call(inner), smallvec![b_nid, a_nid], elem_ty.clone());
+    let entry_block = graph.skeleton.entry;
+    graph.skeleton.blocks[entry_block].term = SkeletonTerminator::Return(Some(call_nid));
+    EgirFunc::new(
+        wrapper_name,
+        span,
+        None,
+        vec![
+            (elem_ty.clone(), "a".to_string()),
+            (elem_ty.clone(), "b".to_string()),
+        ],
+        elem_ty,
+        graph,
+        HashMap::new(),
+    )
 }

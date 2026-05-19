@@ -466,6 +466,66 @@ entry scan_inplace(a: *[]i32) []i32 =
 }
 
 #[test]
+fn parallel_scan_emits_swap_wrapper_with_swapped_args() {
+    // Phase 3 of parallel scan reads `off = block_offsets[tid]` and
+    // applies `op(off, elem)` to each element of `output[chunk]`. Map's
+    // body-call convention is `func(elem, ...captures)`, which would
+    // give `op(elem, off)` — sound for commutative ops, silently wrong
+    // for non-commutative ones. EGIR plumbs around this by synthesizing
+    // a swap-args wrapper function `\(a, b) -> op(b, a)` and routing
+    // phase 3 through it; this test pins that wiring in SSA.
+    let ssa = compile_to_ssa(
+        r#"
+#[compute]
+entry parallel_scan(a: []i32) []i32 = scan(|acc: i32, x: i32| acc + x, 0, a)
+"#,
+    );
+
+    let wrapper = ssa
+        .functions
+        .iter()
+        .find(|f| f.name.ends_with("_scan_op_swap"))
+        .expect("parallel scan should synthesize a swap wrapper EgirFunc");
+
+    assert_eq!(
+        wrapper.body.params.len(),
+        2,
+        "swap wrapper must take exactly two params"
+    );
+    let a_id = wrapper.body.params[0].0;
+    let b_id = wrapper.body.params[1].0;
+
+    let call = wrapper
+        .body
+        .inner
+        .insts
+        .values()
+        .find_map(|inst| match &inst.data {
+            crate::ssa::types::InstKind::Op {
+                tag: crate::op::OpTag::Call(name),
+                operands,
+            } => Some((name.clone(), operands.clone())),
+            _ => None,
+        })
+        .expect("swap wrapper body must contain a Call");
+
+    assert!(
+        !call.0.ends_with("_scan_op_swap"),
+        "swap wrapper should call the underlying op, not itself: got {}",
+        call.0
+    );
+    let operands: Vec<_> = call.1.iter().map(|v| v.as_ssa()).collect();
+    assert_eq!(
+        operands,
+        vec![Some(b_id), Some(a_id)],
+        "swap wrapper must call inner(b, a), not inner(a, b); got operands {:?} vs params [a={:?}, b={:?}]",
+        operands,
+        a_id,
+        b_id,
+    );
+}
+
+#[test]
 fn consuming_filter_compiles_end_to_end() {
     // `*[N]T` filter whose input is dead-after: ownership sets
     // `consumes_input = true`, EGIR emits

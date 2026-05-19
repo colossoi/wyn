@@ -167,11 +167,11 @@ Notes:
   compile-time metadata rather than a runtime struct field.
 - `Filter` parallelization would build on parallel `Scan` (prefix-sum
   over the predicate mask to compute write offsets) — not yet wired.
-- The non-commutative-scan limitation: phase 3's call order is
-  `op(elem, off)` rather than the Futhark-correct `op(off, elem)`.
-  Sound for commutative associative ops (sum, max, min, AND, OR, XOR,
-  multiply). Non-commutative associative ops (string concat, matmul)
-  would need a `<op>_swap` wrapper function — not yet wired.
+- Phase 3 of parallel scan applies `op(off, elem)`, not `op(elem, off)`:
+  `egir::parallelize` synthesizes a swap-args wrapper EgirFunc
+  `\(a, b) -> op(b, a)` alongside the phase entries, and phase 3's Map
+  routes through the wrapper. Correct for non-commutative associative
+  combiners (string concat, matmul).
 
 ### SPIR-V Backend Optimizations
 
