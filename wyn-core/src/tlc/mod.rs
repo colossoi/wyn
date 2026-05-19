@@ -194,25 +194,6 @@ pub fn var_term_builtin_id(term: &Term, _symbols: &SymbolTable) -> Option<Builti
     }
 }
 
-/// Like `var_term_matches_name`, but returns the matching name (if
-/// any). Useful when the caller needs to dispatch on one of several
-/// possible names — e.g. `intrinsic_aliasing_arg` in
-/// `tlc/ownership.rs`.
-pub fn var_term_canonical_name<'a>(term: &'a Term, symbols: &'a SymbolTable) -> Option<&'a str> {
-    match &term.kind {
-        TermKind::Var(VarRef::Symbol(sym)) => symbols.get(*sym).map(|s| s.as_str()),
-        TermKind::Var(VarRef::Builtin { id, .. }) => {
-            // Prefer impl_source_names[0] — that's the form historically
-            // used by name-keyed dispatch (`_w_intrinsic_*`). Fall back
-            // to surface_name when impl_source_names is empty (per-type
-            // ops, compiler-internal entries).
-            let def = by_id(*id);
-            def.impl_source_names().first().copied().or(Some(def.raw.surface_name))
-        }
-        _ => None,
-    }
-}
-
 /// The kind of term.
 #[derive(Debug, Clone)]
 pub enum TermKind {

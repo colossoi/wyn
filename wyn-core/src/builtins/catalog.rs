@@ -123,6 +123,16 @@ pub struct KnownBuiltinIds {
     pub thread_id: BuiltinId,
     pub storage_index: BuiltinId,
     pub storage_store: BuiltinId,
+    /// Polymorphic numeric ops the `specialize` pass rewrites — `mul`
+    /// becomes a `BinOp("*")`, the rest pick up a per-type prefix
+    /// (`f32.abs`, `i32.min`, …). Structural dispatch on these `BuiltinId`s
+    /// distinguishes a catalog reference from a same-named user binding.
+    pub mul: BuiltinId,
+    pub abs: BuiltinId,
+    pub sign: BuiltinId,
+    pub min: BuiltinId,
+    pub max: BuiltinId,
+    pub clamp: BuiltinId,
 }
 
 /// Indexed view over the catalog table. Built once at program startup
@@ -178,6 +188,12 @@ impl BuiltinCatalog {
             thread_id: resolve(N::INTRINSIC_THREAD_ID),
             storage_index: resolve(N::INTRINSIC_STORAGE_INDEX),
             storage_store: resolve(N::INTRINSIC_STORAGE_STORE),
+            mul: resolve("mul"),
+            abs: resolve("abs"),
+            sign: resolve("sign"),
+            min: resolve("min"),
+            max: resolve("max"),
+            clamp: resolve("clamp"),
         };
 
         BuiltinCatalog {

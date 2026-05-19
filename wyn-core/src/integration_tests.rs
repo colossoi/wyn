@@ -1399,6 +1399,37 @@ entry fragment_main(#[uniform(set=1, binding=0)] iTime: f32, #[builtin(position)
     assert!(result.is_ok(), "SPIR-V compilation failed: {:?}", result.err());
 }
 
+#[test]
+fn mul_all_three_overloads_compile_to_spirv() {
+    // `mul` has three overloads with three different `PrimOp`s
+    // (MatrixTimesMatrix / MatrixTimesVector / VectorTimesMatrix).
+    // `tlc::specialize` rewrites every `mul(a, b)` call into
+    // `BinOp("*")(a, b)`; the BinOp lowering then picks the right
+    // SPIR-V op based on operand shapes. This pins the wiring end-to-
+    // end: a single shader exercising all three call shapes must
+    // compile through to valid SPIR-V.
+    let source = r#"
+def m1 = @[[1.0f32, 0.0f32], [0.0f32, 1.0f32]]
+def m2 = @[[2.0f32, 0.0f32], [0.0f32, 2.0f32]]
+
+#[fragment]
+entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
+    let a: mat2f32 = m1 in
+    let b: mat2f32 = m2 in
+    let v: vec2f32 = @[pos.x, pos.y] in
+    let mm: mat2f32 = mul(a, b) in
+    let mv: vec2f32 = mul(mm, v) in
+    let vm: vec2f32 = mul(v, mm) in
+    @[mv.x, mv.y, vm.x, vm.y]
+"#;
+    let result = crate::compile_thru_spirv(source);
+    assert!(
+        result.is_ok(),
+        "all three mul overloads should compile to SPIR-V: {:?}",
+        result.err()
+    );
+}
+
 // =============================================================================
 // Array Variant Monomorphization
 // =============================================================================

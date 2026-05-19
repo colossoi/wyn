@@ -46,10 +46,12 @@ fn test_specialize_sign_f32() {
     let f32_ty = Type::Constructed(TypeName::Float(32), vec![]);
 
     let x_sym = b.sym("x");
-    let sign_sym = b.sym("sign");
     let test_sym = b.sym("test");
 
-    // Build: sign(x) where x: f32
+    // Build: sign(x) where x: f32. After NameResolution covers every
+    // catalog ref, real-program calls arrive at `specialize` as
+    // `VarRef::Builtin`; the pass no longer touches `VarRef::Symbol`
+    // (those are user bindings that may shadow catalog names).
     let x_var = Term {
         id: b.next_id(),
         ty: f32_ty.clone(),
@@ -57,11 +59,15 @@ fn test_specialize_sign_f32() {
         kind: TermKind::Var(VarRef::Symbol(x_sym)),
     };
 
+    let sign_id = crate::builtins::catalog().known().sign;
     let sign_var = Term {
         id: b.next_id(),
         ty: Type::Constructed(TypeName::Arrow, vec![f32_ty.clone(), f32_ty.clone()]),
         span: b.span(),
-        kind: TermKind::Var(VarRef::Symbol(sign_sym)),
+        kind: TermKind::Var(VarRef::Builtin {
+            id: sign_id,
+            overload_idx: 0,
+        }),
     };
 
     let sign_call = Term {
@@ -113,10 +119,10 @@ fn test_specialize_min_i32() {
 
     let a_sym = b.sym("a");
     let b_sym = b.sym("b");
-    let min_sym = b.sym("min");
     let test_sym = b.sym("test");
 
-    // Build: min(a, b) where a, b: i32
+    // Build: min(a, b) where a, b: i32. Catalog refs arrive as
+    // `VarRef::Builtin` post-NameResolution.
     let a_var = Term {
         id: b.next_id(),
         ty: i32_ty.clone(),
@@ -134,11 +140,15 @@ fn test_specialize_min_i32() {
     let partial_ty = Type::Constructed(TypeName::Arrow, vec![i32_ty.clone(), i32_ty.clone()]);
     let func_ty = Type::Constructed(TypeName::Arrow, vec![i32_ty.clone(), partial_ty.clone()]);
 
+    let min_id = crate::builtins::catalog().known().min;
     let min_var = Term {
         id: b.next_id(),
         ty: func_ty,
         span: b.span(),
-        kind: TermKind::Var(VarRef::Symbol(min_sym)),
+        kind: TermKind::Var(VarRef::Builtin {
+            id: min_id,
+            overload_idx: 0,
+        }),
     };
 
     let min_a_b = Term {
