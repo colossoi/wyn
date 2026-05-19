@@ -3326,15 +3326,30 @@ fn lower_ssa_entry_point(
         let input_type = constructor.polytype_to_spirv(&input.ty);
 
         if let Some(IoDecoration::BuiltIn(builtin)) = &input.decoration {
+            // WGSL's `@builtin(position)` is stage-aware (vertex-out vs
+            // fragment-in), so the Wyn frontend lets either `position` or
+            // `frag_coord` parse to `BuiltIn::Position`/`BuiltIn::FragCoord`
+            // and trusts the backend to do the right thing for the stage.
+            // SPIR-V's builtins are stage-specific: fragment inputs must
+            // decorate as FragCoord, never Position (drivers silently
+            // zero a Position-decorated fragment input).
+            let stage_builtin = match (&entry.execution_model, builtin) {
+                (ExecutionModel::Fragment, spirv::BuiltIn::Position) => spirv::BuiltIn::FragCoord,
+                _ => *builtin,
+            };
             // Built-in input
             let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::Input, input_type);
             let var_id = constructor.builder.variable(ptr_type, None, spirv::StorageClass::Input, None);
-            constructor.builder.decorate(var_id, spirv::Decoration::BuiltIn, [Operand::BuiltIn(*builtin)]);
+            constructor.builder.decorate(
+                var_id,
+                spirv::Decoration::BuiltIn,
+                [Operand::BuiltIn(stage_builtin)],
+            );
             constructor.env.insert(input.name.clone(), var_id);
             interfaces.push(var_id);
 
             // Track GlobalInvocationId for compute shaders
-            if *builtin == spirv::BuiltIn::GlobalInvocationId {
+            if stage_builtin == spirv::BuiltIn::GlobalInvocationId {
                 constructor.global_invocation_id = Some(var_id);
             }
         } else if let Some((set, binding)) = input.uniform_binding {
