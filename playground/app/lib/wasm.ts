@@ -24,14 +24,6 @@ export interface IRTreeNode {
   children?: IRTreeNode[];
 }
 
-export interface CompileResult {
-  success: boolean;
-  glsl?: string;
-  tlc?: IRTreeNode[];
-  mir?: string;
-  error?: ErrorInfo;
-}
-
 // -----------------------------------------------------------------------------
 // WGSL compilation output — includes a structured program interface the JS
 // side uses to drive WebGPU buffer/binding setup and the pipeline-viz panel.
@@ -83,8 +75,6 @@ export interface CompileResultWgsl {
 
 export interface WynWasm {
   version: () => string;
-  compile_with_ir: (source: string) => CompileResult;
-  compile_to_shadertoy: (source: string) => CompileResult;
   compile_to_wgsl: (source: string) => CompileResultWgsl;
   get_example_program: () => string;
 }
@@ -105,8 +95,6 @@ export function initWasm(): Promise<WynWasm> {
       }
       return {
         version: mod.version,
-        compile_with_ir: mod.compile_with_ir,
-        compile_to_shadertoy: mod.compile_to_shadertoy,
         compile_to_wgsl: mod.compile_to_wgsl,
         get_example_program: mod.get_example_program,
       };

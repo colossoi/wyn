@@ -40,9 +40,9 @@ pub fn run(inner: &mut EgirInner, unroll_maps: bool) {
 /// Expand every `SideEffectKind::Pending(PendingSoac::...)` in the skeleton.
 ///
 /// `unroll_maps`: when true, Map over statically-sized arrays up to 16
-/// elements is unrolled into straight-line code. GLSL targets pass `false`
-/// (the GLSL structurizer prefers explicit loops; GLSL drivers unroll on
-/// their own).
+/// elements is unrolled into straight-line code. Both current backends
+/// (SPIR-V, WGSL) pass `true`; the knob exists so a future textual
+/// backend that prefers loops over unrolled blocks can opt out.
 pub fn run_one_body(
     graph: &mut EGraph,
     control_headers: &mut HashMap<BlockId, ControlHeader>,

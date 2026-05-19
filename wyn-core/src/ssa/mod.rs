@@ -2,7 +2,7 @@
 //!
 //! With EGIR as the mid-end, this layer is strictly "the IR the codegens
 //! consume". No optimization passes live here — the types are defined, the
-//! builder emits them from EGIR's `elaborate`, and the SPIR-V / GLSL backends
+//! builder emits them from EGIR's `elaborate`, and the SPIR-V / WGSL backends
 //! read them.
 //!
 //! ## Submodules

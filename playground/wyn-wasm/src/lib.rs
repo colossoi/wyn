@@ -234,60 +234,13 @@ pub struct ErrorInfo {
     pub location: Option<ErrorLocation>,
 }
 
-/// Result of compiling Wyn source to GLSL
-#[derive(Serialize, Deserialize)]
-pub struct CompileResult {
-    pub success: bool,
-    pub glsl: Option<String>,
-    pub error: Option<ErrorInfo>,
-}
-
-impl CompileResult {
-    fn ok(glsl: String) -> Self {
-        CompileResult {
-            success: true,
-            glsl: Some(glsl),
-            error: None,
-        }
-    }
-
-    fn err(e: CompilerError) -> Self {
-        let location = e.span().map(|s| ErrorLocation {
-            start_line: s.start_line,
-            start_col: s.start_col,
-            end_line: s.end_line,
-            end_col: s.end_col,
-        });
-
-        let message = format_error(&e);
-
-        CompileResult {
-            success: false,
-            glsl: None,
-            error: Some(ErrorInfo { message, location }),
-        }
-    }
-
-    fn err_msg(message: String) -> Self {
-        CompileResult {
-            success: false,
-            glsl: None,
-            error: Some(ErrorInfo {
-                message,
-                location: None,
-            }),
-        }
-    }
-}
-
-/// Extended result with IR trees for visualization
-#[derive(Serialize, Deserialize)]
-pub struct CompileResultWithIR {
-    pub success: bool,
-    pub glsl: Option<String>,
-    pub tlc: Option<Vec<TreeNode>>,
-    pub mir: Option<String>,
-    pub error: Option<ErrorInfo>,
+fn error_location(e: &CompilerError) -> Option<ErrorLocation> {
+    e.span().map(|s| ErrorLocation {
+        start_line: s.start_line,
+        start_col: s.start_col,
+        end_line: s.end_line,
+        end_col: s.end_col,
+    })
 }
 
 fn format_error(e: &CompilerError) -> String {
@@ -297,7 +250,6 @@ fn format_error(e: &CompilerError) -> String {
         CompilerError::UndefinedVariable(name, _) => format!("Undefined variable: '{}'", name),
         CompilerError::AliasError(msg, _) => format!("Alias error: {}", msg),
         CompilerError::SpirvError(msg, _) => format!("SPIR-V error: {}", msg),
-        CompilerError::GlslError(msg, _) => format!("GLSL error: {}", msg),
         CompilerError::WgslError(msg, _) => format!("WGSL error: {}", msg),
         CompilerError::ModuleError(msg, _) => format!("Module error: {}", msg),
         CompilerError::FlatteningError(msg, _) => format!("Flatten error: {}", msg),
@@ -616,10 +568,9 @@ fn compile_to_wgsl_impl(source: &str) -> CompileResultWgsl {
         None => return CompileResultWgsl::err_msg("Compiler not initialized".to_string()),
     };
 
-    // Frontend pipeline — identical to the GLSL path through
-    // alias-check, diverging at EGIR (WGSL uses the SPIR-V-parity
-    // pipeline: `expand_soacs(true) → materialize → optimize_skeleton
-    // → elaborate`).
+    // Frontend pipeline: parse → elaborate → resolve → fold → type-check →
+    // TLC → EGIR (`expand_soacs(true) → materialize → optimize_skeleton →
+    // elaborate`) → WGSL.
     let parsed = match wyn_core::Compiler::parse(source, &mut node_counter) {
         Ok(p) => p,
         Err(e) => return CompileResultWgsl::err(e),
@@ -682,227 +633,6 @@ fn compile_to_wgsl_impl(source: &str) -> CompileResultWgsl {
     }
 }
 
-fn error_location(e: &CompilerError) -> Option<ErrorLocation> {
-    e.span().map(|s| ErrorLocation {
-        start_line: s.start_line,
-        start_col: s.start_col,
-        end_line: s.end_line,
-        end_col: s.end_col,
-    })
-}
-
-impl CompileResultWithIR {
-    fn err(e: CompilerError) -> Self {
-        CompileResultWithIR {
-            success: false,
-            glsl: None,
-            tlc: None,
-            mir: None,
-            error: Some(ErrorInfo {
-                message: format_error(&e),
-                location: error_location(&e),
-            }),
-        }
-    }
-
-    fn err_msg(message: String) -> Self {
-        CompileResultWithIR {
-            success: false,
-            glsl: None,
-            tlc: None,
-            mir: None,
-            error: Some(ErrorInfo {
-                message,
-                location: None,
-            }),
-        }
-    }
-}
-
-/// Compile Wyn source code to Shadertoy-compatible GLSL.
-///
-/// Returns a JSON-serialized CompileResult.
-/// Note: init_compiler() should be called first, but this will auto-initialize if needed.
-#[wasm_bindgen]
-pub fn compile_to_shadertoy(source: &str) -> JsValue {
-    // Set up panic hook for better error messages
-    console_error_panic_hook::set_once();
-
-    // Auto-initialize if not already done
-    init_compiler();
-
-    let result = compile_impl(source);
-    serde_wasm_bindgen::to_value(&result).unwrap_or_else(|e| {
-        let error_result = CompileResult::err_msg(format!("Serialization error: {}", e));
-        serde_wasm_bindgen::to_value(&error_result).unwrap()
-    })
-}
-
-fn compile_impl(source: &str) -> CompileResult {
-    // Create frontend from cached prelude
-    let (mut node_counter, mut module_manager) = match create_compiler_init() {
-        Some(f) => f,
-        None => return CompileResult::err_msg("Compiler not initialized".to_string()),
-    };
-
-    // Parse
-    let parsed = match wyn_core::Compiler::parse(source, &mut node_counter) {
-        Ok(p) => p,
-        Err(e) => return CompileResult::err(e),
-    };
-
-    // Elaborate modules
-    let parsed = match parsed.elaborate_modules(&mut module_manager, &mut node_counter) {
-        Ok(p) => p,
-        Err(e) => return CompileResult::err(e),
-    };
-
-    // Resolve names
-    let resolved = match parsed.resolve(&module_manager) {
-        Ok(r) => r,
-        Err(e) => return CompileResult::err(e),
-    };
-
-    // Fold AST constants
-    let ast_folded = resolved.fold_ast_constants();
-
-    // Type check
-    let type_checked = match ast_folded.type_check(&mut module_manager) {
-        Ok(t) => t,
-        Err(e) => return CompileResult::err(e),
-    };
-
-    // Full TLC pipeline, then the EGIR chain (skipping `materialize` —
-    // GLSL supports dynamic indexing natively).
-    let tlc_with_ownership = match type_checked
-        .to_tlc(&module_manager, false)
-        .partial_eval()
-        .normalize_soacs()
-        .fuse_maps()
-        .apply_ownership()
-    {
-        Ok(t) => t,
-        Err(e) => return CompileResult::err_msg(format!("apply_ownership: {:?}", e)),
-    };
-    let tlc_parallelized = match tlc_with_ownership
-        .defunctionalize()
-        .monomorphize()
-        .buffer_specialize()
-        .fold_generated_lambdas()
-        .inline_small()
-        .parallelize_soacs(false)
-    {
-        Ok(t) => t,
-        Err(e) => return CompileResult::err_msg(format!("parallelize_soacs: {:?}", e)),
-    };
-    let raw = match tlc_parallelized.filter_reachable().to_egraph() {
-        Ok(s) => s,
-        Err(e) => return CompileResult::err_msg(format!("SSA conversion error: {:?}", e)),
-    };
-    let ssa = raw.expand_soacs(false).optimize_skeleton().elaborate();
-
-    // Lower to Shadertoy GLSL
-    match ssa.lower_shadertoy() {
-        Ok(glsl) => CompileResult::ok(glsl),
-        Err(e) => CompileResult::err(e),
-    }
-}
-
-/// Compile Wyn source code and return IR trees along with GLSL.
-///
-/// Returns a JSON-serialized CompileResultWithIR.
-#[wasm_bindgen]
-pub fn compile_with_ir(source: &str) -> JsValue {
-    console_error_panic_hook::set_once();
-    init_compiler();
-
-    let result = compile_with_ir_impl(source);
-    serde_wasm_bindgen::to_value(&result).unwrap_or_else(|e| {
-        let error_result = CompileResultWithIR::err_msg(format!("Serialization error: {}", e));
-        serde_wasm_bindgen::to_value(&error_result).unwrap()
-    })
-}
-
-fn compile_with_ir_impl(source: &str) -> CompileResultWithIR {
-    let (mut node_counter, mut module_manager) = match create_compiler_init() {
-        Some(f) => f,
-        None => return CompileResultWithIR::err_msg("Compiler not initialized".to_string()),
-    };
-
-    // Parse
-    let parsed = match wyn_core::Compiler::parse(source, &mut node_counter) {
-        Ok(p) => p,
-        Err(e) => return CompileResultWithIR::err(e),
-    };
-
-    // Elaborate modules
-    let parsed = match parsed.elaborate_modules(&mut module_manager, &mut node_counter) {
-        Ok(p) => p,
-        Err(e) => return CompileResultWithIR::err(e),
-    };
-
-    // Resolve names
-    let resolved = match parsed.resolve(&module_manager) {
-        Ok(r) => r,
-        Err(e) => return CompileResultWithIR::err(e),
-    };
-
-    // Fold AST constants
-    let ast_folded = resolved.fold_ast_constants();
-
-    // Type check
-    let type_checked = match ast_folded.type_check(&mut module_manager) {
-        Ok(t) => t,
-        Err(e) => return CompileResultWithIR::err(e),
-    };
-
-    // Transform to TLC
-    let tlc_program = type_checked.to_tlc(&module_manager, false);
-
-    // Capture TLC tree (after partial eval, before defunctionalization)
-    let tlc_after_partial_eval = tlc_program.partial_eval();
-    let tlc_tree = tlc_tree::program_to_tree(&tlc_after_partial_eval.tlc);
-
-    // Full TLC pipeline, then the EGIR chain (GLSL skips materialize).
-    let tlc_with_ownership = match tlc_after_partial_eval
-        .normalize_soacs()
-        .fuse_maps()
-        .apply_ownership()
-    {
-        Ok(t) => t,
-        Err(e) => return CompileResultWithIR::err_msg(format!("apply_ownership: {:?}", e)),
-    };
-    let tlc_parallelized = match tlc_with_ownership
-        .defunctionalize()
-        .monomorphize()
-        .buffer_specialize()
-        .fold_generated_lambdas()
-        .inline_small()
-        .parallelize_soacs(false)
-    {
-        Ok(t) => t,
-        Err(e) => return CompileResultWithIR::err_msg(format!("parallelize_soacs: {:?}", e)),
-    };
-    let raw = match tlc_parallelized.filter_reachable().to_egraph() {
-        Ok(s) => s,
-        Err(e) => return CompileResultWithIR::err_msg(format!("SSA conversion error: {:?}", e)),
-    };
-    let ssa = raw.expand_soacs(false).optimize_skeleton().elaborate();
-    let mir = wyn_core::ssa::print::format_program(&ssa.ssa);
-
-    // Lower to Shadertoy GLSL
-    match ssa.lower_shadertoy() {
-        Ok(glsl) => CompileResultWithIR {
-            success: true,
-            glsl: Some(glsl),
-            tlc: Some(tlc_tree),
-            mir: Some(mir),
-            error: None,
-        },
-        Err(e) => CompileResultWithIR::err(e),
-    }
-}
-
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod lib_tests;
@@ -911,7 +641,7 @@ mod lib_tests;
 #[wasm_bindgen]
 pub fn get_example_program() -> String {
     r#"-- Wyn Shader Example
--- This compiles to Shadertoy-compatible GLSL
+-- This compiles to WGSL for WebGPU
 
 ------------------------------------------------------------
 -- Uniforms

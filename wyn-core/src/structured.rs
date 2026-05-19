@@ -1,7 +1,10 @@
-//! Structured control flow IR for GLSL emission.
+//! Structured control flow IR for textual-shader emission.
 //!
 //! Converts the SSA CFG (blocks + branches) into a tree that maps directly
-//! to GLSL control flow: sequential statements, if-else, while loops.
+//! to the control-flow constructs WGSL exposes: sequential statements,
+//! if-else, while loops. SPIR-V emission keeps the SSA CFG directly and
+//! doesn't go through this; it's needed only for backends whose output is
+//! structured source rather than a basic-block graph.
 
 use crate::ssa::framework::InstId;
 use crate::ssa::types::{BlockId, ControlHeader, FuncBody, Terminator, ValueId};
@@ -82,8 +85,8 @@ impl<'a> StructCtx<'a> {
             }
             let block = &self.body.inner.blocks[current];
 
-            // Bind block params from args (emit as Assign for non-entry blocks)
-            // The GLSL emitter handles these: first occurrence declares, later assigns.
+            // Bind block params from args (emit as Assign for non-entry blocks).
+            // Textual emitters handle these: first occurrence declares, later assigns.
             for (param, arg) in block.params.iter().zip(current_args.iter()) {
                 if *param != *arg {
                     nodes.push(Node::Assign {

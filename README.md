@@ -1,6 +1,6 @@
 # Wyn
 
-A minimal compiler for a Futhark-like programming language that generates SPIR-V, GLSL, and WGSL code for GPU shaders.
+A minimal compiler for a Futhark-like programming language that generates SPIR-V and WGSL code for GPU shaders.
 
 ## Features
 
@@ -8,7 +8,7 @@ A minimal compiler for a Futhark-like programming language that generates SPIR-V
 - Higher-order functions (map, reduce, zip, etc.)
 - Vector and matrix types optimized for GPU operations
 - Pattern matching
-- SPIR-V, GLSL, and WGSL code generation for Vulkan/WebGPU shaders
+- SPIR-V and WGSL code generation for Vulkan/WebGPU shaders
 - Vertex, fragment, and compute shader support
 - Array operations with size tracking
 - Loop constructs
@@ -18,7 +18,7 @@ A minimal compiler for a Futhark-like programming language that generates SPIR-V
 
 The project is organized as a Rust workspace:
 
-- **`wyn-core/`** - Compiler library (lexer, parser, type checker, TLC, EGIR mid-end, SSA, SPIR-V/GLSL/WGSL backends). Includes an in-crate generic SSA framework at `ssa::framework` (blocks, values, instructions, terminators) used only for codegen.
+- **`wyn-core/`** - Compiler library (lexer, parser, type checker, TLC, EGIR mid-end, SSA, SPIR-V/WGSL backends). Includes an in-crate generic SSA framework at `ssa::framework` (blocks, values, instructions, terminators) used only for codegen.
 - **`wyn/`** - Command-line executable
 - **`wyn-analyzer/`** - Language server (in development)
 - **`viz/`** - Visualization tool for rendering SPIR-V shaders
@@ -85,7 +85,7 @@ What you get "for free":
 | Stage | Source | Description |
 |-------|--------|-------------|
 | **SsaConverted** | `EgirSkelOptimized::elaborate` | EGIR chain elaborated into SSA `Program` |
-| **Lowered** | `spirv` / `glsl` / `wgsl` | SSA to SPIR-V, GLSL, or WGSL |
+| **Lowered** | `spirv` / `wgsl` | SSA to SPIR-V or WGSL |
 
 SSA is intentionally minimal: all mid-end machinery (effect tokens, canonicalization, verification, generic transform passes) lives in EGIR. The `ssa::framework` module provides a generic CFG-with-block-params representation; `ssa::types` is the concrete instantiation (`InstKind` instructions, `Type<TypeName>` values).
 
@@ -294,11 +294,8 @@ def fragment_main(): #[location(0)] vec4f32 =
 # Compile to SPIR-V
 cargo run --bin wyn -- compile input.wyn -o output.spv
 
-# Compile to GLSL
-cargo run --bin wyn -- compile input.wyn -o output.glsl -t glsl
-
-# Compile to Shadertoy GLSL
-cargo run --bin wyn -- compile input.wyn -o output.glsl -t shadertoy
+# Compile to WGSL
+cargo run --bin wyn -- compile input.wyn -o output.wgsl -t wgsl
 
 # Type check without generating code
 cargo run --bin wyn -- check input.wyn

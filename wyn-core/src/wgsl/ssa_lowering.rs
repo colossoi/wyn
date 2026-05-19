@@ -1,6 +1,5 @@
 //! WGSL SSA-to-text lowering.
 //!
-//! The backend is built against WGSL directly (not as a GLSL dialect).
 //! Entry points carry `@vertex` / `@fragment` / `@compute` attributes;
 //! module-scope types and bindings precede function definitions.
 //!

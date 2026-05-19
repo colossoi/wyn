@@ -1724,7 +1724,7 @@ impl<'a> Converter<'a> {
             // audit confirms no future use.
             SoacOp::Scatter { .. } => Err(ConvertError::Unsupported("SOAC scatter".into())),
             // TODO(reduce_by_index): parallel path needs atomic-op emission
-            // (atomicAdd/atomicMin/etc.) in spirv/wgsl/glsl backends — not yet wired.
+            // (atomicAdd/atomicMin/etc.) in spirv/wgsl backends — not yet wired.
             // Sequential lowering is straightforward (read-combine-write loop) but
             // also not yet wired. Produced by `to_tlc::transform_soac_reduce_by_index`.
             SoacOp::ReduceByIndex { .. } => Err(ConvertError::Unsupported("SOAC reduce_by_index".into())),

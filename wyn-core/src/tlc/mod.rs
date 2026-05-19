@@ -2164,9 +2164,9 @@ impl<'a> Transformer<'a> {
 
                 // Create parameter symbols. Display names must be distinct
                 // per-parameter — SPIR-V keys off numeric parameter ids so
-                // it survives duplicate names, but text-emitting backends
-                // (GLSL, WGSL) inherit the display name verbatim and reject
-                // a function whose parameter list repeats a name.
+                // it survives duplicate names, but WGSL inherits the display
+                // name verbatim and rejects a function whose parameter list
+                // repeats a name.
                 let params: Vec<(SymbolId, Type<TypeName>)> = param_tys
                     .iter()
                     .enumerate()

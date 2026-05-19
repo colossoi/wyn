@@ -25,7 +25,6 @@ pub mod name_registry;
 pub mod tlc;
 
 pub mod egir;
-pub mod glsl;
 /// Re-export of the pipeline descriptor format. Lives in its own
 /// crate so host runtimes (e.g. `extra/viz`) can deserialize the
 /// JSON without pulling in the whole compiler.
@@ -259,7 +258,7 @@ pub type TypeTable = HashMap<NodeId, TypeScheme<TypeName>>;
 //       .elaborate()                               -> SsaConverted
 //
 // Backend:
-//       .lower() | .lower_glsl() | .lower_wgsl()
+//       .lower() | .lower_wgsl()
 //
 // Tests should prefer the `compile_thru_*` helpers below, which subsume
 // the chain up to a milestone and centralize updates as new passes land.
@@ -758,9 +757,8 @@ impl TlcGeneratedLambdasFolded {
     }
 
     /// Build the raw EGIR program. Callers chain the pipeline
-    /// (`expand_soacs → [materialize →] optimize_skeleton → elaborate`)
-    /// explicitly — materialize is the only optional pass and is required for
-    /// SPIR-V but not GLSL.
+    /// (`expand_soacs → materialize → optimize_skeleton → elaborate`)
+    /// explicitly.
     pub fn to_egraph(self) -> std::result::Result<EgirParallelized, ConvertError> {
         let empty = std::collections::HashMap::new();
         egir::from_tlc::run(
@@ -812,9 +810,8 @@ impl TlcSmallInlined {
     }
 
     /// Build the raw EGIR program. Callers chain the pipeline
-    /// (`expand_soacs → [materialize →] optimize_skeleton → elaborate`)
-    /// explicitly — materialize is the only optional pass and is required for
-    /// SPIR-V but not GLSL.
+    /// (`expand_soacs → materialize → optimize_skeleton → elaborate`)
+    /// explicitly.
     pub fn to_egraph(self) -> std::result::Result<EgirParallelized, ConvertError> {
         let empty = std::collections::HashMap::new();
         egir::from_tlc::run(
@@ -931,8 +928,8 @@ impl EgirRaw {
 
 impl EgirParallelized {
     /// `unroll_maps`: whether to unroll small-constant-length Maps into
-    /// straight-line code. Typically `true` for SPIR-V and `false` for GLSL
-    /// (where drivers unroll themselves and the structurizer prefers loops).
+    /// straight-line code. Both current backends (SPIR-V, WGSL) want
+    /// `true` — kept as a knob so future backends can opt out.
     pub fn expand_soacs(self, unroll_maps: bool) -> EgirSoacExpanded {
         let EgirParallelized(mut inner) = self;
         egir::soac_expand::run(&mut inner, unroll_maps);
@@ -988,14 +985,6 @@ impl SsaConverted {
             spirv,
             pipeline: self.pipeline,
         })
-    }
-
-    pub fn lower_glsl(self) -> error::Result<glsl::GlslOutput> {
-        glsl::lower(&self.ssa)
-    }
-
-    pub fn lower_shadertoy(self) -> error::Result<String> {
-        glsl::lower_shadertoy(&self.ssa)
     }
 
     pub fn lower_wgsl(self) -> error::Result<String> {

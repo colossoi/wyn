@@ -1256,8 +1256,6 @@ def test2(a:vec2f32, b:vec2f32) f32 = dot(a, b)
     );
 }
 
-// Tests for new GLSL builtins (abs, sign, floor, ceil, fract, min, max, clamp, mix, smoothstep)
-
 #[test]
 fn test_builtin_abs_scalar_and_vector() {
     typecheck_program(
@@ -2050,8 +2048,6 @@ def update(v: i32, e: f32) i32 =
 
 #[test]
 fn test_vec_with_swizzle_chained_rotations() {
-    // The exact GLSL pattern from the original request, in Wyn:
-    //   dir.yz *= rot(mouse.y); dir.xz *= rot(mouse.x); ...
     typecheck_program(
         r#"
 def rot(a: f32) mat2f32 =
@@ -2147,14 +2143,6 @@ def pick(v: #left(i32) | #right(i32)) f32 =
     );
 }
 
-// =============================================================================
-// GLSL builtins added late: `exp2` (base-2 exponential, GLSL.std.450 #29)
-// and `step` (heaviside step, #48). Both have a scalar form and a
-// scalar-edge / vec broadcast; per-type entries cover the all-vec form.
-// =============================================================================
-
-/// GLSL `exp2` — scalar `f32 -> f32` (per-type op via `open f32`) and
-/// per-component on vectors via `vec.exp2`.
 #[test]
 fn builtin_exp2() {
     let scalar = try_typecheck_program("open f32\ndef f(x: f32) f32 = exp2(x)");
@@ -2167,8 +2155,6 @@ fn builtin_exp2() {
     assert!(vec3.is_ok(), "vec.exp2 should accept vec3f32: {:?}", vec3);
 }
 
-/// GLSL `step(edge, x)` returns 1.0 if `x >= edge` else 0.0.
-/// Covers the scalar form and the scalar-edge / vec-x broadcast.
 #[test]
 fn builtin_step() {
     let scalar = try_typecheck_program("def f(edge: f32, x: f32) f32 = step(edge, x)");

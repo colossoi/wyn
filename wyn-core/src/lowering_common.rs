@@ -1,4 +1,4 @@
-//! Common utilities shared between lowering backends (SPIR-V, GLSL, etc.)
+//! Common utilities shared between lowering backends (SPIR-V, WGSL).
 
 use crate::ast::TypeName;
 use crate::ssa::types::ExecutionModel;

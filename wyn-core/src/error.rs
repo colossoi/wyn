@@ -18,9 +18,6 @@ pub enum CompilerError {
     #[error("SPIR-V generation error: {0}")]
     SpirvError(String, Option<Span>),
 
-    #[error("GLSL generation error: {0}")]
-    GlslError(String, Option<Span>),
-
     #[error("WGSL generation error: {0}")]
     WgslError(String, Option<Span>),
 
@@ -51,7 +48,6 @@ impl CompilerError {
             Self::UndefinedVariable(_, span) => *span,
             Self::AliasError(_, span) => *span,
             Self::SpirvError(_, span) => *span,
-            Self::GlslError(_, span) => *span,
             Self::WgslError(_, span) => *span,
             Self::ModuleError(_, span) => *span,
             Self::FlatteningError(_, span) => *span,
@@ -90,13 +86,6 @@ macro_rules! err_undef {
 macro_rules! err_spirv {
     ($($arg:tt)*) => {
         $crate::error::CompilerError::SpirvError(format!($($arg)*), None)
-    };
-}
-
-#[macro_export]
-macro_rules! err_glsl {
-    ($($arg:tt)*) => {
-        $crate::error::CompilerError::GlslError(format!($($arg)*), None)
     };
 }
 
@@ -166,13 +155,6 @@ macro_rules! err_spirv_at {
 }
 
 #[macro_export]
-macro_rules! err_glsl_at {
-    ($span:expr, $($arg:tt)*) => {
-        $crate::error::CompilerError::GlslError(format!($($arg)*), Some($span))
-    };
-}
-
-#[macro_export]
 macro_rules! err_wgsl_at {
     ($span:expr, $($arg:tt)*) => {
         $crate::error::CompilerError::WgslError(format!($($arg)*), Some($span))
@@ -231,13 +213,6 @@ macro_rules! bail_spirv {
 }
 
 #[macro_export]
-macro_rules! bail_glsl {
-    ($($arg:tt)*) => {
-        return Err($crate::err_glsl!($($arg)*))
-    };
-}
-
-#[macro_export]
 macro_rules! bail_module {
     ($($arg:tt)*) => {
         return Err($crate::err_module!($($arg)*))
@@ -285,13 +260,6 @@ macro_rules! bail_undef_at {
 macro_rules! bail_spirv_at {
     ($span:expr, $($arg:tt)*) => {
         return Err($crate::err_spirv_at!($span, $($arg)*))
-    };
-}
-
-#[macro_export]
-macro_rules! bail_glsl_at {
-    ($span:expr, $($arg:tt)*) => {
-        return Err($crate::err_glsl_at!($span, $($arg)*))
     };
 }
 

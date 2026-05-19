@@ -20,10 +20,6 @@ while [[ $# -gt 0 ]]; do
             KEEP=true
             shift 2
             ;;
-        --glsl)
-            MODE="glsl"
-            shift
-            ;;
         --wgsl)
             MODE="wgsl"
             shift
@@ -33,10 +29,9 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         *)
-            echo "Usage: $0 [--keep|-k] [--out-dir|-o DIR] [--glsl|--wgsl] [--release]"
+            echo "Usage: $0 [--keep|-k] [--out-dir|-o DIR] [--wgsl] [--release]"
             echo "  --keep, -k       Keep generated files (in /tmp by default)"
             echo "  --out-dir, -o    Output directory (implies --keep)"
-            echo "  --glsl           Compile to GLSL (shadertoy) instead of SPIR-V"
             echo "  --wgsl           Compile to WGSL and validate with 'viz validate'"
             echo "  --release        Build wyn (and viz, for --wgsl) with --release"
             echo "                   (default: debug — builds faster, runs slower)"
@@ -75,49 +70,7 @@ SKIP=0
 for f in testfiles/*.wyn testfiles/playground/*.wyn; do
     base=$(basename "$f" .wyn)
 
-    if [ "$MODE" = "glsl" ]; then
-        # GLSL mode: compile to shadertoy. Skip compute-only shaders
-        # and anything with module-scope `#[storage]` — Shadertoy
-        # GLSL is fragment-only with fixed iResolution/iTime/iMouse
-        # uniforms; custom storage bindings have no equivalent.
-        if grep -q '#\[compute\]' "$f" && ! grep -q '#\[fragment\]' "$f"; then
-            printf "Skipping %s (compute-only)\n" "$f"
-            SKIP=$((SKIP + 1))
-            continue
-        fi
-        if grep -q '#\[storage' "$f"; then
-            printf "Skipping %s (uses module-scope #[storage])\n" "$f"
-            SKIP=$((SKIP + 1))
-            continue
-        fi
-        # Auto-lifted compute pre-passes (e.g. ripples.wyn) synthesize
-        # storage bindings during compilation. Shadertoy GLSL can't
-        # express those either. `--single-stage` would disable the
-        # lift, but the default sweep doesn't pass it.
-        if [ "$base" = "ripples" ]; then
-            printf "Skipping %s (auto-lifted compute pre-pass, no Shadertoy equivalent)\n" "$f"
-            SKIP=$((SKIP + 1))
-            continue
-        fi
-
-        out_path="${OUT_DIR}/${base}.glsl"
-        printf "Compiling %s → GLSL... " "$f"
-
-        if ! compile_err=$("$WYN_BIN" compile "$f" -t shadertoy -o "$out_path" 2>&1); then
-            echo "FAILED"
-            echo "$compile_err"
-            FAIL=$((FAIL + 1))
-            continue
-        fi
-
-        if [ "$KEEP" = true ]; then
-            echo "OK → $out_path"
-        else
-            echo "OK"
-            rm -f "$out_path"
-        fi
-        PASS=$((PASS + 1))
-    elif [ "$MODE" = "wgsl" ]; then
+    if [ "$MODE" = "wgsl" ]; then
         # WGSL mode: compile + validate via viz (naga in-process).
         # Skip testfiles that depend on `impl_source`-linked SPIR-V
         # helpers (e.g. sha256_compress) — WGSL has no equivalent

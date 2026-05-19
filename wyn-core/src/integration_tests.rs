@@ -2066,8 +2066,7 @@ entry main() #[location(0)] vec4f32 =
     assert_spirv_call_arities_match(&spirv);
 }
 
-/// The full GLSL pattern from the original request: four chained
-/// `with .swizzle *= mat2` rotations on a direction vector.
+/// Four chained `with .swizzle *= mat2` rotations on a direction vector.
 #[test]
 fn swizzle_with_chained_rotations_compiles_to_spirv() {
     let src = r#"

@@ -14,10 +14,6 @@ enum Target {
     /// SPIR-V binary (default)
     #[default]
     Spirv,
-    /// GLSL source code
-    Glsl,
-    /// GLSL for Shadertoy (fragment shader only, mainImage entry point)
-    Shadertoy,
     /// WGSL source code (WebGPU shading language)
     Wgsl,
 }
@@ -43,7 +39,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Compile one or more source files to SPIR-V or GLSL
+    /// Compile one or more source files to SPIR-V or WGSL
     Compile {
         /// Input source file(s). When multiple files are given, each
         /// is compiled in turn within a single process — useful for
@@ -180,7 +176,6 @@ fn run(cli: Cli) -> Result<(), DriverError> {
                         let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
                         let ext = match target {
                             Target::Spirv => "spv",
-                            Target::Glsl | Target::Shadertoy => "glsl",
                             Target::Wgsl => "wgsl",
                         };
                         Some(dir.join(format!("{stem}.{ext}")))
@@ -315,23 +310,12 @@ fn compile_file(
         tlc_parallel.filter_reachable()
     });
 
-    // Build the raw EGIR program, then chain the passes. SPIR-V needs
-    // `materialize` (rewrite dynamic Index → Materialize+DynamicExtract);
-    // GLSL skips it.
+    // Build the raw EGIR program, then chain the passes.
     let raw = time("to_egraph", verbose, || tlc_reachable.to_egraph())?;
-    // Unroll small Maps for SPIR-V and WGSL; leave loops intact for GLSL
-    // (drivers unroll themselves and the structurizer is happier with
-    // real loops).
-    let unroll_maps = matches!(target, Target::Spirv | Target::Wgsl);
-    let expanded = time("expand_soacs", verbose, || raw.expand_soacs(unroll_maps));
-    let ssa = match target {
-        Target::Spirv | Target::Wgsl => time("egir_passes_full", verbose, || {
-            expanded.materialize().optimize_skeleton().elaborate()
-        }),
-        Target::Glsl | Target::Shadertoy => time("egir_passes_glsl", verbose, || {
-            expanded.optimize_skeleton().elaborate()
-        }),
-    };
+    let expanded = time("expand_soacs", verbose, || raw.expand_soacs(true));
+    let ssa = time("egir_passes_full", verbose, || {
+        expanded.materialize().optimize_skeleton().elaborate()
+    });
 
     // Dump MIR if requested
     if let Some(ref path) = output_mir {
@@ -379,49 +363,6 @@ fn compile_file(
             if verbose {
                 info!("Successfully compiled to {}", output_path.display());
                 info!("Generated {} words of SPIR-V", spirv_len);
-            }
-        }
-        Target::Glsl => {
-            let glsl_output = time("glsl_lower", verbose, || wyn_core::glsl::lower(&soac_lowered.ssa))?;
-
-            let output_path = output.unwrap_or_else(|| {
-                let mut path = input.clone();
-                path.set_extension("glsl");
-                path
-            });
-
-            let mut combined = String::new();
-            if let Some(vert) = &glsl_output.vertex {
-                combined.push_str("// === VERTEX SHADER ===\n");
-                combined.push_str(vert);
-                combined.push('\n');
-            }
-            if let Some(frag) = &glsl_output.fragment {
-                combined.push_str("// === FRAGMENT SHADER ===\n");
-                combined.push_str(frag);
-                combined.push('\n');
-            }
-            fs::write(&output_path, &combined)?;
-
-            if verbose {
-                info!("Successfully compiled to {}", output_path.display());
-            }
-        }
-        Target::Shadertoy => {
-            let glsl = time("glsl_lower_shadertoy", verbose, || {
-                wyn_core::glsl::lower_shadertoy(&soac_lowered.ssa)
-            })?;
-
-            let output_path = output.unwrap_or_else(|| {
-                let mut path = input.clone();
-                path.set_extension("glsl");
-                path
-            });
-
-            fs::write(&output_path, &glsl)?;
-
-            if verbose {
-                info!("Successfully compiled to {}", output_path.display());
             }
         }
         Target::Wgsl => {

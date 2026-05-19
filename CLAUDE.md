@@ -167,7 +167,7 @@ smallest program that still reproduces the bug. Source:
   script; good template.
 - Prior reduction results for the sqrt-panic demo and SoA-tuple
   ArrayWith bug yielded ~2KB repros from ~12KB sources.
-- Compile a source file to SPIR-V or GLSL
+- Compile a source file to SPIR-V or WGSL
 
      Usage: wyn compile [OPTIONS] <FILE>
 
@@ -177,15 +177,14 @@ smallest program that still reproduces the bug. Source:
 
      Options:
        -o, --output <FILE>
-               Output file (defaults to input name with .spv or .glsl extension)
+               Output file (defaults to input name with .spv or .wgsl extension)
 
        -t, --target <TARGET>
                Target output format
 
                Possible values:
-               - spirv:     SPIR-V binary (default)
-               - glsl:      GLSL source code
-               - shadertoy: GLSL for Shadertoy (fragment shader only, mainImage entry point)
+               - spirv: SPIR-V binary (default)
+               - wgsl:  WGSL source code
 
                [default: spirv]
 
