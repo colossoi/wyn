@@ -219,20 +219,34 @@ pub fn build_shadertoy(
         ));
     }
 
-    // Match well-known names; ignore everything else.
+    // Match well-known names; anything else is a hard error — silently
+    // ignoring an unrecognized uniform leaves its binding slot unbound
+    // at draw time and the driver crashes with "device lost".
+    let mut unknown: Vec<String> = Vec::new();
     for u in &sidecar {
         let slot = match u.name.as_str() {
             "iResolution" => Some(&mut resolution),
             "iTime" => Some(&mut time),
             "difficulty" | "iDifficulty" => Some(&mut difficulty_slot),
             "iMouse" => Some(&mut mouse),
-            _ => None,
+            _ => {
+                unknown.push(u.name.clone());
+                None
+            }
         };
         if let Some(s) = slot {
             s.actual_set = u.set;
             s.actual_binding = u.binding;
             s.present = true;
         }
+    }
+    if !unknown.is_empty() {
+        return Err(anyhow!(
+            "viz vf --shadertoy: shader declares uniforms `{}` that aren't in the \
+             shadertoy well-known set (iResolution / iTime / iMouse / difficulty). \
+             --shadertoy can't supply them; a non-shadertoy host runner is needed.",
+            unknown.join("`, `"),
+        ));
     }
 
     // All declared shadertoy uniforms must share a single set; per-set
