@@ -165,13 +165,40 @@ Notes:
   `array_with_inplace` via the `view_buffer_id` map on the SPIR-V
   side, so `ViewIndex` resolves the backing storage buffer from
   compile-time metadata rather than a runtime struct field.
-- `Filter` parallelization would build on parallel `Scan` (prefix-sum
-  over the predicate mask to compute write offsets) — not yet wired.
 - Phase 3 of parallel scan applies `op(off, elem)`, not `op(elem, off)`:
   `egir::parallelize` synthesizes a swap-args wrapper EgirFunc
   `\(a, b) -> op(b, a)` alongside the phase entries, and phase 3's Map
   routes through the wrapper. Correct for non-commutative associative
   combiners (string concat, matmul).
+
+#### Remaining-work ordering
+
+The unimplemented cells above have a few hard dependencies between
+them, plus some softer reuse opportunities. Anything not on this list
+is independent.
+
+- **`Scatter` serial → `ReduceByIndex` serial.** Both write
+  `dest[indices[k]] = …` per iteration; ReduceByIndex adds a
+  read-combine-write step. They share an OOB-guarded indexed-write
+  loop builder, so doing Scatter first lets ReduceByIndex reuse it
+  rather than mirror the shape. Both also share a design choice on
+  whether `dest: Place` accepts `BufferSlice` (entry-bound storage)
+  or only `LocalArray` (function-local fixed array) initially;
+  picking the same answer for both keeps the `Place` story coherent.
+- **Surface parsing.** `reduce_by_index` already has a producer at
+  `tlc::mod::transform_soac_reduce_by_index`. `scatter` is not in the
+  SOAC names list — Scatter needs a `transform_soac_scatter` in the
+  same shape before EGIR work matters.
+- **Parallel `Filter` → parallel `Scan`.** Already in place;
+  prefix-sum over the predicate mask gives per-element write offsets.
+- **Parallel `ReduceByIndex` → atomic intrinsics.** The catalog has
+  no `atomicAdd`/`atomicMin`/etc. today; adding them is a
+  prerequisite for parallel histograms. Serial ReduceByIndex doesn't
+  need them.
+- **Parallel `Scatter` → no hard prerequisite**, but the duplicate-
+  index semantics ("last write wins" sequentially) become racy in
+  parallel. Either accept the race (matches Futhark's documented
+  behavior) or gate on atomic-store availability.
 
 ### SPIR-V Backend Optimizations
 
