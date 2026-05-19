@@ -10,9 +10,6 @@
 
 open f32
 
-#[uniform(set=1, binding=0)] def iResolution: vec3f32
-#[uniform(set=1, binding=1)] def iTime: f32
-
 def MAXDIST: f32 = 50.0
 
 ------------------------------------------------------------
@@ -71,7 +68,7 @@ def pR(p: vec2f32, a: f32) vec2f32 =
 ------------------------------------------------------------
 -- Fractal IFS (20 iterations)
 ------------------------------------------------------------
-def fractal(p_in: vec3f32) f32 =
+def fractal(p_in: vec3f32, iTime: f32) f32 =
   let d      = iTime * 5.0 - p_in.z in
   -- swizzle p to yxz
   let p0     = @[p_in.y, p_in.x, p_in.z] in
@@ -103,21 +100,21 @@ def fractal(p_in: vec3f32) f32 =
 ------------------------------------------------------------
 -- Scene SDF: returns (dist, material_id)
 ------------------------------------------------------------
-def scene_map(pos: vec3f32) (f32, f32) =
+def scene_map(pos: vec3f32, iTime: f32) (f32, f32) =
   let d0 = 10.0 in
-  let d1 = min(d0, fractal(pos)) in
+  let d1 = min(d0, fractal(pos, iTime)) in
   let d2 = smin(d1, fPlane(pos, @[0.0, 1.0, 0.0], 10.0), 4.6) in
   (d2, 0.0)
 
 ------------------------------------------------------------
 -- Volumetric march (20 steps, early-exit encoded as done flag)
 ------------------------------------------------------------
-def vmarch(ro: vec3f32, rd: vec3f32, _dist: f32) vec3f32 =
+def vmarch(ro: vec3f32, rd: vec3f32, _dist: f32, iTime: f32) vec3f32 =
   let c = hue_rotate(@[0.0, 0.0, 1.0], 5.5) in
   let (_, _, sum_final, _) =
     loop (i, p, sum, done) = (0, ro, @[0.0, 0.0, 0.0], false)
     while i < 20 && !done do
-      let (rx, _) = scene_map(p) in
+      let (rx, _) = scene_map(p, iTime) in
       if rx > 0.01 then
         (i + 1, p, sum, true)
       else
@@ -131,12 +128,12 @@ def vmarch(ro: vec3f32, rd: vec3f32, _dist: f32) vec3f32 =
 ------------------------------------------------------------
 -- Ray march (50 steps, early-exit encoded as done flag)
 ------------------------------------------------------------
-def march(ro: vec3f32, rd: vec3f32) (f32, f32) =
+def march(ro: vec3f32, rd: vec3f32, iTime: f32) (f32, f32) =
   let prec = 0.001 in
   let (_, res_t, res_mat, _) =
     loop (i, rt, rm, done) = (0, 0.0, 0.0, false)
     while i < 50 && !done do
-      let (sx, sy) = scene_map(ro + rd * rt) in
+      let (sx, sy) = scene_map(ro + rd * rt, iTime) in
       if rt > MAXDIST || sx < prec then
         (i + 1, rt, rm, true)
       else
@@ -147,24 +144,24 @@ def march(ro: vec3f32, rd: vec3f32) (f32, f32) =
 ------------------------------------------------------------
 -- Normal estimation via central differences
 ------------------------------------------------------------
-def calc_normal(pos: vec3f32) vec3f32 =
+def calc_normal(pos: vec3f32, iTime: f32) vec3f32 =
   let eps = 0.005 in
-  let (d0, _) = scene_map(pos) in
-  let (dx, _) = scene_map(@[pos.x + eps, pos.y, pos.z]) in
-  let (dy, _) = scene_map(@[pos.x, pos.y + eps, pos.z]) in
-  let (dz, _) = scene_map(@[pos.x, pos.y, pos.z + eps]) in
+  let (d0, _) = scene_map(pos, iTime) in
+  let (dx, _) = scene_map(@[pos.x + eps, pos.y, pos.z], iTime) in
+  let (dy, _) = scene_map(@[pos.x, pos.y + eps, pos.z], iTime) in
+  let (dz, _) = scene_map(@[pos.x, pos.y, pos.z + eps], iTime) in
   normalize(@[dx - d0, dy - d0, dz - d0])
 
 ------------------------------------------------------------
 -- Render: trace + volumetric shading
 ------------------------------------------------------------
-def render(ro: vec3f32, rd: vec3f32) vec4f32 =
-  let (res_t, _) = march(ro, rd) in
+def render(ro: vec3f32, rd: vec3f32, iTime: f32) vec4f32 =
+  let (res_t, _) = march(ro, rd, iTime) in
   if res_t > MAXDIST then
     @[0.0, 0.0, 0.0, 50.0]
   else
     let pos  = ro + res_t * rd in
-    let col  = vmarch(pos, rd, res_t) in
+    let col  = vmarch(pos, rd, res_t, iTime) in
     let fade = clamp(res_t / 50.0, 0.0, 1.0) in
     let col2 = mix(col, @[0.0, 0.0, 0.0], fade) in
     @[col2.x, col2.y, col2.z, res_t]
@@ -173,7 +170,7 @@ def render(ro: vec3f32, rd: vec3f32) vec4f32 =
 -- Fragment shader
 ------------------------------------------------------------
 #[fragment]
-entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
   -- Flip Y for Vulkan so the screen-Y convention matches Shadertoy's.
   let fc    = @[fragCoord.x, iResolution.y - fragCoord.y] in
   -- UV setup with barrel-distortion term
@@ -192,7 +189,7 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4
   let rd_local = normalize(@[uv.x, uv.y, 0.8]) in
   let rd       = normalize(cam_x * rd_local.x + cam_y * rd_local.y + forward * rd_local.z) in
   -- Render and invert color
-  let col    = render(cam_pos, rd) in
+  let col    = render(cam_pos, rd, iTime) in
   let alpha  = clamp(1.0 - col.w / MAXDIST, 0.0, 1.0) in
   @[1.0 - col.x, 1.0 - col.y, 1.0 - col.z, alpha]
 

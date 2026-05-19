@@ -7,12 +7,6 @@
 open f32
 
 ------------------------------------------------------------
--- Uniforms
-------------------------------------------------------------
-#[uniform(set=1, binding=0)] def iResolution: vec3f32
-#[uniform(set=1, binding=1)] def iTime: f32
-
-------------------------------------------------------------
 -- Constants
 ------------------------------------------------------------
 def PI: f32 = 3.14159265358979
@@ -69,7 +63,7 @@ def box(p: vec3f32, b: vec3f32) f32 =
 -- Five rounds of abs-fold + rotation, then a final xz rotation,
 -- then evaluate the box SDF.
 ------------------------------------------------------------
-def ifsBox(p0: vec3f32) f32 =
+def ifsBox(p0: vec3f32, iTime: f32) f32 =
   let p_folded =
     loop p = p0 for i < 5 do
       let p1 = @[abs(p.x) - 1.0, abs(p.y) - 1.0, abs(p.z) - 1.0] in
@@ -84,20 +78,20 @@ def ifsBox(p0: vec3f32) f32 =
 -- Scene SDF.
 -- Folds space modularly in x, y, z and applies polar symmetry on xy.
 ------------------------------------------------------------
-def sceneMap(p: vec3f32) f32 =
+def sceneMap(p: vec3f32, iTime: f32) f32 =
   let px = mod(p.x - 5.0, 10.0) - 5.0 in
   let py = mod(p.y - 5.0, 10.0) - 5.0 in
   let pz = mod(p.z, 16.0) - 8.0 in
   let p1: vec3f32 = @[px, py, pz] in
   let pxy2 = pmod(@[p1.x, p1.y], 5.0) in
   let p2: vec3f32 = @[pxy2.x, pxy2.y, p1.z] in
-  ifsBox(p2)
+  ifsBox(p2, iTime)
 
 ------------------------------------------------------------
 -- Fragment shader
 ------------------------------------------------------------
 #[fragment]
-entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
   -- Flip Y for Vulkan so the screen-Y convention matches Shadertoy's.
   let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
   -- Screen-space UV ([-1,1] range, aspect-corrected)
@@ -115,7 +109,7 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4
   let (acc, acc2, t) =
     loop (acc, acc2, t) = (0.0, 0.0, 0.0) for i < 99 do
       let pos  = cPos + ray * t in
-      let dist = max(abs(sceneMap(pos)), 0.02) in
+      let dist = max(abs(sceneMap(pos, iTime)), 0.02) in
       let a    = exp(0.0 - dist * 3.0) in
       -- Pulse rings: every 30 units (modulated by time) double the
       -- glow contribution `a` and add it to BOTH acc and acc2. The

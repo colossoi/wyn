@@ -3,14 +3,7 @@
 -- License: Creative Commons (CC BY-NC-SA 4.0)
 -- Original: https://x.com/Jaenam97/status/1997653539078693351
 
-------------------------------------------------------------
--- Uniforms
-------------------------------------------------------------
 open f32
-
-#[uniform(set=1, binding=0)] def iResolution: vec3f32
-#[uniform(set=1, binding=1)] def iTime: f32
-#[uniform(set=1, binding=5)] def iMouse: vec4f32
 
 def FAR: f32 = 55.0
 
@@ -63,7 +56,7 @@ def foilGyroid(p: vec3f32, t: f32) f32 =
 ------------------------------------------------------------
 -- Main raymarching function with chromatic offset
 ------------------------------------------------------------
-def raymarch(fragCoord: vec2f32, res: vec2f32, rotX: mat2f32, rotY: mat2f32, chromatic: f32, use_mouse: f32) f32 =
+def raymarch(fragCoord: vec2f32, res: vec2f32, rotX: mat2f32, rotY: mat2f32, chromatic: f32, use_mouse: f32, iTime: f32) f32 =
   let marchResult = loop (i, dt, acc) = (0.0, 0.0, 0.0) while i < FAR do
     -- Ray origin with camera path
     let ro_z = iTime * 0.5 in
@@ -125,7 +118,7 @@ def raymarch(fragCoord: vec2f32, res: vec2f32, rotX: mat2f32, rotY: mat2f32, chr
 -- Fragment shader
 ------------------------------------------------------------
 #[fragment]
-entry fragment_main(#[builtin(position)] frag: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[uniform(set=1, binding=5)] iMouse: vec4f32, #[builtin(position)] frag: vec4f32) #[location(0)] vec4f32 =
   let res = iResolution.xy in
   let uv = @[frag.x, res.y - frag.y] in
 
@@ -142,9 +135,9 @@ entry fragment_main(#[builtin(position)] frag: vec4f32) #[location(0)] vec4f32 =
   let rotY = rot2D(ma.y) in
 
   -- Raymarch three times with chromatic offset for RGB channels
-  let r_val = raymarch(uv, res, rotX, rotY, 0.0 - 1.0, use_mouse) in
-  let g_val = raymarch(uv, res, rotX, rotY, 0.0, use_mouse) in
-  let b_val = raymarch(uv, res, rotX, rotY, 1.0, use_mouse) in
+  let r_val = raymarch(uv, res, rotX, rotY, 0.0 - 1.0, use_mouse, iTime) in
+  let g_val = raymarch(uv, res, rotX, rotY, 0.0, use_mouse, iTime) in
+  let b_val = raymarch(uv, res, rotX, rotY, 1.0, use_mouse, iTime) in
 
   -- Tone mapping: tanh(O * O / 1e7)
   let scale = 1.0 / 10000000.0 in

@@ -25,9 +25,6 @@
 
 open f32
 
-#[uniform(set=1, binding=0)] def iResolution: vec3f32
-#[uniform(set=1, binding=1)] def iTime: f32
-
 ------------------------------------------------------------
 -- Vertex: full-screen triangle.
 ------------------------------------------------------------
@@ -37,8 +34,7 @@ def verts: [3]vec4f32 =
    @[-1.0, 3.0, 0.0, 1.0]]
 
 #[vertex]
-entry vertex_main(#[builtin(vertex_index)] vid: i32)
-  #[builtin(position)] vec4f32 = verts[vid]
+entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 = verts[vid]
 
 ------------------------------------------------------------
 -- Candidate set: 12 point indices.
@@ -50,7 +46,7 @@ def point_of(i: i32) vec2f32 =
   @[0.65 * cos(angle_of(i)), 0.65 * sin(angle_of(i))]
 
 -- Same phase the filter predicate uses, so the two stay in sync.
-def phase_of(i: i32) f32 = sin(iTime * 0.9 + f32.i32(i) * 0.523)
+def phase_of(i: i32, iTime: f32) f32 = sin(iTime * 0.9 + f32.i32(i) * 0.523)
 
 ------------------------------------------------------------
 -- Iñigo Quilez cosine palette.
@@ -63,8 +59,7 @@ def palette(t: f32) vec3f32 =
 -- Fragment.
 ------------------------------------------------------------
 #[fragment]
-entry fragment_main(#[builtin(position)] fragCoord: vec4f32)
-  #[location(0)] vec4f32 =
+entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
   let coord  = @[fragCoord.x, iResolution.y - fragCoord.y] in
   let uv01   = coord / iResolution.xy in
   let aspect = iResolution.x / iResolution.y in
@@ -73,7 +68,7 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32)
   -- Continuous glow contribution from each candidate, summed.
   -- map+reduce over candidate_ids fuses into a single redomap loop.
   let glows  = map(|i: i32|
-                     let p         = phase_of(i) in
+                     let p         = phase_of(i, iTime) in
                      let intensity = if p > 0.0 then p else 0.0 in
                      let d         = magnitude(uv - point_of(i)) in
                      intensity / (40.0 * d * d + 0.22),
@@ -82,7 +77,7 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32)
 
   -- Filter: which candidates are above the 0.5 threshold *right now*.
   -- Drives the central halo's radius and the palette hue offset.
-  let active = filter(|i: i32| phase_of(i) > 0.5, candidate_ids) in
+  let active = filter(|i: i32| phase_of(i, iTime) > 0.5, candidate_ids) in
   let n      = length(active) in
   let pulse  = f32.i32(n) / 12.0 in
 

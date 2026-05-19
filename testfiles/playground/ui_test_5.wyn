@@ -6,12 +6,6 @@
 open f32
 
 ------------------------------------------------------------
--- Uniforms
-------------------------------------------------------------
-#[uniform(set=1, binding=0)] def iResolution: vec3f32
-#[uniform(set=1, binding=1)] def iTime: f32
-
-------------------------------------------------------------
 -- Constants
 ------------------------------------------------------------
 def max_steps: i32 = 64
@@ -39,10 +33,10 @@ def rot(a: f32) mat2f32 =
   @[[c, 0.0 - s], [s, c]]
 
 -- Pixel-scaled antialiasing width.
-def antialiasing(n: f32) f32 = n / min(iResolution.y, iResolution.x)
+def antialiasing(n: f32, iResolution: vec3f32) f32 = n / min(iResolution.y, iResolution.x)
 
 -- smoothstep with the antialiasing width as lower edge.
-def smoothAA(d: f32, b: f32) f32 = smoothstep(antialiasing(1.0), b, d)
+def smoothAA(d: f32, b: f32, iResolution: vec3f32) f32 = smoothstep(antialiasing(1.0, iResolution), b, d)
 
 -- Axis-aligned box SDF.
 def box(p: vec2f32, s: vec2f32) f32 =
@@ -232,7 +226,7 @@ def drawFont(p0: vec2f32, char: i32) f32 =
 -- Ring SDFs
 ------------------------------------------------------------
 
-def ring0(p0: vec2f32) f32 =
+def ring0(p0: vec2f32, iTime: f32) f32 =
   let p1 = p0 * rot(radians(0.0 - iTime * 30.0 + 50.0)) in
   let df1 = domainFold(p1, 16.0) in
   let p1s = df1 - @[0.35, 0.35] in
@@ -268,36 +262,36 @@ def ring0(p0: vec2f32) f32 =
   let dT2 = abs(tri(pTri2r, @[0.03, 0.03], radians(45.0))) - 0.003 in
   min(d10, dT2)
 
-def ring1(p0: vec2f32) f32 =
+def ring1(p0: vec2f32, iTime: f32) f32 =
   let p1 = p0 * rot(radians(iTime * 60.0)) in
   union(
     clipWedge(p1, shell(magnitude(p0) - 0.45, 0.02), 140.0),
     shell(magnitude(p0) - 0.45, 0.001))
 
-def ring2(p0: vec2f32) f32 =
+def ring2(p0: vec2f32, iTime: f32) f32 =
   let p1   = p0 * rot(0.0 - radians(sin(iTime * 2.0) * 90.0)) in
   let ring = shell(magnitude(p1) - 0.3, 0.02) in
   union(clipWedge(p1, ring, 120.0), clipWedgeInverted(p1, ring, 120.0))
 
-def ring3(p0: vec2f32) f32 =
+def ring3(p0: vec2f32, iTime: f32) f32 =
   let p1      = p0 * rot(radians(0.0 - iTime * 80.0 - 120.0)) in
   let dfs     = domainFold(p1, 6.0) - @[0.3, 0.3] in
   let pattern = shell(box(dfs * rot(radians(45.0)), @[0.03, 0.025]), 0.003) in
   union(clipWedge(p1, pattern, 140.0), clipWedgeInverted(p1, pattern, 140.0))
 
-def ring4(p0: vec2f32) f32 =
+def ring4(p0: vec2f32, iTime: f32) f32 =
   let p1  = p0 * rot(radians(iTime * 75.0 - 220.0)) in
   let dfs = domainFold(p1, 2.0) - @[0.1, 0.1] in
   clipWedgeInverted(dfs, shell(magnitude(p1) - 0.25, 0.01), 20.0)
 
-def ring5(p0: vec2f32) f32 =
+def ring5(p0: vec2f32, iTime: f32) f32 =
   let p1 = p0 * rot(radians(0.0 - iTime * 70.0 + 170.0)) in
   let p2 = p1 * rot(radians(0.0 - 30.0)) in
   union(
     clipWedge(p1, shell(magnitude(p1) - 0.16, 0.02), 150.0),
     clipWedgeInverted(p2, shell(magnitude(p2) - 0.136, 0.02), 60.0))
 
-def ring6(p0: vec2f32) f32 =
+def ring6(p0: vec2f32, iTime: f32) f32 =
   let p1  = p0 * rot(radians(iTime * 72.0 + 110.0)) in
   let big = subtract(
               subtract(shell(magnitude(p1) - 0.95, 0.001),
@@ -312,7 +306,7 @@ def ring6(p0: vec2f32) f32 =
 -- Background fractal grid
 ------------------------------------------------------------
 
-def bg(p0: vec2f32) f32 =
+def bg(p0: vec2f32, iTime: f32) f32 =
   let p_t = @[p0.x, p0.y - iTime * 0.1] in
   let p1 = p_t * 2.8 in
   let gv0 = @[fract(p1.x) - 0.5, fract(p1.y) - 0.5] in
@@ -347,7 +341,7 @@ def bg(p0: vec2f32) f32 =
 -- UI widgets
 ------------------------------------------------------------
 
-def numberWithCircleUI(p0: vec2f32) f32 =
+def numberWithCircleUI(p0: vec2f32, iTime: f32) f32 =
   let p = p0 * skewX(radians(0.0 - 15.0)) in
   let n1 = i32.f32(mod(iTime * 6.0, 10.0)) in
   let d0 = drawFont(p - @[0.0 - 0.16, 0.0], n1) in
@@ -368,7 +362,7 @@ def numberWithCircleUI(p0: vec2f32) f32 =
   let dx1 = max(0.0 - box(p0, @[0.13, 0.07]), dx0) in
   min(d4, abs(dx1) - 0.0005)
 
-def blockUI(p0: vec2f32) f32 =
+def blockUI(p0: vec2f32, iTime: f32) f32 =
   let p1 = @[mod(p0.x + iTime * 0.05, 0.04) - 0.02, abs(p0.y) - 0.02] in
   let d0 = box(p1, @[0.0085, 0.0085]) in
   let p2 = @[mod(p0.x + iTime * 0.05 + 0.02, 0.04) - 0.02, abs(p0.y) - 0.02] in
@@ -376,7 +370,7 @@ def blockUI(p0: vec2f32) f32 =
   let d2 = max(abs(p0.x) - 0.2, d1) in
   abs(d2) - 0.0002
 
-def smallCircleUI(p_in: vec2f32) f32 =
+def smallCircleUI(p_in: vec2f32, iTime: f32) f32 =
   let p0 = p_in * 1.1 in
   let deg0 = 20.0 in
   let p1 = p0 * rot(radians(sin(iTime * 3.0) * 50.0)) in
@@ -400,7 +394,7 @@ def smallCircleUI(p_in: vec2f32) f32 =
   let f2 = max(0.0 - dot(p3, @[cos(b_neg), sin(b_neg)]), f1) in
   min(d3, abs(f2) - 0.0005)
 
-def smallCircleUI2(p0: vec2f32) f32 =
+def smallCircleUI2(p0: vec2f32, iTime: f32) f32 =
   let d0 = abs(magnitude(p0) - 0.04) - 0.0001 in
   let p1 = p0 * rot(radians(iTime * 30.0)) in
   let deg = 140.0 in
@@ -416,7 +410,7 @@ def smallCircleUI2(p0: vec2f32) f32 =
   let d2 = min(d1, f2) in
   max(0.0 - (magnitude(p1) - 0.02), d2)
 
-def rectUI(p_in: vec2f32) f32 =
+def rectUI(p_in: vec2f32, iTime: f32) f32 =
   let p0 = p_in * rot(radians(45.0)) in
   let d0 = abs(box(p0, @[0.12, 0.12])) - 0.003 in
   let p1 = p0 * rot(radians(iTime * 60.0)) in
@@ -441,7 +435,7 @@ def rectUI(p_in: vec2f32) f32 =
   let g2 = max(0.0 - (abs(p5.y) - 0.01), g1) in
   min(d7, g2)
 
-def graphUI(p0: vec2f32) f32 =
+def graphUI(p0: vec2f32, iTime: f32) f32 =
   let p1 = @[p0.x + 0.5, (p0.y - iTime * 0.25) * 100.0] in
   let gv = @[fract(p1.x) - 0.5, fract(p1.y) - 0.5] in
   let id = @[p1.x - fract(p1.x), p1.y - fract(p1.y)] in
@@ -461,7 +455,7 @@ def staticUI(p0: vec2f32) f32 =
   let d4 = min(d3, magnitude(p0 - @[0.0, 0.13]) - 0.012) in
   min(d4, magnitude(p0 - @[0.0, 0.0 - 0.3]) - 0.012)
 
-def arrowUI(p0: vec2f32) f32 =
+def arrowUI(p0: vec2f32, iTime: f32) f32 =
   let px = 0.0 - p0.x in
   let px_t = mod(px - iTime * 0.12, 0.07) - 0.035 - 0.0325 in
   let p1 = @[px_t * 0.9, p0.y * 1.5] in
@@ -485,23 +479,23 @@ def sideUI(p0: vec2f32) f32 =
   let p2 = @[p0.x, abs(p0.y) - 0.275] in
   min(d0, sideLine(p2))
 
-def overlayUI(p0: vec2f32) f32 =
-  let d0 = numberWithCircleUI(p0 - @[0.56, 0.0 - 0.34]) in
+def overlayUI(p0: vec2f32, iTime: f32) f32 =
+  let d0 = numberWithCircleUI(p0 - @[0.56, 0.0 - 0.34], iTime) in
   let p_blk = @[abs(p0.x) - 0.56, p0.y - 0.45] in
-  let d1 = min(d0, blockUI(p_blk)) in
+  let d1 = min(d0, blockUI(p_blk, iTime)) in
   let p_sc2a = @[abs(p0.x) - 0.72, p0.y - 0.35] in
-  let d2 = min(d1, smallCircleUI2(p_sc2a)) in
-  let d3 = min(d2, smallCircleUI2(p0 - @[0.0 - 0.39, 0.0 - 0.42])) in
+  let d2 = min(d1, smallCircleUI2(p_sc2a, iTime)) in
+  let d3 = min(d2, smallCircleUI2(p0 - @[0.0 - 0.39, 0.0 - 0.42], iTime)) in
   let p_sc1 = @[p0.x - 0.58, abs(p0.y - 0.07) - 0.12] in
-  let d4 = min(d3, smallCircleUI(p_sc1)) in
-  let d5 = min(d4, rectUI(p0 - @[0.0 - 0.58, 0.0 - 0.3])) in
+  let d4 = min(d3, smallCircleUI(p_sc1, iTime)) in
+  let d5 = min(d4, rectUI(p0 - @[0.0 - 0.58, 0.0 - 0.3], iTime)) in
   let p_graph_0 = p0 - @[0.0 - 0.58, 0.1] in
   let p_graph = @[abs(p_graph_0.x) - 0.05, p_graph_0.y] in
-  let d6 = min(d5, graphUI(p_graph)) in
+  let d6 = min(d5, graphUI(p_graph, iTime)) in
   let p_stat = @[abs(p0.x) - 0.72, p0.y - 0.13] in
   let d7 = min(d6, staticUI(p_stat)) in
   let p_arrow = @[abs(p0.x) - 0.51, p0.y - 0.35] in
-  let d8 = min(d7, arrowUI(p_arrow)) in
+  let d8 = min(d7, arrowUI(p_arrow, iTime)) in
   let p_side = @[abs(p0.x) - 0.82, p0.y] in
   min(d8, sideUI(p_side))
 
@@ -509,7 +503,7 @@ def overlayUI(p0: vec2f32) f32 =
 -- 3D ray-march scene
 ------------------------------------------------------------
 
-def thicknessAt(t: f32) f32 =
+def thicknessAt(iTime: f32) f32 =
   let maxT = 0.03 in
   let minT = 0.007 in
   let frame = mod(iTime, 30.0) in
@@ -522,23 +516,23 @@ def thicknessAt(t: f32) f32 =
       minT + cubicInOut(tm) * maxT
   else maxT
 
-def getDist(p0: vec3f32) f32 =
+def getDist(p0: vec3f32, iTime: f32) f32 =
   let p  = @[p0.x, p0.y, p0.z + 0.7] in
   let th = thicknessAt(iTime) in
   let xy = p.xy in
   -- Each slab is the intersection of its ring SDF with a thin Z slice.
   let slabs: [7]f32 = [
-    intersect(abs(p.z)       - th, ring0(xy)),
-    intersect(abs(p.z - 0.2) - th, ring1(xy)),
-    intersect(abs(p.z - 0.4) - th, ring2(xy)),
-    intersect(abs(p.z - 0.6) - th, ring3(xy)),
-    intersect(abs(p.z - 0.8) - th, ring4(xy)),
-    intersect(abs(p.z - 1.0) - th, ring5(xy)),
-    intersect(abs(p.z - 1.2) - th, ring6(xy))
+    intersect(abs(p.z)       - th, ring0(xy, iTime)),
+    intersect(abs(p.z - 0.2) - th, ring1(xy, iTime)),
+    intersect(abs(p.z - 0.4) - th, ring2(xy, iTime)),
+    intersect(abs(p.z - 0.6) - th, ring3(xy, iTime)),
+    intersect(abs(p.z - 0.8) - th, ring4(xy, iTime)),
+    intersect(abs(p.z - 1.0) - th, ring5(xy, iTime)),
+    intersect(abs(p.z - 1.2) - th, ring6(xy, iTime))
   ] in
   reduce(|a: f32, b: f32| union(a, b), 10000.0, slabs)
 
-def rayMarch(ro: vec3f32, rd: vec3f32) vec3f32 =
+def rayMarch(ro: vec3f32, rd: vec3f32, iTime: f32) vec3f32 =
   let glowVal = 0.003 in
   let tmax    = 5.0 in
   let (_, _, alpha, steps) =
@@ -546,7 +540,7 @@ def rayMarch(ro: vec3f32, rd: vec3f32) vec3f32 =
       if t > tmax then (max_steps, t, a, s)
       else
         let p   = ro + rd * t in
-        let d   = getDist(p) in
+        let d   = getDist(p, iTime) in
         let da  = 1.0 - smoothstep(0.0, glowVal, d) in
         let tn  = t + max(0.0001, abs(d) * 0.6) in
         (i + 1, tn, a + da, f32.i32(i))
@@ -575,7 +569,7 @@ def verts: [3]vec4f32 =
 entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 = verts[vertex_id]
 
 -- Camera: static orbit + animated bobbing during the last 20s of the loop.
-def cameraOrigin(uv: vec2f32) vec3f32 =
+def cameraOrigin(uv: vec2f32, iTime: f32) vec3f32 =
   let frame  = mod(iTime, 30.0) in
   let (yz, ogRXZ, animRXZ) =
     if frame >= 10.0 then
@@ -601,7 +595,7 @@ def cameraOrigin(uv: vec2f32) vec3f32 =
   @[xz_in.x, ro1.y, xz_in.y]
 
 #[fragment]
-entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
   -- Flip Y for Vulkan
   let coord = @[fragCoord.x, iResolution.y - fragCoord.y] in
   -- Zoom out so the UI overlay (±0.82 horizontally) and outer ring
@@ -610,15 +604,15 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4
   let scale = iResolution.y * 0.7 in
   let uv    = @[(coord.x - 0.5 * iResolution.x) / scale,
                 (coord.y - 0.5 * iResolution.y) / scale] in
-  let ro    = cameraOrigin(uv) in
+  let ro    = cameraOrigin(uv, iTime) in
   let rd    = cameraRay(uv, ro, @[0.0, 0.0, 0.0], 1.0) in
-  let scene = rayMarch(ro, rd) in
-  let bg_d  = bg(uv) in
-  let col0  = mix(@[0.0, 0.0, 0.0], @[1.0, 1.0, 1.0], smoothAA(bg_d, 0.0)) in
+  let scene = rayMarch(ro, rd, iTime) in
+  let bg_d  = bg(uv, iTime) in
+  let col0  = mix(@[0.0, 0.0, 0.0], @[1.0, 1.0, 1.0], smoothAA(bg_d, 0.0, iResolution)) in
   let col1  = mix(col0, scene, 0.7) in
   let col2  = vec.pow(col1, @[0.9545, 0.9545, 0.9545]) in
-  let ui_d  = overlayUI(uv) in
-  let col3  = mix(col2, @[1.0, 1.0, 1.0], smoothAA(ui_d, 0.0)) in
+  let ui_d  = overlayUI(uv, iTime) in
+  let col3  = mix(col2, @[1.0, 1.0, 1.0], smoothAA(ui_d, 0.0, iResolution)) in
   @[col3.x, col3.y, col3.z, 1.0]
 
 ------------------------------------------------------------

@@ -2,11 +2,6 @@
 -- Original: https://www.shadertoy.com/view/Xds3zN
 -- License: MIT (see original GLSL below)
 
--- Uniforms from host
-#[uniform(set=1, binding=0)] def iResolution: vec3f32
-#[uniform(set=1, binding=1)] def iTime: f32
-#[uniform(set=1, binding=5)] def iMouse: vec4f32
-
 -- Vertex shader: full-screen triangle
 def verts: [3]vec4f32 =
   [@[-1.0, -1.0, 0.0, 1.0],
@@ -408,7 +403,7 @@ def setCamera(ro:vec3f32, ta:vec3f32, cr:f32) mat3f32 =
 ------------------------------------------------------------
 
 #[fragment]
-entry fragment_main(#[builtin(position)] fragCoord:vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[uniform(set=1, binding=5)] iMouse: vec4f32, #[builtin(position)] fragCoord:vec4f32) #[location(0)] vec4f32 =
   let mo = @[iMouse.x / iResolution.x, iMouse.y / iResolution.y] in
   let time = 32.0 + iTime * 1.5 in
 

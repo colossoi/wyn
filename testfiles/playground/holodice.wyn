@@ -6,13 +6,6 @@
 open f32
 
 ------------------------------------------------------------
--- Uniforms
-------------------------------------------------------------
-#[uniform(set=1, binding=0)] def iResolution: vec3f32
-#[uniform(set=1, binding=1)] def iTime: f32
-#[uniform(set=1, binding=5)] def iMouse: vec4f32
-
-------------------------------------------------------------
 -- Vertex shader: full-screen triangle
 ------------------------------------------------------------
 def verts: [3]vec4f32 =
@@ -37,7 +30,7 @@ def rotMat(angle: f32) mat2f32 =
 -- Channel ray march (direct port of macro A(C, Z))
 ------------------------------------------------------------
 
-def traceSimple(fragCoord: vec2f32, mx: f32, my: f32, z_offset: f32, use_mouse: f32) f32 =
+def traceSimple(fragCoord: vec2f32, mx: f32, my: f32, z_offset: f32, use_mouse: f32, iResolution: vec3f32) f32 =
   let r = iResolution in
   let rx = rotMat(mx) in
   let ry = rotMat(my) in
@@ -98,7 +91,7 @@ def traceSimple(fragCoord: vec2f32, mx: f32, my: f32, z_offset: f32, use_mouse: 
 ------------------------------------------------------------
 
 #[fragment]
-entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[uniform(set=1, binding=5)] iMouse: vec4f32, #[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
   -- Flip Y for Vulkan
   let coord = @[fragCoord.x, iResolution.y - fragCoord.y] in
 
@@ -111,9 +104,9 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4
   in
 
   -- Trace each color channel with chromatic aberration offset
-  let r_val = traceSimple(coord, m.x, m.y, (0.0 - 1.0), use_mouse) in
-  let g_val = traceSimple(coord, m.x, m.y, 0.0, use_mouse) in
-  let b_val = traceSimple(coord, m.x, m.y, 1.0, use_mouse) in
+  let r_val = traceSimple(coord, m.x, m.y, (0.0 - 1.0), use_mouse, iResolution) in
+  let g_val = traceSimple(coord, m.x, m.y, 0.0, use_mouse, iResolution) in
+  let b_val = traceSimple(coord, m.x, m.y, 1.0, use_mouse, iResolution) in
 
   -- Apply tanh tonemapping: tanh(O * O / 1e7)
   let scale = 1.0 / 10000000.0 in

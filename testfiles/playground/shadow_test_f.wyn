@@ -18,13 +18,6 @@
 open f32
 
 ------------------------------------------------------------
--- Uniforms
-------------------------------------------------------------
-#[uniform(set=1, binding=0)] def iResolution: vec3f32
-#[uniform(set=1, binding=1)] def iTime: f32
-#[uniform(set=1, binding=5)] def iMouse: vec4f32
-
-------------------------------------------------------------
 -- Constants
 ------------------------------------------------------------
 def MAX_STEPS: i32 = 400
@@ -41,8 +34,7 @@ def verts: [3]vec4f32 =
    @[-1.0,  3.0, 0.0, 1.0]]
 
 #[vertex]
-entry vertex_main(#[builtin(vertex_index)] vertex_id: i32)
-  #[builtin(position)] vec4f32 = verts[vertex_id]
+entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 = verts[vertex_id]
 
 ------------------------------------------------------------
 -- 2D rotation matrix. Right-multiplying a row vector yields a
@@ -69,7 +61,7 @@ def thc(a: f32, b: f32) f32 =
 -- world's origin, bobbing on `y = 0.25 * sin(iTime)`. The ground is
 -- a plane at y = -1 with a shallow upward bowl term.
 ------------------------------------------------------------
-def getDist(p0: vec3f32) f32 =
+def getDist(p0: vec3f32, iTime: f32) f32 =
   let p_a = p0 with .xz *= rot(0.5 * iTime) in
 
   -- Torus, centered at +1 on x in the rotated frame, then locally
@@ -97,11 +89,11 @@ def getDist(p0: vec3f32) f32 =
 -- `dS` flips relative to the previous step, halve the step length.
 -- Lets the original march re-enter the surface after overshooting.
 ------------------------------------------------------------
-def rayMarch(ro: vec3f32, rd: vec3f32, z0: f32) f32 =
+def rayMarch(ro: vec3f32, rd: vec3f32, z0: f32, iTime: f32) f32 =
   let s0 = sign(z0) in
   let result = loop (i, dO, z, s) = (0, 0.0, z0, s0) while i < MAX_STEPS do
     let p = ro + rd * dO in
-    let dS = getDist(p) in
+    let dS = getDist(p, iTime) in
     let dSsign = sign(dS) in
     let zs2 = if s != dSsign then (z * 0.5, dSsign) else (z, s) in
     let z2 = zs2.0 in
@@ -115,12 +107,12 @@ def rayMarch(ro: vec3f32, rd: vec3f32, z0: f32) f32 =
 ------------------------------------------------------------
 -- Central-difference normal estimation.
 ------------------------------------------------------------
-def getNormal(p: vec3f32) vec3f32 =
-  let d = getDist(p) in
+def getNormal(p: vec3f32, iTime: f32) vec3f32 =
+  let d = getDist(p, iTime) in
   let e = 0.001 in
-  let nx = d - getDist(p - @[e, 0.0, 0.0]) in
-  let ny = d - getDist(p - @[0.0, e, 0.0]) in
-  let nz = d - getDist(p - @[0.0, 0.0, e]) in
+  let nx = d - getDist(p - @[e, 0.0, 0.0], iTime) in
+  let ny = d - getDist(p - @[0.0, e, 0.0], iTime) in
+  let nz = d - getDist(p - @[0.0, 0.0, e], iTime) in
   normalize(@[nx, ny, nz])
 
 ------------------------------------------------------------
@@ -139,8 +131,7 @@ def getRayDir(uv: vec2f32, p: vec3f32, l: vec3f32, z: f32) vec3f32 =
 -- Fragment shader.
 ------------------------------------------------------------
 #[fragment]
-entry fragment_main(#[builtin(position)] fragCoord: vec4f32)
-  #[location(0)] vec4f32 =
+entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
   -- Flip Y for Vulkan / WebGPU.
   let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
   let uv = @[(fc.x - 0.5 * iResolution.x) / iResolution.y,
@@ -155,13 +146,13 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32)
 
   let rd = getRayDir(uv, ro, @[0.0, 0.0, 0.0], 1.0) in
 
-  let d = rayMarch(ro, rd, 1.0) in
+  let d = rayMarch(ro, rd, 1.0, iTime) in
   let p = ro + rd * d in
 
   if d >= MAX_DIST then
     @[0.0, 0.0, 0.0, 1.0]
   else
-    let n_raw = getNormal(p) in
+    let n_raw = getNormal(p, iTime) in
 
     -- Above y = -0.9 (i.e. on the shapes, not the floor), inflate
     -- the normal before reflecting so highlights look "bumpier" the
@@ -175,17 +166,17 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32)
     -- opposite direction (z = -1) until we exit the geometry.
     let pIn  = p - n_raw * (4.0 * SURF_DIST) in
     let rdIn = refract(rd, n_raw, 1.0 / IOR) in
-    let dIn  = rayMarch(pIn, rdIn, -1.0) in
+    let dIn  = rayMarch(pIn, rdIn, -1.0, iTime) in
     let pExit = pIn + rdIn * dIn in
-    let nExit = -getNormal(pExit) in
+    let nExit = -getNormal(pExit, iTime) in
 
     -- Re-march outward toward the exit point — gives a soft
     -- "look-through" highlight on the back side of the geometry.
     let p2  = p + n_raw * (4.0 * SURF_DIST) in
     let cr  = normalize(p - pExit) in
-    let d2  = rayMarch(p2, cr, 1.0) in
+    let d2  = rayMarch(p2, cr, 1.0, iTime) in
     let p3  = p2 + cr * d2 in
-    let n2  = getNormal(p3) in
+    let n2  = getNormal(p3, iTime) in
 
     -- Lighting.
     let lightDir1 = normalize(@[0.5 * cos(iTime), 1.0, 0.5 * sin(iTime)]) in

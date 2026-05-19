@@ -8,13 +8,6 @@
 open f32
 
 ------------------------------------------------------------
--- Uniforms
-------------------------------------------------------------
-#[uniform(set=1, binding=0)] def iResolution: vec3f32
-#[uniform(set=1, binding=1)] def iTime: f32
-#[uniform(set=1, binding=5)] def iMouse: vec4f32
-
-------------------------------------------------------------
 -- Constants
 ------------------------------------------------------------
 def iterations: i32  = 17
@@ -72,7 +65,7 @@ def fractal_iter(p0: vec3f32) (vec3f32, f32) =
 -- Fragment shader
 ------------------------------------------------------------
 #[fragment]
-entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[uniform(set=1, binding=5)] iMouse: vec4f32, #[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
   -- Flip Y for Vulkan NDC
   let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
 

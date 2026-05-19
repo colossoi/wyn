@@ -14,9 +14,6 @@
 
 open f32
 
-#[uniform(set=1, binding=0)] def iResolution: vec3f32
-#[uniform(set=1, binding=1)] def iTime: f32
-
 ------------------------------------------------------------
 -- Full-screen triangle
 ------------------------------------------------------------
@@ -142,7 +139,7 @@ def sphere_line_ab(p: vec3f32, a: vec3f32, b: vec3f32) f32 =
 --   bcol   = sphere border colour mask
 --   hitbol = 1 if nearest object is the sphere, 0 if tunnel
 ------------------------------------------------------------
-def de(p: vec3f32, hpos: vec3f32, point_dir: vec3f32) (f32, f32, f32, f32) =
+def de(p: vec3f32, hpos: vec3f32, point_dir: vec3f32, iTime: f32) (f32, f32, f32, f32) =
   -- Tunnel: warp position along camera path
   let ppath  = path(p.z) in
   let pt    = @[p.x - ppath.x, p.y - ppath.y, p.z] in
@@ -202,12 +199,12 @@ def de(p: vec3f32, hpos: vec3f32, point_dir: vec3f32) (f32, f32, f32, f32) =
 ------------------------------------------------------------
 -- normal: central-difference surface normal
 ------------------------------------------------------------
-def normal(p: vec3f32, hpos: vec3f32, point_dir: vec3f32) vec3f32 =
+def normal(p: vec3f32, hpos: vec3f32, point_dir: vec3f32, iTime: f32) vec3f32 =
   let eps = 0.005 in
-  let (d0, _, _, _) = de(p,                                     hpos, point_dir) in
-  let (dx, _, _, _) = de(@[p.x + eps, p.y,       p.z      ], hpos, point_dir) in
-  let (dy, _, _, _) = de(@[p.x,       p.y + eps, p.z      ], hpos, point_dir) in
-  let (dz, _, _, _) = de(@[p.x,       p.y,       p.z + eps], hpos, point_dir) in
+  let (d0, _, _, _) = de(p,                                     hpos, point_dir, iTime) in
+  let (dx, _, _, _) = de(@[p.x + eps, p.y,       p.z      ], hpos, point_dir, iTime) in
+  let (dy, _, _, _) = de(@[p.x,       p.y + eps, p.z      ], hpos, point_dir, iTime) in
+  let (dz, _, _, _) = de(@[p.x,       p.y,       p.z + eps], hpos, point_dir, iTime) in
   normalize(@[dx - d0, dy - d0, dz - d0])
 
 ------------------------------------------------------------
@@ -218,7 +215,7 @@ def normal(p: vec3f32, hpos: vec3f32, point_dir: vec3f32) vec3f32 =
 -- `m` over the primary-hit tunnel-local point and modulated by two
 -- edge patterns driven by `hp` and `hexpos`.
 ------------------------------------------------------------
-def march(from: vec3f32, dir: vec3f32, hpos: vec3f32, point_dir: vec3f32) vec3f32 =
+def march(from: vec3f32, dir: vec3f32, hpos: vec3f32, point_dir: vec3f32, iTime: f32) vec3f32 =
   let odir = dir in
   let nd = normalize(point_dir) in
   let nd_abs = @[abs(nd.x), abs(nd.y), abs(nd.z)] in
@@ -227,7 +224,7 @@ def march(from: vec3f32, dir: vec3f32, hpos: vec3f32, point_dir: vec3f32) vec3f3
   let (p_hit, d_hit, _, g1, _) =
     loop (p, d, td, g, done) = (from, 1.0, 0.0, @[0.0, 0.0, 0.0], false)
     while td < 200.0 && !done do
-      let (d2, _tc, _bc, hitbol) = de(p, hpos, point_dir) in
+      let (d2, _tc, _bc, hitbol) = de(p, hpos, point_dir, iTime) in
       if d2 < 0.001
       then (p, d2, td, g, true)
       else
@@ -237,8 +234,8 @@ def march(from: vec3f32, dir: vec3f32, hpos: vec3f32, point_dir: vec3f32) vec3f3
 
   -- Step back slightly before normal sampling — matches GLSL p -= dir*.01.
   let p_back = p_hit - dir * 0.01 in
-  let n = normal(p_back, hpos, point_dir) in
-  let (_, tcol, bcol, hitbol_hit) = de(p_back, hpos, point_dir) in
+  let n = normal(p_back, hpos, point_dir, iTime) in
+  let (_, tcol, bcol, hitbol_hit) = de(p_back, hpos, point_dir, iTime) in
 
   -- Tunnel-local point at the primary hit, and hexpos/hp derived from it
   -- (used by the reflection-pass edge patterns).
@@ -262,7 +259,7 @@ def march(from: vec3f32, dir: vec3f32, hpos: vec3f32, point_dir: vec3f32) vec3f3
   let (p_refl, d_refl, _, g2, _) =
     loop (p, d, td, g, done) = (p_back, 1.0, 0.0, g1, false)
     while td < 200.0 && !done do
-      let (d2, _tc, _bc, _hb) = de(p, hpos, point_dir) in
+      let (d2, _tc, _bc, _hb) = de(p, hpos, point_dir, iTime) in
       if d2 < 0.001
       then (p, d2, td, g, true)
       else
@@ -309,7 +306,7 @@ def march(from: vec3f32, dir: vec3f32, hpos: vec3f32, point_dir: vec3f32) vec3f3
 -- Fragment shader
 ------------------------------------------------------------
 #[fragment]
-entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
   -- Flip Y for Vulkan conventions
   let coord = @[fragCoord.x, iResolution.y - fragCoord.y] in
 
@@ -345,7 +342,7 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4
   let dir       = dir_local * cam_mat in
 
   -- March and apply warm tint
-  let col_raw = march(from, dir, hpos, point_dir) in
+  let col_raw = march(from, dir, hpos, point_dir, iTime) in
   let col     = col_raw * @[1.0, 0.9, 0.8] in
   @[col.x, col.y, col.z, 1.0]
 
