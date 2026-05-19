@@ -120,7 +120,9 @@ struct Constructor {
     /// Tracks which SPIR-V types already have ArrayStride decorations for buffer layout.
     buffer_stride_decorated: HashSet<spirv::Word>,
 
-    /// buffer_id → (buffer_var, elem_spirv_type). Indexed by the u32 constant in view struct field 0.
+    /// buffer_id → (buffer_var, elem_spirv_type). Indexed by the
+    /// compile-time buffer_id stored on the view's SSA value via
+    /// `view_buffer_id`.
     buffer_vars: Vec<(spirv::Word, spirv::Word)>,
     /// (set, binding) → buffer_id, for deduplication in get_or_assign_buffer_id.
     buffer_id_map: HashMap<(u32, u32), u32>,
@@ -2157,7 +2159,8 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 let elem = base_ty.elem_type().expect("Array has elem");
 
                 if types::is_array_variant_view(variant) {
-                    // View variant: {buffer_id, offset, len} struct
+                    // View variant: {offset, len} struct; backing buffer
+                    // recovered from `view_buffer_id` provenance.
                     self.lower_view_index(
                         base.as_ssa().expect("view base must be SSA"),
                         base_id,
