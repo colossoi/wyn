@@ -15,7 +15,6 @@
 use super::VarRef;
 use super::{ArrayExpr, Def, DefMeta, Lambda, LoopKind, Program, SoacOp, Term, TermIdSource, TermKind};
 use crate::ast::TypeName;
-use crate::interface;
 use crate::types::TypeExt;
 use crate::types::TypeScheme;
 use crate::{SymbolId, SymbolTable};
@@ -53,10 +52,6 @@ pub(crate) struct Monomorphizer<'a> {
     schemes: &'a HashMap<SymbolId, TypeScheme>,
     /// Term ID source for creating new terms
     term_ids: TermIdSource,
-    /// Uniform declarations (passed through unchanged)
-    uniforms: Vec<interface::UniformDecl>,
-    /// Storage declarations (passed through unchanged)
-    storage: Vec<interface::StorageDecl>,
     /// Canonical function name → def SymbolId mapping (passed through unchanged)
     def_syms: std::collections::HashMap<String, crate::SymbolId>,
 }
@@ -329,8 +324,6 @@ impl<'a> Monomorphizer<'a> {
             processed: HashSet::new(),
             schemes,
             term_ids: TermIdSource::new(),
-            uniforms: program.uniforms,
-            storage: program.storage,
             def_syms: program.def_syms,
         }
     }
@@ -350,8 +343,6 @@ impl<'a> Monomorphizer<'a> {
 
         Program {
             defs: self.mono_functions,
-            uniforms: self.uniforms,
-            storage: self.storage,
             symbols: self.symbols,
             def_syms: self.def_syms,
         }

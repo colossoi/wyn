@@ -2,7 +2,7 @@ use super::{SkolemId, Type, TypeExt, TypeName, TypeScheme};
 use crate::ast::*;
 use crate::builtins::{BuiltinId, by_id};
 use crate::error::{CompilerError, Result};
-use crate::interface::{Attribute, StorageDecl, UniformDecl};
+use crate::interface::Attribute;
 use crate::module_manager::ModuleManager;
 use crate::name_resolution::NameResolution;
 use crate::scope::{IdentifierKind, ScopeEntry, ScopeStack};
@@ -1509,14 +1509,6 @@ impl<'a> TypeChecker<'a> {
 
                 Ok(())
             }
-            Declaration::Uniform(uniform_decl) => {
-                debug!("Checking Uniform declaration: {}", uniform_decl.name);
-                self.check_uniform_decl(uniform_decl)
-            }
-            Declaration::Storage(storage_decl) => {
-                debug!("Checking Storage declaration: {}", storage_decl.name);
-                self.check_storage_decl(storage_decl)
-            }
             Declaration::Sig(sig_decl) => {
                 debug!("Checking Sig declaration: {}", sig_decl.name);
                 self.check_sig_decl(sig_decl)
@@ -1552,22 +1544,6 @@ impl<'a> TypeChecker<'a> {
                 self.check_extern_decl(extern_decl)
             }
         }
-    }
-
-    fn check_uniform_decl(&mut self, decl: &UniformDecl) -> Result<()> {
-        // Add the uniform to scope with its declared type
-        let type_scheme = TypeScheme::Monotype(decl.ty.clone());
-        self.define(decl.name.clone(), IdentifierKind::UserDecl, type_scheme);
-        debug!("Inserting uniform variable '{}' into scope", decl.name);
-        Ok(())
-    }
-
-    fn check_storage_decl(&mut self, decl: &StorageDecl) -> Result<()> {
-        // Add the storage buffer to scope with its declared type
-        let type_scheme = TypeScheme::Monotype(decl.ty.clone());
-        self.define(decl.name.clone(), IdentifierKind::UserDecl, type_scheme);
-        debug!("Inserting storage variable '{}' into scope", decl.name);
-        Ok(())
     }
 
     fn check_decl(&mut self, decl: &Decl) -> Result<()> {

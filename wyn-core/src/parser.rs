@@ -1,8 +1,6 @@
 use crate::ast::*;
 use crate::error::Result;
-use crate::interface::{
-    Attribute, EntryDecl, EntryOutput, StorageAccess, StorageDecl, StorageLayout, UniformDecl,
-};
+use crate::interface::{AttrExt, Attribute, EntryDecl, EntryOutput, StorageAccess, StorageLayout};
 use crate::lexer::{LocatedToken, Token};
 use crate::types;
 use crate::{bail_parse_at, err_parse, err_parse_at};
@@ -161,22 +159,6 @@ impl<'a> Parser<'a> {
         let has_entry_attr = attributes
             .iter()
             .any(|attr| matches!(attr, Attribute::Vertex | Attribute::Fragment | Attribute::Compute));
-        let uniform_attr = attributes.iter().find_map(|attr| {
-            if let Attribute::Uniform { set, binding } = attr { Some((*set, *binding)) } else { None }
-        });
-        let storage_attr = attributes.iter().find_map(|attr| {
-            if let Attribute::Storage {
-                set,
-                binding,
-                layout,
-                access,
-            } = attr
-            {
-                Some((*set, *binding, *layout, *access))
-            } else {
-                None
-            }
-        });
 
         // Entry attributes require the 'entry' keyword, not 'def' or 'let'
         if has_entry_attr {
@@ -187,25 +169,20 @@ impl<'a> Parser<'a> {
             );
         }
 
-        if let Some((set, binding)) = uniform_attr {
-            // Uniform declaration - delegate to helper
-            if keyword != "def" {
-                bail_parse_at!(
-                    self.current_span(),
-                    "Uniform declarations must use 'def', not 'let'"
-                );
-            }
-            self.parse_uniform_decl(set, binding)
-        } else if let Some((set, binding, layout, access)) = storage_attr {
-            // Storage buffer declaration - delegate to helper
-            if keyword != "def" {
-                bail_parse_at!(
-                    self.current_span(),
-                    "Storage declarations must use 'def', not 'let'"
-                );
-            }
-            self.parse_storage_decl(set, binding, layout, access)
-        } else {
+        if attributes.has_uniform() {
+            bail_parse_at!(
+                self.current_span(),
+                "#[uniform(...)] is only valid on entry-point parameters, not on top-level 'def' declarations"
+            );
+        }
+        if attributes.has_storage() {
+            bail_parse_at!(
+                self.current_span(),
+                "#[storage(...)] is only valid on entry-point parameters, not on top-level 'def' declarations"
+            );
+        }
+
+        {
             // Regular declaration (let or def)
             match keyword {
                 "let" => self.expect(Token::Let)?,
@@ -579,90 +556,6 @@ impl<'a> Parser<'a> {
             let ty = self.parse_type()?;
             Ok((vec![ty], vec![None]))
         }
-    }
-
-    fn parse_uniform_decl(&mut self, set: u32, binding: u32) -> Result<Declaration> {
-        let start_span = self.current_span();
-        // Set 0 is reserved for compiler-allocated storage (compute
-        // entry-input/output buffers, multi-stage SOAC partials,
-        // graphical-prepass results). User decls must use set 1+.
-        if set == 0 {
-            bail_parse_at!(
-                start_span,
-                "uniform decls must use set 1 or higher; set 0 is reserved for compiler-allocated storage"
-            );
-        }
-        // Consume 'def' keyword
-        self.expect(Token::Def)?;
-
-        let name = self.expect_identifier()?;
-
-        // Uniforms must have an explicit type annotation
-        self.expect(Token::Colon)?;
-        let ty = self.parse_type()?;
-
-        // Uniforms must NOT have initializers
-        if self.check(&Token::Assign) {
-            bail_parse_at!(
-                self.current_span(),
-                "Uniform declarations cannot have initializer values"
-            );
-        }
-
-        let span = start_span.merge(&self.previous_span());
-        Ok(Declaration::Uniform(UniformDecl {
-            name,
-            ty,
-            set,
-            binding,
-            span,
-        }))
-    }
-
-    fn parse_storage_decl(
-        &mut self,
-        set: u32,
-        binding: u32,
-        layout: StorageLayout,
-        access: StorageAccess,
-    ) -> Result<Declaration> {
-        let start_span = self.current_span();
-        // Set 0 is reserved for compiler-allocated storage (compute
-        // entry-input/output buffers, multi-stage SOAC partials,
-        // graphical-prepass results). User decls must use set 1+.
-        if set == 0 {
-            bail_parse_at!(
-                start_span,
-                "storage decls must use set 1 or higher; set 0 is reserved for compiler-allocated storage"
-            );
-        }
-        // Consume 'def' keyword
-        self.expect(Token::Def)?;
-
-        let name = self.expect_identifier()?;
-
-        // Storage buffers must have an explicit type annotation
-        self.expect(Token::Colon)?;
-        let ty = self.parse_type()?;
-
-        // Storage buffers must NOT have initializers
-        if self.check(&Token::Assign) {
-            bail_parse_at!(
-                self.current_span(),
-                "Storage buffer declarations cannot have initializer values"
-            );
-        }
-
-        let span = start_span.merge(&self.previous_span());
-        Ok(Declaration::Storage(StorageDecl {
-            name,
-            ty,
-            set,
-            binding,
-            layout,
-            access,
-            span,
-        }))
     }
 
     fn parse_attribute(&mut self) -> Result<Attribute> {

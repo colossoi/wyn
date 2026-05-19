@@ -1437,38 +1437,6 @@ fn declaration_to_symbol(decl: &ast::Declaration) -> Option<DocumentSymbol> {
                 children: None,
             })
         }
-        ast::Declaration::Uniform(uniform) => {
-            let range = Range::default();
-            Some(DocumentSymbol {
-                name: uniform.name.clone(),
-                detail: Some(format!(
-                    "uniform (set={}, binding={})",
-                    uniform.set, uniform.binding
-                )),
-                kind: SymbolKind::VARIABLE,
-                tags: None,
-                deprecated: None,
-                range,
-                selection_range: range,
-                children: None,
-            })
-        }
-        ast::Declaration::Storage(storage) => {
-            let range = Range::default();
-            Some(DocumentSymbol {
-                name: storage.name.clone(),
-                detail: Some(format!(
-                    "storage (set={}, binding={})",
-                    storage.set, storage.binding
-                )),
-                kind: SymbolKind::VARIABLE,
-                tags: None,
-                deprecated: None,
-                range,
-                selection_range: range,
-                children: None,
-            })
-        }
         ast::Declaration::Sig(sig) => {
             let range = Range::default();
             Some(DocumentSymbol {

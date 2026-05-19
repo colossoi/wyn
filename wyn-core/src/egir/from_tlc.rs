@@ -184,8 +184,6 @@ pub fn run(
         externs,
         entry_points,
         constants,
-        program.uniforms.clone(),
-        program.storage.clone(),
         pipeline,
     ))
 }
@@ -464,6 +462,9 @@ fn convert_entry_point(
         let name = symbols.get(*sym).expect("BUG: symbol not in table").clone();
         let decoration = entry.params.get(i).and_then(crate::binding_layout::extract_io_decoration);
         let size_hint = entry.params.get(i).and_then(extract_size_hint);
+        let uniform_binding = entry.params.get(i).and_then(crate::binding_layout::extract_uniform_binding);
+        let attr_storage_binding =
+            entry.params.get(i).and_then(crate::binding_layout::extract_storage_binding);
 
         // Always register a FuncParam placeholder so param indexing stays
         // stable; the binding below may override it.
@@ -496,6 +497,7 @@ fn convert_entry_point(
                     decoration: None,
                     size_hint: None,
                     storage_binding: Some(set_binding),
+                    uniform_binding: None,
                     push_constant_offset: None,
                 });
                 view_nids.push(converter.emit_storage_view(set_binding.0, set_binding.1, field_ty.clone()));
@@ -505,10 +507,11 @@ fn convert_entry_point(
             continue;
         }
 
-        let storage_binding = binding_for_param.get(&(*sym, None)).copied();
+        let storage_binding = binding_for_param.get(&(*sym, None)).copied().or(attr_storage_binding);
 
         let push_constant_offset = if is_compute
             && storage_binding.is_none()
+            && uniform_binding.is_none()
             && !matches!(&decoration, Some(IoDecoration::BuiltIn(_)))
         {
             let offset = pc_offset;
@@ -529,6 +532,7 @@ fn convert_entry_point(
             decoration,
             size_hint,
             storage_binding,
+            uniform_binding,
             push_constant_offset,
         });
     }

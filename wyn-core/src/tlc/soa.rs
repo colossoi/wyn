@@ -170,8 +170,6 @@ impl SoaTransformer {
         let defs = program.defs.into_iter().map(|def| self.transform_def(def)).collect();
         Program {
             defs,
-            uniforms: program.uniforms,
-            storage: program.storage,
             symbols: self.symbols,
             def_syms: program.def_syms,
         }

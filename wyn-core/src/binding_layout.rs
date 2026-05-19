@@ -118,3 +118,35 @@ pub fn extract_io_decoration(pattern: &Pattern) -> Option<IoDecoration> {
         _ => None,
     }
 }
+
+/// Extract a `#[uniform(set, binding)]` from a param pattern.
+pub fn extract_uniform_binding(pattern: &Pattern) -> Option<(u32, u32)> {
+    match &pattern.kind {
+        PatternKind::Attributed(attrs, inner) => {
+            for attr in attrs {
+                if let Attribute::Uniform { set, binding } = attr {
+                    return Some((*set, *binding));
+                }
+            }
+            extract_uniform_binding(inner)
+        }
+        PatternKind::Typed(inner, _) => extract_uniform_binding(inner),
+        _ => None,
+    }
+}
+
+/// Extract a `#[storage(set, binding, ...)]` from a param pattern.
+pub fn extract_storage_binding(pattern: &Pattern) -> Option<(u32, u32)> {
+    match &pattern.kind {
+        PatternKind::Attributed(attrs, inner) => {
+            for attr in attrs {
+                if let Attribute::Storage { set, binding, .. } = attr {
+                    return Some((*set, *binding));
+                }
+            }
+            extract_storage_binding(inner)
+        }
+        PatternKind::Typed(inner, _) => extract_storage_binding(inner),
+        _ => None,
+    }
+}

@@ -232,12 +232,6 @@ impl AstFormatter {
         match decl {
             Declaration::Decl(d) => self.write_decl(d),
             Declaration::Entry(e) => self.write_entry(e),
-            Declaration::Uniform(u) => {
-                self.write_line(&format!("uniform {}: {}", u.name, u.ty));
-            }
-            Declaration::Storage(s) => {
-                self.write_line(&format!("storage {}: {}", s.name, s.ty));
-            }
             Declaration::Sig(v) => {
                 let mut header = format!("sig {}", v.name);
                 // Rust-style generics: <[n], [m], A, B>

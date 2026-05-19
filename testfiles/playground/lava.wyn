@@ -2,13 +2,7 @@
 -- Wyn port of the Shadertoy shader
 -- Original: https://www.shadertoy.com/view/3sySRK
 
-------------------------------------------------------------
--- Uniforms
-------------------------------------------------------------
 open f32
-
-#[uniform(set=1, binding=0)] def iResolution: vec3f32
-#[uniform(set=1, binding=1)] def iTime: f32
 
 ------------------------------------------------------------
 -- Vertex shader: full-screen triangle
@@ -36,7 +30,7 @@ def sdSphere(p: vec3f32, s: f32) f32 =
 -- Scene mapping
 ------------------------------------------------------------
 
-def sdfScene(p: vec3f32) f32 =
+def sdfScene(p: vec3f32, iTime: f32) f32 =
   let (_, d) = loop (i, d) = (0, 2.0) while i < 16 do
     let fi = f32.i32(i) in
     let time = iTime * (fract((fi * 412.531 + 0.513)) - 0.5) * 2.0 in
@@ -53,14 +47,14 @@ def sdfScene(p: vec3f32) f32 =
 -- Normal calculation (tetrahedron technique)
 ------------------------------------------------------------
 
-def calcNormal(p: vec3f32) vec3f32 =
+def calcNormal(p: vec3f32, iTime: f32) vec3f32 =
   let h = 1e-5 in
   let k = @[1.0, -1.0] in
   -- k.xyy, k.yyx, k.yxy, k.xxx
-  let n1 = sdfScene(@[p.x + k.x * h, p.y + k.y * h, p.z + k.y * h]) in
-  let n2 = sdfScene(@[p.x + k.y * h, p.y + k.y * h, p.z + k.x * h]) in
-  let n3 = sdfScene(@[p.x + k.y * h, p.y + k.x * h, p.z + k.y * h]) in
-  let n4 = sdfScene(@[p.x + k.x * h, p.y + k.x * h, p.z + k.x * h]) in
+  let n1 = sdfScene(@[p.x + k.x * h, p.y + k.y * h, p.z + k.y * h], iTime) in
+  let n2 = sdfScene(@[p.x + k.y * h, p.y + k.y * h, p.z + k.x * h], iTime) in
+  let n3 = sdfScene(@[p.x + k.y * h, p.y + k.x * h, p.z + k.y * h], iTime) in
+  let n4 = sdfScene(@[p.x + k.x * h, p.y + k.x * h, p.z + k.x * h], iTime) in
   normalize(@[k.x * n1 + k.y * n2 + k.y * n3 + k.x * n4,
               k.y * n1 + k.y * n2 + k.x * n3 + k.x * n4,
               k.y * n1 + k.x * n2 + k.y * n3 + k.x * n4])
@@ -69,10 +63,10 @@ def calcNormal(p: vec3f32) vec3f32 =
 -- Ray marching
 ------------------------------------------------------------
 
-def raymarch(rayOri: vec3f32, rayDir: vec3f32) (f32, vec3f32) =
+def raymarch(rayOri: vec3f32, rayDir: vec3f32, iTime: f32) (f32, vec3f32) =
   let (_, depth, p) = loop (i, depth, p) = (0, 0.0, rayOri) while i < 64 do
     let p2 = rayOri + rayDir * depth in
-    let dist = sdfScene(p2) in
+    let dist = sdfScene(p2, iTime) in
     if dist < 1e-6 then (64, depth, p2)  -- break
     else (i + 1, depth + dist, p2)
   in (min(6.0, depth), p)
@@ -82,7 +76,7 @@ def raymarch(rayOri: vec3f32, rayDir: vec3f32) (f32, vec3f32) =
 ------------------------------------------------------------
 
 #[fragment]
-entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
   -- Flip Y for Vulkan
   let coord = @[fragCoord.x, iResolution.y - fragCoord.y] in
   let uv = coord / iResolution.xy in
@@ -92,9 +86,9 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4
   let rayOri = @[(uv.x - 0.5) * aspect * 6.0, (uv.y - 0.5) * 6.0, 3.0] in
   let rayDir = @[0.0, 0.0, -1.0] in
 
-  let (depth, p) = raymarch(rayOri, rayDir) in
+  let (depth, p) = raymarch(rayOri, rayDir, iTime) in
 
-  let n = calcNormal(p) in
+  let n = calcNormal(p, iTime) in
   let b = max(0.0, dot(n, @[0.577, 0.577, 0.577])) in
 
   -- Colorful lava effect

@@ -542,10 +542,6 @@ pub struct Def {
 #[derive(Debug, Clone)]
 pub struct Program {
     pub defs: Vec<Def>,
-    /// Uniform declarations (no bodies, just metadata).
-    pub uniforms: Vec<interface::UniformDecl>,
-    /// Storage buffer declarations (no bodies, just metadata).
-    pub storage: Vec<interface::StorageDecl>,
     /// Symbol table: maps SymbolId to original name (for errors/debugging).
     pub symbols: SymbolTable,
     /// Canonical function name → def SymbolId mapping.
@@ -568,8 +564,6 @@ impl Program {
 #[derive(Debug, Clone)]
 pub struct ProgramParts {
     pub defs: Vec<Def>,
-    pub uniforms: Vec<interface::UniformDecl>,
-    pub storage: Vec<interface::StorageDecl>,
 }
 
 impl ProgramParts {
@@ -577,8 +571,6 @@ impl ProgramParts {
     pub fn with_symbols(self, symbols: SymbolTable, def_syms: HashMap<String, SymbolId>) -> Program {
         Program {
             defs: self.defs,
-            uniforms: self.uniforms,
-            storage: self.storage,
             symbols,
             def_syms,
         }
@@ -590,8 +582,6 @@ impl Program {
     pub fn rebuild(self, defs: Vec<Def>, symbols: SymbolTable) -> Program {
         Program {
             defs,
-            uniforms: self.uniforms,
-            storage: self.storage,
             symbols,
             def_syms: self.def_syms,
         }
@@ -1296,8 +1286,6 @@ impl<'a> Transformer<'a> {
 
         // Second pass: transform function bodies (now resolve_or_define can find top-level symbols)
         let mut defs = Vec::new();
-        let mut uniforms = Vec::new();
-        let mut storage = Vec::new();
 
         for decl in &program.declarations {
             match decl {
@@ -1310,12 +1298,6 @@ impl<'a> Transformer<'a> {
                     if let Some(def) = self.transform_entry(e) {
                         defs.push(def);
                     }
-                }
-                ast::Declaration::Uniform(u) => {
-                    uniforms.push(u.clone());
-                }
-                ast::Declaration::Storage(s) => {
-                    storage.push(s.clone());
                 }
                 ast::Declaration::Extern(e) => {
                     // Use the pre-registered symbol
@@ -1340,11 +1322,7 @@ impl<'a> Transformer<'a> {
             }
         }
 
-        ProgramParts {
-            defs,
-            uniforms,
-            storage,
-        }
+        ProgramParts { defs }
     }
 
     pub fn transform_decl(&mut self, decl: &ast::Decl) -> Option<Def> {

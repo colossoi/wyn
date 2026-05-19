@@ -84,8 +84,6 @@ fn test_specialize_sign_f32() {
             meta: DefMeta::Function,
             arity: 0,
         }],
-        uniforms: vec![],
-        storage: vec![],
         symbols,
         def_syms: HashMap::new(),
     };
@@ -163,8 +161,6 @@ fn test_specialize_min_i32() {
             meta: DefMeta::Function,
             arity: 0,
         }],
-        uniforms: vec![],
-        storage: vec![],
         symbols,
         def_syms: HashMap::new(),
     };

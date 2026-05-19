@@ -407,17 +407,14 @@ fn program_wrapping_body(b: &mut B, body: Term) -> Program {
     let def = b.entry_def(name, vec![], body);
     Program {
         defs: vec![def],
-        uniforms: vec![],
-        storage: vec![],
         symbols: std::mem::replace(&mut b.symbols, SymbolTable::new()),
         def_syms: HashMap::new(),
     }
 }
 
 /// Binding registry finds `ArrayExpr::StorageBuffer` nested inside a
-/// SOAC input — the case `collect_program_resource_bindings` misses
-/// and that caused the scan/reduce allocator to collide with input
-/// buffers before PLAN_scan_stage_b.md was written.
+/// SOAC input. The scan/reduce allocator must see these so it doesn't
+/// pick a colliding (set, binding) for its phase buffers.
 #[test]
 fn binding_registry_finds_storage_buffer_in_soac_input() {
     let mut b = B::new();

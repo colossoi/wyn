@@ -2,7 +2,7 @@ pub use spirv;
 
 // Re-export type system types from the types module
 use crate::IdSource;
-use crate::interface::{Attribute, EntryDecl, StorageDecl, UniformDecl};
+use crate::interface::{Attribute, EntryDecl};
 pub use crate::types::{RecordFields, Type, TypeName, TypeScheme};
 
 /// Qualified name representing a path through modules to a name
@@ -223,10 +223,8 @@ pub struct Program {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Declaration {
-    Decl(Decl),           // Unified let/def declarations
-    Entry(EntryDecl),     // Entry point declarations (vertex/fragment shaders)
-    Uniform(UniformDecl), // Uniform declarations (no initializer)
-    Storage(StorageDecl), // Storage buffer declarations
+    Decl(Decl),       // Unified let/def declarations
+    Entry(EntryDecl), // Entry point declarations (vertex/fragment shaders)
     Sig(SigDecl),
     Extern(ExternDecl),             // External linked SPIR-V function
     TypeBind(TypeBind),             // Type declarations

@@ -1207,9 +1207,6 @@ fn test_complex_shader() {
     // Full shader with uniforms, matrices, map, multiple functions
     let _ssa = compile_to_ssa(
         r#"
-#[uniform(set=1, binding=0)] def iResolution: vec2f32
-#[uniform(set=1, binding=1)] def iTime: f32
-
 def verts: [3]vec4f32 =
     [@[-1.0, -1.0, 0.0, 1.0],
      @[3.0, -1.0, 0.0, 1.0],
@@ -1247,7 +1244,7 @@ def main_image(res: vec2f32, time: f32, fragCoord: vec2f32) vec4f32 =
     v4s[0]
 
 #[fragment]
-entry fragment_main(#[builtin(frag_coord)] pos: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec2f32, #[uniform(set=1, binding=1)] iTime: f32, #[builtin(frag_coord)] pos: vec4f32) #[location(0)] vec4f32 =
     main_image(@[iResolution.x, iResolution.y], iTime, @[pos.x, pos.y])
 "#,
     );
@@ -1299,15 +1296,13 @@ entry compute_main(data: []i32) i32 =
 fn test_full_pipeline_to_spirv() {
     // Verify the full pipeline compiles successfully to SPIR-V
     let source = r#"
-#[uniform(set=1, binding=0)] def iTime: f32
-
 def compute(x: f32, y: f32) f32 =
     let a = f32.sin(x) in
     let b = f32.cos(y) in
     a + b
 
 #[fragment]
-entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[uniform(set=1, binding=0)] iTime: f32, #[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     let s = compute(pos.x, pos.y) in
     @[s + iTime, 0.0, 0.0, 1.0]
 "#;

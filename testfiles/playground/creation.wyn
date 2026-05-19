@@ -6,9 +6,6 @@
 
 open f32
 
-#[uniform(set=1, binding=0)] def iResolution: vec3f32
-#[uniform(set=1, binding=1)] def iTime: f32
-
 def verts: [3]vec4f32 =
   [@[-1.0, -1.0, 0.0, 1.0],
    @[3.0, -1.0, 0.0, 1.0],
@@ -20,7 +17,7 @@ entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] 
 -- One iteration of the per-channel accumulation. Returns (c_i, l) where
 -- l is the radial distance used both for this iteration's warp and for
 -- the final divide in the fragment shader.
-def iter(fragXY: vec2f32, z: f32) (f32, f32) =
+def iter(fragXY: vec2f32, z: f32, iResolution: vec3f32) (f32, f32) =
   let p0    = fragXY / iResolution.xy in
   let uv0   = p0 in
   let p1    = p0 - @[0.5, 0.5] in
@@ -33,14 +30,18 @@ def iter(fragXY: vec2f32, z: f32) (f32, f32) =
   (0.01 / magnitude(m), l)
 
 #[fragment]
-entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(
+  #[uniform(set=1, binding=0)] iResolution: vec3f32,
+  #[uniform(set=1, binding=1)] iTime: f32,
+  #[builtin(position)] fragCoord: vec4f32
+  ) #[location(0)] vec4f32 =
   let fc = fragCoord.xy in
   let z1 = iTime + 0.07 in
-  let (cx, _) = iter(fc, z1) in
+  let (cx, _) = iter(fc, z1, iResolution) in
   let z2 = z1 + 0.07 in
-  let (cy, _) = iter(fc, z2) in
+  let (cy, _) = iter(fc, z2, iResolution) in
   let z3 = z2 + 0.07 in
-  let (cz, l) = iter(fc, z3) in
+  let (cz, l) = iter(fc, z3, iResolution) in
   @[cx / l, cy / l, cz / l, iTime]
 
 ------------------------------------------------------------

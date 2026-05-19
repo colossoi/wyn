@@ -31,8 +31,6 @@ pub fn normalize(program: Program) -> Program {
 
     Program {
         defs,
-        uniforms: program.uniforms,
-        storage: program.storage,
         symbols,
         def_syms: program.def_syms,
     }

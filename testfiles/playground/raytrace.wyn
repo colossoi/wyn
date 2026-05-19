@@ -2,15 +2,7 @@
 -- A simple scene with reflective spheres on a checkerboard ground plane
 -- Uses PBR-inspired lighting with configurable reflection bounces
 
-------------------------------------------------------------
--- Uniforms
-------------------------------------------------------------
 open f32
-
-#[uniform(set=1, binding=0)] def iResolution: vec3f32
-#[uniform(set=1, binding=1)] def iTime: f32
-#[uniform(set=1, binding=2)] def difficulty: i32
-#[uniform(set=1, binding=5)] def iMouse: vec4f32
 
 ------------------------------------------------------------
 -- Constants
@@ -308,7 +300,7 @@ def getCamera(time: f32, mouse: vec4f32, resolution: vec2f32) (vec3f32, vec3f32,
 ------------------------------------------------------------
 
 -- Trace a single sample at given sub-pixel offset
-def traceSample(fragCoord: vec4f32, offsetX: f32, offsetY: f32) vec3f32 =
+def traceSample(fragCoord: vec4f32, offsetX: f32, offsetY: f32, iResolution: vec3f32, iTime: f32, iMouse: vec4f32, difficulty: i32) vec3f32 =
   let coord = @[fragCoord.x + offsetX, iResolution.y - fragCoord.y + offsetY] in
 
   let uv = @[(coord.x / iResolution.x) * 2.0 - 1.0,
@@ -327,7 +319,7 @@ def traceSample(fragCoord: vec4f32, offsetX: f32, offsetY: f32) vec3f32 =
   trace(camPos, rd, maxBounces)
 
 #[fragment]
-entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
-  let color = traceSample(fragCoord, 0.0, 0.0) in
+entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[uniform(set=1, binding=2)] difficulty: i32, #[uniform(set=1, binding=5)] iMouse: vec4f32, #[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
+  let color = traceSample(fragCoord, 0.0, 0.0, iResolution, iTime, iMouse, difficulty) in
   let gamma = 1.0 / 2.2 in
   @[color.x ** gamma, color.y ** gamma, color.z ** gamma, 1.0]

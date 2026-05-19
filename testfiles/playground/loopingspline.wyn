@@ -3,9 +3,6 @@
 
 open f32
 
-#[uniform(set=1, binding=0)] def iResolution: vec3f32
-#[uniform(set=1, binding=1)] def iTime: f32
-
 -- 8 control points. The original allowed iMouse to override p[2]; omitted.
 def ctrlPts: [8]vec2f32 =
   [@[0.10, 0.25],
@@ -108,15 +105,15 @@ def debugDistanceField(uv: vec2f32) vec2f32 =
   @[minDist, minRoughDist]
 
 -- UV divided by x on both axes (preserves aspect).
-def getUV(px: vec2f32) vec2f32 =
+def getUV(px: vec2f32, iResolution: vec3f32) vec2f32 =
   @[px.x / iResolution.x, px.y / iResolution.x]
 
 ------------------------------------------------------------
 -- Fragment shader
 ------------------------------------------------------------
 #[fragment]
-entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
-  let uv    = getUV(@[fragCoord.x, iResolution.y - fragCoord.y]) in
+entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
+  let uv    = getUV(@[fragCoord.x, iResolution.y - fragCoord.y], iResolution) in
   let fTime = iTime * 0.15 in
   let pA    = catmullRom(fract(fTime)) in
   let pB    = catmullRom(fract(fTime + 0.02)) in

@@ -745,81 +745,6 @@ fn test_parse_vector_arithmetic() {
 }
 
 #[test]
-fn test_parse_uniform_attribute() {
-    let program = parse_ok("#[uniform(binding=0)] def material_color: vec3");
-    assert_eq!(program.declarations.len(), 1);
-
-    let uniform_decl = match &program.declarations[0] {
-        Declaration::Uniform(u) => u,
-        _ => panic!("Expected Uniform declaration"),
-    };
-    assert_eq!(uniform_decl.name, "material_color");
-    assert_eq!(uniform_decl.binding, 0);
-    assert_matches!(
-        &uniform_decl.ty,
-        Type::Constructed(TypeName::Named(name), args) if name == "vec3" && args.is_empty()
-    );
-}
-
-#[test]
-fn test_parse_uniform_without_initializer() {
-    let program = parse_ok("#[uniform(binding=5)] def material_color: vec3");
-    assert_eq!(program.declarations.len(), 1);
-
-    let uniform_decl = match &program.declarations[0] {
-        Declaration::Uniform(u) => u,
-        _ => panic!("Expected Uniform declaration"),
-    };
-    assert_eq!(uniform_decl.name, "material_color");
-    assert_eq!(uniform_decl.binding, 5);
-    assert_matches!(
-        &uniform_decl.ty,
-        Type::Constructed(TypeName::Named(name), args) if name == "vec3" && args.is_empty()
-    );
-    // Check that there's no initializer (uniforms don't have bodies)
-}
-
-#[test]
-fn test_uniform_with_initializer_error() {
-    expect_parse_error(
-        "#[uniform(binding=0)] def material_color: vec3 = vec3(1.0f32, 0.5f32, 0.2f32)",
-        |error| match error {
-            CompilerError::ParseError(msg, _)
-                if msg.contains("Uniform declarations cannot have initializer values") =>
-            {
-                Ok(())
-            }
-            _ => Err(format!(
-                "Expected parse error about uniform initializer, got: {:?}",
-                error
-            )),
-        },
-    );
-}
-
-#[test]
-fn test_uniform_set_zero_error() {
-    // Set 0 is reserved for compiler-allocated storage; user decls
-    // must use set 1 or higher (see SPECIFICATION.md "Descriptor Set
-    // Layout").
-    expect_parse_error("#[uniform(set=0, binding=0)] def x: f32", |error| match error {
-        CompilerError::ParseError(msg, _) if msg.contains("set 0 is reserved") => Ok(()),
-        _ => Err(format!("Expected set=0 error, got: {:?}", error)),
-    });
-}
-
-#[test]
-fn test_storage_set_zero_error() {
-    expect_parse_error(
-        "#[storage(set=0, binding=0)] def buf: []f32",
-        |error| match error {
-            CompilerError::ParseError(msg, _) if msg.contains("set 0 is reserved") => Ok(()),
-            _ => Err(format!("Expected set=0 error, got: {:?}", error)),
-        },
-    );
-}
-
-#[test]
 fn test_parse_multiple_shader_outputs() {
     let entry = single_entry(
         r#"
@@ -841,46 +766,6 @@ fn test_parse_multiple_shader_outputs() {
 
     // Check second output: [location(1)] vec3
     assert_eq!(entry.outputs[1].attribute, Some(Attribute::Location(1)));
-}
-
-#[test]
-fn test_parse_complete_shader_example() {
-    let program = parse_ok(
-        r#"
-            -- Complete shader example with multiple outputs
-            #[uniform(binding=0)] def material_color: vec3
-            #[uniform(binding=1)] def time: f32
-
-            #[vertex] entry vertex_main() (#[builtin(position)] vec4, #[location(0)] vec3) =
-              let angle: f32 = time in
-              let x: f32 = sin(angle) in
-              let y: f32 = cos(angle) in
-              let position: vec4 = vec4(x, y, 0.0f32, 1.0f32) in
-              let color: vec3 = material_color in
-              (position, color)
-
-            #[fragment] entry fragment_main() (#[location(0)] vec4, #[location(1)] vec3) =
-              let final_color: vec4 = vec4(1.0f32, 0.5f32, 0.2f32, 1.0f32) in
-              let normal: vec3 = vec3(0.0f32, 1.0f32, 0.0f32) in
-              (final_color, normal)
-            "#,
-    );
-
-    assert_eq!(program.declarations.len(), 4);
-
-    // Check uniform declarations
-    assert!(matches!(&program.declarations[0], Declaration::Uniform(u) if u.name == "material_color"));
-    assert!(matches!(&program.declarations[1], Declaration::Uniform(u) if u.name == "time"));
-
-    // Check vertex shader with multiple outputs
-    assert!(
-        matches!(&program.declarations[2], Declaration::Entry(entry) if entry.name == "vertex_main" && entry.entry_type == Attribute::Vertex)
-    );
-
-    // Check fragment shader with multiple outputs
-    assert!(
-        matches!(&program.declarations[3], Declaration::Entry(entry) if entry.name == "fragment_main" && entry.entry_type == Attribute::Fragment)
-    );
 }
 
 #[test]
@@ -3525,4 +3410,26 @@ functor mk_erf(R: real) = {
 }
 "#;
     let _program = parse_ok(src);
+}
+
+#[test]
+fn test_module_scope_uniform_decl_rejected() {
+    expect_parse_error(
+        r#"#[uniform(set=1, binding=0)] def iTime: f32"#,
+        |error| match error {
+            CompilerError::ParseError(msg, _) if msg.contains("#[uniform(...)]") => Ok(()),
+            other => Err(format!("expected uniform-rejection error, got {:?}", other)),
+        },
+    );
+}
+
+#[test]
+fn test_module_scope_storage_decl_rejected() {
+    expect_parse_error(
+        r#"#[storage(set=1, binding=0, access=read)] def display_board: []i32"#,
+        |error| match error {
+            CompilerError::ParseError(msg, _) if msg.contains("#[storage(...)]") => Ok(()),
+            other => Err(format!("expected storage-rejection error, got {:?}", other)),
+        },
+    );
 }

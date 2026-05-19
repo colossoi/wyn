@@ -443,10 +443,6 @@ pub struct Program {
     /// Program-level constant definitions (zero-arg defs with purely constant bodies).
     /// Emitted once at module scope; functions reference them via `InstKind::Global`.
     pub constants: Vec<Constant>,
-    /// Uniform declarations.
-    pub uniforms: Vec<interface::UniformDecl>,
-    /// Storage buffer declarations.
-    pub storage: Vec<interface::StorageDecl>,
 }
 
 /// A program-level constant definition.
@@ -500,6 +496,8 @@ pub struct EntryInput {
     pub decoration: Option<IoDecoration>,
     pub size_hint: Option<std::num::NonZeroU32>,
     pub storage_binding: Option<(u32, u32)>,
+    /// Programmer-attributed `#[uniform(set, binding)]` on this param.
+    pub uniform_binding: Option<(u32, u32)>,
     /// For compute shader broadcast inputs: byte offset within the push constant block.
     pub push_constant_offset: Option<u32>,
 }

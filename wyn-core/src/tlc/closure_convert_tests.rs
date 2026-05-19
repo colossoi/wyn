@@ -18,8 +18,6 @@ fn unit_ty() -> Type<TypeName> {
 fn empty_program() -> Program {
     Program {
         defs: vec![],
-        uniforms: vec![],
-        storage: vec![],
         symbols: SymbolTable::new(),
         def_syms: HashMap::new(),
     }

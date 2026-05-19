@@ -192,12 +192,6 @@ impl PlaceholderResolver {
         match decl {
             Declaration::Decl(d) => self.resolve_decl(d),
             Declaration::Entry(e) => self.resolve_entry(e),
-            Declaration::Storage(s) => {
-                s.ty = self.resolve_type(&s.ty);
-            }
-            Declaration::Uniform(u) => {
-                u.ty = self.resolve_type(&u.ty);
-            }
             Declaration::Sig(s) => {
                 s.ty = self.resolve_type(&s.ty);
             }

@@ -52,8 +52,6 @@ fn make_program(name_sym: SymbolId, body: Term, symbols: SymbolTable) -> Program
             meta: DefMeta::Function,
             arity: 0,
         }],
-        uniforms: vec![],
-        storage: vec![],
         symbols,
         def_syms: HashMap::new(),
     }
@@ -405,8 +403,6 @@ fn test_function_inlining() {
                 arity: 0,
             },
         ],
-        uniforms: vec![],
-        storage: vec![],
         symbols,
         def_syms: HashMap::new(),
     };
@@ -518,8 +514,6 @@ fn test_function_alias_inlining() {
                 arity: 0,
             },
         ],
-        uniforms: vec![],
-        storage: vec![],
         symbols,
         def_syms: HashMap::new(),
     };
@@ -635,8 +629,6 @@ fn test_function_alias_partial_application() {
                 arity: 0,
             },
         ],
-        uniforms: vec![],
-        storage: vec![],
         symbols,
         def_syms: HashMap::new(),
     };
@@ -716,8 +708,6 @@ fn test_intrinsic_alias_inlining() {
             meta: DefMeta::Function,
             arity: 0,
         }],
-        uniforms: vec![],
-        storage: vec![],
         symbols,
         def_syms: HashMap::new(),
     };

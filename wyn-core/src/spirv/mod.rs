@@ -92,23 +92,14 @@ struct Constructor {
     ptr_type_cache: HashMap<(spirv::StorageClass, spirv::Word), spirv::Word>,
     runtime_array_cache: HashMap<(spirv::Word, u32), spirv::Word>, // (elem_type, stride) -> decorated type
     buffer_block_cache: HashMap<spirv::Word, spirv::Word>, // runtime_array_type -> Block-decorated struct
-    uniform_block_cache: HashMap<spirv::Word, spirv::Word>, // value_type -> Block-decorated struct
     interface_block_cache: HashMap<InterfaceBlockKey, spirv::Word>,
     array_elem_cache: HashMap<spirv::Word, spirv::Word>, // array_type -> element_type
 
     // Entry point interface tracking
     entry_point_interfaces: HashMap<String, Vec<spirv::Word>>,
 
-    // Global constants: name -> constant_id (SPIR-V OpConstant)
-    uniform_variables: HashMap<String, spirv::Word>,
-    uniform_types: HashMap<String, spirv::Word>, // uniform name -> SPIR-V type ID
-    uniform_load_cache: HashMap<String, spirv::Word>, // cached OpLoad results per function
-
-    // Storage buffer name maps (for program.storage declarations)
-    storage_variables: HashMap<String, spirv::Word>, // name -> var_id
-    storage_elem_types: HashMap<String, spirv::Word>, // name -> element SPIR-V type
     extract_cache: HashMap<(spirv::Word, u32), spirv::Word>, // CSE for OpCompositeExtract
-    null_const_cache: HashMap<spirv::Word, spirv::Word>, // type -> OpConstantNull id
+    null_const_cache: HashMap<spirv::Word, spirv::Word>,     // type -> OpConstantNull id
 
     /// Storage buffers for compute shaders: (set, binding) -> (buffer_var, elem_type_id, buffer_ptr_type)
     storage_buffers: HashMap<(u32, u32), (spirv::Word, spirv::Word, spirv::Word)>,
@@ -180,15 +171,9 @@ impl Constructor {
             ptr_type_cache: HashMap::new(),
             runtime_array_cache: HashMap::new(),
             buffer_block_cache: HashMap::new(),
-            uniform_block_cache: HashMap::new(),
             interface_block_cache: HashMap::new(),
             array_elem_cache: HashMap::new(),
             entry_point_interfaces: HashMap::new(),
-            uniform_variables: HashMap::new(),
-            uniform_types: HashMap::new(),
-            uniform_load_cache: HashMap::new(),
-            storage_variables: HashMap::new(),
-            storage_elem_types: HashMap::new(),
             extract_cache: HashMap::new(),
             null_const_cache: HashMap::new(),
             storage_buffers: HashMap::new(),
@@ -579,28 +564,6 @@ impl Constructor {
         ty
     }
 
-    /// Create (or reuse) a Block-decorated struct type for a uniform
-    /// buffer. Cached by `value_type` because rspirv's `type_struct`
-    /// dedupes anyway — without a cache, calling this twice with the
-    /// same value type emits `Block` / `MemberDecorate Offset 0` on
-    /// the same struct ID twice, which spirv-val rejects with "ID
-    /// decorated with Offset multiple times is not allowed".
-    fn create_uniform_block_type(&mut self, value_type: spirv::Word) -> spirv::Word {
-        if let Some(&cached) = self.uniform_block_cache.get(&value_type) {
-            return cached;
-        }
-        let block_struct = self.builder.type_struct(vec![value_type]);
-        self.builder.decorate(block_struct, spirv::Decoration::Block, []);
-        self.builder.member_decorate(
-            block_struct,
-            0,
-            spirv::Decoration::Offset,
-            [Operand::LiteralBit32(0)],
-        );
-        self.uniform_block_cache.insert(value_type, block_struct);
-        block_struct
-    }
-
     /// Create a storage buffer variable for compute shaders.
     /// Returns the variable ID. Also registers it in storage_buffers for later lookup.
     /// Idempotent: returns existing variable if already created for this (set, binding).
@@ -815,7 +778,6 @@ impl Constructor {
         self.variables_block = None;
         self.first_code_block = None;
         self.env.clear();
-        self.uniform_load_cache.clear();
         self.extract_cache.clear();
 
         Ok(())
@@ -1337,28 +1299,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 }
 
                 crate::op::OpTag::Global(name) => {
-                    if let Some(&var_id) = self.constructor.uniform_variables.get(name) {
-                        // Load uniform value
-                        let value_type =
-                            self.constructor.uniform_types.get(name).copied().ok_or_else(|| {
-                                err_spirv_at!(self.blame_span(), "Unknown uniform type: {}", name)
-                            })?;
-                        let member_ptr_type = self.constructor.builder.type_pointer(
-                            None,
-                            spirv::StorageClass::Uniform,
-                            value_type,
-                        );
-                        let zero = self.constructor.const_i32(0);
-                        let member_ptr =
-                            self.constructor.builder.access_chain(member_ptr_type, None, var_id, [zero])?;
-                        self.constructor.builder.load(value_type, None, member_ptr, None, [])?
-                    } else if self.constructor.storage_variables.contains_key(name) {
-                        bail_spirv_at!(
-                            self.blame_span(),
-                            "Direct global access to storage buffer '{}' is invalid; use array indexing",
-                            name
-                        )
-                    } else if let Some(&func_id) = self.constructor.functions.get(name) {
+                    if let Some(&func_id) = self.constructor.functions.get(name) {
                         // Global constant function - call it with no args to get the value.
                         // This handles `def verts: [3]vec4f32 = [...]` referenced as just `verts`.
                         self.constructor.builder.function_call(result_ty, None, func_id, [])?
@@ -3049,37 +2990,6 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
     // Collect entry point info for later
     let mut entry_info: Vec<(String, spirv::ExecutionModel, Option<(u32, u32, u32)>)> = Vec::new();
 
-    // Lower uniforms
-    for uniform in &program.uniforms {
-        let value_type = constructor.polytype_to_spirv(&uniform.ty);
-        let block_type = constructor.create_uniform_block_type(value_type);
-        let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::Uniform, block_type);
-        let var_id = constructor.builder.variable(ptr_type, None, spirv::StorageClass::Uniform, None);
-
-        constructor.builder.decorate(
-            var_id,
-            spirv::Decoration::DescriptorSet,
-            [Operand::LiteralBit32(uniform.set)],
-        );
-        constructor.builder.decorate(
-            var_id,
-            spirv::Decoration::Binding,
-            [Operand::LiteralBit32(uniform.binding)],
-        );
-
-        constructor.uniform_variables.insert(uniform.name.clone(), var_id);
-        constructor.uniform_types.insert(uniform.name.clone(), value_type);
-    }
-
-    // Lower storage buffers (using proper Block-decorated runtime array wrapping)
-    for storage in &program.storage {
-        let var_id = constructor.create_storage_buffer(&storage.ty, storage.set, storage.binding);
-        let elem_ty = storage.ty.elem_type().filter(|_| storage.ty.is_array()).unwrap_or(&storage.ty);
-        let elem_spirv = constructor.polytype_to_spirv(elem_ty);
-        constructor.storage_variables.insert(storage.name.clone(), var_id);
-        constructor.storage_elem_types.insert(storage.name.clone(), elem_spirv);
-    }
-
     // Forward-declare all functions first (so they can call each other in any order)
     for func in &program.functions {
         if func.linkage_name.is_some() {
@@ -3178,29 +3088,6 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
         if let Some(&func_id) = constructor.functions.get(name) {
             let mut interfaces = constructor.entry_point_interfaces.get(name).cloned().unwrap_or_default();
 
-            // Add all uniform variables to the interface.
-            for &uniform_var in constructor.uniform_variables.values() {
-                if !interfaces.contains(&uniform_var) {
-                    interfaces.push(uniform_var);
-                }
-            }
-
-            // Add all module-scope `#[storage]` variables. These aren't
-            // in any entry's `inputs`/`outputs` list (those cover only
-            // auto-bound compute parameters) but a fragment/compute
-            // entry may still read one via `storage_board[i]`. Adding
-            // them unconditionally is over-permissive (an entry that
-            // doesn't reference a particular storage decl still lists
-            // it as an interface variable — harmless), but it
-            // guarantees we never emit an entry that uses a storage
-            // var without declaring it as interface (spirv-val rejects
-            // that).
-            for &storage_var in constructor.storage_variables.values() {
-                if !interfaces.contains(&storage_var) {
-                    interfaces.push(storage_var);
-                }
-            }
-
             // Add storage buffer variables that this entry point declares
             // (via its inputs/outputs). Don't add ALL storage vars — other
             // entry points may have buffers this one doesn't reference.
@@ -3234,10 +3121,6 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
                     }
                 }
             }
-            // Named storage variables (from program.storage) are already
-            // covered by the per-entry input/output scan above — each entry
-            // point declares exactly the bindings it uses.
-
             constructor.builder.entry_point(*model, func_id, name, interfaces);
 
             // Add execution modes

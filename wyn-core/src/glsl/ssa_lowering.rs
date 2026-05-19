@@ -464,21 +464,6 @@ impl<'a> LowerCtx<'a> {
 
         let mut code = String::new();
 
-        // Emit uniforms. These names are host-contract (e.g. Shadertoy's
-        // `iResolution`) and must appear verbatim, so validate rather than
-        // mangle.
-        for uniform in &self.program.uniforms {
-            self.validate_io_name(&uniform.name)?;
-            writeln!(
-                code,
-                "layout(set = {}, binding = {}) uniform {} {};",
-                uniform.set,
-                uniform.binding,
-                self.type_to_glsl(&uniform.ty),
-                uniform.name
-            )
-            .unwrap();
-        }
         writeln!(code).unwrap();
 
         // Lower helper functions

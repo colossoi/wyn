@@ -10,9 +10,6 @@
 //! metadata — e.g. declaring an intermediate `partials` buffer on a
 //! phase entry point. Having a single typed home for these declarations
 //! gives backends one source of truth for the entry interface.
-//!
-//! For transitional compatibility, `ast` re-exports these names so
-//! existing `interface::Attribute` / `interface::EntryDecl` call sites keep working.
 
 use crate::ast::{Expression, Pattern, Span};
 use crate::types::Type;
@@ -69,6 +66,8 @@ pub trait AttrExt {
     fn has<F: Fn(&Attribute) -> bool>(&self, pred: F) -> bool;
     fn first_builtin(&self) -> Option<spirv::BuiltIn>;
     fn first_location(&self) -> Option<u32>;
+    fn has_uniform(&self) -> bool;
+    fn has_storage(&self) -> bool;
 }
 
 impl AttrExt for [Attribute] {
@@ -80,6 +79,12 @@ impl AttrExt for [Attribute] {
     }
     fn first_location(&self) -> Option<u32> {
         self.iter().find_map(|a| if let Attribute::Location(l) = a { Some(*l) } else { None })
+    }
+    fn has_uniform(&self) -> bool {
+        self.has(|a| matches!(a, Attribute::Uniform { .. }))
+    }
+    fn has_storage(&self) -> bool {
+        self.has(|a| matches!(a, Attribute::Storage { .. }))
     }
 }
 
@@ -141,26 +146,6 @@ pub struct EntryDecl {
 // ---------------------------------------------------------------------------
 // Resource declarations (uniforms / storage buffers)
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct UniformDecl {
-    pub name: String,
-    pub ty: Type,     // Uniforms always have an explicit type
-    pub set: u32, // Descriptor set number; user decls must use set 1+ (set 0 is reserved for the compiler)
-    pub binding: u32, // Explicit binding number (required)
-    pub span: Span, // Source span of the decl, for diagnostics
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct StorageDecl {
-    pub name: String,
-    pub ty: Type,     // Storage buffers have an explicit type (usually runtime-sized array)
-    pub set: u32, // Descriptor set number; user decls must use set 1+ (set 0 is reserved for the compiler)
-    pub binding: u32, // Binding number within the set
-    pub layout: StorageLayout, // Memory layout (std430, std140)
-    pub access: StorageAccess, // Access mode (read, write, readwrite)
-    pub span: Span, // Source span of the decl, for diagnostics
-}
 
 /// Memory layout for storage buffers.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]

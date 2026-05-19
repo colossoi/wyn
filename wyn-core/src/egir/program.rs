@@ -110,8 +110,6 @@ pub struct EgirInner {
     pub externs: Vec<Function>,
     pub entry_points: Vec<EgirEntry>,
     pub constants: Vec<Constant>,
-    pub uniforms: Vec<interface::UniformDecl>,
-    pub storage: Vec<interface::StorageDecl>,
     pub pipeline: PipelineDescriptor,
 }
 
@@ -121,8 +119,6 @@ impl EgirInner {
         externs: Vec<Function>,
         entry_points: Vec<EgirEntry>,
         constants: Vec<Constant>,
-        uniforms: Vec<interface::UniformDecl>,
-        storage: Vec<interface::StorageDecl>,
         pipeline: PipelineDescriptor,
     ) -> Self {
         EgirInner {
@@ -130,8 +126,6 @@ impl EgirInner {
             externs,
             entry_points,
             constants,
-            uniforms,
-            storage,
             pipeline,
         }
     }
@@ -139,14 +133,6 @@ impl EgirInner {
     /// Convenience: build an EGIR program wrapping a single function body.
     /// Used by the probe path in `from_tlc`.
     pub fn single_function(func: EgirFunc) -> Self {
-        Self::new(
-            vec![func],
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            PipelineDescriptor::default(),
-        )
+        Self::new(vec![func], vec![], vec![], vec![], PipelineDescriptor::default())
     }
 }

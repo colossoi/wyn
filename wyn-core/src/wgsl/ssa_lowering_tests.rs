@@ -255,8 +255,6 @@ fn lower_empty_program_succeeds() {
         functions: Vec::new(),
         entry_points: Vec::new(),
         constants: Vec::new(),
-        uniforms: Vec::new(),
-        storage: Vec::new(),
     };
     let out = super::lower(&program).expect("empty program should lower");
     assert!(out.contains("WGSL backend"));
@@ -503,16 +501,14 @@ fn wgsl_uniforms_emit_bindings() {
     // emission path + Global reference resolution.
     let wgsl = compile_to_wgsl(
         r#"
-#[uniform(set=1, binding=0)] def iTime: f32
-
 #[fragment]
-entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[uniform(set=1, binding=0)] iTime: f32, #[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     @[iTime, 0.0, 0.0, 1.0]
 "#,
     )
     .expect("compile");
     validate_wgsl(&wgsl);
-    assert!(wgsl.contains("@group(1) @binding(0) var<uniform> iTime: f32;"));
+    assert!(wgsl.contains("@group(1) @binding(0) var<uniform> w_iTime: f32;"));
 }
 
 #[test]

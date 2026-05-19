@@ -1056,10 +1056,8 @@ pub fn run(mut program: Program, disable: bool) -> crate::error::Result<Parallel
 
     // Track max binding across every `(set, binding)` the program already
     // uses — including implicit `ArrayExpr::StorageBuffer` bindings
-    // introduced by buffer_specialize/mono for SOAC inputs, not just
-    // user-declared `#[storage]` entries. Filtering only by
-    // `program.storage` would collide fresh intermediates with input
-    // buffers; see PLAN_scan_stage_b.md.
+    // introduced by buffer_specialize/mono for SOAC inputs. Missing these
+    // would let fresh intermediates collide with input buffers.
     let mut next_binding: u32 =
         collect_all_used_bindings(&program).iter().map(|(_, b)| b + 1).max().unwrap_or(0);
 
@@ -1147,7 +1145,7 @@ pub fn run(mut program: Program, disable: bool) -> crate::error::Result<Parallel
                         entry_point: name,
                         stage,
                     }],
-                    bindings: collect_program_resource_bindings(&program),
+                    bindings: Vec::new(),
                     vertex_inputs: vec![],
                     fragment_outputs: vec![],
                 }));
@@ -1189,7 +1187,7 @@ fn make_lowering_plan(
 ) -> LoweringPlan {
     let sizing = PipelineSizing::for_analyzed_entry(program, analysis);
     match &analysis.soac.original {
-        SoacOp::Map { .. } => make_map_plan(analysis, entry_name, next_binding, program, sizing),
+        SoacOp::Map { .. } => make_map_plan(analysis, entry_name, next_binding, sizing),
         SoacOp::Reduce { op, ne, .. } => make_two_phase_plan(
             analysis,
             entry_name,
@@ -1221,7 +1219,6 @@ fn make_map_plan(
     analysis: &EntryAnalysis,
     entry_name: &str,
     _next_binding: u32,
-    program: &Program,
     sizing: PipelineSizing,
 ) -> LoweringPlan {
     // Plan: don't pre-allocate the output binding. The EGIR side already
@@ -1231,13 +1228,7 @@ fn make_map_plan(
     // tags the entry as a parallel Map; the pipeline descriptor's binding
     // list gets enriched post-EGIR by `enrich_pipeline_with_auto_bindings`
     // (see `from_tlc.rs:164`).
-    //
-    // Seed the descriptor with uniforms/storage from `program.uniforms`
-    // and `program.storage`. They aren't claimed by the SOAC's inputs
-    // but the shader still references them (captured-by-name) and
-    // `enrich_pipeline_with_auto_bindings` only fills storage buffers.
-    let mut bindings = collect_program_resource_bindings(program);
-    bindings.extend(collect_soac_bindings(&analysis.soac));
+    let bindings = collect_soac_bindings(&analysis.soac);
     let pipeline = Pipeline::Compute(ComputePipeline {
         entry_point: entry_name.to_string(),
         workgroup_size: sizing.workgroup,
@@ -2476,20 +2467,12 @@ fn input_storage_decls(soac: &SoacAnalysis) -> Vec<interface::StorageBindingDecl
 
 /// Collect every `(set, binding)` pair already claimed anywhere in the
 /// program so `parallelize::run` can hand out fresh intermediate bindings
-/// that don't collide with anything. Includes user-declared resources
-/// (`program.storage`, `program.uniforms`) *and* implicit bindings
-/// attached by earlier passes as `ArrayExpr::StorageBuffer` inside SOAC
-/// inputs. Consulting only `program.storage` would miss the implicit
-/// ones — scan's three-way collision (partials, result, input) would
-/// emit a broken shader.
+/// that don't collide with anything. Walks every term, picking up
+/// implicit bindings attached by earlier passes as `ArrayExpr::StorageBuffer`
+/// inside SOAC inputs — scan's three-way collision (partials, result,
+/// input) would otherwise emit a broken shader.
 fn collect_all_used_bindings(program: &Program) -> HashSet<(u32, u32)> {
     let mut used: HashSet<(u32, u32)> = HashSet::new();
-    for u in &program.uniforms {
-        used.insert((u.set, u.binding));
-    }
-    for s in &program.storage {
-        used.insert((s.set, s.binding));
-    }
     for def in &program.defs {
         collect_bindings_in_term(&def.body, &mut used);
     }
@@ -2540,40 +2523,9 @@ fn collect_bindings_in_soac(op: &SoacOp, used: &mut HashSet<(u32, u32)>) {
     }
 }
 
-/// Graphics pipelines and non-parallelized compute entries need to declare
-/// every resource the shader references so the host can build a matching
-/// pipeline layout. Without this, viz/wgpu rejects the pipeline with
-/// "Binding is missing from the pipeline layout".
-fn collect_program_resource_bindings(program: &Program) -> Vec<Binding> {
-    let mut bindings = Vec::new();
-    for u in &program.uniforms {
-        bindings.push(Binding::Uniform {
-            set: u.set,
-            binding: u.binding,
-            name: u.name.clone(),
-        });
-    }
-    for s in &program.storage {
-        let access = match s.access {
-            interface::StorageAccess::ReadOnly => Access::ReadOnly,
-            interface::StorageAccess::WriteOnly => Access::WriteOnly,
-            interface::StorageAccess::ReadWrite => Access::ReadWrite,
-        };
-        bindings.push(Binding::StorageBuffer {
-            set: s.set,
-            binding: s.binding,
-            access,
-            usage: BufferUsage::Input,
-            name: s.name.clone(),
-        });
-    }
-    bindings
-}
-
 fn build_default_pipeline(program: &Program) -> PipelineDescriptor {
     let mut pipelines = Vec::new();
 
-    let resource_bindings = collect_program_resource_bindings(program);
     for def in &program.defs {
         if let DefMeta::EntryPoint(ref decl) = def.meta {
             let name = program.symbols.get(def.name).cloned().unwrap_or_default();
@@ -2586,7 +2538,7 @@ fn build_default_pipeline(program: &Program) -> PipelineDescriptor {
                         workgroup_size: sizing.workgroup.0,
                     },
                     default_total_threads: sizing.default_total_threads,
-                    bindings: resource_bindings.clone(),
+                    bindings: Vec::new(),
                 }));
             } else {
                 let stage = if decl.entry_type == Attribute::Vertex {
@@ -2599,7 +2551,7 @@ fn build_default_pipeline(program: &Program) -> PipelineDescriptor {
                         entry_point: name,
                         stage,
                     }],
-                    bindings: resource_bindings.clone(),
+                    bindings: Vec::new(),
                     vertex_inputs: vec![],
                     fragment_outputs: vec![],
                 }));

@@ -9,7 +9,7 @@ use crate::SymbolTable;
 use std::collections::HashMap;
 
 use super::{
-    ArrayExpr, Def, Lambda, Place, Program, Shape, SoacBody, SoacOp, Term, TermKind, extract_lambda_params,
+    ArrayExpr, Def, Lambda, Place, Program, SoacBody, SoacOp, Term, TermKind, extract_lambda_params,
 };
 use crate::SymbolId;
 use crate::ast::TypeName;

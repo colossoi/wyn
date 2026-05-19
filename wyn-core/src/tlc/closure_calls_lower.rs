@@ -546,8 +546,6 @@ pub fn run(program: Program, closure_info: &ClosureInfo) -> Program {
 
     let result = Program {
         defs,
-        uniforms: program.uniforms,
-        storage: program.storage,
         symbols: program.symbols,
         def_syms: program.def_syms,
     };

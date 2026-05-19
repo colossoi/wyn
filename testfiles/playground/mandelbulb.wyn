@@ -6,12 +6,6 @@
 open f32
 
 ------------------------------------------------------------
--- Uniforms
-------------------------------------------------------------
-#[uniform(set=1, binding=0)] def iResolution: vec3f32
-#[uniform(set=1, binding=1)] def iTime: f32
-
-------------------------------------------------------------
 -- Rotate (p.x, p.z) by angle a around the y axis.
 ------------------------------------------------------------
 def ry(p: vec3f32, a: f32) vec3f32 =
@@ -52,17 +46,17 @@ def mb(p_in: vec3f32) vec3f32 =
   @[0.5 * log(r) * r / dr_final, orbit_min, 0.0]
 
 -- Wrap mb with a time-based rotation about Y.
-def scene(p: vec3f32) vec3f32 =
+def scene(p: vec3f32, iTime: f32) vec3f32 =
   mb(ry(p, iTime * 0.2))
 
 ------------------------------------------------------------
 -- Soft shadows — attenuate based on how close the ray came to the
 -- surface along its path to the light.
 ------------------------------------------------------------
-def softshadow(ro: vec3f32, rd: vec3f32, k: f32) f32 =
+def softshadow(ro: vec3f32, rd: vec3f32, k: f32, iTime: f32) f32 =
   let (_, _, res) =
     loop (i, t, akuma) = (0, 0.01, 1.0) while i < 50 do
-      let h = (scene(ro + rd * t)).x in
+      let h = (scene(ro + rd * t, iTime)).x in
       if h < 0.001 then (50, t, 0.02)
       else
         let akuma2 = min(akuma, k * h / t) in
@@ -73,11 +67,11 @@ def softshadow(ro: vec3f32, rd: vec3f32, k: f32) f32 =
 ------------------------------------------------------------
 -- Analytic-ish normal via central differences.
 ------------------------------------------------------------
-def nor(p: vec3f32) vec3f32 =
+def nor(p: vec3f32, iTime: f32) vec3f32 =
   let e = 0.001 in
-  let dx = (scene(@[p.x + e, p.y, p.z])).x - (scene(@[p.x - e, p.y, p.z])).x in
-  let dy = (scene(@[p.x, p.y + e, p.z])).x - (scene(@[p.x, p.y - e, p.z])).x in
-  let dz = (scene(@[p.x, p.y, p.z + e])).x - (scene(@[p.x, p.y, p.z - e])).x in
+  let dx = (scene(@[p.x + e, p.y, p.z], iTime)).x - (scene(@[p.x - e, p.y, p.z], iTime)).x in
+  let dy = (scene(@[p.x, p.y + e, p.z], iTime)).x - (scene(@[p.x, p.y - e, p.z], iTime)).x in
+  let dz = (scene(@[p.x, p.y, p.z + e], iTime)).x - (scene(@[p.x, p.y, p.z - e], iTime)).x in
   normalize(@[dx, dy, dz])
 
 ------------------------------------------------------------
@@ -85,13 +79,13 @@ def nor(p: vec3f32) vec3f32 =
 --
 -- Returns (res_t, orbit_min_at_best, _). res_t = -1 if no hit.
 ------------------------------------------------------------
-def intersect(ro: vec3f32, rd: vec3f32, pixel_size: f32) vec3f32 =
+def intersect(ro: vec3f32, rd: vec3f32, pixel_size: f32, iTime: f32) vec3f32 =
   let (_, t_final, _, _, _, _, res_t, res_y) =
     loop (i, t, os, pd, max_err, stop, rt, ry) = (0, 1.0, 0.0, 100.0, 1000.0, false, 0.0, 0.0)
     while i < 48 do
       if stop then (i + 1, t, os, pd, max_err, stop, rt, ry)
       else
-        let c = scene(ro + rd * t) in
+        let c = scene(ro + rd * t, iTime) in
         let d = c.x in
         -- When we overstep (d <= os), back up AND reset d to 1.0 so the
         -- error metric blows up and we don't lock res_t onto this too-close
@@ -136,7 +130,7 @@ entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] 
 -- Fragment shader
 ------------------------------------------------------------
 #[fragment]
-entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
   -- Flip Y for Vulkan.
   let coord = @[fragCoord.x, iResolution.y - fragCoord.y] in
   let q  = @[coord.x / iResolution.x, coord.y / iResolution.y] in
@@ -167,12 +161,12 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4
   let col_bg = bg0 + @[1.0, 0.8, 0.4] * pow(halo, 17.0) in
 
   -- Trace
-  let res = intersect(ro, rd, pixel_size) in
+  let res = intersect(ro, rd, pixel_size, iTime) in
   let col =
     if res.x > 0.0 then
       let p = ro + rd * res.x in
-      let n = nor(p) in
-      let sh = softshadow(p, sundir, 10.0) in
+      let n = nor(p, iTime) in
+      let sh = softshadow(p, sundir, 10.0, iTime) in
       let dif = max(0.0, dot(n, sundir)) in
       let skyL = 0.6 + 0.4 * max(0.0, dot(n, @[0.0, 1.0, 0.0])) in
       let bac = max(0.3 + 0.7 * dot(@[0.0 - sundir.x, 0.0 - 1.0, 0.0 - sundir.z], n), 0.0) in

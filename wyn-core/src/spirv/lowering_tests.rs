@@ -381,23 +381,21 @@ fn test_partial_eval_inlined_function_local_id_collision() {
     // - The helper's local collides with fragment_main's locals in local_map
     let spirv = compile_to_spirv_with_partial_eval(
         r#"
-#[uniform(set=1, binding=0)] def iTime: f32
-
 -- Helper function that will be inlined when called with known args.
 -- The let binding 'weight' uses iTime which is unknown, so it gets residualized.
-def helper(x: f32) f32 =
+def helper(x: f32, iTime: f32) f32 =
     let weight = x * iTime in
     weight
 
 #[fragment]
-entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[uniform(set=1, binding=0)] iTime: f32, #[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     -- Create multiple locals to ensure LocalId collision
     let a = pos.x in
     let b = pos.y in
     let c = pos.z in
     -- Call helper with known arg - this gets inlined.
     -- helper's 'weight' local may collide with our locals.
-    let d = helper(3.0) in
+    let d = helper(3.0, iTime) in
     @[d, a, b, c]
 "#,
     )

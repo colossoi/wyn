@@ -203,8 +203,6 @@ fn test_simple_map_fusion() {
             meta: DefMeta::Function,
             arity: 0,
         }],
-        uniforms: vec![],
-        storage: vec![],
         symbols,
         def_syms: HashMap::new(),
     };
@@ -331,8 +329,6 @@ fn test_chain_of_three_maps() {
             meta: DefMeta::Function,
             arity: 0,
         }],
-        uniforms: vec![],
-        storage: vec![],
         symbols,
         def_syms: HashMap::new(),
     };
@@ -433,8 +429,6 @@ fn test_multi_use_no_fusion() {
             meta: DefMeta::Function,
             arity: 0,
         }],
-        uniforms: vec![],
-        storage: vec![],
         symbols,
         def_syms: HashMap::new(),
     };
@@ -530,8 +524,6 @@ fn test_zip_fused_producer() {
             meta: DefMeta::Function,
             arity: 0,
         }],
-        uniforms: vec![],
-        storage: vec![],
         symbols,
         def_syms: HashMap::new(),
     };
@@ -631,8 +623,6 @@ fn test_consumer_multi_input_no_fusion() {
             meta: DefMeta::Function,
             arity: 0,
         }],
-        uniforms: vec![],
-        storage: vec![],
         symbols,
         def_syms: HashMap::new(),
     };
@@ -694,8 +684,6 @@ fn test_inline_map_fusion() {
             meta: DefMeta::Function,
             arity: 0,
         }],
-        uniforms: vec![],
-        storage: vec![],
         symbols,
         def_syms: HashMap::new(),
     };
@@ -789,8 +777,6 @@ fn test_inline_chain_of_three() {
             meta: DefMeta::Function,
             arity: 0,
         }],
-        uniforms: vec![],
-        storage: vec![],
         symbols,
         def_syms: HashMap::new(),
     };
@@ -881,8 +867,6 @@ fn test_zip_fused_consumer_inline() {
             meta: DefMeta::Function,
             arity: 0,
         }],
-        uniforms: vec![],
-        storage: vec![],
         symbols,
         def_syms: HashMap::new(),
     };
@@ -994,8 +978,6 @@ fn test_map_zip_map() {
             meta: DefMeta::Function,
             arity: 0,
         }],
-        uniforms: vec![],
-        storage: vec![],
         symbols,
         def_syms: HashMap::new(),
     };
@@ -1092,8 +1074,6 @@ fn test_raytrace_step1_local_map_reduce() {
             meta: DefMeta::Function,
             arity: 0,
         }],
-        uniforms: vec![],
-        storage: vec![],
         symbols,
         def_syms: HashMap::new(),
     };
@@ -1209,8 +1189,6 @@ fn test_raytrace_step2_interprocedural_reduce_consumer() {
 
     let program = Program {
         defs: vec![my_reduce_def, main_def],
-        uniforms: vec![],
-        storage: vec![],
         symbols,
         def_syms: HashMap::new(),
     };
@@ -1329,8 +1307,6 @@ fn test_raytrace_step3_interprocedural_map_producer() {
 
     let program = Program {
         defs: vec![my_map_def, main_def],
-        uniforms: vec![],
-        storage: vec![],
         symbols,
         def_syms: HashMap::new(),
     };
@@ -1474,8 +1450,6 @@ fn test_raytrace_step4_both_interprocedural() {
 
     let program = Program {
         defs: vec![my_map_def, my_reduce_def, main_def],
-        uniforms: vec![],
-        storage: vec![],
         symbols,
         def_syms: HashMap::new(),
     };
@@ -1619,8 +1593,6 @@ fn test_raytrace_step5_globals_pattern_fused() {
 
     let program = Program {
         defs: vec![intersect_def, find_closest_def, main_def],
-        uniforms: vec![],
-        storage: vec![],
         symbols,
         def_syms: HashMap::new(),
     };

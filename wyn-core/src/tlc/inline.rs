@@ -27,8 +27,6 @@ pub fn run_reachable(program: Program) -> Program {
     let defs = dead_code_eliminate(program.defs);
     let result = Program {
         defs,
-        uniforms: program.uniforms,
-        storage: program.storage,
         symbols: program.symbols,
         def_syms: program.def_syms,
     };
@@ -80,8 +78,6 @@ pub fn run_small(program: Program) -> Program {
 
     Program {
         defs,
-        uniforms: program.uniforms,
-        storage: program.storage,
         symbols: program.symbols,
         def_syms: program.def_syms,
     }
@@ -106,8 +102,6 @@ pub fn run_large(program: Program) -> Program {
 
     let result = Program {
         defs,
-        uniforms: program.uniforms,
-        storage: program.storage,
         symbols: program.symbols,
         def_syms: program.def_syms,
     };

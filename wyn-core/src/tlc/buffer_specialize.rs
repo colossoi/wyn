@@ -57,12 +57,6 @@ struct BufferSpecializer {
     /// Populated per-def (from entry params or function params) and
     /// cleared when switching defs.
     buffer_map: HashMap<SymbolId, BufferBinding>,
-    /// Module-scope `#[storage]` declarations: symbol → BufferBinding.
-    /// Populated once in `run()` from `program.storage` and treated as
-    /// always-in-scope — when the per-def `buffer_map` misses, we fall
-    /// back to this. Fragment/compute entries that read a module-scope
-    /// storage binding via `display_board[i]` route through here.
-    module_storage_map: HashMap<SymbolId, BufferBinding>,
     /// Cache: (original_def_sym, spec_key) → specialized_def_sym
     specializations: HashMap<(SymbolId, SpecKey), SymbolId>,
     /// Newly generated defs
@@ -72,11 +66,9 @@ struct BufferSpecializer {
 }
 
 impl BufferSpecializer {
-    /// Resolve a symbol to a `BufferBinding`, consulting the per-def map
-    /// first (view params of the current function/entry), then falling
-    /// back to the module-scope storage map. Per-def wins on name shadow.
+    /// Resolve a symbol to a `BufferBinding` from the per-def view-param map.
     fn resolve_buffer(&self, sym: &SymbolId) -> Option<&BufferBinding> {
-        self.buffer_map.get(sym).or_else(|| self.module_storage_map.get(sym))
+        self.buffer_map.get(sym)
     }
 }
 
@@ -140,7 +132,6 @@ pub fn run(mut program: Program) -> Program {
         symbols: program.symbols,
         term_ids: TermIdSource::new(),
         buffer_map: HashMap::new(),
-        module_storage_map: HashMap::new(),
         specializations: HashMap::new(),
         new_defs: Vec::new(),
         def_map: HashMap::new(),
@@ -149,26 +140,6 @@ pub fn run(mut program: Program) -> Program {
     // Build def_map
     for def in &program.defs {
         specializer.def_map.insert(def.name, def.clone());
-    }
-
-    // Seed the module-scope storage map from `program.storage`. Each
-    // declaration resolves to a `SymbolId` via name lookup on the
-    // symbol table. These bindings are always in scope — any def's
-    // body that references them goes through `resolve_buffer` →
-    // fallback → specialization.
-    for storage in &program.storage {
-        let sym = specializer.symbols.iter().find(|(_, name)| *name == &storage.name).map(|(id, _)| *id);
-        if let Some(sym) = sym {
-            let elem_ty = array_elem_type(&storage.ty);
-            specializer.module_storage_map.insert(
-                sym,
-                BufferBinding {
-                    set: storage.set,
-                    binding: storage.binding,
-                    elem_ty,
-                },
-            );
-        }
     }
 
     // Process each def. Compute entry points populate `buffer_map` from
@@ -184,11 +155,9 @@ pub fn run(mut program: Program) -> Program {
             DefMeta::EntryPoint(entry) => {
                 // Compute entries seed the per-def `buffer_map` from
                 // their view-typed parameters (auto-bound to bindings
-                // 0, 1, …). Vertex and fragment entries don't have
-                // auto-bound params, but their bodies can still read
-                // module-scope `#[storage]` bindings — rewriting those
-                // reads requires walking the body. Both paths funnel
-                // through `rewrite_term` on the def body.
+                // 0, 1, …). Vertex/fragment entries have no view
+                // parameters, but their bodies still go through
+                // `rewrite_term` for consistency.
                 let processed = if matches!(entry.entry_type, interface::Attribute::Compute) {
                     specializer.process_entry_point(def, entry)
                 } else {
@@ -208,8 +177,6 @@ pub fn run(mut program: Program) -> Program {
 
     let result = Program {
         defs: processed_defs,
-        uniforms: program.uniforms,
-        storage: program.storage,
         symbols: specializer.symbols,
         def_syms: program.def_syms,
     };
@@ -255,10 +222,7 @@ impl BufferSpecializer {
 
     /// Rewrite a def body with no per-def `buffer_map` — used for
     /// vertex/fragment entries that don't have auto-bound view
-    /// parameters but may still read module-scope `#[storage]`
-    /// bindings. The module-scope map is always in scope, so
-    /// rewrites of `storage_def[i]` and `length(storage_def)`
-    /// still fire.
+    /// parameters.
     fn rewrite_def_body(&mut self, def: &Def) -> Def {
         let old_buffer_map = self.buffer_map.clone();
         self.buffer_map.clear();
@@ -342,8 +306,6 @@ impl BufferSpecializer {
                 let new_rhs = self.rewrite_term(rhs);
 
                 // If the let-binding aliases a buffer-backed variable, propagate.
-                // Consult the module-scope storage map too — a `let local = board
-                // in ...` where `board` is a `#[storage]` def should propagate.
                 let was_buffer = if let TermKind::Var(VarRef::Symbol(sym)) = &rhs.kind {
                     if let Some(binding) = self.resolve_buffer(sym) {
                         let b = binding.clone();
@@ -407,9 +369,6 @@ impl BufferSpecializer {
                 match &func.kind {
                     TermKind::Var(VarRef::Symbol(sym)) => {
                         // Check if any arguments are buffer-backed (clone to avoid borrow).
-                        // Consults both the per-def `buffer_map` (view params) and
-                        // the module-scope storage map so `helper(board, i)` where
-                        // `board` is a `#[storage]` def specializes correctly.
                         let arg_refs: Vec<&Term> = args.iter().collect();
                         let buffer_args: Vec<Option<BufferBinding>> = args
                             .iter()

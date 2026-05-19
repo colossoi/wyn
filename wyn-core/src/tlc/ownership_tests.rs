@@ -166,8 +166,6 @@ fn synth_program_with_alias_let() -> (Program, crate::SymbolId, crate::SymbolId)
     };
     let program = Program {
         defs: vec![def],
-        uniforms: vec![],
-        storage: vec![],
         symbols,
         def_syms: Default::default(),
     };
@@ -1329,8 +1327,6 @@ fn synth_program_with_with_through_index() -> Program {
 
     Program {
         defs: vec![f_def],
-        uniforms: vec![],
-        storage: vec![],
         symbols,
         def_syms,
     }
@@ -1575,8 +1571,6 @@ fn synth_program_with_populated_soac_captures() -> Program {
 
     Program {
         defs: vec![consume_def, main_def],
-        uniforms: vec![],
-        storage: vec![],
         symbols,
         def_syms,
     }
@@ -1733,8 +1727,6 @@ fn soac_capture_term_is_analyzed_for_liveness() {
 
     let program = Program {
         defs: vec![main_def],
-        uniforms: vec![],
-        storage: vec![],
         symbols,
         def_syms: std::collections::HashMap::new(),
     };

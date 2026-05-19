@@ -711,48 +711,13 @@ impl<'a> LowerCtx<'a> {
             writeln!(output).unwrap();
         }
 
-        // Uniform declarations: `@group(G) @binding(B) var<uniform> name: T;`.
-        // Uniforms must be host-shared with the user-written name, so we
-        // validate rather than mangle.
-        for u in &self.program.uniforms {
-            validate_wgsl_identifier(&u.name).map_err(|e| crate::err_wgsl!("uniform {}: {}", u.name, e))?;
-            let ty_str = self.type_emitter.type_to_wgsl(&u.ty)?;
-            writeln!(
-                output,
-                "@group({}) @binding({}) var<uniform> {}: {};",
-                u.set, u.binding, u.name, ty_str
-            )
-            .unwrap();
-            writeln!(output).unwrap();
-        }
-
-        // Storage buffer declarations from user-declared `#[storage]`
-        // bindings. Access mode → second parameter of `var<storage, ...>`.
-        for s in &self.program.storage {
-            validate_wgsl_identifier(&s.name)
-                .map_err(|e| crate::err_wgsl!("storage buffer {}: {}", s.name, e))?;
-            let ty_str = self.type_emitter.type_to_wgsl(&s.ty)?;
-            let access = match s.access {
-                crate::interface::StorageAccess::ReadOnly => "read",
-                crate::interface::StorageAccess::WriteOnly => "write",
-                crate::interface::StorageAccess::ReadWrite => "read_write",
-            };
-            writeln!(
-                output,
-                "@group({}) @binding({}) var<storage, {}> {}: {};",
-                s.set, s.binding, access, s.name, ty_str
-            )
-            .unwrap();
-        }
-
         // Compiler-introduced storage bindings + entry-level storage-
         // backed I/O. WGSL needs these at module scope; dedupe by
         // (set, binding) and coalesce access modes so an (in, out) pair
         // on the same slot becomes `read_write`.
         let mut synth: HashMap<(u32, u32), (String, String, bool, bool)> = HashMap::new();
         // Key → (elem_ty_str, module_name, has_read, has_write).
-        let is_declared =
-            |set, binding| self.program.storage.iter().any(|s| s.set == set && s.binding == binding);
+        let is_declared = |_set: u32, _binding: u32| false;
         for entry in &self.program.entry_points {
             // Explicit compiler-inserted bindings (e.g. parallelize's
             // partial-sum buffer).
@@ -834,6 +799,41 @@ impl<'a> LowerCtx<'a> {
                 output,
                 "@group({}) @binding({}) var<storage, {}> {}: array<{}>;",
                 set, binding, access, name, elem_ty
+            )
+            .unwrap();
+            writeln!(output).unwrap();
+        }
+
+        // Entry-param `#[uniform(set, binding)]` declarations become
+        // module-scope `var<uniform>` in WGSL. The variable's name is
+        // the mangled form of the param name so it matches body
+        // references. Dedupe by mangled name across entries — same
+        // name in two entries must agree on (set, binding, type).
+        let mut uniforms: HashMap<String, (u32, u32, String)> = HashMap::new();
+        for entry in &self.program.entry_points {
+            for input in &entry.inputs {
+                if let Some((set, binding)) = input.uniform_binding {
+                    let ty_str = self.type_emitter.type_to_wgsl(&input.ty)?;
+                    let key = self.mangle_tracked(&input.name)?;
+                    if let Some(prev) = uniforms.get(&key) {
+                        if *prev != (set, binding, ty_str.clone()) {
+                            return Err(crate::err_wgsl!(
+                                "uniform '{}' declared with conflicting (set, binding, type) across entries",
+                                input.name
+                            ));
+                        }
+                    }
+                    uniforms.insert(key, (set, binding, ty_str));
+                }
+            }
+        }
+        let mut uniforms_sorted: Vec<_> = uniforms.into_iter().collect();
+        uniforms_sorted.sort_by_key(|(_, (set, binding, _))| (*set, *binding));
+        for (name, (set, binding, ty_str)) in uniforms_sorted {
+            writeln!(
+                output,
+                "@group({}) @binding({}) var<uniform> {}: {};",
+                set, binding, name, ty_str
             )
             .unwrap();
             writeln!(output).unwrap();
@@ -965,6 +965,12 @@ impl<'a> LowerCtx<'a> {
             // Push-constant inputs are routed through the synthesized
             // uniform block — no function parameter emitted.
             if input.push_constant_offset.is_some() {
+                continue;
+            }
+            // `#[uniform]`-attributed inputs become module-scope
+            // `var<uniform>` declarations; the body references them by
+            // name directly.
+            if input.uniform_binding.is_some() {
                 continue;
             }
             let param_name =
@@ -1362,21 +1368,9 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
     }
 
     /// Resolve a storage binding (set, binding) to its module-scope name.
-    /// Checks user-declared `#[storage]` buffers first, falls back to the
-    /// synthesized `_buf_{set}_{binding}` naming used for compiler-
-    /// introduced compute-entry bindings.
+    /// Uses the synthesized `_buf_{set}_{binding}` naming used for
+    /// compiler-introduced compute-entry bindings.
     fn storage_name(&self, set: u32, binding: u32) -> Result<String> {
-        if let Some(name) = self
-            .ctx
-            .program
-            .storage
-            .iter()
-            .find(|s| s.set == set && s.binding == binding)
-            .map(|s| s.name.clone())
-        {
-            return Ok(name);
-        }
-        // Synthesized binding — matches the naming in `lower_program`.
         for entry in &self.ctx.program.entry_points {
             if entry.storage_bindings.iter().any(|sb| sb.set == set && sb.binding == binding)
                 || entry.inputs.iter().any(|i| i.storage_binding == Some((set, binding)))
@@ -2027,9 +2021,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     // and referenced by their user-facing names (validated as
                     // legal WGSL identifiers). Wyn-internal defs go through the
                     // mangler.
-                    if self.ctx.program.uniforms.iter().any(|u| u.name == *name)
-                        || self.ctx.program.constants.iter().any(|c| c.name == *name)
-                    {
+                    if self.ctx.program.constants.iter().any(|c| c.name == *name) {
                         Ok(name.clone())
                     } else {
                         self.ctx.mangle_tracked(name)

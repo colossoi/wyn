@@ -68,8 +68,6 @@ pub fn run(program: Program) -> Program {
 
         program = Program {
             defs,
-            uniforms: program.uniforms,
-            storage: program.storage,
             symbols,
             def_syms: def_syms.clone(),
         };

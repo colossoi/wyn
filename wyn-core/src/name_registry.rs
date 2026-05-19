@@ -99,8 +99,6 @@ impl NameRegistry {
                 ast::Declaration::Decl(d) => Some(d.name.clone()),
                 ast::Declaration::Entry(e) => Some(e.name.clone()),
                 ast::Declaration::Extern(e) => Some(e.name.clone()),
-                ast::Declaration::Uniform(u) => Some(u.name.clone()),
-                ast::Declaration::Storage(s) => Some(s.name.clone()),
                 _ => None,
             };
             if let Some(name) = name {

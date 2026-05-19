@@ -161,8 +161,6 @@ impl<'a> OpenResolver<'a> {
             | Declaration::ModuleTypeBind(_)
             | Declaration::Sig(_)
             | Declaration::TypeBind(_)
-            | Declaration::Uniform(_)
-            | Declaration::Storage(_)
             | Declaration::Extern(_)
             | Declaration::Import(_) => Ok(()),
         }
@@ -442,8 +440,6 @@ fn top_level_name(decl: &Declaration) -> Option<String> {
         Declaration::Entry(e) => Some(e.name.clone()),
         Declaration::Sig(s) => Some(s.name.clone()),
         Declaration::Extern(e) => Some(e.name.clone()),
-        Declaration::Uniform(u) => Some(u.name.clone()),
-        Declaration::Storage(s) => Some(s.name.clone()),
         // No value-namespace name to register.
         Declaration::Module(_)
         | Declaration::ModuleTypeBind(_)

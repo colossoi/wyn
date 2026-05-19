@@ -69,8 +69,6 @@ pub fn run_program(inner: EgirInner) -> (Program, PipelineDescriptor) {
         functions,
         entry_points,
         constants: inner.constants,
-        uniforms: inner.uniforms,
-        storage: inner.storage,
     };
     (program, inner.pipeline)
 }

@@ -199,8 +199,6 @@ fn test_defunc_simple_lambda_no_capture() {
             meta: DefMeta::Function,
             arity: 1,
         }],
-        uniforms: vec![],
-        storage: vec![],
         symbols: b.finish(),
         def_syms: HashMap::new(),
     };
@@ -294,8 +292,6 @@ fn test_defunc_lambda_with_capture() {
             meta: DefMeta::Function,
             arity: 1,
         }],
-        uniforms: vec![],
-        storage: vec![],
         symbols,
         def_syms: HashMap::new(),
     };
@@ -514,8 +510,6 @@ fn test_nested_hof_passthrough() {
                 arity: 1,
             },
         ],
-        uniforms: vec![],
-        storage: vec![],
         symbols,
         def_syms: HashMap::new(),
     };
