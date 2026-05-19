@@ -369,6 +369,26 @@ pub fn build_name_resolution(
         }
     }
 
+    // Top-level prelude functions (`reverse`, `rotate`, `iota`, etc.) —
+    // these live outside any module and aren't reached via
+    // `elaborated_modules`, but their bodies reference catalog builtins
+    // like `length` that must classify as `Builtin` to satisfy
+    // `var_term_builtin_id`'s no-string-lookup invariant.
+    let prelude_decls = module_manager.get_prelude_function_declarations();
+    let mut prelude_scope: ScopeStack<()> = ScopeStack::new();
+    for d in &prelude_decls {
+        prelude_scope.insert(d.name.clone(), ());
+    }
+    for d in &prelude_decls {
+        let mut scope = prelude_scope.clone();
+        scope.push_scope();
+        for p in &d.params {
+            collect_pattern_bindings(p, &mut scope);
+        }
+        walk_resolution(&d.body, catalog, &mut scope, &mut nr);
+        scope.pop_scope();
+    }
+
     nr
 }
 

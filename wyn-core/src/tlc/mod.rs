@@ -171,17 +171,25 @@ pub enum VarRef {
     Symbol(SymbolId),
 }
 
-/// Resolve a `Var`-position term to its `BuiltinId`, if any. Handles
-/// `VarRef::Builtin { id, .. }` directly and looks up `VarRef::Symbol`
-/// by name in the catalog. Returns `None` for non-`Var` terms and for
-/// symbol references that don't name a catalog entry.
-pub fn var_term_builtin_id(term: &Term, symbols: &SymbolTable) -> Option<BuiltinId> {
+/// Resolve a `Var`-position term to its `BuiltinId`, if any.
+///
+/// Only `VarRef::Builtin { id, .. }` returns `Some(id)`. `VarRef::Symbol`
+/// always returns `None` — it's a user-defined binding (local, top-level,
+/// or prelude function) that may legitimately *shadow* a catalog name
+/// (e.g. a user `let outer = …` reused as a SOAC-position closure
+/// shadows the catalog `outer` outer-product builtin). The previous
+/// catalog-by-name lookup in this branch silently mis-routed shadowing
+/// user values through builtin lowering.
+///
+/// Catalog calls reach TLC as `VarRef::Builtin` end-to-end:
+/// `NameResolution` classifies AST identifiers, synthesizers
+/// (`buffer_specialize::make_app`, `parallelize::intrinsic_term`,
+/// etc.) emit `Var(Builtin)` directly, and `transform_expr`'s
+/// Identifier path consults the `NameResolution` side table.
+pub fn var_term_builtin_id(term: &Term, _symbols: &SymbolTable) -> Option<BuiltinId> {
     match &term.kind {
         TermKind::Var(VarRef::Builtin { id, .. }) => Some(*id),
-        TermKind::Var(VarRef::Symbol(sym)) => {
-            let name = symbols.get(*sym)?;
-            catalog().lookup_by_any_name(name).map(|def| def.id)
-        }
+        TermKind::Var(VarRef::Symbol(_)) => None,
         _ => None,
     }
 }
