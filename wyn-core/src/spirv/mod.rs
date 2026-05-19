@@ -3314,6 +3314,9 @@ fn lower_ssa_entry_point(
 
     // Handle inputs
     let mut location = 0u32;
+    // Uniform-bound inputs need their access-chain + load deferred until
+    // after `begin_function`. Each entry here: (input.name, var_id, value_type).
+    let mut uniform_loads: Vec<(String, spirv::Word, spirv::Word)> = Vec::new();
     for input in &entry.inputs {
         // Push constant inputs are handled separately above
         if input.push_constant_offset.is_some() {
@@ -3334,6 +3337,32 @@ fn lower_ssa_entry_point(
             if *builtin == spirv::BuiltIn::GlobalInvocationId {
                 constructor.global_invocation_id = Some(var_id);
             }
+        } else if let Some((set, binding)) = input.uniform_binding {
+            // `#[uniform(set, binding)]` → Block-decorated struct in
+            // Uniform storage class. Per Vulkan rules the struct must
+            // wrap the value; member 0 carries the actual data.
+            let block_struct = constructor.builder.type_struct(vec![input_type]);
+            constructor.builder.decorate(block_struct, spirv::Decoration::Block, []);
+            constructor.builder.member_decorate(
+                block_struct,
+                0,
+                spirv::Decoration::Offset,
+                [Operand::LiteralBit32(0)],
+            );
+            let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::Uniform, block_struct);
+            let var_id = constructor.builder.variable(ptr_type, None, spirv::StorageClass::Uniform, None);
+            constructor.builder.decorate(
+                var_id,
+                spirv::Decoration::DescriptorSet,
+                [Operand::LiteralBit32(set)],
+            );
+            constructor.builder.decorate(
+                var_id,
+                spirv::Decoration::Binding,
+                [Operand::LiteralBit32(binding)],
+            );
+            interfaces.push(var_id);
+            uniform_loads.push((input.name.clone(), var_id, input_type));
         } else if let Some((set, binding)) = input.storage_binding {
             let var_id = constructor.create_storage_buffer(&input.ty, set, binding);
             // Mark input storage buffers as non-writable ONLY if no other
@@ -3436,12 +3465,28 @@ fn lower_ssa_entry_point(
         }
     }
 
+    // Load uniform members: each `#[uniform]` param is an OpVariable
+    // pointing at a Block-decorated `{value_type}` struct in Uniform
+    // storage. The body references the value, so AccessChain to
+    // member 0 + Load and put the loaded value in env.
+    for (name, var_id, value_type) in &uniform_loads {
+        let member_ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::Uniform, *value_type);
+        let zero = constructor.const_i32(0);
+        let access_chain = constructor.builder.access_chain(member_ptr_type, None, *var_id, [zero])?;
+        let loaded = constructor.builder.load(*value_type, None, access_chain, None, [])?;
+        constructor.env.insert(name.clone(), loaded);
+    }
+
     // Load input values from their pointer variables.
     // Entry point inputs are SPIR-V Input variables (pointers), but the SSA body
     // expects loaded values. Load them now and update env with the loaded values.
     for input in &entry.inputs {
-        // Skip storage buffers and push constants - they use different access patterns
-        if input.storage_binding.is_some() || input.push_constant_offset.is_some() {
+        // Skip storage buffers, push constants, and uniforms — each
+        // uses a different access pattern handled above.
+        if input.storage_binding.is_some()
+            || input.push_constant_offset.is_some()
+            || input.uniform_binding.is_some()
+        {
             continue;
         }
         let input_type = constructor.polytype_to_spirv(&input.ty);
