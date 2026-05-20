@@ -482,3 +482,75 @@ fn vertex_inputs_populated_from_location_params() {
     let fs = find("fs").expect("fragment graphics pipeline");
     assert!(fs.vertex_inputs.is_empty());
 }
+
+// --- fragment_outputs population from #[location(n)] returns ------------
+
+#[test]
+fn fragment_outputs_populated_from_location_returns() {
+    use crate::pipeline_descriptor::Pipeline;
+
+    let src = "#[vertex]\n\
+               entry vs(#[location(0)] position: vec3f32)\n\
+                 #[builtin(position)] vec4f32 =\n\
+                 @[position.x, position.y, position.z, 1.0]\n\
+               #[fragment]\n\
+               entry fs() #[location(0)] vec4f32 =\n\
+                 @[1.0, 0.0, 0.0, 1.0]";
+    let converted = crate::compile_thru_ssa(src).expect("compile thru ssa");
+
+    let fs = converted
+        .pipeline
+        .pipelines
+        .iter()
+        .find_map(|p| match p {
+            Pipeline::Graphics(gp) if gp.stages.iter().any(|s| s.entry_point == "fs") => Some(gp),
+            _ => None,
+        })
+        .expect("fragment graphics pipeline");
+
+    // The single #[location(0)] return surfaces as one fragment output.
+    assert_eq!(fs.fragment_outputs.len(), 1);
+    assert_eq!(fs.fragment_outputs[0].location, 0);
+    assert_eq!(fs.fragment_outputs[0].name, "fs_output");
+}
+
+// --- vertex shaders may read #[uniform] params -------------------------
+
+#[test]
+fn vertex_uniform_param_compiles_and_surfaces_binding() {
+    use crate::pipeline_descriptor::{Binding, Pipeline};
+
+    // A vertex shader reading a uniform is standard; the type checker
+    // must not reject the `#[uniform]` param as a missing vertex
+    // attribute, and the binding must surface in the descriptor.
+    let src = "#[vertex]\n\
+               entry vs(#[location(0)] position: vec3f32,\n\
+                        #[uniform(set=0, binding=0)] scale: f32)\n\
+                 #[builtin(position)] vec4f32 =\n\
+                 @[position.x * scale, position.y * scale, position.z * scale, 1.0]\n\
+               #[fragment]\n\
+               entry fs() #[location(0)] vec4f32 = @[1.0, 0.0, 0.0, 1.0]";
+    let converted = crate::compile_thru_ssa(src).expect("compile thru ssa");
+
+    let vs = converted
+        .pipeline
+        .pipelines
+        .iter()
+        .find_map(|p| match p {
+            Pipeline::Graphics(gp) if gp.stages.iter().any(|s| s.entry_point == "vs") => Some(gp),
+            _ => None,
+        })
+        .expect("vertex graphics pipeline");
+
+    // `position` surfaces as a vertex input; `scale` as a uniform binding.
+    assert_eq!(vs.vertex_inputs.len(), 1);
+    assert_eq!(vs.vertex_inputs[0].name, "position");
+    assert!(
+        vs.bindings.iter().any(|b| matches!(
+            b,
+            Binding::Uniform { set: 0, binding: 0, name } if name == "scale"
+        )),
+        "vertex uniform `scale` should surface as a binding, got {:?}",
+        vs.bindings
+    );
+}

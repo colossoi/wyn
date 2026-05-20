@@ -12,9 +12,6 @@
 
 open f32
 
-#[uniform(set = 1, binding = 0)] def iResolution: vec3f32
-#[uniform(set = 1, binding = 1)] def iTime: f32
-
 ------------------------------------------------------------
 -- Camera — Acko.Effect.Camera at the first-load at-rest state.
 --
@@ -143,6 +140,8 @@ entry vertex_main
   , #[location(2)] vertex_color: vec4f32
   , #[location(3)] vert_s      : f32
   , #[location(4)] track_meta  : vec4f32
+  , #[uniform(set=1, binding=0)] iResolution: vec3f32
+  , #[uniform(set=1, binding=1)] iTime: f32
   )
   ( #[builtin(position)] vec4f32
   , #[location(0)] vec3f32  -- view-space normal (un-normalized)

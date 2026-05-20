@@ -202,6 +202,9 @@ fn enrich_pipeline_with_auto_bindings(pipeline: &mut PipelineDescriptor, entries
         if matches!(entry.execution_model, ExecutionModel::Vertex) {
             enrich_vertex_inputs(pipeline, entry);
         }
+        if matches!(entry.execution_model, ExecutionModel::Fragment) {
+            enrich_fragment_outputs(pipeline, entry);
+        }
 
         // Find the bindings list backing this entry. Compute entries
         // match a single-stage `Compute` by `entry_point` or any stage
@@ -328,6 +331,36 @@ fn enrich_vertex_inputs(pipeline: &mut PipelineDescriptor, entry: &EgirEntry) {
             name: input.name.clone(),
             format,
         });
+    }
+}
+
+/// Populate the `fragment_outputs` of the Graphics pipeline backing a
+/// fragment entry from its `#[location(n)]` outputs. Mirrors
+/// `enrich_vertex_inputs`: each `IoDecoration::Location` output becomes
+/// a `FragmentOutput` carrying the location and a synthesized name.
+/// `EntryOutput` has no name field, so the name is derived from the
+/// entry name + position, matching the storage-output convention in
+/// `enrich_pipeline_with_auto_bindings`.
+fn enrich_fragment_outputs(pipeline: &mut PipelineDescriptor, entry: &EgirEntry) {
+    use crate::pipeline_descriptor::{FragmentOutput, Pipeline};
+    use crate::ssa::types::IoDecoration;
+
+    let fragment_outputs = match pipeline.pipelines.iter_mut().find(|p| match p {
+        Pipeline::Graphics(gp) => gp.stages.iter().any(|s| s.entry_point == entry.name),
+        _ => false,
+    }) {
+        Some(Pipeline::Graphics(gp)) => &mut gp.fragment_outputs,
+        _ => return,
+    };
+
+    let multi = entry.outputs.len() > 1;
+    for (i, output) in entry.outputs.iter().enumerate() {
+        let Some(IoDecoration::Location(location)) = output.decoration else {
+            continue;
+        };
+        let name =
+            if multi { format!("{}_output_{}", entry.name, i) } else { format!("{}_output", entry.name) };
+        fragment_outputs.push(FragmentOutput { location, name });
     }
 }
 
