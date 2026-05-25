@@ -156,3 +156,35 @@ pub fn extract_storage_binding(pattern: &Pattern) -> Option<(u32, u32)> {
         _ => None,
     }
 }
+
+/// Extract a `#[texture(set, binding)]` from a param pattern.
+pub fn extract_texture_binding(pattern: &Pattern) -> Option<(u32, u32)> {
+    match &pattern.kind {
+        PatternKind::Attributed(attrs, inner) => {
+            for attr in attrs {
+                if let Attribute::Texture { set, binding } = attr {
+                    return Some((*set, *binding));
+                }
+            }
+            extract_texture_binding(inner)
+        }
+        PatternKind::Typed(inner, _) => extract_texture_binding(inner),
+        _ => None,
+    }
+}
+
+/// Extract a `#[sampler(set, binding)]` from a param pattern.
+pub fn extract_sampler_binding(pattern: &Pattern) -> Option<(u32, u32)> {
+    match &pattern.kind {
+        PatternKind::Attributed(attrs, inner) => {
+            for attr in attrs {
+                if let Attribute::Sampler { set, binding } = attr {
+                    return Some((*set, *binding));
+                }
+            }
+            extract_sampler_binding(inner)
+        }
+        PatternKind::Typed(inner, _) => extract_sampler_binding(inner),
+        _ => None,
+    }
+}

@@ -1289,12 +1289,20 @@ impl<'a> TypeChecker<'a> {
                     continue;
                 }
                 let attrs = param_attrs(param);
-                // `#[uniform]` / `#[storage]` params are resource bindings,
-                // not vertex attributes — a vertex shader reading a uniform
-                // is standard. Skip them here; they're validated as bindings
+                // `#[uniform]` / `#[storage]` / `#[texture]` / `#[sampler]`
+                // params are resource bindings, not vertex attributes — a
+                // vertex shader reading a uniform or sampling a texture is
+                // standard. Skip them here; they're validated as bindings
                 // elsewhere (and surfaced into the pipeline descriptor).
-                if attrs.iter().any(|a| matches!(a, Attribute::Uniform { .. } | Attribute::Storage { .. }))
-                {
+                if attrs.iter().any(|a| {
+                    matches!(
+                        a,
+                        Attribute::Uniform { .. }
+                            | Attribute::Storage { .. }
+                            | Attribute::Texture { .. }
+                            | Attribute::Sampler { .. }
+                    )
+                }) {
                     continue;
                 }
                 let location = attrs.iter().find_map(|a| match a {

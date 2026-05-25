@@ -7,13 +7,15 @@ use crate::builtins::names::{
     INTRINSIC_FLOOR, INTRINSIC_FRACT, INTRINSIC_INVERSE, INTRINSIC_LENGTH, INTRINSIC_MAGNITUDE,
     INTRINSIC_MIX, INTRINSIC_NORMALIZE, INTRINSIC_OUTER, INTRINSIC_REFLECT, INTRINSIC_REFRACT,
     INTRINSIC_SLICE, INTRINSIC_SMOOTHSTEP, INTRINSIC_STORAGE_INDEX, INTRINSIC_STORAGE_LEN,
-    INTRINSIC_STORAGE_STORE, INTRINSIC_THREAD_ID, INTRINSIC_UNINIT,
+    INTRINSIC_STORAGE_STORE, INTRINSIC_TEXTURE_LOAD, INTRINSIC_TEXTURE_SAMPLE, INTRINSIC_THREAD_ID,
+    INTRINSIC_UNINIT,
 };
 use crate::builtins::scheme::{
-    array_to_i32, mat_square_to_mat, mat_square_to_scalar, mat_x_mat, mat_x_vec, scalar_unary, unit_to_t,
-    vec_binary_same, vec_binary_to_scalar, vec_clamp_scalar_lohi, vec_mix_scalar_interp,
-    vec_scalar_edge_to_vec, vec_smoothstep_scalar_edges, vec_ternary_same, vec_to_scalar, vec_unary_same,
-    vec_vec_outer, vec_vec_scalar_to_vec, vec_x_mat, vec3f32_binary,
+    array_to_i32, mat_square_to_mat, mat_square_to_scalar, mat_x_mat, mat_x_vec, scalar_unary,
+    texture_load_scheme, texture_sample_scheme, unit_to_t, vec_binary_same, vec_binary_to_scalar,
+    vec_clamp_scalar_lohi, vec_mix_scalar_interp, vec_scalar_edge_to_vec, vec_smoothstep_scalar_edges,
+    vec_ternary_same, vec_to_scalar, vec_unary_same, vec_vec_outer, vec_vec_scalar_to_vec, vec_x_mat,
+    vec3f32_binary,
 };
 
 // ---------------------------------------------------------------------------
@@ -314,6 +316,23 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         INTRINSIC_DOT,
         vec_binary_to_scalar,
         BuiltinLowering::PrimOp(PrimOp::Dot)
+    ),
+    // Texture ops. Not GLSL.std.450 ext-insts, so they dispatch via
+    // `ByBuiltinId` (resolved through `catalog().known()` in each
+    // backend) rather than `PrimOp`. v1 is explicit-LOD only to keep
+    // sampling referentially transparent — see the texture plan's v2
+    // note for gradient-based filtering.
+    polymorphic_intrinsic!(
+        "texture_load",
+        INTRINSIC_TEXTURE_LOAD,
+        texture_load_scheme,
+        BuiltinLowering::ByBuiltinId
+    ),
+    polymorphic_intrinsic!(
+        "texture_sample",
+        INTRINSIC_TEXTURE_SAMPLE,
+        texture_sample_scheme,
+        BuiltinLowering::ByBuiltinId
     ),
     polymorphic_intrinsic!(
         "cross",

@@ -138,16 +138,37 @@ pub enum Binding {
         size: u32,
         name: String,
     },
+    /// Sampled texture (descriptor set binding). Bound from a
+    /// `#[texture(set, binding)]` entry-point param of type `texture2d`.
+    Texture {
+        set: u32,
+        binding: u32,
+        name: String,
+        sample_type: TextureSampleType,
+        view_dimension: TextureViewDimension,
+        multisampled: bool,
+    },
+    /// Sampler (descriptor set binding). Bound from a
+    /// `#[sampler(set, binding)]` entry-point param of type `sampler`.
+    Sampler {
+        set: u32,
+        binding: u32,
+        name: String,
+        binding_type: SamplerBindingType,
+    },
 }
 
 impl Binding {
-    /// Descriptor-set binding number for storage / uniform bindings.
-    /// Panics on `PushConstant`, which has no binding number — push
-    /// constants live in their own range and are addressed by offset.
+    /// Descriptor-set binding number for storage / uniform / texture /
+    /// sampler bindings. Panics on `PushConstant`, which has no binding
+    /// number — push constants live in their own range and are addressed
+    /// by offset.
     pub fn wgpu_binding(&self) -> u32 {
         match self {
             Binding::StorageBuffer { binding, .. } => *binding,
             Binding::Uniform { binding, .. } => *binding,
+            Binding::Texture { binding, .. } => *binding,
+            Binding::Sampler { binding, .. } => *binding,
             Binding::PushConstant { .. } => panic!("PushConstant has no binding number"),
         }
     }
@@ -183,6 +204,41 @@ pub enum BufferUsage {
     Output,
     /// Internal to the pipeline (written by one stage, read by another).
     Intermediate,
+}
+
+/// Sampled type of a texture binding. Mirrors the wgpu
+/// `TextureSampleType` subset Wyn produces. v1 always emits
+/// `Float { filterable: true }` (the only `texture2d` sampled type).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextureSampleType {
+    Float {
+        filterable: bool,
+    },
+    Sint,
+    Uint,
+    Depth,
+}
+
+/// View dimension of a texture binding. v1 always emits `D2`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextureViewDimension {
+    D1,
+    D2,
+    D2Array,
+    Cube,
+    CubeArray,
+    D3,
+}
+
+/// Sampler binding mode. v1 always emits `Filtering`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SamplerBindingType {
+    Filtering,
+    NonFiltering,
+    Comparison,
 }
 
 /// Scalar/vector format of a vertex-buffer attribute. Mirrors the

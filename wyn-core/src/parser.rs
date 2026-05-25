@@ -181,6 +181,18 @@ impl<'a> Parser<'a> {
                 "#[storage(...)] is only valid on entry-point parameters, not on top-level 'def' declarations"
             );
         }
+        if attributes.has_texture() {
+            bail_parse_at!(
+                self.current_span(),
+                "#[texture(...)] is only valid on entry-point parameters, not on top-level 'def' declarations"
+            );
+        }
+        if attributes.has_sampler() {
+            bail_parse_at!(
+                self.current_span(),
+                "#[sampler(...)] is only valid on entry-point parameters, not on top-level 'def' declarations"
+            );
+        }
 
         {
             // Regular declaration (let or def)
@@ -618,6 +630,47 @@ impl<'a> Parser<'a> {
                     binding.ok_or_else(|| err_parse!("uniform attribute requires 'binding' parameter"))?;
 
                 Ok(Attribute::Uniform { set, binding })
+            }
+            "texture" | "sampler" => {
+                // `#[texture(set=M, binding=N)]` / `#[sampler(set=M, binding=N)]`.
+                // Same shape as `uniform`: default set 1, binding required.
+                let is_texture = attr_name == "texture";
+                self.expect(Token::LeftParen)?;
+
+                let mut set: u32 = 1;
+                let mut binding: Option<u32> = None;
+
+                loop {
+                    let param_name = self.expect_identifier()?;
+                    self.expect(Token::Assign)?;
+                    match param_name.as_str() {
+                        "set" => set = self.expect_integer()?,
+                        "binding" => binding = Some(self.expect_integer()?),
+                        _ => bail_parse_at!(
+                            self.current_span(),
+                            "Unknown {} parameter: {}",
+                            attr_name,
+                            param_name
+                        ),
+                    }
+                    if self.check(&Token::Comma) {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+
+                self.expect(Token::RightParen)?;
+                self.expect(Token::RightBracket)?;
+
+                let binding = binding
+                    .ok_or_else(|| err_parse!("{} attribute requires 'binding' parameter", attr_name))?;
+
+                if is_texture {
+                    Ok(Attribute::Texture { set, binding })
+                } else {
+                    Ok(Attribute::Sampler { set, binding })
+                }
             }
             "builtin" => {
                 self.expect(Token::LeftParen)?;
@@ -1148,6 +1201,9 @@ impl<'a> Parser<'a> {
                     "u64" => TypeName::UInt(64),
                     // Boolean
                     "bool" => TypeName::Bool,
+                    // Opaque GPU resources (nullary in v1)
+                    "texture2d" => TypeName::Texture2D,
+                    "sampler" => TypeName::Sampler,
                     // User-defined type alias or unrecognized type
                     _ => TypeName::Named(type_name),
                 };

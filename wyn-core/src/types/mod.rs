@@ -241,6 +241,18 @@ pub enum TypeName {
     /// Entry point params are constrained to Storage, others remain polymorphic.
     AddressPlaceholder,
 
+    // --- Opaque GPU resources ---
+    /// A 2D, float-sampled image. Nullary (no type args) in v1: the
+    /// sampled type is fixed to `f32`, matching Wyn's `vec4f32`/`mat4f32`
+    /// no-angle-bracket style. An opaque handle bound via
+    /// `#[texture(set, binding)]`; read with `texture_load` /
+    /// `texture_sample`.
+    Texture2D,
+    /// A filtering sampler. Nullary opaque handle bound via
+    /// `#[sampler(set, binding)]`; paired with a `Texture2D` in
+    /// `texture_sample`.
+    Sampler,
+
     // --- Type system internals ---
     /// Rigid skolem constant for existential sizes.
     /// Created when opening existential types (?k. T). Unlike unification variables,
@@ -303,6 +315,8 @@ impl std::fmt::Display for TypeName {
             TypeName::ArrayVariantBounded => write!(f, "bounded"),
             TypeName::ArrayVariantVirtual => write!(f, "virtual"),
             TypeName::AddressPlaceholder => write!(f, "?addrspace"),
+            TypeName::Texture2D => write!(f, "texture2d"),
+            TypeName::Sampler => write!(f, "sampler"),
             TypeName::Skolem(id) => write!(f, "{}", id),
         }
     }
@@ -363,6 +377,8 @@ impl polytype::Name for TypeName {
             TypeName::ArrayVariantVirtual => "virtual".to_string(),
             TypeName::ArrayVariantBounded => "bounded".to_string(),
             TypeName::AddressPlaceholder => "?variant".to_string(),
+            TypeName::Texture2D => "texture2d".to_string(),
+            TypeName::Sampler => "sampler".to_string(),
             TypeName::Skolem(id) => format!("{}", id),
         }
     }
@@ -919,6 +935,10 @@ pub fn is_copy(ty: &Type) -> bool {
             TypeName::Array => false,
             TypeName::Tuple(_) => args.iter().all(is_copy),
             TypeName::Unique => unreachable!("handled above by is_unique"),
+            // Opaque GPU resource handles are not copyable values — they
+            // must reach the backend as the original binding, not be
+            // duplicated by ownership/move analysis.
+            TypeName::Texture2D | TypeName::Sampler => false,
             _ => true,
         },
         Type::Variable(_) => true,

@@ -188,6 +188,8 @@ impl TypeKey {
                     TypeName::ArrayVariantView => "array_view".to_string(),
                     TypeName::ArrayVariantVirtual => "array_virtual".to_string(),
                     TypeName::ArrayVariantBounded => "array_bounded".to_string(),
+                    TypeName::Texture2D => "texture2d".to_string(),
+                    TypeName::Sampler => "sampler".to_string(),
                     TypeName::AddressPlaceholder => {
                         panic!("AddressPlaceholder should be resolved before monomorphization")
                     }
@@ -243,6 +245,8 @@ impl TypeKey {
                     "array_composite" => TypeName::ArrayVariantComposite,
                     "array_virtual" => TypeName::ArrayVariantVirtual,
                     "array_bounded" => TypeName::ArrayVariantBounded,
+                    "texture2d" => TypeName::Texture2D,
+                    "sampler" => TypeName::Sampler,
                     s if s.starts_with("tuple") => {
                         let n: usize = s[5..]
                             .parse()

@@ -41,6 +41,18 @@ pub enum Attribute {
         layout: StorageLayout,
         access: StorageAccess,
     },
+    /// A 2D float texture resource bound at (set, binding). Carried on an
+    /// entry-point param of type `texture2d`.
+    Texture {
+        set: u32,
+        binding: u32,
+    },
+    /// A sampler resource bound at (set, binding). Carried on an
+    /// entry-point param of type `sampler`.
+    Sampler {
+        set: u32,
+        binding: u32,
+    },
     /// Hint for the expected size of a dynamic array (in elements).
     /// Used for parallelization decisions. Ignored on non-arrays or
     /// statically sized arrays. `NonZeroU32` encodes that
@@ -68,6 +80,8 @@ pub trait AttrExt {
     fn first_location(&self) -> Option<u32>;
     fn has_uniform(&self) -> bool;
     fn has_storage(&self) -> bool;
+    fn has_texture(&self) -> bool;
+    fn has_sampler(&self) -> bool;
 }
 
 impl AttrExt for [Attribute] {
@@ -85,6 +99,12 @@ impl AttrExt for [Attribute] {
     }
     fn has_storage(&self) -> bool {
         self.has(|a| matches!(a, Attribute::Storage { .. }))
+    }
+    fn has_texture(&self) -> bool {
+        self.has(|a| matches!(a, Attribute::Texture { .. }))
+    }
+    fn has_sampler(&self) -> bool {
+        self.has(|a| matches!(a, Attribute::Sampler { .. }))
     }
 }
 

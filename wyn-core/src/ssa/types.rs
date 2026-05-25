@@ -500,6 +500,10 @@ pub struct EntryInput {
     pub uniform_binding: Option<(u32, u32)>,
     /// For compute shader broadcast inputs: byte offset within the push constant block.
     pub push_constant_offset: Option<u32>,
+    /// Programmer-attributed `#[texture(set, binding)]` on a `texture2d` param.
+    pub texture_binding: Option<(u32, u32)>,
+    /// Programmer-attributed `#[sampler(set, binding)]` on a `sampler` param.
+    pub sampler_binding: Option<(u32, u32)>,
 }
 
 /// Output from an entry point.

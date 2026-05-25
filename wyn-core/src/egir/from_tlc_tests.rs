@@ -554,3 +554,49 @@ fn vertex_uniform_param_compiles_and_surfaces_binding() {
         vs.bindings
     );
 }
+
+// --- texture + sampler bindings surface in the descriptor --------------
+
+#[test]
+fn texture_and_sampler_params_surface_bindings() {
+    use crate::pipeline_descriptor::{Binding, Pipeline};
+
+    let src = "#[vertex]\n\
+               entry vs(#[location(0)] pos: vec2f32)\n\
+                 (#[builtin(position)] vec4f32, #[location(0)] vec2f32) =\n\
+                 (@[pos.x, pos.y, 0.0, 1.0], pos)\n\
+               #[fragment]\n\
+               entry fs( #[location(0)] uv: vec2f32\n\
+                       , #[texture(set=0, binding=0)] tex: texture2d\n\
+                       , #[sampler(set=0, binding=1)] samp: sampler\n\
+                       ) #[location(0)] vec4f32 =\n\
+                 texture_sample(tex, samp, uv, 0.0) + texture_load(tex, @[0, 0], 0)";
+    let converted = crate::compile_thru_ssa(src).expect("compile thru ssa");
+
+    let fs = converted
+        .pipeline
+        .pipelines
+        .iter()
+        .find_map(|p| match p {
+            Pipeline::Graphics(gp) if gp.stages.iter().any(|s| s.entry_point == "fs") => Some(gp),
+            _ => None,
+        })
+        .expect("fragment graphics pipeline");
+
+    assert!(
+        fs.bindings.iter().any(|b| matches!(
+            b,
+            Binding::Texture { set: 0, binding: 0, name, .. } if name == "tex"
+        )),
+        "texture `tex` should surface as a Texture binding, got {:?}",
+        fs.bindings
+    );
+    assert!(
+        fs.bindings.iter().any(|b| matches!(
+            b,
+            Binding::Sampler { set: 0, binding: 1, name, .. } if name == "samp"
+        )),
+        "sampler `samp` should surface as a Sampler binding, got {:?}",
+        fs.bindings
+    );
+}

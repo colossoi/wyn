@@ -418,6 +418,22 @@ impl Constructor {
                     TypeName::AddressPlaceholder | TypeName::SizePlaceholder => {
                         panic!("Placeholders should be resolved before SPIR-V lowering");
                     }
+                    TypeName::Texture2D => {
+                        // 2D float sampled image. sampled=1 (used with a
+                        // sampler), Unknown format (sampled images don't
+                        // carry a format). rspirv dedups type_image.
+                        self.builder.type_image(
+                            self.f32_type,
+                            spirv::Dim::Dim2D,
+                            0, // depth: not a depth texture
+                            0, // arrayed: single image
+                            0, // ms: not multisampled
+                            1, // sampled: sampled (vs storage) image
+                            spirv::ImageFormat::Unknown,
+                            None,
+                        )
+                    }
+                    TypeName::Sampler => self.builder.type_sampler(),
                     _ => {
                         panic!(
                             "BUG: Unknown type reached lowering: {:?}. This should have been caught during type checking.",
@@ -1340,7 +1356,9 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                             || *id == known.length
                             || *id == known.uninit
                             || *id == known.array_with
-                            || *id == known.array_with_in_place));
+                            || *id == known.array_with_in_place
+                            || *id == known.texture_load
+                            || *id == known.texture_sample));
                     if typed_dispatch {
                         self.lower_builtin_call(
                             *id,
@@ -2417,6 +2435,50 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         self.constructor.null_const_cache.insert(result_ty, null_id);
                         Ok(null_id)
                     }
+                } else if id == known.texture_load {
+                    // texture_load(tex, coord, lod) → OpImageFetch. Raw texel
+                    // fetch; referentially transparent (no derivatives).
+                    // arg_ids = [image, coord, lod].
+                    if arg_ids.len() != 3 {
+                        bail_spirv!("texture_load requires 3 arguments");
+                    }
+                    Ok(self.constructor.builder.image_fetch(
+                        result_ty,
+                        None,
+                        arg_ids[0],
+                        arg_ids[1],
+                        Some(spirv::ImageOperands::LOD),
+                        [Operand::IdRef(arg_ids[2])],
+                    )?)
+                } else if id == known.texture_sample {
+                    // texture_sample(tex, samp, uv, lod) → OpSampledImage +
+                    // OpImageSampleExplicitLod. v1 uses EXPLICIT LOD (the
+                    // trailing arg) rather than implicit/derivative LOD, so
+                    // the result is a pure function of its arguments —
+                    // referentially transparent and valid in any stage. See
+                    // the texture plan's v2 note for gradient-based filtering
+                    // (`texture_sample_grad`). arg_ids = [image, sampler, uv, lod].
+                    if arg_ids.len() != 4 {
+                        bail_spirv!("texture_sample requires 4 arguments");
+                    }
+                    let image_ty = self
+                        .constructor
+                        .polytype_to_spirv(&PolyType::Constructed(TypeName::Texture2D, vec![]));
+                    let sampled_img_ty = self.constructor.builder.type_sampled_image(image_ty);
+                    let sampled = self.constructor.builder.sampled_image(
+                        sampled_img_ty,
+                        None,
+                        arg_ids[0],
+                        arg_ids[1],
+                    )?;
+                    Ok(self.constructor.builder.image_sample_explicit_lod(
+                        result_ty,
+                        None,
+                        sampled,
+                        arg_ids[2],
+                        spirv::ImageOperands::LOD,
+                        [Operand::IdRef(arg_ids[3])],
+                    )?)
                 } else if id == known.array_with || id == known.array_with_in_place {
                     // _w_array_with(array, index, value) - array update.
                     // Same SPIR-V lowering for both flavors today — SPIR-V can
@@ -3391,6 +3453,30 @@ fn lower_ssa_entry_point(
             );
             interfaces.push(var_id);
             uniform_loads.push((input.name.clone(), var_id, input_type));
+        } else if let Some((set, binding)) = input.texture_binding.or(input.sampler_binding) {
+            // `#[texture]` / `#[sampler]` → opaque handle in UniformConstant
+            // storage, decorated DescriptorSet/Binding. Unlike a uniform
+            // there is no Block struct: the var points straight at the
+            // image/sampler type. The generic input-load loop below does a
+            // plain `OpLoad` of this var (storage class is irrelevant to
+            // OpLoad), yielding the image/sampler *object* the sample/fetch
+            // ops consume — so we just stash the var in `env` by name here.
+            let ptr_type =
+                constructor.get_or_create_ptr_type(spirv::StorageClass::UniformConstant, input_type);
+            let var_id =
+                constructor.builder.variable(ptr_type, None, spirv::StorageClass::UniformConstant, None);
+            constructor.builder.decorate(
+                var_id,
+                spirv::Decoration::DescriptorSet,
+                [Operand::LiteralBit32(set)],
+            );
+            constructor.builder.decorate(
+                var_id,
+                spirv::Decoration::Binding,
+                [Operand::LiteralBit32(binding)],
+            );
+            constructor.env.insert(input.name.clone(), var_id);
+            interfaces.push(var_id);
         } else if let Some((set, binding)) = input.storage_binding {
             let var_id = constructor.create_storage_buffer(&input.ty, set, binding);
             // Mark input storage buffers as non-writable ONLY if no other

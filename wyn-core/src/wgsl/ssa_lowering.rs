@@ -398,6 +398,9 @@ impl TypeEmitter {
                 TypeName::Int(32) => Ok("i32".to_string()),
                 TypeName::UInt(32) => Ok("u32".to_string()),
                 TypeName::Bool => Ok("bool".to_string()),
+                // Opaque GPU resources (v1: 2D float texture + sampler).
+                TypeName::Texture2D => Ok("texture_2d<f32>".to_string()),
+                TypeName::Sampler => Ok("sampler".to_string()),
                 TypeName::Float(bits) | TypeName::Int(bits) | TypeName::UInt(bits) if *bits != 32 => Err(
                     crate::err_wgsl!("WGSL does not support {}-bit scalars (found {:?})", bits, ty),
                 ),
@@ -838,6 +841,42 @@ impl<'a> LowerCtx<'a> {
             writeln!(output).unwrap();
         }
 
+        // Entry-param `#[texture]` / `#[sampler]` declarations become
+        // module-scope handle vars (no address space). Same dedupe-by-name
+        // discipline as uniforms. The WGSL type comes from the param type
+        // (`texture_2d<f32>` / `sampler`).
+        let mut handles: HashMap<String, (u32, u32, String)> = HashMap::new();
+        for entry in &self.program.entry_points {
+            for input in &entry.inputs {
+                let set_binding = input.texture_binding.or(input.sampler_binding);
+                if let Some((set, binding)) = set_binding {
+                    let ty_str = self.type_emitter.type_to_wgsl(&input.ty)?;
+                    let key = self.mangle_tracked(&input.name)?;
+                    if let Some(prev) = handles.get(&key) {
+                        if *prev != (set, binding, ty_str.clone()) {
+                            return Err(crate::err_wgsl!(
+                                "texture/sampler '{}' declared with conflicting (set, binding, type) \
+                                 across entries",
+                                input.name
+                            ));
+                        }
+                    }
+                    handles.insert(key, (set, binding, ty_str));
+                }
+            }
+        }
+        let mut handles_sorted: Vec<_> = handles.into_iter().collect();
+        handles_sorted.sort_by_key(|(_, (set, binding, _))| (*set, *binding));
+        for (name, (set, binding, ty_str)) in handles_sorted {
+            writeln!(
+                output,
+                "@group({}) @binding({}) var {}: {};",
+                set, binding, name, ty_str
+            )
+            .unwrap();
+            writeln!(output).unwrap();
+        }
+
         output.push_str(&code);
         Ok(output)
     }
@@ -970,6 +1009,12 @@ impl<'a> LowerCtx<'a> {
             // `var<uniform>` declarations; the body references them by
             // name directly.
             if input.uniform_binding.is_some() {
+                continue;
+            }
+            // `#[texture]` / `#[sampler]` inputs become module-scope handle
+            // vars (emitted in `lower_program`); the body references them by
+            // the same mangled name, so no function param.
+            if input.texture_binding.is_some() || input.sampler_binding.is_some() {
                 continue;
             }
             let param_name =
@@ -2089,6 +2134,26 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     // cast is needed.
                     if *id == known.thread_id && args.is_empty() {
                         return Ok("_wgsl_gid.x".to_string());
+                    }
+                    // texture_load(tex, coord, lod) → textureLoad. Raw texel
+                    // fetch (no filtering); referentially transparent.
+                    if *id == known.texture_load && args.len() == 3 {
+                        return Ok(format!(
+                            "textureLoad({}, {}, {})",
+                            arg_strs[0], arg_strs[1], arg_strs[2]
+                        ));
+                    }
+                    // texture_sample(tex, samp, uv, lod) → textureSampleLevel.
+                    // v1 uses EXPLICIT LOD (the trailing arg), not implicit
+                    // `textureSample`, so the result is a pure function of its
+                    // arguments — referentially transparent and valid in any
+                    // stage. See the texture plan's v2 note for gradient-based
+                    // filtering (`texture_sample_grad` → `textureSampleGrad`).
+                    if *id == known.texture_sample && args.len() == 4 {
+                        return Ok(format!(
+                            "textureSampleLevel({}, {}, {}, {})",
+                            arg_strs[0], arg_strs[1], arg_strs[2], arg_strs[3]
+                        ));
                     }
                     if *id == known.storage_len && args.len() == 2 {
                         let set = self.resolve_const_u32(args[0]);

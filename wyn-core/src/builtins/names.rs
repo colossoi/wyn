@@ -114,3 +114,17 @@ pub const INTRINSIC_SMOOTHSTEP: &str = "_w_intrinsic_smoothstep";
 
 /// Compute-shader thread id.
 pub const INTRINSIC_THREAD_ID: &str = "_w_intrinsic_thread_id";
+
+// ---------------------------------------------------------------------------
+// Textures / samplers
+// ---------------------------------------------------------------------------
+
+/// Raw texel fetch at an integer coordinate + mip level (no filtering).
+/// Referentially transparent: result depends only on its arguments.
+pub const INTRINSIC_TEXTURE_LOAD: &str = "_w_intrinsic_texture_load";
+
+/// Filtered sample at an explicit LOD. v1 uses explicit LOD (not
+/// implicit/derivative-based) to stay referentially transparent — see the
+/// v2 note in the texture plan for gradient-based filtering
+/// (`texture_sample_grad`).
+pub const INTRINSIC_TEXTURE_SAMPLE: &str = "_w_intrinsic_texture_sample";

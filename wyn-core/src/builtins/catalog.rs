@@ -133,6 +133,9 @@ pub struct KnownBuiltinIds {
     pub min: BuiltinId,
     pub max: BuiltinId,
     pub clamp: BuiltinId,
+    /// Texture ops dispatched by `ByBuiltinId` in the SPIR-V/WGSL backends.
+    pub texture_load: BuiltinId,
+    pub texture_sample: BuiltinId,
 }
 
 /// Indexed view over the catalog table. Built once at program startup
@@ -194,6 +197,8 @@ impl BuiltinCatalog {
             min: resolve("min"),
             max: resolve("max"),
             clamp: resolve("clamp"),
+            texture_load: resolve(N::INTRINSIC_TEXTURE_LOAD),
+            texture_sample: resolve(N::INTRINSIC_TEXTURE_SAMPLE),
         };
 
         BuiltinCatalog {

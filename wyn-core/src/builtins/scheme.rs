@@ -322,3 +322,39 @@ pub fn u32_binary(_ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     let u = u32_ty();
     TypeScheme::Monotype(arrow_chain(&[u.clone(), u.clone()], u))
 }
+
+// ---------------------------------------------------------------------------
+// Textures / samplers
+// ---------------------------------------------------------------------------
+
+fn texture2d_ty() -> Type {
+    Type::Constructed(TypeName::Texture2D, vec![])
+}
+fn sampler_ty() -> Type {
+    Type::Constructed(TypeName::Sampler, vec![])
+}
+fn f32_ty() -> Type {
+    Type::Constructed(TypeName::Float(32), vec![])
+}
+fn vec_n(elem: Type, n: usize) -> Type {
+    vec_type(elem, Type::Constructed(TypeName::Size(n), vec![]))
+}
+
+/// `texture2d -> vec2<i32> -> i32 -> vec4<f32>` — raw texel fetch
+/// (`texture_load`). Monomorphic; pure (no derivatives).
+pub fn texture_load_scheme(_ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+    let coord = vec_n(i32_ty(), 2);
+    let result = vec_n(f32_ty(), 4);
+    TypeScheme::Monotype(arrow_chain(&[texture2d_ty(), coord, i32_ty()], result))
+}
+
+/// `texture2d -> sampler -> vec2<f32> -> f32 -> vec4<f32>` — filtered
+/// sample at an EXPLICIT LOD (`texture_sample`). The trailing `f32` is
+/// the mip level. Explicit LOD keeps this referentially transparent (no
+/// screen-space-derivative dependence); see the texture plan's v2 note
+/// for gradient-based filtering.
+pub fn texture_sample_scheme(_ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+    let uv = vec_n(f32_ty(), 2);
+    let result = vec_n(f32_ty(), 4);
+    TypeScheme::Monotype(arrow_chain(&[texture2d_ty(), sampler_ty(), uv, f32_ty()], result))
+}

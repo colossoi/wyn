@@ -195,7 +195,9 @@ pub fn run(
 /// from `MultiCompute` parallelization paths that pre-populate the
 /// list) are skipped to avoid duplicates.
 fn enrich_pipeline_with_auto_bindings(pipeline: &mut PipelineDescriptor, entries: &[EgirEntry]) {
-    use crate::pipeline_descriptor::{Access, Binding, BufferUsage, Pipeline};
+    use crate::pipeline_descriptor::{
+        Access, Binding, BufferUsage, Pipeline, SamplerBindingType, TextureSampleType, TextureViewDimension,
+    };
     use crate::ssa::types::ExecutionModel;
 
     for entry in entries {
@@ -270,6 +272,28 @@ fn enrich_pipeline_with_auto_bindings(pipeline: &mut PipelineDescriptor, entries
                     offset,
                     size,
                     name: input.name.clone(),
+                });
+            } else if let Some((set, binding)) = input.texture_binding {
+                if claimed.contains(&(set, binding)) {
+                    continue;
+                }
+                bindings.push(Binding::Texture {
+                    set,
+                    binding,
+                    name: input.name.clone(),
+                    sample_type: TextureSampleType::Float { filterable: true },
+                    view_dimension: TextureViewDimension::D2,
+                    multisampled: false,
+                });
+            } else if let Some((set, binding)) = input.sampler_binding {
+                if claimed.contains(&(set, binding)) {
+                    continue;
+                }
+                bindings.push(Binding::Sampler {
+                    set,
+                    binding,
+                    name: input.name.clone(),
+                    binding_type: SamplerBindingType::Filtering,
                 });
             }
         }
@@ -497,6 +521,8 @@ fn convert_entry_point(
         let uniform_binding = entry.params.get(i).and_then(crate::binding_layout::extract_uniform_binding);
         let attr_storage_binding =
             entry.params.get(i).and_then(crate::binding_layout::extract_storage_binding);
+        let texture_binding = entry.params.get(i).and_then(crate::binding_layout::extract_texture_binding);
+        let sampler_binding = entry.params.get(i).and_then(crate::binding_layout::extract_sampler_binding);
 
         // Uniqueness is an ownership-tracking concept that's already been
         // consumed by `apply_ownership`; codegen operates on the stripped
@@ -537,6 +563,8 @@ fn convert_entry_point(
                     storage_binding: Some(set_binding),
                     uniform_binding: None,
                     push_constant_offset: None,
+                    texture_binding: None,
+                    sampler_binding: None,
                 });
                 view_nids.push(converter.emit_storage_view(set_binding.0, set_binding.1, field_ty.clone()));
             }
@@ -550,6 +578,8 @@ fn convert_entry_point(
         let push_constant_offset = if is_compute
             && storage_binding.is_none()
             && uniform_binding.is_none()
+            && texture_binding.is_none()
+            && sampler_binding.is_none()
             && !matches!(&decoration, Some(IoDecoration::BuiltIn(_)))
         {
             let offset = pc_offset;
@@ -572,6 +602,8 @@ fn convert_entry_point(
             storage_binding,
             uniform_binding,
             push_constant_offset,
+            texture_binding,
+            sampler_binding,
         });
     }
     let binding_num: u32 = entry.param_bindings.len() as u32;
