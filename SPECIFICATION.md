@@ -1427,6 +1427,34 @@ entry fs(
 ) #[location(0)] vec4f32 = result
 ```
 
+#### Resource Bindings
+
+Uniforms, storage buffers, textures, and samplers are bound to
+entry-point parameters via attributes (never to top-level `def`s).
+
+**`#[uniform(set=S, binding=B)]`** / **`#[storage(set=S, binding=B, ...)]`** —
+small read-only constants / arbitrary-size buffers. See *GPU Resources
+and Descriptor Set Layout* for set-numbering rules.
+
+**`#[texture(set=S, binding=B)]`** - binds a `texture2d` parameter to a
+sampled texture resource. `set` defaults to 1; `binding` is required.
+
+**`#[sampler(set=S, binding=B)]`** - binds a `sampler` parameter to a
+sampler resource. `set` defaults to 1; `binding` is required.
+
+```wyn
+#[fragment]
+entry fs(
+    #[location(0)] uv: vec2f32,
+    #[texture(set=0, binding=0)] tex: texture2d,
+    #[sampler(set=0, binding=1)] samp: sampler
+) #[location(0)] vec4f32 =
+    texture_sample(tex, samp, uv, 0.0)
+```
+
+See *Texture and Sampler Types* for the types and the
+`texture_load` / `texture_sample` operations.
+
 ### Attribute Examples
 
 #### Complete Vertex Shader Interface
@@ -1584,40 +1612,99 @@ The attribute system is statically type-checked:
 
 ---
 
+## Texture and Sampler Types
+
+Wyn has two opaque GPU-resource types for image sampling. They are
+*handles*, not values: they can't be constructed, copied, or used in
+arithmetic — only bound (via `#[texture]` / `#[sampler]` on an
+entry-point parameter) and passed to the texture operations below.
+
+| Type        | Meaning                                              |
+|-------------|------------------------------------------------------|
+| `texture2d` | A 2D, `f32`-sampled image.                           |
+| `sampler`   | A filtering sampler.                                 |
+
+(`texture2d` is monomorphic in this version — the sampled type is fixed
+to `f32`, matching the no-angle-bracket style of `vec4f32` / `mat4f32`.)
+
+### Texture operations
+
+**`texture_load(tex: texture2d, coord: vec2i32, lod: i32) -> vec4f32`**
+— raw texel fetch at integer coordinate `coord` and mip level `lod`. No
+filtering.
+
+**`texture_sample(tex: texture2d, samp: sampler, uv: vec2f32, lod: f32) -> vec4f32`**
+— filtered sample at UV `uv`, using sampler `samp`, at an **explicit**
+mip level `lod`.
+
+Both operations are *referentially transparent*: their result is a pure
+function of their arguments. In particular `texture_sample` takes an
+explicit `lod` rather than computing one from screen-space derivatives,
+so it has no hidden cross-invocation dependence and is valid in any
+shader stage. (Derivative-based automatic mip selection — and a
+referentially-transparent `texture_sample_grad` variant taking explicit
+gradients — is planned future work.)
+
+```wyn
+#[fragment]
+entry fs(
+    #[location(0)] uv: vec2f32,
+    #[texture(set=0, binding=0)] tex: texture2d,
+    #[sampler(set=0, binding=1)] samp: sampler
+) #[location(0)] vec4f32 =
+    let filtered = texture_sample(tex, samp, uv, 0.0) in
+    let texel    = texture_load(tex, @[0, 0], 0) in
+    filtered + texel
+```
+
+---
+
 ## GPU Resources and Descriptor Set Layout
 
 Shaders read and write GPU memory through three kinds of bindings:
 **uniforms** (small, read-only constants), **storage buffers**
 (arbitrary-size, read or read-write arrays), and **push constants**
 (tiny, fast, write-once-per-dispatch). Wyn surfaces uniforms and
-storage buffers as top-level `def`s decorated with attributes; push
-constants are not user-declared (the compiler synthesizes them for
-non-array compute entry parameters that need to broadcast a scalar
-to every invocation).
+storage buffers as **entry-point parameters** decorated with binding
+attributes; push constants are not user-declared (the compiler
+synthesizes them for non-array compute entry parameters that need to
+broadcast a scalar to every invocation).
+
+> Note: these attributes go on entry-point *parameters*, not on
+> top-level `def`s. `#[uniform(...)] def x: T` and `#[storage(...)]
+> def x: T` are compile-time errors ("only valid on entry-point
+> parameters").
 
 ### Grammar
 
 ```ebnf
-uniform_decl ::= "#[" "uniform" "(" set_param? "binding" "=" decimal ")" "]"
-                 "def" identifier ":" type
-set_param    ::= "set" "=" decimal ","
-storage_decl ::= "#[" "storage" "(" set_param? "binding" "=" decimal
+binding_attr ::= "#[" "uniform" "(" set_param? "binding" "=" decimal ")" "]"
+               | "#[" "storage" "(" set_param? "binding" "=" decimal
                  ("," "layout" "=" layout_kind)?
                  ("," "access" "=" access_kind)?
                  ")" "]"
-                 "def" identifier ":" type
+set_param    ::= "set" "=" decimal ","
 layout_kind  ::= "std430" | "std140"
 access_kind  ::= "read" | "write" | "readwrite"
 ```
 
+A `binding_attr` prefixes an entry-point parameter:
+`binding_attr identifier ":" type`.
+
 Examples:
 
 ```wyn
-#[uniform(set=1, binding=0)] def iResolution: vec3f32
-#[uniform(binding=1)]        def iTime: f32           -- set defaults to 1
+#[fragment]
+entry main(
+    #[uniform(set=1, binding=0)] iResolution: vec3f32,
+    #[uniform(binding=1)]        iTime: f32,            -- set defaults to 1
+    #[builtin(frag_coord)]       fragCoord: vec4f32
+) #[location(0)] vec4f32 = ...
 
-#[storage(set=2, binding=0, access=read)]
-def particles: []vec4f32
+#[compute]
+entry sim(
+    #[storage(set=2, binding=0, access=read)] particles: []vec4f32
+) ... = ...
 ```
 
 ### Descriptor Set Layout
@@ -1656,11 +1743,12 @@ and return value. A tuple-of-arrays input is split into one binding
 per element. For example,
 
 ```wyn
-#[uniform(set=1, binding=0)] def now: f32
-#[uniform(set=1, binding=1)] def rfr: f32
-
 #[compute]
-entry price_options(opts: [](f32, f32, i32, f32, f32)) []f32 = ...
+entry price_options(
+    #[uniform(set=1, binding=0)] now: f32,
+    #[uniform(set=1, binding=1)] rfr: f32,
+    opts: [](f32, f32, i32, f32, f32)
+) []f32 = ...
 ```
 
 allocates five storage bindings on set 0 for the SoA-split input
