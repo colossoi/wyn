@@ -209,8 +209,7 @@ pub fn build_shadertoy(
         present: false,
     };
 
-    let sidecar = load_sidecar_uniforms(spv_path)
-        .map_err(|e| anyhow!("viz vf --shadertoy: {}", e))?;
+    let sidecar = load_sidecar_uniforms(spv_path).map_err(|e| anyhow!("viz vf --shadertoy: {}", e))?;
     if sidecar.is_empty() {
         return Err(anyhow!(
             "viz vf --shadertoy: sidecar next to {:?} declares no Uniform bindings on its first graphics pipeline. \
