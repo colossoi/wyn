@@ -178,7 +178,7 @@ pub fn run(
 
     // `plans` is consumed inline above (output-binding routing); the
     // EGIR-side parallelization pass runs as a separate typestate stage
-    // on `EgirRaw` — see `lib::EgirRaw::parallelize`.
+    // after output assignment — see `lib::EgirOutputsAssigned::parallelize`.
     Ok(EgirInner::new(
         functions,
         externs,
@@ -626,52 +626,14 @@ fn convert_entry_point(
     );
     let is_unit_return = matches!(ret_type, Type::Constructed(TypeName::Unit, _));
 
-    // Pre-create the output StorageView for compute+storage-output entries so
-    // it's available for the Map→MapInto rewrite on the result node.
-    let has_storage_output =
-        is_compute && !is_unit_return && outputs.iter().any(|o| o.storage_binding.is_some());
-    let compute_output_view = if has_storage_output {
-        outputs.first().map(|output| {
-            let (set, binding) =
-                output.storage_binding.expect("BUG: compute output without storage binding");
-            let elem_ty = output.ty.elem_type().cloned().unwrap_or(output.ty.clone());
-            converter.emit_storage_view(set, binding, elem_ty)
-        })
-    } else {
-        None
-    };
-
-    // Convert body.
+    // Convert body. Output assignment (storing the result into the bound
+    // storage views / graphics output slots, and retargeting tail
+    // Map/Scan SOACs to stream directly into a runtime-sized output) is a
+    // separate, uniform pass — `egir::assign_outputs`, run right after
+    // this conversion. Here we just leave the body terminating in its
+    // single tail value (or `None` for a unit entry).
     let result_nid = converter.convert_term(inner_body)?;
-
-    // Finalize based on entry-point kind.
     if is_unit_return {
-        converter.set_return(None);
-    } else if is_compute && !outputs.is_empty() {
-        // Map/Scan producing an array → flip the destination to
-        // OutputView so the streaming writes land directly in the
-        // bound view. Scan that's already `InputBuffer` (consumes its
-        // input in place) is intentionally NOT retargeted: the result
-        // lives in the input buffer, and the parallel-scan path
-        // reroutes the pipeline descriptor's writes to that binding.
-        // Everything else (Reduce/Redomap returning a scalar or tuple,
-        // or a plain expression) → compute the value, then store it
-        // explicitly.
-        if result_soac_is_consuming_scan(&converter.graph, result_nid) {
-            converter.set_return(None);
-        } else if let (true, Some(output_view_nid)) = (
-            result_soac_is_map_or_scan(&converter.graph, result_nid),
-            compute_output_view,
-        ) {
-            rewrite_map_scan_to_into(&mut converter.graph, result_nid, output_view_nid);
-            converter.set_return(None);
-        } else {
-            emit_compute_output_stores(&mut converter, result_nid, &outputs);
-            converter.set_return(None);
-        }
-    } else if !is_compute && !is_unit_return && !outputs.is_empty() {
-        // Vertex/fragment: OutputPtr + Store per output.
-        emit_vertex_fragment_output_stores(&mut converter, result_nid, &outputs);
         converter.set_return(None);
     } else {
         converter.set_return(Some(result_nid));
@@ -690,165 +652,6 @@ fn convert_entry_point(
         graph,
         control_headers,
     ))
-}
-
-/// True iff the side-effect producing `result` is a `PendingSoac::Scan`
-/// with `destination: InputBuffer` — i.e. the scan writes its
-/// prefix-scan back into its input buffer. The auto-bound entry output
-/// is unused; the caller (the parallel-scan reroute or the host
-/// pipeline) reads the result from the input binding.
-fn result_soac_is_consuming_scan(graph: &EGraph, result: NodeId) -> bool {
-    for (_bid, block) in &graph.skeleton.blocks {
-        for se in &block.side_effects {
-            if se.result == Some(result) {
-                return matches!(
-                    &se.kind,
-                    SideEffectKind::Pending(PendingSoac::Scan {
-                        destination: SoacDestination::InputBuffer,
-                        ..
-                    })
-                );
-            }
-        }
-    }
-    false
-}
-
-/// True iff the side-effect producing `result` is a Map or Scan SOAC
-/// that can be retargeted to an OutputView. Scans already at
-/// `InputBuffer` are skipped — those are handled by
-/// `result_soac_is_consuming_scan`.
-fn result_soac_is_map_or_scan(graph: &EGraph, result: NodeId) -> bool {
-    for (_bid, block) in &graph.skeleton.blocks {
-        for se in &block.side_effects {
-            if se.result == Some(result) {
-                return matches!(
-                    &se.kind,
-                    SideEffectKind::Pending(PendingSoac::Map { .. })
-                        | SideEffectKind::Pending(PendingSoac::Scan {
-                            destination: SoacDestination::Fresh,
-                            ..
-                        })
-                );
-            }
-        }
-    }
-    false
-}
-
-fn rewrite_map_scan_to_into(graph: &mut EGraph, target_result: NodeId, output_view: NodeId) {
-    for (_bid, block) in graph.skeleton.blocks.iter_mut() {
-        for se in &mut block.side_effects {
-            if se.result != Some(target_result) {
-                continue;
-            }
-            let kind = se.kind.clone();
-            match kind {
-                SideEffectKind::Pending(PendingSoac::Map {
-                    func,
-                    input_array_types,
-                    input_elem_types,
-                    output_elem_type,
-                    destination: _,
-                }) => {
-                    se.kind = SideEffectKind::Pending(PendingSoac::Map {
-                        func,
-                        input_array_types,
-                        input_elem_types,
-                        output_elem_type,
-                        destination: SoacDestination::OutputView,
-                    });
-                    se.operand_nodes.push(output_view);
-                }
-                SideEffectKind::Pending(PendingSoac::Scan {
-                    func,
-                    input_array_type,
-                    input_elem_type,
-                    destination: _,
-                }) => {
-                    se.kind = SideEffectKind::Pending(PendingSoac::Scan {
-                        func,
-                        input_array_type,
-                        input_elem_type,
-                        destination: SoacDestination::OutputView,
-                    });
-                    se.operand_nodes.push(output_view);
-                }
-                other => panic!(
-                    "rewrite_map_scan_to_into: side effect for target_result={:?} \
-                     is not Map/Scan: {:?} — caller must screen with \
-                     result_soac_is_map_or_scan first",
-                    target_result, other
-                ),
-            }
-            return;
-        }
-    }
-    panic!(
-        "rewrite_map_scan_to_into: no side effect produced target_result={:?}",
-        target_result
-    );
-}
-
-/// Compute entry with a non-view result: store the result (or its tuple
-/// components) into the output storage buffers.
-fn emit_compute_output_stores(converter: &mut Converter<'_>, result_nid: NodeId, outputs: &[EntryOutput]) {
-    for (i, output) in outputs.iter().enumerate() {
-        let (set, binding) = output.storage_binding.expect("BUG: compute output without storage binding");
-        let value_nid = if outputs.len() == 1 {
-            result_nid
-        } else {
-            converter.emit_project(result_nid, i as u32, output.ty.clone())
-        };
-
-        let fixed_size = output.ty.array_size().and_then(|s| {
-            if let Type::Constructed(TypeName::Size(n), _) = s { Some(*n) } else { None }
-        });
-        let elem_ty = output.ty.elem_type().cloned();
-
-        if let (Some(n), Some(et)) = (fixed_size, elem_ty) {
-            let view_nid = converter.emit_storage_view(set, binding, et.clone());
-            for j in 0..n {
-                let elem_nid = converter.emit_project(value_nid, j as u32, et.clone());
-                let idx_nid = converter.intern_u32(j as u32);
-                converter.emit_storage_store(view_nid, idx_nid, elem_nid, et.clone());
-            }
-        } else if is_unsized_array(&output.ty) {
-            // A runtime-sized array reached the explicit-store fallback —
-            // this means a SOAC rewrite (Map/Scan→OutputView) was expected
-            // upstream but didn't happen. Storing the whole view at idx=0
-            // would emit nonsense; surface the contract violation instead.
-            panic!(
-                "compute output #{} is a runtime-sized array ({:?}) but \
-                 reached emit_compute_output_stores: the producing SOAC \
-                 must rewrite to OutputView upstream",
-                i, output.ty
-            );
-        } else {
-            let view_nid = converter.emit_storage_view(set, binding, output.ty.clone());
-            let idx_zero = converter.intern_u32(0);
-            converter.emit_storage_store(view_nid, idx_zero, value_nid, output.ty.clone());
-        }
-    }
-}
-
-/// Vertex/fragment entry: write the result (or tuple components) to
-/// `OutputPtr(i)` locations.
-fn emit_vertex_fragment_output_stores(
-    converter: &mut Converter<'_>,
-    result_nid: NodeId,
-    outputs: &[EntryOutput],
-) {
-    if outputs.len() == 1 {
-        let place_nid = converter.emit_output_slot(0, outputs[0].ty.clone());
-        converter.emit_store(place_nid, result_nid);
-    } else {
-        for (i, output) in outputs.iter().enumerate() {
-            let component = converter.emit_project(result_nid, i as u32, output.ty.clone());
-            let place_nid = converter.emit_output_slot(i, output.ty.clone());
-            converter.emit_store(place_nid, component);
-        }
-    }
 }
 
 // ============================================================================
@@ -924,24 +727,8 @@ impl<'a> Converter<'a> {
 
     // -- Entry-point emission helpers (thin delegations to `graph_ops`) --
 
-    fn intern_u32(&mut self, n: u32) -> NodeId {
-        super::graph_ops::intern_u32(&mut self.graph, n, self.current_span)
-    }
-
     fn emit_storage_view(&mut self, set: u32, binding: u32, view_ty: Type<TypeName>) -> NodeId {
         super::graph_ops::intern_storage_view(&mut self.graph, set, binding, view_ty, self.current_span)
-    }
-
-    fn emit_store(&mut self, place_nid: NodeId, value_nid: NodeId) -> EffectToken {
-        let span = self.current_span;
-        super::graph_ops::emit_store(
-            &mut self.graph,
-            self.current_block,
-            place_nid,
-            value_nid,
-            &mut self.next_effect,
-            span,
-        )
     }
 
     fn emit_storage_store(
@@ -962,16 +749,6 @@ impl<'a> Converter<'a> {
             &mut self.next_effect,
             span,
         );
-    }
-
-    /// Emit a pure `OutputSlot(index)` node (produces a `PlaceId`).
-    fn emit_output_slot(&mut self, index: usize, elem_ty: Type<TypeName>) -> NodeId {
-        self.intern_pure(PureOp::OutputSlot { index }, smallvec![], elem_ty)
-    }
-
-    /// Emit a pure `Project(base, index)` node.
-    fn emit_project(&mut self, base_nid: NodeId, index: u32, ty: Type<TypeName>) -> NodeId {
-        self.intern_pure(PureOp::Project { index }, smallvec![base_nid], ty)
     }
 
     /// Extract the built EGraph + control_headers, leaving the rest of the
@@ -2227,21 +2004,6 @@ fn extract_lambda_params(term: &Term) -> (&Term, Vec<(SymbolId, Type<TypeName>)>
         current = &lam.body;
     }
     (current, params)
-}
-
-/// Check if a type is an unsized array (runtime-sized storage buffer). At
-/// this pipeline stage a "runtime size" shows up as either an unresolved
-/// polytype variable or a `SizePlaceholder` (the latter is what
-/// `--fill-holes` leaves in size positions).
-fn is_unsized_array(ty: &Type<TypeName>) -> bool {
-    ty.array_size()
-        .map(|s| {
-            matches!(
-                s,
-                Type::Variable(_) | Type::Constructed(TypeName::SizePlaceholder, _)
-            )
-        })
-        .unwrap_or(false)
 }
 
 /// Extract a `#[size_hint(N)]` attribute from a pattern.

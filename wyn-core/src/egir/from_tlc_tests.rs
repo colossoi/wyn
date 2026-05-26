@@ -47,6 +47,8 @@ fn compile_via_egir(src: &str) -> Program {
     crate::EgirRaw(
         run(&tlc.tlc, PipelineDescriptor::default(), &empty).expect("egir::from_tlc conversion failed"),
     )
+    .assign_outputs()
+    .expect("egir::assign_outputs failed")
     .parallelize(&empty)
     .expand_soacs(true)
     .optimize_skeleton()
@@ -333,72 +335,6 @@ entry main() #[builtin(position)] vec4f32 =
     );
     // 'pick' may be inlined — just verify compilation succeeds
     assert!(!program.entry_points.is_empty(), "Should have entry points");
-}
-
-#[test]
-#[should_panic(expected = "is not Map/Scan")]
-fn rewrite_map_scan_to_into_panics_on_reduce() {
-    use super::rewrite_map_scan_to_into;
-    use crate::egir::types::{EGraph, PendingSoac, SideEffect, SideEffectKind};
-    use smallvec::SmallVec;
-
-    let mut graph = EGraph::new();
-    let target = graph.alloc_side_effect_result(i32_ty());
-    let output_view = graph.alloc_side_effect_result(i32_ty());
-
-    let entry = graph.skeleton.entry;
-    graph.skeleton.blocks[entry].side_effects.push(SideEffect {
-        kind: SideEffectKind::Pending(PendingSoac::Reduce {
-            func: "f".to_string(),
-            input_array_type: i32_ty(),
-            input_elem_type: i32_ty(),
-        }),
-        operand_nodes: SmallVec::new(),
-        result: Some(target),
-        effects: None,
-        span: None,
-    });
-
-    rewrite_map_scan_to_into(&mut graph, target, output_view);
-}
-
-#[test]
-#[should_panic(expected = "runtime-sized array")]
-fn emit_compute_output_stores_panics_on_unsized_array() {
-    use super::emit_compute_output_stores;
-    use crate::ssa::types::EntryOutput;
-
-    // Build a runtime-sized array type: [n]f32 where n is a free variable.
-    let f32_ty = Type::Constructed(TypeName::Float(32), vec![]);
-    let unsized_arr_ty = Type::Constructed(TypeName::Array, vec![f32_ty.clone(), Type::Variable(99)]);
-
-    let symbols = SymbolTable::new();
-    let top_level = HashMap::new();
-    let constants_by_name = HashMap::new();
-    let mut converter = Converter::new(&top_level, &constants_by_name, &symbols, HashSet::new());
-
-    let result_nid = converter.graph.alloc_side_effect_result(unsized_arr_ty.clone());
-
-    let outputs = vec![EntryOutput {
-        ty: unsized_arr_ty,
-        decoration: None,
-        storage_binding: Some((0, 1)),
-    }];
-
-    emit_compute_output_stores(&mut converter, result_nid, &outputs);
-}
-
-#[test]
-#[should_panic(expected = "no side effect produced")]
-fn rewrite_map_scan_to_into_panics_when_target_missing() {
-    use super::rewrite_map_scan_to_into;
-    use crate::egir::types::EGraph;
-
-    let mut graph = EGraph::new();
-    let target = graph.alloc_side_effect_result(i32_ty());
-    let output_view = graph.alloc_side_effect_result(i32_ty());
-
-    rewrite_map_scan_to_into(&mut graph, target, output_view);
 }
 
 #[test]

@@ -825,6 +825,30 @@ fn has_soac_kind(term: &crate::tlc::Term, kind: &str) -> bool {
 }
 
 // =============================================================================
+// Multi-output compute entries
+// =============================================================================
+
+/// Regression: a compute entry returning a tuple of >1 runtime-sized
+/// array used to panic in EGIR lowering — the SOAC→OutputView rewrite
+/// that streams a runtime-sized result into its bound storage view only
+/// fired for the single-output case. For a tuple result, each field
+/// reached `emit_compute_output_stores` as a plain value and hit the
+/// `is_unsized_array` guard (`from_tlc.rs` "must rewrite to OutputView
+/// upstream"). Each tuple field's producing Map/Scan must be retargeted
+/// to its own output view.
+#[test]
+fn test_multi_output_compute_runtime_sized_arrays() {
+    let _ssa = compile_to_ssa(
+        r#"
+#[compute]
+entry gen(src: []f32) ([]f32, []f32) =
+    (map(|x: f32| x * 2.0, src), map(|x: f32| x * 3.0, src))
+"#,
+    );
+    // Compilation success (no panic) is the test.
+}
+
+// =============================================================================
 // Basic Expressions
 // =============================================================================
 

@@ -580,6 +580,33 @@ entry sum_array(#[size_hint(1024)] data: []f32) f32 =
 }
 
 #[test]
+fn wgsl_compute_multi_output_runtime_sized_arrays() {
+    // A compute entry returning a tuple of >1 runtime-sized array: each
+    // field's producing `map` must stream into its own bound output
+    // storage view. Regression for the EGIR panic where the
+    // SOAC→OutputView rewrite only fired for the single-output case.
+    let wgsl = compile_to_wgsl(
+        r#"
+#[compute]
+entry gen(src: []f32) ([]f32, []f32) =
+    (map(|x: f32| x * 2.0, src), map(|x: f32| x * 3.0, src))
+"#,
+    )
+    .expect("compile");
+    validate_wgsl(&wgsl);
+
+    // Two distinct output buffers, each written directly by its own map.
+    assert!(
+        wgsl.contains("_buf_0_1[") && wgsl.contains("] = "),
+        "expected a direct write to output buffer 1:\n{wgsl}"
+    );
+    assert!(
+        wgsl.contains("_buf_0_2[") && wgsl.contains("] = "),
+        "expected a direct write to output buffer 2:\n{wgsl}"
+    );
+}
+
+#[test]
 fn wgsl_fragment_with_helper_function() {
     // User-defined helper called from the entry point. Exercises:
     // function emission + call, parameter passing, return value.
