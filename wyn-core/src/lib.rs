@@ -40,7 +40,7 @@ pub mod wgsl;
 mod integration_tests;
 
 #[cfg(test)]
-mod desugar_tests;
+mod slice_range_tests;
 
 use std::collections::HashMap;
 use std::hash::Hash;
