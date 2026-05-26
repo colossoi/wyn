@@ -4,6 +4,19 @@ use anyhow::{Context, Result, anyhow};
 use ash::vk;
 use std::ffi::CStr;
 
+/// Turn a Vulkan submit/wait result into an `anyhow` error, calling out a lost
+/// device explicitly — the usual cause is a watchdog/TDR timeout from too much
+/// work in one dispatch, which otherwise surfaces as a silently-zeroed buffer.
+fn check_vk(result: std::result::Result<(), vk::Result>, what: &str) -> Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(vk::Result::ERROR_DEVICE_LOST) => Err(anyhow!(
+            "{what}: GPU device lost — likely a watchdog/TDR timeout; lower --chunk-size"
+        )),
+        Err(e) => Err(anyhow!("{what}: {e:?}")),
+    }
+}
+
 unsafe extern "system" fn vulkan_debug_callback(
     message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
     message_type: vk::DebugUtilsMessageTypeFlagsEXT,
@@ -644,15 +657,15 @@ impl<'a> ComputePipeline<'a> {
 
             let fence = self.ctx.device.create_fence(&vk::FenceCreateInfo::default(), None)?;
 
-            self.ctx
-                .device
-                .queue_submit(self.ctx.queue, &[submit_info], fence)
-                .context("Failed to submit queue")?;
-
-            self.ctx
-                .device
-                .wait_for_fences(&[fence], true, u64::MAX)
-                .context("Failed to wait for fence")?;
+            check_vk(
+                self.ctx.device.queue_submit(self.ctx.queue, &[submit_info], fence),
+                "queue submit",
+            )?;
+            check_vk(
+                self.ctx.device.wait_for_fences(&[fence], true, u64::MAX),
+                "wait for fence",
+            )?;
+            check_vk(self.ctx.device.device_wait_idle(), "device wait idle")?;
 
             self.ctx.device.destroy_fence(fence, None);
 
@@ -916,14 +929,17 @@ impl<'a> MultiStagePipeline<'a> {
 
             let submit_info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));
             let fence = self.ctx.device.create_fence(&vk::FenceCreateInfo::default(), None)?;
-            self.ctx
-                .device
-                .queue_submit(self.ctx.queue, &[submit_info], fence)
-                .context("Failed to submit queue")?;
-            self.ctx
-                .device
-                .wait_for_fences(&[fence], true, u64::MAX)
-                .context("Failed to wait for fence")?;
+            check_vk(
+                self.ctx.device.queue_submit(self.ctx.queue, &[submit_info], fence),
+                "queue submit",
+            )?;
+            check_vk(
+                self.ctx.device.wait_for_fences(&[fence], true, u64::MAX),
+                "wait for fence",
+            )?;
+            // Best-effort: some drivers only report a lost device here, after
+            // recovering the fence on reset.
+            check_vk(self.ctx.device.device_wait_idle(), "device wait idle")?;
             self.ctx.device.destroy_fence(fence, None);
 
             self.ctx.device.reset_command_pool(self.command_pool, vk::CommandPoolResetFlags::empty())?;
