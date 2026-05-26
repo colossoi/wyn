@@ -237,7 +237,12 @@ pub fn create_binding_buffers(
                 ));
             } else {
                 // Un-sized intermediate/output: fall back to a default size.
-                let count = 1024usize;
+                // Reduce/redomap phase 1 runs a fixed saturating grid
+                // (PHASE1_SATURATING_GROUPS=1024 workgroups × 64), so its
+                // `partials` buffer needs one element per worker; size the
+                // default to cover that grid so phase 1 never writes out of
+                // bounds. (Length-bearing buffers are sized in pass 2.)
+                let count = 1024 * 64usize;
                 if verbose {
                     println!("Allocated {} default zero elements for '{}'", count, name);
                 }

@@ -462,6 +462,13 @@ fn classify_input(input: &ArrayExpr) -> Option<ArrayProvenance> {
 
 const DEFAULT_WORKGROUP_X: u32 = 64;
 
+/// Workgroup count for a reduce/redomap phase 1 grid. The grid is fixed
+/// (not derived from input length) and sized to roughly saturate the GPU;
+/// the kernel grid-strides over the input via the `num_workgroups`
+/// intrinsic, so this bounds the `partials` count to one per worker
+/// (`PHASE1_SATURATING_GROUPS * workgroup_width`) regardless of input size.
+const PHASE1_SATURATING_GROUPS: u32 = 1024;
+
 /// Per-entry pipeline sizing derived from `#[size_hint(N)]`. The
 /// `workgroup` drives the shader's `local_size` and the chunk-arithmetic
 /// `total_threads`; `default_total_threads` ships to the pipeline
@@ -1584,7 +1591,7 @@ fn build_two_phase_pipeline_descriptor(
     Pipeline::MultiCompute(MultiComputePipeline {
         bindings: all_bindings,
         stages: vec![
-            derived_stage(
+            saturating_stage(
                 entry_name.to_string(),
                 input_indices,
                 vec![partials_idx],
@@ -1937,7 +1944,7 @@ fn build_two_phase_entries(
     let pipeline = Pipeline::MultiCompute(MultiComputePipeline {
         bindings: all_bindings,
         stages: vec![
-            derived_stage(phase1_name.clone(), input_indices, vec![partials_idx], workgroup),
+            saturating_stage(phase1_name.clone(), input_indices, vec![partials_idx], workgroup),
             fixed_stage(phase2_name.clone(), vec![partials_idx], vec![result_idx]),
         ],
         default_total_threads: sizing.default_total_threads,
@@ -2589,6 +2596,30 @@ fn derived_stage(
         workgroup_size: workgroup,
         dispatch_size: DispatchSize::DerivedFromInputLength {
             workgroup_size: workgroup.0,
+        },
+        reads,
+        writes,
+    }
+}
+
+/// A `ComputeStage` for a reduce/redomap phase 1: a fixed, hardware-saturating
+/// grid (`PHASE1_SATURATING_GROUPS` workgroups), *not* derived from input
+/// length. The kernel grid-strides over the input via the `num_workgroups`
+/// intrinsic, so a bounded grid yields a bounded `partials` count — one partial
+/// per worker — instead of one per input element.
+fn saturating_stage(
+    entry_point: String,
+    reads: Vec<usize>,
+    writes: Vec<usize>,
+    workgroup: (u32, u32, u32),
+) -> ComputeStage {
+    ComputeStage {
+        entry_point,
+        workgroup_size: workgroup,
+        dispatch_size: DispatchSize::Fixed {
+            x: PHASE1_SATURATING_GROUPS,
+            y: 1,
+            z: 1,
         },
         reads,
         writes,

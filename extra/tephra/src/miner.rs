@@ -26,8 +26,17 @@ use crate::vk_helpers::{ComputeContext, MultiStagePipeline, StorageBuffer};
 /// target(32) + n(4) + nonce_offset(4) = 116 bytes.
 const PUSH_CONSTANT_BYTES: usize = 116;
 
-/// Phase-1 workgroup width: each thread hashes one nonce.
+/// Phase-1 workgroup width. Phase 1 runs a fixed, GPU-saturating grid and
+/// each thread grid-strides over many nonces, so the worker count (and thus
+/// the `partials` count phase 2 must combine) is bounded by the grid size,
+/// not by the nonce count.
 const WORKGROUP_SIZE: u32 = 64;
+
+/// Phase-1 workgroup count: a fixed grid sized to saturate the GPU. The
+/// number of partials phase 1 emits is `DEFAULT_WORKGROUPS * WORKGROUP_SIZE`,
+/// independent of how many nonces a chunk scans. Matches the compiler's
+/// `PHASE1_SATURATING_GROUPS`. Overridable via `--workgroups`.
+const DEFAULT_WORKGROUPS: u32 = 1024;
 
 /// Bytes per result entry: u32 nonce + 8 × u32 hash = 36 bytes.
 const RESULT_BYTES: usize = 36;
@@ -218,10 +227,18 @@ pub fn run(
         PUSH_CONSTANT_BYTES as u32,
     )?;
 
-    // partials: device-local scratch sized for a full chunk's worst case;
-    // the host never reads or writes it (descriptor `usage: intermediate`).
+    // Phase 1 runs a fixed grid every chunk, so the worker count T — and
+    // therefore the number of partials — is constant. Idle workers (when a
+    // chunk has fewer nonces than workers) write the neutral element, so
+    // phase 2 reduces exactly these T entries with no stale reads.
+    let num_workgroups = workgroups_override.unwrap_or(DEFAULT_WORKGROUPS);
+    let total_threads = num_workgroups * WORKGROUP_SIZE;
+
+    // partials: device-local scratch sized to exactly T = total_threads
+    // entries (phase 2's reduce length is this buffer's length); the host
+    // never reads or writes it (descriptor `usage: intermediate`).
     // result: host-visible, read back after each chunk.
-    let partials = StorageBuffer::new_device_local(&ctx, chunk as usize * RESULT_BYTES)?;
+    let partials = StorageBuffer::new_device_local(&ctx, total_threads as usize * RESULT_BYTES)?;
     let result = StorageBuffer::new_host_bytes(&ctx, RESULT_BYTES)?;
 
     // Bind buffers in descriptor-binding order: buffers[binding] = buffer.
@@ -239,7 +256,6 @@ pub fn run(
     for chunk_idx in 0..num_chunks {
         let chunk_offset = nonce_offset + chunk_idx * chunk;
         let chunk_n = chunk.min(nonces - chunk_idx * chunk);
-        let num_workgroups = workgroups_override.unwrap_or_else(|| chunk_n.div_ceil(WORKGROUP_SIZE));
 
         let pc = push_constants_for(&header_base, &target, chunk_n, chunk_offset);
         pipeline.dispatch(&buffers, &[[num_workgroups, 1, 1], [1, 1, 1]], &pc)?;
