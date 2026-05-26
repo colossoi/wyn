@@ -232,6 +232,9 @@ pub fn run(
 
     let start = Instant::now();
     let mut hit: Option<(u32, [u32; 8])> = None;
+    // Count only nonces from chunks that actually completed, so the reported
+    // rate reflects real work even if a chunk aborts (e.g. device lost).
+    let mut completed: u64 = 0;
 
     for chunk_idx in 0..num_chunks {
         let chunk_offset = nonce_offset + chunk_idx * chunk;
@@ -242,6 +245,7 @@ pub fn run(
         pipeline.dispatch(&buffers, &[[num_workgroups, 1, 1], [1, 1, 1]], &pc)?;
 
         let words = result.read_u32(RESULT_BYTES / 4)?;
+        completed += chunk_n as u64;
         let nonce = words[0];
         let mut hash = [0u32; 8];
         hash.copy_from_slice(&words[1..9]);
@@ -269,11 +273,10 @@ pub fn run(
     }
 
     let elapsed = start.elapsed();
-    let computed = num_chunks as u64 * chunk as u64;
-    let rate = computed as f64 / elapsed.as_secs_f64();
+    let rate = completed as f64 / elapsed.as_secs_f64();
     println!(
         "Mined {} nonces in {:.2?} ({:.0} H/s wall clock)",
-        nonces, elapsed, rate
+        completed, elapsed, rate
     );
 
     match hit {
