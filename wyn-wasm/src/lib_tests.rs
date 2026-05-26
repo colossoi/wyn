@@ -54,12 +54,6 @@ fn compile_to_ssa(source: &str) -> wyn_core::ssa::types::Program {
 /// `interface.storage`, and each compute entry's inputs must expose
 /// the `(set, binding)` coordinates it reads/writes.
 #[test]
-#[ignore = "Deferred: the graphical-invariant-SOAC lift no longer fires for \
-uniform-driven reduces. #[uniform] is now entry-param-only (since uniforms can't be \
-top-level defs), and tlc/parallelize.rs::compute_taint_set taints every entry param, so \
-lift_graphical_invariant_soacs treats the uniform-dependent reduce as per-invocation and \
-won't hoist it into a compute pre-pass. Re-enable once the lift exempts uniform-bound \
-params from the taint set."]
 fn interface_surfaces_lifted_prepass_storage_bindings() {
     let src = r#"
 #[vertex]

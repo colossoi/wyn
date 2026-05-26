@@ -704,21 +704,42 @@ fn lift_graphical_invariant_soacs(
 
     for idx in indices {
         let entry_name = program.symbols.get(program.defs[idx].name).cloned().unwrap_or_default();
-        let entry_params: HashSet<SymbolId> = {
-            let (params, _) = peel_lambda_params(&program.defs[idx].body);
-            params.iter().map(|(s, _)| *s).collect()
+
+        // Classify each entry param by correlating the lambda params (by
+        // position) with the source patterns on the decl. A `#[uniform]`
+        // param is invariant across invocations, so it must NOT seed the
+        // taint set: a reduce over `map(|i| f(uniform, i), 0..<N)` is
+        // entry-invariant and is a valid lift. Such uniforms are instead
+        // captured into the pre-pass entry (see `maybe_hoist`). Every other
+        // param (builtin / location) is per-invocation and taints.
+        let decl_params: Vec<ast::Pattern> = match &program.defs[idx].meta {
+            DefMeta::EntryPoint(decl) => decl.params.clone(),
+            _ => Vec::new(),
         };
+        let (peeled, _) = peel_lambda_params(&program.defs[idx].body);
+        let mut entry_params: HashSet<SymbolId> = HashSet::new();
+        let mut uniform_params: HashMap<SymbolId, (u32, u32)> = HashMap::new();
+        for (i, (sym, _)) in peeled.iter().enumerate() {
+            match decl_params.get(i).and_then(crate::binding_layout::extract_uniform_binding) {
+                Some(binding) => {
+                    uniform_params.insert(*sym, binding);
+                }
+                None => {
+                    entry_params.insert(*sym);
+                }
+            }
+        }
 
         let body = program.defs[idx].body.clone();
         let mut added_decls: Vec<interface::StorageBindingDecl> = Vec::new();
-        // Compute the *transitive* set of symbols that depend on entry
-        // params. The lift pass should not hoist any SOAC whose free
-        // vars intersect this set — they're per-invocation values.
+        // Transitive set of symbols that depend on per-invocation params. The
+        // lift pass refuses to hoist any SOAC whose free vars intersect it.
         let tainted = compute_taint_set(&body, &entry_params, &program.symbols);
         let new_body = lift_in_term(
             body,
             &entry_name,
             &tainted,
+            &uniform_params,
             next_binding,
             &mut added_decls,
             &mut new_defs,
@@ -757,6 +778,7 @@ fn lift_in_term(
     term: Term,
     entry_name: &str,
     entry_params: &std::collections::HashSet<SymbolId>,
+    uniform_params: &HashMap<SymbolId, (u32, u32)>,
     next_binding: &mut u32,
     added_decls: &mut Vec<interface::StorageBindingDecl>,
     new_defs: &mut Vec<Def>,
@@ -770,6 +792,7 @@ fn lift_in_term(
                 *body,
                 entry_name,
                 entry_params,
+                uniform_params,
                 next_binding,
                 added_decls,
                 new_defs,
@@ -798,6 +821,7 @@ fn lift_in_term(
                 entry_name,
                 &name_ty,
                 entry_params,
+                uniform_params,
                 next_binding,
                 added_decls,
                 new_defs,
@@ -808,6 +832,7 @@ fn lift_in_term(
                 *body,
                 entry_name,
                 entry_params,
+                uniform_params,
                 next_binding,
                 added_decls,
                 new_defs,
@@ -839,6 +864,7 @@ fn maybe_hoist(
     entry_name: &str,
     name_ty: &Type<TypeName>,
     entry_params: &std::collections::HashSet<SymbolId>,
+    uniform_params: &HashMap<SymbolId, (u32, u32)>,
     next_binding: &mut u32,
     added_decls: &mut Vec<interface::StorageBindingDecl>,
     new_defs: &mut Vec<Def>,
@@ -882,9 +908,14 @@ fn maybe_hoist(
     let binding = (AUTO_STORAGE_SET, *next_binding);
     *next_binding += 1;
 
+    // Capture the SOAC's uniform free vars. The pre-pass is a separate
+    // entry, so it must re-declare each uniform it reads as its own
+    // `#[uniform]` param at the same (set, binding) the original entry used.
+    let captured_uniforms = collect_uniform_free_vars(&rhs, uniform_params, &program.symbols);
+
     let span = rhs.span;
     let prepass_name = format!("{}_prepass_{}", entry_name, added_decls.len());
-    let prepass_def = build_prepass_def(&prepass_name, rhs, name_ty.clone(), program);
+    let prepass_def = build_prepass_def(&prepass_name, rhs, name_ty.clone(), &captured_uniforms, program);
     prepass_result_bindings.insert(prepass_def.name, binding);
     new_defs.push(prepass_def);
 
@@ -967,6 +998,43 @@ fn rhs_references_entry_param(
     free.iter().any(|t| matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if entry_params.contains(s)))
 }
 
+/// Collect `term`'s free vars that are uniform entry params, as
+/// `(symbol, type, binding)`. Used to re-declare the uniforms a hoisted
+/// SOAC reads on the generated pre-pass entry. Deduplicated by symbol.
+fn collect_uniform_free_vars(
+    term: &Term,
+    uniform_params: &HashMap<SymbolId, (u32, u32)>,
+    symbols: &SymbolTable,
+) -> Vec<(SymbolId, Type<TypeName>, (u32, u32))> {
+    let bound: HashSet<SymbolId> = HashSet::new();
+    let empty_top: HashSet<SymbolId> = HashSet::new();
+    let empty_defs: HashSet<String> = HashSet::new();
+    let mut free: Vec<Term> = Vec::new();
+    let mut seen: HashSet<SymbolId> = HashSet::new();
+    collect_free_vars(
+        term,
+        &bound,
+        &empty_top,
+        &empty_defs,
+        symbols,
+        &mut free,
+        &mut seen,
+    );
+
+    let mut out: Vec<(SymbolId, Type<TypeName>, (u32, u32))> = Vec::new();
+    let mut added: HashSet<SymbolId> = HashSet::new();
+    for t in &free {
+        if let TermKind::Var(VarRef::Symbol(s)) = &t.kind {
+            if let Some(binding) = uniform_params.get(s) {
+                if added.insert(*s) {
+                    out.push((*s, t.ty.clone(), *binding));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Panic if any free variable of `term` has a type that carries an
 /// unresolved Size type variable. See the TODO at `maybe_hoist` —
 /// these vars aren't in scope inside the generated pre-pass, and
@@ -1032,9 +1100,22 @@ fn build_prepass_def(
     entry_name: &str,
     soac_term: Term,
     elem_ty: Type<TypeName>,
+    captured_uniforms: &[(SymbolId, Type<TypeName>, (u32, u32))],
     program: &mut Program,
 ) -> Def {
-    make_entry_def(entry_name, soac_term, elem_ty, &[], Vec::new(), program)
+    let required_params: Vec<(SymbolId, Type<TypeName>)> =
+        captured_uniforms.iter().map(|(s, ty, _)| (*s, ty.clone())).collect();
+    let uniform_attrs: Vec<Option<(u32, u32)>> =
+        captured_uniforms.iter().map(|(_, _, b)| Some(*b)).collect();
+    make_entry_def(
+        entry_name,
+        soac_term,
+        elem_ty,
+        &required_params,
+        &uniform_attrs,
+        Vec::new(),
+        program,
+    )
 }
 
 /// Parallelize SOACs in compute entry points.
@@ -1693,6 +1774,7 @@ fn build_two_phase_entries(
         phase1_body,
         unit_ty.clone(),
         &analysis.required_params,
+        &[],
         phase1_bindings,
         program,
     );
@@ -1746,6 +1828,7 @@ fn build_two_phase_entries(
         phase2_body,
         unit_ty.clone(),
         &analysis.required_params,
+        &[],
         phase2_bindings,
         program,
     );
@@ -2282,6 +2365,7 @@ fn make_entry_def(
     body: Term,
     return_ty: Type<TypeName>,
     required_params: &[(SymbolId, Type<TypeName>)],
+    uniform_attrs: &[Option<(u32, u32)>],
     storage_bindings: Vec<interface::StorageBindingDecl>,
     program: &mut Program,
 ) -> Def {
@@ -2320,18 +2404,34 @@ fn make_entry_def(
     };
 
     // Build ast::Pattern entries — from_tlc's entry conversion reads these
-    // for IO decoration and size_hint, but phase-entry params need neither,
-    // so bare `PatternKind::Name` is enough.
+    // for IO decoration and bindings. Storage-view phase params need no
+    // attribute (their bindings come via `storage_bindings`), but a captured
+    // uniform must carry its `#[uniform(set, binding)]` so from_tlc emits it
+    // as a uniform input rather than a push constant.
     let ast_params: Vec<ast::Pattern> = required_params
         .iter()
-        .map(|(s, _)| {
+        .enumerate()
+        .map(|(i, (s, _))| {
             let pname = program.symbols.get(*s).cloned().unwrap_or_else(|| format!("p{}", s.0));
-            ast::Pattern {
+            let name_pat = ast::Pattern {
                 h: ast::Header {
                     id: ast::NodeId(0),
                     span: dummy_span,
                 },
                 kind: ast::PatternKind::Name(pname),
+            };
+            match uniform_attrs.get(i).copied().flatten() {
+                Some((set, binding)) => ast::Pattern {
+                    h: ast::Header {
+                        id: ast::NodeId(0),
+                        span: dummy_span,
+                    },
+                    kind: ast::PatternKind::Attributed(
+                        vec![Attribute::Uniform { set, binding }],
+                        Box::new(name_pat),
+                    ),
+                },
+                None => name_pat,
             }
         })
         .collect();

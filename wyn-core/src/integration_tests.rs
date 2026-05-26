@@ -1182,6 +1182,63 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32)
     );
 }
 
+/// Companion to the over-hoist test above: a reduce whose only
+/// non-constant dependency is a `#[uniform]` param IS graphical-invariant
+/// (a uniform is constant across invocations), so it must lift into a
+/// compute pre-pass. Because `#[uniform]` is entry-param-only and the
+/// lift's taint set treats every entry param as per-invocation, the lift
+/// has to explicitly exempt uniform params — otherwise it silently stops
+/// firing for the common uniform-driven case. And since the pre-pass is a
+/// separate entry, it must re-declare the uniform as its own `#[uniform]`
+/// param; without that, codegen panics with `Unknown global: iTime`.
+#[test]
+fn test_uniform_driven_reduce_lifts_into_prepass() {
+    let source = r#"
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vid: i32)
+  #[builtin(position)] vec4f32 =
+  @[-1.0, -1.0, 0.0, 1.0]
+
+#[fragment]
+entry fragment_main(
+  #[uniform(set=1, binding=0)] iTime: f32,
+  #[builtin(position)] fragCoord: vec4f32
+) #[location(0)] vec4f32 =
+  let samples = map(|i: i32| f32.cos(iTime + f32.i32(i)), 0..<64) in
+  let breath = reduce(|a: f32, b: f32| a + b, 0.0, samples) in
+  @[breath, 0.0, 0.0, 1.0]
+"#;
+
+    // The lift must fire: the uniform-driven reduce becomes a compute
+    // pre-pass (multi-staged into phase1 + phase2 compute entries). Before
+    // the uniform exemption there were no compute entries at all.
+    let ssa = compile_to_ssa_with_modules(source);
+    let compute_entries: Vec<&str> = ssa
+        .entry_points
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.execution_model,
+                crate::ssa::types::ExecutionModel::Compute { .. }
+            )
+        })
+        .map(|e| e.name.as_str())
+        .collect();
+    assert!(
+        compute_entries.iter().any(|n| n.contains("prepass")),
+        "uniform-driven reduce should lift into a compute pre-pass; \
+         compute entries were {:?}",
+        compute_entries
+    );
+
+    // ...and the lifted result must still compile: the pre-pass re-declares
+    // iTime as its own uniform, so codegen resolves it (no `Unknown global`).
+    compile_to_spirv(source).expect(
+        "a fragment reduce depending only on a uniform must lift into a \
+         compute pre-pass that re-declares the uniform and compiles to SPIR-V",
+    );
+}
+
 // =============================================================================
 // Materialization Optimization
 // =============================================================================
