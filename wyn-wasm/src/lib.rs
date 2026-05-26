@@ -82,7 +82,9 @@ mod tlc_tree {
     fn term_to_tree(term: &Term) -> TreeNode {
         let ty = fmt_ty(&term.ty);
         match &term.kind {
-            TermKind::Var(wyn_core::tlc::VarRef::Symbol(name)) => TreeNode::leaf(format!("Var({}) : {}", name, ty)),
+            TermKind::Var(wyn_core::tlc::VarRef::Symbol(name)) => {
+                TreeNode::leaf(format!("Var({}) : {}", name, ty))
+            }
             TermKind::BinOp(op) => TreeNode::leaf(format!("BinOp({:?}) : {}", op, ty)),
             TermKind::UnOp(op) => TreeNode::leaf(format!("UnOp({:?}) : {}", op, ty)),
             TermKind::Lambda(ref lam) => {
@@ -152,9 +154,7 @@ mod tlc_tree {
                 children.push(TreeNode::branch("body", vec![term_to_tree(body)]));
                 TreeNode::branch(label, children)
             }
-            TermKind::Soac(_) | TermKind::ArrayExpr(_) => {
-                TreeNode::leaf(format!("<soac> : {}", ty))
-            }
+            TermKind::Soac(_) | TermKind::ArrayExpr(_) => TreeNode::leaf(format!("<soac> : {}", ty)),
             other => TreeNode::leaf(format!("{:?} : {}", other, ty)),
         }
     }
@@ -294,7 +294,9 @@ pub struct EntryBinding {
     pub name: String,
     pub ty: String,
     /// `"builtin(<name>)"`, `"location(<n>)"`, `"storage(<set>,<binding>)"`,
-    /// `"push_constant(<offset>)"`, or `"unknown"`.
+    /// `"uniform(<set>,<binding>)"`, `"texture(<set>,<binding>)"`,
+    /// `"sampler(<set>,<binding>)"`, `"push_constant(<offset>)"`, or
+    /// `"unknown"`.
     pub decoration: String,
 }
 
@@ -318,6 +320,12 @@ fn entry_binding_from_input(input: &wyn_core::ssa::types::EntryInput) -> EntryBi
     use wyn_core::ssa::types::IoDecoration;
     let decoration = if let Some((s, b)) = input.storage_binding {
         format!("storage({},{})", s, b)
+    } else if let Some((s, b)) = input.uniform_binding {
+        format!("uniform({},{})", s, b)
+    } else if let Some((s, b)) = input.texture_binding {
+        format!("texture({},{})", s, b)
+    } else if let Some((s, b)) = input.sampler_binding {
+        format!("sampler({},{})", s, b)
     } else if let Some(off) = input.push_constant_offset {
         format!("push_constant({})", off)
     } else {
@@ -353,7 +361,6 @@ fn entry_binding_from_output(idx: usize, output: &wyn_core::ssa::types::EntryOut
 }
 
 fn program_interface(program: &wyn_core::ssa::types::Program) -> ProgramInterface {
-    use wyn_core::interface::StorageAccess;
     use wyn_core::ssa::types::ExecutionModel;
     use wyn_core::types::TypeExt;
     let entries = program
@@ -401,43 +408,32 @@ fn program_interface(program: &wyn_core::ssa::types::Program) -> ProgramInterfac
             }
         })
         .collect();
-    let uniforms = program
-        .uniforms
-        .iter()
-        .map(|u| ResourceBinding {
-            name: u.name.clone(),
-            set: u.set,
-            binding: u.binding,
-            ty: wyn_core::diags::format_type(&u.ty),
-            access: String::new(),
-        })
-        .collect();
-    let mut storage: Vec<ResourceBinding> = program
-        .storage
-        .iter()
-        .map(|s| {
-            let access = match s.access {
-                StorageAccess::ReadOnly => "read",
-                StorageAccess::WriteOnly => "write",
-                StorageAccess::ReadWrite => "read_write",
-            };
-            ResourceBinding {
-                name: s.name.clone(),
-                set: s.set,
-                binding: s.binding,
-                ty: wyn_core::diags::format_type(&s.ty),
-                access: access.to_string(),
+    // Uniforms: every entry input carrying a `#[uniform(set, binding)]`
+    // attribution. Deduplicate by slot — the same uniform is referenced from
+    // each entry that uses it (e.g. a vertex + fragment pair sharing iTime).
+    let mut uniforms_by_slot: std::collections::BTreeMap<(u32, u32), ResourceBinding> =
+        std::collections::BTreeMap::new();
+    for entry in &program.entry_points {
+        for input in &entry.inputs {
+            if let Some((set, binding)) = input.uniform_binding {
+                uniforms_by_slot.entry((set, binding)).or_insert_with(|| ResourceBinding {
+                    name: input.name.clone(),
+                    set,
+                    binding,
+                    ty: fmt_ssa_type(&input.ty),
+                    access: String::new(),
+                });
             }
-        })
-        .collect();
+        }
+    }
+    let uniforms: Vec<ResourceBinding> = uniforms_by_slot.into_values().collect();
 
-    // Compiler-introduced storage bindings (e.g. parallelize's partials +
-    // result buffers). Coalesce across entries — a phase-1 writer and a
-    // phase-2 reader of the same slot yields `read_write`. Skip any slot
-    // the user already declared.
-    let is_user_declared = |set: u32, binding: u32| -> bool {
-        program.storage.iter().any(|s| s.set == set && s.binding == binding)
-    };
+    // Storage bindings, coalesced across entries — a phase-1 writer and a
+    // phase-2 reader of the same slot yields `read_write`. Both the user's
+    // declared storage params and the compiler-introduced buffers (e.g.
+    // parallelize's partials + result) live on the entries' inputs/outputs
+    // and `storage_bindings`, so they all flow through here.
+    let mut storage: Vec<ResourceBinding> = Vec::new();
     let mut synth: std::collections::BTreeMap<
         (u32, u32),
         (polytype::Type<wyn_core::ast::TypeName>, bool, bool),
@@ -448,9 +444,6 @@ fn program_interface(program: &wyn_core::ssa::types::Program) -> ProgramInterfac
                 elem_ty: polytype::Type<wyn_core::ast::TypeName>,
                 reads: bool,
                 writes: bool| {
-        if is_user_declared(set, binding) {
-            return;
-        }
         let e: &mut (_, bool, bool) =
             synth.entry((set, binding)).or_insert_with(|| (elem_ty, false, false));
         e.1 |= reads;
@@ -593,11 +586,7 @@ fn compile_to_wgsl_impl(source: &str) -> CompileResultWgsl {
     let tlc_after_partial_eval = tlc_program.partial_eval();
     let tlc_tree = tlc_tree::program_to_tree(&tlc_after_partial_eval.tlc);
 
-    let tlc_with_ownership = match tlc_after_partial_eval
-        .normalize_soacs()
-        .fuse_maps()
-        .apply_ownership()
-    {
+    let tlc_with_ownership = match tlc_after_partial_eval.normalize_soacs().fuse_maps().apply_ownership() {
         Ok(t) => t,
         Err(e) => return CompileResultWgsl::err_msg(format!("apply_ownership: {:?}", e)),
     };
