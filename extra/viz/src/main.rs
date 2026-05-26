@@ -27,8 +27,8 @@ use crate::spirv::{auto_detect_compute_entry_point, resolve_entry_points};
                   \n\
                   Drives the wyn compiler's output (and hand-rolled modules):\n\
                   interactive vertex+fragment viewing, headless compute,\n\
-                  descriptor-driven pipelines, naga validation, a Bitcoin-miner\n\
-                  harness, and adapter inspection.",
+                  descriptor-driven pipelines, naga validation, and adapter\n\
+                  inspection.",
     version
 )]
 struct Cli {
@@ -77,31 +77,6 @@ impl From<TopologyArg> for wgpu::PrimitiveTopology {
 }
 
 /// Parse 76-byte raw header hex into 19 big-endian u32 words for SHA256.
-fn parse_header_hex(s: &str) -> std::result::Result<[u32; 19], String> {
-    let s = s.trim();
-    if s.len() != 152 {
-        return Err(format!(
-            "expected 152 hex chars (76 bytes), got {} chars",
-            s.len()
-        ));
-    }
-    let mut words = [0u32; 19];
-    for (i, word) in words.iter_mut().enumerate() {
-        let hex = &s[i * 8..(i + 1) * 8];
-        let bytes: [u8; 4] = [
-            u8::from_str_radix(&hex[0..2], 16).map_err(|e| format!("bad hex at byte {}: {}", i * 4, e))?,
-            u8::from_str_radix(&hex[2..4], 16)
-                .map_err(|e| format!("bad hex at byte {}: {}", i * 4 + 1, e))?,
-            u8::from_str_radix(&hex[4..6], 16)
-                .map_err(|e| format!("bad hex at byte {}: {}", i * 4 + 2, e))?,
-            u8::from_str_radix(&hex[6..8], 16)
-                .map_err(|e| format!("bad hex at byte {}: {}", i * 4 + 3, e))?,
-        ];
-        *word = u32::from_be_bytes(bytes);
-    }
-    Ok(words)
-}
-
 fn parse_size(s: &str) -> std::result::Result<(u32, u32), String> {
     let sep = if s.contains('x') { 'x' } else { ',' };
     let parts: Vec<&str> = s.splitn(2, sep).collect();
@@ -267,34 +242,6 @@ enum Command {
         #[arg(short, long)]
         verbose: bool,
     },
-    /// Run the Bitcoin miner shader and report hash hits
-    #[command(name = "miner")]
-    Miner {
-        /// Path to the linked miner SPIR-V module
-        path: PathBuf,
-        /// Raw block header hex (76 bytes = 152 hex chars, everything except the nonce).
-        /// Bytes are converted to big-endian u32 words for SHA256.
-        #[arg(long, value_parser = parse_header_hex)]
-        header_hex: [u32; 19],
-        /// Number of nonces to try
-        #[arg(long, short, default_value = "1024")]
-        nonces: u32,
-        /// Starting nonce offset
-        #[arg(long, default_value = "0")]
-        nonce_offset: u32,
-        /// Number of workgroups (each has 64 threads)
-        #[arg(long)]
-        workgroups: Option<u32>,
-        /// Max nonces per GPU dispatch (avoids GPU timeout). Loops through the full range in chunks.
-        #[arg(long, short = 'c', default_value = "262144")]
-        chunk_size: u32,
-        /// Run naga validation on the SPIR-V before sending to the GPU driver
-        #[arg(long)]
-        validate: bool,
-        /// Print verbose output. `-v` adds per-chunk progress; `-vv` also dumps phase-1 partials each chunk.
-        #[arg(short, long, action = clap::ArgAction::Count)]
-        verbose: u8,
-    },
     /// Render a built-in test pattern (no shader file needed, always validates)
     #[command(name = "testpattern")]
     TestPattern {
@@ -404,27 +351,6 @@ fn main() -> Result<()> {
                 input_map,
                 output_map,
                 &push_constants,
-                verbose,
-            ))?;
-        }
-        Command::Miner {
-            path,
-            header_hex,
-            nonces,
-            nonce_offset,
-            workgroups,
-            chunk_size,
-            validate,
-            verbose,
-        } => {
-            pollster::block_on(modes::miner::run_miner(
-                path,
-                header_hex,
-                nonces,
-                nonce_offset,
-                workgroups,
-                chunk_size,
-                validate,
                 verbose,
             ))?;
         }

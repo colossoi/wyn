@@ -1,5 +1,5 @@
-//! Headless GPU helpers shared across compute / run / miner / validate /
-//! info modes: device acquisition, GPU timestamp profiling, generic
+//! Headless GPU helpers shared across compute / run / validate / info
+//! modes: device acquisition, GPU timestamp profiling, generic
 //! buffer & bind-group construction over `Binding`,
 //! readback, push-constant assembly, and the `--shadertoy`-style
 //! sidecar uniform declarations.
@@ -130,7 +130,7 @@ impl Default for DeviceRequest<'_> {
 /// sequence into the caller's encoder. Encoder lifecycle, queue
 /// submit, polling, and any readback all stay at the call site,
 /// which keeps multi-stage / chunked / per-stage-encoder flows
-/// (pipeline mode, miner) free to drive multiple passes per encoder
+/// (pipeline mode) free to drive multiple passes per encoder
 /// or split encoders mid-loop.
 pub struct ComputeExecutor<'a> {
     pub label: &'a str,
@@ -161,7 +161,7 @@ impl ComputeExecutor<'_> {
 }
 
 /// Headless device + queue with the feature set every compute / pipeline /
-/// miner / validate / info path expects: SPIR-V passthrough, push
+/// validate / info path expects: SPIR-V passthrough, push
 /// constants, and timestamp queries (each conditional on adapter
 /// support), plus the adapter's max push-constant size as the limit.
 pub async fn create_headless_device(verbose: bool) -> Result<(Device, Queue)> {
@@ -187,112 +187,6 @@ pub async fn create_headless_device(verbose: bool) -> Result<(Device, Queue)> {
     }
 
     Ok(ctx.into_device_queue())
-}
-
-/// GPU timestamp profiler for compute passes.
-/// Wraps a wgpu QuerySet + resolve/read buffers. Each "slot" records
-/// begin/end timestamps for one compute pass (2 queries per slot).
-pub struct GpuTimestamps {
-    query_set: wgpu::QuerySet,
-    resolve_buf: wgpu::Buffer,
-    read_buf: wgpu::Buffer,
-    ns_per_tick: f64,
-    num_slots: u32,        // total slots allocated
-    queries_per_slot: u32, // 2 queries per slot (begin + end)
-}
-
-/// wgpu hard limit on queries per QuerySet (see `wgpu_core::QUERY_SET_MAX_QUERIES`).
-const MAX_QUERIES_PER_SET: u32 = 4096;
-
-impl GpuTimestamps {
-    /// Create a new profiler with `num_slots` slots. Returns None if the device
-    /// doesn't support TIMESTAMP_QUERY. If `num_slots` would exceed wgpu's
-    /// 4096-query cap, the slot count is clamped — `writes_for` returns
-    /// `None` for any chunk index past the cap, so those dispatches simply
-    /// run untimed.
-    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, num_slots: u32) -> Option<Self> {
-        if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
-            return None;
-        }
-        let queries_per_slot = 2;
-        let num_slots = num_slots.min(MAX_QUERIES_PER_SET / queries_per_slot);
-        let total_queries = num_slots * queries_per_slot;
-        let byte_size = total_queries as u64 * 8;
-        Some(Self {
-            query_set: device.create_query_set(&wgpu::QuerySetDescriptor {
-                label: Some("gpu_timestamps"),
-                count: total_queries,
-                ty: wgpu::QueryType::Timestamp,
-            }),
-            resolve_buf: device.create_buffer(&BufferDescriptor {
-                label: Some("timestamp_resolve"),
-                size: byte_size,
-                usage: BufferUsages::QUERY_RESOLVE | BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            }),
-            read_buf: device.create_buffer(&BufferDescriptor {
-                label: Some("timestamp_read"),
-                size: byte_size,
-                usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }),
-            ns_per_tick: queue.get_timestamp_period() as f64,
-            num_slots,
-            queries_per_slot,
-        })
-    }
-
-    /// Returns the `ComputePassTimestampWrites` for the given slot index,
-    /// or `None` if `slot` is past the QuerySet cap (see `MAX_QUERIES_PER_SET`).
-    pub fn writes_for(&self, slot: u32) -> Option<wgpu::ComputePassTimestampWrites<'_>> {
-        if slot >= self.num_slots {
-            return None;
-        }
-        let base = slot * self.queries_per_slot;
-        Some(wgpu::ComputePassTimestampWrites {
-            query_set: &self.query_set,
-            beginning_of_pass_write_index: Some(base),
-            end_of_pass_write_index: Some(base + 1),
-        })
-    }
-
-    /// Resolve all queries and read back the timestamps. Returns a Vec of
-    /// (begin_ns, end_ns) per slot, stopping at the first unused slot.
-    pub async fn read_back(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Result<Vec<(f64, f64)>> {
-        let total = self.num_slots * self.queries_per_slot;
-        let byte_size = total as u64 * 8;
-        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
-            label: Some("timestamp_resolve"),
-        });
-        encoder.resolve_query_set(&self.query_set, 0..total, &self.resolve_buf, 0);
-        encoder.copy_buffer_to_buffer(&self.resolve_buf, 0, &self.read_buf, 0, byte_size);
-        queue.submit(Some(encoder.finish()));
-        let _ = device.poll(wgpu::PollType::Wait);
-
-        let slice = self.read_buf.slice(..byte_size);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| {
-            tx.send(r).unwrap();
-        });
-        let _ = device.poll(wgpu::PollType::Wait);
-        rx.recv().unwrap()?;
-
-        let data = slice.get_mapped_range();
-        let raw: &[u64] = bytemuck::cast_slice(&data);
-
-        let mut results = Vec::new();
-        for i in 0..self.num_slots as usize {
-            let begin = raw[i * 2];
-            let end = raw[i * 2 + 1];
-            if begin == 0 && end == 0 {
-                break;
-            }
-            results.push((begin as f64 * self.ns_per_tick, end as f64 * self.ns_per_tick));
-        }
-        drop(data);
-        self.read_buf.unmap();
-        Ok(results)
-    }
 }
 
 pub fn create_binding_buffers(
