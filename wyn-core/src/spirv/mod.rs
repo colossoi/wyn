@@ -133,6 +133,13 @@ struct Constructor {
     /// struct id is block-decorated exactly once.
     block_decorated: HashSet<spirv::Word>,
 
+    /// Tracks storage-buffer variables already decorated `NonWritable`.
+    /// `create_storage_buffer` is idempotent, so a binding read (and never
+    /// written) by more than one entry point reaches the decoration site
+    /// once per entry with the same var id; `spirv-val` rejects the repeated
+    /// `NonWritable`. This set ensures each var is decorated at most once.
+    nonwritable_decorated: HashSet<spirv::Word>,
+
     /// buffer_id → (buffer_var, elem_spirv_type). Indexed by the
     /// compile-time buffer_id stored on the view's SSA value via
     /// `view_buffer_id`.
@@ -200,6 +207,7 @@ impl Constructor {
             current_entry_outputs: Vec::new(),
             buffer_stride_decorated: HashSet::new(),
             block_decorated: HashSet::new(),
+            nonwritable_decorated: HashSet::new(),
             buffer_vars: Vec::new(),
             buffer_id_map: HashMap::new(),
             constant_ids: HashSet::new(),
@@ -3533,7 +3541,14 @@ fn lower_ssa_entry_point(
             // entry point writes to the same binding. In multi-entry modules
             // (e.g., reduce phase1 + phase2), the partials buffer is written
             // by phase1 and read by phase2 — it must stay writable.
-            if !written_bindings.contains(&(set, binding)) {
+            //
+            // `create_storage_buffer` returns the same var for a shared
+            // binding, so guard the decoration to fire once per var — two
+            // entries reading the same never-written input would otherwise
+            // decorate it `NonWritable` twice (spirv-val rejects).
+            if !written_bindings.contains(&(set, binding))
+                && constructor.nonwritable_decorated.insert(var_id)
+            {
                 constructor.builder.decorate(
                     var_id,
                     spirv::Decoration::NonWritable,

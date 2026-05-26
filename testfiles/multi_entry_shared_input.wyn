@@ -1,0 +1,14 @@
+-- Two compute entries reading the same input storage buffer (`xs`, the
+-- auto-bound set 0 / binding 0). Each entry's lowering marks an input buffer
+-- it never writes as `NonWritable`; since the buffer var is shared across
+-- entries, the decoration must fire once per var, not once per entry —
+-- otherwise spirv-val rejects the repeated `NonWritable`. See
+-- spirv::mod's `nonwritable_decorated` guard.
+
+#[compute]
+entry prefix_doubled(xs: []f32) []f32 =
+  scan(|a: f32, b: f32| a + b, 0.0, map(|x: f32| x * 2.0, xs))
+
+#[compute]
+entry sum_doubled(xs: []f32) f32 =
+  reduce(|a: f32, b: f32| a + b, 0.0, map(|x: f32| x * 2.0, xs))
