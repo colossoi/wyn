@@ -387,7 +387,20 @@ fn emit_chunk_arithmetic(
         u32_ty.clone(),
         None,
     );
-    let total = graph_ops::intern_u32(graph, total_threads, None);
+    // Runtime total thread count = num_workgroups.x * workgroup width. With a
+    // `derived_from_input_length` dispatch (~ceil(n / width) workgroups) this
+    // makes chunk_size ≈ 1, so each thread reduces ~one element — a saturating
+    // grid rather than a fixed `total_threads`-wide one. `total_threads` is the
+    // compile-time per-workgroup width.
+    let nwg = graph_ops::intern_intrinsic(
+        graph,
+        catalog().known().num_workgroups,
+        smallvec![],
+        u32_ty.clone(),
+        None,
+    );
+    let wg_width = graph_ops::intern_u32(graph, total_threads, None);
+    let total = graph_ops::intern_binop(graph, "*", nwg, wg_width, u32_ty.clone(), None);
     let one = graph_ops::intern_u32(graph, 1, None);
     let total_minus_one = graph_ops::intern_binop(graph, "-", total, one, u32_ty.clone(), None);
     let len_plus = graph_ops::intern_binop(graph, "+", input_len, total_minus_one, u32_ty.clone(), None);
@@ -499,9 +512,13 @@ pub fn phase1_transform_redomap(
         se.operand_nodes[i] = new_view;
     }
 
-    // Redirect the auto-output Store to partials[tid].
-    let (store_block, store_idx) =
-        find_store_of(entry, result_nid).ok_or_else(|| "no Store writes the Redomap result".to_string())?;
+    // Redirect the entry's output store(s) to `partials[tid]`, writing the
+    // *whole* result per thread (AoS). A scalar result has one Store of
+    // `result_nid`; an AoS tuple result is SoA-decomposed by
+    // `emit_compute_output_stores` into per-component / per-element Stores of
+    // `Project…(result_nid)`. Find them all (value projects from the result),
+    // repoint the first to write `result_nid` into the partials slot, and drop
+    // the rest — phase2 reads the AoS partials and writes the AoS result.
     let elem_ty = entry.graph.types[&result_nid].clone();
     let arr_ty = Type::Constructed(
         TypeName::Array,
@@ -523,13 +540,38 @@ pub fn phase1_transform_redomap(
         smallvec![partials_view, tid],
         elem_ty.clone(),
     );
+
+    let mut output_stores: Vec<(BlockId, usize)> = Vec::new();
+    for (bid, block) in &entry.graph.skeleton.blocks {
+        for (i, se) in block.side_effects.iter().enumerate() {
+            if matches!(&se.kind, SideEffectKind::Inst(InstKind::Store { .. }))
+                && se
+                    .operand_nodes
+                    .get(1)
+                    .is_some_and(|&v| value_projects_from(&entry.graph, v, result_nid))
+            {
+                output_stores.push((bid, i));
+            }
+        }
+    }
+    let (keep_block, keep_idx) =
+        *output_stores.first().ok_or_else(|| "no Store writes the Redomap result".to_string())?;
     {
-        let se = &mut entry.graph.skeleton.blocks[store_block].side_effects[store_idx];
+        let se = &mut entry.graph.skeleton.blocks[keep_block].side_effects[keep_idx];
         se.operand_nodes[0] = new_place;
+        se.operand_nodes[1] = result_nid;
+    }
+    // Drop the remaining decomposed output stores (highest index first so the
+    // earlier indices — including the keeper — stay valid).
+    let mut to_remove: Vec<(BlockId, usize)> = output_stores.into_iter().skip(1).collect();
+    to_remove.sort_by(|a, b| b.1.cmp(&a.1));
+    for (bid, idx) in to_remove {
+        entry.graph.skeleton.blocks[bid].side_effects.remove(idx);
     }
 
-    // Clear outputs[0].storage_binding (phase2 takes it); register partials.
-    if let Some(o) = entry.outputs.get_mut(0) {
+    // The original output binding(s) are now unused (phase2 owns the result);
+    // clear them and register the partials buffer.
+    for o in entry.outputs.iter_mut() {
         o.storage_binding = None;
     }
     entry.storage_bindings.push(crate::interface::StorageBindingDecl {
@@ -540,6 +582,24 @@ pub fn phase1_transform_redomap(
     });
 
     Ok(())
+}
+
+/// True if `value` is `root` or a chain of `Project`s rooted at `root` — used
+/// to recognize the (possibly SoA-decomposed) Stores of a reduce result.
+fn value_projects_from(graph: &super::types::EGraph, value: NodeId, root: NodeId) -> bool {
+    let mut cur = value;
+    loop {
+        if cur == root {
+            return true;
+        }
+        match &graph.nodes[cur] {
+            super::types::ENode::Pure {
+                op: super::types::PureOp::Project { .. },
+                operands,
+            } => cur = operands[0],
+            _ => return false,
+        }
+    }
 }
 
 /// Programmatic phase2 synthesis where the neutral element is a

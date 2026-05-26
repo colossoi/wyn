@@ -41,6 +41,145 @@ fn compile_to_fused_tlc(input: &str) -> crate::tlc::Program {
     fused.0.tlc
 }
 
+/// Assert that a compute `reduce`-over-`map`-of-range `src` parallelizes and
+/// that phase1's per-thread loop trip-count transitively depends on
+/// `thread_id` — i.e. each thread reduces only its *chunk* of the range.
+///
+/// The bug: phase1 looped the full `0..n` per invocation (quadratic — every
+/// thread redoes the whole reduction; `thread_id` was used only as the
+/// partials output slot, never to bound the loop). With the bug the
+/// trip-count is the raw input length `n` (thread-independent), so
+/// `thread_id` is unreachable from the loop condition and this fails.
+fn assert_phase1_loop_depends_on_thread_id(src: &str) {
+    use crate::builtins::catalog;
+    use crate::op::OpTag;
+    use crate::ssa::types::{ControlHeader, FuncBody, InstKind, Terminator, ValueId};
+    use std::collections::{HashMap, HashSet, VecDeque};
+
+    let program = compile_to_ssa(src);
+    let thread_id_builtin = catalog().known().thread_id;
+
+    // The phase1 entry is the parallelized worker — the one that reads
+    // `thread_id` (the per-thread partials slot). phase2 is single-threaded.
+    // (The EGIR redomap path mutates the original entry in place, so phase1
+    // keeps the source entry name rather than gaining a `_phase1` suffix.)
+    let has_thread_id = |body: &FuncBody| -> bool {
+        body.inner.blocks.iter().any(|(_, block)| {
+            block.insts.iter().any(|&i| {
+                matches!(&body.get_inst(i).data,
+                    InstKind::Op { tag: OpTag::Intrinsic { id, .. }, .. } if *id == thread_id_builtin)
+            })
+        })
+    };
+    let phase1 = program.entry_points.iter().find(|e| has_thread_id(&e.body)).unwrap_or_else(|| {
+        panic!(
+            "expected a parallelized phase1 entry (one using thread_id); entries: {:?}",
+            program.entry_points.iter().map(|e| e.name.clone()).collect::<Vec<_>>()
+        )
+    });
+    let body = &phase1.body;
+
+    // The two-phase reduce must have a phase2 that combines the partials into
+    // the result — otherwise the partials are written but never reduced (an
+    // incomplete program; the descriptor would reference a phantom entry).
+    assert!(
+        program.entry_points.iter().any(|e| e.name.contains("phase2") || e.name.contains("combine")),
+        "missing phase2 combine entry — partials are never reduced to a result; entries: {:?}",
+        program.entry_points.iter().map(|e| e.name.clone()).collect::<Vec<_>>()
+    );
+
+    // Map each SSA result to its operand values; locate the `thread_id` result.
+    let mut def: HashMap<ValueId, Vec<ValueId>> = HashMap::new();
+    let mut thread_id_val: Option<ValueId> = None;
+    for (_bid, block) in &body.inner.blocks {
+        for &inst_id in &block.insts {
+            let inst = body.get_inst(inst_id);
+            let Some(result) = inst.result else { continue };
+            def.insert(result, inst.data.ssa_uses());
+            if let InstKind::Op {
+                tag: OpTag::Intrinsic { id, .. },
+                ..
+            } = &inst.data
+            {
+                if *id == thread_id_builtin {
+                    thread_id_val = Some(result);
+                }
+            }
+        }
+    }
+    let thread_id_val = thread_id_val.expect("phase1 must compute thread_id");
+
+    // Loop-header condition value(s).
+    let cond_vals: Vec<ValueId> = body
+        .inner
+        .blocks
+        .iter()
+        .filter(|(bid, _)| matches!(body.control_headers.get(bid), Some(ControlHeader::Loop { .. })))
+        .filter_map(|(_, block)| match &block.term {
+            Terminator::CondBranch { cond, .. } => Some(*cond),
+            _ => None,
+        })
+        .collect();
+    assert!(!cond_vals.is_empty(), "phase1 must contain a loop");
+
+    // Is `thread_id` reachable from a loop condition via def→operand edges?
+    let reaches_tid = |start: ValueId| -> bool {
+        let mut seen = HashSet::new();
+        let mut q = VecDeque::from([start]);
+        while let Some(v) = q.pop_front() {
+            if v == thread_id_val {
+                return true;
+            }
+            if seen.insert(v) {
+                if let Some(ops) = def.get(&v) {
+                    q.extend(ops.iter().copied());
+                }
+            }
+        }
+        false
+    };
+    assert!(
+        cond_vals.iter().any(|&c| reaches_tid(c)),
+        "phase1's loop trip-count is independent of thread_id — every thread \
+         reduces the full input (quadratic) instead of a per-thread chunk"
+    );
+
+    // End-to-end: the parallelized program (including phase2 reducing the
+    // partials and storing the result) must still reach SPIR-V.
+    compile_to_spirv(src).expect("parallelized reduce-over-range must compile to SPIR-V");
+}
+
+/// Baseline: a scalar reduce over a mapped range chunks phase1 correctly.
+#[test]
+fn compute_scalar_reduce_over_range_chunks_phase1() {
+    assert_phase1_loop_depends_on_thread_id(
+        r#"
+#[compute]
+entry mn(n: u32) u32 =
+  let cands = map(|i: u32| i * 2654435761u32, 0u32..<n) in
+  reduce(|a: u32, b: u32| if a < b then a else b, 4294967295u32, cands)
+"#,
+    );
+}
+
+/// The miner's shape: a reduce whose element is an AoS `(scalar, array)`
+/// tuple. Routed (like scalars) through the EGIR `phase1_transform_redomap`
+/// chunking — phase1 chunks the range and phase2 combines the partials.
+#[test]
+fn compute_soa_tuple_reduce_over_range_chunks_phase1() {
+    assert_phase1_loop_depends_on_thread_id(
+        r#"
+#[compute]
+entry mn(n: u32) (u32, [4]u32) =
+  let cands = map(|i: u32| (i, [i, i, i, i]), 0u32..<n) in
+  reduce(
+    |a: (u32, [4]u32), b: (u32, [4]u32)| if a.0 < b.0 then a else b,
+    (4294967295u32, [0u32, 0u32, 0u32, 0u32]),
+    cands)
+"#,
+    );
+}
+
 // =============================================================================
 // Phase 2 regression: unbound `Var(Symbol(sym))` references through TLC passes
 // =============================================================================
