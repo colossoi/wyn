@@ -1,7 +1,10 @@
 [workspace]
 members = ["wyn-core", "wyn", "wyn-analyzer", "wyn-pipeline-descriptor"]
 resolver = "2"
-exclude = ["extra", "playground"]
+# wyn-wasm is built only for wasm32 via `wasm-pack`, never the host target the
+# rest of the workspace compiles for, and it carries its own size-tuned
+# release profile — so it stays out of the workspace with its own lockfile.
+exclude = ["extra", "wyn-wasm"]
 
 [workspace.package]
 version = "0.1.0"
