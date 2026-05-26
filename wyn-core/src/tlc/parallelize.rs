@@ -1376,14 +1376,18 @@ fn make_two_phase_plan(
             | Type::Constructed(TypeName::Float(_), _)
             | Type::Constructed(TypeName::Bool, _),
     );
+    // Tuple results whose output Stores the phase1 rewrite can fold into one
+    // whole-tuple partials Store route through the EGIR chunking path alongside
+    // scalars.
+    let routable_result = scalar_result || tuple_can_use_whole_store_partials(&elem_type);
     let (strategy, can_route) = match &analysis.soac.original {
         SoacOp::Reduce { .. } => (
             ParallelStrategy::Reduce,
-            scalar_result && reduce_op.captures.is_empty() && is_simple_constant_term(ne),
+            routable_result && reduce_op.captures.is_empty() && is_simple_constant_term(ne),
         ),
         SoacOp::Redomap { .. } => (
             ParallelStrategy::Redomap,
-            scalar_result && reduce_op.captures.is_empty(),
+            routable_result && reduce_op.captures.is_empty(),
         ),
         _ => (ParallelStrategy::Reduce, false),
     };
@@ -1459,6 +1463,22 @@ fn make_two_phase_plan(
 /// auto-allocate for this entry's view-typed params. Plain unsized
 /// arrays contribute 1; tuples-of-unsized-arrays contribute one per
 /// component. Mirrors the allocator at `from_tlc.rs:395`+.
+/// True for a tuple result the EGIR phase1 store-rewrite can collapse into a
+/// single whole-tuple `partials[tid]` Store. `emit_compute_output_stores`
+/// SoA-decomposes the result into per-component / per-element Stores; the
+/// rewrite reconstructs one whole-result Store from them, which works as long
+/// as every component is a scalar or fixed-size array. An unsized-array
+/// component is split into its own runtime-sized binding that can't be folded
+/// back into one slot, so such tuples stay on the TLC path.
+fn tuple_can_use_whole_store_partials(elem_ty: &Type<TypeName>) -> bool {
+    match elem_ty {
+        Type::Constructed(TypeName::Tuple(_), comps) => {
+            comps.iter().all(|c| !crate::types::is_unsized_array(c))
+        }
+        _ => false,
+    }
+}
+
 fn count_view_param_bindings(program: &Program, def_sym: SymbolId) -> u32 {
     let def = match program.defs.iter().find(|d| d.name == def_sym) {
         Some(d) => d,

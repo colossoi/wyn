@@ -115,6 +115,9 @@ pub const INTRINSIC_SMOOTHSTEP: &str = "_w_intrinsic_smoothstep";
 /// Compute-shader thread id.
 pub const INTRINSIC_THREAD_ID: &str = "_w_intrinsic_thread_id";
 
+/// Compute-shader workgroup count (the `.x` dispatch dimension).
+pub const INTRINSIC_NUM_WORKGROUPS: &str = "_w_intrinsic_num_workgroups";
+
 // ---------------------------------------------------------------------------
 // Textures / samplers
 // ---------------------------------------------------------------------------
