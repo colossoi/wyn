@@ -57,8 +57,9 @@ pub fn run(program: Program) -> Program {
                 if did_fuse {
                     changed = true;
                 }
-                // Inline map fusion: map(f, map(g, a)) → map(f∘g, a)
-                let new_body = fuse_inline_maps(new_body, &mut symbols, &mut term_ids);
+                // Inline producer→consumer fusion for SOACs nested directly
+                // as another SOAC's input (map→map, map→reduce, map→scan).
+                let new_body = fuse_inline_soac_inputs(new_body, &mut symbols, &mut term_ids);
                 Def {
                     body: new_body,
                     ..def
@@ -394,44 +395,130 @@ fn replace_consumer(
 // =============================================================================
 
 /// Bottom-up pass: fuse nested Maps in SOAC inputs.
-fn fuse_inline_maps(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdSource) -> Term {
-    // Recurse into children first (bottom-up)
-    let term = term.map_children(&mut |child| fuse_inline_maps(child, symbols, term_ids));
+/// Fuse an inline SOAC producer that appears directly as another SOAC's
+/// input — the inline counterpart of the graph-driven let-chain fusion.
+/// Covers the same producer/consumer pairs as `build_fused_from_semantics`:
+/// `map → map` (compose into one Map), `map → reduce` (Redomap), and
+/// `map → scan` (fused Scan whose operator includes the map transform).
+///
+/// Inline nested SOACs (`scan(op, ne, map(g, xs))`) never get a let binding
+/// for the summary-based path to recognize, so without this they reach EGIR
+/// as a separate producer loop building a runtime-sized in-register array —
+/// which the SPIR-V backend cannot represent (`Composite variant unsized
+/// arrays not supported`).
+fn fuse_inline_soac_inputs(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdSource) -> Term {
+    // Recurse into children first (bottom-up).
+    let term = term.map_children(&mut |child| fuse_inline_soac_inputs(child, symbols, term_ids));
+    let span = term.span;
 
-    // Check if this is a Map with any Map inputs
-    if let TermKind::Soac(SoacOp::Map { .. }) = &term.kind {
-        let TermKind::Soac(SoacOp::Map {
+    match term.kind {
+        // map(f, map(g, xs)) → map(f∘g, xs)
+        TermKind::Soac(SoacOp::Map {
             lam,
             inputs,
             consumes_input,
-        }) = term.kind
-        else {
-            unreachable!()
-        };
-
-        let has_fusible = inputs.iter().any(|input| {
-            matches!(input, ArrayExpr::Ref(t) if matches!(t.kind, TermKind::Soac(SoacOp::Map { .. })))
-        });
-
-        if has_fusible {
-            let fused = fuse_inline_map_inputs(lam, inputs, symbols, term_ids);
-            return Term {
-                kind: TermKind::Soac(fused),
+        }) => {
+            let has_fusible = inputs.iter().any(|input| {
+                matches!(input, ArrayExpr::Ref(t) if matches!(t.kind, TermKind::Soac(SoacOp::Map { .. })))
+            });
+            if has_fusible {
+                let fused = fuse_inline_map_inputs(lam, inputs, symbols, term_ids);
+                return Term {
+                    kind: TermKind::Soac(fused),
+                    ..term
+                };
+            }
+            Term {
+                kind: TermKind::Soac(SoacOp::Map {
+                    lam,
+                    inputs,
+                    consumes_input,
+                }),
                 ..term
-            };
+            }
         }
 
-        return Term {
-            kind: TermKind::Soac(SoacOp::Map {
-                lam,
-                inputs,
-                consumes_input,
-            }),
-            ..term
-        };
-    }
+        // reduce(op, ne, map(g, xs)) → redomap(op∘g, op, ne, xs)
+        TermKind::Soac(SoacOp::Reduce { op, ne, input }) => {
+            // Mirror the `MapIntoReduce` semantic guard: binary reducer only.
+            if op.lam.params.len() == 2 {
+                if let Some((map_sb, map_inputs)) = inline_map_producer(&input) {
+                    let composed_op =
+                        compose_map_reduce(map_sb.lam, op.lam.clone(), span, symbols, term_ids);
+                    return Term {
+                        kind: TermKind::Soac(SoacOp::Redomap {
+                            op: super::SoacBody {
+                                lam: composed_op,
+                                captures: vec![],
+                            },
+                            reduce_op: op,
+                            ne,
+                            inputs: map_inputs,
+                        }),
+                        ..term
+                    };
+                }
+            }
+            Term {
+                kind: TermKind::Soac(SoacOp::Reduce { op, ne, input }),
+                ..term
+            }
+        }
 
-    term
+        // scan(op, ne, map(g, xs)) → scan(op∘g, ne, xs)   (single map input only)
+        TermKind::Soac(SoacOp::Scan {
+            op,
+            ne,
+            input,
+            consumes_input,
+        }) => {
+            if op.lam.params.len() == 2 {
+                if let Some((map_sb, map_inputs)) = inline_map_producer(&input) {
+                    // `MapIntoScan` only fuses a single-input map.
+                    if map_inputs.len() == 1 {
+                        let composed_op =
+                            compose_map_reduce(map_sb.lam, op.lam.clone(), span, symbols, term_ids);
+                        return Term {
+                            kind: TermKind::Soac(SoacOp::Scan {
+                                op: super::SoacBody {
+                                    lam: composed_op,
+                                    captures: vec![],
+                                },
+                                ne,
+                                input: map_inputs.into_iter().next().unwrap(),
+                                // Fusion runs before apply_ownership; the
+                                // ownership pass re-decides consumes_input.
+                                consumes_input: false,
+                            }),
+                            ..term
+                        };
+                    }
+                }
+            }
+            Term {
+                kind: TermKind::Soac(SoacOp::Scan {
+                    op,
+                    ne,
+                    input,
+                    consumes_input,
+                }),
+                ..term
+            }
+        }
+
+        _ => term,
+    }
+}
+
+/// If `input` is an inline `map(...)` producer (`ArrayExpr::Ref` wrapping a
+/// `Map` SOAC), return its lambda body + parallel inputs; else `None`.
+fn inline_map_producer(input: &ArrayExpr) -> Option<(super::SoacBody, Vec<ArrayExpr>)> {
+    if let ArrayExpr::Ref(t) = input {
+        if let TermKind::Soac(SoacOp::Map { lam, inputs, .. }) = &t.kind {
+            return Some((lam.clone(), inputs.clone()));
+        }
+    }
+    None
 }
 
 /// Fuse inline nested Maps from a Map's inputs.

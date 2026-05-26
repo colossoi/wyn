@@ -1,0 +1,10 @@
+-- Inline SOAC fusion: a `scan` consuming a `map` directly as its input
+-- (no intervening `let`). Without inline producer→consumer fusion the map's
+-- runtime-sized result reaches the backend as an in-register Composite array,
+-- which SPIR-V cannot represent ("Composite variant unsized arrays not
+-- supported"). Fusion folds the map transform into the scan operator:
+--   scan(op, ne, map(g, xs)) → scan(op∘g, ne, xs)
+
+#[compute]
+entry prefix_doubled(xs: []f32) []f32 =
+  scan(|a: f32, b: f32| a + b, 0.0, map(|x: f32| x * 2.0, xs))

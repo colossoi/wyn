@@ -1,0 +1,8 @@
+-- Inline SOAC fusion: a `reduce` consuming a `map` directly as its input
+-- (no intervening `let`). Fusion folds the map into a Redomap, avoiding an
+-- in-register runtime-sized Composite intermediate:
+--   reduce(op, ne, map(g, xs)) → redomap(op∘g, op, ne, xs)
+
+#[compute]
+entry sum_doubled(xs: []f32) f32 =
+  reduce(|a: f32, b: f32| a + b, 0.0, map(|x: f32| x * 2.0, xs))
