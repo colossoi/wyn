@@ -1,0 +1,11 @@
+-- Reduce over a map over an iota: `reduce(op, ne, map(g, 0..<n))`.
+-- Fuses to a Redomap over the virtual range, which the parallelizer
+-- chunk-slices per thread. The chunk arithmetic must run in the range's
+-- index type (i32 here), not u32 — otherwise the per-chunk `start`/`len`
+-- come out u32 and feed an i32 `{start, step, len}` range struct, producing
+-- an OpCompositeConstruct whose constituents don't match the struct
+-- (spirv-val rejects). See egir::parallelize::emit_chunk_arithmetic.
+
+#[compute]
+entry sum_doubled_iota(n: i32) f32 =
+  reduce(|a: f32, b: f32| a + b, 0.0, map(|x: i32| f32.i32(x) * 2.0, 0..<n))

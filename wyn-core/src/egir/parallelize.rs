@@ -380,6 +380,19 @@ fn emit_chunk_arithmetic(
     input_len: NodeId,
 ) -> Result<(NodeId, NodeId, NodeId), String> {
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+    // The chunk arithmetic runs in the input's *index* type: storage-view
+    // inputs index in u32 (`_w_intrinsic_storage_len`), Range inputs in the
+    // range's own element type (typically i32). Computing in u32 and feeding
+    // a u32 `chunk_start`/`chunk_len` into an i32 Range produced an
+    // `OpCompositeConstruct` whose constituents didn't match the i32
+    // `{start, step, len}` struct (spirv-val rejected it). Derive the index
+    // type from `input_len` and emit all arithmetic there.
+    let index_ty = graph.types[&input_len].clone();
+    let is_u32 = index_ty == u32_ty;
+
+    // `tid`/`num_workgroups` are u32 intrinsics. The returned `tid` stays u32
+    // (callers use it as a `partials[tid]` storage index); the index-typed
+    // copies feed the chunk math.
     let tid = graph_ops::intern_intrinsic(
         graph,
         catalog().known().thread_id,
@@ -387,11 +400,6 @@ fn emit_chunk_arithmetic(
         u32_ty.clone(),
         None,
     );
-    // Runtime total thread count = num_workgroups.x * workgroup width. With a
-    // `derived_from_input_length` dispatch (~ceil(n / width) workgroups) this
-    // makes chunk_size ≈ 1, so each thread reduces ~one element — a saturating
-    // grid rather than a fixed `total_threads`-wide one. `total_threads` is the
-    // compile-time per-workgroup width.
     let nwg = graph_ops::intern_intrinsic(
         graph,
         catalog().known().num_workgroups,
@@ -399,19 +407,63 @@ fn emit_chunk_arithmetic(
         u32_ty.clone(),
         None,
     );
-    let wg_width = graph_ops::intern_u32(graph, total_threads, None);
-    let total = graph_ops::intern_binop(graph, "*", nwg, wg_width, u32_ty.clone(), None);
-    let one = graph_ops::intern_u32(graph, 1, None);
-    let total_minus_one = graph_ops::intern_binop(graph, "-", total, one, u32_ty.clone(), None);
-    let len_plus = graph_ops::intern_binop(graph, "+", input_len, total_minus_one, u32_ty.clone(), None);
-    let chunk_size = graph_ops::intern_binop(graph, "/", len_plus, total, u32_ty.clone(), None);
-    let chunk_start = graph_ops::intern_binop(graph, "*", tid, chunk_size, u32_ty.clone(), None);
-    let remaining = graph_ops::intern_binop(graph, "-", input_len, chunk_start, u32_ty.clone(), None);
-    let u32_min =
-        catalog().lookup_by_any_name("u32.min").ok_or_else(|| "u32.min not in catalog".to_string())?;
+    let tid_idx = cast_u32_to_index(graph, tid, &index_ty)?;
+    let nwg_idx = cast_u32_to_index(graph, nwg, &index_ty)?;
+
+    // Runtime total thread count = num_workgroups.x * workgroup width. With a
+    // `derived_from_input_length` dispatch (~ceil(n / width) workgroups) this
+    // makes chunk_size ≈ 1, so each thread reduces ~one element — a saturating
+    // grid rather than a fixed `total_threads`-wide one. `total_threads` is the
+    // compile-time per-workgroup width.
+    let wg_width = intern_index_lit(graph, total_threads, &index_ty);
+    let total = graph_ops::intern_binop(graph, "*", nwg_idx, wg_width, index_ty.clone(), None);
+    let one = intern_index_lit(graph, 1, &index_ty);
+    let total_minus_one = graph_ops::intern_binop(graph, "-", total, one, index_ty.clone(), None);
+    let len_plus = graph_ops::intern_binop(graph, "+", input_len, total_minus_one, index_ty.clone(), None);
+    let chunk_size = graph_ops::intern_binop(graph, "/", len_plus, total, index_ty.clone(), None);
+    let chunk_start = graph_ops::intern_binop(graph, "*", tid_idx, chunk_size, index_ty.clone(), None);
+    let remaining = graph_ops::intern_binop(graph, "-", input_len, chunk_start, index_ty.clone(), None);
+    let min_name = if is_u32 { "u32.min" } else { "i32.min" };
+    let min_op =
+        catalog().lookup_by_any_name(min_name).ok_or_else(|| format!("{} not in catalog", min_name))?;
     let chunk_len =
-        graph_ops::intern_intrinsic(graph, u32_min.id, smallvec![chunk_size, remaining], u32_ty, None);
+        graph_ops::intern_intrinsic(graph, min_op.id, smallvec![chunk_size, remaining], index_ty, None);
     Ok((tid, chunk_start, chunk_len))
+}
+
+/// Integer literal `n` typed as `index_ty` (`u32` → `PureOp::Uint`, else
+/// `PureOp::Int`).
+fn intern_index_lit(graph: &mut super::types::EGraph, n: u32, index_ty: &Type<TypeName>) -> NodeId {
+    let op = match index_ty {
+        Type::Constructed(TypeName::UInt(32), _) => super::types::PureOp::Uint(n.to_string()),
+        _ => super::types::PureOp::Int(n.to_string()),
+    };
+    graph.intern_pure_with_span(op, smallvec![], index_ty.clone(), None)
+}
+
+/// Cast a u32 value into `index_ty`: identity for u32, else the per-type
+/// bitcast intrinsic (`i32.u32`).
+fn cast_u32_to_index(
+    graph: &mut super::types::EGraph,
+    v: NodeId,
+    index_ty: &Type<TypeName>,
+) -> Result<NodeId, String> {
+    match index_ty {
+        Type::Constructed(TypeName::UInt(32), _) => Ok(v),
+        Type::Constructed(TypeName::Int(32), _) => {
+            let conv = catalog()
+                .lookup_by_any_name("i32.u32")
+                .ok_or_else(|| "i32.u32 not in catalog".to_string())?;
+            Ok(graph_ops::intern_intrinsic(
+                graph,
+                conv.id,
+                smallvec![v],
+                index_ty.clone(),
+                None,
+            ))
+        }
+        other => Err(format!("chunk arithmetic: unsupported index type {:?}", other)),
+    }
 }
 
 /// Emit a `_w_intrinsic_storage_len(set, binding)` node returning u32.
