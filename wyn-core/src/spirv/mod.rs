@@ -121,6 +121,15 @@ struct Constructor {
     /// Tracks which SPIR-V types already have ArrayStride decorations for buffer layout.
     buffer_stride_decorated: HashSet<spirv::Word>,
 
+    /// Tracks struct types already decorated with `Block` (+ member offsets).
+    /// `rspirv` deduplicates structurally-identical `OpTypeStruct`s, so a
+    /// `{float}` uniform-block wrapper and a `{float}` push-constant-block
+    /// wrapper collapse to one type id. Both wrapper paths want to decorate
+    /// it `Block`, but `spirv-val` rejects a type decorated `Block` (or a
+    /// member decorated `Offset`) more than once. This set ensures each
+    /// struct id is block-decorated exactly once.
+    block_decorated: HashSet<spirv::Word>,
+
     /// buffer_id → (buffer_var, elem_spirv_type). Indexed by the
     /// compile-time buffer_id stored on the view's SSA value via
     /// `view_buffer_id`.
@@ -186,6 +195,7 @@ impl Constructor {
             linked_functions: HashMap::new(),
             current_entry_outputs: Vec::new(),
             buffer_stride_decorated: HashSet::new(),
+            block_decorated: HashSet::new(),
             buffer_vars: Vec::new(),
             buffer_id_map: HashMap::new(),
             constant_ids: HashSet::new(),
@@ -509,6 +519,26 @@ impl Constructor {
         }
     }
 
+    /// Decorate `ty` as a `Block` with the given member byte offsets, exactly
+    /// once per struct id. `rspirv` collapses structurally-identical structs,
+    /// so distinct block wrappers (uniform / push-constant / buffer) over the
+    /// same inner layout reach this with the same `ty`; re-decorating would
+    /// make `spirv-val` reject the duplicate `Block` / `Offset`.
+    fn decorate_block(&mut self, ty: spirv::Word, member_offsets: &[u32]) {
+        if !self.block_decorated.insert(ty) {
+            return;
+        }
+        self.builder.decorate(ty, spirv::Decoration::Block, []);
+        for (i, &offset) in member_offsets.iter().enumerate() {
+            self.builder.member_decorate(
+                ty,
+                i as u32,
+                spirv::Decoration::Offset,
+                [Operand::LiteralBit32(offset)],
+            );
+        }
+    }
+
     /// Create a decorated interface block struct type.
     /// Atomically creates the OpTypeStruct AND all required decorations.
     /// Cached by kind + layout so identical blocks share one ID, but
@@ -532,18 +562,8 @@ impl Constructor {
         // to avoid sharing IDs with plain tuple structs.
         let ty = self.builder.type_struct(member_types.iter().copied());
 
-        // Decorate as Block
-        self.builder.decorate(ty, spirv::Decoration::Block, []);
-
-        // Apply member offsets
-        for (i, &offset) in member_offsets.iter().enumerate() {
-            self.builder.member_decorate(
-                ty,
-                i as u32,
-                spirv::Decoration::Offset,
-                [Operand::LiteralBit32(offset)],
-            );
-        }
+        // Decorate as Block + member offsets (once per struct id).
+        self.decorate_block(ty, member_offsets);
 
         // Apply ArrayStride for array members
         for (i, poly_ty) in member_poly_types.iter().enumerate() {
@@ -560,8 +580,7 @@ impl Constructor {
             return ty;
         }
         let ty = self.builder.type_struct([runtime_array_type]);
-        self.builder.decorate(ty, spirv::Decoration::Block, []);
-        self.builder.member_decorate(ty, 0, spirv::Decoration::Offset, [Operand::LiteralBit32(0)]);
+        self.decorate_block(ty, &[0]);
         self.buffer_block_cache.insert(runtime_array_type, ty);
         ty
     }
@@ -575,8 +594,7 @@ impl Constructor {
             return ty;
         }
         let ty = self.builder.type_struct([value_type]);
-        self.builder.decorate(ty, spirv::Decoration::Block, []);
-        self.builder.member_decorate(ty, 0, spirv::Decoration::Offset, [Operand::LiteralBit32(0)]);
+        self.decorate_block(ty, &[0]);
         self.uniform_block_cache.insert(value_type, ty);
         ty
     }
