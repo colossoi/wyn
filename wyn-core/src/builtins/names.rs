@@ -115,6 +115,9 @@ pub const INTRINSIC_SMOOTHSTEP: &str = "_w_intrinsic_smoothstep";
 /// Compute-shader thread id.
 pub const INTRINSIC_THREAD_ID: &str = "_w_intrinsic_thread_id";
 
+/// Compute-shader local invocation id (the `.x` index within the workgroup).
+pub const INTRINSIC_LOCAL_ID: &str = "_w_intrinsic_local_id";
+
 /// Compute-shader workgroup count (the `.x` dispatch dimension).
 pub const INTRINSIC_NUM_WORKGROUPS: &str = "_w_intrinsic_num_workgroups";
 

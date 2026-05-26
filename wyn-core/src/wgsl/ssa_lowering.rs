@@ -1150,6 +1150,10 @@ impl<'a> LowerCtx<'a> {
         // lowering name-free.
         if matches!(entry.execution_model, ExecutionModel::Compute { .. }) {
             param_strs.push("@builtin(global_invocation_id) _wgsl_gid: vec3<u32>".to_string());
+            // Likewise `_w_intrinsic_local_id()` → `_wgsl_lid.x`, the thread's
+            // index within its workgroup (used by the workgroup-parallel
+            // phase2 reduce for shared-memory addressing).
+            param_strs.push("@builtin(local_invocation_id) _wgsl_lid: vec3<u32>".to_string());
             // Likewise for `_w_intrinsic_num_workgroups()` → `_wgsl_nwg.x`,
             // the runtime dispatch grid width the parallelize chunk math
             // divides the input by.
@@ -2138,6 +2142,10 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     // cast is needed.
                     if *id == known.thread_id && args.is_empty() {
                         return Ok("_wgsl_gid.x".to_string());
+                    }
+                    // `_w_intrinsic_local_id()` → `_wgsl_lid.x` (also u32).
+                    if *id == known.local_id && args.is_empty() {
+                        return Ok("_wgsl_lid.x".to_string());
                     }
                     // `_w_intrinsic_num_workgroups()` → `_wgsl_nwg.x` (also u32).
                     if *id == known.num_workgroups && args.is_empty() {

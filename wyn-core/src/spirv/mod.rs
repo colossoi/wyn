@@ -108,6 +108,9 @@ struct Constructor {
     /// GlobalInvocationId variable for compute shaders (set during entry point setup)
     global_invocation_id: Option<spirv::Word>,
 
+    /// LocalInvocationId variable for compute shaders (set during entry point setup)
+    local_invocation_id: Option<spirv::Word>,
+
     /// NumWorkgroups variable for compute shaders (set during entry point setup)
     num_workgroups: Option<spirv::Word>,
 
@@ -201,6 +204,7 @@ impl Constructor {
             null_const_cache: HashMap::new(),
             storage_buffers: HashMap::new(),
             global_invocation_id: None,
+            local_invocation_id: None,
             num_workgroups: None,
             push_constant_var: None,
             linked_functions: HashMap::new(),
@@ -1383,6 +1387,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         && (*id == known.slice
                             || *id == known.storage_len
                             || *id == known.thread_id
+                            || *id == known.local_id
                             || *id == known.num_workgroups
                             || *id == known.length
                             || *id == known.uninit
@@ -2789,6 +2794,19 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         gid,
                         [0],
                     )?)
+                } else if id == known.local_id {
+                    let lid_var = self
+                        .constructor
+                        .local_invocation_id
+                        .ok_or_else(|| err_spirv!("LocalInvocationId not set for compute shader"))?;
+                    let uvec3_type = self.constructor.get_or_create_vec_type(self.constructor.u32_type, 3);
+                    let lid = self.constructor.builder.load(uvec3_type, None, lid_var, None, [])?;
+                    Ok(self.constructor.builder.composite_extract(
+                        self.constructor.u32_type,
+                        None,
+                        lid,
+                        [0],
+                    )?)
                 } else if id == known.num_workgroups {
                     let nwg_var = self
                         .constructor
@@ -3395,6 +3413,20 @@ fn lower_ssa_entry_point(
             );
             constructor.global_invocation_id = Some(gid_var);
             interfaces.push(gid_var);
+        }
+        if let Some(lid_var) = constructor.local_invocation_id {
+            interfaces.push(lid_var);
+        } else {
+            let uvec3_type = constructor.get_or_create_vec_type(constructor.u32_type, 3);
+            let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::Input, uvec3_type);
+            let lid_var = constructor.builder.variable(ptr_type, None, spirv::StorageClass::Input, None);
+            constructor.builder.decorate(
+                lid_var,
+                spirv::Decoration::BuiltIn,
+                [Operand::BuiltIn(spirv::BuiltIn::LocalInvocationId)],
+            );
+            constructor.local_invocation_id = Some(lid_var);
+            interfaces.push(lid_var);
         }
         if let Some(nwg_var) = constructor.num_workgroups {
             interfaces.push(nwg_var);
