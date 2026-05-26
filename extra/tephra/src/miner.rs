@@ -26,8 +26,14 @@ use crate::vk_helpers::{ComputeContext, MultiStagePipeline, StorageBuffer};
 /// target(32) + n(4) + nonce_offset(4) = 116 bytes.
 const PUSH_CONSTANT_BYTES: usize = 116;
 
-/// Phase-1 workgroup width: each thread hashes one nonce.
+/// Phase-1 workgroup width (threads per workgroup).
 const WORKGROUP_SIZE: u32 = 64;
+
+/// Default phase-1 workgroup count when `--workgroups` isn't given. A fixed,
+/// moderate grid that saturates the GPU while keeping the partials array (one
+/// slot per thread) small enough that phase2's single-threaded combine stays
+/// off the critical path. Tune per device with `--workgroups`.
+const DEFAULT_WORKGROUPS: u32 = 1024;
 
 /// Bytes per result entry: u32 nonce + 8 × u32 hash = 36 bytes.
 const RESULT_BYTES: usize = 36;
@@ -218,10 +224,20 @@ pub fn run(
         PUSH_CONSTANT_BYTES as u32,
     )?;
 
-    // partials: device-local scratch sized for a full chunk's worst case;
-    // the host never reads or writes it (descriptor `usage: intermediate`).
+    // Fixed saturating grid: phase1 dispatches the same workgroup count every
+    // chunk, and the shader derives each thread's nonce span from
+    // `num_workgroups` at runtime. Each thread writes exactly one partial, so
+    // partials is sized to the thread count (not the chunk's nonce count) —
+    // phase2 (single-threaded) then reduces exactly that many. Keeping the grid
+    // moderate keeps phase2's serial combine off the critical path; tune with
+    // --workgroups.
+    let num_workgroups = workgroups_override.unwrap_or(DEFAULT_WORKGROUPS).max(1);
+    let total_threads = num_workgroups as usize * WORKGROUP_SIZE as usize;
+
+    // partials: device-local scratch, one slot per phase-1 thread; the host
+    // never reads or writes it (descriptor `usage: intermediate`).
     // result: host-visible, read back after each chunk.
-    let partials = StorageBuffer::new_device_local(&ctx, chunk as usize * RESULT_BYTES)?;
+    let partials = StorageBuffer::new_device_local(&ctx, total_threads * RESULT_BYTES)?;
     let result = StorageBuffer::new_host_bytes(&ctx, RESULT_BYTES)?;
 
     // Bind buffers in descriptor-binding order: buffers[binding] = buffer.
@@ -239,7 +255,6 @@ pub fn run(
     for chunk_idx in 0..num_chunks {
         let chunk_offset = nonce_offset + chunk_idx * chunk;
         let chunk_n = chunk.min(nonces - chunk_idx * chunk);
-        let num_workgroups = workgroups_override.unwrap_or_else(|| chunk_n.div_ceil(WORKGROUP_SIZE));
 
         let pc = push_constants_for(&header_base, &target, chunk_n, chunk_offset);
         pipeline.dispatch(&buffers, &[[num_workgroups, 1, 1], [1, 1, 1]], &pc)?;
