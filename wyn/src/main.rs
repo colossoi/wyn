@@ -219,6 +219,9 @@ fn compile_file(
         info!("Compiling {}...", input.display());
     }
 
+    // Wall-clock start for the always-printed timing summary below.
+    let compile_start = Instant::now();
+
     // Read source file
     let source = fs::read_to_string(&input)?;
 
@@ -327,16 +330,19 @@ fn compile_file(
 
     let soac_lowered = ssa;
 
+    // Output path (default: input name with the target's extension).
+    let output_path = output.unwrap_or_else(|| {
+        let mut path = input.clone();
+        path.set_extension(match target {
+            Target::Spirv => "spv",
+            Target::Wgsl => "wgsl",
+        });
+        path
+    });
+
     match target {
         Target::Spirv => {
             let lowered = time("lower", verbose, || soac_lowered.lower())?;
-
-            // Determine output path
-            let output_path = output.unwrap_or_else(|| {
-                let mut path = input.clone();
-                path.set_extension("spv");
-                path
-            });
 
             // Write SPIR-V binary
             let mut file = fs::File::create(&output_path)?;
@@ -368,12 +374,6 @@ fn compile_file(
         Target::Wgsl => {
             let wgsl = time("wgsl_lower", verbose, || wyn_core::wgsl::lower(&soac_lowered.ssa))?;
 
-            let output_path = output.unwrap_or_else(|| {
-                let mut path = input.clone();
-                path.set_extension("wgsl");
-                path
-            });
-
             fs::write(&output_path, &wgsl)?;
 
             if verbose {
@@ -381,6 +381,15 @@ fn compile_file(
             }
         }
     }
+
+    // Always-on wall-clock summary (per-pass breakdown is available via
+    // `-v`). Printed to stderr so it doesn't pollute any piped output.
+    eprintln!(
+        "Compiled {} → {} in {:.2}s",
+        input.display(),
+        output_path.display(),
+        compile_start.elapsed().as_secs_f64()
+    );
 
     Ok(())
 }
