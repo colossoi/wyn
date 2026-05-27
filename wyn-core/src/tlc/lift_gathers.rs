@@ -25,7 +25,7 @@
 //! used *solely* via dynamic `Index`, and the producer's free variables are
 //! all input arrays (no captured uniforms/sizes yet).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::closure_convert::collect_free_vars;
 use super::parallelize::{intrinsic_term_by_id, make_entry_def};
@@ -73,8 +73,12 @@ fn lift_entry(program: &mut Program, idx: usize, new_defs: &mut Vec<Def>) {
         DefMeta::EntryPoint(d) => (**d).clone(),
         _ => return,
     };
-    let view_count =
-        crate::binding_layout::compute_entry_binding_layout(&params, &decl, AUTO_STORAGE_SET).len() as u32;
+    let slots = crate::binding_layout::compute_entry_binding_layout(&params, &decl, AUTO_STORAGE_SET);
+    // A producer `map(f, src)` whose `src` is one of these params produces an
+    // array with `src`'s element count — used to size the gather buffer.
+    let param_bindings: HashMap<SymbolId, (u32, u32)> =
+        slots.iter().map(|s| (s.param_sym, (s.set, s.binding))).collect();
+    let view_count = slots.len() as u32;
     let out_count = storage_output_count(&tail.ty);
     let mut next_gather = view_count + out_count;
 
@@ -82,6 +86,7 @@ fn lift_entry(program: &mut Program, idx: usize, new_defs: &mut Vec<Def>) {
     let new_body = lift_in_term(
         body,
         &entry_name,
+        &param_bindings,
         &mut next_gather,
         &mut added_decls,
         new_defs,
@@ -99,6 +104,7 @@ fn lift_entry(program: &mut Program, idx: usize, new_defs: &mut Vec<Def>) {
 fn lift_in_term(
     term: Term,
     entry_name: &str,
+    param_bindings: &HashMap<SymbolId, (u32, u32)>,
     next_gather: &mut u32,
     added_decls: &mut Vec<StorageBindingDecl>,
     new_defs: &mut Vec<Def>,
@@ -107,7 +113,15 @@ fn lift_in_term(
     match term.kind {
         TermKind::Lambda(lam) => {
             let Lambda { params, body, ret_ty } = lam;
-            let new_body = lift_in_term(*body, entry_name, next_gather, added_decls, new_defs, program);
+            let new_body = lift_in_term(
+                *body,
+                entry_name,
+                param_bindings,
+                next_gather,
+                added_decls,
+                new_defs,
+                program,
+            );
             Term {
                 kind: TermKind::Lambda(Lambda {
                     params,
@@ -129,6 +143,7 @@ fn lift_in_term(
                 &rhs,
                 *body.clone(),
                 entry_name,
+                param_bindings,
                 *next_gather,
                 new_defs.len(),
                 program,
@@ -140,13 +155,22 @@ fn lift_in_term(
                 return lift_in_term(
                     rewritten_body,
                     entry_name,
+                    param_bindings,
                     next_gather,
                     added_decls,
                     new_defs,
                     program,
                 );
             }
-            let new_body = lift_in_term(*body, entry_name, next_gather, added_decls, new_defs, program);
+            let new_body = lift_in_term(
+                *body,
+                entry_name,
+                param_bindings,
+                next_gather,
+                added_decls,
+                new_defs,
+                program,
+            );
             Term {
                 kind: TermKind::Let {
                     name,
@@ -171,6 +195,7 @@ fn try_lift(
     rhs: &Term,
     body: Term,
     entry_name: &str,
+    param_bindings: &HashMap<SymbolId, (u32, u32)>,
     binding_num: u32,
     gather_idx: usize,
     program: &mut Program,
@@ -198,6 +223,11 @@ fn try_lift(
         return None;
     }
 
+    // The gather buffer holds `map(f, src)`'s output: one element per `src`
+    // element, so its length tracks `src`'s element count (element sizes may
+    // differ). `from_tlc` allocates the host buffer from this policy.
+    let length = gather_length(&elem_ty, &frees, param_bindings);
+
     let prepass = build_gather_prepass(
         entry_name,
         gather_idx,
@@ -205,15 +235,42 @@ fn try_lift(
         name_ty.clone(),
         &frees,
         binding,
+        length.clone(),
         program,
     );
+    // The consumer *reads* the gather buffer: an Input-role decl carrying the
+    // sizing policy. `from_tlc` emits any length-bearing storage binding as a
+    // compiler-managed Intermediate in the descriptor (read-only here).
     let decl = StorageBindingDecl {
         set: binding.0,
         binding: binding.1,
         role: StorageRole::Input,
         elem_ty,
+        length,
     };
     Some((prepass, decl, rewritten))
+}
+
+/// Sizing policy for the gather buffer: `LikeInput` of the producer's first
+/// input array (a `map` preserves element count). `None` if that input isn't
+/// a known param binding or element sizes can't be computed — the runtime
+/// then falls back to its default intermediate size.
+fn gather_length(
+    elem_ty: &Type<TypeName>,
+    producer_inputs: &[(SymbolId, Type<TypeName>)],
+    param_bindings: &HashMap<SymbolId, (u32, u32)>,
+) -> Option<crate::pipeline_descriptor::BufferLen> {
+    let elem_bytes = crate::ssa::layout::type_byte_size(elem_ty)?;
+    let (src_sym, src_ty) = producer_inputs.first()?;
+    let (set, binding) = param_bindings.get(src_sym).copied()?;
+    let src_elem_ty = crate::types::array_elem(src_ty)?;
+    let src_elem_bytes = crate::ssa::layout::type_byte_size(src_elem_ty)?;
+    Some(crate::pipeline_descriptor::BufferLen::LikeInput {
+        set,
+        binding,
+        elem_bytes,
+        src_elem_bytes,
+    })
 }
 
 /// Recursively replace `Index { array: Var(arr), index }` with
@@ -256,7 +313,8 @@ fn rewrite_uses(
 /// Build the `<entry>_gather_<n>` compute entry whose body is the producer
 /// `map`, re-declaring each captured input array as its own view param and
 /// pinning the result to `binding` via an Output storage decl (which
-/// `parallelize::make_map_plan` reads to force the map's output buffer).
+/// `parallelize::make_map_plan` reads to force the map's output buffer; the
+/// `length` makes `from_tlc` emit it as a compiler-managed Intermediate).
 fn build_gather_prepass(
     entry_name: &str,
     gather_idx: usize,
@@ -264,6 +322,7 @@ fn build_gather_prepass(
     result_ty: Type<TypeName>,
     captured_inputs: &[(SymbolId, Type<TypeName>)],
     binding: (u32, u32),
+    length: Option<crate::pipeline_descriptor::BufferLen>,
     program: &mut Program,
 ) -> Def {
     let name = format!("{}_gather_{}", entry_name, gather_idx);
@@ -274,6 +333,7 @@ fn build_gather_prepass(
         binding: binding.1,
         role: StorageRole::Output,
         elem_ty,
+        length,
     }];
     make_entry_def(
         &name,

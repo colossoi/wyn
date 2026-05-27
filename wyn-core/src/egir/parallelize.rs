@@ -320,6 +320,7 @@ pub fn phase1_transform_reduce(
         binding: partials_binding.1,
         role: crate::interface::StorageRole::Intermediate,
         elem_ty,
+        length: None,
     });
     let _ = result_binding; // caller needs this for phase2 synthesis (not done here)
 
@@ -631,6 +632,7 @@ pub fn phase1_transform_redomap(
         binding: partials_binding.1,
         role: crate::interface::StorageRole::Intermediate,
         elem_ty,
+        length: None,
     });
 
     Ok(())
@@ -873,6 +875,7 @@ fn transform_scan_entry(
         binding: block_offsets_binding.1,
         role: crate::interface::StorageRole::Intermediate,
         elem_ty: entry.storage_bindings[0].elem_ty.clone(),
+        length: None,
     });
     let _ = output_binding;
 
@@ -1019,6 +1022,7 @@ pub fn phase1_transform_scan(
         binding: block_sums_binding.1,
         role: crate::interface::StorageRole::Intermediate,
         elem_ty,
+        length: None,
     });
     Ok(())
 }

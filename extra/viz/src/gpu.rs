@@ -197,20 +197,38 @@ pub fn create_binding_buffers(
     verbose: bool,
 ) -> Result<HashMap<u32, (wgpu::Buffer, u64)>> {
     let mut buffers = HashMap::new();
+    // (set, binding) -> byte size, so a length-policy buffer can be sized
+    // relative to an already-allocated source buffer.
+    let mut byte_sizes: HashMap<(u32, u32), u64> = HashMap::new();
 
+    let make_buffer = |device: &wgpu::Device, queue: &wgpu::Queue, name: &str, data: &[u8]| {
+        let buffer = device.create_buffer(&BufferDescriptor {
+            label: Some(name),
+            size: data.len() as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&buffer, 0, data);
+        buffer
+    };
+
+    // Pass 1: host inputs (file-backed) and buffers without an explicit length
+    // policy (outputs / un-sized intermediates). Record byte sizes so pass 2
+    // can resolve `length: LikeInput` references.
     for b in bindings {
         if let Binding::StorageBuffer {
-            binding, name, usage, ..
+            set, binding, name, usage, length, ..
         } = b
         {
-            let (data_bytes, element_count) = if let Some(path) = inputs.get(name.as_str()) {
+            if length.is_some() {
+                continue;
+            }
+            let data_bytes = if let Some(path) = inputs.get(name.as_str()) {
                 let data = load_f32_json(path)?;
-                let count = data.len();
-                let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
                 if verbose {
-                    println!("Loaded {} elements for '{}' from {}", count, name, path.display());
+                    println!("Loaded {} elements for '{}' from {}", data.len(), name, path.display());
                 }
-                (bytes, count)
+                data.iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>()
             } else if *usage == BufferUsage::Input {
                 return Err(anyhow!(
                     "No input file provided for '{}'. Use --input {}:<file.json>",
@@ -218,27 +236,39 @@ pub fn create_binding_buffers(
                     name
                 ));
             } else {
-                // Intermediate/output buffers: allocate a reasonable size.
-                // For intermediate buffers in multi-compute, the runtime needs to
-                // allocate based on the pipeline's needs. Use 1024 elements as default.
+                // Un-sized intermediate/output: fall back to a default size.
                 let count = 1024usize;
                 if verbose {
-                    println!("Allocated {} zero elements for '{}'", count, name);
+                    println!("Allocated {} default zero elements for '{}'", count, name);
                 }
-                (vec![0u8; count * 4], count)
+                vec![0u8; count * 4]
             };
-
             let byte_size = data_bytes.len() as u64;
-            let buffer = device.create_buffer(&BufferDescriptor {
-                label: Some(name),
-                size: byte_size,
-                usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            queue.write_buffer(&buffer, 0, &data_bytes);
-
+            let buffer = make_buffer(device, queue, name, &data_bytes);
             buffers.insert(*binding, (buffer, byte_size));
-            let _ = element_count; // used in verbose output above
+            byte_sizes.insert((*set, *binding), byte_size);
+        }
+    }
+
+    // Pass 2: compiler-managed buffers with an explicit length policy (gather
+    // intermediates), sized from their source buffer allocated in pass 1.
+    for b in bindings {
+        if let Binding::StorageBuffer {
+            binding, name, length: Some(len), ..
+        } = b
+        {
+            if buffers.contains_key(binding) {
+                continue;
+            }
+            let byte_size = len
+                .resolve_bytes(|s, bnd| byte_sizes.get(&(s, bnd)).copied())
+                .ok_or_else(|| anyhow!("cannot size buffer '{}': its source buffer was not allocated", name))?
+                .max(4);
+            if verbose {
+                println!("Allocated {} bytes for compiler-managed buffer '{}'", byte_size, name);
+            }
+            let buffer = make_buffer(device, queue, name, &vec![0u8; byte_size as usize]);
+            buffers.insert(*binding, (buffer, byte_size));
         }
     }
 

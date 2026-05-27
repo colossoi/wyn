@@ -210,4 +210,8 @@ pub struct StorageBindingDecl {
     pub role: StorageRole,
     /// The element type stored at each index of the buffer.
     pub elem_ty: Type,
+    /// Sizing policy for a compiler-managed buffer whose length isn't a
+    /// host-supplied input (e.g. a gather intermediate). `None` for ordinary
+    /// inputs/outputs, which the runtime sizes from host data or dispatch.
+    pub length: Option<crate::pipeline_descriptor::BufferLen>,
 }

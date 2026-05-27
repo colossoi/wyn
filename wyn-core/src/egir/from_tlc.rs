@@ -226,7 +226,7 @@ fn enrich_pipeline_with_auto_bindings(pipeline: &mut PipelineDescriptor, entries
 
         // Snapshot existing (set, binding) and push-constant offsets to
         // skip what `parallelize` already surfaced.
-        let claimed: HashSet<(u32, u32)> = bindings
+        let mut claimed: HashSet<(u32, u32)> = bindings
             .iter()
             .filter_map(|b| match b {
                 Binding::StorageBuffer { set, binding, .. } => Some((*set, *binding)),
@@ -262,6 +262,7 @@ fn enrich_pipeline_with_auto_bindings(pipeline: &mut PipelineDescriptor, entries
                     access: Access::ReadOnly,
                     usage: BufferUsage::Input,
                     name: input.name.clone(),
+                    length: None,
                 });
             } else if let Some(offset) = input.push_constant_offset {
                 if claimed_pc_offsets.contains(&offset) {
@@ -298,11 +299,39 @@ fn enrich_pipeline_with_auto_bindings(pipeline: &mut PipelineDescriptor, entries
             }
         }
 
+        // Compiler-managed gather buffers: storage bindings carrying an
+        // explicit `length` (a `lift_gathers` intermediate, referenced via
+        // `storage_index` rather than a param). Emit these *before* outputs so
+        // the producer's matching `EntryOutput` (same set/binding) doesn't
+        // also claim it as a host-read `Output`. The producer declares it
+        // Output (it writes) and the consumer Input (it reads); both surface
+        // as a compiler-managed `Intermediate`, with access from the role.
+        for decl in &entry.storage_bindings {
+            if decl.length.is_none() {
+                continue;
+            }
+            if !claimed.insert((decl.set, decl.binding)) {
+                continue;
+            }
+            let access = match decl.role {
+                crate::interface::StorageRole::Output => Access::WriteOnly,
+                _ => Access::ReadOnly,
+            };
+            bindings.push(Binding::StorageBuffer {
+                set: decl.set,
+                binding: decl.binding,
+                access,
+                usage: BufferUsage::Intermediate,
+                name: format!("{}_gather_b{}", entry.name, decl.binding),
+                length: decl.length.clone(),
+            });
+        }
+
         for (i, output) in entry.outputs.iter().enumerate() {
             let Some((set, binding)) = output.storage_binding else {
                 continue;
             };
-            if claimed.contains(&(set, binding)) {
+            if !claimed.insert((set, binding)) {
                 continue;
             }
             // EntryOutput has no name field; synthesize from the entry
@@ -319,26 +348,7 @@ fn enrich_pipeline_with_auto_bindings(pipeline: &mut PipelineDescriptor, entries
                 access: Access::WriteOnly,
                 usage: BufferUsage::Output,
                 name,
-            });
-        }
-
-        // Input-role storage bindings the entry reads via `storage_index`
-        // but never names as a param — e.g. the gather buffer a `lift_gathers`
-        // consumer reads. These aren't EntryInputs (no param backs them), so
-        // surface them here or the host runtime never binds the buffer.
-        for (i, decl) in entry.storage_bindings.iter().enumerate() {
-            if !matches!(decl.role, crate::interface::StorageRole::Input) {
-                continue;
-            }
-            if claimed.contains(&(decl.set, decl.binding)) {
-                continue;
-            }
-            bindings.push(Binding::StorageBuffer {
-                set: decl.set,
-                binding: decl.binding,
-                access: Access::ReadOnly,
-                usage: BufferUsage::Input,
-                name: format!("{}_gather_in_{}", entry.name, i),
+                length: None,
             });
         }
     }

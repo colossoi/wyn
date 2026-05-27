@@ -1,17 +1,30 @@
 # Plan: materialize randomly-indexed computed arrays into a buffer
 
-> **Status (gather-materialize branch):** Phase 1 (Map-only gather) **landed**.
-> `tlc/lift_gathers.rs` + the `lift_gathers` typestate step (between
-> `apply_ownership` and `defunctionalize`) detect `let arr = map(f, src) in
-> …arr[i]`, split the producer into a `<entry>_gather_<n>` compute pre-pass
-> writing a forced storage binding, and rewrite the consumer's `arr[i]` to a
-> `storage_index` load. `parallelize::make_map_plan` honors the pre-pass's
-> Output decl to pin its result buffer; `enrich_pipeline_with_auto_bindings`
-> surfaces the consumer's Input gather binding into the descriptor. Both repros
-> validate (spirv-val + naga); covered by unit tests in `lift_gathers_tests.rs`,
-> an end-to-end binding-wiring test in `integration_tests.rs`, and a WGSL test
-> in `wgsl/ssa_lowering_tests.rs`. Phase 1 uses the existing oversized (65536)
-> intermediate default — real `BufferLen` sizing is Phase 2 (next).
+> **Status (gather-materialize branch):** Phases 1–2 (Map-only gather + real
+> buffer sizing) **landed**.
+> **Phase 1:** `tlc/lift_gathers.rs` + the `lift_gathers` typestate step
+> (between `apply_ownership` and `defunctionalize`) detect `let arr = map(f,
+> src) in …arr[i]`, split the producer into a `<entry>_gather_<n>` compute
+> pre-pass writing a forced storage binding, and rewrite the consumer's
+> `arr[i]` to a `storage_index` load. `parallelize::make_map_plan` honors the
+> pre-pass's Output decl to pin its result buffer.
+> **Phase 2:** the gather buffer is now a `BufferUsage::Intermediate`
+> (compiler-managed scratch, no host file) carrying a `BufferLen` sizing policy
+> (`pipeline_descriptor`). `lift_gathers` emits `BufferLen::LikeInput{src, …}`
+> (a map preserves element count); `enrich_pipeline_with_auto_bindings` surfaces
+> any length-bearing storage binding as an Intermediate (access from role:
+> producer writes, consumer reads); `viz/gpu.rs` sizes it from the policy
+> (two-pass: inputs first, then resolve `LikeInput`), retiring the 1024 default
+> for it. Verified at the descriptor level (spirv-val + naga + binding/length
+> tests); GPU runtime sizing is in place but not exercised here (no adapter).
+> Covered by `lift_gathers_tests.rs`, `integration_tests.rs`,
+> `wgsl/ssa_lowering_tests.rs`, and `BufferLen` tests in the descriptor crate.
+>
+> **Known gap (out of Phase 2 scope):** a runtime-sized *output* buffer (e.g.
+> the consumer's `iota(6144)` result) still uses viz's 1024 default — a
+> pre-existing limitation affecting any runtime-sized compute output, not
+> gather-specific. **Next:** Phase 3 (Scan/Redomap producers), Phase 4 (gather
+> CSE).
 
 ## Context
 

@@ -924,6 +924,7 @@ fn maybe_hoist(
         binding: binding.1,
         role: interface::StorageRole::Input,
         elem_ty: name_ty.clone(),
+        length: None,
     });
 
     // Rewrite the let RHS to a storage load at position 0.
@@ -1303,9 +1304,12 @@ fn make_lowering_plan(
     }
 }
 
-/// Find an Output-role storage binding declared on a compute entry's
-/// interface, if any. Only gather pre-passes (`lift_gathers`) declare one;
-/// it pins the map's result buffer to the binding the consumer reads.
+/// Find a gather pre-pass's pinned result binding, if any. `lift_gathers`
+/// declares the pre-pass's output buffer as an Output-role storage binding
+/// (the only Map with one); this pins the map's result to the exact binding
+/// the consumer reads. Ordinary maps declare none and auto-allocate at EGIR.
+/// A gather *consumer* declares its read buffer as Input, not Output, so this
+/// never mistakes it for the consumer's own output.
 fn forced_output_binding_from_decl(program: &Program, def_name: SymbolId) -> Option<(u32, u32)> {
     let def = program.defs.iter().find(|d| d.name == def_name)?;
     let DefMeta::EntryPoint(decl) = &def.meta else {
@@ -1812,6 +1816,7 @@ fn build_two_phase_entries(
         binding: partials_binding.1,
         role: interface::StorageRole::Intermediate,
         elem_ty: elem_type.clone(),
+        length: None,
     });
     let phase1_def = make_entry_def(
         &phase1_name,
@@ -1859,12 +1864,14 @@ fn build_two_phase_entries(
             binding: partials_binding.1,
             role: interface::StorageRole::Intermediate,
             elem_ty: elem_type.clone(),
+            length: None,
         },
         interface::StorageBindingDecl {
             set: result_binding.0,
             binding: result_binding.1,
             role: interface::StorageRole::Output,
             elem_ty: elem_type.clone(),
+            length: None,
         },
     ];
     let phase2_def = make_entry_def(
@@ -2530,6 +2537,7 @@ fn push_storage_binding(
         access,
         usage,
         name,
+        length: None,
     });
     idx
 }
@@ -2591,6 +2599,7 @@ fn collect_soac_bindings(soac: &SoacAnalysis) -> Vec<Binding> {
             access: Access::ReadOnly,
             usage: BufferUsage::Input,
             name: format!("input_{}", i),
+            length: None,
         })
         .collect()
 }
@@ -2605,6 +2614,7 @@ fn input_storage_decls(soac: &SoacAnalysis) -> Vec<interface::StorageBindingDecl
             binding,
             role: interface::StorageRole::Input,
             elem_ty: elem_ty.clone(),
+            length: None,
         })
         .collect()
 }

@@ -2512,26 +2512,24 @@ fn compile_parallel(source: &str) -> crate::Lowered {
         .expect("lower")
 }
 
-/// The storage-buffer bindings of a compute pipeline as `(binding, usage)`.
-fn compute_storage_bindings(
+/// Full storage-buffer descriptors of a compute pipeline.
+fn compute_storage_buffers(
     pipeline: &crate::pipeline_descriptor::PipelineDescriptor,
     entry: &str,
-) -> Vec<(u32, String)> {
+) -> Vec<crate::pipeline_descriptor::Binding> {
     use crate::pipeline_descriptor::{Binding, Pipeline};
-    let cp = pipeline
+    pipeline
         .pipelines
         .iter()
         .find_map(|p| match p {
             Pipeline::Compute(cp) if cp.entry_point == entry => Some(cp),
             _ => None,
         })
-        .unwrap_or_else(|| panic!("no compute pipeline named {entry}"));
-    cp.bindings
+        .unwrap_or_else(|| panic!("no compute pipeline named {entry}"))
+        .bindings
         .iter()
-        .filter_map(|b| match b {
-            Binding::StorageBuffer { binding, usage, .. } => Some((*binding, format!("{usage:?}"))),
-            _ => None,
-        })
+        .filter(|b| matches!(b, Binding::StorageBuffer { .. }))
+        .cloned()
         .collect()
 }
 
@@ -2540,10 +2538,14 @@ fn compute_storage_bindings(
 /// supported"). `lift_gathers` splits the producer `map` into its own
 /// `gen_gather_0` compute stage writing a storage buffer, and rewrites the
 /// consumer's `counts[i]` into a load from that buffer. This pins the
-/// end-to-end wiring: both stages must agree on the gather buffer's binding,
-/// and it must not collide with the consumer's own input/output buffers.
+/// end-to-end wiring: both stages agree on the gather buffer's binding, it's a
+/// compiler-managed Intermediate (not host I/O), it doesn't collide with the
+/// consumer's own input/output, and it carries a `LikeInput` sizing policy so
+/// the host allocates it from `bh`'s length (a `map` preserves element count;
+/// `[]vec4f32` → `[]i32` is 4 of 16 bytes per element).
 #[test]
-fn gather_computed_array_materializes_to_shared_binding() {
+fn gather_computed_array_materializes_to_shared_intermediate() {
+    use crate::pipeline_descriptor::{Access, Binding, BufferLen, BufferUsage};
     let src = "\
 #[compute]
 entry gen(bh: []vec4f32) []i32 =
@@ -2553,7 +2555,6 @@ entry gen(bh: []vec4f32) []i32 =
     let lowered = compile_parallel(src);
     assert!(!lowered.spirv.is_empty(), "lowering produced no SPIR-V");
 
-    // The producer became its own gather stage.
     let gather_entry = lowered
         .pipeline
         .pipelines
@@ -2566,34 +2567,77 @@ entry gen(bh: []vec4f32) []i32 =
         })
         .expect("a gather pre-pass compute stage must exist");
 
-    let gather_bindings = compute_storage_bindings(&lowered.pipeline, &gather_entry);
-    let consumer_bindings = compute_storage_bindings(&lowered.pipeline, "gen");
+    let gather_bufs = compute_storage_buffers(&lowered.pipeline, &gather_entry);
+    let consumer_bufs = compute_storage_buffers(&lowered.pipeline, "gen");
 
-    // The gather stage writes exactly one Output buffer.
-    let gather_out: Vec<u32> =
-        gather_bindings.iter().filter(|(_, u)| u == "Output").map(|(b, _)| *b).collect();
+    // The pre-pass writes exactly one Intermediate (the gather buffer), sized
+    // LikeInput of `bh` (binding 0): one i32 (4B) per vec4f32 (16B) element.
+    let producer_intermediates: Vec<&Binding> = gather_bufs
+        .iter()
+        .filter(|b| {
+            matches!(
+                b,
+                Binding::StorageBuffer {
+                    usage: BufferUsage::Intermediate,
+                    ..
+                }
+            )
+        })
+        .collect();
     assert_eq!(
-        gather_out.len(),
+        producer_intermediates.len(),
         1,
-        "gather stage should write one output buffer: {gather_bindings:?}"
+        "pre-pass writes one gather intermediate: {gather_bufs:?}"
     );
-    let gather_binding = gather_out[0];
+    let Binding::StorageBuffer {
+        binding: gather_binding,
+        access,
+        length,
+        ..
+    } = producer_intermediates[0]
+    else {
+        unreachable!()
+    };
+    assert_eq!(*access, Access::WriteOnly, "pre-pass writes the gather buffer");
+    assert_eq!(
+        length.as_ref(),
+        Some(&BufferLen::LikeInput {
+            set: 0,
+            binding: 0,
+            elem_bytes: 4,
+            src_elem_bytes: 16,
+        }),
+        "gather buffer must be sized from its input array's element count"
+    );
 
-    // The consumer reads that exact binding as an Input, and writes its own
-    // result to a *different* binding (no collision with the gather buffer).
+    // The consumer reads that same binding as a read-only Intermediate.
+    let reads_gather = consumer_bufs.iter().any(|b| {
+        matches!(b, Binding::StorageBuffer { binding, usage: BufferUsage::Intermediate, access: Access::ReadOnly, .. } if binding == gather_binding)
+    });
     assert!(
-        consumer_bindings.contains(&(gather_binding, "Input".to_string())),
-        "consumer must read the gather buffer at binding {gather_binding} as Input: {consumer_bindings:?}"
+        reads_gather,
+        "consumer must read the gather buffer (binding {gather_binding}) read-only: {consumer_bufs:?}"
     );
-    let consumer_out: Vec<u32> =
-        consumer_bindings.iter().filter(|(_, u)| u == "Output").map(|(b, _)| *b).collect();
+
+    // The consumer's own output goes to a different binding — no collision.
+    let consumer_outputs: Vec<u32> = consumer_bufs
+        .iter()
+        .filter_map(|b| match b {
+            Binding::StorageBuffer {
+                binding,
+                usage: BufferUsage::Output,
+                ..
+            } => Some(*binding),
+            _ => None,
+        })
+        .collect();
     assert_eq!(
-        consumer_out.len(),
+        consumer_outputs.len(),
         1,
-        "consumer writes one output: {consumer_bindings:?}"
+        "consumer writes one output: {consumer_bufs:?}"
     );
     assert_ne!(
-        consumer_out[0], gather_binding,
+        consumer_outputs[0], *gather_binding,
         "consumer output must not collide with the gather buffer"
     );
 }

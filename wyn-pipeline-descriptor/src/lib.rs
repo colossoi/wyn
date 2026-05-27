@@ -125,6 +125,11 @@ pub enum Binding {
         access: Access,
         usage: BufferUsage,
         name: String,
+        /// Sizing policy for compiler-managed buffers whose length isn't a
+        /// host-supplied input (e.g. a gather intermediate). `None` for
+        /// host inputs (sized from the supplied data) and ordinary outputs.
+        #[serde(default)]
+        length: Option<BufferLen>,
     },
     /// Uniform buffer (descriptor set binding).
     Uniform {
@@ -182,6 +187,49 @@ impl Binding {
                 ..
             }
         )
+    }
+}
+
+/// Compile-time sizing policy for a compiler-managed storage buffer whose
+/// length isn't a host-supplied input. The host runtime resolves this to a
+/// byte size when allocating the buffer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BufferLen {
+    /// Exactly `bytes` bytes.
+    Fixed {
+        bytes: u64,
+    },
+    /// Same element *count* as the buffer at (`set`, `binding`), whose
+    /// elements are `src_elem_bytes` each; this buffer's elements are
+    /// `elem_bytes` each. Byte size = `src_bytes / src_elem_bytes *
+    /// elem_bytes`. A `map` output keeps its input's element count but its
+    /// element size may differ (e.g. `[]vec4f32` → `[]i32`).
+    LikeInput {
+        set: u32,
+        binding: u32,
+        elem_bytes: u32,
+        src_elem_bytes: u32,
+    },
+}
+
+impl BufferLen {
+    /// Resolve to a byte size given a lookup of already-allocated buffers'
+    /// byte sizes by (set, binding). Returns `None` if a referenced source
+    /// buffer hasn't been sized yet.
+    pub fn resolve_bytes(&self, src_bytes: impl Fn(u32, u32) -> Option<u64>) -> Option<u64> {
+        match self {
+            BufferLen::Fixed { bytes } => Some(*bytes),
+            BufferLen::LikeInput {
+                set,
+                binding,
+                elem_bytes,
+                src_elem_bytes,
+            } => {
+                let bytes = src_bytes(*set, *binding)?;
+                Some(bytes / *src_elem_bytes as u64 * *elem_bytes as u64)
+            }
+        }
     }
 }
 
@@ -306,6 +354,42 @@ mod tests {
         assert_eq!(VertexFormat::Float32x3.byte_size(), 12);
         assert_eq!(VertexFormat::Float32x4.byte_size(), 16);
         assert_eq!(VertexFormat::Uint32x4.byte_size(), 16);
+    }
+
+    #[test]
+    fn buffer_len_resolve_like_input() {
+        // A `[]vec4f32` (16 B/elem) input of 64 elements → 1024 bytes; a gather
+        // of `[]i32` (4 B/elem) keeping its element count is 64 * 4 = 256 bytes.
+        let len = BufferLen::LikeInput {
+            set: 0,
+            binding: 0,
+            elem_bytes: 4,
+            src_elem_bytes: 16,
+        };
+        assert_eq!(
+            len.resolve_bytes(|s, b| (s == 0 && b == 0).then_some(1024)),
+            Some(256)
+        );
+        // Source not yet allocated → unresolved.
+        assert_eq!(len.resolve_bytes(|_, _| None), None);
+        // Fixed is independent of any source.
+        assert_eq!(
+            BufferLen::Fixed { bytes: 40 }.resolve_bytes(|_, _| None),
+            Some(40)
+        );
+    }
+
+    #[test]
+    fn buffer_len_serde_round_trip() {
+        let len = BufferLen::LikeInput {
+            set: 0,
+            binding: 2,
+            elem_bytes: 4,
+            src_elem_bytes: 16,
+        };
+        let json = serde_json::to_string(&len).unwrap();
+        assert!(json.contains("\"like_input\""), "got: {json}");
+        assert_eq!(serde_json::from_str::<BufferLen>(&json).unwrap(), len);
     }
 
     #[test]

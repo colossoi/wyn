@@ -95,6 +95,7 @@ impl EntryBuilder {
             binding,
             role: interface::StorageRole::Intermediate,
             elem_ty,
+            length: None,
         });
     }
 
@@ -104,6 +105,7 @@ impl EntryBuilder {
             binding,
             role: interface::StorageRole::Output,
             elem_ty,
+            length: None,
         });
     }
 
