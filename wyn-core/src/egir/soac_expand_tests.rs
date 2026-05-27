@@ -42,6 +42,7 @@ fn compile_to_expanded_egraph(input: &str) -> crate::egir::types::EGraph {
         .fuse_maps()
         .apply_ownership()
         .expect("apply_ownership")
+        .lift_gathers()
         .defunctionalize()
         .monomorphize()
         .buffer_specialize()

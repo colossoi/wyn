@@ -299,6 +299,7 @@ fn compile_to_wgsl(source: &str) -> crate::error::Result<String> {
         .fuse_maps()
         .apply_ownership()
         .expect("apply_ownership")
+        .lift_gathers()
         .defunctionalize()
         .monomorphize()
         .buffer_specialize()
@@ -664,5 +665,33 @@ entry sum_array(data: []f32) f32 =
         wgsl.contains("@workgroup_size(64, 1, 1)"),
         "no size_hint should keep workgroup_size=64, got:\n{}",
         wgsl
+    );
+}
+
+#[test]
+fn wgsl_gather_computed_array() {
+    // A randomly-indexed computed array is materialized into its own
+    // storage buffer; the consumer reads it by index. The WGSL backend must
+    // emit the gather buffer as a module-scope `var<storage>` and validate
+    // (naga) end-to-end. Three buffers: input `bh` (0), consumer output (1),
+    // gather intermediate (2).
+    let wgsl = compile_to_wgsl(
+        "\
+#[compute]
+entry gen(bh: []vec4f32) []i32 =
+  let counts = map(|h:vec4f32| 4 + 5*(if h.x>4.0 then 3 else 1), bh) in
+  map(|i:i32| counts[i % 256], iota(6144))
+",
+    )
+    .expect("gather program must lower to WGSL");
+
+    assert!(
+        wgsl.contains("@group(0) @binding(2)") && wgsl.contains("var<storage"),
+        "the gather buffer must be declared as a storage binding:\n{wgsl}"
+    );
+    // The consumer indexes the gather buffer (binding 2).
+    assert!(
+        wgsl.contains("_buf_0_2["),
+        "consumer must read the gather buffer by index:\n{wgsl}"
     );
 }

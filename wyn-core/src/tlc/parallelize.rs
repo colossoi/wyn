@@ -1268,7 +1268,14 @@ fn make_lowering_plan(
 ) -> LoweringPlan {
     let sizing = PipelineSizing::for_analyzed_entry(program, analysis);
     match &analysis.soac.original {
-        SoacOp::Map { .. } => make_map_plan(analysis, entry_name, next_binding, sizing),
+        SoacOp::Map { .. } => {
+            // A gather pre-pass (emitted by `lift_gathers` before defunc)
+            // declares an Output-role storage binding so its result lands on
+            // the exact buffer the consumer reads via `storage_index`. Honor
+            // it; ordinary maps declare none and auto-allocate at EGIR.
+            let forced = forced_output_binding_from_decl(program, analysis.def_name);
+            make_map_plan(analysis, entry_name, next_binding, sizing, forced)
+        }
         SoacOp::Reduce { op, ne, .. } => make_two_phase_plan(
             analysis,
             entry_name,
@@ -1296,11 +1303,26 @@ fn make_lowering_plan(
     }
 }
 
+/// Find an Output-role storage binding declared on a compute entry's
+/// interface, if any. Only gather pre-passes (`lift_gathers`) declare one;
+/// it pins the map's result buffer to the binding the consumer reads.
+fn forced_output_binding_from_decl(program: &Program, def_name: SymbolId) -> Option<(u32, u32)> {
+    let def = program.defs.iter().find(|d| d.name == def_name)?;
+    let DefMeta::EntryPoint(decl) = &def.meta else {
+        return None;
+    };
+    decl.storage_bindings
+        .iter()
+        .find(|b| matches!(b.role, interface::StorageRole::Output))
+        .map(|b| (b.set, b.binding))
+}
+
 fn make_map_plan(
     analysis: &EntryAnalysis,
     entry_name: &str,
     _next_binding: u32,
     sizing: PipelineSizing,
+    forced_output_binding: Option<(u32, u32)>,
 ) -> LoweringPlan {
     // Plan: don't pre-allocate the output binding. The EGIR side already
     // auto-allocates it via `build_entry_outputs` and walks the entry's
@@ -1326,7 +1348,9 @@ fn make_map_plan(
             input_index: 0,
             workgroup_size: sizing.workgroup.0,
         },
-        bindings: PlannedBindings::Map { output: None },
+        bindings: PlannedBindings::Map {
+            output: forced_output_binding,
+        },
     };
     LoweringPlan {
         removed_entry: None,
@@ -2289,7 +2313,7 @@ fn let_term(name: SymbolId, name_ty: Type<TypeName>, rhs: Term, body: Term, span
 
 /// Build an `App(Var(Builtin { id, overload_idx: 0 }), args)` term for
 /// a catalog intrinsic.
-fn intrinsic_term_by_id(
+pub(crate) fn intrinsic_term_by_id(
     id: crate::builtins::BuiltinId,
     args: Vec<Term>,
     ret_ty: Type<TypeName>,
@@ -2371,7 +2395,7 @@ fn soac_term(soac: SoacOp, ty: Type<TypeName>, span: ast::Span) -> Term {
     }
 }
 
-fn uint_lit(val: u64, span: ast::Span) -> Term {
+pub(crate) fn uint_lit(val: u64, span: ast::Span) -> Term {
     Term {
         id: TermId(0),
         ty: Type::Constructed(TypeName::UInt(32), vec![]),
@@ -2380,7 +2404,7 @@ fn uint_lit(val: u64, span: ast::Span) -> Term {
     }
 }
 
-fn make_entry_def(
+pub(crate) fn make_entry_def(
     name: &str,
     body: Term,
     return_ty: Type<TypeName>,

@@ -321,6 +321,26 @@ fn enrich_pipeline_with_auto_bindings(pipeline: &mut PipelineDescriptor, entries
                 name,
             });
         }
+
+        // Input-role storage bindings the entry reads via `storage_index`
+        // but never names as a param — e.g. the gather buffer a `lift_gathers`
+        // consumer reads. These aren't EntryInputs (no param backs them), so
+        // surface them here or the host runtime never binds the buffer.
+        for (i, decl) in entry.storage_bindings.iter().enumerate() {
+            if !matches!(decl.role, crate::interface::StorageRole::Input) {
+                continue;
+            }
+            if claimed.contains(&(decl.set, decl.binding)) {
+                continue;
+            }
+            bindings.push(Binding::StorageBuffer {
+                set: decl.set,
+                binding: decl.binding,
+                access: Access::ReadOnly,
+                usage: BufferUsage::Input,
+                name: format!("{}_gather_in_{}", entry.name, i),
+            });
+        }
     }
 }
 

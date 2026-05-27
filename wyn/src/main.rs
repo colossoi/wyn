@@ -285,8 +285,12 @@ fn compile_file(
     let tlc_fused = time("fuse_maps", verbose, || tlc_normed.fuse_maps());
     let tlc_owned = time("apply_ownership", verbose, || tlc_fused.apply_ownership())?;
 
+    // Materialize randomly-indexed computed arrays into storage buffers
+    // (before defunctionalization, while their producers are still SOACs).
+    let tlc_gathered = time("lift_gathers", verbose, || tlc_owned.lift_gathers());
+
     // Defunctionalize: lift lambdas and flatten SOAC captures
-    let tlc_defunc = time("defunctionalize", verbose, || tlc_owned.defunctionalize());
+    let tlc_defunc = time("defunctionalize", verbose, || tlc_gathered.defunctionalize());
 
     // Monomorphize polymorphic functions at TLC level
     let tlc_mono = time("tlc_monomorphize", verbose, || tlc_defunc.monomorphize());

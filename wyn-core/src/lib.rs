@@ -544,6 +544,7 @@ impl TlcTransformed {
             .fuse_maps()
             .apply_ownership()
             .expect("apply_ownership")
+            .lift_gathers()
             .defunctionalize()
             .monomorphize()
             .buffer_specialize()
@@ -630,6 +631,28 @@ impl std::ops::Deref for TlcOwnershipApplied {
 }
 
 impl TlcOwnershipApplied {
+    /// Materialize randomly-indexed computed arrays into storage buffers.
+    /// Runs before defunctionalization, while a gathered computed array is
+    /// still a plain `Var` and its producer a recognizable `Soac(Map)`.
+    pub fn lift_gathers(self) -> TlcGathersLifted {
+        let mut inner = self.0;
+        inner.tlc = tlc::lift_gathers::run(inner.tlc);
+        TlcGathersLifted(inner)
+    }
+}
+
+/// TLC after randomly-indexed computed arrays have been lifted into gather
+/// pre-pass entries (computed-array gathers now read from storage buffers).
+pub struct TlcGathersLifted(pub TlcEarlyInner);
+
+impl std::ops::Deref for TlcGathersLifted {
+    type Target = TlcEarlyInner;
+    fn deref(&self) -> &TlcEarlyInner {
+        &self.0
+    }
+}
+
+impl TlcGathersLifted {
     /// Run the three-phase closure pipeline:
     /// 1. `closure_convert::run` lifts every lambda to a top-level def
     ///    and produces a `ClosureInfo` side-table describing captures

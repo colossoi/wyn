@@ -34,6 +34,7 @@ fn compile_via_egir(src: &str) -> Program {
         .fuse_maps()
         .apply_ownership()
         .expect("apply_ownership")
+        .lift_gathers()
         .defunctionalize()
         .monomorphize()
         .buffer_specialize()

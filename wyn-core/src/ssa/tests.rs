@@ -197,6 +197,7 @@ fn spirv_storage_write_chain_lowers_cleanly() {
         .fuse_maps()
         .apply_ownership()
         .expect("apply_ownership")
+        .lift_gathers()
         .defunctionalize()
         .monomorphize()
         .buffer_specialize()

@@ -2007,6 +2007,7 @@ fn compile_to_ssa_with_inline_small(input: &str) -> Program {
         .fuse_maps()
         .apply_ownership()
         .expect("apply_ownership")
+        .lift_gathers()
         .defunctionalize()
         .monomorphize()
         .buffer_specialize()
@@ -2468,5 +2469,131 @@ entry sq(xs: []f32) []f32 = map(|x: f32| x * x, xs)
     assert!(
         !has_loop_merge,
         "compute Map entry must NOT contain OpLoopMerge — the parallel kernel is loop-free"
+    );
+}
+
+/// Compile `source` through the full *parallelized* pipeline (matching the
+/// production driver, which always parallelizes compute) and return the
+/// lowered SPIR-V + pipeline descriptor.
+fn compile_parallel(source: &str) -> crate::Lowered {
+    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
+    let type_checked = Compiler::parse(source, &mut node_counter)
+        .expect("parse")
+        .resolve(&mut module_manager)
+        .expect("resolve")
+        .fold_ast_constants()
+        .type_check(&mut module_manager)
+        .expect("type_check");
+    type_checked
+        .to_tlc(&module_manager, false)
+        .partial_eval()
+        .normalize_soacs()
+        .fuse_maps()
+        .apply_ownership()
+        .expect("apply_ownership")
+        .lift_gathers()
+        .defunctionalize()
+        .monomorphize()
+        .buffer_specialize()
+        .fold_generated_lambdas()
+        .inline_small()
+        // `parallelize_soacs` takes a *disable* flag; `false` enables it,
+        // matching the production driver's default (non-`--single-stage`).
+        .parallelize_soacs(false)
+        .expect("parallelize_soacs")
+        .filter_reachable()
+        .to_egraph()
+        .expect("to_egraph")
+        .expand_soacs(true)
+        .materialize()
+        .optimize_skeleton()
+        .elaborate()
+        .lower()
+        .expect("lower")
+}
+
+/// The storage-buffer bindings of a compute pipeline as `(binding, usage)`.
+fn compute_storage_bindings(
+    pipeline: &crate::pipeline_descriptor::PipelineDescriptor,
+    entry: &str,
+) -> Vec<(u32, String)> {
+    use crate::pipeline_descriptor::{Binding, Pipeline};
+    let cp = pipeline
+        .pipelines
+        .iter()
+        .find_map(|p| match p {
+            Pipeline::Compute(cp) if cp.entry_point == entry => Some(cp),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no compute pipeline named {entry}"));
+    cp.bindings
+        .iter()
+        .filter_map(|b| match b {
+            Binding::StorageBuffer { binding, usage, .. } => Some((*binding, format!("{usage:?}"))),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Gathering a *computed* array (a `map` result) at a runtime index used to
+/// panic in SPIR-V emission ("Composite variant unsized arrays not
+/// supported"). `lift_gathers` splits the producer `map` into its own
+/// `gen_gather_0` compute stage writing a storage buffer, and rewrites the
+/// consumer's `counts[i]` into a load from that buffer. This pins the
+/// end-to-end wiring: both stages must agree on the gather buffer's binding,
+/// and it must not collide with the consumer's own input/output buffers.
+#[test]
+fn gather_computed_array_materializes_to_shared_binding() {
+    let src = "\
+#[compute]
+entry gen(bh: []vec4f32) []i32 =
+  let counts = map(|h:vec4f32| 4 + 5*(if h.x>4.0 then 3 else 1), bh) in
+  map(|i:i32| counts[i % 256], iota(6144))
+";
+    let lowered = compile_parallel(src);
+    assert!(!lowered.spirv.is_empty(), "lowering produced no SPIR-V");
+
+    // The producer became its own gather stage.
+    let gather_entry = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .find_map(|p| match p {
+            crate::pipeline_descriptor::Pipeline::Compute(cp) if cp.entry_point.contains("_gather_") => {
+                Some(cp.entry_point.clone())
+            }
+            _ => None,
+        })
+        .expect("a gather pre-pass compute stage must exist");
+
+    let gather_bindings = compute_storage_bindings(&lowered.pipeline, &gather_entry);
+    let consumer_bindings = compute_storage_bindings(&lowered.pipeline, "gen");
+
+    // The gather stage writes exactly one Output buffer.
+    let gather_out: Vec<u32> =
+        gather_bindings.iter().filter(|(_, u)| u == "Output").map(|(b, _)| *b).collect();
+    assert_eq!(
+        gather_out.len(),
+        1,
+        "gather stage should write one output buffer: {gather_bindings:?}"
+    );
+    let gather_binding = gather_out[0];
+
+    // The consumer reads that exact binding as an Input, and writes its own
+    // result to a *different* binding (no collision with the gather buffer).
+    assert!(
+        consumer_bindings.contains(&(gather_binding, "Input".to_string())),
+        "consumer must read the gather buffer at binding {gather_binding} as Input: {consumer_bindings:?}"
+    );
+    let consumer_out: Vec<u32> =
+        consumer_bindings.iter().filter(|(_, u)| u == "Output").map(|(b, _)| *b).collect();
+    assert_eq!(
+        consumer_out.len(),
+        1,
+        "consumer writes one output: {consumer_bindings:?}"
+    );
+    assert_ne!(
+        consumer_out[0], gather_binding,
+        "consumer output must not collide with the gather buffer"
     );
 }

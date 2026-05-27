@@ -1,0 +1,4 @@
+#[compute]
+entry gen(bh: []vec4f32) []i32 =
+  let counts = map(|h:vec4f32| 4 + 5*(if h.x>4.0 then 3 else 1), bh) in
+  map(|i:i32| counts[i % 256], iota(6144))
