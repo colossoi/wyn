@@ -1,16 +1,16 @@
 //! Tephra: Minimal ash-based compute shader runner for Wyn
 //!
 //! Usage:
-//!   tephra <shader.spv> [--entry <name>] [--size <n>] [--input <values>]
-//!   tephra --pipeline <config.json>
-//!   tephra <miner.spv> --mine --header-hex <152 hex chars> [--nonces <n>]
+//!   tephra run <shader.spv> [--entry <name>] [--size <n>] [--input <values>]
+//!   tephra pipeline <config.json>
+//!   tephra mine <miner.spv> --header-hex <152 hex chars> [--nonces <n>]
 
 mod miner;
 mod pipeline;
 mod vk_helpers;
 
 use anyhow::{Context, Result, bail};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use vk_helpers::{ComputeContext, StorageBuffer};
 
@@ -18,58 +18,71 @@ use vk_helpers::{ComputeContext, StorageBuffer};
 #[command(name = "tephra")]
 #[command(about = "Run Wyn compute shaders via Vulkan")]
 struct Args {
-    /// Path to SPIR-V compute shader (for simple mode)
-    #[arg(required_unless_present = "pipeline")]
-    shader: Option<PathBuf>,
+    #[command(subcommand)]
+    command: Command,
+}
 
-    /// Entry point name
-    #[arg(short, long, default_value = "main")]
-    entry: String,
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Run a single-buffer compute shader and print its output.
+    Run {
+        /// Path to SPIR-V compute shader.
+        shader: PathBuf,
 
-    /// Number of elements in the buffer
-    #[arg(short = 'n', long, default_value = "64")]
-    size: usize,
+        /// Entry point name.
+        #[arg(short, long, default_value = "main")]
+        entry: String,
 
-    /// Workgroup size X (must match shader's LocalSize)
-    #[arg(short = 'w', long, default_value = "64")]
-    workgroup: u32,
+        /// Number of elements in the buffer.
+        #[arg(short = 'n', long, default_value = "64")]
+        size: usize,
 
-    /// Input values (comma-separated floats, or 'iota' for 0,1,2,...)
-    #[arg(short, long, default_value = "iota")]
-    input: String,
+        /// Workgroup size X (must match shader's LocalSize).
+        #[arg(short = 'w', long, default_value = "64")]
+        workgroup: u32,
 
-    /// Path to pipeline configuration JSON (for multi-buffer mode)
-    #[arg(short, long)]
-    pipeline: Option<PathBuf>,
+        /// Input values (comma-separated floats, or 'iota' for 0,1,2,...).
+        #[arg(short, long, default_value = "iota")]
+        input: String,
+    },
 
-    /// Bitcoin miner mode: drive the miner's two-stage reduce pipeline.
-    #[arg(long)]
-    mine: bool,
+    /// Run a multi-buffer compute pipeline from a configuration JSON.
+    Pipeline {
+        /// Path to pipeline configuration JSON.
+        config: PathBuf,
+    },
 
-    /// Raw block header hex (152 hex chars = 76 bytes, everything except the
-    /// nonce), converted to 19 big-endian u32 words. Required with --mine.
-    #[arg(long, value_parser = parse_header_hex)]
-    header_hex: Option<[u32; 19]>,
+    /// Drive the Bitcoin miner's two-stage reduce pipeline over a nonce range.
+    Mine {
+        /// Path to the linked miner SPIR-V module.
+        shader: PathBuf,
 
-    /// Number of nonces to try.
-    #[arg(long, default_value = "1024")]
-    nonces: u32,
+        /// Raw block header hex (152 hex chars = 76 bytes, everything except
+        /// the nonce), converted to 19 big-endian u32 words.
+        #[arg(long, value_parser = parse_header_hex)]
+        header_hex: [u32; 19],
 
-    /// Starting nonce offset.
-    #[arg(long, default_value = "0")]
-    nonce_offset: u32,
+        /// Number of nonces to try.
+        #[arg(short = 'n', long, default_value = "1024")]
+        nonces: u32,
 
-    /// Workgroups per dispatch (each 64 threads); derived from the chunk if unset.
-    #[arg(long)]
-    workgroups: Option<u32>,
+        /// Starting nonce offset.
+        #[arg(long, default_value = "0")]
+        nonce_offset: u32,
 
-    /// Max nonces per GPU dispatch; the range is chunked to dodge watchdog timeouts.
-    #[arg(long, default_value = "262144")]
-    chunk_size: u32,
+        /// Workgroups per dispatch (each 64 threads). The phase1 grid is fixed
+        /// (saturating), so this is a constant grid width, default 1024.
+        #[arg(long)]
+        workgroups: Option<u32>,
 
-    /// Verbose output.
-    #[arg(short, long, action = clap::ArgAction::Count)]
-    verbose: u8,
+        /// Max nonces per GPU dispatch; the range is chunked to dodge watchdog timeouts.
+        #[arg(short = 'c', long, default_value = "262144")]
+        chunk_size: u32,
+
+        /// Verbose output.
+        #[arg(short, long, action = clap::ArgAction::Count)]
+        verbose: u8,
+    },
 }
 
 /// Parse a 76-byte block header from 152 hex chars into 19 big-endian u32 words.
@@ -101,50 +114,58 @@ fn parse_header_hex(s: &str) -> std::result::Result<[u32; 19], String> {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Pipeline mode: multi-buffer JSON configuration
-    if let Some(pipeline_path) = args.pipeline {
-        return run_pipeline(&pipeline_path);
-    }
-
-    // Simple mode: single buffer
-    let shader = args.shader.expect("shader required without --pipeline");
-
-    // Mine mode: drive the miner's two-stage reduce pipeline.
-    if args.mine {
-        let header = args.header_hex.context("--mine requires --header-hex")?;
-        return miner::run(
+    match args.command {
+        Command::Pipeline { config } => run_pipeline(&config),
+        Command::Mine {
+            shader,
+            header_hex,
+            nonces,
+            nonce_offset,
+            workgroups,
+            chunk_size,
+            verbose,
+        } => miner::run(
             &shader,
-            header,
-            args.nonces,
-            args.nonce_offset,
-            args.workgroups,
-            args.chunk_size,
-            args.verbose,
-        );
+            header_hex,
+            nonces,
+            nonce_offset,
+            workgroups,
+            chunk_size,
+            verbose,
+        ),
+        Command::Run {
+            shader,
+            entry,
+            size,
+            workgroup,
+            input,
+        } => run_simple(&shader, &entry, size, workgroup, &input),
     }
+}
 
-    // Parse input data
-    let input_data: Vec<f32> = if args.input == "iota" {
-        (0..args.size).map(|i| i as f32).collect()
+/// Single-buffer compute: load `shader`, run `entry` over `size` elements of
+/// `input` (comma-separated floats or `iota`), print the output.
+fn run_simple(shader: &PathBuf, entry: &str, size: usize, workgroup: u32, input: &str) -> Result<()> {
+    let input_data: Vec<f32> = if input == "iota" {
+        (0..size).map(|i| i as f32).collect()
     } else {
-        args.input
+        input
             .split(',')
             .map(|s| s.trim().parse::<f32>())
             .collect::<std::result::Result<Vec<_>, _>>()
             .context("Failed to parse input values")?
     };
 
-    if input_data.len() != args.size {
+    if input_data.len() != size {
         bail!(
             "Input size mismatch: got {} values, expected {}",
             input_data.len(),
-            args.size
+            size
         );
     }
 
-    // Load SPIR-V
     let spirv_bytes =
-        std::fs::read(&shader).with_context(|| format!("Failed to read shader: {:?}", shader))?;
+        std::fs::read(shader).with_context(|| format!("Failed to read shader: {:?}", shader))?;
 
     if spirv_bytes.len() % 4 != 0 {
         bail!("SPIR-V file size must be a multiple of 4 bytes");
@@ -155,10 +176,8 @@ fn main() -> Result<()> {
         .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
         .collect();
 
-    // Run compute shader
-    let output_data = run_compute(&spirv_words, &args.entry, &input_data, args.workgroup)?;
+    let output_data = run_compute(&spirv_words, entry, &input_data, workgroup)?;
 
-    // Print results
     println!("Input:  {:?}", &input_data[..input_data.len().min(16)]);
     if input_data.len() > 16 {
         println!("        ... ({} total)", input_data.len());
