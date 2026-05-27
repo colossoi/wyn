@@ -227,6 +227,51 @@ pub fn emit_storage_store(
     let _ = emit_store(graph, block, place_nid, value_nid, next_effect, span);
 }
 
+/// Emit a `Load` of `place_nid` (a place-producing pure op like `ViewIndex`)
+/// in `block`; returns the loaded-value node (typed `elem_ty`).
+pub fn emit_load(
+    graph: &mut EGraph,
+    block: BlockId,
+    place_nid: NodeId,
+    elem_ty: Type<TypeName>,
+    next_effect: &mut u32,
+    span: Option<Span>,
+) -> NodeId {
+    let effect_in = EffectToken(0); // placeholder; elaborate builds the real chain
+    let effect_out = alloc_effect(next_effect);
+    let result = graph.alloc_side_effect_result(elem_ty);
+    graph.skeleton.blocks[block].side_effects.push(SideEffect {
+        kind: SideEffectKind::Inst(InstKind::Load {
+            place: Default::default(),
+        }),
+        operand_nodes: smallvec![place_nid],
+        result: Some(result),
+        effects: Some((effect_in, effect_out)),
+        span,
+    });
+    result
+}
+
+/// Emit `view[index]` as a `ViewIndex` place + `Load` in `block`; returns the
+/// loaded value. Companion to `emit_storage_store`.
+pub fn emit_view_load(
+    graph: &mut EGraph,
+    block: BlockId,
+    view_nid: NodeId,
+    index_nid: NodeId,
+    elem_ty: Type<TypeName>,
+    next_effect: &mut u32,
+    span: Option<Span>,
+) -> NodeId {
+    let place_nid = graph.intern_pure_with_span(
+        PureOp::ViewIndex,
+        smallvec![view_nid, index_nid],
+        elem_ty.clone(),
+        span,
+    );
+    emit_load(graph, block, place_nid, elem_ty, next_effect, span)
+}
+
 /// Push a `SideEffectKind::Pending(soac)` side-effect into `block` with
 /// the given operands; returns the allocated `result_nid` (typed as
 /// `result_ty`, which the SOAC's lowering recovers from

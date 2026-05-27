@@ -23,6 +23,7 @@ use super::program::{EgirEntry, EgirFunc, EgirInner};
 use super::types::{
     EGraph, NodeId, PendingSoac, PureOp, SideEffectKind, SkeletonTerminator, SoacDestination,
 };
+use crate::ssa::types::ControlHeader;
 use crate::tlc::parallelize::{ParallelStrategy, ParallelizationPlan};
 
 /// Walk every entry; for each entry that has a plan, do the EGIR-side
@@ -349,11 +350,55 @@ pub fn synthesize_phase2_reduce(
     result_binding: (u32, u32),
 ) -> EgirEntry {
     use super::builder::EntryBuilder;
-    let mut b = EntryBuilder::new_compute(format!("{}_phase2_combine", entry_name), (1, 1, 1));
+    let mut b = EntryBuilder::new_compute(format!("{}_phase2_combine", entry_name), (PHASE2_WIDTH, 1, 1));
     b.declare_intermediate_storage(partials_binding.0, partials_binding.1, elem_ty.clone());
     b.declare_output_storage(result_binding.0, result_binding.1, elem_ty.clone());
 
-    let arr_ty = Type::Constructed(
+    let init_nid = b.emit_constant(init, elem_ty.clone());
+    build_tree_reduce_phase2(
+        &mut b,
+        op_func,
+        elem_ty,
+        init_nid,
+        partials_binding,
+        result_binding,
+    );
+    b.build()
+}
+
+/// Workgroup width for the single-workgroup tree-reduce phase 2: `W` threads
+/// grid-stride the `T` partials into shared memory, then reduce in-shared with
+/// a log-`W` tree. Kept modest so `W * sizeof(elem)` stays within the
+/// workgroup shared-memory budget (256 × a 36-byte tuple ≈ 9 KB). The phase2
+/// `ComputeStage` in `tlc::parallelize` must dispatch this same width.
+pub const PHASE2_WIDTH: u32 = 256;
+
+/// Build the workgroup-parallel tree-reduce body for phase 2 into `b`'s graph.
+/// `init_nid` is the neutral element, already interned in `b`'s graph.
+///
+/// `W = PHASE2_WIDTH` threads each grid-stride over `partials[lid, lid+W, …]`
+/// accumulating into a register, write the partial to `shared[lid]`, barrier,
+/// then tree-reduce shared memory (`stride = W/2 … 1`, `shared[lid] =
+/// op(shared[lid], shared[lid+stride])`) with a barrier each step; thread 0
+/// writes `shared[0]` to `result[0]`. Cost `O(T/W + log W)`.
+///
+/// Correctness: associative, not commutative. Both the grid-stride
+/// (`op(acc, partials[i])`, increasing `i`) and the tree (`op(lower, higher)`)
+/// combine in deterministic left→right order. Barriers sit in uniform control
+/// flow (the loop's continue block + after the grid loop), reached by every
+/// invocation — required for `OpControlBarrier`.
+fn build_tree_reduce_phase2(
+    b: &mut super::builder::EntryBuilder,
+    op_func: String,
+    elem_ty: Type<TypeName>,
+    init_nid: NodeId,
+    partials_binding: (u32, u32),
+    result_binding: (u32, u32),
+) {
+    let w = PHASE2_WIDTH;
+    let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+    let view_arr_ty = Type::Constructed(
         TypeName::Array,
         vec![
             elem_ty.clone(),
@@ -361,12 +406,279 @@ pub fn synthesize_phase2_reduce(
             Type::Constructed(TypeName::ArrayVariantView, vec![]),
         ],
     );
-    let view = b.emit_storage_view(partials_binding.0, partials_binding.1, arr_ty.clone());
-    let init_nid = b.emit_constant(init, elem_ty.clone());
-    let r = b.emit_pending_reduce(op_func, view, arr_ty, elem_ty.clone(), init_nid, vec![]);
-    let zero = b.emit_u32(0);
-    b.emit_storage_store(result_binding.0, result_binding.1, zero, r, elem_ty);
-    b.build()
+
+    // ---- entry block: lid, partials view + length, shared view, result view ----
+    let entry_bid = b.graph_mut().skeleton.entry;
+    let graph = b.graph_mut();
+    let mut eff = graph_ops::next_effect_token(graph);
+
+    let lid = graph_ops::intern_intrinsic(
+        graph,
+        catalog().known().local_id,
+        smallvec![],
+        u32_ty.clone(),
+        None,
+    );
+    let partials_view = graph_ops::intern_storage_view(
+        graph,
+        partials_binding.0,
+        partials_binding.1,
+        view_arr_ty.clone(),
+        None,
+    );
+    let len = emit_storage_len(graph, partials_binding.0, partials_binding.1);
+    let result_view = graph_ops::intern_storage_view(
+        graph,
+        result_binding.0,
+        result_binding.1,
+        view_arr_ty.clone(),
+        None,
+    );
+    // Workgroup-shared `array<elem, W>` (id 0 within this entry).
+    let shared_view = graph_ops::emit_workgroup_view(graph, 0, w, view_arr_ty.clone(), None);
+    let w_nid = graph_ops::intern_u32(graph, w, None);
+    let zero_u32 = graph_ops::intern_u32(graph, 0, None);
+
+    // Contiguous per-thread chunk over `partials` (not strided): thread `lid`
+    // reduces `partials[start .. end)`, so the tree combines `shared[0..W]` in
+    // global order and the reduction stays valid for associative,
+    // non-commutative operators.
+    //   chunk = ceil(len / W);  start = lid * chunk;  end = min(start+chunk, len)
+    let w_minus_1 = graph_ops::intern_u32(graph, w - 1, None);
+    let len_plus = graph_ops::intern_binop(graph, "+", len, w_minus_1, u32_ty.clone(), None);
+    let chunk = graph_ops::intern_binop(graph, "/", len_plus, w_nid, u32_ty.clone(), None);
+    let start = graph_ops::intern_binop(graph, "*", lid, chunk, u32_ty.clone(), None);
+    let start_plus = graph_ops::intern_binop(graph, "+", start, chunk, u32_ty.clone(), None);
+    let u32_min = catalog().lookup_by_any_name("u32.min").expect("catalog has u32.min");
+    let end = graph_ops::intern_intrinsic(
+        graph,
+        u32_min.id,
+        smallvec![start_plus, len],
+        u32_ty.clone(),
+        None,
+    );
+
+    // ---- blocks ----
+    let grid_header = graph.skeleton.create_block();
+    let grid_body = graph.skeleton.create_block();
+    let grid_cont = graph.skeleton.create_block();
+    let grid_after = graph.skeleton.create_block();
+    let tree_header = graph.skeleton.create_block();
+    let tree_body = graph.skeleton.create_block();
+    let tree_then = graph.skeleton.create_block();
+    let tree_sel_merge = graph.skeleton.create_block();
+    let tree_cont = graph.skeleton.create_block();
+    let tree_after = graph.skeleton.create_block();
+    let write_blk = graph.skeleton.create_block();
+    let end_blk = graph.skeleton.create_block();
+
+    // grid_header params: (acc, i)
+    let acc_in = graph.add_block_param(grid_header, 0, elem_ty.clone());
+    graph.skeleton.blocks[grid_header].params.push(acc_in);
+    let i_in = graph.add_block_param(grid_header, 1, u32_ty.clone());
+    graph.skeleton.blocks[grid_header].params.push(i_in);
+
+    // entry → grid_header(init, start)
+    graph.skeleton.blocks[entry_bid].term = SkeletonTerminator::Branch {
+        target: grid_header,
+        args: vec![init_nid, start],
+    };
+
+    // grid_header: i < end ? grid_body : grid_after(acc)
+    let grid_cond = graph_ops::intern_binop(graph, "<", i_in, end, bool_ty.clone(), None);
+    graph.skeleton.blocks[grid_header].term = SkeletonTerminator::CondBranch {
+        cond: grid_cond,
+        then_target: grid_body,
+        then_args: vec![],
+        else_target: grid_after,
+        else_args: vec![acc_in],
+    };
+    b.control_headers_mut().insert(
+        grid_header,
+        ControlHeader::Loop {
+            merge: grid_after,
+            continue_block: grid_cont,
+        },
+    );
+
+    // grid_body: acc' = op(acc, partials[i]); → grid_cont(acc')
+    let graph = b.graph_mut();
+    let elem_i = graph_ops::emit_view_load(
+        graph,
+        grid_body,
+        partials_view,
+        i_in,
+        elem_ty.clone(),
+        &mut eff,
+        None,
+    );
+    let acc_next = graph.intern_pure(
+        PureOp::Call(op_func.clone()),
+        smallvec![acc_in, elem_i],
+        elem_ty.clone(),
+    );
+    graph.skeleton.blocks[grid_body].term = SkeletonTerminator::Branch {
+        target: grid_cont,
+        args: vec![acc_next],
+    };
+
+    // grid_cont(acc_c): i_next = i + W; → grid_header(acc_c, i_next)
+    let acc_c = graph.add_block_param(grid_cont, 0, elem_ty.clone());
+    graph.skeleton.blocks[grid_cont].params.push(acc_c);
+    let one_u32 = graph_ops::intern_u32(graph, 1, None);
+    let i_next = graph_ops::intern_binop(graph, "+", i_in, one_u32, u32_ty.clone(), None);
+    graph.skeleton.blocks[grid_cont].term = SkeletonTerminator::Branch {
+        target: grid_header,
+        args: vec![acc_c, i_next],
+    };
+
+    // grid_after(acc_final): shared[lid] = acc_final; barrier; → tree_header(W/2)
+    let acc_final = graph.add_block_param(grid_after, 0, elem_ty.clone());
+    graph.skeleton.blocks[grid_after].params.push(acc_final);
+    graph_ops::emit_storage_store(
+        graph,
+        grid_after,
+        shared_view,
+        lid,
+        acc_final,
+        elem_ty.clone(),
+        &mut eff,
+        None,
+    );
+    graph_ops::emit_workgroup_barrier(graph, grid_after, &mut eff);
+    let w_half = graph_ops::intern_u32(graph, w / 2, None);
+    graph.skeleton.blocks[grid_after].term = SkeletonTerminator::Branch {
+        target: tree_header,
+        args: vec![w_half],
+    };
+
+    // tree_header(stride): stride > 0 ? tree_body : tree_after
+    let stride_in = graph.add_block_param(tree_header, 0, u32_ty.clone());
+    graph.skeleton.blocks[tree_header].params.push(stride_in);
+    let stride_cond = graph_ops::intern_binop(graph, ">", stride_in, zero_u32, bool_ty.clone(), None);
+    graph.skeleton.blocks[tree_header].term = SkeletonTerminator::CondBranch {
+        cond: stride_cond,
+        then_target: tree_body,
+        then_args: vec![],
+        else_target: tree_after,
+        else_args: vec![],
+    };
+    b.control_headers_mut().insert(
+        tree_header,
+        ControlHeader::Loop {
+            merge: tree_after,
+            continue_block: tree_cont,
+        },
+    );
+
+    // tree_body: lid < stride ? tree_then : tree_sel_merge  (selection)
+    let graph = b.graph_mut();
+    let active = graph_ops::intern_binop(graph, "<", lid, stride_in, bool_ty.clone(), None);
+    graph.skeleton.blocks[tree_body].term = SkeletonTerminator::CondBranch {
+        cond: active,
+        then_target: tree_then,
+        then_args: vec![],
+        else_target: tree_sel_merge,
+        else_args: vec![],
+    };
+    b.control_headers_mut().insert(
+        tree_body,
+        ControlHeader::Selection {
+            merge: tree_sel_merge,
+        },
+    );
+
+    // tree_then: shared[lid] = op(shared[lid], shared[lid+stride]); → tree_sel_merge
+    let graph = b.graph_mut();
+    let a = graph_ops::emit_view_load(
+        graph,
+        tree_then,
+        shared_view,
+        lid,
+        elem_ty.clone(),
+        &mut eff,
+        None,
+    );
+    let lid_plus = graph_ops::intern_binop(graph, "+", lid, stride_in, u32_ty.clone(), None);
+    let bb = graph_ops::emit_view_load(
+        graph,
+        tree_then,
+        shared_view,
+        lid_plus,
+        elem_ty.clone(),
+        &mut eff,
+        None,
+    );
+    let combined = graph.intern_pure(PureOp::Call(op_func.clone()), smallvec![a, bb], elem_ty.clone());
+    graph_ops::emit_storage_store(
+        graph,
+        tree_then,
+        shared_view,
+        lid,
+        combined,
+        elem_ty.clone(),
+        &mut eff,
+        None,
+    );
+    graph.skeleton.blocks[tree_then].term = SkeletonTerminator::Branch {
+        target: tree_sel_merge,
+        args: vec![],
+    };
+
+    // tree_sel_merge → tree_cont   (selection merge; barrier lives past it)
+    graph.skeleton.blocks[tree_sel_merge].term = SkeletonTerminator::Branch {
+        target: tree_cont,
+        args: vec![],
+    };
+
+    // tree_cont: barrier; stride_next = stride/2; → tree_header(stride_next)
+    graph_ops::emit_workgroup_barrier(graph, tree_cont, &mut eff);
+    let two = graph_ops::intern_u32(graph, 2, None);
+    let stride_next = graph_ops::intern_binop(graph, "/", stride_in, two, u32_ty.clone(), None);
+    graph.skeleton.blocks[tree_cont].term = SkeletonTerminator::Branch {
+        target: tree_header,
+        args: vec![stride_next],
+    };
+
+    // tree_after: lid == 0 ? write_blk : end_blk   (selection)
+    let is_zero = graph_ops::intern_binop(graph, "==", lid, zero_u32, bool_ty.clone(), None);
+    graph.skeleton.blocks[tree_after].term = SkeletonTerminator::CondBranch {
+        cond: is_zero,
+        then_target: write_blk,
+        then_args: vec![],
+        else_target: end_blk,
+        else_args: vec![],
+    };
+    b.control_headers_mut().insert(tree_after, ControlHeader::Selection { merge: end_blk });
+
+    // write_blk: result[0] = shared[0]; → end_blk
+    let graph = b.graph_mut();
+    let s0 = graph_ops::emit_view_load(
+        graph,
+        write_blk,
+        shared_view,
+        zero_u32,
+        elem_ty.clone(),
+        &mut eff,
+        None,
+    );
+    graph_ops::emit_storage_store(
+        graph,
+        write_blk,
+        result_view,
+        zero_u32,
+        s0,
+        elem_ty.clone(),
+        &mut eff,
+        None,
+    );
+    graph.skeleton.blocks[write_blk].term = SkeletonTerminator::Branch {
+        target: end_blk,
+        args: vec![],
+    };
+
+    // end_blk is the exit; `build()` finalizes it with Return(None).
+    b.set_current_block(end_blk);
 }
 
 /// Emit the chunk-arithmetic preamble (`tid`, `chunk_start`,
@@ -670,23 +982,19 @@ pub fn synthesize_phase2_reduce_cloning_ne(
     result_binding: (u32, u32),
 ) -> Result<EgirEntry, String> {
     use super::builder::EntryBuilder;
-    let mut b = EntryBuilder::new_compute(format!("{}_phase2_combine", entry_name), (1, 1, 1));
+    let mut b = EntryBuilder::new_compute(format!("{}_phase2_combine", entry_name), (PHASE2_WIDTH, 1, 1));
     b.declare_intermediate_storage(partials_binding.0, partials_binding.1, elem_ty.clone());
     b.declare_output_storage(result_binding.0, result_binding.1, elem_ty.clone());
 
-    let arr_ty = Type::Constructed(
-        TypeName::Array,
-        vec![
-            elem_ty.clone(),
-            Type::Variable(0),
-            Type::Constructed(TypeName::ArrayVariantView, vec![]),
-        ],
-    );
-    let view = b.emit_storage_view(partials_binding.0, partials_binding.1, arr_ty.clone());
     let init_nid = graph_ops::clone_pure_subgraph(phase1_graph, b.graph_mut(), phase1_ne_nid)?;
-    let r = b.emit_pending_reduce(op_func, view, arr_ty, elem_ty.clone(), init_nid, vec![]);
-    let zero = b.emit_u32(0);
-    b.emit_storage_store(result_binding.0, result_binding.1, zero, r, elem_ty);
+    build_tree_reduce_phase2(
+        &mut b,
+        op_func,
+        elem_ty,
+        init_nid,
+        partials_binding,
+        result_binding,
+    );
     Ok(b.build())
 }
 

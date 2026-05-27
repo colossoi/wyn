@@ -127,6 +127,20 @@ impl EntryBuilder {
         &mut self.graph
     }
 
+    /// Mutable access to the control-header map — used when hand-building
+    /// structured control flow (loops / selections) directly on the graph,
+    /// e.g. the workgroup-parallel phase2 tree reduce.
+    pub fn control_headers_mut(&mut self) -> &mut HashMap<BlockId, ControlHeader> {
+        &mut self.control_headers
+    }
+
+    /// Repoint the "current" block. `build()` finalizes the current block
+    /// with `Return(None)`, so a multi-block body must set this to its exit
+    /// block before calling `build()`.
+    pub fn set_current_block(&mut self, block: BlockId) {
+        self.current_block = block;
+    }
+
     pub fn emit_u32(&mut self, n: u32) -> NodeId {
         let span = self.span();
         graph_ops::intern_u32(&mut self.graph, n, span)

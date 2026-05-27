@@ -180,6 +180,64 @@ entry mn(n: u32) (u32, [4]u32) =
     );
 }
 
+/// The reduce phase2 is a workgroup-parallel tree reduce: a `LocalSize(W,1,1)`
+/// `*_phase2_combine` entry that uses `local_id`, a workgroup-shared array, and
+/// `ControlBarrier`s — not a single-threaded combine loop.
+#[test]
+fn phase2_reduce_is_workgroup_parallel_tree() {
+    use crate::builtins::catalog;
+    use crate::op::{OpTag, PureViewSource};
+    use crate::ssa::types::{ExecutionModel, InstKind};
+
+    let program = compile_to_ssa(
+        r#"
+#[compute]
+entry sum(xs: []f32) f32 =
+  reduce(|a: f32, b: f32| a + b, 0.0, xs)
+"#,
+    );
+
+    let phase2 = program
+        .entry_points
+        .iter()
+        .find(|e| e.name.ends_with("_phase2_combine"))
+        .expect("a *_phase2_combine entry");
+
+    match &phase2.execution_model {
+        ExecutionModel::Compute { local_size } => {
+            assert_eq!(local_size.0, crate::egir::parallelize::PHASE2_WIDTH);
+            assert_eq!((local_size.1, local_size.2), (1, 1));
+        }
+        other => panic!("phase2 not compute: {:?}", other),
+    }
+
+    let body = &phase2.body;
+    let insts = || body.inner.blocks.iter().flat_map(|(_, b)| b.insts.iter().map(|&i| body.get_inst(i)));
+
+    let barriers = insts().filter(|n| matches!(n.data, InstKind::ControlBarrier)).count();
+    assert_eq!(barriers, 2, "grid-stride + tree-step barriers");
+
+    assert!(
+        insts().any(|n| matches!(
+            &n.data,
+            InstKind::Op {
+                tag: OpTag::StorageView(PureViewSource::Workgroup { .. }),
+                ..
+            }
+        )),
+        "phase2 must use a workgroup-shared array"
+    );
+
+    let local_id = catalog().known().local_id;
+    assert!(
+        insts().any(|n| matches!(
+            &n.data,
+            InstKind::Op { tag: OpTag::Intrinsic { id, .. }, .. } if *id == local_id
+        )),
+        "phase2 must read local_id"
+    );
+}
+
 // =============================================================================
 // Phase 2 regression: unbound `Var(Symbol(sym))` references through TLC passes
 // =============================================================================

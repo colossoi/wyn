@@ -1597,7 +1597,7 @@ fn build_two_phase_pipeline_descriptor(
                 vec![partials_idx],
                 workgroup,
             ),
-            fixed_stage(phase2_name, vec![partials_idx], vec![result_idx]),
+            tree_phase2_stage(phase2_name, vec![partials_idx], vec![result_idx]),
         ],
         default_total_threads: sizing.default_total_threads,
     })
@@ -1945,7 +1945,7 @@ fn build_two_phase_entries(
         bindings: all_bindings,
         stages: vec![
             saturating_stage(phase1_name.clone(), input_indices, vec![partials_idx], workgroup),
-            fixed_stage(phase2_name.clone(), vec![partials_idx], vec![result_idx]),
+            tree_phase2_stage(phase2_name.clone(), vec![partials_idx], vec![result_idx]),
         ],
         default_total_threads: sizing.default_total_threads,
     });
@@ -2633,6 +2633,20 @@ fn fixed_stage(entry_point: String, reads: Vec<usize>, writes: Vec<usize>) -> Co
     ComputeStage {
         entry_point,
         workgroup_size: (1, 1, 1),
+        dispatch_size: DispatchSize::Fixed { x: 1, y: 1, z: 1 },
+        reads,
+        writes,
+    }
+}
+
+/// A reduce/redomap phase 2 stage: one workgroup of `PHASE2_WIDTH` threads
+/// (`LocalSize(W,1,1)`, dispatch `[1,1,1]`) that tree-reduces the partials in
+/// workgroup-shared memory. Mirrors the `W` baked into the synthesized phase2
+/// entry (`egir::parallelize::build_tree_reduce_phase2`).
+fn tree_phase2_stage(entry_point: String, reads: Vec<usize>, writes: Vec<usize>) -> ComputeStage {
+    ComputeStage {
+        entry_point,
+        workgroup_size: (crate::egir::parallelize::PHASE2_WIDTH, 1, 1),
         dispatch_size: DispatchSize::Fixed { x: 1, y: 1, z: 1 },
         reads,
         writes,

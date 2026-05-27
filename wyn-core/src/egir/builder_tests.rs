@@ -213,12 +213,14 @@ fn phase1_transform_reduce_in_place() {
 }
 
 /// Synthesize a phase2-combine EgirEntry from scratch using
-/// `synthesize_phase2_reduce` and assert its shape.
+/// `synthesize_phase2_reduce` and assert its workgroup-parallel tree-reduce
+/// shape: a `LocalSize(W,1,1)` entry with a workgroup-shared array, barriers,
+/// and `op_func` calls — not the old single-threaded `PendingSoac::Reduce`.
 #[test]
 fn synthesize_phase2_reduce_shape() {
-    use crate::egir::parallelize::synthesize_phase2_reduce;
-    use crate::egir::types::{PendingSoac, PureOp, PureViewSource, SideEffectKind};
-    use crate::ssa::types::ConstantValue;
+    use crate::egir::parallelize::{PHASE2_WIDTH, synthesize_phase2_reduce};
+    use crate::egir::types::{ENode, PendingSoac, PureOp, PureViewSource, SideEffectKind};
+    use crate::ssa::types::{ConstantValue, InstKind};
 
     let entry = synthesize_phase2_reduce(
         "sum",
@@ -230,10 +232,10 @@ fn synthesize_phase2_reduce_shape() {
     );
 
     assert_eq!(entry.name, "sum_phase2_combine");
-    // Single-thread combine: local_size = (1, 1, 1).
+    // Single-workgroup tree reduce: local_size = (W, 1, 1).
     match entry.execution_model {
         crate::ssa::types::ExecutionModel::Compute { local_size } => {
-            assert_eq!(local_size, (1, 1, 1));
+            assert_eq!(local_size, (PHASE2_WIDTH, 1, 1));
         }
         other => panic!("expected Compute execution model, got {:?}", other),
     }
@@ -247,63 +249,64 @@ fn synthesize_phase2_reduce_shape() {
         b.set == 0 && b.binding == 2 && matches!(b.role, crate::interface::StorageRole::Output)
     }));
 
-    // Body: one PendingSoac::Reduce, one Store. The Reduce reads from
-    // partials; the Store writes to result[0].
-    let entry_block = entry.graph.skeleton.entry;
-    let block = &entry.graph.skeleton.blocks[entry_block];
-    let reduce_se = block
-        .side_effects
-        .iter()
-        .find(|se| matches!(&se.kind, SideEffectKind::Pending(PendingSoac::Reduce { .. })))
-        .expect("Reduce present");
-    let reduce_input = reduce_se.operand_nodes[0];
-    let input_storage = match &entry.graph.nodes[reduce_input] {
-        crate::egir::types::ENode::Pure {
-            op: PureOp::StorageView(PureViewSource::Storage { set, binding }),
-            ..
-        } => (*set, *binding),
-        other => panic!("Reduce input is not Storage view: {:?}", other),
+    // No serial PendingSoac::Reduce anymore — the combine is open-coded.
+    let any_se = |pred: &dyn Fn(&crate::egir::types::SideEffect) -> bool| {
+        entry.graph.skeleton.blocks.iter().any(|(_, b)| b.side_effects.iter().any(|se| pred(se)))
     };
-    assert_eq!(input_storage, (0, 1), "phase2 reads from partials");
+    assert!(
+        !any_se(&|se| matches!(&se.kind, SideEffectKind::Pending(PendingSoac::Reduce { .. }))),
+        "tree-reduce phase2 must not emit a serial PendingSoac::Reduce"
+    );
 
-    let store_se = block
-        .side_effects
-        .iter()
-        .find(|se| {
-            matches!(
-                &se.kind,
-                SideEffectKind::Inst(crate::ssa::types::InstKind::Store { .. })
-            )
-        })
-        .expect("Store present");
-    // Store's place = ViewIndex(view, idx). Extract the view's
-    // (set, binding) — should be the result binding.
-    let place = store_se.operand_nodes[0];
-    let view_nid = match &entry.graph.nodes[place] {
-        crate::egir::types::ENode::Pure {
-            op: PureOp::ViewIndex,
-            operands,
-            ..
-        } => operands[0],
-        other => panic!("Store place is not ViewIndex: {:?}", other),
-    };
-    let result_storage = match &entry.graph.nodes[view_nid] {
-        crate::egir::types::ENode::Pure {
-            op: PureOp::StorageView(PureViewSource::Storage { set, binding }),
-            ..
-        } => (*set, *binding),
-        other => panic!("Store view not Storage: {:?}", other),
-    };
-    assert_eq!(result_storage, (0, 2), "phase2 writes to result");
+    // A workgroup-shared `array<f32, W>` view backs the tree.
+    assert!(
+        entry.graph.nodes.values().any(|n| matches!(
+            n,
+            ENode::Pure {
+                op: PureOp::StorageView(PureViewSource::Workgroup { count, .. }),
+                ..
+            } if *count == PHASE2_WIDTH
+        )),
+        "expected a workgroup view of {} elements",
+        PHASE2_WIDTH
+    );
 
-    // Init is a ConstantValue::F32(0.0) (or its PureOp equivalent). The
-    // builder routes ConstantValue through `EGraph::intern_constant`, so
-    // it lives as `ENode::Constant(F32)`.
-    let init_nid = reduce_se.operand_nodes[1];
-    match &entry.graph.nodes[init_nid] {
-        crate::egir::types::ENode::Constant(ConstantValue::F32(bits)) => {
-            assert_eq!(f32::from_bits(*bits), 0.0);
-        }
-        other => panic!("Reduce init is not ConstantValue::F32(0.0): {:?}", other),
-    }
+    // Two barriers (after the grid-stride store, and once per tree step).
+    let barriers = entry
+        .graph
+        .skeleton
+        .blocks
+        .iter()
+        .flat_map(|(_, b)| b.side_effects.iter())
+        .filter(|se| matches!(&se.kind, SideEffectKind::Inst(InstKind::ControlBarrier)))
+        .count();
+    assert_eq!(barriers, 2, "grid-stride barrier + tree-step barrier");
+
+    // The combiner is invoked via Call(op_func) (grid-stride + tree merge).
+    assert!(
+        entry.graph.nodes.values().any(|n| matches!(
+            n,
+            ENode::Pure { op: PureOp::Call(f), .. } if f == "_w_lambda_0"
+        )),
+        "expected Call to the reduce combiner"
+    );
+
+    // local_id drives shared-memory addressing.
+    let local_id = crate::builtins::catalog().known().local_id;
+    assert!(
+        entry.graph.nodes.values().any(|n| matches!(
+            n,
+            ENode::Pure { op: PureOp::Intrinsic { id, .. }, .. } if *id == local_id
+        )),
+        "expected a _w_intrinsic_local_id node"
+    );
+
+    // The neutral element is still the f32 0.0 constant.
+    assert!(
+        entry.graph.nodes.values().any(|n| matches!(
+            n,
+            ENode::Constant(ConstantValue::F32(bits)) if f32::from_bits(*bits) == 0.0
+        )),
+        "expected the f32 0.0 neutral element"
+    );
 }
