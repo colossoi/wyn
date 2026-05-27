@@ -109,6 +109,20 @@ fn is_handleable_soac(kind: &SideEffectKind) -> bool {
     }
 }
 
+/// Element type to read from an input array: the buffer's own element type
+/// (uniqueness stripped). For a map-fused scan/reduce the raw input element
+/// differs from the accumulator element carried by `input_elem_type` (e.g.
+/// `scan(+, 0, map(|h:vec4f32| ..:i32, bh))` reads `vec4f32` but accumulates
+/// `i32`), so the read must follow the array type, not the accumulator.
+/// Falls back to `acc_elem` when the array type has no extractable element
+/// (e.g. a SoA-tuple source, handled separately).
+fn input_read_elem(arr_ty: &Type<TypeName>, acc_elem: &Type<TypeName>) -> Type<TypeName> {
+    match crate::types::array_elem(arr_ty) {
+        Some(e) => crate::types::strip_unique(e),
+        None => acc_elem.clone(),
+    }
+}
+
 fn is_plain_composite(arr_ty: &Type<TypeName>) -> bool {
     match arr_ty {
         Type::Constructed(TypeName::Array, args) if args.len() == 3 => {
@@ -199,7 +213,10 @@ fn expand_one(
         }) => {
             let func = func.clone();
             let arr_ty = input_array_type.clone();
-            let elem_ty = input_elem_type.clone();
+            // The read element follows the buffer's type, not the accumulator
+            // (they differ for a map-fused reduce, e.g. a fused scan's chunk
+            // total over a `vec4f32` input accumulating `i32`).
+            let read_elem = input_read_elem(&arr_ty, input_elem_type);
 
             // Decode operands: [arr, init, ...captures].
             let arr_nid = se.operand_nodes[0];
@@ -215,7 +232,7 @@ fn expand_one(
                 idx,
                 AccumulatorLoop {
                     len_input: (arr_nid, arr_ty.clone()),
-                    read_inputs: vec![(arr_nid, arr_ty, elem_ty)],
+                    read_inputs: vec![(arr_nid, arr_ty, read_elem)],
                     init_acc: init_nid,
                     acc_ty,
                     result_node: result_nid,
@@ -466,7 +483,10 @@ fn expand_one(
         }) => {
             let func = func.clone();
             let arr_ty = input_array_type.clone();
+            // `elem_ty` is the accumulator/output element; the input read uses
+            // the buffer's element type (differs for a map-fused scan).
             let elem_ty = input_elem_type.clone();
+            let read_elem = input_read_elem(&arr_ty, &elem_ty);
             let destination = *destination;
 
             let arr_nid = se.operand_nodes[0];
@@ -487,7 +507,7 @@ fn expand_one(
                         idx,
                         ScanLoop {
                             len_input: (arr_nid, arr_ty.clone()),
-                            input: (arr_nid, arr_ty, elem_ty.clone()),
+                            input: (arr_nid, arr_ty, read_elem.clone()),
                             init_acc: init_nid,
                             acc_ty: elem_ty,
                             out_arr_ty,
@@ -510,7 +530,7 @@ fn expand_one(
                         idx,
                         ScanIntoLoop {
                             len_input: (arr_nid, arr_ty.clone()),
-                            input: (arr_nid, arr_ty, elem_ty.clone()),
+                            input: (arr_nid, arr_ty, read_elem.clone()),
                             init_acc: init_nid,
                             acc_ty: elem_ty,
                             view_nid,

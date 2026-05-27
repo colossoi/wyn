@@ -1,0 +1,8 @@
+-- Gather over a scan of a computed array. The producer map fuses into the
+-- scan (vec4f32 -> i32), which is then materialized into a buffer the
+-- consumer indexes at a runtime position.
+#[compute]
+entry gen(bh: []vec4f32) []i32 =
+  let counts = map(|h: vec4f32| 4 + 5 * (if h.x > 4.0 then 3 else 1), bh) in
+  let offsets = scan(|a: i32, b: i32| a + b, 0, counts) in
+  map(|i: i32| offsets[i % 256], iota(6144))

@@ -1,7 +1,10 @@
 # Plan: materialize randomly-indexed computed arrays into a buffer
 
-> **Status (gather-materialize branch):** Phases 1–3 (Map gather + real buffer
-> sizing + scan producers, with the forced-binding channel unified) **landed**.
+> **Status (gather-materialize branch):** Phases 1–3 **landed** — both plan
+> repros (map gather and scan-over-computed-array gather) compile and validate
+> (spirv-val + naga). Map gather + real buffer sizing + scan producers, with
+> the forced-binding channel unified and fused map→scan lowering fixed
+> (including the type-changing case).
 > **Phase 1:** `tlc/lift_gathers.rs` + the `lift_gathers` typestate step
 > (between `apply_ownership` and `defunctionalize`) detect `let arr = map(f,
 > src) in …arr[i]`, split the producer into a `<entry>_gather_<n>` compute
@@ -41,21 +44,21 @@
 > over one. The gather lift admits these (its `scan_input_is_direct` gate keys
 > on input-vs-result element type).
 >
-> **Known gaps:**
-> - A runtime-sized *output* buffer (e.g. the consumer's `iota(6144)` result)
->   still uses viz's 1024 default — pre-existing, affects any runtime-sized
->   compute output, not gather-specific.
-> - A *type-changing* fused scan (`g: A -> T`, e.g. the original chained repro
->   `let counts = map(|h:vec4f32| .. : i32) in scan(.., counts)`) still
->   mis-lowers: the scan's phase 1 access-chains the raw input with the
->   accumulator's element type (an `OpAccessChain` int-vs-vector mismatch). This
->   is a separate scan-lowering gap (a standalone such scan also fails), so the
->   gather lift declines these and leaves the diagnostic. Fixing it means
->   distinguishing the scan's *input* element type from its *accumulator*
->   element type in phase 1.
+> **Type-changing fused scan (fixed):** `soac_expand` now reads a scan/reduce
+> input element using the *buffer's* element type (`array_elem(input_array_type)`),
+> not the accumulator element (`input_elem_type`) — they differ for a
+> map-fused producer (`scan(+, 0, map(|h:vec4f32| ..:i32, bh))` reads `vec4f32`,
+> accumulates `i32`). With that + the `reduce_op` fix, type-changing fused
+> scans lower correctly, so the gather lift admits scans over computed arrays;
+> its gate is now the general "all producer free vars are entry params" check
+> (pre-pass must be self-contained), shared by map and scan.
 >
-> **Next:** type-changing fused-scan lowering (unblocks the chained repro);
-> Phase 4 (gather CSE).
+> **Known gap:** a runtime-sized *output* buffer (e.g. the consumer's
+> `iota(6144)` result) still uses viz's 1024 default — pre-existing, affects any
+> runtime-sized compute output, not gather-specific.
+>
+> **Next:** Phase 4 (coalesce multiple gathers of the same array into one
+> buffer); optionally the runtime-sized-output sizing.
 
 ## Context
 

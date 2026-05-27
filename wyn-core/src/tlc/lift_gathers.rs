@@ -29,7 +29,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::closure_convert::collect_free_vars;
 use super::parallelize::{intrinsic_term_by_id, make_entry_def};
-use super::{ArrayExpr, Def, DefMeta, Lambda, Program, SoacOp, Term, TermKind, VarRef};
+use super::{Def, DefMeta, Lambda, Program, SoacOp, Term, TermKind, VarRef};
 use crate::ast::TypeName;
 use crate::builtins::catalog;
 use crate::egir::from_tlc::AUTO_STORAGE_SET;
@@ -212,23 +212,15 @@ fn try_lift(
     }
     let elem_ty = crate::types::array_elem(name_ty).cloned()?;
 
-    // Producer captures only input arrays (Phase 1). Any other free var
-    // (uniform/size) would need re-declaration on the pre-pass — deferred.
+    // The pre-pass re-declares the producer's free variables as its own input
+    // params, so every one must be an entry-param input array (Phase 1). A
+    // free var that's a let-bound computed array or a uniform/size would need
+    // its definition pulled in (or a uniform re-declared) — deferred. This
+    // keeps the pre-pass self-contained over real buffers. (Fusion has already
+    // folded any `map` producer into the scan/map, so a `scan(op, ne, map(g,
+    // xs))` arrives reading `xs` directly.)
     let frees = free_symbol_vars(rhs, &program.symbols);
-    if !frees.iter().all(|(_, ty)| is_runtime_sized_array(ty)) {
-        return None;
-    }
-
-    // A `scan` pre-pass lowers correctly only when its input array's element
-    // type matches the scan's element type — i.e. a direct scan, or a
-    // map-fused scan that preserves the type (`scan(op, ne, map(g, xs))` with
-    // `g: T -> T`). A *type-changing* fused producer (`g: A -> T`) still
-    // mis-lowers today (the scan's phase 1 access-chains the raw input with
-    // the accumulator's element type — a gap independent of gather, since a
-    // standalone such scan also fails), so decline it and leave the existing
-    // diagnostic rather than emit an invalid shader. `map` producers have no
-    // such restriction.
-    if matches!(&rhs.kind, TermKind::Soac(SoacOp::Scan { .. })) && !scan_input_is_direct(rhs, &elem_ty) {
+    if !frees.iter().all(|(s, ty)| is_runtime_sized_array(ty) && param_bindings.contains_key(s)) {
         return None;
     }
 
@@ -268,24 +260,6 @@ fn try_lift(
         length,
     };
     Some((prepass, decl, rewritten))
-}
-
-/// True if a `scan` producer reads an array (`Ref(Var)` or storage buffer)
-/// whose element type matches the scan's element type. That holds for a plain
-/// scan and for a type-preserving map-fused scan (both lower correctly); it is
-/// false for a type-changing fused producer, which still mis-lowers today.
-fn scan_input_is_direct(rhs: &Term, result_elem: &Type<TypeName>) -> bool {
-    let TermKind::Soac(SoacOp::Scan { input, .. }) = &rhs.kind else {
-        return false;
-    };
-    match input {
-        ArrayExpr::Ref(t) => {
-            matches!(&t.kind, TermKind::Var(_))
-                && crate::types::array_elem(&t.ty).map(|e| e == result_elem).unwrap_or(false)
-        }
-        ArrayExpr::StorageBuffer { elem_ty, .. } => elem_ty == result_elem,
-        _ => false,
-    }
 }
 
 /// Sizing policy for the gather buffer: `LikeInput` of the producer's first

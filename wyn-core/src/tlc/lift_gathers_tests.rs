@@ -157,10 +157,11 @@ entry g(xs: []i32) []i32 =
 }
 
 #[test]
-fn declines_scan_over_computed_array() {
-    // A scan over a *computed* array fuses into a producer that doesn't lower
-    // today (a standalone `scan(op, ne, map(..))` also fails). The lift must
-    // decline it rather than emit an invalid shader — no gather pre-pass.
+fn lifts_scan_over_computed_array() {
+    // A scan over a *computed* array: fusion folds the producer map into the
+    // scan (`scan(op, ne, map(g, bh))`), so the scan reads the entry param
+    // `bh` directly and the lift can pull it into a self-contained pre-pass —
+    // even though `g` changes the element type (vec4f32 -> i32).
     let src = "\
 #[compute]
 entry gen(bh: []vec4f32) []i32 =
@@ -170,8 +171,30 @@ entry gen(bh: []vec4f32) []i32 =
 ";
     let lifted = super::run(ownership_applied(src));
     assert!(
+        has_gather_prepass(&lifted),
+        "a scan over a (map-fused) computed array must be lifted into a gather pre-pass"
+    );
+}
+
+#[test]
+fn declines_producer_over_let_bound_non_param() {
+    // If the producer's input is a let-bound array that is *not* an entry
+    // param (and didn't fuse away), the pre-pass can't source it, so the lift
+    // declines rather than emit a phantom input. Here `mid` is a scan result
+    // (not a map), so it doesn't fuse into the outer scan.
+    let src = "\
+#[compute]
+entry gen(xs: []i32) []i32 =
+  let mid = scan(|a:i32,b:i32| a+b, 0, xs) in
+  let outer = scan(|a:i32,b:i32| a*b, 1, mid) in
+  map(|i:i32| outer[i % 256], iota(6144))
+";
+    let lifted = super::run(ownership_applied(src));
+    // `outer`'s producer reads `mid` (a let-bound non-param), so it's declined;
+    // `mid` itself is consumed by `outer` (not indexed), so it's not a site.
+    assert!(
         !has_gather_prepass(&lifted),
-        "a scan over a computed array must not be lifted (fused producer doesn't lower)"
+        "a producer reading a non-param computed array must not be lifted"
     );
 }
 
