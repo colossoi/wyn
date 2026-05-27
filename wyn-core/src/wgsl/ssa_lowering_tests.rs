@@ -580,6 +580,41 @@ entry sum_array(#[size_hint(1024)] data: []f32) f32 =
     );
 }
 
+/// An `i32`-range reduce lowers to valid WGSL — regression guard and the
+/// passing contrast to the `u32`-range case below.
+#[test]
+fn wgsl_i32_range_reduce_validates() {
+    let wgsl = compile_to_wgsl(
+        r#"
+#[compute]
+entry mn(n: i32) i32 =
+  reduce(|a: i32, b: i32| if a < b then a else b, 2147483647, 0..<n)
+"#,
+    )
+    .expect("compile");
+    validate_wgsl(&wgsl);
+}
+
+/// Known bug: a reduce over a **u32** range emits a WGSL range struct whose
+/// `len` field (`.f2`) is hardcoded `i32`, so `length(range)` comes out i32
+/// against a u32 loop counter and naga rejects the comparison. An i32 range
+/// (above) validates fine, so the fault is the virtual-array (range) struct
+/// field typing in the WGSL backend, not the reduce/parallelize path. Remove
+/// `#[ignore]` once the range struct carries the range's element type.
+#[test]
+#[ignore = "u32-range WGSL: range struct len field typed i32, mismatches a u32 range"]
+fn wgsl_u32_range_reduce_validates() {
+    let wgsl = compile_to_wgsl(
+        r#"
+#[compute]
+entry mn(n: u32) u32 =
+  reduce(|a: u32, b: u32| if a < b then a else b, 4294967295u32, 0u32..<n)
+"#,
+    )
+    .expect("compile");
+    validate_wgsl(&wgsl);
+}
+
 #[test]
 fn wgsl_compute_multi_output_runtime_sized_arrays() {
     // A compute entry returning a tuple of >1 runtime-sized array: each
