@@ -591,6 +591,7 @@ fn compile_to_wgsl_impl(source: &str) -> CompileResultWgsl {
         Err(e) => return CompileResultWgsl::err_msg(format!("apply_ownership: {:?}", e)),
     };
     let tlc_parallelized = match tlc_with_ownership
+        .lift_gathers()
         .defunctionalize()
         .monomorphize()
         .buffer_specialize()
