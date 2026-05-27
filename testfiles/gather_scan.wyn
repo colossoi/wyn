@@ -1,0 +1,4 @@
+#[compute]
+entry g(xs: []i32) []i32 =
+  let o = scan(|a:i32, b:i32| a + b, 0, xs) in
+  map(|i:i32| o[i % 256], iota(6144))

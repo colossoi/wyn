@@ -29,7 +29,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::closure_convert::collect_free_vars;
 use super::parallelize::{intrinsic_term_by_id, make_entry_def};
-use super::{Def, DefMeta, Lambda, Program, SoacOp, Term, TermKind, VarRef};
+use super::{ArrayExpr, Def, DefMeta, Lambda, Program, SoacOp, Term, TermKind, VarRef};
 use crate::ast::TypeName;
 use crate::builtins::catalog;
 use crate::egir::from_tlc::AUTO_STORAGE_SET;
@@ -200,8 +200,14 @@ fn try_lift(
     gather_idx: usize,
     program: &mut Program,
 ) -> Option<(Def, StorageBindingDecl, Term)> {
-    // Producer must be a `map` yielding a runtime-sized array.
-    if !matches!(&rhs.kind, TermKind::Soac(SoacOp::Map { .. })) || !is_runtime_sized_array(name_ty) {
+    // Producer must be an array-yielding SOAC (`map` or `scan`) of a
+    // runtime-sized array. Both preserve element count, so the gather buffer
+    // tracks the producer's input length.
+    let is_array_producer = matches!(
+        &rhs.kind,
+        TermKind::Soac(SoacOp::Map { .. }) | TermKind::Soac(SoacOp::Scan { .. })
+    );
+    if !is_array_producer || !is_runtime_sized_array(name_ty) {
         return None;
     }
     let elem_ty = crate::types::array_elem(name_ty).cloned()?;
@@ -210,6 +216,17 @@ fn try_lift(
     // (uniform/size) would need re-declaration on the pre-pass — deferred.
     let frees = free_symbol_vars(rhs, &program.symbols);
     if !frees.iter().all(|(_, ty)| is_runtime_sized_array(ty)) {
+        return None;
+    }
+
+    // A `scan` pre-pass only lowers correctly when its input is a direct
+    // entry-param array of the scan's element type. A scan over a *computed*
+    // array (e.g. `scan(op, ne, map(..))`) is a fused producer that today
+    // mis-lowers regardless of gather (a standalone `scan(op,ne,map(..))` also
+    // fails) — detect it by the input element type differing from the result
+    // and decline, leaving the existing diagnostic rather than emitting an
+    // invalid shader. `map` has no such restriction (it may change types).
+    if matches!(&rhs.kind, TermKind::Soac(SoacOp::Scan { .. })) && !scan_input_is_direct(rhs, &elem_ty) {
         return None;
     }
 
@@ -249,6 +266,24 @@ fn try_lift(
         length,
     };
     Some((prepass, decl, rewritten))
+}
+
+/// True if a `scan` producer reads a direct array of its own element type
+/// (`Ref(Var)` or storage buffer). A pure scan preserves element type, so an
+/// input whose element type differs signals a fused producer (e.g.
+/// `scan(op, ne, map(..))`) that doesn't lower today — decline those.
+fn scan_input_is_direct(rhs: &Term, result_elem: &Type<TypeName>) -> bool {
+    let TermKind::Soac(SoacOp::Scan { input, .. }) = &rhs.kind else {
+        return false;
+    };
+    match input {
+        ArrayExpr::Ref(t) => {
+            matches!(&t.kind, TermKind::Var(_))
+                && crate::types::array_elem(&t.ty).map(|e| e == result_elem).unwrap_or(false)
+        }
+        ArrayExpr::StorageBuffer { elem_ty, .. } => elem_ty == result_elem,
+        _ => false,
+    }
 }
 
 /// Sizing policy for the gather buffer: `LikeInput` of the producer's first

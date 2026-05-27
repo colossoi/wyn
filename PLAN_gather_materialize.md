@@ -1,7 +1,7 @@
 # Plan: materialize randomly-indexed computed arrays into a buffer
 
-> **Status (gather-materialize branch):** Phases 1–2 (Map-only gather + real
-> buffer sizing) **landed**.
+> **Status (gather-materialize branch):** Phases 1–3 (Map gather + real buffer
+> sizing + scan producers, with the forced-binding channel unified) **landed**.
 > **Phase 1:** `tlc/lift_gathers.rs` + the `lift_gathers` typestate step
 > (between `apply_ownership` and `defunctionalize`) detect `let arr = map(f,
 > src) in …arr[i]`, split the producer into a `<entry>_gather_<n>` compute
@@ -20,11 +20,30 @@
 > Covered by `lift_gathers_tests.rs`, `integration_tests.rs`,
 > `wgsl/ssa_lowering_tests.rs`, and `BufferLen` tests in the descriptor crate.
 >
-> **Known gap (out of Phase 2 scope):** a runtime-sized *output* buffer (e.g.
-> the consumer's `iota(6144)` result) still uses viz's 1024 default — a
-> pre-existing limitation affecting any runtime-sized compute output, not
-> gather-specific. **Next:** Phase 3 (Scan/Redomap producers), Phase 4 (gather
-> CSE).
+> **Phase 3:** scan producers + a unification of the forced-output channel.
+> *Unification (done first):* the per-SOAC forced-result-binding paths collapsed
+> to one channel — `parallelize::run` folds gather pre-passes' `Output` decls
+> into the same `prepass_result_bindings` map the scalar lift uses, and
+> `PlannedBindings::forced_output()` lets `from_tlc` honor a pinned output for
+> Map *and* Scan uniformly (removed the Map-specific `forced_output_binding_from_decl`).
+> *Scan:* `lift_gathers` accepts a `scan` producer; `make_scan_plan` honors the
+> forced output (symmetric with `make_two_phase_plan`) and places its
+> block-sum/offset intermediates above it. Verified: `let o = scan(op,ne,xs) in
+> …o[i]` over an input array compiles + validates (spirv-val + naga).
+>
+> **Known gaps:**
+> - A runtime-sized *output* buffer (e.g. the consumer's `iota(6144)` result)
+>   still uses viz's 1024 default — pre-existing, affects any runtime-sized
+>   compute output, not gather-specific.
+> - A scan over a *computed* array (`let counts = map(..) in scan(.., counts)`,
+>   the original Phase-3 repro) is **declined** by the lift: it fuses into a
+>   `scan(op,ne,map(..))` that mis-lowers today *independently of gather* (a
+>   standalone `scan(op,ne,map(..))` also fails an `OpFunctionCall` type check).
+>   Fixing that fused-scan lowering is an orthogonal scan bug; once fixed, the
+>   gather lift handles the chained case with no further change.
+>
+> **Next:** fix fused map→scan lowering (orthogonal), then revisit the chained
+> repro; Phase 4 (gather CSE).
 
 ## Context
 

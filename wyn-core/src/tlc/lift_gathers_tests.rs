@@ -132,6 +132,49 @@ fn lifts_map_gather_into_prepass_and_storage_index() {
     );
 }
 
+fn has_gather_prepass(program: &Program) -> bool {
+    program
+        .defs
+        .iter()
+        .any(|d| program.symbols.get(d.name).map(|n| n.contains("_gather_")).unwrap_or(false))
+}
+
+#[test]
+fn lifts_scan_over_input_array() {
+    // A scan over an entry-param array is a valid gather producer (scan
+    // preserves element count and type), so it's lifted like a map.
+    let src = "\
+#[compute]
+entry g(xs: []i32) []i32 =
+  let o = scan(|a:i32,b:i32| a+b, 0, xs) in
+  map(|i:i32| o[i % 256], iota(6144))
+";
+    let lifted = super::run(ownership_applied(src));
+    assert!(
+        has_gather_prepass(&lifted),
+        "scan over an input array must be lifted into a gather pre-pass"
+    );
+}
+
+#[test]
+fn declines_scan_over_computed_array() {
+    // A scan over a *computed* array fuses into a producer that doesn't lower
+    // today (a standalone `scan(op, ne, map(..))` also fails). The lift must
+    // decline it rather than emit an invalid shader — no gather pre-pass.
+    let src = "\
+#[compute]
+entry gen(bh: []vec4f32) []i32 =
+  let counts = map(|h:vec4f32| 4 + 5*(if h.x>4.0 then 3 else 1), bh) in
+  let offsets = scan(|a:i32,b:i32| a+b, 0, counts) in
+  map(|i:i32| offsets[i % 256], iota(6144))
+";
+    let lifted = super::run(ownership_applied(src));
+    assert!(
+        !has_gather_prepass(&lifted),
+        "a scan over a computed array must not be lifted (fused producer doesn't lower)"
+    );
+}
+
 #[test]
 fn leaves_pointwise_map_chains_untouched() {
     // No random indexing: `counts` is consumed pointwise, so fusion/lowering

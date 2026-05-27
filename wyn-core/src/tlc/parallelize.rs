@@ -652,9 +652,27 @@ pub enum PlannedBindings {
         result: (u32, u32),
     },
     Scan {
+        /// Pinned result buffer when this is a gather pre-pass; `None` means
+        /// EGIR auto-allocates the scan's output at `param_count`.
+        output: Option<(u32, u32)>,
         block_sums: (u32, u32),
         block_offsets: (u32, u32),
     },
+}
+
+impl PlannedBindings {
+    /// The pinned result binding for SOAC kinds whose result is a single
+    /// `EntryOutput` buffer (Map, Scan). `from_tlc::build_entry_outputs`
+    /// honors this so the EGIR output lands on the buffer the consumer reads.
+    /// Reduce/Redomap manage their result binding inside `make_two_phase_plan`
+    /// (it's a store, not an `EntryOutput`), so they report `None` here.
+    pub fn forced_output(&self) -> Option<(u32, u32)> {
+        match self {
+            PlannedBindings::Map { output } => *output,
+            PlannedBindings::Scan { output, .. } => *output,
+            PlannedBindings::Reduce { .. } | PlannedBindings::Redomap { .. } => None,
+        }
+    }
 }
 
 // =============================================================================
@@ -1157,6 +1175,21 @@ pub fn run(mut program: Program, disable: bool) -> crate::error::Result<Parallel
     let mut prepass_result_bindings: HashMap<SymbolId, (u32, u32)> = HashMap::new();
     lift_graphical_invariant_soacs(&mut program, &mut next_binding, &mut prepass_result_bindings);
 
+    // Gather pre-passes (from the pre-defunc `lift_gathers`) pin their result
+    // by declaring it as an Output-role storage binding on the entry. Fold
+    // those into the same forced-binding map, so every SOAC kind's lowering
+    // honors a forced result through one channel — there's no separate
+    // per-kind reader.
+    for def in &program.defs {
+        if let DefMeta::EntryPoint(decl) = &def.meta {
+            if let Some(b) =
+                decl.storage_bindings.iter().find(|b| matches!(b.role, interface::StorageRole::Output))
+            {
+                prepass_result_bindings.entry(def.name).or_insert((b.set, b.binding));
+            }
+        }
+    }
+
     let analyses = analyze_program(&program);
 
     if analyses.is_empty() {
@@ -1270,12 +1303,10 @@ fn make_lowering_plan(
     let sizing = PipelineSizing::for_analyzed_entry(program, analysis);
     match &analysis.soac.original {
         SoacOp::Map { .. } => {
-            // A gather pre-pass (emitted by `lift_gathers` before defunc)
-            // declares an Output-role storage binding so its result lands on
-            // the exact buffer the consumer reads via `storage_index`. Honor
-            // it; ordinary maps declare none and auto-allocate at EGIR.
-            let forced = forced_output_binding_from_decl(program, analysis.def_name);
-            make_map_plan(analysis, entry_name, next_binding, sizing, forced)
+            // `forced_result_binding` pins the map's output to a specific
+            // buffer when this is a gather pre-pass (the consumer reads it via
+            // `storage_index`); ordinary maps pass `None` and auto-allocate.
+            make_map_plan(analysis, entry_name, next_binding, sizing, forced_result_binding)
         }
         SoacOp::Reduce { op, ne, .. } => make_two_phase_plan(
             analysis,
@@ -1297,28 +1328,18 @@ fn make_lowering_plan(
             program,
             sizing,
         ),
-        SoacOp::Scan { op, ne, .. } => {
-            make_scan_plan(analysis, entry_name, op, ne, next_binding, program, sizing)
-        }
+        SoacOp::Scan { op, ne, .. } => make_scan_plan(
+            analysis,
+            entry_name,
+            op,
+            ne,
+            next_binding,
+            forced_result_binding,
+            program,
+            sizing,
+        ),
         _ => unreachable!("analyze_soac rejected non-parallelizable variants"),
     }
-}
-
-/// Find a gather pre-pass's pinned result binding, if any. `lift_gathers`
-/// declares the pre-pass's output buffer as an Output-role storage binding
-/// (the only Map with one); this pins the map's result to the exact binding
-/// the consumer reads. Ordinary maps declare none and auto-allocate at EGIR.
-/// A gather *consumer* declares its read buffer as Input, not Output, so this
-/// never mistakes it for the consumer's own output.
-fn forced_output_binding_from_decl(program: &Program, def_name: SymbolId) -> Option<(u32, u32)> {
-    let def = program.defs.iter().find(|d| d.name == def_name)?;
-    let DefMeta::EntryPoint(decl) = &def.meta else {
-        return None;
-    };
-    decl.storage_bindings
-        .iter()
-        .find(|b| matches!(b.role, interface::StorageRole::Output))
-        .map(|b| (b.set, b.binding))
 }
 
 fn make_map_plan(
@@ -1579,6 +1600,7 @@ fn make_scan_plan(
     op: &super::SoacBody,
     _ne: &Term,
     next_binding: u32,
+    forced_result_binding: Option<(u32, u32)>,
     program: &mut Program,
     sizing: PipelineSizing,
 ) -> LoweringPlan {
@@ -1636,9 +1658,17 @@ fn make_scan_plan(
     // view-typed entry param plus one for the array output. Our
     // intermediates have to live above that range.
     let auto_input_count = count_view_param_bindings(program, analysis.def_name);
-    let output_binding = (AUTO_STORAGE_SET, next_binding + auto_input_count);
-    let block_sums_binding = (AUTO_STORAGE_SET, next_binding + auto_input_count + 1);
-    let block_offsets_binding = (AUTO_STORAGE_SET, next_binding + auto_input_count + 2);
+    // A gather pre-pass pins its result to the buffer the consumer reads;
+    // otherwise the output sits just past the input-view bindings (matching
+    // `from_tlc::build_entry_outputs`). The two intermediates start one past
+    // the output binding so they never collide with it — a forced output may
+    // sit above the fresh range. (Non-forced layout is unchanged: output at
+    // `auto_input_count`, then `+1`, `+2`.)
+    let auto_output = next_binding + auto_input_count;
+    let output_binding = forced_result_binding.unwrap_or((AUTO_STORAGE_SET, auto_output));
+    let scratch_start = output_binding.1.max(auto_output) + 1;
+    let block_sums_binding = (AUTO_STORAGE_SET, scratch_start);
+    let block_offsets_binding = (AUTO_STORAGE_SET, scratch_start + 1);
 
     let pipeline = build_scan_pipeline_descriptor(
         entry_name,
@@ -1652,6 +1682,7 @@ fn make_scan_plan(
     );
 
     let bindings = PlannedBindings::Scan {
+        output: forced_result_binding,
         block_sums: block_sums_binding,
         block_offsets: block_offsets_binding,
     };

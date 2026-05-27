@@ -762,6 +762,7 @@ fn transform_scan_entry(
         PlannedBindings::Scan {
             block_sums,
             block_offsets,
+            ..
         } => (block_sums, block_offsets),
         _ => return None,
     };

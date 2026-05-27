@@ -2641,3 +2641,82 @@ entry gen(bh: []vec4f32) []i32 =
         "consumer output must not collide with the gather buffer"
     );
 }
+
+/// A `scan` producer gathers the same way a `map` does: it's lifted into its
+/// own pre-pass (here a multi-stage parallel scan) writing the gather buffer,
+/// which the consumer reads via `storage_index`. The forced-output binding is
+/// honored uniformly across SOAC kinds, so the scan's final output lands on
+/// the buffer the consumer reads, and the scan's own intermediates (block
+/// sums/offsets) sit above it without collision.
+#[test]
+fn gather_scan_producer_materializes_to_shared_intermediate() {
+    use crate::pipeline_descriptor::{Access, Binding, BufferLen, BufferUsage, Pipeline};
+    let src = "\
+#[compute]
+entry g(xs: []i32) []i32 =
+  let o = scan(|a:i32,b:i32| a+b, 0, xs) in
+  map(|i:i32| o[i % 256], iota(6144))
+";
+    let lowered = compile_parallel(src);
+    assert!(!lowered.spirv.is_empty(), "lowering produced no SPIR-V");
+
+    // The consumer reads the gather buffer as a read-only Intermediate sized
+    // LikeInput of `xs` (scan preserves element count and type: i32 → i32).
+    let consumer_bufs = compute_storage_buffers(&lowered.pipeline, "g");
+    let gather = consumer_bufs
+        .iter()
+        .find_map(|b| match b {
+            Binding::StorageBuffer {
+                binding,
+                usage: BufferUsage::Intermediate,
+                access: Access::ReadOnly,
+                length: Some(len),
+                ..
+            } => Some((*binding, len.clone())),
+            _ => None,
+        })
+        .expect("consumer must read a sized gather intermediate");
+    assert_eq!(
+        gather.1,
+        BufferLen::LikeInput {
+            set: 0,
+            binding: 0,
+            elem_bytes: 4,
+            src_elem_bytes: 4,
+        }
+    );
+
+    // The gather pre-pass is a multi-stage parallel scan that writes that same
+    // binding as its result, with its block-sum/offset intermediates above it.
+    let scan_pipeline = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .find_map(|p| match p {
+            Pipeline::MultiCompute(mc) if mc.stages.iter().any(|s| s.entry_point.contains("_gather_")) => {
+                Some(mc)
+            }
+            _ => None,
+        })
+        .expect("scan gather pre-pass must be a multi_compute pipeline");
+    let writes_gather = scan_pipeline
+        .bindings
+        .iter()
+        .any(|b| matches!(b, Binding::StorageBuffer { binding, .. } if *binding == gather.0));
+    assert!(
+        writes_gather,
+        "scan pre-pass must write the gather buffer (binding {})",
+        gather.0
+    );
+    // No other binding in the scan pipeline collides with the gather output.
+    let dup = scan_pipeline
+        .bindings
+        .iter()
+        .filter(|b| matches!(b, Binding::StorageBuffer { binding, .. } if *binding == gather.0))
+        .count();
+    assert_eq!(
+        dup, 1,
+        "exactly one scan binding is the gather buffer: {:?}",
+        scan_pipeline.bindings
+    );
+}

@@ -143,16 +143,11 @@ pub fn run(
                 let workgroup = lookup_workgroup_size(&pipeline, &entry.name);
                 // If TLC parallelize reserved a specific output binding
                 // for this entry, honor it; otherwise auto-allocate.
-                let forced_output_binding = plans.get(&entry.name).and_then(|p| {
-                    use crate::tlc::parallelize::PlannedBindings;
-                    match &p.bindings {
-                        PlannedBindings::Map { output } => *output,
-                        // Reduce/Scan/Redomap haven't migrated yet — they
-                        // still come through the old TLC path with their
-                        // own bindings, so don't override.
-                        _ => None,
-                    }
-                });
+                // Map and Scan results are single `EntryOutput` buffers whose
+                // binding `build_entry_outputs` may pin (gather pre-passes do).
+                // Reduce/Redomap manage their result inside the TLC two-phase
+                // plan, so `forced_output` reports `None` for them.
+                let forced_output_binding = plans.get(&entry.name).and_then(|p| p.bindings.forced_output());
                 let ep = convert_entry_point(
                     def,
                     entry,
