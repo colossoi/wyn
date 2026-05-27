@@ -2720,3 +2720,50 @@ entry g(xs: []i32) []i32 =
         scan_pipeline.bindings
     );
 }
+
+/// Multiple gathers of the *same* computed array coalesce to one buffer: the
+/// lift keys on the let-bound symbol and rewrites every `arr[..]` use to the
+/// same storage binding, so a single pre-pass materializes `arr` once no
+/// matter how many times (or in how many consumer maps) it's indexed.
+#[test]
+fn gather_same_array_coalesces_to_one_buffer() {
+    use crate::pipeline_descriptor::{Binding, BufferUsage, Pipeline};
+    let src = "\
+#[compute]
+entry gen(bh: []i32) []i32 =
+  let arr = map(|x:i32| x + 1, bh) in
+  map(|i:i32| arr[i % 256] + arr[(i + 1) % 256], iota(6144))
+";
+    let lowered = compile_parallel(src);
+    assert!(!lowered.spirv.is_empty());
+
+    // Exactly one gather pre-pass, despite two `arr[..]` uses.
+    let gather_prepasses = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .filter(|p| matches!(p, Pipeline::Compute(cp) if cp.entry_point.contains("_gather_")))
+        .count();
+    assert_eq!(
+        gather_prepasses, 1,
+        "two uses of one computed array must share one gather pre-pass"
+    );
+
+    // The consumer references exactly one gather intermediate.
+    let consumer_intermediates = compute_storage_buffers(&lowered.pipeline, "gen")
+        .into_iter()
+        .filter(|b| {
+            matches!(
+                b,
+                Binding::StorageBuffer {
+                    usage: BufferUsage::Intermediate,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        consumer_intermediates, 1,
+        "both gathers must read the same intermediate buffer"
+    );
+}

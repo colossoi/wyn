@@ -53,12 +53,24 @@
 > its gate is now the general "all producer free vars are entry params" check
 > (pre-pass must be self-contained), shared by map and scan.
 >
-> **Known gap:** a runtime-sized *output* buffer (e.g. the consumer's
-> `iota(6144)` result) still uses viz's 1024 default — pre-existing, affects any
-> runtime-sized compute output, not gather-specific.
+> **Phase 4 (already satisfied by design):** multiple gathers of the *same*
+> computed array coalesce to one buffer — the lift keys on the let-bound symbol
+> and rewrites every `arr[..]` use (across any number of consumer maps) to the
+> same storage binding, so one pre-pass materializes `arr` once. Locked in by
+> `gather_same_array_coalesces_to_one_buffer`.
 >
-> **Next:** Phase 4 (coalesce multiple gathers of the same array into one
-> buffer); optionally the runtime-sized-output sizing.
+> **Known gaps / future work:**
+> - A runtime-sized *output* buffer (e.g. the consumer's `iota(6144)` result)
+>   still uses viz's 1024 default — pre-existing, affects any runtime-sized
+>   compute output, not gather-specific.
+> - **Producer CSE:** two *distinct* lets with structurally-identical producers
+>   (`let a = map(f,bh) in let b = map(f,bh) in …a[i]…b[j]`) get one buffer
+>   *each* — coalescing them needs alpha-equivalence CSE (arguably a general
+>   pass, not gather-specific). Niche; programmers normally write one let.
+> - **Nested gathers:** a gather consumer that is *itself* gathered
+>   (`let p = map(|i| arr[i], iota) in …p[j]…`, where `arr` is also gathered)
+>   still panics (composite-unsized) — the lift doesn't recurse into a freshly
+>   materialized consumer. Separate from Phase 4.
 
 ## Context
 
