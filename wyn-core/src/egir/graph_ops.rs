@@ -171,6 +171,23 @@ pub fn emit_store(
     effect_out
 }
 
+/// Emit a workgroup execution+memory barrier (`InstKind::ControlBarrier`)
+/// in `block`. No operands or result; the effect token keeps it ordered
+/// against the workgroup-shared loads/stores it synchronizes. Returns the
+/// produced effect-out token.
+pub fn emit_workgroup_barrier(graph: &mut EGraph, block: BlockId, next_effect: &mut u32) -> EffectToken {
+    let effect_in = EffectToken(0); // placeholder; real chain is built by elaborate
+    let effect_out = alloc_effect(next_effect);
+    graph.skeleton.blocks[block].side_effects.push(SideEffect {
+        kind: SideEffectKind::Inst(InstKind::ControlBarrier),
+        operand_nodes: smallvec![],
+        result: None,
+        effects: Some((effect_in, effect_out)),
+        span: None,
+    });
+    effect_out
+}
+
 /// Emit a store through a `StorageView` at `index_nid`. Builds the
 /// `ViewIndex` pure node and the `Store` side-effect.
 pub fn emit_storage_store(

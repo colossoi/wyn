@@ -227,6 +227,12 @@ pub enum InstKind {
         index: usize,
         result: PlaceId,
     },
+
+    /// Workgroup execution + memory barrier (`workgroupBarrier()` /
+    /// `OpControlBarrier`). No operands, no result; ordered by the effect
+    /// chain so it isn't reordered around the workgroup-shared loads/stores
+    /// it synchronizes. Emitted by the workgroup-parallel reduce phase 2.
+    ControlBarrier,
 }
 
 impl InstKind {
@@ -235,7 +241,10 @@ impl InstKind {
     pub fn value_uses(&self) -> Vec<ValueRef> {
         match self {
             InstKind::Op { operands, .. } => operands.clone(),
-            InstKind::Alloca { .. } | InstKind::OutputSlot { .. } | InstKind::Load { .. } => vec![],
+            InstKind::Alloca { .. }
+            | InstKind::OutputSlot { .. }
+            | InstKind::Load { .. }
+            | InstKind::ControlBarrier => vec![],
             InstKind::Store { value, .. } => vec![*value],
             InstKind::ViewIndex { view, index, .. } => vec![*view, *index],
         }
@@ -281,7 +290,10 @@ impl InstKind {
                 sub(view);
                 sub(index);
             }
-            InstKind::Alloca { .. } | InstKind::OutputSlot { .. } | InstKind::Load { .. } => {}
+            InstKind::Alloca { .. }
+            | InstKind::OutputSlot { .. }
+            | InstKind::Load { .. }
+            | InstKind::ControlBarrier => {}
         }
     }
 
@@ -294,7 +306,7 @@ impl InstKind {
             InstKind::Alloca { result, .. }
             | InstKind::OutputSlot { result, .. }
             | InstKind::ViewIndex { result, .. } => sub(result),
-            InstKind::Op { .. } => {}
+            InstKind::Op { .. } | InstKind::ControlBarrier => {}
         }
     }
 

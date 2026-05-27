@@ -1615,6 +1615,18 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 // Void instruction.
                 self.constructor.const_i32(0)
             }
+            InstKind::ControlBarrier => {
+                // Workgroup execution + memory barrier: synchronize the
+                // workgroup and make workgroup-shared writes visible.
+                let wg_scope = self.constructor.const_u32(spirv::Scope::Workgroup as u32);
+                let semantics = self.constructor.const_u32(
+                    (spirv::MemorySemantics::WORKGROUP_MEMORY | spirv::MemorySemantics::ACQUIRE_RELEASE)
+                        .bits(),
+                );
+                self.constructor.builder.control_barrier(wg_scope, wg_scope, semantics)?;
+                // Void instruction.
+                self.constructor.const_i32(0)
+            }
         };
 
         if let Some(result_value) = inst.result {

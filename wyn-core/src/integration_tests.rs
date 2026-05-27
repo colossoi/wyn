@@ -731,6 +731,7 @@ fn inst_signature_multiset(ssa: &Program) -> std::collections::BTreeMap<String, 
             InstKind::Store { .. } => "Store".to_string(),
             InstKind::ViewIndex { .. } => "ViewIndex".to_string(),
             InstKind::OutputSlot { .. } => "OutputSlot".to_string(),
+            InstKind::ControlBarrier => "ControlBarrier".to_string(),
             InstKind::Op { tag, .. } => format!(
                 "Op:{}",
                 match tag {

@@ -326,6 +326,9 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
         InstKind::OutputSlot { index, result } => {
             let _ = write!(out, "output_slot {index} -> {}", fmt_place(*result));
         }
+        InstKind::ControlBarrier => {
+            let _ = write!(out, "control_barrier");
+        }
     }
 }
 

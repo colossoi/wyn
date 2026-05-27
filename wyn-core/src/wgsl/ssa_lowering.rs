@@ -1649,6 +1649,11 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             continue;
                         }
 
+                        InstKind::ControlBarrier => {
+                            writeln!(output, "{}workgroupBarrier();", self.ctx.indent_str()).unwrap();
+                            continue;
+                        }
+
                         // `_w_intrinsic_uninit()` returns an
                         // uninitialized composite. In WGSL that's just a
                         // `var<function> x: T;` — no initializer, no
@@ -2479,7 +2484,8 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             | InstKind::ViewIndex { .. }
             | InstKind::Alloca { .. }
             | InstKind::Load { .. }
-            | InstKind::Store { .. } => Err(crate::err_wgsl_at!(
+            | InstKind::Store { .. }
+            | InstKind::ControlBarrier => Err(crate::err_wgsl_at!(
                 self.blame_span(),
                 "internal: {:?} should be handled in emit_nodes",
                 inst.data
