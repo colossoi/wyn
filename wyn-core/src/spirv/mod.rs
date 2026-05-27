@@ -3737,6 +3737,19 @@ fn lower_ssa_entry_point(
             let result = inst.result.expect("StorageView(Workgroup) must have a result");
             let view_ty = body.get_value_type(result);
             let elem_ty = view_ty.elem_type().cloned().unwrap_or_else(|| view_ty.clone());
+            // KNOWN LIMITATION (struct/array reduce accumulators): `elem_spirv`
+            // is the *same* SPIR-V type id `polytype_to_spirv` hands the
+            // partials storage buffer — and rspirv dedups type ids while SPIR-V
+            // decorations are per-id. So when the accumulator is a struct/array
+            // (e.g. the miner's `(u32, [8]u32)`), this Workgroup array's element
+            // inherits the buffer's `Offset`/`ArrayStride` (explicit layout),
+            // which Vulkan forbids on the Workgroup storage class. `spirv-val`
+            // (and validation layers) flag it; AMD/typical drivers tolerate it
+            // and run correctly. Scalar accumulators (no layout decorations) are
+            // clean. A real fix is either SPV_KHR_workgroup_memory_explicit_layout
+            // (Block-wrap this array, keep the decorated type) or an undecorated
+            // shared type with component-wise value reconciliation at the
+            // buffer<->shared boundary; deferred.
             let elem_spirv = constructor.polytype_to_spirv(&elem_ty);
             let count_const = constructor.const_u32(*count);
             let arr_ty = constructor.builder.type_array(elem_spirv, count_const);
