@@ -618,15 +618,18 @@ impl SoaTransformer {
             }
             SoacOp::Scan {
                 op,
+                reduce_op,
                 ne,
                 input,
                 consumes_input,
             } => {
                 let new_op = self.transform_soac_body(op);
+                let new_reduce_op = self.transform_soac_body(reduce_op);
                 let new_ne = self.transform_term(ne);
                 let new_input = self.transform_array_expr(input);
                 SoacOp::Scan {
                     op: new_op,
+                    reduce_op: new_reduce_op,
                     ne: Box::new(new_ne),
                     input: new_input,
                     consumes_input: *consumes_input,

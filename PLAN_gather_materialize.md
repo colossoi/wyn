@@ -31,19 +31,31 @@
 > block-sum/offset intermediates above it. Verified: `let o = scan(op,ne,xs) in
 > …o[i]` over an input array compiles + validates (spirv-val + naga).
 >
+> **Fused map→scan lowering (fixed):** `SoacOp::Scan` / `PendingSoac::Scan`
+> gained a pure `reduce_func` (mirroring `Redomap`), threaded through every TLC
+> SOAC-reconstruction pass and the egir scan synthesis. The parallel scan uses
+> the fused element-step (`op`/`func`) for phase 1 and the pure combiner
+> (`reduce_op`/`reduce_func`) for phases 2 & 3 (which merge already-transformed
+> block sums). A *type-preserving* fused scan (`scan(op, ne, map(g, xs))`,
+> `g: T -> T`) now compiles and validates (spirv-val + naga), as does a gather
+> over one. The gather lift admits these (its `scan_input_is_direct` gate keys
+> on input-vs-result element type).
+>
 > **Known gaps:**
 > - A runtime-sized *output* buffer (e.g. the consumer's `iota(6144)` result)
 >   still uses viz's 1024 default — pre-existing, affects any runtime-sized
 >   compute output, not gather-specific.
-> - A scan over a *computed* array (`let counts = map(..) in scan(.., counts)`,
->   the original Phase-3 repro) is **declined** by the lift: it fuses into a
->   `scan(op,ne,map(..))` that mis-lowers today *independently of gather* (a
->   standalone `scan(op,ne,map(..))` also fails an `OpFunctionCall` type check).
->   Fixing that fused-scan lowering is an orthogonal scan bug; once fixed, the
->   gather lift handles the chained case with no further change.
+> - A *type-changing* fused scan (`g: A -> T`, e.g. the original chained repro
+>   `let counts = map(|h:vec4f32| .. : i32) in scan(.., counts)`) still
+>   mis-lowers: the scan's phase 1 access-chains the raw input with the
+>   accumulator's element type (an `OpAccessChain` int-vs-vector mismatch). This
+>   is a separate scan-lowering gap (a standalone such scan also fails), so the
+>   gather lift declines these and leaves the diagnostic. Fixing it means
+>   distinguishing the scan's *input* element type from its *accumulator*
+>   element type in phase 1.
 >
-> **Next:** fix fused map→scan lowering (orthogonal), then revisit the chained
-> repro; Phase 4 (gather CSE).
+> **Next:** type-changing fused-scan lowering (unblocks the chained repro);
+> Phase 4 (gather CSE).
 
 ## Context
 

@@ -385,11 +385,13 @@ fn analyze_soac(
         },
         SoacOp::Scan {
             op,
+            reduce_op,
             ne,
             input,
             consumes_input,
         } => SoacOp::Scan {
             op: op.clone(),
+            reduce_op: reduce_op.clone(),
             ne: ne.clone(),
             input: input.clone(),
             consumes_input: *consumes_input,

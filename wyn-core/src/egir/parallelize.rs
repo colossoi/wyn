@@ -778,16 +778,25 @@ fn transform_scan_entry(
     // into phase 2), original captures count, and the destination kind.
     // `OutputView` means a separate auto-bound output buffer; `InputBuffer`
     // means writes route back to the input.
-    let (op_func, elem_ty, init_nid, captures_count, consuming) = {
+    // `op_func` is the per-element step (phase 1, reads raw inputs);
+    // `reduce_func` is the pure combiner (phases 2 & 3, which merge already-
+    // transformed values). They differ only for a map-fused scan.
+    let (op_func, reduce_func, elem_ty, init_nid, captures_count, consuming) = {
         let (block, idx) = find_pending_scan(entry)?;
         let se = &entry.graph.skeleton.blocks[block].side_effects[idx];
-        let (func, elem, dest) = match &se.kind {
+        let (func, reduce, elem, dest) = match &se.kind {
             SideEffectKind::Pending(PendingSoac::Scan {
                 func,
+                reduce_func,
                 input_elem_type,
                 destination,
                 ..
-            }) => (func.clone(), input_elem_type.clone(), destination.clone()),
+            }) => (
+                func.clone(),
+                reduce_func.clone(),
+                input_elem_type.clone(),
+                destination.clone(),
+            ),
             _ => return None,
         };
         let n = se.operand_nodes.len();
@@ -809,7 +818,7 @@ fn transform_scan_entry(
             SoacDestination::Fresh => return None,
         };
         let init = se.operand_nodes[1];
-        (func, elem, init, captures_count, is_consuming)
+        (func, reduce, elem, init, captures_count, is_consuming)
     };
 
     // Output binding: for consuming scans, write back to the input
@@ -827,9 +836,11 @@ fn transform_scan_entry(
     // dependents).
     let phase2 = {
         let phase1_graph_snapshot = entry.graph.clone();
+        // Phase 2 scans the per-chunk block sums (already-transformed values),
+        // so it uses the pure combiner, not the element-step.
         synthesize_phase2_scan(
             &entry.name,
-            op_func.clone(),
+            reduce_func.clone(),
             elem_ty.clone(),
             &phase1_graph_snapshot,
             init_nid,
@@ -839,10 +850,12 @@ fn transform_scan_entry(
         .ok()?
     };
 
+    // Phase 3 adds each block's offset to its already-locally-scanned output
+    // elements — again merging transformed values, so the pure combiner.
     let swap_wrapper_name = format!("{}_scan_op_swap", entry.name);
     let swap_wrapper = synthesize_swap_wrapper(
         swap_wrapper_name.clone(),
-        op_func.clone(),
+        reduce_func.clone(),
         elem_ty.clone(),
         entry.span,
     );

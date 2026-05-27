@@ -196,6 +196,10 @@ impl EntryBuilder {
             &mut self.graph,
             self.current_block,
             PendingSoac::Scan {
+                // A serial into-scan (e.g. phase 2's block-sum scan) is never
+                // re-parallelized, so its element-step and pure combiner are
+                // the same function.
+                reduce_func: func.clone(),
                 func,
                 input_array_type: input_array_ty,
                 input_elem_type: input_elem_ty,

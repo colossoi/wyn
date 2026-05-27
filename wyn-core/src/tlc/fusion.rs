@@ -274,6 +274,10 @@ fn build_fused_from_semantics(
                         lam: composed_op,
                         captures: vec![],
                     },
+                    // The pure combiner is the original scan op (without the
+                    // producer `f`); phase 2 combines already-transformed block
+                    // sums, so it must not re-apply `f`.
+                    reduce_op: op.clone(),
                     ne: init.clone(),
                     input: input_exprs[0].clone(),
                     // Fusion runs before apply_ownership; ownership pass
@@ -468,6 +472,7 @@ fn fuse_inline_soac_inputs(term: Term, symbols: &mut SymbolTable, term_ids: &mut
         // scan(op, ne, map(g, xs)) → scan(op∘g, ne, xs)   (single map input only)
         TermKind::Soac(SoacOp::Scan {
             op,
+            reduce_op,
             ne,
             input,
             consumes_input,
@@ -484,6 +489,9 @@ fn fuse_inline_soac_inputs(term: Term, symbols: &mut SymbolTable, term_ids: &mut
                                     lam: composed_op,
                                     captures: vec![],
                                 },
+                                // Folding `g` into the per-element step leaves
+                                // the pure combiner (phase 2) unchanged.
+                                reduce_op,
                                 ne,
                                 input: map_inputs.into_iter().next().unwrap(),
                                 // Fusion runs before apply_ownership; the
@@ -498,6 +506,7 @@ fn fuse_inline_soac_inputs(term: Term, symbols: &mut SymbolTable, term_ids: &mut
             Term {
                 kind: TermKind::Soac(SoacOp::Scan {
                     op,
+                    reduce_op,
                     ne,
                     input,
                     consumes_input,

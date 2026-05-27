@@ -195,7 +195,13 @@ pub enum PendingSoac {
     /// (compute-shader ABI; result is dummy/unit). Operand layout
     /// depends on the destination — see `SoacDestination`.
     Scan {
+        /// Element-combine `(acc, x) -> acc'` for phase 1 / phase 3. For a
+        /// `map`-fused scan this folds the producer `f` into the step.
         func: String,
+        /// Pure associative combiner `(a, a) -> a` for phase 2 (merging block
+        /// sums). Equals `func` for a plain scan; differs for a fused scan.
+        /// Mirrors `Redomap::reduce_func`.
+        reduce_func: String,
         input_array_type: Type<TypeName>,
         input_elem_type: Type<TypeName>,
         destination: SoacDestination,

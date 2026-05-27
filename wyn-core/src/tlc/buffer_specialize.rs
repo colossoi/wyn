@@ -583,11 +583,13 @@ impl BufferSpecializer {
             },
             SoacOp::Scan {
                 op,
+                reduce_op,
                 ne,
                 input,
                 consumes_input,
             } => SoacOp::Scan {
                 op: self.rewrite_soac_body(op),
+                reduce_op: self.rewrite_soac_body(reduce_op),
                 ne: Box::new(self.rewrite_term(ne)),
                 input: self.rewrite_array_expr(input),
                 consumes_input: *consumes_input,
@@ -1210,11 +1212,13 @@ impl BufferSpecializer {
             },
             SoacOp::Scan {
                 op,
+                reduce_op,
                 ne,
                 input,
                 consumes_input,
             } => SoacOp::Scan {
                 op: self.rewrite_specialized_soac_body(op, view_params),
+                reduce_op: self.rewrite_specialized_soac_body(reduce_op, view_params),
                 ne: Box::new(self.rewrite_specialized_body(ne, view_params)),
                 input: self.rewrite_specialized_array_expr(input, view_params),
                 consumes_input: *consumes_input,

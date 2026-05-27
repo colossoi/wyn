@@ -460,6 +460,9 @@ fn expand_one(
             input_array_type,
             input_elem_type,
             destination,
+            // Serial expansion reads raw inputs via `func`; the pure combiner
+            // is only needed by the parallel phase 2 / phase 3.
+            reduce_func: _,
         }) => {
             let func = func.clone();
             let arr_ty = input_array_type.clone();

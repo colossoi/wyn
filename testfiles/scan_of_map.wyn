@@ -1,0 +1,6 @@
+-- Map fused into a scan (type-preserving): scan(+, 0, map(*2, xs)).
+-- Exercises the fused-scan lowering: phase 1 folds the map into the
+-- per-element step, while phases 2/3 use the pure combiner.
+#[compute]
+entry g(xs: []i32) []i32 =
+  scan(|a: i32, b: i32| a + b, 0, map(|x: i32| x * 2, xs))

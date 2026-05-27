@@ -356,8 +356,15 @@ pub fn collect_free_vars_soac(
             collect_free_vars(ne, bound, top_level, known_defs, symbols, free, seen);
             collect_free_vars_array_expr(input, bound, top_level, known_defs, symbols, free, seen);
         }
-        SoacOp::Scan { op, ne, input, .. } => {
+        SoacOp::Scan {
+            op,
+            reduce_op,
+            ne,
+            input,
+            ..
+        } => {
             collect_free_vars_soac_body(op, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars_soac_body(reduce_op, bound, top_level, known_defs, symbols, free, seen);
             collect_free_vars(ne, bound, top_level, known_defs, symbols, free, seen);
             collect_free_vars_array_expr(input, bound, top_level, known_defs, symbols, free, seen);
         }
@@ -509,7 +516,7 @@ fn check_soac_envelopes(
     let bodies: Vec<&super::SoacBody> = match soac {
         SoacOp::Map { lam, .. } => vec![lam],
         SoacOp::Reduce { op, .. } => vec![op],
-        SoacOp::Scan { op, .. } => vec![op],
+        SoacOp::Scan { op, reduce_op, .. } => vec![op, reduce_op],
         SoacOp::Filter { pred, .. } => vec![pred],
         SoacOp::ReduceByIndex { op, .. } => vec![op],
         SoacOp::Redomap { op, reduce_op, .. } => vec![op, reduce_op],
@@ -985,11 +992,13 @@ impl<'a> ClosureConverter<'a> {
             },
             SoacOp::Scan {
                 op,
+                reduce_op,
                 ne,
                 input,
                 consumes_input,
             } => SoacOp::Scan {
                 op: self.lift_soac_lambda(op.lam, span),
+                reduce_op: self.lift_soac_lambda(reduce_op.lam, span),
                 ne: Box::new(self.convert_term(*ne)),
                 input: self.convert_array_expr(input, span),
                 consumes_input,

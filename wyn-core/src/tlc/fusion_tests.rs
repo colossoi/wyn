@@ -101,6 +101,27 @@ fn mk_reduce(
     )
 }
 
+fn mk_scan(
+    op: Lambda,
+    ne: Term,
+    input: Term,
+    result_ty: Type<TypeName>,
+    term_ids: &mut TermIdSource,
+) -> Term {
+    mk_term(
+        TermKind::Soac(SoacOp::Scan {
+            op: mk_soac_body(op.clone()),
+            // A freshly-built scan is non-fused: pure combiner == element step.
+            reduce_op: mk_soac_body(op),
+            ne: Box::new(ne),
+            input: ArrayExpr::Ref(Box::new(input)),
+            consumes_input: false,
+        }),
+        result_ty,
+        term_ids,
+    )
+}
+
 /// Build a function def wrapping a body in a lambda
 fn mk_func_def(
     name: SymbolId,
@@ -705,6 +726,85 @@ fn test_inline_map_fusion() {
             assert_eq!(lam.lam.params[0].0, x_sym);
         }
         other => panic!("Expected fused Map, got {:?}", other),
+    }
+}
+
+// -------------------------------------------------------------------------
+// Test: scan(op, ne, map(g, a)) fuses g into the per-element step but keeps
+// the original pure combiner as `reduce_op` (needed by the parallel scan's
+// phase 2, which merges already-transformed block sums). Regression guard
+// for the fused-scan `OpFunctionCall` type mismatch.
+// -------------------------------------------------------------------------
+#[test]
+fn test_map_into_scan_keeps_pure_reduce_op() {
+    let mut symbols = SymbolTable::default();
+    let mut term_ids = TermIdSource::new();
+
+    let a_sym = symbols.alloc("a".to_string());
+    let x_sym = symbols.alloc("x".to_string());
+    let acc_sym = symbols.alloc("acc".to_string());
+    let b_sym = symbols.alloc("b".to_string());
+
+    // Inner: map(g, a) where g(x) = x
+    let g = mk_lambda1(
+        x_sym,
+        i32_ty(),
+        mk_term(TermKind::Var(VarRef::Symbol(x_sym)), i32_ty(), &mut term_ids),
+        i32_ty(),
+    );
+    let a = mk_term(
+        TermKind::Var(VarRef::Symbol(a_sym)),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let inner_map = mk_map(g, a, array_ty(i32_ty()), &mut term_ids);
+
+    // Outer: scan(plus, 0, inner_map) where plus(acc, b) = acc
+    let plus = mk_lambda2(
+        acc_sym,
+        i32_ty(),
+        b_sym,
+        i32_ty(),
+        mk_term(TermKind::Var(VarRef::Symbol(acc_sym)), i32_ty(), &mut term_ids),
+        i32_ty(),
+    );
+    let ne = mk_term(TermKind::IntLit("0".to_string()), i32_ty(), &mut term_ids);
+    let outer = mk_scan(plus, ne, inner_map, array_ty(i32_ty()), &mut term_ids);
+
+    let program = Program {
+        defs: vec![Def {
+            name: symbols.alloc("main".to_string()),
+            ty: array_ty(i32_ty()),
+            body: outer,
+            meta: DefMeta::Function,
+            arity: 0,
+        }],
+        symbols,
+        def_syms: HashMap::new(),
+    };
+
+    let fused = run(program);
+
+    match &fused.defs[0].body.kind {
+        TermKind::Soac(SoacOp::Scan {
+            op, reduce_op, input, ..
+        }) => {
+            // The map fused away — the scan now reads `a` directly.
+            match input {
+                ArrayExpr::Ref(t) => {
+                    assert!(matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == a_sym))
+                }
+                other => panic!("Expected Ref(a), got {:?}", other),
+            }
+            // The pure combiner (phase 2) is preserved verbatim — still
+            // `plus`'s params — rather than being lost to the fused step.
+            assert_eq!(reduce_op.lam.params.len(), 2);
+            assert_eq!(reduce_op.lam.params[0].0, acc_sym);
+            assert_eq!(reduce_op.lam.params[1].0, b_sym);
+            // The element step exists independently (it folds `g` in).
+            assert_eq!(op.lam.params.len(), 2);
+        }
+        other => panic!("Expected fused Scan, got {:?}", other),
     }
 }
 

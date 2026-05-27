@@ -324,12 +324,14 @@ pub(crate) fn rewrite_map_scan_to_into(graph: &mut EGraph, target_result: NodeId
                 }
                 SideEffectKind::Pending(PendingSoac::Scan {
                     func,
+                    reduce_func,
                     input_array_type,
                     input_elem_type,
                     destination: _,
                 }) => {
                     se.kind = SideEffectKind::Pending(PendingSoac::Scan {
                         func,
+                        reduce_func,
                         input_array_type,
                         input_elem_type,
                         destination: SoacDestination::OutputView,

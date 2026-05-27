@@ -1577,10 +1577,11 @@ impl<'a> Converter<'a> {
             } => self.convert_soac_redomap(op, reduce_op, ne, inputs, ty),
             SoacOp::Scan {
                 op,
+                reduce_op,
                 ne,
                 input,
                 consumes_input,
-            } => self.convert_soac_scan(op, ne, input, *consumes_input, ty),
+            } => self.convert_soac_scan(op, reduce_op, ne, input, *consumes_input, ty),
             SoacOp::Filter {
                 pred,
                 input,
@@ -1751,12 +1752,14 @@ impl<'a> Converter<'a> {
     fn convert_soac_scan(
         &mut self,
         op: &SoacBody,
+        reduce_op: &SoacBody,
         ne: &Term,
         input: &ArrayExpr,
         consumes_input: bool,
         result_ty: Type<TypeName>,
     ) -> Result<NodeId, ConvertError> {
         let op_name = self.lambda_fn_name(&op.lam)?;
+        let reduce_name = self.lambda_fn_name(&reduce_op.lam)?;
         let capture_nids: Vec<NodeId> =
             op.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
         // Take the elem type from the result, not the input — for a
@@ -1782,6 +1785,7 @@ impl<'a> Converter<'a> {
         Ok(self.emit_soac(
             PendingSoac::Scan {
                 func: op_name,
+                reduce_func: reduce_name,
                 input_array_type: arr_ty,
                 input_elem_type: elem_ty,
                 destination,

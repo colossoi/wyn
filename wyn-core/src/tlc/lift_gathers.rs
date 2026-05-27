@@ -219,13 +219,15 @@ fn try_lift(
         return None;
     }
 
-    // A `scan` pre-pass only lowers correctly when its input is a direct
-    // entry-param array of the scan's element type. A scan over a *computed*
-    // array (e.g. `scan(op, ne, map(..))`) is a fused producer that today
-    // mis-lowers regardless of gather (a standalone `scan(op,ne,map(..))` also
-    // fails) — detect it by the input element type differing from the result
-    // and decline, leaving the existing diagnostic rather than emitting an
-    // invalid shader. `map` has no such restriction (it may change types).
+    // A `scan` pre-pass lowers correctly only when its input array's element
+    // type matches the scan's element type — i.e. a direct scan, or a
+    // map-fused scan that preserves the type (`scan(op, ne, map(g, xs))` with
+    // `g: T -> T`). A *type-changing* fused producer (`g: A -> T`) still
+    // mis-lowers today (the scan's phase 1 access-chains the raw input with
+    // the accumulator's element type — a gap independent of gather, since a
+    // standalone such scan also fails), so decline it and leave the existing
+    // diagnostic rather than emit an invalid shader. `map` producers have no
+    // such restriction.
     if matches!(&rhs.kind, TermKind::Soac(SoacOp::Scan { .. })) && !scan_input_is_direct(rhs, &elem_ty) {
         return None;
     }
@@ -268,10 +270,10 @@ fn try_lift(
     Some((prepass, decl, rewritten))
 }
 
-/// True if a `scan` producer reads a direct array of its own element type
-/// (`Ref(Var)` or storage buffer). A pure scan preserves element type, so an
-/// input whose element type differs signals a fused producer (e.g.
-/// `scan(op, ne, map(..))`) that doesn't lower today — decline those.
+/// True if a `scan` producer reads an array (`Ref(Var)` or storage buffer)
+/// whose element type matches the scan's element type. That holds for a plain
+/// scan and for a type-preserving map-fused scan (both lower correctly); it is
+/// false for a type-changing fused producer, which still mis-lowers today.
 fn scan_input_is_direct(rhs: &Term, result_elem: &Type<TypeName>) -> bool {
     let TermKind::Soac(SoacOp::Scan { input, .. }) = &rhs.kind else {
         return false;

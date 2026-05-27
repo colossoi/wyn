@@ -400,6 +400,7 @@ impl<'a> CallLowerer<'a> {
             },
             SoacOp::Scan {
                 op,
+                reduce_op,
                 ne,
                 input,
                 consumes_input,
@@ -407,6 +408,14 @@ impl<'a> CallLowerer<'a> {
                 op: super::SoacBody {
                     lam: op.lam,
                     captures: op
+                        .captures
+                        .into_iter()
+                        .map(|(s, ty, t)| (s, ty, self.lower_term(t)))
+                        .collect(),
+                },
+                reduce_op: super::SoacBody {
+                    lam: reduce_op.lam,
+                    captures: reduce_op
                         .captures
                         .into_iter()
                         .map(|(s, ty, t)| (s, ty, self.lower_term(t)))

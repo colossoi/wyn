@@ -444,7 +444,19 @@ pub enum SoacOp {
         inputs: Vec<ArrayExpr>,
     },
     Scan {
+        /// Element-combine: `(acc, x) -> acc'`. For a plain scan this is the
+        /// pure associative combiner; for a `map`-fused scan it is
+        /// `(acc, raw) -> acc ⊕ f(raw)`, folding the producer `f` into the
+        /// per-element step. Used by the parallel scan's phase 1 / phase 3
+        /// (combine the running accumulator with an input element).
         op: SoacBody,
+        /// Pure associative combiner `(a, a) -> a` on the value type, for the
+        /// parallel scan's phase 2 (combine two already-scanned block sums).
+        /// Equals `op` for a plain scan; for a fused scan it is the original
+        /// scan combiner without the producer `f`. Mirrors `Redomap::reduce_op`
+        /// — a parallel scan needs both the elementwise step and a pure
+        /// combiner, since phase 2 combines transformed values, not raw inputs.
+        reduce_op: SoacBody,
         ne: Box<Term>,
         input: ArrayExpr,
         /// Set by the ownership pass when the scan's input is mutable
@@ -827,8 +839,15 @@ where
             f(ne);
             visit_array_expr_children(input, f);
         }
-        SoacOp::Scan { op, ne, input, .. } => {
+        SoacOp::Scan {
+            op,
+            reduce_op,
+            ne,
+            input,
+            ..
+        } => {
             visit_soac_body_children(op, f);
+            visit_soac_body_children(reduce_op, f);
             f(ne);
             visit_array_expr_children(input, f);
         }
@@ -972,11 +991,13 @@ where
         },
         SoacOp::Scan {
             op,
+            reduce_op,
             ne,
             input,
             consumes_input,
         } => SoacOp::Scan {
             op: map_soac_body_children(op, f),
+            reduce_op: map_soac_body_children(reduce_op, f),
             ne: Box::new(f(*ne)),
             input: map_array_expr_children(input, f),
             consumes_input,
@@ -2055,6 +2076,9 @@ impl<'a> Transformer<'a> {
             ty,
             span,
             TermKind::Soac(SoacOp::Scan {
+                // A source-level scan has no fused producer, so the pure
+                // combiner and the element-combine are the same lambda.
+                reduce_op: op.clone(),
                 op,
                 ne: Box::new(ne_term),
                 input: ArrayExpr::Ref(Box::new(arr_term)),
