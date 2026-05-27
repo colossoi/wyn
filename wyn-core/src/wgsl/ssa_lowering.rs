@@ -806,6 +806,37 @@ impl<'a> LowerCtx<'a> {
             writeln!(output).unwrap();
         }
 
+        // Workgroup-shared arrays (phase2 tree reduce): one module-scope
+        // `var<workgroup> _wg_<id>: array<T, count>` per distinct id, found by
+        // pre-scanning every entry body for `StorageView(Workgroup{id,count})`.
+        // ids are globally unique (assigned by the phase2 synthesis).
+        let mut wg_arrays: std::collections::BTreeMap<u32, (String, u32)> =
+            std::collections::BTreeMap::new();
+        for entry in &self.program.entry_points {
+            for (_, inst) in entry.body.inner.insts.iter() {
+                if let InstKind::Op {
+                    tag: crate::op::OpTag::StorageView(crate::op::PureViewSource::Workgroup { id, count }),
+                    ..
+                } = &inst.data
+                {
+                    let result = inst.result.expect("StorageView(Workgroup) must have a result");
+                    let view_ty = entry.body.get_value_type(result);
+                    let elem_ty = view_ty.elem_type().cloned().unwrap_or_else(|| view_ty.clone());
+                    let elem_str = self.type_emitter.type_to_wgsl(&elem_ty)?;
+                    wg_arrays.entry(*id).or_insert((elem_str, *count));
+                }
+            }
+        }
+        for (id, (elem_str, count)) in wg_arrays {
+            writeln!(
+                output,
+                "var<workgroup> _wg_{}: array<{}, {}>;",
+                id, elem_str, count
+            )
+            .unwrap();
+            writeln!(output).unwrap();
+        }
+
         // Entry-param `#[uniform(set, binding)]` declarations become
         // module-scope `var<uniform>` in WGSL. The variable's name is
         // the mangled form of the param name so it matches body
@@ -2437,6 +2468,12 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                     )
                                 },
                             )?
+                        }
+                        // Module-scope `var<workgroup> _wg_<id>` declared in
+                        // `lower_program`'s header pre-scan; index it like any
+                        // other view via the ViewHandle below.
+                        crate::op::PureViewSource::Workgroup { id, .. } => {
+                            format!("_wg_{}", id)
                         }
                     };
                     let offset_expr = self.get_value(offset)?;

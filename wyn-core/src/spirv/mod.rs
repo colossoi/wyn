@@ -149,6 +149,12 @@ struct Constructor {
     buffer_vars: Vec<(spirv::Word, spirv::Word)>,
     /// (set, binding) → buffer_id, for deduplication in get_or_assign_buffer_id.
     buffer_id_map: HashMap<(u32, u32), u32>,
+    /// Workgroup-shared arrays: id → (workgroup `OpVariable`, element type).
+    /// Created in `lower_ssa_entry_point` by pre-scanning the body for
+    /// `StorageView(Workgroup{id, count})` ops, so the var exists (and is in
+    /// the entry interface, required by SPIR-V ≥1.4) before `ViewIndex` chains
+    /// into it.
+    workgroup_vars: HashMap<u32, (spirv::Word, spirv::Word)>,
 
     /// IDs of all module-level constants (OpConstant, OpConstantTrue/False, OpConstantComposite, OpConstantNull).
     /// Used to decide whether a composite can be emitted as OpConstantComposite.
@@ -213,6 +219,7 @@ impl Constructor {
             block_decorated: HashSet::new(),
             nonwritable_decorated: HashSet::new(),
             buffer_vars: Vec::new(),
+            workgroup_vars: HashMap::new(),
             buffer_id_map: HashMap::new(),
             constant_ids: HashSet::new(),
         }
@@ -1016,6 +1023,10 @@ struct LowerCtx<'a, 'b> {
     /// `buffer_vars`). Tracks the handle value's provenance so `ViewIndex`
     /// can pick the right storage buffer for its `OpAccessChain`.
     view_buffer_id: HashMap<ValueId, u32>,
+    /// Map from a `StorageView(Workgroup)` result ValueId to its workgroup
+    /// array id (key into `Constructor::workgroup_vars`), so `ViewIndex` can
+    /// access-chain into the workgroup variable instead of a storage buffer.
+    workgroup_view: HashMap<ValueId, u32>,
     /// Map from a `PlaceId` to the SPIR-V pointer word that addresses it.
     /// Populated by place-producing instructions (`OutputSlot`,
     /// `ViewIndex`, `Alloca`) and read by `Load` / `Store`.
@@ -1044,6 +1055,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             block_indices: HashMap::new(),
             phi_inputs: Vec::new(),
             view_buffer_id: HashMap::new(),
+            workgroup_view: HashMap::new(),
             place_ptr_id: HashMap::new(),
             current_span: None,
             func_span,
@@ -1475,6 +1487,23 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                                 [new_offset, len_id],
                             )?
                         }
+                        crate::op::PureViewSource::Workgroup { id, .. } => {
+                            // The workgroup var was created in entry setup.
+                            // Record the view→id mapping so ViewIndex chains
+                            // into it; the {offset, len} struct is built the
+                            // same way as a storage view.
+                            if let Some(result) = inst.result {
+                                self.workgroup_view.insert(result, *id);
+                            }
+                            let u32_ty = self.constructor.u32_type;
+                            let view_struct_type =
+                                self.constructor.get_or_create_struct_type(vec![u32_ty, u32_ty]);
+                            self.constructor.builder.composite_construct(
+                                view_struct_type,
+                                None,
+                                [offset_id, len_id],
+                            )?
+                        }
                     }
                 }
 
@@ -1568,6 +1597,29 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 let view_ssa = view.as_ssa().ok_or_else(|| {
                     err_spirv_at!(self.blame_span(), "ViewIndex view operand must be SSA")
                 })?;
+
+                // Workgroup-shared view: access-chain into the module-scope
+                // `array<T, count>` in Workgroup storage (no wrapping block
+                // struct, so the chain is just `[offset + index]`).
+                if let Some(&wg_id) = self.workgroup_view.get(&view_ssa) {
+                    let (wg_var, elem_ty_id) =
+                        *self.constructor.workgroup_vars.get(&wg_id).ok_or_else(|| {
+                            err_spirv_at!(self.blame_span(), "ViewIndex: unknown workgroup id {}", wg_id)
+                        })?;
+                    let actual_index =
+                        self.constructor.builder.i_add(u32_ty, None, base_offset, index_id)?;
+                    let elem_ptr_type =
+                        self.constructor.get_or_create_ptr_type(spirv::StorageClass::Workgroup, elem_ty_id);
+                    let ptr = self.constructor.builder.access_chain(
+                        elem_ptr_type,
+                        None,
+                        wg_var,
+                        [actual_index],
+                    )?;
+                    self.place_ptr_id.insert(*result, ptr);
+                    return Ok(());
+                }
+
                 let buf_id = self.view_buffer_id.get(&view_ssa).copied().ok_or_else(|| {
                     err_spirv_at!(
                         self.blame_span(),
@@ -3658,6 +3710,40 @@ fn lower_ssa_entry_point(
             constructor.builder.decorate(var_id, spirv::Decoration::Location, [Operand::LiteralBit32(loc)]);
             output_vars.push(var_id);
             interfaces.push(var_id);
+        }
+    }
+
+    // Workgroup-shared arrays (phase2 tree reduce): create one module-scope
+    // `OpVariable` in Workgroup storage per distinct id referenced by a
+    // `StorageView(Workgroup{id, count})` in this body, and list it in the
+    // entry interface (required by SPIR-V >= 1.4). Must precede `entry_point()`
+    // consuming `interfaces`, hence the pre-scan here rather than lazily during
+    // `ViewIndex` lowering.
+    if is_compute {
+        for (_, inst) in body.inner.insts.iter() {
+            let InstKind::Op {
+                tag: crate::op::OpTag::StorageView(crate::op::PureViewSource::Workgroup { id, count }),
+                ..
+            } = &inst.data
+            else {
+                continue;
+            };
+            if let Some(&(var, _)) = constructor.workgroup_vars.get(id) {
+                if !interfaces.contains(&var) {
+                    interfaces.push(var);
+                }
+                continue;
+            }
+            let result = inst.result.expect("StorageView(Workgroup) must have a result");
+            let view_ty = body.get_value_type(result);
+            let elem_ty = view_ty.elem_type().cloned().unwrap_or_else(|| view_ty.clone());
+            let elem_spirv = constructor.polytype_to_spirv(&elem_ty);
+            let count_const = constructor.const_u32(*count);
+            let arr_ty = constructor.builder.type_array(elem_spirv, count_const);
+            let ptr_ty = constructor.get_or_create_ptr_type(spirv::StorageClass::Workgroup, arr_ty);
+            let var = constructor.builder.variable(ptr_ty, None, spirv::StorageClass::Workgroup, None);
+            constructor.workgroup_vars.insert(*id, (var, elem_spirv));
+            interfaces.push(var);
         }
     }
 

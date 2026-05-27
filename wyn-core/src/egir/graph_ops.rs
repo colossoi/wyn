@@ -100,6 +100,28 @@ pub fn intern_storage_view(
     )
 }
 
+/// A workgroup-shared array view: `StorageView(Workgroup{id, count})` with
+/// `[offset=0, len=count]`. `view_ty` is the array type `[count]elem`; the
+/// backends recover the element type from it to declare a module-scope
+/// `array<elem, count>` in workgroup storage. Indexed with the same
+/// `ViewIndex` + `Load`/`Store` machinery as storage views.
+pub fn emit_workgroup_view(
+    graph: &mut EGraph,
+    id: u32,
+    count: u32,
+    view_ty: Type<TypeName>,
+    span: Option<Span>,
+) -> NodeId {
+    let zero_nid = intern_u32(graph, 0, span);
+    let count_nid = intern_u32(graph, count, span);
+    graph.intern_pure_with_span(
+        PureOp::StorageView(PureViewSource::Workgroup { id, count }),
+        smallvec![zero_nid, count_nid],
+        view_ty,
+        span,
+    )
+}
+
 /// `StorageView(Storage{set, binding})` with caller-supplied `offset`
 /// and `len`. Used to build a chunked sub-view of a larger storage
 /// buffer (phase1 of parallel reduce/scan).

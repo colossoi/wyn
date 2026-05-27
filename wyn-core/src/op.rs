@@ -88,4 +88,13 @@ pub enum PureViewSource {
         binding: u32,
     },
     Inherited,
+    /// Workgroup-shared array, `id`-th in the entry, of `count` elements.
+    /// Unlike Storage there is no descriptor binding — the backend declares
+    /// a module-scope `array<T, count>` in workgroup storage. The element
+    /// type comes from the view's result type. Emitted by the
+    /// workgroup-parallel reduce phase 2.
+    Workgroup {
+        id: u32,
+        count: u32,
+    },
 }
