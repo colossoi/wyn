@@ -2388,3 +2388,40 @@ def main (b: bool) (xs: []i32) bool =\n\
     let result = try_typecheck_program(source);
     assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
 }
+
+// =============================================================================
+// Size coercion `:>` (spec lines 1062-1069)
+// =============================================================================
+//
+// `:>` is documented as a runtime-checked coercion. Today the checker
+// accepts the expression and the backend emits no length assertion, so
+// a statically-impossible coercion compiles silently with no diagnostic
+// or runtime trap.
+
+#[test]
+#[ignore = "spec section \"Size Types > Size Coercion\": a :> coercion with statically-known mismatched sizes (here [3]i32 -> [5]i32) should be rejected at compile time or emit a runtime check; today the program compiles with no diagnostic and no runtime assertion"]
+fn aspiration_size_coercion_statically_mismatched_rejected() {
+    let result = try_typecheck_program("def f() [5]i32 = [1, 2, 3] :> [5]i32");
+    assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
+}
+
+// =============================================================================
+// Size variable sharing (spec section "Size Types", lines 956-1156)
+// =============================================================================
+//
+// A function `def f [n] (a: [n]i32) (b: [n]i32) = ...` declares that the
+// two arguments share size `n`. The checker should reject a call site
+// passing arrays of statically-known different sizes. Today size
+// variables are mostly treated as generic type variables, so the
+// constraint isn't enforced — calls with statically different lengths
+// compile.
+
+#[test]
+#[ignore = "spec section \"Size Types\": a function with a shared size parameter `[n]` should reject call sites with statically different array sizes; today the size variable is treated generically and the call compiles"]
+fn aspiration_size_param_shared_across_args_constraint_enforced() {
+    let source = "\
+def eq [n] (a: [n]i32) (b: [n]i32) i32 = a[0] + b[0]\n\
+def main () i32 = eq [1, 2, 3] [4, 5]\n";
+    let result = try_typecheck_program(source);
+    assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
+}
