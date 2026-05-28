@@ -237,8 +237,6 @@ param_type    ::= type | "(" name ":" type ")"
 
 stringlit  ::= '"' stringchar* '"'
 stringchar ::= <any source character except "\" or newline or double quotes>
-charlit    ::= "'" char "'"
-char       ::= <any source character except "\" or newline or single quotes>
 
 existential_size ::= "?" ("[" name "]")+ "." type
 ```
@@ -299,13 +297,12 @@ let r: { x: f32, y: f32 } = make_point() in r.x
 
 Functions are classified via function types, but they are not fully first class. See Higher-order functions for the details.
 
-#### String and Character Literals
+#### String Literals
 
-Wyn has no first-class strings or character type. A string literal
-(`"..."`) is a lexical token accepted only in two non-expression
-positions: the path in `import "..."` and the linkage name in
-`#[linked("...")]`. Writing a string where a value is expected is a
-syntax error.
+Wyn has no first-class string type. A string literal (`"..."`) is a
+lexical token accepted only in two non-expression positions: the path
+in `import "..."` and the linkage name in `#[linked("...")]`. Writing
+a string where a value is expected is a syntax error.
 
 #### Existential Size Quantifiers
 
@@ -625,7 +622,6 @@ pat         ::= name
 
 pat_literal ::= [ "-" ] intnumber
                 | [ "-" ] floatnumber
-                | charlit
                 | "true"
                 | "false"
 
