@@ -1579,18 +1579,11 @@ size.
 
 ### Vector Constructors
 
-Vectors can be constructed in two ways:
+Vectors are constructed with the `@[...]` literal syntax:
 
-**1. Literal syntax (`@[...]`)** - Preferred for most cases:
 ```wyn
 let v1: vec3f32 = @[1.0, 2.0, 3.0]
 let v2: vec4f32 = @[1.0, 0.0, 0.0, 1.0]
-```
-
-**2. Explicit constructor syntax (`vecN`)** - Useful when type suffix is needed:
-```wyn
-let v1: vec3f32 = vec3 1.0f32 2.0f32 3.0f32
-let v2: vec4f32 = vec4 1.0f32 2.0f32 3.0f32 4.0f32
 ```
 
 The element type is inferred from the arguments or the context.
@@ -1607,6 +1600,41 @@ The attribute system is statically type-checked:
 - Location attributes can be used with any serializable type
 - Shader stage compatibility is verified at compile time
 - Interface matching between vertex and fragment shaders is validated
+
+---
+
+## Matrix Types
+
+Wyn provides built-in matrix types for graphics and compute workloads. A matrix value has a fixed row count R, a fixed column count C, and a scalar element type — written `matRxC<elem>`. Square matrices have a shorthand alias `matN<elem>`:
+
+| Shape | Square shorthand | Rectangular form |
+|-------|-----------------|------------------|
+| 2×2   | `mat2f32`       | `mat2x2f32`      |
+| 3×3   | `mat3f32`       | `mat3x3f32`      |
+| 4×4   | `mat4f32`       | `mat4x4f32`      |
+| R×C (R ≠ C) | n/a       | `matRxCf32`      |
+
+Both the shorthand and rectangular form name the same type — `mat2f32 = mat2x2f32`.
+
+Supported dimensions are R, C ∈ {2, 3, 4}. Supported element types are all of the SPIR-V scalar primitives: `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `f16`, `f32`, `f64`. (In practice graphics code uses `f32`; the broader set is available for compute workloads that need it.)
+
+### Matrix Literals
+
+Matrices are written with the `@[[...], [...], ...]` literal syntax — outer brackets describe rows, inner brackets describe each row's components:
+
+```wyn
+let m: mat2x2f32 = @[[1.0, 0.0],
+                     [0.0, 1.0]]
+
+let rot: mat2f32 = @[[c, s],
+                     [-s, c]]
+```
+
+Each inner array becomes one column of the matrix at SPIR-V emission — the literal above produces the GLSL equivalent `mat2(c, s, -s, c)` (column-major, matching GPU convention).
+
+### Matrices in Storage Buffers
+
+Matrix types are valid array elements, so `[][N][M]T` storage views and SOAC inputs all work over matrix values the same way they do over scalars.
 
 ---
 
