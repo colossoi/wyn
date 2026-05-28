@@ -1456,6 +1456,24 @@ entry fs(
 See *Texture and Sampler Types* for the types and the
 `texture_load` / `texture_sample` operations.
 
+### External Linkage
+
+**`#[linked("name")]`** — applied to an `extern` declaration, marks
+the function as resolved at SPIR-V link time. The string is the
+linkage name the host runtime's linker matches against an external
+SPIR-V module. The Wyn compiler emits a `LinkageAttributes` import
+decoration for the function and trusts the host to supply a body with
+a matching `Export` decoration.
+
+```wyn
+#[linked("sha256_compress")]
+extern sha256_compress(state: [8]u32, block: [16]u32) [8]u32
+```
+
+The signature must match the externally-supplied function's type
+exactly. WGSL emission does not support this attribute — `#[linked]`
+is SPIR-V only.
+
 ### Attribute Examples
 
 #### Complete Vertex Shader Interface
