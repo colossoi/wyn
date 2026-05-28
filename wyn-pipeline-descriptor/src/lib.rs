@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Top-level pipeline descriptor. One per compiled program.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PipelineDescriptor {
     /// Individual pipelines in this program (one per top-level entry or multi-dispatch SOAC).
     pub pipelines: Vec<Pipeline>,
