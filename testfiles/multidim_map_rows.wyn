@@ -1,0 +1,8 @@
+-- Stage 1: nested SOAC over a multi-dim composite. The map dispatches
+-- over the outer dim of an [3][2]i32 matrix; each thread receives the
+-- inner [2]i32 sub-array as the lambda parameter.
+
+#[compute]
+entry sums() [3]i32 =
+    let m: [3][2]i32 = [[1, 2], [3, 4], [5, 6]] in
+    map(|row: [2]i32| row[0] + row[1], m)

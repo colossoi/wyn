@@ -750,3 +750,154 @@ fn test_intrinsic_alias_inlining() {
         other => panic!("Expected App, got {:?}", other),
     }
 }
+
+// =============================================================================
+// Substitution survives through SOAC residualization
+// =============================================================================
+//
+// Regression: `let m = lit in map(f, m)` — partial_eval evaluates the let-rhs
+// and binds `m` in env, then descends into the body. Hitting the SOAC at
+// `body`, the previous code returned `Value::Unknown(term.clone())` *without
+// substituting let-bound vars into the SOAC's sub-terms*, so the resulting
+// program had a dangling free `Var(m_sym)` inside the SOAC's input expression.
+//
+// The corrected behavior: when residualizing a SOAC (or ArrayExpr), free
+// Vars referring to env-bound symbols must be substituted with the let-rhs
+// term (binder-aware — Lambda params and inner Let-bound names shadow env).
+
+use crate::tlc::{ArrayExpr, SoacBody, SoacOp};
+
+/// Assert that `target_sym` does not occur as a free `Var` anywhere
+/// in `term`. Recurses via `map_children`, so it sees through Soac,
+/// ArrayExpr, App, Tuple, etc. without needing per-variant handling.
+/// Binder-aware via the `bound` set: Lambda params, Let names, etc.
+/// shadow the assertion (we treat any matching symbol added by an
+/// enclosing binder as a different identifier).
+fn assert_no_free_reference_to(term: &crate::tlc::Term, target_sym: SymbolId) {
+    fn walk(t: &crate::tlc::Term, target: SymbolId, shadowed: bool) {
+        if shadowed {
+            return;
+        }
+        match &t.kind {
+            TermKind::Var(VarRef::Symbol(sym)) => {
+                assert!(
+                    *sym != target,
+                    "free Var(sym={:?}) — let-bound symbol not substituted through SOAC",
+                    sym.0,
+                );
+            }
+            TermKind::Let { name, rhs, body, .. } => {
+                walk(rhs, target, false);
+                walk(body, target, *name == target);
+            }
+            TermKind::Lambda(lam) => {
+                let shadow = lam.params.iter().any(|(p, _)| *p == target);
+                walk(&lam.body, target, shadow);
+            }
+            _ => {
+                let cloned = crate::tlc::Term {
+                    id: t.id,
+                    ty: t.ty.clone(),
+                    span: t.span,
+                    kind: t.kind.clone(),
+                };
+                let _ = cloned.map_children(&mut |child| {
+                    walk(&child, target, false);
+                    child
+                });
+            }
+        }
+    }
+    walk(term, target_sym, false);
+}
+
+#[test]
+fn let_bound_array_substituted_through_soac_input() {
+    // Construct (paraphrased):
+    //   def test() [3]i32 =
+    //       let m: [3]i32 = [1, 2, 3] in
+    //       map(|x: i32| x, m)
+    //
+    // After partial_eval, the let may be eliminated — but if so, every
+    // reference to `m` inside the SOAC must be substituted with the literal.
+    let mut b = TestBuilder::new();
+    let m_sym = b.sym("m");
+    let x_sym = b.sym("x");
+    let test_sym = b.sym("test");
+
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+    let arr_ty = Type::Constructed(
+        TypeName::Array,
+        vec![
+            i32_ty.clone(),
+            Type::Constructed(TypeName::Size(3), vec![]),
+            Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
+        ],
+    );
+
+    // [1, 2, 3] as ArrayExpr::Literal
+    let lit_elems = vec![
+        make_int(&mut b.ids, 1),
+        make_int(&mut b.ids, 2),
+        make_int(&mut b.ids, 3),
+    ];
+    let arr_lit_term = Term {
+        id: b.next_id(),
+        ty: arr_ty.clone(),
+        span: b.span(),
+        kind: TermKind::ArrayExpr(ArrayExpr::Literal(lit_elems)),
+    };
+
+    // `m`-typed var reference inside the SOAC input
+    let m_var = Term {
+        id: b.next_id(),
+        ty: arr_ty.clone(),
+        span: b.span(),
+        kind: TermKind::Var(VarRef::Symbol(m_sym)),
+    };
+
+    // Identity lambda |x: i32| x
+    let x_var = Term {
+        id: b.next_id(),
+        ty: i32_ty.clone(),
+        span: b.span(),
+        kind: TermKind::Var(VarRef::Symbol(x_sym)),
+    };
+    let lam = Lambda {
+        params: vec![(x_sym, i32_ty.clone())],
+        body: Box::new(x_var),
+        ret_ty: i32_ty.clone(),
+    };
+
+    let soac_term = Term {
+        id: b.next_id(),
+        ty: arr_ty.clone(),
+        span: b.span(),
+        kind: TermKind::Soac(SoacOp::Map {
+            lam: SoacBody {
+                lam,
+                captures: vec![],
+            },
+            inputs: vec![ArrayExpr::Ref(Box::new(m_var))],
+            consumes_input: false,
+        }),
+    };
+
+    let let_term = Term {
+        id: b.next_id(),
+        ty: arr_ty.clone(),
+        span: b.span(),
+        kind: TermKind::Let {
+            name: m_sym,
+            name_ty: arr_ty.clone(),
+            rhs: Box::new(arr_lit_term),
+            body: Box::new(soac_term),
+        },
+    };
+
+    let program = make_program(test_sym, let_term, b.finish());
+    let result = PartialEvaluator::partial_eval(program);
+
+    assert_eq!(result.defs.len(), 1);
+    assert_no_free_reference_to(&result.defs[0].body, m_sym);
+}

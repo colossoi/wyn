@@ -217,8 +217,16 @@ impl PartialEvaluator {
             // Extern declarations - residualize (linked at SPIR-V level)
             TermKind::Extern(_) => Value::Unknown(term.clone()),
 
-            // SOAC nodes are opaque to partial evaluation — residualize
-            TermKind::Soac(_) | TermKind::ArrayExpr(_) => Value::Unknown(term.clone()),
+            // SOAC nodes are opaque to partial evaluation, but their sub-
+            // terms may reference env-bound `Var`s (e.g. `let m = lit in
+            // map(f, m)` — the SOAC consumes `m`). Substitute those refs
+            // through the SOAC's children so the dissolved `Let` doesn't
+            // leave dangling free vars downstream.
+            TermKind::Soac(_) | TermKind::ArrayExpr(_) => {
+                let mut bound = std::collections::HashSet::new();
+                let subst = self.substitute_residual_vars(term.clone(), &mut bound);
+                Value::Unknown(subst)
+            }
 
             // Structural ops: evaluate children so let-bound `Var`s
             // get substituted through, then rebuild the variant. Without
@@ -606,6 +614,97 @@ impl PartialEvaluator {
             Value::Array(elems) => self.reify_array(elems, ty, span),
             Value::Vector(elems) => self.reify_vector(elems, ty, span),
             Value::Partial { sym, args, .. } => self.reify_partial(sym, args, ty, span),
+        }
+    }
+
+    /// Binder-aware walk that replaces every free `Var(VarRef::Symbol(sym))`
+    /// (one not bound by an enclosing `Let`/`Lambda`) with the reified
+    /// `env[sym]` value, if any. Used when residualizing nodes like `Soac`
+    /// and `ArrayExpr` that the evaluator would otherwise clone wholesale —
+    /// without this, an enclosing `let m = lit in soac(..., m)` dissolves
+    /// the let and leaves a dangling `Var(m)` inside the SOAC.
+    ///
+    /// `bound` tracks symbols currently in scope (shadowing env). It's
+    /// mutated in place as we descend into binders and restored on exit.
+    fn substitute_residual_vars(
+        &mut self,
+        term: Term,
+        bound: &mut std::collections::HashSet<SymbolId>,
+    ) -> Term {
+        let ty = term.ty.clone();
+        let span = term.span;
+        match term.kind {
+            TermKind::Var(VarRef::Symbol(name)) => {
+                if !bound.contains(&name) {
+                    if let Some(val) = self.env.get(&name).cloned() {
+                        return self.reify(val, &ty, span);
+                    }
+                }
+                Term {
+                    id: term.id,
+                    ty,
+                    span,
+                    kind: TermKind::Var(VarRef::Symbol(name)),
+                }
+            }
+            TermKind::Let {
+                name,
+                name_ty,
+                rhs,
+                body,
+            } => {
+                let new_rhs = self.substitute_residual_vars(*rhs, bound);
+                let added = bound.insert(name);
+                let new_body = self.substitute_residual_vars(*body, bound);
+                if added {
+                    bound.remove(&name);
+                }
+                Term {
+                    id: term.id,
+                    ty,
+                    span,
+                    kind: TermKind::Let {
+                        name,
+                        name_ty,
+                        rhs: Box::new(new_rhs),
+                        body: Box::new(new_body),
+                    },
+                }
+            }
+            TermKind::Lambda(lam) => {
+                let mut added: Vec<SymbolId> = Vec::new();
+                for (p, _) in &lam.params {
+                    if bound.insert(*p) {
+                        added.push(*p);
+                    }
+                }
+                let new_body = self.substitute_residual_vars(*lam.body, bound);
+                for p in added {
+                    bound.remove(&p);
+                }
+                Term {
+                    id: term.id,
+                    ty,
+                    span,
+                    kind: TermKind::Lambda(Lambda {
+                        params: lam.params,
+                        body: Box::new(new_body),
+                        ret_ty: lam.ret_ty,
+                    }),
+                }
+            }
+            other => {
+                // Non-binder: recurse through every Term child via
+                // `map_children` (which covers App, If, Soac, ArrayExpr,
+                // Tuple, etc. recursively at the structural level).
+                let outer = Term {
+                    id: term.id,
+                    ty: ty.clone(),
+                    span,
+                    kind: other,
+                };
+                outer.map_children(&mut |child| self.substitute_residual_vars(child, bound))
+            }
         }
     }
 
