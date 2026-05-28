@@ -1,0 +1,13 @@
+-- Stage 0: declare + index a 2-D fixed-size composite local in a compute
+-- entry. Two entries exercise both indexing paths: const-index (OpComposite-
+-- Extract) and runtime-index (OpAccessChain).
+
+#[compute]
+entry pick_const() i32 =
+    let m: [3][2]i32 = [[1, 2], [3, 4], [5, 6]] in
+    m[1][0]
+
+#[compute]
+entry pick_runtime(i: i32, j: i32) i32 =
+    let m: [3][2]i32 = [[1, 2], [3, 4], [5, 6]] in
+    m[i][j]

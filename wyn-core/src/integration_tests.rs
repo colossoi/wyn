@@ -2826,3 +2826,75 @@ entry gen(bh: []i32) []i32 =
         "both gathers must read the same intermediate buffer"
     );
 }
+
+// =============================================================================
+// Stage 0: multi-dimensional fixed-size composite locals
+// =============================================================================
+//
+// `[N][M]T` composite literal declared as a local in a compute entry and
+// indexed both with constants (→ OpCompositeExtract in SPIR-V) and with
+// runtime values (→ OpAccessChain). Tests both the type-system + lowering
+// path (already implemented across `parser → checker → tlc → egir → ssa →
+// spirv/wgsl`) and the const-fold path that produces a single nested
+// `OpConstantComposite`.
+
+#[test]
+fn multidim_composite_local_const_and_runtime_index() {
+    use crate::ssa::types::InstKind;
+
+    let src = r#"
+        #[compute]
+        entry pick_const() i32 =
+            let m: [3][2]i32 = [[1, 2], [3, 4], [5, 6]] in
+            m[1][0]
+
+        #[compute]
+        entry pick_runtime(i: i32, j: i32) i32 =
+            let m: [3][2]i32 = [[1, 2], [3, 4], [5, 6]] in
+            m[i][j]
+    "#;
+
+    let program = compile_to_ssa(src);
+
+    // Both entries survive — neither got DCE'd or fused away.
+    let entry_names: Vec<&str> = program.entry_points.iter().map(|e| e.name.as_str()).collect();
+    assert!(
+        entry_names.contains(&"pick_const") && entry_names.contains(&"pick_runtime"),
+        "expected both entries in SSA; got {entry_names:?}",
+    );
+
+    // The const-index entry should produce zero `Op::Index` insts in its
+    // body — folding reduces `m[1][0]` to the literal scalar `3`. The
+    // runtime-index entry MUST still carry `Op::Index` operations, since
+    // `i` and `j` are entry parameters and can't be folded away.
+    let body_dyn_extracts = |ep_name: &str| -> usize {
+        let ep = program.entry_points.iter().find(|e| e.name == ep_name).unwrap();
+        ep.body
+            .inner
+            .insts
+            .iter()
+            .filter(|(_, inst)| {
+                matches!(
+                    &inst.data,
+                    InstKind::Op {
+                        tag: crate::op::OpTag::DynamicExtract,
+                        ..
+                    }
+                )
+            })
+            .count()
+    };
+    assert_eq!(
+        body_dyn_extracts("pick_const"),
+        0,
+        "const-index `m[1][0]` should fold; saw DynamicExtract ops remaining"
+    );
+    assert_eq!(
+        body_dyn_extracts("pick_runtime"),
+        2,
+        "runtime-index `m[i][j]` should emit two chained DynamicExtract ops"
+    );
+
+    // End-to-end smoke: the SPIR-V backend accepts the program.
+    let _ = crate::compile_thru_spirv(src).expect("compile_thru_spirv should succeed");
+}
