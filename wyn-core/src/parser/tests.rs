@@ -3433,3 +3433,62 @@ fn test_module_scope_storage_decl_rejected() {
         },
     );
 }
+
+// Spec lines 1726-1728: set=0 is reserved for the compiler-allocated
+// storage namespace; `#[uniform(set=0, ...)]` and `#[storage(set=0, ...)]`
+// must be parse errors that name the offending source span. Without this,
+// the user's binding silently collides with compiler-allocated buffers and
+// the failure surfaces much later (or runs wrong on the GPU).
+
+#[test]
+fn test_parse_rejects_uniform_with_set_zero() {
+    let src = r#"
+#[fragment]
+entry frag(
+    #[uniform(set=0, binding=0)] iTime: f32,
+    #[builtin(position)] fragCoord: vec4f32
+) #[location(0)] vec4f32 = @[0.0, 0.0, 0.0, 1.0]
+"#;
+    expect_parse_error(src, |err| match err {
+        CompilerError::ParseError(msg, _)
+            if msg.contains("set=0") && (msg.contains("reserved") || msg.contains("compiler")) =>
+        {
+            Ok(())
+        }
+        other => Err(format!("expected set=0 rejection, got {:?}", other)),
+    });
+}
+
+#[test]
+fn test_parse_rejects_storage_with_set_zero() {
+    let src = r#"
+#[compute]
+entry sim(
+    #[storage(set=0, binding=0, access=read)] data: []vec4f32
+) []vec4f32 = data
+"#;
+    expect_parse_error(src, |err| match err {
+        CompilerError::ParseError(msg, _)
+            if msg.contains("set=0") && (msg.contains("reserved") || msg.contains("compiler")) =>
+        {
+            Ok(())
+        }
+        other => Err(format!("expected set=0 rejection, got {:?}", other)),
+    });
+}
+
+#[test]
+fn test_parse_accepts_uniform_with_set_one() {
+    // Smoke: the positive case keeps working — only set=0 is rejected.
+    let src = r#"
+#[fragment]
+entry frag(
+    #[uniform(set=1, binding=0)] iTime: f32,
+    #[builtin(position)] fragCoord: vec4f32
+) #[location(0)] vec4f32 = @[0.0, 0.0, 0.0, 1.0]
+"#;
+    let tokens = tokenize(src).expect("tokenize");
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
+    parser.parse().expect("set=1 should parse cleanly");
+}

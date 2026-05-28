@@ -605,7 +605,16 @@ impl<'a> Parser<'a> {
 
                     match param_name.as_str() {
                         "set" => {
-                            set = self.expect_integer()?;
+                            let span = self.current_span();
+                            let value = self.expect_integer()?;
+                            if value == 0 {
+                                bail_parse_at!(
+                                    span,
+                                    "set=0 is reserved for compiler-allocated storage; \
+                                     #[uniform(...)] must use set=1 or higher"
+                                );
+                            }
+                            set = value;
                         }
                         "binding" => {
                             binding = Some(self.expect_integer()?);
@@ -727,7 +736,16 @@ impl<'a> Parser<'a> {
 
                     match param_name.as_str() {
                         "set" => {
-                            set = self.expect_integer()?;
+                            let span = self.current_span();
+                            let value = self.expect_integer()?;
+                            if value == 0 {
+                                bail_parse_at!(
+                                    span,
+                                    "set=0 is reserved for compiler-allocated storage; \
+                                     #[storage(...)] must use set=1 or higher"
+                                );
+                            }
+                            set = value;
                         }
                         "binding" => {
                             binding = Some(self.expect_integer()?);

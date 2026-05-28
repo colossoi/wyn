@@ -462,7 +462,7 @@ fn vertex_uniform_param_compiles_and_surfaces_binding() {
     // attribute, and the binding must surface in the descriptor.
     let src = "#[vertex]\n\
                entry vs(#[location(0)] position: vec3f32,\n\
-                        #[uniform(set=0, binding=0)] scale: f32)\n\
+                        #[uniform(set=1, binding=0)] scale: f32)\n\
                  #[builtin(position)] vec4f32 =\n\
                  @[position.x * scale, position.y * scale, position.z * scale, 1.0]\n\
                #[fragment]\n\
@@ -485,7 +485,7 @@ fn vertex_uniform_param_compiles_and_surfaces_binding() {
     assert!(
         vs.bindings.iter().any(|b| matches!(
             b,
-            Binding::Uniform { set: 0, binding: 0, name } if name == "scale"
+            Binding::Uniform { set: 1, binding: 0, name } if name == "scale"
         )),
         "vertex uniform `scale` should surface as a binding, got {:?}",
         vs.bindings
