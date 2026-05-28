@@ -54,6 +54,8 @@ fn make_program(name_sym: SymbolId, body: Term, symbols: SymbolTable) -> Program
         }],
         symbols,
         def_syms: HashMap::new(),
+
+        view_lengths: Default::default(),
     }
 }
 
@@ -405,6 +407,8 @@ fn test_function_inlining() {
         ],
         symbols,
         def_syms: HashMap::new(),
+
+        view_lengths: Default::default(),
     };
 
     let result = PartialEvaluator::partial_eval(program);
@@ -516,6 +520,8 @@ fn test_function_alias_inlining() {
         ],
         symbols,
         def_syms: HashMap::new(),
+
+        view_lengths: Default::default(),
     };
 
     let result = PartialEvaluator::partial_eval(program);
@@ -631,6 +637,8 @@ fn test_function_alias_partial_application() {
         ],
         symbols,
         def_syms: HashMap::new(),
+
+        view_lengths: Default::default(),
     };
 
     let result = PartialEvaluator::partial_eval(program);
@@ -710,6 +718,8 @@ fn test_intrinsic_alias_inlining() {
         }],
         symbols,
         def_syms: HashMap::new(),
+
+        view_lengths: Default::default(),
     };
 
     let result = PartialEvaluator::partial_eval(program);

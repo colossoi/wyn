@@ -63,6 +63,12 @@ struct BufferSpecializer {
     new_defs: Vec<Def>,
     /// All defs by symbol for lookup
     def_map: HashMap<SymbolId, Def>,
+    /// Side table for downstream passes: each rewritten storage-view length
+    /// expression's `TermId` mapped back to its `(set, binding)`. Populated
+    /// at every `length(view) → storage_len(set, binding)` rewrite site so
+    /// `parallelize::resolve_dispatch_len` can look up dispatch lengths by
+    /// term id instead of pattern-matching the lowered form.
+    view_lengths: HashMap<crate::tlc::TermId, (u32, u32)>,
 }
 
 impl BufferSpecializer {
@@ -135,6 +141,7 @@ pub fn run(mut program: Program) -> Program {
         specializations: HashMap::new(),
         new_defs: Vec::new(),
         def_map: HashMap::new(),
+        view_lengths: program.view_lengths,
     };
 
     // Build def_map
@@ -178,7 +185,8 @@ pub fn run(mut program: Program) -> Program {
     let result = Program {
         defs: processed_defs,
         symbols: specializer.symbols,
-        def_syms: program.def_syms,
+        view_lengths: specializer.view_lengths,
+        ..program
     };
     result.assert_flat_apps();
     result
@@ -356,10 +364,13 @@ impl BufferSpecializer {
                                 u32_ty.clone(),
                                 span,
                             );
+                            self.view_lengths.insert(storage_len.id, (binding.set, binding.binding));
                             if term.ty == u32_ty {
                                 return storage_len;
                             }
-                            return self.make_app("i32.u32", vec![storage_len], term.ty.clone(), span);
+                            let cast = self.make_app("i32.u32", vec![storage_len], term.ty.clone(), span);
+                            self.view_lengths.insert(cast.id, (binding.set, binding.binding));
+                            return cast;
                         }
                     }
                 }

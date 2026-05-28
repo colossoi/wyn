@@ -201,6 +201,8 @@ fn test_defunc_simple_lambda_no_capture() {
         }],
         symbols: b.finish(),
         def_syms: HashMap::new(),
+
+        view_lengths: Default::default(),
     };
 
     let known_defs = HashSet::new();
@@ -294,6 +296,8 @@ fn test_defunc_lambda_with_capture() {
         }],
         symbols,
         def_syms: HashMap::new(),
+
+        view_lengths: Default::default(),
     };
 
     let known_defs = HashSet::new();
@@ -512,6 +516,8 @@ fn test_nested_hof_passthrough() {
         ],
         symbols,
         def_syms: HashMap::new(),
+
+        view_lengths: Default::default(),
     };
 
     let known_defs = HashSet::new();

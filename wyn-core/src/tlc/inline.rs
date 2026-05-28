@@ -28,7 +28,7 @@ pub fn run_reachable(program: Program) -> Program {
     let result = Program {
         defs,
         symbols: program.symbols,
-        def_syms: program.def_syms,
+        ..program
     };
     super::hof_specialize::verify_hof_specialized(&result).unwrap_or_else(|e| {
         panic!(
@@ -79,7 +79,7 @@ pub fn run_small(program: Program) -> Program {
     Program {
         defs,
         symbols: program.symbols,
-        def_syms: program.def_syms,
+        ..program
     }
 }
 
@@ -103,7 +103,7 @@ pub fn run_large(program: Program) -> Program {
     let result = Program {
         defs,
         symbols: program.symbols,
-        def_syms: program.def_syms,
+        ..program
     };
     result.assert_flat_apps();
     result

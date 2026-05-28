@@ -71,6 +71,7 @@ pub fn run(program: Program) -> Program {
             defs,
             symbols,
             def_syms: def_syms.clone(),
+            ..program
         };
     }
 

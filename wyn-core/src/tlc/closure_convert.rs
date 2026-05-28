@@ -626,7 +626,7 @@ impl<'a> ClosureConverter<'a> {
         let result_program = Program {
             defs: transformed.into_iter().chain(cc.lifted_defs).collect(),
             symbols: cc.symbols,
-            def_syms: program.def_syms,
+            ..program
         };
 
         let info = ClosureInfo {

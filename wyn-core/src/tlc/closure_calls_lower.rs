@@ -556,7 +556,7 @@ pub fn run(program: Program, closure_info: &ClosureInfo) -> Program {
     let result = Program {
         defs,
         symbols: program.symbols,
-        def_syms: program.def_syms,
+        ..program
     };
 
     verify_closure_calls_lowered(&result)

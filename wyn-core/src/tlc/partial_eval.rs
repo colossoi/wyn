@@ -107,7 +107,7 @@ impl PartialEvaluator {
         let result = Program {
             defs,
             symbols: eval.symbols,
-            def_syms: program.def_syms,
+            ..program
         };
         result.assert_flat_apps();
         result

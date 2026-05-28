@@ -32,7 +32,7 @@ pub fn normalize(program: Program) -> Program {
     Program {
         defs,
         symbols,
-        def_syms: program.def_syms,
+        ..program
     }
 }
 

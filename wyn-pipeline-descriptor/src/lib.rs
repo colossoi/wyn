@@ -99,18 +99,50 @@ pub enum ShaderStage {
 }
 
 /// How to determine the compute dispatch grid size.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DispatchSize {
-    /// Fixed dispatch grid.
+    /// Fixed dispatch grid (absolute workgroup counts).
     Fixed {
         x: u32,
         y: u32,
         z: u32,
     },
-    /// Derive from input array length: ceil(input_length / workgroup_size).
-    DerivedFromInputLength {
+    /// Dispatch `ceil(len / workgroup_size)` workgroups, where `len` is the
+    /// number of iterations resolved from `DispatchLen`. Replaces the old
+    /// `DerivedFromInputLength`, which only said "derive from *an* input
+    /// buffer" and silently guessed the wrong one for range-driven maps.
+    DerivedFrom {
+        len: DispatchLen,
         workgroup_size: u32,
+    },
+}
+
+/// The source of truth for a `DerivedFrom` dispatch's iteration count.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DispatchLen {
+    /// One iteration per element of the buffer at (`set`, `binding`) — e.g.
+    /// `map(f, arr)` over a storage-buffer input. The host reads the buffer's
+    /// element count.
+    InputBinding {
+        set: u32,
+        binding: u32,
+        /// Bytes per element of that buffer, so the host recovers the element
+        /// count from its byte size.
+        elem_bytes: u32,
+    },
+    /// A compile-time-known iteration count — e.g. `map(f, iota(6144))`.
+    /// (Struct variant, not `Fixed(u32)`, so it serializes under the internal
+    /// `kind` tag.)
+    Fixed {
+        count: u32,
+    },
+    /// A runtime count read from a scalar push-constant — e.g. `map(f,
+    /// iota(n))` where `n` is an entry parameter. The host reads the u32 at
+    /// `offset` in the push-constant block.
+    PushConstant {
+        offset: u32,
     },
 }
 
@@ -211,12 +243,23 @@ pub enum BufferLen {
         elem_bytes: u32,
         src_elem_bytes: u32,
     },
+    /// One `elem_bytes`-sized element per dispatched thread. A parallel
+    /// `map`/`scan` writes exactly one output element per thread, so its
+    /// output length equals the resolved dispatch thread count — which the
+    /// host computes anyway (it covers buffer inputs, static and dynamic
+    /// ranges uniformly). Byte size = `dispatch_threads * elem_bytes`. The
+    /// thread count isn't a `src_bytes` lookup, so this resolves via
+    /// `dispatch_elem_bytes`, not `resolve_bytes`.
+    SameAsDispatch {
+        elem_bytes: u32,
+    },
 }
 
 impl BufferLen {
     /// Resolve to a byte size given a lookup of already-allocated buffers'
     /// byte sizes by (set, binding). Returns `None` if a referenced source
-    /// buffer hasn't been sized yet.
+    /// buffer hasn't been sized yet, or for `SameAsDispatch` (which needs the
+    /// resolved dispatch thread count — see `dispatch_elem_bytes`).
     pub fn resolve_bytes(&self, src_bytes: impl Fn(u32, u32) -> Option<u64>) -> Option<u64> {
         match self {
             BufferLen::Fixed { bytes } => Some(*bytes),
@@ -229,6 +272,16 @@ impl BufferLen {
                 let bytes = src_bytes(*set, *binding)?;
                 Some(bytes / *src_elem_bytes as u64 * *elem_bytes as u64)
             }
+            BufferLen::SameAsDispatch { .. } => None,
+        }
+    }
+
+    /// Element byte size if this buffer is sized by the dispatch thread count
+    /// (`SameAsDispatch`); the host multiplies it by the resolved threads.
+    pub fn dispatch_elem_bytes(&self) -> Option<u32> {
+        match self {
+            BufferLen::SameAsDispatch { elem_bytes } => Some(*elem_bytes),
+            _ => None,
         }
     }
 }
@@ -377,6 +430,42 @@ mod tests {
             BufferLen::Fixed { bytes: 40 }.resolve_bytes(|_, _| None),
             Some(40)
         );
+    }
+
+    #[test]
+    fn buffer_len_same_as_dispatch() {
+        // A dispatch-sized output isn't a `src_bytes` lookup — it resolves via
+        // `dispatch_elem_bytes` and the host scales by the dispatch thread count.
+        let len = BufferLen::SameAsDispatch { elem_bytes: 4 };
+        assert_eq!(len.resolve_bytes(|_, _| Some(1024)), None);
+        assert_eq!(len.dispatch_elem_bytes(), Some(4));
+        assert_eq!(BufferLen::Fixed { bytes: 40 }.dispatch_elem_bytes(), None);
+        let json = serde_json::to_string(&len).unwrap();
+        assert!(json.contains("\"same_as_dispatch\""), "got: {json}");
+        assert_eq!(serde_json::from_str::<BufferLen>(&json).unwrap(), len);
+    }
+
+    #[test]
+    fn dispatch_len_serde_round_trip() {
+        // `DerivedFrom` wraps an internally-tagged `DispatchLen`, so each source
+        // variant must round-trip with its `kind` tag.
+        for len in [
+            DispatchLen::InputBinding {
+                set: 0,
+                binding: 1,
+                elem_bytes: 4,
+            },
+            DispatchLen::Fixed { count: 6144 },
+            DispatchLen::PushConstant { offset: 8 },
+        ] {
+            let size = DispatchSize::DerivedFrom {
+                len: len.clone(),
+                workgroup_size: 64,
+            };
+            let json = serde_json::to_string(&size).unwrap();
+            assert!(json.contains("\"derived_from\""), "got: {json}");
+            assert_eq!(serde_json::from_str::<DispatchSize>(&json).unwrap(), size);
+        }
     }
 
     #[test]

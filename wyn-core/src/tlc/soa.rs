@@ -171,7 +171,7 @@ impl SoaTransformer {
         Program {
             defs,
             symbols: self.symbols,
-            def_syms: program.def_syms,
+            ..program
         }
     }
 

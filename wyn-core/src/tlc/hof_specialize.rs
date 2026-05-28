@@ -905,7 +905,7 @@ impl<'a> HofSpecializer<'a> {
         Program {
             defs: transformed.into_iter().chain(hs.specialized_defs).collect(),
             symbols: hs.symbols,
-            def_syms: program.def_syms,
+            ..program
         }
     }
 

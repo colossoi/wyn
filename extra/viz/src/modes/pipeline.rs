@@ -97,12 +97,20 @@ fn run_single_compute(
         println!("Running compute pipeline: {}", cp.entry_point);
     }
 
-    let buffers = create_binding_buffers(device, queue, &cp.bindings, inputs, verbose)?;
-    let (layout, bind_group) = build_bind_group(device, &cp.bindings, &buffers)?;
-
     // Build push constant data from CLI args matched against descriptor bindings
     let pc_bytes = build_push_constant_bytes(&cp.bindings, push_constants, verbose)?;
     let total_pc_size = pc_bytes.len() as u32;
+
+    let buffers = create_binding_buffers(
+        device,
+        queue,
+        &cp.bindings,
+        inputs,
+        Some(&cp.dispatch_size),
+        &pc_bytes,
+        verbose,
+    )?;
+    let (layout, bind_group) = build_bind_group(device, &cp.bindings, &buffers)?;
 
     let pc_ranges: Vec<wgpu::PushConstantRange> = if total_pc_size > 0 {
         vec![wgpu::PushConstantRange {
@@ -128,7 +136,7 @@ fn run_single_compute(
         cache: None,
     });
 
-    let dispatch = resolve_dispatch_size(&cp.dispatch_size, &buffers, &cp.bindings, None);
+    let dispatch = resolve_dispatch_size(&cp.dispatch_size, &buffers, &pc_bytes);
     if verbose {
         println!("Dispatch: {} x {} x {}", dispatch.0, dispatch.1, dispatch.2);
     }
@@ -175,12 +183,13 @@ fn run_multi_compute(
         }
     }
 
-    let buffers = create_binding_buffers(device, queue, &mp.bindings, inputs, verbose)?;
-    let (layout, bind_group) = build_bind_group(device, &mp.bindings, &buffers)?;
-
     // Build push constant data from CLI args matched against descriptor bindings
     let pc_bytes = build_push_constant_bytes(&mp.bindings, push_constants, verbose)?;
     let total_pc_size = pc_bytes.len() as u32;
+
+    let buffers =
+        create_binding_buffers(device, queue, &mp.bindings, inputs, None, &pc_bytes, verbose)?;
+    let (layout, bind_group) = build_bind_group(device, &mp.bindings, &buffers)?;
 
     let pc_ranges: Vec<wgpu::PushConstantRange> = if total_pc_size > 0 {
         vec![wgpu::PushConstantRange {
@@ -208,8 +217,7 @@ fn run_multi_compute(
             cache: None,
         });
 
-        let dispatch =
-            resolve_dispatch_size(&stage.dispatch_size, &buffers, &mp.bindings, Some(&stage.reads));
+        let dispatch = resolve_dispatch_size(&stage.dispatch_size, &buffers, &pc_bytes);
         if verbose {
             println!(
                 "Stage {} ({}): dispatch {} x {} x {}",

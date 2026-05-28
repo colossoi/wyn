@@ -32,8 +32,12 @@ pub enum ArrayProvenance {
         binding: u32,
         elem_ty: Type<TypeName>,
     },
-    /// From a range/iota.
-    Range,
+    /// From a range/iota. Carries the bound expression so the dispatch
+    /// length can be resolved from `iota(literal)` / `iota(param)` /
+    /// `iota(length(arr))` without re-walking lowered IR.
+    Range {
+        bound: Term,
+    },
     /// Anything else (entry-param array vars, SoA-tuple references, etc.).
     /// TLC analysis can't pin down `(set, binding)` for these, but EGIR
     /// can — the from_tlc / soac_expand machinery already handles
@@ -228,6 +232,15 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
     let mut scope = ScopeStack::default();
     let mut current: Term = def.body.clone();
 
+    // The entry's binding layout — used to resolve `Ref(Var(sym))` SOAC inputs
+    // back to their assigned (set, binding). Empty for non-compute entries.
+    let entry_slots = if let DefMeta::EntryPoint(decl) = &def.meta {
+        let (params, _) = peel_lambda_params(&def.body);
+        crate::binding_layout::compute_entry_binding_layout(&params, decl, AUTO_STORAGE_SET)
+    } else {
+        Vec::new()
+    };
+
     loop {
         let Term { ty, kind, .. } = current;
         match kind {
@@ -245,7 +258,7 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
                 current = *body;
             }
             TermKind::Soac(soac) => {
-                let parallelizable = analyze_soac(&soac, &ty, symbols)?;
+                let parallelizable = analyze_soac(&soac, &ty, symbols, &entry_slots)?;
                 let captured_params = scope.captured_params();
                 let prefix_lets = scope.into_prefix_lets();
                 let required_params =
@@ -344,6 +357,7 @@ fn analyze_soac(
     soac: &SoacOp,
     _result_ty: &Type<TypeName>,
     _symbols: &SymbolTable,
+    entry_slots: &[crate::interface::EntryBindingSlot],
 ) -> Option<SoacAnalysis> {
     let normalized: SoacOp = match soac {
         SoacOp::Map {
@@ -408,7 +422,7 @@ fn analyze_soac(
     // Opaque can only happen for Map.
     let provenances: Vec<ArrayProvenance> = soac_inputs(&normalized)
         .iter()
-        .map(|ae| classify_input(ae).unwrap_or(ArrayProvenance::Opaque))
+        .map(|ae| classify_input(ae, entry_slots).unwrap_or(ArrayProvenance::Opaque))
         .collect();
     Some(SoacAnalysis {
         original: normalized,
@@ -439,7 +453,10 @@ fn binop(op: &str, lhs: Term, rhs: Term, ty: Type<TypeName>, span: ast::Span) ->
     }
 }
 
-fn classify_input(input: &ArrayExpr) -> Option<ArrayProvenance> {
+fn classify_input(
+    input: &ArrayExpr,
+    entry_slots: &[crate::interface::EntryBindingSlot],
+) -> Option<ArrayProvenance> {
     match input {
         ArrayExpr::StorageBuffer {
             set,
@@ -451,9 +468,54 @@ fn classify_input(input: &ArrayExpr) -> Option<ArrayProvenance> {
             binding: *binding,
             elem_ty: elem_ty.clone(),
         }),
-        ArrayExpr::Range { .. } => Some(ArrayProvenance::Range),
+        ArrayExpr::Ref(t) => {
+            // A bare entry-param storage-buffer reference. Resolve the
+            // assigned (set, binding) via the entry's binding layout — the
+            // same lookup `default_entry_dispatch_len` uses. Tuple-of-views
+            // params resolve to their first slot (same element count).
+            if let TermKind::Var(VarRef::Symbol(sym)) = &t.kind {
+                if let Some(slot) = entry_slots.iter().find(|s| s.param_sym == *sym) {
+                    return Some(ArrayProvenance::Storage {
+                        set: slot.set,
+                        binding: slot.binding,
+                        elem_ty: slot.elem_ty.clone(),
+                    });
+                }
+            }
+            // `iota(N)` desugars to
+            // `let arg = N in Range{ start: 0, len: arg - 0, step: None }`.
+            // The dispatch length is `N` itself; lift it out as the Range bound.
+            if let Some(bound) = extract_iota_bound(t) {
+                return Some(ArrayProvenance::Range { bound });
+            }
+            None
+        }
         _ => None,
     }
+}
+
+/// Recognize the `iota(N)` desugaring
+/// `let arg = N in Range { start: 0, len: arg - 0 }` and recover `N`.
+fn extract_iota_bound(t: &Term) -> Option<Term> {
+    let TermKind::Let { name, rhs, body, .. } = &t.kind else {
+        return None;
+    };
+    let TermKind::ArrayExpr(ArrayExpr::Range { start, len, .. }) = &body.kind else {
+        return None;
+    };
+    let TermKind::App { func, args } = &len.kind else {
+        return None;
+    };
+    let [arg, zero] = args.as_slice() else { return None };
+    let TermKind::BinOp(op) = &func.kind else {
+        return None;
+    };
+    let arg_is_name = matches!(&arg.kind, TermKind::Var(VarRef::Symbol(s)) if s == name);
+    (op.op == "-" && is_zero_int(start) && is_zero_int(zero) && arg_is_name).then(|| (**rhs).clone())
+}
+
+fn is_zero_int(t: &Term) -> bool {
+    matches!(&t.kind, TermKind::IntLit(s) if s == "0")
 }
 
 // =============================================================================
@@ -1226,10 +1288,12 @@ pub fn run(mut program: Program, disable: bool) -> crate::error::Result<Parallel
                 // stage, so we emit an empty vec.
                 let input_bindings: Vec<Binding> = vec![];
                 let sizing = PipelineSizing::for_default_entry(&program, def.name);
+                let len = default_entry_dispatch_len(&program, def.name);
                 pipelines.push(Pipeline::Compute(ComputePipeline {
                     entry_point: name,
                     workgroup_size: sizing.workgroup,
-                    dispatch_size: DispatchSize::DerivedFromInputLength {
+                    dispatch_size: DispatchSize::DerivedFrom {
+                        len,
                         workgroup_size: sizing.workgroup.0,
                     },
                     bindings: input_bindings,
@@ -1315,7 +1379,14 @@ fn make_lowering_plan(
             // `forced_result_binding` pins the map's output to a specific
             // buffer when this is a gather pre-pass (the consumer reads it via
             // `storage_index`); ordinary maps pass `None` and auto-allocate.
-            make_map_plan(analysis, entry_name, next_binding, sizing, forced_result_binding)
+            make_map_plan(
+                analysis,
+                entry_name,
+                next_binding,
+                sizing,
+                forced_result_binding,
+                program,
+            )
         }
         SoacOp::Reduce { op, ne, .. } => make_two_phase_plan(
             analysis,
@@ -1357,6 +1428,7 @@ fn make_map_plan(
     _next_binding: u32,
     sizing: PipelineSizing,
     forced_output_binding: Option<(u32, u32)>,
+    program: &Program,
 ) -> LoweringPlan {
     // Plan: don't pre-allocate the output binding. The EGIR side already
     // auto-allocates it via `build_entry_outputs` and walks the entry's
@@ -1369,7 +1441,8 @@ fn make_map_plan(
     let pipeline = Pipeline::Compute(ComputePipeline {
         entry_point: entry_name.to_string(),
         workgroup_size: sizing.workgroup,
-        dispatch_size: DispatchSize::DerivedFromInputLength {
+        dispatch_size: DispatchSize::DerivedFrom {
+            len: resolve_dispatch_len(analysis, 0, program),
             workgroup_size: sizing.workgroup.0,
         },
         bindings,
@@ -1636,7 +1709,10 @@ fn make_scan_plan(
         let pipeline = Pipeline::Compute(ComputePipeline {
             entry_point: entry_name.to_string(),
             workgroup_size: sizing.workgroup,
-            dispatch_size: DispatchSize::DerivedFromInputLength {
+            // Serial single-thread scan, not parallelized — no EGIR pass fills
+            // this in, so derive from the entry's first input buffer here.
+            dispatch_size: DispatchSize::DerivedFrom {
+                len: default_entry_dispatch_len(program, analysis.def_name),
                 workgroup_size: sizing.workgroup.0,
             },
             bindings: vec![],
@@ -1681,13 +1757,14 @@ fn make_scan_plan(
 
     let pipeline = build_scan_pipeline_descriptor(
         entry_name,
-        &analysis.soac,
+        analysis,
         &elem_type,
         consuming,
         output_binding,
         block_sums_binding,
         block_offsets_binding,
         sizing,
+        program,
     );
 
     let bindings = PlannedBindings::Scan {
@@ -1730,14 +1807,16 @@ fn make_scan_plan(
 ///   result from the input buffer.
 fn build_scan_pipeline_descriptor(
     entry_name: &str,
-    soac: &SoacAnalysis,
+    analysis: &EntryAnalysis,
     elem_type: &Type<TypeName>,
     consuming: bool,
     output_binding: (u32, u32),
     block_sums_binding: (u32, u32),
     block_offsets_binding: (u32, u32),
     sizing: PipelineSizing,
+    program: &Program,
 ) -> Pipeline {
+    let soac = &analysis.soac;
     let workgroup = sizing.workgroup;
     let _ = elem_type;
     let mut all_bindings = collect_soac_bindings(soac);
@@ -1796,6 +1875,9 @@ fn build_scan_pipeline_descriptor(
     let phase2_name = format!("{}_phase2_scan_sums", entry_name);
     let phase3_name = format!("{}_phase3_add_offsets", entry_name);
 
+    // Phases 1 and 3 iterate one thread per scan element — the scan's
+    // single input determines the length.
+    let scan_len = resolve_dispatch_len(analysis, 0, program);
     Pipeline::MultiCompute(MultiComputePipeline {
         bindings: all_bindings,
         stages: vec![
@@ -1804,9 +1886,16 @@ fn build_scan_pipeline_descriptor(
                 input_indices,
                 vec![output_idx, block_sums_idx],
                 workgroup,
+                scan_len.clone(),
             ),
             fixed_stage(phase2_name, vec![block_sums_idx], vec![block_offsets_idx]),
-            derived_stage(phase3_name, vec![block_offsets_idx], vec![output_idx], workgroup),
+            derived_stage(
+                phase3_name,
+                vec![block_offsets_idx],
+                vec![output_idx],
+                workgroup,
+                scan_len,
+            ),
         ],
         default_total_threads: sizing.default_total_threads,
     })
@@ -2582,19 +2671,113 @@ fn push_storage_binding(
     idx
 }
 
-/// A `ComputeStage` with `workgroup` + `DerivedFromInputLength`
-/// dispatch. Used by per-element phases (phase 1 of reduce; phases 1+3
-/// of scan).
+/// Byte size of one element of `ty`, defaulting to 4 if not statically known.
+fn elem_byte_size(ty: &Type<TypeName>) -> u32 {
+    crate::ssa::layout::type_byte_size(ty).unwrap_or(4)
+}
+
+/// Resolve a parallel SOAC's `DispatchLen` from its provenance: a buffer
+/// view → that buffer's binding; a range with a recognizable bound → the
+/// bound's source (`Fixed` / `InputBinding(length(arr))`); a fixed-size
+/// array → its static count; otherwise the entry's first input buffer
+/// (computed/loaded arrays share its element count).
+fn resolve_dispatch_len(analysis: &EntryAnalysis, input_index: usize, program: &Program) -> DispatchLen {
+    let inputs = analysis.soac.inputs();
+    match analysis.soac.provenances.get(input_index) {
+        Some(ArrayProvenance::Storage {
+            set,
+            binding,
+            elem_ty,
+        }) => DispatchLen::InputBinding {
+            set: *set,
+            binding: *binding,
+            elem_bytes: elem_byte_size(elem_ty),
+        },
+        Some(ArrayProvenance::Range { bound }) => resolve_range_bound(bound, analysis.def_name, program)
+            .unwrap_or_else(|| default_entry_dispatch_len(program, analysis.def_name)),
+        Some(ArrayProvenance::Opaque) | None => inputs
+            .get(input_index)
+            .and_then(|ae| match ae {
+                ArrayExpr::Ref(t) => fixed_array_count(&t.ty),
+                _ => None,
+            })
+            .map(|count| DispatchLen::Fixed { count })
+            .unwrap_or_else(|| default_entry_dispatch_len(program, analysis.def_name)),
+    }
+}
+
+/// `iota(N)` count from the range's bound:
+/// - integer literal → `Fixed{count}`;
+/// - a `Term` whose id `buffer_specialize` recorded in `program.view_lengths`
+///   (i.e. a rewritten `length(view_param)` → `storage_len(set, binding)`,
+///   or its scalar-cast wrapper) → that binding's `InputBinding`;
+/// otherwise `None` and the caller falls back to the entry's first buffer.
+fn resolve_range_bound(bound: &Term, def_name: SymbolId, program: &Program) -> Option<DispatchLen> {
+    if let TermKind::IntLit(s) = &bound.kind {
+        return s.parse::<u32>().ok().map(|count| DispatchLen::Fixed { count });
+    }
+    let &(set, binding) = program.view_lengths.get(&bound.id)?;
+    let slot = entry_binding_slots(program, def_name)
+        .into_iter()
+        .find(|s| s.set == set && s.binding == binding)?;
+    Some(DispatchLen::InputBinding {
+        set,
+        binding,
+        elem_bytes: elem_byte_size(&slot.elem_ty),
+    })
+}
+
+/// Static element count of a fixed-size `[N]T`, if any.
+fn fixed_array_count(ty: &Type<TypeName>) -> Option<u32> {
+    match crate::types::array_size(ty)? {
+        Type::Constructed(TypeName::Size(n), _) => Some(*n as u32),
+        _ => None,
+    }
+}
+
+/// Entry's auto-storage binding slots, or empty for non-entry / non-compute
+/// defs. Single source of truth for the param→binding lookups used by both
+/// `default_entry_dispatch_len` and the SOAC-input provenance resolver.
+fn entry_binding_slots(program: &Program, def_name: SymbolId) -> Vec<crate::interface::EntryBindingSlot> {
+    let Some(def) = program.defs.iter().find(|d| d.name == def_name) else {
+        return Vec::new();
+    };
+    let DefMeta::EntryPoint(decl) = &def.meta else {
+        return Vec::new();
+    };
+    let (params, _) = peel_lambda_params(&def.body);
+    crate::binding_layout::compute_entry_binding_layout(&params, decl, AUTO_STORAGE_SET)
+}
+
+/// Dispatch length for a non-parallelized compute entry: its first input-view
+/// param binding (the previous "derive from the first input buffer" behavior,
+/// now explicit), else a single-element grid.
+fn default_entry_dispatch_len(program: &Program, def_name: SymbolId) -> DispatchLen {
+    let slots = entry_binding_slots(program, def_name);
+    let Some(slot) = slots.first() else {
+        return DispatchLen::Fixed { count: 1 };
+    };
+    DispatchLen::InputBinding {
+        set: slot.set,
+        binding: slot.binding,
+        elem_bytes: elem_byte_size(&slot.elem_ty),
+    }
+}
+
+/// A `ComputeStage` with `workgroup` + a `DerivedFrom(len)` dispatch. Used by
+/// per-element phases (phase 1 of reduce; phases 1+3 of scan).
 fn derived_stage(
     entry_point: String,
     reads: Vec<usize>,
     writes: Vec<usize>,
     workgroup: (u32, u32, u32),
+    len: DispatchLen,
 ) -> ComputeStage {
     ComputeStage {
         entry_point,
         workgroup_size: workgroup,
-        dispatch_size: DispatchSize::DerivedFromInputLength {
+        dispatch_size: DispatchSize::DerivedFrom {
+            len,
             workgroup_size: workgroup.0,
         },
         reads,
@@ -2763,10 +2946,12 @@ fn build_default_pipeline(program: &Program) -> PipelineDescriptor {
             let name = program.symbols.get(def.name).cloned().unwrap_or_default();
             if decl.entry_type.is_compute() {
                 let sizing = PipelineSizing::for_default_entry(program, def.name);
+                let len = default_entry_dispatch_len(program, def.name);
                 pipelines.push(Pipeline::Compute(ComputePipeline {
                     entry_point: name,
                     workgroup_size: sizing.workgroup,
-                    dispatch_size: DispatchSize::DerivedFromInputLength {
+                    dispatch_size: DispatchSize::DerivedFrom {
+                        len,
                         workgroup_size: sizing.workgroup.0,
                     },
                     default_total_threads: sizing.default_total_threads,

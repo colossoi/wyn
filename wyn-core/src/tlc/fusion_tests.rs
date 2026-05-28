@@ -226,6 +226,8 @@ fn test_simple_map_fusion() {
         }],
         symbols,
         def_syms: HashMap::new(),
+
+        view_lengths: Default::default(),
     };
 
     let fused = run(program);
@@ -352,6 +354,8 @@ fn test_chain_of_three_maps() {
         }],
         symbols,
         def_syms: HashMap::new(),
+
+        view_lengths: Default::default(),
     };
 
     let fused = run(program);
@@ -452,6 +456,8 @@ fn test_multi_use_no_fusion() {
         }],
         symbols,
         def_syms: HashMap::new(),
+
+        view_lengths: Default::default(),
     };
 
     let result = run(program);
@@ -547,6 +553,8 @@ fn test_zip_fused_producer() {
         }],
         symbols,
         def_syms: HashMap::new(),
+
+        view_lengths: Default::default(),
     };
 
     let fused = run(program);
@@ -646,6 +654,8 @@ fn test_consumer_multi_input_no_fusion() {
         }],
         symbols,
         def_syms: HashMap::new(),
+
+        view_lengths: Default::default(),
     };
 
     let result = run(program);
@@ -707,6 +717,8 @@ fn test_inline_map_fusion() {
         }],
         symbols,
         def_syms: HashMap::new(),
+
+        view_lengths: Default::default(),
     };
 
     let fused = run(program);
@@ -781,6 +793,8 @@ fn test_map_into_scan_keeps_pure_reduce_op() {
         }],
         symbols,
         def_syms: HashMap::new(),
+
+        view_lengths: Default::default(),
     };
 
     let fused = run(program);
@@ -879,6 +893,8 @@ fn test_inline_chain_of_three() {
         }],
         symbols,
         def_syms: HashMap::new(),
+
+        view_lengths: Default::default(),
     };
 
     let fused = run(program);
@@ -969,6 +985,8 @@ fn test_zip_fused_consumer_inline() {
         }],
         symbols,
         def_syms: HashMap::new(),
+
+        view_lengths: Default::default(),
     };
 
     let fused = run(program);
@@ -1080,6 +1098,8 @@ fn test_map_zip_map() {
         }],
         symbols,
         def_syms: HashMap::new(),
+
+        view_lengths: Default::default(),
     };
 
     let fused = run(program);
@@ -1176,6 +1196,8 @@ fn test_raytrace_step1_local_map_reduce() {
         }],
         symbols,
         def_syms: HashMap::new(),
+
+        view_lengths: Default::default(),
     };
 
     let fused = run(program);
@@ -1291,6 +1313,8 @@ fn test_raytrace_step2_interprocedural_reduce_consumer() {
         defs: vec![my_reduce_def, main_def],
         symbols,
         def_syms: HashMap::new(),
+
+        view_lengths: Default::default(),
     };
 
     let fused = run(program);
@@ -1409,6 +1433,8 @@ fn test_raytrace_step3_interprocedural_map_producer() {
         defs: vec![my_map_def, main_def],
         symbols,
         def_syms: HashMap::new(),
+
+        view_lengths: Default::default(),
     };
 
     let fused = run(program);
@@ -1552,6 +1578,8 @@ fn test_raytrace_step4_both_interprocedural() {
         defs: vec![my_map_def, my_reduce_def, main_def],
         symbols,
         def_syms: HashMap::new(),
+
+        view_lengths: Default::default(),
     };
 
     let fused = run(program);
@@ -1695,6 +1723,8 @@ fn test_raytrace_step5_globals_pattern_fused() {
         defs: vec![intersect_def, find_closest_def, main_def],
         symbols,
         def_syms: HashMap::new(),
+
+        view_lengths: Default::default(),
     };
 
     let fused = run(program);

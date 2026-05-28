@@ -11,8 +11,8 @@ use std::path::Path;
 use anyhow::{Context, Result, anyhow};
 
 pub use wyn_pipeline_descriptor::{
-    Access, Binding, BufferUsage, ComputePipeline, DispatchSize, MultiComputePipeline, Pipeline,
-    PipelineDescriptor,
+    Access, Binding, BufferUsage, ComputePipeline, DispatchLen, DispatchSize, MultiComputePipeline,
+    Pipeline, PipelineDescriptor,
 };
 
 pub fn load_f32_json(path: &Path) -> Result<Vec<f32>> {

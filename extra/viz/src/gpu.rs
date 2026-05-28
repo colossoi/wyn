@@ -16,7 +16,7 @@ use wgpu::{
     Surface, Trace,
 };
 
-use crate::json::{Access, Binding, BufferUsage, DispatchSize, load_f32_json};
+use crate::json::{Access, Binding, BufferUsage, DispatchLen, DispatchSize, load_f32_json};
 use crate::specs::{PushConstantSpec, StorageBufferSpec, UniformSpec};
 use crate::spirv::SpirvAccess;
 
@@ -194,6 +194,8 @@ pub fn create_binding_buffers(
     queue: &wgpu::Queue,
     bindings: &[Binding],
     inputs: &HashMap<String, PathBuf>,
+    dispatch: Option<&DispatchSize>,
+    pc_bytes: &[u8],
     verbose: bool,
 ) -> Result<HashMap<u32, (wgpu::Buffer, u64)>> {
     let mut buffers = HashMap::new();
@@ -265,10 +267,26 @@ pub fn create_binding_buffers(
             if buffers.contains_key(binding) {
                 continue;
             }
-            let byte_size = len
-                .resolve_bytes(|s, bnd| byte_sizes.get(&(s, bnd)).copied())
-                .ok_or_else(|| anyhow!("cannot size buffer '{}': its source buffer was not allocated", name))?
-                .max(4);
+            // A `SameAsDispatch` output holds one element per dispatched thread,
+            // so its size needs the resolved dispatch — one workgroup's worth of
+            // padding over the exact length, which is harmless slack.
+            let byte_size = if let Some(elem_bytes) = len.dispatch_elem_bytes() {
+                let dispatch = dispatch.ok_or_else(|| {
+                    anyhow!("cannot size dispatch-length buffer '{}': no dispatch in scope", name)
+                })?;
+                let (groups, _, _) = resolve_dispatch_size(dispatch, &buffers, pc_bytes);
+                let wg = match dispatch {
+                    DispatchSize::DerivedFrom { workgroup_size, .. } => *workgroup_size,
+                    DispatchSize::Fixed { .. } => 1,
+                };
+                ((groups * wg) as u64 * elem_bytes as u64).max(4)
+            } else {
+                len.resolve_bytes(|s, bnd| byte_sizes.get(&(s, bnd)).copied())
+                    .ok_or_else(|| {
+                        anyhow!("cannot size buffer '{}': its source buffer was not allocated", name)
+                    })?
+                    .max(4)
+            };
             if verbose {
                 println!("Allocated {} bytes for compiler-managed buffer '{}'", byte_size, name);
             }
@@ -334,28 +352,38 @@ pub fn build_bind_group(
 pub fn resolve_dispatch_size(
     dispatch: &DispatchSize,
     buffers: &HashMap<u32, (wgpu::Buffer, u64)>,
-    bindings: &[Binding],
-    reads: Option<&[usize]>,
+    pc_bytes: &[u8],
 ) -> (u32, u32, u32) {
     match dispatch {
         DispatchSize::Fixed { x, y, z } => (*x, *y, *z),
-        DispatchSize::DerivedFromInputLength { workgroup_size } => {
-            // Find the first input binding to derive length from
-            let input_binding = reads
-                .and_then(|r| r.first())
-                .and_then(|&idx| bindings.get(idx))
-                .or_else(|| bindings.iter().find(|b| b.is_input()));
-
-            let elements = input_binding
-                .map(|b| {
-                    let binding_num = b.wgpu_binding();
-                    buffers.get(&binding_num).map(|(_, size)| (*size / 4) as u32).unwrap_or(0)
-                })
-                .unwrap_or(0);
-
+        DispatchSize::DerivedFrom { len, workgroup_size } => {
+            let elements = resolve_dispatch_len(len, buffers, pc_bytes);
             let wg = *workgroup_size;
-            let groups = (elements + wg - 1) / wg;
-            (groups, 1, 1)
+            ((elements + wg - 1) / wg, 1, 1)
+        }
+    }
+}
+
+/// Resolve a `DerivedFrom` dispatch's iteration count from its `DispatchLen`
+/// source: a buffer's element count, a compile-time constant, or a scalar read
+/// from the push-constant block.
+fn resolve_dispatch_len(
+    len: &DispatchLen,
+    buffers: &HashMap<u32, (wgpu::Buffer, u64)>,
+    pc_bytes: &[u8],
+) -> u32 {
+    match len {
+        DispatchLen::InputBinding { binding, elem_bytes, .. } => buffers
+            .get(binding)
+            .map(|(_, size)| (*size / *elem_bytes as u64) as u32)
+            .unwrap_or(0),
+        DispatchLen::Fixed { count } => *count,
+        DispatchLen::PushConstant { offset } => {
+            let o = *offset as usize;
+            pc_bytes
+                .get(o..o + 4)
+                .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .unwrap_or(0)
         }
     }
 }

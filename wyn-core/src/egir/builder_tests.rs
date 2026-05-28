@@ -121,6 +121,7 @@ fn phase1_transform_reduce_in_place() {
         ty: f32_ty(),
         decoration: None,
         storage_binding: Some((0, 1)),
+        length: None,
     });
 
     // Run the in-place transformation. Partials at (0, 2).

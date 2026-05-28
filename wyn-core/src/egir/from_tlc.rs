@@ -27,7 +27,7 @@ use smallvec::{SmallVec, smallvec};
 
 use super::program::{EgirEntry, EgirFunc, EgirInner};
 use super::types::*;
-use crate::pipeline_descriptor::PipelineDescriptor;
+use crate::pipeline_descriptor::{BufferLen, PipelineDescriptor};
 
 // ============================================================================
 // Descriptor-set convention
@@ -148,6 +148,14 @@ pub fn run(
                 // Reduce/Redomap manage their result inside the TLC two-phase
                 // plan, so `forced_output` reports `None` for them.
                 let forced_output_binding = plans.get(&entry.name).and_then(|p| p.bindings.forced_output());
+                // A parallel map/scan writes one output element per thread, so
+                // its storage output is dispatch-sized. Reduce/Redomap results
+                // are single elements; entries without a plan keep the host's
+                // default sizing.
+                let dispatch_sized_outputs = plans.get(&entry.name).is_some_and(|p| {
+                    use crate::tlc::parallelize::ParallelStrategy;
+                    matches!(p.strategy, ParallelStrategy::Map | ParallelStrategy::Scan)
+                });
                 let ep = convert_entry_point(
                     def,
                     entry,
@@ -157,6 +165,7 @@ pub fn run(
                     &pure_constant_names,
                     workgroup,
                     forced_output_binding,
+                    dispatch_sized_outputs,
                 )?;
                 entry_points.push(ep);
             }
@@ -343,7 +352,7 @@ fn enrich_pipeline_with_auto_bindings(pipeline: &mut PipelineDescriptor, entries
                 access: Access::WriteOnly,
                 usage: BufferUsage::Output,
                 name,
-                length: None,
+                length: output.length.clone(),
             });
         }
     }
@@ -511,6 +520,7 @@ fn convert_entry_point(
     pure_constants: &HashSet<String>,
     workgroup: (u32, u32, u32),
     forced_output_binding: Option<(u32, u32)>,
+    dispatch_sized_outputs: bool,
 ) -> Result<EgirEntry, ConvertError> {
     use crate::ssa::types::{EntryInput, ExecutionModel, IoDecoration};
 
@@ -648,6 +658,7 @@ fn convert_entry_point(
         is_compute,
         binding_num,
         forced_output_binding,
+        dispatch_sized_outputs,
     );
     let is_unit_return = matches!(ret_type, Type::Constructed(TypeName::Unit, _));
 
@@ -2070,10 +2081,23 @@ fn build_entry_outputs(
     is_compute: bool,
     binding_start: u32,
     forced_output_binding: Option<(u32, u32)>,
+    dispatch_sized: bool,
 ) -> Vec<EntryOutput> {
     use EntryOutput;
     let mut binding_num = binding_start;
     let mut forced_remaining = forced_output_binding;
+    // A parallel map/scan writes one output element per dispatched thread, so
+    // a storage output's length tracks the dispatch. `None` otherwise (the
+    // host falls back to its default sizing).
+    let length_for = |binding: Option<(u32, u32)>, ty: &Type<TypeName>| -> Option<BufferLen> {
+        if dispatch_sized && binding.is_some() {
+            Some(BufferLen::SameAsDispatch {
+                elem_bytes: crate::ssa::layout::type_byte_size(ty).unwrap_or(4),
+            })
+        } else {
+            None
+        }
+    };
     let mut storage_binding_for = |ty: &Type<TypeName>, is_compute: bool| -> Option<(u32, u32)> {
         if is_compute && !matches!(ty, Type::Constructed(TypeName::Unit, _)) {
             // Honor the planned binding for the first storage output if
@@ -2092,10 +2116,12 @@ fn build_entry_outputs(
 
     if entry.outputs.iter().all(|o| o.attribute.is_none()) && entry.outputs.len() == 1 {
         if !matches!(ret_type, Type::Constructed(TypeName::Unit, _)) {
+            let storage_binding = storage_binding_for(ret_type, is_compute);
             vec![EntryOutput {
                 ty: ret_type.clone(),
                 decoration: None,
-                storage_binding: storage_binding_for(ret_type, is_compute),
+                storage_binding,
+                length: length_for(storage_binding, ret_type),
             }]
         } else {
             vec![]
@@ -2105,13 +2131,18 @@ fn build_entry_outputs(
             .outputs
             .iter()
             .zip(component_types.iter())
-            .map(|(output, ty)| EntryOutput {
-                ty: ty.clone(),
-                decoration: output.attribute.as_ref().and_then(convert_to_io_decoration),
-                storage_binding: storage_binding_for(ty, is_compute),
+            .map(|(output, ty)| {
+                let storage_binding = storage_binding_for(ty, is_compute);
+                EntryOutput {
+                    ty: ty.clone(),
+                    decoration: output.attribute.as_ref().and_then(convert_to_io_decoration),
+                    storage_binding,
+                    length: length_for(storage_binding, ty),
+                }
             })
             .collect()
     } else {
+        let storage_binding = storage_binding_for(ret_type, is_compute);
         vec![EntryOutput {
             ty: ret_type.clone(),
             decoration: entry
@@ -2119,7 +2150,8 @@ fn build_entry_outputs(
                 .first()
                 .and_then(|o| o.attribute.as_ref())
                 .and_then(convert_to_io_decoration),
-            storage_binding: storage_binding_for(ret_type, is_compute),
+            storage_binding,
+            length: length_for(storage_binding, ret_type),
         }]
     }
 }

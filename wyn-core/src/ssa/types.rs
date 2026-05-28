@@ -525,6 +525,11 @@ pub struct EntryOutput {
     pub decoration: Option<IoDecoration>,
     /// For compute shaders with unsized array outputs: (set, binding).
     pub storage_binding: Option<(u32, u32)>,
+    /// Sizing policy for a runtime-sized storage output (a parallel map/scan
+    /// writes one element per thread → `SameAsDispatch`). `None` for
+    /// fixed/graphics outputs and entries whose output size the host already
+    /// knows another way.
+    pub length: Option<crate::pipeline_descriptor::BufferLen>,
 }
 
 /// I/O decoration for entry point parameters.
