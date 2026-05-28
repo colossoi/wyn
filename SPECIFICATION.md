@@ -459,9 +459,36 @@ Type abbreviations function as shorthands for the purpose of documentation or br
 
 If the right-hand side of a type contains existential sizes, it must be declared "size-lifted" with `type~`. If it (potentially) contains a function, it must be declared "fully lifted" with `type^`. A lifted type can also contain existential sizes.
 
+A size-lifted abbreviation hides an existential size behind the name:
+
+```wyn
+type~ bag = ?n. [n]i32
+
+def empty_bag: bag = []
+```
+
+A fully-lifted abbreviation hides a function type:
+
+```wyn
+type^ cmp = i32 -> i32 -> i32
+
+def ascending: cmp = |x: i32, y: i32| x - y
+def descending: cmp = |x: i32, y: i32| y - x
+```
+
 **Restrictions:**
 - Lifted types cannot be put in arrays
 - Fully lifted types cannot be returned from conditional or loop expressions
+
+> **Implementation note.** The current compiler accepts the `type~` and
+> `type^` surface syntax and records the marker on every type
+> declaration, but the rest of the lifted-type machinery — checking that
+> the marker matches the RHS, propagating liftedness through type
+> applications, restricting type-parameter instantiation by liftedness
+> class (`'a` vs. `'~a` vs. `'^a`) — is in flux. The restriction
+> diagnostics fire today through generic shape checks (e.g. "function in
+> array position") rather than through liftedness audits, so error
+> messages may not yet point at the marker decision.
 
 ### Type Parameters
 

@@ -102,7 +102,7 @@ impl<'a> Parser<'a> {
                 decl.attributes = attributes;
                 Ok(Declaration::Sig(decl))
             }
-            Some(Token::Type) => {
+            Some(Token::Type) | Some(Token::TypeSizeLifted) | Some(Token::TypeFullyLifted) => {
                 let type_bind = self.parse_type_bind()?;
                 Ok(Declaration::TypeBind(type_bind))
             }
@@ -907,8 +907,15 @@ impl<'a> Parser<'a> {
 
     fn parse_type(&mut self) -> Result<Type> {
         trace!("parse_type: next token = {:?}", self.peek());
-        // Note: existential types (?k. [k]T) are NOT allowed here.
-        // Use parse_return_type_simple for return types that allow existentials.
+
+        // Existential size quantifier `?[n].T` (spec line 243):
+        //   existential_size ::= "?" ("[" name "]")+ "." type
+        // Valid anywhere a type can appear (the type's existential sizes
+        // become fresh during checking). Lifted-type declarations require
+        // this — `type~ bag = ?[n].[n]i32`.
+        if self.check(&Token::QuestionMark) {
+            return self.parse_existential_type();
+        }
 
         // Check for named parameter syntax: (name: type) -> ...
         // We parse this for documentation but drop the name, keeping just the type

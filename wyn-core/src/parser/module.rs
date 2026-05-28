@@ -13,9 +13,20 @@ impl Parser<'_> {
     pub fn parse_type_bind(&mut self) -> Result<TypeBind> {
         trace!("parse_type_bind: next token = {:?}", self.peek());
 
-        match self.peek() {
-            Some(Token::Type) => self.advance(),
-            _ => bail_parse!("Expected 'type' keyword"),
+        let lifting = match self.peek() {
+            Some(Token::Type) => {
+                self.advance();
+                None
+            }
+            Some(Token::TypeSizeLifted) => {
+                self.advance();
+                Some(crate::ast::TypeLifting::SizeLifted)
+            }
+            Some(Token::TypeFullyLifted) => {
+                self.advance();
+                Some(crate::ast::TypeLifting::FullyLifted)
+            }
+            _ => bail_parse!("Expected 'type', 'type~', or 'type^' keyword"),
         };
 
         let name = self.expect_identifier()?;
@@ -28,6 +39,7 @@ impl Parser<'_> {
 
         Ok(TypeBind {
             name,
+            lifting,
             type_params,
             definition,
         })

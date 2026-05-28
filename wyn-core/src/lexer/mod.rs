@@ -136,6 +136,8 @@ pub enum Token {
     Open,
     Import,
     Type,
+    TypeSizeLifted,  // type~
+    TypeFullyLifted, // type^
     Include,
     With,
     Extern,
@@ -233,6 +235,11 @@ fn parse_keyword(input: &str) -> IResult<&str, Token> {
             keyword("while", Token::While),
             keyword("def", Token::Def),
             keyword("sig", Token::Sig),
+            // Lifted markers must come BEFORE plain `type` so the longest
+            // match wins. `~`/`^` aren't word chars, so `tag()` is the
+            // right matcher here (no `peek` word-boundary needed).
+            value(Token::TypeSizeLifted, tag("type~")),
+            value(Token::TypeFullyLifted, tag("type^")),
             keyword("type", Token::Type),
             keyword("with", Token::With),
             keyword("open", Token::Open),

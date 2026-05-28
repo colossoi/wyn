@@ -375,3 +375,31 @@ fn test_mixed_identifiers_and_operators() {
         ]
     );
 }
+
+// =============================================================================
+// Lifted type-abbreviation keywords (spec lines 445-499)
+// =============================================================================
+//
+// `type~` (size-lifted) declares a type whose RHS contains existential sizes
+// (`?[n]`). `type^` (fully-lifted) declares one whose RHS may contain
+// functions. Both are single lexical tokens — `type~` and `type^`, no
+// whitespace between `type` and the marker — matching Futhark's convention.
+// Plain `type` continues to lex as `Token::Type`.
+
+#[test]
+fn test_tokenize_type_size_lifted() {
+    let tokens = tokens_only("type~ bag = ?n. [n]i32");
+    assert_eq!(tokens[0], Token::TypeSizeLifted);
+}
+
+#[test]
+fn test_tokenize_type_fully_lifted() {
+    let tokens = tokens_only("type^ cmp = i32 -> i32 -> i32");
+    assert_eq!(tokens[0], Token::TypeFullyLifted);
+}
+
+#[test]
+fn test_tokenize_plain_type_unchanged() {
+    let tokens = tokens_only("type pair = (i32, i32)");
+    assert_eq!(tokens[0], Token::Type);
+}

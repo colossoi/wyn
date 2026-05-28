@@ -3243,6 +3243,7 @@ fn test_parse_existential_type_multiple_vars() {
 }
 
 #[test]
+#[ignore = "existentials are now accepted in any type position (parse_type dispatches to parse_existential_type on `?`) so type~/type^ declaration RHSes can use them. Restricting them to return position is a type-checker concern, not a parser concern."]
 fn test_parse_existential_type_in_parameter_rejected() {
     // Existential types are only valid in return position, not parameter position
     expect_parse_error("def len(arr: ?k. [k]i32) i32 = ???", |_| Ok(()));
@@ -3491,4 +3492,76 @@ entry frag(
     let mut nc = NodeCounter::new();
     let mut parser = Parser::new(tokens, &mut nc);
     parser.parse().expect("set=1 should parse cleanly");
+}
+
+// =============================================================================
+// Lifted type abbreviations: `type~` and `type^` (spec lines 445-499)
+// =============================================================================
+//
+// Surface syntax:
+//   type   T = ...    -- ordinary (no existential sizes, no functions in RHS)
+//   type~  T = ...    -- size-lifted: RHS may contain existential sizes ?[n]
+//   type^  T = ...    -- fully-lifted: RHS may contain function types
+//
+// The AST records the marker on each `TypeBind` so downstream passes can
+// enforce the restrictions (lifted types cannot be put in arrays;
+// fully-lifted types cannot be returned from conditionals or loops).
+// Restriction enforcement itself is out of scope for this commit —
+// aspirational `#[ignore]`d integration tests live in integration_tests.rs.
+
+#[test]
+fn test_parse_type_bind_unlifted() {
+    let src = "type pair = (i32, i32)";
+    let program = parse_ok(src);
+    let decl = &program.declarations[0];
+    let crate::ast::Declaration::TypeBind(tb) = decl else {
+        panic!("expected TypeBind, got {:?}", decl);
+    };
+    assert_eq!(tb.name, "pair");
+    assert!(tb.lifting.is_none());
+}
+
+#[test]
+fn test_parse_type_bind_size_lifted() {
+    let src = "type~ bag = ?n. [n]i32";
+    let program = parse_ok(src);
+    let crate::ast::Declaration::TypeBind(tb) = &program.declarations[0] else {
+        panic!("expected TypeBind");
+    };
+    assert_eq!(tb.name, "bag");
+    assert_eq!(tb.lifting, Some(crate::ast::TypeLifting::SizeLifted));
+}
+
+#[test]
+fn test_parse_type_bind_fully_lifted() {
+    let src = "type^ cmp = i32 -> i32 -> i32";
+    let program = parse_ok(src);
+    let crate::ast::Declaration::TypeBind(tb) = &program.declarations[0] else {
+        panic!("expected TypeBind");
+    };
+    assert_eq!(tb.name, "cmp");
+    assert_eq!(tb.lifting, Some(crate::ast::TypeLifting::FullyLifted));
+}
+
+#[test]
+fn test_parse_type_bind_size_lifted_with_type_params() {
+    // Generic size-lifted type: `type~ bag <A> = ?n. [n]A`
+    let src = "type~ bag <A> = ?n. [n]A";
+    let program = parse_ok(src);
+    let crate::ast::Declaration::TypeBind(tb) = &program.declarations[0] else {
+        panic!("expected TypeBind");
+    };
+    assert_eq!(tb.lifting, Some(crate::ast::TypeLifting::SizeLifted));
+    assert_eq!(tb.type_params.len(), 1);
+}
+
+#[test]
+fn test_parse_type_bind_fully_lifted_with_type_params() {
+    let src = "type^ cmp <A> = A -> A -> i32";
+    let program = parse_ok(src);
+    let crate::ast::Declaration::TypeBind(tb) = &program.declarations[0] else {
+        panic!("expected TypeBind");
+    };
+    assert_eq!(tb.lifting, Some(crate::ast::TypeLifting::FullyLifted));
+    assert_eq!(tb.type_params.len(), 1);
 }

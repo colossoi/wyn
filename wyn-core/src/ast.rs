@@ -278,8 +278,24 @@ pub struct ExternDecl {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeBind {
     pub name: String,
+    /// Lifted-type marker on the declaration: `type~` → `SizeLifted`,
+    /// `type^` → `FullyLifted`, plain `type` → `None`. Per the spec
+    /// (sections "Lifted Types" / "Higher-order Functions"), the marker
+    /// controls whether the type may contain existential sizes or
+    /// function types, and downstream what shapes can use it (no arrays
+    /// of lifted; no fully-lifted out of if/loop). The parser records
+    /// the marker; enforcement is a follow-up.
+    pub lifting: Option<TypeLifting>,
     pub type_params: Vec<TypeParam>,
     pub definition: Type,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TypeLifting {
+    /// `type~` — RHS may contain existential sizes (`?[n]`).
+    SizeLifted,
+    /// `type^` — RHS may contain function types (transitively size-lifted too).
+    FullyLifted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

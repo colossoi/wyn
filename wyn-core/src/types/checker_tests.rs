@@ -2225,3 +2225,111 @@ fn fragment_location_varying_still_typechecks() {
            @[color.x, color.y, color.z, 1.0]",
     );
 }
+
+// =============================================================================
+// Lifted-type restrictions (spec lines 458-465)
+// =============================================================================
+//
+// Per the spec, certain shapes that contain functions or existential sizes
+// must be rejected at type-check time:
+//
+//  * Lifted types (size-lifted or fully-lifted) cannot be put in arrays.
+//  * Fully-lifted types additionally cannot be returned from `if`/`match`
+//    branches or `loop` parameters.
+//
+// Each restriction is tested in two flavors:
+//  - The "direct" form, where a function or existential type literally
+//    appears in array position — caught by inspecting the type shape
+//    directly.
+//  - The "via an abbreviation" form, where the bad shape hides behind a
+//    `type~`/`type^` declared abbreviation. This case unambiguously
+//    requires the lifted-marker plumbing.
+
+// ----- Lifted (existential / function) types in arrays -----
+
+/// Direct: `[]( ?n. [n]i32 )` — array of existentially-sized arrays.
+/// Different array instances would carry different existential sizes,
+/// which can't share an outer array's uniform element shape.
+#[test]
+fn aspiration_existential_size_array_in_array_rejected_direct() {
+    let result = try_typecheck_program("def junk: [](?n. [n]i32) = [[1, 2, 3], [4, 5]]");
+    assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
+}
+
+/// Via `type~`: same shape but hidden behind a size-lifted abbreviation.
+/// Even with the RHS hidden, the array-of-bags use should be rejected
+/// because the abbreviation's lifting marker says so.
+#[test]
+fn aspiration_size_lifted_abbreviation_in_array_rejected() {
+    let result = try_typecheck_program("type~ bag = ?n. [n]i32\ndef bags: []bag = []");
+    assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
+}
+
+/// Direct: `[](i32 -> i32)` — array of functions.
+#[test]
+fn aspiration_function_in_array_rejected_direct() {
+    let result = try_typecheck_program("def fns: [](i32 -> i32) = []");
+    assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
+}
+
+/// Via `type^`: array of fully-lifted abbreviation.
+#[test]
+fn aspiration_fully_lifted_abbreviation_in_array_rejected() {
+    let result = try_typecheck_program("type^ cmp = i32 -> i32 -> i32\ndef cmps: []cmp = []");
+    assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
+}
+
+// ----- Fully-lifted types out of branches / loops (the `type^`-only rule) -----
+
+/// A direct function returned from an `if`/`else` branch.
+#[test]
+fn aspiration_function_returned_from_if_rejected_direct() {
+    let result = try_typecheck_program(
+        "def choose(p: bool) (i32 -> i32) = if p then (|x: i32| x + 1) else (|x: i32| x - 1)",
+    );
+    assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
+}
+
+/// Same shape behind a `type^` abbreviation.
+#[test]
+fn aspiration_fully_lifted_abbreviation_returned_from_if_rejected() {
+    let result = try_typecheck_program(
+        "type^ cmp = i32 -> i32 -> i32\n\
+         def asc: cmp = |x: i32, y: i32| x - y\n\
+         def dsc: cmp = |x: i32, y: i32| y - x\n\
+         def pick(p: bool) cmp = if p then asc else dsc",
+    );
+    assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
+}
+
+/// Fully-lifted as a `loop` parameter. The accumulator type flows through
+/// every iteration; a function-typed accumulator violates the rule.
+#[test]
+fn aspiration_fully_lifted_loop_parameter_rejected() {
+    let result = try_typecheck_program(
+        "type^ cmp = i32 -> i32 -> i32\n\
+         def chain(k: i32) cmp = loop f: cmp = (|x: i32, y: i32| x - y) for i < k do f",
+    );
+    assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
+}
+
+// ----- Plain `type` with a shape that requires a lifted marker -----
+//
+// Spec line 460: an unmarked `type` declaration whose RHS contains an
+// existential size or a function must be rejected — the user is required
+// to mark it `type~` or `type^` respectively. Each test below uses the
+// abbreviation in a downstream `def` to ensure some part of the pipeline
+// surfaces the mismatch.
+
+#[test]
+fn plain_type_with_existential_rhs_is_rejected() {
+    let result = try_typecheck_program("type bag = ?n. [n]i32\ndef x: bag = [1, 2, 3]");
+    assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
+}
+
+#[test]
+fn plain_type_with_function_rhs_is_rejected() {
+    let result =
+        try_typecheck_program("type cmp = i32 -> i32 -> i32\ndef ascending: cmp = |x: i32, y: i32| x - y");
+    assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
+}
