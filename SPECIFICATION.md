@@ -1361,6 +1361,7 @@ attr ::= "vertex" | "fragment" | "compute"
 builtin_name ::= "position" | "vertex_index" | "instance_index"
                | "front_facing" | "frag_depth" | "frag_coord"
                | "global_invocation_id" | "local_invocation_id"
+               | "workgroup_id" | "num_workgroups"
 ```
 
 Wyn supports an attribute system for shader interface specification. Attributes are written as `#[attr]` and can be applied to:
@@ -1407,9 +1408,17 @@ entry compute_main(data: []f32) []f32 = map(|x| x * 2.0, data)
 - `#[builtin(front_facing)]` - Front-facing status
 - `#[builtin(frag_depth)]` - Fragment depth output
 
-**Compute Shader Built-ins:**
-- `#[builtin(global_invocation_id)]` - Global thread ID
-- `#[builtin(local_invocation_id)]` - Local thread ID within workgroup
+**Compute Shader Built-ins:** all four are typed `vec3u32`, supplying
+3-D coordinates that the kernel may use as 1-D / 2-D as appropriate.
+
+- `#[builtin(global_invocation_id)]` — global thread coordinates across
+  the whole dispatch (`workgroup_id * workgroup_size + local_invocation_id`)
+- `#[builtin(local_invocation_id)]` — thread coordinates within the
+  enclosing workgroup
+- `#[builtin(workgroup_id)]` — workgroup coordinates within the
+  dispatched grid
+- `#[builtin(num_workgroups)]` — total dispatched workgroup count
+  along each axis (the value the host passed to `dispatch_workgroups`)
 
 #### Location-based Interface
 
