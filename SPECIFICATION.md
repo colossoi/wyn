@@ -529,25 +529,13 @@ These have the same rules and restrictions as lifted type abbreviations.
 
 ### Description
 
-Infix operators are defined much like functions:
+An infix operator is defined like an ordinary function, with the operator name enclosed in parentheses at the name position and the parameters following normally:
 
 ```wyn
-def (p1: t1) op (p2: t2): rt = ...
+def (+^) (a: i32, b: i32) (c: i32, d: i32) = (a + c, b + d)
 ```
 
-For example:
-
-```wyn
-def (a:i32,b:i32) +^ (c:i32,d:i32) = (a+c, b+d)
-```
-
-We can also define operators by enclosing the operator name in parentheses and suffixing the parameters, as an ordinary function:
-
-```wyn
-def (+^) (a:i32,b:i32) (c:i32,d:i32) = (a+c, b+d)
-```
-
-This is necessary when defining a polymorphic operator.
+Call sites use the operator in infix position: `(1, 2) +^ (3, 4)`. The parenthesized-name form is the only way to declare an operator.
 
 ### Operator Names and Fixity
 
@@ -560,16 +548,6 @@ It is not permitted to define operators with the names `&&` or `||` (although th
 ### Shadowing Built-in Operators
 
 A built-in operator can be shadowed (i.e. a new `+` can be defined). This will result in the built-in polymorphic operator becoming inaccessible, except through the intrinsics module.
-
-### Prefix Notation
-
-An infix operator can also be defined with prefix notation, like an ordinary function, by enclosing it in parentheses:
-
-```wyn
-def (+) (x: i32) (y: i32) = x - y
-```
-
-This is necessary when defining operators that take type or shape parameters.
 
 ---
 
