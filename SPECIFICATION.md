@@ -1519,9 +1519,6 @@ Example usage:
 let position: vec3f32 = @[1.0, 2.0, 3.0]
 let color: vec4f32 = @[1.0, 0.0, 0.0, 1.0]
 
--- Alternative: explicit constructor syntax
-let pos2: vec3f32 = vec3 1.0f32 2.0f32 3.0f32
-
 -- Built-in variables often require vector types
 #[vertex]
 entry vertex_main() #[builtin(position)] vec4f32 =
