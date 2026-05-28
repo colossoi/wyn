@@ -2333,3 +2333,58 @@ fn plain_type_with_function_rhs_is_rejected() {
         try_typecheck_program("type cmp = i32 -> i32 -> i32\ndef ascending: cmp = |x: i32, y: i32| x - y");
     assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
 }
+
+// =============================================================================
+// Causality restriction (spec lines 1076-1098)
+// =============================================================================
+//
+// A size parameter must be "used as the size of some parameter" — i.e. it
+// must appear as a concrete array size on at least one of the function's
+// value parameters. The spec gives the minimal counterexample
+// `def f [n] (x: i32) = n` and says it should be rejected.
+
+#[test]
+#[ignore = "spec section \"Size Types > Causality Restriction\": a size parameter never used as a concrete array size should be a type error; today it is silently accepted"]
+fn aspiration_causality_unused_size_param_rejected() {
+    let result = try_typecheck_program("def f [n] (x: i32) i32 = n");
+    assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
+}
+
+// =============================================================================
+// Multi-dimensional chained slicing (spec line 720-722)
+// =============================================================================
+//
+// Per the spec, multi-dim slicing is expressed by chaining single-dim
+// slices: `a[i:j][k:l]` slices the outer dim then the inner. Single-dim
+// `a[i:j]` works on rank-1 arrays today; applying a second slice to the
+// sub-array returned by the outer slice is not yet supported.
+
+#[test]
+#[ignore = "spec section \"Expressions > Semantics of Simple Expressions > a[i:j:s]\": chained multi-dim slicing a[i:j][k:l] should type-check; today applying a slice to the sub-array returned by an outer slice fails"]
+fn aspiration_chained_multidim_slice() {
+    let source = "def f(a: [3][4]i32) [2][3]i32 = a[0:2][0:3]";
+    let result = try_typecheck_program(source);
+    assert!(result.is_ok());
+}
+
+// =============================================================================
+// Empty array literals (spec lines 1100-1106)
+// =============================================================================
+//
+// Constructing an empty array via `[] : t` requires the element type's
+// shape to be statically known at the point of construction. The spec
+// example pairs an empty `[][]i32` with a later `[filter (>0) xs]`,
+// whose inner array size is unknown at the point `a` is constructed —
+// that should be a type error.
+
+#[test]
+#[ignore = "spec section \"Size Types > Empty Array Literals\": empty array whose element shape isn't known at the construction point should be a type error; today this program is silently accepted"]
+fn aspiration_empty_array_with_unknown_inner_size_rejected() {
+    let source = "\
+def main (b: bool) (xs: []i32) bool =\n\
+  let a = [] : [][]i32 in\n\
+  let bs = [filter (>0) xs] in\n\
+  a[0] == bs[0]\n";
+    let result = try_typecheck_program(source);
+    assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
+}
