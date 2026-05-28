@@ -712,14 +712,14 @@ A record expression consists of a comma-separated sequence of field expressions.
 Each field may only be defined once.
 
 #### a[i]
-Return the element at the given position in the array. The index may be a comma-separated list of indexes instead of just a single index. If the number of indices given is less than the rank of the array, an array is returned. The index may be of any unsigned integer type.
+Return the element at the given position in the array. The index may be of any unsigned integer type. Multi-dimensional arrays are indexed by chaining: `a[i][j]` selects an element from a rank-2 array; `a[i]` alone returns the inner sub-array.
 
 The array `a` must be a variable name or a parenthesised expression. Furthermore, there may not be a space between `a` and the opening bracket. This disambiguates the array indexing `a[i]`, from `a [i]`, which is a function call with a literal array.
 
 #### a[i:j:s]
 Return a slice of the array `a` from index `i` to `j`, the former inclusive and the latter exclusive, taking every `s`-th element. The `s` parameter may not be zero. If `s` is negative, it means to start at `i` and descend by steps of size `s` to `j` (not inclusive). Slicing can be done only with expressions of type `i64`.
 
-It is generally a bad idea for `s` to be non-constant. Slicing of multiple dimensions can be done by separating with commas, and may be intermixed freely with indexing.
+It is generally a bad idea for `s` to be non-constant. Slicing of multiple dimensions is done by chaining: `a[i:j][k:l]` slices the outer dimension first, then the inner one.
 
 If `s` is elided it defaults to 1. If `i` or `j` is elided, their value depends on the sign of `s`. If `s` is positive, `i` become 0 and `j` become the length of the array. If `s` is negative, `i` becomes the length of the array minus one, and `j` becomes minus one. This means that `a[::-1]` is the reverse of the array `a`.
 
@@ -880,8 +880,8 @@ An operator section that is equivalent to `|x| x binop y`.
 #### (.a.b.c)
 An operator section that is equivalent to `|x| x.a.b.c`.
 
-#### (.[i,j])
-An operator section that is equivalent to `|x| x[i,j]`.
+#### (.[i])
+An operator section that is equivalent to `|x| x[i]`. For multi-dimensional indexing, chain: `(.[i][j])` is `|x| x[i][j]`.
 
 ---
 
@@ -1799,7 +1799,7 @@ A Wyn program is read top-down, and all functions must be declared in the order 
 
 Wyn supports a range of integer types, floating point types, and booleans (see Primitive Types and Values). A numeric literal can be suffixed with its desired type, such as `1i8` for an eight-bit signed integer. Un-adorned numerals have their type inferred based on use. This only works for built-in numeric types.
 
-Arrays are a built-in type. The type of an array containing elements of type `t` is written `[]t` (not `[t]` as in Haskell), and we may optionally annotate it with a size as `[n]t` (see Shape Declarations). Array values are written as `[1,2,3]`. Array indexing is written `a[i]` with no space allowed between the array name and the brace. Indexing of multi-dimensional arrays is written `a[i,j]`. Arrays are 0-indexed.
+Arrays are a built-in type. The type of an array containing elements of type `t` is written `[]t` (not `[t]` as in Haskell), and we may optionally annotate it with a size as `[n]t` (see Shape Declarations). Array values are written as `[1,2,3]`. Array indexing is written `a[i]` with no space allowed between the array name and the brace. Indexing of multi-dimensional arrays is done by chaining: `a[i][j]`. Arrays are 0-indexed.
 
 All types can be combined in tuples as usual, as well as in structurally typed records, as in Standard ML and Flix. Non-recursive sum types are supported, and are also structurally typed. Abstract types are possible via the module system; see Modules.
 
