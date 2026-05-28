@@ -2898,3 +2898,53 @@ fn multidim_composite_local_const_and_runtime_index() {
     // End-to-end smoke: the SPIR-V backend accepts the program.
     let _ = crate::compile_thru_spirv(src).expect("compile_thru_spirv should succeed");
 }
+
+// Stage 2: runtime-outer / fixed-inner storage view. Pins the descriptor
+// shape — the per-element byte count must reflect the full inner sub-array
+// size (`[4]u32` → 16 B), not the innermost scalar (4 B), because the
+// dispatch length is `byte_size / elem_bytes` and the buffer holds one
+// `[4]u32` per dispatched thread.
+#[test]
+fn multidim_view_inner_fixed_carries_subarray_elem_bytes() {
+    use crate::pipeline_descriptor::{BufferLen, DispatchLen, DispatchSize, Pipeline};
+    let src = r#"
+        #[compute]
+        entry row_sums(buf: []([4]u32)) []u32 =
+            map(|row: [4]u32| row[0] + row[1] + row[2] + row[3], buf)
+    "#;
+    let lowered = crate::compile_thru_spirv(src).expect("compile_thru_spirv");
+    let Pipeline::Compute(cp) = lowered.pipeline.pipelines.first().expect("one pipeline") else {
+        panic!("expected single-compute pipeline");
+    };
+    match &cp.dispatch_size {
+        DispatchSize::DerivedFrom { len, .. } => match len {
+            DispatchLen::InputBinding {
+                set,
+                binding,
+                elem_bytes,
+            } => {
+                assert_eq!(*set, 0);
+                assert_eq!(*binding, 0);
+                assert_eq!(
+                    *elem_bytes, 16,
+                    "buf: []([4]u32) — each iterated element is [4]u32 (16 bytes), not 4"
+                );
+            }
+            other => panic!("expected InputBinding dispatch length, got {other:?}"),
+        },
+        other => panic!("expected DerivedFrom dispatch size, got {other:?}"),
+    }
+    // The output `[]u32` is one u32 per dispatched thread.
+    let output_len = cp.bindings.iter().find_map(|b| match b {
+        crate::pipeline_descriptor::Binding::StorageBuffer { name, length, .. }
+            if name == "row_sums_output" =>
+        {
+            length.clone()
+        }
+        _ => None,
+    });
+    match output_len {
+        Some(BufferLen::SameAsDispatch { elem_bytes }) => assert_eq!(elem_bytes, 4),
+        other => panic!("output should be SameAsDispatch{{elem_bytes: 4}}, got {other:?}"),
+    }
+}

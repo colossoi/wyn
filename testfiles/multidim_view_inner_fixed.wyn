@@ -1,0 +1,8 @@
+-- Stage 2: runtime-outer / fixed-inner storage view. Entry parameter
+-- `buf: []([4]u32)` is a runtime-sized array whose element is a fixed
+-- [4]u32 sub-array. The map dispatches over the outer (runtime) dim;
+-- each thread receives one inner [4]u32 row and reduces it locally.
+
+#[compute]
+entry row_sums(buf: []([4]u32)) []u32 =
+    map(|row: [4]u32| row[0] + row[1] + row[2] + row[3], buf)
