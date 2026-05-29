@@ -246,7 +246,7 @@ fn convert_function(
     pure_constants: &HashSet<String>,
 ) -> Result<ConvertedFunc, ConvertError> {
     let symbols = ctx.symbols;
-    let def_name = symbols.get(def.name).expect("BUG").clone();
+    let def_name = symbol_name(symbols, def.name)?.to_string();
 
     // Extern functions: emit a 1-block Unreachable stub directly; no EGIR
     // passes apply to them. They flow through as `Function` records.
@@ -272,11 +272,8 @@ fn convert_function(
     let ret_type = inner_body.ty.clone();
     let param_info: Vec<(Type<TypeName>, String)> = params
         .iter()
-        .map(|(sym, ty)| {
-            let name = symbols.get(*sym).unwrap_or(&format!("arg")).clone();
-            (ty.clone(), name)
-        })
-        .collect();
+        .map(|(sym, ty)| Ok((ty.clone(), symbol_name(symbols, *sym)?.to_string())))
+        .collect::<Result<_, ConvertError>>()?;
 
     let mut converter = ctx.new_converter(pure_constants);
     for (i, (sym, ty)) in params.iter().enumerate() {
