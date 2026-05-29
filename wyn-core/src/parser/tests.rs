@@ -3243,13 +3243,6 @@ fn test_parse_existential_type_multiple_vars() {
 }
 
 #[test]
-#[ignore = "existentials are now accepted in any type position (parse_type dispatches to parse_existential_type on `?`) so type~/type^ declaration RHSes can use them. Restricting them to return position is a type-checker concern, not a parser concern."]
-fn test_parse_existential_type_in_parameter_rejected() {
-    // Existential types are only valid in return position, not parameter position
-    expect_parse_error("def len(arr: ?k. [k]i32) i32 = ???", |_| Ok(()));
-}
-
-#[test]
 fn test_numeric_field_access() {
     // Numeric field access like t.0 for tuple indexing
     let src = "def x(t: (i32, i32)) i32 = t.0";
