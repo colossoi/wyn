@@ -257,7 +257,7 @@ fn lower_slot(
 /// input buffer. The auto-bound entry output is unused; the caller (the
 /// parallel-scan reroute or the host pipeline) reads the result from the input
 /// binding.
-pub(crate) fn result_soac_is_consuming_scan(graph: &EGraph, result: NodeId) -> bool {
+fn result_soac_is_consuming_scan(graph: &EGraph, result: NodeId) -> bool {
     for (_bid, block) in &graph.skeleton.blocks {
         for se in &block.side_effects {
             if se.result == Some(result) {
@@ -277,7 +277,7 @@ pub(crate) fn result_soac_is_consuming_scan(graph: &EGraph, result: NodeId) -> b
 /// True iff the side-effect producing `result` is a Map or Scan(Fresh) SOAC
 /// that can be retargeted to an OutputView. Scans already at `InputBuffer` are
 /// skipped — those are handled by `result_soac_is_consuming_scan`.
-pub(crate) fn result_soac_is_map_or_scan(graph: &EGraph, result: NodeId) -> bool {
+fn result_soac_is_map_or_scan(graph: &EGraph, result: NodeId) -> bool {
     for (_bid, block) in &graph.skeleton.blocks {
         for se in &block.side_effects {
             if se.result == Some(result) {
@@ -298,7 +298,7 @@ pub(crate) fn result_soac_is_map_or_scan(graph: &EGraph, result: NodeId) -> bool
 /// Retarget the Map/Scan producing `target_result` to write directly into
 /// `output_view`: flip its `destination` to `OutputView` and append the view
 /// as its last operand. Callers must screen with `result_soac_is_map_or_scan`.
-pub(crate) fn rewrite_map_scan_to_into(graph: &mut EGraph, target_result: NodeId, output_view: NodeId) {
+fn rewrite_map_scan_to_into(graph: &mut EGraph, target_result: NodeId, output_view: NodeId) {
     for (_bid, block) in graph.skeleton.blocks.iter_mut() {
         for se in &mut block.side_effects {
             if se.result != Some(target_result) {
@@ -356,7 +356,7 @@ pub(crate) fn rewrite_map_scan_to_into(graph: &mut EGraph, target_result: NodeId
 
 /// True iff `ty` is an array whose size is a free variable or a placeholder
 /// (i.e. runtime-sized rather than a known constant).
-pub(crate) fn is_unsized_array(ty: &Type<TypeName>) -> bool {
+fn is_unsized_array(ty: &Type<TypeName>) -> bool {
     ty.array_size()
         .map(|s| {
             matches!(
