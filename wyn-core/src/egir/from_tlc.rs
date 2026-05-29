@@ -12,8 +12,13 @@ use crate::tlc::SoacBody;
 use crate::tlc::VarRef;
 use std::collections::{HashMap, HashSet};
 
+use super::publish::PipelineDescriptorPublish;
 use super::types::EffectToken;
 use crate::ast::{Span, TypeName};
+use crate::binding_layout::{
+    extract_io_decoration, extract_sampler_binding, extract_storage_binding, extract_texture_binding,
+    extract_uniform_binding,
+};
 use crate::interface;
 use crate::ssa::framework::BlockId;
 use crate::ssa::types::{ControlHeader, FuncBody, Function, InstKind, ValueRef};
@@ -51,6 +56,11 @@ pub enum ConvertError {
     GraphError(String),
     /// Unsupported TLC construct (todo).
     Unsupported(String),
+    /// Compiler invariant violated — a downstream pass should have made
+    /// this state unreachable. Surfaces as a propagated error rather than
+    /// a panic so the caller can label it as an internal compiler error
+    /// in user-facing output.
+    Internal(String),
 }
 
 impl std::fmt::Display for ConvertError {
@@ -58,6 +68,7 @@ impl std::fmt::Display for ConvertError {
         match self {
             ConvertError::GraphError(msg) => write!(f, "EGraph conversion error: {}", msg),
             ConvertError::Unsupported(msg) => write!(f, "Unsupported: {}", msg),
+            ConvertError::Internal(msg) => write!(f, "internal compiler error: {}", msg),
         }
     }
 }
@@ -135,7 +146,7 @@ pub fn run(
                 }
             }
             DefMeta::EntryPoint(entry) => {
-                let workgroup = lookup_workgroup_size(&pipeline, &entry.name);
+                let workgroup = pipeline.workgroup_size_of(&entry.name);
                 // If TLC parallelize reserved a specific output binding
                 // for this entry, honor it; otherwise auto-allocate.
                 // Map and Scan results are single `EntryOutput` buffers whose
@@ -174,11 +185,8 @@ pub fn run(
     //     descriptor-level binding declarations routed from each
     //     entry's `#[storage]`/`#[uniform]`/etc. attributes
     //   - `#[location(N)]` graphics IO on vertex/fragment entries
-    {
-        use crate::egir::publish::PipelineDescriptorPublish;
-        pipeline.publish_implicit_bindings(&entry_points);
-        pipeline.publish_graphics_io(&entry_points);
-    }
+    pipeline.publish_implicit_bindings(&entry_points);
+    pipeline.publish_graphics_io(&entry_points);
 
     Ok(EgirInner::new(
         functions,
@@ -257,27 +265,6 @@ fn convert_function(
     )))
 }
 
-/// Convert an entry point directly via the EGraph Converter.
-/// Look up the workgroup size the parallelizer chose for this entry in
-/// the pipeline descriptor. Returns the default `(64, 1, 1)` when the
-/// entry isn't in the descriptor (e.g. graphics entries; non-compute
-/// `entry` calls below skip this anyway).
-fn lookup_workgroup_size(pipeline: &PipelineDescriptor, entry_name: &str) -> (u32, u32, u32) {
-    use crate::pipeline_descriptor::Pipeline;
-    for p in &pipeline.pipelines {
-        match p {
-            Pipeline::Compute(cp) if cp.entry_point == entry_name => return cp.workgroup_size,
-            Pipeline::MultiCompute(mp) => {
-                if let Some(stage) = mp.stages.iter().find(|s| s.entry_point == entry_name) {
-                    return stage.workgroup_size;
-                }
-            }
-            _ => {}
-        }
-    }
-    (64, 1, 1)
-}
-
 fn convert_entry_point(
     def: &TlcDef,
     entry: &interface::EntryDecl,
@@ -318,13 +305,12 @@ fn convert_entry_point(
 
     for (i, (sym, ty)) in params.iter().enumerate() {
         let name = symbols.get(*sym).expect("BUG: symbol not in table").clone();
-        let decoration = entry.params.get(i).and_then(crate::binding_layout::extract_io_decoration);
+        let decoration = entry.params.get(i).and_then(extract_io_decoration);
         let size_hint = entry.params.get(i).and_then(extract_size_hint);
-        let uniform_binding = entry.params.get(i).and_then(crate::binding_layout::extract_uniform_binding);
-        let attr_storage_binding =
-            entry.params.get(i).and_then(crate::binding_layout::extract_storage_binding);
-        let texture_binding = entry.params.get(i).and_then(crate::binding_layout::extract_texture_binding);
-        let sampler_binding = entry.params.get(i).and_then(crate::binding_layout::extract_sampler_binding);
+        let uniform_binding = entry.params.get(i).and_then(extract_uniform_binding);
+        let attr_storage_binding = entry.params.get(i).and_then(extract_storage_binding);
+        let texture_binding = entry.params.get(i).and_then(extract_texture_binding);
+        let sampler_binding = entry.params.get(i).and_then(extract_sampler_binding);
 
         // Uniqueness is an ownership-tracking concept that's already been
         // consumed by `apply_ownership`; codegen operates on the stripped
@@ -385,7 +371,12 @@ fn convert_entry_point(
             && !matches!(&decoration, Some(IoDecoration::BuiltIn(_)))
         {
             let offset = pc_offset;
-            pc_offset += crate::ssa::layout::type_byte_size(ty).unwrap_or(4);
+            pc_offset += crate::ssa::layout::type_byte_size(ty).ok_or_else(|| {
+                ConvertError::Internal(format!(
+                    "push-constant param `{}` has no static byte layout",
+                    name
+                ))
+            })?;
             Some(offset)
         } else {
             None

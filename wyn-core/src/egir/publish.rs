@@ -43,6 +43,12 @@ pub trait PipelineDescriptorPublish {
     /// pipelines from `#[location(N)]` decorations on the matching
     /// vertex/fragment entry's inputs/outputs.
     fn publish_graphics_io(&mut self, entries: &[EgirEntry]);
+
+    /// Workgroup size the parallelizer chose for the compute entry
+    /// `entry_name`, or `(64, 1, 1)` when the entry isn't in the
+    /// descriptor (e.g. graphics entries — non-compute call sites skip
+    /// this anyway).
+    fn workgroup_size_of(&self, entry_name: &str) -> (u32, u32, u32);
 }
 
 impl PipelineDescriptorPublish for PipelineDescriptor {
@@ -202,6 +208,21 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                 _ => {}
             }
         }
+    }
+
+    fn workgroup_size_of(&self, entry_name: &str) -> (u32, u32, u32) {
+        for p in &self.pipelines {
+            match p {
+                Pipeline::Compute(cp) if cp.entry_point == entry_name => return cp.workgroup_size,
+                Pipeline::MultiCompute(mp) => {
+                    if let Some(stage) = mp.stages.iter().find(|s| s.entry_point == entry_name) {
+                        return stage.workgroup_size;
+                    }
+                }
+                _ => {}
+            }
+        }
+        (64, 1, 1)
     }
 }
 
