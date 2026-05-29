@@ -88,6 +88,28 @@ fn symbol_name(symbols: &SymbolTable, sym: SymbolId) -> Result<&str, ConvertErro
         .ok_or_else(|| ConvertError::Internal(format!("symbol {sym:?} not in symbol table")))
 }
 
+/// Read-only state shared across every converter built during a single
+/// `run` — the top-level def index, the arity-0 name → symbol map, and
+/// the symbol table. Acts as a factory: `new_converter` snapshots the
+/// caller's current `pure_constants` set into a fresh `Converter`,
+/// keeping the per-call `clone()` inside one method.
+struct GlobalContext<'a> {
+    top_level: &'a HashMap<SymbolId, &'a TlcDef>,
+    constants_by_name: &'a HashMap<String, SymbolId>,
+    symbols: &'a SymbolTable,
+}
+
+impl<'a> GlobalContext<'a> {
+    fn new_converter(&self, pure_constants: &HashSet<String>) -> Converter<'a> {
+        Converter::new(
+            self.top_level,
+            self.constants_by_name,
+            self.symbols,
+            pure_constants.clone(),
+        )
+    }
+}
+
 // ============================================================================
 // Public entry point
 // ============================================================================
@@ -106,6 +128,12 @@ pub fn run(
 
     let constants_by_name = program.value_defs_by_name();
 
+    let ctx = GlobalContext {
+        top_level: &top_level,
+        constants_by_name: &constants_by_name,
+        symbols,
+    };
+
     // Phase 1: detect pure constants. We elaborate each arity-0 def's body
     // through the full EGIR pipeline once (using a throwaway chain) to see if
     // it collapses to a purely-constant FuncBody. Constants are hoisted to
@@ -122,12 +150,7 @@ pub fn run(
         }
         let def_name = symbols.get(def.name).expect("BUG: symbol not in table").clone();
 
-        let mut converter = Converter::new(
-            &top_level,
-            &constants_by_name,
-            symbols,
-            pure_constant_names.clone(), // why is this cloned here?
-        );
+        let mut converter = ctx.new_converter(&pure_constant_names);
         if let Ok(result_nid) = converter.convert_term(&def.body) {
             converter.set_return(Some(result_nid));
             if let Some(body) = converter.probe_constant_body(def.body.ty.clone()) {
@@ -152,8 +175,7 @@ pub fn run(
                 if pure_constant_names.contains(def_name) {
                     continue;
                 }
-                match convert_function(def, &top_level, &constants_by_name, symbols, &pure_constant_names)?
-                {
+                match convert_function(def, &ctx, &pure_constant_names)? {
                     ConvertedFunc::Extern(f) => externs.push(f),
                     ConvertedFunc::Regular(fe) => functions.push(fe),
                 }
@@ -178,9 +200,7 @@ pub fn run(
                 let ep = convert_entry_point(
                     def,
                     entry,
-                    &top_level,
-                    &constants_by_name,
-                    symbols,
+                    &ctx,
                     &pure_constant_names,
                     workgroup,
                     forced_output_binding,
@@ -221,11 +241,10 @@ enum ConvertedFunc {
 
 fn convert_function(
     def: &TlcDef,
-    top_level: &HashMap<SymbolId, &TlcDef>,
-    constants_by_name: &HashMap<String, SymbolId>,
-    symbols: &SymbolTable,
+    ctx: &GlobalContext,
     pure_constants: &HashSet<String>,
 ) -> Result<ConvertedFunc, ConvertError> {
+    let symbols = ctx.symbols;
     let def_name = symbols.get(def.name).expect("BUG").clone();
 
     // Extern functions: emit a 1-block Unreachable stub directly; no EGIR
@@ -258,7 +277,7 @@ fn convert_function(
         })
         .collect();
 
-    let mut converter = Converter::new(top_level, constants_by_name, symbols, pure_constants.clone());
+    let mut converter = ctx.new_converter(pure_constants);
     for (i, (sym, ty)) in params.iter().enumerate() {
         let nid = converter.graph.add_func_param(i, ty.clone());
         converter.locals.insert(*sym, nid);
@@ -281,9 +300,7 @@ fn convert_function(
 fn convert_entry_point(
     def: &TlcDef,
     entry: &interface::EntryDecl,
-    top_level: &HashMap<SymbolId, &TlcDef>,
-    constants_by_name: &HashMap<String, SymbolId>,
-    symbols: &SymbolTable,
+    ctx: &GlobalContext,
     pure_constants: &HashSet<String>,
     workgroup: (u32, u32, u32),
     forced_output_binding: Option<(u32, u32)>,
@@ -291,6 +308,7 @@ fn convert_entry_point(
 ) -> Result<EgirEntry, ConvertError> {
     use crate::ssa::types::{EntryInput, ExecutionModel, IoDecoration};
 
+    let symbols = ctx.symbols;
     let def_name = symbol_name(symbols, def.name)?;
     let (inner_body, params) = extract_lambda_params(&def.body);
     let is_compute = matches!(entry.entry_type, interface::Attribute::Compute);
@@ -301,7 +319,7 @@ fn convert_entry_point(
         .map(|(sym, ty)| Ok((ty.clone(), symbol_name(symbols, *sym)?.to_string())))
         .collect::<Result<_, ConvertError>>()?;
 
-    let mut converter = Converter::new(top_level, constants_by_name, symbols, pure_constants.clone());
+    let mut converter = ctx.new_converter(pure_constants);
 
     // Build entry inputs alongside the symbol → NodeId bindings. A compute
     // entry param that's a tuple-of-unsized-arrays gets one storage binding
