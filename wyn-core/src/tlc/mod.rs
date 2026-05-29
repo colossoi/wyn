@@ -1929,8 +1929,9 @@ impl<'a> Transformer<'a> {
                          TypeChecked::reject_type_holes"
                     );
                 }
-                let hole_ty = self.lookup_type(expr.h.id).unwrap_or(ty.clone());
-                defaults::default_term_for_type(self, &hole_ty, span)
+                // `ty` is the table lookup at the top of this function (which
+                // already panics if missing) — no need to look it up again.
+                defaults::default_term_for_type(self, &ty, span)
             }
         }
     }
