@@ -28,10 +28,12 @@ pub enum Value {
     Array(Vec<Value>),
     Vector(Vec<Value>),
 
-    /// Partial application: function waiting for more args
+    /// Partial application: function waiting for more args. Each
+    /// accumulated arg carries its source type so the reifier can
+    /// rebuild the App term without re-deriving types from the def.
     Partial {
         sym: SymbolId,
-        args: Vec<Value>,
+        args: Vec<(Value, Type<TypeName>)>,
         remaining: usize,
     },
 
@@ -42,30 +44,6 @@ pub enum Value {
 impl Value {
     fn is_known(&self) -> bool {
         !matches!(self, Value::Unknown(_))
-    }
-}
-
-/// Extract parameter types from an arrow type.
-/// `A -> B -> C -> R` yields `[A, B, C]`.
-fn extract_param_types(ty: &Type<TypeName>) -> Vec<Type<TypeName>> {
-    let mut params = Vec::new();
-    let mut current = ty;
-    while let Type::Constructed(TypeName::Arrow, args) = current {
-        if args.len() == 2 {
-            params.push(args[0].clone());
-            current = &args[1];
-        } else {
-            break;
-        }
-    }
-    params
-}
-
-/// Extract argument types from an application term.
-fn extract_arg_types_from_app(term: &Term) -> Vec<Type<TypeName>> {
-    match &term.kind {
-        TermKind::App { args, .. } => args.iter().map(|a| a.ty.clone()).collect(),
-        _ => vec![],
     }
 }
 
@@ -188,9 +166,13 @@ impl PartialEvaluator {
                 }
             }
 
-            // Application - evaluate args and apply
+            // Application - evaluate args (pairing each with its source
+            // term type) and apply. Carrying types alongside values lets
+            // downstream reification rebuild the App without re-deriving
+            // types from the def.
             TermKind::App { func, args } => {
-                let arg_vals: Vec<Value> = args.iter().map(|a| self.eval(a)).collect();
+                let arg_vals: Vec<(Value, Type<TypeName>)> =
+                    args.iter().map(|a| (self.eval(a), a.ty.clone())).collect();
                 self.apply(func, arg_vals, term)
             }
 
@@ -275,11 +257,11 @@ impl PartialEvaluator {
     }
 
     /// Apply a function to arguments based on the base term kind.
-    fn apply(&mut self, base: &Term, args: Vec<Value>, original: &Term) -> Value {
+    fn apply(&mut self, base: &Term, args: Vec<(Value, Type<TypeName>)>, original: &Term) -> Value {
         match &base.kind {
             TermKind::BinOp(op) => {
                 if args.len() >= 2 {
-                    self.eval_binop(op, &args[0], &args[1], original)
+                    self.eval_binop(op, &args[0].0, &args[1].0, original)
                 } else {
                     Value::Unknown(original.clone())
                 }
@@ -287,7 +269,7 @@ impl PartialEvaluator {
 
             TermKind::UnOp(op) => {
                 if !args.is_empty() {
-                    self.eval_unop(op, &args[0], original)
+                    self.eval_unop(op, &args[0].0, original)
                 } else {
                     Value::Unknown(original.clone())
                 }
@@ -317,17 +299,14 @@ impl PartialEvaluator {
     /// reduce the call further but the args may have been substituted
     /// (e.g. a let-bound `Var` resolved to its rhs term). Cloning the
     /// original term in this position would discard those substitutions.
-    fn residualize_call(&mut self, func: Term, args: Vec<Value>, original: &Term) -> Value {
-        let spine_types = extract_arg_types_from_app(original);
-        let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
-        let arg_terms: Vec<Term> = args
-            .into_iter()
-            .enumerate()
-            .map(|(i, arg)| {
-                let arg_ty = spine_types.get(i).unwrap_or(&unit_ty);
-                self.reify(arg, arg_ty, original.span)
-            })
-            .collect();
+    fn residualize_call(
+        &mut self,
+        func: Term,
+        args: Vec<(Value, Type<TypeName>)>,
+        original: &Term,
+    ) -> Value {
+        let arg_terms: Vec<Term> =
+            args.into_iter().map(|(arg, ty)| self.reify(arg, &ty, original.span)).collect();
         let result = self.mk_term(
             original.ty.clone(),
             original.span,
@@ -340,7 +319,7 @@ impl PartialEvaluator {
     }
 
     /// Apply a named function to arguments.
-    fn apply_var(&mut self, sym: SymbolId, args: Vec<Value>, original: &Term) -> Value {
+    fn apply_var(&mut self, sym: SymbolId, args: Vec<(Value, Type<TypeName>)>, original: &Term) -> Value {
         // Check if this is a let-bound variable aliasing a function.
         // This handles cases like `let f = g in f x` where g is a known function.
         if let Some(Value::Partial {
@@ -370,7 +349,7 @@ impl PartialEvaluator {
         // Check for known function
         if let Some(def) = self.defs.get(&sym).cloned() {
             let args_len = args.len();
-            let all_known = args.iter().all(|a| a.is_known());
+            let all_known = args.iter().all(|(v, _)| v.is_known());
             if args_len >= def.arity && def.arity > 0 && all_known {
                 // Fully applied with known args - inline
                 self.inline(&def, args)
@@ -392,7 +371,7 @@ impl PartialEvaluator {
     }
 
     /// Inline a function call.
-    fn inline(&mut self, def: &Def, args: Vec<Value>) -> Value {
+    fn inline(&mut self, def: &Def, args: Vec<(Value, Type<TypeName>)>) -> Value {
         let mut body = &def.body;
         let mut args_iter = args.into_iter();
 
@@ -404,7 +383,7 @@ impl PartialEvaluator {
                 // Bind as many args as this lambda has params
                 let mut consumed = 0;
                 for (param, _) in params {
-                    if let Some(arg) = args_iter.next() {
+                    if let Some((arg, _arg_ty)) = args_iter.next() {
                         self.env.insert(*param, arg);
                         consumed += 1;
                     } else {
@@ -479,8 +458,9 @@ impl PartialEvaluator {
             TermKind::App { func, args } if matches!(func.kind, TermKind::BinOp(_) | TermKind::UnOp(_)) => {
                 let folded_args: Vec<Term> = args.iter().map(|a| self.fold_in_body(a)).collect();
                 // Try to evaluate if all args are literals
-                let arg_vals: Vec<Value> = folded_args.iter().map(|a| self.try_literal_value(a)).collect();
-                if arg_vals.iter().all(|v| !matches!(v, Value::Unknown(_))) {
+                let arg_vals: Vec<(Value, Type<TypeName>)> =
+                    folded_args.iter().map(|a| (self.try_literal_value(a), a.ty.clone())).collect();
+                if arg_vals.iter().all(|(v, _)| !matches!(v, Value::Unknown(_))) {
                     let result = self.apply(func, arg_vals, term);
                     if !matches!(result, Value::Unknown(_)) {
                         return self.reify(result, &term.ty, term.span);
@@ -593,7 +573,10 @@ impl PartialEvaluator {
     /// Try to extract a literal Value from a term. Returns Unknown for non-literals.
     fn try_literal_value(&self, term: &Term) -> Value {
         match &term.kind {
-            TermKind::IntLit(s) => Value::Int(s.parse().unwrap_or(0)),
+            TermKind::IntLit(s) => Value::Int(
+                s.parse()
+                    .unwrap_or_else(|e| panic!("lexer-produced IntLit `{s}` failed to parse as i64: {e}")),
+            ),
             TermKind::FloatLit(f) => Value::Float(*f as f64),
             TermKind::BoolLit(b) => Value::Bool(*b),
             _ => Value::Unknown(term.clone()),
@@ -710,27 +693,34 @@ impl PartialEvaluator {
 
     fn reify_tuple(&mut self, elems: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {
         let component_types = match ty {
-            Type::Constructed(TypeName::Tuple(_), args) => args.clone(),
-            _ => vec![],
+            Type::Constructed(TypeName::Tuple(_), args) => args.as_slice(),
+            other => panic!(
+                "reify_tuple dispatched on non-tuple type {other:?} — \
+                 caller (`reify` for Value::Tuple) is responsible for the type shape",
+            ),
         };
-        let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
+        assert_eq!(
+            elems.len(),
+            component_types.len(),
+            "reify_tuple: element count {} does not match tuple type arity {}",
+            elems.len(),
+            component_types.len(),
+        );
         let part_terms: Vec<Term> = elems
             .into_iter()
-            .enumerate()
-            .map(|(i, elem)| {
-                let elem_ty = component_types.get(i).unwrap_or(&unit_ty);
-                self.reify(elem, elem_ty, span)
-            })
+            .zip(component_types.iter())
+            .map(|(elem, elem_ty)| self.reify(elem, elem_ty, span))
             .collect();
         self.mk_term(ty.clone(), span, TermKind::Tuple(part_terms))
     }
 
     fn reify_array(&mut self, elems: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {
-        let elem_ty = ty
-            .elem_type()
-            .filter(|_| ty.is_array())
-            .cloned()
-            .unwrap_or_else(|| Type::Constructed(TypeName::Unit, vec![]));
+        let elem_ty = crate::types::array_elem(ty).cloned().unwrap_or_else(|| {
+            panic!(
+                "reify_array dispatched on non-array type {ty:?} — \
+                 caller (`reify` for Value::Array) is responsible for the type shape"
+            )
+        });
         let part_terms: Vec<Term> =
             elems.into_iter().map(|elem| self.reify(elem, &elem_ty, span)).collect();
         self.mk_term(
@@ -741,24 +731,27 @@ impl PartialEvaluator {
     }
 
     fn reify_vector(&mut self, elems: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {
-        let elem_ty = ty.elem_type().cloned().unwrap_or_else(|| Type::Constructed(TypeName::Unit, vec![]));
+        let elem_ty = ty.elem_type().cloned().unwrap_or_else(|| {
+            panic!(
+                "reify_vector dispatched on non-vec type {ty:?} — \
+                 caller (`reify` for Value::Vector) is responsible for the type shape"
+            )
+        });
         let part_terms: Vec<Term> =
             elems.into_iter().map(|elem| self.reify(elem, &elem_ty, span)).collect();
         self.mk_term(ty.clone(), span, TermKind::VecLit(part_terms))
     }
 
-    fn reify_partial(&mut self, sym: SymbolId, args: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {
-        let param_types = self.defs.get(&sym).map(|d| extract_param_types(&d.ty));
-        let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
+    fn reify_partial(
+        &mut self,
+        sym: SymbolId,
+        args: Vec<(Value, Type<TypeName>)>,
+        ty: &Type<TypeName>,
+        span: Span,
+    ) -> Term {
         let func_term = self.mk_term(ty.clone(), span, TermKind::Var(VarRef::Symbol(sym)));
-        let arg_terms: Vec<Term> = args
-            .into_iter()
-            .enumerate()
-            .map(|(i, arg)| {
-                let arg_ty = param_types.as_ref().and_then(|pts| pts.get(i)).unwrap_or(&unit_ty);
-                self.reify(arg, arg_ty, span)
-            })
-            .collect();
+        let arg_terms: Vec<Term> =
+            args.into_iter().map(|(arg, arg_ty)| self.reify(arg, &arg_ty, span)).collect();
         self.mk_term(
             ty.clone(),
             span,
@@ -769,26 +762,14 @@ impl PartialEvaluator {
         )
     }
 
-    fn reify_call(&mut self, sym: SymbolId, args: Vec<Value>, original: &Term) -> Value {
-        let spine_types = extract_arg_types_from_app(original);
-        let def_param_types = self.defs.get(&sym).map(|d| extract_param_types(&d.ty));
-        let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
+    fn reify_call(&mut self, sym: SymbolId, args: Vec<(Value, Type<TypeName>)>, original: &Term) -> Value {
         let func_term = self.mk_term(
             original.ty.clone(),
             original.span,
             TermKind::Var(VarRef::Symbol(sym)),
         );
-        let arg_terms: Vec<Term> = args
-            .into_iter()
-            .enumerate()
-            .map(|(i, arg)| {
-                let arg_ty = spine_types
-                    .get(i)
-                    .or_else(|| def_param_types.as_ref().and_then(|pts| pts.get(i)))
-                    .unwrap_or(&unit_ty);
-                self.reify(arg, arg_ty, original.span)
-            })
-            .collect();
+        let arg_terms: Vec<Term> =
+            args.into_iter().map(|(arg, arg_ty)| self.reify(arg, &arg_ty, original.span)).collect();
         let result = self.mk_term(
             original.ty.clone(),
             original.span,
