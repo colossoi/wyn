@@ -75,6 +75,19 @@ impl std::fmt::Display for ConvertError {
 
 impl std::error::Error for ConvertError {}
 
+/// Look up `sym`'s source name in `symbols`, returning a propagated
+/// `ConvertError::Internal` if the symbol isn't in the table. The
+/// situation is a compiler-internal invariant violation — every symbol
+/// reachable from a `Def` should have been registered during
+/// resolution — but propagating instead of panicking lets the caller
+/// surface a structured "internal compiler error" message.
+fn symbol_name(symbols: &SymbolTable, sym: SymbolId) -> Result<&str, ConvertError> {
+    symbols
+        .get(sym)
+        .map(String::as_str)
+        .ok_or_else(|| ConvertError::Internal(format!("symbol {sym:?} not in symbol table")))
+}
+
 // ============================================================================
 // Public entry point
 // ============================================================================
@@ -278,13 +291,15 @@ fn convert_entry_point(
 ) -> Result<EgirEntry, ConvertError> {
     use crate::ssa::types::{EntryInput, ExecutionModel, IoDecoration};
 
-    let def_name = symbols.get(def.name).expect("BUG: symbol not in table").clone();
+    let def_name = symbol_name(symbols, def.name)?;
     let (inner_body, params) = extract_lambda_params(&def.body);
     let is_compute = matches!(entry.entry_type, interface::Attribute::Compute);
 
     let ret_type = inner_body.ty.clone();
-    let param_info: Vec<(Type<TypeName>, String)> =
-        params.iter().map(|(sym, ty)| (ty.clone(), symbols.get(*sym).expect("BUG").clone())).collect();
+    let param_info: Vec<(Type<TypeName>, String)> = params
+        .iter()
+        .map(|(sym, ty)| Ok((ty.clone(), symbol_name(symbols, *sym)?.to_string())))
+        .collect::<Result<_, ConvertError>>()?;
 
     let mut converter = Converter::new(top_level, constants_by_name, symbols, pure_constants.clone());
 
@@ -304,7 +319,7 @@ fn convert_entry_point(
         entry.param_bindings.iter().map(|s| ((s.param_sym, s.tuple_field), (s.set, s.binding))).collect();
 
     for (i, (sym, ty)) in params.iter().enumerate() {
-        let name = symbols.get(*sym).expect("BUG: symbol not in table").clone();
+        let name = symbol_name(symbols, *sym)?;
         let decoration = entry.params.get(i).and_then(extract_io_decoration);
         let size_hint = entry.params.get(i).and_then(extract_size_hint);
         let uniform_binding = entry.params.get(i).and_then(extract_uniform_binding);
@@ -339,10 +354,12 @@ fn convert_entry_point(
         if let Some(field_tys) = tuple_of_views_fields {
             let mut view_nids: SmallVec<[NodeId; 4]> = SmallVec::new();
             for (field_idx, field_ty) in field_tys.iter().enumerate() {
-                let set_binding = binding_for_param
-                    .get(&(*sym, Some(field_idx)))
-                    .copied()
-                    .expect("BUG: param_bindings missing tuple-of-views slot");
+                let set_binding =
+                    binding_for_param.get(&(*sym, Some(field_idx))).copied().ok_or_else(|| {
+                        ConvertError::Internal(format!(
+                            "param_bindings missing tuple-of-views slot ({name}, field {field_idx})"
+                        ))
+                    })?;
                 inputs.push(EntryInput {
                     name: format!("{}_{}", name, field_idx),
                     ty: field_ty.clone(),
@@ -388,7 +405,7 @@ fn convert_entry_point(
         }
 
         inputs.push(EntryInput {
-            name,
+            name: name.to_string(),
             ty: ty.clone(),
             decoration,
             size_hint,
@@ -435,7 +452,7 @@ fn convert_entry_point(
 
     let (graph, control_headers) = converter.into_graph_parts();
     Ok(EgirEntry::new(
-        def_name,
+        def_name.to_string(),
         def.body.span,
         execution_model,
         inputs,
