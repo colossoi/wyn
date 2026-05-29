@@ -125,19 +125,64 @@ pub struct EntryOutput {
     pub attribute: Option<Attribute>,
 }
 
-/// One auto-allocated storage-buffer binding slot for a compute entry
-/// param. Tuple-of-views entry params expand to one slot per field.
+/// Auto-allocated storage-buffer binding(s) for a single compute-entry
+/// param. Each param produces exactly one record; the `kind`
+/// discriminates plain `[]T` view params (one buffer) from
+/// tuple-of-views params (one buffer per tuple field).
 #[derive(Debug, Clone, PartialEq)]
-pub struct EntryBindingSlot {
+pub struct EntryParamBinding {
+    /// The body-level symbol this binding describes.
+    pub param_sym: crate::SymbolId,
+    pub kind: EntryParamBindingKind,
+}
+
+/// What shape of storage allocation a param received.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EntryParamBindingKind {
+    /// Plain `[]T` view param: one storage buffer at `(set, binding)`.
+    Single {
+        set: u32,
+        binding: u32,
+        elem_ty: Type,
+    },
+    /// Tuple-of-views param: one storage buffer per tuple field,
+    /// indexed by field position.
+    TupleOfViews(Vec<TupleFieldBinding>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TupleFieldBinding {
     pub set: u32,
     pub binding: u32,
-    /// The body-level symbol the slot is allocated for.
-    pub param_sym: crate::SymbolId,
-    /// For tuple-of-views entry params: which tuple field. `None` for
-    /// plain view-array params.
-    pub tuple_field: Option<usize>,
-    /// Element type stored at each index of the buffer.
     pub elem_ty: Type,
+}
+
+impl EntryParamBinding {
+    /// Number of distinct `(set, binding)` slots this param consumed.
+    pub fn buffer_count(&self) -> u32 {
+        match &self.kind {
+            EntryParamBindingKind::Single { .. } => 1,
+            EntryParamBindingKind::TupleOfViews(fields) => fields.len() as u32,
+        }
+    }
+
+    /// First `(set, binding, elem_ty)` for this param — the only buffer
+    /// for `Single`, the field-0 buffer for `TupleOfViews`. Callers
+    /// that need to size a dispatch from the param's outer length use
+    /// this; tuple fields share the outer length by construction.
+    pub fn first_buffer(&self) -> (u32, u32, &Type) {
+        match &self.kind {
+            EntryParamBindingKind::Single {
+                set,
+                binding,
+                elem_ty,
+            } => (*set, *binding, elem_ty),
+            EntryParamBindingKind::TupleOfViews(fields) => {
+                let f = fields.first().expect("tuple-of-views with zero fields");
+                (f.set, f.binding, &f.elem_ty)
+            }
+        }
+    }
 }
 
 /// Entry point declaration (vertex/fragment/compute shader).
@@ -159,7 +204,13 @@ pub struct EntryDecl {
     /// specialization, parallelize sizing, EGIR conversion). Empty
     /// for non-compute entries and for entries before the populate
     /// pass has run.
-    pub param_bindings: Vec<EntryBindingSlot>,
+    /// Per-body-param auto-storage binding. Same length as the lambda
+    /// parameter list (one slot per body param, in declaration order);
+    /// `None` for params that don't take a storage buffer (scalars,
+    /// uniforms, push-constant routed values, builtins, etc.). Indexing
+    /// in lockstep with body params is the contract — consumers should
+    /// `zip` rather than rebuild a sym→binding map.
+    pub param_bindings: Vec<Option<EntryParamBinding>>,
     pub body: Expression,
 }
 

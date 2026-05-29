@@ -20,6 +20,7 @@ use super::{
 use crate::ast::{self, Span, TypeName};
 use crate::builtins::catalog;
 use crate::interface;
+use crate::interface::EntryParamBindingKind;
 use crate::tlc::var_term_builtin_id;
 use crate::types::TypeExt;
 use crate::{SymbolId, SymbolTable};
@@ -202,18 +203,23 @@ impl BufferSpecializer {
         // Read the cached layout from `entry.param_bindings` (populated by
         // `populate_entry_param_bindings` at the start of `run`). The body
         // rewriter handles only bare `Var(sym)` references — skip
-        // tuple-of-views slots since `t.0`/`t.1` projections aren't
+        // tuple-of-views params since `t.0`/`t.1` projections aren't
         // recognized.
-        for slot in &entry.param_bindings {
-            if slot.tuple_field.is_some() {
+        for param_binding in entry.param_bindings.iter().flatten() {
+            let EntryParamBindingKind::Single {
+                set,
+                binding,
+                elem_ty,
+            } = &param_binding.kind
+            else {
                 continue;
-            }
+            };
             self.buffer_map.insert(
-                slot.param_sym,
+                param_binding.param_sym,
                 BufferBinding {
-                    set: slot.set,
-                    binding: slot.binding,
-                    elem_ty: slot.elem_ty.clone(),
+                    set: *set,
+                    binding: *binding,
+                    elem_ty: elem_ty.clone(),
                 },
             );
         }

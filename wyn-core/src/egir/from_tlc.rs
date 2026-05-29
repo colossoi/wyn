@@ -20,6 +20,7 @@ use crate::binding_layout::{
     extract_uniform_binding,
 };
 use crate::interface;
+use crate::interface::{EntryParamBinding, EntryParamBindingKind};
 use crate::ssa::framework::BlockId;
 use crate::ssa::types::{ControlHeader, FuncBody, Function, InstKind, ValueRef};
 use crate::tlc::{
@@ -330,13 +331,17 @@ fn convert_entry_point(
     let mut inputs: Vec<EntryInput> = Vec::with_capacity(params.len());
     let mut pc_offset: u32 = 0;
 
-    // The layout was computed once at the start of buffer specialization
-    // and stored on `entry.param_bindings`. Index it by (param_sym,
-    // tuple_field) so the loop can do an O(1) lookup per param/field.
-    let binding_for_param: std::collections::HashMap<(SymbolId, Option<usize>), (u32, u32)> =
-        entry.param_bindings.iter().map(|s| ((s.param_sym, s.tuple_field), (s.set, s.binding))).collect();
+    // `entry.param_bindings` is dense — same length as `params`, with
+    // `None` for non-storage params. Walking them in lockstep means the
+    // layout and the body params can't drift; the layout pass enforces
+    // the alignment once at the call site, and consumers just zip.
+    debug_assert_eq!(
+        entry.param_bindings.len(),
+        params.len(),
+        "entry.param_bindings length must match body params"
+    );
 
-    for (i, (sym, ty)) in params.iter().enumerate() {
+    for (i, ((sym, ty), param_binding)) in params.iter().zip(entry.param_bindings.iter()).enumerate() {
         let name = symbol_name(symbols, *sym)?;
         let decoration = entry.params.get(i).and_then(extract_io_decoration);
         let size_hint = entry.params.get(i).and_then(extract_size_hint);
@@ -357,46 +362,53 @@ fn convert_entry_point(
         converter.locals.insert(*sym, fp_nid);
 
         // Tuple-of-unsized-arrays: the layout already decided which
-        // (set, binding) goes to each field. The presence of
-        // `(sym, Some(0))` in the index means the param was classified
-        // as tuple-of-views.
-        let tuple_of_views_fields: Option<&[Type<TypeName>]> = match ty {
-            Type::Constructed(TypeName::Tuple(_), field_tys)
-                if binding_for_param.contains_key(&(*sym, Some(0))) =>
-            {
-                Some(field_tys.as_slice())
+        // (set, binding) goes to each field. Reconstruct the param as a
+        // `Tuple(view…)` node so the body's reference resolves.
+        if let Some(EntryParamBinding {
+            kind: EntryParamBindingKind::TupleOfViews(fields),
+            ..
+        }) = param_binding
+        {
+            let field_tys = match ty {
+                Type::Constructed(TypeName::Tuple(_), field_tys) => field_tys.as_slice(),
+                _ => {
+                    return Err(ConvertError::Internal(format!(
+                        "tuple-of-views param `{name}` is not a tuple type"
+                    )));
+                }
+            };
+            if field_tys.len() != fields.len() {
+                return Err(ConvertError::Internal(format!(
+                    "tuple-of-views param `{name}`: layout has {} fields, type has {}",
+                    fields.len(),
+                    field_tys.len(),
+                )));
             }
-            _ => None,
-        };
-
-        if let Some(field_tys) = tuple_of_views_fields {
             let mut view_nids: SmallVec<[NodeId; 4]> = SmallVec::new();
-            for (field_idx, field_ty) in field_tys.iter().enumerate() {
-                let set_binding =
-                    binding_for_param.get(&(*sym, Some(field_idx))).copied().ok_or_else(|| {
-                        ConvertError::Internal(format!(
-                            "param_bindings missing tuple-of-views slot ({name}, field {field_idx})"
-                        ))
-                    })?;
+            for (field_idx, (field_ty, slot)) in field_tys.iter().zip(fields.iter()).enumerate() {
                 inputs.push(EntryInput {
                     name: format!("{}_{}", name, field_idx),
                     ty: field_ty.clone(),
                     decoration: None,
                     size_hint: None,
-                    storage_binding: Some(set_binding),
+                    storage_binding: Some((slot.set, slot.binding)),
                     uniform_binding: None,
                     push_constant_offset: None,
                     texture_binding: None,
                     sampler_binding: None,
                 });
-                view_nids.push(converter.emit_storage_view(set_binding.0, set_binding.1, field_ty.clone()));
+                view_nids.push(converter.emit_storage_view(slot.set, slot.binding, field_ty.clone()));
             }
             let tuple_nid = converter.intern_pure(PureOp::Tuple(view_nids.len()), view_nids, ty.clone());
             converter.locals.insert(*sym, tuple_nid);
             continue;
         }
 
-        let storage_binding = binding_for_param.get(&(*sym, None)).copied().or(attr_storage_binding);
+        let auto_storage_binding = param_binding.as_ref().and_then(|b| match &b.kind {
+            EntryParamBindingKind::Single { set, binding, .. } => Some((*set, *binding)),
+            EntryParamBindingKind::TupleOfViews(_) => None,
+        });
+        let storage_binding = auto_storage_binding.or(attr_storage_binding);
 
         let push_constant_offset = if is_compute
             && storage_binding.is_none()
@@ -434,7 +446,7 @@ fn convert_entry_point(
             sampler_binding,
         });
     }
-    let binding_num: u32 = entry.param_bindings.len() as u32;
+    let binding_num: u32 = entry.param_bindings.iter().flatten().map(|b| b.buffer_count()).sum();
 
     let execution_model = match &entry.entry_type {
         interface::Attribute::Vertex => ExecutionModel::Vertex,

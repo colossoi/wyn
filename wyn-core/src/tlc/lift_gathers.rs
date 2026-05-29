@@ -33,7 +33,7 @@ use super::{Def, DefMeta, Lambda, Program, SoacOp, Term, TermKind, VarRef};
 use crate::ast::TypeName;
 use crate::builtins::catalog;
 use crate::egir::from_tlc::AUTO_STORAGE_SET;
-use crate::interface::{StorageBindingDecl, StorageRole};
+use crate::interface::{EntryParamBindingKind, StorageBindingDecl, StorageRole};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
 
@@ -76,9 +76,17 @@ fn lift_entry(program: &mut Program, idx: usize, new_defs: &mut Vec<Def>) {
     let slots = crate::binding_layout::compute_entry_binding_layout(&params, &decl, AUTO_STORAGE_SET);
     // A producer `map(f, src)` whose `src` is one of these params produces an
     // array with `src`'s element count — used to size the gather buffer.
-    let param_bindings: HashMap<SymbolId, (u32, u32)> =
-        slots.iter().map(|s| (s.param_sym, (s.set, s.binding))).collect();
-    let view_count = slots.len() as u32;
+    // Tuple-of-views params aren't gather sources (gather references bare
+    // `Var(sym)`, never tuple projections), so we only index Single bindings.
+    let param_bindings: HashMap<SymbolId, (u32, u32)> = slots
+        .iter()
+        .flatten()
+        .filter_map(|b| match &b.kind {
+            EntryParamBindingKind::Single { set, binding, .. } => Some((b.param_sym, (*set, *binding))),
+            EntryParamBindingKind::TupleOfViews(_) => None,
+        })
+        .collect();
+    let view_count: u32 = slots.iter().flatten().map(|b| b.buffer_count()).sum();
     let out_count = storage_output_count(&tail.ty);
     let mut next_gather = view_count + out_count;
 

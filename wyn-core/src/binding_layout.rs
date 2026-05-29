@@ -4,31 +4,34 @@
 //! param, N per tuple-of-views param (one per field).
 //!
 //! Producer side only; the layout is computed once at the start of
-//! buffer specialization and cached on `EntryDecl::param_bindings`.
-//! Consumers read the cached vector directly.
+//! buffer specialization and cached on `EntryDecl::param_bindings` as
+//! a `Vec<Option<...>>` aligned to the body params, so consumers can
+//! iterate them in lockstep instead of joining by symbol.
 
 use polytype::Type;
 
 use crate::SymbolId;
 use crate::ast::{Pattern, PatternKind, TypeName};
-use crate::interface::{Attribute, EntryBindingSlot, EntryDecl};
+use crate::interface::{Attribute, EntryDecl, EntryParamBinding, EntryParamBindingKind, TupleFieldBinding};
 use crate::ssa::types::IoDecoration;
 use crate::types::TypeExt;
 
-/// Runtime-sized array: either an unresolved polytype variable in
-/// size position (the normal type-inference chain) or a
-/// `SizePlaceholder` (when `--fill-holes` substituted a hole there).
-/// Sees through `Unique` (`*[]T` is still a runtime-sized array).
-fn is_runtime_sized_array(ty: &Type<TypeName>) -> bool {
-    crate::types::strip_unique(ty)
-        .array_size()
-        .map(|s| {
-            matches!(
-                s,
-                Type::Variable(_) | Type::Constructed(TypeName::SizePlaceholder, _)
-            )
-        })
-        .unwrap_or(false)
+/// Returns the element type if `ty` is a runtime-sized array — i.e. has
+/// an unresolved polytype variable in size position (the normal
+/// type-inference chain) or a `SizePlaceholder` (when `--fill-holes`
+/// substituted a hole there). Sees through `Unique` (`*[]T` is still a
+/// runtime-sized array). Callers use the returned elem type directly,
+/// so the binding layout never has to re-prove the array shape.
+fn runtime_sized_array_elem(ty: &Type<TypeName>) -> Option<&Type<TypeName>> {
+    let ty = TypeExt::strip_unique(ty);
+    let size = ty.array_size()?;
+    if !matches!(
+        size,
+        Type::Variable(_) | Type::Constructed(TypeName::SizePlaceholder, _)
+    ) {
+        return None;
+    }
+    ty.elem_type()
 }
 
 /// Walk a compute entry's params and produce the auto-storage binding
@@ -49,12 +52,12 @@ pub fn compute_entry_binding_layout(
     body_params: &[(SymbolId, Type<TypeName>)],
     entry: &EntryDecl,
     set: u32,
-) -> Vec<EntryBindingSlot> {
+) -> Vec<Option<EntryParamBinding>> {
     if !matches!(entry.entry_type, Attribute::Compute) {
-        return Vec::new();
+        return vec![None; body_params.len()];
     }
 
-    let mut out = Vec::new();
+    let mut out: Vec<Option<EntryParamBinding>> = Vec::with_capacity(body_params.len());
     let mut binding_num: u32 = 0;
 
     for (i, (sym, ty)) in body_params.iter().enumerate() {
@@ -63,22 +66,34 @@ pub fn compute_entry_binding_layout(
 
         // Uniqueness is an ownership marker; for binding allocation, `*[]T`
         // and `[]T` lower identically.
-        let ty = crate::types::strip_unique(ty);
+        let ty = TypeExt::strip_unique(ty);
 
-        // Tuple-of-views: one slot per field.
-        if let Type::Constructed(TypeName::Tuple(_), field_tys) = &ty {
-            if !has_builtin && !field_tys.is_empty() && field_tys.iter().all(is_runtime_sized_array) {
-                for (field_idx, field_ty) in field_tys.iter().enumerate() {
-                    out.push(EntryBindingSlot {
-                        set,
-                        binding: binding_num,
+        // Tuple-of-views: one slot per field. Each field's elem type comes
+        // from `runtime_sized_array_elem`, so the test that admits the
+        // tuple is the same call that delivers the elem.
+        if let Type::Constructed(TypeName::Tuple(_), field_tys) = ty {
+            if !has_builtin && !field_tys.is_empty() {
+                let field_elems: Option<Vec<&Type<TypeName>>> =
+                    field_tys.iter().map(runtime_sized_array_elem).collect();
+                if let Some(field_elems) = field_elems {
+                    let fields = field_elems
+                        .into_iter()
+                        .map(|elem_ty| {
+                            let slot = TupleFieldBinding {
+                                set,
+                                binding: binding_num,
+                                elem_ty: elem_ty.clone(),
+                            };
+                            binding_num += 1;
+                            slot
+                        })
+                        .collect();
+                    out.push(Some(EntryParamBinding {
                         param_sym: *sym,
-                        tuple_field: Some(field_idx),
-                        elem_ty: field_ty.elem_type().cloned().unwrap_or(Type::Variable(0)),
-                    });
-                    binding_num += 1;
+                        kind: EntryParamBindingKind::TupleOfViews(fields),
+                    }));
+                    continue;
                 }
-                continue;
             }
         }
 
@@ -87,15 +102,18 @@ pub fn compute_entry_binding_layout(
         // (no builtin produces an array), but the allocator still
         // assigns a binding rather than silently routing to push
         // constants where the type wouldn't fit.
-        if is_runtime_sized_array(&ty) {
-            out.push(EntryBindingSlot {
-                set,
-                binding: binding_num,
+        if let Some(elem_ty) = runtime_sized_array_elem(ty) {
+            out.push(Some(EntryParamBinding {
                 param_sym: *sym,
-                tuple_field: None,
-                elem_ty: ty.elem_type().cloned().unwrap_or(Type::Variable(0)),
-            });
+                kind: EntryParamBindingKind::Single {
+                    set,
+                    binding: binding_num,
+                    elem_ty: elem_ty.clone(),
+                },
+            }));
             binding_num += 1;
+        } else {
+            out.push(None);
         }
     }
 

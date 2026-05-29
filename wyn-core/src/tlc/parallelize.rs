@@ -11,7 +11,7 @@ use super::closure_convert::collect_free_vars;
 use crate::ast::{self, TypeName};
 use crate::builtins::catalog;
 use crate::egir::from_tlc::AUTO_STORAGE_SET;
-use crate::interface::{self, Attribute};
+use crate::interface::{self, Attribute, EntryParamBinding, EntryParamBindingKind};
 use crate::pipeline_descriptor::*;
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
@@ -357,7 +357,7 @@ fn analyze_soac(
     soac: &SoacOp,
     _result_ty: &Type<TypeName>,
     _symbols: &SymbolTable,
-    entry_slots: &[crate::interface::EntryBindingSlot],
+    entry_slots: &[Option<EntryParamBinding>],
 ) -> Option<SoacAnalysis> {
     let normalized: SoacOp = match soac {
         SoacOp::Map {
@@ -453,10 +453,7 @@ fn binop(op: &str, lhs: Term, rhs: Term, ty: Type<TypeName>, span: ast::Span) ->
     }
 }
 
-fn classify_input(
-    input: &ArrayExpr,
-    entry_slots: &[crate::interface::EntryBindingSlot],
-) -> Option<ArrayProvenance> {
+fn classify_input(input: &ArrayExpr, entry_slots: &[Option<EntryParamBinding>]) -> Option<ArrayProvenance> {
     match input {
         ArrayExpr::StorageBuffer {
             set,
@@ -474,11 +471,12 @@ fn classify_input(
             // same lookup `default_entry_dispatch_len` uses. Tuple-of-views
             // params resolve to their first slot (same element count).
             if let TermKind::Var(VarRef::Symbol(sym)) = &t.kind {
-                if let Some(slot) = entry_slots.iter().find(|s| s.param_sym == *sym) {
+                if let Some(binding) = entry_slots.iter().flatten().find(|s| s.param_sym == *sym) {
+                    let (set, binding, elem_ty) = binding.first_buffer();
                     return Some(ArrayProvenance::Storage {
-                        set: slot.set,
-                        binding: slot.binding,
-                        elem_ty: slot.elem_ty.clone(),
+                        set,
+                        binding,
+                        elem_ty: elem_ty.clone(),
                     });
                 }
             }
@@ -1616,7 +1614,7 @@ fn count_view_param_bindings(program: &Program, def_sym: SymbolId) -> u32 {
         None => return 0,
     };
     match &def.meta {
-        DefMeta::EntryPoint(entry) => entry.param_bindings.len() as u32,
+        DefMeta::EntryPoint(entry) => entry.param_bindings.iter().flatten().map(|b| b.buffer_count()).sum(),
         _ => 0,
     }
 }
@@ -2637,10 +2635,10 @@ pub(crate) fn make_entry_def(
             name_span: dummy_span,
             size_params: vec![],
             type_params: vec![],
+            param_bindings: vec![None; ast_params.len()],
             params: ast_params,
             outputs,
             storage_bindings,
-            param_bindings: vec![],
             body: dummy_expr,
         })),
         arity: required_params.len(),
@@ -2717,13 +2715,22 @@ fn resolve_range_bound(bound: &Term, def_name: SymbolId, program: &Program) -> O
         return s.parse::<u32>().ok().map(|count| DispatchLen::Fixed { count });
     }
     let &(set, binding) = program.view_lengths.get(&bound.id)?;
-    let slot = entry_binding_slots(program, def_name)
-        .into_iter()
-        .find(|s| s.set == set && s.binding == binding)?;
+    let elem_ty =
+        entry_binding_slots(program, def_name).into_iter().flatten().find_map(|b| match b.kind {
+            EntryParamBindingKind::Single {
+                set: s,
+                binding: bi,
+                elem_ty,
+            } if s == set && bi == binding => Some(elem_ty),
+            EntryParamBindingKind::TupleOfViews(fields) => {
+                fields.into_iter().find(|f| f.set == set && f.binding == binding).map(|f| f.elem_ty)
+            }
+            _ => None,
+        })?;
     Some(DispatchLen::InputBinding {
         set,
         binding,
-        elem_bytes: elem_byte_size(&slot.elem_ty),
+        elem_bytes: elem_byte_size(&elem_ty),
     })
 }
 
@@ -2738,7 +2745,7 @@ fn fixed_array_count(ty: &Type<TypeName>) -> Option<u32> {
 /// Entry's auto-storage binding slots, or empty for non-entry / non-compute
 /// defs. Single source of truth for the param→binding lookups used by both
 /// `default_entry_dispatch_len` and the SOAC-input provenance resolver.
-fn entry_binding_slots(program: &Program, def_name: SymbolId) -> Vec<crate::interface::EntryBindingSlot> {
+fn entry_binding_slots(program: &Program, def_name: SymbolId) -> Vec<Option<EntryParamBinding>> {
     let Some(def) = program.defs.iter().find(|d| d.name == def_name) else {
         return Vec::new();
     };
@@ -2754,13 +2761,14 @@ fn entry_binding_slots(program: &Program, def_name: SymbolId) -> Vec<crate::inte
 /// now explicit), else a single-element grid.
 fn default_entry_dispatch_len(program: &Program, def_name: SymbolId) -> DispatchLen {
     let slots = entry_binding_slots(program, def_name);
-    let Some(slot) = slots.first() else {
+    let Some(binding) = slots.iter().flatten().next() else {
         return DispatchLen::Fixed { count: 1 };
     };
+    let (set, buf_binding, elem_ty) = binding.first_buffer();
     DispatchLen::InputBinding {
-        set: slot.set,
-        binding: slot.binding,
-        elem_bytes: elem_byte_size(&slot.elem_ty),
+        set,
+        binding: buf_binding,
+        elem_bytes: elem_byte_size(elem_ty),
     }
 }
 
