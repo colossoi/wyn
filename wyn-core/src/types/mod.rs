@@ -949,9 +949,13 @@ pub fn is_copy(ty: &Type) -> bool {
 pub fn strip_unique(ty: &Type) -> Type {
     match ty {
         Type::Constructed(TypeName::Unique, args) => {
-            // Recursively strip from the inner type
-            let inner = args.first().cloned().unwrap_or_else(|| ty.clone());
-            strip_unique(&inner)
+            // Recursively strip from the inner type. `Unique` always has
+            // exactly one inner arg (enforced at every constructor: see
+            // `unique`, `TypeExt::unique`, `as_unique_inner`'s debug_assert).
+            let [inner] = args.as_slice() else {
+                panic!("Unique type must have exactly one inner arg, got {args:?}");
+            };
+            strip_unique(inner)
         }
         Type::Constructed(name, args) => {
             // Recursively strip from constructor arguments (e.g., arrow types)
