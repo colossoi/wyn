@@ -565,6 +565,19 @@ impl Program {
             def.body.assert_flat_apps_in(&name);
         }
     }
+
+    /// Index of arity-0 `Function`-meta defs by their source name. These are
+    /// the top-level value bindings (`def foo = expr`) — candidates for being
+    /// hoisted to program scope as pure constants, and the resolution target
+    /// when a downstream `Var(sym)` reference has lost its symbol context and
+    /// needs to look the def up by name.
+    pub fn value_defs_by_name(&self) -> HashMap<String, SymbolId> {
+        self.defs
+            .iter()
+            .filter(|d| d.arity == 0 && matches!(&d.meta, DefMeta::Function))
+            .filter_map(|d| self.symbols.get(d.name).map(|n| (n.clone(), d.name)))
+            .collect()
+    }
 }
 
 /// Parts of a TLC program, without the symbol table.

@@ -80,12 +80,7 @@ pub fn run(
     let top_level: HashMap<SymbolId, &TlcDef> = program.defs.iter().map(|d| (d.name, d)).collect();
     let symbols = &program.symbols;
 
-    let constants_by_name: HashMap<String, SymbolId> = program
-        .defs
-        .iter()
-        .filter(|d| d.arity == 0 && matches!(&d.meta, DefMeta::Function))
-        .filter_map(|d| symbols.get(d.name).map(|n| (n.clone(), d.name)))
-        .collect();
+    let constants_by_name = program.value_defs_by_name();
 
     // Phase 1: detect pure constants. We elaborate each arity-0 def's body
     // through the full EGIR pipeline once (using a throwaway chain) to see if
@@ -107,7 +102,7 @@ pub fn run(
             &top_level,
             &constants_by_name,
             symbols,
-            pure_constant_names.clone(),
+            pure_constant_names.clone(), // why is this cloned here?
         );
         if let Ok(result_nid) = converter.convert_term(&def.body) {
             converter.set_return(Some(result_nid));
