@@ -1757,7 +1757,11 @@ impl<'a> Transformer<'a> {
                 // `xyzw` or `rgba`): build per-letter projections;
                 // single letter → scalar, multi → _w_vec_lit.
                 if rec.ty.is_vec() && crate::types::is_swizzle_field(field) {
-                    let elem_ty = rec.ty.elem_type().cloned().unwrap_or(ty.clone());
+                    let elem_ty = rec
+                        .ty
+                        .elem_type()
+                        .cloned()
+                        .expect("rec.ty.is_vec() above guarantees a vec elem type");
                     let components: Vec<Term> = field
                         .chars()
                         .map(|c| {

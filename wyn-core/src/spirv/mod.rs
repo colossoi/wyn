@@ -635,12 +635,16 @@ impl Constructor {
         if let Some(&(var_id, _, _)) = self.storage_buffers.get(&(set, binding)) {
             return var_id;
         }
-        // Extract element type from array type
-        let elem_ty = array_ty
-            .elem_type()
-            .filter(|_| array_ty.is_array())
-            .cloned()
-            .unwrap_or_else(|| array_ty.clone());
+        // Storage buffers can be either an array-shaped view (`[]T` → elem is
+        // `T`) or a scalar / vec / struct output (e.g. a reduce result, which
+        // the SOAC pass packs into a single-element `[]T` buffer at the
+        // binding level even though the user-visible type is `T`). Use
+        // `array_elem` rather than `elem_type` here so a vec-typed buffer
+        // stays a vec instead of being unpacked into its component.
+        let elem_ty = match crate::types::array_elem(array_ty) {
+            Some(elem) => elem.clone(),
+            None => array_ty.clone(),
+        };
         let elem_spirv = self.polytype_to_spirv(&elem_ty);
 
         // Calculate stride from element type size
@@ -3513,7 +3517,7 @@ fn lower_ssa_entry_point(
         .inputs
         .iter()
         .enumerate()
-        .filter_map(|(i, inp)| inp.push_constant_offset.map(|off| (i, off)))
+        .filter_map(|(i, inp)| inp.push_constant.map(|pc| (i, pc.offset)))
         .collect();
     let pc_var = if !pc_inputs.is_empty() {
         // Build member types for push constant block
@@ -3554,7 +3558,7 @@ fn lower_ssa_entry_point(
     let mut uniform_loads: Vec<(String, spirv::Word, spirv::Word)> = Vec::new();
     for input in &entry.inputs {
         // Push constant inputs are handled separately above
-        if input.push_constant_offset.is_some() {
+        if input.push_constant.is_some() {
             continue;
         }
 
@@ -3736,7 +3740,13 @@ fn lower_ssa_entry_point(
             }
             let result = inst.result.expect("StorageView(Workgroup) must have a result");
             let view_ty = body.get_value_type(result);
-            let elem_ty = view_ty.elem_type().cloned().unwrap_or_else(|| view_ty.clone());
+            // Workgroup-shared partial buffer: array-shaped for vector reduces
+            // (`[]T` → elem is `T`), or scalar/vec/struct-shaped for single-
+            // element reductions (the view itself IS the elem).
+            let elem_ty = match crate::types::array_elem(view_ty) {
+                Some(elem) => elem.clone(),
+                None => view_ty.clone(),
+            };
             // KNOWN LIMITATION (struct/array reduce accumulators): `elem_spirv`
             // is the *same* SPIR-V type id `polytype_to_spirv` hands the
             // partials storage buffer — and rspirv dedups type ids while SPIR-V
@@ -3806,7 +3816,7 @@ fn lower_ssa_entry_point(
         // Skip storage buffers, push constants, and uniforms — each
         // uses a different access pattern handled above.
         if input.storage_binding.is_some()
-            || input.push_constant_offset.is_some()
+            || input.push_constant.is_some()
             || input.uniform_binding.is_some()
         {
             continue;

@@ -500,6 +500,17 @@ pub enum ExecutionModel {
     },
 }
 
+/// A compute-broadcast input's placement in the push-constant block.
+/// `offset` is the byte offset within the block; `size` is the byte
+/// width of the param's static layout. Both are decided at binding
+/// allocation time, so downstream backends never have to re-derive
+/// either from the param type.
+#[derive(Debug, Clone, Copy)]
+pub struct PushConstantSlot {
+    pub offset: u32,
+    pub size: u32,
+}
+
 /// Input to an entry point.
 #[derive(Debug, Clone)]
 pub struct EntryInput {
@@ -510,8 +521,10 @@ pub struct EntryInput {
     pub storage_binding: Option<(u32, u32)>,
     /// Programmer-attributed `#[uniform(set, binding)]` on this param.
     pub uniform_binding: Option<(u32, u32)>,
-    /// For compute shader broadcast inputs: byte offset within the push constant block.
-    pub push_constant_offset: Option<u32>,
+    /// Placement in the per-entry push-constant block for compute-broadcast
+    /// inputs. `Some` carries both byte offset and byte size, decided at
+    /// the moment the offset was assigned.
+    pub push_constant: Option<PushConstantSlot>,
     /// Programmer-attributed `#[texture(set, binding)]` on a `texture2d` param.
     pub texture_binding: Option<(u32, u32)>,
     /// Programmer-attributed `#[sampler(set, binding)]` on a `sampler` param.

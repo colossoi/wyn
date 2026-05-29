@@ -136,7 +136,10 @@ pub struct EntryParamBinding {
     pub kind: EntryParamBindingKind,
 }
 
-/// What shape of storage allocation a param received.
+/// What shape of storage allocation a param received. `elem_bytes`
+/// is recorded at binding-allocation time alongside `elem_ty` so
+/// downstream consumers (dispatch sizing, buffer length) never
+/// re-derive it from the type.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EntryParamBindingKind {
     /// Plain `[]T` view param: one storage buffer at `(set, binding)`.
@@ -144,6 +147,7 @@ pub enum EntryParamBindingKind {
         set: u32,
         binding: u32,
         elem_ty: Type,
+        elem_bytes: u32,
     },
     /// Tuple-of-views param: one storage buffer per tuple field,
     /// indexed by field position.
@@ -155,6 +159,7 @@ pub struct TupleFieldBinding {
     pub set: u32,
     pub binding: u32,
     pub elem_ty: Type,
+    pub elem_bytes: u32,
 }
 
 impl EntryParamBinding {
@@ -166,20 +171,22 @@ impl EntryParamBinding {
         }
     }
 
-    /// First `(set, binding, elem_ty)` for this param — the only buffer
-    /// for `Single`, the field-0 buffer for `TupleOfViews`. Callers
-    /// that need to size a dispatch from the param's outer length use
-    /// this; tuple fields share the outer length by construction.
-    pub fn first_buffer(&self) -> (u32, u32, &Type) {
+    /// First `(set, binding, elem_ty, elem_bytes)` for this param —
+    /// the only buffer for `Single`, the field-0 buffer for
+    /// `TupleOfViews`. Callers that need to size a dispatch from the
+    /// param's outer length use this; tuple fields share the outer
+    /// length by construction.
+    pub fn first_buffer(&self) -> (u32, u32, &Type, u32) {
         match &self.kind {
             EntryParamBindingKind::Single {
                 set,
                 binding,
                 elem_ty,
-            } => (*set, *binding, elem_ty),
+                elem_bytes,
+            } => (*set, *binding, elem_ty, *elem_bytes),
             EntryParamBindingKind::TupleOfViews(fields) => {
                 let f = fields.first().expect("tuple-of-views with zero fields");
-                (f.set, f.binding, &f.elem_ty)
+                (f.set, f.binding, &f.elem_ty, f.elem_bytes)
             }
         }
     }

@@ -16,13 +16,19 @@ use crate::interface::{Attribute, EntryDecl, EntryParamBinding, EntryParamBindin
 use crate::ssa::types::IoDecoration;
 use crate::types::TypeExt;
 
-/// Returns the element type if `ty` is a runtime-sized array — i.e. has
-/// an unresolved polytype variable in size position (the normal
-/// type-inference chain) or a `SizePlaceholder` (when `--fill-holes`
-/// substituted a hole there). Sees through `Unique` (`*[]T` is still a
-/// runtime-sized array). Callers use the returned elem type directly,
-/// so the binding layout never has to re-prove the array shape.
-fn runtime_sized_array_elem(ty: &Type<TypeName>) -> Option<&Type<TypeName>> {
+/// Admits `ty` as a runtime-sized array entry-param shape and returns
+/// the element type plus its static byte size. A runtime-sized array
+/// has an unresolved polytype variable in size position (the normal
+/// type-inference chain) or a `SizePlaceholder` (under `--fill-holes`);
+/// sees through `Unique` (`*[]T` qualifies the same as `[]T`).
+///
+/// Admission additionally requires the element type to have a known
+/// static byte size — i.e. anything except another runtime-sized
+/// array. This rejects multi-rank runtime views (`[][]T`) at the
+/// binding-allocation gate, matching the current spec (Stage 3
+/// multi-dim is not yet shipped). Callers don't need a separate
+/// `type_byte_size` retry — admission *is* the proof.
+fn runtime_sized_array_elem(ty: &Type<TypeName>) -> Option<(&Type<TypeName>, u32)> {
     let ty = TypeExt::strip_unique(ty);
     let size = ty.array_size()?;
     if !matches!(
@@ -31,7 +37,9 @@ fn runtime_sized_array_elem(ty: &Type<TypeName>) -> Option<&Type<TypeName>> {
     ) {
         return None;
     }
-    ty.elem_type()
+    let elem = ty.elem_type()?;
+    let elem_bytes = crate::ssa::layout::type_byte_size(elem)?;
+    Some((elem, elem_bytes))
 }
 
 /// Walk a compute entry's params and produce the auto-storage binding
@@ -68,21 +76,22 @@ pub fn compute_entry_binding_layout(
         // and `[]T` lower identically.
         let ty = TypeExt::strip_unique(ty);
 
-        // Tuple-of-views: one slot per field. Each field's elem type comes
-        // from `runtime_sized_array_elem`, so the test that admits the
-        // tuple is the same call that delivers the elem.
+        // Tuple-of-views: one slot per field. Each field's elem type +
+        // byte size come from `runtime_sized_array_elem`, so the test
+        // that admits the tuple is the same call that delivers both.
         if let Type::Constructed(TypeName::Tuple(_), field_tys) = ty {
             if !has_builtin && !field_tys.is_empty() {
-                let field_elems: Option<Vec<&Type<TypeName>>> =
+                let field_elems: Option<Vec<(&Type<TypeName>, u32)>> =
                     field_tys.iter().map(runtime_sized_array_elem).collect();
                 if let Some(field_elems) = field_elems {
                     let fields = field_elems
                         .into_iter()
-                        .map(|elem_ty| {
+                        .map(|(elem_ty, elem_bytes)| {
                             let slot = TupleFieldBinding {
                                 set,
                                 binding: binding_num,
                                 elem_ty: elem_ty.clone(),
+                                elem_bytes,
                             };
                             binding_num += 1;
                             slot
@@ -102,13 +111,14 @@ pub fn compute_entry_binding_layout(
         // (no builtin produces an array), but the allocator still
         // assigns a binding rather than silently routing to push
         // constants where the type wouldn't fit.
-        if let Some(elem_ty) = runtime_sized_array_elem(ty) {
+        if let Some((elem_ty, elem_bytes)) = runtime_sized_array_elem(ty) {
             out.push(Some(EntryParamBinding {
                 param_sym: *sym,
                 kind: EntryParamBindingKind::Single {
                     set,
                     binding: binding_num,
                     elem_ty: elem_ty.clone(),
+                    elem_bytes,
                 },
             }));
             binding_num += 1;

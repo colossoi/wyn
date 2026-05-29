@@ -26,11 +26,14 @@ use super::{ArrayExpr, Def, DefMeta, Lambda, Program, SoacOp, Term, TermId, Term
 /// Where a SOAC's input array comes from.
 #[derive(Debug, Clone)]
 pub enum ArrayProvenance {
-    /// From a storage buffer entry parameter.
+    /// From a storage buffer entry parameter. `elem_bytes` is captured
+    /// at construction time alongside `elem_ty` so the dispatch-len
+    /// resolver doesn't have to re-derive it from the type.
     Storage {
         set: u32,
         binding: u32,
         elem_ty: Type<TypeName>,
+        elem_bytes: u32,
     },
     /// From a range/iota. Carries the bound expression so the dispatch
     /// length can be resolved from `iota(literal)` / `iota(param)` /
@@ -460,11 +463,19 @@ fn classify_input(input: &ArrayExpr, entry_slots: &[Option<EntryParamBinding>]) 
             binding,
             elem_ty,
             ..
-        } => Some(ArrayProvenance::Storage {
-            set: *set,
-            binding: *binding,
-            elem_ty: elem_ty.clone(),
-        }),
+        } => {
+            let elem_bytes = crate::ssa::layout::type_byte_size(elem_ty).expect(
+                "ArrayExpr::StorageBuffer elem_ty must have a static byte layout — \
+                 the constructor (buffer_specialize / parallelize synthesis) is \
+                 responsible for only ever producing sized elem types",
+            );
+            Some(ArrayProvenance::Storage {
+                set: *set,
+                binding: *binding,
+                elem_ty: elem_ty.clone(),
+                elem_bytes,
+            })
+        }
         ArrayExpr::Ref(t) => {
             // A bare entry-param storage-buffer reference. Resolve the
             // assigned (set, binding) via the entry's binding layout — the
@@ -472,11 +483,12 @@ fn classify_input(input: &ArrayExpr, entry_slots: &[Option<EntryParamBinding>]) 
             // params resolve to their first slot (same element count).
             if let TermKind::Var(VarRef::Symbol(sym)) = &t.kind {
                 if let Some(binding) = entry_slots.iter().flatten().find(|s| s.param_sym == *sym) {
-                    let (set, binding, elem_ty) = binding.first_buffer();
+                    let (set, binding, elem_ty, elem_bytes) = binding.first_buffer();
                     return Some(ArrayProvenance::Storage {
                         set,
                         binding,
                         elem_ty: elem_ty.clone(),
+                        elem_bytes,
                     });
                 }
             }
@@ -2669,11 +2681,6 @@ fn push_storage_binding(
     idx
 }
 
-/// Byte size of one element of `ty`, defaulting to 4 if not statically known.
-fn elem_byte_size(ty: &Type<TypeName>) -> u32 {
-    crate::ssa::layout::type_byte_size(ty).unwrap_or(4)
-}
-
 /// Resolve a parallel SOAC's `DispatchLen` from its provenance: a buffer
 /// view → that buffer's binding; a range with a recognizable bound → the
 /// bound's source (`Fixed` / `InputBinding(length(arr))`); a fixed-size
@@ -2685,11 +2692,12 @@ fn resolve_dispatch_len(analysis: &EntryAnalysis, input_index: usize, program: &
         Some(ArrayProvenance::Storage {
             set,
             binding,
-            elem_ty,
+            elem_bytes,
+            ..
         }) => DispatchLen::InputBinding {
             set: *set,
             binding: *binding,
-            elem_bytes: elem_byte_size(elem_ty),
+            elem_bytes: *elem_bytes,
         },
         Some(ArrayProvenance::Range { bound }) => resolve_range_bound(bound, analysis.def_name, program)
             .unwrap_or_else(|| default_entry_dispatch_len(program, analysis.def_name)),
@@ -2715,22 +2723,23 @@ fn resolve_range_bound(bound: &Term, def_name: SymbolId, program: &Program) -> O
         return s.parse::<u32>().ok().map(|count| DispatchLen::Fixed { count });
     }
     let &(set, binding) = program.view_lengths.get(&bound.id)?;
-    let elem_ty =
+    let elem_bytes =
         entry_binding_slots(program, def_name).into_iter().flatten().find_map(|b| match b.kind {
             EntryParamBindingKind::Single {
                 set: s,
                 binding: bi,
-                elem_ty,
-            } if s == set && bi == binding => Some(elem_ty),
+                elem_bytes,
+                ..
+            } if s == set && bi == binding => Some(elem_bytes),
             EntryParamBindingKind::TupleOfViews(fields) => {
-                fields.into_iter().find(|f| f.set == set && f.binding == binding).map(|f| f.elem_ty)
+                fields.into_iter().find(|f| f.set == set && f.binding == binding).map(|f| f.elem_bytes)
             }
             _ => None,
         })?;
     Some(DispatchLen::InputBinding {
         set,
         binding,
-        elem_bytes: elem_byte_size(&elem_ty),
+        elem_bytes,
     })
 }
 
@@ -2764,11 +2773,11 @@ fn default_entry_dispatch_len(program: &Program, def_name: SymbolId) -> Dispatch
     let Some(binding) = slots.iter().flatten().next() else {
         return DispatchLen::Fixed { count: 1 };
     };
-    let (set, buf_binding, elem_ty) = binding.first_buffer();
+    let (set, buf_binding, _elem_ty, elem_bytes) = binding.first_buffer();
     DispatchLen::InputBinding {
         set,
         binding: buf_binding,
-        elem_bytes: elem_byte_size(elem_ty),
+        elem_bytes,
     }
 }
 
@@ -2854,6 +2863,7 @@ fn storage_inputs(soac: &SoacAnalysis) -> impl Iterator<Item = (usize, u32, u32,
             set,
             binding,
             elem_ty,
+            ..
         } => Some((i, *set, *binding, elem_ty)),
         _ => None,
     })

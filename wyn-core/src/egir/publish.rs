@@ -110,14 +110,13 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                         name: input.name.clone(),
                         length: None,
                     });
-                } else if let Some(offset) = input.push_constant_offset {
-                    if claimed_pc_offsets.contains(&offset) {
+                } else if let Some(pc) = input.push_constant {
+                    if claimed_pc_offsets.contains(&pc.offset) {
                         continue;
                     }
-                    let size = crate::ssa::layout::type_byte_size(&input.ty).unwrap_or(4) as u32;
                     bindings.push(Binding::PushConstant {
-                        offset,
-                        size,
+                        offset: pc.offset,
+                        size: pc.size,
                         name: input.name.clone(),
                     });
                 } else if let Some((set, binding)) = input.texture_binding {

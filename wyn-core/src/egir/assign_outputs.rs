@@ -196,7 +196,7 @@ fn lower_slot(
 
     // Retargetable Map/Scan(Fresh): stream the SOAC into the output view.
     if result_soac_is_map_or_scan(graph, slot.source) {
-        let elem_ty = slot.ty.elem_type().cloned().unwrap_or_else(|| slot.ty.clone());
+        let elem_ty = slot.ty.elem_type().cloned().expect("Map/Scan slot output is always an array");
         let view = graph_ops::intern_storage_view(graph, set, binding, elem_ty, None);
         rewrite_map_scan_to_into(graph, slot.source, view);
         return Ok(());

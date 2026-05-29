@@ -307,7 +307,7 @@ fn convert_entry_point(
     forced_output_binding: Option<(u32, u32)>,
     dispatch_sized_outputs: bool,
 ) -> Result<EgirEntry, ConvertError> {
-    use crate::ssa::types::{EntryInput, ExecutionModel, IoDecoration};
+    use crate::ssa::types::{EntryInput, ExecutionModel, IoDecoration, PushConstantSlot};
 
     let symbols = ctx.symbols;
     let def_name = symbol_name(symbols, def.name)?;
@@ -393,7 +393,7 @@ fn convert_entry_point(
                     size_hint: None,
                     storage_binding: Some((slot.set, slot.binding)),
                     uniform_binding: None,
-                    push_constant_offset: None,
+                    push_constant: None,
                     texture_binding: None,
                     sampler_binding: None,
                 });
@@ -410,21 +410,22 @@ fn convert_entry_point(
         });
         let storage_binding = auto_storage_binding.or(attr_storage_binding);
 
-        let push_constant_offset = if is_compute
+        let push_constant = if is_compute
             && storage_binding.is_none()
             && uniform_binding.is_none()
             && texture_binding.is_none()
             && sampler_binding.is_none()
             && !matches!(&decoration, Some(IoDecoration::BuiltIn(_)))
         {
-            let offset = pc_offset;
-            pc_offset += crate::ssa::layout::type_byte_size(ty).ok_or_else(|| {
+            let size = crate::ssa::layout::type_byte_size(ty).ok_or_else(|| {
                 ConvertError::Internal(format!(
                     "push-constant param `{}` has no static byte layout",
                     name
                 ))
             })?;
-            Some(offset)
+            let offset = pc_offset;
+            pc_offset += size;
+            Some(PushConstantSlot { offset, size })
         } else {
             None
         };
@@ -441,7 +442,7 @@ fn convert_entry_point(
             size_hint,
             storage_binding,
             uniform_binding,
-            push_constant_offset,
+            push_constant,
             texture_binding,
             sampler_binding,
         });
@@ -464,7 +465,7 @@ fn convert_entry_point(
         binding_num,
         forced_output_binding,
         dispatch_sized_outputs,
-    );
+    )?;
     let is_unit_return = matches!(ret_type, Type::Constructed(TypeName::Unit, _));
 
     // Convert body. Output assignment (storing the result into the bound
@@ -1887,22 +1888,30 @@ fn build_entry_outputs(
     binding_start: u32,
     forced_output_binding: Option<(u32, u32)>,
     dispatch_sized: bool,
-) -> Vec<EntryOutput> {
+) -> Result<Vec<EntryOutput>, ConvertError> {
     use EntryOutput;
     let mut binding_num = binding_start;
     let mut forced_remaining = forced_output_binding;
     // A parallel map/scan writes one output element per dispatched thread, so
     // a storage output's length tracks the dispatch. `None` otherwise (the
-    // host falls back to its default sizing).
-    let length_for = |binding: Option<(u32, u32)>, ty: &Type<TypeName>| -> Option<BufferLen> {
-        if dispatch_sized && binding.is_some() {
-            Some(BufferLen::SameAsDispatch {
-                elem_bytes: crate::ssa::layout::type_byte_size(ty).unwrap_or(4),
-            })
-        } else {
-            None
-        }
-    };
+    // host falls back to its default sizing). `ty` is the runtime-sized
+    // array output type; `elem_bytes` is the byte size of *one element*
+    // (i.e. of `ty.elem_type()`), not the whole array.
+    let length_for =
+        |binding: Option<(u32, u32)>, ty: &Type<TypeName>| -> Result<Option<BufferLen>, ConvertError> {
+            if !dispatch_sized || binding.is_none() {
+                return Ok(None);
+            }
+            let elem_ty = ty.elem_type().ok_or_else(|| {
+                ConvertError::Internal(format!("dispatch-sized output type is not an array: {ty:?}"))
+            })?;
+            let elem_bytes = crate::ssa::layout::type_byte_size(elem_ty).ok_or_else(|| {
+                ConvertError::Internal(format!(
+                    "dispatch-sized output element has no static byte layout: {elem_ty:?}"
+                ))
+            })?;
+            Ok(Some(BufferLen::SameAsDispatch { elem_bytes }))
+        };
     let mut storage_binding_for = |ty: &Type<TypeName>, is_compute: bool| -> Option<(u32, u32)> {
         if is_compute && !matches!(ty, Type::Constructed(TypeName::Unit, _)) {
             // Honor the planned binding for the first storage output if
@@ -1922,14 +1931,14 @@ fn build_entry_outputs(
     if entry.outputs.iter().all(|o| o.attribute.is_none()) && entry.outputs.len() == 1 {
         if !matches!(ret_type, Type::Constructed(TypeName::Unit, _)) {
             let storage_binding = storage_binding_for(ret_type, is_compute);
-            vec![EntryOutput {
+            Ok(vec![EntryOutput {
                 ty: ret_type.clone(),
                 decoration: None,
                 storage_binding,
-                length: length_for(storage_binding, ret_type),
-            }]
+                length: length_for(storage_binding, ret_type)?,
+            }])
         } else {
-            vec![]
+            Ok(vec![])
         }
     } else if let Type::Constructed(TypeName::Tuple(_), component_types) = ret_type {
         entry
@@ -1938,17 +1947,17 @@ fn build_entry_outputs(
             .zip(component_types.iter())
             .map(|(output, ty)| {
                 let storage_binding = storage_binding_for(ty, is_compute);
-                EntryOutput {
+                Ok(EntryOutput {
                     ty: ty.clone(),
                     decoration: output.attribute.as_ref().and_then(convert_to_io_decoration),
                     storage_binding,
-                    length: length_for(storage_binding, ty),
-                }
+                    length: length_for(storage_binding, ty)?,
+                })
             })
             .collect()
     } else {
         let storage_binding = storage_binding_for(ret_type, is_compute);
-        vec![EntryOutput {
+        Ok(vec![EntryOutput {
             ty: ret_type.clone(),
             decoration: entry
                 .outputs
@@ -1956,8 +1965,8 @@ fn build_entry_outputs(
                 .and_then(|o| o.attribute.as_ref())
                 .and_then(convert_to_io_decoration),
             storage_binding,
-            length: length_for(storage_binding, ret_type),
-        }]
+            length: length_for(storage_binding, ret_type)?,
+        }])
     }
 }
 

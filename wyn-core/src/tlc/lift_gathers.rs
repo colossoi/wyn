@@ -345,7 +345,9 @@ fn build_gather_prepass(
     program: &mut Program,
 ) -> Def {
     let name = format!("{}_gather_{}", entry_name, gather_idx);
-    let elem_ty = crate::types::array_elem(&result_ty).cloned().unwrap_or_else(|| result_ty.clone());
+    let elem_ty = crate::types::array_elem(&result_ty)
+        .cloned()
+        .expect("try_lift's is_runtime_sized_array(name_ty) gate guarantees an array elem");
     let uniform_attrs = vec![None; captured_inputs.len()];
     let storage_bindings = vec![StorageBindingDecl {
         set: binding.0,

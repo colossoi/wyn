@@ -210,6 +210,7 @@ impl BufferSpecializer {
                 set,
                 binding,
                 elem_ty,
+                ..
             } = &param_binding.kind
             else {
                 continue;

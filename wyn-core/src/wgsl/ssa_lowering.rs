@@ -777,7 +777,14 @@ impl<'a> LowerCtx<'a> {
                     if is_declared(set, binding) {
                         continue;
                     }
-                    let elem_ty = out.ty.elem_type().cloned().unwrap_or_else(|| out.ty.clone());
+                    // Array-shaped output (`[]T`) → elem is `T`; scalar / vec /
+                    // struct-valued compute output (e.g. reduce → f32) packs
+                    // into a single-element `[]T` binding where `out.ty` IS
+                    // the elem. `array_elem` returns None for the latter.
+                    let elem_ty = match crate::types::array_elem(&out.ty) {
+                        Some(elem) => elem.clone(),
+                        None => out.ty.clone(),
+                    };
                     let ty_str = self.type_emitter.type_to_wgsl(&elem_ty)?;
                     let entry_ref = synth.entry((set, binding)).or_insert_with(|| {
                         let name = format!("_buf_{}_{}", set, binding);
@@ -821,7 +828,12 @@ impl<'a> LowerCtx<'a> {
                 {
                     let result = inst.result.expect("StorageView(Workgroup) must have a result");
                     let view_ty = entry.body.get_value_type(result);
-                    let elem_ty = view_ty.elem_type().cloned().unwrap_or_else(|| view_ty.clone());
+                    // Array-shaped workgroup view → elem; scalar / vec /
+                    // struct-shaped (single-element reduce) → view IS the elem.
+                    let elem_ty = match crate::types::array_elem(view_ty) {
+                        Some(elem) => elem.clone(),
+                        None => view_ty.clone(),
+                    };
                     let elem_str = self.type_emitter.type_to_wgsl(&elem_ty)?;
                     wg_arrays.entry(*id).or_insert((elem_str, *count));
                 }
@@ -994,7 +1006,7 @@ impl<'a> LowerCtx<'a> {
         // a uniform block instead. Collected here so `lower_program`'s
         // module-scope pass can emit the struct + `var<uniform>` decl.
         let pc_inputs: Vec<(usize, &crate::ssa::types::EntryInput)> =
-            entry.inputs.iter().enumerate().filter(|(_, inp)| inp.push_constant_offset.is_some()).collect();
+            entry.inputs.iter().enumerate().filter(|(_, inp)| inp.push_constant.is_some()).collect();
         let pc_block: Option<PcBlock> = if !pc_inputs.is_empty() {
             // Synthetic (set, binding) chosen to avoid colliding with
             // user-declared storage/uniform bindings: set = 1 (user
@@ -1033,7 +1045,7 @@ impl<'a> LowerCtx<'a> {
             }
             // Push-constant inputs are routed through the synthesized
             // uniform block — no function parameter emitted.
-            if input.push_constant_offset.is_some() {
+            if input.push_constant.is_some() {
                 continue;
             }
             // `#[uniform]`-attributed inputs become module-scope
