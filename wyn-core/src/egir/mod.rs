@@ -13,6 +13,7 @@ mod fold;
 mod loop_analysis;
 pub(crate) mod materialize;
 pub mod program;
+pub mod publish;
 pub mod rewrite;
 mod scoped_map;
 pub(crate) mod skel_opt;

@@ -167,17 +167,19 @@ pub fn run(
         }
     }
 
-    // Enrich the pipeline descriptor with auto-allocated bindings that
-    // `convert_entry_point` parked on each entry's `inputs`/`outputs`
-    // (compute SoA-split storage and unsized-array outputs). Without
-    // this, a host runtime reading the JSON sidecar sees only the
-    // user-declared uniforms/storage and is missing every buffer the
-    // compiler injected.
-    enrich_pipeline_with_auto_bindings(&mut pipeline, &entry_points);
+    // Publish per-entry state from EGIR into the host-runtime-shared
+    // `PipelineDescriptor` (see `egir::publish`):
+    //   - implicit bindings the compiler invented to communicate
+    //     between auto-generated entry points / phases, plus
+    //     descriptor-level binding declarations routed from each
+    //     entry's `#[storage]`/`#[uniform]`/etc. attributes
+    //   - `#[location(N)]` graphics IO on vertex/fragment entries
+    {
+        use crate::egir::publish::PipelineDescriptorPublish;
+        pipeline.publish_implicit_bindings(&entry_points);
+        pipeline.publish_graphics_io(&entry_points);
+    }
 
-    // `plans` is consumed inline above (output-binding routing); the
-    // EGIR-side parallelization pass runs as a separate typestate stage
-    // after output assignment — see `lib::EgirOutputsAssigned::parallelize`.
     Ok(EgirInner::new(
         functions,
         externs,
@@ -185,236 +187,6 @@ pub fn run(
         constants,
         pipeline,
     ))
-}
-
-/// Walk every compute entry and append `Binding::StorageBuffer` entries
-/// to its corresponding `Pipeline::Compute` for each auto-allocated
-/// `(set, binding)` recorded on the entry's `EntryInput`s and
-/// `EntryOutput`s. Bindings already present in the descriptor (e.g.
-/// from `MultiCompute` parallelization paths that pre-populate the
-/// list) are skipped to avoid duplicates.
-fn enrich_pipeline_with_auto_bindings(pipeline: &mut PipelineDescriptor, entries: &[EgirEntry]) {
-    use crate::pipeline_descriptor::{
-        Access, Binding, BufferUsage, Pipeline, SamplerBindingType, TextureSampleType, TextureViewDimension,
-    };
-    use crate::ssa::types::ExecutionModel;
-
-    for entry in entries {
-        if matches!(entry.execution_model, ExecutionModel::Vertex) {
-            enrich_vertex_inputs(pipeline, entry);
-        }
-        if matches!(entry.execution_model, ExecutionModel::Fragment) {
-            enrich_fragment_outputs(pipeline, entry);
-        }
-
-        // Find the bindings list backing this entry. Compute entries
-        // match a single-stage `Compute` by `entry_point` or any stage
-        // of a `MultiCompute` (whose bindings are shared across stages,
-        // covering parallel reduce / redomap / scan phases). Graphics
-        // entries match a single-stage `Graphics` by stage entry_point.
-        let bindings: &mut Vec<Binding> = match pipeline.pipelines.iter_mut().find(|p| match p {
-            Pipeline::Compute(cp) => cp.entry_point == entry.name,
-            Pipeline::MultiCompute(mc) => mc.stages.iter().any(|s| s.entry_point == entry.name),
-            Pipeline::Graphics(gp) => gp.stages.iter().any(|s| s.entry_point == entry.name),
-        }) {
-            Some(Pipeline::Compute(cp)) => &mut cp.bindings,
-            Some(Pipeline::MultiCompute(mc)) => &mut mc.bindings,
-            Some(Pipeline::Graphics(gp)) => &mut gp.bindings,
-            _ => continue,
-        };
-
-        // Snapshot existing (set, binding) and push-constant offsets to
-        // skip what `parallelize` already surfaced.
-        let mut claimed: HashSet<(u32, u32)> = bindings
-            .iter()
-            .filter_map(|b| match b {
-                Binding::StorageBuffer { set, binding, .. } => Some((*set, *binding)),
-                Binding::Uniform { set, binding, .. } => Some((*set, *binding)),
-                _ => None,
-            })
-            .collect();
-        let claimed_pc_offsets: HashSet<u32> = bindings
-            .iter()
-            .filter_map(|b| match b {
-                Binding::PushConstant { offset, .. } => Some(*offset),
-                _ => None,
-            })
-            .collect();
-
-        for input in &entry.inputs {
-            if let Some((set, binding)) = input.uniform_binding {
-                if claimed.contains(&(set, binding)) {
-                    continue;
-                }
-                bindings.push(Binding::Uniform {
-                    set,
-                    binding,
-                    name: input.name.clone(),
-                });
-            } else if let Some((set, binding)) = input.storage_binding {
-                if claimed.contains(&(set, binding)) {
-                    continue;
-                }
-                bindings.push(Binding::StorageBuffer {
-                    set,
-                    binding,
-                    access: Access::ReadOnly,
-                    usage: BufferUsage::Input,
-                    name: input.name.clone(),
-                    length: None,
-                });
-            } else if let Some(offset) = input.push_constant_offset {
-                if claimed_pc_offsets.contains(&offset) {
-                    continue;
-                }
-                let size = crate::ssa::layout::type_byte_size(&input.ty).unwrap_or(4) as u32;
-                bindings.push(Binding::PushConstant {
-                    offset,
-                    size,
-                    name: input.name.clone(),
-                });
-            } else if let Some((set, binding)) = input.texture_binding {
-                if claimed.contains(&(set, binding)) {
-                    continue;
-                }
-                bindings.push(Binding::Texture {
-                    set,
-                    binding,
-                    name: input.name.clone(),
-                    sample_type: TextureSampleType::Float { filterable: true },
-                    view_dimension: TextureViewDimension::D2,
-                    multisampled: false,
-                });
-            } else if let Some((set, binding)) = input.sampler_binding {
-                if claimed.contains(&(set, binding)) {
-                    continue;
-                }
-                bindings.push(Binding::Sampler {
-                    set,
-                    binding,
-                    name: input.name.clone(),
-                    binding_type: SamplerBindingType::Filtering,
-                });
-            }
-        }
-
-        // Compiler-managed gather buffers: storage bindings carrying an
-        // explicit `length` (a `lift_gathers` intermediate, referenced via
-        // `storage_index` rather than a param). Emit these *before* outputs so
-        // the producer's matching `EntryOutput` (same set/binding) doesn't
-        // also claim it as a host-read `Output`. The producer declares it
-        // Output (it writes) and the consumer Input (it reads); both surface
-        // as a compiler-managed `Intermediate`, with access from the role.
-        for decl in &entry.storage_bindings {
-            if decl.length.is_none() {
-                continue;
-            }
-            if !claimed.insert((decl.set, decl.binding)) {
-                continue;
-            }
-            let access = match decl.role {
-                crate::interface::StorageRole::Output => Access::WriteOnly,
-                _ => Access::ReadOnly,
-            };
-            bindings.push(Binding::StorageBuffer {
-                set: decl.set,
-                binding: decl.binding,
-                access,
-                usage: BufferUsage::Intermediate,
-                name: format!("{}_gather_b{}", entry.name, decl.binding),
-                length: decl.length.clone(),
-            });
-        }
-
-        for (i, output) in entry.outputs.iter().enumerate() {
-            let Some((set, binding)) = output.storage_binding else {
-                continue;
-            };
-            if !claimed.insert((set, binding)) {
-                continue;
-            }
-            // EntryOutput has no name field; synthesize from the entry
-            // name + position. Single-output is the common case and
-            // gets the cleaner `<entry>_output` form.
-            let name = if entry.outputs.len() == 1 {
-                format!("{}_output", entry.name)
-            } else {
-                format!("{}_output_{}", entry.name, i)
-            };
-            bindings.push(Binding::StorageBuffer {
-                set,
-                binding,
-                access: Access::WriteOnly,
-                usage: BufferUsage::Output,
-                name,
-                length: output.length.clone(),
-            });
-        }
-    }
-}
-
-/// Populate the `vertex_inputs` of the Graphics pipeline backing a
-/// vertex entry from its `#[location(n)]` parameters. Each
-/// `IoDecoration::Location` input becomes a `VertexAttribute` carrying
-/// the location, name, and the format derived from the input's type.
-/// The type checker guarantees every such input has a valid vertex
-/// format, so `vertex_format` returning `None` here is a compiler bug.
-fn enrich_vertex_inputs(pipeline: &mut PipelineDescriptor, entry: &EgirEntry) {
-    use crate::pipeline_descriptor::{Pipeline, VertexAttribute};
-    use crate::ssa::types::IoDecoration;
-
-    let vertex_inputs = match pipeline.pipelines.iter_mut().find(|p| match p {
-        Pipeline::Graphics(gp) => gp.stages.iter().any(|s| s.entry_point == entry.name),
-        _ => false,
-    }) {
-        Some(Pipeline::Graphics(gp)) => &mut gp.vertex_inputs,
-        _ => return,
-    };
-
-    for input in &entry.inputs {
-        let Some(IoDecoration::Location(location)) = input.decoration else {
-            continue;
-        };
-        let format = crate::ssa::layout::vertex_format(&input.ty).expect(
-            "vertex #[location] param must have a valid vertex format \
-             (the type checker enforces this)",
-        );
-        vertex_inputs.push(VertexAttribute {
-            location,
-            name: input.name.clone(),
-            format,
-        });
-    }
-}
-
-/// Populate the `fragment_outputs` of the Graphics pipeline backing a
-/// fragment entry from its `#[location(n)]` outputs. Mirrors
-/// `enrich_vertex_inputs`: each `IoDecoration::Location` output becomes
-/// a `FragmentOutput` carrying the location and a synthesized name.
-/// `EntryOutput` has no name field, so the name is derived from the
-/// entry name + position, matching the storage-output convention in
-/// `enrich_pipeline_with_auto_bindings`.
-fn enrich_fragment_outputs(pipeline: &mut PipelineDescriptor, entry: &EgirEntry) {
-    use crate::pipeline_descriptor::{FragmentOutput, Pipeline};
-    use crate::ssa::types::IoDecoration;
-
-    let fragment_outputs = match pipeline.pipelines.iter_mut().find(|p| match p {
-        Pipeline::Graphics(gp) => gp.stages.iter().any(|s| s.entry_point == entry.name),
-        _ => false,
-    }) {
-        Some(Pipeline::Graphics(gp)) => &mut gp.fragment_outputs,
-        _ => return,
-    };
-
-    let multi = entry.outputs.len() > 1;
-    for (i, output) in entry.outputs.iter().enumerate() {
-        let Some(IoDecoration::Location(location)) = output.decoration else {
-            continue;
-        };
-        let name =
-            if multi { format!("{}_output_{}", entry.name, i) } else { format!("{}_output", entry.name) };
-        fragment_outputs.push(FragmentOutput { location, name });
-    }
 }
 
 enum ConvertedFunc {
