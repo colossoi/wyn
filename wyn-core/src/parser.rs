@@ -64,15 +64,33 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Get the span of the current token
+    /// Get the span of the current token, or a zero-width span at the
+    /// end of the last token when we've consumed everything (so error
+    /// diagnostics at EOF point at where the missing token *would* be).
+    /// Returns the "before-beginning" span `(0,0,0,0)` only on empty
+    /// input.
     fn current_span(&self) -> Span {
-        self.tokens.get(self.current).map(|t| t.span).unwrap_or(Span::new(0, 0, 0, 0))
+        if let Some(t) = self.tokens.get(self.current) {
+            return t.span;
+        }
+        match self.tokens.last() {
+            Some(last) => Span::new(
+                last.span.end_line,
+                last.span.end_col,
+                last.span.end_line,
+                last.span.end_col,
+            ),
+            None => Span::new(0, 0, 0, 0),
+        }
     }
 
-    /// Get the span of the previous token
+    /// Get the span of the previous token. Returns the "before-beginning"
+    /// span `(0,0,0,0)` when no token has been consumed yet.
     fn previous_span(&self) -> Span {
         if self.current > 0 {
-            self.tokens.get(self.current - 1).map(|t| t.span).unwrap_or(Span::new(0, 0, 0, 0))
+            // `current > 0` and the parser never advances past `tokens.len()`,
+            // so this index is always in-bounds.
+            self.tokens[self.current - 1].span
         } else {
             Span::new(0, 0, 0, 0)
         }
