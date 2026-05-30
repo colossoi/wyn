@@ -802,7 +802,7 @@ fn lift_graphical_invariant_soacs(
     let mut new_defs: Vec<Def> = Vec::new();
 
     for idx in indices {
-        let entry_name = program.symbols.get(program.defs[idx].name).cloned().unwrap_or_default();
+        let entry_name = crate::symbol_name_or_bug(&program.symbols, program.defs[idx].name).to_string();
 
         // Classify each entry param by correlating the lambda params (by
         // position) with the source patterns on the decl. A `#[uniform]`
@@ -1291,7 +1291,7 @@ pub fn run(mut program: Program, disable: bool) -> crate::error::Result<Parallel
     for def in &program.defs {
         if let DefMeta::EntryPoint(ref decl) = def.meta {
             if decl.entry_type.is_compute() && !analyses.contains_key(&def.name) {
-                let name = program.symbols.get(def.name).cloned().unwrap_or_default();
+                let name = crate::symbol_name_or_bug(&program.symbols, def.name).to_string();
                 // For non-parallelized compute entries, the SSA-stage
                 // codegen derives binding info from the entry's param
                 // types. No binding info is extractable at this TLC
@@ -1314,7 +1314,7 @@ pub fn run(mut program: Program, disable: bool) -> crate::error::Result<Parallel
     }
 
     for (_sym, analysis) in &analyses {
-        let entry_name = program.symbols.get(analysis.def_name).cloned().unwrap_or_default();
+        let entry_name = crate::symbol_name_or_bug(&program.symbols, analysis.def_name).to_string();
         let forced = prepass_result_bindings.get(&analysis.def_name).copied();
         let plan = make_lowering_plan(analysis, &entry_name, next_binding, forced, &mut program);
         next_binding += plan.extra_bindings_used;
@@ -1332,7 +1332,7 @@ pub fn run(mut program: Program, disable: bool) -> crate::error::Result<Parallel
     for def in &program.defs {
         if let DefMeta::EntryPoint(ref decl) = def.meta {
             if !decl.entry_type.is_compute() {
-                let name = program.symbols.get(def.name).cloned().unwrap_or_default();
+                let name = crate::symbol_name_or_bug(&program.symbols, def.name).to_string();
                 let stage = if decl.entry_type == Attribute::Vertex {
                     ShaderStage::Vertex
                 } else {
@@ -2602,7 +2602,7 @@ pub(crate) fn make_entry_def(
         .iter()
         .enumerate()
         .map(|(i, (s, _))| {
-            let pname = program.symbols.get(*s).cloned().unwrap_or_else(|| format!("p{}", s.0));
+            let pname = crate::symbol_name_or_bug(&program.symbols, *s).to_string();
             let name_pat = ast::Pattern {
                 h: ast::Header {
                     id: ast::NodeId(0),
@@ -2961,7 +2961,7 @@ fn build_default_pipeline(program: &Program) -> PipelineDescriptor {
 
     for def in &program.defs {
         if let DefMeta::EntryPoint(ref decl) = def.meta {
-            let name = program.symbols.get(def.name).cloned().unwrap_or_default();
+            let name = crate::symbol_name_or_bug(&program.symbols, def.name).to_string();
             if decl.entry_type.is_compute() {
                 let sizing = PipelineSizing::for_default_entry(program, def.name);
                 let len = default_entry_dispatch_len(program, def.name);

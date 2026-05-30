@@ -60,7 +60,7 @@ pub fn run(mut program: Program) -> Program {
 
 /// Lift gather sites out of a single compute entry at `program.defs[idx]`.
 fn lift_entry(program: &mut Program, idx: usize, new_defs: &mut Vec<Def>) {
-    let entry_name = program.symbols.get(program.defs[idx].name).cloned().unwrap_or_default();
+    let entry_name = crate::symbol_name_or_bug(&program.symbols, program.defs[idx].name).to_string();
     let body = program.defs[idx].body.clone();
 
     // Gather buffers must sit above the consumer's own auto-allocated

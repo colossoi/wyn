@@ -980,14 +980,9 @@ impl BufferSpecializer {
                     let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
 
                     // Fresh symbols for the let-bound view's offset and len
-                    let offset_sym = self.symbols.alloc(format!(
-                        "{}_offset",
-                        self.symbols.get(*name).cloned().unwrap_or_default()
-                    ));
-                    let len_sym = self.symbols.alloc(format!(
-                        "{}_len",
-                        self.symbols.get(*name).cloned().unwrap_or_default()
-                    ));
+                    let base_name = crate::symbol_name_or_bug(&self.symbols, *name).to_string();
+                    let offset_sym = self.symbols.alloc(format!("{}_offset", base_name));
+                    let len_sym = self.symbols.alloc(format!("{}_len", base_name));
 
                     // Extend view_params so the body knows `name` is a view
                     let mut extended = view_params.clone();

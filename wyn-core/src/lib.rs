@@ -114,6 +114,19 @@ impl std::fmt::Display for SymbolId {
 /// Symbol table: maps SymbolId to original name (for errors/debugging).
 pub type SymbolTable = IdArena<SymbolId, String>;
 
+/// Look up `sym`'s source name in `symbols`, or panic with a uniform
+/// "internal compiler bug" message. Use this when downstream code
+/// structurally requires that every `SymbolId` it sees was registered
+/// by an earlier pass — the panic is the structural assertion, not a
+/// placeholder. Call sites in `Result`-returning paths should prefer
+/// `egir::from_tlc::symbol_name` (which propagates the same condition
+/// as `ConvertError::Internal`).
+pub fn symbol_name_or_bug(symbols: &SymbolTable, sym: SymbolId) -> &str {
+    symbols.get(sym).map(String::as_str).unwrap_or_else(|| {
+        panic!("BUG: symbol {sym:?} not in symbol table — registration invariant violated")
+    })
+}
+
 /// Arena that allocates IDs and stores associated items.
 ///
 /// Combines ID generation with storage, ensuring each item gets a unique ID.

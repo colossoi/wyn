@@ -1183,8 +1183,7 @@ impl<'a> HofSpecializer<'a> {
                 TermKind::Var(VarRef::Symbol(sym)) => *sym,
                 _ => panic!("BUG: capture term is not a Var: {:?}", cap_term.kind),
             };
-            let outer_name =
-                self.symbols.get(outer_sym).cloned().unwrap_or_else(|| format!("cap{}", outer_sym.0));
+            let outer_name = crate::symbol_name_or_bug(&self.symbols, outer_sym).to_string();
             let fresh_sym = self.symbols.alloc(format!("{}__cap_{}", specialized_name, outer_name));
             capture_subst.push((outer_sym, fresh_sym));
             new_params.push((fresh_sym, cap_term.ty.clone()));
