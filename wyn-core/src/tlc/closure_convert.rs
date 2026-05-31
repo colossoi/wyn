@@ -1063,9 +1063,12 @@ impl<'a> ClosureConverter<'a> {
                 len: Box::new(self.convert_term(*len)),
                 step: step.map(|s| Box::new(self.convert_term(*s))),
             },
-            ArrayExpr::StorageView(_) => {
-                unreachable!("StorageBuffer introduced after defunctionalization")
-            }
+            ArrayExpr::StorageView(sv) => ArrayExpr::StorageView(super::StorageView {
+                binding: sv.binding,
+                offset: Box::new(self.convert_term(*sv.offset)),
+                len: Box::new(self.convert_term(*sv.len)),
+                elem_ty: sv.elem_ty,
+            }),
         }
     }
 

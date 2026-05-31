@@ -513,9 +513,12 @@ impl<'a> CallLowerer<'a> {
                 len: Box::new(self.lower_term(*len)),
                 step: step.map(|s| Box::new(self.lower_term(*s))),
             },
-            ArrayExpr::StorageView(_) => {
-                unreachable!("StorageBuffer introduced after defunctionalization")
-            }
+            ArrayExpr::StorageView(sv) => ArrayExpr::StorageView(super::StorageView {
+                binding: sv.binding,
+                offset: Box::new(self.lower_term(*sv.offset)),
+                len: Box::new(self.lower_term(*sv.len)),
+                elem_ty: sv.elem_ty,
+            }),
         }
     }
 }

@@ -474,8 +474,8 @@ fn classify_input(input: &ArrayExpr, entry_slots: &[Option<EntryParamBinding>]) 
         ArrayExpr::StorageView(crate::tlc::StorageView { binding, elem_ty, .. }) => {
             let elem_bytes = crate::ssa::layout::type_byte_size(elem_ty).expect(
                 "ArrayExpr::StorageView elem_ty must have a static byte layout — \
-                 the constructor (buffer_specialize / parallelize synthesis) is \
-                 responsible for only ever producing sized elem types",
+                 every constructor (lift_gathers / buffer_specialize / parallelize \
+                 synthesis) is responsible for only ever producing sized elem types",
             );
             Some(ArrayProvenance::Storage {
                 binding: *binding,
@@ -1259,8 +1259,8 @@ pub fn run(mut program: Program, disable: bool) -> crate::error::Result<Parallel
 
     // Track max binding across every `(set, binding)` the program already
     // uses — including implicit `ArrayExpr::StorageBuffer` bindings
-    // introduced by buffer_specialize/mono for SOAC inputs. Missing these
-    // would let fresh intermediates collide with input buffers.
+    // introduced by lift_gathers / buffer_specialize / mono for SOAC inputs.
+    // Missing these would let fresh intermediates collide with input buffers.
     let mut next_binding: u32 =
         collect_all_used_bindings(&program).iter().map(|br| br.binding + 1).max().unwrap_or(0);
 

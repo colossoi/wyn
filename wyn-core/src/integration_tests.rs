@@ -2702,6 +2702,91 @@ entry gen(bh: []vec4f32) []i32 =
     );
 }
 
+// ---------------------------------------------------------------------------
+// Multi-consumer gather regression
+// ---------------------------------------------------------------------------
+//
+// `lift_gathers` handles a computed array `counts = map(...)` consumed by a
+// single downstream SOAC/gather. Whenever `counts` has *two or more* downstream
+// consumers (e.g. a `reduce` plus a `scan`, or a `scan` plus a direct
+// `counts[i % N]` gather in the same lambda), the lift currently leaves the
+// in-register Composite array in place and the SPIR-V backend panics at
+// `spirv/mod.rs:374` ("Composite variant unsized arrays not supported"). The
+// single-consumer controls below pin the working baseline; the
+// `#[ignore]`-marked tests capture the multi-consumer bug — run with
+// `cargo test -- --ignored` to verify the panic and remove the `#[ignore]`
+// once the lift threads the same intermediate buffer to every consumer.
+
+/// Control: a single `scan` consumer of a computed `counts` map lifts cleanly.
+#[test]
+fn single_consumer_scan_compiles() {
+    compile_to_spirv(
+        "\
+#[compute]
+entry gen(xs: []i32) []i32 =
+  let counts  = map(|x: i32| x * 2, xs) in
+  let offsets = scan(|a: i32, b: i32| a + b, 0, counts) in
+  map(|i: i32| offsets[i % 8], iota(64))
+",
+    )
+    .expect("single-consumer scan-over-map must lift + compile");
+}
+
+/// Control: a single `reduce` consumer of a computed `counts` map lifts cleanly.
+#[test]
+fn single_consumer_reduce_compiles() {
+    compile_to_spirv(
+        "\
+#[compute]
+entry gen(xs: []i32) []i32 =
+  let counts = map(|x: i32| x * 2, xs) in
+  let total  = reduce(|a: i32, b: i32| a + b, 0, counts) in
+  map(|i: i32| total, iota(64))
+",
+    )
+    .expect("single-consumer reduce-over-map must lift + compile");
+}
+
+/// When `counts` is consumed by **both** a `reduce` and a `scan` (and a
+/// downstream gather then reads the scan result), `lift_gathers` materializes
+/// `counts` into one shared gather buffer that both downstream SOACs read from.
+#[test]
+fn multi_consumer_scan_plus_reduce_lifts() {
+    compile_to_spirv(
+        "\
+#[compute]
+entry gen(xs: []i32) []i32 =
+  let counts  = map(|x: i32| x * 2, xs) in
+  let total   = reduce(|a: i32, b: i32| a + b, 0, counts) in
+  let offsets = scan(|a: i32, b: i32| a + b, 0, counts) in
+  map(|i: i32| offsets[i % 8] + total, iota(64))
+",
+    )
+    .expect("multi-consumer (reduce + scan over the same counts) should lift + compile");
+}
+
+/// Known bug (different shape from the `reduce + scan` case above): when
+/// `counts` is consumed by both a `scan` and a direct `counts[i % 8]` in the
+/// same lambda, `partial_eval` inlines `counts` at both use sites *before*
+/// `lift_gathers` runs, leaving an inline `(map(...))[i % 8]` random-index
+/// pattern that has no `let`-bound producer for the pass to lift. Re-enable
+/// once gather detection covers `Index{Soac(Map), idx}` directly (likely
+/// by hoisting inline producers into a let before the let-chain walk).
+#[test]
+#[ignore = "lift_gathers: partial_eval inlines the producer so no let-bound gather site remains"]
+fn multi_consumer_scan_plus_gather_lifts() {
+    compile_to_spirv(
+        "\
+#[compute]
+entry gen(xs: []i32) []i32 =
+  let counts  = map(|x: i32| x * 2, xs) in
+  let offsets = scan(|a: i32, b: i32| a + b, 0, counts) in
+  map(|i: i32| offsets[i % 8] + counts[i % 8], iota(64))
+",
+    )
+    .expect("multi-consumer (scan + direct gather of the same counts) should lift + compile");
+}
+
 /// A `scan` producer gathers the same way a `map` does: it's lifted into its
 /// own pre-pass (here a multi-stage parallel scan) writing the gather buffer,
 /// which the consumer reads via `storage_index`. The forced-output binding is

@@ -176,11 +176,13 @@ entry gen(bh: []vec4f32) []i32 =
 }
 
 #[test]
-fn declines_producer_over_let_bound_non_param() {
-    // If the producer's input is a let-bound array that is *not* an entry
-    // param (and didn't fuse away), the pre-pass can't source it, so the lift
-    // declines rather than emit a phantom input. Here `mid` is a scan result
-    // (not a map), so it doesn't fuse into the outer scan.
+fn lifts_chained_scan_producers() {
+    // Chained let-bound scans: `mid` is a scan over the entry param `xs` and is
+    // itself consumed as the `outer` scan's input; `outer`'s result is randomly
+    // indexed. `mid` is lifted because a SOAC input is a materializable use; the
+    // resulting `mid` gather buffer then sources `outer`'s pre-pass (one
+    // `chained_intermediates` Input decl). Two gather pre-passes — one per
+    // scan — with `mid`'s output feeding `outer`'s input.
     let src = "\
 #[compute]
 entry gen(xs: []i32) []i32 =
@@ -189,11 +191,47 @@ entry gen(xs: []i32) []i32 =
   map(|i:i32| outer[i % 256], iota(6144))
 ";
     let lifted = super::run(ownership_applied(src));
-    // `outer`'s producer reads `mid` (a let-bound non-param), so it's declined;
-    // `mid` itself is consumed by `outer` (not indexed), so it's not a site.
+    let prepasses = lifted
+        .defs
+        .iter()
+        .filter(|d| {
+            matches!(d.meta, super::DefMeta::EntryPoint(_))
+                && lifted.symbols.get(d.name).is_some_and(|n| n.contains("_gather_"))
+        })
+        .count();
+    assert_eq!(
+        prepasses, 2,
+        "expected one gather pre-pass per chained scan (mid + outer)"
+    );
+}
+
+#[test]
+fn declines_bare_var_in_non_materializable_position() {
+    // `counts` appears both as `counts[i % 256]` (materializable → would
+    // become `storage_index`) and as a bare `Var(counts)` argument to the
+    // `length` builtin (non-materializable: we don't know how to lower a
+    // runtime-sized Composite threaded through arbitrary term positions, and
+    // `length` reading a hypothetical gather buffer's length isn't part of
+    // the current materialization story). The bail must win: the lift
+    // declines the whole binding, leaving the un-lifted `let counts = map(...)`
+    // for downstream passes. Asserts that we did not silently rewrite some
+    // uses and forget others — the bail is all-or-nothing.
+    let src = "\
+#[compute]
+entry gen(xs: []i32) []i32 =
+  let counts = map(|x: i32| x + 1, xs) in
+  let n: i32 = length(counts) in
+  map(|i: i32| counts[i % 256] + n, iota(6144))
+";
+    let lifted = super::run(ownership_applied(src));
     assert!(
         !has_gather_prepass(&lifted),
-        "a producer reading a non-param computed array must not be lifted"
+        "a bare Var(counts) in a non-materializable position must trip the bail \
+         and decline the lift even when a materializable use is present"
+    );
+    assert!(
+        has_map_producing_let(&def_named(&lifted, "gen").body),
+        "with the lift declined, the original `let counts = map(...)` must remain"
     );
 }
 

@@ -455,8 +455,12 @@ pub struct Shape(pub Vec<Dim>);
 //   rewritten to `_w_tuple(...)` by `tlc::soa`. Post-SoA passes don't
 //   meaningfully encounter it.
 //
-// * `StorageBuffer` is introduced by `tlc::buffer_specialize`.
-//   Pre-buffer_specialize passes don't see it.
+// * `StorageBuffer` is introduced by `tlc::lift_gathers` (pre-defunc,
+//   materializing a gather producer's result into a storage buffer that
+//   downstream SOACs and `storage_index` reads share) and by
+//   `tlc::buffer_specialize` (post-mono, rewriting view-array entry params
+//   into `(offset, len)` pairs feeding a storage buffer). Other passes in
+//   between just pass it through.
 //
 // A future refactor could narrow these via per-phase enum splits
 // (`PreSoaArrayExpr` / `PostSoaArrayExpr`, etc.) so the invariants are
@@ -480,9 +484,10 @@ pub enum ArrayExpr {
         len: Box<Term>,
         step: Option<Box<Term>>,
     },
-    /// Storage buffer reference (introduced by buffer_specialize).
-    /// Represents elements from a storage buffer at `binding`, starting
-    /// at `offset` for `len` elements.
+    /// Storage buffer reference. Represents elements from a storage buffer
+    /// at `binding`, starting at `offset` for `len` elements. Introduced by
+    /// `lift_gathers` (pre-defunc, for gather materialization) or
+    /// `buffer_specialize` (post-mono, for view-array SOAC inputs).
     StorageView(StorageView),
 }
 

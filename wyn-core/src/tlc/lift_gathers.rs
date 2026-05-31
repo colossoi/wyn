@@ -29,7 +29,11 @@ use std::collections::{HashMap, HashSet};
 
 use super::closure_convert::collect_free_vars;
 use super::parallelize::make_entry_def;
-use super::{Def, DefMeta, Lambda, Program, SoacOp, Term, TermIdSource, TermKind, VarRef};
+use super::{
+    ArrayExpr, Def, DefMeta, Lambda, Program, SoacBody, SoacOp, StorageView, Term, TermIdSource, TermKind,
+    VarRef,
+};
+use crate::BindingRef;
 use crate::ast::TypeName;
 use crate::egir::from_tlc::AUTO_STORAGE_SET;
 use crate::interface::{EntryParamBindingKind, StorageBindingDecl, StorageRole};
@@ -233,11 +237,16 @@ fn try_lift(
         return None;
     }
 
-    // Rewrite `name[idx]` → storage_index on a trial copy; bail if `name` is
-    // used any other way, or if no use is a dynamic (non-constant) index.
+    // Rewrite `name[idx]` → storage_index and `ArrayExpr::Ref(Var(name))`
+    // → `ArrayExpr::StorageBuffer{…}` on a trial copy; bail if `name` is used
+    // any other way (a bare Var in a non-SOAC-input position), or if no use is
+    // a dynamic index nor a SOAC input. Multi-consumer is fine: every
+    // downstream Index *and* every downstream SOAC input gets routed to the
+    // same gather buffer.
     let binding = (AUTO_STORAGE_SET, binding_num);
     let mut bail = false;
     let mut dyn_uses = 0usize;
+    let mut soac_uses = 0usize;
     // Local ID source for the synthesized literals + App nodes. Per-pass
     // restart matches the rest of the lift-gathers / parallelize style;
     // TLC TermIds aren't load-bearing past parallelize.
@@ -249,9 +258,10 @@ fn try_lift(
         &elem_ty,
         &mut bail,
         &mut dyn_uses,
+        &mut soac_uses,
         &mut term_ids,
     );
-    if bail || dyn_uses == 0 {
+    if bail || (dyn_uses + soac_uses == 0) {
         return None;
     }
 
@@ -259,6 +269,12 @@ fn try_lift(
     // element, so its length tracks `src`'s element count (element sizes may
     // differ). `from_tlc` allocates the host buffer from this policy.
     let length = gather_length(&elem_ty, &frees, param_bindings);
+
+    // Chained intermediates: if the producer reads any `StorageBuffer{set,
+    // binding, …}` directly (e.g. its input was itself a previously-lifted
+    // gather buffer), the pre-pass must declare each as its own Input so the
+    // descriptor wires up the cross-stage read.
+    let chained = producer_storage_inputs(rhs);
 
     let prepass = build_gather_prepass(
         entry_name,
@@ -268,6 +284,7 @@ fn try_lift(
         &frees,
         binding,
         length.clone(),
+        &chained,
         program,
         &mut term_ids,
     );
@@ -305,10 +322,26 @@ fn gather_length(
     })
 }
 
-/// Recursively replace `Index { array: Var(arr), index }` with
-/// `_w_intrinsic_storage_index(set, binding, index)`. Sets `bail` if `arr`
-/// appears in any other position (not a pure-gather use). Counts uses whose
-/// index is not a constant literal in `dyn_uses`.
+/// Recursively replace each use of `arr` with a read from the gather buffer.
+/// The walk is **context-aware** via mutual recursion with
+/// [`rewrite_soac`] / [`rewrite_array_input`]:
+///
+///   * In a generic `Term` position (here): an `Index { array: Var(arr), index
+///     }` is rewritten to `_w_intrinsic_storage_index(set, binding, index)`
+///     (tallied in `dyn_uses`); a bare `Var(arr)` sets `bail` (we can't lower
+///     a runtime-sized Composite threaded through arbitrary term positions);
+///     a `Soac` is split into "inputs → materializable" + "lambda bodies / ne
+///     → generic", handled by [`rewrite_soac`].
+///   * In an *ArrayExpr input* position (see [`rewrite_array_input`]): a
+///     `Ref(Var(arr))` at any nesting depth — including nested inside a `Zip`
+///     or another `Soac`'s own input — is rewritten to
+///     `StorageBuffer{set,binding,offset:0,len:storage_len,elem_ty}` (tallied
+///     in `soac_uses`). The materializable-position frame propagates down
+///     through `Zip` and nested `Soac` inputs but flips back to a generic
+///     `Term` context when we cross into a `Ref(non-Var)`'s wrapped Term, a
+///     `Range`'s `start`/`len`/`step`, a `Literal`'s inner terms, or a
+///     `StorageBuffer`'s `offset`/`len` — i.e. wherever the surrounding
+///     position is no longer "a SOAC reading this array."
 fn rewrite_uses(
     term: Term,
     arr: SymbolId,
@@ -316,11 +349,21 @@ fn rewrite_uses(
     elem_ty: &Type<TypeName>,
     bail: &mut bool,
     dyn_uses: &mut usize,
+    soac_uses: &mut usize,
     term_ids: &mut TermIdSource,
 ) -> Term {
     if let TermKind::Index { array, index } = &term.kind {
         if matches!(&array.kind, TermKind::Var(VarRef::Symbol(s)) if *s == arr) {
-            let idx = rewrite_uses((**index).clone(), arr, binding, elem_ty, bail, dyn_uses, term_ids);
+            let idx = rewrite_uses(
+                (**index).clone(),
+                arr,
+                binding,
+                elem_ty,
+                bail,
+                dyn_uses,
+                soac_uses,
+                term_ids,
+            );
             if !matches!(idx.kind, TermKind::IntLit(_)) {
                 *dyn_uses += 1;
             }
@@ -333,11 +376,272 @@ fn rewrite_uses(
             );
         }
     }
+
+    // SOAC: hand off to the context-aware soac walker so inputs are treated
+    // as a materializable ArrayExpr position (intercepting `Ref(Var(arr))` at
+    // any nesting depth) while lambda bodies / ne / etc. stay in the generic
+    // Term context.
+    if let TermKind::Soac(_) = &term.kind {
+        let Term { id, ty, span, kind } = term;
+        let TermKind::Soac(soac) = kind else {
+            unreachable!()
+        };
+        let new_soac = rewrite_soac(
+            soac, arr, binding, elem_ty, bail, dyn_uses, soac_uses, span, term_ids,
+        );
+        return Term {
+            id,
+            ty,
+            span,
+            kind: TermKind::Soac(new_soac),
+        };
+    }
+
     if matches!(&term.kind, TermKind::Var(VarRef::Symbol(s)) if *s == arr) {
         *bail = true;
         return term;
     }
-    term.map_children(&mut |c| rewrite_uses(c, arr, binding, elem_ty, bail, dyn_uses, term_ids))
+    term.map_children(&mut |c| rewrite_uses(c, arr, binding, elem_ty, bail, dyn_uses, soac_uses, term_ids))
+}
+
+/// Walk a `SoacOp`, splitting inputs (materializable ArrayExpr position) from
+/// other components (generic Term position). Inputs go through
+/// [`rewrite_array_input`]; lambda bodies / ne / etc. go through
+/// [`rewrite_uses`].
+#[allow(clippy::too_many_arguments)]
+fn rewrite_soac(
+    soac: SoacOp,
+    arr: SymbolId,
+    binding: (u32, u32),
+    elem_ty: &Type<TypeName>,
+    bail: &mut bool,
+    dyn_uses: &mut usize,
+    soac_uses: &mut usize,
+    span: crate::ast::Span,
+    term_ids: &mut TermIdSource,
+) -> SoacOp {
+    match soac {
+        SoacOp::Map {
+            lam,
+            inputs,
+            destination,
+        } => SoacOp::Map {
+            lam: rewrite_soac_body(lam, arr, binding, elem_ty, bail, dyn_uses, soac_uses, term_ids),
+            inputs: inputs
+                .into_iter()
+                .map(|ae| {
+                    rewrite_array_input(
+                        ae, arr, binding, elem_ty, bail, dyn_uses, soac_uses, span, term_ids,
+                    )
+                })
+                .collect(),
+            destination,
+        },
+        SoacOp::Reduce { op, ne, input } => SoacOp::Reduce {
+            op: rewrite_soac_body(op, arr, binding, elem_ty, bail, dyn_uses, soac_uses, term_ids),
+            ne: Box::new(rewrite_uses(
+                *ne, arr, binding, elem_ty, bail, dyn_uses, soac_uses, term_ids,
+            )),
+            input: rewrite_array_input(
+                input, arr, binding, elem_ty, bail, dyn_uses, soac_uses, span, term_ids,
+            ),
+        },
+        SoacOp::Scan {
+            op,
+            reduce_op,
+            ne,
+            input,
+            destination,
+        } => SoacOp::Scan {
+            op: rewrite_soac_body(op, arr, binding, elem_ty, bail, dyn_uses, soac_uses, term_ids),
+            reduce_op: rewrite_soac_body(
+                reduce_op, arr, binding, elem_ty, bail, dyn_uses, soac_uses, term_ids,
+            ),
+            ne: Box::new(rewrite_uses(
+                *ne, arr, binding, elem_ty, bail, dyn_uses, soac_uses, term_ids,
+            )),
+            input: rewrite_array_input(
+                input, arr, binding, elem_ty, bail, dyn_uses, soac_uses, span, term_ids,
+            ),
+            destination,
+        },
+        SoacOp::Redomap {
+            op,
+            reduce_op,
+            ne,
+            inputs,
+        } => SoacOp::Redomap {
+            op: rewrite_soac_body(op, arr, binding, elem_ty, bail, dyn_uses, soac_uses, term_ids),
+            reduce_op: rewrite_soac_body(
+                reduce_op, arr, binding, elem_ty, bail, dyn_uses, soac_uses, term_ids,
+            ),
+            ne: Box::new(rewrite_uses(
+                *ne, arr, binding, elem_ty, bail, dyn_uses, soac_uses, term_ids,
+            )),
+            inputs: inputs
+                .into_iter()
+                .map(|ae| {
+                    rewrite_array_input(
+                        ae, arr, binding, elem_ty, bail, dyn_uses, soac_uses, span, term_ids,
+                    )
+                })
+                .collect(),
+        },
+        SoacOp::Filter {
+            pred,
+            input,
+            destination,
+        } => SoacOp::Filter {
+            pred: rewrite_soac_body(pred, arr, binding, elem_ty, bail, dyn_uses, soac_uses, term_ids),
+            input: rewrite_array_input(
+                input, arr, binding, elem_ty, bail, dyn_uses, soac_uses, span, term_ids,
+            ),
+            destination,
+        },
+        // Scatter / ReduceByIndex carry ArrayExpr indices+values too. Defer
+        // their materializable-position treatment until those SOACs are
+        // wired up end-to-end; for now fall back to the generic descent so
+        // an `arr` reference inside one cleanly bails.
+        other => super::map_soac_children(other, &mut |t| {
+            rewrite_uses(t, arr, binding, elem_ty, bail, dyn_uses, soac_uses, term_ids)
+        }),
+    }
+}
+
+/// Walk a `SoacBody` (a SOAC's lambda + captures). The lambda body and each
+/// capture term sit in the generic `Term` context.
+#[allow(clippy::too_many_arguments)]
+fn rewrite_soac_body(
+    sb: SoacBody,
+    arr: SymbolId,
+    binding: (u32, u32),
+    elem_ty: &Type<TypeName>,
+    bail: &mut bool,
+    dyn_uses: &mut usize,
+    soac_uses: &mut usize,
+    term_ids: &mut TermIdSource,
+) -> SoacBody {
+    SoacBody {
+        lam: rewrite_lambda(sb.lam, arr, binding, elem_ty, bail, dyn_uses, soac_uses, term_ids),
+        captures: sb
+            .captures
+            .into_iter()
+            .map(|(s, ty, t)| {
+                (
+                    s,
+                    ty,
+                    rewrite_uses(t, arr, binding, elem_ty, bail, dyn_uses, soac_uses, term_ids),
+                )
+            })
+            .collect(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rewrite_lambda(
+    lam: Lambda,
+    arr: SymbolId,
+    binding: (u32, u32),
+    elem_ty: &Type<TypeName>,
+    bail: &mut bool,
+    dyn_uses: &mut usize,
+    soac_uses: &mut usize,
+    term_ids: &mut TermIdSource,
+) -> Lambda {
+    Lambda {
+        params: lam.params,
+        body: Box::new(rewrite_uses(
+            *lam.body, arr, binding, elem_ty, bail, dyn_uses, soac_uses, term_ids,
+        )),
+        ret_ty: lam.ret_ty,
+    }
+}
+
+/// Walk an `ArrayExpr` in **materializable position** (a SOAC input slot,
+/// directly or nested through `Zip` / nested `Soac` inputs). A bare
+/// `Ref(Var(arr))` here is the canonical "consume `arr` as a SOAC input"
+/// pattern: rewrite it to a `StorageView` read of the gather buffer (and
+/// bump `soac_uses`) — at *any* depth, including under a `Zip` or another
+/// `Soac`'s `Map(inputs=[Ref(Var(arr))])`. The materializable frame
+/// propagates down `Zip` and `Soac`-input children; everywhere else (the
+/// wrapped term inside a non-matching `Ref`, a `Range`'s components, a
+/// `Literal`'s elements, a `StorageView`'s `offset`/`len`) we flip back to
+/// the generic `Term` context and route through [`rewrite_uses`].
+#[allow(clippy::too_many_arguments)]
+fn rewrite_array_input(
+    ae: ArrayExpr,
+    arr: SymbolId,
+    binding: (u32, u32),
+    elem_ty: &Type<TypeName>,
+    bail: &mut bool,
+    dyn_uses: &mut usize,
+    soac_uses: &mut usize,
+    span: crate::ast::Span,
+    term_ids: &mut TermIdSource,
+) -> ArrayExpr {
+    match ae {
+        ArrayExpr::Ref(t) => {
+            if matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == arr) {
+                *soac_uses += 1;
+                let bref = BindingRef::new(binding.0, binding.1);
+                let len = super::storage_len_call(bref, span, term_ids);
+                ArrayExpr::StorageView(StorageView {
+                    binding: bref,
+                    offset: Box::new(uint_lit(0, span, term_ids)),
+                    len: Box::new(len),
+                    elem_ty: elem_ty.clone(),
+                })
+            } else {
+                // The wrapped term is a generic Term context (not itself an
+                // input position) — descend via `rewrite_uses`.
+                ArrayExpr::Ref(Box::new(rewrite_uses(
+                    *t, arr, binding, elem_ty, bail, dyn_uses, soac_uses, term_ids,
+                )))
+            }
+        }
+        ArrayExpr::Zip(children) => ArrayExpr::Zip(
+            children
+                .into_iter()
+                .map(|c| {
+                    rewrite_array_input(
+                        c, arr, binding, elem_ty, bail, dyn_uses, soac_uses, span, term_ids,
+                    )
+                })
+                .collect(),
+        ),
+        ArrayExpr::Soac(boxed) => ArrayExpr::Soac(Box::new(rewrite_soac(
+            *boxed, arr, binding, elem_ty, bail, dyn_uses, soac_uses, span, term_ids,
+        ))),
+        ArrayExpr::Literal(terms) => ArrayExpr::Literal(
+            terms
+                .into_iter()
+                .map(|t| rewrite_uses(t, arr, binding, elem_ty, bail, dyn_uses, soac_uses, term_ids))
+                .collect(),
+        ),
+        ArrayExpr::Range { start, len, step } => ArrayExpr::Range {
+            start: Box::new(rewrite_uses(
+                *start, arr, binding, elem_ty, bail, dyn_uses, soac_uses, term_ids,
+            )),
+            len: Box::new(rewrite_uses(
+                *len, arr, binding, elem_ty, bail, dyn_uses, soac_uses, term_ids,
+            )),
+            step: step.map(|s| {
+                Box::new(rewrite_uses(
+                    *s, arr, binding, elem_ty, bail, dyn_uses, soac_uses, term_ids,
+                ))
+            }),
+        },
+        ArrayExpr::StorageView(sv) => ArrayExpr::StorageView(StorageView {
+            binding: sv.binding,
+            offset: Box::new(rewrite_uses(
+                *sv.offset, arr, binding, elem_ty, bail, dyn_uses, soac_uses, term_ids,
+            )),
+            len: Box::new(rewrite_uses(
+                *sv.len, arr, binding, elem_ty, bail, dyn_uses, soac_uses, term_ids,
+            )),
+            elem_ty: sv.elem_ty,
+        }),
+    }
 }
 
 /// Build the `<entry>_gather_<n>` compute entry whose body is the producer
@@ -353,6 +657,7 @@ fn build_gather_prepass(
     captured_inputs: &[(SymbolId, Type<TypeName>)],
     binding: (u32, u32),
     length: Option<crate::pipeline_descriptor::BufferLen>,
+    chained_intermediates: &[(u32, u32, Type<TypeName>)],
     program: &mut Program,
     term_ids: &mut TermIdSource,
 ) -> Def {
@@ -361,12 +666,23 @@ fn build_gather_prepass(
         .cloned()
         .expect("try_lift's is_runtime_sized_array(name_ty) gate guarantees an array elem");
     let uniform_attrs = vec![None; captured_inputs.len()];
-    let storage_bindings = vec![StorageBindingDecl {
-        binding: crate::BindingRef::new(binding.0, binding.1),
+    let mut storage_bindings = vec![StorageBindingDecl {
+        binding: BindingRef::new(binding.0, binding.1),
         role: StorageRole::Output,
         elem_ty,
         length,
     }];
+    for (set, binding, elem_ty) in chained_intermediates {
+        storage_bindings.push(StorageBindingDecl {
+            binding: BindingRef::new(*set, *binding),
+            role: StorageRole::Input,
+            elem_ty: elem_ty.clone(),
+            // Length policy was already attached to this binding by whichever
+            // earlier `try_lift` created it; the descriptor uses that
+            // canonical entry and falls back if absent (Phase 2 plumbing).
+            length: None,
+        });
+    }
     make_entry_def(
         &name,
         producer,
@@ -444,6 +760,82 @@ fn free_symbol_vars(term: &Term, symbols: &SymbolTable) -> Vec<(SymbolId, Type<T
         .collect()
 }
 
+/// Return every `ArrayExpr::StorageView` (deduped by binding) reachable from
+/// `rhs` — i.e. the chained intermediates the producer reads. The walker
+/// [`rewrite_array_input`] can plant a `StorageView` at any depth (nested
+/// through `Zip` or inside another `Soac`'s own input), so a one-level scan
+/// would miss them and the resulting pre-pass would forget to declare those
+/// bindings as Inputs. Recursive descent + dedup keeps the declaration set
+/// complete and minimal.
+fn producer_storage_inputs(rhs: &Term) -> Vec<(u32, u32, Type<TypeName>)> {
+    let mut out = Vec::<(u32, u32, Type<TypeName>)>::new();
+    collect_storage_in_term(rhs, &mut out);
+    out
+}
+
+fn collect_storage_in_term(term: &Term, out: &mut Vec<(u32, u32, Type<TypeName>)>) {
+    if let TermKind::Soac(soac) = &term.kind {
+        collect_storage_in_soac(soac, out);
+    }
+    term.for_each_child(&mut |c| collect_storage_in_term(c, out));
+}
+
+fn collect_storage_in_soac(soac: &SoacOp, out: &mut Vec<(u32, u32, Type<TypeName>)>) {
+    match soac {
+        SoacOp::Map { inputs, .. } | SoacOp::Redomap { inputs, .. } => {
+            for ae in inputs {
+                collect_storage_in_ae(ae, out);
+            }
+        }
+        SoacOp::Reduce { input, .. } | SoacOp::Scan { input, .. } | SoacOp::Filter { input, .. } => {
+            collect_storage_in_ae(input, out);
+        }
+        _ => {}
+    }
+}
+
+fn collect_storage_in_ae(ae: &ArrayExpr, out: &mut Vec<(u32, u32, Type<TypeName>)>) {
+    match ae {
+        ArrayExpr::StorageView(sv) => {
+            let key = (sv.binding.set, sv.binding.binding);
+            if !out.iter().any(|(s, b, _)| (*s, *b) == key) {
+                out.push((sv.binding.set, sv.binding.binding, sv.elem_ty.clone()));
+            }
+            // The offset/len Terms can themselves contain SOACs reading
+            // other storage buffers — keep descending.
+            collect_storage_in_term(&sv.offset, out);
+            collect_storage_in_term(&sv.len, out);
+        }
+        ArrayExpr::Ref(t) => collect_storage_in_term(t, out),
+        ArrayExpr::Zip(children) => {
+            for c in children {
+                collect_storage_in_ae(c, out);
+            }
+        }
+        ArrayExpr::Soac(boxed) => collect_storage_in_soac(boxed, out),
+        ArrayExpr::Literal(terms) => {
+            for t in terms {
+                collect_storage_in_term(t, out);
+            }
+        }
+        ArrayExpr::Range { start, len, step } => {
+            collect_storage_in_term(start, out);
+            collect_storage_in_term(len, out);
+            if let Some(s) = step {
+                collect_storage_in_term(s, out);
+            }
+        }
+    }
+}
+
+fn uint_lit(val: u64, span: crate::ast::Span, term_ids: &mut TermIdSource) -> Term {
+    Term {
+        id: term_ids.next_id(),
+        ty: Type::Constructed(TypeName::UInt(32), vec![]),
+        span,
+        kind: TermKind::IntLit(val.to_string()),
+    }
+}
 #[cfg(test)]
 #[path = "lift_gathers_tests.rs"]
 mod lift_gathers_tests;

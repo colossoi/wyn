@@ -422,9 +422,12 @@ pub(super) fn apply_type_subst_to_array_expr(
             len: Box::new(apply_type_subst_to_term(len, subst, term_ids)),
             step: step.as_ref().map(|s| Box::new(apply_type_subst_to_term(s, subst, term_ids))),
         },
-        ArrayExpr::StorageView(_) => {
-            unreachable!("StorageBuffer introduced after defunctionalization")
-        }
+        ArrayExpr::StorageView(sv) => ArrayExpr::StorageView(super::StorageView {
+            binding: sv.binding,
+            offset: Box::new(apply_type_subst_to_term(&sv.offset, subst, term_ids)),
+            len: Box::new(apply_type_subst_to_term(&sv.len, subst, term_ids)),
+            elem_ty: sv.elem_ty.clone(),
+        }),
     }
 }
 
@@ -856,9 +859,12 @@ fn substitute_var_array_expr(
             len: Box::new(substitute_var(len, old_sym, new_sym, term_ids)),
             step: step.as_ref().map(|s| Box::new(substitute_var(s, old_sym, new_sym, term_ids))),
         },
-        ArrayExpr::StorageView(_) => {
-            unreachable!("StorageBuffer introduced after defunctionalization")
-        }
+        ArrayExpr::StorageView(sv) => ArrayExpr::StorageView(super::StorageView {
+            binding: sv.binding,
+            offset: Box::new(substitute_var(&sv.offset, old_sym, new_sym, term_ids)),
+            len: Box::new(substitute_var(&sv.len, old_sym, new_sym, term_ids)),
+            elem_ty: sv.elem_ty.clone(),
+        }),
     }
 }
 
