@@ -56,9 +56,17 @@ if not exist "%BINARY%" (
 )
 
 REM Collect every .wyn under testfiles\ and testfiles\playground\.
+REM The `if /I "%%~xf"==".wyn"` guard is load-bearing: cmd's `*.wyn`
+REM glob has legacy DOS semantics and matches files whose extension
+REM *begins with* `.wyn` (so `sha256_linked_test.wyn_` — the deliberately
+REM disabled file — slips through without it).
 set FILES=
-for %%f in (testfiles\*.wyn) do set FILES=!FILES! "%%f"
-for %%f in (testfiles\playground\*.wyn) do set FILES=!FILES! "%%f"
+for %%f in (testfiles\*.wyn) do (
+    if /I "%%~xf"==".wyn" set FILES=!FILES! "%%f"
+)
+for %%f in (testfiles\playground\*.wyn) do (
+    if /I "%%~xf"==".wyn" set FILES=!FILES! "%%f"
+)
 
 if "!FILES!"=="" (
     echo No testfiles found under testfiles\ or testfiles\playground\
@@ -70,7 +78,9 @@ set OUTDIR=%TEMP%\wyn_profile_out
 if not exist "%OUTDIR%" mkdir "%OUTDIR%"
 
 echo Profiling compile of every testfile (output -^> %OUTDIR%)...
-samply record -- "%BINARY%" compile !FILES! -o "%OUTDIR%"
+REM `-v` prints `[i/n] path` before each file so a mid-batch compile
+REM failure is immediately attributable to the file that triggered it.
+samply record -- "%BINARY%" compile -v !FILES! -o "%OUTDIR%"
 
 set EXITCODE=%errorlevel%
 popd
