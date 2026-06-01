@@ -5,6 +5,10 @@
 //! - Side-effectful operators remain anchored in a CFG skeleton
 //! - Scoped elaboration converts back to sequential SSA (DCE for free)
 //! - Rewrite rules are applied eagerly during construction (Phase 2+)
+//!
+//! Shape inspired by Chris Fallin's aegraph writeup
+//! (acyclic, GVN'd, side-effect skeleton, scoped elaboration as
+//! extraction): <https://cfallin.org/blog/2026/04/09/aegraph/>.
 
 mod domtree;
 pub(crate) mod elaborate;
