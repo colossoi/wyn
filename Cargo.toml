@@ -26,3 +26,11 @@ opt-level = 1
 
 [profile.release]
 debug = "line-tables-only"
+
+# Sampling-profiler build: release optimizations + full debuginfo so
+# samply / cargo-flamegraph / VTune can resolve function names and
+# inlined frames. Build with `cargo build --profile profiling --bin wyn`.
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
