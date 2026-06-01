@@ -25,6 +25,33 @@ use super::{
 
 type Summaries = HashMap<SymbolId, FunctionSummary>;
 
+/// Pass-local context threaded through every fusion-internal call.
+/// Holds artifacts that are expensive to recompute per call site:
+/// - `summaries`: borrowed from the per-outer-iteration analysis
+/// - `sym_to_def`: rebuilt once per outer iteration (previously
+///   `producer_graph::build_producer_graph` re-scanned the entire
+///   symbol table on every call).
+struct FusionContext<'a> {
+    summaries: &'a Summaries,
+    sym_to_def: HashMap<SymbolId, SymbolId>,
+}
+
+/// Build the `Var-symbol → def-symbol` lookup once. The fusion pass
+/// allocates fresh let-binding / lambda symbols during a sweep, but
+/// none of those name a def, so the map stays valid across the sweep.
+fn build_sym_to_def(
+    symbols: &SymbolTable,
+    def_syms: &HashMap<String, SymbolId>,
+) -> HashMap<SymbolId, SymbolId> {
+    let mut sym_to_def: HashMap<SymbolId, SymbolId> = HashMap::new();
+    for (sym, name) in symbols.iter() {
+        if let Some(&def_sym) = def_syms.get(name) {
+            sym_to_def.insert(*sym, def_sym);
+        }
+    }
+    sym_to_def
+}
+
 // =============================================================================
 // Public entry point
 // =============================================================================
@@ -49,14 +76,25 @@ pub fn run(program: Program) -> Program {
         let def_syms = program.def_syms;
         let mut term_ids = TermIdSource::new();
 
+        // Precompute the Var-symbol → def-symbol map once per outer
+        // iteration. Each `build_producer_graph` call used to rebuild
+        // this from a full symbol-table scan; with N defs containing
+        // M let chains, that's N·M scans of the (growing) symbol table
+        // per outer iteration. Hoisting it makes producer-graph
+        // construction O(graph size) instead of O(symbol table size).
+        let sym_to_def = build_sym_to_def(&symbols, &def_syms);
+        let ctx = FusionContext {
+            summaries: &summaries,
+            sym_to_def,
+        };
+
         let defs = program
             .defs
             .into_iter()
             .map(|def| {
                 // Bottom-up: fuse children first, then try graph-driven fusion
-                let new_body = fuse_term(def.body, &summaries, &mut symbols, &mut term_ids, &def_syms);
-                let (new_body, did_fuse) =
-                    fuse_def_body(new_body, &summaries, &mut symbols, &mut term_ids, &def_syms);
+                let new_body = fuse_term(def.body, &ctx, &mut symbols, &mut term_ids);
+                let (new_body, did_fuse) = fuse_def_body(new_body, &ctx, &mut symbols, &mut term_ids);
                 if did_fuse {
                     changed = true;
                 }
@@ -89,15 +127,14 @@ pub fn run(program: Program) -> Program {
 /// sub-expression that contains a Let chain with SOAC producers/consumers.
 fn fuse_term(
     term: Term,
-    summaries: &Summaries,
+    ctx: &FusionContext<'_>,
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
-    def_syms: &HashMap<String, SymbolId>,
 ) -> Term {
-    let term = term.map_children(&mut |child| fuse_term(child, summaries, symbols, term_ids, def_syms));
+    let term = term.map_children(&mut |child| fuse_term(child, ctx, symbols, term_ids));
 
     if matches!(term.kind, TermKind::Let { .. }) {
-        let (fused, _) = fuse_def_body(term, summaries, symbols, term_ids, def_syms);
+        let (fused, _) = fuse_def_body(term, ctx, symbols, term_ids);
         return fused;
     }
 
@@ -107,15 +144,13 @@ fn fuse_term(
 /// Fuse within a body term. Returns the new body and whether any fusion happened.
 fn fuse_def_body(
     body: Term,
-    summaries: &Summaries,
+    ctx: &FusionContext<'_>,
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
-    def_syms: &HashMap<String, SymbolId>,
 ) -> (Term, bool) {
     let (params, inner) = extract_lambda_params(&body);
-    let param_syms: Vec<SymbolId> = params.iter().map(|(s, _)| *s).collect();
 
-    let graph = producer_graph::build_producer_graph(&inner, &param_syms, summaries, symbols, def_syms);
+    let graph = producer_graph::build_producer_graph(&inner, ctx.summaries, &ctx.sym_to_def);
 
     if graph.node_count() < 2 {
         return (body, false);

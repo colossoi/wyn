@@ -100,22 +100,16 @@ impl ProducerGraph {
 /// Build a ProducerGraph from a function body.
 ///
 /// Walks the Let chain, creating nodes for SOAC/array-producing operations
-/// and edges for def-use relationships between them.
+/// and edges for def-use relationships between them. `sym_to_def` is the
+/// `Var-symbol → def-symbol` lookup; the fusion pass hoists its
+/// construction across the per-iteration sweep (see
+/// `tlc::fusion::FusionContext`), so this function is O(graph size)
+/// rather than O(graph size + symbol table size).
 pub fn build_producer_graph(
     body: &Term,
-    _params: &[SymbolId],
     summaries: &HashMap<SymbolId, FunctionSummary>,
-    symbols: &SymbolTable,
-    def_syms: &HashMap<String, SymbolId>,
+    sym_to_def: &HashMap<SymbolId, SymbolId>,
 ) -> ProducerGraph {
-    // Build callee_sym → def_sym resolver
-    let mut sym_to_def: HashMap<SymbolId, SymbolId> = HashMap::new();
-    for (sym, name) in symbols.iter() {
-        if let Some(&def_sym) = def_syms.get(name) {
-            sym_to_def.insert(*sym, def_sym);
-        }
-    }
-
     let mut builder = GraphBuilder {
         nodes: Vec::new(),
         edges: Vec::new(),
@@ -140,8 +134,10 @@ struct GraphBuilder<'a> {
     edges: Vec<ProducerEdge>,
     binding_map: HashMap<SymbolId, ProducerId>,
     summaries: &'a HashMap<SymbolId, FunctionSummary>,
-    /// Resolves call-site SymbolIds to canonical def SymbolIds for summary lookup.
-    sym_to_def: HashMap<SymbolId, SymbolId>,
+    /// Resolves call-site SymbolIds to canonical def SymbolIds for summary
+    /// lookup. Borrowed from the fusion pass's `FusionContext` so the map
+    /// is built once per outer iteration, not once per graph build.
+    sym_to_def: &'a HashMap<SymbolId, SymbolId>,
     term_ids: TermIdSource,
 }
 
