@@ -390,7 +390,12 @@ impl<'a> OpenResolver<'a> {
 /// Build the open index from the union of `spec_schemes`'s keys
 /// (qualified `M.name` names from elaborated module specs) and the
 /// builtins catalog (`f32.cos`, `_w_intrinsic_*`, etc.).
-fn build_index(
+/// Build the open index from the union of `spec_schemes`'s keys and
+/// the builtins catalog. The index is invariant across a type-check
+/// run, so callers that resolve many bodies in sequence (notably the
+/// prelude-elaborated-decls loop in `types::run`) should build once
+/// and reuse via `run_with_index` / `run_in_module_with_index`.
+pub fn build_index(
     spec_schemes: &HashMap<String, TypeScheme<TypeName>>,
     catalog: &BuiltinCatalog,
 ) -> OpenIndex {
@@ -411,14 +416,21 @@ fn build_index(
 
 /// Top-level public entry point. Builds the open index from the union
 /// of `spec_schemes`'s keys and the builtins catalog, then rewrites
-/// every declaration body in `program`.
+/// every declaration body in `program`. Single-shot callers can use
+/// this; callers that resolve multiple bodies should build the index
+/// once with `build_index` and use `run_with_index`.
 pub fn run(
     program: &mut Program,
     spec_schemes: &HashMap<String, TypeScheme<TypeName>>,
     catalog: &BuiltinCatalog,
 ) -> Result<()> {
     let index = build_index(spec_schemes, catalog);
-    let mut r = OpenResolver::new(&index);
+    run_with_index(program, &index)
+}
+
+/// Like `run` but reuses a pre-built index.
+pub fn run_with_index(program: &mut Program, index: &OpenIndex) -> Result<()> {
+    let mut r = OpenResolver::new(index);
     r.resolve_program(program)
 }
 
@@ -427,7 +439,9 @@ pub fn run(
 /// so a sibling reference like `log` (inside `f32`'s body) qualifies
 /// to `f32.log`. Used for prelude module decl bodies, which never go
 /// through `resolve_program` (they're stored as elaborated decls in
-/// the module manager, not in the user `Program`).
+/// the module manager, not in the user `Program`). Callers that
+/// resolve many such bodies should hoist `build_index` and call
+/// `run_in_module_with_index` instead.
 pub fn run_in_module(
     expr: &mut crate::ast::Expression,
     module_name: &str,
@@ -435,14 +449,19 @@ pub fn run_in_module(
     catalog: &BuiltinCatalog,
 ) -> Result<()> {
     let index = build_index(spec_schemes, catalog);
-    if !index.has_module(module_name) {
-        // Not a known module — nothing to qualify. Still walk the
-        // expression so any top-level `open M` it contains validates.
-        let mut r = OpenResolver::new(&index);
-        return r.resolve_expression(expr);
+    run_in_module_with_index(expr, module_name, &index)
+}
+
+/// Like `run_in_module` but reuses a pre-built index.
+pub fn run_in_module_with_index(
+    expr: &mut crate::ast::Expression,
+    module_name: &str,
+    index: &OpenIndex,
+) -> Result<()> {
+    let mut r = OpenResolver::new(index);
+    if index.has_module(module_name) {
+        r.opens.push(module_name.to_string());
     }
-    let mut r = OpenResolver::new(&index);
-    r.opens.push(module_name.to_string());
     r.resolve_expression(expr)
 }
 

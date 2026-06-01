@@ -33,21 +33,25 @@ pub fn run(ast: &mut ast::Program, module_manager: &mut ModuleManager) -> Result
     resolver.resolve(module_manager, ast);
     let (context, spec_schemes) = resolver.into_parts();
 
-    resolve_opens::run(ast, &spec_schemes, catalog())?;
+    // Build the open-resolver index once and reuse across the user
+    // `Program` and every elaborated prelude module body — the index
+    // is invariant across this whole run (spec_schemes + catalog
+    // don't change).
+    let open_index = resolve_opens::build_index(&spec_schemes, catalog());
+    resolve_opens::run_with_index(ast, &open_index)?;
 
     // Prelude module decl bodies don't go through `resolve_opens::run`
     // (they aren't in the user `Program`), but their bodies reference
     // sibling defs by unqualified name (e.g. `log10`'s body calls `log`,
     // which is `f32.log` from outside). Qualify them here as if each
     // body were inside an implicit `open <module_name>`.
-    let cat = catalog();
     let module_names: Vec<String> = module_manager.elaborated_modules_mut().keys().cloned().collect();
     for module_name in module_names {
         let elaborated =
             module_manager.elaborated_modules_mut().get_mut(&module_name).expect("module exists");
         for item in &mut elaborated.items {
             if let crate::module_manager::ElaboratedItem::Decl(decl) = item {
-                resolve_opens::run_in_module(&mut decl.body, &module_name, &spec_schemes, cat)?;
+                resolve_opens::run_in_module_with_index(&mut decl.body, &module_name, &open_index)?;
             }
         }
     }
