@@ -34,7 +34,7 @@ pub(crate) fn run(inner: &mut EgirInner) {
 
 /// Rewrite all dynamic Index nodes in the e-graph to Materialize +
 /// DynamicExtract.
-pub(crate) fn run_one_body(graph: &mut EGraph) {
+fn run_one_body(graph: &mut EGraph) {
     // Snapshot first; we'll mutate node entries and add new Materialize nodes.
     let targets: Vec<(NodeId, NodeId, NodeId)> = graph
         .nodes

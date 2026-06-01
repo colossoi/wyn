@@ -52,7 +52,7 @@ pub struct PreElaboratedPrelude {
     /// Module type registry: type name -> ModuleTypeExpression
     pub module_type_registry: HashMap<String, ModuleTypeExpression>,
     /// Elaborated modules: module_name -> ElaboratedModule
-    pub elaborated_modules: HashMap<String, ElaboratedModule>,
+    pub(crate) elaborated_modules: HashMap<String, ElaboratedModule>,
     /// Set of known module names (for name resolution)
     pub known_modules: HashSet<String>,
     /// Type aliases from modules: "module.typename" -> underlying Type

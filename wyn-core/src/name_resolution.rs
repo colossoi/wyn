@@ -26,7 +26,7 @@ use crate::module_manager::ModuleManager;
 use crate::scope::{ScopeStack, for_each_pattern_name};
 
 /// Insert every name bound by `pattern` into `scope`.
-pub(crate) fn collect_pattern_bindings(pattern: &crate::ast::Pattern, scope: &mut ScopeStack<()>) {
+fn collect_pattern_bindings(pattern: &crate::ast::Pattern, scope: &mut ScopeStack<()>) {
     for_each_pattern_name(pattern, &mut |name| {
         scope.insert(name.to_string(), ());
     });

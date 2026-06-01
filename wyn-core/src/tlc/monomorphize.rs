@@ -22,7 +22,7 @@ use polytype::Type;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// A substitution mapping type variables to concrete types
-pub(crate) type Substitution = HashMap<usize, Type<TypeName>>;
+type Substitution = HashMap<usize, Type<TypeName>>;
 
 /// Monomorphize a TLC program.
 ///
@@ -35,7 +35,7 @@ pub fn run(program: Program, schemes: &HashMap<SymbolId, TypeScheme>) -> Program
     result
 }
 
-pub(crate) struct Monomorphizer<'a> {
+struct Monomorphizer<'a> {
     /// Symbol table for name lookup and allocation
     symbols: SymbolTable,
     /// Original polymorphic functions by symbol
@@ -74,7 +74,7 @@ struct SubstKey(Vec<(usize, TypeKey)>);
 
 /// Combined specialization key: type substitution.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct SpecKey {
+struct SpecKey {
     /// Type substitution for specialization
     type_subst: SubstKey,
 }
@@ -109,20 +109,20 @@ impl SubstKey {
 
 impl SpecKey {
     /// Create an empty spec key (for monomorphic functions)
-    pub(crate) fn empty() -> Self {
+    fn empty() -> Self {
         SpecKey {
             type_subst: SubstKey(Vec::new()),
         }
     }
 
-    pub(crate) fn new(subst: &Substitution) -> Self {
+    fn new(subst: &Substitution) -> Self {
         SpecKey {
             type_subst: SubstKey::from_subst(subst),
         }
     }
 
     /// Returns true if this represents a non-trivial specialization
-    pub(crate) fn needs_specialization(&self) -> bool {
+    fn needs_specialization(&self) -> bool {
         !self.type_subst.is_empty()
     }
 }
@@ -1077,7 +1077,7 @@ fn format_subst(subst: &Substitution) -> String {
     items.iter().map(|(_, ty)| format_type_compact(ty)).collect::<Vec<_>>().join("_")
 }
 
-pub(crate) fn format_type_compact(ty: &Type<TypeName>) -> String {
+fn format_type_compact(ty: &Type<TypeName>) -> String {
     match ty {
         Type::Variable(id) => format!("v{}", id),
         Type::Constructed(TypeName::Size(n), _) => format!("n{}", n),

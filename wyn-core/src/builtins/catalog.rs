@@ -9,7 +9,7 @@ use crate::builtins::scheme::SchemeBuilder;
 pub struct BuiltinId(u32);
 
 impl BuiltinId {
-    pub(crate) fn new(idx: u32) -> Self {
+    fn new(idx: u32) -> Self {
         BuiltinId(idx)
     }
 

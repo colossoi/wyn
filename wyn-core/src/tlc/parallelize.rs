@@ -2541,7 +2541,7 @@ fn soac_term(soac: SoacOp, ty: Type<TypeName>, span: ast::Span) -> Term {
     }
 }
 
-pub(crate) fn uint_lit(val: u64, span: ast::Span) -> Term {
+fn uint_lit(val: u64, span: ast::Span) -> Term {
     Term {
         id: TermId(0),
         ty: Type::Constructed(TypeName::UInt(32), vec![]),

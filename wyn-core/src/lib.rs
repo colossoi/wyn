@@ -514,9 +514,9 @@ pub struct TlcEarlyInner {
     pub tlc: tlc::Program,
     pub type_table: TypeTable,
     /// Built-in names that should not be captured as free variables
-    pub(crate) known_defs: std::collections::HashSet<String>,
+    known_defs: std::collections::HashSet<String>,
     /// Type schemes for functions (for monomorphization)
-    pub(crate) schemes: HashMap<SymbolId, types::TypeScheme>,
+    schemes: HashMap<SymbolId, types::TypeScheme>,
     /// Errors surfaced while default-filling `???` type holes with
     /// `--fill-holes`. Empty unless `to_tlc` was called with
     /// `fill_holes = true` and some hole had a type that couldn't

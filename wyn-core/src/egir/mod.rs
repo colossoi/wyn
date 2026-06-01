@@ -6,7 +6,7 @@
 //! - Scoped elaboration converts back to sequential SSA (DCE for free)
 //! - Rewrite rules are applied eagerly during construction (Phase 2+)
 
-pub(crate) mod domtree;
+mod domtree;
 pub(crate) mod elaborate;
 mod extract;
 mod fold;
