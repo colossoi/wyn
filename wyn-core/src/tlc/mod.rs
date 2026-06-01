@@ -195,6 +195,94 @@ pub fn var_term_builtin_id(term: &Term, _symbols: &SymbolTable) -> Option<Builti
     }
 }
 
+/// Emit `_w_intrinsic_storage_index(binding.set, binding.binding, index)`
+/// returning `elem_ty`. The single recognized shape for an indexed load
+/// against a `BindingRef` — used by `buffer_specialize` (entry-param &
+/// view-param indexing) and `lift_gathers` (intermediate-buffer gather).
+/// Caller is responsible for any u32 cast on `index`.
+pub(crate) fn storage_index_call(
+    binding: crate::BindingRef,
+    index: Term,
+    elem_ty: Type<TypeName>,
+    span: ast::Span,
+    ids: &mut TermIdSource,
+) -> Term {
+    let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
+    let set_lit = Term {
+        id: ids.next_id(),
+        ty: u32_ty.clone(),
+        span,
+        kind: TermKind::IntLit(binding.set.to_string()),
+    };
+    let bind_lit = Term {
+        id: ids.next_id(),
+        ty: u32_ty,
+        span,
+        kind: TermKind::IntLit(binding.binding.to_string()),
+    };
+    let func = Term {
+        id: ids.next_id(),
+        // Builtin function type stays polymorphic at this layer; downstream
+        // lowering reads the App's return type, not the func term's type.
+        ty: Type::Variable(0),
+        span,
+        kind: TermKind::Var(VarRef::Builtin {
+            id: crate::builtins::catalog().known().storage_index,
+            overload_idx: 0,
+        }),
+    };
+    Term {
+        id: ids.next_id(),
+        ty: elem_ty,
+        span,
+        kind: TermKind::App {
+            func: Box::new(func),
+            args: vec![set_lit, bind_lit, index],
+        },
+    }
+}
+
+/// Emit `_w_intrinsic_storage_len(binding.set, binding.binding)` returning
+/// `u32`. Caller wraps in `i32.u32` cast if the consumer expects `i32`
+/// (user-facing `length(view)` returns `i32`).
+pub(crate) fn storage_len_call(
+    binding: crate::BindingRef,
+    span: ast::Span,
+    ids: &mut TermIdSource,
+) -> Term {
+    let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
+    let set_lit = Term {
+        id: ids.next_id(),
+        ty: u32_ty.clone(),
+        span,
+        kind: TermKind::IntLit(binding.set.to_string()),
+    };
+    let bind_lit = Term {
+        id: ids.next_id(),
+        ty: u32_ty.clone(),
+        span,
+        kind: TermKind::IntLit(binding.binding.to_string()),
+    };
+    let func = Term {
+        id: ids.next_id(),
+        ty: Type::Variable(0),
+        span,
+        kind: TermKind::Var(VarRef::Builtin {
+            id: crate::builtins::catalog().known().storage_len,
+            overload_idx: 0,
+        }),
+    };
+    Term {
+        id: ids.next_id(),
+        ty: u32_ty,
+        span,
+        kind: TermKind::App {
+            func: Box::new(func),
+            args: vec![set_lit, bind_lit],
+        },
+    }
+}
+
 /// The kind of term.
 #[derive(Debug, Clone)]
 pub enum TermKind {

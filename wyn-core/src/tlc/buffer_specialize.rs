@@ -334,19 +334,8 @@ impl BufferSpecializer {
                         if let Some(binding) = self.resolve_buffer(data_sym).cloned() {
                             let span = term.span;
                             let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
-                            let set_lit =
-                                self.make_int_lit(&binding.binding.set.to_string(), u32_ty.clone(), span);
-                            let binding_lit = self.make_int_lit(
-                                &binding.binding.binding.to_string(),
-                                u32_ty.clone(),
-                                span,
-                            );
-                            let storage_len = self.make_app_by_id(
-                                catalog().known().storage_len,
-                                vec![set_lit, binding_lit],
-                                u32_ty.clone(),
-                                span,
-                            );
+                            let storage_len =
+                                super::storage_len_call(binding.binding, span, &mut self.term_ids);
                             if term.ty == u32_ty {
                                 return storage_len;
                             }
@@ -510,17 +499,13 @@ impl BufferSpecializer {
                 if let TermKind::Var(VarRef::Symbol(data_sym)) = &array.kind {
                     if let Some(binding) = self.resolve_buffer(data_sym).cloned() {
                         let span = term.span;
-                        let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
                         let idx = self.rewrite_term(index);
-                        let set_lit =
-                            self.make_int_lit(&binding.binding.set.to_string(), u32_ty.clone(), span);
-                        let binding_lit =
-                            self.make_int_lit(&binding.binding.binding.to_string(), u32_ty.clone(), span);
-                        return self.make_app_by_id(
-                            catalog().known().storage_index,
-                            vec![set_lit, binding_lit, idx],
+                        return super::storage_index_call(
+                            binding.binding,
+                            idx,
                             binding.elem_ty,
                             span,
+                            &mut self.term_ids,
                         );
                     }
                 }
@@ -722,15 +707,7 @@ impl BufferSpecializer {
             if let Some(binding) = buf {
                 // Replace with (0, _w_intrinsic_storage_len(set, binding))
                 let zero = self.make_int_lit("0", u32_ty.clone(), span);
-                let set_lit = self.make_int_lit(&binding.binding.set.to_string(), u32_ty.clone(), span);
-                let binding_lit =
-                    self.make_int_lit(&binding.binding.binding.to_string(), u32_ty.clone(), span);
-                let storage_len = self.make_app_by_id(
-                    catalog().known().storage_len,
-                    vec![set_lit, binding_lit],
-                    u32_ty.clone(),
-                    span,
-                );
+                let storage_len = super::storage_len_call(binding.binding, span, &mut self.term_ids);
                 new_args.push(zero);
                 new_args.push(storage_len);
             } else {
@@ -1099,9 +1076,6 @@ impl BufferSpecializer {
                     let span = term.span;
                     let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
                     let idx = self.rewrite_specialized_body(index, view_params);
-                    let set_lit = self.make_int_lit(&view.binding.set.to_string(), u32_ty.clone(), span);
-                    let binding_lit =
-                        self.make_int_lit(&view.binding.binding.to_string(), u32_ty.clone(), span);
                     let idx = if idx.ty == u32_ty {
                         idx
                     } else {
@@ -1111,14 +1085,15 @@ impl BufferSpecializer {
                         ast::BinaryOp { op: "+".to_string() },
                         *view.offset,
                         idx,
-                        u32_ty.clone(),
+                        u32_ty,
                         span,
                     );
-                    return self.make_app_by_id(
-                        catalog().known().storage_index,
-                        vec![set_lit, binding_lit, add_result],
+                    return super::storage_index_call(
+                        view.binding,
+                        add_result,
                         view.elem_ty,
                         span,
+                        &mut self.term_ids,
                     );
                 }
                 Term {
@@ -1446,17 +1421,6 @@ impl BufferSpecializer {
         }
     }
 
-    /// Build an `App(Var(Builtin{id}), args)` for a catalog `BuiltinId`.
-    fn make_app_by_id(
-        &mut self,
-        id: crate::builtins::BuiltinId,
-        args: Vec<Term>,
-        ret_ty: Type<TypeName>,
-        span: Span,
-    ) -> Term {
-        self.build_app_call(VarRef::Builtin { id, overload_idx: 0 }, args, ret_ty, span)
-    }
-
     fn make_app(
         &mut self,
         intrinsic_name: &str,
@@ -1485,7 +1449,9 @@ impl BufferSpecializer {
         self.build_app_call(func_var, args, ret_ty, span)
     }
 
-    /// Shared App-builder used by `make_app` and `make_app_by_id`.
+    /// Shared App-builder for `make_app` (and previously `make_app_by_id`
+    /// before storage-intrinsic emission moved to `tlc::storage_index_call` /
+    /// `tlc::storage_len_call`).
     fn build_app_call(
         &mut self,
         func_var: crate::tlc::VarRef,

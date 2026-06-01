@@ -28,10 +28,9 @@
 use std::collections::{HashMap, HashSet};
 
 use super::closure_convert::collect_free_vars;
-use super::parallelize::{intrinsic_term_by_id, make_entry_def};
-use super::{Def, DefMeta, Lambda, Program, SoacOp, Term, TermKind, VarRef};
+use super::parallelize::make_entry_def;
+use super::{Def, DefMeta, Lambda, Program, SoacOp, Term, TermIdSource, TermKind, VarRef};
 use crate::ast::TypeName;
-use crate::builtins::catalog;
 use crate::egir::from_tlc::AUTO_STORAGE_SET;
 use crate::interface::{EntryParamBindingKind, StorageBindingDecl, StorageRole};
 use crate::{SymbolId, SymbolTable};
@@ -239,7 +238,19 @@ fn try_lift(
     let binding = (AUTO_STORAGE_SET, binding_num);
     let mut bail = false;
     let mut dyn_uses = 0usize;
-    let rewritten = rewrite_uses(body, name, binding, &elem_ty, &mut bail, &mut dyn_uses);
+    // Local ID source for the synthesized literals + App nodes. Per-pass
+    // restart matches the rest of the lift-gathers / parallelize style;
+    // TLC TermIds aren't load-bearing past parallelize.
+    let mut term_ids = TermIdSource::new();
+    let rewritten = rewrite_uses(
+        body,
+        name,
+        binding,
+        &elem_ty,
+        &mut bail,
+        &mut dyn_uses,
+        &mut term_ids,
+    );
     if bail || dyn_uses == 0 {
         return None;
     }
@@ -304,22 +315,20 @@ fn rewrite_uses(
     elem_ty: &Type<TypeName>,
     bail: &mut bool,
     dyn_uses: &mut usize,
+    term_ids: &mut TermIdSource,
 ) -> Term {
     if let TermKind::Index { array, index } = &term.kind {
         if matches!(&array.kind, TermKind::Var(VarRef::Symbol(s)) if *s == arr) {
-            let idx = rewrite_uses((**index).clone(), arr, binding, elem_ty, bail, dyn_uses);
+            let idx = rewrite_uses((**index).clone(), arr, binding, elem_ty, bail, dyn_uses, term_ids);
             if !matches!(idx.kind, TermKind::IntLit(_)) {
                 *dyn_uses += 1;
             }
-            return intrinsic_term_by_id(
-                catalog().known().storage_index,
-                vec![
-                    uint_lit(binding.0 as u64, term.span),
-                    uint_lit(binding.1 as u64, term.span),
-                    idx,
-                ],
+            return super::storage_index_call(
+                crate::BindingRef::new(binding.0, binding.1),
+                idx,
                 elem_ty.clone(),
                 term.span,
+                term_ids,
             );
         }
     }
@@ -327,7 +336,7 @@ fn rewrite_uses(
         *bail = true;
         return term;
     }
-    term.map_children(&mut |c| rewrite_uses(c, arr, binding, elem_ty, bail, dyn_uses))
+    term.map_children(&mut |c| rewrite_uses(c, arr, binding, elem_ty, bail, dyn_uses, term_ids))
 }
 
 /// Build the `<entry>_gather_<n>` compute entry whose body is the producer
@@ -430,15 +439,6 @@ fn free_symbol_vars(term: &Term, symbols: &SymbolTable) -> Vec<(SymbolId, Type<T
             _ => None,
         })
         .collect()
-}
-
-fn uint_lit(val: u64, span: crate::ast::Span) -> Term {
-    Term {
-        id: super::TermId(0),
-        ty: Type::Constructed(TypeName::UInt(32), vec![]),
-        span,
-        kind: TermKind::IntLit(val.to_string()),
-    }
 }
 
 #[cfg(test)]
