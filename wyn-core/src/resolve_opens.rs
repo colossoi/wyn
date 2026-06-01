@@ -38,14 +38,17 @@ mod tests;
 /// Member-source abstraction. Decouples the resolver from where module
 /// member info lives so later changes (real value exports, user
 /// modules, etc.) update only the index construction.
+///
+/// Storage is `module → set of member names` rather than a flat
+/// `HashSet<(String, String)>` so `has_member(m, n)` can probe with
+/// `&str` borrows instead of allocating two owned `String`s per call
+/// — the resolver checks every identifier in every expression, so the
+/// per-probe `to_string()` allocations were a hot path.
 #[derive(Debug, Default, Clone)]
 pub struct OpenIndex {
-    /// Modules known to the program. Anything not in this set fails
-    /// `open` validation regardless of whether some member of that name
-    /// happens to be registered elsewhere.
-    modules: HashSet<String>,
-    /// Value-namespace members per module. `(module, name)` pairs.
-    members: HashSet<(String, String)>,
+    /// Value-namespace members keyed by module. Module-presence is
+    /// `members.contains_key(m)`; there's no separate `modules` set.
+    members: HashMap<String, HashSet<String>>,
 }
 
 impl OpenIndex {
@@ -54,18 +57,27 @@ impl OpenIndex {
     }
 
     pub fn has_module(&self, m: &str) -> bool {
-        self.modules.contains(m)
+        self.members.contains_key(m)
     }
 
     pub fn has_member(&self, m: &str, name: &str) -> bool {
-        self.members.contains(&(m.to_string(), name.to_string()))
+        self.members.get(m).is_some_and(|s| s.contains(name))
     }
 
     /// Insert a `(module, name)` pair, also marking the module as
     /// known. Used to build the index from spec_schemes / impl_source.
     pub fn add_member(&mut self, module: &str, name: &str) {
-        self.modules.insert(module.to_string());
-        self.members.insert((module.to_string(), name.to_string()));
+        // Avoid an unconditional `module.to_string()` on the hot
+        // already-present path: clone only when we have to insert.
+        if let Some(set) = self.members.get_mut(module) {
+            if !set.contains(name) {
+                set.insert(name.to_string());
+            }
+        } else {
+            let mut set = HashSet::new();
+            set.insert(name.to_string());
+            self.members.insert(module.to_string(), set);
+        }
     }
 
     /// Build an index from any iterator of `"M.name"`-style keys (the
