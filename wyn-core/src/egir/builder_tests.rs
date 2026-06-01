@@ -120,7 +120,7 @@ fn phase1_transform_reduce_in_place() {
     entry.outputs.push(crate::ssa::types::EntryOutput {
         ty: f32_ty(),
         decoration: None,
-        storage_binding: Some((0, 1)),
+        storage_binding: Some(crate::BindingRef::new(0, 1)),
         length: None,
     });
 
@@ -141,8 +141,8 @@ fn phase1_transform_reduce_in_place() {
         other => panic!("input view is not a Pure node: {:?}", other),
     };
     match new_input_op {
-        PureOp::StorageView(PureViewSource::Storage { set, binding }) => {
-            assert_eq!((set, binding), (0, 0), "input view still points at xs");
+        PureOp::StorageView(PureViewSource::Storage(br)) => {
+            assert_eq!((br.set, br.binding), (0, 0), "input view still points at xs");
         }
         other => panic!("input view became non-StorageView: {:?}", other),
     }
@@ -195,8 +195,12 @@ fn phase1_transform_reduce_in_place() {
                 _ => panic!("place's view operand is not Pure"),
             };
             match view_op {
-                PureOp::StorageView(PureViewSource::Storage { set, binding }) => {
-                    assert_eq!((set, binding), (0, 2), "Store now targets partials at (0, 2)");
+                PureOp::StorageView(PureViewSource::Storage(br)) => {
+                    assert_eq!(
+                        (br.set, br.binding),
+                        (0, 2),
+                        "Store now targets partials at (0, 2)"
+                    );
                 }
                 other => panic!("Store's view is not StorageView(partials): {:?}", other),
             }

@@ -27,6 +27,7 @@
 //! This makes the data flow explicit at branch sites rather than requiring
 //! inspection of phi nodes to understand where values come from.
 
+use crate::BindingRef;
 use crate::ast::{Span, TypeName};
 use crate::interface;
 use crate::op::OpTag;
@@ -333,11 +334,8 @@ pub struct PlaceInfo {
 /// Where a view array gets its data from.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ViewSource {
-    /// Backed by a storage buffer at (set, binding).
-    Storage {
-        set: u32,
-        binding: u32,
-    },
+    /// Backed by a storage buffer at `binding.set` / `binding.binding`.
+    Storage(BindingRef),
     /// Inherited from another view value (e.g. a function parameter or a slice).
     /// The SPIR-V backend follows this chain to find the underlying Storage source.
     Inherited {
@@ -518,17 +516,17 @@ pub struct EntryInput {
     pub ty: Type<TypeName>,
     pub decoration: Option<IoDecoration>,
     pub size_hint: Option<std::num::NonZeroU32>,
-    pub storage_binding: Option<(u32, u32)>,
+    pub storage_binding: Option<BindingRef>,
     /// Programmer-attributed `#[uniform(set, binding)]` on this param.
-    pub uniform_binding: Option<(u32, u32)>,
+    pub uniform_binding: Option<BindingRef>,
     /// Placement in the per-entry push-constant block for compute-broadcast
     /// inputs. `Some` carries both byte offset and byte size, decided at
     /// the moment the offset was assigned.
     pub push_constant: Option<PushConstantSlot>,
     /// Programmer-attributed `#[texture(set, binding)]` on a `texture2d` param.
-    pub texture_binding: Option<(u32, u32)>,
+    pub texture_binding: Option<BindingRef>,
     /// Programmer-attributed `#[sampler(set, binding)]` on a `sampler` param.
-    pub sampler_binding: Option<(u32, u32)>,
+    pub sampler_binding: Option<BindingRef>,
 }
 
 /// Output from an entry point.
@@ -536,8 +534,8 @@ pub struct EntryInput {
 pub struct EntryOutput {
     pub ty: Type<TypeName>,
     pub decoration: Option<IoDecoration>,
-    /// For compute shaders with unsized array outputs: (set, binding).
-    pub storage_binding: Option<(u32, u32)>,
+    /// For compute shaders with unsized array outputs.
+    pub storage_binding: Option<BindingRef>,
     /// Sizing policy for a runtime-sized storage output (a parallel map/scan
     /// writes one element per thread → `SameAsDispatch`). `None` for
     /// fixed/graphics outputs and entries whose output size the host already

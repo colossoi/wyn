@@ -261,14 +261,14 @@ pub fn phase1_transform_reduce(
     };
 
     // 2. Build chunk arithmetic in the same block as the reduce.
-    let input_len = emit_storage_len(&mut entry.graph, view_storage.0, view_storage.1);
+    let input_len = emit_storage_len(&mut entry.graph, view_storage.set, view_storage.binding);
     let (tid, chunk_start, chunk_len) = emit_chunk_arithmetic(&mut entry.graph, total_threads, input_len)?;
 
     // 3. Build a new chunked StorageView with [chunk_start, chunk_len].
     let chunked_view = graph_ops::intern_chunked_storage_view(
         &mut entry.graph,
-        view_storage.0,
-        view_storage.1,
+        view_storage.set,
+        view_storage.binding,
         chunk_start,
         chunk_len,
         input_view_ty,
@@ -825,10 +825,8 @@ pub fn phase1_transform_redomap(
 
     // Chunk arith uses the first input's length.
     let first_view_nid = input_view_data[0].0;
-    let input_len = if let Some((set, binding)) =
-        graph_ops::extract_storage_view_source(&entry.graph, first_view_nid)
-    {
-        emit_storage_len(&mut entry.graph, set, binding)
+    let input_len = if let Some(br) = graph_ops::extract_storage_view_source(&entry.graph, first_view_nid) {
+        emit_storage_len(&mut entry.graph, br.set, br.binding)
     } else if let Some((_, len_nid, _)) =
         graph_ops::extract_array_range_operands(&entry.graph, first_view_nid)
     {
@@ -843,32 +841,31 @@ pub fn phase1_transform_redomap(
     // start = old_start + chunk_start, new len = chunk_len, same step).
     let mut new_views: Vec<NodeId> = Vec::with_capacity(input_count);
     for (view_nid, view_ty) in input_view_data {
-        let chunked =
-            if let Some((set, binding)) = graph_ops::extract_storage_view_source(&entry.graph, view_nid) {
-                graph_ops::intern_chunked_storage_view(
-                    &mut entry.graph,
-                    set,
-                    binding,
-                    chunk_start,
-                    chunk_len,
-                    view_ty,
-                    None,
-                )
-            } else if let Some((orig_start, _, step)) =
-                graph_ops::extract_array_range_operands(&entry.graph, view_nid)
-            {
-                let has_step = step.is_some();
-                let start_ty = entry.graph.types[&orig_start].clone();
-                let new_start =
-                    graph_ops::intern_binop(&mut entry.graph, "+", orig_start, chunk_start, start_ty, None);
-                let mut ops: smallvec::SmallVec<[NodeId; 4]> = smallvec![new_start, chunk_len];
-                if let Some(s) = step {
-                    ops.push(s);
-                }
-                entry.graph.intern_pure(super::types::PureOp::ArrayRange { has_step }, ops, view_ty)
-            } else {
-                return Err("phase1 Redomap: input neither StorageView nor ArrayRange".into());
-            };
+        let chunked = if let Some(br) = graph_ops::extract_storage_view_source(&entry.graph, view_nid) {
+            graph_ops::intern_chunked_storage_view(
+                &mut entry.graph,
+                br.set,
+                br.binding,
+                chunk_start,
+                chunk_len,
+                view_ty,
+                None,
+            )
+        } else if let Some((orig_start, _, step)) =
+            graph_ops::extract_array_range_operands(&entry.graph, view_nid)
+        {
+            let has_step = step.is_some();
+            let start_ty = entry.graph.types[&orig_start].clone();
+            let new_start =
+                graph_ops::intern_binop(&mut entry.graph, "+", orig_start, chunk_start, start_ty, None);
+            let mut ops: smallvec::SmallVec<[NodeId; 4]> = smallvec![new_start, chunk_len];
+            if let Some(s) = step {
+                ops.push(s);
+            }
+            entry.graph.intern_pure(super::types::PureOp::ArrayRange { has_step }, ops, view_ty)
+        } else {
+            return Err("phase1 Redomap: input neither StorageView nor ArrayRange".into());
+        };
         new_views.push(chunked);
     }
 
@@ -1134,9 +1131,11 @@ fn transform_scan_entry(
     let output_binding = if consuming {
         let (block, idx) = find_pending_scan(entry)?;
         let input_view_nid = entry.graph.skeleton.blocks[block].side_effects[idx].operand_nodes[0];
-        graph_ops::extract_storage_view_source(&entry.graph, input_view_nid)?
+        let br = graph_ops::extract_storage_view_source(&entry.graph, input_view_nid)?;
+        (br.set, br.binding)
     } else {
-        entry.outputs.first()?.storage_binding?
+        let br = entry.outputs.first()?.storage_binding?;
+        (br.set, br.binding)
     };
 
     // Phase 2 needs a NE NodeId in its own graph — clone from phase 1's
@@ -1242,13 +1241,13 @@ pub fn phase1_transform_scan(
     let input_storage = graph_ops::extract_storage_view_source(&entry.graph, input_view_nid)
         .ok_or_else(|| "Scan input is not a StorageView".to_string())?;
 
-    let input_len = emit_storage_len(&mut entry.graph, input_storage.0, input_storage.1);
+    let input_len = emit_storage_len(&mut entry.graph, input_storage.set, input_storage.binding);
     let (tid, chunk_start, chunk_len) = emit_chunk_arithmetic(&mut entry.graph, total_threads, input_len)?;
 
     let chunked_input = graph_ops::intern_chunked_storage_view(
         &mut entry.graph,
-        input_storage.0,
-        input_storage.1,
+        input_storage.set,
+        input_storage.binding,
         chunk_start,
         chunk_len,
         input_view_ty.clone(),
@@ -1275,8 +1274,8 @@ pub fn phase1_transform_scan(
             .ok_or_else(|| "Scan output_view is not a StorageView".to_string())?;
         let chunked_output = graph_ops::intern_chunked_storage_view(
             &mut entry.graph,
-            output_storage.0,
-            output_storage.1,
+            output_storage.set,
+            output_storage.binding,
             chunk_start,
             chunk_len,
             output_view_ty,

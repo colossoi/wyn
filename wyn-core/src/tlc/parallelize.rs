@@ -820,8 +820,8 @@ fn lift_graphical_invariant_soacs(
         let mut uniform_params: HashMap<SymbolId, (u32, u32)> = HashMap::new();
         for (i, (sym, _)) in peeled.iter().enumerate() {
             match decl_params.get(i).and_then(crate::binding_layout::extract_uniform_binding) {
-                Some(binding) => {
-                    uniform_params.insert(*sym, binding);
+                Some(br) => {
+                    uniform_params.insert(*sym, (br.set, br.binding));
                 }
                 None => {
                     entry_params.insert(*sym);

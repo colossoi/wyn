@@ -15,6 +15,7 @@ use std::fmt::Write as _;
 
 use polytype::Type as PolyType;
 
+use crate::BindingRef;
 use crate::ast::{Span, TypeName};
 use crate::builtins::lowering::{BuiltinLowering, PrimOp};
 use crate::error::Result;
@@ -747,7 +748,8 @@ impl<'a> LowerCtx<'a> {
             // array element type; the WGSL binding holds the full
             // `array<T>`.
             for input in &entry.inputs {
-                if let Some((set, binding)) = input.storage_binding {
+                if let Some(br) = input.storage_binding {
+                    let (set, binding) = (br.set, br.binding);
                     if is_declared(set, binding) {
                         continue;
                     }
@@ -773,7 +775,8 @@ impl<'a> LowerCtx<'a> {
             // array of that scalar — the SOAC parallelize pass packs
             // the result into a single-element slot.
             for out in &entry.outputs {
-                if let Some((set, binding)) = out.storage_binding {
+                if let Some(br) = out.storage_binding {
+                    let (set, binding) = (br.set, br.binding);
                     if is_declared(set, binding) {
                         continue;
                     }
@@ -857,7 +860,8 @@ impl<'a> LowerCtx<'a> {
         let mut uniforms: HashMap<String, (u32, u32, String)> = HashMap::new();
         for entry in &self.program.entry_points {
             for input in &entry.inputs {
-                if let Some((set, binding)) = input.uniform_binding {
+                if let Some(br) = input.uniform_binding {
+                    let (set, binding) = (br.set, br.binding);
                     let ty_str = self.type_emitter.type_to_wgsl(&input.ty)?;
                     let key = self.mangle_tracked(&input.name)?;
                     if let Some(prev) = uniforms.get(&key) {
@@ -892,7 +896,8 @@ impl<'a> LowerCtx<'a> {
         for entry in &self.program.entry_points {
             for input in &entry.inputs {
                 let set_binding = input.texture_binding.or(input.sampler_binding);
-                if let Some((set, binding)) = set_binding {
+                if let Some(br) = set_binding {
+                    let (set, binding) = (br.set, br.binding);
                     let ty_str = self.type_emitter.type_to_wgsl(&input.ty)?;
                     let key = self.mangle_tracked(&input.name)?;
                     if let Some(prev) = handles.get(&key) {
@@ -1466,10 +1471,11 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
     /// Uses the synthesized `_buf_{set}_{binding}` naming used for
     /// compiler-introduced compute-entry bindings.
     fn storage_name(&self, set: u32, binding: u32) -> Result<String> {
+        let br = BindingRef::new(set, binding);
         for entry in &self.ctx.program.entry_points {
             if entry.storage_bindings.iter().any(|sb| sb.set == set && sb.binding == binding)
-                || entry.inputs.iter().any(|i| i.storage_binding == Some((set, binding)))
-                || entry.outputs.iter().any(|o| o.storage_binding == Some((set, binding)))
+                || entry.inputs.iter().any(|i| i.storage_binding == Some(br))
+                || entry.outputs.iter().any(|o| o.storage_binding == Some(br))
             {
                 return Ok(format!("_buf_{}_{}", set, binding));
             }
@@ -2460,9 +2466,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     let offset = operands[0];
                     let len = operands[1];
                     let buffer_name = match src {
-                        crate::op::PureViewSource::Storage { set, binding } => {
-                            self.storage_name(*set, *binding)?
-                        }
+                        crate::op::PureViewSource::Storage(br) => self.storage_name(br.set, br.binding)?,
                         crate::op::PureViewSource::Inherited => {
                             let parent = operands[2].as_ssa().ok_or_else(|| {
                                 crate::err_wgsl_at!(

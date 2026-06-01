@@ -27,6 +27,8 @@
 //! - `OutputSlot { index }`: 0 — EGIR-only (place-producing; SSA uses
 //!   `InstKind::OutputSlot`).
 
+use crate::BindingRef;
+
 /// The operator identity shared by EGIR's pure nodes and SSA's `InstKind::Op`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum OpTag {
@@ -83,10 +85,7 @@ pub enum OpTag {
 /// containing `ENode::Pure` or `InstKind::Op`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PureViewSource {
-    Storage {
-        set: u32,
-        binding: u32,
-    },
+    Storage(BindingRef),
     Inherited,
     /// Workgroup-shared array, `id`-th in the entry, of `count` elements.
     /// Unlike Storage there is no descriptor binding — the backend declares

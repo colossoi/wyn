@@ -7,6 +7,7 @@ mod lowering_tests;
 use crate::builtins::catalog;
 use std::collections::{HashMap, HashSet};
 
+use crate::BindingRef;
 use crate::ast::Span;
 use crate::ast::TypeName;
 use crate::builtins::lowering::{BuiltinLowering, PrimOp};
@@ -1441,7 +1442,8 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     let len_id = self.get_value_ref(len)?;
 
                     match src {
-                        crate::op::PureViewSource::Storage { set, binding } => {
+                        crate::op::PureViewSource::Storage(br) => {
+                            let (set, binding) = (&br.set, &br.binding);
                             if self.constructor.storage_buffers.contains_key(&(*set, *binding)) {
                                 let buffer_id = self.constructor.get_or_assign_buffer_id(*set, *binding);
                                 if let Some(result) = inst.result {
@@ -3313,16 +3315,16 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
     // resolve them during lowering, even though they're lowered before entry points.
     for entry in &program.entry_points {
         for input in &entry.inputs {
-            if let Some((set, binding)) = input.storage_binding {
-                if !constructor.storage_buffers.contains_key(&(set, binding)) {
-                    constructor.create_storage_buffer(&input.ty, set, binding);
+            if let Some(br) = input.storage_binding {
+                if !constructor.storage_buffers.contains_key(&(br.set, br.binding)) {
+                    constructor.create_storage_buffer(&input.ty, br.set, br.binding);
                 }
             }
         }
         for output in &entry.outputs {
-            if let Some((set, binding)) = output.storage_binding {
-                if !constructor.storage_buffers.contains_key(&(set, binding)) {
-                    constructor.create_storage_buffer(&output.ty, set, binding);
+            if let Some(br) = output.storage_binding {
+                if !constructor.storage_buffers.contains_key(&(br.set, br.binding)) {
+                    constructor.create_storage_buffer(&output.ty, br.set, br.binding);
                 }
             }
         }
@@ -3355,7 +3357,7 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
     // Lower all entry points
     // Collect all bindings that ANY entry point writes to (outputs).
     // These must not be marked NonWritable even when read by another entry point.
-    let written_bindings: std::collections::HashSet<(u32, u32)> = program
+    let written_bindings: HashSet<BindingRef> = program
         .entry_points
         .iter()
         .flat_map(|e| e.outputs.iter().filter_map(|o| o.storage_binding))
@@ -3382,8 +3384,10 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
             // entry points may have buffers this one doesn't reference.
             if let Some(entry) = program.entry_points.iter().find(|e| e.name == *name) {
                 for input in &entry.inputs {
-                    if let Some((set, binding)) = input.storage_binding {
-                        if let Some(&(var_id, _, _)) = constructor.storage_buffers.get(&(set, binding)) {
+                    if let Some(br) = input.storage_binding {
+                        if let Some(&(var_id, _, _)) =
+                            constructor.storage_buffers.get(&(br.set, br.binding))
+                        {
                             if !interfaces.contains(&var_id) {
                                 interfaces.push(var_id);
                             }
@@ -3391,8 +3395,10 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
                     }
                 }
                 for output in &entry.outputs {
-                    if let Some((set, binding)) = output.storage_binding {
-                        if let Some(&(var_id, _, _)) = constructor.storage_buffers.get(&(set, binding)) {
+                    if let Some(br) = output.storage_binding {
+                        if let Some(&(var_id, _, _)) =
+                            constructor.storage_buffers.get(&(br.set, br.binding))
+                        {
                             if !interfaces.contains(&var_id) {
                                 interfaces.push(var_id);
                             }
@@ -3457,7 +3463,7 @@ fn lower_ssa_function(constructor: &mut Constructor, func: &Function) -> Result<
 fn lower_ssa_entry_point(
     constructor: &mut Constructor,
     entry: &EntryPoint,
-    written_bindings: &std::collections::HashSet<(u32, u32)>,
+    written_bindings: &HashSet<BindingRef>,
 ) -> Result<()> {
     let body = &entry.body;
     let is_compute = matches!(entry.execution_model, ExecutionModel::Compute { .. });
@@ -3591,7 +3597,7 @@ fn lower_ssa_entry_point(
             if stage_builtin == spirv::BuiltIn::GlobalInvocationId {
                 constructor.global_invocation_id = Some(var_id);
             }
-        } else if let Some((set, binding)) = input.uniform_binding {
+        } else if let Some(br) = input.uniform_binding {
             // `#[uniform(set, binding)]` → Block-decorated `{value}` struct
             // in Uniform storage class; the helper caches the struct so
             // two params with the same value type don't double-decorate
@@ -3602,16 +3608,16 @@ fn lower_ssa_entry_point(
             constructor.builder.decorate(
                 var_id,
                 spirv::Decoration::DescriptorSet,
-                [Operand::LiteralBit32(set)],
+                [Operand::LiteralBit32(br.set)],
             );
             constructor.builder.decorate(
                 var_id,
                 spirv::Decoration::Binding,
-                [Operand::LiteralBit32(binding)],
+                [Operand::LiteralBit32(br.binding)],
             );
             interfaces.push(var_id);
             uniform_loads.push((input.name.clone(), var_id, input_type));
-        } else if let Some((set, binding)) = input.texture_binding.or(input.sampler_binding) {
+        } else if let Some(br) = input.texture_binding.or(input.sampler_binding) {
             // `#[texture]` / `#[sampler]` → opaque handle in UniformConstant
             // storage, decorated DescriptorSet/Binding. Unlike a uniform
             // there is no Block struct: the var points straight at the
@@ -3626,17 +3632,17 @@ fn lower_ssa_entry_point(
             constructor.builder.decorate(
                 var_id,
                 spirv::Decoration::DescriptorSet,
-                [Operand::LiteralBit32(set)],
+                [Operand::LiteralBit32(br.set)],
             );
             constructor.builder.decorate(
                 var_id,
                 spirv::Decoration::Binding,
-                [Operand::LiteralBit32(binding)],
+                [Operand::LiteralBit32(br.binding)],
             );
             constructor.env.insert(input.name.clone(), var_id);
             interfaces.push(var_id);
-        } else if let Some((set, binding)) = input.storage_binding {
-            let var_id = constructor.create_storage_buffer(&input.ty, set, binding);
+        } else if let Some(br) = input.storage_binding {
+            let var_id = constructor.create_storage_buffer(&input.ty, br.set, br.binding);
             // Mark input storage buffers as non-writable ONLY if no other
             // entry point writes to the same binding. In multi-entry modules
             // (e.g., reduce phase1 + phase2), the partials buffer is written
@@ -3646,9 +3652,7 @@ fn lower_ssa_entry_point(
             // binding, so guard the decoration to fire once per var — two
             // entries reading the same never-written input would otherwise
             // decorate it `NonWritable` twice (spirv-val rejects).
-            if !written_bindings.contains(&(set, binding))
-                && constructor.nonwritable_decorated.insert(var_id)
-            {
+            if !written_bindings.contains(&br) && constructor.nonwritable_decorated.insert(var_id) {
                 constructor.builder.decorate(
                     var_id,
                     spirv::Decoration::NonWritable,
@@ -3683,8 +3687,8 @@ fn lower_ssa_entry_point(
     let mut output_vars = Vec::new();
     let mut output_location = 0u32;
     for output in &entry.outputs {
-        if let Some((set, binding)) = output.storage_binding {
-            let var_id = constructor.create_storage_buffer(&output.ty, set, binding);
+        if let Some(br) = output.storage_binding {
+            let var_id = constructor.create_storage_buffer(&output.ty, br.set, br.binding);
             interfaces.push(var_id);
             // Don't add to output_vars - storage buffers are accessed differently
         } else if let Some(IoDecoration::BuiltIn(builtin)) = &output.decoration {

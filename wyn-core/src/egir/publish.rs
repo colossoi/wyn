@@ -89,22 +89,22 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                 .collect();
 
             for input in &entry.inputs {
-                if let Some((set, binding)) = input.uniform_binding {
-                    if claimed.contains(&(set, binding)) {
+                if let Some(br) = input.uniform_binding {
+                    if claimed.contains(&(br.set, br.binding)) {
                         continue;
                     }
                     bindings.push(Binding::Uniform {
-                        set,
-                        binding,
+                        set: br.set,
+                        binding: br.binding,
                         name: input.name.clone(),
                     });
-                } else if let Some((set, binding)) = input.storage_binding {
-                    if claimed.contains(&(set, binding)) {
+                } else if let Some(br) = input.storage_binding {
+                    if claimed.contains(&(br.set, br.binding)) {
                         continue;
                     }
                     bindings.push(Binding::StorageBuffer {
-                        set,
-                        binding,
+                        set: br.set,
+                        binding: br.binding,
                         access: Access::ReadOnly,
                         usage: BufferUsage::Input,
                         name: input.name.clone(),
@@ -119,25 +119,25 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                         size: pc.size,
                         name: input.name.clone(),
                     });
-                } else if let Some((set, binding)) = input.texture_binding {
-                    if claimed.contains(&(set, binding)) {
+                } else if let Some(br) = input.texture_binding {
+                    if claimed.contains(&(br.set, br.binding)) {
                         continue;
                     }
                     bindings.push(Binding::Texture {
-                        set,
-                        binding,
+                        set: br.set,
+                        binding: br.binding,
                         name: input.name.clone(),
                         sample_type: TextureSampleType::Float { filterable: true },
                         view_dimension: TextureViewDimension::D2,
                         multisampled: false,
                     });
-                } else if let Some((set, binding)) = input.sampler_binding {
-                    if claimed.contains(&(set, binding)) {
+                } else if let Some(br) = input.sampler_binding {
+                    if claimed.contains(&(br.set, br.binding)) {
                         continue;
                     }
                     bindings.push(Binding::Sampler {
-                        set,
-                        binding,
+                        set: br.set,
+                        binding: br.binding,
                         name: input.name.clone(),
                         binding_type: SamplerBindingType::Filtering,
                     });
@@ -173,10 +173,10 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
             }
 
             for (i, output) in entry.outputs.iter().enumerate() {
-                let Some((set, binding)) = output.storage_binding else {
+                let Some(br) = output.storage_binding else {
                     continue;
                 };
-                if !claimed.insert((set, binding)) {
+                if !claimed.insert((br.set, br.binding)) {
                     continue;
                 }
                 // EntryOutput has no name field; synthesize from the entry
@@ -188,8 +188,8 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                     format!("{}_output_{}", entry.name, i)
                 };
                 bindings.push(Binding::StorageBuffer {
-                    set,
-                    binding,
+                    set: br.set,
+                    binding: br.binding,
                     access: Access::WriteOnly,
                     usage: BufferUsage::Output,
                     name,

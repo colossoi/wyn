@@ -10,11 +10,11 @@
 
 use polytype::Type;
 
-use crate::SymbolId;
 use crate::ast::{Pattern, PatternKind, TypeName};
 use crate::interface::{Attribute, EntryDecl, EntryParamBinding, EntryParamBindingKind, TupleFieldBinding};
 use crate::ssa::types::IoDecoration;
 use crate::types::TypeExt;
+use crate::{BindingRef, SymbolId};
 
 /// Admits `ty` as a runtime-sized array entry-param shape and returns
 /// the element type plus its static byte size. A runtime-sized array
@@ -154,12 +154,12 @@ pub fn extract_io_decoration(pattern: &Pattern) -> Option<IoDecoration> {
 }
 
 /// Extract a `#[uniform(set, binding)]` from a param pattern.
-pub fn extract_uniform_binding(pattern: &Pattern) -> Option<(u32, u32)> {
+pub fn extract_uniform_binding(pattern: &Pattern) -> Option<BindingRef> {
     match &pattern.kind {
         PatternKind::Attributed(attrs, inner) => {
             for attr in attrs {
                 if let Attribute::Uniform { set, binding } = attr {
-                    return Some((*set, *binding));
+                    return Some(BindingRef::new(*set, *binding));
                 }
             }
             extract_uniform_binding(inner)
@@ -170,12 +170,12 @@ pub fn extract_uniform_binding(pattern: &Pattern) -> Option<(u32, u32)> {
 }
 
 /// Extract a `#[storage(set, binding, ...)]` from a param pattern.
-pub fn extract_storage_binding(pattern: &Pattern) -> Option<(u32, u32)> {
+pub fn extract_storage_binding(pattern: &Pattern) -> Option<BindingRef> {
     match &pattern.kind {
         PatternKind::Attributed(attrs, inner) => {
             for attr in attrs {
                 if let Attribute::Storage { set, binding, .. } = attr {
-                    return Some((*set, *binding));
+                    return Some(BindingRef::new(*set, *binding));
                 }
             }
             extract_storage_binding(inner)
@@ -186,12 +186,12 @@ pub fn extract_storage_binding(pattern: &Pattern) -> Option<(u32, u32)> {
 }
 
 /// Extract a `#[texture(set, binding)]` from a param pattern.
-pub fn extract_texture_binding(pattern: &Pattern) -> Option<(u32, u32)> {
+pub fn extract_texture_binding(pattern: &Pattern) -> Option<BindingRef> {
     match &pattern.kind {
         PatternKind::Attributed(attrs, inner) => {
             for attr in attrs {
                 if let Attribute::Texture { set, binding } = attr {
-                    return Some((*set, *binding));
+                    return Some(BindingRef::new(*set, *binding));
                 }
             }
             extract_texture_binding(inner)
@@ -202,12 +202,12 @@ pub fn extract_texture_binding(pattern: &Pattern) -> Option<(u32, u32)> {
 }
 
 /// Extract a `#[sampler(set, binding)]` from a param pattern.
-pub fn extract_sampler_binding(pattern: &Pattern) -> Option<(u32, u32)> {
+pub fn extract_sampler_binding(pattern: &Pattern) -> Option<BindingRef> {
     match &pattern.kind {
         PatternKind::Attributed(attrs, inner) => {
             for attr in attrs {
                 if let Attribute::Sampler { set, binding } = attr {
-                    return Some((*set, *binding));
+                    return Some(BindingRef::new(*set, *binding));
                 }
             }
             extract_sampler_binding(inner)

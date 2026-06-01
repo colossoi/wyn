@@ -27,7 +27,7 @@ use crate::tlc::{
     ArrayExpr, Def as TlcDef, DefMeta, Lambda, LoopKind, Program as TlcProgram, SoacOp, Term, TermKind,
 };
 use crate::types::TypeExt;
-use crate::{SymbolId, SymbolTable};
+use crate::{BindingRef, SymbolId, SymbolTable};
 use polytype::Type;
 use smallvec::{SmallVec, smallvec};
 
@@ -189,7 +189,10 @@ pub fn run(
                 // binding `build_entry_outputs` may pin (gather pre-passes do).
                 // Reduce/Redomap manage their result inside the TLC two-phase
                 // plan, so `forced_output` reports `None` for them.
-                let forced_output_binding = plans.get(&entry.name).and_then(|p| p.bindings.forced_output());
+                let forced_output_binding = plans
+                    .get(&entry.name)
+                    .and_then(|p| p.bindings.forced_output())
+                    .map(|(set, binding)| BindingRef::new(set, binding));
                 // A parallel map/scan writes one output element per thread, so
                 // its storage output is dispatch-sized. Reduce/Redomap results
                 // are single elements; entries without a plan keep the host's
@@ -301,7 +304,7 @@ fn convert_entry_point(
     ctx: &GlobalContext,
     pure_constants: &HashSet<String>,
     workgroup: (u32, u32, u32),
-    forced_output_binding: Option<(u32, u32)>,
+    forced_output_binding: Option<BindingRef>,
     dispatch_sized_outputs: bool,
 ) -> Result<EgirEntry, ConvertError> {
     use crate::ssa::types::{EntryInput, ExecutionModel, IoDecoration, PushConstantSlot};
@@ -388,7 +391,7 @@ fn convert_entry_point(
                     ty: field_ty.clone(),
                     decoration: None,
                     size_hint: None,
-                    storage_binding: Some((slot.set, slot.binding)),
+                    storage_binding: Some(BindingRef::new(slot.set, slot.binding)),
                     uniform_binding: None,
                     push_constant: None,
                     texture_binding: None,
@@ -402,7 +405,7 @@ fn convert_entry_point(
         }
 
         let auto_storage_binding = param_binding.as_ref().and_then(|b| match &b.kind {
-            EntryParamBindingKind::Single { set, binding, .. } => Some((*set, *binding)),
+            EntryParamBindingKind::Single { set, binding, .. } => Some(BindingRef::new(*set, *binding)),
             EntryParamBindingKind::TupleOfViews(_) => None,
         });
         let storage_binding = auto_storage_binding.or(attr_storage_binding);
@@ -427,8 +430,8 @@ fn convert_entry_point(
             None
         };
 
-        if let Some((set, binding)) = storage_binding {
-            let view_nid = converter.emit_storage_view(set, binding, ty.clone());
+        if let Some(br) = storage_binding {
+            let view_nid = converter.emit_storage_view(br.set, br.binding, ty.clone());
             converter.locals.insert(*sym, view_nid);
         }
 
@@ -1717,10 +1720,9 @@ impl<'a> Converter<'a> {
                 let effect_out = self.alloc_effect();
                 self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
                     kind: SideEffectKind::Inst(InstKind::Op {
-                        tag: crate::op::OpTag::StorageView(crate::op::PureViewSource::Storage {
-                            set: *set,
-                            binding: *binding,
-                        }),
+                        tag: crate::op::OpTag::StorageView(crate::op::PureViewSource::Storage(
+                            BindingRef::new(*set, *binding),
+                        )),
                         operands: vec![
                             ValueRef::Ssa(Default::default()),
                             ValueRef::Ssa(Default::default()),
@@ -1883,7 +1885,7 @@ fn build_entry_outputs(
     ret_type: &Type<TypeName>,
     is_compute: bool,
     binding_start: u32,
-    forced_output_binding: Option<(u32, u32)>,
+    forced_output_binding: Option<BindingRef>,
     dispatch_sized: bool,
 ) -> Result<Vec<EntryOutput>, ConvertError> {
     use EntryOutput;
@@ -1895,7 +1897,7 @@ fn build_entry_outputs(
     // array output type; `elem_bytes` is the byte size of *one element*
     // (i.e. of `ty.elem_type()`), not the whole array.
     let length_for =
-        |binding: Option<(u32, u32)>, ty: &Type<TypeName>| -> Result<Option<BufferLen>, ConvertError> {
+        |binding: Option<BindingRef>, ty: &Type<TypeName>| -> Result<Option<BufferLen>, ConvertError> {
             if !dispatch_sized || binding.is_none() {
                 return Ok(None);
             }
@@ -1909,7 +1911,7 @@ fn build_entry_outputs(
             })?;
             Ok(Some(BufferLen::SameAsDispatch { elem_bytes }))
         };
-    let mut storage_binding_for = |ty: &Type<TypeName>, is_compute: bool| -> Option<(u32, u32)> {
+    let mut storage_binding_for = |ty: &Type<TypeName>, is_compute: bool| -> Option<BindingRef> {
         if is_compute && !matches!(ty, Type::Constructed(TypeName::Unit, _)) {
             // Honor the planned binding for the first storage output if
             // present; subsequent outputs (tuple-return entries) keep
@@ -1917,7 +1919,7 @@ fn build_entry_outputs(
             if let Some(b) = forced_remaining.take() {
                 return Some(b);
             }
-            let b = (AUTO_STORAGE_SET, binding_num);
+            let b = BindingRef::new(AUTO_STORAGE_SET, binding_num);
             binding_num += 1;
             Some(b)
         } else {

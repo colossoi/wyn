@@ -15,6 +15,7 @@
 use polytype::Type;
 use smallvec::{SmallVec, smallvec};
 
+use crate::BindingRef;
 use crate::ast::{Span, TypeName};
 use crate::builtins::BuiltinId;
 use crate::builtins::catalog;
@@ -71,7 +72,7 @@ pub fn intern_binop(
     graph.intern_pure_with_span(PureOp::BinOp(op.into()), smallvec![lhs, rhs], ty, span)
 }
 
-/// `StorageView(Storage{set, binding})` with the default
+/// `StorageView(Storage(BindingRef::new(set, binding)))` with the default
 /// `[0, _w_intrinsic_storage_len(set, binding)]` operand pair.
 pub fn intern_storage_view(
     graph: &mut EGraph,
@@ -93,7 +94,7 @@ pub fn intern_storage_view(
     );
     let zero_nid = intern_u32(graph, 0, span);
     graph.intern_pure_with_span(
-        PureOp::StorageView(PureViewSource::Storage { set, binding }),
+        PureOp::StorageView(PureViewSource::Storage(BindingRef::new(set, binding))),
         smallvec![zero_nid, len_nid],
         view_ty,
         span,
@@ -122,8 +123,8 @@ pub fn emit_workgroup_view(
     )
 }
 
-/// `StorageView(Storage{set, binding})` with caller-supplied `offset`
-/// and `len`. Used to build a chunked sub-view of a larger storage
+/// `StorageView(Storage(BindingRef::new(set, binding)))` with caller-supplied
+/// `offset` and `len`. Used to build a chunked sub-view of a larger storage
 /// buffer (phase1 of parallel reduce/scan).
 pub fn intern_chunked_storage_view(
     graph: &mut EGraph,
@@ -135,7 +136,7 @@ pub fn intern_chunked_storage_view(
     span: Option<Span>,
 ) -> NodeId {
     graph.intern_pure_with_span(
-        PureOp::StorageView(PureViewSource::Storage { set, binding }),
+        PureOp::StorageView(PureViewSource::Storage(BindingRef::new(set, binding))),
         smallvec![offset, len],
         view_ty,
         span,
@@ -302,14 +303,14 @@ pub fn emit_pending_soac(
 // Read-side inspection
 // ---------------------------------------------------------------------------
 
-/// If `view_nid` is a `PureOp::StorageView(Storage{set, binding})`,
-/// return the `(set, binding)` pair. Otherwise `None`.
-pub fn extract_storage_view_source(graph: &EGraph, view_nid: NodeId) -> Option<(u32, u32)> {
+/// If `view_nid` is a `PureOp::StorageView(Storage(br))`, return `br`.
+/// Otherwise `None`.
+pub fn extract_storage_view_source(graph: &EGraph, view_nid: NodeId) -> Option<BindingRef> {
     match &graph.nodes[view_nid] {
         ENode::Pure {
-            op: PureOp::StorageView(PureViewSource::Storage { set, binding }),
+            op: PureOp::StorageView(PureViewSource::Storage(br)),
             ..
-        } => Some((*set, *binding)),
+        } => Some(*br),
         _ => None,
     }
 }

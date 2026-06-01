@@ -127,9 +127,11 @@ fn flatten_outputs(
         .enumerate()
         .map(|(i, output)| {
             let dest = if is_compute {
-                let (set, binding) =
-                    output.storage_binding.expect("BUG: compute output without storage binding");
-                Dest::StorageView { set, binding }
+                let br = output.storage_binding.expect("BUG: compute output without storage binding");
+                Dest::StorageView {
+                    set: br.set,
+                    binding: br.binding,
+                }
             } else {
                 Dest::OutputSlot { index: i }
             };

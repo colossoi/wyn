@@ -272,8 +272,8 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
             }
             OpTag::StorageView(src) => {
                 let src_str = match src {
-                    PureViewSource::Storage { set, binding } => {
-                        format!("storage({set}, {binding})")
+                    PureViewSource::Storage(br) => {
+                        format!("storage({}, {})", br.set, br.binding)
                     }
                     PureViewSource::Inherited => format_ref(&operands[2]),
                     PureViewSource::Workgroup { id, count } => {

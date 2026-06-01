@@ -114,6 +114,35 @@ impl std::fmt::Display for SymbolId {
 /// Symbol table: maps SymbolId to original name (for errors/debugging).
 pub type SymbolTable = IdArena<SymbolId, String>;
 
+// =============================================================================
+// Storage binding reference
+// =============================================================================
+
+/// A `(descriptor set, binding)` pair naming a host-runtime storage /
+/// uniform / texture / sampler resource. Replaces the parallel `(u32, u32)`
+/// plumbing that used to thread through every layer (TLC `ArrayExpr`,
+/// SSA / EGIR `ViewSource`, `EntryInput`, `StorageBindingDecl`,
+/// `EntryParamBindingKind`, …). Deliberately no `Default` impl —
+/// `BindingRef { set: 0, binding: 0 }` is a meaningful binding, and a
+/// default value would silently mask construction bugs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BindingRef {
+    pub set: u32,
+    pub binding: u32,
+}
+
+impl BindingRef {
+    pub const fn new(set: u32, binding: u32) -> Self {
+        BindingRef { set, binding }
+    }
+}
+
+impl std::fmt::Display for BindingRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "set={},binding={}", self.set, self.binding)
+    }
+}
+
 /// Look up `sym`'s source name in `symbols`, or panic with a uniform
 /// "internal compiler bug" message. Use this when downstream code
 /// structurally requires that every `SymbolId` it sees was registered
