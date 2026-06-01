@@ -104,7 +104,7 @@ struct Constructor {
     null_const_cache: HashMap<spirv::Word, spirv::Word>,     // type -> OpConstantNull id
 
     /// Storage buffers for compute shaders: (set, binding) -> (buffer_var, elem_type_id, buffer_ptr_type)
-    storage_buffers: HashMap<(u32, u32), (spirv::Word, spirv::Word, spirv::Word)>,
+    storage_buffers: HashMap<BindingRef, (spirv::Word, spirv::Word, spirv::Word)>,
 
     /// GlobalInvocationId variable for compute shaders (set during entry point setup)
     global_invocation_id: Option<spirv::Word>,
@@ -149,7 +149,7 @@ struct Constructor {
     /// `view_buffer_id`.
     buffer_vars: Vec<(spirv::Word, spirv::Word)>,
     /// (set, binding) → buffer_id, for deduplication in get_or_assign_buffer_id.
-    buffer_id_map: HashMap<(u32, u32), u32>,
+    buffer_id_map: HashMap<BindingRef, u32>,
     /// Workgroup-shared arrays: id → (workgroup `OpVariable`, element type).
     /// Created in `lower_ssa_entry_point` by pre-scanning the body for
     /// `StorageView(Workgroup{id, count})` ops, so the var exists (and is in
@@ -229,16 +229,16 @@ impl Constructor {
     /// Get or assign a sequential buffer_id for a (set, binding) pair.
     /// Also registers the buffer_var in buffer_vars for later lookup.
     fn get_or_assign_buffer_id(&mut self, set: u32, binding: u32) -> u32 {
-        if let Some(&id) = self.buffer_id_map.get(&(set, binding)) {
+        if let Some(&id) = self.buffer_id_map.get(&BindingRef::new(set, binding)) {
             return id;
         }
         let id = self.buffer_vars.len() as u32;
         let &(buffer_var, elem_ty, _) = self
             .storage_buffers
-            .get(&(set, binding))
+            .get(&BindingRef::new(set, binding))
             .expect("get_or_assign_buffer_id: storage buffer must exist");
         self.buffer_vars.push((buffer_var, elem_ty));
-        self.buffer_id_map.insert((set, binding), id);
+        self.buffer_id_map.insert(BindingRef::new(set, binding), id);
         id
     }
 
@@ -633,7 +633,7 @@ impl Constructor {
         binding: u32,
     ) -> spirv::Word {
         // Return existing if already created
-        if let Some(&(var_id, _, _)) = self.storage_buffers.get(&(set, binding)) {
+        if let Some(&(var_id, _, _)) = self.storage_buffers.get(&BindingRef::new(set, binding)) {
             return var_id;
         }
         // Storage buffers can be either an array-shaped view (`[]T` → elem is
@@ -694,7 +694,7 @@ impl Constructor {
         );
 
         // Store for later lookup (ptr_type used for StorageView struct construction)
-        self.storage_buffers.insert((set, binding), (var_id, block_struct, ptr_type));
+        self.storage_buffers.insert(BindingRef::new(set, binding), (var_id, block_struct, ptr_type));
 
         var_id
     }
@@ -1444,7 +1444,11 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     match src {
                         crate::op::PureViewSource::Storage(br) => {
                             let (set, binding) = (&br.set, &br.binding);
-                            if self.constructor.storage_buffers.contains_key(&(*set, *binding)) {
+                            if self
+                                .constructor
+                                .storage_buffers
+                                .contains_key(&BindingRef::new(*set, *binding))
+                            {
                                 let buffer_id = self.constructor.get_or_assign_buffer_id(*set, *binding);
                                 if let Some(result) = inst.result {
                                     self.view_buffer_id.insert(result, buffer_id);
@@ -2841,9 +2845,9 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                             )?,
                         };
                     let &(buffer_var, _, _) =
-                        self.constructor.storage_buffers.get(&(set, binding)).ok_or_else(|| {
-                            err_spirv!("Storage buffer not found for set={}, binding={}", set, binding)
-                        })?;
+                        self.constructor.storage_buffers.get(&BindingRef::new(set, binding)).ok_or_else(
+                            || err_spirv!("Storage buffer not found for set={}, binding={}", set, binding),
+                        )?;
                     let len_u32 = self.constructor.builder.array_length(
                         self.constructor.u32_type,
                         None,
@@ -3316,14 +3320,14 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
     for entry in &program.entry_points {
         for input in &entry.inputs {
             if let Some(br) = input.storage_binding {
-                if !constructor.storage_buffers.contains_key(&(br.set, br.binding)) {
+                if !constructor.storage_buffers.contains_key(&br) {
                     constructor.create_storage_buffer(&input.ty, br.set, br.binding);
                 }
             }
         }
         for output in &entry.outputs {
             if let Some(br) = output.storage_binding {
-                if !constructor.storage_buffers.contains_key(&(br.set, br.binding)) {
+                if !constructor.storage_buffers.contains_key(&br) {
                     constructor.create_storage_buffer(&output.ty, br.set, br.binding);
                 }
             }
@@ -3335,7 +3339,7 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
     // partials/result intermediates) that aren't user-visible outputs.
     for entry in &program.entry_points {
         for sb in &entry.storage_bindings {
-            if !constructor.storage_buffers.contains_key(&(sb.binding.set, sb.binding.binding)) {
+            if !constructor.storage_buffers.contains_key(&sb.binding) {
                 constructor.create_storage_buffer(&sb.elem_ty, sb.binding.set, sb.binding.binding);
             }
         }
@@ -3385,9 +3389,7 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
             if let Some(entry) = program.entry_points.iter().find(|e| e.name == *name) {
                 for input in &entry.inputs {
                     if let Some(br) = input.storage_binding {
-                        if let Some(&(var_id, _, _)) =
-                            constructor.storage_buffers.get(&(br.set, br.binding))
-                        {
+                        if let Some(&(var_id, _, _)) = constructor.storage_buffers.get(&br) {
                             if !interfaces.contains(&var_id) {
                                 interfaces.push(var_id);
                             }
@@ -3396,9 +3398,7 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
                 }
                 for output in &entry.outputs {
                     if let Some(br) = output.storage_binding {
-                        if let Some(&(var_id, _, _)) =
-                            constructor.storage_buffers.get(&(br.set, br.binding))
-                        {
+                        if let Some(&(var_id, _, _)) = constructor.storage_buffers.get(&br) {
                             if !interfaces.contains(&var_id) {
                                 interfaces.push(var_id);
                             }
@@ -3409,9 +3409,7 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
                 // the entry's typed `storage_bindings` list (e.g.
                 // parallelize's partials/result intermediates).
                 for sb in &entry.storage_bindings {
-                    if let Some(&(var_id, _, _)) =
-                        constructor.storage_buffers.get(&(sb.binding.set, sb.binding.binding))
-                    {
+                    if let Some(&(var_id, _, _)) = constructor.storage_buffers.get(&sb.binding) {
                         if !interfaces.contains(&var_id) {
                             interfaces.push(var_id);
                         }

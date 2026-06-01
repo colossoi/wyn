@@ -718,19 +718,18 @@ impl<'a> LowerCtx<'a> {
         // backed I/O. WGSL needs these at module scope; dedupe by
         // (set, binding) and coalesce access modes so an (in, out) pair
         // on the same slot becomes `read_write`.
-        let mut synth: HashMap<(u32, u32), (String, String, bool, bool)> = HashMap::new();
+        let mut synth: HashMap<BindingRef, (String, String, bool, bool)> = HashMap::new();
         // Key → (elem_ty_str, module_name, has_read, has_write).
-        let is_declared = |_set: u32, _binding: u32| false;
+        let is_declared = |_: BindingRef| false;
         for entry in &self.program.entry_points {
             // Explicit compiler-inserted bindings (e.g. parallelize's
             // partial-sum buffer).
             for sb in &entry.storage_bindings {
-                if is_declared(sb.binding.set, sb.binding.binding) {
+                if is_declared(sb.binding) {
                     continue;
                 }
-                let key = (sb.binding.set, sb.binding.binding);
                 let ty_str = self.type_emitter.type_to_wgsl(&sb.elem_ty)?;
-                let entry_ref = synth.entry(key).or_insert_with(|| {
+                let entry_ref = synth.entry(sb.binding).or_insert_with(|| {
                     let name = format!("_buf_{}_{}", sb.binding.set, sb.binding.binding);
                     (ty_str.clone(), name, false, false)
                 });
@@ -749,8 +748,7 @@ impl<'a> LowerCtx<'a> {
             // `array<T>`.
             for input in &entry.inputs {
                 if let Some(br) = input.storage_binding {
-                    let (set, binding) = (br.set, br.binding);
-                    if is_declared(set, binding) {
+                    if is_declared(br) {
                         continue;
                     }
                     let elem_ty = input
@@ -761,8 +759,8 @@ impl<'a> LowerCtx<'a> {
                         })?
                         .clone();
                     let ty_str = self.type_emitter.type_to_wgsl(&elem_ty)?;
-                    let entry_ref = synth.entry((set, binding)).or_insert_with(|| {
-                        let name = format!("_buf_{}_{}", set, binding);
+                    let entry_ref = synth.entry(br).or_insert_with(|| {
+                        let name = format!("_buf_{}_{}", br.set, br.binding);
                         (ty_str.clone(), name, false, false)
                     });
                     // Entry inputs are read by convention.
@@ -776,8 +774,7 @@ impl<'a> LowerCtx<'a> {
             // the result into a single-element slot.
             for out in &entry.outputs {
                 if let Some(br) = out.storage_binding {
-                    let (set, binding) = (br.set, br.binding);
-                    if is_declared(set, binding) {
+                    if is_declared(br) {
                         continue;
                     }
                     // Array-shaped output (`[]T`) → elem is `T`; scalar / vec /
@@ -789,8 +786,8 @@ impl<'a> LowerCtx<'a> {
                         None => out.ty.clone(),
                     };
                     let ty_str = self.type_emitter.type_to_wgsl(&elem_ty)?;
-                    let entry_ref = synth.entry((set, binding)).or_insert_with(|| {
-                        let name = format!("_buf_{}_{}", set, binding);
+                    let entry_ref = synth.entry(br).or_insert_with(|| {
+                        let name = format!("_buf_{}_{}", br.set, br.binding);
                         (ty_str.clone(), name, false, false)
                     });
                     entry_ref.3 = true;
@@ -799,8 +796,9 @@ impl<'a> LowerCtx<'a> {
         }
         // Sort for determinism.
         let mut synth_sorted: Vec<_> = synth.into_iter().collect();
-        synth_sorted.sort_by_key(|((set, binding), _)| (*set, *binding));
-        for ((set, binding), (elem_ty, name, has_in, has_out)) in synth_sorted {
+        synth_sorted.sort_by_key(|(br, _)| (br.set, br.binding));
+        for (br, (elem_ty, name, has_in, has_out)) in synth_sorted {
+            let (set, binding) = (br.set, br.binding);
             let access = match (has_in, has_out) {
                 (true, true) => "read_write",
                 (true, false) => "read",
