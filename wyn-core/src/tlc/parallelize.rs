@@ -13,7 +13,7 @@ use crate::builtins::catalog;
 use crate::egir::from_tlc::AUTO_STORAGE_SET;
 use crate::interface::{self, Attribute, EntryParamBinding, EntryParamBindingKind};
 use crate::pipeline_descriptor::*;
-use crate::{SymbolId, SymbolTable};
+use crate::{BindingRef, SymbolId, SymbolTable};
 use polytype::Type;
 use std::collections::{HashMap, HashSet};
 
@@ -30,8 +30,7 @@ pub enum ArrayProvenance {
     /// at construction time alongside `elem_ty` so the dispatch-len
     /// resolver doesn't have to re-derive it from the type.
     Storage {
-        set: u32,
-        binding: u32,
+        binding: BindingRef,
         elem_ty: Type<TypeName>,
         elem_bytes: u32,
     },
@@ -470,8 +469,7 @@ fn classify_input(input: &ArrayExpr, entry_slots: &[Option<EntryParamBinding>]) 
                  responsible for only ever producing sized elem types",
             );
             Some(ArrayProvenance::Storage {
-                set: *set,
-                binding: *binding,
+                binding: BindingRef::new(*set, *binding),
                 elem_ty: elem_ty.clone(),
                 elem_bytes,
             })
@@ -485,8 +483,7 @@ fn classify_input(input: &ArrayExpr, entry_slots: &[Option<EntryParamBinding>]) 
                 if let Some(slot) = entry_slots.iter().flatten().find(|s| s.param_sym == *sym) {
                     let (buf, elem_ty, elem_bytes) = slot.first_buffer();
                     return Some(ArrayProvenance::Storage {
-                        set: buf.set,
-                        binding: buf.binding,
+                        binding: buf,
                         elem_ty: elem_ty.clone(),
                         elem_bytes,
                     });
@@ -622,11 +619,11 @@ fn entry_size_hint(
     // set=0 in source order) to translate.
     if let Some(analysis) = analysis {
         match analysis.soac.provenances.first() {
-            Some(ArrayProvenance::Storage { set, binding, .. }) if *set == 0 => {
+            Some(ArrayProvenance::Storage { binding, .. }) if binding.set == 0 => {
                 let mut idx: u32 = 0;
                 for p in &decl.params {
                     if pattern_binds_view_array(p) {
-                        if idx == *binding {
+                        if idx == binding.binding {
                             return crate::egir::from_tlc::extract_size_hint(p);
                         }
                         idx += 1;
@@ -722,22 +719,22 @@ pub enum PlannedBindings {
         /// `None` means TLC defers to EGIR's `build_entry_outputs` for
         /// the result binding. For first-cut Map we always defer; future
         /// migrations may reserve specific bindings here.
-        output: Option<(u32, u32)>,
+        output: Option<BindingRef>,
     },
     Reduce {
-        partials: (u32, u32),
-        result: (u32, u32),
+        partials: BindingRef,
+        result: BindingRef,
     },
     Redomap {
-        partials: (u32, u32),
-        result: (u32, u32),
+        partials: BindingRef,
+        result: BindingRef,
     },
     Scan {
         /// Pinned result buffer when this is a gather pre-pass; `None` means
         /// EGIR auto-allocates the scan's output at `param_count`.
-        output: Option<(u32, u32)>,
-        block_sums: (u32, u32),
-        block_offsets: (u32, u32),
+        output: Option<BindingRef>,
+        block_sums: BindingRef,
+        block_offsets: BindingRef,
     },
 }
 
@@ -747,7 +744,7 @@ impl PlannedBindings {
     /// honors this so the EGIR output lands on the buffer the consumer reads.
     /// Reduce/Redomap manage their result binding inside `make_two_phase_plan`
     /// (it's a store, not an `EntryOutput`), so they report `None` here.
-    pub fn forced_output(&self) -> Option<(u32, u32)> {
+    pub fn forced_output(&self) -> Option<BindingRef> {
         match self {
             PlannedBindings::Map { output } => *output,
             PlannedBindings::Scan { output, .. } => *output,
@@ -783,7 +780,7 @@ impl PlannedBindings {
 fn lift_graphical_invariant_soacs(
     program: &mut Program,
     next_binding: &mut u32,
-    prepass_result_bindings: &mut HashMap<SymbolId, (u32, u32)>,
+    prepass_result_bindings: &mut HashMap<SymbolId, BindingRef>,
 ) {
     use std::collections::HashSet;
 
@@ -817,11 +814,11 @@ fn lift_graphical_invariant_soacs(
         };
         let (peeled, _) = peel_lambda_params(&program.defs[idx].body);
         let mut entry_params: HashSet<SymbolId> = HashSet::new();
-        let mut uniform_params: HashMap<SymbolId, (u32, u32)> = HashMap::new();
+        let mut uniform_params: HashMap<SymbolId, BindingRef> = HashMap::new();
         for (i, (sym, _)) in peeled.iter().enumerate() {
             match decl_params.get(i).and_then(crate::binding_layout::extract_uniform_binding) {
                 Some(br) => {
-                    uniform_params.insert(*sym, (br.set, br.binding));
+                    uniform_params.insert(*sym, br);
                 }
                 None => {
                     entry_params.insert(*sym);
@@ -877,11 +874,11 @@ fn lift_in_term(
     term: Term,
     entry_name: &str,
     entry_params: &std::collections::HashSet<SymbolId>,
-    uniform_params: &HashMap<SymbolId, (u32, u32)>,
+    uniform_params: &HashMap<SymbolId, BindingRef>,
     next_binding: &mut u32,
     added_decls: &mut Vec<interface::StorageBindingDecl>,
     new_defs: &mut Vec<Def>,
-    prepass_result_bindings: &mut HashMap<SymbolId, (u32, u32)>,
+    prepass_result_bindings: &mut HashMap<SymbolId, BindingRef>,
     program: &mut Program,
 ) -> Term {
     match term.kind {
@@ -963,11 +960,11 @@ fn maybe_hoist(
     entry_name: &str,
     name_ty: &Type<TypeName>,
     entry_params: &std::collections::HashSet<SymbolId>,
-    uniform_params: &HashMap<SymbolId, (u32, u32)>,
+    uniform_params: &HashMap<SymbolId, BindingRef>,
     next_binding: &mut u32,
     added_decls: &mut Vec<interface::StorageBindingDecl>,
     new_defs: &mut Vec<Def>,
-    prepass_result_bindings: &mut HashMap<SymbolId, (u32, u32)>,
+    prepass_result_bindings: &mut HashMap<SymbolId, BindingRef>,
     program: &mut Program,
 ) -> Term {
     // TODO: extend to array-result SOACs (Scan, Map). A pre-pass
@@ -1004,7 +1001,7 @@ fn maybe_hoist(
     // make_two_phase_plan will use this as the prepass's result_binding
     // (via the prepass_result_bindings map), so phase 2's final store
     // goes exactly here.
-    let binding = (AUTO_STORAGE_SET, *next_binding);
+    let binding = BindingRef::new(AUTO_STORAGE_SET, *next_binding);
     *next_binding += 1;
 
     // Capture the SOAC's uniform free vars. The pre-pass is a separate
@@ -1019,7 +1016,7 @@ fn maybe_hoist(
     new_defs.push(prepass_def);
 
     added_decls.push(interface::StorageBindingDecl {
-        binding: crate::BindingRef::new(binding.0, binding.1),
+        binding,
         role: interface::StorageRole::Input,
         elem_ty: name_ty.clone(),
         length: None,
@@ -1029,8 +1026,8 @@ fn maybe_hoist(
     intrinsic_term_by_id(
         catalog().known().storage_index,
         vec![
-            uint_lit(binding.0 as u64, span),
-            uint_lit(binding.1 as u64, span),
+            uint_lit(binding.set as u64, span),
+            uint_lit(binding.binding as u64, span),
             uint_lit(0, span),
         ],
         name_ty.clone(),
@@ -1102,9 +1099,9 @@ fn rhs_references_entry_param(
 /// SOAC reads on the generated pre-pass entry. Deduplicated by symbol.
 fn collect_uniform_free_vars(
     term: &Term,
-    uniform_params: &HashMap<SymbolId, (u32, u32)>,
+    uniform_params: &HashMap<SymbolId, BindingRef>,
     symbols: &SymbolTable,
-) -> Vec<(SymbolId, Type<TypeName>, (u32, u32))> {
+) -> Vec<(SymbolId, Type<TypeName>, BindingRef)> {
     let bound: HashSet<SymbolId> = HashSet::new();
     let empty_top: HashSet<SymbolId> = HashSet::new();
     let empty_defs: HashSet<String> = HashSet::new();
@@ -1120,7 +1117,7 @@ fn collect_uniform_free_vars(
         &mut seen,
     );
 
-    let mut out: Vec<(SymbolId, Type<TypeName>, (u32, u32))> = Vec::new();
+    let mut out: Vec<(SymbolId, Type<TypeName>, BindingRef)> = Vec::new();
     let mut added: HashSet<SymbolId> = HashSet::new();
     for t in &free {
         if let TermKind::Var(VarRef::Symbol(s)) = &t.kind {
@@ -1199,12 +1196,12 @@ fn build_prepass_def(
     entry_name: &str,
     soac_term: Term,
     elem_ty: Type<TypeName>,
-    captured_uniforms: &[(SymbolId, Type<TypeName>, (u32, u32))],
+    captured_uniforms: &[(SymbolId, Type<TypeName>, BindingRef)],
     program: &mut Program,
 ) -> Def {
     let required_params: Vec<(SymbolId, Type<TypeName>)> =
         captured_uniforms.iter().map(|(s, ty, _)| (*s, ty.clone())).collect();
-    let uniform_attrs: Vec<Option<(u32, u32)>> =
+    let uniform_attrs: Vec<Option<BindingRef>> =
         captured_uniforms.iter().map(|(_, _, b)| Some(*b)).collect();
     make_entry_def(
         entry_name,
@@ -1252,7 +1249,7 @@ pub fn run(mut program: Program, disable: bool) -> crate::error::Result<Parallel
     // to the storage binding the graphical entry reads from; Stage B's
     // `make_two_phase_plan` consults this so phase 2's result store goes
     // exactly there (instead of a freshly-allocated binding).
-    let mut prepass_result_bindings: HashMap<SymbolId, (u32, u32)> = HashMap::new();
+    let mut prepass_result_bindings: HashMap<SymbolId, BindingRef> = HashMap::new();
     lift_graphical_invariant_soacs(&mut program, &mut next_binding, &mut prepass_result_bindings);
 
     // Gather pre-passes (from the pre-defunc `lift_gathers`) pin their result
@@ -1265,7 +1262,7 @@ pub fn run(mut program: Program, disable: bool) -> crate::error::Result<Parallel
             if let Some(b) =
                 decl.storage_bindings.iter().find(|b| matches!(b.role, interface::StorageRole::Output))
             {
-                prepass_result_bindings.entry(def.name).or_insert((b.binding.set, b.binding.binding));
+                prepass_result_bindings.entry(def.name).or_insert(b.binding);
             }
         }
     }
@@ -1379,7 +1376,7 @@ fn make_lowering_plan(
     analysis: &EntryAnalysis,
     entry_name: &str,
     next_binding: u32,
-    forced_result_binding: Option<(u32, u32)>,
+    forced_result_binding: Option<BindingRef>,
     program: &mut Program,
 ) -> LoweringPlan {
     let sizing = PipelineSizing::for_analyzed_entry(program, analysis);
@@ -1436,7 +1433,7 @@ fn make_map_plan(
     entry_name: &str,
     _next_binding: u32,
     sizing: PipelineSizing,
-    forced_output_binding: Option<(u32, u32)>,
+    forced_output_binding: Option<BindingRef>,
     program: &Program,
 ) -> LoweringPlan {
     // Plan: don't pre-allocate the output binding. The EGIR side already
@@ -1483,7 +1480,7 @@ fn make_two_phase_plan(
     reduce_op: &super::SoacBody,
     ne: &Term,
     next_binding: u32,
-    forced_result_binding: Option<(u32, u32)>,
+    forced_result_binding: Option<BindingRef>,
     program: &mut Program,
     sizing: PipelineSizing,
 ) -> LoweringPlan {
@@ -1493,10 +1490,10 @@ fn make_two_phase_plan(
     // so this keeps the two sides in sync. Without a forced binding the
     // plan allocates its own.
     let (partials_binding, result_binding, extra_used) = match forced_result_binding {
-        Some(result) => ((AUTO_STORAGE_SET, next_binding), result, 1),
+        Some(result) => (BindingRef::new(AUTO_STORAGE_SET, next_binding), result, 1),
         None => (
-            (AUTO_STORAGE_SET, next_binding),
-            (AUTO_STORAGE_SET, next_binding + 1),
+            BindingRef::new(AUTO_STORAGE_SET, next_binding),
+            BindingRef::new(AUTO_STORAGE_SET, next_binding + 1),
             2,
         ),
     };
@@ -1539,8 +1536,8 @@ fn make_two_phase_plan(
         // EGIR path have to live above that range to avoid colliding
         // with the input buffers.
         let auto_input_count = count_view_param_bindings(program, analysis.def_name);
-        let partials_binding = (AUTO_STORAGE_SET, next_binding + auto_input_count);
-        let result_binding = (AUTO_STORAGE_SET, next_binding + auto_input_count + 1);
+        let partials_binding = BindingRef::new(AUTO_STORAGE_SET, next_binding + auto_input_count);
+        let result_binding = BindingRef::new(AUTO_STORAGE_SET, next_binding + auto_input_count + 1);
         let pipeline = build_two_phase_pipeline_descriptor(
             entry_name,
             &analysis.soac,
@@ -1648,8 +1645,8 @@ fn build_two_phase_pipeline_descriptor(
     entry_name: &str,
     analysis: &SoacAnalysis,
     _elem_type: &Type<TypeName>,
-    partials_binding: (u32, u32),
-    result_binding: (u32, u32),
+    partials_binding: BindingRef,
+    result_binding: BindingRef,
     sizing: PipelineSizing,
 ) -> Pipeline {
     let workgroup = sizing.workgroup;
@@ -1691,7 +1688,7 @@ fn make_scan_plan(
     op: &super::SoacBody,
     _ne: &Term,
     next_binding: u32,
-    forced_result_binding: Option<(u32, u32)>,
+    forced_result_binding: Option<BindingRef>,
     program: &mut Program,
     sizing: PipelineSizing,
 ) -> LoweringPlan {
@@ -1759,10 +1756,10 @@ fn make_scan_plan(
     // sit above the fresh range. (Non-forced layout is unchanged: output at
     // `auto_input_count`, then `+1`, `+2`.)
     let auto_output = next_binding + auto_input_count;
-    let output_binding = forced_result_binding.unwrap_or((AUTO_STORAGE_SET, auto_output));
-    let scratch_start = output_binding.1.max(auto_output) + 1;
-    let block_sums_binding = (AUTO_STORAGE_SET, scratch_start);
-    let block_offsets_binding = (AUTO_STORAGE_SET, scratch_start + 1);
+    let output_binding = forced_result_binding.unwrap_or(BindingRef::new(AUTO_STORAGE_SET, auto_output));
+    let scratch_start = output_binding.binding.max(auto_output) + 1;
+    let block_sums_binding = BindingRef::new(AUTO_STORAGE_SET, scratch_start);
+    let block_offsets_binding = BindingRef::new(AUTO_STORAGE_SET, scratch_start + 1);
 
     let pipeline = build_scan_pipeline_descriptor(
         entry_name,
@@ -1819,9 +1816,9 @@ fn build_scan_pipeline_descriptor(
     analysis: &EntryAnalysis,
     elem_type: &Type<TypeName>,
     consuming: bool,
-    output_binding: (u32, u32),
-    block_sums_binding: (u32, u32),
-    block_offsets_binding: (u32, u32),
+    output_binding: BindingRef,
+    block_sums_binding: BindingRef,
+    block_offsets_binding: BindingRef,
     sizing: PipelineSizing,
     program: &Program,
 ) -> Pipeline {
@@ -1839,7 +1836,7 @@ fn build_scan_pipeline_descriptor(
     if consuming && all_bindings.is_empty() {
         push_storage_binding(
             &mut all_bindings,
-            (AUTO_STORAGE_SET, 0),
+            BindingRef::new(AUTO_STORAGE_SET, 0),
             Access::ReadWrite,
             BufferUsage::Input,
             "input_0".to_string(),
@@ -1920,8 +1917,8 @@ fn build_two_phase_entries(
     reduce_op: &super::SoacBody,
     ne: &Term,
     elem_type: &Type<TypeName>,
-    partials_binding: (u32, u32),
-    result_binding: (u32, u32),
+    partials_binding: BindingRef,
+    result_binding: BindingRef,
     program: &mut Program,
     sizing: PipelineSizing,
 ) -> (Vec<Def>, Pipeline) {
@@ -1950,7 +1947,7 @@ fn build_two_phase_entries(
     // the input buffer at (0, 0) under the too-shallow allocator.
     let mut phase1_bindings = input_storage_decls(&analysis.soac);
     phase1_bindings.push(interface::StorageBindingDecl {
-        binding: crate::BindingRef::new(partials_binding.0, partials_binding.1),
+        binding: BindingRef::new(partials_binding.set, partials_binding.binding),
         role: interface::StorageRole::Intermediate,
         elem_ty: elem_type.clone(),
         length: None,
@@ -1968,8 +1965,8 @@ fn build_two_phase_entries(
     // Phase 2: reduce over the partials buffer, write result to result_binding[0].
     let phase2_name = format!("{}_phase2_combine", entry_name);
     let partials_input = ArrayExpr::StorageBuffer {
-        set: partials_binding.0,
-        binding: partials_binding.1,
+        set: partials_binding.set,
+        binding: partials_binding.binding,
         offset: Box::new(uint_lit(0, span)),
         len: Box::new(uint_lit(workgroup.0 as u64, span)),
         elem_ty: elem_type.clone(),
@@ -1984,8 +1981,8 @@ fn build_two_phase_entries(
     let phase2_store = intrinsic_term_by_id(
         catalog().known().storage_store,
         vec![
-            uint_lit(result_binding.0 as u64, span),
-            uint_lit(result_binding.1 as u64, span),
+            uint_lit(result_binding.set as u64, span),
+            uint_lit(result_binding.binding as u64, span),
             uint_lit(0, span),
             var_term(r_sym, elem_type.clone(), span),
         ],
@@ -1997,13 +1994,13 @@ fn build_two_phase_entries(
     // writes the final user-visible `result`.
     let phase2_bindings = vec![
         interface::StorageBindingDecl {
-            binding: crate::BindingRef::new(partials_binding.0, partials_binding.1),
+            binding: BindingRef::new(partials_binding.set, partials_binding.binding),
             role: interface::StorageRole::Intermediate,
             elem_ty: elem_type.clone(),
             length: None,
         },
         interface::StorageBindingDecl {
-            binding: crate::BindingRef::new(result_binding.0, result_binding.1),
+            binding: BindingRef::new(result_binding.set, result_binding.binding),
             role: interface::StorageRole::Output,
             elem_ty: elem_type.clone(),
             length: None,
@@ -2261,7 +2258,7 @@ fn build_chunked_soac_body(
     //   let r = <soac> in _w_intrinsic_storage_store(set, binding, tid, r)
     // so each thread's partial lands at partials[tid]. Return type then
     // becomes Unit rather than `result_ty`.
-    write_partial_to: Option<(u32, u32)>,
+    write_partial_to: Option<BindingRef>,
     total_threads: u32,
 ) -> Term {
     // ChunkArithmetic's `index_ty` matches the SOAC input's index type:
@@ -2327,7 +2324,7 @@ fn build_chunked_soac_body(
 
     // If requested, wrap the SOAC with `let r = <soac> in store(set, binding, tid, r)`
     // so each thread's partial result lands in its own slot.
-    if let Some((set, binding)) = write_partial_to {
+    if let Some(br) = write_partial_to {
         let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
         let r_sym = program.symbols.alloc("_par_out".into());
         let tid_var = chunk.tid_u32(span);
@@ -2335,8 +2332,8 @@ fn build_chunked_soac_body(
         let store = intrinsic_term_by_id(
             catalog().known().storage_store,
             vec![
-                uint_lit(set as u64, span),
-                uint_lit(binding as u64, span),
+                uint_lit(br.set as u64, span),
+                uint_lit(br.binding as u64, span),
                 tid_var,
                 r_var,
             ],
@@ -2551,7 +2548,7 @@ pub(crate) fn make_entry_def(
     body: Term,
     return_ty: Type<TypeName>,
     required_params: &[(SymbolId, Type<TypeName>)],
-    uniform_attrs: &[Option<(u32, u32)>],
+    uniform_attrs: &[Option<BindingRef>],
     storage_bindings: Vec<interface::StorageBindingDecl>,
     program: &mut Program,
 ) -> Def {
@@ -2607,13 +2604,16 @@ pub(crate) fn make_entry_def(
                 kind: ast::PatternKind::Name(pname),
             };
             match uniform_attrs.get(i).copied().flatten() {
-                Some((set, binding)) => ast::Pattern {
+                Some(br) => ast::Pattern {
                     h: ast::Header {
                         id: ast::NodeId(0),
                         span: dummy_span,
                     },
                     kind: ast::PatternKind::Attributed(
-                        vec![Attribute::Uniform { set, binding }],
+                        vec![Attribute::Uniform {
+                            set: br.set,
+                            binding: br.binding,
+                        }],
                         Box::new(name_pat),
                     ),
                 },
@@ -2660,15 +2660,15 @@ pub(crate) fn make_entry_def(
 /// Append a storage-buffer binding to `bindings` and return its index.
 fn push_storage_binding(
     bindings: &mut Vec<Binding>,
-    (set, binding): (u32, u32),
+    br: BindingRef,
     access: Access,
     usage: BufferUsage,
     name: String,
 ) -> usize {
     let idx = bindings.len();
     bindings.push(Binding::StorageBuffer {
-        set,
-        binding,
+        set: br.set,
+        binding: br.binding,
         access,
         usage,
         name,
@@ -2686,13 +2686,10 @@ fn resolve_dispatch_len(analysis: &EntryAnalysis, input_index: usize, program: &
     let inputs = analysis.soac.inputs();
     match analysis.soac.provenances.get(input_index) {
         Some(ArrayProvenance::Storage {
-            set,
-            binding,
-            elem_bytes,
-            ..
+            binding, elem_bytes, ..
         }) => DispatchLen::InputBinding {
-            set: *set,
-            binding: *binding,
+            set: binding.set,
+            binding: binding.binding,
             elem_bytes: *elem_bytes,
         },
         Some(ArrayProvenance::Range { bound }) => resolve_range_bound(bound, analysis.def_name, program)
@@ -2719,7 +2716,7 @@ fn resolve_range_bound(bound: &Term, def_name: SymbolId, program: &Program) -> O
         return s.parse::<u32>().ok().map(|count| DispatchLen::Fixed { count });
     }
     let &(set, binding) = program.view_lengths.get(&bound.id)?;
-    let target = crate::BindingRef::new(set, binding);
+    let target = BindingRef::new(set, binding);
     let elem_bytes =
         entry_binding_slots(program, def_name).into_iter().flatten().find_map(|b| match b.kind {
             EntryParamBindingKind::Single {
@@ -2851,14 +2848,9 @@ fn tree_phase2_stage(entry_point: String, reads: Vec<usize>, writes: Vec<usize>)
 /// `(positional_index, set, binding, elem_ty)` for each. Provenances
 /// that aren't `ArrayProvenance::Storage` (e.g. ranges) are skipped.
 /// Single source of truth for the two adapters below.
-fn storage_inputs(soac: &SoacAnalysis) -> impl Iterator<Item = (usize, u32, u32, &Type<TypeName>)> + '_ {
+fn storage_inputs(soac: &SoacAnalysis) -> impl Iterator<Item = (usize, BindingRef, &Type<TypeName>)> + '_ {
     soac.provenances.iter().enumerate().filter_map(|(i, p)| match p {
-        ArrayProvenance::Storage {
-            set,
-            binding,
-            elem_ty,
-            ..
-        } => Some((i, *set, *binding, elem_ty)),
+        ArrayProvenance::Storage { binding, elem_ty, .. } => Some((i, *binding, elem_ty)),
         _ => None,
     })
 }
@@ -2866,9 +2858,9 @@ fn storage_inputs(soac: &SoacAnalysis) -> impl Iterator<Item = (usize, u32, u32,
 /// Pipeline-level `Binding` descriptors for the SOAC's storage inputs.
 fn collect_soac_bindings(soac: &SoacAnalysis) -> Vec<Binding> {
     storage_inputs(soac)
-        .map(|(i, set, binding, _)| Binding::StorageBuffer {
-            set,
-            binding,
+        .map(|(i, br, _)| Binding::StorageBuffer {
+            set: br.set,
+            binding: br.binding,
             access: Access::ReadOnly,
             usage: BufferUsage::Input,
             name: format!("input_{}", i),
@@ -2882,8 +2874,8 @@ fn collect_soac_bindings(soac: &SoacAnalysis) -> Vec<Binding> {
 /// backend's binding allowlist admits the references.
 fn input_storage_decls(soac: &SoacAnalysis) -> Vec<interface::StorageBindingDecl> {
     storage_inputs(soac)
-        .map(|(_, set, binding, elem_ty)| interface::StorageBindingDecl {
-            binding: crate::BindingRef::new(set, binding),
+        .map(|(_, br, elem_ty)| interface::StorageBindingDecl {
+            binding: br,
             role: interface::StorageRole::Input,
             elem_ty: elem_ty.clone(),
             length: None,

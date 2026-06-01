@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use polytype::Type;
 use smallvec::smallvec;
 
+use crate::BindingRef;
 use crate::ast::TypeName;
 use crate::builtins::catalog;
 use crate::ssa::framework::BlockId;
@@ -245,7 +246,7 @@ fn extract_constant(graph: &super::types::EGraph, nid: NodeId) -> Option<Constan
 pub fn phase1_transform_reduce(
     entry: &mut EgirEntry,
     total_threads: u32,
-    partials_binding: (u32, u32),
+    partials_binding: BindingRef,
 ) -> Result<(), String> {
     // 1. Locate the Reduce side-effect and pull the operands.
     let (reduce_block, reduce_idx) =
@@ -293,8 +294,8 @@ pub fn phase1_transform_reduce(
     );
     let partials_view = graph_ops::intern_storage_view(
         &mut entry.graph,
-        partials_binding.0,
-        partials_binding.1,
+        partials_binding.set,
+        partials_binding.binding,
         arr_ty,
         None,
     );
@@ -317,7 +318,7 @@ pub fn phase1_transform_reduce(
         o.storage_binding = None;
     }
     entry.storage_bindings.push(crate::interface::StorageBindingDecl {
-        binding: crate::BindingRef::new(partials_binding.0, partials_binding.1),
+        binding: crate::BindingRef::new(partials_binding.set, partials_binding.binding),
         role: crate::interface::StorageRole::Intermediate,
         elem_ty,
         length: None,
@@ -345,13 +346,13 @@ pub fn synthesize_phase2_reduce(
     op_func: String,
     elem_ty: Type<TypeName>,
     init: ConstantValue,
-    partials_binding: (u32, u32),
-    result_binding: (u32, u32),
+    partials_binding: BindingRef,
+    result_binding: BindingRef,
 ) -> EgirEntry {
     use super::builder::EntryBuilder;
     let mut b = EntryBuilder::new_compute(format!("{}_phase2_combine", entry_name), (PHASE2_WIDTH, 1, 1));
-    b.declare_intermediate_storage(partials_binding.0, partials_binding.1, elem_ty.clone());
-    b.declare_output_storage(result_binding.0, result_binding.1, elem_ty.clone());
+    b.declare_intermediate_storage(partials_binding.set, partials_binding.binding, elem_ty.clone());
+    b.declare_output_storage(result_binding.set, result_binding.binding, elem_ty.clone());
 
     let init_nid = b.emit_constant(init, elem_ty.clone());
     build_tree_reduce_phase2(
@@ -391,8 +392,8 @@ fn build_tree_reduce_phase2(
     op_func: String,
     elem_ty: Type<TypeName>,
     init_nid: NodeId,
-    partials_binding: (u32, u32),
-    result_binding: (u32, u32),
+    partials_binding: BindingRef,
+    result_binding: BindingRef,
 ) {
     let w = PHASE2_WIDTH;
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
@@ -420,16 +421,16 @@ fn build_tree_reduce_phase2(
     );
     let partials_view = graph_ops::intern_storage_view(
         graph,
-        partials_binding.0,
-        partials_binding.1,
+        partials_binding.set,
+        partials_binding.binding,
         view_arr_ty.clone(),
         None,
     );
-    let len = emit_storage_len(graph, partials_binding.0, partials_binding.1);
+    let len = emit_storage_len(graph, partials_binding.set, partials_binding.binding);
     let result_view = graph_ops::intern_storage_view(
         graph,
-        result_binding.0,
-        result_binding.1,
+        result_binding.set,
+        result_binding.binding,
         view_arr_ty.clone(),
         None,
     );
@@ -799,7 +800,7 @@ fn emit_storage_len(graph: &mut super::types::EGraph, set: u32, binding: u32) ->
 pub fn phase1_transform_redomap(
     entry: &mut EgirEntry,
     total_threads: u32,
-    partials_binding: (u32, u32),
+    partials_binding: BindingRef,
 ) -> Result<(), String> {
     let (block_id, idx) =
         find_pending_redomap(entry).ok_or_else(|| "no PendingSoac::Redomap in entry".to_string())?;
@@ -891,8 +892,8 @@ pub fn phase1_transform_redomap(
     );
     let partials_view = graph_ops::intern_storage_view(
         &mut entry.graph,
-        partials_binding.0,
-        partials_binding.1,
+        partials_binding.set,
+        partials_binding.binding,
         arr_ty,
         None,
     );
@@ -936,7 +937,7 @@ pub fn phase1_transform_redomap(
         o.storage_binding = None;
     }
     entry.storage_bindings.push(crate::interface::StorageBindingDecl {
-        binding: crate::BindingRef::new(partials_binding.0, partials_binding.1),
+        binding: crate::BindingRef::new(partials_binding.set, partials_binding.binding),
         role: crate::interface::StorageRole::Intermediate,
         elem_ty,
         length: None,
@@ -973,13 +974,13 @@ pub fn synthesize_phase2_reduce_cloning_ne(
     elem_ty: Type<TypeName>,
     phase1_graph: &super::types::EGraph,
     phase1_ne_nid: NodeId,
-    partials_binding: (u32, u32),
-    result_binding: (u32, u32),
+    partials_binding: BindingRef,
+    result_binding: BindingRef,
 ) -> Result<EgirEntry, String> {
     use super::builder::EntryBuilder;
     let mut b = EntryBuilder::new_compute(format!("{}_phase2_combine", entry_name), (PHASE2_WIDTH, 1, 1));
-    b.declare_intermediate_storage(partials_binding.0, partials_binding.1, elem_ty.clone());
-    b.declare_output_storage(result_binding.0, result_binding.1, elem_ty.clone());
+    b.declare_intermediate_storage(partials_binding.set, partials_binding.binding, elem_ty.clone());
+    b.declare_output_storage(result_binding.set, result_binding.binding, elem_ty.clone());
 
     let init_nid = graph_ops::clone_pure_subgraph(phase1_graph, b.graph_mut(), phase1_ne_nid)?;
     build_tree_reduce_phase2(
@@ -1129,11 +1130,9 @@ fn transform_scan_entry(
     let output_binding = if consuming {
         let (block, idx) = find_pending_scan(entry)?;
         let input_view_nid = entry.graph.skeleton.blocks[block].side_effects[idx].operand_nodes[0];
-        let br = graph_ops::extract_storage_view_source(&entry.graph, input_view_nid)?;
-        (br.set, br.binding)
+        graph_ops::extract_storage_view_source(&entry.graph, input_view_nid)?
     } else {
-        let br = entry.outputs.first()?.storage_binding?;
-        (br.set, br.binding)
+        entry.outputs.first()?.storage_binding?
     };
 
     // Phase 2 needs a NE NodeId in its own graph — clone from phase 1's
@@ -1190,7 +1189,7 @@ fn transform_scan_entry(
     // and writes the corrected prefix back. Declare the additional
     // intermediate binding on the entry interface.
     entry.storage_bindings.push(crate::interface::StorageBindingDecl {
-        binding: crate::BindingRef::new(block_offsets_binding.0, block_offsets_binding.1),
+        binding: crate::BindingRef::new(block_offsets_binding.set, block_offsets_binding.binding),
         role: crate::interface::StorageRole::Intermediate,
         elem_ty: entry.storage_bindings[0].elem_ty.clone(),
         length: None,
@@ -1213,7 +1212,7 @@ pub fn phase1_transform_scan(
     op_func: String,
     elem_ty: Type<TypeName>,
     captures_count: usize,
-    block_sums_binding: (u32, u32),
+    block_sums_binding: BindingRef,
 ) -> Result<(), String> {
     let (scan_block, scan_idx) =
         find_pending_scan(entry).ok_or_else(|| "no PendingSoac::Scan in entry".to_string())?;
@@ -1318,8 +1317,8 @@ pub fn phase1_transform_scan(
         );
         let block_sums_view = graph_ops::intern_storage_view(
             &mut entry.graph,
-            block_sums_binding.0,
-            block_sums_binding.1,
+            block_sums_binding.set,
+            block_sums_binding.binding,
             arr_ty,
             None,
         );
@@ -1336,7 +1335,7 @@ pub fn phase1_transform_scan(
     }
 
     entry.storage_bindings.push(crate::interface::StorageBindingDecl {
-        binding: crate::BindingRef::new(block_sums_binding.0, block_sums_binding.1),
+        binding: crate::BindingRef::new(block_sums_binding.set, block_sums_binding.binding),
         role: crate::interface::StorageRole::Intermediate,
         elem_ty,
         length: None,
@@ -1354,13 +1353,21 @@ pub fn synthesize_phase2_scan(
     elem_ty: Type<TypeName>,
     phase1_graph: &super::types::EGraph,
     phase1_ne_nid: NodeId,
-    block_sums_binding: (u32, u32),
-    block_offsets_binding: (u32, u32),
+    block_sums_binding: BindingRef,
+    block_offsets_binding: BindingRef,
 ) -> Result<EgirEntry, String> {
     use super::builder::EntryBuilder;
     let mut b = EntryBuilder::new_compute(format!("{}_phase2_scan_sums", entry_name), (1, 1, 1));
-    b.declare_intermediate_storage(block_sums_binding.0, block_sums_binding.1, elem_ty.clone());
-    b.declare_intermediate_storage(block_offsets_binding.0, block_offsets_binding.1, elem_ty.clone());
+    b.declare_intermediate_storage(
+        block_sums_binding.set,
+        block_sums_binding.binding,
+        elem_ty.clone(),
+    );
+    b.declare_intermediate_storage(
+        block_offsets_binding.set,
+        block_offsets_binding.binding,
+        elem_ty.clone(),
+    );
 
     let arr_ty = Type::Constructed(
         TypeName::Array,
@@ -1370,9 +1377,13 @@ pub fn synthesize_phase2_scan(
             Type::Constructed(TypeName::ArrayVariantView, vec![]),
         ],
     );
-    let block_sums_view = b.emit_storage_view(block_sums_binding.0, block_sums_binding.1, arr_ty.clone());
-    let block_offsets_view =
-        b.emit_storage_view(block_offsets_binding.0, block_offsets_binding.1, arr_ty.clone());
+    let block_sums_view =
+        b.emit_storage_view(block_sums_binding.set, block_sums_binding.binding, arr_ty.clone());
+    let block_offsets_view = b.emit_storage_view(
+        block_offsets_binding.set,
+        block_offsets_binding.binding,
+        arr_ty.clone(),
+    );
     let init_nid = graph_ops::clone_pure_subgraph(phase1_graph, b.graph_mut(), phase1_ne_nid)?;
     b.emit_pending_scan_into(
         op_func,
@@ -1399,8 +1410,8 @@ pub fn synthesize_phase3_scan(
     entry_name: &str,
     swap_wrapper_name: String,
     elem_ty: Type<TypeName>,
-    output_binding: (u32, u32),
-    block_offsets_binding: (u32, u32),
+    output_binding: BindingRef,
+    block_offsets_binding: BindingRef,
     total_threads: u32,
 ) -> EgirEntry {
     use super::builder::EntryBuilder;
@@ -1408,8 +1419,12 @@ pub fn synthesize_phase3_scan(
         format!("{}_phase3_add_offsets", entry_name),
         (total_threads, 1, 1),
     );
-    b.declare_output_storage(output_binding.0, output_binding.1, elem_ty.clone());
-    b.declare_intermediate_storage(block_offsets_binding.0, block_offsets_binding.1, elem_ty.clone());
+    b.declare_output_storage(output_binding.set, output_binding.binding, elem_ty.clone());
+    b.declare_intermediate_storage(
+        block_offsets_binding.set,
+        block_offsets_binding.binding,
+        elem_ty.clone(),
+    );
 
     let arr_ty = Type::Constructed(
         TypeName::Array,
@@ -1419,15 +1434,18 @@ pub fn synthesize_phase3_scan(
             Type::Constructed(TypeName::ArrayVariantView, vec![]),
         ],
     );
-    let _output_view = b.emit_storage_view(output_binding.0, output_binding.1, arr_ty.clone());
-    let block_offsets_view =
-        b.emit_storage_view(block_offsets_binding.0, block_offsets_binding.1, arr_ty.clone());
+    let _output_view = b.emit_storage_view(output_binding.set, output_binding.binding, arr_ty.clone());
+    let block_offsets_view = b.emit_storage_view(
+        block_offsets_binding.set,
+        block_offsets_binding.binding,
+        arr_ty.clone(),
+    );
 
     // tid, chunk_start, chunk_len from output length.
     let output_len = {
         let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
-        let set_nid = graph_ops::intern_u32(b.graph_mut(), output_binding.0, None);
-        let binding_nid = graph_ops::intern_u32(b.graph_mut(), output_binding.1, None);
+        let set_nid = graph_ops::intern_u32(b.graph_mut(), output_binding.set, None);
+        let binding_nid = graph_ops::intern_u32(b.graph_mut(), output_binding.binding, None);
         graph_ops::intern_intrinsic(
             b.graph_mut(),
             catalog().known().storage_len,
@@ -1449,8 +1467,8 @@ pub fn synthesize_phase3_scan(
 
     let chunked_output = graph_ops::intern_chunked_storage_view(
         b.graph_mut(),
-        output_binding.0,
-        output_binding.1,
+        output_binding.set,
+        output_binding.binding,
         chunk_start,
         chunk_len,
         arr_ty.clone(),

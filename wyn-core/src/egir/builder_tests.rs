@@ -125,7 +125,8 @@ fn phase1_transform_reduce_in_place() {
     });
 
     // Run the in-place transformation. Partials at (0, 2).
-    phase1_transform_reduce(&mut entry, 64, (0, 2)).expect("phase1 transform succeeded");
+    phase1_transform_reduce(&mut entry, 64, crate::BindingRef::new(0, 2))
+        .expect("phase1 transform succeeded");
 
     // 1. The Reduce side-effect's input should now be a NEW storage view
     //    whose operands are (chunk_start, chunk_len) — not (0, full_len).
@@ -233,8 +234,8 @@ fn synthesize_phase2_reduce_shape() {
         "_w_lambda_0".to_string(),
         f32_ty(),
         ConstantValue::from_f32(0.0),
-        (0, 1), // partials at (0, 1)
-        (0, 2), // result at (0, 2)
+        crate::BindingRef::new(0, 1), // partials at (0, 1)
+        crate::BindingRef::new(0, 2), // result at (0, 2)
     );
 
     assert_eq!(entry.name, "sum_phase2_combine");

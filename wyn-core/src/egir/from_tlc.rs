@@ -189,10 +189,7 @@ pub fn run(
                 // binding `build_entry_outputs` may pin (gather pre-passes do).
                 // Reduce/Redomap manage their result inside the TLC two-phase
                 // plan, so `forced_output` reports `None` for them.
-                let forced_output_binding = plans
-                    .get(&entry.name)
-                    .and_then(|p| p.bindings.forced_output())
-                    .map(|(set, binding)| BindingRef::new(set, binding));
+                let forced_output_binding = plans.get(&entry.name).and_then(|p| p.bindings.forced_output());
                 // A parallel map/scan writes one output element per thread, so
                 // its storage output is dispatch-sized. Reduce/Redomap results
                 // are single elements; entries without a plan keep the host's
