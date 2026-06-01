@@ -281,11 +281,10 @@ impl EntryBuilder {
         result
     }
 
-    /// Emit a `Store` of `value` to `storage[set, binding][index]`.
+    /// Emit a `Store` of `value` to `storage[binding][index]`.
     pub fn emit_storage_store(
         &mut self,
-        set: u32,
-        binding: u32,
+        binding: BindingRef,
         index_nid: NodeId,
         value_nid: NodeId,
         elem_ty: Type<TypeName>,
@@ -298,7 +297,7 @@ impl EntryBuilder {
                 Type::Constructed(TypeName::ArrayVariantView, vec![]),
             ],
         );
-        let view_nid = self.emit_storage_view(BindingRef::new(set, binding), arr_ty);
+        let view_nid = self.emit_storage_view(binding, arr_ty);
         let span = self.span();
         graph_ops::emit_storage_store(
             &mut self.graph,

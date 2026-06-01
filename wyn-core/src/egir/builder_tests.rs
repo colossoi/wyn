@@ -48,7 +48,7 @@ fn entry_builder_constructs_phase2_shape() {
         vec![],
     );
     let zero = b.emit_u32(0);
-    b.emit_storage_store(0, 2, zero, r, f32_ty());
+    b.emit_storage_store(BindingRef::new(0, 2), zero, r, f32_ty());
 
     let entry = b.build();
     assert_eq!(entry.name, "compute_sum_phase2_combine");
@@ -113,7 +113,7 @@ fn phase1_transform_reduce_in_place() {
         vec![],
     );
     let zero = b.emit_u32(0);
-    b.emit_storage_store(0, 1, zero, reduce_result, f32_ty());
+    b.emit_storage_store(BindingRef::new(0, 1), zero, reduce_result, f32_ty());
     let mut entry = b.build();
 
     // Decorate the entry as if `from_tlc::build_entry_outputs` had run:

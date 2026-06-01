@@ -262,7 +262,7 @@ pub fn phase1_transform_reduce(
     };
 
     // 2. Build chunk arithmetic in the same block as the reduce.
-    let input_len = emit_storage_len(&mut entry.graph, view_storage.set, view_storage.binding);
+    let input_len = emit_storage_len(&mut entry.graph, view_storage);
     let (tid, chunk_start, chunk_len) = emit_chunk_arithmetic(&mut entry.graph, total_threads, input_len)?;
 
     // 3. Build a new chunked StorageView with [chunk_start, chunk_len].
@@ -413,7 +413,7 @@ fn build_tree_reduce_phase2(
         None,
     );
     let partials_view = graph_ops::intern_storage_view(graph, partials_binding, view_arr_ty.clone(), None);
-    let len = emit_storage_len(graph, partials_binding.set, partials_binding.binding);
+    let len = emit_storage_len(graph, partials_binding);
     let result_view = graph_ops::intern_storage_view(graph, result_binding, view_arr_ty.clone(), None);
     // Workgroup-shared `array<elem, W>` (id 0 within this entry).
     let shared_view = graph_ops::emit_workgroup_view(graph, 0, w, view_arr_ty.clone(), None);
@@ -761,10 +761,10 @@ fn cast_u32_to_index(
 }
 
 /// Emit a `_w_intrinsic_storage_len(set, binding)` node returning u32.
-fn emit_storage_len(graph: &mut super::types::EGraph, set: u32, binding: u32) -> NodeId {
+fn emit_storage_len(graph: &mut super::types::EGraph, br: BindingRef) -> NodeId {
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
-    let set_nid = graph_ops::intern_u32(graph, set, None);
-    let binding_nid = graph_ops::intern_u32(graph, binding, None);
+    let set_nid = graph_ops::intern_u32(graph, br.set, None);
+    let binding_nid = graph_ops::intern_u32(graph, br.binding, None);
     graph_ops::intern_intrinsic(
         graph,
         catalog().known().storage_len,
@@ -807,7 +807,7 @@ pub fn phase1_transform_redomap(
     // Chunk arith uses the first input's length.
     let first_view_nid = input_view_data[0].0;
     let input_len = if let Some(br) = graph_ops::extract_storage_view_source(&entry.graph, first_view_nid) {
-        emit_storage_len(&mut entry.graph, br.set, br.binding)
+        emit_storage_len(&mut entry.graph, br)
     } else if let Some((_, len_nid, _)) =
         graph_ops::extract_array_range_operands(&entry.graph, first_view_nid)
     {
@@ -1211,7 +1211,7 @@ pub fn phase1_transform_scan(
     let input_storage = graph_ops::extract_storage_view_source(&entry.graph, input_view_nid)
         .ok_or_else(|| "Scan input is not a StorageView".to_string())?;
 
-    let input_len = emit_storage_len(&mut entry.graph, input_storage.set, input_storage.binding);
+    let input_len = emit_storage_len(&mut entry.graph, input_storage);
     let (tid, chunk_start, chunk_len) = emit_chunk_arithmetic(&mut entry.graph, total_threads, input_len)?;
 
     let chunked_input = graph_ops::intern_chunked_storage_view(
