@@ -41,11 +41,8 @@ use super::types::{
 
 /// Where a single output value is written.
 enum Dest {
-    /// Compute output bound to a storage buffer at `(set, binding)`.
-    StorageView {
-        set: u32,
-        binding: u32,
-    },
+    /// Compute output bound to a storage buffer at `binding`.
+    StorageView(crate::BindingRef),
     /// Graphics output written to the `index`-th location/builtin slot.
     OutputSlot {
         index: usize,
@@ -128,10 +125,7 @@ fn flatten_outputs(
         .map(|(i, output)| {
             let dest = if is_compute {
                 let br = output.storage_binding.expect("BUG: compute output without storage binding");
-                Dest::StorageView {
-                    set: br.set,
-                    binding: br.binding,
-                }
+                Dest::StorageView(br)
             } else {
                 Dest::OutputSlot { index: i }
             };
@@ -180,8 +174,8 @@ fn lower_slot(
     next_effect: &mut u32,
     slot: &Slot,
 ) -> Result<(), ConvertError> {
-    let (set, binding) = match slot.dest {
-        Dest::StorageView { set, binding } => (set, binding),
+    let binding = match slot.dest {
+        Dest::StorageView(br) => br,
         Dest::OutputSlot { index } => {
             // Graphics: write the whole value to the output slot.
             let place = graph.intern_pure(PureOp::OutputSlot { index }, smallvec![], slot.ty.clone());
@@ -199,7 +193,7 @@ fn lower_slot(
     // Retargetable Map/Scan(Fresh): stream the SOAC into the output view.
     if result_soac_is_map_or_scan(graph, slot.source) {
         let elem_ty = slot.ty.elem_type().cloned().expect("Map/Scan slot output is always an array");
-        let view = graph_ops::intern_storage_view(graph, set, binding, elem_ty, None);
+        let view = graph_ops::intern_storage_view(graph, binding, elem_ty, None);
         rewrite_map_scan_to_into(graph, slot.source, view);
         return Ok(());
     }
@@ -209,7 +203,7 @@ fn lower_slot(
         if let Type::Constructed(TypeName::Size(n), _) = s { Some(*n) } else { None }
     });
     if let (Some(n), Some(et)) = (fixed_size, slot.ty.elem_type().cloned()) {
-        let view = graph_ops::intern_storage_view(graph, set, binding, et.clone(), None);
+        let view = graph_ops::intern_storage_view(graph, binding, et.clone(), None);
         for j in 0..n {
             let elem = graph.intern_pure(
                 PureOp::Project { index: j as u32 },
@@ -235,7 +229,7 @@ fn lower_slot(
     }
 
     // Scalar / vector / matrix: store the whole value at index 0.
-    let view = graph_ops::intern_storage_view(graph, set, binding, slot.ty.clone(), None);
+    let view = graph_ops::intern_storage_view(graph, binding, slot.ty.clone(), None);
     let idx0 = graph_ops::intern_u32(graph, 0, None);
     graph_ops::emit_storage_store(
         graph,

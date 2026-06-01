@@ -72,18 +72,17 @@ pub fn intern_binop(
     graph.intern_pure_with_span(PureOp::BinOp(op.into()), smallvec![lhs, rhs], ty, span)
 }
 
-/// `StorageView(Storage(BindingRef::new(set, binding)))` with the default
+/// `StorageView(Storage(br))` with the default
 /// `[0, _w_intrinsic_storage_len(set, binding)]` operand pair.
 pub fn intern_storage_view(
     graph: &mut EGraph,
-    set: u32,
-    binding: u32,
+    br: BindingRef,
     view_ty: Type<TypeName>,
     span: Option<Span>,
 ) -> NodeId {
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
-    let set_nid = intern_u32(graph, set, span);
-    let binding_nid = intern_u32(graph, binding, span);
+    let set_nid = intern_u32(graph, br.set, span);
+    let binding_nid = intern_u32(graph, br.binding, span);
     let storage_len_id = catalog().known().storage_len;
     let len_nid = intern_intrinsic(
         graph,
@@ -94,7 +93,7 @@ pub fn intern_storage_view(
     );
     let zero_nid = intern_u32(graph, 0, span);
     graph.intern_pure_with_span(
-        PureOp::StorageView(PureViewSource::Storage(BindingRef::new(set, binding))),
+        PureOp::StorageView(PureViewSource::Storage(br)),
         smallvec![zero_nid, len_nid],
         view_ty,
         span,
@@ -123,20 +122,19 @@ pub fn emit_workgroup_view(
     )
 }
 
-/// `StorageView(Storage(BindingRef::new(set, binding)))` with caller-supplied
-/// `offset` and `len`. Used to build a chunked sub-view of a larger storage
-/// buffer (phase1 of parallel reduce/scan).
+/// `StorageView(Storage(br))` with caller-supplied `offset` and `len`.
+/// Used to build a chunked sub-view of a larger storage buffer (phase1
+/// of parallel reduce/scan).
 pub fn intern_chunked_storage_view(
     graph: &mut EGraph,
-    set: u32,
-    binding: u32,
+    br: BindingRef,
     offset: NodeId,
     len: NodeId,
     view_ty: Type<TypeName>,
     span: Option<Span>,
 ) -> NodeId {
     graph.intern_pure_with_span(
-        PureOp::StorageView(PureViewSource::Storage(BindingRef::new(set, binding))),
+        PureOp::StorageView(PureViewSource::Storage(br)),
         smallvec![offset, len],
         view_ty,
         span,

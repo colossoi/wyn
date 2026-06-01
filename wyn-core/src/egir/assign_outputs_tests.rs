@@ -56,7 +56,7 @@ fn lower_slot_rejects_unsized_array_without_soac() {
         index: 0,
         ty: unsized_arr_ty,
         source,
-        dest: Dest::StorageView { set: 0, binding: 1 },
+        dest: Dest::StorageView(crate::BindingRef::new(0, 1)),
     };
 
     let err = lower_slot(&mut graph, block, &mut next_effect, &slot)

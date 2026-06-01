@@ -6,6 +6,7 @@
 use polytype::Type;
 
 use super::EntryBuilder;
+use crate::BindingRef;
 use crate::ast::TypeName;
 use crate::builtins::catalog;
 
@@ -33,10 +34,10 @@ fn unsized_arr_view_ty(elem: Type<TypeName>) -> Type<TypeName> {
 #[test]
 fn entry_builder_constructs_phase2_shape() {
     let mut b = EntryBuilder::new_compute("compute_sum_phase2_combine".to_string(), (1, 1, 1));
-    b.declare_intermediate_storage(0, 1, f32_ty());
-    b.declare_output_storage(0, 2, f32_ty());
+    b.declare_intermediate_storage(BindingRef::new(0, 1), f32_ty());
+    b.declare_output_storage(BindingRef::new(0, 2), f32_ty());
 
-    let view = b.emit_storage_view(0, 1, unsized_arr_view_ty(f32_ty()));
+    let view = b.emit_storage_view(BindingRef::new(0, 1), unsized_arr_view_ty(f32_ty()));
     let init = b.emit_constant(crate::ssa::types::ConstantValue::from_f32(0.0), f32_ty());
     let r = b.emit_pending_reduce(
         "op_add".into(),
@@ -98,10 +99,10 @@ fn phase1_transform_reduce_in_place() {
     // builder. The shape mirrors what `from_tlc::convert_entry_point`
     // would produce for `entry sum(xs: []f32) f32 = reduce(+, 0.0, xs)`.
     let mut b = EntryBuilder::new_compute("sum".to_string(), (64, 1, 1));
-    b.declare_intermediate_storage(0, 0, f32_ty()); // input xs
-    b.declare_output_storage(0, 1, f32_ty()); // auto-allocated output
+    b.declare_intermediate_storage(BindingRef::new(0, 0), f32_ty()); // input xs
+    b.declare_output_storage(BindingRef::new(0, 1), f32_ty()); // auto-allocated output
 
-    let xs_view = b.emit_storage_view(0, 0, unsized_arr_view_ty(f32_ty()));
+    let xs_view = b.emit_storage_view(BindingRef::new(0, 0), unsized_arr_view_ty(f32_ty()));
     let init = b.emit_constant(crate::ssa::types::ConstantValue::from_f32(0.0), f32_ty());
     let reduce_result = b.emit_pending_reduce(
         "op_add".into(),

@@ -394,11 +394,7 @@ fn convert_entry_point(
                     texture_binding: None,
                     sampler_binding: None,
                 });
-                view_nids.push(converter.emit_storage_view(
-                    slot.binding.set,
-                    slot.binding.binding,
-                    field_ty.clone(),
-                ));
+                view_nids.push(converter.emit_storage_view(slot.binding, field_ty.clone()));
             }
             let tuple_nid = converter.intern_pure(PureOp::Tuple(view_nids.len()), view_nids, ty.clone());
             converter.locals.insert(*sym, tuple_nid);
@@ -432,7 +428,7 @@ fn convert_entry_point(
         };
 
         if let Some(br) = storage_binding {
-            let view_nid = converter.emit_storage_view(br.set, br.binding, ty.clone());
+            let view_nid = converter.emit_storage_view(br, ty.clone());
             converter.locals.insert(*sym, view_nid);
         }
 
@@ -570,8 +566,8 @@ impl<'a> Converter<'a> {
 
     // -- Entry-point emission helpers (thin delegations to `graph_ops`) --
 
-    fn emit_storage_view(&mut self, set: u32, binding: u32, view_ty: Type<TypeName>) -> NodeId {
-        super::graph_ops::intern_storage_view(&mut self.graph, set, binding, view_ty, self.current_span)
+    fn emit_storage_view(&mut self, binding: BindingRef, view_ty: Type<TypeName>) -> NodeId {
+        super::graph_ops::intern_storage_view(&mut self.graph, binding, view_ty, self.current_span)
     }
 
     fn emit_storage_store(
@@ -983,7 +979,7 @@ impl<'a> Converter<'a> {
             }
         };
         let index_nid = self.convert_term(&args[2])?;
-        let view_nid = self.emit_storage_view(set, binding, ty.clone());
+        let view_nid = self.emit_storage_view(BindingRef::new(set, binding), ty.clone());
         let place_nid = self.intern_pure(PureOp::ViewIndex, smallvec![view_nid, index_nid], ty.clone());
         let result_nid = self.graph.alloc_side_effect_result(ty.clone());
         let effect_in = EffectToken(0);
@@ -1024,7 +1020,7 @@ impl<'a> Converter<'a> {
         let index_nid = self.convert_term(&args[2])?;
         let value_nid = self.convert_term(&args[3])?;
         let value_ty = args[3].ty.clone();
-        let view_nid = self.emit_storage_view(set, binding, value_ty.clone());
+        let view_nid = self.emit_storage_view(BindingRef::new(set, binding), value_ty.clone());
         self.emit_storage_store(view_nid, index_nid, value_nid, value_ty);
         let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
         Ok(self.intern_pure(PureOp::Unit, smallvec![], unit_ty))

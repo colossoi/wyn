@@ -268,8 +268,7 @@ pub fn phase1_transform_reduce(
     // 3. Build a new chunked StorageView with [chunk_start, chunk_len].
     let chunked_view = graph_ops::intern_chunked_storage_view(
         &mut entry.graph,
-        view_storage.set,
-        view_storage.binding,
+        view_storage,
         chunk_start,
         chunk_len,
         input_view_ty,
@@ -292,13 +291,7 @@ pub fn phase1_transform_reduce(
             Type::Constructed(TypeName::ArrayVariantView, vec![]),
         ],
     );
-    let partials_view = graph_ops::intern_storage_view(
-        &mut entry.graph,
-        partials_binding.set,
-        partials_binding.binding,
-        arr_ty,
-        None,
-    );
+    let partials_view = graph_ops::intern_storage_view(&mut entry.graph, partials_binding, arr_ty, None);
     let new_place = entry.graph.intern_pure(
         super::types::PureOp::ViewIndex,
         smallvec![partials_view, tid],
@@ -351,8 +344,8 @@ pub fn synthesize_phase2_reduce(
 ) -> EgirEntry {
     use super::builder::EntryBuilder;
     let mut b = EntryBuilder::new_compute(format!("{}_phase2_combine", entry_name), (PHASE2_WIDTH, 1, 1));
-    b.declare_intermediate_storage(partials_binding.set, partials_binding.binding, elem_ty.clone());
-    b.declare_output_storage(result_binding.set, result_binding.binding, elem_ty.clone());
+    b.declare_intermediate_storage(partials_binding, elem_ty.clone());
+    b.declare_output_storage(result_binding, elem_ty.clone());
 
     let init_nid = b.emit_constant(init, elem_ty.clone());
     build_tree_reduce_phase2(
@@ -419,21 +412,9 @@ fn build_tree_reduce_phase2(
         u32_ty.clone(),
         None,
     );
-    let partials_view = graph_ops::intern_storage_view(
-        graph,
-        partials_binding.set,
-        partials_binding.binding,
-        view_arr_ty.clone(),
-        None,
-    );
+    let partials_view = graph_ops::intern_storage_view(graph, partials_binding, view_arr_ty.clone(), None);
     let len = emit_storage_len(graph, partials_binding.set, partials_binding.binding);
-    let result_view = graph_ops::intern_storage_view(
-        graph,
-        result_binding.set,
-        result_binding.binding,
-        view_arr_ty.clone(),
-        None,
-    );
+    let result_view = graph_ops::intern_storage_view(graph, result_binding, view_arr_ty.clone(), None);
     // Workgroup-shared `array<elem, W>` (id 0 within this entry).
     let shared_view = graph_ops::emit_workgroup_view(graph, 0, w, view_arr_ty.clone(), None);
     let w_nid = graph_ops::intern_u32(graph, w, None);
@@ -844,8 +825,7 @@ pub fn phase1_transform_redomap(
         let chunked = if let Some(br) = graph_ops::extract_storage_view_source(&entry.graph, view_nid) {
             graph_ops::intern_chunked_storage_view(
                 &mut entry.graph,
-                br.set,
-                br.binding,
+                br,
                 chunk_start,
                 chunk_len,
                 view_ty,
@@ -890,13 +870,7 @@ pub fn phase1_transform_redomap(
             Type::Constructed(TypeName::ArrayVariantView, vec![]),
         ],
     );
-    let partials_view = graph_ops::intern_storage_view(
-        &mut entry.graph,
-        partials_binding.set,
-        partials_binding.binding,
-        arr_ty,
-        None,
-    );
+    let partials_view = graph_ops::intern_storage_view(&mut entry.graph, partials_binding, arr_ty, None);
     let new_place = entry.graph.intern_pure(
         super::types::PureOp::ViewIndex,
         smallvec![partials_view, tid],
@@ -979,8 +953,8 @@ pub fn synthesize_phase2_reduce_cloning_ne(
 ) -> Result<EgirEntry, String> {
     use super::builder::EntryBuilder;
     let mut b = EntryBuilder::new_compute(format!("{}_phase2_combine", entry_name), (PHASE2_WIDTH, 1, 1));
-    b.declare_intermediate_storage(partials_binding.set, partials_binding.binding, elem_ty.clone());
-    b.declare_output_storage(result_binding.set, result_binding.binding, elem_ty.clone());
+    b.declare_intermediate_storage(partials_binding, elem_ty.clone());
+    b.declare_output_storage(result_binding, elem_ty.clone());
 
     let init_nid = graph_ops::clone_pure_subgraph(phase1_graph, b.graph_mut(), phase1_ne_nid)?;
     build_tree_reduce_phase2(
@@ -1242,8 +1216,7 @@ pub fn phase1_transform_scan(
 
     let chunked_input = graph_ops::intern_chunked_storage_view(
         &mut entry.graph,
-        input_storage.set,
-        input_storage.binding,
+        input_storage,
         chunk_start,
         chunk_len,
         input_view_ty.clone(),
@@ -1270,8 +1243,7 @@ pub fn phase1_transform_scan(
             .ok_or_else(|| "Scan output_view is not a StorageView".to_string())?;
         let chunked_output = graph_ops::intern_chunked_storage_view(
             &mut entry.graph,
-            output_storage.set,
-            output_storage.binding,
+            output_storage,
             chunk_start,
             chunk_len,
             output_view_ty,
@@ -1315,13 +1287,8 @@ pub fn phase1_transform_scan(
                 Type::Constructed(TypeName::ArrayVariantView, vec![]),
             ],
         );
-        let block_sums_view = graph_ops::intern_storage_view(
-            &mut entry.graph,
-            block_sums_binding.set,
-            block_sums_binding.binding,
-            arr_ty,
-            None,
-        );
+        let block_sums_view =
+            graph_ops::intern_storage_view(&mut entry.graph, block_sums_binding, arr_ty, None);
         graph_ops::emit_storage_store(
             &mut entry.graph,
             scan_block,
@@ -1358,16 +1325,8 @@ pub fn synthesize_phase2_scan(
 ) -> Result<EgirEntry, String> {
     use super::builder::EntryBuilder;
     let mut b = EntryBuilder::new_compute(format!("{}_phase2_scan_sums", entry_name), (1, 1, 1));
-    b.declare_intermediate_storage(
-        block_sums_binding.set,
-        block_sums_binding.binding,
-        elem_ty.clone(),
-    );
-    b.declare_intermediate_storage(
-        block_offsets_binding.set,
-        block_offsets_binding.binding,
-        elem_ty.clone(),
-    );
+    b.declare_intermediate_storage(block_sums_binding, elem_ty.clone());
+    b.declare_intermediate_storage(block_offsets_binding, elem_ty.clone());
 
     let arr_ty = Type::Constructed(
         TypeName::Array,
@@ -1377,13 +1336,8 @@ pub fn synthesize_phase2_scan(
             Type::Constructed(TypeName::ArrayVariantView, vec![]),
         ],
     );
-    let block_sums_view =
-        b.emit_storage_view(block_sums_binding.set, block_sums_binding.binding, arr_ty.clone());
-    let block_offsets_view = b.emit_storage_view(
-        block_offsets_binding.set,
-        block_offsets_binding.binding,
-        arr_ty.clone(),
-    );
+    let block_sums_view = b.emit_storage_view(block_sums_binding, arr_ty.clone());
+    let block_offsets_view = b.emit_storage_view(block_offsets_binding, arr_ty.clone());
     let init_nid = graph_ops::clone_pure_subgraph(phase1_graph, b.graph_mut(), phase1_ne_nid)?;
     b.emit_pending_scan_into(
         op_func,
@@ -1419,12 +1373,8 @@ pub fn synthesize_phase3_scan(
         format!("{}_phase3_add_offsets", entry_name),
         (total_threads, 1, 1),
     );
-    b.declare_output_storage(output_binding.set, output_binding.binding, elem_ty.clone());
-    b.declare_intermediate_storage(
-        block_offsets_binding.set,
-        block_offsets_binding.binding,
-        elem_ty.clone(),
-    );
+    b.declare_output_storage(output_binding, elem_ty.clone());
+    b.declare_intermediate_storage(block_offsets_binding, elem_ty.clone());
 
     let arr_ty = Type::Constructed(
         TypeName::Array,
@@ -1434,12 +1384,8 @@ pub fn synthesize_phase3_scan(
             Type::Constructed(TypeName::ArrayVariantView, vec![]),
         ],
     );
-    let _output_view = b.emit_storage_view(output_binding.set, output_binding.binding, arr_ty.clone());
-    let block_offsets_view = b.emit_storage_view(
-        block_offsets_binding.set,
-        block_offsets_binding.binding,
-        arr_ty.clone(),
-    );
+    let _output_view = b.emit_storage_view(output_binding, arr_ty.clone());
+    let block_offsets_view = b.emit_storage_view(block_offsets_binding, arr_ty.clone());
 
     // tid, chunk_start, chunk_len from output length.
     let output_len = {
@@ -1467,8 +1413,7 @@ pub fn synthesize_phase3_scan(
 
     let chunked_output = graph_ops::intern_chunked_storage_view(
         b.graph_mut(),
-        output_binding.set,
-        output_binding.binding,
+        output_binding,
         chunk_start,
         chunk_len,
         arr_ty.clone(),

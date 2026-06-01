@@ -90,18 +90,18 @@ impl EntryBuilder {
 
     // ---- Storage interface declarations ----------------------------------
 
-    pub fn declare_intermediate_storage(&mut self, set: u32, binding: u32, elem_ty: Type<TypeName>) {
+    pub fn declare_intermediate_storage(&mut self, binding: BindingRef, elem_ty: Type<TypeName>) {
         self.storage_bindings.push(interface::StorageBindingDecl {
-            binding: BindingRef::new(set, binding),
+            binding,
             role: interface::StorageRole::Intermediate,
             elem_ty,
             length: None,
         });
     }
 
-    pub fn declare_output_storage(&mut self, set: u32, binding: u32, elem_ty: Type<TypeName>) {
+    pub fn declare_output_storage(&mut self, binding: BindingRef, elem_ty: Type<TypeName>) {
         self.storage_bindings.push(interface::StorageBindingDecl {
-            binding: BindingRef::new(set, binding),
+            binding,
             role: interface::StorageRole::Output,
             elem_ty,
             length: None,
@@ -149,9 +149,9 @@ impl EntryBuilder {
         graph_ops::intern_constant(&mut self.graph, value, ty)
     }
 
-    pub fn emit_storage_view(&mut self, set: u32, binding: u32, view_ty: Type<TypeName>) -> NodeId {
+    pub fn emit_storage_view(&mut self, binding: BindingRef, view_ty: Type<TypeName>) -> NodeId {
         let span = self.span();
-        graph_ops::intern_storage_view(&mut self.graph, set, binding, view_ty, span)
+        graph_ops::intern_storage_view(&mut self.graph, binding, view_ty, span)
     }
 
     /// Emit a `PendingSoac::Reduce` side-effect. `soac_expand` will lower
@@ -298,7 +298,7 @@ impl EntryBuilder {
                 Type::Constructed(TypeName::ArrayVariantView, vec![]),
             ],
         );
-        let view_nid = self.emit_storage_view(set, binding, arr_ty);
+        let view_nid = self.emit_storage_view(BindingRef::new(set, binding), arr_ty);
         let span = self.span();
         graph_ops::emit_storage_store(
             &mut self.graph,
