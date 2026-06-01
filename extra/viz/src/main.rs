@@ -277,8 +277,8 @@ enum Command {
         #[arg(long, value_parser = parse_size, default_value = "64x64")]
         grid: (u32, u32),
         /// Initial board state: a built-in name (`glider`, `blinker`,
-        /// `beacon`, `pulsar`, `random`) or a path to a `.rle`,
-        /// `.cells`, or `.bin` file. Default: `random` with a
+        /// `beacon`, `pulsar`, `glidergun`, `random`) or a path to a
+        /// `.rle`, `.cells`, or `.bin` file. Default: `random` with a
         /// time-based seed.
         #[arg(long, default_value = "random")]
         pattern: String,

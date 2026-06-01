@@ -1,7 +1,7 @@
 //! Initial-board sources for `viz simulate`. Built-in named patterns
-//! (glider, blinker, beacon, pulsar, random), Conway-RLE files
-//! (`.rle`), plaintext (`.cells`), and the existing flat-i32 `.bin`
-//! convention used by the rest of viz.
+//! (glider, blinker, beacon, pulsar, glidergun, random), Conway-RLE
+//! files (`.rle`), plaintext (`.cells`), and the existing flat-i32
+//! `.bin` convention used by the rest of viz.
 
 use std::path::PathBuf;
 
@@ -12,7 +12,7 @@ use anyhow::{Context, Result, anyhow, bail};
 #[derive(Debug, Clone)]
 pub enum Pattern {
     /// Named built-in pattern (`glider`, `blinker`, `beacon`, `pulsar`,
-    /// or `random`).
+    /// `glidergun`, or `random`).
     Builtin(String),
     /// A pattern file — dispatched by extension (`.rle`, `.cells`,
     /// `.bin`).
@@ -49,6 +49,7 @@ pub fn build_initial_board(pattern: &Pattern, seed: Option<u64>, grid: (u32, u32
             "blinker" => Ok(centered(w, h, BLINKER, 3, 1)),
             "beacon" => Ok(centered(w, h, BEACON, 4, 4)),
             "pulsar" => Ok(centered(w, h, PULSAR, 13, 13)),
+            "glidergun" => Ok(centered(w, h, GLIDERGUN, 36, 9)),
             "random" => Ok(random_board(
                 seed.unwrap_or_else(time_seed),
                 w,
@@ -56,7 +57,8 @@ pub fn build_initial_board(pattern: &Pattern, seed: Option<u64>, grid: (u32, u32
                 /* density = */ 0.30,
             )),
             other => Err(anyhow!(
-                "unknown built-in pattern {:?}; known: glider, blinker, beacon, pulsar, random",
+                "unknown built-in pattern {:?}; \
+                 known: glider, blinker, beacon, pulsar, glidergun, random",
                 other
             )),
         },
@@ -88,6 +90,58 @@ const GLIDER: PatternCoords = &[(1, 0), (2, 1), (0, 2), (1, 2), (2, 2)];
 const BLINKER: PatternCoords = &[(0, 0), (1, 0), (2, 0)];
 
 const BEACON: PatternCoords = &[(0, 0), (1, 0), (0, 1), (3, 2), (2, 3), (3, 3)];
+
+// Gosper Glider Gun. 36×9 bounding box, period 30; emits gliders
+// indefinitely from the right edge. The first known finite Life pattern
+// with unbounded growth (Gosper, 1970). Centered on a `--grid 64x64`
+// it has plenty of room to fire.
+const GLIDERGUN: PatternCoords = &[
+    // Row 0
+    (24, 0),
+    // Row 1
+    (22, 1),
+    (24, 1),
+    // Row 2 — left block, mid pair, right block
+    (12, 2),
+    (13, 2),
+    (20, 2),
+    (21, 2),
+    (34, 2),
+    (35, 2),
+    // Row 3
+    (11, 3),
+    (15, 3),
+    (20, 3),
+    (21, 3),
+    (34, 3),
+    (35, 3),
+    // Row 4 — left block + queen-bee shuttle row
+    (0, 4),
+    (1, 4),
+    (10, 4),
+    (16, 4),
+    (20, 4),
+    (21, 4),
+    // Row 5
+    (0, 5),
+    (1, 5),
+    (10, 5),
+    (14, 5),
+    (16, 5),
+    (17, 5),
+    (22, 5),
+    (24, 5),
+    // Row 6
+    (10, 6),
+    (16, 6),
+    (24, 6),
+    // Row 7
+    (11, 7),
+    (15, 7),
+    // Row 8
+    (12, 8),
+    (13, 8),
+];
 
 // 13×13 pulsar, period 3. Coordinates taken from Conwaylife.com.
 const PULSAR: PatternCoords = &[
@@ -370,6 +424,16 @@ mod tests {
         let mut actual = alive;
         actual.sort();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn glidergun_has_36_alive_cells() {
+        // The Gosper Glider Gun is famously 36 cells. Place it on a 64×64
+        // grid (centered) and verify the count survives the bounding-box
+        // crop in `centered`.
+        let board = build_initial_board(&Pattern::Builtin("glidergun".into()), None, (64, 64)).unwrap();
+        let alive = board.iter().filter(|&&c| c == 1).count();
+        assert_eq!(alive, 36, "Gosper Glider Gun should have 36 alive cells");
     }
 
     #[test]
