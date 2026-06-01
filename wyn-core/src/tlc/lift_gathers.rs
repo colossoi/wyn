@@ -269,6 +269,7 @@ fn try_lift(
         binding,
         length.clone(),
         program,
+        &mut term_ids,
     );
     // The consumer *reads* the gather buffer: an Input-role decl carrying the
     // sizing policy. `from_tlc` emits any length-bearing storage binding as a
@@ -353,6 +354,7 @@ fn build_gather_prepass(
     binding: (u32, u32),
     length: Option<crate::pipeline_descriptor::BufferLen>,
     program: &mut Program,
+    term_ids: &mut TermIdSource,
 ) -> Def {
     let name = format!("{}_gather_{}", entry_name, gather_idx);
     let elem_ty = crate::types::array_elem(&result_ty)
@@ -373,6 +375,7 @@ fn build_gather_prepass(
         &uniform_attrs,
         storage_bindings,
         program,
+        term_ids,
     )
 }
 

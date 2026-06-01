@@ -17,7 +17,9 @@ use crate::{BindingRef, SymbolId, SymbolTable};
 use polytype::Type;
 use std::collections::{HashMap, HashSet};
 
-use super::{ArrayExpr, Def, DefMeta, Lambda, Program, SoacDestination, SoacOp, Term, TermId, TermKind};
+use super::{
+    ArrayExpr, Def, DefMeta, Lambda, Program, SoacDestination, SoacOp, Term, TermIdSource, TermKind,
+};
 
 // =============================================================================
 // Analysis types
@@ -325,8 +327,12 @@ fn compute_required_params(
         bound.insert(*name);
     }
     // Wrap the SOAC in a throwaway Term so we can reuse the same walker.
+    // `collect_free_vars` reads the term's `kind` and structure but never
+    // queries the id; a local TermIdSource keeps the "no placeholders"
+    // invariant without threading a source down through the analysis API.
+    let mut throwaway_ids = TermIdSource::new();
     let soac_term = Term {
-        id: TermId(0),
+        id: throwaway_ids.next_id(),
         ty: Type::Variable(0),
         span: ast::Span::new(0, 0, 0, 0),
         kind: TermKind::Soac(soac.original.clone()),
@@ -432,24 +438,32 @@ fn analyze_soac(
     })
 }
 
-fn binop(op: &str, lhs: Term, rhs: Term, ty: Type<TypeName>, span: ast::Span) -> Term {
+fn binop(
+    op: &str,
+    lhs: Term,
+    rhs: Term,
+    ty: Type<TypeName>,
+    span: ast::Span,
+    term_ids: &mut TermIdSource,
+) -> Term {
+    let func = Term {
+        id: term_ids.next_id(),
+        ty: Type::Constructed(
+            TypeName::Arrow,
+            vec![
+                ty.clone(),
+                Type::Constructed(TypeName::Arrow, vec![ty.clone(), ty.clone()]),
+            ],
+        ),
+        span,
+        kind: TermKind::BinOp(ast::BinaryOp { op: op.to_string() }),
+    };
     Term {
-        id: TermId(0),
-        ty: ty.clone(),
+        id: term_ids.next_id(),
+        ty,
         span,
         kind: TermKind::App {
-            func: Box::new(Term {
-                id: TermId(0),
-                ty: Type::Constructed(
-                    TypeName::Arrow,
-                    vec![
-                        ty.clone(),
-                        Type::Constructed(TypeName::Arrow, vec![ty.clone(), ty.clone()]),
-                    ],
-                ),
-                span,
-                kind: TermKind::BinOp(ast::BinaryOp { op: op.to_string() }),
-            }),
+            func: Box::new(func),
             args: vec![lhs, rhs],
         },
     }
@@ -776,6 +790,7 @@ fn lift_graphical_invariant_soacs(
     program: &mut Program,
     next_binding: &mut u32,
     prepass_result_bindings: &mut HashMap<SymbolId, BindingRef>,
+    term_ids: &mut TermIdSource,
 ) {
     use std::collections::HashSet;
 
@@ -836,6 +851,7 @@ fn lift_graphical_invariant_soacs(
             &mut new_defs,
             prepass_result_bindings,
             program,
+            term_ids,
         );
 
         program.defs[idx].body = new_body;
@@ -875,6 +891,7 @@ fn lift_in_term(
     new_defs: &mut Vec<Def>,
     prepass_result_bindings: &mut HashMap<SymbolId, BindingRef>,
     program: &mut Program,
+    term_ids: &mut TermIdSource,
 ) -> Term {
     match term.kind {
         TermKind::Lambda(lam) => {
@@ -889,6 +906,7 @@ fn lift_in_term(
                 new_defs,
                 prepass_result_bindings,
                 program,
+                term_ids,
             );
             Term {
                 id: term.id,
@@ -918,6 +936,7 @@ fn lift_in_term(
                 new_defs,
                 prepass_result_bindings,
                 program,
+                term_ids,
             );
             let new_body = lift_in_term(
                 *body,
@@ -929,6 +948,7 @@ fn lift_in_term(
                 new_defs,
                 prepass_result_bindings,
                 program,
+                term_ids,
             );
             Term {
                 id: term.id,
@@ -961,6 +981,7 @@ fn maybe_hoist(
     new_defs: &mut Vec<Def>,
     prepass_result_bindings: &mut HashMap<SymbolId, BindingRef>,
     program: &mut Program,
+    term_ids: &mut TermIdSource,
 ) -> Term {
     // TODO: extend to array-result SOACs (Scan, Map). A pre-pass
     // emitting an array would need to write N slots to storage, the
@@ -1006,7 +1027,14 @@ fn maybe_hoist(
 
     let span = rhs.span;
     let prepass_name = format!("{}_prepass_{}", entry_name, added_decls.len());
-    let prepass_def = build_prepass_def(&prepass_name, rhs, name_ty.clone(), &captured_uniforms, program);
+    let prepass_def = build_prepass_def(
+        &prepass_name,
+        rhs,
+        name_ty.clone(),
+        &captured_uniforms,
+        program,
+        term_ids,
+    );
     prepass_result_bindings.insert(prepass_def.name, binding);
     new_defs.push(prepass_def);
 
@@ -1021,12 +1049,13 @@ fn maybe_hoist(
     intrinsic_term_by_id(
         catalog().known().storage_index,
         vec![
-            uint_lit(binding.set as u64, span),
-            uint_lit(binding.binding as u64, span),
-            uint_lit(0, span),
+            uint_lit(binding.set as u64, span, term_ids),
+            uint_lit(binding.binding as u64, span, term_ids),
+            uint_lit(0, span, term_ids),
         ],
         name_ty.clone(),
         span,
+        term_ids,
     )
 }
 
@@ -1193,6 +1222,7 @@ fn build_prepass_def(
     elem_ty: Type<TypeName>,
     captured_uniforms: &[(SymbolId, Type<TypeName>, BindingRef)],
     program: &mut Program,
+    term_ids: &mut TermIdSource,
 ) -> Def {
     let required_params: Vec<(SymbolId, Type<TypeName>)> =
         captured_uniforms.iter().map(|(s, ty, _)| (*s, ty.clone())).collect();
@@ -1206,6 +1236,7 @@ fn build_prepass_def(
         &uniform_attrs,
         Vec::new(),
         program,
+        term_ids,
     )
 }
 
@@ -1233,6 +1264,11 @@ pub fn run(mut program: Program, disable: bool) -> crate::error::Result<Parallel
     let mut next_binding: u32 =
         collect_all_used_bindings(&program).iter().map(|br| br.binding + 1).max().unwrap_or(0);
 
+    // Pass-local TermIdSource. TLC TermIds on synthesized terms aren't
+    // load-bearing past parallelize, but every synthesized term still
+    // gets a real ID (no `TermId(0)` placeholder).
+    let mut term_ids = TermIdSource::new();
+
     // Hoist invariant SOACs out of graphical entry bodies into generated
     // compute pre-pass entries. Each pre-pass writes its SOAC result to
     // a fresh storage buffer; the graphical entry's body is rewritten to
@@ -1245,7 +1281,12 @@ pub fn run(mut program: Program, disable: bool) -> crate::error::Result<Parallel
     // `make_two_phase_plan` consults this so phase 2's result store goes
     // exactly there (instead of a freshly-allocated binding).
     let mut prepass_result_bindings: HashMap<SymbolId, BindingRef> = HashMap::new();
-    lift_graphical_invariant_soacs(&mut program, &mut next_binding, &mut prepass_result_bindings);
+    lift_graphical_invariant_soacs(
+        &mut program,
+        &mut next_binding,
+        &mut prepass_result_bindings,
+        &mut term_ids,
+    );
 
     // Gather pre-passes (from the pre-defunc `lift_gathers`) pin their result
     // by declaring it as an Output-role storage binding on the entry. Fold
@@ -1307,7 +1348,14 @@ pub fn run(mut program: Program, disable: bool) -> crate::error::Result<Parallel
     for (_sym, analysis) in &analyses {
         let entry_name = crate::symbol_name_or_bug(&program.symbols, analysis.def_name).to_string();
         let forced = prepass_result_bindings.get(&analysis.def_name).copied();
-        let plan = make_lowering_plan(analysis, &entry_name, next_binding, forced, &mut program);
+        let plan = make_lowering_plan(
+            analysis,
+            &entry_name,
+            next_binding,
+            forced,
+            &mut program,
+            &mut term_ids,
+        );
         next_binding += plan.extra_bindings_used;
         if let Some(removed) = plan.removed_entry {
             removed_entries.push(removed);
@@ -1373,6 +1421,7 @@ fn make_lowering_plan(
     next_binding: u32,
     forced_result_binding: Option<BindingRef>,
     program: &mut Program,
+    term_ids: &mut TermIdSource,
 ) -> LoweringPlan {
     let sizing = PipelineSizing::for_analyzed_entry(program, analysis);
     match &analysis.soac.original {
@@ -1398,6 +1447,7 @@ fn make_lowering_plan(
             forced_result_binding,
             program,
             sizing,
+            term_ids,
         ),
         SoacOp::Redomap { reduce_op, ne, .. } => make_two_phase_plan(
             analysis,
@@ -1408,6 +1458,7 @@ fn make_lowering_plan(
             forced_result_binding,
             program,
             sizing,
+            term_ids,
         ),
         SoacOp::Scan { op, ne, .. } => make_scan_plan(
             analysis,
@@ -1478,6 +1529,7 @@ fn make_two_phase_plan(
     forced_result_binding: Option<BindingRef>,
     program: &mut Program,
     sizing: PipelineSizing,
+    term_ids: &mut TermIdSource,
 ) -> LoweringPlan {
     // Partials always consumes one fresh binding. When the caller has
     // pre-allocated a result binding (graphical-entry lift), use it; the
@@ -1581,6 +1633,7 @@ fn make_two_phase_plan(
         result_binding,
         program,
         sizing,
+        term_ids,
     );
     LoweringPlan {
         removed_entry: Some(analysis.def_name),
@@ -1916,6 +1969,7 @@ fn build_two_phase_entries(
     result_binding: BindingRef,
     program: &mut Program,
     sizing: PipelineSizing,
+    term_ids: &mut TermIdSource,
 ) -> (Vec<Def>, Pipeline) {
     let workgroup = sizing.workgroup;
     let span = ne.span;
@@ -1932,6 +1986,7 @@ fn build_two_phase_entries(
         program,
         Some(partials_binding),
         workgroup.0,
+        term_ids,
     );
     // Phase 1 storage interface: reads whatever the input SOAC declares
     // (Input role), writes `partials` at `tid` (Intermediate). Input
@@ -1955,14 +2010,15 @@ fn build_two_phase_entries(
         &[],
         phase1_bindings,
         program,
+        term_ids,
     );
 
     // Phase 2: reduce over the partials buffer, write result to result_binding[0].
     let phase2_name = format!("{}_phase2_combine", entry_name);
     let partials_input = ArrayExpr::StorageView(crate::tlc::StorageView {
         binding: partials_binding,
-        offset: Box::new(uint_lit(0, span)),
-        len: Box::new(uint_lit(workgroup.0 as u64, span)),
+        offset: Box::new(uint_lit(0, span, term_ids)),
+        len: Box::new(uint_lit(workgroup.0 as u64, span, term_ids)),
         elem_ty: elem_type.clone(),
     });
     let phase2_soac = SoacOp::Reduce {
@@ -1970,20 +2026,29 @@ fn build_two_phase_entries(
         ne: Box::new(ne.clone()),
         input: partials_input,
     };
-    let phase2_soac_term = soac_term(phase2_soac, elem_type.clone(), span);
+    let phase2_soac_term = soac_term(phase2_soac, elem_type.clone(), span, term_ids);
     let r_sym = program.symbols.alloc("_par_out".into());
+    let r_var = var_term(r_sym, elem_type.clone(), span, term_ids);
     let phase2_store = intrinsic_term_by_id(
         catalog().known().storage_store,
         vec![
-            uint_lit(result_binding.set as u64, span),
-            uint_lit(result_binding.binding as u64, span),
-            uint_lit(0, span),
-            var_term(r_sym, elem_type.clone(), span),
+            uint_lit(result_binding.set as u64, span, term_ids),
+            uint_lit(result_binding.binding as u64, span, term_ids),
+            uint_lit(0, span, term_ids),
+            r_var,
         ],
         unit_ty.clone(),
         span,
+        term_ids,
     );
-    let phase2_body = let_term(r_sym, elem_type.clone(), phase2_soac_term, phase2_store, span);
+    let phase2_body = let_term(
+        r_sym,
+        elem_type.clone(),
+        phase2_soac_term,
+        phase2_store,
+        span,
+        term_ids,
+    );
     // Phase 2 storage interface: reads `partials` (as an Intermediate) and
     // writes the final user-visible `result`.
     let phase2_bindings = vec![
@@ -2008,6 +2073,7 @@ fn build_two_phase_entries(
         &[],
         phase2_bindings,
         program,
+        term_ids,
     );
 
     let mut all_bindings = collect_soac_bindings(&analysis.soac);
@@ -2095,14 +2161,14 @@ impl ChunkArithmetic {
     /// The raw u32 thread-id. Use for storage-op indices (`partials[tid]`,
     /// `block_sums[tid]`, etc.) since `_w_intrinsic_storage_store`'s
     /// index arg is u32.
-    fn tid_u32(&self, span: ast::Span) -> Term {
-        var_term(self.tid_sym, u32_ty(), span)
+    fn tid_u32(&self, span: ast::Span, term_ids: &mut TermIdSource) -> Term {
+        var_term(self.tid_sym, u32_ty(), span, term_ids)
     }
-    fn chunk_start(&self, span: ast::Span) -> Term {
-        var_term(self.chunk_start_sym, self.index_ty.clone(), span)
+    fn chunk_start(&self, span: ast::Span, term_ids: &mut TermIdSource) -> Term {
+        var_term(self.chunk_start_sym, self.index_ty.clone(), span, term_ids)
     }
-    fn chunk_len(&self, span: ast::Span) -> Term {
-        var_term(self.chunk_len_sym, self.index_ty.clone(), span)
+    fn chunk_len(&self, span: ast::Span, term_ids: &mut TermIdSource) -> Term {
+        var_term(self.chunk_len_sym, self.index_ty.clone(), span, term_ids)
     }
 
     /// Wrap `body` with:
@@ -2118,86 +2184,116 @@ impl ChunkArithmetic {
     /// `i32.u32` bitcast. `input_len_term` must already be typed as
     /// `self.index_ty`; callers derive it from the SOAC input's length
     /// term.
-    fn wrap(&self, body: Term, input_len_term: Term, span: ast::Span, program: &mut Program) -> Term {
+    fn wrap(
+        &self,
+        body: Term,
+        input_len_term: Term,
+        span: ast::Span,
+        program: &mut Program,
+        term_ids: &mut TermIdSource,
+    ) -> Term {
         let ity = self.index_ty.clone();
         let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
-        let one_lit = int_lit_of(1, &ity, span);
-        let total_lit = int_lit_of(self.total_threads as i64, &ity, span);
+        let one_lit = int_lit_of(1, &ity, span, term_ids);
+        let total_lit = int_lit_of(self.total_threads as i64, &ity, span, term_ids);
 
         let len_minus_start = binop(
             "-",
-            var_term(self.input_len_sym, ity.clone(), span),
-            var_term(self.chunk_start_sym, ity.clone(), span),
+            var_term(self.input_len_sym, ity.clone(), span, term_ids),
+            var_term(self.chunk_start_sym, ity.clone(), span, term_ids),
             ity.clone(),
             span,
+            term_ids,
         );
         let cond = binop(
             "<",
-            var_term(self.chunk_size_sym, ity.clone(), span),
+            var_term(self.chunk_size_sym, ity.clone(), span, term_ids),
             len_minus_start.clone(),
             bool_ty,
             span,
+            term_ids,
         );
+        let then_branch = var_term(self.chunk_size_sym, ity.clone(), span, term_ids);
         let min_expr = Term {
-            id: TermId(0),
+            id: term_ids.next_id(),
             ty: ity.clone(),
             span,
             kind: TermKind::If {
                 cond: Box::new(cond),
-                then_branch: Box::new(var_term(self.chunk_size_sym, ity.clone(), span)),
+                then_branch: Box::new(then_branch),
                 else_branch: Box::new(len_minus_start),
             },
         };
-        let body = let_term(self.chunk_len_sym, ity.clone(), min_expr, body, span);
+        let body = let_term(self.chunk_len_sym, ity.clone(), min_expr, body, span, term_ids);
 
         let tid_as_idx = if ity == u32_ty() {
-            var_term(self.tid_sym, u32_ty(), span)
+            var_term(self.tid_sym, u32_ty(), span, term_ids)
         } else {
-            intrinsic_term(
-                "i32.u32",
-                vec![var_term(self.tid_sym, u32_ty(), span)],
-                ity.clone(),
-                span,
-                program,
-            )
+            let tid_var = var_term(self.tid_sym, u32_ty(), span, term_ids);
+            intrinsic_term("i32.u32", vec![tid_var], ity.clone(), span, program, term_ids)
         };
         let chunk_start_rhs = binop(
             "*",
             tid_as_idx,
-            var_term(self.chunk_size_sym, ity.clone(), span),
+            var_term(self.chunk_size_sym, ity.clone(), span, term_ids),
             ity.clone(),
             span,
+            term_ids,
         );
-        let body = let_term(self.chunk_start_sym, ity.clone(), chunk_start_rhs, body, span);
+        let body = let_term(
+            self.chunk_start_sym,
+            ity.clone(),
+            chunk_start_rhs,
+            body,
+            span,
+            term_ids,
+        );
 
         let total_minus_1 = binop(
             "-",
-            var_term(self.total_sym, ity.clone(), span),
+            var_term(self.total_sym, ity.clone(), span, term_ids),
             one_lit,
             ity.clone(),
             span,
+            term_ids,
         );
         let len_plus = binop(
             "+",
-            var_term(self.input_len_sym, ity.clone(), span),
+            var_term(self.input_len_sym, ity.clone(), span, term_ids),
             total_minus_1,
             ity.clone(),
             span,
+            term_ids,
         );
         let chunk_size_rhs = binop(
             "/",
             len_plus,
-            var_term(self.total_sym, ity.clone(), span),
+            var_term(self.total_sym, ity.clone(), span, term_ids),
             ity.clone(),
             span,
+            term_ids,
         );
-        let body = let_term(self.chunk_size_sym, ity.clone(), chunk_size_rhs, body, span);
+        let body = let_term(
+            self.chunk_size_sym,
+            ity.clone(),
+            chunk_size_rhs,
+            body,
+            span,
+            term_ids,
+        );
 
-        let body = let_term(self.input_len_sym, ity.clone(), input_len_term, body, span);
-        let body = let_term(self.total_sym, ity, total_lit, body, span);
+        let body = let_term(
+            self.input_len_sym,
+            ity.clone(),
+            input_len_term,
+            body,
+            span,
+            term_ids,
+        );
+        let body = let_term(self.total_sym, ity, total_lit, body, span, term_ids);
 
-        let tid_rhs = intrinsic_term_by_id(catalog().known().thread_id, vec![], u32_ty(), span);
-        let_term(self.tid_sym, u32_ty(), tid_rhs, body, span)
+        let tid_rhs = intrinsic_term_by_id(catalog().known().thread_id, vec![], u32_ty(), span, term_ids);
+        let_term(self.tid_sym, u32_ty(), tid_rhs, body, span, term_ids)
     }
 }
 
@@ -2224,9 +2320,9 @@ fn soac_input_index_ty(soac: &SoacOp) -> Type<TypeName> {
 /// Integer literal term typed as `ty`. `ty` is expected to be one of
 /// `Int(32)` / `UInt(32)`; other widths/types aren't used by
 /// `ChunkArithmetic` today.
-fn int_lit_of(value: i64, ty: &Type<TypeName>, span: ast::Span) -> Term {
+fn int_lit_of(value: i64, ty: &Type<TypeName>, span: ast::Span, term_ids: &mut TermIdSource) -> Term {
     Term {
-        id: TermId(0),
+        id: term_ids.next_id(),
         ty: ty.clone(),
         span,
         kind: TermKind::IntLit(value.to_string()),
@@ -2254,6 +2350,7 @@ fn build_chunked_soac_body(
     // becomes Unit rather than `result_ty`.
     write_partial_to: Option<BindingRef>,
     total_threads: u32,
+    term_ids: &mut TermIdSource,
 ) -> Term {
     // ChunkArithmetic's `index_ty` matches the SOAC input's index type:
     // storage-view inputs use u32 (from `_w_intrinsic_storage_len`);
@@ -2262,8 +2359,8 @@ fn build_chunked_soac_body(
     // original source-level types, avoiding a bitcast boundary.
     let index_ty = soac_input_index_ty(&soac.original);
     let chunk = ChunkArithmetic::alloc_for(index_ty, total_threads, program);
-    let chunk_start_var = chunk.chunk_start(span);
-    let chunk_len_var = chunk.chunk_len(span);
+    let chunk_start_var = chunk.chunk_start(span, term_ids);
+    let chunk_len_var = chunk.chunk_len(span, term_ids);
 
     let chunked_soac = match &soac.original {
         SoacOp::Map {
@@ -2273,7 +2370,7 @@ fn build_chunked_soac_body(
         } => {
             let chunked_inputs = inputs
                 .iter()
-                .map(|input| chunk_array_expr(input, &chunk_start_var, &chunk_len_var))
+                .map(|input| chunk_array_expr(input, &chunk_start_var, &chunk_len_var, term_ids))
                 .collect();
             SoacOp::Map {
                 lam: lam.clone(),
@@ -2284,7 +2381,7 @@ fn build_chunked_soac_body(
         SoacOp::Reduce { op, ne, input } => SoacOp::Reduce {
             op: op.clone(),
             ne: ne.clone(),
-            input: chunk_array_expr(input, &chunk_start_var, &chunk_len_var),
+            input: chunk_array_expr(input, &chunk_start_var, &chunk_len_var, term_ids),
         },
         SoacOp::Redomap {
             op,
@@ -2294,7 +2391,7 @@ fn build_chunked_soac_body(
         } => {
             let chunked_inputs = inputs
                 .iter()
-                .map(|input| chunk_array_expr(input, &chunk_start_var, &chunk_len_var))
+                .map(|input| chunk_array_expr(input, &chunk_start_var, &chunk_len_var, term_ids))
                 .collect();
             SoacOp::Redomap {
                 op: op.clone(),
@@ -2312,41 +2409,47 @@ fn build_chunked_soac_body(
     };
 
     // Get the input length term from the first input's provenance.
-    let input_len_term = get_input_len(soac, span);
+    let input_len_term = get_input_len(soac, span, term_ids);
 
-    let mut body = soac_term(chunked_soac, result_ty.clone(), span);
+    let mut body = soac_term(chunked_soac, result_ty.clone(), span, term_ids);
 
     // If requested, wrap the SOAC with `let r = <soac> in store(set, binding, tid, r)`
     // so each thread's partial result lands in its own slot.
     if let Some(br) = write_partial_to {
         let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
         let r_sym = program.symbols.alloc("_par_out".into());
-        let tid_var = chunk.tid_u32(span);
-        let r_var = var_term(r_sym, result_ty.clone(), span);
+        let tid_var = chunk.tid_u32(span, term_ids);
+        let r_var = var_term(r_sym, result_ty.clone(), span, term_ids);
         let store = intrinsic_term_by_id(
             catalog().known().storage_store,
             vec![
-                uint_lit(br.set as u64, span),
-                uint_lit(br.binding as u64, span),
+                uint_lit(br.set as u64, span, term_ids),
+                uint_lit(br.binding as u64, span, term_ids),
                 tid_var,
                 r_var,
             ],
             unit_ty,
             span,
+            term_ids,
         );
-        body = let_term(r_sym, result_ty.clone(), body, store, span);
+        body = let_term(r_sym, result_ty.clone(), body, store, span, term_ids);
     }
 
     // Wrap with prefix lets (from the original entry body).
     for (name, ty, rhs) in prefix_lets.iter().rev() {
-        body = let_term(*name, ty.clone(), rhs.clone(), body, span);
+        body = let_term(*name, ty.clone(), rhs.clone(), body, span, term_ids);
     }
 
-    chunk.wrap(body, input_len_term, span, program)
+    chunk.wrap(body, input_len_term, span, program, term_ids)
 }
 
 /// Replace a storage buffer's offset/len with chunk-relative values.
-fn chunk_array_expr(input: &ArrayExpr, chunk_start: &Term, chunk_len: &Term) -> ArrayExpr {
+fn chunk_array_expr(
+    input: &ArrayExpr,
+    chunk_start: &Term,
+    chunk_len: &Term,
+    term_ids: &mut TermIdSource,
+) -> ArrayExpr {
     match input {
         ArrayExpr::StorageView(crate::tlc::StorageView {
             binding,
@@ -2364,6 +2467,7 @@ fn chunk_array_expr(input: &ArrayExpr, chunk_start: &Term, chunk_len: &Term) -> 
                     chunk_start.clone(),
                     chunk_start.ty.clone(),
                     chunk_start.span,
+                    term_ids,
                 )
             };
             ArrayExpr::StorageView(crate::tlc::StorageView {
@@ -2386,6 +2490,7 @@ fn chunk_array_expr(input: &ArrayExpr, chunk_start: &Term, chunk_len: &Term) -> 
                 chunk_start.clone(),
                 range_ty.clone(),
                 start.span,
+                term_ids,
             );
             ArrayExpr::Range {
                 start: Box::new(new_start),
@@ -2398,15 +2503,15 @@ fn chunk_array_expr(input: &ArrayExpr, chunk_start: &Term, chunk_len: &Term) -> 
 }
 
 /// Get the input length term from the SOAC's first input.
-fn get_input_len(soac: &SoacAnalysis, span: ast::Span) -> Term {
-    get_array_expr_len(soac.inputs()[0], span)
+fn get_input_len(soac: &SoacAnalysis, span: ast::Span, term_ids: &mut TermIdSource) -> Term {
+    get_array_expr_len(soac.inputs()[0], span, term_ids)
 }
 
-fn get_array_expr_len(ae: &ArrayExpr, span: ast::Span) -> Term {
+fn get_array_expr_len(ae: &ArrayExpr, span: ast::Span, term_ids: &mut TermIdSource) -> Term {
     match ae {
         ArrayExpr::StorageView(crate::tlc::StorageView { len, .. }) => (**len).clone(),
         ArrayExpr::Range { len, .. } => (**len).clone(),
-        _ => uint_lit(0, span), // fallback
+        _ => uint_lit(0, span, term_ids), // fallback
     }
 }
 
@@ -2418,19 +2523,26 @@ fn is_literal_zero(term: &Term) -> bool {
 // Term-building helpers
 // =============================================================================
 
-fn var_term(sym: SymbolId, ty: Type<TypeName>, span: ast::Span) -> Term {
+fn var_term(sym: SymbolId, ty: Type<TypeName>, span: ast::Span, term_ids: &mut TermIdSource) -> Term {
     Term {
-        id: TermId(0),
+        id: term_ids.next_id(),
         ty,
         span,
         kind: TermKind::Var(VarRef::Symbol(sym)),
     }
 }
 
-fn let_term(name: SymbolId, name_ty: Type<TypeName>, rhs: Term, body: Term, span: ast::Span) -> Term {
+fn let_term(
+    name: SymbolId,
+    name_ty: Type<TypeName>,
+    rhs: Term,
+    body: Term,
+    span: ast::Span,
+    term_ids: &mut TermIdSource,
+) -> Term {
     let ty = body.ty.clone();
     Term {
-        id: TermId(0),
+        id: term_ids.next_id(),
         ty,
         span,
         kind: TermKind::Let {
@@ -2449,15 +2561,16 @@ pub(crate) fn intrinsic_term_by_id(
     args: Vec<Term>,
     ret_ty: Type<TypeName>,
     span: ast::Span,
+    term_ids: &mut TermIdSource,
 ) -> Term {
     let func_term = Term {
-        id: TermId(0),
+        id: term_ids.next_id(),
         ty: Type::Variable(0),
         span,
         kind: TermKind::Var(VarRef::Builtin { id, overload_idx: 0 }),
     };
     Term {
-        id: TermId(0),
+        id: term_ids.next_id(),
         ty: ret_ty,
         span,
         kind: TermKind::App {
@@ -2473,6 +2586,7 @@ fn intrinsic_term(
     ret_ty: Type<TypeName>,
     span: ast::Span,
     program: &mut Program,
+    term_ids: &mut TermIdSource,
 ) -> Term {
     // Catalog-resolved builtins emit `Var(Builtin(id))` so downstream
     // passes dispatch structurally. The assert mirrors `tlc::build_call`
@@ -2501,13 +2615,13 @@ fn intrinsic_term(
         VarRef::Symbol(sym)
     };
     let func_term = Term {
-        id: TermId(0),
+        id: term_ids.next_id(),
         ty: Type::Variable(0),
         span,
         kind: TermKind::Var(func_var),
     };
     Term {
-        id: TermId(0),
+        id: term_ids.next_id(),
         ty: ret_ty,
         span,
         kind: TermKind::App {
@@ -2517,18 +2631,18 @@ fn intrinsic_term(
     }
 }
 
-fn soac_term(soac: SoacOp, ty: Type<TypeName>, span: ast::Span) -> Term {
+fn soac_term(soac: SoacOp, ty: Type<TypeName>, span: ast::Span, term_ids: &mut TermIdSource) -> Term {
     Term {
-        id: TermId(0),
+        id: term_ids.next_id(),
         ty,
         span,
         kind: TermKind::Soac(soac),
     }
 }
 
-fn uint_lit(val: u64, span: ast::Span) -> Term {
+fn uint_lit(val: u64, span: ast::Span, term_ids: &mut TermIdSource) -> Term {
     Term {
-        id: TermId(0),
+        id: term_ids.next_id(),
         ty: Type::Constructed(TypeName::UInt(32), vec![]),
         span,
         kind: TermKind::IntLit(val.to_string()),
@@ -2543,6 +2657,7 @@ pub(crate) fn make_entry_def(
     uniform_attrs: &[Option<BindingRef>],
     storage_bindings: Vec<interface::StorageBindingDecl>,
     program: &mut Program,
+    term_ids: &mut TermIdSource,
 ) -> Def {
     let sym = program.symbols.alloc(name.to_string());
     program.def_syms.insert(name.to_string(), sym);
@@ -2566,7 +2681,7 @@ pub(crate) fn make_entry_def(
             ty = Type::Constructed(TypeName::Arrow, vec![pt.clone(), ty]);
         }
         let lam_body = Term {
-            id: TermId(0),
+            id: term_ids.next_id(),
             ty: ty.clone(),
             span: dummy_span,
             kind: TermKind::Lambda(Lambda {
