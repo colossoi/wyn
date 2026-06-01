@@ -168,8 +168,6 @@ fn synth_program_with_alias_let() -> (Program, crate::SymbolId, crate::SymbolId)
         defs: vec![def],
         symbols,
         def_syms: Default::default(),
-
-        view_lengths: Default::default(),
     };
     let _ = lam_body_id; // silence unused (kept for documentation)
     (program, a_sym, b_sym)
@@ -1331,7 +1329,6 @@ fn synth_program_with_with_through_index() -> Program {
         defs: vec![f_def],
         symbols,
         def_syms,
-        view_lengths: Default::default(),
     }
 }
 
@@ -1576,7 +1573,6 @@ fn synth_program_with_populated_soac_captures() -> Program {
         defs: vec![consume_def, main_def],
         symbols,
         def_syms,
-        view_lengths: Default::default(),
     }
 }
 
@@ -1733,8 +1729,6 @@ fn soac_capture_term_is_analyzed_for_liveness() {
         defs: vec![main_def],
         symbols,
         def_syms: std::collections::HashMap::new(),
-
-        view_lengths: Default::default(),
     };
 
     let model = super::analyze(&program);

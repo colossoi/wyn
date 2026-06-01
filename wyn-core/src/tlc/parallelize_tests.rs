@@ -409,8 +409,6 @@ fn program_wrapping_body(b: &mut B, body: Term) -> Program {
         defs: vec![def],
         symbols: std::mem::replace(&mut b.symbols, SymbolTable::new()),
         def_syms: HashMap::new(),
-
-        view_lengths: Default::default(),
     }
 }
 

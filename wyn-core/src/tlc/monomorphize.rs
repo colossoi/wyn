@@ -54,8 +54,6 @@ struct Monomorphizer<'a> {
     term_ids: TermIdSource,
     /// Canonical function name → def SymbolId mapping (passed through unchanged)
     def_syms: std::collections::HashMap<String, crate::SymbolId>,
-    /// Storage-view length side table (passed through unchanged).
-    view_lengths: std::collections::HashMap<super::TermId, (u32, u32)>,
 }
 
 struct WorkItem {
@@ -331,7 +329,6 @@ impl<'a> Monomorphizer<'a> {
             schemes,
             term_ids: TermIdSource::new(),
             def_syms: program.def_syms,
-            view_lengths: program.view_lengths,
         }
     }
 
@@ -352,7 +349,6 @@ impl<'a> Monomorphizer<'a> {
             defs: self.mono_functions,
             symbols: self.symbols,
             def_syms: self.def_syms,
-            view_lengths: self.view_lengths,
         }
     }
 

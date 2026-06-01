@@ -2699,16 +2699,15 @@ fn resolve_dispatch_len(analysis: &EntryAnalysis, input_index: usize, program: &
 
 /// `iota(N)` count from the range's bound:
 /// - integer literal → `Fixed{count}`;
-/// - a `Term` whose id `buffer_specialize` recorded in `program.view_lengths`
-///   (i.e. a rewritten `length(view_param)` → `storage_len(set, binding)`,
-///   or its scalar-cast wrapper) → that binding's `InputBinding`;
+/// - a `storage_len(IntLit set, IntLit binding)` call (or its `i32.u32`
+///   scalar-cast wrapper, as emitted by `buffer_specialize` from
+///   `length(view_param)`) → that binding's `InputBinding`;
 /// otherwise `None` and the caller falls back to the entry's first buffer.
 fn resolve_range_bound(bound: &Term, def_name: SymbolId, program: &Program) -> Option<DispatchLen> {
     if let TermKind::IntLit(s) = &bound.kind {
         return s.parse::<u32>().ok().map(|count| DispatchLen::Fixed { count });
     }
-    let &(set, binding) = program.view_lengths.get(&bound.id)?;
-    let target = BindingRef::new(set, binding);
+    let target = recognize_storage_len(bound)?;
     let elem_bytes =
         entry_binding_slots(program, def_name).into_iter().flatten().find_map(|b| match b.kind {
             EntryParamBindingKind::Single {
@@ -2720,10 +2719,45 @@ fn resolve_range_bound(bound: &Term, def_name: SymbolId, program: &Program) -> O
             _ => None,
         })?;
     Some(DispatchLen::InputBinding {
-        set,
-        binding,
+        set: target.set,
+        binding: target.binding,
         elem_bytes,
     })
+}
+
+/// Match `storage_len(IntLit set, IntLit binding)` (the shape that
+/// `buffer_specialize` emits for `length(view_param)`), unwrapping a
+/// surrounding `i32.u32` cast if present. Returns the recognized binding.
+fn recognize_storage_len(term: &Term) -> Option<BindingRef> {
+    let TermKind::App { func, args } = &term.kind else {
+        return None;
+    };
+    let id = match &func.kind {
+        TermKind::Var(VarRef::Builtin { id, .. }) => *id,
+        _ => return None,
+    };
+    if id == catalog().known().storage_len {
+        if args.len() != 2 {
+            return None;
+        }
+        let set = u32_int_lit(&args[0])?;
+        let binding = u32_int_lit(&args[1])?;
+        return Some(BindingRef::new(set, binding));
+    }
+    if catalog().lookup_by_any_name("i32.u32").map(|d| d.id) == Some(id) {
+        if args.len() != 1 {
+            return None;
+        }
+        return recognize_storage_len(&args[0]);
+    }
+    None
+}
+
+fn u32_int_lit(term: &Term) -> Option<u32> {
+    match &term.kind {
+        TermKind::IntLit(s) => s.parse::<u32>().ok(),
+        _ => None,
+    }
 }
 
 /// Static element count of a fixed-size `[N]T`, if any.

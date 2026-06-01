@@ -555,12 +555,6 @@ pub struct Program {
     /// Canonical function name → def SymbolId mapping.
     /// Used by fusion to resolve call-site SymbolIds to def SymbolIds.
     pub def_syms: HashMap<String, SymbolId>,
-    /// Side table populated by `buffer_specialize`: maps the `TermId` of each
-    /// rewritten storage-view length expression (a `storage_len(set,binding)`
-    /// call, or its scalar-cast wrapper) back to the `(set, binding)` whose
-    /// length it represents. Lets downstream passes resolve a SOAC's dispatch
-    /// length without re-pattern-matching the lowered form.
-    pub view_lengths: HashMap<TermId, (u32, u32)>,
 }
 
 impl Program {
@@ -600,19 +594,17 @@ impl ProgramParts {
             defs: self.defs,
             symbols,
             def_syms,
-            view_lengths: HashMap::new(),
         }
     }
 }
 
 impl Program {
-    /// Rebuild a Program, carrying def_syms + view_lengths through.
+    /// Rebuild a Program, carrying def_syms through.
     pub fn rebuild(self, defs: Vec<Def>, symbols: SymbolTable) -> Program {
         Program {
             defs,
             symbols,
             def_syms: self.def_syms,
-            view_lengths: self.view_lengths,
         }
     }
 }

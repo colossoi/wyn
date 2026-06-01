@@ -92,8 +92,6 @@ fn test_specialize_sign_f32() {
         }],
         symbols,
         def_syms: HashMap::new(),
-
-        view_lengths: Default::default(),
     };
 
     let specialized = run(program);
@@ -175,8 +173,6 @@ fn test_specialize_min_i32() {
         }],
         symbols,
         def_syms: HashMap::new(),
-
-        view_lengths: Default::default(),
     };
 
     let specialized = run(program);

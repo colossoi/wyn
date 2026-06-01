@@ -20,8 +20,6 @@ fn empty_program() -> Program {
         defs: vec![],
         symbols: SymbolTable::new(),
         def_syms: HashMap::new(),
-
-        view_lengths: Default::default(),
     }
 }
 
