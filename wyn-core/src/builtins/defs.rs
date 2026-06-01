@@ -747,6 +747,11 @@ fn generate_per_type_ops() -> Vec<BuiltinDefRaw> {
         for (op, prim) in [("+", IAdd), ("-", ISub), ("*", IMul), ("/", SDiv), ("%", SRem)] {
             defs.push(per_type_op(ty, op, op, L(prim)));
         }
+        if ty == "i32" {
+            // 32-bit only for now; widening to i8/i16/i64 means
+            // emitting per-width helper functions in `spirv::pow`.
+            defs.push(per_type_op(ty, "**", "**", L(IntPow { signed: true })));
+        }
         for (op, prim) in [
             ("<", SLessThan),
             ("==", IEqual),
@@ -766,6 +771,10 @@ fn generate_per_type_ops() -> Vec<BuiltinDefRaw> {
     for &ty in unsigned_ints {
         for (op, prim) in [("+", IAdd), ("-", ISub), ("*", IMul), ("/", UDiv), ("%", UMod)] {
             defs.push(per_type_op(ty, op, op, L(prim)));
+        }
+        if ty == "u32" {
+            // 32-bit only for now; see the i32 comment above.
+            defs.push(per_type_op(ty, "**", "**", L(IntPow { signed: false })));
         }
         for (op, prim) in [
             ("<", ULessThan),

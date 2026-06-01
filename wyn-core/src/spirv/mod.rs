@@ -4,6 +4,7 @@
 
 #[cfg(test)]
 mod lowering_tests;
+mod pow;
 use crate::builtins::catalog;
 use std::collections::{HashMap, HashSet};
 
@@ -121,6 +122,12 @@ struct Constructor {
     /// Linked SPIR-V functions: linkage_name -> function_id
     linked_functions: HashMap<String, spirv::Word>,
 
+    /// Compiler-generated integer-pow helpers (see `spirv::pow`), keyed
+    /// by `signed`. Emitted once per module after function forward
+    /// declarations; `PrimOp::IntPow` lowers to `OpFunctionCall` against
+    /// the cached id.
+    int_pow_functions: HashMap<bool, spirv::Word>,
+
     /// Output variables for the current entry point being lowered.
     /// Set during entry point setup, cleared at end. Used by OutputPtr lowering.
     current_entry_outputs: Vec<spirv::Word>,
@@ -215,6 +222,7 @@ impl Constructor {
             num_workgroups: None,
             push_constant_var: None,
             linked_functions: HashMap::new(),
+            int_pow_functions: HashMap::new(),
             current_entry_outputs: Vec::new(),
             buffer_stride_decorated: HashSet::new(),
             block_decorated: HashSet::new(),
@@ -1956,6 +1964,8 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 let operands = vec![Operand::IdRef(lhs), Operand::IdRef(rhs)];
                 Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 26, operands)?)
             }
+            ("**", Constructed(Int(_), _), _) => self.emit_int_pow_call(lhs, rhs, result_ty, true),
+            ("**", Constructed(UInt(_), _), _) => self.emit_int_pow_call(lhs, rhs, result_ty, false),
 
             // Integer operations (signed)
             ("+", Constructed(Int(_), _), _) => {
@@ -2126,6 +2136,26 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
 
             _ => bail_spirv!("Unsupported binary operation: {} on {:?}", op, lhs_ty),
         }
+    }
+
+    /// Lower an integer `**` to an `OpFunctionCall` against the
+    /// compiler-generated helper emitted by `spirv::pow`. Bridges
+    /// `lower_binop`'s inline dispatch to the shared helper used by
+    /// `PrimOp::IntPow` in `lower_primop`.
+    fn emit_int_pow_call(
+        &mut self,
+        lhs: spirv::Word,
+        rhs: spirv::Word,
+        result_ty: spirv::Word,
+        signed: bool,
+    ) -> Result<spirv::Word> {
+        let func_id = self
+            .constructor
+            .int_pow_functions
+            .get(&signed)
+            .copied()
+            .ok_or_else(|| err_spirv!("int_pow helper not emitted (signed={})", signed))?;
+        Ok(self.constructor.builder.function_call(result_ty, None, func_id, vec![lhs, rhs])?)
     }
 
     /// Splat a scalar SPIR-V value into a vector matching `vec_ty`.
@@ -2924,6 +2954,20 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             PrimOp::GlslExt(ext_op) => {
                 Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, *ext_op, operands)?)
             }
+            PrimOp::IntPow { signed } => {
+                if arg_ids.len() != 2 {
+                    bail_spirv!("int_pow requires 2 args");
+                }
+                // Function id was cached by `spirv::pow::emit_int_pow_helpers`
+                // during module setup; missing means a backend-init bug.
+                let func_id = self
+                    .constructor
+                    .int_pow_functions
+                    .get(signed)
+                    .copied()
+                    .ok_or_else(|| err_spirv!("int_pow helper not emitted (signed={})", signed))?;
+                Ok(self.constructor.builder.function_call(result_ty, None, func_id, arg_ids.to_vec())?)
+            }
             PrimOp::Dot => {
                 if arg_ids.len() != 2 {
                     bail_spirv!("dot requires 2 args");
@@ -3313,6 +3357,12 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
             constructor.linked_functions.insert(func.name.clone(), func_id);
         }
     }
+
+    // Emit compiler-generated helpers. Integer `**` lowers to an
+    // OpFunctionCall against one of these (see `spirv::pow`); emitting
+    // both signedness variants unconditionally is ~60 instructions of
+    // module overhead and drivers DCE them when unused.
+    pow::emit_int_pow_helpers(&mut constructor)?;
 
     // Pre-create storage buffers for all entry point bindings so that
     // buffer-specialized functions (which reference set/binding directly) can

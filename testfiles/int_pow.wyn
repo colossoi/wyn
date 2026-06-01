@@ -1,0 +1,17 @@
+-- Integer exponentiation by repeated squaring.
+--
+-- `i32 ** i32` and `u32 ** u32` lower to compiler-generated helpers
+-- in `spirv::pow` rather than the float-only GLSL.std.450 `Pow`.
+-- spirv-val confirms the helper functions are structurally valid.
+-- Mixes signed and unsigned use sites in one entry so the backend
+-- has to emit and call both helper variants.
+
+def cube_i(x: i32) i32 = x ** 3
+def cube_u(x: u32) u32 = x ** 3u32
+
+#[compute]
+entry int_pow_test(input: []i32) []i32 =
+    -- Cast through u32 → cube the unsigned magnitude → back to i32 →
+    -- add the signed cube. Exercises both helpers from one entry
+    -- point's body without depending on multi-entry handling.
+    map(|v| cube_i(v) + i32.u32(cube_u(u32.i32(v))), input)

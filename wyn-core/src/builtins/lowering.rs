@@ -78,6 +78,17 @@ pub enum PrimOp {
     SRem,
     SMod,
     UMod,
+    /// Integer exponentiation by repeated squaring. SPIR-V has no
+    /// native integer-pow instruction (GLSL.std.450 `Pow` is float
+    /// only), so the backend emits a `OpFunctionCall` to a
+    /// compiler-generated helper (`spirv::pow::emit_int_pow_helpers`).
+    /// `signed = true` uses `OpSGreaterThan` / `OpShiftRightArithmetic`
+    /// for the loop's exit and shift; `false` uses the unsigned ops.
+    /// 32-bit only for now; other widths can be added by extending
+    /// this variant with a width field.
+    IntPow {
+        signed: bool,
+    },
     // Comparison ops
     FOrdEqual,
     FOrdNotEqual,
