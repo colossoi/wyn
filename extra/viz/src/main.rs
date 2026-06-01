@@ -252,6 +252,60 @@ enum Command {
         #[arg(short, long)]
         verbose: bool,
     },
+    /// Interactive simulation viewer: drives a SPIR-V module with one
+    /// compute entry + one graphics entry. Each frame dispatches the
+    /// compute entry to write the next generation into one of two
+    /// ping-pong storage buffers, then renders the fragment reading
+    /// that buffer. Conway's Game of Life is the motivating example.
+    #[command(name = "simulate")]
+    Simulate {
+        /// Path to the SPIR-V module
+        path: PathBuf,
+        /// Compute entry name (auto-detected if there's exactly one
+        /// `Compute` pipeline in the descriptor)
+        #[arg(long)]
+        compute: Option<String>,
+        /// Vertex entry name (auto-detected)
+        #[arg(long)]
+        vertex: Option<String>,
+        /// Fragment entry name (auto-detected)
+        #[arg(long)]
+        fragment: Option<String>,
+        /// Grid dimensions WxH. Drives compute push constants
+        /// (width/height) and the fragment's grid_width/grid_height
+        /// uniforms.
+        #[arg(long, value_parser = parse_size, default_value = "64x64")]
+        grid: (u32, u32),
+        /// Initial board state: a built-in name (`glider`, `blinker`,
+        /// `beacon`, `pulsar`, `random`) or a path to a `.rle`,
+        /// `.cells`, or `.bin` file. Default: `random` with a
+        /// time-based seed.
+        #[arg(long, default_value = "random")]
+        pattern: String,
+        /// RNG seed for `--pattern random`. Defaults to a time-based
+        /// seed; pass an explicit value for reproducible runs.
+        #[arg(long)]
+        seed: Option<u64>,
+        /// Maximum number of frames to render before exiting
+        #[arg(long)]
+        max_frames: Option<u32>,
+        /// Print frame timing statistics
+        #[arg(short, long)]
+        verbose: bool,
+        /// Disable GPU validation layers (validation is ON by default)
+        #[arg(long)]
+        no_validate: bool,
+        /// Present mode: fifo (vsync), mailbox (triple-buffer), immediate (no sync)
+        #[arg(long, value_enum, default_value = "fifo")]
+        present_mode: PresentModeArg,
+        /// Window size as WxH (e.g. --size 512x512)
+        #[arg(long, value_parser = parse_size)]
+        size: Option<(u32, u32)>,
+        /// Vertex count for the draw call. Default 3 matches a
+        /// fullscreen-triangle vertex shader.
+        #[arg(long, default_value = "3")]
+        vertex_count: u32,
+    },
 }
 
 fn main() -> Result<()> {
@@ -368,6 +422,38 @@ fn main() -> Result<()> {
         }
         Command::TestPattern { max_frames, verbose } => {
             modes::testpattern::run_test_pattern(max_frames, verbose)?;
+        }
+        Command::Simulate {
+            path,
+            compute,
+            vertex,
+            fragment,
+            grid,
+            pattern,
+            seed,
+            max_frames,
+            verbose,
+            no_validate,
+            present_mode,
+            size,
+            vertex_count,
+        } => {
+            let parsed_pattern = modes::simulate::parse_pattern(&pattern);
+            modes::simulate::run_simulate(
+                path,
+                compute,
+                vertex,
+                fragment,
+                grid,
+                parsed_pattern,
+                seed,
+                max_frames,
+                verbose,
+                !no_validate,
+                present_mode.into(),
+                size,
+                vertex_count,
+            )?;
         }
     }
 

@@ -495,3 +495,107 @@ pub fn build_test_pattern_uniforms(
 
     (buffer, bind_group, layout)
 }
+
+/// Walk a graphics pipeline's declared uniforms and allocate a buffer
+/// for each recognized name. Unknown uniform names error out.
+/// Returns the buffers (each `Option<wgpu::Buffer>` is `Some` iff the
+/// shader declared that uniform) and the per-uniform `BindGroupLayoutEntry`
+/// list the caller appends to the render bind-group layout.
+///
+/// Recognized names:
+/// - `iResolution`: vec3<f32> + pad, written per frame from
+///   `config.width` / `config.height`.
+/// - `iTime`: f32, written per frame from elapsed seconds.
+/// - `grid_width` / `grid_height`: i32, set once from the CLI `--grid`.
+///
+/// The `display_binding` arg is reported only so the error message can
+/// flag accidental name collisions; the storage binding itself is
+/// added by the caller (it's not a uniform).
+#[allow(clippy::type_complexity)]
+pub fn build_simulate_uniforms(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    graphics: &wyn_pipeline_descriptor::GraphicsPipeline,
+    grid: (u32, u32),
+) -> Result<(
+    Option<wgpu::Buffer>,
+    Option<wgpu::Buffer>,
+    Option<wgpu::Buffer>,
+    Option<wgpu::Buffer>,
+    Vec<wgpu::BindGroupLayoutEntry>,
+)> {
+    use wyn_pipeline_descriptor::Binding;
+
+    let mut resolution = None;
+    let mut time = None;
+    let mut grid_w = None;
+    let mut grid_h = None;
+    let mut entries: Vec<wgpu::BindGroupLayoutEntry> = Vec::new();
+
+    for b in &graphics.bindings {
+        let Binding::Uniform { binding, name, .. } = b else {
+            continue;
+        };
+        let (size_bytes, init_bytes): (u64, Vec<u8>) = match name.as_str() {
+            "iResolution" => {
+                let u = ResolutionUniform {
+                    resolution: [0.0, 0.0, 1.0],
+                    _pad: 0.0,
+                };
+                (
+                    std::mem::size_of::<ResolutionUniform>() as u64,
+                    bytemuck::bytes_of(&u).to_vec(),
+                )
+            }
+            "iTime" => {
+                let u = TimeUniform { time: 0.0 };
+                (
+                    std::mem::size_of::<TimeUniform>() as u64,
+                    bytemuck::bytes_of(&u).to_vec(),
+                )
+            }
+            "grid_width" => {
+                let v: i32 = grid.0 as i32;
+                (4, v.to_le_bytes().to_vec())
+            }
+            "grid_height" => {
+                let v: i32 = grid.1 as i32;
+                (4, v.to_le_bytes().to_vec())
+            }
+            other => {
+                return Err(anyhow!(
+                    "simulate: graphics pipeline declares unknown uniform {:?}; \
+                     known: iResolution, iTime, grid_width, grid_height",
+                    other
+                ));
+            }
+        };
+        let buffer = device.create_buffer(&BufferDescriptor {
+            label: Some(&format!("simulate.uniform.{}", name)),
+            size: size_bytes,
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&buffer, 0, &init_bytes);
+
+        entries.push(wgpu::BindGroupLayoutEntry {
+            binding: *binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        });
+
+        match name.as_str() {
+            "iResolution" => resolution = Some(buffer),
+            "iTime" => time = Some(buffer),
+            "grid_width" => grid_w = Some(buffer),
+            "grid_height" => grid_h = Some(buffer),
+            _ => unreachable!(),
+        }
+    }
+    Ok((resolution, grid_w, grid_h, time, entries))
+}
