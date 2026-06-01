@@ -14,7 +14,6 @@ pub mod pattern;
 pub mod scope;
 pub mod ssa;
 pub mod types;
-pub mod visitor;
 
 // Re-export type_checker from its new location for backwards compatibility
 pub use types::checker as type_checker;
