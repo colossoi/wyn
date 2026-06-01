@@ -219,7 +219,12 @@ pub fn create_binding_buffers(
     // can resolve `length: LikeInput` references.
     for b in bindings {
         if let Binding::StorageBuffer {
-            set, binding, name, usage, length, ..
+            set,
+            binding,
+            name,
+            usage,
+            length,
+            ..
         } = b
         {
             if length.is_some() {
@@ -228,7 +233,12 @@ pub fn create_binding_buffers(
             let data_bytes = if let Some(path) = inputs.get(name.as_str()) {
                 let data = load_f32_json(path)?;
                 if verbose {
-                    println!("Loaded {} elements for '{}' from {}", data.len(), name, path.display());
+                    println!(
+                        "Loaded {} elements for '{}' from {}",
+                        data.len(),
+                        name,
+                        path.display()
+                    );
                 }
                 data.iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>()
             } else if *usage == BufferUsage::Input {
@@ -261,7 +271,10 @@ pub fn create_binding_buffers(
     // intermediates), sized from their source buffer allocated in pass 1.
     for b in bindings {
         if let Binding::StorageBuffer {
-            binding, name, length: Some(len), ..
+            binding,
+            name,
+            length: Some(len),
+            ..
         } = b
         {
             if buffers.contains_key(binding) {
@@ -272,7 +285,10 @@ pub fn create_binding_buffers(
             // padding over the exact length, which is harmless slack.
             let byte_size = if let Some(elem_bytes) = len.dispatch_elem_bytes() {
                 let dispatch = dispatch.ok_or_else(|| {
-                    anyhow!("cannot size dispatch-length buffer '{}': no dispatch in scope", name)
+                    anyhow!(
+                        "cannot size dispatch-length buffer '{}': no dispatch in scope",
+                        name
+                    )
                 })?;
                 let (groups, _, _) = resolve_dispatch_size(dispatch, &buffers, pc_bytes);
                 let wg = match dispatch {
@@ -283,12 +299,18 @@ pub fn create_binding_buffers(
             } else {
                 len.resolve_bytes(|s, bnd| byte_sizes.get(&(s, bnd)).copied())
                     .ok_or_else(|| {
-                        anyhow!("cannot size buffer '{}': its source buffer was not allocated", name)
+                        anyhow!(
+                            "cannot size buffer '{}': its source buffer was not allocated",
+                            name
+                        )
                     })?
                     .max(4)
             };
             if verbose {
-                println!("Allocated {} bytes for compiler-managed buffer '{}'", byte_size, name);
+                println!(
+                    "Allocated {} bytes for compiler-managed buffer '{}'",
+                    byte_size, name
+                );
             }
             let buffer = make_buffer(device, queue, name, &vec![0u8; byte_size as usize]);
             buffers.insert(*binding, (buffer, byte_size));
@@ -373,17 +395,13 @@ fn resolve_dispatch_len(
     pc_bytes: &[u8],
 ) -> u32 {
     match len {
-        DispatchLen::InputBinding { binding, elem_bytes, .. } => buffers
-            .get(binding)
-            .map(|(_, size)| (*size / *elem_bytes as u64) as u32)
-            .unwrap_or(0),
+        DispatchLen::InputBinding {
+            binding, elem_bytes, ..
+        } => buffers.get(binding).map(|(_, size)| (*size / *elem_bytes as u64) as u32).unwrap_or(0),
         DispatchLen::Fixed { count } => *count,
         DispatchLen::PushConstant { offset } => {
             let o = *offset as usize;
-            pc_bytes
-                .get(o..o + 4)
-                .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                .unwrap_or(0)
+            pc_bytes.get(o..o + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).unwrap_or(0)
         }
     }
 }

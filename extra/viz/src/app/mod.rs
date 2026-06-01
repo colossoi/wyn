@@ -78,6 +78,41 @@ struct State {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: SurfaceConfiguration,
+    start_time: std::time::Instant,
+    // Mouse tracking (consumed by vf's shadertoy iMouse uniform; harmless
+    // for other modes that don't read it).
+    mouse_pos: [f32; 2],
+    mouse_click_pos: [f32; 2],
+    mouse_pressed: bool,
+    // Frame limiting (optional, for debugging)
+    frame_count: u32,
+    max_frames: Option<u32>,
+    // Frame timing (includes GPU wait)
+    frame_times: [f64; 60], // Recent frame times in ms (ring buffer)
+    frame_time_idx: usize,
+    verbose: bool,
+    /// Per-frame depth attachment, recreated on resize. Sized to
+    /// `config.width × config.height`, format `DEPTH_FORMAT`.
+    depth_view: TextureView,
+    /// Mode-specific GPU state. The `App` constructor picks one
+    /// variant; the rest of the per-frame path dispatches on this.
+    mode: AppMode,
+}
+
+/// Mode-specific GPU state held by `State`. Each variant owns the
+/// pipelines, bind groups, and buffers that variant's `render` path
+/// consumes; common surface / device / window state stays in `State`
+/// itself.
+enum AppMode {
+    VertexFragment(VfState),
+    // `Simulate(SimulateState)` lands with the simulate feature; the
+    // single-variant enum here is the stepping stone.
+}
+
+/// GPU state for the `vf` / `testpattern` interactive viewers. Holds
+/// exactly one render pipeline + (optionally) shadertoy uniforms +
+/// vertex / index / storage buffers.
+struct VfState {
     pipeline: RenderPipeline,
     // Uniform support - separate buffers for iResolution, iTime, iMouse, difficulty (optional, enabled with --shadertoy)
     resolution_buffer: Option<wgpu::Buffer>,
@@ -92,18 +127,6 @@ struct State {
     /// Empty bind group, bound at every set index below
     /// `uniform_bind_group_set` to satisfy wgpu's contiguous-sets requirement.
     empty_bind_group: Option<BindGroup>,
-    start_time: std::time::Instant,
-    // Mouse tracking
-    mouse_pos: [f32; 2],
-    mouse_click_pos: [f32; 2],
-    mouse_pressed: bool,
-    // Frame limiting (optional, for debugging)
-    frame_count: u32,
-    max_frames: Option<u32>,
-    // Frame timing (includes GPU wait)
-    frame_times: [f64; 60], // Recent frame times in ms (ring buffer)
-    frame_time_idx: usize,
-    verbose: bool,
     /// Number of vertex-shader invocations per draw call.
     vertex_count: u32,
     /// Host-uploaded storage buffers; held only to keep them alive for
@@ -115,9 +138,6 @@ struct State {
     /// Optional u32 index buffer + its element count; when `Some`,
     /// render() uses `draw_indexed` and `vertex_count` is ignored.
     index_buffer: Option<(wgpu::Buffer, u32)>,
-    /// Per-frame depth attachment, recreated on resize. Sized to
-    /// `config.width × config.height`, format `DEPTH_FORMAT`.
-    depth_view: TextureView,
 }
 
 /// Allocate a depth texture matching `config.width × config.height` and
@@ -368,12 +388,7 @@ impl State {
         let now = std::time::Instant::now();
         let depth_view = create_depth_view(&device, &config);
 
-        Ok(Self {
-            window,
-            surface,
-            device,
-            queue,
-            config,
+        let vf = VfState {
             pipeline,
             resolution_buffer,
             time_buffer,
@@ -382,6 +397,18 @@ impl State {
             uniform_bind_group,
             uniform_bind_group_set,
             empty_bind_group,
+            vertex_count: spec.vertex_count,
+            _storage_buffers: storage_buffers,
+            vertex_buffers: vertex_buffers.buffers,
+            index_buffer,
+        };
+
+        Ok(Self {
+            window,
+            surface,
+            device,
+            queue,
+            config,
             start_time: now,
             mouse_pos: [0.0, 0.0],
             mouse_click_pos: [0.0, 0.0],
@@ -391,11 +418,8 @@ impl State {
             frame_times: [0.0; 60],
             frame_time_idx: 0,
             verbose,
-            vertex_count: spec.vertex_count,
-            _storage_buffers: storage_buffers,
-            vertex_buffers: vertex_buffers.buffers,
-            index_buffer,
             depth_view,
+            mode: AppMode::VertexFragment(vf),
         })
     }
 
@@ -414,109 +438,26 @@ impl State {
 
         self.frame_count += 1;
 
-        // Update uniform data for this frame if Shadertoy mode is enabled
-        if let (Some(ref resolution_buffer), Some(ref time_buffer)) =
-            (&self.resolution_buffer, &self.time_buffer)
-        {
-            let now = std::time::Instant::now();
-            let elapsed = now.duration_since(self.start_time).as_secs_f32();
-
-            // Update iResolution
-            let resolution = ResolutionUniform {
-                resolution: [self.config.width as f32, self.config.height as f32, 1.0],
-                _pad: 0.0,
-            };
-            self.queue.write_buffer(resolution_buffer, 0, bytemuck::cast_slice(&[resolution]));
-
-            // Update iTime
-            let time = TimeUniform { time: elapsed };
-            self.queue.write_buffer(time_buffer, 0, bytemuck::cast_slice(&[time]));
-
-            // Update iMouse
-            if let Some(mouse_buffer) = &self.mouse_buffer {
-                // Shadertoy convention: (x, y, click_x, click_y)
-                // click_x/click_y are negative when not pressed
-                let mouse = MouseUniform {
-                    mouse: if self.mouse_pressed {
-                        [
-                            self.mouse_pos[0],
-                            self.mouse_pos[1],
-                            self.mouse_click_pos[0],
-                            self.mouse_click_pos[1],
-                        ]
-                    } else {
-                        [self.mouse_pos[0], self.mouse_pos[1], -1.0, -1.0]
-                    },
-                };
-                self.queue.write_buffer(mouse_buffer, 0, bytemuck::cast_slice(&[mouse]));
-            }
-        }
-
         match self.surface.get_current_texture() {
             Ok(frame) => {
                 let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-
                 let mut encoder = self.device.create_command_encoder(&CommandEncoderDescriptor {
                     label: Some("encoder"),
                 });
 
-                {
-                    let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("pass"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &view,
-                            resolve_target: None,
-                            ops: Operations {
-                                load: LoadOp::Clear(Color {
-                                    // Linear white — surface is non-sRGB, so clear
-                                    // values display directly. Matches the original
-                                    // masthead's background (and lets its fog math,
-                                    // ported below, fade distant geometry into it).
-                                    r: 1.0,
-                                    g: 1.0,
-                                    b: 1.0,
-                                    a: 1.0,
-                                }),
-                                store: StoreOp::Store,
-                            },
-                            depth_slice: None,
-                        })],
-                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                            view: &self.depth_view,
-                            depth_ops: Some(Operations {
-                                load: LoadOp::Clear(1.0),
-                                store: StoreOp::Store,
-                            }),
-                            stencil_ops: None,
-                        }),
-                        ..Default::default()
-                    });
-
-                    rpass.set_pipeline(&self.pipeline);
-                    // Set uniform bind group if available, at the set number
-                    // declared by the shader (via sidecar descriptor). Fill
-                    // any lower sets with the shared empty bind group so the
-                    // pipeline layout is fully satisfied.
-                    if let Some(ref bind_group) = self.uniform_bind_group {
-                        if let Some(ref empty) = self.empty_bind_group {
-                            for i in 0..self.uniform_bind_group_set {
-                                rpass.set_bind_group(i, empty, &[]);
-                            }
-                        }
-                        rpass.set_bind_group(self.uniform_bind_group_set, bind_group, &[]);
-                    }
-                    for (slot, buf) in self.vertex_buffers.iter().enumerate() {
-                        rpass.set_vertex_buffer(slot as u32, buf.slice(..));
-                    }
-                    match &self.index_buffer {
-                        Some((buf, count)) => {
-                            rpass.set_index_buffer(buf.slice(..), wgpu::IndexFormat::Uint32);
-                            rpass.draw_indexed(0..*count, 0, 0..1);
-                        }
-                        None => {
-                            rpass.draw(0..self.vertex_count, 0..1);
-                        }
-                    }
+                match &self.mode {
+                    AppMode::VertexFragment(vf) => render_vf(
+                        vf,
+                        &view,
+                        &self.depth_view,
+                        &self.queue,
+                        &self.config,
+                        self.start_time,
+                        self.mouse_pos,
+                        self.mouse_click_pos,
+                        self.mouse_pressed,
+                        &mut encoder,
+                    ),
                 }
 
                 self.queue.submit(Some(encoder.finish()));
@@ -571,6 +512,111 @@ impl State {
                 // Non-fatal miscellaneous error; skip this frame.
                 eprintln!("surface error: Other; skipping frame");
             }
+        }
+    }
+}
+
+/// Per-frame VfState path: shadertoy uniform writes + single render pass.
+/// Extracted from `State::render` so that the dispatch in `State::render`
+/// stays small and other modes (e.g. `Simulate`) can slot in alongside.
+#[allow(clippy::too_many_arguments)]
+fn render_vf(
+    vf: &VfState,
+    view: &TextureView,
+    depth_view: &TextureView,
+    queue: &wgpu::Queue,
+    config: &SurfaceConfiguration,
+    start_time: std::time::Instant,
+    mouse_pos: [f32; 2],
+    mouse_click_pos: [f32; 2],
+    mouse_pressed: bool,
+    encoder: &mut wgpu::CommandEncoder,
+) {
+    // Update uniform data for this frame if Shadertoy mode is enabled
+    if let (Some(ref resolution_buffer), Some(ref time_buffer)) = (&vf.resolution_buffer, &vf.time_buffer) {
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(start_time).as_secs_f32();
+
+        // Update iResolution
+        let resolution = ResolutionUniform {
+            resolution: [config.width as f32, config.height as f32, 1.0],
+            _pad: 0.0,
+        };
+        queue.write_buffer(resolution_buffer, 0, bytemuck::cast_slice(&[resolution]));
+
+        // Update iTime
+        let time = TimeUniform { time: elapsed };
+        queue.write_buffer(time_buffer, 0, bytemuck::cast_slice(&[time]));
+
+        // Update iMouse
+        if let Some(mouse_buffer) = &vf.mouse_buffer {
+            // Shadertoy convention: (x, y, click_x, click_y)
+            // click_x/click_y are negative when not pressed
+            let mouse = MouseUniform {
+                mouse: if mouse_pressed {
+                    [mouse_pos[0], mouse_pos[1], mouse_click_pos[0], mouse_click_pos[1]]
+                } else {
+                    [mouse_pos[0], mouse_pos[1], -1.0, -1.0]
+                },
+            };
+            queue.write_buffer(mouse_buffer, 0, bytemuck::cast_slice(&[mouse]));
+        }
+    }
+
+    let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("pass"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view,
+            resolve_target: None,
+            ops: Operations {
+                load: LoadOp::Clear(Color {
+                    // Linear white — surface is non-sRGB, so clear
+                    // values display directly. Matches the original
+                    // masthead's background (and lets its fog math,
+                    // ported below, fade distant geometry into it).
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                }),
+                store: StoreOp::Store,
+            },
+            depth_slice: None,
+        })],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: depth_view,
+            depth_ops: Some(Operations {
+                load: LoadOp::Clear(1.0),
+                store: StoreOp::Store,
+            }),
+            stencil_ops: None,
+        }),
+        ..Default::default()
+    });
+
+    rpass.set_pipeline(&vf.pipeline);
+    // Set uniform bind group if available, at the set number
+    // declared by the shader (via sidecar descriptor). Fill
+    // any lower sets with the shared empty bind group so the
+    // pipeline layout is fully satisfied.
+    if let Some(ref bind_group) = vf.uniform_bind_group {
+        if let Some(ref empty) = vf.empty_bind_group {
+            for i in 0..vf.uniform_bind_group_set {
+                rpass.set_bind_group(i, empty, &[]);
+            }
+        }
+        rpass.set_bind_group(vf.uniform_bind_group_set, bind_group, &[]);
+    }
+    for (slot, buf) in vf.vertex_buffers.iter().enumerate() {
+        rpass.set_vertex_buffer(slot as u32, buf.slice(..));
+    }
+    match &vf.index_buffer {
+        Some((buf, count)) => {
+            rpass.set_index_buffer(buf.slice(..), wgpu::IndexFormat::Uint32);
+            rpass.draw_indexed(0..*count, 0, 0..1);
+        }
+        None => {
+            rpass.draw(0..vf.vertex_count, 0..1);
         }
     }
 }

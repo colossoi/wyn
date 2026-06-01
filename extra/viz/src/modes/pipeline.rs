@@ -187,8 +187,7 @@ fn run_multi_compute(
     let pc_bytes = build_push_constant_bytes(&mp.bindings, push_constants, verbose)?;
     let total_pc_size = pc_bytes.len() as u32;
 
-    let buffers =
-        create_binding_buffers(device, queue, &mp.bindings, inputs, None, &pc_bytes, verbose)?;
+    let buffers = create_binding_buffers(device, queue, &mp.bindings, inputs, None, &pc_bytes, verbose)?;
     let (layout, bind_group) = build_bind_group(device, &mp.bindings, &buffers)?;
 
     let pc_ranges: Vec<wgpu::PushConstantRange> = if total_pc_size > 0 {
