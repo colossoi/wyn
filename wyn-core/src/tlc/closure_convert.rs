@@ -429,7 +429,7 @@ pub fn collect_free_vars_array_expr(
                 collect_free_vars(s, bound, top_level, known_defs, symbols, free, seen);
             }
         }
-        ArrayExpr::StorageBuffer { offset, len, .. } => {
+        ArrayExpr::StorageView(crate::tlc::StorageView { offset, len, .. }) => {
             // set/binding are compile-time u32s; only offset/len carry refs.
             collect_free_vars(offset, bound, top_level, known_defs, symbols, free, seen);
             collect_free_vars(len, bound, top_level, known_defs, symbols, free, seen);
@@ -1063,7 +1063,7 @@ impl<'a> ClosureConverter<'a> {
                 len: Box::new(self.convert_term(*len)),
                 step: step.map(|s| Box::new(self.convert_term(*s))),
             },
-            ArrayExpr::StorageBuffer { .. } => {
+            ArrayExpr::StorageView(_) => {
                 unreachable!("StorageBuffer introduced after defunctionalization")
             }
         }

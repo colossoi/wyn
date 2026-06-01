@@ -23,32 +23,20 @@ use crate::interface;
 use crate::interface::EntryParamBindingKind;
 use crate::tlc::var_term_builtin_id;
 use crate::types::TypeExt;
-use crate::{SymbolId, SymbolTable};
+use crate::{BindingRef, SymbolId, SymbolTable};
 use polytype::Type;
 use std::collections::HashMap;
 
 /// Buffer binding info for a view-array parameter.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct BufferBinding {
-    set: u32,
-    binding: u32,
-    elem_ty: Type<TypeName>,
-}
-
-/// Resolved view info: an expression that represents a view into a buffer.
-/// `offset` and `len` are TLC terms (may be Var refs to param symbols, or
-/// computed expressions like `offset + start`).
-struct ViewInfo {
-    offset: Term,
-    len: Term,
-    set: u32,
-    binding: u32,
+    binding: BindingRef,
     elem_ty: Type<TypeName>,
 }
 
 /// A specialization key: for each parameter position, `Some(binding)` if it's
 /// a buffer-backed view, `None` otherwise.
-type SpecKey = Vec<Option<(u32, u32)>>;
+type SpecKey = Vec<Option<BindingRef>>;
 
 /// Buffer specializer state.
 struct BufferSpecializer {
@@ -212,8 +200,7 @@ impl BufferSpecializer {
             self.buffer_map.insert(
                 param_binding.param_sym,
                 BufferBinding {
-                    set: binding.set,
-                    binding: binding.binding,
+                    binding: *binding,
                     elem_ty: elem_ty.clone(),
                 },
             );
@@ -272,8 +259,7 @@ impl BufferSpecializer {
                 self.buffer_map.insert(
                     *sym,
                     BufferBinding {
-                        set: 0,
-                        binding: binding_num,
+                        binding: BindingRef::new(0, binding_num),
                         elem_ty,
                     },
                 );
@@ -356,21 +342,27 @@ impl BufferSpecializer {
                         if let Some(binding) = self.resolve_buffer(data_sym).cloned() {
                             let span = term.span;
                             let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
-                            let set_lit = self.make_int_lit(&binding.set.to_string(), u32_ty.clone(), span);
-                            let binding_lit =
-                                self.make_int_lit(&binding.binding.to_string(), u32_ty.clone(), span);
+                            let set_lit =
+                                self.make_int_lit(&binding.binding.set.to_string(), u32_ty.clone(), span);
+                            let binding_lit = self.make_int_lit(
+                                &binding.binding.binding.to_string(),
+                                u32_ty.clone(),
+                                span,
+                            );
                             let storage_len = self.make_app_by_id(
                                 catalog().known().storage_len,
                                 vec![set_lit, binding_lit],
                                 u32_ty.clone(),
                                 span,
                             );
-                            self.view_lengths.insert(storage_len.id, (binding.set, binding.binding));
+                            self.view_lengths
+                                .insert(storage_len.id, (binding.binding.set, binding.binding.binding));
                             if term.ty == u32_ty {
                                 return storage_len;
                             }
                             let cast = self.make_app("i32.u32", vec![storage_len], term.ty.clone(), span);
-                            self.view_lengths.insert(cast.id, (binding.set, binding.binding));
+                            self.view_lengths
+                                .insert(cast.id, (binding.binding.set, binding.binding.binding));
                             return cast;
                         }
                     }
@@ -533,9 +525,10 @@ impl BufferSpecializer {
                         let span = term.span;
                         let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
                         let idx = self.rewrite_term(index);
-                        let set_lit = self.make_int_lit(&binding.set.to_string(), u32_ty.clone(), span);
+                        let set_lit =
+                            self.make_int_lit(&binding.binding.set.to_string(), u32_ty.clone(), span);
                         let binding_lit =
-                            self.make_int_lit(&binding.binding.to_string(), u32_ty.clone(), span);
+                            self.make_int_lit(&binding.binding.binding.to_string(), u32_ty.clone(), span);
                         return self.make_app_by_id(
                             catalog().known().storage_index,
                             vec![set_lit, binding_lit, idx],
@@ -679,19 +672,12 @@ impl BufferSpecializer {
                 len: Box::new(self.rewrite_term(len)),
                 step: step.as_ref().map(|s| Box::new(self.rewrite_term(s))),
             },
-            ArrayExpr::StorageBuffer {
-                set,
-                binding,
-                offset,
-                len,
-                elem_ty,
-            } => ArrayExpr::StorageBuffer {
-                set: *set,
-                binding: *binding,
-                offset: Box::new(self.rewrite_term(offset)),
-                len: Box::new(self.rewrite_term(len)),
-                elem_ty: elem_ty.clone(),
-            },
+            ArrayExpr::StorageView(sv) => ArrayExpr::StorageView(crate::tlc::StorageView {
+                binding: sv.binding,
+                offset: Box::new(self.rewrite_term(&sv.offset)),
+                len: Box::new(self.rewrite_term(&sv.len)),
+                elem_ty: sv.elem_ty.clone(),
+            }),
         }
     }
 
@@ -729,8 +715,7 @@ impl BufferSpecializer {
         let span = original_term.span;
 
         // Build specialization key
-        let spec_key: SpecKey =
-            buffer_args.iter().map(|b| b.as_ref().map(|bb| (bb.set, bb.binding))).collect();
+        let spec_key: SpecKey = buffer_args.iter().map(|b| b.as_ref().map(|bb| bb.binding)).collect();
 
         // Check if we already have this specialization
         let spec_sym = if let Some(&sym) = self.specializations.get(&(func_sym, spec_key.clone())) {
@@ -750,8 +735,9 @@ impl BufferSpecializer {
             if let Some(binding) = buf {
                 // Replace with (0, _w_intrinsic_storage_len(set, binding))
                 let zero = self.make_int_lit("0", u32_ty.clone(), span);
-                let set_lit = self.make_int_lit(&binding.set.to_string(), u32_ty.clone(), span);
-                let binding_lit = self.make_int_lit(&binding.binding.to_string(), u32_ty.clone(), span);
+                let set_lit = self.make_int_lit(&binding.binding.set.to_string(), u32_ty.clone(), span);
+                let binding_lit =
+                    self.make_int_lit(&binding.binding.binding.to_string(), u32_ty.clone(), span);
                 let storage_len = self.make_app_by_id(
                     catalog().known().storage_len,
                     vec![set_lit, binding_lit],
@@ -803,7 +789,9 @@ impl BufferSpecializer {
         let suffix: String = buffer_args
             .iter()
             .enumerate()
-            .filter_map(|(i, b)| b.as_ref().map(|bb| format!("_b{}s{}b{}", i, bb.set, bb.binding)))
+            .filter_map(|(i, b)| {
+                b.as_ref().map(|bb| format!("_b{}s{}b{}", i, bb.binding.set, bb.binding.binding))
+            })
             .collect();
         let spec_name = format!("{}{}", orig_name, suffix);
         let spec_sym = self.symbols.alloc(spec_name);
@@ -816,7 +804,7 @@ impl BufferSpecializer {
         // Build new params and a mapping from old view params to their buffer info
         let mut new_params: Vec<(SymbolId, Type<TypeName>)> = Vec::new();
         // Maps old param sym → (offset_sym, len_sym, set, binding, elem_ty)
-        let mut view_param_map: HashMap<SymbolId, (SymbolId, SymbolId, u32, u32, Type<TypeName>)> =
+        let mut view_param_map: HashMap<SymbolId, (SymbolId, SymbolId, BindingRef, Type<TypeName>)> =
             HashMap::new();
 
         for (i, (sym, ty)) in orig_params.iter().enumerate() {
@@ -828,13 +816,7 @@ impl BufferSpecializer {
                 new_params.push((len_sym, u32_ty.clone()));
                 view_param_map.insert(
                     *sym,
-                    (
-                        offset_sym,
-                        len_sym,
-                        binding.set,
-                        binding.binding,
-                        binding.elem_ty.clone(),
-                    ),
+                    (offset_sym, len_sym, binding.binding, binding.elem_ty.clone()),
                 );
             } else {
                 new_params.push((*sym, ty.clone()));
@@ -865,7 +847,7 @@ impl BufferSpecializer {
     fn rewrite_specialized_body(
         &mut self,
         term: &Term,
-        view_params: &HashMap<SymbolId, (SymbolId, SymbolId, u32, u32, Type<TypeName>)>,
+        view_params: &HashMap<SymbolId, (SymbolId, SymbolId, BindingRef, Type<TypeName>)>,
     ) -> Term {
         match &term.kind {
             TermKind::App { func, args } => {
@@ -875,9 +857,9 @@ impl BufferSpecializer {
                 {
                     if let Some(view) = self.try_resolve_view_expr(&args[0], view_params) {
                         if view.len.ty == term.ty {
-                            return view.len;
+                            return *view.len;
                         }
-                        return self.make_app("i32.u32", vec![view.len], term.ty.clone(), term.span);
+                        return self.make_app("i32.u32", vec![*view.len], term.ty.clone(), term.span);
                     }
                 }
 
@@ -900,10 +882,9 @@ impl BufferSpecializer {
                             if let TermKind::Var(VarRef::Symbol(s)) = &a.kind {
                                 if view_params.contains_key(s) {
                                     // This is a view param — build a BufferBinding for it
-                                    let (_, _, set, binding, elem_ty) = &view_params[s];
+                                    let (_, _, br, elem_ty) = &view_params[s];
                                     Some(BufferBinding {
-                                        set: *set,
-                                        binding: *binding,
+                                        binding: *br,
                                         elem_ty: elem_ty.clone(),
                                     })
                                 } else {
@@ -980,10 +961,7 @@ impl BufferSpecializer {
 
                     // Extend view_params so the body knows `name` is a view
                     let mut extended = view_params.clone();
-                    extended.insert(
-                        *name,
-                        (offset_sym, len_sym, view.set, view.binding, view.elem_ty.clone()),
-                    );
+                    extended.insert(*name, (offset_sym, len_sym, view.binding, view.elem_ty.clone()));
 
                     let new_body = self.rewrite_specialized_body(body, &extended);
 
@@ -998,7 +976,7 @@ impl BufferSpecializer {
                         kind: TermKind::Let {
                             name: len_sym,
                             name_ty: u32_ty.clone(),
-                            rhs: Box::new(view.len),
+                            rhs: view.len,
                             body: Box::new(new_body),
                         },
                     };
@@ -1009,7 +987,7 @@ impl BufferSpecializer {
                         kind: TermKind::Let {
                             name: offset_sym,
                             name_ty: u32_ty,
-                            rhs: Box::new(view.offset),
+                            rhs: view.offset,
                             body: Box::new(inner),
                         },
                     };
@@ -1134,8 +1112,9 @@ impl BufferSpecializer {
                     let span = term.span;
                     let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
                     let idx = self.rewrite_specialized_body(index, view_params);
-                    let set_lit = self.make_int_lit(&view.set.to_string(), u32_ty.clone(), span);
-                    let binding_lit = self.make_int_lit(&view.binding.to_string(), u32_ty.clone(), span);
+                    let set_lit = self.make_int_lit(&view.binding.set.to_string(), u32_ty.clone(), span);
+                    let binding_lit =
+                        self.make_int_lit(&view.binding.binding.to_string(), u32_ty.clone(), span);
                     let idx = if idx.ty == u32_ty {
                         idx
                     } else {
@@ -1143,7 +1122,7 @@ impl BufferSpecializer {
                     };
                     let add_result = self.make_binop_app(
                         ast::BinaryOp { op: "+".to_string() },
-                        view.offset,
+                        *view.offset,
                         idx,
                         u32_ty.clone(),
                         span,
@@ -1175,7 +1154,7 @@ impl BufferSpecializer {
     fn rewrite_specialized_loop_kind(
         &mut self,
         kind: &LoopKind,
-        view_params: &HashMap<SymbolId, (SymbolId, SymbolId, u32, u32, Type<TypeName>)>,
+        view_params: &HashMap<SymbolId, (SymbolId, SymbolId, BindingRef, Type<TypeName>)>,
     ) -> LoopKind {
         match kind {
             LoopKind::For { var, var_ty, iter } => LoopKind::For {
@@ -1197,7 +1176,7 @@ impl BufferSpecializer {
     fn rewrite_specialized_soac(
         &mut self,
         soac: &SoacOp,
-        view_params: &HashMap<SymbolId, (SymbolId, SymbolId, u32, u32, Type<TypeName>)>,
+        view_params: &HashMap<SymbolId, (SymbolId, SymbolId, BindingRef, Type<TypeName>)>,
     ) -> SoacOp {
         match soac {
             SoacOp::Map {
@@ -1281,7 +1260,7 @@ impl BufferSpecializer {
     fn rewrite_specialized_lambda(
         &mut self,
         lam: &Lambda,
-        view_params: &HashMap<SymbolId, (SymbolId, SymbolId, u32, u32, Type<TypeName>)>,
+        view_params: &HashMap<SymbolId, (SymbolId, SymbolId, BindingRef, Type<TypeName>)>,
     ) -> Lambda {
         Lambda {
             params: lam.params.clone(),
@@ -1293,7 +1272,7 @@ impl BufferSpecializer {
     fn rewrite_specialized_soac_body(
         &mut self,
         sb: &super::SoacBody,
-        view_params: &HashMap<SymbolId, (SymbolId, SymbolId, u32, u32, Type<TypeName>)>,
+        view_params: &HashMap<SymbolId, (SymbolId, SymbolId, BindingRef, Type<TypeName>)>,
     ) -> super::SoacBody {
         super::SoacBody {
             lam: self.rewrite_specialized_lambda(&sb.lam, view_params),
@@ -1308,17 +1287,16 @@ impl BufferSpecializer {
     fn rewrite_specialized_array_expr(
         &mut self,
         ae: &ArrayExpr,
-        view_params: &HashMap<SymbolId, (SymbolId, SymbolId, u32, u32, Type<TypeName>)>,
+        view_params: &HashMap<SymbolId, (SymbolId, SymbolId, BindingRef, Type<TypeName>)>,
     ) -> ArrayExpr {
         match ae {
             ArrayExpr::Ref(t) => {
                 // If the ref is a bare Var pointing to a view param, emit StorageBuffer
                 if let TermKind::Var(VarRef::Symbol(sym)) = &t.kind {
-                    if let Some((offset_sym, len_sym, set, binding, elem_ty)) = view_params.get(sym) {
+                    if let Some((offset_sym, len_sym, br, elem_ty)) = view_params.get(sym) {
                         let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
-                        return ArrayExpr::StorageBuffer {
-                            set: *set,
-                            binding: *binding,
+                        return ArrayExpr::StorageView(crate::tlc::StorageView {
+                            binding: *br,
                             offset: Box::new(Term {
                                 id: self.term_ids.next_id(),
                                 ty: u32_ty.clone(),
@@ -1332,7 +1310,7 @@ impl BufferSpecializer {
                                 kind: TermKind::Var(VarRef::Symbol(*len_sym)),
                             }),
                             elem_ty: elem_ty.clone(),
-                        };
+                        });
                     }
                 }
                 ArrayExpr::Ref(Box::new(self.rewrite_specialized_body(t, view_params)))
@@ -1351,26 +1329,19 @@ impl BufferSpecializer {
                 len: Box::new(self.rewrite_specialized_body(len, view_params)),
                 step: step.as_ref().map(|s| Box::new(self.rewrite_specialized_body(s, view_params))),
             },
-            ArrayExpr::StorageBuffer {
-                set,
-                binding,
-                offset,
-                len,
-                elem_ty,
-            } => ArrayExpr::StorageBuffer {
-                set: *set,
-                binding: *binding,
-                offset: Box::new(self.rewrite_specialized_body(offset, view_params)),
-                len: Box::new(self.rewrite_specialized_body(len, view_params)),
-                elem_ty: elem_ty.clone(),
-            },
+            ArrayExpr::StorageView(sv) => ArrayExpr::StorageView(crate::tlc::StorageView {
+                binding: sv.binding,
+                offset: Box::new(self.rewrite_specialized_body(&sv.offset, view_params)),
+                len: Box::new(self.rewrite_specialized_body(&sv.len, view_params)),
+                elem_ty: sv.elem_ty.clone(),
+            }),
         }
     }
 
     fn rewrite_specialized_place(
         &mut self,
         place: &Place,
-        view_params: &HashMap<SymbolId, (SymbolId, SymbolId, u32, u32, Type<TypeName>)>,
+        view_params: &HashMap<SymbolId, (SymbolId, SymbolId, BindingRef, Type<TypeName>)>,
     ) -> Place {
         match place {
             Place::BufferSlice {
@@ -1396,36 +1367,35 @@ impl BufferSpecializer {
     // View expression resolution
     // =========================================================================
 
-    /// Try to resolve an expression to a `ViewInfo` — i.e. determine whether
+    /// Try to resolve an expression to a `StorageView` — i.e. determine whether
     /// it refers (directly or via slicing) to a known buffer-backed view.
     ///
-    /// Returns `Some(ViewInfo)` for:
+    /// Returns `Some(StorageView)` for:
     /// - `Var(sym)` where sym is in `view_params`
     /// - `_w_intrinsic_slice(expr, start, end)` where expr resolves to a view
     fn try_resolve_view_expr(
         &mut self,
         term: &Term,
-        view_params: &HashMap<SymbolId, (SymbolId, SymbolId, u32, u32, Type<TypeName>)>,
-    ) -> Option<ViewInfo> {
+        view_params: &HashMap<SymbolId, (SymbolId, SymbolId, BindingRef, Type<TypeName>)>,
+    ) -> Option<crate::tlc::StorageView> {
         match &term.kind {
             TermKind::Var(VarRef::Symbol(sym)) => {
-                let (offset_sym, len_sym, set, binding, elem_ty) = view_params.get(sym)?;
+                let (offset_sym, len_sym, br, elem_ty) = view_params.get(sym)?;
                 let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
-                Some(ViewInfo {
-                    offset: Term {
+                Some(crate::tlc::StorageView {
+                    binding: *br,
+                    offset: Box::new(Term {
                         id: self.term_ids.next_id(),
                         ty: u32_ty.clone(),
                         span: term.span,
                         kind: TermKind::Var(VarRef::Symbol(*offset_sym)),
-                    },
-                    len: Term {
+                    }),
+                    len: Box::new(Term {
                         id: self.term_ids.next_id(),
                         ty: u32_ty,
                         span: term.span,
                         kind: TermKind::Var(VarRef::Symbol(*len_sym)),
-                    },
-                    set: *set,
-                    binding: *binding,
+                    }),
                     elem_ty: elem_ty.clone(),
                 })
             }
@@ -1447,7 +1417,7 @@ impl BufferSpecializer {
                         // new_offset = parent.offset + start
                         let new_offset = self.make_binop_app(
                             ast::BinaryOp { op: "+".to_string() },
-                            parent.offset,
+                            *parent.offset,
                             start.clone(),
                             u32_ty.clone(),
                             span,
@@ -1462,11 +1432,10 @@ impl BufferSpecializer {
                             span,
                         );
 
-                        return Some(ViewInfo {
-                            offset: new_offset,
-                            len: new_len,
-                            set: parent.set,
+                        return Some(crate::tlc::StorageView {
                             binding: parent.binding,
+                            offset: Box::new(new_offset),
+                            len: Box::new(new_len),
                             elem_ty: parent.elem_ty,
                         });
                     }

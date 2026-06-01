@@ -752,19 +752,17 @@ impl SoaTransformer {
                 len: Box::new(self.transform_term(len)),
                 step: step.as_ref().map(|s| Box::new(self.transform_term(s))),
             },
-            ArrayExpr::StorageBuffer {
-                set,
+            ArrayExpr::StorageView(crate::tlc::StorageView {
                 binding,
                 offset,
                 len,
                 elem_ty,
-            } => ArrayExpr::StorageBuffer {
-                set: *set,
+            }) => ArrayExpr::StorageView(crate::tlc::StorageView {
                 binding: *binding,
                 offset: Box::new(self.transform_term(offset)),
                 len: Box::new(self.transform_term(len)),
                 elem_ty: soa_type(elem_ty),
-            },
+            }),
         }
     }
 

@@ -457,19 +457,14 @@ fn binop(op: &str, lhs: Term, rhs: Term, ty: Type<TypeName>, span: ast::Span) ->
 
 fn classify_input(input: &ArrayExpr, entry_slots: &[Option<EntryParamBinding>]) -> Option<ArrayProvenance> {
     match input {
-        ArrayExpr::StorageBuffer {
-            set,
-            binding,
-            elem_ty,
-            ..
-        } => {
+        ArrayExpr::StorageView(crate::tlc::StorageView { binding, elem_ty, .. }) => {
             let elem_bytes = crate::ssa::layout::type_byte_size(elem_ty).expect(
-                "ArrayExpr::StorageBuffer elem_ty must have a static byte layout — \
+                "ArrayExpr::StorageView elem_ty must have a static byte layout — \
                  the constructor (buffer_specialize / parallelize synthesis) is \
                  responsible for only ever producing sized elem types",
             );
             Some(ArrayProvenance::Storage {
-                binding: BindingRef::new(*set, *binding),
+                binding: *binding,
                 elem_ty: elem_ty.clone(),
                 elem_bytes,
             })
@@ -1236,7 +1231,7 @@ pub fn run(mut program: Program, disable: bool) -> crate::error::Result<Parallel
     // introduced by buffer_specialize/mono for SOAC inputs. Missing these
     // would let fresh intermediates collide with input buffers.
     let mut next_binding: u32 =
-        collect_all_used_bindings(&program).iter().map(|(_, b)| b + 1).max().unwrap_or(0);
+        collect_all_used_bindings(&program).iter().map(|br| br.binding + 1).max().unwrap_or(0);
 
     // Hoist invariant SOACs out of graphical entry bodies into generated
     // compute pre-pass entries. Each pre-pass writes its SOAC result to
@@ -1702,7 +1697,7 @@ fn make_scan_plan(
     // literal, etc.) fail because phase 1 needs a `(set, binding)`
     // pair to chunk.
     let input_likely_storage = match analysis.soac.inputs().first() {
-        Some(ArrayExpr::StorageBuffer { .. }) => true,
+        Some(ArrayExpr::StorageView(_)) => true,
         Some(ArrayExpr::Ref(t)) => matches!(&t.kind, TermKind::Var(VarRef::Symbol(_))),
         _ => false,
     };
@@ -1964,13 +1959,12 @@ fn build_two_phase_entries(
 
     // Phase 2: reduce over the partials buffer, write result to result_binding[0].
     let phase2_name = format!("{}_phase2_combine", entry_name);
-    let partials_input = ArrayExpr::StorageBuffer {
-        set: partials_binding.set,
-        binding: partials_binding.binding,
+    let partials_input = ArrayExpr::StorageView(crate::tlc::StorageView {
+        binding: partials_binding,
         offset: Box::new(uint_lit(0, span)),
         len: Box::new(uint_lit(workgroup.0 as u64, span)),
         elem_ty: elem_type.clone(),
-    };
+    });
     let phase2_soac = SoacOp::Reduce {
         op: reduce_op.clone(),
         ne: Box::new(ne.clone()),
@@ -2354,13 +2348,12 @@ fn build_chunked_soac_body(
 /// Replace a storage buffer's offset/len with chunk-relative values.
 fn chunk_array_expr(input: &ArrayExpr, chunk_start: &Term, chunk_len: &Term) -> ArrayExpr {
     match input {
-        ArrayExpr::StorageBuffer {
-            set,
+        ArrayExpr::StorageView(crate::tlc::StorageView {
             binding,
             offset,
             elem_ty,
             ..
-        } => {
+        }) => {
             // New offset = original_offset + chunk_start
             let new_offset = if is_literal_zero(offset) {
                 chunk_start.clone()
@@ -2373,13 +2366,12 @@ fn chunk_array_expr(input: &ArrayExpr, chunk_start: &Term, chunk_len: &Term) -> 
                     chunk_start.span,
                 )
             };
-            ArrayExpr::StorageBuffer {
-                set: *set,
+            ArrayExpr::StorageView(crate::tlc::StorageView {
                 binding: *binding,
                 offset: Box::new(new_offset),
                 len: Box::new(chunk_len.clone()),
                 elem_ty: elem_ty.clone(),
-            }
+            })
         }
         ArrayExpr::Range { start, len: _, step } => {
             // Range: chunk_start..chunk_len starting from original start.
@@ -2412,7 +2404,7 @@ fn get_input_len(soac: &SoacAnalysis, span: ast::Span) -> Term {
 
 fn get_array_expr_len(ae: &ArrayExpr, span: ast::Span) -> Term {
     match ae {
-        ArrayExpr::StorageBuffer { len, .. } => (**len).clone(),
+        ArrayExpr::StorageView(crate::tlc::StorageView { len, .. }) => (**len).clone(),
         ArrayExpr::Range { len, .. } => (**len).clone(),
         _ => uint_lit(0, span), // fallback
     }
@@ -2883,24 +2875,24 @@ fn input_storage_decls(soac: &SoacAnalysis) -> Vec<interface::StorageBindingDecl
         .collect()
 }
 
-/// Collect every `(set, binding)` pair already claimed anywhere in the
+/// Collect every `BindingRef` already claimed anywhere in the
 /// program so `parallelize::run` can hand out fresh intermediate bindings
 /// that don't collide with anything. Walks every term, picking up
-/// implicit bindings attached by earlier passes as `ArrayExpr::StorageBuffer`
+/// implicit bindings attached by earlier passes as `ArrayExpr::StorageView`
 /// inside SOAC inputs — scan's three-way collision (partials, result,
 /// input) would otherwise emit a broken shader.
-fn collect_all_used_bindings(program: &Program) -> HashSet<(u32, u32)> {
-    let mut used: HashSet<(u32, u32)> = HashSet::new();
+fn collect_all_used_bindings(program: &Program) -> HashSet<BindingRef> {
+    let mut used: HashSet<BindingRef> = HashSet::new();
     for def in &program.defs {
         collect_bindings_in_term(&def.body, &mut used);
     }
     used
 }
 
-fn collect_bindings_in_term(term: &Term, used: &mut HashSet<(u32, u32)>) {
+fn collect_bindings_in_term(term: &Term, used: &mut HashSet<BindingRef>) {
     // At a TermKind wrapping ArrayExpr/Soac, inspect the wrapped shape so
-    // `StorageBuffer` bindings aren't skipped by `for_each_child` (which
-    // only visits Term children and can't extract u32 binding fields).
+    // `StorageView` bindings aren't skipped by `for_each_child` (which
+    // only visits Term children and can't extract binding fields).
     match &term.kind {
         TermKind::ArrayExpr(ae) => collect_bindings_in_ae(ae, used),
         TermKind::Soac(op) => collect_bindings_in_soac(op, used),
@@ -2909,9 +2901,9 @@ fn collect_bindings_in_term(term: &Term, used: &mut HashSet<(u32, u32)>) {
     term.for_each_child(&mut |c| collect_bindings_in_term(c, used));
 }
 
-fn collect_bindings_in_ae(ae: &ArrayExpr, used: &mut HashSet<(u32, u32)>) {
-    if let ArrayExpr::StorageBuffer { set, binding, .. } = ae {
-        used.insert((*set, *binding));
+fn collect_bindings_in_ae(ae: &ArrayExpr, used: &mut HashSet<BindingRef>) {
+    if let ArrayExpr::StorageView(crate::tlc::StorageView { binding: br, .. }) = ae {
+        used.insert(*br);
     }
     match ae {
         ArrayExpr::Zip(aes) => {
@@ -2924,7 +2916,7 @@ fn collect_bindings_in_ae(ae: &ArrayExpr, used: &mut HashSet<(u32, u32)>) {
     }
 }
 
-fn collect_bindings_in_soac(op: &SoacOp, used: &mut HashSet<(u32, u32)>) {
+fn collect_bindings_in_soac(op: &SoacOp, used: &mut HashSet<BindingRef>) {
     match op {
         SoacOp::Map { inputs, .. } | SoacOp::Redomap { inputs, .. } => {
             for ae in inputs {

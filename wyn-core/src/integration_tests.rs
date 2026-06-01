@@ -449,7 +449,7 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::Program, stage: &str) {
                     walk(s, bound, symbols, stage, def_name);
                 }
             }
-            ArrayExpr::StorageBuffer { offset, len, .. } => {
+            ArrayExpr::StorageView(crate::tlc::StorageView { offset, len, .. }) => {
                 walk(offset, bound, symbols, stage, def_name);
                 walk(len, bound, symbols, stage, def_name);
             }

@@ -582,7 +582,7 @@ impl<'p> Builder<'p> {
                 Origin::BorrowedMutableElement
             }
             // Storage-buffer-backed views: conservative borrow.
-            ArrayExpr::StorageBuffer { .. } => Origin::Borrowed,
+            ArrayExpr::StorageView(_) => Origin::Borrowed,
             // Zip is a phase-scoped sentinel that should be absorbed
             // by `tlc::soa::run` before we get here. If one survives,
             // be conservative.
@@ -616,7 +616,7 @@ impl<'p> Builder<'p> {
                     self.visit_term(s);
                 }
             }
-            ArrayExpr::StorageBuffer { offset, len, .. } => {
+            ArrayExpr::StorageView(crate::tlc::StorageView { offset, len, .. }) => {
                 self.visit_term(offset);
                 self.visit_term(len);
             }
@@ -1017,7 +1017,7 @@ impl<'m> Liveness<'m> {
                 let after_start = self.analyze(len, after);
                 self.analyze(start, after_start)
             }
-            ArrayExpr::StorageBuffer { offset, len, .. } => {
+            ArrayExpr::StorageView(crate::tlc::StorageView { offset, len, .. }) => {
                 let after_offset = self.analyze(len, live_after);
                 self.analyze(offset, after_offset)
             }

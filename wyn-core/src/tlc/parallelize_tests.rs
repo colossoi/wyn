@@ -14,7 +14,7 @@ use super::analyze_entry;
 use crate::ast::{self, Span, TypeName};
 use crate::tlc::SoacBody;
 use crate::tlc::{ArrayExpr, Def, DefMeta, Lambda, LoopKind, SoacOp, Term, TermId, TermIdSource, TermKind};
-use crate::{SymbolId, SymbolTable};
+use crate::{BindingRef, SymbolId, SymbolTable};
 use polytype::Type;
 
 // ---------- type helpers ----------
@@ -431,13 +431,12 @@ fn binding_registry_finds_storage_buffer_in_soac_input() {
     };
     let offset = b.term(TermKind::IntLit("0".into()), u32_ty_v.clone());
     let len = b.term(TermKind::IntLit("16".into()), u32_ty_v);
-    let input = ArrayExpr::StorageBuffer {
-        set: 0,
-        binding: 3,
+    let input = ArrayExpr::StorageView(crate::tlc::StorageView {
+        binding: BindingRef::new(0, 3),
         offset: Box::new(offset),
         len: Box::new(len),
         elem_ty: i32_ty(),
-    };
+    });
     let soac = b.term(
         TermKind::Soac(SoacOp::Map {
             lam: SoacBody {
@@ -453,8 +452,8 @@ fn binding_registry_finds_storage_buffer_in_soac_input() {
     let program = program_wrapping_body(&mut b, soac);
     let used = collect_all_used_bindings(&program);
     assert!(
-        used.contains(&(0, 3)),
-        "expected (0, 3) in used bindings; got {:?}",
+        used.contains(&BindingRef::new(0, 3)),
+        "expected set=0,binding=3 in used bindings; got {:?}",
         used
     );
 }
@@ -470,13 +469,12 @@ fn binding_registry_finds_nested_storage_buffers() {
     let mk_sb = |b: &mut B, binding: u32| -> ArrayExpr {
         let offset = b.term(TermKind::IntLit("0".into()), u32_ty_v.clone());
         let len = b.term(TermKind::IntLit("8".into()), u32_ty_v.clone());
-        ArrayExpr::StorageBuffer {
-            set: 0,
-            binding,
+        ArrayExpr::StorageView(crate::tlc::StorageView {
+            binding: BindingRef::new(0, binding),
             offset: Box::new(offset),
             len: Box::new(len),
             elem_ty: i32_ty(),
-        }
+        })
     };
 
     let x = b.sym("x");
@@ -503,8 +501,16 @@ fn binding_registry_finds_nested_storage_buffers() {
 
     let program = program_wrapping_body(&mut b, soac);
     let used = collect_all_used_bindings(&program);
-    assert!(used.contains(&(0, 5)), "missing (0, 5): {:?}", used);
-    assert!(used.contains(&(0, 7)), "missing (0, 7): {:?}", used);
+    assert!(
+        used.contains(&BindingRef::new(0, 5)),
+        "missing set=0,binding=5: {:?}",
+        used
+    );
+    assert!(
+        used.contains(&BindingRef::new(0, 7)),
+        "missing set=0,binding=7: {:?}",
+        used
+    );
 }
 
 // =============================================================================

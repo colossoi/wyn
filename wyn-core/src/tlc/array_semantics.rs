@@ -78,8 +78,7 @@ pub enum ArraySemantics {
 
     /// Storage buffer reference (external memory).
     StorageBuffer {
-        set: u32,
-        binding: u32,
+        binding: crate::BindingRef,
     },
 
     /// Opaque — can't classify this operation.
@@ -90,8 +89,7 @@ pub enum ArraySemantics {
 #[derive(Debug, Clone)]
 pub enum PlaceSource {
     BufferSlice {
-        set: u32,
-        binding: u32,
+        binding: crate::BindingRef,
     },
     LocalArray(SymbolId),
     /// Can't classify.
@@ -408,10 +406,9 @@ pub fn classify_array_expr(ae: &ArrayExpr) -> ArraySemantics {
             start: start.clone(),
             len: len.clone(),
         },
-        ArrayExpr::StorageBuffer { set, binding, .. } => ArraySemantics::StorageBuffer {
-            set: *set,
-            binding: *binding,
-        },
+        ArrayExpr::StorageView(crate::tlc::StorageView { binding: br, .. }) => {
+            ArraySemantics::StorageBuffer { binding: *br }
+        }
     }
 }
 

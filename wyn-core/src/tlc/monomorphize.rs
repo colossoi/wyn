@@ -672,7 +672,7 @@ impl<'a> Monomorphizer<'a> {
                 len: Box::new(self.process_term(len)),
                 step: step.as_ref().map(|s| Box::new(self.process_term(s))),
             },
-            ArrayExpr::StorageBuffer { .. } => unreachable!("StorageBuffer introduced after monomorphize"),
+            ArrayExpr::StorageView(_) => unreachable!("StorageBuffer introduced after monomorphize"),
         }
     }
 
@@ -1032,7 +1032,7 @@ impl<'a> Monomorphizer<'a> {
                 len: Box::new(self.apply_subst_term(len, subst)),
                 step: step.as_ref().map(|s| Box::new(self.apply_subst_term(s, subst))),
             },
-            ArrayExpr::StorageBuffer { .. } => unreachable!("StorageBuffer introduced after monomorphize"),
+            ArrayExpr::StorageView(_) => unreachable!("StorageBuffer introduced after monomorphize"),
         }
     }
 }

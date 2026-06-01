@@ -29,7 +29,7 @@ use crate::error::CompilerError;
 use crate::interface;
 use crate::name_resolution::NameResolution;
 use crate::types::TypeExt;
-use crate::{SymbolId, SymbolTable, TypeTable};
+use crate::{BindingRef, SymbolId, SymbolTable, TypeTable};
 use polytype::Type;
 use std::collections::HashMap;
 
@@ -393,15 +393,21 @@ pub enum ArrayExpr {
         step: Option<Box<Term>>,
     },
     /// Storage buffer reference (introduced by buffer_specialize).
-    /// Represents elements from a storage buffer at (set, binding),
-    /// starting at `offset` for `len` elements.
-    StorageBuffer {
-        set: u32,
-        binding: u32,
-        offset: Box<Term>,
-        len: Box<Term>,
-        elem_ty: Type<TypeName>,
-    },
+    /// Represents elements from a storage buffer at `binding`, starting
+    /// at `offset` for `len` elements.
+    StorageView(StorageView),
+}
+
+/// A TLC-level view into a runtime-sized storage buffer: the binding it
+/// reads from plus the offset / length / element-type triple that gives
+/// the view its identity. Used by both `ArrayExpr::StorageView` and the
+/// file-private `ViewInfo` in `buffer_specialize.rs`.
+#[derive(Debug, Clone)]
+pub struct StorageView {
+    pub binding: BindingRef,
+    pub offset: Box<Term>,
+    pub len: Box<Term>,
+    pub elem_ty: Type<TypeName>,
 }
 
 /// A second-order array combinator (SOAC) operation.
@@ -940,9 +946,9 @@ where
                 f(s);
             }
         }
-        ArrayExpr::StorageBuffer { offset, len, .. } => {
-            f(offset);
-            f(len);
+        ArrayExpr::StorageView(sv) => {
+            f(&sv.offset);
+            f(&sv.len);
         }
     }
 }
@@ -1084,19 +1090,17 @@ where
             len: Box::new(f(*len)),
             step: step.map(|s| Box::new(f(*s))),
         },
-        ArrayExpr::StorageBuffer {
-            set,
+        ArrayExpr::StorageView(StorageView {
             binding,
             offset,
             len,
             elem_ty,
-        } => ArrayExpr::StorageBuffer {
-            set,
+        }) => ArrayExpr::StorageView(StorageView {
             binding,
             offset: Box::new(f(*offset)),
             len: Box::new(f(*len)),
             elem_ty,
-        },
+        }),
     }
 }
 

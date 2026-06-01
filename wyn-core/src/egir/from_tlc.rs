@@ -1695,13 +1695,12 @@ impl<'a> Converter<'a> {
                 };
                 Ok(self.intern_pure(PureOp::ArrayRange { has_step }, operands, ty))
             }
-            ArrayExpr::StorageBuffer {
-                set,
+            ArrayExpr::StorageView(crate::tlc::StorageView {
                 binding,
                 offset,
                 len,
                 elem_ty,
-            } => {
+            }) => {
                 let offset_nid = self.convert_term(offset)?;
                 let len_nid = self.convert_term(len)?;
                 let array_ty = Type::Constructed(
@@ -1717,9 +1716,7 @@ impl<'a> Converter<'a> {
                 let effect_out = self.alloc_effect();
                 self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
                     kind: SideEffectKind::Inst(InstKind::Op {
-                        tag: crate::op::OpTag::StorageView(crate::op::PureViewSource::Storage(
-                            BindingRef::new(*set, *binding),
-                        )),
+                        tag: crate::op::OpTag::StorageView(crate::op::PureViewSource::Storage(*binding)),
                         operands: vec![
                             ValueRef::Ssa(Default::default()),
                             ValueRef::Ssa(Default::default()),
@@ -1762,7 +1759,7 @@ impl<'a> Converter<'a> {
                     Type::Constructed(TypeName::ArrayVariantVirtual, vec![]),
                 ],
             ),
-            ArrayExpr::StorageBuffer { elem_ty, .. } => Type::Constructed(
+            ArrayExpr::StorageView(crate::tlc::StorageView { elem_ty, .. }) => Type::Constructed(
                 TypeName::Array,
                 vec![
                     elem_ty.clone(),
@@ -1792,7 +1789,7 @@ impl<'a> Converter<'a> {
                 terms.first().map(|t| t.ty.clone()).unwrap_or(Type::Constructed(TypeName::Unit, vec![]))
             }
             ArrayExpr::Range { start, .. } => start.ty.clone(),
-            ArrayExpr::StorageBuffer { elem_ty, .. } => elem_ty.clone(),
+            ArrayExpr::StorageView(crate::tlc::StorageView { elem_ty, .. }) => elem_ty.clone(),
         }
     }
 }

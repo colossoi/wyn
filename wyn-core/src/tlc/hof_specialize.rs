@@ -422,7 +422,7 @@ pub(super) fn apply_type_subst_to_array_expr(
             len: Box::new(apply_type_subst_to_term(len, subst, term_ids)),
             step: step.as_ref().map(|s| Box::new(apply_type_subst_to_term(s, subst, term_ids))),
         },
-        ArrayExpr::StorageBuffer { .. } => {
+        ArrayExpr::StorageView(_) => {
             unreachable!("StorageBuffer introduced after defunctionalization")
         }
     }
@@ -856,7 +856,7 @@ fn substitute_var_array_expr(
             len: Box::new(substitute_var(len, old_sym, new_sym, term_ids)),
             step: step.as_ref().map(|s| Box::new(substitute_var(s, old_sym, new_sym, term_ids))),
         },
-        ArrayExpr::StorageBuffer { .. } => {
+        ArrayExpr::StorageView(_) => {
             unreachable!("StorageBuffer introduced after defunctionalization")
         }
     }
