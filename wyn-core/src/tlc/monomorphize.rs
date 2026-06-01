@@ -584,11 +584,11 @@ impl<'a> Monomorphizer<'a> {
             SoacOp::Map {
                 lam,
                 inputs,
-                consumes_input,
+                destination,
             } => SoacOp::Map {
                 lam: self.process_soac_body(lam),
                 inputs: inputs.iter().map(|ae| self.process_array_expr(ae)).collect(),
-                consumes_input: *consumes_input,
+                destination: *destination,
             },
             SoacOp::Reduce { op, ne, input } => SoacOp::Reduce {
                 op: self.process_soac_body(op),
@@ -600,22 +600,22 @@ impl<'a> Monomorphizer<'a> {
                 reduce_op,
                 ne,
                 input,
-                consumes_input,
+                destination,
             } => SoacOp::Scan {
                 op: self.process_soac_body(op),
                 reduce_op: self.process_soac_body(reduce_op),
                 ne: Box::new(self.process_term(ne)),
                 input: self.process_array_expr(input),
-                consumes_input: *consumes_input,
+                destination: *destination,
             },
             SoacOp::Filter {
                 pred,
                 input,
-                consumes_input,
+                destination,
             } => SoacOp::Filter {
                 pred: self.process_soac_body(pred),
                 input: self.process_array_expr(input),
-                consumes_input: *consumes_input,
+                destination: *destination,
             },
             SoacOp::Scatter {
                 dest,
@@ -944,11 +944,11 @@ impl<'a> Monomorphizer<'a> {
             SoacOp::Map {
                 lam,
                 inputs,
-                consumes_input,
+                destination,
             } => SoacOp::Map {
                 lam: self.apply_subst_soac_body(lam, subst),
                 inputs: inputs.iter().map(|ae| self.apply_subst_array_expr(ae, subst)).collect(),
-                consumes_input: *consumes_input,
+                destination: *destination,
             },
             SoacOp::Reduce { op, ne, input } => SoacOp::Reduce {
                 op: self.apply_subst_soac_body(op, subst),
@@ -960,22 +960,22 @@ impl<'a> Monomorphizer<'a> {
                 reduce_op,
                 ne,
                 input,
-                consumes_input,
+                destination,
             } => SoacOp::Scan {
                 op: self.apply_subst_soac_body(op, subst),
                 reduce_op: self.apply_subst_soac_body(reduce_op, subst),
                 ne: Box::new(self.apply_subst_term(ne, subst)),
                 input: self.apply_subst_array_expr(input, subst),
-                consumes_input: *consumes_input,
+                destination: *destination,
             },
             SoacOp::Filter {
                 pred,
                 input,
-                consumes_input,
+                destination,
             } => SoacOp::Filter {
                 pred: self.apply_subst_soac_body(pred, subst),
                 input: self.apply_subst_array_expr(input, subst),
-                consumes_input: *consumes_input,
+                destination: *destination,
             },
             SoacOp::Scatter {
                 dest,

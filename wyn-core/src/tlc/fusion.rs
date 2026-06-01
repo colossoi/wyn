@@ -18,7 +18,10 @@ use std::collections::HashMap;
 
 use super::array_semantics::{ArraySemantics, FunctionSummary, FusionKind, can_fuse, summarize_program};
 use super::producer_graph::{self, ProducerEdge};
-use super::{ArrayExpr, Def, Lambda, Program, SoacOp, Term, TermIdSource, TermKind, extract_lambda_params};
+use super::{
+    ArrayExpr, Def, Lambda, Program, SoacDestination, SoacOp, Term, TermIdSource, TermKind,
+    extract_lambda_params,
+};
 
 type Summaries = HashMap<SymbolId, FunctionSummary>;
 
@@ -235,7 +238,7 @@ fn build_fused_from_semantics(
                         captures: vec![],
                     },
                     inputs: input_exprs,
-                    consumes_input: false,
+                    destination: SoacDestination::Fresh,
                 }),
             })
         }
@@ -282,8 +285,8 @@ fn build_fused_from_semantics(
                     ne: init.clone(),
                     input: input_exprs[0].clone(),
                     // Fusion runs before apply_ownership; ownership pass
-                    // will (re-)decide consumes_input on this fused Scan.
-                    consumes_input: false,
+                    // will (re-)decide destination on this fused Scan.
+                    destination: SoacDestination::Fresh,
                 }),
             })
         }
@@ -421,7 +424,7 @@ fn fuse_inline_soac_inputs(term: Term, symbols: &mut SymbolTable, term_ids: &mut
         TermKind::Soac(SoacOp::Map {
             lam,
             inputs,
-            consumes_input,
+            destination,
         }) => {
             let has_fusible = inputs.iter().any(|input| {
                 matches!(input, ArrayExpr::Ref(t) if matches!(t.kind, TermKind::Soac(SoacOp::Map { .. })))
@@ -437,7 +440,7 @@ fn fuse_inline_soac_inputs(term: Term, symbols: &mut SymbolTable, term_ids: &mut
                 kind: TermKind::Soac(SoacOp::Map {
                     lam,
                     inputs,
-                    consumes_input,
+                    destination,
                 }),
                 ..term
             }
@@ -476,7 +479,7 @@ fn fuse_inline_soac_inputs(term: Term, symbols: &mut SymbolTable, term_ids: &mut
             reduce_op,
             ne,
             input,
-            consumes_input,
+            destination,
         }) => {
             if op.lam.params.len() == 2 {
                 if let Some((map_sb, map_inputs)) = inline_map_producer(&input) {
@@ -496,8 +499,8 @@ fn fuse_inline_soac_inputs(term: Term, symbols: &mut SymbolTable, term_ids: &mut
                                 ne,
                                 input: map_inputs.into_iter().next().unwrap(),
                                 // Fusion runs before apply_ownership; the
-                                // ownership pass re-decides consumes_input.
-                                consumes_input: false,
+                                // ownership pass re-decides destination.
+                                destination: SoacDestination::Fresh,
                             }),
                             ..term
                         };
@@ -510,7 +513,7 @@ fn fuse_inline_soac_inputs(term: Term, symbols: &mut SymbolTable, term_ids: &mut
                     reduce_op,
                     ne,
                     input,
-                    consumes_input,
+                    destination,
                 }),
                 ..term
             }
@@ -597,7 +600,7 @@ fn fuse_inline_map_inputs(
             captures: vec![],
         },
         inputs: new_inputs,
-        consumes_input: false,
+        destination: SoacDestination::Fresh,
     }
 }
 

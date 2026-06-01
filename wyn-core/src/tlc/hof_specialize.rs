@@ -334,11 +334,11 @@ pub(super) fn apply_type_subst_to_soac(
         SoacOp::Map {
             lam,
             inputs,
-            consumes_input,
+            destination,
         } => SoacOp::Map {
             lam: apply_type_subst_to_soac_body(lam, subst, term_ids),
             inputs: inputs.iter().map(|ae| apply_type_subst_to_array_expr(ae, subst, term_ids)).collect(),
-            consumes_input: *consumes_input,
+            destination: *destination,
         },
         SoacOp::Reduce { op, ne, input } => SoacOp::Reduce {
             op: apply_type_subst_to_soac_body(op, subst, term_ids),
@@ -350,22 +350,22 @@ pub(super) fn apply_type_subst_to_soac(
             reduce_op,
             ne,
             input,
-            consumes_input,
+            destination,
         } => SoacOp::Scan {
             op: apply_type_subst_to_soac_body(op, subst, term_ids),
             reduce_op: apply_type_subst_to_soac_body(reduce_op, subst, term_ids),
             ne: Box::new(apply_type_subst_to_term(ne, subst, term_ids)),
             input: apply_type_subst_to_array_expr(input, subst, term_ids),
-            consumes_input: *consumes_input,
+            destination: *destination,
         },
         SoacOp::Filter {
             pred,
             input,
-            consumes_input,
+            destination,
         } => SoacOp::Filter {
             pred: apply_type_subst_to_soac_body(pred, subst, term_ids),
             input: apply_type_subst_to_array_expr(input, subst, term_ids),
-            consumes_input: *consumes_input,
+            destination: *destination,
         },
         SoacOp::Scatter {
             dest,
@@ -759,14 +759,14 @@ fn substitute_var_soac(
         SoacOp::Map {
             lam,
             inputs,
-            consumes_input,
+            destination,
         } => SoacOp::Map {
             lam: substitute_var_soac_body(lam, old_sym, new_sym, term_ids),
             inputs: inputs
                 .iter()
                 .map(|ae| substitute_var_array_expr(ae, old_sym, new_sym, term_ids))
                 .collect(),
-            consumes_input: *consumes_input,
+            destination: *destination,
         },
         SoacOp::Reduce { op, ne, input } => SoacOp::Reduce {
             op: substitute_var_soac_body(op, old_sym, new_sym, term_ids),
@@ -778,22 +778,22 @@ fn substitute_var_soac(
             reduce_op,
             ne,
             input,
-            consumes_input,
+            destination,
         } => SoacOp::Scan {
             op: substitute_var_soac_body(op, old_sym, new_sym, term_ids),
             reduce_op: substitute_var_soac_body(reduce_op, old_sym, new_sym, term_ids),
             ne: Box::new(substitute_var(ne, old_sym, new_sym, term_ids)),
             input: substitute_var_array_expr(input, old_sym, new_sym, term_ids),
-            consumes_input: *consumes_input,
+            destination: *destination,
         },
         SoacOp::Filter {
             pred,
             input,
-            consumes_input,
+            destination,
         } => SoacOp::Filter {
             pred: substitute_var_soac_body(pred, old_sym, new_sym, term_ids),
             input: substitute_var_array_expr(input, old_sym, new_sym, term_ids),
-            consumes_input: *consumes_input,
+            destination: *destination,
         },
         SoacOp::Scatter {
             dest,

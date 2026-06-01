@@ -410,6 +410,26 @@ pub struct StorageView {
     pub elem_ty: Type<TypeName>,
 }
 
+/// Where an array-producing SOAC's per-iteration result is written.
+/// Used by `Map`, `Scan`, and `Filter`. At TLC only `Fresh` and
+/// `InputBuffer` are produced — the ownership pass switches `Fresh` to
+/// `InputBuffer` for inputs that are mutable, dead-after, and pointwise.
+/// `OutputView` is set EGIR-side by `assign_outputs` when a retargetable
+/// SOAC streams directly into a bound compute-shader output view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SoacDestination {
+    /// Allocate a fresh output buffer, accumulate via the loop's
+    /// carried value, return the buffer.
+    Fresh,
+    /// Mutate the primary input buffer in place at each index, return
+    /// the input buffer as the result. The result aliases `inputs[0]`
+    /// instead of a fresh allocation.
+    InputBuffer,
+    /// Write to a separately-bound output view (compute-shader ABI).
+    /// EGIR-only; TLC never produces this variant.
+    OutputView,
+}
+
 /// A second-order array combinator (SOAC) operation.
 ///
 /// `Reduce`, `Redomap`, `Scan`, and `ReduceByIndex` parallelize freely on
@@ -423,12 +443,10 @@ pub enum SoacOp {
         lam: SoacBody,
         /// Parallel inputs. `inputs.len() == lam.lam.params.len()`.
         inputs: Vec<ArrayExpr>,
-        /// Set by the ownership pass when the map's primary input
-        /// is mutable, dead-after, pointwise, and not bound to a
-        /// compute-shader output. Read by `egir::from_tlc` to lower
-        /// the map to an in-place loop instead of allocating a
-        /// fresh output buffer.
-        consumes_input: bool,
+        /// Picked by the ownership pass: `InputBuffer` when the map's
+        /// primary input is mutable, dead-after, pointwise, and not
+        /// bound to a compute-shader output; `Fresh` otherwise.
+        destination: SoacDestination,
     },
     Reduce {
         op: SoacBody,
@@ -465,21 +483,17 @@ pub enum SoacOp {
         reduce_op: SoacBody,
         ne: Box<Term>,
         input: ArrayExpr,
-        /// Set by the ownership pass when the scan's input is mutable
-        /// and dead-after the SOAC. Read by `egir::from_tlc` to lower
-        /// the scan to an in-place loop (a[i] = op(a[i-1], a[i]))
-        /// instead of allocating a fresh output buffer. Mirrors the
-        /// flag of the same name on `Map`.
-        consumes_input: bool,
+        /// Picked by the ownership pass: `InputBuffer` when the scan's
+        /// input is mutable and dead-after; `Fresh` otherwise.
+        destination: SoacDestination,
     },
     Filter {
         pred: SoacBody,
         input: ArrayExpr,
-        /// Set by the ownership pass when the filter's input is
-        /// mutable and dead-after. Read by `egir::from_tlc` to reuse
-        /// the input as the output buffer (the result `View` aliases
-        /// it).
-        consumes_input: bool,
+        /// Picked by the ownership pass: `InputBuffer` when the filter's
+        /// input is mutable and dead-after (the result `View` aliases
+        /// it); `Fresh` otherwise.
+        destination: SoacDestination,
     },
     // TODO(scatter): no producer in to_tlc yet. EGIR rejects this variant
     // (`egir::from_tlc::convert_soac`). Kept so the SoacOp enum carries the
@@ -997,11 +1011,11 @@ where
         SoacOp::Map {
             lam,
             inputs,
-            consumes_input,
+            destination,
         } => SoacOp::Map {
             lam: map_soac_body_children(lam, f),
             inputs: inputs.into_iter().map(|ae| map_array_expr_children(ae, f)).collect(),
-            consumes_input,
+            destination,
         },
         SoacOp::Reduce { op, ne, input } => SoacOp::Reduce {
             op: map_soac_body_children(op, f),
@@ -1013,22 +1027,22 @@ where
             reduce_op,
             ne,
             input,
-            consumes_input,
+            destination,
         } => SoacOp::Scan {
             op: map_soac_body_children(op, f),
             reduce_op: map_soac_body_children(reduce_op, f),
             ne: Box::new(f(*ne)),
             input: map_array_expr_children(input, f),
-            consumes_input,
+            destination,
         },
         SoacOp::Filter {
             pred,
             input,
-            consumes_input,
+            destination,
         } => SoacOp::Filter {
             pred: map_soac_body_children(pred, f),
             input: map_array_expr_children(input, f),
-            consumes_input,
+            destination,
         },
         SoacOp::Scatter {
             dest,
@@ -2060,7 +2074,7 @@ impl<'a> Transformer<'a> {
             TermKind::Soac(SoacOp::Map {
                 lam,
                 inputs,
-                consumes_input: false,
+                destination: SoacDestination::Fresh,
             }),
         )
     }
@@ -2105,7 +2119,7 @@ impl<'a> Transformer<'a> {
                 ne: Box::new(ne_term),
                 input: ArrayExpr::Ref(Box::new(arr_term)),
                 // Initial construction; apply_ownership may flip later.
-                consumes_input: false,
+                destination: SoacDestination::Fresh,
             }),
         )
     }
@@ -2125,7 +2139,7 @@ impl<'a> Transformer<'a> {
                 pred,
                 input: ArrayExpr::Ref(Box::new(arr_term)),
                 // Initial construction; apply_ownership may flip later.
-                consumes_input: false,
+                destination: SoacDestination::Fresh,
             }),
         )
     }

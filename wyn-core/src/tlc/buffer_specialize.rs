@@ -562,11 +562,11 @@ impl BufferSpecializer {
             SoacOp::Map {
                 lam,
                 inputs,
-                consumes_input,
+                destination,
             } => SoacOp::Map {
                 lam: self.rewrite_soac_body(lam),
                 inputs: inputs.iter().map(|ae| self.rewrite_array_expr(ae)).collect(),
-                consumes_input: *consumes_input,
+                destination: *destination,
             },
             SoacOp::Reduce { op, ne, input } => SoacOp::Reduce {
                 op: self.rewrite_soac_body(op),
@@ -578,22 +578,22 @@ impl BufferSpecializer {
                 reduce_op,
                 ne,
                 input,
-                consumes_input,
+                destination,
             } => SoacOp::Scan {
                 op: self.rewrite_soac_body(op),
                 reduce_op: self.rewrite_soac_body(reduce_op),
                 ne: Box::new(self.rewrite_term(ne)),
                 input: self.rewrite_array_expr(input),
-                consumes_input: *consumes_input,
+                destination: *destination,
             },
             SoacOp::Filter {
                 pred,
                 input,
-                consumes_input,
+                destination,
             } => SoacOp::Filter {
                 pred: self.rewrite_soac_body(pred),
                 input: self.rewrite_array_expr(input),
-                consumes_input: *consumes_input,
+                destination: *destination,
             },
             SoacOp::Scatter {
                 dest,
@@ -1169,14 +1169,14 @@ impl BufferSpecializer {
             SoacOp::Map {
                 lam,
                 inputs,
-                consumes_input,
+                destination,
             } => SoacOp::Map {
                 lam: self.rewrite_specialized_soac_body(lam, view_params),
                 inputs: inputs
                     .iter()
                     .map(|ae| self.rewrite_specialized_array_expr(ae, view_params))
                     .collect(),
-                consumes_input: *consumes_input,
+                destination: *destination,
             },
             SoacOp::Reduce { op, ne, input } => SoacOp::Reduce {
                 op: self.rewrite_specialized_soac_body(op, view_params),
@@ -1188,22 +1188,22 @@ impl BufferSpecializer {
                 reduce_op,
                 ne,
                 input,
-                consumes_input,
+                destination,
             } => SoacOp::Scan {
                 op: self.rewrite_specialized_soac_body(op, view_params),
                 reduce_op: self.rewrite_specialized_soac_body(reduce_op, view_params),
                 ne: Box::new(self.rewrite_specialized_body(ne, view_params)),
                 input: self.rewrite_specialized_array_expr(input, view_params),
-                consumes_input: *consumes_input,
+                destination: *destination,
             },
             SoacOp::Filter {
                 pred,
                 input,
-                consumes_input,
+                destination,
             } => SoacOp::Filter {
                 pred: self.rewrite_specialized_soac_body(pred, view_params),
                 input: self.rewrite_specialized_array_expr(input, view_params),
-                consumes_input: *consumes_input,
+                destination: *destination,
             },
             SoacOp::Scatter {
                 dest,

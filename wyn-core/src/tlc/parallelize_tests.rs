@@ -12,8 +12,10 @@
 use super::VarRef;
 use super::analyze_entry;
 use crate::ast::{self, Span, TypeName};
-use crate::tlc::SoacBody;
-use crate::tlc::{ArrayExpr, Def, DefMeta, Lambda, LoopKind, SoacOp, Term, TermId, TermIdSource, TermKind};
+use crate::tlc::{
+    ArrayExpr, Def, DefMeta, Lambda, LoopKind, SoacBody, SoacDestination, SoacOp, Term, TermId,
+    TermIdSource, TermKind,
+};
 use crate::{BindingRef, SymbolId, SymbolTable};
 use polytype::Type;
 
@@ -118,7 +120,7 @@ impl B {
                     captures: vec![],
                 },
                 inputs: vec![input],
-                consumes_input: false,
+                destination: SoacDestination::Fresh,
             }),
             arr_i32_ty(),
         )
@@ -376,7 +378,7 @@ fn t11_required_params_closure() {
                 captures: vec![],
             },
             inputs: vec![input],
-            consumes_input: false,
+            destination: SoacDestination::Fresh,
         }),
         arr_i32_ty(),
     );
@@ -442,7 +444,7 @@ fn binding_registry_finds_storage_buffer_in_soac_input() {
                 captures: vec![],
             },
             inputs: vec![input],
-            consumes_input: false,
+            destination: SoacDestination::Fresh,
         }),
         arr_i32_ty(),
     );
@@ -492,7 +494,7 @@ fn binding_registry_finds_nested_storage_buffers() {
                 captures: vec![],
             },
             inputs: vec![zip],
-            consumes_input: false,
+            destination: SoacDestination::Fresh,
         }),
         arr_i32_ty(),
     );

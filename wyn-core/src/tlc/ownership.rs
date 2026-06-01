@@ -26,7 +26,9 @@ use std::collections::{HashMap, HashSet};
 
 use crate::SymbolId;
 use crate::ast::{Span, TypeName};
-use crate::tlc::{ArrayExpr, Def, DefMeta, Lambda, LoopKind, Program, SoacOp, Term, TermId, TermKind};
+use crate::tlc::{
+    ArrayExpr, Def, DefMeta, Lambda, LoopKind, Program, SoacDestination, SoacOp, Term, TermId, TermKind,
+};
 use crate::types;
 use polytype::Type;
 
@@ -1186,10 +1188,10 @@ impl<'m> Rewriter<'m> {
         let mut rewritten = term.map_children(&mut |child| self.rewrite(child));
         if self.consuming_soacs.contains(&id) {
             match &mut rewritten.kind {
-                TermKind::Soac(SoacOp::Map { consumes_input, .. })
-                | TermKind::Soac(SoacOp::Scan { consumes_input, .. })
-                | TermKind::Soac(SoacOp::Filter { consumes_input, .. }) => {
-                    *consumes_input = true;
+                TermKind::Soac(SoacOp::Map { destination, .. })
+                | TermKind::Soac(SoacOp::Scan { destination, .. })
+                | TermKind::Soac(SoacOp::Filter { destination, .. }) => {
+                    *destination = SoacDestination::InputBuffer;
                 }
                 _ => {}
             }
@@ -1319,7 +1321,7 @@ fn walk_for_eligible_soacs(
             // and the pipeline descriptor skips the auto-output slot.
             // For the serial-fallback path (when parallel scan doesn't
             // fire), `rewrite_map_scan_to_into` overrides any stray
-            // `consumes_input` to `OutputView`.
+            // `InputBuffer` destination to `OutputView`.
             if let Some(input_sym) = input_is_dead_unique_var(term.id, input, model) {
                 if scan_body_ok(&op.lam) && !body_references_sym(&op.lam.body, input_sym) {
                     out.push(term.id);

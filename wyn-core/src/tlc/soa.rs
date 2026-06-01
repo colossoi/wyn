@@ -299,8 +299,8 @@ impl SoaTransformer {
                     SoacOp::Map {
                         lam,
                         inputs,
-                        consumes_input,
-                    } => self.try_normalize_map(lam, inputs, consumes_input),
+                        destination,
+                    } => self.try_normalize_map(lam, inputs, destination),
                     other => other,
                 };
                 self.mk_term(new_ty, span, TermKind::Soac(new_soac))
@@ -595,7 +595,7 @@ impl SoaTransformer {
             SoacOp::Map {
                 lam,
                 inputs,
-                consumes_input,
+                destination,
             } => {
                 let new_lam = self.transform_soac_body(lam);
                 let new_inputs: Vec<ArrayExpr> =
@@ -603,7 +603,7 @@ impl SoaTransformer {
                 SoacOp::Map {
                     lam: new_lam,
                     inputs: new_inputs,
-                    consumes_input: *consumes_input,
+                    destination: *destination,
                 }
             }
             SoacOp::Reduce { op, ne, input } => {
@@ -621,7 +621,7 @@ impl SoaTransformer {
                 reduce_op,
                 ne,
                 input,
-                consumes_input,
+                destination,
             } => {
                 let new_op = self.transform_soac_body(op);
                 let new_reduce_op = self.transform_soac_body(reduce_op);
@@ -632,20 +632,20 @@ impl SoaTransformer {
                     reduce_op: new_reduce_op,
                     ne: Box::new(new_ne),
                     input: new_input,
-                    consumes_input: *consumes_input,
+                    destination: *destination,
                 }
             }
             SoacOp::Filter {
                 pred,
                 input,
-                consumes_input,
+                destination,
             } => {
                 let new_pred = self.transform_soac_body(pred);
                 let new_input = self.transform_array_expr(input);
                 SoacOp::Filter {
                     pred: new_pred,
                     input: new_input,
-                    consumes_input: *consumes_input,
+                    destination: *destination,
                 }
             }
             SoacOp::Scatter {
@@ -861,13 +861,13 @@ impl SoaTransformer {
         &mut self,
         sb: super::SoacBody,
         inputs: Vec<ArrayExpr>,
-        consumes_input: bool,
+        destination: super::SoacDestination,
     ) -> SoacOp {
         if inputs.len() <= 1 || sb.lam.params.len() != 1 {
             return SoacOp::Map {
                 lam: sb,
                 inputs,
-                consumes_input,
+                destination,
             };
         }
 
@@ -880,7 +880,7 @@ impl SoaTransformer {
                 return SoacOp::Map {
                     lam: sb,
                     inputs,
-                    consumes_input,
+                    destination,
                 };
             }
         };
@@ -889,7 +889,7 @@ impl SoaTransformer {
             return SoacOp::Map {
                 lam: sb,
                 inputs,
-                consumes_input,
+                destination,
             };
         }
 
@@ -918,7 +918,7 @@ impl SoaTransformer {
                 captures,
             },
             inputs,
-            consumes_input,
+            destination,
         }
     }
 

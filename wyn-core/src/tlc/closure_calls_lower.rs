@@ -373,7 +373,7 @@ impl<'a> CallLowerer<'a> {
             SoacOp::Map {
                 lam,
                 inputs,
-                consumes_input,
+                destination,
             } => SoacOp::Map {
                 lam: super::SoacBody {
                     lam: lam.lam,
@@ -384,7 +384,7 @@ impl<'a> CallLowerer<'a> {
                         .collect(),
                 },
                 inputs: inputs.into_iter().map(|ae| self.lower_array_expr(ae)).collect(),
-                consumes_input,
+                destination,
             },
             SoacOp::Reduce { op, ne, input } => SoacOp::Reduce {
                 op: super::SoacBody {
@@ -403,7 +403,7 @@ impl<'a> CallLowerer<'a> {
                 reduce_op,
                 ne,
                 input,
-                consumes_input,
+                destination,
             } => SoacOp::Scan {
                 op: super::SoacBody {
                     lam: op.lam,
@@ -423,12 +423,12 @@ impl<'a> CallLowerer<'a> {
                 },
                 ne: Box::new(self.lower_term(*ne)),
                 input: self.lower_array_expr(input),
-                consumes_input,
+                destination,
             },
             SoacOp::Filter {
                 pred,
                 input,
-                consumes_input,
+                destination,
             } => SoacOp::Filter {
                 pred: super::SoacBody {
                     lam: pred.lam,
@@ -439,7 +439,7 @@ impl<'a> CallLowerer<'a> {
                         .collect(),
                 },
                 input: self.lower_array_expr(input),
-                consumes_input,
+                destination,
             },
             SoacOp::Scatter {
                 dest,

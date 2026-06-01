@@ -755,7 +755,7 @@ fn test_intrinsic_alias_inlining() {
 // Vars referring to env-bound symbols must be substituted with the let-rhs
 // term (binder-aware — Lambda params and inner Let-bound names shadow env).
 
-use crate::tlc::{ArrayExpr, SoacBody, SoacOp};
+use crate::tlc::{ArrayExpr, SoacBody, SoacDestination, SoacOp};
 
 /// Assert that `target_sym` does not occur as a free `Var` anywhere
 /// in `term`. Recurses via `map_children`, so it sees through Soac,
@@ -869,7 +869,7 @@ fn let_bound_array_substituted_through_soac_input() {
                 captures: vec![],
             },
             inputs: vec![ArrayExpr::Ref(Box::new(m_var))],
-            consumes_input: false,
+            destination: SoacDestination::Fresh,
         }),
     };
 

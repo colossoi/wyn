@@ -17,7 +17,7 @@ use crate::{BindingRef, SymbolId, SymbolTable};
 use polytype::Type;
 use std::collections::{HashMap, HashSet};
 
-use super::{ArrayExpr, Def, DefMeta, Lambda, Program, SoacOp, Term, TermId, TermKind};
+use super::{ArrayExpr, Def, DefMeta, Lambda, Program, SoacDestination, SoacOp, Term, TermId, TermKind};
 
 // =============================================================================
 // Analysis types
@@ -365,7 +365,7 @@ fn analyze_soac(
         SoacOp::Map {
             lam,
             inputs,
-            consumes_input,
+            destination,
         } => {
             // Map is migrated to the EGIR-side lowering path, which
             // rediscovers input shapes natively (storage buffers, SoA
@@ -373,7 +373,7 @@ fn analyze_soac(
             SoacOp::Map {
                 lam: lam.clone(),
                 inputs: inputs.clone(),
-                consumes_input: *consumes_input,
+                destination: *destination,
             }
         }
         SoacOp::Reduce { op, ne, input } => {
@@ -404,13 +404,13 @@ fn analyze_soac(
             reduce_op,
             ne,
             input,
-            consumes_input,
+            destination,
         } => SoacOp::Scan {
             op: op.clone(),
             reduce_op: reduce_op.clone(),
             ne: ne.clone(),
             input: input.clone(),
-            consumes_input: *consumes_input,
+            destination: *destination,
         },
         _ => return None,
     };
@@ -1728,14 +1728,14 @@ fn make_scan_plan(
         };
     }
 
-    // When the original scan has `consumes_input = true`, phase 1 and
+    // When the original scan has `destination = true`, phase 1 and
     // phase 3 write back to the input buffer; the auto-bound output
     // binding is unused. The pipeline descriptor reroutes
     // accordingly.
     let consuming = matches!(
         &analysis.soac.original,
         SoacOp::Scan {
-            consumes_input: true,
+            destination: SoacDestination::InputBuffer,
             ..
         },
     );
@@ -2269,7 +2269,7 @@ fn build_chunked_soac_body(
         SoacOp::Map {
             lam,
             inputs,
-            consumes_input,
+            destination,
         } => {
             let chunked_inputs = inputs
                 .iter()
@@ -2278,7 +2278,7 @@ fn build_chunked_soac_body(
             SoacOp::Map {
                 lam: lam.clone(),
                 inputs: chunked_inputs,
-                consumes_input: *consumes_input,
+                destination: *destination,
             }
         }
         SoacOp::Reduce { op, ne, input } => SoacOp::Reduce {

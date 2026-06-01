@@ -4,7 +4,7 @@ use super::{Origin, OwnershipModel, analyze, build, eligible_consuming_soacs};
 use crate::Compiler;
 use crate::SymbolTable;
 use crate::builtins::catalog;
-use crate::tlc::{Program, Term, TermKind};
+use crate::tlc::{Program, SoacDestination, Term, TermKind};
 
 #[test]
 fn origin_mutability() {
@@ -986,12 +986,12 @@ entry double(arr: []i32) []i32 = map(|x: i32| x + 1, arr)
 }
 
 // =============================================================================
-// `consumes_input` flag flipping by apply_ownership (Phase C)
+// `destination` flag flipping by apply_ownership (Phase C)
 // =============================================================================
 
 /// Drive the program through to `TlcOwnershipApplied` (post-fusion,
 /// post-apply_ownership). Returns the post-rewrite Program for
-/// inspecting `SoacOp::Map { consumes_input, .. }`.
+/// inspecting `SoacOp::Map { destination, .. }`.
 fn compile_to_owned(source: &str) -> Program {
     let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
     let parsed = Compiler::parse(source, &mut node_counter).expect("parse");
@@ -1011,10 +1011,10 @@ fn compile_to_owned(source: &str) -> Program {
     owned.0.tlc
 }
 
-fn map_consumes_input(program: &Program, fn_name: &str) -> Option<bool> {
-    fn walk(t: &Term) -> Option<bool> {
-        if let TermKind::Soac(SoacOp::Map { consumes_input, .. }) = &t.kind {
-            return Some(*consumes_input);
+fn map_destination(program: &Program, fn_name: &str) -> Option<SoacDestination> {
+    fn walk(t: &Term) -> Option<SoacDestination> {
+        if let TermKind::Soac(SoacOp::Map { destination, .. }) = &t.kind {
+            return Some(*destination);
         }
         let mut found = None;
         t.for_each_child(&mut |child| {
@@ -1036,9 +1036,9 @@ def f(a: *[3][4]i32) [3][4]i32 = map(|row| row, a)
 "#,
     );
     assert_eq!(
-        map_consumes_input(&program, "f"),
-        Some(true),
-        "eligible Map should have consumes_input = true after apply_ownership",
+        map_destination(&program, "f"),
+        Some(SoacDestination::InputBuffer),
+        "eligible Map should have destination = InputBuffer after apply_ownership",
     );
 }
 
@@ -1050,16 +1050,16 @@ def f(a: [3][4]i32) [3][4]i32 = map(|row| row, a)
 "#,
     );
     assert_eq!(
-        map_consumes_input(&program, "f"),
-        Some(false),
-        "Map over non-unique input should keep consumes_input = false",
+        map_destination(&program, "f"),
+        Some(SoacDestination::Fresh),
+        "Map over non-unique input should keep destination = Fresh",
     );
 }
 
-fn scan_consumes_input(program: &Program, fn_name: &str) -> Option<bool> {
-    fn walk(t: &Term) -> Option<bool> {
-        if let TermKind::Soac(SoacOp::Scan { consumes_input, .. }) = &t.kind {
-            return Some(*consumes_input);
+fn scan_destination(program: &Program, fn_name: &str) -> Option<SoacDestination> {
+    fn walk(t: &Term) -> Option<SoacDestination> {
+        if let TermKind::Soac(SoacOp::Scan { destination, .. }) = &t.kind {
+            return Some(*destination);
         }
         let mut found = None;
         t.for_each_child(&mut |child| {
@@ -1081,9 +1081,9 @@ def f(a: *[8]i32) [8]i32 = scan(|acc: i32, x: i32| acc + x, 0, a)
 "#,
     );
     assert_eq!(
-        scan_consumes_input(&program, "f"),
-        Some(true),
-        "eligible Scan should have consumes_input = true after apply_ownership",
+        scan_destination(&program, "f"),
+        Some(SoacDestination::InputBuffer),
+        "eligible Scan should have destination = InputBuffer after apply_ownership",
     );
 }
 
@@ -1095,16 +1095,16 @@ def f(a: [8]i32) [8]i32 = scan(|acc: i32, x: i32| acc + x, 0, a)
 "#,
     );
     assert_eq!(
-        scan_consumes_input(&program, "f"),
-        Some(false),
-        "Scan over non-unique input should keep consumes_input = false",
+        scan_destination(&program, "f"),
+        Some(SoacDestination::Fresh),
+        "Scan over non-unique input should keep destination = Fresh",
     );
 }
 
-fn filter_consumes_input(program: &Program, fn_name: &str) -> Option<bool> {
-    fn walk(t: &Term) -> Option<bool> {
-        if let TermKind::Soac(SoacOp::Filter { consumes_input, .. }) = &t.kind {
-            return Some(*consumes_input);
+fn filter_destination(program: &Program, fn_name: &str) -> Option<SoacDestination> {
+    fn walk(t: &Term) -> Option<SoacDestination> {
+        if let TermKind::Soac(SoacOp::Filter { destination, .. }) = &t.kind {
+            return Some(*destination);
         }
         let mut found = None;
         t.for_each_child(&mut |child| {
@@ -1126,9 +1126,9 @@ def f(a: *[8]i32) ?k.[k]i32 = filter(|x: i32| x > 0, a)
 "#,
     );
     assert_eq!(
-        filter_consumes_input(&program, "f"),
-        Some(true),
-        "eligible Filter should have consumes_input = true after apply_ownership",
+        filter_destination(&program, "f"),
+        Some(SoacDestination::InputBuffer),
+        "eligible Filter should have destination = InputBuffer after apply_ownership",
     );
 }
 
@@ -1140,9 +1140,9 @@ def f(a: [8]i32) ?k.[k]i32 = filter(|x: i32| x > 0, a)
 "#,
     );
     assert_eq!(
-        filter_consumes_input(&program, "f"),
-        Some(false),
-        "Filter over non-unique input should keep consumes_input = false",
+        filter_destination(&program, "f"),
+        Some(SoacDestination::Fresh),
+        "Filter over non-unique input should keep destination = Fresh",
     );
 }
 
@@ -1508,7 +1508,7 @@ fn synth_program_with_populated_soac_captures() -> Program {
                 captures: vec![(cap_sym, unique_arr_ty.clone(), var_outer)],
             },
             inputs: vec![range_input],
-            consumes_input: false,
+            destination: SoacDestination::Fresh,
         }),
     };
 
@@ -1664,7 +1664,7 @@ fn soac_capture_term_is_analyzed_for_liveness() {
                 captures: vec![(cap_sym, arr_ty.clone(), var_outer)],
             },
             inputs: vec![range_input],
-            consumes_input: false,
+            destination: SoacDestination::Fresh,
         }),
     };
 

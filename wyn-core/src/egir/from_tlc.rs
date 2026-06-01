@@ -1379,8 +1379,8 @@ impl<'a> Converter<'a> {
             SoacOp::Map {
                 lam,
                 inputs,
-                consumes_input,
-            } => self.convert_soac_map(lam, inputs, *consumes_input, ty),
+                destination,
+            } => self.convert_soac_map(lam, inputs, *destination, ty),
             SoacOp::Reduce { op, ne, input, .. } => self.convert_soac_reduce(op, ne, input, ty),
             SoacOp::Redomap {
                 op,
@@ -1394,13 +1394,13 @@ impl<'a> Converter<'a> {
                 reduce_op,
                 ne,
                 input,
-                consumes_input,
-            } => self.convert_soac_scan(op, reduce_op, ne, input, *consumes_input, ty),
+                destination,
+            } => self.convert_soac_scan(op, reduce_op, ne, input, *destination, ty),
             SoacOp::Filter {
                 pred,
                 input,
-                consumes_input,
-            } => self.convert_soac_filter(pred, input, *consumes_input, ty),
+                destination,
+            } => self.convert_soac_filter(pred, input, *destination, ty),
             // TODO(scatter): no producer in to_tlc yet (no surface name dispatched here).
             // Variant exists to anchor the place-passing SOAC shape; remove if a wider
             // audit confirms no future use.
@@ -1448,7 +1448,7 @@ impl<'a> Converter<'a> {
         &mut self,
         sb: &SoacBody,
         inputs: &[ArrayExpr],
-        consumes_input: bool,
+        destination: SoacDestination,
         result_ty: Type<TypeName>,
     ) -> Result<NodeId, ConvertError> {
         let f_name = self.lambda_fn_name(&sb.lam)?;
@@ -1479,8 +1479,6 @@ impl<'a> Converter<'a> {
         operands.extend_from_slice(&input_nids);
         operands.extend_from_slice(&capture_nids);
 
-        let destination =
-            if consumes_input { SoacDestination::InputBuffer } else { SoacDestination::Fresh };
         Ok(self.emit_soac(
             PendingSoac::Map {
                 func: f_name,
@@ -1569,7 +1567,7 @@ impl<'a> Converter<'a> {
         reduce_op: &SoacBody,
         ne: &Term,
         input: &ArrayExpr,
-        consumes_input: bool,
+        destination: SoacDestination,
         result_ty: Type<TypeName>,
     ) -> Result<NodeId, ConvertError> {
         let op_name = self.lambda_fn_name(&op.lam)?;
@@ -1593,9 +1591,6 @@ impl<'a> Converter<'a> {
         let mut operands: SmallVec<[NodeId; 4]> = smallvec![arr_nid, init_nid];
         operands.extend(capture_nids.iter().copied());
 
-        let destination =
-            if consumes_input { SoacDestination::InputBuffer } else { SoacDestination::Fresh };
-
         Ok(self.emit_soac(
             PendingSoac::Scan {
                 func: op_name,
@@ -1613,7 +1608,7 @@ impl<'a> Converter<'a> {
         &mut self,
         pred: &SoacBody,
         input: &ArrayExpr,
-        consumes_input: bool,
+        destination: SoacDestination,
         _result_ty: Type<TypeName>,
     ) -> Result<NodeId, ConvertError> {
         let pred_name = self.lambda_fn_name(&pred.lam)?;
@@ -1651,9 +1646,6 @@ impl<'a> Converter<'a> {
 
         let mut operands: SmallVec<[NodeId; 4]> = smallvec![arr_nid];
         operands.extend(capture_nids.iter().copied());
-
-        let destination =
-            if consumes_input { SoacDestination::InputBuffer } else { SoacDestination::Fresh };
 
         Ok(self.emit_soac(
             PendingSoac::Filter {

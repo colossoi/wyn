@@ -141,29 +141,18 @@ pub enum SideEffectKind {
 }
 
 /// Where an array-producing SOAC's per-iteration result is written.
-/// Applies to `Map` and `Scan`; `Reduce` returns a scalar and has no
-/// destination, `Redomap` has its own per-iteration handling.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SoacDestination {
-    /// Allocate a fresh output buffer, accumulate via the loop's
-    /// carried value, return the buffer. Operand layout (for Map):
-    /// `[input_0, ..., input_{n-1}, ...captures]`. For Scan:
-    /// `[input, init, ...captures]`.
-    Fresh,
-    /// Write to a separately-bound output view (compute-shader
-    /// ABI). The view is appended as the last operand. The SOAC's
-    /// own result is unit-valued (writes are effectful). Operand
-    /// layout (Map): `[input_0, ..., ...captures, output_view]`.
-    /// Operand layout (Scan): `[input, init, ...captures, output_view]`.
-    OutputView,
-    /// Mutate `inputs[0]` in place at each index, return the input
-    /// buffer as the result. Set by the ownership pass when the
-    /// input is dead-after, mutable, and the body is pointwise.
-    /// Operand layout matches `Fresh`; the difference is that the
-    /// result aliases `inputs[0]` instead of a fresh allocation.
-    /// Currently implemented for `Map` only.
-    InputBuffer,
-}
+/// Defined in `crate::tlc` and re-exported here so EGIR consumers see
+/// the same type that TLC's `SoacOp::{Map, Scan, Filter}` carry.
+///
+/// Operand layouts in `PendingSoac` are variant-dependent and follow
+/// each destination:
+/// - `Fresh` (Map): `[input_0, ..., input_{n-1}, ...captures]`
+/// - `Fresh` (Scan): `[input, init, ...captures]`
+/// - `OutputView` (Map): `[input_0, ..., ...captures, output_view]`
+/// - `OutputView` (Scan): `[input, init, ...captures, output_view]`
+/// - `InputBuffer`: operand layout matches `Fresh`; the difference is
+///   that the result aliases `inputs[0]` instead of a fresh allocation.
+pub use crate::tlc::SoacDestination;
 
 /// An unexpanded SOAC operation held in the skeleton until `soac_expand` rewrites
 /// it into an explicit loop. All operand NodeIds live in `SideEffect.operand_nodes`

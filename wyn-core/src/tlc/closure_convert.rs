@@ -979,11 +979,11 @@ impl<'a> ClosureConverter<'a> {
             SoacOp::Map {
                 lam,
                 inputs,
-                consumes_input,
+                destination,
             } => SoacOp::Map {
                 lam: self.lift_soac_lambda(lam.lam, span),
                 inputs: inputs.into_iter().map(|ae| self.convert_array_expr(ae, span)).collect(),
-                consumes_input,
+                destination,
             },
             SoacOp::Reduce { op, ne, input } => SoacOp::Reduce {
                 op: self.lift_soac_lambda(op.lam, span),
@@ -995,22 +995,22 @@ impl<'a> ClosureConverter<'a> {
                 reduce_op,
                 ne,
                 input,
-                consumes_input,
+                destination,
             } => SoacOp::Scan {
                 op: self.lift_soac_lambda(op.lam, span),
                 reduce_op: self.lift_soac_lambda(reduce_op.lam, span),
                 ne: Box::new(self.convert_term(*ne)),
                 input: self.convert_array_expr(input, span),
-                consumes_input,
+                destination,
             },
             SoacOp::Filter {
                 pred,
                 input,
-                consumes_input,
+                destination,
             } => SoacOp::Filter {
                 pred: self.lift_soac_lambda(pred.lam, span),
                 input: self.convert_array_expr(input, span),
-                consumes_input,
+                destination,
             },
             SoacOp::Scatter {
                 dest,

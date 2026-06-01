@@ -500,8 +500,8 @@ entry frag() #[location(0)] vec4f32 =
 #[test]
 fn consuming_map_compiles_end_to_end() {
     // `*[N]T` map whose input is dead-after: the ownership pass
-    // sets `consumes_input = true`, EGIR conversion produces
-    // `SoacDestination::InputBuffer`, and `soac_expand` emits the
+    // sets `destination = SoacDestination::InputBuffer`, EGIR
+    // conversion threads it through, and `soac_expand` emits the
     // in-place loop. Compiling end-to-end through SSA exercises
     // every layer.
     let _ssa = compile_to_ssa(
@@ -588,9 +588,10 @@ entry frag(c: vec4f32) vec4f32 =
 #[test]
 fn consuming_scan_compiles_end_to_end() {
     // Parallel of `consuming_map_compiles_end_to_end` for Scan: `*[N]T`
-    // input that's dead-after; ownership sets `consumes_input = true`,
-    // EGIR emits `SoacDestination::InputBuffer`, and `soac_expand` runs
-    // the destination-passing loop. Pre-S4 this hit a panic.
+    // input that's dead-after; ownership sets
+    // `destination = SoacDestination::InputBuffer`, EGIR threads it through,
+    // and `soac_expand` runs the destination-passing loop. Pre-S4 this hit a
+    // panic.
     let _ssa = compile_to_ssa(
         r#"
 def cumsum(a: *[8]i32) [8]i32 = scan(|acc: i32, x: i32| acc + x, 0, a)
@@ -725,9 +726,9 @@ entry parallel_scan(a: []i32) []i32 = scan(|acc: i32, x: i32| acc + x, 0, a)
 #[test]
 fn consuming_filter_compiles_end_to_end() {
     // `*[N]T` filter whose input is dead-after: ownership sets
-    // `consumes_input = true`, EGIR emits
-    // `SoacDestination::InputBuffer`, and `build_filter_loop`
-    // carries the input array as the destination buffer.
+    // `destination = SoacDestination::InputBuffer`, EGIR threads it
+    // through, and `build_filter_loop` carries the input array as the
+    // destination buffer.
     let _ssa = compile_to_ssa(
         r#"
 def keep_pos(a: *[8]i32) ?k.[k]i32 = filter(|x: i32| x > 0, a)

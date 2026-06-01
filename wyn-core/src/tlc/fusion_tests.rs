@@ -1,7 +1,7 @@
 use super::super::{DefMeta, SoacOp};
 use crate::ast::Span;
-use crate::tlc::SoacBody;
 use crate::tlc::fusion::*;
+use crate::tlc::{SoacBody, SoacDestination};
 use std::collections::HashMap;
 
 fn dummy_span() -> Span {
@@ -42,7 +42,7 @@ fn mk_map(lam: Lambda, input: Term, result_ty: Type<TypeName>, term_ids: &mut Te
         TermKind::Soac(SoacOp::Map {
             lam: mk_soac_body(lam),
             inputs: vec![ArrayExpr::Ref(Box::new(input))],
-            consumes_input: false,
+            destination: SoacDestination::Fresh,
         }),
         result_ty,
         term_ids,
@@ -115,7 +115,7 @@ fn mk_scan(
             reduce_op: mk_soac_body(op),
             ne: Box::new(ne),
             input: ArrayExpr::Ref(Box::new(input)),
-            consumes_input: false,
+            destination: SoacDestination::Fresh,
         }),
         result_ty,
         term_ids,
@@ -503,7 +503,7 @@ fn test_zip_fused_producer() {
         TermKind::Soac(SoacOp::Map {
             lam: mk_soac_body(f),
             inputs: vec![ArrayExpr::Ref(Box::new(a)), ArrayExpr::Ref(Box::new(b))],
-            consumes_input: false,
+            destination: SoacDestination::Fresh,
         }),
         array_ty(i32_ty()),
         &mut term_ids,
@@ -619,7 +619,7 @@ fn test_consumer_multi_input_no_fusion() {
         TermKind::Soac(SoacOp::Map {
             lam: mk_soac_body(g),
             inputs: vec![ArrayExpr::Ref(Box::new(b_ref)), ArrayExpr::Ref(Box::new(other))],
-            consumes_input: false,
+            destination: SoacDestination::Fresh,
         }),
         array_ty(i32_ty()),
         &mut term_ids,
@@ -691,7 +691,7 @@ fn test_inline_map_fusion() {
         TermKind::Soac(SoacOp::Map {
             lam: mk_soac_body(f),
             inputs: vec![ArrayExpr::Ref(Box::new(inner_map))],
-            consumes_input: false,
+            destination: SoacDestination::Fresh,
         }),
         array_ty(i32_ty()),
         &mut term_ids,
@@ -846,7 +846,7 @@ fn test_inline_chain_of_three() {
         TermKind::Soac(SoacOp::Map {
             lam: mk_soac_body(g),
             inputs: vec![ArrayExpr::Ref(Box::new(inner))],
-            consumes_input: false,
+            destination: SoacDestination::Fresh,
         }),
         array_ty(i32_ty()),
         &mut term_ids,
@@ -863,7 +863,7 @@ fn test_inline_chain_of_three() {
         TermKind::Soac(SoacOp::Map {
             lam: mk_soac_body(f),
             inputs: vec![ArrayExpr::Ref(Box::new(middle))],
-            consumes_input: false,
+            destination: SoacDestination::Fresh,
         }),
         array_ty(i32_ty()),
         &mut term_ids,
@@ -953,7 +953,7 @@ fn test_zip_fused_consumer_inline() {
                 ArrayExpr::Ref(Box::new(inner_map)), // will be fused
                 ArrayExpr::Ref(Box::new(b)),         // stays as-is
             ],
-            consumes_input: false,
+            destination: SoacDestination::Fresh,
         }),
         array_ty(i32_ty()),
         &mut term_ids,
@@ -1064,7 +1064,7 @@ fn test_map_zip_map() {
                 ArrayExpr::Ref(Box::new(map_g_a)),
                 ArrayExpr::Ref(Box::new(map_h_b)),
             ],
-            consumes_input: false,
+            destination: SoacDestination::Fresh,
         }),
         array_ty(i32_ty()),
         &mut term_ids,
