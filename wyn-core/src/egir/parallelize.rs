@@ -317,8 +317,7 @@ pub fn phase1_transform_reduce(
         o.storage_binding = None;
     }
     entry.storage_bindings.push(crate::interface::StorageBindingDecl {
-        set: partials_binding.0,
-        binding: partials_binding.1,
+        binding: crate::BindingRef::new(partials_binding.0, partials_binding.1),
         role: crate::interface::StorageRole::Intermediate,
         elem_ty,
         length: None,
@@ -937,8 +936,7 @@ pub fn phase1_transform_redomap(
         o.storage_binding = None;
     }
     entry.storage_bindings.push(crate::interface::StorageBindingDecl {
-        set: partials_binding.0,
-        binding: partials_binding.1,
+        binding: crate::BindingRef::new(partials_binding.0, partials_binding.1),
         role: crate::interface::StorageRole::Intermediate,
         elem_ty,
         length: None,
@@ -1192,8 +1190,7 @@ fn transform_scan_entry(
     // and writes the corrected prefix back. Declare the additional
     // intermediate binding on the entry interface.
     entry.storage_bindings.push(crate::interface::StorageBindingDecl {
-        set: block_offsets_binding.0,
-        binding: block_offsets_binding.1,
+        binding: crate::BindingRef::new(block_offsets_binding.0, block_offsets_binding.1),
         role: crate::interface::StorageRole::Intermediate,
         elem_ty: entry.storage_bindings[0].elem_ty.clone(),
         length: None,
@@ -1339,8 +1336,7 @@ pub fn phase1_transform_scan(
     }
 
     entry.storage_bindings.push(crate::interface::StorageBindingDecl {
-        set: block_sums_binding.0,
-        binding: block_sums_binding.1,
+        binding: crate::BindingRef::new(block_sums_binding.0, block_sums_binding.1),
         role: crate::interface::StorageRole::Intermediate,
         elem_ty,
         length: None,

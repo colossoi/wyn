@@ -391,13 +391,17 @@ fn convert_entry_point(
                     ty: field_ty.clone(),
                     decoration: None,
                     size_hint: None,
-                    storage_binding: Some(BindingRef::new(slot.set, slot.binding)),
+                    storage_binding: Some(slot.binding),
                     uniform_binding: None,
                     push_constant: None,
                     texture_binding: None,
                     sampler_binding: None,
                 });
-                view_nids.push(converter.emit_storage_view(slot.set, slot.binding, field_ty.clone()));
+                view_nids.push(converter.emit_storage_view(
+                    slot.binding.set,
+                    slot.binding.binding,
+                    field_ty.clone(),
+                ));
             }
             let tuple_nid = converter.intern_pure(PureOp::Tuple(view_nids.len()), view_nids, ty.clone());
             converter.locals.insert(*sym, tuple_nid);
@@ -405,7 +409,7 @@ fn convert_entry_point(
         }
 
         let auto_storage_binding = param_binding.as_ref().and_then(|b| match &b.kind {
-            EntryParamBindingKind::Single { set, binding, .. } => Some(BindingRef::new(*set, *binding)),
+            EntryParamBindingKind::Single { binding, .. } => Some(*binding),
             EntryParamBindingKind::TupleOfViews(_) => None,
         });
         let storage_binding = auto_storage_binding.or(attr_storage_binding);

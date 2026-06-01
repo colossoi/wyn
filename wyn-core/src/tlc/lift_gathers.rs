@@ -82,7 +82,9 @@ fn lift_entry(program: &mut Program, idx: usize, new_defs: &mut Vec<Def>) {
         .iter()
         .flatten()
         .filter_map(|b| match &b.kind {
-            EntryParamBindingKind::Single { set, binding, .. } => Some((b.param_sym, (*set, *binding))),
+            EntryParamBindingKind::Single { binding, .. } => {
+                Some((b.param_sym, (binding.set, binding.binding)))
+            }
             EntryParamBindingKind::TupleOfViews(_) => None,
         })
         .collect();
@@ -261,8 +263,7 @@ fn try_lift(
     // sizing policy. `from_tlc` emits any length-bearing storage binding as a
     // compiler-managed Intermediate in the descriptor (read-only here).
     let decl = StorageBindingDecl {
-        set: binding.0,
-        binding: binding.1,
+        binding: crate::BindingRef::new(binding.0, binding.1),
         role: StorageRole::Input,
         elem_ty,
         length,
@@ -350,8 +351,7 @@ fn build_gather_prepass(
         .expect("try_lift's is_runtime_sized_array(name_ty) gate guarantees an array elem");
     let uniform_attrs = vec![None; captured_inputs.len()];
     let storage_bindings = vec![StorageBindingDecl {
-        set: binding.0,
-        binding: binding.1,
+        binding: crate::BindingRef::new(binding.0, binding.1),
         role: StorageRole::Output,
         elem_ty,
         length,

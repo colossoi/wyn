@@ -126,8 +126,7 @@ fn lifts_map_gather_into_prepass_and_storage_index() {
 
     // Producer and consumer agree on the gather buffer's (set, binding).
     assert_eq!(
-        (out_binding.set, out_binding.binding),
-        (in_binding.set, in_binding.binding),
+        out_binding.binding, in_binding.binding,
         "pre-pass output and consumer input must name the same gather buffer"
     );
 }

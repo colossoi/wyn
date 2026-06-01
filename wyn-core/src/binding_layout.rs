@@ -88,8 +88,7 @@ pub fn compute_entry_binding_layout(
                         .into_iter()
                         .map(|(elem_ty, elem_bytes)| {
                             let slot = TupleFieldBinding {
-                                set,
-                                binding: binding_num,
+                                binding: BindingRef::new(set, binding_num),
                                 elem_ty: elem_ty.clone(),
                                 elem_bytes,
                             };
@@ -115,8 +114,7 @@ pub fn compute_entry_binding_layout(
             out.push(Some(EntryParamBinding {
                 param_sym: *sym,
                 kind: EntryParamBindingKind::Single {
-                    set,
-                    binding: binding_num,
+                    binding: BindingRef::new(set, binding_num),
                     elem_ty: elem_ty.clone(),
                     elem_bytes,
                 },

@@ -155,7 +155,7 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                 if decl.length.is_none() {
                     continue;
                 }
-                if !claimed.insert((decl.set, decl.binding)) {
+                if !claimed.insert((decl.binding.set, decl.binding.binding)) {
                     continue;
                 }
                 let access = match decl.role {
@@ -163,11 +163,11 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                     _ => Access::ReadOnly,
                 };
                 bindings.push(Binding::StorageBuffer {
-                    set: decl.set,
-                    binding: decl.binding,
+                    set: decl.binding.set,
+                    binding: decl.binding.binding,
                     access,
                     usage: BufferUsage::Intermediate,
-                    name: format!("{}_gather_b{}", entry.name, decl.binding),
+                    name: format!("{}_gather_b{}", entry.name, decl.binding.binding),
                     length: decl.length.clone(),
                 });
             }

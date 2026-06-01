@@ -725,13 +725,13 @@ impl<'a> LowerCtx<'a> {
             // Explicit compiler-inserted bindings (e.g. parallelize's
             // partial-sum buffer).
             for sb in &entry.storage_bindings {
-                if is_declared(sb.set, sb.binding) {
+                if is_declared(sb.binding.set, sb.binding.binding) {
                     continue;
                 }
-                let key = (sb.set, sb.binding);
+                let key = (sb.binding.set, sb.binding.binding);
                 let ty_str = self.type_emitter.type_to_wgsl(&sb.elem_ty)?;
                 let entry_ref = synth.entry(key).or_insert_with(|| {
-                    let name = format!("_buf_{}_{}", sb.set, sb.binding);
+                    let name = format!("_buf_{}_{}", sb.binding.set, sb.binding.binding);
                     (ty_str.clone(), name, false, false)
                 });
                 match sb.role {
@@ -1473,7 +1473,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
     fn storage_name(&self, set: u32, binding: u32) -> Result<String> {
         let br = BindingRef::new(set, binding);
         for entry in &self.ctx.program.entry_points {
-            if entry.storage_bindings.iter().any(|sb| sb.set == set && sb.binding == binding)
+            if entry.storage_bindings.iter().any(|sb| sb.binding == br)
                 || entry.inputs.iter().any(|i| i.storage_binding == Some(br))
                 || entry.outputs.iter().any(|o| o.storage_binding == Some(br))
             {

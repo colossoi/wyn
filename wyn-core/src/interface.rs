@@ -13,6 +13,7 @@
 
 use crate::ast::{Expression, Pattern, Span};
 use crate::types::Type;
+use crate::{BindingRef, SymbolId};
 
 // ---------------------------------------------------------------------------
 // Shader-stage / parameter attributes
@@ -132,7 +133,7 @@ pub struct EntryOutput {
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntryParamBinding {
     /// The body-level symbol this binding describes.
-    pub param_sym: crate::SymbolId,
+    pub param_sym: SymbolId,
     pub kind: EntryParamBindingKind,
 }
 
@@ -142,10 +143,9 @@ pub struct EntryParamBinding {
 /// re-derive it from the type.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EntryParamBindingKind {
-    /// Plain `[]T` view param: one storage buffer at `(set, binding)`.
+    /// Plain `[]T` view param: one storage buffer at `binding`.
     Single {
-        set: u32,
-        binding: u32,
+        binding: BindingRef,
         elem_ty: Type,
         elem_bytes: u32,
     },
@@ -156,8 +156,7 @@ pub enum EntryParamBindingKind {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TupleFieldBinding {
-    pub set: u32,
-    pub binding: u32,
+    pub binding: BindingRef,
     pub elem_ty: Type,
     pub elem_bytes: u32,
 }
@@ -171,22 +170,21 @@ impl EntryParamBinding {
         }
     }
 
-    /// First `(set, binding, elem_ty, elem_bytes)` for this param —
+    /// First `(binding, elem_ty, elem_bytes)` for this param —
     /// the only buffer for `Single`, the field-0 buffer for
     /// `TupleOfViews`. Callers that need to size a dispatch from the
     /// param's outer length use this; tuple fields share the outer
     /// length by construction.
-    pub fn first_buffer(&self) -> (u32, u32, &Type, u32) {
+    pub fn first_buffer(&self) -> (BindingRef, &Type, u32) {
         match &self.kind {
             EntryParamBindingKind::Single {
-                set,
                 binding,
                 elem_ty,
                 elem_bytes,
-            } => (*set, *binding, elem_ty, *elem_bytes),
+            } => (*binding, elem_ty, *elem_bytes),
             EntryParamBindingKind::TupleOfViews(fields) => {
                 let f = fields.first().expect("tuple-of-views with zero fields");
-                (f.set, f.binding, &f.elem_ty, f.elem_bytes)
+                (f.binding, &f.elem_ty, f.elem_bytes)
             }
         }
     }
@@ -263,8 +261,7 @@ pub enum StorageRole {
 /// bindings the source program didn't (e.g. `parallelize`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct StorageBindingDecl {
-    pub set: u32,
-    pub binding: u32,
+    pub binding: BindingRef,
     pub role: StorageRole,
     /// The element type stored at each index of the buffer.
     pub elem_ty: Type,

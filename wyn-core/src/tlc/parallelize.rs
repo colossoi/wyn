@@ -482,11 +482,11 @@ fn classify_input(input: &ArrayExpr, entry_slots: &[Option<EntryParamBinding>]) 
             // same lookup `default_entry_dispatch_len` uses. Tuple-of-views
             // params resolve to their first slot (same element count).
             if let TermKind::Var(VarRef::Symbol(sym)) = &t.kind {
-                if let Some(binding) = entry_slots.iter().flatten().find(|s| s.param_sym == *sym) {
-                    let (set, binding, elem_ty, elem_bytes) = binding.first_buffer();
+                if let Some(slot) = entry_slots.iter().flatten().find(|s| s.param_sym == *sym) {
+                    let (buf, elem_ty, elem_bytes) = slot.first_buffer();
                     return Some(ArrayProvenance::Storage {
-                        set,
-                        binding,
+                        set: buf.set,
+                        binding: buf.binding,
                         elem_ty: elem_ty.clone(),
                         elem_bytes,
                     });
@@ -1019,8 +1019,7 @@ fn maybe_hoist(
     new_defs.push(prepass_def);
 
     added_decls.push(interface::StorageBindingDecl {
-        set: binding.0,
-        binding: binding.1,
+        binding: crate::BindingRef::new(binding.0, binding.1),
         role: interface::StorageRole::Input,
         elem_ty: name_ty.clone(),
         length: None,
@@ -1266,7 +1265,7 @@ pub fn run(mut program: Program, disable: bool) -> crate::error::Result<Parallel
             if let Some(b) =
                 decl.storage_bindings.iter().find(|b| matches!(b.role, interface::StorageRole::Output))
             {
-                prepass_result_bindings.entry(def.name).or_insert((b.set, b.binding));
+                prepass_result_bindings.entry(def.name).or_insert((b.binding.set, b.binding.binding));
             }
         }
     }
@@ -1951,8 +1950,7 @@ fn build_two_phase_entries(
     // the input buffer at (0, 0) under the too-shallow allocator.
     let mut phase1_bindings = input_storage_decls(&analysis.soac);
     phase1_bindings.push(interface::StorageBindingDecl {
-        set: partials_binding.0,
-        binding: partials_binding.1,
+        binding: crate::BindingRef::new(partials_binding.0, partials_binding.1),
         role: interface::StorageRole::Intermediate,
         elem_ty: elem_type.clone(),
         length: None,
@@ -1999,15 +1997,13 @@ fn build_two_phase_entries(
     // writes the final user-visible `result`.
     let phase2_bindings = vec![
         interface::StorageBindingDecl {
-            set: partials_binding.0,
-            binding: partials_binding.1,
+            binding: crate::BindingRef::new(partials_binding.0, partials_binding.1),
             role: interface::StorageRole::Intermediate,
             elem_ty: elem_type.clone(),
             length: None,
         },
         interface::StorageBindingDecl {
-            set: result_binding.0,
-            binding: result_binding.1,
+            binding: crate::BindingRef::new(result_binding.0, result_binding.1),
             role: interface::StorageRole::Output,
             elem_ty: elem_type.clone(),
             length: None,
@@ -2723,16 +2719,14 @@ fn resolve_range_bound(bound: &Term, def_name: SymbolId, program: &Program) -> O
         return s.parse::<u32>().ok().map(|count| DispatchLen::Fixed { count });
     }
     let &(set, binding) = program.view_lengths.get(&bound.id)?;
+    let target = crate::BindingRef::new(set, binding);
     let elem_bytes =
         entry_binding_slots(program, def_name).into_iter().flatten().find_map(|b| match b.kind {
             EntryParamBindingKind::Single {
-                set: s,
-                binding: bi,
-                elem_bytes,
-                ..
-            } if s == set && bi == binding => Some(elem_bytes),
+                binding, elem_bytes, ..
+            } if binding == target => Some(elem_bytes),
             EntryParamBindingKind::TupleOfViews(fields) => {
-                fields.into_iter().find(|f| f.set == set && f.binding == binding).map(|f| f.elem_bytes)
+                fields.into_iter().find(|f| f.binding == target).map(|f| f.elem_bytes)
             }
             _ => None,
         })?;
@@ -2773,10 +2767,10 @@ fn default_entry_dispatch_len(program: &Program, def_name: SymbolId) -> Dispatch
     let Some(binding) = slots.iter().flatten().next() else {
         return DispatchLen::Fixed { count: 1 };
     };
-    let (set, buf_binding, _elem_ty, elem_bytes) = binding.first_buffer();
+    let (buf, _elem_ty, elem_bytes) = binding.first_buffer();
     DispatchLen::InputBinding {
-        set,
-        binding: buf_binding,
+        set: buf.set,
+        binding: buf.binding,
         elem_bytes,
     }
 }
@@ -2889,8 +2883,7 @@ fn collect_soac_bindings(soac: &SoacAnalysis) -> Vec<Binding> {
 fn input_storage_decls(soac: &SoacAnalysis) -> Vec<interface::StorageBindingDecl> {
     storage_inputs(soac)
         .map(|(_, set, binding, elem_ty)| interface::StorageBindingDecl {
-            set,
-            binding,
+            binding: crate::BindingRef::new(set, binding),
             role: interface::StorageRole::Input,
             elem_ty: elem_ty.clone(),
             length: None,

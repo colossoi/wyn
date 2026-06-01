@@ -25,6 +25,7 @@ use std::collections::HashMap;
 use polytype::Type;
 use smallvec::smallvec;
 
+use crate::BindingRef;
 use crate::ast::{Span, TypeName};
 use crate::interface;
 use crate::ssa::framework::BlockId;
@@ -91,8 +92,7 @@ impl EntryBuilder {
 
     pub fn declare_intermediate_storage(&mut self, set: u32, binding: u32, elem_ty: Type<TypeName>) {
         self.storage_bindings.push(interface::StorageBindingDecl {
-            set,
-            binding,
+            binding: BindingRef::new(set, binding),
             role: interface::StorageRole::Intermediate,
             elem_ty,
             length: None,
@@ -101,8 +101,7 @@ impl EntryBuilder {
 
     pub fn declare_output_storage(&mut self, set: u32, binding: u32, elem_ty: Type<TypeName>) {
         self.storage_bindings.push(interface::StorageBindingDecl {
-            set,
-            binding,
+            binding: BindingRef::new(set, binding),
             role: interface::StorageRole::Output,
             elem_ty,
             length: None,

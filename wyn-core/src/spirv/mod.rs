@@ -3335,8 +3335,8 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
     // partials/result intermediates) that aren't user-visible outputs.
     for entry in &program.entry_points {
         for sb in &entry.storage_bindings {
-            if !constructor.storage_buffers.contains_key(&(sb.set, sb.binding)) {
-                constructor.create_storage_buffer(&sb.elem_ty, sb.set, sb.binding);
+            if !constructor.storage_buffers.contains_key(&(sb.binding.set, sb.binding.binding)) {
+                constructor.create_storage_buffer(&sb.elem_ty, sb.binding.set, sb.binding.binding);
             }
         }
     }
@@ -3409,7 +3409,9 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
                 // the entry's typed `storage_bindings` list (e.g.
                 // parallelize's partials/result intermediates).
                 for sb in &entry.storage_bindings {
-                    if let Some(&(var_id, _, _)) = constructor.storage_buffers.get(&(sb.set, sb.binding)) {
+                    if let Some(&(var_id, _, _)) =
+                        constructor.storage_buffers.get(&(sb.binding.set, sb.binding.binding))
+                    {
                         if !interfaces.contains(&var_id) {
                             interfaces.push(var_id);
                         }

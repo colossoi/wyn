@@ -212,9 +212,10 @@ fn phase1_transform_reduce_in_place() {
     assert_eq!(entry.outputs[0].storage_binding, None);
 
     // 4. storage_bindings contains the new partials Intermediate.
-    assert!(entry.storage_bindings.iter().any(|b| b.set == 0
-        && b.binding == 2
-        && matches!(b.role, crate::interface::StorageRole::Intermediate)));
+    assert!(
+        entry.storage_bindings.iter().any(|b| b.binding == crate::BindingRef::new(0, 2)
+            && matches!(b.role, crate::interface::StorageRole::Intermediate))
+    );
 }
 
 /// Synthesize a phase2-combine EgirEntry from scratch using
@@ -248,10 +249,11 @@ fn synthesize_phase2_reduce_shape() {
     // Two storage decls: intermediate partials, output result.
     assert_eq!(entry.storage_bindings.len(), 2);
     assert!(entry.storage_bindings.iter().any(|b| {
-        b.set == 0 && b.binding == 1 && matches!(b.role, crate::interface::StorageRole::Intermediate)
+        b.binding == crate::BindingRef::new(0, 1)
+            && matches!(b.role, crate::interface::StorageRole::Intermediate)
     }));
     assert!(entry.storage_bindings.iter().any(|b| {
-        b.set == 0 && b.binding == 2 && matches!(b.role, crate::interface::StorageRole::Output)
+        b.binding == crate::BindingRef::new(0, 2) && matches!(b.role, crate::interface::StorageRole::Output)
     }));
 
     // No serial PendingSoac::Reduce anymore — the combine is open-coded.

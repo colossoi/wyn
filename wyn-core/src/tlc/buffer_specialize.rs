@@ -206,20 +206,14 @@ impl BufferSpecializer {
         // tuple-of-views params since `t.0`/`t.1` projections aren't
         // recognized.
         for param_binding in entry.param_bindings.iter().flatten() {
-            let EntryParamBindingKind::Single {
-                set,
-                binding,
-                elem_ty,
-                ..
-            } = &param_binding.kind
-            else {
+            let EntryParamBindingKind::Single { binding, elem_ty, .. } = &param_binding.kind else {
                 continue;
             };
             self.buffer_map.insert(
                 param_binding.param_sym,
                 BufferBinding {
-                    set: *set,
-                    binding: *binding,
+                    set: binding.set,
+                    binding: binding.binding,
                     elem_ty: elem_ty.clone(),
                 },
             );
