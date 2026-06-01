@@ -474,8 +474,8 @@ fn classify_input(input: &ArrayExpr, entry_slots: &[Option<EntryParamBinding>]) 
             // assigned (set, binding) via the entry's binding layout — the
             // same lookup `default_entry_dispatch_len` uses. Tuple-of-views
             // params resolve to their first slot (same element count).
-            if let TermKind::Var(VarRef::Symbol(sym)) = &t.kind {
-                if let Some(slot) = entry_slots.iter().flatten().find(|s| s.param_sym == *sym) {
+            if let Some(sym) = input.as_named_ref() {
+                if let Some(slot) = entry_slots.iter().flatten().find(|s| s.param_sym == sym) {
                     let (buf, elem_ty, elem_bytes) = slot.first_buffer();
                     return Some(ArrayProvenance::Storage {
                         binding: buf,

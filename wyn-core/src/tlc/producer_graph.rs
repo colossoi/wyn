@@ -253,14 +253,7 @@ impl<'a> GraphBuilder<'a> {
             .input_exprs()
             .iter()
             .enumerate()
-            .filter_map(|(i, ae)| {
-                if let super::ArrayExpr::Ref(t) = ae {
-                    if let TermKind::Var(VarRef::Symbol(sym)) = &t.kind {
-                        return Some((i, *sym));
-                    }
-                }
-                None
-            })
+            .filter_map(|(i, ae)| ae.as_named_ref().map(|sym| (i, sym)))
             .collect();
 
         for (input_index, sym) in input_syms {

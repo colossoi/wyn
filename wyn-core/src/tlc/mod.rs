@@ -410,6 +410,22 @@ pub struct StorageView {
     pub elem_ty: Type<TypeName>,
 }
 
+impl ArrayExpr {
+    /// `Ref(Var(sym))` → `Some(sym)`. The canonical "named SOAC input"
+    /// shape — used by `producer_graph::wire_edges` and
+    /// `parallelize::classify_input` to recognize an array input that's
+    /// just a bare name (an entry parameter, an intermediate, a
+    /// let-bound result of a prior SOAC).
+    pub fn as_named_ref(&self) -> Option<SymbolId> {
+        if let ArrayExpr::Ref(t) = self {
+            if let TermKind::Var(VarRef::Symbol(sym)) = &t.kind {
+                return Some(*sym);
+            }
+        }
+        None
+    }
+}
+
 /// Where an array-producing SOAC's per-iteration result is written.
 /// Used by `Map`, `Scan`, and `Filter`. At TLC only `Fresh` and
 /// `InputBuffer` are produced — the ownership pass switches `Fresh` to
