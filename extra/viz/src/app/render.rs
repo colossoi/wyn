@@ -19,7 +19,7 @@ use crate::spirv::load_spirv_module;
 /// for the masthead's `near=2, far=17000` projection range.
 pub const DEPTH_FORMAT: TextureFormat = TextureFormat::Depth32Float;
 
-fn default_depth_state() -> DepthStencilState {
+pub(super) fn default_depth_state() -> DepthStencilState {
     DepthStencilState {
         format: DEPTH_FORMAT,
         depth_write_enabled: true,

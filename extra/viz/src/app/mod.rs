@@ -14,8 +14,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupLayoutDescriptor, Color, CommandEncoderDescriptor, Extent3d,
-    InstanceFlags, LoadOp, Operations, PresentMode, RenderPipeline, StoreOp, SurfaceConfiguration,
-    TextureDescriptor, TextureDimension, TextureUsages, TextureView, TextureViewDescriptor,
+    InstanceFlags, LoadOp, Operations, PipelineLayoutDescriptor, PresentMode, RenderPipeline, StoreOp,
+    SurfaceConfiguration, TextureDescriptor, TextureDimension, TextureUsages, TextureView,
+    TextureViewDescriptor,
 };
 
 use winit::application::ApplicationHandler;
@@ -569,19 +570,229 @@ impl State {
 
     /// Construct GPU state for the interactive `pipeline` mode: a
     /// descriptor-driven compute chain + one graphics pipeline. See
-    /// `InteractivePipelineSpec` for the descriptor source. Filled in
-    /// incrementally; the current implementation handles only the
-    /// minimal `storage_image_roundtrip` shape (one compute writing a
-    /// storage texture + one graphics pipeline sampling it). Storage
-    /// buffers, push constants, and Shadertoy-style uniforms land in
-    /// follow-up commits.
+    /// `InteractivePipelineSpec` for the descriptor source.
+    ///
+    /// v1 supports: storage textures (cross-stage write+sample),
+    /// samplers, and uniform/push-constant-less compute + graphics
+    /// pipelines. Storage buffers, push constants, and Shadertoy
+    /// uniforms (iResolution / iTime / iMouse / iFrame) are scaffolded
+    /// — the `PipelineState`'s slots are `None` for now and follow-up
+    /// commits wire the descriptor → buffer mapping for each.
     async fn new_pipeline(window: Arc<Window>, spec: &InteractivePipelineSpec) -> Result<Self> {
-        let _ = window;
-        let _ = spec;
-        anyhow::bail!(
-            "interactive pipeline mode: GPU state construction not yet implemented \
-             (skeleton committed; coming in the next commit)"
-        )
+        use wyn_pipeline_descriptor::{Binding, Pipeline as DescPipeline};
+
+        let validate = spec.validate;
+        let verbose = spec.verbose;
+        let present_mode = spec.present_mode;
+
+        let win = window.clone();
+        let ctx = GpuContext::request(DeviceRequest {
+            instance_flags: if validate {
+                InstanceFlags::VALIDATION | InstanceFlags::DEBUG
+            } else {
+                InstanceFlags::empty()
+            },
+            desired_features: wgpu::Features::SPIRV_SHADER_PASSTHROUGH | wgpu::Features::PUSH_CONSTANTS,
+            limits_overlay: Some(Box::new(|limits, _adapter| {
+                limits.max_push_constant_size = 128;
+            })),
+            surface_target: Some(Box::new(move |inst| {
+                inst.create_surface(win).context("failed to create wgpu surface")
+            })),
+        })
+        .await?;
+
+        let surface = ctx.surface.expect("surface_target was Some, surface must be present");
+        let adapter = ctx.adapter;
+        let device = ctx.device;
+        let queue = ctx.queue;
+
+        if verbose {
+            let info = adapter.get_info();
+            eprintln!("[viz pipeline-interactive] Adapter: {} ({:?})", info.name, info.backend);
+        }
+        device.on_uncaptured_error(Box::new(|error| {
+            eprintln!("\n[GPU validation error]\n{:?}\n", error);
+        }));
+
+        let size = window.inner_size();
+        let config = render::configure_surface(
+            &surface,
+            &device,
+            &adapter,
+            size.width,
+            size.height,
+            present_mode,
+        )?;
+        let depth_view = create_depth_view(&device, &config);
+
+        // Allocate cross-pipeline resources up front (Phase 1b helpers).
+        let storage_textures =
+            gpu::create_storage_textures(&device, &spec.descriptor, Some((config.width, config.height)));
+        let samplers = gpu::create_samplers(&device, &spec.descriptor);
+
+        // Load the SPIR-V module once; both compute and graphics
+        // pipelines reuse the same shader binary.
+        let module = crate::spirv::load_spirv_module(&device, &spec.shader_path)
+            .with_context(|| format!("load SPIR-V module {:?}", spec.shader_path))?;
+
+        // ----- Compute stages -----
+        let mut compute_stages: Vec<PipelineComputeStage> = Vec::new();
+        for pipeline in &spec.descriptor.pipelines {
+            let DescPipeline::Compute(cp) = pipeline else {
+                continue;
+            };
+
+            // Group bindings by `set` to build one bind-group layout +
+            // bind group per set the pipeline uses.
+            let max_set = cp.bindings.iter().filter_map(binding_set).max().unwrap_or(0);
+            let mut bgls: Vec<wgpu::BindGroupLayout> = Vec::with_capacity((max_set + 1) as usize);
+            let mut bgs: Vec<Option<BindGroup>> = Vec::with_capacity((max_set + 1) as usize);
+            let mut bgl_refs: Vec<wgpu::BindGroupLayout> = Vec::new();
+
+            for set in 0..=max_set {
+                let any_in_set = cp.bindings.iter().any(|b| binding_set(b) == Some(set));
+                if !any_in_set {
+                    bgls.push(empty_bind_group_layout(&device, &format!("compute_empty_set{set}")));
+                    bgs.push(None);
+                    continue;
+                }
+                let (layout, bg) = gpu::build_resource_bind_group_for_set(
+                    &device,
+                    &cp.bindings,
+                    set,
+                    wgpu::ShaderStages::COMPUTE,
+                    &storage_textures,
+                    &samplers,
+                )
+                .with_context(|| {
+                    format!("compute {:?}: build bind group for set {}", cp.entry_point, set)
+                })?;
+                bgls.push(layout);
+                bgs.push(Some(bg));
+            }
+            bgl_refs.extend(bgls);
+
+            let bgl_borrows: Vec<&wgpu::BindGroupLayout> = bgl_refs.iter().collect();
+            let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+                label: Some(&format!("compute_layout_{}", cp.entry_point)),
+                bind_group_layouts: &bgl_borrows,
+                push_constant_ranges: &[],
+            });
+            let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(&cp.entry_point),
+                layout: Some(&pipeline_layout),
+                module: &module,
+                entry_point: Some(&cp.entry_point),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+
+            // Resolve dispatch. For descriptor sizing modes that depend on
+            // buffer sizes, the existing helper takes a buffer map — empty
+            // for now since v1 doesn't allocate storage buffers in this
+            // path. Storage-image-driven shaders typically use Fixed or
+            // input-binding-derived dispatches that work with an empty map.
+            let workgroups = gpu::resolve_dispatch_size(&cp.dispatch_size, &HashMap::new(), &[]);
+
+            compute_stages.push(PipelineComputeStage {
+                pipeline: compute_pipeline,
+                bind_groups_by_set: bgs,
+                workgroups,
+                push_constants: Vec::new(),
+                label: format!("compute.{}", cp.entry_point),
+            });
+        }
+
+        // ----- Graphics pipeline -----
+        let graphics_bindings = collect_graphics_bindings(&spec.descriptor);
+        let g_max_set = graphics_bindings.iter().filter_map(binding_set).max().unwrap_or(0);
+        let mut g_bgls: Vec<wgpu::BindGroupLayout> = Vec::with_capacity((g_max_set + 1) as usize);
+        let mut g_bgs: Vec<Option<BindGroup>> = Vec::with_capacity((g_max_set + 1) as usize);
+        for set in 0..=g_max_set {
+            let any_in_set = graphics_bindings.iter().any(|b| binding_set(b) == Some(set));
+            if !any_in_set {
+                g_bgls.push(empty_bind_group_layout(&device, &format!("graphics_empty_set{set}")));
+                g_bgs.push(None);
+                continue;
+            }
+            let (layout, bg) = gpu::build_resource_bind_group_for_set(
+                &device,
+                &graphics_bindings,
+                set,
+                wgpu::ShaderStages::FRAGMENT,
+                &storage_textures,
+                &samplers,
+            )
+            .with_context(|| format!("graphics: build bind group for set {}", set))?;
+            g_bgls.push(layout);
+            g_bgs.push(Some(bg));
+        }
+
+        let g_bgl_borrows: Vec<&wgpu::BindGroupLayout> = g_bgls.iter().collect();
+        let render_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("graphics_layout"),
+            bind_group_layouts: &g_bgl_borrows,
+            push_constant_ranges: &[],
+        });
+        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("graphics_pipeline"),
+            layout: Some(&render_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some(&spec.vertex_entry),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some(&spec.fragment_entry),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(render::default_depth_state()),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let state = PipelineState {
+            compute_stages,
+            render_pipeline,
+            render_bind_groups_by_set: g_bgs,
+            vertex_count: spec.vertex_count,
+            resolution_buffer: None,
+            time_buffer: None,
+            mouse_buffer: None,
+            frame_buffer: None,
+            _storage_buffers: HashMap::new(),
+            _storage_textures: storage_textures,
+            _samplers: samplers,
+        };
+
+        Ok(Self {
+            window,
+            surface,
+            device,
+            queue,
+            config,
+            start_time: std::time::Instant::now(),
+            mouse_pos: [0.0, 0.0],
+            mouse_click_pos: [0.0, 0.0],
+            mouse_pressed: false,
+            frame_count: 0,
+            max_frames: spec.max_frames,
+            frame_times: [0.0; 60],
+            frame_time_idx: 0,
+            verbose,
+            depth_view,
+            mode: AppMode::Pipeline(state),
+        })
     }
 
     async fn new_simulate(window: Arc<Window>, spec: &SimulateSpec) -> Result<Self> {
@@ -1180,6 +1391,48 @@ fn render_simulate(
         rpass.set_bind_group(sim.render_bind_group_set, &sim.render_bind_groups[bg_index], &[]);
         rpass.draw(0..sim.vertex_count, 0..1);
     }
+}
+
+/// `Some(set)` for any binding that lives in a descriptor set; `None`
+/// for `PushConstant` (which has no set).
+fn binding_set(b: &wyn_pipeline_descriptor::Binding) -> Option<u32> {
+    use wyn_pipeline_descriptor::Binding;
+    match b {
+        Binding::StorageBuffer { set, .. } => Some(*set),
+        Binding::Uniform { set, .. } => Some(*set),
+        Binding::Texture { set, .. } => Some(*set),
+        Binding::Sampler { set, .. } => Some(*set),
+        Binding::StorageTexture { set, .. } => Some(*set),
+        Binding::PushConstant { .. } => None,
+    }
+}
+
+/// Empty bind group layout used to satisfy wgpu's contiguous-set rule
+/// at any set index a pipeline doesn't otherwise populate.
+fn empty_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: Some(label),
+        entries: &[],
+    })
+}
+
+/// Collect every `Binding` declared on any Graphics pipeline in the
+/// descriptor. Wyn emits one graphics pipeline per entry point, so a
+/// shader's vertex bindings + fragment bindings can be split across
+/// two `Pipeline::Graphics` entries; we re-merge them for the unified
+/// render bind-group construction.
+fn collect_graphics_bindings(desc: &PipelineDescriptor) -> Vec<wyn_pipeline_descriptor::Binding> {
+    desc.pipelines
+        .iter()
+        .filter_map(|p| {
+            if let wyn_pipeline_descriptor::Pipeline::Graphics(g) = p {
+                Some(g.bindings.clone())
+            } else {
+                None
+            }
+        })
+        .flatten()
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
