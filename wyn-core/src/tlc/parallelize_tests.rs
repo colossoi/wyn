@@ -992,13 +992,15 @@ fn single_entry_scalar_reduces_in_let_rhs_stay_inline_not_hoisted() {
 
 /// `let counts = map(...); let s1 = scan(counts); let s2 = scan(map(|i|
 /// s1[i%N], iota(M))); map(|i| s2[i%K], iota(P))` — four nominally
-/// stageable SOACs — collapses dramatically: `fuse_maps` folds each
-/// producer map into the next scan / consumer, and chained gathers across
-/// scans get a single shared producing pipeline. From one source entry we
-/// get just two pipelines (a MultiCompute scan-of-map + a Compute
-/// consumer) totalling **4** stages. Pins how aggressive fusion is.
+/// stageable SOACs. `fuse_maps` folds `counts` into `s1` (one consumer),
+/// then `lift_gathers` lifts both `s1` and `s2` into their own gather
+/// pre-passes because each is randomly indexed downstream. From one source
+/// entry we get three pipelines (two scan pre-passes + the consumer)
+/// totalling stages = `s1`'s MultiCompute phases + `s2`'s serial Compute
+/// (its input is `iota` — a Range, not a buffer — so the parallel scan
+/// can't route, falling through to a single-thread Compute) + the consumer.
 #[test]
-fn chained_scans_within_one_entry_collapse_to_four_stages() {
+fn chained_scans_within_one_entry_collapse_to_three_pipelines() {
     let src = r#"
         #[compute]
         entry gen(bh: []vec4f32) []i32 =
@@ -1009,15 +1011,20 @@ fn chained_scans_within_one_entry_collapse_to_four_stages() {
             map(|i: i32| s2[i % 128], iota(2048))
     "#;
     let (program, desc) = parallelize_src(src);
+    let kinds: Vec<_> = desc
+        .pipelines
+        .iter()
+        .map(|p| match p {
+            Pipeline::Compute(cp) => format!("Compute({})", cp.entry_point),
+            Pipeline::MultiCompute(mc) => format!("MultiCompute(stages={})", mc.stages.len()),
+            Pipeline::Graphics(_) => "Graphics".into(),
+        })
+        .collect();
     assert_eq!(
         desc.pipelines.len(),
-        2,
-        "fusion collapses to 2 pipelines (scan-of-map + consumer)"
-    );
-    assert_eq!(
-        total_compute_stages(&desc),
-        4,
-        "1 (consumer) + 3 (scan-of-map phase1/phase2/phase3); compute entries={}",
+        3,
+        "expected 3 pipelines (s1 pre-pass + s2 pre-pass + consumer); got {kinds:?}, \
+         compute entries={}",
         compute_entry_count(&program)
     );
 }

@@ -232,7 +232,7 @@ fn try_lift(
     // keeps the pre-pass self-contained over real buffers. (Fusion has already
     // folded any `map` producer into the scan/map, so a `scan(op, ne, map(g,
     // xs))` arrives reading `xs` directly.)
-    let frees = free_symbol_vars(rhs, &program.symbols);
+    let frees = free_symbol_vars(rhs, &program.symbols, &program.def_syms);
     if !frees.iter().all(|(s, ty)| is_runtime_sized_array(ty) && param_bindings.contains_key(s)) {
         return None;
     }
@@ -737,17 +737,26 @@ fn is_runtime_sized_array(ty: &Type<TypeName>) -> bool {
 }
 
 /// Collect the free `Var(Symbol)` references of `term` as `(sym, ty)`.
-fn free_symbol_vars(term: &Term, symbols: &SymbolTable) -> Vec<(SymbolId, Type<TypeName>)> {
+/// `def_syms` is the program's top-level def table — its keys identify
+/// names that are globally accessible (top-level functions / constants)
+/// and therefore not "free" in the sense the predicate cares about
+/// (they don't need to be supplied as pre-pass inputs; they're emitted
+/// as separate defs and called directly).
+fn free_symbol_vars(
+    term: &Term,
+    symbols: &SymbolTable,
+    def_syms: &HashMap<String, SymbolId>,
+) -> Vec<(SymbolId, Type<TypeName>)> {
     let bound: HashSet<SymbolId> = HashSet::new();
     let empty_top: HashSet<SymbolId> = HashSet::new();
-    let empty_defs: HashSet<String> = HashSet::new();
+    let known_defs: HashSet<String> = def_syms.keys().cloned().collect();
     let mut free: Vec<Term> = Vec::new();
     let mut seen: HashSet<SymbolId> = HashSet::new();
     collect_free_vars(
         term,
         &bound,
         &empty_top,
-        &empty_defs,
+        &known_defs,
         symbols,
         &mut free,
         &mut seen,

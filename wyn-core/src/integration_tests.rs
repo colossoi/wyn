@@ -2786,6 +2786,39 @@ entry gen(xs: []i32) []i32 =
     .expect("multi-consumer (scan + direct gather of the same counts) should lift + compile");
 }
 
+/// Bisected min-repro: a fused scan whose op-lambda calls a user helper
+/// function (`box_count`) and whose result is randomly indexed
+/// (`offsets[nb - 1]`). Prior to the fix, `lift_gathers::free_symbol_vars`
+/// passed empty `known_defs` to `collect_free_vars`, so the top-level def
+/// reference to `box_count` appeared as a "free var" — failing the
+/// entry-param predicate and declining the lift. The scan then stayed in
+/// `gen`'s body where `parallelize::make_scan_plan` fell back to the serial
+/// pipeline, and EGIR's `is_handleable_soac` rejected the resulting
+/// `Scan { destination: Fresh, input: View }` combination → unexpanded
+/// `PendingSoac` panic at `egir/elaborate.rs:314`. With the fix, top-level
+/// defs are filtered out of the predicate, the scan lifts into a gather
+/// pre-pass, and the rest of the pipeline handles it normally.
+#[test]
+fn fused_scan_helper_call_then_indexed_read_compiles() {
+    compile_to_spirv(
+        "\
+def win_count(hw: f32) i32 =
+  let span = 2.0 * hw - 1.0 in
+  let fit  = i32.f32(floor(span / 2.4)) in
+  if fit < 0 then 0 else if fit > 3 then 3 else fit
+
+def box_count(hw: f32) i32 = 8 + 5 * win_count(hw)
+
+#[compute]
+entry gen(bh: []vec4f32, #[uniform(set=1,binding=0)] nb: i32) [1]i32 =
+  let counts  = map(|h: vec4f32| box_count(h.x), bh) in
+  let offsets = scan(|a: i32, b: i32| a + b, 0, counts) in
+  [if nb <= 0 then 0 else offsets[nb - 1]]
+",
+    )
+    .expect("fused-scan-of-helper-mapping with indexed scan read should compile");
+}
+
 /// A `scan` producer gathers the same way a `map` does: it's lifted into its
 /// own pre-pass (here a multi-stage parallel scan) writing the gather buffer,
 /// which the consumer reads via `storage_index`. The forced-output binding is
