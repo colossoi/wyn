@@ -707,13 +707,14 @@ impl<'a> Parser<'a> {
                 // adapter supports without a feature gate. `set`
                 // defaults to 1 to match texture/sampler convention.
                 use crate::interface::StorageAccess;
-                use crate::pipeline_descriptor::StorageImageFormat;
+                use crate::pipeline_descriptor::{StorageImageFormat, StorageTextureSize};
                 self.expect(Token::LeftParen)?;
 
                 let mut set: u32 = 1;
                 let mut binding: Option<u32> = None;
                 let mut format: Option<StorageImageFormat> = None;
                 let mut access: StorageAccess = StorageAccess::WriteOnly;
+                let mut size: StorageTextureSize = StorageTextureSize::default();
 
                 loop {
                     let param_name = self.expect_identifier()?;
@@ -748,6 +749,33 @@ impl<'a> Parser<'a> {
                                 ),
                             };
                         }
+                        "size" => {
+                            // `size = window` (default) or `size = 1024x1024`
+                            // (parses as IntLit `1024` then ident `x1024` —
+                            // accept both `WxH` as a single identifier and
+                            // the bare `window` keyword).
+                            let s = self.expect_identifier()?;
+                            size = match s.as_str() {
+                                "window" => StorageTextureSize::SameAsWindow,
+                                other => {
+                                    if let Some((w, h)) = other.split_once('x') {
+                                        let w: u32 = w.parse().map_err(|_| {
+                                            err_parse!("storage_image size: expected WxH, got '{}'", other)
+                                        })?;
+                                        let h: u32 = h.parse().map_err(|_| {
+                                            err_parse!("storage_image size: expected WxH, got '{}'", other)
+                                        })?;
+                                        StorageTextureSize::Fixed { width: w, height: h }
+                                    } else {
+                                        bail_parse_at!(
+                                            self.current_span(),
+                                            "Unknown storage_image size: '{}'. Supported: window, WxH (e.g. 1024x1024)",
+                                            other
+                                        )
+                                    }
+                                }
+                            };
+                        }
                         _ => bail_parse_at!(
                             self.current_span(),
                             "Unknown storage_image parameter: {}",
@@ -774,6 +802,7 @@ impl<'a> Parser<'a> {
                     binding,
                     format,
                     access,
+                    size,
                 })
             }
             "builtin" => {

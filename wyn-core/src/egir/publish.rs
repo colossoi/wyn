@@ -157,7 +157,7 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                         name: input.name.clone(),
                         binding_type: SamplerBindingType::Filtering,
                     });
-                } else if let Some((br, format, access)) = input.storage_image_binding {
+                } else if let Some((br, format, access, size)) = input.storage_image_binding {
                     if claimed.contains(&(br.set, br.binding)) {
                         continue;
                     }
@@ -171,6 +171,7 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                             crate::interface::StorageAccess::WriteOnly => Access::WriteOnly,
                             crate::interface::StorageAccess::ReadWrite => Access::ReadWrite,
                         },
+                        size,
                     });
                 }
             }

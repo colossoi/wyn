@@ -57,14 +57,17 @@ pub enum Attribute {
     /// A 2D storage image resource bound at (set, binding). Carried on
     /// an entry-point param of type `storage_image`. The `format` pins
     /// the on-GPU pixel format; the `access` declares whether the
-    /// shader writes, reads, or both. The same `(set, binding)` may be
-    /// declared as `Texture { ... }` in a sibling pipeline — the host
-    /// allocates one wgpu texture and binds it via two views.
+    /// shader writes, reads, or both; the `size` picks the host-side
+    /// resolution policy (defaults to `SameAsWindow`). The same
+    /// `(set, binding)` may be declared as `Texture { ... }` in a
+    /// sibling pipeline — the host allocates one wgpu texture and
+    /// binds it via two views.
     StorageImage {
         set: u32,
         binding: u32,
         format: crate::pipeline_descriptor::StorageImageFormat,
         access: StorageAccess,
+        size: crate::pipeline_descriptor::StorageTextureSize,
     },
     /// Hint for the expected size of a dynamic array (in elements).
     /// Used for parallelization decisions. Ignored on non-arrays or

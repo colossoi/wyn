@@ -20,6 +20,7 @@ use crate::json::{
     Access, Binding, BufferUsage, DispatchLen, DispatchSize, Pipeline, PipelineDescriptor,
     StorageImageFormat, load_f32_json,
 };
+use wyn_pipeline_descriptor::StorageTextureSize;
 use crate::specs::{PushConstantSpec, StorageBufferSpec, UniformSpec};
 use crate::spirv::SpirvAccess;
 
@@ -686,9 +687,11 @@ pub fn build_per_set_bind_groups(
 // future work — comes in Phase 3 when the multi-stage simulate mode
 // needs descriptor-driven dispatch sizing for the chained passes.
 
-/// Default storage-texture extent. Holds for v1 until the descriptor
-/// grows a per-binding sizing policy.
-pub const STORAGE_TEXTURE_DEFAULT_SIZE: u32 = 1024;
+/// Fallback storage-texture extent for `SameAsWindow` allocations
+/// before the surface size is known (e.g. headless smoke runs). The
+/// runnable simulate path overrides this with the actual swapchain
+/// dimensions and re-allocates on resize.
+pub const STORAGE_TEXTURE_FALLBACK_SIZE: u32 = 1024;
 
 /// Map a descriptor `StorageImageFormat` to the matching
 /// `wgpu::TextureFormat`. Kept in lock-step with the SPIR-V
@@ -739,6 +742,7 @@ pub struct StorageTextureResource {
 pub fn create_storage_textures(
     device: &wgpu::Device,
     descriptor: &PipelineDescriptor,
+    surface_size: Option<(u32, u32)>,
 ) -> HashMap<(u32, u32), StorageTextureResource> {
     let mut out: HashMap<(u32, u32), StorageTextureResource> = HashMap::new();
     for pipeline in &descriptor.pipelines {
@@ -749,7 +753,7 @@ pub fn create_storage_textures(
         };
         for b in bindings {
             let Binding::StorageTexture {
-                set, binding, name, format, ..
+                set, binding, name, format, size: size_policy, ..
             } = b
             else {
                 continue;
@@ -759,9 +763,14 @@ pub fn create_storage_textures(
                 continue;
             }
             let wgpu_format = storage_image_format_to_wgpu(*format);
+            let (width, height) = match size_policy {
+                StorageTextureSize::Fixed { width, height } => (*width, *height),
+                StorageTextureSize::SameAsWindow => surface_size
+                    .unwrap_or((STORAGE_TEXTURE_FALLBACK_SIZE, STORAGE_TEXTURE_FALLBACK_SIZE)),
+            };
             let size = wgpu::Extent3d {
-                width: STORAGE_TEXTURE_DEFAULT_SIZE,
-                height: STORAGE_TEXTURE_DEFAULT_SIZE,
+                width,
+                height,
                 depth_or_array_layers: 1,
             };
             let texture = device.create_texture(&wgpu::TextureDescriptor {

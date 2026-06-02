@@ -3760,7 +3760,7 @@ fn lower_ssa_entry_point(
             );
             interfaces.push(var_id);
             uniform_loads.push((input.name.clone(), var_id, input_type));
-        } else if let Some((br, format, _access)) = input.storage_image_binding {
+        } else if let Some((br, format, _access, _size)) = input.storage_image_binding {
             // `#[storage_image]` → opaque OpTypeImage(Sampled=2, Format=FMT)
             // in UniformConstant storage. The format comes from the binding
             // attribute (per-param), not from the language type, so we build
@@ -4005,7 +4005,7 @@ fn lower_ssa_entry_point(
         // above) — the polytype-derived placeholder has Format=Unknown
         // and doesn't match the variable's pointee type. Rebuild with
         // the binding's format for the load result type.
-        let input_type = if let Some((_, format, _)) = input.storage_image_binding {
+        let input_type = if let Some((_, format, _, _)) = input.storage_image_binding {
             constructor.builder.type_image(
                 constructor.f32_type,
                 spirv::Dim::Dim2D,

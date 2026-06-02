@@ -198,12 +198,42 @@ pub enum Binding {
     /// param of type `storage_image`. The same `(set, binding)` slot
     /// may also be declared as a `Texture` in another pipeline — viz
     /// allocates one wgpu texture and binds it through two views.
+    ///
+    /// `size` is the resolution policy the host uses to allocate the
+    /// backing `wgpu::Texture`. Defaults to `SameAsWindow` so a
+    /// compute shader writing per-pixel naturally tracks the swapchain
+    /// size; producers that want a fixed grid (e.g. the Mountains
+    /// shader's BUFFER_SIZE-capped erosion textures) opt in to
+    /// `Fixed`.
     StorageTexture {
         set: u32,
         binding: u32,
         name: String,
         format: StorageImageFormat,
         access: Access,
+        #[serde(default)]
+        size: StorageTextureSize,
+    },
+}
+
+/// Resolution policy for a storage texture's backing `wgpu::Texture`.
+/// Resolved by the host at allocation time (and on window resize for
+/// `SameAsWindow`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StorageTextureSize {
+    /// Track the swapchain surface size. The default — a fragment
+    /// shader sampling this texture covers each output pixel exactly
+    /// once.
+    #[default]
+    SameAsWindow,
+    /// Fixed `(width, height)` in pixels. Used when the producer's
+    /// dispatch is sized to a constant grid (e.g. the Mountains
+    /// shader's `BUFFER_SIZE` cap that decouples compute resolution
+    /// from window resolution).
+    Fixed {
+        width: u32,
+        height: u32,
     },
 }
 

@@ -215,16 +215,17 @@ pub fn extract_sampler_binding(pattern: &Pattern) -> Option<BindingRef> {
     }
 }
 
-/// Extract a `#[storage_image(set, binding, format, access)]` from a
-/// param pattern. Returns the binding ref plus the format/access
-/// attributes — the latter two are pinned at shader-compile time and
-/// need to reach the descriptor as well as the SPIR-V backend.
+/// Extract a `#[storage_image(set, binding, format, access, size)]`
+/// from a param pattern. Returns the binding ref plus the
+/// format / access / size attributes — pinned at shader-compile time
+/// and threaded into the descriptor + SPIR-V backend.
 pub fn extract_storage_image_binding(
     pattern: &Pattern,
 ) -> Option<(
     BindingRef,
     crate::pipeline_descriptor::StorageImageFormat,
     crate::interface::StorageAccess,
+    crate::pipeline_descriptor::StorageTextureSize,
 )> {
     match &pattern.kind {
         PatternKind::Attributed(attrs, inner) => {
@@ -234,9 +235,10 @@ pub fn extract_storage_image_binding(
                     binding,
                     format,
                     access,
+                    size,
                 } = attr
                 {
-                    return Some((BindingRef::new(*set, *binding), *format, *access));
+                    return Some((BindingRef::new(*set, *binding), *format, *access, *size));
                 }
             }
             extract_storage_image_binding(inner)
