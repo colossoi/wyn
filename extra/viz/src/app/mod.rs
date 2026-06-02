@@ -635,6 +635,13 @@ impl State {
         let storage_textures =
             gpu::create_storage_textures(&device, &spec.descriptor, Some((config.width, config.height)));
         let samplers = gpu::create_samplers(&device, &spec.descriptor);
+        // Phase 4: Shadertoy-style uniforms (iResolution / iTime /
+        // iMouse / iFrame). One buffer per declared uniform name on
+        // the graphics pipeline; the per-frame render path writes
+        // their values.
+        let graphics_bindings_pre = collect_graphics_bindings(&spec.descriptor);
+        let uniforms = uniforms::build_pipeline_uniforms(&device, &graphics_bindings_pre)
+            .context("build_pipeline_uniforms")?;
 
         // Load the SPIR-V module once; both compute and graphics
         // pipelines reuse the same shader binary.
@@ -669,6 +676,7 @@ impl State {
                     wgpu::ShaderStages::COMPUTE,
                     &storage_textures,
                     &samplers,
+                    &uniforms.by_set_binding,
                 )
                 .with_context(|| {
                     format!("compute {:?}: build bind group for set {}", cp.entry_point, set)
@@ -757,6 +765,7 @@ impl State {
                 wgpu::ShaderStages::FRAGMENT,
                 &storage_textures,
                 &samplers,
+                &uniforms.by_set_binding,
             )
             .with_context(|| format!("graphics: build bind group for set {}", set))?;
             g_bgls.push(layout);
@@ -800,10 +809,10 @@ impl State {
             render_pipeline,
             render_bind_groups_by_set: g_bgs,
             vertex_count: spec.vertex_count,
-            resolution_buffer: None,
-            time_buffer: None,
-            mouse_buffer: None,
-            frame_buffer: None,
+            resolution_buffer: uniforms.resolution,
+            time_buffer: uniforms.time,
+            mouse_buffer: uniforms.mouse,
+            frame_buffer: uniforms.frame,
             _storage_buffers: HashMap::new(),
             _storage_textures: storage_textures,
             _samplers: samplers,
@@ -1494,20 +1503,28 @@ fn render_pipeline(
         queue.write_buffer(buf, 0, bytemuck::cast_slice(&[u]));
     }
     if let Some(ref buf) = state.time_buffer {
+        // iTime is padded to 16 bytes (`min_binding_size` on most
+        // adapters); write a vec4 with `[t, 0, 0, 0]`.
         let t = start_time.elapsed().as_secs_f32();
-        queue.write_buffer(buf, 0, bytemuck::cast_slice(&[t]));
+        queue.write_buffer(buf, 0, bytemuck::cast_slice(&[t, 0.0, 0.0, 0.0]));
     }
     if let Some(ref buf) = state.mouse_buffer {
-        let m = [
-            mouse_pos[0],
-            mouse_pos[1],
-            if mouse_pressed { mouse_click_pos[0] } else { 0.0 },
-            if mouse_pressed { mouse_click_pos[1] } else { 0.0 },
-        ];
-        queue.write_buffer(buf, 0, bytemuck::cast_slice(&m));
+        let u = MouseUniform {
+            mouse: [
+                mouse_pos[0],
+                mouse_pos[1],
+                if mouse_pressed { mouse_click_pos[0] } else { 0.0 },
+                if mouse_pressed { mouse_click_pos[1] } else { 0.0 },
+            ],
+        };
+        queue.write_buffer(buf, 0, bytemuck::cast_slice(&[u]));
     }
     if let Some(ref buf) = state.frame_buffer {
-        queue.write_buffer(buf, 0, bytemuck::cast_slice(&[frame_count]));
+        let u = uniforms::FrameUniform {
+            frame: frame_count,
+            _pad: [0; 3],
+        };
+        queue.write_buffer(buf, 0, bytemuck::cast_slice(&[u]));
     }
 
     // Dispatch each compute stage in descriptor order.

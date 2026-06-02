@@ -932,6 +932,7 @@ pub fn build_resource_bind_group_for_set(
     visibility: ShaderStages,
     storage_textures: &HashMap<(u32, u32), StorageTextureResource>,
     samplers: &HashMap<(u32, u32), wgpu::Sampler>,
+    uniforms: &HashMap<(u32, u32), wgpu::Buffer>,
 ) -> Result<(wgpu::BindGroupLayout, BindGroup)> {
     let mut layout_entries: Vec<BindGroupLayoutEntry> = Vec::new();
     let mut group_entries: Vec<BindGroupEntry> = Vec::new();
@@ -1062,6 +1063,39 @@ pub fn build_resource_bind_group_for_set(
                 group_entries.push(BindGroupEntry {
                     binding: *binding,
                     resource: BindingResource::Sampler(sampler),
+                });
+            }
+            Binding::Uniform {
+                set: bset,
+                binding,
+                ..
+            } if *bset == set => {
+                let key = (*bset, *binding);
+                let buffer = uniforms.get(&key).ok_or_else(|| {
+                    anyhow!(
+                        "no uniform buffer allocated for ({}, {}); caller must \
+                         pre-allocate via build_pipeline_uniforms",
+                        bset,
+                        binding
+                    )
+                })?;
+                layout_entries.push(BindGroupLayoutEntry {
+                    binding: *binding,
+                    visibility,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                });
+                group_entries.push(BindGroupEntry {
+                    binding: *binding,
+                    resource: BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer,
+                        offset: 0,
+                        size: None,
+                    }),
                 });
             }
             _ => {}

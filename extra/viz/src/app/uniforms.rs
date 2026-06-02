@@ -54,6 +54,15 @@ pub struct DifficultyUniform {
     pub _pad: [i32; 3],
 }
 
+/// `iFrame` — current frame number. wgpu uniform buffers require a
+/// minimum 16-byte size on many adapters, so we pad to a vec4.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct FrameUniform {
+    pub frame: u32,
+    pub _pad: [u32; 3],
+}
+
 // ---------------------------------------------------------------------------
 // Sidecar parsing
 // ---------------------------------------------------------------------------
@@ -598,4 +607,99 @@ pub fn build_simulate_uniforms(
         }
     }
     Ok((resolution, grid_w, grid_h, time, entries))
+}
+
+/// Bundle of buffers + lookup map returned by
+/// `build_pipeline_uniforms`. Each `Option` is `Some` iff the
+/// descriptor's graphics pipeline declares the matching uniform name.
+/// `by_set_binding` indexes every allocated buffer by `(set, binding)`
+/// so the bind-group builder can resolve uniform entries uniformly.
+pub struct PipelineUniforms {
+    pub resolution: Option<wgpu::Buffer>,
+    pub time: Option<wgpu::Buffer>,
+    pub mouse: Option<wgpu::Buffer>,
+    pub frame: Option<wgpu::Buffer>,
+    pub by_set_binding: std::collections::HashMap<(u32, u32), wgpu::Buffer>,
+}
+
+/// Allocate Shadertoy-style uniform buffers for every recognized name
+/// the descriptor's graphics pipeline declares as a `Binding::Uniform`.
+///
+/// Recognized names: `iResolution` (vec3 + pad), `iTime` (f32),
+/// `iMouse` (vec4), `iFrame` (u32 + pad). Unknown uniform names error
+/// — silently dropping them would leave their bind slot unbound at
+/// draw time. Initial buffer contents are zero; the per-frame render
+/// path writes updated values.
+pub fn build_pipeline_uniforms(
+    device: &wgpu::Device,
+    graphics_bindings: &[wyn_pipeline_descriptor::Binding],
+) -> Result<PipelineUniforms> {
+    use std::collections::HashMap;
+    use wyn_pipeline_descriptor::Binding;
+
+    let mut resolution: Option<wgpu::Buffer> = None;
+    let mut time: Option<wgpu::Buffer> = None;
+    let mut mouse: Option<wgpu::Buffer> = None;
+    let mut frame: Option<wgpu::Buffer> = None;
+    let mut by_set_binding: HashMap<(u32, u32), wgpu::Buffer> = HashMap::new();
+
+    for b in graphics_bindings {
+        let Binding::Uniform { set, binding, name } = b else {
+            continue;
+        };
+        let (size_bytes, label) = match name.as_str() {
+            "iResolution" => (
+                std::mem::size_of::<ResolutionUniform>() as u64,
+                "pipeline.uniform.iResolution",
+            ),
+            "iTime" => (
+                // Pad to 16 bytes — wgpu's UNIFORM minimum binding size
+                // is 16 on many adapters.
+                16u64,
+                "pipeline.uniform.iTime",
+            ),
+            "iMouse" => (
+                std::mem::size_of::<MouseUniform>() as u64,
+                "pipeline.uniform.iMouse",
+            ),
+            "iFrame" => (
+                std::mem::size_of::<FrameUniform>() as u64,
+                "pipeline.uniform.iFrame",
+            ),
+            other => {
+                return Err(anyhow!(
+                    "viz pipeline-interactive: graphics pipeline declares unknown uniform `{}`. \
+                     Known names: iResolution, iTime, iMouse, iFrame.",
+                    other
+                ));
+            }
+        };
+
+        let buffer = device.create_buffer(&BufferDescriptor {
+            label: Some(label),
+            size: size_bytes,
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Cloning a wgpu::Buffer is a refcount bump, so the lookup map
+        // and the typed Option both hold valid handles to the same GPU
+        // resource.
+        by_set_binding.insert((*set, *binding), buffer.clone());
+        match name.as_str() {
+            "iResolution" => resolution = Some(buffer),
+            "iTime" => time = Some(buffer),
+            "iMouse" => mouse = Some(buffer),
+            "iFrame" => frame = Some(buffer),
+            _ => unreachable!(),
+        }
+    }
+
+    Ok(PipelineUniforms {
+        resolution,
+        time,
+        mouse,
+        frame,
+        by_set_binding,
+    })
 }

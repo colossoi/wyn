@@ -1,0 +1,28 @@
+-- Smoke for the pipeline-interactive uniform wiring (Phase 4a).
+-- Compute writes a constant; fragment animates the green channel
+-- with iTime so the user sees motion (verifies iTime threads
+-- through and the render path re-renders each frame).
+
+#[compute]
+entry paint(#[storage_image(set=0, binding=0, format=rgba8unorm, access=write_only)] img: storage_image,
+            #[builtin(global_invocation_id)] gid: vec3u32) () =
+  let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
+  let fx = f32.u32(gid.x) / 1024.0 in
+  image_store(img, xy, @[fx, 0.0, 0.0, 1.0])
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 =
+  let verts = [@[-1.0, -1.0, 0.0, 1.0],
+               @[3.0, -1.0, 0.0, 1.0],
+               @[-1.0, 3.0, 0.0, 1.0]] in
+  verts[vid]
+
+#[fragment]
+entry fragment_main(#[builtin(position)] pos: vec4f32,
+                    #[uniform(set=1, binding=0)] iTime: f32,
+                    #[texture(set=0, binding=0)] tex: texture2d,
+                    #[sampler(set=0, binding=1)] samp: sampler)
+  #[location(0)] vec4f32 =
+  let uv = @[pos.x / 1024.0, pos.y / 1024.0] in
+  let base = texture_sample(tex, samp, uv, 0.0) in
+  @[base.x, 0.5 + 0.5 * f32.sin(iTime), 0.0, 1.0]
