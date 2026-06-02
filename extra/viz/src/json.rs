@@ -12,7 +12,8 @@ use anyhow::{Context, Result, anyhow};
 
 pub use wyn_pipeline_descriptor::{
     Access, Binding, BufferUsage, ComputePipeline, DispatchLen, DispatchSize, MultiComputePipeline,
-    Pipeline, PipelineDescriptor,
+    Pipeline, PipelineDescriptor, SamplerBindingType, StorageImageFormat, TextureSampleType,
+    TextureViewDimension,
 };
 
 pub fn load_f32_json(path: &Path) -> Result<Vec<f32>> {

@@ -16,7 +16,10 @@ use wgpu::{
     Surface, Trace,
 };
 
-use crate::json::{Access, Binding, BufferUsage, DispatchLen, DispatchSize, load_f32_json};
+use crate::json::{
+    Access, Binding, BufferUsage, DispatchLen, DispatchSize, Pipeline, PipelineDescriptor,
+    StorageImageFormat, load_f32_json,
+};
 use crate::specs::{PushConstantSpec, StorageBufferSpec, UniformSpec};
 use crate::spirv::SpirvAccess;
 
@@ -664,4 +667,347 @@ pub fn build_per_set_bind_groups(
         bind_groups.push(group);
     }
     (layouts, bind_groups)
+}
+
+// =============================================================================
+// Storage textures (Phase 1b — Path B)
+// =============================================================================
+//
+// A `Binding::StorageTexture` declares a 2D wgpu::Texture that a compute
+// shader writes via `image_store` and a later stage samples via
+// `texture_sample` on a sibling `Binding::Texture` at the same
+// `(set, binding)` slot. The host allocates ONE `wgpu::Texture` per
+// unique `(set, binding)` slot and binds it in each consuming pipeline
+// through the appropriate view (storage view for `StorageTexture`
+// bindings, sampled view for `Texture` bindings).
+//
+// Sizing: v1 uses a fixed 1024×1024 dimension. A per-binding sizing
+// policy in the descriptor (analogous to `BufferLen::LikeInput`) is
+// future work — comes in Phase 3 when the multi-stage simulate mode
+// needs descriptor-driven dispatch sizing for the chained passes.
+
+/// Default storage-texture extent. Holds for v1 until the descriptor
+/// grows a per-binding sizing policy.
+pub const STORAGE_TEXTURE_DEFAULT_SIZE: u32 = 1024;
+
+/// Map a descriptor `StorageImageFormat` to the matching
+/// `wgpu::TextureFormat`. Kept in lock-step with the SPIR-V
+/// `ImageFormat` map on the compiler side (see
+/// `wyn-core/src/spirv/mod.rs::storage_image_format_to_spirv`).
+pub fn storage_image_format_to_wgpu(f: StorageImageFormat) -> wgpu::TextureFormat {
+    match f {
+        StorageImageFormat::Rgba8Unorm => wgpu::TextureFormat::Rgba8Unorm,
+        StorageImageFormat::Rgba16Float => wgpu::TextureFormat::Rgba16Float,
+        StorageImageFormat::Rgba32Float => wgpu::TextureFormat::Rgba32Float,
+        StorageImageFormat::R32Float => wgpu::TextureFormat::R32Float,
+    }
+}
+
+/// Map descriptor `Access` to wgpu's `StorageTextureAccess`. v1 ships
+/// `read_only` and `write_only`; `read_write` requires an adapter
+/// feature flag and is exposed but the caller must verify support.
+fn access_to_storage_texture_access(a: Access) -> wgpu::StorageTextureAccess {
+    match a {
+        Access::ReadOnly => wgpu::StorageTextureAccess::ReadOnly,
+        Access::WriteOnly => wgpu::StorageTextureAccess::WriteOnly,
+        Access::ReadWrite => wgpu::StorageTextureAccess::ReadWrite,
+    }
+}
+
+/// Allocated storage texture + its two views. The storage view is
+/// bound for `Binding::StorageTexture` consumers; the sampled view is
+/// bound for `Binding::Texture` consumers reading the same underlying
+/// resource (cross-stage sharing).
+pub struct StorageTextureResource {
+    pub texture: wgpu::Texture,
+    pub storage_view: wgpu::TextureView,
+    pub sampled_view: wgpu::TextureView,
+    pub format: wgpu::TextureFormat,
+}
+
+/// Walk every pipeline's bindings, allocate one `wgpu::Texture` per
+/// unique `(set, binding)` slot declared as `Binding::StorageTexture`
+/// in at least one pipeline. The map is keyed by `(set, binding)` so
+/// consumers (compute pipelines that write, fragment pipelines that
+/// sample) can look the resource up by descriptor coordinates.
+///
+/// The texture is created with `STORAGE_BINDING | TEXTURE_BINDING |
+/// COPY_SRC | COPY_DST`; the storage view targets the storage binding
+/// path, the sampled view targets the texture binding path. wgpu
+/// allows the same `wgpu::Texture` to satisfy both binding types as
+/// long as the texture was created with both usages, which it is.
+pub fn create_storage_textures(
+    device: &wgpu::Device,
+    descriptor: &PipelineDescriptor,
+) -> HashMap<(u32, u32), StorageTextureResource> {
+    let mut out: HashMap<(u32, u32), StorageTextureResource> = HashMap::new();
+    for pipeline in &descriptor.pipelines {
+        let bindings: &[Binding] = match pipeline {
+            Pipeline::Compute(cp) => &cp.bindings,
+            Pipeline::MultiCompute(mc) => &mc.bindings,
+            Pipeline::Graphics(gp) => &gp.bindings,
+        };
+        for b in bindings {
+            let Binding::StorageTexture {
+                set, binding, name, format, ..
+            } = b
+            else {
+                continue;
+            };
+            let key = (*set, *binding);
+            if out.contains_key(&key) {
+                continue;
+            }
+            let wgpu_format = storage_image_format_to_wgpu(*format);
+            let size = wgpu::Extent3d {
+                width: STORAGE_TEXTURE_DEFAULT_SIZE,
+                height: STORAGE_TEXTURE_DEFAULT_SIZE,
+                depth_or_array_layers: 1,
+            };
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(&format!("storage_texture_{}", name)),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu_format,
+                usage: wgpu::TextureUsages::STORAGE_BINDING
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let storage_view = texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some(&format!("storage_view_{}", name)),
+                format: Some(wgpu_format),
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                ..Default::default()
+            });
+            let sampled_view = texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some(&format!("sampled_view_{}", name)),
+                format: Some(wgpu_format),
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                ..Default::default()
+            });
+            out.insert(
+                key,
+                StorageTextureResource {
+                    texture,
+                    storage_view,
+                    sampled_view,
+                    format: wgpu_format,
+                },
+            );
+        }
+    }
+    out
+}
+
+/// Allocate one `wgpu::Sampler` per unique `(set, binding)` slot
+/// declared as `Binding::Sampler` in any pipeline. v1 emits the
+/// linear-filter / clamp-to-edge default which matches Shadertoy's
+/// per-channel sampler in the absence of explicit per-channel
+/// overrides; a per-binding sampler-spec extension is future work.
+pub fn create_samplers(
+    device: &wgpu::Device,
+    descriptor: &PipelineDescriptor,
+) -> HashMap<(u32, u32), wgpu::Sampler> {
+    let mut out: HashMap<(u32, u32), wgpu::Sampler> = HashMap::new();
+    for pipeline in &descriptor.pipelines {
+        let bindings: &[Binding] = match pipeline {
+            Pipeline::Compute(cp) => &cp.bindings,
+            Pipeline::MultiCompute(mc) => &mc.bindings,
+            Pipeline::Graphics(gp) => &gp.bindings,
+        };
+        for b in bindings {
+            let Binding::Sampler { set, binding, name, .. } = b else {
+                continue;
+            };
+            let key = (*set, *binding);
+            if out.contains_key(&key) {
+                continue;
+            }
+            let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some(&format!("sampler_{}", name)),
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                address_mode_w: wgpu::AddressMode::ClampToEdge,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::FilterMode::Nearest,
+                ..Default::default()
+            });
+            out.insert(key, sampler);
+        }
+    }
+    out
+}
+
+/// Build a single set's bind-group layout + bind group for a pipeline,
+/// covering the `Binding::StorageTexture` / `Binding::Texture` /
+/// `Binding::Sampler` entries that share a wgpu::Texture or sampler
+/// resource pool. Compute pipelines pass
+/// `visibility = ShaderStages::COMPUTE`, fragment pipelines pass
+/// `ShaderStages::FRAGMENT`, etc.
+///
+/// Resources are looked up from the pools by `(set, binding)`. A
+/// `Binding::Texture` whose `(set, binding)` slot also has a
+/// `StorageTextureResource` uses that resource's `sampled_view` —
+/// this is the cross-stage compute-write / fragment-sample handoff.
+/// A `Texture` slot with no storage-texture entry would need a
+/// host-uploaded texture (e.g. for image inputs); that path isn't
+/// wired yet and falls through with an error.
+pub fn build_resource_bind_group_for_set(
+    device: &wgpu::Device,
+    bindings: &[Binding],
+    set: u32,
+    visibility: ShaderStages,
+    storage_textures: &HashMap<(u32, u32), StorageTextureResource>,
+    samplers: &HashMap<(u32, u32), wgpu::Sampler>,
+) -> Result<(wgpu::BindGroupLayout, BindGroup)> {
+    let mut layout_entries: Vec<BindGroupLayoutEntry> = Vec::new();
+    let mut group_entries: Vec<BindGroupEntry> = Vec::new();
+
+    for b in bindings {
+        match b {
+            Binding::StorageTexture {
+                set: bset,
+                binding,
+                format,
+                access,
+                ..
+            } if *bset == set => {
+                let key = (*bset, *binding);
+                let res = storage_textures.get(&key).ok_or_else(|| {
+                    anyhow!("no storage texture allocated for ({}, {})", bset, binding)
+                })?;
+                layout_entries.push(BindGroupLayoutEntry {
+                    binding: *binding,
+                    visibility,
+                    ty: BindingType::StorageTexture {
+                        access: access_to_storage_texture_access(access.clone()),
+                        format: storage_image_format_to_wgpu(*format),
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                });
+                group_entries.push(BindGroupEntry {
+                    binding: *binding,
+                    resource: BindingResource::TextureView(&res.storage_view),
+                });
+            }
+            Binding::Texture {
+                set: bset,
+                binding,
+                view_dimension,
+                multisampled,
+                sample_type,
+                ..
+            } if *bset == set => {
+                let key = (*bset, *binding);
+                let view = storage_textures
+                    .get(&key)
+                    .map(|r| &r.sampled_view)
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "Texture binding ({}, {}) has no storage_texture entry to share; \
+                             host-uploaded textures not yet wired",
+                            bset,
+                            binding
+                        )
+                    })?;
+                layout_entries.push(BindGroupLayoutEntry {
+                    binding: *binding,
+                    visibility,
+                    ty: BindingType::Texture {
+                        sample_type: match sample_type {
+                            wyn_pipeline_descriptor::TextureSampleType::Float { filterable } => {
+                                wgpu::TextureSampleType::Float {
+                                    filterable: *filterable,
+                                }
+                            }
+                            wyn_pipeline_descriptor::TextureSampleType::Sint => {
+                                wgpu::TextureSampleType::Sint
+                            }
+                            wyn_pipeline_descriptor::TextureSampleType::Uint => {
+                                wgpu::TextureSampleType::Uint
+                            }
+                            wyn_pipeline_descriptor::TextureSampleType::Depth => {
+                                wgpu::TextureSampleType::Depth
+                            }
+                        },
+                        view_dimension: match view_dimension {
+                            wyn_pipeline_descriptor::TextureViewDimension::D1 => {
+                                wgpu::TextureViewDimension::D1
+                            }
+                            wyn_pipeline_descriptor::TextureViewDimension::D2 => {
+                                wgpu::TextureViewDimension::D2
+                            }
+                            wyn_pipeline_descriptor::TextureViewDimension::D2Array => {
+                                wgpu::TextureViewDimension::D2Array
+                            }
+                            wyn_pipeline_descriptor::TextureViewDimension::Cube => {
+                                wgpu::TextureViewDimension::Cube
+                            }
+                            wyn_pipeline_descriptor::TextureViewDimension::CubeArray => {
+                                wgpu::TextureViewDimension::CubeArray
+                            }
+                            wyn_pipeline_descriptor::TextureViewDimension::D3 => {
+                                wgpu::TextureViewDimension::D3
+                            }
+                        },
+                        multisampled: *multisampled,
+                    },
+                    count: None,
+                });
+                group_entries.push(BindGroupEntry {
+                    binding: *binding,
+                    resource: BindingResource::TextureView(view),
+                });
+            }
+            Binding::Sampler {
+                set: bset,
+                binding,
+                binding_type,
+                ..
+            } if *bset == set => {
+                let key = (*bset, *binding);
+                let sampler = samplers.get(&key).ok_or_else(|| {
+                    anyhow!("no sampler allocated for ({}, {})", bset, binding)
+                })?;
+                layout_entries.push(BindGroupLayoutEntry {
+                    binding: *binding,
+                    visibility,
+                    ty: BindingType::Sampler(match binding_type {
+                        wyn_pipeline_descriptor::SamplerBindingType::Filtering => {
+                            wgpu::SamplerBindingType::Filtering
+                        }
+                        wyn_pipeline_descriptor::SamplerBindingType::NonFiltering => {
+                            wgpu::SamplerBindingType::NonFiltering
+                        }
+                        wyn_pipeline_descriptor::SamplerBindingType::Comparison => {
+                            wgpu::SamplerBindingType::Comparison
+                        }
+                    }),
+                    count: None,
+                });
+                group_entries.push(BindGroupEntry {
+                    binding: *binding,
+                    resource: BindingResource::Sampler(sampler),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: Some(&format!("resource_bgl_set{}", set)),
+        entries: &layout_entries,
+    });
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some(&format!("resource_bg_set{}", set)),
+        layout: &layout,
+        entries: &group_entries,
+    });
+    Ok((layout, bind_group))
 }
