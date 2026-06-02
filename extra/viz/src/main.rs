@@ -245,6 +245,18 @@ enum Command {
         ///   "erode_b:512x512x1"
         #[arg(long = "dispatch", value_name = "ENTRY:WxH[xD]", verbatim_doc_comment)]
         dispatch: Vec<String>,
+        /// Wire a ping-pong feedback pair: the binding named `READ` in
+        /// the compute entry `ENTRY` reads the *previous frame*'s value
+        /// of the storage_image named `WRITE` (Shadertoy-style
+        /// self-feedback). The host allocates two physical textures for
+        /// the pair and swaps which is bound each frame.
+        ///
+        /// Format: `ENTRY:READ=WRITE`. Repeatable.
+        ///
+        /// Example:
+        ///   "buffer_a:prev_a=out_a"
+        #[arg(long = "feedback", value_name = "ENTRY:READ=WRITE", verbatim_doc_comment)]
+        feedback: Vec<String>,
         /// Print verbose output
         #[arg(short, long)]
         verbose: bool,
@@ -403,6 +415,7 @@ fn main() -> Result<()> {
             outputs,
             push_constants,
             dispatch,
+            feedback,
             verbose,
         } => {
             let parse_pairs = |pairs: &[String]| -> Result<HashMap<String, PathBuf>> {
@@ -447,6 +460,22 @@ fn main() -> Result<()> {
                 })
                 .collect::<Result<HashMap<_, _>>>()?;
 
+            // Parse `--feedback ENTRY:READ=WRITE` into (entry, read,
+            // write) triples. Names are resolved to (set, binding) when
+            // we have the descriptor in hand.
+            let feedback_specs: Vec<(String, String, String)> = feedback
+                .iter()
+                .map(|s| {
+                    let (entry, rw) = s.split_once(':').ok_or_else(|| {
+                        anyhow!("Invalid --feedback '{}'. Expected ENTRY:READ=WRITE", s)
+                    })?;
+                    let (read, write) = rw.split_once('=').ok_or_else(|| {
+                        anyhow!("Invalid --feedback '{}'. Expected ENTRY:READ=WRITE", s)
+                    })?;
+                    Ok((entry.to_string(), read.to_string(), write.to_string()))
+                })
+                .collect::<Result<Vec<_>>>()?;
+
             pollster::block_on(modes::pipeline::run_pipeline(
                 path,
                 pipeline,
@@ -454,6 +483,7 @@ fn main() -> Result<()> {
                 output_map,
                 &push_constants,
                 &dispatch_overrides,
+                &feedback_specs,
                 verbose,
             ))?;
         }

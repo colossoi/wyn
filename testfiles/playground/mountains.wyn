@@ -4,18 +4,24 @@
 -- License: MIT. Phacelle Noise and the Erosion Filter (Buffer B) are
 -- (c) 2025 Rune Skovbo Johansen under MPL-2.0.
 --
--- v1 (this port): no Buffer A self-feedback yet — Buffer A computes a
--- static initial heightmap each frame (default flat + center bump).
--- Mouse painting, erosion toggle, and Backspace reset land when
--- pipeline mode grows ping-pong support.
---
 -- Resource layout:
---   set 0, binding 0: bufferA  (rgba16float storage / sampled)
---   set 0, binding 1: bufferB  (rgba16float storage / sampled)
---   set 0, binding 2: bufferC  (rgba16float storage / sampled)
---   set 0, binding 3: linear sampler
---   set 1, binding 0: iResolution
---   set 1, binding 1: iTime
+--   set 0, binding 0:  bufferA  (rgba16float storage / sampled — ping-pong write target)
+--   set 0, binding 10: bufferA previous-frame view (the same logical
+--                      resource — wired host-side via `--feedback`)
+--   set 0, binding 1:  bufferB  (rgba16float storage / sampled)
+--   set 0, binding 2:  bufferC  (rgba16float storage / sampled)
+--   set 0, binding 3:  linear sampler
+--   set 1, binding 0:  iResolution
+--   set 1, binding 1:  iTime
+--   set 1, binding 2:  iMouse
+--   set 1, binding 3:  iFrame
+--   set 2, binding 0:  keyboard texture (256×3 R8Unorm)
+--
+-- Buffer A reads its own previous output via `prev_a`, applies the
+-- per-frame mouse painting / reset logic from the original Shadertoy,
+-- and writes the new state to `out_a`. The host (viz pipeline-
+-- interactive) needs `--feedback buffer_a:prev_a=out_a` to allocate
+-- two physical storage textures for the pair and swap them per frame.
 
 open f32
 
@@ -485,23 +491,74 @@ def Heightmap(p: vec2f32, n: vec3f32) vec4f32 =
 
 ------------------------------------------------------------
 -- Compute entry: Buffer A
--- Initial heightmap. v1: stateless — `DEFAULT_HEIGHT` + a small center
--- bump. Output channels: (height, slope.x, slope.y, unused).
+--
+-- Reads the previous-frame heightmap via `prev_a` (host-wired ping-pong)
+-- and either resets it (frame < 2 or Backspace toggled) or accumulates
+-- mouse-painted brush deltas into it.
+--
+-- Output channels: (height, slope.x, slope.y, unused).
 ------------------------------------------------------------
+
+-- World-space cursor position derived from the mouse ray hitting the
+-- DEFAULT_HEIGHT plane. Mirrors GetMouseWorldPos in the GLSL.
+def mouse_world_pos(ro: vec3f32, mrd: vec3f32, planeHeight: f32) vec3f32 =
+  let t = (planeHeight - ro.y) / mrd.y in
+  ro + mrd * @[t, t, t]
 
 #[compute]
 entry buffer_a(#[storage_image(set=0, binding=0, format=rgba16float, access=write_only)] out_a: storage_image,
+               #[texture(set=0, binding=10)] prev_a: texture2d,
+               #[sampler(set=0, binding=3)] samp: sampler,
+               #[texture(set=2, binding=0)] keyboard: texture2d,
                #[builtin(global_invocation_id)] gid: vec3u32,
-               #[uniform(set=1, binding=0)] iResolution: vec3f32) () =
+               #[uniform(set=1, binding=0)] iResolution: vec3f32,
+               #[uniform(set=1, binding=1)] iTime: f32,
+               #[uniform(set=1, binding=2)] iMouse: vec4f32,
+               #[uniform(set=1, binding=3)] iFrame: u32) () =
   let xy_i = @[i32.u32(gid.x), i32.u32(gid.y)] in
   let mapPos = @[f32.u32(gid.x) / iResolution.x,
                  f32.u32(gid.y) / iResolution.y] in
-  let bump = GetBrushDelta(mapPos, @[0.5, 0.5], 0.35) in
-  let value = @[DEFAULT_HEIGHT + bump.x * 0.1,
-                bump.y * 0.1,
-                bump.z * 0.1,
-                0.0] in
-  image_store(out_a, xy_i, value)
+  let fragCoord = @[f32.u32(gid.x), f32.u32(gid.y)] in
+
+  -- Previous-frame state.
+  let prev = texture_sample(prev_a, samp, mapPos, 0.0) in
+
+  -- Backspace pressed-this-frame (row 1, col 8 — JS keyCode 8).
+  let backspace = texture_load(keyboard, @[8i32, 1i32], 0).x > 0.0 in
+  let need_reset = iFrame < 2u32 || backspace in
+
+  -- Reset path: initial dome.
+  let init_bump = GetBrushDelta(mapPos, @[0.5, 0.5], 0.35) in
+  let init_v = @[DEFAULT_HEIGHT + init_bump.x * 0.1,
+                 init_bump.y * 0.1,
+                 init_bump.z * 0.1,
+                 0.0] in
+  let base = if need_reset then init_v else prev in
+
+  -- Mouse painting. iMouse.z > 0 ↔ mouse held this frame.
+  let painted =
+    if iMouse.z > 0.0 then
+      let (ro, _) = GetRay(iTime, iResolution, fragCoord) in
+      let (_, mrd) = GetRay(iTime, iResolution, @[iMouse.x, iMouse.y]) in
+      let cursor = mouse_world_pos(ro, mrd, DEFAULT_HEIGHT) in
+      let cursorPos = @[cursor.x + 0.5, cursor.z + 0.5] in
+      let v = GetBrushDelta(mapPos, cursorPos, BRUSH_SIZE) in
+      -- Shift key (row 0, col 16) inverts the brush.
+      let shift_down = texture_load(keyboard, @[16i32, 0i32], 0).x > 0.0 in
+      let v_signed = if shift_down then @[0.0 - v.x, 0.0 - v.y, 0.0 - v.z] else v in
+      -- Original divides by iFrameRate; we don't track it yet, assume
+      -- ~60 fps so the v1 painting magnitude lands close to the
+      -- original's. A persistent slope-painter doesn't need exact
+      -- frame-pacing here — heavier strokes just take fewer frames.
+      let dt_factor = 0.05 / 60.0 in
+      let added = @[base.x + v_signed.x * dt_factor,
+                    base.y + v_signed.y * dt_factor,
+                    base.z + v_signed.z * dt_factor,
+                    base.w] in
+      @[clamp01(added.x), added.y, added.z, added.w]
+    else base in
+
+  image_store(out_a, xy_i, painted)
 
 ------------------------------------------------------------
 -- Compute entry: Buffer B

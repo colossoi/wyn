@@ -31,6 +31,7 @@ pub async fn run_pipeline(
     outputs: HashMap<String, PathBuf>,
     push_constants: &[PushConstantSpec],
     dispatch_overrides: &HashMap<String, (u32, u32, u32)>,
+    feedback_specs: &[(String, String, String)],
     verbose: bool,
 ) -> Result<()> {
     let desc_json = fs::read_to_string(&pipeline_path)
@@ -53,7 +54,19 @@ pub async fn run_pipeline(
                  (descriptor has a graphics pipeline; results render to the window)"
             );
         }
-        return run_pipeline_interactive(spv_path, desc, dispatch_overrides.clone(), verbose);
+        return run_pipeline_interactive(
+            spv_path,
+            desc,
+            dispatch_overrides.clone(),
+            feedback_specs.to_vec(),
+            verbose,
+        );
+    }
+    if !feedback_specs.is_empty() {
+        eprintln!(
+            "[viz pipeline] --feedback is ignored in headless mode \
+             (no frames, no previous-state notion)"
+        );
     }
 
     let (device, queue) = create_headless_device(verbose).await?;
@@ -106,6 +119,7 @@ fn run_pipeline_interactive(
     spv_path: PathBuf,
     desc: PipelineDescriptor,
     dispatch_overrides: HashMap<String, (u32, u32, u32)>,
+    feedback_specs: Vec<(String, String, String)>,
     verbose: bool,
 ) -> Result<()> {
     // Resolve the vertex and fragment entry-point names from the
@@ -133,6 +147,7 @@ fn run_pipeline_interactive(
         vertex_entry,
         fragment_entry,
         dispatch_overrides,
+        feedback_specs,
         max_frames: None,
         verbose,
         validate: false,

@@ -421,7 +421,7 @@ pub fn resolve_dispatch_size_with_textures(
                     // pipeline workgroup_size (x and y), not by the
                     // 1D `workgroup_size` in `DerivedFrom`.
                     if let Some(res) = storage_textures.get(&(*set, *binding)) {
-                        let size = res.texture.size();
+                        let size = res.textures[0].size();
                         let wg_y = pipeline_workgroup_size.1.max(1);
                         let wg_z = pipeline_workgroup_size.2.max(1);
                         (
@@ -781,10 +781,28 @@ fn access_to_storage_texture_access(a: Access) -> wgpu::StorageTextureAccess {
 /// bound for `Binding::Texture` consumers reading the same underlying
 /// resource (cross-stage sharing).
 pub struct StorageTextureResource {
-    pub texture: wgpu::Texture,
-    pub storage_view: wgpu::TextureView,
-    pub sampled_view: wgpu::TextureView,
+    /// Physical texture slots. Always length 1 for ordinary storage
+    /// textures; length 2 for ping-pong pairs (one "current"-writable
+    /// + one "previous"-readable, swapped each frame by the host).
+    pub textures: Vec<wgpu::Texture>,
+    /// One storage view per slot (binding-as-storage_image consumer).
+    pub storage_views: Vec<wgpu::TextureView>,
+    /// One sampled view per slot (binding-as-texture2d consumer).
+    pub sampled_views: Vec<wgpu::TextureView>,
     pub format: wgpu::TextureFormat,
+}
+
+/// A resolved feedback (ping-pong) pair. The read binding at
+/// `(read_set, read_binding)` is bound to the slot OPPOSITE the current
+/// parity; the write binding at `(write_set, write_binding)` is bound
+/// to the slot AT the current parity. The host increments parity each
+/// frame so what was "current" becomes "previous" for next frame.
+#[derive(Debug, Clone, Copy)]
+pub struct FeedbackPair {
+    pub read_set: u32,
+    pub read_binding: u32,
+    pub write_set: u32,
+    pub write_binding: u32,
 }
 
 /// Walk every pipeline's bindings, allocate one `wgpu::Texture` per
@@ -802,7 +820,15 @@ pub fn create_storage_textures(
     device: &wgpu::Device,
     descriptor: &PipelineDescriptor,
     surface_size: Option<(u32, u32)>,
+    feedback_pairs: &[FeedbackPair],
 ) -> HashMap<(u32, u32), StorageTextureResource> {
+    // A (set, binding) that appears as the WRITE side of any feedback
+    // pair needs two physical textures; everything else gets one.
+    let pingpong_write_keys: std::collections::HashSet<(u32, u32)> = feedback_pairs
+        .iter()
+        .map(|p| (p.write_set, p.write_binding))
+        .collect();
+
     let mut out: HashMap<(u32, u32), StorageTextureResource> = HashMap::new();
     for pipeline in &descriptor.pipelines {
         let bindings: &[Binding] = match pipeline {
@@ -832,37 +858,52 @@ pub fn create_storage_textures(
                 height,
                 depth_or_array_layers: 1,
             };
-            let texture = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some(&format!("storage_texture_{}", name)),
-                size,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu_format,
-                usage: wgpu::TextureUsages::STORAGE_BINDING
-                    | wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_SRC
-                    | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            });
-            let storage_view = texture.create_view(&wgpu::TextureViewDescriptor {
-                label: Some(&format!("storage_view_{}", name)),
-                format: Some(wgpu_format),
-                dimension: Some(wgpu::TextureViewDimension::D2),
-                ..Default::default()
-            });
-            let sampled_view = texture.create_view(&wgpu::TextureViewDescriptor {
-                label: Some(&format!("sampled_view_{}", name)),
-                format: Some(wgpu_format),
-                dimension: Some(wgpu::TextureViewDimension::D2),
-                ..Default::default()
-            });
+            let slot_count = if pingpong_write_keys.contains(&key) { 2 } else { 1 };
+
+            let mut textures = Vec::with_capacity(slot_count);
+            let mut storage_views = Vec::with_capacity(slot_count);
+            let mut sampled_views = Vec::with_capacity(slot_count);
+            for slot in 0..slot_count {
+                let label_suffix = if slot_count == 1 {
+                    String::new()
+                } else {
+                    format!(".slot{slot}")
+                };
+                let texture = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some(&format!("storage_texture_{name}{label_suffix}")),
+                    size,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu_format,
+                    usage: wgpu::TextureUsages::STORAGE_BINDING
+                        | wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::COPY_SRC
+                        | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                let storage_view = texture.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some(&format!("storage_view_{name}{label_suffix}")),
+                    format: Some(wgpu_format),
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    ..Default::default()
+                });
+                let sampled_view = texture.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some(&format!("sampled_view_{name}{label_suffix}")),
+                    format: Some(wgpu_format),
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    ..Default::default()
+                });
+                textures.push(texture);
+                storage_views.push(storage_view);
+                sampled_views.push(sampled_view);
+            }
             out.insert(
                 key,
                 StorageTextureResource {
-                    texture,
-                    storage_view,
-                    sampled_view,
+                    textures,
+                    storage_views,
+                    sampled_views,
                     format: wgpu_format,
                 },
             );
@@ -1040,6 +1081,8 @@ pub fn build_resource_bind_group_for_set(
     host_textures: &HashMap<(u32, u32), HostTextureResource>,
     samplers: &HashMap<(u32, u32), wgpu::Sampler>,
     uniforms: &HashMap<(u32, u32), wgpu::Buffer>,
+    feedback_reads: &HashMap<(u32, u32), (u32, u32)>,
+    parity: usize,
 ) -> Result<(wgpu::BindGroupLayout, BindGroup)> {
     let mut layout_entries: Vec<BindGroupLayoutEntry> = Vec::new();
     let mut group_entries: Vec<BindGroupEntry> = Vec::new();
@@ -1057,6 +1100,10 @@ pub fn build_resource_bind_group_for_set(
                 let res = storage_textures.get(&key).ok_or_else(|| {
                     anyhow!("no storage texture allocated for ({}, {})", bset, binding)
                 })?;
+                // Ping-pong write side: storage_view at the current
+                // parity. For non-ping-pong textures, slot count is 1
+                // so the index folds back to 0 either way.
+                let slot = parity % res.storage_views.len();
                 layout_entries.push(BindGroupLayoutEntry {
                     binding: *binding,
                     visibility,
@@ -1069,7 +1116,7 @@ pub fn build_resource_bind_group_for_set(
                 });
                 group_entries.push(BindGroupEntry {
                     binding: *binding,
-                    resource: BindingResource::TextureView(&res.storage_view),
+                    resource: BindingResource::TextureView(&res.storage_views[slot]),
                 });
             }
             Binding::Texture {
@@ -1084,19 +1131,49 @@ pub fn build_resource_bind_group_for_set(
                 // Resolve the sampled view: storage_texture pool first
                 // (cross-stage compute-write / fragment-sample handoff),
                 // then host-uploaded pool (keyboard, etc.).
-                let view = storage_textures
-                    .get(&key)
-                    .map(|r| &r.sampled_view)
-                    .or_else(|| host_textures.get(&key).map(|r| &r.view))
-                    .ok_or_else(|| {
+                //
+                // If this binding is the READ side of a feedback pair,
+                // its view comes from the WRITE side's storage texture
+                // at the OPPOSITE parity ("previous frame's value");
+                // otherwise we use the current-parity sampled view.
+                let view = if let Some(&(ws, wb)) = feedback_reads.get(&key) {
+                    let res = storage_textures.get(&(ws, wb)).ok_or_else(|| {
                         anyhow!(
-                            "Texture binding ({}, {}) has no resource — neither a \
-                             compute-written storage_texture nor a host-uploaded \
-                             host_texture (e.g. `keyboard`)",
+                            "Feedback read at ({}, {}) targets ({}, {}) but no \
+                             storage texture is allocated for the write side",
                             bset,
-                            binding
+                            binding,
+                            ws,
+                            wb
                         )
                     })?;
+                    if res.sampled_views.len() < 2 {
+                        return Err(anyhow!(
+                            "Feedback read at ({}, {}) targets non-ping-pong \
+                             storage texture at ({}, {}); the write side must \
+                             be allocated with 2 slots",
+                            bset,
+                            binding,
+                            ws,
+                            wb
+                        ));
+                    }
+                    &res.sampled_views[(parity + 1) % 2]
+                } else {
+                    storage_textures
+                        .get(&key)
+                        .map(|r| &r.sampled_views[parity % r.sampled_views.len()])
+                        .or_else(|| host_textures.get(&key).map(|r| &r.view))
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "Texture binding ({}, {}) has no resource — neither \
+                                 a compute-written storage_texture nor a \
+                                 host-uploaded host_texture (e.g. `keyboard`)",
+                                bset,
+                                binding
+                            )
+                        })?
+                };
                 layout_entries.push(BindGroupLayoutEntry {
                     binding: *binding,
                     visibility,

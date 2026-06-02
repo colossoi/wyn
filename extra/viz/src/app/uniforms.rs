@@ -623,7 +623,10 @@ pub struct PipelineUniforms {
 }
 
 /// Allocate Shadertoy-style uniform buffers for every recognized name
-/// the descriptor's graphics pipeline declares as a `Binding::Uniform`.
+/// any pipeline in the descriptor declares as a `Binding::Uniform`.
+/// Each `(set, binding)` is allocated once; compute pipelines that
+/// declare the same `(set, binding)` as the graphics pipeline reuse
+/// the same buffer.
 ///
 /// Recognized names: `iResolution` (vec3 + pad), `iTime` (f32),
 /// `iMouse` (vec4), `iFrame` (u32 + pad). Unknown uniform names error
@@ -632,7 +635,7 @@ pub struct PipelineUniforms {
 /// path writes updated values.
 pub fn build_pipeline_uniforms(
     device: &wgpu::Device,
-    graphics_bindings: &[wyn_pipeline_descriptor::Binding],
+    all_uniform_bindings: &[wyn_pipeline_descriptor::Binding],
 ) -> Result<PipelineUniforms> {
     use std::collections::HashMap;
     use wyn_pipeline_descriptor::Binding;
@@ -643,10 +646,15 @@ pub fn build_pipeline_uniforms(
     let mut frame: Option<wgpu::Buffer> = None;
     let mut by_set_binding: HashMap<(u32, u32), wgpu::Buffer> = HashMap::new();
 
-    for b in graphics_bindings {
+    for b in all_uniform_bindings {
         let Binding::Uniform { set, binding, name } = b else {
             continue;
         };
+        // Same (set, binding) may be declared by multiple pipelines —
+        // only allocate the buffer once.
+        if by_set_binding.contains_key(&(*set, *binding)) {
+            continue;
+        }
         let (size_bytes, label) = match name.as_str() {
             "iResolution" => (
                 std::mem::size_of::<ResolutionUniform>() as u64,

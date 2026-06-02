@@ -124,6 +124,13 @@ pub struct InteractivePipelineSpec {
     /// the descriptor's workgroup_size at dispatch time. Empty when
     /// the compiler's default dispatch is correct for every stage.
     pub dispatch_overrides: HashMap<String, (u32, u32, u32)>,
+    /// Ping-pong feedback pairs, one per `--feedback ENTRY:READ=WRITE`
+    /// on the CLI. Each entry is `(entry_point, read_binding_name,
+    /// write_binding_name)`. The host resolves names to `(set,
+    /// binding)` at state construction, allocates two physical
+    /// textures per write binding, and swaps which one is bound each
+    /// frame. Empty for shaders with no self-feedback.
+    pub feedback_specs: Vec<(String, String, String)>,
     pub max_frames: Option<u32>,
     pub verbose: bool,
     pub validate: bool,
@@ -196,10 +203,14 @@ enum AppMode {
 /// `ComputePipeline` in the descriptor.
 struct PipelineComputeStage {
     pipeline: wgpu::ComputePipeline,
-    /// Bind groups indexed by descriptor-set number. Empty sets below
-    /// the lowest used one get a no-op group attached at render time
-    /// to satisfy wgpu's contiguous-sets requirement.
-    bind_groups_by_set: Vec<Option<BindGroup>>,
+    /// Bind groups indexed by (parity, descriptor-set number). Parity
+    /// 0 and 1 hold logically-distinct ping-pong texture bindings; for
+    /// pipelines untouched by feedback, both parities point at the
+    /// same physical resources but are built as separate `BindGroup`s
+    /// to keep the indexing path uniform. Empty sets below the lowest
+    /// used one get a no-op group attached at render time to satisfy
+    /// wgpu's contiguous-sets requirement.
+    bind_groups_by_set: [Vec<Option<BindGroup>>; 2],
     workgroups: (u32, u32, u32),
     push_constants: Vec<u8>,
     label: String,
@@ -210,8 +221,10 @@ struct PipelineComputeStage {
 struct PipelineState {
     compute_stages: Vec<PipelineComputeStage>,
     render_pipeline: RenderPipeline,
-    /// Render-side bind groups indexed by descriptor-set number.
-    render_bind_groups_by_set: Vec<Option<BindGroup>>,
+    /// Render-side bind groups indexed by (parity, descriptor-set
+    /// number). See `PipelineComputeStage.bind_groups_by_set` for the
+    /// parity convention.
+    render_bind_groups_by_set: [Vec<Option<BindGroup>>; 2],
     vertex_count: u32,
     // Shadertoy-style uniform buffers, populated per frame when the
     // graphics pipeline declares the matching uniform binding.
@@ -644,17 +657,100 @@ impl State {
         )?;
         let depth_view = create_depth_view(&device, &config);
 
+        // Phase 6: resolve `--feedback ENTRY:READ=WRITE` specs against
+        // the descriptor. Each spec names a compute entry plus two
+        // binding names (read + write) inside it; we look them up to
+        // get `(set, binding)` tuples the storage-texture allocator and
+        // bind-group builder consume directly.
+        let feedback_pairs: Vec<gpu::FeedbackPair> = spec
+            .feedback_specs
+            .iter()
+            .map(|(entry, read, write)| -> Result<gpu::FeedbackPair> {
+                let cp = spec
+                    .descriptor
+                    .pipelines
+                    .iter()
+                    .find_map(|p| match p {
+                        DescPipeline::Compute(cp) if cp.entry_point == *entry => Some(cp),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "--feedback '{}:{}={}' — no compute pipeline with that entry point",
+                            entry,
+                            read,
+                            write
+                        )
+                    })?;
+                let mut read_loc = None;
+                let mut write_loc = None;
+                for b in &cp.bindings {
+                    match b {
+                        wyn_pipeline_descriptor::Binding::Texture {
+                            set, binding, name, ..
+                        } if name == read => read_loc = Some((*set, *binding)),
+                        wyn_pipeline_descriptor::Binding::StorageTexture {
+                            set, binding, name, ..
+                        } if name == write => write_loc = Some((*set, *binding)),
+                        _ => {}
+                    }
+                }
+                let (read_set, read_binding) = read_loc.ok_or_else(|| {
+                    anyhow!(
+                        "--feedback '{}:{}={}' — entry has no texture2d binding named '{}'",
+                        entry,
+                        read,
+                        write,
+                        read
+                    )
+                })?;
+                let (write_set, write_binding) = write_loc.ok_or_else(|| {
+                    anyhow!(
+                        "--feedback '{}:{}={}' — entry has no storage_image binding named '{}'",
+                        entry,
+                        read,
+                        write,
+                        write
+                    )
+                })?;
+                Ok(gpu::FeedbackPair {
+                    read_set,
+                    read_binding,
+                    write_set,
+                    write_binding,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let feedback_reads: HashMap<(u32, u32), (u32, u32)> = feedback_pairs
+            .iter()
+            .map(|p| ((p.read_set, p.read_binding), (p.write_set, p.write_binding)))
+            .collect();
+
         // Allocate cross-pipeline resources up front (Phase 1b helpers).
-        let storage_textures =
-            gpu::create_storage_textures(&device, &spec.descriptor, Some((config.width, config.height)));
+        let storage_textures = gpu::create_storage_textures(
+            &device,
+            &spec.descriptor,
+            Some((config.width, config.height)),
+            &feedback_pairs,
+        );
         let host_textures = gpu::create_host_textures(&device, &spec.descriptor, &storage_textures);
         let samplers = gpu::create_samplers(&device, &spec.descriptor);
         // Phase 4: Shadertoy-style uniforms (iResolution / iTime /
-        // iMouse / iFrame). One buffer per declared uniform name on
-        // the graphics pipeline; the per-frame render path writes
-        // their values.
-        let graphics_bindings_pre = collect_graphics_bindings(&spec.descriptor);
-        let uniforms = uniforms::build_pipeline_uniforms(&device, &graphics_bindings_pre)
+        // iMouse / iFrame). One buffer per `(set, binding)` declared by
+        // any pipeline (graphics OR compute); same-slot declarations
+        // across pipelines reuse the same physical buffer. The
+        // per-frame render path writes their values.
+        let all_uniform_bindings: Vec<wyn_pipeline_descriptor::Binding> = spec
+            .descriptor
+            .pipelines
+            .iter()
+            .flat_map(|p| match p {
+                DescPipeline::Compute(cp) => cp.bindings.iter().cloned().collect::<Vec<_>>(),
+                DescPipeline::MultiCompute(mc) => mc.bindings.iter().cloned().collect(),
+                DescPipeline::Graphics(gp) => gp.bindings.iter().cloned().collect(),
+            })
+            .collect();
+        let uniforms = uniforms::build_pipeline_uniforms(&device, &all_uniform_bindings)
             .context("build_pipeline_uniforms")?;
 
         // Load the SPIR-V module once; both compute and graphics
@@ -670,44 +766,58 @@ impl State {
             };
 
             // Group bindings by `set` to build one bind-group layout +
-            // bind group per set the pipeline uses.
+            // per-parity bind groups per set. The layout is parity-
+            // invariant (it describes the binding *types*, not the
+            // resources), so we build it once at parity 0 and reuse it
+            // for the parity 1 build.
             let max_set = cp.bindings.iter().filter_map(binding_set).max().unwrap_or(0);
             let mut bgls: Vec<wgpu::BindGroupLayout> = Vec::with_capacity((max_set + 1) as usize);
-            let mut bgs: Vec<Option<BindGroup>> = Vec::with_capacity((max_set + 1) as usize);
-            let mut bgl_refs: Vec<wgpu::BindGroupLayout> = Vec::new();
+            let mut bgs: [Vec<Option<BindGroup>>; 2] = [Vec::new(), Vec::new()];
 
             for set in 0..=max_set {
                 let any_in_set = cp.bindings.iter().any(|b| binding_set(b) == Some(set));
                 if !any_in_set {
                     let layout = empty_bind_group_layout(&device, &format!("compute_empty_set{set}"));
-                    let empty_bg = device.create_bind_group(&BindGroupDescriptor {
-                        label: Some(&format!("compute_empty_bg_set{set}")),
-                        layout: &layout,
-                        entries: &[],
-                    });
+                    for parity in 0..2 {
+                        let empty_bg = device.create_bind_group(&BindGroupDescriptor {
+                            label: Some(&format!("compute_empty_bg_set{set}_p{parity}")),
+                            layout: &layout,
+                            entries: &[],
+                        });
+                        bgs[parity].push(Some(empty_bg));
+                    }
                     bgls.push(layout);
-                    bgs.push(Some(empty_bg));
                     continue;
                 }
-                let (layout, bg) = gpu::build_resource_bind_group_for_set(
-                    &device,
-                    &cp.bindings,
-                    set,
-                    wgpu::ShaderStages::COMPUTE,
-                    &storage_textures,
-                    &host_textures,
-                    &samplers,
-                    &uniforms.by_set_binding,
-                )
-                .with_context(|| {
-                    format!("compute {:?}: build bind group for set {}", cp.entry_point, set)
-                })?;
-                bgls.push(layout);
-                bgs.push(Some(bg));
+                let mut set_layout: Option<wgpu::BindGroupLayout> = None;
+                for parity in 0..2 {
+                    let (layout, bg) = gpu::build_resource_bind_group_for_set(
+                        &device,
+                        &cp.bindings,
+                        set,
+                        wgpu::ShaderStages::COMPUTE,
+                        &storage_textures,
+                        &host_textures,
+                        &samplers,
+                        &uniforms.by_set_binding,
+                        &feedback_reads,
+                        parity,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "compute {:?}: build bind group for set {} (parity {})",
+                            cp.entry_point, set, parity
+                        )
+                    })?;
+                    if set_layout.is_none() {
+                        set_layout = Some(layout);
+                    }
+                    bgs[parity].push(Some(bg));
+                }
+                bgls.push(set_layout.expect("layout built for parity 0"));
             }
-            bgl_refs.extend(bgls);
 
-            let bgl_borrows: Vec<&wgpu::BindGroupLayout> = bgl_refs.iter().collect();
+            let bgl_borrows: Vec<&wgpu::BindGroupLayout> = bgls.iter().collect();
             let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
                 label: Some(&format!("compute_layout_{}", cp.entry_point)),
                 bind_group_layouts: &bgl_borrows,
@@ -771,33 +881,45 @@ impl State {
         let graphics_bindings = collect_graphics_bindings(&spec.descriptor);
         let g_max_set = graphics_bindings.iter().filter_map(binding_set).max().unwrap_or(0);
         let mut g_bgls: Vec<wgpu::BindGroupLayout> = Vec::with_capacity((g_max_set + 1) as usize);
-        let mut g_bgs: Vec<Option<BindGroup>> = Vec::with_capacity((g_max_set + 1) as usize);
+        let mut g_bgs: [Vec<Option<BindGroup>>; 2] = [Vec::new(), Vec::new()];
         for set in 0..=g_max_set {
             let any_in_set = graphics_bindings.iter().any(|b| binding_set(b) == Some(set));
             if !any_in_set {
                 let layout = empty_bind_group_layout(&device, &format!("graphics_empty_set{set}"));
-                let empty_bg = device.create_bind_group(&BindGroupDescriptor {
-                    label: Some(&format!("graphics_empty_bg_set{set}")),
-                    layout: &layout,
-                    entries: &[],
-                });
+                for parity in 0..2 {
+                    let empty_bg = device.create_bind_group(&BindGroupDescriptor {
+                        label: Some(&format!("graphics_empty_bg_set{set}_p{parity}")),
+                        layout: &layout,
+                        entries: &[],
+                    });
+                    g_bgs[parity].push(Some(empty_bg));
+                }
                 g_bgls.push(layout);
-                g_bgs.push(Some(empty_bg));
                 continue;
             }
-            let (layout, bg) = gpu::build_resource_bind_group_for_set(
-                &device,
-                &graphics_bindings,
-                set,
-                wgpu::ShaderStages::FRAGMENT,
-                &storage_textures,
-                &host_textures,
-                &samplers,
-                &uniforms.by_set_binding,
-            )
-            .with_context(|| format!("graphics: build bind group for set {}", set))?;
-            g_bgls.push(layout);
-            g_bgs.push(Some(bg));
+            let mut set_layout: Option<wgpu::BindGroupLayout> = None;
+            for parity in 0..2 {
+                let (layout, bg) = gpu::build_resource_bind_group_for_set(
+                    &device,
+                    &graphics_bindings,
+                    set,
+                    wgpu::ShaderStages::FRAGMENT,
+                    &storage_textures,
+                    &host_textures,
+                    &samplers,
+                    &uniforms.by_set_binding,
+                    &feedback_reads,
+                    parity,
+                )
+                .with_context(|| {
+                    format!("graphics: build bind group for set {} (parity {})", set, parity)
+                })?;
+                if set_layout.is_none() {
+                    set_layout = Some(layout);
+                }
+                g_bgs[parity].push(Some(bg));
+            }
+            g_bgls.push(set_layout.expect("layout built for parity 0"));
         }
 
         let g_bgl_borrows: Vec<&wgpu::BindGroupLayout> = g_bgls.iter().collect();
@@ -1697,6 +1819,11 @@ fn render_pipeline(
         queue.write_buffer(buf, 0, bytemuck::cast_slice(&[u]));
     }
 
+    // Pick the bind-group parity for this frame. Phase 6: compute and
+    // graphics pipelines both hold two bind-group sets; ping-pong
+    // textures alternate which physical slot is "current" each frame.
+    let parity = (frame_count as usize) % 2;
+
     // Dispatch each compute stage in descriptor order.
     for stage in &state.compute_stages {
         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -1704,7 +1831,7 @@ fn render_pipeline(
             timestamp_writes: None,
         });
         cpass.set_pipeline(&stage.pipeline);
-        for (set, bg_opt) in stage.bind_groups_by_set.iter().enumerate() {
+        for (set, bg_opt) in stage.bind_groups_by_set[parity].iter().enumerate() {
             if let Some(bg) = bg_opt {
                 cpass.set_bind_group(set as u32, bg, &[]);
             }
@@ -1739,7 +1866,7 @@ fn render_pipeline(
         ..Default::default()
     });
     rpass.set_pipeline(&state.render_pipeline);
-    for (set, bg_opt) in state.render_bind_groups_by_set.iter().enumerate() {
+    for (set, bg_opt) in state.render_bind_groups_by_set[parity].iter().enumerate() {
         if let Some(bg) = bg_opt {
             rpass.set_bind_group(set as u32, bg, &[]);
         }
