@@ -2182,11 +2182,7 @@ impl<'a> Parser<'a> {
             Some(Token::DollarSign) => self.parse_curry_expression(),
             _ => {
                 let span = self.current_span();
-                Err(err_parse!(
-                    "Expected expression, got {:?} at {}",
-                    self.peek(),
-                    span
-                ))
+                Err(err_parse_at!(span, "Expected expression, got {:?}", self.peek()))
             }
         }
     }
