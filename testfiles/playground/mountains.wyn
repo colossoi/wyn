@@ -10,8 +10,8 @@
 -- pipeline mode grows ping-pong support.
 --
 -- Resource layout:
---   set 0, binding 0: bufferA  (rgba32float storage / sampled)
---   set 0, binding 1: bufferB  (rgba32float storage / sampled)
+--   set 0, binding 0: bufferA  (rgba16float storage / sampled)
+--   set 0, binding 1: bufferB  (rgba16float storage / sampled)
 --   set 0, binding 2: bufferC  (rgba16float storage / sampled)
 --   set 0, binding 3: linear sampler
 --   set 1, binding 0: iResolution
@@ -490,7 +490,7 @@ def Heightmap(p: vec2f32, n: vec3f32) vec4f32 =
 ------------------------------------------------------------
 
 #[compute]
-entry buffer_a(#[storage_image(set=0, binding=0, format=rgba32float, access=write_only)] out_a: storage_image,
+entry buffer_a(#[storage_image(set=0, binding=0, format=rgba16float, access=write_only)] out_a: storage_image,
                #[builtin(global_invocation_id)] gid: vec3u32,
                #[uniform(set=1, binding=0)] iResolution: vec3f32) () =
   let xy_i = @[i32.u32(gid.x), i32.u32(gid.y)] in
@@ -509,7 +509,7 @@ entry buffer_a(#[storage_image(set=0, binding=0, format=rgba32float, access=writ
 ------------------------------------------------------------
 
 #[compute]
-entry buffer_b(#[storage_image(set=0, binding=1, format=rgba32float, access=write_only)] out_b: storage_image,
+entry buffer_b(#[storage_image(set=0, binding=1, format=rgba16float, access=write_only)] out_b: storage_image,
                #[texture(set=0, binding=0)] tex_a: texture2d,
                #[sampler(set=0, binding=3)] samp: sampler,
                #[builtin(global_invocation_id)] gid: vec3u32,
