@@ -2425,3 +2425,30 @@ def main () i32 = eq [1, 2, 3] [4, 5]\n";
     let result = try_typecheck_program(source);
     assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
 }
+
+/// Spec §x binop y: `**` is the one binary op that admits a
+/// heterogeneous shape — a float base may take an integer exponent
+/// (signed or unsigned, any width); every other op still requires same
+/// types, and the exception is one-directional (integer base + float
+/// exponent stays a same-typed error).
+#[test]
+fn pow_operator_heterogeneous_cases() {
+    // 1. Permitted: `f32 ** i32` (default int literal is i32).
+    typecheck_program("def pow5(x: f32) f32 = x ** 5");
+
+    // 2. Permitted: `f32 ** u32` (explicit unsigned exponent).
+    typecheck_program("def pow5u(x: f32) f32 = x ** 5u32");
+
+    // 3. Regression guard: existing homogeneous shape keeps working.
+    typecheck_program("def pow5f(x: f32) f32 = x ** 5.0f32");
+
+    // 4. Rejected: integer base, float exponent — the exception only
+    //    runs in the float-base direction.
+    let int_base_float_exp = try_typecheck_program("def bad(x: i32) i32 = x ** 5.0f32");
+    assert!(matches!(int_base_float_exp, Err(CompilerError::TypeError(_, _))));
+
+    // 5. Rejected: other binary operators stay strictly same-typed. The
+    //    exception is `**`-only.
+    let plus_het = try_typecheck_program("def bad(x: f32) f32 = x + 5");
+    assert!(matches!(plus_het, Err(CompilerError::TypeError(_, _))));
+}

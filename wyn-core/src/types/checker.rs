@@ -2718,13 +2718,27 @@ impl<'a> TypeChecker<'a> {
                 r.clone()
             }
             (None, None) => {
-                self.unify_or_err(
-                    &left_type,
-                    &right_type,
-                    span,
-                    &format!("Operator '{}' requires same-typed operands", op),
-                )?;
-                l.clone()
+                // `**` exception: a float base may take an integer exponent of
+                // any width. Result is the base's float type. See
+                // SPECIFICATION.md `x binop y`. The (Int base, Float exp) shape
+                // stays a same-typed error, matching the spec's wording.
+                if op == "**"
+                    && matches!(l, Type::Constructed(TypeName::Float(_), _))
+                    && matches!(
+                        r,
+                        Type::Constructed(TypeName::Int(_), _) | Type::Constructed(TypeName::UInt(_), _)
+                    )
+                {
+                    l.clone()
+                } else {
+                    self.unify_or_err(
+                        &left_type,
+                        &right_type,
+                        span,
+                        &format!("Operator '{}' requires same-typed operands", op),
+                    )?;
+                    l.clone()
+                }
             }
         };
 

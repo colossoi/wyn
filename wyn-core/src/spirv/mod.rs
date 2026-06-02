@@ -1958,8 +1958,22 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             ("!=", Constructed(Float(_), _), _) => {
                 Ok(self.constructor.builder.f_ord_not_equal(bool_type, None, lhs, rhs)?)
             }
+            ("**", Constructed(Float(_), _), Constructed(Int(_), _)) => {
+                // Float base, integer exponent (the spec'd het case). Convert
+                // the exponent to the base's float type, then call GLSL Pow.
+                let glsl = self.constructor.glsl_ext_inst_id;
+                let conv = self.constructor.builder.convert_s_to_f(result_ty, None, rhs)?;
+                let operands = vec![Operand::IdRef(lhs), Operand::IdRef(conv)];
+                Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 26, operands)?)
+            }
+            ("**", Constructed(Float(_), _), Constructed(UInt(_), _)) => {
+                let glsl = self.constructor.glsl_ext_inst_id;
+                let conv = self.constructor.builder.convert_u_to_f(result_ty, None, rhs)?;
+                let operands = vec![Operand::IdRef(lhs), Operand::IdRef(conv)];
+                Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 26, operands)?)
+            }
             ("**", Constructed(Float(_), _), _) => {
-                // Power operator using GLSL pow (opcode 26)
+                // Float base, float exponent: GLSL pow (opcode 26).
                 let glsl = self.constructor.glsl_ext_inst_id;
                 let operands = vec![Operand::IdRef(lhs), Operand::IdRef(rhs)];
                 Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 26, operands)?)

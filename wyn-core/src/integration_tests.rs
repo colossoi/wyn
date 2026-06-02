@@ -1679,6 +1679,54 @@ entry fragment_main(#[uniform(set=1, binding=0)] iTime: f32, #[builtin(position)
     assert!(result.is_ok(), "SPIR-V compilation failed: {:?}", result.err());
 }
 
+/// Spec §x binop y: `f32 ** i32` (float base, integer exponent) must
+/// type-check, lower to valid SPIR-V, and route through `OpConvertSToF`
+/// before `GLSL Pow`. Use exponent `9` to skip the EGIR fold's
+/// `2..8` constant-power-to-mul-chain rewrite, forcing the
+/// backend-conversion path.
+#[test]
+fn pow_float_base_int_exp_lowers_via_convert_then_pow() {
+    use rspirv::binary::parse_words;
+    use rspirv::dr::Loader;
+    use rspirv::spirv::Op;
+
+    let spirv = compile_to_spirv(
+        "\
+#[compute]
+entry e(xs: []f32) []f32 = map(|x: f32| x ** 9, xs)
+",
+    )
+    .expect("f32 ** i32 (exp=9) compiles to SPIR-V");
+
+    let mut loader = Loader::new();
+    parse_words(&spirv, &mut loader).expect("parse spirv");
+    let module = loader.module();
+
+    let mut converts = 0;
+    let mut pows = 0;
+    for func in &module.functions {
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                match inst.class.opcode {
+                    Op::ConvertSToF => converts += 1,
+                    Op::ExtInst => {
+                        // GLSL.std.450 Pow = opcode 26 (operand index 1).
+                        if let Some(rspirv::dr::Operand::LiteralExtInstInteger(26)) = inst.operands.get(1) {
+                            pows += 1;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    assert!(
+        converts >= 1,
+        "expected at least one OpConvertSToF to coerce i32 exponent, found {converts}"
+    );
+    assert!(pows >= 1, "expected at least one GLSL Pow ext-inst, found {pows}");
+}
+
 #[test]
 fn mul_all_three_overloads_compile_to_spirv() {
     // `mul` has three overloads with three different `PrimOp`s

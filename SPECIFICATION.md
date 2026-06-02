@@ -766,9 +766,9 @@ Access field `f` of the expression `e`, which must be a record or tuple.
 Evaluate the expression `e` with the module `m` locally opened, as if by `open`. This can make some expressions easier to read and write, without polluting the global scope with a declaration-level `open`.
 
 #### x binop y
-Apply an operator to `x` and `y`. Operators are functions like any other, and can be user-defined. Wyn pre-defines certain "magical" overloaded operators that work on several types. Overloaded operators cannot be defined by the user. Both operands must have the same type. The predefined operators and their semantics are:
+Apply an operator to `x` and `y`. Operators are functions like any other, and can be user-defined. Wyn pre-defines certain "magical" overloaded operators that work on several types. Overloaded operators cannot be defined by the user. Both operands must have the same type, except where noted below for `**`. The predefined operators and their semantics are:
 
-- **`**`**: Power operator, defined for all numeric types.
+- **`**`**: Power operator, defined for all numeric types. The base and exponent must have the same type, **with one exception**: if the base is a floating-point scalar (`f16` / `f32` / `f64`), the exponent may be any signed or unsigned integer type (`i8` … `i64`, `u8` … `u64`); the result type is the base's float type, computed as if the integer exponent were first converted to the base's float type.
 - **`//`, `%%`**: Division and remainder on integers, with rounding towards zero.
 - **`*`, `/`, `%`, `+`, `-`**: The usual arithmetic operators, defined for all numeric types. Note that `/` and `%` rounds towards negative infinity when used on integers - this is different from in C.
 - **`^`, `&`, `|`, `>>`, `<<`, `>>>`**: Bitwise operators, respectively bitwise xor, and, or, arithmetic shift right, left shift, and logical (unsigned) shift right. Shifting is undefined if the right operand is negative, or greater than or equal to the length in bits of the left operand.
