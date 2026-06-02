@@ -120,7 +120,7 @@ pub fn build_producer_graph(
     };
 
     builder.walk_term(body);
-    builder.compute_use_counts();
+    builder.compute_use_counts(body);
 
     ProducerGraph {
         nodes: builder.nodes,
@@ -264,19 +264,37 @@ impl<'a> GraphBuilder<'a> {
     }
 
     /// After all nodes and edges are built, count how many times each
-    /// producer's output is used (both as SOAC inputs and in non-SOAC contexts).
-    fn compute_use_counts(&mut self) {
-        // Count edges per producer
-        let mut counts: HashMap<ProducerId, usize> = HashMap::new();
-        for edge in &self.edges {
-            *counts.entry(edge.producer).or_insert(0) += 1;
+    /// producer's binding symbol is referenced anywhere in the function
+    /// body — including non-SOAC uses like `Index{Var(p), idx}` inside a
+    /// consumer SOAC's lambda body. SOAC-only edge counting under-counts
+    /// when a let-bound producer has both a SOAC consumer and a non-SOAC
+    /// consumer: fusion would then think the producer is dead after fusing
+    /// the SOAC edge, drop its let-binding, and leave the non-SOAC
+    /// reference dangling.
+    fn compute_use_counts(&mut self, body: &Term) {
+        use std::collections::HashSet;
+        let producer_syms: HashSet<SymbolId> = self.binding_map.keys().copied().collect();
+        let mut tally: HashMap<SymbolId, usize> = HashMap::new();
+        walk_vars(body, &producer_syms, &mut tally);
+        for (sym, n) in tally {
+            if let Some(&pid) = self.binding_map.get(&sym) {
+                self.nodes[pid.0 as usize].use_count = n;
+            }
         }
-        for (id, count) in counts {
-            self.nodes[id.0 as usize].use_count = count;
-        }
-        // TODO: also count non-SOAC uses by walking the full term body
-        // For now, edge count is a lower bound.
     }
+}
+
+fn walk_vars(
+    t: &Term,
+    producers: &std::collections::HashSet<SymbolId>,
+    tally: &mut HashMap<SymbolId, usize>,
+) {
+    if let TermKind::Var(VarRef::Symbol(s)) = &t.kind {
+        if producers.contains(s) {
+            *tally.entry(*s).or_insert(0) += 1;
+        }
+    }
+    t.for_each_child(&mut |c| walk_vars(c, producers, tally));
 }
 
 /// Substitute one param symbol → arg symbol throughout an ArraySemantics

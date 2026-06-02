@@ -2765,15 +2765,14 @@ entry gen(xs: []i32) []i32 =
     .expect("multi-consumer (reduce + scan over the same counts) should lift + compile");
 }
 
-/// Known bug (different shape from the `reduce + scan` case above): when
-/// `counts` is consumed by both a `scan` and a direct `counts[i % 8]` in the
-/// same lambda, `partial_eval` inlines `counts` at both use sites *before*
-/// `lift_gathers` runs, leaving an inline `(map(...))[i % 8]` random-index
-/// pattern that has no `let`-bound producer for the pass to lift. Re-enable
-/// once gather detection covers `Index{Soac(Map), idx}` directly (likely
-/// by hoisting inline producers into a let before the let-chain walk).
+/// `counts` consumed by both `scan(counts)` and a direct random gather
+/// `counts[i % 8]`. The scan's input is a SOAC edge in the producer graph;
+/// the `counts[i % 8]` reference inside the outer map's lambda body is *not*
+/// a SOAC edge. With the use-count fix in `producer_graph` counting every
+/// `Var(counts)` reference (not just SOAC edges), fusion sees `counts` as
+/// multi-use and declines to fuse + drop the let, so `lift_gathers` handles
+/// it as a normal multi-consumer let-bound producer.
 #[test]
-#[ignore = "lift_gathers: partial_eval inlines the producer so no let-bound gather site remains"]
 fn multi_consumer_scan_plus_gather_lifts() {
     compile_to_spirv(
         "\
