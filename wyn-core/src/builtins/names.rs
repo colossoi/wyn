@@ -134,3 +134,13 @@ pub const INTRINSIC_TEXTURE_LOAD: &str = "_w_intrinsic_texture_load";
 /// v2 note in the texture plan for gradient-based filtering
 /// (`texture_sample_grad`).
 pub const INTRINSIC_TEXTURE_SAMPLE: &str = "_w_intrinsic_texture_sample";
+
+/// Write one texel to a storage image at integer coordinates.
+/// `image_store(image, ivec2, vec4) -> unit`. Lowers to `OpImageWrite`.
+pub const INTRINSIC_IMAGE_STORE: &str = "_w_intrinsic_image_store";
+
+/// Point-read one texel from a storage image at integer coordinates.
+/// `image_load(image, ivec2) -> vec4`. Lowers to `OpImageRead`. No
+/// filtering — use `texture_sample` on a `Texture2D` view of the same
+/// underlying resource for bilinear access.
+pub const INTRINSIC_IMAGE_LOAD: &str = "_w_intrinsic_image_load";

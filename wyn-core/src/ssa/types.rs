@@ -527,6 +527,14 @@ pub struct EntryInput {
     pub texture_binding: Option<BindingRef>,
     /// Programmer-attributed `#[sampler(set, binding)]` on a `sampler` param.
     pub sampler_binding: Option<BindingRef>,
+    /// Programmer-attributed `#[storage_image(set, binding, format, access)]`
+    /// on a `storage_image` param. Carries the binding ref plus the
+    /// format/access attributes from the source.
+    pub storage_image_binding: Option<(
+        BindingRef,
+        crate::pipeline_descriptor::StorageImageFormat,
+        crate::interface::StorageAccess,
+    )>,
 }
 
 /// Output from an entry point.

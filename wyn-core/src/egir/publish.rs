@@ -157,6 +157,21 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                         name: input.name.clone(),
                         binding_type: SamplerBindingType::Filtering,
                     });
+                } else if let Some((br, format, access)) = input.storage_image_binding {
+                    if claimed.contains(&(br.set, br.binding)) {
+                        continue;
+                    }
+                    bindings.push(Binding::StorageTexture {
+                        set: br.set,
+                        binding: br.binding,
+                        name: input.name.clone(),
+                        format,
+                        access: match access {
+                            crate::interface::StorageAccess::ReadOnly => Access::ReadOnly,
+                            crate::interface::StorageAccess::WriteOnly => Access::WriteOnly,
+                            crate::interface::StorageAccess::ReadWrite => Access::ReadWrite,
+                        },
+                    });
                 }
             }
 

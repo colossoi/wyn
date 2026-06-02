@@ -476,6 +476,26 @@ impl Constructor {
                         )
                     }
                     TypeName::Sampler => self.builder.type_sampler(),
+                    TypeName::StorageTexture => {
+                        // Placeholder. SPIR-V storage images must declare a
+                        // non-Unknown format on `OpTypeImage`, but the format
+                        // lives on the binding attribute (per-param), not on
+                        // the language-level type. The format-aware type is
+                        // built at the use site in `lower_ssa_entry_point`
+                        // (via `storage_image_binding`) and assigned to the
+                        // OpVariable directly; this placeholder is never
+                        // actually attached to a variable.
+                        self.builder.type_image(
+                            self.f32_type,
+                            spirv::Dim::Dim2D,
+                            0,
+                            0,
+                            0,
+                            2, // sampled=2 = storage image
+                            spirv::ImageFormat::Unknown,
+                            None,
+                        )
+                    }
                     _ => {
                         panic!(
                             "BUG: Unknown type reached lowering: {:?}. This should have been caught during type checking.",
@@ -998,6 +1018,20 @@ impl Constructor {
 /// - SSA blocks become SPIR-V blocks
 /// - Block parameters become OpPhi nodes
 /// - Terminators become branch instructions
+/// Map a `StorageImageFormat` from the descriptor to the matching
+/// SPIR-V `ImageFormat` literal used in `OpTypeImage`. Kept in lock-step
+/// with the wgpu side: every format we emit here must also be allocated
+/// by the host with the matching `wgpu::TextureFormat`.
+fn storage_image_format_to_spirv(f: crate::pipeline_descriptor::StorageImageFormat) -> spirv::ImageFormat {
+    use crate::pipeline_descriptor::StorageImageFormat as F;
+    match f {
+        F::Rgba8Unorm => spirv::ImageFormat::Rgba8,
+        F::Rgba16Float => spirv::ImageFormat::Rgba16f,
+        F::Rgba32Float => spirv::ImageFormat::Rgba32f,
+        F::R32Float => spirv::ImageFormat::R32f,
+    }
+}
+
 fn lower_ssa_body(constructor: &mut Constructor, body: &FuncBody, func_span: Span) -> Result<spirv::Word> {
     let mut ctx = LowerCtx::new(constructor, body, false, func_span);
     ctx.lower()
@@ -1419,7 +1453,9 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                             || *id == known.array_with
                             || *id == known.array_with_in_place
                             || *id == known.texture_load
-                            || *id == known.texture_sample));
+                            || *id == known.texture_sample
+                            || *id == known.image_store
+                            || *id == known.image_load));
                     if typed_dispatch {
                         self.lower_builtin_call(
                             *id,
@@ -2604,6 +2640,31 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         Some(spirv::ImageOperands::LOD),
                         [Operand::IdRef(arg_ids[2])],
                     )?)
+                } else if id == known.image_store {
+                    // image_store(image, ivec2, vec4) → OpImageWrite.
+                    // arg_ids = [image, coord, texel]. SPIR-V's
+                    // OpImageWrite has no result type / no result id;
+                    // we return the zero word — the caller never reads
+                    // the result of a unit-typed App.
+                    if arg_ids.len() != 3 {
+                        bail_spirv!("image_store requires 3 arguments");
+                    }
+                    self.constructor.builder.image_write(arg_ids[0], arg_ids[1], arg_ids[2], None, [])?;
+                    Ok(0)
+                } else if id == known.image_load {
+                    // image_load(image, ivec2) → OpImageRead.
+                    // arg_ids = [image, coord]. Result is vec4f32.
+                    if arg_ids.len() != 2 {
+                        bail_spirv!("image_load requires 2 arguments");
+                    }
+                    Ok(self.constructor.builder.image_read(
+                        result_ty,
+                        None,
+                        arg_ids[0],
+                        arg_ids[1],
+                        None,
+                        [],
+                    )?)
                 } else if id == known.texture_sample {
                     // texture_sample(tex, samp, uv, lod) → OpSampledImage +
                     // OpImageSampleExplicitLod. v1 uses EXPLICIT LOD (the
@@ -3681,6 +3742,38 @@ fn lower_ssa_entry_point(
             );
             interfaces.push(var_id);
             uniform_loads.push((input.name.clone(), var_id, input_type));
+        } else if let Some((br, format, _access)) = input.storage_image_binding {
+            // `#[storage_image]` → opaque OpTypeImage(Sampled=2, Format=FMT)
+            // in UniformConstant storage. The format comes from the binding
+            // attribute (per-param), not from the language type, so we build
+            // the image type here rather than reuse `input_type` (which used
+            // the placeholder format from `polytype_to_spirv`).
+            let img_type = constructor.builder.type_image(
+                constructor.f32_type,
+                spirv::Dim::Dim2D,
+                0,
+                0,
+                0,
+                2,
+                storage_image_format_to_spirv(format),
+                None,
+            );
+            let ptr_type =
+                constructor.get_or_create_ptr_type(spirv::StorageClass::UniformConstant, img_type);
+            let var_id =
+                constructor.builder.variable(ptr_type, None, spirv::StorageClass::UniformConstant, None);
+            constructor.builder.decorate(
+                var_id,
+                spirv::Decoration::DescriptorSet,
+                [Operand::LiteralBit32(br.set)],
+            );
+            constructor.builder.decorate(
+                var_id,
+                spirv::Decoration::Binding,
+                [Operand::LiteralBit32(br.binding)],
+            );
+            constructor.env.insert(input.name.clone(), var_id);
+            interfaces.push(var_id);
         } else if let Some(br) = input.texture_binding.or(input.sampler_binding) {
             // `#[texture]` / `#[sampler]` → opaque handle in UniformConstant
             // storage, decorated DescriptorSet/Binding. Unlike a uniform
@@ -3889,7 +3982,25 @@ fn lower_ssa_entry_point(
         {
             continue;
         }
-        let input_type = constructor.polytype_to_spirv(&input.ty);
+        // Storage-image variables have a format-aware `OpTypeImage`
+        // built at the binding site (`storage_image_binding` branch
+        // above) — the polytype-derived placeholder has Format=Unknown
+        // and doesn't match the variable's pointee type. Rebuild with
+        // the binding's format for the load result type.
+        let input_type = if let Some((_, format, _)) = input.storage_image_binding {
+            constructor.builder.type_image(
+                constructor.f32_type,
+                spirv::Dim::Dim2D,
+                0,
+                0,
+                0,
+                2,
+                storage_image_format_to_spirv(format),
+                None,
+            )
+        } else {
+            constructor.polytype_to_spirv(&input.ty)
+        };
         if let Some(&var_id) = constructor.env.get(&input.name) {
             let loaded = constructor.builder.load(input_type, None, var_id, None, [])?;
             constructor.env.insert(input.name.clone(), loaded);

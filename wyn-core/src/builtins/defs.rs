@@ -4,18 +4,18 @@ use crate::builtins::lowering::PrimOp;
 use crate::builtins::names::{
     INTRINSIC_ABS, INTRINSIC_ARRAY_WITH, INTRINSIC_ARRAY_WITH_INPLACE, INTRINSIC_CEIL, INTRINSIC_CLAMP,
     INTRINSIC_COS, INTRINSIC_CROSS, INTRINSIC_DETERMINANT, INTRINSIC_DISTANCE, INTRINSIC_DOT,
-    INTRINSIC_FLOOR, INTRINSIC_FRACT, INTRINSIC_INVERSE, INTRINSIC_LENGTH, INTRINSIC_LOCAL_ID,
-    INTRINSIC_MAGNITUDE, INTRINSIC_MIX, INTRINSIC_NORMALIZE, INTRINSIC_NUM_WORKGROUPS, INTRINSIC_OUTER,
-    INTRINSIC_REFLECT, INTRINSIC_REFRACT, INTRINSIC_SLICE, INTRINSIC_SMOOTHSTEP, INTRINSIC_STORAGE_INDEX,
-    INTRINSIC_STORAGE_LEN, INTRINSIC_STORAGE_STORE, INTRINSIC_TEXTURE_LOAD, INTRINSIC_TEXTURE_SAMPLE,
-    INTRINSIC_THREAD_ID, INTRINSIC_UNINIT,
+    INTRINSIC_FLOOR, INTRINSIC_FRACT, INTRINSIC_IMAGE_LOAD, INTRINSIC_IMAGE_STORE, INTRINSIC_INVERSE,
+    INTRINSIC_LENGTH, INTRINSIC_LOCAL_ID, INTRINSIC_MAGNITUDE, INTRINSIC_MIX, INTRINSIC_NORMALIZE,
+    INTRINSIC_NUM_WORKGROUPS, INTRINSIC_OUTER, INTRINSIC_REFLECT, INTRINSIC_REFRACT, INTRINSIC_SLICE,
+    INTRINSIC_SMOOTHSTEP, INTRINSIC_STORAGE_INDEX, INTRINSIC_STORAGE_LEN, INTRINSIC_STORAGE_STORE,
+    INTRINSIC_TEXTURE_LOAD, INTRINSIC_TEXTURE_SAMPLE, INTRINSIC_THREAD_ID, INTRINSIC_UNINIT,
 };
 use crate::builtins::scheme::{
-    array_to_i32, mat_square_to_mat, mat_square_to_scalar, mat_x_mat, mat_x_vec, scalar_unary,
-    texture_load_scheme, texture_sample_scheme, unit_to_t, vec_binary_same, vec_binary_to_scalar,
-    vec_clamp_scalar_lohi, vec_mix_scalar_interp, vec_scalar_edge_to_vec, vec_smoothstep_scalar_edges,
-    vec_ternary_same, vec_to_scalar, vec_unary_same, vec_vec_outer, vec_vec_scalar_to_vec, vec_x_mat,
-    vec3f32_binary,
+    array_to_i32, image_load_scheme, image_store_scheme, mat_square_to_mat, mat_square_to_scalar,
+    mat_x_mat, mat_x_vec, scalar_unary, texture_load_scheme, texture_sample_scheme, unit_to_t,
+    vec_binary_same, vec_binary_to_scalar, vec_clamp_scalar_lohi, vec_mix_scalar_interp,
+    vec_scalar_edge_to_vec, vec_smoothstep_scalar_edges, vec_ternary_same, vec_to_scalar, vec_unary_same,
+    vec_vec_outer, vec_vec_scalar_to_vec, vec_x_mat, vec3f32_binary,
 };
 
 // ---------------------------------------------------------------------------
@@ -53,6 +53,26 @@ macro_rules! polymorphic_intrinsic {
             impl_source_names: &[$internal],
             kind: BuiltinKind::UserVisible,
             purity: Purity::Pure,
+            overloads: &[BuiltinOverload {
+                scheme: Some($scheme),
+                lowering: $lowering,
+            }],
+        }
+    };
+}
+
+// Same as `polymorphic_intrinsic` but marks the entry as
+// `Purity::Effectful`, preventing the SSA/EGIR pipeline from DCE'ing
+// the call. Used for ops whose only purpose is a side effect on a
+// resource (e.g. `image_store`).
+macro_rules! polymorphic_intrinsic_effectful {
+    ($surface:literal, $internal:expr, $scheme:expr, $lowering:expr) => {
+        BuiltinDefRaw {
+            surface_name: $surface,
+            intrinsic_source_names: &[$surface],
+            impl_source_names: &[$internal],
+            kind: BuiltinKind::UserVisible,
+            purity: Purity::Effectful,
             overloads: &[BuiltinOverload {
                 scheme: Some($scheme),
                 lowering: $lowering,
@@ -332,6 +352,24 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         "texture_sample",
         INTRINSIC_TEXTURE_SAMPLE,
         texture_sample_scheme,
+        BuiltinLowering::ByBuiltinId
+    ),
+    // Storage-image ops. Compute-side write / point-read on
+    // `#[storage_image]`-bound textures. Lower to `OpImageWrite` /
+    // `OpImageRead`. Filtering (bilinear sampling) of a storage image
+    // goes through `texture_sample` on a `Texture2D` view of the same
+    // underlying GPU resource — the host wires both bindings to one
+    // wgpu texture.
+    polymorphic_intrinsic_effectful!(
+        "image_store",
+        INTRINSIC_IMAGE_STORE,
+        image_store_scheme,
+        BuiltinLowering::ByBuiltinId
+    ),
+    polymorphic_intrinsic!(
+        "image_load",
+        INTRINSIC_IMAGE_LOAD,
+        image_load_scheme,
         BuiltinLowering::ByBuiltinId
     ),
     polymorphic_intrinsic!(

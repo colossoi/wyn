@@ -193,6 +193,18 @@ pub enum Binding {
         name: String,
         binding_type: SamplerBindingType,
     },
+    /// Storage image (descriptor set binding). Bound from a
+    /// `#[storage_image(set, binding, format, access)]` entry-point
+    /// param of type `storage_image`. The same `(set, binding)` slot
+    /// may also be declared as a `Texture` in another pipeline — viz
+    /// allocates one wgpu texture and binds it through two views.
+    StorageTexture {
+        set: u32,
+        binding: u32,
+        name: String,
+        format: StorageImageFormat,
+        access: Access,
+    },
 }
 
 impl Binding {
@@ -206,6 +218,7 @@ impl Binding {
             Binding::Uniform { binding, .. } => *binding,
             Binding::Texture { binding, .. } => *binding,
             Binding::Sampler { binding, .. } => *binding,
+            Binding::StorageTexture { binding, .. } => *binding,
             Binding::PushConstant { .. } => panic!("PushConstant has no binding number"),
         }
     }
@@ -340,6 +353,21 @@ pub enum SamplerBindingType {
     Filtering,
     NonFiltering,
     Comparison,
+}
+
+/// Pixel format for a storage-image binding. Bound at shader-compile
+/// time via the `#[storage_image(..., format=FMT, ...)]` attribute;
+/// the host allocates the wgpu texture with the matching format.
+/// The whitelist starts narrow — formats are added as shaders demand
+/// them. Names match the lowercase wgpu/WGSL spelling for round-trip
+/// clarity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageImageFormat {
+    Rgba8Unorm,
+    Rgba16Float,
+    Rgba32Float,
+    R32Float,
 }
 
 /// Scalar/vector format of a vertex-buffer attribute. Mirrors the

@@ -16,8 +16,8 @@ use super::publish::PipelineDescriptorPublish;
 use super::types::EffectToken;
 use crate::ast::{Span, TypeName};
 use crate::binding_layout::{
-    extract_io_decoration, extract_sampler_binding, extract_storage_binding, extract_texture_binding,
-    extract_uniform_binding,
+    extract_io_decoration, extract_sampler_binding, extract_storage_binding, extract_storage_image_binding,
+    extract_texture_binding, extract_uniform_binding,
 };
 use crate::interface;
 use crate::interface::{EntryParamBinding, EntryParamBindingKind};
@@ -374,6 +374,7 @@ fn convert_entry_point(
         let attr_storage_binding = entry.params.get(i).and_then(extract_storage_binding);
         let texture_binding = entry.params.get(i).and_then(extract_texture_binding);
         let sampler_binding = entry.params.get(i).and_then(extract_sampler_binding);
+        let storage_image_binding = entry.params.get(i).and_then(extract_storage_image_binding);
 
         // Uniqueness is an ownership-tracking concept that's already been
         // consumed by `apply_ownership`; codegen operates on the stripped
@@ -421,6 +422,7 @@ fn convert_entry_point(
                     push_constant: None,
                     texture_binding: None,
                     sampler_binding: None,
+                    storage_image_binding: None,
                 });
                 view_nids.push(converter.emit_storage_view(slot.binding, field_ty.clone()));
             }
@@ -440,6 +442,7 @@ fn convert_entry_point(
             && uniform_binding.is_none()
             && texture_binding.is_none()
             && sampler_binding.is_none()
+            && storage_image_binding.is_none()
             && !matches!(&decoration, Some(IoDecoration::BuiltIn(_)))
         {
             let size = crate::ssa::layout::type_byte_size(ty).ok_or_else(|| {
@@ -470,6 +473,7 @@ fn convert_entry_point(
             push_constant,
             texture_binding,
             sampler_binding,
+            storage_image_binding,
         });
     }
     let binding_num: u32 = entry.param_bindings.iter().flatten().map(|b| b.buffer_count()).sum();
@@ -889,6 +893,8 @@ impl<'a> Converter<'a> {
                     self.lower_storage_index(args, ty)
                 } else if *id == known.storage_store && args.len() == 4 {
                     self.lower_storage_store(args)
+                } else if *id == known.image_store && args.len() == 3 {
+                    self.lower_image_store(args, *id, *overload_idx)
                 } else {
                     let arg_nids: SmallVec<[NodeId; 4]> =
                         args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
@@ -1052,6 +1058,39 @@ impl<'a> Converter<'a> {
         self.emit_storage_store(view_nid, index_nid, value_nid, value_ty);
         let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
         Ok(self.intern_pure(PureOp::Unit, smallvec![], unit_ty))
+    }
+
+    /// Convert `image_store(image, ivec2, vec4) -> unit` into a
+    /// side-effect Inst tagged as `OpTag::Intrinsic`. The SPIR-V
+    /// backend recognizes the intrinsic id and emits `OpImageWrite`.
+    /// Modeled after `lower_storage_store`: the operands flow through
+    /// as `operand_nodes`, an effect token is allocated, the App
+    /// result is unit.
+    fn lower_image_store(
+        &mut self,
+        args: &[Term],
+        id: crate::builtins::BuiltinId,
+        overload_idx: usize,
+    ) -> Result<NodeId, ConvertError> {
+        let arg_nids: SmallVec<[NodeId; 4]> =
+            args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
+        let arg_vrefs: Vec<ValueRef> =
+            (0..arg_nids.len()).map(|_| ValueRef::Ssa(crate::ssa::types::ValueId::default())).collect();
+        let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
+        let result_nid = self.graph.alloc_side_effect_result(unit_ty.clone());
+        let effect_in = EffectToken(0);
+        let effect_out = self.alloc_effect();
+        self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
+            kind: SideEffectKind::Inst(InstKind::Op {
+                tag: crate::op::OpTag::Intrinsic { id, overload_idx },
+                operands: arg_vrefs,
+            }),
+            operand_nodes: arg_nids,
+            result: Some(result_nid),
+            effects: Some((effect_in, effect_out)),
+            span: self.current_span,
+        });
+        Ok(result_nid)
     }
 
     // ========================================================================

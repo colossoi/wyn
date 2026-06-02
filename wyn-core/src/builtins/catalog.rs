@@ -138,6 +138,9 @@ pub struct KnownBuiltinIds {
     /// Texture ops dispatched by `ByBuiltinId` in the SPIR-V/WGSL backends.
     pub texture_load: BuiltinId,
     pub texture_sample: BuiltinId,
+    /// Storage-image ops dispatched by `ByBuiltinId`.
+    pub image_store: BuiltinId,
+    pub image_load: BuiltinId,
 }
 
 /// Indexed view over the catalog table. Built once at program startup
@@ -203,6 +206,8 @@ impl BuiltinCatalog {
             clamp: resolve("clamp"),
             texture_load: resolve(N::INTRINSIC_TEXTURE_LOAD),
             texture_sample: resolve(N::INTRINSIC_TEXTURE_SAMPLE),
+            image_store: resolve(N::INTRINSIC_IMAGE_STORE),
+            image_load: resolve(N::INTRINSIC_IMAGE_LOAD),
         };
 
         BuiltinCatalog {

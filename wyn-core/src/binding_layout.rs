@@ -214,3 +214,34 @@ pub fn extract_sampler_binding(pattern: &Pattern) -> Option<BindingRef> {
         _ => None,
     }
 }
+
+/// Extract a `#[storage_image(set, binding, format, access)]` from a
+/// param pattern. Returns the binding ref plus the format/access
+/// attributes — the latter two are pinned at shader-compile time and
+/// need to reach the descriptor as well as the SPIR-V backend.
+pub fn extract_storage_image_binding(
+    pattern: &Pattern,
+) -> Option<(
+    BindingRef,
+    crate::pipeline_descriptor::StorageImageFormat,
+    crate::interface::StorageAccess,
+)> {
+    match &pattern.kind {
+        PatternKind::Attributed(attrs, inner) => {
+            for attr in attrs {
+                if let Attribute::StorageImage {
+                    set,
+                    binding,
+                    format,
+                    access,
+                } = attr
+                {
+                    return Some((BindingRef::new(*set, *binding), *format, *access));
+                }
+            }
+            extract_storage_image_binding(inner)
+        }
+        PatternKind::Typed(inner, _) => extract_storage_image_binding(inner),
+        _ => None,
+    }
+}

@@ -54,6 +54,18 @@ pub enum Attribute {
         set: u32,
         binding: u32,
     },
+    /// A 2D storage image resource bound at (set, binding). Carried on
+    /// an entry-point param of type `storage_image`. The `format` pins
+    /// the on-GPU pixel format; the `access` declares whether the
+    /// shader writes, reads, or both. The same `(set, binding)` may be
+    /// declared as `Texture { ... }` in a sibling pipeline — the host
+    /// allocates one wgpu texture and binds it via two views.
+    StorageImage {
+        set: u32,
+        binding: u32,
+        format: crate::pipeline_descriptor::StorageImageFormat,
+        access: StorageAccess,
+    },
     /// Hint for the expected size of a dynamic array (in elements).
     /// Used for parallelization decisions. Ignored on non-arrays or
     /// statically sized arrays. `NonZeroU32` encodes that
@@ -83,6 +95,7 @@ pub trait AttrExt {
     fn has_storage(&self) -> bool;
     fn has_texture(&self) -> bool;
     fn has_sampler(&self) -> bool;
+    fn has_storage_image(&self) -> bool;
 }
 
 impl AttrExt for [Attribute] {
@@ -106,6 +119,9 @@ impl AttrExt for [Attribute] {
     }
     fn has_sampler(&self) -> bool {
         self.has(|a| matches!(a, Attribute::Sampler { .. }))
+    }
+    fn has_storage_image(&self) -> bool {
+        self.has(|a| matches!(a, Attribute::StorageImage { .. }))
     }
 }
 

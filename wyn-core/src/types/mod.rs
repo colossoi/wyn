@@ -252,6 +252,15 @@ pub enum TypeName {
     /// `#[sampler(set, binding)]`; paired with a `Texture2D` in
     /// `texture_sample`.
     Sampler,
+    /// A 2D storage image — a texture a compute entry can write via
+    /// `image_store` (and point-read via `image_load`). Bound via
+    /// `#[storage_image(set, binding, format, access)]`. Element type
+    /// is fixed to vec4f32; the binding's `format` attribute decides
+    /// the on-GPU pixel format. The same `(set, binding)` slot can be
+    /// declared as `Texture2D` in another pipeline; viz binds the same
+    /// underlying `wgpu::Texture` to both, so a compute-written
+    /// storage image can be sampled bilinearly by a later fragment.
+    StorageTexture,
 
     // --- Type system internals ---
     /// Rigid skolem constant for existential sizes.
@@ -317,6 +326,7 @@ impl std::fmt::Display for TypeName {
             TypeName::AddressPlaceholder => write!(f, "?addrspace"),
             TypeName::Texture2D => write!(f, "texture2d"),
             TypeName::Sampler => write!(f, "sampler"),
+            TypeName::StorageTexture => write!(f, "storage_image"),
             TypeName::Skolem(id) => write!(f, "{}", id),
         }
     }
@@ -379,6 +389,7 @@ impl polytype::Name for TypeName {
             TypeName::AddressPlaceholder => "?variant".to_string(),
             TypeName::Texture2D => "texture2d".to_string(),
             TypeName::Sampler => "sampler".to_string(),
+            TypeName::StorageTexture => "storage_image".to_string(),
             TypeName::Skolem(id) => format!("{}", id),
         }
     }
@@ -938,7 +949,7 @@ pub fn is_copy(ty: &Type) -> bool {
             // Opaque GPU resource handles are not copyable values — they
             // must reach the backend as the original binding, not be
             // duplicated by ownership/move analysis.
-            TypeName::Texture2D | TypeName::Sampler => false,
+            TypeName::Texture2D | TypeName::Sampler | TypeName::StorageTexture => false,
             _ => true,
         },
         Type::Variable(_) => true,

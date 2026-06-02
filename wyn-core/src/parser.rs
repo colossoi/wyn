@@ -699,6 +699,83 @@ impl<'a> Parser<'a> {
                     Ok(Attribute::Sampler { set, binding })
                 }
             }
+            "storage_image" => {
+                // `#[storage_image(set=M, binding=N, format=FMT, access=ACC)]`.
+                // `format` is required (no sensible default — different
+                // shaders need different pixel formats). `access`
+                // defaults to `write_only`, the only mode every WebGPU
+                // adapter supports without a feature gate. `set`
+                // defaults to 1 to match texture/sampler convention.
+                use crate::interface::StorageAccess;
+                use crate::pipeline_descriptor::StorageImageFormat;
+                self.expect(Token::LeftParen)?;
+
+                let mut set: u32 = 1;
+                let mut binding: Option<u32> = None;
+                let mut format: Option<StorageImageFormat> = None;
+                let mut access: StorageAccess = StorageAccess::WriteOnly;
+
+                loop {
+                    let param_name = self.expect_identifier()?;
+                    self.expect(Token::Assign)?;
+                    match param_name.as_str() {
+                        "set" => set = self.expect_integer()?,
+                        "binding" => binding = Some(self.expect_integer()?),
+                        "format" => {
+                            let fmt_name = self.expect_identifier()?;
+                            format = Some(match fmt_name.as_str() {
+                                "rgba8unorm" => StorageImageFormat::Rgba8Unorm,
+                                "rgba16float" => StorageImageFormat::Rgba16Float,
+                                "rgba32float" => StorageImageFormat::Rgba32Float,
+                                "r32float" => StorageImageFormat::R32Float,
+                                other => bail_parse_at!(
+                                    self.current_span(),
+                                    "Unknown storage_image format: '{}'. Supported: rgba8unorm, rgba16float, rgba32float, r32float",
+                                    other
+                                ),
+                            });
+                        }
+                        "access" => {
+                            let acc_name = self.expect_identifier()?;
+                            access = match acc_name.as_str() {
+                                "read" | "read_only" => StorageAccess::ReadOnly,
+                                "write" | "write_only" => StorageAccess::WriteOnly,
+                                "readwrite" | "read_write" => StorageAccess::ReadWrite,
+                                other => bail_parse_at!(
+                                    self.current_span(),
+                                    "Unknown storage_image access mode: '{}'. Supported: read, write, readwrite",
+                                    other
+                                ),
+                            };
+                        }
+                        _ => bail_parse_at!(
+                            self.current_span(),
+                            "Unknown storage_image parameter: {}",
+                            param_name
+                        ),
+                    }
+                    if self.check(&Token::Comma) {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+
+                self.expect(Token::RightParen)?;
+                self.expect(Token::RightBracket)?;
+
+                let binding = binding
+                    .ok_or_else(|| err_parse!("storage_image attribute requires 'binding' parameter"))?;
+                let format = format
+                    .ok_or_else(|| err_parse!("storage_image attribute requires 'format' parameter"))?;
+
+                Ok(Attribute::StorageImage {
+                    set,
+                    binding,
+                    format,
+                    access,
+                })
+            }
             "builtin" => {
                 self.expect(Token::LeftParen)?;
                 let builtin_name = self.expect_identifier()?;
@@ -1247,6 +1324,7 @@ impl<'a> Parser<'a> {
                     // Opaque GPU resources (nullary in v1)
                     "texture2d" => TypeName::Texture2D,
                     "sampler" => TypeName::Sampler,
+                    "storage_image" => TypeName::StorageTexture,
                     // User-defined type alias or unrecognized type
                     _ => TypeName::Named(type_name),
                 };
