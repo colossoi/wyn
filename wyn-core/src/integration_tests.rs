@@ -2902,6 +2902,94 @@ entry gen(xs: []i32) ([]i32, []i32) =
     );
 }
 
+/// Parked repro #1: `wyn compile --single-stage` emits invalid SPIR-V
+/// (OpAccessChain result type / base type mismatch) for a vec4-emitting
+/// map that gathers from a derived (map/scan-produced) array.
+///
+/// Trigger requires all three:
+///   1. vec4-emitting map (output is `[]vec4f32`).
+///   2. Gather inside the map's body from a *derived* array — a map/scan
+///      result, not a direct input.
+///   3. `--single-stage` mode (sequential-loop debug pipeline).
+///
+/// Dropping any one and it compiles clean. Without `--single-stage` the
+/// same shape compiles; replacing the output type with `[]i32` or
+/// replacing the derived gather with a direct input gather both
+/// compile. The spirv-val error is:
+///   "OpAccessChain result type (OpTypeInt) does not match the type
+///    that results from indexing into the base <id> (OpTypeVector)."
+///
+/// This integration test uses the regular (non-single-stage) compile
+/// path, so it currently *passes*; the bug only surfaces under the
+/// single-stage CLI flag. Marked `#[ignore]` to flag it as a known
+/// repro on the bugfix branch — when single-stage gets a code path
+/// reachable from tests, drop the ignore and assert it round-trips.
+#[test]
+#[ignore = "parked: --single-stage emits invalid SPIR-V for vec4-map gathering derived array"]
+fn single_stage_vec4_map_gather_from_derived_array_repro() {
+    // Status: passes today. The lib-test pipeline (`compile_thru_tlc` →
+    // `optimize_for_test(false)`) sets `parallelize_compute = false`, which
+    // the docstring calls "the `--single-stage` driver mode" — but the
+    // spirv-val failure observed from the CLI's `--single-stage` flag does
+    // NOT surface here, so something the driver does beyond
+    // `parallelize_compute = false` is needed to reproduce. Left as a parked
+    // repro: when the missing piece is wired in (or the CLI flag is replaced
+    // by a programmatic equivalent reachable from tests), this assertion
+    // should start failing, the bug should be fixed, and the `#[ignore]`
+    // dropped.
+    compile_to_spirv(
+        "\
+#[compute]
+entry gen(xs: []i32) []vec4f32 =
+  let cs = map(|x: i32| x * 2, xs) in
+  map(|i: i32| @[f32.i32(cs[i]), 0.0, 0.0, 1.0], iota(8))
+",
+    )
+    .expect("vec4-map gathering derived array compiles in default (non-single-stage) mode");
+}
+
+/// Parked repro #2: the compiler-allocated intermediate buffer from
+/// `lift_gathers` (when a computed array has multiple consumers) is
+/// reported in the pipeline `.json` descriptor with
+/// `access = read_only`, but the emitted SPIR-V both writes and reads
+/// it within the same kernel — the scan stage writes, the indexed
+/// gather reads. wgpu/Naga then rejects at runtime:
+///   "Storage class Storage{LOAD} doesn't match shader
+///    Storage{LOAD | STORE}"
+///
+/// Descriptor reports `gen_gather_b3 access=read_only` — should be
+/// `read_write`.
+///
+/// This test currently *passes* the SPIR-V compile step (the panic /
+/// validation failure happens at the wgpu pipeline-creation boundary,
+/// not at compile-to-SPIR-V). It's `#[ignore]`'d as a known repro on
+/// the bugfix branch; the fix should make the descriptor for any
+/// intermediate buffer that is BOTH written and read within the same
+/// kernel report `access = read_write`. Drop the ignore once the
+/// pipeline-descriptor pass reports the correct access mode.
+#[test]
+#[ignore = "parked: intermediate buffer reports read_only in descriptor but is read+written in shader"]
+fn intermediate_buffer_descriptor_access_repro() {
+    // Status: passes today (`compile_to_spirv` succeeds). The access-mode
+    // mismatch only surfaces at wgpu pipeline creation (runtime validation),
+    // which lib tests don't reach. To make this a real failing test, the
+    // assertion should inspect the resulting pipeline `.json` descriptor and
+    // verify that any intermediate binding which is both written and read
+    // within the same kernel reports `access = read_write`. Left as a parked
+    // repro until the descriptor-pass fix lands.
+    compile_to_spirv(
+        "\
+#[compute]
+entry gen(xs: []i32) ([]i32, [1]i32) =
+  let counts  = map(|x: i32| x * 2, xs) in
+  let offsets = scan(|a: i32, b: i32| a + b, 0, counts) in
+  (map(|i: i32| offsets[i % 8], iota(64)),
+   [offsets[7]])
+",
+    )
+    .expect("compile-to-SPIR-V step succeeds; wgpu pipeline creation fails on descriptor access mismatch");
+}
+
 /// A `scan` producer gathers the same way a `map` does: it's lifted into its
 /// own pre-pass (here a multi-stage parallel scan) writing the gather buffer,
 /// which the consumer reads via `storage_index`. The forced-output binding is
