@@ -442,52 +442,18 @@ def ErosionFilter(p: vec2f32, heightAndSlope_in: vec3f32, fadeTarget_in: f32,
 -- Heightmap entry helper (Buffer B body)
 ------------------------------------------------------------
 
--- Returns (eroded_height, erosion_delta, ridge_map, trees).
-def Heightmap(p: vec2f32, n: vec3f32) vec4f32 =
-  -- Erosion parameter constants (verbatim from the original).
-  let EROSION_SCALE = 0.15 in
-  let EROSION_STRENGTH = 0.22 in
-  let EROSION_GULLY_WEIGHT = 0.5 in
-  let EROSION_DETAIL = 1.5 in
-  let EROSION_ROUNDING: vec4f32 = @[0.1, 0.0, 0.1, 2.0] in
-  let EROSION_ONSET: vec4f32 = @[0.7, 1.25, 2.8, 1.5] in
-  let EROSION_ASSUMED_SLOPE: vec2f32 = @[0.7, 1.0] in
-  let EROSION_CELL_SCALE = 0.7 in
-  let EROSION_NORMALIZATION = 0.5 in
-  let EROSION_LACUNARITY = 2.0 in
-  let EROSION_GAIN = 0.5 in
-
-  let fadeTarget = clamp((n.x - DEFAULT_HEIGHT) / 0.15, 0.0 - 1.0, 1.0) in
-
-  let (h, ridgeMap) =
-    ErosionFilter(p, n, fadeTarget,
-                  EROSION_STRENGTH, EROSION_GULLY_WEIGHT, EROSION_DETAIL,
-                  EROSION_ROUNDING, EROSION_ONSET, EROSION_ASSUMED_SLOPE,
-                  EROSION_SCALE, EROSION_OCTAVES, EROSION_LACUNARITY,
-                  EROSION_GAIN, EROSION_CELL_SCALE, EROSION_NORMALIZATION) in
-
-  let eroded = n.x + h.x in
-
-  -- Tree coverage (uses the supplemental noise we sample separately at
-  -- render time; here we just compute the trees mask from terrain).
-  let deriv = @[n.y + h.y, n.z + h.z] in
-  let normalY = 1.0 / sqrt(1.0 + dot(deriv, deriv)) in
-  let occlusion = h.x / h.w + 0.5 in
-  let trees_mask =
-    smoothstep(GRASS_HEIGHT + 0.05, GRASS_HEIGHT + 0.01,
-               eroded + 0.01 + (occlusion - 0.8) * 0.05)
-    * smoothstep(0.0, 0.4, occlusion)
-    * smoothstep(0.95, 1.0, normalY)
-    * smoothstep(0.0 - 1.4, 0.0, ridgeMap)
-    * smoothstep(WATER_HEIGHT, WATER_HEIGHT + 0.007, eroded) in
-  let trees_amount = (trees_mask - 0.5) / 0.6 in
-
-  -- Erosion delta normalized to [0, 1] for storage.
-  let erosion_norm = clamp01(h.x / h.w * 0.5 + 0.5) in
-  let ridge_norm = clamp01(ridgeMap * 0.5 + 0.5) in
-  let trees_norm = clamp01(trees_amount * 0.5 + 0.5) in
-
-  @[eroded, erosion_norm, ridge_norm, trees_norm]
+-- Returns (eroded_height, erosion_delta_norm, ridge_norm, trees_norm).
+--
+-- v1 ships with erosion off so the bare ping-pong'd heightmap renders
+-- on its own — useful while we wire up the Enter-key erosion toggle.
+-- The full erosion pipeline (PhacelleNoise + ErosionFilter) is kept
+-- compiled and exercised; the gating just discards its output.
+--
+--   ridge_norm = 1.0  → drainage blend collapses to 0 downstream.
+--   trees_norm = 0.5  → 0 trees amount in the renderer.
+--   erosion_norm = 0.5 → 0 erosion delta downstream.
+def Heightmap(_p: vec2f32, n: vec3f32) vec4f32 =
+  @[n.x, 0.5, 1.0, 0.5]
 
 ------------------------------------------------------------
 -- Compute entry: Buffer A
@@ -520,8 +486,11 @@ entry buffer_a(#[storage_image(set=0, binding=0, format=rgba16float, access=writ
                  f32.u32(gid.y) / iResolution.y] in
   let fragCoord = @[f32.u32(gid.x), f32.u32(gid.y)] in
 
-  -- Previous-frame state.
-  let prev = texture_sample(prev_a, samp, mapPos, 0.0) in
+  -- Previous-frame state. Point-fetch at this thread's texel — linear
+  -- sampling at non-texel-centered UVs (`gid / W` vs `(gid + 0.5) / W`)
+  -- would average with neighbours every frame and slowly blur the
+  -- heightmap toward flat.
+  let prev = texture_load(prev_a, xy_i, 0) in
 
   -- Backspace pressed-this-frame (row 1, col 8 — JS keyCode 8).
   let backspace = texture_load(keyboard, @[8i32, 1i32], 0).x > 0.0 in
