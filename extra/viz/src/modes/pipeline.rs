@@ -30,6 +30,7 @@ pub async fn run_pipeline(
     inputs: HashMap<String, PathBuf>,
     outputs: HashMap<String, PathBuf>,
     push_constants: &[PushConstantSpec],
+    dispatch_overrides: &HashMap<String, (u32, u32, u32)>,
     verbose: bool,
 ) -> Result<()> {
     let desc_json = fs::read_to_string(&pipeline_path)
@@ -52,7 +53,7 @@ pub async fn run_pipeline(
                  (descriptor has a graphics pipeline; results render to the window)"
             );
         }
-        return run_pipeline_interactive(spv_path, desc, verbose);
+        return run_pipeline_interactive(spv_path, desc, dispatch_overrides.clone(), verbose);
     }
 
     let (device, queue) = create_headless_device(verbose).await?;
@@ -101,7 +102,12 @@ pub async fn run_pipeline(
 /// the descriptor each frame, then renders the one graphics pipeline.
 /// Activated automatically when the descriptor contains a graphics
 /// pipeline (the headless `--input` / `--output` flags are ignored).
-fn run_pipeline_interactive(spv_path: PathBuf, desc: PipelineDescriptor, verbose: bool) -> Result<()> {
+fn run_pipeline_interactive(
+    spv_path: PathBuf,
+    desc: PipelineDescriptor,
+    dispatch_overrides: HashMap<String, (u32, u32, u32)>,
+    verbose: bool,
+) -> Result<()> {
     // Resolve the vertex and fragment entry-point names from the
     // descriptor. Wyn emits one Graphics pipeline per entry point, so
     // a vertex-only and a fragment-only pipeline coexist; we collect
@@ -126,6 +132,7 @@ fn run_pipeline_interactive(spv_path: PathBuf, desc: PipelineDescriptor, verbose
         descriptor: desc,
         vertex_entry,
         fragment_entry,
+        dispatch_overrides,
         max_frames: None,
         verbose,
         validate: false,

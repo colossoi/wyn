@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand};
 use wgpu::PresentMode;
 
@@ -226,6 +226,25 @@ enum Command {
         ///   "header_base:u32x19=0,0,0,..."
         #[arg(long = "push-constant", value_name = "SPEC", verbatim_doc_comment, value_parser = PushConstantSpec::parse)]
         push_constants: Vec<PushConstantSpec>,
+        /// Override the per-frame compute dispatch for one compute
+        /// entry (repeatable). Format: `ENTRY:WxH[xD]`.
+        ///
+        /// `ENTRY` matches the compute pipeline's `entry_point`.
+        /// `W` / `H` / `D` are total thread counts on each axis (viz
+        /// divides by the descriptor's `workgroup_size` to compute
+        /// workgroup counts). `D` defaults to 1 when omitted.
+        ///
+        /// Only meaningful in interactive mode (when the descriptor
+        /// has a graphics pipeline); ignored in headless mode. Useful
+        /// when the compiler's default dispatch doesn't match the
+        /// resource you want to fill — e.g. a storage-image-writing
+        /// compute whose default is 1 thread.
+        ///
+        /// Examples:
+        ///   "paint:1024x1024"
+        ///   "erode_b:512x512x1"
+        #[arg(long = "dispatch", value_name = "ENTRY:WxH[xD]", verbatim_doc_comment)]
+        dispatch: Vec<String>,
         /// Print verbose output
         #[arg(short, long)]
         verbose: bool,
@@ -383,6 +402,7 @@ fn main() -> Result<()> {
             inputs,
             outputs,
             push_constants,
+            dispatch,
             verbose,
         } => {
             let parse_pairs = |pairs: &[String]| -> Result<HashMap<String, PathBuf>> {
@@ -399,12 +419,41 @@ fn main() -> Result<()> {
             let input_map = parse_pairs(&inputs)?;
             let output_map = parse_pairs(&outputs)?;
 
+            // Parse `--dispatch ENTRY:WxH[xD]` into a HashMap keyed by
+            // compute entry-point name. Total thread counts; viz
+            // divides by the descriptor's workgroup_size at use.
+            let dispatch_overrides: HashMap<String, (u32, u32, u32)> = dispatch
+                .iter()
+                .map(|s| {
+                    let (entry, dims) = s
+                        .split_once(':')
+                        .ok_or_else(|| anyhow!("Invalid --dispatch '{}'. Expected ENTRY:WxH[xD]", s))?;
+                    let parts: Vec<&str> = dims.split('x').collect();
+                    let parse = |p: &str| -> Result<u32> {
+                        p.parse()
+                            .with_context(|| format!("--dispatch '{}': cannot parse '{}'", s, p))
+                    };
+                    let (w, h, d) = match parts.as_slice() {
+                        [w, h] => (parse(w)?, parse(h)?, 1u32),
+                        [w, h, d] => (parse(w)?, parse(h)?, parse(d)?),
+                        _ => {
+                            return Err(anyhow!(
+                                "Invalid --dispatch '{}'. Expected WxH or WxHxD after ':'",
+                                s
+                            ));
+                        }
+                    };
+                    Ok((entry.to_string(), (w, h, d)))
+                })
+                .collect::<Result<HashMap<_, _>>>()?;
+
             pollster::block_on(modes::pipeline::run_pipeline(
                 path,
                 pipeline,
                 input_map,
                 output_map,
                 &push_constants,
+                &dispatch_overrides,
                 verbose,
             ))?;
         }

@@ -119,6 +119,11 @@ pub struct InteractivePipelineSpec {
     pub vertex_entry: String,
     /// Resolved fragment stage entry-point name.
     pub fragment_entry: String,
+    /// Per-compute-entry dispatch overrides (`--dispatch ENTRY:WxH[xD]`
+    /// on the CLI). Total thread counts on each axis; viz divides by
+    /// the descriptor's workgroup_size at dispatch time. Empty when
+    /// the compiler's default dispatch is correct for every stage.
+    pub dispatch_overrides: HashMap<String, (u32, u32, u32)>,
     pub max_frames: Option<u32>,
     pub verbose: bool,
     pub validate: bool,
@@ -693,7 +698,30 @@ impl State {
             // for now since v1 doesn't allocate storage buffers in this
             // path. Storage-image-driven shaders typically use Fixed or
             // input-binding-derived dispatches that work with an empty map.
-            let workgroups = gpu::resolve_dispatch_size(&cp.dispatch_size, &HashMap::new(), &[]);
+            //
+            // CLI `--dispatch ENTRY:WxH[xD]` overrides the descriptor's
+            // policy at the per-entry level. The override is in TOTAL
+            // threads on each axis; we divide each axis by the matching
+            // workgroup-size dim (`workgroup_size.0` for W, `.1` for H,
+            // `.2` for D) to get the workgroup counts wgpu expects. A
+            // workgroup-size dim of 0 would be malformed; clamp to 1
+            // defensively.
+            let workgroups = if let Some(&(w, h, d)) = spec.dispatch_overrides.get(&cp.entry_point) {
+                let (wgx, wgy, wgz) = (
+                    cp.workgroup_size.0.max(1),
+                    cp.workgroup_size.1.max(1),
+                    cp.workgroup_size.2.max(1),
+                );
+                (w.div_ceil(wgx), h.div_ceil(wgy), d.div_ceil(wgz))
+            } else {
+                gpu::resolve_dispatch_size(&cp.dispatch_size, &HashMap::new(), &[])
+            };
+            if verbose {
+                eprintln!(
+                    "[viz pipeline-interactive] compute '{}': dispatch = {} × {} × {}",
+                    cp.entry_point, workgroups.0, workgroups.1, workgroups.2
+                );
+            }
 
             compute_stages.push(PipelineComputeStage {
                 pipeline: compute_pipeline,
