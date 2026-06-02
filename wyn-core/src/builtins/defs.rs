@@ -919,6 +919,11 @@ fn generate_per_type_ops() -> Vec<BuiltinDefRaw> {
         defs.push(per_type_op(ty, "isnan", "isnan", L(IsNan)));
         defs.push(per_type_op(ty, "isinf", "isinf", L(IsInf)));
         defs.push(per_type_op(ty, "ldexp", "ldexp", L(GlslExt(53))));
+        // Screen-space derivatives — fragment-stage only. Lower to
+        // SPIR-V's core `OpDPdx` / `OpDPdy` / `OpFwidth` instructions.
+        defs.push(per_type_op(ty, "dFdx", "dFdx", L(DPdx)));
+        defs.push(per_type_op(ty, "dFdy", "dFdy", L(DPdy)));
+        defs.push(per_type_op(ty, "fwidth", "fwidth", L(Fwidth)));
     }
 
     // ---- float_modules: conversions ----

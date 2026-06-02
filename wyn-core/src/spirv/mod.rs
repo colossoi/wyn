@@ -3373,6 +3373,24 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         .matrix_times_scalar(result_ty, None, arg_ids[0], arg_ids[1])?,
                 )
             }
+            PrimOp::DPdx => {
+                if arg_ids.len() != 1 {
+                    bail_spirv!("DPdx requires 1 arg");
+                }
+                Ok(self.constructor.builder.d_pdx(result_ty, None, arg_ids[0])?)
+            }
+            PrimOp::DPdy => {
+                if arg_ids.len() != 1 {
+                    bail_spirv!("DPdy requires 1 arg");
+                }
+                Ok(self.constructor.builder.d_pdy(result_ty, None, arg_ids[0])?)
+            }
+            PrimOp::Fwidth => {
+                if arg_ids.len() != 1 {
+                    bail_spirv!("Fwidth requires 1 arg");
+                }
+                Ok(self.constructor.builder.fwidth(result_ty, None, arg_ids[0])?)
+            }
         }
     }
 }

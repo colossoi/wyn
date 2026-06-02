@@ -104,6 +104,11 @@ module type real = {
   sig nan : t
   sig pi : t
   sig e : t
+  -- Fragment-stage screen-space derivatives. Calling these from a
+  -- vertex or compute stage produces undefined results.
+  sig dFdx : t -> t
+  sig dFdy : t -> t
+  sig fwidth : t -> t
 }
 module type float = {
   include real

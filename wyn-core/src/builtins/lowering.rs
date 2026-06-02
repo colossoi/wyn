@@ -134,4 +134,11 @@ pub enum PrimOp {
     UConvert,
     // Bitcast (reinterpret bits)
     Bitcast,
+    // Screen-space derivatives. Fragment-stage only; SPIR-V's base
+    // Shader capability covers the implicit (`DPdx`/`DPdy`/`Fwidth`)
+    // forms used here. Fine/coarse variants would require
+    // `DerivativeControl` and are not exposed yet.
+    DPdx,
+    DPdy,
+    Fwidth,
 }
