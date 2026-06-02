@@ -53,6 +53,22 @@ pub trait PipelineDescriptorPublish {
 
 impl PipelineDescriptorPublish for PipelineDescriptor {
     fn publish_implicit_bindings(&mut self, entries: &[EgirEntry]) {
+        // SPIR-V `NonWritable` is a module-level decoration on
+        // `OpVariable`, not per-entry-point. The SPIR-V backend (see
+        // `spirv/mod.rs` `written_bindings`) only emits `NonWritable`
+        // when no entry writes the binding. Naga / wgpu reads that
+        // module-level access as the binding's class: any binding
+        // written by some entry becomes `read_write`. The descriptor
+        // must agree, otherwise wgpu rejects pipeline creation with
+        // `Storage class Storage{LOAD} doesn't match shader Storage{LOAD
+        // | STORE}`. Compute the set of module-writable bindings here
+        // and promote `ReadOnly → ReadWrite` in a final post-pass below.
+        let written_bindings: HashSet<(u32, u32)> = entries
+            .iter()
+            .flat_map(|e| e.outputs.iter().filter_map(|o| o.storage_binding))
+            .map(|br| (br.set, br.binding))
+            .collect();
+
         for entry in entries {
             // Find the bindings list backing this entry. Compute entries
             // match a single-stage `Compute` by `entry_point` or any stage
@@ -195,6 +211,29 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                     name,
                     length: output.length.clone(),
                 });
+            }
+        }
+
+        // Promote any `ReadOnly` storage binding whose `(set, binding)`
+        // is written by some entry in the module — see comment at the
+        // top of this function for why. Monotonic: only widens. Existing
+        // `ReadWrite` / `WriteOnly` are left as-is (`WriteOnly` already
+        // maps to `read_only=false` at the wgpu layer).
+        for pipeline in self.pipelines.iter_mut() {
+            let bindings: &mut Vec<Binding> = match pipeline {
+                Pipeline::Compute(cp) => &mut cp.bindings,
+                Pipeline::MultiCompute(mc) => &mut mc.bindings,
+                Pipeline::Graphics(gp) => &mut gp.bindings,
+            };
+            for b in bindings.iter_mut() {
+                if let Binding::StorageBuffer {
+                    set, binding, access, ..
+                } = b
+                {
+                    if *access == Access::ReadOnly && written_bindings.contains(&(*set, *binding)) {
+                        *access = Access::ReadWrite;
+                    }
+                }
             }
         }
     }

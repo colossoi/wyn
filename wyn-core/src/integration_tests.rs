@@ -1780,6 +1780,12 @@ fn compile_to_spirv(input: &str) -> Result<Vec<u32>, Box<dyn std::error::Error>>
     Ok(crate::compile_thru_spirv(input)?.spirv)
 }
 
+/// Single-stage equivalent of `compile_to_spirv` — disables
+/// `parallelize_soacs`, matching the CLI's `--single-stage` mode.
+fn compile_to_spirv_single_stage(input: &str) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
+    Ok(crate::compile_thru_spirv_single_stage(input)?.spirv)
+}
+
 /// Helper: compile source through SSA. Same as `compile_to_ssa`; kept as
 /// a separate name because some legacy tests distinguished module-bearing
 /// programs from non-module ones — `compile_thru_frontend` handles both.
@@ -2371,6 +2377,136 @@ entry main() #[location(0)] vec4f32 =
     assert_spirv_call_arities_match(&spirv);
 }
 
+/// Walk every `OpAccessChain` into a `StorageBuffer`-class `OpVariable`
+/// and assert the access-chain's result pointer points at the same
+/// element type the variable's runtime array carries. spirv-val rejects
+/// a mismatch with `OpAccessChain result type ... does not match the
+/// type that results from indexing into the base`; the in-process check
+/// catches the same shape so tests don't need `spirv-val` on $PATH.
+fn assert_spirv_storage_access_chain_pointee_types_match(spirv_words: &[u32]) {
+    use rspirv::binary::parse_words;
+    use rspirv::dr::{Loader, Operand};
+    use rspirv::spirv::{Op, StorageClass};
+    use std::collections::HashMap;
+
+    let mut loader = Loader::new();
+    parse_words(spirv_words, &mut loader).expect("parse spirv");
+    let module = loader.module();
+
+    // First pass: index every type-defining instruction by its result id.
+    let mut types: HashMap<u32, &rspirv::dr::Instruction> = HashMap::new();
+    for inst in module.types_global_values.iter() {
+        if let Some(id) = inst.result_id {
+            types.insert(id, inst);
+        }
+    }
+
+    // Helper: drill `OpTypePointer Class %inner` → `inner`.
+    let ptr_pointee = |type_id: u32| -> Option<u32> {
+        let inst = types.get(&type_id)?;
+        if inst.class.opcode != Op::TypePointer {
+            return None;
+        }
+        // Operands: [0] StorageClass, [1] inner type IdRef.
+        match inst.operands.get(1) {
+            Some(Operand::IdRef(id)) => Some(*id),
+            _ => None,
+        }
+    };
+
+    // Helper: drill `OpTypeStruct %member0 %member1 ...` → first member.
+    // For wyn's storage buffer blocks this is the `OpTypeRuntimeArray`.
+    let struct_first_member = |type_id: u32| -> Option<u32> {
+        let inst = types.get(&type_id)?;
+        if inst.class.opcode != Op::TypeStruct {
+            return None;
+        }
+        match inst.operands.first() {
+            Some(Operand::IdRef(id)) => Some(*id),
+            _ => None,
+        }
+    };
+
+    // Helper: drill `OpTypeRuntimeArray %elem` → `elem`. (Also accepts
+    // OpTypeArray.)
+    let array_elem = |type_id: u32| -> Option<u32> {
+        let inst = types.get(&type_id)?;
+        if !matches!(inst.class.opcode, Op::TypeRuntimeArray | Op::TypeArray) {
+            return None;
+        }
+        match inst.operands.first() {
+            Some(Operand::IdRef(id)) => Some(*id),
+            _ => None,
+        }
+    };
+
+    // Collect each StorageBuffer-class OpVariable's element type.
+    let mut storage_var_elem: HashMap<u32, u32> = HashMap::new();
+    for inst in module.types_global_values.iter() {
+        if inst.class.opcode != Op::Variable {
+            continue;
+        }
+        let class = match inst.operands.first() {
+            Some(Operand::StorageClass(c)) => *c,
+            _ => continue,
+        };
+        if class != StorageClass::StorageBuffer {
+            continue;
+        }
+        let var_id = match inst.result_id {
+            Some(id) => id,
+            None => continue,
+        };
+        // Variable's result_type is `OpTypePointer StorageBuffer %struct`.
+        let var_ptr_ty = match inst.result_type {
+            Some(id) => id,
+            None => continue,
+        };
+        let struct_ty = match ptr_pointee(var_ptr_ty) {
+            Some(id) => id,
+            None => continue,
+        };
+        let runtime_arr = match struct_first_member(struct_ty) {
+            Some(id) => id,
+            None => continue,
+        };
+        let elem = match array_elem(runtime_arr) {
+            Some(id) => id,
+            None => continue,
+        };
+        storage_var_elem.insert(var_id, elem);
+    }
+
+    // Walk every function body for OpAccessChain into such a variable.
+    for func in &module.functions {
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                if inst.class.opcode != Op::AccessChain {
+                    continue;
+                }
+                // Operands: [0] base IdRef, [1..] index IdRefs.
+                let base = match inst.operands.first() {
+                    Some(Operand::IdRef(id)) => *id,
+                    _ => continue,
+                };
+                let Some(expected_elem) = storage_var_elem.get(&base).copied() else {
+                    continue;
+                };
+                let result_ptr_ty = inst.result_type.expect("OpAccessChain has result type");
+                let actual_pointee =
+                    ptr_pointee(result_ptr_ty).expect("OpAccessChain result type must be OpTypePointer");
+                assert_eq!(
+                    actual_pointee, expected_elem,
+                    "OpAccessChain into StorageBuffer var %{base}: result pointer pointee \
+                     %{actual_pointee} does not match the variable's array element type \
+                     %{expected_elem} (chain result_id %{:?})",
+                    inst.result_id
+                );
+            }
+        }
+    }
+}
+
 /// Walk every `OpFunctionCall` in a SPIR-V module and assert each
 /// call's argument count matches the called function's declared
 /// parameter count. The arity-mismatch class of bug above produces
@@ -2658,6 +2794,13 @@ entry gen(bh: []vec4f32) []i32 =
     else {
         unreachable!()
     };
+    // The pre-pass writes the gather binding as its EntryOutput — that
+    // shows up as `WriteOnly` in the producer pipeline. `publish` then
+    // promotes any `ReadOnly` consumer reference of a module-written
+    // binding to `ReadWrite` (see the consumer assertion below), so
+    // wgpu/Naga sees consistent module-level access. `WriteOnly` is
+    // already `read_only=false` at the wgpu layer, so the producer side
+    // doesn't need widening.
     assert_eq!(*access, Access::WriteOnly, "pre-pass writes the gather buffer");
     assert_eq!(
         length.as_ref(),
@@ -2670,13 +2813,15 @@ entry gen(bh: []vec4f32) []i32 =
         "gather buffer must be sized from its input array's element count"
     );
 
-    // The consumer reads that same binding as a read-only Intermediate.
+    // The consumer reads that same binding as an Intermediate. Access is
+    // `ReadWrite` because of the module-level promotion described above —
+    // not because the consumer itself writes (it doesn't).
     let reads_gather = consumer_bufs.iter().any(|b| {
-        matches!(b, Binding::StorageBuffer { binding, usage: BufferUsage::Intermediate, access: Access::ReadOnly, .. } if binding == gather_binding)
+        matches!(b, Binding::StorageBuffer { binding, usage: BufferUsage::Intermediate, access: Access::ReadWrite, .. } if binding == gather_binding)
     });
     assert!(
         reads_gather,
-        "consumer must read the gather buffer (binding {gather_binding}) read-only: {consumer_bufs:?}"
+        "consumer must read the gather buffer (binding {gather_binding}) as ReadWrite intermediate: {consumer_bufs:?}"
     );
 
     // The consumer's own output goes to a different binding — no collision.
@@ -2902,42 +3047,19 @@ entry gen(xs: []i32) ([]i32, []i32) =
     );
 }
 
-/// Parked repro #1: `wyn compile --single-stage` emits invalid SPIR-V
-/// (OpAccessChain result type / base type mismatch) for a vec4-emitting
-/// map that gathers from a derived (map/scan-produced) array.
-///
-/// Trigger requires all three:
-///   1. vec4-emitting map (output is `[]vec4f32`).
-///   2. Gather inside the map's body from a *derived* array — a map/scan
-///      result, not a direct input.
-///   3. `--single-stage` mode (sequential-loop debug pipeline).
-///
-/// Dropping any one and it compiles clean. Without `--single-stage` the
-/// same shape compiles; replacing the output type with `[]i32` or
-/// replacing the derived gather with a direct input gather both
-/// compile. The spirv-val error is:
-///   "OpAccessChain result type (OpTypeInt) does not match the type
-///    that results from indexing into the base <id> (OpTypeVector)."
-///
-/// This integration test uses the regular (non-single-stage) compile
-/// path, so it currently *passes*; the bug only surfaces under the
-/// single-stage CLI flag. Marked `#[ignore]` to flag it as a known
-/// repro on the bugfix branch — when single-stage gets a code path
-/// reachable from tests, drop the ignore and assert it round-trips.
+/// Under `--single-stage` mode, a vec4-emitting map that gathers from a
+/// derived (map/scan-produced) array must still produce well-formed
+/// SPIR-V. The bug was: `lift_gathers` flagged the producer's gather
+/// buffer via an Output-role `StorageBindingDecl` on the prepass entry,
+/// but `from_tlc::convert` only consulted the parallelize `plans` for
+/// `forced_output_binding`. With `parallelize_soacs(disable=true)`
+/// `plans` is empty, so `build_entry_outputs` auto-allocated the
+/// prepass's output at the next free binding — colliding with the
+/// consumer's vec4 output and emitting an `int` store into a `vec4`
+/// buffer. spirv-val flagged the OpAccessChain type mismatch.
 #[test]
-#[ignore = "parked: --single-stage emits invalid SPIR-V for vec4-map gathering derived array"]
 fn single_stage_vec4_map_gather_from_derived_array_repro() {
-    // Status: passes today. The lib-test pipeline (`compile_thru_tlc` →
-    // `optimize_for_test(false)`) sets `parallelize_compute = false`, which
-    // the docstring calls "the `--single-stage` driver mode" — but the
-    // spirv-val failure observed from the CLI's `--single-stage` flag does
-    // NOT surface here, so something the driver does beyond
-    // `parallelize_compute = false` is needed to reproduce. Left as a parked
-    // repro: when the missing piece is wired in (or the CLI flag is replaced
-    // by a programmatic equivalent reachable from tests), this assertion
-    // should start failing, the bug should be fixed, and the `#[ignore]`
-    // dropped.
-    compile_to_spirv(
+    let spirv = compile_to_spirv_single_stage(
         "\
 #[compute]
 entry gen(xs: []i32) []vec4f32 =
@@ -2945,39 +3067,27 @@ entry gen(xs: []i32) []vec4f32 =
   map(|i: i32| @[f32.i32(cs[i]), 0.0, 0.0, 1.0], iota(8))
 ",
     )
-    .expect("vec4-map gathering derived array compiles in default (non-single-stage) mode");
+    .expect("single-stage vec4-map gathering derived array compiles");
+    assert_spirv_storage_access_chain_pointee_types_match(&spirv);
 }
 
-/// Parked repro #2: the compiler-allocated intermediate buffer from
-/// `lift_gathers` (when a computed array has multiple consumers) is
-/// reported in the pipeline `.json` descriptor with
-/// `access = read_only`, but the emitted SPIR-V both writes and reads
-/// it within the same kernel — the scan stage writes, the indexed
-/// gather reads. wgpu/Naga then rejects at runtime:
-///   "Storage class Storage{LOAD} doesn't match shader
-///    Storage{LOAD | STORE}"
-///
-/// Descriptor reports `gen_gather_b3 access=read_only` — should be
-/// `read_write`.
-///
-/// This test currently *passes* the SPIR-V compile step (the panic /
-/// validation failure happens at the wgpu pipeline-creation boundary,
-/// not at compile-to-SPIR-V). It's `#[ignore]`'d as a known repro on
-/// the bugfix branch; the fix should make the descriptor for any
-/// intermediate buffer that is BOTH written and read within the same
-/// kernel report `access = read_write`. Drop the ignore once the
-/// pipeline-descriptor pass reports the correct access mode.
+/// The descriptor for a compiler-allocated `lift_gathers` intermediate
+/// must agree with the SPIR-V module's per-binding writability. SPIR-V's
+/// `NonWritable` decoration is module-level, so when a sibling entry in
+/// the same module writes the gather buffer, the consumer pipeline's
+/// `OpVariable` has no `NonWritable` and Naga reports the storage as
+/// `read_write`. Previously the descriptor reported `read_only` based on
+/// the consumer's `StorageBindingDecl.role` alone, causing wgpu to fail
+/// pipeline creation with `Storage class Storage{LOAD} doesn't match
+/// shader Storage{LOAD | STORE}`. The fix promotes any intermediate
+/// binding whose `(set, binding)` is also an entry-output target to
+/// `Access::ReadWrite`.
 #[test]
-#[ignore = "parked: intermediate buffer reports read_only in descriptor but is read+written in shader"]
 fn intermediate_buffer_descriptor_access_repro() {
-    // Status: passes today (`compile_to_spirv` succeeds). The access-mode
-    // mismatch only surfaces at wgpu pipeline creation (runtime validation),
-    // which lib tests don't reach. To make this a real failing test, the
-    // assertion should inspect the resulting pipeline `.json` descriptor and
-    // verify that any intermediate binding which is both written and read
-    // within the same kernel reports `access = read_write`. Left as a parked
-    // repro until the descriptor-pass fix lands.
-    compile_to_spirv(
+    use crate::pipeline_descriptor::{Access, Binding, BufferUsage, Pipeline};
+    use std::collections::HashSet;
+
+    let lowered = crate::compile_thru_spirv(
         "\
 #[compute]
 entry gen(xs: []i32) ([]i32, [1]i32) =
@@ -2987,7 +3097,65 @@ entry gen(xs: []i32) ([]i32, [1]i32) =
    [offsets[7]])
 ",
     )
-    .expect("compile-to-SPIR-V step succeeds; wgpu pipeline creation fails on descriptor access mismatch");
+    .expect("compile to SPIR-V");
+
+    // Collect every (set, binding) any pipeline writes to anywhere in
+    // the module. A read-only declaration of one of these in a sibling
+    // pipeline is a descriptor↔shader mismatch.
+    let written: HashSet<(u32, u32)> = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .flat_map(|p| match p {
+            Pipeline::Compute(cp) => cp.bindings.iter().collect::<Vec<_>>(),
+            Pipeline::MultiCompute(mc) => mc.bindings.iter().collect::<Vec<_>>(),
+            Pipeline::Graphics(gp) => gp.bindings.iter().collect::<Vec<_>>(),
+        })
+        .filter_map(|b| match b {
+            Binding::StorageBuffer {
+                set, binding, access, ..
+            } if matches!(access, Access::WriteOnly | Access::ReadWrite) => Some((*set, *binding)),
+            _ => None,
+        })
+        .collect();
+
+    let mut violations: Vec<String> = Vec::new();
+    for p in &lowered.pipeline.pipelines {
+        let (label, bindings): (String, &[Binding]) = match p {
+            Pipeline::Compute(cp) => (cp.entry_point.clone(), &cp.bindings),
+            Pipeline::MultiCompute(mc) => {
+                let names: Vec<&str> = mc.stages.iter().map(|s| s.entry_point.as_str()).collect();
+                (format!("multi[{}]", names.join(",")), &mc.bindings)
+            }
+            Pipeline::Graphics(gp) => {
+                let names: Vec<&str> = gp.stages.iter().map(|s| s.entry_point.as_str()).collect();
+                (format!("graphics[{}]", names.join(",")), &gp.bindings)
+            }
+        };
+        for b in bindings {
+            if let Binding::StorageBuffer {
+                set,
+                binding,
+                access: Access::ReadOnly,
+                usage: BufferUsage::Intermediate,
+                name,
+                ..
+            } = b
+            {
+                if written.contains(&(*set, *binding)) {
+                    violations.push(format!(
+                        "pipeline {label}: intermediate binding {set}.{binding} ({name}) \
+                         declared read_only but written by another entry in the module"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "descriptor↔shader access mismatch on lift_gathers intermediates:\n  {}",
+        violations.join("\n  ")
+    );
 }
 
 /// A `scan` producer gathers the same way a `map` does: it's lifted into its
@@ -3008,8 +3176,11 @@ entry g(xs: []i32) []i32 =
     let lowered = compile_parallel(src);
     assert!(!lowered.spirv.is_empty(), "lowering produced no SPIR-V");
 
-    // The consumer reads the gather buffer as a read-only Intermediate sized
+    // The consumer reads the gather buffer as an Intermediate sized
     // LikeInput of `xs` (scan preserves element count and type: i32 → i32).
+    // Access is `ReadWrite`: `publish` promotes any binding written by a
+    // sibling entry in the module so the descriptor matches the SPIR-V's
+    // module-level access.
     let consumer_bufs = compute_storage_buffers(&lowered.pipeline, "g");
     let gather = consumer_bufs
         .iter()
@@ -3017,7 +3188,7 @@ entry g(xs: []i32) []i32 =
             Binding::StorageBuffer {
                 binding,
                 usage: BufferUsage::Intermediate,
-                access: Access::ReadOnly,
+                access: Access::ReadWrite,
                 length: Some(len),
                 ..
             } => Some((*binding, len.clone())),

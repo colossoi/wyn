@@ -189,15 +189,29 @@ pub fn run(
                 // binding `build_entry_outputs` may pin (gather pre-passes do).
                 // Reduce/Redomap manage their result inside the TLC two-phase
                 // plan, so `forced_output` reports `None` for them.
-                let forced_output_binding = plans.get(&entry.name).and_then(|p| p.bindings.forced_output());
+                //
+                // Fallback for `--single-stage` / `parallelize_soacs(disable=
+                // true)`: no plan exists, but `lift_gathers` still records its
+                // intended gather binding as an Output-role
+                // `StorageBindingDecl` carrying a `length` (the gather-prepass
+                // marker shape). Use that as the forced output so the prepass
+                // map writes the gather buffer instead of having its result
+                // auto-allocated onto a colliding binding.
+                let plan = plans.get(&entry.name);
+                let forced_output_binding = plan
+                    .and_then(|p| p.bindings.forced_output())
+                    .or_else(|| gather_prepass_forced_output(entry));
                 // A parallel map/scan writes one output element per thread, so
-                // its storage output is dispatch-sized. Reduce/Redomap results
-                // are single elements; entries without a plan keep the host's
-                // default sizing.
-                let dispatch_sized_outputs = plans.get(&entry.name).is_some_and(|p| {
+                // its storage output is dispatch-sized. Gather pre-passes are
+                // parallel maps too; treat the lift_gathers fallback above the
+                // same way. Reduce/Redomap results are single elements;
+                // entries without a plan or fallback keep the host's default
+                // sizing.
+                let dispatch_sized_outputs = plan.is_some_and(|p| {
                     use crate::tlc::parallelize::ParallelStrategy;
                     matches!(p.strategy, ParallelStrategy::Map | ParallelStrategy::Scan)
-                });
+                }) || (plan.is_none()
+                    && gather_prepass_forced_output(entry).is_some());
                 let ep = convert_entry_point(
                     def,
                     entry,
@@ -293,6 +307,20 @@ fn convert_function(
         graph,
         control_headers,
     )))
+}
+
+/// When `parallelize_soacs` is disabled, `lift_gathers`-emitted prepass
+/// entries are the only producers carrying a forced-binding intent —
+/// recorded as an Output-role `StorageBindingDecl` with `length: Some(_)`
+/// (the gather-buffer marker). Recover that binding so
+/// `build_entry_outputs` pins the prepass's map output to it instead of
+/// auto-allocating onto a colliding slot.
+fn gather_prepass_forced_output(entry: &interface::EntryDecl) -> Option<BindingRef> {
+    entry
+        .storage_bindings
+        .iter()
+        .find(|d| matches!(d.role, interface::StorageRole::Output) && d.length.is_some())
+        .map(|d| d.binding)
 }
 
 fn convert_entry_point(

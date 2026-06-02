@@ -577,9 +577,11 @@ impl TlcTransformed {
 impl TlcTransformed {
     /// Test-only: run the canonical TLC optimization pipeline to
     /// `TlcReachable` without the per-stage `time(...)` wrappers the
-    /// driver uses. `parallelize_compute = false` matches the
-    /// `--single-stage` driver mode.
-    pub fn optimize_for_test(self, parallelize_compute: bool) -> TlcReachable {
+    /// driver uses. The bool is forwarded as `parallelize_soacs(disable=
+    /// bool)`: `false` ⇒ parallelization enabled (default driver mode,
+    /// what most tests want); `true` ⇒ parallelization disabled (matches
+    /// the CLI's `--single-stage` flag).
+    pub fn optimize_for_test(self, disable_parallelize: bool) -> TlcReachable {
         self.partial_eval()
             .normalize_soacs()
             .fuse_maps()
@@ -591,7 +593,7 @@ impl TlcTransformed {
             .buffer_specialize()
             .fold_generated_lambdas()
             .inline_small()
-            .parallelize_soacs(parallelize_compute)
+            .parallelize_soacs(disable_parallelize)
             .expect("parallelize_soacs")
             .filter_reachable()
     }
@@ -1177,4 +1179,23 @@ pub fn compile_thru_ssa(source: &str) -> std::result::Result<SsaConverted, Box<d
 #[cfg(test)]
 pub fn compile_thru_spirv(source: &str) -> std::result::Result<Lowered, Box<dyn std::error::Error>> {
     Ok(compile_thru_ssa(source)?.lower()?)
+}
+
+/// Single-stage equivalent of `compile_thru_spirv`: matches the CLI's
+/// `--single-stage` mode by disabling `parallelize_soacs`. Used by tests
+/// that exercise compiler paths the default driver-equivalent doesn't
+/// reach.
+#[cfg(test)]
+pub fn compile_thru_spirv_single_stage(
+    source: &str,
+) -> std::result::Result<Lowered, Box<dyn std::error::Error>> {
+    let (mut node_counter, mut module_manager) = cached_compiler_init();
+    let type_checked = Compiler::parse(source, &mut node_counter)?
+        .elaborate_modules(&mut module_manager, &mut node_counter)?
+        .resolve(&module_manager)?
+        .fold_ast_constants()
+        .type_check(&mut module_manager)?;
+    let tlc = type_checked.to_tlc(&module_manager, false).optimize_for_test(true);
+    let ssa = tlc.to_egraph()?.expand_soacs(true).materialize().optimize_skeleton().elaborate();
+    Ok(ssa.lower()?)
 }
