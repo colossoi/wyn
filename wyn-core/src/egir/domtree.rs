@@ -6,6 +6,10 @@
 use crate::ssa::framework::BlockId;
 use std::collections::{HashMap, HashSet};
 
+#[cfg(test)]
+#[path = "domtree_tests.rs"]
+mod domtree_tests;
+
 /// Dominator tree.
 pub struct DomTree {
     /// Immediate dominator of each block (entry has no idom).
@@ -19,52 +23,83 @@ pub struct DomTree {
 /// Generic CFG trait so we can compute domtrees from either SSA or skeleton.
 pub trait CfgView {
     fn entry(&self) -> BlockId;
-    fn all_blocks(&self) -> Vec<BlockId>;
     fn successors(&self, block: BlockId) -> Vec<BlockId>;
 }
 
 impl DomTree {
     /// Build a dominator tree from any CFG-like structure.
+    ///
+    /// Dominator analysis is defined on the flowgraph rooted at the
+    /// entry — "X dominates Y" means "every path from *entry* to Y
+    /// passes through X". Blocks not reachable from entry have no
+    /// well-defined dominators, and including them in the iterative
+    /// fixpoint poisons reachable blocks they appear as predecessors of
+    /// (intersection with their garbage `doms` set collapses to ∅). So
+    /// the analysis runs over the entry-reachable subgraph only;
+    /// unreachable blocks left behind by upstream passes (e.g.
+    /// `fold_constant_branches` dropping a dead arm) appear in the
+    /// resulting tree only as "no idom, not in preorder".
     pub fn build(cfg: &dyn CfgView) -> Self {
         let entry = cfg.entry();
-        let all_blocks = cfg.all_blocks();
 
-        // Build predecessor map.
+        // Forward BFS from entry to collect the reachable subgraph.
+        // Everything else is left out of the analysis entirely.
+        let reachable: HashSet<BlockId> = {
+            let mut visited: HashSet<BlockId> = HashSet::new();
+            let mut stack = vec![entry];
+            while let Some(b) = stack.pop() {
+                if !visited.insert(b) {
+                    continue;
+                }
+                for s in cfg.successors(b) {
+                    if !visited.contains(&s) {
+                        stack.push(s);
+                    }
+                }
+            }
+            visited
+        };
+        let reachable_blocks: Vec<BlockId> = reachable.iter().copied().collect();
+
+        // Build predecessor map, restricted to edges between reachable
+        // blocks. An unreachable predecessor would still poison the
+        // intersection even if the destination is reachable.
         let mut preds: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
-        for &b in &all_blocks {
+        for &b in &reachable_blocks {
             preds.entry(b).or_default();
         }
-        for &b in &all_blocks {
+        for &b in &reachable_blocks {
             for succ in cfg.successors(b) {
-                preds.entry(succ).or_default().push(b);
+                if reachable.contains(&succ) {
+                    preds.entry(succ).or_default().push(b);
+                }
             }
         }
 
         // Iterative fixpoint dominator computation.
         let mut doms: HashMap<BlockId, HashSet<BlockId>> = HashMap::new();
-        let all_set: HashSet<BlockId> = all_blocks.iter().copied().collect();
-        for &b in &all_blocks {
+        for &b in &reachable_blocks {
             if b == entry {
                 doms.insert(b, HashSet::from([entry]));
             } else {
-                doms.insert(b, all_set.clone());
+                doms.insert(b, reachable.clone());
             }
         }
 
         loop {
             let mut changed = false;
-            for &b in &all_blocks {
+            for &b in &reachable_blocks {
                 if b == entry {
                     continue;
                 }
                 let pred_list = &preds[&b];
-                let mut new_set = if pred_list.is_empty() {
-                    HashSet::new()
-                } else {
-                    let mut iter = pred_list.iter();
-                    let first = doms[iter.next().unwrap()].clone();
-                    iter.fold(first, |acc, p| acc.intersection(&doms[p]).copied().collect())
-                };
+                // Every non-entry reachable block has at least one
+                // reachable predecessor (otherwise it wouldn't be
+                // reachable), so the intersection is well-defined.
+                let mut iter = pred_list.iter();
+                let first = doms[iter.next().expect("reachable non-entry block has a predecessor")].clone();
+                let mut new_set: HashSet<BlockId> =
+                    iter.fold(first, |acc, p| acc.intersection(&doms[p]).copied().collect());
                 new_set.insert(b);
                 if new_set != doms[&b] {
                     doms.insert(b, new_set);
@@ -75,6 +110,8 @@ impl DomTree {
                 break;
             }
         }
+        // Rebind so the idom extraction below iterates the same set.
+        let all_blocks = reachable_blocks;
 
         // Extract idom.
         let mut idom = HashMap::new();
@@ -156,10 +193,6 @@ pub struct SkeletonCfgView<'a> {
 impl CfgView for SkeletonCfgView<'_> {
     fn entry(&self) -> BlockId {
         self.skeleton.entry
-    }
-
-    fn all_blocks(&self) -> Vec<BlockId> {
-        self.skeleton.blocks.keys().collect()
     }
 
     fn successors(&self, block: BlockId) -> Vec<BlockId> {

@@ -82,6 +82,27 @@ fn test_if_expression() {
 }
 
 #[test]
+fn test_if_literal_true_lowers() {
+    // Regression for the const-fold / domtree interaction: when the
+    // condition is a literal bool, `fold_constant_branches` rewrites
+    // the entry's CondBranch into a Branch to the live arm and leaves
+    // the dead arm in `skeleton.blocks` without a predecessor. If
+    // dominator analysis lets that unreachable block poison its
+    // formerly-shared merge block, elaborate skips the merge and
+    // SPIR-V lowering panics on the dangling branch.
+    let spirv = compile_to_spirv("def f(x) = if true then x + 1 else x + 2").unwrap();
+    assert!(!spirv.is_empty());
+    assert_eq!(spirv[0], 0x07230203);
+}
+
+#[test]
+fn test_if_literal_false_lowers() {
+    let spirv = compile_to_spirv("def f(x) = if false then x + 1 else x + 2").unwrap();
+    assert!(!spirv.is_empty());
+    assert_eq!(spirv[0], 0x07230203);
+}
+
+#[test]
 fn test_comparisons() {
     let spirv = compile_to_spirv("def f(x, y) = if x < y then 1 else if x > y then 2 else 0").unwrap();
     assert!(!spirv.is_empty());
