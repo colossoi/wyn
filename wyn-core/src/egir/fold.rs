@@ -14,6 +14,7 @@
 use crate::ast::TypeName;
 use crate::ssa::types::ConstantValue;
 use polytype::Type;
+use smallvec::smallvec;
 
 use super::types::{EGraph, ENode, NodeId, PureOp};
 
@@ -32,6 +33,7 @@ impl EGraph {
                 let (a, b) = (operands[0], operands[1]);
                 self.fold_binop_identity(name, a, b)
                     .or_else(|| self.fold_binop_const(name, a, b, result_ty))
+                    .or_else(|| self.fold_pow_to_mul_chain(name, a, b, result_ty))
             }
             PureOp::UnaryOp(name) if operands.len() == 1 => self.fold_unary(name, operands[0]),
             _ => None,
@@ -115,6 +117,55 @@ impl EGraph {
             }
             _ => None,
         }
+    }
+
+    /// `x ** k` → left-to-right multiply chain for small positive integer
+    /// constant `k` (`2 ≤ k < 8`). For small exponents the chain is
+    /// strictly better than the backend's `**` lowering (GLSL.std.450
+    /// `Pow` for floats, exponentiation-by-squaring helper for ints):
+    /// fewer ops, exact, and no `x ≤ 0` edge cases for `Pow`. The base's
+    /// `result_ty` is preserved on every emitted multiply. The exponent
+    /// literal can be any numeric flavor (`i32` / `u32` / `f32`); float
+    /// requires same-typed operands, so `f32 ** f32` arrives here with
+    /// the exponent as `f32`. Non-integral or out-of-range exponents
+    /// (e.g. `2.5`, `-1`, `0`) leave the `**` node alone.
+    fn fold_pow_to_mul_chain(
+        &mut self,
+        name: &str,
+        base: NodeId,
+        exp: NodeId,
+        result_ty: &Type<TypeName>,
+    ) -> Option<NodeId> {
+        if name != "**" {
+            return None;
+        }
+        let k: u32 = if let Some(v) = self.as_i32(exp) {
+            if v < 2 {
+                return None;
+            }
+            u32::try_from(v).ok()?
+        } else if let Some(v) = self.as_u32(exp) {
+            if v < 2 {
+                return None;
+            }
+            v
+        } else if let Some(f) = self.as_f32(exp) {
+            // Only integral floats in 2..8.
+            if f.fract() != 0.0 || !(2.0..8.0).contains(&f) {
+                return None;
+            }
+            f as u32
+        } else {
+            return None;
+        };
+        if k >= 8 {
+            return None;
+        }
+        let mut acc = base;
+        for _ in 1..k {
+            acc = self.intern_pure(PureOp::BinOp("*".into()), smallvec![acc, base], result_ty.clone());
+        }
+        Some(acc)
     }
 
     /// `-(-x) → x` and `!(!x) → x` (no-op for any other unary op).
@@ -225,3 +276,7 @@ fn eval_f32(op: &str, a: f32, b: f32) -> Option<f32> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "fold_tests.rs"]
+mod fold_tests;

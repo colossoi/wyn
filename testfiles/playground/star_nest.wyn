@@ -114,13 +114,13 @@ entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform
       let dm = max(0.0, darkmatter - a * a * 0.001) in
 
       -- Contrast boost
-      let a3 = a * a * a in
+      let a3 = a ** 3 in
 
       -- Apply dark matter fading only after step 6
       let fade2 = if r > 6 then fade * (1.0 - dm) else fade in
 
       -- Accumulate: base fade glow + distance-coloured emission
-      let emit = @[s, s * s, s * s * s * s] * a3 * brightness * fade2 in
+      let emit = @[s, s ** 2, s ** 4] * a3 * brightness * fade2 in
       let v2   = v + @[fade2, fade2, fade2] + emit in
 
       -- Distance fading for next step

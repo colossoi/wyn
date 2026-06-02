@@ -88,7 +88,7 @@ def epsilon: f32 = 0.001
 
 def pbrFresnelSchlick(cosTheta: f32, f0: vec3f32) vec3f32 =
   let oneMinusCos = 1.0 - cosTheta in
-  let pow5 = oneMinusCos * oneMinusCos * oneMinusCos * oneMinusCos * oneMinusCos in
+  let pow5 = oneMinusCos ** 5 in
   f0 + (1.0 - f0) * pow5
 
 def pbrDistributionGGX(nDotH: f32, roughness: f32) f32 =

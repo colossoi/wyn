@@ -97,7 +97,7 @@ def hash21(p0: vec2f32) f32 =
   fract(p2.x + p2.y)
 
 def cubicInOut(t: f32) f32 =
-  if t < 0.5 then 4.0 * t * t * t
+  if t < 0.5 then 4.0 * t ** 3
   else 0.5 * pow(2.0 * t - 2.0, 3.0) + 1.0
 
 def getTime(t: f32, duration: f32) f32 =
