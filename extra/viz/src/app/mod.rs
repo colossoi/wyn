@@ -714,7 +714,13 @@ impl State {
                 );
                 (w.div_ceil(wgx), h.div_ceil(wgy), d.div_ceil(wgz))
             } else {
-                gpu::resolve_dispatch_size(&cp.dispatch_size, &HashMap::new(), &[])
+                gpu::resolve_dispatch_size_with_textures(
+                    &cp.dispatch_size,
+                    cp.workgroup_size,
+                    &HashMap::new(),
+                    &[],
+                    &storage_textures,
+                )
             };
             if verbose {
                 eprintln!(

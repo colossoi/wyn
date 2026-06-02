@@ -144,6 +144,17 @@ pub enum DispatchLen {
     PushConstant {
         offset: u32,
     },
+    /// One iteration per texel of the storage texture at (`set`,
+    /// `binding`) — used for compute entries whose primary output is a
+    /// storage image (`image_store`). The host reads the allocated
+    /// `wgpu::Texture`'s `width × height` (the storage texture's
+    /// resolution is set by the descriptor's `StorageTextureSize`
+    /// policy at allocation time). 2D dispatch: the host divides by
+    /// the workgroup_size's x/y dims to produce workgroup counts.
+    StorageImage {
+        set: u32,
+        binding: u32,
+    },
 }
 
 /// A GPU resource binding used by the pipeline.

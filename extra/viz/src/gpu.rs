@@ -375,17 +375,72 @@ pub fn build_bind_group(
 }
 
 /// Compute dispatch dimensions from a DispatchSize spec.
+///
+/// For 1D-shaped sources (`InputBinding`, `Fixed`, `PushConstant`)
+/// returns `(workgroup_count_x, 1, 1)`. For `StorageImage` returns a
+/// 2D shape `(width/wg_x, height/wg_y, 1)` sized from the
+/// storage-texture pool. Compute entries whose primary output is a
+/// storage image rely on this 2D path.
 pub fn resolve_dispatch_size(
     dispatch: &DispatchSize,
     buffers: &HashMap<u32, (wgpu::Buffer, u64)>,
     pc_bytes: &[u8],
 ) -> (u32, u32, u32) {
+    // For the 1D-style sources, the pipeline workgroup_size triple
+    // doesn't matter — only the x dim (carried inside `DerivedFrom`)
+    // is consulted. The `StorageImage` source ignores this wrapper
+    // and is routed through the explicit path instead.
+    resolve_dispatch_size_with_textures(dispatch, (1, 1, 1), buffers, pc_bytes, &HashMap::new())
+}
+
+/// Like `resolve_dispatch_size` but knows how to size a `StorageImage`
+/// dispatch from the storage-texture pool. The headless `pipeline`
+/// path passes an empty pool; the interactive path passes its
+/// `storage_textures` map.
+///
+/// `pipeline_workgroup_size` is the compute pipeline's full
+/// `(x, y, z)` workgroup size from the descriptor — needed to compute
+/// per-axis workgroup counts for the 2D `StorageImage` dispatch.
+/// `DispatchSize::DerivedFrom` only carries the x dim and treats every
+/// other source as 1D; this path uses the full triple instead.
+pub fn resolve_dispatch_size_with_textures(
+    dispatch: &DispatchSize,
+    pipeline_workgroup_size: (u32, u32, u32),
+    buffers: &HashMap<u32, (wgpu::Buffer, u64)>,
+    pc_bytes: &[u8],
+    storage_textures: &HashMap<(u32, u32), StorageTextureResource>,
+) -> (u32, u32, u32) {
     match dispatch {
         DispatchSize::Fixed { x, y, z } => (*x, *y, *z),
         DispatchSize::DerivedFrom { len, workgroup_size } => {
-            let elements = resolve_dispatch_len(len, buffers, pc_bytes);
-            let wg = *workgroup_size;
-            ((elements + wg - 1) / wg, 1, 1)
+            let wg_x = (*workgroup_size).max(1);
+            match len {
+                DispatchLen::StorageImage { set, binding } => {
+                    // 2D dispatch over the texture's resolution.
+                    // Workgroup counts per axis divide by the full
+                    // pipeline workgroup_size (x and y), not by the
+                    // 1D `workgroup_size` in `DerivedFrom`.
+                    if let Some(res) = storage_textures.get(&(*set, *binding)) {
+                        let size = res.texture.size();
+                        let wg_y = pipeline_workgroup_size.1.max(1);
+                        let wg_z = pipeline_workgroup_size.2.max(1);
+                        (
+                            size.width.div_ceil(pipeline_workgroup_size.0.max(1)),
+                            size.height.div_ceil(wg_y),
+                            1u32.div_ceil(wg_z),
+                        )
+                    } else {
+                        // Storage texture wasn't allocated (headless
+                        // path with no graphics pipeline, or descriptor
+                        // mismatch). Conservative: 1 workgroup.
+                        (1, 1, 1)
+                    }
+                }
+                _ => {
+                    let elements = resolve_dispatch_len(len, buffers, pc_bytes);
+                    (elements.div_ceil(wg_x), 1, 1)
+                }
+            }
         }
     }
 }
@@ -393,6 +448,9 @@ pub fn resolve_dispatch_size(
 /// Resolve a `DerivedFrom` dispatch's iteration count from its `DispatchLen`
 /// source: a buffer's element count, a compile-time constant, or a scalar read
 /// from the push-constant block.
+///
+/// `StorageImage` is handled by `resolve_dispatch_size_with_textures`
+/// directly (it's 2D, not 1D) and never reaches this helper.
 fn resolve_dispatch_len(
     len: &DispatchLen,
     buffers: &HashMap<u32, (wgpu::Buffer, u64)>,
@@ -407,6 +465,7 @@ fn resolve_dispatch_len(
             let o = *offset as usize;
             pc_bytes.get(o..o + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).unwrap_or(0)
         }
+        DispatchLen::StorageImage { .. } => 1,
     }
 }
 

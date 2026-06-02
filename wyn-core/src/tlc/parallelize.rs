@@ -2897,20 +2897,46 @@ fn entry_binding_slots(program: &Program, def_name: SymbolId) -> Vec<Option<Entr
     crate::binding_layout::compute_entry_binding_layout(&params, decl, AUTO_STORAGE_SET)
 }
 
-/// Dispatch length for a non-parallelized compute entry: its first input-view
-/// param binding (the previous "derive from the first input buffer" behavior,
-/// now explicit), else a single-element grid.
+/// Dispatch length for a non-parallelized compute entry:
+///   1. its first input-view param binding, if any (the previous
+///      "derive from the first input buffer" behavior, now explicit);
+///   2. else its first `#[storage_image]` param — the natural dispatch
+///      is one thread per texel of the image being written; the host
+///      resolves the size from the descriptor's `StorageTextureSize`
+///      policy at allocation time;
+///   3. else a single-element grid (the conservative fallback for
+///      entries that drive themselves entirely from push constants /
+///      uniforms).
 fn default_entry_dispatch_len(program: &Program, def_name: SymbolId) -> DispatchLen {
     let slots = entry_binding_slots(program, def_name);
-    let Some(binding) = slots.iter().flatten().next() else {
-        return DispatchLen::Fixed { count: 1 };
-    };
-    let (buf, _elem_ty, elem_bytes) = binding.first_buffer();
-    DispatchLen::InputBinding {
-        set: buf.set,
-        binding: buf.binding,
-        elem_bytes,
+    if let Some(binding) = slots.iter().flatten().next() {
+        let (buf, _elem_ty, elem_bytes) = binding.first_buffer();
+        return DispatchLen::InputBinding {
+            set: buf.set,
+            binding: buf.binding,
+            elem_bytes,
+        };
     }
+    // No view-array param — look for a `#[storage_image]` param to
+    // size the dispatch from. The first one declared wins; shaders
+    // that write multiple images and want a different sizing source
+    // can use the `--dispatch ENTRY:WxH` CLI override at runtime.
+    let def = program.defs.iter().find(|d| d.name == def_name);
+    if let Some(def) = def {
+        if let DefMeta::EntryPoint(decl) = &def.meta {
+            for pattern in &decl.params {
+                if let Some((br, _fmt, _access, _size)) =
+                    crate::binding_layout::extract_storage_image_binding(pattern)
+                {
+                    return DispatchLen::StorageImage {
+                        set: br.set,
+                        binding: br.binding,
+                    };
+                }
+            }
+        }
+    }
+    DispatchLen::Fixed { count: 1 }
 }
 
 /// A `ComputeStage` with `workgroup` + a `DerivedFrom(len)` dispatch. Used by
