@@ -871,6 +871,112 @@ pub fn create_storage_textures(
     out
 }
 
+/// Host-uploaded texture: a `wgpu::Texture` that the viz host writes
+/// each frame from CPU state (today: Shadertoy's keyboard convention,
+/// a 256×3 R8Unorm texture). The pool is keyed by `(set, binding)`
+/// the same way storage textures are.
+pub struct HostTextureResource {
+    pub texture: wgpu::Texture,
+    pub view: wgpu::TextureView,
+    pub format: wgpu::TextureFormat,
+    pub extent: (u32, u32),
+    /// Identifier for the per-frame writer. Drives the
+    /// `update_host_textures` dispatch on `State`.
+    pub kind: HostTextureKind,
+}
+
+/// What CPU state feeds a `HostTextureResource` each frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostTextureKind {
+    /// Shadertoy's 256×3 keyboard texture. Row 0 = currently-down,
+    /// row 1 = pressed-this-frame, row 2 = toggled. R8Unorm.
+    Keyboard,
+}
+
+/// Walk every pipeline's bindings; allocate one `wgpu::Texture` for
+/// each `Binding::Texture` whose name matches a recognized
+/// host-uploaded pattern AND has no sibling `StorageTexture` at the
+/// same `(set, binding)`. Texture bindings that look like
+/// compute-written content (a sibling `StorageTexture` exists) flow
+/// through `create_storage_textures`'s `sampled_view` instead; this
+/// pool is only for textures whose contents come from the CPU.
+///
+/// Today the only recognized host pattern is "keyboard" (case-
+/// insensitive) → 256×3 R8Unorm. Future host-uploaded textures
+/// (image files, video, audio) would add their own match arms.
+pub fn create_host_textures(
+    device: &wgpu::Device,
+    descriptor: &PipelineDescriptor,
+    storage_textures: &HashMap<(u32, u32), StorageTextureResource>,
+) -> HashMap<(u32, u32), HostTextureResource> {
+    let mut out: HashMap<(u32, u32), HostTextureResource> = HashMap::new();
+    for pipeline in &descriptor.pipelines {
+        let bindings: &[Binding] = match pipeline {
+            Pipeline::Compute(cp) => &cp.bindings,
+            Pipeline::MultiCompute(mc) => &mc.bindings,
+            Pipeline::Graphics(gp) => &gp.bindings,
+        };
+        for b in bindings {
+            let Binding::Texture { set, binding, name, .. } = b else {
+                continue;
+            };
+            let key = (*set, *binding);
+            // If a storage texture covers this slot, the texture binding
+            // reads its sampled view — not a host-uploaded path.
+            if storage_textures.contains_key(&key) {
+                continue;
+            }
+            if out.contains_key(&key) {
+                continue;
+            }
+            // Name-based classification. v1 recognizes "keyboard" only.
+            let lower = name.to_ascii_lowercase();
+            let kind = if lower == "keyboard" || lower == "ikeyboard" {
+                HostTextureKind::Keyboard
+            } else {
+                // Unrecognized — leave it out; the bind-group builder
+                // will surface a clear "no resource" error when the
+                // slot is bound.
+                continue;
+            };
+            let (width, height, format) = match kind {
+                HostTextureKind::Keyboard => (256u32, 3u32, wgpu::TextureFormat::R8Unorm),
+            };
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(&format!("host_texture_{}", name)),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some(&format!("host_view_{}", name)),
+                format: Some(format),
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                ..Default::default()
+            });
+            out.insert(
+                key,
+                HostTextureResource {
+                    texture,
+                    view,
+                    format,
+                    extent: (width, height),
+                    kind,
+                },
+            );
+        }
+    }
+    out
+}
+
 /// Allocate one `wgpu::Sampler` per unique `(set, binding)` slot
 /// declared as `Binding::Sampler` in any pipeline. v1 emits the
 /// linear-filter / clamp-to-edge default which matches Shadertoy's
@@ -931,6 +1037,7 @@ pub fn build_resource_bind_group_for_set(
     set: u32,
     visibility: ShaderStages,
     storage_textures: &HashMap<(u32, u32), StorageTextureResource>,
+    host_textures: &HashMap<(u32, u32), HostTextureResource>,
     samplers: &HashMap<(u32, u32), wgpu::Sampler>,
     uniforms: &HashMap<(u32, u32), wgpu::Buffer>,
 ) -> Result<(wgpu::BindGroupLayout, BindGroup)> {
@@ -974,13 +1081,18 @@ pub fn build_resource_bind_group_for_set(
                 ..
             } if *bset == set => {
                 let key = (*bset, *binding);
+                // Resolve the sampled view: storage_texture pool first
+                // (cross-stage compute-write / fragment-sample handoff),
+                // then host-uploaded pool (keyboard, etc.).
                 let view = storage_textures
                     .get(&key)
                     .map(|r| &r.sampled_view)
+                    .or_else(|| host_textures.get(&key).map(|r| &r.view))
                     .ok_or_else(|| {
                         anyhow!(
-                            "Texture binding ({}, {}) has no storage_texture entry to share; \
-                             host-uploaded textures not yet wired",
+                            "Texture binding ({}, {}) has no resource — neither a \
+                             compute-written storage_texture nor a host-uploaded \
+                             host_texture (e.g. `keyboard`)",
                             bset,
                             binding
                         )

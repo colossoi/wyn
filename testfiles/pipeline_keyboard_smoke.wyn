@@ -1,0 +1,23 @@
+-- Phase 4b smoke: fragment reads the Shadertoy keyboard texture.
+-- Press space (keycode 32) to turn the screen white; release for
+-- black. Verifies the host-uploaded keyboard texture path
+-- end-to-end.
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 =
+  let verts = [@[-1.0, -1.0, 0.0, 1.0],
+               @[3.0, -1.0, 0.0, 1.0],
+               @[-1.0, 3.0, 0.0, 1.0]] in
+  verts[vid]
+
+#[fragment]
+entry fragment_main(#[builtin(position)] pos: vec4f32,
+                    #[texture(set=1, binding=0)] keyboard: texture2d,
+                    #[sampler(set=1, binding=1)] kbd_samp: sampler)
+  #[location(0)] vec4f32 =
+  -- texelFetch at (32, 0) = "is space currently down?" Returns 1.0
+  -- when pressed, 0.0 otherwise. The sampler is unused here but
+  -- needed because Wyn requires both texture and sampler together
+  -- for now; we point-sample via texture_load.
+  let space_down = texture_load(keyboard, @[32i32, 0i32], 0).x in
+  @[space_down, space_down, space_down, 1.0]

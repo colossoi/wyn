@@ -155,6 +155,13 @@ struct State {
     mouse_pos: [f32; 2],
     mouse_click_pos: [f32; 2],
     mouse_pressed: bool,
+    // Keyboard state for the Shadertoy 256×3 convention. Rows in
+    // declaration order are `currently_down`, `pressed_this_frame`,
+    // `toggled`. Each row has 256 columns indexed by Shadertoy's
+    // keycode (ASCII for printable keys; named keys map per a small
+    // table near `apply_keyboard_event`). `pressed_this_frame` clears
+    // at the end of every frame.
+    keyboard: [u8; 256 * 3],
     // Frame limiting (optional, for debugging)
     frame_count: u32,
     max_frames: Option<u32>,
@@ -212,6 +219,11 @@ struct PipelineState {
     time_buffer: Option<wgpu::Buffer>,
     mouse_buffer: Option<wgpu::Buffer>,
     frame_buffer: Option<wgpu::Buffer>,
+    /// Host-uploaded textures, written each frame from CPU state. Today
+    /// the only entry is the Shadertoy keyboard texture (256×3 R8Unorm),
+    /// allocated when the descriptor declares a Texture binding named
+    /// "keyboard" / "iKeyboard".
+    host_textures: HashMap<(u32, u32), gpu::HostTextureResource>,
     // Storage buffers + textures + samplers — held to keep the GPU
     // resources alive for the bind groups' lifetime.
     _storage_buffers: HashMap<u32, (wgpu::Buffer, u64)>,
@@ -563,6 +575,7 @@ impl State {
             mouse_pos: [0.0, 0.0],
             mouse_click_pos: [0.0, 0.0],
             mouse_pressed: false,
+            keyboard: [0u8; 256 * 3],
             frame_count: 0,
             max_frames,
             frame_times: [0.0; 60],
@@ -634,6 +647,7 @@ impl State {
         // Allocate cross-pipeline resources up front (Phase 1b helpers).
         let storage_textures =
             gpu::create_storage_textures(&device, &spec.descriptor, Some((config.width, config.height)));
+        let host_textures = gpu::create_host_textures(&device, &spec.descriptor, &storage_textures);
         let samplers = gpu::create_samplers(&device, &spec.descriptor);
         // Phase 4: Shadertoy-style uniforms (iResolution / iTime /
         // iMouse / iFrame). One buffer per declared uniform name on
@@ -675,6 +689,7 @@ impl State {
                     set,
                     wgpu::ShaderStages::COMPUTE,
                     &storage_textures,
+                    &host_textures,
                     &samplers,
                     &uniforms.by_set_binding,
                 )
@@ -764,6 +779,7 @@ impl State {
                 set,
                 wgpu::ShaderStages::FRAGMENT,
                 &storage_textures,
+                &host_textures,
                 &samplers,
                 &uniforms.by_set_binding,
             )
@@ -813,6 +829,7 @@ impl State {
             time_buffer: uniforms.time,
             mouse_buffer: uniforms.mouse,
             frame_buffer: uniforms.frame,
+            host_textures,
             _storage_buffers: HashMap::new(),
             _storage_textures: storage_textures,
             _samplers: samplers,
@@ -828,6 +845,7 @@ impl State {
             mouse_pos: [0.0, 0.0],
             mouse_click_pos: [0.0, 0.0],
             mouse_pressed: false,
+            keyboard: [0u8; 256 * 3],
             frame_count: 0,
             max_frames: spec.max_frames,
             frame_times: [0.0; 60],
@@ -1130,6 +1148,7 @@ impl State {
             mouse_pos: [0.0, 0.0],
             mouse_click_pos: [0.0, 0.0],
             mouse_pressed: false,
+            keyboard: [0u8; 256 * 3],
             frame_count: 0,
             max_frames: spec.max_frames,
             frame_times: [0.0; 60],
@@ -1195,9 +1214,15 @@ impl State {
                         self.mouse_pos,
                         self.mouse_click_pos,
                         self.mouse_pressed,
+                        &self.keyboard,
                         &mut encoder,
                     ),
                 }
+                // Clear the "pressed this frame" row of the keyboard
+                // state — every press lives for exactly one frame in
+                // the Shadertoy convention. Cheap (256 bytes) and
+                // harmless when no keyboard texture is bound.
+                clear_keyboard_pressed_this_frame(&mut self.keyboard);
 
                 self.queue.submit(Some(encoder.finish()));
                 frame.present();
@@ -1436,6 +1461,110 @@ fn render_simulate(
     }
 }
 
+/// Map a winit `KeyCode` to Shadertoy's row index. Shadertoy uses
+/// JavaScript keyCodes — printable keys = ASCII, named keys per a
+/// fixed table. We cover the keys the Mountains shader actually
+/// touches (Enter, Backspace, Shift) plus a generous set so basic
+/// shaders work without further tweaking. Unknown keys return None.
+fn shadertoy_keycode(key: &winit::keyboard::KeyCode) -> Option<u8> {
+    use winit::keyboard::KeyCode::*;
+    Some(match key {
+        Backspace => 8,
+        Tab => 9,
+        Enter | NumpadEnter => 13,
+        ShiftLeft | ShiftRight => 16,
+        ControlLeft | ControlRight => 17,
+        AltLeft | AltRight => 18,
+        Pause => 19,
+        CapsLock => 20,
+        Escape => 27,
+        Space => 32,
+        PageUp => 33,
+        PageDown => 34,
+        End => 35,
+        Home => 36,
+        ArrowLeft => 37,
+        ArrowUp => 38,
+        ArrowRight => 39,
+        ArrowDown => 40,
+        Delete => 46,
+        Digit0 => 48,
+        Digit1 => 49,
+        Digit2 => 50,
+        Digit3 => 51,
+        Digit4 => 52,
+        Digit5 => 53,
+        Digit6 => 54,
+        Digit7 => 55,
+        Digit8 => 56,
+        Digit9 => 57,
+        KeyA => 65,
+        KeyB => 66,
+        KeyC => 67,
+        KeyD => 68,
+        KeyE => 69,
+        KeyF => 70,
+        KeyG => 71,
+        KeyH => 72,
+        KeyI => 73,
+        KeyJ => 74,
+        KeyK => 75,
+        KeyL => 76,
+        KeyM => 77,
+        KeyN => 78,
+        KeyO => 79,
+        KeyP => 80,
+        KeyQ => 81,
+        KeyR => 82,
+        KeyS => 83,
+        KeyT => 84,
+        KeyU => 85,
+        KeyV => 86,
+        KeyW => 87,
+        KeyX => 88,
+        KeyY => 89,
+        KeyZ => 90,
+        _ => return None,
+    })
+}
+
+/// Apply a winit keyboard event to the 256×3 keyboard state.
+/// Row 0 (offset 0..256) = currently down. Row 1 (offset 256..512) =
+/// pressed this frame (cleared by `clear_keyboard_pressed_this_frame`
+/// at end of frame). Row 2 (offset 512..768) = toggled (flipped on
+/// each press).
+fn apply_keyboard_event(state: &mut [u8; 256 * 3], event: &winit::event::KeyEvent) {
+    let winit::keyboard::PhysicalKey::Code(code) = event.physical_key else {
+        return;
+    };
+    let Some(idx) = shadertoy_keycode(&code) else {
+        return;
+    };
+    let i = idx as usize;
+    match event.state {
+        winit::event::ElementState::Pressed => {
+            // Mark currently down + this-frame press, only on the
+            // first press event (winit fires KeyboardInput on repeat
+            // too; filter on `event.repeat`).
+            state[i] = 0xff;
+            if !event.repeat {
+                state[256 + i] = 0xff;
+                state[512 + i] = if state[512 + i] != 0 { 0 } else { 0xff };
+            }
+        }
+        winit::event::ElementState::Released => {
+            state[i] = 0;
+        }
+    }
+}
+
+/// Clear the pressed-this-frame row at the end of each frame.
+fn clear_keyboard_pressed_this_frame(state: &mut [u8; 256 * 3]) {
+    for byte in &mut state[256..512] {
+        *byte = 0;
+    }
+}
+
 /// `Some(set)` for any binding that lives in a descriptor set; `None`
 /// for `PushConstant` (which has no set).
 fn binding_set(b: &wyn_pipeline_descriptor::Binding) -> Option<u32> {
@@ -1490,8 +1619,37 @@ fn render_pipeline(
     mouse_pos: [f32; 2],
     mouse_click_pos: [f32; 2],
     mouse_pressed: bool,
+    keyboard: &[u8; 256 * 3],
     encoder: &mut wgpu::CommandEncoder,
 ) {
+    // Push host-uploaded textures (currently: keyboard) up to the
+    // GPU before the frame's compute + render passes consume them.
+    for ((_, _), res) in &state.host_textures {
+        match res.kind {
+            gpu::HostTextureKind::Keyboard => {
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &res.texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    keyboard,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        // R8Unorm = 1 byte per texel; 256 texels per row.
+                        bytes_per_row: Some(res.extent.0),
+                        rows_per_image: Some(res.extent.1),
+                    },
+                    wgpu::Extent3d {
+                        width: res.extent.0,
+                        height: res.extent.1,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+        }
+    }
     // Update Shadertoy-style uniforms when the graphics pipeline asked
     // for them. Each is independently optional; the constructor sets
     // the `Option` based on the descriptor.
@@ -1699,6 +1857,9 @@ impl ApplicationHandler for App {
                                 }
                             }
                         }
+                    }
+                    WindowEvent::KeyboardInput { event, .. } => {
+                        apply_keyboard_event(&mut state.keyboard, &event);
                     }
                     _ => {}
                 }
