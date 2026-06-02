@@ -2846,21 +2846,17 @@ impl<'a> TypeChecker<'a> {
         let param_stripped = strip_unique(&expected_param);
 
         // Unify argument with expected param
-        self.context.unify(&arg_stripped, &param_stripped).map_err(|e| {
+        self.context.unify(&arg_stripped, &param_stripped).map_err(|_| {
+            let base = format!(
+                "Function argument type mismatch at argument {}: expected {}, got {}",
+                arg_index + 1,
+                self.format_type(&param_stripped),
+                self.format_type(&arg_stripped),
+            );
             let error_msg = if arg.h.span.is_generated() {
-                format!(
-                    "Function argument type mismatch at argument {}: {:?}\n\
-                         Expected param type: {}\n\
-                         Actual arg type: {}\n\
-                         Generated expression: {:#?}",
-                    arg_index + 1,
-                    e,
-                    self.format_type(&param_stripped),
-                    self.format_type(&arg_stripped),
-                    arg
-                )
+                format!("{base}\nGenerated expression: {:#?}", arg)
             } else {
-                format!("Function argument type mismatch: {:?}", e)
+                base
             };
             err_type_at!(arg.h.span, "{}", error_msg)
         })?;

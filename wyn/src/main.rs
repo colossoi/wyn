@@ -132,6 +132,13 @@ fn main() -> ExitCode {
             eprintln!("{msg}");
             ExitCode::from(2)
         }
+        Err(DriverError::CompilationError(e)) => {
+            match e.span() {
+                Some(span) if !span.is_generated() => eprintln!("{span}: {e}"),
+                _ => eprintln!("{e}"),
+            }
+            ExitCode::from(1)
+        }
         Err(e) => {
             eprintln!("{e}");
             ExitCode::from(1)
