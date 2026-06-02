@@ -7,6 +7,7 @@ mod render;
 mod uniforms;
 mod vertex_buffers;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -23,12 +24,12 @@ use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowAttributes};
 
-use crate::gpu::{DeviceRequest, GpuContext};
+use crate::gpu::{self, DeviceRequest, GpuContext};
 use crate::modes::simulate::BindingLoc;
 use render::DEPTH_FORMAT;
 use uniforms::{MouseUniform, ResolutionUniform, TimeUniform};
 
-use wyn_pipeline_descriptor::{ComputePipeline, GraphicsPipeline};
+use wyn_pipeline_descriptor::{ComputePipeline, GraphicsPipeline, PipelineDescriptor};
 
 // --- Pipeline spec passed to the app -----------------------------------------
 
@@ -101,6 +102,30 @@ pub struct SimulateSpec {
     pub vertex_count: u32,
 }
 
+/// Configuration for the interactive shape of `pipeline` mode: an
+/// arbitrary chain of compute pipelines plus a graphics pipeline that
+/// renders to a window, all driven from the descriptor JSON. Built by
+/// `modes::pipeline::run_pipeline_interactive` after detecting a
+/// graphics pipeline in the descriptor.
+///
+/// This is `pipeline` mode's interactive variant — same descriptor
+/// schema as the headless path, plus the windowing knobs `vf` and
+/// `simulate` carry.
+pub struct InteractivePipelineSpec {
+    pub shader_path: PathBuf,
+    pub descriptor: PipelineDescriptor,
+    /// Resolved vertex stage entry-point name.
+    pub vertex_entry: String,
+    /// Resolved fragment stage entry-point name.
+    pub fragment_entry: String,
+    pub max_frames: Option<u32>,
+    pub verbose: bool,
+    pub validate: bool,
+    pub present_mode: PresentMode,
+    pub size: Option<(u32, u32)>,
+    pub vertex_count: u32,
+}
+
 /// Where the WGSL/SPIR-V module comes from.
 pub enum Shader {
     /// Load SPIR-V from disk; entry-point names come from
@@ -146,6 +171,46 @@ struct State {
 enum AppMode {
     VertexFragment(VfState),
     Simulate(SimulateState),
+    /// Interactive `pipeline` mode: descriptor-driven N compute stages
+    /// then one graphics pipeline per frame. Cross-stage data flows
+    /// through storage buffers, storage textures (compute-writes
+    /// readable as fragment-sampled textures via the same wgpu::
+    /// Texture allocated once at startup), and uniforms.
+    Pipeline(PipelineState),
+}
+
+/// One compute stage in a `PipelineState` chain. Mirrors a single
+/// `ComputePipeline` in the descriptor.
+struct PipelineComputeStage {
+    pipeline: wgpu::ComputePipeline,
+    /// Bind groups indexed by descriptor-set number. Empty sets below
+    /// the lowest used one get a no-op group attached at render time
+    /// to satisfy wgpu's contiguous-sets requirement.
+    bind_groups_by_set: Vec<Option<BindGroup>>,
+    workgroups: (u32, u32, u32),
+    push_constants: Vec<u8>,
+    label: String,
+}
+
+/// GPU state for `AppMode::Pipeline`. Holds every pipeline + bind
+/// group needed to drive the descriptor each frame.
+struct PipelineState {
+    compute_stages: Vec<PipelineComputeStage>,
+    render_pipeline: RenderPipeline,
+    /// Render-side bind groups indexed by descriptor-set number.
+    render_bind_groups_by_set: Vec<Option<BindGroup>>,
+    vertex_count: u32,
+    // Shadertoy-style uniform buffers, populated per frame when the
+    // graphics pipeline declares the matching uniform binding.
+    resolution_buffer: Option<wgpu::Buffer>,
+    time_buffer: Option<wgpu::Buffer>,
+    mouse_buffer: Option<wgpu::Buffer>,
+    frame_buffer: Option<wgpu::Buffer>,
+    // Storage buffers + textures + samplers — held to keep the GPU
+    // resources alive for the bind groups' lifetime.
+    _storage_buffers: HashMap<u32, (wgpu::Buffer, u64)>,
+    _storage_textures: HashMap<(u32, u32), gpu::StorageTextureResource>,
+    _samplers: HashMap<(u32, u32), wgpu::Sampler>,
 }
 
 /// GPU state for `simulate`: a compute pipeline that ping-pongs
@@ -502,6 +567,23 @@ impl State {
         })
     }
 
+    /// Construct GPU state for the interactive `pipeline` mode: a
+    /// descriptor-driven compute chain + one graphics pipeline. See
+    /// `InteractivePipelineSpec` for the descriptor source. Filled in
+    /// incrementally; the current implementation handles only the
+    /// minimal `storage_image_roundtrip` shape (one compute writing a
+    /// storage texture + one graphics pipeline sampling it). Storage
+    /// buffers, push constants, and Shadertoy-style uniforms land in
+    /// follow-up commits.
+    async fn new_pipeline(window: Arc<Window>, spec: &InteractivePipelineSpec) -> Result<Self> {
+        let _ = window;
+        let _ = spec;
+        anyhow::bail!(
+            "interactive pipeline mode: GPU state construction not yet implemented \
+             (skeleton committed; coming in the next commit)"
+        )
+    }
+
     async fn new_simulate(window: Arc<Window>, spec: &SimulateSpec) -> Result<Self> {
         use wgpu::util::DeviceExt;
         use wyn_pipeline_descriptor::Binding;
@@ -848,6 +930,19 @@ impl State {
                         self.frame_count,
                         &mut encoder,
                     ),
+                    AppMode::Pipeline(state) => render_pipeline(
+                        state,
+                        &view,
+                        &self.depth_view,
+                        &self.queue,
+                        &self.config,
+                        self.start_time,
+                        self.frame_count,
+                        self.mouse_pos,
+                        self.mouse_click_pos,
+                        self.mouse_pressed,
+                        &mut encoder,
+                    ),
                 }
 
                 self.queue.submit(Some(encoder.finish()));
@@ -1087,6 +1182,97 @@ fn render_simulate(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn render_pipeline(
+    state: &PipelineState,
+    view: &TextureView,
+    depth_view: &TextureView,
+    queue: &wgpu::Queue,
+    config: &SurfaceConfiguration,
+    start_time: std::time::Instant,
+    frame_count: u32,
+    mouse_pos: [f32; 2],
+    mouse_click_pos: [f32; 2],
+    mouse_pressed: bool,
+    encoder: &mut wgpu::CommandEncoder,
+) {
+    // Update Shadertoy-style uniforms when the graphics pipeline asked
+    // for them. Each is independently optional; the constructor sets
+    // the `Option` based on the descriptor.
+    if let Some(ref buf) = state.resolution_buffer {
+        let u = ResolutionUniform {
+            resolution: [config.width as f32, config.height as f32, 1.0],
+            _pad: 0.0,
+        };
+        queue.write_buffer(buf, 0, bytemuck::cast_slice(&[u]));
+    }
+    if let Some(ref buf) = state.time_buffer {
+        let t = start_time.elapsed().as_secs_f32();
+        queue.write_buffer(buf, 0, bytemuck::cast_slice(&[t]));
+    }
+    if let Some(ref buf) = state.mouse_buffer {
+        let m = [
+            mouse_pos[0],
+            mouse_pos[1],
+            if mouse_pressed { mouse_click_pos[0] } else { 0.0 },
+            if mouse_pressed { mouse_click_pos[1] } else { 0.0 },
+        ];
+        queue.write_buffer(buf, 0, bytemuck::cast_slice(&m));
+    }
+    if let Some(ref buf) = state.frame_buffer {
+        queue.write_buffer(buf, 0, bytemuck::cast_slice(&[frame_count]));
+    }
+
+    // Dispatch each compute stage in descriptor order.
+    for stage in &state.compute_stages {
+        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some(&stage.label),
+            timestamp_writes: None,
+        });
+        cpass.set_pipeline(&stage.pipeline);
+        for (set, bg_opt) in stage.bind_groups_by_set.iter().enumerate() {
+            if let Some(bg) = bg_opt {
+                cpass.set_bind_group(set as u32, bg, &[]);
+            }
+        }
+        if !stage.push_constants.is_empty() {
+            cpass.set_push_constants(0, &stage.push_constants);
+        }
+        let (x, y, z) = stage.workgroups;
+        cpass.dispatch_workgroups(x, y, z);
+    }
+
+    // Render the single graphics pipeline.
+    let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("pipeline.render_pass"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view,
+            resolve_target: None,
+            ops: Operations {
+                load: LoadOp::Clear(Color::BLACK),
+                store: StoreOp::Store,
+            },
+            depth_slice: None,
+        })],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: depth_view,
+            depth_ops: Some(Operations {
+                load: LoadOp::Clear(1.0),
+                store: StoreOp::Store,
+            }),
+            stencil_ops: None,
+        }),
+        ..Default::default()
+    });
+    rpass.set_pipeline(&state.render_pipeline);
+    for (set, bg_opt) in state.render_bind_groups_by_set.iter().enumerate() {
+        if let Some(bg) = bg_opt {
+            rpass.set_bind_group(set as u32, bg, &[]);
+        }
+    }
+    rpass.draw(0..state.vertex_count, 0..1);
+}
+
 pub struct App {
     state: Option<State>,
     spec: AppSpec,
@@ -1099,6 +1285,7 @@ pub struct App {
 enum AppSpec {
     Vf(PipelineSpec),
     Simulate(SimulateSpec),
+    Pipeline(InteractivePipelineSpec),
 }
 
 impl AppSpec {
@@ -1106,6 +1293,7 @@ impl AppSpec {
         match self {
             AppSpec::Vf(s) => s.size,
             AppSpec::Simulate(s) => s.size,
+            AppSpec::Pipeline(s) => s.size,
         }
     }
 }
@@ -1122,6 +1310,13 @@ impl App {
         Self {
             state: None,
             spec: AppSpec::Simulate(spec),
+        }
+    }
+
+    pub fn new_pipeline(spec: InteractivePipelineSpec) -> Self {
+        Self {
+            state: None,
+            spec: AppSpec::Pipeline(spec),
         }
     }
 }
@@ -1144,6 +1339,7 @@ impl ApplicationHandler for App {
         let result = match &self.spec {
             AppSpec::Vf(s) => pollster::block_on(State::new(window, s)),
             AppSpec::Simulate(s) => pollster::block_on(State::new_simulate(window, s)),
+            AppSpec::Pipeline(s) => pollster::block_on(State::new_pipeline(window, s)),
         };
         match result {
             Ok(state) => {

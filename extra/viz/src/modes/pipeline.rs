@@ -9,7 +9,9 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow};
 use wgpu::{CommandEncoderDescriptor, PipelineLayoutDescriptor};
+use winit::event_loop::EventLoop;
 
+use crate::app::{App, InteractivePipelineSpec};
 use crate::gpu::{
     ComputeExecutor, build_bind_group, build_push_constant_bytes, create_binding_buffers,
     create_headless_device, readback_buffer, resolve_dispatch_size,
@@ -20,6 +22,7 @@ use crate::json::{
 };
 use crate::specs::PushConstantSpec;
 use crate::spirv::load_spirv_module;
+use wyn_pipeline_descriptor::ShaderStage;
 
 pub async fn run_pipeline(
     spv_path: PathBuf,
@@ -36,6 +39,20 @@ pub async fn run_pipeline(
 
     if desc.pipelines.is_empty() {
         return Err(anyhow!("Pipeline descriptor has no pipelines"));
+    }
+
+    // Auto-detect interactive vs headless. A descriptor with a
+    // `Graphics` pipeline asks for a window: switch to the interactive
+    // path. Otherwise stick with the original headless compute runner.
+    let has_graphics = desc.pipelines.iter().any(|p| matches!(p, Pipeline::Graphics(_)));
+    if has_graphics {
+        if !inputs.is_empty() || !outputs.is_empty() {
+            eprintln!(
+                "[viz pipeline] --input / --output are ignored in interactive mode \
+                 (descriptor has a graphics pipeline; results render to the window)"
+            );
+        }
+        return run_pipeline_interactive(spv_path, desc, verbose);
     }
 
     let (device, queue) = create_headless_device(verbose).await?;
@@ -70,14 +87,59 @@ pub async fn run_pipeline(
                 .with_context(|| format!("Pipeline {} (multi_compute) failed", pi))?;
             }
             Pipeline::Graphics(_) => {
-                eprintln!(
-                    "Pipeline {} is a graphics pipeline (not yet supported by `run`)",
-                    pi
-                );
+                // Unreachable now (caught above), kept for completeness
+                // if a future descriptor shape allows mixed headless +
+                // graphics dispatches.
             }
         }
     }
 
+    Ok(())
+}
+
+/// Interactive path. Opens a window, runs every compute pipeline in
+/// the descriptor each frame, then renders the one graphics pipeline.
+/// Activated automatically when the descriptor contains a graphics
+/// pipeline (the headless `--input` / `--output` flags are ignored).
+fn run_pipeline_interactive(spv_path: PathBuf, desc: PipelineDescriptor, verbose: bool) -> Result<()> {
+    // Resolve the vertex and fragment entry-point names from the
+    // descriptor. Wyn emits one Graphics pipeline per entry point, so
+    // a vertex-only and a fragment-only pipeline coexist; we collect
+    // their stage names and re-merge here.
+    let stages: Vec<&wyn_pipeline_descriptor::GraphicsStage> = desc
+        .pipelines
+        .iter()
+        .filter_map(|p| if let Pipeline::Graphics(g) = p { Some(g) } else { None })
+        .flat_map(|g| g.stages.iter())
+        .collect();
+    let vertex_entry = stages
+        .iter()
+        .find_map(|s| matches!(s.stage, ShaderStage::Vertex).then(|| s.entry_point.clone()))
+        .ok_or_else(|| anyhow!("descriptor lacks a vertex stage"))?;
+    let fragment_entry = stages
+        .iter()
+        .find_map(|s| matches!(s.stage, ShaderStage::Fragment).then(|| s.entry_point.clone()))
+        .ok_or_else(|| anyhow!("descriptor lacks a fragment stage"))?;
+
+    let spec = InteractivePipelineSpec {
+        shader_path: spv_path,
+        descriptor: desc,
+        vertex_entry,
+        fragment_entry,
+        max_frames: None,
+        verbose,
+        validate: false,
+        present_mode: wgpu::PresentMode::Fifo,
+        size: None,
+        // v1: assume a full-screen triangle vertex shader (the
+        // playground shape). A `--vertex-count` flag follows when a
+        // shader needs something different.
+        vertex_count: 3,
+    };
+
+    let event_loop = EventLoop::new().context("failed to create event loop")?;
+    let mut app = App::new_pipeline(spec);
+    event_loop.run_app(&mut app).map_err(|e| anyhow!(e)).context("winit event loop errored")?;
     Ok(())
 }
 
