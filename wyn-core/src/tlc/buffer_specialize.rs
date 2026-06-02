@@ -1034,10 +1034,27 @@ impl BufferSpecializer {
 
             // Leaves
             TermKind::Var(VarRef::Symbol(_)) => {
-                // If this var refers to a view param that was replaced,
-                // this is a bare reference (not in _w_index or _w_intrinsic_length).
-                // This shouldn't happen in well-formed code since view arrays
-                // are only used via index/length, but return it as-is.
+                // Reachable for two distinct shapes:
+                //   1. `Var(view_param)` as a user-function call argument.
+                //      The App arm above already computed `inner_buffer_args`
+                //      from the *original* args and routes through
+                //      `specialize_call`, which discards the rewritten arg for
+                //      view-typed positions and inserts `(0, storage_len)`
+                //      instead. Our clone here is throwaway in that path.
+                //   2. `Var(sym)` where `sym` isn't a view param at all — a
+                //      scalar / non-view local — passing through unchanged.
+                //
+                // The case the rewriter does NOT cover: a `let alias = expr in
+                // …` where `expr` is view-typed but isn't recognized by
+                // `try_resolve_view_expr` (which only handles bare
+                // `Var(view_param)`, slice intrinsics, and a few App shapes).
+                // For e.g. `let alias = (if cond then board else board) in
+                // length(alias)`, the Let arm fails to extend `view_params`
+                // with `alias`, so downstream `length(alias)` / `alias[i]`
+                // sees a bare view-typed Var that never gets resolved.
+                // No production source exercises that today; see the parked
+                // `bare_var_view_alias_via_if_not_resolved` test in
+                // `buffer_specialize_tests.rs`.
                 term.clone()
             }
             TermKind::Var(VarRef::Builtin { .. })
@@ -1529,3 +1546,7 @@ fn wrap_in_lambdas(body: Term, params: &[(SymbolId, Type<TypeName>)], term_ids: 
         }),
     }
 }
+
+#[cfg(test)]
+#[path = "buffer_specialize_tests.rs"]
+mod buffer_specialize_tests;
