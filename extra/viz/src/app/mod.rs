@@ -679,8 +679,14 @@ impl State {
             for set in 0..=max_set {
                 let any_in_set = cp.bindings.iter().any(|b| binding_set(b) == Some(set));
                 if !any_in_set {
-                    bgls.push(empty_bind_group_layout(&device, &format!("compute_empty_set{set}")));
-                    bgs.push(None);
+                    let layout = empty_bind_group_layout(&device, &format!("compute_empty_set{set}"));
+                    let empty_bg = device.create_bind_group(&BindGroupDescriptor {
+                        label: Some(&format!("compute_empty_bg_set{set}")),
+                        layout: &layout,
+                        entries: &[],
+                    });
+                    bgls.push(layout);
+                    bgs.push(Some(empty_bg));
                     continue;
                 }
                 let (layout, bg) = gpu::build_resource_bind_group_for_set(
@@ -769,8 +775,14 @@ impl State {
         for set in 0..=g_max_set {
             let any_in_set = graphics_bindings.iter().any(|b| binding_set(b) == Some(set));
             if !any_in_set {
-                g_bgls.push(empty_bind_group_layout(&device, &format!("graphics_empty_set{set}")));
-                g_bgs.push(None);
+                let layout = empty_bind_group_layout(&device, &format!("graphics_empty_set{set}"));
+                let empty_bg = device.create_bind_group(&BindGroupDescriptor {
+                    label: Some(&format!("graphics_empty_bg_set{set}")),
+                    layout: &layout,
+                    entries: &[],
+                });
+                g_bgls.push(layout);
+                g_bgs.push(Some(empty_bg));
                 continue;
             }
             let (layout, bg) = gpu::build_resource_bind_group_for_set(
