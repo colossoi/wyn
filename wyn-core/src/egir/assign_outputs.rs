@@ -76,6 +76,7 @@ fn assign_entry_outputs(entry: &mut EgirEntry) -> Result<(), ConvertError> {
         graph,
         outputs,
         execution_model,
+        aliases,
         ..
     } = entry;
 
@@ -102,7 +103,7 @@ fn assign_entry_outputs(entry: &mut EgirEntry) -> Result<(), ConvertError> {
 
     let mut next_effect = graph_ops::next_effect_token(graph);
     for slot in slots {
-        lower_slot(graph, return_block, &mut next_effect, &slot)?;
+        lower_slot(graph, aliases, return_block, &mut next_effect, result, &slot)?;
     }
 
     // The body is now unit-producing.
@@ -168,10 +169,16 @@ fn output_sources(graph: &mut EGraph, result: NodeId, outputs: &[EntryOutput]) -
         .collect()
 }
 
+// `entry_result` is the entry's returned-value NodeId. It's threaded so the
+// multi-consumer scan can exclude that result node from "real" value-flow
+// consumers — `output_sources` already decomposes the result tuple /
+// projection chain when populating slot sources.
 fn lower_slot(
     graph: &mut EGraph,
+    aliases: &mut std::collections::HashMap<NodeId, NodeId>,
     block: BlockId,
     next_effect: &mut u32,
+    entry_result: NodeId,
     slot: &Slot,
 ) -> Result<(), ConvertError> {
     let binding = match slot.dest {
@@ -193,7 +200,22 @@ fn lower_slot(
     // Retargetable Map/Scan(Fresh): stream the SOAC into the output view.
     if result_soac_is_map_or_scan(graph, slot.source) {
         let elem_ty = slot.ty.elem_type().cloned().expect("Map/Scan slot output is always an array");
-        let view = graph_ops::intern_storage_view(graph, binding, elem_ty, None);
+        let view = graph_ops::intern_storage_view(graph, binding, elem_ty.clone(), None);
+
+        // Slot 0's binding becomes the shared buffer (both backends declare
+        // output bindings as read-write — SPIR-V skips `NonWritable` on
+        // outputs, WGSL emits `read_write` for `var<storage>`). Any other
+        // consumer of the SOAC's result reads via the same view.
+        rewrite_other_index_consumers_to_loads(
+            graph,
+            aliases,
+            block,
+            next_effect,
+            entry_result,
+            slot,
+            view,
+            elem_ty,
+        )?;
         rewrite_map_scan_to_into(graph, slot.source, view);
         return Ok(());
     }
@@ -241,6 +263,102 @@ fn lower_slot(
         next_effect,
         None,
     );
+    Ok(())
+}
+
+// ----------------------------------------------------------------------------
+// Multi-consumer SOAC: rewrite sibling Index reads to storage loads
+// ----------------------------------------------------------------------------
+
+/// When retargeting a `Map`/`Scan(Fresh)` SOAC to write directly into
+/// `slot`'s output view, any *other* reader of the SOAC's result NodeId
+/// would still demand the (now-vanished) in-register Composite array.
+/// For each such consumer of `slot.source`:
+///
+/// - `Pure { Index, [slot.source, idx] }` → synthesise a `ViewIndex + Load`
+///   against the slot's output view (both backends expose output bindings
+///   read-write) and alias the Index NodeId to the load's result. The
+///   alias is consulted at extraction time (`elaborate::run` merges
+///   `EgirEntry.aliases` into the extraction `best` map), so every
+///   downstream `demand` transparently redirects.
+/// - Any other Pure-node consumer shape (`Project`, `Tuple`, `ArrayLit`,
+///   `Call`, …) → clean `ConvertError::Unsupported`. v1 cap; extend
+///   arm-by-arm as needed.
+/// - Side-effect operand reference (other than the SOAC's own `result`)
+///   → clean `ConvertError::Unsupported`. Same v1 cap.
+fn rewrite_other_index_consumers_to_loads(
+    graph: &mut EGraph,
+    aliases: &mut std::collections::HashMap<NodeId, NodeId>,
+    block: BlockId,
+    next_effect: &mut u32,
+    entry_result: NodeId,
+    slot: &Slot,
+    view: NodeId,
+    elem_ty: Type<TypeName>,
+) -> Result<(), ConvertError> {
+    let source = slot.source;
+
+    // Reject side-effect operand uses (other than the SOAC's own result).
+    for (_bid, blk) in &graph.skeleton.blocks {
+        for se in &blk.side_effects {
+            if se.result == Some(source) {
+                continue;
+            }
+            if se.operand_nodes.contains(&source) {
+                return Err(ConvertError::Unsupported(format!(
+                    "compute output #{}: SOAC result is also used as a \
+                     side-effect operand; v1 supports only sibling Index reads \
+                     of the same SOAC result alongside output retargeting",
+                    slot.index
+                )));
+            }
+        }
+    }
+
+    // Collect every Pure node whose operands include `source`. Skip the
+    // entry's return-value NodeId itself — `output_sources` already
+    // decomposes the result tuple/projection chain, so its uses of `source`
+    // don't represent real value-flow consumers.
+    let consumers: Vec<NodeId> = graph
+        .nodes
+        .iter()
+        .filter_map(|(nid, node)| match node {
+            ENode::Pure { operands, .. } if nid != entry_result && operands.contains(&source) => Some(nid),
+            _ => None,
+        })
+        .collect();
+
+    // Classify and rewrite each consumer.
+    for cid in consumers {
+        let (op, operands) = match &graph.nodes[cid] {
+            ENode::Pure { op, operands } => (op.clone(), operands.clone()),
+            _ => unreachable!("filtered to Pure above"),
+        };
+        match op {
+            PureOp::Index if operands.len() == 2 && operands[0] == source => {
+                let idx_nid = operands[1];
+                let load_result = graph_ops::emit_view_load(
+                    graph,
+                    block,
+                    view,
+                    idx_nid,
+                    elem_ty.clone(),
+                    next_effect,
+                    None,
+                );
+                aliases.insert(cid, load_result);
+            }
+            other_op => {
+                return Err(ConvertError::Unsupported(format!(
+                    "compute output #{}: SOAC result flows into an unsupported \
+                     consumer shape (PureOp::{:?}); v1 supports only Index{{result, *}} \
+                     consumers alongside output retargeting",
+                    slot.index, other_op
+                )));
+            }
+        }
+    }
+
     Ok(())
 }
 

@@ -59,7 +59,8 @@ fn lower_slot_rejects_unsized_array_without_soac() {
         dest: Dest::StorageView(crate::BindingRef::new(0, 1)),
     };
 
-    let err = lower_slot(&mut graph, block, &mut next_effect, &slot)
+    let mut aliases = std::collections::HashMap::new();
+    let err = lower_slot(&mut graph, &mut aliases, block, &mut next_effect, source, &slot)
         .expect_err("runtime-sized array without a producing SOAC must be rejected");
     match err {
         ConvertError::Unsupported(msg) => {

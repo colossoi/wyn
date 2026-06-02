@@ -2819,6 +2819,89 @@ entry gen(bh: []vec4f32, #[uniform(set=1,binding=0)] nb: i32) [1]i32 =
     .expect("fused-scan-of-helper-mapping with indexed scan read should compile");
 }
 
+/// Bisected min-repro: a multi-output entry returns a scan result AS one
+/// output and also reads that scan by a (constant) index for a second
+/// output. Previously panicked at `spirv/mod.rs:375` ("Composite variant
+/// unsized arrays not supported") because `assign_outputs` retargeted the
+/// scan to `OutputView` for slot 0 but slot 1's `[offsets[0]]` still
+/// demanded the (now-vanished) in-register Composite. Fixed in
+/// `assign_outputs::rewrite_other_index_consumers_to_loads`: detect the
+/// sibling Index consumer, synthesise a `ViewIndex + Load` against slot
+/// 0's output view (both backends declare output bindings as read-write),
+/// alias the Index NodeId to the load result. Slot 0's binding doubles as
+/// the shared buffer.
+#[test]
+fn multi_output_returns_scan_and_reads_it_by_index() {
+    compile_to_spirv(
+        "\
+#[compute]
+entry gen(xs: []i32) ([]i32, [1]i32) =
+  let offsets = scan(|a: i32, b: i32| a + b, 0, xs) in
+  (offsets, [offsets[0]])
+",
+    )
+    .expect("multi-output (scan + indexed read of same scan) should compile");
+}
+
+/// Dynamic-index variant of the above — slot 1 reads `offsets[k]` where
+/// `k` is a uniform, exercising the path where the rewrite passes the
+/// dynamic index NodeId straight through `emit_view_load`.
+#[test]
+fn multi_output_returns_scan_and_reads_it_by_dynamic_index() {
+    compile_to_spirv(
+        "\
+#[compute]
+entry gen(xs: []i32, #[uniform(set=1,binding=0)] k: i32) ([]i32, [1]i32) =
+  let offsets = scan(|a: i32, b: i32| a + b, 0, xs) in
+  (offsets, [offsets[k]])
+",
+    )
+    .expect("multi-output with dynamic-index sibling read of same scan should compile");
+}
+
+/// Map producer variant — slot 0 retargets a Map (not a Scan); slot 1
+/// reads it by index. Same mechanism, different SOAC kind.
+#[test]
+fn multi_output_returns_map_and_reads_it_by_index() {
+    compile_to_spirv(
+        "\
+#[compute]
+entry gen(xs: []i32) ([]i32, [1]i32) =
+  let doubled = map(|x: i32| x * 2, xs) in
+  (doubled, [doubled[0]])
+",
+    )
+    .expect("multi-output (map + indexed read of same map) should compile");
+}
+
+/// Returning the same scan in two output slots — `(offsets, offsets)` —
+/// can't be served by retargeting the scan twice. Slot 0 retargets to
+/// its view; slot 1, also a runtime-sized array, can't retarget the
+/// (already-retargeted) SOAC, so it falls through to the existing
+/// "runtime-sized array not produced by a retargetable map/scan"
+/// `ConvertError::Unsupported`. Pinned here to confirm we surface a
+/// clean diagnostic rather than panicking.
+#[test]
+fn multi_output_returns_scan_in_two_slots_is_rejected() {
+    let result = crate::compile_thru_spirv(
+        "\
+#[compute]
+entry gen(xs: []i32) ([]i32, []i32) =
+  let offsets = scan(|a: i32, b: i32| a + b, 0, xs) in
+  (offsets, offsets)
+",
+    );
+    let err = match result {
+        Ok(_) => panic!("expected returning the same scan in two output slots to fail"),
+        Err(e) => e,
+    };
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("runtime-sized array"),
+        "expected runtime-sized-array diagnostic, got: {msg}"
+    );
+}
+
 /// A `scan` producer gathers the same way a `map` does: it's lifted into its
 /// own pre-pass (here a multi-stage parallel scan) writing the gather buffer,
 /// which the consumer reads via `storage_index`. The forced-output binding is
