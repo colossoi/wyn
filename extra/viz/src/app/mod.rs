@@ -623,7 +623,14 @@ impl State {
             } else {
                 InstanceFlags::empty()
             },
-            desired_features: wgpu::Features::SPIRV_SHADER_PASSTHROUGH | wgpu::Features::PUSH_CONSTANTS,
+            // FLOAT32_FILTERABLE lets us linear-sample rgba32float
+            // storage textures, which feedback-shaders (e.g. mountains
+            // painting the heightmap) need so per-frame brush
+            // increments at the edges of the brush don't round to
+            // zero under f16 precision.
+            desired_features: wgpu::Features::SPIRV_SHADER_PASSTHROUGH
+                | wgpu::Features::PUSH_CONSTANTS
+                | wgpu::Features::FLOAT32_FILTERABLE,
             limits_overlay: Some(Box::new(|limits, _adapter| {
                 limits.max_push_constant_size = 128;
             })),

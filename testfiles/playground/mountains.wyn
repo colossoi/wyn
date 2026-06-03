@@ -5,11 +5,11 @@
 -- (c) 2025 Rune Skovbo Johansen under MPL-2.0.
 --
 -- Resource layout:
---   set 0, binding 0:  bufferA  (rgba16float storage / sampled — ping-pong write target)
+--   set 0, binding 0:  bufferA  (rgba32float storage / sampled — ping-pong write target)
 --   set 0, binding 10: bufferA previous-frame view (the same logical
 --                      resource — wired host-side via `--feedback`)
---   set 0, binding 1:  bufferB  (rgba16float storage / sampled)
---   set 0, binding 2:  bufferC  (rgba16float storage / sampled)
+--   set 0, binding 1:  bufferB  (rgba32float storage / sampled)
+--   set 0, binding 2:  bufferC  (rgba32float storage / sampled)
 --   set 0, binding 3:  linear sampler
 --   set 1, binding 0:  iResolution
 --   set 1, binding 1:  iTime
@@ -28,9 +28,6 @@ open f32
 ------------------------------------------------------------
 -- Constants
 ------------------------------------------------------------
-
-def PI: f32 = 3.14159265358979
-def DEG_TO_RAD: f32 = PI / 180.0
 
 def DEFAULT_HEIGHT: f32 = 0.45
 def BRUSH_SIZE: f32 = 0.2
@@ -142,8 +139,6 @@ def noised(p: vec2f32) vec3f32 =
 
   let value = va + u.x * (vb - va) + u.y * (vc - va) + u.x * u.y * (va - vb - vc + vd) in
 
-  -- Derivative: ga + u.x * (gb - ga) + u.y * (gc - ga) + u.x*u.y * (ga - gb - gc + gd)
-  --           + du * (u.yx * (va - vb - vc + vd) + vec2(vb, vc) - va)
   let g_lin = ga + @[u.x, u.x] * (gb - ga) + @[u.y, u.y] * (gc - ga)
               + @[u.x * u.y, u.x * u.y] * (ga - gb - gc + gd) in
   let uyx = @[u.y, u.x] in
@@ -184,7 +179,7 @@ def boxIntersection(ro: vec3f32, rd: vec3f32, boxSize: vec3f32) (vec2f32, vec3f3
 
 def CameraRay(fov: f32, size: vec2f32, pos: vec2f32) vec3f32 =
   let xy = pos - size * @[0.5, 0.5] in
-  let cot_half_fov = tan((90.0 - fov * 0.5) * DEG_TO_RAD) in
+  let cot_half_fov = tan(radians(90.0 - fov * 0.5)) in
   let z = size.y * 0.5 * cot_half_fov in
   normalize(@[xy.x, xy.y, 0.0 - z])
 
@@ -202,8 +197,8 @@ def CameraRotation(angle: vec2f32) mat3f32 =
 
 -- Returns (ro, rd).
 def GetRay(iTime: f32, iResolution: vec3f32, fragCoord: vec2f32) (vec3f32, vec3f32) =
-  let iRevolution = iTime * 2.0 * PI in
-  let cameraAngle = @[iRevolution * TIME_CAM_SPIN + CAMERA_ANGLE * 2.0 * PI,
+  let iRevolution = iTime * 2.0 * pi in
+  let cameraAngle = @[iRevolution * TIME_CAM_SPIN + CAMERA_ANGLE * 2.0 * pi,
                       CAMERA_ELEVATION] in
   let rot = CameraRotation(@[cameraAngle.y, cameraAngle.x]) in
   let rd0 = CameraRay(CAMERA_FOV, @[iResolution.x, iResolution.y], fragCoord) in
@@ -213,9 +208,9 @@ def GetRay(iTime: f32, iResolution: vec3f32, fragCoord: vec2f32) (vec3f32, vec3f
 
 def SkyColor(rd: vec3f32, sun: vec3f32) vec3f32 =
   let costh = dot(rd, sun) in
-  AMBIENT_COLOR * @[PI * (1.0 - abs(costh) * 0.8),
-                    PI * (1.0 - abs(costh) * 0.8),
-                    PI * (1.0 - abs(costh) * 0.8)]
+  AMBIENT_COLOR * @[pi * (1.0 - abs(costh) * 0.8),
+                    pi * (1.0 - abs(costh) * 0.8),
+                    pi * (1.0 - abs(costh) * 0.8)]
 
 def Tonemap_ACES(x: vec3f32) vec3f32 =
   let a = 2.51 in
@@ -238,7 +233,7 @@ def D_GGX(linearRoughness: f32, NoH: f32) f32 =
   let oneMinusNoHSquared = 1.0 - NoH * NoH in
   let a = NoH * linearRoughness in
   let k = linearRoughness / (oneMinusNoHSquared + a * a) in
-  k * k * (1.0 / PI)
+  k * k * (1.0 / pi)
 
 def V_SmithGGXCorrelated(linearRoughness: f32, NoV: f32, NoL: f32) f32 =
   let a2 = linearRoughness * linearRoughness in
@@ -257,9 +252,9 @@ def Fd_Burley(linearRoughness: f32, NoV: f32, NoL: f32, LoH: f32) f32 =
   let f90 = 0.5 + 2.0 * linearRoughness * LoH * LoH in
   let lightScatter = F_Schlick_s(1.0, f90, NoL) in
   let viewScatter  = F_Schlick_s(1.0, f90, NoV) in
-  lightScatter * viewScatter * (1.0 / PI)
+  lightScatter * viewScatter * (1.0 / pi)
 
-def Fd_Lambert: f32 = 1.0 / PI
+def Fd_Lambert: f32 = 1.0 / pi
 
 def Shade(diffuse: vec3f32, f0: vec3f32, smoothness: f32,
           n: vec3f32, v: vec3f32, l: vec3f32, lc: vec3f32) vec3f32 =
@@ -284,13 +279,13 @@ def Shade(diffuse: vec3f32, f0: vec3f32, smoothness: f32,
 ------------------------------------------------------------
 
 def PhaseRayleigh(costh: f32) f32 =
-  3.0 * (1.0 + costh * costh) / (16.0 * PI)
+  3.0 * (1.0 + costh * costh) / (16.0 * pi)
 
 def PhaseMie(costh: f32, g_in: f32) f32 =
   let g = min(g_in, 0.9381) in
   let k = 1.55 * g - 0.55 * g * g * g in
   let kcosth = k * costh in
-  (1.0 - k * k) / ((4.0 * PI) * (1.0 - kcosth) * (1.0 - kcosth))
+  (1.0 - k * k) / ((4.0 * pi) * (1.0 - kcosth) * (1.0 - kcosth))
 
 ------------------------------------------------------------
 -- Brush helper (Buffer A)
@@ -316,9 +311,9 @@ def GetBrushDelta(mapPos: vec2f32, cursorPos: vec2f32, brushSize: f32) vec3f32 =
 def PhacelleNoise(p: vec2f32, normDir: vec2f32, freq: f32,
                   offset_in: f32, normalization: f32) vec4f32 =
   -- Orthogonal to normDir, scaled by freq * TAU
-  let sideDir = @[(0.0 - normDir.y) * freq * 2.0 * PI,
-                  normDir.x * freq * 2.0 * PI] in
-  let offset = offset_in * 2.0 * PI in
+  let sideDir = @[(0.0 - normDir.y) * freq * 2.0 * pi,
+                  normDir.x * freq * 2.0 * pi] in
+  let offset = offset_in * 2.0 * pi in
 
   let pInt = vec.floor(p) in
   let pFrac = vec.fract(p) in
@@ -517,7 +512,7 @@ def mouse_world_pos(ro: vec3f32, mrd: vec3f32, planeHeight: f32) vec3f32 =
   ro + mrd * @[t, t, t]
 
 #[compute]
-entry buffer_a(#[storage_image(set=0, binding=0, format=rgba16float, access=write_only)] out_a: storage_image,
+entry buffer_a(#[storage_image(set=0, binding=0, format=rgba32float, access=write_only)] out_a: storage_image,
                #[texture(set=0, binding=10)] prev_a: texture2d,
                #[sampler(set=0, binding=3)] samp: sampler,
                #[texture(set=2, binding=0)] keyboard: texture2d,
@@ -580,7 +575,7 @@ entry buffer_a(#[storage_image(set=0, binding=0, format=rgba16float, access=writ
 ------------------------------------------------------------
 
 #[compute]
-entry buffer_b(#[storage_image(set=0, binding=1, format=rgba16float, access=write_only)] out_b: storage_image,
+entry buffer_b(#[storage_image(set=0, binding=1, format=rgba32float, access=write_only)] out_b: storage_image,
                #[texture(set=0, binding=0)] tex_a: texture2d,
                #[sampler(set=0, binding=3)] samp: sampler,
                #[builtin(global_invocation_id)] gid: vec3u32,
@@ -599,7 +594,7 @@ entry buffer_b(#[storage_image(set=0, binding=1, format=rgba16float, access=writ
 ------------------------------------------------------------
 
 #[compute]
-entry buffer_c(#[storage_image(set=0, binding=2, format=rgba16float, access=write_only)] out_c: storage_image,
+entry buffer_c(#[storage_image(set=0, binding=2, format=rgba32float, access=write_only)] out_c: storage_image,
                #[builtin(global_invocation_id)] gid: vec3u32,
                #[uniform(set=1, binding=0)] iResolution: vec3f32) () =
   let xy_i = @[i32.u32(gid.x), i32.u32(gid.y)] in
@@ -875,7 +870,7 @@ entry fragment_main(#[builtin(position)] pos_in: vec4f32,
       let direct = Shade(diffuseColor, f0, smoothness, normal_base, neg_rd, sun,
                          SUN_COLOR * v3(shadow)) in
       let bounce_dot = dot(normal_base, sun * @[1.0, 0.0 - 1.0, 1.0]) * 0.5 + 0.5 in
-      let bounce = diffuseColor * SUN_COLOR * v3(bounce_dot * Fd_Lambert / PI) in
+      let bounce = diffuseColor * SUN_COLOR * v3(bounce_dot * Fd_Lambert / pi) in
 
       -- Reflection: trace a secondary ray, fall back to sky.
       let (_, _, _, r_t) = march(pos, r, tex_b, samp) in
