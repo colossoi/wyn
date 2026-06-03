@@ -204,9 +204,12 @@ enum Command {
     Pipeline {
         /// Path to the SPIR-V module
         path: PathBuf,
-        /// Path to the pipeline descriptor JSON
+        /// Path to the pipeline descriptor JSON. Defaults to
+        /// `<spv-path>.json` (the file `wyn compile` writes next to
+        /// its output by default), so this only needs to be supplied
+        /// when the descriptor lives somewhere else.
         #[arg(long, short)]
-        pipeline: PathBuf,
+        pipeline: Option<PathBuf>,
         /// Input data: name:file.json (repeatable)
         #[arg(long = "input", value_name = "NAME:FILE")]
         inputs: Vec<String>,
@@ -254,6 +257,42 @@ enum Command {
         ///   "buffer_a:prev_a=out_a"
         #[arg(long = "feedback", value_name = "ENTRY:READ=WRITE", verbatim_doc_comment)]
         feedback: Vec<String>,
+        /// Directory of per-binding files. For each `storage_buffer`
+        /// declared in the descriptor (other than recognized
+        /// host-uploaded names like `keyboard`), and for each
+        /// `vertex_inputs[i]` declared on a graphics pipeline, viz
+        /// loads `<dir>/<name>.bin` — a flat little-endian byte file —
+        /// and binds it as a storage buffer or a vertex buffer.
+        #[arg(long)]
+        storage_dir: Option<PathBuf>,
+        /// Flat little-endian u32 index buffer file. When present, viz
+        /// sets it via `set_index_buffer` and dispatches `draw_indexed`
+        /// with `file_size / 4` indices (`--vertex-count` is ignored).
+        /// Without this, viz does a non-indexed `draw(0..vertex_count)`.
+        #[arg(long)]
+        index_buffer: Option<PathBuf>,
+        /// Present mode: fifo (vsync), mailbox (triple-buffer), immediate (no sync)
+        #[arg(long, value_enum, default_value = "fifo")]
+        present_mode: PresentModeArg,
+        /// Disable GPU validation layers (validation is ON by default)
+        #[arg(long)]
+        no_validate: bool,
+        /// Window size as WxH (e.g. --size 256x256)
+        #[arg(long, value_parser = parse_size)]
+        size: Option<(u32, u32)>,
+        /// Maximum number of frames to render before exiting (for debugging)
+        #[arg(long)]
+        max_frames: Option<u32>,
+        /// Vertex count for the draw call. Default 3 matches a
+        /// fullscreen-triangle vertex shader; bump to the number of
+        /// invocations a `vertex_index`-driven vertex shader expects.
+        /// Ignored when `--index-buffer` is supplied (the index file's
+        /// length drives `draw_indexed` instead).
+        #[arg(long, default_value = "3")]
+        vertex_count: u32,
+        /// Primitive topology for the draw call.
+        #[arg(long, value_enum, default_value = "triangle-list")]
+        topology: TopologyArg,
         /// Print verbose output
         #[arg(short, long)]
         verbose: bool,
@@ -411,6 +450,14 @@ fn main() -> Result<()> {
             push_constants,
             dispatch,
             feedback,
+            storage_dir,
+            index_buffer,
+            present_mode,
+            no_validate,
+            size,
+            max_frames,
+            vertex_count,
+            topology,
             verbose,
         } => {
             let parse_pairs = |pairs: &[String]| -> Result<HashMap<String, PathBuf>> {
@@ -471,14 +518,25 @@ fn main() -> Result<()> {
                 })
                 .collect::<Result<Vec<_>>>()?;
 
+            let pipeline_path = pipeline.unwrap_or_else(|| path.with_extension("json"));
             pollster::block_on(modes::pipeline::run_pipeline(
                 path,
-                pipeline,
+                pipeline_path,
                 input_map,
                 output_map,
                 &push_constants,
                 &dispatch_overrides,
                 &feedback_specs,
+                modes::pipeline::InteractiveOpts {
+                    storage_dir,
+                    index_buffer,
+                    present_mode: present_mode.into(),
+                    validate: !no_validate,
+                    size,
+                    max_frames,
+                    vertex_count,
+                    topology: topology.into(),
+                },
                 verbose,
             ))?;
         }

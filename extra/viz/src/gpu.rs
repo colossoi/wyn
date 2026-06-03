@@ -1035,6 +1035,10 @@ pub enum HostBufferKind {
     /// 768 u32 entries, `row * 256 + keycode`, row 0 = currently-down,
     /// row 1 = pressed-this-frame, row 2 = toggled.
     Keyboard,
+    /// Loaded once at startup from `<storage_dir>/<binding_name>.bin`.
+    /// The host doesn't rewrite the contents per frame — the shader
+    /// reads whatever the file contained.
+    FileLoaded,
 }
 
 /// Walk every pipeline's bindings; allocate a `wgpu::Buffer` for each
@@ -1044,8 +1048,10 @@ pub enum HostBufferKind {
 /// (e.g. the keyboard state, which is a keycode → state table).
 pub fn create_host_buffers(
     device: &wgpu::Device,
+    queue: &wgpu::Queue,
     descriptor: &PipelineDescriptor,
-) -> HashMap<(u32, u32), HostBufferResource> {
+    storage_dir: Option<&std::path::Path>,
+) -> Result<HashMap<(u32, u32), HostBufferResource>> {
     let mut out: HashMap<(u32, u32), HostBufferResource> = HashMap::new();
     for pipeline in &descriptor.pipelines {
         let bindings: &[Binding] = match pipeline {
@@ -1062,31 +1068,53 @@ pub fn create_host_buffers(
                 continue;
             }
             let lower = name.to_ascii_lowercase();
-            let kind = if lower == "keyboard" || lower == "ikeyboard" {
-                HostBufferKind::Keyboard
-            } else {
+            if lower == "keyboard" || lower == "ikeyboard" {
+                let byte_size = 768u64 * 4; // 768 u32 entries
+                let buffer = device.create_buffer(&BufferDescriptor {
+                    label: Some(&format!("host_buffer_{name}")),
+                    size: byte_size,
+                    usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                out.insert(
+                    key,
+                    HostBufferResource {
+                        buffer,
+                        byte_size,
+                        kind: HostBufferKind::Keyboard,
+                    },
+                );
+                continue;
+            }
+
+            // No host pattern recognized; try `<storage_dir>/<name>.bin`
+            // if the caller supplied a storage dir.
+            let Some(dir) = storage_dir else {
                 continue;
             };
-            let byte_size = match kind {
-                HostBufferKind::Keyboard => 768u64 * 4, // 768 u32 entries
+            let path = dir.join(format!("{name}.bin"));
+            let Ok(data) = std::fs::read(&path) else {
+                continue;
             };
+            let byte_size = data.len() as u64;
             let buffer = device.create_buffer(&BufferDescriptor {
                 label: Some(&format!("host_buffer_{name}")),
                 size: byte_size,
                 usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
+            queue.write_buffer(&buffer, 0, &data);
             out.insert(
                 key,
                 HostBufferResource {
                     buffer,
                     byte_size,
-                    kind,
+                    kind: HostBufferKind::FileLoaded,
                 },
             );
         }
     }
-    out
+    Ok(out)
 }
 
 /// Allocate one `wgpu::Sampler` per unique `(set, binding)` slot

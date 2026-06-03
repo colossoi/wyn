@@ -63,7 +63,6 @@ pub fn run_test_pattern(max_frames: Option<u32>, verbose: bool) -> Result<()> {
         verbose,
         validate: true,
         present_mode: PresentMode::Fifo,
-        difficulty: 0,
         size: None,
         vertex_count: 3,
         topology: wgpu::PrimitiveTopology::TriangleList,

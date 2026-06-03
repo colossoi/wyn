@@ -24,6 +24,20 @@ use crate::specs::PushConstantSpec;
 use crate::spirv::load_spirv_module;
 use wyn_pipeline_descriptor::ShaderStage;
 
+/// Knobs that only mean anything on the interactive path. Bundled so
+/// `run_pipeline`'s signature doesn't grow N positional args every
+/// time the interactive mode learns another flag.
+pub struct InteractiveOpts {
+    pub storage_dir: Option<PathBuf>,
+    pub index_buffer: Option<PathBuf>,
+    pub present_mode: wgpu::PresentMode,
+    pub validate: bool,
+    pub size: Option<(u32, u32)>,
+    pub max_frames: Option<u32>,
+    pub vertex_count: u32,
+    pub topology: wgpu::PrimitiveTopology,
+}
+
 pub async fn run_pipeline(
     spv_path: PathBuf,
     pipeline_path: PathBuf,
@@ -32,6 +46,7 @@ pub async fn run_pipeline(
     push_constants: &[PushConstantSpec],
     dispatch_overrides: &HashMap<String, (u32, u32, u32)>,
     feedback_specs: &[(String, String, String)],
+    interactive_opts: InteractiveOpts,
     verbose: bool,
 ) -> Result<()> {
     let desc_json = fs::read_to_string(&pipeline_path)
@@ -59,6 +74,7 @@ pub async fn run_pipeline(
             desc,
             dispatch_overrides.clone(),
             feedback_specs.to_vec(),
+            interactive_opts,
             verbose,
         );
     }
@@ -120,6 +136,7 @@ fn run_pipeline_interactive(
     desc: PipelineDescriptor,
     dispatch_overrides: HashMap<String, (u32, u32, u32)>,
     feedback_specs: Vec<(String, String, String)>,
+    opts: InteractiveOpts,
     verbose: bool,
 ) -> Result<()> {
     // Resolve the vertex and fragment entry-point names from the
@@ -148,15 +165,15 @@ fn run_pipeline_interactive(
         fragment_entry,
         dispatch_overrides,
         feedback_specs,
-        max_frames: None,
+        max_frames: opts.max_frames,
         verbose,
-        validate: false,
-        present_mode: wgpu::PresentMode::Fifo,
-        size: None,
-        // v1: assume a full-screen triangle vertex shader (the
-        // playground shape). A `--vertex-count` flag follows when a
-        // shader needs something different.
-        vertex_count: 3,
+        validate: opts.validate,
+        present_mode: opts.present_mode,
+        size: opts.size,
+        vertex_count: opts.vertex_count,
+        topology: opts.topology,
+        storage_dir: opts.storage_dir,
+        index_buffer: opts.index_buffer,
     };
 
     let event_loop = EventLoop::new().context("failed to create event loop")?;

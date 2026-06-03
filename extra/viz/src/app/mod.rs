@@ -136,6 +136,19 @@ pub struct InteractivePipelineSpec {
     pub present_mode: PresentMode,
     pub size: Option<(u32, u32)>,
     pub vertex_count: u32,
+    /// Primitive topology for the graphics pipeline.
+    pub topology: wgpu::PrimitiveTopology,
+    /// Directory of per-binding `.bin` files. The host loads each
+    /// `vertex_inputs[i]` declared on the graphics pipeline into a
+    /// vertex buffer, and each `storage_buffer` binding (other than
+    /// recognized host-uploaded names like `keyboard`) into a storage
+    /// buffer, by reading `<storage_dir>/<binding_name>.bin`.
+    pub storage_dir: Option<PathBuf>,
+    /// Flat little-endian `u32` index buffer file. When present, the
+    /// host binds it and dispatches `draw_indexed` with
+    /// `file_size / 4` indices in place of the non-indexed
+    /// `draw(0..vertex_count)`.
+    pub index_buffer: Option<PathBuf>,
 }
 
 /// Where the WGSL/SPIR-V module comes from.
@@ -225,6 +238,11 @@ struct PipelineState {
     /// parity convention.
     render_bind_groups_by_set: [Vec<Option<BindGroup>>; 2],
     vertex_count: u32,
+    /// One vertex buffer per declared `#[location(n)]` attribute, in
+    /// shader_location order. Empty for full-screen-triangle shaders.
+    vertex_buffers: Vec<wgpu::Buffer>,
+    /// Optional `(buffer, index_count)` for indexed draws.
+    index_buffer: Option<(wgpu::Buffer, u32)>,
     // Shadertoy-style uniform buffers, populated per frame when the
     // graphics pipeline declares the matching uniform binding.
     resolution_buffer: Option<wgpu::Buffer>,
@@ -735,7 +753,49 @@ impl State {
             &feedback_pairs,
         );
         let host_textures = gpu::create_host_textures(&device, &spec.descriptor, &storage_textures);
-        let host_buffers = gpu::create_host_buffers(&device, &spec.descriptor);
+        let host_buffers = gpu::create_host_buffers(
+            &device,
+            &queue,
+            &spec.descriptor,
+            spec.storage_dir.as_deref(),
+        )?;
+
+        // Vertex attributes declared on a graphics pipeline (one buffer
+        // per `#[location(n)]` attribute, file-loaded from
+        // `<storage_dir>/<name>.bin`).
+        let vertex_buffer_pack = vertex_buffers::build_vertex_buffers(
+            &device,
+            &queue,
+            &spec.shader_path,
+            spec.storage_dir.as_deref(),
+        )?;
+
+        // Optional index buffer — flat little-endian u32. Indexed draws
+        // when present; non-indexed `draw(0..vertex_count)` otherwise.
+        let index_buffer: Option<(wgpu::Buffer, u32)> = if let Some(path) =
+            spec.index_buffer.as_deref()
+        {
+            let data = std::fs::read(path)
+                .with_context(|| format!("viz pipeline --index-buffer: reading {:?}", path))?;
+            if data.len() % 4 != 0 {
+                return Err(anyhow::anyhow!(
+                    "viz pipeline --index-buffer: {:?} is {} bytes, not a multiple of 4 (u32 indices)",
+                    path,
+                    data.len(),
+                ));
+            }
+            let count = (data.len() / 4) as u32;
+            let buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("index_buffer"),
+                size: data.len() as u64,
+                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            queue.write_buffer(&buf, 0, &data);
+            Some((buf, count))
+        } else {
+            None
+        };
         let samplers = gpu::create_samplers(&device, &spec.descriptor);
         // Phase 4: Shadertoy-style uniforms (iResolution / iTime /
         // iMouse / iFrame). One buffer per `(set, binding)` declared by
@@ -932,13 +992,34 @@ impl State {
             bind_group_layouts: &g_bgl_borrows,
             push_constant_ranges: &[],
         });
+        // One wgpu::VertexAttribute + matching VertexBufferLayout per
+        // declared `#[location(n)]` attribute. Owned locally so both
+        // arrays live until `create_render_pipeline` returns.
+        let wgpu_attribs: Vec<wgpu::VertexAttribute> = vertex_buffer_pack
+            .attribs
+            .iter()
+            .map(|(fmt, location)| wgpu::VertexAttribute {
+                format: vertex_buffers::wgpu_vertex_format(*fmt),
+                offset: 0,
+                shader_location: *location,
+            })
+            .collect();
+        let vertex_buffer_layouts: Vec<wgpu::VertexBufferLayout> = wgpu_attribs
+            .iter()
+            .zip(vertex_buffer_pack.attribs.iter())
+            .map(|(attr, (fmt, _))| wgpu::VertexBufferLayout {
+                array_stride: fmt.byte_size() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: std::slice::from_ref(attr),
+            })
+            .collect();
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("graphics_pipeline"),
             layout: Some(&render_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &module,
                 entry_point: Some(&spec.vertex_entry),
-                buffers: &[],
+                buffers: &vertex_buffer_layouts,
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -951,7 +1032,10 @@ impl State {
                 })],
                 compilation_options: Default::default(),
             }),
-            primitive: wgpu::PrimitiveState::default(),
+            primitive: wgpu::PrimitiveState {
+                topology: spec.topology,
+                ..Default::default()
+            },
             depth_stencil: Some(render::default_depth_state()),
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
@@ -963,6 +1047,8 @@ impl State {
             render_pipeline,
             render_bind_groups_by_set: g_bgs,
             vertex_count: spec.vertex_count,
+            vertex_buffers: vertex_buffer_pack.buffers,
+            index_buffer,
             resolution_buffer: uniforms.resolution,
             time_buffer: uniforms.time,
             mouse_buffer: uniforms.mouse,
@@ -1801,6 +1887,8 @@ fn render_pipeline(
                 }
                 queue.write_buffer(&res.buffer, 0, bytemuck::cast_slice(&as_u32));
             }
+            // Loaded once at startup; the file contents are already on the GPU.
+            gpu::HostBufferKind::FileLoaded => {}
         }
     }
     // Update Shadertoy-style uniforms when the graphics pipeline asked
@@ -1890,7 +1978,18 @@ fn render_pipeline(
             rpass.set_bind_group(set as u32, bg, &[]);
         }
     }
-    rpass.draw(0..state.vertex_count, 0..1);
+    for (slot, buf) in state.vertex_buffers.iter().enumerate() {
+        rpass.set_vertex_buffer(slot as u32, buf.slice(..));
+    }
+    match &state.index_buffer {
+        Some((buf, count)) => {
+            rpass.set_index_buffer(buf.slice(..), wgpu::IndexFormat::Uint32);
+            rpass.draw_indexed(0..*count, 0, 0..1);
+        }
+        None => {
+            rpass.draw(0..state.vertex_count, 0..1);
+        }
+    }
 }
 
 pub struct App {
