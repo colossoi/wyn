@@ -490,3 +490,69 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4
     assert!(!spirv.is_empty());
     assert_eq!(spirv[0], 0x07230203);
 }
+
+#[test]
+fn test_two_compute_entries_share_one_global_invocation_id() {
+    // Regression for VUID-StandaloneSpirv-OpEntryPoint-09658: the
+    // backend used to emit a fresh `BuiltIn GlobalInvocationId` Input
+    // variable for every entry-point param with
+    // `#[builtin(global_invocation_id)]`, on top of the cached
+    // module-level one — so each OpEntryPoint's interface ended up
+    // with two variables sharing the same BuiltIn decoration, which
+    // Vulkan rejects.
+    //
+    // The check here counts BuiltIn-decoration words in the SPIR-V
+    // module: exactly one should appear for GlobalInvocationId no
+    // matter how many compute entries reference it.
+    let src = "\
+def verts: [3]vec4f32 =
+  [@[0.0 - 1.0, 0.0 - 1.0, 0.0, 1.0],
+   @[3.0, 0.0 - 1.0, 0.0, 1.0],
+   @[0.0 - 1.0, 3.0, 0.0, 1.0]]
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vid: i32)
+  #[builtin(position)] vec4f32 = verts[vid]
+
+#[compute]
+entry a(#[builtin(global_invocation_id)] gid: vec3u32) () = ()
+
+#[compute]
+entry b(#[builtin(global_invocation_id)] gid: vec3u32) () = ()
+
+#[fragment]
+entry fragment_main(#[builtin(position)] _p: vec4f32)
+  #[location(0)] vec4f32 = @[0.0, 0.0, 0.0, 1.0]
+";
+    let spirv = compile_to_spirv(src).expect("two-compute-entry shader should compile");
+    // BuiltIn enum value for GlobalInvocationId is 28
+    // (spirv::BuiltIn::GlobalInvocationId as u32).
+    let global_invocation_id_builtin = spirv::BuiltIn::GlobalInvocationId as u32;
+    // OpDecorate is opcode 71 with word_count 4 for BuiltIn:
+    // [opcode|word_count<<16, target_id, Decoration::BuiltIn(11),
+    //  BuiltIn_enum_value]. Scan for that pattern.
+    const OP_DECORATE: u32 = 71;
+    const DECORATION_BUILTIN: u32 = 11;
+    let mut count = 0;
+    let mut i = 5; // skip 5-word header
+    while i + 3 < spirv.len() {
+        let word = spirv[i];
+        let opcode = word & 0xFFFF;
+        let word_count = (word >> 16) as usize;
+        if opcode == OP_DECORATE
+            && word_count == 4
+            && spirv[i + 2] == DECORATION_BUILTIN
+            && spirv[i + 3] == global_invocation_id_builtin
+        {
+            count += 1;
+        }
+        if word_count == 0 {
+            break;
+        }
+        i += word_count;
+    }
+    assert_eq!(
+        count, 1,
+        "expected exactly one `OpDecorate ... BuiltIn GlobalInvocationId`, got {count}"
+    );
+}

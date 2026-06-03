@@ -3725,20 +3725,46 @@ fn lower_ssa_entry_point(
                 (ExecutionModel::Fragment, spirv::BuiltIn::Position) => spirv::BuiltIn::FragCoord,
                 _ => *builtin,
             };
-            // Built-in input
-            let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::Input, input_type);
-            let var_id = constructor.builder.variable(ptr_type, None, spirv::StorageClass::Input, None);
-            constructor.builder.decorate(
-                var_id,
-                spirv::Decoration::BuiltIn,
-                [Operand::BuiltIn(stage_builtin)],
-            );
+            // Reuse the module-level cached variable for the shared
+            // compute builtins so the entry's interface doesn't end
+            // up with two Input variables decorated with the same
+            // BuiltIn — Vulkan rejects that (VUID-StandaloneSpirv-
+            // OpEntryPoint-09658) even though earlier drivers
+            // tolerated it.
+            let cached = match stage_builtin {
+                spirv::BuiltIn::GlobalInvocationId => constructor.global_invocation_id,
+                spirv::BuiltIn::LocalInvocationId => constructor.local_invocation_id,
+                spirv::BuiltIn::NumWorkgroups => constructor.num_workgroups,
+                _ => None,
+            };
+            let var_id = if let Some(existing) = cached {
+                existing
+            } else {
+                let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::Input, input_type);
+                let new_var =
+                    constructor.builder.variable(ptr_type, None, spirv::StorageClass::Input, None);
+                constructor.builder.decorate(
+                    new_var,
+                    spirv::Decoration::BuiltIn,
+                    [Operand::BuiltIn(stage_builtin)],
+                );
+                match stage_builtin {
+                    spirv::BuiltIn::GlobalInvocationId => {
+                        constructor.global_invocation_id = Some(new_var);
+                    }
+                    spirv::BuiltIn::LocalInvocationId => {
+                        constructor.local_invocation_id = Some(new_var);
+                    }
+                    spirv::BuiltIn::NumWorkgroups => {
+                        constructor.num_workgroups = Some(new_var);
+                    }
+                    _ => {}
+                }
+                new_var
+            };
             constructor.env.insert(input.name.clone(), var_id);
-            interfaces.push(var_id);
-
-            // Track GlobalInvocationId for compute shaders
-            if stage_builtin == spirv::BuiltIn::GlobalInvocationId {
-                constructor.global_invocation_id = Some(var_id);
+            if !interfaces.contains(&var_id) {
+                interfaces.push(var_id);
             }
         } else if let Some(br) = input.uniform_binding {
             // `#[uniform(set, binding)]` → Block-decorated `{value}` struct
