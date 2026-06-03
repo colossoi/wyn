@@ -237,6 +237,7 @@ struct PipelineState {
     /// allocated when the descriptor declares a Texture binding named
     /// "keyboard" / "iKeyboard".
     host_textures: HashMap<(u32, u32), gpu::HostTextureResource>,
+    host_buffers: HashMap<(u32, u32), gpu::HostBufferResource>,
     // Storage buffers + textures + samplers — held to keep the GPU
     // resources alive for the bind groups' lifetime.
     _storage_buffers: HashMap<u32, (wgpu::Buffer, u64)>,
@@ -741,6 +742,7 @@ impl State {
             &feedback_pairs,
         );
         let host_textures = gpu::create_host_textures(&device, &spec.descriptor, &storage_textures);
+        let host_buffers = gpu::create_host_buffers(&device, &spec.descriptor);
         let samplers = gpu::create_samplers(&device, &spec.descriptor);
         // Phase 4: Shadertoy-style uniforms (iResolution / iTime /
         // iMouse / iFrame). One buffer per `(set, binding)` declared by
@@ -805,6 +807,7 @@ impl State {
                         wgpu::ShaderStages::COMPUTE,
                         &storage_textures,
                         &host_textures,
+                        &host_buffers,
                         &samplers,
                         &uniforms.by_set_binding,
                         &feedback_reads,
@@ -913,6 +916,7 @@ impl State {
                     wgpu::ShaderStages::FRAGMENT,
                     &storage_textures,
                     &host_textures,
+                    &host_buffers,
                     &samplers,
                     &uniforms.by_set_binding,
                     &feedback_reads,
@@ -971,6 +975,7 @@ impl State {
             mouse_buffer: uniforms.mouse,
             frame_buffer: uniforms.frame,
             host_textures,
+            host_buffers,
             _storage_buffers: HashMap::new(),
             _storage_textures: storage_textures,
             _samplers: samplers,
@@ -1788,6 +1793,20 @@ fn render_pipeline(
                         depth_or_array_layers: 1,
                     },
                 );
+            }
+        }
+    }
+    // Push host-uploaded storage buffers (keyboard as 768 u32 entries,
+    // matching the same row * 256 + keycode layout the texture path
+    // uses, just laid out flat instead of as a 2D image).
+    for ((_, _), res) in &state.host_buffers {
+        match res.kind {
+            gpu::HostBufferKind::Keyboard => {
+                let mut as_u32 = [0u32; 768];
+                for (dst, src) in as_u32.iter_mut().zip(keyboard.iter()) {
+                    *dst = *src as u32;
+                }
+                queue.write_buffer(&res.buffer, 0, bytemuck::cast_slice(&as_u32));
             }
         }
     }

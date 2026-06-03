@@ -1018,6 +1018,77 @@ pub fn create_host_textures(
     out
 }
 
+/// Host-uploaded storage buffer — content lives in CPU state and gets
+/// written to the GPU each frame. Parallel to `HostTextureResource`
+/// but for `Binding::StorageBuffer` slots. Today the only kind is
+/// the keyboard state buffer (768 u32 entries: 3 rows × 256 keycodes,
+/// `keyboard[row * 256 + key]` non-zero when set).
+pub struct HostBufferResource {
+    pub buffer: wgpu::Buffer,
+    pub byte_size: u64,
+    pub kind: HostBufferKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostBufferKind {
+    /// Same encoding as `HostTextureKind::Keyboard` but laid out flat:
+    /// 768 u32 entries, `row * 256 + keycode`, row 0 = currently-down,
+    /// row 1 = pressed-this-frame, row 2 = toggled.
+    Keyboard,
+}
+
+/// Walk every pipeline's bindings; allocate a `wgpu::Buffer` for each
+/// `Binding::StorageBuffer` whose name matches a recognized host-
+/// uploaded pattern. Mirrors `create_host_textures` but for storage
+/// buffers — used for resources that aren't really 2D image data
+/// (e.g. the keyboard state, which is a keycode → state table).
+pub fn create_host_buffers(
+    device: &wgpu::Device,
+    descriptor: &PipelineDescriptor,
+) -> HashMap<(u32, u32), HostBufferResource> {
+    let mut out: HashMap<(u32, u32), HostBufferResource> = HashMap::new();
+    for pipeline in &descriptor.pipelines {
+        let bindings: &[Binding] = match pipeline {
+            Pipeline::Compute(cp) => &cp.bindings,
+            Pipeline::MultiCompute(mc) => &mc.bindings,
+            Pipeline::Graphics(gp) => &gp.bindings,
+        };
+        for b in bindings {
+            let Binding::StorageBuffer { set, binding, name, .. } = b else {
+                continue;
+            };
+            let key = (*set, *binding);
+            if out.contains_key(&key) {
+                continue;
+            }
+            let lower = name.to_ascii_lowercase();
+            let kind = if lower == "keyboard" || lower == "ikeyboard" {
+                HostBufferKind::Keyboard
+            } else {
+                continue;
+            };
+            let byte_size = match kind {
+                HostBufferKind::Keyboard => 768u64 * 4, // 768 u32 entries
+            };
+            let buffer = device.create_buffer(&BufferDescriptor {
+                label: Some(&format!("host_buffer_{name}")),
+                size: byte_size,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            out.insert(
+                key,
+                HostBufferResource {
+                    buffer,
+                    byte_size,
+                    kind,
+                },
+            );
+        }
+    }
+    out
+}
+
 /// Allocate one `wgpu::Sampler` per unique `(set, binding)` slot
 /// declared as `Binding::Sampler` in any pipeline. v1 emits the
 /// linear-filter / clamp-to-edge default which matches Shadertoy's
@@ -1079,6 +1150,7 @@ pub fn build_resource_bind_group_for_set(
     visibility: ShaderStages,
     storage_textures: &HashMap<(u32, u32), StorageTextureResource>,
     host_textures: &HashMap<(u32, u32), HostTextureResource>,
+    host_buffers: &HashMap<(u32, u32), HostBufferResource>,
     samplers: &HashMap<(u32, u32), wgpu::Sampler>,
     uniforms: &HashMap<(u32, u32), wgpu::Buffer>,
     feedback_reads: &HashMap<(u32, u32), (u32, u32)>,
@@ -1282,6 +1354,42 @@ pub fn build_resource_bind_group_for_set(
                     binding: *binding,
                     resource: BindingResource::Buffer(wgpu::BufferBinding {
                         buffer,
+                        offset: 0,
+                        size: None,
+                    }),
+                });
+            }
+            Binding::StorageBuffer {
+                set: bset,
+                binding,
+                access,
+                ..
+            } if *bset == set => {
+                let key = (*bset, *binding);
+                let res = host_buffers.get(&key).ok_or_else(|| {
+                    anyhow!(
+                        "storage buffer at ({}, {}) is not in the host-uploaded \
+                         pool (e.g. `keyboard`); only host-uploaded storage \
+                         buffers are supported in pipeline mode today",
+                        bset,
+                        binding
+                    )
+                })?;
+                let read_only = matches!(access, Access::Read);
+                layout_entries.push(BindGroupLayoutEntry {
+                    binding: *binding,
+                    visibility,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                });
+                group_entries.push(BindGroupEntry {
+                    binding: *binding,
+                    resource: BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &res.buffer,
                         offset: 0,
                         size: None,
                     }),

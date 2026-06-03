@@ -15,7 +15,9 @@
 --   set 1, binding 1:  iTime
 --   set 1, binding 2:  iMouse
 --   set 1, binding 3:  iFrame
---   set 2, binding 0:  keyboard texture (256×3 R8Unorm)
+--   set 2, binding 0:  keyboard (read-only storage buffer of 768 u32:
+--                      row * 256 + keycode; row 0 = down, 1 = pressed,
+--                      2 = toggled)
 --
 -- Buffer A reads its own previous output via `prev_a`, applies the
 -- per-frame mouse painting / reset logic from the original Shadertoy,
@@ -421,21 +423,14 @@ def ErosionFilter(p: vec2f32, heightAndSlope_in: vec3f32, fadeTarget_in: f32,
 -- Heightmap entry helper (Buffer B body)
 ------------------------------------------------------------
 
--- Default erosion-filter on/off. The Shadertoy original toggles this
--- with Enter; once Buffer B reads the keyboard texture this constant
--- becomes the held-toggled state. Leaving it off for v1 — the bare
--- heightmap renders on its own so we can debug ping-pong / dome
--- visibility without the erosion math obscuring the result.
-def EROSION_ENABLED: bool = true
-
 -- Returns (eroded_height, erosion_delta_norm, ridge_norm, trees_norm).
 --
 -- When erosion is off, the bare heightmap is passed through with:
 --   ridge_norm = 1.0  → drainage blend collapses to 0 downstream.
 --   trees_norm = 0.5  → 0 trees amount in the renderer.
 --   erosion_norm = 0.5 → 0 erosion delta downstream.
-def Heightmap(p: vec2f32, n: vec3f32) vec4f32 =
-  if EROSION_ENABLED then
+def Heightmap(p: vec2f32, n: vec3f32, erosion_enabled: bool) vec4f32 =
+  if erosion_enabled then
     let EROSION_SCALE = 0.15 in
     let EROSION_STRENGTH = 0.22 in
     let EROSION_GULLY_WEIGHT = 0.5 in
@@ -509,7 +504,7 @@ def mouse_world_pos(ro: vec3f32, mrd: vec3f32, planeHeight: f32) vec3f32 =
 entry buffer_a(#[storage_image(set=0, binding=0, format=rgba32float, access=write_only)] out_a: storage_image,
                #[texture(set=0, binding=10)] prev_a: texture2d,
                #[sampler(set=0, binding=3)] samp: sampler,
-               #[texture(set=2, binding=0)] keyboard: texture2d,
+               #[storage(set=2, binding=0, access=read)] keyboard: []u32,
                #[builtin(global_invocation_id)] gid: vec3u32,
                #[uniform(set=1, binding=0)] iResolution: vec3f32,
                #[uniform(set=1, binding=1)] iTime: f32,
@@ -527,7 +522,8 @@ entry buffer_a(#[storage_image(set=0, binding=0, format=rgba32float, access=writ
   let prev = texture_load(prev_a, xy_i, 0) in
 
   -- Backspace pressed-this-frame (row 1, col 8 — JS keyCode 8).
-  let backspace = texture_load(keyboard, @[8i32, 1i32], 0).x > 0.0 in
+  -- Backspace pressed-this-frame: row 1 * 256 + keycode 8.
+  let backspace = keyboard[1 * 256 + 8] != 0u32 in
   let need_reset = iFrame < 2u32 || backspace in
 
   -- Reset path: initial dome.
@@ -549,7 +545,8 @@ entry buffer_a(#[storage_image(set=0, binding=0, format=rgba32float, access=writ
       let cursorPos = @[cursor.x + 0.5, cursor.z + 0.5] in
       let v = GetBrushDelta(mapPos, cursorPos, BRUSH_SIZE) in
       -- Shift key (row 0, col 16) inverts the brush.
-      let shift_down = texture_load(keyboard, @[16i32, 0i32], 0).x > 0.0 in
+      -- Shift currently-down: row 0 * 256 + keycode 16.
+      let shift_down = keyboard[0 * 256 + 16] != 0u32 in
       let v_signed = if shift_down then @[0.0 - v.x, 0.0 - v.y, 0.0 - v.z] else v in
       -- Original divides by iFrameRate; we don't track it yet, assume
       -- ~60 fps so the v1 painting magnitude lands close to the
@@ -574,6 +571,7 @@ entry buffer_a(#[storage_image(set=0, binding=0, format=rgba32float, access=writ
 entry buffer_b(#[storage_image(set=0, binding=1, format=rgba32float, access=write_only)] out_b: storage_image,
                #[texture(set=0, binding=0)] tex_a: texture2d,
                #[sampler(set=0, binding=3)] samp: sampler,
+               #[storage(set=2, binding=0, access=read)] keyboard: []u32,
                #[builtin(global_invocation_id)] gid: vec3u32,
                #[uniform(set=1, binding=0)] iResolution: vec3f32) () =
   let xy_i = @[i32.u32(gid.x), i32.u32(gid.y)] in
@@ -581,7 +579,10 @@ entry buffer_b(#[storage_image(set=0, binding=1, format=rgba32float, access=writ
              f32.u32(gid.y) / iResolution.y] in
   let n4 = texture_sample(tex_a, samp, uv, 0.0) in
   let n = n4.xyz in
-  let out = Heightmap(uv, n) in
+  -- Enter (JS keyCode 13) toggled state lives in keyboard row 2.
+  -- Erosion defaults on; press Enter to toggle it off.
+  let erosion_enabled = keyboard[2 * 256 + 13] == 0u32 in
+  let out = Heightmap(uv, n, erosion_enabled) in
   image_store(out_b, xy_i, out)
 
 ------------------------------------------------------------

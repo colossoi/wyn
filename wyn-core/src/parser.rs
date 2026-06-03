@@ -429,21 +429,11 @@ impl<'a> Parser<'a> {
         // Only typed identifiers allowed, not general patterns
         let params = self.parse_entry_params()?;
 
-        // Compute entry params cannot have explicit bindings
-        if matches!(entry_type, Attribute::Compute) {
-            for param in &params {
-                if let PatternKind::Typed(inner, _) = &param.kind {
-                    if let PatternKind::Attributed(attrs, _) = &inner.kind {
-                        if attrs.iter().any(|a| matches!(a, Attribute::Storage { .. })) {
-                            bail_parse_at!(
-                                self.current_span(),
-                                "Compute entry parameters cannot have explicit bindings"
-                            );
-                        }
-                    }
-                }
-            }
-        }
+        // Compute entry params are normally auto-bound (storage buffers
+        // numbered 0..N by `binding_layout`); an explicit
+        // `#[storage(set, binding, access)]` opts that param out of the
+        // auto-allocator and pins it to a host-wired slot (e.g. the
+        // keyboard state).
 
         // Parse return type (which may have optional attributes) - no arrow required
         let (return_types, return_attributes) =

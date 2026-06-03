@@ -72,6 +72,15 @@ pub fn compute_entry_binding_layout(
         let decoration = entry.params.get(i).and_then(extract_io_decoration);
         let has_builtin = matches!(decoration, Some(IoDecoration::BuiltIn(_)));
 
+        // Explicit `#[storage(set, binding, access)]` on a `[]T` param
+        // means the host wires it (e.g. the keyboard state). The auto-
+        // allocator stays out of those slots so the binding number we
+        // pick downstream agrees with the explicit one.
+        if extract_storage_binding(&entry.params[i]).is_some() {
+            out.push(None);
+            continue;
+        }
+
         // Uniqueness is an ownership marker; for binding allocation, `*[]T`
         // and `[]T` lower identically.
         let ty = TypeExt::strip_unique(ty);
