@@ -580,8 +580,10 @@ entry buffer_b(#[storage_image(set=0, binding=1, format=rgba32float, access=writ
   let n4 = texture_sample(tex_a, samp, uv, 0.0) in
   let n = n4.xyz in
   -- Enter (JS keyCode 13) toggled state lives in keyboard row 2.
-  -- Erosion defaults on; press Enter to toggle it off.
-  let erosion_enabled = keyboard[2 * 256 + 13] == 0u32 in
+  -- Default is on; pressing Enter XORs it.
+  let EROSION_DEFAULT_ON: bool = true in
+  let enter_toggled = keyboard[2 * 256 + 13] != 0u32 in
+  let erosion_enabled = if enter_toggled then !EROSION_DEFAULT_ON else EROSION_DEFAULT_ON in
   let out = Heightmap(uv, n, erosion_enabled) in
   image_store(out_b, xy_i, out)
 
