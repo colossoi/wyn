@@ -457,23 +457,33 @@ def Heightmap(p: vec2f32, n: vec3f32) vec4f32 =
                     EROSION_SCALE, EROSION_OCTAVES, EROSION_LACUNARITY,
                     EROSION_GAIN, EROSION_CELL_SCALE, EROSION_NORMALIZATION) in
 
-    let eroded = n.x + h.x in
+    let eroded_no_trees = n.x + h.x in
 
     let deriv = n.yz + h.yz in
     let normalY = 1.0 / sqrt(1.0 + dot(deriv, deriv)) in
     let occlusion = h.x / h.w + 0.5 in
     let trees_mask =
       smoothstep(GRASS_HEIGHT + 0.05, GRASS_HEIGHT + 0.01,
-                 eroded + 0.01 + (occlusion - 0.8) * 0.05)
+                 eroded_no_trees + 0.01 + (occlusion - 0.8) * 0.05)
       * smoothstep(0.0, 0.4, occlusion)
       * smoothstep(0.95, 1.0, normalY)
       * smoothstep(0.0 - 1.4, 0.0, ridgeMap)
-      * smoothstep(WATER_HEIGHT, WATER_HEIGHT + 0.007, eroded) in
-    let trees_amount = (trees_mask - 0.5) / 0.6 in
+      * smoothstep(WATER_HEIGHT, WATER_HEIGHT + 0.007, eroded_no_trees) in
+    let treesAmount = (trees_mask - 0.5) / 0.6 in
+
+    -- Modulate the trees mask by high-frequency noise so forest
+    -- patches scatter naturally instead of appearing as solid blobs.
+    -- Then lift the terrain slightly where trees show, so trunks
+    -- read as standing on the ground rather than embedded in it.
+    let tree_noise = noised((p + v2(0.5)) * 200.0).x in
+    let trees = (treesAmount - (tree_noise * 0.5 + 0.5) ** 2) * 1.5 in
+    let eroded =
+      if trees > 0.0 then eroded_no_trees + trees / 300.0
+      else eroded_no_trees in
 
     let erosion_norm = clamp01(h.x / h.w * 0.5 + 0.5) in
     let ridge_norm = clamp01(ridgeMap * 0.5 + 0.5) in
-    let trees_norm = clamp01(trees_amount * 0.5 + 0.5) in
+    let trees_norm = clamp01(trees * 0.5 + 0.5) in
 
     @[eroded, erosion_norm, ridge_norm, trees_norm]
   else
@@ -877,7 +887,11 @@ entry fragment_main(#[builtin(position)] pos_in: vec4f32,
   -- Atmosphere over everything.
   let color_atmos = AtmosphereShade(ro, rd, t, sun, color_shaded) in
 
-  -- Tonemap + gamma.
+  -- Tonemap + gamma + dither. The original samples Shadertoy's
+  -- iChannel2 noise texture / 255 for the dither; we approximate with
+  -- our procedural hash, breaking up the quantisation banding in dark
+  -- regions the same way.
   let tm = Tonemap_ACES(color_atmos) in
   let gamma = @[tm.x ** (1.0 / 2.2), tm.y ** (1.0 / 2.2), tm.z ** (1.0 / 2.2)] in
-  @[gamma.x, gamma.y, gamma.z, 1.0]
+  let dither = (hash2(fragCoord).x * 0.5 + 0.5) / 255.0 in
+  @[gamma.x + dither, gamma.y + dither, gamma.z + dither, 1.0]
