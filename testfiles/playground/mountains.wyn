@@ -426,7 +426,7 @@ def ErosionFilter(p: vec2f32, heightAndSlope_in: vec3f32, fadeTarget_in: f32,
 -- becomes the held-toggled state. Leaving it off for v1 — the bare
 -- heightmap renders on its own so we can debug ping-pong / dome
 -- visibility without the erosion math obscuring the result.
-def EROSION_ENABLED: bool = false
+def EROSION_ENABLED: bool = true
 
 -- Returns (eroded_height, erosion_delta_norm, ridge_norm, trees_norm).
 --
