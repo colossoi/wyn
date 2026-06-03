@@ -55,19 +55,12 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 pub fn run_test_pattern(max_frames: Option<u32>, verbose: bool) -> Result<()> {
     eprintln!("[viz] Test pattern mode - built-in WGSL shader");
     let spec = PipelineSpec {
-        shader: Shader::Wgsl(TEST_PATTERN_SHADER),
-        vertex_entry: "vs_main".to_string(),
-        fragment_entry: "fs_main".to_string(),
-        shadertoy: false,
+        shader: Shader(TEST_PATTERN_SHADER),
         max_frames,
         verbose,
         validate: true,
         present_mode: PresentMode::Fifo,
         size: None,
-        vertex_count: 3,
-        topology: wgpu::PrimitiveTopology::TriangleList,
-        storage_dir: None,
-        index_buffer: None,
     };
     let event_loop = EventLoop::new().context("failed to create event loop")?;
     let mut app = App::new(spec);

@@ -21,8 +21,7 @@ use crate::json::{
     StorageImageFormat, load_f32_json,
 };
 use wyn_pipeline_descriptor::StorageTextureSize;
-use crate::specs::{PushConstantSpec, StorageBufferSpec, UniformSpec};
-use crate::spirv::SpirvAccess;
+use crate::specs::PushConstantSpec;
 
 /// Bundle of the wgpu objects produced by a single
 /// `Instance::request_adapter` + `Adapter::request_device` cycle.
@@ -588,146 +587,6 @@ pub fn build_push_constant_bytes(
     Ok(bytes)
 }
 
-/// Allocate the storage + staging buffer pair for each `StorageBufferSpec`,
-/// upload its initial data (zeros, or the JSON file the spec points at),
-/// and return tuples for the bind-group + readback steps.
-pub fn prepare_storage_buffers(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    specs: Vec<StorageBufferSpec>,
-    verbose: bool,
-) -> Result<Vec<(StorageBufferSpec, wgpu::Buffer, wgpu::Buffer)>> {
-    let mut out = Vec::with_capacity(specs.len());
-    for spec in specs {
-        let buffer = device.create_buffer(&BufferDescriptor {
-            label: Some(&format!("storage_buffer_set{}_b{}", spec.set, spec.binding)),
-            size: spec.byte_size(),
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let init_data = spec.load_initial_data()?;
-        if verbose && spec.input_file.is_some() {
-            println!(
-                "Loaded {} bytes for set {} binding {} from {:?}",
-                init_data.len(),
-                spec.set,
-                spec.binding,
-                spec.input_file
-            );
-        }
-        queue.write_buffer(&buffer, 0, &init_data);
-
-        let staging = device.create_buffer(&BufferDescriptor {
-            label: Some(&format!("staging_buffer_set{}_b{}", spec.set, spec.binding)),
-            size: spec.byte_size(),
-            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        out.push((spec, buffer, staging));
-    }
-    Ok(out)
-}
-
-/// Build one BindGroupLayout + BindGroup per descriptor set spanning
-/// `storage_buffers` and `uniform_buffers`, indexed by set number.
-/// wgpu requires set indices in the pipeline layout to be contiguous
-/// from 0, so any unused intermediate sets get an empty layout/group.
-///
-/// Storage-buffer access mode is read from `access_by_binding`
-/// (extracted from the SPIR-V's `NonWritable` / `NonReadable`
-/// decorations); the pipeline layout must match exactly.
-pub fn build_per_set_bind_groups(
-    device: &wgpu::Device,
-    storage_buffers: &[(StorageBufferSpec, wgpu::Buffer, wgpu::Buffer)],
-    uniform_buffers: &[(UniformSpec, wgpu::Buffer)],
-    access_by_binding: &HashMap<(u32, u32), SpirvAccess>,
-) -> (Vec<wgpu::BindGroupLayout>, Vec<BindGroup>) {
-    let max_set = storage_buffers
-        .iter()
-        .map(|(s, _, _)| s.set)
-        .chain(uniform_buffers.iter().map(|(u, _)| u.set))
-        .max()
-        .unwrap_or(0);
-
-    let mut layouts: Vec<wgpu::BindGroupLayout> = Vec::with_capacity((max_set + 1) as usize);
-    let mut bind_groups: Vec<BindGroup> = Vec::with_capacity((max_set + 1) as usize);
-    for set in 0..=max_set {
-        let mut layout_entries: Vec<BindGroupLayoutEntry> = Vec::new();
-        let mut group_entries: Vec<BindGroupEntry> = Vec::new();
-
-        for (spec, buf, _) in storage_buffers {
-            if spec.set != set {
-                continue;
-            }
-            // Default to read-write if the shader has no opinion. Read-only
-            // when `NonWritable` is set; `WriteOnly` falls back to
-            // read_only=false because wgpu's `Storage { read_only }` has
-            // no separate write-only form.
-            let read_only = matches!(
-                access_by_binding.get(&(spec.set, spec.binding)),
-                Some(SpirvAccess::ReadOnly)
-            );
-            layout_entries.push(BindGroupLayoutEntry {
-                binding: spec.binding,
-                visibility: ShaderStages::COMPUTE,
-                ty: BindingType::Buffer {
-                    ty: BufferBindingType::Storage { read_only },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            });
-            group_entries.push(BindGroupEntry {
-                binding: spec.binding,
-                resource: BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: buf,
-                    offset: 0,
-                    size: None,
-                }),
-            });
-        }
-        for (spec, buf) in uniform_buffers {
-            if spec.set != set {
-                continue;
-            }
-            layout_entries.push(BindGroupLayoutEntry {
-                binding: spec.binding,
-                visibility: ShaderStages::COMPUTE,
-                ty: BindingType::Buffer {
-                    ty: BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            });
-            group_entries.push(BindGroupEntry {
-                binding: spec.binding,
-                resource: BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: buf,
-                    offset: 0,
-                    size: None,
-                }),
-            });
-        }
-        layout_entries.sort_by_key(|e| e.binding);
-        group_entries.sort_by_key(|e| e.binding);
-
-        let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some(&format!("compute_bgl_set{}", set)),
-            entries: &layout_entries,
-        });
-        let group = device.create_bind_group(&BindGroupDescriptor {
-            label: Some(&format!("compute_bg_set{}", set)),
-            layout: &layout,
-            entries: &group_entries,
-        });
-        layouts.push(layout);
-        bind_groups.push(group);
-    }
-    (layouts, bind_groups)
-}
 
 // =============================================================================
 // Storage textures (Phase 1b — Path B)
@@ -789,7 +648,6 @@ pub struct StorageTextureResource {
     pub storage_views: Vec<wgpu::TextureView>,
     /// One sampled view per slot (binding-as-texture2d consumer).
     pub sampled_views: Vec<wgpu::TextureView>,
-    pub format: wgpu::TextureFormat,
 }
 
 /// A resolved feedback (ping-pong) pair. The read binding at
@@ -904,7 +762,6 @@ pub fn create_storage_textures(
                     textures,
                     storage_views,
                     sampled_views,
-                    format: wgpu_format,
                 },
             );
         }
@@ -919,7 +776,6 @@ pub fn create_storage_textures(
 pub struct HostTextureResource {
     pub texture: wgpu::Texture,
     pub view: wgpu::TextureView,
-    pub format: wgpu::TextureFormat,
     pub extent: (u32, u32),
     /// Identifier for the per-frame writer. Drives the
     /// `update_host_textures` dispatch on `State`.
@@ -1008,7 +864,6 @@ pub fn create_host_textures(
                 HostTextureResource {
                     texture,
                     view,
-                    format,
                     extent: (width, height),
                     kind,
                 },
@@ -1025,7 +880,6 @@ pub fn create_host_textures(
 /// `keyboard[row * 256 + key]` non-zero when set).
 pub struct HostBufferResource {
     pub buffer: wgpu::Buffer,
-    pub byte_size: u64,
     pub kind: HostBufferKind,
 }
 
@@ -1080,7 +934,6 @@ pub fn create_host_buffers(
                     key,
                     HostBufferResource {
                         buffer,
-                        byte_size,
                         kind: HostBufferKind::Keyboard,
                     },
                 );
@@ -1108,7 +961,6 @@ pub fn create_host_buffers(
                 key,
                 HostBufferResource {
                     buffer,
-                    byte_size,
                     kind: HostBufferKind::FileLoaded,
                 },
             );

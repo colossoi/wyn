@@ -2,17 +2,15 @@
 //! `testpattern` modes: surface format selection, surface
 //! configuration, and the SPIR-V vs WGSL render-pipeline branches.
 
-use std::path::Path;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use wgpu::{
-    Adapter, BindGroup, BindGroupLayout, Buffer, ColorTargetState, CompareFunction, DepthStencilState,
+    Adapter, BindGroup, Buffer, ColorTargetState, CompareFunction, DepthStencilState,
     FragmentState, PipelineLayoutDescriptor, PresentMode, PrimitiveState, RenderPipeline, Surface,
     SurfaceConfiguration, TextureFormat, TextureUsages, VertexState,
 };
 
 use crate::app::uniforms::build_test_pattern_uniforms;
-use crate::spirv::load_spirv_module;
 
 /// Depth attachment format for every render pipeline. `Depth32Float` is
 /// universally supported on Vulkan/D3D/Metal and gives ample precision
@@ -73,98 +71,6 @@ pub fn configure_surface(
     Ok(config)
 }
 
-/// Render pipeline for a SPIR-V module with separate vertex + fragment
-/// entry points. When `shadertoy_uniforms` is `Some`, the bind-group
-/// layout for the shadertoy uniforms is plumbed at the requested set
-/// index, with empty-layout placeholders padding any lower sets so
-/// wgpu's contiguous-set rule is satisfied.
-pub fn build_spirv_render_pipeline(
-    device: &wgpu::Device,
-    format: TextureFormat,
-    path: &Path,
-    vertex_entry: &str,
-    fragment_entry: &str,
-    shadertoy_uniforms: Option<(&BindGroupLayout, Option<&BindGroupLayout>, u32)>,
-    topology: wgpu::PrimitiveTopology,
-    // One per `#[location(n)]` vertex-shader input attribute, in
-    // declaration order: `(format, shader_location)`. Each becomes its
-    // own `VertexBufferLayout` (one buffer per attribute, offset 0,
-    // stride = format byte size). Empty for shaders without vertex
-    // attributes.
-    vertex_attribs: &[(wyn_pipeline_descriptor::VertexFormat, u32)],
-) -> Result<RenderPipeline> {
-    let module =
-        load_spirv_module(device, path).with_context(|| format!("load SPIR-V module {:?}", path))?;
-
-    // The uniform layout (if any) lives at `set`; wgpu requires set
-    // numbers to be contiguous, so prefix the empty layout for any
-    // lower sets.
-    let mut bind_group_layouts: Vec<&BindGroupLayout> = vec![];
-    if let Some((uniforms_bgl, empty_bgl, set)) = shadertoy_uniforms {
-        if let Some(empty) = empty_bgl {
-            for _ in 0..set {
-                bind_group_layouts.push(empty);
-            }
-        }
-        bind_group_layouts.push(uniforms_bgl);
-    }
-
-    let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-        label: Some("layout"),
-        bind_group_layouts: &bind_group_layouts,
-        push_constant_ranges: &[],
-    });
-
-    // One `wgpu::VertexAttribute` + matching `VertexBufferLayout` per
-    // declared `#[location(n)]` attribute. Owned locally so both arrays
-    // live until `create_render_pipeline` returns.
-    let wgpu_attribs: Vec<wgpu::VertexAttribute> = vertex_attribs
-        .iter()
-        .map(|(fmt, location)| wgpu::VertexAttribute {
-            format: super::vertex_buffers::wgpu_vertex_format(*fmt),
-            offset: 0,
-            shader_location: *location,
-        })
-        .collect();
-    let vertex_buffer_layouts: Vec<wgpu::VertexBufferLayout> = wgpu_attribs
-        .iter()
-        .zip(vertex_attribs.iter())
-        .map(|(attr, (fmt, _))| wgpu::VertexBufferLayout {
-            array_stride: fmt.byte_size() as u64,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: std::slice::from_ref(attr),
-        })
-        .collect();
-
-    Ok(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("pipeline"),
-        layout: Some(&layout),
-        vertex: VertexState {
-            module: &module,
-            entry_point: Some(vertex_entry),
-            buffers: &vertex_buffer_layouts,
-            compilation_options: Default::default(),
-        },
-        fragment: Some(FragmentState {
-            module: &module,
-            entry_point: Some(fragment_entry),
-            targets: &[Some(ColorTargetState {
-                format,
-                blend: Some(wgpu::BlendState::REPLACE),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: Default::default(),
-        }),
-        primitive: PrimitiveState {
-            topology,
-            ..PrimitiveState::default()
-        },
-        depth_stencil: Some(default_depth_state()),
-        multisample: wgpu::MultisampleState::default(),
-        multiview: None,
-        cache: None,
-    }))
-}
 
 /// Render pipeline for the embedded WGSL test pattern. Returns the
 /// pipeline alongside the resolution buffer + bind group it owns —
