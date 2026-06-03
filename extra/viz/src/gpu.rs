@@ -1375,7 +1375,7 @@ pub fn build_resource_bind_group_for_set(
                         binding
                     )
                 })?;
-                let read_only = matches!(access, Access::Read);
+                let read_only = matches!(access, Access::ReadOnly);
                 layout_entries.push(BindGroupLayoutEntry {
                     binding: *binding,
                     visibility,
