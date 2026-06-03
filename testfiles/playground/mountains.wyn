@@ -442,18 +442,63 @@ def ErosionFilter(p: vec2f32, heightAndSlope_in: vec3f32, fadeTarget_in: f32,
 -- Heightmap entry helper (Buffer B body)
 ------------------------------------------------------------
 
+-- Default erosion-filter on/off. The Shadertoy original toggles this
+-- with Enter; once Buffer B reads the keyboard texture this constant
+-- becomes the held-toggled state. Leaving it off for v1 — the bare
+-- heightmap renders on its own so we can debug ping-pong / dome
+-- visibility without the erosion math obscuring the result.
+def EROSION_ENABLED: bool = false
+
 -- Returns (eroded_height, erosion_delta_norm, ridge_norm, trees_norm).
 --
--- v1 ships with erosion off so the bare ping-pong'd heightmap renders
--- on its own — useful while we wire up the Enter-key erosion toggle.
--- The full erosion pipeline (PhacelleNoise + ErosionFilter) is kept
--- compiled and exercised; the gating just discards its output.
---
+-- When erosion is off, the bare heightmap is passed through with:
 --   ridge_norm = 1.0  → drainage blend collapses to 0 downstream.
 --   trees_norm = 0.5  → 0 trees amount in the renderer.
 --   erosion_norm = 0.5 → 0 erosion delta downstream.
-def Heightmap(_p: vec2f32, n: vec3f32) vec4f32 =
-  @[n.x, 0.5, 1.0, 0.5]
+def Heightmap(p: vec2f32, n: vec3f32) vec4f32 =
+  if EROSION_ENABLED then
+    let EROSION_SCALE = 0.15 in
+    let EROSION_STRENGTH = 0.22 in
+    let EROSION_GULLY_WEIGHT = 0.5 in
+    let EROSION_DETAIL = 1.5 in
+    let EROSION_ROUNDING: vec4f32 = @[0.1, 0.0, 0.1, 2.0] in
+    let EROSION_ONSET: vec4f32 = @[0.7, 1.25, 2.8, 1.5] in
+    let EROSION_ASSUMED_SLOPE: vec2f32 = @[0.7, 1.0] in
+    let EROSION_CELL_SCALE = 0.7 in
+    let EROSION_NORMALIZATION = 0.5 in
+    let EROSION_LACUNARITY = 2.0 in
+    let EROSION_GAIN = 0.5 in
+
+    let fadeTarget = clamp((n.x - DEFAULT_HEIGHT) / 0.15, 0.0 - 1.0, 1.0) in
+
+    let (h, ridgeMap) =
+      ErosionFilter(p, n, fadeTarget,
+                    EROSION_STRENGTH, EROSION_GULLY_WEIGHT, EROSION_DETAIL,
+                    EROSION_ROUNDING, EROSION_ONSET, EROSION_ASSUMED_SLOPE,
+                    EROSION_SCALE, EROSION_OCTAVES, EROSION_LACUNARITY,
+                    EROSION_GAIN, EROSION_CELL_SCALE, EROSION_NORMALIZATION) in
+
+    let eroded = n.x + h.x in
+
+    let deriv = @[n.y + h.y, n.z + h.z] in
+    let normalY = 1.0 / sqrt(1.0 + dot(deriv, deriv)) in
+    let occlusion = h.x / h.w + 0.5 in
+    let trees_mask =
+      smoothstep(GRASS_HEIGHT + 0.05, GRASS_HEIGHT + 0.01,
+                 eroded + 0.01 + (occlusion - 0.8) * 0.05)
+      * smoothstep(0.0, 0.4, occlusion)
+      * smoothstep(0.95, 1.0, normalY)
+      * smoothstep(0.0 - 1.4, 0.0, ridgeMap)
+      * smoothstep(WATER_HEIGHT, WATER_HEIGHT + 0.007, eroded) in
+    let trees_amount = (trees_mask - 0.5) / 0.6 in
+
+    let erosion_norm = clamp01(h.x / h.w * 0.5 + 0.5) in
+    let ridge_norm = clamp01(ridgeMap * 0.5 + 0.5) in
+    let trees_norm = clamp01(trees_amount * 0.5 + 0.5) in
+
+    @[eroded, erosion_norm, ridge_norm, trees_norm]
+  else
+    @[n.x, 0.5, 1.0, 0.5]
 
 ------------------------------------------------------------
 -- Compute entry: Buffer A
@@ -618,10 +663,13 @@ def march(ro: vec3f32, rd: vec3f32,
   let samples = i32.f32(48.0 * RAYMARCH_QUALITY) in
   let stepScale0 = 1.0 / RAYMARCH_QUALITY in
 
-  -- Loop state: (i, t, stepScale, stepSize, hit_t, hit_normal, hit_material, s_t, done)
-  let (_, _, _, _, t_hit, n_hit, mat_hit, s_t_acc, _) =
-    loop (i, t, stepScale, stepSize, hit_t, n_acc, mat_acc, s_t, done)
-       = (0, tStart, stepScale0, 0.0, 0.0 - 1.0, @[0.0, 1.0, 0.0], M_GROUND, 9999.0, false)
+  -- Loop state mirrors the original `t / stepSize / stepScale` machinery
+  -- plus a `sky` flag for the first-sample-misses-the-bottom early bail
+  -- and a `done` flag for any early termination.
+  -- (i, t, stepScale, stepSize, sky, n_acc, mat_acc, s_t, done)
+  let (_, t_loop, _, _, sky, n_hit, mat_hit, s_t_acc, _) =
+    loop (i, t, stepScale, stepSize, sky, n_acc, mat_acc, s_t, done)
+       = (0, tStart, stepScale0, 0.0, false, @[0.0, 1.0, 0.0], M_GROUND, 9999.0, false)
        while i < samples && !done do
       let pos = ro + rd * @[t, t, t] in
       let h = mapHeight(tex_b, samp, GetUV(pos)) in
@@ -630,20 +678,36 @@ def march(ro: vec3f32, rd: vec3f32,
       if altitude < 0.0 then
         if i < 1 then
           if pos.y < 0.35 then
-            (i + 1, t, stepScale, stepSize, 0.0 - 1.0, n_acc, mat_acc, 9999.0, true)
+            -- First sample is below the sea floor — ray misses the
+            -- terrain entirely. Bail and let the caller render sky.
+            (i + 1, t, stepScale, stepSize, true, n_acc, mat_acc, 9999.0, true)
           else
-            (i + 1, t, stepScale, stepSize, t, boxNormal, M_STRATA, s_t_new, true)
+            -- First sample is below ground but above sea floor → the
+            -- ray hit the bounding-box side wall. Terminate at this t
+            -- with the M_STRATA material so the renderer paints the
+            -- exposed cliff face.
+            (i + 1, t, stepScale, stepSize, sky, boxNormal, M_STRATA, s_t_new, true)
         else
+          -- Contact refinement: halve stepScale (persistently!) and
+          -- step back. Next iteration's forward steps inherit the
+          -- smaller stepScale too, so we converge on the surface.
           let stepScale2 = stepScale * 0.5 in
           let t2 = t - stepSize * stepScale2 in
-          (i + 1, t2, stepScale2, stepSize, hit_t, n_acc, mat_acc, s_t_new, false)
+          (i + 1, t2, stepScale2, stepSize, sky, n_acc, mat_acc, s_t_new, false)
       else
         let stepSize2 = abs(altitude) + min(1e-2, abs(altitude) * 0.01) in
         let t2 = t + stepSize2 * stepScale in
-        (i + 1, t2, stepScale, stepSize2, hit_t, n_acc, mat_acc, s_t_new, false)
+        (i + 1, t2, stepScale, stepSize2, sky, n_acc, mat_acc, s_t_new, false)
   in
 
-  -- Account for water intersection.
+  -- After the loop, `t_loop` is whatever the marcher converged to —
+  -- the contact t for ground hits, the entry t for M_STRATA hits, or
+  -- a stale value for the sky bail (overridden below).
+  let t_hit = if sky then 0.0 - 1.0 else t_loop in
+
+  -- Account for water intersection. Water wins when its entry comes
+  -- before the terrain hit (or there is no terrain hit) AND we
+  -- didn't already terminate on a strata cliff face.
   let (waterBox, waterNormal) =
     boxIntersection(ro, rd, @[BOX_SIZE.x, WATER_HEIGHT, BOX_SIZE.z]) in
   let (t_final, n_final, mat_final) =
