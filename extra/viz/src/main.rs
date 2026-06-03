@@ -376,6 +376,10 @@ enum Command {
 }
 
 fn main() -> Result<()> {
+    // Install a logger backend so wgpu's `log::warn!` / validation
+    // messages actually go somewhere. Off until RUST_LOG asks for it,
+    // so the default invocation stays quiet.
+    env_logger::init();
     let cli = Cli::parse();
 
     match cli.command {
