@@ -745,13 +745,20 @@ entry fragment_main(#[builtin(position)] pos_in: vec4f32,
                     #[texture(set=0, binding=2)] tex_c: texture2d,
                     #[sampler(set=0, binding=3)] samp: sampler,
                     #[uniform(set=1, binding=0)] iResolution: vec3f32,
-                    #[uniform(set=1, binding=1)] iTime: f32)
+                    #[uniform(set=1, binding=1)] iTime: f32,
+                    #[uniform(set=1, binding=2)] iMouse: vec4f32)
   #[location(0)] vec4f32 =
   -- Flip Y for Vulkan NDC -> Shadertoy convention.
   let fragCoord = @[pos_in.x, iResolution.y - pos_in.y] in
 
   -- Camera + primary ray.
   let (ro, rd) = GetRay(iTime, iResolution, fragCoord) in
+
+  -- Mouse ray for the brush-radius cursor indicator. iMouse.y arrives
+  -- top-down from the host; flip to Shadertoy bottom-up to match
+  -- fragCoord.
+  let (_, mrd) = GetRay(iTime, iResolution, @[iMouse.x, iResolution.y - iMouse.y]) in
+  let cursor = mouse_world_pos(ro, mrd, DEFAULT_HEIGHT) in
 
   -- Fixed sun direction.
   let sun = normalize(@[0.0 - 1.0, 0.4, 0.05]) in
@@ -793,7 +800,7 @@ entry fragment_main(#[builtin(position)] pos_in: vec4f32,
       let smoothness = if material == M_WATER then 0.95 else 0.0 in
 
       -- Material color.
-      let diffuseColor =
+      let diffuseColor_raw =
         if material == M_GROUND then
           let occlusion = clamp01(erosion + 0.5) in
           let c1 = CLIFF_COLOR * smoothstep(0.4, 0.52, pos.y) in
@@ -828,6 +835,17 @@ entry fragment_main(#[builtin(position)] pos_in: vec4f32,
                        smoothstep(0.005, 0.0, diff_h + breakup * 0.005) else 0.0 in
           let w0 = mix(WATER_COLOR, WATER_SHORE_COLOR, shore) in
           mix(w0, v3(1.0), foam) in
+
+      -- Brush-radius cursor indicator. Two cyan rings (inner at
+      -- BRUSH_SIZE*0.2, outer at BRUSH_SIZE) drawn while the mouse is
+      -- held, skipping cliff faces so they don't smear over strata.
+      let diffuseColor =
+        if iMouse.z > 0.0 && material != M_STRATA then
+          let cursorDist = distance(pos.xz, cursor.xz) in
+          let val = 1.0 - clamp01(min(200.0 * abs(cursorDist - BRUSH_SIZE * 0.2),
+                                       0.5 + 200.0 * abs(cursorDist - BRUSH_SIZE))) in
+          mix(diffuseColor_raw, @[0.0, 1.0, 1.0], val)
+        else diffuseColor_raw in
 
       -- Shadow ray.
       let shadow =
