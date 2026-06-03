@@ -3,7 +3,7 @@
 //! The wyn compiler emits a JSON sidecar (`<spv_path>.json`) alongside
 //! the SPIR-V module declaring the (set, binding) location of each
 //! uniform the shader references — `iResolution`, `iTime`, `iMouse`,
-//! `difficulty`. This module reads that sidecar, allocates the
+//! `iMouse`. This module reads that sidecar, allocates the
 //! uniform buffers, and builds a single bind group sized to the
 //! actually-declared uniforms.
 //!
@@ -45,13 +45,6 @@ pub struct TimeUniform {
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct MouseUniform {
     pub mouse: [f32; 4],
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct DifficultyUniform {
-    pub difficulty: i32,
-    pub _pad: [i32; 3],
 }
 
 /// `iFrame` — current frame number. wgpu uniform buffers require a
@@ -160,7 +153,6 @@ pub struct ShadertoyBindings {
     pub resolution_buffer: Option<Buffer>,
     pub time_buffer: Option<Buffer>,
     pub mouse_buffer: Option<Buffer>,
-    pub difficulty_buffer: Option<Buffer>,
     /// Host-uploaded storage buffers, kept alive for the lifetime of
     /// the bind group. Populated only when `--storage-dir` was supplied.
     pub storage_buffers: Vec<Buffer>,
@@ -186,10 +178,9 @@ pub fn build_shadertoy(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     spv_path: &Path,
-    difficulty: i32,
     storage_dir: Option<&Path>,
 ) -> Result<ShadertoyBindings> {
-    /// Where the shader expects one of the four shadertoy uniforms.
+    /// Where the shader expects one of the three shadertoy uniforms.
     /// `actual_*` come from the sidecar; `present` is set if the
     /// sidecar mentioned this uniform's well-known name.
     struct Slot {
@@ -205,11 +196,6 @@ pub fn build_shadertoy(
     let mut time = Slot {
         actual_set: 0,
         actual_binding: 1,
-        present: false,
-    };
-    let mut difficulty_slot = Slot {
-        actual_set: 0,
-        actual_binding: 2,
         present: false,
     };
     let mut mouse = Slot {
@@ -235,7 +221,6 @@ pub fn build_shadertoy(
         let slot = match u.name.as_str() {
             "iResolution" => Some(&mut resolution),
             "iTime" => Some(&mut time),
-            "difficulty" | "iDifficulty" => Some(&mut difficulty_slot),
             "iMouse" => Some(&mut mouse),
             _ => {
                 unknown.push(u.name.clone());
@@ -251,7 +236,7 @@ pub fn build_shadertoy(
     if !unknown.is_empty() {
         return Err(anyhow!(
             "viz vf --shadertoy: shader declares uniforms `{}` that aren't in the \
-             shadertoy well-known set (iResolution / iTime / iMouse / difficulty). \
+             shadertoy well-known set (iResolution / iTime / iMouse). \
              --shadertoy can't supply them; a non-shadertoy host runner is needed.",
             unknown.join("`, `"),
         ));
@@ -259,7 +244,7 @@ pub fn build_shadertoy(
 
     // All declared shadertoy uniforms must share a single set; per-set
     // bind groups aren't supported here.
-    let present_sets: Vec<u32> = [&resolution, &time, &difficulty_slot, &mouse]
+    let present_sets: Vec<u32> = [&resolution, &time, &mouse]
         .iter()
         .filter(|s| s.present)
         .map(|s| s.actual_set)
@@ -298,18 +283,6 @@ pub fn build_shadertoy(
         queue.write_buffer(&buf, 0, bytemuck::cast_slice(&[TimeUniform { time: 0.0 }]));
         buf
     });
-    let difficulty_buffer = difficulty_slot.present.then(|| {
-        let buf = make_buffer(
-            "difficulty_buffer",
-            std::mem::size_of::<DifficultyUniform>() as u64,
-        );
-        let initial = DifficultyUniform {
-            difficulty,
-            _pad: [0, 0, 0],
-        };
-        queue.write_buffer(&buf, 0, bytemuck::cast_slice(&[initial]));
-        buf
-    });
     let mouse_buffer = mouse.present.then(|| {
         let buf = make_buffer("mouse_buffer", std::mem::size_of::<MouseUniform>() as u64);
         queue.write_buffer(
@@ -336,7 +309,6 @@ pub fn build_shadertoy(
     let slots: Vec<(u32, &Buffer)> = [
         resolution_buffer.as_ref().map(|b| (resolution.actual_binding, b)),
         time_buffer.as_ref().map(|b| (time.actual_binding, b)),
-        difficulty_buffer.as_ref().map(|b| (difficulty_slot.actual_binding, b)),
         mouse_buffer.as_ref().map(|b| (mouse.actual_binding, b)),
     ]
     .into_iter()
@@ -442,7 +414,6 @@ pub fn build_shadertoy(
         resolution_buffer,
         time_buffer,
         mouse_buffer,
-        difficulty_buffer,
         storage_buffers,
         bind_group,
         bind_group_layout,

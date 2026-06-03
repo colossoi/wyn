@@ -18,6 +18,8 @@ def epsilon: f32 = 0.001
 def maxDist: f32 = 100.0
 def numSpheres: i32 = 12
 
+def MAX_REFLECTION_BOUNCES: i32 = 3
+
 def lightDir: vec3f32 =
   @[0.5773502691896258, 0.5773502691896258, -0.5773502691896258]
 
@@ -474,10 +476,9 @@ def traceSample(
 entry fragment_main(
   #[uniform(set=1, binding=0)] iResolution: vec3f32,
   #[uniform(set=1, binding=1)] iTime: f32,
-  #[uniform(set=1, binding=2)] difficulty: i32,
   #[uniform(set=1, binding=5)] iMouse: vec4f32,
   #[builtin(position)] fragCoord: vec4f32
 ) #[location(0)] vec4f32 =
-  let color = traceSample(iResolution, iTime, iMouse, difficulty, fragCoord, 0.0, 0.0) in
+  let color = traceSample(iResolution, iTime, iMouse, MAX_REFLECTION_BOUNCES, fragCoord, 0.0, 0.0) in
   let gamma = 1.0 / 2.2 in
   @[color.x ** gamma, color.y ** gamma, color.z ** gamma, 1.0]

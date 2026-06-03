@@ -41,16 +41,15 @@ pub struct PipelineSpec {
     pub shader: Shader,
     pub vertex_entry: String,
     pub fragment_entry: String,
-    /// Bind shadertoy-style uniforms (iResolution, iTime, iMouse,
-    /// difficulty) discovered from the SPIR-V's JSON sidecar. Only
-    /// meaningful for `Shader::Spirv`; ignored for `Shader::Wgsl`,
-    /// which uses its own hardcoded resolution uniform.
+    /// Bind shadertoy-style uniforms (iResolution, iTime, iMouse)
+    /// discovered from the SPIR-V's JSON sidecar. Only meaningful for
+    /// `Shader::Spirv`; ignored for `Shader::Wgsl`, which uses its own
+    /// hardcoded resolution uniform.
     pub shadertoy: bool,
     pub max_frames: Option<u32>,
     pub verbose: bool,
     pub validate: bool,
     pub present_mode: PresentMode,
-    pub difficulty: i32,
     pub size: Option<(u32, u32)>,
     /// Number of vertex-shader invocations per draw (`rpass.draw(0..vertex_count, 0..1)`).
     pub vertex_count: u32,
@@ -290,11 +289,10 @@ struct SimulateState {
 /// vertex / index / storage buffers.
 struct VfState {
     pipeline: RenderPipeline,
-    // Uniform support - separate buffers for iResolution, iTime, iMouse, difficulty (optional, enabled with --shadertoy)
+    // Uniform support - separate buffers for iResolution, iTime, iMouse (optional, enabled with --shadertoy)
     resolution_buffer: Option<wgpu::Buffer>,
     time_buffer: Option<wgpu::Buffer>,
     mouse_buffer: Option<wgpu::Buffer>,
-    _difficulty_buffer: Option<wgpu::Buffer>,
     uniform_bind_group: Option<BindGroup>,
     /// Descriptor-set index at which `uniform_bind_group` is bound. Defaults
     /// to 0; overridden from the sidecar pipeline descriptor when the shader
@@ -437,7 +435,6 @@ impl State {
                 &device,
                 &queue,
                 path,
-                spec.difficulty,
                 spec.storage_dir.as_deref(),
             )?)
         } else {
@@ -506,7 +503,6 @@ impl State {
             resolution_buffer,
             time_buffer,
             mouse_buffer,
-            difficulty_buffer,
             storage_buffers,
             uniform_bind_group,
         ) = match &spec.shader {
@@ -527,18 +523,17 @@ impl State {
                     spec.topology,
                     &vertex_buffers.attribs,
                 )?;
-                let (rb, tb, mb, db, sb, bg) = match shadertoy {
+                let (rb, tb, mb, sb, bg) = match shadertoy {
                     Some(s) => (
                         s.resolution_buffer,
                         s.time_buffer,
                         s.mouse_buffer,
-                        s.difficulty_buffer,
                         s.storage_buffers,
                         Some(s.bind_group),
                     ),
-                    None => (None, None, None, None, Vec::new(), None),
+                    None => (None, None, None, Vec::new(), None),
                 };
-                (pipeline, rb, tb, mb, db, sb, bg)
+                (pipeline, rb, tb, mb, sb, bg)
             }
             Shader::Wgsl(source) => {
                 let (pipeline, res_buffer, bind_group) = render::build_wgsl_render_pipeline(
@@ -552,7 +547,6 @@ impl State {
                 (
                     pipeline,
                     Some(res_buffer),
-                    None,
                     None,
                     None,
                     Vec::new(),
@@ -569,7 +563,6 @@ impl State {
             resolution_buffer,
             time_buffer,
             mouse_buffer,
-            _difficulty_buffer: difficulty_buffer,
             uniform_bind_group,
             uniform_bind_group_set,
             empty_bind_group,

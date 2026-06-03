@@ -116,9 +116,6 @@ enum Command {
         /// Present mode: fifo (vsync), mailbox (triple-buffer), immediate (no sync)
         #[arg(long, value_enum, default_value = "fifo")]
         present_mode: PresentModeArg,
-        /// Difficulty level for shaders that use it (binding 2)
-        #[arg(long, default_value = "3")]
-        difficulty: i32,
         /// Window size as WxH (e.g. --size 256x256)
         #[arg(long, value_parser = parse_size)]
         size: Option<(u32, u32)>,
@@ -355,7 +352,6 @@ fn main() -> Result<()> {
             verbose,
             no_validate,
             present_mode,
-            difficulty,
             size,
             vertex_count,
             topology,
@@ -372,7 +368,6 @@ fn main() -> Result<()> {
                 verbose,
                 !no_validate,
                 present_mode.into(),
-                difficulty,
                 size,
                 vertex_count,
                 topology.into(),
