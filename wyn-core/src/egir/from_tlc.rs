@@ -339,13 +339,20 @@ fn convert_entry_point(
     let (inner_body, params) = extract_lambda_params(&def.body);
     let is_compute = matches!(entry.entry_type, interface::Attribute::Compute);
 
-    // Prefer `def.ty`'s arrow-return position as the entry's declared
-    // return type. `inner_body.ty` is the body's runtime type — Unit
-    // after `tlc::normalize_outputs` has rewritten the tail into
-    // `OutputSlotStore` chains — but the entry's declared output shape
-    // still lives on `def.ty`, untouched by that pass.
-    let (_sig_params, sig_ret) = extract_function_signature(&def.ty);
-    let ret_type = sig_ret;
+    // Compute entries: prefer `def.ty`'s arrow-return position. After
+    // `tlc::normalize_outputs` the body's `inner_body.ty` is `Unit`
+    // (the slot stores produce nothing), so the declared output shape
+    // only survives on `def.ty`. Graphics entries (vertex / fragment):
+    // keep the prior contract `inner_body.ty`, since `normalize_outputs`
+    // doesn't touch them and a future pass that wraps `def.ty`'s
+    // return position (e.g. uniqueness) shouldn't silently change how
+    // `build_entry_outputs` classifies the result.
+    let ret_type = if is_compute {
+        let (_sig_params, sig_ret) = extract_function_signature(&def.ty);
+        sig_ret
+    } else {
+        inner_body.ty.clone()
+    };
     let param_info: Vec<(Type<TypeName>, String)> = params
         .iter()
         .map(|(sym, ty)| Ok((ty.clone(), symbol_name(symbols, *sym)?.to_string())))

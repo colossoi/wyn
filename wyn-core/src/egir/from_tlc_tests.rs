@@ -539,3 +539,105 @@ fn texture_and_sampler_params_surface_bindings() {
         fs.bindings
     );
 }
+
+/// Graphics entries must NOT derive `EgirEntry.return_ty` from
+/// `def.ty`'s arrow-return position — that's the post-`normalize_outputs`
+/// shortcut for compute entries, and graphics entries don't go through
+/// `normalize_outputs`. The prior contract used `inner_body.ty`, which
+/// matches the body's actual produced shape after ownership /
+/// monomorphize / etc. Forcing the def.ty-derived form here makes any
+/// future divergence (e.g. a uniqueness wrapper that ownership doesn't
+/// strip from `def.ty` for non-compute entries) silently change how
+/// `build_entry_outputs` classifies the return — a tuple wrapped in
+/// `Unique` no longer matches the `Tuple` arm, and an N-output entry
+/// gets collapsed to a single output.
+///
+/// This test constructs the divergence directly by mutating the graphics
+/// entry's `def.ty` after type-checking. With the guard (`if is_compute
+/// { sig_ret } else { inner_body.ty.clone() }`) the conversion still
+/// reads the unmodified `inner_body.ty` and produces two outputs; without
+/// the guard the wrapped `def.ty` propagates and produces one.
+#[test]
+fn graphics_entry_ret_type_comes_from_inner_body_not_def_ty() {
+    use crate::tlc::DefMeta;
+
+    let src = r#"
+#[vertex]
+entry vertex_main(#[location(0)] position: vec3f32, #[location(1)] color: vec3f32)
+  (#[builtin(position)] vec4f32, #[location(0)] vec3f32) =
+  (@[position.x, position.y, position.z, 1.0], color)
+"#;
+    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
+    let parsed = crate::Compiler::parse(src, &mut node_counter).expect("parse");
+    let type_checked = parsed
+        .resolve(&mut module_manager)
+        .expect("resolve")
+        .fold_ast_constants()
+        .type_check(&mut module_manager)
+        .expect("type_check");
+    let tlc = type_checked
+        .to_tlc(&module_manager, false)
+        .partial_eval()
+        .normalize_soacs()
+        .fuse_maps()
+        .apply_ownership()
+        .expect("apply_ownership")
+        .normalize_outputs()
+        .expect("normalize_outputs")
+        .lift_gathers()
+        .defunctionalize()
+        .monomorphize()
+        .buffer_specialize()
+        .fold_generated_lambdas()
+        .inline_small()
+        .parallelize_soacs(false)
+        .expect("parallelize_soacs")
+        .filter_reachable();
+
+    let mut tlc_program = tlc.tlc.clone();
+
+    // Mutate the vertex entry's `def.ty` arrow-return position to wrap
+    // the result tuple in `TypeName::Unique`. `inner_body.ty` stays
+    // unchanged. This synthesises the divergence that a future ownership
+    // / lowering change could produce naturally.
+    let def = tlc_program
+        .defs
+        .iter_mut()
+        .find(|d| tlc_program.symbols.get(d.name).map(|n| n == "vertex_main").unwrap_or(false))
+        .expect("vertex_main def");
+    assert!(
+        matches!(&def.meta, DefMeta::EntryPoint(e) if !e.entry_type.is_compute()),
+        "precondition: vertex_main is a graphics entry"
+    );
+    wrap_arrow_return_in_unique(&mut def.ty);
+
+    let egir = super::run(&tlc_program, PipelineDescriptor::default(), &HashMap::new())
+        .expect("from_tlc::run on graphics entry must succeed");
+    let entry = egir.entry_points.iter().find(|e| e.name == "vertex_main").expect("vertex_main EgirEntry");
+
+    assert_eq!(
+        entry.outputs.len(),
+        2,
+        "graphics entry's outputs must be derived from inner_body.ty (preserved as a tuple) \
+         — not from def.ty (mutated to Unique-wrap the tuple). got {:?}",
+        entry.outputs.iter().map(|o| &o.ty).collect::<Vec<_>>()
+    );
+}
+
+/// Walk an arrow chain `P1 -> P2 -> ... -> Pn -> R` and replace `R` with
+/// `Unique(R)`. Used to synthesise a divergence between `def.ty`'s
+/// arrow-return position and `inner_body.ty`.
+fn wrap_arrow_return_in_unique(mut ty: &mut Type<TypeName>) {
+    loop {
+        let inner = match ty {
+            Type::Constructed(TypeName::Arrow, args) if args.len() == 2 => &mut args[1],
+            _ => break,
+        };
+        if !matches!(inner, Type::Constructed(TypeName::Arrow, _)) {
+            let old = std::mem::replace(inner, Type::Constructed(TypeName::Unit, vec![]));
+            *inner = Type::Constructed(TypeName::Unique, vec![old]);
+            return;
+        }
+        ty = inner;
+    }
+}
