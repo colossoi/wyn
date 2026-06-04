@@ -34,6 +34,10 @@ use super::{Def, DefMeta, Lambda, Program, Term, TermIdSource, TermKind};
 use crate::ast::TypeName;
 use polytype::Type;
 
+#[cfg(test)]
+#[path = "normalize_outputs_tests.rs"]
+mod normalize_outputs_tests;
+
 #[derive(Debug)]
 pub enum NormalizeError {
     /// The entry tail doesn't match a shape this pass can decompose.
@@ -192,9 +196,14 @@ fn emit_slot_writes(
     n_outputs: usize,
     term_ids: &mut TermIdSource,
 ) -> Result<Term, NormalizeError> {
-    // If the entry has zero outputs (unit return), nothing to write.
+    // If the entry has zero outputs (unit return), there are no slot
+    // writes to emit — but the tail may be a side-effectful expression
+    // (e.g. `image_store(img, xy, c)`) whose value is unit by type
+    // checking. Return it unchanged so the side effect survives. The
+    // body's tail still has unit type, so the enclosing Lambda's
+    // `ret_ty: Unit` rewrite stays consistent.
     if n_outputs == 0 {
-        return Ok(unit_term(term_ids, tail.span));
+        return Ok(tail);
     }
 
     // Decompose `tail` into per-slot sources.
