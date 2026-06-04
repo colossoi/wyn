@@ -2122,6 +2122,24 @@ fn build_entry_outputs(
     // `OutputSlotStore.value.ty` post-monomorphize/buffer_specialize),
     // not from `entry.outputs[i].ty` (which is parse-time-frozen and
     // can still carry unresolved Array-variant type variables).
+    // Source declared no return type (`entry foo(...) () = …`). For
+    // both Unit (compute entries whose tail is a side-effectful builtin
+    // like `image_store` — `normalize_outputs` leaves the body Unit-
+    // typed when `n_outputs == 0`) and SideEffect (a normalised
+    // `OutputSlotStore` chain that bottomed out empty), there's no
+    // logical output slot to emit. Returning a synthetic Unit-typed
+    // `EntryOutput` here would surface to the SPIR-V backend as an
+    // `Output<void>` variable in the entry's interface — malformed and
+    // rejected by naga / the Vulkan validation layer.
+    if entry.outputs.is_empty()
+        && matches!(
+            ret_type,
+            Type::Constructed(TypeName::Unit | TypeName::SideEffect, _)
+        )
+    {
+        return Ok(vec![]);
+    }
+
     if matches!(ret_type, Type::Constructed(TypeName::SideEffect, _)) {
         return entry
             .outputs
