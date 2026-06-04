@@ -1818,8 +1818,8 @@ impl<'a> Converter<'a> {
             TypeName::Array,
             vec![
                 elem_ty.clone(),
-                size.clone(),
                 Type::Constructed(TypeName::ArrayVariantBounded, vec![]),
+                size.clone(),
             ],
         );
 
@@ -1878,8 +1878,8 @@ impl<'a> Converter<'a> {
                     TypeName::Array,
                     vec![
                         elem_ty.clone(),
-                        Type::Constructed(TypeName::SizePlaceholder, vec![]),
                         Type::Constructed(TypeName::ArrayVariantView, vec![]),
+                        Type::Constructed(TypeName::SizePlaceholder, vec![]),
                     ],
                 );
                 let result_nid = self.graph.alloc_side_effect_result(array_ty);
@@ -1926,16 +1926,16 @@ impl<'a> Converter<'a> {
                 TypeName::Array,
                 vec![
                     start.ty.clone(),
-                    Type::Constructed(TypeName::SizePlaceholder, vec![]),
                     Type::Constructed(TypeName::ArrayVariantVirtual, vec![]),
+                    Type::Constructed(TypeName::SizePlaceholder, vec![]),
                 ],
             ),
             ArrayExpr::StorageView(crate::tlc::StorageView { elem_ty, .. }) => Type::Constructed(
                 TypeName::Array,
                 vec![
                     elem_ty.clone(),
-                    Type::Constructed(TypeName::SizePlaceholder, vec![]),
                     Type::Constructed(TypeName::ArrayVariantView, vec![]),
+                    Type::Constructed(TypeName::SizePlaceholder, vec![]),
                 ],
             ),
         }

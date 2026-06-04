@@ -33,9 +33,10 @@ fn default_free_vars_in_type(ty: &mut Type<TypeName>, bound: &[usize]) {
         }
         Type::Variable(_) => {}
         Type::Constructed(TypeName::Array, args) if args.len() == 3 => {
+            // args = [elem, variant, size]
             default_free_vars_in_type(&mut args[0], bound);
-            default_free_vars_in_array_size(&mut args[1], bound);
-            default_free_vars_in_array_variant(&mut args[2], bound);
+            default_free_vars_in_array_variant(&mut args[1], bound);
+            default_free_vars_in_array_size(&mut args[2], bound);
         }
         Type::Constructed(_, args) => {
             for a in args {
@@ -137,12 +138,12 @@ pub(super) fn default_term_for_type(tr: &mut Transformer<'_>, ty: &Type<TypeName
             }
         }
         Type::Constructed(TypeName::Array, args) if args.len() == 3 => {
-            // Array[elem, size, variant]. Only Composite arrays can be
+            // Array[elem, variant, size]. Only Composite arrays can be
             // default-filled — View/Virtual need a buffer binding or
             // a range, which `--fill-holes` can't synthesize.
             let elem_ty = &args[0];
-            let size = type_size_literal(&args[1]);
-            let is_composite = matches!(&args[2], Type::Constructed(TypeName::ArrayVariantComposite, _));
+            let is_composite = matches!(&args[1], Type::Constructed(TypeName::ArrayVariantComposite, _));
+            let size = type_size_literal(&args[2]);
             match (is_composite, size) {
                 (true, Some(n)) => {
                     let elem = default_term_for_type(tr, elem_ty, span);

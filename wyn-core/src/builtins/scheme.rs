@@ -57,7 +57,7 @@ fn mat_type(elem: Type, n: Type, m: Type) -> Type {
 }
 
 fn array_type(elem: Type, addrspace: Type, size: Type) -> Type {
-    Type::Constructed(TypeName::Array, vec![elem, size, addrspace])
+    Type::Constructed(TypeName::Array, vec![elem, addrspace, size])
 }
 
 fn arrow_chain(params: &[Type], ret: Type) -> Type {

@@ -84,6 +84,7 @@ fn vertex_format_rejects_aggregates() {
         TypeName::Array,
         vec![
             scalar(TypeName::Float(32)),
+            Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Constructed(TypeName::Size(4), vec![]),
         ],
     );

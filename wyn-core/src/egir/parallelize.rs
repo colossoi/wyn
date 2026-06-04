@@ -287,8 +287,8 @@ pub fn phase1_transform_reduce(
         TypeName::Array,
         vec![
             elem_ty.clone(),
-            Type::Variable(0),
             Type::Constructed(TypeName::ArrayVariantView, vec![]),
+            Type::Variable(0),
         ],
     );
     let partials_view = graph_ops::intern_storage_view(&mut entry.graph, partials_binding, arr_ty, None);
@@ -395,8 +395,8 @@ fn build_tree_reduce_phase2(
         TypeName::Array,
         vec![
             elem_ty.clone(),
-            Type::Variable(0),
             Type::Constructed(TypeName::ArrayVariantView, vec![]),
+            Type::Variable(0),
         ],
     );
 
@@ -866,8 +866,8 @@ pub fn phase1_transform_redomap(
         TypeName::Array,
         vec![
             elem_ty.clone(),
-            Type::Variable(0),
             Type::Constructed(TypeName::ArrayVariantView, vec![]),
+            Type::Variable(0),
         ],
     );
     let partials_view = graph_ops::intern_storage_view(&mut entry.graph, partials_binding, arr_ty, None);
@@ -1283,8 +1283,8 @@ pub fn phase1_transform_scan(
             TypeName::Array,
             vec![
                 elem_ty.clone(),
-                Type::Variable(0),
                 Type::Constructed(TypeName::ArrayVariantView, vec![]),
+                Type::Variable(0),
             ],
         );
         let block_sums_view =
@@ -1332,8 +1332,8 @@ pub fn synthesize_phase2_scan(
         TypeName::Array,
         vec![
             elem_ty.clone(),
-            Type::Variable(0),
             Type::Constructed(TypeName::ArrayVariantView, vec![]),
+            Type::Variable(0),
         ],
     );
     let block_sums_view = b.emit_storage_view(block_sums_binding, arr_ty.clone());
@@ -1380,8 +1380,8 @@ pub fn synthesize_phase3_scan(
         TypeName::Array,
         vec![
             elem_ty.clone(),
-            Type::Variable(0),
             Type::Constructed(TypeName::ArrayVariantView, vec![]),
+            Type::Variable(0),
         ],
     );
     let _output_view = b.emit_storage_view(output_binding, arr_ty.clone());

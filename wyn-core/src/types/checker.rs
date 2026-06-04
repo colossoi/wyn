@@ -138,9 +138,10 @@ fn fv_type_generalizable(ty: &Type) -> BTreeSet<usize> {
                 acc.insert(*n);
             }
             Type::Constructed(TypeName::Array, args) => {
-                // Only element type position is generalizable. Wyn's Array layout
-                // is [elem, size, variant]; size and variant are compile-time
-                // invariants that must be concrete before monomorphization.
+                // Only element type position is generalizable. Wyn's Array
+                // layout is [elem, variant, dim_0, ...]; variant and the dim
+                // sizes are compile-time invariants that must be concrete
+                // before monomorphization.
                 if let Some(elem) = args.first() {
                     go(elem, acc);
                 }
@@ -888,9 +889,9 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    /// Build an array type: Array[elem, size, variant]
+    /// Build an array type: `Array[elem, variant, size]`
     fn array_ty(elem: Type, addrspace: polytype::Variable, size: polytype::Variable) -> Type {
-        Type::Constructed(TypeName::Array, vec![elem, Self::var(size), Self::var(addrspace)])
+        Type::Constructed(TypeName::Array, vec![elem, Self::var(addrspace), Self::var(size)])
     }
 
     /// Register zipN: ∀n a1..aN s. [a1,s,n] -> ... -> [aN,s,n] -> [(a1,...,aN),s,n]
@@ -1020,7 +1021,7 @@ impl<'a> TypeChecker<'a> {
                 Type::arrow(Self::var(a), Self::var(b)),
                 Self::array_ty(Self::var(a), s, n),
             ],
-            Type::Constructed(TypeName::Array, vec![Self::var(b), Self::var(n), composite]),
+            Type::Constructed(TypeName::Array, vec![Self::var(b), composite, Self::var(n)]),
         );
         self.define_builtin("map", Self::forall(&[a, b, n, s], body));
 
@@ -1074,7 +1075,7 @@ impl<'a> TypeChecker<'a> {
         let composite = Type::Constructed(TypeName::ArrayVariantComposite, vec![]);
         let body = Self::arrow_chain(
             &[op_ty, Self::var(a), Self::array_ty(Self::var(a), s, n)],
-            Type::Constructed(TypeName::Array, vec![Self::var(a), Self::var(n), composite]),
+            Type::Constructed(TypeName::Array, vec![Self::var(a), composite, Self::var(n)]),
         );
         self.define_builtin("scan", Self::forall(&[a, n, s], body));
 
@@ -1088,7 +1089,7 @@ impl<'a> TypeChecker<'a> {
         let k = "k".to_string();
         let k_var = Type::Constructed(TypeName::SizeVar(k.clone()), vec![]);
         let composite = Type::Constructed(TypeName::ArrayVariantComposite, vec![]);
-        let result_array = Type::Constructed(TypeName::Array, vec![Self::var(a), k_var, composite]);
+        let result_array = Type::Constructed(TypeName::Array, vec![Self::var(a), composite, k_var]);
         let existential_result = Type::Constructed(TypeName::Existential(vec![k]), vec![result_array]);
         let body = Self::arrow_chain(&[pred_ty, array_a], existential_result);
         self.define_builtin("filter", Self::forall(&[a, n, s], body));
@@ -1787,7 +1788,7 @@ impl<'a> TypeChecker<'a> {
 
                 if is_matrix {
                     // Matrix: extract row size and element type from the array type
-                    // Array[elem_type, size, variant]
+                    // Array[elem_type, variant, dim_0, ...]
                     let resolved = first_type.apply(&self.context);
                     if resolved.is_array() {
                         if let Type::Constructed(TypeName::Size(cols), _) = resolved.array_size().expect("Array has size") {
@@ -2426,7 +2427,7 @@ impl<'a> TypeChecker<'a> {
                 let elem_type = start_type.apply(&self.context);
                 // Range literals produce virtual arrays (struct {start, step, len})
                 let addrspace = Type::Constructed(TypeName::ArrayVariantVirtual, vec![]);
-                Ok(Type::Constructed(TypeName::Array, vec![elem_type, size_type, addrspace]))
+                Ok(Type::Constructed(TypeName::Array, vec![elem_type, addrspace, size_type]))
             }
 
             ExprKind::Slice(slice) => {
@@ -2486,7 +2487,7 @@ impl<'a> TypeChecker<'a> {
                 } else {
                     addrspace
                 };
-                Ok(Type::Constructed(TypeName::Array, vec![elem_type, result_size, result_variant]))
+                Ok(Type::Constructed(TypeName::Array, vec![elem_type, result_variant, result_size]))
             }
 
             ExprKind::TypeAscription(expr, ascribed_ty) => {
@@ -2882,7 +2883,7 @@ impl<'a> TypeChecker<'a> {
         let size_var = self.context.new_variable();
         let want_array = Type::Constructed(
             TypeName::Array,
-            vec![elem_var.clone(), size_var.clone(), addrspace_var.clone()],
+            vec![elem_var.clone(), addrspace_var.clone(), size_var.clone()],
         );
 
         self.context.unify(array_ty, &want_array).map_err(|_| {

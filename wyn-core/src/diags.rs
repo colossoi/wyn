@@ -64,7 +64,7 @@ fn format_constructed_type(name: &TypeName, args: &[PolyType<TypeName>]) -> Stri
         TypeName::SizeVar(s) => s.clone(),
         TypeName::SizePlaceholder => "?".to_string(),
         TypeName::Array => {
-            // Array[elem, size, variant]
+            // Array[elem, variant, dim_0, ...]
             let ty = &PolyType::Constructed(name.clone(), args.to_vec());
             let elem = format_type(ty.elem_type().expect("Array has elem"));
             let size = ty.array_size().expect("Array has size");

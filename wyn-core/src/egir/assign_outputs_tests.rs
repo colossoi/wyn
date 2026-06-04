@@ -45,7 +45,16 @@ fn rewrite_map_scan_to_into_panics_when_target_missing() {
 #[test]
 fn lower_slot_rejects_unsized_array_without_soac() {
     let f32_ty = Type::Constructed(TypeName::Float(32), vec![]);
-    let unsized_arr_ty = Type::Constructed(TypeName::Array, vec![f32_ty.clone(), Type::Variable(99)]);
+    // Array args = [elem, variant, size]. Use a View variant + a free
+    // type variable for the size to model "unsized runtime array."
+    let unsized_arr_ty = Type::Constructed(
+        TypeName::Array,
+        vec![
+            f32_ty.clone(),
+            Type::Constructed(TypeName::ArrayVariantView, vec![]),
+            Type::Variable(99),
+        ],
+    );
 
     let mut graph = EGraph::new();
     let source = graph.alloc_side_effect_result(unsized_arr_ty.clone());

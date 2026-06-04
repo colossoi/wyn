@@ -536,7 +536,8 @@ fn is_view_array_ty(ty: &polytype::Type<TypeName>) -> bool {
     if args.len() != 3 {
         return false;
     }
-    crate::types::is_array_variant_view(&args[2])
+    // args = [elem, variant, size]
+    crate::types::is_array_variant_view(&args[1])
 }
 
 struct LowerCtx<'a> {

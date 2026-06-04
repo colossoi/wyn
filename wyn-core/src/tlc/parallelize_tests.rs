@@ -38,8 +38,8 @@ fn arr_i32_ty() -> Type<TypeName> {
         TypeName::Array,
         vec![
             i32_ty(),
-            Type::Constructed(TypeName::Size(8), vec![]),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
+            Type::Constructed(TypeName::Size(8), vec![]),
         ],
     )
 }

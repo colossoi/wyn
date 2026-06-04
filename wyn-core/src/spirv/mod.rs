@@ -331,7 +331,7 @@ impl Constructor {
                         self.get_or_create_struct_type(field_types)
                     }
                     TypeName::Array => {
-                        // Array[elem, size, variant]
+                        // Array[elem, variant, dim_0, ...]
                         let elem = ty.elem_type().expect("Array has elem");
                         let elem_type = self.polytype_to_spirv(elem);
                         let size = ty.array_size().expect("Array has size");
@@ -2423,8 +2423,8 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                             TypeName::Array,
                             vec![
                                 elem.clone(),
-                                base_ty.array_size().expect("Array has size").clone(),
                                 PolyType::Constructed(TypeName::ArrayVariantComposite, vec![]),
+                                base_ty.array_size().expect("Array has size").clone(),
                             ],
                         );
                         self.lower_composite_index(buf_id, index_id, result_ty, &composite_ty)

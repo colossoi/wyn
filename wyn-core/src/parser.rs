@@ -1131,14 +1131,14 @@ impl<'a> Parser<'a> {
 
                     if self.check(&Token::RightBracket) {
                         // Empty brackets [] - unsized array with placeholder address space
-                        // Array[elem, size, variant]
+                        // Array[elem, variant, size]
                         self.advance();
                         base = Type::Constructed(
                             TypeName::Array,
                             vec![
                                 base,
-                                Type::Constructed(TypeName::SizePlaceholder, vec![]),
                                 Type::Constructed(TypeName::AddressPlaceholder, vec![]),
+                                Type::Constructed(TypeName::SizePlaceholder, vec![]),
                             ],
                         );
                     } else if let Some(Token::Identifier(name)) = self.peek() {
@@ -1146,13 +1146,13 @@ impl<'a> Parser<'a> {
                         let size_var = name.clone();
                         self.advance();
                         self.expect(Token::RightBracket)?;
-                        // Array[elem, size, variant]
+                        // Array[elem, variant, size]
                         base = Type::Constructed(
                             TypeName::Array,
                             vec![
                                 base,
-                                types::size_var(size_var),
                                 Type::Constructed(TypeName::AddressPlaceholder, vec![]),
+                                types::size_var(size_var),
                             ],
                         );
                     } else if let Some(Token::IntLiteral(n)) = self.peek() {
@@ -1160,13 +1160,13 @@ impl<'a> Parser<'a> {
                         let size = usize::try_from(n).map_err(|_| err_parse!("Invalid array size"))?;
                         self.advance();
                         self.expect(Token::RightBracket)?;
-                        // Array[elem, size, variant]
+                        // Array[elem, variant, size]
                         base = Type::Constructed(
                             TypeName::Array,
                             vec![
                                 base,
-                                Type::Constructed(TypeName::Size(size), vec![]),
                                 Type::Constructed(TypeName::AddressPlaceholder, vec![]),
+                                Type::Constructed(TypeName::Size(size), vec![]),
                             ],
                         );
                     } else {
@@ -1237,12 +1237,13 @@ impl<'a> Parser<'a> {
             if self.check(&Token::RightBracket) {
                 self.advance();
                 let elem_type = self.parse_array_or_base_type()?;
+                // Array[elem, variant, size]
                 return Ok(Type::Constructed(
                     TypeName::Array,
                     vec![
                         elem_type,
-                        Type::Constructed(TypeName::SizePlaceholder, vec![]),
                         Type::Constructed(TypeName::AddressPlaceholder, vec![]),
+                        Type::Constructed(TypeName::SizePlaceholder, vec![]),
                     ],
                 ));
             }
@@ -1253,13 +1254,13 @@ impl<'a> Parser<'a> {
                 self.advance();
                 self.expect(Token::RightBracket)?;
                 let elem_type = self.parse_array_or_base_type()?; // Allow nested arrays
-                // Array[elem, size, variant]
+                // Array[elem, variant, size]
                 Ok(Type::Constructed(
                     TypeName::Array,
                     vec![
                         elem_type,
-                        Type::Constructed(TypeName::Size(size), vec![]),
                         Type::Constructed(TypeName::AddressPlaceholder, vec![]),
+                        Type::Constructed(TypeName::Size(size), vec![]),
                     ],
                 ))
             } else if let Some(Token::Identifier(name)) = self.peek() {
@@ -1268,13 +1269,13 @@ impl<'a> Parser<'a> {
                 self.advance();
                 self.expect(Token::RightBracket)?;
                 let elem_type = self.parse_array_or_base_type()?;
-                // Array[elem, size, variant]
+                // Array[elem, variant, size]
                 Ok(Type::Constructed(
                     TypeName::Array,
                     vec![
                         elem_type,
-                        types::size_var(size_var),
                         Type::Constructed(TypeName::AddressPlaceholder, vec![]),
+                        types::size_var(size_var),
                     ],
                 ))
             } else {

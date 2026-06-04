@@ -293,8 +293,8 @@ impl EntryBuilder {
             TypeName::Array,
             vec![
                 elem_ty.clone(),
-                Type::Variable(0),
                 Type::Constructed(TypeName::ArrayVariantView, vec![]),
+                Type::Variable(0),
             ],
         );
         let view_nid = self.emit_storage_view(binding, arr_ty);

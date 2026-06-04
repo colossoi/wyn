@@ -50,7 +50,16 @@ fn i32_ty() -> Type<TypeName> {
 
 #[allow(dead_code)]
 fn array_ty(elem: Type<TypeName>) -> Type<TypeName> {
-    Type::Constructed(TypeName::Array, vec![elem])
+    // Array args = [elem, variant, size]. Test-fixture placeholder
+    // with Composite variant + opaque Variable size.
+    Type::Constructed(
+        TypeName::Array,
+        vec![
+            elem,
+            Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
+            Type::Variable(0),
+        ],
+    )
 }
 
 fn arrow(from: Type<TypeName>, to: Type<TypeName>) -> Type<TypeName> {

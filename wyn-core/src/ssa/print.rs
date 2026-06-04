@@ -34,7 +34,8 @@ fn format_type(ty: &Type<TypeName>) -> String {
         }
         Type::Constructed(TypeName::Array, args) if args.len() >= 2 => {
             let elem = format_type(&args[0]);
-            let size = if args.len() >= 3 { format_array_size(&args[1]) } else { "?".to_string() };
+            // args = [elem, variant, dim_0, ...]; size is args[2] when present.
+            let size = if args.len() >= 3 { format_array_size(&args[2]) } else { "?".to_string() };
             format!("[{size}]{elem}")
         }
         Type::Constructed(TypeName::Vec, args) if !args.is_empty() => {

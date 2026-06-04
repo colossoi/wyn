@@ -172,10 +172,16 @@ pub enum TypeName {
     /// Signed integer types: i8, i16, i32, i64
     Int(usize),
     /// Unified array type constructor.
-    /// Type args: [elem_type, address_space, size]
-    /// - elem_type: element type (f32, etc.)
-    /// - address_space: Storage, Function, AddressPlaceholder, or type variable
-    /// - size: Size(n), SizeVar("n"), SizePlaceholder, or type variable
+    /// Type args: `[elem, variant, dim_0, dim_1, …, dim_{rank-1}]`
+    /// - `elem`: element type (f32, etc.)
+    /// - `variant`: ArrayVariantView / Composite / Virtual / Bounded,
+    ///   AddressPlaceholder, or a type variable
+    /// - `dim_i`: per-dimension size term — `Size(n)` / `SizeVar(name)` /
+    ///   `SizePlaceholder` / `Skolem` / `Variable`
+    ///
+    /// Rank is implicit: `args.len() - 2`. All arrays are rank-1 today;
+    /// the variadic dim suffix is the entry point for multi-dim
+    /// representations in a future effort.
     Array,
     /// Size placeholder (for []t syntax where size is inferred). Replaced with type variable before type checking.
     SizePlaceholder,
@@ -417,11 +423,15 @@ impl polytype::Name for TypeName {
 ///
 /// ## Constructed type argument layouts
 ///
-/// | Type    | args[0]       | args[1]          | args[2]      |
-/// |---------|---------------|------------------|--------------|
-/// | `Vec`   | elem_type     | Size(n)          | —            |
-/// | `Mat`   | elem_type     | Size(cols)       | Size(rows)   |
-/// | `Array` | elem_type     | size             | variant      |
+/// | Type    | args[0]       | args[1]          | args[2..]                |
+/// |---------|---------------|------------------|--------------------------|
+/// | `Vec`   | elem_type     | Size(n)          | —                        |
+/// | `Mat`   | elem_type     | Size(cols)       | Size(rows)               |
+/// | `Array` | elem_type     | variant          | dim_0, dim_1, …, dim_R-1 |
+///
+/// Array rank is implicit: `args.len() - 2`. All arrays are rank-1
+/// today; the variadic dim suffix is the entry point for multi-dim
+/// representations in a future effort.
 pub trait TypeExt {
     /// Create a unique (consuming/alias-free) type: *T
     fn unique(inner: Type) -> Type;
@@ -550,7 +560,7 @@ impl TypeExt for Type {
             Type::Constructed(TypeName::Array, args) => {
                 debug_assert!(
                     args.len() >= 1 && args.len() <= 3,
-                    "Array must have 1-3 args [elem, size, variant], got {:?}",
+                    "Array must have 1-3 args [elem, variant, size], got {:?}",
                     args
                 );
                 args.first()
@@ -662,13 +672,13 @@ impl TypeExt for Type {
     fn array_size(&self) -> Option<&Type> {
         if let Type::Constructed(TypeName::Array, args) = self {
             debug_assert!(
-                args.len() >= 2,
-                "Array must have at least 2 args [elem, size, ...], got {:?}",
+                args.len() >= 3,
+                "Array must have at least 3 args [elem, variant, dim_0, ...], got {:?}",
                 args
             );
             debug_assert!(
                 matches!(
-                    &args[1],
+                    &args[2],
                     Type::Constructed(
                         TypeName::Size(_)
                             | TypeName::SizeVar(_)
@@ -677,25 +687,24 @@ impl TypeExt for Type {
                         _
                     ) | Type::Variable(_)
                 ),
-                "Array args[1] should be Size/SizeVar/SizePlaceholder/Skolem/Variable, got {:?}",
-                args[1]
+                "Array args[2] should be Size/SizeVar/SizePlaceholder/Skolem/Variable, got {:?}",
+                args[2]
             );
-            return Some(&args[1]);
+            return Some(&args[2]);
         }
         None
     }
 
     fn array_variant(&self) -> Option<&Type> {
         if let Type::Constructed(TypeName::Array, args) = self {
-            debug_assert_eq!(
-                args.len(),
-                3,
-                "Array must have exactly 3 args [elem, size, variant], got {:?}",
+            debug_assert!(
+                args.len() >= 2,
+                "Array must have at least 2 args [elem, variant, ...], got {:?}",
                 args
             );
             debug_assert!(
                 matches!(
-                    &args[2],
+                    &args[1],
                     Type::Constructed(
                         TypeName::ArrayVariantComposite
                             | TypeName::ArrayVariantView
@@ -705,10 +714,10 @@ impl TypeExt for Type {
                         _
                     ) | Type::Variable(_)
                 ),
-                "Array args[2] should be a variant/placeholder/variable, got {:?}",
-                args[2]
+                "Array args[1] should be a variant/placeholder/variable, got {:?}",
+                args[1]
             );
-            return Some(&args[2]);
+            return Some(&args[1]);
         }
         None
     }
@@ -835,28 +844,29 @@ pub fn matrix_type_constructors() -> HashMap<String, Type> {
         .collect()
 }
 
-/// Create a sized array: Array[elem, Size(n), Composite]
-/// Defaults to Composite variant for local/value arrays.
+/// Create a sized array: `Array[elem, Composite, Size(n)]`. Defaults to
+/// Composite variant for local/value arrays.
 pub fn sized_array(size: usize, elem_type: Type) -> Type {
     Type::Constructed(
         TypeName::Array,
         vec![
             elem_type,
-            Type::Constructed(TypeName::Size(size), vec![]),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
+            Type::Constructed(TypeName::Size(size), vec![]),
         ],
     )
 }
 
-/// Create a sized array with placeholder address space: Array[elem, Size(n), Placeholder]
-/// Used for parser tests where address space hasn't been resolved yet.
+/// Create a sized array with placeholder address space: `Array[elem,
+/// AddressPlaceholder, Size(n)]`. Used for parser tests where the
+/// address space hasn't been resolved yet.
 pub fn sized_array_placeholder(size: usize, elem_type: Type) -> Type {
     Type::Constructed(
         TypeName::Array,
         vec![
             elem_type,
-            Type::Constructed(TypeName::Size(size), vec![]),
             Type::Constructed(TypeName::AddressPlaceholder, vec![]),
+            Type::Constructed(TypeName::Size(size), vec![]),
         ],
     )
 }
@@ -1068,11 +1078,11 @@ pub fn debug_assert_top_level_type(ty: &Type, context: &str) {
 
     match ty {
         Type::Constructed(name, _) => match name {
-            // Address space markers - only valid inside Array[elem, size, variant]
+            // Address space markers - only valid inside Array[elem, variant, dim_0, ...]
             TypeName::ArrayVariantView | TypeName::ArrayVariantComposite | TypeName::AddressPlaceholder => {
                 panic!(
                     "BUG: Address space type {:?} used as top-level type in {}. \
-                     Address space markers should only appear inside Array[elem, size, variant].",
+                     Address space markers should only appear inside Array[elem, variant, dim_0, ...].",
                     ty, context
                 );
             }
@@ -1119,16 +1129,17 @@ pub fn pointer_addrspace(ty: &Type) -> Option<&Type> {
 }
 
 // --- Array type helpers ---
-// Array[elem, size, variant] is the unified array type.
+// Array[elem, variant, dim_0, ...] is the unified array type. Rank is
+// implicit (args.len() - 2); all arrays are rank-1 today.
 
-/// Create an unsized array (slice): Array[elem, SizePlaceholder, addrspace]
-pub fn unsized_array(elem: Type, addrspace: Type) -> Type {
+/// Create an unsized array (slice): `Array[elem, variant, SizePlaceholder]`
+pub fn unsized_array(elem: Type, variant: Type) -> Type {
     Type::Constructed(
         TypeName::Array,
         vec![
             elem,
+            variant,
             Type::Constructed(TypeName::SizePlaceholder, vec![]),
-            addrspace,
         ],
     )
 }
@@ -1204,7 +1215,7 @@ pub fn format_type(ty: &Type) -> String {
             let arg_strs: Vec<String> = args.iter().map(format_type).collect();
             format!("({})", arg_strs.join(", "))
         }
-        // Array[elem, size, variant]
+        // Array[elem, variant, dim_0, ...]
         _ if ty.is_array() => {
             let elem = format_type(ty.elem_type().expect("Array has elem"));
             let size = ty.array_size().expect("Array has size");

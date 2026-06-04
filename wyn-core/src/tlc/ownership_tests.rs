@@ -116,7 +116,14 @@ fn synth_program_with_alias_let() -> (Program, crate::SymbolId, crate::SymbolId)
 
     // Type: *[4]i32  —  Unique(Array<i32>)
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
-    let arr_ty = Type::Constructed(TypeName::Array, vec![i32_ty.clone()]);
+    let arr_ty = Type::Constructed(
+        TypeName::Array,
+        vec![
+            i32_ty.clone(),
+            Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
+            Type::Variable(0),
+        ],
+    );
     let unique_arr_ty = Type::Constructed(TypeName::Unique, vec![arr_ty.clone()]);
 
     // Body: Let b = a in 0    (rhs `a` aliases `b`; `0` body keeps test trivial)
@@ -1227,8 +1234,22 @@ fn synth_program_with_with_through_index() -> Program {
 
     // Types
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
-    let inner_arr_ty = Type::Constructed(TypeName::Array, vec![i32_ty.clone()]);
-    let outer_arr_ty = Type::Constructed(TypeName::Array, vec![inner_arr_ty.clone()]);
+    let inner_arr_ty = Type::Constructed(
+        TypeName::Array,
+        vec![
+            i32_ty.clone(),
+            Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
+            Type::Variable(0),
+        ],
+    );
+    let outer_arr_ty = Type::Constructed(
+        TypeName::Array,
+        vec![
+            inner_arr_ty.clone(),
+            Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
+            Type::Variable(0),
+        ],
+    );
     let unique_outer_ty = Type::Constructed(TypeName::Unique, vec![outer_arr_ty.clone()]);
 
     // _w_intrinsic_array_with : [4]i32 -> i32 -> i32 -> [4]i32
@@ -1414,7 +1435,14 @@ fn synth_program_with_populated_soac_captures() -> Program {
     let cap_sym = symbols.alloc("cap".to_string());
 
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
-    let arr_ty = Type::Constructed(TypeName::Array, vec![i32_ty.clone()]);
+    let arr_ty = Type::Constructed(
+        TypeName::Array,
+        vec![
+            i32_ty.clone(),
+            Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
+            Type::Variable(0),
+        ],
+    );
     let unique_arr_ty = Type::Constructed(TypeName::Unique, vec![arr_ty.clone()]);
     let consume_ty = Type::Constructed(TypeName::Arrow, vec![unique_arr_ty.clone(), i32_ty.clone()]);
 
@@ -1500,7 +1528,14 @@ fn synth_program_with_populated_soac_captures() -> Program {
     // local plus the outer term that supplies its value at SOAC creation.
     let map_term = Term {
         id: ids.next_id(),
-        ty: Type::Constructed(TypeName::Array, vec![i32_ty.clone()]),
+        ty: Type::Constructed(
+            TypeName::Array,
+            vec![
+                i32_ty.clone(),
+                Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
+                Type::Variable(0),
+            ],
+        ),
         span: Span::dummy(),
         kind: TermKind::Soac(SoacOp::Map {
             lam: SoacBody {
@@ -1524,7 +1559,14 @@ fn synth_program_with_populated_soac_captures() -> Program {
         span: Span::dummy(),
         kind: TermKind::Let {
             name: f_sym,
-            name_ty: Type::Constructed(TypeName::Array, vec![i32_ty.clone()]),
+            name_ty: Type::Constructed(
+                TypeName::Array,
+                vec![
+                    i32_ty.clone(),
+                    Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
+                    Type::Variable(0),
+                ],
+            ),
             rhs: Box::new(map_term),
             body: Box::new(inner_let_body),
         },
@@ -1613,7 +1655,14 @@ fn soac_capture_term_is_analyzed_for_liveness() {
     let lambda_param_sym = symbols.alloc("_x".to_string());
 
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
-    let arr_ty = Type::Constructed(TypeName::Array, vec![i32_ty.clone()]);
+    let arr_ty = Type::Constructed(
+        TypeName::Array,
+        vec![
+            i32_ty.clone(),
+            Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
+            Type::Variable(0),
+        ],
+    );
 
     let var_outer = Term {
         id: ids.next_id(),

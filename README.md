@@ -247,7 +247,7 @@ don't pattern-match on args indices directly.
 | `Tuple(n)` | t₁ | t₂ | … | n elements; arity in the variant tag |
 | `Vec` | elem | `Size(n)` | — | n-component vector |
 | `Mat` | elem | `Size(cols)` | `Size(rows)` | Column-major |
-| `Array` | elem | size | variant | size is `Size(n)` \| `SizeVar(name)` \| `SizePlaceholder` \| `Variable`; variant is `ArrayVariantView` \| `Composite` \| `Virtual` \| `Bounded` |
+| `Array` | elem | variant | dim_0 (… dim_{rank-1}) | Rank is implicit (`args.len() - 2`); all arrays are rank-1 today. Each dim is `Size(n)` \| `SizeVar(name)` \| `SizePlaceholder` \| `Variable`; variant is `ArrayVariantView` \| `Composite` \| `Virtual` \| `Bounded` |
 | `Pointer` | pointee | addrspace | — | addrspace is one of `PointerFunction` / `PointerInput` / `PointerOutput` / `PointerStorage` |
 | `Unique` | inner | — | — | `*T` uniqueness marker (consumed by ownership) |
 | `Record(fields)` | t₁ | t₂ | … | Field names in the variant payload (declared order); per-field types in args |

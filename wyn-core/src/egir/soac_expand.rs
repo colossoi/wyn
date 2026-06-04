@@ -126,7 +126,8 @@ fn input_read_elem(arr_ty: &Type<TypeName>, acc_elem: &Type<TypeName>) -> Type<T
 fn is_plain_composite(arr_ty: &Type<TypeName>) -> bool {
     match arr_ty {
         Type::Constructed(TypeName::Array, args) if args.len() == 3 => {
-            is_array_variant_composite(&args[2]) && !is_virtual_array(arr_ty)
+            // args = [elem, variant, size]
+            is_array_variant_composite(&args[1]) && !is_virtual_array(arr_ty)
         }
         _ => false,
     }
@@ -187,7 +188,8 @@ fn is_view_source(arr_ty: &Type<TypeName>) -> bool {
     matches!(
         arr_ty,
         Type::Constructed(TypeName::Array, args)
-            if args.len() == 3 && is_array_variant_view(&args[2])
+            // args = [elem, variant, size]
+            if args.len() == 3 && is_array_variant_view(&args[1])
     )
 }
 
@@ -1215,8 +1217,8 @@ fn build_filter_loop(
         TypeName::Array,
         vec![
             spec.elem_ty.clone(),
-            spec.capacity_size.clone(),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
+            spec.capacity_size.clone(),
         ],
     );
 

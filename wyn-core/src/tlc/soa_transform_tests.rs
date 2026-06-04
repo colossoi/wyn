@@ -17,7 +17,7 @@ fn composite_variant() -> Type<TypeName> {
 }
 
 fn array_ty(elem: Type<TypeName>, size: usize) -> Type<TypeName> {
-    Type::Constructed(TypeName::Array, vec![elem, size_ty(size), composite_variant()])
+    Type::Constructed(TypeName::Array, vec![elem, composite_variant(), size_ty(size)])
 }
 
 fn tuple_ty(args: Vec<Type<TypeName>>) -> Type<TypeName> {

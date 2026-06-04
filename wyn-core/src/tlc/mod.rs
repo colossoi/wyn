@@ -2832,9 +2832,9 @@ impl<'a> Transformer<'a> {
                 self.mk_tuple(blank_terms, ty.clone(), span)
             }
             Type::Constructed(TypeName::Array, args) => {
-                debug_assert_eq!(args.len(), 3, "Array type must have [elem, size, variant] args");
+                debug_assert_eq!(args.len(), 3, "Array type must have [elem, variant, size] args");
                 let elem_ty = &args[0];
-                let n = match &args[1] {
+                let n = match &args[2] {
                     Type::Constructed(TypeName::Size(n), _) => *n,
                     other => panic!(
                         "BUG: array-typed sum payload must have constant size (got {:?}); \
