@@ -309,11 +309,6 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
                 scope.push_let(name, name_ty, *rhs);
                 current = *body;
             }
-            TermKind::OutputSlotStore { value, .. } => {
-                // Single-output entries that didn't pass through the Let
-                // sequencing — the tail is the slot store directly.
-                current = *value;
-            }
             TermKind::Soac(soac) => {
                 let parallelizable = analyze_soac(&soac, &ty, symbols, &entry_slots)?;
                 let captured_params = scope.captured_params();

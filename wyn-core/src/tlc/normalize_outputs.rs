@@ -7,23 +7,24 @@
 //! tail looking for a parallelisable SOAC, `egir::assign_outputs`
 //! flattens the tuple and per-slot retargets producer SOACs.
 //!
-//! After this pass: a compute entry's body is *unit-producing*. Its
-//! tail is a chain of `TermKind::OutputSlotStore { slot_index, value, .. }`
-//! terms, one per declared output, wired together via `Let { name: _ }`
-//! sequencing and terminated by `UnitLit`. Single-output and
-//! multi-output cases share one structural shape.
+//! After this pass: a compute entry's body produces no value
+//! (`SideEffect`-typed). Its tail is a chain of
+//! `TermKind::OutputSlotStore { slot_index, value, .. }` terms, one
+//! per declared output, wired together via `Let { name: _ }`
+//! sequencing and capped with a `SideEffect`-typed terminator.
+//! Single-output and multi-output cases share one structural shape.
+//! After running, `def.ty == def.body.ty` for every normalised entry.
 //!
 //! The pass runs after `apply_ownership` (so `SoacDestination` is
 //! already accurate) and before `lift_gathers` / `defunctionalize` /
 //! `parallelize_soacs` (so the simpler IR shape feeds those passes).
 //!
-//! Phase 1 scope:
-//!   * Tail shapes handled: a `TermKind::Tuple(operands)` matching
-//!     `outputs.len()` → N slots; any other tail with a single-output
-//!     entry → 1 slot.
-//!   * Tail shapes deferred: `If` / `Loop` / function calls returning a
-//!     tuple — error out with `NormalizeError::UnsupportedTail` and
-//!     defer until a workload needs them.
+//! Tail shapes handled: a `TermKind::Tuple(operands)` matching
+//! `outputs.len()` → N slots; any other tail with a single-output
+//! entry → 1 slot. Multi-output entries whose tail is a single value
+//! of tuple type (e.g. a `reduce` returning `(u32, [4]u32)`) flow
+//! through unchanged — `egir::assign_outputs` decomposes them via
+//! `Project` over the `Return(Some(result))` terminator.
 //!
 //! `SoacDestination::OutputView` association with bindings stays at
 //! EGIR time (`from_tlc::build_entry_outputs` allocates `BindingRef`s
@@ -41,11 +42,6 @@ mod normalize_outputs_tests;
 
 #[derive(Debug)]
 pub enum NormalizeError {
-    /// The entry tail doesn't match a shape this pass can decompose.
-    UnsupportedTail {
-        entry: String,
-        shape: &'static str,
-    },
     /// The tuple-tail operand count doesn't match the declared output
     /// count.
     SlotCountMismatch {
@@ -58,14 +54,6 @@ pub enum NormalizeError {
 impl std::fmt::Display for NormalizeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            NormalizeError::UnsupportedTail { entry, shape } => {
-                write!(
-                    f,
-                    "normalize_outputs: entry `{entry}` tail has shape `{shape}` which Phase 1 \
-                     doesn't yet decompose into output slots; rewrite to a Tuple(...) of slot \
-                     producers or report a bug"
-                )
-            }
             NormalizeError::SlotCountMismatch {
                 entry,
                 outputs,
@@ -113,7 +101,7 @@ fn normalize_entry(
 
     // Peel the outer Lambda (entry params) and any tail Let-chain; the
     // tail expression is what we decompose. We rebuild the same
-    // Lambda/Let frame around the new unit-producing body so all
+    // Lambda/Let frame around the new `SideEffect`-typed body so all
     // intermediate bindings stay in scope for the slot writes.
     let body_span = def.body.span;
     let body = std::mem::replace(
@@ -156,11 +144,11 @@ fn rewrite_body(
         }) => {
             let new_body = rewrite_body(*body, entry_name, n_outputs, term_ids, symbols)?;
             // Derive the rebuilt Lambda's arrow ty + ret_ty from
-            // `new_body.ty`. For fully-normalised bodies that's Unit;
-            // for the multi-output non-Tuple fallthrough in
-            // `emit_slot_writes` (which preserves the tail's tuple
-            // type) it's the original tuple. Forcing Unit here would
-            // claim a return type the body doesn't actually produce.
+            // `new_body.ty`. For fully-normalised bodies that's
+            // `SideEffect`; for the multi-output non-Tuple fallthrough
+            // in `emit_slot_writes` (which preserves the tail's tuple
+            // type) it's the original tuple. Forcing one or the other
+            // would claim a return type the body doesn't produce.
             let body_ty = new_body.ty.clone();
             let mut arrow_ty = body_ty.clone();
             for (_, pt) in params.iter().rev() {
@@ -315,30 +303,4 @@ fn side_effect_terminator(term_ids: &mut TermIdSource, span: crate::ast::Span) -
 
 fn side_effect_ty() -> Type<TypeName> {
     Type::Constructed(TypeName::SideEffect, vec![])
-}
-
-fn tail_shape_name(kind: &TermKind) -> &'static str {
-    match kind {
-        TermKind::Var(_) => "Var",
-        TermKind::BinOp(_) => "BinOp",
-        TermKind::UnOp(_) => "UnOp",
-        TermKind::Lambda(_) => "Lambda",
-        TermKind::App { .. } => "App",
-        TermKind::Let { .. } => "Let",
-        TermKind::IntLit(_) => "IntLit",
-        TermKind::FloatLit(_) => "FloatLit",
-        TermKind::BoolLit(_) => "BoolLit",
-        TermKind::UnitLit => "UnitLit",
-        TermKind::Coerce { .. } => "Coerce",
-        TermKind::Extern(_) => "Extern",
-        TermKind::If { .. } => "If",
-        TermKind::Loop { .. } => "Loop",
-        TermKind::Soac(_) => "Soac",
-        TermKind::ArrayExpr(_) => "ArrayExpr",
-        TermKind::Tuple(_) => "Tuple",
-        TermKind::TupleProj { .. } => "TupleProj",
-        TermKind::Index { .. } => "Index",
-        TermKind::VecLit(_) => "VecLit",
-        TermKind::OutputSlotStore { .. } => "OutputSlotStore",
-    }
 }
