@@ -882,25 +882,6 @@ impl<'m> Liveness<'m> {
         union(&live_after, &live_in_body)
     }
 
-    /// SOAC-body variant of `analyze_lambda`: same fixed-point as
-    /// above, but also threads liveness through capture terms.
-    ///
-    /// Capture terms are program points themselves — they may
-    /// contain reads or kills that need to land at the lambda
-    /// creation site. We thread liveness through them in reverse
-    /// (last-evaluated first under backward dataflow), starting
-    /// from the post-body live set so any uses inside a capture
-    /// term flow back to the parent's live_in.
-    fn analyze_soac_body(&mut self, sb: &super::SoacBody, live_after: LiveSet) -> LiveSet {
-        let no_per_call_defs = LiveSet::new();
-        let live_in_body = self.lambda_body_fixed_point(&sb.lam, &no_per_call_defs);
-        let mut live = union(&live_after, &live_in_body);
-        for (_, _, capture_term) in sb.captures.iter().rev() {
-            live = self.analyze(capture_term, live);
-        }
-        live
-    }
-
     fn analyze_soac(&mut self, op: &SoacOp, live_after: LiveSet, soac_id: TermId) -> LiveSet {
         let per_call_defs = self.model.defs.get(&soac_id).cloned().unwrap_or_default();
         match op {

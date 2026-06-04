@@ -247,9 +247,7 @@ impl Parser<'_> {
             self.advance(); // consume `(`
             if !self.check(&Token::RightParen) {
                 loop {
-                    let arg = self.parse_pattern()?;
-                    end_span = arg.h.span;
-                    args.push(arg);
+                    args.push(self.parse_pattern()?);
                     if self.check(&Token::Comma) {
                         self.advance();
                     } else {
