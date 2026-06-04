@@ -710,7 +710,15 @@ fn build_gather_prepass(
     let elem_ty = crate::types::array_elem(&result_ty)
         .cloned()
         .expect("try_lift's is_runtime_sized_array(name_ty) gate guarantees an array elem");
-    let uniform_attrs = vec![None; captured_inputs.len()];
+    let required_params: Vec<super::parallelize::RequiredParam> = captured_inputs
+        .iter()
+        .map(|(s, ty)| super::parallelize::RequiredParam {
+            sym: *s,
+            ty: ty.clone(),
+            attr: None,
+            binding: None,
+        })
+        .collect();
     let mut storage_bindings = vec![StorageBindingDecl {
         binding: BindingRef::new(binding.0, binding.1),
         role: StorageRole::Output,
@@ -732,8 +740,7 @@ fn build_gather_prepass(
         &name,
         producer,
         result_ty,
-        captured_inputs,
-        &uniform_attrs,
+        &required_params,
         storage_bindings,
         program,
         term_ids,

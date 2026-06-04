@@ -105,6 +105,21 @@ impl SoacAnalysis {
     }
 }
 
+/// One entry of an `EntryAnalysis::required_params` list: a free var
+/// from the SOAC + prefix_lets fragment, paired with the attribute and
+/// `EntryParamBinding` carried forward from the original entry. Phase
+/// entries reproduce all four so a captured param routes through EGIR
+/// the same way the original did (a runtime-sized array without the
+/// `#[storage]` attribute and `EntryParamBinding` falls into the
+/// push-constant path and fails its static-layout check).
+#[derive(Debug, Clone)]
+pub(crate) struct RequiredParam {
+    pub sym: SymbolId,
+    pub ty: Type<TypeName>,
+    pub attr: Option<Attribute>,
+    pub binding: Option<interface::EntryParamBinding>,
+}
+
 /// Result of analyzing a compute entry point.
 #[derive(Debug, Clone)]
 struct EntryAnalysis {
@@ -113,10 +128,11 @@ struct EntryAnalysis {
     /// Let-binding prefix before the SOAC.
     pub prefix_lets: Vec<(SymbolId, Type<TypeName>, Term)>,
     /// The subset of the original entry's params that the SOAC and
-    /// `prefix_lets` actually reference. Phase entries must re-declare
-    /// these as params so the references don't leak out as free
-    /// globals during SPIR-V emission.
-    pub required_params: Vec<(SymbolId, Type<TypeName>)>,
+    /// `prefix_lets` actually reference, each annotated with its
+    /// original attribute + `EntryParamBinding`. Phase entries must
+    /// re-declare these as params so the references don't leak out as
+    /// free globals during SPIR-V emission.
+    pub required_params: Vec<RequiredParam>,
 }
 
 // =============================================================================
@@ -283,7 +299,7 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
                 let captured_params = scope.captured_params();
                 let prefix_lets = scope.into_prefix_lets();
                 let required_params =
-                    compute_required_params(&parallelizable, &prefix_lets, &captured_params, symbols);
+                    compute_required_params(&parallelizable, &prefix_lets, &captured_params, def, symbols);
                 return Some(EntryAnalysis {
                     def_name: def.name,
                     soac: parallelizable,
@@ -309,9 +325,12 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
 }
 
 /// Compute the subset of outer entry params that the tail SOAC + retained
-/// prefix_lets actually reference. Phase entries must re-declare these
-/// as their own params or the references leak out as undefined globals
-/// during SPIR-V emission.
+/// prefix_lets actually reference, each annotated with the attribute +
+/// `EntryParamBinding` carried forward from the original entry. Phase
+/// entries must re-declare these as params (or the references leak out
+/// as undefined globals during SPIR-V emission) AND reproduce the
+/// original binding metadata (or a runtime-sized array param falls into
+/// EGIR's push-constant path and fails its static-layout check).
 ///
 /// Reuses `closure_convert::collect_free_vars` with empty `top_level` /
 /// `known_defs` sets — no top-level filtering, just "bound vs free"
@@ -320,8 +339,9 @@ fn compute_required_params(
     soac: &SoacAnalysis,
     prefix_lets: &[(SymbolId, Type<TypeName>, Term)],
     captured_params: &[(SymbolId, Type<TypeName>)],
+    def: &Def,
     symbols: &SymbolTable,
-) -> Vec<(SymbolId, Type<TypeName>)> {
+) -> Vec<RequiredParam> {
     use std::collections::HashSet;
     let empty_top: HashSet<SymbolId> = HashSet::new();
     let empty_defs: HashSet<String> = HashSet::new();
@@ -372,7 +392,62 @@ fn compute_required_params(
             },
         )
         .collect();
-    captured_params.iter().filter(|(s, _)| free_syms.contains(s)).cloned().collect()
+
+    // Zip in each captured param's attribute and `EntryParamBinding`
+    // from the original entry. `peel_lambda_params` indexes the entry
+    // body's outer Lambda; that index aligns with `EntryDecl.params`
+    // and `EntryDecl.param_bindings`.
+    let decl = match &def.meta {
+        DefMeta::EntryPoint(d) => Some(d),
+        _ => None,
+    };
+    let (orig_params, _) = peel_lambda_params(&def.body);
+
+    captured_params
+        .iter()
+        .filter(|(s, _)| free_syms.contains(s))
+        .map(|(sym, ty)| {
+            let orig_idx = orig_params.iter().position(|(s, _)| s == sym);
+            let attr = decl
+                .and_then(|d| orig_idx.and_then(|i| d.params.get(i)))
+                .and_then(forwardable_binding_attribute);
+            let binding =
+                decl.and_then(|d| orig_idx.and_then(|i| d.param_bindings.get(i).cloned())).flatten();
+            RequiredParam {
+                sym: *sym,
+                ty: ty.clone(),
+                attr,
+                binding,
+            }
+        })
+        .collect()
+}
+
+/// Find the first `#[storage]` / `#[uniform]` / `#[texture]` / `#[sampler]`
+/// / `#[storage_image]` attribute on an entry-param pattern, peeling
+/// through `Typed` and `Attributed` wrappers to reach it. Phase entries
+/// re-attach this attribute on the corresponding captured param so EGIR
+/// routes the param to the same binding the host provided.
+fn forwardable_binding_attribute(pat: &ast::Pattern) -> Option<Attribute> {
+    match &pat.kind {
+        ast::PatternKind::Attributed(attrs, inner) => {
+            for attr in attrs {
+                if matches!(
+                    attr,
+                    Attribute::Storage { .. }
+                        | Attribute::Uniform { .. }
+                        | Attribute::Texture { .. }
+                        | Attribute::Sampler { .. }
+                        | Attribute::StorageImage { .. }
+                ) {
+                    return Some(attr.clone());
+                }
+            }
+            forwardable_binding_attribute(inner)
+        }
+        ast::PatternKind::Typed(inner, _) => forwardable_binding_attribute(inner),
+        _ => None,
+    }
 }
 
 /// Analyze a SOAC, rejecting non-parallelizable variants (Filter,
@@ -1241,16 +1316,23 @@ fn build_prepass_def(
     program: &mut Program,
     term_ids: &mut TermIdSource,
 ) -> Def {
-    let required_params: Vec<(SymbolId, Type<TypeName>)> =
-        captured_uniforms.iter().map(|(s, ty, _)| (*s, ty.clone())).collect();
-    let uniform_attrs: Vec<Option<BindingRef>> =
-        captured_uniforms.iter().map(|(_, _, b)| Some(*b)).collect();
+    let required_params: Vec<RequiredParam> = captured_uniforms
+        .iter()
+        .map(|(s, ty, b)| RequiredParam {
+            sym: *s,
+            ty: ty.clone(),
+            attr: Some(Attribute::Uniform {
+                set: b.set,
+                binding: b.binding,
+            }),
+            binding: None,
+        })
+        .collect();
     make_entry_def(
         entry_name,
         soac_term,
         elem_ty,
         &required_params,
-        &uniform_attrs,
         Vec::new(),
         program,
         term_ids,
@@ -2024,7 +2106,6 @@ fn build_two_phase_entries(
         phase1_body,
         unit_ty.clone(),
         &analysis.required_params,
-        &[],
         phase1_bindings,
         program,
         term_ids,
@@ -2087,7 +2168,6 @@ fn build_two_phase_entries(
         phase2_body,
         unit_ty.clone(),
         &analysis.required_params,
-        &[],
         phase2_bindings,
         program,
         term_ids,
@@ -2670,8 +2750,7 @@ pub(crate) fn make_entry_def(
     name: &str,
     body: Term,
     return_ty: Type<TypeName>,
-    required_params: &[(SymbolId, Type<TypeName>)],
-    uniform_attrs: &[Option<BindingRef>],
+    required_params: &[RequiredParam],
     storage_bindings: Vec<interface::StorageBindingDecl>,
     program: &mut Program,
     term_ids: &mut TermIdSource,
@@ -2690,19 +2769,21 @@ pub(crate) fn make_entry_def(
 
     // Wrap the body in a single flat Lambda carrying `required_params`, mirroring
     // `transform_entry`'s convention. Compute the full arrow type.
+    let lambda_params: Vec<(SymbolId, Type<TypeName>)> =
+        required_params.iter().map(|r| (r.sym, r.ty.clone())).collect();
     let (full_ty, body) = if required_params.is_empty() {
         (return_ty.clone(), body)
     } else {
         let mut ty = return_ty.clone();
-        for (_, pt) in required_params.iter().rev() {
-            ty = Type::Constructed(TypeName::Arrow, vec![pt.clone(), ty]);
+        for r in required_params.iter().rev() {
+            ty = Type::Constructed(TypeName::Arrow, vec![r.ty.clone(), ty]);
         }
         let lam_body = Term {
             id: term_ids.next_id(),
             ty: ty.clone(),
             span: dummy_span,
             kind: TermKind::Lambda(Lambda {
-                params: required_params.to_vec(),
+                params: lambda_params,
                 body: Box::new(body),
                 ret_ty: return_ty.clone(),
             }),
@@ -2710,16 +2791,15 @@ pub(crate) fn make_entry_def(
         (ty, lam_body)
     };
 
-    // Build ast::Pattern entries — from_tlc's entry conversion reads these
-    // for IO decoration and bindings. Storage-view phase params need no
-    // attribute (their bindings come via `storage_bindings`), but a captured
-    // uniform must carry its `#[uniform(set, binding)]` so from_tlc emits it
-    // as a uniform input rather than a push constant.
+    // Build ast::Pattern entries. Each required_param that originated from
+    // an attributed entry param (`#[storage(...)]` / `#[uniform(...)]` /
+    // etc.) gets its original attribute re-attached, so EGIR conversion
+    // routes it to the same binding the host provided rather than
+    // falling back to push constants.
     let ast_params: Vec<ast::Pattern> = required_params
         .iter()
-        .enumerate()
-        .map(|(i, (s, _))| {
-            let pname = crate::symbol_name_or_bug(&program.symbols, *s).to_string();
+        .map(|r| {
+            let pname = crate::symbol_name_or_bug(&program.symbols, r.sym).to_string();
             let name_pat = ast::Pattern {
                 h: ast::Header {
                     id: ast::NodeId(0),
@@ -2727,24 +2807,20 @@ pub(crate) fn make_entry_def(
                 },
                 kind: ast::PatternKind::Name(pname),
             };
-            match uniform_attrs.get(i).copied().flatten() {
-                Some(br) => ast::Pattern {
+            match &r.attr {
+                Some(attr) => ast::Pattern {
                     h: ast::Header {
                         id: ast::NodeId(0),
                         span: dummy_span,
                     },
-                    kind: ast::PatternKind::Attributed(
-                        vec![Attribute::Uniform {
-                            set: br.set,
-                            binding: br.binding,
-                        }],
-                        Box::new(name_pat),
-                    ),
+                    kind: ast::PatternKind::Attributed(vec![attr.clone()], Box::new(name_pat)),
                 },
                 None => name_pat,
             }
         })
         .collect();
+    let param_bindings: Vec<Option<interface::EntryParamBinding>> =
+        required_params.iter().map(|r| r.binding.clone()).collect();
 
     // Declare one anonymous output so `build_entry_outputs` in from_tlc
     // treats the return type as a single storage-bound output and
@@ -2767,7 +2843,7 @@ pub(crate) fn make_entry_def(
             name_span: dummy_span,
             size_params: vec![],
             type_params: vec![],
-            param_bindings: vec![None; ast_params.len()],
+            param_bindings,
             params: ast_params,
             outputs,
             storage_bindings,

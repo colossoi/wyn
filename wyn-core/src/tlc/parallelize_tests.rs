@@ -391,7 +391,7 @@ fn t11_required_params_closure() {
         1,
         "only q is referenced; p should be filtered out"
     );
-    assert_eq!(a.required_params[0].0, q);
+    assert_eq!(a.required_params[0].sym, q);
 }
 
 // ----------------------------------------------------------------------
@@ -1134,4 +1134,70 @@ fn aspiration_two_scalar_reduces_in_let_rhs_should_each_hoist() {
         5,
         "2 + 2 (reduces) + 1 (consumer) = 5"
     );
+}
+
+// ----- TLC-side two-phase reduce synthesis -----
+
+/// Compile `src` end-to-end through SPIR-V via the canonical TLC + EGIR
+/// + SSA pipeline. Used by tests that exercise the TLC-side two-phase
+/// reduce synthesis path — the bugs there surface as EGIR-conversion
+/// errors that `parallelize_src` alone wouldn't observe.
+fn compile_to_spirv(src: &str) -> crate::error::Result<Vec<u32>> {
+    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
+    let parsed = crate::Compiler::parse(src, &mut node_counter).expect("parse");
+    let type_checked = parsed
+        .resolve(&module_manager)
+        .expect("resolve")
+        .fold_ast_constants()
+        .type_check(&mut module_manager)
+        .expect("type_check");
+
+    let ssa = type_checked
+        .to_tlc(&module_manager, false)
+        .partial_eval()
+        .normalize_soacs()
+        .fuse_maps()
+        .apply_ownership()
+        .expect("apply_ownership")
+        .normalize_outputs()
+        .expect("normalize_outputs")
+        .lift_gathers()
+        .defunctionalize()
+        .monomorphize()
+        .buffer_specialize()
+        .fold_generated_lambdas()
+        .inline_small()
+        .parallelize_soacs(false)
+        .expect("parallelize_soacs")
+        .filter_reachable()
+        .to_egraph()
+        .map_err(|e| crate::error::CompilerError::FlatteningError(format!("{e:?}"), None))?
+        .expand_soacs(true)
+        .materialize()
+        .optimize_skeleton()
+        .elaborate();
+
+    ssa.lower().map(|l| l.spirv)
+}
+
+/// Single-output reduce whose combiner captures a uniform — forces the
+/// TLC-side two-phase synthesis (`can_route = false` because
+/// `captures` is non-empty). The synthesized phase entries must
+/// re-attach the original storage / uniform attributes to the captured
+/// params; otherwise EGIR's push-constant fallback rejects the
+/// runtime-sized `xs` array.
+///
+/// Regression: prior to the fix, `make_entry_def` set
+/// `param_bindings: vec![None; n]` and emitted bare patterns with no
+/// `#[storage]` / `#[uniform]` attribute. Compilation failed with
+/// `push-constant param 'xs' has no static byte layout`.
+#[test]
+fn two_phase_reduce_with_capture_preserves_param_attributes() {
+    let src = r#"
+#[compute]
+entry foo(#[storage(set=1, binding=0)] xs: []i32,
+          #[uniform(set=2, binding=0)] k: i32) i32 =
+    reduce(|a:i32, b:i32| a + b + k, 0, xs)
+"#;
+    compile_to_spirv(src).expect("two-phase reduce with capture must compile end-to-end");
 }
