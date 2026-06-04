@@ -112,6 +112,7 @@ fn format_constructed_type(name: &TypeName, args: &[PolyType<TypeName>]) -> Stri
             // Unit type - ()
             "()".to_string()
         }
+        TypeName::SideEffect => "!()".to_string(),
         TypeName::Tuple(_n) => {
             // (T1, T2, ...)
             // Tuple arity is in n, field types are in args

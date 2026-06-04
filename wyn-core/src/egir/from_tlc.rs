@@ -27,6 +27,7 @@ use crate::tlc::{
     ArrayExpr, Def as TlcDef, DefMeta, Lambda, LoopKind, Program as TlcProgram, SoacOp, Term, TermKind,
 };
 use crate::types::TypeExt;
+use crate::types::extract_function_signature;
 use crate::{BindingRef, SymbolId, SymbolTable};
 use polytype::Type;
 use smallvec::{SmallVec, smallvec};
@@ -339,20 +340,17 @@ fn convert_entry_point(
     let (inner_body, params) = extract_lambda_params(&def.body);
     let is_compute = matches!(entry.entry_type, interface::Attribute::Compute);
 
-    // Compute entries: prefer `def.ty`'s arrow-return position. After
-    // `tlc::normalize_outputs` the body's `inner_body.ty` is `Unit`
-    // (the slot stores produce nothing), so the declared output shape
-    // only survives on `def.ty`. Graphics entries (vertex / fragment):
-    // keep the prior contract `inner_body.ty`, since `normalize_outputs`
-    // doesn't touch them and a future pass that wraps `def.ty`'s
-    // return position (e.g. uniqueness) shouldn't silently change how
-    // `build_entry_outputs` classifies the result.
-    let ret_type = if is_compute {
-        let (_sig_params, sig_ret) = extract_function_signature(&def.ty);
-        sig_ret
-    } else {
-        inner_body.ty.clone()
-    };
+    // After `normalize_outputs`, `def.ty == def.body.ty` (the body
+    // ends in `SideEffect` for normalized compute entries, in its
+    // tail's type for graphics). Reading `inner_body.ty` is the right
+    // source either way.
+    let ret_type = inner_body.ty.clone();
+    // For normalized compute entries, the body's `OutputSlotStore.value`
+    // terms carry the post-`monomorphize`/`buffer_specialize` per-slot
+    // types — pre-walk the body to harvest them so
+    // `build_entry_outputs` can use them in preference to the parse-
+    // time `entry.outputs[i].ty`.
+    let slot_value_tys = collect_output_slot_value_tys(inner_body);
     let param_info: Vec<(Type<TypeName>, String)> = params
         .iter()
         .map(|(sym, ty)| Ok((ty.clone(), symbol_name(symbols, *sym)?.to_string())))
@@ -503,12 +501,16 @@ fn convert_entry_point(
     let outputs = build_entry_outputs(
         entry,
         &ret_type,
+        &slot_value_tys,
         is_compute,
         binding_num,
         forced_output_binding,
         dispatch_sized_outputs,
     )?;
-    let is_unit_return = matches!(ret_type, Type::Constructed(TypeName::Unit, _));
+    let is_unit_return = matches!(
+        ret_type,
+        Type::Constructed(TypeName::Unit, _) | Type::Constructed(TypeName::SideEffect, _)
+    );
 
     // Convert body. Output assignment (storing the result into the bound
     // storage views / graphics output slots, and retargeting tail
@@ -1963,21 +1965,6 @@ fn is_purely_constant_body(body: &FuncBody) -> bool {
     })
 }
 
-/// Extract parameter types and return type from an arrow type.
-fn extract_function_signature(ty: &Type<TypeName>) -> (Vec<Type<TypeName>>, Type<TypeName>) {
-    let mut params = Vec::new();
-    let mut current = ty.clone();
-    while let Type::Constructed(TypeName::Arrow, ref args) = current {
-        if args.len() == 2 {
-            params.push(args[0].clone());
-            current = args[1].clone();
-        } else {
-            break;
-        }
-    }
-    (params, current)
-}
-
 /// Walk through nested Lambdas to extract parameters and the inner body.
 fn extract_lambda_params(term: &Term) -> (&Term, Vec<(SymbolId, Type<TypeName>)>) {
     let mut params = Vec::new();
@@ -2018,9 +2005,47 @@ fn convert_to_io_decoration(attr: &interface::Attribute) -> Option<IoDecoration>
 
 /// Build entry outputs from an AST `EntryDecl`.
 /// For compute shaders, non-unit outputs get sequential storage bindings starting at `binding_start`.
+/// Walk a (post-normalize_outputs) entry body and collect each
+/// `OutputSlotStore { slot_index, value, .. }`'s `value.ty` into a
+/// dense `Vec<Option<Type>>` indexed by slot. Returns empty if the
+/// body contains no `OutputSlotStore` (graphics entries; the
+/// multi-output non-Tuple fallthrough that `normalize_outputs` leaves
+/// unrewritten). `build_entry_outputs` reads from this in preference
+/// to the parse-time `entry.outputs[i].ty`, since the body's term
+/// types are current with `monomorphize` / `buffer_specialize`.
+fn collect_output_slot_value_tys(body: &crate::tlc::Term) -> Vec<Option<Type<TypeName>>> {
+    use crate::tlc::TermKind;
+    let mut out: Vec<(usize, Type<TypeName>)> = Vec::new();
+    let mut cur = body;
+    loop {
+        match &cur.kind {
+            TermKind::Let { rhs, body, .. } => {
+                if let TermKind::OutputSlotStore {
+                    slot_index, value, ..
+                } = &rhs.kind
+                {
+                    out.push((*slot_index, value.ty.clone()));
+                }
+                cur = body;
+            }
+            _ => break,
+        }
+    }
+    if out.is_empty() {
+        return Vec::new();
+    }
+    let max = out.iter().map(|(i, _)| *i).max().unwrap();
+    let mut dense: Vec<Option<Type<TypeName>>> = vec![None; max + 1];
+    for (i, ty) in out {
+        dense[i] = Some(ty);
+    }
+    dense
+}
+
 fn build_entry_outputs(
     entry: &interface::EntryDecl,
     ret_type: &Type<TypeName>,
+    slot_value_tys: &[Option<Type<TypeName>>],
     is_compute: bool,
     binding_start: u32,
     forced_output_binding: Option<BindingRef>,
@@ -2064,6 +2089,31 @@ fn build_entry_outputs(
             None
         }
     };
+
+    // Normalized compute entries type their return position as
+    // `SideEffect` (the body produces no value; it writes via
+    // `OutputSlotStore`). The decoration is on `entry.outputs[i]`; the
+    // per-slot ty must come from `slot_value_tys[i]` (the body's
+    // `OutputSlotStore.value.ty` post-monomorphize/buffer_specialize),
+    // not from `entry.outputs[i].ty` (which is parse-time-frozen and
+    // can still carry unresolved Array-variant type variables).
+    if matches!(ret_type, Type::Constructed(TypeName::SideEffect, _)) {
+        return entry
+            .outputs
+            .iter()
+            .enumerate()
+            .map(|(i, output)| {
+                let ty = slot_value_tys.get(i).and_then(|t| t.as_ref()).unwrap_or(&output.ty);
+                let storage_binding = storage_binding_for(ty, is_compute);
+                Ok(EntryOutput {
+                    ty: ty.clone(),
+                    decoration: output.attribute.as_ref().and_then(convert_to_io_decoration),
+                    storage_binding,
+                    length: length_for(storage_binding, ty)?,
+                })
+            })
+            .collect();
+    }
 
     if entry.outputs.iter().all(|o| o.attribute.is_none()) && entry.outputs.len() == 1 {
         if !matches!(ret_type, Type::Constructed(TypeName::Unit, _)) {

@@ -128,13 +128,13 @@ fn normalize_entry(
     );
 
     let new_body = rewrite_body(body, &entry_name, n_outputs, term_ids, symbols)?;
+    // Sync `def.ty` with the rewritten body so `def.ty == def.body.ty`.
+    // The body's outer Lambda now ends in `SideEffect`; the def's
+    // signature follows. The original declared per-slot output shape
+    // still lives on `decl.outputs[i].ty + attribute` — EGIR
+    // conversion reads it from there.
+    def.ty = new_body.ty.clone();
     def.body = new_body;
-
-    // Intentionally leave `def.ty` unchanged. The outer Lambda's `ret_ty`
-    // is overwritten to Unit in `rewrite_body` so the body's
-    // Term-level types are consistent (the chain root is `UnitLit`).
-    // But the def's *signature* still names the original output type so
-    // EGIR conversion can build `EntryOutput`s from it.
 
     Ok(())
 }
@@ -250,10 +250,10 @@ fn emit_slot_writes(
         }
     };
 
-    // Build the chain: store_N → store_{N-1} → … → store_0 → UnitLit.
-    // We construct from the inside out: the innermost is UnitLit; each
-    // outer wraps the previous in `Let { name: _, rhs: store, body: inner }`.
-    let mut chain = unit_term(term_ids, tail.span);
+    // Build the chain: store_N → store_{N-1} → … → store_0 → <terminator>.
+    // Innermost is a `SideEffect`-typed terminator; each outer wraps
+    // the previous in `Let { name: _, rhs: store, body: inner }`.
+    let mut chain = side_effect_terminator(term_ids, tail.span);
     for (i, (value, value_ty)) in slot_sources.into_iter().enumerate().rev() {
         let store = make_store(i, value, value_ty, term_ids);
         chain = sequence(store, chain, term_ids, symbols);
@@ -270,7 +270,7 @@ fn make_store(
     let span = value.span;
     Term {
         id: term_ids.next_id(),
-        ty: Type::Constructed(TypeName::Unit, vec![]),
+        ty: side_effect_ty(),
         span,
         kind: TermKind::OutputSlotStore {
             slot_index,
@@ -280,31 +280,41 @@ fn make_store(
     }
 }
 
-/// `let _seq: () = first in rest` — a sequencing operator.
+/// `let _seq: SideEffect = first in rest` — a sequencing operator. The
+/// sequencing-let's `name_ty` is `SideEffect` to be honest about what
+/// `first` is: a side-effecting operation (`OutputSlotStore`) that
+/// produces no value, only writes to the bound output buffer.
 fn sequence(first: Term, rest: Term, term_ids: &mut TermIdSource, symbols: &mut SymbolTable) -> Term {
     let span = first.span;
-    let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
     let name = symbols.alloc("_seq".to_string());
     Term {
         id: term_ids.next_id(),
-        ty: unit_ty.clone(),
+        ty: side_effect_ty(),
         span,
         kind: TermKind::Let {
             name,
-            name_ty: unit_ty,
+            name_ty: side_effect_ty(),
             rhs: Box::new(first),
             body: Box::new(rest),
         },
     }
 }
 
-fn unit_term(term_ids: &mut TermIdSource, span: crate::ast::Span) -> Term {
+/// `SideEffect`-typed terminator for the slot-store chain. Uses the
+/// `UnitLit` term kind for now (the chain needs to end in *something*);
+/// the wrapping `Term.ty` overrides to `SideEffect` so the chain's
+/// type-level story is consistent end-to-end.
+fn side_effect_terminator(term_ids: &mut TermIdSource, span: crate::ast::Span) -> Term {
     Term {
         id: term_ids.next_id(),
-        ty: Type::Constructed(TypeName::Unit, vec![]),
+        ty: side_effect_ty(),
         span,
         kind: TermKind::UnitLit,
     }
+}
+
+fn side_effect_ty() -> Type<TypeName> {
+    Type::Constructed(TypeName::SideEffect, vec![])
 }
 
 fn tail_shape_name(kind: &TermKind) -> &'static str {

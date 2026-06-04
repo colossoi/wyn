@@ -155,3 +155,33 @@ entry foo(xs: []i32) (i32, i32) =
     );
     assert_let_lambda_type_invariants(&entry.body);
 }
+
+/// After `normalize_outputs`, a compute entry whose body decomposes into
+/// `OutputSlotStore` writes has no runtime return value — slot writes
+/// are the work. The body's tail must therefore type as `SideEffect`
+/// (not `Unit`, which is a value), and `def.ty == def.body.ty` so both
+/// views of the def's signature agree.
+#[test]
+fn normalize_outputs_yields_side_effect_typed_body() {
+    let source = r#"
+#[compute]
+entry foo(xs: []i32) (i32, i32) =
+    (xs[0], xs[1])
+"#;
+    let program = compile_to_normalized_tlc(source);
+    let entry = program
+        .defs
+        .iter()
+        .find(|d| program.symbols.get(d.name).map(|n| n == "foo").unwrap_or(false))
+        .expect("foo entry");
+    assert_eq!(
+        entry.ty, entry.body.ty,
+        "def.ty must equal def.body.ty after normalize_outputs"
+    );
+    let (_params, ret) = crate::types::extract_function_signature(&entry.ty);
+    assert_eq!(
+        ret,
+        Type::Constructed(TypeName::SideEffect, vec![]),
+        "normalized entry's return position must be SideEffect, not Unit"
+    );
+}

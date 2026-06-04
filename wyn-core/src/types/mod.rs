@@ -199,8 +199,17 @@ pub enum TypeName {
     /// Record type: {field1: type1, field2: type2}
     /// Preserves source order of fields, but equality is order-independent
     Record(RecordFields),
-    /// Unit type: () - the empty tuple, used for side-effect-only functions
+    /// Unit type: () - the empty tuple, an honest value.
     Unit,
+    /// "No return value" type. Distinct from `Unit`: `Unit` IS a value
+    /// (the empty tuple, `()`); `SideEffect` is the absence of a return
+    /// value, used to type functions whose only meaningful output is
+    /// observable through side effects — imperative builtins like
+    /// `image_store` / `storage_store`, and compute entries post-
+    /// `normalize_outputs` whose body produces nothing but a chain of
+    /// `OutputSlotStore` writes. Lowering treats this as `void` in the
+    /// SPIR-V / WGSL backends.
+    SideEffect,
     /// Tuple type with arity (size). Field types stored in Type::Constructed args.
     Tuple(usize),
     /// Sum type: Constructor1 type* | Constructor2 type*
@@ -297,6 +306,7 @@ impl std::fmt::Display for TypeName {
                 write!(f, "}}")
             }
             TypeName::Unit => write!(f, "()"),
+            TypeName::SideEffect => write!(f, "!()"),
             TypeName::Tuple(n) => write!(f, "Tuple({})", n),
             TypeName::Sum(variants) => {
                 for (i, (name, types)) in variants.iter().enumerate() {
@@ -358,6 +368,7 @@ impl polytype::Name for TypeName {
                 format!("{{{}}}", field_strs.join(", "))
             }
             TypeName::Unit => "()".to_string(),
+            TypeName::SideEffect => "!()".to_string(),
             TypeName::Tuple(n) => format!("Tuple({})", n),
             TypeName::Sum(variants) => {
                 let variant_strs: Vec<String> = variants
@@ -1144,6 +1155,28 @@ pub fn array_size(ty: &Type) -> Option<&Type> {
     ty.array_size()
 }
 
+/// Walk an arrow chain `P1 -> P2 -> ... -> Pn -> R` and return
+/// `(vec![P1, P2, ..., Pn], R)`. For a non-arrow `ty`, returns
+/// `(vec![], ty.clone())`. This is the single canonical helper for
+/// peeling an entry def's signature into params + declared return — used
+/// by `lift_gathers` to recover the entry's declared output type after
+/// `normalize_outputs` makes `def.body.ty == Unit`, and by
+/// `egir::from_tlc` to wire each entry param's type into the
+/// `EgirEntry`.
+pub fn extract_function_signature(ty: &Type) -> (Vec<Type>, Type) {
+    let mut params = Vec::new();
+    let mut current = ty.clone();
+    while let Type::Constructed(TypeName::Arrow, ref args) = current {
+        if args.len() == 2 {
+            params.push(args[0].clone());
+            current = args[1].clone();
+        } else {
+            break;
+        }
+    }
+    (params, current)
+}
+
 /// Check if a type is a storage array that requires BoundSlice-style access.
 /// Storage arrays with unsized length need pointer-based indexing at runtime.
 pub fn is_bound_slice_access(ty: &Type) -> bool {
@@ -1223,5 +1256,36 @@ pub fn format_scheme(scheme: &TypeScheme) -> String {
         TypeScheme::Polytype { variable, body } => {
             format!("∀{}. {}", variable, format_scheme(body))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn i32_ty() -> Type {
+        Type::Constructed(TypeName::Int(32), vec![])
+    }
+    fn f32_ty() -> Type {
+        Type::Constructed(TypeName::Float(32), vec![])
+    }
+    fn arrow(a: Type, b: Type) -> Type {
+        Type::Constructed(TypeName::Arrow, vec![a, b])
+    }
+
+    #[test]
+    fn extract_function_signature_chains_arrows_in_order() {
+        // `i32 -> f32 -> i32` -> ([i32, f32], i32)
+        let ty = arrow(i32_ty(), arrow(f32_ty(), i32_ty()));
+        let (params, ret) = extract_function_signature(&ty);
+        assert_eq!(params, vec![i32_ty(), f32_ty()]);
+        assert_eq!(ret, i32_ty());
+    }
+
+    #[test]
+    fn extract_function_signature_on_non_arrow_returns_empty_params() {
+        let (params, ret) = extract_function_signature(&i32_ty());
+        assert!(params.is_empty());
+        assert_eq!(ret, i32_ty());
     }
 }
