@@ -155,8 +155,14 @@ fn rewrite_body(
             ret_ty: _,
         }) => {
             let new_body = rewrite_body(*body, entry_name, n_outputs, term_ids, symbols)?;
-            let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
-            let mut arrow_ty = unit_ty.clone();
+            // Derive the rebuilt Lambda's arrow ty + ret_ty from
+            // `new_body.ty`. For fully-normalised bodies that's Unit;
+            // for the multi-output non-Tuple fallthrough in
+            // `emit_slot_writes` (which preserves the tail's tuple
+            // type) it's the original tuple. Forcing Unit here would
+            // claim a return type the body doesn't actually produce.
+            let body_ty = new_body.ty.clone();
+            let mut arrow_ty = body_ty.clone();
             for (_, pt) in params.iter().rev() {
                 arrow_ty = Type::Constructed(TypeName::Arrow, vec![pt.clone(), arrow_ty]);
             }
@@ -167,7 +173,7 @@ fn rewrite_body(
                 kind: TermKind::Lambda(Lambda {
                     params,
                     body: Box::new(new_body),
-                    ret_ty: unit_ty,
+                    ret_ty: body_ty,
                 }),
             })
         }
@@ -178,9 +184,10 @@ fn rewrite_body(
             body,
         } => {
             let new_body = rewrite_body(*body, entry_name, n_outputs, term_ids, symbols)?;
+            let body_ty = new_body.ty.clone();
             Ok(Term {
                 id: term_ids.next_id(),
-                ty: Type::Constructed(TypeName::Unit, vec![]),
+                ty: body_ty,
                 span: term.span,
                 kind: TermKind::Let {
                     name,

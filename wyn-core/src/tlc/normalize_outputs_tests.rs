@@ -1,4 +1,31 @@
 use crate::Compiler;
+use crate::ast::TypeName;
+use crate::tlc::{Program, Term, TermKind};
+use polytype::Type;
+
+/// Compile a Wyn source string up to (and including) `normalize_outputs`,
+/// returning the resulting TLC `Program`. Used by tests that need to
+/// inspect post-normalize_outputs term structure directly.
+fn compile_to_normalized_tlc(source: &str) -> Program {
+    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
+    let parsed = Compiler::parse(source, &mut node_counter).expect("parse");
+    let type_checked = parsed
+        .resolve(&mut module_manager)
+        .expect("resolve")
+        .fold_ast_constants()
+        .type_check(&mut module_manager)
+        .expect("type_check");
+    let normalized = type_checked
+        .to_tlc(&module_manager, false)
+        .partial_eval()
+        .normalize_soacs()
+        .fuse_maps()
+        .apply_ownership()
+        .expect("apply_ownership")
+        .normalize_outputs()
+        .expect("normalize_outputs");
+    normalized.0.tlc
+}
 
 /// Compile a Wyn source string through the full pipeline (parse →
 /// type-check → TLC → EGIR → SSA → SPIR-V) and return the SPIR-V words.
@@ -75,4 +102,56 @@ entry paint(#[storage_image(set=0, binding=0, format=rgba8unorm, access=write_on
         spirv_contains_opcode(&spirv, OP_IMAGE_WRITE),
         "expected OpImageWrite in compiled SPIR-V (regression: normalize_outputs dropping unit-return tail)",
     );
+}
+
+/// Walk a Term tree and assert the TLC invariant `let.ty == let.body.ty`
+/// and `lambda.ret_ty == lambda.body.ty` at every layer. Panics on
+/// mismatch, reporting the offending node's kind.
+fn assert_let_lambda_type_invariants(term: &Term) {
+    match &term.kind {
+        TermKind::Lambda(lam) => {
+            assert_eq!(lam.ret_ty, lam.body.ty, "Lambda.ret_ty must match Lambda.body.ty",);
+            assert_let_lambda_type_invariants(&lam.body);
+        }
+        TermKind::Let { body, .. } => {
+            assert_eq!(term.ty, body.ty, "Let.ty must match Let.body.ty");
+            assert_let_lambda_type_invariants(body);
+        }
+        _ => {}
+    }
+}
+
+/// Multi-output entry whose tail is NOT a `Tuple` literal — e.g. a
+/// `reduce` returning a tuple. `emit_slot_writes` falls through and
+/// returns the tail unchanged with its tuple type. The enclosing
+/// `rewrite_body` Lambda/Let wrappers must reflect that type, NOT
+/// force `Unit` unconditionally.
+///
+/// Regression: prior to the fix, both arms set `ret_ty: unit_ty` /
+/// `ty: Unit` regardless of the rewritten body's actual type, so a
+/// `Lambda` whose body is tuple-typed claimed `ret_ty: Unit`.
+#[test]
+fn multi_output_non_tuple_tail_preserves_lambda_let_types() {
+    let source = r#"
+def pair_min(a: (i32, i32), b: (i32, i32)) (i32, i32) =
+  if a.0 < b.0 then a else b
+
+#[compute]
+entry foo(xs: []i32) (i32, i32) =
+  reduce(pair_min, (0, 0), map(|x: i32| (x, x), xs))
+"#;
+    let program = compile_to_normalized_tlc(source);
+    let entry = program
+        .defs
+        .iter()
+        .find(|d| program.symbols.get(d.name).map(|n| n == "foo").unwrap_or(false))
+        .expect("foo entry");
+    let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
+    assert_ne!(
+        entry.body.ty, unit_ty,
+        "precondition: this test only exercises the multi-output non-Tuple \
+         fallthrough; if the outer Lambda's ty is Unit, the fallthrough \
+         didn't fire and the test is moot"
+    );
+    assert_let_lambda_type_invariants(&entry.body);
 }
