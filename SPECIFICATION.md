@@ -2,28 +2,42 @@
 
 ## Introduction
 
-Wyn is a functional, array-centric language for GPU programming. It
-compiles higher-order functions away via defunctionalization,
-producing code that runs on GPU targets without first-class function
-pointers. Its array surface abstracts over the several incompatible
-array kinds a GPU exposes — function-local arrays, vectors, storage
-buffers — a single paradigm for all of them.
+Wyn is a functional, array-centric language for GPU programming.
+Function values are erased before execution, so programs run on GPU
+targets that have no first-class function pointers. The array surface
+unifies the several incompatible array kinds a GPU exposes —
+function-local arrays, vectors, storage buffers — into a single
+paradigm.
 
 ### Design Goals
 
-- **GPU-targeted**: language constraints (regular arrays, no recursion, no first-class function pointers) keep programs compatible with massively parallel hardware
-- **Array-oriented**: First-class support for multi-dimensional arrays and array operations
-- **Type-safe**: Static type checking with explicit type annotations
-- **Functional**: Immutable data structures and expression-based computation
+- **GPU-targeted**: language constraints (regular arrays, no
+  recursion, no first-class function values) keep programs compatible
+  with massively parallel hardware.
+- **Array-oriented**: first-class support for multi-dimensional arrays
+  and array operations.
+- **Type-safe**: static type checking with type inference.
+- **Functional**: immutable data structures and expression-based
+  computation.
+- **Modular**: encapsulation and reuse through first-class modules —
+  signatures hide implementation details, and parameterized modules
+  generalize components across types.
 
 ### Key Features
 
-- Multi-dimensional array types with literal syntax
-- Built-in functions for array-to-vector conversion
-- Entry point declarations for vertex and fragment shaders
-- Automatic semantic mapping (e.g., a `[4]f32` return is the vertex position output)
-- Static type checking with type inference
-- Integration with GPU built-in variables (vertex index, fragment coordinates, etc.)
+- **Second-order array operators**: `map`, `reduce`, `scan`, `filter`,
+  and related combinators are the primary way to express bulk
+  operations on arrays.
+- **Uniqueness types**: `*T` marks a value as consuming-only, letting
+  `arr with [i] = x` mutate in place when the source is unique and
+  copy when it is not.
+- **Size-typed arrays**: array lengths participate in the type system;
+  `def f(xs: [n]i32) [n]i32` declares a function whose output has the
+  same length as its input.
+- **Attribute-driven shader interface**: attributes (`#[location]`,
+  `#[builtin]`, `#[storage]`, `#[uniform]`, `#[texture]`, `#[sampler]`,
+  …) wire entry-point parameters and returns to GPU resources,
+  built-ins, and inter-stage I/O.
 
 ### Program Structure
 
@@ -47,16 +61,8 @@ def step(dt: f32, v: f32) f32 = v + gravity * dt
 ```
 
 Functions are first-class within the program — they can be passed to
-higher-order operators like `map` and `reduce` — but they don't escape
-into runtime values. The compiler defunctionalizes them away during
-lowering.
-
-Type inference fills in argument and return types when context allows;
-the explicit annotations above are illustrative, not required:
-
-```wyn
-def step(dt, v) = v + gravity * dt
-```
+higher-order operators like `map` and `reduce` — but function values
+are erased before execution and do not exist at runtime.
 
 Arrays are the primary aggregate. Sizes participate in the type
 system, so a function that takes an `[n]f32` returns an array whose
@@ -68,9 +74,9 @@ def normalize(xs: [n]f32) [n]f32 =
   map(|x| x / total, xs)
 ```
 
-A graphics program splits across two entry points — a vertex stage
-that emits per-vertex position and varyings, and a fragment stage
-that consumes the matched varyings and writes a color:
+A typical graphics program splits across two entry points — a vertex
+stage that emits per-vertex position and varyings, and a fragment
+stage that consumes the matched varyings and writes a color:
 
 ```wyn
 #[vertex]
@@ -87,11 +93,30 @@ entry fs(#[location(0)] color: vec3f32) #[location(0)] vec4f32 =
   @[color.x, color.y, color.z, 1.0]
 ```
 
-The two entry points communicate through `#[location(n)]` — the
-vertex output at location 0 flows into the fragment input at the same
-location. Built-ins (vertex index, fragment position, etc.) are
-addressed by `#[builtin(...)]` instead, with a fixed set of names per
-stage.
+A single source entry may compile to multiple module entries. SOACs
+whose lowering requires more than one kernel — a parallel reduce that
+runs a per-workgroup partial fold followed by a tree-reduction across
+the partials, for example — split into separate entries that the host
+dispatches in sequence. The compiled module's pipeline descriptor
+names every entry it produced; hosts iterate the descriptor rather
+than the source.
+
+A Wyn program can span multiple files. Each file is implicitly a
+module: declarations at file scope are members of that module. Files
+reference each other with `import`, which loads a sibling file and
+binds its declarations under the imported name; `open` brings a
+module's members into the current scope unqualified. Modules can also
+be defined inline with `module m = { ... }`. Module types describe a
+module's interface; parameterized modules take other modules as
+arguments.
+
+A small standard library is automatically loaded. Top-level
+declarations from its files — including the second-order array
+operators (`map`, `reduce`, `scan`, `filter`, …) — are available
+unqualified throughout the program. The standard library also defines
+per-type modules (`i32`, `f32`, `bool`, …) that group operations on
+their type; programs can `open` such a module to bring its members
+into scope or address them by qualified name (`f32.sqrt`, `i32.abs`).
 
 ## Grammar Notation
 
@@ -127,30 +152,38 @@ constructor  ::= "#" name
 
 ### Description
 
-Many elements in Wyn are named. When defining something, we give it an unqualified name (`name`). When referencing something inside a module, we use a qualified name (`qualname`). We can also use symbols (`symbol`, `qualsymbol`), which are treated as infix operators by the grammar.
+A `name` is an unqualified identifier used at definition sites. A
+`qualname` is the dotted form used to reference something inside a
+module. A `symbol` (or `qualsymbol`) names an operator.
 
-Constructor names of sum types are identifiers prefixed with `#`, with no space afterwards. Record fields are named with `fieldid` - note that a `fieldid` can be a decimal number.
+Constructor names of sum types are identifiers prefixed with `#`,
+with no whitespace between the `#` and the name. Record fields use
+`fieldid`, which is either a name or a decimal.
 
 Wyn has three distinct namespaces:
-- **Terms**: Variables, functions, and modules
-- **Module types**: Module type definitions
-- **Types**: Type names and type constructors
 
-Modules (including parametric modules) and values both share the term namespace.
+- **Terms**: variables, functions, and modules.
+- **Module types**: module type definitions.
+- **Types**: type names and type constructors.
+
+Modules (including parameterized modules) and values share the term
+namespace.
 
 ### Reserved Names
 
-A reserved name or symbol may be used only when explicitly present in the grammar. In particular, they cannot be bound in definitions.
+Reserved names and symbols may appear only where the grammar
+explicitly admits them; they cannot be bound in definitions.
 
 **Reserved identifiers:**
 ```
-true, false, if, then, else, def, let, loop, in, val, for, do, with, local, 
-open, include, import, type, module, while, assert, match, case
+case, def, do, else, entry, extern, false, for, functor, if,
+import, in, include, let, loop, match, module, open, sig, then,
+true, type, while, with
 ```
 
 **Reserved symbols:**
 ```
-=
+=    ->    |    |>
 ```
 
 ---
@@ -192,7 +225,11 @@ Boolean literals are written `true` and `false`. The primitive types in Wyn are:
 
 ### Numeric Literals
 
-Numeric literals can be suffixed with their intended type. For example `42i8` is of type `i8`, and `1337e2f64` is of type `f64`. If no suffix is given, the type of the literal will be inferred based on its use. If the use is not constrained, integral literals will be assigned type `i32`, and decimal literals type `f64`.
+Numeric literals can be suffixed with their intended type. For example
+`42i8` is of type `i8`, and `1337e2f64` is of type `f64`. If no suffix
+is given, the type of the literal will be inferred based on its use.
+If the use is not constrained, integral literals will be assigned type
+`i32`, and decimal literals type `f32`.
 
 **Integer formats:**
 - **Decimal**: `42`, `1000`, `42i8`
@@ -202,7 +239,8 @@ Numeric literals can be suffixed with their intended type. For example `42i8` is
 **Float formats:**
 - **Decimal**: `3.14`, `1.5e-10`, `2.0f32`
 
-Underscores may be used as digit separators in numeric literals for readability (e.g., `1_000_000`, `0xFF_FF_FF`).
+Underscores may be used as digit separators in numeric literals for
+readability (e.g., `1_000_000`, `0xFF_FF_FF`).
 
 ---
 
@@ -243,23 +281,71 @@ existential_size ::= "?" ("[" name "]")+ "." type
 
 ### Description
 
-Compound types can be constructed based on the primitive types. The Wyn type system is entirely structural, and type abbreviations are merely shorthands. The only exception is abstract types whose definition has been hidden via the module system.
+Compound types can be constructed based on the primitive types. The
+Wyn type system is entirely structural, and type abbreviations are
+merely shorthands. The only exception is abstract types whose
+definition has been hidden via the module system.
 
 #### Tuple Types
 
-A tuple value or type is written as a sequence of comma-separated values or types enclosed in parentheses. For example, `(0, 1)` is a tuple value of type `(i32, i32)`. The elements of a tuple need not have the same type – the value `(false, 1, 2.0)` is of type `(bool, i32, f64)`. A tuple element can also be another tuple, as in `((1,2),(3,4))`, which is of type `((i32, i32), (i32, i32))`. A tuple cannot have just one element, but empty tuples are permitted, although they are not very useful. Empty tuples are written `()` and are of type `()`.
+A tuple value or type is written as a sequence of comma-separated
+values or types enclosed in parentheses. For example, `(0, 1)` is a
+tuple value of type `(i32, i32)`. The elements of a tuple need not
+have the same type – the value `(false, 1, 2.0)` is of type
+`(bool, i32, f32)`. A tuple element can also be another tuple, as in
+`((1,2),(3,4))`, which is of type `((i32, i32), (i32, i32))`. A
+tuple cannot have just one element, but empty tuples are permitted,
+although they are not very useful. Empty tuples are written `()` and
+are of type `()`.
 
 #### Array Types
 
-An array value is written as a sequence of zero or more comma-separated values enclosed in square brackets: `[1, 2, 3]`. An array type is written as `[d]t`, where `t` is the element type of the array, and `d` is an expression of type `i64` indicating the number of elements in the array. We can elide `d` and write just `[]` (an anonymous size), in which case the size will be inferred.
+An array value is written as a sequence of zero or more
+comma-separated values enclosed in square brackets: `[1, 2, 3]`. An
+array type is written as `[d]t`, where `t` is the element type of the
+array, and `d` is an expression of type `i64` indicating the number of
+elements in the array. We can elide `d` and write just `[]` (an
+anonymous size), in which case the size will be inferred.
 
-As an example, an array of three integers could be written as `[1, 2, 3]`, and has type `[3]i32`. An empty array is written as `[]`, and its type is inferred from its use. When writing Wyn values for testing purposes, empty arrays are written `empty([0]t)` for an empty array of type `[0]t`.
+As an example, an array of three integers could be written as
+`[1, 2, 3]`, and has type `[3]i32`. An empty array is written as `[]`,
+and its type is inferred from its use. When writing Wyn values for
+testing purposes, empty arrays are written `empty([0]t)` for an empty
+array of type `[0]t`.
 
-**Multi-dimensional arrays** are supported in Wyn, but they must be regular, meaning that all inner arrays must have the same shape. For example, `[[1,2], [3,4], [5,6]]` is a valid array of type `[3][2]i32`, but `[[1,2], [3,4,5], [6,7]]` is not, because we cannot come up with integers `m` and `n` such that `[m][n]i32` describes the array. The restriction to regular arrays is rooted in low-level concerns about efficient compilation.
+**Multi-dimensional arrays** are supported in Wyn, but they must be
+regular, meaning that all inner arrays must have the same shape. For
+example, `[[1,2], [3,4], [5,6]]` is a valid array of type `[3][2]i32`,
+but `[[1,2], [3,4,5], [6,7]]` is not, because we cannot come up with
+integers `m` and `n` such that `[m][n]i32` describes the array. The
+restriction to regular arrays is rooted in low-level concerns about
+efficient compilation.
+
+#### Vector Types
+
+A vector is a fixed-width aggregate of scalar components, written
+`vecNT` where `N` is the component count (2, 3, or 4) and `T` is the
+scalar element type — e.g. `vec3f32`, `vec4i32`. Vector literals use
+the `@[...]` syntax: `let v: vec3f32 = @[1.0, 2.0, 3.0]`. See Vector
+Types below for the full naming table, constructors, and swizzles.
+
+#### Matrix Types
+
+A matrix is a fixed-shape aggregate of scalar components, written
+`matRxCT` (rectangular) or `matNT` (square, equivalent to `matNxNT`).
+Supported dimensions are R, C ∈ {2, 3, 4}; element types are the
+primitive scalar types. Matrix literals use the
+`@[[...], [...], ...]` syntax. See Matrix Types below for naming and
+construction details.
 
 #### Sum Types
 
-Sum types are anonymous in Wyn, and are written as the constructors separated by vertical bars. Each constructor consists of a `#`-prefixed name and an optional parenthesised payload — a comma-separated list of payload types (or sub-patterns / sub-expressions, depending on the syntactic position). A constructor with no payload is written bare, with no parentheses.
+Sum types are anonymous in Wyn, and are written as the constructors
+separated by vertical bars. Each constructor consists of a
+`#`-prefixed name and an optional parenthesised payload — a
+comma-separated list of payload types (or sub-patterns /
+sub-expressions, depending on the syntactic position). A constructor
+with no payload is written bare, with no parentheses.
 
 Because sum types are structural, constructor names are not globally
 unique — they are tags inside a sum type, not declarations. The same
@@ -275,11 +361,18 @@ type down, an annotation is required:
 let x: #left(i32) | #right(f32) = #left(3)
 ```
 
-**Note:** The current implementation of sum types is fairly inefficient, in that all possible constructors of a sum-typed value will be resident in memory. Avoid using sum types where multiple constructors have large payloads.
+**Note:** Implementations are not required to optimize the
+representation of sum-typed values. A sum-typed value may carry
+storage for every constructor's payload; sum types with multiple
+large-payload constructors can be costly.
 
 #### Record Types
 
-Records are mappings from field names to values, with the field names known statically. A tuple behaves in all respects like a record with numeric field names starting from zero, and vice versa. It is an error for a record type to name the same field twice. A trailing comma is permitted.
+Records are mappings from field names to values, with the field names
+known statically. A tuple behaves in all respects like a record with
+numeric field names starting from zero, and vice versa. It is an
+error for a record type to name the same field twice. A trailing
+comma is permitted.
 
 Records are structural: a field name `x` does not identify a single
 record type, so a bare projection `r.x` does not fully determine
@@ -295,7 +388,8 @@ let r: { x: f32, y: f32 } = make_point() in r.x
 
 #### Function Types
 
-Functions are classified via function types, but they are not fully first class. See Higher-order functions for the details.
+Functions are classified via function types, but they are not fully
+first class. See Higher-order functions for the details.
 
 #### String Literals
 
@@ -306,7 +400,21 @@ a string where a value is expected is a syntax error.
 
 #### Existential Size Quantifiers
 
-An existential size quantifier brings an unknown size into scope within a type. This can be used to encode constraints for statically unknown array sizes.
+An existential size quantifier brings an unknown size into scope
+within a type. It is used to describe results whose size is not
+statically known — most commonly, the output of `filter`:
+
+```wyn
+def is_even(x: i32) bool = x % 2 == 0
+
+def evens(arr: [8]i32) ?k. [k]i32 =
+    filter(is_even, arr)
+```
+
+The return type `?k. [k]i32` says "for some size `k`, an array of
+length `k`". A caller of `evens` receives an array of
+unknown-but-fixed length; `k` is in scope within the type but cannot
+be statically determined by the caller.
 
 ---
 
