@@ -31,6 +31,7 @@
 //! and EGIR maps it to the slot's binding.
 
 use super::{Def, DefMeta, Lambda, Program, Term, TermIdSource, TermKind};
+use crate::SymbolTable;
 use crate::ast::TypeName;
 use polytype::Type;
 
@@ -92,13 +93,18 @@ pub fn run(mut program: Program) -> Result<Program, NormalizeError> {
         })
         .collect();
 
+    let Program { defs, symbols, .. } = &mut program;
     for idx in entry_indices {
-        normalize_entry(&mut program.defs[idx], &mut term_ids)?;
+        normalize_entry(&mut defs[idx], &mut term_ids, symbols)?;
     }
     Ok(program)
 }
 
-fn normalize_entry(def: &mut Def, term_ids: &mut TermIdSource) -> Result<(), NormalizeError> {
+fn normalize_entry(
+    def: &mut Def,
+    term_ids: &mut TermIdSource,
+    symbols: &mut SymbolTable,
+) -> Result<(), NormalizeError> {
     let DefMeta::EntryPoint(decl) = &def.meta else {
         unreachable!("filtered to EntryPoint")
     };
@@ -121,7 +127,7 @@ fn normalize_entry(def: &mut Def, term_ids: &mut TermIdSource) -> Result<(), Nor
         },
     );
 
-    let new_body = rewrite_body(body, &entry_name, n_outputs, term_ids)?;
+    let new_body = rewrite_body(body, &entry_name, n_outputs, term_ids, symbols)?;
     def.body = new_body;
 
     // Intentionally leave `def.ty` unchanged. The outer Lambda's `ret_ty`
@@ -140,6 +146,7 @@ fn rewrite_body(
     entry_name: &str,
     n_outputs: usize,
     term_ids: &mut TermIdSource,
+    symbols: &mut SymbolTable,
 ) -> Result<Term, NormalizeError> {
     match term.kind {
         TermKind::Lambda(Lambda {
@@ -147,7 +154,7 @@ fn rewrite_body(
             body,
             ret_ty: _,
         }) => {
-            let new_body = rewrite_body(*body, entry_name, n_outputs, term_ids)?;
+            let new_body = rewrite_body(*body, entry_name, n_outputs, term_ids, symbols)?;
             let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
             let mut arrow_ty = unit_ty.clone();
             for (_, pt) in params.iter().rev() {
@@ -170,7 +177,7 @@ fn rewrite_body(
             rhs,
             body,
         } => {
-            let new_body = rewrite_body(*body, entry_name, n_outputs, term_ids)?;
+            let new_body = rewrite_body(*body, entry_name, n_outputs, term_ids, symbols)?;
             Ok(Term {
                 id: term_ids.next_id(),
                 ty: Type::Constructed(TypeName::Unit, vec![]),
@@ -184,7 +191,7 @@ fn rewrite_body(
             })
         }
         // Tail position — decompose.
-        _ => emit_slot_writes(term, entry_name, n_outputs, term_ids),
+        _ => emit_slot_writes(term, entry_name, n_outputs, term_ids, symbols),
     }
 }
 
@@ -195,6 +202,7 @@ fn emit_slot_writes(
     entry_name: &str,
     n_outputs: usize,
     term_ids: &mut TermIdSource,
+    symbols: &mut SymbolTable,
 ) -> Result<Term, NormalizeError> {
     // If the entry has zero outputs (unit return), there are no slot
     // writes to emit — but the tail may be a side-effectful expression
@@ -241,7 +249,7 @@ fn emit_slot_writes(
     let mut chain = unit_term(term_ids, tail.span);
     for (i, (value, value_ty)) in slot_sources.into_iter().enumerate().rev() {
         let store = make_store(i, value, value_ty, term_ids);
-        chain = sequence(store, chain, term_ids);
+        chain = sequence(store, chain, term_ids, symbols);
     }
     Ok(chain)
 }
@@ -265,22 +273,17 @@ fn make_store(
     }
 }
 
-/// `let _: () = first in rest` — a sequencing operator. The let-name is a
-/// fresh `_seq_<term_id>` symbol; downstream passes are agnostic to it.
-fn sequence(first: Term, rest: Term, term_ids: &mut TermIdSource) -> Term {
+/// `let _seq: () = first in rest` — a sequencing operator.
+fn sequence(first: Term, rest: Term, term_ids: &mut TermIdSource, symbols: &mut SymbolTable) -> Term {
     let span = first.span;
     let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
+    let name = symbols.alloc("_seq".to_string());
     Term {
         id: term_ids.next_id(),
         ty: unit_ty.clone(),
         span,
         kind: TermKind::Let {
-            // Sequencing let — discardable; use SymbolId(0) as a sentinel
-            // since `partial_eval` and downstream passes route by
-            // SymbolId equality and we never reference this name from
-            // anywhere. If a downstream pass needs a real symbol it can
-            // intern one.
-            name: crate::SymbolId(0),
+            name,
             name_ty: unit_ty,
             rhs: Box::new(first),
             body: Box::new(rest),
