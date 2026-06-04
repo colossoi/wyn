@@ -262,3 +262,33 @@ entry gen(bh: []i32) []i32 =
         "no gather pre-pass for a non-indexed computed array"
     );
 }
+
+#[test]
+fn lifts_gather_inside_tuple_slot_operand() {
+    // Multi-output entry where the gather candidate (`let counts =
+    // map(...) in map(|i| counts[i % 256], iota(...))`) lives inline as a
+    // tuple operand, not above the tuple. After normalize_outputs wraps
+    // the slot operand in `OutputSlotStore { value: ... }`, the lifter
+    // must still descend into `value` to find the producer. Regression:
+    // before the fix, `lift_in_term`'s `_ =>` catch-all dropped the
+    // OutputSlotStore subtree, and the gather producer survived
+    // unlifted into codegen.
+    let src = "\
+#[compute]
+entry gen(bh: []vec4f32) ([]i32, []i32) =
+  (let counts = map(|h:vec4f32| 4 + 5*(if h.x>4.0 then 3 else 1), bh) in
+     map(|i:i32| counts[i % 256], iota(6144)),
+   iota(100))
+";
+    let program = ownership_applied(src);
+    let normalized = crate::tlc::normalize_outputs::run(program).expect("normalize_outputs");
+    let lifted = super::run(normalized);
+    assert!(
+        has_gather_prepass(&lifted),
+        "gather producer inside an OutputSlotStore.value must still be lifted"
+    );
+    assert!(
+        !has_map_producing_let(&def_named(&lifted, "gen").body),
+        "the producer `let` inside the tuple operand must be gone after lifting"
+    );
+}

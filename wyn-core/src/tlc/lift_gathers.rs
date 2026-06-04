@@ -189,12 +189,52 @@ fn lift_in_term(
                 new_defs,
                 program,
             );
+            // After normalize_outputs, the rhs of a sequencing let is an
+            // OutputSlotStore that may wrap further gather candidates
+            // (`let _ = OutputSlotStore(i, let counts = map(...) in …)`).
+            // Descend so the inner producer still gets lifted.
+            let new_rhs = if matches!(rhs.kind, TermKind::OutputSlotStore { .. }) {
+                Box::new(lift_in_term(
+                    *rhs,
+                    entry_name,
+                    param_bindings,
+                    next_gather,
+                    added_decls,
+                    new_defs,
+                    program,
+                ))
+            } else {
+                rhs
+            };
             Term {
                 kind: TermKind::Let {
                     name,
                     name_ty,
-                    rhs,
+                    rhs: new_rhs,
                     body: Box::new(new_body),
+                },
+                ..term
+            }
+        }
+        TermKind::OutputSlotStore {
+            slot_index,
+            value,
+            value_ty,
+        } => {
+            let new_value = lift_in_term(
+                *value,
+                entry_name,
+                param_bindings,
+                next_gather,
+                added_decls,
+                new_defs,
+                program,
+            );
+            Term {
+                kind: TermKind::OutputSlotStore {
+                    slot_index,
+                    value: Box::new(new_value),
+                    value_ty,
                 },
                 ..term
             }
