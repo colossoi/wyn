@@ -364,18 +364,13 @@ impl<'a> CallLowerer<'a> {
                 span,
                 kind: TermKind::VecLit(parts.into_iter().map(|p| self.lower_term(p)).collect()),
             },
-            TermKind::OutputSlotStore {
-                slot_index,
-                value,
-                value_ty,
-            } => Term {
+            TermKind::OutputSlotStore { slot_index, value } => Term {
                 id: self.term_ids.next_id(),
                 ty,
                 span,
                 kind: TermKind::OutputSlotStore {
                     slot_index,
                     value: Box::new(self.lower_term(*value)),
-                    value_ty,
                 },
             },
         }

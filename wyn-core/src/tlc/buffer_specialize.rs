@@ -521,15 +521,10 @@ impl BufferSpecializer {
                 kind: TermKind::VecLit(parts.iter().map(|p| self.rewrite_term(p)).collect()),
                 ..term.clone()
             },
-            TermKind::OutputSlotStore {
-                slot_index,
-                value,
-                value_ty,
-            } => Term {
+            TermKind::OutputSlotStore { slot_index, value } => Term {
                 kind: TermKind::OutputSlotStore {
                     slot_index: *slot_index,
                     value: Box::new(self.rewrite_term(value)),
-                    value_ty: value_ty.clone(),
                 },
                 ..term.clone()
             },
@@ -1139,15 +1134,10 @@ impl BufferSpecializer {
                 ),
                 ..term.clone()
             },
-            TermKind::OutputSlotStore {
-                slot_index,
-                value,
-                value_ty,
-            } => Term {
+            TermKind::OutputSlotStore { slot_index, value } => Term {
                 kind: TermKind::OutputSlotStore {
                     slot_index: *slot_index,
                     value: Box::new(self.rewrite_specialized_body(value, view_params)),
-                    value_ty: value_ty.clone(),
                 },
                 ..term.clone()
             },

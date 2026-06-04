@@ -392,32 +392,17 @@ pub enum TermKind {
     ///
     /// `slot_index` identifies which `EntryDecl.outputs[i]` this store
     /// targets — the actual `BindingRef` is allocated at EGIR
-    /// conversion (`build_entry_outputs`, `egir/from_tlc.rs:1943`),
-    /// so TLC-level normalisation doesn't have to mirror that
-    /// allocation logic.
+    /// conversion. The slot's runtime type is `value.ty` (kept current
+    /// by every walker that recurses through `value`); EGIR consumers
+    /// read from there.
     ///
-    /// `value`'s shape determines the lowering:
-    ///   * `Soac(Map | Scan(Fresh) | Filter)` → retarget producer to
-    ///     the slot's output view (gid-indexed stores).
-    ///   * `ArrayExpr::Literal` / `VecLit` of fixed size → element
-    ///     stores at indices `0..n`.
-    ///   * Scalar / vector / matrix → single store at index 0.
-    ///   * Runtime-sized non-retargetable → diagnostic.
-    ///
-    /// `value_ty` is the slot's declared output type (matches the
-    /// `EntryOutput.ty` from the entry's `EntryDecl`). It survives
-    /// `partial_eval` so lowering doesn't have to re-derive from
-    /// `value.ty` (which may be more general, e.g. a tuple-projection
-    /// result).
-    ///
-    /// `OutputSlotStore` is a *unit-producing side effect* — its TLC
-    /// type is `()`. The entry body becomes a chain of these via
-    /// `let _ = <store> in <next>` ending in `UnitLit`. The entry's
-    /// return type becomes `Unit` post-normalisation.
+    /// `OutputSlotStore` is `SideEffect`-typed (no return value, only
+    /// the bound-buffer write). The entry body becomes a chain of these
+    /// via `let _ = <store> in <next>` capped with a `SideEffect`
+    /// terminator; `def.ty == def.body.ty` post-normalisation.
     OutputSlotStore {
         slot_index: usize,
         value: Box<Term>,
-        value_ty: Type<TypeName>,
     },
 }
 
@@ -905,14 +890,9 @@ impl Term {
 
             TermKind::VecLit(parts) => TermKind::VecLit(parts.into_iter().map(&mut *f).collect()),
 
-            TermKind::OutputSlotStore {
-                slot_index,
-                value,
-                value_ty,
-            } => TermKind::OutputSlotStore {
+            TermKind::OutputSlotStore { slot_index, value } => TermKind::OutputSlotStore {
                 slot_index,
                 value: Box::new(f(*value)),
-                value_ty,
             },
         };
 

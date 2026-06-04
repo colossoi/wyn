@@ -209,11 +209,9 @@ fn emit_slot_writes(
         return Ok(tail);
     }
 
-    // Decompose `tail` into per-slot sources.
-    let slot_sources: Vec<(Term, Type<TypeName>)> = match tail.kind {
-        TermKind::Tuple(operands) if operands.len() == n_outputs => {
-            operands.into_iter().map(|t| (t.clone(), t.ty)).collect()
-        }
+    // Decompose `tail` into per-slot value terms.
+    let slot_values: Vec<Term> = match tail.kind {
+        TermKind::Tuple(operands) if operands.len() == n_outputs => operands,
         TermKind::Tuple(operands) => {
             return Err(NormalizeError::SlotCountMismatch {
                 entry: entry_name.to_string(),
@@ -221,7 +219,7 @@ fn emit_slot_writes(
                 operands: operands.len(),
             });
         }
-        _ if n_outputs == 1 => vec![(tail.clone(), tail.ty)],
+        _ if n_outputs == 1 => vec![tail.clone()],
         // Multi-output entries whose tail is a *single* value of tuple
         // type (e.g. a reduce returning `(u32, [4]u32)` or a function
         // call returning a tuple). Phase 1A leaves these unnormalised:
@@ -242,19 +240,14 @@ fn emit_slot_writes(
     // Innermost is a `SideEffect`-typed terminator; each outer wraps
     // the previous in `Let { name: _, rhs: store, body: inner }`.
     let mut chain = side_effect_terminator(term_ids, tail.span);
-    for (i, (value, value_ty)) in slot_sources.into_iter().enumerate().rev() {
-        let store = make_store(i, value, value_ty, term_ids);
+    for (i, value) in slot_values.into_iter().enumerate().rev() {
+        let store = make_store(i, value, term_ids);
         chain = sequence(store, chain, term_ids, symbols);
     }
     Ok(chain)
 }
 
-fn make_store(
-    slot_index: usize,
-    value: Term,
-    value_ty: Type<TypeName>,
-    term_ids: &mut TermIdSource,
-) -> Term {
+fn make_store(slot_index: usize, value: Term, term_ids: &mut TermIdSource) -> Term {
     let span = value.span;
     Term {
         id: term_ids.next_id(),
@@ -263,7 +256,6 @@ fn make_store(
         kind: TermKind::OutputSlotStore {
             slot_index,
             value: Box::new(value),
-            value_ty,
         },
     }
 }

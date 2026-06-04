@@ -216,11 +216,7 @@ fn lift_in_term(
                 ..term
             }
         }
-        TermKind::OutputSlotStore {
-            slot_index,
-            value,
-            value_ty,
-        } => {
+        TermKind::OutputSlotStore { slot_index, value } => {
             let new_value = lift_in_term(
                 *value,
                 entry_name,
@@ -234,7 +230,6 @@ fn lift_in_term(
                 kind: TermKind::OutputSlotStore {
                     slot_index,
                     value: Box::new(new_value),
-                    value_ty,
                 },
                 ..term
             }

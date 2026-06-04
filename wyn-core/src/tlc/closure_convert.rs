@@ -851,18 +851,13 @@ impl<'a> ClosureConverter<'a> {
                 span,
                 kind: TermKind::VecLit(parts.into_iter().map(|p| self.convert_term(p)).collect()),
             },
-            TermKind::OutputSlotStore {
-                slot_index,
-                value,
-                value_ty,
-            } => Term {
+            TermKind::OutputSlotStore { slot_index, value } => Term {
                 id: self.term_ids.next_id(),
                 ty,
                 span,
                 kind: TermKind::OutputSlotStore {
                     slot_index,
                     value: Box::new(self.convert_term(*value)),
-                    value_ty,
                 },
             },
         }
