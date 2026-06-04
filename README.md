@@ -4,15 +4,15 @@ A minimal compiler for a Futhark-like programming language that generates SPIR-V
 
 ## Features
 
+- Functional syntax for shader programming
 - Hindley-Milner type inference with polymorphic types
 - Higher-order functions (map, reduce, zip, etc.)
-- Vector and matrix types optimized for GPU operations
 - Pattern matching
 - SPIR-V and WGSL code generation for Vulkan/WebGPU shaders
 - Vertex, fragment, and compute shader support
+- Vector and matrix types optimized for GPU operations
 - Array operations with size tracking
 - Loop constructs
-- Futhark-inspired functional syntax for shader programming
 
 ## Project Structure
 
@@ -30,21 +30,26 @@ The compiler uses a multi-stage pipeline with typestate-driven phases. Each stag
 
 ### Mid-End: Acyclic E-Graph
 
-The mid-end is an **acyclic e-graph**: a sea of hash-consed pure nodes plus a skeleton CFG of effectful instructions. Most optimizations fall out of the data structure without dedicated passes.
+The mid-end is an **acyclic e-graph**: a sea of hash-consed pure nodes
+plus a skeleton CFG of effectful instructions. Purity is
+**blacklisted**, not whitelisted — only `Alloca` / `Load` / `Store`
+stay in the skeleton; everything else (calls, intrinsics, storage
+views, projections, indexing) is hash-consed in the pure sea.
 
-Key structures (`egir::types`):
-- **`ENode::Pure { op, operands }`** — hash-consed pure value; GVN is automatic.
-- **`Skeleton`** — a CFG of side-effectful instructions (`SideEffect`) anchored in blocks with `SkeletonTerminator`s. Operands are `NodeId`s.
-- **`ENode::SideEffectResult`** — unique (non-hash-consed) handle for the value produced by a skeleton instruction, consumable by the pure sea.
-- **Purity is blacklisted**, not whitelisted: the only `InstKind`s kept in the skeleton are `Alloca`, `Load`, `Store`. Everything else — `Call`, `Intrinsic`, `StorageView*`, `StorageViewIndex`, `OutputPtr`, `Index`, `Project`, etc. — is hash-consed into the pure sea.
+Most optimizations fall out of the data structure without dedicated
+passes:
 
-What you get "for free":
-- **GVN** — `intern_pure(op, operands)` returns an existing `NodeId` when `(op, operands)` match.
-- **Constant folding** — `intern_pure` consults `fold.rs` before inserting; folded results are themselves interned, so folds compose.
-- **DCE** — `elaborate` is demand-driven from skeleton roots; unreached pure nodes are never emitted.
-- **CSE along a domtree path** — `ScopedMap` tracks emitted nodes per dominator scope; siblings never cross-pollute.
-- **LICM** — `loop_analysis` picks the outermost loop where all operands are available as the placement point.
-- **Branch folding + redundant-phi elimination** — `skel_opt` rewrites the skeleton CFG before elaboration.
+- **GVN** — pure-node interning deduplicates by structural equality.
+- **Constant folding** — the interner consults a folder before
+  inserting, so folds compose.
+- **DCE** — elaboration is demand-driven from skeleton roots;
+  unreached pure nodes are never emitted.
+- **CSE along the domtree** — emitted pure nodes are scoped to
+  dominator regions; siblings never share.
+- **LICM** — pure nodes float to the outermost loop where all their
+  operands are available.
+- **Branch folding + redundant-phi elimination** — the skeleton CFG
+  is rewritten before elaboration.
 
 ### Frontend (AST)
 
@@ -63,22 +68,25 @@ What you get "for free":
 | **TlcPartialEvaled** | `tlc::partial_eval` | Constant folding and algebraic simplifications |
 | **TlcSoaNormalized** | `tlc::soa` | SoA transform (`[n](A,B)` → `([n]A, [n]B)`) + Map+Zip flattening + standalone Zip elimination |
 | **TlcFused** | `tlc::fusion` | SOAC fusion: map-map, interprocedural producer-consumer |
-| **TlcOwnershipApplied** | `tlc::ownership` | Backward ownership-liveness analysis with fixed-point over loops/SOAC bodies. Reports use-after-move; rewrites `_w_intrinsic_array_with` → `_w_intrinsic_array_with_inplace` where the source's owner is mutable and dead-after the call |
-| **TlcDefunctionalized** | `tlc::closure_convert` → `tlc::hof_specialize` → `tlc::closure_calls_lower` (composed inside `TlcOwnershipApplied::defunctionalize`) | Three sequential passes communicating through a `ClosureInfo` side-table. Lambdas lifted to top-level defs, HOFs specialized away, captures threaded into call sites. Captures for SOAC-position lambdas land on a `SoacBody { lam, captures }` wrapper. `verify_closure_converted`, `verify_hof_specialized`, and `verify_closure_calls_lowered` guard each phase boundary |
+| **TlcOwnershipApplied** | `tlc::ownership` | Backward ownership-liveness analysis. Reports use-after-move; rewrites array-update operations into in-place forms when the source is mutable and dead after the call |
+| **TlcOutputsNormalized** | `tlc::normalize_outputs` | Rewrites each compute entry's tail into a chain of explicit per-slot output writes. Single-output and multi-output entries share one structural shape; the entry's `def.ty` is kept in sync with its rewritten body |
+| **TlcGathersLifted** | `tlc::lift_gathers` | Materializes randomly-indexed computed arrays into storage buffers by splitting the producer into its own pre-pass compute entry and rewriting indexed reads in the consumer to load from that buffer |
+| **TlcDefunctionalized** | `tlc::closure_convert` → `tlc::hof_specialize` → `tlc::closure_calls_lower` | Three sequential passes: lambdas lifted to top-level defs, higher-order functions specialized away, captures threaded into call sites. Verifier-checked invariants guard each phase boundary (see Defunctionalization below) |
 | **TlcMonomorphized** | `tlc::specialize`, `tlc::monomorphize` | Polymorphic intrinsics specialized; user functions monomorphized |
 | **TlcBufferSpecialized** | `tlc::buffer_specialize` | Storage buffer parameter specialization |
-| **TlcGeneratedLambdasFolded** | `tlc::inline` | Fold compiler-generated `_w_lambda_*` defs (from defunctionalization) back at call sites + DCE |
+| **TlcGeneratedLambdasFolded** | `tlc::inline` | Fold compiler-generated lambda defs back at call sites + DCE |
 | **TlcSmallInlined** | `tlc::inline` | Inline small user functions and constants |
-| **TlcParallelized** | `tlc::parallelize` | Per-entry SOAC parallelization **analysis**: pick strategy + workgroup + dispatch shape, reserve intermediate bindings, build the host `PipelineDescriptor`, and emit a declarative `ParallelizationPlan` per parallelized entry on the `ParallelizationResult.plans` map for EGIR to consume. Kernel lowering happens EGIR-side — see `egir::parallelize` below |
+| **TlcParallelized** | `tlc::parallelize` | Per-entry SOAC parallelization analysis: pick strategy + workgroup + dispatch shape, reserve intermediate bindings, build the host pipeline descriptor, and emit a declarative parallelization plan per entry for EGIR to consume. Kernel lowering happens EGIR-side |
 | **TlcReachable** | `tlc::inline` | Dead definition elimination |
 
 ### EGIR (Acyclic E-Graph IR)
 | Stage | Module | Description |
 |-------|--------|-------------|
-| **EgirRaw** | `egir::from_tlc` | TLC term → EGraph; `_w_intrinsic_*` calls lowered as pure `PureOp::Intrinsic` (effectful intrinsics like `_w_intrinsic_storage_index` handled by explicit arms) |
-| **EgirParallelized** | `egir::parallelize` | Consumes `tlc::parallelize`'s per-entry `ParallelizationPlan` map and tags each planned compute entry's tail SOAC with `PendingSoac::Parallel { serial: Box<PendingSoac> }`. No-op when the plan map is empty (graphics-only programs, non-parallelized compute entries) |
-| **EgirSoacExpanded** | `egir::soac_expand` | Every `PendingSoac` rewritten into an explicit loop subgraph (block-split + header/body/after, alloca/store for output arrays, view loads, SoA-aware reads). Map with a statically-sized input of ≤16 elements is unrolled via a shared `try_unroll` / `build_loop` / `expand_loop` core. `PendingSoac::Parallel` (compute-entry SOAC) dispatches to lane-indexed builders (`build_parallel_map`) — preheader loads `gl_GlobalInvocationID`, body is gated by `OpSelectionMerge` rather than `OpLoopMerge` |
-| **EgirMaterialized** | `egir::materialize` | (optional, SPIR-V only) dynamic `Index` → `Materialize` + `DynamicExtract`, then LICM-hoisted out of loops |
+| **EgirRaw** | `egir::from_tlc` | TLC → EGraph; intrinsic calls become pure nodes (with explicit arms for effectful ones). Per-slot output writes are bridged back into a tail tuple so the next stage can retarget per slot |
+| **EgirOutputsAssigned** | `egir::assign_outputs` | Per-slot output retargeting: each tail-tuple slot is routed to its allocated output binding (storage view for compute, IO variable for graphics) |
+| **EgirParallelized** | `egir::parallelize` | Consumes the parallelization plan from TLC and tags each planned compute entry's tail SOAC for parallel expansion. No-op when no entries are parallelized |
+| **EgirSoacExpanded** | `egir::soac_expand` | Every pending SOAC is rewritten into an explicit loop subgraph. Small statically-sized maps are unrolled. Compute-entry SOACs lower to lane-indexed kernels that read the global invocation id |
+| **EgirMaterialized** | `egir::materialize` | (optional, SPIR-V only) Dynamic `Index` operations are materialized into pointer-based reads and LICM-hoisted out of loops |
 | **EgirSkelOptimized** | `egir::skel_opt` | Skeleton CFG rewrites: branch folding, redundant-phi elimination |
 
 ### SSA (codegen only)
@@ -87,55 +95,45 @@ What you get "for free":
 | **SsaConverted** | `EgirSkelOptimized::elaborate` | EGIR chain elaborated into SSA `Program` |
 | **Lowered** | `spirv` / `wgsl` | SSA to SPIR-V or WGSL |
 
-SSA is intentionally minimal: all mid-end machinery (effect tokens, canonicalization, verification, generic transform passes) lives in EGIR. The `ssa::framework` module provides a generic CFG-with-block-params representation; `ssa::types` is the concrete instantiation (`InstKind` instructions, `Type<TypeName>` values).
+SSA is intentionally minimal: all mid-end machinery (effect tokens,
+canonicalization, verification, generic transform passes) lives in
+EGIR. A generic CFG-with-block-params representation is provided in
+`ssa::framework`; the concrete instantiation lives in `ssa::types`.
 
 Key properties:
-- CFG with basic blocks and block parameters (not phi nodes)
-- No effect tokens at the SSA layer — instruction order is fixed by elaboration
-- `ValueDef::FunctionParam` distinct from `ValueDef::Param` (block params)
-- `ControlHeader` metadata stored in a side-map on `FuncBody`, not on blocks
+- CFG with basic blocks and block parameters (not phi nodes).
+- No effect tokens at the SSA layer — instruction order is fixed by
+  elaboration.
+- Function parameters and block parameters are distinct kinds of
+  values.
 
 ### SOAC Parallelization Boundary
 
 Parallelization of compute-entry SOACs splits cleanly across the two
-mid-end passes. **TLC `parallelize` is analysis-only**: it identifies the
-tail SOAC of each compute entry, chooses a strategy + workgroup +
-dispatch model, reserves intermediate binding numbers, and emits a
-declarative `ParallelizationPlan` per entry (plus the host-facing
-`PipelineDescriptor`). It does **not** hand-roll kernel bodies for Map
-or wire up storage views — those duplicate work EGIR already does
-well (SoA-tuple aware reads via `as_soa_tuple` / `emit_read_element`,
-OutputView wiring, storage-view construction).
+mid-end passes. **TLC `parallelize` is analysis-only**: it picks a
+strategy + workgroup + dispatch shape per entry, reserves intermediate
+bindings, and emits a declarative plan plus the host-facing pipeline
+descriptor. It does not hand-roll kernel bodies — EGIR already builds
+those well.
 
-**EGIR `parallelize` consumes the plans** and rewrites planned entries
-according to each strategy. Per-SOAC shape:
+**EGIR `parallelize` consumes the plans** and rewrites entries per
+strategy:
 
-- **Map** — the tail `PendingSoac::Map` is wrapped in
-  `Parallel { serial: Box<PendingSoac> }`. `soac_expand` dispatches on
-  the wrapper to a lane-indexed scalar kernel (load
-  `gl_GlobalInvocationID`, bounds-check, single guarded scalar body),
-  reusing all the existing element-read / OutputView machinery. The
-  serial-loop builder remains in place for non-entry Maps (e.g. an
-  intermediate `map` inside a function body) — those legitimately want
-  a per-thread sequential walk.
-- **Reduce** — the original entry is rewritten in place as phase 1
-  (chunked input + store-to-`partials[tid]`) and a fresh phase 2
-  combine entry is synthesized via `EntryBuilder` from a `PendingSoac::
-  Reduce` over the partials array.
-- **Redomap** — same shape as Reduce phase 1 / phase 2, but phase 2
-  uses Redomap's pure `reduce_func` combiner; the NE subgraph is cloned
-  across EGraphs via `graph_ops::clone_pure_subgraph`.
-- **Scan** — three-phase structure. Phase 1 (in-place rewrite of the
-  original entry): chunks the scan's input + output views and appends a
-  chunked `PendingSoac::Reduce` plus a `Store` so each thread also
-  writes its final accumulator to `block_sums[tid]`. Phase 2 (synthesized,
-  1×1×1 dispatch): sequential `PendingSoac::Scan` over `block_sums` into
-  `block_offsets`. Phase 3 (synthesized, chunked): `PendingSoac::Map`
-  applying `op(elem, off)` to each element of `output[chunk]` with `off`
-  loaded from `block_offsets[tid]`. When the ownership pass marks the
-  scan's input as consumable (`*[]T`), phase 1 and phase 3 reroute
-  writes back to the input binding and the pipeline descriptor skips
-  the auto-output slot.
+- **Map** — lane-indexed scalar kernel: one thread per element, guarded
+  by a bounds check. The serial-loop builder is still used for
+  non-entry maps (intermediate `map` inside a function body) which
+  legitimately want sequential execution per thread.
+- **Reduce** — two-phase: phase 1 chunks the input per thread and
+  writes a partial; phase 2 is a synthesized combine entry over the
+  partials.
+- **Redomap** — same two-phase shape as Reduce, with the redomap's
+  combiner in phase 2.
+- **Scan** — three-phase Blelloch-style: phase 1 chunks the scan
+  per-thread + writes per-block sums; phase 2 sequentially scans the
+  per-block sums into per-block offsets; phase 3 applies the
+  per-element fold. When the input is marked consumable (`*[]T`),
+  phases 1 and 3 write back in place and the pipeline descriptor
+  skips the auto-output slot.
 
 ### SOAC Implementation Status
 
@@ -200,92 +198,80 @@ is independent.
   parallel. Either accept the race (matches Futhark's documented
   behavior) or gate on atomic-store availability.
 
-### SPIR-V Backend Optimizations
-
-- **Polytype cache** — Memoizes `polytype_to_spirv` to prevent duplicate type instructions
-- **Composite constant cache** — Deduplicates `OpConstantComposite` by (type, constituents)
-- **Null constant cache** — Deduplicates `OpConstantNull` by type
-
 ### Defunctionalization
 
 The `defunctionalize()` typestate transition composes three sequential
-passes under `tlc::`. They communicate through a `ClosureInfo`
-side-table — every callable `Var`-position in the IR resolves through
-a single `closure_info.resolve_callable(sym)` lookup that returns
-either `Direct(sym)` (no captures) or
-`Closure { code, captures, param_count }`.
+passes that share a closure-info side table. Every callable position
+in the IR resolves through a single lookup that says either "direct
+call" or "closure (code address + captures)".
 
-1. **`closure_convert`** — lifts every standalone `TermKind::Lambda` to
-   a top-level `Def`, replacing the lambda site with a `Var` referring
-   to the lifted symbol. Free variables become trailing parameters on
-   the lifted def. Let-bound lambdas are substituted away (`let g =
-   |…| body in rest` → `rest[g/lifted_sym]`) so no callable aliases
-   survive into later passes. Transitive captures are pulled in: if a
-   lifted lambda's body calls another closure, that closure's captures
-   are added to the outer lambda's capture list. Output: `(Program,
-   ClosureInfo)`.
+1. **`closure_convert`** — lifts every standalone lambda to a top-level
+   def. Free variables become trailing parameters on the lifted def.
+   Let-bound lambdas are substituted away so no callable aliases
+   survive. Transitive captures are pulled in.
 
 2. **`hof_specialize`** — clones each user-defined higher-order
    function for every concrete callable that flows in, eliminating
-   function-typed parameters. Single dispatch point: at each
-   `App(Var(hof), args)`, look up the func-arg-slot's symbol via
-   `closure_info.resolve_callable`. The cloned body has its captures
-   pre-threaded (using the same logic the next pass applies globally)
-   before the per-specialization renaming step rewrites outer-scope
-   capture symbols to fresh local params. After this pass, every
-   reachable top-level def has zero function-typed parameters.
+   function-typed parameters. After this pass, every reachable
+   top-level def has zero function-typed parameters.
 
-3. **`closure_calls_lower`** — global tree walk. At each
-   `App(Var(sym), args)` where `closure_info` reports
-   `Closure { code, captures, param_count }`, threads captures by
-   rewriting to `App(Var(code), args ++ captures)`. Idempotent — only
-   triggers when `args.len() == param_count`, so calls that
-   `hof_specialize` already pre-threaded inside specialized HOF bodies
-   are skipped.
+3. **`closure_calls_lower`** — final global tree walk that threads
+   captures into call sites. Idempotent with the pre-threading
+   `hof_specialize` already did inside cloned bodies.
 
-SOAC envelope captures: lambdas embedded in `SoacOp` envelopes
-(`Map`, `Reduce`, `Scan`, …) are lifted by `closure_convert` like any
-other lambda, but the SOAC keeps a `SoacBody { lam: Lambda,
-captures: Vec<(SymbolId, Type, Term)> }` payload so the loop body and
-its closed-over values stay together for later expansion. The same
-shape is used for `ArrayExpr::Generate`.
+Lambdas embedded in SOAC operators are lifted the same way, but the
+SOAC keeps a `(lambda, captures)` payload so the loop body and its
+closed-over values stay together for later expansion.
 
-Example transformation:
-```
--- Input (lambda with capture y):
-map(|x| x + y, arr)
+Three verifier-checked invariants guard the phase boundaries: no
+standalone lambdas survive outside SOAC envelopes, no reachable def
+has a function-typed parameter, and every call is fully arity-matched
+to a non-callable target.
 
--- After closure_convert:
-_w_lambda_0 = λ(x, y). x + y       -- y is a regular param of the lifted def
-map(SoacBody { lam: _w_lambda_0, captures: [(y_sym, ty, Var(y))] }, arr)
-```
+### Type Schema
 
-Three verifier-checked invariants run at each phase boundary:
-`verify_closure_converted` (no `TermKind::Lambda` outside SOAC envelopes),
-`verify_hof_specialized` (no reachable top-level def has a function-typed
-parameter), and `verify_closure_calls_lowered` (every `App.func` is a `Var`
-or operator, every call is fully arity-matched — including intrinsic
-arities derived from `builtins::intrinsic_arity`).
+Throughout TLC and EGIR, types are `polytype::Type<TypeName>`. The
+underlying carrier is `Type::Constructed(TypeName, Vec<Type>)` — the
+`Vec<Type>` (the "args") means different things per variant. This
+schema is the canonical mapping. Helpers in `wyn-core/src/types/mod.rs`
+(`array_elem`, `array_size`, `array_variant`, `strip_unique`,
+`extract_function_signature`) centralize the position queries so passes
+don't pattern-match on args indices directly.
+
+| Variant | args[0] | args[1] | args[2] | Notes |
+|---|---|---|---|---|
+| `Bool`, `Float(n)`, `UInt(n)`, `Int(n)` | — | — | — | Nullary scalars |
+| `Unit` | — | — | — | The `()` value |
+| `SideEffect` | — | — | — | "No return value, side effects only"; renders as `!()`. Used by post-`normalize_outputs` compute entry bodies and imperative builtin signatures |
+| `Arrow` | param | return | — | Curry by chaining (`a → b → c` = `Arrow(a, Arrow(b, c))`) |
+| `Tuple(n)` | t₁ | t₂ | … | n elements; arity in the variant tag |
+| `Vec` | elem | `Size(n)` | — | n-component vector |
+| `Mat` | elem | `Size(cols)` | `Size(rows)` | Column-major |
+| `Array` | elem | size | variant | size is `Size(n)` \| `SizeVar(name)` \| `SizePlaceholder` \| `Variable`; variant is `ArrayVariantView` \| `Composite` \| `Virtual` \| `Bounded` |
+| `Pointer` | pointee | addrspace | — | addrspace is one of `PointerFunction` / `PointerInput` / `PointerOutput` / `PointerStorage` |
+| `Unique` | inner | — | — | `*T` uniqueness marker (consumed by ownership) |
+| `Record(fields)` | t₁ | t₂ | … | Field names in the variant payload (declared order); per-field types in args |
+| `Sum(variants)` | — | — | — | Both names and per-variant payload types are in the `Sum` payload itself; args is empty |
+| `Existential(vars)` | t | — | — | Bound size-var names in the variant payload; inner type in args[0] |
+| `Named(s)`, `Size(n)`, `SizeVar(s)`, `UserVar(s)` | — | — | — | Nullary; data carried in the variant payload |
+| `SizePlaceholder`, `AddressPlaceholder`, `ArrayVariant{View,Composite,Virtual,Bounded}`, `Pointer{Function,Input,Output,Storage}` | — | — | — | Nullary marker types used only as args of other variants |
+| `Texture2D`, `Sampler`, `StorageTexture` | — | — | — | Nullary opaque GPU handles. Format/access for storage textures live on `EntryInput.storage_image_binding` (per-param), not on the language-level type |
 
 ## Example Program
 
-```futhark
--- Simple shader that renders a full-screen triangle
-
-def positions: [3]vec4f32 =
-  [vec4 (-1.0f32) (-1.0f32) 0.0f32 1.0f32,
-   vec4 3.0f32 (-1.0f32) 0.0f32 1.0f32,
-   vec4 (-1.0f32) 3.0f32 0.0f32 1.0f32]
+```
+-- Render a full-screen triangle.
 
 #[vertex]
-def vertex_main(
-    #[builtin(vertex_index)] vertex_id: i32
-): #[builtin(position)] vec4f32 =
-  positions[vertex_id]
+entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 =
+  let verts = [@[-1.0, -1.0, 0.0, 1.0],
+               @[ 3.0, -1.0, 0.0, 1.0],
+               @[-1.0,  3.0, 0.0, 1.0]] in
+  verts[vid]
 
 #[fragment]
-def fragment_main(): #[location(0)] vec4f32 =
-  vec4 0.529f32 0.808f32 0.922f32 1.0f32  -- Sky blue
+entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
+  @[0.529, 0.808, 0.922, 1.0]  -- Sky blue
 ```
 
 ## Usage
@@ -315,7 +301,7 @@ cargo build --release
 cargo test
 ```
 
-552 tests currently pass (5 ignored for pending features). All 24 end-to-end testfiles in `testfiles/` compile and validate (`bash scripts/validate_testfiles.sh`).
+985 tests currently pass (9 ignored for pending features). All 69 SPIR-V testfiles in `testfiles/` compile and validate (`bash scripts/validate_testfiles.sh`); 67 of those also validate as WGSL (`bash scripts/validate_testfiles.sh --wgsl` — 2 skip because they depend on linked SPIR-V helpers).
 
 ## Language Overview
 
@@ -330,53 +316,59 @@ cargo test
 
 ### Key Syntax
 
-```futhark
--- Function definitions
-def add x y = x + y
-def reverse [n] (arr: [n]i32): [n]i32 = ...
+```
+-- Top-level definitions
+def add(x: i32, y: i32) i32 = x + y
+def first(xs: []i32) i32 = xs[0]
 
--- Shader entry points with attributes
+-- Shader entry points (one entry-point keyword per stage)
 #[vertex]
-def vs_main(#[builtin(vertex_index)] id: i32): #[builtin(position)] vec4f32 = ...
+entry vs_main(#[builtin(vertex_index)] id: i32) #[builtin(position)] vec4f32 = ...
 
 #[fragment]
-def fs_main(#[location(0)] color: vec3f32): #[location(0)] vec4f32 = ...
+entry fs_main(#[location(0)] color: vec3f32) #[location(0)] vec4f32 = ...
 
--- Lambdas and pattern matching
-\x -> x + 1
-\(x, y) -> x + y
+#[compute]
+entry sum_array(#[size_hint(1024)] data: []f32) f32 =
+  reduce(|a: f32, b: f32| a + b, 0.0, data)
 
--- Loops (no recursion allowed)
+-- Lambdas
+|x: i32| x + 1
+|x: i32, y: i32| x + y
+
+-- Loops (the supported looping primitive)
 loop (acc, i) = (0, 0) while i < n do (acc + arr[i], i + 1)
 
 -- Higher-order functions
-map (\x -> x * 2) arr
-reduce (+) 0 arr
+map(|x: i32| x * 2, arr)
+reduce(|a: i32, b: i32| a + b, 0, arr)
 ```
 
 ### Type Inference
 
-```futhark
-def identity x = x
+```
+def identity(x) = x
 -- Inferred: ∀a. a -> a
 
-def zip_arrays xs ys = zip xs ys
+def zip_arrays(xs, ys) = zip(xs, ys)
 -- Inferred: ∀n t1 t2. [n]t1 -> [n]t2 -> [n](t1, t2)
 ```
 
 ## Current Limitations
 
-- Module system is partially implemented
-- No recursion — use `loop` or higher-order functions instead
-- `match` expressions parsed but not fully implemented in code generation
+- Module system covers the common path (`open`, qualified access, multi-file imports — see `testfiles/open_module_demo.wyn`); some advanced features remain unimplemented.
+- `match` expressions work for literals, wildcards, and sum-type constructors (`testfiles/match_*.wyn`, `testfiles/sum_demo.wyn`); guards and nested patterns are pending.
 
-## Dependencies
+## Design Choices
+
+These are deliberate and not on a fix-it list:
+
+- **No recursion.** Use `loop` or higher-order functions. Aligns with Futhark and GPU-targeted execution.
+
+## Key Dependencies
 
 - **nom** — Parser combinators
 - **polytype** — Hindley-Milner type system
 - **rspirv** — SPIR-V builder
-- **slotmap** — Arena allocation for SSA IDs
-- **thiserror** — Error handling
-- **clap** — CLI parsing
 
 For complete language details, see [SPECIFICATION.md](SPECIFICATION.md).
