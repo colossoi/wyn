@@ -27,6 +27,9 @@ pub enum CompilerError {
     #[error("Flattening error: {0}")]
     FlatteningError(String, Option<Span>),
 
+    #[error("Normalize-outputs error: {0}")]
+    NormalizeOutputsError(String, Option<Span>),
+
     /// Program contains unresolved `???` type holes. The payload is a
     /// pre-formatted multi-line diagnostic listing each hole's
     /// inferred type and source location.
@@ -51,6 +54,7 @@ impl CompilerError {
             Self::WgslError(_, span) => *span,
             Self::ModuleError(_, span) => *span,
             Self::FlatteningError(_, span) => *span,
+            Self::NormalizeOutputsError(_, span) => *span,
             Self::TypeHole(_) => None,
             Self::IoError(_) | Self::SpirvBuilderError(_) => None,
         }

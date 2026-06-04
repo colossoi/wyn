@@ -532,15 +532,40 @@ fn convert_entry_point(
     } else {
         let mut by_index = converter.output_slot_values.clone();
         by_index.sort_by_key(|(i, _)| *i);
+        // `normalize_outputs::emit_slot_writes` emits exactly one
+        // `OutputSlotStore` per declared output, with slot indices
+        // densely covering `[0, n_outputs)`. Pin that invariant here
+        // — if a future pass perturbs the chain (drops/duplicates a
+        // store) the bridge would silently emit a malformed Tuple.
+        debug_assert_eq!(
+            by_index.len(),
+            entry.outputs.len(),
+            "bridge: expected one OutputSlotStore per declared output \
+             ({} declared, {} collected)",
+            entry.outputs.len(),
+            by_index.len(),
+        );
+        debug_assert!(
+            by_index.iter().enumerate().all(|(pos, (slot, _))| *slot == pos),
+            "bridge: slot indices must densely cover [0, n_outputs); got {:?}",
+            by_index.iter().map(|(s, _)| *s).collect::<Vec<_>>()
+        );
         let nids: SmallVec<[NodeId; 4]> = by_index.iter().map(|(_, n)| *n).collect();
         if nids.len() == 1 {
             Some(nids[0])
         } else {
             // Derive the tuple type from `entry.outputs` since
-            // `ret_type` is `()` post-`normalize_outputs`.
+            // `ret_type` is `SideEffect` post-`normalize_outputs`.
+            // Tag the synthesised node with the entry-body span so
+            // downstream diagnostics referring to the bridged Tuple
+            // point at user-meaningful source.
             let component_tys: Vec<_> = entry.outputs.iter().map(|o| o.ty.clone()).collect();
             let tuple_ty = Type::Constructed(TypeName::Tuple(component_tys.len()), component_tys);
-            Some(converter.intern_pure(PureOp::Tuple(nids.len()), nids, tuple_ty))
+            let saved_span = converter.current_span;
+            converter.current_span = Some(inner_body.span);
+            let nid = converter.intern_pure(PureOp::Tuple(nids.len()), nids, tuple_ty);
+            converter.current_span = saved_span;
+            Some(nid)
         }
     };
 
