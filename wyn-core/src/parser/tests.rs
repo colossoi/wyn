@@ -165,7 +165,150 @@ fn test_parse_let_decl() {
 fn test_parse_array_type() {
     let decl = single_decl("let arr: [3][4]f32 = [[1.0f32, 2.0f32], [3.0f32, 4.0f32]]");
     assert_eq!(decl.name, "arr");
-    assert!(decl.ty.is_some(), "Expected array type to be parsed");
+    // `[m][n]T` parses to nested rank-1: outer dim m wraps an inner
+    // rank-1 array of dim n. Variant is AddressPlaceholder until
+    // resolution. A future canonicalization pass may flatten same-
+    // variant nests into a flat multi-dim shape.
+    let inner = Type::Constructed(
+        TypeName::Array,
+        vec![
+            crate::types::f32(),
+            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
+            Type::Constructed(TypeName::Size(4), vec![]),
+        ],
+    );
+    let outer = Type::Constructed(
+        TypeName::Array,
+        vec![
+            inner,
+            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
+            Type::Constructed(TypeName::Size(3), vec![]),
+        ],
+    );
+    assert_eq!(decl.ty.as_ref(), Some(&outer));
+}
+
+#[test]
+fn test_parse_array_type_size_var_outer() {
+    // `[n][4]T` — outer size is a variable, inner is a literal.
+    let decl = single_decl("let arr: [n][4]f32 = body");
+    let inner = Type::Constructed(
+        TypeName::Array,
+        vec![
+            crate::types::f32(),
+            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
+            Type::Constructed(TypeName::Size(4), vec![]),
+        ],
+    );
+    let outer = Type::Constructed(
+        TypeName::Array,
+        vec![
+            inner,
+            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
+            crate::types::size_var("n".to_string()),
+        ],
+    );
+    assert_eq!(decl.ty.as_ref(), Some(&outer));
+}
+
+#[test]
+fn test_parse_array_type_size_var_inner() {
+    // `[3][n]T` — outer literal, inner size variable.
+    let decl = single_decl("let arr: [3][n]f32 = body");
+    let inner = Type::Constructed(
+        TypeName::Array,
+        vec![
+            crate::types::f32(),
+            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
+            crate::types::size_var("n".to_string()),
+        ],
+    );
+    let outer = Type::Constructed(
+        TypeName::Array,
+        vec![
+            inner,
+            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
+            Type::Constructed(TypeName::Size(3), vec![]),
+        ],
+    );
+    assert_eq!(decl.ty.as_ref(), Some(&outer));
+}
+
+#[test]
+fn test_parse_array_type_empty_brackets_outer() {
+    // `[][4]T` — outer dim is a SizePlaceholder, inner is literal.
+    let decl = single_decl("let arr: [][4]f32 = body");
+    let inner = Type::Constructed(
+        TypeName::Array,
+        vec![
+            crate::types::f32(),
+            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
+            Type::Constructed(TypeName::Size(4), vec![]),
+        ],
+    );
+    let outer = Type::Constructed(
+        TypeName::Array,
+        vec![
+            inner,
+            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
+            Type::Constructed(TypeName::SizePlaceholder, vec![]),
+        ],
+    );
+    assert_eq!(decl.ty.as_ref(), Some(&outer));
+}
+
+#[test]
+fn test_parse_array_type_rank3() {
+    // `[2][3][4]T` — three levels of nesting, all literal sizes.
+    let decl = single_decl("let arr: [2][3][4]f32 = body");
+    let inner = Type::Constructed(
+        TypeName::Array,
+        vec![
+            crate::types::f32(),
+            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
+            Type::Constructed(TypeName::Size(4), vec![]),
+        ],
+    );
+    let middle = Type::Constructed(
+        TypeName::Array,
+        vec![
+            inner,
+            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
+            Type::Constructed(TypeName::Size(3), vec![]),
+        ],
+    );
+    let outer = Type::Constructed(
+        TypeName::Array,
+        vec![
+            middle,
+            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
+            Type::Constructed(TypeName::Size(2), vec![]),
+        ],
+    );
+    assert_eq!(decl.ty.as_ref(), Some(&outer));
+}
+
+#[test]
+fn test_parse_array_type_unique_nested() {
+    // `*[2][3]i32` — uniqueness marker wraps the outer nested array.
+    let decl = single_decl("let arr: *[2][3]i32 = body");
+    let inner = Type::Constructed(
+        TypeName::Array,
+        vec![
+            crate::types::i32(),
+            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
+            Type::Constructed(TypeName::Size(3), vec![]),
+        ],
+    );
+    let outer = Type::Constructed(
+        TypeName::Array,
+        vec![
+            inner,
+            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
+            Type::Constructed(TypeName::Size(2), vec![]),
+        ],
+    );
+    assert_eq!(decl.ty.as_ref(), Some(&crate::types::unique(outer)));
 }
 
 #[test]
