@@ -32,11 +32,13 @@ fn default_free_vars_in_type(ty: &mut Type<TypeName>, bound: &[usize]) {
             *ty = Type::Constructed(TypeName::Int(32), vec![]);
         }
         Type::Variable(_) => {}
-        Type::Constructed(TypeName::Array, args) if args.len() == 3 => {
-            // args = [elem, variant, size]
+        Type::Constructed(TypeName::Array, args) if args.len() >= 3 => {
+            // args = [elem, variant, dim_0, ...]
             default_free_vars_in_type(&mut args[0], bound);
             default_free_vars_in_array_variant(&mut args[1], bound);
-            default_free_vars_in_array_size(&mut args[2], bound);
+            for dim in &mut args[2..] {
+                default_free_vars_in_array_size(dim, bound);
+            }
         }
         Type::Constructed(_, args) => {
             for a in args {
@@ -138,9 +140,9 @@ pub(super) fn default_term_for_type(tr: &mut Transformer<'_>, ty: &Type<TypeName
             }
         }
         Type::Constructed(TypeName::Array, args) if args.len() == 3 => {
-            // Array[elem, variant, size]. Only Composite arrays can be
-            // default-filled — View/Virtual need a buffer binding or
-            // a range, which `--fill-holes` can't synthesize.
+            // Rank-1 Array[elem, variant, size]. Only Composite arrays
+            // can be default-filled — View/Virtual need a buffer
+            // binding or a range, which `--fill-holes` can't synthesize.
             let elem_ty = &args[0];
             let is_composite = matches!(&args[1], Type::Constructed(TypeName::ArrayVariantComposite, _));
             let size = type_size_literal(&args[2]);

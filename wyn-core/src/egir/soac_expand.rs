@@ -124,19 +124,20 @@ fn input_read_elem(arr_ty: &Type<TypeName>, acc_elem: &Type<TypeName>) -> Type<T
 }
 
 fn is_plain_composite(arr_ty: &Type<TypeName>) -> bool {
+    // Rank-1 invariant: SOAC expansion only handles single-dim arrays.
     match arr_ty {
         Type::Constructed(TypeName::Array, args) if args.len() == 3 => {
-            // args = [elem, variant, size]
             is_array_variant_composite(&args[1]) && !is_virtual_array(arr_ty)
         }
         _ => false,
     }
 }
 
-/// Input-array shape handled today: composite/view/virtual arrays, or SoA
-/// tuples `([n]A, [n]B, ...)` (produced by `tlc::soa`) whose components are
-/// themselves handleable.
+/// Input-array shape handled today: rank-1 composite/view/virtual
+/// arrays, or SoA tuples `([n]A, [n]B, ...)` (produced by `tlc::soa`)
+/// whose components are themselves handleable.
 fn is_plain_array_source(arr_ty: &Type<TypeName>) -> bool {
+    // Rank-1 invariant.
     if matches!(arr_ty, Type::Constructed(TypeName::Array, args) if args.len() == 3) {
         return true;
     }
@@ -156,6 +157,7 @@ pub(super) fn as_soa_tuple(ty: &Type<TypeName>) -> Option<&[Type<TypeName>]> {
     if components.is_empty() {
         return None;
     }
+    // Rank-1 invariant on each component.
     let all_soa = components.iter().all(|ct| {
         matches!(ct, Type::Constructed(TypeName::Array, args) if args.len() == 3)
             || as_soa_tuple(ct).is_some()

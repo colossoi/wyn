@@ -478,11 +478,28 @@ pub trait TypeExt {
     /// Get the matrix rows as a raw type (args[2]).
     fn mat_rows_type(&self) -> Option<&Type>;
 
-    /// Get the array size type (args[1]), or None if not an Array.
+    /// Get the array's variant type (`args[1]`), or `None` if not an
+    /// Array.
+    fn array_variant(&self) -> Option<&Type>;
+
+    /// Get the array's first (and, today, only) dimension size
+    /// (`args[2]`), or `None` if not an Array. Equivalent to
+    /// `array_dim(0)`; kept as the dominant accessor while all arrays
+    /// are rank-1.
     fn array_size(&self) -> Option<&Type>;
 
-    /// Get the array variant type (args[2]), or None if not an Array.
-    fn array_variant(&self) -> Option<&Type>;
+    /// Number of array dimensions (`args.len() - 2`), or `None` if not
+    /// an Array. Always 1 today; the variadic dim suffix is the entry
+    /// point for multi-dim representations.
+    fn array_rank(&self) -> Option<usize>;
+
+    /// Per-dimension sizes (`&args[2..]`), or `None` if not an Array.
+    /// One entry today (rank-1).
+    fn array_dims(&self) -> Option<&[Type]>;
+
+    /// Size of the i-th dimension (`&args[2 + i]`), or `None` if not
+    /// an Array or if `i >= rank`.
+    fn array_dim(&self, i: usize) -> Option<&Type>;
 }
 
 impl TypeExt for Type {
@@ -720,6 +737,34 @@ impl TypeExt for Type {
             return Some(&args[1]);
         }
         None
+    }
+
+    fn array_rank(&self) -> Option<usize> {
+        if let Type::Constructed(TypeName::Array, args) = self {
+            debug_assert!(
+                args.len() >= 3,
+                "Array must have at least 3 args [elem, variant, dim_0, ...], got {:?}",
+                args
+            );
+            return Some(args.len() - 2);
+        }
+        None
+    }
+
+    fn array_dims(&self) -> Option<&[Type]> {
+        if let Type::Constructed(TypeName::Array, args) = self {
+            debug_assert!(
+                args.len() >= 3,
+                "Array must have at least 3 args [elem, variant, dim_0, ...], got {:?}",
+                args
+            );
+            return Some(&args[2..]);
+        }
+        None
+    }
+
+    fn array_dim(&self, i: usize) -> Option<&Type> {
+        self.array_dims().and_then(|dims| dims.get(i))
     }
 }
 
@@ -1298,5 +1343,46 @@ mod tests {
         let (params, ret) = extract_function_signature(&i32_ty());
         assert!(params.is_empty());
         assert_eq!(ret, i32_ty());
+    }
+
+    fn rank1_arr(size: usize) -> Type {
+        Type::Constructed(
+            TypeName::Array,
+            vec![
+                f32_ty(),
+                Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
+                Type::Constructed(TypeName::Size(size), vec![]),
+            ],
+        )
+    }
+
+    #[test]
+    fn array_rank_reports_dim_count() {
+        assert_eq!(rank1_arr(8).array_rank(), Some(1));
+        assert_eq!(i32_ty().array_rank(), None);
+    }
+
+    #[test]
+    fn array_dims_returns_dim_slice() {
+        let arr = rank1_arr(8);
+        let dims = arr.array_dims().unwrap();
+        assert_eq!(dims.len(), 1);
+        assert!(matches!(&dims[0], Type::Constructed(TypeName::Size(8), _)));
+    }
+
+    #[test]
+    fn array_dim_indexes_dim_slice() {
+        let arr = rank1_arr(8);
+        assert!(matches!(
+            arr.array_dim(0),
+            Some(Type::Constructed(TypeName::Size(8), _))
+        ));
+        assert!(arr.array_dim(1).is_none());
+    }
+
+    #[test]
+    fn array_dim_zero_matches_array_size() {
+        let arr = rank1_arr(8);
+        assert_eq!(arr.array_dim(0), arr.array_size());
     }
 }
