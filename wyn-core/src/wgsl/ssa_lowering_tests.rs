@@ -732,3 +732,31 @@ entry gen(bh: []vec4f32) []i32 =
         "consumer must read the gather buffer by index:\n{wgsl}"
     );
 }
+
+/// Compute entries that bind a `storage_image` and call `image_store`
+/// must lower to WGSL: a module-scope
+/// `var name: texture_storage_2d<format, access>` declaration plus a
+/// `textureStore(name, coord, value)` call.
+#[test]
+fn wgsl_compute_storage_image_store() {
+    let source = r#"
+#[compute]
+entry paint(#[storage_image(set=0, binding=0, format=rgba8unorm, access=write_only)] img: storage_image,
+            #[builtin(global_invocation_id)] gid: vec3u32) () =
+  let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
+  image_store(img, xy, @[1.0, 0.0, 0.0, 1.0])
+"#;
+    let wgsl = compile_to_wgsl(source).expect("compile to WGSL");
+    assert!(
+        wgsl.contains("texture_storage_2d<rgba8unorm, write>"),
+        "WGSL must declare the storage image binding type:\n{wgsl}"
+    );
+    assert!(
+        wgsl.contains("@group(0) @binding(0)"),
+        "WGSL must declare the storage image at the right set/binding:\n{wgsl}"
+    );
+    assert!(
+        wgsl.contains("textureStore("),
+        "image_store must lower to textureStore:\n{wgsl}"
+    );
+}

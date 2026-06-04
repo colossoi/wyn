@@ -402,6 +402,13 @@ impl TypeEmitter {
                 // Opaque GPU resources (v1: 2D float texture + sampler).
                 TypeName::Texture2D => Ok("texture_2d<f32>".to_string()),
                 TypeName::Sampler => Ok("sampler".to_string()),
+                // Storage images: like SPIR-V, the language-level type is
+                // nullary. The actual format-aware
+                // `texture_storage_2d<format, access>` is emitted at the
+                // binding site, where `storage_image_binding` carries
+                // the per-param format + access. This placeholder isn't
+                // referenced by any body code.
+                TypeName::StorageTexture => Ok("texture_storage_2d<rgba8unorm, write>".to_string()),
                 TypeName::Float(bits) | TypeName::Int(bits) | TypeName::UInt(bits) if *bits != 32 => Err(
                     crate::err_wgsl!("WGSL does not support {}-bit scalars (found {:?})", bits, ty),
                 ),
@@ -552,6 +559,12 @@ struct LowerCtx<'a> {
     /// index in `entry.inputs` so `lower_entry_point` can route the
     /// corresponding SSA `ValueId` to `<block_var>.<field_name>`.
     pc_blocks: HashMap<String, PcBlock>,
+    /// If the current compute entry's source declared its own
+    /// `#[builtin(global_invocation_id)]` param, this holds that param's
+    /// mangled WGSL name. `_w_intrinsic_thread_id()` lowering reads from
+    /// this in preference to the synthesized `_wgsl_gid`, since WGSL
+    /// rejects duplicate `@builtin` declarations on the same entry.
+    wgsl_gid_alias: Option<String>,
 }
 
 /// Uniform-block stand-in for a compute entry's push-constant inputs.
@@ -577,6 +590,7 @@ impl<'a> LowerCtx<'a> {
             output_structs: HashMap::new(),
             output_struct_counter: 0,
             pc_blocks: HashMap::new(),
+            wgsl_gid_alias: None,
         }
     }
 
@@ -923,6 +937,46 @@ impl<'a> LowerCtx<'a> {
             writeln!(output).unwrap();
         }
 
+        // Storage-image bindings. WGSL renders the format and access
+        // mode on the binding's type: `texture_storage_2d<format,
+        // access>`. Dedupe by name in case multiple entries declare
+        // the same param (cross-stage sharing).
+        let mut storage_images: HashMap<String, (u32, u32, String)> = HashMap::new();
+        for entry in &self.program.entry_points {
+            for input in &entry.inputs {
+                let Some((br, format, access, _size)) = input.storage_image_binding else {
+                    continue;
+                };
+                let ty_str = format!(
+                    "texture_storage_2d<{}, {}>",
+                    wgsl_storage_image_format(format),
+                    wgsl_storage_access(access),
+                );
+                let key = self.mangle_tracked(&input.name)?;
+                if let Some(prev) = storage_images.get(&key) {
+                    if *prev != (br.set, br.binding, ty_str.clone()) {
+                        return Err(crate::err_wgsl!(
+                            "storage_image '{}' declared with conflicting \
+                             (set, binding, format, access) across entries",
+                            input.name
+                        ));
+                    }
+                }
+                storage_images.insert(key, (br.set, br.binding, ty_str));
+            }
+        }
+        let mut storage_images_sorted: Vec<_> = storage_images.into_iter().collect();
+        storage_images_sorted.sort_by_key(|(_, (set, binding, _))| (*set, *binding));
+        for (name, (set, binding, ty_str)) in storage_images_sorted {
+            writeln!(
+                output,
+                "@group({}) @binding({}) var {}: {};",
+                set, binding, name, ty_str
+            )
+            .unwrap();
+            writeln!(output).unwrap();
+        }
+
         output.push_str(&code);
         Ok(output)
     }
@@ -1057,10 +1111,14 @@ impl<'a> LowerCtx<'a> {
             if input.uniform_binding.is_some() {
                 continue;
             }
-            // `#[texture]` / `#[sampler]` inputs become module-scope handle
-            // vars (emitted in `lower_program`); the body references them by
-            // the same mangled name, so no function param.
-            if input.texture_binding.is_some() || input.sampler_binding.is_some() {
+            // `#[texture]` / `#[sampler]` / `#[storage_image]` inputs
+            // become module-scope handle vars (emitted in `lower_program`);
+            // the body references them by the same mangled name, so no
+            // function param.
+            if input.texture_binding.is_some()
+                || input.sampler_binding.is_some()
+                || input.storage_image_binding.is_some()
+            {
                 continue;
             }
             let param_name =
@@ -1189,13 +1247,25 @@ impl<'a> LowerCtx<'a> {
 
         // Compute shaders always get a synthetic
         // `@builtin(global_invocation_id) _wgsl_gid: vec3<u32>` parameter
-        // so `_w_intrinsic_thread_id()` can read `_wgsl_gid.x`. Wyn's
-        // source surface never declares this builtin manually — it's
-        // only introduced by the `parallelize` pass via the intrinsic —
-        // so a fixed internal name is safe and keeps the intrinsic
-        // lowering name-free.
+        // so `_w_intrinsic_thread_id()` can read `_wgsl_gid.x`. Skip if
+        // the user already declared one with `#[builtin(global_invocation_id)]`
+        // — WGSL rejects duplicate `@builtin` declarations on the same
+        // entry, and the intrinsic dispatch can read from the user's
+        // param via the alias added below.
+        self.wgsl_gid_alias = None;
         if matches!(entry.execution_model, ExecutionModel::Compute { .. }) {
-            param_strs.push("@builtin(global_invocation_id) _wgsl_gid: vec3<u32>".to_string());
+            let user_gid = entry.inputs.iter().find(|i| {
+                matches!(
+                    &i.decoration,
+                    Some(IoDecoration::BuiltIn(spirv::BuiltIn::GlobalInvocationId))
+                )
+            });
+            if let Some(input) = user_gid {
+                let mangled = self.mangle_tracked(&input.name)?;
+                self.wgsl_gid_alias = Some(mangled);
+            } else {
+                param_strs.push("@builtin(global_invocation_id) _wgsl_gid: vec3<u32>".to_string());
+            }
             // Likewise `_w_intrinsic_local_id()` → `_wgsl_lid.x`, the thread's
             // index within its workgroup (used by the workgroup-parallel
             // phase2 reduce for shared-memory addressing).
@@ -1835,8 +1905,23 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             self.value_map.insert(result, ValueBinding::Alias(expr));
                             continue;
                         }
+                        // Unit / SideEffect results have no usable value
+                        // — emit the expression as a bare statement
+                        // (`textureStore(...);`) rather than a
+                        // `var name: type = expr;` that WGSL would
+                        // reject (the comment-typed `var v: /* unit */`
+                        // shape fails to parse).
+                        let result_ty = self.body.get_value_type(result);
+                        if matches!(
+                            result_ty,
+                            polytype::Type::Constructed(TypeName::Unit, _)
+                                | polytype::Type::Constructed(TypeName::SideEffect, _)
+                        ) {
+                            writeln!(output, "{}{};", self.ctx.indent_str(), expr).unwrap();
+                            continue;
+                        }
                         let var = wgsl_var(result);
-                        let ty = self.ctx.type_emitter.type_to_wgsl(self.body.get_value_type(result))?;
+                        let ty = self.ctx.type_emitter.type_to_wgsl(result_ty)?;
                         writeln!(output, "{}var {}: {} = {};", self.ctx.indent_str(), var, ty, expr)
                             .unwrap();
                         self.declared.insert(var.clone());
@@ -2188,12 +2273,15 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         Some(PolyType::Constructed(TypeName::Int(32), _))
                     );
                     // `_w_intrinsic_thread_id()` → `_wgsl_gid.x` from the
-                    // compute entry's auto-injected builtin parameter. The
-                    // SSA result type is always `u32` (see
+                    // compute entry's auto-injected builtin parameter, or
+                    // from the user-declared global-invocation-id param
+                    // when one exists (`wgsl_gid_alias`). The SSA result
+                    // type is always `u32` (see
                     // `parallelize::intrinsic_term(..., u32_ty)`), so no
                     // cast is needed.
                     if *id == known.thread_id && args.is_empty() {
-                        return Ok("_wgsl_gid.x".to_string());
+                        let base = self.ctx.wgsl_gid_alias.as_deref().unwrap_or("_wgsl_gid");
+                        return Ok(format!("{base}.x"));
                     }
                     // `_w_intrinsic_local_id()` → `_wgsl_lid.x` (also u32).
                     if *id == known.local_id && args.is_empty() {
@@ -2208,6 +2296,20 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     if *id == known.texture_load && args.len() == 3 {
                         return Ok(format!(
                             "textureLoad({}, {}, {})",
+                            arg_strs[0], arg_strs[1], arg_strs[2]
+                        ));
+                    }
+                    // image_load(img, coord) → textureLoad. Storage images
+                    // have no LOD argument; the fetched texel comes from
+                    // the bound storage texture at the given pixel.
+                    if *id == known.image_load && args.len() == 2 {
+                        return Ok(format!("textureLoad({}, {})", arg_strs[0], arg_strs[1]));
+                    }
+                    // image_store(img, coord, value) → textureStore. Side-
+                    // effecting write to the bound storage texture.
+                    if *id == known.image_store && args.len() == 3 {
+                        return Ok(format!(
+                            "textureStore({}, {}, {})",
                             arg_strs[0], arg_strs[1], arg_strs[2]
                         ));
                     }
@@ -2605,6 +2707,25 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
 /// Returns `None` for `PrimOp`s without a defined WGSL emission (e.g.
 /// `IsNan`, `OuterProduct`); the caller surfaces an error or falls
 /// back to a user-function call.
+fn wgsl_storage_image_format(format: crate::pipeline_descriptor::StorageImageFormat) -> &'static str {
+    use crate::pipeline_descriptor::StorageImageFormat;
+    match format {
+        StorageImageFormat::Rgba8Unorm => "rgba8unorm",
+        StorageImageFormat::Rgba16Float => "rgba16float",
+        StorageImageFormat::Rgba32Float => "rgba32float",
+        StorageImageFormat::R32Float => "r32float",
+    }
+}
+
+fn wgsl_storage_access(access: crate::interface::StorageAccess) -> &'static str {
+    use crate::interface::StorageAccess;
+    match access {
+        StorageAccess::ReadOnly => "read",
+        StorageAccess::WriteOnly => "write",
+        StorageAccess::ReadWrite => "read_write",
+    }
+}
+
 fn lower_primop_wgsl(prim_op: &PrimOp, args: &[String], result_ty_str: Option<&str>) -> Option<String> {
     use PrimOp::*;
     match prim_op {
