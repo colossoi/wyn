@@ -854,6 +854,9 @@ impl<'m> Liveness<'m> {
                 let live = self.analyze(index, live);
                 self.analyze(array, live)
             }
+            TermKind::OutputSlotStore { .. } => {
+                unreachable!("OutputSlotStore introduced by tlc::normalize_outputs (post-ownership)")
+            }
         }
     }
 

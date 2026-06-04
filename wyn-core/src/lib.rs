@@ -587,6 +587,8 @@ impl TlcTransformed {
             .fuse_maps()
             .apply_ownership()
             .expect("apply_ownership")
+            .normalize_outputs()
+            .expect("normalize_outputs")
             .lift_gathers()
             .defunctionalize()
             .monomorphize()
@@ -674,6 +676,32 @@ impl std::ops::Deref for TlcOwnershipApplied {
 }
 
 impl TlcOwnershipApplied {
+    /// Normalise compute-entry bodies so the entry tail is a chain of
+    /// explicit per-slot `OutputSlotStore` writes ending in `UnitLit`,
+    /// not a tail expression that "returns" the entry value. After
+    /// this, single-output and multi-output entries share one shape;
+    /// `parallelize_soacs` and `egir/assign_outputs` no longer have to
+    /// special-case the tail's shape (Tuple vs. Soac vs. literal).
+    pub fn normalize_outputs(self) -> Result<TlcOutputsNormalized> {
+        let mut inner = self.0;
+        inner.tlc = tlc::normalize_outputs::run(inner.tlc)
+            .map_err(|e| crate::error::CompilerError::FlatteningError(format!("{e}"), None))?;
+        Ok(TlcOutputsNormalized(inner))
+    }
+}
+
+/// TLC with compute entries normalised to unit-producing bodies built
+/// from `TermKind::OutputSlotStore` per declared output.
+pub struct TlcOutputsNormalized(pub TlcEarlyInner);
+
+impl std::ops::Deref for TlcOutputsNormalized {
+    type Target = TlcEarlyInner;
+    fn deref(&self) -> &TlcEarlyInner {
+        &self.0
+    }
+}
+
+impl TlcOutputsNormalized {
     /// Materialize randomly-indexed computed arrays into storage buffers.
     /// Runs before defunctionalization, while a gathered computed array is
     /// still a plain `Var` and its producer a recognizable `Soac(Map)`.

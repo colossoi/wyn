@@ -283,6 +283,15 @@ pub(super) fn apply_type_subst_to_term(
         TermKind::VecLit(parts) => {
             TermKind::VecLit(parts.iter().map(|p| apply_type_subst_to_term(p, subst, term_ids)).collect())
         }
+        TermKind::OutputSlotStore {
+            slot_index,
+            value,
+            value_ty,
+        } => TermKind::OutputSlotStore {
+            slot_index: *slot_index,
+            value: Box::new(apply_type_subst_to_term(value, subst, term_ids)),
+            value_ty: value_ty.clone(),
+        },
     };
     Term {
         id: term_ids.next_id(),
@@ -716,6 +725,20 @@ pub(super) fn substitute_var(
                 parts.iter().map(|p| substitute_var(p, old_sym, new_sym, term_ids)).collect(),
             ),
         },
+        TermKind::OutputSlotStore {
+            slot_index,
+            value,
+            value_ty,
+        } => Term {
+            id: term_ids.next_id(),
+            ty: term.ty.clone(),
+            span: term.span,
+            kind: TermKind::OutputSlotStore {
+                slot_index: *slot_index,
+                value: Box::new(substitute_var(value, old_sym, new_sym, term_ids)),
+                value_ty: value_ty.clone(),
+            },
+        },
     }
 }
 
@@ -1127,6 +1150,20 @@ impl<'a> HofSpecializer<'a> {
                 ty,
                 span,
                 kind: TermKind::VecLit(parts.into_iter().map(|p| self.rewrite_term(p)).collect()),
+            },
+            TermKind::OutputSlotStore {
+                slot_index,
+                value,
+                value_ty,
+            } => Term {
+                id: self.term_ids.next_id(),
+                ty,
+                span,
+                kind: TermKind::OutputSlotStore {
+                    slot_index,
+                    value: Box::new(self.rewrite_term(*value)),
+                    value_ty,
+                },
             },
         }
     }

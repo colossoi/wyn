@@ -293,6 +293,9 @@ pub fn collect_free_vars(
             collect_free_vars(array, bound, top_level, known_defs, symbols, free, seen);
             collect_free_vars(index, bound, top_level, known_defs, symbols, free, seen);
         }
+        TermKind::OutputSlotStore { value, .. } => {
+            collect_free_vars(value, bound, top_level, known_defs, symbols, free, seen);
+        }
     }
 }
 
@@ -847,6 +850,20 @@ impl<'a> ClosureConverter<'a> {
                 ty,
                 span,
                 kind: TermKind::VecLit(parts.into_iter().map(|p| self.convert_term(p)).collect()),
+            },
+            TermKind::OutputSlotStore {
+                slot_index,
+                value,
+                value_ty,
+            } => Term {
+                id: self.term_ids.next_id(),
+                ty,
+                span,
+                kind: TermKind::OutputSlotStore {
+                    slot_index,
+                    value: Box::new(self.convert_term(*value)),
+                    value_ty,
+                },
             },
         }
     }

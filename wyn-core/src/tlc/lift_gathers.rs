@@ -71,7 +71,7 @@ fn lift_entry(program: &mut Program, idx: usize, new_defs: &mut Vec<Def>) {
     // places this entry's storage outputs at `view_count..view_count +
     // out_count` (see `build_entry_outputs`). So the first free binding for a
     // gather intermediate is `view_count + out_count`.
-    let (params, tail) = peel_lambda_params(&body);
+    let (params, _tail) = peel_lambda_params(&body);
     let decl = match &program.defs[idx].meta {
         DefMeta::EntryPoint(d) => (**d).clone(),
         _ => return,
@@ -92,7 +92,12 @@ fn lift_entry(program: &mut Program, idx: usize, new_defs: &mut Vec<Def>) {
         })
         .collect();
     let view_count: u32 = slots.iter().flatten().map(|b| b.buffer_count()).sum();
-    let out_count = storage_output_count(&tail.ty);
+    // Pull the declared return type from `def.ty`'s arrow-return position
+    // rather than the body's tail. After `tlc::normalize_outputs` the tail
+    // is a unit-producing `OutputSlotStore` chain; the entry's *declared*
+    // output shape lives on `def.ty`.
+    let entry_ret_ty = signature_return_type(&program.defs[idx].ty);
+    let out_count = storage_output_count(&entry_ret_ty);
     let mut next_gather = view_count + out_count;
 
     let mut added_decls: Vec<StorageBindingDecl> = Vec::new();
@@ -710,6 +715,21 @@ fn peel_lambda_params(term: &Term) -> (Vec<(SymbolId, Type<TypeName>)>, &Term) {
         }
         _ => (vec![], term),
     }
+}
+
+/// The rightmost type in an arrow chain — e.g. `(a -> b -> c)` → `c`.
+/// Used to recover the declared entry return type from `def.ty` when the
+/// body has been rewritten unit-producing by `tlc::normalize_outputs`.
+fn signature_return_type(ty: &Type<TypeName>) -> Type<TypeName> {
+    let mut cur = ty;
+    while let Type::Constructed(TypeName::Arrow, args) = cur {
+        if args.len() == 2 {
+            cur = &args[1];
+        } else {
+            break;
+        }
+    }
+    cur.clone()
 }
 
 /// Number of storage-output bindings `from_tlc` allocates for a compute

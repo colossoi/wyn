@@ -21,6 +21,8 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
         .fuse_maps()
         .apply_ownership()
         .expect("apply_ownership")
+        .normalize_outputs()
+        .expect("normalize_outputs")
         .lift_gathers()
         .defunctionalize()
         .monomorphize()
@@ -54,6 +56,8 @@ fn compile_through_ssa(input: &str) -> Result<Program, CompilerError> {
         .fuse_maps()
         .apply_ownership()
         .expect("apply_ownership")
+        .normalize_outputs()
+        .expect("normalize_outputs")
         .lift_gathers()
         .defunctionalize()
         .monomorphize()
@@ -512,7 +516,7 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     let tlc = tlc.normalize_soacs().fuse_maps().apply_ownership().expect("apply_ownership");
     eprintln!("=== fuse_maps OK ===");
 
-    let tlc = tlc.lift_gathers().defunctionalize();
+    let tlc = tlc.normalize_outputs().expect("normalize_outputs").lift_gathers().defunctionalize();
     eprintln!("=== defunctionalize OK ===");
 
     let tlc = tlc.monomorphize();
@@ -571,7 +575,7 @@ entry main(data: []i32) []i32 = [first(data)]
     let tlc = tlc.normalize_soacs().fuse_maps().apply_ownership().expect("apply_ownership");
     eprintln!("=== fuse_maps OK ===");
 
-    let tlc = tlc.lift_gathers().defunctionalize();
+    let tlc = tlc.normalize_outputs().expect("normalize_outputs").lift_gathers().defunctionalize();
     eprintln!("=== defunctionalize OK ===");
 
     let tlc = tlc.monomorphize();

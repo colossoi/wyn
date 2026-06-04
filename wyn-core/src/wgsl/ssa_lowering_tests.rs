@@ -299,6 +299,8 @@ fn compile_to_wgsl(source: &str) -> crate::error::Result<String> {
         .fuse_maps()
         .apply_ownership()
         .expect("apply_ownership")
+        .normalize_outputs()
+        .expect("normalize_outputs")
         .lift_gathers()
         .defunctionalize()
         .monomorphize()

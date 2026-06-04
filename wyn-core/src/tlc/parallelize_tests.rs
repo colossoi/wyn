@@ -586,6 +586,8 @@ fn parallelize_src(
         .fuse_maps()
         .apply_ownership()
         .expect("apply_ownership")
+        .normalize_outputs()
+        .expect("normalize_outputs")
         .lift_gathers()
         .defunctionalize()
         .monomorphize()

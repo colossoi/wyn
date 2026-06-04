@@ -348,6 +348,9 @@ impl SoaTransformer {
                 let new_parts: Vec<Term> = parts.iter().map(|p| self.transform_term(p)).collect();
                 self.mk_term(new_ty, span, TermKind::VecLit(new_parts))
             }
+            TermKind::OutputSlotStore { .. } => {
+                unreachable!("OutputSlotStore introduced by tlc::normalize_outputs (post-soa)")
+            }
         }
     }
 

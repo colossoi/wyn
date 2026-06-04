@@ -344,6 +344,7 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::Program, stage: &str) {
                 walk(array, bound, symbols, stage, def_name);
                 walk(index, bound, symbols, stage, def_name);
             }
+            TermKind::OutputSlotStore { value, .. } => walk(value, bound, symbols, stage, def_name),
         }
     }
 
@@ -2121,6 +2122,8 @@ fn compile_to_ssa_with_inline_small(input: &str) -> Program {
         .fuse_maps()
         .apply_ownership()
         .expect("apply_ownership")
+        .normalize_outputs()
+        .expect("normalize_outputs")
         .lift_gathers()
         .defunctionalize()
         .monomorphize()
@@ -2735,6 +2738,8 @@ fn compile_parallel(source: &str) -> crate::Lowered {
         .fuse_maps()
         .apply_ownership()
         .expect("apply_ownership")
+        .normalize_outputs()
+        .expect("normalize_outputs")
         .lift_gathers()
         .defunctionalize()
         .monomorphize()

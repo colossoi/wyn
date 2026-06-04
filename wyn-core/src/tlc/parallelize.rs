@@ -258,8 +258,25 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
                 rhs,
                 body,
             } => {
+                // `tlc::normalize_outputs` emits the entry tail as a chain
+                // of `let _ = OutputSlotStore(i, <slot_value>) in …`.
+                // Treat slot 0's value as the entry's parallelisable tail
+                // — same primary-slot policy the old direct `Tuple(...)`
+                // tail had — and keep walking the body for prefix lets.
+                if let TermKind::OutputSlotStore {
+                    slot_index: 0, value, ..
+                } = rhs.kind
+                {
+                    current = *value;
+                    continue;
+                }
                 scope.push_let(name, name_ty, *rhs);
                 current = *body;
+            }
+            TermKind::OutputSlotStore { value, .. } => {
+                // Single-output entries that didn't pass through the Let
+                // sequencing — the tail is the slot store directly.
+                current = *value;
             }
             TermKind::Soac(soac) => {
                 let parallelizable = analyze_soac(&soac, &ty, symbols, &entry_slots)?;

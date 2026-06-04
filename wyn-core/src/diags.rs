@@ -930,6 +930,13 @@ impl tlc::Term {
                 }
                 write!(f, "]")
             }
+            tlc::TermKind::OutputSlotStore {
+                slot_index, value, ..
+            } => {
+                write!(f, "store(slot={}, ", slot_index)?;
+                value.fmt_prec(f, 0)?;
+                write!(f, ")")
+            }
         }
     }
 }

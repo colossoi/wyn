@@ -14,6 +14,7 @@ pub mod inline;
 pub mod lift_gathers;
 pub mod monomorphize;
 pub mod normalize;
+pub mod normalize_outputs;
 pub mod ownership;
 pub mod parallelize;
 pub mod partial_eval;
@@ -383,6 +384,41 @@ pub enum TermKind {
 
     /// Vector literal: `@[x, y, z, w]`.
     VecLit(Vec<Term>),
+
+    /// Write a Term value to a compute entry's `slot_index`-th output
+    /// destination. Introduced by `tlc::normalize_outputs` to make slot
+    /// writes explicit in the entry body, replacing the prior
+    /// "entry-tail expression is the return value" convention.
+    ///
+    /// `slot_index` identifies which `EntryDecl.outputs[i]` this store
+    /// targets — the actual `BindingRef` is allocated at EGIR
+    /// conversion (`build_entry_outputs`, `egir/from_tlc.rs:1943`),
+    /// so TLC-level normalisation doesn't have to mirror that
+    /// allocation logic.
+    ///
+    /// `value`'s shape determines the lowering:
+    ///   * `Soac(Map | Scan(Fresh) | Filter)` → retarget producer to
+    ///     the slot's output view (gid-indexed stores).
+    ///   * `ArrayExpr::Literal` / `VecLit` of fixed size → element
+    ///     stores at indices `0..n`.
+    ///   * Scalar / vector / matrix → single store at index 0.
+    ///   * Runtime-sized non-retargetable → diagnostic.
+    ///
+    /// `value_ty` is the slot's declared output type (matches the
+    /// `EntryOutput.ty` from the entry's `EntryDecl`). It survives
+    /// `partial_eval` so lowering doesn't have to re-derive from
+    /// `value.ty` (which may be more general, e.g. a tuple-projection
+    /// result).
+    ///
+    /// `OutputSlotStore` is a *unit-producing side effect* — its TLC
+    /// type is `()`. The entry body becomes a chain of these via
+    /// `let _ = <store> in <next>` ending in `UnitLit`. The entry's
+    /// return type becomes `Unit` post-normalisation.
+    OutputSlotStore {
+        slot_index: usize,
+        value: Box<Term>,
+        value_ty: Type<TypeName>,
+    },
 }
 
 /// The kind of loop (mirrors MIR::LoopKind).
@@ -868,6 +904,16 @@ impl Term {
             },
 
             TermKind::VecLit(parts) => TermKind::VecLit(parts.into_iter().map(&mut *f).collect()),
+
+            TermKind::OutputSlotStore {
+                slot_index,
+                value,
+                value_ty,
+            } => TermKind::OutputSlotStore {
+                slot_index,
+                value: Box::new(f(*value)),
+                value_ty,
+            },
         };
 
         Term { kind, ..self }
@@ -944,6 +990,7 @@ impl Term {
                 f(array);
                 f(index);
             }
+            TermKind::OutputSlotStore { value, .. } => f(value),
         }
     }
 }

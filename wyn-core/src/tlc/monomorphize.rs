@@ -554,6 +554,15 @@ impl<'a> Monomorphizer<'a> {
             TermKind::VecLit(ref parts) => {
                 TermKind::VecLit(parts.iter().map(|p| self.process_term(p)).collect())
             }
+            TermKind::OutputSlotStore {
+                slot_index,
+                ref value,
+                ref value_ty,
+            } => TermKind::OutputSlotStore {
+                slot_index: *slot_index,
+                value: Box::new(self.process_term(value)),
+                value_ty: value_ty.clone(),
+            },
         };
 
         Term {
@@ -839,6 +848,15 @@ impl<'a> Monomorphizer<'a> {
             TermKind::VecLit(parts) => {
                 TermKind::VecLit(parts.iter().map(|p| self.apply_subst_term(p, subst)).collect())
             }
+            TermKind::OutputSlotStore {
+                slot_index,
+                value,
+                value_ty,
+            } => TermKind::OutputSlotStore {
+                slot_index: *slot_index,
+                value: Box::new(self.apply_subst_term(value, subst)),
+                value_ty: apply_subst(value_ty, subst),
+            },
 
             TermKind::Lambda(Lambda { params, body, ret_ty }) => TermKind::Lambda(Lambda {
                 params: params.iter().map(|(p, ty)| (*p, apply_subst(ty, subst))).collect(),

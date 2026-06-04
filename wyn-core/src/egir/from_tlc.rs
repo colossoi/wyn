@@ -339,7 +339,13 @@ fn convert_entry_point(
     let (inner_body, params) = extract_lambda_params(&def.body);
     let is_compute = matches!(entry.entry_type, interface::Attribute::Compute);
 
-    let ret_type = inner_body.ty.clone();
+    // Prefer `def.ty`'s arrow-return position as the entry's declared
+    // return type. `inner_body.ty` is the body's runtime type — Unit
+    // after `tlc::normalize_outputs` has rewritten the tail into
+    // `OutputSlotStore` chains — but the entry's declared output shape
+    // still lives on `def.ty`, untouched by that pass.
+    let (_sig_params, sig_ret) = extract_function_signature(&def.ty);
+    let ret_type = sig_ret;
     let param_info: Vec<(Type<TypeName>, String)> = params
         .iter()
         .map(|(sym, ty)| Ok((ty.clone(), symbol_name(symbols, *sym)?.to_string())))
@@ -489,7 +495,7 @@ fn convert_entry_point(
 
     let outputs = build_entry_outputs(
         entry,
-        &inner_body.ty,
+        &ret_type,
         is_compute,
         binding_num,
         forced_output_binding,
@@ -504,11 +510,58 @@ fn convert_entry_point(
     // this conversion. Here we just leave the body terminating in its
     // single tail value (or `None` for a unit entry).
     let result_nid = converter.convert_term(inner_body)?;
-    if is_unit_return {
+
+    // Phase 1A bridge: if the body collected per-slot values via
+    // `OutputSlotStore` terms (i.e. `tlc::normalize_outputs` ran), the
+    // body itself is unit-producing — but `egir::assign_outputs` still
+    // wants to see a tuple of slot values at the tail so it can do its
+    // per-slot retargeting. Synthesise that tuple here from the
+    // collected pairs, indexed by `slot_index` so order matches
+    // `entry.outputs`.
+    let slot_result = if converter.output_slot_values.is_empty() {
+        None
+    } else {
+        let mut by_index = converter.output_slot_values.clone();
+        by_index.sort_by_key(|(i, _)| *i);
+        let nids: SmallVec<[NodeId; 4]> = by_index.iter().map(|(_, n)| *n).collect();
+        if nids.len() == 1 {
+            Some(nids[0])
+        } else {
+            // Derive the tuple type from `entry.outputs` since
+            // `ret_type` is `()` post-`normalize_outputs`.
+            let component_tys: Vec<_> = entry.outputs.iter().map(|o| o.ty.clone()).collect();
+            let tuple_ty = Type::Constructed(TypeName::Tuple(component_tys.len()), component_tys);
+            Some(converter.intern_pure(PureOp::Tuple(nids.len()), nids, tuple_ty))
+        }
+    };
+
+    // Slot-collected entries always carry their tuple result into the
+    // Return terminator so `egir::assign_outputs` can retarget per slot,
+    // even when the body's TLC return type is Unit post-`normalize_outputs`.
+    let was_slot_collected = slot_result.is_some();
+    if let Some(synth) = slot_result {
+        converter.set_return(Some(synth));
+    } else if is_unit_return {
         converter.set_return(None);
     } else {
         converter.set_return(Some(result_nid));
     }
+
+    // When the body was unit-typed post-`normalize_outputs` but we
+    // synthesised a tuple at the tail, the EgirEntry's `ret_type` should
+    // reflect that tuple shape (downstream uses it for the function
+    // signature and the assign_outputs flatten). Rebuild from
+    // `entry.outputs` in that case.
+    let ret_type = if was_slot_collected {
+        if entry.outputs.len() == 1 {
+            entry.outputs[0].ty.clone()
+        } else {
+            let component_tys: Vec<_> = entry.outputs.iter().map(|o| o.ty.clone()).collect();
+            Type::Constructed(TypeName::Tuple(component_tys.len()), component_tys)
+        }
+    } else {
+        ret_type
+    };
 
     let (graph, control_headers) = converter.into_graph_parts();
     Ok(EgirEntry::new(
@@ -555,6 +608,14 @@ struct Converter<'a> {
     /// the originating source. Pushed/popped in `convert_term`; `None`
     /// only outside any term conversion (e.g. entry-point glue).
     current_span: Option<Span>,
+    /// `(slot_index, value_nid)` pairs collected from `OutputSlotStore`
+    /// terms during entry-body conversion. Populated by
+    /// `convert_term_kind`'s `OutputSlotStore` arm; consumed by
+    /// `convert_entry_point` to synthesise the entry's tuple result so
+    /// `egir::assign_outputs` can do its existing per-slot retargeting.
+    /// Phase 1A bridge — a later step folds `assign_outputs`'s logic
+    /// into the slot conversion itself.
+    output_slot_values: Vec<(usize, NodeId)>,
 }
 
 impl<'a> Converter<'a> {
@@ -578,6 +639,7 @@ impl<'a> Converter<'a> {
             control_headers: HashMap::new(),
             next_effect: 1,
             current_span: None,
+            output_slot_values: Vec::new(),
         }
     }
 
@@ -810,6 +872,22 @@ impl<'a> Converter<'a> {
             }
             TermKind::BinOp(_) | TermKind::UnOp(_) => {
                 panic!("ICE: bare operator in to_egir (should be inside App)")
+            }
+            // Phase 1A bridge: collect each `OutputSlotStore { slot_index,
+            // value, .. }`'s converted value NodeId into
+            // `output_slot_values`. The entry-point glue
+            // (`convert_entry_point`) synthesises a tuple of these at
+            // the body's tail so the existing `egir::assign_outputs`
+            // logic continues to do per-slot retargeting unchanged.
+            // Returning a unit constant keeps the surrounding `Let`
+            // chain's `body` happy and well-typed.
+            TermKind::OutputSlotStore {
+                slot_index, value, ..
+            } => {
+                let value_nid = self.convert_term(value)?;
+                self.output_slot_values.push((*slot_index, value_nid));
+                let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
+                Ok(self.intern_pure(PureOp::Unit, smallvec![], unit_ty))
             }
         }
     }
