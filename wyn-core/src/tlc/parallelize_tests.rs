@@ -1201,3 +1201,60 @@ entry foo(#[storage(set=1, binding=0)] xs: []i32,
 "#;
     compile_to_spirv(src).expect("two-phase reduce with capture must compile end-to-end");
 }
+
+/// Demonstration: a multi-output two-phase reduce must preserve every
+/// declared output slot through phase synthesis. `analyze_entry`'s
+/// slot-0 short-circuit at `parallelize.rs` used to descend into slot
+/// 0's value and discard the rest of the let-chain (which carries
+/// slots 1..N's `OutputSlotStore` terms). `build_two_phase_entries`
+/// then built phase1/phase2 from an `EntryAnalysis` that knew nothing
+/// about extra slots, the original entry was removed from
+/// `program.defs`, and the replacement phase entries declared no
+/// output for slot 1.
+///
+/// The original entry declares 2 outputs (the reduce result + `42`).
+/// After parallelize, the program's compute entries should collectively
+/// declare 2 `StorageRole::Output` bindings — one per slot. Pre-fix
+/// they declared exactly 1.
+#[test]
+fn two_phase_reduce_preserves_extra_slot_value() {
+    let src = r#"
+#[compute]
+entry foo(#[storage(set=1, binding=0)] xs: []i32,
+          #[uniform(set=2, binding=0)] k: i32) (i32, i32) =
+    (reduce(|a:i32, b:i32| a + b + k, 0, xs), 42)
+"#;
+    let (program, _desc) = parallelize_src(src);
+
+    let total_outputs: usize = program
+        .defs
+        .iter()
+        .filter_map(|d| match &d.meta {
+            DefMeta::EntryPoint(e) if e.entry_type.is_compute() => Some(
+                e.storage_bindings
+                    .iter()
+                    .filter(|b| matches!(b.role, crate::interface::StorageRole::Output))
+                    .count(),
+            ),
+            _ => None,
+        })
+        .sum();
+    assert_eq!(
+        total_outputs, 2,
+        "multi-output entry must produce one Output binding per slot \
+         (regression: two-phase synthesis drops extra slot stores)"
+    );
+
+    // End-to-end: slot 1's literal 42 must survive into SPIR-V as an
+    // `OpConstant` (opcode 43) with a word-count of 4 and a literal
+    // value 42. The 4-word `OpConstant` instruction starts with
+    // `(4 << 16) | 43 = 0x0004002B`, so scan for any window of 4 words
+    // where the first is that encoding and the last is 42.
+    let spirv = compile_to_spirv(src).expect("multi-output two-phase reduce must lower to SPIR-V");
+    let op_constant_42_header: u32 = (4u32 << 16) | 43;
+    let has_constant_42 = spirv.windows(4).any(|w| w[0] == op_constant_42_header && w[3] == 42);
+    assert!(
+        has_constant_42,
+        "expected OpConstant 42 in SPIR-V (slot 1's literal 42 missing)"
+    );
+}

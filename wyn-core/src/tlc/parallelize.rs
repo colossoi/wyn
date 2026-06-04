@@ -133,6 +133,12 @@ struct EntryAnalysis {
     /// re-declare these as params so the references don't leak out as
     /// free globals during SPIR-V emission.
     pub required_params: Vec<RequiredParam>,
+    /// `(slot_index, value)` for each output slot whose value isn't
+    /// the SOAC itself. The SOAC consumes slot 0's value; remaining
+    /// `OutputSlotStore` terms from the post-SOAC let-chain land here
+    /// so the TLC-side two-phase synthesis can append direct
+    /// `storage_store` calls for them to phase 2's body.
+    pub extra_slots: Vec<(usize, Term)>,
 }
 
 // =============================================================================
@@ -251,6 +257,7 @@ impl ScopeStack {
 fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
     let mut scope = ScopeStack::default();
     let mut current: Term = def.body.clone();
+    let mut extra_slots: Vec<(usize, Term)> = Vec::new();
 
     // The entry's binding layout — used to resolve `Ref(Var(sym))` SOAC inputs
     // back to their assigned (set, binding). Empty for non-compute entries.
@@ -283,6 +290,19 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
                     slot_index: 0, value, ..
                 } = rhs.kind
                 {
+                    // The let's `body` is the rest of the
+                    // `normalize_outputs` sequencing chain (slots 1..N
+                    // stores ending in `UnitLit`). Walk it here so the
+                    // sibling slot values reach phase synthesis; the
+                    // analysis itself descends into slot 0's value.
+                    collect_extra_slot_stores(&body, &mut extra_slots);
+                    if extra_slots.iter().any(|(_, v)| matches!(v.kind, TermKind::Soac(_))) {
+                        // Sibling slot computed by another SOAC would
+                        // need its own parallel kernel; not handled by
+                        // the two-phase synthesis yet — bail and let
+                        // the entry stay unparallelized.
+                        return None;
+                    }
                     current = *value;
                     continue;
                 }
@@ -298,13 +318,20 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
                 let parallelizable = analyze_soac(&soac, &ty, symbols, &entry_slots)?;
                 let captured_params = scope.captured_params();
                 let prefix_lets = scope.into_prefix_lets();
-                let required_params =
-                    compute_required_params(&parallelizable, &prefix_lets, &captured_params, def, symbols);
+                let required_params = compute_required_params(
+                    &parallelizable,
+                    &prefix_lets,
+                    &extra_slots,
+                    &captured_params,
+                    def,
+                    symbols,
+                );
                 return Some(EntryAnalysis {
                     def_name: def.name,
                     soac: parallelizable,
                     prefix_lets,
                     required_params,
+                    extra_slots,
                 });
             }
             TermKind::Var(VarRef::Symbol(sym)) => {
@@ -324,6 +351,28 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
     }
 }
 
+/// Walk the body half of slot 0's sequencing let, picking off each
+/// `OutputSlotStore { slot_index, value, .. }` along the let-chain
+/// into `out`. The chain shape from `normalize_outputs` is `let _seq =
+/// OutputSlotStore(i, v) in <rest>` terminating in `UnitLit`.
+fn collect_extra_slot_stores(term: &Term, out: &mut Vec<(usize, Term)>) {
+    let mut cur = term;
+    loop {
+        match &cur.kind {
+            TermKind::Let { rhs, body, .. } => {
+                if let TermKind::OutputSlotStore {
+                    slot_index, value, ..
+                } = &rhs.kind
+                {
+                    out.push((*slot_index, (**value).clone()));
+                }
+                cur = body;
+            }
+            _ => break,
+        }
+    }
+}
+
 /// Compute the subset of outer entry params that the tail SOAC + retained
 /// prefix_lets actually reference, each annotated with the attribute +
 /// `EntryParamBinding` carried forward from the original entry. Phase
@@ -338,6 +387,7 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
 fn compute_required_params(
     soac: &SoacAnalysis,
     prefix_lets: &[(SymbolId, Type<TypeName>, Term)],
+    extra_slots: &[(usize, Term)],
     captured_params: &[(SymbolId, Type<TypeName>)],
     def: &Def,
     symbols: &SymbolTable,
@@ -383,6 +433,21 @@ fn compute_required_params(
         &mut free,
         &mut seen,
     );
+
+    // Sibling slot values evaluate in phase 2 alongside the reduce
+    // result store; their free vars must also be re-declared on the
+    // phase entries.
+    for (_, sval) in extra_slots {
+        collect_free_vars(
+            sval,
+            &bound,
+            &empty_top,
+            &empty_defs,
+            symbols,
+            &mut free,
+            &mut seen,
+        );
+    }
 
     let free_syms: HashSet<SymbolId> = free
         .iter()
@@ -1720,8 +1785,14 @@ fn make_two_phase_plan(
         };
     }
 
-    // Legacy TLC-side synthesis (still used by Redomap and complex
-    // Reduce shapes pending EGIR support).
+    // TLC-side synthesis path (used by Redomap and complex Reduce
+    // shapes not yet covered by the EGIR-side migration). Allocates
+    // one extra Output binding per `extra_slots` entry so the original
+    // entry's multi-output shape survives into phase 2.
+    let extra_slot_bindings: Vec<BindingRef> = (0..analysis.extra_slots.len() as u32)
+        .map(|i| BindingRef::new(AUTO_STORAGE_SET, next_binding + extra_used + i))
+        .collect();
+    let extra_used = extra_used + analysis.extra_slots.len() as u32;
     let (entries, pipeline) = build_two_phase_entries(
         entry_name,
         analysis,
@@ -1730,6 +1801,7 @@ fn make_two_phase_plan(
         &elem_type,
         partials_binding,
         result_binding,
+        &extra_slot_bindings,
         program,
         sizing,
         term_ids,
@@ -2066,10 +2138,16 @@ fn build_two_phase_entries(
     elem_type: &Type<TypeName>,
     partials_binding: BindingRef,
     result_binding: BindingRef,
+    extra_slot_bindings: &[BindingRef],
     program: &mut Program,
     sizing: PipelineSizing,
     term_ids: &mut TermIdSource,
 ) -> (Vec<Def>, Pipeline) {
+    debug_assert_eq!(
+        extra_slot_bindings.len(),
+        analysis.extra_slots.len(),
+        "one binding per extra slot"
+    );
     let workgroup = sizing.workgroup;
     let span = ne.span;
 
@@ -2139,17 +2217,41 @@ fn build_two_phase_entries(
         span,
         term_ids,
     );
+    // Sequence the reduce's result store with one `storage_store` per
+    // extra slot. Each extra slot is a non-SOAC term (`analyze_entry`
+    // rejects SOAC-valued extra slots) so evaluating it in phase 2's
+    // single-thread context is safe.
+    let mut phase2_tail = phase2_store;
+    for ((_, slot_value), slot_binding) in analysis.extra_slots.iter().zip(extra_slot_bindings.iter()).rev()
+    {
+        let store = intrinsic_term_by_id(
+            catalog().known().storage_store,
+            vec![
+                uint_lit(slot_binding.set as u64, span, term_ids),
+                uint_lit(slot_binding.binding as u64, span, term_ids),
+                uint_lit(0, span, term_ids),
+                slot_value.clone(),
+            ],
+            unit_ty.clone(),
+            span,
+            term_ids,
+        );
+        let seq_sym = program.symbols.alloc("_seq".into());
+        phase2_tail = let_term(seq_sym, unit_ty.clone(), store, phase2_tail, span, term_ids);
+    }
     let phase2_body = let_term(
         r_sym,
         elem_type.clone(),
         phase2_soac_term,
-        phase2_store,
+        phase2_tail,
         span,
         term_ids,
     );
-    // Phase 2 storage interface: reads `partials` (as an Intermediate) and
-    // writes the final user-visible `result`.
-    let phase2_bindings = vec![
+    // Phase 2 storage interface: reads `partials` (as an Intermediate),
+    // writes the final user-visible `result`, plus one Output binding
+    // per extra slot so the original entry's multi-output shape
+    // survives into phase 2.
+    let mut phase2_bindings = vec![
         interface::StorageBindingDecl {
             binding: BindingRef::new(partials_binding.set, partials_binding.binding),
             role: interface::StorageRole::Intermediate,
@@ -2163,6 +2265,14 @@ fn build_two_phase_entries(
             length: None,
         },
     ];
+    for ((_, slot_value), slot_binding) in analysis.extra_slots.iter().zip(extra_slot_bindings.iter()) {
+        phase2_bindings.push(interface::StorageBindingDecl {
+            binding: *slot_binding,
+            role: interface::StorageRole::Output,
+            elem_ty: slot_value.ty.clone(),
+            length: None,
+        });
+    }
     let phase2_def = make_entry_def(
         &phase2_name,
         phase2_body,
@@ -2189,12 +2299,23 @@ fn build_two_phase_entries(
         BufferUsage::Output,
         format!("{}_result", entry_name),
     );
+    let mut phase2_output_indices = vec![result_idx];
+    for (i, slot_binding) in extra_slot_bindings.iter().enumerate() {
+        let idx = push_storage_binding(
+            &mut all_bindings,
+            *slot_binding,
+            Access::WriteOnly,
+            BufferUsage::Output,
+            format!("{}_slot{}", entry_name, analysis.extra_slots[i].0),
+        );
+        phase2_output_indices.push(idx);
+    }
 
     let pipeline = Pipeline::MultiCompute(MultiComputePipeline {
         bindings: all_bindings,
         stages: vec![
             saturating_stage(phase1_name.clone(), input_indices, vec![partials_idx], workgroup),
-            tree_phase2_stage(phase2_name.clone(), vec![partials_idx], vec![result_idx]),
+            tree_phase2_stage(phase2_name.clone(), vec![partials_idx], phase2_output_indices),
         ],
         default_total_threads: sizing.default_total_threads,
     });
