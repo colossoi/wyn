@@ -106,7 +106,7 @@ def raycast(ro: vec3f32, rd: vec3f32, gro: vec3f32, iTime: f32) (bool, f32, vec3
   let (_, _, hit, ht, hn, hc) =
     loop (i, t, hit, ht, hn, hc) =
       (0, 0.0, false, 0.0, @[0.0, 1.0, 0.0], @[0.0, 0.0, 0.0])
-    while i < 192 && !hit && t < 120.0 do
+    while i < 192 && !hit && t < 90.0 do
       let c = cellCenter(ro + rd * (t + 0.001)) in
       let (vin, vout, vn) = rayCell(ro, rd, c, 1.0, 1.5) in
       if mapSolid(c, gro, iTime) then (i + 1, max(vin, 0.0), true, max(vin, 0.0), vn, c)
@@ -182,7 +182,9 @@ entry fragment_main(
       let bac = clamp(dot(nor, normalize(@[0.4, 0.0, 0.0 - 0.7])), 0.0, 1.0) in
       let lin = 1.30 * dif + 0.55 * sky + 0.25 * bac + 0.18 in
       let shade = lin * ao in
-      let fog = exp(0.0 - 0.020 * t) in
+      -- Stronger fog, forced fully to black before the march limit (90) so
+      -- nothing pops into existence at the horizon.
+      let fog = exp(0.0 - 0.035 * t) * (1.0 - smoothstep(50.0, 88.0, t)) in
       @[shade, shade, shade] * fog
     else @[0.0, 0.0, 0.0]
   in
