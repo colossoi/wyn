@@ -1141,11 +1141,8 @@ is not allowed.
 
 #### |x, y, z| e
 Produce an anonymous function taking parameters `x`, `y`, and `z`,
-whose body is `e`. The function captures any free variables in `e`
-from the enclosing scope, so anonymous functions are the natural way
-to write closures over higher-order array operators (`map`, `reduce`,
-…). Anonymous functions do not permit type parameters; use a named
-function for a polymorphic function.
+whose body is `e`. See Lambdas for the semantics of environment
+capture and the restrictions that apply.
 
 #### (binop)
 An operator section that is equivalent to `|x, y| x binop y`.
@@ -1167,19 +1164,24 @@ multi-dimensional indexing, chain: `(.[i][j])` is `|x| x[i][j]`.
 
 ## Higher-order Functions
 
-At a high level, Wyn functions are values, and can be used as any other value. However, to ensure that the compiler is able to compile the higher-order functions efficiently via defunctionalisation, certain type-driven restrictions exist on how functions can be used. These also apply to any record or tuple containing a function (a functional type):
+Within a Wyn program, functions can be named, passed as arguments,
+and returned from other functions. Function values do not exist at
+runtime, however (see Program Structure), so the following
+restrictions apply to functions and to any record or tuple
+containing a function (a functional type):
 
 - Arrays of functions are not permitted.
 - A function cannot be returned from an `if` expression.
 - A loop parameter cannot be a function.
 
-Further, type parameters are divided into non-lifted (bound with an apostrophe, e.g. `'t`), size-lifted (`'~t`), and fully lifted (`'^t`). Only fully lifted type parameters may be instantiated with a functional type. Within a function, a lifted type parameter is treated as a functional type.
-
-See also In-place updates for details on how consumption interacts with higher-order functions.
+See also In-place Updates for details on how consumption interacts
+with higher-order functions.
 
 ### Function Arity and Partial Application
 
-Wyn functions are **not curried** by default. Every function has a fixed arity (number of arguments) and must be called with exactly that many arguments. Partial application is not allowed.
+Wyn functions are **not curried** by default. Every function has a
+fixed arity (number of arguments) and must be called with exactly
+that many arguments. Partial application is not allowed.
 
 ```wyn
 def add(x: i32, y: i32) i32 = x + y
@@ -1191,298 +1193,481 @@ def result = add(1, 2)
 def add_one = add(1)  -- Error: function requires 2 arguments
 ```
 
-This restriction applies uniformly:
+This restriction applies uniformly to:
 - Top-level function definitions
-- Lambda expressions
+- Anonymous functions
 - Built-in functions
 - Functions passed as higher-order arguments
 
-The restriction exists to simplify compilation to GPU targets and ensure predictable performance.
-
 #### Explicit Currying with Placeholder Syntax
 
-When you need to create a partially applied function, use explicit placeholder syntax with `$`:
+When a partially applied function is needed, use explicit placeholder
+syntax with `$`:
 
 ```wyn
-def add(x: i32, y: i32) i32 = x + y
+def add(x: i32, y: i32, z: i32) i32 = x + y + z
 
--- Create a 2-arity function that calls add with middle arg fixed
-def add_with_5 = $add(_, 5, _)  -- Produces (i32, i32) -> i32
+-- Create a 2-arity function that calls `add` with the middle arg
+-- fixed.
+def add_with_5 = $add(_, 5, _)        -- Produces (i32, i32) -> i32
 
--- Create a 1-arity function
-def add_one = $add(_, 1)  -- Produces i32 -> i32
+-- Create a 1-arity function with two of the three args fixed.
+def add_one = $add(_, 1, 0)           -- Produces i32 -> i32
 
 -- Usage
-def result = add_one(5)  -- Returns 6
+def result = add_one(5)               -- Returns 6
 ```
 
 The `$func(args...)` syntax:
-- `_` marks placeholder positions that become parameters of the new function
-- Non-placeholder arguments are captured at the definition site
-- The resulting function has arity equal to the number of `_` placeholders
-- The resulting function is itself non-curried (requires all placeholders filled at once)
+
+- `_` marks placeholder positions that become parameters of the new
+  function.
+- Non-placeholder arguments are captured at the definition site.
+- The resulting function has arity equal to the number of `_`
+  placeholders.
+- The resulting function is itself non-curried (it requires all
+  placeholders to be filled at once).
+
+---
+
+## Lambdas
+
+A lambda — an anonymous function written `|x, y, z| body` — is the
+primary way to specialise a higher-order operator per call site.
+Parameter types may be inferred from context or given explicitly:
+
+```wyn
+map(|x| x * 2.0, arr)
+map(|x: f32| x * 2.0, arr)
+```
+
+### Environment Capture
+
+A lambda captures every free variable in its body — every identifier
+that is bound outside the lambda but referenced inside it. The
+captured values become part of the lambda's behaviour and travel
+with it wherever it is passed.
+
+```wyn
+def above(threshold: i32, arr: [n]i32) ?k. [k]i32 =
+    filter(|x| x > threshold, arr)
+```
+
+The lambda captures `threshold` from the enclosing function's
+parameters; `filter` invokes the lambda once per element of `arr`,
+and each invocation sees the captured `threshold`.
+
+Capture is by value: each captured value is snapshotted at the
+lambda's construction site. Because Wyn is purely functional there
+is no observable difference between by-value and by-reference
+capture in any case.
+
+A lambda may capture any value visible at its definition site —
+scalars, arrays, vectors, records, tuples, and references to named
+functions. References to named functions are resolved statically;
+they do not become runtime function values.
+
+### Restrictions
+
+Lambdas do not permit type parameters — they are inherently
+monomorphic at their definition site. To express a polymorphic
+higher-order computation, use a named function and pass it to the
+operator instead.
+
+The restrictions on functional types described under Higher-order
+Functions apply to lambda-valued expressions just as to any other
+functional-typed value.
 
 ---
 
 ## Type Inference
 
-Wyn supports Hindley-Milner-style type inference, so in many cases explicit type annotations can be left off. Record field projection cannot in isolation be fully inferred, and may need type annotations where their inputs are bound. The same goes when constructing sum types, as Wyn cannot assume that a given constructor only belongs to a single type. Further, consumed parameters (see In-place updates) must be explicitly annotated.
+Wyn supports Hindley-Milner-style type inference; in many cases
+explicit type annotations can be omitted. Annotations are still
+required in the following situations:
 
-Type inference processes top-level declared in top-down order, and the type of a top-level function must be completely inferred at its definition site. Specifically, if a top-level function uses overloaded arithmetic operators, the resolution of those overloads cannot be influenced by later uses of the function.
+- **Record field projection** is not in general unambiguous from a
+  bare projection like `r.x`, so `r` must have a type known from
+  context or by annotation.
+- **Sum-type constructors** do not by themselves determine their sum
+  type — `#foo(1)` is ambiguous in isolation — so the expected type
+  must be available from context or an annotation.
+- **Consumed parameters** (see In-place Updates) must be annotated
+  explicitly.
 
-Local bindings made with `let` are not made polymorphic through let-generalisation unless they are syntactically functions, meaning they have at least one named parameter.
+Top-level declarations are processed in order, and each top-level
+function's type must be completely resolved at its definition site.
+If a top-level function uses overloaded arithmetic operators, the
+choice of overload cannot be influenced by later use sites — either
+the operand types are determined locally (e.g. by annotation) or
+the default arithmetic resolution applies.
+
+Local `let` bindings are monomorphic; their types are not
+let-generalised.
 
 ---
 
 ## Size Types
 
-Wyn supports a system of size-dependent types that statically checks that the sizes of arrays passed to a function are compatible.
+Wyn supports a system of size-dependent types that statically checks
+that the sizes of arrays passed to a function are compatible.
 
-Whenever a pattern occurs (in `let`, `loop`, and function parameters), as well as in return types, the types of the bindings express invariants about the shapes of arrays that are accepted or produced by the function. For example:
-
-```wyn
-def f [n] (a: [n]i32) (b: [n]i32): [n]i32 =
-  map2 (+) a b
-```
-
-We use a size parameter, `[n]`, to explicitly quantify a size. The `[n]` parameter is not explicitly passed when calling `f`. Rather, its value is implicitly deduced from the arguments passed for the value parameters. An array type can contain anonymous sizes, e.g. `[]i32`, for which the type checker will invent fresh size parameters, which ensures that all arrays have a size. On the right-hand side of a function arrow ("return types"), this results in an existential size that is not known until the function is fully applied, e.g:
+Whenever a pattern occurs (in `let`, `loop`, and function
+parameters), as well as in return types, the types of the bindings
+express invariants about the shapes of arrays accepted or produced
+by the function. For example:
 
 ```wyn
-sig filter [n] 'a : (p: a -> bool) -> (as: [n]a) -> ?[k].[k]a
+def double<[n]>(a: [n]i32) [n]i32 = map(|x| x * 2, a)
 ```
 
-Sizes can be any expression of type `i64` that does not consume any free variables. Size parameters can be used as ordinary variables of type `i64` within the scope of the parameters. The type checker verifies that the program obeys any constraints imposed by size annotations.
+A size parameter, `[n]`, explicitly quantifies a size. The `[n]`
+parameter is not passed explicitly when calling the function;
+instead its value is implicitly deduced from the arguments. An array
+type can contain an anonymous size, e.g. `[]i32`, for which the type
+checker invents a fresh size parameter — every array has a size in
+the type system. In return-type position this can produce an
+existential size that is not known until the function is fully
+applied. For example, `filter` has a return type along these lines:
 
-Size-dependent types are supported, as the names of parameters can be used in the return type of a function:
+```
+filter : <[n], A>(A -> bool, [n]A) -> ?k. [k]A
+```
+
+Sizes may be any expression of type `i64` that does not consume any
+free variables. Size parameters can be used as ordinary `i64`
+variables within their scope. The type checker verifies that the
+program obeys any constraints imposed by size annotations.
+
+Size-dependent types are supported, as the names of value parameters
+can be used in the return type of a function:
 
 ```wyn
-def replicate 't (n: i64) (x: t): [n]t = ...
+def replicate<T>(n: i64, x: T) [n]T = ???
 ```
 
-An application `replicate 10 0` will have type `[10]i32`.
+An application `replicate(10, 0)` produces a value of type `[10]i32`.
 
-Whenever we write a type `[e]t`, `e` must be a well-typed expression of type `i64` in scope (possibly by referencing names bound as a size parameter).
+Whenever a type `[e]t` is written, `e` must be a well-typed
+expression of type `i64` in scope (possibly by referencing a name
+bound as a size parameter).
 
 ### Unknown Sizes
 
-There are cases where the type checker cannot assign a precise size to the result of some operation. For example, the type of `filter` is:
+There are cases where the type checker cannot assign a precise size
+to the result of some operation. For example, `filter` has a type
+roughly like:
 
-```wyn
-sig filter [n] 'a : (a -> bool) -> [n]t -> ?[m].[m]t
+```
+filter : <[n], A>(A -> bool, [n]A) -> ?k. [k]A
 ```
 
-The function returns of an array of some existential size `m`, but it cannot be known in advance.
+The function returns an array of some existential size `k` that
+cannot be known in advance.
 
-When an application `filter p xs` is found, the result will be of type `[k]t`, where `k` is a fresh unknown size that is considered distinct from every other size in the program. It is sometimes necessary to perform a size coercion (see Size coercion) to convert an unknown size to a known size.
+When an application `filter(p, xs)` is encountered, the result is
+typed `[k]A`, where `k` is a fresh unknown size that is considered
+distinct from every other size in the program. It is sometimes
+necessary to perform a size coercion (see Size Coercion) to convert
+an unknown size to a known size.
 
-Generally, unknown sizes are constructed whenever the true size cannot be expressed. The following lists all possible sources of unknown sizes.
+In general, unknown sizes are produced whenever the true size
+cannot be expressed. The following lists all sources of unknown
+sizes.
 
 #### Size going out of scope
 
-An unknown size is created in some cases when the a type references a name that has gone out of scope:
+An unknown size is created when a type references a name that has
+gone out of scope:
 
 ```wyn
-match ...
-case #some(c) -> replicate c 0
+match …
+case #some(c) -> replicate(c, 0)
 ```
 
-The type of `replicate c 0` is `[c]i32`, but since `c` is locally bound, the type of the entire expression is `[k]i32` for some fresh `k`.
+The type of `replicate(c, 0)` is `[c]i32`, but since `c` is locally
+bound, the type of the entire expression is `[k]i32` for some fresh
+`k`.
 
-#### Consuming expression passed as function argument
+#### Computed expression passed as a size argument
 
-The type of `replicate e 0` should be `[e]i32`, but if `e` is an expression that is not valid as a size, this is not expressible. Therefore an unknown size `k` is created and the size of the expression becomes `[k]i32`.
+The type of `replicate(e, 0)` should be `[e]i32`, but if `e` is not
+valid as a size expression this cannot be expressed. An unknown size
+`k` is created and the size of the expression becomes `[k]i32`.
 
 #### Compound expression used as range bound
 
-While a simple range expression such as `0..<n` can be assigned type `[n]i32`, a range expression `0..<(n+1)` will give produce an unknown size.
+While a simple range expression such as `0..<n` can be assigned type
+`[n]i32`, a range expression `0..<(n+1)` produces an unknown size.
 
 #### Complex slicing
 
-Most complex array slicing, such as `xs[a:b]`, will have an unknown size. Exceptions are listed in the reference for slice expressions.
+Most complex array slicing, such as `xs[a..b]`, has an unknown size.
+Exceptions are listed in the reference for slice expressions.
 
 #### Complex ranges
 
-Most complex ranges, such as `a..<b`, will have an unknown size. Exceptions exist for general ranges and "upto" ranges.
+Most complex ranges, such as `a..<b`, have an unknown size.
+Exceptions exist for general ranges and "upto" ranges.
 
 #### Existential size in function return type
 
-Whenever the result of a function application has an existential size, that size is replaced with a fresh unknown size variable.
+Whenever the result of a function application has an existential
+size, that size is replaced with a fresh unknown size variable.
 
-For example, `filter` has the following type:
+For example, given `filter`'s type:
 
-```wyn
-sig filter [n] 'a : (p: a -> bool) -> (as: [n]a) -> ?[k].[k]a
+```
+filter : <[n], A>(A -> bool, [n]A) -> ?k. [k]A
 ```
 
-For an application `filter f xs`, the type checker invents a fresh unknown size `k'`, and the actual type for this specific application will be `[k']a`.
+an application `filter(f, xs)` causes the type checker to invent a
+fresh unknown size `k'`, and the actual type for that application
+is `[k']A`.
 
 #### Branches of if return arrays of different sizes
 
-When an `if` (or `match`) expression has branches that returns array of different sizes, the differing sizes will be replaced with fresh unknown sizes. For example:
+When an `if` (or `match`) expression has branches that return arrays
+of different sizes, the differing sizes are replaced with fresh
+unknown sizes. For example:
 
 ```wyn
-if b then [[1,2], [3,4]]
-     else [[5,6]]
+if b then [[1, 2], [3, 4]]
+     else [[5, 6]]
 ```
 
-This expression will have type `[k][2]i32`, for some fresh `k`.
+This expression has type `[k][2]i32` for some fresh `k`.
 
-**Important**: The check whether the sizes differ is done when first encountering the `if` or `match` during type checking. At this point, the type checker may not realise that the two sizes are actually equal, even though constraints later in the function force them to be. This can always be resolved by adding type annotations.
+**Important**: the check for differing sizes is performed when first
+encountering the `if` or `match` during type checking. At that point
+the type checker may not yet realise that the two sizes are equal,
+even though constraints later in the function force them to be.
+Adding type annotations resolves this.
 
 #### An array produced by a loop does not have a known size
 
-If the size of some loop parameter is not maintained across a loop iteration, the final result of the loop will contain unknown sizes. For example:
-
-```wyn
-loop xs = [1] for i < n do xs ++ xs
-```
-
-Similar to conditionals, the type checker may sometimes be too cautious in assuming that some size may change during the loop. Adding type annotations to the loop parameter can be used to resolve this.
+If the size of some loop parameter is not maintained across a loop
+iteration, the final result of the loop will contain unknown sizes.
+Similarly to conditionals, the type checker may sometimes be too
+conservative in concluding that a size might change during the loop;
+adding type annotations to the loop parameter can resolve this.
 
 ### Size Coercion
 
-Size coercion, written with `:>`, can be used to perform a runtime-checked coercion of one size to another. This can be useful as an escape hatch in the size type system:
+Size coercion, written with `:>`, performs a runtime-checked
+coercion of one size to another. It is the escape hatch from the
+size type system — useful when a value has an unknown size that the
+programmer knows is equal to some named size:
 
 ```wyn
-def concat_to 'a (m: i32) (a: []a) (b: []a) : [m]a =
-  a ++ b :> [m]a
+def take_n<A>(n: i64, xs: []A) [n]A =
+  xs[..n] :> [n]A
 ```
+
+Here `xs[..n]` has an unknown size (slicing produces an existential
+size; see Unknown Sizes), and `:> [n]A` asserts that the slice's
+size is in fact `n`. The assertion is checked at run-time.
 
 ### Causality Restriction
 
-Conceptually, size parameters are assigned their value by reading the sizes of concrete values passed along as parameters. This means that any size parameter must be used as the size of some parameter. This is an error:
+Conceptually, size parameters are assigned their values by reading
+the sizes of concrete values passed as parameters. Every size
+parameter must therefore appear as the size of some parameter. The
+following is an error:
 
 ```wyn
-def f [n] (x: i32) = n
+def f<[n]>(x: i32) i32 = i32.i64(n)   -- `n` is never bound by a param
 ```
 
 The following is not an error:
 
 ```wyn
-def f [n] (g: [n]i32 -> [n]i32) = ...
+def f<[n]>(g: [n]i32 -> [n]i32) i32 = ???
 ```
 
-However, using this function comes with a constraint: whenever an application `f x` occurs, the value of the size parameter must be inferable. Specifically, this value must have been used as the size of an array before the `f x` application is encountered. The notion of "before" is subtle, as there is no evaluation ordering of a Wyn expression, except that a let-binding is always evaluated before its body, the argument to a function is always evaluated before the function itself, and the left operand to an operator is evaluated before the right.
+…but using this function comes with a constraint: whenever an
+application `f(x)` occurs, the value of the size parameter must be
+inferable. The value must have been used as the size of an array
+before the `f(x)` application is encountered. The notion of "before"
+is subtle since there is no overall evaluation order on a Wyn
+expression — only that a let-binding is evaluated before its body,
+the argument to a function is evaluated before the function itself,
+and the left operand of an operator is evaluated before the right.
 
-The causality restriction only occurs when a function has size parameters whose first use is not as a concrete array size. For example, it does not apply to uses of the following function:
+The causality restriction only matters when a function has a size
+parameter whose first use is not as a concrete array size. It does
+not apply to uses of the following function, for example:
 
 ```wyn
-def f [n] (arr: [n]i32) (g: [n]i32 -> [n]i32) = ...
+def f<[n]>(arr: [n]i32, g: [n]i32 -> [n]i32) [n]i32 = g(arr)
 ```
 
-This is because the proper value of `n` can be read directly from the actual size of the array.
+…because the value of `n` can be read directly from `arr`'s size.
 
 ### Empty Array Literals
 
-Just as with size-polymorphic functions, when constructing an empty array, we must know the exact size of the (missing) elements. For example, in the following program we are forcing the elements of `a` to be the same as the elements of `b`, but the size of the elements of `b` are not known at the time `a` is constructed:
+Just as with size-polymorphic functions, constructing an empty array
+requires knowing the exact size of the (missing) elements. In the
+following program the elements of `a` are constrained to have the
+same type as the elements of `b`, but `b`'s element sizes are not
+known at the time `a` is constructed:
 
 ```wyn
-def main (b: bool) (xs: []i32) =
-  let a = [] : [][]i32
-  let b = [filter (>0) xs]
-  in a[0] == b[0]
+def main(b: bool, xs: []i32) bool =
+  let a: [][]i32 = [] in
+  let b = [filter(|x| x > 0, xs)] in
+  a[0] == b[0]
 ```
 
 The result is a type error.
 
 ### Sum Types
 
-When constructing a value of a sum type, the compiler must still be able to determine the size of the constructors that are not used. This is illegal:
+When constructing a value of a sum type, the compiler must still be
+able to determine the size of the constructors that are not used.
+The following is illegal:
 
 ```wyn
 type sum = #foo([]i32) | #bar([]i32)
 
-def main(xs: *[]i32) =
-  let v: sum = #foo(xs)
-  in xs
+def main(xs: *[]i32) i32 =
+  let v: sum = #foo(xs) in
+  xs[0]
 ```
 
 ### Modules
 
-When matching a module with a module type (see Modules), a non-lifted abstract type (i.e. one that is declared with `type` rather than `type^`) may not be implemented by a type abbreviation that contains any existential sizes. This is to ensure that if we have the following:
+When matching a module against a module type (see Modules), a
+non-lifted abstract type (one declared with `type` rather than
+`type^`) may not be implemented by a type abbreviation that contains
+any existential sizes. This ensures that, given:
 
 ```wyn
-module m : { type t } = ...
+module m : { type t } = …
 ```
 
-Then we can construct an array of values of type `m.t` without worrying about constructing an irregular array.
+an array of values of type `m.t` can always be constructed without
+risking irregularity.
 
 ### Higher-order Functions
 
-When a higher-order function takes a functional argument whose return type is a non-lifted type parameter, any instantiation of that type parameter must have a non-existential size. If the return type is a lifted type parameter, then the instantiation may contain existential sizes. This is why the type of `map` guarantees regular arrays:
+When a higher-order function expects a function argument whose
+output is itself an array, the per-call output size must be the
+same for every invocation. This is why `map` produces a regular
+array: its function argument has type `A -> B`, where `B` must be a
+fixed-size type, so every element of the input maps to a result of
+the same shape and the output stays rectangular.
 
-```wyn
-sig map [n] 'a 'b : (a -> b) -> [n]a -> [n]b
-```
-
-The type parameter `b` can only be replaced with a type that has non-existential sizes, which means they must be the same for every application of the function. In contrast, this is the type of the pipeline operator:
-
-```wyn
-sig (|>) '^a -> '^b : a -> (a -> b) -> b
-```
-
-The provided function can return something with an existential size (such as `filter`).
+Operators whose result size genuinely varies per call — `filter`,
+for example, where each invocation may keep a different number of
+elements — produce existentially-sized results that do not feed
+back into a `map`-like operator without first being materialised.
 
 #### A function whose return type has an unknown size
 
-If a function (named or anonymous) is inferred to have a return type that contains an unknown size variable created within the function body, that size variable will be replaced with an existential size. In most cases this is not important, but it means that an expression like the following is ill-typed:
+If a function (named or anonymous) is inferred to have a return type
+that contains an unknown size variable created within the function
+body, that size variable is replaced with an existential size.
+Usually this is harmless, but it means an expression like the
+following is ill-typed:
 
 ```wyn
-map(|xs| iota(length(xs)), xss : [n][m]i32)
+map(|xs: [m]i32| iota(length(xs)), xss)
 ```
 
-This is because the `(length xs)` expression gives rise to some fresh size `k`. The lambda is then assigned the type `[n]t -> [k]i32`, which is immediately turned into `[n]t -> ?[k].[k]i32` because `k` was generated inside its body. A function of this type cannot be passed to `map`, as explained before. The solution is to bind `length` to a name before the lambda.
+Here `length(xs)` gives rise to some fresh size `k`. The lambda is
+then assigned the type `[m]i32 -> [k]i32`, which is immediately
+rewritten to `[m]i32 -> ?k. [k]i32` because `k` was generated inside
+the lambda body. A function of this type cannot be passed to `map`,
+as explained above. The fix is to bind the length to a name in the
+enclosing scope before the lambda is constructed.
 
 ---
 
 ## In-place Updates
 
-In-place updates do not provide observable side effects, but they do provide a way to efficiently update an array in-place, with the guarantee that the cost is proportional to the size of the value(s) being written, not the size of the full array.
+In-place updates do not produce observable side effects, but they
+provide a way to update an array efficiently — the cost is
+proportional to the size of the value(s) being written, not the size
+of the full array.
 
-The `a with [i] = v` language construct, and derived forms, performs an in-place update. The compiler verifies that the original array (`a`) is not used on any execution path following the in-place update. This involves also checking that no alias of `a` is used. Generally, most language constructs produce new arrays, but some (slicing) create arrays that alias their input arrays.
+The `a with [i] = v` construct (and its derived forms) performs an
+in-place update. The compiler verifies that the original array `a` is
+not used on any execution path following the update, and that no
+alias of `a` is used either. Most language constructs produce fresh
+arrays with no aliases; slicing is the main exception — a slice
+aliases its source.
 
-When defining a function parameter we can mark it as consuming by prefixing it with an asterisk. For a return type, we can mark it as alias-free by prefixing it with an asterisk. For example:
+A function parameter may be marked **consuming** by prefixing its
+type with `*`. A return type may be marked **alias-free** the same
+way. For example:
 
 ```wyn
-def modify (a: *[]i32) (i: i32) (x: i32): *[]i32 =
+def modify(a: *[]i32, i: i32, x: i32) *[]i32 =
   a with [i] = a[i] + x
 ```
 
-A parameter that is not consuming is called observing. In the parameter declaration `a: *[i32]`, the asterisk means that the function `modify` has been given "ownership" of the array `a`, meaning that any caller of `modify` will never reference array `a` after the call again. This allows the `with` expression to perform an in-place update. After a call `modify a i x`, neither `a` or any variable that aliases `a` may be used on any following execution path.
+A parameter that is not consuming is called **observing**. The `*` in
+`a: *[]i32` means `modify` takes ownership of `a`; no caller may
+reference `a` (or any alias of it) after the call. This is what
+permits the `with` expression to update in place. After a call
+`modify(a, i, x)`, neither `a` nor any alias of `a` may be used on
+any subsequent execution path.
 
-If an asterisk is present at any point inside a tuple parameter type, the parameter as a whole is considered consuming. For example:
+If a `*` appears anywhere inside a tuple parameter type, the whole
+parameter is considered consuming:
 
 ```wyn
-def consumes_both ((a,b): (*[]i32,[]i32)) = ...
+def consumes_both(p: (*[]i32, []i32)) i32 = ???
 ```
 
-This is usually not desirable behaviour. Use multiple parameters instead:
+This is usually not desirable. Prefer separate parameters:
 
 ```wyn
-def consumes_first_arg (a: *[]i32) (b: []i32) = ...
+def consumes_first_arg(a: *[]i32, b: []i32) i32 = ???
 ```
 
-For bulk in-place updates with multiple values, use the `scatter` function from the prelude.
+For bulk in-place updates with multiple values, use the `scatter`
+function from the prelude.
 
 ### Alias Analysis
 
-The rules used by the Wyn compiler to determine aliasing are intuitive in the intra-procedural case. Aliases are associated with entire arrays. Aliases of a record are tuple are tracked for each element, not for the record or tuple itself. Most constructs produce fresh arrays, with no aliases. The main exceptions are `if`, `loop`, function calls, and variable literals.
+The rules used to determine aliasing are intuitive in the intra-
+procedural case. Aliases are associated with entire arrays. Aliases
+of a record or tuple are tracked for each element, not for the record
+or tuple itself. Most constructs produce fresh arrays with no
+aliases; the main exceptions are `if`, `loop`, function calls, and
+variable references.
 
-After a binding `let a = b`, that simply assigns a new name to an existing variable, the variable `a` aliases `b`. Similarly for record projections and patterns.
+After a binding `let a = b`, which simply assigns a new name to an
+existing variable, `a` aliases `b`. Similarly for record projections
+and pattern bindings.
 
-The result of an `if` aliases the union of the aliases of the components.
+The result of an `if` aliases the union of the aliases of its
+branches.
 
-The result of a `loop` aliases the initial values, as well as any aliases that the merge parameters may assume at the end of an iteration, computed to a fixed point.
+The result of a `loop` aliases the initial values as well as any
+aliases that the merge parameters may assume at the end of an
+iteration, computed to a fixed point.
 
-The aliases of a value returned from a function is the most interesting case, and depends on whether the return value is declared alias-free (with an asterisk `*`) or not. If it is declared alias-free, then it has no aliases. Otherwise, it aliases all arguments passed for non-consumed parameters.
+The aliases of a value returned from a function depend on whether the
+return value is declared alias-free (with `*`). If it is, the value
+has no aliases. Otherwise, it aliases all arguments passed for
+non-consumed parameters.
 
-### In-place Updates and Higher-Order Functions
+### In-place Updates and Higher-order Functions
 
-Consumption generally interacts inflexibly with higher-order functions. The issue is that we cannot control how many times a function argument is applied, or to what, so it is not safe to pass a function that consumes its argument. The following two conservative rules govern the interaction between consumption and higher-order functions:
+Consumption interacts inflexibly with higher-order functions: the
+language cannot control how many times a function argument is
+applied, or to what, so it is not safe to pass a function that
+consumes its argument. Two conservative rules govern this
+interaction:
 
-- In the expression `let p = e1 in ...`, if any in-place update takes place in the expression `e1`, the value bound by `p` must not be or contain a function.
-
-- A function that consumes one of its arguments may not be passed as a higher-order argument to another function.
+- In the expression `let p = e1 in …`, if any in-place update takes
+  place inside `e1`, the value bound by `p` must not be or contain a
+  function.
+- A function that consumes one of its arguments may not be passed as
+  a higher-order argument to another function.
 
 ---
 
