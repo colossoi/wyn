@@ -2944,13 +2944,10 @@ fn test_parse_def_rejects_short_circuit_operator_names() {
     // versions can't be short-circuiting (they evaluate both arguments).
     // Prefixed forms (e.g. `&&!`, `||+`) are allowed.
     // Unignore this test when the restriction is enforced.
-    expect_parse_error(
-        "def (&&)(x: bool, y: bool) bool = x",
-        |err| match err {
-            CompilerError::ParseError(_, _) => Ok(()),
-            other => Err(format!("expected parse error, got {:?}", other)),
-        },
-    );
+    expect_parse_error("def (&&)(x: bool, y: bool) bool = x", |err| match err {
+        CompilerError::ParseError(_, _) => Ok(()),
+        other => Err(format!("expected parse error, got {:?}", other)),
+    });
 }
 
 #[test]
@@ -3769,9 +3766,7 @@ fn test_parse_type_application_with_generic_args() {
     // should work; the parser currently does not handle the `<` token
     // in `parse_type_application` and the application form fails.
     // Unignore this test when the feature lands.
-    let program = parse_ok(
-        "type pair<[n]> = ([n]i32, [n]i32)\ndef x: pair<[2]> = ([1, 2], [3, 4])",
-    );
+    let program = parse_ok("type pair<[n]> = ([n]i32, [n]i32)\ndef x: pair<[2]> = ([1, 2], [3, 4])");
     assert_eq!(program.declarations.len(), 2);
 }
 
