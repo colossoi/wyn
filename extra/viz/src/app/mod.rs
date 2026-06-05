@@ -83,6 +83,11 @@ pub struct InteractivePipelineSpec {
     /// recognized host-uploaded names like `keyboard`) into a storage
     /// buffer, by reading `<storage_dir>/<binding_name>.bin`.
     pub storage_dir: Option<PathBuf>,
+    /// Maps a `#[texture]` binding name to an image file on disk
+    /// (`--texture NAME:FILE`). Each is decoded, mipmapped, and sampled
+    /// with `address_mode = repeat`. Empty for shaders with no image
+    /// textures.
+    pub texture_map: HashMap<String, PathBuf>,
     /// Flat little-endian `u32` index buffer file. When present, the
     /// host binds it and dispatches `draw_indexed` with
     /// `file_size / 4` indices in place of the non-indexed
@@ -407,21 +412,18 @@ impl State {
 
         if verbose {
             let info = adapter.get_info();
-            eprintln!("[viz pipeline-interactive] Adapter: {} ({:?})", info.name, info.backend);
+            eprintln!(
+                "[viz pipeline-interactive] Adapter: {} ({:?})",
+                info.name, info.backend
+            );
         }
         device.on_uncaptured_error(Box::new(|error| {
             eprintln!("\n[GPU validation error]\n{:?}\n", error);
         }));
 
         let size = window.inner_size();
-        let config = render::configure_surface(
-            &surface,
-            &device,
-            &adapter,
-            size.width,
-            size.height,
-            present_mode,
-        )?;
+        let config =
+            render::configure_surface(&surface, &device, &adapter, size.width, size.height, present_mode)?;
         let depth_view = create_depth_view(&device, &config);
 
         // Phase 6: resolve `--feedback ENTRY:READ=WRITE` specs against
@@ -500,13 +502,15 @@ impl State {
             Some((config.width, config.height)),
             &feedback_pairs,
         );
-        let host_textures = gpu::create_host_textures(&device, &spec.descriptor, &storage_textures);
-        let host_buffers = gpu::create_host_buffers(
+        let host_textures = gpu::create_host_textures(
             &device,
             &queue,
             &spec.descriptor,
-            spec.storage_dir.as_deref(),
+            &storage_textures,
+            &spec.texture_map,
         )?;
+        let host_buffers =
+            gpu::create_host_buffers(&device, &queue, &spec.descriptor, spec.storage_dir.as_deref())?;
 
         // Vertex attributes declared on a graphics pipeline (one buffer
         // per `#[location(n)]` attribute, file-loaded from
@@ -520,9 +524,7 @@ impl State {
 
         // Optional index buffer — flat little-endian u32. Indexed draws
         // when present; non-indexed `draw(0..vertex_count)` otherwise.
-        let index_buffer: Option<(wgpu::Buffer, u32)> = if let Some(path) =
-            spec.index_buffer.as_deref()
-        {
+        let index_buffer: Option<(wgpu::Buffer, u32)> = if let Some(path) = spec.index_buffer.as_deref() {
             let data = std::fs::read(path)
                 .with_context(|| format!("viz pipeline --index-buffer: reading {:?}", path))?;
             if data.len() % 4 != 0 {
@@ -544,7 +546,7 @@ impl State {
         } else {
             None
         };
-        let samplers = gpu::create_samplers(&device, &spec.descriptor);
+        let samplers = gpu::create_samplers(&device, &spec.descriptor, !spec.texture_map.is_empty());
         // Phase 4: Shadertoy-style uniforms (iResolution / iTime /
         // iMouse / iFrame). One buffer per `(set, binding)` declared by
         // any pipeline (graphics OR compute); same-slot declarations
@@ -829,7 +831,6 @@ impl State {
         })
     }
 
-
     fn resize(&mut self, size: PhysicalSize<u32>) {
         if size.width > 0 && size.height > 0 {
             self.config.width = size.width;
@@ -984,7 +985,6 @@ fn render_vf(
     }
     rpass.draw(0..3, 0..1);
 }
-
 
 /// Map a winit `KeyCode` to Shadertoy's row index. Shadertoy uses
 /// JavaScript keyCodes — printable keys = ASCII, named keys per a
@@ -1173,6 +1173,9 @@ fn render_pipeline(
                     },
                 );
             }
+            // File-backed images are static: uploaded + mipmapped once at
+            // allocation, never rewritten per frame.
+            gpu::HostTextureKind::ImageFile => {}
         }
     }
     // Push host-uploaded storage buffers (keyboard as 768 u32 entries,
