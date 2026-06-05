@@ -49,9 +49,14 @@ def vnoise(x: vec3f32) f32 =
 def mapTerrain(p0: vec3f32, iTime: f32) f32 =
   let p1 = p0 * 0.1 in
   let p = p1 with .xz = p1.xz * 0.6 in
-  let t = (0.5 + 0.15 * iTime) * 1.4 in
-  let f = 0.5 * vnoise(p * 1.00 + @[0.0, t, 0.0])
-        + 0.25 * vnoise(p * 2.02 + @[0.0, 2.0 * t, 0.0])
+  -- iq's stepped morph: hold the noise phase flat for most of each unit
+  -- interval, then smoothstep-snap it to the next state, so the terrain
+  -- rearranges in bursts rather than drifting continuously.
+  let tm = 0.5 + 0.15 * iTime in
+  let time = floor(tm) + smoothstep(0.7, 1.0, fract(tm)) in
+  let st = 1.4 * time in
+  let f = 0.5 * vnoise(p * 1.00 + @[0.0, st, 0.0])
+        + 0.25 * vnoise(p * 2.02 + @[0.0, 2.0 * st, 0.0])
         + 0.125 * vnoise(p * 4.01) in
   25.0 * f - 10.0
 
