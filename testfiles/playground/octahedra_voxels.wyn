@@ -1,0 +1,188 @@
+-- Truncated-octahedron voxel terrain — a "Minecraft" landscape whose voxels
+-- are truncated octahedra on the BCC lattice (so adjacent layers offset).
+--
+-- Data structures after Inigo Quilez's "Voxel Edges" / voxellines
+-- (https://iquilezles.org/articles/voxellines/): a per-cell occupancy `map`
+-- driven by an fbm `mapTerrain`, walked by a DDA `raycast`, then flat-shaded
+-- with neighbour-based ambient occlusion, edge wireframes and fog — but the
+-- voxel is a truncated octahedron (Voronoi cell of BCC), not a cube, so the
+-- DDA is the exact ray/polytope cell traversal from truncated_octahedra.wyn,
+-- and noise is procedural (no iChannel texture). Targets the B&W mode of the
+-- reference. The original GLSL is © Inigo Quilez (referenced, not copied).
+--
+-- Texture-free; runs in viz directly:
+--   viz run octahedra_voxels.spv --size 720x720
+
+open f32
+
+def BIG: f32 = 100000.0
+
+def vround(v: vec3f32) vec3f32 = vec.floor(v + @[0.5, 0.5, 0.5])
+
+-- Nearest BCC centre. BCC = 2Z³ ∪ (2Z³ + (1,1,1)).
+def cellCenter(p: vec3f32) vec3f32 =
+  let one = @[1.0, 1.0, 1.0] in
+  let a = vround(p * 0.5) * 2.0 in
+  let b = vround((p - one) * 0.5) * 2.0 + one in
+  if dot(p - a, p - a) < dot(p - b, p - b) then a else b
+
+------------------------------------------------------------
+-- Procedural value noise + fbm terrain (replaces iq's texture noise).
+------------------------------------------------------------
+def hash1(p: vec3f32) f32 = fract(sin(dot(p, @[127.1, 311.7, 74.7])) * 43758.5453)
+
+def vnoise(x: vec3f32) f32 =
+  let i = vec.floor(x) in
+  let f0 = vec.fract(x) in
+  let f = f0 * f0 * (3.0 - 2.0 * f0) in
+  let n000 = hash1(i + @[0.0, 0.0, 0.0]) in
+  let n100 = hash1(i + @[1.0, 0.0, 0.0]) in
+  let n010 = hash1(i + @[0.0, 1.0, 0.0]) in
+  let n110 = hash1(i + @[1.0, 1.0, 0.0]) in
+  let n001 = hash1(i + @[0.0, 0.0, 1.0]) in
+  let n101 = hash1(i + @[1.0, 0.0, 1.0]) in
+  let n011 = hash1(i + @[0.0, 1.0, 1.0]) in
+  let n111 = hash1(i + @[1.0, 1.0, 1.0]) in
+  mix(mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
+      mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y), f.z)
+
+def mapTerrain(p0: vec3f32, iTime: f32) f32 =
+  let p1 = p0 * 0.1 in
+  let p = p1 with .xz = p1.xz * 0.6 in
+  let t = (0.5 + 0.15 * iTime) * 1.4 in
+  let f = 0.5 * vnoise(p * 1.00 + @[0.0, t, 0.0])
+        + 0.25 * vnoise(p * 2.02 + @[0.0, 2.0 * t, 0.0])
+        + 0.125 * vnoise(p * 4.01) in
+  25.0 * f - 10.0
+
+-- Cell occupancy: solid where the terrain field dips below 0.5. The height
+-- term tilts it into a heightfield; cells near the camera (gro) are cleared
+-- so the fly-through never starts buried.
+def mapSolid(c: vec3f32, gro: vec3f32, iTime: f32) bool =
+  let f0 = mapTerrain(c, iTime) + 0.25 * c.y in
+  let f = if magnitude(gro - c) < 5.0 then 1.0 else f0 in
+  f < 0.5
+
+def solidI(c: vec3f32, gro: vec3f32, iTime: f32) f32 =
+  if mapSolid(c, gro, iTime) then 1.0 else 0.0
+
+------------------------------------------------------------
+-- Exact ray / truncated-octahedron cell test (7 slabs).
+------------------------------------------------------------
+def clipSlab(tin: f32, nrm: vec3f32, tout: f32, n: vec3f32, d: f32, o: vec3f32, rd: vec3f32)
+  (f32, vec3f32, f32) =
+  let denom = dot(n, rd) in
+  let no = dot(n, o) in
+  if abs(denom) < 0.0000001 then
+    if abs(no) > d then (BIG, nrm, 0.0 - BIG) else (tin, nrm, tout)
+  else
+    let ta = (0.0 - d - no) / denom in
+    let tb = (d - no) / denom in
+    let te = min(ta, tb) in
+    let tx = max(ta, tb) in
+    let (tin2, nrm2) = if te > tin then (te, normalize((0.0 - sign(denom)) * n)) else (tin, nrm) in
+    (tin2, nrm2, min(tout, tx))
+
+def rayCell(ro: vec3f32, rd: vec3f32, c: vec3f32, rc: f32, roo: f32) (f32, f32, vec3f32) =
+  let o = ro - c in
+  let (t1, n1, x1) = clipSlab(0.0 - BIG, @[0.0, 1.0, 0.0], BIG, @[1.0, 0.0, 0.0], rc, o, rd) in
+  let (t2, n2, x2) = clipSlab(t1, n1, x1, @[0.0, 1.0, 0.0], rc, o, rd) in
+  let (t3, n3, x3) = clipSlab(t2, n2, x2, @[0.0, 0.0, 1.0], rc, o, rd) in
+  let (t4, n4, x4) = clipSlab(t3, n3, x3, @[1.0, 1.0, 1.0], roo, o, rd) in
+  let (t5, n5, x5) = clipSlab(t4, n4, x4, @[1.0, 1.0, 0.0 - 1.0], roo, o, rd) in
+  let (t6, n6, x6) = clipSlab(t5, n5, x5, @[1.0, 0.0 - 1.0, 1.0], roo, o, rd) in
+  let (t7, n7, x7) = clipSlab(t6, n6, x6, @[0.0 - 1.0, 1.0, 1.0], roo, o, rd) in
+  (t7, x7, n7)
+
+-- DDA over the BCC lattice: step Voronoi-region to Voronoi-region; the first
+-- region whose cell is solid is the hit, at the face we crossed into it.
+-- Returns (hit, t, normal, cell-centre).
+def raycast(ro: vec3f32, rd: vec3f32, gro: vec3f32, iTime: f32) (bool, f32, vec3f32, vec3f32) =
+  let (_, _, hit, ht, hn, hc) =
+    loop (i, t, hit, ht, hn, hc) =
+      (0, 0.0, false, 0.0, @[0.0, 1.0, 0.0], @[0.0, 0.0, 0.0])
+    while i < 192 && !hit && t < 120.0 do
+      let c = cellCenter(ro + rd * (t + 0.001)) in
+      let (vin, vout, vn) = rayCell(ro, rd, c, 1.0, 1.5) in
+      if mapSolid(c, gro, iTime) then (i + 1, max(vin, 0.0), true, max(vin, 0.0), vn, c)
+      else (i + 1, vout + 0.002, false, ht, hn, hc)
+  in
+  (hit, ht, hn, hc)
+
+-- Cheap neighbour-occupancy AO: how many of the four cells sitting above the
+-- face (across its rim) are solid. (iq's voxellines AO, simplified for the
+-- truncated-octahedron face instead of a square.)
+def calcAO(pos: vec3f32, nor: vec3f32, gro: vec3f32, iTime: f32) f32 =
+  let up = if abs(nor.y) > 0.9 then @[1.0, 0.0, 0.0] else @[0.0, 1.0, 0.0] in
+  let t1 = normalize(cross(nor, up)) in
+  let t2 = cross(nor, t1) in
+  let b = pos + nor * 0.7 in
+  let occ = solidI(cellCenter(b + t1 * 1.2), gro, iTime)
+          + solidI(cellCenter(b - t1 * 1.2), gro, iTime)
+          + solidI(cellCenter(b + t2 * 1.2), gro, iTime)
+          + solidI(cellCenter(b - t2 * 1.2), gro, iTime) in
+  clamp(1.0 - 0.22 * occ, 0.2, 1.0)
+
+------------------------------------------------------------
+-- Fly-through camera path (after iq's `path`).
+------------------------------------------------------------
+def path(t: f32) vec3f32 =
+  let p = 100.0 * vec.sin(0.02 * t * @[1.0, 1.2] + @[0.1, 0.9])
+        + 50.0 * vec.sin(0.04 * t * @[1.3, 1.0] + @[1.0, 4.5]) in
+  @[p.x, 18.0 + 4.0 * sin(0.05 * t), p.y]
+
+------------------------------------------------------------
+-- Full-screen triangle vertex shader
+------------------------------------------------------------
+def verts: [3]vec4f32 =
+  [@[-1.0, -1.0, 0.0, 1.0],
+   @[3.0, -1.0, 0.0, 1.0],
+   @[-1.0, 3.0, 0.0, 1.0]]
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 = verts[vid]
+
+------------------------------------------------------------
+-- Fragment shader
+------------------------------------------------------------
+#[fragment]
+entry fragment_main(
+  #[uniform(set=1, binding=0)] iResolution: vec3f32,
+  #[uniform(set=1, binding=1)] iTime: f32,
+  #[builtin(position)] fragCoord: vec4f32
+) #[location(0)] vec4f32 =
+  let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
+  let p = (2.0 * fc - iResolution.xy) / iResolution.y in
+
+  -- Camera fly-through.
+  let time = 2.0 * iTime in
+  let ro = path(time) in
+  let ta = path(time + 5.0) - @[0.0, 6.0, 0.0] in
+  let cr = 0.2 * cos(0.1 * iTime) in
+  let cw = normalize(ta - ro) in
+  let cp = @[sin(cr), cos(cr), 0.0] in
+  let cu = normalize(cross(cw, cp)) in
+  let cv = normalize(cross(cu, cw)) in
+  let rd = normalize(p.x * cu + p.y * cv + 2.5 * cw) in
+
+  let lig = normalize(@[0.0 - 0.4, 0.3, 0.7]) in
+  let (hit, t, nor, _hc) = raycast(ro, rd, ro, iTime) in
+  let col =
+    if hit then
+      let pos = ro + rd * t in
+      let ao = calcAO(pos, nor, ro, iTime) in
+      -- B&W flat shading (key + sky + back fill), occluded.
+      let dif = clamp(dot(nor, lig), 0.0, 1.0) in
+      let sky = 0.5 + 0.5 * nor.y in
+      let bac = clamp(dot(nor, normalize(@[0.4, 0.0, 0.0 - 0.7])), 0.0, 1.0) in
+      let lin = 1.30 * dif + 0.55 * sky + 0.25 * bac + 0.18 in
+      let shade = lin * ao in
+      let fog = exp(0.0 - 0.020 * t) in
+      @[shade, shade, shade] * fog
+    else @[0.0, 0.0, 0.0]
+  in
+  -- vignette + gamma
+  let q = fc / iResolution.xy in
+  let vig = 0.5 + 0.5 * (16.0 * q.x * q.y * (1.0 - q.x) * (1.0 - q.y)) ** 0.1 in
+  let g = vec.pow(vec.clamp(col * vig, @[0.0, 0.0, 0.0], @[1.0, 1.0, 1.0]), @[0.4545, 0.4545, 0.4545]) in
+  @[g.x, g.y, g.z, 1.0]
