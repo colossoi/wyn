@@ -2,12 +2,11 @@
 //! `testpattern` modes: surface format selection, surface
 //! configuration, and the SPIR-V vs WGSL render-pipeline branches.
 
-
 use anyhow::{Result, anyhow};
 use wgpu::{
-    Adapter, BindGroup, Buffer, ColorTargetState, CompareFunction, DepthStencilState,
-    FragmentState, PipelineLayoutDescriptor, PresentMode, PrimitiveState, RenderPipeline, Surface,
-    SurfaceConfiguration, TextureFormat, TextureUsages, VertexState,
+    Adapter, BindGroup, Buffer, ColorTargetState, CompareFunction, DepthStencilState, FragmentState,
+    PipelineLayoutDescriptor, PresentMode, PrimitiveState, RenderPipeline, Surface, SurfaceConfiguration,
+    TextureFormat, TextureUsages, VertexState,
 };
 
 use crate::app::uniforms::build_test_pattern_uniforms;
@@ -70,7 +69,6 @@ pub fn configure_surface(
     surface.configure(device, &config);
     Ok(config)
 }
-
 
 /// Render pipeline for the embedded WGSL test pattern. Returns the
 /// pipeline alongside the resolution buffer + bind group it owns —
