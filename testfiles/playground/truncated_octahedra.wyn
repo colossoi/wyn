@@ -19,6 +19,11 @@ def GAP: f32 = 0.03      -- shrink each solid cell so a contact seam shows
 def BOUND: f32 = 4.0     -- block half-extent, as a box on cell-centre coords
 def BIG: f32 = 100000.0
 
+-- Camera zoom knobs:
+def CAM_DIST: f32 = 12.0   -- orbit radius (dolly the camera in/out)
+def CAM_HEIGHT: f32 = 5.5  -- camera height (how much it looks down)
+def CAM_FOCAL: f32 = 2.2   -- lens: higher = more zoomed-in (narrower FOV)
+
 def vround(v: vec3f32) vec3f32 = vec.floor(v + @[0.5, 0.5, 0.5])
 
 -- Nearest BCC centre. BCC = 2Z³ ∪ (2Z³ + (1,1,1)); the nearest centre is the
@@ -134,12 +139,12 @@ entry fragment_main(
   -- (origin), fixed height, so it rotates in place. Narrow FOV (focal 2.2)
   -- for an almost-orthographic, zoomed-out framing.
   let an = 0.2 * iTime in
-  let ro = @[12.0 * sin(an), 5.5, 12.0 * cos(an)] in
+  let ro = @[CAM_DIST * sin(an), CAM_HEIGHT, CAM_DIST * cos(an)] in
   let ta = @[0.0, 0.0, 0.0] in
   let ww = normalize(ta - ro) in
   let uu = normalize(cross(ww, @[0.0, 1.0, 0.0])) in
   let vv = cross(uu, ww) in
-  let rd = normalize(p.x * uu + p.y * vv + 2.2 * ww) in
+  let rd = normalize(p.x * uu + p.y * vv + CAM_FOCAL * ww) in
 
   -- Bound the whole block with one big box (reuse rayCell as a pure cube).
   let (btin, btout, _) = rayCell(ro, rd, @[0.0, 0.0, 0.0], BOUND + 2.0, BIG) in
