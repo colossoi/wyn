@@ -423,7 +423,7 @@ be statically determined by the caller.
 ### Grammar
 
 ```ebnf
-dec ::= val_bind | type_bind | mod_bind | mod_type_bind
+dec ::= def_bind | type_bind | mod_bind | mod_type_bind | entry_bind
       | "open" mod_exp
       | "import" stringlit
       | "local" dec
@@ -432,19 +432,34 @@ dec ::= val_bind | type_bind | mod_bind | mod_type_bind
 
 ### Description
 
-A Wyn module consists of a sequence of declarations. Files are also modules. Each declaration is processed in order, and a declaration can only refer to names bound by preceding declarations.
+A Wyn module consists of a sequence of declarations. Declarations are
+processed in order, and a declaration may refer only to names bound
+by preceding declarations — forward references are not permitted.
 
-Any names defined by a declaration inside a module are by default visible to users of that module (see Modules).
+The five binding forms — `def_bind`, `type_bind`, `mod_bind`,
+`mod_type_bind`, and `entry_bind` — bind values (including functions),
+types, modules, module types, and shader entry points respectively.
+Their syntax is detailed in the sections that follow.
 
-#### Declaration Types
+Names bound by a declaration inside a module are visible to users of
+the module by default (see Modules); the `local` modifier suppresses
+this.
 
-- **`open mod_exp`** brings names bound in `mod_exp` into the current scope. These names will also be visible to users of the module.
+#### Declaration Modifiers
 
-- **`local dec`** has the meaning of `dec`, but any names bound by `dec` will not be visible outside the module.
+- **`open mod_exp`** brings the names bound in `mod_exp` into the
+  current scope. They are also re-exported through the enclosing
+  module.
 
-- **`import "foo"`** is a shorthand for `local open import "foo"`, where the import is interpreted as a module expression (see Modules).
+- **`local dec`** binds the names defined by `dec` in the current
+  scope but hides them from users of the enclosing module.
 
-- **`#[attr] dec`** adds an attribute to a declaration (see Attributes).
+- **`import "foo"`** is shorthand for `local open` of the module
+  expression `import "foo"` (see Modules) — it pulls in another
+  file's exports without re-exporting them.
+
+- **`#[attr] dec`** attaches an attribute to the declaration it
+  precedes (see Attributes).
 
 ---
 
@@ -453,59 +468,98 @@ Any names defined by a declaration inside a module are by default visible to use
 ### Grammar
 
 ```ebnf
-val_bind ::= ["#[" attr "]"] ("def" | "let") (name | "(" symbol ")") type_param* pat* [":" type] "=" exp
-           | ["#[" attr "]"] ("def" | "let") pat symbol pat [":" type] "=" exp
+def_bind      ::= "def" def_name [generics] [def_signature] "=" exp
+def_name      ::= name | "(" symbol ")"
+def_signature ::= "(" param ("," param)* ")" type   -- function form
+                | ":" type                          -- typed constant
+param         ::= name ":" type
+generics      ::= "<" generic_param ("," generic_param)* ">"
+generic_param ::= "[" name "]" | UpperName
+
+entry_bind    ::= "entry" name "(" [entry_param ("," entry_param)*] ")"
+                  entry_return "=" exp
+entry_param   ::= ["#[" attr "]"] name ":" type
+entry_return  ::= type | "(" entry_output ("," entry_output)* ")"
+entry_output  ::= ["#[" attr "]"] type
 ```
+
+`UpperName` is an identifier whose first character is uppercase.
 
 ### Description
 
-Functions and constants must be defined before they are used. A function declaration must specify the name, parameters, and body of the function:
+A `def` declaration binds a value or function to a name at module
+scope. The body is an arbitrary expression that may use only names
+already in scope at the point of binding; forward references are
+not permitted, and functions may not be recursive.
+
+A `def` may take parameters and a return type, in which case it
+defines a function; without parameters it is a constant.
 
 ```wyn
-def name params...: rettype = body
+def gravity: f32 = 9.81
+def step(dt: f32, v: f32) f32 = v + gravity * dt
 ```
 
 #### Type Inference
 
-Hindley-Milner-style type inference is supported. A parameter may be given a type with the notation `(name: type)`. Functions may not be recursive. The sizes of the arguments can be constrained - see Size Types.
+Hindley-Milner-style type inference fills in argument and return
+types when context allows. Explicit annotations are required only
+when inference cannot determine a unique type. Sizes participate
+in the type system; see Size Types for the rules.
+
+```wyn
+def step(dt, v) = v + 9.81 * dt
+```
+
+Here `dt`, `v`, and the return type are all inferred as `f32`:
+`9.81` defaults to `f32`, the multiplication constrains `dt`, and
+the addition constrains `v`.
 
 #### Polymorphic Functions
 
-A function can be polymorphic by using type parameters, in the same way as for Type Abbreviations:
+A function may be polymorphic over types and sizes through the
+`<...>` generics list. Size parameters are written `[n]`; type
+parameters are uppercase identifiers:
 
 ```wyn
-def reverse [n] 't (xs: [n]t): [n]t = xs[::-1]
+def reverse<[n], A>(xs: [n]A) [n]A = ???
 ```
 
-Type parameters for a function do not need to cover the types of all parameters. The type checker will add more if necessary. For example, the following is well typed:
+Generics need not cover the type of every parameter. Any argument
+whose type isn't tied to a declared generic is given a fresh type
+variable by inference:
 
 ```wyn
-def pair 'a (x: a) y = (x, y)
+def pair<A>(x: A, y) = (x, y)
 ```
 
-A new type variable will be invented for the parameter `y`.
+A fresh type variable is invented for `y`.
 
 #### Type Parameter Resolution
 
-Shape and type parameters are not passed explicitly when calling functions, but are automatically derived. If an array value `v` is passed for a type parameter `t`, all other arguments passed of type `t` must have the same shape as `v`. For example, consider the following definition:
+Type and size parameters are inferred from arguments at call sites
+— they are not passed explicitly. If the same type parameter `A`
+appears in multiple parameter positions, all arguments bound to it
+must agree in both shape and element type. For example:
 
 ```wyn
-def pair 't (x: t) (y: t) = (x, y)
+def pair<A>(x: A, y: A) = (x, y)
 ```
 
-The application `pair [1] [2,3]` is ill-typed because the arrays have different shapes.
+`pair([1], [2, 3])` is ill-typed because the two arguments bind
+`A` to arrays of different sizes.
 
 #### Aliasing Restrictions
 
-To simplify the handling of in-place updates (see In-place Updates), the value returned by a function may not alias any global variables.
-
-#### Let Bindings
-
-`let` may not be used to define top-level bindings.
+To simplify the handling of in-place updates (see In-place
+Updates), the value returned by a function may not alias any
+global variables.
 
 #### Shader Entry Points
 
-Shader entry points are defined using the `entry` keyword with a `#[vertex]`, `#[fragment]`, or `#[compute]` attribute:
+A shader entry point is declared with the `entry` keyword. It may
+be annotated with a `#[vertex]`, `#[fragment]`, or `#[compute]`
+attribute identifying the pipeline stage:
 
 ```wyn
 #[vertex]
@@ -520,30 +574,19 @@ entry fragment_main() #[location(0)] vec4f32 =
 entry double(arr: []f32) []f32 = map(|x| x * 2.0, arr)
 ```
 
-**Entry Point Syntax:**
-- Parentheses are required, even for zero-argument entry points: `entry foo() ...`
-- Parameters must be simple identifiers with explicit type annotations: `name: type`
-- Pattern destructuring is not allowed in entry point parameters
-- Return type is required and comes after the parameter list (no arrow)
+Entry-point declarations differ from `def` in three ways:
 
-When the Wyn program is compiled, any `entry` declaration in the single file passed directly to the Wyn compiler will be exposed as a shader entry point. Entry points in files accessed via `import` are not considered entry points, but can still be called as normal functions.
+- Parameters require the `name: type` form; pattern destructuring
+  is not allowed.
+- Parameters and return positions accept attributes
+  (`#[builtin(...)]`, `#[location(n)]`, `#[storage]`, `#[uniform]`,
+  `#[texture]`, `#[sampler]`, `#[storage_image]`) that wire them to
+  GPU resources, built-ins, and inter-stage I/O.
+- An empty parameter list still requires the parentheses:
+  `entry foo() ret = ...`.
 
-**Entry Point Naming Restrictions:**
-The name of an entry point must not contain an apostrophe (`'`), even though that is normally permitted in Wyn identifiers.
-
----
-
-## Value Declarations
-
-### Description
-
-A named value/constant can be declared as follows:
-
-```wyn
-def name: type = definition
-```
-
-The definition can be an arbitrary expression, including function calls and other values, although they must be in scope before the value is defined. If the return type contains any anonymous sizes (see Size types), new existential sizes will be constructed for them.
+The name of an entry point must not contain an apostrophe (`'`),
+even though apostrophes are otherwise permitted in identifiers.
 
 ---
 
@@ -552,27 +595,31 @@ The definition can be an arbitrary expression, including function calls and othe
 ### Grammar
 
 ```ebnf
-type_bind  ::= ("type" | "type^" | "type~") name type_param* "=" type
-type_param ::= "[" name "]" | "'" name | "'~" name | "'^" name
+type_bind     ::= type_keyword name [generics] "=" type
+type_keyword  ::= "type" | "type~" | "type^"
+generics      ::= "<" generic_param ("," generic_param)* ">"
+generic_param ::= "[" name "]" | UpperName
 ```
 
 ### Description
 
-Type abbreviations function as shorthands for the purpose of documentation or brevity. After a type binding `type t1 = t2`, the name `t1` can be used as a shorthand for the type `t2`. Type abbreviations do not create distinct types: the types `t1` and `t2` are entirely interchangeable.
+A type abbreviation is a shorthand: after `type t1 = t2`, the name
+`t1` is interchangeable with the type `t2`. Type abbreviations do
+not introduce distinct types; the abbreviation and its definition
+denote the same type.
 
 ### Lifted Types
 
-If the right-hand side of a type contains existential sizes, it must be declared "size-lifted" with `type~`. If it (potentially) contains a function, it must be declared "fully lifted" with `type^`. A lifted type can also contain existential sizes.
-
-A size-lifted abbreviation hides an existential size behind the name:
+A type abbreviation must be marked **size-lifted** (`type~`) if its
+right-hand side contains existential sizes, and **fully lifted**
+(`type^`) if it (potentially) contains a function. A fully-lifted
+type may also contain existential sizes.
 
 ```wyn
 type~ bag = ?n. [n]i32
 
 def empty_bag: bag = []
 ```
-
-A fully-lifted abbreviation hides a function type:
 
 ```wyn
 type^ cmp = i32 -> i32 -> i32
@@ -582,51 +629,36 @@ def descending: cmp = |x: i32, y: i32| y - x
 ```
 
 **Restrictions:**
-- Lifted types cannot be put in arrays
-- Fully lifted types cannot be returned from conditional or loop expressions
-
-> **Implementation note.** The current compiler accepts the `type~` and
-> `type^` surface syntax and records the marker on every type
-> declaration, but the rest of the lifted-type machinery — checking that
-> the marker matches the RHS, propagating liftedness through type
-> applications, restricting type-parameter instantiation by liftedness
-> class (`'a` vs. `'~a` vs. `'^a`) — is in flux. The restriction
-> diagnostics fire today through generic shape checks (e.g. "function in
-> array position") rather than through liftedness audits, so error
-> messages may not yet point at the marker decision.
+- Lifted types cannot appear as array elements.
+- Fully-lifted types cannot be returned from a conditional or loop
+  expression.
 
 ### Type Parameters
 
-A type abbreviation can have zero or more parameters:
-
-#### Size Parameters
-
-A type parameter enclosed with square brackets is a size parameter, and can be used in the definition as an array size, or as a size argument to other type abbreviations. When passing an argument for a shape parameter, it must be enclosed in square brackets:
-
-```wyn
-type two_intvecs [n] = ([n]i32, [n]i32)
-
-def x: two_intvecs [2] = (iota 2, replicate 2 0)
-```
-
-When referencing a type abbreviation, size parameters work much like array sizes. Like sizes, they can be passed an anonymous size (`[]`). All size parameters must be used in the definition of the type abbreviation.
-
-#### Type Parameters
-
-A type parameter prefixed with a single quote is a type parameter. It is in scope as a type in the definition of the type abbreviation. Whenever the type abbreviation is used in a type expression, a type argument must be passed for the parameter. Type arguments need not be prefixed with single quotes:
+A type abbreviation may take size and/or type parameters via the
+`<...>` generics list. Size parameters are written `[n]` and stand
+in for array sizes; type parameters are uppercase identifiers and
+stand in for arbitrary types:
 
 ```wyn
-type two_vecs [n] 't = ([n]t, [n]t)
-type two_intvecs [n] = two_vecs [n] i32
-def x: two_vecs [2] i32 = (iota 2, replicate 2 0)
+type two_intvecs<[n]>  = ([n]i32, [n]i32)
+type two_vecs<[n], T>  = ([n]T,   [n]T)
 ```
 
-#### Lifted Type Parameters
+When applying a parameterised abbreviation, size arguments go in
+brackets (`<[2]>`) and type arguments are written bare (`<i32>`):
 
-- **Size-lifted type parameter**: prefixed with `'~`
-- **Fully lifted type parameter**: prefixed with `'^`
+```wyn
+def x: two_intvecs<[2]> = ([1, 2], [3, 4])
+def y: two_vecs<[2], i32> = ([1, 2], [3, 4])
+```
 
-These have the same rules and restrictions as lifted type abbreviations.
+All declared size parameters must appear in the definition.
+
+> **Note:** Explicit parametric type application at use sites is not
+> yet supported by the reference implementation; an abbreviation with
+> parameters can be declared but cannot currently be referenced with
+> explicit arguments. The behaviour above is the intended spec.
 
 ---
 
@@ -634,48 +666,73 @@ These have the same rules and restrictions as lifted type abbreviations.
 
 ### Description
 
-An infix operator is defined like an ordinary function, with the operator name enclosed in parentheses at the name position and the parameters following normally:
+An infix operator is defined like an ordinary function, with the
+operator name enclosed in parentheses at the name position and the
+operands listed as a single parameter list:
 
 ```wyn
-def (+^) (a: i32, b: i32) (c: i32, d: i32) = (a + c, b + d)
+def (+^)((a: i32, b: i32), (c: i32, d: i32)) = (a + c, b + d)
 ```
 
-Call sites use the operator in infix position: `(1, 2) +^ (3, 4)`. The parenthesized-name form is the only way to declare an operator.
+Call sites use the operator in infix position: `(1, 2) +^ (3, 4)`.
+The parenthesised-name form is the only way to declare an operator.
 
 ### Operator Names and Fixity
 
-A valid operator name is a non-empty sequence of characters chosen from the string `"+-*/%=!><&^"`. The fixity of an operator is determined by its first characters, which must correspond to a built-in operator. Thus, `+^` binds like `+`, whilst `*^` binds like `*`. The longest such prefix is used to determine fixity, so `>>=` binds like `>>`, not like `>`.
+A valid operator name is a non-empty sequence of characters chosen
+from the string `"+-*/%=!><&^|"`. The fixity of an operator is
+determined by its leading characters, which must correspond to a
+built-in operator. Thus `+^` binds like `+`, while `*^` binds like
+`*`. The longest such prefix wins, so `>>=` binds like `>>`, not
+like `>`.
 
 ### Restrictions
 
-It is not permitted to define operators with the names `&&` or `||` (although these as prefixes are accepted). This is because a user-defined version of these operators would not be short-circuiting. User-defined operators behave exactly like ordinary functions, except for being infix.
+It is not permitted to define operators with the names `&&` or `||`
+(although these as prefixes are accepted). A user-defined version of
+either would not be short-circuiting. User-defined operators behave
+exactly like ordinary functions, except for being infix.
 
 ### Shadowing Built-in Operators
 
-A built-in operator can be shadowed (i.e. a new `+` can be defined). This will result in the built-in polymorphic operator becoming inaccessible, except through the intrinsics module.
+A built-in operator may be shadowed (e.g. a new `+` can be defined).
+The built-in polymorphic operator then becomes inaccessible except
+through the intrinsics module.
 
 ---
 
 ## Expressions
 
-Expressions are the basic construct of any Wyn program. An expression has a statically determined type, and produces a value at runtime. Wyn is an eager/strict language ("call by value").
+Expressions are the basic construct of any Wyn program. An expression
+has a statically determined type and produces a value at runtime.
+Wyn is an eager/strict language ("call by value"). The basic elements
+of expressions are called atoms — for example literals and variables,
+plus the more complicated forms with their own productions in the
+grammar below.
 
-The basic elements of expressions are called atoms, for example literals and variables, but also more complicated forms.
+Some expression forms — notably the second-order array operators
+(`map`, `reduce`, `scan`, `filter`) — have parallel semantics. The
+compiler may but need not execute them in parallel; programs must not
+depend on a specific evaluation order beyond what the operator itself
+promises.
 
 ### Grammar
 
 ```ebnf
 atom        ::= literal
                 | qualname ("." fieldid)*
+                | qualname "(" [exp ("," exp)*] ")"
+                | qualname slice
                 | "(" ")"
                 | "(" exp ")" ("." fieldid)*
+                | "(" exp ")" "(" [exp ("," exp)*] ")"
+                | "(" exp ")" slice
                 | "(" exp ("," exp)+ [","] ")"
                 | "{" "}"
                 | "{" field ("," field)* [","] "}"
-                | qualname slice
-                | "(" exp ")" slice
                 | quals "." "(" exp ")"
                 | "[" exp ("," exp)* [","] "]"
+                | "@[" exp ("," exp)* [","] "]"
                 | "(" qualsymbol ")"
                 | "(" exp qualsymbol ")"
                 | "(" qualsymbol exp ")"
@@ -685,7 +742,6 @@ atom        ::= literal
 
 exp         ::= atom
                 | exp qualsymbol exp
-                | exp exp
                 | "!" exp
                 | "-" exp
                 | constructor [ "(" exp ("," exp)* [","] ")" ]
@@ -742,54 +798,55 @@ index       ::= exp [":" [exp]] [":" [exp]]
                 | [exp] [":" exp] ":" [exp]
 ```
 
-### Description
-
-Some of the built-in expression forms have parallel semantics, but it is not guaranteed that the the parallel constructs in Wyn are evaluated in parallel, especially if they are nested in complicated ways. Their purpose is to give the compiler as much freedom and information is possible, in order to enable it to maximise the efficiency of the generated code.
-
 ### Resolving Ambiguities
 
-The above grammar contains some ambiguities, which in the concrete implementation is resolved via a combination of lexer and grammar transformations. For ease of understanding, they are presented here in natural text.
+The grammar above contains ambiguities; they are resolved by the
+rules below.
 
-An expression `x.y` may either be a reference to the name `y` in the module `x`, or the field `y` in the record `x`. Modules and values occupy the same name space, so this is disambiguated by whether `x` is a value or module.
+An expression `x.y` is either a reference to the name `y` in the
+module `x`, or the field `y` in the record `x`. Modules and values
+occupy the same namespace, so this is disambiguated by whether `x` is
+a value or a module.
 
-A type ascription (`exp : type`) cannot appear as an array index, as it conflicts with the syntax for slicing.
+A type ascription (`exp : type`) cannot appear as an array index, as
+it conflicts with the syntax for slicing.
 
-In `f [x]`, there is an ambiguity between indexing the array `f` at position `x`, or calling the function `f` with the singleton array `x`. We resolve this the following way:
+An expression `(-x)` is parsed as the variable `x` negated and
+enclosed in parentheses, rather than an operator section partially
+applying the infix operator `-`.
 
-- If there is a space between `f` and the opening bracket, it is treated as a function application.
-- Otherwise, it is an array index operation.
-
-An expression `(-x)` is parsed as the variable `x` negated and enclosed in parentheses, rather than an operator section partially applying the infix operator `-`.
-
-Prefix operators bind more tightly than infix operators. Note that the only prefix operators are the builtin `!` and `-`, and more cannot be defined. In particular, a user-defined operator beginning with `!` binds as `!=`, as on the table below, not as the prefix operator `!`.
-
-Function and type application binds more tightly than infix operators.
+Prefix operators bind more tightly than infix operators. The only
+prefix operators are the built-in `!` and `-`; user-defined prefix
+operators are not supported. A user-defined operator beginning with
+`!` binds as the infix operator (e.g. `!=` row in the table below),
+not as the prefix `!`.
 
 Attributes bind less tightly than any other syntactic construct.
 
-A type application `pt [n]t` is parsed as an application of the type constructor `pt` to the size argument `[n]` and the type `t`. To pass a single array-typed parameter, enclose it in parens.
+The bodies of `let`, `if`, and `loop` extend as far to the right as
+possible.
 
-The bodies of `let`, `if`, and `loop` extend as far to the right as possible.
-
-The following table describes the precedence and associativity of infix operators in both expressions and type expressions. All operators in the same row have the same precedence. The rows are listed in increasing order of precedence. Note that not all operators listed here are used in expressions; nevertheless, they are still used for resolving ambiguities.
+The following table describes the precedence and associativity of
+infix operators in both expressions and type expressions. All
+operators in the same row have the same precedence. Rows are listed
+in increasing order of precedence. Not every operator listed is used
+in expressions; they remain in the table for ambiguity resolution.
 
 | Associativity | Operators |
 |---------------|-----------|
-| left | `,` |
-| left | `:`, `:>` |
-| left | `` `symbol` `` |
-| left | `\|\|` |
-| left | `&&` |
-| left | `<= >= > < == != ! =` |
-| left | `& ^ \|` |
-| left | `<< >> >>>` |
-| left | `+ -` |
-| left | `* / % // %%` |
-| left | `\|>` |
-| right | `<\|` |
+| left  | `,` |
+| left  | `:`, `:>` |
+| left  | `` `symbol` `` |
+| left  | `\|\|` |
+| left  | `&&` |
+| left  | `<= >= > < == != ! =` |
+| left  | `& ^ \|` |
+| left  | `<< >> >>>` |
+| left  | `+ -` |
+| left  | `* / % // %%` |
+| left  | `\|>` |
 | right | `->` |
-| left | `**` |
-| left | juxtaposition |
+| left  | `**` |
 
 ### Semantics of Simple Expressions
 

@@ -2938,6 +2938,42 @@ fn test_parse_rust_style_function_with_mixed_params() {
 }
 
 #[test]
+#[ignore = "rejection of `&&` / `||` as user-defined operator names not yet enforced (SPECIFICATION.md → User-Defined Operators)"]
+fn test_parse_def_rejects_short_circuit_operator_names() {
+    // The spec forbids redefining `&&` and `||` because user-defined
+    // versions can't be short-circuiting (they evaluate both arguments).
+    // Prefixed forms (e.g. `&&!`, `||+`) are allowed.
+    // Unignore this test when the restriction is enforced.
+    expect_parse_error(
+        "def (&&)(x: bool, y: bool) bool = x",
+        |err| match err {
+            CompilerError::ParseError(_, _) => Ok(()),
+            other => Err(format!("expected parse error, got {:?}", other)),
+        },
+    );
+}
+
+#[test]
+fn test_parse_def_rejects_juxtaposed_generic_params() {
+    // Futhark-style juxtaposed generics (`def f [n] 'a (x: a) = x`) are
+    // not Wyn syntax — only the `<[n], A>` angle-bracket form is.
+    expect_parse_error("def f [n] 'a (x: a) = x", |err| match err {
+        CompilerError::ParseError(_, _) => Ok(()),
+        other => Err(format!("expected parse error, got {:?}", other)),
+    });
+}
+
+#[test]
+fn test_parse_def_rejects_infix_operator_definition() {
+    // Defining an operator via infix position (`def x + y = x + y`) is
+    // not supported — operator defs use the prefix form `def (+) (x, y)`.
+    expect_parse_error("def x + y = x + y", |err| match err {
+        CompilerError::ParseError(_, _) => Ok(()),
+        other => Err(format!("expected parse error, got {:?}", other)),
+    });
+}
+
+#[test]
 fn test_parse_rust_style_lambda_single_param() {
     // New syntax: |x| body
     let decl = single_decl("def f = |x| x + 1");
@@ -3386,6 +3422,17 @@ fn test_parse_existential_type_multiple_vars() {
 }
 
 #[test]
+fn test_parse_existential_rejects_bracketed_size_names() {
+    // Existential size names are bare identifiers, not bracketed: the
+    // syntax is `?k. [k]i32`, NOT `?[k]. [k]i32` (the latter looks
+    // plausible by analogy with the array dim syntax but is rejected).
+    expect_parse_error("def f(x: i32) ?[k]. [k]i32 = ???", |err| match err {
+        CompilerError::ParseError(_, _) => Ok(()),
+        other => Err(format!("expected parse error, got {:?}", other)),
+    });
+}
+
+#[test]
 fn test_numeric_field_access() {
     // Numeric field access like t.0 for tuple indexing
     let src = "def x(t: (i32, i32)) i32 = t.0";
@@ -3700,4 +3747,58 @@ fn test_parse_type_bind_fully_lifted_with_type_params() {
     };
     assert_eq!(tb.lifting, Some(crate::ast::TypeLifting::FullyLifted));
     assert_eq!(tb.type_params.len(), 1);
+}
+
+#[test]
+fn test_parse_type_bind_with_size_param_only() {
+    // A type abbreviation parameterised by a size only (no type params).
+    let src = "type two_intvecs<[n]> = ([n]i32, [n]i32)";
+    let program = parse_ok(src);
+    let crate::ast::Declaration::TypeBind(tb) = &program.declarations[0] else {
+        panic!("expected TypeBind");
+    };
+    assert_eq!(tb.name, "two_intvecs");
+    assert_eq!(tb.type_params.len(), 1);
+}
+
+#[test]
+#[ignore = "explicit parametric type application at use sites not yet implemented (SPECIFICATION.md → Type Abbreviations)"]
+fn test_parse_type_application_with_generic_args() {
+    // A parameterised type abbreviation referenced with explicit
+    // arguments — `pair<[2]>` in type position. The spec says this
+    // should work; the parser currently does not handle the `<` token
+    // in `parse_type_application` and the application form fails.
+    // Unignore this test when the feature lands.
+    let program = parse_ok(
+        "type pair<[n]> = ([n]i32, [n]i32)\ndef x: pair<[2]> = ([1, 2], [3, 4])",
+    );
+    assert_eq!(program.declarations.len(), 2);
+}
+
+#[test]
+fn test_parse_slice_dotdot_form() {
+    // Slice uses the `..` token; both bounds optional.
+    parse_ok("def f(xs: []i32) []i32 = xs[1..3]");
+    parse_ok("def g(xs: []i32) []i32 = xs[..3]");
+    parse_ok("def h(xs: []i32) []i32 = xs[1..]");
+    parse_ok("def i(xs: []i32) []i32 = xs[..]");
+}
+
+#[test]
+#[ignore = "Python-style slice `a[i:j:s]` (with optional step) is in the spec as future work (SPECIFICATION.md → Expressions: a[i:j:s]); parser currently only accepts `a[i..j]`"]
+fn test_parse_slice_colon_syntax() {
+    // The spec's `a[i:j]` colon-separated slicing form, including the
+    // step variant `a[i:j:s]`. Unignore once the parser accepts it.
+    parse_ok("def f(xs: []i32) []i32 = xs[1:3]");
+    parse_ok("def g(xs: []i32) []i32 = xs[1:3:2]");
+    parse_ok("def h(xs: []i32) []i32 = xs[::-1]");
+}
+
+#[test]
+fn test_parse_array_index_rejects_comma_separated_indices() {
+    // Multi-dimensional indexing is `a[i][j]`, not `a[i, j]`.
+    expect_parse_error("def f(xs: [3][2]i32) i32 = xs[0, 1]", |err| match err {
+        CompilerError::ParseError(_, _) => Ok(()),
+        other => Err(format!("expected parse error, got {:?}", other)),
+    });
 }
