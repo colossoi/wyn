@@ -106,17 +106,26 @@ def shadowed(ro: vec3f32, rd: vec3f32, tmax: f32) bool =
   in
   blk
 
--- Soft shadow: average a small cone of occlusion rays (centre + 4 around) so
--- the shadow edge gets a penumbra instead of a hard line. `r` ≈ cone radius.
+-- Soft shadow: average a cone of occlusion rays (centre + an 8-ray ring) so
+-- the shadow edge gets a wide, smooth penumbra. `r` ≈ cone half-angle (rad);
+-- larger = softer. The penumbra widens with occluder distance, as it should.
 def softShadow(o: vec3f32, rd: vec3f32, tmax: f32, r: f32) f32 =
-  let t1 = r * normalize(cross(rd, @[0.07, 1.0, 0.13])) in
-  let t2 = r * cross(normalize(cross(rd, @[0.07, 1.0, 0.13])), rd) in
+  let a = normalize(cross(rd, @[0.07, 1.0, 0.13])) in
+  let b = cross(a, rd) in
+  let u = a * r in
+  let v = b * r in
+  let w = (a + b) * (0.7071 * r) in
+  let z = (a - b) * (0.7071 * r) in
   let s0 = if shadowed(o, rd, tmax) then 0.0 else 1.0 in
-  let s1 = if shadowed(o, normalize(rd + t1), tmax) then 0.0 else 1.0 in
-  let s2 = if shadowed(o, normalize(rd - t1), tmax) then 0.0 else 1.0 in
-  let s3 = if shadowed(o, normalize(rd + t2), tmax) then 0.0 else 1.0 in
-  let s4 = if shadowed(o, normalize(rd - t2), tmax) then 0.0 else 1.0 in
-  (s0 + s1 + s2 + s3 + s4) * 0.2
+  let s1 = if shadowed(o, normalize(rd + u), tmax) then 0.0 else 1.0 in
+  let s2 = if shadowed(o, normalize(rd - u), tmax) then 0.0 else 1.0 in
+  let s3 = if shadowed(o, normalize(rd + v), tmax) then 0.0 else 1.0 in
+  let s4 = if shadowed(o, normalize(rd - v), tmax) then 0.0 else 1.0 in
+  let s5 = if shadowed(o, normalize(rd + w), tmax) then 0.0 else 1.0 in
+  let s6 = if shadowed(o, normalize(rd - w), tmax) then 0.0 else 1.0 in
+  let s7 = if shadowed(o, normalize(rd + z), tmax) then 0.0 else 1.0 in
+  let s8 = if shadowed(o, normalize(rd - z), tmax) then 0.0 else 1.0 in
+  (s0 + s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8) / 9.0
 
 def hash3(p: vec3f32) vec3f32 =
   let q = @[dot(p, @[127.1, 311.7, 74.7]),
@@ -174,8 +183,8 @@ entry fragment_main(
         -- square-face axes or the (1,1,1) hex-face diagonals), each soft-shadowed.
         let lig1 = normalize(@[0.62, 0.71, 0.34]) in
         let lig2 = normalize(@[0.0 - 0.55, 0.52, 0.0 - 0.66]) in
-        let s1 = softShadow(pos + nor * 0.01, lig1, 18.0, 0.06) in
-        let s2 = softShadow(pos + nor * 0.01, lig2, 18.0, 0.06) in
+        let s1 = softShadow(pos + nor * 0.01, lig1, 18.0, 0.18) in
+        let s2 = softShadow(pos + nor * 0.01, lig2, 18.0, 0.18) in
         let d1 = max(dot(nor, lig1), 0.0) * s1 in
         let d2 = max(dot(nor, lig2), 0.0) * s2 in
         let sky = 0.5 + 0.5 * nor.y in
