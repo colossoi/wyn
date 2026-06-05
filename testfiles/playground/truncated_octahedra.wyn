@@ -4,16 +4,17 @@
 -- (BCC) lattice, so the space-filling packing is rendered by domain-folding
 -- each point onto its nearest BCC centre and evaluating one cell's SDF: the
 -- intersection of a cube (its 6 square faces) and an octahedron (its 8
--- hexagonal faces). A finite cluster — cells whose centre lies within BOUND —
--- is raymarched, coloured per cell, on a near-white background, reproducing
--- the Wikipedia "truncated octahedra tiling space" illustration.
+-- hexagonal faces). A finite rectangular block of complete cells is
+-- raymarched, hash-coloured per cell, lit by one top light with soft shadows
+-- and ambient occlusion — after Wikipedia's "truncated octahedra tiling
+-- space" illustration (viewed near-head-on so the cells form a grid).
 --
 -- Texture-free; runs in viz directly:
 --   viz run truncated_octahedra.spv --size 720x720
 
 open f32
 
-def GAP: f32 = 0.035    -- shrink each cell so the seams between solids show
+def GAP: f32 = 0.02     -- shrink each cell so a thin contact seam shows
 def BOUND: f32 = 4.0    -- cluster half-extent, as a box on cell-centre coords
 
 def vround(v: vec3f32) vec3f32 = vec.floor(v + @[0.5, 0.5, 0.5])
@@ -29,18 +30,18 @@ def cellCenter(p: vec3f32) vec3f32 =
   if dot(da, da) < dot(db, db) then a else b
 
 -- Truncated-octahedron cell SDF: cube ∩ octahedron, each a normalised
--- half-space distance (so the hex faces stay regular). With this BCC, the
--- square faces sit at |x|≤1 and the hex faces at |x|+|y|+|z|≤1.5.
+-- half-space distance (so the hex faces stay regular). The square faces sit
+-- at |x|≤1 and the hex faces at |x|+|y|+|z|≤1.5.
 def cellSDF(local: vec3f32) f32 =
   let q = vec.abs(local) in
   let boxd = max(max(q.x, q.y), q.z) - (1.0 - GAP) in
   let octd = (q.x + q.y + q.z - 1.5 * (1.0 - GAP)) * 0.57735027 in
   max(boxd, octd)
 
--- Returns (distance, cell centre). The box term on the centre is constant
--- within a cell, so it removes whole cells whose centre falls outside a
--- rectangular block (complete truncated octahedra, stacked in flat layers,
--- rather than a sphere-clipped blob).
+-- (distance, cell centre). The box term on the centre is constant within a
+-- cell, so it removes whole cells outside the block (complete cells, stacked
+-- in flat layers). The field is discontinuous at that removal boundary — the
+-- marcher clamps its step near the block to cope.
 def sceneMap(p: vec3f32) (f32, vec3f32) =
   let c = cellCenter(p) in
   let bnd = max(max(abs(c.x), abs(c.y)), abs(c.z)) - BOUND in
@@ -52,12 +53,32 @@ def sceneDist(p: vec3f32) f32 =
   d
 
 def calcNormal(p: vec3f32) vec3f32 =
-  let e = 0.0008 in
+  let e = 0.0025 in
   let k0 = @[1.0, 0.0 - 1.0, 0.0 - 1.0] in
   let k1 = @[0.0 - 1.0, 0.0 - 1.0, 1.0] in
   let k2 = @[0.0 - 1.0, 1.0, 0.0 - 1.0] in
   let k3 = @[1.0, 1.0, 1.0] in
   normalize(k0 * sceneDist(p + k0 * e) + k1 * sceneDist(p + k1 * e) + k2 * sceneDist(p + k2 * e) + k3 * sceneDist(p + k3 * e))
+
+-- Soft shadow toward the light (iq).
+def softShadow(ro: vec3f32, rd: vec3f32) f32 =
+  let (_, _, res) =
+    loop (i, t, res) = (0, 0.02, 1.0) while i < 64 && t < 9.0 && res > 0.02 do
+      let d = sceneDist(ro + rd * t) in
+      let res2 = min(res, 14.0 * d / t) in
+      (i + 1, t + clamp(d, 0.01, 0.2), res2)
+  in
+  clamp(res, 0.0, 1.0)
+
+-- Cheap ambient occlusion (iq): how fast the field rises along the normal.
+def calcAO(pos: vec3f32, nor: vec3f32) f32 =
+  let (_, occ, _) =
+    loop (i, occ, sca) = (0, 0.0, 1.0) for k < 5 do
+      let h = 0.012 + 0.12 * f32.i32(k) in
+      let d = sceneDist(pos + nor * h) in
+      (k, occ + (h - d) * sca, sca * 0.93)
+  in
+  clamp(1.0 - 1.6 * occ, 0.0, 1.0)
 
 def hash3(p: vec3f32) vec3f32 =
   let q = @[dot(p, @[127.1, 311.7, 74.7]),
@@ -88,25 +109,31 @@ entry fragment_main(
   let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
   let p = (2.0 * fc - iResolution.xy) / iResolution.y in
 
-  -- Orbit camera, raised so the horizontal layers read clearly.
-  let an = 0.2 * iTime in
-  let ro = @[9.5 * cos(an), 6.5, 9.5 * sin(an)] in
-  let ta = @[0.0, 0.0, 0.0] in
+  -- Near-head-on camera (look down +z so cells read as a grid), gentle sway,
+  -- narrow FOV (focal 2.2) for an almost-orthographic, zoomed-out framing.
+  let an = 0.18 * iTime in
+  let ro = @[4.5 * sin(an), 5.0, 12.5 * cos(an)] in
+  let ta = @[0.0, 0.4, 0.0] in
   let ww = normalize(ta - ro) in
   let uu = normalize(cross(ww, @[0.0, 1.0, 0.0])) in
   let vv = cross(uu, ww) in
-  let rd = normalize(p.x * uu + p.y * vv + 1.7 * ww) in
+  let rd = normalize(p.x * uu + p.y * vv + 2.2 * ww) in
 
-  -- Sphere-trace the honeycomb. The domain-fold + cell-removal term make the
-  -- field discontinuous at cell boundaries, so the step is clamped (≤ 0.35,
-  -- below the cell thickness) — otherwise the march overshoots a thin front
-  -- wall and hits a cell's unlit back interior.
-  let (_, t, hit) =
-    loop (i, t, hit) = (0, 0.0, false) while i < 256 && !hit && t < 60.0 do
-      let d = sceneDist(ro + rd * t) in
-      if d < 0.0006 * t + 0.0005 then (i + 1, t, true)
-      else (i + 1, t + clamp(d, 0.012, 0.35), false)
+  -- Sphere-trace. Far from the block the true distance steps fast; once close
+  -- (|p|<7.5) the step is clamped (the removal term makes the field
+  -- discontinuous there, so big steps would punch through a wall).
+  let (_, t0, hit) =
+    loop (i, t, hit) = (0, 0.0, false) while i < 260 && !hit && t < 60.0 do
+      let pc = ro + rd * t in
+      let d = sceneDist(pc) in
+      let stepd = if magnitude(pc) < 7.5 then clamp(d, 0.006, 0.12) else max(d * 0.8, 0.12) in
+      if d < 0.0008 * t + 0.0005 then (i + 1, t, true)
+      else (i + 1, t + stepd, false)
   in
+
+  -- Refine onto the iso-surface so the normal isn't quantised by the step
+  -- (this is what removes the concentric-arc banding).
+  let t = loop tr = t0 for r < 4 do tr + sceneDist(ro + rd * tr) in
 
   let bg = @[0.97, 0.975, 0.99] in
   let col =
@@ -114,17 +141,26 @@ entry fragment_main(
       let pos = ro + rd * t in
       let nor = calcNormal(pos) in
       let (_, c) = sceneMap(pos) in
-      -- Per-cell colour from a hash of the cell centre.
+      -- Muted per-cell colour from a hash of the cell centre.
       let h = hash3(c) in
-      let base = 0.55 + 0.42 * vec.cos(6.2831 * h.x + @[0.0, 2.1, 4.2]) in
-      -- Phong: one directional light (diffuse N·L) + ambient + specular.
-      let lig = normalize(@[0.5, 0.75, 0.42]) in
-      let dif = max(dot(nor, lig), 0.0) in
-      let amb = 0.28 in
-      let hal = normalize(lig - rd) in
-      let spe = dif * max(dot(nor, hal), 0.0) ** 40.0 in
-      let lit = base * (amb + (1.0 - amb) * dif) + 0.3 * @[1.0, 1.0, 1.0] * spe in
-      mix(lit, bg, smoothstep(16.0, 36.0, t))
+      let base = 0.46 + 0.30 * vec.cos(6.2831 * h.x + @[0.0, 2.1, 4.2]) in
+      -- Two lights, each soft-shadowed, plus ambient occlusion: a warm key
+      -- from upper-right and a cooler fill from the upper-left, matching the
+      -- reference's two bright faces per cell.
+      let lig1 = normalize(@[0.55, 0.80, 0.40]) in
+      let lig2 = normalize(@[0.0 - 0.60, 0.55, 0.30]) in
+      let sh1 = softShadow(pos + nor * 0.015, lig1) in
+      let sh2 = softShadow(pos + nor * 0.015, lig2) in
+      let dif1 = max(dot(nor, lig1), 0.0) * sh1 in
+      let dif2 = max(dot(nor, lig2), 0.0) * sh2 in
+      let ao = calcAO(pos, nor) in
+      let sky = 0.5 + 0.5 * nor.y in
+      let amb = (0.22 + 0.16 * sky) * ao in
+      let hal = normalize(lig1 - rd) in
+      let spe = dif1 * max(dot(nor, hal), 0.0) ** 40.0 in
+      let lit = base * (amb + 0.85 * dif1 * @[1.05, 1.0, 0.9] + 0.45 * dif2 * @[0.85, 0.92, 1.05])
+              + 0.20 * @[1.0, 1.0, 1.0] * spe in
+      mix(lit, bg, smoothstep(18.0, 40.0, t))
     else bg
   in
   let g = vec.pow(vec.clamp(col, @[0.0, 0.0, 0.0], @[1.0, 1.0, 1.0]), @[0.4545, 0.4545, 0.4545]) in
