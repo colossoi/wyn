@@ -1,0 +1,133 @@
+-- Truncated octahedra tiling space (the bitruncated cubic honeycomb).
+--
+-- The truncated octahedron is the Voronoi cell of the body-centred cubic
+-- (BCC) lattice, so the space-filling packing is rendered by domain-folding
+-- each point onto its nearest BCC centre and evaluating one cell's SDF: the
+-- intersection of a cube (its 6 square faces) and an octahedron (its 8
+-- hexagonal faces). A finite cluster — cells whose centre lies within BOUND —
+-- is raymarched, coloured per cell, on a near-white background, reproducing
+-- the Wikipedia "truncated octahedra tiling space" illustration.
+--
+-- Texture-free; runs in viz directly:
+--   viz run truncated_octahedra.spv --size 720x720
+
+open f32
+
+def GAP: f32 = 0.06     -- shrink each cell so the seams between solids show
+def BOUND: f32 = 3.5    -- cluster radius, measured in cell-centre distance
+
+def vround(v: vec3f32) vec3f32 = vec.floor(v + @[0.5, 0.5, 0.5])
+
+-- Nearest BCC centre. BCC = 2Z³ ∪ (2Z³ + (1,1,1)); the nearest centre is the
+-- nearer of the nearest point in each cubic sublattice.
+def cellCenter(p: vec3f32) vec3f32 =
+  let one = @[1.0, 1.0, 1.0] in
+  let a = vround(p * 0.5) * 2.0 in
+  let b = vround((p - one) * 0.5) * 2.0 + one in
+  let da = p - a in
+  let db = p - b in
+  if dot(da, da) < dot(db, db) then a else b
+
+-- Truncated-octahedron cell SDF: cube ∩ octahedron, each a normalised
+-- half-space distance (so the hex faces stay regular). With this BCC, the
+-- square faces sit at |x|≤1 and the hex faces at |x|+|y|+|z|≤1.5.
+def cellSDF(local: vec3f32) f32 =
+  let q = vec.abs(local) in
+  let boxd = max(max(q.x, q.y), q.z) - (1.0 - GAP) in
+  let octd = (q.x + q.y + q.z - 1.5 * (1.0 - GAP)) * 0.57735027 in
+  max(boxd, octd)
+
+-- Returns (distance, cell centre). The `magnitude(c) - BOUND` term is constant
+-- within a cell, so it removes whole cells whose centre is outside the cluster
+-- (keeping complete truncated octahedra rather than slicing them).
+def sceneMap(p: vec3f32) (f32, vec3f32) =
+  let c = cellCenter(p) in
+  let d = max(cellSDF(p - c), magnitude(c) - BOUND) in
+  (d, c)
+
+def sceneDist(p: vec3f32) f32 =
+  let (d, _) = sceneMap(p) in
+  d
+
+def calcNormal(p: vec3f32) vec3f32 =
+  let e = 0.0008 in
+  let k0 = @[1.0, 0.0 - 1.0, 0.0 - 1.0] in
+  let k1 = @[0.0 - 1.0, 0.0 - 1.0, 1.0] in
+  let k2 = @[0.0 - 1.0, 1.0, 0.0 - 1.0] in
+  let k3 = @[1.0, 1.0, 1.0] in
+  normalize(k0 * sceneDist(p + k0 * e) + k1 * sceneDist(p + k1 * e) + k2 * sceneDist(p + k2 * e) + k3 * sceneDist(p + k3 * e))
+
+def hash3(p: vec3f32) vec3f32 =
+  let q = @[dot(p, @[127.1, 311.7, 74.7]),
+            dot(p, @[269.5, 183.3, 246.1]),
+            dot(p, @[113.5, 271.9, 124.6])] in
+  vec.fract(vec.sin(q) * 43758.5453)
+
+------------------------------------------------------------
+-- Full-screen triangle vertex shader
+------------------------------------------------------------
+def verts: [3]vec4f32 =
+  [@[-1.0, -1.0, 0.0, 1.0],
+   @[3.0, -1.0, 0.0, 1.0],
+   @[-1.0, 3.0, 0.0, 1.0]]
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 = verts[vid]
+
+------------------------------------------------------------
+-- Fragment shader
+------------------------------------------------------------
+#[fragment]
+entry fragment_main(
+  #[uniform(set=1, binding=0)] iResolution: vec3f32,
+  #[uniform(set=1, binding=1)] iTime: f32,
+  #[builtin(position)] fragCoord: vec4f32
+) #[location(0)] vec4f32 =
+  let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
+  let p = (2.0 * fc - iResolution.xy) / iResolution.y in
+
+  -- Orbit camera looking at the cluster.
+  let an = 0.25 * iTime in
+  let ro = @[8.0 * cos(an), 4.5, 8.0 * sin(an)] in
+  let ta = @[0.0, 0.0, 0.0] in
+  let ww = normalize(ta - ro) in
+  let uu = normalize(cross(ww, @[0.0, 1.0, 0.0])) in
+  let vv = cross(uu, ww) in
+  let rd = normalize(p.x * uu + p.y * vv + 1.7 * ww) in
+
+  -- Sphere-trace the honeycomb.
+  let (_, t, hit) =
+    loop (i, t, hit) = (0, 0.0, false) while i < 160 && !hit && t < 40.0 do
+      let d = sceneDist(ro + rd * t) in
+      if d < 0.0008 * t + 0.0004 then (i + 1, t, true)
+      else (i + 1, t + d, false)
+  in
+
+  let bg = @[0.97, 0.975, 0.99] in
+  let col =
+    if hit then
+      let pos = ro + rd * t in
+      let nor = calcNormal(pos) in
+      let (_, c) = sceneMap(pos) in
+      -- Per-cell colour from a hash of the cell centre.
+      let h = hash3(c) in
+      let base = 0.55 + 0.42 * vec.cos(6.2831 * h.x + @[0.0, 2.1, 4.2]) in
+      -- Lighting: key + sky fill + back + ambient, plus a specular and rim.
+      let lig = normalize(@[0.5, 0.8, 0.35]) in
+      let dif = max(dot(nor, lig), 0.0) in
+      let sky = 0.5 + 0.5 * nor.y in
+      let bac = max(dot(nor, normalize(@[0.0 - 0.5, 0.2, 0.0 - 0.4])), 0.0) in
+      let lin = 1.30 * dif * @[1.0, 0.96, 0.86]
+              + 0.55 * sky * @[0.50, 0.62, 0.78]
+              + 0.30 * bac * @[0.70, 0.70, 0.70]
+              + 0.18 * @[1.0, 1.0, 1.0] in
+      let hal = normalize(lig - rd) in
+      let spe = dif * max(dot(nor, hal), 0.0) ** 32.0 in
+      let shaded = base * lin + 0.4 * @[1.0, 1.0, 1.0] * spe in
+      let fre = (1.0 - max(dot(nor, 0.0 - rd), 0.0)) ** 5.0 in
+      let lit = shaded + 0.15 * fre * @[1.0, 1.0, 1.0] in
+      mix(lit, bg, smoothstep(10.0, 30.0, t))
+    else bg
+  in
+  let g = vec.pow(vec.clamp(col, @[0.0, 0.0, 0.0], @[1.0, 1.0, 1.0]), @[0.4545, 0.4545, 0.4545]) in
+  @[g.x, g.y, g.z, 1.0]
