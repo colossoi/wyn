@@ -2225,23 +2225,30 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     // back to a mangled user-function call.
                     let raw_strs: Result<Vec<_>> = args.iter().map(|a| self.get_value(*a)).collect();
                     let raw_strs = raw_strs?;
-                    // Structural dispatch first: if this name is registered
-                    // in `impl_source`, route through the `BuiltinLowering` so
-                    // the qualifier prefix doesn't matter (`f32.cos`,
-                    // `vec.cos`, `_w_intrinsic_cos` all share a `PrimOp`).
-                    if let Some(lowered) =
-                        self.try_lower_via_impl_source(func, &raw_strs, result_ty.as_ref())?
-                    {
-                        return Ok(lowered);
-                    }
-                    if let Some(lowered) = try_lower_wgsl_builtin(func, &raw_strs) {
-                        return Ok(lowered);
+                    // A user-defined function shadows any same-named builtin:
+                    // resolve the callee first and only fall back to builtin
+                    // dispatch when no user function owns this name. Without
+                    // this, a user `def step(...)` would be hijacked by the
+                    // builtin `step` lowering (matched purely by surface name).
+                    let callee = self.ctx.program.functions.iter().find(|f| f.name == *func);
+                    if callee.is_none() {
+                        // Structural dispatch: if this name is registered
+                        // in `impl_source`, route through the `BuiltinLowering`
+                        // so the qualifier prefix doesn't matter (`f32.cos`,
+                        // `vec.cos`, `_w_intrinsic_cos` all share a `PrimOp`).
+                        if let Some(lowered) =
+                            self.try_lower_via_impl_source(func, &raw_strs, result_ty.as_ref())?
+                        {
+                            return Ok(lowered);
+                        }
+                        if let Some(lowered) = try_lower_wgsl_builtin(func, &raw_strs) {
+                            return Ok(lowered);
+                        }
                     }
                     // Mirror `lower_function`: drop arguments whose parameter
                     // slot on the callee is a view-array. The callee's
                     // signature has those params filtered out, so we skip
                     // the corresponding args here too.
-                    let callee = self.ctx.program.functions.iter().find(|f| f.name == *func);
                     let arg_strs: Vec<String> = match callee {
                         Some(f) => args
                             .iter()
@@ -2256,11 +2263,33 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     Ok(format!("{}({})", mangled, arg_strs.join(", ")))
                 }
 
-                crate::op::OpTag::Intrinsic { id, overload_idx: _ } => {
+                crate::op::OpTag::Intrinsic { id, overload_idx } => {
                     let args: &[ValueRef] = operands;
                     let known = catalog().known();
                     let arg_strs: Result<Vec<_>> = args.iter().map(|a| self.get_value(*a)).collect();
                     let arg_strs = arg_strs?;
+
+                    // Honor the type-checker's overload choice for the
+                    // operand-splatting ext-insts (`smoothstep(scalar,
+                    // scalar, vec)`, `step(scalar, vec)`): mirror the SPIR-V
+                    // backend by splatting the named scalar operands to the
+                    // result vector width before emitting the same WGSL call.
+                    // The chosen overload's scheme guarantees those operands
+                    // are scalar, so the splat is unconditional. The name-keyed
+                    // `lower_intrinsic` below only ever sees overload 0, so it
+                    // can't reach this case on its own.
+                    if let BuiltinLowering::ExtInstSplat { ext, splat_args } =
+                        &crate::builtins::by_id(*id).overloads()[*overload_idx].lowering
+                    {
+                        if let (Some(name), Some(rty)) = (glsl_std450_wgsl_name(*ext), result_ty.as_ref()) {
+                            let rty_str = self.ctx.type_emitter.type_to_wgsl(rty)?;
+                            let mut splatted = arg_strs.clone();
+                            for &pos in *splat_args {
+                                splatted[pos] = format!("{}({})", rty_str, arg_strs[pos]);
+                            }
+                            return Ok(format!("{}({})", name, splatted.join(", ")));
+                        }
+                    }
                     // `_w_intrinsic_storage_len(set, binding)` → runtime
                     // length of the storage buffer at those coordinates.
                     // Both args are compile-time integer constants.
@@ -2727,6 +2756,61 @@ fn wgsl_storage_access(access: crate::interface::StorageAccess) -> &'static str 
     }
 }
 
+/// GLSL.std.450 ext-inst number → its WGSL builtin spelling. Shared by
+/// the `GlslExt` PrimOp arm and the `ExtInstSplat` lowering (which splats
+/// scalar operands before emitting the same call). Returns `None` for
+/// numbers with no direct WGSL equivalent.
+fn glsl_std450_wgsl_name(n: u32) -> Option<&'static str> {
+    Some(match n {
+        1 => "round",
+        3 => "trunc",
+        4 | 5 => "abs",
+        6 | 7 => "sign",
+        8 => "floor",
+        9 => "ceil",
+        10 => "fract",
+        11 => "radians",
+        12 => "degrees",
+        13 => "sin",
+        14 => "cos",
+        15 => "tan",
+        16 => "asin",
+        17 => "acos",
+        18 => "atan",
+        19 => "sinh",
+        20 => "cosh",
+        21 => "tanh",
+        22 => "asinh",
+        23 => "acosh",
+        24 => "atanh",
+        25 => "atan2",
+        26 => "pow",
+        27 => "exp",
+        28 => "log",
+        29 => "exp2",
+        30 => "log2",
+        31 => "sqrt",
+        32 => "inverseSqrt",
+        33 => "determinant",
+        34 => "inverse",
+        37 | 38 | 39 => "min",
+        40 | 41 | 42 => "max",
+        43 | 44 | 45 => "clamp",
+        46 => "mix",
+        48 => "step",
+        49 => "smoothstep",
+        50 => "fma",
+        53 => "ldexp",
+        66 => "length",
+        67 => "distance",
+        68 => "cross",
+        69 => "normalize",
+        71 => "reflect",
+        72 => "refract",
+        _ => return None,
+    })
+}
+
 fn lower_primop_wgsl(prim_op: &PrimOp, args: &[String], result_ty_str: Option<&str>) -> Option<String> {
     use PrimOp::*;
     match prim_op {
@@ -2736,53 +2820,7 @@ fn lower_primop_wgsl(prim_op: &PrimOp, args: &[String], result_ty_str: Option<&s
         // collapses signed/unsigned/float variants into a single
         // overloaded builtin (FMin/UMin/SMin → `min`).
         GlslExt(n) => {
-            let name = match n {
-                1 => "round",
-                3 => "trunc",
-                4 | 5 => "abs",
-                6 | 7 => "sign",
-                8 => "floor",
-                9 => "ceil",
-                10 => "fract",
-                11 => "radians",
-                12 => "degrees",
-                13 => "sin",
-                14 => "cos",
-                15 => "tan",
-                16 => "asin",
-                17 => "acos",
-                18 => "atan",
-                19 => "sinh",
-                20 => "cosh",
-                21 => "tanh",
-                22 => "asinh",
-                23 => "acosh",
-                24 => "atanh",
-                25 => "atan2",
-                26 => "pow",
-                27 => "exp",
-                28 => "log",
-                29 => "exp2",
-                30 => "log2",
-                31 => "sqrt",
-                32 => "inverseSqrt",
-                33 => "determinant",
-                34 => "inverse",
-                37 | 38 | 39 => "min",
-                40 | 41 | 42 => "max",
-                43 | 44 | 45 => "clamp",
-                46 => "mix",
-                49 => "smoothstep",
-                50 => "fma",
-                53 => "ldexp",
-                66 => "length",
-                67 => "distance",
-                68 => "cross",
-                69 => "normalize",
-                71 => "reflect",
-                72 => "refract",
-                _ => return None,
-            };
+            let name = glsl_std450_wgsl_name(*n)?;
             Some(format!("{}({})", name, args.join(", ")))
         }
 
@@ -2799,6 +2837,18 @@ fn lower_primop_wgsl(prim_op: &PrimOp, args: &[String], result_ty_str: Option<&s
                 None
             }
         }
+
+        // Screen-space derivatives map to WGSL's native spellings.
+        Fwidth => Some(format!("fwidth({})", args.join(", "))),
+        DPdx => Some(format!("dpdx({})", args.join(", "))),
+        DPdy => Some(format!("dpdy({})", args.join(", "))),
+
+        // WGSL has no `isNan` / `isInf` builtins, so synthesize them from
+        // the standard floating-point identities. `x != x` is true only
+        // for NaN; a finite |x| ceiling detects ±Inf. Both spellings are
+        // componentwise, so they also work for vector operands.
+        IsNan => Some(format!("({0} != {0})", args[0])),
+        IsInf => Some(format!("(abs({0}) > 3.4028235e38)", args[0])),
 
         Dot => Some(format!("dot({})", args.join(", "))),
 
