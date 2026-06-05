@@ -1,0 +1,464 @@
+-- "Cube lines" — Wyn port of the Shadertoy shader https://www.shadertoy.com/view/NslGRN
+-- by Danil (2021), CC BY-NC-SA 3.0.
+--
+-- A refractive glass cube; each face shows three rotated bilinear "lines"
+-- patches with layered, self-intersecting transparency, plus a soft-shadowed
+-- ground plane. Antialiasing of the line colour uses screen-space
+-- derivatives (`fwidth`).
+--
+-- Fidelity notes: ported with the shader's default `#define` configuration
+--   (USE_LIGHT-equivalent toggles off): no AA supersampling loop, no DEBUG,
+--   ROTATION_SPEED and MOUSE_control on, all the *_ALPHA / ONLY_BOX /
+--   ANIM_* / STATIC_SHAPE / CAMERA_* paths off. The `iChannel0` background
+--   composite only exists under the off-by-default *_ALPHA defines, so this
+--   port is texture-free.
+--
+-- The original GLSL is preserved commented-out at the bottom.
+
+open f32
+
+------------------------------------------------------------
+-- Constants
+------------------------------------------------------------
+def PI: f32             = 3.1415926
+def tshift: f32         = 53.0
+def FDIST: f32          = 0.7
+def IOR: f32            = 1.33
+def ROTATION_SPEED: f32 = 0.8999
+def BOXDIMS: vec3f32    = @[0.75, 0.75, 1.25]
+def curvature: f32      = 0.5
+
+------------------------------------------------------------
+-- Axis rotation matrices. GLSL builds these as `mat3(col0,col1,col2)`
+-- (column-major); each outer array below is one column.
+------------------------------------------------------------
+def rotx(a: f32) mat3f32 =
+  let s = sin(a) in
+  let c = cos(a) in
+  @[[1.0, 0.0, 0.0], [0.0, c, s], [0.0, 0.0 - s, c]]
+
+def roty(a: f32) mat3f32 =
+  let s = sin(a) in
+  let c = cos(a) in
+  @[[c, 0.0, s], [0.0, 1.0, 0.0], [0.0 - s, 0.0, c]]
+
+def rotz(a: f32) mat3f32 =
+  let s = sin(a) in
+  let c = cos(a) in
+  @[[c, s, 0.0], [0.0 - s, c, 0.0], [0.0, 0.0, 1.0]]
+
+------------------------------------------------------------
+-- Derivative-antialiased cosine palette helper.
+-- When the screen-space derivative is degenerate (zero / NaN / Inf)
+-- it falls back to an 8-tap average; otherwise it band-limits cos(x)
+-- with smoothstep on the pixel footprint.
+------------------------------------------------------------
+def fcos(x: vec3f32, iResolution: vec3f32) vec3f32 =
+  -- NOTE(hole): no vector `fwidth` in Wyn — `fwidth`/`dFdx`/`dFdy` are
+  -- registered per-scalar-type only, so GLSL's component-wise
+  -- `fwidth(vec3)` must be expanded by hand.
+  let w  = @[fwidth(x.x), fwidth(x.y), fwidth(x.z)] in
+  let lw = magnitude(w) in
+  if lw == 0.0 || isnan(lw) || isinf(lw) then
+    let tc =
+      loop tc = @[0.0, 0.0, 0.0] for i < 8 do
+        tc + vec.cos(x + x * f32.i32(i - 4) * (0.01 * 400.0 / iResolution.y))
+    in
+    tc / 8.0
+  else
+    vec.cos(x) * smoothstep(3.14 * 2.0, 0.0, w)
+
+------------------------------------------------------------
+-- Cosine-palette colour of an interior point.
+------------------------------------------------------------
+def getColor(p0: vec3f32, iResolution: vec3f32) vec3f32 =
+  let pa = vec.abs(p0) in
+  let pb = pa * 1.25 in
+  let p  = 0.5 * pb / dot(pb, pb) in
+  let t  = 0.13 * magnitude(p) in
+  let col =
+    @[0.3, 0.4, 0.5]
+    + 0.12 * fcos(6.28318 * t * 1.0   + @[0.0, 0.8, 1.1], iResolution)
+    + 0.11 * fcos(6.28318 * t * 3.1   + @[0.3, 0.4, 0.1], iResolution)
+    + 0.10 * fcos(6.28318 * t * 5.1   + @[0.1, 0.7, 1.1], iResolution)
+    + 0.10 * fcos(6.28318 * t * 17.1  + @[0.2, 0.6, 0.7], iResolution)
+    + 0.10 * fcos(6.28318 * t * 31.1  + @[0.1, 0.6, 0.7], iResolution)
+    + 0.10 * fcos(6.28318 * t * 65.1  + @[0.0, 0.5, 0.8], iResolution)
+    + 0.10 * fcos(6.28318 * t * 115.1 + @[0.1, 0.4, 0.7], iResolution)
+    + 0.10 * fcos(6.28318 * t * 265.1 + @[1.1, 1.4, 2.7], iResolution)
+  in
+  vec.clamp(col, @[0.0, 0.0, 0.0], @[1.0, 1.0, 1.0])
+
+------------------------------------------------------------
+-- Shade a patch hit (and, when present, its self-intersection hit).
+-- GLSL out-params (colx, colsi) become tuple results.
+------------------------------------------------------------
+def calcColor(ro: vec3f32, rd: vec3f32, d: f32, len: f32, si: bool, td: f32, iResolution: vec3f32)
+  (vec4f32, vec4f32) =
+  let pos = ro + rd * d in
+  let a   = 1.0 - smoothstep(len - 0.15 * 0.5, len + 0.00001, magnitude(pos)) in
+  let col = getColor(pos, iResolution) in
+  let colx = @[col.x, col.y, col.z, a] in
+  if si then
+    let pos2 = ro + rd * td in
+    let ta   = 1.0 - smoothstep(len - 0.15 * 0.5, len + 0.00001, magnitude(pos2)) in
+    let col2 = getColor(pos2, iResolution) in
+    (colx, @[col2.x, col2.y, col2.z, ta])
+  else
+    (colx, @[0.0, 0.0, 0.0, 0.0])
+
+------------------------------------------------------------
+-- Ray / bilinear-patch intersection.
+-- Returns (hit, t, norm, si, tsi, normsi, fade, fadesi).
+------------------------------------------------------------
+def iBilinearPatch(ro: vec3f32, rd: vec3f32, ps: vec4f32, ph: vec4f32, sz: f32)
+  (bool, f32, vec3f32, bool, f32, vec3f32, f32, f32) =
+  let va = @[0.0, 0.0, ph.x + ph.w - ph.y - ph.z] in
+  let vb = @[0.0, ps.w - ps.y, ph.z - ph.x] in
+  let vc = @[ps.z - ps.x, 0.0, ph.y - ph.x] in
+  let vd = @[ps.x, ps.y, ph.x] in
+
+  let tmp = 1.0 / (vb.y * vc.x) in
+  let d = va.z * tmp in
+  let g = (vc.z * vb.y - vd.y * va.z) * tmp in
+  let h = (vb.z * vc.x - va.z * vd.x) * tmp in
+  let i = 0.0 - 1.0 in
+  let j = (vd.x * vd.y * va.z + vd.z * vb.y * vc.x) * tmp
+        - (vd.y * vb.z * vc.x + vd.x * vc.z * vb.y) * tmp in
+
+  -- a = b = c = e = f = 0, so terms with them vanish.
+  let p = dot(@[d, 0.0, 0.0], rd.xzy * rd.zyx) in
+  let q = dot(ro.xzz * rd.zxy, @[d, d, 0.0]) + dot(@[g, h, i], rd.xzy) in
+  let r = dot(@[d, 0.0, 0.0], ro.xzy * ro.zyx) + dot(@[g, h, i], ro.xzy) + j in
+
+  let miss = (false, 0.0 - 1.0, @[0.0, 1.0, 0.0], false, 0.0 - 1.0, @[0.0, 1.0, 0.0], 1.0, 1.0) in
+
+  if abs(p) < 0.000001 then
+    let tt = (0.0 - r) / q in
+    if tt <= 0.0 then miss
+    else
+      let pos = ro + tt * rd in
+      if magnitude(pos) > sz then miss
+      else
+        let grad = @[2.0, 2.0, 2.0] * pos.xzy * @[d, 0.0, 0.0]
+                 + pos.zxz * @[d, d, 0.0] + pos.yyx * @[0.0, 0.0, 0.0]
+                 + @[g, h, i] in
+        (true, tt, 0.0 - normalize(grad), false, 0.0 - 1.0, @[0.0, 1.0, 0.0], 1.0, 1.0)
+  else
+    let sq = q * q - 4.0 * p * r in
+    if sq < 0.0 then miss
+    else
+      let s   = sqrt(sq) in
+      let t0  = (0.0 - q + s) / (2.0 * p) in
+      let t1  = (0.0 - q - s) / (2.0 * p) in
+      let tt1 = min(if t0 < 0.0 then t1 else t0, if t1 < 0.0 then t0 else t1) in
+      let tt2 = max(if t0 > 0.0 then t1 else t0, if t1 > 0.0 then t0 else t1) in
+      if tt1 <= 0.0 then miss
+      else
+        let pos0 = ro + tt1 * rd in
+        let ru   = step(sz, magnitude(pos0)) > 0.5 in
+        let tt0  = if ru then tt2 else tt1 in
+        let pos  = if ru then ro + tt2 * rd else pos0 in
+        if tt0 <= 0.0 then miss
+        else if step(sz, magnitude(pos)) > 0.5 then miss
+        else
+          let grad = @[2.0, 2.0, 2.0] * pos.xzy * @[d, 0.0, 0.0]
+                   + pos.zxz * @[d, d, 0.0] + pos.yyx * @[0.0, 0.0, 0.0]
+                   + @[g, h, i] in
+          let norm = 0.0 - normalize(grad) in
+          -- self-intersection second root
+          if (tt2 > 0.0) && (!ru) && !(step(sz, magnitude(ro + tt2 * rd)) > 0.5) then
+            let tpos  = ro + tt2 * rd in
+            let tgrad = @[2.0, 2.0, 2.0] * tpos.xzy * @[d, 0.0, 0.0]
+                      + tpos.zxz * @[d, d, 0.0] + tpos.yyx * @[0.0, 0.0, 0.0]
+                      + @[g, h, i] in
+            (true, tt0, norm, true, tt2, 0.0 - normalize(tgrad), s, s)
+          else
+            (true, tt0, norm, false, 0.0 - 1.0, @[0.0, 1.0, 0.0], s, 1.0)
+
+def dot2(v: vec3f32) f32 = dot(v, v)
+
+------------------------------------------------------------
+-- Soft box shadow (iq).
+------------------------------------------------------------
+def segShadow(ro: vec3f32, rd: vec3f32, pa: vec3f32, sh0: f32) f32 =
+  let dm = dot(rd.yz, rd.yz) in
+  let k1 = (ro.x - pa.x) * dm in
+  let k2 = (ro.x + pa.x) * dm in
+  let k5 = (ro.yz + pa.yz) * dm in
+  let k3 = dot(ro.yz + pa.yz, rd.yz) in
+  let k4 = (pa.yz + pa.yz) * rd.yz in
+  let k6 = (pa.yz + pa.yz) * dm in
+  loop sh = sh0 for ii < 4 do
+    -- NOTE(hole): bitwise `&`/`>>` parse and have builtin lowerings but
+    -- the type checker rejects them ("Unknown binary operator"), so the
+    -- `ii&1` / `ii>>1` bit-extraction is written as its integer-arith
+    -- equivalent (valid for ii ≥ 0).
+    let s = @[f32.i32(ii % 2), f32.i32(ii / 2)] in
+    let t = dot(s, k4) - k3 in
+    if t > 0.0 then
+      let cx = @[clamp(0.0 - rd.x * t, k1, k2), (k5 - k6 * s).x, (k5 - k6 * s).y] in
+      min(sh, dot2(cx + rd * t) / (t * t))
+    else sh
+
+def boxSoftShadow(ro: vec3f32, rd0: vec3f32, rad: vec3f32, sk: f32) f32 =
+  let rd  = rd0 + 0.0001 * (@[1.0, 1.0, 1.0] - vec.abs(vec.sign(rd0))) in
+  let mm  = @[1.0, 1.0, 1.0] / rd in
+  let n   = mm * ro in
+  let k   = vec.abs(mm) * rad in
+  let t1  = (0.0 - n) - k in
+  let t2  = (0.0 - n) + k in
+  let tN  = max(max(t1.x, t1.y), t1.z) in
+  let tF  = min(min(t2.x, t2.y), t2.z) in
+  if tN < tF && tF > 0.0 then 0.0
+  else
+    let sh1 = segShadow(ro.xyz, rd.xyz, rad.xyz, 1.0) in
+    let sh2 = segShadow(ro.yzx, rd.yzx, rad.yzx, sh1) in
+    let sh3 = segShadow(ro.zxy, rd.zxy, rad.zxy, sh2) in
+    let sh  = clamp(sk * sqrt(sh3), 0.0, 1.0) in
+    sh * sh * (3.0 - 2.0 * sh)
+
+------------------------------------------------------------
+-- Ray / box intersection. Returns (t, nn).
+------------------------------------------------------------
+def box(ro: vec3f32, rd0: vec3f32, r: vec3f32, entering: bool) (f32, vec3f32) =
+  let rd   = rd0 + 0.0001 * (@[1.0, 1.0, 1.0] - vec.abs(vec.sign(rd0))) in
+  let dr   = @[1.0, 1.0, 1.0] / rd in
+  let n    = ro * dr in
+  let k    = r * vec.abs(dr) in
+  let pin  = (0.0 - k) - n in
+  let pout = k - n in
+  let tin  = max(pin.x, max(pin.y, pin.z)) in
+  let tout = min(pout.x, min(pout.y, pout.z)) in
+  if tin > tout then (0.0 - 1.0, @[0.0, 1.0, 0.0])
+  else
+    let nn =
+      if entering then
+        (0.0 - vec.sign(rd)) * step(pin.zxy, pin.xyz) * step(pin.yzx, pin.xyz)
+      else
+        vec.sign(rd) * step(pout.xyz, pout.zxy) * step(pout.xyz, pout.yzx)
+    in
+    (if entering then tin else tout, nn)
+
+------------------------------------------------------------
+-- Background plane + sky.
+------------------------------------------------------------
+def bgcol(rd: vec3f32) vec3f32 =
+  mix(@[0.01, 0.01, 0.01], @[0.336, 0.458, 0.668], 1.0 - (abs(rd.z + 0.25)) ** 1.3)
+
+-- Returns (color, alpha).
+def background(ro: vec3f32, rd: vec3f32, l_dir: vec3f32) (vec3f32, f32) =
+  let t = ((0.0 - BOXDIMS.z) - ro.z) / rd.z in
+  let bgc = bgcol(rd) in
+  if t < 0.0 then (bgc, 0.0)
+  else
+    let uv   = ro.xy + t * rd.xy in
+    let shad = boxSoftShadow(ro + t * rd, normalize(l_dir + @[0.0, 0.0, 1.0]) * rotz(PI * 0.65), BOXDIMS, 1.5) in
+    let aof0 = smoothstep(0.0 - 0.95, 0.75, magnitude(vec.abs(uv) - vec.min(vec.abs(uv), @[0.45, 0.45]))) in
+    let aofac = min(aof0, smoothstep(0.0 - 0.65, 1.0, shad)) in
+    let lght = max(dot(normalize(ro + t * rd + @[0.0, 0.0, 0.0 - 5.0]), normalize(l_dir - @[0.0, 0.0, 1.0]) * rotz(PI * 0.65)), 0.0) in
+    let col  = mix(@[0.4, 0.4, 0.4], @[0.71, 0.772, 0.895], lght * lght * aofac + 0.05) * aofac in
+    let alpha = 1.0 - smoothstep(7.0, 10.0, magnitude(uv)) in
+    (mix(col * magnitude(col) * 0.8, bgc, smoothstep(7.0, 10.0, magnitude(uv))), alpha)
+
+------------------------------------------------------------
+-- Full-screen triangle vertex shader
+------------------------------------------------------------
+def verts: [3]vec4f32 =
+  [@[-1.0, -1.0, 0.0, 1.0],
+   @[3.0, -1.0, 0.0, 1.0],
+   @[-1.0, 3.0, 0.0, 1.0]]
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 = verts[vertex_id]
+
+------------------------------------------------------------
+-- The interior of one cube face: three rotated patches, shaded and
+-- depth-sorted with layered transparency. Returns (color, alpha) plus
+-- the front-most hit distance via `tout`.
+------------------------------------------------------------
+def insides(ro0: vec3f32, rd0: vec3f32, nor_c: vec3f32, l_dir0: vec3f32, iResolution: vec3f32)
+  (vec4f32, f32) =
+  -- Orient ray into the face-local frame.
+  let (ro1, rd1, l_dir) =
+    if abs(nor_c.x) > 0.5 then (ro0.xzy * nor_c.x, rd0.xzy * nor_c.x, l_dir0)
+    else if abs(nor_c.z) > 0.5 then (ro0.yxz * nor_c.z, rd0.yxz * nor_c.z, l_dir0 * roty(PI))
+    else (ro0 * nor_c.y, rd0 * nor_c.y, l_dir0 * rotz((0.0 - PI) * 0.5))
+  in
+
+  -- Per-face inter-patch rotation.
+  let rmat =
+    if abs(nor_c.x) > 0.5 then rotz((0.0 - PI) * (1.0 / 3.0))
+    else if abs(nor_c.z) > 0.5 then rotz(PI * (1.0 / 3.0))
+    else rotx(PI * (1.0 / 3.0))
+  in
+
+  let bil_size = 1.0 in
+  let ps = @[0.0 - bil_size, 0.0 - bil_size, bil_size, bil_size] * curvature in
+  let ph = @[0.0 - bil_size, bil_size, bil_size, 0.0 - bil_size] * curvature in
+
+  -- Accumulate per-patch shading. State carries the rotating ray plus
+  -- the three layer slots (depth/si data in dx, colours in colx/colxsi).
+  let zero4 = @[0.0, 0.0, 0.0, 0.0] in
+  let (_, _, dx, colx, colxsi) =
+    loop (ro, rd, dx, colx, colxsi) =
+      (ro1, rd1,
+       [@[0.0 - 1.0, 0.0 - 1.0, 0.0 - 1.0], @[0.0 - 1.0, 0.0 - 1.0, 0.0 - 1.0], @[0.0 - 1.0, 0.0 - 1.0, 0.0 - 1.0]],
+       [zero4, zero4, zero4],
+       [zero4, zero4, zero4])
+    for i < 3 do
+      let ro2 = ro * rmat in
+      let rd2 = rd * rmat in
+      let (hit, tnew, normnew, si, tsi, normsi, fade, fadesi) =
+        iBilinearPatch(ro2, rd2, ps, ph, bil_size) in
+      if hit && tnew > 0.0 then
+        let (tcol, tcolsi) = calcColor(ro2, rd2, tnew, bil_size, si, tsi, iResolution) in
+        if tcol.w > 0.0 then
+          let dx2 = dx with [i] = @[tnew, f32.bool(si), tsi] in
+          let dif0 = clamp(dot(normnew, l_dir), 0.0, 1.0) in
+          let amb0 = clamp(0.5 + 0.5 * dot(normnew, l_dir), 0.0, 1.0) in
+          let shad = @[0.32, 0.43, 0.54] * amb0 + @[1.0, 0.9, 0.7] * dif0 in
+          let tcr  = @[1.0, 0.21, 0.11] in
+          let ta   = clamp(magnitude(tcol.xyz), 0.0, 1.0) in
+          let tc   = vec.clamp(tcol * tcol * 2.0, zero4, @[1.0, 1.0, 1.0, 1.0]) in
+          let rgb0 = tc.xyz * shad * 1.4 + 3.0 * (tcr * tc.xyz) * clamp(1.0 - (amb0 + dif0), 0.0, 1.0) in
+          let rgb1 = vec.clamp(2.0 * rgb0 * rgb0, @[0.0, 0.0, 0.0], @[1.0, 1.0, 1.0]) in
+          let tvalx = @[rgb1.x, rgb1.y, rgb1.z, min(tc.w, ta)] * min(fade * 5.0, 1.0) in
+          let colx2 = colx with [i] = tvalx in
+          if si then
+            let difs = clamp(dot(normsi, l_dir), 0.0, 1.0) in
+            let ambs = clamp(0.5 + 0.5 * dot(normsi, l_dir), 0.0, 1.0) in
+            let shads = @[0.32, 0.43, 0.54] * ambs + @[1.0, 0.9, 0.7] * difs in
+            let tas   = clamp(magnitude(tcolsi.xyz), 0.0, 1.0) in
+            let tcs   = vec.clamp(tcolsi * tcolsi * 2.0, zero4, @[1.0, 1.0, 1.0, 1.0]) in
+            let rgbs0 = tcs.xyz * shads + 3.0 * (tcr * tcs.xyz) * clamp(1.0 - (ambs + difs), 0.0, 1.0) in
+            let rgbs1 = vec.clamp(2.0 * rgbs0 * rgbs0, @[0.0, 0.0, 0.0], @[1.0, 1.0, 1.0]) * min(fadesi * 5.0, 1.0) in
+            let csi2  = colxsi with [i] = @[rgbs1.x, rgbs1.y, rgbs1.z, min(tcs.w, tas)] in
+            (ro2, rd2, dx2, colx2, csi2)
+          else
+            (ro2, rd2, dx2, colx2, colxsi)
+        else (ro2, rd2, dx, colx, colxsi)
+      else (ro2, rd2, dx, colx, colxsi)
+  in
+
+  -- Depth-sort the three layers (compare-swap network), tracking order.
+  let order0 = [0, 1, 2] in
+  let (dxa, ordera) =
+    if dx[0].x < dx[1].x then
+      ((dx with [0] = dx[1]) with [1] = dx[0], (order0 with [0] = order0[1]) with [1] = order0[0])
+    else (dx, order0) in
+  let (dxb, orderb) =
+    if dxa[1].x < dxa[2].x then
+      ((dxa with [1] = dxa[2]) with [2] = dxa[1], (ordera with [1] = ordera[2]) with [2] = ordera[1])
+    else (dxa, ordera) in
+  let (dxc, orderc) =
+    if dxb[0].x < dxb[1].x then
+      ((dxb with [0] = dxb[1]) with [1] = dxb[0], (orderb with [0] = orderb[1]) with [1] = orderb[0])
+    else (dxb, orderb) in
+
+  let tout = max(max(dxc[0].x, dxc[1].x), dxc[2].x) in
+
+  let a0 = if dxc[0].y < 0.5 then colx[orderc[0]].w else 1.0 in
+
+  -- Self-intersection compositing per sorted layer.
+  let rul0 = (dxc[0].y > 0.5) && (dxc[1].x <= 0.0) in
+  let rul1 = (dxc[1].y > 0.5) && (dxc[0].x > dxc[1].z) in
+  let rul2 = (dxc[2].y > 0.5) && (dxc[1].x > dxc[2].z) in
+  let colx2 =
+    loop colxk = colx for k < 3 do
+      let rk = if k == 0 then rul0 else if k == 1 then rul1 else rul2 in
+      if rk then
+        let oi = orderc[k] in
+        let tcolxsi = colxsi[oi] in
+        let tcolx   = colxk[oi] in
+        let tvalx   = mix(tcolxsi, tcolx, tcolx.w) in
+        let tvalx2  = mix(zero4, tvalx, max(tcolx.w, tcolxsi.w)) in
+        colxk with [oi] = tvalx2
+      else colxk
+  in
+
+  let a1 = if dxc[1].y < 0.5 then colx2[orderc[1]].w
+           else if dxc[1].z > dxc[0].x then colx2[orderc[1]].w else 1.0 in
+  let a2 = if dxc[2].y < 0.5 then colx2[orderc[2]].w
+           else if dxc[2].z > dxc[1].x then colx2[orderc[2]].w else 1.0 in
+  let col = mix(mix(colx2[orderc[0]].xyz, colx2[orderc[1]].xyz, a1), colx2[orderc[2]].xyz, a2) in
+  let a  = max(max(a0, a1), a2) in
+  (@[col.x, col.y, col.z, a], tout)
+
+------------------------------------------------------------
+-- Fragment shader (mainImage)
+------------------------------------------------------------
+#[fragment]
+entry fragment_main(
+  #[uniform(set=1, binding=0)] iResolution: vec3f32,
+  #[uniform(set=1, binding=1)] iTime: f32,
+  #[uniform(set=1, binding=5)] iMouse: vec4f32,
+  #[builtin(position)] fragCoord: vec4f32
+) #[location(0)] vec4f32 =
+  let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
+
+  let l_dir = normalize(@[0.0, 1.0, 0.0]) * rotz(0.5) in
+
+  let mouseY0 = (1.0 - 1.15 * iMouse.y / iResolution.y) * 0.5 * PI in
+  let mouseY =
+    if iMouse.y < 1.0 then
+      PI * 0.49 - smoothstep(0.0, 8.5, mod((iTime + tshift) * 0.33, 25.0))
+        * (1.0 - smoothstep(14.0, 24.0, mod((iTime + tshift) * 0.33, 25.0))) * 0.55 * PI
+    else mouseY0 in
+  let mouseX = (0.0 - 2.0) * PI - 0.25 * (iTime * ROTATION_SPEED + tshift)
+             - (iMouse.x / iResolution.x) * 2.0 * PI in
+
+  let eye = 4.0 * @[cos(mouseX) * cos(mouseY), sin(mouseX) * cos(mouseY), sin(mouseY)] in
+  let w = normalize(0.0 - eye) in
+  let up = @[0.0, 0.0, 1.0] in
+  let u = normalize(cross(w, up)) in
+  let v = cross(u, w) in
+
+  let uv = (fc - 0.5 * iResolution.xy) / iResolution.x in
+  let rd = normalize(w * FDIST + uv.x * u + uv.y * v) in
+
+  let (t, ni) = box(eye, rd, BOXDIMS, true) in
+  let ro = eye + t * rd in
+  let coords = ro.xy * ni.z / BOXDIMS.xy + ro.yz * ni.x / BOXDIMS.yz + ro.zx * ni.y / BOXDIMS.zx in
+  let fadeborders = (1.0 - smoothstep(0.915, 1.05, abs(coords.x))) * (1.0 - smoothstep(0.915, 1.05, abs(coords.y))) in
+
+  if t > 0.0 then
+    let R0a = (IOR - 1.0) / (IOR + 1.0) in
+    let R0  = R0a * R0a in
+
+    -- theta = 0 ⇒ n = (0,0,1)
+    let n = @[0.0, 0.0, 1.0] in
+    let nr = n.zxy * ni.x + n.yzx * ni.y + n.xyz * ni.z in
+    let rdr = reflect(rd, nr) in
+    let (reflcol, _) = background(ro, rdr, l_dir) in
+    let rd2_0 = refract(rd, nr, 1.0 / IOR) in
+
+    -- Two refraction bounces, accumulating interior colour per bounce.
+    let (_, _, _, colo) =
+      loop (rd2, accum, ro_refr, colo) = (rd2_0, 1.0, ro, [@[0.0, 0.0, 0.0, 0.0], @[0.0, 0.0, 0.0, 0.0]])
+      for j < 2 do
+        let coords2 = ro_refr.xy * ni.z + ro_refr.yz * ni.x + ro_refr.zx * ni.y in
+        let eye2 = @[coords2.x, coords2.y, 0.0 - 1.0] in
+        let rd2trans0 = rd2.yzx * ni.x + rd2.zxy * ni.y + rd2.xyz * ni.z in
+        let rd2trans = @[rd2trans0.x, rd2trans0.y, 0.0 - rd2trans0.z] in
+        let (internalcol, tb) = insides(eye2, rd2trans, ni, l_dir, iResolution) in
+        let colo2 = if tb > 0.0 then colo with [j] = @[internalcol.x * accum, internalcol.y * accum, internalcol.z * accum, internalcol.w] else colo in
+        if (tb <= 0.0) || (internalcol.w < 1.0) then
+          let (toutb, no2) = box(ro_refr, rd2, BOXDIMS, false) in
+          let no2b = n.zyx * no2.x + n.xzy * no2.y + n.yxz * no2.z in
+          let rout = ro_refr + toutb * rd2 in
+          let rdout = refract(rd2, 0.0 - no2b, IOR) in
+          let fresnel2 = R0 + (1.0 - R0) * (1.0 - dot(rdout, no2b)) ** 1.3 in
+          let rd2b = reflect(rd2, 0.0 - no2b) in
+          let rout2 = @[rout.x, rout.y, max(rout.z, 0.0 - 0.999)] in
+          (rd2b, accum * fresnel2, rout2, colo2)
+        else (rd2, accum, ro_refr, colo2)
+    in
+    let fresnel = R0 + (1.0 - R0) * (1.0 - dot(0.0 - rd, nr)) ** 5.0 in
+    let col0 = mix(mix(colo[1].xyz * colo[1].w, colo[0].xyz, colo[0].w) * fadeborders, reflcol, fresnel ** 1.5) in
+    let col = vec.clamp(col0, @[0.0, 0.0, 0.0], @[1.0, 1.0, 1.0]) in
+    let cineshader_alpha = clamp(0.15 * dot(eye, ro), 0.0, 1.0) in
+    @[col.x, col.y, col.z, cineshader_alpha]
+  else
+    let (bg, _) = background(eye, rd, l_dir) in
+    @[bg.x, bg.y, bg.z, 0.15]
