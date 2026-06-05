@@ -2501,7 +2501,12 @@ impl<'a> Parser<'a> {
 
         self.expect(Token::Assign)?;
         let value = Box::new(self.parse_expression()?);
-        self.expect(Token::In)?;
+        // `in` may be omitted when the body is itself a `let` expression,
+        // so chained bindings can be written without a sea of `in`
+        // keywords: `let x = 1 let y = 2 in x + y`.
+        if !self.check(&Token::Let) {
+            self.expect(Token::In)?;
+        }
         let body = Box::new(self.parse_expression()?);
         let span = start_span.merge(&body.h.span);
 

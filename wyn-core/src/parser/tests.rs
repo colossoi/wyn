@@ -3776,6 +3776,24 @@ fn test_parse_type_application_with_generic_args() {
 }
 
 #[test]
+fn test_parse_let_in_chain_omits_inner_in() {
+    // Chained let bindings can elide the `in` keyword when the body
+    // is itself a `let` expression: `let x = 1 let y = 2 in x + y`.
+    parse_ok("def f = let x = 1 let y = 2 in x + y");
+    parse_ok("def g = let x = 1 let y = x + 1 let z = y * 2 in z");
+}
+
+#[test]
+fn test_parse_let_in_requires_in_at_tail() {
+    // The terminal `let` in a chain still needs `in` — it cannot
+    // simply run off the end of the function body.
+    expect_parse_error("def f = let x = 1 let y = 2 x + y", |err| match err {
+        CompilerError::ParseError(_, _) => Ok(()),
+        other => Err(format!("expected parse error, got {:?}", other)),
+    });
+}
+
+#[test]
 fn test_parse_slice_dotdot_form() {
     // Slice uses the `..` token; both bounds optional.
     parse_ok("def f(xs: []i32) []i32 = xs[1..3]");
