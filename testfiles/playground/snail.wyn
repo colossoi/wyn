@@ -18,7 +18,8 @@
 --   * GLSL bitwise `&`/`>>` (the tetrahedral-normal index trick) is
 --     rejected by Wyn's checker, so the 4 offset directions are written
 --     out as constants.
---   * USE_TEXTURES==1, AA==1 (single sample) — matching the descriptor.
+--   * USE_TEXTURES==1. AA supersampling via `def AA` (2 ⇒ 4×; set 1 for
+--     the stock single-sample default).
 --
 -- The threaded params `it ic1 s1 ic2 s2` (and `ic3 s3` in shading) carry
 -- iTime + the texture/sampler bindings, which are GLSL globals.
@@ -28,6 +29,10 @@
 open f32
 
 def pi: f32 = 3.1415927
+
+-- Antialiasing: AA×AA samples per pixel. 1 = single sample (the stock
+-- shader's default), 2 = 4× AA (slower; 4× the raymarch + texture work).
+def AA: i32 = 2
 
 ------------------------------------------------------------
 -- SDF primitives (iq, https://iquilezles.org/articles/distfunctions)
@@ -580,12 +585,24 @@ entry fragment_main(
   #[builtin(position)] fragCoord: vec4f32
 ) #[location(0)] vec4f32 =
   let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
-  let p = (2.0 * fc - iResolution.xy) / iResolution.y in
-  let q = fc / iResolution.xy in
+  -- Camera is constant across sub-pixel samples, so hoist it.
   let an = 1.87 - 0.04 * (1.0 - cos(0.5 * iTime)) in
   let ro = @[0.0 - 0.4, 0.2, 0.0] + 2.2 * @[cos(an), 0.0, sin(an)] in
   let ta = @[0.0 - 0.6, 0.2, 0.0] in
   let ca = setCamera(ro, ta) in
-  let rd = normalize(ca * @[p.x, p.y, 0.0 - 2.8]) in
-  let col = render(ro, rd, q, iTime, iChannel1, s1, iChannel2, s2, iChannel3, s3) in
+  let aaf = f32.i32(AA) in
+  -- AA×AA supersampling (AA=1 ⇒ a single sample, identical to the stock
+  -- default). One flat loop indexed idx = m*AA + n flattens GLSL's nested
+  -- m,n loop; only the sub-pixel jitter varies per sample.
+  let col_sum =
+    loop col = @[0.0, 0.0, 0.0] for idx < AA * AA do
+      let m = idx / AA in
+      let n = idx % AA in
+      let fcn = fc + @[f32.i32(m), f32.i32(n)] / aaf in
+      let p = (2.0 * fcn - iResolution.xy) / iResolution.y in
+      let q = fcn / iResolution.xy in
+      let rd = normalize(ca * @[p.x, p.y, 0.0 - 2.8]) in
+      col + render(ro, rd, q, iTime, iChannel1, s1, iChannel2, s2, iChannel3, s3)
+  in
+  let col = col_sum / (aaf * aaf) in
   @[col.x, col.y, col.z, 1.0]
