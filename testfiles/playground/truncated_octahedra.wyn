@@ -130,11 +130,12 @@ entry fragment_main(
   let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
   let p = (2.0 * fc - iResolution.xy) / iResolution.y in
 
-  -- Near-head-on camera (look down +z so cells read as a grid), gentle sway,
-  -- narrow FOV (focal 2.2) for an almost-orthographic, zoomed-out framing.
-  let an = 0.18 * iTime in
-  let ro = @[4.5 * sin(an), 5.0, 12.5 * cos(an)] in
-  let ta = @[0.0, 0.4, 0.0] in
+  -- Turntable orbit: constant-radius circle around the figure centre
+  -- (origin), fixed height, so it rotates in place. Narrow FOV (focal 2.2)
+  -- for an almost-orthographic, zoomed-out framing.
+  let an = 0.2 * iTime in
+  let ro = @[12.0 * sin(an), 5.5, 12.0 * cos(an)] in
+  let ta = @[0.0, 0.0, 0.0] in
   let ww = normalize(ta - ro) in
   let uu = normalize(cross(ww, @[0.0, 1.0, 0.0])) in
   let vv = cross(uu, ww) in
