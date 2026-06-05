@@ -3,6 +3,6 @@
 -- consumer indexes at a runtime position.
 #[compute]
 entry gen(bh: []vec4f32) []i32 =
-  let counts = map(|h: vec4f32| 4 + 5 * (if h.x > 4.0 then 3 else 1), bh) in
+  let counts = map(|h: vec4f32| 4 + 5 * (if h.x > 4.0 then 3 else 1), bh)
   let offsets = scan(|a: i32, b: i32| a + b, 0, counts) in
   map(|i: i32| offsets[i % 256], iota(6144))

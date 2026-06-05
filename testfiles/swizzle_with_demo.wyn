@@ -12,7 +12,7 @@
 open f32
 
 def rot(a: f32) mat2f32 =
-  let c = cos(a) in
+  let c = cos(a)
   let s = sin(a) in
   @[[c, s], [0.0f32 - s, c]]
 
@@ -30,21 +30,21 @@ entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] 
 -- AST→TLC lowering rebuilds the vec each time, but with the
 -- target bound to a fresh let so it evaluates only once per arm.
 def transform(dir0: vec3f32, mx: f32, my: f32, rotview1: mat2f32, rotview2: mat2f32) vec3f32 =
-  let d1 = dir0 with .yz *= rot(my) in
-  let d2 = d1 with .xz *= rot(mx) in
+  let d1 = dir0 with .yz *= rot(my)
+  let d2 = d1 with .xz *= rot(mx)
   let d3 = d2 with .yz *= rotview2 in
   d3 with .xz *= rotview1
 
 #[fragment]
 entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
-  let coord = @[fragCoord.x, iResolution.y - fragCoord.y] in
-  let uv = @[coord.x / iResolution.x - 0.5f32, coord.y / iResolution.y - 0.5f32] in
-  let dir0 = @[uv.x * 0.8f32, uv.y * 0.8f32, 1.0f32] in
+  let coord = @[fragCoord.x, iResolution.y - fragCoord.y]
+  let uv = @[coord.x / iResolution.x - 0.5f32, coord.y / iResolution.y - 0.5f32]
+  let dir0 = @[uv.x * 0.8f32, uv.y * 0.8f32, 1.0f32]
 
-  let view1 = rot(iTime * 0.3f32) in
-  let view2 = rot(iTime * 0.5f32) in
-  let mx = iTime * 0.1f32 in
-  let my = iTime * 0.07f32 in
+  let view1 = rot(iTime * 0.3f32)
+  let view2 = rot(iTime * 0.5f32)
+  let mx = iTime * 0.1f32
+  let my = iTime * 0.07f32
 
   let d = transform(dir0, mx, my, view1, view2) in
   @[d.x * 0.5f32 + 0.5f32, d.y * 0.5f32 + 0.5f32, d.z * 0.5f32 + 0.5f32, 1.0f32]

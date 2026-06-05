@@ -13,13 +13,13 @@ entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] 
 
 -- Helper: build a 2x2 rotation matrix
 def rot2(a: f32) mat2f32 =
-  let c = cos(a) in
+  let c = cos(a)
   let s = sin(a) in
   @[[c, 0.0 - s], [s, c]]
 
 -- Helper: build a 3x3 rotation matrix around Z axis
 def rot3z(a: f32) mat3f32 =
-  let c = cos(a) in
+  let c = cos(a)
   let s = sin(a) in
   @[[c, 0.0 - s, 0.0],
     [s, c, 0.0],
@@ -28,12 +28,12 @@ def rot3z(a: f32) mat3f32 =
 #[fragment]
 entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[builtin(frag_coord)] fragCoord: vec4f32) #[location(0)] vec4f32 =
   let uv = @[(fragCoord.x / iResolution.x) * 2.0 - 1.0,
-             (fragCoord.y / iResolution.y) * 2.0 - 1.0] in
+             (fragCoord.y / iResolution.y) * 2.0 - 1.0]
   let t = iTime in
 
   -- Case 1: mat2 * mat2 (OpMatrixTimesMatrix)
-  let r1 = rot2(t) in
-  let r2 = rot2(t * 0.5) in
+  let r1 = rot2(t)
+  let r2 = rot2(t * 0.5)
   let mm : mat2f32 = r1 * r2 in
 
   -- Case 2: mat2 * vec2 (OpMatrixTimesVector)
@@ -55,7 +55,7 @@ entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform
   let sm : mat2f32 = 0.25 * mm in
 
   -- Also exercise mat3 paths
-  let rz = rot3z(t) in
+  let rz = rot3z(t)
   let p3 = @[uv.x, uv.y, 0.0] in
 
   -- mat3 * vec3
@@ -65,7 +65,7 @@ entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform
   let vm3 : vec3f32 = p3 * rz in
 
   -- mat3 * mat3
-  let rz2 = rot3z(t * 0.3) in
+  let rz2 = rot3z(t * 0.3)
   let mm3 : mat3f32 = rz * rz2 in
 
   -- mat3 * scalar
@@ -76,12 +76,12 @@ entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform
 
   -- Combine all results into output color to prevent dead-code elimination
   -- Use mat*vec to extract values from matrix results
-  let ms_v = ms * uv in
-  let sm_v = sm * uv in
-  let ms3_v = ms3 * p3 in
-  let sm3_v = sm3 * p3 in
-  let c1 = mv.x + vm.y + vs.x + sv.y in
-  let c2 = mv3.x + vm3.y in
-  let c3 = ms_v.x + sm_v.x in
+  let ms_v = ms * uv
+  let sm_v = sm * uv
+  let ms3_v = ms3 * p3
+  let sm3_v = sm3 * p3
+  let c1 = mv.x + vm.y + vs.x + sv.y
+  let c2 = mv3.x + vm3.y
+  let c3 = ms_v.x + sm_v.x
   let c4 = ms3_v.x + sm3_v.x in
   @[c1, c2, c3 + c4, 1.0]

@@ -11,10 +11,10 @@ open f32
   else @[-1.0, 3.0, 0.0, 1.0]
 
 #[fragment] entry fragment_main() #[location(0)] vec4f32 =
-  let a = radians(45.0) in
-  let r = cos(a) in
-  let g = sin(a) in
-  let b = tanh(a) in
-  let lo = min(r, g) in
+  let a = radians(45.0)
+  let r = cos(a)
+  let g = sin(a)
+  let b = tanh(a)
+  let lo = min(r, g)
   let hi = max(r, g) in
   @[lo, hi, b, 1.0]

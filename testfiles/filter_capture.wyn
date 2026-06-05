@@ -10,8 +10,8 @@ def above_threshold(threshold: i32, arr: [6]i32) ?k. [k]i32 =
 
 #[vertex]
 entry vertex_main() #[builtin(position)] vec4f32 =
-    let kept = above_threshold(3, [1, 5, 2, 7, 3, 9]) in
-    let count = length(kept) in
+    let kept = above_threshold(3, [1, 5, 2, 7, 3, 9])
+    let count = length(kept)
     let first = kept[0] in
     @[f32.i32(count), f32.i32(first), 0.0, 1.0]
 

@@ -21,7 +21,7 @@ def shade(t: #big([4]i32) | #small(i32) | #empty) i32 =
 
 #[fragment]
 entry fragment_main(#[builtin(position)] _fc: vec4f32) #[location(0)] vec4f32 =
-  let a = shade(#big([1, 2, 3, 4])) in
-  let b = shade(#small(7)) in
+  let a = shade(#big([1, 2, 3, 4]))
+  let b = shade(#small(7))
   let c = shade(#empty) in
   @[f32.i32(a) / 255.0f32, f32.i32(b) / 255.0f32, f32.i32(c) / 255.0f32, 1.0f32]

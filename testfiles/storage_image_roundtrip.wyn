@@ -6,8 +6,8 @@
 #[compute]
 entry paint(#[storage_image(set=0, binding=0, format=rgba8unorm, access=write_only)] img: storage_image,
             #[builtin(global_invocation_id)] gid: vec3u32) () =
-  let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
-  let fx = f32.u32(gid.x) / 1024.0 in
+  let xy = @[i32.u32(gid.x), i32.u32(gid.y)]
+  let fx = f32.u32(gid.x) / 1024.0
   let fy = f32.u32(gid.y) / 1024.0 in
   image_store(img, xy, @[fx, fy, 0.0, 1.0])
 

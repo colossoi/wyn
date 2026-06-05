@@ -6,7 +6,7 @@
 #[compute]
 entry paint(#[storage_image(set=0, binding=0, format=rgba8unorm, access=write_only)] img: storage_image,
             #[builtin(global_invocation_id)] gid: vec3u32) () =
-  let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
+  let xy = @[i32.u32(gid.x), i32.u32(gid.y)]
   let fx = f32.u32(gid.x) / 1024.0 in
   image_store(img, xy, @[fx, 0.0, 0.0, 1.0])
 
@@ -23,6 +23,6 @@ entry fragment_main(#[builtin(position)] pos: vec4f32,
                     #[texture(set=0, binding=0)] tex: texture2d,
                     #[sampler(set=0, binding=1)] samp: sampler)
   #[location(0)] vec4f32 =
-  let uv = @[pos.x / 1024.0, pos.y / 1024.0] in
+  let uv = @[pos.x / 1024.0, pos.y / 1024.0]
   let base = texture_sample(tex, samp, uv, 0.0) in
   @[base.x, 0.5 + 0.5 * f32.sin(iTime), 0.0, 1.0]
