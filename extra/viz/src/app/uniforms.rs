@@ -11,14 +11,12 @@
 //! WGSL test pattern has its own simpler `build_test_pattern_uniforms`
 //! that hardcodes a single resolution uniform at (0, 0).
 
-
 use anyhow::{Result, anyhow};
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingResource, BindingType, Buffer, BufferBindingType, BufferDescriptor,
     BufferUsages, ShaderStages,
 };
-
 
 // ---------------------------------------------------------------------------
 // Uniform repr-C structs. wgpu's std140 layout: vec3<f32> pads to 16 bytes,

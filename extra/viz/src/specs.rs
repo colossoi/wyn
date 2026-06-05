@@ -13,9 +13,8 @@ impl PushConstantSpec {
     /// Parse from "name:type=value" format
     /// Examples: "n:i32=64", "header_base:u32x19=0,0,0,..."
     pub fn parse(spec: &str) -> Result<Self> {
-        let (name_type, value) = spec
-            .split_once('=')
-            .ok_or_else(|| anyhow!("Push constant spec must contain '=': {}", spec))?;
+        let (name_type, value) =
+            spec.split_once('=').ok_or_else(|| anyhow!("Push constant spec must contain '=': {}", spec))?;
         let (name, ty) = name_type
             .split_once(':')
             .ok_or_else(|| anyhow!("Push constant spec must have format name:type=value: {}", spec))?;
