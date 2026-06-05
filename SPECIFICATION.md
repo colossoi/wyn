@@ -757,8 +757,6 @@ exp         ::= atom
                 | "|" pat ("," pat)* "|" exp
                 | "loop" pat ["=" exp] loopform "do" exp
                 | "#[" attr "]" exp
-                | "unsafe" exp
-                | "assert" atom atom
                 | exp "with" slice "=" exp
                 | exp "with" fieldid ("." fieldid)* "=" exp
                 | exp "with" "." swizzle assign_op exp
@@ -863,32 +861,53 @@ Evaluates to an empty tuple.
 Evaluates to the result of `e`.
 
 #### ???
-A typed hole, usable as a placeholder expression. The type checker will infer any necessary type for this expression. This can sometimes result in an ambiguous type, which can be resolved using a type ascription. Evaluating a typed hole results in a run-time error.
+A typed hole, usable as a placeholder expression. The type checker
+will infer any necessary type for this expression. This can sometimes
+result in an ambiguous type, which can be resolved using a type
+ascription. Evaluating a typed hole results in a run-time error.
 
 #### (e1, e2, ..., eN)
-Evaluates to a tuple containing N values. Equivalent to the record literal `{0=e1, 1=e2, ..., N-1=eN}`.
+Evaluates to a tuple containing N values. Equivalent to the record
+literal `{0=e1, 1=e2, ..., N-1=eN}`.
 
 #### {f1, f2, ..., fN}
-A record expression consists of a comma-separated sequence of field expressions. Each field expression defines the value of a field in the record. A field expression can take one of two forms:
+A record expression consists of a comma-separated sequence of field
+expressions. Each field expression defines the value of a field in
+the record. A field expression takes one of two forms:
 
-- `f = e`: defines a field with the name `f` and the value resulting from evaluating `e`.
-- `f`: defines a field with the name `f` and the value of the variable `f` in scope.
+- `f = e`: defines a field with the name `f` and the value resulting
+  from evaluating `e`.
+- `f`: defines a field with the name `f` and the value of the
+  variable `f` in scope.
 
 Each field may only be defined once.
 
 #### a[i]
-Return the element at the given position in the array. The index may be of any unsigned integer type. Multi-dimensional arrays are indexed by chaining: `a[i][j]` selects an element from a rank-2 array; `a[i]` alone returns the inner sub-array.
-
-The array `a` must be a variable name or a parenthesised expression. Furthermore, there may not be a space between `a` and the opening bracket. This disambiguates the array indexing `a[i]`, from `a [i]`, which is a function call with a literal array.
+Return the element at the given position in the array. The index may
+be of any unsigned integer type. Multi-dimensional arrays are indexed
+by chaining: `a[i][j]` selects an element from a rank-2 array; `a[i]`
+alone returns the inner sub-array.
 
 #### a[i:j:s]
-Return a slice of the array `a` from index `i` to `j`, the former inclusive and the latter exclusive, taking every `s`-th element. The `s` parameter may not be zero. If `s` is negative, it means to start at `i` and descend by steps of size `s` to `j` (not inclusive). Slicing can be done only with expressions of type `i64`.
+Return a slice of the array `a` from index `i` to `j`, the former
+inclusive and the latter exclusive, taking every `s`-th element. The
+`s` parameter may not be zero. If `s` is negative, it means to start
+at `i` and descend by steps of size `s` to `j` (not inclusive).
+Slicing indices have type `i64`.
 
-It is generally a bad idea for `s` to be non-constant. Slicing of multiple dimensions is done by chaining: `a[i:j][k:l]` slices the outer dimension first, then the inner one.
+It is generally a bad idea for `s` to be non-constant. Slicing of
+multiple dimensions is done by chaining: `a[i:j][k:l]` slices the
+outer dimension first, then the inner one.
 
-If `s` is elided it defaults to 1. If `i` or `j` is elided, their value depends on the sign of `s`. If `s` is positive, `i` become 0 and `j` become the length of the array. If `s` is negative, `i` becomes the length of the array minus one, and `j` becomes minus one. This means that `a[::-1]` is the reverse of the array `a`.
+If `s` is elided it defaults to 1. If `i` or `j` is elided, their
+value depends on the sign of `s`. If `s` is positive, `i` becomes 0
+and `j` becomes the length of the array. If `s` is negative, `i`
+becomes the length of the array minus one and `j` becomes minus one.
+This means that `a[::-1]` is the reverse of the array `a`.
 
-In the general case, the size of the array produced by a slice is unknown (see Size types). In a few cases, the size is known statically:
+In the general case, the size of the array produced by a slice is
+unknown (see Size Types). In a few cases the size is known
+statically:
 
 - `a[0:n]` has size `n`
 - `a[:n]` has size `n`
@@ -898,23 +917,32 @@ In the general case, the size of the array produced by a slice is unknown (see S
 This holds only if `n` is a variable or constant.
 
 #### [x, y, z]
-Create an array containing the indicated elements. Each element must have the same type and shape.
-
-**Large array optimisation**: as a special case, large one-dimensional array literal consisting entirely of monomorphic constants (i.e., numbers must have a type suffix) are handled with specialised fast-path code by the compiler. To keep compile times manageable, make sure that all very large array literals (more than about ten thousand elements) are of this form. This is likely relevant only for generated code.
+Create an array containing the indicated elements. Each element must
+have the same type and shape.
 
 #### x..y...z
-Construct a signed integer array whose first element is `x` and which proceeds with a stride of `y-x` until reaching `z` (inclusive). The `..y` part can be elided in which case a stride of 1 is used. All components must be of the same unsigned integer type.
+Construct a signed integer array whose first element is `x`, which
+proceeds with a stride of `y-x` until reaching `z` (inclusive). The
+`..y` part may be elided, in which case a stride of 1 is used. All
+components must be of the same signed integer type.
 
-A run-time error occurs if `z` is less than `x` or `y`, or if `x` and `y` are the same value.
+A run-time error occurs if `z` is less than `x` or `y`, or if `x` and
+`y` are the same value.
 
-In the general case, the size of the array produced by a range is unknown (see Size types). In a few cases, the size is known statically:
+In the general case, the size of the array produced by a range is
+unknown (see Size Types). In a few cases the size is known
+statically:
 
-- `0..<n` has size `n`.
-- `0..1..<n` has size `n`.
+- `0..<n` has size `n`
+- `0..1..<n` has size `n`
 - `1..2...n` has size `n`
 
 #### x..y..<z
-Construct a signed integer array whose first elements is `x`, and which proceeds upwards with a stride of `y-x` until reaching `z` (exclusive). The `..y` part can be elided in which case a stride of 1 is used. A run-time error occurs if `z` is less than `x` or `y`, or if `x` and `y` are the same value.
+Construct a signed integer array whose first element is `x`, which
+proceeds upwards with a stride of `y-x` until reaching `z`
+(exclusive). The `..y` part may be elided, in which case a stride of
+1 is used. A run-time error occurs if `z` is less than `x` or `y`,
+or if `x` and `y` are the same value.
 
 - `0..1..<n` has size `n`
 - `0..<n` has size `n`
@@ -922,73 +950,119 @@ Construct a signed integer array whose first elements is `x`, and which proceeds
 This holds only if `n` is a variable or constant.
 
 #### x..y..>z
-Construct a signed integer array whose first elements is `x`, and which proceeds downwards with a stride of `y-x` until reaching `z` (exclusive). The `..y` part can be elided in which case a stride of -1 is used. A run-time error occurs if `z` is greater than `x` or `y`, or if `x` and `y` are the same value.
+Construct a signed integer array whose first element is `x`, which
+proceeds downwards with a stride of `y-x` until reaching `z`
+(exclusive). The `..y` part may be elided, in which case a stride
+of -1 is used. A run-time error occurs if `z` is greater than `x` or
+`y`, or if `x` and `y` are the same value.
 
 #### e.f
-Access field `f` of the expression `e`, which must be a record or tuple.
+Access field `f` of the expression `e`, which must be a record or
+tuple.
 
 #### m.(e)
-Evaluate the expression `e` with the module `m` locally opened, as if by `open`. This can make some expressions easier to read and write, without polluting the global scope with a declaration-level `open`.
+Evaluate the expression `e` with the module `m` locally opened, as if
+by `open`. This can make some expressions easier to read and write
+without polluting the surrounding scope with a declaration-level
+`open`.
 
 #### x binop y
-Apply an operator to `x` and `y`. Operators are functions like any other, and can be user-defined. Wyn pre-defines certain "magical" overloaded operators that work on several types. Overloaded operators cannot be defined by the user. Both operands must have the same type, except where noted below for `**`. The predefined operators and their semantics are:
+Apply an operator to `x` and `y`. Operators are functions like any
+other and can be user-defined. Wyn pre-defines a set of overloaded
+operators that work across multiple numeric types; these overloaded
+operators cannot be redefined by the user (but they may be shadowed —
+see User-Defined Operators). Both operands must have the same type,
+except where noted below for `**`. The predefined operators are:
 
-- **`**`**: Power operator, defined for all numeric types. The base and exponent must have the same type, **with one exception**: if the base is a floating-point scalar (`f16` / `f32` / `f64`), the exponent may be any signed or unsigned integer type (`i8` … `i64`, `u8` … `u64`); the result type is the base's float type, computed as if the integer exponent were first converted to the base's float type.
-- **`//`, `%%`**: Division and remainder on integers, with rounding towards zero.
-- **`*`, `/`, `%`, `+`, `-`**: The usual arithmetic operators, defined for all numeric types. Note that `/` and `%` rounds towards negative infinity when used on integers - this is different from in C.
-- **`^`, `&`, `|`, `>>`, `<<`, `>>>`**: Bitwise operators, respectively bitwise xor, and, or, arithmetic shift right, left shift, and logical (unsigned) shift right. Shifting is undefined if the right operand is negative, or greater than or equal to the length in bits of the left operand.
+- **`**`**: Power operator, defined for all numeric types. The base
+  and exponent must have the same type, **with one exception**: if
+  the base is a floating-point scalar (`f16` / `f32` / `f64`), the
+  exponent may be any signed or unsigned integer type
+  (`i8` … `i64`, `u8` … `u64`); the result type is the base's float
+  type, computed as if the integer exponent were first converted to
+  the base's float type.
+- **`//`, `%%`**: Integer division and remainder, rounding towards
+  zero.
+- **`*`, `/`, `%`, `+`, `-`**: The usual arithmetic operators,
+  defined for all numeric types. `/` and `%` round towards negative
+  infinity when used on integers — different from C.
+- **`^`, `&`, `|`, `>>`, `<<`, `>>>`**: Bitwise operators —
+  respectively bitwise xor, and, or, arithmetic shift right, left
+  shift, and logical (unsigned) shift right. Shifting is undefined if
+  the right operand is negative, or greater than or equal to the bit
+  width of the left operand.
 
-Note that, unlike in C, bitwise operators have higher priority than arithmetic operators. This means that `x & y == z` is understood as `(x & y) == z`, rather than `x & (y == z)` as it would in C. Note that the latter is a type error in Wyn anyhow.
+Unlike in C, bitwise operators have higher priority than arithmetic
+operators. This means that `x & y == z` is understood as `(x & y) ==
+z`, rather than `x & (y == z)` as it would in C. (The latter is a
+type error in Wyn anyway.)
 
-- **`==`, `!=`**: Compare any two values of builtin or compound type for equality.
-- **`<`, `<=`. `>`, `>=`**: Company any two values of numeric type for equality.
-- **`` `qualname` ``**: Use qualname, which may be any non-operator function name, as an infix operator.
+- **`==`, `!=`**: Compare any two values of built-in or compound type
+  for equality.
+- **`<`, `<=`, `>`, `>=`**: Compare any two values of numeric type
+  for ordering.
+- **`` `qualname` ``**: Use `qualname`, which may be any non-operator
+  function name, as an infix operator.
 
 #### x && y
-Short-circuiting logical conjunction; both operands must be of type `bool`.
+Short-circuiting logical conjunction; both operands must be of type
+`bool`.
 
 #### x || y
-Short-circuiting logical disjunction; both operands must be of type `bool`.
+Short-circuiting logical disjunction; both operands must be of type
+`bool`.
 
-#### f x
-Apply the function `f` to the argument `x`.
+#### f(x, y, z)
+Apply the function `f` to the arguments `x`, `y`, and `z`. Function
+application is always fully saturated: every parameter of `f` is
+given a value at the call site. Partial application is not
+supported.
 
 #### #c(x, y, z)
-Apply the sum type constructor `#c` to the payload `x`, `y`, and `z`. A constructor application is always assumed to be saturated, i.e. its entire payload provided. This means that constructors may not be partially applied. A nullary constructor is written bare, with no parentheses (`#c`).
+Apply the sum type constructor `#c` to the payload `x`, `y`, and
+`z`. A constructor application is always assumed to be saturated, so
+constructors may not be partially applied. A nullary constructor is
+written bare, with no parentheses (`#c`).
 
 #### e : t
-Annotate that `e` is expected to be of type `t`, failing with a type error if it is not. If `t` is an array with shape declarations, the correctness of the shape declarations is checked at run-time.
+Annotate that `e` is expected to be of type `t`, failing with a type
+error if it is not.
 
-Due to ambiguities, this syntactic form cannot appear as an array index expression unless it is first enclosed in parentheses. However, as an array index must always be of type `i64`, there is never a reason to put an explicit type ascription there.
+Due to ambiguities, this syntactic form cannot appear as an array
+index expression unless it is first enclosed in parentheses. However,
+as an array index must always be of type `i64`, there is never a
+reason to put an type ascription there.
 
 #### e :> t
-Coerce the size of `e` to `t`. The type of `t` must match the type of `e`, except that the sizes may be statically different. At run-time, it will be verified that the sizes are the same.
+Coerce the size of `e` to `t`. The type of `t` must match the type
+of `e`, except that the sizes may be statically different. At
+run-time it will be verified that the sizes are the same.
 
 #### ! x
-Logical negation if `x` is of type `bool`. Bitwise negation if `x` is of integral type.
+Logical negation if `x` is of type `bool`. Bitwise negation if `x` is
+of integral type.
 
 #### - x
 Numerical negation of `x`, which must be of numeric type.
 
 #### #[attr] e
-Apply the given attribute to the expression. Attributes are an ad-hoc and optional mechanism for providing extra information, directives, or hints to the compiler. See Attributes for more information.
-
-#### unsafe e
-Elide safety checks and assertions (such as bounds checking) that occur during execution of `e`. This is useful if the compiler is otherwise unable to avoid bounds checks (e.g. when using indirect indexes), but you really do not want them there. Make very sure that the code is correct; eliding such checks can lead to memory corruption.
-
-This construct is deprecated. Use the `#[unsafe]` attribute instead.
-
-#### assert cond e
-Terminate execution with an error if `cond` evaluates to false, otherwise produce the result of evaluating `e`. Unless `e` produces a value that is used subsequently (it can just be a variable), dead code elimination may remove the assertion.
+Apply the given attribute to the expression. Attributes are an ad-hoc
+and optional mechanism for providing extra information, directives,
+or hints to the implementation. See Attributes for more information.
 
 #### a with [i] = e
-Return `a`, but with the element at position `i` changed to contain the result of evaluating `e`. Consumes `a`.
+Return `a`, but with the element at position `i` changed to contain
+the result of evaluating `e`. Consumes `a`.
 
 #### r with f = e
-Return the record `r`, but with field `f` changed to have value `e`. The type of the field must remain unchanged. Type inference is limited: `r` must have a completely known type up to `f`. This sometimes requires extra type annotations to make the type of `r` known.
+Return the record `r`, but with field `f` changed to have value `e`.
+The type of the field must remain unchanged. Type inference here is
+limited: `r` must have a completely known type up to `f`. This
+sometimes requires extra type annotations to make the type of `r`
+known.
 
 #### if c then a else b
-If `c` evaluates to true, evaluate `a`, else evaluate `b`.
+If `c` evaluates to true, evaluate `a`; otherwise evaluate `b`.
 
 ### Binding Expressions
 
