@@ -1,21 +1,23 @@
 -- Truncated octahedra tiling space (the bitruncated cubic honeycomb).
 --
 -- The truncated octahedron is the Voronoi cell of the body-centred cubic
--- (BCC) lattice, so the space-filling packing is rendered by domain-folding
--- each point onto its nearest BCC centre and evaluating one cell's SDF: the
--- intersection of a cube (its 6 square faces) and an octahedron (its 8
--- hexagonal faces). A finite rectangular block of complete cells is
--- raymarched, hash-coloured per cell, lit by one top light with soft shadows
--- and ambient occlusion — after Wikipedia's "truncated octahedra tiling
--- space" illustration (viewed near-head-on so the cells form a grid).
+-- (BCC) lattice. Rather than sphere-trace a (discontinuous) distance field,
+-- this traverses the lattice cell-by-cell and does an EXACT ray/polytope test
+-- per cell: the cell is the intersection of 7 slabs (3 axis slabs → 6 square
+-- faces, 4 diagonal slabs → 8 hexagonal faces), so ray-vs-cell is plane
+-- clipping. Each step analytically exits the current Voronoi region and moves
+-- to the next, giving exact hits and exact (flat) face normals — no banding,
+-- no overshoot. A finite block of cells is kept, lit by two shadowed lights,
+-- after Wikipedia's "truncated octahedra tiling space" illustration.
 --
 -- Texture-free; runs in viz directly:
 --   viz run truncated_octahedra.spv --size 720x720
 
 open f32
 
-def GAP: f32 = 0.02     -- shrink each cell so a thin contact seam shows
-def BOUND: f32 = 4.0    -- cluster half-extent, as a box on cell-centre coords
+def GAP: f32 = 0.03      -- shrink each solid cell so a contact seam shows
+def BOUND: f32 = 4.0     -- block half-extent, as a box on cell-centre coords
+def BIG: f32 = 100000.0
 
 def vround(v: vec3f32) vec3f32 = vec.floor(v + @[0.5, 0.5, 0.5])
 
@@ -29,56 +31,75 @@ def cellCenter(p: vec3f32) vec3f32 =
   let db = p - b in
   if dot(da, da) < dot(db, db) then a else b
 
--- Truncated-octahedron cell SDF: cube ∩ octahedron, each a normalised
--- half-space distance (so the hex faces stay regular). The square faces sit
--- at |x|≤1 and the hex faces at |x|+|y|+|z|≤1.5.
-def cellSDF(local: vec3f32) f32 =
-  let q = vec.abs(local) in
-  let boxd = max(max(q.x, q.y), q.z) - (1.0 - GAP) in
-  let octd = (q.x + q.y + q.z - 1.5 * (1.0 - GAP)) * 0.57735027 in
-  max(boxd, octd)
+def kept(c: vec3f32) bool = max(max(abs(c.x), abs(c.y)), abs(c.z)) <= BOUND
 
--- (distance, cell centre). The box term on the centre is constant within a
--- cell, so it removes whole cells outside the block (complete cells, stacked
--- in flat layers). The field is discontinuous at that removal boundary — the
--- marcher clamps its step near the block to cope.
-def sceneMap(p: vec3f32) (f32, vec3f32) =
-  let c = cellCenter(p) in
-  let bnd = max(max(abs(c.x), abs(c.y)), abs(c.z)) - BOUND in
-  let d = max(cellSDF(p - c), bnd) in
-  (d, c)
+-- Clip the ray (origin offset `o`, dir `rd`) by one slab |n·x| ≤ d, narrowing
+-- the running entry interval (tin, entry-normal nrm) and exit tout.
+def clipSlab(tin: f32, nrm: vec3f32, tout: f32, n: vec3f32, d: f32, o: vec3f32, rd: vec3f32)
+  (f32, vec3f32, f32) =
+  let denom = dot(n, rd) in
+  let no = dot(n, o) in
+  if abs(denom) < 0.0000001 then
+    -- Ray parallel to the slab: outside ⇒ no intersection.
+    if abs(no) > d then (BIG, nrm, 0.0 - BIG) else (tin, nrm, tout)
+  else
+    let ta = (0.0 - d - no) / denom in
+    let tb = (d - no) / denom in
+    let te = min(ta, tb) in
+    let tx = max(ta, tb) in
+    -- Entering this slab later than the running tin ⇒ it owns the hit normal
+    -- (outward face normal = −sign(denom)·n).
+    let (tin2, nrm2) = if te > tin then (te, normalize((0.0 - sign(denom)) * n)) else (tin, nrm) in
+    (tin2, nrm2, min(tout, tx))
 
-def sceneDist(p: vec3f32) f32 =
-  let (d, _) = sceneMap(p) in
-  d
+-- Exact ray / truncated-octahedron (centre c) intersection: 3 axis slabs of
+-- half-width `rc` (square faces) ∩ 4 diagonal slabs of half-width `roo` (hex
+-- faces). Returns (t_enter, t_exit, enter_normal). A hit is t_enter ≤ t_exit.
+def rayCell(ro: vec3f32, rd: vec3f32, c: vec3f32, rc: f32, roo: f32) (f32, f32, vec3f32) =
+  let o = ro - c in
+  let (t1, n1, x1) = clipSlab(0.0 - BIG, @[0.0, 1.0, 0.0], BIG, @[1.0, 0.0, 0.0], rc, o, rd) in
+  let (t2, n2, x2) = clipSlab(t1, n1, x1, @[0.0, 1.0, 0.0], rc, o, rd) in
+  let (t3, n3, x3) = clipSlab(t2, n2, x2, @[0.0, 0.0, 1.0], rc, o, rd) in
+  let (t4, n4, x4) = clipSlab(t3, n3, x3, @[1.0, 1.0, 1.0], roo, o, rd) in
+  let (t5, n5, x5) = clipSlab(t4, n4, x4, @[1.0, 1.0, 0.0 - 1.0], roo, o, rd) in
+  let (t6, n6, x6) = clipSlab(t5, n5, x5, @[1.0, 0.0 - 1.0, 1.0], roo, o, rd) in
+  let (t7, n7, x7) = clipSlab(t6, n6, x6, @[0.0 - 1.0, 1.0, 1.0], roo, o, rd) in
+  (t7, x7, n7)
 
-def calcNormal(p: vec3f32) vec3f32 =
-  let e = 0.0025 in
-  let k0 = @[1.0, 0.0 - 1.0, 0.0 - 1.0] in
-  let k1 = @[0.0 - 1.0, 0.0 - 1.0, 1.0] in
-  let k2 = @[0.0 - 1.0, 1.0, 0.0 - 1.0] in
-  let k3 = @[1.0, 1.0, 1.0] in
-  normalize(k0 * sceneDist(p + k0 * e) + k1 * sceneDist(p + k1 * e) + k2 * sceneDist(p + k2 * e) + k3 * sceneDist(p + k3 * e))
+-- The solid (gap-shrunk) cell radii and the full Voronoi-cell radii.
+def RC_SOLID: f32 = 1.0 - GAP
+def RO_SOLID: f32 = 1.5 * (1.0 - GAP)
 
--- Soft shadow toward the light (iq).
-def softShadow(ro: vec3f32, rd: vec3f32) f32 =
-  let (_, _, res) =
-    loop (i, t, res) = (0, 0.02, 1.0) while i < 64 && t < 9.0 && res > 0.02 do
-      let d = sceneDist(ro + rd * t) in
-      let res2 = min(res, 14.0 * d / t) in
-      (i + 1, t + clamp(d, 0.01, 0.2), res2)
+-- Traverse the lattice: at each step, find the cell whose Voronoi region we're
+-- in, test its solid cell, and (on miss) advance past the region exit to the
+-- next cell. Returns (hit, t, normal, centre).
+def traceScene(ro: vec3f32, rd: vec3f32, tstart: f32, tmax: f32) (bool, f32, vec3f32, vec3f32) =
+  let (_, _, hit, ht, hn, hc) =
+    loop (i, t, hit, ht, hn, hc) =
+      (0, tstart, false, 0.0, @[0.0, 1.0, 0.0], @[0.0, 0.0, 0.0])
+    while i < 48 && !hit && t < tmax do
+      let c = cellCenter(ro + rd * (t + 0.001)) in
+      let (_, vout, _) = rayCell(ro, rd, c, 1.0, 1.5) in
+      let (sin0, sout, sn) = rayCell(ro, rd, c, RC_SOLID, RO_SOLID) in
+      if (sin0 <= sout) && (sin0 > t - 0.001) && (sin0 < tmax) && kept(c) then
+        (i + 1, sin0, true, sin0, sn, c)
+      else
+        (i + 1, max(vout, t) + 0.002, false, ht, hn, hc)
   in
-  clamp(res, 0.0, 1.0)
+  (hit, ht, hn, hc)
 
--- Cheap ambient occlusion (iq): how fast the field rises along the normal.
-def calcAO(pos: vec3f32, nor: vec3f32) f32 =
-  let (_, occ, _) =
-    loop (i, occ, sca) = (0, 0.0, 1.0) for k < 5 do
-      let h = 0.012 + 0.12 * f32.i32(k) in
-      let d = sceneDist(pos + nor * h) in
-      (k, occ + (h - d) * sca, sca * 0.93)
+-- Hard shadow / occlusion: is anything between `ro` and the (directional)
+-- light within `tmax`?
+def shadowed(ro: vec3f32, rd: vec3f32, tmax: f32) bool =
+  let (_, _, blk) =
+    loop (i, t, blk) = (0, 0.02, false) while i < 40 && !blk && t < tmax do
+      let c = cellCenter(ro + rd * (t + 0.001)) in
+      let (_, vout, _) = rayCell(ro, rd, c, 1.0, 1.5) in
+      let (sin0, sout, _) = rayCell(ro, rd, c, RC_SOLID, RO_SOLID) in
+      if (sin0 <= sout) && (sin0 > 0.02) && (sin0 < tmax) && kept(c) then (i + 1, t, true)
+      else (i + 1, max(vout, t) + 0.002, false)
   in
-  clamp(1.0 - 1.6 * occ, 0.0, 1.0)
+  blk
 
 def hash3(p: vec3f32) vec3f32 =
   let q = @[dot(p, @[127.1, 311.7, 74.7]),
@@ -119,49 +140,33 @@ entry fragment_main(
   let vv = cross(uu, ww) in
   let rd = normalize(p.x * uu + p.y * vv + 2.2 * ww) in
 
-  -- Sphere-trace. Far from the block the true distance steps fast; once close
-  -- (|p|<7.5) the step is clamped (the removal term makes the field
-  -- discontinuous there, so big steps would punch through a wall).
-  let (_, t0, hit) =
-    loop (i, t, hit) = (0, 0.0, false) while i < 260 && !hit && t < 60.0 do
-      let pc = ro + rd * t in
-      let d = sceneDist(pc) in
-      let stepd = if magnitude(pc) < 7.5 then clamp(d, 0.006, 0.12) else max(d * 0.8, 0.12) in
-      if d < 0.0008 * t + 0.0005 then (i + 1, t, true)
-      else (i + 1, t + stepd, false)
-  in
-
-  -- Refine onto the iso-surface so the normal isn't quantised by the step
-  -- (this is what removes the concentric-arc banding).
-  let t = loop tr = t0 for r < 4 do tr + sceneDist(ro + rd * tr) in
+  -- Bound the whole block with one big box (reuse rayCell as a pure cube).
+  let (btin, btout, _) = rayCell(ro, rd, @[0.0, 0.0, 0.0], BOUND + 2.0, BIG) in
 
   let bg = @[0.97, 0.975, 0.99] in
   let col =
-    if hit then
-      let pos = ro + rd * t in
-      let nor = calcNormal(pos) in
-      let (_, c) = sceneMap(pos) in
-      -- Muted per-cell colour from a hash of the cell centre.
-      let h = hash3(c) in
-      let base = 0.46 + 0.30 * vec.cos(6.2831 * h.x + @[0.0, 2.1, 4.2]) in
-      -- Two lights, each soft-shadowed, plus ambient occlusion: a warm key
-      -- from upper-right and a cooler fill from the upper-left, matching the
-      -- reference's two bright faces per cell.
-      let lig1 = normalize(@[0.55, 0.80, 0.40]) in
-      let lig2 = normalize(@[0.0 - 0.60, 0.55, 0.30]) in
-      let sh1 = softShadow(pos + nor * 0.015, lig1) in
-      let sh2 = softShadow(pos + nor * 0.015, lig2) in
-      let dif1 = max(dot(nor, lig1), 0.0) * sh1 in
-      let dif2 = max(dot(nor, lig2), 0.0) * sh2 in
-      let ao = calcAO(pos, nor) in
-      let sky = 0.5 + 0.5 * nor.y in
-      let amb = (0.22 + 0.16 * sky) * ao in
-      let hal = normalize(lig1 - rd) in
-      let spe = dif1 * max(dot(nor, hal), 0.0) ** 40.0 in
-      let lit = base * (amb + 0.85 * dif1 * @[1.05, 1.0, 0.9] + 0.45 * dif2 * @[0.85, 0.92, 1.05])
-              + 0.20 * @[1.0, 1.0, 1.0] * spe in
-      mix(lit, bg, smoothstep(18.0, 40.0, t))
-    else bg
+    if btin > btout || btout < 0.0 then bg
+    else
+      let (hit, t, nor, c) = traceScene(ro, rd, max(btin, 0.0), btout) in
+      if hit then
+        let pos = ro + rd * t in
+        let h = hash3(c) in
+        let base = 0.46 + 0.30 * vec.cos(6.2831 * h.x + @[0.0, 2.1, 4.2]) in
+        -- Two directional lights, each with a hard cast shadow.
+        let lig1 = normalize(@[0.55, 0.80, 0.40]) in
+        let lig2 = normalize(@[0.0 - 0.60, 0.55, 0.30]) in
+        let s1 = if shadowed(pos + nor * 0.01, lig1, 18.0) then 0.0 else 1.0 in
+        let s2 = if shadowed(pos + nor * 0.01, lig2, 18.0) then 0.0 else 1.0 in
+        let d1 = max(dot(nor, lig1), 0.0) * s1 in
+        let d2 = max(dot(nor, lig2), 0.0) * s2 in
+        let sky = 0.5 + 0.5 * nor.y in
+        let amb = 0.24 + 0.14 * sky in
+        let hal = normalize(lig1 - rd) in
+        let spe = d1 * max(dot(nor, hal), 0.0) ** 40.0 in
+        let lit = base * (amb + 0.85 * d1 * @[1.05, 1.0, 0.9] + 0.45 * d2 * @[0.85, 0.92, 1.05])
+                + 0.18 * @[1.0, 1.0, 1.0] * spe in
+        mix(lit, bg, smoothstep(18.0, 42.0, t))
+      else bg
   in
   let g = vec.pow(vec.clamp(col, @[0.0, 0.0, 0.0], @[1.0, 1.0, 1.0]), @[0.4545, 0.4545, 0.4545]) in
   @[g.x, g.y, g.z, 1.0]
