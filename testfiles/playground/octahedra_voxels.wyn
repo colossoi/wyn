@@ -114,19 +114,44 @@ def raycast(ro: vec3f32, rd: vec3f32, gro: vec3f32, iTime: f32) (bool, f32, vec3
   in
   (hit, ht, hn, hc)
 
--- Cheap neighbour-occupancy AO: how many of the four cells sitting above the
--- face (across its rim) are solid. (iq's voxellines AO, simplified for the
--- truncated-octahedron face instead of a square.)
-def calcAO(pos: vec3f32, nor: vec3f32, gro: vec3f32, iTime: f32) f32 =
+-- Occlusion toward a directional light: is any solid cell between `o` and the
+-- light within `tmax`? Returns 1.0 (lit) or 0.0 (in shadow).
+def occluded(o: vec3f32, rd: vec3f32, gro: vec3f32, iTime: f32, tmax: f32) f32 =
+  let (_, _, blk) =
+    loop (i, t, blk) = (0, 0.05, false) while i < 48 && !blk && t < tmax do
+      let c = cellCenter(o + rd * (t + 0.001)) in
+      let (vin, vout, _) = rayCell(o, rd, c, 1.0, 1.5) in
+      if mapSolid(c, gro, iTime) && vin > 0.05 && vin < tmax then (i + 1, t, true)
+      else (i + 1, vout + 0.002, false)
+  in
+  if blk then 0.0 else 1.0
+
+-- Soft cast shadow: average a small cone of occlusion rays (centre + 4) for a
+-- penumbra. `r` ≈ cone half-angle; larger = softer.
+def softShadow(o: vec3f32, rd: vec3f32, gro: vec3f32, iTime: f32, tmax: f32, r: f32) f32 =
+  let a = normalize(cross(rd, @[0.07, 1.0, 0.13])) in
+  let b = cross(a, rd) in
+  let u = a * r in
+  let v = b * r in
+  (occluded(o, rd, gro, iTime, tmax)
+   + occluded(o, normalize(rd + u), gro, iTime, tmax)
+   + occluded(o, normalize(rd - u), gro, iTime, tmax)
+   + occluded(o, normalize(rd + v), gro, iTime, tmax)
+   + occluded(o, normalize(rd - v), gro, iTime, tmax)) * 0.2
+
+-- Per-face ambient occlusion: how many of the four cells across the face rim
+-- are solid. Sampled from the cell centre `c` (not the per-pixel hit point),
+-- so it's constant across the face — no within-face pattern.
+def calcAO(c: vec3f32, nor: vec3f32, gro: vec3f32, iTime: f32) f32 =
   let up = if abs(nor.y) > 0.9 then @[1.0, 0.0, 0.0] else @[0.0, 1.0, 0.0] in
   let t1 = normalize(cross(nor, up)) in
   let t2 = cross(nor, t1) in
-  let b = pos + nor * 0.7 in
-  let occ = solidI(cellCenter(b + t1 * 1.2), gro, iTime)
-          + solidI(cellCenter(b - t1 * 1.2), gro, iTime)
-          + solidI(cellCenter(b + t2 * 1.2), gro, iTime)
-          + solidI(cellCenter(b - t2 * 1.2), gro, iTime) in
-  clamp(1.0 - 0.22 * occ, 0.2, 1.0)
+  let b = c + nor * 1.4 in
+  let occ = solidI(cellCenter(b + t1 * 1.7), gro, iTime)
+          + solidI(cellCenter(b - t1 * 1.7), gro, iTime)
+          + solidI(cellCenter(b + t2 * 1.7), gro, iTime)
+          + solidI(cellCenter(b - t2 * 1.7), gro, iTime) in
+  clamp(1.0 - 0.18 * occ, 0.35, 1.0)
 
 ------------------------------------------------------------
 -- Fly-through camera path (after iq's `path`).
@@ -171,17 +196,17 @@ entry fragment_main(
   let rd = normalize(p.x * cu + p.y * cv + 2.5 * cw) in
 
   let lig = normalize(@[0.0 - 0.4, 0.3, 0.7]) in
-  let (hit, t, nor, _hc) = raycast(ro, rd, ro, iTime) in
+  let (hit, t, nor, hc) = raycast(ro, rd, ro, iTime) in
   let col =
     if hit then
       let pos = ro + rd * t in
-      let ao = calcAO(pos, nor, ro, iTime) in
-      -- B&W flat shading (key + sky + back fill), occluded.
-      let dif = clamp(dot(nor, lig), 0.0, 1.0) in
+      let ao = calcAO(hc, nor, ro, iTime) in
+      -- Soft cast shadow on the key light; AO on the indirect terms.
+      let sh = softShadow(pos + nor * 0.05, lig, ro, iTime, 22.0, 0.10) in
+      let dif = clamp(dot(nor, lig), 0.0, 1.0) * sh in
       let sky = 0.5 + 0.5 * nor.y in
       let bac = clamp(dot(nor, normalize(@[0.4, 0.0, 0.0 - 0.7])), 0.0, 1.0) in
-      let lin = 1.30 * dif + 0.55 * sky + 0.25 * bac + 0.18 in
-      let shade = lin * ao in
+      let shade = 1.30 * dif + 0.55 * sky * ao + 0.25 * bac * ao + 0.18 * ao in
       -- Stronger fog, forced fully to black before the march limit (90) so
       -- nothing pops into existence at the horizon.
       let fog = exp(0.0 - 0.035 * t) * (1.0 - smoothstep(50.0, 88.0, t)) in
