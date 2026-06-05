@@ -41,6 +41,21 @@ paradigm.
 
 ### Program Structure
 
+Where other shader languages iterate, Wyn transforms.
+
+Arrays are the primary data structure, aligning with the regular,
+data-parallel organization of modern GPU hardware. Operators such as
+`map`, `reduce`, `scan`, and `filter` consume and produce arrays,
+while function values specialize each operator invocation by
+capturing values from the surrounding scope.
+
+Most non-trivial programs are compositions of these operators. Rather
+than writing execution pipelines explicitly, programmers describe
+transformations of arrays; the compiler constructs GPU pipelines that
+preserve the program's semantics while exploiting the available
+parallelism. The programmer describes transformations; the compiler
+derives the pipeline.
+
 A Wyn program is a sequence of declarations. The smallest interesting
 program is a single compute entry point:
 
