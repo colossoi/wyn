@@ -1,0 +1,608 @@
+-- "Snail" — Wyn port of the Shadertoy shader https://www.shadertoy.com/view/ld3Gz2
+-- by Inigo Quilez. SDF raymarched snail on a leaf: spiral-shell distance
+-- field, bezier body/antennae, water drops, subsurface scattering, soft
+-- shadows, and a cheap blurred-cubemap background.
+--
+-- Textures: iChannel1/2/3 are external images. Run with viz:
+--   viz run snail.spv --texture iChannel1:A.png --texture iChannel2:B.jpg \
+--                     --texture iChannel3:C.png
+-- (Supply the classic Shadertoy organic/noise textures or equivalents.)
+--
+-- Fidelity notes (NOTE(hole)):
+--   * Wyn has only EXPLICIT-LOD `texture_sample(t,s,uv,lod)`; GLSL's
+--     implicit-LOD `texture(s,uv)` (4 sites: shell-bump, body sparkle,
+--     plant/leaf colour, leaf normal) is substituted with LOD 0 — may
+--     alias vs the derivative-selected original. The explicit-LOD sites
+--     (shell stripe noise, text1, and the LOD-4 background blur) port
+--     directly; the LOD-4 background relies on the generated mip chain.
+--   * GLSL bitwise `&`/`>>` (the tetrahedral-normal index trick) is
+--     rejected by Wyn's checker, so the 4 offset directions are written
+--     out as constants.
+--   * USE_TEXTURES==1. AA supersampling via `def AA` (2 ⇒ 4×; set 1 for
+--     the stock single-sample default).
+--
+-- The threaded params `it ic1 s1 ic2 s2` (and `ic3 s3` in shading) carry
+-- iTime + the texture/sampler bindings, which are GLSL globals.
+--
+-- Original GLSL preserved commented-out at the bottom.
+
+open f32
+
+def pi: f32 = 3.1415927
+
+-- Antialiasing: AA×AA samples per pixel. 1 = single sample (the stock
+-- shader's default), 2 = 4× AA (slower; 4× the raymarch + texture work).
+def AA: i32 = 2
+
+------------------------------------------------------------
+-- SDF primitives (iq, https://iquilezles.org/articles/distfunctions)
+------------------------------------------------------------
+def sdSphere(p: vec3f32, s: vec4f32) f32 = magnitude(p - s.xyz) - s.w
+
+def sdEllipsoid(p: vec3f32, c: vec3f32, r: vec3f32) f32 =
+  (magnitude((p - c) / r) - 1.0) * min(min(r.x, r.y), r.z)
+
+def sdCircle(p: vec2f32, c: vec2f32, r: f32) f32 = magnitude(p - c) - r
+
+def sdTorus(p: vec3f32, t: vec2f32) f32 =
+  magnitude(@[magnitude(p.xz) - t.x, p.y]) - t.y
+
+def sdCapsule(p: vec3f32, a: vec3f32, b: vec3f32, r: f32) f32 =
+  let pa = p - a in
+  let ba = b - a in
+  let h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0) in
+  magnitude(pa - ba * h) - r
+
+def udSegment(p: vec3f32, a: vec3f32, b: vec3f32) vec2f32 =
+  let pa = p - a in
+  let ba = b - a in
+  let h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0) in
+  @[magnitude(pa - ba * h), h]
+
+------------------------------------------------------------
+-- Quadratic bezier distance (ravg.pdf / iq)
+------------------------------------------------------------
+def det(a: vec2f32, b: vec2f32) f32 = a.x * b.y - b.x * a.y
+
+def getClosest(b0: vec2f32, b1: vec2f32, b2: vec2f32) vec3f32 =
+  let a = det(b0, b2) in
+  let b = 2.0 * det(b1, b0) in
+  let d = 2.0 * det(b2, b1) in
+  let f = b * d - a * a in
+  let d21 = b2 - b1 in
+  let d10 = b1 - b0 in
+  let d20 = b2 - b0 in
+  let gf0 = 2.0 * (b * d21 + d * d10 + a * d20) in
+  let gf = @[gf0.y, 0.0 - gf0.x] in
+  let pp = (0.0 - f) * gf / dot(gf, gf) in
+  let d0p = b0 - pp in
+  let ap = det(d0p, d20) in
+  let bp = 2.0 * det(d10, d0p) in
+  let t = clamp((ap + bp) / (2.0 * a + b + d), 0.0, 1.0) in
+  let m = mix(mix(b0, b1, t), mix(b1, b2, t), t) in
+  @[m.x, m.y, t]
+
+def sdBezier(a: vec3f32, b: vec3f32, c: vec3f32, p: vec3f32) vec4f32 =
+  let w = normalize(cross(c - b, a - b)) in
+  let u = normalize(c - b) in
+  let v = cross(w, u) in
+  let a2 = @[dot(a - b, u), dot(a - b, v)] in
+  let c2 = @[dot(c - b, u), dot(c - b, v)] in
+  let p3 = @[dot(p - b, u), dot(p - b, v), dot(p - b, w)] in
+  let cp = getClosest(a2 - p3.xy, @[0.0, 0.0] - p3.xy, c2 - p3.xy) in
+  @[sqrt(dot(cp.xy, cp.xy) + p3.z * p3.z), cp.z, magnitude(cp.xy), p3.z]
+
+------------------------------------------------------------
+-- Smooth min/max (iq)
+------------------------------------------------------------
+def smin(a: f32, b: f32, k: f32) f32 =
+  let h = max(k - abs(a - b), 0.0) in
+  min(a, b) - h * h * 0.25 / k
+
+def smax(a: f32, b: f32, k: f32) f32 =
+  let h = max(k - abs(a - b), 0.0) in
+  max(a, b) + h * h * 0.25 / k
+
+def smax3(a: vec3f32, b: vec3f32, k: f32) vec3f32 =
+  let h = vec.max(k - vec.abs(a - b), @[0.0, 0.0, 0.0]) in
+  vec.max(a, b) + h * h * 0.25 / k
+
+------------------------------------------------------------
+def hash1(n: f32) f32 = fract(sin(n) * 43758.5453123)
+
+-- Spherical Fibonacci direction (iq)
+def forwardSF(i: f32, n: f32) vec3f32 =
+  let phi = 2.0 * pi * fract(i / 1.618033988749894848) in
+  let zi = 1.0 - (2.0 * i + 1.0) / n in
+  let sinTheta = sqrt(1.0 - zi * zi) in
+  @[cos(phi) * sinTheta, sin(phi) * sinTheta, zi]
+
+------------------------------------------------------------
+-- Shell: logarithmic-spiral distance field. Returns (d, matInfo).
+-- Samples iChannel2 (explicit LOD 0).
+------------------------------------------------------------
+def mapShell(p0: vec3f32, ic2: texture2d, s2: sampler) (f32, vec4f32) =
+  let p = p0 - @[0.05, 0.12, 0.0 - 0.09] in
+  let q0 = @[[0.0 - 0.6333234236, 0.0 - 0.7332753384, 0.2474039592],
+             [0.7738444477, 0.0 - 0.6034162289, 0.1924931824],
+             [0.0081370606, 0.3133626215, 0.9495986813]] * p in
+  let b = 0.1759 in
+  let r = magnitude(q0.xy) in
+  let t = atan2(q0.y, q0.x) in
+  let np = (log(r) / b - t) / (2.0 * pi) in
+  let nm = (log(0.11) / b - t) / (2.0 * pi) in
+  let n = min(np, nm) in
+  let ni = floor(n) in
+  let r1 = exp(b * (t + 2.0 * pi * ni)) in
+  let r2 = r1 * 3.019863 in
+  let h1 = q0.z + 1.5 * r1 - 0.5 in
+  let dd1 = sqrt((r1 - r) * (r1 - r) + h1 * h1) - r1 in
+  let h2 = q0.z + 1.5 * r2 - 0.5 in
+  let dd2 = sqrt((r2 - r) * (r2 - r) + h2 * h2) - r2 in
+  let (d0, dx, dy) = if dd1 < dd2 then (dd1, r1 - r, h1) else (dd2, r2 - r, h2) in
+  let di = texture_sample(ic2, s2, @[t + r, 0.5], 0.0).x in
+  let d1 = d0 + 0.002 * di in
+  let matInfo = @[dx, dy, r / 0.4, t / pi] in
+  let s = q0 in
+  let q1 = q0 - @[0.34, 0.0 - 0.1, 0.03] in
+  let q1b = q1 with .xy = @[[0.8, 0.6], [0.0 - 0.6, 0.8]] * q1.xy in
+  let d2 = smin(d1, sdTorus(q1b, @[0.28, 0.05]), 0.06) in
+  let d3 = smax(d2, 0.0 - sdEllipsoid(q1b, @[0.0, 0.0, 0.0], @[0.24, 0.36, 0.24]), 0.03) in
+  let d4 = smax(d3, 0.0 - sdEllipsoid(s, @[0.52, 0.0, 0.0], @[0.42, 0.23, 0.5]), 0.05) in
+  (d4, matInfo)
+
+------------------------------------------------------------
+-- text1: detail texture. USE_TEXTURES==1 → iChannel1 (explicit LOD 0).
+------------------------------------------------------------
+def text1(p: vec2f32, ic1: texture2d, s1: sampler) f32 =
+  texture_sample(ic1, s1, p, 0.0).x
+
+------------------------------------------------------------
+-- Snail body/antennae. Returns (vec2 res, vec4 matInfo).
+-- Threads iTime (antennae sway) + iChannel1 (disp via text1).
+------------------------------------------------------------
+def mapSnail(p: vec3f32, it: f32, ic1: texture2d, s1: sampler) (vec2f32, vec4f32) =
+  let head = @[0.0 - 0.76, 0.6, 0.0 - 0.3] in
+  let q = p - head in
+
+  let b1a = sdBezier(@[0.0 - 0.13, 0.0 - 0.65, 0.0], @[0.24, 1.0, 0.0], head + @[0.04, 0.01, 0.0], p) in
+  let d1a = b1a.x - smoothstep(0.0, 0.2, b1a.y) * (0.16 - 0.07 * smoothstep(0.5, 1.0, b1a.y)) in
+  let b1 = sdBezier(@[0.0 - 0.085, 0.0, 0.0], @[0.0 - 0.1, 0.85, 0.0], head + @[0.06, 0.0 - 0.08, 0.0], p) in
+  let d2a = b1.x - (0.1 - 0.06 * b1.y) in
+  let d1b = smin(d1a, d2a, 0.03) in
+  let matInfo0 = @[b1.y, b1.z, b1.w, 0.0] in
+
+  let d2b = sdSphere(q, @[0.0, 0.0 - 0.06, 0.0, 0.085]) in
+  let d1c = smin(d1b, d2b, 0.03) in
+  let d1d = smin(d1c, sdSphere(p, @[0.05, 0.52, 0.0, 0.13]), 0.07) in
+
+  let q1 = q with .xz = @[[0.8, 0.6], [0.0 - 0.6, 0.8]] * q.xz in
+  let sq = @[q1.x, q1.y, abs(q1.z)] in
+
+  -- top antennae
+  let af = 0.05 * vec.sin(0.5 * it + @[0.0, 1.0, 3.0] + @[2.0, 1.0, 0.0] * sign(q1.z)) in
+  let b2 = sdBezier(@[0.0, 0.0, 0.0], @[0.0 - 0.1, 0.2, 0.2], @[0.0 - 0.3, 0.2, 0.3] + af, sq) in
+  let d3a = b2.x - (0.03 - 0.025 * b2.y) in
+  let d1e = smin(d1d, d3a, 0.04) in
+  let d3b = sdSphere(sq, @[0.0 - 0.3, 0.2, 0.3, 0.016] + @[af.x, af.y, af.z, 0.0]) in
+  let d1f = smin(d1e, d3b, 0.01) in
+
+  -- bottom antennae
+  let bf = 0.02 * vec.sin(0.3 * it + @[4.0, 1.0, 2.0] + @[3.0, 0.0, 1.0] * sign(q1.z)) in
+  let b3 = udSegment(sq, @[0.06, 0.0 - 0.05, 0.0], @[0.0 - 0.04, 0.0 - 0.2, 0.18] + bf) in
+  let d3c = b3.x - (0.025 - 0.02 * b3.y) in
+  let d1g = smin(d1f, d3c, 0.06) in
+  let d3d = sdSphere(sq, @[0.0 - 0.04, 0.0 - 0.2, 0.18, 0.008] + @[bf.x, bf.y, bf.z, 0.0]) in
+  let d1h = smin(d1g, d3d, 0.02) in
+
+  -- bottom
+  let pp0 = p - @[0.0 - 0.17, 0.15, 0.0] in
+  let co = 0.988771078 in
+  let si = 0.149438132 in
+  let pp = pp0 with .xy = @[[co, si], [0.0 - si, co]] * pp0.xy in
+  let d1i = smin(d1h, sdEllipsoid(pp, @[0.0, 0.0, 0.0], @[0.084, 0.3, 0.15]), 0.05) in
+  let d1j = smax(d1i, 0.0 - sdEllipsoid(pp, @[0.0 - 0.08, 0.0, 0.0], @[0.06, 0.55, 0.1]), 0.02) in
+
+  -- disp
+  let dis = text1(5.0 * p.xy, ic1, s1) in
+  let dx = 0.5 + 0.5 * (1.0 - smoothstep(0.5, 1.0, b1.y)) in
+  let d1 = d1j - 0.005 * dis * dx * 0.5 in
+  (@[d1, 1.0], matInfo0)
+
+def mapDrop(p0: vec3f32) f32 =
+  let p1 = p0 - @[0.0 - 0.26, 0.25, 0.0 - 0.02] in
+  let p = p1 with .x = p1.x - 2.5 * p1.y * p1.y in
+  sdCapsule(p, @[0.0, 0.0 - 0.06, 0.0], @[0.014, 0.06, 0.0], 0.037)
+
+def mapLeaf(p0: vec3f32) f32 =
+  let pa = p0 - @[0.0 - 1.8, 0.6, 0.0 - 0.75] in
+  let pb = @[[0.671212, 0.366685, 0.0 - 0.644218],
+             [0.0 - 0.479426, 0.877583, 0.0],
+             [0.565354, 0.308854, 0.764842]] * pa in
+  let pc = pb with .y = pb.y + 0.2 * exp2(0.0 - abs(2.9 * pb.z)) in
+  let ph = 0.25 * 50.0 * pc.x - 0.25 * 75.0 * abs(pc.z) in
+  let rr0 = sin(ph) in
+  let rr1 = rr0 * rr0 in
+  let rr2 = rr1 * rr1 in
+  let pd = pc with .y = pc.y + 0.005 * rr2 in
+  let r0 = clamp((pd.x + 2.0) / 4.0, 0.0, 1.0) in
+  let r = 0.0001 + r0 * (1.0 - r0) * (1.0 - r0) * 6.0 in
+  let rr3 = sin(ph * 2.0) in
+  let rr4 = rr3 * rr3 in
+  let rr5 = rr4 * (0.5 + 0.5 * sin(pd.x * 12.0)) in
+  let ri = 0.035 * rr5 in
+  let d = sdEllipsoid(pd, @[0.0, 0.0, 0.0], @[2.0, 0.25 * r, r + ri]) in
+  let d2 = pd.y - 0.02 in
+  smax(d, 0.0 - d2, 0.02)
+
+------------------------------------------------------------
+-- Opaque scene: leaf, stem, snail, shell. Returns (res, matInfo).
+------------------------------------------------------------
+def mapOpaque(p: vec3f32, it: f32, ic1: texture2d, s1: sampler, ic2: texture2d, s2: sampler)
+  (vec2f32, vec4f32) =
+  -- leaf
+  let res0 = @[mapLeaf(p), 4.0] in
+  let mi0 = @[0.0, 0.0, 0.0, 0.0] in
+  -- stem
+  let b3 = sdBezier(@[0.0 - 0.15, 0.0 - 1.5, 0.0], @[0.0 - 0.1, 0.5, 0.0], @[0.0 - 0.6, 1.5, 0.0], p) in
+  let d3 = b3.x - 0.04 + 0.02 * b3.y in
+  let (res1, mi1) = if d3 < res0.x then (@[d3, 3.0], mi0) else (res0, mi0) in
+  -- snail + shell inside bounding volume
+  let boundingVolume = sdCapsule(p, @[0.0, 0.0, 0.0], @[0.0 - 0.6, 0.7, 0.0], 0.55) in
+  if boundingVolume < res1.x then
+    let (tmp, miS) = mapSnail(p, it, ic1, s1) in
+    let (res2, mi2) = if tmp.x < res1.x then (tmp, miS) else (res1, mi1) in
+    let bb = magnitude(p - @[0.25, 0.3, 0.0 - 0.1]) - 0.6 in
+    if bb < res2.x then
+      let (d4, miSh) = mapShell(p, ic2, s2) in
+      if d4 < res2.x then (@[d4, 2.0], miSh) else (res2, mi2)
+    else (res2, mi2)
+  else (res1, mi1)
+
+-- Tetrahedral SDF normal. (GLSL used a bitwise index trick for the 4
+-- offset directions; Wyn's checker rejects bitwise ops, so the four
+-- 0.5773-scaled directions are written out — NOTE(hole).)
+def calcNormalOpaque(pos: vec3f32, eps: f32, it: f32, ic1: texture2d, s1: sampler, ic2: texture2d, s2: sampler) vec3f32 =
+  let e0 = 0.5773 * @[1.0, 0.0 - 1.0, 0.0 - 1.0] in
+  let e1 = 0.5773 * @[0.0 - 1.0, 0.0 - 1.0, 1.0] in
+  let e2 = 0.5773 * @[0.0 - 1.0, 1.0, 0.0 - 1.0] in
+  let e3 = 0.5773 * @[1.0, 1.0, 1.0] in
+  let (h0, _) = mapOpaque(pos + eps * e0, it, ic1, s1, ic2, s2) in
+  let (h1, _) = mapOpaque(pos + eps * e1, it, ic1, s1, ic2, s2) in
+  let (h2, _) = mapOpaque(pos + eps * e2, it, ic1, s1, ic2, s2) in
+  let (h3, _) = mapOpaque(pos + eps * e3, it, ic1, s1, ic2, s2) in
+  normalize(e0 * h0.x + e1 * h1.x + e2 * h2.x + e3 * h3.x)
+
+------------------------------------------------------------
+-- Transparent scene: water drops on the leaf.
+------------------------------------------------------------
+def mapLeafWaterDrops(p0: vec3f32) f32 =
+  let pa = p0 - @[0.0 - 1.8, 0.6, 0.0 - 0.75] in
+  let s = pa in
+  let pb = @[[0.671212, 0.366685, 0.0 - 0.644218],
+             [0.0 - 0.479426, 0.877583, 0.0],
+             [0.565354, 0.308854, 0.764842]] * pa in
+  let q = pb in
+  let p = pb with .y = pb.y + 0.2 * exp(0.0 - abs(2.0 * pb.z)) in
+  let d1 = sdEllipsoid(q, @[0.5, 0.0, 0.2], 1.0 * @[0.15, 0.13, 0.15]) in
+  let d2 = sdEllipsoid(q, @[0.8, 0.0 - 0.07, 0.0 - 0.15], 0.5 * @[0.15, 0.13, 0.15]) in
+  let d3a = sdEllipsoid(s, @[0.76, 0.0 - 0.8, 0.6], 0.5 * @[0.15, 0.2, 0.15]) in
+  let d4 = sdEllipsoid(q, @[0.0 - 0.5, 0.09, 0.0 - 0.2], @[0.04, 0.03, 0.04]) in
+  let d3 = max(d3a, p.y - 0.01) in
+  min(min(d1, d4), min(d2, d3))
+
+def mapTransparent(p: vec3f32) (vec2f32, vec4f32) =
+  let d5 = mapDrop(p) in
+  let d6 = mapLeafWaterDrops(p) in
+  (@[min(d5, d6), 4.0], @[0.0, 0.0, 0.0, 0.0])
+
+def calcNormalTransparent(pos: vec3f32, eps: f32) vec3f32 =
+  let exy = @[1.0, 0.0 - 1.0] * 0.5773 * eps in
+  let exyy = @[exy.x, exy.y, exy.y] in
+  let eyyx = @[exy.y, exy.y, exy.x] in
+  let eyxy = @[exy.y, exy.x, exy.y] in
+  let exxx = @[exy.x, exy.x, exy.x] in
+  let (h0, _) = mapTransparent(pos + exyy) in
+  let (h1, _) = mapTransparent(pos + eyyx) in
+  let (h2, _) = mapTransparent(pos + eyxy) in
+  let (h3, _) = mapTransparent(pos + exxx) in
+  normalize(exyy * h0.x + eyyx * h1.x + eyxy * h2.x + exxx * h3.x)
+
+------------------------------------------------------------
+-- Ambient occlusion, SSS, soft shadow (all march mapOpaque).
+------------------------------------------------------------
+def calcAO(pos: vec3f32, nor: vec3f32, it: f32, ic1: texture2d, s1: sampler, ic2: texture2d, s2: sampler) f32 =
+  let ao =
+    loop ao = 0.0 for i < 32 do
+      let ap0 = forwardSF(f32.i32(i), 32.0) in
+      let h = hash1(f32.i32(i)) in
+      let ap = ap0 * (sign(dot(ap0, nor)) * h * 0.1) in
+      let (m, _) = mapOpaque(pos + nor * 0.01 + ap, it, ic1, s1, ic2, s2) in
+      ao + clamp(m.x * 3.0, 0.0, 1.0)
+  in
+  clamp(ao / 32.0 * 6.0, 0.0, 1.0)
+
+def calcSSS(pos: vec3f32, nor: vec3f32, it: f32, ic1: texture2d, s1: sampler, ic2: texture2d, s2: sampler) f32 =
+  let occ =
+    loop occ = 0.0 for i < 8 do
+      let h = 0.002 + 0.11 * f32.i32(i) / 7.0 in
+      let dir0 = normalize(vec.sin(f32.i32(i) * 13.0 + @[0.0, 2.1, 4.2])) in
+      let dir = dir0 * sign(dot(dir0, nor)) in
+      let (m, _) = mapOpaque(pos - h * dir, it, ic1, s1, ic2, s2) in
+      occ + (h - m.x)
+  in
+  let o = clamp(1.0 - 11.0 * occ / 8.0, 0.0, 1.0) in
+  o * o
+
+def calcSoftShadow(ro: vec3f32, rd: vec3f32, k: f32, it: f32, ic1: texture2d, s1: sampler, ic2: texture2d, s2: sampler) f32 =
+  let (_, _, res, _) =
+    loop (i, t, res, done) = (0, 0.01, 1.0, false) while i < 32 && !done do
+      let (m, _) = mapOpaque(ro + rd * t, it, ic1, s1, ic2, s2) in
+      let h = m.x in
+      let res2 = min(res, smoothstep(0.0, 1.0, k * h / t)) in
+      if res2 < 0.01 then (i + 1, t, res2, true)
+      else (i + 1, t + clamp(h, 0.04, 0.1), res2, false)
+  in
+  clamp(res, 0.0, 1.0)
+
+def sunDir: vec3f32 = normalize(@[0.2, 0.1, 0.02])
+
+------------------------------------------------------------
+-- Opaque shading. iChannel1/2/3.
+------------------------------------------------------------
+def shadeOpaque(ro: vec3f32, rd: vec3f32, t: f32, m: f32, matInfo: vec4f32,
+                it: f32, ic1: texture2d, s1: sampler, ic2: texture2d, s2: sampler, ic3: texture2d, s3: sampler) vec3f32 =
+  let eps = 0.002 in
+  let pos = ro + t * rd in
+  let nor0 = calcNormalOpaque(pos, eps, it, ic1, s1, ic2, s2) in
+
+  let (mateD, mateS, mateK, mateE, focc, fsha, nor) =
+    if m < 1.5 then
+      -- snail body
+      let dis = text1(5.0 * pos.xy, ic1, s1) in
+      let be0 = sdEllipsoid(pos, @[0.0 - 0.3, 0.0 - 0.5, 0.0 - 0.1], @[0.2, 1.0, 0.5]) in
+      let be = 1.0 - smoothstep(0.0 - 0.01, 0.01, be0) in
+      let ff = abs(matInfo.x - 0.20) in
+      let mS0 = 6.0 * mix(0.7 * @[2.0, 1.2, 0.2], @[2.5, 1.8, 0.9], ff) in
+      let mS1 = (mS0 + 2.0 * dis) * 1.5 * (1.0 + 0.5 * ff * ff) * (1.0 - 0.5 * be) in
+      let mD0 = @[1.0, 0.8, 0.4] * dis * 0.015 + @[0.8, 0.4, 0.3] * 0.15 * be in
+      let f0 = clamp(dot(0.0 - rd, nor0), 0.0, 1.0) in
+      let f1 = 1.0 - f0 ** 8.0 in
+      let f2 = 1.0 - (1.0 - f1) * (1.0 - texture_sample(ic2, s2, 0.3 * pos.xy, 0.0).x) in
+      let mS = mS1 * (@[0.5, 0.1, 0.0] + f2 * @[0.5, 0.9, 1.0]) in
+      let focc0 = 0.2 + 0.8 * smoothstep(0.0, 0.15, sdSphere(pos, @[0.05, 0.52, 0.0, 0.13])) in
+      (mD0, mS, @[60.0, 0.7 + 2.0 * dis], @[0.0, 0.0, 0.0], focc0, 1.0, nor0)
+    else if m < 2.5 then
+      -- shell
+      let tip = 1.0 - smoothstep(0.05, 0.4, magnitude(pos - @[0.17, 0.2, 0.35])) in
+      let mD0 = mix(0.7 * @[0.2, 0.21, 0.22], 0.2 * @[0.15, 0.1, 0.0], tip) in
+      let uv = @[0.5 * atan2(matInfo.x, matInfo.y) / 3.1416, 1.5 * matInfo.w] in
+      let ff = 2.0 * matInfo.w + matInfo.z in
+      let ral = 0.4 + 0.4 * (0.26 * sin(ff * 6.283185 * 1.0 + 0.0)
+                           + 0.23 * sin(ff * 6.283185 * 3.0 + 2.0)
+                           + 0.20 * sin(ff * 6.283185 * 8.0 + 1.0)
+                           + 0.17 * sin(ff * 6.283185 * 17.0 + 3.0)
+                           + 0.14 * sin(ff * 6.283185 * 25.0 + 2.0)) in
+      let mD1 = mD0 * (0.25 + 0.75 * ral) in
+      let pa = smoothstep(0.0 - 0.2, 0.2, 0.3 + sin(2.0 + 40.0 * uv.x + 3.0 * sin(11.0 * uv.x))) in
+      let bar0 = mix(pa, 1.0, smoothstep(0.7, 1.0, tip)) in
+      let bar = bar0 * (if matInfo.z < 0.6 then 1.0 else smoothstep(0.17, 0.21, abs(matInfo.w))) in
+      let mD = mD1 * (@[0.06, 0.03, 0.0] + @[0.94, 0.97, 1.0] * bar) in
+      (mD, 1.5 * @[1.0, 0.65, 0.6] * (1.0 - tip), @[64.0, 0.2], @[0.0, 0.0, 0.0], 1.0, 1.0, nor0)
+    else if m < 3.5 then
+      -- plant (stem)
+      let fre = clamp(1.0 + dot(nor0, rd), 0.0, 1.0) in
+      let mD = @[0.05, 0.1, 0.0] * 0.2 + 0.2 * fre * @[1.0, 0.5, 0.1] in
+      let te = texture_sample(ic2, s2, pos.xy * 0.2, 0.0).xyz in
+      let mS = @[0.1, 0.2, 0.02] * 25.0 * (0.5 + 1.5 * te) in
+      let mE = 0.5 * @[0.1, 0.1, 0.03] * (0.2 + 0.8 * te.x) in
+      (mD, mS, @[5.0, 1.0], mE, 1.0, 1.0, nor0)
+    else
+      -- leaf
+      let p0 = pos - @[0.0 - 1.8, 0.6, 0.0 - 0.75] in
+      let p1 = @[[0.671212, 0.366685, 0.0 - 0.644218],
+                 [0.0 - 0.479426, 0.877583, 0.0],
+                 [0.565354, 0.308854, 0.764842]] * p0 in
+      let q = p1 in
+      let p = p1 with .y = p1.y + 0.2 * exp(0.0 - abs(2.0 * p1.z)) in
+      let vv = smoothstep(0.01, 0.02, abs(p.z)) in
+      let rr = sin(4.0 * 0.25 * 50.0 * p.x - 4.0 * 0.25 * 75.0 * abs(p.z)) in
+      let te = texture_sample(ic2, s2, p.xz * 0.35, 0.0).xyz in
+      let r0 = clamp((p.x + 2.0) / 4.0, 0.0, 1.0) in
+      let r = r0 * (1.0 - r0) * (1.0 - r0) * 6.0 in
+      let ff = magnitude(p.xz / @[2.0, r]) in
+      let mD0 = mix(@[0.07, 0.1, 0.0], @[0.05, 0.2, 0.01] * 0.25, vv) in
+      let mD1 = mix(mD0, @[0.16, 0.2, 0.01] * 0.25, ff) in
+      let mD = mD1 * (1.0 + 0.25 * te) * 0.8 in
+      let mS = @[0.15, 0.2, 0.02] * 0.8 * (1.0 + 0.2 * rr) * 0.8 in
+      let norT = texture_sample(ic3, s3, 1.0 * p.xz, 0.0).xy in
+      let norA = nor0 with .xz = nor0.xz + vv * 0.15 * (0.0 - 1.0 + 2.0 * norT) in
+      let norB = normalize(norA) in
+      let dd1 = sdEllipsoid(q, @[0.5 - 0.07, 0.0, 0.20], 1.0 * @[1.4 * 0.15, 0.13, 0.15]) in
+      let dd2 = sdEllipsoid(q, @[0.8 - 0.05, 0.0 - 0.07, 0.0 - 0.15], 0.5 * @[1.3 * 0.15, 0.13, 0.15]) in
+      let dd4 = sdEllipsoid(q, @[0.0 - 0.5 - 0.07, 0.09, 0.0 - 0.20], 1.0 * @[1.4 * 0.04, 0.03, 0.04]) in
+      let dd = min(dd1, min(dd2, dd4)) in
+      let fsha0 = 0.05 + 0.95 * smoothstep(0.0, 0.05, dd) in
+      let e1 = abs(sdCircle(q.xz, @[0.5, 0.20], 1.0 * 0.15)) in
+      let e2 = abs(sdCircle(q.xz, @[0.8, 0.0 - 0.15], 0.5 * 0.15)) in
+      let e4 = abs(sdCircle(q.xz, @[0.0 - 0.5, 0.0 - 0.20], 1.0 * 0.04)) in
+      let ee = min(e1, min(e2, e4)) in
+      let focc0 = 0.55 + 0.45 * smoothstep(0.0, 0.08, ee) in
+      let g1 = distance(q.xz, @[0.5 - 0.07, 0.20]) in
+      let g2 = distance(q.xz, @[0.8 - 0.03, 0.0 - 0.15]) in
+      let fsha = fsha0 + (1.0 - smoothstep(0.0, 0.10, g1)) * 1.5 + (1.0 - smoothstep(0.0, 0.05, g2)) * 1.5 in
+      (mD, mS, @[64.0, 0.25], @[0.0, 0.0, 0.0], focc0, fsha, norB)
+  in
+
+  let hal = normalize(sunDir - rd) in
+  let fre = clamp(1.0 + dot(nor, rd), 0.0, 1.0) in
+  let occ = calcAO(pos, nor, it, ic1, s1, ic2, s2) * focc in
+  let sss0 = calcSSS(pos, nor, it, ic1, s1, ic2, s2) in
+  let sss = sss0 * occ + fre * occ + (0.5 + 0.5 * fre) * abs(matInfo.x - 0.2) * occ in
+
+  let dif0 = clamp(dot(nor, sunDir), 0.0, 1.0) * fsha in
+  let sha = if dif0 > 0.0001 then calcSoftShadow(pos, sunDir, 20.0, it, ic1, s1, ic2, s2) else 1.0 in
+  let dif1 = dif0 * sha in
+  let spe1 = clamp(dot(nor, hal), 0.0, 1.0) in
+  let bou = clamp(0.3 - 0.7 * nor.y, 0.0, 1.0) in
+
+  let col0 = 7.0 * @[1.7, 1.2, 0.6] * dif1 * 2.0
+           + 4.0 * @[0.2, 1.2, 1.6] * occ * (0.5 + 0.5 * nor.y)
+           + 1.8 * @[0.1, 2.0, 0.1] * bou * occ in
+  let col1 = col0 * mateD in
+  let col2 = col1 + 0.4 * sss * (@[0.15, 0.1, 0.05] + @[0.85, 0.9, 0.95] * dif1) * (0.05 + 0.95 * occ) * mateS in
+  let col3 = vec.pow(col2, @[0.6, 0.8, 1.0]) in
+  let col4 = col3
+           + @[1.0, 1.0, 1.0] * 0.2 * spe1 ** (1.0 + mateK.x) * dif1 * (0.04 + 0.96 * fre ** 4.0) * mateK.x * mateK.y
+           + @[1.0, 1.0, 1.0] * 0.1 * spe1 ** (1.0 + mateK.x / 3.0) * dif1 * (0.1 + 0.9 * fre ** 4.0) * mateK.x * mateK.y in
+  let refY = reflect(rd, nor).y in
+  let col5 = col4
+           + 0.1 * @[1.0, max(1.5 - 0.7 * col4.y, 0.0), 2.0] * occ * occ * smoothstep(0.0, 0.3, refY) * mateK.x * mateK.y * (0.04 + 0.96 * fre ** 5.0) in
+  col5 + mateE
+
+------------------------------------------------------------
+-- Transparent shading (water drops). iChannel1 via text1.
+------------------------------------------------------------
+def shadeTransparent(ro: vec3f32, rd: vec3f32, t: f32, col0: vec3f32, depth: f32, ic1: texture2d, s1: sampler) vec3f32 =
+  let oriCol = col0 in
+  let dz = depth - t in
+  let ao = clamp(dz * 50.0, 0.0, 1.0) in
+  let pos = ro + t * rd in
+  let nor = calcNormalTransparent(pos, 0.002) in
+  let fre = clamp(1.0 + dot(rd, nor), 0.0, 1.0) in
+  let hal = normalize(sunDir - rd) in
+  let ref = reflect(0.0 - rd, nor) in
+  let spe1 = clamp(dot(nor, hal), 0.0, 1.0) in
+  let spe2 = clamp(dot(ref, sunDir), 0.0, 1.0) in
+  let ds = 1.6 - col0.y in
+  let col1 = col0 * mix(@[0.0, 0.0, 0.0], @[0.4, 0.6, 0.4], ao) in
+  let col2 = col1
+           + ds * 1.5 * @[1.0, 0.9, 0.8] * spe1 ** 80.0
+           + ds * 0.2 * @[0.9, 1.0, 1.0] * smoothstep(0.4, 0.8, fre)
+           + ds * 0.9 * @[0.6, 0.7, 1.0] * smoothstep(0.0 - 0.5, 0.5, 0.0 - reflect(rd, nor).y) * smoothstep(0.2, 0.4, fre)
+           + ds * 0.5 * @[1.0, 0.9, 0.8] * spe2 ** 80.0
+           + ds * 0.5 * @[1.0, 0.9, 0.8] * spe2 ** 16.0 in
+  let col3 = col2 + @[0.8, 1.0, 0.8] * 0.5 * smoothstep(0.3, 0.6, text1(0.8 * nor.xy, ic1, s1)) * (0.1 + 0.9 * fre * fre) in
+  mix(col3, oriCol, smoothstep(0.6, 1.0, fre))
+
+------------------------------------------------------------
+-- Raymarchers. Returns (res, matInfo).
+------------------------------------------------------------
+def intersectOpaque(ro: vec3f32, rd: vec3f32, mindist: f32, maxdist: f32,
+                    it: f32, ic1: texture2d, s1: sampler, ic2: texture2d, s2: sampler) (vec2f32, vec4f32) =
+  let (_, _, res, mi, _) =
+    loop (i, t, res, mi, done) = (0, mindist, @[0.0 - 1.0, 0.0 - 1.0], @[0.0, 0.0, 0.0, 0.0], false)
+    while i < 128 && !done do
+      let (h, miH) = mapOpaque(ro + t * rd, it, ic1, s1, ic2, s2) in
+      let res2 = @[t, h.y] in
+      if h.x < 0.001 * t || t > maxdist then (i + 1, t, res2, miH, true)
+      else (i + 1, t + h.x * 0.9, res2, miH, false)
+  in
+  (res, mi)
+
+def intersectTransparent(ro: vec3f32, rd: vec3f32, mindist: f32, maxdist: f32) vec2f32 =
+  let (_, _, res, _) =
+    loop (i, t, res, done) = (0, mindist, @[0.0 - 1.0, 0.0 - 1.0], false)
+    while i < 64 && !done do
+      let (h, _) = mapTransparent(ro + t * rd) in
+      let res2 = @[t, h.y] in
+      if h.x < 0.001 * t || t > maxdist then (i + 1, t, res2, true)
+      else (i + 1, t + h.x, res2, false)
+  in
+  res
+
+------------------------------------------------------------
+-- Cheap blurred cubemap background. iChannel2 (explicit LOD 4 → mips).
+------------------------------------------------------------
+def background(d: vec3f32, ic2: texture2d, s2: sampler) vec3f32 =
+  let n = vec.abs(d) in
+  let uv = if n.x > n.y && n.x > n.z then d.yz / d.x
+           else if n.y > n.x && n.y > n.z then d.zx / d.y
+           else d.xy / d.z in
+  let col =
+    loop col = @[0.0, 0.0, 0.0] for i < 200 do
+      let h = f32.i32(i) / 200.0 in
+      let an = 31.0 * 6.2831 * h in
+      let of = @[cos(an), sin(an)] * h in
+      let tmp = texture_sample(ic2, s2, uv * 0.25 + 0.0075 * of, 4.0).yxz in
+      smax3(col, tmp, 0.5)
+  in
+  vec.pow(col, @[3.5, 3.0, 6.0]) * 0.2
+
+------------------------------------------------------------
+def render(ro: vec3f32, rd: vec3f32, q: vec2f32,
+           it: f32, ic1: texture2d, s1: sampler, ic2: texture2d, s2: sampler, ic3: texture2d, s3: sampler) vec3f32 =
+  let bg = background(rd, ic2, s2) in
+  let mindist = 1.0 in
+  let maxdist0 = 4.0 in
+  let (tm, matInfo) = intersectOpaque(ro, rd, mindist, maxdist0, it, ic1, s1, ic2, s2) in
+  let (col0, maxdist) =
+    if tm.y > 0.0 - 0.5 && tm.x < maxdist0 then
+      (shadeOpaque(ro, rd, tm.x, tm.y, matInfo, it, ic1, s1, ic2, s2, ic3, s3), tm.x)
+    else (bg, maxdist0) in
+  let tt = intersectTransparent(ro, rd, mindist, maxdist) in
+  let col1 = if tt.y > 0.0 - 0.5 && tt.x < maxdist then
+               shadeTransparent(ro, rd, tt.x, col0, maxdist, ic1, s1)
+             else col0 in
+  let sun = clamp(dot(rd, sunDir), 0.0, 1.0) in
+  let col2 = col1 + 1.0 * @[1.5, 0.8, 0.7] * sun ** 4.0 in
+  let col3 = vec.pow(col2, @[0.45, 0.45, 0.45]) in
+  let col4 = @[1.05, 1.0, 1.0] * col3 * (0.7 + 0.3 * col3 * vec.max(3.0 - 2.0 * col3, @[0.0, 0.0, 0.0])) + @[0.0, 0.0, 0.04] in
+  let col5 = col4 * (0.3 + 0.7 * (16.0 * q.x * q.y * (1.0 - q.x) * (1.0 - q.y)) ** 0.1) in
+  vec.clamp(col5, @[0.0, 0.0, 0.0], @[1.0, 1.0, 1.0])
+
+def setCamera(ro: vec3f32, rt: vec3f32) mat3f32 =
+  let w = normalize(ro - rt) in
+  let m = sqrt(1.0 - w.y * w.y) in
+  @[[w.z, 0.0, 0.0 - w.x],
+    [0.0, m * m, 0.0 - w.z * w.y],
+    [w.x * m, w.y * m, w.z * m]]
+
+------------------------------------------------------------
+-- Full-screen triangle vertex shader
+------------------------------------------------------------
+def verts: [3]vec4f32 =
+  [@[-1.0, -1.0, 0.0, 1.0],
+   @[3.0, -1.0, 0.0, 1.0],
+   @[-1.0, 3.0, 0.0, 1.0]]
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 = verts[vid]
+
+------------------------------------------------------------
+-- Fragment shader (mainImage, AA==1)
+------------------------------------------------------------
+#[fragment]
+entry fragment_main(
+  #[texture(set=0, binding=0)] iChannel1: texture2d,
+  #[sampler(set=0, binding=1)] s1: sampler,
+  #[texture(set=0, binding=2)] iChannel2: texture2d,
+  #[sampler(set=0, binding=3)] s2: sampler,
+  #[texture(set=0, binding=4)] iChannel3: texture2d,
+  #[sampler(set=0, binding=5)] s3: sampler,
+  #[uniform(set=1, binding=0)] iResolution: vec3f32,
+  #[uniform(set=1, binding=1)] iTime: f32,
+  #[builtin(position)] fragCoord: vec4f32
+) #[location(0)] vec4f32 =
+  let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
+  -- Camera is constant across sub-pixel samples, so hoist it.
+  let an = 1.87 - 0.04 * (1.0 - cos(0.5 * iTime)) in
+  let ro = @[0.0 - 0.4, 0.2, 0.0] + 2.2 * @[cos(an), 0.0, sin(an)] in
+  let ta = @[0.0 - 0.6, 0.2, 0.0] in
+  let ca = setCamera(ro, ta) in
+  let aaf = f32.i32(AA) in
+  -- AA×AA supersampling (AA=1 ⇒ a single sample, identical to the stock
+  -- default). One flat loop indexed idx = m*AA + n flattens GLSL's nested
+  -- m,n loop; only the sub-pixel jitter varies per sample.
+  let col_sum =
+    loop col = @[0.0, 0.0, 0.0] for idx < AA * AA do
+      let m = idx / AA in
+      let n = idx % AA in
+      let fcn = fc + @[f32.i32(m), f32.i32(n)] / aaf in
+      let p = (2.0 * fcn - iResolution.xy) / iResolution.y in
+      let q = fcn / iResolution.xy in
+      let rd = normalize(ca * @[p.x, p.y, 0.0 - 2.8]) in
+      col + render(ro, rd, q, iTime, iChannel1, s1, iChannel2, s2, iChannel3, s3)
+  in
+  let col = col_sum / (aaf * aaf) in
+  @[col.x, col.y, col.z, 1.0]
