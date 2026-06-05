@@ -1,0 +1,209 @@
+-- "Clouds" — Wyn port of the Shadertoy shader https://www.shadertoy.com/view/lss3zr
+-- Volumetric cloud raymarching: a value-noise fbm density field is marched
+-- front-to-back, accumulating colour with Beer-Lambert transmittance.
+--
+-- Fidelity notes:
+--   * The original's secondary light-scatter march is behind
+--     `#define USE_LIGHT 0`, so it is disabled there and omitted here.
+--   * The original's unused `getNormal()` helper is likewise omitted.
+--   * `mo` (the camera orbit input) is derived from iTime in the original,
+--     so this port needs no mouse uniform.
+--
+-- The original GLSL is preserved commented-out at the bottom.
+
+open f32
+
+------------------------------------------------------------
+-- Noise basis matrix. GLSL `mat3(c0, c1, c2)` is column-major,
+-- so each outer array below is one column (matching Wyn's
+-- outer-array-becomes-column emission convention).
+------------------------------------------------------------
+def m: mat3f32 =
+  @[[ 0.00,  0.80,  0.60],
+    [-0.80,  0.36, -0.48],
+    [-0.60, -0.48,  0.64]]
+
+def hash(n: f32) f32 = fract(sin(n) * 43758.5453)
+
+------------------------------------------------------------
+-- 3D value noise.
+------------------------------------------------------------
+def noise(x: vec3f32) f32 =
+  let p  = vec.floor(x) in
+  let f0 = vec.fract(x) in
+  let f  = f0 * f0 * (3.0 - 2.0 * f0) in
+  let n  = p.x + p.y * 57.0 + 113.0 * p.z in
+  mix(mix(mix(hash(n +   0.0), hash(n +   1.0), f.x),
+          mix(hash(n +  57.0), hash(n +  58.0), f.x), f.y),
+      mix(mix(hash(n + 113.0), hash(n + 114.0), f.x),
+          mix(hash(n + 170.0), hash(n + 171.0), f.x), f.y), f.z)
+
+------------------------------------------------------------
+-- Fractal Brownian motion (3 octaves).
+------------------------------------------------------------
+def fbm(p0: vec3f32) f32 =
+  let f0 = 0.5 * noise(p0) in
+  let p1 = m * p0 * 2.02 in
+  let f1 = f0 + 0.25 * noise(p1) in
+  let p2 = m * p1 * 2.03 in
+  f1 + 0.125 * noise(p2)
+
+------------------------------------------------------------
+-- Density field: an inverted sphere SDF perturbed by fbm.
+-- Returns positive values inside the cloud.
+------------------------------------------------------------
+def scene(pos: vec3f32) f32 =
+  0.1 - magnitude(pos) * 0.05 + fbm(pos * 0.3)
+
+------------------------------------------------------------
+-- Camera basis as a column-major mat3 (cu, cv, cw).
+------------------------------------------------------------
+def camera(ro: vec3f32, ta: vec3f32) mat3f32 =
+  let cw = normalize(ta - ro) in
+  let cp = @[0.0, 1.0, 0.0] in
+  let cu = cross(cw, cp) in
+  let cv = cross(cu, cw) in
+  @[[cu.x, cu.y, cu.z],
+    [cv.x, cv.y, cv.z],
+    [cw.x, cw.y, cw.z]]
+
+------------------------------------------------------------
+-- Full-screen triangle vertex shader
+------------------------------------------------------------
+def verts: [3]vec4f32 =
+  [@[-1.0, -1.0, 0.0, 1.0],
+   @[3.0, -1.0, 0.0, 1.0],
+   @[-1.0, 3.0, 0.0, 1.0]]
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 = verts[vertex_id]
+
+------------------------------------------------------------
+-- Fragment shader (mainImage)
+------------------------------------------------------------
+#[fragment]
+entry fragment_main(
+  #[uniform(set=1, binding=0)] iResolution: vec3f32,
+  #[uniform(set=1, binding=1)] iTime: f32,
+  #[builtin(position)] fragCoord: vec4f32
+) #[location(0)] vec4f32 =
+  -- Flip Y for Vulkan NDC
+  let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
+  let uv = (fc * 2.0 - iResolution.xy) / min(iResolution.x, iResolution.y) in
+
+  -- Camera orbit derived from time
+  let mo = @[iTime * 0.1, cos(iTime * 0.25) * 3.0] in
+  let camDist = 25.0 in
+  let ta = @[0.0, 1.0, 0.0] in
+  let ro = camDist * normalize(@[cos(2.75 - 3.0 * mo.x),
+                                 0.7 - 1.0 * (mo.y - 1.0),
+                                 sin(2.75 - 3.0 * mo.x)]) in
+  let targetDepth = 1.3 in
+  let c   = camera(ro, ta) in
+  let dir = c * normalize(@[uv.x, uv.y, targetDepth]) in
+
+  -- Raymarch settings
+  let zMax       = 40.0 in
+  let zstep      = zMax / 64.0 in
+  let absorption = 100.0 in
+
+  -- Front-to-back accumulation with early-out when transmittance is spent.
+  -- State: (step, position, transmittance, colour, done)
+  let (_, _, _, color_acc, _) =
+    loop (i, p, t, color, done) = (0, ro, 1.0, @[0.0, 0.0, 0.0, 0.0], false)
+    while i < 64 && !done do
+      let density = scene(p) in
+      if density > 0.0 then
+        let tmp = density / 64.0 in
+        let t2  = t * (1.0 - tmp * absorption) in
+        if t2 <= 0.01 then
+          (i + 1, p, t2, color, true)
+        else
+          let k    = 50.0 * tmp * t2 in
+          let col1 = @[k, k, k, k] in
+          (i + 1, p + dir * zstep, t2, color + col1, false)
+      else
+        (i + 1, p + dir * zstep, t, color, false)
+  in
+
+  -- Sky gradient behind the cloud
+  let bg = mix(@[0.3, 0.1, 0.8], @[0.7, 0.7, 1.0], 1.0 - (uv.y + 1.0) * 0.5) in
+  color_acc with .xyz += bg
+
+------------------------------------------------------------
+-- Original GLSL (Shadertoy lss3zr), commented out below.
+------------------------------------------------------------
+
+-- #define USE_LIGHT 0
+--
+-- mat3 m = mat3( 0.00,  0.80,  0.60,
+--               -0.80,  0.36, -0.48,
+--               -0.60, -0.48,  0.64);
+--
+-- float hash(float n) { return fract(sin(n) * 43758.5453); }
+--
+-- float noise(in vec3 x) {
+--     vec3 p = floor(x);
+--     vec3 f = fract(x);
+--     f = f * f * (3.0 - 2.0 * f);
+--     float n = p.x + p.y * 57.0 + 113.0 * p.z;
+--     float res = mix(mix(mix(hash(n +   0.0), hash(n +   1.0), f.x),
+--                         mix(hash(n +  57.0), hash(n +  58.0), f.x), f.y),
+--                     mix(mix(hash(n + 113.0), hash(n + 114.0), f.x),
+--                         mix(hash(n + 170.0), hash(n + 171.0), f.x), f.y), f.z);
+--     return res;
+-- }
+--
+-- float fbm(vec3 p) {
+--     float f;
+--     f  = 0.5000 * noise(p); p = m * p * 2.02;
+--     f += 0.2500 * noise(p); p = m * p * 2.03;
+--     f += 0.1250 * noise(p);
+--     return f;
+-- }
+--
+-- float scene(in vec3 pos) { return 0.1 - length(pos) * 0.05 + fbm(pos * 0.3); }
+--
+-- mat3 camera(vec3 ro, vec3 ta) {
+--     vec3 cw = normalize(ta - ro);
+--     vec3 cp = vec3(0.0, 1.0, 0.0);
+--     vec3 cu = cross(cw, cp);
+--     vec3 cv = cross(cu, cw);
+--     return mat3(cu, cv, cw);
+-- }
+--
+-- void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+--     vec2 uv = (fragCoord.xy * 2.0 - iResolution.xy) / min(iResolution.x, iResolution.y);
+--     vec2 mo = vec2(iTime * 0.1, cos(iTime * 0.25) * 3.0);
+--     float camDist = 25.0;
+--     vec3 ta = vec3(0.0, 1.0, 0.0);
+--     vec3 ro = camDist * normalize(vec3(cos(2.75 - 3.0 * mo.x), 0.7 - 1.0 * (mo.y - 1.0), sin(2.75 - 3.0 * mo.x)));
+--     float targetDepth = 1.3;
+--     mat3 c = camera(ro, ta);
+--     vec3 dir = c * normalize(vec3(uv, targetDepth));
+--     const int sampleCount = 64;
+--     float zMax = 40.0;
+--     float zstep = zMax / float(sampleCount);
+--     vec3 p = ro;
+--     float T = 1.0;
+--     float absorption = 100.0;
+--     vec4 color = vec4(0.0);
+--     for (int i = 0; i < sampleCount; i++) {
+--         float density = scene(p);
+--         if (density > 0.0) {
+--             float tmp = density / float(sampleCount);
+--             T *= 1.0 - (tmp * absorption);
+--             if (T <= 0.01) break;
+--             float opaity = 50.0;
+--             float k = opaity * tmp * T;
+--             vec4 cloudColor = vec4(1.0);
+--             vec4 col1 = cloudColor * k;
+--             vec4 col2 = vec4(0.0);
+--             color += col1 + col2;
+--         }
+--         p += dir * zstep;
+--     }
+--     vec3 bg = mix(vec3(0.3, 0.1, 0.8), vec3(0.7, 0.7, 1.0), 1.0 - (uv.y + 1.0) * 0.5);
+--     color.rgb += bg;
+--     fragColor = color;
+-- }
