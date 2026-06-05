@@ -197,3 +197,23 @@ def make: #m([2][3]i32) | #s(i32) = #s(0)
         }
     }
 }
+
+// A top-level `def` whose name collides with a SOAC (`map`) type-checks fine —
+// HM inference resolves the user signature — but AST→TLC lowering disagrees:
+// `resolve_soac_name` only excludes *locally* bound names, so the user `def`
+// is treated as the `map` SOAC and the 1-arg call is routed to
+// `transform_soac_map`, which `assert!(args.len() >= 2)` and panics with
+// "map requires at least 2 arguments" (tlc/mod.rs). It should instead shadow
+// the SOAC (user defs win, cf. the WGSL backend's name-shadowing fix) or
+// surface a clean CompilerError. Ignored until that checker-vs-TLC mismatch is
+// reconciled; run with `cargo test -- --ignored` to observe the panic.
+#[test]
+#[ignore = "known bug: user `def map` panics in AST->TLC SOAC lowering instead of shadowing/erroring"]
+fn user_def_shadowing_soac_map_panics_in_tlc() {
+    let _ = compile_to_tlc_raw(
+        r#"
+def map(x: i32) i32 = x
+def use_it(y: i32) i32 = map(y)
+"#,
+    );
+}
