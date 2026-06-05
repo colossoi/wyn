@@ -2080,6 +2080,41 @@ let v2: vec4f32 = @[1.0, 0.0, 0.0, 1.0]
 
 The element type is inferred from the arguments or the context.
 
+### Vector Arithmetic and Scalar Broadcasting
+
+The binary arithmetic operators `+`, `-`, `*`, and `/` apply
+component-wise to vectors. When both operands are vectors they must
+have the *same* vector type (same length and element type); the result
+is that type and each component is combined independently:
+
+```wyn
+let a: vec3f32 = @[1.0, 2.0, 3.0]
+let b: vec3f32 = @[4.0, 5.0, 6.0]
+let s: vec3f32 = a + b            -- (5.0, 7.0, 9.0)
+let p: vec3f32 = a * b            -- (4.0, 10.0, 18.0), component-wise
+```
+
+When one operand is a scalar, it is **broadcast** against the vector:
+the scalar is applied to every component, and the result has the
+vector's type. The scalar may appear on **either** side, so both
+`v op scalar` and `scalar op v` are accepted:
+
+```wyn
+let v: vec3f32 = @[1.0, 2.0, 3.0]
+let scaled: vec3f32 = v * 2.0         -- (2.0, 4.0, 6.0)
+let shifted: vec3f32 = 3.0 - 2.0 * v  -- 3.0 - (2.0, 4.0, 6.0) = (1.0, -1.0, -3.0)
+```
+
+Broadcasting performs **no implicit numeric conversion**: the scalar's
+type must equal the vector's element type. Mixing a `vec3f32` with an
+`i32` scalar is a type error — write the scalar as `f32`. Likewise,
+component-wise vector arithmetic between two vectors of different
+element types or lengths is rejected.
+
+For `*` specifically, matrix products (matrix×matrix, matrix×vector,
+vector×matrix, matrix×scalar) take priority over component-wise
+arithmetic; see [Matrix Types](#matrix-types).
+
 ### Constraints
 
 - Location numbers must be non-negative integers
