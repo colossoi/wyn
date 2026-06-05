@@ -3784,6 +3784,24 @@ fn test_parse_let_in_chain_omits_inner_in() {
 }
 
 #[test]
+#[ignore = "let-in size binding `let [n] pat = e in body` is in the spec as future work (SPECIFICATION.md → Expressions: let [n] pat = e in body); parser only accepts `let pat [: type] = e in body`"]
+fn test_parse_let_in_size_binding() {
+    // Future-work form: `let [n] pat = e in body` binds the size of
+    // an array being introduced. Unignore when the parser supports
+    // size bindings in let-in expressions.
+    parse_ok("def f = let [n] xs: [n]i32 = [1, 2, 3] in xs[0]");
+}
+
+#[test]
+#[ignore = "local function `let f(...) = e in body` is in the spec as future work (SPECIFICATION.md → Expressions: let f(...) = e in body); parser only accepts `let pat = e in body`"]
+fn test_parse_let_in_local_function() {
+    // Future-work form: a `let` with a parameter list defines a local
+    // function whose name is in scope for the body (but not itself).
+    // Unignore when the parser supports local functions.
+    parse_ok("def main = let inc(x: i32) = x + 1 in inc(2)");
+}
+
+#[test]
 fn test_parse_let_in_requires_in_at_tail() {
     // The terminal `let` in a chain still needs `in` — it cannot
     // simply run off the end of the function body.

@@ -751,9 +751,9 @@ exp         ::= atom
                 | exp [ ".." exp ] "..<" exp
                 | exp [ ".." exp ] "..>" exp
                 | "if" exp "then" exp "else" exp
-                | "let" size* pat "=" exp "in" exp
-                | "let" name slice "=" exp "in" exp
-                | "let" name type_param* pat+ [":" type] "=" exp "in" exp
+                | "let" pat [":" type] "=" exp ["in"] exp
+                | "let" size+ pat "=" exp ["in"] exp
+                | "let" name [generics] "(" [param ("," param)*] ")" "=" exp ["in"] exp
                 | "|" pat ("," pat)* "|" exp
                 | "loop" pat ["=" exp] loopform "do" exp
                 | "#[" attr "]" exp
@@ -1067,45 +1067,70 @@ If `c` evaluates to true, evaluate `a`; otherwise evaluate `b`.
 ### Binding Expressions
 
 #### let pat = e in body
-Evaluate `e` and bind the result to the irrefutable pattern `pat` (see Patterns) while evaluating `body`. The `in` keyword is optional if `body` is a `let` expression. The binding is not let-generalised, meaning it has a monomorphic type. This can be significant if `e` is of functional type.
+Evaluate `e` and bind the result to the irrefutable pattern `pat`
+(see Patterns) while evaluating `body`. The `in` keyword may be
+omitted when `body` is itself a `let` expression, so chained
+bindings need only one closing `in`:
 
-If `e` is of type `i64` and `pat` binds only a single name `v`, then the type of the overall expression is the type of `body`, but with any occurence of `v` replaced by `e`.
+```wyn
+let x = 1
+let y = 2 in
+x + y
+```
+
+The binding is not let-generalised, meaning it has a monomorphic
+type. This can be significant if `e` is of functional type.
+
+If `e` is of type `i64` and `pat` binds only a single name `v`, then
+the type of the overall expression is the type of `body`, but with
+any occurrence of `v` replaced by `e`.
 
 #### let [n] pat = e in body
-As above, but bind sizes (here `n`) used in the pattern (here to the size of the array being bound). All sizes must be used in the pattern. Roughly equivalent to `let f [n] pat = body in f e`.
+As above, but additionally bind sizes (here `n`) used in the
+pattern (here to the size of the array being bound). All declared
+sizes must be used in the pattern.
 
-#### let a[i] = v in body
-Write `v` to `a[i]` and evaluate `body`. The given index need not be complete and can also be a slice, but in these cases, the value of `v` must be an array of the proper size. This notation is syntactic sugar for `let a = a with [i] = v in a`.
-
-#### let f params... = e in body
-Bind `f` to a function with the given parameters and definition (`e`) and evaluate `body`. The function will be treated as aliasing any free variables in `e`. The function is not in scope of itself, and hence cannot be recursive.
+#### let f(x, y) = e in body
+Bind `f` to a local function with the given parameters and
+definition (`e`) and evaluate `body`. The function aliases any free
+variables in `e`.
 
 #### loop pat = initial for x in a do loopbody
-Bind `pat` to the initial values given in `initial`.
+Bind `pat` to the initial values given in `initial`. For each
+element `x` in `a`, evaluate `loopbody` and rebind `pat` to the
+result of the evaluation. Return the final value of `pat`.
 
-For each element `x` in `a`, evaluate `loopbody` and rebind `pat` to the result of the evaluation.
-
-Return the final value of `pat`.
-
-The `= initial` can be left out, in which case initial values for the pattern are taken from equivalently named variables in the environment. I.e., `loop (x) = ...` is equivalent to `loop (x = x) = ...`.
+The `= initial` may be omitted, in which case initial values for the
+pattern are taken from equivalently named variables in the
+environment — `loop (x) = ...` is equivalent to `loop (x = x) = ...`.
 
 #### loop pat = initial for x < n do loopbody
-Equivalent to `loop (pat = initial) for x in [0..1..<n] do loopbody`.
+Equivalent to `loop (pat = initial) for x in (0..1..<n) do loopbody`.
 
 #### loop pat = initial while cond do loopbody
-Bind `pat` to the initial values given in `initial`.
-
-If `cond` evaluates to true, bind `pat` to the result of evaluating `loopbody`, and repeat the step.
-
-Return the final value of `pat`.
+Bind `pat` to the initial values given in `initial`. If `cond`
+evaluates to true, bind `pat` to the result of evaluating
+`loopbody`, and repeat. Return the final value of `pat` when `cond`
+is false.
 
 #### match x case p1 -> e1 case p2 -> e2
-Match the value produced by `x` to each of the patterns in turn, picking the first one that succeeds. The result of the corresponding expression is the value of the entire `match` expression. All the expressions associated with a case must have the same type (but not necessarily match the type of `x`). It is a type error if there is not a case for every possible value of `x` - inexhaustive pattern matching is not allowed.
+Match the value produced by `x` against each pattern in turn,
+picking the first one that succeeds. The result of the corresponding
+expression is the value of the entire `match` expression. All the
+expressions on the right of a `case` must have the same type (which
+need not be the type of `x`). It is a type error if the cases do not
+cover every possible value of `x` — non-exhaustive pattern matching
+is not allowed.
 
 ### Function Expressions
 
 #### |x, y, z| e
-Produces an anonymous function taking parameters `x`, `y`, and `z`, whose body is `e`. Lambdas do not permit type parameters; use a named function if you want a polymorphic function.
+Produce an anonymous function taking parameters `x`, `y`, and `z`,
+whose body is `e`. The function captures any free variables in `e`
+from the enclosing scope, so anonymous functions are the natural way
+to write closures over higher-order array operators (`map`, `reduce`,
+…). Anonymous functions do not permit type parameters; use a named
+function for a polymorphic function.
 
 #### (binop)
 An operator section that is equivalent to `|x, y| x binop y`.
@@ -1120,7 +1145,8 @@ An operator section that is equivalent to `|x| x binop y`.
 An operator section that is equivalent to `|x| x.a.b.c`.
 
 #### (.[i])
-An operator section that is equivalent to `|x| x[i]`. For multi-dimensional indexing, chain: `(.[i][j])` is `|x| x[i][j]`.
+An operator section that is equivalent to `|x| x[i]`. For
+multi-dimensional indexing, chain: `(.[i][j])` is `|x| x[i][j]`.
 
 ---
 
