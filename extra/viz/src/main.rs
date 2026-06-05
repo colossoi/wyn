@@ -106,6 +106,11 @@ enum Command {
         /// Output file: name:file.json (repeatable, omit to print to stdout)
         #[arg(long = "output", value_name = "NAME:FILE")]
         outputs: Vec<String>,
+        /// Back a `#[texture]` binding with an image file: name:file.png
+        /// (repeatable). The image is decoded, mipmapped, and sampled with
+        /// address_mode=repeat. PNG/JPG. Only meaningful in interactive mode.
+        #[arg(long = "texture", value_name = "NAME:FILE")]
+        textures: Vec<String>,
         /// Push constant (repeatable).
         ///
         /// Format: `name:type=value`. Type is one of i32, u32, f32,
@@ -227,6 +232,7 @@ fn main() -> Result<()> {
             pipeline,
             inputs,
             outputs,
+            textures,
             push_constants,
             dispatch,
             feedback,
@@ -253,6 +259,7 @@ fn main() -> Result<()> {
             };
             let input_map = parse_pairs(&inputs)?;
             let output_map = parse_pairs(&outputs)?;
+            let texture_map = parse_pairs(&textures)?;
 
             // Parse `--dispatch ENTRY:WxH[xD]` into a HashMap keyed by
             // compute entry-point name. Total thread counts; viz
@@ -265,8 +272,7 @@ fn main() -> Result<()> {
                         .ok_or_else(|| anyhow!("Invalid --dispatch '{}'. Expected ENTRY:WxH[xD]", s))?;
                     let parts: Vec<&str> = dims.split('x').collect();
                     let parse = |p: &str| -> Result<u32> {
-                        p.parse()
-                            .with_context(|| format!("--dispatch '{}': cannot parse '{}'", s, p))
+                        p.parse().with_context(|| format!("--dispatch '{}': cannot parse '{}'", s, p))
                     };
                     let (w, h, d) = match parts.as_slice() {
                         [w, h] => (parse(w)?, parse(h)?, 1u32),
@@ -288,12 +294,12 @@ fn main() -> Result<()> {
             let feedback_specs: Vec<(String, String, String)> = feedback
                 .iter()
                 .map(|s| {
-                    let (entry, rw) = s.split_once(':').ok_or_else(|| {
-                        anyhow!("Invalid --feedback '{}'. Expected ENTRY:READ=WRITE", s)
-                    })?;
-                    let (read, write) = rw.split_once('=').ok_or_else(|| {
-                        anyhow!("Invalid --feedback '{}'. Expected ENTRY:READ=WRITE", s)
-                    })?;
+                    let (entry, rw) = s
+                        .split_once(':')
+                        .ok_or_else(|| anyhow!("Invalid --feedback '{}'. Expected ENTRY:READ=WRITE", s))?;
+                    let (read, write) = rw
+                        .split_once('=')
+                        .ok_or_else(|| anyhow!("Invalid --feedback '{}'. Expected ENTRY:READ=WRITE", s))?;
                     Ok((entry.to_string(), read.to_string(), write.to_string()))
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -309,6 +315,7 @@ fn main() -> Result<()> {
                 &feedback_specs,
                 modes::pipeline::InteractiveOpts {
                     storage_dir,
+                    texture_map,
                     index_buffer,
                     present_mode: present_mode.into(),
                     validate: !no_validate,

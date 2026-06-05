@@ -20,8 +20,8 @@ use crate::json::{
     Access, Binding, BufferUsage, DispatchLen, DispatchSize, Pipeline, PipelineDescriptor,
     StorageImageFormat, load_f32_json,
 };
-use wyn_pipeline_descriptor::StorageTextureSize;
 use crate::specs::PushConstantSpec;
+use wyn_pipeline_descriptor::StorageTextureSize;
 
 /// Bundle of the wgpu objects produced by a single
 /// `Instance::request_adapter` + `Adapter::request_device` cycle.
@@ -587,7 +587,6 @@ pub fn build_push_constant_bytes(
     Ok(bytes)
 }
 
-
 // =============================================================================
 // Storage textures (Phase 1b — Path B)
 // =============================================================================
@@ -682,10 +681,8 @@ pub fn create_storage_textures(
 ) -> HashMap<(u32, u32), StorageTextureResource> {
     // A (set, binding) that appears as the WRITE side of any feedback
     // pair needs two physical textures; everything else gets one.
-    let pingpong_write_keys: std::collections::HashSet<(u32, u32)> = feedback_pairs
-        .iter()
-        .map(|p| (p.write_set, p.write_binding))
-        .collect();
+    let pingpong_write_keys: std::collections::HashSet<(u32, u32)> =
+        feedback_pairs.iter().map(|p| (p.write_set, p.write_binding)).collect();
 
     let mut out: HashMap<(u32, u32), StorageTextureResource> = HashMap::new();
     for pipeline in &descriptor.pipelines {
@@ -696,7 +693,12 @@ pub fn create_storage_textures(
         };
         for b in bindings {
             let Binding::StorageTexture {
-                set, binding, name, format, size: size_policy, ..
+                set,
+                binding,
+                name,
+                format,
+                size: size_policy,
+                ..
             } = b
             else {
                 continue;
@@ -708,8 +710,9 @@ pub fn create_storage_textures(
             let wgpu_format = storage_image_format_to_wgpu(*format);
             let (width, height) = match size_policy {
                 StorageTextureSize::Fixed { width, height } => (*width, *height),
-                StorageTextureSize::SameAsWindow => surface_size
-                    .unwrap_or((STORAGE_TEXTURE_FALLBACK_SIZE, STORAGE_TEXTURE_FALLBACK_SIZE)),
+                StorageTextureSize::SameAsWindow => {
+                    surface_size.unwrap_or((STORAGE_TEXTURE_FALLBACK_SIZE, STORAGE_TEXTURE_FALLBACK_SIZE))
+                }
             };
             let size = wgpu::Extent3d {
                 width,
@@ -722,11 +725,7 @@ pub fn create_storage_textures(
             let mut storage_views = Vec::with_capacity(slot_count);
             let mut sampled_views = Vec::with_capacity(slot_count);
             for slot in 0..slot_count {
-                let label_suffix = if slot_count == 1 {
-                    String::new()
-                } else {
-                    format!(".slot{slot}")
-                };
+                let label_suffix = if slot_count == 1 { String::new() } else { format!(".slot{slot}") };
                 let texture = device.create_texture(&wgpu::TextureDescriptor {
                     label: Some(&format!("storage_texture_{name}{label_suffix}")),
                     size,
@@ -788,6 +787,25 @@ pub enum HostTextureKind {
     /// Shadertoy's 256×3 keyboard texture. Row 0 = currently-down,
     /// row 1 = pressed-this-frame, row 2 = toggled. R8Unorm.
     Keyboard,
+    /// Decoded from a PNG/JPG named on the CLI via `--texture NAME:FILE`.
+    /// Static: uploaded once at allocation and mipmapped on the GPU, never
+    /// rewritten per frame.
+    ImageFile,
+}
+
+/// Decode a PNG/JPG file to tightly-packed RGBA8. `vflip` flips the rows,
+/// since Shadertoy textures are stored relative to GL's bottom-up
+/// convention. Returns `(width, height, rgba8_bytes)`.
+///
+/// `vflip` and sRGB-ness (which would switch the texture format to
+/// `Rgba8UnormSrgb`) are the two knobs that should become per-texture
+/// options once the descriptor/CLI carries sampler specs; for now `vflip`
+/// is on and images are treated as linear `Rgba8Unorm`.
+pub fn load_image_file(path: &std::path::Path, vflip: bool) -> Result<(u32, u32, Vec<u8>)> {
+    let img = image::open(path).with_context(|| format!("decoding image texture {:?}", path))?;
+    let img = if vflip { img.flipv() } else { img };
+    let rgba = img.to_rgba8();
+    Ok((rgba.width(), rgba.height(), rgba.into_raw()))
 }
 
 /// Walk every pipeline's bindings; allocate one `wgpu::Texture` for
@@ -803,9 +821,11 @@ pub enum HostTextureKind {
 /// (image files, video, audio) would add their own match arms.
 pub fn create_host_textures(
     device: &wgpu::Device,
+    queue: &wgpu::Queue,
     descriptor: &PipelineDescriptor,
     storage_textures: &HashMap<(u32, u32), StorageTextureResource>,
-) -> HashMap<(u32, u32), HostTextureResource> {
+    texture_map: &HashMap<String, PathBuf>,
+) -> Result<HashMap<(u32, u32), HostTextureResource>> {
     let mut out: HashMap<(u32, u32), HostTextureResource> = HashMap::new();
     for pipeline in &descriptor.pipelines {
         let bindings: &[Binding] = match pipeline {
@@ -814,7 +834,10 @@ pub fn create_host_textures(
             Pipeline::Graphics(gp) => &gp.bindings,
         };
         for b in bindings {
-            let Binding::Texture { set, binding, name, .. } = b else {
+            let Binding::Texture {
+                set, binding, name, ..
+            } = b
+            else {
                 continue;
             };
             let key = (*set, *binding);
@@ -826,19 +849,73 @@ pub fn create_host_textures(
             if out.contains_key(&key) {
                 continue;
             }
-            // Name-based classification. v1 recognizes "keyboard" only.
+            // Classification: a `--texture NAME:FILE` entry (matched on the
+            // binding name) is a static image file; "keyboard" is the
+            // per-frame CPU table. Anything else is left out — the
+            // bind-group builder surfaces a clear "no resource" error.
             let lower = name.to_ascii_lowercase();
-            let kind = if lower == "keyboard" || lower == "ikeyboard" {
-                HostTextureKind::Keyboard
-            } else {
-                // Unrecognized — leave it out; the bind-group builder
-                // will surface a clear "no resource" error when the
-                // slot is bound.
+            if let Some(path) = texture_map.get(name) {
+                let (width, height, rgba) = load_image_file(path, /* vflip */ true)?;
+                let mip_count = width.max(height).max(1).ilog2() + 1;
+                let format = wgpu::TextureFormat::Rgba8Unorm;
+                let texture = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some(&format!("host_texture_image_{}", name)),
+                    size: wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: mip_count,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    // RENDER_ATTACHMENT: the mip generator renders into each level.
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::COPY_DST
+                        | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                });
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &rgba,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(4 * width), // Rgba8 = 4 bytes/texel
+                        rows_per_image: Some(height),
+                    },
+                    wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
+                );
+                generate_mipmaps(device, queue, &texture, format, mip_count);
+                let view = texture.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some(&format!("host_view_image_{}", name)),
+                    format: Some(format),
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    ..Default::default()
+                });
+                out.insert(
+                    key,
+                    HostTextureResource {
+                        texture,
+                        view,
+                        extent: (width, height),
+                        kind: HostTextureKind::ImageFile,
+                    },
+                );
                 continue;
-            };
-            let (width, height, format) = match kind {
-                HostTextureKind::Keyboard => (256u32, 3u32, wgpu::TextureFormat::R8Unorm),
-            };
+            }
+            if lower != "keyboard" && lower != "ikeyboard" {
+                continue;
+            }
+            let (width, height, format) = (256u32, 3u32, wgpu::TextureFormat::R8Unorm);
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(&format!("host_texture_{}", name)),
                 size: wgpu::Extent3d {
@@ -865,12 +942,149 @@ pub fn create_host_textures(
                     texture,
                     view,
                     extent: (width, height),
-                    kind,
+                    kind: HostTextureKind::Keyboard,
                 },
             );
         }
     }
-    out
+    Ok(out)
+}
+
+/// Fullscreen-triangle blit that samples the previous mip level. Used by
+/// `generate_mipmaps` to downsample level N from level N-1.
+const MIPGEN_WGSL: &str = r#"
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+
+struct VOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32) -> VOut {
+    var out: VOut;
+    let x = f32((vid << 1u) & 2u);
+    let y = f32(vid & 2u);
+    out.uv = vec2<f32>(x, y);
+    out.pos = vec4<f32>(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
+    return out;
+}
+
+@fragment
+fn fs_main(in: VOut) -> @location(0) vec4<f32> {
+    return textureSample(src, samp, in.uv);
+}
+"#;
+
+/// Generate mip levels 1..`mip_count` for `texture` on the GPU. wgpu has
+/// no built-in mip generator, so render each level from the previous one
+/// with a linear-sampled fullscreen blit (a 2×2-ish box downsample). Runs
+/// once per image at load time.
+fn generate_mipmaps(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    format: wgpu::TextureFormat,
+    mip_count: u32,
+) {
+    if mip_count <= 1 {
+        return;
+    }
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("mipgen_blit"),
+        source: wgpu::ShaderSource::Wgsl(MIPGEN_WGSL.into()),
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("mipgen_pipeline"),
+        layout: None, // auto layout: group(0) = { src texture, sampler }
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    });
+    let blit_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("mipgen_sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::FilterMode::Nearest,
+        ..Default::default()
+    });
+    let bgl = pipeline.get_bind_group_layout(0);
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("mipgen_encoder"),
+    });
+    for level in 1..mip_count {
+        let src_view = texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("mipgen_src"),
+            format: Some(format),
+            dimension: Some(wgpu::TextureViewDimension::D2),
+            base_mip_level: level - 1,
+            mip_level_count: Some(1),
+            ..Default::default()
+        });
+        let dst_view = texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("mipgen_dst"),
+            format: Some(format),
+            dimension: Some(wgpu::TextureViewDimension::D2),
+            base_mip_level: level,
+            mip_level_count: Some(1),
+            ..Default::default()
+        });
+        let bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("mipgen_bg"),
+            layout: &bgl,
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: BindingResource::TextureView(&src_view),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: BindingResource::Sampler(&blit_sampler),
+                },
+            ],
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("mipgen_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &dst_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
+    queue.submit([encoder.finish()]);
 }
 
 /// Host-uploaded storage buffer — content lives in CPU state and gets
@@ -914,7 +1128,10 @@ pub fn create_host_buffers(
             Pipeline::Graphics(gp) => &gp.bindings,
         };
         for b in bindings {
-            let Binding::StorageBuffer { set, binding, name, .. } = b else {
+            let Binding::StorageBuffer {
+                set, binding, name, ..
+            } = b
+            else {
                 continue;
             };
             let key = (*set, *binding);
@@ -974,10 +1191,23 @@ pub fn create_host_buffers(
 /// linear-filter / clamp-to-edge default which matches Shadertoy's
 /// per-channel sampler in the absence of explicit per-channel
 /// overrides; a per-binding sampler-spec extension is future work.
+///
+/// When `image_textures_present` (any `--texture NAME:FILE` was supplied),
+/// the samplers switch to `Repeat` wrapping + linear mipmap filtering — what
+/// Shadertoy image shaders expect. Descriptors don't record which sampler
+/// pairs with which texture, so this is a run-wide toggle rather than a
+/// per-binding choice; a per-binding sampler spec is the long-term fix.
+/// TODO: per-binding sampler spec (wrap/filter/srgb) via descriptor or CLI.
 pub fn create_samplers(
     device: &wgpu::Device,
     descriptor: &PipelineDescriptor,
+    image_textures_present: bool,
 ) -> HashMap<(u32, u32), wgpu::Sampler> {
+    let (address_mode, mipmap_filter) = if image_textures_present {
+        (wgpu::AddressMode::Repeat, wgpu::FilterMode::Linear)
+    } else {
+        (wgpu::AddressMode::ClampToEdge, wgpu::FilterMode::Nearest)
+    };
     let mut out: HashMap<(u32, u32), wgpu::Sampler> = HashMap::new();
     for pipeline in &descriptor.pipelines {
         let bindings: &[Binding] = match pipeline {
@@ -986,7 +1216,10 @@ pub fn create_samplers(
             Pipeline::Graphics(gp) => &gp.bindings,
         };
         for b in bindings {
-            let Binding::Sampler { set, binding, name, .. } = b else {
+            let Binding::Sampler {
+                set, binding, name, ..
+            } = b
+            else {
                 continue;
             };
             let key = (*set, *binding);
@@ -995,12 +1228,12 @@ pub fn create_samplers(
             }
             let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
                 label: Some(&format!("sampler_{}", name)),
-                address_mode_u: wgpu::AddressMode::ClampToEdge,
-                address_mode_v: wgpu::AddressMode::ClampToEdge,
-                address_mode_w: wgpu::AddressMode::ClampToEdge,
+                address_mode_u: address_mode,
+                address_mode_v: address_mode,
+                address_mode_w: address_mode,
                 mag_filter: wgpu::FilterMode::Linear,
                 min_filter: wgpu::FilterMode::Linear,
-                mipmap_filter: wgpu::FilterMode::Nearest,
+                mipmap_filter,
                 ..Default::default()
             });
             out.insert(key, sampler);
@@ -1049,9 +1282,9 @@ pub fn build_resource_bind_group_for_set(
                 ..
             } if *bset == set => {
                 let key = (*bset, *binding);
-                let res = storage_textures.get(&key).ok_or_else(|| {
-                    anyhow!("no storage texture allocated for ({}, {})", bset, binding)
-                })?;
+                let res = storage_textures
+                    .get(&key)
+                    .ok_or_else(|| anyhow!("no storage texture allocated for ({}, {})", bset, binding))?;
                 // Ping-pong write side: storage_view at the current
                 // parity. For non-ping-pong textures, slot count is 1
                 // so the index folds back to 0 either way.
@@ -1182,9 +1415,9 @@ pub fn build_resource_bind_group_for_set(
                 ..
             } if *bset == set => {
                 let key = (*bset, *binding);
-                let sampler = samplers.get(&key).ok_or_else(|| {
-                    anyhow!("no sampler allocated for ({}, {})", bset, binding)
-                })?;
+                let sampler = samplers
+                    .get(&key)
+                    .ok_or_else(|| anyhow!("no sampler allocated for ({}, {})", bset, binding))?;
                 layout_entries.push(BindGroupLayoutEntry {
                     binding: *binding,
                     visibility,
@@ -1207,9 +1440,7 @@ pub fn build_resource_bind_group_for_set(
                 });
             }
             Binding::Uniform {
-                set: bset,
-                binding,
-                ..
+                set: bset, binding, ..
             } if *bset == set => {
                 let key = (*bset, *binding);
                 let buffer = uniforms.get(&key).ok_or_else(|| {
