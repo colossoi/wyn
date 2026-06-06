@@ -3786,7 +3786,7 @@ fn lower_ssa_entry_point(
             );
             interfaces.push(var_id);
             uniform_loads.push((input.name.clone(), var_id, input_type));
-        } else if let Some((br, format, _access, _size)) = input.storage_image_binding {
+        } else if let Some((br, format, access, _size)) = input.storage_image_binding {
             // `#[storage_image]` → opaque OpTypeImage(Sampled=2, Format=FMT)
             // in UniformConstant storage. The format comes from the binding
             // attribute (per-param), not from the language type, so we build
@@ -3816,6 +3816,25 @@ fn lower_ssa_entry_point(
                 spirv::Decoration::Binding,
                 [Operand::LiteralBit32(br.binding)],
             );
+            // Encode the source-level access qualifier as SPIR-V
+            // `NonReadable` / `NonWritable` decorations on the variable.
+            // Without these naga/wgpu infers `ReadWrite` and rejects the
+            // pipeline at create-time when the host descriptor declares a
+            // narrower access (e.g. `write_only`).
+            use crate::interface::StorageAccess;
+            match access {
+                StorageAccess::WriteOnly => constructor.builder.decorate(
+                    var_id,
+                    spirv::Decoration::NonReadable,
+                    std::iter::empty::<Operand>(),
+                ),
+                StorageAccess::ReadOnly => constructor.builder.decorate(
+                    var_id,
+                    spirv::Decoration::NonWritable,
+                    std::iter::empty::<Operand>(),
+                ),
+                StorageAccess::ReadWrite => {}
+            }
             constructor.env.insert(input.name.clone(), var_id);
             interfaces.push(var_id);
         } else if let Some(br) = input.texture_binding.or(input.sampler_binding) {

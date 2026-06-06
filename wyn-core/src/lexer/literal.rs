@@ -110,10 +110,7 @@ fn parse_binary_int(input: &str) -> IResult<&str, Token> {
 // (unary `-` over a positive literal).
 fn parse_decimal_int(input: &str) -> IResult<&str, Token> {
     map(
-        tuple((
-            alt((decimal_with_underscores, digit1)),
-            opt(int_type_suffix),
-        )),
+        tuple((alt((decimal_with_underscores, digit1)), opt(int_type_suffix))),
         |(digits, suffix)| {
             let clean = strip_underscores(digits);
             // Store as string directly - no numeric conversion needed for decimal
