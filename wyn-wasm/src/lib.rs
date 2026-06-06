@@ -256,6 +256,9 @@ fn format_error(e: &CompilerError) -> String {
         CompilerError::IoError(err) => format!("IO error: {}", err),
         CompilerError::SpirvBuilderError(msg) => format!("SPIR-V builder error: {}", msg),
         CompilerError::TypeHole(msg) => format!("Type hole: {}", msg),
+        CompilerError::NormalizeOutputsError(msg, _) => {
+            format!("Output normalisation error: {}", msg)
+        }
     }
 }
 
@@ -317,17 +320,18 @@ fn fmt_ssa_type(ty: &polytype::Type<wyn_core::ast::TypeName>) -> String {
 }
 
 fn entry_binding_from_input(input: &wyn_core::ssa::types::EntryInput) -> EntryBinding {
+    use wyn_core::BindingRef;
     use wyn_core::ssa::types::IoDecoration;
-    let decoration = if let Some((s, b)) = input.storage_binding {
-        format!("storage({},{})", s, b)
-    } else if let Some((s, b)) = input.uniform_binding {
-        format!("uniform({},{})", s, b)
-    } else if let Some((s, b)) = input.texture_binding {
-        format!("texture({},{})", s, b)
-    } else if let Some((s, b)) = input.sampler_binding {
-        format!("sampler({},{})", s, b)
-    } else if let Some(off) = input.push_constant_offset {
-        format!("push_constant({})", off)
+    let decoration = if let Some(BindingRef { set, binding }) = input.storage_binding {
+        format!("storage({},{})", set, binding)
+    } else if let Some(BindingRef { set, binding }) = input.uniform_binding {
+        format!("uniform({},{})", set, binding)
+    } else if let Some(BindingRef { set, binding }) = input.texture_binding {
+        format!("texture({},{})", set, binding)
+    } else if let Some(BindingRef { set, binding }) = input.sampler_binding {
+        format!("sampler({},{})", set, binding)
+    } else if let Some(pc) = input.push_constant {
+        format!("push_constant({})", pc.offset)
     } else {
         match &input.decoration {
             Some(IoDecoration::BuiltIn(b)) => format!("builtin({:?})", b),
@@ -343,9 +347,10 @@ fn entry_binding_from_input(input: &wyn_core::ssa::types::EntryInput) -> EntryBi
 }
 
 fn entry_binding_from_output(idx: usize, output: &wyn_core::ssa::types::EntryOutput) -> EntryBinding {
+    use wyn_core::BindingRef;
     use wyn_core::ssa::types::IoDecoration;
-    let decoration = if let Some((s, b)) = output.storage_binding {
-        format!("storage({},{})", s, b)
+    let decoration = if let Some(BindingRef { set, binding }) = output.storage_binding {
+        format!("storage({},{})", set, binding)
     } else {
         match &output.decoration {
             Some(IoDecoration::BuiltIn(b)) => format!("builtin({:?})", b),
@@ -380,8 +385,8 @@ fn program_interface(program: &wyn_core::ssa::types::Program) -> ProgramInterfac
             // inputs/outputs — surface them so the pipeline viz can show
             // the full buffer interface.
             for sb in &e.storage_bindings {
-                let already = e.inputs.iter().any(|i| i.storage_binding == Some((sb.set, sb.binding)))
-                    || e.outputs.iter().any(|o| o.storage_binding == Some((sb.set, sb.binding)));
+                let already = e.inputs.iter().any(|i| i.storage_binding == Some(sb.binding))
+                    || e.outputs.iter().any(|o| o.storage_binding == Some(sb.binding));
                 if already {
                     continue;
                 }
@@ -391,9 +396,9 @@ fn program_interface(program: &wyn_core::ssa::types::Program) -> ProgramInterfac
                     wyn_core::interface::StorageRole::Intermediate => "tmp",
                 };
                 inputs.push(EntryBinding {
-                    name: format!("_buf_{}_{}_{}", sb.set, sb.binding, role),
+                    name: format!("_buf_{}_{}_{}", sb.binding.set, sb.binding.binding, role),
                     ty: fmt_ssa_type(&sb.elem_ty),
-                    decoration: format!("storage({},{})", sb.set, sb.binding),
+                    decoration: format!("storage({},{})", sb.binding.set, sb.binding.binding),
                 });
             }
             let outputs: Vec<EntryBinding> =
@@ -415,11 +420,11 @@ fn program_interface(program: &wyn_core::ssa::types::Program) -> ProgramInterfac
         std::collections::BTreeMap::new();
     for entry in &program.entry_points {
         for input in &entry.inputs {
-            if let Some((set, binding)) = input.uniform_binding {
-                uniforms_by_slot.entry((set, binding)).or_insert_with(|| ResourceBinding {
+            if let Some(br) = input.uniform_binding {
+                uniforms_by_slot.entry((br.set, br.binding)).or_insert_with(|| ResourceBinding {
                     name: input.name.clone(),
-                    set,
-                    binding,
+                    set: br.set,
+                    binding: br.binding,
                     ty: fmt_ssa_type(&input.ty),
                     access: String::new(),
                 });
@@ -456,18 +461,25 @@ fn program_interface(program: &wyn_core::ssa::types::Program) -> ProgramInterfac
                 wyn_core::interface::StorageRole::Output => (false, true),
                 wyn_core::interface::StorageRole::Intermediate => (true, true),
             };
-            mark(&mut synth, sb.set, sb.binding, sb.elem_ty.clone(), r, w);
+            mark(
+                &mut synth,
+                sb.binding.set,
+                sb.binding.binding,
+                sb.elem_ty.clone(),
+                r,
+                w,
+            );
         }
         for input in &entry.inputs {
-            if let Some((set, binding)) = input.storage_binding {
+            if let Some(br) = input.storage_binding {
                 let elem_ty = input.ty.elem_type().cloned().unwrap_or_else(|| input.ty.clone());
-                mark(&mut synth, set, binding, elem_ty, true, false);
+                mark(&mut synth, br.set, br.binding, elem_ty, true, false);
             }
         }
         for out in &entry.outputs {
-            if let Some((set, binding)) = out.storage_binding {
+            if let Some(br) = out.storage_binding {
                 let elem_ty = out.ty.elem_type().cloned().unwrap_or_else(|| out.ty.clone());
-                mark(&mut synth, set, binding, elem_ty, false, true);
+                mark(&mut synth, br.set, br.binding, elem_ty, false, true);
             }
         }
     }
@@ -590,7 +602,11 @@ fn compile_to_wgsl_impl(source: &str) -> CompileResultWgsl {
         Ok(t) => t,
         Err(e) => return CompileResultWgsl::err_msg(format!("apply_ownership: {:?}", e)),
     };
-    let tlc_parallelized = match tlc_with_ownership
+    let tlc_outputs_normalized = match tlc_with_ownership.normalize_outputs() {
+        Ok(t) => t,
+        Err(e) => return CompileResultWgsl::err_msg(format!("normalize_outputs: {:?}", e)),
+    };
+    let tlc_parallelized = match tlc_outputs_normalized
         .lift_gathers()
         .defunctionalize()
         .monomorphize()
