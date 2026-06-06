@@ -1,93 +1,122 @@
--- Conway's Game of Life.
+-- Conway's Game of Life on a 2D storage texture.
+--
+-- The board lives entirely on the GPU as a single-channel float
+-- storage image (1.0 = alive, 0.0 = dead). One thread per cell.
 --
 -- Two entry points:
 --
---   `step`    (compute) — reads the current generation from a storage
---                         buffer, writes the next generation to the
---                         return buffer. The host dispatches this once
---                         per frame, ping-ponging input/output bindings.
+--   `step`     (compute)  — reads the previous frame's board via
+--                           `texture_load`, applies the Conway rule
+--                           per cell, and writes the next generation
+--                           with `image_store`. The previous-frame
+--                           read is wired up host-side as a
+--                           ping-pong pair (`--feedback step:prev_board=board`),
+--                           so the host swaps which physical texture
+--                           is "current" each frame.
 --
---   `display` (fragment) — reads the most-recently-written buffer via a
---                          module-scope storage binding and colors each
---                          pixel by the cell it falls on.
+--   `display`  (fragment) — reads the just-written board via
+--                           `texture_load` and colors each pixel
+--                           white (alive) or black (dead).
 --
--- The loop itself lives in the host: each frame it dispatches `step`
--- and then renders with `display`, swapping which physical buffer is
--- bound where. Nothing in Wyn is simulating "time" — the Wyn file
--- describes the per-step rule and the per-pixel rendering; the driver
--- iterates them.
+-- The window size IS the grid size: the storage image defaults to
+-- `SameAsWindow`, and the host's per-frame compute dispatch covers
+-- every texel (one thread per cell). Resize the window and the grid
+-- resizes with it.
+--
+-- The first two frames write a hash-seeded random pattern (~20% alive)
+-- to give the simulation something interesting to evolve. After that
+-- it's pure Conway.
 
--- ---------------------------------------------------------------
+------------------------------------------------------------
 -- Shared helpers
--- ---------------------------------------------------------------
+------------------------------------------------------------
 
--- Read cell (x, y) from a flat row-major board. Cells outside the
--- grid are treated as dead (0), so the universe is bounded by dead
--- walls on every side.
-def cell(board: []i32, width: i32, height: i32, x: i32, y: i32) i32 =
-    if x < 0 then 0
-    else if x >= width then 0
-    else if y < 0 then 0
-    else if y >= height then 0
-    else board[y * width + x]
+-- Read cell (x, y) from a `texture2d` view of the previous-frame
+-- board. Out-of-bounds reads return 0 (a dead wall), so the universe
+-- is bounded.
+def cell_at(prev: texture2d, w: i32, h: i32, x: i32, y: i32) f32 =
+  if x < 0 || x >= w || y < 0 || y >= h then 0.0
+  else (texture_load(prev, @[x, y], 0)).x
 
 -- Count the 8 Moore-neighborhood neighbors of (x, y).
-def neighbor_count(board: []i32, width: i32, height: i32, x: i32, y: i32) i32 =
-    cell(board, width, height, x - 1, y - 1) +
-    cell(board, width, height, x,     y - 1) +
-    cell(board, width, height, x + 1, y - 1) +
-    cell(board, width, height, x - 1, y    ) +
-    cell(board, width, height, x + 1, y    ) +
-    cell(board, width, height, x - 1, y + 1) +
-    cell(board, width, height, x,     y + 1) +
-    cell(board, width, height, x + 1, y + 1)
+def neighbors(prev: texture2d, w: i32, h: i32, x: i32, y: i32) f32 =
+  cell_at(prev, w, h, x - 1, y - 1) +
+  cell_at(prev, w, h, x,     y - 1) +
+  cell_at(prev, w, h, x + 1, y - 1) +
+  cell_at(prev, w, h, x - 1, y    ) +
+  cell_at(prev, w, h, x + 1, y    ) +
+  cell_at(prev, w, h, x - 1, y + 1) +
+  cell_at(prev, w, h, x,     y + 1) +
+  cell_at(prev, w, h, x + 1, y + 1)
 
--- Conway's rule applied to a single flat index.
-def step_cell(board: []i32, width: i32, height: i32, i: i32) i32 =
-    let x = i % width in
-    let y = i / width in
-    let n = neighbor_count(board, width, height, x, y) in
-    let alive = board[i] == 1 in
-    if alive then
-        if n == 2 || n == 3 then 1 else 0
-    else if n == 3 then 1 else 0
+-- Cheap deterministic 32-bit hash of an (x, y) pair. Multiply-add of
+-- two large odd primes; u32 multiplication wraps on overflow, which
+-- mixes the bits well enough for an initial random-ish seed. Not
+-- cryptographic — just enough to make the starting board look noisy.
+def hash2(x: i32, y: i32) u32 =
+  let a = u32.i32(x) * 374761393u32 in
+  let b = u32.i32(y) * 668265263u32 in
+  (a + b) * 1274126177u32
 
--- ---------------------------------------------------------------
+------------------------------------------------------------
 -- Compute entry: one Conway step over the whole grid
--- ---------------------------------------------------------------
+------------------------------------------------------------
 
 #[compute]
-entry step(board: []i32, width: i32, height: i32) []i32 =
-    map(|i| step_cell(board, width, height, i), iota(length(board)))
+entry step(#[storage_image(set=0, binding=0, format=r32float, access=write_only)] board: storage_image,
+           #[texture(set=0, binding=1)] prev_board: texture2d,
+           #[builtin(global_invocation_id)] gid: vec3u32,
+           #[uniform(set=1, binding=0)] iResolution: vec3f32,
+           #[uniform(set=1, binding=3)] iFrame: u32) () =
+  let x = i32.u32(gid.x) in
+  let y = i32.u32(gid.y) in
+  let w = i32.f32(iResolution.x) in
+  let h = i32.f32(iResolution.y) in
 
--- ---------------------------------------------------------------
--- Fragment entry: render the current board
--- ---------------------------------------------------------------
+  -- Seed: ~20% of cells alive on frame 0 (and frame 1, since
+  -- ping-pong has two slots and both need initial state). Out-of-bounds
+  -- threads (when the dispatch rounds up past the texture) write to
+  -- texels that get clipped; safe and cheaper than a branch.
+  let seed = hash2(x, y) in
+  let alive_init = if (seed % 100u32) < 20u32 then 1.0 else 0.0 in
+
+  -- Evolve: standard Conway rule on the previous frame.
+  let alive_prev = cell_at(prev_board, w, h, x, y) in
+  let n = neighbors(prev_board, w, h, x, y) in
+  let alive_next =
+    if alive_prev > 0.5 then
+      -- Live cell survives with 2 or 3 neighbors.
+      if n > 1.5 && n < 3.5 then 1.0 else 0.0
+    else
+      -- Dead cell comes alive with exactly 3 neighbors.
+      if n > 2.5 && n < 3.5 then 1.0 else 0.0 in
+
+  let out_val = if iFrame < 2u32 then alive_init else alive_next in
+  image_store(board, @[x, y], @[out_val, 0.0, 0.0, 1.0])
+
+------------------------------------------------------------
+-- Graphics: full-screen triangle vertex stage
+------------------------------------------------------------
 
 def verts: [3]vec4f32 =
-    [@[-1.0, -1.0, 0.0, 1.0],
-     @[ 3.0, -1.0, 0.0, 1.0],
-     @[-1.0,  3.0, 0.0, 1.0]]
+  [@[-1.0, -1.0, 0.0, 1.0],
+   @[ 3.0, -1.0, 0.0, 1.0],
+   @[-1.0,  3.0, 0.0, 1.0]]
 
 #[vertex]
 entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 =
-    verts[vertex_id]
+  verts[vertex_id]
+
+------------------------------------------------------------
+-- Fragment entry: render the current board
+------------------------------------------------------------
 
 #[fragment]
-entry display(#[uniform(set = 1, binding = 0)] iResolution: vec3f32, #[uniform(set = 1, binding = 1)] grid_width: i32, #[uniform(set = 1, binding = 2)] grid_height: i32, #[storage(set = 1, binding = 3, access = read)] display_board: []i32, #[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
-    -- Flip Y so (0, 0) renders at the top-left visually.
-    let px = fragCoord.x in
-    let py = iResolution.y - fragCoord.y in
-
-    let cell_w = iResolution.x / f32.i32(grid_width) in
-    let cell_h = iResolution.y / f32.i32(grid_height) in
-
-    let gx = i32.f32(px / cell_w) in
-    let gy = i32.f32(py / cell_h) in
-
-    if gx < 0 || gx >= grid_width || gy < 0 || gy >= grid_height then
-        @[0.1, 0.1, 0.1, 1.0]
-    else
-        let idx = gy * grid_width + gx in
-        let alive = display_board[idx] == 1 in
-        if alive then @[1.0, 1.0, 1.0, 1.0] else @[0.0, 0.0, 0.0, 1.0]
+entry display(#[builtin(position)] pos_in: vec4f32,
+              #[texture(set=0, binding=0)] tex_board: texture2d)
+  #[location(0)] vec4f32 =
+  -- Window size = grid size, so a fragment's pixel coord IS its
+  -- cell coord. No upscaling.
+  let xy_i = @[i32.f32(pos_in.x), i32.f32(pos_in.y)] in
+  let alive = (texture_load(tex_board, xy_i, 0)).x > 0.5 in
+  if alive then @[1.0, 1.0, 1.0, 1.0] else @[0.0, 0.0, 0.0, 1.0]
