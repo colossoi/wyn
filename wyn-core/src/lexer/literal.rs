@@ -103,18 +103,19 @@ fn parse_binary_int(input: &str) -> IResult<&str, Token> {
 }
 
 // Decimal integer: [digits][type_suffix]
+//
+// No leading `-`: the lexer is context-free and would greedily turn
+// `(x%4)-1` into `(x%4)` followed by IntLit("-1"), leaving the parser
+// without a binary operator between them. Negation is the parser's job
+// (unary `-` over a positive literal).
 fn parse_decimal_int(input: &str) -> IResult<&str, Token> {
     map(
         tuple((
-            opt(char('-')),
             alt((decimal_with_underscores, digit1)),
             opt(int_type_suffix),
         )),
-        |(sign, digits, suffix)| {
-            let mut clean = strip_underscores(digits);
-            if sign.is_some() {
-                clean = format!("-{}", clean);
-            }
+        |(digits, suffix)| {
+            let clean = strip_underscores(digits);
             // Store as string directly - no numeric conversion needed for decimal
             let base_token = Token::IntLiteral(clean.into());
             match suffix {
@@ -174,18 +175,17 @@ fn hexadecimalfloat(input: &str) -> IResult<&str, &str> {
 }
 
 // Parse float literal
+//
+// No leading `-`: same reasoning as `parse_decimal_int`. Negation is
+// the parser's job.
 pub fn parse_float_literal(input: &str) -> IResult<&str, Token> {
     map(
         tuple((
-            opt(char('-')),
             alt((hexadecimalfloat, exponentfloat, pointfloat)),
             opt(float_type_suffix),
         )),
-        |(sign, float_str, suffix)| {
-            let mut clean = strip_underscores(float_str);
-            if sign.is_some() {
-                clean = format!("-{}", clean);
-            }
+        |(float_str, suffix)| {
+            let clean = strip_underscores(float_str);
 
             // Hexadecimal floats need special parsing
             if clean.starts_with("0x") || clean.starts_with("0X") {

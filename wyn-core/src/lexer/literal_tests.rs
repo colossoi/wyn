@@ -79,10 +79,11 @@ fn test_integers_with_underscores() {
 #[test]
 fn test_basic_decimals() {
     assert_eq!(parse_int_literal("42"), Ok(("", Token::IntLiteral("42".into()))));
-    assert_eq!(
-        parse_int_literal("-17"),
-        Ok(("", Token::IntLiteral("-17".into())))
-    );
+    // Leading `-` is NOT part of the literal: the lexer would otherwise
+    // greedily turn `(x%4)-1` into `(x%4)` followed by IntLit("-1"),
+    // leaving the parser without a binary operator. Negation is the
+    // parser's job (unary `-` over a positive literal).
+    assert!(parse_int_literal("-17").is_err());
 }
 
 #[test]
@@ -165,7 +166,8 @@ fn test_float_without_suffix() {
     // Note: .5 no longer parses as float (conflicts with tuple field access xy.0)
     assert!(parse_float_literal(".5").is_err());
     assert_eq!(parse_float_literal("7.0"), Ok(("", Token::FloatLiteral(7.0))));
-    assert_eq!(parse_float_literal("-3.14"), Ok(("", Token::FloatLiteral(-3.14))));
+    // Leading `-` is NOT part of the literal — see `test_basic_decimals`.
+    assert!(parse_float_literal("-3.14").is_err());
 }
 
 #[test]

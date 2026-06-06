@@ -41,12 +41,15 @@ fn test_tokenize_identifiers() {
 
 #[test]
 fn test_tokenize_literals() {
+    // Leading `-` is a separate `BinOp("-")` token — the lexer no longer
+    // folds it into the numeric literal. Negation is handled at parse time.
     let input = "-1.0f32 42 3.14f32";
     let tokens = tokens_only(input);
     assert_eq!(
         tokens,
         vec![
-            Token::FloatLiteral(-1.0),
+            Token::BinOp("-".into()),
+            Token::FloatLiteral(1.0),
             Token::IntLiteral("42".into()),
             Token::FloatLiteral(3.14),
         ]
@@ -71,14 +74,15 @@ fn test_all_literal_types() {
 
 #[test]
 fn test_integer_literal_formats() {
-    // Test decimal integers (basic support)
+    // Test decimal integers. Leading `-` is a separate `BinOp("-")`.
     let input = "42 -10 0";
     let tokens = tokens_only(input);
     assert_eq!(
         tokens,
         vec![
             Token::IntLiteral("42".into()),
-            Token::IntLiteral("-10".into()),
+            Token::BinOp("-".into()),
+            Token::IntLiteral("10".into()),
             Token::IntLiteral("0".into()),
         ]
     );

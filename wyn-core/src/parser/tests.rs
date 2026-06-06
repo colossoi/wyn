@@ -3833,3 +3833,12 @@ fn test_parse_array_index_rejects_comma_separated_indices() {
         other => Err(format!("expected parse error, got {:?}", other)),
     });
 }
+
+#[test]
+fn test_parse_nested_abs_checkerboard_pattern() {
+    // Does this parse? Mixed nested `abs` / `%` / `-` / `*` /
+    // qualified-name (`f32.i32`) expression, no whitespace.
+    parse_ok(
+        "def f(x: i32, y: i32) f32 = f32.i32(abs(abs((x%4)-1)-1)*abs(abs((y%4)-1)-1))",
+    );
+}

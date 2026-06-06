@@ -104,10 +104,9 @@ impl Parser<'_> {
             | Some(Token::True)
             | Some(Token::False) => self.parse_pattern_literal(),
 
-            Some(Token::Minus) => {
-                // Negative literal
-                self.parse_pattern_literal()
-            }
+            // Negative literal — the lexer emits unary minus as
+            // `BinOp("-")`, never the dedicated `Token::Minus`.
+            Some(Token::BinOp(op)) if op == "-" => self.parse_pattern_literal(),
 
             _ => Err(err_parse!("Expected pattern, got {:?}", self.peek())),
         }
@@ -274,12 +273,13 @@ impl Parser<'_> {
         trace!("parse_pattern_literal: next token = {:?}", self.peek());
         let start_span = self.current_span();
 
-        // Check for negative sign
-        let is_negative = if self.check(&Token::Minus) {
-            self.advance();
-            true
-        } else {
-            false
+        // Check for negative sign (lexer emits unary minus as `BinOp("-")`).
+        let is_negative = match self.peek() {
+            Some(Token::BinOp(op)) if op == "-" => {
+                self.advance();
+                true
+            }
+            _ => false,
         };
 
         let literal = match self.peek() {
