@@ -1,0 +1,33 @@
+-- | A worked example of the `-- |` / `-- ^` doc convention.
+-- This intro paragraph is the *file-level* doc — it has a blank line
+-- between it and the first item, so the extractor stashes it as the
+-- module intro instead of attaching it to an item.
+
+-- | Build a 4×4 translation matrix from a position vector.
+--
+-- The resulting matrix moves objects by `(p.x, p.y, p.z)` in world
+-- space. Multiply against a column-vector point to translate it; against
+-- another matrix to compose.
+def translation(p: vec3f32) mat4f32 =
+  @[
+    [1.0f32, 0.0f32, 0.0f32, p.x],
+    [0.0f32, 1.0f32, 0.0f32, p.y],
+    [0.0f32, 0.0f32, 1.0f32, p.z],
+    [0.0f32, 0.0f32, 0.0f32, 1.0f32]
+  ]
+
+-- | Rotate around all three axes from a vector of Euler angles.
+def rotation_euler(
+  a: vec3f32   -- ^ XYZ-intrinsic Euler angles, radians (x=pitch, y=yaw, z=roll).
+) mat4f32 =
+  let s = [ f32.sin(a.x), f32.sin(a.y), f32.sin(a.z) ] in
+  let c = [ f32.cos(a.x), f32.cos(a.y), f32.cos(a.z) ] in
+  @[
+    [c[1]*c[2], c[1]*s[2], -s[1], 0.0f32],
+    [s[0]*s[1]*c[2]-c[0]*s[2], s[0]*s[1]*s[2]+c[0]*c[2], s[0]*c[1], 0.0f32],
+    [c[0]*s[1]*c[2]+s[0]*s[2], c[0]*s[1]*s[2]-s[0]*c[2], c[0]*c[1], 0.0f32],
+    [0.0f32, 0.0f32, 0.0f32, 1.0f32]
+  ]
+
+-- An ordinary `--` note. Not picked up by the extractor.
+def helper_no_doc(x: f32) f32 = x + 1.0f32
