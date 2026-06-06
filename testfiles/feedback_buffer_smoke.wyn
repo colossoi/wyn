@@ -1,0 +1,25 @@
+-- Smoke test for `viz pipeline --feedback ENTRY:READ=WRITE` when both
+-- sides are storage buffers. The compute entry `tick` reads previous
+-- frame's `prev` (set=0, binding=0) and writes this frame's `out`
+-- (set=0, binding=1). Both are `[]u32` with a fixed dispatch length —
+-- no input-binding-derived dispatch, so we exercise just the
+-- bind-group / ping-pong plumbing without depending on
+-- dispatch-from-feedback-input resolution (a separate gap).
+
+#[compute]
+entry tick(#[storage(set=2, binding=0, access=read)] prev: []u32,
+           #[uniform(set=1, binding=0)] iFrame: u32) []u32 =
+  map(|i: i32| prev[i] + 1u32, 0i32..<i32.u32(iFrame))
+
+-- Minimal graphics pair so viz takes the runnable (windowed) path
+-- where --feedback is honoured. The fragment shader is a constant
+-- colour — it doesn't actually display the buffer.
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vid: i32)
+  #[builtin(position)] vec4f32 =
+  @[0.0, 0.0, 0.0, 1.0]
+
+#[fragment]
+entry frag_main(#[builtin(position)] pos: vec4f32)
+  #[location(0)] vec4f32 =
+  @[0.1, 0.1, 0.1, 1.0]

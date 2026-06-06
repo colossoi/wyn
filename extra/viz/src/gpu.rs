@@ -969,6 +969,121 @@ pub fn create_host_buffers(
     Ok(out)
 }
 
+/// A ping-pong storage-buffer pair backing a `--feedback` spec where
+/// both sides are `Binding::StorageBuffer`. Keyed in the host pool by
+/// the WRITE side's `(set, binding)`; the two `wgpu::Buffer`s alternate
+/// roles each frame (parity slot = current write target, opposite
+/// parity = previous-frame read source). Mirrors `StorageTextureResource`
+/// but with no view objects — wgpu binds buffers directly.
+pub struct FeedbackBufferResource {
+    /// Always length 2. `parity % 2` is the current write slot; the
+    /// opposite is the previous-frame read slot.
+    pub buffers: Vec<wgpu::Buffer>,
+}
+
+/// Allocate a 2-slot `wgpu::Buffer` pair for every storage-buffer
+/// feedback spec. The byte size comes from the WRITE side's
+/// `Binding::StorageBuffer.length` policy in the descriptor.
+///
+/// Phase 1 supports the two length policies that don't need the
+/// host-buffer or input-buffer byte-size pool (which isn't materialised
+/// yet at this point in startup): `BufferLen::Fixed` and
+/// `BufferLen::SameAsDispatch` (resolved via the owning compute
+/// pipeline's `dispatch_size`). `BufferLen::LikeInput` errors with a
+/// clean message — wire the necessary input-byte-size lookup if a real
+/// workload needs it.
+pub fn create_feedback_buffers(
+    device: &wgpu::Device,
+    descriptor: &PipelineDescriptor,
+    buffer_feedback_pairs: &[FeedbackPair],
+) -> Result<HashMap<(u32, u32), FeedbackBufferResource>> {
+    let mut out: HashMap<(u32, u32), FeedbackBufferResource> = HashMap::new();
+    for pair in buffer_feedback_pairs {
+        let write_key = (pair.write_set, pair.write_binding);
+        if out.contains_key(&write_key) {
+            continue;
+        }
+
+        // Locate the compute pipeline owning the write binding so we
+        // can read its `dispatch_size` (needed for `SameAsDispatch`).
+        let mut write_binding_desc: Option<&Binding> = None;
+        let mut owning_compute: Option<&wyn_pipeline_descriptor::ComputePipeline> = None;
+        for pipeline in &descriptor.pipelines {
+            let Pipeline::Compute(cp) = pipeline else {
+                continue;
+            };
+            for b in &cp.bindings {
+                if let Binding::StorageBuffer { set, binding, .. } = b {
+                    if (*set, *binding) == write_key {
+                        write_binding_desc = Some(b);
+                        owning_compute = Some(cp);
+                    }
+                }
+            }
+        }
+        let (write_b, cp) = match (write_binding_desc, owning_compute) {
+            (Some(b), Some(cp)) => (b, cp),
+            _ => {
+                return Err(anyhow!(
+                    "--feedback buffer pair write side ({}, {}) names no \
+                     storage_buffer binding on any compute pipeline",
+                    write_key.0,
+                    write_key.1,
+                ));
+            }
+        };
+        let (name, length) = match write_b {
+            Binding::StorageBuffer { name, length, .. } => (name.clone(), length.clone()),
+            _ => unreachable!("filtered to StorageBuffer above"),
+        };
+        let length = length.ok_or_else(|| {
+            anyhow!(
+                "--feedback buffer pair write side '{}' ({}, {}) has no `length` policy in \
+                 the descriptor; both ping-pong slots need a concrete byte size",
+                name,
+                write_key.0,
+                write_key.1,
+            )
+        })?;
+
+        let byte_size: u64 = match &length {
+            wyn_pipeline_descriptor::BufferLen::Fixed { bytes } => *bytes,
+            wyn_pipeline_descriptor::BufferLen::SameAsDispatch { elem_bytes } => {
+                let (gx, gy, gz) = resolve_dispatch_size(&cp.dispatch_size, &HashMap::new(), &[]);
+                let wg = match cp.dispatch_size {
+                    DispatchSize::DerivedFrom { workgroup_size, .. } => workgroup_size,
+                    DispatchSize::Fixed { .. } => 1,
+                };
+                let threads = (gx as u64) * (gy as u64) * (gz as u64) * (wg as u64);
+                (threads * *elem_bytes as u64).max(4)
+            }
+            wyn_pipeline_descriptor::BufferLen::LikeInput { .. } => {
+                return Err(anyhow!(
+                    "--feedback buffer pair write side '{}' ({}, {}) uses `LikeInput` \
+                     sizing; not supported yet — declare a `Fixed` or `SameAsDispatch` \
+                     length, or wire input-byte-size lookup into create_feedback_buffers",
+                    name,
+                    write_key.0,
+                    write_key.1,
+                ));
+            }
+        };
+
+        let mut buffers = Vec::with_capacity(2);
+        for slot in 0..2 {
+            let buffer = device.create_buffer(&BufferDescriptor {
+                label: Some(&format!("feedback_buffer_{name}.slot{slot}")),
+                size: byte_size,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            buffers.push(buffer);
+        }
+        out.insert(write_key, FeedbackBufferResource { buffers });
+    }
+    Ok(out)
+}
+
 /// Allocate one `wgpu::Sampler` per unique `(set, binding)` slot
 /// declared as `Binding::Sampler` in any pipeline. v1 emits the
 /// linear-filter / clamp-to-edge default which matches Shadertoy's
@@ -1031,9 +1146,11 @@ pub fn build_resource_bind_group_for_set(
     storage_textures: &HashMap<(u32, u32), StorageTextureResource>,
     host_textures: &HashMap<(u32, u32), HostTextureResource>,
     host_buffers: &HashMap<(u32, u32), HostBufferResource>,
+    feedback_buffers: &HashMap<(u32, u32), FeedbackBufferResource>,
     samplers: &HashMap<(u32, u32), wgpu::Sampler>,
     uniforms: &HashMap<(u32, u32), wgpu::Buffer>,
     feedback_reads: &HashMap<(u32, u32), (u32, u32)>,
+    buffer_feedback_reads: &HashMap<(u32, u32), (u32, u32)>,
     parity: usize,
 ) -> Result<(wgpu::BindGroupLayout, BindGroup)> {
     let mut layout_entries: Vec<BindGroupLayoutEntry> = Vec::new();
@@ -1246,16 +1363,39 @@ pub fn build_resource_bind_group_for_set(
                 ..
             } if *bset == set => {
                 let key = (*bset, *binding);
-                let res = host_buffers.get(&key).ok_or_else(|| {
-                    anyhow!(
-                        "storage buffer at ({}, {}) is not in the host-uploaded \
-                         pool (e.g. `keyboard`); only host-uploaded storage \
-                         buffers are supported in pipeline mode today",
-                        bset,
-                        binding
-                    )
-                })?;
                 let read_only = matches!(access, Access::ReadOnly);
+                // Resolve the backing `wgpu::Buffer`:
+                //   1. READ side of a buffer-feedback pair → write-side
+                //      pool, opposite-parity slot ("previous frame").
+                //   2. WRITE side of a buffer-feedback pair (or any other
+                //      binding pointing at the WRITE-side `(set, binding)`,
+                //      including a fragment shader's read-only view of
+                //      the same storage) → current-parity slot.
+                //   3. Otherwise → host-uploaded pool (keyboard, file).
+                let buffer_ref: &wgpu::Buffer = if let Some(&(ws, wb)) =
+                    buffer_feedback_reads.get(&key)
+                {
+                    let res = feedback_buffers.get(&(ws, wb)).ok_or_else(|| {
+                        anyhow!(
+                            "feedback buffer pair at write ({ws}, {wb}) was not allocated; \
+                             read side ({bset}, {binding}) can't bind"
+                        )
+                    })?;
+                    &res.buffers[(parity + 1) % 2]
+                } else if let Some(res) = feedback_buffers.get(&key) {
+                    &res.buffers[parity % 2]
+                } else {
+                    let res = host_buffers.get(&key).ok_or_else(|| {
+                        anyhow!(
+                            "storage buffer at ({}, {}) is not in the host-uploaded \
+                             pool (e.g. `keyboard`) nor any feedback pair; declare it \
+                             host-uploaded or wire a `--feedback` spec for it",
+                            bset,
+                            binding
+                        )
+                    })?;
+                    &res.buffer
+                };
                 layout_entries.push(BindGroupLayoutEntry {
                     binding: *binding,
                     visibility,
@@ -1269,7 +1409,7 @@ pub fn build_resource_bind_group_for_set(
                 group_entries.push(BindGroupEntry {
                     binding: *binding,
                     resource: BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &res.buffer,
+                        buffer: buffer_ref,
                         offset: 0,
                         size: None,
                     }),

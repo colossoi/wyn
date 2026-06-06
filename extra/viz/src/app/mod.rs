@@ -429,66 +429,97 @@ impl State {
         // binding names (read + write) inside it; we look them up to
         // get `(set, binding)` tuples the storage-texture allocator and
         // bind-group builder consume directly.
-        let feedback_pairs: Vec<gpu::FeedbackPair> = spec
-            .feedback_specs
-            .iter()
-            .map(|(entry, read, write)| -> Result<gpu::FeedbackPair> {
-                let cp = spec
-                    .descriptor
-                    .pipelines
-                    .iter()
-                    .find_map(|p| match p {
-                        DescPipeline::Compute(cp) if cp.entry_point == *entry => Some(cp),
-                        _ => None,
-                    })
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "--feedback '{}:{}={}' — no compute pipeline with that entry point",
-                            entry,
-                            read,
-                            write
-                        )
-                    })?;
-                let mut read_loc = None;
-                let mut write_loc = None;
-                for b in &cp.bindings {
-                    match b {
-                        wyn_pipeline_descriptor::Binding::Texture {
-                            set, binding, name, ..
-                        } if name == read => read_loc = Some((*set, *binding)),
-                        wyn_pipeline_descriptor::Binding::StorageTexture {
-                            set, binding, name, ..
-                        } if name == write => write_loc = Some((*set, *binding)),
-                        _ => {}
-                    }
-                }
-                let (read_set, read_binding) = read_loc.ok_or_else(|| {
+        // A feedback spec resolves to either a texture pair (READ is a
+        // `Binding::Texture`, WRITE is a `Binding::StorageTexture`) or a
+        // buffer pair (both sides are `Binding::StorageBuffer`). Same-name
+        // matches across kinds within one spec are a mixed-kind error.
+        let mut texture_feedback_pairs: Vec<gpu::FeedbackPair> = Vec::new();
+        let mut buffer_feedback_pairs: Vec<gpu::FeedbackPair> = Vec::new();
+        for (entry, read, write) in &spec.feedback_specs {
+            let cp = spec
+                .descriptor
+                .pipelines
+                .iter()
+                .find_map(|p| match p {
+                    DescPipeline::Compute(cp) if cp.entry_point == *entry => Some(cp),
+                    _ => None,
+                })
+                .ok_or_else(|| {
                     anyhow!(
-                        "--feedback '{}:{}={}' — entry has no texture2d binding named '{}'",
+                        "--feedback '{}:{}={}' — no compute pipeline with that entry point",
                         entry,
                         read,
-                        write,
-                        read
-                    )
-                })?;
-                let (write_set, write_binding) = write_loc.ok_or_else(|| {
-                    anyhow!(
-                        "--feedback '{}:{}={}' — entry has no storage_image binding named '{}'",
-                        entry,
-                        read,
-                        write,
                         write
                     )
                 })?;
-                Ok(gpu::FeedbackPair {
-                    read_set,
-                    read_binding,
-                    write_set,
-                    write_binding,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let feedback_reads: HashMap<(u32, u32), (u32, u32)> = feedback_pairs
+            let mut tex_read: Option<(u32, u32)> = None;
+            let mut tex_write: Option<(u32, u32)> = None;
+            let mut buf_read: Option<(u32, u32)> = None;
+            let mut buf_write: Option<(u32, u32)> = None;
+            for b in &cp.bindings {
+                match b {
+                    wyn_pipeline_descriptor::Binding::Texture {
+                        set, binding, name, ..
+                    } if name == read => tex_read = Some((*set, *binding)),
+                    wyn_pipeline_descriptor::Binding::StorageTexture {
+                        set, binding, name, ..
+                    } if name == write => tex_write = Some((*set, *binding)),
+                    wyn_pipeline_descriptor::Binding::StorageBuffer {
+                        set, binding, name, ..
+                    } if name == read => buf_read = Some((*set, *binding)),
+                    wyn_pipeline_descriptor::Binding::StorageBuffer {
+                        set, binding, name, ..
+                    } if name == write => buf_write = Some((*set, *binding)),
+                    _ => {}
+                }
+            }
+            match (tex_read, tex_write, buf_read, buf_write) {
+                (Some((rs, rb)), Some((ws, wb)), None, None) => {
+                    texture_feedback_pairs.push(gpu::FeedbackPair {
+                        read_set: rs,
+                        read_binding: rb,
+                        write_set: ws,
+                        write_binding: wb,
+                    });
+                }
+                (None, None, Some((rs, rb)), Some((ws, wb))) => {
+                    buffer_feedback_pairs.push(gpu::FeedbackPair {
+                        read_set: rs,
+                        read_binding: rb,
+                        write_set: ws,
+                        write_binding: wb,
+                    });
+                }
+                (Some(_), _, Some(_), _) | (_, Some(_), _, Some(_)) => {
+                    return Err(anyhow!(
+                        "--feedback '{}:{}={}' — names match both texture and storage-buffer \
+                         bindings; feedback pairs must be all-texture or all-buffer",
+                        entry,
+                        read,
+                        write
+                    ));
+                }
+                _ => {
+                    return Err(anyhow!(
+                        "--feedback '{}:{}={}' — entry has no matching pair: expected a \
+                         texture2d named '{}' + storage_image named '{}', or storage_buffer \
+                         bindings named '{}' (read) and '{}' (write)",
+                        entry,
+                        read,
+                        write,
+                        read,
+                        write,
+                        read,
+                        write
+                    ));
+                }
+            }
+        }
+        let feedback_reads: HashMap<(u32, u32), (u32, u32)> = texture_feedback_pairs
+            .iter()
+            .map(|p| ((p.read_set, p.read_binding), (p.write_set, p.write_binding)))
+            .collect();
+        let buffer_feedback_reads: HashMap<(u32, u32), (u32, u32)> = buffer_feedback_pairs
             .iter()
             .map(|p| ((p.read_set, p.read_binding), (p.write_set, p.write_binding)))
             .collect();
@@ -498,8 +529,10 @@ impl State {
             &device,
             &spec.descriptor,
             Some((config.width, config.height)),
-            &feedback_pairs,
+            &texture_feedback_pairs,
         );
+        let feedback_buffers =
+            gpu::create_feedback_buffers(&device, &spec.descriptor, &buffer_feedback_pairs)?;
         let host_textures = gpu::create_host_textures(&device, &spec.descriptor, &storage_textures);
         let host_buffers = gpu::create_host_buffers(
             &device,
@@ -609,9 +642,11 @@ impl State {
                         &storage_textures,
                         &host_textures,
                         &host_buffers,
+                        &feedback_buffers,
                         &samplers,
                         &uniforms.by_set_binding,
                         &feedback_reads,
+                        &buffer_feedback_reads,
                         parity,
                     )
                     .with_context(|| {
@@ -718,9 +753,11 @@ impl State {
                     &storage_textures,
                     &host_textures,
                     &host_buffers,
+                    &feedback_buffers,
                     &samplers,
                     &uniforms.by_set_binding,
                     &feedback_reads,
+                    &buffer_feedback_reads,
                     parity,
                 )
                 .with_context(|| {
