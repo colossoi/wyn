@@ -1,0 +1,40 @@
+-- A minimal particle simulator demonstrating storage-buffer feedback.
+--
+-- The compute entry `tick` keeps a buffer of `vec2i32` pixel positions.
+-- Each frame it reads the previous-frame positions via `prev_pos` (the
+-- feedback read side) and returns the new ones. The update is trivial:
+-- shift each particle by (1, 1), wrapping at 512px so a particle that
+-- walks off the right/bottom edge re-enters at the top-left.
+--
+-- The fragment entry `main_image` reads the SAME feedback read side
+-- (set=2, binding=0) — i.e. previous-frame positions — and lights up
+-- one white pixel at each particle, black elsewhere.
+--
+-- Run:
+--   wyn compile testfiles/playground/particles.wyn -o /tmp/particles.spv
+--   viz pipeline /tmp/particles.spv --feedback tick:prev_pos=tick_output --max-frames 200
+
+#[compute]
+entry tick(#[storage(set=2, binding=0, access=read)] prev_pos: []vec2i32) []vec2i32 =
+  map(|i: i32|
+        let p = prev_pos[i] in
+        @[(p.x + 1) % 512, (p.y + 1) % 512],
+      0i32..<1)
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vid: i32)
+  #[builtin(position)] vec4f32 =
+  -- Full-screen triangle: three off-screen verts that cover the viewport.
+  let x = if vid == 0 then -1.0 else if vid == 1 then 3.0 else -1.0 in
+  let y = if vid == 0 then -1.0 else if vid == 1 then -1.0 else 3.0 in
+  @[x, y, 0.0, 1.0]
+
+#[fragment]
+entry main_image(#[storage(set=2, binding=0, access=read)] positions: []vec2i32,
+                 #[builtin(position)] fragCoord: vec4f32)
+  #[location(0)] vec4f32 =
+  let px = i32.f32(fragCoord.x) in
+  let py = i32.f32(fragCoord.y) in
+  let p = positions[0] in
+  let hit = (px == p.x) && (py == p.y) in
+  if hit then @[1.0, 1.0, 1.0, 1.0] else @[0.0, 0.0, 0.0, 1.0]
