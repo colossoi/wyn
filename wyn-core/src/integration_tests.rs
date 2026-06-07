@@ -3565,6 +3565,47 @@ fn compute_let_wrapped_if_over_two_maps_compiles_runtime_sized() {
     crate::compile_thru_spirv(src).expect("Let-wrapped If over two maps must compile");
 }
 
+/// The user's original case 1 (fixed-size output): both branches map
+/// over different sources (`0..<N` vs `prev_pos`) but the output is
+/// `[Size(2)]vec2f32` because `N = 2` is a literal. Lands in the
+/// fixed-aggregate path of `dispatch::compute_slot_source`. This
+/// always worked; the test pins it as regression protection alongside
+/// the runtime-sized variants the DPS migration unblocked.
+#[test]
+fn compute_if_over_two_maps_compiles_fixed_size_different_sources() {
+    let src = r#"
+        def N: i32 = 2
+        #[compute]
+        entry tick(#[storage(set=2, binding=0, access=read)] prev_pos: []vec2f32,
+                   #[uniform(set=1, binding=1)] iTime: f32) []vec2f32 =
+          if iTime == 0.0 then
+            map(|i:i32| if i == 0 then @[2.0, 2.0] else @[15.0, 5.0], 0i32..<N)
+          else
+            map(|pos:vec2f32| @[pos.x + 1.0, pos.y + 1.0], prev_pos)
+    "#;
+    crate::compile_thru_spirv(src)
+        .expect("fixed-size If-over-maps (different sources) must compile");
+}
+
+/// The user's original case 2 (fixed-size output): both branches map
+/// over the *same* range source. Output is still `[Size(2)]vec2f32`.
+/// Same code path as case 1 — the source-difference doesn't matter for
+/// fixed-size aggregates.
+#[test]
+fn compute_if_over_two_maps_compiles_fixed_size_same_source() {
+    let src = r#"
+        def N: i32 = 2
+        #[compute]
+        entry tick(#[storage(set=2, binding=0, access=read)] prev_pos: []vec2f32,
+                   #[uniform(set=1, binding=1)] iTime: f32) []vec2f32 =
+          if iTime == 0.0 then
+            map(|i:i32| if i == 0 then @[2.0, 2.0] else @[15.0, 5.0], 0i32..<N)
+          else
+            map(|i:i32| @[f32.i32(i), f32.i32(i)], 0i32..<N)
+    "#;
+    crate::compile_thru_spirv(src).expect("fixed-size If-over-maps (same source) must compile");
+}
+
 /// Multi-output entry whose Tuple components each contain an `If`.
 /// `normalize_outputs` decomposes the Tuple into per-slot
 /// `OutputSlotStore`s; each then enters the `If`-fork recursion in
