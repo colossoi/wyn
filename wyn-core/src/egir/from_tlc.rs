@@ -522,72 +522,25 @@ fn convert_entry_point(
     // single tail value (or `None` for a unit entry).
     let result_nid = converter.convert_term(inner_body)?;
 
-    // Phase 1A bridge: if the body collected per-slot values via
-    // `OutputSlotStore` terms (i.e. `tlc::normalize_outputs` ran), the
-    // body itself is unit-producing — but `egir::assign_outputs` still
-    // wants to see a tuple of slot values at the tail so it can do its
-    // per-slot retargeting. Synthesise that tuple here from the
-    // collected pairs, indexed by `slot_index` so order matches
-    // `entry.outputs`.
-    let slot_result = if converter.output_slot_values.is_empty() {
-        None
-    } else {
-        let mut by_index = converter.output_slot_values.clone();
-        by_index.sort_by_key(|(i, _)| *i);
-        // `normalize_outputs::emit_slot_writes` emits exactly one
-        // `OutputSlotStore` per declared output, with slot indices
-        // densely covering `[0, n_outputs)`. Pin that invariant here
-        // — if a future pass perturbs the chain (drops/duplicates a
-        // store) the bridge would silently emit a malformed Tuple.
-        debug_assert_eq!(
-            by_index.len(),
-            entry.outputs.len(),
-            "bridge: expected one OutputSlotStore per declared output \
-             ({} declared, {} collected)",
-            entry.outputs.len(),
-            by_index.len(),
-        );
-        debug_assert!(
-            by_index.iter().enumerate().all(|(pos, (slot, _))| *slot == pos),
-            "bridge: slot indices must densely cover [0, n_outputs); got {:?}",
-            by_index.iter().map(|(s, _)| *s).collect::<Vec<_>>()
-        );
-        let nids: SmallVec<[NodeId; 4]> = by_index.iter().map(|(_, n)| *n).collect();
-        if nids.len() == 1 {
-            Some(nids[0])
-        } else {
-            // Derive the tuple type from `entry.outputs` since
-            // `ret_type` is `SideEffect` post-`normalize_outputs`.
-            // Tag the synthesised node with the entry-body span so
-            // downstream diagnostics referring to the bridged Tuple
-            // point at user-meaningful source.
-            let component_tys: Vec<_> = entry.outputs.iter().map(|o| o.ty.clone()).collect();
-            let tuple_ty = Type::Constructed(TypeName::Tuple(component_tys.len()), component_tys);
-            let saved_span = converter.current_span;
-            converter.current_span = Some(inner_body.span);
-            let nid = converter.intern_pure(PureOp::Tuple(nids.len()), nids, tuple_ty);
-            converter.current_span = saved_span;
-            Some(nid)
-        }
-    };
-
-    // Slot-collected entries always carry their tuple result into the
-    // Return terminator so `egir::assign_outputs` can retarget per slot,
-    // even when the body's TLC return type is Unit post-`normalize_outputs`.
-    let was_slot_collected = slot_result.is_some();
-    if let Some(synth) = slot_result {
-        converter.set_return(Some(synth));
+    // Slot-collected entries (post-`normalize_outputs`) have their
+    // writes recorded as per-slot `SlotSource`s rather than flowing
+    // through a single Return value. `egir::assign_outputs` reads
+    // those sources directly off `EgirEntry.slot_sources` and
+    // retargets each one. The body terminates with `Return(None)` —
+    // there's no value to merge through the CFG.
+    let was_slot_collected = !converter.slot_sources_accum.is_empty();
+    if was_slot_collected {
+        converter.set_return(None);
     } else if is_unit_return {
         converter.set_return(None);
     } else {
         converter.set_return(Some(result_nid));
     }
 
-    // When the body was unit-typed post-`normalize_outputs` but we
-    // synthesised a tuple at the tail, the EgirEntry's `ret_type` should
-    // reflect that tuple shape (downstream uses it for the function
-    // signature and the assign_outputs flatten). Rebuild from
-    // `entry.outputs` in that case.
+    // `ret_type` is used by downstream code to type the entry's
+    // function signature. Post-`normalize_outputs` the body's TLC
+    // return type is `SideEffect`; reconstruct from `entry.outputs`
+    // so the signature matches the declared output shape.
     let ret_type = if was_slot_collected {
         if entry.outputs.len() == 1 {
             entry.outputs[0].ty.clone()
@@ -599,8 +552,9 @@ fn convert_entry_point(
         ret_type
     };
 
+    let slot_sources = std::mem::take(&mut converter.slot_sources_accum);
     let (graph, control_headers) = converter.into_graph_parts();
-    Ok(EgirEntry::new(
+    let mut entry = EgirEntry::new(
         def_name.to_string(),
         def.body.span,
         execution_model,
@@ -611,7 +565,9 @@ fn convert_entry_point(
         ret_type,
         graph,
         control_headers,
-    ))
+    );
+    entry.slot_sources = slot_sources;
+    Ok(entry)
 }
 
 // ============================================================================
@@ -644,14 +600,20 @@ struct Converter<'a> {
     /// the originating source. Pushed/popped in `convert_term`; `None`
     /// only outside any term conversion (e.g. entry-point glue).
     current_span: Option<Span>,
-    /// `(slot_index, value_nid)` pairs collected from `OutputSlotStore`
-    /// terms during entry-body conversion. Populated by
-    /// `convert_term_kind`'s `OutputSlotStore` arm; consumed by
-    /// `convert_entry_point` to synthesise the entry's tuple result so
-    /// `egir::assign_outputs` can do its existing per-slot retargeting.
-    /// Phase 1A bridge — a later step folds `assign_outputs`'s logic
-    /// into the slot conversion itself.
-    output_slot_values: Vec<(usize, NodeId)>,
+    /// Per-slot list of `SlotSource { block, value }` records collected
+    /// from `OutputSlotStore` terms during entry-body conversion. Indexed
+    /// by slot index. Populated by `convert_slot_store` (the
+    /// `OutputSlotStore` arm of `convert_term_kind` delegates here);
+    /// consumed by `convert_entry_point` to populate `EgirEntry.slot_sources`
+    /// and decide whether the body terminates with `Return(None)` (when
+    /// all outputs were written via slot stores) or a value (legacy
+    /// non-normalized entries).
+    ///
+    /// A slot with one source has `vec![one]`; a slot written from both
+    /// arms of an `If` (where both branches independently store to the
+    /// same slot) has two. Empty for unit-returning entries that never
+    /// went through `normalize_outputs`.
+    slot_sources_accum: Vec<Vec<crate::egir::program::SlotSource>>,
 }
 
 impl<'a> Converter<'a> {
@@ -675,7 +637,7 @@ impl<'a> Converter<'a> {
             control_headers: HashMap::new(),
             next_effect: 1,
             current_span: None,
-            output_slot_values: Vec::new(),
+            slot_sources_accum: Vec::new(),
         }
     }
 
@@ -909,21 +871,97 @@ impl<'a> Converter<'a> {
             TermKind::BinOp(_) | TermKind::UnOp(_) => {
                 panic!("ICE: bare operator in to_egir (should be inside App)")
             }
-            // Phase 1A bridge: collect each `OutputSlotStore { slot_index,
-            // value, .. }`'s converted value NodeId into
-            // `output_slot_values`. The entry-point glue
-            // (`convert_entry_point`) synthesises a tuple of these at
-            // the body's tail so the existing `egir::assign_outputs`
-            // logic continues to do per-slot retargeting unchanged.
-            // Returning a unit constant keeps the surrounding `Let`
-            // chain's `body` happy and well-typed.
+            // `OutputSlotStore { slot_index, value, .. }`: delegate
+            // to `convert_slot_store`, which recurses through `If` and
+            // records one `SlotSource` per producing leaf. Returning a
+            // unit constant keeps the surrounding `Let` chain's `body`
+            // well-typed.
             TermKind::OutputSlotStore {
                 slot_index, value, ..
             } => {
-                let value_nid = self.convert_term(value)?;
-                self.output_slot_values.push((*slot_index, value_nid));
+                self.convert_slot_store(*slot_index, value)?;
                 let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
                 Ok(self.intern_pure(PureOp::Unit, smallvec![], unit_ty))
+            }
+        }
+    }
+
+    // ========================================================================
+    // Output slot stores (DPS write at the producing site)
+    // ========================================================================
+
+    /// Convert one `OutputSlotStore(slot_index, value)`, recursing through
+    /// `If` so each producing leaf records its own `SlotSource` at the
+    /// block in which it fires.
+    ///
+    /// `If`-shaped values fork at the EGIR level: the current block ends
+    /// with `CondBranch`, each arm recursively converts the same slot
+    /// store against its branch, and both arms terminate with
+    /// `Branch(merge)` carrying no result args. There's nothing to
+    /// merge — each branch's slot write went to the same binding, the
+    /// runtime CFG picks which one fires.
+    ///
+    /// Non-control-flow values are converted normally; a single
+    /// `SlotSource { block: self.current_block, value: <converted> }`
+    /// is pushed to `slot_sources_accum[slot_index]`.
+    fn convert_slot_store(
+        &mut self,
+        slot_index: usize,
+        value: &Term,
+    ) -> Result<(), ConvertError> {
+        use crate::ssa::types::ControlHeader;
+        match &value.kind {
+            TermKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                let cond_nid = self.convert_term(cond)?;
+
+                let then_block = self.graph.skeleton.create_block();
+                let else_block = self.graph.skeleton.create_block();
+                let merge_block = self.graph.skeleton.create_block();
+
+                self.control_headers.insert(
+                    self.current_block,
+                    ControlHeader::Selection { merge: merge_block },
+                );
+                self.graph.skeleton.blocks[self.current_block].term =
+                    SkeletonTerminator::CondBranch {
+                        cond: cond_nid,
+                        then_target: then_block,
+                        then_args: vec![],
+                        else_target: else_block,
+                        else_args: vec![],
+                    };
+
+                self.current_block = then_block;
+                self.convert_slot_store(slot_index, then_branch)?;
+                self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
+                    target: merge_block,
+                    args: vec![],
+                };
+
+                self.current_block = else_block;
+                self.convert_slot_store(slot_index, else_branch)?;
+                self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
+                    target: merge_block,
+                    args: vec![],
+                };
+
+                self.current_block = merge_block;
+                Ok(())
+            }
+            _ => {
+                let value_nid = self.convert_term(value)?;
+                while self.slot_sources_accum.len() <= slot_index {
+                    self.slot_sources_accum.push(Vec::new());
+                }
+                self.slot_sources_accum[slot_index].push(crate::egir::program::SlotSource {
+                    block: self.current_block,
+                    value: value_nid,
+                });
+                Ok(())
             }
         }
     }

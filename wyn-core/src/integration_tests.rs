@@ -3479,3 +3479,51 @@ fn multidim_view_inner_fixed_carries_subarray_elem_bytes() {
         ),
     }
 }
+
+/// `If`-over-two-retargetable-maps with a runtime-sized output:
+/// previously rejected by `assign_outputs::lower_slot` because the
+/// merge-block param wasn't a Map/Scan node. After the DPS migration,
+/// each branch's `OutputSlotStore` records its own `SlotSource` at
+/// its block; `assign_outputs` retargets both Maps into the same
+/// output view. Runtime CFG ensures only one fires per execution
+/// path.
+#[test]
+fn compute_if_over_two_maps_compiles_runtime_sized() {
+    use crate::pipeline_descriptor::{BufferLen, Pipeline};
+    let src = r#"
+        #[compute]
+        entry tick(#[storage(set=2, binding=0, access=read)] prev: []vec2f32,
+                   #[uniform(set=1, binding=1)] iTime: f32) []vec2f32 =
+          if iTime == 0.0
+            then map(|p: vec2f32| @[1.0f32, 1.0f32], prev)
+            else map(|p: vec2f32| @[p.x + 1.0f32, p.y + 1.0f32], prev)
+    "#;
+    let lowered = crate::compile_thru_spirv(src).expect("compile_thru_spirv");
+    let Pipeline::Compute(cp) = lowered.pipeline.pipelines.first().expect("one pipeline")
+    else {
+        panic!("expected single-compute pipeline");
+    };
+    // Output's size variable matches `prev`'s — the length-inference
+    // rule emits `LikeInput` rather than `SameAsDispatch`.
+    let output_len = cp.bindings.iter().find_map(|b| match b {
+        crate::pipeline_descriptor::Binding::StorageBuffer { name, length, .. }
+            if name == "tick_output" =>
+        {
+            length.clone()
+        }
+        _ => None,
+    });
+    match output_len {
+        Some(BufferLen::LikeInput {
+            set,
+            binding,
+            elem_bytes,
+            ..
+        }) => {
+            assert_eq!(set, 2);
+            assert_eq!(binding, 0);
+            assert_eq!(elem_bytes, 8); // vec2f32
+        }
+        other => panic!("output should be LikeInput, got {other:?}"),
+    }
+}

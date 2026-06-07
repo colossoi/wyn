@@ -40,6 +40,7 @@ use super::types::{
 };
 
 /// Where a single output value is written.
+#[derive(Clone, Copy)]
 enum Dest {
     /// Compute output bound to a storage buffer at `binding`.
     StorageView(crate::BindingRef),
@@ -68,10 +69,23 @@ pub fn run(inner: &mut EgirInner) -> Result<(), ConvertError> {
 
 fn assign_entry_outputs(entry: &mut EgirEntry) -> Result<(), ConvertError> {
     if entry.outputs.is_empty() {
-        // Unit entry: body already terminates in `Return(None)`.
         return Ok(());
     }
 
+    // Slot-collected entries (post-`normalize_outputs`): each declared
+    // output carries one or more `SlotSource`s from the body. Retarget
+    // each source against the slot's destination. Multi-source slots
+    // (e.g. both arms of an `If` write the same slot) share one
+    // `OutputView`; the runtime CFG decides which source's write fires.
+    if !entry.slot_sources.is_empty() {
+        return assign_from_slot_sources(entry);
+    }
+
+    // Legacy / graphics path: walk the body's `Return(Some(result))`
+    // terminator and classify the result NodeId. Used for entries that
+    // didn't go through `normalize_outputs` (no compute-pipeline ones
+    // today should fall here — `normalize_outputs` runs unconditionally
+    // for `is_compute` entries — but graphics entries still use this).
     let EgirEntry {
         graph,
         outputs,
@@ -80,8 +94,6 @@ fn assign_entry_outputs(entry: &mut EgirEntry) -> Result<(), ConvertError> {
         ..
     } = entry;
 
-    // Locate the unique `Return(Some(result))` terminator (functional body:
-    // one tail value through the merge block).
     let mut return_loc: Option<(BlockId, NodeId)> = None;
     for (bid, block) in &graph.skeleton.blocks {
         if let SkeletonTerminator::Return(Some(r)) = block.term {
@@ -94,7 +106,6 @@ fn assign_entry_outputs(entry: &mut EgirEntry) -> Result<(), ConvertError> {
     }
     let (return_block, result) = match return_loc {
         Some(x) => x,
-        // Already unit-producing — nothing to assign.
         None => return Ok(()),
     };
 
@@ -106,8 +117,217 @@ fn assign_entry_outputs(entry: &mut EgirEntry) -> Result<(), ConvertError> {
         lower_slot(graph, aliases, return_block, &mut next_effect, result, &slot)?;
     }
 
-    // The body is now unit-producing.
     graph.skeleton.blocks[return_block].term = SkeletonTerminator::Return(None);
+    Ok(())
+}
+
+/// Per-slot, per-source retargeting. The slot's destination comes from
+/// `EgirEntry.outputs[i]`; each `SlotSource` independently lowers to a
+/// DPS write into the same destination. Multi-source slots reject
+/// mixed-shape sources (e.g. one Map + one fixed aggregate) for v1.
+fn assign_from_slot_sources(entry: &mut EgirEntry) -> Result<(), ConvertError> {
+    let is_compute = matches!(entry.execution_model, ExecutionModel::Compute { .. });
+    let EgirEntry {
+        graph,
+        outputs,
+        aliases,
+        slot_sources,
+        ..
+    } = entry;
+
+    let mut next_effect = graph_ops::next_effect_token(graph);
+
+    for (slot_index, output) in outputs.iter().enumerate() {
+        let dest = if is_compute {
+            let br = output
+                .storage_binding
+                .expect("BUG: compute output without storage binding");
+            Dest::StorageView(br)
+        } else {
+            Dest::OutputSlot { index: slot_index }
+        };
+
+        let sources = slot_sources.get(slot_index).cloned().unwrap_or_default();
+        if sources.is_empty() {
+            return Err(ConvertError::Unsupported(format!(
+                "compute output #{} has no source — `normalize_outputs` \
+                 should have emitted at least one `OutputSlotStore` for \
+                 every declared output",
+                slot_index
+            )));
+        }
+
+        let multi_source = sources.len() > 1;
+        for src in &sources {
+            lower_slot_source(
+                graph,
+                aliases,
+                &mut next_effect,
+                src.block,
+                src.value,
+                slot_index,
+                &output.ty,
+                &dest,
+                multi_source,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Classify a single source NodeId and emit the DPS write into `dest`.
+/// `multi_source` controls v1 gating: sibling-Index rewrites and any
+/// shape-mixing across sources are rejected when `multi_source` is true.
+#[allow(clippy::too_many_arguments)]
+fn lower_slot_source(
+    graph: &mut EGraph,
+    aliases: &mut std::collections::HashMap<NodeId, NodeId>,
+    next_effect: &mut u32,
+    block: BlockId,
+    source: NodeId,
+    slot_index: usize,
+    slot_ty: &Type<TypeName>,
+    dest: &Dest,
+    multi_source: bool,
+) -> Result<(), ConvertError> {
+    let binding = match *dest {
+        Dest::StorageView(br) => br,
+        Dest::OutputSlot { index } => {
+            let place =
+                graph.intern_pure(PureOp::OutputSlot { index }, smallvec![], slot_ty.clone());
+            graph_ops::emit_store(graph, block, place, source, next_effect, None);
+            return Ok(());
+        }
+    };
+
+    // Consuming Scan(InputBuffer): result lives in the input buffer; no store.
+    if result_soac_is_consuming_scan(graph, source) {
+        return Ok(());
+    }
+
+    // Retargetable Map/Scan(Fresh): stream into the slot's output view.
+    if result_soac_is_map_or_scan(graph, source) {
+        let elem_ty = slot_ty
+            .elem_type()
+            .cloned()
+            .expect("Map/Scan slot output is always an array");
+        let view = graph_ops::intern_storage_view(graph, binding, elem_ty.clone(), None);
+        if multi_source {
+            // v1 cap: sibling-Index rewrites against a multi-source slot
+            // would have to pick which source's view to load from, which
+            // requires Phi-tracking we haven't built yet. Reject any
+            // non-trivial consumer of this source.
+            reject_sibling_consumers(graph, source, slot_index)?;
+        } else {
+            // Use the existing single-source sibling-Index rewrite. We
+            // pass `source` as the "entry result" sentinel here since
+            // the multi-consumer-scan exclusion is built around that
+            // identity; for the slot-sources path there is no synthetic
+            // tuple node to exclude, so passing `source` self-excludes
+            // safely.
+            let pseudo_slot = Slot {
+                index: slot_index,
+                ty: slot_ty.clone(),
+                source,
+                dest: dest.clone(),
+            };
+            rewrite_other_index_consumers_to_loads(
+                graph,
+                aliases,
+                block,
+                next_effect,
+                source,
+                &pseudo_slot,
+                view,
+                elem_ty,
+            )?;
+        }
+        rewrite_map_scan_to_into(graph, source, view);
+        return Ok(());
+    }
+
+    // Fixed-size aggregate: element-store each of the N elements.
+    let fixed_size = slot_ty.array_size().and_then(|s| {
+        if let Type::Constructed(TypeName::Size(n), _) = s {
+            Some(*n)
+        } else {
+            None
+        }
+    });
+    if let (Some(n), Some(et)) = (fixed_size, slot_ty.elem_type().cloned()) {
+        let view = graph_ops::intern_storage_view(graph, binding, et.clone(), None);
+        for j in 0..n {
+            let elem = graph.intern_pure(
+                PureOp::Project { index: j as u32 },
+                smallvec![source],
+                et.clone(),
+            );
+            let idx = graph_ops::intern_u32(graph, j as u32, None);
+            graph_ops::emit_storage_store(
+                graph,
+                block,
+                view,
+                idx,
+                elem,
+                et.clone(),
+                next_effect,
+                None,
+            );
+        }
+        return Ok(());
+    }
+
+    // Runtime-sized array not produced by a retargetable SOAC.
+    if is_unsized_array(slot_ty) {
+        return Err(ConvertError::Unsupported(format!(
+            "compute output #{} is a runtime-sized array ({:?}) not produced by a \
+             retargetable map/scan: only map/scan results stream into a runtime-sized \
+             output. Wrap the producer in a `map`, or return a fixed-size array",
+            slot_index, slot_ty
+        )));
+    }
+
+    // Scalar / vector / matrix: store the whole value at index 0.
+    let view = graph_ops::intern_storage_view(graph, binding, slot_ty.clone(), None);
+    let idx0 = graph_ops::intern_u32(graph, 0, None);
+    graph_ops::emit_storage_store(
+        graph,
+        block,
+        view,
+        idx0,
+        source,
+        slot_ty.clone(),
+        next_effect,
+        None,
+    );
+    Ok(())
+}
+
+/// Multi-source v1 cap: any non-self Pure consumer of `source` is
+/// rejected. Sibling-Index rewrites for multi-source slots would need
+/// Phi-tracking to know which source's view to load from on each path.
+fn reject_sibling_consumers(
+    graph: &EGraph,
+    source: NodeId,
+    slot_index: usize,
+) -> Result<(), ConvertError> {
+    let has_consumer = graph
+        .nodes
+        .iter()
+        .any(|(nid, node)| match node {
+            ENode::Pure { operands, .. } if nid != source => operands.contains(&source),
+            _ => false,
+        });
+    if has_consumer {
+        return Err(ConvertError::Unsupported(format!(
+            "compute output #{}: a slot written from multiple control-flow \
+             paths (e.g. both arms of an `If`) is consumed elsewhere as a \
+             value; v1 only supports multi-source slots that are pure \
+             outputs",
+            slot_index
+        )));
+    }
     Ok(())
 }
 
