@@ -3447,7 +3447,13 @@ fn multidim_view_inner_fixed_carries_subarray_elem_bytes() {
         },
         other => panic!("expected DerivedFrom dispatch size, got {other:?}"),
     }
-    // The output `[]u32` is one u32 per dispatched thread.
+    // The output `[]u32`'s size variable matches `buf`'s (the
+    // type checker unified them — `map(f, buf): [n]u32` for the same
+    // `n` as `buf: [n][4]u32`), so the length-policy inference
+    // emits `LikeInput` rather than the looser `SameAsDispatch`.
+    // Both resolve to the same allocated byte size when the dispatch
+    // is itself derived from `buf` (as it is here), but `LikeInput`
+    // names the source binding explicitly.
     let output_len = cp.bindings.iter().find_map(|b| match b {
         crate::pipeline_descriptor::Binding::StorageBuffer { name, length, .. }
             if name == "row_sums_output" =>
@@ -3457,7 +3463,19 @@ fn multidim_view_inner_fixed_carries_subarray_elem_bytes() {
         _ => None,
     });
     match output_len {
-        Some(BufferLen::SameAsDispatch { elem_bytes }) => assert_eq!(elem_bytes, 4),
-        other => panic!("output should be SameAsDispatch{{elem_bytes: 4}}, got {other:?}"),
+        Some(BufferLen::LikeInput {
+            set,
+            binding,
+            elem_bytes,
+            src_elem_bytes,
+        }) => {
+            assert_eq!(set, 0);
+            assert_eq!(binding, 0);
+            assert_eq!(elem_bytes, 4);
+            assert_eq!(src_elem_bytes, 16);
+        }
+        other => panic!(
+            "output should be LikeInput {{set:0, binding:0, elem_bytes:4, src_elem_bytes:16}}, got {other:?}"
+        ),
     }
 }

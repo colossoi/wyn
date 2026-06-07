@@ -6,6 +6,7 @@
 //! back to `FuncBody` via demand-driven scheduling (giving DCE for free).
 
 use crate::builtins::catalog;
+use crate::ssa::types::EntryInput;
 use crate::ssa::types::EntryOutput;
 use crate::ssa::types::IoDecoration;
 use crate::tlc::SoacBody;
@@ -502,6 +503,7 @@ fn convert_entry_point(
         entry,
         &ret_type,
         &slot_value_tys,
+        &inputs,
         is_compute,
         binding_num,
         forced_output_binding,
@@ -2071,6 +2073,7 @@ fn build_entry_outputs(
     entry: &interface::EntryDecl,
     ret_type: &Type<TypeName>,
     slot_value_tys: &[Option<Type<TypeName>>],
+    inputs: &[EntryInput],
     is_compute: bool,
     binding_start: u32,
     forced_output_binding: Option<BindingRef>,
@@ -2079,25 +2082,72 @@ fn build_entry_outputs(
     use EntryOutput;
     let mut binding_num = binding_start;
     let mut forced_remaining = forced_output_binding;
-    // A parallel map/scan writes one output element per dispatched thread, so
-    // a storage output's length tracks the dispatch. `None` otherwise (the
-    // host falls back to its default sizing). `ty` is the runtime-sized
-    // array output type; `elem_bytes` is the byte size of *one element*
-    // (i.e. of `ty.elem_type()`), not the whole array.
+    // Pick a `BufferLen` policy for the output binding, in order:
+    //
+    //   1. Output type carries a compile-time-known `Size(n)` literal
+    //      → `Fixed { bytes: n * elem_bytes }`.
+    //   2. Output's size variable matches one of the entry's storage
+    //      inputs (the type checker has unified them) → `LikeInput`
+    //      tracking that input.
+    //   3. The parallelize plan said the entry is dispatch-sized
+    //      (a single Map/Scan SOAC at the tail, or a forced gather
+    //      prepass) → `SameAsDispatch { elem_bytes }`.
+    //   4. None — the host falls back to its default sizing or, if it
+    //      tried to allocate this buffer, surfaces a clean error.
+    //
+    // The size info is already in the (post-monomorphize) type — we
+    // just read it. No structural rewrites needed for `if/else`
+    // branches whose result types have already been unified.
     let length_for =
         |binding: Option<BindingRef>, ty: &Type<TypeName>| -> Result<Option<BufferLen>, ConvertError> {
-            if !dispatch_sized || binding.is_none() {
+            if binding.is_none() {
                 return Ok(None);
             }
-            let elem_ty = ty.elem_type().ok_or_else(|| {
-                ConvertError::Internal(format!("dispatch-sized output type is not an array: {ty:?}"))
-            })?;
+            let Some(elem_ty) = ty.elem_type() else {
+                return Ok(None);
+            };
             let elem_bytes = crate::ssa::layout::type_byte_size(elem_ty).ok_or_else(|| {
-                ConvertError::Internal(format!(
-                    "dispatch-sized output element has no static byte layout: {elem_ty:?}"
-                ))
+                ConvertError::Internal(format!("output element has no static byte layout: {elem_ty:?}"))
             })?;
-            Ok(Some(BufferLen::SameAsDispatch { elem_bytes }))
+            if let Some(out_size) = crate::types::array_size(ty) {
+                // Rule 1: compile-time size literal.
+                if let Type::Constructed(TypeName::Size(n), _) = out_size {
+                    return Ok(Some(BufferLen::Fixed {
+                        bytes: (*n as u64) * elem_bytes as u64,
+                    }));
+                }
+                // Rule 2: size variable shared with an entry input.
+                for input in inputs {
+                    let Some(in_binding) = input.storage_binding else {
+                        continue;
+                    };
+                    let Some(in_size) = crate::types::array_size(&input.ty) else {
+                        continue;
+                    };
+                    if in_size == out_size {
+                        let Some(in_elem_ty) = input.ty.elem_type() else {
+                            continue;
+                        };
+                        let src_elem_bytes =
+                            crate::ssa::layout::type_byte_size(in_elem_ty).ok_or_else(|| {
+                                ConvertError::Internal(format!(
+                                    "input element has no static byte layout: {in_elem_ty:?}"
+                                ))
+                            })?;
+                        return Ok(Some(BufferLen::LikeInput {
+                            set: in_binding.set,
+                            binding: in_binding.binding,
+                            elem_bytes,
+                            src_elem_bytes,
+                        }));
+                    }
+                }
+            }
+            // Rule 3: existing dispatch-sized path.
+            if dispatch_sized {
+                return Ok(Some(BufferLen::SameAsDispatch { elem_bytes }));
+            }
+            Ok(None)
         };
     let mut storage_binding_for = |ty: &Type<TypeName>, is_compute: bool| -> Option<BindingRef> {
         if is_compute && !matches!(ty, Type::Constructed(TypeName::Unit, _)) {
