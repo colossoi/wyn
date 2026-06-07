@@ -3527,3 +3527,41 @@ fn compute_if_over_two_maps_compiles_runtime_sized() {
         other => panic!("output should be LikeInput, got {other:?}"),
     }
 }
+
+/// Nested `If` over retargetable maps. The `convert_slot_store`
+/// recursion handles arbitrary nesting; each leaf records its own
+/// `SlotSource` against the branch's block. After realization the
+/// slot has three sources (one per leaf), all retargeting into the
+/// same `OutputView`.
+#[test]
+fn compute_nested_if_over_three_maps_compiles_runtime_sized() {
+    let src = r#"
+        #[compute]
+        entry tick(#[storage(set=2, binding=0, access=read)] prev: []vec2f32,
+                   #[uniform(set=1, binding=1)] iTime: f32) []vec2f32 =
+          if iTime < 0.0
+            then map(|p: vec2f32| @[0.0f32, 0.0f32], prev)
+            else if iTime == 0.0
+              then map(|p: vec2f32| @[1.0f32, 1.0f32], prev)
+              else map(|p: vec2f32| @[p.x + 1.0f32, p.y + 1.0f32], prev)
+    "#;
+    crate::compile_thru_spirv(src).expect("nested If over three maps must compile");
+}
+
+/// `Let`-wrapped `If` whose body's branches read the let-bound value.
+/// `convert_slot_store` recognises the `Let` and binds the RHS at the
+/// current block before recursing into the body — so the binding
+/// survives the branch fork.
+#[test]
+fn compute_let_wrapped_if_over_two_maps_compiles_runtime_sized() {
+    let src = r#"
+        #[compute]
+        entry tick<[n]>(#[storage(set=2, binding=0, access=read)] prev: [n]vec2f32,
+                        #[uniform(set=1, binding=1)] iTime: f32) [n]vec2f32 =
+          let nudge: f32 = iTime * 0.1f32 in
+          if iTime == 0.0
+            then map(|p: vec2f32| @[nudge, nudge], prev)
+            else map(|p: vec2f32| @[p.x + nudge, p.y + nudge], prev)
+    "#;
+    crate::compile_thru_spirv(src).expect("Let-wrapped If over two maps must compile");
+}

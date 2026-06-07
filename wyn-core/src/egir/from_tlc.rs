@@ -891,8 +891,8 @@ impl<'a> Converter<'a> {
     // ========================================================================
 
     /// Convert one `OutputSlotStore(slot_index, value)`, recursing through
-    /// `If` so each producing leaf records its own `SlotSource` at the
-    /// block in which it fires.
+    /// `If` (and `Let` wrapping it) so each producing leaf records its
+    /// own `SlotSource` at the block in which it fires.
     ///
     /// `If`-shaped values fork at the EGIR level: the current block ends
     /// with `CondBranch`, each arm recursively converts the same slot
@@ -900,6 +900,11 @@ impl<'a> Converter<'a> {
     /// `Branch(merge)` carrying no result args. There's nothing to
     /// merge — each branch's slot write went to the same binding, the
     /// runtime CFG picks which one fires.
+    ///
+    /// `Let { x = rhs, body }` wrapping an output value (e.g. `let n =
+    /// length(xs) in if c then map_using_n else map_using_n`) binds
+    /// `rhs` at the current block, then recurses on `body` — the
+    /// binding is visible in both `If` arms when the body forks.
     ///
     /// Non-control-flow values are converted normally; a single
     /// `SlotSource { block: self.current_block, value: <converted> }`
@@ -911,6 +916,20 @@ impl<'a> Converter<'a> {
     ) -> Result<(), ConvertError> {
         use crate::ssa::types::ControlHeader;
         match &value.kind {
+            TermKind::Let {
+                name,
+                name_ty: _,
+                rhs,
+                body,
+            } => {
+                // Bind `rhs` at the current block (it produces a value;
+                // for unit-valued RHS like a side-effect call, the
+                // resulting NodeId is just the Unit constant). The
+                // binding survives the branch fork in `body`.
+                let rhs_nid = self.convert_term(rhs)?;
+                self.locals.insert(*name, rhs_nid);
+                self.convert_slot_store(slot_index, body)
+            }
             TermKind::If {
                 cond,
                 then_branch,
