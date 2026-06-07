@@ -680,7 +680,7 @@ impl TlcOwnershipApplied {
     /// explicit per-slot `OutputSlotStore` writes ending in `UnitLit`,
     /// not a tail expression that "returns" the entry value. After
     /// this, single-output and multi-output entries share one shape;
-    /// `parallelize_soacs` and `egir/assign_outputs` no longer have to
+    /// `parallelize_soacs` and `egir/realize_outputs` no longer have to
     /// special-case the tail's shape (Tuple vs. Soac vs. literal).
     pub fn normalize_outputs(self) -> Result<TlcOutputsNormalized> {
         let mut inner = self.0;
@@ -860,7 +860,7 @@ impl TlcGeneratedLambdasFolded {
             pipeline_descriptor::PipelineDescriptor::default(),
             &empty,
         )
-        .and_then(|inner| EgirRaw(inner).assign_outputs().map(|a| a.parallelize(&empty)))
+        .and_then(|inner| EgirRaw(inner).realize_outputs().map(|a| a.parallelize(&empty)))
     }
 }
 
@@ -913,7 +913,7 @@ impl TlcSmallInlined {
             pipeline_descriptor::PipelineDescriptor::default(),
             &empty,
         )
-        .and_then(|inner| EgirRaw(inner).assign_outputs().map(|a| a.parallelize(&empty)))
+        .and_then(|inner| EgirRaw(inner).realize_outputs().map(|a| a.parallelize(&empty)))
     }
 }
 
@@ -953,7 +953,7 @@ impl TlcParallelized {
             tlc, pipeline, plans, ..
         } = self.0;
         egir::from_tlc::run(&tlc, pipeline, &plans)
-            .and_then(|inner| EgirRaw(inner).assign_outputs().map(|a| a.parallelize(&plans)))
+            .and_then(|inner| EgirRaw(inner).realize_outputs().map(|a| a.parallelize(&plans)))
     }
 }
 
@@ -974,7 +974,7 @@ impl TlcReachable {
             tlc, pipeline, plans, ..
         } = self.0;
         egir::from_tlc::run(&tlc, pipeline, &plans)
-            .and_then(|inner| EgirRaw(inner).assign_outputs().map(|a| a.parallelize(&plans)))
+            .and_then(|inner| EgirRaw(inner).realize_outputs().map(|a| a.parallelize(&plans)))
     }
 }
 
@@ -990,11 +990,11 @@ impl TlcReachable {
 /// Raw EGIR program, directly produced by TLC → EGIR conversion.
 pub struct EgirRaw(EgirInner);
 
-/// EGIR after entry-output assignment. Each entry's returned value has been
-/// stored into its bound storage views / graphics output slots (and tail
-/// Map/Scan SOACs retargeted to stream into runtime-sized outputs), leaving
-/// every entry body unit-producing. See `egir::assign_outputs`.
-pub struct EgirOutputsAssigned(EgirInner);
+/// EGIR after entry-output realization. Every declared output has its
+/// writes materialised as side effects against the bound storage view
+/// (compute) or `OutputSlot` place (graphics). The body's `Return`
+/// terminator carries no value. See `egir::realize_outputs`.
+pub struct EgirOutputsRealized(EgirInner);
 
 /// EGIR after compute-entry SOAC parallelization tagging. Tail SOACs on
 /// planned compute entries are wrapped in `PendingSoac::Parallel` so
@@ -1014,17 +1014,25 @@ pub struct EgirMaterialized(EgirInner);
 pub struct EgirSkelOptimized(EgirInner);
 
 impl EgirRaw {
-    /// Assign every entry's outputs by destination-passing (storage-view /
-    /// output-slot stores + tail-SOAC retargeting). Runs before
-    /// `parallelize` so the SOAC→OutputView rewrite precedes SOAC wrapping.
-    pub fn assign_outputs(self) -> std::result::Result<EgirOutputsAssigned, ConvertError> {
+    /// Realize every entry's outputs into side-effect writes. For
+    /// compute entries: walk `EgirEntry.slot_sources` and emit a DPS
+    /// write per source against the slot's `OutputView` (Map/Scan
+    /// retarget, fixed-aggregate element stores, scalar `Store` at
+    /// index 0). For graphics entries: classify the body's
+    /// `Return(Some(value))` and emit one store per declared
+    /// `OutputSlot { index }`. After this pass the
+    /// `realize_outputs::verify` invariant holds: no runtime-sized
+    /// Composite array is reachable from any entry output. Runs
+    /// before `parallelize` so the SOAC→OutputView rewrite precedes
+    /// SOAC wrapping.
+    pub fn realize_outputs(self) -> std::result::Result<EgirOutputsRealized, ConvertError> {
         let EgirRaw(mut inner) = self;
-        egir::assign_outputs::run(&mut inner)?;
-        Ok(EgirOutputsAssigned(inner))
+        egir::realize_outputs::run(&mut inner)?;
+        Ok(EgirOutputsRealized(inner))
     }
 }
 
-impl EgirOutputsAssigned {
+impl EgirOutputsRealized {
     /// EGIR-side SOAC parallelization. Consumes `plans` from TLC analysis
     /// and tags each planned compute entry's tail SOAC for lane-indexed
     /// lowering downstream. Always called before `expand_soacs` — see the
@@ -1033,7 +1041,7 @@ impl EgirOutputsAssigned {
         self,
         plans: &std::collections::HashMap<String, tlc::parallelize::ParallelizationPlan>,
     ) -> EgirParallelized {
-        let EgirOutputsAssigned(mut inner) = self;
+        let EgirOutputsRealized(mut inner) = self;
         egir::parallelize::run(&mut inner, plans);
         EgirParallelized(inner)
     }

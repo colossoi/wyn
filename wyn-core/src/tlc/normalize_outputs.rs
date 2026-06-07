@@ -4,7 +4,7 @@
 //! expression "produces" the entry's return value. Single-output entries
 //! return a single Term; tuple-output entries return a `Tuple(N)`. The
 //! downstream stack then decomposes this — `analyze_entry` walks the
-//! tail looking for a parallelisable SOAC, `egir::assign_outputs`
+//! tail looking for a parallelisable SOAC, `egir::realize_outputs`
 //! flattens the tuple and per-slot retargets producer SOACs.
 //!
 //! After this pass: a compute entry's body produces no value
@@ -23,7 +23,7 @@
 //! `outputs.len()` → N slots; any other tail with a single-output
 //! entry → 1 slot. Multi-output entries whose tail is a single value
 //! of tuple type (e.g. a `reduce` returning `(u32, [4]u32)`) flow
-//! through unchanged — `egir::assign_outputs` decomposes them via
+//! through unchanged — `egir::realize_outputs` decomposes them via
 //! `Project` over the `Return(Some(result))` terminator.
 //!
 //! `SoacDestination::OutputView` association with bindings stays at
@@ -223,7 +223,7 @@ fn emit_slot_writes(
         // Multi-output entries whose tail is a *single* value of tuple
         // type (e.g. a reduce returning `(u32, [4]u32)` or a function
         // call returning a tuple). Phase 1A leaves these unnormalised:
-        // `egir::assign_outputs` still handles them via the existing
+        // `egir::realize_outputs` still handles them via the existing
         // `Project` decomposition over a `Return(Some(result))`
         // terminator. The non-normalised tail flows through unchanged.
         _ => {

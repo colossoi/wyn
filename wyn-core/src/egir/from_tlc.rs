@@ -517,14 +517,14 @@ fn convert_entry_point(
     // Convert body. Output assignment (storing the result into the bound
     // storage views / graphics output slots, and retargeting tail
     // Map/Scan SOACs to stream directly into a runtime-sized output) is a
-    // separate, uniform pass — `egir::assign_outputs`, run right after
+    // separate, uniform pass — `egir::realize_outputs`, run right after
     // this conversion. Here we just leave the body terminating in its
     // single tail value (or `None` for a unit entry).
     let result_nid = converter.convert_term(inner_body)?;
 
     // Slot-collected entries (post-`normalize_outputs`) have their
     // writes recorded as per-slot `SlotSource`s rather than flowing
-    // through a single Return value. `egir::assign_outputs` reads
+    // through a single Return value. `egir::realize_outputs` reads
     // those sources directly off `EgirEntry.slot_sources` and
     // retargets each one. The body terminates with `Return(None)` —
     // there's no value to merge through the CFG.

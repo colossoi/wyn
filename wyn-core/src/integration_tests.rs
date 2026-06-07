@@ -3020,10 +3020,10 @@ entry gen(bh: []vec4f32, #[uniform(set=1,binding=0)] nb: i32) [1]i32 =
 /// Bisected min-repro: a multi-output entry returns a scan result AS one
 /// output and also reads that scan by a (constant) index for a second
 /// output. Previously panicked at `spirv/mod.rs:375` ("Composite variant
-/// unsized arrays not supported") because `assign_outputs` retargeted the
+/// unsized arrays not supported") because `realize_outputs` retargeted the
 /// scan to `OutputView` for slot 0 but slot 1's `[offsets[0]]` still
 /// demanded the (now-vanished) in-register Composite. Fixed in
-/// `assign_outputs::rewrite_other_index_consumers_to_loads`: detect the
+/// `realize_outputs::rewrite_other_index_consumers_to_loads`: detect the
 /// sibling Index consumer, synthesise a `ViewIndex + Load` against slot
 /// 0's output view (both backends declare output bindings as read-write),
 /// alias the Index NodeId to the load result. Slot 0's binding doubles as
@@ -3481,10 +3481,10 @@ fn multidim_view_inner_fixed_carries_subarray_elem_bytes() {
 }
 
 /// `If`-over-two-retargetable-maps with a runtime-sized output:
-/// previously rejected by `assign_outputs::lower_slot` because the
+/// previously rejected by `realize_outputs::lower_slot` because the
 /// merge-block param wasn't a Map/Scan node. After the DPS migration,
 /// each branch's `OutputSlotStore` records its own `SlotSource` at
-/// its block; `assign_outputs` retargets both Maps into the same
+/// its block; `realize_outputs` retargets both Maps into the same
 /// output view. Runtime CFG ensures only one fires per execution
 /// path.
 #[test]

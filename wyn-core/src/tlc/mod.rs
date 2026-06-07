@@ -544,7 +544,7 @@ impl ArrayExpr {
 /// Used by `Map`, `Scan`, and `Filter`. At TLC only `Fresh` and
 /// `InputBuffer` are produced — the ownership pass switches `Fresh` to
 /// `InputBuffer` for inputs that are mutable, dead-after, and pointwise.
-/// `OutputView` is set EGIR-side by `assign_outputs` when a retargetable
+/// `OutputView` is set EGIR-side by `realize_outputs` when a retargetable
 /// SOAC streams directly into a bound compute-shader output view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SoacDestination {

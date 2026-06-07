@@ -50,8 +50,8 @@ fn compile_via_egir(src: &str) -> Program {
     crate::EgirRaw(
         run(&tlc.tlc, PipelineDescriptor::default(), &empty).expect("egir::from_tlc conversion failed"),
     )
-    .assign_outputs()
-    .expect("egir::assign_outputs failed")
+    .realize_outputs()
+    .expect("egir::realize_outputs failed")
     .parallelize(&empty)
     .expand_soacs(true)
     .optimize_skeleton()
