@@ -3565,3 +3565,24 @@ fn compute_let_wrapped_if_over_two_maps_compiles_runtime_sized() {
     "#;
     crate::compile_thru_spirv(src).expect("Let-wrapped If over two maps must compile");
 }
+
+/// Multi-output entry whose Tuple components each contain an `If`.
+/// `normalize_outputs` decomposes the Tuple into per-slot
+/// `OutputSlotStore`s; each then enters the `If`-fork recursion in
+/// `convert_slot_store`. Both slots end up multi-source, each
+/// retargeting into its own `OutputView`.
+#[test]
+fn compute_multi_output_tuple_of_ifs_compiles() {
+    let src = r#"
+        #[compute]
+        entry tick<[n]>(#[storage(set=2, binding=0, access=read)] prev_pos: [n]vec2f32,
+                        #[uniform(set=1, binding=1)] iTime: f32) ([n]vec2f32, [n]f32) =
+          (if iTime == 0.0
+             then map(|p: vec2f32| @[0.0f32, 0.0f32], prev_pos)
+             else map(|p: vec2f32| @[p.x + 1.0f32, p.y + 1.0f32], prev_pos),
+           if iTime == 0.0
+             then map(|p: vec2f32| 0.0f32, prev_pos)
+             else map(|p: vec2f32| p.x * p.x + p.y * p.y, prev_pos))
+    "#;
+    crate::compile_thru_spirv(src).expect("multi-output tuple of Ifs must compile");
+}
