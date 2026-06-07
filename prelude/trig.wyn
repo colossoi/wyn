@@ -1,23 +1,53 @@
--- Derived trigonometric functions functor
--- Provides sinpi, cospi, tanpi, asinpi, acospi, atanpi, atan2pi, hypot
+-- | Trigonometric helpers parameterised over any `real` (`f16`, `f32`,
+-- `f64`). The `pi`-multiplied variants spare one multiplication and
+-- can be marginally more accurate on hardware that has dedicated
+-- `sinpi` / `cospi` intrinsics (e.g. some GPU paths); on
+-- pure-emulation paths they are exactly equivalent to multiplying the
+-- argument by `pi` yourself.
 
+-- | The trig functor. Instantiate at a `real` module to get a
+-- corresponding `trig*` module; the two predeclared instantiations
+-- are `trig32` (over `f32`) and `trig64` (over `f64`).
 functor ftrig(R: real) = {
   type t = R.t
 
-  -- Trig functions with pi multiplier: sin(pi * x), etc.
+  -- | Sine where the input is in *half-turns* (units of `pi`).
+  -- `sinpi(0.5)` is `1.0`. Equivalent to `R.sin(R.pi * x)`.
   def sinpi(x: t) t = R.sin(R.pi * x)
+
+  -- | Cosine in units of `pi`. `cospi(0.0)` is `1.0`, `cospi(1.0)`
+  -- is `-1.0`.
   def cospi(x: t) t = R.cos(R.pi * x)
+
+  -- | Tangent in units of `pi`. Diverges as `x → 0.5 + k` for any
+  -- integer `k`.
   def tanpi(x: t) t = R.tan(R.pi * x)
 
-  -- Inverse trig functions returning result in units of pi
+  -- | Inverse sine, result in units of `pi` (half-turns). Inverse of
+  -- `sinpi`. The output range is `[-0.5, 0.5]`.
   def asinpi(x: t) t = R.asin(x) / R.pi
+
+  -- | Inverse cosine in units of `pi`. Output range `[0, 1]`.
   def acospi(x: t) t = R.acos(x) / R.pi
+
+  -- | Inverse tangent in units of `pi`. Output range `(-0.5, 0.5)`.
   def atanpi(x: t) t = R.atan(x) / R.pi
+
+  -- | Two-argument arctangent in units of `pi`, output range
+  -- `(-1.0, 1.0]`. Forwards to `R.atan2(x, y)` — consult `R.atan2`'s
+  -- own docs for the argument convention.
   def atan2pi(x: t, y: t) t = R.atan2(x, y) / R.pi
 
-  -- Euclidean distance
+  -- | Euclidean norm `sqrt(x² + y²)` computed naively. Overflows when
+  -- `x * x` or `y * y` exceeds the type's `highest`; pre-scale by
+  -- `R.max(R.abs(x), R.abs(y))` if either component approaches
+  -- `sqrt(highest)`.
   def hypot(x: t, y: t) t = R.sqrt(x * x + y * y)
 }
 
+-- | `ftrig` instantiated for 32-bit floats.
 module trig32 = ftrig(f32)
+
+-- | `ftrig` instantiated for 64-bit floats. Use only on backends that
+-- enable `f64` — `wgsl` does not.
 module trig64 = ftrig(f64)

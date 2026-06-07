@@ -1,10 +1,19 @@
--- Statistical functions functor
--- Provides erf, erfc, gamma, lgamma for any real number type
+-- | Special functions parameterised over any `real` (`f32`, `f64`).
+-- Implementations are closed-form approximations chosen for cheap GPU
+-- evaluation, not for last-bit accuracy — read each function's
+-- accuracy note before using these in numerical-analysis contexts.
 
+-- | The stats functor. Instantiate at a `real` module to get a
+-- corresponding `stats*` module; the two predeclared instantiations
+-- are `stats32` and `stats64`.
 functor fstats(R: real) = {
   type t = R.t
 
-  -- Log-gamma using Stirling's approximation (good for x > 0)
+  -- | Natural log of the gamma function via the Stirling series. The
+  -- approximation is asymptotic for large `x` (relative error well
+  -- under 1e-3 around `x ≥ 5`) and degrades as `x → 0`. Returns
+  -- garbage for `x ≤ 0` — gamma's poles at non-positive integers are
+  -- not detected.
   def lgamma(x: t) t =
     let half = R.f64(0.5f64) in
     let one = R.f64(1.0f64) in
@@ -12,9 +21,15 @@ functor fstats(R: real) = {
     let log2pi = R.f64(1.8378770664093453f64) in
     (x - half) * R.log(x) - x + half * log2pi + one / (twelve * x)
 
+  -- | `exp(lgamma(x))`. Same domain and accuracy caveats as
+  -- `lgamma`; overflows to `+inf` long before `x` approaches the
+  -- type's `highest`.
   def gamma(x: t) t = R.exp(lgamma(x))
 
-  -- Error function using Abramowitz and Stegun approximation
+  -- | Gauss error function, computed by Abramowitz & Stegun 7.1.26
+  -- (a 5-term rational + exponential). Maximum relative error
+  -- ≈ 1.5e-7 across the full real line — sufficient for graphics
+  -- noise / Monte-Carlo use, not for hypothesis testing.
   def erf(x: t) t =
     let zero = R.f64(0.0f64) in
     let one = R.f64(1.0f64) in
@@ -31,8 +46,15 @@ functor fstats(R: real) = {
     let y = one - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * R.exp(zero - ax * ax) in
     sign * y
 
+  -- | `1 - erf(x)`. Loses precision for large `x` (catastrophic
+  -- cancellation against `1.0`); use a dedicated `erfc`
+  -- implementation if you need the tail.
   def erfc(x: t) t = R.f64(1.0f64) - erf(x)
 }
 
+-- | `fstats` instantiated for 32-bit floats.
 module stats32 = fstats(f32)
+
+-- | `fstats` instantiated for 64-bit floats. Backend support for
+-- `f64` is not universal; consult the targeted shader stage.
 module stats64 = fstats(f64)

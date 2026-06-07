@@ -1,3 +1,17 @@
+-- | Numeric and primitive-conversion module-type hierarchy.
+-- Every concrete numeric module (`i32`, `f32`, ...) implements
+-- exactly one of `integral` / `float`, and both inherit from
+-- `numeric` and `from_prim`. Call the concrete modules directly
+-- (`i32.max(a, b)`, `f32.pi`) — `module type`s exist so user
+-- code can be parameterised by `functor` (see `trig.wyn` for an
+-- example).
+
+-- | Conversion-from-every-primitive interface. Implementers
+-- promise a `t`-valued coercion from each built-in scalar type.
+-- Conversions are *value-preserving* where representable and
+-- *unspecified* otherwise — e.g. `f32.i64` of a value larger than
+-- 2^24 loses low-order precision, `i32.f32` of a NaN is
+-- backend-defined.
 module type from_prim = {
   type t
   sig i8 : i8 -> t
@@ -11,15 +25,32 @@ module type from_prim = {
   sig f16 : f16 -> t
   sig f32 : f32 -> t
   sig f64 : f64 -> t
+
+  -- | True ↦ 1, False ↦ 0. The standard predicate-to-numeric
+  -- coercion you'd write by hand.
   sig bool : bool -> t
 }
+
+-- | The arithmetic interface shared by every numeric module. All
+-- comparison operators short-circuit at the lexer/parser level
+-- only — at runtime they evaluate both sides eagerly.
 module type numeric = {
   include from_prim
   sig (+) : t -> t -> t
   sig (-) : t -> t -> t
   sig (*) : t -> t -> t
+
+  -- | Division semantics depend on `t`. For integral `t` it rounds
+  -- towards negative infinity (Euclidean — see `(//)` on the
+  -- `integral` interface for the other rounding); for `real` `t`
+  -- it's IEEE-754 division and divide-by-zero yields `inf` / `nan`
+  -- rather than trapping.
   sig (/) : t -> t -> t
+
+  -- | Remainder paired with `(/)`. For integral `t` use `(%%)` if
+  -- you want truncated-division semantics instead.
   sig (%) : t -> t -> t
+
   sig (**) : t -> t -> t
   sig (==) : t -> t -> bool
   sig (<) : t -> t -> bool
@@ -27,26 +58,59 @@ module type numeric = {
   sig (<=) : t -> t -> bool
   sig (>=) : t -> t -> bool
   sig (!=) : t -> t -> bool
+
+  -- | Arithmetic negation. For unsigned `t` this wraps modulo
+  -- `2^num_bits`; for `real` `t` it flips the sign bit (so
+  -- `neg(0.0)` is `-0.0`, distinct from `0.0` under `to_bits`).
   sig neg : t -> t
+
   sig max : t -> t -> t
   sig min : t -> t -> t
   sig abs : t -> t
+
+  -- | Sign as `-1`, `0`, or `1`. For `real` `t`, `sign(nan)` is
+  -- backend-defined.
   sig sign : t -> t
+
+  -- | `clamp(lo, hi, x)` — argument order is *bounds first, value
+  -- last*. `lo > hi` yields an unspecified result.
   sig clamp : t -> t -> t -> t
+
+  -- | The largest representable value. For `real` `t` this is
+  -- `+inf` (so `clamp(_, highest, x)` is a no-op upper bound).
   sig highest : t
+
+  -- | The smallest representable value. For `real` `t` this is
+  -- `-inf`; for signed integral `t` it's `-2^(num_bits-1)`.
   sig lowest : t
+
   sig sum<[n]> : [n]t -> t
   sig product<[n]> : [n]t -> t
   sig maximum<[n]> : [n]t -> t
   sig minimum<[n]> : [n]t -> t
 }
+
+-- | Integer-specific operations layered on top of `numeric`.
+-- Implemented by `i8` / `i16` / `i32` / `i64` and their unsigned
+-- counterparts.
 module type integral = {
   include numeric
+
+  -- | Quotient rounded toward zero (truncated division).
+  -- Differs from `(/)` (Euclidean) only when one operand is
+  -- negative — `(-7) / 2 == -4`, `(-7) // 2 == -3`.
   sig (//) : t -> t -> t
+
+  -- | Remainder paired with `(//)`. Sign matches the dividend.
   sig (%%) : t -> t -> t
+
   sig (&) : t -> t -> t
   sig (|) : t -> t -> t
+
+  -- | Bitwise XOR. Not exponentiation — for that see `(**)`.
   sig (^) : t -> t -> t
+
+  -- | Bitwise NOT. Distinct from logical `!`.
   sig not : t -> t
   sig (<<) : t -> t -> t
   sig (>>) : t -> t -> t
@@ -55,25 +119,63 @@ module type integral = {
   sig get_bit : i32 -> t -> i32
   sig set_bit : i32 -> t -> i32 -> t
   sig popc : t -> i32
+
+  -- | High half of an `t × t` multiply. Together with `(*)` (low
+  -- half) this gives the full `2 × num_bits` product without
+  -- promoting to a wider type.
   sig mul_hi : (x: t) -> (y: t) -> t
+
+  -- | High half of `a * b + c`. Used to chain `mul_hi` into a
+  -- multi-precision multiply-add.
   sig mad_hi : (a: t) -> (b: t) -> (c: t) -> t
+
+  -- | Count leading zeros. `clz(0)` is `num_bits`.
   sig clz : t -> i32
+
+  -- | Count trailing zeros. `ctz(0)` is `num_bits`.
   sig ctz : t -> i32
 }
+
+-- | Real-valued operations layered on top of `numeric`. Implemented
+-- by `f16` / `f32` / `f64`. All transcendentals delegate to the
+-- backend's intrinsics; the accuracy of each is backend-dependent
+-- and not contracted here — typically `f32` is "good to ~1 ULP" but
+-- consult your SPIR-V / WGSL profile if you need a bound.
 module type real = {
   include numeric
+
+  -- | `1 / x`. Cheaper than `1.0 / x` on some backends (a dedicated
+  -- reciprocal intrinsic vs. a general division). Returns `inf` for
+  -- `x = 0`, no trap.
   sig recip : t -> t
+
+  -- | `num / den` as a `t` value, with both arguments as 64-bit
+  -- integers so e.g. `from_fraction(355, 113)` gives a precise `pi`
+  -- approximation without intermediate rounding.
   sig from_fraction : i64 -> i64 -> t
+
+  -- | Square root. Domain `x ≥ 0`; `sqrt(-x)` is `nan` (no trap).
   sig sqrt : t -> t
+
+  -- | `1 / sqrt(x)`. Backend may use a dedicated intrinsic (fast
+  -- inverse square root); precision is no worse than `recip ∘ sqrt`.
   sig rsqrt : t -> t
+
   sig cbrt : t -> t
   sig exp : t -> t
   sig exp2 : t -> t
   sig sin : t -> t
   sig cos : t -> t
   sig tan : t -> t
+
+  -- | Inverse sine, output range `[-π/2, π/2]`. Domain `[-1, 1]`;
+  -- outside that range the result is `nan`.
   sig asin : t -> t
+
+  -- | Inverse cosine, output range `[0, π]`. Same domain caveat as
+  -- `asin`.
   sig acos : t -> t
+
   sig atan : t -> t
   sig sinh : t -> t
   sig cosh : t -> t
@@ -81,55 +183,148 @@ module type real = {
   sig asinh : t -> t
   sig acosh : t -> t
   sig atanh : t -> t
+
+  -- | Two-argument arctangent. Argument order is `atan2(y, x)`
+  -- (the math/SPIR-V convention).
   sig atan2 : t -> t -> t
+
+  -- | Linear interpolation `a + (b - a) * t`. `t = 0` returns
+  -- exactly `a`, `t = 1` returns `b + (b - a) * 0` which is *not*
+  -- guaranteed to equal `b` exactly when `a != b` — for endpoint-
+  -- preserving interpolation prefer `(1 - t) * a + t * b`.
   sig lerp : t -> t -> t -> t
+
   sig log : t -> t
   sig log2 : t -> t
   sig log10 : t -> t
+
+  -- | `log(1 + x)`. Accurate for `x` near zero (avoids the catastrophic
+  -- cancellation of `log(1.0 + tiny)`).
   sig log1p : t -> t
+
   sig ceil : t -> t
   sig floor : t -> t
+
+  -- | Fractional part `x - floor(x)`, always in `[0, 1)`. For
+  -- negative `x` this is *not* the sign-preserving form (`fract(-0.3)`
+  -- is `0.7`, not `-0.3`).
   sig fract : t -> t
+
   sig trunc : t -> t
   sig round : t -> t
+
+  -- | `pow(base, exp)` — function form of `(**)`.
   sig pow : t -> t -> t
+
+  -- | Floating-point modulo. Sign matches the divisor (so it's the
+  -- Euclidean form, not C's `fmod`).
   sig mod : t -> t -> t
+
   sig radians : t -> t
   sig degrees : t -> t
+
+  -- | `a * b + c` as one operation, but **not** guaranteed
+  -- single-rounding. Use `fma` if you need that.
   sig mad : (a: t) -> (b: t) -> (c: t) -> t
+
+  -- | Fused multiply-add — `a * b + c` rounded once. Slower than
+  -- `mad` on backends that don't have a dedicated instruction.
   sig fma : (a: t) -> (b: t) -> (c: t) -> t
+
   sig isinf : t -> bool
   sig isnan : t -> bool
+
+  -- | Positive infinity.
   sig inf : t
+
+  -- | Some NaN. The bit pattern is not specified — compare with
+  -- `isnan`, never with `(==)` (which is always `false` for NaN).
   sig nan : t
+
   sig pi : t
   sig e : t
-  -- Fragment-stage screen-space derivatives. Calling these from a
-  -- vertex or compute stage produces undefined results.
+
+  -- | Screen-space derivative along x. **Fragment-stage only.**
+  -- Calling from a vertex or compute entry is undefined behaviour;
+  -- the value comes from comparing the result of the surrounding
+  -- expression across a 2×2 fragment quad.
   sig dFdx : t -> t
+
+  -- | Screen-space derivative along y. **Fragment-stage only**, same
+  -- caveats as `dFdx`.
   sig dFdy : t -> t
+
+  -- | `abs(dFdx) + abs(dFdy)` — the standard antialiasing edge-width
+  -- estimate. **Fragment-stage only.**
   sig fwidth : t -> t
 }
+
+-- | The `float` interface adds bit-level introspection and a few
+-- IEEE-754-only operations on top of `real`. Implemented by `f16`,
+-- `f32`, `f64`.
 module type float = {
   include real
+
+  -- | The unsigned-integer type holding `t`'s bit pattern.
   type int_t
+
+  -- | Reinterpret `int_t` bits as `t`. No conversion — bit-identical.
   sig from_bits : int_t -> t
+
+  -- | Reinterpret `t` bits as `int_t`. Two NaNs may compare equal
+  -- under `to_bits` even though they're "different NaNs" under IEEE
+  -- — useful for hashing, not for masquerading as equality.
   sig to_bits : t -> int_t
+
+  -- | Bit width of the representation (16 / 32 / 64).
   sig num_bits : i32
+
+  -- | The smallest positive value `e` such that `1 + e > 1`. The
+  -- "machine epsilon" — useful as a tolerance for "are these close?"
+  -- comparisons (multiplied by the magnitude of the values being
+  -- compared).
   sig epsilon : t
+
+  -- | `x * 2^k`. Exact (no rounding) — equivalent to bit-bumping
+  -- the exponent.
   sig ldexp : t -> i32 -> t
+
+  -- | `abs(x)` with `y`'s sign. `copysign(_, -0.0)` is negative
+  -- (preserves IEEE-754 negative zero).
   sig copysign : (x: t) -> (y: t) -> t
 }
+-- | `bool` as a value-preserving conversion source — implements
+-- `from_prim` but no arithmetic. Use `i32.bool(b)` etc. to lift a
+-- predicate into a numeric type.
 module bool : from_prim with t = bool
+
+-- | Signed 8-bit integer. Most arithmetic widens internally on
+-- current GPU backends, so prefer `i32` unless you specifically
+-- need 8-bit storage.
 module i8 : (integral with t = i8)
 module i16 : (integral with t = i16)
+
+-- | The default integer type. Pick this unless you need a specific
+-- width — `iota`, range syntax `a..<b`, and array indexing all use
+-- `i32`.
 module i32 : (integral with t = i32)
 module i64 : (integral with t = i64)
 module u8 : (integral with t = u8)
 module u16 : (integral with t = u16)
+
+-- | Unsigned 32-bit integer. Used for bit-level work, hash state,
+-- and texture/buffer indices that cross the host boundary.
 module u32 : (integral with t = u32)
 module u64 : (integral with t = u64)
+
+-- | 64-bit float. **Not supported by every backend** — WGSL has
+-- no `f64`, and many SPIR-V profiles require the `Float64`
+-- capability. Use `f32` by default.
 module f64 : (float with t = f64 with int_t = u64)
+
+-- | 32-bit float — the workhorse of GPU computation. Implementations
+-- of operations not defined here are provided by the backend
+-- (`sin`, `cos`, ...).
 module f32 : (float with t = f32 with int_t = u32) = {
   type t = f32
   type int_t = u32
@@ -148,7 +343,11 @@ module f32 : (float with t = f32 with int_t = u32) = {
   def bool(x: bool) t = if x then 1.0f32 else 0.0f32
 
   def neg(x: t) t = 0.0f32 - x
+
+  -- | `+inf`. The largest representable `f32`.
   def highest: t = 1.0f32 / 0.0f32
+
+  -- | `-inf`. The smallest (most negative) representable `f32`.
   def lowest: t = (0.0f32 - 1.0f32) / 0.0f32
 
   def recip(x: t) t = 1.0f32 / x
@@ -158,19 +357,40 @@ module f32 : (float with t = f32 with int_t = u32) = {
   def log10(x: t) t = f32.log(x) / f32.log(10.0f32)
   def log1p(x: t) t = f32.log((1.0f32 + x))
 
+  -- | π to `f32` precision.
   def pi: t = 3.14159265358979323846f32
 
+  -- | `a * b + c` as one expression — *no* single-rounding
+  -- guarantee. Use `fma` for IEEE-754 fused multiply-add.
   def mad(a: t, b: t, c: t) t = a * b + c
 
+  -- | `+inf`, same value as `highest`. Exposed under both names
+  -- because `inf` reads more naturally in floating-point contexts.
   def inf: t = 1.0f32 / 0.0f32
+
+  -- | A NaN. Bit pattern is `0/0`. Compare with `isnan`, not `(==)`.
   def nan: t = 0.0f32 / 0.0f32
+
+  -- | e (Euler's number) to `f32` precision.
   def e: t = 2.71828182845904523536f32
 
   def from_bits(x: int_t) t = _w_intrinsic_f32_from_bits(x)
   def to_bits(x: t) int_t = _w_intrinsic_f32_to_bits(x)
   def num_bits: i32 = 32
 
+  -- | Distance from `1.0` to the next representable `f32`,
+  -- approximately `1.19e-7`. Use as a relative-tolerance unit, e.g.
+  -- `abs(a - b) < epsilon * max(abs(a), abs(b))`.
   def epsilon: t = 1.1920929e-7f32
+
+  -- | `abs(x)` with `y`'s sign. **Does not detect negative zero**:
+  -- `copysign(1.0, -0.0)` returns `1.0`, not `-1.0` — the comparison
+  -- `y < 0.0` is `false` for `-0.0`. Use `to_bits` if you need
+  -- IEEE-strict sign handling.
   def copysign(x: t, y: t) t = if y < 0.0f32 then (0.0f32 - f32.abs(x)) else f32.abs(x)
 }
+
+-- | 16-bit float. Backend support is uneven — SPIR-V needs the
+-- `Float16` capability; WGSL needs `shader-f16`. Use `f32` if you
+-- can.
 module f16 : (float with t = f16 with int_t = u16)

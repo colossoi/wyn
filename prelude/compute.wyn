@@ -1,14 +1,22 @@
--- Compute shader helper functions
+-- | Helpers used by the compute-pipeline lowering passes. End users
+-- should rarely call these directly; they're exposed so phase-split
+-- compute entries (e.g. parallel reduce / scan) can name their chunk
+-- boundaries by the same rule the compiler used when planning them.
 
--- Compute chunk bounds for parallel work distribution.
--- Given a thread ID, total array length, and number of threads,
--- returns (chunk_start, chunk_end) for this thread's work range.
+-- | Slice `array_len` elements into per-thread chunks by ceiling
+-- division and return this thread's `[start, end)` range. The last
+-- chunk is clamped at `array_len`, so threads whose `thread_id`
+-- exceeds the populated range get an empty range (start == end) and
+-- can early-out without a bounds check.
 --
--- Uses ceiling division to ensure all elements are covered:
---   chunk_size = ceil(array_len / total_threads)
---   chunk_start = thread_id * chunk_size
---   chunk_end = min(chunk_start + chunk_size, array_len)
-def _w_compute_chunk_bounds(thread_id: i32, array_len: i32, total_threads: i32) (i32, i32) =
+-- Names beginning with `_w_` are a compiler-internal convention —
+-- prefer iterating directly with `map` / `reduce` over an
+-- entry-param array, which produces the same partition implicitly.
+def _w_compute_chunk_bounds(
+    thread_id: i32,      -- ^ 0-based thread index within the launch.
+    array_len: i32,      -- ^ Total element count to partition.
+    total_threads: i32   -- ^ Workgroup width × workgroup count.
+  ) (i32, i32) =
     let chunk_size = (array_len + total_threads - 1) / total_threads in
     let chunk_start = thread_id * chunk_size in
     let chunk_end = i32.min(chunk_start + chunk_size, array_len) in

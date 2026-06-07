@@ -1,10 +1,17 @@
--- Graphics module: 3D transformation matrices for f32
--- (f64 removed - GPU shaders use f32)
+-- | 3D affine transforms for 32-bit floats.
+--
+-- Matrices here are row-major as written in source — `@[[a, b, c, d],
+-- [e, f, g, h], ...]` lays out row 0 as `[a, b, c, d]`. WGSL and
+-- SPIR-V are column-major by convention, so the backends transpose
+-- on the way in; multiply column-vectors *on the right*
+-- (`M * v`) for the usual graphics-textbook semantics.
 
 module graphics = {
-  -- Create a 4x4 translation (position) matrix from a 3D vector
-  -- Moves objects by (x, y, z) in world space
-  def translation(p: vec3f32) mat4f32 =
+  -- | 4×4 translation matrix that moves a point by `p`. Composes as
+  -- `translation(a) * translation(b) == translation(a + b)`.
+  def translation(
+      p: vec3f32   -- ^ Displacement vector in world units.
+    ) mat4f32 =
     @[
       [1.0f32, 0.0f32, 0.0f32, p.x],
       [0.0f32, 1.0f32, 0.0f32, p.y],
@@ -12,10 +19,16 @@ module graphics = {
       [0.0f32, 0.0f32, 0.0f32, 1.0f32]
     ]
 
-  -- Create a 4x4 rotation matrix from Euler angles (in radians)
-  -- Uses XYZ intrinsic Euler angles (rotate around X, then Y, then Z)
-  -- Input: vec3f32 where x=pitch, y=yaw, z=roll (in radians)
-  def rotation_euler(a: vec3f32) mat4f32 =
+  -- | 4×4 rotation matrix from an XYZ-intrinsic Euler triple. Order
+  -- of application is X then Y then Z — i.e. apply pitch around the
+  -- object's own X axis first, then yaw around its new Y, then roll
+  -- around its new Z. This convention is *not* gimbal-lock-free;
+  -- at `pitch = ±π/2` yaw and roll degenerate.
+  def rotation_euler(
+      a: vec3f32   -- ^ Euler angles in radians: `x = pitch`, `y = yaw`,
+                   --   `z = roll`. Use `f32.radians` to convert from
+                   --   degrees.
+    ) mat4f32 =
     let s = [ f32.sin(a.x), f32.sin(a.y), f32.sin(a.z) ] in
     let c = [ f32.cos(a.x), f32.cos(a.y), f32.cos(a.z) ] in
     @[

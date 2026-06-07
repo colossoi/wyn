@@ -1,15 +1,25 @@
--- Second-Order Array Combinators (SOACs)
--- Based on Futhark's prelude/soacs module
+-- | Second-Order Array Combinators (SOACs) — derived wrappers around
+-- the array-builtin SOACs (`map`, `reduce`, `scan`, `filter`,
+-- `scatter`, `zip`, `length`, `replicate`, `reduce_by_index`,
+-- `iota`). The builtins themselves live in the type checker; the
+-- functions here are written in Wyn and lower into the same
+-- primitives.
 --
--- Fundamental SOACs (map, reduce, scan, filter, scatter, zip, zip3, zip4, zip5,
--- length, replicate, reduce_by_index) are true builtins registered in the type
--- checker. This file provides derived combinators.
+-- For SOACs that take an operator (`reduce`, `scan`, `reduce_by_index`
+-- and anything built on them) the operator must be **associative**
+-- *and* **commutative**: Wyn's GPU lowering is free to reorder
+-- combinations, and unlike Futhark there is no separate
+-- `reduce_comm` to opt into the stricter requirement. A non-
+-- commutative operator yields an unspecified result.
 
 ------------------------------------------------------------
 -- Zipping and unzipping
 ------------------------------------------------------------
 
--- Split an array of pairs into two arrays
+-- | Split an array of pairs into the array of first components and
+-- the array of second components. Runs in two passes; for hot loops
+-- with multiple unzip outputs, consider unzipping inline with two
+-- `map`s over the same array so the compiler can fuse them.
 def unzip<[n], A, B>(xys: [n](A, B)) ([n]A, [n]B) =
   (map(|(a, _): (A, B)| a, xys),
    map(|(_, b): (A, B)| b, xys))
@@ -18,11 +28,13 @@ def unzip<[n], A, B>(xys: [n](A, B)) ([n]A, [n]B) =
 -- Boolean aggregation
 ------------------------------------------------------------
 
--- Test if predicate holds for all elements
+-- | True when `p` holds for every element. Equivalent to
+-- `reduce (&&) true (map p xs)`; short-circuiting is not guaranteed.
 def all<[n], A>(p: A -> bool, xs: [n]A) bool =
   reduce(|a, b| a && b, true, map(p, xs))
 
--- Test if predicate holds for any element
+-- | True when `p` holds for at least one element. Equivalent to
+-- `reduce (||) false (map p xs)`; short-circuiting is not guaranteed.
 def any<[n], A>(p: A -> bool, xs: [n]A) bool =
   reduce(|a, b| a || b, false, map(p, xs))
 
@@ -30,12 +42,15 @@ def any<[n], A>(p: A -> bool, xs: [n]A) bool =
 -- Array generation
 ------------------------------------------------------------
 
--- Generate array of sequential integers [0, 1, 2, ..., n-1]
--- Fundamental for distributing work across parallel threads.
+-- | `[0, 1, ..., size - 1]`. The fundamental work-distribution
+-- primitive — `map(f, iota(n))` becomes one work item per thread.
+-- `size` must be non-negative; a negative argument yields an empty
+-- array under the current lowering, but don't rely on that.
 def iota<[n]>(size: i32) [n]i32 = 0..<size
 
--- Generate array by applying function to each index
--- tabulate size f = [f 0, f 1, ..., f (size-1)]
+-- | `[f 0, f 1, ..., f (size - 1)]`. Sugar for `map(f, iota(size))`;
+-- the lowering is identical, so prefer whichever reads better at
+-- the call site.
 def tabulate<[n], A>(size: i32, f: i32 -> A) [n]A =
   map(f, iota(size))
 
@@ -43,12 +58,16 @@ def tabulate<[n], A>(size: i32, f: i32 -> A) [n]A =
 -- Array transformations
 ------------------------------------------------------------
 
--- Reverse an array
+-- | Return the elements in reverse order. Materialises a fresh
+-- array (no in-place reversal); cheaper to fuse the reversal into a
+-- consumer if the result is only read once.
 def reverse<[n], A>(arr: [n]A) [n]A =
   let len = length(arr)
   in map(|i| arr[len - 1 - i], iota(len))
 
--- Rotate array left by k positions
+-- | Cyclically shift elements left by `k`: element at index `i`
+-- comes from `arr[(i + k) % n]`. `k` may be negative; `k mod n` is
+-- computed in the usual way (sign-of-divisor — `(-1) mod 3 = 2`).
 def rotate<[n], A>(k: i32, arr: [n]A) [n]A =
   let len = length(arr)
   in map(|i| arr[(i + k) % len], iota(len))
@@ -57,7 +76,10 @@ def rotate<[n], A>(k: i32, arr: [n]A) [n]A =
 -- Reduce variants
 ------------------------------------------------------------
 
--- Commutative reduce (same as reduce, but documents commutativity)
+-- | Alias for `reduce` that documents the operator's commutativity
+-- at the call site. The lowering is identical — Wyn's `reduce`
+-- already assumes commutativity (see the module note above). Use
+-- this only when reviewer-targeted clarity matters.
 def reduce_comm<[n], A>(op: A -> A -> A, ne: A, arr: [n]A) A =
   reduce(op, ne, arr)
 
@@ -65,8 +87,10 @@ def reduce_comm<[n], A>(op: A -> A -> A, ne: A, arr: [n]A) A =
 -- Partitioning
 ------------------------------------------------------------
 
--- Split array into elements satisfying predicate and those that don't
--- Returns (elements where p is true, elements where p is false)
+-- | Split into elements where `p` holds and elements where it
+-- doesn't. **Runs two passes over `xs`** (one per `filter`), so for
+-- expensive `p` consider a single-pass implementation that
+-- accumulates both halves.
 def partition<[n], A>(p: A -> bool, xs: [n]A) =
   (filter(p, xs), filter(|x| !p(x), xs))
 
@@ -74,14 +98,35 @@ def partition<[n], A>(p: A -> bool, xs: [n]A) =
 -- Spread
 ------------------------------------------------------------
 
--- Place values at indices in array filled with default value
-def spread<[n], [m], A>(size: i32, default: A, indices: [m]i32, values: [m]A) [n]A =
+-- | Build a length-`size` array initialised to `default`, then
+-- write `values[k]` at index `indices[k]` for each `k`. Indices
+-- outside `[0, size)` and duplicate indices follow the underlying
+-- `scatter` semantics: duplicates resolve to one of the writes
+-- (which one is unspecified), out-of-bounds writes are discarded.
+def spread<[n], [m], A>(
+    size: i32,           -- ^ Length of the output array.
+    default: A,          -- ^ Fill value for indices not written.
+    indices: [m]i32,     -- ^ Target indices, parallel to `values`.
+    values: [m]A         -- ^ Values to write.
+  ) [n]A =
   scatter(replicate(size, default), indices, values)
 
 ------------------------------------------------------------
 -- Histogram
 ------------------------------------------------------------
 
--- Histogram (alias for reduce_by_index builtin)
-def hist<[n], [m], A>(dest: [n]A, op: A -> A -> A, ne: A, indices: [m]i32, values: [m]A) [n]A =
+-- | Generalised histogram / scatter-with-combiner. For each `k`,
+-- combine `values[k]` into `dest[indices[k]]` using `op`. `op` must
+-- be associative and commutative for the same reason `reduce` does.
+-- `ne` is the identity for `op` and is the value combined with any
+-- bucket touched by zero writes.
+def hist<[n], [m], A>(
+    dest: [n]A,          -- ^ Initial bucket array (length is the
+                         --   number of buckets).
+    op: A -> A -> A,     -- ^ Associative + commutative combiner.
+    ne: A,               -- ^ Identity for `op`.
+    indices: [m]i32,     -- ^ Target bucket per value, parallel to
+                         --   `values`.
+    values: [m]A         -- ^ Inputs to combine into buckets.
+  ) [n]A =
   reduce_by_index(dest, op, ne, indices, values)
