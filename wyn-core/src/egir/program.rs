@@ -56,6 +56,21 @@ impl EgirFunc {
     }
 }
 
+/// One write site for an entry output slot: the block in which the
+/// store fires and the value produced there. A slot can have multiple
+/// sources when different CFG paths each write it (e.g. both arms of
+/// an `If` whose result flows into the slot).
+///
+/// The `block` is load-bearing for any pass that emits side-effect
+/// stores at the producer site — retargeting a `Map`'s destination is
+/// metadata-only on the node, but emitting `Store` for a scalar
+/// requires knowing the block to insert it into.
+#[derive(Debug, Clone, Copy)]
+pub struct SlotSource {
+    pub block: BlockId,
+    pub value: NodeId,
+}
+
 pub struct EgirEntry {
     pub name: String,
     pub span: Span,
@@ -68,6 +83,13 @@ pub struct EgirEntry {
     pub graph: EGraph,
     pub control_headers: HashMap<BlockId, ControlHeader>,
     pub aliases: HashMap<NodeId, NodeId>,
+    /// Per-slot list of (producing-block, value) pairs. Indexed by
+    /// declared output slot. A slot with one source has `vec![one]`;
+    /// a slot written from both arms of an `If` has two. Empty for
+    /// unit-returning entries. Phase 1 of the DPS migration: populated
+    /// only by code added in later phases; today's `from_tlc` leaves
+    /// it untouched.
+    pub slot_sources: Vec<Vec<SlotSource>>,
 }
 
 impl EgirEntry {
@@ -95,6 +117,7 @@ impl EgirEntry {
             graph,
             control_headers,
             aliases: HashMap::new(),
+            slot_sources: Vec::new(),
         }
     }
 }
