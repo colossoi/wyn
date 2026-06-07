@@ -2118,6 +2118,29 @@ impl<'a> Transformer<'a> {
             return self.transform_soac_call(&soac_name, args, ty, span);
         }
 
+        // Constructor-style vec conversion (`vec2i32(v)`, …).
+        // The type checker recorded a `VecConstructor` ResolvedValueRef
+        // for the callee. Desugar to a `VecLit` of componentwise scalar
+        // conversion calls — `vec2i32(v)` ⟶ `@[i32(v.x), i32(v.y)]`
+        // with each `i32(…)` resolved to its concrete per-type catalog
+        // entry by the source-component type.
+        if let ast::ExprKind::Identifier(_, _) = &func.kind {
+            if let Some(crate::name_resolution::ResolvedValueRef::VecConstructor {
+                arity,
+                target_elem,
+                ..
+            }) = self.name_resolution.get(func.h.id).cloned()
+            {
+                debug_assert_eq!(
+                    args.len(),
+                    1,
+                    "BUG: vec constructor expected 1 arg, got {}",
+                    args.len()
+                );
+                return self.transform_vec_constructor(&args[0], &target_elem, arity, ty, span);
+            }
+        }
+
         let func_term = self.transform_expr(func);
 
         if args.is_empty() {
@@ -2154,6 +2177,97 @@ impl<'a> Transformer<'a> {
             TermKind::App {
                 func: Box::new(func_term),
                 args: arg_terms,
+            },
+        )
+    }
+
+    /// Synthesise `vec<N><target_elem>(v)` as a `VecLit` of N
+    /// componentwise scalar conversion calls. Each component is
+    /// `<target_elem>.<source_elem>(v.<i>)`, where `<source_elem>` is
+    /// read from `v`'s converted Term type.
+    fn transform_vec_constructor(
+        &mut self,
+        arg: &ast::Expression,
+        target_elem: &str,
+        arity: usize,
+        result_ty: Type<TypeName>,
+        span: Span,
+    ) -> Term {
+        let arg_term = self.transform_expr(arg);
+        // The arg is a vec whose elem type tells us the source-elem
+        // module name. `i32`-to-`f32` keys map to the catalog entry
+        // `f32.i32` (target.source); we form that surface name and
+        // dispatch via the builtin catalog.
+        let source_elem_ty = arg_term
+            .ty
+            .elem_type()
+            .expect("vec constructor arg must be a vec — type checker enforces this")
+            .clone();
+        let source_elem_name =
+            crate::types::checker::type_name_to_module(&source_elem_ty).unwrap_or_else(|| {
+                panic!(
+                    "BUG: vec constructor arg's component type {:?} has no surface module name",
+                    source_elem_ty
+                )
+            });
+        let conv_surface = format!("{}.{}", target_elem, source_elem_name);
+        let conv_builtin =
+            crate::builtins::catalog().lookup_by_surface_name(&conv_surface).unwrap_or_else(|| {
+                panic!(
+                    "BUG: vec constructor desugar can't find catalog entry `{}` — \
+                     target_elem `{}` source_elem `{}` arity {}",
+                    conv_surface, target_elem, source_elem_name, arity
+                )
+            });
+        let conv_id = conv_builtin.id;
+        let target_elem_ty =
+            result_ty.elem_type().expect("vec constructor result type is always a vec").clone();
+
+        // Bind the arg once to a synthetic let so each component
+        // projection reuses the same evaluation. `SymbolId(0)` is the
+        // shared "sequence" sentinel — fine for unit-typed bindings
+        // but here we want the value preserved, so allocate a fresh
+        // name.
+        let arg_sym = self.symbols.alloc("_w_vec_conv_arg".to_string());
+        let arg_ref = self.mk_term(arg_term.ty.clone(), span, TermKind::Var(VarRef::Symbol(arg_sym)));
+
+        // Build N per-component conversion calls.
+        let mut components: Vec<Term> = Vec::with_capacity(arity);
+        for i in 0..arity {
+            let proj = self.mk_tuple_proj(arg_ref.clone(), i, source_elem_ty.clone(), span);
+            let conv_func = self.mk_term(
+                Type::Constructed(
+                    TypeName::Arrow,
+                    vec![source_elem_ty.clone(), target_elem_ty.clone()],
+                ),
+                span,
+                TermKind::Var(VarRef::Builtin {
+                    id: conv_id,
+                    overload_idx: 0,
+                }),
+            );
+            let conv_call = self.mk_term(
+                target_elem_ty.clone(),
+                span,
+                TermKind::App {
+                    func: Box::new(conv_func),
+                    args: vec![proj],
+                },
+            );
+            components.push(conv_call);
+        }
+
+        let vec_lit = self.build_vec_lit_from_terms(&components, result_ty.clone(), span);
+
+        // Wrap in `let _w_vec_conv_arg = <arg_term> in <vec_lit>`.
+        self.mk_term(
+            result_ty.clone(),
+            span,
+            TermKind::Let {
+                name: arg_sym,
+                name_ty: arg_term.ty.clone(),
+                rhs: Box::new(arg_term),
+                body: Box::new(vec_lit),
             },
         )
     }

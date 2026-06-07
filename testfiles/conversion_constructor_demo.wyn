@@ -1,0 +1,16 @@
+-- Constructor-style numeric conversions:
+--   `T(value)` is shorthand for the per-type catalog entry
+--   `T.source(value)`. Both forms are accepted. Vec shorthand
+--   `vecNT(v)` desugars to a componentwise scalar conversion.
+
+#[compute]
+entry tick(#[storage(set=2, binding=0, access=read)] xs: []vec2f32,
+           #[storage(set=2, binding=1, access=read)] ys: []vec3i32,
+           #[storage(set=2, binding=2, access=read)] zs: []vec4u32,
+           #[storage(set=2, binding=3, access=read)] ws: []f32)
+          ([]vec2i32, []vec3f32, []vec4f32, []i32) =
+  (map(|v: vec2f32| vec2i32(v), xs),
+   map(|v: vec3i32| vec3f32(v), ys),
+   map(|v: vec4u32| vec4f32(v), zs),
+   -- Legacy dot-form keeps working alongside the new constructor form.
+   map(|w: f32| i32.f32(w), ws))

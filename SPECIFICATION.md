@@ -238,6 +238,13 @@ Boolean literals are written `true` and `false`. The primitive types in Wyn are:
 - **Floating-point types**: `f16`, `f32`, `f64`
 - **Boolean type**: `bool`
 
+Each primitive type name doubles as a **polymorphic conversion
+builtin**: applied as `T(value)` it dispatches on `value`'s inferred
+type to the corresponding per-type catalog entry. The vec shorthand
+names (`vec2i32`, `vec3f32`, `vec4u32`, …) extend the same scheme to
+vectors — `vecNT(v)` is componentwise. See *Type Conversions* below
+for the full dispatch table and the legacy `T.source(value)` form.
+
 ### Numeric Literals
 
 Numeric literals can be suffixed with their intended type. For example
@@ -256,6 +263,55 @@ If the use is not constrained, integral literals will be assigned type
 
 Underscores may be used as digit separators in numeric literals for
 readability (e.g., `1_000_000`, `0xFF_FF_FF`).
+
+---
+
+## Type Conversions
+
+Wyn performs no implicit numeric coercion — conversions between
+distinct numeric types must be written explicitly. The recommended
+form is **constructor-style**: `T(value)` invokes `T`'s conversion
+of `value`, with the source type read from `value`'s inferred type.
+
+```wyn
+let xi: i32 = i32(2.5f32)        -- f32 -> i32
+let xf: f32 = f32(7i32)          -- i32 -> f32
+let xu: u32 = u32(-1i32)         -- i32 -> u32 (bitcast)
+let v:  vec2i32 = vec2i32(uv)    -- vec2f32 -> vec2i32, componentwise
+```
+
+For each `(target, source)` pair the compiler resolves an overload
+from the per-type conversion catalog (`T.source`) — e.g.
+`i32(x: f32)` dispatches to the same `_w_intrinsic_i32_from_f32`
+that `i32.f32(x)` does. The dispatch table:
+
+| Source        | Available targets                  | Lowering          |
+|---------------|------------------------------------|-------------------|
+| `fN`          | `i8`, `i16`, `i32`, `i64`          | float→signed-int  |
+| `fN`          | `u8`, `u16`, `u32`, `u64`          | float→unsigned-int|
+| `iN`          | `f16`, `f32`, `f64`                | signed-int→float  |
+| `uN`          | `f16`, `f32`, `f64`                | unsigned-int→float|
+| `iN` ↔ `iM`   | same-signedness, different widths  | sign-extending convert |
+| `uN` ↔ `uM`   | same-signedness, different widths  | zero-extending convert |
+| `iN` ↔ `uN`   | same width                         | bitcast           |
+| `iN` ↔ `uM`   | different widths                   | sign/zero convert |
+
+Vec shorthand: `vecNT(v)` desugars to a `@[T(v.x), T(v.y), ...]`
+literal, applying the scalar `T(...)` conversion to each component.
+Arity is read from the constructor name (`vec2`/`vec3`/`vec4`); the
+arg must be a vec of matching arity, or it's a type error.
+
+### Legacy dot-form (`T.source(value)`)
+
+The original surface — `i32.f32(x)` — remains supported and resolves
+to the same catalog entry as `i32(x)`. The constructor form is
+preferred because it doesn't require restating the source type. Vec
+conversions have no dot-form equivalent; use `vecNT(v)`.
+
+Broadcasting between vector and scalar in arithmetic (`v + 1.0`)
+performs no implicit numeric conversion — both sides must already
+share an element type (see the operators section for the broadcast
+rules).
 
 ---
 

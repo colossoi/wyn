@@ -3583,8 +3583,7 @@ fn compute_if_over_two_maps_compiles_fixed_size_different_sources() {
           else
             map(|pos:vec2f32| @[pos.x + 1.0, pos.y + 1.0], prev_pos)
     "#;
-    crate::compile_thru_spirv(src)
-        .expect("fixed-size If-over-maps (different sources) must compile");
+    crate::compile_thru_spirv(src).expect("fixed-size If-over-maps (different sources) must compile");
 }
 
 /// The user's original case 2 (fixed-size output): both branches map
@@ -3625,4 +3624,70 @@ fn compute_multi_output_tuple_of_ifs_compiles() {
              else map(|p: vec2f32| p.x * p.x + p.y * p.y, prev_pos))
     "#;
     crate::compile_thru_spirv(src).expect("multi-output tuple of Ifs must compile");
+}
+
+// ---- Constructor-style type conversions `T(value)` ----
+//
+// The `i32(x)` form dispatches via the existing per-type catalog
+// entries (`i32.f32`, etc.); the `vec2i32(v)` form additionally
+// desugars at `to_tlc` time into a `VecLit` of componentwise scalar
+// conversion calls. These tests pin the end-to-end pipeline.
+
+#[test]
+fn ctor_scalar_constructor_compiles_to_spirv() {
+    let src = r#"
+        #[compute]
+        entry tick(#[storage(set=2, binding=0, access=read)] xs: []f32,
+                   #[uniform(set=1, binding=0)] n: u32) []i32 =
+          map(|x: f32| i32(x), xs)
+    "#;
+    crate::compile_thru_spirv(src).expect("i32(f32) constructor must compile to SPIR-V");
+}
+
+#[test]
+fn ctor_scalar_constructor_matches_legacy_dot_form() {
+    let new = r#"
+        #[compute]
+        entry tick(#[storage(set=2, binding=0, access=read)] xs: []f32,
+                   #[uniform(set=1, binding=0)] n: u32) []i32 =
+          map(|x: f32| i32(x), xs)
+    "#;
+    let legacy = r#"
+        #[compute]
+        entry tick(#[storage(set=2, binding=0, access=read)] xs: []f32,
+                   #[uniform(set=1, binding=0)] n: u32) []i32 =
+          map(|x: f32| i32.f32(x), xs)
+    "#;
+    // Both must compile; backward-compat sanity for the legacy form.
+    crate::compile_thru_spirv(new).expect("new T(value) form must compile");
+    crate::compile_thru_spirv(legacy).expect("legacy T.source(value) form must still compile");
+}
+
+#[test]
+fn ctor_vec2_constructor_compiles_to_spirv() {
+    let src = r#"
+        #[compute]
+        entry tick(#[storage(set=2, binding=0, access=read)] xs: []vec2f32,
+                   #[uniform(set=1, binding=0)] n: u32) []vec2i32 =
+          map(|v: vec2f32| vec2i32(v), xs)
+    "#;
+    crate::compile_thru_spirv(src).expect("vec2i32(vec2f32) must compile to SPIR-V");
+}
+
+#[test]
+fn ctor_vec3_and_vec4_constructors_compile_to_spirv() {
+    let v3 = r#"
+        #[compute]
+        entry tick(#[storage(set=2, binding=0, access=read)] xs: []vec3i32,
+                   #[uniform(set=1, binding=0)] n: u32) []vec3f32 =
+          map(|v: vec3i32| vec3f32(v), xs)
+    "#;
+    let v4 = r#"
+        #[compute]
+        entry tick(#[storage(set=2, binding=0, access=read)] xs: []vec4u32,
+                   #[uniform(set=1, binding=0)] n: u32) []vec4f32 =
+          map(|v: vec4u32| vec4f32(v), xs)
+    "#;
+    crate::compile_thru_spirv(v3).expect("vec3f32(vec3i32) must compile");
+    crate::compile_thru_spirv(v4).expect("vec4f32(vec4u32) must compile");
 }

@@ -19,6 +19,23 @@ use super::{
 
 /// Render a single swizzle slot index as its `xyzw` letter. Used by
 /// VecWith diagnostics so error messages match the user's source.
+/// Map a primitive scalar type to its surface module name
+/// (`Float(32)` → `"f32"`, `Bool` → `"bool"`, …). Used by the vec
+/// constructor dispatch to compute the per-component target type name
+/// it'll feed into the catalog lookup at to_tlc desugar time. Returns
+/// `None` for any non-primitive type (composite arrays, tuples, etc.)
+/// — the vec dispatch falls back to the standard undefined-name path
+/// for those.
+pub(crate) fn type_name_to_module(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Constructed(TypeName::Bool, _) => Some("bool".to_string()),
+        Type::Constructed(TypeName::Float(b), _) => Some(format!("f{}", b)),
+        Type::Constructed(TypeName::Int(b), _) => Some(format!("i{}", b)),
+        Type::Constructed(TypeName::UInt(b), _) => Some(format!("u{}", b)),
+        _ => None,
+    }
+}
+
 fn swizzle_letter(idx: u8) -> char {
     match idx {
         0 => 'x',
@@ -100,6 +117,15 @@ pub struct TypeChecker<'a> {
     /// error at the next public entry point (check_program /
     /// check_module_functions / check_prelude_functions).
     pending_cycle_error: std::cell::RefCell<Option<CompilerError>>,
+    /// Side table for constructor-call dispatch (`i32(x)`, `f32(true)`,
+    /// …). Maps the callee identifier's NodeId to the list of catalog
+    /// `BuiltinId`s that were registered as overload candidates, in the
+    /// same order as the candidates returned by
+    /// `resolve_callee_candidates`. After `resolve_overload` picks a
+    /// winner index, the type checker writes the winning `BuiltinId`
+    /// back into `name_resolution.values` so downstream consumers see a
+    /// resolved per-type conversion catalog entry (e.g. `i32.f32`).
+    constructor_call_catalog_ids: HashMap<NodeId, Vec<BuiltinId>>,
 }
 
 /// Compute free type variables in a Type
@@ -699,6 +725,7 @@ impl<'a> TypeChecker<'a> {
             module_schemes: spec_schemes,
             name_resolution: NameResolution::default(),
             pending_cycle_error: std::cell::RefCell::new(None),
+            constructor_call_catalog_ids: HashMap::new(),
         }
     }
 
@@ -2113,6 +2140,10 @@ impl<'a> TypeChecker<'a> {
                             // (TLC `Var(Builtin)`, `PureOp::Intrinsic`, ...) can
                             // dispatch on the right `BuiltinDef::overloads()` entry.
                             self.name_resolution.set_overload_idx(func.h.id, r.winner_index);
+                            // If this was a scalar constructor call
+                            // (`i32(x)`, etc.), record the chosen
+                            // per-type conversion catalog entry.
+                            self.record_constructor_dispatch(func.h.id, r.winner_index);
                             return Ok(r.return_type);
                         }
                         Err(_) => bail_type_at!(
@@ -2547,6 +2578,16 @@ impl<'a> TypeChecker<'a> {
                     });
                 }
 
+                // Constructor-style conversion: `i32(x)`, `vec2i32(v)`, etc.
+                // The parser already accepts `Application(Identifier([], T), [v])`;
+                // we intercept here when the name isn't a known value but
+                // matches a type-constructor pattern.
+                if quals.is_empty() {
+                    if let Some(candidates) = self.try_resolve_constructor_call(name, func.h.id) {
+                        return Ok(candidates);
+                    }
+                }
+
                 Err(err_undef_at!(func.h.span, "{}", full_name))
             }
 
@@ -2557,6 +2598,142 @@ impl<'a> TypeChecker<'a> {
                     candidates: vec![Candidate { ty }],
                     display_name: "<expr>".to_string(),
                 })
+            }
+        }
+    }
+
+    /// Constructor-style conversion dispatch (`i32(x)`, `vec2i32(v)`, …).
+    ///
+    /// The parser-level surface already accepts `T(value)` as a normal
+    /// `Application` node; the standard identifier-resolution path
+    /// returns `None` because `T` isn't a value name (it's a type
+    /// module or a vec shorthand). This hook intercepts that failure
+    /// and routes the call to one of two dispatch paths:
+    ///
+    /// **Scalar.** If `name` is a known type module (`i32`, `f32`,
+    /// `bool`, …), enumerate every catalog entry whose surface name
+    /// is `<name>.<source>` via
+    /// `catalog::lookup_by_surface_prefix(name)`. Build a
+    /// multi-candidate result so the existing `resolve_overload`
+    /// machinery picks the right `<name>.<source>` based on the
+    /// argument's inferred type. After `infer_application` records
+    /// the winning index, `record_constructor_dispatch` writes the
+    /// chosen `BuiltinId` back into `name_resolution.values` so
+    /// downstream IR sees the resolved per-type conversion catalog
+    /// entry.
+    ///
+    /// **Vec.** If `name` matches a parser-level vec shorthand
+    /// (`vec2i32`, `vec3f32`, `vec4u32`, …), build a single-candidate
+    /// `vec<a, n> -> vec<target_elem, n>` scheme and record a
+    /// `ResolvedValueRef::VecConstructor` in `name_resolution.values`
+    /// for the callee. `to_tlc::transform_application` reads that
+    /// record and desugars to a `VecLit` of componentwise scalar
+    /// conversion calls.
+    ///
+    /// Returns `None` if the name doesn't match either pattern — the
+    /// caller falls through to the existing "undefined" error path.
+    fn try_resolve_constructor_call(
+        &mut self,
+        name: &str,
+        callee_node_id: NodeId,
+    ) -> Option<CalleeCandidates> {
+        // Scalar dispatch.
+        if self.module_manager.is_known_module(name) {
+            let catalog = crate::builtins::catalog();
+            let entries = catalog.lookup_by_surface_prefix(name);
+            let mut candidates: Vec<Candidate> = Vec::with_capacity(entries.len());
+            let mut catalog_ids: Vec<BuiltinId> = Vec::with_capacity(entries.len());
+            for def in &entries {
+                // Per-type conversion entries (`per_type_conv` in
+                // `builtins/defs.rs`) carry `scheme: None`; their
+                // schemes come from prelude module signatures via
+                // `lookup_module_scheme_by_id`.
+                if let Some(scheme) = self.lookup_module_scheme_by_id(def.id) {
+                    let ty = scheme.instantiate(&mut self.context);
+                    candidates.push(Candidate { ty });
+                    catalog_ids.push(def.id);
+                }
+            }
+            if !candidates.is_empty() {
+                self.constructor_call_catalog_ids.insert(callee_node_id, catalog_ids);
+                return Some(CalleeCandidates {
+                    candidates,
+                    display_name: format!("{}(...)", name),
+                });
+            }
+            // Name matched a module but no `<name>.<X>` entries exist
+            // — fall through; the caller emits an undefined-name
+            // error which is the right diagnostic.
+            return None;
+        }
+
+        // Vec dispatch.
+        let vec_constructors = crate::types::vector_type_constructors();
+        if let Some(target_ty) = vec_constructors.get(name) {
+            // Parse arity and component-type-name from the target ty.
+            let (arity, target_elem) = match target_ty {
+                Type::Constructed(TypeName::Vec, args) if args.len() == 2 => {
+                    let arity = match &args[1] {
+                        Type::Constructed(TypeName::Size(n), _) => *n,
+                        _ => return None,
+                    };
+                    let target_elem = type_name_to_module(&args[0])?;
+                    (arity, target_elem)
+                }
+                _ => return None,
+            };
+
+            // Build a synthetic scheme: `vec<a, arity> -> target_ty`.
+            // The arg's element type `a` is left free so the type
+            // checker accepts any vec-of-arity-n on the arg side; the
+            // componentwise desugar at to_tlc time looks up the
+            // per-component conversion catalog entry and surfaces a
+            // clean error if the source-elem can't be converted.
+            let arg_elem = self.context.new_variable();
+            let arg_vec = Type::Constructed(
+                TypeName::Vec,
+                vec![arg_elem, Type::Constructed(TypeName::Size(arity), vec![])],
+            );
+            let func_ty = Type::Constructed(TypeName::Arrow, vec![arg_vec, target_ty.clone()]);
+
+            // Record the dispatch so `to_tlc` can desugar.
+            self.name_resolution.values.insert(
+                callee_node_id,
+                crate::name_resolution::ResolvedValueRef::VecConstructor {
+                    target_name: name.to_string(),
+                    arity,
+                    target_elem,
+                },
+            );
+
+            return Some(CalleeCandidates {
+                candidates: vec![Candidate { ty: func_ty }],
+                display_name: name.to_string(),
+            });
+        }
+
+        None
+    }
+
+    /// After `resolve_overload` picks a winning candidate in
+    /// `infer_application`, record the corresponding catalog
+    /// `BuiltinId` in `name_resolution.values` so downstream IR
+    /// (TLC `Var(Builtin)`, the SPIR-V dispatcher, …) can dispatch
+    /// on the right per-type conversion entry. No-op when the
+    /// callee wasn't a scalar constructor call.
+    fn record_constructor_dispatch(&mut self, callee_node_id: NodeId, winner_index: usize) {
+        if let Some(catalog_ids) = self.constructor_call_catalog_ids.remove(&callee_node_id) {
+            if let Some(&chosen_id) = catalog_ids.get(winner_index) {
+                self.name_resolution.values.insert(
+                    callee_node_id,
+                    crate::name_resolution::ResolvedValueRef::Builtin {
+                        id: chosen_id,
+                        // `per_type_conv` builtins have exactly one
+                        // overload each — the catalog overload index
+                        // within a single `BuiltinDef` is always 0.
+                        overload_idx: Some(0),
+                    },
+                );
             }
         }
     }

@@ -2452,3 +2452,85 @@ fn pow_operator_heterogeneous_cases() {
     let plus_het = try_typecheck_program("def bad(x: f32) f32 = x + 5");
     assert!(matches!(plus_het, Err(CompilerError::TypeError(_, _))));
 }
+
+// ---- Constructor-style type conversion `T(value)` ----
+
+/// `i32(x)` where `x: f32` dispatches via the existing
+/// `i32.f32` catalog entry — no new intrinsic needed.
+#[test]
+fn ctor_scalar_f32_to_i32_typechecks() {
+    typecheck_program("def to_i(x: f32) i32 = i32(x)");
+}
+
+#[test]
+fn ctor_scalar_u32_to_i32_typechecks() {
+    typecheck_program("def to_i(x: u32) i32 = i32(x)");
+}
+
+#[test]
+fn ctor_scalar_i32_to_f32_typechecks() {
+    typecheck_program("def to_f(x: i32) f32 = f32(x)");
+}
+
+#[test]
+fn ctor_scalar_f32_to_u32_typechecks() {
+    typecheck_program("def to_u(x: f32) u32 = u32(x)");
+}
+
+/// Unknown name falls through to the standard undefined-variable
+/// error — the constructor hook must not swallow non-type names.
+#[test]
+fn ctor_unknown_name_returns_undefined() {
+    let result = try_typecheck_program("def bad(x: f32) f32 = xyzzy(x)");
+    assert!(
+        matches!(result, Err(CompilerError::UndefinedVariable(_, _))),
+        "expected UndefinedVariable, got {result:?}"
+    );
+}
+
+/// Vec constructors desugar to N componentwise scalar conversions.
+/// vec2 / vec3 / vec4 over the realistic source/target pairs.
+#[test]
+fn ctor_vec2_f32_to_i32_typechecks() {
+    typecheck_program("def to_v2i(v: vec2f32) vec2i32 = vec2i32(v)");
+}
+
+#[test]
+fn ctor_vec3_i32_to_f32_typechecks() {
+    typecheck_program("def to_v3f(v: vec3i32) vec3f32 = vec3f32(v)");
+}
+
+#[test]
+fn ctor_vec4_u32_to_f32_typechecks() {
+    typecheck_program("def to_v4f(v: vec4u32) vec4f32 = vec4f32(v)");
+}
+
+/// Vec constructor over a scalar arg is a type error — the
+/// hook synthesises an arrow `vec<a,N> -> vec<T,N>` and unification
+/// against an `i32` arg must fail.
+#[test]
+fn ctor_vec_rejects_scalar_arg() {
+    let result = try_typecheck_program("def bad(x: i32) vec2i32 = vec2i32(x)");
+    assert!(
+        matches!(result, Err(CompilerError::TypeError(_, _))),
+        "expected TypeError, got {result:?}"
+    );
+}
+
+/// Vec3 constructor over a vec2 arg fails on arity.
+#[test]
+fn ctor_vec_rejects_arity_mismatch() {
+    let result = try_typecheck_program("def bad(v: vec2f32) vec3i32 = vec3i32(v)");
+    assert!(
+        matches!(result, Err(CompilerError::TypeError(_, _))),
+        "expected TypeError, got {result:?}"
+    );
+}
+
+/// The legacy dot-form `i32.f32(x)` must keep working — the
+/// constructor hook is additive, the existing `lookup_module_scheme`
+/// path is untouched.
+#[test]
+fn ctor_legacy_dot_syntax_still_works() {
+    typecheck_program("def to_i(x: f32) i32 = i32.f32(x)");
+}

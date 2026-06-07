@@ -293,6 +293,23 @@ pub enum ResolvedValueRef {
         id: BuiltinId,
         overload_idx: Option<usize>,
     },
+    /// Constructor-style vec conversion (`vec2i32(v)`, `vec3f32(u)`, …).
+    /// The type checker recognises the call shape and records the
+    /// target name + arity + per-component target type. `to_tlc` desugars
+    /// the call to a `VecLit` of componentwise scalar conversions:
+    /// `vec2i32(v)` → `@[i32.(elem_of_v)(v.x), i32.(elem_of_v)(v.y)]`.
+    /// The source component type comes from the typed arg at desugar
+    /// time.
+    VecConstructor {
+        /// `"vec2i32"`, `"vec3f32"`, etc. — the original call name.
+        target_name: String,
+        /// Arity: 2, 3, or 4.
+        arity: usize,
+        /// Per-component scalar target type name, e.g. `"i32"` for
+        /// `vec2i32`. The catalog entry `"<target_elem>.<source_elem>"`
+        /// is looked up at desugar time.
+        target_elem: String,
+    },
 }
 
 /// Side table populated by `build_name_resolution`. Maps Identifier
@@ -316,6 +333,11 @@ impl NameResolution {
             match entry {
                 ResolvedValueRef::Builtin { overload_idx, .. } => {
                     *overload_idx = Some(idx);
+                }
+                ResolvedValueRef::VecConstructor { .. } => {
+                    // Vec constructors don't carry an overload index —
+                    // the desugaring picks the catalog entry by name
+                    // at to_tlc time. No-op.
                 }
             }
         }

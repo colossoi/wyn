@@ -8,6 +8,16 @@
 
 -- | Conversion-from-every-primitive interface. Implementers
 -- promise a `t`-valued coercion from each built-in scalar type.
+--
+-- Two surface forms resolve to the same lowering:
+--   * **Constructor (recommended)**: `T(value)` — e.g. `i32(2.5f32)`,
+--     `f32(7i32)`. Source type is read from `value`'s inferred type.
+--   * **Dot-form (legacy)**: `T.source(value)` — e.g. `i32.f32(2.5f32)`.
+--     Still supported; both forms call the same conversion intrinsic.
+--
+-- Vec shorthand `vecNT(v)` desugars to a componentwise `T(...)` per
+-- element. There is no dot-form for vec conversions.
+--
 -- Conversions are *value-preserving* where representable and
 -- *unspecified* otherwise — e.g. `f32.i64` of a value larger than
 -- 2^24 loses low-order precision, `i32.f32` of a NaN is

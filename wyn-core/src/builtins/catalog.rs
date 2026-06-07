@@ -231,6 +231,22 @@ impl BuiltinCatalog {
         self.by_surface_name.get(name).map(|id| &self.defs[id.as_index()])
     }
 
+    /// Enumerate every catalog entry whose surface name is
+    /// `<prefix>.<suffix>` for some non-empty `suffix`. Used by the
+    /// type checker's constructor-call dispatch (e.g. `i32(x)`) to
+    /// gather every `i32.<source>` conversion entry the catalog
+    /// registered via `per_type_conv`. Returns a vector of
+    /// `BuiltinDef` references; order is the catalog's insertion
+    /// order, which is stable across runs.
+    pub fn lookup_by_surface_prefix(&self, prefix: &str) -> Vec<&BuiltinDef> {
+        let dot_prefix = format!("{}.", prefix);
+        self.by_surface_name
+            .iter()
+            .filter(|(name, _)| name.starts_with(&dot_prefix))
+            .map(|(_, id)| &self.defs[id.as_index()])
+            .collect()
+    }
+
     /// Look up by an internal `_w_intrinsic_*` name registered in
     /// `impl_source_names`. Returns the entry whose `impl_source_names`
     /// contains this name (excluding cases where it matches
