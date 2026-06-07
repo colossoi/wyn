@@ -41,10 +41,7 @@ pub fn check(inner: &EgirInner) -> Result<(), ConvertError> {
     Ok(())
 }
 
-fn check_entry(
-    entry_name: &str,
-    graph: &super::super::types::EGraph,
-) -> Result<(), ConvertError> {
+fn check_entry(entry_name: &str, graph: &super::super::types::EGraph) -> Result<(), ConvertError> {
     // Roots: the operand of every Return(Some(_)) terminator, plus
     // every Pure NodeId referenced by a side-effect store's operands.
     // We don't walk SOAC `PendingSoac` operands here: those are
@@ -119,10 +116,7 @@ fn is_runtime_sized_composite_array(ty: &Type<TypeName>) -> bool {
     }
     let variant = &args[1];
     let size = &args[2];
-    let is_composite = matches!(
-        variant,
-        Type::Constructed(TypeName::ArrayVariantComposite, _)
-    );
+    let is_composite = matches!(variant, Type::Constructed(TypeName::ArrayVariantComposite, _));
     let is_runtime = matches!(
         size,
         Type::Variable(_) | Type::Constructed(TypeName::SizePlaceholder, _)
@@ -132,10 +126,7 @@ fn is_runtime_sized_composite_array(ty: &Type<TypeName>) -> bool {
 
 /// Look up the Pure result type for `nid`. ENode::Pure carries its
 /// declared type; we just project the field.
-fn node_type<'a>(
-    graph: &'a super::super::types::EGraph,
-    nid: NodeId,
-) -> Option<&'a Type<TypeName>> {
+fn node_type<'a>(graph: &'a super::super::types::EGraph, nid: NodeId) -> Option<&'a Type<TypeName>> {
     match &graph.nodes[nid] {
         ENode::Pure { .. } => graph.types.get(&nid),
         _ => None,

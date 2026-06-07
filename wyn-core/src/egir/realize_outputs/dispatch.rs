@@ -64,10 +64,7 @@ pub fn compute_slot_source(
 
     // 2. Retargetable Map/Scan(Fresh).
     if result_soac_is_map_or_scan(graph, source) {
-        let elem_ty = slot_ty
-            .elem_type()
-            .cloned()
-            .expect("Map/Scan slot output is always an array");
+        let elem_ty = slot_ty.elem_type().cloned().expect("Map/Scan slot output is always an array");
         let view = graph_ops::intern_storage_view(graph, binding, elem_ty.clone(), None);
         if multi_source {
             reject_sibling_consumers(graph, source, slot_index)?;
@@ -89,11 +86,7 @@ pub fn compute_slot_source(
 
     // 3. Fixed-size aggregate.
     let fixed_size = slot_ty.array_size().and_then(|s| {
-        if let Type::Constructed(TypeName::Size(n), _) = s {
-            Some(*n)
-        } else {
-            None
-        }
+        if let Type::Constructed(TypeName::Size(n), _) = s { Some(*n) } else { None }
     });
     if let (Some(n), Some(et)) = (fixed_size, slot_ty.elem_type().cloned()) {
         let view = graph_ops::intern_storage_view(graph, binding, et.clone(), None);

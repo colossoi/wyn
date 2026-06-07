@@ -909,11 +909,7 @@ impl<'a> Converter<'a> {
     /// Non-control-flow values are converted normally; a single
     /// `SlotSource { block: self.current_block, value: <converted> }`
     /// is pushed to `slot_sources_accum[slot_index]`.
-    fn convert_slot_store(
-        &mut self,
-        slot_index: usize,
-        value: &Term,
-    ) -> Result<(), ConvertError> {
+    fn convert_slot_store(&mut self, slot_index: usize, value: &Term) -> Result<(), ConvertError> {
         use crate::ssa::types::ControlHeader;
         match &value.kind {
             TermKind::Let {
@@ -945,14 +941,13 @@ impl<'a> Converter<'a> {
                     self.current_block,
                     ControlHeader::Selection { merge: merge_block },
                 );
-                self.graph.skeleton.blocks[self.current_block].term =
-                    SkeletonTerminator::CondBranch {
-                        cond: cond_nid,
-                        then_target: then_block,
-                        then_args: vec![],
-                        else_target: else_block,
-                        else_args: vec![],
-                    };
+                self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::CondBranch {
+                    cond: cond_nid,
+                    then_target: then_block,
+                    then_args: vec![],
+                    else_target: else_block,
+                    else_args: vec![],
+                };
 
                 self.current_block = then_block;
                 self.convert_slot_store(slot_index, then_branch)?;

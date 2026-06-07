@@ -3499,8 +3499,7 @@ fn compute_if_over_two_maps_compiles_runtime_sized() {
             else map(|p: vec2f32| @[p.x + 1.0f32, p.y + 1.0f32], prev)
     "#;
     let lowered = crate::compile_thru_spirv(src).expect("compile_thru_spirv");
-    let Pipeline::Compute(cp) = lowered.pipeline.pipelines.first().expect("one pipeline")
-    else {
+    let Pipeline::Compute(cp) = lowered.pipeline.pipelines.first().expect("one pipeline") else {
         panic!("expected single-compute pipeline");
     };
     // Output's size variable matches `prev`'s — the length-inference

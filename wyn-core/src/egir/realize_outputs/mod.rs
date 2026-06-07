@@ -85,9 +85,7 @@ fn realize_compute_slots(entry: &mut EgirEntry) -> Result<(), ConvertError> {
     let mut next_effect = graph_ops::next_effect_token(graph);
 
     for (slot_index, output) in outputs.iter().enumerate() {
-        let binding = output
-            .storage_binding
-            .expect("BUG: compute output without storage binding");
+        let binding = output.storage_binding.expect("BUG: compute output without storage binding");
         let sources = slot_sources.get(slot_index).cloned().unwrap_or_default();
         if sources.is_empty() {
             return Err(ConvertError::Unsupported(format!(
@@ -159,9 +157,7 @@ fn realize_legacy_return(entry: &mut EgirEntry) -> Result<(), ConvertError> {
     for (slot_index, output) in outputs.iter().enumerate() {
         let source = sources[slot_index];
         if is_compute {
-            let binding = output
-                .storage_binding
-                .expect("BUG: compute output without storage binding");
+            let binding = output.storage_binding.expect("BUG: compute output without storage binding");
             // Single-source slot for legacy compute. Sibling-Index
             // rewrites are still valid (they're against the single
             // result NodeId).
