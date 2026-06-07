@@ -129,6 +129,7 @@ enum ItemKind {
     Def,
     Module,
     ModuleType,
+    Functor,
     Type,
     Sig,
 }
@@ -139,6 +140,7 @@ impl ItemKind {
             ItemKind::Def => "def",
             ItemKind::Module => "module",
             ItemKind::ModuleType => "module type",
+            ItemKind::Functor => "functor",
             ItemKind::Type => "type",
             ItemKind::Sig => "sig",
         }
@@ -254,10 +256,14 @@ fn extract_module(src_path: &Path, source: &str) -> Result<ModuleDoc> {
                     line: i + 1,
                 });
             }
-            // Track module / module-type entry. Module bodies open with
-            // `= {` on the declaration line (sometimes wrapping); v1
-            // assumes the `{` is on the same line.
-            if matches!(item_kind, ItemKind::Module | ItemKind::ModuleType) && trimmed.contains('{') {
+            // Track module / module-type / functor entry. Bodies open
+            // with `= {` on the declaration line; v1 assumes `{` is on
+            // the same line as the keyword.
+            if matches!(
+                item_kind,
+                ItemKind::Module | ItemKind::ModuleType | ItemKind::Functor
+            ) && trimmed.contains('{')
+            {
                 scope.push(guess_item_name(trimmed, item_kind));
             }
             i += lines_consumed;
@@ -317,6 +323,7 @@ fn item_kind_of_line(trimmed: &str) -> Option<ItemKind> {
         "def" => Some(ItemKind::Def),
         "type" => Some(ItemKind::Type),
         "sig" => Some(ItemKind::Sig),
+        "functor" => Some(ItemKind::Functor),
         "module" => {
             // `module type foo = …` vs `module foo = …`.
             let rest = trimmed.trim_start_matches("module").trim_start();
@@ -368,28 +375,63 @@ fn guess_item_name(trimmed: &str, kind: ItemKind) -> String {
 /// `-- ^` notes appearing inline on parameter lines are extracted as
 /// `ParamNote`s and stripped from the rendered signature.
 fn collect_signature(lines: &[&str], start: usize) -> (String, Vec<ParamNote>, usize) {
+    // Bracket depth: only `()` and `[]` continue a signature line.
+    // `{` opens a module / sig body and acts as a terminator — we
+    // want the signature to be the declaration line(s) up to and
+    // including `{`, never to span the body.
     let mut depth: i32 = 0;
     let mut out_lines: Vec<String> = Vec::new();
     let mut param_notes: Vec<ParamNote> = Vec::new();
+    // True iff the previous line opened or continued a `-- ^` note,
+    // so a bare `-- …` continuation on the next line appends to it.
+    let mut in_caret_note = false;
     let mut i = start;
     while i < lines.len() {
         let line = lines[i];
+        // Pure continuation comment: `   -- text` with no Wyn code on
+        // the line. If a `-- ^` note is open, append; either way the
+        // line stays out of the rendered signature.
+        let trimmed_full = line.trim();
+        if let Some(continuation) = trimmed_full.strip_prefix("--") {
+            if !continuation.starts_with('|') && !continuation.starts_with('^') && in_caret_note {
+                if let Some(last) = param_notes.last_mut() {
+                    last.body.push(' ');
+                    last.body.push_str(continuation.trim());
+                }
+                i += 1;
+                continue;
+            }
+            if !continuation.starts_with('|') && !continuation.starts_with('^') {
+                // Bare comment unattached to a `-- ^` note — drop from
+                // the signature, treat as a no-op for bracket counting.
+                i += 1;
+                continue;
+            }
+        }
+
         // Split off any `-- ^` parameter note before counting brackets.
         let (sig_part, note) = split_caret_note(line);
         if let Some((ident, body)) = note {
             param_notes.push(ParamNote { ident, body });
+            in_caret_note = true;
+        } else {
+            in_caret_note = false;
         }
         out_lines.push(sig_part.trim_end().to_string());
+        let mut opens_body = false;
         for c in sig_part.chars() {
             match c {
-                '(' | '[' | '{' => depth += 1,
-                ')' | ']' | '}' => depth -= 1,
+                '(' | '[' => depth += 1,
+                ')' | ']' => depth -= 1,
+                '{' => opens_body = true,
                 _ => {}
             }
         }
         let trimmed = sig_part.trim();
         let has_eq = signature_has_body_eq(&sig_part);
-        if depth <= 0 && (has_eq || trimmed.is_empty() || is_terminal_sig_line(trimmed)) {
+        if depth <= 0
+            && (has_eq || opens_body || trimmed.is_empty() || is_terminal_sig_line(trimmed))
+        {
             i += 1;
             break;
         }
