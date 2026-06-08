@@ -3626,6 +3626,22 @@ fn compute_multi_output_tuple_of_ifs_compiles() {
     crate::compile_thru_spirv(src).expect("multi-output tuple of Ifs must compile");
 }
 
+// Minimal repro of the view-array slice provenance bug. `xs[0..3]` is
+// fine at top level, fails inside a `map` lambda body with
+// "slice_to_composite: no buffer provenance".
+#[test]
+fn slice_view_inside_map_lambda_compiles_to_spirv() {
+    let src = r#"
+        def gather3(arr: [3]f32) f32 = arr[0] + arr[1] + arr[2]
+
+        #[compute]
+        entry tick(#[storage(set=2, binding=0, access=read)] xs: []f32) []f32 =
+          map(|_:i32| gather3(xs[0..3]), 0i32..<3)
+    "#;
+    crate::compile_thru_spirv(src)
+        .expect("view-array slice inside a map lambda must preserve buffer provenance");
+}
+
 // ---- Constructor-style type conversions `T(value)` ----
 //
 // The `i32(x)` form dispatches via the existing per-type catalog

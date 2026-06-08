@@ -180,11 +180,22 @@ impl BufferSpecializer {
         let old_buffer_map = self.buffer_map.clone();
         self.buffer_map.clear();
 
-        // Read the cached layout from `entry.param_bindings` (populated by
-        // `populate_entry_param_bindings` at the start of `run`). The body
-        // rewriter handles only bare `Var(sym)` references — skip
-        // tuple-of-views params since `t.0`/`t.1` projections aren't
-        // recognized.
+        // Two sources of buffer-backed view params:
+        //
+        // 1. Auto-bound (no explicit attribute): the layout pass in
+        //    `populate_entry_param_bindings` assigned a binding number
+        //    and cached it as a `Single` entry on `entry.param_bindings`.
+        //
+        // 2. Explicit-bound (`#[storage(set, binding, ...)]`): the layout
+        //    pass deliberately left these as `None` in `param_bindings`
+        //    so the auto-binding counter doesn't reserve their slot. We
+        //    still need their provenance here, so read it back off the
+        //    AST attribute on `entry.params`.
+        //
+        // Both produce a `BufferBinding` in `buffer_map`; downstream
+        // rewriting doesn't care which source the binding came from.
+        // Tuple-of-views entries are skipped because the body rewriter
+        // handles only bare `Var(sym)` references, not `t.0` / `t.1`.
         for param_binding in entry.param_bindings.iter().flatten() {
             let EntryParamBindingKind::Single { binding, elem_ty, .. } = &param_binding.kind else {
                 continue;
@@ -194,6 +205,25 @@ impl BufferSpecializer {
                 BufferBinding {
                     binding: *binding,
                     elem_ty: elem_ty.clone(),
+                },
+            );
+        }
+        let (body_params, _) = extract_params(&def.body);
+        for (i, (sym, ty)) in body_params.iter().enumerate() {
+            let Some(pat) = entry.params.get(i) else {
+                continue;
+            };
+            let Some(binding) = crate::binding_layout::extract_storage_binding(pat) else {
+                continue;
+            };
+            if !is_view_array(ty) {
+                continue;
+            }
+            self.buffer_map.insert(
+                *sym,
+                BufferBinding {
+                    binding,
+                    elem_ty: array_elem_type(ty),
                 },
             );
         }
@@ -632,10 +662,151 @@ impl BufferSpecializer {
     }
 
     fn rewrite_soac_body(&mut self, sb: &super::SoacBody) -> super::SoacBody {
+        // A SoacBody for a `map(f, xs)` after defunctionalization holds
+        // `lam.body = Var(lifted_sym)` and stashes the lambda's captured
+        // values in `captures`. At SOAC expansion (egir/soac_expand) those
+        // captures get appended to the lifted def's arg list. If a capture
+        // is a buffer-backed view (`Var(xs)` for an `xs: []T` entry param),
+        // the lifted def still takes a `[?]T` view param — the same
+        // invariant violation `specialize_call` fixes for plain `App`
+        // call sites. Specialize the lifted def the same way: replace its
+        // view param with `(offset: u32, len: u32)`, rewrite uses inside
+        // its body to storage intrinsics, and rewrite the SOAC to call
+        // the specialized def with `(0, storage_len(set, binding))`
+        // captures.
+        if let Some(new_sb) = self.try_specialize_soac_view_captures(sb) {
+            return new_sb;
+        }
+
         super::SoacBody {
             lam: self.rewrite_lambda(&sb.lam),
             captures: sb.captures.iter().map(|(s, t, e)| (*s, t.clone(), self.rewrite_term(e))).collect(),
         }
+    }
+
+    fn try_specialize_soac_view_captures(
+        &mut self,
+        sb: &super::SoacBody,
+    ) -> Option<super::SoacBody> {
+        let TermKind::Var(VarRef::Symbol(lifted_sym)) = &sb.lam.body.kind else {
+            return None;
+        };
+        let lifted_sym = *lifted_sym;
+        let target_def = self.def_map.get(&lifted_sym)?.clone();
+        if !matches!(target_def.meta, DefMeta::Function | DefMeta::LiftedLambda) {
+            return None;
+        }
+
+        // closure_convert appends captures after the original lambda
+        // params, so capture i corresponds to lifted-def param
+        // `n_lam_params + i`.
+        let (target_params, _) = extract_params(&target_def.body);
+        let n_lam_params = sb.lam.params.len();
+        if target_params.len() != n_lam_params + sb.captures.len() {
+            return None;
+        }
+
+        let mut buffer_args: Vec<Option<BufferBinding>> = vec![None; target_params.len()];
+        let mut any_buffer = false;
+        for (i, (_, _, cap_term)) in sb.captures.iter().enumerate() {
+            let TermKind::Var(VarRef::Symbol(view_sym)) = &cap_term.kind else {
+                continue;
+            };
+            let Some(binding) = self.resolve_buffer(view_sym).cloned() else {
+                continue;
+            };
+            buffer_args[n_lam_params + i] = Some(binding);
+            any_buffer = true;
+        }
+        if !any_buffer {
+            return None;
+        }
+
+        // Share the `(orig_sym, spec_key) → spec_sym` cache with the App
+        // path so a buffer reached via both forms gets one specialized
+        // copy. SOAC sites need the offset/len param symbols too — those
+        // come back as `split_syms` on a cache miss; on a hit, recover
+        // them by walking the cached def's param list.
+        let spec_key: SpecKey =
+            buffer_args.iter().map(|b| b.as_ref().map(|bb| bb.binding)).collect();
+        let (spec_sym, split_syms) = if let Some(&cached) =
+            self.specializations.get(&(lifted_sym, spec_key.clone()))
+        {
+            (cached, self.recover_split_syms(cached, &buffer_args))
+        } else {
+            let (s, splits) = self.create_specialized_def(
+                lifted_sym,
+                &target_def,
+                &buffer_args,
+                sb.lam.body.span,
+            );
+            self.specializations.insert((lifted_sym, spec_key), s);
+            (s, splits)
+        };
+
+        let new_lam_body = Term {
+            id: self.term_ids.next_id(),
+            kind: TermKind::Var(VarRef::Symbol(spec_sym)),
+            ..(*sb.lam.body).clone()
+        };
+        let new_lam = Lambda {
+            params: sb.lam.params.clone(),
+            body: Box::new(new_lam_body),
+            ret_ty: sb.lam.ret_ty.clone(),
+        };
+
+        let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
+        let mut new_captures: Vec<(SymbolId, Type<TypeName>, Term)> =
+            Vec::with_capacity(sb.captures.len() + 1);
+        for (i, (cap_sym, cap_ty, cap_term)) in sb.captures.iter().enumerate() {
+            let pos = n_lam_params + i;
+            match (&buffer_args[pos], &split_syms[pos]) {
+                (Some(binding), Some((offset_sym, len_sym))) => {
+                    let span = cap_term.span;
+                    let zero = self.make_int_lit("0", u32_ty.clone(), span);
+                    let storage_len =
+                        super::storage_len_call(binding.binding, span, &mut self.term_ids);
+                    new_captures.push((*offset_sym, u32_ty.clone(), zero));
+                    new_captures.push((*len_sym, u32_ty.clone(), storage_len));
+                }
+                _ => {
+                    new_captures.push((*cap_sym, cap_ty.clone(), self.rewrite_term(cap_term)));
+                }
+            }
+        }
+
+        Some(super::SoacBody {
+            lam: new_lam,
+            captures: new_captures,
+        })
+    }
+
+    /// Given a cached specialized def and the buffer_args that produced
+    /// it, walk the spec def's params to recover the `(offset_sym, len_sym)`
+    /// allocated for each view position. Used when the specialization
+    /// cache hits and we need the symbols at a new caller site.
+    fn recover_split_syms(
+        &self,
+        spec_sym: SymbolId,
+        buffer_args: &[Option<BufferBinding>],
+    ) -> Vec<Option<(SymbolId, SymbolId)>> {
+        let def = self
+            .new_defs
+            .iter()
+            .find(|d| d.name == spec_sym)
+            .expect("BUG: cached spec sym not in new_defs");
+        let (params, _) = extract_params(&def.body);
+        let mut splits: Vec<Option<(SymbolId, SymbolId)>> = vec![None; buffer_args.len()];
+        let mut p = 0usize;
+        for (i, slot) in buffer_args.iter().enumerate() {
+            if slot.is_some() {
+                splits[i] = Some((params[p].0, params[p + 1].0));
+                p += 2;
+            } else {
+                p += 1;
+            }
+        }
+        splits
     }
 
     fn rewrite_array_expr(&mut self, ae: &ArrayExpr) -> ArrayExpr {
@@ -696,12 +867,15 @@ impl BufferSpecializer {
         // Build specialization key
         let spec_key: SpecKey = buffer_args.iter().map(|b| b.as_ref().map(|bb| bb.binding)).collect();
 
-        // Check if we already have this specialization
+        // Check if we already have this specialization. App call sites
+        // build their new arg list inline below; the `split_syms` side
+        // channel from `create_specialized_def` is unused on this path
+        // (it exists for SOAC capture rewriting, where positions matter).
         let spec_sym = if let Some(&sym) = self.specializations.get(&(func_sym, spec_key.clone())) {
             sym
         } else {
-            // Create the specialized function
-            let spec_sym = self.create_specialized_def(func_sym, target_def, buffer_args, span);
+            let (spec_sym, _splits) =
+                self.create_specialized_def(func_sym, target_def, buffer_args, span);
             self.specializations.insert((func_sym, spec_key), spec_sym);
             spec_sym
         };
@@ -747,13 +921,17 @@ impl BufferSpecializer {
 
     /// Create a specialized copy of a function where view params are replaced
     /// with (offset: u32, len: u32) and array ops use storage intrinsics.
+    /// Returns the new def's `SymbolId` plus, for each `buffer_args` entry,
+    /// the `(offset_sym, len_sym)` allocated for that position (or `None`
+    /// for non-view positions). Callers reading captures-by-position
+    /// (SOACs) need these to label the new offset/len terms.
     fn create_specialized_def(
         &mut self,
         _func_sym: SymbolId,
         target_def: &Def,
         buffer_args: &[Option<BufferBinding>],
         _span: Span,
-    ) -> SymbolId {
+    ) -> (SymbolId, Vec<Option<(SymbolId, SymbolId)>>) {
         let orig_name = self.symbols.get(target_def.name).expect("BUG: symbol not in table").clone();
 
         // Build suffix from buffer bindings
@@ -778,6 +956,8 @@ impl BufferSpecializer {
         let mut view_param_map: HashMap<SymbolId, (SymbolId, SymbolId, BindingRef, Type<TypeName>)> =
             HashMap::new();
 
+        let mut split_syms: Vec<Option<(SymbolId, SymbolId)>> =
+            (0..buffer_args.len()).map(|_| None).collect();
         for (i, (sym, ty)) in orig_params.iter().enumerate() {
             if let Some(Some(binding)) = buffer_args.get(i) {
                 // Replace view param with offset + len
@@ -789,6 +969,7 @@ impl BufferSpecializer {
                     *sym,
                     (offset_sym, len_sym, binding.binding, binding.elem_ty.clone()),
                 );
+                split_syms[i] = Some((offset_sym, len_sym));
             } else {
                 new_params.push((*sym, ty.clone()));
             }
@@ -810,7 +991,7 @@ impl BufferSpecializer {
         };
 
         self.new_defs.push(spec_def);
-        spec_sym
+        (spec_sym, split_syms)
     }
 
     /// Rewrite the body of a specialized function, replacing operations on
