@@ -468,6 +468,16 @@ impl TypeEmitter {
                     {
                         return Ok(self.virtual_range_struct(&elem));
                     }
+                    // View arrays are runtime `{offset, len}` handles into a
+                    // backing storage buffer. The buffer is static (recovered
+                    // from the type's region), so the VALUE is just the runtime
+                    // pair — modelled as `vec2<u32>` (`.x` = offset, `.y` = len).
+                    // (The storage *binding* is declared `array<T>` separately;
+                    // this is the type of a view VALUE that flows through lets,
+                    // function params, and block params.)
+                    if let Some(PolyType::Constructed(TypeName::ArrayVariantView, _)) = ty.array_variant() {
+                        return Ok("vec2<u32>".to_string());
+                    }
                     // Bounded arrays are `{buffer: array<T, N>, len: u32}` —
                     // function-local fixed-capacity buffer plus a runtime
                     // count.
@@ -1429,18 +1439,6 @@ fn wgsl_builtin_type(b: &spirv::BuiltIn) -> Option<&'static str> {
 // Body-level lowering
 // -----------------------------------------------------------------------------
 
-/// A storage-view handle tracked per ValueId: the name of the underlying
-/// `@group @binding` storage declaration plus the offset and length
-/// expressions the view was created with. When a `StorageViewIndex` or
-/// `StorageViewLen` reaches lowering, we resolve the view's ValueId to
-/// one of these and emit `name[offset + idx]` or the recorded len expr.
-#[derive(Clone)]
-struct ViewHandle {
-    buffer_name: String,
-    offset_expr: String,
-    len_expr: String,
-}
-
 /// Value-category tag on each ValueId's emitted WGSL expression.
 /// `Alias` is safe to substitute into any rvalue context. `Place`
 /// names an lvalue whose read is side-effectful or expensive (a
@@ -1469,8 +1467,10 @@ struct BodyLowerCtx<'a, 'b> {
     value_map: HashMap<ValueId, ValueBinding>,
     /// Set of names declared with `let`/`var` in the current scope.
     declared: HashSet<String>,
-    /// Storage view handles keyed by their `StorageView` result ValueId.
-    view_handles: HashMap<ValueId, ViewHandle>,
+    /// Workgroup view name (`_wg_<id>`) keyed by `StorageView` result ValueId.
+    /// Storage views recover their buffer name from the type's region; only
+    /// workgroup views (whose `_wg_<id>` isn't in any type) need this.
+    workgroup_view_name: HashMap<ValueId, String>,
     /// WGSL place expression per `PlaceId` — output variable name,
     /// `_alloca_N` for function-local `Alloca`s, or `buf[offset+idx]`
     /// for `ViewIndex`. Consumed by `Load` / `Store` in `emit_nodes`.
@@ -1498,7 +1498,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             body,
             value_map: HashMap::new(),
             declared: HashSet::new(),
-            view_handles: HashMap::new(),
+            workgroup_view_name: HashMap::new(),
             place_targets: HashMap::new(),
             uses_output_ptrs: false,
             output_target_names: HashMap::new(),
@@ -1548,10 +1548,10 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
     fn view_buffer_name(&self, view_ssa: ValueId) -> Result<String> {
         match crate::types::array_view_region(self.body.get_value_type(view_ssa)) {
             Some(br) => self.storage_name(br.set, br.binding),
-            None => self.view_handles.get(&view_ssa).map(|h| h.buffer_name.clone()).ok_or_else(|| {
+            None => self.workgroup_view_name.get(&view_ssa).cloned().ok_or_else(|| {
                 crate::err_wgsl_at!(
                     self.blame_span(),
-                    "view {:?} has neither a concrete buffer region nor a workgroup handle",
+                    "view {:?} has neither a concrete buffer region nor a workgroup name",
                     view_ssa
                 )
             }),
@@ -1723,21 +1723,12 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                     "ViewIndex: view operand must be an SSA value"
                                 )
                             })?;
+                            // Buffer name from the type's region; offset is the
+                            // `.x` of the view's `vec2<u32>` value.
                             let buffer_name = self.view_buffer_name(view_id)?;
-                            let offset_expr = self
-                                .view_handles
-                                .get(&view_id)
-                                .ok_or_else(|| {
-                                    crate::err_wgsl_at!(
-                                        self.blame_span(),
-                                        "ViewIndex: view {:?} not registered in view_handles",
-                                        view_id
-                                    )
-                                })?
-                                .offset_expr
-                                .clone();
+                            let view_val = self.get_value(*view)?;
                             let idx = self.get_value(*index)?;
-                            let expr = format!("{}[(i32({})) + (i32({}))]", buffer_name, offset_expr, idx);
+                            let expr = format!("{}[(i32(({}).x)) + (i32({}))]", buffer_name, view_val, idx);
                             self.place_targets.insert(*result, expr);
                             continue;
                         }
@@ -2424,13 +2415,18 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             result_ty_ref.array_variant(),
                             Some(PolyType::Constructed(TypeName::ArrayVariantComposite, _))
                         );
-                        // Source is a view iff we've tracked a ViewHandle
-                        // for its SSA id.
-                        if let Some(handle) = self.view_handles.get(&arr_id).cloned() {
-                            // The source buffer comes from the view's type region
-                            // (storage) or its handle (workgroup) — authoritative
-                            // regardless of how the source view was derived.
+                        // Source is a view iff its type is the View variant.
+                        let src_is_view = self
+                            .body
+                            .get_value_type(arr_id)
+                            .array_variant()
+                            .map(crate::types::is_array_variant_view)
+                            .unwrap_or(false);
+                        if src_is_view {
+                            // Buffer name from the source view's type region; its
+                            // runtime offset is the `.x` of its `vec2<u32>` value.
                             let buffer_name = self.view_buffer_name(arr_id)?;
+                            let view_val = self.get_value(args[0])?;
                             if result_is_composite {
                                 // View → Composite: materialize as
                                 // `array<T,N>(buf[off+s], buf[off+s+1], ...)`.
@@ -2448,35 +2444,18 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                 })?;
                                 let ty_str = self.ctx.type_emitter.type_to_wgsl(result_ty_ref)?;
                                 let elems: Vec<String> = (start..end)
-                                    .map(|i| {
-                                        format!("{}[(i32({}) + {}i)]", buffer_name, handle.offset_expr, i)
-                                    })
+                                    .map(|i| format!("{}[(i32(({}).x) + {}i)]", buffer_name, view_val, i))
                                     .collect();
                                 return Ok(format!("{}({})", ty_str, elems.join(", ")));
                             } else {
-                                // View → View: register a new handle whose
-                                // offset is `base_offset + start` and len is
-                                // `end - start`; return the buffer name so
-                                // downstream StorageViewIndex resolves
-                                // through the new handle.
-                                let result_id = inst.result.ok_or_else(|| {
-                                    crate::err_wgsl_at!(
-                                        self.blame_span(),
-                                        "_w_intrinsic_slice must have a result"
-                                    )
-                                })?;
+                                // View → View: a fresh `vec2<u32>` whose offset is
+                                // `source.x + start` and len is `end - start`. Its
+                                // type carries the same region, so downstream
+                                // consumers recover the buffer from it.
                                 let new_offset =
-                                    format!("(i32({}) + i32({}))", handle.offset_expr, arg_strs[1]);
-                                let new_len = format!("(i32({}) - i32({}))", arg_strs[2], arg_strs[1]);
-                                self.view_handles.insert(
-                                    result_id,
-                                    ViewHandle {
-                                        buffer_name: buffer_name.clone(),
-                                        offset_expr: new_offset,
-                                        len_expr: new_len,
-                                    },
-                                );
-                                return Ok(buffer_name);
+                                    format!("u32(i32(({}).x) + i32({}))", view_val, arg_strs[1]);
+                                let new_len = format!("u32(i32({}) - i32({}))", arg_strs[2], arg_strs[1]);
+                                return Ok(format!("vec2<u32>({}, {})", new_offset, new_len));
                             }
                         }
                         // Composite → Composite: `array<T,N>(arr[s], arr[s+1], ...)`.
@@ -2524,6 +2503,15 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             }
                             if let Some(PolyType::Constructed(TypeName::Size(n), _)) = ty.array_size() {
                                 return Ok(if wants_i32 { format!("{}i", n) } else { format!("{}u", n) });
+                            }
+                            // View: the length is the `.y` of its `vec2<u32>`
+                            // value (a whole-buffer entry view's `.y` is the
+                            // buffer's `arrayLength`).
+                            if let Some(PolyType::Constructed(TypeName::ArrayVariantView, _)) =
+                                ty.array_variant()
+                            {
+                                let expr = format!("({}).y", arg_strs[0]);
+                                return Ok(if wants_i32 { format!("i32({})", expr) } else { expr });
                             }
                             // Runtime-sized storage array: `arrayLength(&x)` is u32.
                             let expr = format!("arrayLength(&{})", arg_strs[0]);
@@ -2610,71 +2598,31 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     Ok(format!("{}[{}]", base_val, index_val))
                 }
 
-                // Storage view: remember (buffer_name, offset, len) against
-                // the view's ValueId so subsequent StorageViewIndex /
-                // StorageViewLen can resolve through it. The "value" of a
-                // view node is the buffer name — uses outside of
-                // Index/Len (rare) get the binding directly.
+                // Storage view: a runtime `{offset, len}` handle into a backing
+                // buffer, reified as a `vec2<u32>` value (`.x` = offset, `.y` =
+                // len). The backing buffer is static — recovered from the value
+                // type's region at the consumer (`view_buffer_name`) — so it's
+                // NOT part of the value. Workgroup views are the one exception:
+                // their `_wg_<id>` name isn't in any type, so record it.
                 crate::op::OpTag::StorageView(src) => {
                     let offset = operands[0];
                     let len = operands[1];
-                    let buffer_name = match src {
-                        crate::op::PureViewSource::Storage(br) => self.storage_name(br.set, br.binding)?,
-                        crate::op::PureViewSource::Inherited => {
-                            let parent = operands[2].as_ssa().ok_or_else(|| {
-                                crate::err_wgsl_at!(
-                                    self.blame_span(),
-                                    "StorageView Inherited parent must be SSA"
-                                )
-                            })?;
-                            // Inherit the parent view's underlying binding
-                            // name (offset/len come fresh from this Node).
-                            self.view_handles.get(&parent).map(|h| h.buffer_name.clone()).ok_or_else(
-                                || {
-                                    crate::err_wgsl_at!(
-                                        self.blame_span(),
-                                        "Inherited view's parent has no handle"
-                                    )
-                                },
-                            )?
-                        }
-                        // Module-scope `var<workgroup> _wg_<id>` declared in
-                        // `lower_program`'s header pre-scan; index it like any
-                        // other view via the ViewHandle below.
-                        crate::op::PureViewSource::Workgroup { id, .. } => {
-                            format!("_wg_{}", id)
-                        }
-                    };
-                    let offset_expr = self.get_value(offset)?;
-                    let len_expr = self.get_value(len)?;
                     let result_id = inst.result.ok_or_else(|| {
                         crate::err_wgsl_at!(self.blame_span(), "StorageView must have a result")
                     })?;
-                    self.view_handles.insert(
-                        result_id,
-                        ViewHandle {
-                            buffer_name: buffer_name.clone(),
-                            offset_expr,
-                            len_expr,
-                        },
-                    );
-                    // Return the buffer name itself. Downstream uses resolve
-                    // through view_handles for offset/len.
-                    Ok(buffer_name)
+                    if let crate::op::PureViewSource::Workgroup { id, .. } = src {
+                        self.workgroup_view_name.insert(result_id, format!("_wg_{}", id));
+                    }
+                    let offset_expr = self.get_value(offset)?;
+                    let len_expr = self.get_value(len)?;
+                    Ok(format!("vec2<u32>(u32({}), u32({}))", offset_expr, len_expr))
                 }
 
                 crate::op::OpTag::StorageViewLen => {
+                    // Length is the `.y` of the view's `vec2<u32>` value.
                     let view = operands[0];
-                    let view_id = view.as_ssa().ok_or_else(|| {
-                        crate::err_wgsl_at!(self.blame_span(), "StorageViewLen view must be SSA")
-                    })?;
-                    let handle = self.view_handles.get(&view_id).cloned().ok_or_else(|| {
-                        crate::err_wgsl_at!(
-                            self.blame_span(),
-                            "StorageViewLen references view without a known handle"
-                        )
-                    })?;
-                    Ok(handle.len_expr)
+                    let view_val = self.get_value(view)?;
+                    Ok(format!("({}).y", view_val))
                 }
 
                 crate::op::OpTag::ViewIndex | crate::op::OpTag::OutputSlot { .. } => {
