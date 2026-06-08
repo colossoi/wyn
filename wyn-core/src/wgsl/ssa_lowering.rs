@@ -1539,6 +1539,25 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
     /// Resolve a storage binding (set, binding) to its module-scope name.
     /// Uses the synthesized `_buf_{set}_{binding}` naming used for
     /// compiler-introduced compute-entry bindings.
+    /// The WGSL buffer identifier a view value reads. A storage view's
+    /// descriptor is the concrete `Region(set, binding)` in its type, so the
+    /// name comes from there — authoritative regardless of how the view was
+    /// derived (slice, block param, call). A workgroup view's type is
+    /// `NoRegion`; its `_wg_<id>` name isn't in any type, so it is recovered
+    /// from the `ViewHandle` set when the view was created.
+    fn view_buffer_name(&self, view_ssa: ValueId) -> Result<String> {
+        match crate::types::array_view_region(self.body.get_value_type(view_ssa)) {
+            Some(br) => self.storage_name(br.set, br.binding),
+            None => self.view_handles.get(&view_ssa).map(|h| h.buffer_name.clone()).ok_or_else(|| {
+                crate::err_wgsl_at!(
+                    self.blame_span(),
+                    "view {:?} has neither a concrete buffer region nor a workgroup handle",
+                    view_ssa
+                )
+            }),
+        }
+    }
+
     fn storage_name(&self, set: u32, binding: u32) -> Result<String> {
         let br = BindingRef::new(set, binding);
         for entry in &self.ctx.program.entry_points {
@@ -1704,18 +1723,21 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                     "ViewIndex: view operand must be an SSA value"
                                 )
                             })?;
-                            let handle = self.view_handles.get(&view_id).ok_or_else(|| {
-                                crate::err_wgsl_at!(
-                                    self.blame_span(),
-                                    "ViewIndex: view {:?} not registered in view_handles",
-                                    view_id
-                                )
-                            })?;
+                            let buffer_name = self.view_buffer_name(view_id)?;
+                            let offset_expr = self
+                                .view_handles
+                                .get(&view_id)
+                                .ok_or_else(|| {
+                                    crate::err_wgsl_at!(
+                                        self.blame_span(),
+                                        "ViewIndex: view {:?} not registered in view_handles",
+                                        view_id
+                                    )
+                                })?
+                                .offset_expr
+                                .clone();
                             let idx = self.get_value(*index)?;
-                            let expr = format!(
-                                "{}[(i32({})) + (i32({}))]",
-                                handle.buffer_name, handle.offset_expr, idx
-                            );
+                            let expr = format!("{}[(i32({})) + (i32({}))]", buffer_name, offset_expr, idx);
                             self.place_targets.insert(*result, expr);
                             continue;
                         }
@@ -2405,6 +2427,10 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         // Source is a view iff we've tracked a ViewHandle
                         // for its SSA id.
                         if let Some(handle) = self.view_handles.get(&arr_id).cloned() {
+                            // The source buffer comes from the view's type region
+                            // (storage) or its handle (workgroup) — authoritative
+                            // regardless of how the source view was derived.
+                            let buffer_name = self.view_buffer_name(arr_id)?;
                             if result_is_composite {
                                 // View → Composite: materialize as
                                 // `array<T,N>(buf[off+s], buf[off+s+1], ...)`.
@@ -2423,10 +2449,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                 let ty_str = self.ctx.type_emitter.type_to_wgsl(result_ty_ref)?;
                                 let elems: Vec<String> = (start..end)
                                     .map(|i| {
-                                        format!(
-                                            "{}[(i32({}) + {}i)]",
-                                            handle.buffer_name, handle.offset_expr, i
-                                        )
+                                        format!("{}[(i32({}) + {}i)]", buffer_name, handle.offset_expr, i)
                                     })
                                     .collect();
                                 return Ok(format!("{}({})", ty_str, elems.join(", ")));
@@ -2448,12 +2471,12 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                 self.view_handles.insert(
                                     result_id,
                                     ViewHandle {
-                                        buffer_name: handle.buffer_name.clone(),
+                                        buffer_name: buffer_name.clone(),
                                         offset_expr: new_offset,
                                         len_expr: new_len,
                                     },
                                 );
-                                return Ok(handle.buffer_name);
+                                return Ok(buffer_name);
                             }
                         }
                         // Composite → Composite: `array<T,N>(arr[s], arr[s+1], ...)`.
