@@ -36,7 +36,8 @@ fn compile_to_tlc(source: &str) -> Program {
         .fold_ast_constants()
         .type_check(&mut module_manager)
         .expect("type_check");
-    let tlc = type_checked.to_tlc(&module_manager, false).partial_eval().normalize_soacs();
+    let tlc =
+        type_checked.to_tlc(&module_manager, false).pin_entry_regions().partial_eval().normalize_soacs();
     tlc.0.tlc
 }
 
@@ -533,7 +534,8 @@ fn has_use_after_move(source: &str) -> bool {
         .fold_ast_constants()
         .type_check(&mut module_manager)
         .expect("type_check");
-    let tlc = type_checked.to_tlc(&module_manager, false).partial_eval().normalize_soacs();
+    let tlc =
+        type_checked.to_tlc(&module_manager, false).pin_entry_regions().partial_eval().normalize_soacs();
     super::check(&tlc.0.tlc).is_err()
 }
 

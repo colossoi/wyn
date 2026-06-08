@@ -65,6 +65,7 @@ passes:
 | Stage | Module | Description |
 |-------|--------|-------------|
 | **TlcTransformed** | `tlc` (`TypeChecked::to_tlc`) | AST converted to minimal typed lambda calculus |
+| **TlcRegionsPinned** | `tlc::pin_entry_regions` | Each storage entry-param's concrete `Region(set, binding)` is substituted into its type, so a view's buffer is a statically-known type property that flows by unification. A distinct typestate, so the rest of the pipeline can't run without it (see View Buffer Provenance below) |
 | **TlcPartialEvaled** | `tlc::partial_eval` | Constant folding and algebraic simplifications |
 | **TlcSoaNormalized** | `tlc::soa` | SoA transform (`[n](A,B)` → `([n]A, [n]B)`) + Map+Zip flattening + standalone Zip elimination |
 | **TlcFused** | `tlc::fusion` | SOAC fusion: map-map, interprocedural producer-consumer |
@@ -72,8 +73,7 @@ passes:
 | **TlcOutputsNormalized** | `tlc::normalize_outputs` | Rewrites each compute entry's tail into a chain of explicit per-slot output writes. Single-output and multi-output entries share one structural shape; the entry's `def.ty` is kept in sync with its rewritten body |
 | **TlcGathersLifted** | `tlc::lift_gathers` | Materializes randomly-indexed computed arrays into storage buffers by splitting the producer into its own pre-pass compute entry and rewriting indexed reads in the consumer to load from that buffer |
 | **TlcDefunctionalized** | `tlc::closure_convert` → `tlc::hof_specialize` → `tlc::closure_calls_lower` | Three sequential passes: lambdas lifted to top-level defs, higher-order functions specialized away, captures threaded into call sites. Verifier-checked invariants guard each phase boundary (see Defunctionalization below) |
-| **TlcMonomorphized** | `tlc::specialize`, `tlc::monomorphize` | Polymorphic intrinsics specialized; user functions monomorphized |
-| **TlcBufferSpecialized** | `tlc::buffer_specialize` | Storage buffer parameter specialization |
+| **TlcMonomorphized** | `tlc::specialize`, `tlc::monomorphize` | Polymorphic intrinsics specialized; user functions monomorphized — including over a view's **region**, so a function called on two buffers yields two monomorphs (this subsumes the former `buffer_specialize` pass) |
 | **TlcGeneratedLambdasFolded** | `tlc::inline` | Fold compiler-generated lambda defs back at call sites + DCE |
 | **TlcSmallInlined** | `tlc::inline` | Inline small user functions and constants |
 | **TlcParallelized** | `tlc::parallelize` | Per-entry SOAC parallelization analysis: pick strategy + workgroup + dispatch shape, reserve intermediate bindings, build the host pipeline descriptor, and emit a declarative parallelization plan per entry for EGIR to consume. Kernel lowering happens EGIR-side |

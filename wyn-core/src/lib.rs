@@ -567,13 +567,28 @@ impl std::ops::Deref for TlcTransformed {
 impl TlcTransformed {
     /// Pin each compute entry's storage-param buffer region into its type:
     /// substitute the param's region variable → `Region(set, binding)` so a
-    /// view's descriptor is a statically-known property of its type. Runs
-    /// first; every downstream view inherits its region by unification.
-    pub fn pin_entry_regions(mut self) -> TlcTransformed {
-        tlc::pin_entry_regions::run(&mut self.0.tlc);
-        self
+    /// view's descriptor is a statically-known property of its type, and every
+    /// downstream view inherits its region by unification. This is the first
+    /// TLC pass; the resulting `TlcRegionsPinned` typestate is what `partial_eval`
+    /// consumes, so the rest of the pipeline cannot run without it.
+    pub fn pin_entry_regions(self) -> TlcRegionsPinned {
+        let mut inner = self.0;
+        tlc::pin_entry_regions::run(&mut inner.tlc);
+        TlcRegionsPinned(inner)
     }
+}
 
+/// TLC after entry-param buffer regions are pinned into their types.
+pub struct TlcRegionsPinned(pub TlcEarlyInner);
+
+impl std::ops::Deref for TlcRegionsPinned {
+    type Target = TlcEarlyInner;
+    fn deref(&self) -> &TlcEarlyInner {
+        &self.0
+    }
+}
+
+impl TlcRegionsPinned {
     /// Constant folding and algebraic simplifications.
     pub fn partial_eval(self) -> TlcPartialEvaled {
         let mut inner = self.0;

@@ -35,7 +35,7 @@ fn compile_to_fused_tlc(input: &str) -> crate::tlc::Program {
         .fold_ast_constants()
         .type_check(&mut module_manager)
         .expect("type_check");
-    let tlc = type_checked.to_tlc(&module_manager, false);
+    let tlc = type_checked.to_tlc(&module_manager, false).pin_entry_regions();
     let fused =
         tlc.partial_eval().normalize_soacs().fuse_maps().apply_ownership().expect("apply_ownership");
     fused.0.tlc
