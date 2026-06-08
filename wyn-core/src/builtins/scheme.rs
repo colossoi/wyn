@@ -56,8 +56,8 @@ fn mat_type(elem: Type, n: Type, m: Type) -> Type {
     Type::Constructed(TypeName::Mat, vec![elem, n, m])
 }
 
-fn array_type(elem: Type, addrspace: Type, size: Type) -> Type {
-    Type::Constructed(TypeName::Array, vec![elem, addrspace, size])
+fn array_type(elem: Type, addrspace: Type, size: Type, region: Type) -> Type {
+    Type::Constructed(TypeName::Array, vec![elem, addrspace, size, region])
 }
 
 fn arrow_chain(params: &[Type], ret: Type) -> Type {
@@ -244,8 +244,13 @@ pub fn vec_x_mat(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
 
 /// `∀a n s. Array[a, s, n] -> i32` — array length.
 pub fn array_to_i32(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
-    let (a, n, s) = (ctx.new_variable(), ctx.new_variable(), ctx.new_variable());
-    quantify(arrow_chain(&[array_type(a, s, n)], i32_ty()))
+    let (a, n, s, r) = (
+        ctx.new_variable(),
+        ctx.new_variable(),
+        ctx.new_variable(),
+        ctx.new_variable(),
+    );
+    quantify(arrow_chain(&[array_type(a, s, n, r)], i32_ty()))
 }
 
 /// `∀a. () -> a` — uninit/poison value.
@@ -256,31 +261,47 @@ pub fn unit_to_t(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
 
 /// `∀a n s. Array[a, s, n] -> i32 -> a -> Array[a, s, n]` — array_with.
 pub fn array_index_value_to_array(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
-    let (a, n, s) = (ctx.new_variable(), ctx.new_variable(), ctx.new_variable());
-    let arr = array_type(a.clone(), s, n);
+    let (a, n, s, r) = (
+        ctx.new_variable(),
+        ctx.new_variable(),
+        ctx.new_variable(),
+        ctx.new_variable(),
+    );
+    let arr = array_type(a.clone(), s, n, r);
     quantify(arrow_chain(&[arr.clone(), i32_ty(), a], arr))
 }
 
 /// `∀a n s. i32 -> a -> Array[a, s, n]` — replicate.
 pub fn replicate_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
-    let (a, n, s) = (ctx.new_variable(), ctx.new_variable(), ctx.new_variable());
-    quantify(arrow_chain(&[i32_ty(), a.clone()], array_type(a, s, n)))
+    let (a, n, s, r) = (
+        ctx.new_variable(),
+        ctx.new_variable(),
+        ctx.new_variable(),
+        ctx.new_variable(),
+    );
+    quantify(arrow_chain(&[i32_ty(), a.clone()], array_type(a, s, n, r)))
 }
 
 /// `∀a n s. (a -> a -> a) -> a -> Array[a, s, n] -> a` — reduce.
 pub fn reduce_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
-    let (a, n, s) = (ctx.new_variable(), ctx.new_variable(), ctx.new_variable());
+    let (a, n, s, r) = (
+        ctx.new_variable(),
+        ctx.new_variable(),
+        ctx.new_variable(),
+        ctx.new_variable(),
+    );
     let op = arrow_chain(&[a.clone(), a.clone()], a.clone());
-    let arr = array_type(a.clone(), s, n);
+    let arr = array_type(a.clone(), s, n, r);
     quantify(arrow_chain(&[op, a.clone(), arr], a))
 }
 
 /// `∀a n s. (a -> a -> a) -> a -> Array[a, s, n] -> Array[a, s, n]` — scan.
 pub fn scan_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     let (a, n, s) = (ctx.new_variable(), ctx.new_variable(), ctx.new_variable());
+    let (r_in, r_out) = (ctx.new_variable(), ctx.new_variable());
     let op = arrow_chain(&[a.clone(), a.clone()], a.clone());
-    let arr_in = array_type(a.clone(), s.clone(), n.clone());
-    let arr_out = array_type(a.clone(), s, n);
+    let arr_in = array_type(a.clone(), s.clone(), n.clone(), r_in);
+    let arr_out = array_type(a.clone(), s, n, r_out);
     quantify(arrow_chain(&[op, a, arr_in], arr_out))
 }
 
@@ -292,10 +313,11 @@ pub fn map_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
         ctx.new_variable(),
         ctx.new_variable(),
     );
+    let (r_in, r_out) = (ctx.new_variable(), ctx.new_variable());
     let f = arrow_chain(&[a.clone()], b.clone());
     quantify(arrow_chain(
-        &[f, array_type(a, s.clone(), n.clone())],
-        array_type(b, s, n),
+        &[f, array_type(a, s.clone(), n.clone(), r_in)],
+        array_type(b, s, n, r_out),
     ))
 }
 
@@ -310,9 +332,10 @@ pub fn map_into_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
         ctx.new_variable(),
         ctx.new_variable(),
     );
+    let (r1, r2) = (ctx.new_variable(), ctx.new_variable());
     let f = arrow_chain(&[a.clone()], b.clone());
     quantify(arrow_chain(
-        &[f, array_type(a, s1, n), array_type(b, s2, m), i32_ty()],
+        &[f, array_type(a, s1, n, r1), array_type(b, s2, m, r2), i32_ty()],
         unit_ty(),
     ))
 }

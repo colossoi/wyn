@@ -33,6 +33,7 @@ fn view_i32_ty() -> Type<TypeName> {
             i32_ty(),
             Type::Variable(999),
             Type::Constructed(TypeName::ArrayVariantView, vec![]),
+            crate::types::no_region(),
         ],
     )
 }

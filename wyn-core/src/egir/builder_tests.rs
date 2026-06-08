@@ -15,14 +15,15 @@ fn f32_ty() -> Type<TypeName> {
 }
 
 fn unsized_arr_view_ty(elem: Type<TypeName>) -> Type<TypeName> {
-    // `Array[elem, ?size, ArrayVariantView]` — the storage-view shape
+    // `Array[elem, ArrayVariantView, ?size, NoRegion]` — the storage-view shape
     // a runtime-sized partials buffer takes inside the EGraph.
     Type::Constructed(
         TypeName::Array,
         vec![
             elem,
-            Type::Variable(0),
             Type::Constructed(TypeName::ArrayVariantView, vec![]),
+            Type::Variable(0),
+            crate::types::no_region(),
         ],
     )
 }

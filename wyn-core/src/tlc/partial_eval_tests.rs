@@ -822,6 +822,7 @@ fn let_bound_array_substituted_through_soac_input() {
             i32_ty.clone(),
             Type::Constructed(TypeName::Size(3), vec![]),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
+            crate::types::no_region(),
         ],
     );
 

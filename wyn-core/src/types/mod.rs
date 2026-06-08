@@ -172,16 +172,20 @@ pub enum TypeName {
     /// Signed integer types: i8, i16, i32, i64
     Int(usize),
     /// Unified array type constructor.
-    /// Type args: `[elem, variant, dim_0, dim_1, …, dim_{rank-1}]`
+    /// Type args: `[elem, variant, dim_0, dim_1, …, dim_{rank-1}, region]`
     /// - `elem`: element type (f32, etc.)
     /// - `variant`: ArrayVariantView / Composite / Virtual / Bounded,
     ///   AddressPlaceholder, or a type variable
     /// - `dim_i`: per-dimension size term — `Size(n)` / `SizeVar(name)` /
     ///   `SizePlaceholder` / `Skolem` / `Variable`
+    /// - `region`: buffer region — `Region(set,binding)` (a storage view),
+    ///   `NoRegion` (a non-view array), `AddressPlaceholder` (pre-resolution),
+    ///   or a type variable (a region-polymorphic view function). The region
+    ///   makes a view's buffer binding a statically-known property of its type.
     ///
-    /// Rank is implicit: `args.len() - 2`. All arrays are rank-1 today;
-    /// the variadic dim suffix is the entry point for multi-dim
-    /// representations in a future effort.
+    /// Rank is implicit: `args.len() - 3` (region is the trailing arg). All
+    /// arrays are rank-1 today; the variadic dim suffix is the entry point for
+    /// multi-dim representations in a future effort.
     Array,
     /// Size placeholder (for []t syntax where size is inferred). Replaced with type variable before type checking.
     SizePlaceholder,
@@ -255,6 +259,16 @@ pub enum TypeName {
     /// Array variant placeholder. Replaced with type variable before type checking.
     /// Entry point params are constrained to Storage, others remain polymorphic.
     AddressPlaceholder,
+    /// Buffer region `(set, binding)` carried inside a `View` variant at the
+    /// EGIR/SSA level: `Array[elem, ArrayVariantView[Region(set,binding)], dim]`.
+    /// Introduced at EGIR lowering (where the binding is known), so the backend
+    /// reads a view's descriptor off its type instead of a per-value side-map.
+    /// Never appears in source/TLC types — views are nullary (`View[]`) there.
+    Region(crate::BindingRef),
+    /// The region slot's value for a non-view array (composite/virtual/bounded):
+    /// "this array is not buffer-backed, so it has no descriptor region." A
+    /// concrete tag (not a variable) so non-view arrays carry no free type var.
+    NoRegion,
 
     // --- Opaque GPU resources ---
     /// A 2D, float-sampled image. Nullary (no type args) in v1: the
@@ -340,6 +354,8 @@ impl std::fmt::Display for TypeName {
             TypeName::ArrayVariantBounded => write!(f, "bounded"),
             TypeName::ArrayVariantVirtual => write!(f, "virtual"),
             TypeName::AddressPlaceholder => write!(f, "?addrspace"),
+            TypeName::Region(b) => write!(f, "region(set={}, binding={})", b.set, b.binding),
+            TypeName::NoRegion => write!(f, "no_region"),
             TypeName::Texture2D => write!(f, "texture2d"),
             TypeName::Sampler => write!(f, "sampler"),
             TypeName::StorageTexture => write!(f, "storage_image"),
@@ -404,6 +420,8 @@ impl polytype::Name for TypeName {
             TypeName::ArrayVariantVirtual => "virtual".to_string(),
             TypeName::ArrayVariantBounded => "bounded".to_string(),
             TypeName::AddressPlaceholder => "?variant".to_string(),
+            TypeName::Region(b) => format!("region_s{}_b{}", b.set, b.binding),
+            TypeName::NoRegion => "no_region".to_string(),
             TypeName::Texture2D => "texture2d".to_string(),
             TypeName::Sampler => "sampler".to_string(),
             TypeName::StorageTexture => "storage_image".to_string(),
@@ -500,6 +518,11 @@ pub trait TypeExt {
     /// Size of the i-th dimension (`&args[2 + i]`), or `None` if not
     /// an Array or if `i >= rank`.
     fn array_dim(&self, i: usize) -> Option<&Type>;
+
+    /// The array's buffer-region type (the trailing arg), or `None` if not an
+    /// Array. For a View this is `Region(set,binding)` (or a region variable);
+    /// for non-view arrays it is `NoRegion`.
+    fn array_region(&self) -> Option<&Type>;
 }
 
 impl TypeExt for Type {
@@ -575,11 +598,7 @@ impl TypeExt for Type {
                 args.first()
             }
             Type::Constructed(TypeName::Array, args) => {
-                debug_assert!(
-                    args.len() >= 1 && args.len() <= 3,
-                    "Array must have 1-3 args [elem, variant, size], got {:?}",
-                    args
-                );
+                debug_assert_array_args(args);
                 args.first()
             }
             _ => None,
@@ -688,25 +707,7 @@ impl TypeExt for Type {
 
     fn array_size(&self) -> Option<&Type> {
         if let Type::Constructed(TypeName::Array, args) = self {
-            debug_assert!(
-                args.len() >= 3,
-                "Array must have at least 3 args [elem, variant, dim_0, ...], got {:?}",
-                args
-            );
-            debug_assert!(
-                matches!(
-                    &args[2],
-                    Type::Constructed(
-                        TypeName::Size(_)
-                            | TypeName::SizeVar(_)
-                            | TypeName::SizePlaceholder
-                            | TypeName::Skolem(_),
-                        _
-                    ) | Type::Variable(_)
-                ),
-                "Array args[2] should be Size/SizeVar/SizePlaceholder/Skolem/Variable, got {:?}",
-                args[2]
-            );
+            debug_assert_array_args(args);
             return Some(&args[2]);
         }
         None
@@ -714,26 +715,7 @@ impl TypeExt for Type {
 
     fn array_variant(&self) -> Option<&Type> {
         if let Type::Constructed(TypeName::Array, args) = self {
-            debug_assert!(
-                args.len() >= 2,
-                "Array must have at least 2 args [elem, variant, ...], got {:?}",
-                args
-            );
-            debug_assert!(
-                matches!(
-                    &args[1],
-                    Type::Constructed(
-                        TypeName::ArrayVariantComposite
-                            | TypeName::ArrayVariantView
-                            | TypeName::ArrayVariantVirtual
-                            | TypeName::ArrayVariantBounded
-                            | TypeName::AddressPlaceholder,
-                        _
-                    ) | Type::Variable(_)
-                ),
-                "Array args[1] should be a variant/placeholder/variable, got {:?}",
-                args[1]
-            );
+            debug_assert_array_args(args);
             return Some(&args[1]);
         }
         None
@@ -741,30 +723,32 @@ impl TypeExt for Type {
 
     fn array_rank(&self) -> Option<usize> {
         if let Type::Constructed(TypeName::Array, args) = self {
-            debug_assert!(
-                args.len() >= 3,
-                "Array must have at least 3 args [elem, variant, dim_0, ...], got {:?}",
-                args
-            );
-            return Some(args.len() - 2);
+            debug_assert_array_args(args);
+            // [elem, variant, dim_0, …, dim_{rank-1}, region] → rank = len - 3.
+            return Some(args.len() - 3);
         }
         None
     }
 
     fn array_dims(&self) -> Option<&[Type]> {
         if let Type::Constructed(TypeName::Array, args) = self {
-            debug_assert!(
-                args.len() >= 3,
-                "Array must have at least 3 args [elem, variant, dim_0, ...], got {:?}",
-                args
-            );
-            return Some(&args[2..]);
+            debug_assert_array_args(args);
+            // Dims are the variadic middle; the trailing arg is the region.
+            return Some(&args[2..args.len() - 1]);
         }
         None
     }
 
     fn array_dim(&self, i: usize) -> Option<&Type> {
         self.array_dims().and_then(|dims| dims.get(i))
+    }
+
+    fn array_region(&self) -> Option<&Type> {
+        if let Type::Constructed(TypeName::Array, args) = self {
+            debug_assert_array_args(args);
+            return args.last();
+        }
+        None
     }
 }
 
@@ -889,16 +873,66 @@ pub fn matrix_type_constructors() -> HashMap<String, Type> {
         .collect()
 }
 
-/// Create a sized array: `Array[elem, Composite, Size(n)]`. Defaults to
-/// Composite variant for local/value arrays.
+/// A concrete buffer-region tag `Region(set, binding)` for a View's region slot.
+pub fn region_tag(binding: crate::BindingRef) -> Type {
+    Type::Constructed(TypeName::Region(binding), vec![])
+}
+
+/// The `NoRegion` tag — the region slot of a non-view array.
+pub fn no_region() -> Type {
+    Type::Constructed(TypeName::NoRegion, vec![])
+}
+
+/// If `ty` is an array, return a copy with its region slot (the last arg)
+/// replaced by `region`; otherwise return `ty` unchanged. Used where the
+/// region authority is the buffer binding (the view-interning helpers): the
+/// binding stamps the region into an array-typed view. A `StorageView`'s node
+/// type is the *element* type in output-slot paths and the *array* type in
+/// input-view paths; only the latter carries a region (and is what flows
+/// through block params / slices), so a non-array view type is left as-is —
+/// its binding rides the op tag locally at the point of creation.
+pub fn array_with_region(ty: &Type, region: Type) -> Type {
+    match ty {
+        Type::Constructed(TypeName::Array, args) => {
+            debug_assert_array_args(args);
+            let mut args = args.clone();
+            *args.last_mut().expect("array has >= 4 args") = region;
+            Type::Constructed(TypeName::Array, args)
+        }
+        _ => ty.clone(),
+    }
+}
+
+/// Read the concrete buffer region off an array type's region slot, if it has
+/// a concrete `Region` (not `NoRegion` and not a variable).
+pub fn array_view_region(ty: &Type) -> Option<crate::BindingRef> {
+    match ty.array_region()? {
+        Type::Constructed(TypeName::Region(b), _) => Some(*b),
+        _ => None,
+    }
+}
+
+/// Build a rank-1 `Array[elem, variant, size, region]`, validating the kind
+/// schema in debug builds so a mis-ordered/short construction fails loudly
+/// instead of silently producing a type that won't unify.
+pub fn make_array1(elem: Type, variant: Type, size: Type, region: Type) -> Type {
+    let args = vec![elem, variant, size, region];
+    debug_assert!(
+        validate_type_args(&TypeName::Array, &args).is_ok(),
+        "malformed Array construction: {}",
+        validate_type_args(&TypeName::Array, &args).unwrap_err()
+    );
+    Type::Constructed(TypeName::Array, args)
+}
+
+/// Create a sized array: `Array[elem, Composite, Size(n), NoRegion]`. Defaults
+/// to Composite variant for local/value arrays (not buffer-backed).
 pub fn sized_array(size: usize, elem_type: Type) -> Type {
-    Type::Constructed(
-        TypeName::Array,
-        vec![
-            elem_type,
-            Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
-            Type::Constructed(TypeName::Size(size), vec![]),
-        ],
+    make_array1(
+        elem_type,
+        Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
+        Type::Constructed(TypeName::Size(size), vec![]),
+        no_region(),
     )
 }
 
@@ -906,13 +940,11 @@ pub fn sized_array(size: usize, elem_type: Type) -> Type {
 /// AddressPlaceholder, Size(n)]`. Used for parser tests where the
 /// address space hasn't been resolved yet.
 pub fn sized_array_placeholder(size: usize, elem_type: Type) -> Type {
-    Type::Constructed(
-        TypeName::Array,
-        vec![
-            elem_type,
-            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
-            Type::Constructed(TypeName::Size(size), vec![]),
-        ],
+    make_array1(
+        elem_type,
+        Type::Constructed(TypeName::AddressPlaceholder, vec![]),
+        Type::Constructed(TypeName::Size(size), vec![]),
+        Type::Constructed(TypeName::AddressPlaceholder, vec![]),
     )
 }
 
@@ -1081,6 +1113,11 @@ pub fn is_array_variant_bounded(ty: &Type) -> bool {
     matches!(ty, Type::Constructed(TypeName::ArrayVariantBounded, _))
 }
 
+pub mod schema_validation;
+pub use schema_validation::{
+    ArgKind, debug_assert_array_args, validate_array_args, validate_type_args, validate_type_schema,
+};
+
 /// Get the array variant from an array type (returns the variant type argument)
 pub fn get_array_variant(ty: &Type) -> Option<&TypeName> {
     match ty.array_variant()? {
@@ -1124,7 +1161,12 @@ pub fn debug_assert_top_level_type(ty: &Type, context: &str) {
     match ty {
         Type::Constructed(name, _) => match name {
             // Address space markers - only valid inside Array[elem, variant, dim_0, ...]
-            TypeName::ArrayVariantView | TypeName::ArrayVariantComposite | TypeName::AddressPlaceholder => {
+            // (Region lives one level deeper, inside the View variant's args.)
+            TypeName::ArrayVariantView
+            | TypeName::ArrayVariantComposite
+            | TypeName::Region(_)
+            | TypeName::NoRegion
+            | TypeName::AddressPlaceholder => {
                 panic!(
                     "BUG: Address space type {:?} used as top-level type in {}. \
                      Address space markers should only appear inside Array[elem, variant, dim_0, ...].",
@@ -1178,14 +1220,12 @@ pub fn pointer_addrspace(ty: &Type) -> Option<&Type> {
 // implicit (args.len() - 2); all arrays are rank-1 today.
 
 /// Create an unsized array (slice): `Array[elem, variant, SizePlaceholder]`
-pub fn unsized_array(elem: Type, variant: Type) -> Type {
-    Type::Constructed(
-        TypeName::Array,
-        vec![
-            elem,
-            variant,
-            Type::Constructed(TypeName::SizePlaceholder, vec![]),
-        ],
+pub fn unsized_array(elem: Type, variant: Type, region: Type) -> Type {
+    make_array1(
+        elem,
+        variant,
+        Type::Constructed(TypeName::SizePlaceholder, vec![]),
+        region,
     )
 }
 
@@ -1352,6 +1392,7 @@ mod tests {
                 f32_ty(),
                 Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
                 Type::Constructed(TypeName::Size(size), vec![]),
+                no_region(),
             ],
         )
     }

@@ -40,6 +40,7 @@ fn arr_i32_ty() -> Type<TypeName> {
             i32_ty(),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Constructed(TypeName::Size(8), vec![]),
+            crate::types::no_region(),
         ],
     )
 }

@@ -445,6 +445,8 @@ impl Constructor {
                     }
                     TypeName::ArrayVariantComposite
                     | TypeName::ArrayVariantView
+                    | TypeName::Region(_)
+                    | TypeName::NoRegion
                     | TypeName::PointerFunction
                     | TypeName::PointerInput
                     | TypeName::PointerOutput
@@ -2425,6 +2427,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                                 elem.clone(),
                                 PolyType::Constructed(TypeName::ArrayVariantComposite, vec![]),
                                 base_ty.array_size().expect("Array has size").clone(),
+                                crate::types::no_region(),
                             ],
                         );
                         self.lower_composite_index(buf_id, index_id, result_ty, &composite_ty)

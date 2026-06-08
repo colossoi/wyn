@@ -1139,6 +1139,8 @@ impl<'a> Parser<'a> {
                                 base,
                                 Type::Constructed(TypeName::AddressPlaceholder, vec![]),
                                 Type::Constructed(TypeName::SizePlaceholder, vec![]),
+                                // region placeholder, resolved to a fresh var by resolve_placeholders.
+                                Type::Constructed(TypeName::AddressPlaceholder, vec![]),
                             ],
                         );
                     } else if let Some(Token::Identifier(name)) = self.peek() {
@@ -1153,6 +1155,8 @@ impl<'a> Parser<'a> {
                                 base,
                                 Type::Constructed(TypeName::AddressPlaceholder, vec![]),
                                 types::size_var(size_var),
+                                // region placeholder, resolved to a fresh var by resolve_placeholders.
+                                Type::Constructed(TypeName::AddressPlaceholder, vec![]),
                             ],
                         );
                     } else if let Some(Token::IntLiteral(n)) = self.peek() {
@@ -1167,6 +1171,8 @@ impl<'a> Parser<'a> {
                                 base,
                                 Type::Constructed(TypeName::AddressPlaceholder, vec![]),
                                 Type::Constructed(TypeName::Size(size), vec![]),
+                                // region placeholder, resolved to a fresh var by resolve_placeholders.
+                                Type::Constructed(TypeName::AddressPlaceholder, vec![]),
                             ],
                         );
                     } else {
@@ -1244,6 +1250,8 @@ impl<'a> Parser<'a> {
                         elem_type,
                         Type::Constructed(TypeName::AddressPlaceholder, vec![]),
                         Type::Constructed(TypeName::SizePlaceholder, vec![]),
+                        // region placeholder, resolved to a fresh var by resolve_placeholders.
+                        Type::Constructed(TypeName::AddressPlaceholder, vec![]),
                     ],
                 ));
             }
@@ -1261,6 +1269,8 @@ impl<'a> Parser<'a> {
                         elem_type,
                         Type::Constructed(TypeName::AddressPlaceholder, vec![]),
                         Type::Constructed(TypeName::Size(size), vec![]),
+                        // region placeholder, resolved to a fresh var by resolve_placeholders.
+                        Type::Constructed(TypeName::AddressPlaceholder, vec![]),
                     ],
                 ))
             } else if let Some(Token::Identifier(name)) = self.peek() {
@@ -1276,6 +1286,8 @@ impl<'a> Parser<'a> {
                         elem_type,
                         Type::Constructed(TypeName::AddressPlaceholder, vec![]),
                         types::size_var(size_var),
+                        // region placeholder, resolved to a fresh var by resolve_placeholders.
+                        Type::Constructed(TypeName::AddressPlaceholder, vec![]),
                     ],
                 ))
             } else {

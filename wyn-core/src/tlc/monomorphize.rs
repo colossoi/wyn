@@ -188,6 +188,8 @@ impl TypeKey {
                     TypeName::ArrayVariantView => "array_view".to_string(),
                     TypeName::ArrayVariantVirtual => "array_virtual".to_string(),
                     TypeName::ArrayVariantBounded => "array_bounded".to_string(),
+                    TypeName::Region(b) => format!("region_s{}_b{}", b.set, b.binding),
+                    TypeName::NoRegion => "no_region".to_string(),
                     TypeName::Texture2D => "texture2d".to_string(),
                     TypeName::Sampler => "sampler".to_string(),
                     TypeName::AddressPlaceholder => {
@@ -255,6 +257,19 @@ impl TypeKey {
                     }
                     s if s.starts_with("sizevar_") => TypeName::SizeVar(s[8..].to_string()),
                     s if s.starts_with("uservar_") => TypeName::UserVar(s[8..].to_string()),
+                    s if s.starts_with("region_s") => {
+                        let rest = &s["region_s".len()..];
+                        let (set_s, bind_s) = rest
+                            .split_once("_b")
+                            .unwrap_or_else(|| panic!("BUG: invalid mangled region name: {}", s));
+                        let set =
+                            set_s.parse().unwrap_or_else(|_| panic!("BUG: invalid region set in: {}", s));
+                        let binding = bind_s
+                            .parse()
+                            .unwrap_or_else(|_| panic!("BUG: invalid region binding in: {}", s));
+                        TypeName::Region(crate::BindingRef::new(set, binding))
+                    }
+                    "no_region" => TypeName::NoRegion,
                     s => TypeName::Named(s.to_string()),
                 };
                 Type::Constructed(type_name, type_args)
@@ -1130,6 +1145,8 @@ fn format_type_compact(ty: &Type<TypeName>) -> String {
             format!("{}_{}", name, args_str)
         }
         Type::Constructed(TypeName::ArrayVariantView, _) => "array_view".to_string(),
+        Type::Constructed(TypeName::Region(b), _) => format!("region_s{}_b{}", b.set, b.binding),
+        Type::Constructed(TypeName::NoRegion, _) => "no_region".to_string(),
         Type::Constructed(TypeName::ArrayVariantComposite, _) => "array_composite".to_string(),
         Type::Constructed(TypeName::ArrayVariantVirtual, _) => "array_virtual".to_string(),
         Type::Constructed(TypeName::ArrayVariantBounded, _) => "array_bounded".to_string(),

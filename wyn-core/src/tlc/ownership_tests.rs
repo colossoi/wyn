@@ -122,6 +122,7 @@ fn synth_program_with_alias_let() -> (Program, crate::SymbolId, crate::SymbolId)
             i32_ty.clone(),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Variable(0),
+            crate::types::no_region(),
         ],
     );
     let unique_arr_ty = Type::Constructed(TypeName::Unique, vec![arr_ty.clone()]);
@@ -1240,6 +1241,7 @@ fn synth_program_with_with_through_index() -> Program {
             i32_ty.clone(),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Variable(0),
+            crate::types::no_region(),
         ],
     );
     let outer_arr_ty = Type::Constructed(
@@ -1248,6 +1250,7 @@ fn synth_program_with_with_through_index() -> Program {
             inner_arr_ty.clone(),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Variable(0),
+            crate::types::no_region(),
         ],
     );
     let unique_outer_ty = Type::Constructed(TypeName::Unique, vec![outer_arr_ty.clone()]);
@@ -1441,6 +1444,7 @@ fn synth_program_with_populated_soac_captures() -> Program {
             i32_ty.clone(),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Variable(0),
+            crate::types::no_region(),
         ],
     );
     let unique_arr_ty = Type::Constructed(TypeName::Unique, vec![arr_ty.clone()]);
@@ -1534,6 +1538,7 @@ fn synth_program_with_populated_soac_captures() -> Program {
                 i32_ty.clone(),
                 Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
                 Type::Variable(0),
+                crate::types::no_region(),
             ],
         ),
         span: Span::dummy(),
@@ -1661,6 +1666,7 @@ fn soac_capture_term_is_analyzed_for_liveness() {
             i32_ty.clone(),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Variable(0),
+            crate::types::no_region(),
         ],
     );
 

@@ -32,11 +32,13 @@ fn default_free_vars_in_type(ty: &mut Type<TypeName>, bound: &[usize]) {
             *ty = Type::Constructed(TypeName::Int(32), vec![]);
         }
         Type::Variable(_) => {}
-        Type::Constructed(TypeName::Array, args) if args.len() >= 3 => {
-            // args = [elem, variant, dim_0, ...]
+        Type::Constructed(TypeName::Array, args) if args.len() >= 4 => {
+            // args = [elem, variant, dim_0, ..., region]
+            let last = args.len() - 1;
             default_free_vars_in_type(&mut args[0], bound);
             default_free_vars_in_array_variant(&mut args[1], bound);
-            for dim in &mut args[2..] {
+            default_free_vars_in_array_region(&mut args[last], bound);
+            for dim in &mut args[2..last] {
                 default_free_vars_in_array_size(dim, bound);
             }
         }
@@ -65,6 +67,17 @@ fn default_free_vars_in_array_variant(ty: &mut Type<TypeName>, bound: &[usize]) 
     if let Type::Variable(v) = ty {
         if !bound.contains(v) {
             *ty = Type::Constructed(TypeName::ArrayVariantComposite, vec![]);
+        }
+    }
+}
+
+/// Free variable in an Array region position → `NoRegion`. An unpinned region
+/// defaults to "no buffer" (the array isn't a storage view), matching the
+/// Composite-variant default chosen alongside it.
+fn default_free_vars_in_array_region(ty: &mut Type<TypeName>, bound: &[usize]) {
+    if let Type::Variable(v) = ty {
+        if !bound.contains(v) {
+            *ty = Type::Constructed(TypeName::NoRegion, vec![]);
         }
     }
 }
@@ -139,8 +152,8 @@ pub(super) fn default_term_for_type(tr: &mut Transformer<'_>, ty: &Type<TypeName
                 None => hole_fill_error(tr, span, ty, "vector size is not a literal"),
             }
         }
-        Type::Constructed(TypeName::Array, args) if args.len() == 3 => {
-            // Rank-1 Array[elem, variant, size]. Only Composite arrays
+        Type::Constructed(TypeName::Array, args) if args.len() == 4 => {
+            // Rank-1 Array[elem, variant, size, region]. Only Composite arrays
             // can be default-filled — View/Virtual need a buffer
             // binding or a range, which `--fill-holes` can't synthesize.
             let elem_ty = &args[0];

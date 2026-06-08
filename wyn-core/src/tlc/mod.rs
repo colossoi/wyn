@@ -2950,8 +2950,8 @@ impl<'a> Transformer<'a> {
                 // arrays with a constant size.
                 debug_assert_eq!(
                     args.len(),
-                    3,
-                    "Array sum payload must have [elem, variant, size] args"
+                    4,
+                    "Array sum payload must have [elem, variant, size, region] args"
                 );
                 let elem_ty = &args[0];
                 let n = match &args[2] {

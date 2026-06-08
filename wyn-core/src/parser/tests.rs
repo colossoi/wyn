@@ -175,6 +175,7 @@ fn test_parse_array_type() {
             crate::types::f32(),
             Type::Constructed(TypeName::AddressPlaceholder, vec![]),
             Type::Constructed(TypeName::Size(4), vec![]),
+            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
         ],
     );
     let outer = Type::Constructed(
@@ -183,6 +184,7 @@ fn test_parse_array_type() {
             inner,
             Type::Constructed(TypeName::AddressPlaceholder, vec![]),
             Type::Constructed(TypeName::Size(3), vec![]),
+            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
         ],
     );
     assert_eq!(decl.ty.as_ref(), Some(&outer));
@@ -198,6 +200,7 @@ fn test_parse_array_type_size_var_outer() {
             crate::types::f32(),
             Type::Constructed(TypeName::AddressPlaceholder, vec![]),
             Type::Constructed(TypeName::Size(4), vec![]),
+            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
         ],
     );
     let outer = Type::Constructed(
@@ -206,6 +209,7 @@ fn test_parse_array_type_size_var_outer() {
             inner,
             Type::Constructed(TypeName::AddressPlaceholder, vec![]),
             crate::types::size_var("n".to_string()),
+            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
         ],
     );
     assert_eq!(decl.ty.as_ref(), Some(&outer));
@@ -221,6 +225,7 @@ fn test_parse_array_type_size_var_inner() {
             crate::types::f32(),
             Type::Constructed(TypeName::AddressPlaceholder, vec![]),
             crate::types::size_var("n".to_string()),
+            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
         ],
     );
     let outer = Type::Constructed(
@@ -229,6 +234,7 @@ fn test_parse_array_type_size_var_inner() {
             inner,
             Type::Constructed(TypeName::AddressPlaceholder, vec![]),
             Type::Constructed(TypeName::Size(3), vec![]),
+            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
         ],
     );
     assert_eq!(decl.ty.as_ref(), Some(&outer));
@@ -244,6 +250,7 @@ fn test_parse_array_type_empty_brackets_outer() {
             crate::types::f32(),
             Type::Constructed(TypeName::AddressPlaceholder, vec![]),
             Type::Constructed(TypeName::Size(4), vec![]),
+            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
         ],
     );
     let outer = Type::Constructed(
@@ -252,6 +259,7 @@ fn test_parse_array_type_empty_brackets_outer() {
             inner,
             Type::Constructed(TypeName::AddressPlaceholder, vec![]),
             Type::Constructed(TypeName::SizePlaceholder, vec![]),
+            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
         ],
     );
     assert_eq!(decl.ty.as_ref(), Some(&outer));
@@ -267,6 +275,7 @@ fn test_parse_array_type_rank3() {
             crate::types::f32(),
             Type::Constructed(TypeName::AddressPlaceholder, vec![]),
             Type::Constructed(TypeName::Size(4), vec![]),
+            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
         ],
     );
     let middle = Type::Constructed(
@@ -275,6 +284,7 @@ fn test_parse_array_type_rank3() {
             inner,
             Type::Constructed(TypeName::AddressPlaceholder, vec![]),
             Type::Constructed(TypeName::Size(3), vec![]),
+            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
         ],
     );
     let outer = Type::Constructed(
@@ -283,6 +293,7 @@ fn test_parse_array_type_rank3() {
             middle,
             Type::Constructed(TypeName::AddressPlaceholder, vec![]),
             Type::Constructed(TypeName::Size(2), vec![]),
+            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
         ],
     );
     assert_eq!(decl.ty.as_ref(), Some(&outer));
@@ -298,6 +309,7 @@ fn test_parse_array_type_unique_nested() {
             crate::types::i32(),
             Type::Constructed(TypeName::AddressPlaceholder, vec![]),
             Type::Constructed(TypeName::Size(3), vec![]),
+            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
         ],
     );
     let outer = Type::Constructed(
@@ -306,6 +318,7 @@ fn test_parse_array_type_unique_nested() {
             inner,
             Type::Constructed(TypeName::AddressPlaceholder, vec![]),
             Type::Constructed(TypeName::Size(2), vec![]),
+            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
         ],
     );
     assert_eq!(decl.ty.as_ref(), Some(&crate::types::unique(outer)));
@@ -332,6 +345,7 @@ fn test_parse_entry_point_decl() {
                 crate::types::f32(),
                 Type::Constructed(TypeName::AddressPlaceholder, vec![]),
                 Type::Constructed(TypeName::Size(4), vec![]),
+                Type::Constructed(TypeName::AddressPlaceholder, vec![]),
             ],
         )
     );

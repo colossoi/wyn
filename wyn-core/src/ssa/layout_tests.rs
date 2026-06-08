@@ -86,6 +86,7 @@ fn vertex_format_rejects_aggregates() {
             scalar(TypeName::Float(32)),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Constructed(TypeName::Size(4), vec![]),
+            crate::types::no_region(),
         ],
     );
     assert_eq!(vertex_format(&arr), None);

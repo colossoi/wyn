@@ -295,6 +295,8 @@ impl EntryBuilder {
                 elem_ty.clone(),
                 Type::Constructed(TypeName::ArrayVariantView, vec![]),
                 Type::Variable(0),
+                // region stamped from the binding by emit_storage_view.
+                crate::types::no_region(),
             ],
         );
         let view_nid = self.emit_storage_view(binding, arr_ty);

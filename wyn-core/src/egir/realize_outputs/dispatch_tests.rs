@@ -55,6 +55,7 @@ fn compute_slot_source_rejects_unsized_array_without_soac() {
             f32_ty.clone(),
             Type::Constructed(TypeName::ArrayVariantView, vec![]),
             Type::Variable(99),
+            crate::types::no_region(),
         ],
     );
 

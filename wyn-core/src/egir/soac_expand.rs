@@ -125,8 +125,9 @@ fn input_read_elem(arr_ty: &Type<TypeName>, acc_elem: &Type<TypeName>) -> Type<T
 
 fn is_plain_composite(arr_ty: &Type<TypeName>) -> bool {
     // Rank-1 invariant: SOAC expansion only handles single-dim arrays.
+    // Rank-1 array = [elem, variant, size, region] (4 args).
     match arr_ty {
-        Type::Constructed(TypeName::Array, args) if args.len() == 3 => {
+        Type::Constructed(TypeName::Array, args) if args.len() == 4 => {
             is_array_variant_composite(&args[1]) && !is_virtual_array(arr_ty)
         }
         _ => false,
@@ -137,8 +138,8 @@ fn is_plain_composite(arr_ty: &Type<TypeName>) -> bool {
 /// arrays, or SoA tuples `([n]A, [n]B, ...)` (produced by `tlc::soa`)
 /// whose components are themselves handleable.
 fn is_plain_array_source(arr_ty: &Type<TypeName>) -> bool {
-    // Rank-1 invariant.
-    if matches!(arr_ty, Type::Constructed(TypeName::Array, args) if args.len() == 3) {
+    // Rank-1 invariant: [elem, variant, size, region] (4 args).
+    if matches!(arr_ty, Type::Constructed(TypeName::Array, args) if args.len() == 4) {
         return true;
     }
     if let Some(components) = as_soa_tuple(arr_ty) {
@@ -157,9 +158,9 @@ pub(super) fn as_soa_tuple(ty: &Type<TypeName>) -> Option<&[Type<TypeName>]> {
     if components.is_empty() {
         return None;
     }
-    // Rank-1 invariant on each component.
+    // Rank-1 invariant on each component ([elem, variant, size, region]).
     let all_soa = components.iter().all(|ct| {
-        matches!(ct, Type::Constructed(TypeName::Array, args) if args.len() == 3)
+        matches!(ct, Type::Constructed(TypeName::Array, args) if args.len() == 4)
             || as_soa_tuple(ct).is_some()
     });
     if all_soa { Some(components) } else { None }
@@ -190,8 +191,8 @@ fn is_view_source(arr_ty: &Type<TypeName>) -> bool {
     matches!(
         arr_ty,
         Type::Constructed(TypeName::Array, args)
-            // args = [elem, variant, size]
-            if args.len() == 3 && is_array_variant_view(&args[1])
+            // args = [elem, variant, size, region]
+            if args.len() == 4 && is_array_variant_view(&args[1])
     )
 }
 
@@ -1221,6 +1222,7 @@ fn build_filter_loop(
             spec.elem_ty.clone(),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             spec.capacity_size.clone(),
+            crate::types::no_region(),
         ],
     );
 

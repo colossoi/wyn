@@ -92,6 +92,7 @@ pub fn intern_storage_view(
         span,
     );
     let zero_nid = intern_u32(graph, 0, span);
+    let view_ty = crate::types::array_with_region(&view_ty, crate::types::region_tag(br));
     graph.intern_pure_with_span(
         PureOp::StorageView(PureViewSource::Storage(br)),
         smallvec![zero_nid, len_nid],
@@ -114,6 +115,8 @@ pub fn emit_workgroup_view(
 ) -> NodeId {
     let zero_nid = intern_u32(graph, 0, span);
     let count_nid = intern_u32(graph, count, span);
+    // Workgroup-shared memory is not descriptor-bound: no (set, binding) region.
+    let view_ty = crate::types::array_with_region(&view_ty, crate::types::no_region());
     graph.intern_pure_with_span(
         PureOp::StorageView(PureViewSource::Workgroup { id, count }),
         smallvec![zero_nid, count_nid],
@@ -133,6 +136,7 @@ pub fn intern_chunked_storage_view(
     view_ty: Type<TypeName>,
     span: Option<Span>,
 ) -> NodeId {
+    let view_ty = crate::types::array_with_region(&view_ty, crate::types::region_tag(br));
     graph.intern_pure_with_span(
         PureOp::StorageView(PureViewSource::Storage(br)),
         smallvec![offset, len],

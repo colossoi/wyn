@@ -14,7 +14,8 @@ use std::collections::{BTreeSet, HashMap};
 // Import type helper functions from parent module
 use super::patterns::coverage::{CoverageError, check_match, format_cov_pat};
 use super::{
-    as_arrow, bool_type, f32, function, i32, mat, record, sized_array, strip_unique, tuple, unit, vec,
+    as_arrow, bool_type, f32, function, i32, mat, no_region, record, sized_array, strip_unique, tuple,
+    unit, vec,
 };
 
 /// Render a single swizzle slot index as its `xyzw` letter. Used by
@@ -916,9 +917,28 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    /// Build an array type: `Array[elem, variant, size]`
-    fn array_ty(elem: Type, addrspace: polytype::Variable, size: polytype::Variable) -> Type {
-        Type::Constructed(TypeName::Array, vec![elem, Self::var(addrspace), Self::var(size)])
+    /// Build an array type `Array[elem, variant, size, region]` for a builtin
+    /// scheme, allocating a fresh region variable so the array is polymorphic
+    /// over *which buffer* it views — a view function is `∀r. View[…,r] → …`,
+    /// each call site instantiating `r` to a concrete region. The variant slot
+    /// is likewise a variable (the array may be a view or a composite); the
+    /// region var is generalized alongside it (see `generalize_closed`).
+    fn array_ty(&mut self, elem: Type, addrspace: polytype::Variable, size: polytype::Variable) -> Type {
+        let region = self.fresh_var();
+        Type::Constructed(
+            TypeName::Array,
+            vec![elem, Self::var(addrspace), Self::var(size), Self::var(region)],
+        )
+    }
+
+    /// Quantify a closed builtin body over *all* its free type variables.
+    /// Every variable in a builtin scheme is meant to be polymorphic, so this
+    /// equals listing them explicitly — and, unlike a hand-written `forall`
+    /// list, it cannot forget the region variable `array_ty` introduces for
+    /// each array.
+    fn generalize_closed(body: Type) -> TypeScheme {
+        let vars = fv_type(&body);
+        quantify(TypeScheme::Monotype(body), &vars)
     }
 
     /// Register zipN: ∀n a1..aN s. [a1,s,n] -> ... -> [aN,s,n] -> [(a1,...,aN),s,n]
@@ -927,20 +947,18 @@ impl<'a> TypeChecker<'a> {
         let s = self.fresh_var();
         let elem_vars: Vec<polytype::Variable> = (0..arity).map(|_| self.fresh_var()).collect();
 
-        let params: Vec<Type> = elem_vars.iter().map(|&v| Self::array_ty(Self::var(v), s, n)).collect();
+        let params: Vec<Type> = elem_vars.iter().map(|&v| self.array_ty(Self::var(v), s, n)).collect();
         let tuple_ty = Type::Constructed(
             TypeName::Tuple(arity),
             elem_vars.iter().map(|&v| Self::var(v)).collect(),
         );
-        let ret = Self::array_ty(tuple_ty, s, n);
+        let ret = self.array_ty(tuple_ty, s, n);
         let body = Self::arrow_chain(&params, ret);
 
-        let mut all_vars = vec![n, s];
-        all_vars.extend(&elem_vars);
         self.define(
             format!("zip{}", arity),
             IdentifierKind::Builtin,
-            Self::forall(&all_vars, body),
+            Self::generalize_closed(body),
         );
     }
 
@@ -1024,8 +1042,8 @@ impl<'a> TypeChecker<'a> {
     pub fn load_builtins(&mut self) -> Result<()> {
         // length: ∀n a s. Array[a, s, n] -> i32
         let (n, a, s) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
-        let body = Self::arrow_chain(&[Self::array_ty(Self::var(a), s, n)], i32());
-        self.define_builtin("length", Self::forall(&[n, a, s], body));
+        let body = Self::arrow_chain(&[self.array_ty(Self::var(a), s, n)], i32());
+        self.define_builtin("length", Self::generalize_closed(body));
 
         // map: ∀a b n s. (a -> b) -> Array[a, s, n] -> Array[b, n, Composite]
         //
@@ -1046,11 +1064,14 @@ impl<'a> TypeChecker<'a> {
         let body = Self::arrow_chain(
             &[
                 Type::arrow(Self::var(a), Self::var(b)),
-                Self::array_ty(Self::var(a), s, n),
+                self.array_ty(Self::var(a), s, n),
             ],
-            Type::Constructed(TypeName::Array, vec![Self::var(b), composite, Self::var(n)]),
+            Type::Constructed(
+                TypeName::Array,
+                vec![Self::var(b), composite, Self::var(n), no_region()],
+            ),
         );
-        self.define_builtin("map", Self::forall(&[a, b, n, s], body));
+        self.define_builtin("map", Self::generalize_closed(body));
 
         // zip: ∀n a b s. Array[a, s, n] -> Array[b, s, n] -> Array[(a, b), s, n]
         let (n, a, b, s) = (
@@ -1061,12 +1082,12 @@ impl<'a> TypeChecker<'a> {
         );
         let body = Self::arrow_chain(
             &[
-                Self::array_ty(Self::var(a), s, n),
-                Self::array_ty(Self::var(b), s, n),
+                self.array_ty(Self::var(a), s, n),
+                self.array_ty(Self::var(b), s, n),
             ],
-            Self::array_ty(tuple(vec![Self::var(a), Self::var(b)]), s, n),
+            self.array_ty(tuple(vec![Self::var(a), Self::var(b)]), s, n),
         );
-        self.define_builtin("zip", Self::forall(&[n, a, b, s], body));
+        self.define_builtin("zip", Self::generalize_closed(body));
 
         // zip3..zip5: ∀n a1..aN s. [a1,s,n] -> ... -> [aN,s,n] -> [(a1,...,aN),s,n]
         for arity in 3..=5 {
@@ -1076,24 +1097,24 @@ impl<'a> TypeChecker<'a> {
         // to_vec: ∀n a s. Array[a, s, n] -> Vec(n, a)
         let (n, a, s) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
         let body = Self::arrow_chain(
-            &[Self::array_ty(Self::var(a), s, n)],
+            &[self.array_ty(Self::var(a), s, n)],
             Self::vec_ty(n, Self::var(a)),
         );
-        self.define_builtin("to_vec", Self::forall(&[n, a, s], body));
+        self.define_builtin("to_vec", Self::generalize_closed(body));
 
         // replicate: ∀size a s. i32 -> a -> Array[a, s, size]
         let (size, a, s) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
-        let body = Self::arrow_chain(&[i32(), Self::var(a)], Self::array_ty(Self::var(a), s, size));
-        self.define_builtin("replicate", Self::forall(&[size, a, s], body));
+        let body = Self::arrow_chain(&[i32(), Self::var(a)], self.array_ty(Self::var(a), s, size));
+        self.define_builtin("replicate", Self::generalize_closed(body));
 
         // reduce: ∀a n s. (a -> a -> a) -> a -> Array[a, s, n] -> a
         let (a, n, s) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
         let op_ty = Type::arrow(Self::var(a), Type::arrow(Self::var(a), Self::var(a)));
         let body = Self::arrow_chain(
-            &[op_ty, Self::var(a), Self::array_ty(Self::var(a), s, n)],
+            &[op_ty, Self::var(a), self.array_ty(Self::var(a), s, n)],
             Self::var(a),
         );
-        self.define_builtin("reduce", Self::forall(&[a, n, s], body));
+        self.define_builtin("reduce", Self::generalize_closed(body));
 
         // scan: ∀a n s. (a -> a -> a) -> a -> Array[a, s, n] -> Array[a, n, Composite]
         // Output variant pinned to Composite for the same reason as `map` above.
@@ -1101,42 +1122,46 @@ impl<'a> TypeChecker<'a> {
         let op_ty = Type::arrow(Self::var(a), Type::arrow(Self::var(a), Self::var(a)));
         let composite = Type::Constructed(TypeName::ArrayVariantComposite, vec![]);
         let body = Self::arrow_chain(
-            &[op_ty, Self::var(a), Self::array_ty(Self::var(a), s, n)],
-            Type::Constructed(TypeName::Array, vec![Self::var(a), composite, Self::var(n)]),
+            &[op_ty, Self::var(a), self.array_ty(Self::var(a), s, n)],
+            Type::Constructed(
+                TypeName::Array,
+                vec![Self::var(a), composite, Self::var(n), no_region()],
+            ),
         );
-        self.define_builtin("scan", Self::forall(&[a, n, s], body));
+        self.define_builtin("scan", Self::generalize_closed(body));
 
         // filter: ∀a n s. (a -> bool) -> Array[a, s, n] -> ?k. Array[a, k, Composite]
         // Output variant pinned to Composite for the same reason as `map` / `scan`.
         let (a, n, s) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
         let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
         let pred_ty = Type::arrow(Self::var(a), bool_ty);
-        let array_a = Self::array_ty(Self::var(a), s, n);
+        let array_a = self.array_ty(Self::var(a), s, n);
         // Existential return type: ?k. Array[a, k, Composite]
         let k = "k".to_string();
         let k_var = Type::Constructed(TypeName::SizeVar(k.clone()), vec![]);
         let composite = Type::Constructed(TypeName::ArrayVariantComposite, vec![]);
-        let result_array = Type::Constructed(TypeName::Array, vec![Self::var(a), composite, k_var]);
+        let result_array =
+            Type::Constructed(TypeName::Array, vec![Self::var(a), composite, k_var, no_region()]);
         let existential_result = Type::Constructed(TypeName::Existential(vec![k]), vec![result_array]);
         let body = Self::arrow_chain(&[pred_ty, array_a], existential_result);
-        self.define_builtin("filter", Self::forall(&[a, n, s], body));
+        self.define_builtin("filter", Self::generalize_closed(body));
 
         // scatter: ∀a n m s1 s2 s3. Array[a, s1, n] -> Array[i32, s2, m] -> Array[a, s3, m] -> Array[a, s1, n]
         let (a, n, m) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
         let (s1, s2, s3) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
-        let dest_array = Self::array_ty(Self::var(a), s1, n);
-        let indices_array = Self::array_ty(i32(), s2, m);
-        let values_array = Self::array_ty(Self::var(a), s3, m);
+        let dest_array = self.array_ty(Self::var(a), s1, n);
+        let indices_array = self.array_ty(i32(), s2, m);
+        let values_array = self.array_ty(Self::var(a), s3, m);
         let body = Self::arrow_chain(&[dest_array.clone(), indices_array, values_array], dest_array);
-        self.define_builtin("scatter", Self::forall(&[a, n, m, s1, s2, s3], body));
+        self.define_builtin("scatter", Self::generalize_closed(body));
 
         // reduce_by_index: ∀a n m s1 s2 s3. Array[a, s1, n] -> (a -> a -> a) -> a -> Array[i32, s2, m] -> Array[a, s3, m] -> Array[a, s1, n]
         let (a, n, m) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
         let (s1, s2, s3) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
         let op_ty = Type::arrow(Self::var(a), Type::arrow(Self::var(a), Self::var(a)));
-        let dest_array = Self::array_ty(Self::var(a), s1, n);
-        let indices_array = Self::array_ty(i32(), s2, m);
-        let values_array = Self::array_ty(Self::var(a), s3, m);
+        let dest_array = self.array_ty(Self::var(a), s1, n);
+        let indices_array = self.array_ty(i32(), s2, m);
+        let values_array = self.array_ty(Self::var(a), s3, m);
         let body = Self::arrow_chain(
             &[
                 dest_array.clone(),
@@ -1147,12 +1172,12 @@ impl<'a> TypeChecker<'a> {
             ],
             dest_array,
         );
-        self.define_builtin("reduce_by_index", Self::forall(&[a, n, m, s1, s2, s3], body));
+        self.define_builtin("reduce_by_index", Self::generalize_closed(body));
 
         // _w_alloc_array: ∀n t s. i32 -> Array[t, s, n]
         let (n, t, s) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
-        let body = Self::arrow_chain(&[i32()], Self::array_ty(Self::var(t), s, n));
-        self.define_builtin("_w_alloc_array", Self::forall(&[n, t, s], body));
+        let body = Self::arrow_chain(&[i32()], self.array_ty(Self::var(t), s, n));
+        self.define_builtin("_w_alloc_array", Self::generalize_closed(body));
 
         // dot: ∀n t. Vec(n, t) -> Vec(n, t) -> t
         let (n, t) = (self.fresh_var(), self.fresh_var());
@@ -1863,7 +1888,7 @@ impl<'a> TypeChecker<'a> {
 
                 // Constrain array type - strip uniqueness (indexing *[n]T works like [n]T)
                 let array_type_stripped = strip_unique(&array_type);
-                let (elem_var, _, _) = self.constrain_array_type(
+                let (elem_var, _, _, _) = self.constrain_array_type(
                     &array_type_stripped,
                     &array_expr.h.span,
                     "Cannot index non-array type",
@@ -1889,7 +1914,7 @@ impl<'a> TypeChecker<'a> {
 
                 // Constrain array type - strip uniqueness
                 let array_type_stripped = strip_unique(&array_type);
-                let (elem_var, _, _) = self.constrain_array_type(
+                let (elem_var, _, _, _) = self.constrain_array_type(
                     &array_type_stripped,
                     &array.h.span,
                     "Cannot update non-array type",
@@ -2301,7 +2326,7 @@ impl<'a> TypeChecker<'a> {
                     LoopForm::ForIn(pat, arr) => {
                         // Array must be an array type: Array[elem, addrspace, size]
                         let arr_type = self.infer_expression(arr)?;
-                        let (elem_type, _, _) =
+                        let (elem_type, _, _, _) =
                             self.constrain_array_type(&arr_type, &arr.h.span, "for-in requires an array")?;
 
                         // Bind pattern to element type.
@@ -2458,7 +2483,10 @@ impl<'a> TypeChecker<'a> {
                 let elem_type = start_type.apply(&self.context);
                 // Range literals produce virtual arrays (struct {start, step, len})
                 let addrspace = Type::Constructed(TypeName::ArrayVariantVirtual, vec![]);
-                Ok(Type::Constructed(TypeName::Array, vec![elem_type, addrspace, size_type]))
+                Ok(Type::Constructed(
+                    TypeName::Array,
+                    vec![elem_type, addrspace, size_type, no_region()],
+                ))
             }
 
             ExprKind::Slice(slice) => {
@@ -2470,8 +2498,8 @@ impl<'a> TypeChecker<'a> {
                 let array_type = self.infer_expression(&slice.array)?;
                 let array_type_stripped = strip_unique(&array_type);
 
-                // Constrain array to be Array[elem, addrspace, size]
-                let (elem_var, addrspace_var, _) = self.constrain_array_type(
+                // Constrain array to be Array[elem, addrspace, size, region]
+                let (elem_var, addrspace_var, _, region_var) = self.constrain_array_type(
                     &array_type_stripped,
                     &slice.array.h.span,
                     "Cannot slice non-array type",
@@ -2511,14 +2539,24 @@ impl<'a> TypeChecker<'a> {
                 // the elements will be materialized into a composite array.
                 let elem_type = elem_var.apply(&self.context);
                 let addrspace = addrspace_var.apply(&self.context);
-                let result_variant = if super::is_array_variant_view(&addrspace)
-                    && matches!(result_size, Type::Constructed(TypeName::Size(_), _))
-                {
+                let materialized = super::is_array_variant_view(&addrspace)
+                    && matches!(result_size, Type::Constructed(TypeName::Size(_), _));
+                let result_variant = if materialized {
                     super::array_variant_composite()
                 } else {
                     addrspace
                 };
-                Ok(Type::Constructed(TypeName::Array, vec![elem_type, result_variant, result_size]))
+                // A materialized slice is a fresh composite (no buffer); a view
+                // slice stays in the *same* buffer, so it keeps the source region.
+                let result_region = if materialized {
+                    no_region()
+                } else {
+                    region_var.apply(&self.context)
+                };
+                Ok(Type::Constructed(
+                    TypeName::Array,
+                    vec![elem_type, result_variant, result_size, result_region],
+                ))
             }
 
             ExprKind::TypeAscription(expr, ascribed_ty) => {
@@ -3049,18 +3087,27 @@ impl<'a> TypeChecker<'a> {
     /// component type variables.
     ///
     /// Caller should strip uniqueness before calling if needed.
+    /// Returns `(elem, variant, size, region)` vars after unifying `array_ty`
+    /// with a fresh `Array[_, _, _, _]`. The region var lets a view's buffer
+    /// flow to slice/for-in results without being fabricated.
     fn constrain_array_type(
         &mut self,
         array_ty: &Type,
         span: &Span,
         error_context: &str,
-    ) -> Result<(Type, Type, Type)> {
+    ) -> Result<(Type, Type, Type, Type)> {
         let elem_var = self.context.new_variable();
         let addrspace_var = self.context.new_variable();
         let size_var = self.context.new_variable();
+        let region_var = self.context.new_variable();
         let want_array = Type::Constructed(
             TypeName::Array,
-            vec![elem_var.clone(), addrspace_var.clone(), size_var.clone()],
+            vec![
+                elem_var.clone(),
+                addrspace_var.clone(),
+                size_var.clone(),
+                region_var.clone(),
+            ],
         );
 
         self.context.unify(array_ty, &want_array).map_err(|_| {
@@ -3072,7 +3119,7 @@ impl<'a> TypeChecker<'a> {
             )
         })?;
 
-        Ok((elem_var, addrspace_var, size_var))
+        Ok((elem_var, addrspace_var, size_var, region_var))
     }
 
     /// Infer the type of a field access on a base type.

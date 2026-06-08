@@ -289,6 +289,8 @@ pub fn phase1_transform_reduce(
             elem_ty.clone(),
             Type::Constructed(TypeName::ArrayVariantView, vec![]),
             Type::Variable(0),
+            // region stamped from the binding by intern_storage_view.
+            crate::types::no_region(),
         ],
     );
     let partials_view = graph_ops::intern_storage_view(&mut entry.graph, partials_binding, arr_ty, None);
@@ -397,6 +399,8 @@ fn build_tree_reduce_phase2(
             elem_ty.clone(),
             Type::Constructed(TypeName::ArrayVariantView, vec![]),
             Type::Variable(0),
+            // region stamped from the binding by intern_storage_view.
+            crate::types::no_region(),
         ],
     );
 
@@ -868,6 +872,8 @@ pub fn phase1_transform_redomap(
             elem_ty.clone(),
             Type::Constructed(TypeName::ArrayVariantView, vec![]),
             Type::Variable(0),
+            // region stamped from the binding by intern_storage_view.
+            crate::types::no_region(),
         ],
     );
     let partials_view = graph_ops::intern_storage_view(&mut entry.graph, partials_binding, arr_ty, None);
@@ -1285,6 +1291,8 @@ pub fn phase1_transform_scan(
                 elem_ty.clone(),
                 Type::Constructed(TypeName::ArrayVariantView, vec![]),
                 Type::Variable(0),
+                // region stamped from the binding by intern_storage_view.
+                crate::types::no_region(),
             ],
         );
         let block_sums_view =
@@ -1334,6 +1342,8 @@ pub fn synthesize_phase2_scan(
             elem_ty.clone(),
             Type::Constructed(TypeName::ArrayVariantView, vec![]),
             Type::Variable(0),
+            // region stamped from the binding by intern_storage_view.
+            crate::types::no_region(),
         ],
     );
     let block_sums_view = b.emit_storage_view(block_sums_binding, arr_ty.clone());
@@ -1382,6 +1392,8 @@ pub fn synthesize_phase3_scan(
             elem_ty.clone(),
             Type::Constructed(TypeName::ArrayVariantView, vec![]),
             Type::Variable(0),
+            // region stamped from the binding by intern_storage_view.
+            crate::types::no_region(),
         ],
     );
     let _output_view = b.emit_storage_view(output_binding, arr_ty.clone());

@@ -85,7 +85,7 @@ fn array_with_nodes(graph: &crate::egir::types::EGraph) -> Vec<crate::egir::type
 fn is_soa_tuple(ty: &Type<TypeName>) -> bool {
     matches!(ty, Type::Constructed(TypeName::Tuple(_), components)
         if components.iter().all(|c|
-            matches!(c, Type::Constructed(TypeName::Array, args) if args.len() == 3)))
+            matches!(c, Type::Constructed(TypeName::Array, args) if args.len() == 4)))
 }
 
 #[test]
