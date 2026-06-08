@@ -261,7 +261,7 @@ fn compile_file(
 
     // Transform to TLC (including prelude code - transformed here for consistent type variables)
     let tlc_transformed = time("to_tlc", verbose, || {
-        type_checked.to_tlc(&module_manager, fill_holes)
+        type_checked.to_tlc(&module_manager, fill_holes).pin_entry_regions()
     });
 
     // Surface any hole-fill errors collected during TLC transform.
@@ -427,7 +427,8 @@ fn check_file(input: PathBuf, verbose: bool) -> Result<(), DriverError> {
 
     type_checked.print_warnings();
 
-    let tlc_after_norm = type_checked.to_tlc(&module_manager, false).partial_eval().normalize_soacs();
+    let tlc_after_norm =
+        type_checked.to_tlc(&module_manager, false).pin_entry_regions().partial_eval().normalize_soacs();
     wyn_core::tlc::ownership::check(&tlc_after_norm.0.tlc)?;
 
     if verbose {

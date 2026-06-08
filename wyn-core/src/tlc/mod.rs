@@ -19,6 +19,7 @@ pub mod ownership;
 pub mod parallelize;
 pub mod partial_eval;
 pub mod patterns;
+pub mod pin_entry_regions;
 pub mod producer_graph;
 pub mod run;
 pub mod soa;

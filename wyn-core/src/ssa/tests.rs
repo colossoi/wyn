@@ -192,6 +192,7 @@ fn spirv_storage_write_chain_lowers_cleanly() {
         .type_check(&mut module_manager)
         .unwrap()
         .to_tlc(&module_manager, false)
+        .pin_entry_regions()
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()

@@ -565,6 +565,15 @@ impl std::ops::Deref for TlcTransformed {
 }
 
 impl TlcTransformed {
+    /// Pin each compute entry's storage-param buffer region into its type:
+    /// substitute the param's region variable → `Region(set, binding)` so a
+    /// view's descriptor is a statically-known property of its type. Runs
+    /// first; every downstream view inherits its region by unification.
+    pub fn pin_entry_regions(mut self) -> TlcTransformed {
+        tlc::pin_entry_regions::run(&mut self.0.tlc);
+        self
+    }
+
     /// Constant folding and algebraic simplifications.
     pub fn partial_eval(self) -> TlcPartialEvaled {
         let mut inner = self.0;
@@ -582,7 +591,8 @@ impl TlcTransformed {
     /// what most tests want); `true` ⇒ parallelization disabled (matches
     /// the CLI's `--single-stage` flag).
     pub fn optimize_for_test(self, disable_parallelize: bool) -> TlcReachable {
-        self.partial_eval()
+        self.pin_entry_regions()
+            .partial_eval()
             .normalize_soacs()
             .fuse_maps()
             .apply_ownership()

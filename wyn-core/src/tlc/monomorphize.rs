@@ -1070,7 +1070,7 @@ impl<'a> Monomorphizer<'a> {
 }
 
 /// Apply a substitution to a type
-fn apply_subst(ty: &Type<TypeName>, subst: &Substitution) -> Type<TypeName> {
+pub(crate) fn apply_subst(ty: &Type<TypeName>, subst: &Substitution) -> Type<TypeName> {
     match ty {
         Type::Variable(id) => subst.get(id).cloned().unwrap_or_else(|| ty.clone()),
         Type::Constructed(name, args) => {

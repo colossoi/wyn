@@ -157,6 +157,13 @@ fn fv_type(ty: &Type) -> BTreeSet<usize> {
 /// size generalized, every use instantiates a fresh size var,
 /// unification pins the per-use var, and the original definition stays
 /// unresolved all the way into monomorphization / SPIR-V lowering.
+///
+/// The **region** slot (the trailing arg) IS generalizable: a view
+/// function is `∀r. View[…, r] → …`, polymorphic over which buffer it
+/// reads, each call site instantiating `r` to a concrete region. This is
+/// exactly the element-type axis's treatment — generalize so the function
+/// works on views from any buffer; concrete regions get pinned by
+/// unification at each call, and monomorphize specializes per region.
 fn fv_type_generalizable(ty: &Type) -> BTreeSet<usize> {
     let mut out = BTreeSet::new();
     fn go(t: &Type, acc: &mut BTreeSet<usize>) {
@@ -164,13 +171,15 @@ fn fv_type_generalizable(ty: &Type) -> BTreeSet<usize> {
             Type::Variable(n) => {
                 acc.insert(*n);
             }
-            Type::Constructed(TypeName::Array, args) => {
-                // Only element type position is generalizable. Wyn's Array
-                // layout is [elem, variant, dim_0, ...]; variant and the dim
-                // sizes are compile-time invariants that must be concrete
-                // before monomorphization.
-                if let Some(elem) = args.first() {
+            Type::Constructed(TypeName::Array, _) => {
+                // The variant tag and dim sizes are compile-time invariants
+                // that must be concrete before monomorphization, so they are
+                // NOT generalized; the elem type and the region are.
+                if let Some(elem) = t.elem_type() {
                     go(elem, acc);
+                }
+                if let Some(region) = t.array_region() {
+                    go(region, acc);
                 }
             }
             Type::Constructed(_, args) => {
