@@ -13,7 +13,7 @@ use crate::ast::Span;
 use crate::ast::TypeName;
 use crate::builtins::lowering::{BuiltinLowering, PrimOp};
 use crate::error::Result;
-use crate::ssa::layout::{buffer_array_strides, type_byte_size};
+use crate::ssa::layout::{buffer_array_strides, std430_alignment, type_byte_size};
 use crate::ssa::types::{
     BlockId, ConstantValue, ControlHeader, FuncBody, InstKind, Terminator, ValueId, ValueRef, WynInstNode,
 };
@@ -677,8 +677,13 @@ impl Constructor {
         };
         let elem_spirv = self.polytype_to_spirv(&elem_ty);
 
-        // Calculate stride from element type size
-        let stride = type_byte_size(&elem_ty).expect("storage buffer element type must have known size");
+        // The std430 array stride is the element size rounded up to the
+        // element's alignment — a `vec3<T>` is 12 bytes but aligns to 16, so
+        // its runtime-array stride must be 16, not the packed 12 (Vulkan
+        // rejects a stride not satisfying the element alignment).
+        let elem_size = type_byte_size(&elem_ty).expect("storage buffer element type must have known size");
+        let elem_align = std430_alignment(&elem_ty).unwrap_or(elem_size.max(1));
+        let stride = elem_size.div_ceil(elem_align) * elem_align;
 
         // Ensure nested array types have ArrayStride for buffer layout
         self.apply_buffer_array_strides(elem_spirv, &elem_ty);
