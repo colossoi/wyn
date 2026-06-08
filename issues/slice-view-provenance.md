@@ -2,11 +2,20 @@
 
 ## Status
 
-**WIP** — failing test pinned in `wyn-core/src/integration_tests.rs`
-(`slice_view_inside_map_lambda_compiles_to_spirv`), partial fix in
-`wyn-core/src/tlc/buffer_specialize.rs`. The fix surfaces a new error
-(`Unknown global: xs` inside the specialized lifted lambda's body),
-which is the next thing to debug if we continue down this path.
+**Slice→composite case FIXED.** `slice_view_inside_map_lambda_compiles_to_spirv`
+now passes and additionally asserts the reads come from `xs`'s descriptor
+`(set=2, binding=0)` (not the output buffer). The remaining work is the
+**walker unification** (see "Architecture of the loss" → the two body-rewriters
+`rewrite_term` and `rewrite_specialized_body` duplicate view-op coverage; the
+SOAC adapter `try_specialize_soac_view_captures` only looks like a special case
+because of that). That's a follow-up refactor, not a correctness gap.
+
+Historical (now resolved): the WIP previously stopped at `Unknown global: xs`
+inside the specialized lifted lambda's body — the slice→composite
+materialization (`xs[0..3]` feeding a `[N]f32` param) had no rewrite case, so
+its `Var(xs)` operand survived to SPIR-V. `rewrite_specialized_body` now lowers
+`_w_intrinsic_slice(view, s, e)` with a composite result to an N-element
+`ArrayExpr::Literal` of `storage_index(binding, offset + k)` reads.
 
 ## Symptom
 

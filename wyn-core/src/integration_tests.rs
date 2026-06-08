@@ -3626,9 +3626,69 @@ fn compute_multi_output_tuple_of_ifs_compiles() {
     crate::compile_thru_spirv(src).expect("multi-output tuple of Ifs must compile");
 }
 
-// Minimal repro of the view-array slice provenance bug. `xs[0..3]` is
-// fine at top level, fails inside a `map` lambda body with
-// "slice_to_composite: no buffer provenance".
+/// Assert the StorageBuffer variable decorated `(set, binding)` is the base
+/// of at least one `OpAccessChain` — i.e. actually read/written, not merely
+/// declared. Regression guard for view-array provenance loss, where a lifted
+/// lambda's reads went to the (wrong) output descriptor and the input buffer
+/// was declared but never accessed.
+fn assert_storage_descriptor_is_accessed(spirv_words: &[u32], set: u32, binding: u32) {
+    use rspirv::binary::parse_words;
+    use rspirv::dr::{Loader, Operand};
+    use rspirv::spirv::{Decoration, Op};
+    use std::collections::HashMap;
+
+    let mut loader = Loader::new();
+    parse_words(spirv_words, &mut loader).expect("parse spirv");
+    let module = loader.module();
+
+    let mut sets: HashMap<u32, u32> = HashMap::new();
+    let mut binds: HashMap<u32, u32> = HashMap::new();
+    for inst in &module.annotations {
+        if inst.class.opcode != Op::Decorate {
+            continue;
+        }
+        let target = match inst.operands.first() {
+            Some(Operand::IdRef(id)) => *id,
+            _ => continue,
+        };
+        match (inst.operands.get(1), inst.operands.get(2)) {
+            (Some(Operand::Decoration(Decoration::DescriptorSet)), Some(Operand::LiteralBit32(n))) => {
+                sets.insert(target, *n);
+            }
+            (Some(Operand::Decoration(Decoration::Binding)), Some(Operand::LiteralBit32(n))) => {
+                binds.insert(target, *n);
+            }
+            _ => {}
+        }
+    }
+
+    let target_var = sets
+        .iter()
+        .find(|(id, s)| **s == set && binds.get(id) == Some(&binding))
+        .map(|(id, _)| *id)
+        .unwrap_or_else(|| panic!("no StorageBuffer variable decorated (set={set}, binding={binding})"));
+
+    let accessed = module.functions.iter().any(|f| {
+        f.blocks.iter().any(|b| {
+            b.instructions.iter().any(|inst| {
+                inst.class.opcode == Op::AccessChain
+                    && matches!(inst.operands.first(), Some(Operand::IdRef(base)) if *base == target_var)
+            })
+        })
+    });
+
+    assert!(
+        accessed,
+        "descriptor (set={set}, binding={binding}) is declared but never reached by an \
+         OpAccessChain — view-array provenance was lost (reads went to the wrong buffer)"
+    );
+}
+
+// View-array slice provenance through a SOAC capture: `xs[0..3]` is fine at
+// top level but used to fail inside a `map` lambda body with
+// "slice_to_composite: no buffer provenance". After buffer-specialize learned
+// the slice→composite case, the lifted lambda's reads must come from `xs`'s
+// own descriptor (set=2, binding=0), not the compiler-allocated output buffer.
 #[test]
 fn slice_view_inside_map_lambda_compiles_to_spirv() {
     let src = r#"
@@ -3638,8 +3698,9 @@ fn slice_view_inside_map_lambda_compiles_to_spirv() {
         entry tick(#[storage(set=2, binding=0, access=read)] xs: []f32) []f32 =
           map(|_:i32| gather3(xs[0..3]), 0i32..<3)
     "#;
-    crate::compile_thru_spirv(src)
+    let lowered = crate::compile_thru_spirv(src)
         .expect("view-array slice inside a map lambda must preserve buffer provenance");
+    assert_storage_descriptor_is_accessed(&lowered.spirv, 2, 0);
 }
 
 // ---- Constructor-style type conversions `T(value)` ----

@@ -96,6 +96,21 @@ fn array_elem_type(ty: &Type<TypeName>) -> Type<TypeName> {
     ty.elem_type().expect("array has elem type").clone()
 }
 
+/// If `ty` is a fixed-size *composite* array `[N]elem`, return `N`.
+fn composite_array_len(ty: &Type<TypeName>) -> Option<usize> {
+    let is_composite = ty
+        .array_variant()
+        .map(|v| matches!(v, Type::Constructed(TypeName::ArrayVariantComposite, _)))
+        .unwrap_or(false);
+    if !is_composite {
+        return None;
+    }
+    match ty.array_size()? {
+        Type::Constructed(TypeName::Size(n), _) => Some(*n),
+        _ => None,
+    }
+}
+
 /// Extract the parameters of a function by walking nested lambdas.
 fn extract_params(term: &Term) -> (Vec<(SymbolId, Type<TypeName>)>, &Term) {
     match &term.kind {
@@ -684,10 +699,7 @@ impl BufferSpecializer {
         }
     }
 
-    fn try_specialize_soac_view_captures(
-        &mut self,
-        sb: &super::SoacBody,
-    ) -> Option<super::SoacBody> {
+    fn try_specialize_soac_view_captures(&mut self, sb: &super::SoacBody) -> Option<super::SoacBody> {
         let TermKind::Var(VarRef::Symbol(lifted_sym)) = &sb.lam.body.kind else {
             return None;
         };
@@ -727,22 +739,16 @@ impl BufferSpecializer {
         // copy. SOAC sites need the offset/len param symbols too — those
         // come back as `split_syms` on a cache miss; on a hit, recover
         // them by walking the cached def's param list.
-        let spec_key: SpecKey =
-            buffer_args.iter().map(|b| b.as_ref().map(|bb| bb.binding)).collect();
-        let (spec_sym, split_syms) = if let Some(&cached) =
-            self.specializations.get(&(lifted_sym, spec_key.clone()))
-        {
-            (cached, self.recover_split_syms(cached, &buffer_args))
-        } else {
-            let (s, splits) = self.create_specialized_def(
-                lifted_sym,
-                &target_def,
-                &buffer_args,
-                sb.lam.body.span,
-            );
-            self.specializations.insert((lifted_sym, spec_key), s);
-            (s, splits)
-        };
+        let spec_key: SpecKey = buffer_args.iter().map(|b| b.as_ref().map(|bb| bb.binding)).collect();
+        let (spec_sym, split_syms) =
+            if let Some(&cached) = self.specializations.get(&(lifted_sym, spec_key.clone())) {
+                (cached, self.recover_split_syms(cached, &buffer_args))
+            } else {
+                let (s, splits) =
+                    self.create_specialized_def(lifted_sym, &target_def, &buffer_args, sb.lam.body.span);
+                self.specializations.insert((lifted_sym, spec_key), s);
+                (s, splits)
+            };
 
         let new_lam_body = Term {
             id: self.term_ids.next_id(),
@@ -764,8 +770,7 @@ impl BufferSpecializer {
                 (Some(binding), Some((offset_sym, len_sym))) => {
                     let span = cap_term.span;
                     let zero = self.make_int_lit("0", u32_ty.clone(), span);
-                    let storage_len =
-                        super::storage_len_call(binding.binding, span, &mut self.term_ids);
+                    let storage_len = super::storage_len_call(binding.binding, span, &mut self.term_ids);
                     new_captures.push((*offset_sym, u32_ty.clone(), zero));
                     new_captures.push((*len_sym, u32_ty.clone(), storage_len));
                 }
@@ -874,8 +879,7 @@ impl BufferSpecializer {
         let spec_sym = if let Some(&sym) = self.specializations.get(&(func_sym, spec_key.clone())) {
             sym
         } else {
-            let (spec_sym, _splits) =
-                self.create_specialized_def(func_sym, target_def, buffer_args, span);
+            let (spec_sym, _splits) = self.create_specialized_def(func_sym, target_def, buffer_args, span);
             self.specializations.insert((func_sym, spec_key), spec_sym);
             spec_sym
         };
@@ -1015,13 +1019,69 @@ impl BufferSpecializer {
                     }
                 }
 
-                // _w_intrinsic_slice(arr_expr, start, end) where arr_expr resolves to a view
-                // The slice itself produces a view — it can only be consumed by
-                // _w_index or _w_intrinsic_length above. If it appears bare
-                // (e.g. passed to a function), we fall through to default recursion.
-                // But we should NOT recurse into the arr_expr of the slice, because
-                // that would hit the bare Var case and fail. Instead we leave it for
-                // the outer consumer (_w_index, _w_intrinsic_length, or Let) to resolve.
+                // `_w_intrinsic_slice(view, start, end)` whose *result* is a
+                // composite array is a slice→composite materialization (e.g.
+                // `xs[0..3]` passed to a `[N]elem`-typed function). Lower it here
+                // to an N-element composite of storage reads at `offset + k`, so
+                // the view param's buffer provenance is baked in rather than
+                // surviving as a bare `Var(view_param)` that reaches SPIR-V as an
+                // undefined global. (A slice that stays a *view* is consumed by
+                // Index/length/Let above and is left untouched — recursing into
+                // its operand here would hit the bare-Var case.)
+                if var_term_builtin_id(func, &self.symbols) == Some(catalog().known().slice) {
+                    if let Some(n) = composite_array_len(&term.ty) {
+                        if let Some(view) = self.try_resolve_view_expr(term, view_params) {
+                            let span = term.span;
+                            let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
+                            // Bind the slice's base offset once; each element reads
+                            // `offset + k`.
+                            let off_sym = self.symbols.alloc("_slice_off".to_string());
+                            let binding = view.binding;
+                            let elem_ty = view.elem_ty.clone();
+                            let mut reads: Vec<Term> = Vec::with_capacity(n);
+                            for k in 0..n {
+                                let off_ref = Term {
+                                    id: self.term_ids.next_id(),
+                                    ty: u32_ty.clone(),
+                                    span,
+                                    kind: TermKind::Var(VarRef::Symbol(off_sym)),
+                                };
+                                let k_lit = self.make_int_lit(&k.to_string(), u32_ty.clone(), span);
+                                let idx = self.make_binop_app(
+                                    ast::BinaryOp { op: "+".to_string() },
+                                    off_ref,
+                                    k_lit,
+                                    u32_ty.clone(),
+                                    span,
+                                );
+                                reads.push(super::storage_index_call(
+                                    binding,
+                                    idx,
+                                    elem_ty.clone(),
+                                    span,
+                                    &mut self.term_ids,
+                                ));
+                            }
+                            let array = Term {
+                                id: self.term_ids.next_id(),
+                                ty: term.ty.clone(),
+                                span,
+                                kind: TermKind::ArrayExpr(ArrayExpr::Literal(reads)),
+                            };
+                            return Term {
+                                id: self.term_ids.next_id(),
+                                ty: term.ty.clone(),
+                                span,
+                                kind: TermKind::Let {
+                                    name: off_sym,
+                                    name_ty: u32_ty,
+                                    rhs: view.offset,
+                                    body: Box::new(array),
+                                },
+                            };
+                        }
+                    }
+                }
 
                 // User-defined function specialization (only meaningful
                 // for SymbolId-bound user functions).
