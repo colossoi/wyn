@@ -3626,6 +3626,269 @@ fn compute_multi_output_tuple_of_ifs_compiles() {
     crate::compile_thru_spirv(src).expect("multi-output tuple of Ifs must compile");
 }
 
+/// Assert the StorageBuffer variable decorated `(set, binding)` is the base
+/// of at least one `OpAccessChain` — i.e. actually read/written, not merely
+/// declared. Regression guard for view-array provenance loss, where a lifted
+/// lambda's reads went to the (wrong) output descriptor and the input buffer
+/// was declared but never accessed.
+fn assert_storage_descriptor_is_accessed(spirv_words: &[u32], set: u32, binding: u32) {
+    use rspirv::binary::parse_words;
+    use rspirv::dr::{Loader, Operand};
+    use rspirv::spirv::{Decoration, Op};
+    use std::collections::HashMap;
+
+    let mut loader = Loader::new();
+    parse_words(spirv_words, &mut loader).expect("parse spirv");
+    let module = loader.module();
+
+    let mut sets: HashMap<u32, u32> = HashMap::new();
+    let mut binds: HashMap<u32, u32> = HashMap::new();
+    for inst in &module.annotations {
+        if inst.class.opcode != Op::Decorate {
+            continue;
+        }
+        let target = match inst.operands.first() {
+            Some(Operand::IdRef(id)) => *id,
+            _ => continue,
+        };
+        match (inst.operands.get(1), inst.operands.get(2)) {
+            (Some(Operand::Decoration(Decoration::DescriptorSet)), Some(Operand::LiteralBit32(n))) => {
+                sets.insert(target, *n);
+            }
+            (Some(Operand::Decoration(Decoration::Binding)), Some(Operand::LiteralBit32(n))) => {
+                binds.insert(target, *n);
+            }
+            _ => {}
+        }
+    }
+
+    let target_var = sets
+        .iter()
+        .find(|(id, s)| **s == set && binds.get(id) == Some(&binding))
+        .map(|(id, _)| *id)
+        .unwrap_or_else(|| panic!("no StorageBuffer variable decorated (set={set}, binding={binding})"));
+
+    let accessed = module.functions.iter().any(|f| {
+        f.blocks.iter().any(|b| {
+            b.instructions.iter().any(|inst| {
+                inst.class.opcode == Op::AccessChain
+                    && matches!(inst.operands.first(), Some(Operand::IdRef(base)) if *base == target_var)
+            })
+        })
+    });
+
+    assert!(
+        accessed,
+        "descriptor (set={set}, binding={binding}) is declared but never reached by an \
+         OpAccessChain — view-array provenance was lost (reads went to the wrong buffer)"
+    );
+}
+
+// View-array slice provenance through a SOAC capture: `xs[0..3]` is fine at
+// top level but used to fail inside a `map` lambda body with
+// "slice_to_composite: no buffer provenance". After buffer-specialize learned
+// the slice→composite case, the lifted lambda's reads must come from `xs`'s
+// own descriptor (set=2, binding=0), not the compiler-allocated output buffer.
+#[test]
+fn slice_view_inside_map_lambda_compiles_to_spirv() {
+    let src = r#"
+        def gather3(arr: [3]f32) f32 = arr[0] + arr[1] + arr[2]
+
+        #[compute]
+        entry tick(#[storage(set=2, binding=0, access=read)] xs: []f32) []f32 =
+          map(|_:i32| gather3(xs[0..3]), 0i32..<3)
+    "#;
+    let lowered = crate::compile_thru_spirv(src)
+        .expect("view-array slice inside a map lambda must preserve buffer provenance");
+    assert_storage_descriptor_is_accessed(&lowered.spirv, 2, 0);
+}
+
+// ---- Buffer-provenance guards ------------------------------------------------
+//
+// These pin the *correct* descriptor each view read resolves to, so a later
+// refactor of buffer_specialize (e.g. unifying `rewrite_term` and
+// `rewrite_specialized_body`) can't silently mis-route a read to the wrong
+// buffer. `cargo test` green alone does NOT prove this: a wrong-buffer read
+// still passes spirv-val as long as the (wrong) descriptor is declared — which
+// is exactly the historical bug. Each guard asserts via rspirv that the
+// expected `(set, binding)` is actually the base of an `OpAccessChain`.
+
+/// Indexing a *captured* view inside a `map` lambda (→ lifted lambda, the
+/// `rewrite_specialized_body` Index arm) must read from the captured buffer.
+#[test]
+fn view_index_in_map_lambda_reads_own_buffer() {
+    let src = r#"
+        #[compute]
+        entry tick(#[storage(set=2, binding=0, access=read)] xs: []f32) []f32 =
+          map(|i: i32| xs[i] + xs[0], 0i32..<4)
+    "#;
+    let lowered = crate::compile_thru_spirv(src).expect("captured-view index compiles");
+    assert_storage_descriptor_is_accessed(&lowered.spirv, 2, 0);
+}
+
+/// Two captured views at distinct `(set, binding)` must each be read from
+/// their own descriptor — catches a unification that swaps or collapses
+/// buffer provenance.
+#[test]
+fn two_view_captures_read_distinct_buffers() {
+    let src = r#"
+        #[compute]
+        entry tick(
+          #[storage(set=2, binding=0, access=read)] xs: []f32,
+          #[storage(set=2, binding=1, access=read)] ys: []f32
+        ) []f32 =
+          map(|i: i32| xs[i] + ys[0], 0i32..<4)
+    "#;
+    let lowered = crate::compile_thru_spirv(src).expect("two captured views compile");
+    assert_storage_descriptor_is_accessed(&lowered.spirv, 2, 0);
+    assert_storage_descriptor_is_accessed(&lowered.spirv, 2, 1);
+}
+
+/// A captured view passed to a user function that itself indexes it (→
+/// recursive per-buffer specialization) must read from the captured buffer.
+#[test]
+fn view_through_nested_fn_specialization_reads_own_buffer() {
+    let src = r#"
+        def firstx(zs: []f32) f32 = zs[0]
+
+        #[compute]
+        entry tick(#[storage(set=2, binding=0, access=read)] xs: []f32) []f32 =
+          map(|_: i32| firstx(xs), 0i32..<4)
+    "#;
+    let lowered = crate::compile_thru_spirv(src).expect("nested view specialization compiles");
+    assert_storage_descriptor_is_accessed(&lowered.spirv, 2, 0);
+}
+
+/// A view used directly as a `map` *input* (→ the entry walker
+/// `rewrite_term` / SOAC-input path, not a capture) must read from its buffer.
+#[test]
+fn view_as_map_input_reads_own_buffer() {
+    let src = r#"
+        #[compute]
+        entry tick(#[storage(set=2, binding=0, access=read)] xs: []f32) []f32 =
+          map(|x: f32| x * 2.0, xs)
+    "#;
+    let lowered = crate::compile_thru_spirv(src).expect("view-as-map-input compiles");
+    assert_storage_descriptor_is_accessed(&lowered.spirv, 2, 0);
+}
+
+/// Assert that some `OpArrayLength` queries the runtime-array length of the
+/// `(set, binding)` descriptor — the lowering of `length(view)`. Distinct from
+/// `assert_storage_descriptor_is_accessed`: a length query is an `OpArrayLength`
+/// on the buffer struct, not an `OpAccessChain` into it.
+fn assert_array_length_queried_on_descriptor(spirv_words: &[u32], set: u32, binding: u32) {
+    use rspirv::binary::parse_words;
+    use rspirv::dr::{Loader, Operand};
+    use rspirv::spirv::{Decoration, Op};
+    use std::collections::HashMap;
+
+    let mut loader = Loader::new();
+    parse_words(spirv_words, &mut loader).expect("parse spirv");
+    let module = loader.module();
+
+    let mut sets: HashMap<u32, u32> = HashMap::new();
+    let mut binds: HashMap<u32, u32> = HashMap::new();
+    for inst in &module.annotations {
+        if inst.class.opcode != Op::Decorate {
+            continue;
+        }
+        let target = match inst.operands.first() {
+            Some(Operand::IdRef(id)) => *id,
+            _ => continue,
+        };
+        match (inst.operands.get(1), inst.operands.get(2)) {
+            (Some(Operand::Decoration(Decoration::DescriptorSet)), Some(Operand::LiteralBit32(n))) => {
+                sets.insert(target, *n);
+            }
+            (Some(Operand::Decoration(Decoration::Binding)), Some(Operand::LiteralBit32(n))) => {
+                binds.insert(target, *n);
+            }
+            _ => {}
+        }
+    }
+
+    let target_var = sets
+        .iter()
+        .find(|(id, s)| **s == set && binds.get(id) == Some(&binding))
+        .map(|(id, _)| *id)
+        .unwrap_or_else(|| panic!("no StorageBuffer variable decorated (set={set}, binding={binding})"));
+
+    let queried = module.functions.iter().any(|f| {
+        f.blocks.iter().any(|b| {
+            b.instructions.iter().any(|inst| {
+                inst.class.opcode == Op::ArrayLength
+                    && matches!(inst.operands.first(), Some(Operand::IdRef(s)) if *s == target_var)
+            })
+        })
+    });
+
+    assert!(
+        queried,
+        "descriptor (set={set}, binding={binding}) is declared but its length is never \
+         queried by an OpArrayLength — length(view) provenance was lost"
+    );
+}
+
+/// `length(view)` on an entry param must query *its* descriptor. The binding is
+/// baked into `_w_storage_len(set, binding)` as constants (not the side-map), so
+/// this also pins that the right `(set, binding)` reaches the `OpArrayLength`.
+#[test]
+fn entry_length_queries_own_buffer() {
+    let src = r#"
+        #[compute]
+        entry tick(#[storage(set=2, binding=0, access=read)] xs: []f32) []f32 =
+          map(|i: i32| xs[i] * f32.i32(length(xs)), 0i32..<4)
+    "#;
+    let lowered = crate::compile_thru_spirv(src).expect("entry length(view) compiles");
+    assert_array_length_queried_on_descriptor(&lowered.spirv, 2, 0);
+    // and the indexed read still hits the same descriptor
+    assert_storage_descriptor_is_accessed(&lowered.spirv, 2, 0);
+}
+
+/// A `scan` over a view threads that view through loop-carried block params
+/// (scan-DPS phase 1). This is exactly the path `propagate_view_provenance`
+/// keeps correct today; the guard pins that the loop-carried read still resolves
+/// to the input descriptor, so the Tier-2 deletion of that propagation (binding
+/// in the type) can't silently re-route it.
+#[test]
+fn scan_over_view_reads_own_buffer() {
+    let src = r#"
+        #[compute]
+        entry tick(#[storage(set=2, binding=0, access=read)] xs: []f32) []f32 =
+          scan(|a: f32, b: f32| a + b, 0.0, xs)
+    "#;
+    let lowered = crate::compile_thru_spirv(src).expect("scan over a view compiles");
+    assert_storage_descriptor_is_accessed(&lowered.spirv, 2, 0);
+}
+
+/// Tier-2 acceptance spec (not yet satisfied): merging two views at *distinct*
+/// descriptors — `if c then xs else ys` — has no single static binding. The
+/// correct outcome once binding is a type-level region is a **type error**
+/// (unifying `Region(2,0)` with `Region(2,1)` fails), surfaced at the source
+/// rather than a silent wrong-buffer read. Today the binding isn't in the type,
+/// so this doesn't yet diagnose at type-check; `#[ignore]` until Tier 2.
+#[test]
+#[ignore = "Tier 2: distinct-buffer merge becomes a region unification (type) error"]
+fn merge_of_distinct_buffers_is_a_type_error() {
+    let src = r#"
+        #[compute]
+        entry tick(
+          #[storage(set=2, binding=0, access=read)] xs: []f32,
+          #[storage(set=2, binding=1, access=read)] ys: []f32,
+          #[uniform(set=1, binding=0)] c: u32
+        ) []f32 =
+          map(|i: i32| (if c > 0u32 then xs else ys)[i], 0i32..<4)
+    "#;
+    let err = crate::compile_thru_spirv(src)
+        .err()
+        .expect("merging xs and ys (distinct descriptors) must not compile");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("region") || msg.contains("binding") || msg.contains("descriptor"),
+        "expected a region/binding-mismatch type error, got: {msg}"
+    );
+}
+
 // ---- Constructor-style type conversions `T(value)` ----
 //
 // The `i32(x)` form dispatches via the existing per-type catalog

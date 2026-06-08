@@ -34,6 +34,22 @@ struct BufferBinding {
     elem_ty: Type<TypeName>,
 }
 
+/// Provenance for a view-bearing symbol: a compile-time `binding` plus the
+/// `u32` `offset`/`len` *expressions* into that buffer. The single environment
+/// the unified view-op walker resolves against. Entry params and specialized
+/// function params differ only in what `offset`/`len` they're seeded with —
+/// `0`/`storage_len(binding)` for an entry's whole-buffer view, the split
+/// `(offset, len)` param vars for a specialized function — not in any tag here.
+/// (Cloned per use site; TLC tolerates duplicate term ids, so no enum/recipe
+/// indirection is needed.)
+#[derive(Debug, Clone)]
+struct ViewProv {
+    binding: BindingRef,
+    elem_ty: Type<TypeName>,
+    offset: Term,
+    len: Term,
+}
+
 /// A specialization key: for each parameter position, `Some(binding)` if it's
 /// a buffer-backed view, `None` otherwise.
 type SpecKey = Vec<Option<BindingRef>>;
@@ -42,23 +58,12 @@ type SpecKey = Vec<Option<BindingRef>>;
 struct BufferSpecializer {
     symbols: SymbolTable,
     term_ids: TermIdSource,
-    /// Known buffer params in current scope: symbol → BufferBinding.
-    /// Populated per-def (from entry params or function params) and
-    /// cleared when switching defs.
-    buffer_map: HashMap<SymbolId, BufferBinding>,
     /// Cache: (original_def_sym, spec_key) → specialized_def_sym
     specializations: HashMap<(SymbolId, SpecKey), SymbolId>,
     /// Newly generated defs
     new_defs: Vec<Def>,
     /// All defs by symbol for lookup
     def_map: HashMap<SymbolId, Def>,
-}
-
-impl BufferSpecializer {
-    /// Resolve a symbol to a `BufferBinding` from the per-def view-param map.
-    fn resolve_buffer(&self, sym: &SymbolId) -> Option<&BufferBinding> {
-        self.buffer_map.get(sym)
-    }
 }
 
 /// Populate `EntryDecl::param_bindings` on every entry-point def.
@@ -96,6 +101,29 @@ fn array_elem_type(ty: &Type<TypeName>) -> Type<TypeName> {
     ty.elem_type().expect("array has elem type").clone()
 }
 
+/// If `ty` is a fixed-size *composite* array `[N]elem`, return `N`.
+fn composite_array_len(ty: &Type<TypeName>) -> Option<usize> {
+    let is_composite = ty
+        .array_variant()
+        .map(|v| matches!(v, Type::Constructed(TypeName::ArrayVariantComposite, _)))
+        .unwrap_or(false);
+    if !is_composite {
+        return None;
+    }
+    match ty.array_size()? {
+        Type::Constructed(TypeName::Size(n), _) => Some(*n),
+        _ => None,
+    }
+}
+
+/// Whether a term is the literal integer `0`. A whole-buffer view's offset is
+/// `0`; recognizing it lets the index/length lowering drop the no-op `0 + i`
+/// and the index coercion, keeping the entry body's normal form byte-identical
+/// to what downstream passes (`parallelize`, size-hint) pattern-match.
+fn is_int_lit_zero(t: &Term) -> bool {
+    matches!(&t.kind, TermKind::IntLit(s) if s == "0")
+}
+
 /// Extract the parameters of a function by walking nested lambdas.
 fn extract_params(term: &Term) -> (Vec<(SymbolId, Type<TypeName>)>, &Term) {
     match &term.kind {
@@ -120,7 +148,6 @@ pub fn run(mut program: Program) -> Program {
     let mut specializer = BufferSpecializer {
         symbols: program.symbols,
         term_ids: TermIdSource::new(),
-        buffer_map: HashMap::new(),
         specializations: HashMap::new(),
         new_defs: Vec::new(),
         def_map: HashMap::new(),
@@ -131,22 +158,21 @@ pub fn run(mut program: Program) -> Program {
         specializer.def_map.insert(def.name, def.clone());
     }
 
-    // Process each def. Compute entry points populate `buffer_map` from
-    // their declared view-typed parameters; plain function defs do the
-    // same for their own parameters — this is essential for the defunc-
-    // tionalized lambda case, where a lifted lambda takes a buffer arg
-    // and calls a helper through it. Without walking function bodies,
-    // the helper call never gets specialized, and a runtime-sized view
-    // reaches `materialize` (→ SPIR-V can't type that).
+    // Process each def. Compute entries seed the view-provenance environment
+    // from their view-typed parameters; the single view-op walker lowers
+    // reads/length/slices and specializes any function or lifted lambda
+    // reached through a view arg. This is essential for the defunctionalized
+    // lambda case, where a lifted lambda takes a buffer arg and calls a helper
+    // through it — without walking bodies, a runtime-sized view reaches
+    // `materialize` (→ SPIR-V can't type that).
     let mut processed_defs: Vec<Def> = Vec::new();
     for def in &program.defs {
         match &def.meta {
             DefMeta::EntryPoint(entry) => {
-                // Compute entries seed the per-def `buffer_map` from
-                // their view-typed parameters (auto-bound to bindings
-                // 0, 1, …). Vertex/fragment entries have no view
-                // parameters, but their bodies still go through
-                // `rewrite_term` for consistency.
+                // Compute entries lower their view params against a whole-buffer
+                // provenance environment. Vertex/fragment entries have no view
+                // parameters, but their bodies still go through the walker for
+                // consistency.
                 let processed = if matches!(entry.entry_type, interface::Attribute::Compute) {
                     specializer.process_entry_point(def, entry)
                 } else {
@@ -177,30 +203,49 @@ impl BufferSpecializer {
     /// Process a compute entry point: compute buffer bindings for its params,
     /// then walk the body rewriting calls to functions that receive buffer args.
     fn process_entry_point(&mut self, def: &Def, entry: &interface::EntryDecl) -> Def {
-        let old_buffer_map = self.buffer_map.clone();
-        self.buffer_map.clear();
-
-        // Read the cached layout from `entry.param_bindings` (populated by
-        // `populate_entry_param_bindings` at the start of `run`). The body
-        // rewriter handles only bare `Var(sym)` references — skip
-        // tuple-of-views params since `t.0`/`t.1` projections aren't
-        // recognized.
+        // Seed the view-provenance environment from this entry's view-typed
+        // params. Each is a whole-buffer view (offset 0, len storage_len);
+        // the single view-op walker lowers reads/length/slices against it.
+        //
+        // Two sources:
+        //
+        // 1. Auto-bound (no explicit attribute): the layout pass in
+        //    `populate_entry_param_bindings` assigned a binding number
+        //    and cached it as a `Single` entry on `entry.param_bindings`.
+        //
+        // 2. Explicit-bound (`#[storage(set, binding, ...)]`): the layout
+        //    pass deliberately left these as `None` in `param_bindings`
+        //    so the auto-binding counter doesn't reserve their slot. We
+        //    still need their provenance here, so read it back off the
+        //    AST attribute on `entry.params`.
+        //
+        // Tuple-of-views entries are skipped because the body rewriter
+        // handles only bare `Var(sym)` references, not `t.0` / `t.1`.
+        let span = def.body.span;
+        let mut view_params: HashMap<SymbolId, ViewProv> = HashMap::new();
         for param_binding in entry.param_bindings.iter().flatten() {
             let EntryParamBindingKind::Single { binding, elem_ty, .. } = &param_binding.kind else {
                 continue;
             };
-            self.buffer_map.insert(
-                param_binding.param_sym,
-                BufferBinding {
-                    binding: *binding,
-                    elem_ty: elem_ty.clone(),
-                },
-            );
+            let prov = self.whole_buffer_prov(*binding, elem_ty.clone(), span);
+            view_params.insert(param_binding.param_sym, prov);
+        }
+        let (body_params, _) = extract_params(&def.body);
+        for (i, (sym, ty)) in body_params.iter().enumerate() {
+            let Some(pat) = entry.params.get(i) else {
+                continue;
+            };
+            let Some(binding) = crate::binding_layout::extract_storage_binding(pat) else {
+                continue;
+            };
+            if !is_view_array(ty) {
+                continue;
+            }
+            let prov = self.whole_buffer_prov(binding, array_elem_type(ty), span);
+            view_params.insert(*sym, prov);
         }
 
-        let new_body = self.rewrite_term(&def.body);
-
-        self.buffer_map = old_buffer_map;
+        let new_body = self.rewrite_specialized_body(&def.body, &view_params);
 
         Def {
             body: new_body,
@@ -208,477 +253,166 @@ impl BufferSpecializer {
         }
     }
 
-    /// Rewrite a def body with no per-def `buffer_map` — used for
-    /// vertex/fragment entries that don't have auto-bound view
-    /// parameters.
+    /// Rewrite a def body with no view params — used for vertex/fragment
+    /// entries that don't have buffer-backed view parameters.
     fn rewrite_def_body(&mut self, def: &Def) -> Def {
-        let old_buffer_map = self.buffer_map.clone();
-        self.buffer_map.clear();
-        let new_body = self.rewrite_term(&def.body);
-        self.buffer_map = old_buffer_map;
+        let new_body = self.rewrite_specialized_body(&def.body, &HashMap::new());
         Def {
             body: new_body,
             ..def.clone()
         }
     }
 
-    /// Apply buffer specialization to a non-entry `DefMeta::Function`
-    /// body. Needed because `defunctionalize` lifts entry-point lambdas
-    /// into plain functions — a lifted lambda that captured a view-
-    /// typed entry parameter now takes that view as a regular function
-    /// parameter, and calls through it (e.g. `helper(view, i)`) must
-    /// still be specialized to `_w_intrinsic_storage_index(...)`.
-    ///
-    /// Mirrors `process_entry_point`: save the outer `buffer_map`,
-    /// seed a fresh one from this function's view-typed parameters,
-    /// rewrite the body, then restore. Environment is function-local;
-    /// no bindings leak across defs.
+    /// Apply buffer specialization to a non-entry `DefMeta::Function` or
+    /// `DefMeta::LiftedLambda` body. `defunctionalize` lifts entry-point
+    /// lambdas into plain functions, and a function that calls another
+    /// through a view arg (e.g. `helper(view, i)`) still needs that call
+    /// specialized to `_w_intrinsic_storage_index(...)`.
     fn specialize_function_body(&mut self, def: &Def) -> Def {
-        let (params, _inner_body) = extract_params(&def.body);
-        let has_view_params = params.iter().any(|(_, ty)| is_view_array(ty));
-        if !has_view_params {
-            // No view params — nothing to specialize through this def.
-            return def.clone();
-        }
-
-        let old_buffer_map = self.buffer_map.clone();
-        self.buffer_map.clear();
-
-        let mut binding_num = 0u32;
-        for (sym, ty) in &params {
-            if is_view_array(ty) {
-                let elem_ty = array_elem_type(ty);
-                self.buffer_map.insert(
-                    *sym,
-                    BufferBinding {
-                        binding: BindingRef::new(0, binding_num),
-                        elem_ty,
-                    },
-                );
-                binding_num += 1;
-            }
-        }
-
-        let new_body = self.rewrite_term(&def.body);
-
-        self.buffer_map = old_buffer_map;
-
+        // A view-param function is specialized per buffer at its call sites
+        // (`specialize_call` / the SOAC capture path), each clone baking in a
+        // real `(set, binding)`. We rewrite the original against an *empty*
+        // provenance environment: its own view params have no binding to bake
+        // — fabricating one (the old `BindingRef::new(0, n)`) is what made a
+        // mis-routed read silently land in descriptor `(0,0)`. With no
+        // provenance, any view op left on an unspecialized param simply isn't
+        // lowered and fails downstream rather than reading the wrong buffer.
+        // (When every call site specializes, this original is dead.)
+        let new_body = self.rewrite_specialized_body(&def.body, &HashMap::new());
         Def {
             body: new_body,
             ..def.clone()
         }
     }
 
-    /// Rewrite a term, specializing function calls that pass buffer-backed args.
-    fn rewrite_term(&mut self, term: &Term) -> Term {
-        match &term.kind {
-            TermKind::Lambda(lam) => {
-                let new_body = self.rewrite_term(&lam.body);
-                Term {
-                    kind: TermKind::Lambda(Lambda {
-                        params: lam.params.clone(),
-                        body: Box::new(new_body),
-                        ret_ty: lam.ret_ty.clone(),
-                    }),
-                    ..term.clone()
-                }
-            }
-
-            TermKind::Let {
-                name,
-                name_ty,
-                rhs,
-                body,
-            } => {
-                let new_rhs = self.rewrite_term(rhs);
-
-                // If the let-binding aliases a buffer-backed variable, propagate.
-                let was_buffer = if let TermKind::Var(VarRef::Symbol(sym)) = &rhs.kind {
-                    if let Some(binding) = self.resolve_buffer(sym) {
-                        let b = binding.clone();
-                        self.buffer_map.insert(*name, b);
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                };
-
-                let new_body = self.rewrite_term(body);
-
-                if was_buffer {
-                    self.buffer_map.remove(name);
-                }
-
-                Term {
-                    kind: TermKind::Let {
-                        name: *name,
-                        name_ty: name_ty.clone(),
-                        rhs: Box::new(new_rhs),
-                        body: Box::new(new_body),
-                    },
-                    ..term.clone()
-                }
-            }
-
-            TermKind::App { func, args } => {
-                // `length(data)` on a buffer-backed entry param: rewrite
-                // to `storage_len(set, binding)` so the load goes through
-                // the storage view path. Indexed loads are handled in
-                // the `TermKind::Index` arm above.
-                if var_term_builtin_id(func, &self.symbols) == Some(catalog().known().length)
-                    && args.len() == 1
-                {
-                    if let TermKind::Var(VarRef::Symbol(data_sym)) = &args[0].kind {
-                        if let Some(binding) = self.resolve_buffer(data_sym).cloned() {
-                            let span = term.span;
-                            let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
-                            let storage_len =
-                                super::storage_len_call(binding.binding, span, &mut self.term_ids);
-                            if term.ty == u32_ty {
-                                return storage_len;
-                            }
-                            return self.make_app("i32.u32", vec![storage_len], term.ty.clone(), span);
-                        }
-                    }
-                }
-
-                // User-defined function specialization (only meaningful
-                // when the func is a SymbolId-bound user function).
-                match &func.kind {
-                    TermKind::Var(VarRef::Symbol(sym)) => {
-                        // Check if any arguments are buffer-backed (clone to avoid borrow).
-                        let arg_refs: Vec<&Term> = args.iter().collect();
-                        let buffer_args: Vec<Option<BufferBinding>> = args
-                            .iter()
-                            .map(|a| {
-                                if let TermKind::Var(VarRef::Symbol(s)) = &a.kind {
-                                    self.resolve_buffer(s).cloned()
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect();
-
-                        let has_buffer_args = buffer_args.iter().any(|b| b.is_some());
-                        if has_buffer_args {
-                            if let Some(target_def) = self.def_map.get(sym).cloned() {
-                                if matches!(target_def.meta, DefMeta::Function | DefMeta::LiftedLambda) {
-                                    return self.specialize_call(
-                                        *sym,
-                                        &target_def,
-                                        &arg_refs,
-                                        &buffer_args,
-                                        term,
-                                    );
-                                }
-                            }
-                        }
-
-                        // No buffer args or not a known function — recurse normally
-                        let new_func = self.rewrite_term(func);
-                        let new_args: Vec<Term> = args.iter().map(|a| self.rewrite_term(a)).collect();
-                        Term {
-                            kind: TermKind::App {
-                                func: Box::new(new_func),
-                                args: new_args,
-                            },
-                            ..term.clone()
-                        }
-                    }
-                    _ => {
-                        let new_func = self.rewrite_term(func);
-                        let new_args: Vec<Term> = args.iter().map(|a| self.rewrite_term(a)).collect();
-                        Term {
-                            kind: TermKind::App {
-                                func: Box::new(new_func),
-                                args: new_args,
-                            },
-                            ..term.clone()
-                        }
-                    }
-                }
-            }
-
-            TermKind::If {
-                cond,
-                then_branch,
-                else_branch,
-            } => {
-                let new_cond = self.rewrite_term(cond);
-                let new_then = self.rewrite_term(then_branch);
-                let new_else = self.rewrite_term(else_branch);
-                Term {
-                    kind: TermKind::If {
-                        cond: Box::new(new_cond),
-                        then_branch: Box::new(new_then),
-                        else_branch: Box::new(new_else),
-                    },
-                    ..term.clone()
-                }
-            }
-
-            TermKind::Loop {
-                loop_var,
-                loop_var_ty,
-                init,
-                init_bindings,
-                kind,
-                body,
-            } => {
-                let new_init = self.rewrite_term(init);
-                let new_bindings: Vec<_> =
-                    init_bindings.iter().map(|(s, t, e)| (*s, t.clone(), self.rewrite_term(e))).collect();
-                let new_kind = self.rewrite_loop_kind(kind);
-                let new_body = self.rewrite_term(body);
-                Term {
-                    kind: TermKind::Loop {
-                        loop_var: *loop_var,
-                        loop_var_ty: loop_var_ty.clone(),
-                        init: Box::new(new_init),
-                        init_bindings: new_bindings,
-                        kind: new_kind,
-                        body: Box::new(new_body),
-                    },
-                    ..term.clone()
-                }
-            }
-
-            TermKind::Soac(soac) => {
-                let new_soac = self.rewrite_soac(soac);
-                Term {
-                    kind: TermKind::Soac(new_soac),
-                    ..term.clone()
-                }
-            }
-
-            TermKind::ArrayExpr(ae) => {
-                let new_ae = self.rewrite_array_expr(ae);
-                Term {
-                    kind: TermKind::ArrayExpr(new_ae),
-                    ..term.clone()
-                }
-            }
-
-            // Leaves — no rewriting needed
-            TermKind::Var(_)
-            | TermKind::BinOp(_)
-            | TermKind::UnOp(_)
-            | TermKind::IntLit(_)
-            | TermKind::FloatLit(_)
-            | TermKind::BoolLit(_)
-            | TermKind::UnitLit
-            | TermKind::Extern(_) => term.clone(),
-
-            TermKind::Coerce { inner, target_ty } => Term {
-                kind: TermKind::Coerce {
-                    inner: Box::new(self.rewrite_term(inner)),
-                    target_ty: target_ty.clone(),
-                },
-                ..term.clone()
-            },
-
-            TermKind::Tuple(parts) => Term {
-                kind: TermKind::Tuple(parts.iter().map(|p| self.rewrite_term(p)).collect()),
-                ..term.clone()
-            },
-            TermKind::TupleProj { tuple, idx } => Term {
-                kind: TermKind::TupleProj {
-                    tuple: Box::new(self.rewrite_term(tuple)),
-                    idx: *idx,
-                },
-                ..term.clone()
-            },
-            TermKind::Index { array, index } => {
-                // Buffer-backed indexed load: rewrite `arr[i]` to
-                // `_w_intrinsic_storage_index(set, binding, i)` so the
-                // load goes through the storage view path rather than
-                // being lowered as `materialize + dynamic_extract` on
-                // a runtime-sized buffer (which is invalid).
-                if let TermKind::Var(VarRef::Symbol(data_sym)) = &array.kind {
-                    if let Some(binding) = self.resolve_buffer(data_sym).cloned() {
-                        let span = term.span;
-                        let idx = self.rewrite_term(index);
-                        return super::storage_index_call(
-                            binding.binding,
-                            idx,
-                            binding.elem_ty,
-                            span,
-                            &mut self.term_ids,
-                        );
-                    }
-                }
-                Term {
-                    kind: TermKind::Index {
-                        array: Box::new(self.rewrite_term(array)),
-                        index: Box::new(self.rewrite_term(index)),
-                    },
-                    ..term.clone()
-                }
-            }
-            TermKind::VecLit(parts) => Term {
-                kind: TermKind::VecLit(parts.iter().map(|p| self.rewrite_term(p)).collect()),
-                ..term.clone()
-            },
-            TermKind::OutputSlotStore { slot_index, value } => Term {
-                kind: TermKind::OutputSlotStore {
-                    slot_index: *slot_index,
-                    value: Box::new(self.rewrite_term(value)),
-                },
-                ..term.clone()
-            },
+    fn try_specialize_soac_view_captures(
+        &mut self,
+        sb: &super::SoacBody,
+        view_params: &HashMap<SymbolId, ViewProv>,
+    ) -> Option<super::SoacBody> {
+        let TermKind::Var(VarRef::Symbol(lifted_sym)) = &sb.lam.body.kind else {
+            return None;
+        };
+        let lifted_sym = *lifted_sym;
+        let target_def = self.def_map.get(&lifted_sym)?.clone();
+        if !matches!(target_def.meta, DefMeta::Function | DefMeta::LiftedLambda) {
+            return None;
         }
+
+        // closure_convert appends captures after the original lambda
+        // params, so capture i corresponds to lifted-def param
+        // `n_lam_params + i`.
+        let (target_params, _) = extract_params(&target_def.body);
+        let n_lam_params = sb.lam.params.len();
+        if target_params.len() != n_lam_params + sb.captures.len() {
+            return None;
+        }
+
+        let mut buffer_args: Vec<Option<BufferBinding>> = vec![None; target_params.len()];
+        let mut cap_views: Vec<Option<crate::tlc::StorageView>> =
+            (0..target_params.len()).map(|_| None).collect();
+        let mut any_buffer = false;
+        for (i, (_, _, cap_term)) in sb.captures.iter().enumerate() {
+            let TermKind::Var(VarRef::Symbol(_)) = &cap_term.kind else {
+                continue;
+            };
+            let Some(view) = self.try_resolve_view_expr(cap_term, view_params) else {
+                continue;
+            };
+            buffer_args[n_lam_params + i] = Some(BufferBinding {
+                binding: view.binding,
+                elem_ty: view.elem_ty.clone(),
+            });
+            cap_views[n_lam_params + i] = Some(view);
+            any_buffer = true;
+        }
+        if !any_buffer {
+            return None;
+        }
+
+        // Share the `(orig_sym, spec_key) → spec_sym` cache with the App
+        // path so a buffer reached via both forms gets one specialized
+        // copy. SOAC sites need the offset/len param symbols too — those
+        // come back as `split_syms` on a cache miss; on a hit, recover
+        // them by walking the cached def's param list.
+        let spec_key: SpecKey = buffer_args.iter().map(|b| b.as_ref().map(|bb| bb.binding)).collect();
+        let (spec_sym, split_syms) =
+            if let Some(&cached) = self.specializations.get(&(lifted_sym, spec_key.clone())) {
+                (cached, self.recover_split_syms(cached, &buffer_args))
+            } else {
+                let (s, splits) =
+                    self.create_specialized_def(lifted_sym, &target_def, &buffer_args, sb.lam.body.span);
+                self.specializations.insert((lifted_sym, spec_key), s);
+                (s, splits)
+            };
+
+        let new_lam_body = Term {
+            id: self.term_ids.next_id(),
+            kind: TermKind::Var(VarRef::Symbol(spec_sym)),
+            ..(*sb.lam.body).clone()
+        };
+        let new_lam = Lambda {
+            params: sb.lam.params.clone(),
+            body: Box::new(new_lam_body),
+            ret_ty: sb.lam.ret_ty.clone(),
+        };
+
+        let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
+        let mut new_captures: Vec<(SymbolId, Type<TypeName>, Term)> =
+            Vec::with_capacity(sb.captures.len() + 1);
+        for (i, (cap_sym, cap_ty, cap_term)) in sb.captures.iter().enumerate() {
+            let pos = n_lam_params + i;
+            match (&cap_views[pos], &split_syms[pos]) {
+                (Some(view), Some((offset_sym, len_sym))) => {
+                    // Forward the source view's runtime offset/len into the
+                    // child def's split params — whole-buffer (0/storage_len)
+                    // for an entry capture, the param's own bounds for a
+                    // view-param capture.
+                    new_captures.push((*offset_sym, u32_ty.clone(), (*view.offset).clone()));
+                    new_captures.push((*len_sym, u32_ty.clone(), (*view.len).clone()));
+                }
+                _ => {
+                    new_captures.push((
+                        *cap_sym,
+                        cap_ty.clone(),
+                        self.rewrite_specialized_body(cap_term, view_params),
+                    ));
+                }
+            }
+        }
+
+        Some(super::SoacBody {
+            lam: new_lam,
+            captures: new_captures,
+        })
     }
 
-    fn rewrite_loop_kind(&mut self, kind: &LoopKind) -> LoopKind {
-        match kind {
-            LoopKind::For { var, var_ty, iter } => LoopKind::For {
-                var: *var,
-                var_ty: var_ty.clone(),
-                iter: Box::new(self.rewrite_term(iter)),
-            },
-            LoopKind::ForRange { var, var_ty, bound } => LoopKind::ForRange {
-                var: *var,
-                var_ty: var_ty.clone(),
-                bound: Box::new(self.rewrite_term(bound)),
-            },
-            LoopKind::While { cond } => LoopKind::While {
-                cond: Box::new(self.rewrite_term(cond)),
-            },
-        }
-    }
-
-    fn rewrite_soac(&mut self, soac: &SoacOp) -> SoacOp {
-        match soac {
-            SoacOp::Map {
-                lam,
-                inputs,
-                destination,
-            } => SoacOp::Map {
-                lam: self.rewrite_soac_body(lam),
-                inputs: inputs.iter().map(|ae| self.rewrite_array_expr(ae)).collect(),
-                destination: *destination,
-            },
-            SoacOp::Reduce { op, ne, input } => SoacOp::Reduce {
-                op: self.rewrite_soac_body(op),
-                ne: Box::new(self.rewrite_term(ne)),
-                input: self.rewrite_array_expr(input),
-            },
-            SoacOp::Scan {
-                op,
-                reduce_op,
-                ne,
-                input,
-                destination,
-            } => SoacOp::Scan {
-                op: self.rewrite_soac_body(op),
-                reduce_op: self.rewrite_soac_body(reduce_op),
-                ne: Box::new(self.rewrite_term(ne)),
-                input: self.rewrite_array_expr(input),
-                destination: *destination,
-            },
-            SoacOp::Filter {
-                pred,
-                input,
-                destination,
-            } => SoacOp::Filter {
-                pred: self.rewrite_soac_body(pred),
-                input: self.rewrite_array_expr(input),
-                destination: *destination,
-            },
-            SoacOp::Scatter {
-                dest,
-                indices,
-                values,
-            } => SoacOp::Scatter {
-                dest: self.rewrite_place(dest),
-                indices: self.rewrite_array_expr(indices),
-                values: self.rewrite_array_expr(values),
-            },
-            SoacOp::ReduceByIndex {
-                dest,
-                op,
-                ne,
-                indices,
-                values,
-            } => SoacOp::ReduceByIndex {
-                dest: self.rewrite_place(dest),
-                op: self.rewrite_soac_body(op),
-                ne: Box::new(self.rewrite_term(ne)),
-                indices: self.rewrite_array_expr(indices),
-                values: self.rewrite_array_expr(values),
-            },
-            SoacOp::Redomap {
-                op,
-                reduce_op,
-                ne,
-                inputs,
-            } => SoacOp::Redomap {
-                op: self.rewrite_soac_body(op),
-                reduce_op: self.rewrite_soac_body(reduce_op),
-                ne: Box::new(self.rewrite_term(ne)),
-                inputs: inputs.iter().map(|ae| self.rewrite_array_expr(ae)).collect(),
-            },
-        }
-    }
-
-    fn rewrite_lambda(&mut self, lam: &Lambda) -> Lambda {
-        Lambda {
-            params: lam.params.clone(),
-            body: Box::new(self.rewrite_term(&lam.body)),
-            ret_ty: lam.ret_ty.clone(),
-        }
-    }
-
-    fn rewrite_soac_body(&mut self, sb: &super::SoacBody) -> super::SoacBody {
-        super::SoacBody {
-            lam: self.rewrite_lambda(&sb.lam),
-            captures: sb.captures.iter().map(|(s, t, e)| (*s, t.clone(), self.rewrite_term(e))).collect(),
-        }
-    }
-
-    fn rewrite_array_expr(&mut self, ae: &ArrayExpr) -> ArrayExpr {
-        match ae {
-            ArrayExpr::Ref(t) => ArrayExpr::Ref(Box::new(self.rewrite_term(t))),
-            ArrayExpr::Zip(aes) => ArrayExpr::Zip(aes.iter().map(|a| self.rewrite_array_expr(a)).collect()),
-            ArrayExpr::Soac(op) => ArrayExpr::Soac(Box::new(self.rewrite_soac(op))),
-            ArrayExpr::Literal(terms) => {
-                ArrayExpr::Literal(terms.iter().map(|t| self.rewrite_term(t)).collect())
+    /// Given a cached specialized def and the buffer_args that produced
+    /// it, walk the spec def's params to recover the `(offset_sym, len_sym)`
+    /// allocated for each view position. Used when the specialization
+    /// cache hits and we need the symbols at a new caller site.
+    fn recover_split_syms(
+        &self,
+        spec_sym: SymbolId,
+        buffer_args: &[Option<BufferBinding>],
+    ) -> Vec<Option<(SymbolId, SymbolId)>> {
+        let def = self
+            .new_defs
+            .iter()
+            .find(|d| d.name == spec_sym)
+            .expect("BUG: cached spec sym not in new_defs");
+        let (params, _) = extract_params(&def.body);
+        let mut splits: Vec<Option<(SymbolId, SymbolId)>> = vec![None; buffer_args.len()];
+        let mut p = 0usize;
+        for (i, slot) in buffer_args.iter().enumerate() {
+            if slot.is_some() {
+                splits[i] = Some((params[p].0, params[p + 1].0));
+                p += 2;
+            } else {
+                p += 1;
             }
-            ArrayExpr::Range { start, len, step } => ArrayExpr::Range {
-                start: Box::new(self.rewrite_term(start)),
-                len: Box::new(self.rewrite_term(len)),
-                step: step.as_ref().map(|s| Box::new(self.rewrite_term(s))),
-            },
-            ArrayExpr::StorageView(sv) => ArrayExpr::StorageView(crate::tlc::StorageView {
-                binding: sv.binding,
-                offset: Box::new(self.rewrite_term(&sv.offset)),
-                len: Box::new(self.rewrite_term(&sv.len)),
-                elem_ty: sv.elem_ty.clone(),
-            }),
         }
-    }
-
-    fn rewrite_place(&mut self, place: &Place) -> Place {
-        match place {
-            Place::BufferSlice {
-                base,
-                offset,
-                shape,
-                elem_ty,
-            } => Place::BufferSlice {
-                base: Box::new(self.rewrite_term(base)),
-                offset: Box::new(self.rewrite_term(offset)),
-                shape: shape.clone(),
-                elem_ty: elem_ty.clone(),
-            },
-            Place::LocalArray { id, shape, elem_ty } => Place::LocalArray {
-                id: *id,
-                shape: shape.clone(),
-                elem_ty: elem_ty.clone(),
-            },
-        }
+        splits
     }
 
     /// Create a specialized version of a function for specific buffer bindings.
@@ -696,12 +430,14 @@ impl BufferSpecializer {
         // Build specialization key
         let spec_key: SpecKey = buffer_args.iter().map(|b| b.as_ref().map(|bb| bb.binding)).collect();
 
-        // Check if we already have this specialization
+        // Check if we already have this specialization. App call sites
+        // build their new arg list inline below; the `split_syms` side
+        // channel from `create_specialized_def` is unused on this path
+        // (it exists for SOAC capture rewriting, where positions matter).
         let spec_sym = if let Some(&sym) = self.specializations.get(&(func_sym, spec_key.clone())) {
             sym
         } else {
-            // Create the specialized function
-            let spec_sym = self.create_specialized_def(func_sym, target_def, buffer_args, span);
+            let (spec_sym, _splits) = self.create_specialized_def(func_sym, target_def, buffer_args, span);
             self.specializations.insert((func_sym, spec_key), spec_sym);
             spec_sym
         };
@@ -718,7 +454,9 @@ impl BufferSpecializer {
                 new_args.push(zero);
                 new_args.push(storage_len);
             } else {
-                new_args.push(self.rewrite_term(arg));
+                // Args arrive already rewritten by the caller (the specialized
+                // App arm); a non-buffer arg passes through unchanged.
+                new_args.push((*arg).clone());
             }
         }
 
@@ -745,15 +483,44 @@ impl BufferSpecializer {
         }
     }
 
+    /// Provenance for an entry's whole-buffer view: the descriptor `binding`,
+    /// `offset = 0`, `len = storage_len(binding)`. The `0` offset is what the
+    /// view-op lowering recognizes to keep the entry body's normal form intact.
+    fn whole_buffer_prov(&mut self, binding: BindingRef, elem_ty: Type<TypeName>, span: Span) -> ViewProv {
+        let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
+        let offset = self.make_int_lit("0", u32_ty, span);
+        let len = super::storage_len_call(binding, span, &mut self.term_ids);
+        ViewProv {
+            binding,
+            elem_ty,
+            offset,
+            len,
+        }
+    }
+
+    /// A fresh `Var(sym)` term of type `ty`. Used to seed `ViewProv` offset/len.
+    fn var_term(&mut self, sym: SymbolId, ty: Type<TypeName>, span: Span) -> Term {
+        Term {
+            id: self.term_ids.next_id(),
+            ty,
+            span,
+            kind: TermKind::Var(VarRef::Symbol(sym)),
+        }
+    }
+
     /// Create a specialized copy of a function where view params are replaced
     /// with (offset: u32, len: u32) and array ops use storage intrinsics.
+    /// Returns the new def's `SymbolId` plus, for each `buffer_args` entry,
+    /// the `(offset_sym, len_sym)` allocated for that position (or `None`
+    /// for non-view positions). Callers reading captures-by-position
+    /// (SOACs) need these to label the new offset/len terms.
     fn create_specialized_def(
         &mut self,
         _func_sym: SymbolId,
         target_def: &Def,
         buffer_args: &[Option<BufferBinding>],
         _span: Span,
-    ) -> SymbolId {
+    ) -> (SymbolId, Vec<Option<(SymbolId, SymbolId)>>) {
         let orig_name = self.symbols.get(target_def.name).expect("BUG: symbol not in table").clone();
 
         // Build suffix from buffer bindings
@@ -775,9 +542,10 @@ impl BufferSpecializer {
         // Build new params and a mapping from old view params to their buffer info
         let mut new_params: Vec<(SymbolId, Type<TypeName>)> = Vec::new();
         // Maps old param sym → (offset_sym, len_sym, set, binding, elem_ty)
-        let mut view_param_map: HashMap<SymbolId, (SymbolId, SymbolId, BindingRef, Type<TypeName>)> =
-            HashMap::new();
+        let mut view_param_map: HashMap<SymbolId, ViewProv> = HashMap::new();
 
+        let mut split_syms: Vec<Option<(SymbolId, SymbolId)>> =
+            (0..buffer_args.len()).map(|_| None).collect();
         for (i, (sym, ty)) in orig_params.iter().enumerate() {
             if let Some(Some(binding)) = buffer_args.get(i) {
                 // Replace view param with offset + len
@@ -785,10 +553,18 @@ impl BufferSpecializer {
                 let len_sym = self.symbols.alloc(format!("{}_len", self.symbols.get(*sym).unwrap()));
                 new_params.push((offset_sym, u32_ty.clone()));
                 new_params.push((len_sym, u32_ty.clone()));
+                let offset = self.var_term(offset_sym, u32_ty.clone(), _span);
+                let len = self.var_term(len_sym, u32_ty.clone(), _span);
                 view_param_map.insert(
                     *sym,
-                    (offset_sym, len_sym, binding.binding, binding.elem_ty.clone()),
+                    ViewProv {
+                        binding: binding.binding,
+                        elem_ty: binding.elem_ty.clone(),
+                        offset,
+                        len,
+                    },
                 );
+                split_syms[i] = Some((offset_sym, len_sym));
             } else {
                 new_params.push((*sym, ty.clone()));
             }
@@ -810,16 +586,12 @@ impl BufferSpecializer {
         };
 
         self.new_defs.push(spec_def);
-        spec_sym
+        (spec_sym, split_syms)
     }
 
     /// Rewrite the body of a specialized function, replacing operations on
     /// view params with storage intrinsics.
-    fn rewrite_specialized_body(
-        &mut self,
-        term: &Term,
-        view_params: &HashMap<SymbolId, (SymbolId, SymbolId, BindingRef, Type<TypeName>)>,
-    ) -> Term {
+    fn rewrite_specialized_body(&mut self, term: &Term, view_params: &HashMap<SymbolId, ViewProv>) -> Term {
         match &term.kind {
             TermKind::App { func, args } => {
                 // `length(arr_expr)` where arr_expr resolves to a view.
@@ -834,13 +606,69 @@ impl BufferSpecializer {
                     }
                 }
 
-                // _w_intrinsic_slice(arr_expr, start, end) where arr_expr resolves to a view
-                // The slice itself produces a view — it can only be consumed by
-                // _w_index or _w_intrinsic_length above. If it appears bare
-                // (e.g. passed to a function), we fall through to default recursion.
-                // But we should NOT recurse into the arr_expr of the slice, because
-                // that would hit the bare Var case and fail. Instead we leave it for
-                // the outer consumer (_w_index, _w_intrinsic_length, or Let) to resolve.
+                // `_w_intrinsic_slice(view, start, end)` whose *result* is a
+                // composite array is a slice→composite materialization (e.g.
+                // `xs[0..3]` passed to a `[N]elem`-typed function). Lower it here
+                // to an N-element composite of storage reads at `offset + k`, so
+                // the view param's buffer provenance is baked in rather than
+                // surviving as a bare `Var(view_param)` that reaches SPIR-V as an
+                // undefined global. (A slice that stays a *view* is consumed by
+                // Index/length/Let above and is left untouched — recursing into
+                // its operand here would hit the bare-Var case.)
+                if var_term_builtin_id(func, &self.symbols) == Some(catalog().known().slice) {
+                    if let Some(n) = composite_array_len(&term.ty) {
+                        if let Some(view) = self.try_resolve_view_expr(term, view_params) {
+                            let span = term.span;
+                            let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
+                            // Bind the slice's base offset once; each element reads
+                            // `offset + k`.
+                            let off_sym = self.symbols.alloc("_slice_off".to_string());
+                            let binding = view.binding;
+                            let elem_ty = view.elem_ty.clone();
+                            let mut reads: Vec<Term> = Vec::with_capacity(n);
+                            for k in 0..n {
+                                let off_ref = Term {
+                                    id: self.term_ids.next_id(),
+                                    ty: u32_ty.clone(),
+                                    span,
+                                    kind: TermKind::Var(VarRef::Symbol(off_sym)),
+                                };
+                                let k_lit = self.make_int_lit(&k.to_string(), u32_ty.clone(), span);
+                                let idx = self.make_binop_app(
+                                    ast::BinaryOp { op: "+".to_string() },
+                                    off_ref,
+                                    k_lit,
+                                    u32_ty.clone(),
+                                    span,
+                                );
+                                reads.push(super::storage_index_call(
+                                    binding,
+                                    idx,
+                                    elem_ty.clone(),
+                                    span,
+                                    &mut self.term_ids,
+                                ));
+                            }
+                            let array = Term {
+                                id: self.term_ids.next_id(),
+                                ty: term.ty.clone(),
+                                span,
+                                kind: TermKind::ArrayExpr(ArrayExpr::Literal(reads)),
+                            };
+                            return Term {
+                                id: self.term_ids.next_id(),
+                                ty: term.ty.clone(),
+                                span,
+                                kind: TermKind::Let {
+                                    name: off_sym,
+                                    name_ty: u32_ty,
+                                    rhs: view.offset,
+                                    body: Box::new(array),
+                                },
+                            };
+                        }
+                    }
+                }
 
                 // User-defined function specialization (only meaningful
                 // for SymbolId-bound user functions).
@@ -851,16 +679,12 @@ impl BufferSpecializer {
                         .iter()
                         .map(|a| {
                             if let TermKind::Var(VarRef::Symbol(s)) = &a.kind {
-                                if view_params.contains_key(s) {
-                                    // This is a view param — build a BufferBinding for it
-                                    let (_, _, br, elem_ty) = &view_params[s];
-                                    Some(BufferBinding {
-                                        binding: *br,
-                                        elem_ty: elem_ty.clone(),
-                                    })
-                                } else {
-                                    self.resolve_buffer(s).cloned()
-                                }
+                                // A view-typed arg is one of this scope's view
+                                // params; build a BufferBinding from its provenance.
+                                view_params.get(s).map(|prov| BufferBinding {
+                                    binding: prov.binding,
+                                    elem_ty: prov.elem_ty.clone(),
+                                })
                             } else {
                                 None
                             }
@@ -870,7 +694,7 @@ impl BufferSpecializer {
                     let has_inner_buf = inner_buffer_args.iter().any(|b| b.is_some());
                     if has_inner_buf {
                         if let Some(target_def) = self.def_map.get(sym).cloned() {
-                            if matches!(target_def.meta, DefMeta::Function) {
+                            if matches!(target_def.meta, DefMeta::Function | DefMeta::LiftedLambda) {
                                 let rewritten_args: Vec<Term> = args
                                     .iter()
                                     .map(|a| self.rewrite_specialized_body(a, view_params))
@@ -930,9 +754,18 @@ impl BufferSpecializer {
                     let offset_sym = self.symbols.alloc(format!("{}_offset", base_name));
                     let len_sym = self.symbols.alloc(format!("{}_len", base_name));
 
-                    // Extend view_params so the body knows `name` is a view
+                    // Extend view_params so the body knows `name` is a view.
+                    // The body refers to the let-bound offset/len symbols below.
                     let mut extended = view_params.clone();
-                    extended.insert(*name, (offset_sym, len_sym, view.binding, view.elem_ty.clone()));
+                    extended.insert(
+                        *name,
+                        ViewProv {
+                            binding: view.binding,
+                            elem_ty: view.elem_ty.clone(),
+                            offset: self.var_term(offset_sym, u32_ty.clone(), span),
+                            len: self.var_term(len_sym, u32_ty.clone(), span),
+                        },
+                    );
 
                     let new_body = self.rewrite_specialized_body(body, &extended);
 
@@ -1099,6 +932,18 @@ impl BufferSpecializer {
                 if let Some(view) = self.try_resolve_view_expr(array, view_params) {
                     let span = term.span;
                     let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
+                    // Whole-buffer view (offset 0): index directly, no `0 + i`
+                    // and no coercion, matching the entry-body normal form.
+                    if is_int_lit_zero(&view.offset) {
+                        let idx = self.rewrite_specialized_body(index, view_params);
+                        return super::storage_index_call(
+                            view.binding,
+                            idx,
+                            view.elem_ty,
+                            span,
+                            &mut self.term_ids,
+                        );
+                    }
                     let idx = self.rewrite_specialized_body(index, view_params);
                     let idx = if idx.ty == u32_ty {
                         idx
@@ -1147,7 +992,7 @@ impl BufferSpecializer {
     fn rewrite_specialized_loop_kind(
         &mut self,
         kind: &LoopKind,
-        view_params: &HashMap<SymbolId, (SymbolId, SymbolId, BindingRef, Type<TypeName>)>,
+        view_params: &HashMap<SymbolId, ViewProv>,
     ) -> LoopKind {
         match kind {
             LoopKind::For { var, var_ty, iter } => LoopKind::For {
@@ -1169,7 +1014,7 @@ impl BufferSpecializer {
     fn rewrite_specialized_soac(
         &mut self,
         soac: &SoacOp,
-        view_params: &HashMap<SymbolId, (SymbolId, SymbolId, BindingRef, Type<TypeName>)>,
+        view_params: &HashMap<SymbolId, ViewProv>,
     ) -> SoacOp {
         match soac {
             SoacOp::Map {
@@ -1253,7 +1098,7 @@ impl BufferSpecializer {
     fn rewrite_specialized_lambda(
         &mut self,
         lam: &Lambda,
-        view_params: &HashMap<SymbolId, (SymbolId, SymbolId, BindingRef, Type<TypeName>)>,
+        view_params: &HashMap<SymbolId, ViewProv>,
     ) -> Lambda {
         Lambda {
             params: lam.params.clone(),
@@ -1265,8 +1110,15 @@ impl BufferSpecializer {
     fn rewrite_specialized_soac_body(
         &mut self,
         sb: &super::SoacBody,
-        view_params: &HashMap<SymbolId, (SymbolId, SymbolId, BindingRef, Type<TypeName>)>,
+        view_params: &HashMap<SymbolId, ViewProv>,
     ) -> super::SoacBody {
+        // Same capture-specialization the entry path uses, resolved against the
+        // local view_params: a SOAC whose lambda captures one of this
+        // specialized function's view params must specialize the lifted def too.
+        if let Some(new_sb) = self.try_specialize_soac_view_captures(sb, view_params) {
+            return new_sb;
+        }
+
         super::SoacBody {
             lam: self.rewrite_specialized_lambda(&sb.lam, view_params),
             captures: sb
@@ -1280,30 +1132,27 @@ impl BufferSpecializer {
     fn rewrite_specialized_array_expr(
         &mut self,
         ae: &ArrayExpr,
-        view_params: &HashMap<SymbolId, (SymbolId, SymbolId, BindingRef, Type<TypeName>)>,
+        view_params: &HashMap<SymbolId, ViewProv>,
     ) -> ArrayExpr {
         match ae {
             ArrayExpr::Ref(t) => {
-                // If the ref is a bare Var pointing to a view param, emit StorageBuffer
+                // A bare `Var` pointing to a view param used as a whole array
+                // (e.g. a SOAC input). A specialized-function view param (offset
+                // is a `Var`) no longer exists as a value — reconstitute it as an
+                // explicit `StorageView`. An entry whole-buffer view (offset 0)
+                // still denotes a live param; leave the `Var` so egir/parallelize
+                // resolve its binding and size hint from the entry layout — the
+                // normal form those passes pattern-match.
                 if let TermKind::Var(VarRef::Symbol(sym)) = &t.kind {
-                    if let Some((offset_sym, len_sym, br, elem_ty)) = view_params.get(sym) {
-                        let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
-                        return ArrayExpr::StorageView(crate::tlc::StorageView {
-                            binding: *br,
-                            offset: Box::new(Term {
-                                id: self.term_ids.next_id(),
-                                ty: u32_ty.clone(),
-                                span: t.span,
-                                kind: TermKind::Var(VarRef::Symbol(*offset_sym)),
-                            }),
-                            len: Box::new(Term {
-                                id: self.term_ids.next_id(),
-                                ty: u32_ty,
-                                span: t.span,
-                                kind: TermKind::Var(VarRef::Symbol(*len_sym)),
-                            }),
-                            elem_ty: elem_ty.clone(),
-                        });
+                    if let Some(prov) = view_params.get(sym) {
+                        if !is_int_lit_zero(&prov.offset) {
+                            return ArrayExpr::StorageView(crate::tlc::StorageView {
+                                binding: prov.binding,
+                                offset: Box::new(prov.offset.clone()),
+                                len: Box::new(prov.len.clone()),
+                                elem_ty: prov.elem_ty.clone(),
+                            });
+                        }
                     }
                 }
                 ArrayExpr::Ref(Box::new(self.rewrite_specialized_body(t, view_params)))
@@ -1334,7 +1183,7 @@ impl BufferSpecializer {
     fn rewrite_specialized_place(
         &mut self,
         place: &Place,
-        view_params: &HashMap<SymbolId, (SymbolId, SymbolId, BindingRef, Type<TypeName>)>,
+        view_params: &HashMap<SymbolId, ViewProv>,
     ) -> Place {
         match place {
             Place::BufferSlice {
@@ -1369,27 +1218,16 @@ impl BufferSpecializer {
     fn try_resolve_view_expr(
         &mut self,
         term: &Term,
-        view_params: &HashMap<SymbolId, (SymbolId, SymbolId, BindingRef, Type<TypeName>)>,
+        view_params: &HashMap<SymbolId, ViewProv>,
     ) -> Option<crate::tlc::StorageView> {
         match &term.kind {
             TermKind::Var(VarRef::Symbol(sym)) => {
-                let (offset_sym, len_sym, br, elem_ty) = view_params.get(sym)?;
-                let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
+                let prov = view_params.get(sym)?;
                 Some(crate::tlc::StorageView {
-                    binding: *br,
-                    offset: Box::new(Term {
-                        id: self.term_ids.next_id(),
-                        ty: u32_ty.clone(),
-                        span: term.span,
-                        kind: TermKind::Var(VarRef::Symbol(*offset_sym)),
-                    }),
-                    len: Box::new(Term {
-                        id: self.term_ids.next_id(),
-                        ty: u32_ty,
-                        span: term.span,
-                        kind: TermKind::Var(VarRef::Symbol(*len_sym)),
-                    }),
-                    elem_ty: elem_ty.clone(),
+                    binding: prov.binding,
+                    offset: Box::new(prov.offset.clone()),
+                    len: Box::new(prov.len.clone()),
+                    elem_ty: prov.elem_ty.clone(),
                 })
             }
             TermKind::App { func, args } => {

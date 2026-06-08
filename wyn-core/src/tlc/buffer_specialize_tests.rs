@@ -4,7 +4,7 @@
 //! `rewrite_specialized_body`'s alias handling — see
 //! `bare_var_view_alias_via_if_not_resolved`.
 
-use super::BufferSpecializer;
+use super::{BufferSpecializer, ViewProv};
 use crate::ast::{Span, TypeName};
 use crate::tlc::{Term, TermId, TermIdSource, TermKind, VarRef};
 use crate::{BindingRef, SymbolId, SymbolTable};
@@ -81,7 +81,6 @@ fn fresh_specializer(symbols: SymbolTable, term_ids: TermIdSource) -> BufferSpec
     BufferSpecializer {
         symbols,
         term_ids,
-        buffer_map: HashMap::new(),
         specializations: HashMap::new(),
         new_defs: Vec::new(),
         def_map: HashMap::new(),
@@ -125,9 +124,16 @@ fn bare_var_view_alias_via_if_not_resolved() {
 
     // view_params pre-seeded with `board` (as `process_entry_point`
     // would after reading the entry's param_bindings).
-    let mut view_params: HashMap<SymbolId, (SymbolId, SymbolId, BindingRef, Type<TypeName>)> =
-        HashMap::new();
-    view_params.insert(board, (offset, len, BindingRef::new(0, 0), i32_ty()));
+    let mut view_params: HashMap<SymbolId, ViewProv> = HashMap::new();
+    view_params.insert(
+        board,
+        ViewProv {
+            binding: BindingRef::new(0, 0),
+            elem_ty: i32_ty(),
+            offset: b.var(offset, u32_ty()),
+            len: b.var(len, u32_ty()),
+        },
+    );
 
     // Build `let alias = (if true then Var(board) else Var(board)) in
     // _w_intrinsic_length(alias)`.
