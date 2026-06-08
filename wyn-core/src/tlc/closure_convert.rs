@@ -1110,6 +1110,14 @@ impl<'a> ClosureConverter<'a> {
             })
             .collect();
 
+        // Symbols bound *within* `body` (lets, nested lambda/SOAC params,
+        // loop vars). A transitive capture that's bound here is available
+        // locally — propagating it up would reference an undefined symbol at
+        // the enclosing call site (e.g. `map(|i| let pi = xs[i] in
+        // reduce(+, 0, map(|j| xs[j] - pi, …)))`: the inner closure captures
+        // `pi`, but `pi` is a local of this body, not a capture of it).
+        let body_bound = collect_bound_syms(body);
+
         let mut worklist: Vec<SymbolId> = super::collect_var_refs(body);
         let mut visited: HashSet<SymbolId> = HashSet::new();
         while let Some(sym) = worklist.pop() {
@@ -1125,7 +1133,7 @@ impl<'a> ClosureConverter<'a> {
                     TermKind::Var(VarRef::Symbol(s)) => *s,
                     _ => continue,
                 };
-                if bound.contains(&cap_sym) || seen.contains(&cap_sym) {
+                if bound.contains(&cap_sym) || body_bound.contains(&cap_sym) || seen.contains(&cap_sym) {
                     worklist.push(cap_sym);
                     continue;
                 }
@@ -1149,6 +1157,68 @@ impl<'a> ClosureConverter<'a> {
 
 fn is_arrow_param(ty: &Type<TypeName>) -> bool {
     matches!(ty, Type::Constructed(TypeName::Arrow, _))
+}
+
+/// Every symbol bound *within* `term` — `let` names, lambda / SOAC-lambda
+/// params, SOAC capture binders, loop variables and loop-init bindings.
+/// Used by `compute_transitive_captures` to avoid propagating a nested
+/// closure's capture upward when that symbol is actually a local of the
+/// enclosing body. `for_each_child` handles the recursion into sub-terms.
+fn collect_bound_syms(term: &Term) -> HashSet<SymbolId> {
+    let mut out = HashSet::new();
+    collect_bound_syms_inner(term, &mut out);
+    out
+}
+
+fn collect_bound_syms_inner(term: &Term, out: &mut HashSet<SymbolId>) {
+    match &term.kind {
+        TermKind::Let { name, .. } => {
+            out.insert(*name);
+        }
+        TermKind::Lambda(lam) => {
+            out.extend(lam.params.iter().map(|(p, _)| *p));
+        }
+        TermKind::Loop {
+            loop_var,
+            init_bindings,
+            kind,
+            ..
+        } => {
+            out.insert(*loop_var);
+            out.extend(init_bindings.iter().map(|(n, _, _)| *n));
+            match kind {
+                LoopKind::For { var, .. } | LoopKind::ForRange { var, .. } => {
+                    out.insert(*var);
+                }
+                LoopKind::While { .. } => {}
+            }
+        }
+        TermKind::Soac(soac) => collect_soac_bound_syms(soac, out),
+        _ => {}
+    }
+    term.for_each_child(&mut |child| collect_bound_syms_inner(child, out));
+}
+
+fn collect_soac_bound_syms(soac: &SoacOp, out: &mut HashSet<SymbolId>) {
+    fn body(sb: &super::SoacBody, out: &mut HashSet<SymbolId>) {
+        out.extend(sb.lam.params.iter().map(|(p, _)| *p));
+        out.extend(sb.captures.iter().map(|(s, _, _)| *s));
+    }
+    match soac {
+        SoacOp::Map { lam, .. } => body(lam, out),
+        SoacOp::Reduce { op, .. } => body(op, out),
+        SoacOp::Scan { op, reduce_op, .. } => {
+            body(op, out);
+            body(reduce_op, out);
+        }
+        SoacOp::Filter { pred, .. } => body(pred, out),
+        SoacOp::Redomap { op, reduce_op, .. } => {
+            body(op, out);
+            body(reduce_op, out);
+        }
+        SoacOp::ReduceByIndex { op, .. } => body(op, out),
+        SoacOp::Scatter { .. } => {}
+    }
 }
 
 /// Run closure conversion. Lifts every `Lambda` node to a top-level def,

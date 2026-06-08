@@ -2932,6 +2932,26 @@ entry gen(xs: []i32) []i32 =
     .expect("single-consumer scan-over-map must lift + compile");
 }
 
+/// A scalar bound in an outer SOAC lambda and captured by a *nested* SOAC
+/// lambda must be threaded as a capture, not left as a free global. This is
+/// the N-body inner-force-sum shape — `map(|i| … reduce(+, …, map(|j| f(xs[j],
+/// xs[i]), …)))` — where the inner `map` over `j` closes over `pi = xs[i]`.
+#[test]
+fn nested_soac_captures_outer_scalar() {
+    compile_to_spirv(
+        "\
+#[compute]
+entry t(xs: []f32) []f32 =
+  map(|i: i32|
+        let pi = xs[i] in
+        reduce(|a: f32, b: f32| a + b, 0.0,
+               map(|j: i32| xs[j] - pi, 0i32 ..< 4)),
+      0i32 ..< 4)
+",
+    )
+    .expect("nested SOAC capturing an outer scalar must compile");
+}
+
 /// Control: a single `reduce` consumer of a computed `counts` map lifts cleanly.
 #[test]
 fn single_consumer_reduce_compiles() {
