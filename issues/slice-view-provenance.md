@@ -17,6 +17,38 @@ its `Var(xs)` operand survived to SPIR-V. `rewrite_specialized_body` now lowers
 `_w_intrinsic_slice(view, s, e)` with a composite result to an N-element
 `ArrayExpr::Literal` of `storage_index(binding, offset + k)` reads.
 
+## Walker-unification attempt — findings (reverted)
+
+Tried the "figurative" unification: seed entry view params into the
+specialized provenance map as whole-buffer views (offset 0, len =
+`storage_len`), route entry bodies through `rewrite_specialized_body`, and
+delete `rewrite_term`. The guard net + parallelize tests caught two obstacles:
+
+1. **The SOAC-body handlers are *also* duplicated.** Capture specialization
+   (`try_specialize_soac_view_captures`) is wired only into the
+   `rewrite_term`-family `rewrite_soac_body`, not the specialized-family
+   `rewrite_specialized_soac_body`. Routing entries through the latter skips
+   it → captures fall back to the fake `(0,0)` binding → wrong-buffer reads
+   (the 4 provenance guards fired). Fix: call it from
+   `rewrite_specialized_soac_body` too (entries seed `buffer_map`, which it
+   resolves through). This part worked.
+
+2. **The restructuring is NOT transparent to downstream passes.** Entries
+   can't take added `(offset,len)` params (fixed interface), so the unified
+   path bound them with `let`s wrapping the body — which changed the entry
+   body's top-level shape. The parallelize / size-hint passes pattern-match
+   that shape, and regressed: `size_hint_large_bumps_workgroup_to_256` picked
+   wg=64 instead of 256, plus `phase2_reduce_is_workgroup_parallel_tree`,
+   `two_phase_reduce_*`, `parallel_scan_emits_swap_wrapper_with_swapped_args`.
+
+**Conclusion:** a transparent unification needs *exact output parity*, which
+means the `ViewSource` enum after all — `Params { offset_sym, len_sym }` vs
+`WholeBuffer` — so entry views inline `offset=0` / `len=storage_len` at the use
+sites with **no** let-wrapping, plus suppressing the `0 + i` index form, so
+parallelize sees byte-identical structure. That's the value-type ripple across
+~8 signatures, not a mechanical merge. It's a real scoped refactor; the guard
+net + finding (1) above de-risk it. Deferred.
+
 ## Symptom
 
 ```wyn
