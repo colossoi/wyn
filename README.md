@@ -159,10 +159,10 @@ Notes:
 - `Scan` consuming-input DPS is wired through Path B
   (`egir::parallelize::transform_scan_entry` reroutes phase 1 + phase 3
   writes back to the input binding when destination is `InputBuffer`).
-  View provenance threads through loop block params and
-  `array_with_inplace` via the `view_buffer_id` map on the SPIR-V
-  side, so `ViewIndex` resolves the backing storage buffer from
-  compile-time metadata rather than a runtime struct field.
+  A view's backing buffer flows through loop block params and
+  `array_with_inplace` as part of its **type** (the `Region(set, binding)`
+  in its type's region slot), so `ViewIndex` recovers the storage buffer
+  from `array_view_region(value_type)` — see View Buffer Provenance below.
 - Phase 3 of parallel scan applies `op(off, elem)`, not `op(elem, off)`:
   `egir::parallelize` synthesizes a swap-args wrapper EgirFunc
   `\(a, b) -> op(b, a)` alongside the phase entries, and phase 3's Map
@@ -197,6 +197,37 @@ is independent.
   index semantics ("last write wins" sequentially) become racy in
   parallel. Either accept the race (matches Futhark's documented
   behavior) or gate on atomic-store availability.
+
+### View Buffer Provenance
+
+A view array (`[]T`) is a window into a storage buffer: a runtime
+`{offset, len}` pair plus a **static** descriptor `(set, binding)` — Vulkan
+can't pick a descriptor by a runtime value, so the binding *must* be a
+compile-time constant at every consumer. Wyn makes the binding a property
+of the type: the `Array` type's trailing **region** slot holds
+`Region(set, binding)`.
+
+- **Born at entry params.** `pin_entry_regions` (the first TLC pass)
+  computes each storage entry-param's binding (auto-allocated `set 0,
+  0..N`, or an explicit `#[storage(set, binding)]`) and substitutes the
+  param's region *variable* → `Region(set, binding)` throughout the entry.
+- **Flows by unification.** A view is region-polymorphic everywhere else
+  (`∀r. View[…, r]`), so a slice, a `let`, a function argument, or a SOAC
+  capture inherits its region the same way it inherits its element type —
+  no side-channel, no manual threading. `if c then xs else ys` over two
+  different buffers fails to unify, which is the correct "can't pick a
+  descriptor at runtime" error.
+- **Specialized by monomorphize.** Because the region is an ordinary type
+  parameter, `monomorphize` specializes a view function per region exactly
+  as it does per element type — `f(xs)` and `f(ys)` over two buffers become
+  two monomorphs. (This is what let the dedicated `buffer_specialize` pass
+  be deleted.)
+- **Read by the backends from the type.** A view is a runtime value (SPIR-V:
+  a `{offset,len}` struct; WGSL: a `vec2<u32>`). `ViewIndex` recovers the
+  backing buffer via `array_view_region(value_type)` →
+  `get_or_assign_buffer_id` (SPIR-V) / `storage_name` (WGSL). No
+  `ValueId → binding` side-map. The lone exception is workgroup-shared
+  views, whose `_wg_<id>` isn't a descriptor and rides a small side map.
 
 ### Defunctionalization
 
@@ -247,7 +278,7 @@ don't pattern-match on args indices directly.
 | `Tuple(n)` | t₁ | t₂ | … | n elements; arity in the variant tag |
 | `Vec` | elem | `Size(n)` | — | n-component vector |
 | `Mat` | elem | `Size(cols)` | `Size(rows)` | Column-major |
-| `Array` | elem | variant | dim_0 (… dim_{rank-1}) | Rank is implicit (`args.len() - 2`); all arrays are rank-1 today. Each dim is `Size(n)` \| `SizeVar(name)` \| `SizePlaceholder` \| `Variable`; variant is `ArrayVariantView` \| `Composite` \| `Virtual` \| `Bounded` |
+| `Array` | elem | variant | dim_0 (… dim_{rank-1}), region | Layout `[elem, variant, dim_0…dim_{rank-1}, region]`; rank is implicit (`args.len() - 3`), all arrays rank-1 today. Each dim is `Size(n)` \| `SizeVar(name)` \| `SizePlaceholder` \| `Variable`; variant is `ArrayVariantView` \| `Composite` \| `Virtual` \| `Bounded`. The trailing **region** is `Region(set, binding)` (a storage view), `NoRegion` (a non-view array), or a variable (region-polymorphic) — making a view's buffer a static type property (see View Buffer Provenance) |
 | `Pointer` | pointee | addrspace | — | addrspace is one of `PointerFunction` / `PointerInput` / `PointerOutput` / `PointerStorage` |
 | `Unique` | inner | — | — | `*T` uniqueness marker (consumed by ownership) |
 | `Record(fields)` | t₁ | t₂ | … | Field names in the variant payload (declared order); per-field types in args |
