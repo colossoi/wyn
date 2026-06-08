@@ -23,7 +23,7 @@
 mod pin_entry_regions_tests;
 
 use super::{ArrayExpr, DefMeta, Lambda, LoopKind, Program, SoacOp, Term, TermKind};
-use crate::ast::TypeName;
+use crate::ast::{Span, TypeName};
 use crate::binding_layout::{compute_entry_binding_layout, extract_storage_binding};
 use crate::interface::{EntryDecl, EntryParamBindingKind};
 use crate::tlc::monomorphize::apply_subst;
@@ -35,11 +35,12 @@ use std::collections::HashMap;
 /// Region-variable → concrete `Region(set, binding)` substitution.
 type RegionSubst = HashMap<usize, Type<TypeName>>;
 
-pub fn run(program: &mut Program) {
+pub fn run(program: &mut Program) -> crate::error::Result<()> {
     for def in program.defs.iter_mut() {
         if !matches!(&def.meta, DefMeta::EntryPoint(_)) {
             continue;
         }
+        let span = def.body.span;
         let (params, _) = extract_params(&def.body);
 
         // Cache the auto-storage binding layout on the entry — `from_tlc` and
@@ -50,7 +51,7 @@ pub fn run(program: &mut Program) {
         if let DefMeta::EntryPoint(entry) = &mut def.meta {
             entry.param_bindings =
                 compute_entry_binding_layout(&params, entry, crate::egir::from_tlc::AUTO_STORAGE_SET);
-            collect_region_subst(&params, entry, &mut subst);
+            collect_region_subst(&params, entry, &mut subst, span)?;
         }
 
         if !subst.is_empty() {
@@ -58,6 +59,7 @@ pub fn run(program: &mut Program) {
             subst_term(&mut def.body, &subst);
         }
     }
+    Ok(())
 }
 
 /// Flatten an entry's curried lambda chain into `(param_sym, param_ty)` pairs.
@@ -77,7 +79,12 @@ fn extract_params(term: &Term) -> (Vec<(SymbolId, Type<TypeName>)>, &Term) {
 /// explicit `#[storage(set, binding)]` wins; otherwise the auto-allocated
 /// layout decides. Non-view params contribute nothing (their type has no
 /// region slot variable to pin).
-fn collect_region_subst(params: &[(SymbolId, Type<TypeName>)], entry: &EntryDecl, subst: &mut RegionSubst) {
+fn collect_region_subst(
+    params: &[(SymbolId, Type<TypeName>)],
+    entry: &EntryDecl,
+    subst: &mut RegionSubst,
+    span: Span,
+) -> crate::error::Result<()> {
     let layout = compute_entry_binding_layout(params, entry, crate::egir::from_tlc::AUTO_STORAGE_SET);
 
     for (i, (_sym, ty)) in params.iter().enumerate() {
@@ -85,32 +92,66 @@ fn collect_region_subst(params: &[(SymbolId, Type<TypeName>)], entry: &EntryDecl
 
         // Host-wired explicit binding: the region is the attribute's.
         if let Some(binding) = entry.params.get(i).and_then(extract_storage_binding) {
-            pin_view_region(ty, binding, subst);
+            pin_view_region(ty, binding, subst, span)?;
             continue;
         }
 
         match layout.get(i).and_then(|b| b.as_ref()).map(|b| &b.kind) {
             Some(EntryParamBindingKind::Single { binding, .. }) => {
-                pin_view_region(ty, *binding, subst);
+                pin_view_region(ty, *binding, subst, span)?;
             }
             Some(EntryParamBindingKind::TupleOfViews(fields)) => {
                 if let Type::Constructed(TypeName::Tuple(_), comps) = ty {
                     for (field, comp_ty) in fields.iter().zip(comps) {
-                        pin_view_region(TypeExt::strip_unique(comp_ty), field.binding, subst);
+                        pin_view_region(TypeExt::strip_unique(comp_ty), field.binding, subst, span)?;
                     }
                 }
             }
             None => {}
         }
     }
+    Ok(())
 }
 
 /// If `view_ty`'s region slot is a free variable, record `var → Region(binding)`.
 /// A region already concrete (or absent — a non-array) is left untouched.
-fn pin_view_region(view_ty: &Type<TypeName>, binding: BindingRef, subst: &mut RegionSubst) {
+///
+/// A region variable shared by two params (because type inference unified
+/// them — e.g. `if c then xs else ys` forces both branches to one type) being
+/// pinned to two *distinct* buffers is the merge-over-distinct-descriptors
+/// case: there's no single static binding, so it's a type error rather than a
+/// silent wrong-buffer read.
+fn pin_view_region(
+    view_ty: &Type<TypeName>,
+    binding: BindingRef,
+    subst: &mut RegionSubst,
+    span: Span,
+) -> crate::error::Result<()> {
     if let Some(Type::Variable(id)) = view_ty.array_region() {
-        subst.insert(*id, region_tag(binding));
+        let region = region_tag(binding);
+        if let Some(existing) = subst.get(id) {
+            if *existing != region {
+                let prev = match existing {
+                    Type::Constructed(TypeName::Region(b), _) => *b,
+                    _ => unreachable!("region subst only holds Region tags"),
+                };
+                return Err(crate::err_type_at!(
+                    span,
+                    "this view merges two distinct storage buffers — \
+                     region(set={}, binding={}) and region(set={}, binding={}); \
+                     a view's descriptor must be a single compile-time constant, \
+                     so `if … then … else …` (or any merge) across different \
+                     buffers cannot be lowered",
+                    prev.set,
+                    prev.binding,
+                    binding.set,
+                    binding.binding
+                ));
+            }
+        }
+        subst.insert(*id, region);
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

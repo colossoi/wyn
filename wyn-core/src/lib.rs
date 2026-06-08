@@ -571,10 +571,10 @@ impl TlcTransformed {
     /// downstream view inherits its region by unification. This is the first
     /// TLC pass; the resulting `TlcRegionsPinned` typestate is what `partial_eval`
     /// consumes, so the rest of the pipeline cannot run without it.
-    pub fn pin_entry_regions(self) -> TlcRegionsPinned {
+    pub fn pin_entry_regions(self) -> Result<TlcRegionsPinned> {
         let mut inner = self.0;
-        tlc::pin_entry_regions::run(&mut inner.tlc);
-        TlcRegionsPinned(inner)
+        tlc::pin_entry_regions::run(&mut inner.tlc)?;
+        Ok(TlcRegionsPinned(inner))
     }
 }
 
@@ -598,16 +598,17 @@ impl TlcRegionsPinned {
 }
 
 #[cfg(test)]
-impl TlcTransformed {
+impl TlcRegionsPinned {
     /// Test-only: run the canonical TLC optimization pipeline to
     /// `TlcReachable` without the per-stage `time(...)` wrappers the
-    /// driver uses. The bool is forwarded as `parallelize_soacs(disable=
-    /// bool)`: `false` ⇒ parallelization enabled (default driver mode,
-    /// what most tests want); `true` ⇒ parallelization disabled (matches
-    /// the CLI's `--single-stage` flag).
+    /// driver uses. Runs on the already-region-pinned state, so the
+    /// fallible `pin_entry_regions` step (and its merge-error) is the
+    /// caller's to propagate. The bool is forwarded as `parallelize_soacs(
+    /// disable=bool)`: `false` ⇒ parallelization enabled (default driver
+    /// mode, what most tests want); `true` ⇒ disabled (the `--single-stage`
+    /// flag).
     pub fn optimize_for_test(self, disable_parallelize: bool) -> TlcReachable {
-        self.pin_entry_regions()
-            .partial_eval()
+        self.partial_eval()
             .normalize_soacs()
             .fuse_maps()
             .apply_ownership()
@@ -1200,7 +1201,7 @@ pub fn compile_thru_tlc(source: &str) -> error::Result<TlcReachable> {
         .resolve(&module_manager)?
         .fold_ast_constants()
         .type_check(&mut module_manager)?;
-    Ok(type_checked.to_tlc(&module_manager, false).optimize_for_test(false))
+    Ok(type_checked.to_tlc(&module_manager, false).pin_entry_regions()?.optimize_for_test(false))
 }
 
 /// Run all the way through EGIR + elaborate to SSA. Materialize is enabled
@@ -1234,7 +1235,7 @@ pub fn compile_thru_spirv_single_stage(
         .resolve(&module_manager)?
         .fold_ast_constants()
         .type_check(&mut module_manager)?;
-    let tlc = type_checked.to_tlc(&module_manager, false).optimize_for_test(true);
+    let tlc = type_checked.to_tlc(&module_manager, false).pin_entry_regions()?.optimize_for_test(true);
     let ssa = tlc.to_egraph()?.expand_soacs(true).materialize().optimize_skeleton().elaborate();
     Ok(ssa.lower()?)
 }

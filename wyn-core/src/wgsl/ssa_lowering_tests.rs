@@ -296,6 +296,7 @@ fn compile_to_wgsl(source: &str) -> crate::error::Result<String> {
     type_checked
         .to_tlc(&module_manager, false)
         .pin_entry_regions()
+        .expect("pin_entry_regions")
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()

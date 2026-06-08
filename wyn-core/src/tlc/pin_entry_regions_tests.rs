@@ -16,7 +16,7 @@ fn pin(src: &str) -> Program {
         .fold_ast_constants()
         .type_check(&mut module_manager)
         .expect("type_check");
-    type_checked.to_tlc(&module_manager, false).pin_entry_regions().0.tlc
+    type_checked.to_tlc(&module_manager, false).pin_entry_regions().expect("pin_entry_regions").0.tlc
 }
 
 /// The region slot of the sole entry's `param_index`-th flattened param.

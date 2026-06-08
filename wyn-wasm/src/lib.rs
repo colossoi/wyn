@@ -594,7 +594,10 @@ fn compile_to_wgsl_impl(source: &str) -> CompileResultWgsl {
         Err(e) => return CompileResultWgsl::err(e),
     };
 
-    let tlc_program = type_checked.to_tlc(&module_manager, false).pin_entry_regions();
+    let tlc_program = match type_checked.to_tlc(&module_manager, false).pin_entry_regions() {
+        Ok(t) => t,
+        Err(e) => return CompileResultWgsl::err(e),
+    };
     let tlc_after_partial_eval = tlc_program.partial_eval();
     let tlc_tree = tlc_tree::program_to_tree(&tlc_after_partial_eval.tlc);
 

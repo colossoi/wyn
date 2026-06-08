@@ -193,6 +193,7 @@ fn spirv_storage_write_chain_lowers_cleanly() {
         .unwrap()
         .to_tlc(&module_manager, false)
         .pin_entry_regions()
+        .expect("pin_entry_regions")
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()

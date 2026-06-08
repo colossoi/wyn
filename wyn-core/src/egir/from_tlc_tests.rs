@@ -30,6 +30,7 @@ fn compile_via_egir(src: &str) -> Program {
     let tlc = type_checked
         .to_tlc(&module_manager, false)
         .pin_entry_regions()
+        .expect("pin_entry_regions")
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -578,6 +579,7 @@ entry vertex_main(#[location(0)] position: vec3f32, #[location(1)] color: vec3f3
     let tlc = type_checked
         .to_tlc(&module_manager, false)
         .pin_entry_regions()
+        .expect("pin_entry_regions")
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()

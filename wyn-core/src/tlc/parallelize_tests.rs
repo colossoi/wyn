@@ -583,6 +583,7 @@ fn parallelize_src(
     let tlc = type_checked
         .to_tlc(&module_manager, false)
         .pin_entry_regions()
+        .expect("pin_entry_regions")
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -1156,6 +1157,7 @@ fn compile_to_spirv(src: &str) -> crate::error::Result<Vec<u32>> {
     let ssa = type_checked
         .to_tlc(&module_manager, false)
         .pin_entry_regions()
+        .expect("pin_entry_regions")
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()

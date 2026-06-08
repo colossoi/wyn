@@ -35,7 +35,7 @@ fn compile_to_fused_tlc(input: &str) -> crate::tlc::Program {
         .fold_ast_constants()
         .type_check(&mut module_manager)
         .expect("type_check");
-    let tlc = type_checked.to_tlc(&module_manager, false).pin_entry_regions();
+    let tlc = type_checked.to_tlc(&module_manager, false).pin_entry_regions().expect("pin_entry_regions");
     let fused =
         tlc.partial_eval().normalize_soacs().fuse_maps().apply_ownership().expect("apply_ownership");
     fused.0.tlc
@@ -2118,6 +2118,7 @@ fn compile_to_ssa_with_inline_small(input: &str) -> Program {
     type_checked
         .to_tlc(&module_manager, false)
         .pin_entry_regions()
+        .expect("pin_entry_regions")
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -2734,6 +2735,7 @@ fn compile_parallel(source: &str) -> crate::Lowered {
     type_checked
         .to_tlc(&module_manager, false)
         .pin_entry_regions()
+        .expect("pin_entry_regions")
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -3861,14 +3863,12 @@ fn scan_over_view_reads_own_buffer() {
     assert_storage_descriptor_is_accessed(&lowered.spirv, 2, 0);
 }
 
-/// Tier-2 acceptance spec (not yet satisfied): merging two views at *distinct*
-/// descriptors — `if c then xs else ys` — has no single static binding. The
-/// correct outcome once binding is a type-level region is a **type error**
-/// (unifying `Region(2,0)` with `Region(2,1)` fails), surfaced at the source
-/// rather than a silent wrong-buffer read. Today the binding isn't in the type,
-/// so this doesn't yet diagnose at type-check; `#[ignore]` until Tier 2.
+/// Merging two views at *distinct* descriptors — `if c then xs else ys` — has
+/// no single static binding, so it must not compile. Type inference unifies the
+/// two branches' region variables into one; `pin_entry_regions` then tries to
+/// pin that one variable to both `Region(2,0)` and `Region(2,1)`, detects the
+/// conflict, and rejects it — rather than silently reading the wrong buffer.
 #[test]
-#[ignore = "Tier 2: distinct-buffer merge becomes a region unification (type) error"]
 fn merge_of_distinct_buffers_is_a_type_error() {
     let src = r#"
         #[compute]
