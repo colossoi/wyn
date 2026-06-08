@@ -3703,6 +3703,75 @@ fn slice_view_inside_map_lambda_compiles_to_spirv() {
     assert_storage_descriptor_is_accessed(&lowered.spirv, 2, 0);
 }
 
+// ---- Buffer-provenance guards ------------------------------------------------
+//
+// These pin the *correct* descriptor each view read resolves to, so a later
+// refactor of buffer_specialize (e.g. unifying `rewrite_term` and
+// `rewrite_specialized_body`) can't silently mis-route a read to the wrong
+// buffer. `cargo test` green alone does NOT prove this: a wrong-buffer read
+// still passes spirv-val as long as the (wrong) descriptor is declared — which
+// is exactly the historical bug. Each guard asserts via rspirv that the
+// expected `(set, binding)` is actually the base of an `OpAccessChain`.
+
+/// Indexing a *captured* view inside a `map` lambda (→ lifted lambda, the
+/// `rewrite_specialized_body` Index arm) must read from the captured buffer.
+#[test]
+fn view_index_in_map_lambda_reads_own_buffer() {
+    let src = r#"
+        #[compute]
+        entry tick(#[storage(set=2, binding=0, access=read)] xs: []f32) []f32 =
+          map(|i: i32| xs[i] + xs[0], 0i32..<4)
+    "#;
+    let lowered = crate::compile_thru_spirv(src).expect("captured-view index compiles");
+    assert_storage_descriptor_is_accessed(&lowered.spirv, 2, 0);
+}
+
+/// Two captured views at distinct `(set, binding)` must each be read from
+/// their own descriptor — catches a unification that swaps or collapses
+/// buffer provenance.
+#[test]
+fn two_view_captures_read_distinct_buffers() {
+    let src = r#"
+        #[compute]
+        entry tick(
+          #[storage(set=2, binding=0, access=read)] xs: []f32,
+          #[storage(set=2, binding=1, access=read)] ys: []f32
+        ) []f32 =
+          map(|i: i32| xs[i] + ys[0], 0i32..<4)
+    "#;
+    let lowered = crate::compile_thru_spirv(src).expect("two captured views compile");
+    assert_storage_descriptor_is_accessed(&lowered.spirv, 2, 0);
+    assert_storage_descriptor_is_accessed(&lowered.spirv, 2, 1);
+}
+
+/// A captured view passed to a user function that itself indexes it (→
+/// recursive per-buffer specialization) must read from the captured buffer.
+#[test]
+fn view_through_nested_fn_specialization_reads_own_buffer() {
+    let src = r#"
+        def firstx(zs: []f32) f32 = zs[0]
+
+        #[compute]
+        entry tick(#[storage(set=2, binding=0, access=read)] xs: []f32) []f32 =
+          map(|_: i32| firstx(xs), 0i32..<4)
+    "#;
+    let lowered = crate::compile_thru_spirv(src).expect("nested view specialization compiles");
+    assert_storage_descriptor_is_accessed(&lowered.spirv, 2, 0);
+}
+
+/// A view used directly as a `map` *input* (→ the entry walker
+/// `rewrite_term` / SOAC-input path, not a capture) must read from its buffer.
+#[test]
+fn view_as_map_input_reads_own_buffer() {
+    let src = r#"
+        #[compute]
+        entry tick(#[storage(set=2, binding=0, access=read)] xs: []f32) []f32 =
+          map(|x: f32| x * 2.0, xs)
+    "#;
+    let lowered = crate::compile_thru_spirv(src).expect("view-as-map-input compiles");
+    assert_storage_descriptor_is_accessed(&lowered.spirv, 2, 0);
+}
+
 // ---- Constructor-style type conversions `T(value)` ----
 //
 // The `i32(x)` form dispatches via the existing per-type catalog
