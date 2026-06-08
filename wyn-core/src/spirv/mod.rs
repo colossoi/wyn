@@ -2136,6 +2136,45 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     ("%", Constructed(UInt(_), _)) => {
                         Ok(self.constructor.builder.u_mod(result_ty, None, lhs, rhs)?)
                     }
+
+                    // Vector equality: componentwise compare → bvec,
+                    // then `OpAll` / `OpAny` collapse to scalar bool.
+                    // Matches GLSL `all(a == b)` / `any(a != b)`.
+                    ("==" | "!=", _) => {
+                        let vec_size = lhs_ty
+                            .vec_size()
+                            .ok_or_else(|| crate::err_spirv!("Vec type missing size: {:?}", lhs_ty))?
+                            as u32;
+                        let bvec_ty =
+                            self.constructor.get_or_create_vec_type(self.constructor.bool_type, vec_size);
+                        let cmp = match (op, elem_ty) {
+                            ("==", Constructed(Float(_), _)) => {
+                                self.constructor.builder.f_ord_equal(bvec_ty, None, lhs, rhs)?
+                            }
+                            ("!=", Constructed(Float(_), _)) => {
+                                self.constructor.builder.f_ord_not_equal(bvec_ty, None, lhs, rhs)?
+                            }
+                            ("==", Constructed(Int(_) | UInt(_), _)) => {
+                                self.constructor.builder.i_equal(bvec_ty, None, lhs, rhs)?
+                            }
+                            ("!=", Constructed(Int(_) | UInt(_), _)) => {
+                                self.constructor.builder.i_not_equal(bvec_ty, None, lhs, rhs)?
+                            }
+                            ("==", Constructed(Bool, _)) => {
+                                self.constructor.builder.logical_equal(bvec_ty, None, lhs, rhs)?
+                            }
+                            ("!=", Constructed(Bool, _)) => {
+                                self.constructor.builder.logical_not_equal(bvec_ty, None, lhs, rhs)?
+                            }
+                            _ => bail_spirv!("Unsupported vector {} on element {:?}", op, elem_ty),
+                        };
+                        if op == "==" {
+                            Ok(self.constructor.builder.all(result_ty, None, cmp)?)
+                        } else {
+                            Ok(self.constructor.builder.any(result_ty, None, cmp)?)
+                        }
+                    }
+
                     _ => bail_spirv!(
                         "Unsupported vector binary operation: {} on element {:?}",
                         op,

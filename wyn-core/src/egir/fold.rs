@@ -129,6 +129,12 @@ impl EGraph {
     /// requires same-typed operands, so `f32 ** f32` arrives here with
     /// the exponent as `f32`. Non-integral or out-of-range exponents
     /// (e.g. `2.5`, `-1`, `0`) leave the `**` node alone.
+    ///
+    /// Vector bases are skipped: `vec ** 2.0` previously folded silently
+    /// to a componentwise `v * v`, which looks like squared-magnitude but
+    /// isn't. With no fold here and no backend lowering for `**` on a
+    /// vec, the call falls through to a clean compile-time error so
+    /// users write the intended `dot(v, v)` / `magnitude(v) ** k` form.
     fn fold_pow_to_mul_chain(
         &mut self,
         name: &str,
@@ -137,6 +143,9 @@ impl EGraph {
         result_ty: &Type<TypeName>,
     ) -> Option<NodeId> {
         if name != "**" {
+            return None;
+        }
+        if matches!(result_ty, Type::Constructed(TypeName::Vec, _)) {
             return None;
         }
         let k: u32 = if let Some(v) = self.as_i32(exp) {
