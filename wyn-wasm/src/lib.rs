@@ -610,7 +610,6 @@ fn compile_to_wgsl_impl(source: &str) -> CompileResultWgsl {
         .lift_gathers()
         .defunctionalize()
         .monomorphize()
-        .buffer_specialize()
         .fold_generated_lambdas()
         .inline_small()
         .parallelize_soacs(false)

@@ -37,6 +37,7 @@ fn compile_to_expanded_egraph(input: &str) -> crate::egir::types::EGraph {
 
     let expanded = type_checked
         .to_tlc(&module_manager, false)
+        .pin_entry_regions()
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -47,7 +48,6 @@ fn compile_to_expanded_egraph(input: &str) -> crate::egir::types::EGraph {
         .lift_gathers()
         .defunctionalize()
         .monomorphize()
-        .buffer_specialize()
         .fold_generated_lambdas()
         .inline_small()
         .parallelize_soacs(false)

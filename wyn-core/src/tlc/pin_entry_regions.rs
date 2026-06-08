@@ -37,17 +37,26 @@ type RegionSubst = HashMap<usize, Type<TypeName>>;
 
 pub fn run(program: &mut Program) {
     for def in program.defs.iter_mut() {
-        let DefMeta::EntryPoint(entry) = &def.meta else {
-            continue;
-        };
-        let (params, _) = extract_params(&def.body);
-        let mut subst = RegionSubst::new();
-        collect_region_subst(&params, entry, &mut subst);
-        if subst.is_empty() {
+        if !matches!(&def.meta, DefMeta::EntryPoint(_)) {
             continue;
         }
-        def.ty = apply_subst(&def.ty, &subst);
-        subst_term(&mut def.body, &subst);
+        let (params, _) = extract_params(&def.body);
+
+        // Cache the auto-storage binding layout on the entry — `from_tlc` and
+        // `parallelize` read `entry.param_bindings` to route storage. The entry
+        // params don't change downstream (entries are roots, not monomorphized),
+        // so computing the layout here is equivalent to doing it later.
+        let mut subst = RegionSubst::new();
+        if let DefMeta::EntryPoint(entry) = &mut def.meta {
+            entry.param_bindings =
+                compute_entry_binding_layout(&params, entry, crate::egir::from_tlc::AUTO_STORAGE_SET);
+            collect_region_subst(&params, entry, &mut subst);
+        }
+
+        if !subst.is_empty() {
+            def.ty = apply_subst(&def.ty, &subst);
+            subst_term(&mut def.body, &subst);
+        }
     }
 }
 

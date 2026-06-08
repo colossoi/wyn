@@ -306,11 +306,8 @@ fn compile_file(
     // Monomorphize polymorphic functions at TLC level
     let tlc_mono = time("tlc_monomorphize", verbose, || tlc_defunc.monomorphize());
 
-    // Buffer-specialize view-array params per-buffer
-    let tlc_buf = time("buffer_specialize", verbose, || tlc_mono.buffer_specialize());
-
     // Inline compiler-generated lambda defs + DCE
-    let tlc_folded = time("inline", verbose, || tlc_buf.fold_generated_lambdas());
+    let tlc_folded = time("inline", verbose, || tlc_mono.fold_generated_lambdas());
 
     // Inline small user functions and constants at TLC level
     let tlc_inlined = time("tlc_inline_small", verbose, || tlc_folded.inline_small());

@@ -203,7 +203,6 @@ fn spirv_storage_write_chain_lowers_cleanly() {
         .lift_gathers()
         .defunctionalize()
         .monomorphize()
-        .buffer_specialize()
         .fold_generated_lambdas()
         .inline_small()
         .parallelize_soacs(false)

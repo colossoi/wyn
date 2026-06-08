@@ -2117,6 +2117,7 @@ fn compile_to_ssa_with_inline_small(input: &str) -> Program {
 
     type_checked
         .to_tlc(&module_manager, false)
+        .pin_entry_regions()
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -2127,7 +2128,6 @@ fn compile_to_ssa_with_inline_small(input: &str) -> Program {
         .lift_gathers()
         .defunctionalize()
         .monomorphize()
-        .buffer_specialize()
         .fold_generated_lambdas()
         .inline_small()
         .to_egraph()
@@ -2733,6 +2733,7 @@ fn compile_parallel(source: &str) -> crate::Lowered {
         .expect("type_check");
     type_checked
         .to_tlc(&module_manager, false)
+        .pin_entry_regions()
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -2743,7 +2744,6 @@ fn compile_parallel(source: &str) -> crate::Lowered {
         .lift_gathers()
         .defunctionalize()
         .monomorphize()
-        .buffer_specialize()
         .fold_generated_lambdas()
         .inline_small()
         // `parallelize_soacs` takes a *disable* flag; `false` enables it,

@@ -25,6 +25,7 @@ fn ownership_applied(src: &str) -> Program {
         .expect("type_check");
     type_checked
         .to_tlc(&module_manager, false)
+        .pin_entry_regions()
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()

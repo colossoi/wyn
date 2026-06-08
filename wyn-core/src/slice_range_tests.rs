@@ -16,6 +16,7 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
 
     type_checked
         .to_tlc(&module_manager, false)
+        .pin_entry_regions()
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -26,7 +27,6 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
         .lift_gathers()
         .defunctionalize()
         .monomorphize()
-        .buffer_specialize()
         .fold_generated_lambdas()
         .inline_small()
         .parallelize_soacs(false)
@@ -51,6 +51,7 @@ fn compile_through_ssa(input: &str) -> Result<Program, CompilerError> {
 
     let ssa = type_checked
         .to_tlc(&module_manager, false)
+        .pin_entry_regions()
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -61,7 +62,6 @@ fn compile_through_ssa(input: &str) -> Result<Program, CompilerError> {
         .lift_gathers()
         .defunctionalize()
         .monomorphize()
-        .buffer_specialize()
         .fold_generated_lambdas()
         .inline_small()
         .parallelize_soacs(false)
@@ -507,7 +507,7 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
         .expect("typecheck");
     eprintln!("=== frontend OK ===");
 
-    let tlc = type_checked.to_tlc(&module_manager, false);
+    let tlc = type_checked.to_tlc(&module_manager, false).pin_entry_regions();
     eprintln!("=== to_tlc OK ===");
 
     let tlc = tlc.partial_eval();
@@ -521,9 +521,6 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
 
     let tlc = tlc.monomorphize();
     eprintln!("=== monomorphize OK ===");
-
-    let tlc = tlc.buffer_specialize();
-    eprintln!("=== buffer_specialize OK ===");
 
     let tlc = tlc.fold_generated_lambdas();
     eprintln!("=== inline OK ===");
@@ -566,7 +563,7 @@ entry main(data: []i32) []i32 = [first(data)]
         .expect("typecheck");
     eprintln!("=== frontend OK ===");
 
-    let tlc = type_checked.to_tlc(&module_manager, false);
+    let tlc = type_checked.to_tlc(&module_manager, false).pin_entry_regions();
     eprintln!("=== to_tlc OK ===");
 
     let tlc = tlc.partial_eval();
@@ -580,9 +577,6 @@ entry main(data: []i32) []i32 = [first(data)]
 
     let tlc = tlc.monomorphize();
     eprintln!("=== monomorphize OK ===");
-
-    let tlc = tlc.buffer_specialize();
-    eprintln!("=== buffer_specialize OK ===");
 
     let tlc = tlc.fold_generated_lambdas();
     eprintln!("=== inline OK ===");

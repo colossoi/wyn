@@ -279,13 +279,13 @@ pub type TypeTable = HashMap<NodeId, TypeScheme<TypeName>>;
 //
 // TLC stages (AST → SSA):
 //       .to_tlc(&module_manager, fill_holes)       -> TlcTransformed
+//       .pin_entry_regions()                       -> TlcTransformed
 //       .partial_eval()                            -> TlcPartialEvaled
 //       .normalize_soacs()                         -> TlcSoaNormalized
 //       .fuse_maps()                               -> TlcFused
 //       .apply_ownership()                         -> TlcOwnershipApplied
 //       .defunctionalize()                         -> TlcDefunctionalized
 //       .monomorphize()                            -> TlcMonomorphized
-//       .buffer_specialize()                       -> TlcBufferSpecialized
 //       .fold_generated_lambdas()                  -> TlcGeneratedLambdasFolded
 //       .inline_small()                            -> TlcSmallInlined
 //       .parallelize_soacs(disable)                -> TlcParallelized
@@ -602,7 +602,6 @@ impl TlcTransformed {
             .lift_gathers()
             .defunctionalize()
             .monomorphize()
-            .buffer_specialize()
             .fold_generated_lambdas()
             .inline_small()
             .parallelize_soacs(disable_parallelize)
@@ -783,8 +782,7 @@ impl TlcDefunctionalized {
 }
 
 /// Shared payload for TLC states that carry just `{tlc, type_table}`
-/// (`TlcMonomorphized`, `TlcBufferSpecialized`, `TlcGeneratedLambdasFolded`,
-/// `TlcSmallInlined`).
+/// (`TlcMonomorphized`, `TlcGeneratedLambdasFolded`, `TlcSmallInlined`).
 pub struct TlcLateInner {
     pub tlc: tlc::Program,
     pub type_table: TypeTable,
@@ -801,26 +799,6 @@ impl std::ops::Deref for TlcMonomorphized {
 }
 
 impl TlcMonomorphized {
-    /// Specialize functions that take view-array parameters per-buffer.
-    /// After this pass, no `DefMeta::Function` has view-array parameters.
-    pub fn buffer_specialize(self) -> TlcBufferSpecialized {
-        let mut inner = self.0;
-        inner.tlc = tlc::buffer_specialize::run(inner.tlc);
-        TlcBufferSpecialized(inner)
-    }
-}
-
-/// TLC after buffer specialization (no functions have view-array params)
-pub struct TlcBufferSpecialized(pub TlcLateInner);
-
-impl std::ops::Deref for TlcBufferSpecialized {
-    type Target = TlcLateInner;
-    fn deref(&self) -> &TlcLateInner {
-        &self.0
-    }
-}
-
-impl TlcBufferSpecialized {
     /// Inline compiler-generated `_w_lambda_*` defs back at their call sites,
     /// then remove unreferenced defs (DCE).
     pub fn fold_generated_lambdas(self) -> TlcGeneratedLambdasFolded {

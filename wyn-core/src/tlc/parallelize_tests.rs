@@ -582,6 +582,7 @@ fn parallelize_src(
         .expect("type_check");
     let tlc = type_checked
         .to_tlc(&module_manager, false)
+        .pin_entry_regions()
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -592,7 +593,6 @@ fn parallelize_src(
         .lift_gathers()
         .defunctionalize()
         .monomorphize()
-        .buffer_specialize()
         .fold_generated_lambdas()
         .inline_small()
         .parallelize_soacs(false)
@@ -1155,6 +1155,7 @@ fn compile_to_spirv(src: &str) -> crate::error::Result<Vec<u32>> {
 
     let ssa = type_checked
         .to_tlc(&module_manager, false)
+        .pin_entry_regions()
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -1165,7 +1166,6 @@ fn compile_to_spirv(src: &str) -> crate::error::Result<Vec<u32>> {
         .lift_gathers()
         .defunctionalize()
         .monomorphize()
-        .buffer_specialize()
         .fold_generated_lambdas()
         .inline_small()
         .parallelize_soacs(false)

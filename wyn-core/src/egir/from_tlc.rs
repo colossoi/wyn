@@ -368,17 +368,16 @@ fn convert_entry_point(
     let mut inputs: Vec<EntryInput> = Vec::with_capacity(params.len());
     let mut pc_offset: u32 = 0;
 
-    // `entry.param_bindings` is dense — same length as `params`, with
-    // `None` for non-storage params. Walking them in lockstep means the
-    // layout and the body params can't drift; the layout pass enforces
-    // the alignment once at the call site, and consumers just zip.
-    debug_assert_eq!(
-        entry.param_bindings.len(),
-        params.len(),
-        "entry.param_bindings length must match body params"
-    );
+    // The auto-storage binding layout is dense — same length as `params`,
+    // with `None` for non-storage params — so we walk them in lockstep. It's
+    // computed here from the entry's own params: deterministic and cheap, so
+    // each consumer recomputes rather than threading a cached value that an
+    // intervening pass (monomorphize, parallelize's synthesized entries) might
+    // drop. `pin_entry_regions` computes the same layout to pin regions.
+    let param_bindings =
+        crate::binding_layout::compute_entry_binding_layout(&params, entry, AUTO_STORAGE_SET);
 
-    for (i, ((sym, ty), param_binding)) in params.iter().zip(entry.param_bindings.iter()).enumerate() {
+    for (i, ((sym, ty), param_binding)) in params.iter().zip(param_bindings.iter()).enumerate() {
         let name = symbol_name(symbols, *sym)?;
         let decoration = entry.params.get(i).and_then(extract_io_decoration);
         let size_hint = entry.params.get(i).and_then(extract_size_hint);
@@ -488,7 +487,7 @@ fn convert_entry_point(
             storage_image_binding,
         });
     }
-    let binding_num: u32 = entry.param_bindings.iter().flatten().map(|b| b.buffer_count()).sum();
+    let binding_num: u32 = param_bindings.iter().flatten().map(|b| b.buffer_count()).sum();
 
     let execution_model = match &entry.entry_type {
         interface::Attribute::Vertex => ExecutionModel::Vertex,
