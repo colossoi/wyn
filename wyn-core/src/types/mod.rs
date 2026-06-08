@@ -903,6 +903,24 @@ pub fn array_with_region(ty: &Type, region: Type) -> Type {
     }
 }
 
+/// A view-array type carrying `region`, for a `StorageView`'s result type. If
+/// `view_ty` is already an array, its region slot is set to `region`;
+/// otherwise `view_ty` is the *element* type and is wrapped into
+/// `Array[view_ty, View, SizePlaceholder, region]`. Either way the resulting
+/// view value's type carries its buffer binding, so the backend recovers the
+/// descriptor from the type instead of a side-map.
+pub fn view_array_of(view_ty: &Type, region: Type) -> Type {
+    match view_ty {
+        Type::Constructed(TypeName::Array, _) => array_with_region(view_ty, region),
+        elem => make_array1(
+            elem.clone(),
+            Type::Constructed(TypeName::ArrayVariantView, vec![]),
+            Type::Constructed(TypeName::SizePlaceholder, vec![]),
+            region,
+        ),
+    }
+}
+
 /// Read the concrete buffer region off an array type's region slot, if it has
 /// a concrete `Region` (not `NoRegion` and not a variable).
 pub fn array_view_region(ty: &Type) -> Option<crate::BindingRef> {
