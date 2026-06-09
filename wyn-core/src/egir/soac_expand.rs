@@ -607,12 +607,14 @@ fn expand_one(
             input_elem_type,
             output_capacity_size,
             destination,
+            scratch_out,
         }) => {
             let pred_func = pred_func.clone();
             let arr_ty = input_array_type.clone();
             let elem_ty = input_elem_type.clone();
             let capacity_size = output_capacity_size.clone();
             let destination = *destination;
+            let scratch_out = *scratch_out;
 
             // Operand layout: [input, ...pred_captures].
             let arr_nid = se.operand_nodes[0];
@@ -633,6 +635,7 @@ fn expand_one(
                     captures,
                     result_node: result_nid,
                     destination,
+                    scratch_out,
                 },
                 next_effect,
             );
@@ -1201,8 +1204,14 @@ struct FilterLoop {
     result_node: NodeId,
     /// `Fresh` allocates a new capacity-N buffer via `uninit`. `InputBuffer`
     /// reuses the input as the output buffer (the result `View` aliases
-    /// the input's backing slot). Ownership analysis decides which.
+    /// the input's backing slot). Ownership analysis decides which. Ignored
+    /// when `scratch_out` is set (runtime lowering always writes the scratch
+    /// buffer).
     destination: SoacDestination,
+    /// `Some(br)` selects the runtime scratch-view lowering: compact kept
+    /// elements into the storage buffer at `br` and rebind the result to a
+    /// runtime-length view over it. `None` is the static Bounded lowering.
+    scratch_out: Option<crate::BindingRef>,
 }
 
 fn build_filter_loop(
@@ -1213,6 +1222,18 @@ fn build_filter_loop(
     spec: FilterLoop,
     next_effect: &mut u32,
 ) {
+    if let Some(scratch_out) = spec.scratch_out {
+        build_runtime_filter_loop(
+            graph,
+            control_headers,
+            bid,
+            idx_in_block,
+            spec,
+            scratch_out,
+            next_effect,
+        );
+        return;
+    }
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
     // Composite buffer type — the underlying storage of the Bounded result.
@@ -1398,6 +1419,172 @@ fn build_filter_loop(
         operands: smallvec![after_buf_nid, after_count_nid],
     };
     let _ = next_effect;
+}
+
+/// Runtime-sized `filter` lowering: a single-thread serial scatter into the
+/// reserved scratch storage buffer `scratch_out`. The loop carries only a
+/// surviving `count` and the input index `i` (both `u32`); kept elements are
+/// stored into `scratch_out[count]` and `count` is bumped. The original result
+/// node is rebound to a runtime-length view `StorageView(scratch_out)[0, count]`
+/// over the buffer — its type (set by `convert_soac_filter`) already carries
+/// `Region(scratch_out)`, so the backend recovers the descriptor from the type.
+/// All offsets/lengths are `u32` to match the view `{offset, len}` convention.
+fn build_runtime_filter_loop(
+    graph: &mut EGraph,
+    control_headers: &mut HashMap<BlockId, ControlHeader>,
+    bid: BlockId,
+    idx_in_block: usize,
+    spec: FilterLoop,
+    scratch_out: crate::BindingRef,
+    next_effect: &mut u32,
+) {
+    use super::graph_ops::{emit_storage_store, intern_storage_view, intern_u32};
+    let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+
+    // A view over the whole scratch buffer, for the per-iteration store.
+    let scratch_view = intern_storage_view(graph, scratch_out, spec.elem_ty.clone(), None);
+
+    // Split `bid` into preheader (bid) + after, moving the suffix + terminator.
+    let after = graph.skeleton.create_block();
+    let suffix: Vec<SideEffect> = graph.skeleton.blocks[bid].side_effects.drain(idx_in_block..).collect();
+    let old_term = std::mem::replace(
+        &mut graph.skeleton.blocks[bid].term,
+        SkeletonTerminator::Unreachable,
+    );
+    graph.skeleton.blocks[after].side_effects = suffix;
+    graph.skeleton.blocks[after].term = old_term;
+    if let Some(header_meta) = control_headers.remove(&bid) {
+        control_headers.insert(after, header_meta);
+    }
+
+    // After-block param: the final surviving count.
+    let after_count_nid = graph.add_block_param(after, 0, u32_ty.clone());
+    graph.skeleton.blocks[after].params.push(after_count_nid);
+
+    let header = graph.skeleton.create_block();
+    let body = graph.skeleton.create_block();
+    let then_blk = graph.skeleton.create_block();
+    let else_blk = graph.skeleton.create_block();
+    let sel_merge = graph.skeleton.create_block();
+    let continue_blk = graph.skeleton.create_block();
+
+    // Header params: count_in, i_in.
+    let count_in_nid = graph.add_block_param(header, 0, u32_ty.clone());
+    graph.skeleton.blocks[header].params.push(count_in_nid);
+    let i_in_nid = graph.add_block_param(header, 1, u32_ty.clone());
+    graph.skeleton.blocks[header].params.push(i_in_nid);
+
+    // Preheader → header(0, 0).
+    let zero_count_nid = intern_u32(graph, 0, None);
+    let zero_i_nid = intern_u32(graph, 0, None);
+    graph.skeleton.blocks[bid].term = SkeletonTerminator::Branch {
+        target: header,
+        args: vec![zero_count_nid, zero_i_nid],
+    };
+
+    // Header → cond_br(i < len, body, after(count)).
+    let len_nid = graph.intern_pure(PureOp::StorageViewLen, smallvec![spec.arr_nid], u32_ty.clone());
+    let cond_nid = graph.intern_pure(
+        PureOp::BinOp("<".into()),
+        smallvec![i_in_nid, len_nid],
+        bool_ty.clone(),
+    );
+    graph.skeleton.blocks[header].term = SkeletonTerminator::CondBranch {
+        cond: cond_nid,
+        then_target: body,
+        then_args: vec![],
+        else_target: after,
+        else_args: vec![count_in_nid],
+    };
+    control_headers.insert(
+        header,
+        ControlHeader::Loop {
+            merge: after,
+            continue_block: continue_blk,
+        },
+    );
+
+    // Body: elem = arr[i]; pred = pred_func(elem, captures); cond_br(pred, then, else).
+    let elem_nid = emit_read_element(
+        graph,
+        body,
+        spec.arr_nid,
+        i_in_nid,
+        &spec.arr_ty,
+        &spec.elem_ty,
+        next_effect,
+    );
+    let mut pred_operands: SmallVec<[NodeId; 4]> = smallvec![elem_nid];
+    pred_operands.extend(spec.captures.iter().copied());
+    let pred_nid = graph.intern_pure(PureOp::Call(spec.pred_func), pred_operands, bool_ty.clone());
+    graph.skeleton.blocks[body].term = SkeletonTerminator::CondBranch {
+        cond: pred_nid,
+        then_target: then_blk,
+        then_args: vec![],
+        else_target: else_blk,
+        else_args: vec![],
+    };
+    control_headers.insert(body, ControlHeader::Selection { merge: sel_merge });
+
+    // then: scratch_out[count] = elem; count_bumped = count + 1; Branch(sel_merge, [count_bumped]).
+    emit_storage_store(
+        graph,
+        then_blk,
+        scratch_view,
+        count_in_nid,
+        elem_nid,
+        spec.elem_ty.clone(),
+        next_effect,
+        None,
+    );
+    let one_u32_nid = intern_u32(graph, 1, None);
+    let count_bumped_nid = graph.intern_pure(
+        PureOp::BinOp("+".into()),
+        smallvec![count_in_nid, one_u32_nid],
+        u32_ty.clone(),
+    );
+    graph.skeleton.blocks[then_blk].term = SkeletonTerminator::Branch {
+        target: sel_merge,
+        args: vec![count_bumped_nid],
+    };
+
+    // else: Branch(sel_merge, [count_in]).
+    graph.skeleton.blocks[else_blk].term = SkeletonTerminator::Branch {
+        target: sel_merge,
+        args: vec![count_in_nid],
+    };
+
+    // sel_merge: param count_next; Branch(continue, [count_next]).
+    let count_next_nid = graph.add_block_param(sel_merge, 0, u32_ty.clone());
+    graph.skeleton.blocks[sel_merge].params.push(count_next_nid);
+    graph.skeleton.blocks[sel_merge].term = SkeletonTerminator::Branch {
+        target: continue_blk,
+        args: vec![count_next_nid],
+    };
+
+    // continue: param cont_count; i_next = i + 1; Branch(header, [cont_count, i_next]).
+    let cont_count_nid = graph.add_block_param(continue_blk, 0, u32_ty.clone());
+    graph.skeleton.blocks[continue_blk].params.push(cont_count_nid);
+    let one_i_nid = intern_u32(graph, 1, None);
+    let next_i_nid = graph.intern_pure(
+        PureOp::BinOp("+".into()),
+        smallvec![i_in_nid, one_i_nid],
+        u32_ty.clone(),
+    );
+    graph.skeleton.blocks[continue_blk].term = SkeletonTerminator::Branch {
+        target: header,
+        args: vec![cont_count_nid, next_i_nid],
+    };
+
+    // Rebind the original result NodeId to the runtime-length view
+    // `StorageView(scratch_out)[offset = 0, len = after_count]`. The node's
+    // type (carrying `Region(scratch_out)`) is preserved from emit_soac.
+    let zero_off_nid = intern_u32(graph, 0, None);
+    graph.nodes[spec.result_node] = ENode::Pure {
+        op: PureOp::StorageView(crate::op::PureViewSource::Storage(scratch_out)),
+        operands: smallvec![zero_off_nid, after_count_nid],
+    };
 }
 
 /// Description of an accumulator-only SOAC (Reduce, Redomap): loop over one or
