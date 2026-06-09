@@ -306,7 +306,7 @@ fn mk(ids: &mut TermIdSource, ty: Type<TypeName>, span: Span, kind: TermKind) ->
 }
 
 /// Build Let bindings to substitute params with args, wrapping the inlined body.
-fn build_inline_lets(
+pub(crate) fn build_inline_lets(
     params: &[(SymbolId, Type<TypeName>)],
     args: &[Term],
     body: Term,

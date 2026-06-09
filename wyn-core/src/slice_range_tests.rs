@@ -30,6 +30,7 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
         .monomorphize()
         .fold_generated_lambdas()
         .inline_small()
+        .materialize_entry_soacs()
         .parallelize_soacs(false)
         .expect("parallelize_soacs")
         .filter_reachable()
@@ -66,6 +67,7 @@ fn compile_through_ssa(input: &str) -> Result<Program, CompilerError> {
         .monomorphize()
         .fold_generated_lambdas()
         .inline_small()
+        .materialize_entry_soacs()
         .parallelize_soacs(false)
         .expect("parallelize_soacs")
         .filter_reachable()
@@ -527,7 +529,7 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     let tlc = tlc.fold_generated_lambdas();
     eprintln!("=== inline OK ===");
 
-    let tlc = tlc.inline_small();
+    let tlc = tlc.inline_small().materialize_entry_soacs();
     eprintln!("=== inline_small OK ===");
 
     let tlc = tlc.parallelize_soacs(false).expect("parallelize_soacs");
@@ -583,7 +585,7 @@ entry main(data: []i32) []i32 = [first(data)]
     let tlc = tlc.fold_generated_lambdas();
     eprintln!("=== inline OK ===");
 
-    let tlc = tlc.inline_small();
+    let tlc = tlc.inline_small().materialize_entry_soacs();
     eprintln!("=== inline_small OK ===");
 
     let tlc = tlc.parallelize_soacs(false).expect("parallelize_soacs");

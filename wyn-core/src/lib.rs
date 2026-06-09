@@ -620,6 +620,7 @@ impl TlcRegionsPinned {
             .monomorphize()
             .fold_generated_lambdas()
             .inline_small()
+            .materialize_entry_soacs()
             .parallelize_soacs(disable_parallelize)
             .expect("parallelize_soacs")
             .filter_reachable()
@@ -879,20 +880,17 @@ impl std::ops::Deref for TlcSmallInlined {
 }
 
 impl TlcSmallInlined {
-    /// Parallelize SOACs in compute entry points at the TLC level.
-    /// `disable` turns the pass into an effective no-op — compute SOACs
-    /// remain as single-threaded sequential loops in their original
-    /// entries, graphical entries get no restructuring, and the pipeline
-    /// descriptor is built as if every entry runs in one stage.
-    pub fn parallelize_soacs(self, disable: bool) -> Result<TlcParallelized> {
+    /// Entry-boundary SOAC exposure (normalization, not parallelization).
+    /// Inline the SOAC-producer helper calls in each entry's top-level
+    /// let-chain + tail so a SOAC a user factored into a helper is visible in
+    /// the entry body — letting the next pass (`parallelize`) treat it the same
+    /// as a SOAC written inline. Runs here, after monomorphize (so the inlined
+    /// body's buffer regions are concrete) and after `inline_small` (which
+    /// already folds small producers), so it only adds the large-helper case.
+    pub fn materialize_entry_soacs(self) -> TlcEntrySoacsMaterialized {
         let TlcLateInner { tlc, type_table } = self.0;
-        let result = tlc::parallelize::run(tlc, disable)?;
-        Ok(TlcParallelized(TlcPipelineInner {
-            tlc: result.program,
-            pipeline: result.pipeline,
-            type_table,
-            plans: result.plans,
-        }))
+        let tlc = tlc::materialize_entry_soacs::run(tlc);
+        TlcEntrySoacsMaterialized(TlcLateInner { tlc, type_table })
     }
 
     /// Eliminate unreachable defs (dead code elimination at TLC level).
@@ -918,6 +916,35 @@ impl TlcSmallInlined {
             &empty,
         )
         .and_then(|inner| EgirRaw(inner).realize_outputs().map(|a| a.parallelize(&empty)))
+    }
+}
+
+/// TLC after entry-boundary SOAC exposure (helper-factored SOACs inlined into
+/// their calling entries). The only state from which `parallelize_soacs` runs.
+pub struct TlcEntrySoacsMaterialized(pub TlcLateInner);
+
+impl std::ops::Deref for TlcEntrySoacsMaterialized {
+    type Target = TlcLateInner;
+    fn deref(&self) -> &TlcLateInner {
+        &self.0
+    }
+}
+
+impl TlcEntrySoacsMaterialized {
+    /// Parallelize SOACs in compute entry points at the TLC level.
+    /// `disable` turns the pass into an effective no-op — compute SOACs
+    /// remain as single-threaded sequential loops in their original
+    /// entries, graphical entries get no restructuring, and the pipeline
+    /// descriptor is built as if every entry runs in one stage.
+    pub fn parallelize_soacs(self, disable: bool) -> Result<TlcParallelized> {
+        let TlcLateInner { tlc, type_table } = self.0;
+        let result = tlc::parallelize::run(tlc, disable)?;
+        Ok(TlcParallelized(TlcPipelineInner {
+            tlc: result.program,
+            pipeline: result.pipeline,
+            type_table,
+            plans: result.plans,
+        }))
     }
 }
 

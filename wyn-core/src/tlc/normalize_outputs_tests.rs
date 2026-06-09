@@ -59,6 +59,7 @@ fn compile_to_spirv(source: &str) -> Vec<u32> {
         .monomorphize()
         .fold_generated_lambdas()
         .inline_small()
+        .materialize_entry_soacs()
         .parallelize_soacs(false)
         .expect("parallelize_soacs")
         .filter_reachable()

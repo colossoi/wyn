@@ -39,7 +39,7 @@ struct FusionContext<'a> {
 /// Build the `Var-symbol → def-symbol` lookup once. The fusion pass
 /// allocates fresh let-binding / lambda symbols during a sweep, but
 /// none of those name a def, so the map stays valid across the sweep.
-fn build_sym_to_def(
+pub(crate) fn build_sym_to_def(
     symbols: &SymbolTable,
     def_syms: &HashMap<String, SymbolId>,
 ) -> HashMap<SymbolId, SymbolId> {

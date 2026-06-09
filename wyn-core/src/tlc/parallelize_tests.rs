@@ -596,6 +596,7 @@ fn parallelize_src(
         .monomorphize()
         .fold_generated_lambdas()
         .inline_small()
+        .materialize_entry_soacs()
         .parallelize_soacs(false)
         .expect("parallelize_soacs");
     (tlc.tlc.clone(), tlc.pipeline.clone())
@@ -1170,6 +1171,7 @@ fn compile_to_spirv(src: &str) -> crate::error::Result<Vec<u32>> {
         .monomorphize()
         .fold_generated_lambdas()
         .inline_small()
+        .materialize_entry_soacs()
         .parallelize_soacs(false)
         .expect("parallelize_soacs")
         .filter_reachable()
