@@ -123,6 +123,18 @@ fn mk_scan(
     )
 }
 
+fn mk_filter(pred: Lambda, input: Term, result_ty: Type<TypeName>, term_ids: &mut TermIdSource) -> Term {
+    mk_term(
+        TermKind::Soac(SoacOp::Filter {
+            pred: mk_soac_body(pred),
+            input: ArrayExpr::Ref(Box::new(input)),
+            destination: SoacDestination::Fresh,
+        }),
+        result_ty,
+        term_ids,
+    )
+}
+
 /// Build a function def wrapping a body in a lambda
 fn mk_func_def(
     name: SymbolId,
@@ -261,6 +273,109 @@ fn test_simple_map_fusion() {
             }
         }
         other => panic!("Expected fused Soac(Map), got {:?}", other),
+    }
+}
+
+// -------------------------------------------------------------------------
+// Test: reduce(op, ne, filter(p, xs)) → redomap(op∘mask, op, ne, xs)
+// -------------------------------------------------------------------------
+#[test]
+fn test_filter_into_reduce_fuses_to_masked_redomap() {
+    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+    let mut symbols = SymbolTable::default();
+    let mut term_ids = TermIdSource::new();
+
+    let xs_sym = symbols.alloc("xs".to_string());
+    let k_sym = symbols.alloc("k".to_string()); // let-bound filter result
+    let x_sym = symbols.alloc("x".to_string()); // pred param
+    let a_sym = symbols.alloc("a".to_string()); // reduce acc
+    let b_sym = symbols.alloc("b".to_string()); // reduce elem
+
+    // pred: λx. true  (body content is irrelevant to fusion structure)
+    let pred_body = mk_term(TermKind::BoolLit(true), bool_ty.clone(), &mut term_ids);
+    let pred = mk_lambda1(x_sym, i32_ty(), pred_body, bool_ty);
+
+    // producer: filter(pred, xs)
+    let xs = mk_term(
+        TermKind::Var(VarRef::Symbol(xs_sym)),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let producer = mk_filter(pred, xs, array_ty(i32_ty()), &mut term_ids);
+
+    // reduce op: λ(a, b). a  (binary; body Var(a))
+    let op_body = mk_term(TermKind::Var(VarRef::Symbol(a_sym)), i32_ty(), &mut term_ids);
+    let op = mk_lambda2(a_sym, i32_ty(), b_sym, i32_ty(), op_body, i32_ty());
+    let ne = mk_term(TermKind::IntLit("0".to_string()), i32_ty(), &mut term_ids);
+
+    // consumer: reduce(op, 0, k)
+    let k_ref = mk_term(
+        TermKind::Var(VarRef::Symbol(k_sym)),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let consumer = mk_reduce(op, ne, k_ref, i32_ty(), &mut term_ids);
+
+    // let k = filter(pred, xs) in reduce(op, 0, k)
+    let program_body = mk_term(
+        TermKind::Let {
+            name: k_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(producer),
+            body: Box::new(consumer),
+        },
+        i32_ty(),
+        &mut term_ids,
+    );
+
+    let program = Program {
+        defs: vec![Def {
+            name: symbols.alloc("main".to_string()),
+            ty: i32_ty(),
+            body: program_body,
+            meta: DefMeta::Function,
+            arity: 0,
+        }],
+        symbols,
+        def_syms: HashMap::new(),
+    };
+
+    let fused = run(program);
+
+    // The let-chain collapses to a single masked Redomap over `xs`.
+    match &fused.defs[0].body.kind {
+        TermKind::Soac(SoacOp::Redomap {
+            op,
+            reduce_op,
+            ne,
+            inputs,
+        }) => {
+            // Input is the filter's original input `xs` (no compacted array).
+            assert_eq!(inputs.len(), 1);
+            match &inputs[0] {
+                ArrayExpr::Ref(t) => {
+                    assert!(matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == xs_sym))
+                }
+                other => panic!("expected Ref(Var(xs)), got {other:?}"),
+            }
+            // Map-step op is `(acc, x) -> let _fused = (if p(x) then x else ne) in op(acc, _fused)`.
+            assert_eq!(op.lam.params.len(), 2, "map-step op is binary (acc, x)");
+            assert_eq!(op.lam.params[1].0, x_sym, "element param is the pred's param");
+            match &op.lam.body.kind {
+                TermKind::Let { rhs, .. } => assert!(
+                    matches!(&rhs.kind, TermKind::If { .. }),
+                    "the masked element is an `if p(x) then x else ne`, got {:?}",
+                    rhs.kind
+                ),
+                other => panic!("expected composed Let body, got {other:?}"),
+            }
+            // The pure phase-2 combiner is the original reduce op.
+            assert_eq!(reduce_op.lam.params.len(), 2);
+            assert!(matches!(&reduce_op.lam.body.kind, TermKind::Var(VarRef::Symbol(s)) if *s == a_sym));
+            // Neutral element preserved.
+            assert!(matches!(&ne.kind, TermKind::IntLit(s) if s == "0"));
+        }
+        other => panic!("expected fused Soac(Redomap), got {other:?}"),
     }
 }
 

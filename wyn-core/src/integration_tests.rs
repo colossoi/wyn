@@ -3044,6 +3044,62 @@ entry filt_reduce(xs: []i32) i32 =
     .expect("summing a filtered runtime array (filter → reduce) must compile");
 }
 
+/// True iff the pipeline for `entry` is a multi-stage compute (the two-phase
+/// shape a parallelized reduce/redomap lowers to: chunk + combine). Used to
+/// confirm the masked-redomap fusion fired — a *serial* filter→reduce would be
+/// a single-stage `Compute` instead.
+fn is_two_phase_compute(pipeline: &crate::pipeline_descriptor::PipelineDescriptor, entry: &str) -> bool {
+    use crate::pipeline_descriptor::Pipeline;
+    pipeline.pipelines.iter().any(|p| match p {
+        Pipeline::MultiCompute(mc) => {
+            mc.stages.len() >= 2 && mc.stages.iter().any(|s| s.entry_point == entry)
+        }
+        _ => false,
+    })
+}
+
+/// `reduce(op, ne, filter(p, xs))` fuses into a masked redomap — no compacted
+/// intermediate array — and parallelizes as a two-phase reduce. Pins that the
+/// fusion fired (not the serial scratch-view filter path).
+#[test]
+fn filter_into_reduce_fuses_to_parallel_redomap() {
+    let lowered = crate::compile_thru_spirv(
+        "\
+#[compute]
+entry filt_reduce(xs: []i32) i32 =
+  let kept = filter(|x: i32| x > 4i32, xs) in
+  reduce(|a: i32, b: i32| a + b, 0i32, kept)
+",
+    )
+    .expect("filter→reduce compiles");
+    assert!(
+        is_two_phase_compute(&lowered.pipeline, "filt_reduce"),
+        "reduce(filter(..)) must fuse to a masked redomap (two-phase compute), not a serial filter",
+    );
+}
+
+/// The masked-redomap fusion must fire even when `filter` and `reduce` live in
+/// **different functions** — TLC fusion sees through the `evens` call via
+/// function summaries (no inlining needed at fusion time).
+#[test]
+fn filter_into_reduce_fuses_across_functions() {
+    let lowered = crate::compile_thru_spirv(
+        "\
+def evens(xs: []i32) ?k. [k]i32 = filter(|x: i32| x % 2i32 == 0i32, xs)
+
+#[compute]
+entry filt_reduce(xs: []i32) i32 =
+  let kept = evens(xs) in
+  reduce(|a: i32, b: i32| a + b, 0i32, kept)
+",
+    )
+    .expect("cross-function filter→reduce compiles");
+    assert!(
+        is_two_phase_compute(&lowered.pipeline, "filt_reduce"),
+        "cross-function reduce(evens(xs)) must fuse to a masked redomap via function summaries",
+    );
+}
+
 /// Returning a filtered runtime-sized array from a compute entry. The filter
 /// compacts directly into the user-visible output buffer (sized to the input's
 /// element count), and its surviving count is written to a paired `len` cell

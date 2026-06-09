@@ -252,6 +252,61 @@ fn build_fused_from_semantics(
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
 ) -> Option<Term> {
+    // Filter → Reduction: the producer is a `Filter` (not `Elementwise`), so
+    // build the masked redomap here, before the Elementwise extraction below.
+    // `reduce(op, ne, filter(p, xs))` ≡ `redomap(op∘mask, op, ne, xs)` with
+    // `mask = λx. if p(x) then x else ne` — the dropped elements fold in as
+    // `op(acc, ne) = acc` (ne is op's neutral element by reduce's contract).
+    if let (
+        FusionKind::FilterIntoReduce,
+        ArraySemantics::Filter { input, pred },
+        ArraySemantics::Reduction { op, init, .. },
+    ) = (fusion_kind, producer, consumer)
+    {
+        if op.lam.params.len() != 2 || pred.lam.params.len() != 1 {
+            return None;
+        }
+        let x_sym = pred.lam.params[0].0;
+        let elem_ty = pred.lam.params[0].1.clone();
+        // mask = λx. if p(x) then x else ne
+        let mask_lam = Lambda {
+            params: vec![(x_sym, elem_ty.clone())],
+            body: Box::new(Term {
+                id: term_ids.next_id(),
+                ty: elem_ty.clone(),
+                span,
+                kind: TermKind::If {
+                    cond: pred.lam.body.clone(),
+                    then_branch: Box::new(Term {
+                        id: term_ids.next_id(),
+                        ty: elem_ty.clone(),
+                        span,
+                        kind: TermKind::Var(VarRef::Symbol(x_sym)),
+                    }),
+                    else_branch: init.clone(),
+                },
+            }),
+            ret_ty: elem_ty,
+        };
+        // op∘mask: (acc, x) -> op(acc, mask(x)); the pure phase-2 combiner is
+        // the original `op`.
+        let composed_op = compose_map_reduce(mask_lam, op.lam.clone(), span, symbols, term_ids);
+        return Some(Term {
+            id: term_ids.next_id(),
+            ty: consumer_ty,
+            span,
+            kind: TermKind::Soac(SoacOp::Redomap {
+                op: super::SoacBody {
+                    lam: composed_op,
+                    captures: vec![],
+                },
+                reduce_op: op.clone(),
+                ne: init.clone(),
+                inputs: vec![input.clone()],
+            }),
+        });
+    }
+
     // Fusion runs pre-defunctionalize, so SoacBody.captures is always
     // empty here — extract the inner Lambda for composition.
     let (prod_lam, input_exprs) = match producer {
