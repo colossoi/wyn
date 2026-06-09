@@ -32,6 +32,10 @@ use super::fusion::{build_sym_to_def, substitute_sym};
 use super::inline::build_inline_lets;
 use super::{DefMeta, Lambda, Program, Term, TermIdSource, TermKind, VarRef, extract_lambda_params};
 
+#[cfg(test)]
+#[path = "materialize_entry_soacs_tests.rs"]
+mod materialize_entry_soacs_tests;
+
 /// Bound on inline-chain depth (chained/recursive producers). A real producer
 /// chain is short; the cap only stops a pathological self-recursive helper from
 /// looping forever — it leaves a residual call, which lowers normally.
@@ -112,16 +116,17 @@ fn expose(
                 }),
             }
         }
-        // Top-level let chain: a producer call may be the bound value; the body
-        // continues the chain. (We do NOT recurse into arbitrary sub-terms of
-        // the rhs — only inline it if the rhs itself is a producer call.)
+        // Top-level let chain: walk both the bound value and the body. `expose`
+        // on the rhs inlines it when it's a producer call, descends an
+        // `OutputSlotStore`, or leaves a non-producer value (incl. a SOAC, whose
+        // operand lambdas it never enters) untouched.
         TermKind::Let {
             name,
             name_ty,
             rhs,
             body,
         } => {
-            let new_rhs = maybe_inline(*rhs, producers, sym_to_def, ids, depth);
+            let new_rhs = expose(*rhs, producers, sym_to_def, ids, depth);
             let new_body = expose(*body, producers, sym_to_def, ids, depth);
             Term {
                 id,
@@ -135,6 +140,18 @@ fn expose(
                 },
             }
         }
+        // `normalize_outputs` (which runs before this pass) wraps the entry's
+        // output value in `OutputSlotStore(slot, value)`. The producer call /
+        // SOAC lives in `value`, so descend into it.
+        TermKind::OutputSlotStore { slot_index, value } => Term {
+            id,
+            ty,
+            span,
+            kind: TermKind::OutputSlotStore {
+                slot_index,
+                value: Box::new(expose(*value, producers, sym_to_def, ids, depth)),
+            },
+        },
         // Tail position.
         other => maybe_inline(
             Term {

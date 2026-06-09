@@ -1,0 +1,8 @@
+-- Cross-function auto-parallelization: a `scan` factored into a helper that
+-- `inline_small` won't fold (its operator has control flow). The
+-- `materialize_entry_soacs` pass exposes it at the entry boundary so it
+-- parallelizes into the usual multi-phase scan pipeline.
+def stencil(xs: []i32) []i32 = scan(|a: i32, b: i32| if a > b then a else b, 0i32, xs)
+
+#[compute]
+entry e(xs: []i32) []i32 = stencil(xs)
