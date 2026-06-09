@@ -132,8 +132,10 @@ fn parse_plan(descriptor_path: &Path) -> Result<MinerPlan> {
 // Bitcoin target / push-constant helpers
 // ---------------------------------------------------------------------------
 
-/// Decode Bitcoin compact target (nBits) into a 256-bit target (8 × u32,
-/// big-endian): top byte is the exponent, low 3 bytes the coefficient, so
+/// Decode Bitcoin compact target (nBits) into a 256-bit target as 8 × u32
+/// stored least-significant word first (`words[0]` = LSB, `words[7]` = MSB),
+/// matching the word order the SHA-256 hash arrives in. Top byte of `bits`
+/// is the exponent, low 3 bytes the coefficient, so
 /// `target = coefficient · 2^(8·(exponent-3))`.
 fn decode_compact_target(bits: u32) -> [u32; 8] {
     let exponent = (bits >> 24) as usize;
@@ -149,15 +151,18 @@ fn decode_compact_target(bits: u32) -> [u32; 8] {
             target_bytes[start + 2] = (coefficient & 0xff) as u8;
         }
     }
+    // `target_bytes` is big-endian; word 0 of the most-significant chunk
+    // lands at index 7 so the result is least-significant word first.
     let mut words = [0u32; 8];
     for (i, chunk) in target_bytes.chunks_exact(4).enumerate() {
-        words[i] = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        words[7 - i] = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
     }
     words
 }
 
+/// Format a 256-bit value (least-significant word first) as big-endian hex.
 fn format_u256_hex(words: &[u32; 8]) -> String {
-    words.iter().map(|w| format!("{:08x}", w)).collect()
+    words.iter().rev().map(|w| format!("{:08x}", w)).collect()
 }
 
 /// Assemble the 116-byte push-constant block for one chunk.
@@ -276,10 +281,7 @@ pub fn run(
                 chunk_n,
                 nonce
             );
-            for w in &hash {
-                print!("{:08x}", w);
-            }
-            println!();
+            println!("{}", format_u256_hex(&hash));
         }
 
         if nonce != NO_HIT {
@@ -297,11 +299,7 @@ pub fn run(
 
     match hit {
         Some((nonce, hash)) => {
-            print!("Hit found:\n  nonce {:>10} -> ", nonce);
-            for w in &hash {
-                print!("{:08x}", w);
-            }
-            println!();
+            println!("Hit found:\n  nonce {:>10} -> {}", nonce, format_u256_hex(&hash));
         }
         None => println!("No hits found"),
     }

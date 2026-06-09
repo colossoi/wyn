@@ -53,24 +53,16 @@ def mine_nonce(midstate: [8]u32, header_base: [19]u32, nonce: u32) [8]u32 =
     -- First SHA-256 finishes from the midstate; second SHA-256 hashes that digest.
     sha256_32(sha256_compress(midstate, block2))
 
--- hash[7] = h0 (MSB), hash[0] = h7 (LSB) due to array storage order
+-- Compare two 256-bit integers stored least-significant word first
+-- (index 0 = LSB, index 7 = MSB). Fold the words low-to-high so the most
+-- significant differing word decides: `lt` carries the verdict from the
+-- words seen so far and is overridden whenever a more significant word
+-- differs.
 def hash_below_target(hash: [8]u32, target: [8]u32) bool =
-    if hash[7] < target[0] then true
-    else if hash[7] > target[0] then false
-    else if hash[6] < target[1] then true
-    else if hash[6] > target[1] then false
-    else if hash[5] < target[2] then true
-    else if hash[5] > target[2] then false
-    else if hash[4] < target[3] then true
-    else if hash[4] > target[3] then false
-    else if hash[3] < target[4] then true
-    else if hash[3] > target[4] then false
-    else if hash[2] < target[5] then true
-    else if hash[2] > target[5] then false
-    else if hash[1] < target[6] then true
-    else if hash[1] > target[6] then false
-    else if hash[0] < target[7] then true
-    else false
+    loop lt = false for i < 8 do
+        if hash[i] < target[i] then true
+        else if hash[i] > target[i] then false
+        else lt
 
 def NO_HIT: (u32, [8]u32) =
     (0xFFFFFFFFu32, [0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32,
