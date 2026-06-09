@@ -3123,6 +3123,35 @@ entry e(xs: []i32) []i32 = stencil(xs)
     );
 }
 
+/// GAP: a computed array consumed by random index (a gather) whose producer is in
+/// a **helper** isn't supported — `lift_gathers` runs before the producer is
+/// materialized, so the gather array reaches the backend as a runtime-sized
+/// Composite and **panics** (`spirv::polytype_to_spirv`, the unsized-Composite
+/// arm). It *should* be a clean compile error instead. The body below asserts
+/// that desired behavior; un-ignore when the panic→error fix lands. (Same shape
+/// also panics on master via `inline_small`, so this is a pre-existing
+/// limitation, not a regression from the materialize pass.)
+#[test]
+#[ignore = "cross-function gather: runtime-sized composite indexed → backend panic; \
+            want a clean error (panic→error fix not yet done)"]
+fn cross_function_gather_errors_cleanly() {
+    let r = crate::compile_thru_spirv(
+        "\
+def counts(xs: []i32) []i32 = map(|x: i32| x * 2i32, xs)
+#[compute]
+entry g(xs: []i32) []i32 =
+  let c = counts(xs) in
+  map(|i: i32| c[i % 8i32], iota(64))
+",
+    );
+    let err = r.err().expect("cross-function gather must be a compile error, not success/panic");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("runtime-sized") && msg.contains("index"),
+        "error should explain the un-lifted runtime-sized gather, got: {msg}",
+    );
+}
+
 /// Invariant, end to end: a SOAC helper called *per element* inside a `map`
 /// lambda must NOT be hoisted and parallelized — the inner reduce stays a
 /// serial per-thread loop. The entry parallelizes as a single-stage

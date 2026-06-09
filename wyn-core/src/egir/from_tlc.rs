@@ -915,6 +915,13 @@ impl<'a> Converter<'a> {
                     });
                     Ok(result_nid)
                 } else {
+                    // NOTE: a runtime-sized Composite array reaching here is an
+                    // un-lifted gather (its producer wasn't materialized to a
+                    // storage buffer — e.g. a producer behind a helper call:
+                    // cross-function gather-lifting is unimplemented). It can't be
+                    // lowered as a value and currently panics in the SPIR-V
+                    // backend (`polytype_to_spirv`, the unsized-Composite arm).
+                    // See the ignored `cross_function_gather_errors_cleanly` test.
                     Ok(self.intern_pure(PureOp::Index, smallvec![base, idx], ty))
                 }
             }
