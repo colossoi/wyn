@@ -655,8 +655,6 @@ pub fn get_example_program() -> String {
 ------------------------------------------------------------
 -- Uniforms
 ------------------------------------------------------------
-#[uniform(set=1, binding=0)] def iResolution: vec3f32
-#[uniform(set=1, binding=1)] def iTime: f32
 
 ------------------------------------------------------------
 -- Vertex shader: full-screen triangle
@@ -674,7 +672,10 @@ entry vertex_main(#[builtin(vertex_index)] vertex_id: i32)  #[builtin(position)]
 -- Fragment shader
 ------------------------------------------------------------
 #[fragment]
-entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(
+  #[uniform(set=1, binding=0)] iResolution: vec3f32,
+  #[uniform(set=1, binding=1)] iTime: f32,
+  #[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
   -- Flip Y for Vulkan
   let coord = @[fragCoord.x, iResolution.y - fragCoord.y] in
   let uv = @[coord.x / iResolution.x, coord.y / iResolution.y] in
