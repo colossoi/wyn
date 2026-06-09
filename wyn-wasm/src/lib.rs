@@ -615,6 +615,7 @@ fn compile_to_wgsl_impl(source: &str) -> CompileResultWgsl {
         .monomorphize()
         .fold_generated_lambdas()
         .inline_small()
+        .materialize_entry_soacs()
         .parallelize_soacs(false)
     {
         Ok(t) => t,

@@ -2748,6 +2748,7 @@ fn compile_parallel(source: &str) -> crate::Lowered {
         .monomorphize()
         .fold_generated_lambdas()
         .inline_small()
+        .materialize_entry_soacs()
         // `parallelize_soacs` takes a *disable* flag; `false` enables it,
         // matching the production driver's default (non-`--single-stage`).
         .parallelize_soacs(false)

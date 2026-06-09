@@ -11,6 +11,7 @@ pub mod fusion;
 pub mod hof_specialize;
 pub mod inline;
 pub mod lift_gathers;
+pub mod materialize_entry_soacs;
 pub mod monomorphize;
 pub mod normalize;
 pub mod normalize_outputs;

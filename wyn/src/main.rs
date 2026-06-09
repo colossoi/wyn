@@ -316,8 +316,11 @@ fn compile_file(
     // level). `--single-stage` disables this pass entirely; compute SOACs
     // collapse to sequential loops and graphical entries are not
     // restructured.
+    let tlc_exposed = time("materialize_entry_soacs", verbose, || {
+        tlc_inlined.materialize_entry_soacs()
+    });
     let tlc_parallel = time("tlc_parallelize", verbose, || {
-        tlc_inlined.parallelize_soacs(single_stage)
+        tlc_exposed.parallelize_soacs(single_stage)
     })?;
 
     // Eliminate dead TLC defs
