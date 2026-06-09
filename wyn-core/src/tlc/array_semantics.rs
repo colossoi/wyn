@@ -159,6 +159,12 @@ pub enum FusionKind {
     MapIntoScan,
     /// Inline a range into an elementwise consumer
     RangeIntoMap,
+    /// Fuse a filter into a reduce: `reduce(op, ne, filter(p, a))` →
+    /// `redomap(op∘mask, op, ne, a)` where `mask = λx. if p(x) then x else ne`.
+    /// Valid because `ne` is `op`'s neutral element (reduce's contract), so the
+    /// masked-out elements fold in as no-ops. Avoids materializing the filtered
+    /// array — the result parallelizes as an ordinary redomap.
+    FilterIntoReduce,
     /// Not fusible
     NotFusible,
 }
@@ -179,6 +185,10 @@ pub fn can_fuse(producer: &ArraySemantics, consumer: &ArraySemantics) -> FusionK
 
         // Range → Elementwise: inline range into map body
         (ArraySemantics::Range { .. }, ArraySemantics::Elementwise { .. }) => FusionKind::RangeIntoMap,
+
+        // Filter → Reduction: fold the filter into a masked redomap, avoiding
+        // the compacted intermediate array entirely.
+        (ArraySemantics::Filter { .. }, ArraySemantics::Reduction { .. }) => FusionKind::FilterIntoReduce,
 
         // Everything else: not fusible
         _ => FusionKind::NotFusible,
