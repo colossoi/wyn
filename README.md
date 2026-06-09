@@ -151,7 +151,7 @@ strategy's shape.
 | `Reduce`           | `reduce op ne xs`                       | ✓      | n/a (scalar result) | ✓ (chunked + combine) |
 | `Redomap`          | `reduce op ne (map f xs)` (fused)       | ✓      | n/a (scalar result) | ✓ (chunked + combine) |
 | `Scan`             | `scan op ne xs`                         | ✓      | ✓                   | ✓ (3-phase Blelloch-style) |
-| `Filter`           | `filter pred xs`                        | ✓      | ✓                   | ✗ (no parallel impl) |
+| `Filter`           | `filter pred xs`                        | ✓ (static **and** runtime-sized) | ✓      | partial — `reduce(filter)` fuses to a parallel redomap; standalone `filter` is serial (see below) |
 | `Scatter`          | `scatter dest indices values`           | ✗ EGIR `convert_soac` rejects with `Unsupported` | n/a | ✗ |
 | `ReduceByIndex`    | histogram-style indexed reduction       | ✗ EGIR `convert_soac` rejects with `Unsupported` | n/a | ✗ (atomics not yet implemented) |
 
@@ -168,6 +168,49 @@ Notes:
   `\(a, b) -> op(b, a)` alongside the phase entries, and phase 3's Map
   routes through the wrapper. Correct for non-commutative associative
   combiners (string concat, matmul).
+
+#### `Filter` — runtime-sized inputs and the parallelization gap
+
+`filter` is shape-changing: it returns the existential `?k. [k]T`, opened
+to a runtime length `k ≤ n` at the consumer. Two lowerings, by input size:
+
+- **Static input** (`[N]T`, capacity known): a function-local **Bounded**
+  `{buffer:[N]T, len:i32}` struct — `soac_expand::build_filter_loop`.
+- **Runtime input** (a storage view / entry param, length only known at
+  dispatch): the serial loop compacts kept elements into a reserved scratch
+  **storage** buffer (capacity `n`, host-sized `LikeInput` of the input) and
+  yields a runtime-length **view** over it (`StorageView(scratch)[0, count]`).
+  The surviving count is the view's `len` *operand* — a value, not a
+  type-level size — so `length` and `reduce` consume it like any view. The
+  scratch binding is reserved EGIR-locally (the converter's binding cursor +
+  `extra_storage_bindings`, surfaced by `egir::publish`, like a `lift_gathers`
+  gather buffer). A runtime `filter` reached in a *standalone* function (one
+  inlining didn't fold into a compute entry) errors — only an entry owns a
+  descriptor set to host the scratch buffer; `from_tlc::convert_function`
+  guards this.
+- **`filter` as a compute output**: `realize_outputs::retarget_filter_output`
+  makes the filter compact directly into the entry's output buffer and writes
+  the surviving count to a **paired `u32` length cell** (`Fixed{4}`,
+  repurposed from the scratch binding) the host reads back alongside the data.
+
+**Parallelization status.** `reduce(op, ne, filter(p, xs))` fuses in
+`tlc::fusion` into a **masked redomap** `redomap(op∘mask, op, ne, xs)` with
+`mask = λx. if p(x) then x else ne` (valid because `ne` is `op`'s neutral
+element), so it parallelizes as an ordinary two-phase redomap — no compacted
+intermediate. This fires across function boundaries via `array_semantics`
+function summaries (`reduce(+, 0, evens(xs))` where `def evens = filter(…)`).
+
+**GAP:** a *standalone* parallel `filter` (returning the compacted array —
+`filter→output`/`filter→length` at an entry tail) is **not implemented**; it
+runs through the serial scratch-view loop above. The parallel algorithm is
+map (predicate → flags) → parallel scan (flags → offsets) → scatter
+(`if flags[i] { out[offsets[i]-1] = xs[i] }`) → len (`offsets[n-1]`). Two
+pieces are missing: a `ParallelStrategy::Filter` synthesis mirroring
+`transform_scan_entry` (reusing the parallel scan for the offsets prefix-sum),
+and a guarded parallel **scatter** kernel — `EntryBuilder` only emits
+straight-line SOAC phase bodies, so the conditional store needs hand-built CFG
+(`Scatter` is also still rejected in `egir::convert_soac`). Until then,
+`reduce(filter)` is the only parallel filter path.
 
 #### Remaining-work ordering
 
@@ -187,8 +230,12 @@ is independent.
   `tlc::mod::transform_soac_reduce_by_index`. `scatter` is not in the
   SOAC names list — Scatter needs a `transform_soac_scatter` in the
   same shape before EGIR work matters.
-- **Parallel `Filter` → parallel `Scan`.** Already in place;
-  prefix-sum over the predicate mask gives per-element write offsets.
+- **Parallel `Filter` → parallel `Scan` + a scatter kernel.** The scan
+  prerequisite (prefix-sum over the predicate mask → write offsets) is in
+  place, but the `ParallelStrategy::Filter` synthesis and the guarded scatter
+  kernel are not built (see "`Filter` — runtime-sized inputs" above). Today
+  `reduce(filter)` parallelizes via the masked-redomap fusion; standalone
+  `filter` is serial.
 - **Parallel `ReduceByIndex` → atomic intrinsics.** The catalog has
   no `atomicAdd`/`atomicMin`/etc. today; adding them is a
   prerequisite for parallel histograms. Serial ReduceByIndex doesn't
