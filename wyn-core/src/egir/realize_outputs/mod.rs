@@ -43,8 +43,16 @@ pub mod verify;
 /// Realize every entry's outputs into side-effect stores. After this
 /// pass, `verify::check` confirms the invariant.
 pub fn run(inner: &mut EgirInner) -> Result<(), ConvertError> {
-    for entry in &mut inner.entry_points {
-        realize_entry(entry)?;
+    // `publish_implicit_bindings` already ran in `from_tlc`, so a runtime
+    // `filter` output retarget here must patch the host descriptor in
+    // `inner.pipeline` directly (split-borrowed from `entry_points`).
+    let EgirInner {
+        entry_points,
+        pipeline,
+        ..
+    } = inner;
+    for entry in entry_points.iter_mut() {
+        realize_entry(entry, pipeline)?;
     }
     if cfg!(debug_assertions) {
         verify::check(inner)?;
@@ -52,13 +60,16 @@ pub fn run(inner: &mut EgirInner) -> Result<(), ConvertError> {
     Ok(())
 }
 
-fn realize_entry(entry: &mut EgirEntry) -> Result<(), ConvertError> {
+fn realize_entry(
+    entry: &mut EgirEntry,
+    pipeline: &mut crate::pipeline_descriptor::PipelineDescriptor,
+) -> Result<(), ConvertError> {
     if entry.outputs.is_empty() {
         return Ok(());
     }
     if !entry.slot_sources.is_empty() {
         // DPS path: slot-collected entries (post-`normalize_outputs`).
-        realize_compute_slots(entry)
+        realize_compute_slots(entry, pipeline)
     } else {
         // Return-value classifier: graphics entries, plus compute
         // entries synthesised after `normalize_outputs` (gather
@@ -74,17 +85,22 @@ fn realize_entry(entry: &mut EgirEntry) -> Result<(), ConvertError> {
 /// declared output's `SlotSource`s independently lower to a DPS write
 /// into the shared `OutputView`. Multi-source slots (`If`-forks etc.)
 /// share one view; runtime CFG picks which source's write fires.
-fn realize_compute_slots(entry: &mut EgirEntry) -> Result<(), ConvertError> {
+fn realize_compute_slots(
+    entry: &mut EgirEntry,
+    pipeline: &mut crate::pipeline_descriptor::PipelineDescriptor,
+) -> Result<(), ConvertError> {
+    let entry_name = entry.name.clone();
     let EgirEntry {
         graph,
         outputs,
         aliases,
         slot_sources,
+        storage_bindings,
         ..
     } = entry;
     let mut next_effect = graph_ops::next_effect_token(graph);
 
-    for (slot_index, output) in outputs.iter().enumerate() {
+    for (slot_index, output) in outputs.iter_mut().enumerate() {
         let binding = output.storage_binding.expect("BUG: compute output without storage binding");
         let sources = slot_sources.get(slot_index).cloned().unwrap_or_default();
         if sources.is_empty() {
@@ -94,6 +110,22 @@ fn realize_compute_slots(entry: &mut EgirEntry) -> Result<(), ConvertError> {
                  every declared output",
                 slot_index
             )));
+        }
+
+        // A runtime `filter` whose result is this output retargets directly:
+        // its serial loop compacts into the output buffer and writes a paired
+        // length cell. No DPS store is emitted — the filter *is* the writer.
+        if sources.len() == 1
+            && dispatch::retarget_filter_output(
+                graph,
+                storage_bindings,
+                output,
+                sources[0].value,
+                pipeline,
+                &entry_name,
+            )?
+        {
+            continue;
         }
 
         let multi_source = sources.len() > 1;

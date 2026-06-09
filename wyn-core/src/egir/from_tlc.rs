@@ -576,7 +576,9 @@ fn convert_entry_point(
     // so the signature matches the declared output shape.
     let ret_type = if was_slot_collected {
         if entry.outputs.len() == 1 {
-            entry.outputs[0].ty.clone()
+            // Unwrap a `?k. [k]T` filter output to its runtime array, matching
+            // the `EntryOutput.ty` `build_entry_outputs` produced.
+            unwrap_existential_array(&entry.outputs[0].ty)
         } else {
             let component_tys: Vec<_> = entry.outputs.iter().map(|o| o.ty.clone()).collect();
             Type::Constructed(TypeName::Tuple(component_tys.len()), component_tys)
@@ -1948,6 +1950,7 @@ impl<'a> Converter<'a> {
                     output_capacity_size: size,
                     destination,
                     scratch_out: None,
+                    len_out: None,
                 },
                 operands,
                 bounded_result_ty,
@@ -1998,6 +2001,9 @@ impl<'a> Converter<'a> {
                 output_capacity_size: size,
                 destination,
                 scratch_out: Some(scratch_out),
+                // Set by `realize_outputs` only when this filter is a compute
+                // entry's output (it then needs a host-readable length cell).
+                len_out: None,
             },
             operands,
             view_result_ty,
@@ -2268,6 +2274,19 @@ fn collect_output_slot_value_tys(body: &crate::tlc::Term) -> Vec<Option<Type<Typ
     dense
 }
 
+/// Unwrap an existential array return `?k. [k]T` to its inner array type
+/// `[k]T`. A runtime `filter`'s entry output is declared existential, but the
+/// host-visible buffer is a plain runtime `[]T`; the backend lays out a storage
+/// buffer from the element type alone, so the inner array (size variable and
+/// all) is what `create_storage_buffer` needs. Non-existential types pass
+/// through unchanged.
+fn unwrap_existential_array(ty: &Type<TypeName>) -> Type<TypeName> {
+    match ty {
+        Type::Constructed(TypeName::Existential(_), args) if !args.is_empty() => args[0].clone(),
+        _ => ty.clone(),
+    }
+}
+
 fn build_entry_outputs(
     entry: &interface::EntryDecl,
     ret_type: &Type<TypeName>,
@@ -2395,13 +2414,20 @@ fn build_entry_outputs(
             .iter()
             .enumerate()
             .map(|(i, output)| {
-                let ty = slot_value_tys.get(i).and_then(|t| t.as_ref()).unwrap_or(&output.ty);
-                let storage_binding = storage_binding_for(ty, is_compute);
+                let raw = slot_value_tys.get(i).and_then(|t| t.as_ref()).unwrap_or(&output.ty);
+                // A runtime `filter` output is declared `?k. [k]T`; the
+                // host-visible buffer is a plain runtime `[]T` of the kept
+                // elements. Unwrap the existential so `create_storage_buffer`
+                // sees an array whose element type it can lay out (the size var
+                // is irrelevant — storage buffers are runtime arrays).
+                let ty = unwrap_existential_array(raw);
+                let storage_binding = storage_binding_for(&ty, is_compute);
+                let length = length_for(storage_binding, &ty)?;
                 Ok(EntryOutput {
-                    ty: ty.clone(),
+                    ty,
                     decoration: output.attribute.as_ref().and_then(convert_to_io_decoration),
                     storage_binding,
-                    length: length_for(storage_binding, ty)?,
+                    length,
                 })
             })
             .collect();
