@@ -931,10 +931,56 @@ impl<'a> ClosureConverter<'a> {
         (var_term, captures)
     }
 
+    /// If `lam` is a pure eta-wrapper of a top-level function —
+    /// `λ(p1..pn). g(p1..pn)` with `g` a top-level callable and the
+    /// parameters forwarded in order — return `(g, g's type)`. The SOAC
+    /// operator is then just `g`, and we can reference it directly
+    /// instead of lifting a fresh forwarder def (`_w_lambda_*`).
+    ///
+    /// A bare function operator (`reduce(pick_better, …)`) is eta-expanded
+    /// to such a wrapper by `term_to_lambda`. Lifting that wrapper to its
+    /// own def leaves a redundant call hop that survives to codegen in any
+    /// SOAC phase that isn't fused away — e.g. a parallel reduce's combine
+    /// step, which calls the operator through the wrapper rather than the
+    /// real function.
+    fn eta_reduced_operator(&self, lam: &Lambda) -> Option<(SymbolId, Type<TypeName>)> {
+        let TermKind::App { func, args } = &lam.body.kind else {
+            return None;
+        };
+        let TermKind::Var(VarRef::Symbol(g)) = &func.kind else {
+            return None;
+        };
+        if !self.top_level.contains(g) || args.len() != lam.params.len() {
+            return None;
+        }
+        let forwards_in_order = args
+            .iter()
+            .zip(&lam.params)
+            .all(|(arg, (param, _))| matches!(&arg.kind, TermKind::Var(VarRef::Symbol(s)) if s == param));
+        if forwards_in_order { Some((*g, func.ty.clone())) } else { None }
+    }
+
     /// Lift a SOAC envelope `Lambda` and produce the matching
     /// `SoacBody`: the body becomes `Var(lifted_sym)`, the captures
     /// triple-list is populated.
     fn lift_soac_lambda(&mut self, lam: Lambda, span: Span) -> super::SoacBody {
+        if let Some((g, g_ty)) = self.eta_reduced_operator(&lam) {
+            let body = Term {
+                id: self.term_ids.next_id(),
+                ty: g_ty,
+                span,
+                kind: TermKind::Var(VarRef::Symbol(g)),
+            };
+            return super::SoacBody {
+                lam: Lambda {
+                    params: lam.params,
+                    body: Box::new(body),
+                    ret_ty: lam.ret_ty,
+                },
+                captures: vec![],
+            };
+        }
+
         let lam_ty = if lam.params.len() == 1 {
             Type::Constructed(TypeName::Arrow, vec![lam.params[0].1.clone(), lam.ret_ty.clone()])
         } else {
