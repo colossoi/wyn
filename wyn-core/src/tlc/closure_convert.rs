@@ -863,11 +863,45 @@ impl<'a> ClosureConverter<'a> {
         }
     }
 
+    /// If `body` is a saturated call `g(p1..pn)` that forwards exactly
+    /// `params` in order to a top-level function `g`, return `g`. Such a
+    /// lambda is a pure eta-wrapper (`λp̄. g p̄ ≡ g`).
+    ///
+    /// Bare function operators (`reduce(pick_better, …)`) are eta-expanded
+    /// into this shape by `term_to_lambda`, but it also covers any
+    /// hand-written forwarder. Recognising it lets `lift_lambda` reference
+    /// `g` directly rather than mint a forwarder def — which would otherwise
+    /// survive to codegen as a redundant call hop in any SOAC phase that
+    /// isn't fused away (e.g. a parallel reduce's combine step).
+    fn forwarded_top_level_fn(
+        &self,
+        params: &[(SymbolId, Type<TypeName>)],
+        body: &Term,
+    ) -> Option<SymbolId> {
+        let TermKind::App { func, args } = &body.kind else {
+            return None;
+        };
+        let TermKind::Var(VarRef::Symbol(g)) = &func.kind else {
+            return None;
+        };
+        if !self.top_level.contains(g) || args.len() != params.len() {
+            return None;
+        }
+        let forwards_in_order = args
+            .iter()
+            .zip(params)
+            .all(|(arg, (param, _))| matches!(&arg.kind, TermKind::Var(VarRef::Symbol(s)) if s == param));
+        forwards_in_order.then_some(*g)
+    }
+
     /// Lift a `Lambda` term to a fresh top-level def. Returns `(Var(lifted_sym),
     /// captures)`: the replacement term for the original site, and the captures
     /// computed during free-variable analysis. The lifted def is pushed onto
     /// `lifted_defs`, the new symbol is registered in `top_level`, and an entry
     /// is added to `callable_values`.
+    ///
+    /// A pure eta-wrapper of a top-level function is reduced to that
+    /// function directly (see `forwarded_top_level_fn`) rather than lifted.
     fn lift_lambda(&mut self, term: Term) -> (Term, Vec<Term>) {
         let ty = term.ty.clone();
         let span = term.span;
@@ -877,6 +911,22 @@ impl<'a> ClosureConverter<'a> {
 
         let bound: HashSet<SymbolId> = params.iter().map(|(p, _)| *p).collect();
         let captures = self.compute_transitive_captures(&converted_body, &bound);
+
+        // Eta-reduction: a pure forwarder `λp̄. g p̄` to a top-level function
+        // `g` is just `g` (`λp̄. g p̄ ≡ g`). Referencing `g` directly avoids
+        // minting a redundant forwarder def. The forwarder is top-level, so
+        // there are no captures; the lambda's type matches `g`'s.
+        if captures.is_empty() {
+            if let Some(g) = self.forwarded_top_level_fn(&params, &converted_body) {
+                let var_term = Term {
+                    id: self.term_ids.next_id(),
+                    ty,
+                    span,
+                    kind: TermKind::Var(VarRef::Symbol(g)),
+                };
+                return (var_term, vec![]);
+            }
+        }
 
         let rebuilt = rebuild_nested_lam(&params, converted_body, span, &mut self.term_ids);
         let lifted_sym = self.fresh_lambda_symbol();
@@ -931,56 +981,10 @@ impl<'a> ClosureConverter<'a> {
         (var_term, captures)
     }
 
-    /// If `lam` is a pure eta-wrapper of a top-level function —
-    /// `λ(p1..pn). g(p1..pn)` with `g` a top-level callable and the
-    /// parameters forwarded in order — return `(g, g's type)`. The SOAC
-    /// operator is then just `g`, and we can reference it directly
-    /// instead of lifting a fresh forwarder def (`_w_lambda_*`).
-    ///
-    /// A bare function operator (`reduce(pick_better, …)`) is eta-expanded
-    /// to such a wrapper by `term_to_lambda`. Lifting that wrapper to its
-    /// own def leaves a redundant call hop that survives to codegen in any
-    /// SOAC phase that isn't fused away — e.g. a parallel reduce's combine
-    /// step, which calls the operator through the wrapper rather than the
-    /// real function.
-    fn eta_reduced_operator(&self, lam: &Lambda) -> Option<(SymbolId, Type<TypeName>)> {
-        let TermKind::App { func, args } = &lam.body.kind else {
-            return None;
-        };
-        let TermKind::Var(VarRef::Symbol(g)) = &func.kind else {
-            return None;
-        };
-        if !self.top_level.contains(g) || args.len() != lam.params.len() {
-            return None;
-        }
-        let forwards_in_order = args
-            .iter()
-            .zip(&lam.params)
-            .all(|(arg, (param, _))| matches!(&arg.kind, TermKind::Var(VarRef::Symbol(s)) if s == param));
-        if forwards_in_order { Some((*g, func.ty.clone())) } else { None }
-    }
-
     /// Lift a SOAC envelope `Lambda` and produce the matching
     /// `SoacBody`: the body becomes `Var(lifted_sym)`, the captures
     /// triple-list is populated.
     fn lift_soac_lambda(&mut self, lam: Lambda, span: Span) -> super::SoacBody {
-        if let Some((g, g_ty)) = self.eta_reduced_operator(&lam) {
-            let body = Term {
-                id: self.term_ids.next_id(),
-                ty: g_ty,
-                span,
-                kind: TermKind::Var(VarRef::Symbol(g)),
-            };
-            return super::SoacBody {
-                lam: Lambda {
-                    params: lam.params,
-                    body: Box::new(body),
-                    ret_ty: lam.ret_ty,
-                },
-                captures: vec![],
-            };
-        }
-
         let lam_ty = if lam.params.len() == 1 {
             Type::Constructed(TypeName::Arrow, vec![lam.params[0].1.clone(), lam.ret_ty.clone()])
         } else {
