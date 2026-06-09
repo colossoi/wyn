@@ -234,6 +234,12 @@ pub enum PendingSoac {
         /// kept elements into the storage buffer at `br`. `None` is the
         /// static function-local Bounded lowering.
         scratch_out: Option<crate::BindingRef>,
+        /// `Some(br)` (runtime lowering only) makes the loop also store the
+        /// surviving count into `br[0]` — a host-readable length cell paired
+        /// with the output buffer when the filter result is a compute-entry
+        /// output. `None` when the count flows only as the result view's `len`
+        /// operand (in-kernel consumers like `reduce` / `length`).
+        len_out: Option<crate::BindingRef>,
     },
     /// Wrapper marking a SOAC as parallelized at the entry boundary. The
     /// `egir::parallelize` pass tags a planned compute entry's tail SOAC

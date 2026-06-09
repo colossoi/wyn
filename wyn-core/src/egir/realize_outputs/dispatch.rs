@@ -368,3 +368,124 @@ pub(crate) fn reject_sibling_consumers(
     }
     Ok(())
 }
+
+/// If `source` is produced by a runtime `filter` (a `PendingSoac::Filter` with
+/// `scratch_out = Some(_)`), retarget it so its serial compaction writes the
+/// entry's output buffer directly and skip the normal DPS store. Returns
+/// `false` (no retarget) for a static Bounded filter or any non-filter source —
+/// the caller then falls back to `compute_slot_source`.
+///
+/// The filter's already-reserved scratch binding is repurposed as the paired
+/// **length cell** (`u32`, 4 bytes): the loop stores the surviving count there
+/// so the host can read how many of the capacity-`n` output elements are valid.
+/// The output buffer is sized `LikeInput` on the filter's input (capacity `n`).
+#[allow(clippy::too_many_arguments)]
+pub fn retarget_filter_output(
+    graph: &mut EGraph,
+    storage_bindings: &mut [crate::interface::StorageBindingDecl],
+    output: &mut crate::ssa::types::EntryOutput,
+    source: NodeId,
+    pipeline: &mut crate::pipeline_descriptor::PipelineDescriptor,
+    entry_name: &str,
+) -> Result<bool, ConvertError> {
+    use crate::pipeline_descriptor::BufferLen;
+    let out_binding = output.storage_binding.expect("compute output has a storage binding");
+
+    // Find the filter side-effect producing `source` and retarget it in place.
+    let mut retargeted: Option<(BindingRef, Type<TypeName>, Type<TypeName>)> = None;
+    'outer: for (_bid, block) in graph.skeleton.blocks.iter_mut() {
+        for se in block.side_effects.iter_mut() {
+            if se.result != Some(source) {
+                continue;
+            }
+            if let SideEffectKind::Pending(PendingSoac::Filter {
+                scratch_out,
+                len_out,
+                input_array_type,
+                input_elem_type,
+                ..
+            }) = &mut se.kind
+            {
+                let Some(scratch) = *scratch_out else {
+                    // Static Bounded filter — not a runtime scratch producer.
+                    return Ok(false);
+                };
+                let input_arr_ty = input_array_type.clone();
+                let elem_ty = input_elem_type.clone();
+                // Compact straight into the output buffer; reuse the scratch
+                // binding as the paired length cell.
+                *scratch_out = Some(out_binding);
+                *len_out = Some(scratch);
+                retargeted = Some((scratch, input_arr_ty, elem_ty));
+            }
+            break 'outer;
+        }
+    }
+    let Some((scratch, input_arr_ty, elem_ty)) = retargeted else {
+        return Ok(false);
+    };
+
+    // Repurpose the scratch binding's declaration as the u32 length cell.
+    let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+    let len_cell_len = BufferLen::Fixed { bytes: 4 };
+    for decl in storage_bindings.iter_mut() {
+        if decl.binding == scratch {
+            decl.elem_ty = u32_ty.clone();
+            decl.length = Some(len_cell_len.clone());
+            break;
+        }
+    }
+
+    // Size the output buffer to the input's element count (capacity n). The
+    // input region is concrete after `pin_entry_regions`; if it isn't (no
+    // host buffer to mirror), leave the host to size it.
+    let out_len = crate::types::array_view_region(&input_arr_ty).and_then(|in_binding| {
+        let elem_bytes = crate::ssa::layout::type_byte_size(&elem_ty)?;
+        Some(BufferLen::LikeInput {
+            set: in_binding.set,
+            binding: in_binding.binding,
+            elem_bytes,
+            src_elem_bytes: elem_bytes,
+        })
+    });
+    output.length = out_len.clone();
+
+    // `publish_implicit_bindings` already ran (in `from_tlc`), so patch the
+    // already-published descriptor bindings to match: the output buffer's
+    // host-facing length, and the repurposed length cell.
+    if let Some(out_len) = out_len {
+        set_pipeline_binding_length(pipeline, entry_name, out_binding, out_len);
+    }
+    set_pipeline_binding_length(pipeline, entry_name, scratch, len_cell_len);
+    Ok(true)
+}
+
+/// Update the host descriptor's `length` for the storage binding `br` in the
+/// pipeline owning `entry_name`. A no-op if the binding isn't found.
+fn set_pipeline_binding_length(
+    pipeline: &mut crate::pipeline_descriptor::PipelineDescriptor,
+    entry_name: &str,
+    br: BindingRef,
+    len: crate::pipeline_descriptor::BufferLen,
+) {
+    use crate::pipeline_descriptor::{Binding, Pipeline};
+    let bindings = pipeline.pipelines.iter_mut().find_map(|p| match p {
+        Pipeline::Compute(cp) if cp.entry_point == entry_name => Some(&mut cp.bindings),
+        Pipeline::MultiCompute(mc) if mc.stages.iter().any(|s| s.entry_point == entry_name) => {
+            Some(&mut mc.bindings)
+        }
+        _ => None,
+    });
+    let Some(bindings) = bindings else { return };
+    for b in bindings.iter_mut() {
+        if let Binding::StorageBuffer {
+            set, binding, length, ..
+        } = b
+        {
+            if *set == br.set && *binding == br.binding {
+                *length = Some(len);
+                return;
+            }
+        }
+    }
+}

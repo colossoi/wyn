@@ -3044,13 +3044,11 @@ entry filt_reduce(xs: []i32) i32 =
     .expect("summing a filtered runtime array (filter → reduce) must compile");
 }
 
-/// GAP: returning a filtered array from a compute entry. With the runtime
-/// scratch-view lowering the result is a runtime-length view, but the entry
-/// output path (`realize_outputs`) does not yet retarget a `filter` producer
-/// onto the user-visible output binding (nor expose the runtime length).
-/// Un-ignore when the filter output-retarget lands.
+/// Returning a filtered runtime-sized array from a compute entry. The filter
+/// compacts directly into the user-visible output buffer (sized to the input's
+/// element count), and its surviving count is written to a paired `len` cell
+/// the host reads back. `realize_outputs::retarget_filter_output` wires this.
 #[test]
-#[ignore = "filter → compute output: needs realize_outputs retarget of the filter scratch buffer onto the output binding"]
 fn filter_result_as_compute_output_compiles() {
     compile_to_spirv(
         "\
@@ -3060,6 +3058,69 @@ entry filt_out(xs: []i32) ?k. [k]i32 =
 ",
     )
     .expect("returning a filtered array from a compute entry must compile");
+}
+
+/// Pins the filter→output host ABI (the paired length buffer). The `filt_out`
+/// pipeline must expose: the input, a host-readable **Output** data buffer sized
+/// `LikeInput` of the input (capacity n), and a compiler-managed **Intermediate**
+/// length cell sized `Fixed { bytes: 4 }` (one u32) holding the surviving count.
+#[test]
+fn filter_output_descriptor_has_paired_length_buffer() {
+    use crate::pipeline_descriptor::{Binding, BufferLen, BufferUsage};
+    let src = "\
+#[compute]
+entry filt_out(xs: []i32) ?k. [k]i32 =
+  filter(|x: i32| x % 2i32 == 0i32, xs)
+";
+    let lowered = crate::compile_thru_spirv(src).expect("filter→output compiles");
+    let bufs = compute_storage_buffers(&lowered.pipeline, "filt_out");
+
+    let output = bufs
+        .iter()
+        .find(|b| {
+            matches!(
+                b,
+                Binding::StorageBuffer {
+                    usage: BufferUsage::Output,
+                    ..
+                }
+            )
+        })
+        .expect("filter→output has a host-readable Output buffer");
+    let Binding::StorageBuffer { length: out_len, .. } = output else {
+        unreachable!()
+    };
+    assert!(
+        matches!(out_len, Some(BufferLen::LikeInput { .. })),
+        "output data buffer is sized to the input element count (capacity n): {output:?}",
+    );
+
+    let intermediates: Vec<&Binding> = bufs
+        .iter()
+        .filter(|b| {
+            matches!(
+                b,
+                Binding::StorageBuffer {
+                    usage: BufferUsage::Intermediate,
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert_eq!(
+        intermediates.len(),
+        1,
+        "exactly one Intermediate (the paired length cell): {bufs:?}",
+    );
+    let Binding::StorageBuffer { length: len_len, .. } = intermediates[0] else {
+        unreachable!()
+    };
+    assert_eq!(
+        *len_len,
+        Some(BufferLen::Fixed { bytes: 4 }),
+        "the length cell is a single u32 (4 bytes): {:?}",
+        intermediates[0],
+    );
 }
 
 /// Control: a single `reduce` consumer of a computed `counts` map lifts cleanly.

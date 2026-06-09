@@ -608,6 +608,7 @@ fn expand_one(
             output_capacity_size,
             destination,
             scratch_out,
+            len_out,
         }) => {
             let pred_func = pred_func.clone();
             let arr_ty = input_array_type.clone();
@@ -615,6 +616,7 @@ fn expand_one(
             let capacity_size = output_capacity_size.clone();
             let destination = *destination;
             let scratch_out = *scratch_out;
+            let len_out = *len_out;
 
             // Operand layout: [input, ...pred_captures].
             let arr_nid = se.operand_nodes[0];
@@ -636,6 +638,7 @@ fn expand_one(
                     result_node: result_nid,
                     destination,
                     scratch_out,
+                    len_out,
                 },
                 next_effect,
             );
@@ -1212,6 +1215,10 @@ struct FilterLoop {
     /// elements into the storage buffer at `br` and rebind the result to a
     /// runtime-length view over it. `None` is the static Bounded lowering.
     scratch_out: Option<crate::BindingRef>,
+    /// `Some(br)` (runtime lowering): also store the final surviving count into
+    /// `br[0]`, a host-readable length cell paired with the output buffer (set
+    /// when the filter is a compute-entry output). `None` otherwise.
+    len_out: Option<crate::BindingRef>,
 }
 
 fn build_filter_loop(
@@ -1576,6 +1583,24 @@ fn build_runtime_filter_loop(
         target: header,
         args: vec![cont_count_nid, next_i_nid],
     };
+
+    // When the filter is a compute-entry output, store the final surviving
+    // count into the paired length cell `len_out[0]` so the host can read how
+    // many elements are valid in the (capacity-n) output buffer.
+    if let Some(len_br) = spec.len_out {
+        let len_view = intern_storage_view(graph, len_br, u32_ty.clone(), None);
+        let zero_idx = intern_u32(graph, 0, None);
+        emit_storage_store(
+            graph,
+            after,
+            len_view,
+            zero_idx,
+            after_count_nid,
+            u32_ty.clone(),
+            next_effect,
+            None,
+        );
+    }
 
     // Rebind the original result NodeId to the runtime-length view
     // `StorageView(scratch_out)[offset = 0, len = after_count]`. The node's
