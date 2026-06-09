@@ -143,3 +143,148 @@ fn param_spine_lambdas_are_skipped() {
     });
     assert!(verify_closure_converted(&program).is_ok());
 }
+
+// --- Eta-reduction of SOAC operators -----------------------------------
+
+/// `a -> a -> a`, the type of a binary SOAC operator over `elem`.
+fn binop_ty(elem: &Type<TypeName>) -> Type<TypeName> {
+    Type::Constructed(
+        TypeName::Arrow,
+        vec![
+            elem.clone(),
+            Type::Constructed(TypeName::Arrow, vec![elem.clone(), elem.clone()]),
+        ],
+    )
+}
+
+/// Build `main(arr) = reduce(<op>, (), arr)` plus a top-level binary
+/// function `g`, run closure conversion, and return the converted program
+/// alongside `g` and `main`'s symbols. `op_args` chooses how the operator
+/// envelope forwards its parameters to `g` (in order → eta-reducible).
+fn reduce_with_operator(
+    op_args: impl Fn(crate::SymbolId, crate::SymbolId) -> [crate::SymbolId; 2],
+) -> (Program, ClosureInfo, crate::SymbolId, crate::SymbolId) {
+    let mut program = empty_program();
+    let elem = unit_ty();
+    let op_ty = binop_ty(&elem);
+
+    let g = program.symbols.alloc("g".to_string());
+    let ga = program.symbols.alloc("ga".to_string());
+    let gb = program.symbols.alloc("gb".to_string());
+    program.defs.push(Def {
+        name: g,
+        ty: op_ty.clone(),
+        body: term(
+            TermKind::Lambda(Lambda {
+                params: vec![(ga, elem.clone()), (gb, elem.clone())],
+                body: Box::new(term(TermKind::Var(VarRef::Symbol(ga)), elem.clone())),
+                ret_ty: elem.clone(),
+            }),
+            op_ty.clone(),
+        ),
+        meta: DefMeta::Function,
+        arity: 2,
+    });
+
+    let p0 = program.symbols.alloc("p0".to_string());
+    let p1 = program.symbols.alloc("p1".to_string());
+    let [a0, a1] = op_args(p0, p1);
+    let op = crate::tlc::SoacBody {
+        lam: Lambda {
+            params: vec![(p0, elem.clone()), (p1, elem.clone())],
+            body: Box::new(term(
+                TermKind::App {
+                    func: Box::new(term(TermKind::Var(VarRef::Symbol(g)), op_ty.clone())),
+                    args: vec![
+                        term(TermKind::Var(VarRef::Symbol(a0)), elem.clone()),
+                        term(TermKind::Var(VarRef::Symbol(a1)), elem.clone()),
+                    ],
+                },
+                elem.clone(),
+            )),
+            ret_ty: elem.clone(),
+        },
+        captures: vec![],
+    };
+
+    let arr = program.symbols.alloc("arr".to_string());
+    let reduce = term(
+        TermKind::Soac(SoacOp::Reduce {
+            op,
+            ne: Box::new(term(TermKind::UnitLit, elem.clone())),
+            input: crate::tlc::ArrayExpr::Ref(Box::new(term(
+                TermKind::Var(VarRef::Symbol(arr)),
+                elem.clone(),
+            ))),
+        }),
+        elem.clone(),
+    );
+    let main = program.symbols.alloc("main".to_string());
+    let main_ty = Type::Constructed(TypeName::Arrow, vec![elem.clone(), elem.clone()]);
+    program.defs.push(Def {
+        name: main,
+        ty: main_ty.clone(),
+        body: term(
+            TermKind::Lambda(Lambda {
+                params: vec![(arr, elem.clone())],
+                body: Box::new(reduce),
+                ret_ty: elem.clone(),
+            }),
+            main_ty,
+        ),
+        meta: DefMeta::Function,
+        arity: 1,
+    });
+
+    let (result, info) = run(program, &std::collections::HashSet::new());
+    (result, info, g, main)
+}
+
+/// Peel `main`'s parameter spine and return its tail `reduce` operator body.
+fn reduce_operator_body(program: &Program, main: crate::SymbolId) -> Term {
+    let def = program.defs.iter().find(|d| d.name == main).expect("main def");
+    let mut body = &def.body;
+    while let TermKind::Lambda(Lambda { body: inner, .. }) = &body.kind {
+        body = inner;
+    }
+    let TermKind::Soac(SoacOp::Reduce { op, .. }) = &body.kind else {
+        panic!("expected reduce soac, got {:?}", body.kind);
+    };
+    (*op.lam.body).clone()
+}
+
+#[test]
+fn eta_wrapper_operator_references_function_directly() {
+    // `λ(p0,p1). g(p0,p1)` is a pure forwarder — the operator is just `g`.
+    let (result, _info, g, main) = reduce_with_operator(|p0, p1| [p0, p1]);
+
+    assert_eq!(
+        result.defs.iter().filter(|d| matches!(d.meta, DefMeta::LiftedLambda)).count(),
+        0,
+        "an eta-wrapper operator must not lift a forwarder def"
+    );
+    let op_body = reduce_operator_body(&result, main);
+    assert!(
+        matches!(op_body.kind, TermKind::Var(VarRef::Symbol(s)) if s == g),
+        "reduce operator should reference g directly, got {:?}",
+        op_body.kind
+    );
+}
+
+#[test]
+fn non_forwarding_operator_is_lifted() {
+    // `λ(p0,p1). g(p1,p0)` swaps its arguments — not eta-reducible, so the
+    // envelope must still be lifted to its own def.
+    let (result, _info, g, main) = reduce_with_operator(|p0, p1| [p1, p0]);
+
+    assert_eq!(
+        result.defs.iter().filter(|d| matches!(d.meta, DefMeta::LiftedLambda)).count(),
+        1,
+        "a non-forwarding operator must be lifted"
+    );
+    let op_body = reduce_operator_body(&result, main);
+    let TermKind::Var(VarRef::Symbol(s)) = op_body.kind else {
+        panic!("expected operator to be a Var, got {:?}", op_body.kind);
+    };
+    assert_ne!(s, g, "swapped-arg operator must not collapse to g");
+}
