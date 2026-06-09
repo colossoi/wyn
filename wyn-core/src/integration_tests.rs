@@ -3101,6 +3101,48 @@ entry filt_reduce(xs: []i32) i32 =
     );
 }
 
+/// Cross-function auto-parallelization: a `scan` factored into a helper that
+/// `inline_small` will NOT fold (its operator has control flow, so the
+/// size/control-flow gate skips it) still parallelizes — `materialize_entry_soacs`
+/// exposes it at the entry boundary so `parallelize` produces the same
+/// multi-phase pipeline as the in-entry form. (`inline_small` skipping the
+/// helper is what makes this exercise the new pass specifically.)
+#[test]
+fn cross_function_scan_parallelizes() {
+    let lowered = crate::compile_thru_spirv(
+        "\
+def stencil(xs: []i32) []i32 = scan(|a: i32, b: i32| if a > b then a else b, 0i32, xs)
+#[compute]
+entry e(xs: []i32) []i32 = stencil(xs)
+",
+    )
+    .expect("cross-function scan compiles");
+    assert!(
+        is_two_phase_compute(&lowered.pipeline, "e"),
+        "a scan factored into a (non-inlinable) helper must still parallelize cross-function",
+    );
+}
+
+/// Invariant, end to end: a SOAC helper called *per element* inside a `map`
+/// lambda must NOT be hoisted and parallelized — the inner reduce stays a
+/// serial per-thread loop. The entry parallelizes as a single-stage
+/// lane-indexed map, not a multi-phase reduce pipeline.
+#[test]
+fn per_element_helper_soac_stays_serial() {
+    let lowered = crate::compile_thru_spirv(
+        "\
+def rsum(x: i32) i32 = reduce(|a: i32, b: i32| a + b, 0i32, [x, x, x])
+#[compute]
+entry e(xs: []i32) []i32 = map(|x: i32| rsum(x), xs)
+",
+    )
+    .expect("per-element helper compiles");
+    assert!(
+        !is_two_phase_compute(&lowered.pipeline, "e"),
+        "a per-element helper reduce must stay serial, not become a parallel reduce pipeline",
+    );
+}
+
 /// Returning a filtered runtime-sized array from a compute entry. The filter
 /// compacts directly into the user-visible output buffer (sized to the input's
 /// element count), and its surviving count is written to a paired `len` cell
