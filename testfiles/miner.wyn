@@ -54,15 +54,28 @@ def mine_nonce(midstate: [8]u32, header_base: [19]u32, nonce: u32) [8]u32 =
     sha256_32(sha256_compress(midstate, block2))
 
 -- Compare two 256-bit integers stored least-significant word first
--- (index 0 = LSB, index 7 = MSB). Fold the words low-to-high so the most
--- significant differing word decides: `lt` carries the verdict from the
--- words seen so far and is overridden whenever a more significant word
--- differs.
+-- (index 0 = LSB, index 7 = MSB), most significant word first so the
+-- first differing word decides. Constant indices keep this as register
+-- `OpCompositeExtract`s; a dynamic-index loop would spill `hash`/`target`
+-- to Function-storage arrays, which inherit the buffer's explicit layout
+-- decorations (illegal outside StorageBuffer).
 def hash_below_target(hash: [8]u32, target: [8]u32) bool =
-    loop lt = false for i < 8 do
-        if hash[i] < target[i] then true
-        else if hash[i] > target[i] then false
-        else lt
+    if hash[7] < target[7] then true
+    else if hash[7] > target[7] then false
+    else if hash[6] < target[6] then true
+    else if hash[6] > target[6] then false
+    else if hash[5] < target[5] then true
+    else if hash[5] > target[5] then false
+    else if hash[4] < target[4] then true
+    else if hash[4] > target[4] then false
+    else if hash[3] < target[3] then true
+    else if hash[3] > target[3] then false
+    else if hash[2] < target[2] then true
+    else if hash[2] > target[2] then false
+    else if hash[1] < target[1] then true
+    else if hash[1] > target[1] then false
+    else if hash[0] < target[0] then true
+    else false
 
 def NO_HIT: (u32, [8]u32) =
     (0xFFFFFFFFu32, [0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32,
