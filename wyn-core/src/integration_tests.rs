@@ -2952,6 +2952,116 @@ entry t(xs: []f32) []f32 =
     .expect("nested SOAC capturing an outer scalar must compile");
 }
 
+// ---- `filter` SOAC composition (gaps surfaced exploring the N-body port) ----
+//
+// `filter(pred, xs)` needs a statically-sized `xs` and returns the existential
+// `?k. [k]T`, which a `let` opens before use. These pin which compositions of
+// that result the compiler accepts. (None of these can be *executed* in unit
+// tests — there's no GPU adapter here — so they assert compilation only.)
+
+/// The supported shape: fixed-size input, existential result opened by `let`,
+/// consumed by `length`. Compiles end to end.
+#[test]
+fn filter_in_subroutine_length_compiles() {
+    compile_to_spirv(
+        "\
+def evens(arr: [8]i32) ?k. [k]i32 = filter(|x: i32| x % 2i32 == 0i32, arr)
+
+#[compute]
+entry filt_count() i32 =
+  let e = evens([1i32, 2i32, 3i32, 4i32, 5i32, 6i32, 7i32, 8i32]) in
+  length(e)
+",
+    )
+    .expect("filter in a subroutine, opened by `let`, consumed by `length` must compile");
+}
+
+/// Runtime-sized `filter` consumed by `length`: the input is an entry-param
+/// view (`[]i32`), so `filter` compacts kept elements into a reserved scratch
+/// storage buffer and yields a runtime-length view; `length` reads the view's
+/// `len` operand (the surviving count).
+#[test]
+fn filter_runtime_length_compiles() {
+    compile_to_spirv(
+        "\
+#[compute]
+entry filt_count(xs: []i32) i32 =
+  let e = filter(|x: i32| x % 2i32 == 0i32, xs) in
+  length(e)
+",
+    )
+    .expect("runtime-sized filter consumed by length must compile");
+}
+
+/// A runtime-sized `filter` inside a **subroutine** that the entry calls. This
+/// is the safety net for the scratch-binding home: `filter` compacts into a
+/// reserved storage buffer, and only a compute *entry* owns a descriptor set +
+/// binding namespace to host it (an `EgirFunc` does not — see the guard in
+/// `from_tlc::convert_function`). This compiles because `evens` is **inlined**
+/// into `filt_count` before EGIR conversion, so `convert_soac_filter` runs in
+/// the entry's converter and the scratch buffer lands at a non-colliding entry
+/// binding.
+///
+/// IF THIS TEST STARTS FAILING with "runtime `filter` in function `evens`
+/// reserved a scratch storage buffer …": the inlining invariant broke — a
+/// function whose result is a runtime filter survived to EGIR as a standalone
+/// `EgirFunc`. The scratch buffer then has no descriptor-set home. To fix,
+/// either (a) restore inlining of filter-returning functions before `from_tlc`,
+/// or (b) thread a caller-reserved scratch binding into the function's
+/// signature (like an extra param / interface entry) so the buffer is declared
+/// and sized on a real descriptor set. Do NOT relax the `convert_function`
+/// guard to emit anyway — that mis-numbers the binding and silently drops its
+/// host declaration (wrong-buffer codegen).
+#[test]
+fn filter_runtime_in_subroutine_compiles() {
+    compile_to_spirv(
+        "\
+def evens(arr: []i32) ?k. [k]i32 = filter(|x: i32| x % 2i32 == 0i32, arr)
+
+#[compute]
+entry filt_count(xs: []i32) i32 =
+  let e = evens(xs) in
+  length(e)
+",
+    )
+    .expect("runtime filter in an (inlined) subroutine must compile");
+}
+
+/// Summing a filtered runtime-sized array — `reduce(+, 0, filter(p, xs))` over
+/// an entry-param view. `filter` yields a runtime-length scratch view; `reduce`
+/// consumes it like any reduce-over-view. (Was a gap: the static-literal form
+/// left an unexpanded `PendingSoac` panicking at `elaborate.rs`.)
+#[test]
+fn filter_into_reduce_compiles() {
+    compile_to_spirv(
+        "\
+#[compute]
+entry filt_reduce(xs: []i32) i32 =
+  let kept = filter(|x: i32| x > 4i32, xs) in
+  reduce(|a: i32, b: i32| a + b, 0i32, kept)
+",
+    )
+    .expect("summing a filtered runtime array (filter → reduce) must compile");
+}
+
+/// GAP: returning a filtered array from a compute entry. With the runtime
+/// scratch-view lowering the result is a runtime-length view, but the entry
+/// output path (`realize_outputs`) does not yet retarget a `filter` producer
+/// onto the user-visible output binding (nor expose the runtime length).
+/// Un-ignore when the filter output-retarget lands.
+#[test]
+#[ignore = "filter → compute output: needs realize_outputs retarget of the filter scratch buffer onto the output binding"]
+fn filter_result_as_compute_output_compiles() {
+    compile_to_spirv(
+        "\
+#[compute]
+entry filt_out(xs: []i32) ?k. [k]i32 =
+  filter(|x: i32| x % 2i32 == 0i32, xs)
+",
+    )
+    .expect("returning a filtered array from a compute entry must compile");
+}
+
 /// Control: a single `reduce` consumer of a computed `counts` map lifts cleanly.
 #[test]
 fn single_consumer_reduce_compiles() {

@@ -299,6 +299,25 @@ fn convert_function(
     let result = converter.convert_term(inner_body)?;
     converter.set_return(Some(result));
 
+    // A runtime `filter` compacts into a reserved scratch storage buffer, which
+    // only an `EgirEntry` can host (it owns a descriptor set + a binding
+    // namespace seeded above its params/outputs). An `EgirFunc` has neither, so
+    // a scratch binding accumulated during a function body's conversion has
+    // nowhere to be declared or sized — emitting it would silently mis-number
+    // the binding and drop its host declaration. In practice a function whose
+    // result is a runtime filter is inlined into its caller before this pass
+    // (see `filter_runtime_in_subroutine_compiles`), so this never fires. If it
+    // does, that inlining invariant broke: either restore it, or thread a
+    // caller-reserved scratch binding into the function's signature (like a
+    // param) so the buffer has a home.
+    if !converter.extra_storage_bindings.is_empty() {
+        return Err(ConvertError::GraphError(format!(
+            "runtime `filter` in function `{def_name}` reserved a scratch storage buffer, but a \
+             standalone function has no descriptor-set interface to host it — the call must be \
+             inlined into a compute entry (it was not)"
+        )));
+    }
+
     let (graph, control_headers) = converter.into_graph_parts();
     Ok(ConvertedFunc::Regular(EgirFunc::new(
         def_name,
@@ -513,6 +532,21 @@ fn convert_entry_point(
         Type::Constructed(TypeName::Unit, _) | Type::Constructed(TypeName::SideEffect, _)
     );
 
+    // Seed the scratch-binding cursor just above every auto-storage binding
+    // already claimed by params, outputs, and pre-declared gather buffers, so
+    // a runtime `filter`'s scratch buffer (allocated during body conversion)
+    // never collides with them.
+    converter.next_auto_binding = inputs
+        .iter()
+        .filter_map(|i| i.storage_binding)
+        .chain(outputs.iter().filter_map(|o| o.storage_binding))
+        .chain(entry.storage_bindings.iter().map(|d| d.binding))
+        .filter(|b| b.set == AUTO_STORAGE_SET)
+        .map(|b| b.binding + 1)
+        .max()
+        .unwrap_or(binding_num)
+        .max(binding_num);
+
     // Convert body. Output assignment (storing the result into the bound
     // storage views / graphics output slots, and retargeting tail
     // Map/Scan SOACs to stream directly into a runtime-sized output) is a
@@ -552,6 +586,10 @@ fn convert_entry_point(
     };
 
     let slot_sources = std::mem::take(&mut converter.slot_sources_accum);
+    // Gather buffers declared in TLC (`lift_gathers`, on the `EntryDecl`) plus
+    // scratch buffers allocated during body conversion (runtime `filter`).
+    let mut storage_bindings = entry.storage_bindings.clone();
+    storage_bindings.extend(std::mem::take(&mut converter.extra_storage_bindings));
     let (graph, control_headers) = converter.into_graph_parts();
     let mut entry = EgirEntry::new(
         def_name.to_string(),
@@ -559,7 +597,7 @@ fn convert_entry_point(
         execution_model,
         inputs,
         outputs,
-        entry.storage_bindings.clone(),
+        storage_bindings,
         param_info,
         ret_type,
         graph,
@@ -613,6 +651,17 @@ struct Converter<'a> {
     /// same slot) has two. Empty for unit-returning entries that never
     /// went through `normalize_outputs`.
     slot_sources_accum: Vec<Vec<crate::egir::program::SlotSource>>,
+    /// Next free auto-storage binding number for compiler-introduced scratch
+    /// buffers (runtime `filter` output). Seeded by `convert_entry_point`
+    /// just above the entry's param + output bindings; bumped by
+    /// `alloc_scratch_binding`. The pre-seed value (0) is only used by
+    /// non-entry conversions, which never allocate scratch.
+    next_auto_binding: u32,
+    /// Compiler-introduced storage-binding declarations accumulated during
+    /// body conversion (runtime `filter` scratch buffers). Merged into the
+    /// `EgirEntry.storage_bindings` at construction, where `publish.rs`
+    /// surfaces them to the host descriptor as `Intermediate`s.
+    extra_storage_bindings: Vec<crate::interface::StorageBindingDecl>,
 }
 
 impl<'a> Converter<'a> {
@@ -637,7 +686,18 @@ impl<'a> Converter<'a> {
             next_effect: 1,
             current_span: None,
             slot_sources_accum: Vec::new(),
+            next_auto_binding: 0,
+            extra_storage_bindings: Vec::new(),
         }
+    }
+
+    /// Reserve a fresh auto-storage binding for a compiler-introduced scratch
+    /// buffer. Only valid during entry-body conversion (the cursor is seeded
+    /// in `convert_entry_point`).
+    fn alloc_scratch_binding(&mut self) -> BindingRef {
+        let br = BindingRef::new(AUTO_STORAGE_SET, self.next_auto_binding);
+        self.next_auto_binding += 1;
+        br
     }
 
     /// Intern a pure node, attaching the current term's span (if any).
@@ -1686,12 +1746,15 @@ impl<'a> Converter<'a> {
         let f_name = self.lambda_fn_name(&sb.lam)?;
         let capture_nids: Vec<NodeId> =
             sb.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
-        let input_arr_types: Vec<Type<TypeName>> =
-            inputs.iter().map(|ae| self.array_expr_type(ae)).collect();
         let input_nids: Vec<NodeId> =
             inputs.iter().map(|ae| self.convert_array_expr_value(ae)).collect::<Result<_, _>>()?;
-        let input_elem_types: Vec<Type<TypeName>> =
-            inputs.iter().map(|ae| self.array_expr_elem_type(ae)).collect();
+        let input_arr_types: Vec<Type<TypeName>> =
+            inputs.iter().zip(input_nids.iter()).map(|(ae, nid)| self.value_array_type(*nid, ae)).collect();
+        let input_elem_types: Vec<Type<TypeName>> = input_arr_types
+            .iter()
+            .zip(inputs.iter())
+            .map(|(ty, ae)| self.value_elem_type(ty, ae))
+            .collect();
         let output_elem_ty = if result_ty.is_array() {
             result_ty.elem_type().expect("Array has elem").clone()
         } else if super::soac_expand::as_soa_tuple(&result_ty).is_some() {
@@ -1734,9 +1797,9 @@ impl<'a> Converter<'a> {
         let op_name = self.lambda_fn_name(&op.lam)?;
         let capture_nids: Vec<NodeId> =
             op.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
-        let elem_ty = self.array_expr_elem_type(input);
-        let arr_ty = self.array_expr_type(input);
         let arr_nid = self.convert_array_expr_value(input)?;
+        let arr_ty = self.value_array_type(arr_nid, input);
+        let elem_ty = self.value_elem_type(&arr_ty, input);
         let init_nid = self.convert_term(ne)?;
 
         let mut operands: SmallVec<[NodeId; 4]> = smallvec![arr_nid, init_nid];
@@ -1767,12 +1830,15 @@ impl<'a> Converter<'a> {
             op.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
         let reduce_capture_nids: Vec<NodeId> =
             reduce_op.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
-        let input_arr_types: Vec<Type<TypeName>> =
-            inputs.iter().map(|ae| self.array_expr_type(ae)).collect();
         let input_nids: Vec<NodeId> =
             inputs.iter().map(|ae| self.convert_array_expr_value(ae)).collect::<Result<_, _>>()?;
-        let input_elem_types: Vec<Type<TypeName>> =
-            inputs.iter().map(|ae| self.array_expr_elem_type(ae)).collect();
+        let input_arr_types: Vec<Type<TypeName>> =
+            inputs.iter().zip(input_nids.iter()).map(|(ae, nid)| self.value_array_type(*nid, ae)).collect();
+        let input_elem_types: Vec<Type<TypeName>> = input_arr_types
+            .iter()
+            .zip(inputs.iter())
+            .map(|(ty, ae)| self.value_elem_type(ty, ae))
+            .collect();
         let init_nid = self.convert_term(ne)?;
 
         let mut operands: SmallVec<[NodeId; 4]> = SmallVec::new();
@@ -1811,13 +1877,13 @@ impl<'a> Converter<'a> {
         // rather than `T` (see convert_soac_map's `output_elem_ty`
         // for the same workaround). Scan's accumulator type equals
         // the output element type.
+        let arr_nid = self.convert_array_expr_value(input)?;
+        let arr_ty = self.value_array_type(arr_nid, input);
         let elem_ty = if result_ty.is_array() {
             result_ty.elem_type().expect("Array has elem").clone()
         } else {
-            self.array_expr_elem_type(input)
+            self.value_elem_type(&arr_ty, input)
         };
-        let arr_ty = self.array_expr_type(input);
-        let arr_nid = self.convert_array_expr_value(input)?;
         let init_nid = self.convert_term(ne)?;
 
         let mut operands: SmallVec<[NodeId; 4]> = smallvec![arr_nid, init_nid];
@@ -1850,36 +1916,80 @@ impl<'a> Converter<'a> {
         let arr_ty = self.array_expr_type(input);
         let arr_nid = self.convert_array_expr_value(input)?;
 
-        // Filter requires a statically-sized input — N is the upper
-        // bound on the output count. The TLC-level result type is an
-        // existential `?k. [k]T`; after `open_existential` it becomes
-        // `Array[T, Skolem(k), Composite]`. We rewrite the EGIR-level
-        // result type to `Array[T, Size(N), Bounded]` so downstream
-        // (elaborate, backends) see a concrete Bounded struct with
-        // both a buffer and a runtime length.
+        let mut operands: SmallVec<[NodeId; 4]> = smallvec![arr_nid];
+        operands.extend(capture_nids.iter().copied());
+
+        // The TLC-level result type is an existential `?k. [k]T`; after
+        // `open_existential` its size is a `Skolem(k)`. Two lowerings,
+        // keyed by whether the input has a static capacity:
         let size = arr_ty
             .array_size()
             .ok_or_else(|| ConvertError::GraphError("filter: input has no array_size".into()))?
             .clone();
-        if !matches!(&size, Type::Constructed(TypeName::Size(_), _)) {
-            return Err(ConvertError::GraphError(format!(
-                "filter: input must be statically sized, got size {:?}",
-                size
-            )));
+
+        if let Type::Constructed(TypeName::Size(_), _) = &size {
+            // Static-capacity input: result is a function-local
+            // `Array[T, Size(N), Bounded]` `{buffer, len}` struct (N is the
+            // input's static size, the upper bound).
+            let bounded_result_ty = Type::Constructed(
+                TypeName::Array,
+                vec![
+                    elem_ty.clone(),
+                    Type::Constructed(TypeName::ArrayVariantBounded, vec![]),
+                    size.clone(),
+                    crate::types::no_region(),
+                ],
+            );
+            return Ok(self.emit_soac(
+                PendingSoac::Filter {
+                    pred_func: pred_name,
+                    input_array_type: arr_ty,
+                    input_elem_type: elem_ty,
+                    output_capacity_size: size,
+                    destination,
+                    scratch_out: None,
+                },
+                operands,
+                bounded_result_ty,
+            ));
         }
-        let bounded_result_ty = Type::Constructed(
-            TypeName::Array,
-            vec![
-                elem_ty.clone(),
-                Type::Constructed(TypeName::ArrayVariantBounded, vec![]),
-                size.clone(),
-                crate::types::no_region(),
-            ],
-        );
 
-        let mut operands: SmallVec<[NodeId; 4]> = smallvec![arr_nid];
-        operands.extend(capture_nids.iter().copied());
-
+        // Runtime-sized input: compact the kept elements into a reserved
+        // scratch storage buffer (capacity = input element count), and yield a
+        // runtime-length view over it. The surviving count is the view's `len`
+        // operand. A runtime-sized result cannot back a function-local array.
+        //
+        // The scratch buffer must live in a descriptor set the host sees and a
+        // binding namespace seeded above the entry's params/outputs. Only an
+        // `EgirEntry` provides both; an `EgirFunc` has no `storage_bindings`
+        // interface and an unseeded cursor. A runtime `filter` reaching here in
+        // a standalone function (one monomorphize/inlining didn't fold into its
+        // caller) is caught at `convert_function` — see the guard there.
+        let input_binding = crate::types::array_view_region(&arr_ty).ok_or_else(|| {
+            ConvertError::GraphError(
+                "filter: runtime-sized input has no concrete buffer region — its size is \
+                 not statically known and it is not backed by a storage buffer"
+                    .into(),
+            )
+        })?;
+        let elem_bytes = crate::ssa::layout::type_byte_size(&elem_ty).ok_or_else(|| {
+            ConvertError::GraphError("filter: element type has no static byte size".into())
+        })?;
+        let scratch_out = self.alloc_scratch_binding();
+        self.extra_storage_bindings.push(crate::interface::StorageBindingDecl {
+            binding: scratch_out,
+            role: crate::interface::StorageRole::Intermediate,
+            elem_ty: elem_ty.clone(),
+            // Host sizes the scratch buffer to the input's element count; both
+            // hold `elem_ty`, so src/dst element bytes match.
+            length: Some(crate::pipeline_descriptor::BufferLen::LikeInput {
+                set: input_binding.set,
+                binding: input_binding.binding,
+                elem_bytes,
+                src_elem_bytes: elem_bytes,
+            }),
+        });
+        let view_result_ty = crate::types::view_array_of(&elem_ty, crate::types::region_tag(scratch_out));
         Ok(self.emit_soac(
             PendingSoac::Filter {
                 pred_func: pred_name,
@@ -1887,9 +1997,10 @@ impl<'a> Converter<'a> {
                 input_elem_type: elem_ty,
                 output_capacity_size: size,
                 destination,
+                scratch_out: Some(scratch_out),
             },
             operands,
-            bounded_result_ty,
+            view_result_ty,
         ))
     }
 
@@ -2019,6 +2130,39 @@ impl<'a> Converter<'a> {
             ArrayExpr::Range { start, .. } => start.ty.clone(),
             ArrayExpr::StorageView(crate::tlc::StorageView { elem_ty, .. }) => elem_ty.clone(),
         }
+    }
+
+    /// Authoritative array type of an already-converted input value `nid`. The
+    /// EGIR node's type reflects representation rewrites the TLC term type
+    /// predates — notably a runtime `filter` whose result is a `View` even
+    /// though its TLC type is the existential-opened `Composite`. So a SOAC
+    /// consumer reads the array shape (variant / region) off the node, falling
+    /// back to the TLC-derived `array_expr_type` when the node isn't a concrete
+    /// array (e.g. an opaque tuple handle). Mirrors how `length` dispatches on
+    /// the value type rather than the source type.
+    fn value_array_type(&self, nid: NodeId, fallback: &ArrayExpr) -> Type<TypeName> {
+        if let Some(ty) = self.graph.types.get(&nid) {
+            if matches!(ty, Type::Constructed(TypeName::Array, _))
+                || super::soac_expand::as_soa_tuple(ty).is_some()
+            {
+                return ty.clone();
+            }
+        }
+        self.array_expr_type(fallback)
+    }
+
+    /// Element type matching `value_array_type`: peel the array / SoA-tuple
+    /// element off `arr_ty`, falling back to the TLC-derived element type.
+    fn value_elem_type(&self, arr_ty: &Type<TypeName>, fallback: &ArrayExpr) -> Type<TypeName> {
+        if let Type::Constructed(TypeName::Array, args) = arr_ty {
+            if !args.is_empty() {
+                return args[0].clone();
+            }
+        }
+        if super::soac_expand::as_soa_tuple(arr_ty).is_some() {
+            return super::soac_expand::soa_element_type(arr_ty);
+        }
+        self.array_expr_elem_type(fallback)
     }
 }
 

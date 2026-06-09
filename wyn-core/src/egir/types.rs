@@ -203,25 +203,37 @@ pub enum PendingSoac {
         input_array_types: Vec<Type<TypeName>>,
         input_elem_types: Vec<Type<TypeName>>,
     },
-    /// `filter pred input` → Bounded array carrying the elements of
-    /// `input` that satisfied the predicate, plus a runtime count.
-    /// Operands: `[input, ...pred_captures]`. The result type set on
-    /// the result NodeId is `Array[T, Size(N), Bounded]` where N is
-    /// the input's static size (the upper bound). The runtime `len`
-    /// field of the resulting struct is the actual count of accepted
-    /// elements.
+    /// `filter pred input` carrying the elements of `input` that
+    /// satisfied the predicate, plus a runtime count.
+    /// Operands: `[input, ...pred_captures]`.
+    ///
+    /// Two lowerings, keyed by `scratch_out`:
+    /// - `None` (static-capacity input): the result is a function-local
+    ///   `Array[T, Size(N), Bounded]` `{buffer, len}` struct where N is the
+    ///   input's static size (`output_capacity_size`). The runtime `len`
+    ///   field is the count of accepted elements.
+    /// - `Some(br)` (runtime-sized input): the result is a runtime-length
+    ///   storage view over the reserved scratch buffer at `br`, typed
+    ///   `Array[T, View, _, Region(br)]`. The surviving count is the view's
+    ///   `len` operand (an SSA value). A runtime-sized input cannot back a
+    ///   function-local array, so it compacts into a descriptor-bound buffer.
     Filter {
         pred_func: String,
         input_array_type: Type<TypeName>,
         input_elem_type: Type<TypeName>,
-        /// `Size(N)` — the input's static capacity, reused as the
-        /// output buffer's capacity.
+        /// `Size(N)` — the input's static capacity (static lowering only;
+        /// for the runtime lowering this is unused, the capacity is the
+        /// scratch buffer's host-sized length).
         output_capacity_size: Type<TypeName>,
         /// `Fresh` (allocate a new `[N]T` buffer) or `InputBuffer`
         /// (reuse the input array's backing slot as the output —
         /// the result `View` aliases the input). `OutputView` is
-        /// not yet supported for Filter.
+        /// not yet supported for Filter. Ignored when `scratch_out` is set.
         destination: SoacDestination,
+        /// `Some(br)` selects the runtime scratch-view lowering, compacting
+        /// kept elements into the storage buffer at `br`. `None` is the
+        /// static function-local Bounded lowering.
+        scratch_out: Option<crate::BindingRef>,
     },
     /// Wrapper marking a SOAC as parallelized at the entry boundary. The
     /// `egir::parallelize` pass tags a planned compute entry's tail SOAC
