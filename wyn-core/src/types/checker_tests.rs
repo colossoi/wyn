@@ -2534,3 +2534,33 @@ fn ctor_vec_rejects_arity_mismatch() {
 fn ctor_legacy_dot_syntax_still_works() {
     typecheck_program("def to_i(x: f32) i32 = i32.f32(x)");
 }
+
+// ---- Bare `[]T` size sharing in `def` scope ----
+//
+// Bare `[]T` inside a single `def` resolves to one shared size
+// variable, so `def f(a: []i32, b: []i32)` is sugar for
+// `def f<[n]>(a: [n]i32, b: [n]i32)`.
+
+#[test]
+fn def_bare_array_sizes_share_within_decl() {
+    // Both args resolve to the same size variable; matching literal
+    // sizes typecheck cleanly.
+    typecheck_program("def add_first(a: []i32, b: []i32) i32 = a[0] + b[0]");
+}
+
+#[test]
+fn def_bare_array_size_mismatch_rejected() {
+    // Same `def` as above, but the call site passes literal arrays of
+    // different sizes. Sharing the size variable across `a` and `b`
+    // means the two sizes must unify; they don't, so it's a TypeError.
+    let result = try_typecheck_program(
+        r#"
+def add_first(a: []i32, b: []i32) i32 = a[0] + b[0]
+def test: i32 = add_first([1, 2, 3], [4, 5])
+"#,
+    );
+    assert!(
+        matches!(result, Err(CompilerError::TypeError(_, _))),
+        "expected TypeError for size-mismatched call to def with shared bare-[]: {result:?}"
+    );
+}
