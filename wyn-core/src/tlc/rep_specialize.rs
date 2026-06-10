@@ -693,9 +693,18 @@ impl RepSpecializer {
         // for nested call-edge specialization.
         let new_body = self.specialize_def_body(&callee_def.body, spec_key);
 
+        // `rebuild_nested_lam` (called by `specialize_def_body`) wraps
+        // the inner body in `Lambda` nodes and computes the outer term's
+        // type as the curried arrow over the rewritten params + the
+        // inner body's return type. That outer type IS the function
+        // type — do NOT clone the original `callee_def.ty`, which still
+        // carries `ArrayVariantAbstract` in the matched param's slot.
+        // Mirroring the wrong type into the new def would leak Abstract
+        // back into downstream consumers that read `Def.ty` (call-site
+        // synthesis, EGIR lowering).
         let new_def = Def {
             name: spec_sym,
-            ty: callee_def.ty.clone(),
+            ty: new_body.ty.clone(),
             body: new_body,
             meta: DefMeta::Function,
             arity: callee_def.arity,

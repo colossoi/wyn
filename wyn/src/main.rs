@@ -319,18 +319,20 @@ fn compile_file(
     let tlc_exposed = time("materialize_entry_soacs", verbose, || {
         tlc_inlined.materialize_entry_soacs()
     });
-    let tlc_parallel = time("tlc_parallelize", verbose, || {
-        tlc_exposed.parallelize_soacs(single_stage)
-    })?;
 
     // Phase 2 of array-variant-abstract: at call edges, specialize a
     // user-defined callee whose `Abstract`-typed param receives a
     // producer-known concrete variant (Bounded / View from filter).
-    let tlc_rep_specialized = time("tlc_rep_specialize", verbose, || tlc_parallel.rep_specialize());
+    // Runs before `parallelize_soacs` so the parallelizer sees
+    // concrete representations on every call edge.
+    let tlc_rep_specialized = time("tlc_rep_specialize", verbose, || tlc_exposed.rep_specialize());
+    let tlc_parallel = time("tlc_parallelize", verbose, || {
+        tlc_rep_specialized.parallelize_soacs(single_stage)
+    })?;
 
     // Eliminate dead TLC defs
     let tlc_reachable = time("tlc_filter_reachable", verbose, || {
-        tlc_rep_specialized.filter_reachable()
+        tlc_parallel.filter_reachable()
     });
 
     // Build the raw EGIR program, then chain the passes.
