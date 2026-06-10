@@ -289,6 +289,7 @@ pub type TypeTable = HashMap<NodeId, TypeScheme<TypeName>>;
 //       .fold_generated_lambdas()                  -> TlcGeneratedLambdasFolded
 //       .inline_small()                            -> TlcSmallInlined
 //       .parallelize_soacs(disable)                -> TlcParallelized
+//       .rep_specialize()                          -> TlcRepSpecialized
 //       .filter_reachable()                        -> TlcReachable
 //       .to_egraph()                               -> EgirRaw
 //
@@ -623,6 +624,7 @@ impl TlcRegionsPinned {
             .materialize_entry_soacs()
             .parallelize_soacs(disable_parallelize)
             .expect("parallelize_soacs")
+            .rep_specialize()
             .filter_reachable()
     }
 }
@@ -972,7 +974,58 @@ impl std::ops::Deref for TlcParallelized {
 }
 
 impl TlcParallelized {
+    /// Representation-specialize call edges where a let-bound
+    /// `filter(...)` result flows into a non-inlined size-poly helper.
+    /// Substitutes `ArrayVariantAbstract` in the callee's matched
+    /// param type with the producer's concrete variant (Bounded for
+    /// static-capacity input, View otherwise), cloning the callee per
+    /// `(orig_sym, spec_key)`. Phase 2 of the array-variant-abstract
+    /// project — see `tlc::rep_specialize` for the full story.
+    pub fn rep_specialize(self) -> TlcRepSpecialized {
+        let mut inner = self.0;
+        inner.tlc = tlc::rep_specialize::run(inner.tlc);
+        TlcRepSpecialized(inner)
+    }
+
+    /// Direct shortcut: eliminate unreachable defs without the
+    /// rep-specialize step. Kept for off-mainline test paths that don't
+    /// trigger Abstract leakage; the verifier catches anything that
+    /// slipped past. The canonical path goes through
+    /// `.rep_specialize().filter_reachable()`.
+    pub fn filter_reachable(self) -> TlcReachable {
+        let mut inner = self.0;
+        inner.tlc = tlc::inline::run_reachable(inner.tlc);
+        TlcReachable(inner)
+    }
+
+    pub fn to_egraph(self) -> std::result::Result<EgirParallelized, ConvertError> {
+        let TlcPipelineInner {
+            tlc, pipeline, plans, ..
+        } = self.0;
+        egir::from_tlc::run(&tlc, pipeline, &plans)
+            .and_then(|inner| EgirRaw(inner).realize_outputs().map(|a| a.parallelize(&plans)))
+    }
+}
+
+/// TLC after representation specialization (Phase 2 of
+/// array-variant-abstract). Every `App` whose `Var(Symbol(callee))` arg
+/// at an `Abstract`-typed position had a producer-known concrete
+/// variant now invokes a specialized clone of the callee with that
+/// concrete variant baked in. After this pass, `Abstract` should only
+/// survive in unreachable defs that DCE will drop.
+pub struct TlcRepSpecialized(pub TlcPipelineInner);
+
+impl std::ops::Deref for TlcRepSpecialized {
+    type Target = TlcPipelineInner;
+    fn deref(&self) -> &TlcPipelineInner {
+        &self.0
+    }
+}
+
+impl TlcRepSpecialized {
     /// Eliminate unreachable defs (dead code elimination at TLC level).
+    /// Drops the original `Abstract`-param defs whose call sites all
+    /// got rewritten to specialized siblings.
     pub fn filter_reachable(self) -> TlcReachable {
         let mut inner = self.0;
         inner.tlc = tlc::inline::run_reachable(inner.tlc);

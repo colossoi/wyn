@@ -323,9 +323,14 @@ fn compile_file(
         tlc_exposed.parallelize_soacs(single_stage)
     })?;
 
+    // Phase 2 of array-variant-abstract: at call edges, specialize a
+    // user-defined callee whose `Abstract`-typed param receives a
+    // producer-known concrete variant (Bounded / View from filter).
+    let tlc_rep_specialized = time("tlc_rep_specialize", verbose, || tlc_parallel.rep_specialize());
+
     // Eliminate dead TLC defs
     let tlc_reachable = time("tlc_filter_reachable", verbose, || {
-        tlc_parallel.filter_reachable()
+        tlc_rep_specialized.filter_reachable()
     });
 
     // Build the raw EGIR program, then chain the passes.

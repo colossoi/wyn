@@ -1,25 +1,64 @@
 -- A minimal particle simulator demonstrating storage-buffer feedback.
 --
--- The compute entry `tick` keeps a buffer of `vec2i32` pixel positions.
--- Each frame it reads the previous-frame positions via `prev_pos` (the
--- feedback read side) and returns the new ones. The update is trivial:
--- shift each particle by (1, 1), wrapping at 512px so a particle that
--- walks off the right/bottom edge re-enters at the top-left.
+-- The compute entry `tick` keeps a buffer of `vec4f32` particle state
+-- (position.xy, velocity.zw). Each frame it reads the previous-frame
+-- positions via `prev_pos` (the feedback read side), applies a soft
+-- clumping and alignment force, and writes the new positions.
 --
--- The fragment entry `main_image` reads the SAME feedback read side
--- (set=2, binding=0) — i.e. previous-frame positions — and lights up
--- one white pixel at each particle, black elsewhere.
+-- Exercises `filter(...)` piped into a user-defined size-polymorphic
+-- helper (`center` calling `sum`) — the canonical "Abstract array
+-- crosses a non-inlined call boundary" pattern that motivates
+-- `rep_specialize`.
 --
 -- Run:
 --   wyn compile testfiles/playground/particles.wyn -o /tmp/particles.spv
 --   viz pipeline /tmp/particles.spv --feedback tick:prev_pos=tick_output --max-frames 200
+def N:i32 = 5
+def CLUMPF:f32 = 0.1
+def CLUMPR:f32 = 100.0
+def UPDFACTOR:f32 = 1.0
+def PARTICLE_SIZE = 1.0
+def ALIGNF:f32 = 1.0
+def ALIGNR:f32 = 100.0
+
+def hash2(x: vec2f32) vec2f32 =
+  let k = @[0.3183099, 0.3678794] in
+  let x1 = x * k + k.yx in
+  let s = fract(x1.x * x1.y * (x1.x + x1.y)) in
+  let arg = @[16.0 * k.x * s, 16.0 * k.y * s] in
+  let f = vec.fract(arg) in
+  @[0.0 - 1.0 + 2.0 * f.x, 0.0 - 1.0 + 2.0 * f.y]
+
+def sum<[n]>(arr:[n]vec4f32) vec2f32 = reduce(|a,b| a+b, @[0.0,0.0,0.0,0.0], arr).xy
+def center(arr:[]vec4f32) vec2f32 = sum(arr)/f32(length(arr))
+def clump(pos:vec4f32, arr:[]vec4f32) vec2f32 =
+  let filt = filter(|x| magnitude(pos.xy-x.xy)<CLUMPR, arr) in
+  let dist = (center(filt) - pos.xy) in
+    CLUMPF * dist
+def align(pos:vec4f32, arr:[]vec4f32) vec2f32 =
+  ALIGNF*((reduce(|a,b| a+b, @[0.0,0.0], map(|elem| elem.zw, arr)) / f32(N)) - pos.zw)
 
 #[compute]
-entry tick(#[storage(set=2, binding=0, access=read)] prev_pos: []vec2i32) []vec2i32 =
-  map(|i: i32|
-        let p = prev_pos[i] in
-        @[(p.x + 1) % 512, (p.y + 1) % 512],
-      0i32..<1)
+entry tick(#[storage(set=2, binding=0, access=read)] prev_pos: []vec4f32,
+           #[uniform(set=1, binding=1)] iTime: f32) []vec4f32 =
+  if iTime < 0.1 then
+    map(|i:i32|
+          let loc = f32(i * 9 + 103) in
+          @[100.0*(hash2(@[loc,loc]).x+1.0),
+            100.0*(hash2(@[loc,loc]).y+1.0),
+            hash2(@[loc+1.0,loc-1.0]).x,
+            hash2(@[loc+1.0,loc+1.0]).y],
+        0i32..<N)
+  else
+    let prev_pos = prev_pos[0..N] in
+    map(
+      |upd:vec4f32| @[(upd.x + UPDFACTOR * upd.z + 512.0)%512.0,
+                     (upd.y + UPDFACTOR * upd.w + 512.0)%512.0,
+                     upd.z, upd.w],
+      map(|elem:vec4f32|
+            let deltav = clump(elem, prev_pos) + align(elem, prev_pos) in
+            @[elem.x, elem.y, elem.z + deltav.x, elem.w + deltav.y],
+          prev_pos))
 
 #[vertex]
 entry vertex_main(#[builtin(vertex_index)] vid: i32)
@@ -29,12 +68,15 @@ entry vertex_main(#[builtin(vertex_index)] vid: i32)
   let y = if vid == 0 then -1.0 else if vid == 1 then -1.0 else 3.0 in
   @[x, y, 0.0, 1.0]
 
+def is_hit(pos:vec2f32, pix: vec2f32, epsilon:f32) bool =
+  let diff = pos - pix in
+  magnitude(diff) < epsilon
+
 #[fragment]
-entry main_image(#[storage(set=2, binding=0, access=read)] positions: []vec2i32,
+entry main_image(#[storage(set=2, binding=0, access=read)] positions: []vec4f32,
                  #[builtin(position)] fragCoord: vec4f32)
   #[location(0)] vec4f32 =
-  let px = i32.f32(fragCoord.x) in
-  let py = i32.f32(fragCoord.y) in
-  let p = positions[0] in
-  let hit = (px == p.x) && (py == p.y) in
-  if hit then @[1.0, 1.0, 1.0, 1.0] else @[0.0, 0.0, 0.0, 1.0]
+  let any_hit = reduce(|a, b| a || b, false,
+                       map(|p| is_hit(p.xy, fragCoord.xy, PARTICLE_SIZE),
+                           positions[0..N])) in
+  if any_hit then @[1.0, 1.0, 1.0, 1.0] else @[0.0, 0.0, 0.0, 1.0]
