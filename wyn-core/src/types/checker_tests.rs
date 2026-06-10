@@ -2564,3 +2564,58 @@ def test: i32 = add_first([1, 2, 3], [4, 5])
         "expected TypeError for size-mismatched call to def with shared bare-[]: {result:?}"
     );
 }
+
+// ---- Representation-polymorphic existential array (filter output) ----
+//
+// `filter`'s return scheme is `?k. Array[a, Abstract, k, no_region]`.
+// After `open_existential` (let-binding), the bound value has type
+// `Array[a, Abstract, Skolem(k), no_region]`. Operations on the
+// Abstract-variant array must typecheck cleanly (length, index, slice,
+// passing to a size-poly helper). The previous Composite pinning froze
+// the consumer signature against Composite before the producer's
+// representation existed — see issues/slice-view-provenance.md and
+// `egir::verify_no_abstract`.
+
+#[test]
+fn filter_result_typechecks_in_let_binding() {
+    // Smallest possible case: bind a filter result.
+    typecheck_program(
+        r#"
+def is_even(x: i32) bool = x % 2 == 0
+def evens(arr: [8]i32) ?k. [k]i32 = filter(is_even, arr)
+"#,
+    );
+}
+
+#[test]
+fn filter_result_length_and_index_typecheck() {
+    // Length and index on the opened (Abstract-variant) array. The
+    // type rule must not force a concrete variant here.
+    typecheck_program(
+        r#"
+def is_even(x: i32) bool = x % 2 == 0
+#[vertex]
+entry vertex_main() #[builtin(position)] vec4f32 =
+  let e = filter(is_even, [1, 2, 3, 4, 5, 6, 7, 8]) in
+  @[f32.i32(length(e)), f32.i32(e[0]), 0.0, 1.0]
+"#,
+    );
+}
+
+#[test]
+fn filter_into_reduce_typechecks() {
+    // Canonical "filter then size-polymorphic consumer" pattern. With
+    // filter's old `Composite` pinning the consumer (reduce) was
+    // specialized against Composite — but at EGIR time the producer
+    // chose Bounded/View, mismatching. With Abstract, reduce's
+    // signature stays variant-polymorphic and the producer-side
+    // resolution is what fixes the runtime representation.
+    typecheck_program(
+        r#"
+#[compute]
+entry tick(#[storage(set=2, binding=0, access=read)] xs: []f32) f32 =
+  let ys = filter(|x: f32| x > 0.0, xs) in
+  reduce(|a: f32, b: f32| a + b, 0.0, ys)
+"#,
+    );
+}

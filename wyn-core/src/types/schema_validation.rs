@@ -37,6 +37,7 @@ fn arg_kind_of_name(name: &TypeName) -> ArgKind {
         | TypeName::ArrayVariantComposite
         | TypeName::ArrayVariantVirtual
         | TypeName::ArrayVariantBounded
+        | TypeName::ArrayVariantAbstract
         | TypeName::AddressPlaceholder => ArgKind::Variant,
         TypeName::Size(_) | TypeName::SizeVar(_) | TypeName::SizePlaceholder | TypeName::Skolem(_) => {
             ArgKind::Size

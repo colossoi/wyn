@@ -256,6 +256,17 @@ pub enum TypeName {
     /// output count is data-dependent but whose upper bound is
     /// statically known.
     ArrayVariantBounded,
+    /// Representation-polymorphic array. A first-class member of the
+    /// variant lattice — *not* a placeholder. Used by SOAC producers
+    /// (`filter`, …) whose runtime representation depends on the input
+    /// (Bounded for static-capacity inputs, View for runtime-sized).
+    /// Operations on Abstract arrays — `length`, `index`, `reduce`,
+    /// `scan`, `map`, `slice` — are well-typed in TLC; their backend
+    /// lowering dispatches on the producer's chosen concrete variant.
+    /// Survives `apply_subst` in monomorphize and helper signatures.
+    /// No `Array[_, Abstract, _, _]` may reach SPIR-V or WGSL emission;
+    /// `egir::verify_no_abstract` enforces this at the backend boundary.
+    ArrayVariantAbstract,
     /// Array variant placeholder. Replaced with type variable before type checking.
     /// Entry point params are constrained to Storage, others remain polymorphic.
     AddressPlaceholder,
@@ -353,6 +364,7 @@ impl std::fmt::Display for TypeName {
             TypeName::ArrayVariantComposite => write!(f, "composite"),
             TypeName::ArrayVariantBounded => write!(f, "bounded"),
             TypeName::ArrayVariantVirtual => write!(f, "virtual"),
+            TypeName::ArrayVariantAbstract => write!(f, "abstract"),
             TypeName::AddressPlaceholder => write!(f, "?addrspace"),
             TypeName::Region(b) => write!(f, "region(set={}, binding={})", b.set, b.binding),
             TypeName::NoRegion => write!(f, "no_region"),
@@ -419,6 +431,7 @@ impl polytype::Name for TypeName {
             TypeName::ArrayVariantComposite => "composite".to_string(),
             TypeName::ArrayVariantVirtual => "virtual".to_string(),
             TypeName::ArrayVariantBounded => "bounded".to_string(),
+            TypeName::ArrayVariantAbstract => "abstract".to_string(),
             TypeName::AddressPlaceholder => "?variant".to_string(),
             TypeName::Region(b) => format!("region_s{}_b{}", b.set, b.binding),
             TypeName::NoRegion => "no_region".to_string(),
@@ -1129,6 +1142,19 @@ pub fn array_variant_bounded() -> Type {
 /// Check if a type is the Bounded array variant marker.
 pub fn is_array_variant_bounded(ty: &Type) -> bool {
     matches!(ty, Type::Constructed(TypeName::ArrayVariantBounded, _))
+}
+
+/// Create the Abstract array variant marker — representation-polymorphic
+/// at the TLC level, resolved to a concrete variant by the producer's
+/// EGIR lowering. See `TypeName::ArrayVariantAbstract` for the full
+/// semantics + invariant.
+pub fn array_variant_abstract() -> Type {
+    Type::Constructed(TypeName::ArrayVariantAbstract, vec![])
+}
+
+/// Check if a type is the Abstract array variant marker.
+pub fn is_array_variant_abstract(ty: &Type) -> bool {
+    matches!(ty, Type::Constructed(TypeName::ArrayVariantAbstract, _))
 }
 
 pub mod schema_validation;

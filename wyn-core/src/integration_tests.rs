@@ -4273,3 +4273,46 @@ fn ctor_vec3_and_vec4_constructors_compile_to_spirv() {
     crate::compile_thru_spirv(v3).expect("vec3f32(vec3i32) must compile");
     crate::compile_thru_spirv(v4).expect("vec4f32(vec4u32) must compile");
 }
+
+// ---- ArrayVariantAbstract — `filter` → size-polymorphic consumer ----
+//
+// `filter`'s return scheme is now `?k. Array[a, Abstract, k, no_region]`
+// (was `Composite`). The producer's EGIR lowering picks Bounded for
+// static-capacity inputs and View for runtime-sized ones; the consumer
+// can be a size-polymorphic helper that gets specialized against the
+// `Abstract` representation in TLC and resolved at the producer edge in
+// EGIR. The backend-boundary verifier (`egir::verify_no_abstract`)
+// rejects any residual `Array[_, Abstract, _, _]`.
+//
+// These pin the canonical patterns; for fusion-shape and runtime-length
+// coverage see the older `filter_into_reduce_*` tests above.
+
+#[test]
+fn filter_into_user_size_poly_helper_compiles() {
+    let src = r#"
+def sum<[n]>(xs: [n]f32) f32 = reduce(|a: f32, b: f32| a + b, 0.0, xs)
+
+#[compute]
+entry tick(#[storage(set=2, binding=0, access=read)] xs: []f32) f32 =
+  let kept = filter(|x: f32| x > 0.0, xs) in
+  sum(kept)
+"#;
+    crate::compile_thru_spirv(src)
+        .expect("`filter` piped through a user-defined size-poly helper must compile to SPIR-V");
+}
+
+#[test]
+fn filter_into_user_size_poly_helper_static_capacity() {
+    // Static-capacity input exercises the Bounded producer path
+    // (filter result is `{buffer: [8]f32, len: u32}`).
+    let src = r#"
+def sum<[n]>(xs: [n]f32) f32 = reduce(|a: f32, b: f32| a + b, 0.0, xs)
+
+#[compute]
+entry tick() f32 =
+  let kept = filter(|x: f32| x > 0.0, [1.0, -2.0, 3.0, -4.0, 5.0, -6.0, 7.0, -8.0]) in
+  sum(kept)
+"#;
+    crate::compile_thru_spirv(src)
+        .expect("static-capacity filter piped through a size-poly helper must compile");
+}

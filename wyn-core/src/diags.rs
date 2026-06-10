@@ -164,6 +164,7 @@ fn format_constructed_type(name: &TypeName, args: &[PolyType<TypeName>]) -> Stri
         TypeName::ArrayVariantComposite => "composite".to_string(),
         TypeName::ArrayVariantVirtual => "virtual".to_string(),
         TypeName::ArrayVariantBounded => "bounded".to_string(),
+        TypeName::ArrayVariantAbstract => "abstract".to_string(),
         TypeName::AddressPlaceholder => "?variant".to_string(),
         TypeName::Region(b) => format!("region(set={}, binding={})", b.set, b.binding),
         TypeName::NoRegion => "no_region".to_string(),

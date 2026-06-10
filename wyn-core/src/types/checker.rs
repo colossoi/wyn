@@ -1139,18 +1139,26 @@ impl<'a> TypeChecker<'a> {
         );
         self.define_builtin("scan", Self::generalize_closed(body));
 
-        // filter: ∀a n s. (a -> bool) -> Array[a, s, n] -> ?k. Array[a, k, Composite]
-        // Output variant pinned to Composite for the same reason as `map` / `scan`.
+        // filter: ∀a n s. (a -> bool) -> Array[a, s, n] -> ?k. Array[a, Abstract, k, no_region]
+        //
+        // Output variant is `Abstract` — representation-polymorphic at the
+        // TLC level. The concrete runtime variant (Bounded for static-
+        // capacity inputs, View for runtime-sized) is chosen by the
+        // producer's EGIR lowering in `egir/from_tlc.rs`. Pinning
+        // Composite here would freeze the consumer's signature before
+        // the producer's representation exists — see
+        // `egir::verify_no_abstract` for the backend-boundary invariant.
         let (a, n, s) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
         let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
         let pred_ty = Type::arrow(Self::var(a), bool_ty);
         let array_a = self.array_ty(Self::var(a), s, n);
-        // Existential return type: ?k. Array[a, k, Composite]
         let k = "k".to_string();
         let k_var = Type::Constructed(TypeName::SizeVar(k.clone()), vec![]);
-        let composite = Type::Constructed(TypeName::ArrayVariantComposite, vec![]);
-        let result_array =
-            Type::Constructed(TypeName::Array, vec![Self::var(a), composite, k_var, no_region()]);
+        let abstract_variant = Type::Constructed(TypeName::ArrayVariantAbstract, vec![]);
+        let result_array = Type::Constructed(
+            TypeName::Array,
+            vec![Self::var(a), abstract_variant, k_var, no_region()],
+        );
         let existential_result = Type::Constructed(TypeName::Existential(vec![k]), vec![result_array]);
         let body = Self::arrow_chain(&[pred_ty, array_a], existential_result);
         self.define_builtin("filter", Self::generalize_closed(body));

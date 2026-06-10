@@ -1132,6 +1132,7 @@ impl SsaConverted {
     /// `DynamicExtract`) was already done by the EGIR pipeline if `to_egir`
     /// was called with `EgirOpts::for_spirv()`.
     pub fn lower(self) -> error::Result<Lowered> {
+        egir::verify_no_abstract::run(&self.ssa)?;
         let spirv = spirv::lower_ssa_program(&self.ssa)?;
         Ok(Lowered {
             spirv,
@@ -1140,6 +1141,7 @@ impl SsaConverted {
     }
 
     pub fn lower_wgsl(self) -> error::Result<String> {
+        egir::verify_no_abstract::run(&self.ssa)?;
         wgsl::lower(&self.ssa)
     }
 }

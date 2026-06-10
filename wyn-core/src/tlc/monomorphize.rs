@@ -11,6 +11,16 @@
 //!
 //! When called with [4]f32, creates:
 //!   def sum$n4 (arr:[4]f32) : f32 = ...
+//!
+//! **Representation variants.** `apply_subst` substitutes type *variables*
+//! but does not collapse array *representation* variants. In particular,
+//! `ArrayVariantAbstract` survives substitution unchanged — it is a
+//! first-class representation-polymorphic variant in the lattice, not a
+//! placeholder. A helper specialized against an Abstract-typed argument
+//! gets `Abstract` in its parameter type; the concrete representation is
+//! chosen by the producer's EGIR lowering (`egir/from_tlc.rs`). Any
+//! `Array[_, Abstract, _, _]` surviving past EGIR is caught by
+//! `egir::verify_no_abstract` before backend emission.
 
 use super::VarRef;
 use super::{ArrayExpr, Def, DefMeta, Lambda, LoopKind, Program, SoacOp, Term, TermIdSource, TermKind};
