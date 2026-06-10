@@ -32,11 +32,13 @@ def hash2(x: vec2f32) vec2f32 =
 def sum<[n]>(arr:[n]vec4f32) vec2f32 = reduce(|a,b| a+b, @[0.0,0.0,0.0,0.0], arr).xy
 def center(arr:[]vec4f32) vec2f32 = sum(arr)/f32(length(arr))
 def clump(pos:vec4f32, arr:[]vec4f32) vec2f32 =
+  --let counter = i32(reduce(
+  --  |a,b| if magnitude(pos.xy-b.xy)>CLUMPR then a+@[1.0,0.0,0.0,0.0] else a
+  --  , @[0.0,0.0,0.0,0.0], arr).x) in
   let filt = filter(|x| magnitude(pos.xy-x.xy)<CLUMPR, arr) in
   let dist = (center(filt) - pos.xy) in
     CLUMPF * dist
-def align(pos:vec4f32, arr:[]vec4f32) vec2f32 =
-  ALIGNF*((reduce(|a,b| a+b, @[0.0,0.0], map(|elem| elem.zw, arr)) / f32(N)) - pos.zw)
+def align(pos:vec4f32, arr:[]vec4f32) vec2f32 = ALIGNF*((reduce(|a,b| a+b, @[0.0,0.0], map(|elem| elem.zw, arr)) / f32(N)) - pos.zw)
 
 #[compute]
 entry tick(#[storage(set=2, binding=0, access=read)] prev_pos: []vec4f32,
