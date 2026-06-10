@@ -92,12 +92,26 @@ fn lift_entry(program: &mut Program, idx: usize, new_defs: &mut Vec<Def>) {
         })
         .collect();
     let view_count: u32 = slots.iter().flatten().map(|b| b.buffer_count()).sum();
-    // Pull the declared return type from `def.ty`'s arrow-return position
-    // rather than the body's tail. After `tlc::normalize_outputs` the tail
-    // is a unit-producing `OutputSlotStore` chain; the entry's *declared*
-    // output shape lives on `def.ty`.
-    let entry_ret_ty = crate::types::extract_function_signature(&program.defs[idx].ty).1;
-    let out_count = storage_output_count(&entry_ret_ty);
+    // Number of storage-output slots the entry declared. Reading off
+    // `decl.outputs.len()` is exact — one entry per declared output
+    // (tuple-returning entries get one EntryOutput per field).
+    //
+    // We can NOT read this off `def.ty`'s arrow-return position even
+    // though that LOOKS like the source of truth: `tlc::normalize_outputs`
+    // rewrites the def.ty's return slot to `SideEffect` to match the
+    // body's new `OutputSlotStore` tail, so any pass running after
+    // normalize_outputs that reads `def.ty.return` sees `SideEffect`
+    // and undercounts.
+    //
+    // Why this mattered: if `out_count` undercounts by N, the gather
+    // intermediate `next_gather = view_count + out_count` lands on a
+    // binding slot the (N-th) output expected, and the descriptor
+    // emitter overwrites the output's binding entry with the gather's
+    // intermediate role — the output slot silently vanishes from the
+    // JSON descriptor (regression first surfaced by an entry returning
+    // `([]vec4f32, [5]i32)` whose `[5]i32` literal indexed into a
+    // `scan` result, gather-lifting the scan).
+    let out_count = decl.outputs.len() as u32;
     let mut next_gather = view_count + out_count;
 
     let mut added_decls: Vec<StorageBindingDecl> = Vec::new();
@@ -756,17 +770,6 @@ fn peel_lambda_params(term: &Term) -> (Vec<(SymbolId, Type<TypeName>)>, &Term) {
             (params, tail)
         }
         _ => (vec![], term),
-    }
-}
-
-/// Number of storage-output bindings `from_tlc` allocates for a compute
-/// entry returning `ret_ty`: one per tuple field, one for a plain non-unit
-/// return, none for unit.
-fn storage_output_count(ret_ty: &Type<TypeName>) -> u32 {
-    match ret_ty {
-        Type::Constructed(TypeName::Unit, _) => 0,
-        Type::Constructed(TypeName::Tuple(_), fields) => fields.len() as u32,
-        _ => 1,
     }
 }
 

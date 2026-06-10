@@ -4330,3 +4330,52 @@ fn particle_sim_filter_into_user_helper_compiles() {
     crate::compile_thru_spirv(&src)
         .expect("particle sim with filter→center→sum chain must compile after rep_specialize");
 }
+
+/// Regression: an entry returning a tuple where the second output is a
+/// fixed-size literal that *indexes into a scan result* used to silently
+/// drop the second output's binding from the descriptor JSON. Root
+/// cause: `lift_gathers::lift_entry` read `out_count` off `def.ty`'s
+/// return slot, but `normalize_outputs` rewrites that to `SideEffect`
+/// (the body's tail is an `OutputSlotStore` chain). The old
+/// `storage_output_count(SideEffect)` undercounted, so the gather
+/// intermediate landed on the binding slot the second output expected.
+/// Fix reads `decl.outputs.len()` directly.
+#[test]
+fn entry_tuple_output_with_scan_indexed_literal_keeps_both_bindings() {
+    use crate::pipeline_descriptor::{BufferUsage, Pipeline};
+    let lowered = crate::compile_thru_spirv(
+        "\
+#[compute]
+entry gen(xs: []i32, #[uniform(set=1,binding=0)] n: i32) ([]vec4f32, [5]i32) =
+  let offsets = scan(|a:i32,b:i32| a+b, 0, xs) in
+  (map(|i:i32| @[f32.i32(i),0.0,0.0,1.0], iota(64)),
+   [36, offsets[n - 1], 0, 0, 0])
+",
+    )
+    .expect("scan-into-tuple-literal must compile");
+    let gen_pipeline = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .find_map(|p| match p {
+            Pipeline::Compute(c) if c.entry_point == "gen" => Some(c),
+            _ => None,
+        })
+        .expect("compute pipeline `gen` present");
+    let output_names: Vec<&str> = gen_pipeline
+        .bindings
+        .iter()
+        .filter_map(|b| match b {
+            crate::pipeline_descriptor::Binding::StorageBuffer {
+                usage: BufferUsage::Output,
+                name,
+                ..
+            } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        output_names.contains(&"gen_output_0") && output_names.contains(&"gen_output_1"),
+        "both gen_output_0 and gen_output_1 must be present as outputs in the descriptor; got {output_names:?}"
+    );
+}
