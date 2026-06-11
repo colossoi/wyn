@@ -140,11 +140,45 @@ impl PartialEvaluator {
             // Builtin reference: not constant-foldable on its own.
             TermKind::Var(VarRef::Builtin { .. }) => Value::Unknown(term.clone()),
 
-            // Let binding
-            TermKind::Let { name, rhs, body, .. } => {
+            // Let binding. Inline only *duplicable* rhs values (literals, bare
+            // vars, function values); for a non-trivial residual rhs, keep the
+            // `let` in the residual and reference it by name. Inlining a
+            // residual at every use site duplicates it — exponential for chains
+            // like `let (x0, x1) = mix(..)` repeated, since each step uses the
+            // previous twice — and dissolving the sole binding is what leaves a
+            // var dangling ("Unknown global: <v>") when a residual fails to
+            // substitute it. Keeping the binding fixes both.
+            TermKind::Let {
+                name,
+                name_ty,
+                rhs,
+                body,
+            } => {
                 let rhs_val = self.eval(rhs);
-                self.env.insert(*name, rhs_val);
-                self.eval(body)
+                if is_duplicable(&rhs_val) {
+                    self.env.insert(*name, rhs_val);
+                    self.eval(body)
+                } else {
+                    let rhs_term = self.reify(rhs_val, &rhs.ty, rhs.span);
+                    let name_var = self.mk_term(
+                        rhs_term.ty.clone(),
+                        rhs.span,
+                        TermKind::Var(VarRef::Symbol(*name)),
+                    );
+                    self.env.insert(*name, Value::Unknown(name_var));
+                    let body_val = self.eval(body);
+                    let body_term = self.reify(body_val, &body.ty, body.span);
+                    Value::Unknown(self.mk_term(
+                        term.ty.clone(),
+                        term.span,
+                        TermKind::Let {
+                            name: *name,
+                            name_ty: name_ty.clone(),
+                            rhs: Box::new(rhs_term),
+                            body: Box::new(body_term),
+                        },
+                    ))
+                }
             }
 
             // If expression
@@ -849,6 +883,23 @@ impl PartialEvaluator {
             span,
             kind,
         }
+    }
+}
+
+/// Whether a partial-eval value is cheap to duplicate at every use site.
+/// Literals, bare-variable residuals, unit, and function values are; a
+/// non-trivial residual term (a computation, or an aggregate containing one)
+/// is not — duplicating those at each use is what makes `let`-chains blow up
+/// exponentially, so they are kept as `let`-bindings instead of inlined.
+fn is_duplicable(v: &Value) -> bool {
+    match v {
+        Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Partial { .. } => true,
+        // Lambdas stay inlined: they aren't the source of the duplication
+        // blowup (that's self-referential value chains), and `apply_var` must
+        // see the lambda value in the env to apply it — binding the name to
+        // `Var(name)` instead would make `apply_var` self-alias and recurse.
+        Value::Unknown(t) => matches!(t.kind, TermKind::Var(_) | TermKind::UnitLit | TermKind::Lambda(_)),
+        Value::Tuple(es) | Value::Array(es) | Value::Vector(es) => es.iter().all(is_duplicable),
     }
 }
 

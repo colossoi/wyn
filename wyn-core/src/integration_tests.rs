@@ -4484,3 +4484,39 @@ entry e() []u32 = map(|i: i32| C * 747796405u32 + 2891336453u32, 0i32 ..< 4)
     )
     .expect("folded overflowing u32 arithmetic must wrap, not error");
 }
+
+/// A deep chain of `let (x0, x1) = mix(x0, x1, ..)` — each step uses the
+/// previous result twice — inlined by partial_eval must not duplicate the
+/// residual at every use site. Doing so is exponential in the chain depth
+/// (the term doubles per step) and at shallower depth also drops a binding
+/// ("Unknown global: x0"). partial_eval keeps non-trivial residual `let`s
+/// shared instead. Surfaced by lib/rng.wyn's Threefry `block`.
+#[test]
+fn deep_tuple_let_chain_keeps_sharing() {
+    compile_to_spirv(
+        "\
+module type RA = {
+  type key
+  sig at(k: key, p: u32) u32
+}
+module g : RA = {
+  type key = (u32, u32)
+  def mix(a: u32, b: u32, r: u32) (u32, u32) = let y = a + b in (y, (b << r) ^ y)
+  def block(c0: u32, c1: u32, k0: u32, k1: u32) (u32, u32) =
+    let (x0, x1) = mix(c0 + k0, c1 + k1, 13u32) in
+    let (x0, x1) = mix(x0, x1, 15u32) in
+    let (x0, x1) = mix(x0, x1, 26u32) in
+    let (x0, x1) = mix(x0, x1, 6u32) in
+    let (x0, x1) = mix(x0, x1, 17u32) in
+    let (x0, x1) = mix(x0, x1, 29u32) in
+    let (x0, x1) = mix(x0, x1, 16u32) in
+    let (x0, x1) = mix(x0, x1, 24u32) in
+    (x0 + k0, x1 + k1)
+  def at(k: key, p: u32) u32 = let (k0, k1) = k in let (r0, _) = block(p, 0u32, k0, k1) in r0
+}
+#[compute]
+entry e() []u32 = map(|i: i32| g.at((0x9e3779b9u32, 0x243f6a88u32), u32.i32(i)), 0i32 ..< 4)
+",
+    )
+    .expect("deep tuple-destructure let-chain must lower without blowup or dangling vars");
+}
