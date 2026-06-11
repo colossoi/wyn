@@ -2047,6 +2047,27 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 Ok(self.constructor.builder.i_not_equal(bool_type, None, lhs, rhs)?)
             }
 
+            // Bitwise and shift operations (integer operands)
+            ("&", Constructed(Int(_) | UInt(_), _), _) => {
+                Ok(self.constructor.builder.bitwise_and(result_ty, None, lhs, rhs)?)
+            }
+            ("|", Constructed(Int(_) | UInt(_), _), _) => {
+                Ok(self.constructor.builder.bitwise_or(result_ty, None, lhs, rhs)?)
+            }
+            ("^", Constructed(Int(_) | UInt(_), _), _) => {
+                Ok(self.constructor.builder.bitwise_xor(result_ty, None, lhs, rhs)?)
+            }
+            ("<<", Constructed(Int(_) | UInt(_), _), _) => {
+                Ok(self.constructor.builder.shift_left_logical(result_ty, None, lhs, rhs)?)
+            }
+            // Signed `>>` is arithmetic (sign-extending); unsigned is logical.
+            (">>", Constructed(Int(_), _), _) => {
+                Ok(self.constructor.builder.shift_right_arithmetic(result_ty, None, lhs, rhs)?)
+            }
+            (">>", Constructed(UInt(_), _), _) => {
+                Ok(self.constructor.builder.shift_right_logical(result_ty, None, lhs, rhs)?)
+            }
+
             // Boolean operations
             ("&&", Constructed(Bool, _), _) => {
                 Ok(self.constructor.builder.logical_and(bool_type, None, lhs, rhs)?)

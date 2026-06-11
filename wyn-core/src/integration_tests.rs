@@ -4379,3 +4379,43 @@ entry gen(xs: []i32, #[uniform(set=1,binding=0)] n: i32) ([]vec4f32, [5]i32) =
         "both gen_output_0 and gen_output_1 must be present as outputs in the descriptor; got {output_names:?}"
     );
 }
+
+/// Infix bitwise/shift operators must lower to the matching SPIR-V ops.
+/// `^` → OpBitwiseXor and `<<` → OpShiftLeftLogical; the operands are
+/// unsigned so this also pins the (UInt, _) arm of `lower_binop`.
+#[test]
+fn bitwise_shift_ops_lower_to_spirv() {
+    use rspirv::binary::parse_words;
+    use rspirv::dr::Loader;
+    use rspirv::spirv::Op;
+
+    let spirv = compile_to_spirv(
+        "\
+#[compute]
+entry e(xs: []u32) []u32 = map(|x: u32| (x ^ 5u32) << 1u32, xs)
+",
+    )
+    .expect("infix bitwise/shift compiles to SPIR-V");
+
+    let mut loader = Loader::new();
+    parse_words(&spirv, &mut loader).expect("parse spirv");
+    let module = loader.module();
+
+    let (mut xors, mut shls) = (0, 0);
+    for func in &module.functions {
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                match inst.class.opcode {
+                    Op::BitwiseXor => xors += 1,
+                    Op::ShiftLeftLogical => shls += 1,
+                    _ => {}
+                }
+            }
+        }
+    }
+    assert!(xors >= 1, "expected at least one OpBitwiseXor, found {xors}");
+    assert!(
+        shls >= 1,
+        "expected at least one OpShiftLeftLogical, found {shls}"
+    );
+}

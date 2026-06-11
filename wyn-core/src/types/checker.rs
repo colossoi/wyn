@@ -2906,6 +2906,26 @@ impl<'a> TypeChecker<'a> {
             "+" | "-" | "*" | "/" | "%" | "**" => {
                 self.infer_arith_op_result(op, left_type, right_type, span)
             }
+            "&" | "|" | "^" | "<<" | ">>" => {
+                self.unify_or_err(
+                    &left_type,
+                    &right_type,
+                    span,
+                    &format!("Bitwise operator '{}' requires same-typed operands", op),
+                )?;
+                let t = left_type.apply(&self.context);
+                match t {
+                    Type::Constructed(TypeName::Int(_), _) | Type::Constructed(TypeName::UInt(_), _) => {
+                        Ok(t)
+                    }
+                    _ => Err(err_type_at!(
+                        span,
+                        "Bitwise operator '{}' requires integer operands, got {}",
+                        op,
+                        self.format_type(&t)
+                    )),
+                }
+            }
             _ => Err(err_type_at!(span, "Unknown binary operator: {}", op)),
         }
     }

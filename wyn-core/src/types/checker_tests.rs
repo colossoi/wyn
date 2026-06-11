@@ -2619,3 +2619,31 @@ entry tick(#[storage(set=2, binding=0, access=read)] xs: []f32) f32 =
 "#,
     );
 }
+
+// ---- Infix bitwise / shift operators ----
+//
+// `^ & | << >>` typecheck over integer operands as `t -> t -> t`, and are
+// rejected on non-integer operands. SPIR-V emission is covered separately.
+
+#[test]
+fn bitwise_ops_typecheck_on_integers() {
+    typecheck_program(
+        r#"
+def mix(a: u32, b: u32) u32 = (a ^ b) & (a | b)
+def shifts(x: i32, n: i32) i32 = (x << n) >> n
+"#,
+    );
+}
+
+#[test]
+fn bitwise_op_rejects_float_operands() {
+    let result = try_typecheck_program(
+        r#"
+def bad(x: f32, y: f32) f32 = x ^ y
+"#,
+    );
+    assert!(
+        matches!(result, Err(CompilerError::TypeError(_, _))),
+        "expected TypeError for bitwise '^' on f32 operands: {result:?}"
+    );
+}
