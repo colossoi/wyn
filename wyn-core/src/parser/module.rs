@@ -415,15 +415,16 @@ impl Parser<'_> {
 
     /// Parse a specification:
     /// ```text
-    /// spec ::= "sig" name type_param* ":" type
-    ///        | "sig" "(" symbol ")" ":" type
-    ///        | "sig" symbol type_param* ":" type
+    /// spec ::= "sig" name type_param* sig_type
+    ///        | "sig" "(" symbol ")" sig_type
     ///        | ("type" | "type^" | "type~") name type_param* "=" type
     ///        | ("type" | "type^" | "type~") name type_param*
     ///        | "module" name ":" mod_type_exp
     ///        | "include" mod_type_exp
     ///        | "#[" attr "]" spec
     /// ```
+    /// where `sig_type ::= "(" param ("," param)* ")" type | ":" type` — a
+    /// `sig` is written like the function it describes (see `parse_sig_type`).
     fn parse_spec(&mut self) -> Result<Spec> {
         trace!("parse_spec: next token = {:?}", self.peek());
 
@@ -483,8 +484,7 @@ impl Parser<'_> {
                     };
 
                     self.expect(Token::RightParen)?;
-                    self.expect(Token::Colon)?;
-                    let ty = self.parse_type()?;
+                    let ty = self.parse_sig_type()?;
                     return Ok(Spec::SigOp(op, ty));
                 }
 
@@ -493,8 +493,7 @@ impl Parser<'_> {
                 // Parse type parameters: <[n], A>
                 let type_params = self.parse_type_params()?;
 
-                self.expect(Token::Colon)?;
-                let ty = self.parse_type()?;
+                let ty = self.parse_sig_type()?;
 
                 Ok(Spec::Sig(name, type_params, ty))
             }

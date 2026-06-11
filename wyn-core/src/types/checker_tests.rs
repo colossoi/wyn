@@ -1638,7 +1638,7 @@ fn test_parameterized_module() {
         r#"
 module type my_numeric = {
   type t
-  sig add : t -> t -> t
+  sig add(a: t, b: t) t
 }
 
 module my_f32_num : (my_numeric with t = f32) = {

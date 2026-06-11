@@ -106,12 +106,12 @@ fn elaborate_module_type_with_include() {
 module type numeric = {
     type t
     sig zero : t
-    sig add : t -> t -> t
+    sig add(a: t, b: t) t
 }
 
 module type float_like = {
     include numeric
-    sig mul : t -> t -> t
+    sig mul(a: t, b: t) t
 }
         "#,
     );
@@ -130,7 +130,7 @@ fn elaborate_module_with_signature_and_with() {
         r#"
 module type numeric = {
     type t
-    sig add : t -> t -> t
+    sig add(a: t, b: t) t
 }
 
 module f32_num : (numeric with t = f32) = {
@@ -162,7 +162,7 @@ fn elaborate_functor_application() {
         r#"
 module type numeric = {
     type t
-    sig add : t -> t -> t
+    sig add(a: t, b: t) t
 }
 
 module my_f32_num : (numeric with t = f32) = {
@@ -269,7 +269,7 @@ fn functor_param_module_references_resolved() {
 module type numeric = {
     type t
     sig zero : t
-    sig add : t -> t -> t
+    sig add(a: t, b: t) t
 }
 
 module my_i32 : (numeric with t = i32) = {

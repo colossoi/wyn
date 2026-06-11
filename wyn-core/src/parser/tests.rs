@@ -1586,7 +1586,7 @@ fn test_parse_module_with_signature() {
 
 #[test]
 fn test_parse_module_type_bind() {
-    let program = parse_ok("module type numeric = { type t sig add : t -> t -> t }");
+    let program = parse_ok("module type numeric = { type t sig add(a: t, b: t) t }");
     assert_eq!(program.declarations.len(), 1);
 
     match &program.declarations[0] {
@@ -2772,13 +2772,13 @@ fn test_parse_matrix_literal_in_let() {
 
 #[test]
 fn test_parse_sig_with_operator_percent() {
-    let program = parse_ok("module type numeric = { sig (%) : t -> t -> t }");
+    let program = parse_ok("module type numeric = { sig (%)(a: t, b: t) t }");
     assert_eq!(program.declarations.len(), 1);
 }
 
 #[test]
 fn test_parse_sig_with_operator_double_star() {
-    let program = parse_ok("module type numeric = { sig (**) : t -> t -> t }");
+    let program = parse_ok("module type numeric = { sig (**)(a: t, b: t) t }");
     assert_eq!(program.declarations.len(), 1);
 }
 
@@ -2787,11 +2787,11 @@ fn test_parse_sig_with_multiple_operators() {
     let program = parse_ok(
         r#"
 module type numeric = {
-    sig (+) : t -> t -> t
-    sig (-) : t -> t -> t
-    sig (*) : t -> t -> t
-    sig (/) : t -> t -> t
-    sig (%) : t -> t -> t
+    sig (+)(a: t, b: t) t
+    sig (-)(a: t, b: t) t
+    sig (*)(a: t, b: t) t
+    sig (/)(a: t, b: t) t
+    sig (%)(a: t, b: t) t
 }
 "#,
     );
@@ -2805,10 +2805,10 @@ fn test_parse_math_prelude_subset() {
         r#"
 module type numeric = {
     type t
-    sig (+) : t -> t -> t
-    sig (-) : t -> t -> t
-    sig abs : t -> t
-    sig max : t -> t -> t
+    sig (+)(a: t, b: t) t
+    sig (-)(a: t, b: t) t
+    sig abs(x: t) t
+    sig max(a: t, b: t) t
 }
 "#,
     );
@@ -2820,9 +2820,9 @@ fn test_parse_sig_with_shift_operators() {
     let program = parse_ok(
         r#"
 module type integral = {
-    sig (<<) : t -> t -> t
-    sig (>>) : t -> t -> t
-    sig (>>>) : t -> t -> t
+    sig (<<)(a: t, b: t) t
+    sig (>>)(a: t, b: t) t
+    sig (>>>)(a: t, b: t) t
 }
 "#,
     );
@@ -2875,9 +2875,9 @@ fn test_parse_module_with_operator_sigs() {
         r#"
 module f32 : (numeric with t = f32) = {
   type t = f32
-  sig (+) : t -> t -> t
-  sig (%) : t -> t -> t
-  sig (**) : t -> t -> t
+  sig (+)(a: t, b: t) t
+  sig (%)(a: t, b: t) t
+  sig (**)(a: t, b: t) t
 }
 "#,
     );
@@ -3021,8 +3021,8 @@ fn test_parse_rust_style_lambda_empty_params() {
 
 #[test]
 fn test_parse_rust_style_sig_with_type_params() {
-    // New syntax: sig name<T>: T -> T
-    let program = parse_ok("sig identity<T>: T -> T");
+    // New syntax: sig name<T>(x: T) T
+    let program = parse_ok("sig identity<T>(x: T) T");
     assert_eq!(program.declarations.len(), 1);
     match &program.declarations[0] {
         Declaration::Sig(sig) => {
@@ -3035,8 +3035,8 @@ fn test_parse_rust_style_sig_with_type_params() {
 
 #[test]
 fn test_parse_rust_style_sig_with_size_params() {
-    // New syntax: sig name<[n], A>: [n]A -> [n]A
-    let program = parse_ok("sig sized<[n], A>: [n]A -> [n]A");
+    // New syntax: sig name<[n], A>(x: [n]A) [n]A
+    let program = parse_ok("sig sized<[n], A>(x: [n]A) [n]A");
     assert_eq!(program.declarations.len(), 1);
     match &program.declarations[0] {
         Declaration::Sig(sig) => {

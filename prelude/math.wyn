@@ -24,21 +24,21 @@
 -- backend-defined.
 module type from_prim = {
   type t
-  sig i8 : i8 -> t
-  sig i16 : i16 -> t
-  sig i32 : i32 -> t
-  sig i64 : i64 -> t
-  sig u8 : u8 -> t
-  sig u16 : u16 -> t
-  sig u32 : u32 -> t
-  sig u64 : u64 -> t
-  sig f16 : f16 -> t
-  sig f32 : f32 -> t
-  sig f64 : f64 -> t
+  sig i8(x: i8) t
+  sig i16(x: i16) t
+  sig i32(x: i32) t
+  sig i64(x: i64) t
+  sig u8(x: u8) t
+  sig u16(x: u16) t
+  sig u32(x: u32) t
+  sig u64(x: u64) t
+  sig f16(x: f16) t
+  sig f32(x: f32) t
+  sig f64(x: f64) t
 
   -- | True ↦ 1, False ↦ 0. The standard predicate-to-numeric
   -- coercion you'd write by hand.
-  sig bool : bool -> t
+  sig bool(x: bool) t
 }
 
 -- | The arithmetic interface shared by every numeric module. All
@@ -46,58 +46,58 @@ module type from_prim = {
 -- only — at runtime they evaluate both sides eagerly.
 module type numeric = {
   include from_prim
-  sig (+) : t -> t -> t
-  sig (-) : t -> t -> t
-  sig (*) : t -> t -> t
+  sig (+)(a: t, b: t) t
+  sig (-)(a: t, b: t) t
+  sig (*)(a: t, b: t) t
 
   -- | Division semantics depend on `t`. For integral `t` it rounds
   -- towards negative infinity (Euclidean — see `(//)` on the
   -- `integral` interface for the other rounding); for `real` `t`
   -- it's IEEE-754 division and divide-by-zero yields `inf` / `nan`
   -- rather than trapping.
-  sig (/) : t -> t -> t
+  sig (/)(a: t, b: t) t
 
   -- | Remainder paired with `(/)`. For integral `t` use `(%%)` if
   -- you want truncated-division semantics instead.
-  sig (%) : t -> t -> t
+  sig (%)(a: t, b: t) t
 
-  sig (**) : t -> t -> t
-  sig (==) : t -> t -> bool
-  sig (<) : t -> t -> bool
-  sig (>) : t -> t -> bool
-  sig (<=) : t -> t -> bool
-  sig (>=) : t -> t -> bool
-  sig (!=) : t -> t -> bool
+  sig (**)(a: t, b: t) t
+  sig (==)(a: t, b: t) bool
+  sig (<)(a: t, b: t) bool
+  sig (>)(a: t, b: t) bool
+  sig (<=)(a: t, b: t) bool
+  sig (>=)(a: t, b: t) bool
+  sig (!=)(a: t, b: t) bool
 
   -- | Arithmetic negation. For unsigned `t` this wraps modulo
   -- `2^num_bits`; for `real` `t` it flips the sign bit (so
   -- `neg(0.0)` is `-0.0`, distinct from `0.0` under `to_bits`).
-  sig neg : t -> t
+  sig neg(x: t) t
 
-  sig max : t -> t -> t
-  sig min : t -> t -> t
-  sig abs : t -> t
+  sig max(a: t, b: t) t
+  sig min(a: t, b: t) t
+  sig abs(x: t) t
 
   -- | Sign as `-1`, `0`, or `1`. For `real` `t`, `sign(nan)` is
   -- backend-defined.
-  sig sign : t -> t
+  sig sign(x: t) t
 
   -- | `clamp(lo, hi, x)` — argument order is *bounds first, value
   -- last*. `lo > hi` yields an unspecified result.
-  sig clamp : t -> t -> t -> t
+  sig clamp(a: t, b: t, c: t) t
 
   -- | The largest representable value. For `real` `t` this is
   -- `+inf` (so `clamp(_, highest, x)` is a no-op upper bound).
-  sig highest : t
+  sig highest: t
 
   -- | The smallest representable value. For `real` `t` this is
   -- `-inf`; for signed integral `t` it's `-2^(num_bits-1)`.
-  sig lowest : t
+  sig lowest: t
 
-  sig sum<[n]> : [n]t -> t
-  sig product<[n]> : [n]t -> t
-  sig maximum<[n]> : [n]t -> t
-  sig minimum<[n]> : [n]t -> t
+  sig sum<[n]>(x: [n]t) t
+  sig product<[n]>(x: [n]t) t
+  sig maximum<[n]>(x: [n]t) t
+  sig minimum<[n]>(x: [n]t) t
 }
 
 -- | Integer-specific operations layered on top of `numeric`.
@@ -109,41 +109,41 @@ module type integral = {
   -- | Quotient rounded toward zero (truncated division).
   -- Differs from `(/)` (Euclidean) only when one operand is
   -- negative — `(-7) / 2 == -4`, `(-7) // 2 == -3`.
-  sig (//) : t -> t -> t
+  sig (//)(a: t, b: t) t
 
   -- | Remainder paired with `(//)`. Sign matches the dividend.
-  sig (%%) : t -> t -> t
+  sig (%%)(a: t, b: t) t
 
-  sig (&) : t -> t -> t
-  sig (|) : t -> t -> t
+  sig (&)(a: t, b: t) t
+  sig (|)(a: t, b: t) t
 
   -- | Bitwise XOR. Not exponentiation — for that see `(**)`.
-  sig (^) : t -> t -> t
+  sig (^)(a: t, b: t) t
 
   -- | Bitwise NOT. Distinct from logical `!`.
-  sig not : t -> t
-  sig (<<) : t -> t -> t
-  sig (>>) : t -> t -> t
-  sig (>>>) : t -> t -> t
-  sig num_bits : i32
-  sig get_bit : i32 -> t -> i32
-  sig set_bit : i32 -> t -> i32 -> t
-  sig popc : t -> i32
+  sig not(x: t) t
+  sig (<<)(a: t, b: t) t
+  sig (>>)(a: t, b: t) t
+  sig (>>>)(a: t, b: t) t
+  sig num_bits: i32
+  sig get_bit(a: i32, b: t) i32
+  sig set_bit(a: i32, b: t, c: i32) t
+  sig popc(x: t) i32
 
   -- | High half of an `t × t` multiply. Together with `(*)` (low
   -- half) this gives the full `2 × num_bits` product without
   -- promoting to a wider type.
-  sig mul_hi : (x: t) -> (y: t) -> t
+  sig mul_hi(x: t, y: t) t
 
   -- | High half of `a * b + c`. Used to chain `mul_hi` into a
   -- multi-precision multiply-add.
-  sig mad_hi : (a: t) -> (b: t) -> (c: t) -> t
+  sig mad_hi(a: t, b: t, c: t) t
 
   -- | Count leading zeros. `clz(0)` is `num_bits`.
-  sig clz : t -> i32
+  sig clz(x: t) i32
 
   -- | Count trailing zeros. `ctz(0)` is `num_bits`.
-  sig ctz : t -> i32
+  sig ctz(x: t) i32
 }
 
 -- | Real-valued operations layered on top of `numeric`. Implemented
@@ -157,116 +157,116 @@ module type real = {
   -- | `1 / x`. Cheaper than `1.0 / x` on some backends (a dedicated
   -- reciprocal intrinsic vs. a general division). Returns `inf` for
   -- `x = 0`, no trap.
-  sig recip : t -> t
+  sig recip(x: t) t
 
   -- | `num / den` as a `t` value, with both arguments as 64-bit
   -- integers so e.g. `from_fraction(355, 113)` gives a precise `pi`
   -- approximation without intermediate rounding.
-  sig from_fraction : i64 -> i64 -> t
+  sig from_fraction(a: i64, b: i64) t
 
   -- | Square root. Domain `x ≥ 0`; `sqrt(-x)` is `nan` (no trap).
-  sig sqrt : t -> t
+  sig sqrt(x: t) t
 
   -- | `1 / sqrt(x)`. Backend may use a dedicated intrinsic (fast
   -- inverse square root); precision is no worse than `recip ∘ sqrt`.
-  sig rsqrt : t -> t
+  sig rsqrt(x: t) t
 
-  sig cbrt : t -> t
-  sig exp : t -> t
-  sig exp2 : t -> t
-  sig sin : t -> t
-  sig cos : t -> t
-  sig tan : t -> t
+  sig cbrt(x: t) t
+  sig exp(x: t) t
+  sig exp2(x: t) t
+  sig sin(x: t) t
+  sig cos(x: t) t
+  sig tan(x: t) t
 
   -- | Inverse sine, output range `[-π/2, π/2]`. Domain `[-1, 1]`;
   -- outside that range the result is `nan`.
-  sig asin : t -> t
+  sig asin(x: t) t
 
   -- | Inverse cosine, output range `[0, π]`. Same domain caveat as
   -- `asin`.
-  sig acos : t -> t
+  sig acos(x: t) t
 
-  sig atan : t -> t
-  sig sinh : t -> t
-  sig cosh : t -> t
-  sig tanh : t -> t
-  sig asinh : t -> t
-  sig acosh : t -> t
-  sig atanh : t -> t
+  sig atan(x: t) t
+  sig sinh(x: t) t
+  sig cosh(x: t) t
+  sig tanh(x: t) t
+  sig asinh(x: t) t
+  sig acosh(x: t) t
+  sig atanh(x: t) t
 
   -- | Two-argument arctangent. Argument order is `atan2(y, x)`
   -- (the math/SPIR-V convention).
-  sig atan2 : t -> t -> t
+  sig atan2(a: t, b: t) t
 
   -- | Linear interpolation `a + (b - a) * t`. `t = 0` returns
   -- exactly `a`, `t = 1` returns `b + (b - a) * 0` which is *not*
   -- guaranteed to equal `b` exactly when `a != b` — for endpoint-
   -- preserving interpolation prefer `(1 - t) * a + t * b`.
-  sig lerp : t -> t -> t -> t
+  sig lerp(a: t, b: t, c: t) t
 
-  sig log : t -> t
-  sig log2 : t -> t
-  sig log10 : t -> t
+  sig log(x: t) t
+  sig log2(x: t) t
+  sig log10(x: t) t
 
   -- | `log(1 + x)`. Accurate for `x` near zero (avoids the catastrophic
   -- cancellation of `log(1.0 + tiny)`).
-  sig log1p : t -> t
+  sig log1p(x: t) t
 
-  sig ceil : t -> t
-  sig floor : t -> t
+  sig ceil(x: t) t
+  sig floor(x: t) t
 
   -- | Fractional part `x - floor(x)`, always in `[0, 1)`. For
   -- negative `x` this is *not* the sign-preserving form (`fract(-0.3)`
   -- is `0.7`, not `-0.3`).
-  sig fract : t -> t
+  sig fract(x: t) t
 
-  sig trunc : t -> t
-  sig round : t -> t
+  sig trunc(x: t) t
+  sig round(x: t) t
 
   -- | `pow(base, exp)` — function form of `(**)`.
-  sig pow : t -> t -> t
+  sig pow(a: t, b: t) t
 
   -- | Floating-point modulo. Sign matches the divisor (so it's the
   -- Euclidean form, not C's `fmod`).
-  sig mod : t -> t -> t
+  sig mod(a: t, b: t) t
 
-  sig radians : t -> t
-  sig degrees : t -> t
+  sig radians(x: t) t
+  sig degrees(x: t) t
 
   -- | `a * b + c` as one operation, but **not** guaranteed
   -- single-rounding. Use `fma` if you need that.
-  sig mad : (a: t) -> (b: t) -> (c: t) -> t
+  sig mad(a: t, b: t, c: t) t
 
   -- | Fused multiply-add — `a * b + c` rounded once. Slower than
   -- `mad` on backends that don't have a dedicated instruction.
-  sig fma : (a: t) -> (b: t) -> (c: t) -> t
+  sig fma(a: t, b: t, c: t) t
 
-  sig isinf : t -> bool
-  sig isnan : t -> bool
+  sig isinf(x: t) bool
+  sig isnan(x: t) bool
 
   -- | Positive infinity.
-  sig inf : t
+  sig inf: t
 
   -- | Some NaN. The bit pattern is not specified — compare with
   -- `isnan`, never with `(==)` (which is always `false` for NaN).
-  sig nan : t
+  sig nan: t
 
-  sig pi : t
-  sig e : t
+  sig pi: t
+  sig e: t
 
   -- | Screen-space derivative along x. **Fragment-stage only.**
   -- Calling from a vertex or compute entry is undefined behaviour;
   -- the value comes from comparing the result of the surrounding
   -- expression across a 2×2 fragment quad.
-  sig dFdx : t -> t
+  sig dFdx(x: t) t
 
   -- | Screen-space derivative along y. **Fragment-stage only**, same
   -- caveats as `dFdx`.
-  sig dFdy : t -> t
+  sig dFdy(x: t) t
 
   -- | `abs(dFdx) + abs(dFdy)` — the standard antialiasing edge-width
   -- estimate. **Fragment-stage only.**
-  sig fwidth : t -> t
+  sig fwidth(x: t) t
 }
 
 -- | The `float` interface adds bit-level introspection and a few
@@ -279,29 +279,29 @@ module type float = {
   type int_t
 
   -- | Reinterpret `int_t` bits as `t`. No conversion — bit-identical.
-  sig from_bits : int_t -> t
+  sig from_bits(x: int_t) t
 
   -- | Reinterpret `t` bits as `int_t`. Two NaNs may compare equal
   -- under `to_bits` even though they're "different NaNs" under IEEE
   -- — useful for hashing, not for masquerading as equality.
-  sig to_bits : t -> int_t
+  sig to_bits(x: t) int_t
 
   -- | Bit width of the representation (16 / 32 / 64).
-  sig num_bits : i32
+  sig num_bits: i32
 
   -- | The smallest positive value `e` such that `1 + e > 1`. The
   -- "machine epsilon" — useful as a tolerance for "are these close?"
   -- comparisons (multiplied by the magnitude of the values being
   -- compared).
-  sig epsilon : t
+  sig epsilon: t
 
   -- | `x * 2^k`. Exact (no rounding) — equivalent to bit-bumping
   -- the exponent.
-  sig ldexp : t -> i32 -> t
+  sig ldexp(a: t, b: i32) t
 
   -- | `abs(x)` with `y`'s sign. `copysign(_, -0.0)` is negative
   -- (preserves IEEE-754 negative zero).
-  sig copysign : (x: t) -> (y: t) -> t
+  sig copysign(x: t, y: t) t
 }
 -- | `bool` as a value-preserving conversion source — implements
 -- `from_prim` but no arithmetic. Use `i32.bool(b)` etc. to lift a

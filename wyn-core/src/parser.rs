@@ -315,8 +315,7 @@ impl<'a> Parser<'a> {
         let (size_params, type_params) =
             if self.check_binop("<") { self.parse_generic_params()? } else { (vec![], vec![]) };
 
-        self.expect(Token::Colon)?;
-        let ty = self.parse_type()?;
+        let ty = self.parse_sig_type()?;
 
         Ok(SigDecl {
             attributes: vec![],
@@ -325,6 +324,32 @@ impl<'a> Parser<'a> {
             type_params,
             ty,
         })
+    }
+
+    /// Parse the type tail of a `sig`, written like the `def` it describes —
+    /// a function declaration without its `= body`:
+    ///   `(p: A, q: B) R`  → builds the curried arrow `A -> B -> R`
+    ///   `: T`             → a constant of type `T` (nullary, like `def x: T`)
+    /// There is no arrow-chain spelling; a `sig` mirrors the function's own
+    /// parameter list so the two read in parallel.
+    fn parse_sig_type(&mut self) -> Result<Type> {
+        if self.check(&Token::LeftParen) {
+            let params = self.parse_extern_params()?;
+            if params.is_empty() {
+                bail_parse_at!(
+                    self.current_span(),
+                    "Zero-argument sig must use constant syntax: `sig name: T`"
+                );
+            }
+            let ret = self.parse_return_type_simple()?;
+            // Fold params right-to-left into the curried arrow representation.
+            Ok(params.into_iter().rev().fold(ret, |acc, (_, pty)| types::function(pty, acc)))
+        } else if self.check(&Token::Colon) {
+            self.advance();
+            self.parse_type()
+        } else {
+            bail_parse_at!(self.current_span(), "Expected '(' or ':' after sig name")
+        }
     }
 
     /// Parse an extern declaration for linked SPIR-V functions.
