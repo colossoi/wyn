@@ -266,8 +266,11 @@ impl PartialEvaluator {
             // dissolved `Let` substituted, which `original` still names by hand
             // (the source of "Unknown global: <local>" at codegen).
             TermKind::BinOp(op) => {
-                let folded =
-                    if args.len() >= 2 { self.eval_binop(op, &args[0].0, &args[1].0) } else { None };
+                let folded = if args.len() >= 2 {
+                    self.eval_binop(op, &args[0].0, &args[1].0, &args[0].1)
+                } else {
+                    None
+                };
                 folded.unwrap_or_else(|| self.residualize_unreduced(original))
             }
 
@@ -429,6 +432,8 @@ impl PartialEvaluator {
         self.eval(body)
     }
 
+    // (see `wrap_int` free fn below)
+
     /// Evaluate a binary operation. `Some` means a genuine fold or
     /// simplification was performed (a literal result, or an identity like
     /// `x + 0 → x` that returns a residual operand); `None` means it could
@@ -437,13 +442,19 @@ impl PartialEvaluator {
     /// residual" — conflating them (both used to be `Value::Unknown`) makes
     /// the caller either drop a valid simplification or leave a dissolved
     /// let's variable dangling.
-    fn eval_binop(&self, op: &BinaryOp, lhs: &Value, rhs: &Value) -> Option<Value> {
+    ///
+    /// `ty` is the operand type; integer folds wrap to its bit width so the
+    /// result matches runtime semantics (e.g. u32 multiply is mod 2^32). The
+    /// fold is done in `i128` to avoid overflowing before the wrap.
+    fn eval_binop(&self, op: &BinaryOp, lhs: &Value, rhs: &Value, ty: &Type<TypeName>) -> Option<Value> {
         Some(match (op.op.as_str(), lhs, rhs) {
-            // Integer arithmetic
-            ("+", Value::Int(a), Value::Int(b)) => Value::Int(a + b),
-            ("-", Value::Int(a), Value::Int(b)) => Value::Int(a - b),
-            ("*", Value::Int(a), Value::Int(b)) => Value::Int(a * b),
-            ("/", Value::Int(a), Value::Int(b)) if *b != 0 => Value::Int(*a / *b),
+            // Integer arithmetic (wrapped to the operand's bit width)
+            ("+", Value::Int(a), Value::Int(b)) => Value::Int(wrap_int(*a as i128 + *b as i128, ty)),
+            ("-", Value::Int(a), Value::Int(b)) => Value::Int(wrap_int(*a as i128 - *b as i128, ty)),
+            ("*", Value::Int(a), Value::Int(b)) => Value::Int(wrap_int(*a as i128 * *b as i128, ty)),
+            ("/", Value::Int(a), Value::Int(b)) if *b != 0 => {
+                Value::Int(wrap_int(*a as i128 / *b as i128, ty))
+            }
 
             // Float arithmetic
             ("+", Value::Float(a), Value::Float(b)) => Value::Float(a + b),
@@ -838,6 +849,28 @@ impl PartialEvaluator {
             span,
             kind,
         }
+    }
+}
+
+/// Wrap an integer fold result to `ty`'s bit width and signedness, matching
+/// runtime two's-complement semantics (e.g. u32 arithmetic is mod 2^32). An
+/// `as` cast to a narrower / unsigned integer truncates to the low bits, which
+/// *is* the modular wrap (`300i128 as u8 == 44`, `-1i128 as u8 == 255`); the
+/// caller does the op in `i128` so it can't overflow before this truncation.
+/// Non-integer `ty` (a fresh var, etc.) falls back to a plain i64 truncation.
+/// `Value::Int` is i64, so u64 values `>= 2^63` round-trip as their
+/// two's-complement bit pattern.
+fn wrap_int(v: i128, ty: &Type<TypeName>) -> i64 {
+    match ty {
+        Type::Constructed(TypeName::UInt(8), _) => (v as u8) as i64,
+        Type::Constructed(TypeName::UInt(16), _) => (v as u16) as i64,
+        Type::Constructed(TypeName::UInt(32), _) => (v as u32) as i64,
+        Type::Constructed(TypeName::UInt(64), _) => (v as u64) as i64,
+        Type::Constructed(TypeName::Int(8), _) => (v as i8) as i64,
+        Type::Constructed(TypeName::Int(16), _) => (v as i16) as i64,
+        Type::Constructed(TypeName::Int(32), _) => (v as i32) as i64,
+        Type::Constructed(TypeName::Int(64), _) => v as i64,
+        _ => v as i64,
     }
 }
 

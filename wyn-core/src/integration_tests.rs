@@ -4468,3 +4468,19 @@ entry v() #[builtin(position)] vec4f32 = @[f32.i32(nested_lambda(100)), 0.0, 0.0
 ",
     );
 }
+
+/// partial_eval folds integer arithmetic; a u32 multiply like `C * K`
+/// overflows u32 (and its i128-free product would overflow i64), so the fold
+/// must wrap mod 2^32 rather than emit an out-of-range literal
+/// ("Invalid u32"). Surfaced by lib/rng.wyn's PCG hash.
+#[test]
+fn folded_u32_arithmetic_wraps_to_width() {
+    compile_to_spirv(
+        "\
+def C: u32 = 2654435769u32
+#[compute]
+entry e() []u32 = map(|i: i32| C * 747796405u32 + 2891336453u32, 0i32 ..< 4)
+",
+    )
+    .expect("folded overflowing u32 arithmetic must wrap, not error");
+}
