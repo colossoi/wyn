@@ -1545,6 +1545,21 @@ def use_it: i32 = derived.foo(10)
     );
 }
 
+#[test]
+fn qualified_operator_member_resolves() {
+    // `m.(+)` references a module's operator member by qualified name, the
+    // operator counterpart of `m.foo`. Parses (the `(op)` after `.` reuses the
+    // operator-section parser) and resolves to the `def (+)` member.
+    typecheck_program(
+        r#"
+module m = {
+  def (+)(a: i32, b: i32) i32 = a
+}
+def use_it: i32 = m.(+)(1, 2)
+        "#,
+    );
+}
+
 // =========================================================================
 // Module-system gaps (aspirational, #[ignore]d)
 //
@@ -1593,18 +1608,16 @@ def use_it: i32 = derived.bar(10)
 }
 
 #[test]
-#[ignore = "gap: no syntax to reference a module's operator member by qualified name (e.g. `m.(+)` fails to parse)"]
-fn qualified_operator_member_resolves() {
-    // Desired: forward/reference a module's operator member by qualified
-    // name, needed to wire infix primitives through a functor. The exact
-    // surface syntax is open (`m.(+)` shown); today every form is a parse
-    // error.
+#[ignore = "gap: `m.(+)` reaches user-defined operator members but not a module's builtin operators (builtins are keyed `f32.+`, no parens)"]
+fn qualified_operator_member_resolves_builtin() {
+    // Desired: `f32.(+)` references f32's builtin `+`, so operators can be
+    // forwarded through a functor the way named builtins (`f32.max`) already
+    // are. Currently fails resolution with `UndefinedVariable("f32.(+)")`:
+    // builtin ops are keyed `f32.+` while the qualified-operator syntax yields
+    // `f32.(+)`.
     typecheck_program(
         r#"
-module m = {
-  def (+)(a: i32, b: i32) i32 = a
-}
-def use_it: i32 = m.(+)(1, 2)
+def use_it: f32 = f32.(+)(1.0f32, 2.0f32)
         "#,
     );
 }

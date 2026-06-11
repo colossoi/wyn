@@ -2795,13 +2795,25 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Like `expect_identifier`, but also accepts integer literals for tuple field access (`.0`, `.1`, etc.)
+    /// Like `expect_identifier`, but also accepts integer literals for tuple
+    /// field access (`.0`, `.1`, …) and a parenthesized operator naming a
+    /// module's operator member (`m.(+)`, `m.(<<)`).
     fn expect_field_name(&mut self) -> Result<String> {
         let span = self.current_span();
+        // `m.(+)` — the member is named by an operator; reuse the operator-
+        // section parser, which consumes the `( … )` and returns the operator.
+        // Wrap it in parens to match how an operator `def` is named (`(+)`).
+        if matches!(self.peek(), Some(Token::LeftParen)) {
+            let op = self.parse_operator_section()?;
+            return Ok(format!("({})", op));
+        }
         match self.advance() {
             Some(Token::Identifier(name)) => Ok(name.clone()),
             Some(Token::IntLiteral(n)) => Ok(n.0.clone()),
-            _ => Err(err_parse_at!(span, "Expected field name or tuple index")),
+            _ => Err(err_parse_at!(
+                span,
+                "Expected field name, tuple index, or `(operator)`"
+            )),
         }
     }
 
