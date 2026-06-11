@@ -2674,3 +2674,36 @@ def use_it(x: i64) i64 = x + BIG
 "#,
     );
 }
+
+// ---- Functor member-function abstract-type substitution ----
+//
+// Regression: a functor over a module-type with more than one member, whose
+// body calls a member that *consumes* the abstract type (`at(k: key, ...)`),
+// fails to substitute the abstract `key` for that member at instantiation —
+// the argument resolves to the concrete type while the parameter stays
+// abstract ("Function argument type mismatch: expected key, got u32"). A
+// single-member signature, or a functor that never calls the key-consuming
+// member, both type-check fine — so the trigger is the *other* member
+// shifting which signature the abstract type is substituted into.
+#[test]
+fn functor_substitutes_abstract_type_in_member_call() {
+    typecheck_program(
+        r#"
+module type IFC = {
+  type key
+  sig other(s: u32) u32
+  sig at(k: key, p: u32) u32
+}
+module a : IFC = {
+  type key = u32
+  def other(s: u32) u32 = s
+  def at(k: key, p: u32) u32 = k + p
+}
+functor F(G: IFC) = {
+  def call(k: G.key, p: u32) u32 = G.at(k, p)
+}
+module fa = F(a)
+def use_it(x: u32) u32 = fa.call(x, 1u32)
+"#,
+    );
+}

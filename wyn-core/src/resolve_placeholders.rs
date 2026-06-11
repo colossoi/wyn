@@ -111,7 +111,7 @@ impl PlaceholderResolver {
     /// Also builds TypeSchemes for Spec::Sig items and stores them in spec_schemes.
     fn resolve_elaborated_modules(
         &mut self,
-        modules: &mut std::collections::HashMap<String, crate::module_manager::ElaboratedModule>,
+        modules: &mut indexmap::IndexMap<String, crate::module_manager::ElaboratedModule>,
     ) {
         for (module_name, module) in modules.iter_mut() {
             for item in &mut module.items {

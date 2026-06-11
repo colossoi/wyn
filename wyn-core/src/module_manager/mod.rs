@@ -51,8 +51,13 @@ pub struct FunctorModule {
 pub struct PreElaboratedPrelude {
     /// Module type registry: type name -> ModuleTypeExpression
     pub module_type_registry: HashMap<String, ModuleTypeExpression>,
-    /// Elaborated modules: module_name -> ElaboratedModule
-    pub(crate) elaborated_modules: HashMap<String, ElaboratedModule>,
+    /// Elaborated modules: module_name -> ElaboratedModule.
+    /// IndexMap to preserve insertion order (declaration order). Module
+    /// members are type-checked in this order, and a functor instance is
+    /// always declared after its argument module — so declaration order is a
+    /// valid dependency order. A `HashMap` here randomizes it and makes
+    /// programs with functors compile or not depending on the run.
+    pub(crate) elaborated_modules: IndexMap<String, ElaboratedModule>,
     /// Set of known module names (for name resolution)
     pub known_modules: HashSet<String>,
     /// Type aliases from modules: "module.typename" -> underlying Type
@@ -66,8 +71,13 @@ pub struct PreElaboratedPrelude {
 pub struct ModuleManager {
     /// Module type registry: type name -> ModuleTypeExpression
     module_type_registry: HashMap<String, ModuleTypeExpression>,
-    /// Elaborated modules: module_name -> ElaboratedModule
-    pub(crate) elaborated_modules: HashMap<String, ElaboratedModule>,
+    /// Elaborated modules: module_name -> ElaboratedModule.
+    /// IndexMap to preserve insertion order (declaration order). Module
+    /// members are type-checked in this order, and a functor instance is
+    /// always declared after its argument module — so declaration order is a
+    /// valid dependency order. A `HashMap` here randomizes it and makes
+    /// programs with functors compile or not depending on the run.
+    pub(crate) elaborated_modules: IndexMap<String, ElaboratedModule>,
     /// Functor modules: functor_name -> FunctorModule (unevaluated parameterized modules)
     functor_modules: HashMap<String, FunctorModule>,
     /// Set of known module names (for name resolution)
@@ -102,7 +112,7 @@ impl ModuleManager {
 
         ModuleManager {
             module_type_registry: HashMap::new(),
-            elaborated_modules: HashMap::new(),
+            elaborated_modules: IndexMap::new(),
             functor_modules: HashMap::new(),
             known_modules,
             type_aliases: HashMap::new(),
@@ -620,7 +630,7 @@ impl ModuleManager {
     }
 
     /// Get mutable access to elaborated modules for placeholder resolution
-    pub fn elaborated_modules_mut(&mut self) -> &mut HashMap<String, ElaboratedModule> {
+    pub fn elaborated_modules_mut(&mut self) -> &mut IndexMap<String, ElaboratedModule> {
         &mut self.elaborated_modules
     }
 
