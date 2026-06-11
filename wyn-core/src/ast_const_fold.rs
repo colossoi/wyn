@@ -1,17 +1,25 @@
-//! AST-level constant folding and inlining for integer constants.
+//! Static-size staticization for i32 constants.
 //!
-//! This pass runs before flattening to ensure downstream passes
-//! can see constant values. It handles:
-//! - Folding: `2 + 7` → `9`
-//! - Inlining: `def C = 9; ... C ...` → `def C = 9; ... 9 ...`
+//! Despite the "folding" framing, the only consumer of this pass is
+//! array-size inference: the type checker derives a static `Size(N)` for a
+//! range / slice / array expression *only* when its bounds are literal
+//! integers (`try_extract_const_int`, which matches bare `IntLiteral` and
+//! nothing else). A named constant or unfolded arithmetic leaves the size a
+//! fresh variable — i.e. runtime / unsized. So this pass exists to expose
+//! literal bounds:
+//! - inline i32 constants: `def N = 256; 0..<N` → `0..<256` → `Size(256)`
+//! - fold integer arithmetic: `0..<(2 + 4)` → `0..<6` → `Size(6)`
 //!
-//! This is intentionally limited to integer constants for simplicity.
-//! Float and boolean constants can be added later if needed.
+//! It is deliberately limited to **i32** constants, because array sizes are
+//! i32. A u32/i64 constant can never be a size, and inlining one as a bare
+//! `IntLiteral` would silently retype every use to i32 (the literal default).
+//! Such constants — like the float/bool constants this pass also ignores —
+//! flow through as ordinary typed references.
 
 use crate::ast::UnaryOp;
 use crate::ast::{
     Decl, Declaration, ExprKind, Expression, IfExpr, LetInExpr, LoopExpr, LoopForm, MatchExpr, Program,
-    RangeExpr,
+    RangeExpr, Type, TypeName,
 };
 use crate::interface::EntryDecl;
 use std::collections::HashMap;
@@ -52,8 +60,13 @@ impl AstConstFolder {
         // First pass: collect top-level constant definitions
         for decl in &program.declarations {
             if let Declaration::Decl(d) = decl {
-                // Only parameterless definitions can be constants
-                if d.params.is_empty() && d.size_params.is_empty() && d.type_params.is_empty() {
+                // Only parameterless definitions can be constants, and only
+                // i32 ones can become static sizes (see `is_i32_constant`).
+                if d.params.is_empty()
+                    && d.size_params.is_empty()
+                    && d.type_params.is_empty()
+                    && Self::is_i32_constant(d.ty.as_ref(), &d.body)
+                {
                     if let Some(val) = self.try_eval_const(&d.body) {
                         self.constants.insert(d.name.clone(), val);
                     }
@@ -230,7 +243,11 @@ impl AstConstFolder {
         // Check if this introduces a constant
         // For simplicity, only handle simple name patterns
         let const_binding = if let crate::ast::PatternKind::Name(name) = &let_in.pattern.kind {
-            self.try_eval_const(&let_in.value).map(|val| (name.clone(), val))
+            if Self::is_i32_constant(let_in.ty.as_ref(), &let_in.value) {
+                self.try_eval_const(&let_in.value).map(|val| (name.clone(), val))
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -283,6 +300,26 @@ impl AstConstFolder {
     fn fold_range(&mut self, range: &mut RangeExpr) {
         self.fold_expr(&mut range.start);
         self.fold_expr(&mut range.end);
+    }
+
+    /// Whether a constant is an i32, and therefore eligible to inline as a
+    /// bare `IntLiteral` for static size inference (see the module docs).
+    ///
+    /// Non-i32 integer constants (`u32`, `i64`, ...) must stay references so
+    /// the checker keeps their declared type — inlining one as a bare literal
+    /// would silently retype every use to i32 (the literal default), and it
+    /// could never have been a size anyway. The type is taken from the
+    /// declaration's annotation if present, else a top-level `TypeAscription`
+    /// on the body (the `7u32` suffix form).
+    fn is_i32_constant(annotation: Option<&Type>, body: &Expression) -> bool {
+        let ty = annotation.or(match &body.kind {
+            ExprKind::TypeAscription(_, t) => Some(t),
+            _ => None,
+        });
+        match ty {
+            None => true,
+            Some(t) => matches!(t, Type::Constructed(TypeName::Int(32), _)),
+        }
     }
 
     /// Try to evaluate an expression as a constant integer.

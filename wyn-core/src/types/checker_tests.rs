@@ -2647,3 +2647,30 @@ def bad(x: f32, y: f32) f32 = x ^ y
         "expected TypeError for bitwise '^' on f32 operands: {result:?}"
     );
 }
+
+// ---- Top-level integer constants keep their annotated/suffixed type ----
+//
+// Regression: a top-level `def C: u32 = <lit>` (or any non-i32 integer
+// constant) dropped its type at use sites and defaulted to i32, so using it
+// where a u32 was required failed with "requires same-typed operands, got
+// u32 and i32". Float constants were unaffected.
+
+#[test]
+fn top_level_u32_constant_keeps_its_type() {
+    typecheck_program(
+        r#"
+def SEED: u32 = 7u32
+def use_it(x: u32) u32 = x + SEED
+"#,
+    );
+}
+
+#[test]
+fn top_level_i64_constant_keeps_its_type() {
+    typecheck_program(
+        r#"
+def BIG: i64 = 7i64
+def use_it(x: i64) i64 = x + BIG
+"#,
+    );
+}
