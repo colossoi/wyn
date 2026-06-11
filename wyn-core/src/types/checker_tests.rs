@@ -1622,10 +1622,27 @@ def use_it: f32 = f32.(+)(1.0f32, 2.0f32)
     );
 }
 
+/// A self-contained stand-in for a module with a concrete type alias
+/// (`state = f32`) plus functions that use it internally. The qualified-type-
+/// alias tests below prepend this so they exercise alias resolution without
+/// depending on any prelude module.
+const ALIAS_FIXTURE: &str = r#"
+module rand = {
+  type state = f32
+  def init(seed: f32) state = seed
+  def next(s: state) (state, f32) = (s, s)
+}
+"#;
+
+/// Type check `body` with `ALIAS_FIXTURE` prepended, expecting success.
+fn typecheck_with_alias_fixture(body: &str) {
+    typecheck_program(&format!("{ALIAS_FIXTURE}{body}"));
+}
+
 #[test]
 fn test_qualified_type_alias_resolves() {
     // rand.state is a type alias for f32 - qualified names should resolve
-    typecheck_program(
+    typecheck_with_alias_fixture(
         r#"
 def test: rand.state = 0.5f32
         "#,
@@ -1635,7 +1652,7 @@ def test: rand.state = 0.5f32
 #[test]
 fn test_qualified_type_alias_in_function_param() {
     // rand.state in parameter position should resolve to f32
-    typecheck_program(
+    typecheck_with_alias_fixture(
         r#"
 def use_state(s: rand.state) f32 = s + 1.0f32
 def test: f32 = use_state(0.5f32)
@@ -1647,7 +1664,7 @@ def test: f32 = use_state(0.5f32)
 fn test_module_function_uses_internal_alias() {
     // Module functions like rand.init use 'state' internally - this should type check
     // because the module context provides alias resolution
-    typecheck_program(
+    typecheck_with_alias_fixture(
         r#"
 def test: rand.state = rand.init(0.123f32)
         "#,
@@ -1657,7 +1674,7 @@ def test: rand.state = rand.init(0.123f32)
 #[test]
 fn test_module_function_returns_resolved_alias() {
     // rand.next returns (state, f32) which should resolve to (f32, f32)
-    typecheck_program(
+    typecheck_with_alias_fixture(
         r#"
 def test: (f32, f32) =
     let s = rand.init(0.5f32) in
@@ -1670,7 +1687,7 @@ def test: (f32, f32) =
 fn test_lambda_param_with_qualified_alias() {
     // Lambda parameter annotations should resolve qualified type aliases
     // This tests that |x: rand.state| resolves rand.state -> f32
-    typecheck_program(
+    typecheck_with_alias_fixture(
         r#"
 def test: f32 =
     let f = |x: rand.state| x + 1.0f32 in
@@ -1683,7 +1700,7 @@ def test: f32 =
 fn test_entry_output_with_qualified_alias() {
     // Entry output types should resolve qualified type aliases
     // rand.state -> f32, so returning 1.0f32 should be valid
-    typecheck_program(
+    typecheck_with_alias_fixture(
         r#"
 #[fragment]
 entry test(x: f32) rand.state =
@@ -1696,7 +1713,7 @@ entry test(x: f32) rand.state =
 fn test_type_ascription_with_qualified_alias() {
     // Type ascription should resolve qualified type aliases
     // rand.state -> f32
-    typecheck_program(
+    typecheck_with_alias_fixture(
         r#"
 def test(x: f32) f32 =
     let y = (1.0f32 : rand.state) in
@@ -1709,7 +1726,7 @@ def test(x: f32) f32 =
 fn test_let_annotation_with_qualified_alias() {
     // Let binding type annotations should resolve qualified type aliases
     // rand.state -> f32
-    typecheck_program(
+    typecheck_with_alias_fixture(
         r#"
 def test(x: f32) f32 =
     let y: rand.state = 1.0f32 in

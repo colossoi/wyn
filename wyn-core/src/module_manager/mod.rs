@@ -128,7 +128,6 @@ impl ModuleManager {
         self.load_str(include_str!("../../../prelude/stats.wyn"), node_counter)?;
         self.load_str(include_str!("../../../prelude/trig.wyn"), node_counter)?;
         self.load_str(include_str!("../../../prelude/graphics.wyn"), node_counter)?;
-        self.load_str(include_str!("../../../prelude/rand.wyn"), node_counter)?;
         self.load_str(include_str!("../../../prelude/soacs.wyn"), node_counter)?;
         self.load_str(include_str!("../../../prelude/compute.wyn"), node_counter)?;
 
@@ -180,7 +179,7 @@ impl ModuleManager {
         self.known_modules.contains(name)
     }
 
-    /// Resolve a qualified type alias (e.g., "rand.state" -> underlying type)
+    /// Resolve a qualified type alias (e.g., "my_mod.state" -> underlying type)
     pub fn resolve_type_alias(&self, qualified_name: &str) -> Option<&Type> {
         self.type_aliases.get(qualified_name)
     }
