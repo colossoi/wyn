@@ -1524,6 +1524,28 @@ def use_a(x: a.t) i32 = 0
 }
 
 // =========================================================================
+// Module scoping
+// =========================================================================
+
+#[test]
+fn open_reexports_members() {
+    // `open base` splices `base`'s members into `derived`, so `derived.foo`
+    // resolves from outside — re-export, the linchpin for a functor-produced
+    // numeric hierarchy (the result re-exports the param module's members).
+    typecheck_program(
+        r#"
+module base = {
+  def foo(x: i32) i32 = x + 1
+}
+module derived = {
+  open base
+}
+def use_it: i32 = derived.foo(10)
+        "#,
+    );
+}
+
+// =========================================================================
 // Module-system gaps (aspirational, #[ignore]d)
 //
 // Each test below asserts the *desired* behavior of a module-system feature
@@ -1566,25 +1588,6 @@ module derived = {
   def bar(x: i32) i32 = foo(x) + 1
 }
 def use_it: i32 = derived.bar(10)
-        "#,
-    );
-}
-
-#[test]
-#[ignore = "gap: `open M` does not re-export M's members on the enclosing module"]
-fn open_reexports_members() {
-    // Desired: `open base` makes `base`'s members part of `derived`, so
-    // `derived.foo` resolves. This is the linchpin for a functor-produced
-    // numeric hierarchy (the result must re-export the param's primitives).
-    typecheck_program(
-        r#"
-module base = {
-  def foo(x: i32) i32 = x + 1
-}
-module derived = {
-  open base
-}
-def use_it: i32 = derived.foo(10)
         "#,
     );
 }

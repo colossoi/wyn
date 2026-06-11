@@ -700,8 +700,24 @@ impl ModuleManager {
                             let spec = Spec::Sig(sig_decl.name.clone(), type_params_vec, substituted_ty);
                             items.push(ElaboratedItem::Spec(spec));
                         }
-                        Declaration::Open(_) => {
-                            // TODO: Handle open declarations for name resolution
+                        Declaration::Open(open_expr) => {
+                            // `open M` re-exports M's members as members of this
+                            // module: resolve the opened expression to its
+                            // elaborated items and splice them in at this point.
+                            // `elaborate_module_body` already resolves plain
+                            // names, functor parameters, and applications, so
+                            // this covers `open foo`, `open param`, and
+                            // `open Functor(arg)`. Members the surrounding module
+                            // defines later shadow the opened ones (later items win
+                            // at resolution).
+                            let opened_items = self.elaborate_module_body(
+                                open_expr,
+                                module_name,
+                                substitutions,
+                                param_bindings,
+                                node_counter,
+                            )?;
+                            items.extend(opened_items);
                         }
                         Declaration::TypeBind(type_bind) => {
                             // Handle type aliases, including those referencing parameters
