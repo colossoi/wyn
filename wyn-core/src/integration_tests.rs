@@ -1842,6 +1842,50 @@ fn compile_to_ssa_with_modules(input: &str) -> Program {
     crate::compile_thru_ssa(input).expect("compile to SSA").ssa
 }
 
+// =========================================================================
+// Backend gaps (aspirational, #[ignore]d)
+//
+// Each test asserts the *desired* code-gen outcome for a construct the SPIR-V
+// backend currently can't handle; `#[ignore]`d so the suite stays green.
+// Surfaced while building the lib/ statistics generators. Drop the `#[ignore]`
+// when the gap is closed.
+// =========================================================================
+
+/// Gap: the numeric array-reductions (`sum`/`product`/`minimum`/`maximum`) are
+/// declared in the prelude `numeric` module-type and type-check, but the
+/// SPIR-V backend has no lowering for them — code-gen fails with "Unknown
+/// function: f32.sum". (The `reduce` SOAC *does* lower; these should desugar to
+/// it or gain their own lowering.)
+#[test]
+#[ignore = "gap: numeric array-reductions (sum/product/minimum/maximum) have no SPIR-V lowering"]
+fn numeric_array_reductions_lower_to_spirv() {
+    let source = r#"
+def N: i32 = 256
+#[compute]
+entry e() [4]f32 =
+    let xs = map(|i: i32| f32.i32(i), 0i32 ..< N) in
+    [f32.sum(xs), f32.product(xs), f32.minimum(xs), f32.maximum(xs)]
+"#;
+    compile_to_spirv(source).expect("numeric array-reductions should lower to SPIR-V");
+}
+
+/// Gap: returning a runtime-sized `[]f32` from a (non-entry) function and then
+/// indexing it panics the backend with "Composite variant unsized arrays not
+/// supported" (`spirv/mod.rs`), instead of lowering the result as a
+/// runtime-length array. A let-bound map + index, and a reduce over the same
+/// array, both lower fine — it's specifically a function *return* of an
+/// unsized Composite array that the type lowering rejects.
+#[test]
+#[ignore = "gap: returning a runtime-sized array from a function panics SPIR-V type lowering"]
+fn returning_runtime_sized_array_from_fn_lowers() {
+    let source = r#"
+def g(n: i32) []f32 = map(|i: i32| f32.i32(i), 0i32 ..< n)
+#[compute]
+entry e() [1]f32 = [g(256)[3]]
+"#;
+    compile_to_spirv(source).expect("returning a runtime-sized array should lower to SPIR-V");
+}
+
 /// Verify that nested if/else chains compile to SPIR-V.
 #[test]
 fn test_spirv_nested_if_else_block_params() {

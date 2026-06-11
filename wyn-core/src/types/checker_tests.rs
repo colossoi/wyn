@@ -1523,6 +1523,89 @@ def use_a(x: a.t) i32 = 0
     );
 }
 
+// =========================================================================
+// Module-system gaps (aspirational, #[ignore]d)
+//
+// Each test below asserts the *desired* behavior of a module-system feature
+// that Wyn currently lacks; all are `#[ignore]`d so the suite stays green.
+// Surfaced while building the lib/ statistics generators (rng/dist/disttest)
+// and spiking a Futhark-style functor-produced numeric hierarchy. Drop the
+// `#[ignore]` when the corresponding gap is closed.
+// =========================================================================
+
+#[test]
+#[ignore = "gap: a nested `module` body cannot reference an outer top-level `def` (resolves to UndefinedVariable)"]
+fn nested_module_can_reference_outer_top_level_def() {
+    // Desired: `K`, defined at file scope, is visible inside `module m` —
+    // module bodies should close over the enclosing scope (ML/Futhark do).
+    // Currently fails name resolution with `UndefinedVariable("K", ...)`.
+    typecheck_program(
+        r#"
+def K: u32 = 5u32
+module m = {
+  def f(x: u32) u32 = x + K
+}
+def use_k: u32 = m.f(1u32)
+        "#,
+    );
+}
+
+#[test]
+#[ignore = "gap: `open M` in a module body is a no-op — does not bring M's members into local scope"]
+fn open_brings_members_into_local_scope() {
+    // Desired: after `open base`, `derived`'s body can call `foo` unqualified.
+    // Currently `open` parses but is not wired into name resolution, so `foo`
+    // is UndefinedVariable.
+    typecheck_program(
+        r#"
+module base = {
+  def foo(x: i32) i32 = x + 1
+}
+module derived = {
+  open base
+  def bar(x: i32) i32 = foo(x) + 1
+}
+def use_it: i32 = derived.bar(10)
+        "#,
+    );
+}
+
+#[test]
+#[ignore = "gap: `open M` does not re-export M's members on the enclosing module"]
+fn open_reexports_members() {
+    // Desired: `open base` makes `base`'s members part of `derived`, so
+    // `derived.foo` resolves. This is the linchpin for a functor-produced
+    // numeric hierarchy (the result must re-export the param's primitives).
+    typecheck_program(
+        r#"
+module base = {
+  def foo(x: i32) i32 = x + 1
+}
+module derived = {
+  open base
+}
+def use_it: i32 = derived.foo(10)
+        "#,
+    );
+}
+
+#[test]
+#[ignore = "gap: no syntax to reference a module's operator member by qualified name (e.g. `m.(+)` fails to parse)"]
+fn qualified_operator_member_resolves() {
+    // Desired: forward/reference a module's operator member by qualified
+    // name, needed to wire infix primitives through a functor. The exact
+    // surface syntax is open (`m.(+)` shown); today every form is a parse
+    // error.
+    typecheck_program(
+        r#"
+module m = {
+  def (+)(a: i32, b: i32) i32 = a
+}
+def use_it: i32 = m.(+)(1, 2)
+        "#,
+    );
+}
+
 #[test]
 fn test_qualified_type_alias_resolves() {
     // rand.state is a type alias for f32 - qualified names should resolve
