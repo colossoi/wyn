@@ -1,0 +1,176 @@
+-- | Counter-based pseudo-random generators for shaders and compute.
+--
+-- Randomness is a pure function of a `key` (which names an independent
+-- stream) and a *position*. The core invariant is
+--
+--     same key + same position  ==>  same value
+--
+-- regardless of how threads are scheduled — so results are reproducible and
+-- parallel code can derive randomness from a logical index (pixel id,
+-- particle id, sample id) with no shared mutable state.
+--
+-- The API has two modes, in two modules:
+--
+--   * **random access** (`RANDOM_ACCESS`, implemented by `fasthash` and
+--     `threefry`): `at_u32`/`at_f32` are pure functions of `(key, position)`.
+--     Use this inside `map`/parallel code — each element draws from its own
+--     index.
+--
+--   * **sequential** (`Sequential`, a functor over any generator; `fhseq`
+--     and `tfseq` are it applied to each one): hold a `state` and call
+--     `next_*` to draw a stream, threading the returned state. The classic
+--     "give me the next random" style, kept pure.
+--
+-- The sequential layer is *built on* the random-access one: `next_*` is just
+-- `at_*` with the position threaded and incremented.
+
+-- | A random-access generator: pure `value = f(key, position)`. `key` is
+-- opaque — build one with `seed`/`derive`. Generators differ only in their
+-- internal `key` width, hidden here.
+module type RANDOM_ACCESS = {
+  -- | Names an independent random stream.
+  type key
+
+  -- | Whiten a raw user seed into a well-distributed `key`.
+  sig seed(s: u32) key
+  -- | Derive an independent sub-stream from a key and a `salt` (e.g. a
+  -- bounce index or pass id). Distinct salts give well-separated streams.
+  sig derive(k: key, salt: u32) key
+
+  -- | A uniform `u32` at `(key, position)`. Pure and random-access.
+  sig at_u32(k: key, pos: u32) u32
+  -- | A uniform `f32` in `[0, 1)` at `(key, position)`.
+  sig at_f32(k: key, pos: u32) f32
+}
+
+-- | The cheap tier: a single-lane 32-bit PCG hash (Jarzynski, *Hash
+-- Functions for GPU Rendering*, JCGT 2020). **Fast, graphics/dither-grade**
+-- — good for noise, jitter, and stochastic effects, *not* statistical-grade
+-- Monte-Carlo.
+--
+-- **Stream-count ceiling (by design):** the key is 32-bit, so once you seed
+-- more than ~2^16 (≈ 65k) independent streams the birthday bound makes a
+-- collision likely — two logically-independent streams emitting the same
+-- sequence. When you need many more streams or statistical quality, use
+-- `threefry` (64-bit key) instead.
+module fasthash : RANDOM_ACCESS = {
+  type key = u32
+
+  -- PCG hash finalizer: u32 -> u32 with good avalanche. The variable
+  -- shift `(s >> 28) + 4` is the output permutation; every step uses only
+  -- multiply / add / shift / xor. Private — kept out of `RANDOM_ACCESS`.
+  def pcg(v: u32) u32 =
+    let s = v * 747796405u32 + 2891336453u32 in
+    let w = ((s >> ((s >> 28u32) + 4u32)) ^ s) * 277803737u32 in
+    (w >> 22u32) ^ w
+
+  def seed(s: u32) key = pcg(s)
+  def derive(k: key, salt: u32) key = pcg(k ^ pcg(salt))
+
+  def at_u32(k: key, pos: u32) u32 = pcg(k ^ pcg(pos))
+  -- Uniform `f32` in `[0, 1)`: the top 24 bits (the f32 mantissa width)
+  -- divided by 2^24, so every representable value is equally likely.
+  def at_f32(k: key, pos: u32) f32 =
+    f32.u32(at_u32(k, pos) >> 8u32) * (1.0f32 / 16777216.0f32)
+}
+
+-- | The quality tier: Threefry-2x32-20 (Salmon et al., *Parallel Random
+-- Numbers: As Easy as 1, 2, 3*, Random123). A 64-bit key built from two u32
+-- lanes — collision-safe into the billions of streams — and statistical
+-- quality strong enough for Monte-Carlo, using only u32 add/xor/rotate.
+--
+-- NOT YET VERIFIED against Random123's published test vectors (no GPU in
+-- the build environment): the structure follows Threefry-2x32-20 exactly,
+-- but the numerics should be cross-checked on-device before relying on the
+-- exact bit stream.
+module threefry : RANDOM_ACCESS = {
+  type key = (u32, u32)
+
+  -- 32-bit left rotate. Rotation amounts here are always 1..31.
+  def rotl(x: u32, k: u32) u32 = (x << k) | (x >> (32u32 - k))
+
+  -- One Threefry mix step with rotation `r`: x0 += x1; x1 = rotl(x1,r) ^ x0.
+  def mix(x0: u32, x1: u32, r: u32) (u32, u32) =
+    let y0 = x0 + x1 in
+    (y0, rotl(x1, r) ^ y0)
+
+  -- Threefry-2x32-20 block: a keyed bijection of a 2-word counter. 20 rounds
+  -- (rotations cycle 13,15,26,6 / 17,29,16,24), key-injected before round 0
+  -- and after every 4 rounds. `ks2` is the key parity word.
+  def block(c0: u32, c1: u32, k0: u32, k1: u32) (u32, u32) =
+    let ks2 = 0x1BD11BDAu32 ^ k0 ^ k1 in
+    let x0 = c0 + k0 in
+    let x1 = c1 + k1 in
+    let (x0, x1) = mix(x0, x1, 13u32) in
+    let (x0, x1) = mix(x0, x1, 15u32) in
+    let (x0, x1) = mix(x0, x1, 26u32) in
+    let (x0, x1) = mix(x0, x1, 6u32) in
+    let x0 = x0 + k1 in
+    let x1 = x1 + ks2 + 1u32 in
+    let (x0, x1) = mix(x0, x1, 17u32) in
+    let (x0, x1) = mix(x0, x1, 29u32) in
+    let (x0, x1) = mix(x0, x1, 16u32) in
+    let (x0, x1) = mix(x0, x1, 24u32) in
+    let x0 = x0 + ks2 in
+    let x1 = x1 + k0 + 2u32 in
+    let (x0, x1) = mix(x0, x1, 13u32) in
+    let (x0, x1) = mix(x0, x1, 15u32) in
+    let (x0, x1) = mix(x0, x1, 26u32) in
+    let (x0, x1) = mix(x0, x1, 6u32) in
+    let x0 = x0 + k0 in
+    let x1 = x1 + k1 + 3u32 in
+    let (x0, x1) = mix(x0, x1, 17u32) in
+    let (x0, x1) = mix(x0, x1, 29u32) in
+    let (x0, x1) = mix(x0, x1, 16u32) in
+    let (x0, x1) = mix(x0, x1, 24u32) in
+    let x0 = x0 + k1 in
+    let x1 = x1 + ks2 + 4u32 in
+    let (x0, x1) = mix(x0, x1, 13u32) in
+    let (x0, x1) = mix(x0, x1, 15u32) in
+    let (x0, x1) = mix(x0, x1, 26u32) in
+    let (x0, x1) = mix(x0, x1, 6u32) in
+    (x0 + ks2, x1 + k0 + 5u32)
+
+  -- A 32-bit seed mixes into a full 64-bit key.
+  def seed(s: u32) key = block(s, 0u32, 0x9E3779B9u32, 0x243F6A88u32)
+  def derive(k: key, salt: u32) key =
+    let (k0, k1) = k in
+    block(salt, 0u32, k0, k1)
+
+  -- `pos` is the low counter word (high word 0). The first output word is
+  -- the draw; the second is discarded (a `next2`-style API could keep both).
+  def at_u32(k: key, pos: u32) u32 =
+    let (k0, k1) = k in
+    let (r0, _) = block(pos, 0u32, k0, k1) in
+    r0
+  def at_f32(k: key, pos: u32) f32 =
+    f32.u32(at_u32(k, pos) >> 8u32) * (1.0f32 / 16777216.0f32)
+}
+
+-- | The sequential mode, over *any* random-access generator `G`: a `state`
+-- is a key plus a position, and `next_*` draws `G.at_*` at the current
+-- position and advances. Generator-agnostic — instantiated per generator
+-- below.
+functor Sequential(G: RANDOM_ACCESS) = {
+  -- | A key plus a position. Thread it through `next_*`.
+  type state = (G.key, u32)
+
+  -- | Start a sequential stream at position 0.
+  def from_key(k: G.key) state = (k, 0u32)
+  -- | Start a sequential stream at a logical index — the natural entry
+  -- point inside `map`/parallel code.
+  def for_index(k: G.key, i: i32) state = (k, u32.i32(i))
+
+  -- | Draw the next `u32` and advance. Thread the returned state onward.
+  def next_u32(st: state) (state, u32) =
+    let (k, c) = st in
+    ((k, c + 1u32), G.at_u32(k, c))
+  -- | Draw the next `f32` in `[0, 1)` and advance.
+  def next_f32(st: state) (state, f32) =
+    let (k, c) = st in
+    ((k, c + 1u32), G.at_f32(k, c))
+}
+
+-- | The sequential view of each generator.
+module fhseq = Sequential(fasthash)
+module tfseq = Sequential(threefry)

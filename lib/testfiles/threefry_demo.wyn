@@ -1,0 +1,15 @@
+-- Demo: the `threefry` generator (64-bit two-lane), both modes.
+import "../rng"
+
+def SEED: u32 = 0x9e3779b9u32
+def N: i32 = 256
+
+#[compute]
+entry threefry_fill() []f32 =
+  let k = threefry.seed(SEED) in
+  -- sequential mode: a stream starting at index 1000, drawn up front
+  let s0 = tfseq.for_index(k, 1000i32) in
+  let (s1, a) = tfseq.next_f32(s0) in
+  let (_, b) = tfseq.next_f32(s1) in
+  -- random-access mode: per-thread draw at its own index
+  map(|i: i32| 0.5f32 * threefry.at_f32(k, u32.i32(i)) + 0.25f32 * (a + b), 0i32 ..< N)
