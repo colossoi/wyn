@@ -204,11 +204,7 @@ impl PartialEvaluator {
             // map(f, m)` — the SOAC consumes `m`). Substitute those refs
             // through the SOAC's children so the dissolved `Let` doesn't
             // leave dangling free vars downstream.
-            TermKind::Soac(_) | TermKind::ArrayExpr(_) => {
-                let mut bound = std::collections::HashSet::new();
-                let subst = self.substitute_residual_vars(term.clone(), &mut bound);
-                Value::Unknown(subst)
-            }
+            TermKind::Soac(_) | TermKind::ArrayExpr(_) => self.residualize_unreduced(term),
 
             // Structural ops: evaluate children so let-bound `Var`s
             // get substituted through, then rebuild the variant. Without
@@ -262,20 +258,22 @@ impl PartialEvaluator {
     /// Apply a function to arguments based on the base term kind.
     fn apply(&mut self, base: &Term, args: Vec<(Value, Type<TypeName>)>, original: &Term) -> Value {
         match &base.kind {
+            // `eval_binop`/`eval_unop` return `Some` only for a genuine fold
+            // or simplification (including identities like `x + 0 → x`).
+            // `None` means "couldn't fold" — and we must rebuild the residual
+            // from the *evaluated* operands via `residualize_call`, never from
+            // `original`: an operand may be a let-bound `Var` that an enclosing
+            // dissolved `Let` substituted, which `original` still names by hand
+            // (the source of "Unknown global: <local>" at codegen).
             TermKind::BinOp(op) => {
-                if args.len() >= 2 {
-                    self.eval_binop(op, &args[0].0, &args[1].0, original)
-                } else {
-                    Value::Unknown(original.clone())
-                }
+                let folded =
+                    if args.len() >= 2 { self.eval_binop(op, &args[0].0, &args[1].0) } else { None };
+                folded.unwrap_or_else(|| self.residualize_unreduced(original))
             }
 
             TermKind::UnOp(op) => {
-                if !args.is_empty() {
-                    self.eval_unop(op, &args[0].0, original)
-                } else {
-                    Value::Unknown(original.clone())
-                }
+                let folded = if !args.is_empty() { self.eval_unop(op, &args[0].0) } else { None };
+                folded.unwrap_or_else(|| self.residualize_unreduced(original))
             }
 
             TermKind::Var(VarRef::Symbol(sym)) => self.apply_var(*sym, args, original),
@@ -295,6 +293,20 @@ impl PartialEvaluator {
                 self.residualize_call(base.clone(), args, original)
             }
         }
+    }
+
+    /// Residualize a term the evaluator can't reduce, patching any free
+    /// variable an enclosing *dissolved* `Let` bound into the env. This is a
+    /// binder-aware substitution (`substitute_residual_vars`): it preserves
+    /// the original syntax, node ids, and any nested binders, replacing only
+    /// dangling free vars. Use this for every unreduced residual (binops,
+    /// unops, SOACs, ...) — never `original.clone()`, which would keep naming
+    /// a dissolved let's variable and surface as "Unknown global: <name>" at
+    /// codegen; and not a `reify`-based rebuild, which reconstructs operands
+    /// (e.g. partial applications) and can corrupt closure-call arities.
+    fn residualize_unreduced(&mut self, term: &Term) -> Value {
+        let mut bound = std::collections::HashSet::new();
+        Value::Unknown(self.substitute_residual_vars(term.clone(), &mut bound))
     }
 
     /// Rebuild an App from the (already-evaluated) `func` and `args`,
@@ -347,6 +359,18 @@ impl PartialEvaluator {
         {
             let real_sym = *real_sym;
             return self.apply_var(real_sym, args, original);
+        }
+
+        // A let-bound variable whose residual is a non-Var term — most
+        // importantly a *lambda* (`let g = |x| ... in g a`). Apply the args to
+        // that residual directly. Otherwise, since the `let` is dissolved and
+        // `g` is not a top-level def, we'd fall through to `reify_call(sym)`
+        // and leave `Var(g)` dangling in `g a` — surfacing as "Unknown
+        // function" at codegen, or a mis-threaded closure call.
+        if let Some(Value::Unknown(t)) = self.env.get(&sym).cloned() {
+            if !matches!(t.kind, TermKind::Var(_)) {
+                return self.apply(&t, args, original);
+            }
         }
 
         // Check for known function
@@ -405,9 +429,16 @@ impl PartialEvaluator {
         self.eval(body)
     }
 
-    /// Evaluate binary operation.
-    fn eval_binop(&self, op: &BinaryOp, lhs: &Value, rhs: &Value, original: &Term) -> Value {
-        match (op.op.as_str(), lhs, rhs) {
+    /// Evaluate a binary operation. `Some` means a genuine fold or
+    /// simplification was performed (a literal result, or an identity like
+    /// `x + 0 → x` that returns a residual operand); `None` means it could
+    /// not be reduced and the caller must rebuild residual syntax from the
+    /// evaluated operands. Crucially `None` is *not* the same as "returned a
+    /// residual" — conflating them (both used to be `Value::Unknown`) makes
+    /// the caller either drop a valid simplification or leave a dissolved
+    /// let's variable dangling.
+    fn eval_binop(&self, op: &BinaryOp, lhs: &Value, rhs: &Value) -> Option<Value> {
+        Some(match (op.op.as_str(), lhs, rhs) {
             // Integer arithmetic
             ("+", Value::Int(a), Value::Int(b)) => Value::Int(a + b),
             ("-", Value::Int(a), Value::Int(b)) => Value::Int(a - b),
@@ -428,25 +459,25 @@ impl PartialEvaluator {
             ("<=", Value::Int(a), Value::Int(b)) => Value::Bool(a <= b),
             (">=", Value::Int(a), Value::Int(b)) => Value::Bool(a >= b),
 
-            // Algebraic identities
+            // Algebraic identities (return a residual operand — a valid fold)
             ("+", Value::Int(0), _) => rhs.clone(),
             ("+", _, Value::Int(0)) => lhs.clone(),
             ("*", Value::Int(1), _) => rhs.clone(),
             ("*", _, Value::Int(1)) => lhs.clone(),
             ("*", Value::Int(0), _) | ("*", _, Value::Int(0)) => Value::Int(0),
 
-            _ => Value::Unknown(original.clone()),
-        }
+            _ => return None,
+        })
     }
 
-    /// Evaluate unary operation.
-    fn eval_unop(&self, op: &UnaryOp, arg: &Value, original: &Term) -> Value {
-        match (op.op.as_str(), arg) {
+    /// Evaluate a unary operation. `Some`/`None` as in `eval_binop`.
+    fn eval_unop(&self, op: &UnaryOp, arg: &Value) -> Option<Value> {
+        Some(match (op.op.as_str(), arg) {
             ("-", Value::Int(n)) => Value::Int(-n),
             ("-", Value::Float(f)) => Value::Float(-f),
             ("!", Value::Bool(b)) => Value::Bool(!b),
-            _ => Value::Unknown(original.clone()),
-        }
+            _ => return None,
+        })
     }
 
     // =========================================================================

@@ -4419,3 +4419,52 @@ entry e(xs: []u32) []u32 = map(|x: u32| (x ^ 5u32) << 1u32, xs)
         "expected at least one OpShiftLeftLogical, found {shls}"
     );
 }
+
+/// A function whose body uses bitwise/shift operators with a reused let-local
+/// miscompiles when it is inlined BOTH into a captured value hoisted before a
+/// SOAC and into the SOAC's lambda: the local leaks as "Unknown global: w"
+/// during SPIR-V generation.
+///
+/// Bisected trigger (all three required):
+///   1. bitwise/shift body with a reused let-local: `let w = .. in (w >> _) ^ w`
+///   2. the fn called to produce a *captured* value: `let k = f(7u32) in ..`
+///   3. the fn *also* called inside the SOAC lambda
+/// An arithmetic-only body, a literal (non-call) `k`, or calling `f` only
+/// inside the lambda each compile fine. Surfaced by the lib/rng.wyn PCG hash
+/// (`pcg` has `let w = .. in (w >> 22) ^ w`, used for the hoisted key and
+/// inside the per-element map).
+#[test]
+fn bitwise_fn_inlined_both_captured_and_in_soac_lambda_lowers() {
+    compile_to_spirv(
+        "\
+def f(v: u32) u32 = let w = v ^ 1u32 in (w >> 1u32) ^ w
+#[compute]
+entry e() []f32 =
+  let k = f(7u32) in
+  map(|i: i32| f32.u32(f(k + u32.i32(i))), 0i32 ..< 4)
+",
+    )
+    .expect("bitwise fn inlined both as captured value and in SOAC lambda must lower to SPIR-V");
+}
+
+/// `inner` captures `x` transitively through the intermediate lambda `outer`.
+/// partial_eval inlines the constant call `nested_lambda(100)`, dissolving the
+/// inner `let outer = <lambda>`; `apply_var` must apply the call through that
+/// env-bound lambda, otherwise `outer` is left dangling and closure conversion
+/// mis-threads its capture (`ArityMismatch`). Regression for the env-bound
+/// lambda case of dissolved-let residualization.
+#[test]
+fn nested_transitive_capture_through_inlined_lambda_lowers() {
+    let _ = compile_to_ssa(
+        "\
+def nested_lambda(x: i32) i32 =
+  let outer = |a: i32|
+    let inner = |b: i32| a + b + x in
+    inner(a)
+  in
+  outer(5)
+#[vertex]
+entry v() #[builtin(position)] vec4f32 = @[f32.i32(nested_lambda(100)), 0.0, 0.0, 1.0]
+",
+    );
+}
