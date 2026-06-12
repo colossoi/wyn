@@ -109,6 +109,17 @@ entry tick(#[storage(set=2, binding=0, access=read)] xs: []i32) i32 =
 }
 
 #[test]
+fn filter_over_unreadable_input_yields_no_variant_not_view() {
+    // A filter input whose array type can't be read (a fused-chain ArrayExpr,
+    // not a Ref/StorageView) has no producer-derived variant: `filter_variant`
+    // returns None. The planner maps that to `Strategy::LeaveAsIs` and
+    // `rep_specialize`'s `?` maps it to "no specialization" — report ==
+    // executor. Reporting `View` here (the prior bug) would disagree with the
+    // executor, which does nothing for this case.
+    assert_eq!(filter_variant(&ArrayExpr::Literal(vec![])), None);
+}
+
+#[test]
 fn two_scalar_reduces_captured_in_map_each_broadcast() {
     // Both reduces are scalars consumed per element inside the tail map — each
     // should hoist to its own one-element prepass buffer. This is the shape the

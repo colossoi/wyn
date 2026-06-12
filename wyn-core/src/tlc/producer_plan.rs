@@ -165,11 +165,16 @@ fn plan_node(graph: &ProducerGraph, pid: ProducerId, captured: &HashSet<SymbolId
     let demand = classify_demand(graph, pid, is_captured);
     let strategy = match (&node.semantics, produces_array, demand) {
         // `filter` is a representation choice, not a prepass: Bounded for a
-        // statically-sized input, View otherwise (the same call rep_specialize
-        // executes). An input whose type can't be read falls back to View.
+        // statically-sized input, View for a runtime one — the same
+        // `filter_variant` call `rep_specialize` executes.
         (ArraySemantics::Filter { input, .. }, _, _) => match filter_variant(input) {
             Some(FilterVariant::Bounded { capacity }) => Strategy::BoundedAggregate { capacity },
-            Some(FilterVariant::View) | None => Strategy::View,
+            Some(FilterVariant::View) => Strategy::View,
+            // Input type unreadable (a fused-chain input): no producer-derived
+            // variant. `rep_specialize` does nothing here (its `?` short-circuits
+            // to "no specialization"), so the planner must report the same
+            // "leave alone" — reporting `View` would disagree with the executor.
+            None => Strategy::LeaveAsIs,
         },
         // A scalar SOAC result read per element inside a sibling lambda
         // broadcasts — hoist it to a one-element prepass buffer.
