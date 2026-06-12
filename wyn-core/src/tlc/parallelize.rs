@@ -1015,6 +1015,322 @@ fn lift_graphical_invariant_soacs(
     program.defs.extend(new_defs);
 }
 
+/// Hoist scalar SOAC reductions (`Reduce`/`Redomap`) that the
+/// producer-consumer planner marked `StoragePrepass(ScalarBroadcast)` out of
+/// **compute** entry bodies into their own pre-pass compute entries — the
+/// compute analogue of `lift_graphical_invariant_soacs`.
+///
+/// The planner's `ScalarBroadcast` is exactly a top-level let-bound scalar
+/// reduce whose result is captured into the tail SOAC's operator lambda. The
+/// lane variable is that lambda's parameter, so it's out of scope at the let —
+/// the reduce can't depend on it, which is what makes the hoist sound (the
+/// per-element-lambda / lane-dependent scalar SOACs the planner leaves inline
+/// are never marked `ScalarBroadcast`).
+///
+/// Each hoisted reduce becomes `<entry>_prepass_<n>` re-reading the same
+/// storage inputs it read (entry-param input arrays as view params, chained
+/// `lift_gathers` intermediates as Input decls — mirroring
+/// `lift_gathers::build_gather_prepass`); its single-slot result is pinned to a
+/// fresh binding registered in `prepass_result_bindings`, and the let RHS is
+/// rewritten to a `storage_index(set, binding, 0)` load. The pre-pass entries
+/// are appended to `program.defs` so the compute Stage A/B analysis below
+/// multi-stages each into its own two-phase reduce pipeline.
+fn lift_compute_scalar_reduces(
+    program: &mut Program,
+    next_binding: &mut u32,
+    prepass_result_bindings: &mut HashMap<SymbolId, BindingRef>,
+    term_ids: &mut TermIdSource,
+) {
+    use super::producer_plan::{PrepassKind, Strategy, plan_program};
+
+    // The planner is the decider. Collect, per entry, the let-binding symbols
+    // it marked `ScalarBroadcast`.
+    let plans = plan_program(program);
+    let mut to_hoist: HashMap<SymbolId, HashSet<SymbolId>> = HashMap::new();
+    for plan in &plans {
+        for p in &plan.producers {
+            if let (Some(b), Strategy::StoragePrepass(PrepassKind::ScalarBroadcast)) =
+                (p.binding, p.strategy)
+            {
+                to_hoist.entry(plan.entry).or_default().insert(b);
+            }
+        }
+    }
+    if to_hoist.is_empty() {
+        return;
+    }
+
+    // Only compute entries: graphical entries' scalar reduces were already
+    // hoisted (and their RHS rewritten) by `lift_graphical_invariant_soacs`.
+    let indices: Vec<usize> = program
+        .defs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, d)| match &d.meta {
+            DefMeta::EntryPoint(decl) if decl.entry_type.is_compute() && to_hoist.contains_key(&d.name) => {
+                Some(i)
+            }
+            _ => None,
+        })
+        .collect();
+
+    let mut new_defs: Vec<Def> = Vec::new();
+    for idx in indices {
+        let entry_sym = program.defs[idx].name;
+        let entry_name = crate::symbol_name_or_bug(&program.symbols, entry_sym).to_string();
+        let hoist_set = to_hoist.get(&entry_sym).cloned().unwrap_or_default();
+        let body = program.defs[idx].body.clone();
+        // The entry's own params — the only free vars a pre-pass can re-declare
+        // as its own storage inputs. A reduce reading any other free var (a
+        // let-bound computed intermediate like a fixed-size `map` result) can't
+        // be hoisted yet (it isn't in scope in the pre-pass and isn't a storage
+        // buffer); those stay inline until Stage 4 materializes them.
+        let (peeled, _) = peel_lambda_params(&body);
+        let entry_params: HashSet<SymbolId> = peeled.iter().map(|(s, _)| *s).collect();
+        let mut added_decls: Vec<interface::StorageBindingDecl> = Vec::new();
+        let new_body = hoist_scalar_reduces_in_term(
+            body,
+            &entry_name,
+            &hoist_set,
+            &entry_params,
+            next_binding,
+            &mut added_decls,
+            &mut new_defs,
+            prepass_result_bindings,
+            program,
+            term_ids,
+        );
+        program.defs[idx].body = new_body;
+        if let DefMeta::EntryPoint(ref mut decl) = program.defs[idx].meta {
+            decl.storage_bindings.extend(added_decls);
+        }
+    }
+
+    program.defs.extend(new_defs);
+}
+
+/// Walk the outer `Lambda`/`Let` chain, hoisting each let whose binding symbol
+/// is in `hoist_set`. Stops descending at the first non-Lambda/non-Let term —
+/// the tail SOAC isn't a hoist site (mirrors `lift_in_term`).
+fn hoist_scalar_reduces_in_term(
+    term: Term,
+    entry_name: &str,
+    hoist_set: &HashSet<SymbolId>,
+    entry_params: &HashSet<SymbolId>,
+    next_binding: &mut u32,
+    added_decls: &mut Vec<interface::StorageBindingDecl>,
+    new_defs: &mut Vec<Def>,
+    prepass_result_bindings: &mut HashMap<SymbolId, BindingRef>,
+    program: &mut Program,
+    term_ids: &mut TermIdSource,
+) -> Term {
+    match term.kind {
+        TermKind::Lambda(lam) => {
+            let Lambda { params, body, ret_ty } = lam;
+            let new_body = hoist_scalar_reduces_in_term(
+                *body,
+                entry_name,
+                hoist_set,
+                entry_params,
+                next_binding,
+                added_decls,
+                new_defs,
+                prepass_result_bindings,
+                program,
+                term_ids,
+            );
+            Term {
+                id: term.id,
+                ty: term.ty,
+                span: term.span,
+                kind: TermKind::Lambda(Lambda {
+                    params,
+                    body: Box::new(new_body),
+                    ret_ty,
+                }),
+            }
+        }
+        TermKind::Let {
+            name,
+            name_ty,
+            rhs,
+            body,
+        } => {
+            let new_rhs = if hoist_set.contains(&name) {
+                hoist_one_scalar_reduce(
+                    *rhs,
+                    entry_name,
+                    &name_ty,
+                    entry_params,
+                    next_binding,
+                    added_decls,
+                    new_defs,
+                    prepass_result_bindings,
+                    program,
+                    term_ids,
+                )
+            } else {
+                *rhs
+            };
+            let new_body = hoist_scalar_reduces_in_term(
+                *body,
+                entry_name,
+                hoist_set,
+                entry_params,
+                next_binding,
+                added_decls,
+                new_defs,
+                prepass_result_bindings,
+                program,
+                term_ids,
+            );
+            Term {
+                id: term.id,
+                ty: term.ty,
+                span: term.span,
+                kind: TermKind::Let {
+                    name,
+                    name_ty,
+                    rhs: Box::new(new_rhs),
+                    body: Box::new(new_body),
+                },
+            }
+        }
+        _ => term,
+    }
+}
+
+/// Emit one `<entry>_prepass_<n>` for a scalar reduce and return the
+/// `storage_index(set, binding, 0)` load that replaces its let RHS.
+fn hoist_one_scalar_reduce(
+    rhs: Term,
+    entry_name: &str,
+    name_ty: &Type<TypeName>,
+    entry_params: &HashSet<SymbolId>,
+    next_binding: &mut u32,
+    added_decls: &mut Vec<interface::StorageBindingDecl>,
+    new_defs: &mut Vec<Def>,
+    prepass_result_bindings: &mut HashMap<SymbolId, BindingRef>,
+    program: &mut Program,
+    term_ids: &mut TermIdSource,
+) -> Term {
+    // The planner only marks scalar `Reduce`/`Redomap` as `ScalarBroadcast`;
+    // anything else here is a classifier bug, not a shape to silently lower.
+    debug_assert!(
+        matches!(
+            &rhs.kind,
+            TermKind::Soac(SoacOp::Reduce { .. }) | TermKind::Soac(SoacOp::Redomap { .. })
+        ),
+        "lift_compute_scalar_reduces: planner marked a non-scalar-SOAC producer ScalarBroadcast"
+    );
+
+    // The pre-pass re-declares the reduce's free `Var` inputs as its own storage
+    // view params. Each must be a runtime-sized **entry-param** array — the same
+    // contract as `lift_gathers::build_gather_prepass`. A free var that's a
+    // let-bound computed intermediate (e.g. a fixed-size `map` result) isn't in
+    // scope in the pre-pass and isn't a storage buffer, so we can't hoist it.
+    // (Storage buffers the reduce reads directly — chained `lift_gathers`
+    // intermediates — aren't bare `Var`s, so they don't appear here; they're
+    // threaded via `producer_storage_inputs` below.) Leave such reduces inline
+    // until Stage 4 materializes their intermediate inputs to storage.
+    let captured_inputs = super::lift_gathers::free_symbol_vars(&rhs, &program.symbols, &program.def_syms);
+    let hoistable = captured_inputs
+        .iter()
+        .all(|(s, ty)| entry_params.contains(s) && super::lift_gathers::is_runtime_sized_array(ty));
+    if !hoistable {
+        return rhs;
+    }
+
+    // Pre-allocate the binding the consumer loads slot 0 from. Stage B's
+    // `make_two_phase_plan` uses this as the pre-pass's result binding (via
+    // `prepass_result_bindings`), so phase 2's store goes exactly here.
+    let binding = BindingRef::new(AUTO_STORAGE_SET, *next_binding);
+    *next_binding += 1;
+
+    // Entry-param input arrays become the pre-pass's own view params (positional
+    // binding alignment, exactly as `lift_gathers::build_gather_prepass`);
+    // storage buffers the reduce reads directly (a chained gather intermediate)
+    // become Input decls.
+    let chained = super::lift_gathers::producer_storage_inputs(&rhs);
+
+    let span = rhs.span;
+    let prepass_name = format!("{}_prepass_{}", entry_name, added_decls.len());
+    let prepass_def = build_scalar_prepass_def(
+        &prepass_name,
+        rhs,
+        name_ty.clone(),
+        &captured_inputs,
+        &chained,
+        program,
+        term_ids,
+    );
+    prepass_result_bindings.insert(prepass_def.name, binding);
+    new_defs.push(prepass_def);
+
+    added_decls.push(interface::StorageBindingDecl {
+        binding,
+        role: interface::StorageRole::Input,
+        elem_ty: name_ty.clone(),
+        length: None,
+    });
+
+    intrinsic_term_by_id(
+        catalog().known().storage_index,
+        vec![
+            uint_lit(binding.set as u64, span, term_ids),
+            uint_lit(binding.binding as u64, span, term_ids),
+            uint_lit(0, span, term_ids),
+        ],
+        name_ty.clone(),
+        span,
+        term_ids,
+    )
+}
+
+/// Build the `<entry>_prepass_<n>` compute entry whose body is the scalar
+/// reduce, re-declaring its entry-param input arrays as view params and its
+/// chained storage intermediates as Input decls. Unlike
+/// `lift_gathers::build_gather_prepass`, the scalar result is pinned through
+/// `prepass_result_bindings` (registered by the caller), so no Output decl is
+/// emitted here.
+fn build_scalar_prepass_def(
+    name: &str,
+    soac_term: Term,
+    result_ty: Type<TypeName>,
+    captured_inputs: &[(SymbolId, Type<TypeName>)],
+    chained_intermediates: &[(u32, u32, Type<TypeName>)],
+    program: &mut Program,
+    term_ids: &mut TermIdSource,
+) -> Def {
+    let required_params: Vec<RequiredParam> = captured_inputs
+        .iter()
+        .map(|(s, ty)| RequiredParam {
+            sym: *s,
+            ty: ty.clone(),
+            attr: None,
+            binding: None,
+        })
+        .collect();
+    let storage_bindings: Vec<interface::StorageBindingDecl> = chained_intermediates
+        .iter()
+        .map(|(set, binding, elem_ty)| interface::StorageBindingDecl {
+            binding: BindingRef::new(*set, *binding),
+            role: interface::StorageRole::Input,
+            elem_ty: elem_ty.clone(),
+            length: None,
+        })
+        .collect();
+    make_entry_def(
+        name,
+        soac_term,
+        result_ty,
+        &required_params,
+        storage_bindings,
+        program,
+        term_ids,
+    )
+}
+
 /// Return a `Term`'s (possibly-wrapped) lambda params by peeling
 /// outer `TermKind::Lambda` layers. Mirrors `extract_params` in
 /// `buffer_specialize.rs`.
@@ -1441,6 +1757,18 @@ pub fn run(mut program: Program, disable: bool) -> crate::error::Result<Parallel
     // exactly there (instead of a freshly-allocated binding).
     let mut prepass_result_bindings: HashMap<SymbolId, BindingRef> = HashMap::new();
     lift_graphical_invariant_soacs(
+        &mut program,
+        &mut next_binding,
+        &mut prepass_result_bindings,
+        &mut term_ids,
+    );
+
+    // Compute analogue: hoist scalar reductions the producer-consumer planner
+    // marked `ScalarBroadcast` (a top-level let-bound reduce consumed per
+    // element inside the tail SOAC) out of compute entry bodies into their own
+    // two-phase reduce pre-passes, sharing the same `next_binding` allocator
+    // and `prepass_result_bindings` channel as the graphical lift above.
+    lift_compute_scalar_reduces(
         &mut program,
         &mut next_binding,
         &mut prepass_result_bindings,

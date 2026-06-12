@@ -775,7 +775,7 @@ fn peel_lambda_params(term: &Term) -> (Vec<(SymbolId, Type<TypeName>)>, &Term) {
 
 /// True if `ty` is a runtime-sized array (size is a type variable or
 /// placeholder) — mirrors `binding_layout::is_runtime_sized_array`.
-fn is_runtime_sized_array(ty: &Type<TypeName>) -> bool {
+pub(crate) fn is_runtime_sized_array(ty: &Type<TypeName>) -> bool {
     crate::types::array_size(&crate::types::strip_unique(ty))
         .map(|s| {
             matches!(
@@ -792,7 +792,7 @@ fn is_runtime_sized_array(ty: &Type<TypeName>) -> bool {
 /// and therefore not "free" in the sense the predicate cares about
 /// (they don't need to be supplied as pre-pass inputs; they're emitted
 /// as separate defs and called directly).
-fn free_symbol_vars(
+pub(crate) fn free_symbol_vars(
     term: &Term,
     symbols: &SymbolTable,
     def_syms: &HashMap<String, SymbolId>,
@@ -826,7 +826,7 @@ fn free_symbol_vars(
 /// would miss them and the resulting pre-pass would forget to declare those
 /// bindings as Inputs. Recursive descent + dedup keeps the declaration set
 /// complete and minimal.
-fn producer_storage_inputs(rhs: &Term) -> Vec<(u32, u32, Type<TypeName>)> {
+pub(crate) fn producer_storage_inputs(rhs: &Term) -> Vec<(u32, u32, Type<TypeName>)> {
     let mut out = Vec::<(u32, u32, Type<TypeName>)>::new();
     collect_storage_in_term(rhs, &mut out);
     out
