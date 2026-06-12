@@ -28,6 +28,7 @@ mod rep_specialize_tests;
 pub mod run;
 pub mod soa;
 pub mod specialize;
+pub mod static_index_fusion;
 
 use crate::ast::{self, NodeId, Span, TypeName};
 use crate::builtins::{BuiltinId, by_id, catalog};

@@ -1856,7 +1856,6 @@ fn compile_to_ssa_with_modules(input: &str) -> Program {
 /// rewrites `map(f, src)[3]` → `let i = src[3] in f32.i32(i)` — a virtual-array
 /// access, materializing nothing rather than a whole runtime-sized buffer.
 #[test]
-#[ignore = "spike target: needs static_index_fusion"]
 fn returning_runtime_sized_array_from_fn_lowers() {
     let source = r#"
 def g(n: i32) []f32 = map(|i: i32| f32.i32(i), 0i32 ..< n)
