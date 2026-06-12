@@ -1929,6 +1929,22 @@ entry sum(xs: [16]i32) i32 = reduce(i32.(+), 0i32, xs)
     compile_to_spirv(source).expect("a reified operator member should be passable to a HOF");
 }
 
+/// A top-level `def map` shadowing the `map` SOAC is a normal call, not a SOAC.
+/// SOAC identity is decided by the frontend resolver (structurally, respecting
+/// shadowing) rather than re-derived by string match in TLC — so the user's
+/// one-argument `map` type-checks and lowers instead of panicking as the
+/// two-argument SOAC. `reduce` is exercised alongside to confirm the genuine
+/// SOACs still resolve when not shadowed.
+#[test]
+fn user_def_shadowing_soac_is_a_normal_call() {
+    let source = r#"
+def map(x: i32) i32 = x + 1
+#[compute]
+entry e(xs: [8]i32) i32 = reduce(i32.(+), map(0i32), xs)
+"#;
+    compile_to_spirv(source).expect("a user def shadowing a SOAC name should lower as a normal call");
+}
+
 /// The `numeric` whole-array reductions `sum`/`product`/`minimum`/`maximum` are
 /// implemented (for the float modules) as `reduce` over the per-type operator
 /// and its neutral, so they lower to real SPIR-V reduction loops.

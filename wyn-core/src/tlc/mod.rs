@@ -33,26 +33,11 @@ use crate::ast::{self, NodeId, Span, TypeName};
 use crate::builtins::{BuiltinId, by_id, catalog};
 use crate::error::CompilerError;
 use crate::interface;
-use crate::name_resolution::NameResolution;
+use crate::name_resolution::{NameResolution, ResolvedValueRef, SoacKind};
 use crate::types::TypeExt;
 use crate::{BindingRef, SymbolId, SymbolTable, TypeTable};
 use polytype::Type;
 use std::collections::HashMap;
-
-/// SOAC names that are intercepted in transform_application and turned into
-/// first-class SOAC nodes rather than intrinsic calls.
-const SOAC_NAMES: &[&str] = &[
-    "map",
-    "reduce",
-    "scan",
-    "filter",
-    "zip",
-    "zip2",
-    "zip3",
-    "zip4",
-    "zip5",
-    "reduce_by_index",
-];
 
 // =============================================================================
 // Helper functions
@@ -1434,11 +1419,6 @@ impl<'a> Transformer<'a> {
         }
     }
 
-    /// Check if a name is locally bound (for SOAC renaming check).
-    fn is_locally_bound(&self, name: &str) -> bool {
-        self.scope.contains_key(name)
-    }
-
     /// Transform an AST program to TLC.
     /// Returns program parts without the symbol table - caller must combine with
     /// their owned symbol table using `ProgramParts::with_symbols`.
@@ -2118,9 +2098,10 @@ impl<'a> Transformer<'a> {
         ty: Type<TypeName>,
         span: Span,
     ) -> Term {
-        // Check if func is a bare SOAC name (not locally bound)
-        if let Some(soac_name) = self.resolve_soac_name(func) {
-            return self.transform_soac_call(&soac_name, args, ty, span);
+        // Lower as a SOAC iff the resolver tagged the callee as one
+        // (so a user `def map` shadowing the builtin is a normal call).
+        if let Some(kind) = self.resolve_soac(func) {
+            return self.transform_soac_call(kind, args, ty, span);
         }
 
         // Constructor-style vec conversion (`vec2i32(v)`, …).
@@ -2277,33 +2258,32 @@ impl<'a> Transformer<'a> {
         )
     }
 
-    /// Check if an expression is a bare SOAC name (not locally bound).
-    fn resolve_soac_name(&self, func: &ast::Expression) -> Option<String> {
-        if let ast::ExprKind::Identifier(qualifiers, name) = &func.kind {
-            if qualifiers.is_empty() && !self.is_locally_bound(name) && SOAC_NAMES.contains(&name.as_str())
-            {
-                return Some(name.clone());
-            }
+    /// The SOAC this call's callee denotes, per the frontend resolver —
+    /// `None` for everything else, including a user `def` (top-level or
+    /// local) that shadows a SOAC name. Structural: no surface-name match
+    /// or scope re-derivation here; the resolver already decided.
+    fn resolve_soac(&self, func: &ast::Expression) -> Option<SoacKind> {
+        match self.name_resolution.get(func.h.id) {
+            Some(ResolvedValueRef::Soac(kind)) => Some(*kind),
+            _ => None,
         }
-        None
     }
 
-    /// Dispatch SOAC call by name.
+    /// Dispatch SOAC call by structural kind.
     fn transform_soac_call(
         &mut self,
-        name: &str,
+        kind: SoacKind,
         args: &[ast::Expression],
         ty: Type<TypeName>,
         span: Span,
     ) -> Term {
-        match name {
-            "map" => self.transform_soac_map(args, ty, span),
-            "reduce" => self.transform_soac_reduce(args, ty, span),
-            "scan" => self.transform_soac_scan(args, ty, span),
-            "filter" => self.transform_soac_filter(args, ty, span),
-            "zip" | "zip2" | "zip3" | "zip4" | "zip5" => self.transform_soac_zip(args, ty, span),
-            "reduce_by_index" => self.transform_soac_reduce_by_index(args, ty, span),
-            _ => unreachable!("Unknown SOAC: {}", name),
+        match kind {
+            SoacKind::Map => self.transform_soac_map(args, ty, span),
+            SoacKind::Reduce => self.transform_soac_reduce(args, ty, span),
+            SoacKind::Scan => self.transform_soac_scan(args, ty, span),
+            SoacKind::Filter => self.transform_soac_filter(args, ty, span),
+            SoacKind::Zip => self.transform_soac_zip(args, ty, span),
+            SoacKind::ReduceByIndex => self.transform_soac_reduce_by_index(args, ty, span),
         }
     }
 

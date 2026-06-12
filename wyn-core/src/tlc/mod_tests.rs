@@ -198,22 +198,35 @@ def make: #m([2][3]i32) | #s(i32) = #s(0)
     }
 }
 
-// A top-level `def` whose name collides with a SOAC (`map`) type-checks fine —
-// HM inference resolves the user signature — but AST→TLC lowering disagrees:
-// `resolve_soac_name` only excludes *locally* bound names, so the user `def`
-// is treated as the `map` SOAC and the 1-arg call is routed to
-// `transform_soac_map`, which `assert!(args.len() >= 2)` and panics with
-// "map requires at least 2 arguments" (tlc/mod.rs). It should instead shadow
-// the SOAC (user defs win, cf. the WGSL backend's name-shadowing fix) or
-// surface a clean CompilerError. Ignored until that checker-vs-TLC mismatch is
-// reconciled; run with `cargo test -- --ignored` to observe the panic.
+// A top-level `def` whose name collides with a SOAC (`map`) type-checks as the
+// user signature, and TLC lowers the call to match: SOAC identity is a
+// structural tag set by the frontend resolver (which honours shadowing — local
+// and top-level), so `map(y)` is an ordinary application of the user def, not a
+// `Soac(Map)` node. Before the resolver-driven tag, AST→TLC re-derived SOAC-ness
+// by string match (excluding only *locally* bound names) and the 1-arg call was
+// routed to `transform_soac_map`, which `assert!(args.len() >= 2)` and panicked.
 #[test]
-#[ignore = "known bug: user `def map` panics in AST->TLC SOAC lowering instead of shadowing/erroring"]
-fn user_def_shadowing_soac_map_panics_in_tlc() {
-    let _ = compile_to_tlc_raw(
+fn user_def_shadowing_soac_map_is_a_normal_call() {
+    let program = compile_to_tlc_raw(
         r#"
 def map(x: i32) i32 = x
 def use_it(y: i32) i32 = map(y)
 "#,
     );
+    let body = find_def_body(&program, "use_it");
+    let call = match &body.kind {
+        TermKind::Lambda(lam) => &lam.body,
+        other => panic!("expected `use_it` to be a Lambda, got {:?}", other),
+    };
+    match &call.kind {
+        TermKind::App { func, .. } => assert!(
+            matches!(&func.kind, TermKind::Var(VarRef::Symbol(_))),
+            "callee should be the user `map` symbol, not a SOAC/builtin; got {:?}",
+            func.kind
+        ),
+        other => panic!(
+            "user `def map` should lower to a normal application, not a SOAC; got {:?}",
+            other
+        ),
+    }
 }

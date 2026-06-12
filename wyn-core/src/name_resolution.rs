@@ -279,6 +279,37 @@ fn resolve_declaration(decl: &mut Declaration, module_manager: &ModuleManager) -
 // Side-table builder: classify each Identifier NodeId against the catalog
 // ---------------------------------------------------------------------------
 
+/// Which second-order array combinator a bare identifier denotes. SOACs
+/// are not catalog surface names (and `filter`/`zip`/`reduce_by_index`
+/// are not catalog builtins at all), so they carry their own structural
+/// tag rather than a `BuiltinId`. Recorded by the resolver, so a user
+/// `def map` — top-level or local — that shadows the builtin is never
+/// mistaken for the SOAC by a downstream string match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SoacKind {
+    Map,
+    Reduce,
+    Scan,
+    Filter,
+    Zip,
+    ReduceByIndex,
+}
+
+impl SoacKind {
+    /// The SOAC denoted by an unqualified identifier, if it names one.
+    pub fn from_name(name: &str) -> Option<SoacKind> {
+        Some(match name {
+            "map" => SoacKind::Map,
+            "reduce" => SoacKind::Reduce,
+            "scan" => SoacKind::Scan,
+            "filter" => SoacKind::Filter,
+            "zip" | "zip2" | "zip3" | "zip4" | "zip5" => SoacKind::Zip,
+            "reduce_by_index" => SoacKind::ReduceByIndex,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ResolvedValueRef {
     /// Catalog entry matching this identifier's surface name.
@@ -310,6 +341,12 @@ pub enum ResolvedValueRef {
         /// is looked up at desugar time.
         target_elem: String,
     },
+    /// A second-order array combinator (`map`/`reduce`/…) named by a
+    /// bare, unshadowed identifier. Recorded only when the name resolves
+    /// to the builtin, so TLC lowers a call as a SOAC exactly when the
+    /// frontend resolved one — never when a same-named user `def`
+    /// shadows it.
+    Soac(SoacKind),
 }
 
 /// Side table populated by `build_name_resolution`. Maps Identifier
@@ -338,6 +375,9 @@ impl NameResolution {
                     // Vec constructors don't carry an overload index —
                     // the desugaring picks the catalog entry by name
                     // at to_tlc time. No-op.
+                }
+                ResolvedValueRef::Soac(_) => {
+                    // SOACs aren't overloaded catalog entries. No-op.
                 }
             }
         }
@@ -520,6 +560,13 @@ fn walk_resolution(
                         overload_idx,
                     },
                 );
+            } else if quals.is_empty() {
+                // SOACs (`map`/`reduce`/…) are not catalog surface names.
+                // Record the structural tag here, after the shadowing
+                // check above — so a user `def map` is never tagged.
+                if let Some(kind) = SoacKind::from_name(name) {
+                    nr.values.insert(expr.h.id, ResolvedValueRef::Soac(kind));
+                }
             }
         }
         ExprKind::Application(func, args) => {
