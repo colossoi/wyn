@@ -1,5 +1,20 @@
 //! Per-source DPS dispatch — the shape classifier and emission helpers.
 //!
+//! ## Boundary: output-slot realization (here) vs producer residency (TLC)
+//!
+//! This is the EGIR-side authority for *output-slot realization*: how each
+//! entry-output slot source is written into its storage `OutputView`. It
+//! classifies on **post-expansion EGraph shape** — consuming scan, retargetable
+//! `Map`/`Scan(Fresh)`, fixed-size aggregate, runtime-sized non-retargetable
+//! (clean reject), scalar/vector store — information that doesn't exist in TLC,
+//! which is why it lives here and not in the TLC producer-consumer planner
+//! (`tlc::producer_plan`). That planner owns *producer residency* (fuse /
+//! gather-materialize / scalar-broadcast / filter-variant) before EGIR; this owns
+//! output realization after expansion. The two are deliberately separate
+//! boundaries. The runtime-sized reject below is the same family as
+//! `egir::from_tlc`'s clean-reject of a runtime-sized Composite index — both keep
+//! an unmaterializable shape from reaching the backend as a panic.
+//!
 //! Two entry points, matching the two cases in `realize_outputs`:
 //!
 //!   * `compute_slot_source` — classifies a slot source NodeId and

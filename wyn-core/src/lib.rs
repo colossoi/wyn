@@ -945,9 +945,14 @@ impl TlcEntrySoacsMaterialized {
     }
 }
 
-/// TLC after producer-consumer planning. In this stage the plan is report-only,
-/// so the IR equals `TlcEntrySoacsMaterialized`'s; the typestate marks the
-/// pipeline position the planner owns.
+/// TLC after the producer-consumer planning **diagnostic**. The IR equals
+/// `TlcEntrySoacsMaterialized`'s — this slot only emits the producer
+/// classification report (`producer_plan::report`, debug builds). The
+/// load-bearing planning runs where each producer is actually visible: the
+/// scalar-broadcast and gather decisions inside `parallelize` (the single
+/// authoritative `plan_program` + `lift_gathers::gather_decision`), and the
+/// filter variant via the shared `producer_plan::filter_variant`. See the
+/// `tlc::producer_plan` module doc.
 pub struct TlcProducersPlanned(pub TlcLateInner);
 
 impl std::ops::Deref for TlcProducersPlanned {

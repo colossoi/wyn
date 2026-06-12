@@ -1,17 +1,41 @@
-//! Producer-consumer planning (report-only in this stage).
+//! Producer-consumer planning: one place that classifies, per entry, how each
+//! array/scalar producer is *demanded* by its consumers and which lowering
+//! *strategy* fits — built on the fusion substrate ([`super::producer_graph`] +
+//! [`super::array_semantics`]) rather than re-deriving structure.
 //!
-//! One place that classifies, per entry, how each array/scalar producer is
-//! *demanded* by its consumers and which lowering *strategy* fits — built on
-//! the fusion substrate ([`super::producer_graph`] + [`super::array_semantics`])
-//! rather than re-deriving structure. The scattered deciders this is meant to
-//! consolidate (fusion, `rep_specialize`'s variant choice, `lift_gathers`,
-//! `parallelize`'s scalar-reduce hoist, output retargeting) each own a slice of
-//! this same decision today.
+//! ## What is load-bearing vs analysis
 //!
-//! In this stage the planner only *reports* — it computes a [`Strategy`] per
-//! producer and forwards the IR unchanged, so later stages can take over one
-//! strategy at a time (asserting the planner agrees with the legacy pass before
-//! replacing it).
+//! Producer-residency decisions are made at the pipeline points where each
+//! producer is visible, so for some strategies the planner is the *authority*
+//! and for others a *classifier kept consistent with* the authority that runs
+//! elsewhere:
+//!
+//! * `StoragePrepass(ScalarBroadcast)` — **execution-driving**:
+//!   [`super::parallelize`]'s `lift_compute_scalar_reduces` consumes exactly this
+//!   marking to hoist scalar reduces into prepass entries.
+//! * `BoundedAggregate{capacity}` / `View` — the filter representation choice,
+//!   decided by the shared authority [`filter_variant`]; `rep_specialize` calls
+//!   the same function, so the planner's report and the executor agree by
+//!   construction.
+//! * `StoragePrepass(Gather)` — the *demand* that an array be materialized. The
+//!   residency **authority** is `lift_gathers::gather_decision`, co-located with
+//!   the rewrite machinery it needs and run inside `parallelize` once gather
+//!   producers become visible (post-`normalize_for_gather`); see the boundary
+//!   note below.
+//! * `Fuse` — mirrors `array_semantics::can_fuse`, the seam shared with
+//!   `fusion.rs`. Fusion runs much earlier in the pipeline, so the planner
+//!   classifies fusability but does not *drive* it; `can_fuse` is the one
+//!   decision both share.
+//! * `LeaveAsIs` — no producer-derived decision.
+//!
+//! ## Boundary: producer residency (here) vs output-slot realization (EGIR)
+//!
+//! This planner owns *producer residency* in TLC, before EGIR. A separate,
+//! deliberate boundary — `egir::realize_outputs::dispatch::compute_slot_source`
+//! — owns *output-slot realization*, classifying on post-expansion EGraph shape
+//! (consuming scan / retargetable map-scan / fixed aggregate / runtime-sized
+//! reject / scalar store), which doesn't exist in TLC. The two are distinct
+//! passes; neither subsumes the other.
 //!
 //! The producer graph sees only let-bound and tail producers, and its edges
 //! capture producer→producer array-input links. The two demand signals that
@@ -47,8 +71,11 @@ pub enum Demand {
     Loose,
 }
 
-/// The lowering strategy chosen for one producer. Payload-free in this stage
-/// (report-only); later stages attach the concrete bindings/slots they need.
+/// The lowering strategy classified for one producer. See the module doc for
+/// which variants drive execution (`StoragePrepass(ScalarBroadcast)`) versus
+/// mirror an authority that runs elsewhere (`Bounded`/`View` ↔ [`filter_variant`],
+/// `StoragePrepass(Gather)` ↔ `lift_gathers::gather_decision`, `Fuse` ↔
+/// `can_fuse`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Strategy {
     /// Compose the producer into its single consumer (no materialization).
