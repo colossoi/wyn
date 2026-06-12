@@ -220,6 +220,13 @@ impl<'a> GraphBuilder<'a> {
                     self.binding_map.insert(*name, id);
                 }
 
+                // After `normalize_outputs` the rhs may be an `OutputSlotStore`
+                // wrapping a tuple-slot producer (`let _ = OutputSlotStore(i, let
+                // counts = map(..) in ..)`); descend so those nested producers
+                // become nodes too (the gather executor descends here as well).
+                if let TermKind::OutputSlotStore { value, .. } = &rhs.kind {
+                    self.walk_term(value);
+                }
                 self.walk_term(body);
             }
 
@@ -235,6 +242,11 @@ impl<'a> GraphBuilder<'a> {
                     });
                     self.wire_edges(id);
                 }
+            }
+
+            // A tuple-slot store at the tail — descend into the stored value.
+            TermKind::OutputSlotStore { value, .. } => {
+                self.walk_term(value);
             }
 
             _ => {}

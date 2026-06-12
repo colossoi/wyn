@@ -1753,7 +1753,7 @@ pub fn run(mut program: Program, disable: bool) -> crate::error::Result<Parallel
     // plan, multiple executors.
     program = super::lift_gathers::normalize_for_gather(program);
     let producer_plan = super::producer_plan::plan_program(&program);
-    program = super::lift_gathers::execute_gathers(program);
+    program = super::lift_gathers::execute_gathers(program, &producer_plan);
 
     // Track max binding across every `(set, binding)` the program already
     // uses — including implicit `ArrayExpr::StorageBuffer` bindings

@@ -124,6 +124,17 @@ impl EntryPlan {
     pub fn by_binding(&self, binding: SymbolId) -> Option<&PlannedProducer> {
         self.producers.iter().find(|p| p.binding == Some(binding))
     }
+
+    /// The let-binding symbols this entry's plan marked for gather
+    /// materialization (`StoragePrepass(Gather)`) — the set the gather lift
+    /// executes. `lift_gathers` is the executor of this report.
+    pub fn gather_bindings(&self) -> HashSet<SymbolId> {
+        self.producers
+            .iter()
+            .filter(|p| matches!(p.strategy, Strategy::StoragePrepass(PrepassKind::Gather)))
+            .filter_map(|p| p.binding)
+            .collect()
+    }
 }
 
 /// Plan every entry in `program`. Pure analysis — `program` is not modified.
@@ -138,9 +149,9 @@ pub fn plan_program(program: &Program) -> Vec<EntryPlan> {
         .map(|def| {
             let body = entry_body(&def.body);
             let graph = build_producer_graph(body, &summaries, &sym_to_def);
-            let captured = soac_captured_producers(body, &graph);
+            let per_element = per_element_producers(body, &graph);
             let producers = (0..graph.node_count())
-                .map(|i| plan_node(&graph, ProducerId(i as u32), &captured))
+                .map(|i| plan_node(&graph, ProducerId(i as u32), &per_element))
                 .collect();
             EntryPlan {
                 entry: def.name,
@@ -183,13 +194,14 @@ fn entry_body(body: &Term) -> &Term {
 }
 
 /// Pick the strategy for one producer node from its shape, consumer count, and
-/// whether it is captured per-element into a SOAC lambda.
-fn plan_node(graph: &ProducerGraph, pid: ProducerId, captured: &HashSet<SymbolId>) -> PlannedProducer {
+/// whether it is consumed per element (captured into a SOAC lambda or runtime-
+/// indexed).
+fn plan_node(graph: &ProducerGraph, pid: ProducerId, per_element: &HashSet<SymbolId>) -> PlannedProducer {
     let node = graph.node(pid);
     let produces_array = node.semantics.produces_array();
-    let is_captured = node.binding.map(|s| captured.contains(&s)).unwrap_or(false);
+    let is_per_element = node.binding.map(|s| per_element.contains(&s)).unwrap_or(false);
 
-    let demand = classify_demand(graph, pid, is_captured);
+    let demand = classify_demand(graph, pid, is_per_element);
     let strategy = match (&node.semantics, produces_array, demand) {
         // `filter` is a representation choice, not a prepass: Bounded for a
         // statically-sized input, View for a runtime one — the same
@@ -268,9 +280,10 @@ fn filter_input_type(ae: &ArrayExpr) -> Option<Type<TypeName>> {
 }
 
 /// Classify the dominant demand on a producer.
-fn classify_demand(graph: &ProducerGraph, pid: ProducerId, is_captured: bool) -> Demand {
-    if is_captured {
-        // Captured into a SOAC operator lambda → consumed per element.
+fn classify_demand(graph: &ProducerGraph, pid: ProducerId, is_per_element: bool) -> Demand {
+    if is_per_element {
+        // Captured into a SOAC operator lambda or read via runtime index →
+        // consumed per element.
         return Demand::PerElement;
     }
     let node = graph.node(pid);
@@ -291,17 +304,21 @@ fn classify_demand(graph: &ProducerGraph, pid: ProducerId, is_captured: bool) ->
     Demand::Loose
 }
 
-/// Collect the producer symbols that are captured into some SOAC operator
-/// lambda anywhere in `body` — the per-element-consumed producers.
-fn soac_captured_producers(body: &Term, graph: &ProducerGraph) -> HashSet<SymbolId> {
+/// Collect the producer symbols consumed *per element* anywhere in `body` — a
+/// producer captured into a SOAC operator lambda (`SoacBody::captures`) **or**
+/// read through a runtime `Index`. Both are the gather shape for an array (and a
+/// broadcast for a scalar): the consumer needs one element at a time, so a
+/// computed producer must be materialized to a buffer rather than fused.
+fn per_element_producers(body: &Term, graph: &ProducerGraph) -> HashSet<SymbolId> {
     let producers: HashSet<SymbolId> =
         (0..graph.node_count()).filter_map(|i| graph.node(ProducerId(i as u32)).binding).collect();
     let mut out = HashSet::new();
-    walk_captures(body, &producers, &mut out);
+    walk_per_element(body, &producers, &mut out);
     out
 }
 
-fn walk_captures(term: &Term, producers: &HashSet<SymbolId>, out: &mut HashSet<SymbolId>) {
+fn walk_per_element(term: &Term, producers: &HashSet<SymbolId>, out: &mut HashSet<SymbolId>) {
+    // Captured into a SOAC operator lambda.
     if let TermKind::Soac(soac) = &term.kind {
         for sb in soac_bodies(soac) {
             for (_, _, cap_term) in &sb.captures {
@@ -313,7 +330,16 @@ fn walk_captures(term: &Term, producers: &HashSet<SymbolId>, out: &mut HashSet<S
             }
         }
     }
-    term.for_each_child(&mut |c| walk_captures(c, producers, out));
+    // Read through a runtime `Index` (a constant index fuses in
+    // `static_index_fusion` and isn't a gather; only runtime indexing is).
+    if let TermKind::Index { array, index } = &term.kind {
+        if let TermKind::Var(VarRef::Symbol(s)) = &array.kind {
+            if producers.contains(s) && !matches!(index.kind, TermKind::IntLit(_)) {
+                out.insert(*s);
+            }
+        }
+    }
+    term.for_each_child(&mut |c| walk_per_element(c, producers, out));
 }
 
 /// The operator [`super::SoacBody`]s of a SOAC (every lambda it carries).

@@ -53,12 +53,24 @@ fn compute_entry_indices(program: &Program) -> Vec<usize> {
         .collect()
 }
 
-/// Lift every randomly-indexed computed array out of each compute entry into
-/// a gather pre-pass + a `storage_index` read.
-pub fn run(mut program: Program) -> Program {
+/// Lift every plan-marked gather out of each compute entry into a gather
+/// pre-pass + `storage_index` reads. `producer_plan` is the authority over which
+/// producers gather; this executes its report.
+pub fn run(program: Program) -> Program {
+    let plans = super::producer_plan::plan_program(&program);
+    lift_entries(program, &plans)
+}
+
+/// Execute the plan's gather decisions over every compute entry: build each
+/// entry's `StoragePrepass(Gather)` set from `plans` and materialize it.
+fn lift_entries(mut program: Program, plans: &[super::producer_plan::EntryPlan]) -> Program {
+    let gather_sets: HashMap<SymbolId, HashSet<SymbolId>> =
+        plans.iter().map(|p| (p.entry, p.gather_bindings())).collect();
+    let empty = HashSet::new();
     let mut new_defs: Vec<Def> = Vec::new();
     for idx in compute_entry_indices(&program) {
-        lift_entry(&mut program, idx, &mut new_defs);
+        let set = gather_sets.get(&program.defs[idx].name).unwrap_or(&empty);
+        lift_entry(&mut program, idx, set, &mut new_defs);
     }
     program.defs.extend(new_defs);
     program
@@ -89,16 +101,12 @@ pub fn normalize_for_gather(mut program: Program) -> Program {
 }
 
 /// Executor half of the post-materialize gather lift: materialize each
-/// late-exposed producer into a gather pre-pass + `storage_index` reads. Runs
-/// after [`normalize_for_gather`] has exposed the producers (and, from Stage 7,
-/// after the planner has authorized them).
-pub fn execute_gathers(mut program: Program) -> Program {
-    let mut new_defs: Vec<Def> = Vec::new();
-    for idx in compute_entry_indices(&program) {
-        lift_entry(&mut program, idx, &mut new_defs);
-    }
-    program.defs.extend(new_defs);
-    program
+/// plan-marked late-exposed producer into a gather pre-pass + `storage_index`
+/// reads. Runs after [`normalize_for_gather`] has exposed the producers; `plans`
+/// is the authoritative report (computed in `parallelize::run` between
+/// normalization and here) over which producers gather.
+pub fn execute_gathers(program: Program, plans: &[super::producer_plan::EntryPlan]) -> Program {
+    lift_entries(program, plans)
 }
 
 /// Float a runtime-indexed *nested* elementwise producer to an entry-level
@@ -323,8 +331,10 @@ pub(crate) fn entry_layout(program: &Program, idx: usize) -> Option<(HashMap<Sym
     Some((param_bindings, view_count))
 }
 
-/// Lift gather sites out of a single compute entry at `program.defs[idx]`.
-fn lift_entry(program: &mut Program, idx: usize, new_defs: &mut Vec<Def>) {
+/// Lift the plan-marked gather sites out of a single compute entry at
+/// `program.defs[idx]`. `gather_set` is the entry's `StoragePrepass(Gather)`
+/// bindings from `producer_plan`.
+fn lift_entry(program: &mut Program, idx: usize, gather_set: &HashSet<SymbolId>, new_defs: &mut Vec<Def>) {
     let entry_name = crate::symbol_name_or_bug(&program.symbols, program.defs[idx].name).to_string();
     let body = program.defs[idx].body.clone();
 
@@ -379,6 +389,7 @@ fn lift_entry(program: &mut Program, idx: usize, new_defs: &mut Vec<Def>) {
         body,
         &entry_name,
         &param_bindings,
+        gather_set,
         &mut next_gather,
         &mut added_decls,
         new_defs,
@@ -391,12 +402,17 @@ fn lift_entry(program: &mut Program, idx: usize, new_defs: &mut Vec<Def>) {
     }
 }
 
-/// Walk the outer `Lambda`/`Let` chain, lifting eligible producer lets. Stops
-/// descending at the first non-Lambda/non-Let term (the tail computation).
+/// Walk the outer `Lambda`/`Let` chain, materializing each producer the plan
+/// marked for gather (`gather_set`). Stops descending at the first
+/// non-Lambda/non-Let term (the tail computation). The plan (`producer_plan`) is
+/// the authority over *which* producers gather; this executes that report —
+/// `try_lift` only runs on a binding the plan named, and supplies the mechanics
+/// (rewrite + pre-pass) plus the residency capability check.
 fn lift_in_term(
     term: Term,
     entry_name: &str,
     param_bindings: &HashMap<SymbolId, (u32, u32)>,
+    gather_set: &HashSet<SymbolId>,
     next_gather: &mut u32,
     added_decls: &mut Vec<StorageBindingDecl>,
     new_defs: &mut Vec<Def>,
@@ -409,6 +425,7 @@ fn lift_in_term(
                 *body,
                 entry_name,
                 param_bindings,
+                gather_set,
                 next_gather,
                 added_decls,
                 new_defs,
@@ -429,17 +446,22 @@ fn lift_in_term(
             rhs,
             body,
         } => {
-            if let Some((prepass, decl, rewritten_body)) = try_lift(
-                name,
-                &name_ty,
-                &rhs,
-                *body.clone(),
-                entry_name,
-                param_bindings,
-                *next_gather,
-                new_defs.len(),
-                program,
-            ) {
+            let lifted = if gather_set.contains(&name) {
+                try_lift(
+                    name,
+                    &name_ty,
+                    &rhs,
+                    *body.clone(),
+                    entry_name,
+                    param_bindings,
+                    *next_gather,
+                    new_defs.len(),
+                    program,
+                )
+            } else {
+                None
+            };
+            if let Some((prepass, decl, rewritten_body)) = lifted {
                 *next_gather += 1;
                 new_defs.push(prepass);
                 added_decls.push(decl);
@@ -448,6 +470,7 @@ fn lift_in_term(
                     rewritten_body,
                     entry_name,
                     param_bindings,
+                    gather_set,
                     next_gather,
                     added_decls,
                     new_defs,
@@ -458,6 +481,7 @@ fn lift_in_term(
                 *body,
                 entry_name,
                 param_bindings,
+                gather_set,
                 next_gather,
                 added_decls,
                 new_defs,
@@ -472,6 +496,7 @@ fn lift_in_term(
                     *rhs,
                     entry_name,
                     param_bindings,
+                    gather_set,
                     next_gather,
                     added_decls,
                     new_defs,
@@ -495,6 +520,7 @@ fn lift_in_term(
                 *value,
                 entry_name,
                 param_bindings,
+                gather_set,
                 next_gather,
                 added_decls,
                 new_defs,
