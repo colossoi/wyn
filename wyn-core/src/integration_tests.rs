@@ -1924,6 +1924,30 @@ entry sum(xs: [16]i32) i32 = reduce(i32.(+), 0i32, xs)
     compile_to_spirv(source).expect("a reified operator member should be passable to a HOF");
 }
 
+/// Pre-existing SPIR-V codegen bug (not operator-related — pure infix
+/// reproduces it). A three-deep dependent `let` chain whose final binding is a
+/// *bitwise* op, consumed by a following `if` condition, mislowers with
+/// "place ... has no pointer — its defining instruction was not lowered (or ran
+/// after a consumer)". Narrowing: a two-`let` chain lowers fine, and a
+/// three-`let` chain ending in an *arithmetic* op lowers fine — it takes both
+/// the chain depth and the bitwise final op; the `if` branch contents are
+/// irrelevant. Smells like an EGIR/SSA scheduling issue where the bitwise
+/// place is ordered after its consumer in the conditional.
+#[test]
+#[ignore = "pre-existing: bitwise op at the end of a 3-deep let-chain feeding an if mislowers"]
+fn bitwise_in_deep_let_chain_feeding_if_lowers() {
+    let source = r#"
+#[compute]
+entry t() i32 =
+    let s = 2i32 + 3i32 in
+    let p = s * 4i32 in
+    let x = p & 12i32 in
+    if x < 100i32 then x else 0i32
+"#;
+    compile_to_spirv(source)
+        .expect("bitwise result threaded through a deep let-chain into an if should lower");
+}
+
 /// Verify that nested if/else chains compile to SPIR-V.
 #[test]
 fn test_spirv_nested_if_else_block_params() {
