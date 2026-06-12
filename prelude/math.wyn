@@ -311,26 +311,183 @@ module bool : from_prim with t = bool
 -- | Signed 8-bit integer. Most arithmetic widens internally on
 -- current GPU backends, so prefer `i32` unless you specifically
 -- need 8-bit storage.
-module i8 : (integral with t = i8)
-module i16 : (integral with t = i16)
+module i8 : (integral with t = i8) = {
+  def (+)(a: t, b: t) t = a + b
+  def (-)(a: t, b: t) t = a - b
+  def (*)(a: t, b: t) t = a * b
+  def (/)(a: t, b: t) t = a / b
+  def (%)(a: t, b: t) t = a % b
+  def (**)(a: t, b: t) t = a ** b
+  def (==)(a: t, b: t) bool = a == b
+  def (!=)(a: t, b: t) bool = a != b
+  def (<)(a: t, b: t) bool = a < b
+  def (>)(a: t, b: t) bool = a > b
+  def (<=)(a: t, b: t) bool = a <= b
+  def (>=)(a: t, b: t) bool = a >= b
+  def (&)(a: t, b: t) t = a & b
+  def (|)(a: t, b: t) t = a | b
+  def (^)(a: t, b: t) t = a ^ b
+  def (<<)(a: t, b: t) t = a << b
+  def (>>)(a: t, b: t) t = a >> b
+}
+module i16 : (integral with t = i16) = {
+  def (+)(a: t, b: t) t = a + b
+  def (-)(a: t, b: t) t = a - b
+  def (*)(a: t, b: t) t = a * b
+  def (/)(a: t, b: t) t = a / b
+  def (%)(a: t, b: t) t = a % b
+  def (**)(a: t, b: t) t = a ** b
+  def (==)(a: t, b: t) bool = a == b
+  def (!=)(a: t, b: t) bool = a != b
+  def (<)(a: t, b: t) bool = a < b
+  def (>)(a: t, b: t) bool = a > b
+  def (<=)(a: t, b: t) bool = a <= b
+  def (>=)(a: t, b: t) bool = a >= b
+  def (&)(a: t, b: t) t = a & b
+  def (|)(a: t, b: t) t = a | b
+  def (^)(a: t, b: t) t = a ^ b
+  def (<<)(a: t, b: t) t = a << b
+  def (>>)(a: t, b: t) t = a >> b
+}
 
 -- | The default integer type. Pick this unless you need a specific
 -- width — `iota`, range syntax `a..<b`, and array indexing all use
 -- `i32`.
-module i32 : (integral with t = i32)
-module i64 : (integral with t = i64)
-module u8 : (integral with t = u8)
-module u16 : (integral with t = u16)
+module i32 : (integral with t = i32) = {
+  def (+)(a: t, b: t) t = a + b
+  def (-)(a: t, b: t) t = a - b
+  def (*)(a: t, b: t) t = a * b
+  def (/)(a: t, b: t) t = a / b
+  def (%)(a: t, b: t) t = a % b
+  def (**)(a: t, b: t) t = a ** b
+  def (==)(a: t, b: t) bool = a == b
+  def (!=)(a: t, b: t) bool = a != b
+  def (<)(a: t, b: t) bool = a < b
+  def (>)(a: t, b: t) bool = a > b
+  def (<=)(a: t, b: t) bool = a <= b
+  def (>=)(a: t, b: t) bool = a >= b
+  def (&)(a: t, b: t) t = a & b
+  def (|)(a: t, b: t) t = a | b
+  def (^)(a: t, b: t) t = a ^ b
+  def (<<)(a: t, b: t) t = a << b
+  def (>>)(a: t, b: t) t = a >> b
+}
+module i64 : (integral with t = i64) = {
+  def (+)(a: t, b: t) t = a + b
+  def (-)(a: t, b: t) t = a - b
+  def (*)(a: t, b: t) t = a * b
+  def (/)(a: t, b: t) t = a / b
+  def (%)(a: t, b: t) t = a % b
+  def (**)(a: t, b: t) t = a ** b
+  def (==)(a: t, b: t) bool = a == b
+  def (!=)(a: t, b: t) bool = a != b
+  def (<)(a: t, b: t) bool = a < b
+  def (>)(a: t, b: t) bool = a > b
+  def (<=)(a: t, b: t) bool = a <= b
+  def (>=)(a: t, b: t) bool = a >= b
+  def (&)(a: t, b: t) t = a & b
+  def (|)(a: t, b: t) t = a | b
+  def (^)(a: t, b: t) t = a ^ b
+  def (<<)(a: t, b: t) t = a << b
+  def (>>)(a: t, b: t) t = a >> b
+}
+module u8 : (integral with t = u8) = {
+  def (+)(a: t, b: t) t = a + b
+  def (-)(a: t, b: t) t = a - b
+  def (*)(a: t, b: t) t = a * b
+  def (/)(a: t, b: t) t = a / b
+  def (%)(a: t, b: t) t = a % b
+  def (**)(a: t, b: t) t = a ** b
+  def (==)(a: t, b: t) bool = a == b
+  def (!=)(a: t, b: t) bool = a != b
+  def (<)(a: t, b: t) bool = a < b
+  def (>)(a: t, b: t) bool = a > b
+  def (<=)(a: t, b: t) bool = a <= b
+  def (>=)(a: t, b: t) bool = a >= b
+  def (&)(a: t, b: t) t = a & b
+  def (|)(a: t, b: t) t = a | b
+  def (^)(a: t, b: t) t = a ^ b
+  def (<<)(a: t, b: t) t = a << b
+  def (>>)(a: t, b: t) t = a >> b
+}
+module u16 : (integral with t = u16) = {
+  def (+)(a: t, b: t) t = a + b
+  def (-)(a: t, b: t) t = a - b
+  def (*)(a: t, b: t) t = a * b
+  def (/)(a: t, b: t) t = a / b
+  def (%)(a: t, b: t) t = a % b
+  def (**)(a: t, b: t) t = a ** b
+  def (==)(a: t, b: t) bool = a == b
+  def (!=)(a: t, b: t) bool = a != b
+  def (<)(a: t, b: t) bool = a < b
+  def (>)(a: t, b: t) bool = a > b
+  def (<=)(a: t, b: t) bool = a <= b
+  def (>=)(a: t, b: t) bool = a >= b
+  def (&)(a: t, b: t) t = a & b
+  def (|)(a: t, b: t) t = a | b
+  def (^)(a: t, b: t) t = a ^ b
+  def (<<)(a: t, b: t) t = a << b
+  def (>>)(a: t, b: t) t = a >> b
+}
 
 -- | Unsigned 32-bit integer. Used for bit-level work, hash state,
 -- and texture/buffer indices that cross the host boundary.
-module u32 : (integral with t = u32)
-module u64 : (integral with t = u64)
+module u32 : (integral with t = u32) = {
+  def (+)(a: t, b: t) t = a + b
+  def (-)(a: t, b: t) t = a - b
+  def (*)(a: t, b: t) t = a * b
+  def (/)(a: t, b: t) t = a / b
+  def (%)(a: t, b: t) t = a % b
+  def (**)(a: t, b: t) t = a ** b
+  def (==)(a: t, b: t) bool = a == b
+  def (!=)(a: t, b: t) bool = a != b
+  def (<)(a: t, b: t) bool = a < b
+  def (>)(a: t, b: t) bool = a > b
+  def (<=)(a: t, b: t) bool = a <= b
+  def (>=)(a: t, b: t) bool = a >= b
+  def (&)(a: t, b: t) t = a & b
+  def (|)(a: t, b: t) t = a | b
+  def (^)(a: t, b: t) t = a ^ b
+  def (<<)(a: t, b: t) t = a << b
+  def (>>)(a: t, b: t) t = a >> b
+}
+module u64 : (integral with t = u64) = {
+  def (+)(a: t, b: t) t = a + b
+  def (-)(a: t, b: t) t = a - b
+  def (*)(a: t, b: t) t = a * b
+  def (/)(a: t, b: t) t = a / b
+  def (%)(a: t, b: t) t = a % b
+  def (**)(a: t, b: t) t = a ** b
+  def (==)(a: t, b: t) bool = a == b
+  def (!=)(a: t, b: t) bool = a != b
+  def (<)(a: t, b: t) bool = a < b
+  def (>)(a: t, b: t) bool = a > b
+  def (<=)(a: t, b: t) bool = a <= b
+  def (>=)(a: t, b: t) bool = a >= b
+  def (&)(a: t, b: t) t = a & b
+  def (|)(a: t, b: t) t = a | b
+  def (^)(a: t, b: t) t = a ^ b
+  def (<<)(a: t, b: t) t = a << b
+  def (>>)(a: t, b: t) t = a >> b
+}
 
 -- | 64-bit float. **Not supported by every backend** — WGSL has
 -- no `f64`, and many SPIR-V profiles require the `Float64`
 -- capability. Use `f32` by default.
-module f64 : (float with t = f64 with int_t = u64)
+module f64 : (float with t = f64 with int_t = u64) = {
+  def (+)(a: t, b: t) t = a + b
+  def (-)(a: t, b: t) t = a - b
+  def (*)(a: t, b: t) t = a * b
+  def (/)(a: t, b: t) t = a / b
+  def (%)(a: t, b: t) t = a % b
+  def (**)(a: t, b: t) t = a ** b
+  def (==)(a: t, b: t) bool = a == b
+  def (!=)(a: t, b: t) bool = a != b
+  def (<)(a: t, b: t) bool = a < b
+  def (>)(a: t, b: t) bool = a > b
+  def (<=)(a: t, b: t) bool = a <= b
+  def (>=)(a: t, b: t) bool = a >= b
+}
 
 -- | 32-bit float — the workhorse of GPU computation. Implementations
 -- of operations not defined here are provided by the backend
@@ -338,6 +495,19 @@ module f64 : (float with t = f64 with int_t = u64)
 module f32 : (float with t = f32 with int_t = u32) = {
   type t = f32
   type int_t = u32
+
+  def (+)(a: t, b: t) t = a + b
+  def (-)(a: t, b: t) t = a - b
+  def (*)(a: t, b: t) t = a * b
+  def (/)(a: t, b: t) t = a / b
+  def (%)(a: t, b: t) t = a % b
+  def (**)(a: t, b: t) t = a ** b
+  def (==)(a: t, b: t) bool = a == b
+  def (!=)(a: t, b: t) bool = a != b
+  def (<)(a: t, b: t) bool = a < b
+  def (>)(a: t, b: t) bool = a > b
+  def (<=)(a: t, b: t) bool = a <= b
+  def (>=)(a: t, b: t) bool = a >= b
 
   def i8(x: i8) t = _w_intrinsic_f32_from_i8(x)
   def i16(x: i16) t = _w_intrinsic_f32_from_i16(x)
@@ -403,4 +573,17 @@ module f32 : (float with t = f32 with int_t = u32) = {
 -- | 16-bit float. Backend support is uneven — SPIR-V needs the
 -- `Float16` capability; WGSL needs `shader-f16`. Use `f32` if you
 -- can.
-module f16 : (float with t = f16 with int_t = u16)
+module f16 : (float with t = f16 with int_t = u16) = {
+  def (+)(a: t, b: t) t = a + b
+  def (-)(a: t, b: t) t = a - b
+  def (*)(a: t, b: t) t = a * b
+  def (/)(a: t, b: t) t = a / b
+  def (%)(a: t, b: t) t = a % b
+  def (**)(a: t, b: t) t = a ** b
+  def (==)(a: t, b: t) bool = a == b
+  def (!=)(a: t, b: t) bool = a != b
+  def (<)(a: t, b: t) bool = a < b
+  def (>)(a: t, b: t) bool = a > b
+  def (<=)(a: t, b: t) bool = a <= b
+  def (>=)(a: t, b: t) bool = a >= b
+}

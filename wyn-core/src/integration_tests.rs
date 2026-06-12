@@ -1886,6 +1886,44 @@ entry e() [1]f32 = [g(256)[3]]
     compile_to_spirv(source).expect("returning a runtime-sized array should lower to SPIR-V");
 }
 
+/// The reified operator members on the builtin numeric modules — `i32.(+)`,
+/// `f32.(<)`, `u32.(<<)`, etc. — resolve as real module functions and lower.
+/// The `(op)` form is the function reification of the primitive infix BinOp;
+/// its body is the BinOp itself, so it lowers through the same path as `a + b`.
+#[test]
+fn reified_numeric_operators_lower_to_spirv() {
+    let source = r#"
+#[compute]
+entry arith() i32 =
+    i32.(+)(i32.(*)(i32.(-)(10i32, 3i32), 4i32), i32.(%)(9i32, 5i32))
+#[compute]
+entry bits() u32 = u32.(>>)(u32.(<<)(u32.(^)(u32.(&)(255u32, 15u32), 8u32), 2u32), 1u32)
+#[compute]
+entry cmp(x: f32, y: f32) i32 =
+    let a = if f32.(==)(x, y) then 1i32 else 0i32 in
+    let b = if f32.(!=)(x, y) then 2i32 else 0i32 in
+    let c = if f32.(<)(x, y) then 4i32 else 0i32 in
+    let d = if f32.(>)(x, y) then 8i32 else 0i32 in
+    let e = if f32.(<=)(x, y) then 16i32 else 0i32 in
+    let f = if f32.(>=)(x, y) then 32i32 else 0i32 in
+    a + b + c + d + e + f
+"#;
+    compile_to_spirv(source).expect("reified numeric operator members should lower to SPIR-V");
+}
+
+/// The payoff of reifying operators into real module members: an operator can
+/// be passed as a first-class value to a higher-order function (Wyn forbids
+/// partial application, but operator members are saturated function references,
+/// which it does support). Before reification `i32.(+)` had no referent.
+#[test]
+fn reified_operator_passed_as_first_class_value() {
+    let source = r#"
+#[compute]
+entry sum(xs: [16]i32) i32 = reduce(i32.(+), 0i32, xs)
+"#;
+    compile_to_spirv(source).expect("a reified operator member should be passable to a HOF");
+}
+
 /// Verify that nested if/else chains compile to SPIR-V.
 #[test]
 fn test_spirv_nested_if_else_block_params() {
