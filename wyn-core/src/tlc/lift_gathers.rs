@@ -40,10 +40,9 @@ use crate::interface::{EntryParamBindingKind, StorageBindingDecl, StorageRole};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
 
-/// Lift every randomly-indexed computed array out of each compute entry into
-/// a gather pre-pass + a `storage_index` read.
-pub fn run(mut program: Program) -> Program {
-    let entry_indices: Vec<usize> = program
+/// Indices of every compute entry def in `program`.
+fn compute_entry_indices(program: &Program) -> Vec<usize> {
+    program
         .defs
         .iter()
         .enumerate()
@@ -51,44 +50,51 @@ pub fn run(mut program: Program) -> Program {
             DefMeta::EntryPoint(decl) if decl.entry_type.is_compute() => Some(i),
             _ => None,
         })
-        .collect();
+        .collect()
+}
 
+/// Lift every randomly-indexed computed array out of each compute entry into
+/// a gather pre-pass + a `storage_index` read.
+pub fn run(mut program: Program) -> Program {
     let mut new_defs: Vec<Def> = Vec::new();
-    for idx in entry_indices {
+    for idx in compute_entry_indices(&program) {
         lift_entry(&mut program, idx, &mut new_defs);
     }
     program.defs.extend(new_defs);
     program
 }
 
-/// Re-run the gather lift after `inline_small` / `materialize_entry_soacs`.
+/// Visibility normalization for post-materialize gather planning — the first
+/// half of the post-`inline_small` / `materialize_entry_soacs` gather lift.
 ///
 /// The pre-defunc [`run`] can't see a runtime-sized array produced inside a
 /// helper — the producer only surfaces in the entry body once inlining exposes
-/// it (the ordering hazard). This second pass catches those late producers (a
-/// multi-consumer or randomly-indexed computed array that would otherwise reach
-/// the backend as an unsized Composite and panic).
+/// it (the ordering hazard). Inlining a consumer leaves trivial alias lets —
+/// `f32.sum(xs)` becomes `let p = xs in reduce(.., p)` — and [`rewrite_uses`]
+/// bails on the bare `Var(xs)` in `p`'s RHS; a runtime-indexed *nested* producer
+/// (`map(.., src)[j]`) isn't let-bound at all. This pass collapses those aliases
+/// and floats nested indexed producers to entry-level lets, so a producer-plan
+/// computed *after* it can see and authorize every late-exposed producer. It is
+/// a no-op for entries fully lifted pre-defunc (only storage reads remain).
 ///
-/// Inlining a consumer leaves trivial alias lets — `f32.sum(xs)` becomes
-/// `let p = xs in reduce(.., p)` — and [`rewrite_uses`] bails on the bare
-/// `Var(xs)` in `p`'s RHS. We collapse those aliases first so each consumer
-/// references the producer directly. Entries fully lifted pre-defunc have only
-/// storage reads left, so this is a no-op for them.
-pub fn run_post_materialize(mut program: Program) -> Program {
-    let entry_indices: Vec<usize> = program
-        .defs
-        .iter()
-        .enumerate()
-        .filter_map(|(i, d)| match &d.meta {
-            DefMeta::EntryPoint(decl) if decl.entry_type.is_compute() => Some(i),
-            _ => None,
-        })
-        .collect();
-
-    let mut new_defs: Vec<Def> = Vec::new();
-    for idx in entry_indices {
+/// Split from the executor [`execute_gathers`] precisely so the authoritative
+/// `producer_plan::plan_program` runs *between* them — normalization makes the
+/// producers visible, the plan authorizes them, the executor materializes them.
+pub fn normalize_for_gather(mut program: Program) -> Program {
+    for idx in compute_entry_indices(&program) {
         program.defs[idx].body = inline_trivial_aliases(program.defs[idx].body.clone());
         float_nested_indexed_producers(&mut program, idx);
+    }
+    program
+}
+
+/// Executor half of the post-materialize gather lift: materialize each
+/// late-exposed producer into a gather pre-pass + `storage_index` reads. Runs
+/// after [`normalize_for_gather`] has exposed the producers (and, from Stage 7,
+/// after the planner has authorized them).
+pub fn execute_gathers(mut program: Program) -> Program {
+    let mut new_defs: Vec<Def> = Vec::new();
+    for idx in compute_entry_indices(&program) {
         lift_entry(&mut program, idx, &mut new_defs);
     }
     program.defs.extend(new_defs);
@@ -346,7 +352,7 @@ fn lift_entry(program: &mut Program, idx: usize, new_defs: &mut Vec<Def>) {
     // Gather buffers sit above the entry's input views and outputs, and above
     // any gather Input decls a prior lift run already attached to this entry:
     // the gather lift runs once pre-defunc (`run`) and again post-materialize
-    // (`run_post_materialize`), when helper-inlined producers first become
+    // (`execute_gathers`), when helper-inlined producers first become
     // visible — the second run must not reuse the first run's binding numbers.
     let existing_max = decl
         .storage_bindings

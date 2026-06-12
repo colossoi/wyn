@@ -1037,17 +1037,18 @@ fn lift_graphical_invariant_soacs(
 /// multi-stages each into its own two-phase reduce pipeline.
 fn lift_compute_scalar_reduces(
     program: &mut Program,
+    plans: &[super::producer_plan::EntryPlan],
     next_binding: &mut u32,
     prepass_result_bindings: &mut HashMap<SymbolId, BindingRef>,
     term_ids: &mut TermIdSource,
 ) {
-    use super::producer_plan::{PrepassKind, Strategy, plan_program};
+    use super::producer_plan::{PrepassKind, Strategy};
 
-    // The planner is the decider. Collect, per entry, the let-binding symbols
-    // it marked `ScalarBroadcast`.
-    let plans = plan_program(program);
+    // The planner is the decider. The plan is computed once in `run` (the single
+    // authority, shared with the gather executor); collect, per entry, the
+    // let-binding symbols it marked `ScalarBroadcast`.
     let mut to_hoist: HashMap<SymbolId, HashSet<SymbolId>> = HashMap::new();
-    for plan in &plans {
+    for plan in plans {
         for p in &plan.producers {
             if let (Some(b), Strategy::StoragePrepass(PrepassKind::ScalarBroadcast)) =
                 (p.binding, p.strategy)
@@ -1738,11 +1739,21 @@ pub fn run(mut program: Program, disable: bool) -> crate::error::Result<Parallel
     // materializing a whole runtime-sized buffer.
     program = super::static_index_fusion::run(program);
 
-    // Second gather lift, now post-materialize: catch runtime-sized computed
-    // arrays produced inside a helper that only became visible after inlining
-    // (the ordering hazard `lift_gathers` can't see pre-defunc). Runs before
-    // `next_binding` is computed so the new gather buffers are accounted for.
-    program = super::lift_gathers::run_post_materialize(program);
+    // Post-materialize gather handling, in three steps with the producer-consumer
+    // planner as the single authority between normalization and execution:
+    //   1. normalize — collapse alias lets and float nested indexed producers, so
+    //      every late-exposed (helper-inlined) runtime-sized producer is visible
+    //      as an entry-level let;
+    //   2. plan — the one authoritative `plan_program`, now able to see and
+    //      classify those producers;
+    //   3. execute — materialize the gathers (catching the ordering hazard
+    //      `lift_gathers` can't see pre-defunc), before `next_binding` is computed
+    //      so the new gather buffers are accounted for.
+    // The same `producer_plan` also drives the scalar-broadcast hoist below — one
+    // plan, multiple executors.
+    program = super::lift_gathers::normalize_for_gather(program);
+    let producer_plan = super::producer_plan::plan_program(&program);
+    program = super::lift_gathers::execute_gathers(program);
 
     // Track max binding across every `(set, binding)` the program already
     // uses — including implicit `ArrayExpr::StorageBuffer` bindings
@@ -1782,6 +1793,7 @@ pub fn run(mut program: Program, disable: bool) -> crate::error::Result<Parallel
     // and `prepass_result_bindings` channel as the graphical lift above.
     lift_compute_scalar_reduces(
         &mut program,
+        &producer_plan,
         &mut next_binding,
         &mut prepass_result_bindings,
         &mut term_ids,
