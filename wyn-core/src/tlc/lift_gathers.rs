@@ -994,32 +994,19 @@ fn build_gather_prepass(
     let elem_ty = crate::types::array_elem(&result_ty)
         .cloned()
         .expect("try_lift's is_runtime_sized_array(name_ty) gate guarantees an array elem");
-    let required_params: Vec<super::parallelize::RequiredParam> = captured_inputs
-        .iter()
-        .map(|(s, ty)| super::parallelize::RequiredParam {
-            sym: *s,
-            ty: ty.clone(),
-            attr: None,
-            binding: None,
-        })
-        .collect();
+    // The producer's result is pinned to `binding` via an Output decl; its
+    // captured inputs + chained intermediates share the scalar pre-pass shape.
+    // (Chained length policy was attached when each was created; the descriptor
+    // uses that canonical entry, so Input decls here carry `length: None`.)
+    let (required_params, chained_decls) =
+        super::parallelize::prepass_inputs(captured_inputs, chained_intermediates);
     let mut storage_bindings = vec![StorageBindingDecl {
         binding: BindingRef::new(binding.0, binding.1),
         role: StorageRole::Output,
         elem_ty,
         length,
     }];
-    for (set, binding, elem_ty) in chained_intermediates {
-        storage_bindings.push(StorageBindingDecl {
-            binding: BindingRef::new(*set, *binding),
-            role: StorageRole::Input,
-            elem_ty: elem_ty.clone(),
-            // Length policy was already attached to this binding by whichever
-            // earlier `try_lift` created it; the descriptor uses that
-            // canonical entry and falls back if absent (Phase 2 plumbing).
-            length: None,
-        });
-    }
+    storage_bindings.extend(chained_decls);
     make_entry_def(
         &name,
         producer,

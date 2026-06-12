@@ -1255,12 +1255,40 @@ fn hoist_one_scalar_reduce(
     )
 }
 
+/// The shared pre-pass storage shape: each captured entry-param input array
+/// becomes a view `RequiredParam` (positional binding alignment), and each
+/// chained storage intermediate (a buffer the body reads directly) an Input
+/// `StorageBindingDecl`. Used by the scalar-reduce hoist here and by
+/// `lift_gathers::build_gather_prepass` (which prepends its own Output decl).
+pub(crate) fn prepass_inputs(
+    captured_inputs: &[(SymbolId, Type<TypeName>)],
+    chained_intermediates: &[(u32, u32, Type<TypeName>)],
+) -> (Vec<RequiredParam>, Vec<interface::StorageBindingDecl>) {
+    let required_params = captured_inputs
+        .iter()
+        .map(|(s, ty)| RequiredParam {
+            sym: *s,
+            ty: ty.clone(),
+            attr: None,
+            binding: None,
+        })
+        .collect();
+    let input_decls = chained_intermediates
+        .iter()
+        .map(|(set, binding, elem_ty)| interface::StorageBindingDecl {
+            binding: BindingRef::new(*set, *binding),
+            role: interface::StorageRole::Input,
+            elem_ty: elem_ty.clone(),
+            length: None,
+        })
+        .collect();
+    (required_params, input_decls)
+}
+
 /// Build the `<entry>_prepass_<n>` compute entry whose body is the scalar
-/// reduce, re-declaring its entry-param input arrays as view params and its
-/// chained storage intermediates as Input decls. Unlike
-/// `lift_gathers::build_gather_prepass`, the scalar result is pinned through
-/// `prepass_result_bindings` (registered by the caller), so no Output decl is
-/// emitted here.
+/// reduce. Unlike `lift_gathers::build_gather_prepass`, the scalar result is
+/// pinned through `prepass_result_bindings` (registered by the caller), so no
+/// Output decl is emitted here.
 fn build_scalar_prepass_def(
     name: &str,
     soac_term: Term,
@@ -1270,24 +1298,7 @@ fn build_scalar_prepass_def(
     program: &mut Program,
     term_ids: &mut TermIdSource,
 ) -> Def {
-    let required_params: Vec<RequiredParam> = captured_inputs
-        .iter()
-        .map(|(s, ty)| RequiredParam {
-            sym: *s,
-            ty: ty.clone(),
-            attr: None,
-            binding: None,
-        })
-        .collect();
-    let storage_bindings: Vec<interface::StorageBindingDecl> = chained_intermediates
-        .iter()
-        .map(|(set, binding, elem_ty)| interface::StorageBindingDecl {
-            binding: BindingRef::new(*set, *binding),
-            role: interface::StorageRole::Input,
-            elem_ty: elem_ty.clone(),
-            length: None,
-        })
-        .collect();
+    let (required_params, storage_bindings) = prepass_inputs(captured_inputs, chained_intermediates);
     make_entry_def(
         name,
         soac_term,
