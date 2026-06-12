@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #
-# Compile + validate the rng library demos, and (with --run) execute them on
-# the GPU via tephra. Hand-coded commands, one block per demo — when you add a
-# driver to lib/testfiles/, add its commands here.
+# Compile + validate the rng/dist library testfiles, and (with --run) execute
+# them on the GPU via tephra to eyeball the output. Hand-coded commands, one
+# block per driver — when you add a driver to lib/testfiles/, add its commands
+# here. The unit-test suite is separate: run it with `cargo test`.
 #
 # Usage:  scripts/run_tests.sh [--run]
 set -e
@@ -17,13 +18,13 @@ WYN=./target/debug/wyn
 
 echo "== compile + validate =="
 
-$WYN compile lib/testfiles/fasthash_demo.wyn -o /tmp/fasthash_demo.spv
-spirv-val /tmp/fasthash_demo.spv
-$WYN compile lib/testfiles/fasthash_demo.wyn -t wgsl -o /tmp/fasthash_demo.wgsl
+$WYN compile lib/testfiles/dist_demo.wyn -o /tmp/dist_demo.spv
+spirv-val /tmp/dist_demo.spv
+$WYN compile lib/testfiles/dist_demo.wyn -t wgsl -o /tmp/dist_demo.wgsl
 
-$WYN compile lib/testfiles/threefry_demo.wyn -o /tmp/threefry_demo.spv
-spirv-val /tmp/threefry_demo.spv
-$WYN compile lib/testfiles/threefry_demo.wyn -t wgsl -o /tmp/threefry_demo.wgsl
+$WYN compile lib/testfiles/stats_normal.wyn -o /tmp/stats_normal.spv
+spirv-val /tmp/stats_normal.spv
+$WYN compile lib/testfiles/stats_normal.wyn -t wgsl -o /tmp/stats_normal.wgsl
 
 echo "compile + validate: OK"
 
@@ -36,5 +37,5 @@ echo "== tephra run (needs a Vulkan device) =="
 (cd extra/tephra && cargo build)
 TEPHRA=./extra/tephra/target/debug/tephra
 
-$TEPHRA run /tmp/fasthash_demo.spv --entry fasthash_fill -n 256 -w 64 --input iota
-$TEPHRA run /tmp/threefry_demo.spv --entry threefry_fill -n 256 -w 64 --input iota
+$TEPHRA run /tmp/dist_demo.spv --entry dist_normal_fill -n 256 -w 64
+$TEPHRA run /tmp/stats_normal.spv --entry stats_normal -n 1 -w 1
