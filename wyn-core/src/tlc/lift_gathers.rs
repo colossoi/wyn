@@ -88,10 +88,164 @@ pub fn run_post_materialize(mut program: Program) -> Program {
     let mut new_defs: Vec<Def> = Vec::new();
     for idx in entry_indices {
         program.defs[idx].body = inline_trivial_aliases(program.defs[idx].body.clone());
+        float_nested_indexed_producers(&mut program, idx);
         lift_entry(&mut program, idx, &mut new_defs);
     }
     program.defs.extend(new_defs);
     program
+}
+
+/// Float a runtime-indexed *nested* elementwise producer to an entry-level
+/// `let`, so `lift_entry`'s let-chain walk can materialize it.
+///
+/// `Index(map(.., src), j)` with a non-literal `j` has no fused form (only
+/// constant indices fuse, in `static_index_fusion`), and the producer isn't
+/// let-bound, so the gather lift never sees it and the runtime-sized array
+/// panics in the backend. Rewrite `Index(<producer>, j)` →
+/// `let t = <producer> in Index(Var(t), j)` with `t` pulled to the top of the
+/// entry body. Only producers whose free vars are all entry params are floated
+/// — those are safe to evaluate at entry top; anything referencing an
+/// inner-bound var is left as-is (a remaining gap, not a miscompile).
+fn float_nested_indexed_producers(program: &mut Program, idx: usize) {
+    let (params, _) = peel_lambda_params(&program.defs[idx].body);
+    let entry_params: HashSet<SymbolId> = params.iter().map(|(s, _)| *s).collect();
+
+    // Pass 1 (immutable): collect hoistable `Index` sites by TermId.
+    let body = program.defs[idx].body.clone();
+    let mut sites: Vec<(super::TermId, Term)> = Vec::new();
+    collect_float_sites(
+        &body,
+        &entry_params,
+        &program.symbols,
+        &program.def_syms,
+        &mut sites,
+    );
+    if sites.is_empty() {
+        return;
+    }
+
+    // Allocate a fresh binder per site, then rewrite each site's `Index` array
+    // to `Var(fresh)` and wrap the body in the producer `let`s.
+    let mut ids = TermIdSource::new();
+    let floated: Vec<(super::TermId, SymbolId, Term)> = sites
+        .into_iter()
+        .enumerate()
+        .map(|(i, (tid, producer))| {
+            let sym = program.symbols.alloc(format!("_float_{}_{}", idx, i));
+            (tid, sym, producer)
+        })
+        .collect();
+    let id_to_sym: HashMap<super::TermId, SymbolId> =
+        floated.iter().map(|(tid, sym, _)| (*tid, *sym)).collect();
+
+    let mut wrapped = rewrite_float_sites(body, &id_to_sym, &mut ids);
+    for (_, sym, producer) in floated.into_iter().rev() {
+        let name_ty = producer.ty.clone();
+        let span = producer.span;
+        let body_ty = wrapped.ty.clone();
+        wrapped = Term {
+            id: ids.next_id(),
+            ty: body_ty,
+            span,
+            kind: TermKind::Let {
+                name: sym,
+                name_ty,
+                rhs: Box::new(producer),
+                body: Box::new(wrapped),
+            },
+        };
+    }
+    program.defs[idx].body = wrapped;
+}
+
+/// Fully inline every `let x = v in body` into `body[x := v]`. Used only on a
+/// small floated producer term, so the per-use duplication of `v` is bounded.
+fn inline_lets(term: Term) -> Term {
+    match term.kind {
+        TermKind::Let { name, rhs, body, .. } => {
+            let rhs = inline_lets(*rhs);
+            let body = inline_lets(*body);
+            subst_term(body, name, &rhs)
+        }
+        _ => term.map_children(&mut inline_lets),
+    }
+}
+
+/// Replace every `Var(name)` in `term` with a clone of `repl`. `name` is one
+/// globally-unique SymbolId, so the substitution needs no shadowing check.
+fn subst_term(term: Term, name: SymbolId, repl: &Term) -> Term {
+    if let TermKind::Var(VarRef::Symbol(s)) = &term.kind {
+        if *s == name {
+            return repl.clone();
+        }
+    }
+    term.map_children(&mut |c| subst_term(c, name, repl))
+}
+
+/// True if `t`, after peeling enclosing `let`s, is a directly-nested
+/// `Soac(Map)` — an elementwise producer that isn't reached through a `Var`.
+fn peels_to_map(mut t: &Term) -> bool {
+    loop {
+        match &t.kind {
+            TermKind::Let { body, .. } => t = body,
+            TermKind::Soac(SoacOp::Map { .. }) => return true,
+            _ => return false,
+        }
+    }
+}
+
+fn collect_float_sites(
+    term: &Term,
+    entry_params: &HashSet<SymbolId>,
+    symbols: &SymbolTable,
+    def_syms: &HashMap<String, SymbolId>,
+    out: &mut Vec<(super::TermId, Term)>,
+) {
+    if let TermKind::Index { array, index } = &term.kind {
+        // Constant indices are handled by `static_index_fusion`; only runtime
+        // indices into a directly-nested producer need materialization here.
+        let runtime_index = !matches!(index.kind, TermKind::IntLit(_));
+        if runtime_index && peels_to_map(array) {
+            // Inline the producer's internal `let`s so the floated `let t =`
+            // binds a bare `Soac(Map)` directly (what `try_lift` recognizes) and
+            // the map carries no free scalar binders (e.g. `let n = 256`) that
+            // would defeat the gather lift's free-var contract.
+            let producer = inline_lets((**array).clone());
+            let frees = free_symbol_vars(&producer, symbols, def_syms);
+            if frees.iter().all(|(s, _)| entry_params.contains(s)) {
+                out.push((term.id, producer));
+            }
+        }
+    }
+    term.for_each_child(&mut |c| collect_float_sites(c, entry_params, symbols, def_syms, out));
+}
+
+fn rewrite_float_sites(
+    term: Term,
+    id_to_sym: &HashMap<super::TermId, SymbolId>,
+    ids: &mut TermIdSource,
+) -> Term {
+    let term = term.map_children(&mut |c| rewrite_float_sites(c, id_to_sym, ids));
+    if let TermKind::Index { array, index } = &term.kind {
+        if let Some(&sym) = id_to_sym.get(&term.id) {
+            let var = Term {
+                id: ids.next_id(),
+                ty: array.ty.clone(),
+                span: array.span,
+                kind: TermKind::Var(VarRef::Symbol(sym)),
+            };
+            return Term {
+                id: term.id,
+                ty: term.ty.clone(),
+                span: term.span,
+                kind: TermKind::Index {
+                    array: Box::new(var),
+                    index: index.clone(),
+                },
+            };
+        }
+    }
+    term
 }
 
 /// Collapse `let p = q in body` where `q` is a bare `Var` — an alias inlining

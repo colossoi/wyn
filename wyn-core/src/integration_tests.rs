@@ -1865,15 +1865,14 @@ entry e() [1]f32 = [g(256)[3]]
     compile_to_spirv(source).expect("returning a runtime-sized array should lower to SPIR-V");
 }
 
-/// Guard for the broader gap static-index fusion must NOT silently absorb: a
-/// *runtime* index into a nested runtime-sized producer (`g(256)[j]`). Fusion is
-/// scoped to literal indices, so a known slot collapses to a scalar but a
-/// runtime slot does not — it needs the producer materialized to a buffer first
-/// (Stage 4c). Asserts the eventual goal (it should lower); ignored until 4c
-/// teaches the gather path to materialize a nested runtime-indexed producer.
-/// Keeping it pins that 4b solved only the static case, not this broader one.
+/// The runtime counterpart of the static fusion above: a *runtime* index into a
+/// nested runtime-sized producer (`g(256)[j]`). With no fused form (fusion is
+/// literal-index only), `lift_gathers`'s post-materialize pass floats the nested
+/// producer to an entry-level `let` (inlining its internal `let n = 256` so the
+/// map is self-contained) and materializes it to a gather buffer; the runtime
+/// index then reads the buffer. Distinct from the static case, which never
+/// materializes.
 #[test]
-#[ignore = "gap: runtime index into a nested runtime-sized producer needs materialization (Stage 4c)"]
 fn runtime_index_into_nested_producer_lowers() {
     let source = r#"
 def g(n: i32) []f32 = map(|i: i32| f32.i32(i), 0i32 ..< n)
