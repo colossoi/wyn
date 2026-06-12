@@ -17,11 +17,12 @@
 //!   decided by the shared authority [`filter_variant`]; `rep_specialize` calls
 //!   the same function, so the planner's report and the executor agree by
 //!   construction.
-//! * `StoragePrepass(Gather)` — the *demand* that an array be materialized. The
-//!   residency **authority** is `lift_gathers::gather_decision`, co-located with
-//!   the rewrite machinery it needs and run inside `parallelize` once gather
-//!   producers become visible (post-`normalize_for_gather`); see the boundary
-//!   note below.
+//! * `StoragePrepass(Gather)` — **execution-driving**: `lift_gathers`
+//!   materializes exactly the bindings marked this. producer_plan owns *which*
+//!   producers gather (the demand); `lift_gathers::try_lift` is the executor,
+//!   supplying the capability check + rewrite mechanics. Residency is
+//!   order-dependent for chained gathers, so the mechanics run inline during the
+//!   lift rather than as a precomputed plan.
 //! * `Fuse` — mirrors `array_semantics::can_fuse`, the seam shared with
 //!   `fusion.rs`. Fusion runs much earlier in the pipeline, so the planner
 //!   classifies fusability but does not *drive* it; `can_fuse` is the one
@@ -72,10 +73,10 @@ pub enum Demand {
 }
 
 /// The lowering strategy classified for one producer. See the module doc for
-/// which variants drive execution (`StoragePrepass(ScalarBroadcast)`) versus
+/// which variants drive execution — `StoragePrepass(ScalarBroadcast)` drives the
+/// scalar hoist and `StoragePrepass(Gather)` drives `lift_gathers` — versus
 /// mirror an authority that runs elsewhere (`Bounded`/`View` ↔ [`filter_variant`],
-/// `StoragePrepass(Gather)` ↔ `lift_gathers::gather_decision`, `Fuse` ↔
-/// `can_fuse`).
+/// `Fuse` ↔ `can_fuse`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Strategy {
     /// Compose the producer into its single consumer (no materialization).

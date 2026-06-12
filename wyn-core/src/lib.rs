@@ -948,10 +948,10 @@ impl TlcEntrySoacsMaterialized {
 /// TLC after the producer-consumer planning **diagnostic**. The IR equals
 /// `TlcEntrySoacsMaterialized`'s — this slot only emits the producer
 /// classification report (`producer_plan::report`, debug builds). The
-/// load-bearing planning runs where each producer is actually visible: the
-/// scalar-broadcast and gather decisions inside `parallelize` (the single
-/// authoritative `plan_program` + `lift_gathers::gather_decision`), and the
-/// filter variant via the shared `producer_plan::filter_variant`. See the
+/// load-bearing planning runs where each producer is actually visible: inside
+/// `parallelize`, `plan_program` drives the scalar-broadcast hoist and the gather
+/// lift (`lift_gathers` executes the gather report), and the filter variant goes
+/// through the shared `producer_plan::filter_variant`. See the
 /// `tlc::producer_plan` module doc.
 pub struct TlcProducersPlanned(pub TlcLateInner);
 
