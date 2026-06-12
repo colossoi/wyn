@@ -68,6 +68,47 @@ entry e(xs: []i32) []i32 =
 }
 
 #[test]
+fn filter_over_static_input_plans_bounded_aggregate() {
+    // A filter whose input is a statically-sized array is a fixed-capacity
+    // Bounded aggregate — the same decision `rep_specialize` executes as
+    // `ConcreteVariant::Bounded { capacity }`, sourced from the shared
+    // `filter_variant`. The 5-element literal ANF-binds to a `[5]i32` Ref.
+    let (program, plans) = plan_src(
+        r#"
+def sum<[n]>(arr: [n]i32) i32 = reduce(|a: i32, b: i32| a + b, 0, arr)
+def center(arr: []i32) i32 = sum(arr)
+#[compute]
+entry tick() i32 =
+    let kept = filter(|x: i32| x > 0, [1, -2, 3, -4, 5]) in
+    center(kept)
+"#,
+    );
+    let p = producer(&program, &plans, "kept");
+    assert!(p.produces_array, "`kept` is a filter result array");
+    assert_eq!(p.strategy, Strategy::BoundedAggregate { capacity: 5 });
+}
+
+#[test]
+fn filter_over_runtime_input_plans_view() {
+    // A filter over a runtime-sized storage input has no static capacity —
+    // it's a `{offset,len}` View (and `rep_specialize` leaves the size slot
+    // Skolem). Distinguishes the View case from Bounded above.
+    let (program, plans) = plan_src(
+        r#"
+def sum<[n]>(arr: [n]i32) i32 = reduce(|a: i32, b: i32| a + b, 0, arr)
+def center(arr: []i32) i32 = sum(arr)
+#[compute]
+entry tick(#[storage(set=2, binding=0, access=read)] xs: []i32) i32 =
+    let kept = filter(|x: i32| x > 0, xs) in
+    center(kept)
+"#,
+    );
+    let p = producer(&program, &plans, "kept");
+    assert!(p.produces_array, "`kept` is a filter result array");
+    assert_eq!(p.strategy, Strategy::View);
+}
+
+#[test]
 fn two_scalar_reduces_captured_in_map_each_broadcast() {
     // Both reduces are scalars consumed per element inside the tail map — each
     // should hoist to its own one-element prepass buffer. This is the shape the

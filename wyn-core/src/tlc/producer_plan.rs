@@ -26,8 +26,10 @@ use std::collections::HashSet;
 use super::array_semantics::{ArraySemantics, FusionKind, can_fuse, summarize_program};
 use super::fusion::build_sym_to_def;
 use super::producer_graph::{ProducerGraph, ProducerId, build_producer_graph};
-use super::{DefMeta, Program, SoacOp, Term, TermKind, VarRef};
+use super::{ArrayExpr, DefMeta, Program, SoacOp, Term, TermKind, VarRef};
 use crate::SymbolId;
+use crate::ast::TypeName;
+use polytype::Type;
 
 /// How a producer's result is demanded by its consumers. Recorded for the
 /// report; the strategy is chosen from the combination of demands plus the
@@ -53,8 +55,11 @@ pub enum Strategy {
     Fuse,
     /// Materialize to a scratch buffer in a prepass; consumers read it back.
     StoragePrepass(PrepassKind),
-    /// A `filter` whose output is a fixed-capacity `{buffer,len}` aggregate.
-    BoundedAggregate,
+    /// A `filter` whose output is a fixed-capacity `{buffer,len}` aggregate;
+    /// `capacity` is the static `Size(N)` of the filtered input.
+    BoundedAggregate {
+        capacity: usize,
+    },
     /// A storage-buffer-backed `{offset,len}` view (runtime length OK).
     View,
     /// Nothing to do — fuses trivially, lowers as-is, or is a plain scalar.
@@ -159,12 +164,13 @@ fn plan_node(graph: &ProducerGraph, pid: ProducerId, captured: &HashSet<SymbolId
 
     let demand = classify_demand(graph, pid, is_captured);
     let strategy = match (&node.semantics, produces_array, demand) {
-        // `filter` is a representation choice, not a prepass.
-        (ArraySemantics::Filter { .. }, _, _) => {
-            // Bounded for a statically-sized input, View otherwise. Refined in
-            // the stage that takes variant assignment over from rep_specialize.
-            Strategy::View
-        }
+        // `filter` is a representation choice, not a prepass: Bounded for a
+        // statically-sized input, View otherwise (the same call rep_specialize
+        // executes). An input whose type can't be read falls back to View.
+        (ArraySemantics::Filter { input, .. }, _, _) => match filter_variant(input) {
+            Some(FilterVariant::Bounded { capacity }) => Strategy::BoundedAggregate { capacity },
+            Some(FilterVariant::View) | None => Strategy::View,
+        },
         // A scalar SOAC result read per element inside a sibling lambda
         // broadcasts — hoist it to a one-element prepass buffer.
         (_, false, Demand::PerElement) => Strategy::StoragePrepass(PrepassKind::ScalarBroadcast),
@@ -184,6 +190,48 @@ fn plan_node(graph: &ProducerGraph, pid: ProducerId, captured: &HashSet<SymbolId
         produces_array,
         demand,
         strategy,
+    }
+}
+
+/// The concrete representation a `filter(pred, input)` producer must take.
+/// The single source of truth for the filter variant choice: the planner
+/// records it as a [`Strategy`] and `rep_specialize` executes it as a
+/// `ConcreteVariant`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterVariant {
+    /// Statically-sized input — a fixed-capacity `{buffer,len}` aggregate.
+    Bounded {
+        capacity: usize,
+    },
+    /// Runtime-length input — a `{offset,len}` view.
+    View,
+}
+
+/// Decide a `filter` producer's variant from its input array's size: a static
+/// `Size(N)` yields `Bounded{N}`; any runtime length yields `View`. `None` when
+/// the input type can't be read — a fused-chain input (`Soac`/`Zip`/`Literal`/
+/// `Range`) carries no bound array type, so there's no producer-derived variant.
+pub fn filter_variant(input: &ArrayExpr) -> Option<FilterVariant> {
+    let input_ty = filter_input_type(input)?;
+    let size = crate::types::array_size(&input_ty)?;
+    Some(match size {
+        Type::Constructed(TypeName::Size(n), _) => FilterVariant::Bounded { capacity: *n },
+        _ => FilterVariant::View,
+    })
+}
+
+/// Best-effort array-type extraction for the shapes a `SoacOp::Filter` input
+/// can take. Only `Ref` (a bound name with an Array-typed term) and
+/// `StorageView` (an entry view-array) carry a usable array type; other
+/// variants appear only in fused chains and yield `None`.
+fn filter_input_type(ae: &ArrayExpr) -> Option<Type<TypeName>> {
+    match ae {
+        ArrayExpr::Ref(t) => Some(t.ty.clone()),
+        ArrayExpr::StorageView(sv) => Some(crate::types::view_array_of(
+            &sv.elem_ty,
+            crate::types::region_tag(sv.binding),
+        )),
+        _ => None,
     }
 }
 

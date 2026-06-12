@@ -31,6 +31,7 @@
 use super::{Def, DefMeta, Lambda, LoopKind, Program, SoacOp, Term, TermIdSource, TermKind, VarRef};
 use crate::ast::TypeName;
 use crate::tlc::ArrayExpr;
+use crate::tlc::producer_plan::FilterVariant;
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
 use std::collections::HashMap;
@@ -504,19 +505,17 @@ impl RepSpecializer {
     /// Recognise let-bound producers whose concrete representation is
     /// derivable from the TLC type at this point. Today, only
     /// `SoacOp::Filter` — and `filter` is a SOAC at TLC level
-    /// (`transform_soac_filter` lowers the surface call). Producer
-    /// rule:
-    ///   * input array size statically `Size(_)` ⇒ Bounded.
-    ///   * anything else (Variable / Skolem / SizeVar) ⇒ View.
+    /// (`transform_soac_filter` lowers the surface call). The filter
+    /// variant choice itself lives in `producer_plan::filter_variant`
+    /// (the single source of truth the planner also records); this pass
+    /// executes it as a `ConcreteVariant`.
     fn detect_producer_variant(&self, rhs: &Term) -> Option<ConcreteVariant> {
         match &rhs.kind {
             TermKind::Soac(SoacOp::Filter { input, .. }) => {
-                let input_ty = array_expr_type(input)?;
-                let size = array_size(&input_ty)?;
-                Some(match size {
-                    Type::Constructed(TypeName::Size(n), _) => ConcreteVariant::Bounded { capacity: *n },
-                    _ => ConcreteVariant::View,
-                })
+                match super::producer_plan::filter_variant(input)? {
+                    FilterVariant::Bounded { capacity } => Some(ConcreteVariant::Bounded { capacity }),
+                    FilterVariant::View => Some(ConcreteVariant::View),
+                }
             }
             // `let arr = Var(other)` aliases — propagate the source's
             // variant. Specifically, `open_existential` lowers
@@ -758,31 +757,6 @@ impl RepSpecializer {
 // ----------------------------------------------------------------------
 // Type-level helpers
 // ----------------------------------------------------------------------
-
-fn array_size(ty: &Type<TypeName>) -> Option<&Type<TypeName>> {
-    if let Type::Constructed(TypeName::Array, args) = ty {
-        return args.get(2);
-    }
-    None
-}
-
-/// Best-effort array-type extraction for the shapes a `SoacOp::Filter`
-/// input can take. The variants this pass cares about are `Ref` (a
-/// bound name with an Array-typed term) and `StorageView` (entry
-/// view-array). Other variants (Soac, Zip, Literal, Range) appear in
-/// fused chains; we don't need them for the simple producer-detection
-/// case, so return `None` — the call site falls through to "no
-/// producer-derived variant".
-fn array_expr_type(ae: &ArrayExpr) -> Option<Type<TypeName>> {
-    match ae {
-        ArrayExpr::Ref(t) => Some(t.ty.clone()),
-        ArrayExpr::StorageView(sv) => Some(crate::types::view_array_of(
-            &sv.elem_ty,
-            crate::types::region_tag(sv.binding),
-        )),
-        _ => None,
-    }
-}
 
 /// Return `true` if any `Array[_, ArrayVariantAbstract, _, _]` appears
 /// anywhere in the type tree.
