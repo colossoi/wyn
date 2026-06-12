@@ -26,6 +26,18 @@ $WYN compile lib/testfiles/stats_normal.wyn -o /tmp/stats_normal.spv
 spirv-val /tmp/stats_normal.spv
 $WYN compile lib/testfiles/stats_normal.wyn -t wgsl -o /tmp/stats_normal.wgsl
 
+$WYN compile lib/testfiles/stats_uniform.wyn -o /tmp/stats_uniform.spv
+spirv-val /tmp/stats_uniform.spv
+$WYN compile lib/testfiles/stats_uniform.wyn -t wgsl -o /tmp/stats_uniform.wgsl
+
+$WYN compile lib/testfiles/stats_exponential.wyn -o /tmp/stats_exponential.spv
+spirv-val /tmp/stats_exponential.spv
+$WYN compile lib/testfiles/stats_exponential.wyn -t wgsl -o /tmp/stats_exponential.wgsl
+
+$WYN compile lib/testfiles/stats_uniform_int.wyn -o /tmp/stats_uniform_int.spv
+spirv-val /tmp/stats_uniform_int.spv
+$WYN compile lib/testfiles/stats_uniform_int.wyn -t wgsl -o /tmp/stats_uniform_int.wgsl
+
 echo "compile + validate: OK"
 
 if ! $RUN; then
@@ -38,4 +50,26 @@ echo "== tephra run (needs a Vulkan device) =="
 TEPHRA=./extra/tephra/target/debug/tephra
 
 $TEPHRA run /tmp/dist_demo.spv --entry dist_normal_fill -n 256 -w 64
-$TEPHRA run /tmp/stats_normal.spv --entry stats_normal -n 1 -w 1
+
+echo
+echo "Stats slots: [count, mean, variance, stddev, min, max] over N=65536 draws."
+
+echo
+echo "--- stats_normal (standard normal) ---"
+$TEPHRA run /tmp/stats_normal.spv --entry stats_normal -n 6 -w 64
+echo "Expect: mean 0, variance 1, stddev 1, extremes ~ ± 4 to 5."
+
+echo
+echo "--- stats_uniform (uniform real [0,1)) ---"
+$TEPHRA run /tmp/stats_uniform.spv --entry stats_uniform -n 6 -w 64
+echo "Expect: mean 0.5, variance 1/12 ≈ 0.0833, stddev ≈ 0.289, min ≈ 0, max ≈ 1."
+
+echo
+echo "--- stats_exponential (exponential rate 1) ---"
+$TEPHRA run /tmp/stats_exponential.spv --entry stats_exponential -n 6 -w 64
+echo "Expect: mean 1, variance 1, stddev 1, min ≈ 0, max ≈ 10 to 12."
+
+echo
+echo "--- stats_uniform_int (uniform int [0,10), lifted to f32) ---"
+$TEPHRA run /tmp/stats_uniform_int.spv --entry stats_uniform_int -n 6 -w 64
+echo "Expect: mean 4.5, variance 99/12 ≈ 8.25, stddev ≈ 2.872, min 0, max 9."

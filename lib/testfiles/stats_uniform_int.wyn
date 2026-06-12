@@ -1,0 +1,16 @@
+import "../dist"
+import "../disttest"
+
+-- Uniform integer on [0, 10) via fasthash, widened to f32 so `Stats` (which
+-- expects an f32 series) can reduce it. One draw per index, one position per
+-- draw. Reference moments for [lo, hi): mean (lo+hi-1)/2 = 4.5,
+-- variance ((hi-lo)²-1)/12 = 99/12 ≈ 8.25.
+def N: i32 = 65536
+
+module sampler : SAMPLER = {
+  def sample(i: u32) f32 = f32.i32(fhdist.uniform_int(fhdist.seed(0x9e3779b9u32), i, 0i32, 10i32))
+}
+module gather = Stats(sampler)
+
+#[compute]
+entry stats_uniform_int() [6]f32 = gather.summarize(N)

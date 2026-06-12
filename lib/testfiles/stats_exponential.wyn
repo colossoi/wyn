@@ -1,0 +1,14 @@
+import "../dist"
+import "../disttest"
+
+-- Exponential at rate λ=1 via fasthash. One draw per index, one position per
+-- draw. Reference moments: mean 1/λ = 1, variance 1/λ² = 1.
+def N: i32 = 65536
+
+module sampler : SAMPLER = {
+  def sample(i: u32) f32 = fhdist.exponential(fhdist.seed(0x9e3779b9u32), i, 1.0f32)
+}
+module gather = Stats(sampler)
+
+#[compute]
+entry stats_exponential() [6]f32 = gather.summarize(N)

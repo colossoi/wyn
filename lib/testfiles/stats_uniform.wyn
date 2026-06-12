@@ -1,0 +1,14 @@
+import "../dist"
+import "../disttest"
+
+-- Uniform real on [0, 1) via fasthash. One draw per index, one position per
+-- draw. Reference moments: mean 0.5, variance 1/12 ≈ 0.0833.
+def N: i32 = 65536
+
+module sampler : SAMPLER = {
+  def sample(i: u32) f32 = fhdist.uniform(fhdist.seed(0x9e3779b9u32), i, 0.0f32, 1.0f32)
+}
+module gather = Stats(sampler)
+
+#[compute]
+entry stats_uniform() [6]f32 = gather.summarize(N)
