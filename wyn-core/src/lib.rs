@@ -622,6 +622,7 @@ impl TlcRegionsPinned {
             .fold_generated_lambdas()
             .inline_small()
             .materialize_entry_soacs()
+            .plan_producers()
             .rep_specialize()
             .parallelize_soacs(disable_parallelize)
             .expect("parallelize_soacs")
@@ -933,6 +934,30 @@ impl std::ops::Deref for TlcEntrySoacsMaterialized {
 }
 
 impl TlcEntrySoacsMaterialized {
+    /// Producer-consumer planning (report-only). Classify each array/scalar
+    /// producer in every entry and the strategy that fits — see
+    /// `tlc::producer_plan`. This stage only reports its decisions (logged in
+    /// debug builds); the IR is forwarded unchanged. Later stages take over one
+    /// strategy at a time from the legacy passes.
+    pub fn plan_producers(self) -> TlcProducersPlanned {
+        tlc::producer_plan::report(&self.0.tlc);
+        TlcProducersPlanned(self.0)
+    }
+}
+
+/// TLC after producer-consumer planning. In this stage the plan is report-only,
+/// so the IR equals `TlcEntrySoacsMaterialized`'s; the typestate marks the
+/// pipeline position the planner owns.
+pub struct TlcProducersPlanned(pub TlcLateInner);
+
+impl std::ops::Deref for TlcProducersPlanned {
+    type Target = TlcLateInner;
+    fn deref(&self) -> &TlcLateInner {
+        &self.0
+    }
+}
+
+impl TlcProducersPlanned {
     /// Representation-specialize call edges where a let-bound
     /// `filter(...)` result flows into a non-inlined size-poly helper.
     /// Substitutes `ArrayVariantAbstract` in the callee's matched param

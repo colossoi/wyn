@@ -2910,6 +2910,7 @@ fn compile_parallel(source: &str) -> crate::Lowered {
         .fold_generated_lambdas()
         .inline_small()
         .materialize_entry_soacs()
+        .plan_producers()
         // `parallelize_soacs` takes a *disable* flag; `false` enables it,
         // matching the production driver's default (non-`--single-stage`).
         .parallelize_soacs(false)

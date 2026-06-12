@@ -31,6 +31,7 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
         .fold_generated_lambdas()
         .inline_small()
         .materialize_entry_soacs()
+        .plan_producers()
         .parallelize_soacs(false)
         .expect("parallelize_soacs")
         .filter_reachable()
@@ -68,6 +69,7 @@ fn compile_through_ssa(input: &str) -> Result<Program, CompilerError> {
         .fold_generated_lambdas()
         .inline_small()
         .materialize_entry_soacs()
+        .plan_producers()
         .parallelize_soacs(false)
         .expect("parallelize_soacs")
         .filter_reachable()
@@ -529,7 +531,7 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     let tlc = tlc.fold_generated_lambdas();
     eprintln!("=== inline OK ===");
 
-    let tlc = tlc.inline_small().materialize_entry_soacs();
+    let tlc = tlc.inline_small().materialize_entry_soacs().plan_producers();
     eprintln!("=== inline_small OK ===");
 
     let tlc = tlc.parallelize_soacs(false).expect("parallelize_soacs");
@@ -585,7 +587,7 @@ entry main(data: []i32) []i32 = [first(data)]
     let tlc = tlc.fold_generated_lambdas();
     eprintln!("=== inline OK ===");
 
-    let tlc = tlc.inline_small().materialize_entry_soacs();
+    let tlc = tlc.inline_small().materialize_entry_soacs().plan_producers();
     eprintln!("=== inline_small OK ===");
 
     let tlc = tlc.parallelize_soacs(false).expect("parallelize_soacs");

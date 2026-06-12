@@ -105,6 +105,7 @@ entry tick() i32 =
         .fold_generated_lambdas()
         .inline_small()
         .materialize_entry_soacs()
+        .plan_producers()
         // ← shortcut skipping rep_specialize:
         .parallelize_soacs(false)
         .expect("parallelize_soacs")

@@ -597,6 +597,7 @@ fn parallelize_src(
         .fold_generated_lambdas()
         .inline_small()
         .materialize_entry_soacs()
+        .plan_producers()
         .parallelize_soacs(false)
         .expect("parallelize_soacs");
     (tlc.tlc.clone(), tlc.pipeline.clone())
@@ -1172,6 +1173,7 @@ fn compile_to_spirv(src: &str) -> crate::error::Result<Vec<u32>> {
         .fold_generated_lambdas()
         .inline_small()
         .materialize_entry_soacs()
+        .plan_producers()
         .parallelize_soacs(false)
         .expect("parallelize_soacs")
         .filter_reachable()

@@ -21,6 +21,7 @@ pub mod partial_eval;
 pub mod patterns;
 pub mod pin_entry_regions;
 pub mod producer_graph;
+pub mod producer_plan;
 pub mod rep_specialize;
 #[cfg(test)]
 #[path = "rep_specialize_tests.rs"]

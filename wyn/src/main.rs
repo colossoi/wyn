@@ -320,12 +320,16 @@ fn compile_file(
         tlc_inlined.materialize_entry_soacs()
     });
 
+    // Producer-consumer planning (report-only): classify each producer and
+    // the lowering strategy that fits. See `tlc::producer_plan`.
+    let tlc_planned = time("plan_producers", verbose, || tlc_exposed.plan_producers());
+
     // Phase 2 of array-variant-abstract: at call edges, specialize a
     // user-defined callee whose `Abstract`-typed param receives a
     // producer-known concrete variant (Bounded / View from filter).
     // Runs before `parallelize_soacs` so the parallelizer sees
     // concrete representations on every call edge.
-    let tlc_rep_specialized = time("tlc_rep_specialize", verbose, || tlc_exposed.rep_specialize());
+    let tlc_rep_specialized = time("tlc_rep_specialize", verbose, || tlc_planned.rep_specialize());
     let tlc_parallel = time("tlc_parallelize", verbose, || {
         tlc_rep_specialized.parallelize_soacs(single_stage)
     })?;
