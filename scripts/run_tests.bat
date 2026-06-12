@@ -35,6 +35,10 @@ spirv-val "%TEMP%\stats_exponential.spv" || exit /b 1
 spirv-val "%TEMP%\stats_uniform_int.spv" || exit /b 1
 "%WYN%" compile lib\testfiles\stats_uniform_int.wyn -t wgsl -o "%TEMP%\stats_uniform_int.wgsl" || exit /b 1
 
+"%WYN%" compile lib\testfiles\noise_smoke.wyn -o "%TEMP%\noise_smoke.spv" || exit /b 1
+spirv-val "%TEMP%\noise_smoke.spv" || exit /b 1
+"%WYN%" compile lib\testfiles\noise_smoke.wyn -t wgsl -o "%TEMP%\noise_smoke.wgsl" || exit /b 1
+
 echo compile + validate: OK
 
 if "%RUN%"=="0" (
@@ -72,3 +76,10 @@ echo.
 echo --- stats_uniform_int (uniform int [0,10), lifted to f32) ---
 "%TEPHRA%" run "%TEMP%\stats_uniform_int.spv" --entry stats_uniform_int -n 6 -w 64
 echo Expect: mean 4.5, variance 99/12 ~ 8.25, stddev ~ 2.872, min 0, max 9.
+
+echo.
+echo --- noise_smoke (one query at p=(3.5, 7.25), seed 0x9e3779b9) ---
+"%TEPHRA%" run "%TEMP%\noise_smoke.spv" --entry noise_smoke -n 5 -w 64
+echo Slots: [value2, perlin2, simplex2, worley2, fbm_perlin(6oct, lac=2, gain=0.5)].
+echo Expect: first three in [-1, 1]; worley2 a small positive distance (~0..1.5);
+echo         fbm_perlin a damped sum of octaves (no fixed range, but bounded).

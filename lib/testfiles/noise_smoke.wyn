@@ -1,0 +1,18 @@
+import "../noise"
+
+-- Smoke test: write each noise primitive's value at one query position into
+-- a 5-element output buffer. Compile-only; for visual / statistical checks
+-- see the stats drivers and any shader you wire `fhnoise` into.
+def SEED: u32 = 0x9e3779b9u32
+
+#[compute]
+entry noise_smoke() [5]f32 =
+  let k = fasthash.seed(SEED) in
+  let p : vec2f32 = @[3.5f32, 7.25f32] in
+  [
+    fhnoise.value2(k, p),
+    fhnoise.perlin2(k, p),
+    fhnoise.simplex2(k, p),
+    fhnoise.worley2(k, p),
+    fhnoise.fbm_perlin(k, p, 6i32, 2.0f32, 0.5f32)
+  ]

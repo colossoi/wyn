@@ -1,0 +1,268 @@
+-- | 2D procedural noise on top of any `RANDOM_ACCESS` generator.
+--
+-- Pick a generator (`fasthash` for graphics-grade speed, `threefry` when
+-- stream-count matters), get a `key` from `G.seed(s)`, then call any of:
+--
+--   * `value2`   — bilinear interpolation of per-cell random values
+--                 (cheapest; blocky character).
+--   * `perlin2`  — gradient noise: per-cell unit gradient dotted with the
+--                 offset to the lookup point. The classic.
+--   * `simplex2` — gradient noise on a simplex (triangular) grid; better
+--                 isotropy than `perlin2`, and the modern preferred choice.
+--   * `worley2`  — F1 distance to nearest random point. Cellular / Voronoi
+--                 look; one point per cell, 3×3 neighborhood searched.
+--   * `fbm_<kind>` — sum `octaves` layers of the base noise at increasing
+--                 frequency and decreasing amplitude (fractal Brownian
+--                 motion). One specialised flavor per base noise:
+--                 `fbm_value`, `fbm_perlin`, `fbm_simplex`, `fbm_worley`.
+--
+-- Output ranges: `value2`, `perlin2`, `simplex2` are normalized to roughly
+-- `[-1, 1]`. `worley2` returns raw F1 distance (~`[0, 1.5]`); scale as
+-- needed. `fbm_*` outputs a sum whose range scales with `octaves * |base|`;
+-- divide by `(1 - gain^octaves) / (1 - gain)` to renormalize.
+import "rng"
+
+functor Noise(G: RANDOM_ACCESS) = {
+  -- | An independent noise stream. Build with `G.seed(s)` once and reuse.
+  type key = G.key
+
+  ------------------------------------------------------------------
+  -- internal helpers
+  ------------------------------------------------------------------
+
+  -- Perlin's quintic fade `6t^5 - 15t^4 + 10t^3`. Smooth (C²) over `[0,1]`,
+  -- so derivatives don't pop at cell boundaries the way the cubic fade does.
+  def fade5(t: f32) f32 = t * t * t * (t * (t * 6.0f32 - 15.0f32) + 10.0f32)
+
+  -- Linear interpolation.
+  def lerp(a: f32, b: f32, t: f32) f32 = a + (b - a) * t
+
+  -- Hash a 2D integer cell coordinate to a u32 stream position, then through
+  -- `G.at_u32`. The cantor-style pack (`ix * BIG_PRIME + iy`) keeps `ix` and
+  -- `iy` axes from aliasing; the wrap on signed → unsigned conversion is
+  -- harmless because we only use the result for hashing.
+  def cell_hash(k: key, ix: i32, iy: i32) u32 =
+    G.at_u32(k, u32.i32(ix) * 374761393u32 + u32.i32(iy))
+
+  -- Cell → uniform `f32` in `[0, 1)`. One hash per cell.
+  def cell_f32(k: key, ix: i32, iy: i32) f32 =
+    f32.u32(cell_hash(k, ix, iy) >> 8u32) * (1.0f32 / 16777216.0f32)
+
+  -- Cell → unit-length 2D gradient. Random angle on the circle; one hash
+  -- per cell.
+  def cell_grad2(k: key, ix: i32, iy: i32) vec2f32 =
+    let theta = cell_f32(k, ix, iy) * (2.0f32 * f32.pi) in
+    @[f32.cos(theta), f32.sin(theta)]
+
+  ------------------------------------------------------------------
+  -- value2
+  ------------------------------------------------------------------
+
+  -- | Value noise: bilinear interpolation of per-cell random values, with
+  -- a quintic fade on the interpolation weights. Cheap, somewhat blocky.
+  -- Output: `[-1, 1]`.
+  def value2(k: key, p: vec2f32) f32 =
+    let ix = i32.f32(f32.floor(p.x)) in
+    let iy = i32.f32(f32.floor(p.y)) in
+    let fx = p.x - f32.i32(ix) in
+    let fy = p.y - f32.i32(iy) in
+    let u = fade5(fx) in
+    let v = fade5(fy) in
+    let v00 = cell_f32(k, ix,         iy)         * 2.0f32 - 1.0f32 in
+    let v10 = cell_f32(k, ix + 1i32,  iy)         * 2.0f32 - 1.0f32 in
+    let v01 = cell_f32(k, ix,         iy + 1i32)  * 2.0f32 - 1.0f32 in
+    let v11 = cell_f32(k, ix + 1i32,  iy + 1i32)  * 2.0f32 - 1.0f32 in
+    let x0 = lerp(v00, v10, u) in
+    let x1 = lerp(v01, v11, u) in
+    lerp(x0, x1, v)
+
+  ------------------------------------------------------------------
+  -- perlin2
+  ------------------------------------------------------------------
+
+  -- | Perlin gradient noise: per-cell unit gradient dotted with the offset
+  -- to the lookup point, bilinearly blended with a quintic fade. Scaled by
+  -- `sqrt(2)` to land in roughly `[-1, 1]` (the unscaled theoretical max
+  -- is `1/sqrt(2)`).
+  def perlin2(k: key, p: vec2f32) f32 =
+    let ix = i32.f32(f32.floor(p.x)) in
+    let iy = i32.f32(f32.floor(p.y)) in
+    let fx = p.x - f32.i32(ix) in
+    let fy = p.y - f32.i32(iy) in
+    let n00 = dot(cell_grad2(k, ix,        iy),        @[fx,         fy]) in
+    let n10 = dot(cell_grad2(k, ix + 1i32, iy),        @[fx - 1.0f32, fy]) in
+    let n01 = dot(cell_grad2(k, ix,        iy + 1i32), @[fx,         fy - 1.0f32]) in
+    let n11 = dot(cell_grad2(k, ix + 1i32, iy + 1i32), @[fx - 1.0f32, fy - 1.0f32]) in
+    let u = fade5(fx) in
+    let v = fade5(fy) in
+    let x0 = lerp(n00, n10, u) in
+    let x1 = lerp(n01, n11, u) in
+    lerp(x0, x1, v) * 1.41421356f32
+
+  ------------------------------------------------------------------
+  -- simplex2 (Stefan Gustavson, "Simplex noise demystified")
+  ------------------------------------------------------------------
+
+  -- | Simplex gradient noise on a triangular grid. Better isotropy than
+  -- Perlin (no axis-aligned creases) and a smaller per-eval cost in higher
+  -- dimensions. The constants `F2 = (sqrt(3) - 1)/2` and `G2 = (3 - sqrt(3))/6`
+  -- skew/unskew between the cubic input lattice and the simplex grid.
+  -- Output: `[-1, 1]`-ish (the conventional `* 70` normalizer).
+  def simplex2(k: key, p: vec2f32) f32 =
+    let f2_ = 0.366025404f32 in
+    let g2_ = 0.211324865f32 in
+    -- Skew the input to find which simplex cell we're in.
+    let s = (p.x + p.y) * f2_ in
+    let i = i32.f32(f32.floor(p.x + s)) in
+    let j = i32.f32(f32.floor(p.y + s)) in
+    let t = f32.i32(i + j) * g2_ in
+    let x0 = p.x - (f32.i32(i) - t) in
+    let y0 = p.y - (f32.i32(j) - t) in
+    -- Which of the two triangles inside the cell?
+    let (i1, j1) = if x0 > y0 then (1i32, 0i32) else (0i32, 1i32) in
+    -- Offsets in unskewed (x,y) space to the other two simplex corners.
+    let x1 = x0 - f32.i32(i1) + g2_ in
+    let y1 = y0 - f32.i32(j1) + g2_ in
+    let x2 = x0 - 1.0f32 + 2.0f32 * g2_ in
+    let y2 = y0 - 1.0f32 + 2.0f32 * g2_ in
+    -- Gradient at each corner.
+    let g0 = cell_grad2(k, i,        j) in
+    let g1 = cell_grad2(k, i + i1,   j + j1) in
+    let g2 = cell_grad2(k, i + 1i32, j + 1i32) in
+    -- Radial fall-off `(0.5 - r²)^4` clamped at zero, times the gradient·offset.
+    let t0 = 0.5f32 - x0 * x0 - y0 * y0 in
+    let n0 = if t0 < 0.0f32 then 0.0f32
+             else t0 * t0 * t0 * t0 * dot(g0, @[x0, y0]) in
+    let t1 = 0.5f32 - x1 * x1 - y1 * y1 in
+    let n1 = if t1 < 0.0f32 then 0.0f32
+             else t1 * t1 * t1 * t1 * dot(g1, @[x1, y1]) in
+    let t2 = 0.5f32 - x2 * x2 - y2 * y2 in
+    let n2 = if t2 < 0.0f32 then 0.0f32
+             else t2 * t2 * t2 * t2 * dot(g2, @[x2, y2]) in
+    70.0f32 * (n0 + n1 + n2)
+
+  ------------------------------------------------------------------
+  -- worley2
+  ------------------------------------------------------------------
+
+  -- | Worley / Voronoi noise: F1 distance to the nearest random point.
+  -- One point per integer cell, placed uniformly in `[0,1)²`; the 3×3
+  -- neighborhood is searched for the minimum. Two independent 16-bit
+  -- uniforms per cell are extracted from a single hash (upper / lower
+  -- halves; PCG avalanche makes the halves statistically independent
+  -- enough for graphics).
+  --
+  -- Output: raw F1 distance, ~`[0, 1.5]` worst case; scale as needed.
+  def worley2(k: key, p: vec2f32) f32 =
+    let ix = i32.f32(f32.floor(p.x)) in
+    let iy = i32.f32(f32.floor(p.y)) in
+    let offsets : [9]vec2i32 = [
+      @[-1i32, -1i32], @[0i32, -1i32], @[1i32, -1i32],
+      @[-1i32,  0i32], @[0i32,  0i32], @[1i32,  0i32],
+      @[-1i32,  1i32], @[0i32,  1i32], @[1i32,  1i32]
+    ] in
+    reduce(
+      |a: f32, b: f32| f32.min(a, b),
+      f32.highest,
+      map(|o: vec2i32|
+            let cix = ix + o.x in
+            let ciy = iy + o.y in
+            let h = cell_hash(k, cix, ciy) in
+            let rx = f32.u32(h >> 16u32) * (1.0f32 / 65536.0f32) in
+            let ry = f32.u32(h & 0x0000FFFFu32) * (1.0f32 / 65536.0f32) in
+            let px = f32.i32(cix) + rx in
+            let py = f32.i32(ciy) + ry in
+            let dx = px - p.x in
+            let dy = py - p.y in
+            f32.sqrt(dx * dx + dy * dy),
+          offsets))
+
+  ------------------------------------------------------------------
+  -- fbm2 + per-noise convenience flavors
+  ------------------------------------------------------------------
+
+  -- | Fractional Brownian motion. One specialised flavor per base noise.
+  -- Stacks `octaves` layers: layer `i` samples at frequency `lacunarity^i`,
+  -- amplitude `gain^i`, with a per-octave derived key so layers don't
+  -- lock-step. Standard knobs: `lacunarity = 2.0`, `gain = 0.5` — each
+  -- octave doubles the detail and halves the amplitude, classic 1/f
+  -- spectrum.
+  --
+  -- The preferred shape — once the compiler supports it — is one generic:
+  --
+  --     def fbm2(noise: key -> vec2f32 -> f32, k: key, p: vec2f32,
+  --              octaves: i32, lacunarity: f32, gain: f32) f32 =
+  --       reduce(|a, b| a + b, 0.0f32,
+  --         map(|i: i32|
+  --               let freq = f32.pow(lacunarity, f32.i32(i)) in
+  --               let amp = f32.pow(gain, f32.i32(i)) in
+  --               let kk = G.derive(k, u32.i32(i)) in
+  --               noise(kk, @[p.x * freq, p.y * freq]) * amp,
+  --             0i32 ..< octaves))
+  --
+  -- That form panics today because passing a named def as a function-typed
+  -- argument trips `hof-specialization verifier failed` in `tlc/inline.rs`
+  -- (pinned by the ignored test
+  -- `function_typed_param_with_named_callee_specializes` in
+  -- `wyn-core/src/integration_tests.rs`). The four specialised flavors below
+  -- produce identical SPIR-V and avoid the gap; collapse them to the single
+  -- `fbm2` above once that test starts passing.
+  def fbm_value(k: key, p: vec2f32, octaves: i32, lacunarity: f32, gain: f32) f32 =
+    reduce(
+      |a: f32, b: f32| a + b,
+      0.0f32,
+      map(|i: i32|
+            let freq = f32.pow(lacunarity, f32.i32(i)) in
+            let amp = f32.pow(gain, f32.i32(i)) in
+            let kk = G.derive(k, u32.i32(i)) in
+            let pp : vec2f32 = @[p.x * freq, p.y * freq] in
+            value2(kk, pp) * amp,
+          0i32 ..< octaves))
+
+  def fbm_perlin(k: key, p: vec2f32, octaves: i32, lacunarity: f32, gain: f32) f32 =
+    reduce(
+      |a: f32, b: f32| a + b,
+      0.0f32,
+      map(|i: i32|
+            let freq = f32.pow(lacunarity, f32.i32(i)) in
+            let amp = f32.pow(gain, f32.i32(i)) in
+            let kk = G.derive(k, u32.i32(i)) in
+            let pp : vec2f32 = @[p.x * freq, p.y * freq] in
+            perlin2(kk, pp) * amp,
+          0i32 ..< octaves))
+
+  def fbm_simplex(k: key, p: vec2f32, octaves: i32, lacunarity: f32, gain: f32) f32 =
+    reduce(
+      |a: f32, b: f32| a + b,
+      0.0f32,
+      map(|i: i32|
+            let freq = f32.pow(lacunarity, f32.i32(i)) in
+            let amp = f32.pow(gain, f32.i32(i)) in
+            let kk = G.derive(k, u32.i32(i)) in
+            let pp : vec2f32 = @[p.x * freq, p.y * freq] in
+            simplex2(kk, pp) * amp,
+          0i32 ..< octaves))
+
+  def fbm_worley(k: key, p: vec2f32, octaves: i32, lacunarity: f32, gain: f32) f32 =
+    reduce(
+      |a: f32, b: f32| a + b,
+      0.0f32,
+      map(|i: i32|
+            let freq = f32.pow(lacunarity, f32.i32(i)) in
+            let amp = f32.pow(gain, f32.i32(i)) in
+            let kk = G.derive(k, u32.i32(i)) in
+            let pp : vec2f32 = @[p.x * freq, p.y * freq] in
+            worley2(kk, pp) * amp,
+          0i32 ..< octaves))
+}
+
+-- | The graphics-grade default: noise driven by the fasthash PCG generator.
+-- Use this for procedural textures, shader noise, dithering — anywhere
+-- "fast and good enough" beats statistical rigor.
+module fhnoise = Noise(fasthash)
+
+-- | The high-stream-count tier: noise driven by Threefry-2x32. Slower per
+-- evaluation, but immune to fasthash's ~65k-stream birthday bound. Reach
+-- for this when keys are derived per-frame across long animations, or
+-- when you're using noise inside a Monte-Carlo integrator.
+module tfnoise = Noise(threefry)
