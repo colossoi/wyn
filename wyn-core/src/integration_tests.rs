@@ -1868,6 +1868,29 @@ entry e() [1]f32 = [g(256)[3]]
     compile_to_spirv(source).expect("returning a runtime-sized array should lower to SPIR-V");
 }
 
+/// Gap: a runtime-sized array with *two or more* consumers panics the backend
+/// with "Composite variant unsized arrays not supported" (`spirv/mod.rs`).
+/// A single-consumer runtime-sized array fuses into its consumer and never
+/// materializes (`f32.sum(map(…, 0..<n))` lowers fine), but binding it and
+/// reading it more than once forces materialization of an unsized Composite
+/// array, which the type lowering rejects. This is what blocks the lib/ `Stats`
+/// gatherer, whose sample array feeds `sum`, a deviation `map`, `minimum`, and
+/// `maximum`. Distinct from `returning_runtime_sized_array_from_fn_lowers`,
+/// which is about *returning* such an array.
+#[test]
+#[ignore = "gap: a runtime-sized array with 2+ consumers must materialize as an unsized Composite array"]
+fn runtime_sized_array_with_multiple_consumers_lowers() {
+    let source = r#"
+def g(n: i32) f32 =
+    let xs = map(|i: i32| f32.i32(i), 0i32 ..< n) in
+    f32.sum(xs) + f32.maximum(xs)
+#[compute]
+entry e() f32 = g(256)
+"#;
+    compile_to_spirv(source)
+        .expect("a runtime-sized array read by multiple consumers should lower to SPIR-V");
+}
+
 /// The reified operator members on the builtin numeric modules — `i32.(+)`,
 /// `f32.(<)`, `u32.(<<)`, etc. — resolve as real module functions and lower.
 /// The `(op)` form is the function reification of the primitive infix BinOp;
