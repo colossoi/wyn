@@ -1,0 +1,14 @@
+import "../dist"
+import "../disttest"
+
+-- Standard-normal samples (Box–Muller), one independent draw per index — each
+-- consumes two positions, so stride by 2. Reference moments: mean 0, var 1.
+def N: i32 = 65536
+
+module sampler : SAMPLER = {
+  def sample(i: u32) f32 = fhdist.normal(fhdist.seed(0x9e3779b9u32), i * 2u32)
+}
+module gather = Stats(sampler)
+
+#[compute]
+entry stats_normal() [6]f32 = gather.summarize(N)

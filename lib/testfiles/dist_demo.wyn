@@ -1,0 +1,25 @@
+import "../dist"
+
+def SEED: u32 = 0x9e3779b9u32
+def N: i32 = 256
+
+-- Standard-normal samples, one independent draw per index (each consumes two
+-- positions, so stride the position by 2). Exercises the `Distributions`
+-- functor and, through it, the pure `dist.normal` Box–Muller transform.
+#[compute]
+entry dist_normal_fill() []f32 =
+  let key = fhdist.seed(SEED) in
+  map(|i: i32| fhdist.normal(key, u32.i32(i) * 2u32), 0i32 ..< N)
+
+-- A mix of the one-uniform samplers in a single pass: uniform real,
+-- exponential, and uniform int folded together so all three lower.
+#[compute]
+entry dist_mixed_fill() []f32 =
+  let key = fhdist.seed(SEED) in
+  map(|i: i32|
+        let p = u32.i32(i) * 3u32 in
+        let a = fhdist.uniform(key, p, 1.0f32, 3.0f32) in
+        let b = fhdist.exponential(key, p + 1u32, 2.0f32) in
+        let c = fhdist.uniform_int(key, p + 2u32, 0i32, 6i32) in
+        a + b + f32.i32(c),
+      0i32 ..< N)

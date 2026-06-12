@@ -1,0 +1,79 @@
+-- | Probability-distribution sampling for the `rng` generators.
+--
+-- The core is `dist` — pure functions that reshape a uniform draw
+-- `u ∈ [0, 1)` (or two, for `normal`) into another distribution. They take
+-- the uniforms as arguments and touch no generator, so they are trivially
+-- testable and independent of which `rng` backend produced the bits.
+--
+-- `Distributions(G)` wires those transforms to a random-access generator so
+-- you can draw straight from a `(key, position)`; `fhdist` and `tfdist` are
+-- it applied to `fasthash` and `threefry`. Each sampler documents how many
+-- consecutive positions it consumes — advance your position by that many to
+-- get an independent next draw.
+import "rng"
+
+-- | Pure distribution transforms over uniform draws `u ∈ [0, 1)`.
+module dist = {
+  -- | Uniform real on `[lo, hi)`. Consumes one uniform.
+  def uniform(u: f32, lo: f32, hi: f32) f32 = lo + u * (hi - lo)
+
+  -- | Uniform integer on `[lo, hi)` (half-open). Consumes one uniform.
+  def uniform_int(u: f32, lo: i32, hi: i32) i32 =
+    lo + i32.f32(f32.floor(u * f32.i32(hi - lo)))
+
+  -- | A coin that lands `true` with probability `p`. Consumes one uniform.
+  def bernoulli(u: f32, p: f32) bool = u < p
+
+  -- | Exponential with the given `rate` (λ); mean `1/rate`. Uses `1 - u` so
+  -- the argument to `log` stays in `(0, 1]` and never hits `log 0`. Consumes
+  -- one uniform.
+  def exponential(u: f32, rate: f32) f32 =
+    (0.0f32 - f32.log(1.0f32 - u)) / rate
+
+  -- | Standard normal (mean 0, variance 1) via the Box–Muller transform.
+  -- Consumes two uniforms; `normal2` returns the second deviate the same
+  -- transform produces for free.
+  def normal(u0: f32, u1: f32) f32 =
+    let r = f32.sqrt(0.0f32 - 2.0f32 * f32.log(1.0f32 - u0)) in
+    r * f32.cos(2.0f32 * f32.pi * u1)
+
+  -- | Both independent standard-normal deviates from one Box–Muller pair.
+  -- Consumes two uniforms.
+  def normal2(u0: f32, u1: f32) (f32, f32) =
+    let r = f32.sqrt(0.0f32 - 2.0f32 * f32.log(1.0f32 - u0)) in
+    let theta = 2.0f32 * f32.pi * u1 in
+    (r * f32.cos(theta), r * f32.sin(theta))
+}
+
+-- | Draw distributions straight from a random-access generator `G`: each
+-- sampler reads `G.at_f32` at the given position(s) and shapes it with the
+-- matching `dist` transform.
+functor Distributions(G: RANDOM_ACCESS) = {
+  -- | Whiten a raw seed into a key for this generator — re-exported from `G`
+  -- so distribution code needn't reach into `rng` directly.
+  def seed(s: u32) G.key = G.seed(s)
+
+  -- | Uniform real on `[lo, hi)` at `pos`. One position.
+  def uniform(k: G.key, pos: u32, lo: f32, hi: f32) f32 =
+    dist.uniform(G.at_f32(k, pos), lo, hi)
+
+  -- | Uniform integer on `[lo, hi)` at `pos`. One position.
+  def uniform_int(k: G.key, pos: u32, lo: i32, hi: i32) i32 =
+    dist.uniform_int(G.at_f32(k, pos), lo, hi)
+
+  -- | Coin with probability `p` at `pos`. One position.
+  def bernoulli(k: G.key, pos: u32, p: f32) bool =
+    dist.bernoulli(G.at_f32(k, pos), p)
+
+  -- | Exponential with `rate` at `pos`. One position.
+  def exponential(k: G.key, pos: u32, rate: f32) f32 =
+    dist.exponential(G.at_f32(k, pos), rate)
+
+  -- | Standard normal at `pos`; draws `pos` and `pos + 1`. Two positions.
+  def normal(k: G.key, pos: u32) f32 =
+    dist.normal(G.at_f32(k, pos), G.at_f32(k, pos + 1u32))
+}
+
+-- | The distribution view of each generator.
+module fhdist = Distributions(fasthash)
+module tfdist = Distributions(threefry)

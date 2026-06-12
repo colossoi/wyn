@@ -1,0 +1,42 @@
+-- | A statistics gatherer for the `rng` and `dist` generators.
+--
+-- Define a `SAMPLER` — a pure `sample(i) : f32` series indexed by position —
+-- instantiate `Stats(S)`, and `summarize(n)` reduces the first `n` values to
+-- a small summary buffer you can read back off the GPU and eyeball against a
+-- distribution's known moments. It computes statistics; it asserts nothing.
+--
+-- Generator-agnostic: the sampler can wrap a raw `rng` draw
+-- (`fasthash.at_f32`) just as well as any `dist`/`Distributions` sampler.
+
+-- | A series under test: the `i`-th value as a pure function of its index.
+module type SAMPLER = {
+  sig sample(i: u32) f32
+}
+
+-- | Reduce a sampler's first `n` values to summary statistics.
+functor Stats(S: SAMPLER) = {
+  -- | `[count, mean, variance, stddev, min, max]` over samples `0 .. n-1`,
+  -- packed as a 6-element buffer. Compare `mean`/`variance` against the
+  -- distribution's known moments (uniform `[0,1)` → 0.5, 1/12 ≈ 0.0833;
+  -- standard normal → 0, 1; exponential rate λ → 1/λ, 1/λ²).
+  --
+  -- One streaming pass: a single `reduce` over a `(sum, sumsq, min, max)`
+  -- accumulator fed by a fusing `map`, so the sample series never materializes
+  -- as an intermediate array (a runtime-sized array with multiple consumers
+  -- doesn't lower — see the `runtime_sized_array_with_multiple_consumers`
+  -- gap). Variance is `E[x²] − E[x]²`: one pass, less numerically stable than
+  -- two-pass Welford but fine for eyeballing moments.
+  def summarize(n: i32) [6]f32 =
+    let acc =
+      reduce(
+        |a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)|
+          (a.0 + b.0, a.1 + b.1, f32.min(a.2, b.2), f32.max(a.3, b.3)),
+        (0.0f32, 0.0f32, f32.highest, f32.lowest),
+        map(|i: i32| let x = S.sample(u32.i32(i)) in (x, x * x, x, x), 0i32 ..< n)
+      )
+    in
+    let cnt = f32.i32(n) in
+    let mean = acc.0 / cnt in
+    let variance = acc.1 / cnt - mean * mean in
+    [cnt, mean, variance, f32.sqrt(variance), acc.2, acc.3]
+}
