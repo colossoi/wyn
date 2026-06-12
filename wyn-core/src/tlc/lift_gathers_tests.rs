@@ -76,6 +76,60 @@ fn walk(term: &Term, f: &mut impl FnMut(&Term)) {
 }
 
 #[test]
+fn gather_decision_is_the_authority_and_matches_execution() {
+    // `gather_decision` is the single total authority over gather residency; the
+    // executor (`run`) trusts it. Pin both halves: the decision classifies
+    // `counts` as a `Gather`, and execution materializes exactly that gather —
+    // decision == execution.
+    let program = ownership_applied(GATHER_SRC);
+    let idx = program
+        .defs
+        .iter()
+        .position(|d| program.symbols.get(d.name).map(|n| n == "gen").unwrap_or(false))
+        .expect("gen entry");
+    let (param_bindings, _) = super::entry_layout(&program, idx).expect("gen is a compute entry");
+
+    // Peel the entry's parameter lambda to the `let counts = map(..) in ..` tail.
+    let mut t = &program.defs[idx].body;
+    while let TermKind::Lambda(lam) = &t.kind {
+        t = &lam.body;
+    }
+    let TermKind::Let {
+        name,
+        name_ty,
+        rhs,
+        body,
+    } = &t.kind
+    else {
+        panic!("expected `let counts = map(..) in ..` at the entry tail");
+    };
+
+    let decision = super::gather_decision(
+        *name,
+        name_ty,
+        rhs,
+        (**body).clone(),
+        &param_bindings,
+        0,
+        &program,
+    );
+    assert!(
+        matches!(decision, super::GatherDecision::Gather(_)),
+        "a randomly-indexed runtime-sized `map` result must be decided `Gather`"
+    );
+
+    let lifted = super::run(program);
+    assert!(
+        lifted.defs.iter().any(|d| lifted
+            .symbols
+            .get(d.name)
+            .map(|n| n.contains("_gather_0"))
+            .unwrap_or(false)),
+        "the `Gather` decision must execute into a `gen_gather_0` prepass"
+    );
+}
+
+#[test]
 fn lifts_map_gather_into_prepass_and_storage_index() {
     let program = ownership_applied(GATHER_SRC);
     assert!(

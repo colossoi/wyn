@@ -298,26 +298,17 @@ fn subst_var(term: Term, from: SymbolId, to: SymbolId) -> Term {
     term.map_children(&mut |c| subst_var(c, from, to))
 }
 
-/// Lift gather sites out of a single compute entry at `program.defs[idx]`.
-fn lift_entry(program: &mut Program, idx: usize, new_defs: &mut Vec<Def>) {
-    let entry_name = crate::symbol_name_or_bug(&program.symbols, program.defs[idx].name).to_string();
-    let body = program.defs[idx].body.clone();
-
-    // Gather buffers must sit above the consumer's own auto-allocated
-    // bindings: input-view params occupy `0..view_count`, and `from_tlc`
-    // places this entry's storage outputs at `view_count..view_count +
-    // out_count` (see `build_entry_outputs`). So the first free binding for a
-    // gather intermediate is `view_count + out_count`.
-    let (params, _tail) = peel_lambda_params(&body);
-    let decl = match &program.defs[idx].meta {
-        DefMeta::EntryPoint(d) => (**d).clone(),
-        _ => return,
+/// The gather-relevant storage layout of a compute entry: the `Var(sym) →
+/// (set, binding)` map for its input-array params (gather producers reference
+/// these by bare `Var`; tuple-of-views params aren't gather sources), and the
+/// total input-view buffer count. `None` if `program.defs[idx]` isn't an entry.
+/// Shared by [`lift_entry`] (the executor) and [`gather_decision`] callers.
+pub(crate) fn entry_layout(program: &Program, idx: usize) -> Option<(HashMap<SymbolId, (u32, u32)>, u32)> {
+    let (params, _tail) = peel_lambda_params(&program.defs[idx].body);
+    let DefMeta::EntryPoint(decl) = &program.defs[idx].meta else {
+        return None;
     };
-    let slots = crate::binding_layout::compute_entry_binding_layout(&params, &decl, AUTO_STORAGE_SET);
-    // A producer `map(f, src)` whose `src` is one of these params produces an
-    // array with `src`'s element count — used to size the gather buffer.
-    // Tuple-of-views params aren't gather sources (gather references bare
-    // `Var(sym)`, never tuple projections), so we only index Single bindings.
+    let slots = crate::binding_layout::compute_entry_binding_layout(&params, decl, AUTO_STORAGE_SET);
     let param_bindings: HashMap<SymbolId, (u32, u32)> = slots
         .iter()
         .flatten()
@@ -329,6 +320,26 @@ fn lift_entry(program: &mut Program, idx: usize, new_defs: &mut Vec<Def>) {
         })
         .collect();
     let view_count: u32 = slots.iter().flatten().map(|b| b.buffer_count()).sum();
+    Some((param_bindings, view_count))
+}
+
+/// Lift gather sites out of a single compute entry at `program.defs[idx]`.
+fn lift_entry(program: &mut Program, idx: usize, new_defs: &mut Vec<Def>) {
+    let entry_name = crate::symbol_name_or_bug(&program.symbols, program.defs[idx].name).to_string();
+    let body = program.defs[idx].body.clone();
+
+    // Gather buffers must sit above the consumer's own auto-allocated
+    // bindings: input-view params occupy `0..view_count`, and `from_tlc`
+    // places this entry's storage outputs at `view_count..view_count +
+    // out_count` (see `build_entry_outputs`). So the first free binding for a
+    // gather intermediate is `view_count + out_count`.
+    let Some((param_bindings, view_count)) = entry_layout(program, idx) else {
+        return;
+    };
+    let decl = match &program.defs[idx].meta {
+        DefMeta::EntryPoint(d) => (**d).clone(),
+        _ => return,
+    };
     // Number of storage-output slots the entry declared. Reading off
     // `decl.outputs.len()` is exact — one entry per declared output
     // (tuple-returning entries get one EntryOutput per field).
@@ -501,21 +512,55 @@ fn lift_in_term(
     }
 }
 
-/// Attempt to lift `let name = rhs in body`. Returns the gather pre-pass def,
-/// the consumer's new Input binding decl, and the rewritten body (with each
-/// `name[idx]` replaced by a `storage_index` load and the `let` dropped), or
-/// `None` if this isn't a liftable gather site.
-fn try_lift(
+/// The gather-residency decision for one `let name = rhs in body`. The single
+/// authority over *whether* a computed array becomes a gather buffer: the
+/// executor ([`try_lift`]) trusts it, and `producer_plan` surfaces it as the
+/// planner's `Strategy::StoragePrepass(Gather)`. Total — it never silently
+/// declines a demanded-but-impossible gather:
+///
+///   * [`GatherDecision::Gather`] — semantic *and* capability gates pass; the
+///     executor is then guaranteed to materialize it (no `bail` downstream).
+///   * [`GatherDecision::Unsupported`] — the array is demanded as a gather
+///     (randomly indexed / multi-consumed) but a capability gate fails (a
+///     producer free var isn't an entry-param array, or a use can't be rewritten
+///     to a storage read). Carries a reason; the executor leaves it in place for
+///     the Stage-1 `from_tlc` clean-reject to catch.
+///   * [`GatherDecision::NotGather`] — not a gather producer at all (not a
+///     runtime-sized map/scan, or consumed only wholesale, not per element).
+pub(crate) enum GatherDecision {
+    Gather(GatherPlan),
+    Unsupported(String),
+    NotGather,
+}
+
+/// Everything the executor needs to materialize a [`GatherDecision::Gather`],
+/// computed once by [`gather_decision`] so the executor re-derives nothing.
+pub(crate) struct GatherPlan {
+    /// `body` with every `name[idx]` rewritten to a `storage_index` load and
+    /// every `Ref(Var(name))` SOAC input to a storage-view read.
+    rewritten: Term,
+    frees: Vec<(SymbolId, Type<TypeName>)>,
+    elem_ty: Type<TypeName>,
+    length: Option<crate::pipeline_descriptor::BufferLen>,
+    chained: Vec<(u32, u32, Type<TypeName>)>,
+    binding: (u32, u32),
+    name_ty: Type<TypeName>,
+    rhs: Term,
+}
+
+/// Decide a `let name = rhs in body` gather site — read-only over `program`, so
+/// it doubles as the planner's pure query and the executor's gate. `binding_num`
+/// is the storage binding the rewrite would target; its value doesn't affect the
+/// decision (only the rewritten body the executor consumes).
+pub(crate) fn gather_decision(
     name: SymbolId,
     name_ty: &Type<TypeName>,
     rhs: &Term,
     body: Term,
-    entry_name: &str,
     param_bindings: &HashMap<SymbolId, (u32, u32)>,
     binding_num: u32,
-    gather_idx: usize,
-    program: &mut Program,
-) -> Option<(Def, StorageBindingDecl, Term)> {
+    program: &Program,
+) -> GatherDecision {
     // Producer must be an array-yielding SOAC (`map` or `scan`) of a
     // runtime-sized array. Both preserve element count, so the gather buffer
     // tracks the producer's input length.
@@ -524,9 +569,11 @@ fn try_lift(
         TermKind::Soac(SoacOp::Map { .. }) | TermKind::Soac(SoacOp::Scan { .. })
     );
     if !is_array_producer || !is_runtime_sized_array(name_ty) {
-        return None;
+        return GatherDecision::NotGather;
     }
-    let elem_ty = crate::types::array_elem(name_ty).cloned()?;
+    let Some(elem_ty) = crate::types::array_elem(name_ty).cloned() else {
+        return GatherDecision::NotGather;
+    };
 
     // The pre-pass re-declares the producer's free variables as its own input
     // params, so every one must be an entry-param input array (Phase 1). A
@@ -536,16 +583,20 @@ fn try_lift(
     // folded any `map` producer into the scan/map, so a `scan(op, ne, map(g,
     // xs))` arrives reading `xs` directly.)
     let frees = free_symbol_vars(rhs, &program.symbols, &program.def_syms);
-    if !frees.iter().all(|(s, ty)| is_runtime_sized_array(ty) && param_bindings.contains_key(s)) {
-        return None;
+    if let Some((s, _)) =
+        frees.iter().find(|(s, ty)| !(is_runtime_sized_array(ty) && param_bindings.contains_key(s)))
+    {
+        let fname = crate::symbol_name_or_bug(&program.symbols, *s);
+        return GatherDecision::Unsupported(format!(
+            "gather producer free var `{fname}` is not a runtime-sized entry-param array"
+        ));
     }
 
     // Rewrite `name[idx]` → storage_index and `ArrayExpr::Ref(Var(name))`
-    // → `ArrayExpr::StorageBuffer{…}` on a trial copy; bail if `name` is used
-    // any other way (a bare Var in a non-SOAC-input position), or if no use is
-    // a dynamic index nor a SOAC input. Multi-consumer is fine: every
-    // downstream Index *and* every downstream SOAC input gets routed to the
-    // same gather buffer.
+    // → `ArrayExpr::StorageBuffer{…}`; bail if `name` is used any other way (a
+    // bare Var in a non-SOAC-input position), or if no use is a dynamic index
+    // nor a SOAC input. Multi-consumer is fine: every downstream Index *and*
+    // every downstream SOAC input gets routed to the same gather buffer.
     let binding = (AUTO_STORAGE_SET, binding_num);
     let mut bail = false;
     let mut dyn_uses = 0usize;
@@ -564,8 +615,16 @@ fn try_lift(
         &mut soac_uses,
         &mut term_ids,
     );
-    if bail || (dyn_uses + soac_uses == 0) {
-        return None;
+    if bail {
+        let cname = crate::symbol_name_or_bug(&program.symbols, name);
+        return GatherDecision::Unsupported(format!(
+            "computed array `{cname}` is used in a position that can't read from a storage buffer"
+        ));
+    }
+    if dyn_uses + soac_uses == 0 {
+        // Consumed only wholesale (never randomly indexed nor as a SOAC input):
+        // not a gather. Some other strategy (fuse / view) owns it.
+        return GatherDecision::NotGather;
     }
 
     // The gather buffer holds `map(f, src)`'s output: one element per `src`
@@ -579,15 +638,54 @@ fn try_lift(
     // descriptor wires up the cross-stage read.
     let chained = producer_storage_inputs(rhs);
 
+    GatherDecision::Gather(GatherPlan {
+        rewritten,
+        frees,
+        elem_ty,
+        length,
+        chained,
+        binding,
+        name_ty: name_ty.clone(),
+        rhs: rhs.clone(),
+    })
+}
+
+/// Execute the gather residency decision for `let name = rhs in body`. Returns
+/// the gather pre-pass def, the consumer's new Input binding decl, and the
+/// rewritten body, or `None` when [`gather_decision`] declines (`NotGather`) or
+/// reports the site `Unsupported` (left in place for the Stage-1 clean-reject).
+/// On `Gather` the executor *trusts* the decision: `gather_decision` already
+/// rewrote the body, so no `bail` can occur here.
+fn try_lift(
+    name: SymbolId,
+    name_ty: &Type<TypeName>,
+    rhs: &Term,
+    body: Term,
+    entry_name: &str,
+    param_bindings: &HashMap<SymbolId, (u32, u32)>,
+    binding_num: u32,
+    gather_idx: usize,
+    program: &mut Program,
+) -> Option<(Def, StorageBindingDecl, Term)> {
+    let plan = match gather_decision(name, name_ty, rhs, body, param_bindings, binding_num, program) {
+        GatherDecision::Gather(plan) => plan,
+        GatherDecision::Unsupported(reason) => {
+            log::debug!("lift_gathers: {reason}");
+            return None;
+        }
+        GatherDecision::NotGather => return None,
+    };
+
+    let mut term_ids = TermIdSource::new();
     let prepass = build_gather_prepass(
         entry_name,
         gather_idx,
-        rhs.clone(),
-        name_ty.clone(),
-        &frees,
-        binding,
-        length.clone(),
-        &chained,
+        plan.rhs,
+        plan.name_ty,
+        &plan.frees,
+        plan.binding,
+        plan.length.clone(),
+        &plan.chained,
         program,
         &mut term_ids,
     );
@@ -595,12 +693,12 @@ fn try_lift(
     // sizing policy. `from_tlc` emits any length-bearing storage binding as a
     // compiler-managed Intermediate in the descriptor (read-only here).
     let decl = StorageBindingDecl {
-        binding: crate::BindingRef::new(binding.0, binding.1),
+        binding: crate::BindingRef::new(plan.binding.0, plan.binding.1),
         role: StorageRole::Input,
-        elem_ty,
-        length,
+        elem_ty: plan.elem_ty,
+        length: plan.length,
     };
-    Some((prepass, decl, rewritten))
+    Some((prepass, decl, plan.rewritten))
 }
 
 /// Sizing policy for the gather buffer: `LikeInput` of the producer's first
