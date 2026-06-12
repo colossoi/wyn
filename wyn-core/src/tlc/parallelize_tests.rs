@@ -875,15 +875,15 @@ fn single_entry_two_independent_scans_then_gather_yields_many_stages() {
     );
 }
 
-/// Single entry with a reduce + scan + tail map, where the tail gathers
-/// the scan but consumes the reduce as a scalar. **Finding:** only the
-/// scan gets hoisted (its array result is gathered); the reduce stays
-/// inline in the consumer because `lift_gathers` only extracts SOACs
-/// whose results are *indexed*, and a reduce's scalar result isn't.
-/// Pins the asymmetry: parallel hoisting follows gather sites, not
-/// SOAC-in-let-RHS structure.
+/// Single entry with a reduce + scan + tail map, where the tail gathers the
+/// scan and consumes the reduce as a captured scalar. Both hoist: the scan via
+/// `lift_gathers` (its array result is indexed), the reduce via
+/// `lift_compute_scalar_reduces` (the planner marks the captured scalar
+/// `ScalarBroadcast`). 3 pipelines (scan + reduce + consumer), 6 stages
+/// (3 scan + 2 reduce + 1 consumer).
 #[test]
-fn single_entry_only_gathered_soacs_get_hoisted_not_scalar_reduces() {
+#[ignore = "spike target: producer-consumer plan (not ported)"]
+fn single_entry_scan_and_scalar_reduce_both_hoist() {
     let src = r#"
         #[compute]
         entry e(xs: []i32) []i32 =
@@ -903,15 +903,15 @@ fn single_entry_only_gathered_soacs_get_hoisted_not_scalar_reduces() {
         .collect();
     assert_eq!(
         desc.pipelines.len(),
-        2,
-        "scan hoisted (gathered), reduce stays inline (scalar consumer): {kinds:?}, \
+        3,
+        "scan hoisted (gathered) + reduce hoisted (ScalarBroadcast) + consumer: {kinds:?}, \
          compute entries={}",
         compute_entry_count(&program)
     );
     assert_eq!(
         total_compute_stages(&desc),
-        4,
-        "3 (scan) + 1 (consumer with inline reduce) = 4; {kinds:?}"
+        6,
+        "3 (scan) + 2 (reduce) + 1 (consumer) = 6; {kinds:?}"
     );
 }
 
@@ -952,17 +952,15 @@ fn single_entry_two_gathers_of_same_scan_share_one_producer() {
     );
 }
 
-/// Single entry with three independent reduces in let-RHS, all consumed
-/// as scalars in the tail map. **Finding:** none of the reduces hoist
-/// — the entire entry compiles as a *single non-parallelized* Compute
-/// pipeline that loops the reduces inline. Because `lift_gathers` only
-/// extracts SOACs feeding gather sites and reduces produce scalars (no
-/// gather), three reduces in scalar position get serialized into the
-/// kernel body. Concretely demonstrates the limitation: today, scalar
-/// SOAC results in let-RHS aren't hoisted to their own pipelines, even
-/// when they're independent and would benefit from parallel execution.
+/// Single entry with three independent reduces in let-RHS, all consumed as
+/// scalars in the tail map. Each reduce is captured into the consumer lambda
+/// (the lane var `i` is out of scope at the lets), so the planner marks all
+/// three `ScalarBroadcast` and `lift_compute_scalar_reduces` hoists each into
+/// its own two-phase pre-pass: 4 pipelines (3 reduces + consumer), 7 stages
+/// (2 + 2 + 2 + 1).
 #[test]
-fn single_entry_scalar_reduces_in_let_rhs_stay_inline_not_hoisted() {
+#[ignore = "spike target: producer-consumer plan (not ported)"]
+fn single_entry_scalar_reduces_in_let_rhs_each_hoist() {
     let src = r#"
         #[compute]
         entry e(xs: []i32) []i32 =
@@ -983,15 +981,14 @@ fn single_entry_scalar_reduces_in_let_rhs_stay_inline_not_hoisted() {
         .collect();
     assert_eq!(
         desc.pipelines.len(),
-        1,
-        "scalar reduces in let-RHS don't hoist; whole entry stays in one pipeline: {kinds:?}, \
-         compute entries={}",
+        4,
+        "3 reduce pre-passes + consumer map: {kinds:?}, compute entries={}",
         compute_entry_count(&program)
     );
     assert_eq!(
         total_compute_stages(&desc),
-        1,
-        "single Compute, inline reduces: {kinds:?}"
+        7,
+        "2 + 2 + 2 (reduces) + 1 (consumer) = 7: {kinds:?}"
     );
 }
 
@@ -1067,28 +1064,22 @@ fn two_entries_each_with_scan_then_gather_yield_many_stages() {
 }
 
 // =============================================================================
-// Aspirational tests — pin limitations as `#[ignore]`d failing tests
+// Scalar-reduce hoisting (producer-consumer planner ScalarBroadcast)
 // =============================================================================
 //
-// These describe behavior we'd *like* parallelize to have but doesn't today.
-// Marked `#[ignore]` with a `reason` so they don't fail CI, but `cargo test
-// -- --ignored` runs them. When someone teaches the parallelizer to do
-// what these expect, the assertions will pass and the `#[ignore]` can come
-// off — turning each into a regression guard.
+// A scalar SOAC result (`reduce`/`redomap`) bound in a top-level let and
+// consumed *per element* inside the tail SOAC's operator lambda is marked
+// `StoragePrepass(ScalarBroadcast)` by the producer-consumer planner and
+// hoisted by `lift_compute_scalar_reduces` into its own two-phase reduce
+// pre-pass — instead of being serialized inline in the consumer kernel (which
+// would run the O(N) reduce once per consumer thread).
 
-/// **Aspiration:** a scalar SOAC result (here, `reduce`) in let-RHS,
-/// consumed inside the tail SOAC, should be hoisted into its own
-/// parallel pipeline rather than serialized inline in the consumer.
-///
-/// **Today:** `lift_gathers` only extracts SOACs that feed *array*
-/// indexing (`arr[i]`). A reduce returns a scalar, so it's never gathered
-/// → stays inline in the consumer's kernel as a single-thread sequential
-/// loop (effectively O(N) per consumer thread; for a map of M threads
-/// over a reduce of N inputs, this is M×N work for N total work).
-///
-/// **Ideal shape:** 2 pipelines (reduce 2-stage + map 1-stage), 3 stages.
+/// One captured scalar reduce → 2 pipelines (reduce 2-stage + consumer map
+/// 1-stage), 3 stages. The lane variable `i` is the consumer lambda's
+/// parameter, out of scope at `let s`, so the reduce is invariant across the
+/// map and the hoist is sound.
 #[test]
-#[ignore = "scalar reduce in let-RHS is not hoisted — quadratic blowup; needs lift_scalar_soacs (or extension to lift_gathers)"]
+#[ignore = "spike target: producer-consumer plan (not ported)"]
 fn aspiration_scalar_reduce_in_let_rhs_should_hoist() {
     let src = r#"
         #[compute]
@@ -1109,15 +1100,10 @@ fn aspiration_scalar_reduce_in_let_rhs_should_hoist() {
     );
 }
 
-/// **Aspiration:** two independent scalar reduces in let-RHS, both
-/// consumed in the tail, should each hoist into their own pipeline.
-///
-/// **Today:** neither reduce hoists; the whole entry compiles as a
-/// single non-parallelized Compute that runs both reduces inline.
-///
-/// **Ideal shape:** 3 pipelines (reduce₁ + reduce₂ + consumer), 5 stages.
+/// Two independent captured scalar reduces → each hoists into its own
+/// two-phase pre-pass: 3 pipelines (reduce₁ + reduce₂ + consumer), 5 stages.
 #[test]
-#[ignore = "multiple scalar reduces in let-RHS stay inline; needs hoisting of non-gathered SOAC results"]
+#[ignore = "spike target: producer-consumer plan (not ported)"]
 fn aspiration_two_scalar_reduces_in_let_rhs_should_each_hoist() {
     let src = r#"
         #[compute]

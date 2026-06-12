@@ -1851,14 +1851,12 @@ fn compile_to_ssa_with_modules(input: &str) -> Program {
 // when the gap is closed.
 // =========================================================================
 
-/// Gap: returning a runtime-sized `[]f32` from a (non-entry) function and then
-/// indexing it panics the backend with "Composite variant unsized arrays not
-/// supported" (`spirv/mod.rs`), instead of lowering the result as a
-/// runtime-length array. A let-bound map + index, and a reduce over the same
-/// array, both lower fine — it's specifically a function *return* of an
-/// unsized Composite array that the type lowering rejects.
+/// Returning a runtime-sized `[]f32` from a helper and reading one *constant*
+/// slot. `g` inlines to `map(|i| f32.i32(i), 0..<256)`, and `static_index_fusion`
+/// rewrites `map(f, src)[3]` → `let i = src[3] in f32.i32(i)` — a virtual-array
+/// access, materializing nothing rather than a whole runtime-sized buffer.
 #[test]
-#[ignore = "gap: returning a runtime-sized array from a function panics SPIR-V type lowering"]
+#[ignore = "spike target: needs static_index_fusion"]
 fn returning_runtime_sized_array_from_fn_lowers() {
     let source = r#"
 def g(n: i32) []f32 = map(|i: i32| f32.i32(i), 0i32 ..< n)
@@ -1866,6 +1864,25 @@ def g(n: i32) []f32 = map(|i: i32| f32.i32(i), 0i32 ..< n)
 entry e() [1]f32 = [g(256)[3]]
 "#;
     compile_to_spirv(source).expect("returning a runtime-sized array should lower to SPIR-V");
+}
+
+/// The runtime counterpart of the static fusion above: a *runtime* index into a
+/// nested runtime-sized producer (`g(256)[j]`). With no fused form (fusion is
+/// literal-index only), `lift_gathers`'s post-materialize pass floats the nested
+/// producer to an entry-level `let` (inlining its internal `let n = 256` so the
+/// map is self-contained) and materializes it to a gather buffer; the runtime
+/// index then reads the buffer. Distinct from the static case, which never
+/// materializes.
+#[test]
+#[ignore = "spike target: post-materialize gather lift (not ported)"]
+fn runtime_index_into_nested_producer_lowers() {
+    let source = r#"
+def g(n: i32) []f32 = map(|i: i32| f32.i32(i), 0i32 ..< n)
+#[compute]
+entry e(j: i32) [1]f32 = [g(256)[j]]
+"#;
+    compile_to_spirv(source)
+        .expect("a runtime index into a nested runtime-sized producer should materialize + lower");
 }
 
 /// Gap: a runtime-sized array with *two or more* consumers panics the backend
@@ -1878,7 +1895,7 @@ entry e() [1]f32 = [g(256)[3]]
 /// `maximum`. Distinct from `returning_runtime_sized_array_from_fn_lowers`,
 /// which is about *returning* such an array.
 #[test]
-#[ignore = "gap: a runtime-sized array with 2+ consumers must materialize as an unsized Composite array"]
+#[ignore = "spike target: post-materialize gather lift (not ported)"]
 fn runtime_sized_array_with_multiple_consumers_lowers() {
     let source = r#"
 def g(n: i32) f32 =
@@ -3284,33 +3301,19 @@ entry e(xs: []i32) []i32 = stencil(xs)
     );
 }
 
-/// GAP: a computed array consumed by random index (a gather) whose producer is in
-/// a **helper** isn't supported — `lift_gathers` runs before the producer is
-/// materialized, so the gather array reaches the backend as a runtime-sized
-/// Composite and **panics** (`spirv::polytype_to_spirv`, the unsized-Composite
-/// arm). It *should* be a clean compile error instead. The body below asserts
-/// that desired behavior; un-ignore when the panic→error fix lands. (Same shape
-/// also panics on master via `inline_small`, so this is a pre-existing
-/// limitation, not a regression from the materialize pass.)
+/// Guard for the runtime-sized-index clean-rejection (above): a *statically
+/// sized* composite array must still index fine. The clean-reject keys on
+/// runtime (unsized) Composite size, so a `[N]T` local indexed at runtime
+/// lowers as before, not rejected.
 #[test]
-#[ignore = "cross-function gather: runtime-sized composite indexed → backend panic; \
-            want a clean error (panic→error fix not yet done)"]
-fn cross_function_gather_errors_cleanly() {
-    let r = crate::compile_thru_spirv(
-        "\
-def counts(xs: []i32) []i32 = map(|x: i32| x * 2i32, xs)
+fn sized_composite_array_runtime_index_still_lowers() {
+    let source = r#"
 #[compute]
-entry g(xs: []i32) []i32 =
-  let c = counts(xs) in
-  map(|i: i32| c[i % 8i32], iota(64))
-",
-    );
-    let err = r.err().expect("cross-function gather must be a compile error, not success/panic");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("runtime-sized") && msg.contains("index"),
-        "error should explain the un-lifted runtime-sized gather, got: {msg}",
-    );
+entry e(i: i32) i32 =
+    let m: [4]i32 = [10, 20, 30, 40] in
+    m[i]
+"#;
+    compile_to_spirv(source).expect("runtime index into a statically-sized array should lower");
 }
 
 /// Invariant, end to end: a SOAC helper called *per element* inside a `map`
