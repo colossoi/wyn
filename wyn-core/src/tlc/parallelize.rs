@@ -993,18 +993,21 @@ fn lift_graphical_invariant_soacs(
         // Transitive set of symbols that depend on per-invocation params. The
         // lift pass refuses to hoist any SOAC whose free vars intersect it.
         let tainted = compute_taint_set(&body, &entry_params, &program.symbols);
-        let new_body = lift_in_term(
-            body,
-            &entry_name,
-            &tainted,
-            &uniform_params,
-            next_binding,
-            &mut added_decls,
-            &mut new_defs,
-            prepass_result_bindings,
-            program,
-            term_ids,
-        );
+        let new_body = walk_lets_mut(body, &mut |_name, name_ty, rhs| {
+            maybe_hoist(
+                rhs,
+                &entry_name,
+                name_ty,
+                &tainted,
+                &uniform_params,
+                next_binding,
+                &mut added_decls,
+                &mut new_defs,
+                prepass_result_bindings,
+                program,
+                term_ids,
+            )
+        });
 
         program.defs[idx].body = new_body;
         if let DefMeta::EntryPoint(ref mut decl) = program.defs[idx].meta {
@@ -1013,6 +1016,55 @@ fn lift_graphical_invariant_soacs(
     }
 
     program.defs.extend(new_defs);
+}
+
+/// Walk the outer `Lambda`/`Let` spine, replacing each let's RHS via
+/// `transform(name, name_ty, rhs)`. Stops at the first non-Lambda/non-Let term
+/// (the tail computation isn't a hoist site). The shared spine for the graphics
+/// and compute pre-pass hoists — each supplies its own per-let transform.
+fn walk_lets_mut(term: Term, transform: &mut impl FnMut(SymbolId, &Type<TypeName>, Term) -> Term) -> Term {
+    let Term { id, ty, span, kind } = term;
+    match kind {
+        TermKind::Lambda(Lambda { params, body, ret_ty }) => {
+            let new_body = walk_lets_mut(*body, transform);
+            Term {
+                id,
+                ty,
+                span,
+                kind: TermKind::Lambda(Lambda {
+                    params,
+                    body: Box::new(new_body),
+                    ret_ty,
+                }),
+            }
+        }
+        TermKind::Let {
+            name,
+            name_ty,
+            rhs,
+            body,
+        } => {
+            let new_rhs = transform(name, &name_ty, *rhs);
+            let new_body = walk_lets_mut(*body, transform);
+            Term {
+                id,
+                ty,
+                span,
+                kind: TermKind::Let {
+                    name,
+                    name_ty,
+                    rhs: Box::new(new_rhs),
+                    body: Box::new(new_body),
+                },
+            }
+        }
+        other => Term {
+            id,
+            ty,
+            span,
+            kind: other,
+        },
+    }
 }
 
 /// Hoist scalar SOAC reductions (`Reduce`/`Redomap`) that the
@@ -1089,18 +1141,24 @@ fn lift_compute_scalar_reduces(
         let (peeled, _) = peel_lambda_params(&body);
         let entry_params: HashSet<SymbolId> = peeled.iter().map(|(s, _)| *s).collect();
         let mut added_decls: Vec<interface::StorageBindingDecl> = Vec::new();
-        let new_body = hoist_scalar_reduces_in_term(
-            body,
-            &entry_name,
-            &hoist_set,
-            &entry_params,
-            next_binding,
-            &mut added_decls,
-            &mut new_defs,
-            prepass_result_bindings,
-            program,
-            term_ids,
-        );
+        let new_body = walk_lets_mut(body, &mut |name, name_ty, rhs| {
+            if hoist_set.contains(&name) {
+                hoist_one_scalar_reduce(
+                    rhs,
+                    &entry_name,
+                    name_ty,
+                    &entry_params,
+                    next_binding,
+                    &mut added_decls,
+                    &mut new_defs,
+                    prepass_result_bindings,
+                    program,
+                    term_ids,
+                )
+            } else {
+                rhs
+            }
+        });
         program.defs[idx].body = new_body;
         if let DefMeta::EntryPoint(ref mut decl) = program.defs[idx].meta {
             decl.storage_bindings.extend(added_decls);
@@ -1108,97 +1166,6 @@ fn lift_compute_scalar_reduces(
     }
 
     program.defs.extend(new_defs);
-}
-
-/// Walk the outer `Lambda`/`Let` chain, hoisting each let whose binding symbol
-/// is in `hoist_set`. Stops descending at the first non-Lambda/non-Let term —
-/// the tail SOAC isn't a hoist site (mirrors `lift_in_term`).
-fn hoist_scalar_reduces_in_term(
-    term: Term,
-    entry_name: &str,
-    hoist_set: &HashSet<SymbolId>,
-    entry_params: &HashSet<SymbolId>,
-    next_binding: &mut u32,
-    added_decls: &mut Vec<interface::StorageBindingDecl>,
-    new_defs: &mut Vec<Def>,
-    prepass_result_bindings: &mut HashMap<SymbolId, BindingRef>,
-    program: &mut Program,
-    term_ids: &mut TermIdSource,
-) -> Term {
-    match term.kind {
-        TermKind::Lambda(lam) => {
-            let Lambda { params, body, ret_ty } = lam;
-            let new_body = hoist_scalar_reduces_in_term(
-                *body,
-                entry_name,
-                hoist_set,
-                entry_params,
-                next_binding,
-                added_decls,
-                new_defs,
-                prepass_result_bindings,
-                program,
-                term_ids,
-            );
-            Term {
-                id: term.id,
-                ty: term.ty,
-                span: term.span,
-                kind: TermKind::Lambda(Lambda {
-                    params,
-                    body: Box::new(new_body),
-                    ret_ty,
-                }),
-            }
-        }
-        TermKind::Let {
-            name,
-            name_ty,
-            rhs,
-            body,
-        } => {
-            let new_rhs = if hoist_set.contains(&name) {
-                hoist_one_scalar_reduce(
-                    *rhs,
-                    entry_name,
-                    &name_ty,
-                    entry_params,
-                    next_binding,
-                    added_decls,
-                    new_defs,
-                    prepass_result_bindings,
-                    program,
-                    term_ids,
-                )
-            } else {
-                *rhs
-            };
-            let new_body = hoist_scalar_reduces_in_term(
-                *body,
-                entry_name,
-                hoist_set,
-                entry_params,
-                next_binding,
-                added_decls,
-                new_defs,
-                prepass_result_bindings,
-                program,
-                term_ids,
-            );
-            Term {
-                id: term.id,
-                ty: term.ty,
-                span: term.span,
-                kind: TermKind::Let {
-                    name,
-                    name_ty,
-                    rhs: Box::new(new_rhs),
-                    body: Box::new(new_body),
-                },
-            }
-        }
-        _ => term,
-    }
 }
 
 /// Emit one `<entry>_prepass_<n>` for a scalar reduce and return the
@@ -1344,94 +1311,6 @@ fn peel_lambda_params(term: &Term) -> (Vec<(SymbolId, Type<TypeName>)>, &Term) {
             (params, body)
         }
         _ => (vec![], term),
-    }
-}
-
-/// Walk outer `Lambda`s and `Let`s, hoisting eligible SOAC-RHSs. Stops
-/// descending at the first non-Lambda-non-Let term — that's the tail
-/// computation and isn't a lift site.
-fn lift_in_term(
-    term: Term,
-    entry_name: &str,
-    entry_params: &std::collections::HashSet<SymbolId>,
-    uniform_params: &HashMap<SymbolId, BindingRef>,
-    next_binding: &mut u32,
-    added_decls: &mut Vec<interface::StorageBindingDecl>,
-    new_defs: &mut Vec<Def>,
-    prepass_result_bindings: &mut HashMap<SymbolId, BindingRef>,
-    program: &mut Program,
-    term_ids: &mut TermIdSource,
-) -> Term {
-    match term.kind {
-        TermKind::Lambda(lam) => {
-            let Lambda { params, body, ret_ty } = lam;
-            let new_body = lift_in_term(
-                *body,
-                entry_name,
-                entry_params,
-                uniform_params,
-                next_binding,
-                added_decls,
-                new_defs,
-                prepass_result_bindings,
-                program,
-                term_ids,
-            );
-            Term {
-                id: term.id,
-                ty: term.ty,
-                span: term.span,
-                kind: TermKind::Lambda(Lambda {
-                    params,
-                    body: Box::new(new_body),
-                    ret_ty,
-                }),
-            }
-        }
-        TermKind::Let {
-            name,
-            name_ty,
-            rhs,
-            body,
-        } => {
-            let new_rhs = maybe_hoist(
-                *rhs,
-                entry_name,
-                &name_ty,
-                entry_params,
-                uniform_params,
-                next_binding,
-                added_decls,
-                new_defs,
-                prepass_result_bindings,
-                program,
-                term_ids,
-            );
-            let new_body = lift_in_term(
-                *body,
-                entry_name,
-                entry_params,
-                uniform_params,
-                next_binding,
-                added_decls,
-                new_defs,
-                prepass_result_bindings,
-                program,
-                term_ids,
-            );
-            Term {
-                id: term.id,
-                ty: term.ty,
-                span: term.span,
-                kind: TermKind::Let {
-                    name,
-                    name_ty,
-                    rhs: Box::new(new_rhs),
-                    body: Box::new(new_body),
-                },
-            }
-        }
-        _ => term,
     }
 }
 
