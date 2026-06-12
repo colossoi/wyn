@@ -1732,6 +1732,12 @@ pub fn run(mut program: Program, disable: bool) -> crate::error::Result<Parallel
         });
     }
 
+    // Fuse constant-index reads of an inlined elementwise producer
+    // (`map(f, src)[k]` → `f(src[k])`) before the gather lift, so a producer
+    // demanded only at a known slot collapses to a scalar instead of
+    // materializing a whole runtime-sized buffer.
+    program = super::static_index_fusion::run(program);
+
     // Second gather lift, now post-materialize: catch runtime-sized computed
     // arrays produced inside a helper that only became visible after inlining
     // (the ordering hazard `lift_gathers` can't see pre-defunc). Runs before

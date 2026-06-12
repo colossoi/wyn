@@ -1851,14 +1851,11 @@ fn compile_to_ssa_with_modules(input: &str) -> Program {
 // when the gap is closed.
 // =========================================================================
 
-/// Gap: returning a runtime-sized `[]f32` from a (non-entry) function and then
-/// indexing it panics the backend with "Composite variant unsized arrays not
-/// supported" (`spirv/mod.rs`), instead of lowering the result as a
-/// runtime-length array. A let-bound map + index, and a reduce over the same
-/// array, both lower fine — it's specifically a function *return* of an
-/// unsized Composite array that the type lowering rejects.
+/// Returning a runtime-sized `[]f32` from a helper and reading one *constant*
+/// slot. `g` inlines to `map(|i| f32.i32(i), 0..<256)`, and `static_index_fusion`
+/// rewrites `map(f, src)[3]` → `let i = src[3] in f32.i32(i)` — a virtual-array
+/// access, materializing nothing rather than a whole runtime-sized buffer.
 #[test]
-#[ignore = "gap: returning a runtime-sized array from a function panics SPIR-V type lowering"]
 fn returning_runtime_sized_array_from_fn_lowers() {
     let source = r#"
 def g(n: i32) []f32 = map(|i: i32| f32.i32(i), 0i32 ..< n)
@@ -1866,6 +1863,25 @@ def g(n: i32) []f32 = map(|i: i32| f32.i32(i), 0i32 ..< n)
 entry e() [1]f32 = [g(256)[3]]
 "#;
     compile_to_spirv(source).expect("returning a runtime-sized array should lower to SPIR-V");
+}
+
+/// Guard for the broader gap static-index fusion must NOT silently absorb: a
+/// *runtime* index into a nested runtime-sized producer (`g(256)[j]`). Fusion is
+/// scoped to literal indices, so a known slot collapses to a scalar but a
+/// runtime slot does not — it needs the producer materialized to a buffer first
+/// (Stage 4c). Asserts the eventual goal (it should lower); ignored until 4c
+/// teaches the gather path to materialize a nested runtime-indexed producer.
+/// Keeping it pins that 4b solved only the static case, not this broader one.
+#[test]
+#[ignore = "gap: runtime index into a nested runtime-sized producer needs materialization (Stage 4c)"]
+fn runtime_index_into_nested_producer_lowers() {
+    let source = r#"
+def g(n: i32) []f32 = map(|i: i32| f32.i32(i), 0i32 ..< n)
+#[compute]
+entry e(j: i32) [1]f32 = [g(256)[j]]
+"#;
+    compile_to_spirv(source)
+        .expect("a runtime index into a nested runtime-sized producer should materialize + lower");
 }
 
 /// Gap: a runtime-sized array with *two or more* consumers panics the backend
