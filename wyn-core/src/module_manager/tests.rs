@@ -76,6 +76,10 @@ fn test_query_f32_sin_from_math_prelude() {
     let nr =
         crate::name_resolution::build_name_resolution(&empty_program, &manager, crate::builtins::catalog());
     checker.set_name_resolution(nr);
+    // Register the collection/SOAC builtins (`map`, `reduce`, ...) in scope, as
+    // the real pipeline does (`types::run`). Prelude module bodies reference
+    // them — e.g. `f32.sum` is `reduce(f32.(+), 0.0f32, x)`.
+    checker.load_builtins().expect("Failed to load builtins");
     checker.check_module_functions().expect("Failed to check module functions");
 
     // Query for the f32 module's sin function type from the cache

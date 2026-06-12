@@ -487,6 +487,13 @@ module f64 : (float with t = f64 with int_t = u64) = {
   def (>)(a: t, b: t) bool = a > b
   def (<=)(a: t, b: t) bool = a <= b
   def (>=)(a: t, b: t) bool = a >= b
+
+  def highest: t = 1.0f64 / 0.0f64
+  def lowest: t = (0.0f64 - 1.0f64) / 0.0f64
+  def sum<[n]>(x: [n]t) t = reduce(f64.(+), 0.0f64, x)
+  def product<[n]>(x: [n]t) t = reduce(f64.(*), 1.0f64, x)
+  def maximum<[n]>(x: [n]t) t = reduce(f64.max, f64.lowest, x)
+  def minimum<[n]>(x: [n]t) t = reduce(f64.min, f64.highest, x)
 }
 
 -- | 32-bit float — the workhorse of GPU computation. Implementations
@@ -529,6 +536,13 @@ module f32 : (float with t = f32 with int_t = u32) = {
 
   -- | `-inf`. The smallest (most negative) representable `f32`.
   def lowest: t = (0.0f32 - 1.0f32) / 0.0f32
+
+  -- Whole-array reductions (the `numeric` `sum`/`product`/`maximum`/`minimum`
+  -- specs), expressed as `reduce` over the per-type operator and its neutral.
+  def sum<[n]>(x: [n]t) t = reduce(f32.(+), 0.0f32, x)
+  def product<[n]>(x: [n]t) t = reduce(f32.(*), 1.0f32, x)
+  def maximum<[n]>(x: [n]t) t = reduce(f32.max, f32.lowest, x)
+  def minimum<[n]>(x: [n]t) t = reduce(f32.min, f32.highest, x)
 
   def recip(x: t) t = 1.0f32 / x
   def from_fraction(x: i64, y: i64) t = _w_intrinsic_f32_from_i64(x) / _w_intrinsic_f32_from_i64(y)
@@ -586,4 +600,11 @@ module f16 : (float with t = f16 with int_t = u16) = {
   def (>)(a: t, b: t) bool = a > b
   def (<=)(a: t, b: t) bool = a <= b
   def (>=)(a: t, b: t) bool = a >= b
+
+  def highest: t = 1.0f16 / 0.0f16
+  def lowest: t = (0.0f16 - 1.0f16) / 0.0f16
+  def sum<[n]>(x: [n]t) t = reduce(f16.(+), 0.0f16, x)
+  def product<[n]>(x: [n]t) t = reduce(f16.(*), 1.0f16, x)
+  def maximum<[n]>(x: [n]t) t = reduce(f16.max, f16.lowest, x)
+  def minimum<[n]>(x: [n]t) t = reduce(f16.min, f16.highest, x)
 }

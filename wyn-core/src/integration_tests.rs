@@ -1851,24 +1851,6 @@ fn compile_to_ssa_with_modules(input: &str) -> Program {
 // when the gap is closed.
 // =========================================================================
 
-/// Gap: the numeric array-reductions (`sum`/`product`/`minimum`/`maximum`) are
-/// declared in the prelude `numeric` module-type and type-check, but the
-/// SPIR-V backend has no lowering for them — code-gen fails with "Unknown
-/// function: f32.sum". (The `reduce` SOAC *does* lower; these should desugar to
-/// it or gain their own lowering.)
-#[test]
-#[ignore = "gap: numeric array-reductions (sum/product/minimum/maximum) have no SPIR-V lowering"]
-fn numeric_array_reductions_lower_to_spirv() {
-    let source = r#"
-def N: i32 = 256
-#[compute]
-entry e() [4]f32 =
-    let xs = map(|i: i32| f32.i32(i), 0i32 ..< N) in
-    [f32.sum(xs), f32.product(xs), f32.minimum(xs), f32.maximum(xs)]
-"#;
-    compile_to_spirv(source).expect("numeric array-reductions should lower to SPIR-V");
-}
-
 /// Gap: returning a runtime-sized `[]f32` from a (non-entry) function and then
 /// indexing it panics the backend with "Composite variant unsized arrays not
 /// supported" (`spirv/mod.rs`), instead of lowering the result as a
@@ -1922,6 +1904,40 @@ fn reified_operator_passed_as_first_class_value() {
 entry sum(xs: [16]i32) i32 = reduce(i32.(+), 0i32, xs)
 "#;
     compile_to_spirv(source).expect("a reified operator member should be passable to a HOF");
+}
+
+/// The `numeric` whole-array reductions `sum`/`product`/`minimum`/`maximum` are
+/// implemented (for the float modules) as `reduce` over the per-type operator
+/// and its neutral, so they lower to real SPIR-V reduction loops.
+#[test]
+fn numeric_array_reductions_lower_to_spirv() {
+    let source = r#"
+def N: i32 = 256
+#[compute]
+entry e() [4]f32 =
+    let xs = map(|i: i32| f32.i32(i), 0i32 ..< N) in
+    [f32.sum(xs), f32.product(xs), f32.minimum(xs), f32.maximum(xs)]
+"#;
+    compile_to_spirv(source).expect("numeric array-reductions should lower to SPIR-V");
+}
+
+/// The statistics-gatherer shape that motivated the reductions: reduce a sample
+/// stream to `[count, mean, variance, stddev, min, max]` using `f32.sum`,
+/// `f32.minimum`, `f32.maximum`. This is the lib/ `Stats` summarize body.
+#[test]
+fn statistics_gatherer_lowers() {
+    let source = r#"
+def N: i32 = 256
+#[compute]
+entry summarize() [6]f32 =
+    let xs = map(|i: i32| f32.i32(i), 0i32 ..< N) in
+    let n = f32.i32(N) in
+    let mean = f32.sum(xs) / n in
+    let sq = map(|v: f32| (v - mean) * (v - mean), xs) in
+    let variance = f32.sum(sq) / n in
+    [n, mean, variance, f32.sqrt(variance), f32.minimum(xs), f32.maximum(xs)]
+"#;
+    compile_to_spirv(source).expect("the statistics gatherer should lower to SPIR-V");
 }
 
 /// Pre-existing SPIR-V codegen bug (not operator-related — pure infix
