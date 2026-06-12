@@ -1905,6 +1905,37 @@ entry e() f32 = g(256)
         .expect("a runtime-sized array read by multiple consumers should lower to SPIR-V");
 }
 
+/// Gap: passing a top-level `def` as a function-typed argument panics
+/// `tlc/inline.rs:34` with `hof-specialization verifier failed:
+/// FunctionTypedParam{…}`. HOF specialization eliminates inline lambdas
+/// (`map(|i| …, xs)` lowers fine), but a named callee passed as a value
+/// through a wrapper isn't specialized away, leaving a `FunctionTypedParam`
+/// surviving after `filter_reachable`. Calling the same higher-order def
+/// directly from an entry hits the sibling failure
+/// `closure-calls-lowered verifier failed: ArityMismatch`, so the gap
+/// likely covers both call shapes.
+///
+/// This is the preferred shape for `lib/noise.wyn`'s `fbm` — a generic
+/// `fbm2(noise: key -> vec2f32 -> f32, …)` that all four `fbm_<kind>`
+/// flavors would specialise from. The library currently works around
+/// the gap by inlining the reduce/map into each `fbm_<kind>`; once this
+/// test passes, those four near-identical defs collapse to one.
+#[test]
+#[ignore = "gap: a named def passed as a function-typed argument isn't eliminated by HOF specialization"]
+fn function_typed_param_with_named_callee_specializes() {
+    let source = r#"
+def perlin2(k: u32, p: vec2f32) f32 = f32.u32(k) + p.x
+def fbm2(noise: u32 -> vec2f32 -> f32, k: u32, p: vec2f32, n: i32) f32 =
+  reduce(|a: f32, b: f32| a + b, 0.0f32,
+    map(|i: i32| noise(k, p) * f32.i32(i), 0i32 ..< n))
+def fbm_perlin(k: u32, p: vec2f32, n: i32) f32 = fbm2(perlin2, k, p, n)
+#[compute]
+entry e() f32 = fbm_perlin(1u32, @[0.0f32, 0.0f32], 4i32)
+"#;
+    compile_to_spirv(source)
+        .expect("a named def passed as a function-typed argument should be specialized away");
+}
+
 /// The reified operator members on the builtin numeric modules — `i32.(+)`,
 /// `f32.(<)`, `u32.(<<)`, etc. — resolve as real module functions and lower.
 /// The `(op)` form is the function reification of the primitive infix BinOp;
