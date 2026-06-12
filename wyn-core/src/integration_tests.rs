@@ -3293,8 +3293,6 @@ entry e(xs: []i32) []i32 = stencil(xs)
 /// also panics on master via `inline_small`, so this is a pre-existing
 /// limitation, not a regression from the materialize pass.)
 #[test]
-#[ignore = "cross-function gather: runtime-sized composite indexed → backend panic; \
-            want a clean error (panic→error fix not yet done)"]
 fn cross_function_gather_errors_cleanly() {
     let r = crate::compile_thru_spirv(
         "\
@@ -3311,6 +3309,21 @@ entry g(xs: []i32) []i32 =
         msg.contains("runtime-sized") && msg.contains("index"),
         "error should explain the un-lifted runtime-sized gather, got: {msg}",
     );
+}
+
+/// Guard for the runtime-sized-index clean-rejection (above): a *statically
+/// sized* composite array must still index fine. The clean-reject keys on
+/// runtime (unsized) Composite size, so a `[N]T` local indexed at runtime
+/// lowers as before, not rejected.
+#[test]
+fn sized_composite_array_runtime_index_still_lowers() {
+    let source = r#"
+#[compute]
+entry e(i: i32) i32 =
+    let m: [4]i32 = [10, 20, 30, 40] in
+    m[i]
+"#;
+    compile_to_spirv(source).expect("runtime index into a statically-sized array should lower");
 }
 
 /// Invariant, end to end: a SOAC helper called *per element* inside a `map`

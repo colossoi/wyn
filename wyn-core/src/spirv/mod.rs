@@ -3411,7 +3411,58 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
 /// Lower an SSA program directly to SPIR-V.
 ///
 /// This is the new direct path: TLC → SSA → SPIR-V, bypassing MIR.
+/// Reject any SSA value typed as a runtime-sized Composite array — an
+/// un-lifted gather: a runtime-sized computed array demanded as a *value*
+/// (indexed, returned, reduced) instead of streamed into a storage buffer.
+/// SPIR-V has no unsized in-register array type, so such a value would panic
+/// in `polytype_to_spirv` (the unsized-Composite arm). View / Virtual /
+/// Bounded arrays lower fine and are not flagged.
+fn verify_no_unsized_composite_values(program: &Program) -> Result<()> {
+    for func in &program.functions {
+        for (_, vinfo) in func.body.inner.values.iter() {
+            if is_runtime_sized_composite_array(&vinfo.ty) {
+                bail_spirv!(
+                    "runtime-sized array reaches the backend as a value ({:?}): a \
+                     runtime-sized computed array can only be produced into a \
+                     storage buffer, so indexing, returning, or reducing it requires \
+                     gather-lifting or inlining its producer",
+                    vinfo.ty
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// True iff `ty` is `Array(elem, ArrayVariantComposite, size, ..)` with a
+/// runtime (`Variable` / `SizePlaceholder`) size — the exact shape the
+/// array-type lowering can't represent (mirrors the `polytype_to_spirv`
+/// unsized-Composite guard).
+fn is_runtime_sized_composite_array(ty: &PolyType<TypeName>) -> bool {
+    let PolyType::Constructed(TypeName::Array, args) = ty else {
+        return false;
+    };
+    if args.len() < 3 {
+        return false;
+    }
+    let is_composite = matches!(
+        &args[1],
+        PolyType::Constructed(TypeName::ArrayVariantComposite, _)
+    );
+    let is_runtime = matches!(
+        &args[2],
+        PolyType::Variable(_) | PolyType::Constructed(TypeName::SizePlaceholder, _)
+    );
+    is_composite && is_runtime
+}
+
 pub fn lower_ssa_program(program: &Program) -> Result<Vec<u32>> {
+    // No SSA value may be typed as a runtime-sized Composite array: SPIR-V has
+    // no unsized in-register array type, so such a value would panic in
+    // `polytype_to_spirv` (the unsized-Composite arm). Reject it as a clean
+    // compile error first.
+    verify_no_unsized_composite_values(program)?;
+
     // Use a thread with larger stack size for complex shaders
     const STACK_SIZE: usize = 16 * 1024 * 1024; // 16MB
 

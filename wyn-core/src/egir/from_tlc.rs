@@ -915,13 +915,14 @@ impl<'a> Converter<'a> {
                     });
                     Ok(result_nid)
                 } else {
-                    // NOTE: a runtime-sized Composite array reaching here is an
-                    // un-lifted gather (its producer wasn't materialized to a
-                    // storage buffer — e.g. a producer behind a helper call:
-                    // cross-function gather-lifting is unimplemented). It can't be
-                    // lowered as a value and currently panics in the SPIR-V
-                    // backend (`polytype_to_spirv`, the unsized-Composite arm).
-                    // See the ignored `cross_function_gather_errors_cleanly` test.
+                    // A runtime-sized Composite array reaching here may be an
+                    // un-lifted gather — but a *sibling* Index of a retargeted
+                    // output Map/Scan is later rewritten to a view load by
+                    // `realize_outputs`, and SOACs aren't expanded yet, so we
+                    // can't decide here. Genuinely un-lowerable unsized-Composite
+                    // values are caught at the SSA boundary by
+                    // `spirv::verify_no_unsized_composite_values` (a clean error
+                    // instead of a `polytype_to_spirv` panic).
                     Ok(self.intern_pure(PureOp::Index, smallvec![base, idx], ty))
                 }
             }
