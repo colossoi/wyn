@@ -1299,10 +1299,9 @@ fn build_scalar_prepass_def(
     )
 }
 
-/// Return a `Term`'s (possibly-wrapped) lambda params by peeling
-/// outer `TermKind::Lambda` layers. Mirrors `extract_params` in
-/// `buffer_specialize.rs`.
-fn peel_lambda_params(term: &Term) -> (Vec<(SymbolId, Type<TypeName>)>, &Term) {
+/// Return a `Term`'s (possibly-wrapped) lambda params by peeling outer
+/// `TermKind::Lambda` layers, plus the tail. Shared TLC helper.
+pub(crate) fn peel_lambda_params(term: &Term) -> (Vec<(SymbolId, Type<TypeName>)>, &Term) {
     match &term.kind {
         TermKind::Lambda(lam) => {
             let (mut inner, body) = peel_lambda_params(&lam.body);

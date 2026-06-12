@@ -41,7 +41,7 @@ pub fn run(program: &mut Program) -> crate::error::Result<()> {
             continue;
         }
         let span = def.body.span;
-        let (params, _) = extract_params(&def.body);
+        let (params, _) = crate::tlc::parallelize::peel_lambda_params(&def.body);
 
         // Cache the auto-storage binding layout on the entry — `from_tlc` and
         // `parallelize` read `entry.param_bindings` to route storage. The entry
@@ -60,19 +60,6 @@ pub fn run(program: &mut Program) -> crate::error::Result<()> {
         }
     }
     Ok(())
-}
-
-/// Flatten an entry's curried lambda chain into `(param_sym, param_ty)` pairs.
-fn extract_params(term: &Term) -> (Vec<(SymbolId, Type<TypeName>)>, &Term) {
-    match &term.kind {
-        TermKind::Lambda(lam) => {
-            let (mut inner, body) = extract_params(&lam.body);
-            let mut params = lam.params.clone();
-            params.append(&mut inner);
-            (params, body)
-        }
-        _ => (vec![], term),
-    }
 }
 
 /// Map each storage param's region variable to its concrete region. An

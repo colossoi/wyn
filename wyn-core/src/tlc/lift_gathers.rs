@@ -28,7 +28,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::closure_convert::collect_free_vars;
-use super::parallelize::make_entry_def;
+use super::parallelize::{make_entry_def, peel_lambda_params};
 use super::{
     ArrayExpr, Def, DefMeta, Lambda, Program, SoacBody, SoacOp, StorageView, Term, TermIdSource, TermKind,
     VarRef,
@@ -1034,19 +1034,6 @@ fn build_gather_prepass(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// Peel outer `Lambda` layers, returning the flattened params and the tail.
-fn peel_lambda_params(term: &Term) -> (Vec<(SymbolId, Type<TypeName>)>, &Term) {
-    match &term.kind {
-        TermKind::Lambda(lam) => {
-            let (mut inner, tail) = peel_lambda_params(&lam.body);
-            let mut params = lam.params.clone();
-            params.append(&mut inner);
-            (params, tail)
-        }
-        _ => (vec![], term),
-    }
-}
 
 /// True if `ty` is a runtime-sized array (size is a type variable or
 /// placeholder) — mirrors `binding_layout::is_runtime_sized_array`.
