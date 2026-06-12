@@ -1878,7 +1878,6 @@ entry e() [1]f32 = [g(256)[3]]
 /// `maximum`. Distinct from `returning_runtime_sized_array_from_fn_lowers`,
 /// which is about *returning* such an array.
 #[test]
-#[ignore = "gap: a runtime-sized array with 2+ consumers must materialize as an unsized Composite array"]
 fn runtime_sized_array_with_multiple_consumers_lowers() {
     let source = r#"
 def g(n: i32) f32 =

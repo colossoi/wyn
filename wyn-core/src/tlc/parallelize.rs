@@ -1732,6 +1732,12 @@ pub fn run(mut program: Program, disable: bool) -> crate::error::Result<Parallel
         });
     }
 
+    // Second gather lift, now post-materialize: catch runtime-sized computed
+    // arrays produced inside a helper that only became visible after inlining
+    // (the ordering hazard `lift_gathers` can't see pre-defunc). Runs before
+    // `next_binding` is computed so the new gather buffers are accounted for.
+    program = super::lift_gathers::run_post_materialize(program);
+
     // Track max binding across every `(set, binding)` the program already
     // uses — including implicit `ArrayExpr::StorageBuffer` bindings
     // introduced by lift_gathers / buffer_specialize / mono for SOAC inputs.

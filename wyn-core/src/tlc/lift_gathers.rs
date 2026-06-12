@@ -61,6 +61,83 @@ pub fn run(mut program: Program) -> Program {
     program
 }
 
+/// Re-run the gather lift after `inline_small` / `materialize_entry_soacs`.
+///
+/// The pre-defunc [`run`] can't see a runtime-sized array produced inside a
+/// helper — the producer only surfaces in the entry body once inlining exposes
+/// it (the ordering hazard). This second pass catches those late producers (a
+/// multi-consumer or randomly-indexed computed array that would otherwise reach
+/// the backend as an unsized Composite and panic).
+///
+/// Inlining a consumer leaves trivial alias lets — `f32.sum(xs)` becomes
+/// `let p = xs in reduce(.., p)` — and [`rewrite_uses`] bails on the bare
+/// `Var(xs)` in `p`'s RHS. We collapse those aliases first so each consumer
+/// references the producer directly. Entries fully lifted pre-defunc have only
+/// storage reads left, so this is a no-op for them.
+pub fn run_post_materialize(mut program: Program) -> Program {
+    let entry_indices: Vec<usize> = program
+        .defs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, d)| match &d.meta {
+            DefMeta::EntryPoint(decl) if decl.entry_type.is_compute() => Some(i),
+            _ => None,
+        })
+        .collect();
+
+    let mut new_defs: Vec<Def> = Vec::new();
+    for idx in entry_indices {
+        program.defs[idx].body = inline_trivial_aliases(program.defs[idx].body.clone());
+        lift_entry(&mut program, idx, &mut new_defs);
+    }
+    program.defs.extend(new_defs);
+    program
+}
+
+/// Collapse `let p = q in body` where `q` is a bare `Var` — an alias inlining
+/// leaves behind — into `body[p := q]`. SymbolIds are globally unique, so a
+/// blanket `p → q` substitution needs no shadowing check.
+fn inline_trivial_aliases(term: Term) -> Term {
+    match term.kind {
+        TermKind::Let {
+            name,
+            name_ty,
+            rhs,
+            body,
+        } => {
+            let rhs = inline_trivial_aliases(*rhs);
+            if let TermKind::Var(VarRef::Symbol(q)) = rhs.kind {
+                let body = subst_var(*body, name, q);
+                return inline_trivial_aliases(body);
+            }
+            Term {
+                kind: TermKind::Let {
+                    name,
+                    name_ty,
+                    rhs: Box::new(rhs),
+                    body: Box::new(inline_trivial_aliases(*body)),
+                },
+                ..term
+            }
+        }
+        _ => term.map_children(&mut inline_trivial_aliases),
+    }
+}
+
+/// Replace every `Var(from)` in `term` with `Var(to)`. Unconditional — `from`
+/// is one globally-unique SymbolId bound exactly once, so it can't be shadowed.
+fn subst_var(term: Term, from: SymbolId, to: SymbolId) -> Term {
+    if let TermKind::Var(VarRef::Symbol(s)) = &term.kind {
+        if *s == from {
+            return Term {
+                kind: TermKind::Var(VarRef::Symbol(to)),
+                ..term
+            };
+        }
+    }
+    term.map_children(&mut |c| subst_var(c, from, to))
+}
+
 /// Lift gather sites out of a single compute entry at `program.defs[idx]`.
 fn lift_entry(program: &mut Program, idx: usize, new_defs: &mut Vec<Def>) {
     let entry_name = crate::symbol_name_or_bug(&program.symbols, program.defs[idx].name).to_string();
@@ -112,7 +189,19 @@ fn lift_entry(program: &mut Program, idx: usize, new_defs: &mut Vec<Def>) {
     // `([]vec4f32, [5]i32)` whose `[5]i32` literal indexed into a
     // `scan` result, gather-lifting the scan).
     let out_count = decl.outputs.len() as u32;
-    let mut next_gather = view_count + out_count;
+    // Gather buffers sit above the entry's input views and outputs, and above
+    // any gather Input decls a prior lift run already attached to this entry:
+    // the gather lift runs once pre-defunc (`run`) and again post-materialize
+    // (`run_post_materialize`), when helper-inlined producers first become
+    // visible — the second run must not reuse the first run's binding numbers.
+    let existing_max = decl
+        .storage_bindings
+        .iter()
+        .filter(|b| b.binding.set == AUTO_STORAGE_SET)
+        .map(|b| b.binding.binding + 1)
+        .max()
+        .unwrap_or(0);
+    let mut next_gather = (view_count + out_count).max(existing_max);
 
     let mut added_decls: Vec<StorageBindingDecl> = Vec::new();
     let new_body = lift_in_term(
