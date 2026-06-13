@@ -176,6 +176,23 @@ impl<T: Clone> ScopeStack<ScopeEntry<T>> {
         });
         names
     }
+
+    /// Like `lookup`, but only returns entries whose kind matches.
+    /// Walks frames innermost-first and skips kind-mismatches at each
+    /// frame; this is how a structurally-classified identifier (e.g. a
+    /// SOAC tagged at name-resolution time) can reach its builtin
+    /// scheme through a frame that holds a user-defined shadow at the
+    /// surface name. The shadow stays correct for unkinded `lookup`.
+    pub fn lookup_by_kind(&self, name: &str, kind: IdentifierKind) -> Option<&T> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(entry) = scope.get(name) {
+                if entry.kind == kind {
+                    return Some(&entry.value);
+                }
+            }
+        }
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------

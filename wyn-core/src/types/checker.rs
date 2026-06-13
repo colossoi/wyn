@@ -612,6 +612,14 @@ impl<'a> TypeChecker<'a> {
             return Some(self.resolve_scheme_lookup(def_name, lookup));
         }
 
+        // Path A also fires for SOAC-tagged identifiers — bypass any
+        // user-defined shadow via kind-filtered lookup.
+        if let Some(crate::name_resolution::ResolvedValueRef::Soac(_)) = self.name_resolution.get(node_id) {
+            if let Some(scheme) = self.scope_stack.lookup_by_kind(full_name, IdentifierKind::Builtin) {
+                return Some(self.resolve_scheme_lookup(full_name, SchemeLookup::Single(scheme.clone())));
+            }
+        }
+
         // Path B: non-catalog names — locals, user-defined functions,
         // user-module-scope functions (`materials.pbrCookTorrance` etc).
         let lookup = if is_qualified {
@@ -1239,6 +1247,15 @@ impl<'a> TypeChecker<'a> {
     }
 
     pub fn check_program(&mut self, program: &Program) -> Result<HashMap<NodeId, TypeScheme>> {
+        // Forward-declare ascribed file-scope `def`s in a new frame above
+        // the root so module function bodies can close over the enclosing
+        // file scope; kind-filtered lookup keeps builtins (root frame)
+        // reachable past any user shadows. See ignored aspiration test
+        // `aspiration_user_module_body_sees_file_scope_shadow_of_soac`
+        // for the env-split that would close the remaining policy gap.
+        self.scope_stack.push_scope();
+        self.forward_declare_ascribed_file_scope(program);
+
         // Type-check module functions first to populate the module_schemes cache.
         // This must happen before prelude functions since they may reference module functions.
         self.check_module_functions()?;
@@ -1450,6 +1467,40 @@ impl<'a> TypeChecker<'a> {
         self.scope_stack.pop_scope();
 
         Ok((param_types, body_type))
+    }
+
+    /// Insert each ascribed file-scope `def` into the current frame.
+    /// Idempotent with the main `check_program` walk, which re-inserts
+    /// the same scheme. Defs without full ascription are deferred.
+    fn forward_declare_ascribed_file_scope(&mut self, program: &Program) {
+        for decl in &program.declarations {
+            if let Declaration::Decl(d) = decl {
+                if let Some(scheme) = self.ascription_to_scheme(d) {
+                    self.define(d.name.clone(), IdentifierKind::UserDecl, scheme);
+                }
+            }
+        }
+    }
+
+    /// Build a `TypeScheme` from a `Decl`'s ascription alone, without
+    /// inspecting the body. Returns `None` if the return type or any
+    /// parameter type isn't statically determined (parameter without
+    /// `Pattern::Typed`, missing return-type annotation, etc.) — the
+    /// main type-check loop handles those.
+    fn ascription_to_scheme(&self, decl: &Decl) -> Option<TypeScheme> {
+        let return_ty = decl.ty.as_ref()?;
+        let resolved_return = self.resolve_type_aliases_scoped(return_ty, None);
+        let mut param_types = Vec::with_capacity(decl.params.len());
+        for param in &decl.params {
+            let ty = match &param.kind {
+                PatternKind::Typed(_, ty) => ty.clone(),
+                _ => return None,
+            };
+            param_types.push(self.resolve_type_aliases_scoped(&ty, None));
+        }
+        let func_ty =
+            param_types.into_iter().rev().fold(resolved_return, |acc, p| crate::types::function(p, acc));
+        Some(self.generalize(&func_ty))
     }
 
     /// Type-check function bodies from modules (e.g., rand.init, rand.int, f32.pi)

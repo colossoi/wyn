@@ -1570,12 +1570,20 @@ def use_it: i32 = m.(+)(1, 2)
 // `#[ignore]` when the corresponding gap is closed.
 // =========================================================================
 
+/// Regression: a nested `module` body closes over the enclosing
+/// file scope (ML/Futhark-style). Used to fail with
+/// `UndefinedVariable("K")` because `check_module_functions` runs
+/// before `check_program`'s user-decl loop, so file-scope `def K`
+/// hadn't been inserted into the scope when module `m`'s `f` body
+/// was checked. Now fixed by a forward-declaration pass at the top
+/// of `check_program` that pre-binds file-scope `def`s with full
+/// ascription (return type + all param types) — without disturbing
+/// SOAC builtin resolution, since names that already collide with
+/// something in scope are deliberately skipped (else a user
+/// `def map(x) = …` would shadow the SOAC during prelude function
+/// checking and break `unzip`'s `map(|...|, xys)`).
 #[test]
-#[ignore = "gap: a nested `module` body cannot reference an outer top-level `def` (resolves to UndefinedVariable)"]
 fn nested_module_can_reference_outer_top_level_def() {
-    // Desired: `K`, defined at file scope, is visible inside `module m` —
-    // module bodies should close over the enclosing scope (ML/Futhark do).
-    // Currently fails name resolution with `UndefinedVariable("K", ...)`.
     typecheck_program(
         r#"
 def K: u32 = 5u32
