@@ -892,6 +892,17 @@ struct HofSpecializer<'a> {
     hof_info: HashMap<SymbolId, HofInfo>,
     specialized_defs: Vec<Def>,
     specialization_cache: HashMap<(SymbolId, SymbolId, Vec<String>), SymbolId>,
+    /// Cache: `(lifted_def_sym, [callable_sym at each callable-cap slot])`
+    /// → specialized lifted def sym. Keyed by the lifted def we're cloning
+    /// plus the resolved callables that flow into its callable-typed
+    /// captures, so a second SoacBody asking for the same specialization
+    /// reuses the variant instead of minting another.
+    closure_spec_cache: HashMap<(SymbolId, Vec<SymbolId>), SymbolId>,
+    /// Lookup by sym for every def the cascade may need to clone — built
+    /// once after the main loop from `transformed + specialized_defs`,
+    /// then read-only during cascade. New cascade-specialized defs are
+    /// added back in.
+    defs_by_sym: HashMap<SymbolId, Def>,
     specialization_counter: usize,
     term_ids: TermIdSource,
 }
@@ -908,6 +919,8 @@ impl<'a> HofSpecializer<'a> {
             hof_info,
             specialized_defs: vec![],
             specialization_cache: HashMap::new(),
+            closure_spec_cache: HashMap::new(),
+            defs_by_sym: HashMap::new(),
             specialization_counter: 0,
             term_ids: TermIdSource::new(),
         };
@@ -921,8 +934,44 @@ impl<'a> HofSpecializer<'a> {
             })
             .collect();
 
+        // Cascade closure specialization. The main loop above eliminates
+        // function-typed params from outer HOFs by cloning + substituting
+        // the called code into the HOF body. But a HOF body that captures
+        // its function-typed param into a lifted closure (e.g. via a SOAC
+        // operand whose lambda is a separate top-level def) leaves the
+        // callable flowing into the closure as a runtime arg — and the
+        // closure itself still has a function-typed parameter for that
+        // slot. Walk every def's body and, at each `SoacBody` whose
+        // captures include `(_, arrow_ty, Var(known_callable))`, clone
+        // the lifted def referenced by `lam.body`, substitute the
+        // callable into its body, drop the callable param from its
+        // signature, and rewrite the SoacBody to reference the
+        // specialized variant with the callable capture removed.
+        // Recurses through the cloned bodies, so nested closures cascade
+        // until no callable captures remain.
+        for d in transformed.iter().chain(hs.specialized_defs.iter()) {
+            hs.defs_by_sym.insert(d.name, d.clone());
+        }
+        let transformed: Vec<Def> = transformed
+            .into_iter()
+            .map(|def| Def {
+                body: hs.cascade_specialize_term(def.body),
+                ..def
+            })
+            .collect();
+        let main_loop_specialized: Vec<Def> = std::mem::take(&mut hs.specialized_defs)
+            .into_iter()
+            .map(|def| Def {
+                body: hs.cascade_specialize_term(def.body),
+                ..def
+            })
+            .collect();
+        // Anything the cascade itself emitted while walking those bodies
+        // is in `hs.specialized_defs` now; chain them in too.
+        let cascade_specialized = std::mem::take(&mut hs.specialized_defs);
+
         Program {
-            defs: transformed.into_iter().chain(hs.specialized_defs).collect(),
+            defs: transformed.into_iter().chain(main_loop_specialized).chain(cascade_specialized).collect(),
             symbols: hs.symbols,
             ..program
         }
@@ -1268,6 +1317,245 @@ impl<'a> HofSpecializer<'a> {
             span,
             &mut self.term_ids,
         )
+    }
+
+    // =========================================================================
+    // Cascade closure specialization
+    //
+    // Walks a term, recurses into every `SoacBody`, and for each captured
+    // arrow-typed `Var` that resolves to a known callable, clones the
+    // lifted def referenced by `lam.body` with the callable substituted in
+    // and the callable param dropped. The SoacBody itself is rewritten to
+    // reference the specialized variant and to omit the callable capture.
+    // =========================================================================
+
+    fn cascade_specialize_term(&mut self, term: Term) -> Term {
+        let term = term.map_children(&mut |child| self.cascade_specialize_term(child));
+        match term.kind {
+            TermKind::Soac(soac) => Term {
+                kind: TermKind::Soac(self.cascade_specialize_soac(soac)),
+                ..term
+            },
+            TermKind::ArrayExpr(ae) => Term {
+                kind: TermKind::ArrayExpr(self.cascade_specialize_array_expr(ae)),
+                ..term
+            },
+            _ => term,
+        }
+    }
+
+    fn cascade_specialize_array_expr(&mut self, ae: ArrayExpr) -> ArrayExpr {
+        match ae {
+            ArrayExpr::Soac(boxed) => ArrayExpr::Soac(Box::new(self.cascade_specialize_soac(*boxed))),
+            other => other,
+        }
+    }
+
+    fn cascade_specialize_soac(&mut self, soac: SoacOp) -> SoacOp {
+        match soac {
+            SoacOp::Map {
+                lam,
+                inputs,
+                destination,
+            } => SoacOp::Map {
+                lam: self.cascade_specialize_soac_body(lam),
+                inputs,
+                destination,
+            },
+            SoacOp::Reduce { op, ne, input } => SoacOp::Reduce {
+                op: self.cascade_specialize_soac_body(op),
+                ne,
+                input,
+            },
+            SoacOp::Scan {
+                op,
+                reduce_op,
+                ne,
+                input,
+                destination,
+            } => SoacOp::Scan {
+                op: self.cascade_specialize_soac_body(op),
+                reduce_op: self.cascade_specialize_soac_body(reduce_op),
+                ne,
+                input,
+                destination,
+            },
+            SoacOp::Filter {
+                pred,
+                input,
+                destination,
+            } => SoacOp::Filter {
+                pred: self.cascade_specialize_soac_body(pred),
+                input,
+                destination,
+            },
+            SoacOp::Scatter {
+                dest,
+                indices,
+                values,
+            } => SoacOp::Scatter {
+                dest,
+                indices,
+                values,
+            },
+            SoacOp::ReduceByIndex {
+                dest,
+                op,
+                ne,
+                indices,
+                values,
+            } => SoacOp::ReduceByIndex {
+                dest,
+                op: self.cascade_specialize_soac_body(op),
+                ne,
+                indices,
+                values,
+            },
+            SoacOp::Redomap {
+                op,
+                reduce_op,
+                ne,
+                inputs,
+            } => SoacOp::Redomap {
+                op: self.cascade_specialize_soac_body(op),
+                reduce_op: self.cascade_specialize_soac_body(reduce_op),
+                ne,
+                inputs,
+            },
+        }
+    }
+
+    fn cascade_specialize_soac_body(&mut self, sb: super::SoacBody) -> super::SoacBody {
+        let callable_indices: Vec<usize> = sb
+            .captures
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (_, ty, t))| {
+                if !is_arrow_type(ty) {
+                    return None;
+                }
+                let s = match &t.kind {
+                    TermKind::Var(VarRef::Symbol(s)) => *s,
+                    _ => return None,
+                };
+                if self.closure_info.resolve_callable(s).is_some() { Some(i) } else { None }
+            })
+            .collect();
+
+        if callable_indices.is_empty() {
+            return sb;
+        }
+
+        let lifted_sym = match &sb.lam.body.kind {
+            TermKind::Var(VarRef::Symbol(s)) => *s,
+            _ => return sb,
+        };
+        // Only specialize lifted defs we have a body for. Intrinsic SOAC
+        // operators (no def) fall through.
+        if !self.defs_by_sym.contains_key(&lifted_sym) {
+            return sb;
+        }
+
+        let callable_syms: Vec<SymbolId> = callable_indices
+            .iter()
+            .map(|&i| match &sb.captures[i].2.kind {
+                TermKind::Var(VarRef::Symbol(s)) => *s,
+                _ => unreachable!("filtered to Var above"),
+            })
+            .collect();
+
+        let cache_key = (lifted_sym, callable_syms.clone());
+        let specialized_sym = if let Some(&s) = self.closure_spec_cache.get(&cache_key) {
+            s
+        } else {
+            self.specialize_closure(lifted_sym, &callable_indices, &callable_syms, &sb.captures)
+        };
+
+        let new_lifted_ty = self
+            .defs_by_sym
+            .get(&specialized_sym)
+            .expect("just specialized def must be in defs_by_sym")
+            .ty
+            .clone();
+        let new_lam_body = Term {
+            id: self.term_ids.next_id(),
+            ty: new_lifted_ty,
+            span: sb.lam.body.span,
+            kind: TermKind::Var(VarRef::Symbol(specialized_sym)),
+        };
+
+        let new_captures: Vec<_> = sb
+            .captures
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| !callable_indices.contains(i))
+            .map(|(_, c)| c)
+            .collect();
+
+        super::SoacBody {
+            lam: Lambda {
+                params: sb.lam.params,
+                body: Box::new(new_lam_body),
+                ret_ty: sb.lam.ret_ty,
+            },
+            captures: new_captures,
+        }
+    }
+
+    fn specialize_closure(
+        &mut self,
+        lifted_sym: SymbolId,
+        callable_indices: &[usize],
+        callable_syms: &[SymbolId],
+        captures: &[(SymbolId, Type<TypeName>, Term)],
+    ) -> SymbolId {
+        let lifted_def = self
+            .defs_by_sym
+            .get(&lifted_sym)
+            .expect("cascade_specialize_soac_body verified presence")
+            .clone();
+        let (params, inner_body) = super::extract_lambda_params(&lifted_def.body);
+
+        let drop_set: HashSet<SymbolId> = callable_indices.iter().map(|&i| captures[i].0).collect();
+        let mut new_body = inner_body.clone();
+        for (k, &i) in callable_indices.iter().enumerate() {
+            let local_sym = captures[i].0;
+            new_body = substitute_var(&new_body, local_sym, callable_syms[k], &mut self.term_ids);
+        }
+        let new_params: Vec<(SymbolId, Type<TypeName>)> =
+            params.into_iter().filter(|(s, _)| !drop_set.contains(s)).collect();
+
+        // Cascade into the cloned body: nested closures with their own
+        // callable captures get specialised too.
+        let new_body = self.cascade_specialize_term(new_body);
+
+        let rebuilt = super::closure_convert::rebuild_nested_lam(
+            &new_params,
+            new_body,
+            lifted_def.body.span,
+            &mut self.term_ids,
+        );
+
+        let lifted_name = crate::symbol_name_or_bug(&self.symbols, lifted_sym).to_string();
+        let specialized_name = format!("{}${}", lifted_name, self.specialization_counter);
+        self.specialization_counter += 1;
+        let new_sym = self.symbols.alloc(specialized_name);
+        self.top_level.insert(new_sym);
+
+        let new_def = Def {
+            name: new_sym,
+            ty: rebuilt.ty.clone(),
+            body: rebuilt,
+            meta: lifted_def.meta,
+            arity: new_params.len(),
+        };
+
+        let key = (lifted_sym, callable_syms.to_vec());
+        self.closure_spec_cache.insert(key, new_sym);
+        self.defs_by_sym.insert(new_sym, new_def.clone());
+        self.specialized_defs.push(new_def);
+
+        new_sym
     }
 }
 

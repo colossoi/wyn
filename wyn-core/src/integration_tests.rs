@@ -1905,23 +1905,20 @@ entry e() f32 = g(256)
         .expect("a runtime-sized array read by multiple consumers should lower to SPIR-V");
 }
 
-/// Gap: passing a top-level `def` as a function-typed argument panics
-/// `tlc/inline.rs:34` with `hof-specialization verifier failed:
-/// FunctionTypedParam{…}`. HOF specialization eliminates inline lambdas
-/// (`map(|i| …, xs)` lowers fine), but a named callee passed as a value
-/// through a wrapper isn't specialized away, leaving a `FunctionTypedParam`
-/// surviving after `filter_reachable`. Calling the same higher-order def
-/// directly from an entry hits the sibling failure
-/// `closure-calls-lowered verifier failed: ArityMismatch`, so the gap
-/// likely covers both call shapes.
-///
-/// This is the preferred shape for `lib/noise.wyn`'s `fbm` — a generic
-/// `fbm2(noise: key -> vec2f32 -> f32, …)` that all four `fbm_<kind>`
-/// flavors would specialise from. The library currently works around
-/// the gap by inlining the reduce/map into each `fbm_<kind>`; once this
-/// test passes, those four near-identical defs collapse to one.
+/// Regression for the named-callee HOF gap. The outer `fbm2(perlin2, …)`
+/// is specialized cleanly by the existing main loop, but `fbm2`'s body
+/// also closes over `noise` via a lifted SOAC lambda (closure_convert
+/// adds the function-typed capture as a parameter on the lifted def).
+/// The main loop's substitution only rewrites direct `noise(…)` references
+/// in `fbm2`'s surface body, not the lifted def's signature — so the
+/// captured `noise` still survives as an arrow-typed parameter and the
+/// verifier rejects it. Fixed by adding a cascade closure-specialization
+/// step in `hof_specialize::run` that walks every reachable def, finds
+/// `SoacBody`s whose captures include `(_, arrow_ty, Var(known_callable))`,
+/// clones the lifted def with the callable substituted into the body,
+/// and drops the callable param from its signature. Lets `lib/noise.wyn`
+/// collapse its four `fbm_<kind>` defs into one generic `fbm2`.
 #[test]
-#[ignore = "gap: a named def passed as a function-typed argument isn't eliminated by HOF specialization"]
 fn function_typed_param_with_named_callee_specializes() {
     let source = r#"
 def perlin2(k: u32, p: vec2f32) f32 = f32.u32(k) + p.x
