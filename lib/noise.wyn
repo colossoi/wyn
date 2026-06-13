@@ -181,33 +181,13 @@ functor Noise(G: RANDOM_ACCESS) = {
   -- fbm2 + per-noise convenience flavors
   ------------------------------------------------------------------
 
-  -- | Fractional Brownian motion. One specialised flavor per base noise.
-  -- Stacks `octaves` layers: layer `i` samples at frequency `lacunarity^i`,
-  -- amplitude `gain^i`, with a per-octave derived key so layers don't
-  -- lock-step. Standard knobs: `lacunarity = 2.0`, `gain = 0.5` — each
-  -- octave doubles the detail and halves the amplitude, classic 1/f
-  -- spectrum.
-  --
-  -- The preferred shape — once the compiler supports it — is one generic:
-  --
-  --     def fbm2(noise: key -> vec2f32 -> f32, k: key, p: vec2f32,
-  --              octaves: i32, lacunarity: f32, gain: f32) f32 =
-  --       reduce(|a, b| a + b, 0.0f32,
-  --         map(|i: i32|
-  --               let freq = f32.pow(lacunarity, f32.i32(i)) in
-  --               let amp = f32.pow(gain, f32.i32(i)) in
-  --               let kk = G.derive(k, u32.i32(i)) in
-  --               noise(kk, @[p.x * freq, p.y * freq]) * amp,
-  --             0i32 ..< octaves))
-  --
-  -- That form panics today because passing a named def as a function-typed
-  -- argument trips `hof-specialization verifier failed` in `tlc/inline.rs`
-  -- (pinned by the ignored test
-  -- `function_typed_param_with_named_callee_specializes` in
-  -- `wyn-core/src/integration_tests.rs`). The four specialised flavors below
-  -- produce identical SPIR-V and avoid the gap; collapse them to the single
-  -- `fbm2` above once that test starts passing.
-  def fbm_value(k: key, p: vec2f32, octaves: i32, lacunarity: f32, gain: f32) f32 =
+  -- | Fractional Brownian motion. Stacks `octaves` layers: layer `i`
+  -- samples at frequency `lacunarity^i`, amplitude `gain^i`, with a
+  -- per-octave derived key so layers don't lock-step. Standard knobs:
+  -- `lacunarity = 2.0`, `gain = 0.5` — each octave doubles the detail
+  -- and halves the amplitude, classic 1/f spectrum.
+  def fbm2(noise: key -> vec2f32 -> f32, k: key, p: vec2f32,
+           octaves: i32, lacunarity: f32, gain: f32) f32 =
     reduce(
       |a: f32, b: f32| a + b,
       0.0f32,
@@ -216,44 +196,14 @@ functor Noise(G: RANDOM_ACCESS) = {
             let amp = f32.pow(gain, f32.i32(i)) in
             let kk = G.derive(k, u32.i32(i)) in
             let pp : vec2f32 = @[p.x * freq, p.y * freq] in
-            value2(kk, pp) * amp,
+            noise(kk, pp) * amp,
           0i32 ..< octaves))
 
-  def fbm_perlin(k: key, p: vec2f32, octaves: i32, lacunarity: f32, gain: f32) f32 =
-    reduce(
-      |a: f32, b: f32| a + b,
-      0.0f32,
-      map(|i: i32|
-            let freq = f32.pow(lacunarity, f32.i32(i)) in
-            let amp = f32.pow(gain, f32.i32(i)) in
-            let kk = G.derive(k, u32.i32(i)) in
-            let pp : vec2f32 = @[p.x * freq, p.y * freq] in
-            perlin2(kk, pp) * amp,
-          0i32 ..< octaves))
-
-  def fbm_simplex(k: key, p: vec2f32, octaves: i32, lacunarity: f32, gain: f32) f32 =
-    reduce(
-      |a: f32, b: f32| a + b,
-      0.0f32,
-      map(|i: i32|
-            let freq = f32.pow(lacunarity, f32.i32(i)) in
-            let amp = f32.pow(gain, f32.i32(i)) in
-            let kk = G.derive(k, u32.i32(i)) in
-            let pp : vec2f32 = @[p.x * freq, p.y * freq] in
-            simplex2(kk, pp) * amp,
-          0i32 ..< octaves))
-
-  def fbm_worley(k: key, p: vec2f32, octaves: i32, lacunarity: f32, gain: f32) f32 =
-    reduce(
-      |a: f32, b: f32| a + b,
-      0.0f32,
-      map(|i: i32|
-            let freq = f32.pow(lacunarity, f32.i32(i)) in
-            let amp = f32.pow(gain, f32.i32(i)) in
-            let kk = G.derive(k, u32.i32(i)) in
-            let pp : vec2f32 = @[p.x * freq, p.y * freq] in
-            worley2(kk, pp) * amp,
-          0i32 ..< octaves))
+  -- Per-noise convenience wrappers — same signature, fixed base noise.
+  def fbm_value  (k: key, p: vec2f32, octaves: i32, lacunarity: f32, gain: f32) f32 = fbm2(value2,   k, p, octaves, lacunarity, gain)
+  def fbm_perlin (k: key, p: vec2f32, octaves: i32, lacunarity: f32, gain: f32) f32 = fbm2(perlin2,  k, p, octaves, lacunarity, gain)
+  def fbm_simplex(k: key, p: vec2f32, octaves: i32, lacunarity: f32, gain: f32) f32 = fbm2(simplex2, k, p, octaves, lacunarity, gain)
+  def fbm_worley (k: key, p: vec2f32, octaves: i32, lacunarity: f32, gain: f32) f32 = fbm2(worley2,  k, p, octaves, lacunarity, gain)
 }
 
 -- | The graphics-grade default: noise driven by the fasthash PCG generator.
