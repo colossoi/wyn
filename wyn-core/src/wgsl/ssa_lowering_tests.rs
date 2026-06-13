@@ -600,14 +600,16 @@ entry mn(n: i32) i32 =
     validate_wgsl(&wgsl);
 }
 
-/// Known bug: a reduce over a **u32** range emits a WGSL range struct whose
-/// `len` field (`.f2`) is hardcoded `i32`, so `length(range)` comes out i32
-/// against a u32 loop counter and naga rejects the comparison. An i32 range
-/// (above) validates fine, so the fault is the virtual-array (range) struct
-/// field typing in the WGSL backend, not the reduce/parallelize path. Remove
-/// `#[ignore]` once the range struct carries the range's element type.
+/// Regression: a reduce over a u32 range used to mislower because the
+/// WGSL `_w_intrinsic_length` branch for `ArrayVariantVirtual` returned
+/// the struct's element-typed `.f2` field verbatim while `emit_length`
+/// (EGIR) asked for i32 — a u32 expression assigned into an i32 var.
+/// The sibling branches (Bounded / View / runtime-storage) all honor
+/// `wants_i32`; this one didn't. The reduce loop's counter stays i32
+/// universally; the element value is derived per iteration via an
+/// explicit `u32(idx)` cast, so the only missing piece was the length
+/// cast at the comparison site.
 #[test]
-#[ignore = "u32-range WGSL: range struct len field typed i32, mismatches a u32 range"]
 fn wgsl_u32_range_reduce_validates() {
     let wgsl = compile_to_wgsl(
         r#"

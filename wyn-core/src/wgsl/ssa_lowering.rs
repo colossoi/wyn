@@ -2486,11 +2486,14 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         if let Some(id) = args[0].as_ssa() {
                             let ty = self.body.get_value_type(id);
                             // Virtual arrays carry their length in the `f2`
-                            // field of the range struct.
+                            // field of the range struct, element-typed (so
+                            // `0u32..<n` yields a `u32` field). `emit_length`
+                            // upstream asks for i32, so cast when needed.
                             if let Some(PolyType::Constructed(TypeName::ArrayVariantVirtual, _)) =
                                 ty.array_variant()
                             {
-                                return Ok(format!("{}.f2", arg_strs[0]));
+                                let expr = format!("{}.f2", arg_strs[0]);
+                                return Ok(if wants_i32 { format!("i32({})", expr) } else { expr });
                             }
                             // Bounded arrays carry their runtime length in
                             // the `f1` field of the `{buffer, len}` struct
