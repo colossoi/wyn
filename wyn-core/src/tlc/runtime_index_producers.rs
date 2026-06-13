@@ -21,9 +21,7 @@ use polytype::Type;
 use crate::SymbolId;
 use crate::ast::TypeName;
 
-use super::{
-    ArrayExpr, Lambda, Program, SoacBody, SoacOp, Term, TermIdSource, TermKind, VarRef,
-};
+use super::{ArrayExpr, Lambda, Program, SoacBody, SoacOp, Term, TermIdSource, TermKind, VarRef};
 
 #[derive(Debug)]
 struct Binding {
@@ -203,7 +201,13 @@ fn float_term(
         }
         other => {
             let mut floats = Vec::new();
-            let mapped = Term { id, ty, span, kind: other }.map_children(&mut |child| {
+            let mapped = Term {
+                id,
+                ty,
+                span,
+                kind: other,
+            }
+            .map_children(&mut |child| {
                 let (mut child_floats, child) = float_term(child, blocked, ids, symbols, true);
                 floats.append(&mut child_floats);
                 child
@@ -481,11 +485,7 @@ fn float_array_expr(
 }
 
 fn finish(floats: Vec<Binding>, term: Term, collect: bool, ids: &mut TermIdSource) -> (Vec<Binding>, Term) {
-    if collect {
-        (floats, term)
-    } else {
-        (vec![], wrap_lets(floats, term, ids))
-    }
+    if collect { (floats, term) } else { (vec![], wrap_lets(floats, term, ids)) }
 }
 
 fn wrap_lets(bindings: Vec<Binding>, mut body: Term, ids: &mut TermIdSource) -> Term {

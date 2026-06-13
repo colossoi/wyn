@@ -255,6 +255,7 @@ impl<'a> Elaborator<'a> {
 
     fn elaborate_subtree(&mut self, skel_bid: SkelBlockId) {
         self.elaborated.push_scope();
+        self.elaborated_places.push_scope();
         let pushed_loop = self.maybe_push_loop(skel_bid);
 
         let out_bid = self.block_map[&skel_bid];
@@ -283,6 +284,7 @@ impl<'a> Elaborator<'a> {
         if pushed_loop {
             self.loop_stack.pop();
         }
+        self.elaborated_places.pop_scope();
         self.elaborated.pop_scope();
     }
 

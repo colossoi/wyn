@@ -2024,17 +2024,20 @@ entry summarize() [6]f32 =
     compile_to_spirv(source).expect("the statistics gatherer should lower to SPIR-V");
 }
 
-/// Pre-existing SPIR-V codegen bug (not operator-related — pure infix
-/// reproduces it). A three-deep dependent `let` chain whose final binding is a
-/// *bitwise* op, consumed by a following `if` condition, mislowers with
-/// "place ... has no pointer — its defining instruction was not lowered (or ran
-/// after a consumer)". Narrowing: a two-`let` chain lowers fine, and a
-/// three-`let` chain ending in an *arithmetic* op lowers fine — it takes both
-/// the chain depth and the bitwise final op; the `if` branch contents are
-/// irrelevant. Smells like an EGIR/SSA scheduling issue where the bitwise
-/// place is ordered after its consumer in the conditional.
+/// Regression for an elaborate-pass bug: `emit_storage_store` interns the
+/// output's `view_index` access chain, so both arms of an `if`-then-`else`
+/// writing the same output slot share one hashconsed `ViewIndex` node.
+/// `demand_place`'s cache (`elaborated_places`) wasn't scope-pushed per
+/// subtree, so the access-chain instruction landed in whichever arm
+/// demanded it first; the sibling arm's store then referenced a place
+/// defined in a non-dominating block ("place … has no pointer"). Fix:
+/// scope `elaborated_places` alongside `elaborated` in `elaborate_subtree`
+/// so per-arm cache entries pop with the arm, and the second arm re-emits
+/// its own access chain. The bitwise `&` here matters only because the
+/// arithmetic version constant-folds through `partial_eval`; see
+/// `branch_with_let_terminal_into_output_slot_lowers` for the
+/// fold-resistant parameter-driven repro.
 #[test]
-#[ignore = "pre-existing: bitwise op at the end of a 3-deep let-chain feeding an if mislowers"]
 fn bitwise_in_deep_let_chain_feeding_if_lowers() {
     let source = r#"
 #[compute]
@@ -2046,6 +2049,22 @@ entry t() i32 =
 "#;
     compile_to_spirv(source)
         .expect("bitwise result threaded through a deep let-chain into an if should lower");
+}
+
+/// Minimal repro for the same `elaborate_subtree` place-cache bug. The
+/// runtime parameter `n` keeps the `if` branch live (`partial_eval` can't
+/// fold it), so both arms emit `OutputSlotStore` against the same output
+/// slot's `view_index`. Pre-fix this panicked at SPIR-V emission with
+/// "place … has no pointer".
+#[test]
+fn branch_with_let_terminal_into_output_slot_lowers() {
+    let source = r#"
+#[compute]
+entry t(n: i32) i32 =
+    let x = n + 1i32 in
+    if x < 100i32 then x else 0i32
+"#;
+    compile_to_spirv(source).expect("both arms of an if writing the same output slot should lower");
 }
 
 /// Verify that nested if/else chains compile to SPIR-V.

@@ -46,10 +46,7 @@ fn let_bound_runtime_gather(program: &Program, term: &Term) -> bool {
     let mut found = false;
     walk(term, &mut |t| {
         if let TermKind::Let { name, rhs, .. } = &t.kind {
-            let is_runtime_name = program
-                .symbols
-                .get(*name)
-                .is_some_and(|n| n == "_runtime_gather");
+            let is_runtime_name = program.symbols.get(*name).is_some_and(|n| n == "_runtime_gather");
             if is_runtime_name && is_liftable_producer(rhs) {
                 found = true;
             }
@@ -63,11 +60,7 @@ fn index_reads_runtime_gather(program: &Program, term: &Term) -> bool {
     walk(term, &mut |t| {
         if let TermKind::Index { array, .. } = &t.kind {
             if let TermKind::Var(VarRef::Symbol(sym)) = &array.kind {
-                if program
-                    .symbols
-                    .get(*sym)
-                    .is_some_and(|n| n == "_runtime_gather")
-                {
+                if program.symbols.get(*sym).is_some_and(|n| n == "_runtime_gather") {
                     found = true;
                 }
             }

@@ -64,12 +64,11 @@ pub fn run(mut program: Program) -> Program {
             matches!(
                 summaries.get(&d.name),
                 Some(FunctionSummary {
-                    result:
-                        ResultSemantics::Produces(
-                            ArraySemantics::Elementwise { .. }
-                                | ArraySemantics::PrefixScan { .. }
-                                | ArraySemantics::Reduction { .. },
-                        ),
+                    result: ResultSemantics::Produces(
+                        ArraySemantics::Elementwise { .. }
+                            | ArraySemantics::PrefixScan { .. }
+                            | ArraySemantics::Reduction { .. },
+                    ),
                     ..
                 })
             )
@@ -182,10 +181,7 @@ fn expose(
             ty,
             span,
             kind: TermKind::Tuple(
-                items
-                    .into_iter()
-                    .map(|t| expose(t, producers, sym_to_def, ids, depth))
-                    .collect(),
+                items.into_iter().map(|t| expose(t, producers, sym_to_def, ids, depth)).collect(),
             ),
         },
         TermKind::VecLit(items) => Term {
@@ -193,10 +189,7 @@ fn expose(
             ty,
             span,
             kind: TermKind::VecLit(
-                items
-                    .into_iter()
-                    .map(|t| expose(t, producers, sym_to_def, ids, depth))
-                    .collect(),
+                items.into_iter().map(|t| expose(t, producers, sym_to_def, ids, depth)).collect(),
             ),
         },
         TermKind::Coerce { inner, target_ty } => Term {
@@ -285,16 +278,10 @@ fn expose_array_expr(
     match ae {
         ArrayExpr::Ref(t) => ArrayExpr::Ref(Box::new(expose(*t, producers, sym_to_def, ids, depth))),
         ArrayExpr::Zip(children) => ArrayExpr::Zip(
-            children
-                .into_iter()
-                .map(|c| expose_array_expr(c, producers, sym_to_def, ids, depth))
-                .collect(),
+            children.into_iter().map(|c| expose_array_expr(c, producers, sym_to_def, ids, depth)).collect(),
         ),
         ArrayExpr::Literal(terms) => ArrayExpr::Literal(
-            terms
-                .into_iter()
-                .map(|t| expose(t, producers, sym_to_def, ids, depth))
-                .collect(),
+            terms.into_iter().map(|t| expose(t, producers, sym_to_def, ids, depth)).collect(),
         ),
         ArrayExpr::Range { start, len, step } => ArrayExpr::Range {
             start: Box::new(expose(*start, producers, sym_to_def, ids, depth)),

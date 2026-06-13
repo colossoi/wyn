@@ -1052,10 +1052,7 @@ fn compute_entry_can_broadcast_scalar_prepasses(def: &Def, symbols: &SymbolTable
     let Some(analysis) = analyze_entry(def, symbols) else {
         return false;
     };
-    matches!(
-        analysis.soac.original,
-        SoacOp::Map { .. } | SoacOp::Scan { .. }
-    )
+    matches!(analysis.soac.original, SoacOp::Map { .. } | SoacOp::Scan { .. })
 }
 
 fn compute_broadcast_required_params(
