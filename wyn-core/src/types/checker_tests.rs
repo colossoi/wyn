@@ -1587,12 +1587,17 @@ def use_k: u32 = m.f(1u32)
     );
 }
 
+/// Regression: `open base` inside `module derived = { … }` brings
+/// `base`'s members into local scope, so `derived`'s body can call
+/// `foo` unqualified. Used to fail with `UndefinedVariable("foo")`
+/// because the open-resolver's index was built from `spec_schemes` +
+/// catalog only, and user-defined module `Decl` members never reach
+/// `spec_schemes` — so the resolver didn't know `base` had any
+/// members and the bare `foo` reference fell through. Module
+/// elaboration already splices `open base`'s items into `derived`'s
+/// items; the index now sees them too.
 #[test]
-#[ignore = "gap: `open M` in a module body is a no-op — does not bring M's members into local scope"]
 fn open_brings_members_into_local_scope() {
-    // Desired: after `open base`, `derived`'s body can call `foo` unqualified.
-    // Currently `open` parses but is not wired into name resolution, so `foo`
-    // is UndefinedVariable.
     typecheck_program(
         r#"
 module base = {

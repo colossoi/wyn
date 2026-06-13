@@ -36,8 +36,21 @@ pub fn run(ast: &mut ast::Program, module_manager: &mut ModuleManager) -> Result
     // Build the open-resolver index once and reuse across the user
     // `Program` and every elaborated prelude module body — the index
     // is invariant across this whole run (spec_schemes + catalog
-    // don't change).
-    let open_index = resolve_opens::build_index(&spec_schemes, catalog());
+    // don't change). User-defined modules don't go through
+    // `spec_schemes` (their bodies are `Decl`s, not `Sig` specs), so
+    // walk the elaborated-modules table here and inject each module's
+    // `Decl` member names directly — without this, `open base` for a
+    // user `module base = { def foo … }` finds `base` as an unknown
+    // module and bare `foo` references inside sibling module bodies
+    // never resolve.
+    let mut open_index = resolve_opens::build_index(&spec_schemes, catalog());
+    for (module_name, elaborated) in module_manager.get_elaborated_modules() {
+        for item in &elaborated.items {
+            if let crate::module_manager::ElaboratedItem::Decl(decl) = item {
+                open_index.add_member(module_name, &decl.name);
+            }
+        }
+    }
     resolve_opens::run_with_index(ast, &open_index)?;
 
     // Prelude module decl bodies don't go through `resolve_opens::run`
