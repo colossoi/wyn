@@ -174,8 +174,11 @@ impl PlaceholderResolver {
             }
             Spec::SigOp(name, ty) => {
                 *ty = self.resolve_type(ty);
-                // SigOp has no type params, so it's a monotype
-                let qualified_name = format!("{}.{}", module_name, name);
+                // SigOp has no type params, so it's a monotype. Key by the
+                // function-value spelling `M.(<op>)` to match what the parser
+                // produces for `M.(+)` references — `+` is a binop, `(+)` is
+                // the function-value, and the member is the function.
+                let qualified_name = format!("{}.({})", module_name, name);
                 self.spec_schemes.insert(qualified_name, TypeScheme::Monotype(ty.clone()));
             }
             Spec::Type(_, _, Some(ty)) => {

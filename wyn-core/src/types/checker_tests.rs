@@ -1607,14 +1607,16 @@ def use_it: i32 = derived.bar(10)
     );
 }
 
+/// Regression: `f32.(+)` references f32's reified `+` function value
+/// (operators can be forwarded through a functor the way named builtins
+/// like `f32.max` already are). Used to fail with
+/// `UndefinedVariable("f32.(+)")` because the catalog mis-stored
+/// operator members under the binop spelling `f32.+`. `+` is the
+/// binop; `(+)` is the function value, and member names are always
+/// functions — so the catalog now stores `f32.(+)` and Spec::SigOp's
+/// qualified key uses the same spelling.
 #[test]
-#[ignore = "gap: `m.(+)` reaches user-defined operator members but not a module's builtin operators (builtins are keyed `f32.+`, no parens)"]
 fn qualified_operator_member_resolves_builtin() {
-    // Desired: `f32.(+)` references f32's builtin `+`, so operators can be
-    // forwarded through a functor the way named builtins (`f32.max`) already
-    // are. Currently fails resolution with `UndefinedVariable("f32.(+)")`:
-    // builtin ops are keyed `f32.+` while the qualified-operator syntax yields
-    // `f32.(+)`.
     typecheck_program(
         r#"
 def use_it: f32 = f32.(+)(1.0f32, 2.0f32)

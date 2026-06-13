@@ -697,7 +697,16 @@ fn leak_one(a: &'static str) -> &'static [&'static str] {
 }
 
 fn per_type_op(ty: &str, op: &str, internal_op: &str, lowering: BuiltinLowering) -> BuiltinDefRaw {
-    let surface = leak_str(format!("{}.{}", ty, op));
+    // `+` is a binop; `(+)` is its function-value spelling. The qualified
+    // member name must use the function spelling — that's what `f32.(+)`
+    // (the only writable surface syntax for "the `+` member of f32") parses
+    // to. Alpha-named members like `f32.min` need no wrap.
+    let display_op = if op.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_') {
+        op.to_string()
+    } else {
+        format!("({})", op)
+    };
+    let surface = leak_str(format!("{}.{}", ty, display_op));
     let internal = leak_str(format!("_w_intrinsic_{}_{}", internal_op, ty));
     BuiltinDefRaw {
         surface_name: surface,

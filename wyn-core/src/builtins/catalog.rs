@@ -24,10 +24,12 @@ pub enum BuiltinKind {
     UserVisible,
     /// `_w_intrinsic_*` names emitted by the compiler internally.
     InternalIntrinsic,
-    /// Module-qualified ops like `f32.sin`, `vec.pow`, `i32.+`.
+    /// Module-qualified ops like `f32.sin`, `vec.pow`, `i32.(+)`.
     ModuleBuiltin,
-    /// Operator dispatch entries (e.g. `f32.+`, `i32.<`). Currently
-    /// looked up by `<type>.<op>` string.
+    /// Operator dispatch entries (e.g. `f32.(+)`, `i32.(<)`). Looked
+    /// up by the function-value spelling `<type>.(<op>)` — `+` is the
+    /// binop, `(+)` is the reified two-argument function value, and
+    /// member names are always functions.
     Operator,
 }
 
@@ -60,9 +62,9 @@ pub struct BuiltinOverload {
 /// of keys this entry publishes a polymorphic scheme under (consumed by
 /// the type checker's name resolution). `impl_source_names` is the set
 /// of keys this entry publishes a backend lowering under (consumed by
-/// the backends). Per-type ops like `f32.+` have empty
+/// the backends). Per-type ops like `f32.(+)` have empty
 /// `intrinsic_source_names` (their schemes come from prelude module
-/// signatures) and two entries in `impl_source_names`: `f32.+` and
+/// signatures) and two entries in `impl_source_names`: `f32.(+)` and
 /// `_w_intrinsic_+_f32`.
 #[derive(Debug, Clone)]
 pub struct BuiltinDefRaw {
