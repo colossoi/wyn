@@ -51,7 +51,7 @@ fn compile_to_expanded_egraph(input: &str) -> crate::egir::types::EGraph {
         .monomorphize()
         .fold_generated_lambdas()
         .inline_small()
-        .materialize_entry_soacs()
+        .rep_specialize()
         .parallelize_soacs(false)
         .expect("parallelize_soacs")
         .filter_reachable()

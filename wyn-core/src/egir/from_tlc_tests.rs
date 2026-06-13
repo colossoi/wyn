@@ -43,7 +43,7 @@ fn compile_via_egir(src: &str) -> Program {
         .monomorphize()
         .fold_generated_lambdas()
         .inline_small()
-        .materialize_entry_soacs()
+        .rep_specialize()
         .parallelize_soacs(false)
         .expect("parallelize_soacs")
         .filter_reachable();
@@ -593,7 +593,7 @@ entry vertex_main(#[location(0)] position: vec3f32, #[location(1)] color: vec3f3
         .monomorphize()
         .fold_generated_lambdas()
         .inline_small()
-        .materialize_entry_soacs()
+        .rep_specialize()
         .parallelize_soacs(false)
         .expect("parallelize_soacs")
         .filter_reachable();

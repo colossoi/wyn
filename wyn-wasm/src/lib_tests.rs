@@ -31,7 +31,7 @@ fn compile_to_ssa(source: &str) -> wyn_core::ssa::types::Program {
         .monomorphize()
         .fold_generated_lambdas()
         .inline_small()
-        .materialize_entry_soacs()
+        .rep_specialize()
         .parallelize_soacs(false)
         .expect("parallelize_soacs failed")
         .filter_reachable()

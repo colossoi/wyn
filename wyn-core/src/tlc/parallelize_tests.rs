@@ -596,7 +596,7 @@ fn parallelize_src(
         .monomorphize()
         .fold_generated_lambdas()
         .inline_small()
-        .materialize_entry_soacs()
+        .rep_specialize()
         .parallelize_soacs(false)
         .expect("parallelize_soacs");
     (tlc.tlc.clone(), tlc.pipeline.clone())
@@ -882,7 +882,6 @@ fn single_entry_two_independent_scans_then_gather_yields_many_stages() {
 /// `ScalarBroadcast`). 3 pipelines (scan + reduce + consumer), 6 stages
 /// (3 scan + 2 reduce + 1 consumer).
 #[test]
-#[ignore = "spike target: producer-consumer plan (not ported)"]
 fn single_entry_scan_and_scalar_reduce_both_hoist() {
     let src = r#"
         #[compute]
@@ -959,7 +958,6 @@ fn single_entry_two_gathers_of_same_scan_share_one_producer() {
 /// its own two-phase pre-pass: 4 pipelines (3 reduces + consumer), 7 stages
 /// (2 + 2 + 2 + 1).
 #[test]
-#[ignore = "spike target: producer-consumer plan (not ported)"]
 fn single_entry_scalar_reduces_in_let_rhs_each_hoist() {
     let src = r#"
         #[compute]
@@ -1079,7 +1077,6 @@ fn two_entries_each_with_scan_then_gather_yield_many_stages() {
 /// parameter, out of scope at `let s`, so the reduce is invariant across the
 /// map and the hoist is sound.
 #[test]
-#[ignore = "spike target: producer-consumer plan (not ported)"]
 fn aspiration_scalar_reduce_in_let_rhs_should_hoist() {
     let src = r#"
         #[compute]
@@ -1103,7 +1100,6 @@ fn aspiration_scalar_reduce_in_let_rhs_should_hoist() {
 /// Two independent captured scalar reduces → each hoists into its own
 /// two-phase pre-pass: 3 pipelines (reduce₁ + reduce₂ + consumer), 5 stages.
 #[test]
-#[ignore = "spike target: producer-consumer plan (not ported)"]
 fn aspiration_two_scalar_reduces_in_let_rhs_should_each_hoist() {
     let src = r#"
         #[compute]
@@ -1157,7 +1153,7 @@ fn compile_to_spirv(src: &str) -> crate::error::Result<Vec<u32>> {
         .monomorphize()
         .fold_generated_lambdas()
         .inline_small()
-        .materialize_entry_soacs()
+        .rep_specialize()
         .parallelize_soacs(false)
         .expect("parallelize_soacs")
         .filter_reachable()

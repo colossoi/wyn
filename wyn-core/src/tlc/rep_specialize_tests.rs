@@ -60,7 +60,7 @@ entry tick() i32 =
 }
 
 /// Negative test: run the same program through the
-/// `parallelize_soacs` shortcut on `TlcEntrySoacsMaterialized` (which
+/// `parallelize_soacs` shortcut on `TlcSmallInlined` (which
 /// bypasses rep_specialize). The verifier in `egir::verify_no_abstract`
 /// must fire — this both proves the shortcut path *is* lethal without
 /// rep_specialize and pins that the verifier catches the leak.
@@ -81,7 +81,7 @@ entry tick() i32 =
 
     let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
     // Run the full TLC pipeline except `rep_specialize` — go directly
-    // through `parallelize_soacs` on `TlcEntrySoacsMaterialized`. The
+    // through `parallelize_soacs` on `TlcSmallInlined`. The
     // resulting program still has `Abstract` on `sum`/`center`'s param,
     // so the verifier in `lower(...)` must reject it.
     let parsed = Compiler::parse(src, &mut node_counter).expect("parse");
@@ -104,7 +104,6 @@ entry tick() i32 =
         .monomorphize()
         .fold_generated_lambdas()
         .inline_small()
-        .materialize_entry_soacs()
         // ← shortcut skipping rep_specialize:
         .parallelize_soacs(false)
         .expect("parallelize_soacs")

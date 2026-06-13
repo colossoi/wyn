@@ -32,8 +32,7 @@ fn materialize(src: &str) -> Program {
         .apply_ownership()
         .expect("apply_ownership")
         .normalize_outputs()
-        .expect("normalize_outputs")
-        .lift_gathers();
+        .expect("normalize_outputs");
     run(lifted.0.tlc)
 }
 

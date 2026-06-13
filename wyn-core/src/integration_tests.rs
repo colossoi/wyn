@@ -1873,7 +1873,6 @@ entry e() [1]f32 = [g(256)[3]]
 /// index then reads the buffer. Distinct from the static case, which never
 /// materializes.
 #[test]
-#[ignore = "spike target: post-materialize gather lift (not ported)"]
 fn runtime_index_into_nested_producer_lowers() {
     let source = r#"
 def g(n: i32) []f32 = map(|i: i32| f32.i32(i), 0i32 ..< n)
@@ -1894,7 +1893,6 @@ entry e(j: i32) [1]f32 = [g(256)[j]]
 /// `maximum`. Distinct from `returning_runtime_sized_array_from_fn_lowers`,
 /// which is about *returning* such an array.
 #[test]
-#[ignore = "spike target: post-materialize gather lift (not ported)"]
 fn runtime_sized_array_with_multiple_consumers_lowers() {
     let source = r#"
 def g(n: i32) f32 =
@@ -2925,7 +2923,7 @@ fn compile_parallel(source: &str) -> crate::Lowered {
         .monomorphize()
         .fold_generated_lambdas()
         .inline_small()
-        .materialize_entry_soacs()
+        .rep_specialize()
         // `parallelize_soacs` takes a *disable* flag; `false` enables it,
         // matching the production driver's default (non-`--single-stage`).
         .parallelize_soacs(false)

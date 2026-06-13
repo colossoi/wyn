@@ -296,9 +296,18 @@ fn compile_file(
     // chains so downstream passes see a uniform unit-producing body shape.
     let tlc_normed_outputs = time("normalize_outputs", verbose, || tlc_owned.normalize_outputs())?;
 
-    // Materialize randomly-indexed computed arrays into storage buffers
-    // (before defunctionalization, while their producers are still SOACs).
-    let tlc_gathered = time("lift_gathers", verbose, || tlc_normed_outputs.lift_gathers());
+    let tlc_exposed = time("expose_entry_producer_helpers", verbose, || {
+        tlc_normed_outputs.expose_entry_producer_helpers()
+    });
+    let tlc_static_fused = time("static_index_fusion", verbose, || {
+        tlc_exposed.fuse_static_indices()
+    });
+    let tlc_runtime_floated = time("float_runtime_index_nested_producers", verbose, || {
+        tlc_static_fused.float_runtime_index_nested_producers()
+    });
+    let tlc_gathered = time("gather_residency", verbose, || {
+        tlc_runtime_floated.plan_execute_gather_residency()
+    });
 
     // Defunctionalize: lift lambdas and flatten SOAC captures
     let tlc_defunc = time("defunctionalize", verbose, || tlc_gathered.defunctionalize());
@@ -312,20 +321,12 @@ fn compile_file(
     // Inline small user functions and constants at TLC level
     let tlc_inlined = time("tlc_inline_small", verbose, || tlc_folded.inline_small());
 
-    // Parallelize SOACs in compute shaders (structural decisions at TLC
-    // level). `--single-stage` disables this pass entirely; compute SOACs
-    // collapse to sequential loops and graphical entries are not
-    // restructured.
-    let tlc_exposed = time("materialize_entry_soacs", verbose, || {
-        tlc_inlined.materialize_entry_soacs()
-    });
-
     // Phase 2 of array-variant-abstract: at call edges, specialize a
     // user-defined callee whose `Abstract`-typed param receives a
     // producer-known concrete variant (Bounded / View from filter).
     // Runs before `parallelize_soacs` so the parallelizer sees
     // concrete representations on every call edge.
-    let tlc_rep_specialized = time("tlc_rep_specialize", verbose, || tlc_exposed.rep_specialize());
+    let tlc_rep_specialized = time("tlc_rep_specialize", verbose, || tlc_inlined.rep_specialize());
     let tlc_parallel = time("tlc_parallelize", verbose, || {
         tlc_rep_specialized.parallelize_soacs(single_stage)
     })?;

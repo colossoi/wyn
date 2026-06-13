@@ -309,7 +309,7 @@ fn compile_to_wgsl(source: &str) -> crate::error::Result<String> {
         .monomorphize()
         .fold_generated_lambdas()
         .inline_small()
-        .materialize_entry_soacs()
+        .rep_specialize()
         .parallelize_soacs(false)
         .expect("parallelize_soacs")
         .filter_reachable()

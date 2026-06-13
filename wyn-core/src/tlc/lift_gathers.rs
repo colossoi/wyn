@@ -270,10 +270,7 @@ fn try_lift(
     // Producer must be an array-yielding SOAC (`map` or `scan`) of a
     // runtime-sized array. Both preserve element count, so the gather buffer
     // tracks the producer's input length.
-    let is_array_producer = matches!(
-        &rhs.kind,
-        TermKind::Soac(SoacOp::Map { .. }) | TermKind::Soac(SoacOp::Scan { .. })
-    );
+    let is_array_producer = is_liftable_array_producer(rhs);
     if !is_array_producer || !is_runtime_sized_array(name_ty) {
         return None;
     }
@@ -784,6 +781,14 @@ fn is_runtime_sized_array(ty: &Type<TypeName>) -> bool {
             )
         })
         .unwrap_or(false)
+}
+
+fn is_liftable_array_producer(term: &Term) -> bool {
+    match &term.kind {
+        TermKind::Let { body, .. } => is_liftable_array_producer(body),
+        TermKind::Soac(SoacOp::Map { .. } | SoacOp::Scan { .. }) => true,
+        _ => false,
+    }
 }
 
 /// Collect the free `Var(Symbol)` references of `term` as `(sym, ty)`.

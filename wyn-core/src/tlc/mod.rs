@@ -22,6 +22,7 @@ pub mod patterns;
 pub mod pin_entry_regions;
 pub mod producer_graph;
 pub mod rep_specialize;
+pub mod runtime_index_producers;
 #[cfg(test)]
 #[path = "rep_specialize_tests.rs"]
 mod rep_specialize_tests;

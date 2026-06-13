@@ -938,7 +938,17 @@ impl PlannedBindings {
 ///
 /// Scope (MVP): only reduce/redomap whose result is a scalar. Scan/Map
 /// (array results) and deeply nested lets are left for a follow-up.
-fn lift_graphical_invariant_soacs(
+enum ScalarPrepassPolicy {
+    GraphicalInvariant {
+        tainted: HashSet<SymbolId>,
+        uniform_params: HashMap<SymbolId, BindingRef>,
+    },
+    ComputeBroadcast {
+        source_def: Def,
+    },
+}
+
+fn lift_scalar_soac_prepasses(
     program: &mut Program,
     next_binding: &mut u32,
     prepass_result_bindings: &mut HashMap<SymbolId, BindingRef>,
@@ -953,7 +963,7 @@ fn lift_graphical_invariant_soacs(
         .iter()
         .enumerate()
         .filter_map(|(i, d)| match &d.meta {
-            DefMeta::EntryPoint(decl) if !decl.entry_type.is_compute() => Some(i),
+            DefMeta::EntryPoint(_) => Some(i),
             _ => None,
         })
         .collect();
@@ -963,41 +973,46 @@ fn lift_graphical_invariant_soacs(
     for idx in indices {
         let entry_name = crate::symbol_name_or_bug(&program.symbols, program.defs[idx].name).to_string();
 
-        // Classify each entry param by correlating the lambda params (by
-        // position) with the source patterns on the decl. A `#[uniform]`
-        // param is invariant across invocations, so it must NOT seed the
-        // taint set: a reduce over `map(|i| f(uniform, i), 0..<N)` is
-        // entry-invariant and is a valid lift. Such uniforms are instead
-        // captured into the pre-pass entry (see `maybe_hoist`). Every other
-        // param (builtin / location) is per-invocation and taints.
-        let decl_params: Vec<ast::Pattern> = match &program.defs[idx].meta {
-            DefMeta::EntryPoint(decl) => decl.params.clone(),
-            _ => Vec::new(),
-        };
-        let (peeled, _) = peel_lambda_params(&program.defs[idx].body);
-        let mut entry_params: HashSet<SymbolId> = HashSet::new();
-        let mut uniform_params: HashMap<SymbolId, BindingRef> = HashMap::new();
-        for (i, (sym, _)) in peeled.iter().enumerate() {
-            match decl_params.get(i).and_then(crate::binding_layout::extract_uniform_binding) {
-                Some(br) => {
-                    uniform_params.insert(*sym, br);
+        let body = program.defs[idx].body.clone();
+        let policy = match &program.defs[idx].meta {
+            DefMeta::EntryPoint(decl) if decl.entry_type.is_compute() => {
+                if !compute_entry_can_broadcast_scalar_prepasses(&program.defs[idx], &program.symbols) {
+                    continue;
                 }
-                None => {
-                    entry_params.insert(*sym);
+                ScalarPrepassPolicy::ComputeBroadcast {
+                    source_def: program.defs[idx].clone(),
                 }
             }
-        }
-
-        let body = program.defs[idx].body.clone();
+            DefMeta::EntryPoint(_) => {
+                let decl_params: Vec<ast::Pattern> = match &program.defs[idx].meta {
+                    DefMeta::EntryPoint(decl) => decl.params.clone(),
+                    _ => Vec::new(),
+                };
+                let (peeled, _) = peel_lambda_params(&body);
+                let mut entry_params: HashSet<SymbolId> = HashSet::new();
+                let mut uniform_params: HashMap<SymbolId, BindingRef> = HashMap::new();
+                for (i, (sym, _)) in peeled.iter().enumerate() {
+                    match decl_params.get(i).and_then(crate::binding_layout::extract_uniform_binding) {
+                        Some(br) => {
+                            uniform_params.insert(*sym, br);
+                        }
+                        None => {
+                            entry_params.insert(*sym);
+                        }
+                    }
+                }
+                ScalarPrepassPolicy::GraphicalInvariant {
+                    tainted: compute_taint_set(&body, &entry_params, &program.symbols),
+                    uniform_params,
+                }
+            }
+            _ => continue,
+        };
         let mut added_decls: Vec<interface::StorageBindingDecl> = Vec::new();
-        // Transitive set of symbols that depend on per-invocation params. The
-        // lift pass refuses to hoist any SOAC whose free vars intersect it.
-        let tainted = compute_taint_set(&body, &entry_params, &program.symbols);
         let new_body = lift_in_term(
             body,
             &entry_name,
-            &tainted,
-            &uniform_params,
+            &policy,
             next_binding,
             &mut added_decls,
             &mut new_defs,
@@ -1033,11 +1048,73 @@ fn peel_lambda_params(term: &Term) -> (Vec<(SymbolId, Type<TypeName>)>, &Term) {
 /// Walk outer `Lambda`s and `Let`s, hoisting eligible SOAC-RHSs. Stops
 /// descending at the first non-Lambda-non-Let term — that's the tail
 /// computation and isn't a lift site.
+fn compute_entry_can_broadcast_scalar_prepasses(def: &Def, symbols: &SymbolTable) -> bool {
+    let Some(analysis) = analyze_entry(def, symbols) else {
+        return false;
+    };
+    matches!(
+        analysis.soac.original,
+        SoacOp::Map { .. } | SoacOp::Scan { .. }
+    )
+}
+
+fn compute_broadcast_required_params(
+    term: &Term,
+    source_def: &Def,
+    symbols: &SymbolTable,
+) -> Option<Vec<RequiredParam>> {
+    let bound: HashSet<SymbolId> = HashSet::new();
+    let empty_top: HashSet<SymbolId> = HashSet::new();
+    let empty_defs: HashSet<String> = HashSet::new();
+    let mut free: Vec<Term> = Vec::new();
+    let mut seen: HashSet<SymbolId> = HashSet::new();
+    collect_free_vars(
+        term,
+        &bound,
+        &empty_top,
+        &empty_defs,
+        symbols,
+        &mut free,
+        &mut seen,
+    );
+
+    let free_syms: HashSet<SymbolId> = free
+        .iter()
+        .filter_map(
+            |t| {
+                if let TermKind::Var(VarRef::Symbol(s)) = &t.kind { Some(*s) } else { None }
+            },
+        )
+        .collect();
+    let decl = match &source_def.meta {
+        DefMeta::EntryPoint(decl) => decl,
+        _ => return None,
+    };
+    let (orig_params, _) = peel_lambda_params(&source_def.body);
+    let orig_param_syms: HashSet<SymbolId> = orig_params.iter().map(|(sym, _)| *sym).collect();
+    if !free_syms.iter().all(|sym| orig_param_syms.contains(sym)) {
+        return None;
+    }
+
+    Some(
+        orig_params
+            .iter()
+            .enumerate()
+            .filter(|(_, (sym, _))| free_syms.contains(sym))
+            .map(|(i, (sym, ty))| RequiredParam {
+                sym: *sym,
+                ty: ty.clone(),
+                attr: decl.params.get(i).and_then(forwardable_binding_attribute),
+                binding: decl.param_bindings.get(i).cloned().flatten(),
+            })
+            .collect(),
+    )
+}
+
 fn lift_in_term(
     term: Term,
     entry_name: &str,
-    entry_params: &std::collections::HashSet<SymbolId>,
-    uniform_params: &HashMap<SymbolId, BindingRef>,
+    policy: &ScalarPrepassPolicy,
     next_binding: &mut u32,
     added_decls: &mut Vec<interface::StorageBindingDecl>,
     new_defs: &mut Vec<Def>,
@@ -1051,8 +1128,7 @@ fn lift_in_term(
             let new_body = lift_in_term(
                 *body,
                 entry_name,
-                entry_params,
-                uniform_params,
+                policy,
                 next_binding,
                 added_decls,
                 new_defs,
@@ -1081,8 +1157,7 @@ fn lift_in_term(
                 *rhs,
                 entry_name,
                 &name_ty,
-                entry_params,
-                uniform_params,
+                policy,
                 next_binding,
                 added_decls,
                 new_defs,
@@ -1093,8 +1168,7 @@ fn lift_in_term(
             let new_body = lift_in_term(
                 *body,
                 entry_name,
-                entry_params,
-                uniform_params,
+                policy,
                 next_binding,
                 added_decls,
                 new_defs,
@@ -1126,8 +1200,7 @@ fn maybe_hoist(
     rhs: Term,
     entry_name: &str,
     name_ty: &Type<TypeName>,
-    entry_params: &std::collections::HashSet<SymbolId>,
-    uniform_params: &HashMap<SymbolId, BindingRef>,
+    policy: &ScalarPrepassPolicy,
     next_binding: &mut u32,
     added_decls: &mut Vec<interface::StorageBindingDecl>,
     new_defs: &mut Vec<Def>,
@@ -1149,11 +1222,26 @@ fn maybe_hoist(
         return rhs;
     }
 
-    // Invariance check: none of `rhs`'s free vars may be an entry param.
-    if rhs_references_entry_param(&rhs, entry_params, &program.symbols) {
-        return rhs;
-    }
+    let required_params = match policy {
+        ScalarPrepassPolicy::GraphicalInvariant {
+            tainted,
+            uniform_params,
+        } => {
+            if rhs_references_entry_param(&rhs, tainted, &program.symbols) {
+                return rhs;
+            }
+            assert_hoist_free_vars_are_grounded(&rhs, tainted, &program.symbols);
+            collect_uniform_required_params(&rhs, uniform_params, &program.symbols)
+        }
+        ScalarPrepassPolicy::ComputeBroadcast { source_def } => {
+            match compute_broadcast_required_params(&rhs, source_def, &program.symbols) {
+                Some(required_params) => required_params,
+                None => return rhs,
+            }
+        }
+    };
 
+    // Invariance check: none of `rhs`'s free vars may be an entry param.
     // TODO: polymorphic-size free vars. Free vars whose type contains
     // a Size type variable (e.g. `iota(N)` where `N` is a `<[n]>`
     // parameter) pass the entry-param check — `N` isn't an entry
@@ -1163,8 +1251,6 @@ fn maybe_hoist(
     // fails backend validation. Panic loudly instead until the lift
     // either (a) refuses the hoist when polymorphic sizes are present
     // or (b) captures the size binding alongside the hoisted SOAC.
-    assert_hoist_free_vars_are_grounded(&rhs, entry_params, &program.symbols);
-
     // Pre-allocate the binding the fragment will load from. Stage B's
     // make_two_phase_plan will use this as the prepass's result_binding
     // (via the prepass_result_bindings map), so phase 2's final store
@@ -1175,15 +1261,13 @@ fn maybe_hoist(
     // Capture the SOAC's uniform free vars. The pre-pass is a separate
     // entry, so it must re-declare each uniform it reads as its own
     // `#[uniform]` param at the same (set, binding) the original entry used.
-    let captured_uniforms = collect_uniform_free_vars(&rhs, uniform_params, &program.symbols);
-
     let span = rhs.span;
     let prepass_name = format!("{}_prepass_{}", entry_name, added_decls.len());
     let prepass_def = build_prepass_def(
         &prepass_name,
         rhs,
         name_ty.clone(),
-        &captured_uniforms,
+        &required_params,
         program,
         term_ids,
     );
@@ -1273,11 +1357,11 @@ fn rhs_references_entry_param(
 /// Collect `term`'s free vars that are uniform entry params, as
 /// `(symbol, type, binding)`. Used to re-declare the uniforms a hoisted
 /// SOAC reads on the generated pre-pass entry. Deduplicated by symbol.
-fn collect_uniform_free_vars(
+fn collect_uniform_required_params(
     term: &Term,
     uniform_params: &HashMap<SymbolId, BindingRef>,
     symbols: &SymbolTable,
-) -> Vec<(SymbolId, Type<TypeName>, BindingRef)> {
+) -> Vec<RequiredParam> {
     let bound: HashSet<SymbolId> = HashSet::new();
     let empty_top: HashSet<SymbolId> = HashSet::new();
     let empty_defs: HashSet<String> = HashSet::new();
@@ -1293,13 +1377,21 @@ fn collect_uniform_free_vars(
         &mut seen,
     );
 
-    let mut out: Vec<(SymbolId, Type<TypeName>, BindingRef)> = Vec::new();
+    let mut out: Vec<RequiredParam> = Vec::new();
     let mut added: HashSet<SymbolId> = HashSet::new();
     for t in &free {
         if let TermKind::Var(VarRef::Symbol(s)) = &t.kind {
             if let Some(binding) = uniform_params.get(s) {
                 if added.insert(*s) {
-                    out.push((*s, t.ty.clone(), *binding));
+                    out.push(RequiredParam {
+                        sym: *s,
+                        ty: t.ty.clone(),
+                        attr: Some(Attribute::Uniform {
+                            set: binding.set,
+                            binding: binding.binding,
+                        }),
+                        binding: None,
+                    });
                 }
             }
         }
@@ -1372,27 +1464,15 @@ fn build_prepass_def(
     entry_name: &str,
     soac_term: Term,
     elem_ty: Type<TypeName>,
-    captured_uniforms: &[(SymbolId, Type<TypeName>, BindingRef)],
+    required_params: &[RequiredParam],
     program: &mut Program,
     term_ids: &mut TermIdSource,
 ) -> Def {
-    let required_params: Vec<RequiredParam> = captured_uniforms
-        .iter()
-        .map(|(s, ty, b)| RequiredParam {
-            sym: *s,
-            ty: ty.clone(),
-            attr: Some(Attribute::Uniform {
-                set: b.set,
-                binding: b.binding,
-            }),
-            binding: None,
-        })
-        .collect();
     make_entry_def(
         entry_name,
         soac_term,
         elem_ty,
-        &required_params,
+        required_params,
         Vec::new(),
         program,
         term_ids,
@@ -1440,7 +1520,7 @@ pub fn run(mut program: Program, disable: bool) -> crate::error::Result<Parallel
     // `make_two_phase_plan` consults this so phase 2's result store goes
     // exactly there (instead of a freshly-allocated binding).
     let mut prepass_result_bindings: HashMap<SymbolId, BindingRef> = HashMap::new();
-    lift_graphical_invariant_soacs(
+    lift_scalar_soac_prepasses(
         &mut program,
         &mut next_binding,
         &mut prepass_result_bindings,

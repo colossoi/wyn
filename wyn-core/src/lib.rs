@@ -284,6 +284,11 @@ pub type TypeTable = HashMap<NodeId, TypeScheme<TypeName>>;
 //       .normalize_soacs()                         -> TlcSoaNormalized
 //       .fuse_maps()                               -> TlcFused
 //       .apply_ownership()                         -> TlcOwnershipApplied
+//       .normalize_outputs()                       -> TlcOutputsNormalized
+//       .expose_entry_producer_helpers()           -> TlcEntryProducersExposed
+//       .fuse_static_indices()                     -> TlcStaticIndexFused
+//       .float_runtime_index_nested_producers()    -> TlcRuntimeIndexProducersFloated
+//       .plan_execute_gather_residency()           -> TlcGathersLifted
 //       .defunctionalize()                         -> TlcDefunctionalized
 //       .monomorphize()                            -> TlcMonomorphized
 //       .fold_generated_lambdas()                  -> TlcGeneratedLambdasFolded
@@ -616,13 +621,14 @@ impl TlcRegionsPinned {
             .expect("apply_ownership")
             .normalize_outputs()
             .expect("normalize_outputs")
-            .lift_gathers()
+            .expose_entry_producer_helpers()
+            .fuse_static_indices()
+            .float_runtime_index_nested_producers()
+            .plan_execute_gather_residency()
             .defunctionalize()
             .monomorphize()
             .fold_generated_lambdas()
             .inline_small()
-            .materialize_entry_soacs()
-            .fuse_static_indices()
             .rep_specialize()
             .parallelize_soacs(disable_parallelize)
             .expect("parallelize_soacs")
@@ -731,10 +737,79 @@ impl std::ops::Deref for TlcOutputsNormalized {
 }
 
 impl TlcOutputsNormalized {
-    /// Materialize randomly-indexed computed arrays into storage buffers.
-    /// Runs before defunctionalization, while a gathered computed array is
-    /// still a plain `Var` and its producer a recognizable `Soac(Map)`.
+    /// Entry-boundary producer exposure (normalization, not residency).
+    /// Inline helper calls whose result is an array producer while the caller's
+    /// indexed uses are still local in the entry body.
+    pub fn expose_entry_producer_helpers(self) -> TlcEntryProducersExposed {
+        let mut inner = self.0;
+        inner.tlc = tlc::materialize_entry_soacs::run(inner.tlc);
+        TlcEntryProducersExposed(inner)
+    }
+
+    /// Compatibility shortcut for older off-milestone tests. Runs the new
+    /// pre-defunc residency preparation sequence before the gather executor.
     pub fn lift_gathers(self) -> TlcGathersLifted {
+        self.expose_entry_producer_helpers()
+            .fuse_static_indices()
+            .float_runtime_index_nested_producers()
+            .plan_execute_gather_residency()
+    }
+}
+
+/// TLC after entry-boundary producer helpers have been exposed.
+pub struct TlcEntryProducersExposed(pub TlcEarlyInner);
+
+impl std::ops::Deref for TlcEntryProducersExposed {
+    type Target = TlcEarlyInner;
+    fn deref(&self) -> &TlcEarlyInner {
+        &self.0
+    }
+}
+
+impl TlcEntryProducersExposed {
+    /// Fuse constant-index reads of directly nested elementwise producers
+    /// before the gather residency pass can materialize them.
+    pub fn fuse_static_indices(self) -> TlcStaticIndexFused {
+        let mut inner = self.0;
+        inner.tlc = tlc::static_index_fusion::run(inner.tlc);
+        TlcStaticIndexFused(inner)
+    }
+}
+
+/// TLC after static-index producer reads have been scalar-fused.
+pub struct TlcStaticIndexFused(pub TlcEarlyInner);
+
+impl std::ops::Deref for TlcStaticIndexFused {
+    type Target = TlcEarlyInner;
+    fn deref(&self) -> &TlcEarlyInner {
+        &self.0
+    }
+}
+
+impl TlcStaticIndexFused {
+    /// Float runtime-indexed nested producers into local let-bound producers so
+    /// gather residency can rewrite the indexed uses before defunctionalization.
+    pub fn float_runtime_index_nested_producers(self) -> TlcRuntimeIndexProducersFloated {
+        let mut inner = self.0;
+        inner.tlc = tlc::runtime_index_producers::run(inner.tlc);
+        TlcRuntimeIndexProducersFloated(inner)
+    }
+}
+
+/// TLC after runtime-indexed nested producers have been let-bound.
+pub struct TlcRuntimeIndexProducersFloated(pub TlcEarlyInner);
+
+impl std::ops::Deref for TlcRuntimeIndexProducersFloated {
+    type Target = TlcEarlyInner;
+    fn deref(&self) -> &TlcEarlyInner {
+        &self.0
+    }
+}
+
+impl TlcRuntimeIndexProducersFloated {
+    /// Plan and execute gather residency while producer lets and indexed uses
+    /// are still in the same pre-defunctionalization term.
+    pub fn plan_execute_gather_residency(self) -> TlcGathersLifted {
         let mut inner = self.0;
         inner.tlc = tlc::lift_gathers::run(inner.tlc);
         TlcGathersLifted(inner)
@@ -883,17 +958,29 @@ impl std::ops::Deref for TlcSmallInlined {
 }
 
 impl TlcSmallInlined {
-    /// Entry-boundary SOAC exposure (normalization, not parallelization).
-    /// Inline the SOAC-producer helper calls in each entry's top-level
-    /// let-chain + tail so a SOAC a user factored into a helper is visible in
-    /// the entry body — letting the next pass (`parallelize`) treat it the same
-    /// as a SOAC written inline. Runs here, after monomorphize (so the inlined
-    /// body's buffer regions are concrete) and after `inline_small` (which
-    /// already folds small producers), so it only adds the large-helper case.
-    pub fn materialize_entry_soacs(self) -> TlcEntrySoacsMaterialized {
+    /// Representation-specialize call edges whose array representation is known
+    /// only at the producer site.
+    pub fn rep_specialize(self) -> TlcRepSpecialized {
         let TlcLateInner { tlc, type_table } = self.0;
-        let tlc = tlc::materialize_entry_soacs::run(tlc);
-        TlcEntrySoacsMaterialized(TlcLateInner { tlc, type_table })
+        let tlc = tlc::rep_specialize::run(tlc);
+        TlcRepSpecialized(TlcLateInner { tlc, type_table })
+    }
+
+    /// Direct shortcut: parallelize without the rep-specialize step.
+    /// Off-mainline test paths and any caller that's certain its
+    /// program doesn't ferry filter results across non-inlined call
+    /// boundaries can use this; the verifier catches anything that
+    /// slipped through. The canonical path goes through
+    /// `.rep_specialize().parallelize_soacs(...)`.
+    pub fn parallelize_soacs(self, disable: bool) -> Result<TlcParallelized> {
+        let TlcLateInner { tlc, type_table } = self.0;
+        let result = tlc::parallelize::run(tlc, disable)?;
+        Ok(TlcParallelized(TlcPipelineInner {
+            tlc: result.program,
+            pipeline: result.pipeline,
+            type_table,
+            plans: result.plans,
+        }))
     }
 
     /// Eliminate unreachable defs (dead code elimination at TLC level).
@@ -919,97 +1006,6 @@ impl TlcSmallInlined {
             &empty,
         )
         .and_then(|inner| EgirRaw(inner).realize_outputs().map(|a| a.parallelize(&empty)))
-    }
-}
-
-/// TLC after entry-boundary SOAC exposure (helper-factored SOACs inlined into
-/// their calling entries). The only state from which `parallelize_soacs` runs.
-pub struct TlcEntrySoacsMaterialized(pub TlcLateInner);
-
-impl std::ops::Deref for TlcEntrySoacsMaterialized {
-    type Target = TlcLateInner;
-    fn deref(&self) -> &TlcLateInner {
-        &self.0
-    }
-}
-
-impl TlcEntrySoacsMaterialized {
-    /// Fuse constant-index reads of an inlined elementwise producer
-    /// (`map(f, src)[k]` → `f(src[k])`). A producer demanded only at a known
-    /// slot collapses to a scalar element computation instead of materializing a
-    /// whole runtime-sized buffer. Runs here, post-`materialize_entry_soacs`,
-    /// where an inlined helper's producer is a directly-nested `Soac(Map)` under
-    /// the `Index`.
-    pub fn fuse_static_indices(self) -> TlcStaticIndexFused {
-        let TlcLateInner { tlc, type_table } = self.0;
-        let tlc = tlc::static_index_fusion::run(tlc);
-        TlcStaticIndexFused(TlcLateInner { tlc, type_table })
-    }
-
-    /// Representation-specialize call edges where a let-bound
-    /// `filter(...)` result flows into a non-inlined size-poly helper.
-    /// Substitutes `ArrayVariantAbstract` in the callee's matched param
-    /// type with the producer's concrete variant (Bounded for static-
-    /// capacity input, View otherwise), cloning the callee per
-    /// `(orig_sym, spec_key)`. Runs BEFORE `parallelize_soacs` so the
-    /// parallelizer sees concrete representations on every call edge
-    /// from the start and doesn't have to re-walk SOAC structures
-    /// `rep_specialize` has already rewritten. Phase 2 of the array-
-    /// variant-abstract project — see `tlc::rep_specialize`.
-    pub fn rep_specialize(self) -> TlcRepSpecialized {
-        let TlcLateInner { tlc, type_table } = self.0;
-        let tlc = tlc::rep_specialize::run(tlc);
-        TlcRepSpecialized(TlcLateInner { tlc, type_table })
-    }
-
-    /// Direct shortcut: parallelize without the rep-specialize step.
-    /// Off-mainline test paths and any caller that's certain its
-    /// program doesn't ferry filter results across non-inlined call
-    /// boundaries can use this; the verifier catches anything that
-    /// slipped through. The canonical path goes through
-    /// `.rep_specialize().parallelize_soacs(...)`.
-    pub fn parallelize_soacs(self, disable: bool) -> Result<TlcParallelized> {
-        let TlcLateInner { tlc, type_table } = self.0;
-        let result = tlc::parallelize::run(tlc, disable)?;
-        Ok(TlcParallelized(TlcPipelineInner {
-            tlc: result.program,
-            pipeline: result.pipeline,
-            type_table,
-            plans: result.plans,
-        }))
-    }
-}
-
-/// TLC after static-index fusion (`map(f,src)[k]` → `f(src[k])`). Lives between
-/// `materialize_entry_soacs` and `rep_specialize`.
-pub struct TlcStaticIndexFused(pub TlcLateInner);
-
-impl std::ops::Deref for TlcStaticIndexFused {
-    type Target = TlcLateInner;
-    fn deref(&self) -> &TlcLateInner {
-        &self.0
-    }
-}
-
-impl TlcStaticIndexFused {
-    /// See [`TlcEntrySoacsMaterialized::rep_specialize`].
-    pub fn rep_specialize(self) -> TlcRepSpecialized {
-        let TlcLateInner { tlc, type_table } = self.0;
-        let tlc = tlc::rep_specialize::run(tlc);
-        TlcRepSpecialized(TlcLateInner { tlc, type_table })
-    }
-
-    /// Direct shortcut past `rep_specialize` — see
-    /// [`TlcEntrySoacsMaterialized::parallelize_soacs`].
-    pub fn parallelize_soacs(self, disable: bool) -> Result<TlcParallelized> {
-        let TlcLateInner { tlc, type_table } = self.0;
-        let result = tlc::parallelize::run(tlc, disable)?;
-        Ok(TlcParallelized(TlcPipelineInner {
-            tlc: result.program,
-            pipeline: result.pipeline,
-            type_table,
-            plans: result.plans,
-        }))
     }
 }
 

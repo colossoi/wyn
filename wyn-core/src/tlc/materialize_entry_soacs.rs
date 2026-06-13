@@ -13,12 +13,13 @@
 //! `build_inline_lets`.
 //!
 //! LOAD-BEARING INVARIANT: the walk visits only the entry's outer `Lambda`
-//! chain + its top-level `Let` chain + the tail. It MUST NOT descend into a
-//! SOAC operand lambda (or any lambda). A SOAC helper called *per element*
-//! (`map(|x| helper_scan(x), xs)`) lives inside such a lambda; materializing it
-//! there would expose a per-element scan to parallelization and wreck the
-//! program's cost semantics. This is the same nested-vs-tail line
-//! `array_semantics::analyze_body` draws.
+//! chain, its top-level `Let` chain, and value containers that are still in the
+//! entry tail (`OutputSlotStore`, `Index`, array literals, etc.). It MUST NOT
+//! descend into a SOAC operand lambda (or any non-entry lambda). A SOAC helper
+//! called *per element* (`map(|x| helper_scan(x), xs)`) lives inside such a
+//! lambda; exposing it there would turn a per-element helper into an entry
+//! producer and wreck the program's cost semantics. This is the same
+//! nested-vs-tail line `array_semantics::analyze_body` draws.
 
 use std::collections::HashMap;
 
@@ -27,10 +28,13 @@ use polytype::Type;
 use crate::SymbolId;
 use crate::ast::TypeName;
 
-use super::array_semantics::{FunctionSummary, ResultSemantics, summarize_program};
+use super::array_semantics::{ArraySemantics, FunctionSummary, ResultSemantics, summarize_program};
 use super::fusion::{build_sym_to_def, substitute_sym};
 use super::inline::build_inline_lets;
-use super::{DefMeta, Lambda, Program, Term, TermIdSource, TermKind, VarRef, extract_lambda_params};
+use super::{
+    ArrayExpr, DefMeta, Lambda, Program, StorageView, Term, TermIdSource, TermKind, VarRef,
+    extract_lambda_params,
+};
 
 #[cfg(test)]
 #[path = "materialize_entry_soacs_tests.rs"]
@@ -60,7 +64,12 @@ pub fn run(mut program: Program) -> Program {
             matches!(
                 summaries.get(&d.name),
                 Some(FunctionSummary {
-                    result: ResultSemantics::Produces(_),
+                    result:
+                        ResultSemantics::Produces(
+                            ArraySemantics::Elementwise { .. }
+                                | ArraySemantics::PrefixScan { .. }
+                                | ArraySemantics::Reduction { .. },
+                        ),
                     ..
                 })
             )
@@ -90,9 +99,10 @@ pub fn run(mut program: Program) -> Program {
     program
 }
 
-/// Walk the entry's outer `Lambda` chain + top-level `Let` chain + tail,
-/// inlining producer calls. Never descends into a lambda body other than the
-/// entry's own outer param-binding lambda(s).
+/// Walk the entry's outer `Lambda` chain + top-level `Let` chain + tail value
+/// containers, inlining producer calls. Never descends into a lambda body other
+/// than the entry's own outer param-binding lambda(s), and never enters SOAC
+/// operator bodies.
 fn expose(
     term: Term,
     producers: &HashMap<SymbolId, Producer>,
@@ -152,6 +162,99 @@ fn expose(
                 value: Box::new(expose(*value, producers, sym_to_def, ids, depth)),
             },
         },
+        TermKind::Index { array, index } => Term {
+            id,
+            ty,
+            span,
+            kind: TermKind::Index {
+                array: Box::new(expose(*array, producers, sym_to_def, ids, depth)),
+                index: Box::new(expose(*index, producers, sym_to_def, ids, depth)),
+            },
+        },
+        TermKind::ArrayExpr(ae) => Term {
+            id,
+            ty,
+            span,
+            kind: TermKind::ArrayExpr(expose_array_expr(ae, producers, sym_to_def, ids, depth)),
+        },
+        TermKind::Tuple(items) => Term {
+            id,
+            ty,
+            span,
+            kind: TermKind::Tuple(
+                items
+                    .into_iter()
+                    .map(|t| expose(t, producers, sym_to_def, ids, depth))
+                    .collect(),
+            ),
+        },
+        TermKind::VecLit(items) => Term {
+            id,
+            ty,
+            span,
+            kind: TermKind::VecLit(
+                items
+                    .into_iter()
+                    .map(|t| expose(t, producers, sym_to_def, ids, depth))
+                    .collect(),
+            ),
+        },
+        TermKind::Coerce { inner, target_ty } => Term {
+            id,
+            ty,
+            span,
+            kind: TermKind::Coerce {
+                inner: Box::new(expose(*inner, producers, sym_to_def, ids, depth)),
+                target_ty,
+            },
+        },
+        TermKind::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => Term {
+            id,
+            ty,
+            span,
+            kind: TermKind::If {
+                cond: Box::new(expose(*cond, producers, sym_to_def, ids, depth)),
+                then_branch: Box::new(expose(*then_branch, producers, sym_to_def, ids, depth)),
+                else_branch: Box::new(expose(*else_branch, producers, sym_to_def, ids, depth)),
+            },
+        },
+        TermKind::App { func, args } => {
+            let term = Term {
+                id,
+                ty,
+                span,
+                kind: TermKind::App { func, args },
+            };
+            if let Some(inlined) = inline_if_producer(&term, producers, sym_to_def, ids, depth) {
+                inlined
+            } else {
+                let Term {
+                    id,
+                    ty,
+                    span,
+                    kind: TermKind::App { func, args },
+                } = term
+                else {
+                    unreachable!()
+                };
+                Term {
+                    id,
+                    ty,
+                    span,
+                    kind: TermKind::App {
+                        func,
+                        args: args
+                            .into_iter()
+                            .map(|t| expose(t, producers, sym_to_def, ids, depth))
+                            .collect(),
+                    },
+                }
+            }
+        }
         // Tail position.
         other => maybe_inline(
             Term {
@@ -172,6 +275,44 @@ fn expose(
 /// and re-`expose` the result so chained / arg-position producers materialize
 /// too. Otherwise return `term` unchanged — crucially without recursing into
 /// SOAC operands or lambdas.
+fn expose_array_expr(
+    ae: ArrayExpr,
+    producers: &HashMap<SymbolId, Producer>,
+    sym_to_def: &HashMap<SymbolId, SymbolId>,
+    ids: &mut TermIdSource,
+    depth: usize,
+) -> ArrayExpr {
+    match ae {
+        ArrayExpr::Ref(t) => ArrayExpr::Ref(Box::new(expose(*t, producers, sym_to_def, ids, depth))),
+        ArrayExpr::Zip(children) => ArrayExpr::Zip(
+            children
+                .into_iter()
+                .map(|c| expose_array_expr(c, producers, sym_to_def, ids, depth))
+                .collect(),
+        ),
+        ArrayExpr::Literal(terms) => ArrayExpr::Literal(
+            terms
+                .into_iter()
+                .map(|t| expose(t, producers, sym_to_def, ids, depth))
+                .collect(),
+        ),
+        ArrayExpr::Range { start, len, step } => ArrayExpr::Range {
+            start: Box::new(expose(*start, producers, sym_to_def, ids, depth)),
+            len: Box::new(expose(*len, producers, sym_to_def, ids, depth)),
+            step: step.map(|s| Box::new(expose(*s, producers, sym_to_def, ids, depth))),
+        },
+        ArrayExpr::StorageView(sv) => ArrayExpr::StorageView(StorageView {
+            binding: sv.binding,
+            offset: Box::new(expose(*sv.offset, producers, sym_to_def, ids, depth)),
+            len: Box::new(expose(*sv.len, producers, sym_to_def, ids, depth)),
+            elem_ty: sv.elem_ty,
+        }),
+        // Do not enter nested SOAC operators here; the pass's safety contract is
+        // about exposing entry-tail producers, not changing per-element work.
+        ArrayExpr::Soac(op) => ArrayExpr::Soac(op),
+    }
+}
+
 fn maybe_inline(
     term: Term,
     producers: &HashMap<SymbolId, Producer>,
@@ -179,8 +320,21 @@ fn maybe_inline(
     ids: &mut TermIdSource,
     depth: usize,
 ) -> Term {
+    if let Some(inlined) = inline_if_producer(&term, producers, sym_to_def, ids, depth) {
+        return inlined;
+    }
+    term
+}
+
+fn inline_if_producer(
+    term: &Term,
+    producers: &HashMap<SymbolId, Producer>,
+    sym_to_def: &HashMap<SymbolId, SymbolId>,
+    ids: &mut TermIdSource,
+    depth: usize,
+) -> Option<Term> {
     if depth >= MAX_DEPTH {
-        return term;
+        return None;
     }
     if let TermKind::App { func, args } = &term.kind {
         if let TermKind::Var(VarRef::Symbol(f)) = &func.kind {
@@ -188,12 +342,12 @@ fn maybe_inline(
             if let Some((params, body)) = producers.get(&def_sym) {
                 if params.len() == args.len() {
                     let inlined = inline_call(params, args, body.clone(), term.span, ids);
-                    return expose(inlined, producers, sym_to_def, ids, depth + 1);
+                    return Some(expose(inlined, producers, sym_to_def, ids, depth + 1));
                 }
             }
         }
     }
-    term
+    None
 }
 
 /// Inline a producer call: substitute each `Var` argument directly into the
