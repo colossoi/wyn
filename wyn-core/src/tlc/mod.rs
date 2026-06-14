@@ -1908,18 +1908,71 @@ impl<'a> Transformer<'a> {
                         .elem_type()
                         .cloned()
                         .expect("rec.ty.is_vec() above guarantees a vec elem type");
+                    let n_components = field.chars().count();
+
+                    // Single-letter swizzle is one projection — no
+                    // duplication concern; project the rec term directly.
+                    if n_components == 1 {
+                        let idx = crate::types::swizzle_component_index(field.chars().next().unwrap())
+                            .expect("is_swizzle_field already accepted this letter");
+                        return self.mk_tuple_proj(rec, idx as usize, elem_ty, span);
+                    }
+
+                    // Multi-letter swizzle desugars to one
+                    // `mk_tuple_proj` per component. If `rec` is a
+                    // non-trivial producer (App, Soac, If, Loop, …),
+                    // cloning it once per component leaves downstream
+                    // passes with several independent copies of the
+                    // same producer — egregious when the producer is a
+                    // `reduce(...)`: the SoA / CSE layers don't share
+                    // them, and the compiled output runs the reduce
+                    // once per swizzle slot. Let-bind first so each
+                    // projection reads the same evaluated value;
+                    // mirrors what `transform_vec_with` does for `with`
+                    // updates (`_w_vw_t_…`).
+                    let needs_share = !matches!(
+                        &rec.kind,
+                        TermKind::Var(_)
+                            | TermKind::IntLit(_)
+                            | TermKind::FloatLit(_)
+                            | TermKind::BoolLit(_)
+                            | TermKind::UnitLit
+                    );
+
+                    let (base, wrap_let): (Term, Option<(SymbolId, Type<TypeName>, Term)>) = if needs_share
+                    {
+                        let t_id = self.term_ids.next_id().0;
+                        let t_sym = self.define(&format!("_w_swz_t_{}", t_id));
+                        let t_ty = rec.ty.clone();
+                        let var = self.mk_term(t_ty.clone(), span, TermKind::Var(VarRef::Symbol(t_sym)));
+                        (var, Some((t_sym, t_ty, rec)))
+                    } else {
+                        (rec, None)
+                    };
+
                     let components: Vec<Term> = field
                         .chars()
                         .map(|c| {
                             let idx = crate::types::swizzle_component_index(c)
                                 .expect("is_swizzle_field already accepted this letter");
-                            self.mk_tuple_proj(rec.clone(), idx as usize, elem_ty.clone(), span)
+                            self.mk_tuple_proj(base.clone(), idx as usize, elem_ty.clone(), span)
                         })
                         .collect();
-                    if components.len() == 1 {
-                        return components.into_iter().next().unwrap();
-                    }
-                    return self.build_vec_lit_from_terms(&components, ty, span);
+
+                    let body = self.build_vec_lit_from_terms(&components, ty.clone(), span);
+                    return match wrap_let {
+                        Some((name, name_ty, rhs)) => self.mk_term(
+                            ty,
+                            span,
+                            TermKind::Let {
+                                name,
+                                name_ty,
+                                rhs: Box::new(rhs),
+                                body: Box::new(body),
+                            },
+                        ),
+                        None => body,
+                    };
                 }
                 // Resolve field name to index, treat record as tuple
                 let field_idx = self

@@ -3381,6 +3381,48 @@ entry filt_reduce(xs: []i32) i32 =
     .expect("filter result used inline as `reduce`'s array arg unifies like the let-bound form");
 }
 
+/// Regression: a multi-letter swizzle on a non-trivial expression
+/// must not duplicate the expression. `reduce(...).xy` previously
+/// desugared to `@[reduce(...).0, reduce(...).1]` (clone-per-letter)
+/// and downstream saw two independent `Soac(Reduce)` producers, so
+/// the compiled output ran the reduce twice. Surfaced in
+/// `particles3.wyn`: `center`, `align`, and `separate` each took a
+/// `.xy` (or `.zw`) of an aggregate reduce, and SPIR-V emitted
+/// duplicated reduce loops + duplicate `Length`/`Normalize` ops.
+/// Fixed by let-binding the projection base before splitting it into
+/// per-letter `TupleProj`s when the base isn't already a `Var` /
+/// literal.
+#[test]
+fn swizzle_on_nontrivial_base_does_not_duplicate_producer() {
+    use crate::tlc::{SoacOp, Term, TermKind};
+    fn count_reduces(t: &Term) -> usize {
+        let mut n = 0;
+        if matches!(&t.kind, TermKind::Soac(SoacOp::Reduce { .. })) {
+            n += 1;
+        }
+        t.for_each_child(&mut |c| n += count_reduces(c));
+        n
+    }
+    // Each `def` returns a swizzle of a reduce result. With the fix
+    // there's one physical reduce per def (let-bound, then projected);
+    // without the fix each `.xy` would emit two independent reduces.
+    let tlc = crate::compile_thru_tlc(
+        "\
+def sum2<[n]>(xs: [n]vec4f32) vec2f32 =
+  reduce(|a: vec4f32, b: vec4f32| a + b, @[0.0f32, 0.0f32, 0.0f32, 0.0f32], xs).xy
+#[compute]
+entry e(xs: [8]vec4f32) vec2f32 = sum2(xs)
+",
+    )
+    .expect("compile_thru_tlc");
+    let total: usize = tlc.tlc.defs.iter().map(|d| count_reduces(&d.body)).sum();
+    assert_eq!(
+        total, 1,
+        "`reduce(...).xy` should compile to one physical reduce, not one per swizzle slot — \
+         found {total} `Soac(Reduce)` terms across all defs"
+    );
+}
+
 /// True iff the pipeline for `entry` is a multi-stage compute (the two-phase
 /// shape a parallelized reduce/redomap lowers to: chunk + combine). Used to
 /// confirm the masked-redomap fusion fired — a *serial* filter→reduce would be
