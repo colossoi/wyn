@@ -1987,16 +1987,15 @@ entry e(xs: [8]i32) i32 = reduce(i32.(+), map(0i32), xs)
     compile_to_spirv(source).expect("a user def shadowing a SOAC name should lower as a normal call");
 }
 
-/// Regression for the forward-decl env-confusion bug: a user
-/// `def map(x: i32) i32 = x` at file scope must not break prelude
-/// `unzip`'s `map(|...|, xys)` call. Both `unzip` and the user
-/// reference `map` by surface name, but `name_resolution`
+/// Regression: a user `def map(x: i32) i32 = x` at file scope must
+/// not break prelude `unzip`'s `map(|...|, xys)` call. Both `unzip`
+/// and the user reference `map` by surface name, but `name_resolution`
 /// structurally tags the prelude reference as `Soac(Map)` while the
-/// user reference is left bare (because user `map` is in the user's
-/// top-level scope and shadows the catalog classification). The
-/// checker honours the structural tag via `lookup_by_kind(_, Builtin)`
-/// in Path A so the SOAC scheme resolves regardless of what user
-/// file scope has put in the shadow frame.
+/// user reference is left bare. Post env-split, prelude bodies are
+/// checked under `LookupContext::Prelude`, which never sees user
+/// file-scope; the structural Soac tag routes directly to
+/// `globals.builtins["map"]` so the SOAC scheme resolves regardless
+/// of what the user did at file scope.
 #[test]
 fn user_def_shadowing_map_does_not_break_prelude_unzip() {
     let source = r#"

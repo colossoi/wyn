@@ -182,9 +182,6 @@ pub struct TypeChecker<'a> {
     /// Current module context for resolving unqualified type aliases in expressions.
     /// Set during check_decl_as_in_module for module function checking.
     pub(super) current_module: Option<String>,
-    /// Cached module function schemes (key: "module.function", e.g., "rand.init").
-    /// Populated during check_module_functions to avoid rebuilding schemes on each lookup.
-    module_schemes: HashMap<String, TypeScheme>,
     /// Side table: maps `Identifier` NodeIds to their builtin classification.
     /// Built once before type-check by `name_resolution::build_name_resolution`.
     /// Identifiers absent from this table are resolved via scope/module lookup.
@@ -604,9 +601,29 @@ impl<'a> TypeChecker<'a> {
     /// Compute all free type variables in the current environment (scope stack)
     fn env_free_type_vars(&self) -> BTreeSet<usize> {
         let mut acc = BTreeSet::new();
+        // Local bindings (lambda params, let/loop/match locals).
         self.scope_stack.for_each_binding(|_name, entry| {
             acc.extend(fv_scheme(&entry.value));
         });
+        // Globally-named environments — must be included so HM
+        // generalization correctly excludes vars free in the
+        // surrounding env. `builtins` schemes are closed
+        // (`generalize_closed`) so they contribute nothing, but
+        // `prelude_defs` / `user_file_defs` / `module_schemes`
+        // were generalized at insertion time against a possibly-open
+        // env and can still carry free vars.
+        for scheme in self.globals.builtins.values() {
+            acc.extend(fv_scheme(scheme));
+        }
+        for scheme in self.globals.prelude_defs.values() {
+            acc.extend(fv_scheme(scheme));
+        }
+        for scheme in self.globals.user_file_defs.values() {
+            acc.extend(fv_scheme(scheme));
+        }
+        for scheme in self.globals.module_schemes.values() {
+            acc.extend(fv_scheme(scheme));
+        }
         acc
     }
 
@@ -751,18 +768,17 @@ impl<'a> TypeChecker<'a> {
     /// qualified name (e.g. `materials.pbrCookTorrance`). Used by
     /// `resolve_value_name` Path B.
     fn lookup_module_scheme(&self, qualified_name: &str) -> Option<SchemeLookup> {
-        self.module_schemes.get(qualified_name).cloned().map(SchemeLookup::Single)
+        self.globals.module_schemes.get(qualified_name).cloned().map(SchemeLookup::Single)
     }
 
     /// Look up the prelude-module-supplied scheme for a catalog
     /// per-type op by `BuiltinId`. The catalog stores the canonical
-    /// surface_name on the `BuiltinDef`; we route through that to the
-    /// `module_schemes` map. This is the BuiltinId-keyed counterpart
-    /// to `lookup_module_scheme(qualified_name)` — same data, but the
-    /// dispatch token is structural rather than a string.
+    /// surface_name on the `BuiltinDef`; we route through that to
+    /// `globals.module_schemes`. This is the BuiltinId-keyed
+    /// counterpart to `lookup_module_scheme(qualified_name)`.
     fn lookup_module_scheme_by_id(&self, id: BuiltinId) -> Option<TypeScheme> {
         let surface_name = by_id(id).raw.surface_name;
-        self.module_schemes.get(surface_name).cloned()
+        self.globals.module_schemes.get(surface_name).cloned()
     }
 
     /// Build a `SchemeLookup` from a `BuiltinId` by invoking each
@@ -846,15 +862,13 @@ impl<'a> TypeChecker<'a> {
         spec_schemes: HashMap<String, TypeScheme>,
     ) -> Self {
         let mut globals = GlobalEnv::default();
-        // Seed `module_schemes` from the spec_schemes computed by
-        // `resolve_placeholders` (the same source `module_schemes`
-        // below is initialized from). Stable iteration order: the
-        // input is `HashMap` today; sort for determinism here so
-        // downstream consumers don't see hash-order drift.
-        let mut spec_seeded: Vec<_> = spec_schemes.iter().collect();
-        spec_seeded.sort_by(|a, b| a.0.cmp(b.0));
+        // Seed `globals.module_schemes` from the spec_schemes computed
+        // by `resolve_placeholders`. Sort the HashMap entries for
+        // stable iteration order downstream.
+        let mut spec_seeded: Vec<_> = spec_schemes.into_iter().collect();
+        spec_seeded.sort_by(|a, b| a.0.cmp(&b.0));
         for (k, v) in spec_seeded {
-            globals.module_schemes.insert(k.clone(), v.clone());
+            globals.module_schemes.insert(k, v);
         }
         TypeChecker {
             scope_stack: ScopeStack::new(),
@@ -869,7 +883,6 @@ impl<'a> TypeChecker<'a> {
             arity_map: HashMap::new(),
             skolem_ids: crate::IdSource::new(),
             current_module: None,
-            module_schemes: spec_schemes,
             name_resolution: NameResolution::default(),
             pending_cycle_error: std::cell::RefCell::new(None),
             constructor_call_catalog_ids: HashMap::new(),
@@ -1184,8 +1197,7 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn define_builtin(&mut self, name: &str, scheme: TypeScheme) {
-        self.globals.builtins.insert(name.to_string(), scheme.clone());
-        self.define(name.to_string(), IdentifierKind::Builtin, scheme);
+        self.globals.builtins.insert(name.to_string(), scheme);
     }
 
     pub fn load_builtins(&mut self) -> Result<()> {
@@ -1671,21 +1683,14 @@ impl<'a> TypeChecker<'a> {
             .map(|(module_name, decl)| (module_name.to_string(), decl.clone()))
             .collect();
 
-        // Type-check each module function with module context for alias resolution
+        // Type-check each module function with module context for
+        // alias resolution. `globals_dual_write_decl` inside
+        // `check_decl_as_in_module` is the single source of truth
+        // for `globals.module_schemes`.
         for (module_name, decl) in module_functions {
             let qualified_name = format!("{}.{}", module_name, decl.name);
             debug!("Type-checking module function: {}", qualified_name);
-
-            // Type-check the declaration with module context for alias resolution
             self.check_decl_as_in_module(&decl, &qualified_name, Some(&module_name))?;
-
-            // Mirror into the legacy `module_schemes` map for any
-            // backward-compat consumers; the source of truth is
-            // `globals.module_schemes`, populated via
-            // `globals_dual_write_decl` above.
-            if let Some(scheme) = self.globals.module_schemes.get(&qualified_name) {
-                self.module_schemes.insert(qualified_name, scheme.clone());
-            }
         }
 
         if let Some(err) = self.take_pending_cycle_error() {
@@ -1782,10 +1787,10 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    /// Get a module function scheme from the cache.
+    /// Get a module function scheme from `globals.module_schemes`.
     /// Requires `check_module_functions()` to have been called first.
     pub fn get_module_scheme(&self, qualified_name: &str) -> Option<&TypeScheme> {
-        self.module_schemes.get(qualified_name)
+        self.globals.module_schemes.get(qualified_name)
     }
 
     fn check_declaration(&mut self, decl: &Declaration) -> Result<()> {
