@@ -3334,6 +3334,53 @@ entry filt_reduce(xs: []i32) i32 =
     .expect("summing a filtered runtime array (filter → reduce) must compile");
 }
 
+/// Companion working form for the aspiration below: let-bind first, then
+/// pass to a helper that consumes a plain `[]i32`. The `let` opens
+/// `filter`'s existential into a skolem-sized `[k]i32`, and
+/// `rep_specialize` handles the `Abstract`-variant abstract array
+/// crossing the call boundary into `total`. Pins that this shape stays
+/// working — the inline-existential fix should not regress it.
+#[test]
+fn filter_into_reduce_let_bound_crosses_call_boundary() {
+    compile_to_spirv(
+        "\
+def total(ys: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0i32, ys)
+#[compute]
+entry filt_reduce(xs: []i32) i32 =
+  let kept = filter(|x: i32| x > 4i32, xs) in
+  total(kept)
+",
+    )
+    .expect("let-bound filter result crossing a call boundary into a helper that takes a plain array must compile");
+}
+
+/// Regression: `reduce(_, _, filter(...))` with the filter result used inline
+/// as an argument (no `let` to bind it first) compiles to the same program
+/// as the let-bound form above. Used to fail with
+///
+///   Function argument type mismatch at argument 3:
+///   expected Array[i32, ?, ?, ?],
+///   got ?k. [Array[i32, abstract, k, no_region]]
+///
+/// because existential elimination only fired at `let` binders, not at
+/// general use sites. Fixed in `unify_apply_arg` by mirroring the let-
+/// binder's `open_existential` call at each function-argument unification
+/// site, gated on "expected param is not itself existential" so existential-
+/// typed values can still flow through unchanged when that's the param's
+/// declared type. Surfaced minimizing the type error in
+/// `testfiles/playground/particles3.wyn`'s `align`.
+#[test]
+fn filter_into_reduce_inline_arg_opens_existential() {
+    compile_to_spirv(
+        "\
+#[compute]
+entry filt_reduce(xs: []i32) i32 =
+  reduce(|a: i32, b: i32| a + b, 0i32, filter(|x: i32| x > 4i32, xs))
+",
+    )
+    .expect("filter result used inline as `reduce`'s array arg unifies like the let-bound form");
+}
+
 /// True iff the pipeline for `entry` is a multi-stage compute (the two-phase
 /// shape a parallelized reduce/redomap lowers to: chunk + combine). Used to
 /// confirm the masked-redomap fusion fired — a *serial* filter→reduce would be

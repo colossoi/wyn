@@ -3346,6 +3346,22 @@ impl<'a> TypeChecker<'a> {
         let arg_stripped = strip_unique(arg_ty);
         let param_stripped = strip_unique(&expected_param);
 
+        // Open the argument's existential type at the use site if the
+        // expected parameter is not itself existential. Existential
+        // elimination used to fire only at `let` binders; this mirrors
+        // that policy at every general use site so `reduce(_, _,
+        // filter(...))` inline unifies the same way `let kept =
+        // filter(...) in reduce(_, _, kept)` already does. Don't open
+        // when the param is itself existential — the existential type
+        // can flow through unchanged in that case.
+        let arg_stripped = if matches!(&arg_stripped, Type::Constructed(TypeName::Existential(_), _))
+            && !matches!(&param_stripped, Type::Constructed(TypeName::Existential(_), _))
+        {
+            self.open_existential(arg_stripped)
+        } else {
+            arg_stripped
+        };
+
         // Unify argument with expected param
         self.context.unify(&arg_stripped, &param_stripped).map_err(|_| {
             let base = format!(
