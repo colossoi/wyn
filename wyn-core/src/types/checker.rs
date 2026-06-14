@@ -1361,9 +1361,10 @@ impl<'a> TypeChecker<'a> {
         Ok(())
     }
 
-    /// Names registered by `load_builtins`, queried from the scope by kind.
+    /// Names registered by `load_builtins`. Sourced from
+    /// `globals.builtins`'s `IndexMap` for deterministic order.
     pub fn builtin_names(&self) -> Vec<String> {
-        self.scope_stack.names_by_kind(IdentifierKind::Builtin)
+        self.globals.builtins.keys().cloned().collect()
     }
 
     fn register_vector_fields(&mut self) {
@@ -1379,13 +1380,10 @@ impl<'a> TypeChecker<'a> {
     }
 
     pub fn check_program(&mut self, program: &Program) -> Result<HashMap<NodeId, TypeScheme>> {
-        // Forward-declare ascribed file-scope `def`s in a new frame above
-        // the root so module function bodies can close over the enclosing
-        // file scope; kind-filtered lookup keeps builtins (root frame)
-        // reachable past any user shadows. See ignored aspiration test
-        // `aspiration_user_module_body_sees_file_scope_shadow_of_soac`
-        // for the env-split that would close the remaining policy gap.
-        self.scope_stack.push_scope();
+        // Forward-declare ascribed file-scope `def`s into
+        // `globals.user_file_defs` so module function bodies can close
+        // over them. No `scope_stack.push_scope()` needed — `GlobalEnv`
+        // is keyed independently of the local-scope stack.
         self.forward_declare_ascribed_file_scope(program);
 
         // Type-check module functions first to populate the module_schemes cache.
@@ -1601,15 +1599,15 @@ impl<'a> TypeChecker<'a> {
         Ok((param_types, body_type))
     }
 
-    /// Insert each ascribed file-scope `def` into the current frame.
-    /// Idempotent with the main `check_program` walk, which re-inserts
-    /// the same scheme. Defs without full ascription are deferred.
+    /// Insert each ascribed file-scope `def` into
+    /// `globals.user_file_defs`. Idempotent with the main
+    /// `check_program` walk, which re-inserts the same scheme. Defs
+    /// without full ascription are deferred to the main loop.
     fn forward_declare_ascribed_file_scope(&mut self, program: &Program) {
         for decl in &program.declarations {
             if let Declaration::Decl(d) = decl {
                 if let Some(scheme) = self.ascription_to_scheme(d) {
-                    self.globals.user_file_defs.insert(d.name.clone(), scheme.clone());
-                    self.define(d.name.clone(), IdentifierKind::UserDecl, scheme);
+                    self.globals.user_file_defs.insert(d.name.clone(), scheme);
                 }
             }
         }
@@ -1681,9 +1679,12 @@ impl<'a> TypeChecker<'a> {
             // Type-check the declaration with module context for alias resolution
             self.check_decl_as_in_module(&decl, &qualified_name, Some(&module_name))?;
 
-            // Cache the scheme for fast lookup during name resolution
-            if let Some(entry) = self.scope_stack.lookup(&qualified_name) {
-                self.module_schemes.insert(qualified_name, entry.value.clone());
+            // Mirror into the legacy `module_schemes` map for any
+            // backward-compat consumers; the source of truth is
+            // `globals.module_schemes`, populated via
+            // `globals_dual_write_decl` above.
+            if let Some(scheme) = self.globals.module_schemes.get(&qualified_name) {
+                self.module_schemes.insert(qualified_name, scheme.clone());
             }
         }
 
@@ -1723,15 +1724,30 @@ impl<'a> TypeChecker<'a> {
         self.type_table
     }
 
-    /// Get all function type schemes from the scope stack.
-    /// Used to extract canonical schemes for prelude functions during prelude creation.
-    /// This ensures monomorphization has consistent type variable IDs across params/return.
+    /// Get all function type schemes from the `GlobalEnv`. Used to
+    /// extract canonical schemes for prelude/user/module functions
+    /// during prelude creation and downstream lowering, so
+    /// monomorphization has consistent type-variable IDs across
+    /// params/return. Walks the four global namespaces in a
+    /// deterministic order; ties broken last-write-wins per the
+    /// insert order.
     pub fn get_function_schemes(&self) -> std::collections::HashMap<String, TypeScheme> {
         let mut schemes = std::collections::HashMap::new();
-        self.scope_stack.for_each_binding(|name, entry| {
-            let resolved = self.apply_context_to_scheme(&entry.value);
-            schemes.insert(name.to_string(), resolved);
-        });
+        let mut insert = |name: &str, scheme: &TypeScheme| {
+            schemes.insert(name.to_string(), self.apply_context_to_scheme(scheme));
+        };
+        for (name, scheme) in &self.globals.builtins {
+            insert(name, scheme);
+        }
+        for (name, scheme) in &self.globals.module_schemes {
+            insert(name, scheme);
+        }
+        for (name, scheme) in &self.globals.prelude_defs {
+            insert(name, scheme);
+        }
+        for (name, scheme) in &self.globals.user_file_defs {
+            insert(name, scheme);
+        }
         schemes
     }
 
@@ -1898,13 +1914,12 @@ impl<'a> TypeChecker<'a> {
                 }
             }
 
-            // Add to scope - use declared type if available, otherwise inferred type
+            // Add to GlobalEnv (no scope_stack write — that's the
+            // local-only stack now).
             let stored_type = resolved_declared_type.unwrap_or(expr_type.clone());
-            // Generalize the type to enable polymorphism
             let type_scheme = self.generalize(&stored_type);
-            debug!("Inserting variable '{}' into scope", scope_name);
+            debug!("Inserting variable '{}' into globals", scope_name);
             self.globals_dual_write_decl(scope_name, &type_scheme, module_name);
-            self.define(scope_name.to_string(), IdentifierKind::UserDecl, type_scheme);
             debug!("Inferred type for {}: {}", scope_name, stored_type);
         } else {
             // Function declaration: let/def name param1 param2 = body
@@ -1939,10 +1954,10 @@ impl<'a> TypeChecker<'a> {
             // Entry points go through `Declaration::Entry`; `Decl` has
             // no attributed return types.
 
-            // Update scope with inferred type using generalization
+            // Update GlobalEnv with inferred type (no scope_stack
+            // write — locals only).
             let type_scheme = self.generalize(&func_type);
             self.globals_dual_write_decl(scope_name, &type_scheme, module_name);
-            self.define(scope_name.to_string(), IdentifierKind::UserDecl, type_scheme);
 
             // Track arity for partial application checking
             self.arity_map.insert(scope_name.to_string(), decl.params.len());
@@ -1958,16 +1973,18 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn check_sig_decl(&mut self, decl: &SigDecl) -> Result<()> {
-        // Sig declarations are just type signatures - register them in scope
+        // Sig declarations are just type signatures - register them in
+        // GlobalEnv per current context.
         let type_scheme = TypeScheme::Monotype(decl.ty.clone());
-        self.define(decl.name.clone(), IdentifierKind::UserDecl, type_scheme);
+        self.globals_dual_write_decl(&decl.name, &type_scheme, None);
         Ok(())
     }
 
     fn check_extern_decl(&mut self, decl: &ExternDecl) -> Result<()> {
-        // Extern declarations register a type signature for a linked SPIR-V function
+        // Extern declarations register a type signature for a linked
+        // SPIR-V function — same routing as Sig / Decl.
         let type_scheme = TypeScheme::Monotype(decl.ty.clone());
-        self.define(decl.name.clone(), IdentifierKind::UserDecl, type_scheme);
+        self.globals_dual_write_decl(&decl.name, &type_scheme, None);
         debug!(
             "Registered extern function '{}' with linkage '{}'",
             decl.name, decl.linkage_name
