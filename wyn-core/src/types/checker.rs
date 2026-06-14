@@ -92,6 +92,39 @@ impl TypeWarning {
     }
 }
 
+/// Per-check resolution context. Names what env stack a lookup sees
+/// and at what precedence. Threaded through the checker as
+/// `current_context` and set at each top-level entry point
+/// (`check_program` → `UserFile`, `check_prelude_functions` →
+/// `Prelude`, `check_decl_as_in_module(_, Some(m))` → `Module { m }`).
+/// Phase 3 makes `resolve_value_name` consult this enum directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LookupContext {
+    /// Checking a user file-scope `def` body. Sees: locals →
+    /// user_file_defs → prelude → builtins.
+    UserFile,
+    /// Checking an elaborated-module function body. Sees: locals →
+    /// module siblings (this module's entries in `module_schemes`) →
+    /// user_file_defs → prelude → builtins.
+    Module {
+        name: String,
+    },
+    /// Checking a prelude function body. Sees: locals → prelude →
+    /// builtins. Does NOT see user-file or user-module entries.
+    Prelude,
+}
+
+impl LookupContext {
+    /// Module name if this context is checking inside a module.
+    /// Used as a backwards-compat accessor for `current_module`.
+    pub fn module_name(&self) -> Option<&str> {
+        match self {
+            LookupContext::Module { name } => Some(name.as_str()),
+            _ => None,
+        }
+    }
+}
+
 /// Globally-named environments, separated by namespace.
 ///
 /// Phase 1 of the env-split: populated by dual-writes alongside the
@@ -131,11 +164,12 @@ pub struct TypeChecker<'a> {
     /// `check_module_functions` / `check_prelude_functions`. Phase 3
     /// will switch `resolve_value_name` to query this directly.
     pub(super) globals: GlobalEnv,
-    /// Set while `check_prelude_functions` is running so
-    /// `check_decl_as_in_module`'s dual-write routes to
-    /// `globals.prelude_defs` instead of `globals.user_file_defs`.
-    /// Removed in Phase 2 when `LookupContext` makes this explicit.
-    checking_prelude: bool,
+    /// What context the checker is currently in. Replaces the
+    /// short-lived Phase-1 `checking_prelude` bool and supplements
+    /// the existing `current_module` field (which Phase 4 collapses
+    /// into the `Module` variant). Threaded via save/restore at
+    /// `check_decl_as_in_module`'s prologue/epilogue.
+    pub(super) current_context: LookupContext,
     pub(super) context: Context<TypeName>, // Polytype unification context
     record_field_map: HashMap<(String, String), Type>, // Map (type_name, field_name) -> field_type
     module_manager: &'a ModuleManager,     // Lazy module loading
@@ -785,7 +819,7 @@ impl<'a> TypeChecker<'a> {
         TypeChecker {
             scope_stack: ScopeStack::new(),
             globals,
-            checking_prelude: false,
+            current_context: LookupContext::UserFile,
             context,
             record_field_map: HashMap::new(),
             module_manager,
@@ -1539,11 +1573,11 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    /// Phase-1 dual-write hook. Routes a top-level `Decl` scheme into
-    /// the right `GlobalEnv` slot based on the calling context:
+    /// Phase-1 dual-write hook, Phase-2 reading `current_context`.
+    /// Routes a top-level `Decl` scheme into the right `GlobalEnv` slot:
     ///   * `module_name = Some(_)` → `globals.module_schemes` (key
     ///     is the already-qualified `scope_name`).
-    ///   * `checking_prelude` → `globals.prelude_defs`.
+    ///   * `current_context == Prelude` → `globals.prelude_defs`.
     ///   * Otherwise → `globals.user_file_defs`.
     ///
     /// Removed when Phase 4 migrates the `define` insertion sites
@@ -1556,7 +1590,7 @@ impl<'a> TypeChecker<'a> {
     ) {
         if module_name.is_some() {
             self.globals.module_schemes.insert(scope_name.to_string(), scheme.clone());
-        } else if self.checking_prelude {
+        } else if self.current_context == LookupContext::Prelude {
             self.globals.prelude_defs.insert(scope_name.to_string(), scheme.clone());
         } else {
             self.globals.user_file_defs.insert(scope_name.to_string(), scheme.clone());
@@ -1624,11 +1658,7 @@ impl<'a> TypeChecker<'a> {
         let prelude_functions: Vec<crate::ast::Decl> =
             self.module_manager.get_prelude_function_declarations().into_iter().cloned().collect();
 
-        // Mark so the dual-write inside `check_decl_as_in_module`
-        // routes to `globals.prelude_defs` rather than
-        // `globals.user_file_defs`. Phase 2 replaces this with an
-        // explicit `LookupContext::Prelude`.
-        self.checking_prelude = true;
+        let saved_context = std::mem::replace(&mut self.current_context, LookupContext::Prelude);
         let result: Result<()> = (|| {
             for decl in prelude_functions {
                 debug!("Type-checking prelude function: {}", decl.name);
@@ -1636,7 +1666,7 @@ impl<'a> TypeChecker<'a> {
             }
             Ok(())
         })();
-        self.checking_prelude = false;
+        self.current_context = saved_context;
         result?;
 
         if let Some(err) = self.take_pending_cycle_error() {
@@ -1787,6 +1817,16 @@ impl<'a> TypeChecker<'a> {
         // Set current module context for alias resolution in nested expressions
         let saved_module = self.current_module.take();
         self.current_module = module_name.map(|s| s.to_string());
+        // Mirror the legacy `current_module` field into `current_context`.
+        // Inside `Prelude` (set by `check_prelude_functions`) we KEEP the
+        // Prelude context; module_name will be None there. Otherwise:
+        //   Some(m) → Module { name: m }
+        //   None    → preserve the surrounding context (UserFile, or
+        //             whatever else the outer driver chose).
+        let saved_context = self.current_context.clone();
+        if let Some(m) = module_name {
+            self.current_context = LookupContext::Module { name: m.to_string() };
+        }
 
         // Note: SizeVar/UserVar substitution is now handled by resolve_placeholders pass
         // before type checking. Type parameter names are already converted to type variables.
@@ -1870,6 +1910,7 @@ impl<'a> TypeChecker<'a> {
 
         // Restore previous module context
         self.current_module = saved_module;
+        self.current_context = saved_context;
 
         Ok(())
     }
