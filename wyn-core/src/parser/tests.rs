@@ -3832,16 +3832,6 @@ fn test_parse_slice_dotdot_form() {
 }
 
 #[test]
-#[ignore = "Python-style slice `a[i:j:s]` (with optional step) is in the spec as future work (SPECIFICATION.md → Expressions: a[i:j:s]); parser currently only accepts `a[i..j]`"]
-fn test_parse_slice_colon_syntax() {
-    // The spec's `a[i:j]` colon-separated slicing form, including the
-    // step variant `a[i:j:s]`. Unignore once the parser accepts it.
-    parse_ok("def f(xs: []i32) []i32 = xs[1:3]");
-    parse_ok("def g(xs: []i32) []i32 = xs[1:3:2]");
-    parse_ok("def h(xs: []i32) []i32 = xs[::-1]");
-}
-
-#[test]
 fn test_parse_array_index_rejects_comma_separated_indices() {
     // Multi-dimensional indexing is `a[i][j]`, not `a[i, j]`.
     expect_parse_error("def f(xs: [3][2]i32) i32 = xs[0, 1]", |err| match err {

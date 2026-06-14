@@ -862,9 +862,8 @@ loopform    ::= "for" name "<" exp
                 | "for" pat "in" exp
                 | "while" exp
 
-index       ::= exp [":" [exp]] [":" [exp]]
-                | [exp] ":" exp [":" [exp]]
-                | [exp] [":" exp] ":" [exp]
+index       ::= exp
+                | [exp] ".." [exp]
 ```
 
 ### Resolving Ambiguities
@@ -959,31 +958,20 @@ be of any unsigned integer type. Multi-dimensional arrays are indexed
 by chaining: `a[i][j]` selects an element from a rank-2 array; `a[i]`
 alone returns the inner sub-array.
 
-#### a[i:j:s]
-Return a slice of the array `a` from index `i` to `j`, the former
-inclusive and the latter exclusive, taking every `s`-th element. The
-`s` parameter may not be zero. If `s` is negative, it means to start
-at `i` and descend by steps of size `s` to `j` (not inclusive).
-Slicing indices have type `i64`.
+#### a[i..j]
+Return a slice of the array `a` from index `i` (inclusive) to `j`
+(exclusive). Both bounds are optional: `a[..j]` slices from the start,
+`a[i..]` slices to the end, and `a[..]` is the whole-array identity
+slice. Slicing indices have type `i64`.
 
-It is generally a bad idea for `s` to be non-constant. Slicing of
-multiple dimensions is done by chaining: `a[i:j][k:l]` slices the
-outer dimension first, then the inner one.
+Slicing of multiple dimensions is done by chaining: `a[i..j][k..l]`
+slices the outer dimension first, then the inner one.
 
-If `s` is elided it defaults to 1. If `i` or `j` is elided, their
-value depends on the sign of `s`. If `s` is positive, `i` becomes 0
-and `j` becomes the length of the array. If `s` is negative, `i`
-becomes the length of the array minus one and `j` becomes minus one.
-This means that `a[::-1]` is the reverse of the array `a`.
+In the general case the size of the slice is unknown (see Size
+Types). In a few cases the size is known statically:
 
-In the general case, the size of the array produced by a slice is
-unknown (see Size Types). In a few cases the size is known
-statically:
-
-- `a[0:n]` has size `n`
-- `a[:n]` has size `n`
-- `a[0:n:1]` has size `n`
-- `a[:n:1]` has size `n`
+- `a[0..n]` has size `n`
+- `a[..n]` has size `n`
 
 This holds only if `n` is a variable or constant.
 
