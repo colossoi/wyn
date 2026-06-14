@@ -2010,77 +2010,36 @@ entry e(xs: [4](i32, i32)) i32 =
         .expect("user `def map` must not interfere with prelude unzip's internal `map` call");
 }
 
-/// Documents `name_resolution`'s current policy for user module
-/// bodies: a module's body sees its own siblings and catalog
-/// builtins, but NOT user file-scope defs at the surface-name level.
-/// So a user `def map(...)` at file scope does not shadow the SOAC
-/// `map` inside a user module body — the module's `map(|...|, xs)`
-/// resolves as the SOAC, identical to `unzip`'s behaviour. Driven by
-/// `name_resolution::build_name_resolution`'s per-elaborated-module
-/// walk seeding only module siblings into scope; independent of the
-/// forward-decl `scope_stack` frame the checker pushes. See
-/// `aspiration_user_module_body_sees_file_scope_shadow_of_soac` for
-/// the env-split that would change this.
+/// Companion to `aspiration_user_module_body_sees_file_scope_shadow_of_soac`
+/// — the env-split makes user file-scope visible inside user module
+/// bodies, so a `def map(x: i32) [4]i32` shadows the SOAC `map` for a
+/// module's `map(xs)` call too. Pre-env-split, the module body saw
+/// only its own siblings + catalog and the call resolved as the SOAC.
+/// This test pins the new shadowing behaviour with a multi-line
+/// transitive `def map` body so an inline-small pass can't collapse
+/// the call before TLC observes it.
 #[test]
-fn user_def_shadowing_map_does_not_reach_into_user_module_body() {
+fn user_def_shadowing_map_reaches_into_user_module_body() {
     let source = r#"
-def map(x: i32) i32 = x + 1
+def map(xs: [4]i32) i32 = xs[0] + xs[1] + xs[2] + xs[3]
 module m = {
-  def double(xs: [4]i32) [4]i32 = map(|x: i32| x * 2i32, xs)
+  def first_four_sum(xs: [4]i32) i32 = map(xs)
 }
 #[compute]
-entry e(xs: [4]i32) i32 = reduce(i32.(+), 0i32, m.double(xs))
+entry e(xs: [4]i32) i32 = m.first_four_sum(xs)
 "#;
     compile_to_spirv(source).expect(
-        "a user module body's `map(|...|, xs)` resolves as the SOAC per name_resolution's \
-         module-scope walk, not as the file-scope user `def map`",
+        "after env-split, a user module body's `map(xs)` resolves to the user `def map` \
+         that shadows the SOAC at file scope",
     );
 }
 
-/// Aspiration / env-split docket. User module bodies should close
-/// over the enclosing file scope at the *surface-name* level, not
-/// just for non-builtin names like `K` (which C4 handles via the
-/// forward-decl scope_stack frame). A user `def map(...)` at file
-/// scope ought to shadow the SOAC `map` inside the user-defined
-/// `module m`'s body — same way it shadows the SOAC for the
-/// user's file-scope code today.
-///
-/// Why it doesn't today: scope_stack and name_resolution are two
-/// disjoint axes that the checker has conflated.
-///
-///   * **Lexical visibility** — "what names is this body allowed to
-///     reference?" — lives in `name_resolution::build_name_resolution`,
-///     which walks each elaborated-module body with a fresh
-///     module_scope seeded only with that module's siblings. File-
-///     scope user names never enter; bare `map` inside `m.double` is
-///     tagged `Soac(Map)` regardless of what's at file scope.
-///   * **Checking-order / availability** — "what schemes have we
-///     computed yet?" — lives in the checker's `scope_stack`. The
-///     forward-decl frame puts file-scope user `def`s in early so
-///     module function bodies can reach `K` etc., but it doesn't
-///     change classification.
-///
-/// The forward-decl-frame approach fixes only the second axis.
-/// Closing the first requires teaching `name_resolution` (and the
-/// downstream Path A in `resolve_value_name`) that user module
-/// bodies inherit user file scope. The cleaner shape is a
-/// `GlobalEnv { builtins, prelude_defs, user_defs, module_schemes }`
-/// keyed by namespace plus a `LookupContext` enum (`Prelude`,
-/// `Module`, `UserFile`) threaded through resolution, so each check
-/// queries the right env stack with explicit precedence rather than
-/// stacking frames and relying on innermost-wins or kind-filtered
-/// fall-throughs. Then this test passes naturally: a `Module`-context
-/// lookup of `map` sees `user_defs["map"] = (i32 -> i32)` before it
-/// considers the SOAC, and the resolver tags it as the user def.
-///
-/// Today this program type-checks (the SOAC resolution makes `map(|x| x * 2, xs)`
-/// well-typed), but the call resolves to the SOAC, not the user def.
-/// The assertion (once the env-split lands) would verify that the
-/// emitted call goes through the user `map`'s SymbolId, mirroring
-/// `tlc::mod_tests::user_def_shadowing_soac_map_is_a_normal_call`'s
-/// shape for the module-body case.
+/// Regression for the env-split. After the conversion landed, user
+/// module bodies see user file-scope shadows of SOAC names at the
+/// surface level — `name_resolution` seeds user file-scope into each
+/// user-defined module's `module_scope`, so a bare `map(xs[0])` inside
+/// `m.first_doubled` resolves to the user `def map`, not the SOAC.
 #[test]
-#[ignore = "aspiration: user module bodies should see user file-scope shadows of SOAC names — requires env-split (see docstring)"]
 fn aspiration_user_module_body_sees_file_scope_shadow_of_soac() {
     let source = r#"
 def map(x: i32) i32 = x * 2
@@ -2090,12 +2049,6 @@ module m = {
 #[compute]
 entry e(xs: [4]i32) i32 = m.first_doubled(xs)
 "#;
-    // Today this compiles, but `map(xs[0])` inside `m.first_doubled`
-    // resolves to the SOAC `map`, which expects two args, so this
-    // currently fails with an arity / type-mismatch error. Once the
-    // env-split lets module bodies inherit user file scope, the
-    // checker resolves `map` to the user `def map(x: i32) i32 = x * 2`
-    // and the program type-checks cleanly.
     compile_to_spirv(source).expect(
         "user `def map(x: i32)` at file scope should shadow the SOAC `map` inside a \
          user module body (env-split aspiration)",

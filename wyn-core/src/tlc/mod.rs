@@ -1425,8 +1425,15 @@ impl<'a> Transformer<'a> {
     /// Returns program parts without the symbol table - caller must combine with
     /// their owned symbol table using `ProgramParts::with_symbols`.
     pub fn transform_program(&mut self, program: &ast::Program) -> ProgramParts {
-        // First pass: register all top-level function names so that references
-        // within function bodies use the same SymbolId as the Def.
+        // First pass: register all top-level function names so that
+        // references within function bodies use the same SymbolId as
+        // the Def. Only allocate when the name isn't already pre-
+        // registered by the `NameRegistry` walk in `tlc::run` — that
+        // walk seeds `top_level_symbols` from the catalog / prelude
+        // / elaborated-module items, and a user `def map` that
+        // shadows the SOAC `map` must REUSE the existing symbol so
+        // module-body references (transformed earlier with the
+        // shared `top_level_symbols` map) point at the same Def.
         for decl in &program.declarations {
             match decl {
                 ast::Declaration::Decl(d) => {
@@ -1434,16 +1441,22 @@ impl<'a> Transformer<'a> {
                         Some(ns) => format!("{}.{}", ns, d.name),
                         None => d.name.clone(),
                     };
-                    let sym = self.symbols.alloc(name_str.clone());
-                    self.top_level_symbols.insert(name_str, sym);
+                    if !self.top_level_symbols.contains_key(&name_str) {
+                        let sym = self.symbols.alloc(name_str.clone());
+                        self.top_level_symbols.insert(name_str, sym);
+                    }
                 }
                 ast::Declaration::Entry(e) => {
-                    let sym = self.symbols.alloc(e.name.clone());
-                    self.top_level_symbols.insert(e.name.clone(), sym);
+                    if !self.top_level_symbols.contains_key(&e.name) {
+                        let sym = self.symbols.alloc(e.name.clone());
+                        self.top_level_symbols.insert(e.name.clone(), sym);
+                    }
                 }
                 ast::Declaration::Extern(e) => {
-                    let sym = self.symbols.alloc(e.name.clone());
-                    self.top_level_symbols.insert(e.name.clone(), sym);
+                    if !self.top_level_symbols.contains_key(&e.name) {
+                        let sym = self.symbols.alloc(e.name.clone());
+                        self.top_level_symbols.insert(e.name.clone(), sym);
+                    }
                 }
                 _ => {}
             }

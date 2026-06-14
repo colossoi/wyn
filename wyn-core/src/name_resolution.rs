@@ -405,14 +405,33 @@ pub fn build_name_resolution(
 
     walk_decls(&program.declarations, &top_level, catalog, &mut nr);
 
+    // Collect which elaborated modules were declared in the user
+    // `Program` (as opposed to prelude / system modules). User-
+    // defined module bodies close over the enclosing file scope —
+    // their `module_scope` seeds in the user file-scope names BEFORE
+    // module siblings, so a bare reference inside a user module body
+    // shadows a SOAC iff the user has a file-scope `def` of the same
+    // name. Prelude modules stay invariant: their `module_scope`
+    // contains only their own siblings.
+    // `module_manager.user_module_names` is populated at elaboration
+    // time with every module the user declared (as opposed to prelude
+    // / system modules). Use it directly — by the time we reach name
+    // resolution, the user's `module m = …` declaration has already
+    // been moved out of `program.declarations` into
+    // `elaborated_modules`, so we can't grep the source AST for it.
+    let user_module_names = &module_manager.user_module_names;
+
     // Walk every elaborated module body — both user-source and
     // prelude. Functor instantiations now produce per-instance fresh
     // NodeIds (via `clone_expr_fresh_ids` in
     // `module_manager::elaborate_decl_signature`), so the previous
     // collision risk is gone and prelude bodies can safely be
     // covered by NameResolution.
-    for elaborated in module_manager.elaborated_modules.values() {
+    for (mod_name, elaborated) in module_manager.elaborated_modules.iter() {
         let mut module_scope: ScopeStack<()> = ScopeStack::new();
+        if user_module_names.contains(mod_name) {
+            collect_top_level_names(&program.declarations, &mut module_scope);
+        }
         for item in &elaborated.items {
             if let crate::module_manager::ElaboratedItem::Decl(d) = item {
                 module_scope.insert(d.name.clone(), ());
