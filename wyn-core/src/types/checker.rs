@@ -92,8 +92,50 @@ impl TypeWarning {
     }
 }
 
+/// Globally-named environments, separated by namespace.
+///
+/// Phase 1 of the env-split: populated by dual-writes alongside the
+/// existing `scope_stack` so we can validate the population logic
+/// before any read path depends on it. Lookups still go through
+/// `scope_stack` until Phase 3 swaps in the per-context precedence.
+///
+/// Each map is `IndexMap` to preserve insertion order across runs —
+/// same reason `module_manager.elaborated_modules` / `prelude_functions`
+/// are `IndexMap` (`module_manager/mod.rs:55-67`): deterministic
+/// type-check order, stable diagnostic output, stable golden
+/// downstream. Lookups don't care; iteration does.
+#[derive(Debug, Default, Clone)]
+pub struct GlobalEnv {
+    /// Catalog builtins (`map`, `reduce`, `length`, `f32.sin`, …).
+    /// Populated by `load_builtins`.
+    pub builtins: indexmap::IndexMap<String, TypeScheme>,
+    /// Top-level prelude defs (`unzip`, `rotate`, `iota`, …).
+    /// Populated by `check_prelude_functions`.
+    pub prelude_defs: indexmap::IndexMap<String, TypeScheme>,
+    /// File-scope user `def`s and `entry`s. Populated by
+    /// `forward_declare_ascribed_file_scope` (for ascribed defs)
+    /// and the main `check_program` walk (for everything).
+    pub user_file_defs: indexmap::IndexMap<String, TypeScheme>,
+    /// Module function schemes keyed by qualified name
+    /// (`"f32.sin"`, `"rand.init"`). Populated by
+    /// `check_module_functions` and seeded with `Spec::Sig` /
+    /// `Spec::SigOp` schemes from `resolve_placeholders`.
+    pub module_schemes: indexmap::IndexMap<String, TypeScheme>,
+}
+
 pub struct TypeChecker<'a> {
     scope_stack: ScopeStack<ScopeEntry<TypeScheme>>,
+    /// Phase-1 dual-write target — read path still uses
+    /// `scope_stack` / `module_schemes` below. Populated by
+    /// `define_builtin`, the forward-decl pass, the main loop, and
+    /// `check_module_functions` / `check_prelude_functions`. Phase 3
+    /// will switch `resolve_value_name` to query this directly.
+    pub(super) globals: GlobalEnv,
+    /// Set while `check_prelude_functions` is running so
+    /// `check_decl_as_in_module`'s dual-write routes to
+    /// `globals.prelude_defs` instead of `globals.user_file_defs`.
+    /// Removed in Phase 2 when `LookupContext` makes this explicit.
+    checking_prelude: bool,
     pub(super) context: Context<TypeName>, // Polytype unification context
     record_field_map: HashMap<(String, String), Type>, // Map (type_name, field_name) -> field_type
     module_manager: &'a ModuleManager,     // Lazy module loading
@@ -729,8 +771,21 @@ impl<'a> TypeChecker<'a> {
         type_table: HashMap<NodeId, TypeScheme>,
         spec_schemes: HashMap<String, TypeScheme>,
     ) -> Self {
+        let mut globals = GlobalEnv::default();
+        // Seed `module_schemes` from the spec_schemes computed by
+        // `resolve_placeholders` (the same source `module_schemes`
+        // below is initialized from). Stable iteration order: the
+        // input is `HashMap` today; sort for determinism here so
+        // downstream consumers don't see hash-order drift.
+        let mut spec_seeded: Vec<_> = spec_schemes.iter().collect();
+        spec_seeded.sort_by(|a, b| a.0.cmp(b.0));
+        for (k, v) in spec_seeded {
+            globals.module_schemes.insert(k.clone(), v.clone());
+        }
         TypeChecker {
             scope_stack: ScopeStack::new(),
+            globals,
+            checking_prelude: false,
             context,
             record_field_map: HashMap::new(),
             module_manager,
@@ -1053,6 +1108,7 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn define_builtin(&mut self, name: &str, scheme: TypeScheme) {
+        self.globals.builtins.insert(name.to_string(), scheme.clone());
         self.define(name.to_string(), IdentifierKind::Builtin, scheme);
     }
 
@@ -1476,9 +1532,34 @@ impl<'a> TypeChecker<'a> {
         for decl in &program.declarations {
             if let Declaration::Decl(d) = decl {
                 if let Some(scheme) = self.ascription_to_scheme(d) {
+                    self.globals.user_file_defs.insert(d.name.clone(), scheme.clone());
                     self.define(d.name.clone(), IdentifierKind::UserDecl, scheme);
                 }
             }
+        }
+    }
+
+    /// Phase-1 dual-write hook. Routes a top-level `Decl` scheme into
+    /// the right `GlobalEnv` slot based on the calling context:
+    ///   * `module_name = Some(_)` → `globals.module_schemes` (key
+    ///     is the already-qualified `scope_name`).
+    ///   * `checking_prelude` → `globals.prelude_defs`.
+    ///   * Otherwise → `globals.user_file_defs`.
+    ///
+    /// Removed when Phase 4 migrates the `define` insertion sites
+    /// directly.
+    fn globals_dual_write_decl(
+        &mut self,
+        scope_name: &str,
+        scheme: &TypeScheme,
+        module_name: Option<&str>,
+    ) {
+        if module_name.is_some() {
+            self.globals.module_schemes.insert(scope_name.to_string(), scheme.clone());
+        } else if self.checking_prelude {
+            self.globals.prelude_defs.insert(scope_name.to_string(), scheme.clone());
+        } else {
+            self.globals.user_file_defs.insert(scope_name.to_string(), scheme.clone());
         }
     }
 
@@ -1543,11 +1624,20 @@ impl<'a> TypeChecker<'a> {
         let prelude_functions: Vec<crate::ast::Decl> =
             self.module_manager.get_prelude_function_declarations().into_iter().cloned().collect();
 
-        // Type-check each prelude function
-        for decl in prelude_functions {
-            debug!("Type-checking prelude function: {}", decl.name);
-            self.check_decl(&decl)?;
-        }
+        // Mark so the dual-write inside `check_decl_as_in_module`
+        // routes to `globals.prelude_defs` rather than
+        // `globals.user_file_defs`. Phase 2 replaces this with an
+        // explicit `LookupContext::Prelude`.
+        self.checking_prelude = true;
+        let result: Result<()> = (|| {
+            for decl in prelude_functions {
+                debug!("Type-checking prelude function: {}", decl.name);
+                self.check_decl(&decl)?;
+            }
+            Ok(())
+        })();
+        self.checking_prelude = false;
+        result?;
 
         if let Some(err) = self.take_pending_cycle_error() {
             return Err(err);
@@ -1731,6 +1821,7 @@ impl<'a> TypeChecker<'a> {
             // Generalize the type to enable polymorphism
             let type_scheme = self.generalize(&stored_type);
             debug!("Inserting variable '{}' into scope", scope_name);
+            self.globals_dual_write_decl(scope_name, &type_scheme, module_name);
             self.define(scope_name.to_string(), IdentifierKind::UserDecl, type_scheme);
             debug!("Inferred type for {}: {}", scope_name, stored_type);
         } else {
@@ -1768,6 +1859,7 @@ impl<'a> TypeChecker<'a> {
 
             // Update scope with inferred type using generalization
             let type_scheme = self.generalize(&func_type);
+            self.globals_dual_write_decl(scope_name, &type_scheme, module_name);
             self.define(scope_name.to_string(), IdentifierKind::UserDecl, type_scheme);
 
             // Track arity for partial application checking
