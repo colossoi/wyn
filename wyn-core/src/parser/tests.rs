@@ -3801,12 +3801,14 @@ fn test_parse_let_in_size_binding() {
     parse_ok("def f = let [n] xs: [n]i32 = [1, 2, 3] in xs[0]");
 }
 
+/// Regression: `let name(params) = body in rest` parses as a local
+/// function. Desugared at parse time to `let name = |params| body in
+/// rest` — no new AST variant. Wyn forbids recursion; the desugar
+/// honours that by construction (the lambda is closed over before
+/// `name` enters scope, so `name` is structurally absent from the
+/// lambda body and present only in `rest`).
 #[test]
-#[ignore = "local function `let f(...) = e in body` is in the spec as future work (SPECIFICATION.md → Expressions: let f(...) = e in body); parser only accepts `let pat = e in body`"]
 fn test_parse_let_in_local_function() {
-    // Future-work form: a `let` with a parameter list defines a local
-    // function whose name is in scope for the body (but not itself).
-    // Unignore when the parser supports local functions.
     parse_ok("def main = let inc(x: i32) = x + 1 in inc(2)");
 }
 

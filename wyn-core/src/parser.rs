@@ -2528,6 +2528,47 @@ impl<'a> Parser<'a> {
         self.expect(Token::Let)?;
         let pattern = self.parse_pattern()?;
 
+        // `let name(params) = body in rest` — a let-bound function.
+        // Desugar to `let name = |params| body in rest` at parse time
+        // so downstream sees the existing `LetIn { value: Lambda }`
+        // shape, no new AST variant required. Recursion is not allowed
+        // in Wyn; the desugar honours that by construction — the
+        // lambda is constructed before `name` enters scope, so `name`
+        // is structurally absent from the lambda body and present
+        // only in `rest`. Only fires for simple-name patterns; a
+        // tuple destructuring `let (a, b) = …` already consumed its
+        // `(...)` inside `parse_pattern` above.
+        if pattern.simple_name().is_some() && self.check(&Token::LeftParen) {
+            let params_span = self.current_span();
+            let params = self.parse_comma_separated_params()?;
+            self.expect(Token::Assign)?;
+            let body_expr = self.parse_expression()?;
+            let lam_span = params_span.merge(&body_expr.h.span);
+            let lambda = self.node_counter.mk_node(
+                ExprKind::Lambda(LambdaExpr {
+                    params,
+                    body: Box::new(body_expr),
+                }),
+                lam_span,
+            );
+
+            if !self.check(&Token::Let) {
+                self.expect(Token::In)?;
+            }
+            let body = Box::new(self.parse_expression()?);
+            let span = start_span.merge(&body.h.span);
+
+            return Ok(self.node_counter.mk_node(
+                ExprKind::LetIn(LetInExpr {
+                    pattern,
+                    ty: None,
+                    value: Box::new(lambda),
+                    body,
+                }),
+                span,
+            ));
+        }
+
         // Optional type annotation
         let ty = if self.check(&Token::Colon) {
             self.advance(); // consume ':'
