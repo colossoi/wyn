@@ -688,23 +688,63 @@ impl<'a> TypeChecker<'a> {
             return Some(self.resolve_scheme_lookup(def_name, lookup));
         }
 
-        // Path A also fires for SOAC-tagged identifiers — bypass any
-        // user-defined shadow via kind-filtered lookup.
+        // Path A also fires for SOAC-tagged identifiers — go straight
+        // to the catalog's builtin scheme so a user-defined shadow at
+        // file scope can't reach the prelude. Equivalent to the
+        // previous `scope_stack.lookup_by_kind(_, Builtin)` hack, but
+        // sourced from the canonical `globals.builtins` map.
         if let Some(crate::name_resolution::ResolvedValueRef::Soac(_)) = self.name_resolution.get(node_id) {
-            if let Some(scheme) = self.scope_stack.lookup_by_kind(full_name, IdentifierKind::Builtin) {
+            if let Some(scheme) = self.globals.builtins.get(full_name) {
                 return Some(self.resolve_scheme_lookup(full_name, SchemeLookup::Single(scheme.clone())));
             }
         }
 
-        // Path B: non-catalog names — locals, user-defined functions,
-        // user-module-scope functions (`materials.pbrCookTorrance` etc).
-        let lookup = if is_qualified {
-            self.lookup_module_scheme(full_name)
-        } else {
-            self.scope_stack.lookup(full_name).map(|e| SchemeLookup::Single(e.value.clone()))
-        };
+        // Path B: non-catalog names.
+        // Qualified names go directly to module_schemes.
+        if is_qualified {
+            return self.lookup_module_scheme(full_name).map(|s| self.resolve_scheme_lookup(full_name, s));
+        }
 
-        lookup.map(|scheme_lookup| self.resolve_scheme_lookup(full_name, scheme_lookup))
+        // Unqualified: locals (lambda/let/match/loop bindings) first,
+        // then the per-context global precedence rules.
+        if let Some(scheme) = self.scope_stack.lookup_by_kind(full_name, IdentifierKind::Local) {
+            return Some(self.resolve_scheme_lookup(full_name, SchemeLookup::Single(scheme.clone())));
+        }
+
+        let scheme = self.globals_lookup(full_name)?;
+        Some(self.resolve_scheme_lookup(full_name, SchemeLookup::Single(scheme)))
+    }
+
+    /// Per-context unqualified-name lookup over the global envs.
+    /// Precedence per `LookupContext`:
+    ///   * `UserFile`: user_file_defs → prelude → builtins.
+    ///   * `Module { name }`: module siblings (`{name}.{n}` key in
+    ///     `module_schemes`) → user_file_defs → prelude → builtins.
+    ///     User-defined modules close over file scope.
+    ///   * `Prelude`: prelude → builtins. Does NOT see user.
+    fn globals_lookup(&self, name: &str) -> Option<TypeScheme> {
+        match &self.current_context {
+            LookupContext::UserFile => self
+                .globals
+                .user_file_defs
+                .get(name)
+                .or_else(|| self.globals.prelude_defs.get(name))
+                .or_else(|| self.globals.builtins.get(name))
+                .cloned(),
+            LookupContext::Module { name: mod_name } => {
+                let qualified = format!("{}.{}", mod_name, name);
+                self.globals
+                    .module_schemes
+                    .get(&qualified)
+                    .or_else(|| self.globals.user_file_defs.get(name))
+                    .or_else(|| self.globals.prelude_defs.get(name))
+                    .or_else(|| self.globals.builtins.get(name))
+                    .cloned()
+            }
+            LookupContext::Prelude => {
+                self.globals.prelude_defs.get(name).or_else(|| self.globals.builtins.get(name)).cloned()
+            }
+        }
     }
 
     /// Look up the prelude-module-supplied scheme for a non-catalog
@@ -1061,11 +1101,13 @@ impl<'a> TypeChecker<'a> {
         let ret = self.array_ty(tuple_ty, s, n);
         let body = Self::arrow_chain(&params, ret);
 
-        self.define(
-            format!("zip{}", arity),
-            IdentifierKind::Builtin,
-            Self::generalize_closed(body),
-        );
+        let name = format!("zip{}", arity);
+        let scheme = Self::generalize_closed(body);
+        // Route through `define_builtin` so the dual-write hits
+        // `globals.builtins` — direct `define` here skipped Phase 1's
+        // mirror and made `zipN` lookups in Path A's Soac branch
+        // miss after Phase 3's switch to `globals.builtins`.
+        self.define_builtin(&name, scheme);
     }
 
     /// Build a Vec type: Vec[elem, size]
