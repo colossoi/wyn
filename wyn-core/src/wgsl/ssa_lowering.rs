@@ -1841,6 +1841,32 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             let result_id = inst.result.ok_or_else(|| {
                                 crate::err_wgsl_at!(self.blame_span(), "{} must have a result", func_name)
                             })?;
+
+                            // Storage-image update: `img with [coord] = texel` →
+                            // textureStore. The result is the image itself.
+                            let is_storage_image = operands[0]
+                                .as_ssa()
+                                .map(|sid| {
+                                    matches!(
+                                        self.body.get_value_type(sid).array_variant(),
+                                        Some(PolyType::Constructed(TypeName::ArrayVariantStorageImage, _))
+                                    )
+                                })
+                                .unwrap_or(false);
+                            if is_storage_image {
+                                writeln!(
+                                    output,
+                                    "{}textureStore({}, {}, {});",
+                                    self.ctx.indent_str(),
+                                    arr_src,
+                                    idx,
+                                    val
+                                )
+                                .unwrap();
+                                self.value_map.insert(result_id, ValueBinding::Alias(arr_src));
+                                continue;
+                            }
+
                             if is_inplace {
                                 writeln!(
                                     output,
@@ -2202,6 +2228,13 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     // and view arrays just subscript normally.
                     if let Some(id) = base.as_ssa() {
                         let base_ty = self.body.get_value_type(id);
+                        if let Some(PolyType::Constructed(TypeName::ArrayVariantStorageImage, _)) =
+                            base_ty.array_variant()
+                        {
+                            // Storage-image read: `img[coord]` → textureLoad of
+                            // one texel at the vec2<i32> pixel coordinate.
+                            return Ok(format!("textureLoad({}, {})", base_val, index_val));
+                        }
                         if let Some(PolyType::Constructed(TypeName::ArrayVariantVirtual, _)) =
                             base_ty.array_variant()
                         {
@@ -2339,20 +2372,6 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     if *id == known.texture_load && args.len() == 3 {
                         return Ok(format!(
                             "textureLoad({}, {}, {})",
-                            arg_strs[0], arg_strs[1], arg_strs[2]
-                        ));
-                    }
-                    // image_load(img, coord) → textureLoad. Storage images
-                    // have no LOD argument; the fetched texel comes from
-                    // the bound storage texture at the given pixel.
-                    if *id == known.image_load && args.len() == 2 {
-                        return Ok(format!("textureLoad({}, {})", arg_strs[0], arg_strs[1]));
-                    }
-                    // image_store(img, coord, value) → textureStore. Side-
-                    // effecting write to the bound storage texture.
-                    if *id == known.image_store && args.len() == 3 {
-                        return Ok(format!(
-                            "textureStore({}, {}, {})",
                             arg_strs[0], arg_strs[1], arg_strs[2]
                         ));
                     }

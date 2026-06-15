@@ -1494,6 +1494,71 @@ def test: [5]i32 =
 }
 
 // =========================================================================
+// Storage-image array variant: indexed/updated by a vec2<i32> coordinate
+// =========================================================================
+
+#[test]
+fn storage_image_index_yields_vec4f32() {
+    // `img[coord]` reads one texel: a vec2<i32> pixel coordinate in, vec4f32 out.
+    typecheck_program(
+        r#"
+def sample(img: storage_image, c: vec2i32) vec4f32 =
+    img[c]
+        "#,
+    );
+}
+
+#[test]
+fn storage_image_index_rejects_scalar_index() {
+    // A scalar i32 index is rejected — a storage image needs a vec2<i32> coord.
+    let result = try_typecheck_program(
+        r#"
+def sample(img: storage_image, i: i32) vec4f32 =
+    img[i]
+        "#,
+    );
+    assert!(result.is_err(), "Should error: i32 index into a storage image");
+}
+
+#[test]
+fn storage_image_with_yields_the_image() {
+    // `img with [coord] = texel` evaluates to the storage image itself.
+    typecheck_program(
+        r#"
+def paint(img: storage_image, c: vec2i32) storage_image =
+    img with [c] = @[1.0f32, 0.0f32, 0.0f32, 1.0f32]
+        "#,
+    );
+}
+
+#[test]
+fn storage_image_with_rejects_wrong_texel_type() {
+    // The written value must be the element type (vec4f32), not a scalar.
+    let result = try_typecheck_program(
+        r#"
+def paint(img: storage_image, c: vec2i32) storage_image =
+    img with [c] = 1.0f32
+        "#,
+    );
+    assert!(result.is_err(), "Should error: scalar texel into a storage image");
+}
+
+#[test]
+fn storage_image_with_rejects_scalar_index() {
+    // The update coordinate must be vec2<i32>, not a scalar i32.
+    let result = try_typecheck_program(
+        r#"
+def paint(img: storage_image, i: i32) storage_image =
+    img with [i] = @[1.0f32, 0.0f32, 0.0f32, 1.0f32]
+        "#,
+    );
+    assert!(
+        result.is_err(),
+        "Should error: i32 index updating a storage image"
+    );
+}
+
+// =========================================================================
 // Type alias resolution tests
 // =========================================================================
 

@@ -97,7 +97,15 @@ fn normalize_entry(
         unreachable!("filtered to EntryPoint")
     };
     let entry_name = decl.name.clone();
-    let n_outputs = decl.outputs.len();
+    // A storage-image output is an opaque resource written via OpImageWrite
+    // side effects, not a data slot — exclude it so the side-effect-bearing
+    // tail (`img with [coord] = texel`) is preserved like a unit return, not
+    // wrapped in an OutputSlotStore.
+    let n_outputs = decl
+        .outputs
+        .iter()
+        .filter(|o| crate::types::get_array_variant(&o.ty) != Some(&TypeName::ArrayVariantStorageImage))
+        .count();
 
     // Peel the outer Lambda (entry params) and any tail Let-chain; the
     // tail expression is what we decompose. We rebuild the same

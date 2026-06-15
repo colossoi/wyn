@@ -267,6 +267,15 @@ pub enum TypeName {
     /// No `Array[_, Abstract, _, _]` may reach SPIR-V or WGSL emission;
     /// `egir::verify_no_abstract` enforces this at the backend boundary.
     ArrayVariantAbstract,
+    /// Storage-image variant — a 2-D, runtime-sized, opaque image array of
+    /// `vec4f32`, bound via `#[storage_image(set, binding, format, access)]`.
+    /// Indexed and updated by a `vec2<i32>` coordinate with ordinary array
+    /// syntax: `img[coord]` lowers to `OpImageRead`, `img with [coord] = texel`
+    /// to `OpImageWrite`. The dimension slot is a `SizePlaceholder` (the image
+    /// extent is a host-side runtime value, never inspected at lowering) and the
+    /// region slot is `NoRegion` (the SPIR-V image variable is built from the
+    /// param's `#[storage_image]` binding metadata, not from the type).
+    ArrayVariantStorageImage,
     /// Array variant placeholder. Replaced with type variable before type checking.
     /// Entry point params are constrained to Storage, others remain polymorphic.
     AddressPlaceholder,
@@ -365,6 +374,7 @@ impl std::fmt::Display for TypeName {
             TypeName::ArrayVariantBounded => write!(f, "bounded"),
             TypeName::ArrayVariantVirtual => write!(f, "virtual"),
             TypeName::ArrayVariantAbstract => write!(f, "abstract"),
+            TypeName::ArrayVariantStorageImage => write!(f, "storage_image"),
             TypeName::AddressPlaceholder => write!(f, "?addrspace"),
             TypeName::Region(b) => write!(f, "region(set={}, binding={})", b.set, b.binding),
             TypeName::NoRegion => write!(f, "no_region"),
@@ -432,6 +442,7 @@ impl polytype::Name for TypeName {
             TypeName::ArrayVariantVirtual => "virtual".to_string(),
             TypeName::ArrayVariantBounded => "bounded".to_string(),
             TypeName::ArrayVariantAbstract => "abstract".to_string(),
+            TypeName::ArrayVariantStorageImage => "storage_image".to_string(),
             TypeName::AddressPlaceholder => "?variant".to_string(),
             TypeName::Region(b) => format!("region_s{}_b{}", b.set, b.binding),
             TypeName::NoRegion => "no_region".to_string(),
@@ -1155,6 +1166,18 @@ pub fn array_variant_abstract() -> Type {
 /// Check if a type is the Abstract array variant marker.
 pub fn is_array_variant_abstract(ty: &Type) -> bool {
     matches!(ty, Type::Constructed(TypeName::ArrayVariantAbstract, _))
+}
+
+/// Create the storage-image array variant marker — a 2-D opaque image array
+/// indexed/updated by a `vec2<i32>` coordinate. See
+/// `TypeName::ArrayVariantStorageImage`.
+pub fn array_variant_storage_image() -> Type {
+    Type::Constructed(TypeName::ArrayVariantStorageImage, vec![])
+}
+
+/// Check if a type is the storage-image array variant marker.
+pub fn is_array_variant_storage_image(ty: &Type) -> bool {
+    matches!(ty, Type::Constructed(TypeName::ArrayVariantStorageImage, _))
 }
 
 pub mod schema_validation;

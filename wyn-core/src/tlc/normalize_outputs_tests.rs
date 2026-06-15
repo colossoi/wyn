@@ -80,23 +80,20 @@ fn spirv_contains_opcode(spirv: &[u32], opcode: u32) -> bool {
     spirv.iter().skip(5).any(|w| (w & 0xFFFF) == opcode)
 }
 
-/// Compute entries that declare unit return (`()`) with a side-effectful
-/// tail (e.g. `image_store(img, xy, color)`) must preserve the tail
-/// through normalize_outputs. The pass has no slot writes to emit for a
-/// zero-output entry, but discarding the tail silently drops the
-/// imperative builtin's effect.
-///
-/// Regression: prior to the fix, `emit_slot_writes`'s `n_outputs == 0`
-/// branch returned a fresh `UnitLit`, dropping the `image_store` App
-/// entirely; the compiled SPIR-V contained no `OpImageWrite` instruction.
+/// A storage-image update (`img with [coord] = texel`) is an opaque-resource
+/// write, not a data output: `normalize_outputs` treats the returned image as
+/// zero data-outputs (like a unit return) and leaves the side-effect-bearing
+/// tail in place rather than wrapping it in an `OutputSlotStore`. The write
+/// must survive to SPIR-V as an `OpImageWrite` — it carries an effect token so
+/// DCE can't drop it.
 #[test]
-fn unit_return_compute_entry_preserves_image_store() {
+fn storage_image_update_preserves_op_image_write() {
     let source = r#"
 #[compute]
 entry paint(#[storage_image(set=0, binding=0, format=rgba8unorm, access=write_only)] img: storage_image,
-            #[builtin(global_invocation_id)] gid: vec3u32) () =
+            #[builtin(global_invocation_id)] gid: vec3u32) storage_image =
   let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
-  image_store(img, xy, @[1.0, 0.0, 0.0, 1.0])
+  img with [xy] = @[1.0, 0.0, 0.0, 1.0]
 "#;
 
     let spirv = compile_to_spirv(source);
@@ -104,7 +101,35 @@ entry paint(#[storage_image(set=0, binding=0, format=rgba8unorm, access=write_on
     const OP_IMAGE_WRITE: u32 = 99;
     assert!(
         spirv_contains_opcode(&spirv, OP_IMAGE_WRITE),
-        "expected OpImageWrite in compiled SPIR-V (regression: normalize_outputs dropping unit-return tail)",
+        "expected OpImageWrite in compiled SPIR-V (storage-image `with` update must not be dropped)",
+    );
+}
+
+/// A storage-image read (`src[coord]`) must lower to `OpImageRead`, not be
+/// materialized to a function-local array + `OpAccessChain` (the path a
+/// dynamic Index into a normal array takes).
+#[test]
+fn storage_image_read_lowers_to_op_image_read() {
+    let source = r#"
+#[compute]
+entry copy(#[storage_image(set=0, binding=0, format=rgba32float, access=read)] src: storage_image,
+           #[storage_image(set=0, binding=1, format=rgba32float, access=write_only)] dst: storage_image,
+           #[builtin(global_invocation_id)] gid: vec3u32) storage_image =
+  let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
+  dst with [xy] = src[xy]
+"#;
+
+    let spirv = compile_to_spirv(source);
+
+    const OP_IMAGE_READ: u32 = 98;
+    const OP_IMAGE_WRITE: u32 = 99;
+    assert!(
+        spirv_contains_opcode(&spirv, OP_IMAGE_READ),
+        "expected OpImageRead in compiled SPIR-V (src[coord] must not be materialized)",
+    );
+    assert!(
+        spirv_contains_opcode(&spirv, OP_IMAGE_WRITE),
+        "expected OpImageWrite in compiled SPIR-V",
     );
 }
 

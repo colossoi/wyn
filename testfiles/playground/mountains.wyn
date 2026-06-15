@@ -509,7 +509,7 @@ entry buffer_a(#[storage_image(set=0, binding=0, format=rgba32float, access=writ
                #[uniform(set=1, binding=0)] iResolution: vec3f32,
                #[uniform(set=1, binding=1)] iTime: f32,
                #[uniform(set=1, binding=2)] iMouse: vec4f32,
-               #[uniform(set=1, binding=3)] iFrame: u32) () =
+               #[uniform(set=1, binding=3)] iFrame: u32) storage_image =
   let xy_i = @[i32.u32(gid.x), i32.u32(gid.y)] in
   let mapPos = @[f32.u32(gid.x) / iResolution.x,
                  f32.u32(gid.y) / iResolution.y] in
@@ -560,7 +560,7 @@ entry buffer_a(#[storage_image(set=0, binding=0, format=rgba32float, access=writ
       @[clamp01(added.x), added.y, added.z, added.w]
     else base in
 
-  image_store(out_a, xy_i, painted)
+  out_a with [xy_i] = painted
 
 ------------------------------------------------------------
 -- Compute entry: Buffer B
@@ -573,7 +573,7 @@ entry buffer_b(#[storage_image(set=0, binding=1, format=rgba32float, access=writ
                #[sampler(set=0, binding=3)] samp: sampler,
                #[storage(set=2, binding=0, access=read)] keyboard: []u32,
                #[builtin(global_invocation_id)] gid: vec3u32,
-               #[uniform(set=1, binding=0)] iResolution: vec3f32) () =
+               #[uniform(set=1, binding=0)] iResolution: vec3f32) storage_image =
   let xy_i = @[i32.u32(gid.x), i32.u32(gid.y)] in
   let uv = @[f32.u32(gid.x) / iResolution.x,
              f32.u32(gid.y) / iResolution.y] in
@@ -585,7 +585,7 @@ entry buffer_b(#[storage_image(set=0, binding=1, format=rgba32float, access=writ
   let enter_toggled = keyboard[2 * 256 + 13] != 0u32 in
   let erosion_enabled = if enter_toggled then !EROSION_DEFAULT_ON else EROSION_DEFAULT_ON in
   let out = Heightmap(uv, n, erosion_enabled) in
-  image_store(out_b, xy_i, out)
+  out_b with [xy_i] = out
 
 ------------------------------------------------------------
 -- Compute entry: Buffer C
@@ -595,7 +595,7 @@ entry buffer_b(#[storage_image(set=0, binding=1, format=rgba32float, access=writ
 #[compute]
 entry buffer_c(#[storage_image(set=0, binding=2, format=rgba32float, access=write_only)] out_c: storage_image,
                #[builtin(global_invocation_id)] gid: vec3u32,
-               #[uniform(set=1, binding=0)] iResolution: vec3f32) () =
+               #[uniform(set=1, binding=0)] iResolution: vec3f32) storage_image =
   let xy_i = @[i32.u32(gid.x), i32.u32(gid.y)] in
   let uv = @[f32.u32(gid.x) / iResolution.x,
              f32.u32(gid.y) / iResolution.y] in
@@ -605,7 +605,7 @@ entry buffer_c(#[storage_image(set=0, binding=2, format=rgba32float, access=writ
       let color2 = color + nd * a in
       (color2, a * 0.95, f * 2.0)
   in
-  image_store(out_c, xy_i, @[color_final.x, color_final.y, color_final.z, 1.0])
+  out_c with [xy_i] = @[color_final.x, color_final.y, color_final.z, 1.0]
 
 ------------------------------------------------------------
 -- Image / fragment helpers

@@ -14,8 +14,8 @@ use std::collections::{BTreeSet, HashMap};
 // Import type helper functions from parent module
 use super::patterns::coverage::{CoverageError, check_match, format_cov_pat};
 use super::{
-    as_arrow, bool_type, f32, function, i32, mat, no_region, record, sized_array, strip_unique, tuple,
-    unit, vec,
+    as_arrow, bool_type, f32, function, get_array_variant, i32, mat, no_region, record, sized_array,
+    strip_unique, tuple, unit, vec,
 };
 
 /// Render a single swizzle slot index as its `xyzw` letter. Used by
@@ -410,6 +410,13 @@ impl<'a> TypeChecker<'a> {
         let size = resolved.array_size().expect("Array has size");
         let variant = resolved.array_variant().expect("Array has variant");
         let elem = resolved.elem_type().expect("Array has elem");
+
+        // A storage-image array param is an opaque image resource (bound from
+        // its `#[storage_image]` attribute), not a storage buffer — its variant
+        // is already concrete and must not be re-constrained to View/Composite.
+        if get_array_variant(&resolved) == Some(&TypeName::ArrayVariantStorageImage) {
+            return Ok(());
+        }
 
         // Check if this is a sized array (Size constant)
         let is_sized = matches!(size.apply(&self.context), Type::Constructed(TypeName::Size(_), _));
@@ -2199,17 +2206,32 @@ impl<'a> TypeChecker<'a> {
                 let array_type = self.infer_expression(array_expr)?;
                 let index_type = self.infer_expression(index_expr)?;
 
-                // Unify index type with i32
-                self.context.unify(&index_type, &i32()).map_err(|_| {
-                    err_type_at!(
-                        index_expr.h.span,
-                        "Array index must be an integer type, got {}",
-                        self.format_type(&index_type.apply(&self.context))
-                    )
-                })?;
-
                 // Constrain array type - strip uniqueness (indexing *[n]T works like [n]T)
                 let array_type_stripped = strip_unique(&array_type);
+
+                // A storage-image array reads one texel at a `vec2<i32>` pixel
+                // coordinate; every other variant indexes by an `i32` position.
+                if matches!(
+                    get_array_variant(&array_type_stripped.apply(&self.context)),
+                    Some(TypeName::ArrayVariantStorageImage)
+                ) {
+                    self.context.unify(&index_type, &vec(2, i32())).map_err(|_| {
+                        err_type_at!(
+                            index_expr.h.span,
+                            "Storage-image index must be vec2<i32>, got {}",
+                            self.format_type(&index_type.apply(&self.context))
+                        )
+                    })?;
+                } else {
+                    self.context.unify(&index_type, &i32()).map_err(|_| {
+                        err_type_at!(
+                            index_expr.h.span,
+                            "Array index must be an integer type, got {}",
+                            self.format_type(&index_type.apply(&self.context))
+                        )
+                    })?;
+                }
+
                 let (elem_var, _, _, _) = self.constrain_array_type(
                     &array_type_stripped,
                     &array_expr.h.span,
@@ -2225,17 +2247,32 @@ impl<'a> TypeChecker<'a> {
                 let index_type = self.infer_expression(index)?;
                 let value_type = self.infer_expression(value)?;
 
-                // Unify index type with i32
-                self.context.unify(&index_type, &i32()).map_err(|_| {
-                    err_type_at!(
-                        index.h.span,
-                        "Array index must be an integer type, got {}",
-                        self.format_type(&index_type.apply(&self.context))
-                    )
-                })?;
-
                 // Constrain array type - strip uniqueness
                 let array_type_stripped = strip_unique(&array_type);
+
+                // A storage-image update (`img with [coord] = texel`) writes one
+                // texel at a `vec2<i32>` pixel coordinate; every other variant is
+                // updated at an `i32` position.
+                if matches!(
+                    get_array_variant(&array_type_stripped.apply(&self.context)),
+                    Some(TypeName::ArrayVariantStorageImage)
+                ) {
+                    self.context.unify(&index_type, &vec(2, i32())).map_err(|_| {
+                        err_type_at!(
+                            index.h.span,
+                            "Storage-image index must be vec2<i32>, got {}",
+                            self.format_type(&index_type.apply(&self.context))
+                        )
+                    })?;
+                } else {
+                    self.context.unify(&index_type, &i32()).map_err(|_| {
+                        err_type_at!(
+                            index.h.span,
+                            "Array index must be an integer type, got {}",
+                            self.format_type(&index_type.apply(&self.context))
+                        )
+                    })?;
+                }
                 let (elem_var, _, _, _) = self.constrain_array_type(
                     &array_type_stripped,
                     &array.h.span,

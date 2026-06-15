@@ -1363,6 +1363,21 @@ impl<'a> Parser<'a> {
                     return Ok(Type::Constructed(TypeName::Named(qualified), vec![]));
                 }
 
+                // `storage_image` is a 2-D, runtime-sized, opaque image array
+                // of `vec4f32`, indexed/updated by a `vec2<i32>` coordinate with
+                // ordinary array syntax. Region is `no_region` (the image
+                // variable is built from the `#[storage_image]` binding metadata,
+                // not the type); the extent is a host-side runtime value
+                // (`SizePlaceholder`, like the View variant).
+                if type_name == "storage_image" {
+                    return Ok(types::make_array1(
+                        types::vec(4, types::f32()),
+                        types::array_variant_storage_image(),
+                        Type::Constructed(TypeName::SizePlaceholder, vec![]),
+                        types::no_region(),
+                    ));
+                }
+
                 // Check if this is a builtin primitive type
                 let type_name_variant = match type_name.as_str() {
                     // Floating point types
@@ -1384,7 +1399,6 @@ impl<'a> Parser<'a> {
                     // Opaque GPU resources (nullary in v1)
                     "texture2d" => TypeName::Texture2D,
                     "sampler" => TypeName::Sampler,
-                    "storage_image" => TypeName::StorageTexture,
                     // User-defined type alias or unrecognized type
                     _ => TypeName::Named(type_name),
                 };

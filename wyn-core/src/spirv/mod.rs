@@ -343,7 +343,15 @@ impl Constructor {
                         let variant = ty.array_variant().expect("Array has variant");
 
                         // Dispatch on variant first - View arrays are always {offset, len} structs
-                        if let PolyType::Constructed(TypeName::ArrayVariantView, _) = variant {
+                        if let PolyType::Constructed(TypeName::ArrayVariantStorageImage, _) = variant {
+                            // Storage-image variant: an opaque 2-D image, the same
+                            // `OpTypeImage` the `StorageTexture` arm builds. The
+                            // entry variable itself is created from the param's
+                            // `#[storage_image]` binding metadata; this arm just
+                            // keeps the type total (never the Composite fall-through).
+                            let _ = elem_type;
+                            self.polytype_to_spirv(&PolyType::Constructed(TypeName::StorageTexture, vec![]))
+                        } else if let PolyType::Constructed(TypeName::ArrayVariantView, _) = variant {
                             // View variant: struct { offset: u32, len: u32 }. The
                             // backing storage buffer is identified by the concrete
                             // `Region(set, binding)` in the view's type, not a
@@ -1462,9 +1470,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                             || *id == known.array_with
                             || *id == known.array_with_in_place
                             || *id == known.texture_load
-                            || *id == known.texture_sample
-                            || *id == known.image_store
-                            || *id == known.image_load));
+                            || *id == known.texture_sample));
                     if typed_dispatch {
                         self.lower_builtin_call(
                             *id,
@@ -2413,7 +2419,21 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 let variant = base_ty.array_variant().expect("Array has variant");
                 let elem = base_ty.elem_type().expect("Array has elem");
 
-                if types::is_array_variant_view(variant) {
+                if types::is_array_variant_storage_image(variant) {
+                    // Storage-image variant: `img[coord]` reads one texel via
+                    // OpImageRead. `base_id` is the bound image; `index_id` is
+                    // the vec2<i32> pixel coordinate; the result is vec4f32.
+                    Ok(
+                        self.constructor.builder.image_read(
+                            result_ty,
+                            None,
+                            base_id,
+                            index_id,
+                            None,
+                            [],
+                        )?,
+                    )
+                } else if types::is_array_variant_view(variant) {
                     // View variant: {offset, len} struct; backing buffer
                     // recovered from the view type's region.
                     self.lower_view_index(
@@ -2688,31 +2708,6 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         Some(spirv::ImageOperands::LOD),
                         [Operand::IdRef(arg_ids[2])],
                     )?)
-                } else if id == known.image_store {
-                    // image_store(image, ivec2, vec4) → OpImageWrite.
-                    // arg_ids = [image, coord, texel]. SPIR-V's
-                    // OpImageWrite has no result type / no result id;
-                    // we return the zero word — the caller never reads
-                    // the result of a unit-typed App.
-                    if arg_ids.len() != 3 {
-                        bail_spirv!("image_store requires 3 arguments");
-                    }
-                    self.constructor.builder.image_write(arg_ids[0], arg_ids[1], arg_ids[2], None, [])?;
-                    Ok(0)
-                } else if id == known.image_load {
-                    // image_load(image, ivec2) → OpImageRead.
-                    // arg_ids = [image, coord]. Result is vec4f32.
-                    if arg_ids.len() != 2 {
-                        bail_spirv!("image_load requires 2 arguments");
-                    }
-                    Ok(self.constructor.builder.image_read(
-                        result_ty,
-                        None,
-                        arg_ids[0],
-                        arg_ids[1],
-                        None,
-                        [],
-                    )?)
                 } else if id == known.texture_sample {
                     // texture_sample(tex, samp, uv, lod) → OpSampledImage +
                     // OpImageSampleExplicitLod. v1 uses EXPLICIT LOD (the
@@ -2762,6 +2757,19 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     // region, so downstream `ViewIndex` consumers resolve the
                     // buffer from it.
                     let arr_ty = self.get_value_type_ref(value_refs[0]);
+
+                    // Storage-image update: `img with [coord] = texel` writes one
+                    // texel via OpImageWrite and evaluates to the image itself
+                    // (`arr` is the bound image; `idx` is the vec2<i32> coord).
+                    let is_storage_image = arr_ty
+                        .array_variant()
+                        .map(|v| matches!(v, PolyType::Constructed(TypeName::ArrayVariantStorageImage, _)))
+                        .unwrap_or(false);
+                    if is_storage_image {
+                        self.constructor.builder.image_write(arr, idx, val, None, [])?;
+                        return Ok(arr);
+                    }
+
                     let is_view = arr_ty
                         .array_variant()
                         .map(|v| matches!(v, PolyType::Constructed(TypeName::ArrayVariantView, _)))

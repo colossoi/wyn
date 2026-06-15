@@ -81,6 +81,15 @@ pub fn compute_entry_binding_layout(
             continue;
         }
 
+        // A `#[storage_image(...)]` param is an opaque image resource bound from
+        // the attribute's own (set, binding). Its type is now an `Array`
+        // storage-image variant, but it is not a storage buffer — the auto-
+        // allocator must not consume a binding slot for it.
+        if extract_storage_image_binding(&entry.params[i]).is_some() {
+            out.push(None);
+            continue;
+        }
+
         // Uniqueness is an ownership marker; for binding allocation, `*[]T`
         // and `[]T` lower identically.
         let ty = TypeExt::strip_unique(ty);

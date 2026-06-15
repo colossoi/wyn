@@ -46,7 +46,12 @@ fn run_one_body(graph: &mut EGraph) {
             } if operands.len() == 2 => {
                 let arr = operands[0];
                 let idx = operands[1];
-                if is_const_int(graph, idx) { None } else { Some((nid, arr, idx)) }
+                // A storage-image Index lowers directly to OpImageRead /
+                // textureLoad in the backend; it must not be materialized to a
+                // function-local array (the image is an opaque resource).
+                let is_storage_image = crate::types::get_array_variant(&graph.types[&arr])
+                    == Some(&crate::types::TypeName::ArrayVariantStorageImage);
+                if is_storage_image || is_const_int(graph, idx) { None } else { Some((nid, arr, idx)) }
             }
             _ => None,
         })

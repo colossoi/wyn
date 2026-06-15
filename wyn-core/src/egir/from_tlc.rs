@@ -560,6 +560,11 @@ fn convert_entry_point(
         ret_type,
         Type::Constructed(TypeName::Unit, _) | Type::Constructed(TypeName::SideEffect, _)
     );
+    // A storage-image return is void at the backend: the OpImageWrite side
+    // effects already happened in-body, the image is a bound resource (not a
+    // returned value), and `build_entry_outputs` emitted no output slot.
+    let returns_storage_image =
+        crate::types::get_array_variant(&ret_type) == Some(&TypeName::ArrayVariantStorageImage);
 
     // Seed the scratch-binding cursor just above every auto-storage binding
     // already claimed by params, outputs, and pre-declared gather buffers, so
@@ -594,7 +599,7 @@ fn convert_entry_point(
     let was_slot_collected = !converter.slot_sources_accum.is_empty();
     if was_slot_collected {
         converter.set_return(None);
-    } else if is_unit_return {
+    } else if is_unit_return || returns_storage_image {
         converter.set_return(None);
     } else {
         converter.set_return(Some(result_nid));
@@ -613,6 +618,9 @@ fn convert_entry_point(
             let component_tys: Vec<_> = entry.outputs.iter().map(|o| o.ty.clone()).collect();
             Type::Constructed(TypeName::Tuple(component_tys.len()), component_tys)
         }
+    } else if returns_storage_image {
+        // Void at the backend — the image is a bound resource, not a value.
+        Type::Constructed(TypeName::Unit, vec![])
     } else {
         ret_type
     };
@@ -1157,8 +1165,12 @@ impl<'a> Converter<'a> {
                     self.lower_storage_index(args, ty)
                 } else if *id == known.storage_store && args.len() == 4 {
                     self.lower_storage_store(args)
-                } else if *id == known.image_store && args.len() == 3 {
-                    self.lower_image_store(args, *id, *overload_idx)
+                } else if (*id == known.array_with || *id == known.array_with_in_place)
+                    && args.len() == 3
+                    && crate::types::get_array_variant(&args[0].ty)
+                        == Some(&TypeName::ArrayVariantStorageImage)
+                {
+                    self.lower_storage_image_write(args, *id, *overload_idx)
                 } else {
                     let arg_nids: SmallVec<[NodeId; 4]> =
                         args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
@@ -1324,13 +1336,14 @@ impl<'a> Converter<'a> {
         Ok(self.intern_pure(PureOp::Unit, smallvec![], unit_ty))
     }
 
-    /// Convert `image_store(image, ivec2, vec4) -> unit` into a
-    /// side-effect Inst tagged as `OpTag::Intrinsic`. The SPIR-V
-    /// backend recognizes the intrinsic id and emits `OpImageWrite`.
-    /// Modeled after `lower_storage_store`: the operands flow through
-    /// as `operand_nodes`, an effect token is allocated, the App
-    /// result is unit.
-    fn lower_image_store(
+    /// Convert a storage-image update `img with [coord] = texel` into a
+    /// side-effect `Inst` tagged with the `array_with` intrinsic id. The
+    /// backend's storage-image `array_with` arm emits `OpImageWrite`
+    /// (`textureStore` in WGSL). Modeled after `lower_storage_store`: operands
+    /// flow through as `operand_nodes`, an effect token sequences the write so
+    /// it survives DCE, and the with-expression evaluates to the image itself
+    /// (`args[0]`), matching its `storage_image` result type.
+    fn lower_storage_image_write(
         &mut self,
         args: &[Term],
         id: crate::builtins::BuiltinId,
@@ -1341,7 +1354,7 @@ impl<'a> Converter<'a> {
         let arg_vrefs: Vec<ValueRef> =
             (0..arg_nids.len()).map(|_| ValueRef::Ssa(crate::ssa::types::ValueId::default())).collect();
         let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
-        let result_nid = self.graph.alloc_side_effect_result(unit_ty.clone());
+        let result_nid = self.graph.alloc_side_effect_result(unit_ty);
         let effect_in = EffectToken(0);
         let effect_out = self.alloc_effect();
         self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
@@ -1349,12 +1362,13 @@ impl<'a> Converter<'a> {
                 tag: crate::op::OpTag::Intrinsic { id, overload_idx },
                 operands: arg_vrefs,
             }),
-            operand_nodes: arg_nids,
+            operand_nodes: arg_nids.clone(),
             result: Some(result_nid),
             effects: Some((effect_in, effect_out)),
             span: self.current_span,
         });
-        Ok(result_nid)
+        // The with-expression evaluates to the image itself.
+        Ok(arg_nids[0])
     }
 
     // ========================================================================
@@ -2335,6 +2349,15 @@ fn build_entry_outputs(
     dispatch_sized: bool,
 ) -> Result<Vec<EntryOutput>, ConvertError> {
     use EntryOutput;
+
+    // A storage-image return is an opaque resource the body already wrote via
+    // OpImageWrite side effects — it needs no output buffer. Realize it as zero
+    // data-outputs, like a unit return (`normalize_outputs` likewise leaves the
+    // side-effect-bearing tail in place rather than wrapping it in a slot store).
+    if crate::types::get_array_variant(ret_type) == Some(&TypeName::ArrayVariantStorageImage) {
+        return Ok(vec![]);
+    }
+
     let mut binding_num = binding_start;
     let mut forced_remaining = forced_output_binding;
     // Pick a `BufferLen` policy for the output binding, in order:

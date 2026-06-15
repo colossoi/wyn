@@ -738,8 +738,8 @@ entry gen(bh: []vec4f32) []i32 =
     );
 }
 
-/// Compute entries that bind a `storage_image` and call `image_store`
-/// must lower to WGSL: a module-scope
+/// Compute entries that bind a `storage_image` and update it with array
+/// syntax (`img with [coord] = texel`) must lower to WGSL: a module-scope
 /// `var name: texture_storage_2d<format, access>` declaration plus a
 /// `textureStore(name, coord, value)` call.
 #[test]
@@ -747,9 +747,9 @@ fn wgsl_compute_storage_image_store() {
     let source = r#"
 #[compute]
 entry paint(#[storage_image(set=0, binding=0, format=rgba8unorm, access=write_only)] img: storage_image,
-            #[builtin(global_invocation_id)] gid: vec3u32) () =
+            #[builtin(global_invocation_id)] gid: vec3u32) storage_image =
   let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
-  image_store(img, xy, @[1.0, 0.0, 0.0, 1.0])
+  img with [xy] = @[1.0, 0.0, 0.0, 1.0]
 "#;
     let wgsl = compile_to_wgsl(source).expect("compile to WGSL");
     assert!(
@@ -763,5 +763,33 @@ entry paint(#[storage_image(set=0, binding=0, format=rgba8unorm, access=write_on
     assert!(
         wgsl.contains("textureStore("),
         "image_store must lower to textureStore:\n{wgsl}"
+    );
+}
+
+/// A storage-image read (`src[coord]`) lowers to `textureLoad`, and a write
+/// (`dst with [coord] = texel`) to `textureStore`. Exercises both directions
+/// of the new array syntax for direct entry-param storage images.
+#[test]
+fn wgsl_compute_storage_image_load_and_store() {
+    let source = r#"
+#[compute]
+entry copy(#[storage_image(set=0, binding=0, format=rgba32float, access=read)] src: storage_image,
+           #[storage_image(set=0, binding=1, format=rgba32float, access=write_only)] dst: storage_image,
+           #[builtin(global_invocation_id)] gid: vec3u32) storage_image =
+  let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
+  dst with [xy] = src[xy]
+"#;
+    let wgsl = compile_to_wgsl(source).expect("compile to WGSL");
+    assert!(
+        wgsl.contains("texture_storage_2d<rgba32float, read>"),
+        "read-access storage image must declare a read binding:\n{wgsl}"
+    );
+    assert!(
+        wgsl.contains("textureLoad("),
+        "src[coord] must lower to textureLoad:\n{wgsl}"
+    );
+    assert!(
+        wgsl.contains("textureStore("),
+        "dst with [coord] = texel must lower to textureStore:\n{wgsl}"
     );
 }
