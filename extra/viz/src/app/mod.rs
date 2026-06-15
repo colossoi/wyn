@@ -601,6 +601,22 @@ impl State {
         let module = crate::spirv::load_spirv_module(&device, &spec.shader_path)
             .with_context(|| format!("load SPIR-V module {:?}", spec.shader_path))?;
 
+        // Buffer-size map for dispatch resolution. `DispatchLen::InputBinding`
+        // queries this by binding number to compute element count from the
+        // source buffer's byte size. Today the only buffers available in this
+        // path are the feedback ping-pong slots; the read-side binding stands
+        // in for the dispatch source. Both ping-pong slots are sized the same,
+        // so slot 0's byte size is authoritative.
+        let dispatch_buffer_sizes: HashMap<u32, (wgpu::Buffer, u64)> = buffer_feedback_pairs
+            .iter()
+            .filter_map(|pair| {
+                let res = feedback_buffers.get(&(pair.write_set, pair.write_binding))?;
+                let buf = &res.buffers[0];
+                let size = buf.size();
+                Some((pair.read_binding, (buf.clone(), size)))
+            })
+            .collect();
+
         // ----- Compute stages -----
         let mut compute_stages: Vec<PipelineComputeStage> = Vec::new();
         for pipeline in &spec.descriptor.pipelines {
@@ -678,19 +694,13 @@ impl State {
                 cache: None,
             });
 
-            // Resolve dispatch. For descriptor sizing modes that depend on
-            // buffer sizes, the existing helper takes a buffer map — empty
-            // for now since v1 doesn't allocate storage buffers in this
-            // path. Storage-image-driven shaders typically use Fixed or
-            // input-binding-derived dispatches that work with an empty map.
-            //
-            // CLI `--dispatch ENTRY:WxH[xD]` overrides the descriptor's
-            // policy at the per-entry level. The override is in TOTAL
-            // threads on each axis; we divide each axis by the matching
-            // workgroup-size dim (`workgroup_size.0` for W, `.1` for H,
-            // `.2` for D) to get the workgroup counts wgpu expects. A
-            // workgroup-size dim of 0 would be malformed; clamp to 1
-            // defensively.
+            // Resolve dispatch. `DispatchLen::InputBinding` reads the source
+            // buffer's byte size from `dispatch_buffer_sizes` (populated above
+            // from the feedback pool). `DispatchLen::StorageImage` reads from
+            // `storage_textures`. CLI `--dispatch ENTRY:WxH[xD]` overrides
+            // everything per-entry — the override is in TOTAL threads on each
+            // axis, so divide by the matching workgroup-size dim to get
+            // workgroup counts.
             let workgroups = if let Some(&(w, h, d)) = spec.dispatch_overrides.get(&cp.entry_point) {
                 let (wgx, wgy, wgz) = (
                     cp.workgroup_size.0.max(1),
@@ -702,7 +712,7 @@ impl State {
                 gpu::resolve_dispatch_size_with_textures(
                     &cp.dispatch_size,
                     cp.workgroup_size,
-                    &HashMap::new(),
+                    &dispatch_buffer_sizes,
                     &[],
                     &storage_textures,
                 )
