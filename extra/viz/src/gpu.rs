@@ -947,8 +947,11 @@ pub fn create_host_buffers(
             }
 
             // `--zero-buffer NAME:BYTES`: a host-provided buffer the shader
-            // writes (e.g. a scatter framebuffer) with no input data. wgpu
-            // zero-initializes new buffers, so no upload is needed.
+            // writes (e.g. a scatter framebuffer) with no input data. Zero it
+            // explicitly — wgpu's lazy zero-init is skipped once a compute
+            // shader writes the buffer (it can't track shader-side writes, so it
+            // marks the whole buffer initialized), which would otherwise leave
+            // the un-scattered texels as garbage the fragment reads.
             if let Some(&bytes) = zero_buffers.get(name.as_str()) {
                 let buffer = device.create_buffer(&BufferDescriptor {
                     label: Some(&format!("host_buffer_{name}")),
@@ -956,6 +959,7 @@ pub fn create_host_buffers(
                     usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 });
+                queue.write_buffer(&buffer, 0, &vec![0u8; bytes as usize]);
                 out.insert(
                     key,
                     HostBufferResource {
