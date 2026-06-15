@@ -594,3 +594,23 @@ fn storage_image_loop_carry_should_be_a_compiler_error() {
          clean compiler error, not an invalid-SPIR-V OpPhi caught by spirv-val"
     );
 }
+
+/// TODO(scatter): `scatter` is type-checked but has no backend lowering. Even a
+/// 1-D scatter into a regular array fails EGIR conversion — `SoacOp::Scatter`
+/// is unsupported, and a scatter result isn't a retargetable output producer
+/// (the error mentions "only map/scan results stream into a runtime-sized
+/// output"). This blocks an idiomatic scatter-based rasterizer. Un-ignore once
+/// scatter lowers.
+#[test]
+#[ignore = "scatter has no backend lowering yet"]
+fn scatter_lowers_to_backend() {
+    let src = r#"
+#[compute]
+entry s(#[storage(set=2, binding=0, access=read)] xs: []i32) []i32 =
+  scatter(xs, [0, 1], [9, 8])
+"#;
+    assert!(
+        compile_to_spirv(src).is_ok(),
+        "scatter should lower to SPIR-V (currently unsupported at EGIR conversion)"
+    );
+}

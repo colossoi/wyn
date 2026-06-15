@@ -1558,6 +1558,34 @@ def paint(img: storage_image, i: i32) storage_image =
     );
 }
 
+/// TODO(scatter): `scatter`'s indices are 1-D `i32` (signature
+/// `Array[a,_,n] -> Array[i32,_,m] -> Array[a,_,m] -> Array[a,_,n]`), so it
+/// can't target a 2-D `storage_image`, whose coordinates are `vec2<i32>`. A
+/// storage-image scatter rasterizer needs an overload/variant accepting
+/// `vec2<i32>` indices. Today this is a type error ("argument 2: expected
+/// Array[i32, …], got Array[vec2i32, …]"). Un-ignore once it's accepted.
+#[test]
+#[ignore = "scatter indices are 1-D i32; storage-image scatter needs vec2 coords"]
+fn scatter_accepts_vec2_indices_for_storage_image() {
+    let result = try_typecheck_program(
+        r#"
+def N:i32 = 5
+#[compute]
+entry rasterize(#[storage(set=2, binding=0, access=read)] positions: []vec4f32,
+                #[storage_image(set=0, binding=0, format=rgba8unorm, access=write_only)] img: storage_image)
+  storage_image =
+  let pts = positions[0..N] in
+  let coords = map(|p:vec4f32| @[i32.f32(p.x), i32.f32(p.y)], pts) in
+  let vals = map(|p:vec4f32| @[1.0, 1.0, 1.0, 1.0], pts) in
+  scatter(img, coords, vals)
+        "#,
+    );
+    assert!(
+        result.is_ok(),
+        "scatter into a storage image with vec2<i32> coords should type-check"
+    );
+}
+
 // =========================================================================
 // Type alias resolution tests
 // =========================================================================

@@ -1031,6 +1031,61 @@ fn compile_to_owned(source: &str) -> Program {
     owned.0.tlc
 }
 
+/// Like `compile_to_owned` but returns the `apply_ownership` result so a test
+/// can assert it rejects (or, today, wrongly accepts) a program.
+fn try_compile_to_owned(source: &str) -> crate::error::Result<Program> {
+    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
+    let parsed = Compiler::parse(source, &mut node_counter).expect("parse");
+    let type_checked = parsed
+        .resolve(&mut module_manager)
+        .expect("resolve")
+        .fold_ast_constants()
+        .type_check(&mut module_manager)
+        .expect("type_check");
+    type_checked
+        .to_tlc(&module_manager, false)
+        .pin_entry_regions()
+        .expect("pin_entry_regions")
+        .partial_eval()
+        .normalize_soacs()
+        .fuse_maps()
+        .apply_ownership()
+        .map(|owned| owned.0.tlc)
+}
+
+/// TODO(uniqueness): `arr with [i] = v` must *consume* `arr` — after the update
+/// the original binding (and its aliases) is dead, exactly as in Futhark's
+/// uniqueness rules. Using `arr` again should be a clean error.
+///
+/// Here both the original `arr` and the updated array are read:
+///
+///   let updated = arr with [8] = 9 in
+///   arr[8] + updated[8]      -- `arr[8]` is a use-after-consume
+///
+/// Today the compiler accepts this (the `with` doesn't invalidate `arr`), so
+/// `apply_ownership` returns `Ok`. This is wrong: for a non-copyable array
+/// (e.g. an opaque `storage_image`) the update can't fall back to a functional
+/// copy, so consuming the same array more than once — or discarding the
+/// result, or consuming it once per `map` iteration — must be rejected up front
+/// instead of silently lowering to shared mutation. Un-ignore and flip to
+/// `assert!(result.is_err())` once consumption checking lands.
+#[test]
+#[ignore = "array `with` does not yet consume/invalidate its source binding"]
+fn array_with_should_consume_its_source_binding() {
+    let result = try_compile_to_owned(
+        r#"
+def f() i32 =
+  let arr = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0] in
+  let updated = arr with [8] = 9 in
+  arr[8] + updated[8]
+"#,
+    );
+    assert!(
+        result.is_err(),
+        "using `arr` after `arr with [8] = 9` must be a consume-after-use error"
+    );
+}
+
 fn map_destination(program: &Program, fn_name: &str) -> Option<SoacDestination> {
     fn walk(t: &Term) -> Option<SoacDestination> {
         if let TermKind::Soac(SoacOp::Map { destination, .. }) = &t.kind {
