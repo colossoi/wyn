@@ -20,8 +20,8 @@ use crate::json::{
     Access, Binding, BufferUsage, DispatchLen, DispatchSize, Pipeline, PipelineDescriptor,
     StorageImageFormat, load_f32_json,
 };
-use wyn_pipeline_descriptor::StorageTextureSize;
 use crate::specs::PushConstantSpec;
+use wyn_pipeline_descriptor::StorageTextureSize;
 
 /// Bundle of the wgpu objects produced by a single
 /// `Instance::request_adapter` + `Adapter::request_device` cycle.
@@ -587,7 +587,6 @@ pub fn build_push_constant_bytes(
     Ok(bytes)
 }
 
-
 // =============================================================================
 // Storage textures (Phase 1b — Path B)
 // =============================================================================
@@ -682,10 +681,8 @@ pub fn create_storage_textures(
 ) -> HashMap<(u32, u32), StorageTextureResource> {
     // A (set, binding) that appears as the WRITE side of any feedback
     // pair needs two physical textures; everything else gets one.
-    let pingpong_write_keys: std::collections::HashSet<(u32, u32)> = feedback_pairs
-        .iter()
-        .map(|p| (p.write_set, p.write_binding))
-        .collect();
+    let pingpong_write_keys: std::collections::HashSet<(u32, u32)> =
+        feedback_pairs.iter().map(|p| (p.write_set, p.write_binding)).collect();
 
     let mut out: HashMap<(u32, u32), StorageTextureResource> = HashMap::new();
     for pipeline in &descriptor.pipelines {
@@ -696,7 +693,12 @@ pub fn create_storage_textures(
         };
         for b in bindings {
             let Binding::StorageTexture {
-                set, binding, name, format, size: size_policy, ..
+                set,
+                binding,
+                name,
+                format,
+                size: size_policy,
+                ..
             } = b
             else {
                 continue;
@@ -708,8 +710,9 @@ pub fn create_storage_textures(
             let wgpu_format = storage_image_format_to_wgpu(*format);
             let (width, height) = match size_policy {
                 StorageTextureSize::Fixed { width, height } => (*width, *height),
-                StorageTextureSize::SameAsWindow => surface_size
-                    .unwrap_or((STORAGE_TEXTURE_FALLBACK_SIZE, STORAGE_TEXTURE_FALLBACK_SIZE)),
+                StorageTextureSize::SameAsWindow => {
+                    surface_size.unwrap_or((STORAGE_TEXTURE_FALLBACK_SIZE, STORAGE_TEXTURE_FALLBACK_SIZE))
+                }
             };
             let size = wgpu::Extent3d {
                 width,
@@ -722,11 +725,7 @@ pub fn create_storage_textures(
             let mut storage_views = Vec::with_capacity(slot_count);
             let mut sampled_views = Vec::with_capacity(slot_count);
             for slot in 0..slot_count {
-                let label_suffix = if slot_count == 1 {
-                    String::new()
-                } else {
-                    format!(".slot{slot}")
-                };
+                let label_suffix = if slot_count == 1 { String::new() } else { format!(".slot{slot}") };
                 let texture = device.create_texture(&wgpu::TextureDescriptor {
                     label: Some(&format!("storage_texture_{name}{label_suffix}")),
                     size,
@@ -814,7 +813,10 @@ pub fn create_host_textures(
             Pipeline::Graphics(gp) => &gp.bindings,
         };
         for b in bindings {
-            let Binding::Texture { set, binding, name, .. } = b else {
+            let Binding::Texture {
+                set, binding, name, ..
+            } = b
+            else {
                 continue;
             };
             let key = (*set, *binding);
@@ -905,6 +907,7 @@ pub fn create_host_buffers(
     queue: &wgpu::Queue,
     descriptor: &PipelineDescriptor,
     storage_dir: Option<&std::path::Path>,
+    zero_buffers: &HashMap<String, u64>,
 ) -> Result<HashMap<(u32, u32), HostBufferResource>> {
     let mut out: HashMap<(u32, u32), HostBufferResource> = HashMap::new();
     for pipeline in &descriptor.pipelines {
@@ -914,7 +917,10 @@ pub fn create_host_buffers(
             Pipeline::Graphics(gp) => &gp.bindings,
         };
         for b in bindings {
-            let Binding::StorageBuffer { set, binding, name, .. } = b else {
+            let Binding::StorageBuffer {
+                set, binding, name, ..
+            } = b
+            else {
                 continue;
             };
             let key = (*set, *binding);
@@ -935,6 +941,26 @@ pub fn create_host_buffers(
                     HostBufferResource {
                         buffer,
                         kind: HostBufferKind::Keyboard,
+                    },
+                );
+                continue;
+            }
+
+            // `--zero-buffer NAME:BYTES`: a host-provided buffer the shader
+            // writes (e.g. a scatter framebuffer) with no input data. wgpu
+            // zero-initializes new buffers, so no upload is needed.
+            if let Some(&bytes) = zero_buffers.get(name.as_str()) {
+                let buffer = device.create_buffer(&BufferDescriptor {
+                    label: Some(&format!("host_buffer_{name}")),
+                    size: bytes,
+                    usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                out.insert(
+                    key,
+                    HostBufferResource {
+                        buffer,
+                        kind: HostBufferKind::FileLoaded,
                     },
                 );
                 continue;
@@ -1101,7 +1127,10 @@ pub fn create_samplers(
             Pipeline::Graphics(gp) => &gp.bindings,
         };
         for b in bindings {
-            let Binding::Sampler { set, binding, name, .. } = b else {
+            let Binding::Sampler {
+                set, binding, name, ..
+            } = b
+            else {
                 continue;
             };
             let key = (*set, *binding);
@@ -1166,9 +1195,9 @@ pub fn build_resource_bind_group_for_set(
                 ..
             } if *bset == set => {
                 let key = (*bset, *binding);
-                let res = storage_textures.get(&key).ok_or_else(|| {
-                    anyhow!("no storage texture allocated for ({}, {})", bset, binding)
-                })?;
+                let res = storage_textures
+                    .get(&key)
+                    .ok_or_else(|| anyhow!("no storage texture allocated for ({}, {})", bset, binding))?;
                 // Ping-pong write side: storage_view at the current
                 // parity. For non-ping-pong textures, slot count is 1
                 // so the index folds back to 0 either way.
@@ -1299,9 +1328,9 @@ pub fn build_resource_bind_group_for_set(
                 ..
             } if *bset == set => {
                 let key = (*bset, *binding);
-                let sampler = samplers.get(&key).ok_or_else(|| {
-                    anyhow!("no sampler allocated for ({}, {})", bset, binding)
-                })?;
+                let sampler = samplers
+                    .get(&key)
+                    .ok_or_else(|| anyhow!("no sampler allocated for ({}, {})", bset, binding))?;
                 layout_entries.push(BindGroupLayoutEntry {
                     binding: *binding,
                     visibility,
@@ -1324,9 +1353,7 @@ pub fn build_resource_bind_group_for_set(
                 });
             }
             Binding::Uniform {
-                set: bset,
-                binding,
-                ..
+                set: bset, binding, ..
             } if *bset == set => {
                 let key = (*bset, *binding);
                 let buffer = uniforms.get(&key).ok_or_else(|| {
@@ -1372,9 +1399,7 @@ pub fn build_resource_bind_group_for_set(
                 //      including a fragment shader's read-only view of
                 //      the same storage) → current-parity slot.
                 //   3. Otherwise → host-uploaded pool (keyboard, file).
-                let buffer_ref: &wgpu::Buffer = if let Some(&(ws, wb)) =
-                    buffer_feedback_reads.get(&key)
-                {
+                let buffer_ref: &wgpu::Buffer = if let Some(&(ws, wb)) = buffer_feedback_reads.get(&key) {
                     let res = feedback_buffers.get(&(ws, wb)).ok_or_else(|| {
                         anyhow!(
                             "feedback buffer pair at write ({ws}, {wb}) was not allocated; \

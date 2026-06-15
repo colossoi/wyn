@@ -29,6 +29,9 @@ use wyn_pipeline_descriptor::ShaderStage;
 /// time the interactive mode learns another flag.
 pub struct InteractiveOpts {
     pub storage_dir: Option<PathBuf>,
+    /// Host storage buffers to allocate zero-initialized, by binding name →
+    /// byte size (from `--zero-buffer NAME:BYTES`).
+    pub zero_buffers: HashMap<String, u64>,
     pub index_buffer: Option<PathBuf>,
     pub present_mode: wgpu::PresentMode,
     pub validate: bool,
@@ -173,6 +176,7 @@ fn run_pipeline_interactive(
         vertex_count: opts.vertex_count,
         topology: opts.topology,
         storage_dir: opts.storage_dir,
+        zero_buffers: opts.zero_buffers,
         index_buffer: opts.index_buffer,
     };
 

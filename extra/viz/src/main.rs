@@ -103,6 +103,15 @@ enum Command {
         /// Input data: name:file.json (repeatable)
         #[arg(long = "input", value_name = "NAME:FILE")]
         inputs: Vec<String>,
+        /// Hand a host storage buffer a zero-initialized allocation of
+        /// `BYTES` bytes, by binding name (repeatable). Use for a
+        /// host-provided scratch/framebuffer the shader writes but no
+        /// `--input`/`--feedback` supplies — e.g. the particles `fb`
+        /// (512*512 vec4f32 = 4194304).
+        ///
+        /// Format: `NAME:BYTES`. Example: `fb:4194304`.
+        #[arg(long = "zero-buffer", value_name = "NAME:BYTES", verbatim_doc_comment)]
+        zero_buffers: Vec<String>,
         /// Output file: name:file.json (repeatable, omit to print to stdout)
         #[arg(long = "output", value_name = "NAME:FILE")]
         outputs: Vec<String>,
@@ -226,6 +235,7 @@ fn main() -> Result<()> {
             path,
             pipeline,
             inputs,
+            zero_buffers,
             outputs,
             push_constants,
             dispatch,
@@ -254,6 +264,20 @@ fn main() -> Result<()> {
             let input_map = parse_pairs(&inputs)?;
             let output_map = parse_pairs(&outputs)?;
 
+            // Parse `--zero-buffer NAME:BYTES` into a name → byte-size map.
+            let zero_buffer_map: HashMap<String, u64> = zero_buffers
+                .iter()
+                .map(|s| {
+                    let (name, bytes) = s
+                        .split_once(':')
+                        .ok_or_else(|| anyhow!("Invalid --zero-buffer '{}'. Expected NAME:BYTES", s))?;
+                    let bytes: u64 = bytes
+                        .parse()
+                        .with_context(|| format!("--zero-buffer '{}': cannot parse byte size", s))?;
+                    Ok((name.to_string(), bytes))
+                })
+                .collect::<Result<HashMap<_, _>>>()?;
+
             // Parse `--dispatch ENTRY:WxH[xD]` into a HashMap keyed by
             // compute entry-point name. Total thread counts; viz
             // divides by the descriptor's workgroup_size at use.
@@ -265,8 +289,7 @@ fn main() -> Result<()> {
                         .ok_or_else(|| anyhow!("Invalid --dispatch '{}'. Expected ENTRY:WxH[xD]", s))?;
                     let parts: Vec<&str> = dims.split('x').collect();
                     let parse = |p: &str| -> Result<u32> {
-                        p.parse()
-                            .with_context(|| format!("--dispatch '{}': cannot parse '{}'", s, p))
+                        p.parse().with_context(|| format!("--dispatch '{}': cannot parse '{}'", s, p))
                     };
                     let (w, h, d) = match parts.as_slice() {
                         [w, h] => (parse(w)?, parse(h)?, 1u32),
@@ -288,12 +311,12 @@ fn main() -> Result<()> {
             let feedback_specs: Vec<(String, String, String)> = feedback
                 .iter()
                 .map(|s| {
-                    let (entry, rw) = s.split_once(':').ok_or_else(|| {
-                        anyhow!("Invalid --feedback '{}'. Expected ENTRY:READ=WRITE", s)
-                    })?;
-                    let (read, write) = rw.split_once('=').ok_or_else(|| {
-                        anyhow!("Invalid --feedback '{}'. Expected ENTRY:READ=WRITE", s)
-                    })?;
+                    let (entry, rw) = s
+                        .split_once(':')
+                        .ok_or_else(|| anyhow!("Invalid --feedback '{}'. Expected ENTRY:READ=WRITE", s))?;
+                    let (read, write) = rw
+                        .split_once('=')
+                        .ok_or_else(|| anyhow!("Invalid --feedback '{}'. Expected ENTRY:READ=WRITE", s))?;
                     Ok((entry.to_string(), read.to_string(), write.to_string()))
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -309,6 +332,7 @@ fn main() -> Result<()> {
                 &feedback_specs,
                 modes::pipeline::InteractiveOpts {
                     storage_dir,
+                    zero_buffers: zero_buffer_map,
                     index_buffer,
                     present_mode: present_mode.into(),
                     validate: !no_validate,
