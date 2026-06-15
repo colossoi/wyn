@@ -241,6 +241,18 @@ pub enum PendingSoac {
         /// operand (in-kernel consumers like `reduce` / `length`).
         len_out: Option<crate::BindingRef>,
     },
+    /// `scatter dest indices values` — writes `values[i]` into
+    /// `dest[indices[i]]` for each `i`; out-of-bounds indices are ignored
+    /// (Futhark semantics). Lowered serially (a `tid==0`-guarded loop) in this
+    /// cut; the result is dummy (the in-place writes are the effect).
+    /// Operands: `[dest_view, indices, values]` — `dest_view` is the
+    /// destination's already-lowered `StorageView`.
+    Scatter {
+        indices_array_type: Type<TypeName>,
+        indices_elem_type: Type<TypeName>,
+        values_elem_type: Type<TypeName>,
+        dest_elem_type: Type<TypeName>,
+    },
     /// Wrapper marking a SOAC as parallelized at the entry boundary. The
     /// `egir::parallelize` pass tags a planned compute entry's tail SOAC
     /// with this; `soac_expand` dispatches to a parallel builder (e.g.

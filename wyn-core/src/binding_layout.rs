@@ -192,6 +192,23 @@ pub fn extract_storage_binding(pattern: &Pattern) -> Option<BindingRef> {
     }
 }
 
+/// Extract the declared `access` of a `#[storage(...)]` param (so the backend
+/// knows whether the buffer is written in place, e.g. a `scatter` destination).
+pub fn extract_storage_access(pattern: &Pattern) -> Option<crate::interface::StorageAccess> {
+    match &pattern.kind {
+        PatternKind::Attributed(attrs, inner) => {
+            for attr in attrs {
+                if let Attribute::Storage { access, .. } = attr {
+                    return Some(*access);
+                }
+            }
+            extract_storage_access(inner)
+        }
+        PatternKind::Typed(inner, _) => extract_storage_access(inner),
+        _ => None,
+    }
+}
+
 /// Extract a `#[texture(set, binding)]` from a param pattern.
 pub fn extract_texture_binding(pattern: &Pattern) -> Option<BindingRef> {
     match &pattern.kind {

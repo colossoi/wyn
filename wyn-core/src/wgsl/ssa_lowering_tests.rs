@@ -765,3 +765,30 @@ entry paint(#[storage_image(set=0, binding=0, format=rgba8unorm, access=write_on
         "image_store must lower to textureStore:\n{wgsl}"
     );
 }
+
+/// `scatter` into a `#[storage(access=write)]` framebuffer: the destination
+/// binding must be emitted `read_write` (WGSL requires it for the Store, and
+/// the declared `access=write` must propagate from the param), and the scatter
+/// emits indexed stores into it.
+#[test]
+fn wgsl_scatter_into_storage_buffer() {
+    let source = r#"
+def N:i32 = 5
+#[compute]
+entry rasterize(#[storage(set=2, binding=0, access=read)] positions: []vec4f32,
+                #[storage(set=2, binding=1, access=write)] fb: []vec4f32) () =
+  let pts  = positions[0..N] in
+  let idxs = map(|p:vec4f32| i32.f32(p.y) * 512 + i32.f32(p.x), pts) in
+  let vals = map(|p:vec4f32| @[1.0, 1.0, 1.0, 1.0], pts) in
+  let _ = scatter(fb, idxs, vals) in ()
+"#;
+    let wgsl = compile_to_wgsl(source).expect("compile to WGSL");
+    assert!(
+        wgsl.contains("@group(2) @binding(1) var<storage, read_write>"),
+        "scatter destination must be read_write:\n{wgsl}"
+    );
+    assert!(
+        wgsl.contains("_buf_2_1["),
+        "scatter must emit indexed stores into the framebuffer:\n{wgsl}"
+    );
+}

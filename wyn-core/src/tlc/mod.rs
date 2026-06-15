@@ -2352,6 +2352,7 @@ impl<'a> Transformer<'a> {
             SoacKind::Filter => self.transform_soac_filter(args, ty, span),
             SoacKind::Zip => self.transform_soac_zip(args, ty, span),
             SoacKind::ReduceByIndex => self.transform_soac_reduce_by_index(args, ty, span),
+            SoacKind::Scatter => self.transform_soac_scatter(args, ty, span),
         }
     }
 
@@ -2492,6 +2493,38 @@ impl<'a> Transformer<'a> {
                 dest,
                 op,
                 ne: Box::new(ne_term),
+                indices: ArrayExpr::Ref(Box::new(indices_term)),
+                values: ArrayExpr::Ref(Box::new(values_term)),
+            }),
+        )
+    }
+
+    /// `scatter(dest, indices, values)` → `SoacOp::Scatter`. Writes
+    /// `values[i]` into `dest[indices[i]]` for each `i`; out-of-bounds indices
+    /// are ignored (Futhark semantics). The `dest` must be a Var (a `#[storage]`
+    /// buffer param in the rasterizer use case) — its `Place::LocalArray`
+    /// carries the symbol the EGIR conversion resolves to the dest's view.
+    fn transform_soac_scatter(&mut self, args: &[ast::Expression], ty: Type<TypeName>, span: Span) -> Term {
+        assert!(args.len() >= 3, "scatter requires 3 arguments");
+        let dest_term = self.transform_expr(&args[0]);
+        let indices_term = self.transform_expr(&args[1]);
+        let values_term = self.transform_expr(&args[2]);
+
+        let dest_elem_ty = self.get_array_element_type(&dest_term.ty);
+        let dest = Place::LocalArray {
+            id: match &dest_term.kind {
+                TermKind::Var(VarRef::Symbol(sym)) => *sym,
+                _ => self.define("_w_scatter_dest"),
+            },
+            shape: Shape(vec![]),
+            elem_ty: dest_elem_ty,
+        };
+
+        self.mk_term(
+            ty,
+            span,
+            TermKind::Soac(SoacOp::Scatter {
+                dest,
                 indices: ArrayExpr::Ref(Box::new(indices_term)),
                 values: ArrayExpr::Ref(Box::new(values_term)),
             }),

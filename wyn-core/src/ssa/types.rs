@@ -517,6 +517,10 @@ pub struct EntryInput {
     pub decoration: Option<IoDecoration>,
     pub size_hint: Option<std::num::NonZeroU32>,
     pub storage_binding: Option<BindingRef>,
+    /// Declared `access` of a `#[storage(...)]` param. `WriteOnly`/`ReadWrite`
+    /// mark the buffer as written in place (e.g. a `scatter` destination), so
+    /// the descriptor and WGSL emit a writable binding rather than read-only.
+    pub storage_access: Option<crate::interface::StorageAccess>,
     /// Programmer-attributed `#[uniform(set, binding)]` on this param.
     pub uniform_binding: Option<BindingRef>,
     /// Placement in the per-entry push-constant block for compute-broadcast

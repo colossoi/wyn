@@ -564,3 +564,31 @@ entry fragment_main(#[builtin(position)] _p: vec4f32)
         "expected exactly one `OpDecorate ... BuiltIn GlobalInvocationId`, got {count}"
     );
 }
+
+/// `scatter` into a `#[storage]` framebuffer lowers end-to-end: the full
+/// `SoacKind::Scatter` → `SoacOp::Scatter` → `PendingSoac::Scatter` →
+/// `build_scatter_loop` path emits indexed `OpStore`s into the destination
+/// view (one per scattered element; N=5 here, unrolled).
+#[test]
+fn scatter_into_storage_buffer_lowers() {
+    let spirv = compile_to_spirv(
+        r#"
+def N:i32 = 5
+#[compute]
+entry rasterize(#[storage(set=2, binding=0, access=read)] positions: []vec4f32,
+                #[storage(set=2, binding=1, access=write)] fb: []vec4f32) () =
+  let pts  = positions[0..N] in
+  let idxs = map(|p:vec4f32| i32.f32(p.y) * 512 + i32.f32(p.x), pts) in
+  let vals = map(|p:vec4f32| @[1.0, 1.0, 1.0, 1.0], pts) in
+  let _ = scatter(fb, idxs, vals) in ()
+"#,
+    )
+    .expect("scatter rasterizer must lower to SPIR-V");
+    assert_eq!(spirv[0], 0x07230203, "SPIR-V magic number");
+    const OP_STORE: u32 = 62;
+    let stores = spirv.iter().skip(5).filter(|w| (*w & 0xFFFF) == OP_STORE).count();
+    assert!(
+        stores >= 5,
+        "expected >= 5 OpStore (one per scattered particle), got {stores}"
+    );
+}

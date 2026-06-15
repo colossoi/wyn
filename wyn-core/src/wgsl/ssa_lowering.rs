@@ -790,6 +790,16 @@ impl<'a> LowerCtx<'a> {
                     });
                     // Entry inputs are read by convention.
                     entry_ref.2 = true;
+                    // A `#[storage(..., access=write/readwrite)]` input is
+                    // written in place (e.g. a `scatter` destination); WGSL
+                    // needs `read_write` for the Store.
+                    if matches!(
+                        input.storage_access,
+                        Some(crate::interface::StorageAccess::WriteOnly)
+                            | Some(crate::interface::StorageAccess::ReadWrite)
+                    ) {
+                        entry_ref.3 = true;
+                    }
                 }
             }
             // Entry outputs likewise. For scalar-valued compute outputs

@@ -67,6 +67,22 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
             .iter()
             .flat_map(|e| e.outputs.iter().filter_map(|o| o.storage_binding))
             .map(|br| (br.set, br.binding))
+            // A `#[storage(access=write/readwrite)]` input is written in place
+            // (e.g. a `scatter` destination), so its binding is module-writable
+            // too — the promotion below widens it (and any sibling read of the
+            // same slot) to `ReadWrite`.
+            .chain(entries.iter().flat_map(|e| {
+                e.inputs.iter().filter_map(|i| {
+                    let br = i.storage_binding?;
+                    match i.storage_access {
+                        Some(
+                            crate::interface::StorageAccess::WriteOnly
+                            | crate::interface::StorageAccess::ReadWrite,
+                        ) => Some((br.set, br.binding)),
+                        _ => None,
+                    }
+                })
+            }))
             .collect();
 
         for entry in entries {

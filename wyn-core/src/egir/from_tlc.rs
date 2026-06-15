@@ -17,8 +17,8 @@ use super::publish::PipelineDescriptorPublish;
 use super::types::EffectToken;
 use crate::ast::{Span, TypeName};
 use crate::binding_layout::{
-    extract_io_decoration, extract_sampler_binding, extract_storage_binding, extract_storage_image_binding,
-    extract_texture_binding, extract_uniform_binding,
+    extract_io_decoration, extract_sampler_binding, extract_storage_access, extract_storage_binding,
+    extract_storage_image_binding, extract_texture_binding, extract_uniform_binding,
 };
 use crate::interface;
 use crate::interface::{EntryParamBinding, EntryParamBindingKind};
@@ -402,6 +402,7 @@ fn convert_entry_point(
         let size_hint = entry.params.get(i).and_then(extract_size_hint);
         let uniform_binding = entry.params.get(i).and_then(extract_uniform_binding);
         let attr_storage_binding = entry.params.get(i).and_then(extract_storage_binding);
+        let storage_access = entry.params.get(i).and_then(extract_storage_access);
         let texture_binding = entry.params.get(i).and_then(extract_texture_binding);
         let sampler_binding = entry.params.get(i).and_then(extract_sampler_binding);
         let storage_image_binding = entry.params.get(i).and_then(extract_storage_image_binding);
@@ -448,6 +449,7 @@ fn convert_entry_point(
                     decoration: None,
                     size_hint: None,
                     storage_binding: Some(slot.binding),
+                    storage_access: None,
                     uniform_binding: None,
                     push_constant: None,
                     texture_binding: None,
@@ -499,6 +501,7 @@ fn convert_entry_point(
             decoration,
             size_hint,
             storage_binding,
+            storage_access,
             uniform_binding,
             push_constant,
             texture_binding,
@@ -1732,10 +1735,11 @@ impl<'a> Converter<'a> {
                 input,
                 destination,
             } => self.convert_soac_filter(pred, input, *destination, ty),
-            // TODO(scatter): no producer in to_tlc yet (no surface name dispatched here).
-            // Variant exists to anchor the place-passing SOAC shape; remove if a wider
-            // audit confirms no future use.
-            SoacOp::Scatter { .. } => Err(ConvertError::Unsupported("SOAC scatter".into())),
+            SoacOp::Scatter {
+                dest,
+                indices,
+                values,
+            } => self.convert_soac_scatter(dest, indices, values, ty),
             // TODO(reduce_by_index): parallel path needs atomic-op emission
             // (atomicAdd/atomicMin/etc.) in spirv/wgsl backends — not yet wired.
             // Sequential lowering is straightforward (read-combine-write loop) but
@@ -1820,6 +1824,52 @@ impl<'a> Converter<'a> {
                 input_elem_types,
                 output_elem_type: output_elem_ty,
                 destination,
+            },
+            operands,
+            result_ty,
+        ))
+    }
+
+    /// `scatter(dest, indices, values)` → a side-effecting `PendingSoac::Scatter`.
+    /// `dest` is a `#[storage]` buffer param whose `StorageView` was already
+    /// interned at param setup and stored in `self.locals`; the writes target
+    /// that view. The result node is discarded (rebound during expansion).
+    fn convert_soac_scatter(
+        &mut self,
+        dest: &crate::tlc::Place,
+        indices: &ArrayExpr,
+        values: &ArrayExpr,
+        result_ty: Type<TypeName>,
+    ) -> Result<NodeId, ConvertError> {
+        let (dest_sym, dest_elem_ty) = match dest {
+            crate::tlc::Place::LocalArray { id, elem_ty, .. } => (*id, elem_ty.clone()),
+            _ => {
+                return Err(ConvertError::Unsupported(
+                    "scatter destination must be a storage-buffer param".into(),
+                ));
+            }
+        };
+        let dest_view = *self.locals.get(&dest_sym).ok_or_else(|| {
+            ConvertError::GraphError(
+                "scatter destination is not a bound #[storage] view (must be a storage param)".into(),
+            )
+        })?;
+
+        let indices_nid = self.convert_array_expr_value(indices)?;
+        let values_nid = self.convert_array_expr_value(values)?;
+        let indices_arr_ty = self.value_array_type(indices_nid, indices);
+        let indices_elem_ty = self.value_elem_type(&indices_arr_ty, indices);
+        let values_arr_ty = self.value_array_type(values_nid, values);
+        let values_elem_ty = self.value_elem_type(&values_arr_ty, values);
+
+        let operands: SmallVec<[NodeId; 4]> = smallvec![dest_view, indices_nid, values_nid];
+
+        Ok(self.emit_soac(
+            PendingSoac::Scatter {
+                indices_array_type: indices_arr_ty,
+                indices_elem_type: indices_elem_ty,
+                values_elem_type: values_elem_ty,
+                dest_elem_type: dest_elem_ty,
             },
             operands,
             result_ty,

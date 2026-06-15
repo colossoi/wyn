@@ -102,6 +102,11 @@ fn is_handleable_soac(kind: &SideEffectKind) -> bool {
             input_array_types, ..
         } => input_array_types.iter().all(is_plain_array_source),
         PendingSoac::Filter { input_array_type, .. } => is_plain_array_source(input_array_type),
+        // Scatter reads its indices/values arrays per element; any plain array
+        // source works for the read path.
+        PendingSoac::Scatter {
+            indices_array_type, ..
+        } => is_plain_array_source(indices_array_type),
         // Peel the wrapper and re-check; the inner SOAC's source rules apply.
         PendingSoac::Parallel { serial } => {
             is_handleable_soac(&SideEffectKind::Pending((**serial).clone()))
@@ -639,6 +644,43 @@ fn expand_one(
                     destination,
                     scratch_out,
                     len_out,
+                },
+                next_effect,
+            );
+        }
+        SideEffectKind::Pending(PendingSoac::Scatter {
+            indices_array_type,
+            indices_elem_type,
+            values_elem_type,
+            dest_elem_type,
+        }) => {
+            let indices_arr_ty = indices_array_type.clone();
+            let indices_elem_ty = indices_elem_type.clone();
+            let values_elem_ty = values_elem_type.clone();
+            let dest_elem_ty = dest_elem_type.clone();
+
+            // Operands: [dest_view, indices, values].
+            let dest_view = se.operand_nodes[0];
+            let indices_nid = se.operand_nodes[1];
+            let values_nid = se.operand_nodes[2];
+            let values_arr_ty = graph.types[&values_nid].clone();
+            let result_nid = se.result.expect("Scatter has a result");
+
+            build_scatter_loop(
+                graph,
+                control_headers,
+                bid,
+                idx,
+                ScatterLoop {
+                    dest_view,
+                    dest_elem_ty,
+                    indices_nid,
+                    indices_arr_ty,
+                    indices_elem_ty,
+                    values_nid,
+                    values_arr_ty,
+                    values_elem_ty,
+                    result_node: result_nid,
                 },
                 next_effect,
             );
@@ -1436,6 +1478,93 @@ fn build_filter_loop(
 /// over the buffer — its type (set by `convert_soac_filter`) already carries
 /// `Region(scratch_out)`, so the backend recovers the descriptor from the type.
 /// All offsets/lengths are `u32` to match the view `{offset, len}` convention.
+/// Inputs for a sequential `scatter` expansion.
+struct ScatterLoop {
+    dest_view: NodeId,
+    dest_elem_ty: Type<TypeName>,
+    indices_nid: NodeId,
+    indices_arr_ty: Type<TypeName>,
+    indices_elem_ty: Type<TypeName>,
+    values_nid: NodeId,
+    values_arr_ty: Type<TypeName>,
+    values_elem_ty: Type<TypeName>,
+    result_node: NodeId,
+}
+
+/// Sequential `scatter`: for each `i`, `dest_view[indices[i]] = values[i]`.
+/// The per-element writes are effectful, so the SOAC result binds to a dummy.
+/// Out-of-bounds indices are not guarded here (Futhark ignores them; v1 trusts
+/// the producer to emit in-bounds indices). This is the serial cut — a parallel
+/// (one-thread-per-element) version is deferred; sequential semantics make it a
+/// pure optimization.
+fn build_scatter_loop(
+    graph: &mut EGraph,
+    control_headers: &mut HashMap<BlockId, ControlHeader>,
+    bid: BlockId,
+    idx_in_block: usize,
+    spec: ScatterLoop,
+    next_effect: &mut u32,
+) {
+    use super::graph_ops::emit_storage_store;
+    let ScatterLoop {
+        dest_view,
+        dest_elem_ty,
+        indices_nid,
+        indices_arr_ty,
+        indices_elem_ty,
+        values_nid,
+        values_arr_ty,
+        values_elem_ty,
+        result_node,
+    } = spec;
+
+    let len_input = (indices_nid, indices_arr_ty.clone());
+    let result = ResultBinding::DummyBool { result_node };
+
+    expand_loop(
+        graph,
+        control_headers,
+        bid,
+        idx_in_block,
+        &len_input,
+        &[],
+        &result,
+        next_effect,
+        true,
+        move |graph, next_effect, blk, i_nid, _carried| {
+            let scatter_idx = emit_read_element(
+                graph,
+                blk,
+                indices_nid,
+                i_nid,
+                &indices_arr_ty,
+                &indices_elem_ty,
+                next_effect,
+            );
+            let val = emit_read_element(
+                graph,
+                blk,
+                values_nid,
+                i_nid,
+                &values_arr_ty,
+                &values_elem_ty,
+                next_effect,
+            );
+            emit_storage_store(
+                graph,
+                blk,
+                dest_view,
+                scatter_idx,
+                val,
+                dest_elem_ty.clone(),
+                next_effect,
+                None,
+            );
+            vec![]
+        },
+    );
+}
+
 fn build_runtime_filter_loop(
     graph: &mut EGraph,
     control_headers: &mut HashMap<BlockId, ControlHeader>,
