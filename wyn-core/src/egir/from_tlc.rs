@@ -506,7 +506,36 @@ fn convert_entry_point(
             storage_image_binding,
         });
     }
-    let binding_num: u32 = param_bindings.iter().flatten().map(|b| b.buffer_count()).sum();
+    // Output binding allocation starts above every claimed slot in
+    // `AUTO_STORAGE_SET`: auto-allocated view-array params (the
+    // `buffer_count()` sum) plus any explicit input binding the user
+    // placed in this set (`#[storage_image(set=0, …)]`, `#[texture(
+    // set=0, …)]`, …). Without the explicit-binding term, an output
+    // gets allocated at `binding=0` and collides with e.g. the
+    // user's `img: storage_image` already living there — the host's
+    // bind-group-layout builder then rejects the duplicate.
+    let input_explicit_bindings: Vec<BindingRef> = inputs
+        .iter()
+        .flat_map(|i| {
+            i.storage_binding
+                .into_iter()
+                .chain(i.uniform_binding)
+                .chain(i.texture_binding)
+                .chain(i.sampler_binding)
+                .chain(i.storage_image_binding.map(|(br, _, _, _)| br))
+        })
+        .collect();
+    let binding_num: u32 = {
+        let auto_count: u32 = param_bindings.iter().flatten().map(|b| b.buffer_count()).sum();
+        input_explicit_bindings
+            .iter()
+            .copied()
+            .filter(|b| b.set == AUTO_STORAGE_SET)
+            .map(|b| b.binding + 1)
+            .max()
+            .unwrap_or(0)
+            .max(auto_count)
+    };
 
     let execution_model = match &entry.entry_type {
         interface::Attribute::Vertex => ExecutionModel::Vertex,
@@ -535,10 +564,11 @@ fn convert_entry_point(
     // Seed the scratch-binding cursor just above every auto-storage binding
     // already claimed by params, outputs, and pre-declared gather buffers, so
     // a runtime `filter`'s scratch buffer (allocated during body conversion)
-    // never collides with them.
-    converter.next_auto_binding = inputs
+    // never collides with them. Explicit non-storage-buffer input bindings
+    // (`#[storage_image]`, `#[texture]`, …) in `AUTO_STORAGE_SET` count too.
+    converter.next_auto_binding = input_explicit_bindings
         .iter()
-        .filter_map(|i| i.storage_binding)
+        .copied()
         .chain(outputs.iter().filter_map(|o| o.storage_binding))
         .chain(entry.storage_bindings.iter().map(|d| d.binding))
         .filter(|b| b.set == AUTO_STORAGE_SET)
