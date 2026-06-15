@@ -3846,3 +3846,76 @@ fn test_parse_nested_abs_checkerboard_pattern() {
     // qualified-name (`f32.i32`) expression, no whitespace.
     parse_ok("def f(x: i32, y: i32) f32 = f32.i32(abs(abs((x%4)-1)-1)*abs(abs((y%4)-1)-1))");
 }
+
+#[test]
+fn test_parse_storage_image_size_fixed_wxh() {
+    // `size=512x512` lexes as `IntLit(512)` + `Ident("x512")`. Regression:
+    // pre-fix the parser called expect_identifier() and rejected the IntLit.
+    use crate::pipeline_descriptor::StorageTextureSize;
+    let src = "#[compute]\n\
+               entry e(#[storage_image(set=0, binding=0, format=rgba8unorm, access=write_only, size=512x512)] img: storage_image) () = ()";
+    let program = parse_ok(src);
+    let entry = program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            Declaration::Entry(e) => Some(e),
+            _ => None,
+        })
+        .expect("entry decl");
+    let attrs = match &entry.params[0].kind {
+        PatternKind::Typed(inner, _) => match &inner.kind {
+            PatternKind::Attributed(attrs, _) => attrs,
+            other => panic!("expected attributed inner pattern, got {:?}", other),
+        },
+        PatternKind::Attributed(attrs, _) => attrs,
+        other => panic!("expected attributed/typed param, got {:?}", other),
+    };
+    let size = attrs
+        .iter()
+        .find_map(|a| match a {
+            Attribute::StorageImage { size, .. } => Some(*size),
+            _ => None,
+        })
+        .expect("StorageImage attribute");
+    assert_eq!(
+        size,
+        StorageTextureSize::Fixed {
+            width: 512,
+            height: 512
+        }
+    );
+}
+
+#[test]
+fn test_parse_storage_image_size_window() {
+    // The bare `window` keyword still works (existing form).
+    use crate::pipeline_descriptor::StorageTextureSize;
+    let src = "#[compute]\n\
+               entry e(#[storage_image(set=0, binding=0, format=rgba8unorm, access=write_only, size=window)] img: storage_image) () = ()";
+    let program = parse_ok(src);
+    let entry = program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            Declaration::Entry(e) => Some(e),
+            _ => None,
+        })
+        .expect("entry decl");
+    let attrs = match &entry.params[0].kind {
+        PatternKind::Typed(inner, _) => match &inner.kind {
+            PatternKind::Attributed(attrs, _) => attrs,
+            other => panic!("expected attributed inner pattern, got {:?}", other),
+        },
+        PatternKind::Attributed(attrs, _) => attrs,
+        other => panic!("expected attributed/typed param, got {:?}", other),
+    };
+    let size = attrs
+        .iter()
+        .find_map(|a| match a {
+            Attribute::StorageImage { size, .. } => Some(*size),
+            _ => None,
+        })
+        .expect("StorageImage attribute");
+    assert_eq!(size, StorageTextureSize::SameAsWindow);
+}

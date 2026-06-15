@@ -603,6 +603,40 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Parse the RHS of `size = …` in a `#[storage_image(...)]` attribute.
+    /// Accepted forms: `window` (single identifier) or `WxH` where the
+    /// lexer splits it into `IntLiteral(W)` followed by `Ident("xH")`.
+    fn parse_storage_texture_size(
+        &mut self,
+    ) -> Result<crate::pipeline_descriptor::StorageTextureSize> {
+        use crate::pipeline_descriptor::StorageTextureSize;
+        if let Some(Token::IntLiteral(n)) = self.peek().cloned() {
+            self.advance();
+            let w: u32 = n
+                .0
+                .parse()
+                .map_err(|_| err_parse!("storage_image size width: '{}'", n.0))?;
+            let suffix = self.expect_identifier()?;
+            let h_str = suffix.strip_prefix('x').ok_or_else(|| {
+                err_parse!("storage_image size: expected WxH, got '{}{}'", n.0, suffix)
+            })?;
+            let h: u32 = h_str
+                .parse()
+                .map_err(|_| err_parse!("storage_image size height: '{}'", h_str))?;
+            Ok(StorageTextureSize::Fixed { width: w, height: h })
+        } else {
+            let s = self.expect_identifier()?;
+            match s.as_str() {
+                "window" => Ok(StorageTextureSize::SameAsWindow),
+                other => bail_parse_at!(
+                    self.current_span(),
+                    "Unknown storage_image size: '{}'. Supported: window, WxH (e.g. 1024x1024)",
+                    other
+                ),
+            }
+        }
+    }
+
     fn parse_attribute(&mut self) -> Result<Attribute> {
         trace!("parse_attribute: next token = {:?}", self.peek());
         let attr_name = self.expect_identifier()?;
@@ -765,31 +799,7 @@ impl<'a> Parser<'a> {
                             };
                         }
                         "size" => {
-                            // `size = window` (default) or `size = 1024x1024`
-                            // (parses as IntLit `1024` then ident `x1024` —
-                            // accept both `WxH` as a single identifier and
-                            // the bare `window` keyword).
-                            let s = self.expect_identifier()?;
-                            size = match s.as_str() {
-                                "window" => StorageTextureSize::SameAsWindow,
-                                other => {
-                                    if let Some((w, h)) = other.split_once('x') {
-                                        let w: u32 = w.parse().map_err(|_| {
-                                            err_parse!("storage_image size: expected WxH, got '{}'", other)
-                                        })?;
-                                        let h: u32 = h.parse().map_err(|_| {
-                                            err_parse!("storage_image size: expected WxH, got '{}'", other)
-                                        })?;
-                                        StorageTextureSize::Fixed { width: w, height: h }
-                                    } else {
-                                        bail_parse_at!(
-                                            self.current_span(),
-                                            "Unknown storage_image size: '{}'. Supported: window, WxH (e.g. 1024x1024)",
-                                            other
-                                        )
-                                    }
-                                }
-                            };
+                            size = self.parse_storage_texture_size()?;
                         }
                         _ => bail_parse_at!(
                             self.current_span(),
