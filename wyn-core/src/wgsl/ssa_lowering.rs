@@ -2196,6 +2196,14 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             }
                         };
                         Ok(format!("{}.{}", base_val, swizzle))
+                    } else if matches!(
+                        crate::types::get_array_variant(base_ty),
+                        Some(TypeName::ArrayVariantComposite)
+                    ) {
+                        // A Composite array is a WGSL `array<T, N>`: project by
+                        // subscript. (View/Bounded/Virtual variants are emitted
+                        // as structs, so they keep the `.fN` field access below.)
+                        Ok(format!("{}[{}]", base_val, index))
                     } else {
                         Ok(format!("{}.f{}", base_val, index))
                     }
