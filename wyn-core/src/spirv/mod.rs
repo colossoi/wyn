@@ -166,6 +166,11 @@ struct Constructor {
     /// IDs of all module-level constants (OpConstant, OpConstantTrue/False, OpConstantComposite, OpConstantNull).
     /// Used to decide whether a composite can be emitted as OpConstantComposite.
     constant_ids: HashSet<spirv::Word>,
+
+    /// Used by `polytype_to_spirv` when emitting `StorageTexture` for
+    /// a function signature; entry-var emission still overrides per-
+    /// binding. Set once in `lower_ssa_program_impl`.
+    storage_image_default_format: Option<crate::pipeline_descriptor::StorageImageFormat>,
 }
 
 impl Constructor {
@@ -230,6 +235,7 @@ impl Constructor {
             workgroup_vars: HashMap::new(),
             buffer_id_map: HashMap::new(),
             constant_ids: HashSet::new(),
+            storage_image_default_format: None,
         }
     }
 
@@ -478,14 +484,16 @@ impl Constructor {
                     }
                     TypeName::Sampler => self.builder.type_sampler(),
                     TypeName::StorageTexture => {
-                        // Placeholder. SPIR-V storage images must declare a
-                        // non-Unknown format on `OpTypeImage`, but the format
-                        // lives on the binding attribute (per-param), not on
-                        // the language-level type. The format-aware type is
-                        // built at the use site in `lower_ssa_entry_point`
-                        // (via `storage_image_binding`) and assigned to the
-                        // OpVariable directly; this placeholder is never
-                        // actually attached to a variable.
+                        // Use the program-wide default format (set in
+                        // `lower_ssa_program_impl`) so function signatures
+                        // match the entry-point variable's format-aware type.
+                        // None → fall back to Unknown; only happens when no
+                        // entry uses a storage_image, in which case nothing
+                        // reaches this type anyway.
+                        let format = self
+                            .storage_image_default_format
+                            .map(storage_image_format_to_spirv)
+                            .unwrap_or(spirv::ImageFormat::Unknown);
                         self.builder.type_image(
                             self.f32_type,
                             spirv::Dim::Dim2D,
@@ -493,7 +501,7 @@ impl Constructor {
                             0,
                             0,
                             2, // sampled=2 = storage image
-                            spirv::ImageFormat::Unknown,
+                            format,
                             None,
                         )
                     }
@@ -3427,6 +3435,30 @@ pub fn lower_ssa_program(program: &Program) -> Result<Vec<u32>> {
 
 fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
     let mut constructor = Constructor::new();
+
+    // Pin the program-wide `storage_image` format used by
+    // `polytype_to_spirv` for function-signature `StorageTexture`
+    // params. v1 requires a uniform format across entries; mixed
+    // formats need per-function monomorphization.
+    let mut formats: Vec<crate::pipeline_descriptor::StorageImageFormat> = Vec::new();
+    for entry in &program.entry_points {
+        for input in &entry.inputs {
+            if let Some((_, fmt, _, _)) = input.storage_image_binding {
+                if !formats.contains(&fmt) {
+                    formats.push(fmt);
+                }
+            }
+        }
+    }
+    if formats.len() > 1 {
+        return Err(crate::err_spirv!(
+            "spirv backend: multiple storage_image formats in one program ({:?}) — \
+             only uniform-format programs are supported until per-function \
+             monomorphization over format lands",
+            formats
+        ));
+    }
+    constructor.storage_image_default_format = formats.into_iter().next();
 
     // Collect entry point info for later
     let mut entry_info: Vec<(String, spirv::ExecutionModel, Option<(u32, u32, u32)>)> = Vec::new();
