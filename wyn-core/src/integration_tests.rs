@@ -404,9 +404,11 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::Program, stage: &str) {
                 walk_array_expr(input, bound, symbols, stage, def_name);
                 walk_lambda(&pred.lam, bound, symbols, stage, def_name);
             }
-            SoacOp::Scatter { indices, values, .. } => {
-                walk_array_expr(indices, bound, symbols, stage, def_name);
-                walk_array_expr(values, bound, symbols, stage, def_name);
+            SoacOp::Scatter { lam, inputs, .. } => {
+                for i in inputs {
+                    walk_array_expr(i, bound, symbols, stage, def_name);
+                }
+                walk_lambda(&lam.lam, bound, symbols, stage, def_name);
             }
             SoacOp::ReduceByIndex {
                 op,

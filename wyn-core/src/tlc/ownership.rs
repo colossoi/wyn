@@ -474,9 +474,11 @@ impl<'p> Builder<'p> {
                 }
                 self.visit_soac_body(pred);
             }
-            SoacOp::Scatter { indices, values, .. } => {
-                self.visit_array_expr(indices);
-                self.visit_array_expr(values);
+            SoacOp::Scatter { lam, inputs, .. } => {
+                self.visit_soac_body(lam);
+                for input in inputs {
+                    self.visit_array_expr(input);
+                }
             }
             SoacOp::ReduceByIndex {
                 op,
@@ -906,9 +908,12 @@ impl<'m> Liveness<'m> {
                 let after_pred = self.soac_envelope_fixed_point(pred, &per_call_defs, live_after);
                 self.analyze_array_expr(input, after_pred)
             }
-            SoacOp::Scatter { indices, values, .. } => {
-                let after_values = self.analyze_array_expr(values, live_after);
-                self.analyze_array_expr(indices, after_values)
+            SoacOp::Scatter { lam, inputs, .. } => {
+                let mut live = self.soac_envelope_fixed_point(lam, &per_call_defs, live_after);
+                for ae in inputs.iter().rev() {
+                    live = self.analyze_array_expr(ae, live);
+                }
+                live
             }
             SoacOp::ReduceByIndex {
                 op,

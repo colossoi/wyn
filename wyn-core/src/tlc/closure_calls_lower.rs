@@ -451,14 +451,17 @@ impl<'a> CallLowerer<'a> {
                 input: self.lower_array_expr(input),
                 destination,
             },
-            SoacOp::Scatter {
+            SoacOp::Scatter { dest, lam, inputs } => SoacOp::Scatter {
                 dest,
-                indices,
-                values,
-            } => SoacOp::Scatter {
-                dest,
-                indices: self.lower_array_expr(indices),
-                values: self.lower_array_expr(values),
+                lam: super::SoacBody {
+                    lam: lam.lam,
+                    captures: lam
+                        .captures
+                        .into_iter()
+                        .map(|(s, ty, t)| (s, ty, self.lower_term(t)))
+                        .collect(),
+                },
+                inputs: inputs.into_iter().map(|ae| self.lower_array_expr(ae)).collect(),
             },
             SoacOp::ReduceByIndex {
                 dest,

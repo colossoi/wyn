@@ -651,14 +651,10 @@ impl<'a> Monomorphizer<'a> {
                 input: self.process_array_expr(input),
                 destination: *destination,
             },
-            SoacOp::Scatter {
-                dest,
-                indices,
-                values,
-            } => SoacOp::Scatter {
+            SoacOp::Scatter { dest, lam, inputs } => SoacOp::Scatter {
                 dest: dest.clone(),
-                indices: self.process_array_expr(indices),
-                values: self.process_array_expr(values),
+                lam: self.process_soac_body(lam),
+                inputs: inputs.iter().map(|ae| self.process_array_expr(ae)).collect(),
             },
             SoacOp::ReduceByIndex {
                 dest,
@@ -1020,14 +1016,10 @@ impl<'a> Monomorphizer<'a> {
                 input: self.apply_subst_array_expr(input, subst),
                 destination: *destination,
             },
-            SoacOp::Scatter {
-                dest,
-                indices,
-                values,
-            } => SoacOp::Scatter {
+            SoacOp::Scatter { dest, lam, inputs } => SoacOp::Scatter {
                 dest: dest.clone(),
-                indices: self.apply_subst_array_expr(indices, subst),
-                values: self.apply_subst_array_expr(values, subst),
+                lam: self.apply_subst_soac_body(lam, subst),
+                inputs: inputs.iter().map(|ae| self.apply_subst_array_expr(ae, subst)).collect(),
             },
             SoacOp::ReduceByIndex {
                 dest,

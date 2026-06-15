@@ -371,14 +371,10 @@ pub(super) fn apply_type_subst_to_soac(
             input: apply_type_subst_to_array_expr(input, subst, term_ids),
             destination: *destination,
         },
-        SoacOp::Scatter {
-            dest,
-            indices,
-            values,
-        } => SoacOp::Scatter {
+        SoacOp::Scatter { dest, lam, inputs } => SoacOp::Scatter {
             dest: apply_type_subst_to_place(dest, subst, term_ids),
-            indices: apply_type_subst_to_array_expr(indices, subst, term_ids),
-            values: apply_type_subst_to_array_expr(values, subst, term_ids),
+            lam: apply_type_subst_to_soac_body(lam, subst, term_ids),
+            inputs: inputs.iter().map(|ae| apply_type_subst_to_array_expr(ae, subst, term_ids)).collect(),
         },
         SoacOp::ReduceByIndex {
             dest,
@@ -811,14 +807,13 @@ fn substitute_var_soac(
             input: substitute_var_array_expr(input, old_sym, new_sym, term_ids),
             destination: *destination,
         },
-        SoacOp::Scatter {
-            dest,
-            indices,
-            values,
-        } => SoacOp::Scatter {
+        SoacOp::Scatter { dest, lam, inputs } => SoacOp::Scatter {
             dest: dest.clone(),
-            indices: substitute_var_array_expr(indices, old_sym, new_sym, term_ids),
-            values: substitute_var_array_expr(values, old_sym, new_sym, term_ids),
+            lam: substitute_var_soac_body(lam, old_sym, new_sym, term_ids),
+            inputs: inputs
+                .iter()
+                .map(|ae| substitute_var_array_expr(ae, old_sym, new_sym, term_ids))
+                .collect(),
         },
         SoacOp::ReduceByIndex {
             dest,
@@ -1389,14 +1384,10 @@ impl<'a> HofSpecializer<'a> {
                 input,
                 destination,
             },
-            SoacOp::Scatter {
+            SoacOp::Scatter { dest, lam, inputs } => SoacOp::Scatter {
                 dest,
-                indices,
-                values,
-            } => SoacOp::Scatter {
-                dest,
-                indices,
-                values,
+                lam: self.cascade_specialize_soac_body(lam),
+                inputs,
             },
             SoacOp::ReduceByIndex {
                 dest,

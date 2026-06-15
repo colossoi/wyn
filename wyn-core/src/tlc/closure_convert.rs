@@ -375,9 +375,11 @@ pub fn collect_free_vars_soac(
             collect_free_vars_soac_body(pred, bound, top_level, known_defs, symbols, free, seen);
             collect_free_vars_array_expr(input, bound, top_level, known_defs, symbols, free, seen);
         }
-        SoacOp::Scatter { indices, values, .. } => {
-            collect_free_vars_array_expr(indices, bound, top_level, known_defs, symbols, free, seen);
-            collect_free_vars_array_expr(values, bound, top_level, known_defs, symbols, free, seen);
+        SoacOp::Scatter { lam, inputs, .. } => {
+            collect_free_vars_soac_body(lam, bound, top_level, known_defs, symbols, free, seen);
+            for input in inputs {
+                collect_free_vars_array_expr(input, bound, top_level, known_defs, symbols, free, seen);
+            }
         }
         SoacOp::ReduceByIndex {
             op,
@@ -1074,14 +1076,10 @@ impl<'a> ClosureConverter<'a> {
                 input: self.convert_array_expr(input, span),
                 destination,
             },
-            SoacOp::Scatter {
+            SoacOp::Scatter { dest, lam, inputs } => SoacOp::Scatter {
                 dest,
-                indices,
-                values,
-            } => SoacOp::Scatter {
-                dest,
-                indices: self.convert_array_expr(indices, span),
-                values: self.convert_array_expr(values, span),
+                lam: self.lift_soac_lambda(lam.lam, span),
+                inputs: inputs.into_iter().map(|ae| self.convert_array_expr(ae, span)).collect(),
             },
             SoacOp::ReduceByIndex {
                 dest,

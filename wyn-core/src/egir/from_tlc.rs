@@ -1735,11 +1735,7 @@ impl<'a> Converter<'a> {
                 input,
                 destination,
             } => self.convert_soac_filter(pred, input, *destination, ty),
-            SoacOp::Scatter {
-                dest,
-                indices,
-                values,
-            } => self.convert_soac_scatter(dest, indices, values, ty),
+            SoacOp::Scatter { dest, lam, inputs } => self.convert_soac_scatter(dest, lam, inputs, ty),
             // TODO(reduce_by_index): parallel path needs atomic-op emission
             // (atomicAdd/atomicMin/etc.) in spirv/wgsl backends — not yet wired.
             // Sequential lowering is straightforward (read-combine-write loop) but
@@ -1837,8 +1833,8 @@ impl<'a> Converter<'a> {
     fn convert_soac_scatter(
         &mut self,
         dest: &crate::tlc::Place,
-        indices: &ArrayExpr,
-        values: &ArrayExpr,
+        lam: &crate::tlc::SoacBody,
+        inputs: &[ArrayExpr],
         result_ty: Type<TypeName>,
     ) -> Result<NodeId, ConvertError> {
         let (dest_sym, dest_elem_ty) = match dest {
@@ -1855,20 +1851,41 @@ impl<'a> Converter<'a> {
             )
         })?;
 
-        let indices_nid = self.convert_array_expr_value(indices)?;
-        let values_nid = self.convert_array_expr_value(values)?;
-        let indices_arr_ty = self.value_array_type(indices_nid, indices);
-        let indices_elem_ty = self.value_elem_type(&indices_arr_ty, indices);
-        let values_arr_ty = self.value_array_type(values_nid, values);
-        let values_elem_ty = self.value_elem_type(&values_arr_ty, values);
+        // The envelope `(xs..) -> (index, value)` is a lifted function post-defunc.
+        let func = self.lambda_fn_name(&lam.lam)?;
+        let (index_type, value_type) = match &lam.lam.ret_ty {
+            Type::Constructed(TypeName::Tuple(2), args) => (args[0].clone(), args[1].clone()),
+            other => {
+                return Err(ConvertError::GraphError(format!(
+                    "scatter envelope must return a 2-tuple (index, value), got {other:?}"
+                )));
+            }
+        };
 
-        let operands: SmallVec<[NodeId; 4]> = smallvec![dest_view, indices_nid, values_nid];
+        let input_nids: Vec<NodeId> =
+            inputs.iter().map(|ae| self.convert_array_expr_value(ae)).collect::<Result<_, _>>()?;
+        let input_array_types: Vec<Type<TypeName>> =
+            inputs.iter().zip(input_nids.iter()).map(|(ae, nid)| self.value_array_type(*nid, ae)).collect();
+        let input_elem_types: Vec<Type<TypeName>> = input_array_types
+            .iter()
+            .zip(inputs.iter())
+            .map(|(ty, ae)| self.value_elem_type(ty, ae))
+            .collect();
+        let capture_nids: Vec<NodeId> =
+            lam.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
+
+        let mut operands: SmallVec<[NodeId; 4]> = smallvec![dest_view];
+        operands.extend_from_slice(&input_nids);
+        operands.extend_from_slice(&capture_nids);
 
         Ok(self.emit_soac(
             PendingSoac::Scatter {
-                indices_array_type: indices_arr_ty,
-                indices_elem_type: indices_elem_ty,
-                values_elem_type: values_elem_ty,
+                func,
+                input_array_types,
+                input_elem_types,
+                capture_count: capture_nids.len(),
+                index_type,
+                value_type,
                 dest_elem_type: dest_elem_ty,
             },
             operands,

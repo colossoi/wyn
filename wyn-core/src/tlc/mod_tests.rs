@@ -230,3 +230,71 @@ def use_it(y: i32) i32 = map(y)
         ),
     }
 }
+
+/// Walk a let-chain body to the first `scatter` SOAC.
+fn find_scatter(mut t: &Term) -> &SoacOp {
+    loop {
+        match &t.kind {
+            TermKind::Soac(op @ SoacOp::Scatter { .. }) => return op,
+            TermKind::Lambda(lam) => t = &lam.body,
+            TermKind::Let { rhs, body, .. } => {
+                if let TermKind::Soac(op @ SoacOp::Scatter { .. }) = &rhs.kind {
+                    return op;
+                }
+                t = body;
+            }
+            other => panic!("no scatter SOAC in body; got {other:?}"),
+        }
+    }
+}
+
+// `scatter(dest, is, vs)` lowers to a `Scatter` carrying the identity envelope
+// `λ(i, v) → (i, v)` over `inputs = [is, vs]`. Map→scatter fusion later composes
+// producers into this envelope, so its exact shape is load-bearing.
+#[test]
+fn plain_scatter_carries_identity_envelope() {
+    let program = compile_to_tlc_raw(
+        r#"
+def N:i32 = 5
+#[compute]
+entry rasterize(#[storage(set=2, binding=0, access=read)] positions: []vec4f32,
+                #[storage(set=2, binding=1, access=write)] fb: []vec4f32) () =
+  let pts  = positions[0..N] in
+  let idxs = map(|p:vec4f32| i32.f32(p.y) * 512 + i32.f32(p.x), pts) in
+  let vals = map(|p:vec4f32| @[1.0, 1.0, 1.0, 1.0], pts) in
+  let _ = scatter(fb, idxs, vals) in ()
+"#,
+    );
+    let body = find_def_body(&program, "rasterize");
+    let SoacOp::Scatter { lam, inputs, .. } = find_scatter(body) else {
+        unreachable!("find_scatter returns a Scatter")
+    };
+
+    // Two raw inputs: the index array and the value array.
+    assert_eq!(inputs.len(), 2, "plain scatter keeps [indices, values]");
+
+    // Identity envelope: two params, returning the 2-tuple of those same params.
+    assert_eq!(lam.lam.params.len(), 2, "envelope takes (i, v)");
+    assert!(lam.captures.is_empty(), "identity envelope captures nothing");
+    assert!(
+        matches!(&lam.lam.ret_ty, Type::Constructed(TypeName::Tuple(2), _)),
+        "envelope returns a 2-tuple, got {:?}",
+        lam.lam.ret_ty
+    );
+    let i_sym = lam.lam.params[0].0;
+    let v_sym = lam.lam.params[1].0;
+    match &lam.lam.body.kind {
+        TermKind::Tuple(parts) => {
+            assert_eq!(parts.len(), 2, "body is the pair (i, v)");
+            assert!(
+                matches!(&parts[0].kind, TermKind::Var(VarRef::Symbol(s)) if *s == i_sym),
+                "tuple slot 0 is the index param"
+            );
+            assert!(
+                matches!(&parts[1].kind, TermKind::Var(VarRef::Symbol(s)) if *s == v_sym),
+                "tuple slot 1 is the value param"
+            );
+        }
+        other => panic!("identity envelope body must be a 2-tuple, got {other:?}"),
+    }
+}

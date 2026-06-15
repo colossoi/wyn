@@ -102,11 +102,11 @@ fn is_handleable_soac(kind: &SideEffectKind) -> bool {
             input_array_types, ..
         } => input_array_types.iter().all(is_plain_array_source),
         PendingSoac::Filter { input_array_type, .. } => is_plain_array_source(input_array_type),
-        // Scatter reads its indices/values arrays per element; any plain array
-        // source works for the read path.
+        // Scatter reads its input arrays per element; any plain array source
+        // works for the read path. Loop length comes from the first input.
         PendingSoac::Scatter {
-            indices_array_type, ..
-        } => is_plain_array_source(indices_array_type),
+            input_array_types, ..
+        } => input_array_types.first().is_some_and(is_plain_array_source),
         // Peel the wrapper and re-check; the inner SOAC's source rules apply.
         PendingSoac::Parallel { serial } => {
             is_handleable_soac(&SideEffectKind::Pending((**serial).clone()))
@@ -649,21 +649,27 @@ fn expand_one(
             );
         }
         SideEffectKind::Pending(PendingSoac::Scatter {
-            indices_array_type,
-            indices_elem_type,
-            values_elem_type,
+            func,
+            input_array_types,
+            input_elem_types,
+            capture_count,
+            index_type,
+            value_type,
             dest_elem_type,
         }) => {
-            let indices_arr_ty = indices_array_type.clone();
-            let indices_elem_ty = indices_elem_type.clone();
-            let values_elem_ty = values_elem_type.clone();
-            let dest_elem_ty = dest_elem_type.clone();
-
-            // Operands: [dest_view, indices, values].
+            // Operands: [dest_view, inputs.., captures..].
             let dest_view = se.operand_nodes[0];
-            let indices_nid = se.operand_nodes[1];
-            let values_nid = se.operand_nodes[2];
-            let values_arr_ty = graph.types[&values_nid].clone();
+            let n_inputs = input_array_types.len();
+            let input_nids = &se.operand_nodes[1..1 + n_inputs];
+            let captures: Vec<NodeId> =
+                se.operand_nodes[1 + n_inputs..1 + n_inputs + capture_count].to_vec();
+            let read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)> = input_nids
+                .iter()
+                .zip(input_array_types.iter())
+                .zip(input_elem_types.iter())
+                .map(|((nid, arr_ty), elem_ty)| (*nid, arr_ty.clone(), elem_ty.clone()))
+                .collect();
+            let len_input = (input_nids[0], input_array_types[0].clone());
             let result_nid = se.result.expect("Scatter has a result");
 
             build_scatter_loop(
@@ -673,13 +679,13 @@ fn expand_one(
                 idx,
                 ScatterLoop {
                     dest_view,
-                    dest_elem_ty,
-                    indices_nid,
-                    indices_arr_ty,
-                    indices_elem_ty,
-                    values_nid,
-                    values_arr_ty,
-                    values_elem_ty,
+                    dest_elem_ty: dest_elem_type.clone(),
+                    func: func.clone(),
+                    read_inputs,
+                    captures,
+                    index_type: index_type.clone(),
+                    value_type: value_type.clone(),
+                    len_input,
                     result_node: result_nid,
                 },
                 next_effect,
@@ -1478,16 +1484,20 @@ fn build_filter_loop(
 /// over the buffer — its type (set by `convert_soac_filter`) already carries
 /// `Region(scratch_out)`, so the backend recovers the descriptor from the type.
 /// All offsets/lengths are `u32` to match the view `{offset, len}` convention.
-/// Inputs for a sequential `scatter` expansion.
+/// Inputs for a sequential `scatter` expansion. The per-element envelope
+/// `func` maps the read input elements (plus captures) to an `(index, value)`
+/// pair; the loop projects the pair and writes `dest[index] = value`.
 struct ScatterLoop {
     dest_view: NodeId,
     dest_elem_ty: Type<TypeName>,
-    indices_nid: NodeId,
-    indices_arr_ty: Type<TypeName>,
-    indices_elem_ty: Type<TypeName>,
-    values_nid: NodeId,
-    values_arr_ty: Type<TypeName>,
-    values_elem_ty: Type<TypeName>,
+    func: String,
+    /// `(array_nid, array_type, elem_type)` per input, read per iteration.
+    read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)>,
+    captures: Vec<NodeId>,
+    index_type: Type<TypeName>,
+    value_type: Type<TypeName>,
+    /// Loop bound source — the first input `(nid, array_type)`.
+    len_input: (NodeId, Type<TypeName>),
     result_node: NodeId,
 }
 
@@ -1509,16 +1519,15 @@ fn build_scatter_loop(
     let ScatterLoop {
         dest_view,
         dest_elem_ty,
-        indices_nid,
-        indices_arr_ty,
-        indices_elem_ty,
-        values_nid,
-        values_arr_ty,
-        values_elem_ty,
+        func,
+        read_inputs,
+        captures,
+        index_type,
+        value_type,
+        len_input,
         result_node,
     } = spec;
 
-    let len_input = (indices_nid, indices_arr_ty.clone());
     let result = ResultBinding::DummyBool { result_node };
 
     expand_loop(
@@ -1532,23 +1541,25 @@ fn build_scatter_loop(
         next_effect,
         true,
         move |graph, next_effect, blk, i_nid, _carried| {
-            let scatter_idx = emit_read_element(
-                graph,
-                blk,
-                indices_nid,
-                i_nid,
-                &indices_arr_ty,
-                &indices_elem_ty,
-                next_effect,
+            // (index, value) = func(inputs[i].., ..captures)
+            let mut call_operands: smallvec::SmallVec<[NodeId; 4]> = SmallVec::new();
+            for (arr, arr_ty, elem_ty) in &read_inputs {
+                let elem = emit_read_element(graph, blk, *arr, i_nid, arr_ty, elem_ty, next_effect);
+                call_operands.push(elem);
+            }
+            call_operands.extend(captures.iter().copied());
+            let pair_ty =
+                Type::Constructed(TypeName::Tuple(2), vec![index_type.clone(), value_type.clone()]);
+            let pair_nid = graph.intern_pure(PureOp::Call(func.clone()), call_operands, pair_ty);
+            let scatter_idx = graph.intern_pure(
+                PureOp::Project { index: 0 },
+                smallvec![pair_nid],
+                index_type.clone(),
             );
-            let val = emit_read_element(
-                graph,
-                blk,
-                values_nid,
-                i_nid,
-                &values_arr_ty,
-                &values_elem_ty,
-                next_effect,
+            let val = graph.intern_pure(
+                PureOp::Project { index: 1 },
+                smallvec![pair_nid],
+                value_type.clone(),
             );
             emit_storage_store(
                 graph,

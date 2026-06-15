@@ -366,9 +366,11 @@ fn subst_soac(soac: &mut SoacOp, s: &RegionSubst) {
             subst_soac_body(pred, s);
             subst_array_expr(input, s);
         }
-        SoacOp::Scatter { indices, values, .. } => {
-            subst_array_expr(indices, s);
-            subst_array_expr(values, s);
+        SoacOp::Scatter { lam, inputs, .. } => {
+            subst_soac_body(lam, s);
+            for input in inputs {
+                subst_array_expr(input, s);
+            }
         }
         SoacOp::ReduceByIndex {
             op,

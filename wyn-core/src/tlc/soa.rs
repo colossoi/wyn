@@ -678,18 +678,15 @@ impl SoaTransformer {
                     destination: *destination,
                 }
             }
-            SoacOp::Scatter {
-                dest,
-                indices,
-                values,
-            } => {
+            SoacOp::Scatter { dest, lam, inputs } => {
                 let new_dest = self.transform_place(dest);
-                let new_indices = self.transform_array_expr(indices);
-                let new_values = self.transform_array_expr(values);
+                let new_lam = self.transform_soac_body(lam);
+                let new_inputs: Vec<ArrayExpr> =
+                    inputs.iter().map(|ae| self.transform_array_expr(ae)).collect();
                 SoacOp::Scatter {
                     dest: new_dest,
-                    indices: new_indices,
-                    values: new_values,
+                    lam: new_lam,
+                    inputs: new_inputs,
                 }
             }
             SoacOp::ReduceByIndex {

@@ -51,11 +51,13 @@ pub enum ArraySemantics {
         pred: SoacBody,
     },
 
-    /// Scatter: dest[indices[i]] = values[i] — indexed writes.
+    /// Scatter: over `inputs`, `lam` yields `(index, value)` per element,
+    /// written as `dest[index] = value`. Carries the full `dest`/`lam` so a
+    /// `MapIntoScatter` fusion can rebuild the `Scatter` SOAC from semantics.
     ScatterOp {
-        dest: PlaceSource,
-        indices: ArrayExpr,
-        values: ArrayExpr,
+        dest: Place,
+        lam: SoacBody,
+        inputs: Vec<ArrayExpr>,
     },
 
     /// Histogram-style: dest[indices[i]] = op(dest[indices[i]], values[i]).
@@ -134,7 +136,7 @@ impl ArraySemantics {
             ArraySemantics::Reduction { input, .. } => vec![input],
             ArraySemantics::PrefixScan { input, .. } => vec![input],
             ArraySemantics::Filter { input, .. } => vec![input],
-            ArraySemantics::ScatterOp { indices, values, .. } => vec![indices, values],
+            ArraySemantics::ScatterOp { inputs, .. } => inputs.iter().collect(),
             ArraySemantics::IndexedReduction { indices, values, .. } => vec![indices, values],
             ArraySemantics::Literal(_)
             | ArraySemantics::Range { .. }
@@ -157,6 +159,11 @@ pub enum FusionKind {
     MapIntoReduce,
     /// Compose map into scan: scan(op, ne, map(f, a)) → scan(op∘f, ne, a)
     MapIntoScan,
+    /// Compose a map producer into a scatter's envelope at the fused input slot:
+    /// `scatter(g, dest, map(f, a), vs)` → `scatter(g∘f at slot, dest, a, vs)`.
+    /// The producer's outputs must be fully consumed (scatter has no
+    /// pass-through results), which the single-use edge filter guarantees.
+    MapIntoScatter,
     /// Inline a range into an elementwise consumer
     RangeIntoMap,
     /// Fuse a filter into a reduce: `reduce(op, ne, filter(p, a))` →
@@ -182,6 +189,12 @@ pub fn can_fuse(producer: &ArraySemantics, consumer: &ArraySemantics) -> FusionK
 
         // Elementwise → PrefixScan: compose map into scan body
         (ArraySemantics::Elementwise { .. }, ArraySemantics::PrefixScan { .. }) => FusionKind::MapIntoScan,
+
+        // Elementwise → ScatterOp: compose map into the scatter envelope at the
+        // fused input slot (Futhark thesis §7.3.1 map-scatter rule).
+        (ArraySemantics::Elementwise { .. }, ArraySemantics::ScatterOp { .. }) => {
+            FusionKind::MapIntoScatter
+        }
 
         // Range → Elementwise: inline range into map body
         (ArraySemantics::Range { .. }, ArraySemantics::Elementwise { .. }) => FusionKind::RangeIntoMap,
@@ -377,14 +390,10 @@ pub fn classify_soac(soac: &SoacOp) -> ArraySemantics {
             input: input.clone(),
             pred: pred.clone(),
         },
-        SoacOp::Scatter {
-            dest,
-            indices,
-            values,
-        } => ArraySemantics::ScatterOp {
-            dest: classify_place(dest),
-            indices: indices.clone(),
-            values: values.clone(),
+        SoacOp::Scatter { dest, lam, inputs } => ArraySemantics::ScatterOp {
+            dest: dest.clone(),
+            lam: lam.clone(),
+            inputs: inputs.clone(),
         },
         SoacOp::ReduceByIndex {
             dest,

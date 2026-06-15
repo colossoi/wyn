@@ -423,14 +423,10 @@ impl RepSpecializer {
                 input: self.rewrite_array_expr(input),
                 destination,
             },
-            SoacOp::Scatter {
+            SoacOp::Scatter { dest, lam, inputs } => SoacOp::Scatter {
                 dest,
-                indices,
-                values,
-            } => SoacOp::Scatter {
-                dest,
-                indices: self.rewrite_array_expr(indices),
-                values: self.rewrite_array_expr(values),
+                lam: self.rewrite_soac_body(lam),
+                inputs: inputs.into_iter().map(|ae| self.rewrite_array_expr(ae)).collect(),
             },
             SoacOp::ReduceByIndex {
                 dest,

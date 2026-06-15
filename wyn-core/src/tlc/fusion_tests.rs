@@ -1823,3 +1823,270 @@ fn test_raytrace_step5_globals_pattern_fused() {
         other => panic!("Expected fused Redomap, got {:?}", other),
     }
 }
+
+// -------------------------------------------------------------------------
+// Test: let idxs = map(f, pts) in scatter(fb, idxs, vals)
+//   → scatter(fb, pts, vals), f composed into the envelope's index slot.
+// -------------------------------------------------------------------------
+#[test]
+fn test_map_into_scatter_fuses() {
+    let mut symbols = SymbolTable::default();
+    let mut term_ids = TermIdSource::new();
+
+    let pts_sym = symbols.alloc("pts".to_string());
+    let idxs_sym = symbols.alloc("idxs".to_string());
+    let vals_sym = symbols.alloc("vals".to_string());
+    let fb_sym = symbols.alloc("fb".to_string());
+    let x_sym = symbols.alloc("x".to_string()); // f's param
+    let i_sym = symbols.alloc("i".to_string()); // envelope index param
+    let v_sym = symbols.alloc("v".to_string()); // envelope value param
+
+    // f: i32 → i32 (returns x); producer map(f, pts).
+    let f_body = mk_term(TermKind::Var(VarRef::Symbol(x_sym)), i32_ty(), &mut term_ids);
+    let f = mk_lambda1(x_sym, i32_ty(), f_body, i32_ty());
+    let pts = mk_term(
+        TermKind::Var(VarRef::Symbol(pts_sym)),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let producer = mk_map(f, pts, array_ty(i32_ty()), &mut term_ids);
+
+    // Identity envelope λ(i, v) → (i, v).
+    let i_var = mk_term(TermKind::Var(VarRef::Symbol(i_sym)), i32_ty(), &mut term_ids);
+    let v_var = mk_term(TermKind::Var(VarRef::Symbol(v_sym)), i32_ty(), &mut term_ids);
+    let tup_ty = Type::Constructed(TypeName::Tuple(2), vec![i32_ty(), i32_ty()]);
+    let env_body = mk_term(TermKind::Tuple(vec![i_var, v_var]), tup_ty.clone(), &mut term_ids);
+    let env = mk_lambda2(i_sym, i32_ty(), v_sym, i32_ty(), env_body, tup_ty);
+
+    // scatter(fb, idxs, vals).
+    let idxs_ref = mk_term(
+        TermKind::Var(VarRef::Symbol(idxs_sym)),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let vals_ref = mk_term(
+        TermKind::Var(VarRef::Symbol(vals_sym)),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let scatter = mk_term(
+        TermKind::Soac(SoacOp::Scatter {
+            dest: crate::tlc::Place::LocalArray {
+                id: fb_sym,
+                shape: crate::tlc::Shape(vec![]),
+                elem_ty: i32_ty(),
+            },
+            lam: mk_soac_body(env),
+            inputs: vec![
+                ArrayExpr::Ref(Box::new(idxs_ref)),
+                ArrayExpr::Ref(Box::new(vals_ref)),
+            ],
+        }),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+
+    let body = mk_term(
+        TermKind::Let {
+            name: idxs_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(producer),
+            body: Box::new(scatter),
+        },
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+
+    let program = Program {
+        defs: vec![Def {
+            name: symbols.alloc("main".to_string()),
+            ty: array_ty(i32_ty()),
+            body,
+            meta: DefMeta::Function,
+            arity: 0,
+        }],
+        symbols,
+        def_syms: HashMap::new(),
+    };
+
+    let fused = run(program);
+
+    match &fused.defs[0].body.kind {
+        TermKind::Soac(SoacOp::Scatter { lam, inputs, .. }) => {
+            // Slot 0 input is now `pts`; slot 1 stays `vals`.
+            assert_eq!(inputs.len(), 2);
+            assert!(
+                matches!(&inputs[0], ArrayExpr::Ref(t)
+                    if matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == pts_sym)),
+                "index slot input should be pts, got {:?}",
+                inputs[0]
+            );
+            assert!(
+                matches!(&inputs[1], ArrayExpr::Ref(t)
+                    if matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == vals_sym)),
+                "value slot input should stay vals, got {:?}",
+                inputs[1]
+            );
+
+            // f's param replaces the index slot; the value param stays.
+            assert_eq!(lam.lam.params.len(), 2);
+            assert_eq!(lam.lam.params[0].0, x_sym);
+            assert_eq!(lam.lam.params[1].0, v_sym);
+
+            // Body: let _fused = x in (_fused, v).
+            match &lam.lam.body.kind {
+                TermKind::Let { rhs, body, .. } => {
+                    assert!(matches!(&rhs.kind, TermKind::Var(VarRef::Symbol(s)) if *s == x_sym));
+                    match &body.kind {
+                        TermKind::Tuple(parts) => {
+                            assert_eq!(parts.len(), 2);
+                            assert!(
+                                matches!(&parts[1].kind, TermKind::Var(VarRef::Symbol(s)) if *s == v_sym),
+                                "tuple value slot should still be v"
+                            );
+                        }
+                        other => panic!("expected tuple body, got {other:?}"),
+                    }
+                }
+                other => panic!("expected composed Let body, got {other:?}"),
+            }
+        }
+        other => panic!("expected a single fused Scatter, got {:?}", other),
+    }
+}
+
+// -------------------------------------------------------------------------
+// Test (particles shape): both the index and value arrays are maps over the
+// same base. Both compose into the envelope, and the shared base is deduped to
+// a single input slot — the scatter reads `pts` once, computing both channels.
+// -------------------------------------------------------------------------
+#[test]
+fn test_map_scatter_both_producers_fuse() {
+    let mut symbols = SymbolTable::default();
+    let mut term_ids = TermIdSource::new();
+
+    let pts_sym = symbols.alloc("pts".to_string());
+    let idxs_sym = symbols.alloc("idxs".to_string());
+    let vals_sym = symbols.alloc("vals".to_string());
+    let fb_sym = symbols.alloc("fb".to_string());
+    let x_sym = symbols.alloc("x".to_string()); // f's param (index producer)
+    let y_sym = symbols.alloc("y".to_string()); // g's param (value producer)
+    let i_sym = symbols.alloc("i".to_string());
+    let v_sym = symbols.alloc("v".to_string());
+
+    let mk_pts = |term_ids: &mut TermIdSource| {
+        mk_term(
+            TermKind::Var(VarRef::Symbol(pts_sym)),
+            array_ty(i32_ty()),
+            term_ids,
+        )
+    };
+
+    // idxs = map(f, pts), vals = map(g, pts).
+    let f_body = mk_term(TermKind::Var(VarRef::Symbol(x_sym)), i32_ty(), &mut term_ids);
+    let f = mk_lambda1(x_sym, i32_ty(), f_body, i32_ty());
+    let idxs_producer = mk_map(f, mk_pts(&mut term_ids), array_ty(i32_ty()), &mut term_ids);
+
+    let g_body = mk_term(TermKind::Var(VarRef::Symbol(y_sym)), i32_ty(), &mut term_ids);
+    let g = mk_lambda1(y_sym, i32_ty(), g_body, i32_ty());
+    let vals_producer = mk_map(g, mk_pts(&mut term_ids), array_ty(i32_ty()), &mut term_ids);
+
+    // Identity envelope λ(i, v) → (i, v).
+    let i_var = mk_term(TermKind::Var(VarRef::Symbol(i_sym)), i32_ty(), &mut term_ids);
+    let v_var = mk_term(TermKind::Var(VarRef::Symbol(v_sym)), i32_ty(), &mut term_ids);
+    let tup_ty = Type::Constructed(TypeName::Tuple(2), vec![i32_ty(), i32_ty()]);
+    let env_body = mk_term(TermKind::Tuple(vec![i_var, v_var]), tup_ty.clone(), &mut term_ids);
+    let env = mk_lambda2(i_sym, i32_ty(), v_sym, i32_ty(), env_body, tup_ty);
+
+    let idxs_ref = mk_term(
+        TermKind::Var(VarRef::Symbol(idxs_sym)),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let vals_ref = mk_term(
+        TermKind::Var(VarRef::Symbol(vals_sym)),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let scatter = mk_term(
+        TermKind::Soac(SoacOp::Scatter {
+            dest: crate::tlc::Place::LocalArray {
+                id: fb_sym,
+                shape: crate::tlc::Shape(vec![]),
+                elem_ty: i32_ty(),
+            },
+            lam: mk_soac_body(env),
+            inputs: vec![
+                ArrayExpr::Ref(Box::new(idxs_ref)),
+                ArrayExpr::Ref(Box::new(vals_ref)),
+            ],
+        }),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+
+    // let idxs = map(f, pts) in let vals = map(g, pts) in scatter(fb, idxs, vals)
+    let inner_let = mk_term(
+        TermKind::Let {
+            name: vals_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(vals_producer),
+            body: Box::new(scatter),
+        },
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let body = mk_term(
+        TermKind::Let {
+            name: idxs_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(idxs_producer),
+            body: Box::new(inner_let),
+        },
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+
+    let program = Program {
+        defs: vec![Def {
+            name: symbols.alloc("main".to_string()),
+            ty: array_ty(i32_ty()),
+            body,
+            meta: DefMeta::Function,
+            arity: 0,
+        }],
+        symbols,
+        def_syms: HashMap::new(),
+    };
+
+    let fused = run(program);
+
+    match &fused.defs[0].body.kind {
+        TermKind::Soac(SoacOp::Scatter { lam, inputs, .. }) => {
+            // Both producers fused away (no `idxs`/`vals` Let bindings), and the
+            // shared base is deduped to a SINGLE input slot — pts read once.
+            assert_eq!(inputs.len(), 1, "duplicate pts slots collapse to one");
+            assert!(
+                matches!(&inputs[0], ArrayExpr::Ref(t)
+                    if matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == pts_sym)),
+                "the one input slot reads pts, got {:?}",
+                inputs[0]
+            );
+            // One param feeds both channels; g's param was rewritten to f's by
+            // the dedup, so x_sym is kept.
+            assert_eq!(lam.lam.params.len(), 1, "one param after dedup");
+            assert_eq!(lam.lam.params[0].0, x_sym);
+            // Two composed Lets (index then value) nest around the result tuple.
+            match &lam.lam.body.kind {
+                TermKind::Let { body: outer_body, .. } => {
+                    assert!(
+                        matches!(&outer_body.kind, TermKind::Let { .. }),
+                        "expected two nested composed Lets"
+                    );
+                }
+                other => panic!("expected nested composed Lets, got {other:?}"),
+            }
+        }
+        other => panic!("expected a single fused Scatter, got {:?}", other),
+    }
+}

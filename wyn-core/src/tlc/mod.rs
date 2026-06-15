@@ -617,13 +617,15 @@ pub enum SoacOp {
         /// it); `Fresh` otherwise.
         destination: SoacDestination,
     },
-    // TODO(scatter): no producer in to_tlc yet. EGIR rejects this variant
-    // (`egir::from_tlc::convert_soac`). Kept so the SoacOp enum carries the
-    // place-passing SOAC shape — useful once Scatter is implemented.
+    /// Indexed writes into `dest`: over the parallel `inputs`, `lam` yields an
+    /// `(index, value)` pair per element, written as `dest[index] = value`.
+    /// Plain `scatter(dest, is, vs)` carries the identity envelope
+    /// `lam = λ(i, v) → (i, v)` with `inputs = [is, vs]`; map→scatter fusion
+    /// composes a producer's lambda into `lam` and splices its inputs in.
     Scatter {
         dest: Place,
-        indices: ArrayExpr,
-        values: ArrayExpr,
+        lam: SoacBody,
+        inputs: Vec<ArrayExpr>,
     },
     // TODO(reduce_by_index): produced by to_tlc but EGIR rejects
     // (`egir::from_tlc::convert_soac`). Sequential lowering would be a
@@ -1016,14 +1018,12 @@ where
             visit_soac_body_children(pred, f);
             visit_array_expr_children(input, f);
         }
-        SoacOp::Scatter {
-            dest,
-            indices,
-            values,
-        } => {
+        SoacOp::Scatter { dest, lam, inputs } => {
             visit_place_children(dest, f);
-            visit_array_expr_children(indices, f);
-            visit_array_expr_children(values, f);
+            visit_soac_body_children(lam, f);
+            for input in inputs {
+                visit_array_expr_children(input, f);
+            }
         }
         SoacOp::ReduceByIndex {
             dest,
@@ -1172,14 +1172,10 @@ where
             input: map_array_expr_children(input, f),
             destination,
         },
-        SoacOp::Scatter {
-            dest,
-            indices,
-            values,
-        } => SoacOp::Scatter {
+        SoacOp::Scatter { dest, lam, inputs } => SoacOp::Scatter {
             dest: map_place_children(dest, f),
-            indices: map_array_expr_children(indices, f),
-            values: map_array_expr_children(values, f),
+            lam: map_soac_body_children(lam, f),
+            inputs: inputs.into_iter().map(|ae| map_array_expr_children(ae, f)).collect(),
         },
         SoacOp::ReduceByIndex {
             dest,
@@ -2511,6 +2507,8 @@ impl<'a> Transformer<'a> {
         let values_term = self.transform_expr(&args[2]);
 
         let dest_elem_ty = self.get_array_element_type(&dest_term.ty);
+        let idx_elem_ty = self.get_array_element_type(&indices_term.ty);
+        let val_elem_ty = self.get_array_element_type(&values_term.ty);
         let dest = Place::LocalArray {
             id: match &dest_term.kind {
                 TermKind::Var(VarRef::Symbol(sym)) => *sym,
@@ -2520,13 +2518,34 @@ impl<'a> Transformer<'a> {
             elem_ty: dest_elem_ty,
         };
 
+        // Identity envelope `λ(i, v) → (i, v)`. Fusion composes producer
+        // lambdas into this and splices their inputs in place of `is`/`vs`.
+        let i_sym = self.define("_w_scatter_i");
+        let v_sym = self.define("_w_scatter_v");
+        let i_var = self.mk_term(idx_elem_ty.clone(), span, TermKind::Var(VarRef::Symbol(i_sym)));
+        let v_var = self.mk_term(val_elem_ty.clone(), span, TermKind::Var(VarRef::Symbol(v_sym)));
+        let tuple_ty =
+            Type::Constructed(TypeName::Tuple(2), vec![idx_elem_ty.clone(), val_elem_ty.clone()]);
+        let body = self.mk_tuple(vec![i_var, v_var], tuple_ty.clone(), span);
+        let lam = SoacBody {
+            lam: Lambda {
+                params: vec![(i_sym, idx_elem_ty), (v_sym, val_elem_ty)],
+                body: Box::new(body),
+                ret_ty: tuple_ty,
+            },
+            captures: vec![],
+        };
+
         self.mk_term(
             ty,
             span,
             TermKind::Soac(SoacOp::Scatter {
                 dest,
-                indices: ArrayExpr::Ref(Box::new(indices_term)),
-                values: ArrayExpr::Ref(Box::new(values_term)),
+                lam,
+                inputs: vec![
+                    ArrayExpr::Ref(Box::new(indices_term)),
+                    ArrayExpr::Ref(Box::new(values_term)),
+                ],
             }),
         )
     }

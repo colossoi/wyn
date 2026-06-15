@@ -3408,7 +3408,12 @@ fn collect_bindings_in_soac(op: &SoacOp, used: &mut HashSet<BindingRef>) {
         SoacOp::Reduce { input, .. } | SoacOp::Scan { input, .. } | SoacOp::Filter { input, .. } => {
             collect_bindings_in_ae(input, used);
         }
-        SoacOp::Scatter { indices, values, .. } | SoacOp::ReduceByIndex { indices, values, .. } => {
+        SoacOp::Scatter { inputs, .. } => {
+            for ae in inputs {
+                collect_bindings_in_ae(ae, used);
+            }
+        }
+        SoacOp::ReduceByIndex { indices, values, .. } => {
             collect_bindings_in_ae(indices, used);
             collect_bindings_in_ae(values, used);
         }

@@ -199,6 +199,7 @@ fn fuse_def_body(
         &producer.semantics,
         &consumer.semantics,
         &fusion_kind,
+        edge.input_index,
         consumer.ty.clone(),
         inner.span,
         symbols,
@@ -247,6 +248,7 @@ fn build_fused_from_semantics(
     producer: &ArraySemantics,
     consumer: &ArraySemantics,
     fusion_kind: &FusionKind,
+    input_index: usize,
     consumer_ty: Type<TypeName>,
     span: Span,
     symbols: &mut SymbolTable,
@@ -377,6 +379,48 @@ fn build_fused_from_semantics(
                     // Fusion runs before apply_ownership; ownership pass
                     // will (re-)decide destination on this fused Scan.
                     destination: SoacDestination::Fresh,
+                }),
+            })
+        }
+
+        (
+            FusionKind::MapIntoScatter,
+            ArraySemantics::ScatterOp {
+                dest,
+                lam: env,
+                inputs: scatter_inputs,
+            },
+        ) => {
+            // Compose the producer `f` into the scatter envelope at the fused
+            // slot and splice the producer's inputs in place of the
+            // materialized array (Futhark thesis §7.3.1:
+            // `h = λx y → let y = f x in g y`).
+            let composed = compose_map_into_envelope(
+                prod_lam.clone(),
+                env.lam.clone(),
+                input_index,
+                span,
+                symbols,
+                term_ids,
+            );
+            let mut new_inputs = scatter_inputs.clone();
+            new_inputs.splice(input_index..=input_index, input_exprs.iter().cloned());
+            // Horizontal-fusion dedup: when the index and value producers shared
+            // a base (the particles shape), the splice leaves two slots reading
+            // the same array. Collapse them to one read — the operational form of
+            // Futhark's "compute the shared input once".
+            let (composed, new_inputs) = dedup_envelope_inputs(composed, new_inputs, term_ids);
+            Some(Term {
+                id: term_ids.next_id(),
+                ty: consumer_ty,
+                span,
+                kind: TermKind::Soac(SoacOp::Scatter {
+                    dest: dest.clone(),
+                    lam: super::SoacBody {
+                        lam: composed,
+                        captures: vec![],
+                    },
+                    inputs: new_inputs,
                 }),
             })
         }
@@ -768,6 +812,82 @@ fn compose_map_reduce(
         body: Box::new(composed_body),
         ret_ty: reduce_op.ret_ty,
     }
+}
+
+/// Compose a map producer into a scatter envelope at one input slot.
+/// `producer: (q…) → B` feeds envelope param `slot` (type `B`). The result
+/// takes the producer's params in that slot's place and binds the original
+/// slot param to the producer's body ahead of the envelope body:
+/// `λ(…, q…, …) → let p_slot = producer_body in envelope_body`.
+fn compose_map_into_envelope(
+    producer: Lambda,
+    envelope: Lambda,
+    slot: usize,
+    span: Span,
+    symbols: &mut SymbolTable,
+    term_ids: &mut TermIdSource,
+) -> Lambda {
+    let fresh_sym = symbols.alloc("_fused".to_string());
+    let slot_param = envelope.params[slot].0;
+    let slot_ty = envelope.params[slot].1.clone();
+    let env_body_substituted = substitute_sym(*envelope.body, slot_param, fresh_sym, term_ids);
+
+    let composed_body = Term {
+        id: term_ids.next_id(),
+        ty: envelope.ret_ty.clone(),
+        span,
+        kind: TermKind::Let {
+            name: fresh_sym,
+            name_ty: slot_ty,
+            rhs: producer.body,
+            body: Box::new(env_body_substituted),
+        },
+    };
+
+    // Envelope params with the fused slot replaced by the producer's params.
+    let mut params = envelope.params.clone();
+    params.splice(slot..=slot, producer.params.iter().cloned());
+
+    Lambda {
+        params,
+        body: Box::new(composed_body),
+        ret_ty: envelope.ret_ty,
+    }
+}
+
+/// Collapse envelope input slots that read the same named array into one.
+/// `inputs[i]` lines up with `lam.params[i]`; when a later slot names an array
+/// an earlier kept slot already reads, drop it and rewrite its param to the
+/// kept one. This is horizontal fusion specialised to one consumer's slots:
+/// the shared base is read once rather than per channel.
+fn dedup_envelope_inputs(
+    lam: Lambda,
+    inputs: Vec<ArrayExpr>,
+    term_ids: &mut TermIdSource,
+) -> (Lambda, Vec<ArrayExpr>) {
+    let mut kept_inputs: Vec<ArrayExpr> = Vec::new();
+    let mut kept_params: Vec<(SymbolId, Type<TypeName>)> = Vec::new();
+    let mut body = *lam.body;
+
+    for (ae, param) in inputs.into_iter().zip(lam.params.into_iter()) {
+        if let Some(sym) = ae.as_named_ref() {
+            if let Some(pos) = kept_inputs.iter().position(|k| k.as_named_ref() == Some(sym)) {
+                body = substitute_sym(body, param.0, kept_params[pos].0, term_ids);
+                continue;
+            }
+        }
+        kept_inputs.push(ae);
+        kept_params.push(param);
+    }
+
+    (
+        Lambda {
+            params: kept_params,
+            body: Box::new(body),
+            ret_ty: lam.ret_ty,
+        },
+        kept_inputs,
+    )
 }
 
 // =============================================================================

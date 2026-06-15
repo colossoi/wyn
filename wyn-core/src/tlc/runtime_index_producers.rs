@@ -333,20 +333,22 @@ fn float_soac(
                 },
             )
         }
-        SoacOp::Scatter {
-            dest,
-            indices,
-            values,
-        } => {
-            let (mut floats, indices) = float_array_expr(indices, blocked, ids, symbols);
-            let (mut value_floats, values) = float_array_expr(values, blocked, ids, symbols);
-            floats.append(&mut value_floats);
+        SoacOp::Scatter { dest, lam, inputs } => {
+            let mut floats = Vec::new();
+            let new_inputs = inputs
+                .into_iter()
+                .map(|ae| {
+                    let (mut f, ae) = float_array_expr(ae, blocked, ids, symbols);
+                    floats.append(&mut f);
+                    ae
+                })
+                .collect();
             (
                 floats,
                 SoacOp::Scatter {
                     dest,
-                    indices,
-                    values,
+                    lam,
+                    inputs: new_inputs,
                 },
             )
         }

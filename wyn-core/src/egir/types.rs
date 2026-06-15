@@ -241,16 +241,20 @@ pub enum PendingSoac {
         /// operand (in-kernel consumers like `reduce` / `length`).
         len_out: Option<crate::BindingRef>,
     },
-    /// `scatter dest indices values` — writes `values[i]` into
-    /// `dest[indices[i]]` for each `i`; out-of-bounds indices are ignored
-    /// (Futhark semantics). Lowered serially (a `tid==0`-guarded loop) in this
-    /// cut; the result is dummy (the in-place writes are the effect).
-    /// Operands: `[dest_view, indices, values]` — `dest_view` is the
-    /// destination's already-lowered `StorageView`.
+    /// `scatter`: over the parallel `input` arrays, the lifted `func` yields an
+    /// `(index, value)` pair per element, written as `dest[index] = value`;
+    /// out-of-bounds indices are ignored (Futhark semantics). Lowered serially
+    /// (a `tid==0`-guarded loop) in this cut; the result is dummy (the in-place
+    /// writes are the effect). Operands: `[dest_view, inputs.., captures..]` —
+    /// `dest_view` is the destination's lowered `StorageView`, and the trailing
+    /// `capture_count` operands are the envelope captures.
     Scatter {
-        indices_array_type: Type<TypeName>,
-        indices_elem_type: Type<TypeName>,
-        values_elem_type: Type<TypeName>,
+        func: String,
+        input_array_types: Vec<Type<TypeName>>,
+        input_elem_types: Vec<Type<TypeName>>,
+        capture_count: usize,
+        index_type: Type<TypeName>,
+        value_type: Type<TypeName>,
         dest_elem_type: Type<TypeName>,
     },
     /// Wrapper marking a SOAC as parallelized at the entry boundary. The
