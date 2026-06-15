@@ -3186,11 +3186,14 @@ fn entry_binding_slots(program: &Program, def_name: SymbolId) -> Vec<Option<Entr
 /// Dispatch length for a non-parallelized compute entry:
 ///   1. its first input-view param binding, if any (the previous
 ///      "derive from the first input buffer" behavior, now explicit);
-///   2. else its first `#[storage_image]` param — the natural dispatch
+///   2. else its first explicit `#[storage(set, binding, ...)]`
+///      view-array param — the auto-allocator skips those (host
+///      wires them), but they still describe parallel work;
+///   3. else its first `#[storage_image]` param — the natural dispatch
 ///      is one thread per texel of the image being written; the host
 ///      resolves the size from the descriptor's `StorageTextureSize`
 ///      policy at allocation time;
-///   3. else a single-element grid (the conservative fallback for
+///   4. else a single-element grid (the conservative fallback for
 ///      entries that drive themselves entirely from push constants /
 ///      uniforms).
 fn default_entry_dispatch_len(program: &Program, def_name: SymbolId) -> DispatchLen {
@@ -3203,13 +3206,32 @@ fn default_entry_dispatch_len(program: &Program, def_name: SymbolId) -> Dispatch
             elem_bytes,
         };
     }
-    // No view-array param — look for a `#[storage_image]` param to
-    // size the dispatch from. The first one declared wins; shaders
-    // that write multiple images and want a different sizing source
-    // can use the `--dispatch ENTRY:WxH` CLI override at runtime.
     let def = program.defs.iter().find(|d| d.name == def_name);
     if let Some(def) = def {
         if let DefMeta::EntryPoint(decl) = &def.meta {
+            let (body_params, _) = peel_lambda_params(&def.body);
+            for (i, pattern) in decl.params.iter().enumerate() {
+                let Some(br) = crate::binding_layout::extract_storage_binding(pattern) else {
+                    continue;
+                };
+                let Some((_, ty)) = body_params.get(i) else {
+                    continue;
+                };
+                let Some((_elem_ty, elem_bytes)) =
+                    crate::binding_layout::runtime_sized_array_elem(ty)
+                else {
+                    continue;
+                };
+                return DispatchLen::InputBinding {
+                    set: br.set,
+                    binding: br.binding,
+                    elem_bytes,
+                };
+            }
+            // No view-array param — fall back to `#[storage_image]`.
+            // The first one declared wins; shaders that write multiple
+            // images and want a different sizing source can use the
+            // `--dispatch ENTRY:WxH` CLI override at runtime.
             for pattern in &decl.params {
                 if let Some((br, _fmt, _access, _size)) =
                     crate::binding_layout::extract_storage_image_binding(pattern)

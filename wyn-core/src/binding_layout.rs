@@ -28,7 +28,7 @@ use crate::{BindingRef, SymbolId};
 /// binding-allocation gate, matching the current spec (Stage 3
 /// multi-dim is not yet shipped). Callers don't need a separate
 /// `type_byte_size` retry — admission *is* the proof.
-fn runtime_sized_array_elem(ty: &Type<TypeName>) -> Option<(&Type<TypeName>, u32)> {
+pub fn runtime_sized_array_elem(ty: &Type<TypeName>) -> Option<(&Type<TypeName>, u32)> {
     let ty = TypeExt::strip_unique(ty);
     let size = ty.array_size()?;
     if !matches!(

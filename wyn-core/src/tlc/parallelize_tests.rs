@@ -1245,3 +1245,41 @@ entry foo(#[storage(set=1, binding=0)] xs: []i32,
         "expected OpConstant 42 in SPIR-V (slot 1's literal 42 missing)"
     );
 }
+
+/// Regression: a compute entry that mixes an explicit `#[storage]`
+/// view-array param with a `#[storage_image]` param must dispatch
+/// per-element of the view-array, not per-texel of the image. The
+/// auto-allocator skips host-wired storage params; before the fix
+/// the dispatch then fell through to the storage_image and ran
+/// W*H threads instead of N.
+#[test]
+fn explicit_storage_view_array_drives_dispatch_over_storage_image() {
+    use crate::pipeline_descriptor::DispatchLen;
+    let src = r#"
+        #[compute]
+        entry tick(#[storage(set=2, binding=0, access=read)] prev: []vec4f32,
+                   #[storage_image(set=0, binding=0, format=rgba8unorm, access=write_only)] img: storage_image)
+          []vec4f32 =
+            map(|p: vec4f32|
+                  let _ = image_store(img, @[i32.f32(p.x), i32.f32(p.y)], @[1.0, 1.0, 1.0, 1.0]) in
+                  p,
+                prev)
+    "#;
+    let (_program, desc) = parallelize_src(src);
+    let len = desc.pipelines.iter().find_map(|p| match p {
+        Pipeline::Compute(cp) if cp.entry_point == "tick" => match &cp.dispatch_size {
+            DispatchSize::DerivedFrom { len, .. } => Some(len.clone()),
+            _ => None,
+        },
+        _ => None,
+    });
+    assert_eq!(
+        len,
+        Some(DispatchLen::InputBinding {
+            set: 2,
+            binding: 0,
+            elem_bytes: 16,
+        }),
+        "tick's dispatch must derive from prev (set=2, binding=0), not the storage_image"
+    );
+}
