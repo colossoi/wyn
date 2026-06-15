@@ -564,3 +564,33 @@ entry fragment_main(#[builtin(position)] _p: vec4f32)
         "expected exactly one `OpDecorate ... BuiltIn GlobalInvocationId`, got {count}"
     );
 }
+
+/// TODO(storage-image): reject loop-carrying an opaque storage image up front,
+/// as a clean compiler error, instead of silently emitting invalid SPIR-V.
+///
+/// A `storage_image` is an opaque resource (`OpTypeImage`), not an SSA value:
+/// it cannot be a block parameter / `OpPhi` operand. Threading it through a
+/// loop carry — e.g.
+///
+///   entry rasterize(positions: []vec4f32, img: storage_image) storage_image =
+///     loop acc = img for i < N do
+///       let p = positions[i] in
+///       acc with [@[i32.f32(p.x), i32.f32(p.y)]] = @[1.0, 1.0, 1.0, 1.0]
+///
+/// makes the back-edge merge the image, lowering to `%x = OpPhi %image …` which
+/// spirv-val rejects ("Result type cannot be OpTypeImage"). Today this escapes
+/// the compiler and only fails downstream validation. We want a front/mid-end
+/// check (where the loop carry is still visible) to reject an opaque-resource
+/// loop carry / control-flow merge with a clear message, so a storage-image
+/// write must stay an explicit per-iteration side effect.
+///
+/// Un-ignore once that check exists and assert it fires for the repro above.
+#[test]
+#[ignore = "storage-image loop carry not yet rejected as a clean compiler error"]
+fn storage_image_loop_carry_should_be_a_compiler_error() {
+    assert!(
+        false,
+        "implement: loop-carrying / merging an opaque storage image must be a \
+         clean compiler error, not an invalid-SPIR-V OpPhi caught by spirv-val"
+    );
+}
