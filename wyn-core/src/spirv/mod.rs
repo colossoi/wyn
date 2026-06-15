@@ -3543,12 +3543,28 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
     }
 
     // Lower all entry points
-    // Collect all bindings that ANY entry point writes to (outputs).
-    // These must not be marked NonWritable even when read by another entry point.
+    // Collect all bindings that ANY entry point writes to: storage outputs,
+    // plus `#[storage(access=write/readwrite)]` inputs written in place (e.g. a
+    // `scatter` destination). These must not be marked `NonWritable` in any
+    // entry — including entries that only read the binding — so the shader's
+    // declared access stays consistent across the module and matches the
+    // descriptor's promoted `ReadWrite` (mirrors `egir::publish` written_bindings).
     let written_bindings: HashSet<BindingRef> = program
         .entry_points
         .iter()
         .flat_map(|e| e.outputs.iter().filter_map(|o| o.storage_binding))
+        .chain(program.entry_points.iter().flat_map(|e| {
+            e.inputs.iter().filter_map(|i| {
+                let br = i.storage_binding?;
+                match i.storage_access {
+                    Some(
+                        crate::interface::StorageAccess::WriteOnly
+                        | crate::interface::StorageAccess::ReadWrite,
+                    ) => Some(br),
+                    _ => None,
+                }
+            })
+        }))
         .collect();
 
     for entry in &program.entry_points {
