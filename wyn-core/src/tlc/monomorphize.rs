@@ -198,6 +198,7 @@ impl TypeKey {
                     TypeName::ArrayVariantView => "array_view".to_string(),
                     TypeName::ArrayVariantVirtual => "array_virtual".to_string(),
                     TypeName::ArrayVariantBounded => "array_bounded".to_string(),
+                    TypeName::ArrayVariantAbstract => "array_abstract".to_string(),
                     TypeName::Region(b) => format!("region_s{}_b{}", b.set, b.binding),
                     TypeName::NoRegion => "no_region".to_string(),
                     TypeName::Texture2D => "texture2d".to_string(),
@@ -257,6 +258,7 @@ impl TypeKey {
                     "array_composite" => TypeName::ArrayVariantComposite,
                     "array_virtual" => TypeName::ArrayVariantVirtual,
                     "array_bounded" => TypeName::ArrayVariantBounded,
+                    "array_abstract" => TypeName::ArrayVariantAbstract,
                     "texture2d" => TypeName::Texture2D,
                     "sampler" => TypeName::Sampler,
                     s if s.starts_with("tuple") => {
@@ -1160,6 +1162,7 @@ fn format_type_compact(ty: &Type<TypeName>) -> String {
         Type::Constructed(TypeName::ArrayVariantComposite, _) => "array_composite".to_string(),
         Type::Constructed(TypeName::ArrayVariantVirtual, _) => "array_virtual".to_string(),
         Type::Constructed(TypeName::ArrayVariantBounded, _) => "array_bounded".to_string(),
+        Type::Constructed(TypeName::ArrayVariantAbstract, _) => "array_abstract".to_string(),
         Type::Constructed(name, args) => {
             // Fallback for other constructed types
             let args_str = args.iter().map(format_type_compact).collect::<Vec<_>>().join("_");

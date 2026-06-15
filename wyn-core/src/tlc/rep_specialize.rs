@@ -578,8 +578,8 @@ impl RepSpecializer {
             };
         }
 
-        // Check the callee actually has Abstract at one of the matched
-        // positions — otherwise it's already representation-concrete
+        // Check the callee actually has a representation-polymorphic array
+        // at one of the matched positions; otherwise it's already concrete
         // for this arg, and there's nothing to specialize.
         let Some(callee_def) = self.def_map.get(&callee_sym).cloned() else {
             return Term {
@@ -614,7 +614,7 @@ impl RepSpecializer {
                         continue;
                     }
                 };
-                if !type_has_abstract_array_variant(param_ty) {
+                if !type_has_specializable_array_variant(param_ty) {
                     *slot = None;
                 }
             }
@@ -726,7 +726,7 @@ impl RepSpecializer {
             .enumerate()
             .map(|(i, (s, ty))| {
                 let new_ty = match spec_key.get(i).copied().flatten() {
-                    Some(variant) => substitute_abstract_in_type(ty, variant),
+                    Some(variant) => substitute_specializable_variant_in_type(ty, variant),
                     None => ty.clone(),
                 };
                 (*s, new_ty)
@@ -784,33 +784,43 @@ fn array_expr_type(ae: &ArrayExpr) -> Option<Type<TypeName>> {
     }
 }
 
-/// Return `true` if any `Array[_, ArrayVariantAbstract, _, _]` appears
-/// anywhere in the type tree.
-fn type_has_abstract_array_variant(ty: &Type<TypeName>) -> bool {
+/// Return `true` if any representation-polymorphic array variant appears
+/// anywhere in the type tree. `ArrayVariantAbstract` comes from filter's
+/// existential result; a `Type::Variable` in the variant slot comes from a
+/// plain representation-polymorphic helper such as `def sum(arr: [n]i32)`.
+fn type_has_specializable_array_variant(ty: &Type<TypeName>) -> bool {
     match ty {
         Type::Variable(_) => false,
         Type::Constructed(TypeName::Array, args) if args.len() >= 4 => {
-            matches!(&args[1], Type::Constructed(TypeName::ArrayVariantAbstract, _))
-                || args.iter().any(type_has_abstract_array_variant)
+            matches!(
+                &args[1],
+                Type::Constructed(TypeName::ArrayVariantAbstract, _) | Type::Variable(_)
+            ) || args.iter().any(type_has_specializable_array_variant)
         }
-        Type::Constructed(_, args) => args.iter().any(type_has_abstract_array_variant),
+        Type::Constructed(_, args) => args.iter().any(type_has_specializable_array_variant),
     }
 }
 
-/// Substitute every `ArrayVariantAbstract` in any `Array` subtree with
-/// the chosen concrete variant. For variants that constrain the size
-/// (currently only `Bounded`, which needs a static `Size(N)` capacity),
+/// Substitute every representation-polymorphic array variant in any `Array`
+/// subtree with the chosen concrete variant. For variants that constrain the
+/// size (currently only `Bounded`, which needs a static `Size(N)` capacity),
 /// also rewrite the size slot to the producer's concrete size when the
-/// existing slot is a non-literal (Skolem / Variable / SizeVar). This
-/// is what makes the consumer's specialized signature match the
-/// runtime layout the producer's EGIR lowering emits.
-fn substitute_abstract_in_type(ty: &Type<TypeName>, target: ConcreteVariant) -> Type<TypeName> {
+/// existing slot is a non-literal (Skolem / Variable / SizeVar). This is what
+/// makes the consumer's specialized signature match the runtime layout the
+/// producer's EGIR lowering emits.
+fn substitute_specializable_variant_in_type(
+    ty: &Type<TypeName>,
+    target: ConcreteVariant,
+) -> Type<TypeName> {
     match ty {
         Type::Variable(_) => ty.clone(),
         Type::Constructed(TypeName::Array, args) if args.len() >= 4 => {
             let mut new_args: Vec<Type<TypeName>> =
-                args.iter().map(|a| substitute_abstract_in_type(a, target)).collect();
-            if matches!(&args[1], Type::Constructed(TypeName::ArrayVariantAbstract, _)) {
+                args.iter().map(|a| substitute_specializable_variant_in_type(a, target)).collect();
+            if matches!(
+                &args[1],
+                Type::Constructed(TypeName::ArrayVariantAbstract, _) | Type::Variable(_)
+            ) {
                 new_args[1] = target.variant_type();
                 if let Some(size_ty) = target.size_type() {
                     // Only rewrite the size when the current slot is
@@ -825,7 +835,7 @@ fn substitute_abstract_in_type(ty: &Type<TypeName>, target: ConcreteVariant) -> 
         }
         Type::Constructed(name, args) => Type::Constructed(
             name.clone(),
-            args.iter().map(|a| substitute_abstract_in_type(a, target)).collect(),
+            args.iter().map(|a| substitute_specializable_variant_in_type(a, target)).collect(),
         ),
     }
 }

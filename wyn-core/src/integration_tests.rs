@@ -1765,8 +1765,9 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
 
 #[test]
 fn test_array_variant_monomorphization() {
-    // Slicing a view with constant bounds produces a Composite array (materialized at
-    // the call site), so both call sites use the same Composite variant of sum_first_two.
+    // Slicing a storage view with constant bounds stays a View; the call below
+    // specializes sum_first_two separately from the array-literal Composite
+    // call site instead of materializing the slice.
     let ssa = compile_to_ssa(
         r#"
 def sum_first_two(arr: [4]i32) i32 =
@@ -1816,7 +1817,7 @@ entry compute_main(data: []i32) i32 =
 
     // After TLC-level inlining and DCE, sum_first_two may be fully inlined
     // at all call sites and eliminated. The important thing is that the program
-    // compiles successfully to SSA — buffer specialization is tested implicitly.
+    // compiles successfully to SSA with both View and Composite call shapes.
     // (The function may or may not survive depending on inlining thresholds.)
 }
 

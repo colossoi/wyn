@@ -22,7 +22,7 @@
 #[path = "pin_entry_regions_tests.rs"]
 mod pin_entry_regions_tests;
 
-use super::{ArrayExpr, DefMeta, Lambda, LoopKind, Program, SoacOp, Term, TermKind};
+use super::{ArrayExpr, DefMeta, Lambda, LoopKind, Program, SoacOp, Term, TermKind, VarRef};
 use crate::ast::{Span, TypeName};
 use crate::binding_layout::{compute_entry_binding_layout, extract_storage_binding};
 use crate::interface::{EntryDecl, EntryParamBindingKind};
@@ -48,11 +48,14 @@ pub fn run(program: &mut Program) -> crate::error::Result<()> {
         // params don't change downstream (entries are roots, not monomorphized),
         // so computing the layout here is equivalent to doing it later.
         let mut subst = RegionSubst::new();
+        let mut region_env = HashMap::new();
         if let DefMeta::EntryPoint(entry) = &mut def.meta {
             entry.param_bindings =
                 compute_entry_binding_layout(&params, entry, crate::egir::from_tlc::AUTO_STORAGE_SET);
-            collect_region_subst(&params, entry, &mut subst, span)?;
+            collect_region_subst(&params, entry, &mut subst, &mut region_env, span)?;
         }
+
+        while collect_view_slice_region_subst(&def.body, &mut subst, &region_env)? {}
 
         if !subst.is_empty() {
             def.ty = apply_subst(&def.ty, &subst);
@@ -83,6 +86,7 @@ fn collect_region_subst(
     params: &[(SymbolId, Type<TypeName>)],
     entry: &EntryDecl,
     subst: &mut RegionSubst,
+    region_env: &mut HashMap<SymbolId, Type<TypeName>>,
     span: Span,
 ) -> crate::error::Result<()> {
     let layout = compute_entry_binding_layout(params, entry, crate::egir::from_tlc::AUTO_STORAGE_SET);
@@ -93,12 +97,14 @@ fn collect_region_subst(
         // Host-wired explicit binding: the region is the attribute's.
         if let Some(binding) = entry.params.get(i).and_then(extract_storage_binding) {
             pin_view_region(ty, binding, subst, span)?;
+            region_env.insert(params[i].0, region_tag(binding));
             continue;
         }
 
         match layout.get(i).and_then(|b| b.as_ref()).map(|b| &b.kind) {
             Some(EntryParamBindingKind::Single { binding, .. }) => {
                 pin_view_region(ty, *binding, subst, span)?;
+                region_env.insert(params[i].0, region_tag(*binding));
             }
             Some(EntryParamBindingKind::TupleOfViews(fields)) => {
                 if let Type::Constructed(TypeName::Tuple(_), comps) = ty {
@@ -152,6 +158,86 @@ fn pin_view_region(
         subst.insert(*id, region);
     }
     Ok(())
+}
+
+fn collect_view_slice_region_subst(
+    term: &Term,
+    subst: &mut RegionSubst,
+    region_env: &HashMap<SymbolId, Type<TypeName>>,
+) -> crate::error::Result<bool> {
+    if let TermKind::Let {
+        name,
+        name_ty,
+        rhs,
+        body,
+    } = &term.kind
+    {
+        let mut changed = collect_view_slice_region_subst(rhs, subst, region_env)?;
+        let mut scoped_env = region_env.clone();
+        if let Some(region) = view_region_for_term(rhs, subst, region_env) {
+            if let Some(Type::Variable(id)) = apply_subst(name_ty, subst).array_region() {
+                if !subst.contains_key(id) {
+                    subst.insert(*id, region.clone());
+                    changed = true;
+                }
+            }
+            scoped_env.insert(*name, region);
+        }
+        changed |= collect_view_slice_region_subst(body, subst, &scoped_env)?;
+        return Ok(changed);
+    }
+
+    let mut changed = false;
+    let mut err = None;
+    term.for_each_child(
+        &mut |child| match collect_view_slice_region_subst(child, subst, region_env) {
+            Ok(child_changed) => changed |= child_changed,
+            Err(e) => err = Some(e),
+        },
+    );
+    if let Some(e) = err {
+        return Err(e);
+    }
+
+    if let Some(source_region) = view_region_for_term(term, subst, region_env) {
+        let result_ty = apply_subst(&term.ty, subst);
+        if result_ty.array_variant().map(crate::types::is_array_variant_view).unwrap_or(false) {
+            if let Some(Type::Variable(id)) = result_ty.array_region() {
+                if !subst.contains_key(id) {
+                    subst.insert(*id, source_region);
+                    changed = true;
+                }
+            }
+        }
+    }
+    Ok(changed)
+}
+
+fn view_region_for_term(
+    term: &Term,
+    subst: &RegionSubst,
+    region_env: &HashMap<SymbolId, Type<TypeName>>,
+) -> Option<Type<TypeName>> {
+    if let Some(region @ Type::Constructed(TypeName::Region(_), _)) =
+        apply_subst(&term.ty, subst).array_region().cloned()
+    {
+        return Some(region);
+    }
+
+    match &term.kind {
+        TermKind::Var(VarRef::Symbol(sym)) => region_env.get(sym).cloned(),
+        TermKind::App { func, args } => {
+            let TermKind::Var(VarRef::Builtin { id, .. }) = &func.kind else {
+                return None;
+            };
+            if *id == crate::builtins::catalog().known().slice && args.len() == 3 {
+                view_region_for_term(&args[0], subst, region_env)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------

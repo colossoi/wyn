@@ -412,9 +412,9 @@ fn wgsl_testfile_map_iota() {
 
 #[test]
 fn wgsl_testfile_array_call_demo() {
-    // Exercises `_w_intrinsic_slice` view→composite materialization.
-    // `data[0..4]` with `data: []f32` slices a storage view down to
-    // a `[4]i32` composite that's passed to a user function.
+    // Exercises `_w_intrinsic_slice` view-to-view lowering. `data[0..4]`
+    // with `data: []f32` remains a storage-backed view and is passed to
+    // a view-specialized user function.
     validate_testfile_wgsl("testfiles/array_call_demo.wyn");
 }
 

@@ -606,23 +606,16 @@ impl<'a> Parser<'a> {
     /// Parse the RHS of `size = …` in a `#[storage_image(...)]` attribute.
     /// Accepted forms: `window` (single identifier) or `WxH` where the
     /// lexer splits it into `IntLiteral(W)` followed by `Ident("xH")`.
-    fn parse_storage_texture_size(
-        &mut self,
-    ) -> Result<crate::pipeline_descriptor::StorageTextureSize> {
+    fn parse_storage_texture_size(&mut self) -> Result<crate::pipeline_descriptor::StorageTextureSize> {
         use crate::pipeline_descriptor::StorageTextureSize;
         if let Some(Token::IntLiteral(n)) = self.peek().cloned() {
             self.advance();
-            let w: u32 = n
-                .0
-                .parse()
-                .map_err(|_| err_parse!("storage_image size width: '{}'", n.0))?;
+            let w: u32 = n.0.parse().map_err(|_| err_parse!("storage_image size width: '{}'", n.0))?;
             let suffix = self.expect_identifier()?;
-            let h_str = suffix.strip_prefix('x').ok_or_else(|| {
-                err_parse!("storage_image size: expected WxH, got '{}{}'", n.0, suffix)
-            })?;
-            let h: u32 = h_str
-                .parse()
-                .map_err(|_| err_parse!("storage_image size height: '{}'", h_str))?;
+            let h_str = suffix
+                .strip_prefix('x')
+                .ok_or_else(|| err_parse!("storage_image size: expected WxH, got '{}{}'", n.0, suffix))?;
+            let h: u32 = h_str.parse().map_err(|_| err_parse!("storage_image size height: '{}'", h_str))?;
             Ok(StorageTextureSize::Fixed { width: w, height: h })
         } else {
             let s = self.expect_identifier()?;

@@ -266,6 +266,45 @@ fn fv_type_generalizable(ty: &Type) -> BTreeSet<usize> {
     out
 }
 
+/// Free type variables for a named function scheme. Function declarations are
+/// representation-polymorphic over fixed-size arrays: a helper taking `[4]T`
+/// can be specialized for a storage-backed View slice and for a local
+/// Composite literal at different call sites. Array sizes remain
+/// non-generalized for the same reason as `fv_type_generalizable`; for
+/// size-polymorphic/unsized arrays we also leave the variant pinned so
+/// producer-specialization can resolve filter outputs without defaulting a
+/// Skolem-sized value to Composite.
+fn fv_type_generalizable_for_function(ty: &Type) -> BTreeSet<usize> {
+    let mut out = BTreeSet::new();
+    fn go(t: &Type, acc: &mut BTreeSet<usize>) {
+        match t {
+            Type::Variable(n) => {
+                acc.insert(*n);
+            }
+            Type::Constructed(TypeName::Array, _) => {
+                if let Some(elem) = t.elem_type() {
+                    go(elem, acc);
+                }
+                if matches!(t.array_size(), Some(Type::Constructed(TypeName::Size(_), _))) {
+                    if let Some(variant) = t.array_variant() {
+                        go(variant, acc);
+                    }
+                }
+                if let Some(region) = t.array_region() {
+                    go(region, acc);
+                }
+            }
+            Type::Constructed(_, args) => {
+                for a in args {
+                    go(a, acc);
+                }
+            }
+        }
+    }
+    go(ty, &mut out);
+    out
+}
+
 /// Compute free type variables in a TypeScheme
 fn fv_scheme(s: &TypeScheme) -> BTreeSet<usize> {
     match s {
@@ -656,6 +695,24 @@ impl<'a> TypeChecker<'a> {
         }
 
         // Wrap in nested Polytype quantifiers
+        quantify(TypeScheme::Monotype(applied), &fv_ty)
+    }
+
+    fn generalize_function(&self, ty: &Type) -> TypeScheme {
+        let applied = ty.apply(&self.context);
+
+        debug_assert!(
+            !Self::contains_user_or_size_var(&applied),
+            "Type contains unsubstituted UserVar/SizeVar before function generalization: {:?}",
+            applied
+        );
+
+        let mut fv_ty = fv_type_generalizable_for_function(&applied);
+        let fv_env = self.env_free_type_vars();
+        for v in fv_env {
+            fv_ty.remove(&v);
+        }
+
         quantify(TypeScheme::Monotype(applied), &fv_ty)
     }
 
@@ -1961,7 +2018,7 @@ impl<'a> TypeChecker<'a> {
 
             // Update GlobalEnv with inferred type (no scope_stack
             // write — locals only).
-            let type_scheme = self.generalize(&func_type);
+            let type_scheme = self.generalize_function(&func_type);
             self.globals_dual_write_decl(scope_name, &type_scheme, module_name);
 
             // Track arity for partial application checking
@@ -2800,27 +2857,20 @@ impl<'a> TypeChecker<'a> {
                     None => self.context.new_variable(),
                 };
 
-                // Slice result: if the source is a view but the result has known size,
-                // the elements will be materialized into a composite array.
                 let elem_type = elem_var.apply(&self.context);
                 let addrspace = addrspace_var.apply(&self.context);
-                let materialized = super::is_array_variant_view(&addrspace)
-                    && matches!(result_size, Type::Constructed(TypeName::Size(_), _));
-                let result_variant = if materialized {
-                    super::array_variant_composite()
-                } else {
-                    addrspace
-                };
-                // A materialized slice is a fresh composite (no buffer); a view
-                // slice stays in the *same* buffer, so it keeps the source region.
-                let result_region = if materialized {
-                    no_region()
-                } else {
-                    region_var.apply(&self.context)
-                };
+                // Slices preserve representation: a storage-backed view slice
+                // is another view with adjusted offset/len, not an eager
+                // materialized Composite value. The size slot still records a
+                // constant length when both bounds are literal.
+                let result_region = array_type_stripped
+                    .array_region()
+                    .cloned()
+                    .or_else(|| array_type_stripped.apply(&self.context).array_region().cloned())
+                    .unwrap_or_else(|| region_var.apply(&self.context));
                 Ok(Type::Constructed(
                     TypeName::Array,
-                    vec![elem_type, result_variant, result_size, result_region],
+                    vec![elem_type, addrspace, result_size, result_region],
                 ))
             }
 

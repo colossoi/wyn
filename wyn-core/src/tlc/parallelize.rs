@@ -3217,8 +3217,7 @@ fn default_entry_dispatch_len(program: &Program, def_name: SymbolId) -> Dispatch
                 let Some((_, ty)) = body_params.get(i) else {
                     continue;
                 };
-                let Some((_elem_ty, elem_bytes)) =
-                    crate::binding_layout::runtime_sized_array_elem(ty)
+                let Some((_elem_ty, elem_bytes)) = crate::binding_layout::runtime_sized_array_elem(ty)
                 else {
                     continue;
                 };
