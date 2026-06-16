@@ -1934,6 +1934,32 @@ entry e() f32 = fbm_perlin(1u32, @[0.0f32, 0.0f32], 4i32)
         .expect("a named def passed as a function-typed argument should be specialized away");
 }
 
+/// Gap: a local lambda that closes over an *enclosing function's parameter*
+/// and is applied more than once panics the backend with `Unknown global: k`
+/// (`spirv/mod.rs`). Applied exactly once it lowers fine — the captured param
+/// is inlined at the single call site — but a second application leaves a
+/// reference to the capture (`k`) that resolves to neither a local nor a
+/// global at code-gen time. Surfaced writing the perlin-noise-fields
+/// playground, where `let fb = |q| fhnoise.fbm_perlin(k, q, …)` is called five
+/// times; the workaround there was to inline the five calls and drop the
+/// lambda.
+#[test]
+#[ignore = "backend gap: a local lambda capturing an enclosing fn parameter, applied more than once, fails SPIR-V gen with `Unknown global`"]
+fn local_lambda_capturing_param_applied_twice_lowers() {
+    let source = r#"
+def f(k: u32, p: f32) f32 =
+  let g = |q: f32| q + f32.u32(k) in
+  g(p) + g(p + 1.0f32)
+
+#[compute]
+entry e() f32 = f(3u32, 1.0f32)
+"#;
+    compile_to_spirv(source).expect(
+        "a local lambda closing over an enclosing fn parameter must lower even \
+         when applied more than once",
+    );
+}
+
 /// The reified operator members on the builtin numeric modules — `i32.(+)`,
 /// `f32.(<)`, `u32.(<<)`, etc. — resolve as real module functions and lower.
 /// The `(op)` form is the function reification of the primitive infix BinOp;
