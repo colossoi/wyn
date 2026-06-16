@@ -17,7 +17,7 @@
 
 use crate::Compiler;
 use crate::ast::TypeName;
-use crate::egir::types::{ENode, PureOp};
+use crate::egir::types::{ENode, PendingSoac, PureOp, SideEffectKind};
 use polytype::Type;
 
 /// Compile source through the pipeline to just-past `expand_soacs`,
@@ -88,6 +88,39 @@ fn is_soa_tuple(ty: &Type<TypeName>) -> bool {
     matches!(ty, Type::Constructed(TypeName::Tuple(_), components)
         if components.iter().all(|c|
             matches!(c, Type::Constructed(TypeName::Array, args) if args.len() == 4)))
+}
+
+fn plain_array_ty(elem: Type<TypeName>) -> Type<TypeName> {
+    Type::Constructed(
+        TypeName::Array,
+        vec![
+            elem,
+            Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
+            Type::Constructed(TypeName::Size(4), vec![]),
+            crate::types::no_region(),
+        ],
+    )
+}
+
+#[test]
+fn scatter_handleability_checks_every_input() {
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+    let f32_ty = Type::Constructed(TypeName::Float(32), vec![]);
+    let bad_input_ty = Type::Constructed(TypeName::Tuple(2), vec![i32_ty.clone(), f32_ty.clone()]);
+    let kind = SideEffectKind::Pending(PendingSoac::Scatter {
+        func: "scatter_env".to_string(),
+        input_array_types: vec![plain_array_ty(i32_ty.clone()), bad_input_ty],
+        input_elem_types: vec![i32_ty.clone(), f32_ty.clone()],
+        capture_count: 0,
+        index_type: i32_ty,
+        value_type: f32_ty.clone(),
+        dest_elem_type: f32_ty,
+    });
+
+    assert!(
+        !super::is_handleable_soac(&kind),
+        "scatter expansion reads every input, so an unreadable later input must reject the SOAC"
+    );
 }
 
 #[test]

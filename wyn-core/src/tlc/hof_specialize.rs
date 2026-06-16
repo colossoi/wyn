@@ -400,6 +400,26 @@ pub(super) fn apply_type_subst_to_soac(
             ne: Box::new(apply_type_subst_to_term(ne, subst, term_ids)),
             inputs: inputs.iter().map(|ae| apply_type_subst_to_array_expr(ae, subst, term_ids)).collect(),
         },
+        SoacOp::Screma {
+            map_lams,
+            accumulators,
+            inputs,
+        } => SoacOp::Screma {
+            map_lams: map_lams
+                .iter()
+                .map(|body| apply_type_subst_to_soac_body(body, subst, term_ids))
+                .collect(),
+            accumulators: accumulators
+                .iter()
+                .map(|acc| super::ScremaAccumulatorSpec {
+                    kind: acc.kind,
+                    step_lam: apply_type_subst_to_soac_body(&acc.step_lam, subst, term_ids),
+                    reduce_op: apply_type_subst_to_soac_body(&acc.reduce_op, subst, term_ids),
+                    ne: Box::new(apply_type_subst_to_term(&acc.ne, subst, term_ids)),
+                })
+                .collect(),
+            inputs: inputs.iter().map(|ae| apply_type_subst_to_array_expr(ae, subst, term_ids)).collect(),
+        },
     }
 }
 
@@ -837,6 +857,29 @@ fn substitute_var_soac(
             op: substitute_var_soac_body(op, old_sym, new_sym, term_ids),
             reduce_op: substitute_var_soac_body(reduce_op, old_sym, new_sym, term_ids),
             ne: Box::new(substitute_var(ne, old_sym, new_sym, term_ids)),
+            inputs: inputs
+                .iter()
+                .map(|ae| substitute_var_array_expr(ae, old_sym, new_sym, term_ids))
+                .collect(),
+        },
+        SoacOp::Screma {
+            map_lams,
+            accumulators,
+            inputs,
+        } => SoacOp::Screma {
+            map_lams: map_lams
+                .iter()
+                .map(|body| substitute_var_soac_body(body, old_sym, new_sym, term_ids))
+                .collect(),
+            accumulators: accumulators
+                .iter()
+                .map(|acc| super::ScremaAccumulatorSpec {
+                    kind: acc.kind,
+                    step_lam: substitute_var_soac_body(&acc.step_lam, old_sym, new_sym, term_ids),
+                    reduce_op: substitute_var_soac_body(&acc.reduce_op, old_sym, new_sym, term_ids),
+                    ne: Box::new(substitute_var(&acc.ne, old_sym, new_sym, term_ids)),
+                })
+                .collect(),
             inputs: inputs
                 .iter()
                 .map(|ae| substitute_var_array_expr(ae, old_sym, new_sym, term_ids))
@@ -1411,6 +1454,26 @@ impl<'a> HofSpecializer<'a> {
                 op: self.cascade_specialize_soac_body(op),
                 reduce_op: self.cascade_specialize_soac_body(reduce_op),
                 ne,
+                inputs,
+            },
+            SoacOp::Screma {
+                map_lams,
+                accumulators,
+                inputs,
+            } => SoacOp::Screma {
+                map_lams: map_lams
+                    .into_iter()
+                    .map(|body| self.cascade_specialize_soac_body(body))
+                    .collect(),
+                accumulators: accumulators
+                    .into_iter()
+                    .map(|acc| super::ScremaAccumulatorSpec {
+                        kind: acc.kind,
+                        step_lam: self.cascade_specialize_soac_body(acc.step_lam),
+                        reduce_op: self.cascade_specialize_soac_body(acc.reduce_op),
+                        ne: acc.ne,
+                    })
+                    .collect(),
                 inputs,
             },
         }

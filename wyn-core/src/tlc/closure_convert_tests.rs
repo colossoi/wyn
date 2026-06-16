@@ -3,7 +3,7 @@
 use super::*;
 use crate::SymbolTable;
 use crate::ast::{Span, TypeName};
-use crate::tlc::{Def, DefMeta, Lambda, Program, Term, TermId, TermKind};
+use crate::tlc::{Def, DefMeta, Lambda, Place, Program, Shape, SoacBody, SoacOp, Term, TermId, TermKind};
 use polytype::Type;
 use std::collections::HashMap;
 
@@ -142,6 +142,77 @@ fn param_spine_lambdas_are_skipped() {
         arity: 1,
     });
     assert!(verify_closure_converted(&program).is_ok());
+}
+
+#[test]
+fn unlifted_scatter_envelope_fails_verifier() {
+    let mut program = empty_program();
+    let sym = program.symbols.alloc("f".to_string());
+    let dest = program.symbols.alloc("dest".to_string());
+    let scatter = term(
+        TermKind::Soac(SoacOp::Scatter {
+            dest: Place::LocalArray {
+                id: dest,
+                shape: Shape(vec![]),
+                elem_ty: unit_ty(),
+            },
+            lam: SoacBody {
+                lam: Lambda {
+                    params: vec![],
+                    body: Box::new(term(TermKind::UnitLit, unit_ty())),
+                    ret_ty: unit_ty(),
+                },
+                captures: vec![],
+            },
+            inputs: vec![],
+        }),
+        unit_ty(),
+    );
+    program.defs.push(Def {
+        name: sym,
+        ty: unit_ty(),
+        body: scatter,
+        meta: DefMeta::Function,
+        arity: 0,
+    });
+
+    let err = verify_closure_converted(&program).unwrap_err();
+    assert!(matches!(err, ClosureConvertError::SoacLambdaNotLifted { .. }));
+}
+
+#[test]
+fn scatter_envelope_params_count_as_bound_symbols() {
+    let mut symbols = SymbolTable::new();
+    let mut ids = crate::tlc::TermIdSource::new();
+    let dest = symbols.alloc("dest".to_string());
+    let param = symbols.alloc("p".to_string());
+    let scatter = Term {
+        id: ids.next_id(),
+        ty: unit_ty(),
+        span: span(),
+        kind: TermKind::Soac(SoacOp::Scatter {
+            dest: Place::LocalArray {
+                id: dest,
+                shape: Shape(vec![]),
+                elem_ty: unit_ty(),
+            },
+            lam: SoacBody {
+                lam: Lambda {
+                    params: vec![(param, unit_ty())],
+                    body: Box::new(term(TermKind::Var(VarRef::Symbol(param)), unit_ty())),
+                    ret_ty: unit_ty(),
+                },
+                captures: vec![],
+            },
+            inputs: vec![],
+        }),
+    };
+
+    let bound = collect_bound_syms(&scatter);
+    assert!(
+        bound.contains(&param),
+        "scatter envelope param should be treated like other SOAC lambda params"
+    );
 }
 
 // --- Eta-reduction of SOAC operators -----------------------------------

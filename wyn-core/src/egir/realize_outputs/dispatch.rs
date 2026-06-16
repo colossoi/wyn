@@ -84,6 +84,31 @@ pub fn compute_slot_source(
         return Ok(());
     }
 
+    // 2b. Retargetable array projection of Screma(Fresh). Field 0 is the
+    // mapped output; field 1 is retargetable only for scan accumulators.
+    if let (Some(elem_ty), Some((screma_result, field_idx))) = (
+        slot_ty.elem_type().cloned(),
+        result_soac_is_screma_array_projection(graph, source),
+    ) {
+        let view = graph_ops::intern_storage_view(graph, binding, elem_ty.clone(), None);
+        if multi_source {
+            reject_sibling_consumers(graph, source, slot_index)?;
+        } else {
+            rewrite_sibling_index_consumers(
+                graph,
+                aliases,
+                block,
+                next_effect,
+                source,
+                view,
+                elem_ty,
+                slot_index,
+            )?;
+        }
+        retarget_screma_array_projection(graph, screma_result, field_idx, view);
+        return Ok(());
+    }
+
     // 3. Fixed-size aggregate.
     let fixed_size = slot_ty.array_size().and_then(|s| {
         if let Type::Constructed(TypeName::Size(n), _) = s { Some(*n) } else { None }
@@ -189,8 +214,57 @@ pub(crate) fn result_soac_is_map_or_scan(graph: &EGraph, result: NodeId) -> bool
     false
 }
 
+/// If `source` is a retargetable array projection of a fresh Screma, return
+/// the underlying Screma result and field index.
+pub(crate) fn result_soac_is_screma_array_projection(
+    graph: &EGraph,
+    source: NodeId,
+) -> Option<(NodeId, usize)> {
+    let ENode::Pure {
+        op: PureOp::Project { index },
+        operands,
+    } = &graph.nodes[source]
+    else {
+        return None;
+    };
+    let field_idx = *index as usize;
+    let [screma_result] = operands.as_slice() else {
+        return None;
+    };
+    for (_, block) in &graph.skeleton.blocks {
+        for se in &block.side_effects {
+            if se.result == Some(*screma_result) {
+                return match &se.kind {
+                    SideEffectKind::Pending(PendingSoac::Screma { map_destinations, .. })
+                        if field_idx < map_destinations.len()
+                            && map_destinations[field_idx] == SoacDestination::Fresh =>
+                    {
+                        Some((*screma_result, field_idx))
+                    }
+                    SideEffectKind::Pending(PendingSoac::Screma {
+                        map_destinations,
+                        accumulators,
+                        acc_destinations,
+                        ..
+                    }) if field_idx >= map_destinations.len() && {
+                        let acc_idx = field_idx - map_destinations.len();
+                        acc_idx < accumulators.len()
+                            && accumulators[acc_idx].kind == crate::tlc::ScremaAccumulator::Scan
+                            && acc_destinations[acc_idx] == SoacDestination::Fresh
+                    } =>
+                    {
+                        Some((*screma_result, field_idx))
+                    }
+                    _ => None,
+                };
+            }
+        }
+    }
+    None
+}
+
 /// True iff `ty` is an Array whose size is a free variable or
-/// placeholder — runtime-sized rather than a known constant.
+/// placeholder - runtime-sized rather than a known constant.
 pub(crate) fn is_unsized_array(ty: &Type<TypeName>) -> bool {
     ty.array_size()
         .map(|s| {
@@ -262,6 +336,98 @@ pub(crate) fn retarget_map_scan(graph: &mut EGraph, target_result: NodeId, outpu
     }
     panic!(
         "retarget_map_scan: no side effect produced target_result={:?}",
+        target_result
+    );
+}
+
+/// Retarget one array-producing side of the Screma producing `target_result`
+/// to write into `output_view`.
+pub(crate) fn retarget_screma_array_projection(
+    graph: &mut EGraph,
+    target_result: NodeId,
+    field_idx: usize,
+    output_view: NodeId,
+) {
+    for (_, block) in graph.skeleton.blocks.iter_mut() {
+        for se in &mut block.side_effects {
+            if se.result != Some(target_result) {
+                continue;
+            }
+
+            let SideEffectKind::Pending(PendingSoac::Screma {
+                input_array_types,
+                accumulators,
+                map_capture_counts,
+                map_destinations,
+                acc_destinations,
+                ..
+            }) = &mut se.kind
+            else {
+                panic!(
+                    "retarget_screma_array_projection: side effect for \
+                     target_result={:?} is not Screma: {:?}",
+                    target_result, se.kind
+                );
+            };
+
+            let base_len = input_array_types.len()
+                + accumulators.len()
+                + map_capture_counts.iter().sum::<usize>()
+                + accumulators.iter().map(|acc| acc.step_capture_count).sum::<usize>()
+                + accumulators.iter().map(|acc| acc.reduce_op_capture_count).sum::<usize>();
+            let mut cursor = base_len;
+            let mut map_views = Vec::with_capacity(map_destinations.len());
+            for dest in map_destinations.iter() {
+                if *dest == SoacDestination::OutputView {
+                    map_views.push(Some(
+                        *se.operand_nodes.get(cursor).expect("Screma map output view operand missing"),
+                    ));
+                    cursor += 1;
+                } else {
+                    map_views.push(None);
+                }
+            }
+            let mut acc_views = Vec::with_capacity(acc_destinations.len());
+            for dest in acc_destinations.iter() {
+                if *dest == SoacDestination::OutputView {
+                    acc_views.push(Some(
+                        *se.operand_nodes
+                            .get(cursor)
+                            .expect("Screma accumulator output view operand missing"),
+                    ));
+                    cursor += 1;
+                } else {
+                    acc_views.push(None);
+                }
+            }
+
+            if field_idx < map_destinations.len() {
+                map_destinations[field_idx] = SoacDestination::OutputView;
+                map_views[field_idx] = Some(output_view);
+            } else {
+                let acc_idx = field_idx - map_destinations.len();
+                if acc_idx < accumulators.len()
+                    && accumulators[acc_idx].kind == crate::tlc::ScremaAccumulator::Scan
+                {
+                    acc_destinations[acc_idx] = SoacDestination::OutputView;
+                    acc_views[acc_idx] = Some(output_view);
+                } else {
+                    panic!("retarget_screma_array_projection: unsupported Screma field {field_idx}");
+                }
+            }
+
+            se.operand_nodes.truncate(base_len);
+            for view in map_views.into_iter().flatten() {
+                se.operand_nodes.push(view);
+            }
+            for view in acc_views.into_iter().flatten() {
+                se.operand_nodes.push(view);
+            }
+            return;
+        }
+    }
+    panic!(
+        "retarget_screma_array_projection: no side effect produced target_result={:?}",
         target_result
     );
 }

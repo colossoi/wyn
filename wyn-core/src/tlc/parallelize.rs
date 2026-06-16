@@ -66,15 +66,77 @@ pub struct SoacAnalysis {
     pub provenances: Vec<ArrayProvenance>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParallelSoacFlavor {
+    Map,
+    Reduce,
+    Redomap,
+    Scan,
+    Screma,
+}
+
+struct ParallelSoacShape<'a> {
+    flavor: ParallelSoacFlavor,
+    inputs: Vec<&'a ArrayExpr>,
+    ne: Option<&'a Term>,
+    result_elem_type: Type<TypeName>,
+    lowerable_today: bool,
+}
+
+fn parallel_soac_shape(soac: &SoacOp) -> Option<ParallelSoacShape<'_>> {
+    match soac {
+        SoacOp::Map { lam, inputs, .. } => Some(ParallelSoacShape {
+            flavor: ParallelSoacFlavor::Map,
+            inputs: inputs.iter().collect(),
+            ne: None,
+            result_elem_type: lam.lam.ret_ty.clone(),
+            lowerable_today: true,
+        }),
+        SoacOp::Reduce { ne, input, .. } => Some(ParallelSoacShape {
+            flavor: ParallelSoacFlavor::Reduce,
+            inputs: vec![input],
+            ne: Some(ne),
+            result_elem_type: ne.ty.clone(),
+            lowerable_today: true,
+        }),
+        SoacOp::Redomap { ne, inputs, .. } => Some(ParallelSoacShape {
+            flavor: ParallelSoacFlavor::Redomap,
+            inputs: inputs.iter().collect(),
+            ne: Some(ne),
+            result_elem_type: ne.ty.clone(),
+            lowerable_today: true,
+        }),
+        SoacOp::Scan { ne, input, .. } => Some(ParallelSoacShape {
+            flavor: ParallelSoacFlavor::Scan,
+            inputs: vec![input],
+            ne: Some(ne),
+            result_elem_type: ne.ty.clone(),
+            lowerable_today: true,
+        }),
+        SoacOp::Screma {
+            inputs, accumulators, ..
+        } => {
+            let result_elem_type = accumulators
+                .first()
+                .map(|acc| acc.ne.ty.clone())
+                .unwrap_or_else(|| Type::Constructed(TypeName::Unit, vec![]));
+            Some(ParallelSoacShape {
+                flavor: ParallelSoacFlavor::Screma,
+                inputs: inputs.iter().collect(),
+                ne: None,
+                result_elem_type,
+                lowerable_today: false,
+            })
+        }
+        SoacOp::Filter { .. } | SoacOp::Scatter { .. } | SoacOp::ReduceByIndex { .. } => None,
+    }
+}
+
 /// Every input ArrayExpr a parallelizable SOAC consumes, in source order.
 /// Free-function form so callers (`analyze_soac`) can use it on a raw
 /// `SoacOp` without building a throwaway `SoacAnalysis`.
 fn soac_inputs(soac: &SoacOp) -> Vec<&ArrayExpr> {
-    match soac {
-        SoacOp::Map { inputs, .. } | SoacOp::Redomap { inputs, .. } => inputs.iter().collect(),
-        SoacOp::Reduce { input, .. } | SoacOp::Scan { input, .. } => vec![input],
-        _ => unreachable!("non-parallelizable SoacOp in SoacAnalysis"),
-    }
+    parallel_soac_shape(soac).expect("non-parallel SOAC in SoacAnalysis").inputs
 }
 
 impl SoacAnalysis {
@@ -85,23 +147,13 @@ impl SoacAnalysis {
 
     /// Neutral/initial value — present for Reduce/Redomap/Scan, `None` for Map.
     pub fn ne(&self) -> Option<&Term> {
-        match &self.original {
-            SoacOp::Map { .. } => None,
-            SoacOp::Reduce { ne, .. } | SoacOp::Redomap { ne, .. } | SoacOp::Scan { ne, .. } => Some(ne),
-            _ => unreachable!("non-parallelizable SoacOp in SoacAnalysis"),
-        }
+        parallel_soac_shape(&self.original).expect("non-parallel SOAC in SoacAnalysis").ne
     }
 
     /// Element type of one iteration's output — Map/Scan elem type (from the
     /// per-element lambda's ret_ty); Reduce/Redomap acc type (from `ne.ty`).
     pub fn result_elem_type(&self) -> Type<TypeName> {
-        match &self.original {
-            SoacOp::Map { lam, .. } => lam.lam.ret_ty.clone(),
-            SoacOp::Reduce { ne, .. } | SoacOp::Redomap { ne, .. } | SoacOp::Scan { ne, .. } => {
-                ne.ty.clone()
-            }
-            _ => unreachable!("non-parallelizable SoacOp in SoacAnalysis"),
-        }
+        parallel_soac_shape(&self.original).expect("non-parallel SOAC in SoacAnalysis").result_elem_type
     }
 }
 
@@ -519,6 +571,18 @@ fn analyze_soac(
     _symbols: &SymbolTable,
     entry_slots: &[Option<EntryParamBinding>],
 ) -> Option<SoacAnalysis> {
+    let shape = parallel_soac_shape(soac)?;
+    if !shape.lowerable_today {
+        return None;
+    }
+    debug_assert!(matches!(
+        shape.flavor,
+        ParallelSoacFlavor::Map
+            | ParallelSoacFlavor::Reduce
+            | ParallelSoacFlavor::Redomap
+            | ParallelSoacFlavor::Scan
+    ));
+
     let normalized: SoacOp = match soac {
         SoacOp::Map {
             lam,
@@ -1660,8 +1724,9 @@ fn make_lowering_plan(
     term_ids: &mut TermIdSource,
 ) -> LoweringPlan {
     let sizing = PipelineSizing::for_analyzed_entry(program, analysis);
-    match &analysis.soac.original {
-        SoacOp::Map { .. } => {
+    let shape = parallel_soac_shape(&analysis.soac.original).expect("analyzed SOAC has a parallel shape");
+    match shape.flavor {
+        ParallelSoacFlavor::Map => {
             // `forced_result_binding` pins the map's output to a specific
             // buffer when this is a gather pre-pass (the consumer reads it via
             // `storage_index`); ordinary maps pass `None` and auto-allocate.
@@ -1674,39 +1739,52 @@ fn make_lowering_plan(
                 program,
             )
         }
-        SoacOp::Reduce { op, ne, .. } => make_two_phase_plan(
-            analysis,
-            entry_name,
-            op,
-            ne,
-            next_binding,
-            forced_result_binding,
-            program,
-            sizing,
-            term_ids,
-        ),
-        SoacOp::Redomap { reduce_op, ne, .. } => make_two_phase_plan(
-            analysis,
-            entry_name,
-            reduce_op,
-            ne,
-            next_binding,
-            forced_result_binding,
-            program,
-            sizing,
-            term_ids,
-        ),
-        SoacOp::Scan { op, ne, .. } => make_scan_plan(
-            analysis,
-            entry_name,
-            op,
-            ne,
-            next_binding,
-            forced_result_binding,
-            program,
-            sizing,
-        ),
-        _ => unreachable!("analyze_soac rejected non-parallelizable variants"),
+        ParallelSoacFlavor::Reduce | ParallelSoacFlavor::Redomap => {
+            let (reduce_op, ne) =
+                accumulator_phase_combiner(&analysis.soac.original).expect("reduce-like SOAC has combiner");
+            make_two_phase_plan(
+                analysis,
+                entry_name,
+                reduce_op,
+                ne,
+                next_binding,
+                forced_result_binding,
+                program,
+                sizing,
+                term_ids,
+            )
+        }
+        ParallelSoacFlavor::Scan => {
+            let (op, ne) = scan_phase_combiner(&analysis.soac.original).expect("scan SOAC has combiner");
+            make_scan_plan(
+                analysis,
+                entry_name,
+                op,
+                ne,
+                next_binding,
+                forced_result_binding,
+                program,
+                sizing,
+            )
+        }
+        ParallelSoacFlavor::Screma => {
+            unreachable!("analyze_soac gates Screma until the multi-output phase planner exists")
+        }
+    }
+}
+
+fn accumulator_phase_combiner(soac: &SoacOp) -> Option<(&super::SoacBody, &Term)> {
+    match soac {
+        SoacOp::Reduce { op, ne, .. } => Some((op, ne)),
+        SoacOp::Redomap { reduce_op, ne, .. } => Some((reduce_op, ne)),
+        _ => None,
+    }
+}
+
+fn scan_phase_combiner(soac: &SoacOp) -> Option<(&super::SoacBody, &Term)> {
+    match soac {
+        SoacOp::Scan { op, ne, .. } => Some((op, ne)),
+        _ => None,
     }
 }
 
@@ -3400,7 +3478,7 @@ fn collect_bindings_in_ae(ae: &ArrayExpr, used: &mut HashSet<BindingRef>) {
 
 fn collect_bindings_in_soac(op: &SoacOp, used: &mut HashSet<BindingRef>) {
     match op {
-        SoacOp::Map { inputs, .. } | SoacOp::Redomap { inputs, .. } => {
+        SoacOp::Map { inputs, .. } | SoacOp::Redomap { inputs, .. } | SoacOp::Screma { inputs, .. } => {
             for ae in inputs {
                 collect_bindings_in_ae(ae, used);
             }

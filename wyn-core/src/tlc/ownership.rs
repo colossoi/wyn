@@ -533,6 +533,60 @@ impl<'p> Builder<'p> {
                 }
                 self.visit_soac_body(reduce_op);
             }
+            SoacOp::Screma {
+                map_lams,
+                accumulators,
+                inputs,
+                ..
+            } => {
+                for acc in accumulators {
+                    self.visit_term(&acc.ne);
+                }
+                for ae in inputs {
+                    self.visit_array_expr(ae);
+                }
+                for map_lam in map_lams {
+                    for ((sym, ty), input) in map_lam.lam.params.iter().zip(inputs.iter()) {
+                        if !types::is_copy(ty) {
+                            let origin = self.element_origin_from_input(input);
+                            let owner = self.fresh_owner(origin);
+                            self.bind(*sym, owner);
+                            self.record_per_call_def(soac_id, owner);
+                        }
+                    }
+                }
+                for acc in accumulators {
+                    if let Some(((acc_sym, acc_ty), elem_params)) = acc.step_lam.lam.params.split_first() {
+                        if !types::is_copy(acc_ty) {
+                            let owner = self.fresh_owner(Origin::Fresh);
+                            self.bind(*acc_sym, owner);
+                            self.record_per_call_def(soac_id, owner);
+                        }
+                        for ((sym, ty), input) in elem_params.iter().zip(inputs.iter()) {
+                            if !types::is_copy(ty) {
+                                let origin = self.element_origin_from_input(input);
+                                let owner = self.fresh_owner(origin);
+                                self.bind(*sym, owner);
+                                self.record_per_call_def(soac_id, owner);
+                            }
+                        }
+                    }
+                    for (sym, ty) in &acc.reduce_op.lam.params {
+                        if !types::is_copy(ty) {
+                            let owner = self.fresh_owner(Origin::Fresh);
+                            self.bind(*sym, owner);
+                            self.record_per_call_def(soac_id, owner);
+                        }
+                    }
+                }
+                for map_lam in map_lams {
+                    self.visit_soac_body(map_lam);
+                }
+                for acc in accumulators {
+                    self.visit_soac_body(&acc.step_lam);
+                    self.visit_soac_body(&acc.reduce_op);
+                }
+            }
         }
     }
 
@@ -941,6 +995,28 @@ impl<'m> Liveness<'m> {
                     live = self.analyze_array_expr(ae, live);
                 }
                 self.analyze(ne, live)
+            }
+            SoacOp::Screma {
+                map_lams,
+                accumulators,
+                inputs,
+                ..
+            } => {
+                let mut live = live_after;
+                for map_lam in map_lams {
+                    live = self.soac_envelope_fixed_point(map_lam, &per_call_defs, live);
+                }
+                for acc in accumulators {
+                    live = self.soac_envelope_fixed_point(&acc.step_lam, &per_call_defs, live);
+                    live = self.soac_envelope_fixed_point(&acc.reduce_op, &per_call_defs, live);
+                }
+                for ae in inputs.iter().rev() {
+                    live = self.analyze_array_expr(ae, live);
+                }
+                for acc in accumulators.iter().rev() {
+                    live = self.analyze(&acc.ne, live);
+                }
+                live
             }
         }
     }

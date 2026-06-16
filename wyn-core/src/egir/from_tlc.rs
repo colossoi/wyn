@@ -1723,6 +1723,11 @@ impl<'a> Converter<'a> {
                 inputs,
                 ..
             } => self.convert_soac_redomap(op, reduce_op, ne, inputs, ty),
+            SoacOp::Screma {
+                map_lams,
+                accumulators,
+                inputs,
+            } => self.convert_soac_screma(map_lams, accumulators, inputs, ty),
             SoacOp::Scan {
                 op,
                 reduce_op,
@@ -1959,6 +1964,123 @@ impl<'a> Converter<'a> {
                 reduce_func: reduce_func_name,
                 input_array_types: input_arr_types,
                 input_elem_types,
+            },
+            operands,
+            result_ty,
+        ))
+    }
+
+    fn convert_soac_screma(
+        &mut self,
+        map_lams: &[SoacBody],
+        accumulators: &[crate::tlc::ScremaAccumulatorSpec],
+        inputs: &[ArrayExpr],
+        result_ty: Type<TypeName>,
+    ) -> Result<NodeId, ConvertError> {
+        let result_fields = match &result_ty {
+            Type::Constructed(TypeName::Tuple(_), fields)
+                if fields.len() == map_lams.len() + accumulators.len() =>
+            {
+                fields.clone()
+            }
+            other => {
+                return Err(ConvertError::GraphError(format!(
+                    "screma result must be a tuple with {} mapped and {} accumulator fields, got {other:?}",
+                    map_lams.len(),
+                    accumulators.len()
+                )));
+            }
+        };
+
+        let map_funcs: Vec<String> =
+            map_lams.iter().map(|body| self.lambda_fn_name(&body.lam)).collect::<Result<_, _>>()?;
+        let map_capture_nids: Vec<Vec<NodeId>> = map_lams
+            .iter()
+            .map(|body| {
+                body.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<Vec<_>, _>>()
+            })
+            .collect::<Result<_, _>>()?;
+
+        let mut pending_accs = Vec::with_capacity(accumulators.len());
+        let mut acc_init_nids = Vec::with_capacity(accumulators.len());
+        let mut acc_step_capture_nids = Vec::with_capacity(accumulators.len());
+        let mut acc_reduce_op_capture_nids = Vec::with_capacity(accumulators.len());
+        for acc in accumulators {
+            let step_func = self.lambda_fn_name(&acc.step_lam.lam)?;
+            let reduce_op_func = self.lambda_fn_name(&acc.reduce_op.lam)?;
+            let step_caps: Vec<NodeId> = acc
+                .step_lam
+                .captures
+                .iter()
+                .map(|(_, _, t)| self.convert_term(t))
+                .collect::<Result<_, _>>()?;
+            let reduce_op_caps: Vec<NodeId> = acc
+                .reduce_op
+                .captures
+                .iter()
+                .map(|(_, _, t)| self.convert_term(t))
+                .collect::<Result<_, _>>()?;
+            let init_nid = self.convert_term(&acc.ne)?;
+            pending_accs.push(super::types::PendingScremaAccumulator {
+                kind: acc.kind,
+                step_func,
+                reduce_op_func,
+                step_capture_count: step_caps.len(),
+                reduce_op_capture_count: reduce_op_caps.len(),
+            });
+            acc_init_nids.push(init_nid);
+            acc_step_capture_nids.push(step_caps);
+            acc_reduce_op_capture_nids.push(reduce_op_caps);
+        }
+
+        let input_nids: Vec<NodeId> =
+            inputs.iter().map(|ae| self.convert_array_expr_value(ae)).collect::<Result<_, _>>()?;
+        let input_arr_types: Vec<Type<TypeName>> =
+            inputs.iter().zip(input_nids.iter()).map(|(ae, nid)| self.value_array_type(*nid, ae)).collect();
+        let input_elem_types: Vec<Type<TypeName>> = input_arr_types
+            .iter()
+            .zip(inputs.iter())
+            .map(|(ty, ae)| self.value_elem_type(ty, ae))
+            .collect();
+
+        let mut map_output_elem_types = Vec::with_capacity(map_lams.len());
+        for map_idx in 0..map_lams.len() {
+            let map_array_ty = result_fields[map_idx].clone();
+            let elem_ty = if map_array_ty.is_array() {
+                map_array_ty.elem_type().expect("Array has elem").clone()
+            } else if super::soac_expand::as_soa_tuple(&map_array_ty).is_some() {
+                super::soac_expand::soa_element_type(&map_array_ty)
+            } else {
+                return Err(ConvertError::GraphError(format!(
+                    "screma mapped result must be an array or SoA tuple, got {map_array_ty:?}"
+                )));
+            };
+            map_output_elem_types.push(elem_ty);
+        }
+
+        let mut operands: SmallVec<[NodeId; 4]> = SmallVec::new();
+        operands.extend(input_nids.iter().copied());
+        operands.extend(acc_init_nids.iter().copied());
+        for caps in &map_capture_nids {
+            operands.extend(caps.iter().copied());
+        }
+        for caps in &acc_step_capture_nids {
+            operands.extend(caps.iter().copied());
+        }
+        for caps in &acc_reduce_op_capture_nids {
+            operands.extend(caps.iter().copied());
+        }
+
+        Ok(self.emit_soac(
+            PendingSoac::Screma {
+                map_funcs,
+                accumulators: pending_accs,
+                input_array_types: input_arr_types,
+                input_elem_types,
+                map_output_elem_types,
+                map_capture_counts: map_capture_nids.iter().map(Vec::len).collect(),
+                map_destinations: vec![SoacDestination::Fresh; map_lams.len()],
+                acc_destinations: vec![SoacDestination::Fresh; accumulators.len()],
             },
             operands,
             result_ty,

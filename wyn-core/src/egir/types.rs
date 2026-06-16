@@ -150,9 +150,20 @@ pub enum SideEffectKind {
 /// - `Fresh` (Scan): `[input, init, ...captures]`
 /// - `OutputView` (Map): `[input_0, ..., ...captures, output_view]`
 /// - `OutputView` (Scan): `[input, init, ...captures, output_view]`
+/// - `OutputView` (Screma): `[inputs..., init_accs..., map_captures...,
+///   acc_step_captures..., acc_reduce_op_captures..., output_views...]`
 /// - `InputBuffer`: operand layout matches `Fresh`; the difference is
 ///   that the result aliases `inputs[0]` instead of a fresh allocation.
-pub use crate::tlc::SoacDestination;
+pub use crate::tlc::{ScremaAccumulator, SoacDestination};
+
+#[derive(Clone, Debug)]
+pub struct PendingScremaAccumulator {
+    pub kind: ScremaAccumulator,
+    pub step_func: String,
+    pub reduce_op_func: String,
+    pub step_capture_count: usize,
+    pub reduce_op_capture_count: usize,
+}
 
 /// An unexpanded SOAC operation held in the skeleton until `soac_expand` rewrites
 /// it into an explicit loop. All operand NodeIds live in `SideEffect.operand_nodes`
@@ -202,6 +213,20 @@ pub enum PendingSoac {
         reduce_func: String,
         input_array_types: Vec<Type<TypeName>>,
         input_elem_types: Vec<Type<TypeName>>,
+    },
+    /// Multi-result map+accumulator: one pass writes mapped outputs and
+    /// threads accumulator outputs. Operand layout:
+    /// `[inputs..., init_accs..., map_captures..., acc_step_captures...,
+    /// acc_reduce_op_captures..., output_views...]`.
+    Screma {
+        map_funcs: Vec<String>,
+        accumulators: Vec<PendingScremaAccumulator>,
+        input_array_types: Vec<Type<TypeName>>,
+        input_elem_types: Vec<Type<TypeName>>,
+        map_output_elem_types: Vec<Type<TypeName>>,
+        map_capture_counts: Vec<usize>,
+        map_destinations: Vec<SoacDestination>,
+        acc_destinations: Vec<SoacDestination>,
     },
     /// `filter pred input` carrying the elements of `input` that
     /// satisfied the predicate, plus a runtime count.

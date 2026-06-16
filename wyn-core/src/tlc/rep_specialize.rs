@@ -452,6 +452,23 @@ impl RepSpecializer {
                 ne: Box::new(self.rewrite_term(*ne)),
                 inputs: inputs.into_iter().map(|ae| self.rewrite_array_expr(ae)).collect(),
             },
+            SoacOp::Screma {
+                map_lams,
+                accumulators,
+                inputs,
+            } => SoacOp::Screma {
+                map_lams: map_lams.into_iter().map(|body| self.rewrite_soac_body(body)).collect(),
+                accumulators: accumulators
+                    .into_iter()
+                    .map(|acc| super::ScremaAccumulatorSpec {
+                        kind: acc.kind,
+                        step_lam: self.rewrite_soac_body(acc.step_lam),
+                        reduce_op: self.rewrite_soac_body(acc.reduce_op),
+                        ne: Box::new(self.rewrite_term(*acc.ne)),
+                    })
+                    .collect(),
+                inputs: inputs.into_iter().map(|ae| self.rewrite_array_expr(ae)).collect(),
+            },
         }
     }
 

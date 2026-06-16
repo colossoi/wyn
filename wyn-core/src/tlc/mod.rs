@@ -552,6 +552,20 @@ pub enum SoacDestination {
     OutputView,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScremaAccumulator {
+    Reduce,
+    Scan,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScremaAccumulatorSpec {
+    pub kind: ScremaAccumulator,
+    pub step_lam: SoacBody,
+    pub reduce_op: SoacBody,
+    pub ne: Box<Term>,
+}
+
 /// A second-order array combinator (SOAC) operation.
 ///
 /// `Reduce`, `Redomap`, `Scan`, and `ReduceByIndex` parallelize freely on
@@ -587,6 +601,16 @@ pub enum SoacOp {
         /// Initial accumulator value.
         ne: Box<Term>,
         /// Parallel input arrays (one per element param in op).
+        inputs: Vec<ArrayExpr>,
+    },
+    /// Multi-result map+accumulator SOAC: one loop over `inputs` writes zero
+    /// or more mapped array results and threads zero or more accumulator
+    /// results. Result order is all mapped outputs, then accumulator outputs.
+    Screma {
+        /// Elementwise mapped outputs: each `(x1, ..., xn) -> y`.
+        map_lams: Vec<SoacBody>,
+        /// Per-element accumulator outputs.
+        accumulators: Vec<ScremaAccumulatorSpec>,
         inputs: Vec<ArrayExpr>,
     },
     Scan {
@@ -1053,6 +1077,23 @@ where
                 visit_array_expr_children(ae, f);
             }
         }
+        SoacOp::Screma {
+            map_lams,
+            accumulators,
+            inputs,
+        } => {
+            for map_lam in map_lams {
+                visit_soac_body_children(map_lam, f);
+            }
+            for acc in accumulators {
+                visit_soac_body_children(&acc.step_lam, f);
+                visit_soac_body_children(&acc.reduce_op, f);
+                f(&acc.ne);
+            }
+            for ae in inputs {
+                visit_array_expr_children(ae, f);
+            }
+        }
     }
 }
 
@@ -1199,6 +1240,23 @@ where
             op: map_soac_body_children(op, f),
             reduce_op: map_soac_body_children(reduce_op, f),
             ne: Box::new(f(*ne)),
+            inputs: inputs.into_iter().map(|ae| map_array_expr_children(ae, f)).collect(),
+        },
+        SoacOp::Screma {
+            map_lams,
+            accumulators,
+            inputs,
+        } => SoacOp::Screma {
+            map_lams: map_lams.into_iter().map(|map_lam| map_soac_body_children(map_lam, f)).collect(),
+            accumulators: accumulators
+                .into_iter()
+                .map(|acc| ScremaAccumulatorSpec {
+                    kind: acc.kind,
+                    step_lam: map_soac_body_children(acc.step_lam, f),
+                    reduce_op: map_soac_body_children(acc.reduce_op, f),
+                    ne: Box::new(f(*acc.ne)),
+                })
+                .collect(),
             inputs: inputs.into_iter().map(|ae| map_array_expr_children(ae, f)).collect(),
         },
     }

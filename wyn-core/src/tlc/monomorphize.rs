@@ -680,6 +680,23 @@ impl<'a> Monomorphizer<'a> {
                 ne: Box::new(self.process_term(ne)),
                 inputs: inputs.iter().map(|ae| self.process_array_expr(ae)).collect(),
             },
+            SoacOp::Screma {
+                map_lams,
+                accumulators,
+                inputs,
+            } => SoacOp::Screma {
+                map_lams: map_lams.iter().map(|body| self.process_soac_body(body)).collect(),
+                accumulators: accumulators
+                    .iter()
+                    .map(|acc| super::ScremaAccumulatorSpec {
+                        kind: acc.kind,
+                        step_lam: self.process_soac_body(&acc.step_lam),
+                        reduce_op: self.process_soac_body(&acc.reduce_op),
+                        ne: Box::new(self.process_term(&acc.ne)),
+                    })
+                    .collect(),
+                inputs: inputs.iter().map(|ae| self.process_array_expr(ae)).collect(),
+            },
         }
     }
 
@@ -1043,6 +1060,23 @@ impl<'a> Monomorphizer<'a> {
                 op: self.apply_subst_soac_body(op, subst),
                 reduce_op: self.apply_subst_soac_body(reduce_op, subst),
                 ne: Box::new(self.apply_subst_term(ne, subst)),
+                inputs: inputs.iter().map(|ae| self.apply_subst_array_expr(ae, subst)).collect(),
+            },
+            SoacOp::Screma {
+                map_lams,
+                accumulators,
+                inputs,
+            } => SoacOp::Screma {
+                map_lams: map_lams.iter().map(|body| self.apply_subst_soac_body(body, subst)).collect(),
+                accumulators: accumulators
+                    .iter()
+                    .map(|acc| super::ScremaAccumulatorSpec {
+                        kind: acc.kind,
+                        step_lam: self.apply_subst_soac_body(&acc.step_lam, subst),
+                        reduce_op: self.apply_subst_soac_body(&acc.reduce_op, subst),
+                        ne: Box::new(self.apply_subst_term(&acc.ne, subst)),
+                    })
+                    .collect(),
                 inputs: inputs.iter().map(|ae| self.apply_subst_array_expr(ae, subst)).collect(),
             },
         }

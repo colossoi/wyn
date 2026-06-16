@@ -395,6 +395,22 @@ fn subst_soac(soac: &mut SoacOp, s: &RegionSubst) {
             subst_term(ne, s);
             inputs.iter_mut().for_each(|ae| subst_array_expr(ae, s));
         }
+        SoacOp::Screma {
+            map_lams,
+            accumulators,
+            inputs,
+            ..
+        } => {
+            for map_lam in map_lams {
+                subst_soac_body(map_lam, s);
+            }
+            for acc in accumulators {
+                subst_soac_body(&mut acc.step_lam, s);
+                subst_soac_body(&mut acc.reduce_op, s);
+                subst_term(&mut acc.ne, s);
+            }
+            inputs.iter_mut().for_each(|ae| subst_array_expr(ae, s));
+        }
     }
 }
 

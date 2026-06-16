@@ -94,6 +94,15 @@ pub fn run(program: Program) -> Program {
             .map(|def| {
                 // Bottom-up: fuse children first, then try graph-driven fusion
                 let new_body = fuse_term(def.body, &ctx, &mut symbols, &mut term_ids);
+                let (new_body, did_fuse) = fuse_screma_groups(new_body, &mut symbols, &mut term_ids);
+                if did_fuse {
+                    changed = true;
+                }
+                let (new_body, did_fuse) =
+                    fuse_map_into_screma_consumer(new_body, &mut symbols, &mut term_ids);
+                if did_fuse {
+                    changed = true;
+                }
                 let (new_body, did_fuse) = fuse_def_body(new_body, &ctx, &mut symbols, &mut term_ids);
                 if did_fuse {
                     changed = true;
@@ -122,6 +131,691 @@ pub fn run(program: Program) -> Program {
 // =============================================================================
 // Per-def fusion
 // =============================================================================
+
+#[derive(Clone)]
+struct LetBinding {
+    name: SymbolId,
+    name_ty: Type<TypeName>,
+    rhs: Term,
+    span: Span,
+}
+
+struct ScremaRewrite {
+    insert_at: usize,
+    skip_indices: Vec<usize>,
+    tuple_sym: SymbolId,
+    tuple_ty: Type<TypeName>,
+    fused_binding: LetBinding,
+    projection_fields: HashMap<usize, usize>,
+}
+
+fn fuse_screma_groups(body: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdSource) -> (Term, bool) {
+    let (params, inner) = extract_lambda_params(&body);
+    let (bindings, tail) = flatten_let_chain(inner);
+
+    let Some(group) = find_screma_group(&bindings, &tail) else {
+        return (body, false);
+    };
+
+    let span = group.span;
+    let mut result_fields = Vec::with_capacity(group.maps.len() + group.accumulators.len());
+    result_fields.extend(group.maps.iter().map(|consumer| bindings[consumer.binding_idx].name_ty.clone()));
+    result_fields
+        .extend(group.accumulators.iter().map(|consumer| bindings[consumer.binding_idx].name_ty.clone()));
+    let map_lams: Vec<super::SoacBody> = group
+        .maps
+        .iter()
+        .map(|consumer| {
+            if let Some(producer_lam) = &group.producer_lam {
+                super::SoacBody {
+                    lam: compose_lambdas(
+                        producer_lam.lam.clone(),
+                        consumer.lam.lam.clone(),
+                        span,
+                        symbols,
+                        term_ids,
+                    ),
+                    captures: vec![],
+                }
+            } else {
+                consumer.lam.clone()
+            }
+        })
+        .collect();
+    let accumulators: Vec<super::ScremaAccumulatorSpec> = group
+        .accumulators
+        .iter()
+        .map(|consumer| {
+            let producer_lam =
+                group.producer_lam.as_ref().expect("accumulator Screma fusion requires a producer lambda");
+            super::ScremaAccumulatorSpec {
+                kind: consumer.accumulator,
+                step_lam: super::SoacBody {
+                    lam: compose_map_reduce(
+                        producer_lam.lam.clone(),
+                        consumer.op.lam.clone(),
+                        span,
+                        symbols,
+                        term_ids,
+                    ),
+                    captures: vec![],
+                },
+                reduce_op: consumer.reduce_op.clone(),
+                ne: consumer.ne.clone(),
+            }
+        })
+        .collect();
+    let mut projection_fields: HashMap<usize, usize> = HashMap::new();
+    projection_fields.extend(
+        group.maps.iter().enumerate().map(|(field_idx, consumer)| (consumer.binding_idx, field_idx)),
+    );
+    projection_fields.extend(
+        group
+            .accumulators
+            .iter()
+            .enumerate()
+            .map(|(acc_idx, consumer)| (consumer.binding_idx, group.maps.len() + acc_idx)),
+    );
+    let rewrite = make_screma_rewrite(
+        group.insert_at,
+        group.skip_indices,
+        group.symbol_name,
+        result_fields,
+        map_lams,
+        accumulators,
+        group.inputs,
+        span,
+        projection_fields,
+        symbols,
+        term_ids,
+    );
+    let new_bindings = apply_screma_rewrite(&bindings, rewrite, term_ids);
+
+    let fused_inner = rebuild_let_chain(new_bindings, tail, term_ids);
+    (rebuild_lambda_params(params, fused_inner, term_ids), true)
+}
+
+struct ScremaProducer {
+    lam: super::SoacBody,
+    inputs: Vec<ArrayExpr>,
+}
+
+struct ScremaReduceConsumer {
+    binding_idx: usize,
+    op: super::SoacBody,
+    reduce_op: super::SoacBody,
+    ne: Box<Term>,
+    accumulator: super::ScremaAccumulator,
+}
+
+struct ScremaMapGroupConsumer {
+    binding_idx: usize,
+    lam: super::SoacBody,
+}
+
+struct ScremaGroup {
+    insert_at: usize,
+    skip_indices: Vec<usize>,
+    symbol_name: &'static str,
+    span: Span,
+    inputs: Vec<ArrayExpr>,
+    producer_lam: Option<super::SoacBody>,
+    maps: Vec<ScremaMapGroupConsumer>,
+    accumulators: Vec<ScremaReduceConsumer>,
+}
+
+fn find_screma_group(bindings: &[LetBinding], tail: &Term) -> Option<ScremaGroup> {
+    find_producer_screma_group(bindings, tail).or_else(|| find_direct_map_screma_group(bindings))
+}
+
+fn find_producer_screma_group(bindings: &[LetBinding], tail: &Term) -> Option<ScremaGroup> {
+    for idx in 0..bindings.len() {
+        let Some(producer) = screma_producer_map(&bindings[idx].rhs) else {
+            continue;
+        };
+        let producer_sym = bindings[idx].name;
+        let mut maps = Vec::new();
+        let mut accumulators = Vec::new();
+        let mut selected_consumer_names = Vec::new();
+        let mut cursor = idx + 1;
+        let mut blocked = false;
+        while cursor < bindings.len() {
+            if let Some(lam) = screma_consumer_map(&bindings[cursor].rhs, producer_sym) {
+                if term_mentions_any(&bindings[cursor].rhs, &selected_consumer_names) {
+                    blocked = true;
+                    break;
+                }
+                selected_consumer_names.push(bindings[cursor].name);
+                maps.push(ScremaMapGroupConsumer {
+                    binding_idx: cursor,
+                    lam,
+                });
+                cursor += 1;
+                continue;
+            }
+            if let Some(mut acc) = screma_consumer_accumulator(&bindings[cursor].rhs, producer_sym) {
+                if term_mentions_any(&bindings[cursor].rhs, &selected_consumer_names) {
+                    blocked = true;
+                    break;
+                }
+                selected_consumer_names.push(bindings[cursor].name);
+                acc.binding_idx = cursor;
+                accumulators.push(acc);
+                cursor += 1;
+                continue;
+            }
+            if term_mentions_any(&bindings[cursor].rhs, &[producer_sym]) {
+                blocked = true;
+                break;
+            }
+            cursor += 1;
+        }
+        if !blocked
+            && !maps.is_empty()
+            && !accumulators.is_empty()
+            && maps.len() + accumulators.len() >= 2
+            && !term_mentions_any(tail, &[producer_sym])
+        {
+            return Some(ScremaGroup {
+                insert_at: idx,
+                skip_indices: vec![idx],
+                symbol_name: "_screma",
+                span: bindings[idx].span,
+                inputs: producer.inputs,
+                producer_lam: Some(producer.lam),
+                maps,
+                accumulators,
+            });
+        }
+    }
+    None
+}
+
+fn find_direct_map_screma_group(bindings: &[LetBinding]) -> Option<ScremaGroup> {
+    let mut start = 0;
+    while start < bindings.len() {
+        let Some(first) = direct_screma_map(&bindings[start].rhs) else {
+            start += 1;
+            continue;
+        };
+
+        let Some(first_input_syms) = array_ref_symbols(&first.inputs) else {
+            start += 1;
+            continue;
+        };
+        let first_param_tys = param_types(&first.lam.lam.params);
+        let mut maps = vec![ScremaMapGroupConsumer {
+            binding_idx: start,
+            lam: first.lam,
+        }];
+        let mut end = start + 1;
+        while end < bindings.len() {
+            let Some(next) = direct_screma_map(&bindings[end].rhs) else {
+                break;
+            };
+            let Some(next_input_syms) = array_ref_symbols(&next.inputs) else {
+                break;
+            };
+            if next_input_syms != first_input_syms || param_types(&next.lam.lam.params) != first_param_tys {
+                break;
+            }
+            maps.push(ScremaMapGroupConsumer {
+                binding_idx: end,
+                lam: next.lam,
+            });
+            end += 1;
+        }
+
+        if maps.len() >= 2 {
+            let candidate_names: Vec<SymbolId> = bindings[start..end].iter().map(|b| b.name).collect();
+            if !bindings[start..end].iter().any(|binding| term_mentions_any(&binding.rhs, &candidate_names))
+            {
+                return Some(ScremaGroup {
+                    insert_at: start,
+                    skip_indices: vec![],
+                    symbol_name: "_horizontal_map",
+                    span: bindings[start].span,
+                    inputs: first.inputs,
+                    producer_lam: None,
+                    maps,
+                    accumulators: vec![],
+                });
+            }
+        }
+        start = end.max(start + 1);
+    }
+    None
+}
+
+fn screma_producer_map(term: &Term) -> Option<ScremaProducer> {
+    map_screma_producer(term, MapProducerPolicy::Producer)
+}
+
+fn direct_screma_map(term: &Term) -> Option<ScremaProducer> {
+    map_screma_producer(term, MapProducerPolicy::Direct)
+}
+
+enum MapProducerPolicy {
+    Producer,
+    Direct,
+}
+
+fn map_screma_producer(term: &Term, policy: MapProducerPolicy) -> Option<ScremaProducer> {
+    let TermKind::Soac(SoacOp::Map {
+        lam,
+        inputs,
+        destination: _,
+    }) = &term.kind
+    else {
+        return None;
+    };
+    if !lam.captures.is_empty() {
+        return None;
+    }
+    match policy {
+        MapProducerPolicy::Producer if lam.lam.params.is_empty() => return None,
+        MapProducerPolicy::Direct if inputs.is_empty() || inputs.len() != lam.lam.params.len() => {
+            return None;
+        }
+        _ => {}
+    }
+    Some(ScremaProducer {
+        lam: lam.clone(),
+        inputs: inputs.clone(),
+    })
+}
+
+fn screma_consumer_map(term: &Term, input_sym: SymbolId) -> Option<super::SoacBody> {
+    let TermKind::Soac(SoacOp::Map { lam, inputs, .. }) = &term.kind else {
+        return None;
+    };
+    if inputs.len() != 1 || inputs[0].as_named_ref() != Some(input_sym) || lam.lam.params.len() != 1 {
+        return None;
+    }
+    Some(lam.clone())
+}
+
+fn screma_consumer_accumulator(term: &Term, input_sym: SymbolId) -> Option<ScremaReduceConsumer> {
+    match &term.kind {
+        TermKind::Soac(SoacOp::Reduce { op, ne, input }) => {
+            if input.as_named_ref() != Some(input_sym) || op.lam.params.len() != 2 {
+                return None;
+            }
+            Some(ScremaReduceConsumer {
+                binding_idx: usize::MAX,
+                op: op.clone(),
+                reduce_op: op.clone(),
+                ne: ne.clone(),
+                accumulator: super::ScremaAccumulator::Reduce,
+            })
+        }
+        TermKind::Soac(SoacOp::Scan {
+            op,
+            reduce_op,
+            ne,
+            input,
+            ..
+        }) => {
+            if input.as_named_ref() != Some(input_sym) || op.lam.params.len() != 2 {
+                return None;
+            }
+            Some(ScremaReduceConsumer {
+                binding_idx: usize::MAX,
+                op: op.clone(),
+                reduce_op: reduce_op.clone(),
+                ne: ne.clone(),
+                accumulator: super::ScremaAccumulator::Scan,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn fuse_map_into_screma_consumer(
+    body: Term,
+    symbols: &mut SymbolTable,
+    term_ids: &mut TermIdSource,
+) -> (Term, bool) {
+    let (params, inner) = extract_lambda_params(&body);
+    let (bindings, tail) = flatten_let_chain(inner);
+
+    let Some((producer_idx, consumer_idx, fused_rhs)) =
+        find_map_into_screma_consumer(&bindings, &tail, symbols, term_ids)
+    else {
+        return (body, false);
+    };
+
+    let mut new_bindings = Vec::with_capacity(bindings.len() - 1);
+    for (idx, binding) in bindings.into_iter().enumerate() {
+        if idx == producer_idx {
+            continue;
+        }
+        if idx == consumer_idx {
+            new_bindings.push(LetBinding {
+                rhs: fused_rhs.clone(),
+                ..binding
+            });
+        } else {
+            new_bindings.push(binding);
+        }
+    }
+
+    let fused_inner = rebuild_let_chain(new_bindings, tail, term_ids);
+    (rebuild_lambda_params(params, fused_inner, term_ids), true)
+}
+
+fn find_map_into_screma_consumer(
+    bindings: &[LetBinding],
+    tail: &Term,
+    symbols: &mut SymbolTable,
+    term_ids: &mut TermIdSource,
+) -> Option<(usize, usize, Term)> {
+    for producer_idx in 0..bindings.len() {
+        let Some(producer) = screma_producer_map(&bindings[producer_idx].rhs) else {
+            continue;
+        };
+        let producer_sym = bindings[producer_idx].name;
+        for consumer_idx in producer_idx + 1..bindings.len() {
+            let Some(fused_rhs) = map_into_screma_rhs(
+                &producer,
+                producer_sym,
+                &bindings[consumer_idx].rhs,
+                bindings[consumer_idx].span,
+                symbols,
+                term_ids,
+            ) else {
+                if term_mentions_any(&bindings[consumer_idx].rhs, &[producer_sym]) {
+                    break;
+                }
+                continue;
+            };
+            let other_rhs_uses = bindings.iter().enumerate().any(|(idx, binding)| {
+                idx != producer_idx
+                    && idx != consumer_idx
+                    && term_mentions_any(&binding.rhs, &[producer_sym])
+            });
+            if !other_rhs_uses && !term_mentions_any(tail, &[producer_sym]) {
+                return Some((producer_idx, consumer_idx, fused_rhs));
+            }
+        }
+    }
+    None
+}
+
+fn map_into_screma_rhs(
+    producer: &ScremaProducer,
+    producer_sym: SymbolId,
+    consumer: &Term,
+    span: Span,
+    symbols: &mut SymbolTable,
+    term_ids: &mut TermIdSource,
+) -> Option<Term> {
+    let TermKind::Soac(SoacOp::Screma {
+        map_lams,
+        accumulators,
+        inputs,
+    }) = &consumer.kind
+    else {
+        return None;
+    };
+    if inputs.len() != 1 || inputs[0].as_named_ref() != Some(producer_sym) {
+        return None;
+    }
+    if map_lams.iter().any(|map_lam| !map_lam.captures.is_empty())
+        || accumulators.iter().any(|acc| !acc.step_lam.captures.is_empty())
+    {
+        return None;
+    }
+    if accumulators.iter().any(|acc| acc.step_lam.lam.params.len() != 2) {
+        return None;
+    }
+
+    let map_lams = map_lams
+        .iter()
+        .map(|map_lam| super::SoacBody {
+            lam: compose_lambdas(
+                producer.lam.lam.clone(),
+                map_lam.lam.clone(),
+                span,
+                symbols,
+                term_ids,
+            ),
+            captures: vec![],
+        })
+        .collect();
+    let accumulators = accumulators
+        .iter()
+        .map(|acc| super::ScremaAccumulatorSpec {
+            kind: acc.kind,
+            step_lam: super::SoacBody {
+                lam: compose_map_reduce(
+                    producer.lam.lam.clone(),
+                    acc.step_lam.lam.clone(),
+                    span,
+                    symbols,
+                    term_ids,
+                ),
+                captures: vec![],
+            },
+            reduce_op: acc.reduce_op.clone(),
+            ne: acc.ne.clone(),
+        })
+        .collect();
+
+    Some(Term {
+        id: term_ids.next_id(),
+        ty: consumer.ty.clone(),
+        span: consumer.span,
+        kind: TermKind::Soac(SoacOp::Screma {
+            map_lams,
+            accumulators,
+            inputs: producer.inputs.clone(),
+        }),
+    })
+}
+
+fn make_screma_term(
+    result_fields: Vec<Type<TypeName>>,
+    map_lams: Vec<super::SoacBody>,
+    accumulators: Vec<super::ScremaAccumulatorSpec>,
+    inputs: Vec<ArrayExpr>,
+    span: Span,
+    term_ids: &mut TermIdSource,
+) -> Term {
+    let ty = Type::Constructed(TypeName::Tuple(result_fields.len()), result_fields);
+    Term {
+        id: term_ids.next_id(),
+        ty,
+        span,
+        kind: TermKind::Soac(SoacOp::Screma {
+            map_lams,
+            accumulators,
+            inputs,
+        }),
+    }
+}
+
+fn make_screma_rewrite(
+    insert_at: usize,
+    skip_indices: Vec<usize>,
+    symbol_name: &str,
+    result_fields: Vec<Type<TypeName>>,
+    map_lams: Vec<super::SoacBody>,
+    accumulators: Vec<super::ScremaAccumulatorSpec>,
+    inputs: Vec<ArrayExpr>,
+    span: Span,
+    projection_fields: HashMap<usize, usize>,
+    symbols: &mut SymbolTable,
+    term_ids: &mut TermIdSource,
+) -> ScremaRewrite {
+    let tuple_sym = symbols.alloc(symbol_name.to_string());
+    let rhs = make_screma_term(result_fields, map_lams, accumulators, inputs, span, term_ids);
+    let tuple_ty = rhs.ty.clone();
+    let fused_binding = LetBinding {
+        name: tuple_sym,
+        name_ty: tuple_ty.clone(),
+        rhs,
+        span,
+    };
+    ScremaRewrite {
+        insert_at,
+        skip_indices,
+        tuple_sym,
+        tuple_ty,
+        fused_binding,
+        projection_fields,
+    }
+}
+
+fn tuple_projection_binding(
+    original: &LetBinding,
+    tuple_sym: SymbolId,
+    tuple_ty: &Type<TypeName>,
+    proj_idx: usize,
+    term_ids: &mut TermIdSource,
+) -> LetBinding {
+    let tuple_ref = Term {
+        id: term_ids.next_id(),
+        ty: tuple_ty.clone(),
+        span: original.span,
+        kind: TermKind::Var(VarRef::Symbol(tuple_sym)),
+    };
+    LetBinding {
+        name: original.name,
+        name_ty: original.name_ty.clone(),
+        rhs: Term {
+            id: term_ids.next_id(),
+            ty: original.name_ty.clone(),
+            span: original.span,
+            kind: TermKind::TupleProj {
+                tuple: Box::new(tuple_ref),
+                idx: proj_idx,
+            },
+        },
+        span: original.span,
+    }
+}
+
+fn apply_screma_rewrite(
+    bindings: &[LetBinding],
+    rewrite: ScremaRewrite,
+    term_ids: &mut TermIdSource,
+) -> Vec<LetBinding> {
+    let mut new_bindings = Vec::with_capacity(bindings.len() + 1 - rewrite.skip_indices.len());
+    for (idx, binding) in bindings.iter().enumerate() {
+        if idx == rewrite.insert_at {
+            new_bindings.push(rewrite.fused_binding.clone());
+        }
+        if rewrite.skip_indices.contains(&idx) {
+            continue;
+        }
+        if let Some(&proj_idx) = rewrite.projection_fields.get(&idx) {
+            new_bindings.push(tuple_projection_binding(
+                binding,
+                rewrite.tuple_sym,
+                &rewrite.tuple_ty,
+                proj_idx,
+                term_ids,
+            ));
+        } else {
+            new_bindings.push(binding.clone());
+        }
+    }
+    if rewrite.insert_at >= bindings.len() {
+        new_bindings.push(rewrite.fused_binding);
+    }
+    new_bindings
+}
+
+fn flatten_let_chain(mut term: Term) -> (Vec<LetBinding>, Term) {
+    let mut bindings = Vec::new();
+    loop {
+        match term.kind {
+            TermKind::Let {
+                name,
+                name_ty,
+                rhs,
+                body,
+            } => {
+                bindings.push(LetBinding {
+                    name,
+                    name_ty,
+                    rhs: *rhs,
+                    span: term.span,
+                });
+                term = *body;
+            }
+            _ => return (bindings, term),
+        }
+    }
+}
+
+fn rebuild_let_chain(bindings: Vec<LetBinding>, mut body: Term, term_ids: &mut TermIdSource) -> Term {
+    for binding in bindings.into_iter().rev() {
+        let ty = body.ty.clone();
+        body = Term {
+            id: term_ids.next_id(),
+            ty,
+            span: binding.span,
+            kind: TermKind::Let {
+                name: binding.name,
+                name_ty: binding.name_ty,
+                rhs: Box::new(binding.rhs),
+                body: Box::new(body),
+            },
+        };
+    }
+    body
+}
+
+fn rebuild_lambda_params(
+    params: Vec<(SymbolId, Type<TypeName>)>,
+    body: Term,
+    term_ids: &mut TermIdSource,
+) -> Term {
+    if params.is_empty() {
+        return body;
+    }
+
+    let ret_ty = body.ty.clone();
+    let mut lam_ty = ret_ty.clone();
+    for (_, param_ty) in params.iter().rev() {
+        lam_ty = Type::Constructed(TypeName::Arrow, vec![param_ty.clone(), lam_ty]);
+    }
+    Term {
+        id: term_ids.next_id(),
+        ty: lam_ty,
+        span: body.span,
+        kind: TermKind::Lambda(Lambda {
+            params,
+            body: Box::new(body),
+            ret_ty,
+        }),
+    }
+}
+
+fn param_types(params: &[(SymbolId, Type<TypeName>)]) -> Vec<Type<TypeName>> {
+    params.iter().map(|(_, ty)| ty.clone()).collect()
+}
+
+fn array_ref_symbols(inputs: &[ArrayExpr]) -> Option<Vec<SymbolId>> {
+    inputs.iter().map(ArrayExpr::as_named_ref).collect()
+}
+
+fn term_mentions_any(term: &Term, syms: &[SymbolId]) -> bool {
+    match &term.kind {
+        TermKind::Var(VarRef::Symbol(sym)) => syms.contains(sym),
+        _ => {
+            let mut found = false;
+            term.for_each_child(&mut |child| {
+                if !found && term_mentions_any(child, syms) {
+                    found = true;
+                }
+            });
+            found
+        }
+    }
+}
 
 /// Bottom-up: recurse into children, applying graph-driven fusion at each
 /// sub-expression that contains a Let chain with SOAC producers/consumers.
@@ -582,24 +1276,20 @@ fn fuse_inline_soac_inputs(term: Term, symbols: &mut SymbolTable, term_ids: &mut
 
         // reduce(op, ne, map(g, xs)) → redomap(op∘g, op, ne, xs)
         TermKind::Soac(SoacOp::Reduce { op, ne, input }) => {
-            // Mirror the `MapIntoReduce` semantic guard: binary reducer only.
-            if op.lam.params.len() == 2 {
-                if let Some((map_sb, map_inputs)) = inline_map_producer(&input) {
-                    let composed_op =
-                        compose_map_reduce(map_sb.lam, op.lam.clone(), span, symbols, term_ids);
-                    return Term {
-                        kind: TermKind::Soac(SoacOp::Redomap {
-                            op: super::SoacBody {
-                                lam: composed_op,
-                                captures: vec![],
-                            },
-                            reduce_op: op,
-                            ne,
-                            inputs: map_inputs,
-                        }),
-                        ..term
-                    };
-                }
+            if let Some(fused) = fuse_inline_accumulator_input(
+                InlineAccumulatorKind::Reduce,
+                op.clone(),
+                op.clone(),
+                ne.clone(),
+                input.clone(),
+                span,
+                symbols,
+                term_ids,
+            ) {
+                return Term {
+                    kind: TermKind::Soac(fused),
+                    ..term
+                };
             }
             Term {
                 kind: TermKind::Soac(SoacOp::Reduce { op, ne, input }),
@@ -615,31 +1305,20 @@ fn fuse_inline_soac_inputs(term: Term, symbols: &mut SymbolTable, term_ids: &mut
             input,
             destination,
         }) => {
-            if op.lam.params.len() == 2 {
-                if let Some((map_sb, map_inputs)) = inline_map_producer(&input) {
-                    // `MapIntoScan` only fuses a single-input map.
-                    if map_inputs.len() == 1 {
-                        let composed_op =
-                            compose_map_reduce(map_sb.lam, op.lam.clone(), span, symbols, term_ids);
-                        return Term {
-                            kind: TermKind::Soac(SoacOp::Scan {
-                                op: super::SoacBody {
-                                    lam: composed_op,
-                                    captures: vec![],
-                                },
-                                // Folding `g` into the per-element step leaves
-                                // the pure combiner (phase 2) unchanged.
-                                reduce_op,
-                                ne,
-                                input: map_inputs.into_iter().next().unwrap(),
-                                // Fusion runs before apply_ownership; the
-                                // ownership pass re-decides destination.
-                                destination: SoacDestination::Fresh,
-                            }),
-                            ..term
-                        };
-                    }
-                }
+            if let Some(fused) = fuse_inline_accumulator_input(
+                InlineAccumulatorKind::Scan,
+                op.clone(),
+                reduce_op.clone(),
+                ne.clone(),
+                input.clone(),
+                span,
+                symbols,
+                term_ids,
+            ) {
+                return Term {
+                    kind: TermKind::Soac(fused),
+                    ..term
+                };
             }
             Term {
                 kind: TermKind::Soac(SoacOp::Scan {
@@ -654,6 +1333,54 @@ fn fuse_inline_soac_inputs(term: Term, symbols: &mut SymbolTable, term_ids: &mut
         }
 
         _ => term,
+    }
+}
+
+enum InlineAccumulatorKind {
+    Reduce,
+    Scan,
+}
+
+fn fuse_inline_accumulator_input(
+    kind: InlineAccumulatorKind,
+    op: super::SoacBody,
+    reduce_op: super::SoacBody,
+    ne: Box<Term>,
+    input: ArrayExpr,
+    span: Span,
+    symbols: &mut SymbolTable,
+    term_ids: &mut TermIdSource,
+) -> Option<SoacOp> {
+    if op.lam.params.len() != 2 {
+        return None;
+    }
+    let (map_sb, map_inputs) = inline_map_producer(&input)?;
+    let composed_op = compose_map_reduce(map_sb.lam, op.lam, span, symbols, term_ids);
+    let op = super::SoacBody {
+        lam: composed_op,
+        captures: vec![],
+    };
+    match kind {
+        InlineAccumulatorKind::Reduce => Some(SoacOp::Redomap {
+            op,
+            reduce_op,
+            ne,
+            inputs: map_inputs,
+        }),
+        InlineAccumulatorKind::Scan => {
+            let mut map_inputs = map_inputs.into_iter();
+            let input = map_inputs.next()?;
+            if map_inputs.next().is_some() {
+                return None;
+            }
+            Some(SoacOp::Scan {
+                op,
+                reduce_op,
+                ne,
+                input,
+                destination: SoacDestination::Fresh,
+            })
+        }
     }
 }
 

@@ -410,7 +410,7 @@ pub fn classify_soac(soac: &SoacOp) -> ArraySemantics {
         },
         // Redomap is a fused map+reduce produced by fusion; classified as opaque
         // because it is not analyzed further by the semantic framework.
-        SoacOp::Redomap { .. } => ArraySemantics::Opaque,
+        SoacOp::Redomap { .. } | SoacOp::Screma { .. } => ArraySemantics::Opaque,
     }
 }
 

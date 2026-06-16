@@ -291,6 +291,54 @@ fn float_soac(
                 },
             )
         }
+        SoacOp::Screma {
+            map_lams,
+            accumulators,
+            inputs,
+        } => {
+            let mut floats = Vec::new();
+            let map_lams = map_lams
+                .into_iter()
+                .map(|body| {
+                    let (mut body_floats, body) = float_soac_body(body, blocked, ids, symbols);
+                    floats.append(&mut body_floats);
+                    body
+                })
+                .collect();
+            let accumulators = accumulators
+                .into_iter()
+                .map(|acc| {
+                    let (mut step_floats, step_lam) = float_soac_body(acc.step_lam, blocked, ids, symbols);
+                    let (mut op_floats, reduce_op) = float_soac_body(acc.reduce_op, blocked, ids, symbols);
+                    let (mut ne_floats, ne) = float_term(*acc.ne, blocked, ids, symbols, true);
+                    floats.append(&mut step_floats);
+                    floats.append(&mut op_floats);
+                    floats.append(&mut ne_floats);
+                    super::ScremaAccumulatorSpec {
+                        kind: acc.kind,
+                        step_lam,
+                        reduce_op,
+                        ne: Box::new(ne),
+                    }
+                })
+                .collect();
+            let inputs = inputs
+                .into_iter()
+                .map(|input| {
+                    let (mut input_floats, input) = float_array_expr(input, blocked, ids, symbols);
+                    floats.append(&mut input_floats);
+                    input
+                })
+                .collect();
+            (
+                floats,
+                SoacOp::Screma {
+                    map_lams,
+                    accumulators,
+                    inputs,
+                },
+            )
+        }
         SoacOp::Scan {
             op,
             reduce_op,
@@ -334,7 +382,7 @@ fn float_soac(
             )
         }
         SoacOp::Scatter { dest, lam, inputs } => {
-            let mut floats = Vec::new();
+            let (mut floats, lam) = float_soac_body(lam, blocked, ids, symbols);
             let new_inputs = inputs
                 .into_iter()
                 .map(|ae| {

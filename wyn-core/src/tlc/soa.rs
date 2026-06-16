@@ -727,6 +727,27 @@ impl SoaTransformer {
                     inputs: new_inputs,
                 }
             }
+            SoacOp::Screma {
+                map_lams,
+                accumulators,
+                inputs,
+            } => {
+                let new_inputs: Vec<ArrayExpr> =
+                    inputs.iter().map(|ae| self.transform_array_expr(ae)).collect();
+                SoacOp::Screma {
+                    map_lams: map_lams.iter().map(|body| self.transform_soac_body(body)).collect(),
+                    accumulators: accumulators
+                        .iter()
+                        .map(|acc| super::ScremaAccumulatorSpec {
+                            kind: acc.kind,
+                            step_lam: self.transform_soac_body(&acc.step_lam),
+                            reduce_op: self.transform_soac_body(&acc.reduce_op),
+                            ne: Box::new(self.transform_term(&acc.ne)),
+                        })
+                        .collect(),
+                    inputs: new_inputs,
+                }
+            }
         }
     }
 

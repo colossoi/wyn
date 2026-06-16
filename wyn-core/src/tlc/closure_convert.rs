@@ -400,6 +400,39 @@ pub fn collect_free_vars_soac(
                 collect_free_vars_array_expr(input, bound, top_level, known_defs, symbols, free, seen);
             }
         }
+        SoacOp::Screma {
+            map_lams,
+            accumulators,
+            inputs,
+        } => {
+            for map_lam in map_lams {
+                collect_free_vars_soac_body(map_lam, bound, top_level, known_defs, symbols, free, seen);
+            }
+            for acc in accumulators {
+                collect_free_vars_soac_body(
+                    &acc.step_lam,
+                    bound,
+                    top_level,
+                    known_defs,
+                    symbols,
+                    free,
+                    seen,
+                );
+                collect_free_vars_soac_body(
+                    &acc.reduce_op,
+                    bound,
+                    top_level,
+                    known_defs,
+                    symbols,
+                    free,
+                    seen,
+                );
+                collect_free_vars(&acc.ne, bound, top_level, known_defs, symbols, free, seen);
+            }
+            for input in inputs {
+                collect_free_vars_array_expr(input, bound, top_level, known_defs, symbols, free, seen);
+            }
+        }
     }
 }
 
@@ -525,7 +558,19 @@ fn check_soac_envelopes(
         SoacOp::Filter { pred, .. } => vec![pred],
         SoacOp::ReduceByIndex { op, .. } => vec![op],
         SoacOp::Redomap { op, reduce_op, .. } => vec![op, reduce_op],
-        SoacOp::Scatter { .. } => vec![],
+        SoacOp::Scatter { lam, .. } => vec![lam],
+        SoacOp::Screma {
+            map_lams,
+            accumulators,
+            ..
+        } => {
+            let mut bodies: Vec<&super::SoacBody> = map_lams.iter().collect();
+            for acc in accumulators {
+                bodies.push(&acc.step_lam);
+                bodies.push(&acc.reduce_op);
+            }
+            bodies
+        }
     };
     for sb in bodies {
         if !is_lifted_body(&sb.lam.body, top_level) {
@@ -1105,6 +1150,23 @@ impl<'a> ClosureConverter<'a> {
                 ne: Box::new(self.convert_term(*ne)),
                 inputs: inputs.into_iter().map(|ae| self.convert_array_expr(ae, span)).collect(),
             },
+            SoacOp::Screma {
+                map_lams,
+                accumulators,
+                inputs,
+            } => SoacOp::Screma {
+                map_lams: map_lams.into_iter().map(|body| self.lift_soac_lambda(body.lam, span)).collect(),
+                accumulators: accumulators
+                    .into_iter()
+                    .map(|acc| super::ScremaAccumulatorSpec {
+                        kind: acc.kind,
+                        step_lam: self.lift_soac_lambda(acc.step_lam.lam, span),
+                        reduce_op: self.lift_soac_lambda(acc.reduce_op.lam, span),
+                        ne: Box::new(self.convert_term(*acc.ne)),
+                    })
+                    .collect(),
+                inputs: inputs.into_iter().map(|ae| self.convert_array_expr(ae, span)).collect(),
+            },
         }
     }
 
@@ -1265,7 +1327,20 @@ fn collect_soac_bound_syms(soac: &SoacOp, out: &mut HashSet<SymbolId>) {
             body(reduce_op, out);
         }
         SoacOp::ReduceByIndex { op, .. } => body(op, out),
-        SoacOp::Scatter { .. } => {}
+        SoacOp::Scatter { lam, .. } => body(lam, out),
+        SoacOp::Screma {
+            map_lams,
+            accumulators,
+            ..
+        } => {
+            for map_lam in map_lams {
+                body(map_lam, out);
+            }
+            for acc in accumulators {
+                body(&acc.step_lam, out);
+                body(&acc.reduce_op, out);
+            }
+        }
     }
 }
 

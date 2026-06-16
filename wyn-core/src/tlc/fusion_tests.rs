@@ -1,7 +1,7 @@
 use super::super::{DefMeta, SoacOp};
 use crate::ast::Span;
 use crate::tlc::fusion::*;
-use crate::tlc::{SoacBody, SoacDestination};
+use crate::tlc::{ScremaAccumulator, SoacBody, SoacDestination};
 use std::collections::HashMap;
 
 fn dummy_span() -> Span {
@@ -177,6 +177,21 @@ fn mk_app(func: Term, arg: Term, result_ty: Type<TypeName>, term_ids: &mut TermI
     )
 }
 
+fn contains_screma(term: &Term) -> bool {
+    match &term.kind {
+        TermKind::Soac(SoacOp::Screma { .. }) => true,
+        _ => {
+            let mut found = false;
+            term.for_each_child(&mut |child| {
+                if !found && contains_screma(child) {
+                    found = true;
+                }
+            });
+            found
+        }
+    }
+}
+
 // -------------------------------------------------------------------------
 // Test: simple map(g, map(f, a)) → map(g∘f, a)
 // -------------------------------------------------------------------------
@@ -279,6 +294,1555 @@ fn test_simple_map_fusion() {
 // -------------------------------------------------------------------------
 // Test: reduce(op, ne, filter(p, xs)) → redomap(op∘mask, op, ne, xs)
 // -------------------------------------------------------------------------
+#[test]
+fn test_horizontal_sibling_maps_merge_to_multi_output_screma() {
+    let mut symbols = SymbolTable::default();
+    let mut term_ids = TermIdSource::new();
+
+    let xs_sym = symbols.alloc("xs".to_string());
+    let c_sym = symbols.alloc("c".to_string());
+    let d_sym = symbols.alloc("d".to_string());
+    let x_sym = symbols.alloc("x".to_string());
+    let y_sym = symbols.alloc("y".to_string());
+
+    let f_body = mk_term(TermKind::Var(VarRef::Symbol(x_sym)), i32_ty(), &mut term_ids);
+    let f = mk_lambda1(x_sym, i32_ty(), f_body, i32_ty());
+    let g_body = mk_term(TermKind::Var(VarRef::Symbol(y_sym)), i32_ty(), &mut term_ids);
+    let g = mk_lambda1(y_sym, i32_ty(), g_body, i32_ty());
+
+    let xs_for_c = mk_term(
+        TermKind::Var(VarRef::Symbol(xs_sym)),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let xs_for_d = mk_term(
+        TermKind::Var(VarRef::Symbol(xs_sym)),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let c_map = mk_map(f, xs_for_c, array_ty(i32_ty()), &mut term_ids);
+    let d_map = mk_map(g, xs_for_d, array_ty(i32_ty()), &mut term_ids);
+
+    let c_ref = mk_term(
+        TermKind::Var(VarRef::Symbol(c_sym)),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let d_ref = mk_term(
+        TermKind::Var(VarRef::Symbol(d_sym)),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let tuple_ty = Type::Constructed(TypeName::Tuple(2), vec![array_ty(i32_ty()), array_ty(i32_ty())]);
+    let tail = mk_term(
+        TermKind::Tuple(vec![c_ref, d_ref]),
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+
+    let inner = mk_term(
+        TermKind::Let {
+            name: d_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(d_map),
+            body: Box::new(tail),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let program_body = mk_term(
+        TermKind::Let {
+            name: c_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(c_map),
+            body: Box::new(inner),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+
+    let program = Program {
+        defs: vec![Def {
+            name: symbols.alloc("main".to_string()),
+            ty: tuple_ty,
+            body: program_body,
+            meta: DefMeta::Function,
+            arity: 0,
+        }],
+        symbols,
+        def_syms: HashMap::new(),
+    };
+
+    let fused = run(program);
+
+    let TermKind::Let {
+        name: merged_sym,
+        rhs: merged_rhs,
+        body: c_let,
+        ..
+    } = &fused.defs[0].body.kind
+    else {
+        panic!("expected merged map let");
+    };
+
+    match &merged_rhs.kind {
+        TermKind::Soac(SoacOp::Screma {
+            map_lams,
+            accumulators,
+            inputs,
+        }) => {
+            assert_eq!(inputs.len(), 1);
+            assert!(matches!(
+                &inputs[0],
+                ArrayExpr::Ref(t) if matches!(&t.kind, TermKind::Var(VarRef::Symbol(sym)) if *sym == xs_sym)
+            ));
+            assert!(accumulators.is_empty());
+            assert_eq!(map_lams.len(), 2);
+            assert_eq!(map_lams[0].lam.params.len(), 1);
+            assert_eq!(map_lams[0].lam.params[0].0, x_sym);
+            assert_eq!(map_lams[1].lam.params.len(), 1);
+            assert_eq!(map_lams[1].lam.params[0].0, y_sym);
+            assert!(
+                matches!(&map_lams[0].lam.body.kind, TermKind::Var(VarRef::Symbol(sym)) if *sym == x_sym)
+            );
+            assert!(
+                matches!(&map_lams[1].lam.body.kind, TermKind::Var(VarRef::Symbol(sym)) if *sym == y_sym)
+            );
+        }
+        other => panic!("expected merged Screma rhs, got {:?}", other),
+    }
+
+    let TermKind::Let {
+        name: c_name,
+        rhs: c_rhs,
+        body: d_let,
+        ..
+    } = &c_let.kind
+    else {
+        panic!("expected c projection let");
+    };
+    assert_eq!(*c_name, c_sym);
+    assert!(matches!(
+        &c_rhs.kind,
+        TermKind::TupleProj { tuple, idx: 0 }
+            if matches!(&tuple.kind, TermKind::Var(VarRef::Symbol(sym)) if sym == merged_sym)
+    ));
+
+    let TermKind::Let {
+        name: d_name,
+        rhs: d_rhs,
+        ..
+    } = &d_let.kind
+    else {
+        panic!("expected d projection let");
+    };
+    assert_eq!(*d_name, d_sym);
+    assert!(matches!(
+        &d_rhs.kind,
+        TermKind::TupleProj { tuple, idx: 1 }
+            if matches!(&tuple.kind, TermKind::Var(VarRef::Symbol(sym)) if sym == merged_sym)
+    ));
+}
+
+#[test]
+fn test_horizontal_sibling_maps_keep_different_inputs_separate() {
+    let mut symbols = SymbolTable::default();
+    let mut term_ids = TermIdSource::new();
+
+    let xs_sym = symbols.alloc("xs".to_string());
+    let ys_sym = symbols.alloc("ys".to_string());
+    let c_sym = symbols.alloc("c".to_string());
+    let d_sym = symbols.alloc("d".to_string());
+    let x_sym = symbols.alloc("x".to_string());
+    let y_sym = symbols.alloc("y".to_string());
+
+    let f_body = mk_term(TermKind::Var(VarRef::Symbol(x_sym)), i32_ty(), &mut term_ids);
+    let f = mk_lambda1(x_sym, i32_ty(), f_body, i32_ty());
+    let g_body = mk_term(TermKind::Var(VarRef::Symbol(y_sym)), i32_ty(), &mut term_ids);
+    let g = mk_lambda1(y_sym, i32_ty(), g_body, i32_ty());
+
+    let xs = mk_term(
+        TermKind::Var(VarRef::Symbol(xs_sym)),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let ys = mk_term(
+        TermKind::Var(VarRef::Symbol(ys_sym)),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let c_map = mk_map(f, xs, array_ty(i32_ty()), &mut term_ids);
+    let d_map = mk_map(g, ys, array_ty(i32_ty()), &mut term_ids);
+
+    let c_ref = mk_term(
+        TermKind::Var(VarRef::Symbol(c_sym)),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let d_ref = mk_term(
+        TermKind::Var(VarRef::Symbol(d_sym)),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let tuple_ty = Type::Constructed(TypeName::Tuple(2), vec![array_ty(i32_ty()), array_ty(i32_ty())]);
+    let tail = mk_term(
+        TermKind::Tuple(vec![c_ref, d_ref]),
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+
+    let inner = mk_term(
+        TermKind::Let {
+            name: d_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(d_map),
+            body: Box::new(tail),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let program_body = mk_term(
+        TermKind::Let {
+            name: c_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(c_map),
+            body: Box::new(inner),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+
+    let program = Program {
+        defs: vec![Def {
+            name: symbols.alloc("main".to_string()),
+            ty: tuple_ty,
+            body: program_body,
+            meta: DefMeta::Function,
+            arity: 0,
+        }],
+        symbols,
+        def_syms: HashMap::new(),
+    };
+
+    let fused = run(program);
+    let TermKind::Let { name, rhs, body, .. } = &fused.defs[0].body.kind else {
+        panic!("expected original outer let");
+    };
+    assert_eq!(*name, c_sym);
+    assert!(matches!(&rhs.kind, TermKind::Soac(SoacOp::Map { .. })));
+    assert!(matches!(
+        &body.kind,
+        TermKind::Let { name, rhs, .. }
+            if *name == d_sym && matches!(&rhs.kind, TermKind::Soac(SoacOp::Map { .. }))
+    ));
+}
+
+#[test]
+fn test_horizontal_sibling_maps_merge_same_input_vector() {
+    let mut symbols = SymbolTable::default();
+    let mut term_ids = TermIdSource::new();
+
+    let xs_sym = symbols.alloc("xs".to_string());
+    let ys_sym = symbols.alloc("ys".to_string());
+    let c_sym = symbols.alloc("c".to_string());
+    let d_sym = symbols.alloc("d".to_string());
+    let x1_sym = symbols.alloc("x1".to_string());
+    let y1_sym = symbols.alloc("y1".to_string());
+    let x2_sym = symbols.alloc("x2".to_string());
+    let y2_sym = symbols.alloc("y2".to_string());
+
+    let f = Lambda {
+        params: vec![(x1_sym, i32_ty()), (y1_sym, i32_ty())],
+        body: Box::new(mk_term(
+            TermKind::Var(VarRef::Symbol(x1_sym)),
+            i32_ty(),
+            &mut term_ids,
+        )),
+        ret_ty: i32_ty(),
+    };
+    let g = Lambda {
+        params: vec![(x2_sym, i32_ty()), (y2_sym, i32_ty())],
+        body: Box::new(mk_term(
+            TermKind::Var(VarRef::Symbol(y2_sym)),
+            i32_ty(),
+            &mut term_ids,
+        )),
+        ret_ty: i32_ty(),
+    };
+
+    let mk_input = |sym, term_ids: &mut TermIdSource| {
+        mk_term(TermKind::Var(VarRef::Symbol(sym)), array_ty(i32_ty()), term_ids)
+    };
+    let c_map = mk_term(
+        TermKind::Soac(SoacOp::Map {
+            lam: mk_soac_body(f),
+            inputs: vec![
+                ArrayExpr::Ref(Box::new(mk_input(xs_sym, &mut term_ids))),
+                ArrayExpr::Ref(Box::new(mk_input(ys_sym, &mut term_ids))),
+            ],
+            destination: SoacDestination::Fresh,
+        }),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let d_map = mk_term(
+        TermKind::Soac(SoacOp::Map {
+            lam: mk_soac_body(g),
+            inputs: vec![
+                ArrayExpr::Ref(Box::new(mk_input(xs_sym, &mut term_ids))),
+                ArrayExpr::Ref(Box::new(mk_input(ys_sym, &mut term_ids))),
+            ],
+            destination: SoacDestination::Fresh,
+        }),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+
+    let c_ref = mk_term(
+        TermKind::Var(VarRef::Symbol(c_sym)),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let d_ref = mk_term(
+        TermKind::Var(VarRef::Symbol(d_sym)),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let tuple_ty = Type::Constructed(TypeName::Tuple(2), vec![array_ty(i32_ty()), array_ty(i32_ty())]);
+    let tail = mk_term(
+        TermKind::Tuple(vec![c_ref, d_ref]),
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+
+    let inner = mk_term(
+        TermKind::Let {
+            name: d_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(d_map),
+            body: Box::new(tail),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let program_body = mk_term(
+        TermKind::Let {
+            name: c_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(c_map),
+            body: Box::new(inner),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+
+    let program = Program {
+        defs: vec![Def {
+            name: symbols.alloc("main".to_string()),
+            ty: tuple_ty,
+            body: program_body,
+            meta: DefMeta::Function,
+            arity: 0,
+        }],
+        symbols,
+        def_syms: HashMap::new(),
+    };
+
+    let fused = run(program);
+    let TermKind::Let { rhs: merged_rhs, .. } = &fused.defs[0].body.kind else {
+        panic!("expected merged map let");
+    };
+
+    match &merged_rhs.kind {
+        TermKind::Soac(SoacOp::Screma {
+            map_lams,
+            accumulators,
+            inputs,
+        }) => {
+            assert_eq!(inputs.len(), 2);
+            assert!(accumulators.is_empty());
+            assert_eq!(map_lams.len(), 2);
+            assert_eq!(map_lams[0].lam.params.len(), 2);
+            assert_eq!(map_lams[0].lam.params[0].0, x1_sym);
+            assert_eq!(map_lams[0].lam.params[1].0, y1_sym);
+            assert_eq!(map_lams[1].lam.params.len(), 2);
+            assert_eq!(map_lams[1].lam.params[0].0, x2_sym);
+            assert_eq!(map_lams[1].lam.params[1].0, y2_sym);
+            assert!(
+                matches!(&map_lams[0].lam.body.kind, TermKind::Var(VarRef::Symbol(sym)) if *sym == x1_sym)
+            );
+            assert!(
+                matches!(&map_lams[1].lam.body.kind, TermKind::Var(VarRef::Symbol(sym)) if *sym == y2_sym)
+            );
+        }
+        other => panic!("expected merged Screma rhs, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_horizontal_sibling_maps_enable_shared_producer_vertical_fusion() {
+    let mut symbols = SymbolTable::default();
+    let mut term_ids = TermIdSource::new();
+
+    let xs_sym = symbols.alloc("xs".to_string());
+    let b_sym = symbols.alloc("b".to_string());
+    let c_sym = symbols.alloc("c".to_string());
+    let d_sym = symbols.alloc("d".to_string());
+    let x_sym = symbols.alloc("x".to_string());
+    let y_sym = symbols.alloc("y".to_string());
+    let z_sym = symbols.alloc("z".to_string());
+
+    let f_body = mk_term(TermKind::Var(VarRef::Symbol(x_sym)), i32_ty(), &mut term_ids);
+    let f = mk_lambda1(x_sym, i32_ty(), f_body, i32_ty());
+    let g_body = mk_term(TermKind::Var(VarRef::Symbol(y_sym)), i32_ty(), &mut term_ids);
+    let g = mk_lambda1(y_sym, i32_ty(), g_body, i32_ty());
+    let h_body = mk_term(TermKind::Var(VarRef::Symbol(z_sym)), i32_ty(), &mut term_ids);
+    let h = mk_lambda1(z_sym, i32_ty(), h_body, i32_ty());
+
+    let xs = mk_term(
+        TermKind::Var(VarRef::Symbol(xs_sym)),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let b_map = mk_map(f, xs, array_ty(i32_ty()), &mut term_ids);
+    let b_for_c = mk_term(
+        TermKind::Var(VarRef::Symbol(b_sym)),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let b_for_d = mk_term(
+        TermKind::Var(VarRef::Symbol(b_sym)),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let c_map = mk_map(g, b_for_c, array_ty(i32_ty()), &mut term_ids);
+    let d_map = mk_map(h, b_for_d, array_ty(i32_ty()), &mut term_ids);
+
+    let c_ref = mk_term(
+        TermKind::Var(VarRef::Symbol(c_sym)),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let d_ref = mk_term(
+        TermKind::Var(VarRef::Symbol(d_sym)),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let tuple_ty = Type::Constructed(TypeName::Tuple(2), vec![array_ty(i32_ty()), array_ty(i32_ty())]);
+    let tail = mk_term(
+        TermKind::Tuple(vec![c_ref, d_ref]),
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+
+    let d_let = mk_term(
+        TermKind::Let {
+            name: d_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(d_map),
+            body: Box::new(tail),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let c_let = mk_term(
+        TermKind::Let {
+            name: c_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(c_map),
+            body: Box::new(d_let),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let program_body = mk_term(
+        TermKind::Let {
+            name: b_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(b_map),
+            body: Box::new(c_let),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+
+    let program = Program {
+        defs: vec![Def {
+            name: symbols.alloc("main".to_string()),
+            ty: tuple_ty,
+            body: program_body,
+            meta: DefMeta::Function,
+            arity: 0,
+        }],
+        symbols,
+        def_syms: HashMap::new(),
+    };
+
+    let fused = run(program);
+    let TermKind::Let {
+        name: merged_sym,
+        rhs: merged_rhs,
+        body: c_let,
+        ..
+    } = &fused.defs[0].body.kind
+    else {
+        panic!("expected shared producer to fuse into merged map let");
+    };
+    assert_ne!(
+        *merged_sym, b_sym,
+        "the original shared producer binding should be gone"
+    );
+
+    match &merged_rhs.kind {
+        TermKind::Soac(SoacOp::Screma {
+            map_lams,
+            accumulators,
+            inputs,
+        }) => {
+            assert_eq!(inputs.len(), 1);
+            assert!(matches!(
+                &inputs[0],
+                ArrayExpr::Ref(t) if matches!(&t.kind, TermKind::Var(VarRef::Symbol(sym)) if *sym == xs_sym)
+            ));
+            assert!(accumulators.is_empty());
+            assert_eq!(map_lams.len(), 2);
+            assert_eq!(map_lams[0].lam.params.len(), 1);
+            assert_eq!(map_lams[0].lam.params[0].0, x_sym);
+            assert_eq!(map_lams[1].lam.params.len(), 1);
+            assert_eq!(map_lams[1].lam.params[0].0, x_sym);
+            assert!(matches!(&map_lams[0].lam.body.kind, TermKind::Let { .. }));
+            assert!(matches!(&map_lams[1].lam.body.kind, TermKind::Let { .. }));
+        }
+        other => panic!("expected merged Screma rhs, got {:?}", other),
+    }
+
+    assert!(matches!(
+        &c_let.kind,
+        TermKind::Let { name, rhs, .. }
+            if *name == c_sym && matches!(&rhs.kind, TermKind::TupleProj { idx: 0, .. })
+    ));
+}
+
+#[test]
+fn test_screma_fuses_shared_map_producer_into_map_and_reduce() {
+    let mut symbols = SymbolTable::default();
+    let mut term_ids = TermIdSource::new();
+
+    let xs_sym = symbols.alloc("xs".to_string());
+    let b_sym = symbols.alloc("b".to_string());
+    let c_sym = symbols.alloc("c".to_string());
+    let d_sym = symbols.alloc("d".to_string());
+    let x_sym = symbols.alloc("x".to_string());
+    let y_sym = symbols.alloc("y".to_string());
+    let acc_sym = symbols.alloc("acc".to_string());
+    let elem_sym = symbols.alloc("elem".to_string());
+
+    let f_body = mk_term(TermKind::Var(VarRef::Symbol(x_sym)), i32_ty(), &mut term_ids);
+    let f = mk_lambda1(x_sym, i32_ty(), f_body, i32_ty());
+    let g_body = mk_term(TermKind::Var(VarRef::Symbol(y_sym)), i32_ty(), &mut term_ids);
+    let g = mk_lambda1(y_sym, i32_ty(), g_body, i32_ty());
+    let op = mk_lambda2(
+        acc_sym,
+        i32_ty(),
+        elem_sym,
+        i32_ty(),
+        mk_term(TermKind::Var(VarRef::Symbol(acc_sym)), i32_ty(), &mut term_ids),
+        i32_ty(),
+    );
+
+    let xs = mk_term(
+        TermKind::Var(VarRef::Symbol(xs_sym)),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let b_map = mk_map(f, xs, array_ty(i32_ty()), &mut term_ids);
+    let b_for_c = mk_term(
+        TermKind::Var(VarRef::Symbol(b_sym)),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let b_for_d = mk_term(
+        TermKind::Var(VarRef::Symbol(b_sym)),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let c_map = mk_map(g, b_for_c, array_ty(i32_ty()), &mut term_ids);
+    let ne = mk_term(TermKind::IntLit("0".to_string()), i32_ty(), &mut term_ids);
+    let d_reduce = mk_reduce(op, ne, b_for_d, i32_ty(), &mut term_ids);
+
+    let c_ref = mk_term(
+        TermKind::Var(VarRef::Symbol(c_sym)),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let d_ref = mk_term(TermKind::Var(VarRef::Symbol(d_sym)), i32_ty(), &mut term_ids);
+    let tuple_ty = Type::Constructed(TypeName::Tuple(2), vec![array_ty(i32_ty()), i32_ty()]);
+    let tail = mk_term(
+        TermKind::Tuple(vec![c_ref, d_ref]),
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+
+    let d_let = mk_term(
+        TermKind::Let {
+            name: d_sym,
+            name_ty: i32_ty(),
+            rhs: Box::new(d_reduce),
+            body: Box::new(tail),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let c_let = mk_term(
+        TermKind::Let {
+            name: c_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(c_map),
+            body: Box::new(d_let),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let program_body = mk_term(
+        TermKind::Let {
+            name: b_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(b_map),
+            body: Box::new(c_let),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+
+    let program = Program {
+        defs: vec![Def {
+            name: symbols.alloc("main".to_string()),
+            ty: tuple_ty,
+            body: program_body,
+            meta: DefMeta::Function,
+            arity: 0,
+        }],
+        symbols,
+        def_syms: HashMap::new(),
+    };
+
+    let fused = run(program);
+    let TermKind::Let {
+        name: screma_sym,
+        rhs: screma_rhs,
+        body: c_let,
+        ..
+    } = &fused.defs[0].body.kind
+    else {
+        panic!("expected screma let");
+    };
+    assert_ne!(*screma_sym, b_sym);
+    match &screma_rhs.kind {
+        TermKind::Soac(SoacOp::Screma {
+            map_lams,
+            accumulators,
+            inputs,
+            ..
+        }) => {
+            assert_eq!(inputs.len(), 1);
+            assert!(matches!(
+                &inputs[0],
+                ArrayExpr::Ref(t) if matches!(&t.kind, TermKind::Var(VarRef::Symbol(sym)) if *sym == xs_sym)
+            ));
+            assert_eq!(map_lams.len(), 1);
+            assert_eq!(accumulators.len(), 1);
+            let map_lam = &map_lams[0];
+            let reduce_lam = &accumulators[0].step_lam;
+            assert_eq!(map_lam.lam.params.len(), 1);
+            assert_eq!(map_lam.lam.params[0].0, x_sym);
+            assert_eq!(reduce_lam.lam.params.len(), 2);
+            assert_eq!(reduce_lam.lam.params[1].0, x_sym);
+        }
+        other => panic!("expected Screma rhs, got {:?}", other),
+    }
+
+    assert!(matches!(
+        &c_let.kind,
+        TermKind::Let { name, rhs, .. }
+            if *name == c_sym && matches!(&rhs.kind, TermKind::TupleProj { idx: 0, .. })
+    ));
+}
+
+#[test]
+fn test_screma_fuses_shared_map_producer_into_map_and_scan() {
+    let mut symbols = SymbolTable::default();
+    let mut term_ids = TermIdSource::new();
+
+    let xs_sym = symbols.alloc("xs".to_string());
+    let b_sym = symbols.alloc("b".to_string());
+    let c_sym = symbols.alloc("c".to_string());
+    let d_sym = symbols.alloc("d".to_string());
+    let x_sym = symbols.alloc("x".to_string());
+    let y_sym = symbols.alloc("y".to_string());
+    let acc_sym = symbols.alloc("acc".to_string());
+    let z_sym = symbols.alloc("z".to_string());
+
+    let xs_ref = mk_term(
+        TermKind::Var(VarRef::Symbol(xs_sym)),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let f_body = mk_term(TermKind::Var(VarRef::Symbol(x_sym)), i32_ty(), &mut term_ids);
+    let f = mk_lambda1(x_sym, i32_ty(), f_body, i32_ty());
+    let b_map = mk_map(f, xs_ref, array_ty(i32_ty()), &mut term_ids);
+
+    let b_ref_for_map = mk_term(
+        TermKind::Var(VarRef::Symbol(b_sym)),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let g_body = mk_term(TermKind::Var(VarRef::Symbol(y_sym)), i32_ty(), &mut term_ids);
+    let g = mk_lambda1(y_sym, i32_ty(), g_body, i32_ty());
+    let c_map = mk_map(g, b_ref_for_map, array_ty(i32_ty()), &mut term_ids);
+
+    let b_ref_for_scan = mk_term(
+        TermKind::Var(VarRef::Symbol(b_sym)),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let scan_body = mk_term(TermKind::Var(VarRef::Symbol(acc_sym)), i32_ty(), &mut term_ids);
+    let scan_op = mk_lambda2(acc_sym, i32_ty(), z_sym, i32_ty(), scan_body, i32_ty());
+    let ne = mk_term(TermKind::IntLit("0".to_string()), i32_ty(), &mut term_ids);
+    let d_scan = mk_scan(scan_op, ne, b_ref_for_scan, array_ty(i32_ty()), &mut term_ids);
+
+    let tuple_ty = Type::Constructed(TypeName::Tuple(2), vec![array_ty(i32_ty()), array_ty(i32_ty())]);
+    let c_ref = mk_term(
+        TermKind::Var(VarRef::Symbol(c_sym)),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let d_ref = mk_term(
+        TermKind::Var(VarRef::Symbol(d_sym)),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let tail = mk_term(
+        TermKind::Tuple(vec![c_ref, d_ref]),
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let d_let = mk_term(
+        TermKind::Let {
+            name: d_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(d_scan),
+            body: Box::new(tail),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let c_let = mk_term(
+        TermKind::Let {
+            name: c_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(c_map),
+            body: Box::new(d_let),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let program_body = mk_term(
+        TermKind::Let {
+            name: b_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(b_map),
+            body: Box::new(c_let),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+
+    let program = Program {
+        defs: vec![Def {
+            name: symbols.alloc("main".to_string()),
+            ty: tuple_ty,
+            body: program_body,
+            meta: DefMeta::Function,
+            arity: 0,
+        }],
+        symbols,
+        def_syms: HashMap::new(),
+    };
+
+    let fused = run(program);
+    let TermKind::Let {
+        rhs: screma_rhs,
+        body: c_let,
+        ..
+    } = &fused.defs[0].body.kind
+    else {
+        panic!("expected screma let");
+    };
+    match &screma_rhs.kind {
+        TermKind::Soac(SoacOp::Screma { accumulators, .. }) => {
+            assert_eq!(accumulators.len(), 1);
+            assert_eq!(accumulators[0].kind, ScremaAccumulator::Scan);
+            let reduce_lam = &accumulators[0].step_lam;
+            assert_eq!(reduce_lam.lam.params.len(), 2);
+            assert_eq!(reduce_lam.lam.params[1].0, x_sym);
+        }
+        other => panic!("expected Screma rhs, got {:?}", other),
+    }
+
+    assert!(matches!(
+        &c_let.kind,
+        TermKind::Let { body, .. }
+            if matches!(&body.kind, TermKind::Let { name, rhs, .. }
+                if *name == d_sym && matches!(&rhs.kind, TermKind::TupleProj { idx: 1, .. }))
+    ));
+}
+
+#[test]
+fn test_screma_fuses_across_independent_let() {
+    let mut symbols = SymbolTable::default();
+    let mut term_ids = TermIdSource::new();
+
+    let xs_sym = symbols.alloc("xs".to_string());
+    let b_sym = symbols.alloc("b".to_string());
+    let k_sym = symbols.alloc("k".to_string());
+    let c_sym = symbols.alloc("c".to_string());
+    let d_sym = symbols.alloc("d".to_string());
+    let x_sym = symbols.alloc("x".to_string());
+    let y_sym = symbols.alloc("y".to_string());
+    let acc_sym = symbols.alloc("acc".to_string());
+    let elem_sym = symbols.alloc("elem".to_string());
+
+    let f = mk_lambda1(
+        x_sym,
+        i32_ty(),
+        mk_term(TermKind::Var(VarRef::Symbol(x_sym)), i32_ty(), &mut term_ids),
+        i32_ty(),
+    );
+    let g = mk_lambda1(
+        y_sym,
+        i32_ty(),
+        mk_term(TermKind::Var(VarRef::Symbol(y_sym)), i32_ty(), &mut term_ids),
+        i32_ty(),
+    );
+    let op = mk_lambda2(
+        acc_sym,
+        i32_ty(),
+        elem_sym,
+        i32_ty(),
+        mk_term(TermKind::Var(VarRef::Symbol(acc_sym)), i32_ty(), &mut term_ids),
+        i32_ty(),
+    );
+
+    let b_map = mk_map(
+        f,
+        mk_term(
+            TermKind::Var(VarRef::Symbol(xs_sym)),
+            array_ty(i32_ty()),
+            &mut term_ids,
+        ),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let k_rhs = mk_term(TermKind::IntLit("7".to_string()), i32_ty(), &mut term_ids);
+    let c_map = mk_map(
+        g,
+        mk_term(
+            TermKind::Var(VarRef::Symbol(b_sym)),
+            array_ty(i32_ty()),
+            &mut term_ids,
+        ),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let d_reduce = mk_reduce(
+        op,
+        mk_term(TermKind::IntLit("0".to_string()), i32_ty(), &mut term_ids),
+        mk_term(
+            TermKind::Var(VarRef::Symbol(b_sym)),
+            array_ty(i32_ty()),
+            &mut term_ids,
+        ),
+        i32_ty(),
+        &mut term_ids,
+    );
+
+    let tuple_ty = Type::Constructed(TypeName::Tuple(3), vec![i32_ty(), array_ty(i32_ty()), i32_ty()]);
+    let tail = mk_term(
+        TermKind::Tuple(vec![
+            mk_term(TermKind::Var(VarRef::Symbol(k_sym)), i32_ty(), &mut term_ids),
+            mk_term(
+                TermKind::Var(VarRef::Symbol(c_sym)),
+                array_ty(i32_ty()),
+                &mut term_ids,
+            ),
+            mk_term(TermKind::Var(VarRef::Symbol(d_sym)), i32_ty(), &mut term_ids),
+        ]),
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let d_let = mk_term(
+        TermKind::Let {
+            name: d_sym,
+            name_ty: i32_ty(),
+            rhs: Box::new(d_reduce),
+            body: Box::new(tail),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let c_let = mk_term(
+        TermKind::Let {
+            name: c_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(c_map),
+            body: Box::new(d_let),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let k_let = mk_term(
+        TermKind::Let {
+            name: k_sym,
+            name_ty: i32_ty(),
+            rhs: Box::new(k_rhs),
+            body: Box::new(c_let),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let program_body = mk_term(
+        TermKind::Let {
+            name: b_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(b_map),
+            body: Box::new(k_let),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+
+    let program = Program {
+        defs: vec![Def {
+            name: symbols.alloc("main".to_string()),
+            ty: tuple_ty,
+            body: program_body,
+            meta: DefMeta::Function,
+            arity: 0,
+        }],
+        symbols,
+        def_syms: HashMap::new(),
+    };
+
+    let fused = run(program);
+    let TermKind::Let {
+        rhs: screma_rhs,
+        body: k_let,
+        ..
+    } = &fused.defs[0].body.kind
+    else {
+        panic!("expected Screma let before independent binding");
+    };
+    assert!(matches!(
+        &screma_rhs.kind,
+        TermKind::Soac(SoacOp::Screma {
+            map_lams,
+            accumulators,
+            ..
+        }) if map_lams.len() == 1 && accumulators.len() == 1
+    ));
+    assert!(matches!(
+        &k_let.kind,
+        TermKind::Let { name, body, .. }
+            if *name == k_sym
+                && matches!(&body.kind, TermKind::Let { name, rhs, .. }
+                    if *name == c_sym && matches!(&rhs.kind, TermKind::TupleProj { idx: 0, .. }))
+    ));
+}
+
+#[test]
+fn test_screma_rejects_dependent_sibling() {
+    let mut symbols = SymbolTable::default();
+    let mut term_ids = TermIdSource::new();
+
+    let xs_sym = symbols.alloc("xs".to_string());
+    let b_sym = symbols.alloc("b".to_string());
+    let c_sym = symbols.alloc("c".to_string());
+    let d_sym = symbols.alloc("d".to_string());
+    let x_sym = symbols.alloc("x".to_string());
+    let y_sym = symbols.alloc("y".to_string());
+    let acc_sym = symbols.alloc("acc".to_string());
+    let elem_sym = symbols.alloc("elem".to_string());
+
+    let f = mk_lambda1(
+        x_sym,
+        i32_ty(),
+        mk_term(TermKind::Var(VarRef::Symbol(x_sym)), i32_ty(), &mut term_ids),
+        i32_ty(),
+    );
+    let g = mk_lambda1(
+        y_sym,
+        i32_ty(),
+        mk_term(TermKind::Var(VarRef::Symbol(y_sym)), i32_ty(), &mut term_ids),
+        i32_ty(),
+    );
+    let op = mk_lambda2(
+        acc_sym,
+        i32_ty(),
+        elem_sym,
+        i32_ty(),
+        mk_term(TermKind::Var(VarRef::Symbol(c_sym)), i32_ty(), &mut term_ids),
+        i32_ty(),
+    );
+
+    let b_map = mk_map(
+        f,
+        mk_term(
+            TermKind::Var(VarRef::Symbol(xs_sym)),
+            array_ty(i32_ty()),
+            &mut term_ids,
+        ),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let c_map = mk_map(
+        g,
+        mk_term(
+            TermKind::Var(VarRef::Symbol(b_sym)),
+            array_ty(i32_ty()),
+            &mut term_ids,
+        ),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let d_reduce = mk_reduce(
+        op,
+        mk_term(TermKind::IntLit("0".to_string()), i32_ty(), &mut term_ids),
+        mk_term(
+            TermKind::Var(VarRef::Symbol(b_sym)),
+            array_ty(i32_ty()),
+            &mut term_ids,
+        ),
+        i32_ty(),
+        &mut term_ids,
+    );
+    let tuple_ty = Type::Constructed(TypeName::Tuple(2), vec![array_ty(i32_ty()), i32_ty()]);
+    let tail = mk_term(
+        TermKind::Tuple(vec![
+            mk_term(
+                TermKind::Var(VarRef::Symbol(c_sym)),
+                array_ty(i32_ty()),
+                &mut term_ids,
+            ),
+            mk_term(TermKind::Var(VarRef::Symbol(d_sym)), i32_ty(), &mut term_ids),
+        ]),
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let d_let = mk_term(
+        TermKind::Let {
+            name: d_sym,
+            name_ty: i32_ty(),
+            rhs: Box::new(d_reduce),
+            body: Box::new(tail),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let c_let = mk_term(
+        TermKind::Let {
+            name: c_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(c_map),
+            body: Box::new(d_let),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let program_body = mk_term(
+        TermKind::Let {
+            name: b_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(b_map),
+            body: Box::new(c_let),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+
+    let program = Program {
+        defs: vec![Def {
+            name: symbols.alloc("main".to_string()),
+            ty: tuple_ty,
+            body: program_body,
+            meta: DefMeta::Function,
+            arity: 0,
+        }],
+        symbols,
+        def_syms: HashMap::new(),
+    };
+
+    let fused = run(program);
+    assert!(!contains_screma(&fused.defs[0].body));
+}
+
+#[test]
+fn test_screma_rejects_unsupported_filter_consumer() {
+    let mut symbols = SymbolTable::default();
+    let mut term_ids = TermIdSource::new();
+
+    let xs_sym = symbols.alloc("xs".to_string());
+    let b_sym = symbols.alloc("b".to_string());
+    let c_sym = symbols.alloc("c".to_string());
+    let d_sym = symbols.alloc("d".to_string());
+    let e_sym = symbols.alloc("e".to_string());
+    let x_sym = symbols.alloc("x".to_string());
+    let y_sym = symbols.alloc("y".to_string());
+    let acc_sym = symbols.alloc("acc".to_string());
+    let elem_sym = symbols.alloc("elem".to_string());
+    let pred_sym = symbols.alloc("pred".to_string());
+
+    let f = mk_lambda1(
+        x_sym,
+        i32_ty(),
+        mk_term(TermKind::Var(VarRef::Symbol(x_sym)), i32_ty(), &mut term_ids),
+        i32_ty(),
+    );
+    let g = mk_lambda1(
+        y_sym,
+        i32_ty(),
+        mk_term(TermKind::Var(VarRef::Symbol(y_sym)), i32_ty(), &mut term_ids),
+        i32_ty(),
+    );
+    let op = mk_lambda2(
+        acc_sym,
+        i32_ty(),
+        elem_sym,
+        i32_ty(),
+        mk_term(TermKind::Var(VarRef::Symbol(acc_sym)), i32_ty(), &mut term_ids),
+        i32_ty(),
+    );
+    let pred = mk_lambda1(
+        pred_sym,
+        i32_ty(),
+        mk_term(
+            TermKind::BoolLit(true),
+            Type::Constructed(TypeName::Bool, vec![]),
+            &mut term_ids,
+        ),
+        Type::Constructed(TypeName::Bool, vec![]),
+    );
+
+    let b_map = mk_map(
+        f,
+        mk_term(
+            TermKind::Var(VarRef::Symbol(xs_sym)),
+            array_ty(i32_ty()),
+            &mut term_ids,
+        ),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let c_map = mk_map(
+        g,
+        mk_term(
+            TermKind::Var(VarRef::Symbol(b_sym)),
+            array_ty(i32_ty()),
+            &mut term_ids,
+        ),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let d_reduce = mk_reduce(
+        op,
+        mk_term(TermKind::IntLit("0".to_string()), i32_ty(), &mut term_ids),
+        mk_term(
+            TermKind::Var(VarRef::Symbol(b_sym)),
+            array_ty(i32_ty()),
+            &mut term_ids,
+        ),
+        i32_ty(),
+        &mut term_ids,
+    );
+    let e_filter = mk_filter(
+        pred,
+        mk_term(
+            TermKind::Var(VarRef::Symbol(b_sym)),
+            array_ty(i32_ty()),
+            &mut term_ids,
+        ),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+
+    let tuple_ty = Type::Constructed(
+        TypeName::Tuple(3),
+        vec![array_ty(i32_ty()), i32_ty(), array_ty(i32_ty())],
+    );
+    let tail = mk_term(
+        TermKind::Tuple(vec![
+            mk_term(
+                TermKind::Var(VarRef::Symbol(c_sym)),
+                array_ty(i32_ty()),
+                &mut term_ids,
+            ),
+            mk_term(TermKind::Var(VarRef::Symbol(d_sym)), i32_ty(), &mut term_ids),
+            mk_term(
+                TermKind::Var(VarRef::Symbol(e_sym)),
+                array_ty(i32_ty()),
+                &mut term_ids,
+            ),
+        ]),
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let e_let = mk_term(
+        TermKind::Let {
+            name: e_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(e_filter),
+            body: Box::new(tail),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let d_let = mk_term(
+        TermKind::Let {
+            name: d_sym,
+            name_ty: i32_ty(),
+            rhs: Box::new(d_reduce),
+            body: Box::new(e_let),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let c_let = mk_term(
+        TermKind::Let {
+            name: c_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(c_map),
+            body: Box::new(d_let),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let program_body = mk_term(
+        TermKind::Let {
+            name: b_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(b_map),
+            body: Box::new(c_let),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+
+    let program = Program {
+        defs: vec![Def {
+            name: symbols.alloc("main".to_string()),
+            ty: tuple_ty,
+            body: program_body,
+            meta: DefMeta::Function,
+            arity: 0,
+        }],
+        symbols,
+        def_syms: HashMap::new(),
+    };
+
+    let fused = run(program);
+    assert!(!contains_screma(&fused.defs[0].body));
+}
+
+#[test]
+fn test_screma_rejects_different_producers() {
+    let mut symbols = SymbolTable::default();
+    let mut term_ids = TermIdSource::new();
+
+    let xs_sym = symbols.alloc("xs".to_string());
+    let ys_sym = symbols.alloc("ys".to_string());
+    let b_sym = symbols.alloc("b".to_string());
+    let c_sym = symbols.alloc("c".to_string());
+    let e_sym = symbols.alloc("e".to_string());
+    let d_sym = symbols.alloc("d".to_string());
+    let x_sym = symbols.alloc("x".to_string());
+    let y_sym = symbols.alloc("y".to_string());
+    let z_sym = symbols.alloc("z".to_string());
+    let acc_sym = symbols.alloc("acc".to_string());
+    let elem_sym = symbols.alloc("elem".to_string());
+
+    let f = mk_lambda1(
+        x_sym,
+        i32_ty(),
+        mk_term(TermKind::Var(VarRef::Symbol(x_sym)), i32_ty(), &mut term_ids),
+        i32_ty(),
+    );
+    let g = mk_lambda1(
+        y_sym,
+        i32_ty(),
+        mk_term(TermKind::Var(VarRef::Symbol(y_sym)), i32_ty(), &mut term_ids),
+        i32_ty(),
+    );
+    let h = mk_lambda1(
+        z_sym,
+        i32_ty(),
+        mk_term(TermKind::Var(VarRef::Symbol(z_sym)), i32_ty(), &mut term_ids),
+        i32_ty(),
+    );
+    let op = mk_lambda2(
+        acc_sym,
+        i32_ty(),
+        elem_sym,
+        i32_ty(),
+        mk_term(TermKind::Var(VarRef::Symbol(acc_sym)), i32_ty(), &mut term_ids),
+        i32_ty(),
+    );
+
+    let b_map = mk_map(
+        f,
+        mk_term(
+            TermKind::Var(VarRef::Symbol(xs_sym)),
+            array_ty(i32_ty()),
+            &mut term_ids,
+        ),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let c_map = mk_map(
+        g,
+        mk_term(
+            TermKind::Var(VarRef::Symbol(b_sym)),
+            array_ty(i32_ty()),
+            &mut term_ids,
+        ),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let e_map = mk_map(
+        h,
+        mk_term(
+            TermKind::Var(VarRef::Symbol(ys_sym)),
+            array_ty(i32_ty()),
+            &mut term_ids,
+        ),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let d_reduce = mk_reduce(
+        op,
+        mk_term(TermKind::IntLit("0".to_string()), i32_ty(), &mut term_ids),
+        mk_term(
+            TermKind::Var(VarRef::Symbol(e_sym)),
+            array_ty(i32_ty()),
+            &mut term_ids,
+        ),
+        i32_ty(),
+        &mut term_ids,
+    );
+
+    let tuple_ty = Type::Constructed(TypeName::Tuple(2), vec![array_ty(i32_ty()), i32_ty()]);
+    let tail = mk_term(
+        TermKind::Tuple(vec![
+            mk_term(
+                TermKind::Var(VarRef::Symbol(c_sym)),
+                array_ty(i32_ty()),
+                &mut term_ids,
+            ),
+            mk_term(TermKind::Var(VarRef::Symbol(d_sym)), i32_ty(), &mut term_ids),
+        ]),
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let d_let = mk_term(
+        TermKind::Let {
+            name: d_sym,
+            name_ty: i32_ty(),
+            rhs: Box::new(d_reduce),
+            body: Box::new(tail),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let e_let = mk_term(
+        TermKind::Let {
+            name: e_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(e_map),
+            body: Box::new(d_let),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let c_let = mk_term(
+        TermKind::Let {
+            name: c_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(c_map),
+            body: Box::new(e_let),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let program_body = mk_term(
+        TermKind::Let {
+            name: b_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(b_map),
+            body: Box::new(c_let),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+
+    let program = Program {
+        defs: vec![Def {
+            name: symbols.alloc("main".to_string()),
+            ty: tuple_ty,
+            body: program_body,
+            meta: DefMeta::Function,
+            arity: 0,
+        }],
+        symbols,
+        def_syms: HashMap::new(),
+    };
+
+    let fused = run(program);
+    assert!(!contains_screma(&fused.defs[0].body));
+}
+
+#[test]
+fn test_screma_rejects_tail_use_of_producer() {
+    let mut symbols = SymbolTable::default();
+    let mut term_ids = TermIdSource::new();
+
+    let xs_sym = symbols.alloc("xs".to_string());
+    let b_sym = symbols.alloc("b".to_string());
+    let c_sym = symbols.alloc("c".to_string());
+    let d_sym = symbols.alloc("d".to_string());
+    let x_sym = symbols.alloc("x".to_string());
+    let y_sym = symbols.alloc("y".to_string());
+    let acc_sym = symbols.alloc("acc".to_string());
+    let elem_sym = symbols.alloc("elem".to_string());
+
+    let f = mk_lambda1(
+        x_sym,
+        i32_ty(),
+        mk_term(TermKind::Var(VarRef::Symbol(x_sym)), i32_ty(), &mut term_ids),
+        i32_ty(),
+    );
+    let g = mk_lambda1(
+        y_sym,
+        i32_ty(),
+        mk_term(TermKind::Var(VarRef::Symbol(y_sym)), i32_ty(), &mut term_ids),
+        i32_ty(),
+    );
+    let op = mk_lambda2(
+        acc_sym,
+        i32_ty(),
+        elem_sym,
+        i32_ty(),
+        mk_term(TermKind::Var(VarRef::Symbol(acc_sym)), i32_ty(), &mut term_ids),
+        i32_ty(),
+    );
+
+    let b_map = mk_map(
+        f,
+        mk_term(
+            TermKind::Var(VarRef::Symbol(xs_sym)),
+            array_ty(i32_ty()),
+            &mut term_ids,
+        ),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let c_map = mk_map(
+        g,
+        mk_term(
+            TermKind::Var(VarRef::Symbol(b_sym)),
+            array_ty(i32_ty()),
+            &mut term_ids,
+        ),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let d_reduce = mk_reduce(
+        op,
+        mk_term(TermKind::IntLit("0".to_string()), i32_ty(), &mut term_ids),
+        mk_term(
+            TermKind::Var(VarRef::Symbol(b_sym)),
+            array_ty(i32_ty()),
+            &mut term_ids,
+        ),
+        i32_ty(),
+        &mut term_ids,
+    );
+
+    let tuple_ty = Type::Constructed(
+        TypeName::Tuple(3),
+        vec![array_ty(i32_ty()), i32_ty(), array_ty(i32_ty())],
+    );
+    let tail = mk_term(
+        TermKind::Tuple(vec![
+            mk_term(
+                TermKind::Var(VarRef::Symbol(c_sym)),
+                array_ty(i32_ty()),
+                &mut term_ids,
+            ),
+            mk_term(TermKind::Var(VarRef::Symbol(d_sym)), i32_ty(), &mut term_ids),
+            mk_term(
+                TermKind::Var(VarRef::Symbol(b_sym)),
+                array_ty(i32_ty()),
+                &mut term_ids,
+            ),
+        ]),
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let d_let = mk_term(
+        TermKind::Let {
+            name: d_sym,
+            name_ty: i32_ty(),
+            rhs: Box::new(d_reduce),
+            body: Box::new(tail),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let c_let = mk_term(
+        TermKind::Let {
+            name: c_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(c_map),
+            body: Box::new(d_let),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let program_body = mk_term(
+        TermKind::Let {
+            name: b_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(b_map),
+            body: Box::new(c_let),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+
+    let program = Program {
+        defs: vec![Def {
+            name: symbols.alloc("main".to_string()),
+            ty: tuple_ty,
+            body: program_body,
+            meta: DefMeta::Function,
+            arity: 0,
+        }],
+        symbols,
+        def_syms: HashMap::new(),
+    };
+
+    let fused = run(program);
+    assert!(!contains_screma(&fused.defs[0].body));
+}
+
 #[test]
 fn test_filter_into_reduce_fuses_to_masked_redomap() {
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);

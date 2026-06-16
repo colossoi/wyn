@@ -13,8 +13,8 @@ use super::VarRef;
 use super::analyze_entry;
 use crate::ast::{self, Span, TypeName};
 use crate::tlc::{
-    ArrayExpr, Def, DefMeta, Lambda, LoopKind, SoacBody, SoacDestination, SoacOp, Term, TermId,
-    TermIdSource, TermKind,
+    ArrayExpr, Def, DefMeta, Lambda, LoopKind, ScremaAccumulator, ScremaAccumulatorSpec, SoacBody,
+    SoacDestination, SoacOp, Term, TermId, TermIdSource, TermKind,
 };
 use crate::{BindingRef, SymbolId, SymbolTable};
 use polytype::Type;
@@ -127,6 +127,57 @@ impl B {
         )
     }
 
+    fn trivial_screma(&mut self) -> Term {
+        let x = self.sym("x");
+        let map_body = self.var(x, i32_ty());
+        let map_lam = Lambda {
+            params: vec![(x, i32_ty())],
+            body: Box::new(map_body),
+            ret_ty: i32_ty(),
+        };
+
+        let acc = self.sym("acc");
+        let elem = self.sym("elem");
+        let step_body = self.var(acc, i32_ty());
+        let step_lam = Lambda {
+            params: vec![(acc, i32_ty()), (elem, i32_ty())],
+            body: Box::new(step_body.clone()),
+            ret_ty: i32_ty(),
+        };
+
+        let start = self.int_lit(0);
+        let len = self.int_lit(8);
+        let input = ArrayExpr::Range {
+            start: Box::new(start),
+            len: Box::new(len),
+            step: None,
+        };
+        let ne = self.int_lit(0);
+        let tuple_ty = Type::Constructed(TypeName::Tuple(2), vec![arr_i32_ty(), i32_ty()]);
+        self.term(
+            TermKind::Soac(SoacOp::Screma {
+                map_lams: vec![SoacBody {
+                    lam: map_lam,
+                    captures: vec![],
+                }],
+                accumulators: vec![ScremaAccumulatorSpec {
+                    kind: ScremaAccumulator::Reduce,
+                    step_lam: SoacBody {
+                        lam: step_lam.clone(),
+                        captures: vec![],
+                    },
+                    reduce_op: SoacBody {
+                        lam: step_lam,
+                        captures: vec![],
+                    },
+                    ne: Box::new(ne),
+                }],
+                inputs: vec![input],
+            }),
+            tuple_ty,
+        )
+    }
+
     /// Wrap `body` in a single flat Lambda with the given params,
     /// mirroring what `transform_entry` produces for entry points.
     fn entry_def(&mut self, name: SymbolId, params: Vec<(SymbolId, Type<TypeName>)>, body: Term) -> Def {
@@ -162,6 +213,19 @@ fn t1_naked_lambda_soac() {
     let a = analyze_entry(&def, &b.symbols).expect("should find SOAC");
     assert!(a.prefix_lets.is_empty());
     assert!(matches!(a.soac.original, SoacOp::Map { .. }));
+}
+
+#[test]
+fn t1b_tail_screma_is_not_parallel_planned_yet() {
+    let mut b = B::new();
+    let p = b.sym("p");
+    let body = b.trivial_screma();
+    let name = b.sym("entry");
+    let def = b.entry_def(name, vec![(p, i32_ty())], body);
+    assert!(
+        analyze_entry(&def, &b.symbols).is_none(),
+        "Screma should stay serial until the shared multi-output phase planner exists"
+    );
 }
 
 /// T2: Lambda + deep Let chain + Soac. All lets should appear in

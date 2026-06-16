@@ -508,6 +508,35 @@ impl<'a> CallLowerer<'a> {
                 ne: Box::new(self.lower_term(*ne)),
                 inputs: inputs.into_iter().map(|ae| self.lower_array_expr(ae)).collect(),
             },
+            SoacOp::Screma {
+                map_lams,
+                accumulators,
+                inputs,
+            } => {
+                fn lower_body(this: &mut CallLowerer<'_>, body: super::SoacBody) -> super::SoacBody {
+                    super::SoacBody {
+                        lam: body.lam,
+                        captures: body
+                            .captures
+                            .into_iter()
+                            .map(|(s, ty, t)| (s, ty, this.lower_term(t)))
+                            .collect(),
+                    }
+                }
+                SoacOp::Screma {
+                    map_lams: map_lams.into_iter().map(|body| lower_body(self, body)).collect(),
+                    accumulators: accumulators
+                        .into_iter()
+                        .map(|acc| super::ScremaAccumulatorSpec {
+                            kind: acc.kind,
+                            step_lam: lower_body(self, acc.step_lam),
+                            reduce_op: lower_body(self, acc.reduce_op),
+                            ne: Box::new(self.lower_term(*acc.ne)),
+                        })
+                        .collect(),
+                    inputs: inputs.into_iter().map(|ae| self.lower_array_expr(ae)).collect(),
+                }
+            }
         }
     }
 

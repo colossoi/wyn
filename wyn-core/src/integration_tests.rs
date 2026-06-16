@@ -400,6 +400,25 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::Program, stage: &str) {
                 walk_lambda(&op.lam, bound, symbols, stage, def_name);
                 walk_lambda(&reduce_op.lam, bound, symbols, stage, def_name);
             }
+            SoacOp::Screma {
+                map_lams,
+                accumulators,
+                inputs,
+            } => {
+                for acc in accumulators {
+                    walk(&acc.ne, bound, symbols, stage, def_name);
+                }
+                for i in inputs {
+                    walk_array_expr(i, bound, symbols, stage, def_name);
+                }
+                for map_lam in map_lams {
+                    walk_lambda(&map_lam.lam, bound, symbols, stage, def_name);
+                }
+                for acc in accumulators {
+                    walk_lambda(&acc.step_lam.lam, bound, symbols, stage, def_name);
+                    walk_lambda(&acc.reduce_op.lam, bound, symbols, stage, def_name);
+                }
+            }
             SoacOp::Filter { pred, input, .. } => {
                 walk_array_expr(input, bound, symbols, stage, def_name);
                 walk_lambda(&pred.lam, bound, symbols, stage, def_name);
@@ -1014,6 +1033,7 @@ fn has_soac_kind(term: &crate::tlc::Term, kind: &str) -> bool {
         TermKind::Soac(SoacOp::Map { .. }) if kind == "Map" => true,
         TermKind::Soac(SoacOp::Reduce { .. }) if kind == "Reduce" => true,
         TermKind::Soac(SoacOp::Redomap { .. }) if kind == "Redomap" => true,
+        TermKind::Soac(SoacOp::Screma { .. }) if kind == "Screma" => true,
         TermKind::Let { rhs, body, .. } => has_soac_kind(rhs, kind) || has_soac_kind(body, kind),
         TermKind::Lambda(lam) => has_soac_kind(&lam.body, kind),
         TermKind::App { func, args } => {
@@ -1024,6 +1044,110 @@ fn has_soac_kind(term: &crate::tlc::Term, kind: &str) -> bool {
         TermKind::Index { array, index } => has_soac_kind(array, kind) || has_soac_kind(index, kind),
         _ => false,
     }
+}
+
+#[test]
+fn test_screma_fusion_end_to_end() {
+    let source = r#"
+#[compute]
+entry gen(xs: []i32) ([]i32, [1]i32) =
+  let b = map(|x: i32| x + 1, xs) in
+  let c = map(|y: i32| y * 2, b) in
+  let d = reduce(|acc: i32, z: i32| acc + z, 0, b) in
+  (c, [d])
+"#;
+
+    let tlc = compile_to_fused_tlc(source);
+    let gen = tlc
+        .defs
+        .iter()
+        .find(|def| tlc.symbols.get(def.name).map(|s| s.as_str()) == Some("gen"))
+        .expect("gen not found");
+
+    let (_, body) = extract_lambda_params(&gen.body);
+    assert!(
+        has_soac_kind(&body, "Screma"),
+        "expected shared map producer feeding map+reduce to fuse to Screma"
+    );
+
+    compile_to_spirv(source).expect("Screma-fused map+reduce should lower to SPIR-V");
+}
+
+#[test]
+fn test_screma_scan_fusion_end_to_end() {
+    let source = r#"
+#[compute]
+entry gen(xs: []i32) ([]i32, []i32) =
+  let b = map(|x: i32| x + 1, xs) in
+  let c = map(|y: i32| y * 2, b) in
+  let d = scan(|acc: i32, z: i32| acc + z, 0, b) in
+  (c, d)
+"#;
+
+    let tlc = compile_to_fused_tlc(source);
+    let gen = tlc
+        .defs
+        .iter()
+        .find(|def| tlc.symbols.get(def.name).map(|s| s.as_str()) == Some("gen"))
+        .expect("gen not found");
+
+    let (_, body) = extract_lambda_params(&gen.body);
+    assert!(
+        has_soac_kind(&body, "Screma"),
+        "expected shared map producer feeding map+scan to fuse to Screma"
+    );
+
+    compile_to_spirv(source).expect("Screma-fused map+scan should lower to SPIR-V");
+}
+
+#[test]
+fn test_screma_multi_output_fusion_end_to_end() {
+    let source = r#"
+#[compute]
+entry gen(xs: []i32) ([]i32, []i32, [1]i32, []i32) =
+  let b = map(|x: i32| x + 1, xs) in
+  let c = map(|y: i32| y * 2, b) in
+  let d = reduce(|acc: i32, z: i32| acc + z, 0, b) in
+  let e = map(|w: i32| w - 3, b) in
+  let f = scan(|acc: i32, q: i32| acc + q, 0, b) in
+  (c, e, [d], f)
+"#;
+
+    let tlc = compile_to_fused_tlc(source);
+    let gen = tlc
+        .defs
+        .iter()
+        .find(|def| tlc.symbols.get(def.name).map(|s| s.as_str()) == Some("gen"))
+        .expect("gen not found");
+
+    let (_, body) = extract_lambda_params(&gen.body);
+    assert!(
+        has_soac_kind(&body, "Screma"),
+        "expected shared map producer feeding multiple maps/reduce/scan to fuse to Screma"
+    );
+    fn screma_shape(term: &crate::tlc::Term) -> Option<(usize, usize, usize, usize)> {
+        use crate::tlc::{ScremaAccumulator, SoacOp, TermKind};
+        match &term.kind {
+            TermKind::Soac(SoacOp::Screma {
+                map_lams,
+                accumulators,
+                ..
+            }) => Some((
+                map_lams.len(),
+                accumulators.len(),
+                accumulators.iter().filter(|acc| acc.kind == ScremaAccumulator::Reduce).count(),
+                accumulators.iter().filter(|acc| acc.kind == ScremaAccumulator::Scan).count(),
+            )),
+            TermKind::Let { rhs, body, .. } => screma_shape(rhs).or_else(|| screma_shape(body)),
+            TermKind::Lambda(lam) => screma_shape(&lam.body),
+            TermKind::Tuple(parts) | TermKind::VecLit(parts) => parts.iter().find_map(screma_shape),
+            TermKind::TupleProj { tuple, .. } => screma_shape(tuple),
+            _ => None,
+        }
+    }
+    assert_eq!(screma_shape(&body), Some((2, 2, 1, 1)));
+
+    compile_to_spirv(source).expect("multi-output Screma should lower to SPIR-V");
 }
 
 // =============================================================================
