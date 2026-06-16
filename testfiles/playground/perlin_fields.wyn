@@ -3,7 +3,7 @@
 -- Faithful to Manohar Vanga's "Getting Creative with Perlin Noise Fields"
 -- (https://sighack.com/post/getting-creative-with-perlin-noise-fields,
 -- MIT-licensed sketches at https://github.com/sighack/perlin-noise-fields):
--- thousands of particles spawn at random, each frame read a flow angle
+-- particles spawn at random, each frame read a flow angle
 --
 --     theta = noise(x * scale, y * scale) * 2pi
 --
@@ -48,11 +48,18 @@ import "../../lib/rng"
 
 open f32
 
-def N: i32 = 6000
+-- N is kept modest on purpose: the per-particle `map` in `tick` and the
+-- `scatter` in `rasterize` both lower to a serial loop with no per-thread
+-- partition, yet the host dispatches one thread per particle — so each frame
+-- costs O(N^2). At a few thousand particles that trips the GPU watchdog (white
+-- screen / hang). The canvas accumulates across frames, so ~1k particles still
+-- paint dense curves over a few hundred frames. Bump this only once the map /
+-- scatter lowering is parallelized.
+def N: i32 = 1024
 def RES: i32 = 720
 def RESF: f32 = 720.0
 def STEP: f32 = 1.5
-def LIFETIME: f32 = 90.0
+def LIFETIME: f32 = 120.0
 def NOISE_SCALE: f32 = 0.009
 -- 4-octave / gain-0.5 fbm sums to roughly +/- (1-0.5^4)/(1-0.5); the
 -- reciprocal renormalizes one sample back into [-1, 1].
