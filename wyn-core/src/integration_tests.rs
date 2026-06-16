@@ -3162,6 +3162,54 @@ entry sq(xs: []f32) []f32 = map(|x: f32| x * x, xs)
     );
 }
 
+#[test]
+fn compute_pointwise_screma_from_horizontal_maps_is_parallel() {
+    use crate::builtins::catalog;
+    use crate::op::OpTag;
+    use crate::ssa::types::{ControlHeader, InstKind};
+    let src = r#"
+#[compute]
+entry pair(xs: []f32) ([]f32, []f32) =
+  let a = map(|x: f32| x * x, xs) in
+  let b = map(|x: f32| x + 1.0, xs) in
+  (a, b)
+"#;
+    let fused = compile_to_fused_tlc(src);
+    let pair = fused
+        .defs
+        .iter()
+        .find(|def| fused.symbols.get(def.name).map(|s| s.as_str()) == Some("pair"))
+        .expect("pair not found");
+    let (_, body) = extract_lambda_params(&pair.body);
+    assert!(
+        has_soac_kind(&body, "Screma"),
+        "sibling maps should fuse to pointwise Screma before parallelization"
+    );
+
+    let program = compile_to_ssa(src);
+    let thread_id_builtin = catalog().known().thread_id;
+    let pair = program.entry_points.iter().find(|entry| entry.name == "pair").expect("entry pair present");
+    let loads_thread_id = pair.body.inner.blocks.iter().any(|(_, block)| {
+        block.insts.iter().any(|&inst_id| {
+            matches!(
+                &pair.body.get_inst(inst_id).data,
+                InstKind::Op {
+                    tag: OpTag::Intrinsic { id, .. },
+                    ..
+                } if *id == thread_id_builtin
+            )
+        })
+    });
+    assert!(loads_thread_id, "pointwise Screma entry must read thread_id");
+    assert!(
+        pair.body.control_headers.values().all(|header| !matches!(header, ControlHeader::Loop { .. })),
+        "pointwise Screma entry must be the loop-free guarded lane kernel"
+    );
+
+    let spirv = compile_to_spirv(src).expect("pointwise Screma compute compiles");
+    assert!(!spirv.is_empty(), "pointwise Screma should lower to SPIR-V");
+}
+
 /// Compile `source` through the full *parallelized* pipeline (matching the
 /// production driver, which always parallelizes compute) and return the
 /// lowered SPIR-V + pipeline descriptor.

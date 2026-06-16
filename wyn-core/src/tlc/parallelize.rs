@@ -114,18 +114,21 @@ fn parallel_soac_shape(soac: &SoacOp) -> Option<ParallelSoacShape<'_>> {
             lowerable_today: true,
         }),
         SoacOp::Screma {
-            inputs, accumulators, ..
+            inputs,
+            map_lams,
+            accumulators,
         } => {
             let result_elem_type = accumulators
                 .first()
                 .map(|acc| acc.ne.ty.clone())
+                .or_else(|| map_lams.first().map(|lam| lam.lam.ret_ty.clone()))
                 .unwrap_or_else(|| Type::Constructed(TypeName::Unit, vec![]));
             Some(ParallelSoacShape {
                 flavor: ParallelSoacFlavor::Screma,
                 inputs: inputs.iter().collect(),
                 ne: None,
                 result_elem_type,
-                lowerable_today: false,
+                lowerable_today: accumulators.is_empty() && !map_lams.is_empty(),
             })
         }
         SoacOp::Filter { .. } | SoacOp::Scatter { .. } | SoacOp::ReduceByIndex { .. } => None,
@@ -393,6 +396,20 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
                     None => return None,
                 }
             }
+            TermKind::TupleProj { tuple, idx: 0 } => {
+                let TermKind::Var(VarRef::Symbol(sym)) = tuple.kind else {
+                    return None;
+                };
+                if scope.is_lambda_param(sym) {
+                    return None;
+                }
+                match scope.remove_let(sym) {
+                    Some((_ty, rhs)) if matches!(rhs.kind, TermKind::Soac(SoacOp::Screma { .. })) => {
+                        current = rhs;
+                    }
+                    _ => return None,
+                }
+            }
             _ => return None,
         }
     }
@@ -581,6 +598,7 @@ fn analyze_soac(
             | ParallelSoacFlavor::Reduce
             | ParallelSoacFlavor::Redomap
             | ParallelSoacFlavor::Scan
+            | ParallelSoacFlavor::Screma
     ));
 
     let normalized: SoacOp = match soac {
@@ -619,6 +637,15 @@ fn analyze_soac(
             op: op.clone(),
             reduce_op: reduce_op.clone(),
             ne: ne.clone(),
+            inputs: inputs.clone(),
+        },
+        SoacOp::Screma {
+            map_lams,
+            accumulators,
+            inputs,
+        } if accumulators.is_empty() => SoacOp::Screma {
+            map_lams: map_lams.clone(),
+            accumulators: vec![],
             inputs: inputs.clone(),
         },
         SoacOp::Scan {
@@ -1768,7 +1795,17 @@ fn make_lowering_plan(
             )
         }
         ParallelSoacFlavor::Screma => {
-            unreachable!("analyze_soac gates Screma until the multi-output phase planner exists")
+            // Pointwise-only Screma is a multi-output Map: one lane per
+            // element, no cross-lane phases. Mixed accumulator Screma stays
+            // gated in `parallel_soac_shape`.
+            make_map_plan(
+                analysis,
+                entry_name,
+                next_binding,
+                sizing,
+                forced_result_binding,
+                program,
+            )
         }
     }
 }

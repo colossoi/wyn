@@ -1037,6 +1037,60 @@ fn expand_one(
                         next_effect,
                     );
                 }
+                PendingSoac::Screma {
+                    map_funcs,
+                    accumulators,
+                    input_array_types,
+                    input_elem_types,
+                    map_output_elem_types,
+                    map_capture_counts,
+                    map_destinations,
+                    acc_destinations,
+                } if accumulators.is_empty()
+                    && acc_destinations.is_empty()
+                    && !map_funcs.is_empty()
+                    && map_destinations.iter().all(|dest| *dest == SoacDestination::OutputView) =>
+                {
+                    let n_inputs = input_array_types.len();
+                    let input_nids: Vec<NodeId> = se.operand_nodes[..n_inputs].to_vec();
+                    let mut cursor = n_inputs;
+                    let mut map_captures = Vec::with_capacity(map_capture_counts.len());
+                    for count in &map_capture_counts {
+                        map_captures.push(se.operand_nodes[cursor..cursor + *count].to_vec());
+                        cursor += *count;
+                    }
+                    let output_views = se.operand_nodes[cursor..].to_vec();
+                    assert_eq!(
+                        output_views.len(),
+                        map_funcs.len(),
+                        "Parallel Screma has one output view per map"
+                    );
+                    let result_nid = se.result.expect("Screma has a result");
+
+                    let read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)> = input_nids
+                        .iter()
+                        .zip(input_array_types.iter().zip(input_elem_types.iter()))
+                        .map(|(n, (a, e))| (*n, a.clone(), e.clone()))
+                        .collect();
+                    let len_input = (input_nids[0], input_array_types[0].clone());
+
+                    build_parallel_screma_maps(
+                        graph,
+                        control_headers,
+                        bid,
+                        idx,
+                        ScremaMapsIntoLoop {
+                            len_input,
+                            read_inputs,
+                            output_views,
+                            output_elem_tys: map_output_elem_types,
+                            result_node: result_nid,
+                            funcs: map_funcs,
+                            captures: map_captures,
+                        },
+                        next_effect,
+                    );
+                }
                 other => unreachable!(
                     "PendingSoac::Parallel wrapping unsupported variant: {:?}",
                     std::mem::discriminant(&other)
@@ -1464,6 +1518,121 @@ fn build_parallel_map(
         effects: Some((eff_in, eff_out)),
         span: None,
     });
+    graph.skeleton.blocks[body].term = SkeletonTerminator::Branch {
+        target: after,
+        args: vec![],
+    };
+}
+
+/// Parallel pointwise Screma: one lane reads the shared inputs once and writes
+/// every mapped output field to its corresponding output view.
+struct ScremaMapsIntoLoop {
+    len_input: (NodeId, Type<TypeName>),
+    read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)>,
+    output_views: Vec<NodeId>,
+    output_elem_tys: Vec<Type<TypeName>>,
+    result_node: NodeId,
+    funcs: Vec<String>,
+    captures: Vec<Vec<NodeId>>,
+}
+
+fn build_parallel_screma_maps(
+    graph: &mut EGraph,
+    control_headers: &mut HashMap<BlockId, ControlHeader>,
+    bid: BlockId,
+    idx_in_block: usize,
+    spec: ScremaMapsIntoLoop,
+    next_effect: &mut u32,
+) {
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+    let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+
+    let after = graph.skeleton.create_block();
+    let suffix: Vec<SideEffect> = graph.skeleton.blocks[bid].side_effects.drain(idx_in_block..).collect();
+    let old_term = std::mem::replace(
+        &mut graph.skeleton.blocks[bid].term,
+        SkeletonTerminator::Unreachable,
+    );
+    graph.skeleton.blocks[after].side_effects = suffix;
+    graph.skeleton.blocks[after].term = old_term;
+    if let Some(header_meta) = control_headers.remove(&bid) {
+        control_headers.insert(after, header_meta);
+    }
+
+    graph.nodes[spec.result_node] = ENode::Constant(crate::ssa::types::ConstantValue::Bool(false));
+
+    let body = graph.skeleton.create_block();
+    let known = catalog().known();
+    let tid_nid = graph.intern_pure(
+        PureOp::Intrinsic {
+            id: known.thread_id,
+            overload_idx: 0,
+        },
+        smallvec![],
+        u32_ty,
+    );
+    let i32_from_u32 = catalog().lookup_by_any_name("i32.u32").expect("catalog has i32.u32 bitcast");
+    let i_nid = graph.intern_pure(
+        PureOp::Intrinsic {
+            id: i32_from_u32.id,
+            overload_idx: 0,
+        },
+        smallvec![tid_nid],
+        i32_ty.clone(),
+    );
+    let len_nid = emit_length(graph, spec.len_input.0, &spec.len_input.1, &i32_ty);
+    let cond_nid = graph.intern_pure(PureOp::BinOp("<".into()), smallvec![i_nid, len_nid], bool_ty);
+
+    graph.skeleton.blocks[bid].term = SkeletonTerminator::CondBranch {
+        cond: cond_nid,
+        then_target: body,
+        then_args: vec![],
+        else_target: after,
+        else_args: vec![],
+    };
+    control_headers.insert(bid, ControlHeader::Selection { merge: after });
+
+    let mut elems = Vec::with_capacity(spec.read_inputs.len());
+    for (arr, arr_ty, elem_ty) in &spec.read_inputs {
+        elems.push(emit_read_element(
+            graph,
+            body,
+            *arr,
+            i_nid,
+            arr_ty,
+            elem_ty,
+            next_effect,
+        ));
+    }
+
+    for map_idx in 0..spec.funcs.len() {
+        let mut call_operands: smallvec::SmallVec<[NodeId; 4]> = elems.iter().copied().collect();
+        call_operands.extend(spec.captures[map_idx].iter().copied());
+        let y_nid = graph.intern_pure(
+            PureOp::Call(spec.funcs[map_idx].clone()),
+            call_operands,
+            spec.output_elem_tys[map_idx].clone(),
+        );
+        let ptr_nid = graph.intern_pure(
+            PureOp::ViewIndex,
+            smallvec![spec.output_views[map_idx], i_nid],
+            spec.output_elem_tys[map_idx].clone(),
+        );
+        let eff_in = alloc_effect(next_effect);
+        let eff_out = alloc_effect(next_effect);
+        graph.skeleton.blocks[body].side_effects.push(SideEffect {
+            kind: SideEffectKind::Inst(InstKind::Store {
+                place: Default::default(),
+                value: ValueRef::Ssa(Default::default()),
+            }),
+            operand_nodes: smallvec![ptr_nid, y_nid],
+            result: None,
+            effects: Some((eff_in, eff_out)),
+            span: None,
+        });
+    }
+
     graph.skeleton.blocks[body].term = SkeletonTerminator::Branch {
         target: after,
         args: vec![],

@@ -77,15 +77,21 @@ fn rewrite_tail_map(entry: &mut super::program::EgirEntry) {
             let SideEffectKind::Pending(ref pending) = se.kind else {
                 continue;
             };
-            // Only the entry's tail Map (which targets the auto-bound
-            // OutputView) is parallelizable. Intermediate Maps that
-            // produce fresh arrays for downstream consumers (e.g. a
-            // Map → Reduce fusion that hasn't fused) must stay serial.
+            // Only entry-tail pointwise SOACs that target output views are
+            // parallelizable here. Intermediate Fresh producers must stay
+            // serial unless a strategy-specific transform rewrites them.
             match pending {
                 PendingSoac::Map {
                     destination: SoacDestination::OutputView,
                     ..
                 } => {}
+                PendingSoac::Screma {
+                    accumulators,
+                    map_destinations,
+                    ..
+                } if accumulators.is_empty()
+                    && !map_destinations.is_empty()
+                    && map_destinations.iter().all(|dest| *dest == SoacDestination::OutputView) => {}
                 _ => continue,
             }
             // PendingSoac derives Clone, so the clean version is just to

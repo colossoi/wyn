@@ -127,6 +127,35 @@ impl B {
         )
     }
 
+    fn pointwise_screma(&mut self) -> Term {
+        let x = self.sym("x");
+        let map_body = self.var(x, i32_ty());
+        let map_lam = Lambda {
+            params: vec![(x, i32_ty())],
+            body: Box::new(map_body),
+            ret_ty: i32_ty(),
+        };
+        let start = self.int_lit(0);
+        let len = self.int_lit(8);
+        let input = ArrayExpr::Range {
+            start: Box::new(start),
+            len: Box::new(len),
+            step: None,
+        };
+        let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![arr_i32_ty()]);
+        self.term(
+            TermKind::Soac(SoacOp::Screma {
+                map_lams: vec![SoacBody {
+                    lam: map_lam,
+                    captures: vec![],
+                }],
+                accumulators: vec![],
+                inputs: vec![input],
+            }),
+            tuple_ty,
+        )
+    }
+
     fn trivial_screma(&mut self) -> Term {
         let x = self.sym("x");
         let map_body = self.var(x, i32_ty());
@@ -216,7 +245,19 @@ fn t1_naked_lambda_soac() {
 }
 
 #[test]
-fn t1b_tail_screma_is_not_parallel_planned_yet() {
+fn t1b_tail_pointwise_screma_is_parallel_planned() {
+    let mut b = B::new();
+    let p = b.sym("p");
+    let body = b.pointwise_screma();
+    let name = b.sym("entry");
+    let def = b.entry_def(name, vec![(p, i32_ty())], body);
+    let a = analyze_entry(&def, &b.symbols).expect("pointwise Screma should plan like multi-output map");
+    assert!(a.prefix_lets.is_empty());
+    assert!(matches!(a.soac.original, SoacOp::Screma { accumulators, .. } if accumulators.is_empty()));
+}
+
+#[test]
+fn t1c_tail_mixed_screma_is_not_parallel_planned_yet() {
     let mut b = B::new();
     let p = b.sym("p");
     let body = b.trivial_screma();
