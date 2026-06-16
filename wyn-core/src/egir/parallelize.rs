@@ -62,6 +62,14 @@ pub fn run(inner: &mut EgirInner, plans: &HashMap<String, ParallelizationPlan>) 
                     new_functions.push(swap_wrapper);
                 }
             }
+            ParallelStrategy::Screma => {
+                if let Some((phases, swap_wrapper)) = transform_screma_entry(entry, plan) {
+                    new_entries.extend(phases);
+                    if let Some(sw) = swap_wrapper {
+                        new_functions.push(sw);
+                    }
+                }
+            }
         }
     }
     inner.entry_points.extend(new_entries);
@@ -1105,6 +1113,545 @@ fn find_pending_scan(entry: &EgirEntry) -> Option<(BlockId, usize)> {
         }
     }
     None
+}
+
+fn find_pending_screma(entry: &EgirEntry) -> Option<(BlockId, usize)> {
+    for (bid, block) in &entry.graph.skeleton.blocks {
+        for (i, se) in block.side_effects.iter().enumerate() {
+            if let SideEffectKind::Pending(PendingSoac::Screma { .. }) = &se.kind {
+                return Some((bid, i));
+            }
+        }
+    }
+    None
+}
+
+/// Mixed-Screma migration dispatcher. Gates and routes to the
+/// per-kind transform: Reduce → 2-phase tree-reduce; Scan → 3-phase
+/// block-prefix scan. Mirrors the gate in
+/// `tlc::parallelize::screma_egir_parallelisable`.
+fn transform_screma_entry(
+    entry: &mut EgirEntry,
+    plan: &ParallelizationPlan,
+) -> Option<(Vec<EgirEntry>, Option<EgirFunc>)> {
+    use crate::tlc::parallelize::{PlannedBindings, PlannedScremaAccumulatorKind};
+    let PlannedBindings::Screma { accumulators, .. } = &plan.bindings else {
+        return None;
+    };
+    if accumulators.len() != 1 {
+        return None;
+    }
+    match accumulators[0].kind {
+        PlannedScremaAccumulatorKind::Reduce => {
+            let phase2 = transform_screma_reduce_entry(entry, plan)?;
+            Some((vec![phase2], None))
+        }
+        PlannedScremaAccumulatorKind::Scan => {
+            let (phase2, phase3, swap_wrapper) = transform_screma_scan_entry(entry, plan)?;
+            Some((vec![phase2, phase3], Some(swap_wrapper)))
+        }
+    }
+}
+
+/// 0+ map outputs (no captures) + exactly one Reduce accumulator with
+/// no captures and a scalar-literal NE. The entry is mutated in place
+/// into a chunked phase 1 (chunked input + chunked map output views
+/// + store-to-`partials[tid]` for the reduce result), and the
+/// synthesised phase 2 tree-reduces `partials` into `result` via
+/// `build_tree_reduce_phase2`.
+fn transform_screma_reduce_entry(entry: &mut EgirEntry, plan: &ParallelizationPlan) -> Option<EgirEntry> {
+    use crate::tlc::parallelize::PlannedBindings;
+
+    // 1. Pull binding/dispatch info from the plan.
+    let PlannedBindings::Screma {
+        map_outputs: _,
+        accumulators,
+    } = &plan.bindings
+    else {
+        return None;
+    };
+    if accumulators.len() != 1 {
+        return None;
+    }
+    let acc_planned = &accumulators[0];
+    let partials_binding = acc_planned.partials?;
+    let result_binding = acc_planned.result?;
+    let total_threads = match plan.dispatch {
+        crate::tlc::parallelize::DispatchModel::Fixed { local_size, .. } => local_size[0],
+        crate::tlc::parallelize::DispatchModel::DerivedFromInputLength { workgroup_size, .. } => {
+            workgroup_size
+        }
+    };
+
+    // 2. Locate the Screma side-effect and pull its metadata.
+    let (block_id, idx) = find_pending_screma(entry)?;
+    let (
+        reduce_func,
+        n_inputs,
+        n_accs,
+        map_output_view_ops,
+        input_view_nid,
+        input_view_ty,
+        init_nid,
+        elem_ty,
+        screma_result_nid,
+    ) = {
+        let se = &entry.graph.skeleton.blocks[block_id].side_effects[idx];
+        let SideEffectKind::Pending(PendingSoac::Screma {
+            map_funcs,
+            accumulators,
+            input_array_types,
+            map_destinations,
+            acc_destinations,
+            map_capture_counts,
+            ..
+        }) = &se.kind
+        else {
+            return None;
+        };
+        if accumulators.len() != 1 {
+            return None;
+        }
+        let acc = &accumulators[0];
+        if !matches!(acc.kind, crate::tlc::ScremaAccumulator::Reduce) {
+            return None;
+        }
+        if acc.step_capture_count != 0 || acc.reduce_op_capture_count != 0 {
+            return None;
+        }
+        if map_capture_counts.iter().any(|&c| c != 0) {
+            return None;
+        }
+        let n_inputs = input_array_types.len();
+        if n_inputs != 1 {
+            return None;
+        }
+        let n_accs = accumulators.len();
+        let n_maps = map_funcs.len();
+        // Phase 1 only handles map outputs that have been retargeted to
+        // OutputView (so realize_outputs already pinned their output
+        // buffer). Fresh map outputs would need the loop body to build an
+        // immutable array — incompatible with chunked parallel writes.
+        if !map_destinations.iter().all(|d| matches!(d, SoacDestination::OutputView)) {
+            return None;
+        }
+        // Reduce accumulators expect Fresh destination (scalar result
+        // routed via a Project-based Store).
+        if !acc_destinations.iter().all(|d| matches!(d, SoacDestination::Fresh)) {
+            return None;
+        }
+        let input_nid = se.operand_nodes[0];
+        let init_nid = se.operand_nodes[n_inputs];
+        // Operand layout (gate enforces zero captures everywhere):
+        //   [inputs(n_inputs), init_accs(n_accs), map_output_views(n_maps),
+        //    acc_output_views(0 — all Fresh)]
+        let base = n_inputs + n_accs;
+        let map_view_ops: Vec<usize> = (0..n_maps).map(|m| base + m).collect();
+        let input_ty = entry.graph.types[&input_nid].clone();
+        let result = se.result?;
+        let elem = entry.graph.types[&init_nid].clone();
+        (
+            acc.reduce_op_func.clone(),
+            n_inputs,
+            n_accs,
+            map_view_ops,
+            input_nid,
+            input_ty,
+            init_nid,
+            elem,
+            result,
+        )
+    };
+    debug_assert_eq!(n_inputs, 1);
+    debug_assert_eq!(n_accs, 1);
+
+    // 3. Chunk the input view and every map output view; swap them back
+    // into the Screma operand list.
+    let chunked = chunk_soac_inputs(
+        &mut entry.graph,
+        &[(input_view_nid, input_view_ty)],
+        total_threads,
+        ChunkInputKind::StorageOrRange,
+        "Screma",
+    )
+    .ok()?;
+    let chunk_start = chunked.chunk_start;
+    let chunk_len = chunked.chunk_len;
+    {
+        let se = &mut entry.graph.skeleton.blocks[block_id].side_effects[idx];
+        se.operand_nodes[0] = chunked.views[0];
+    }
+    for (m_idx, op_idx) in map_output_view_ops.iter().enumerate() {
+        let orig_view = entry.graph.skeleton.blocks[block_id].side_effects[idx].operand_nodes[*op_idx];
+        let view_ty = entry.graph.types[&orig_view].clone();
+        let chunked_view = chunk_view_like(
+            &mut entry.graph,
+            orig_view,
+            view_ty,
+            chunk_start,
+            chunk_len,
+            ChunkInputKind::StorageOnly,
+            &format!("Screma map output {m_idx}"),
+        )
+        .ok()?;
+        let se = &mut entry.graph.skeleton.blocks[block_id].side_effects[idx];
+        se.operand_nodes[*op_idx] = chunked_view;
+    }
+
+    // 4. Redirect the reduce result's auto-output Store(s) to
+    // `partials[tid]`. The Store's value is `Project { index: 0 } of
+    // screma_result_nid` — a chain rooted at screma_result_nid, which
+    // `value_projects_from` already accepts. Defensive multi-Store
+    // handling matches the Redomap path (mostly a no-op here — the
+    // result is a single scalar tuple field).
+    let arr_ty = Type::Constructed(
+        TypeName::Array,
+        vec![
+            elem_ty.clone(),
+            Type::Constructed(TypeName::ArrayVariantView, vec![]),
+            Type::Variable(0),
+            crate::types::no_region(),
+        ],
+    );
+    let partials_view = graph_ops::intern_storage_view(&mut entry.graph, partials_binding, arr_ty, None);
+    let new_place = entry.graph.intern_pure(
+        super::types::PureOp::ViewIndex,
+        smallvec![partials_view, chunked.tid],
+        elem_ty.clone(),
+    );
+
+    let mut output_stores: Vec<(BlockId, usize)> = Vec::new();
+    for (bid, block) in &entry.graph.skeleton.blocks {
+        for (i, se) in block.side_effects.iter().enumerate() {
+            if matches!(&se.kind, SideEffectKind::Inst(InstKind::Store { .. }))
+                && se
+                    .operand_nodes
+                    .get(1)
+                    .is_some_and(|&v| value_projects_from(&entry.graph, v, screma_result_nid))
+            {
+                output_stores.push((bid, i));
+            }
+        }
+    }
+    let (keep_block, keep_idx) = *output_stores.first()?;
+    // Capture the original place's underlying binding (the reduce-acc's
+    // auto-allocated output) BEFORE redirecting — so step 5 below can
+    // clear exactly that slot on entry.outputs and leave the map-output
+    // bindings intact.
+    let reduce_acc_output_binding = {
+        let se = &entry.graph.skeleton.blocks[keep_block].side_effects[keep_idx];
+        se.operand_nodes.get(0).and_then(|&p| graph_ops::extract_storage_view_source(&entry.graph, p))
+    };
+    {
+        let se = &mut entry.graph.skeleton.blocks[keep_block].side_effects[keep_idx];
+        se.operand_nodes[0] = new_place;
+        // Keep value as-is — it's `Project { index: n_maps }` of the
+        // Screma tuple, which is the per-thread partial after chunking.
+    }
+    let mut to_remove: Vec<(BlockId, usize)> = output_stores.into_iter().skip(1).collect();
+    to_remove.sort_by(|a, b| b.1.cmp(&a.1));
+    for (bid, idx) in to_remove {
+        entry.graph.skeleton.blocks[bid].side_effects.remove(idx);
+    }
+
+    // 5. Clear the reduce-acc's specific output slot on the entry (phase
+    // 2 owns the result binding now). Map output slots keep their
+    // storage_binding so phase 1's chunked writes land in the right
+    // buffer. Register the partials buffer as Intermediate.
+    if let Some(rb) = reduce_acc_output_binding {
+        for o in entry.outputs.iter_mut() {
+            if o.storage_binding == Some(rb) {
+                o.storage_binding = None;
+            }
+        }
+    }
+    entry.storage_bindings.push(crate::interface::StorageBindingDecl {
+        binding: partials_binding,
+        role: crate::interface::StorageRole::Intermediate,
+        elem_ty: elem_ty.clone(),
+        length: None,
+    });
+
+    // 6. Synthesise phase 2 — tree-reduce of `partials` into `result`,
+    // cloning the NE subgraph from phase 1's graph snapshot. Snapshot
+    // before mutation would be more economical, but cloning post-mutation
+    // is harmless (the NE node is pure and untouched).
+    let phase1_snapshot = entry.graph.clone();
+    let phase2 = synthesize_phase2_reduce_cloning_ne(
+        &entry.name,
+        reduce_func,
+        elem_ty,
+        &phase1_snapshot,
+        init_nid,
+        partials_binding,
+        result_binding,
+    )
+    .ok()?;
+
+    Some(phase2)
+}
+
+/// 0+ map outputs (no captures) + exactly one Scan accumulator with no
+/// captures and a scalar-literal NE. Mirrors `transform_scan_entry`'s
+/// 3-phase shape, adapted to Screma's operand layout: phase 1 chunks
+/// the input + map output views + the scan output view, appends a
+/// synthetic chunked Reduce that writes per-thread final accumulators
+/// to `block_sums[tid]`; phase 2 sequentially scans `block_sums` into
+/// `block_offsets`; phase 3 reads `block_offsets` and applies each
+/// chunk's offset back over the scan output buffer. Phase 3 uses an
+/// arg-swapped wrapper around the combiner so the scan output's
+/// previously-written values land in the `acc` slot.
+fn transform_screma_scan_entry(
+    entry: &mut EgirEntry,
+    plan: &ParallelizationPlan,
+) -> Option<(EgirEntry, EgirEntry, EgirFunc)> {
+    use crate::tlc::parallelize::PlannedBindings;
+
+    // 1. Pull binding/dispatch info from the plan.
+    let PlannedBindings::Screma {
+        map_outputs: _,
+        accumulators,
+    } = &plan.bindings
+    else {
+        return None;
+    };
+    if accumulators.len() != 1 {
+        return None;
+    }
+    let acc_planned = &accumulators[0];
+    let block_sums_binding = acc_planned.block_sums?;
+    let block_offsets_binding = acc_planned.block_offsets?;
+    let total_threads = match plan.dispatch {
+        crate::tlc::parallelize::DispatchModel::Fixed { local_size, .. } => local_size[0],
+        crate::tlc::parallelize::DispatchModel::DerivedFromInputLength { workgroup_size, .. } => {
+            workgroup_size
+        }
+    };
+
+    // 2. Locate the Screma side-effect and pull its metadata.
+    let (block_id, idx) = find_pending_screma(entry)?;
+    let (
+        op_func,
+        reduce_func,
+        map_output_view_ops,
+        scan_output_view_op,
+        input_view_nid,
+        input_view_ty,
+        init_nid,
+        elem_ty,
+    ) = {
+        let se = &entry.graph.skeleton.blocks[block_id].side_effects[idx];
+        let SideEffectKind::Pending(PendingSoac::Screma {
+            map_funcs,
+            accumulators,
+            input_array_types,
+            map_destinations,
+            acc_destinations,
+            map_capture_counts,
+            ..
+        }) = &se.kind
+        else {
+            return None;
+        };
+        if accumulators.len() != 1 {
+            return None;
+        }
+        let acc = &accumulators[0];
+        if !matches!(acc.kind, crate::tlc::ScremaAccumulator::Scan) {
+            return None;
+        }
+        if acc.step_capture_count != 0 || acc.reduce_op_capture_count != 0 {
+            return None;
+        }
+        if map_capture_counts.iter().any(|&c| c != 0) {
+            return None;
+        }
+        let n_inputs = input_array_types.len();
+        if n_inputs != 1 {
+            return None;
+        }
+        if !map_destinations.iter().all(|d| matches!(d, SoacDestination::OutputView)) {
+            return None;
+        }
+        // Realize_outputs retargets the scan accumulator (when its
+        // tuple field feeds the entry's output) to OutputView with the
+        // scan output buffer appended.
+        if !acc_destinations.iter().all(|d| matches!(d, SoacDestination::OutputView)) {
+            return None;
+        }
+        let n_accs = accumulators.len();
+        let n_maps = map_funcs.len();
+        let input_nid = se.operand_nodes[0];
+        let init_nid = se.operand_nodes[n_inputs];
+        // Operand layout (gate enforces zero captures everywhere):
+        //   [inputs(n_inputs), init_accs(n_accs), map_output_views(n_maps),
+        //    acc_output_views(n_accs — all OutputView)]
+        let base = n_inputs + n_accs;
+        let map_view_ops: Vec<usize> = (0..n_maps).map(|m| base + m).collect();
+        let scan_output_view_op = base + n_maps; // 1 acc, OutputView
+        let input_ty = entry.graph.types[&input_nid].clone();
+        let elem = entry.graph.types[&init_nid].clone();
+        (
+            acc.step_func.clone(),
+            acc.reduce_op_func.clone(),
+            map_view_ops,
+            scan_output_view_op,
+            input_nid,
+            input_ty,
+            init_nid,
+            elem,
+        )
+    };
+
+    // 3. Chunk the input view, every map output view, and the scan
+    // output view; swap each back into the Screma operand list.
+    let chunked = chunk_soac_inputs(
+        &mut entry.graph,
+        &[(input_view_nid, input_view_ty.clone())],
+        total_threads,
+        ChunkInputKind::StorageOnly,
+        "Screma+Scan",
+    )
+    .ok()?;
+    let chunk_start = chunked.chunk_start;
+    let chunk_len = chunked.chunk_len;
+    let chunked_input_nid = chunked.views[0];
+    {
+        let se = &mut entry.graph.skeleton.blocks[block_id].side_effects[idx];
+        se.operand_nodes[0] = chunked_input_nid;
+    }
+    for (m_idx, op_idx) in map_output_view_ops.iter().enumerate() {
+        let orig_view = entry.graph.skeleton.blocks[block_id].side_effects[idx].operand_nodes[*op_idx];
+        let view_ty = entry.graph.types[&orig_view].clone();
+        let chunked_view = chunk_view_like(
+            &mut entry.graph,
+            orig_view,
+            view_ty,
+            chunk_start,
+            chunk_len,
+            ChunkInputKind::StorageOnly,
+            &format!("Screma map output {m_idx}"),
+        )
+        .ok()?;
+        let se = &mut entry.graph.skeleton.blocks[block_id].side_effects[idx];
+        se.operand_nodes[*op_idx] = chunked_view;
+    }
+    let (scan_output_storage, orig_scan_output_view_ty) = {
+        let se = &entry.graph.skeleton.blocks[block_id].side_effects[idx];
+        let v = se.operand_nodes[scan_output_view_op];
+        let ty = entry.graph.types[&v].clone();
+        let storage = graph_ops::extract_storage_view_source(&entry.graph, v)?;
+        (storage, ty)
+    };
+    let chunked_scan_output = graph_ops::intern_chunked_storage_view(
+        &mut entry.graph,
+        scan_output_storage,
+        chunk_start,
+        chunk_len,
+        orig_scan_output_view_ty,
+        None,
+    );
+    {
+        let se = &mut entry.graph.skeleton.blocks[block_id].side_effects[idx];
+        se.operand_nodes[scan_output_view_op] = chunked_scan_output;
+    }
+
+    // 4. Snapshot the phase 1 graph BEFORE appending the chunked Reduce
+    // (so phase 2's NE-clone sees a clean snapshot — the appended
+    // Reduce is pure / additive, but the snapshot point matches the
+    // plain-Scan path).
+    let phase1_snapshot = entry.graph.clone();
+
+    // 5. Append a chunked Reduce side-effect that computes each
+    // thread's final accumulator and stores it to `block_sums[tid]`.
+    // Operands: [chunked_input, init].
+    {
+        let mut next_effect = graph_ops::next_effect_token(&entry.graph);
+        let reduce_operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![chunked_input_nid, init_nid];
+        let result_nid = graph_ops::emit_pending_soac(
+            &mut entry.graph,
+            block_id,
+            PendingSoac::Reduce {
+                func: op_func,
+                input_array_type: input_view_ty,
+                input_elem_type: elem_ty.clone(),
+            },
+            reduce_operands,
+            elem_ty.clone(),
+            &mut next_effect,
+            None,
+        );
+        // Store result_nid → block_sums[tid].
+        let arr_ty = Type::Constructed(
+            TypeName::Array,
+            vec![
+                elem_ty.clone(),
+                Type::Constructed(TypeName::ArrayVariantView, vec![]),
+                Type::Variable(0),
+                crate::types::no_region(),
+            ],
+        );
+        let block_sums_view =
+            graph_ops::intern_storage_view(&mut entry.graph, block_sums_binding, arr_ty, None);
+        graph_ops::emit_storage_store(
+            &mut entry.graph,
+            block_id,
+            block_sums_view,
+            chunked.tid,
+            result_nid,
+            elem_ty.clone(),
+            &mut next_effect,
+            None,
+        );
+    }
+
+    // 6. Register block_sums + block_offsets as Intermediate on phase 1
+    // (only block_sums is actually written by phase 1, but declaring
+    // block_offsets here mirrors the plain-Scan path so realize_outputs
+    // & verifiers stay happy — and phase 3 reads from it without an
+    // extra declaration on the entry interface).
+    entry.storage_bindings.push(crate::interface::StorageBindingDecl {
+        binding: block_sums_binding,
+        role: crate::interface::StorageRole::Intermediate,
+        elem_ty: elem_ty.clone(),
+        length: None,
+    });
+    entry.storage_bindings.push(crate::interface::StorageBindingDecl {
+        binding: block_offsets_binding,
+        role: crate::interface::StorageRole::Intermediate,
+        elem_ty: elem_ty.clone(),
+        length: None,
+    });
+
+    // 7. Synthesise phase 2 (sequential scan of block_sums) and phase 3
+    // (apply offsets to scan output), reusing the existing Scan helpers.
+    let phase2 = synthesize_phase2_scan(
+        &entry.name,
+        reduce_func.clone(),
+        elem_ty.clone(),
+        &phase1_snapshot,
+        init_nid,
+        block_sums_binding,
+        block_offsets_binding,
+    )
+    .ok()?;
+    let swap_wrapper_name = format!("{}_scan_op_swap", entry.name);
+    let swap_wrapper = synthesize_swap_wrapper(
+        swap_wrapper_name.clone(),
+        reduce_func,
+        elem_ty.clone(),
+        entry.span,
+    );
+    let phase3 = synthesize_phase3_scan(
+        &entry.name,
+        swap_wrapper_name,
+        elem_ty,
+        scan_output_storage,
+        block_offsets_binding,
+        total_threads,
+    );
+
+    Some((phase2, phase3, swap_wrapper))
 }
 
 /// Orchestrate the Scan migration. Returns `Some(vec![phase2, phase3])`

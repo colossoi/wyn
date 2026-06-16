@@ -9,8 +9,8 @@
 //! T11 additionally verifies `required_params` — the subset of outer
 //! Lambda params that the restructured body actually references.
 
-use super::VarRef;
 use super::analyze_entry;
+use super::{PlannedBindings, PlannedScremaAccumulatorKind, VarRef, reserve_screma_bindings};
 use crate::ast::{self, Span, TypeName};
 use crate::tlc::{
     ArrayExpr, Def, DefMeta, Lambda, LoopKind, ScremaAccumulator, ScremaAccumulatorSpec, SoacBody,
@@ -257,16 +257,57 @@ fn t1b_tail_pointwise_screma_is_parallel_planned() {
 }
 
 #[test]
-fn t1c_tail_mixed_screma_is_not_parallel_planned_yet() {
+fn t1c_tail_mixed_screma_is_recognised_by_analysis() {
     let mut b = B::new();
     let p = b.sym("p");
     let body = b.trivial_screma();
     let name = b.sym("entry");
     let def = b.entry_def(name, vec![(p, i32_ty())], body);
-    assert!(
-        analyze_entry(&def, &b.symbols).is_none(),
-        "Screma should stay serial until the shared multi-output phase planner exists"
-    );
+    let a = analyze_entry(&def, &b.symbols)
+        .expect("mixed Screma (map + reduce accumulator) should now be recognised by the analyzer");
+    assert!(a.prefix_lets.is_empty());
+    assert!(matches!(
+        a.soac.original,
+        SoacOp::Screma { ref accumulators, .. } if !accumulators.is_empty()
+    ));
+}
+
+#[test]
+fn mixed_screma_binding_reservation_covers_reduce_and_scan_accumulators() {
+    let mut b = B::new();
+    let mut body = b.trivial_screma();
+    let TermKind::Soac(SoacOp::Screma { accumulators, .. }) = &mut body.kind else {
+        panic!("fixture should be Screma")
+    };
+    let mut scan = accumulators[0].clone();
+    scan.kind = ScremaAccumulator::Scan;
+    accumulators.push(scan);
+
+    let (bindings, next) = reserve_screma_bindings(
+        &match &body.kind {
+            TermKind::Soac(soac) => soac.clone(),
+            _ => unreachable!(),
+        },
+        7,
+    )
+    .expect("Screma bindings");
+
+    let PlannedBindings::Screma {
+        map_outputs,
+        accumulators,
+    } = bindings
+    else {
+        panic!("expected Screma planned bindings")
+    };
+    assert_eq!(map_outputs.len(), 1);
+    assert_eq!(accumulators.len(), 2);
+    assert_eq!(accumulators[0].kind, PlannedScremaAccumulatorKind::Reduce);
+    assert_eq!(accumulators[0].partials.unwrap().binding, 7);
+    assert_eq!(accumulators[0].result.unwrap().binding, 8);
+    assert_eq!(accumulators[1].kind, PlannedScremaAccumulatorKind::Scan);
+    assert_eq!(accumulators[1].block_sums.unwrap().binding, 9);
+    assert_eq!(accumulators[1].block_offsets.unwrap().binding, 10);
+    assert_eq!(next, 11);
 }
 
 /// T2: Lambda + deep Let chain + Soac. All lets should appear in
@@ -770,6 +811,53 @@ fn nested_reduce_of_map_becomes_two_phase_multi_compute() {
         .or_else(|| multi_stage_count(&desc, "e_phase2_combine"))
         .expect("reduce(map(...)) should produce a multi-compute pipeline");
     assert_eq!(stages, 2, "two-phase reduce: phase1 + phase2");
+}
+
+/// A shared producer feeding both a map and a reduce fuses to a Screma
+/// (map outputs + 1 reduce accumulator). After Step 2 the Screma path
+/// emits the same two-stage shape as the Redomap path — phase 1 chunks
+/// the input and the map output view + writes the reduce partial to
+/// `partials[tid]`, phase 2 tree-reduces partials into the result.
+#[test]
+fn screma_fused_map_and_reduce_becomes_two_phase_multi_compute() {
+    let src = r#"
+        #[compute]
+        entry gen(xs: []i32) ([]i32, [1]i32) =
+          let b = map(|x: i32| x + 1, xs) in
+          let c = map(|y: i32| y * 2, b) in
+          let d = reduce(|acc: i32, z: i32| acc + z, 0, b) in
+          (c, [d])
+    "#;
+    let (_program, desc) = parallelize_src(src);
+    let stages = multi_stage_count(&desc, "gen")
+        .or_else(|| multi_stage_count(&desc, "gen_phase2_combine"))
+        .expect("fused map+reduce Screma should produce a multi-compute pipeline");
+    assert_eq!(stages, 2, "Screma reduce-accumulator: phase1 + phase2");
+}
+
+/// A shared producer feeding both a map and a scan fuses to a Screma
+/// (map outputs + 1 scan accumulator). After Step 3 the Screma path
+/// emits the same three-stage shape as the plain Scan path — phase 1
+/// chunks the input + map output view + scan output view + writes the
+/// per-thread final accumulator to `block_sums[tid]`; phase 2
+/// sequentially scans block_sums into block_offsets; phase 3 applies
+/// each chunk's offset back over the scan output.
+#[test]
+fn screma_fused_map_and_scan_becomes_three_stage_multi_compute() {
+    let src = r#"
+        #[compute]
+        entry gen(xs: []i32) ([]i32, []i32) =
+          let b = map(|x: i32| x + 1, xs) in
+          let c = map(|y: i32| y * 2, b) in
+          let d = scan(|acc: i32, z: i32| acc + z, 0, b) in
+          (c, d)
+    "#;
+    let (_program, desc) = parallelize_src(src);
+    let stages = multi_stage_count(&desc, "gen")
+        .or_else(|| multi_stage_count(&desc, "gen_phase2_scan_sums"))
+        .or_else(|| multi_stage_count(&desc, "gen_phase3_add_offsets"))
+        .expect("fused map+scan Screma should produce a multi-compute pipeline");
+    assert_eq!(stages, 3, "Screma scan-accumulator: phase1 + phase2 + phase3");
 }
 
 /// `scan(+, 0, map(f, xs))` is a parallelizable scan: 3 stages

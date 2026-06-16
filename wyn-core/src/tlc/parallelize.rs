@@ -123,12 +123,19 @@ fn parallel_soac_shape(soac: &SoacOp) -> Option<ParallelSoacShape<'_>> {
                 .map(|acc| acc.ne.ty.clone())
                 .or_else(|| map_lams.first().map(|lam| lam.lam.ret_ty.clone()))
                 .unwrap_or_else(|| Type::Constructed(TypeName::Unit, vec![]));
+            // Pointwise (no accumulators, all maps) routes through the
+            // multi-output map path. Mixed Screma (accumulators + maps) is
+            // recognised by analysis so make_lowering_plan can dispatch a
+            // serial single-thread compute pipeline — the EGIR-side
+            // parallel transform lights up in a follow-up. A Screma with
+            // no maps and no accumulators is meaningless; reject it.
+            let lowerable_today = !inputs.is_empty() && (!accumulators.is_empty() || !map_lams.is_empty());
             Some(ParallelSoacShape {
                 flavor: ParallelSoacFlavor::Screma,
                 inputs: inputs.iter().collect(),
                 ne: None,
                 result_elem_type,
-                lowerable_today: accumulators.is_empty() && !map_lams.is_empty(),
+                lowerable_today,
             })
         }
         SoacOp::Filter { .. } | SoacOp::Scatter { .. } | SoacOp::ReduceByIndex { .. } => None,
@@ -643,9 +650,9 @@ fn analyze_soac(
             map_lams,
             accumulators,
             inputs,
-        } if accumulators.is_empty() => SoacOp::Screma {
+        } => SoacOp::Screma {
             map_lams: map_lams.clone(),
-            accumulators: vec![],
+            accumulators: accumulators.clone(),
             inputs: inputs.clone(),
         },
         SoacOp::Scan {
@@ -945,6 +952,7 @@ pub enum ParallelStrategy {
     Reduce,
     Redomap,
     Scan,
+    Screma,
 }
 
 /// Dispatch shape from the strategy + sizing. Carried explicitly so
@@ -988,6 +996,28 @@ pub enum PlannedBindings {
         block_sums: BindingRef,
         block_offsets: BindingRef,
     },
+    Screma {
+        /// One entry per mapped output. `None` means EGIR auto-allocates the
+        /// entry output view for that field, matching Map/Scan.
+        map_outputs: Vec<Option<BindingRef>>,
+        accumulators: Vec<PlannedScremaAccumulator>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct PlannedScremaAccumulator {
+    pub kind: PlannedScremaAccumulatorKind,
+    pub partials: Option<BindingRef>,
+    pub result: Option<BindingRef>,
+    pub output: Option<BindingRef>,
+    pub block_sums: Option<BindingRef>,
+    pub block_offsets: Option<BindingRef>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlannedScremaAccumulatorKind {
+    Reduce,
+    Scan,
 }
 
 impl PlannedBindings {
@@ -1000,9 +1030,76 @@ impl PlannedBindings {
         match self {
             PlannedBindings::Map { output } => *output,
             PlannedBindings::Scan { output, .. } => *output,
-            PlannedBindings::Reduce { .. } | PlannedBindings::Redomap { .. } => None,
+            PlannedBindings::Reduce { .. }
+            | PlannedBindings::Redomap { .. }
+            | PlannedBindings::Screma { .. } => None,
         }
     }
+}
+
+fn reserve_screma_bindings(soac: &SoacOp, next_binding: u32) -> Option<(PlannedBindings, u32)> {
+    let SoacOp::Screma {
+        map_lams,
+        accumulators,
+        ..
+    } = soac
+    else {
+        return None;
+    };
+    let mut cursor = next_binding;
+    let map_outputs = vec![None; map_lams.len()];
+    let mut planned_accumulators = Vec::with_capacity(accumulators.len());
+    for acc in accumulators {
+        match acc.kind {
+            super::ScremaAccumulator::Reduce => {
+                let partials = BindingRef {
+                    set: AUTO_STORAGE_SET,
+                    binding: cursor,
+                };
+                cursor += 1;
+                let result = BindingRef {
+                    set: AUTO_STORAGE_SET,
+                    binding: cursor,
+                };
+                cursor += 1;
+                planned_accumulators.push(PlannedScremaAccumulator {
+                    kind: PlannedScremaAccumulatorKind::Reduce,
+                    partials: Some(partials),
+                    result: Some(result),
+                    output: None,
+                    block_sums: None,
+                    block_offsets: None,
+                });
+            }
+            super::ScremaAccumulator::Scan => {
+                let block_sums = BindingRef {
+                    set: AUTO_STORAGE_SET,
+                    binding: cursor,
+                };
+                cursor += 1;
+                let block_offsets = BindingRef {
+                    set: AUTO_STORAGE_SET,
+                    binding: cursor,
+                };
+                cursor += 1;
+                planned_accumulators.push(PlannedScremaAccumulator {
+                    kind: PlannedScremaAccumulatorKind::Scan,
+                    partials: None,
+                    result: None,
+                    output: None,
+                    block_sums: Some(block_sums),
+                    block_offsets: Some(block_offsets),
+                });
+            }
+        }
+    }
+    Some((
+        PlannedBindings::Screma {
+            map_outputs,
+            accumulators: planned_accumulators,
+        },
+        cursor,
+    ))
 }
 
 // =============================================================================
@@ -1795,17 +1892,29 @@ fn make_lowering_plan(
             )
         }
         ParallelSoacFlavor::Screma => {
-            // Pointwise-only Screma is a multi-output Map: one lane per
-            // element, no cross-lane phases. Mixed accumulator Screma stays
-            // gated in `parallel_soac_shape`.
-            make_map_plan(
-                analysis,
-                entry_name,
-                next_binding,
-                sizing,
-                forced_result_binding,
-                program,
-            )
+            let is_mixed = match &analysis.soac.original {
+                SoacOp::Screma { accumulators, .. } => !accumulators.is_empty(),
+                _ => false,
+            };
+            if is_mixed {
+                // Mixed Screma: dispatched to make_screma_plan, which picks
+                // an EGIR-parallel two-phase shape when the shape is
+                // supported, else falls back to a serial 1×1×1 Compute
+                // pipeline.
+                make_screma_plan(analysis, entry_name, next_binding, sizing, program)
+            } else {
+                // Pointwise-only Screma is a multi-output Map: one lane per
+                // element, no cross-lane phases. Route through the existing
+                // Map planner / EGIR `rewrite_tail_map` parallel marker.
+                make_map_plan(
+                    analysis,
+                    entry_name,
+                    next_binding,
+                    sizing,
+                    forced_result_binding,
+                    program,
+                )
+            }
         }
     }
 }
@@ -1869,6 +1978,222 @@ fn make_map_plan(
         extra_bindings_used: 0,
         parallel_plan: Some(parallel_plan),
     }
+}
+
+/// True when EGIR's `transform_screma_entry` can parallelise this
+/// mixed Screma today. Supported shape: 0+ map outputs (no captures) and
+/// exactly one accumulator (no captures, scalar-literal NE) that is
+/// either Reduce (2-phase tree) or Scan (3-phase block-prefix).
+fn screma_egir_parallelisable(soac: &SoacOp) -> bool {
+    let SoacOp::Screma {
+        map_lams,
+        accumulators,
+        ..
+    } = soac
+    else {
+        return false;
+    };
+    if accumulators.len() != 1 {
+        return false;
+    }
+    let acc = &accumulators[0];
+    if !acc.step_lam.captures.is_empty() || !acc.reduce_op.captures.is_empty() {
+        return false;
+    }
+    if map_lams.iter().any(|m| !m.captures.is_empty()) {
+        return false;
+    }
+    if !is_simple_constant_term(&acc.ne) {
+        return false;
+    }
+    matches!(
+        &acc.ne.ty,
+        Type::Constructed(TypeName::Int(_), _)
+            | Type::Constructed(TypeName::UInt(_), _)
+            | Type::Constructed(TypeName::Float(_), _)
+            | Type::Constructed(TypeName::Bool, _),
+    )
+}
+
+/// Mixed-Screma planner. Two branches:
+///
+/// - **EGIR-parallel**: when `screma_egir_parallelisable` matches, emit
+///   a two-stage MultiCompute pipeline (phase 1 = the entry, chunked
+///   in-place by `egir::parallelize::transform_screma_entry`; phase 2
+///   = synthesized tree-reduce combiner) and a `ParallelStrategy::Screma`
+///   plan whose `PlannedBindings::Screma` carries the partials/result
+///   bindings.
+/// - **Serial fallback**: 1×1×1 Compute pipeline so the existing serial
+///   soac_expand lowering produces correct output. `parallel_plan` is
+///   None — the EGIR Screma arm short-circuits and the entry stays as
+///   the original PendingSoac::Screma.
+fn make_screma_plan(
+    analysis: &EntryAnalysis,
+    entry_name: &str,
+    next_binding: u32,
+    sizing: PipelineSizing,
+    program: &Program,
+) -> LoweringPlan {
+    if !screma_egir_parallelisable(&analysis.soac.original) {
+        let bindings = collect_soac_bindings(&analysis.soac);
+        let pipeline = Pipeline::Compute(ComputePipeline {
+            entry_point: entry_name.to_string(),
+            workgroup_size: sizing.workgroup,
+            dispatch_size: DispatchSize::Fixed { x: 1, y: 1, z: 1 },
+            bindings,
+            default_total_threads: sizing.default_total_threads,
+        });
+        return LoweringPlan {
+            removed_entry: None,
+            new_defs: Vec::new(),
+            pipeline,
+            extra_bindings_used: 0,
+            parallel_plan: None,
+        };
+    }
+
+    // Place the intermediates above the auto-allocated input bindings
+    // (same trick as make_two_phase_plan / make_scan_plan).
+    let auto_input_count = count_view_param_bindings(program, analysis.def_name);
+    let (planned_bindings, extra_used) =
+        reserve_screma_bindings(&analysis.soac.original, next_binding + auto_input_count)
+            .expect("screma_egir_parallelisable guarantees binding reservation succeeds");
+    let extra_used = extra_used - (next_binding + auto_input_count);
+
+    let acc_kind = match &analysis.soac.original {
+        SoacOp::Screma { accumulators, .. } => accumulators[0].kind,
+        _ => unreachable!(),
+    };
+    let elem_type = analysis.soac.result_elem_type();
+    let pipeline = match acc_kind {
+        super::ScremaAccumulator::Reduce => {
+            let acc_planned = match &planned_bindings {
+                PlannedBindings::Screma { accumulators, .. } => &accumulators[0],
+                _ => unreachable!(),
+            };
+            let partials_binding = acc_planned.partials.expect("Reduce reserves partials");
+            let result_binding = acc_planned.result.expect("Reduce reserves result");
+            build_two_phase_pipeline_descriptor(
+                entry_name,
+                &analysis.soac,
+                &elem_type,
+                partials_binding,
+                result_binding,
+                sizing,
+            )
+        }
+        super::ScremaAccumulator::Scan => {
+            let acc_planned = match &planned_bindings {
+                PlannedBindings::Screma { accumulators, .. } => &accumulators[0],
+                _ => unreachable!(),
+            };
+            let block_sums_binding = acc_planned.block_sums.expect("Scan reserves block_sums");
+            let block_offsets_binding = acc_planned.block_offsets.expect("Scan reserves block_offsets");
+            // The scan accumulator's output is the entry's auto-allocated
+            // output for its tuple field — the slot from_tlc reserves at
+            // (AUTO_STORAGE_SET, next_binding + auto_input_count + map_count).
+            // Mirror build_scan_pipeline_descriptor's non-consuming branch.
+            let n_maps = match &analysis.soac.original {
+                SoacOp::Screma { map_lams, .. } => map_lams.len(),
+                _ => unreachable!(),
+            };
+            let scan_output_binding =
+                BindingRef::new(AUTO_STORAGE_SET, next_binding + auto_input_count + n_maps as u32);
+            build_screma_scan_pipeline_descriptor(
+                entry_name,
+                analysis,
+                scan_output_binding,
+                block_sums_binding,
+                block_offsets_binding,
+                sizing,
+                program,
+            )
+        }
+    };
+
+    let parallel_plan = ParallelizationPlan {
+        entry: entry_name.to_string(),
+        strategy: ParallelStrategy::Screma,
+        dispatch: DispatchModel::Fixed {
+            groups: [1, 1, 1],
+            local_size: [sizing.workgroup.0, sizing.workgroup.1, sizing.workgroup.2],
+        },
+        bindings: planned_bindings,
+    };
+    LoweringPlan {
+        removed_entry: None,
+        new_defs: Vec::new(),
+        pipeline,
+        extra_bindings_used: extra_used,
+        parallel_plan: Some(parallel_plan),
+    }
+}
+
+/// Build the `Pipeline::MultiCompute` descriptor for a Screma with a
+/// single Scan accumulator. Same 3-stage shape as
+/// `build_scan_pipeline_descriptor`'s non-consuming branch, but the
+/// "scan output" binding is the entry's auto-allocated slot for the
+/// accumulator's tuple field rather than the SOAC's solo output.
+fn build_screma_scan_pipeline_descriptor(
+    entry_name: &str,
+    analysis: &EntryAnalysis,
+    scan_output_binding: BindingRef,
+    block_sums_binding: BindingRef,
+    block_offsets_binding: BindingRef,
+    sizing: PipelineSizing,
+    program: &Program,
+) -> Pipeline {
+    let workgroup = sizing.workgroup;
+    let mut all_bindings = collect_soac_bindings(&analysis.soac);
+    let input_indices: Vec<usize> = (0..all_bindings.len()).collect();
+    let output_idx = push_storage_binding(
+        &mut all_bindings,
+        scan_output_binding,
+        Access::ReadWrite,
+        BufferUsage::Output,
+        format!("{}_scan_output", entry_name),
+    );
+    let block_sums_idx = push_storage_binding(
+        &mut all_bindings,
+        block_sums_binding,
+        Access::ReadWrite,
+        BufferUsage::Intermediate,
+        format!("{}_block_sums", entry_name),
+    );
+    let block_offsets_idx = push_storage_binding(
+        &mut all_bindings,
+        block_offsets_binding,
+        Access::ReadWrite,
+        BufferUsage::Intermediate,
+        format!("{}_block_offsets", entry_name),
+    );
+
+    let phase1_name = entry_name.to_string();
+    let phase2_name = format!("{}_phase2_scan_sums", entry_name);
+    let phase3_name = format!("{}_phase3_add_offsets", entry_name);
+
+    let scan_len = resolve_dispatch_len(analysis, 0, program);
+    Pipeline::MultiCompute(MultiComputePipeline {
+        bindings: all_bindings,
+        stages: vec![
+            derived_stage(
+                phase1_name,
+                input_indices,
+                vec![output_idx, block_sums_idx],
+                workgroup,
+                scan_len.clone(),
+            ),
+            fixed_stage(phase2_name, vec![block_sums_idx], vec![block_offsets_idx]),
+            derived_stage(
+                phase3_name,
+                vec![block_offsets_idx],
+                vec![output_idx],
+                workgroup,
+                scan_len,
+            ),
+        ],
+        default_total_threads: sizing.default_total_threads,
+    })
 }
 
 fn make_two_phase_plan(
