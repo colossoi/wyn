@@ -1,0 +1,265 @@
+-- "Perlin Noise Fields" — a playground of flow-field visualizations.
+--
+-- Techniques inspired by Manohar Vanga's post "Getting Creative with
+-- Perlin Noise Fields" (https://sighack.com/post/getting-creative-with-perlin-noise-fields,
+-- source sketches at https://github.com/sighack/perlin-noise-fields).
+-- All noise comes from `lib/noise.wyn` (perlin2 / value2 / worley2 /
+-- fbm_perlin); this file only adds the *visualization* layer: a per-pixel
+-- streamline integrator (LIC-style) that renders the field as flowing
+-- curves, plus assorted colorings.
+--
+-- Hold a lowercase letter to switch variant (release → back to 'a'):
+--
+--   a  flow direction as hue (the raw field)
+--   b  flow lines along the perlin field          (the signature look)
+--   c  curl-noise flow lines
+--   d  right-angle field (angles snapped to 90°)
+--   e  fbm clouds (grayscale)
+--   f  domain-warped fbm
+--   g  worley / cellular
+--   h  topographic contour lines
+--   i  three noise channels → RGB
+--   j  swirl (angle × k, tighter vortices)
+--   k  speed-colored flow (|gradient| palette × flow lines)
+--   l  time-drifting flow lines
+--
+-- Run (the compiler writes /tmp/pf.json beside the .spv; viz auto-loads it
+-- and provides the keyboard buffer from the host):
+--   cargo run --bin wyn -- compile testfiles/playground/perlin_fields.wyn -o /tmp/pf.spv
+--   (cd extra/viz && cargo run -- pipeline /tmp/pf.spv)
+
+import "../../lib/noise"
+import "../../lib/rng"
+
+open f32
+
+def TWO_PI: f32 = 6.28318530718
+
+------------------------------------------------------------
+-- small helpers
+------------------------------------------------------------
+
+def dir_from_angle(a: f32) vec2f32 = @[cos(a), sin(a)]
+
+-- Unit-length, with a stable fallback for the (near-)zero vector.
+def nrm2(v: vec2f32) vec2f32 =
+  let m = sqrt(v.x * v.x + v.y * v.y) in
+  if m > 0.00001 then v / m else @[1.0, 0.0]
+
+-- Iñigo Quilez cosine palette: a + b * cos(2pi (c t + d)).
+def palette(t: f32, d: vec3f32) vec3f32 =
+  let a = @[0.5, 0.5, 0.5] in
+  let b = @[0.5, 0.5, 0.5] in
+  let k = TWO_PI * (t + d) in
+  a + b * @[cos(k.x), cos(k.y), cos(k.z)]
+
+-- Push a [0,1] value toward 0/1 to sharpen flow streaks.
+def contrast(x: f32, amount: f32) f32 =
+  clamp((x - 0.5) * amount + 0.5, 0.0, 1.0)
+
+def gray(x: f32) vec3f32 = @[x, x, x]
+
+------------------------------------------------------------
+-- field directions: each maps (key, point, time) → unit flow vector
+-- by transforming a base perlin sample from the lib.
+------------------------------------------------------------
+
+-- Classic flow field: angle = perlin * 2pi.
+def fld_perlin(k: u32, p: vec2f32, t: f32) vec2f32 =
+  dir_from_angle(fhnoise.perlin2(k, p) * TWO_PI)
+
+-- More turns per unit of noise → tight vortices.
+def fld_swirl(k: u32, p: vec2f32, t: f32) vec2f32 =
+  dir_from_angle(fhnoise.perlin2(k, p) * TWO_PI * 3.0)
+
+-- Snap the angle to the nearest multiple of 90°.
+def fld_right(k: u32, p: vec2f32, t: f32) vec2f32 =
+  let q = pi * 0.5 in
+  let a = floor(fhnoise.perlin2(k, p) * TWO_PI / q + 0.5) * q in
+  dir_from_angle(a)
+
+-- Curl of an fbm scalar: velocity ⟂ gradient (divergence-free swirl).
+def fld_curl(k: u32, p: vec2f32, t: f32) vec2f32 =
+  let e = 0.05 in
+  let nx0 = fhnoise.fbm_perlin(k, p - @[e, 0.0], 4i32, 2.0, 0.5) in
+  let nx1 = fhnoise.fbm_perlin(k, p + @[e, 0.0], 4i32, 2.0, 0.5) in
+  let ny0 = fhnoise.fbm_perlin(k, p - @[0.0, e], 4i32, 2.0, 0.5) in
+  let ny1 = fhnoise.fbm_perlin(k, p + @[0.0, e], 4i32, 2.0, 0.5) in
+  let dx = (nx1 - nx0) / (2.0 * e) in
+  let dy = (ny1 - ny0) / (2.0 * e) in
+  nrm2(@[dy, 0.0 - dx])
+
+-- Flow field advected over time (the sample point drifts).
+def fld_drift(k: u32, p: vec2f32, t: f32) vec2f32 =
+  let pp = p + @[t * 0.15, t * 0.10] in
+  dir_from_angle(fhnoise.perlin2(k, pp) * TWO_PI + t * 0.3)
+
+------------------------------------------------------------
+-- streamline integration (Line-Integral-Convolution style)
+--
+-- Walk the field forward and backward from `p`, averaging a
+-- high-frequency "grain" (value noise from the lib) sampled along the
+-- path. Points on the same streamline see correlated grain, so the
+-- field's integral curves show up as bright/dark streaks.
+------------------------------------------------------------
+
+def grain(kg: u32, pos: vec2f32) f32 =
+  fhnoise.value2(kg, pos * 3.5) * 0.5 + 0.5
+
+def lic(field: u32 -> vec2f32 -> f32 -> vec2f32,
+        k: u32, p: vec2f32, t: f32, steps: i32) f32 =
+  let kg = fasthash.derive(k, 7u32) in
+  let stp = 0.09 in
+  let (fwd, _) = loop (acc, pos) = (0.0, p) for i < steps do
+                   let v = field(k, pos, t) in
+                   let np = pos + v * stp in
+                   (acc + grain(kg, np), np) in
+  let (bwd, _) = loop (acc, pos) = (0.0, p) for i < steps do
+                   let v = field(k, pos, t) in
+                   let np = pos - v * stp in
+                   (acc + grain(kg, np), np) in
+  (fwd + bwd) / (f32.i32(steps) * 2.0)
+
+------------------------------------------------------------
+-- per-variant rendering. `p` is in noise space; `t` is iTime.
+------------------------------------------------------------
+
+-- a: raw field direction as hue.
+def render_field(k: u32, p: vec2f32) vec3f32 =
+  let a = fhnoise.perlin2(k, p) * 0.5 + 0.5 in
+  palette(a, @[0.0, 0.33, 0.67])
+
+-- b: perlin flow lines.
+def render_flow(k: u32, p: vec2f32, t: f32) vec3f32 =
+  gray(contrast(lic(fld_perlin, k, p, t, 24i32), 2.6))
+
+-- c: curl flow lines, tinted.
+def render_curl(k: u32, p: vec2f32, t: f32) vec3f32 =
+  let l = contrast(lic(fld_curl, k, p, t, 28i32), 2.4) in
+  palette(l * 0.6 + 0.1, @[0.0, 0.15, 0.3]) * l
+
+-- d: right-angle maze.
+def render_right(k: u32, p: vec2f32, t: f32) vec3f32 =
+  gray(contrast(lic(fld_right, k, p, t, 26i32), 3.0))
+
+-- e: fbm clouds.
+def render_clouds(k: u32, p: vec2f32) vec3f32 =
+  let n = fhnoise.fbm_perlin(k, p, 6i32, 2.0, 0.5) * 0.5 + 0.5 in
+  gray(clamp(n, 0.0, 1.0))
+
+-- f: domain warping (IQ).
+def render_warp(k: u32, p: vec2f32) vec3f32 =
+  let qx = fhnoise.fbm_perlin(k, p, 5i32, 2.0, 0.5) in
+  let qy = fhnoise.fbm_perlin(k, p + @[5.2, 1.3], 5i32, 2.0, 0.5) in
+  let q = @[qx, qy] in
+  let rx = fhnoise.fbm_perlin(k, p + q * 4.0 + @[1.7, 9.2], 5i32, 2.0, 0.5) in
+  let ry = fhnoise.fbm_perlin(k, p + q * 4.0 + @[8.3, 2.8], 5i32, 2.0, 0.5) in
+  let r = @[rx, ry] in
+  let f = fhnoise.fbm_perlin(k, p + r * 4.0, 5i32, 2.0, 0.5) * 0.5 + 0.5 in
+  let base = @[0.05, 0.1, 0.2] in
+  let mid = @[0.2, 0.5, 0.7] in
+  let hi = @[1.0, 0.85, 0.5] in
+  let c0 = mix(base, mid, clamp(qx * 0.5 + 0.5, 0.0, 1.0)) in
+  mix(c0, hi, clamp(f, 0.0, 1.0))
+
+-- g: worley / cellular.
+def render_worley(k: u32, p: vec2f32) vec3f32 =
+  let w = fhnoise.worley2(k, p) in
+  palette(clamp(w, 0.0, 1.0) * 0.8, @[0.1, 0.4, 0.7])
+
+-- h: topographic contours of fbm.
+def render_contours(k: u32, p: vec2f32) vec3f32 =
+  let n = fhnoise.fbm_perlin(k, p, 5i32, 2.0, 0.5) * 0.5 + 0.5 in
+  let bands = fract(n * 9.0) in
+  let edge = f32.min(bands, 1.0 - bands) * 2.0 in
+  let line = contrast(edge, 6.0) in
+  let bg = palette(n, @[0.3, 0.2, 0.1]) * 0.7 in
+  mix(@[0.0, 0.0, 0.0], bg + @[0.2, 0.2, 0.2], line)
+
+-- i: three independent noise streams → RGB.
+def render_rgb(k: u32, p: vec2f32) vec3f32 =
+  let r = fhnoise.perlin2(fasthash.derive(k, 1u32), p) * 0.5 + 0.5 in
+  let g = fhnoise.perlin2(fasthash.derive(k, 2u32), p) * 0.5 + 0.5 in
+  let b = fhnoise.perlin2(fasthash.derive(k, 3u32), p) * 0.5 + 0.5 in
+  @[r, g, b]
+
+-- j: swirl flow lines, colored by the underlying angle.
+def render_swirl(k: u32, p: vec2f32, t: f32) vec3f32 =
+  let l = contrast(lic(fld_swirl, k, p, t, 30i32), 2.2) in
+  let a = fhnoise.perlin2(k, p) * 0.5 + 0.5 in
+  palette(a, @[0.0, 0.33, 0.67]) * l
+
+-- k: flow lines modulated by field "speed" (gradient magnitude).
+def render_speed(k: u32, p: vec2f32, t: f32) vec3f32 =
+  let e = 0.05 in
+  let nx = fhnoise.perlin2(k, p + @[e, 0.0]) - fhnoise.perlin2(k, p - @[e, 0.0]) in
+  let ny = fhnoise.perlin2(k, p + @[0.0, e]) - fhnoise.perlin2(k, p - @[0.0, e]) in
+  let spd = clamp(sqrt(nx * nx + ny * ny) / (2.0 * e) * 0.25, 0.0, 1.0) in
+  let l = contrast(lic(fld_perlin, k, p, t, 24i32), 2.2) in
+  palette(spd, @[0.5, 0.2, 0.0]) * l
+
+-- l: time-drifting flow lines.
+def render_drift(k: u32, p: vec2f32, t: f32) vec3f32 =
+  let l = contrast(lic(fld_drift, k, p, t, 24i32), 2.4) in
+  palette(l * 0.7, @[0.1, 0.3, 0.5])
+
+------------------------------------------------------------
+-- keyboard variant select (Shadertoy 256×3 layout; row 0 = held).
+------------------------------------------------------------
+
+def held(keyboard: []u32, code: i32) bool = keyboard[0i32 * 256i32 + code] != 0u32
+
+def select_variant(keyboard: []u32) i32 =
+  if held(keyboard, 66i32) then 1i32        -- b
+  else if held(keyboard, 67i32) then 2i32   -- c
+  else if held(keyboard, 68i32) then 3i32   -- d
+  else if held(keyboard, 69i32) then 4i32   -- e
+  else if held(keyboard, 70i32) then 5i32   -- f
+  else if held(keyboard, 71i32) then 6i32   -- g
+  else if held(keyboard, 72i32) then 7i32   -- h
+  else if held(keyboard, 73i32) then 8i32   -- i
+  else if held(keyboard, 74i32) then 9i32   -- j
+  else if held(keyboard, 75i32) then 10i32  -- k
+  else if held(keyboard, 76i32) then 11i32  -- l
+  else 0i32                                 -- a (default)
+
+def render(variant: i32, k: u32, p: vec2f32, t: f32) vec3f32 =
+  if variant == 1i32 then render_flow(k, p, t)
+  else if variant == 2i32 then render_curl(k, p, t)
+  else if variant == 3i32 then render_right(k, p, t)
+  else if variant == 4i32 then render_clouds(k, p)
+  else if variant == 5i32 then render_warp(k, p)
+  else if variant == 6i32 then render_worley(k, p)
+  else if variant == 7i32 then render_contours(k, p)
+  else if variant == 8i32 then render_rgb(k, p)
+  else if variant == 9i32 then render_swirl(k, p, t)
+  else if variant == 10i32 then render_speed(k, p, t)
+  else if variant == 11i32 then render_drift(k, p, t)
+  else render_field(k, p)
+
+------------------------------------------------------------
+-- entry points
+------------------------------------------------------------
+
+def verts: [3]vec4f32 =
+  [@[-1.0, -1.0, 0.0, 1.0],
+   @[3.0, -1.0, 0.0, 1.0],
+   @[-1.0, 3.0, 0.0, 1.0]]
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 = verts[vid]
+
+#[fragment]
+entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32,
+                    #[uniform(set=1, binding=1)] iTime: f32,
+                    #[storage(set=2, binding=0, access=read)] keyboard: []u32,
+                    #[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
+  let coord = @[fragCoord.x, iResolution.y - fragCoord.y] in
+  let uv = coord / iResolution.xy in
+  let asp = iResolution.x / iResolution.y in
+  let q = @[(uv.x * 2.0 - 1.0) * asp, uv.y * 2.0 - 1.0] in
+  let p = q * 3.0 in
+  let k = fasthash.seed(1337u32) in
+  let variant = select_variant(keyboard) in
+  let c = render(variant, k, p, iTime) in
+  @[c.x, c.y, c.z, 1.0]
