@@ -671,6 +671,7 @@ impl TlcSoaNormalized {
     pub fn fuse_maps(self) -> TlcFused {
         let mut inner = self.0;
         inner.tlc = tlc::fusion::run(inner.tlc);
+        inner.tlc = tlc::if_over_producer::run(inner.tlc);
         TlcFused(inner)
     }
 }

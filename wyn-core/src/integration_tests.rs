@@ -1044,6 +1044,15 @@ fn has_soac_kind(term: &crate::tlc::Term, kind: &str) -> bool {
         TermKind::Tuple(parts) | TermKind::VecLit(parts) => parts.iter().any(|p| has_soac_kind(p, kind)),
         TermKind::TupleProj { tuple, .. } => has_soac_kind(tuple, kind),
         TermKind::Index { array, index } => has_soac_kind(array, kind) || has_soac_kind(index, kind),
+        TermKind::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            has_soac_kind(cond, kind)
+                || has_soac_kind(then_branch, kind)
+                || has_soac_kind(else_branch, kind)
+        }
         _ => false,
     }
 }
@@ -3164,6 +3173,50 @@ entry sq(xs: []f32) []f32 = map(|x: f32| x * x, xs)
     );
 }
 
+fn assert_compute_entry_reads_thread_id(src: &str, entry_name: &str) {
+    use crate::builtins::catalog;
+    use crate::op::OpTag;
+    use crate::ssa::types::InstKind;
+
+    let program = compile_to_ssa(src);
+    let thread_id_builtin = catalog().known().thread_id;
+    let entry = program
+        .entry_points
+        .iter()
+        .find(|entry| entry.name == entry_name)
+        .unwrap_or_else(|| panic!("entry {entry_name} present"));
+    let reads_thread_id = entry.body.inner.blocks.iter().any(|(_, block)| {
+        block.insts.iter().any(|&inst_id| {
+            matches!(
+                &entry.body.get_inst(inst_id).data,
+                InstKind::Op {
+                    tag: OpTag::Intrinsic { id, .. },
+                    ..
+                } if *id == thread_id_builtin
+            )
+        })
+    });
+    assert!(
+        reads_thread_id,
+        "entry {entry_name} should use thread_id for pointwise parallelization"
+    );
+}
+
+fn assert_compute_entry_has_no_ssa_loops(src: &str, entry_name: &str) {
+    use crate::ssa::types::ControlHeader;
+
+    let program = compile_to_ssa(src);
+    let entry = program
+        .entry_points
+        .iter()
+        .find(|entry| entry.name == entry_name)
+        .unwrap_or_else(|| panic!("entry {entry_name} present"));
+    assert!(
+        entry.body.control_headers.values().all(|header| !matches!(header, ControlHeader::Loop { .. })),
+        "entry {entry_name} should be a loop-free guarded lane kernel"
+    );
+}
+
 #[test]
 fn compute_pointwise_screma_from_horizontal_maps_is_parallel() {
     use crate::builtins::catalog;
@@ -4441,6 +4494,98 @@ fn compute_if_over_two_maps_compiles_runtime_sized() {
         }
         other => panic!("output should be LikeInput, got {other:?}"),
     }
+}
+
+#[test]
+fn compute_if_over_two_maps_becomes_parallel_pointwise_map() {
+    use crate::tlc::{SoacOp, TermKind};
+
+    let src = r#"
+        #[compute]
+        entry tick(#[storage(set=2, binding=0, access=read)] prev: []vec2f32,
+                   #[uniform(set=1, binding=1)] iTime: f32) []vec2f32 =
+          if iTime == 0.0
+            then map(|p: vec2f32| @[1.0f32, 1.0f32], prev)
+            else map(|p: vec2f32| @[p.x + 1.0f32, p.y + 1.0f32], prev)
+    "#;
+
+    let fused = compile_to_fused_tlc(src);
+    let tick = fused
+        .defs
+        .iter()
+        .find(|def| fused.symbols.get(def.name).map(|s| s.as_str()) == Some("tick"))
+        .expect("tick not found");
+    let (_, body) = extract_lambda_params(&tick.body);
+    let mut tail = &body;
+    while let TermKind::Let { body, .. } = &tail.kind {
+        tail = body;
+    }
+    let TermKind::Soac(SoacOp::Map { lam, .. }) = &tail.kind else {
+        panic!("if-over-maps should normalize to one Map, got {:?}", tail.kind);
+    };
+    assert!(
+        matches!(&lam.lam.body.kind, TermKind::If { .. }),
+        "the fused Map lambda should contain the original condition"
+    );
+
+    assert_compute_entry_reads_thread_id(src, "tick");
+    assert_compute_entry_has_no_ssa_loops(src, "tick");
+}
+
+#[test]
+fn compute_if_over_range_and_let_wrapped_slice_map_parallelizes() {
+    let src = r#"
+        def N: i32 = 8
+        #[compute]
+        entry tick(#[storage(set=2, binding=0, access=read)] prev_pos: []vec4f32,
+                   #[uniform(set=1, binding=1)] iTime: f32) []vec4f32 =
+          if iTime < 0.1 then
+            map(|i:i32| @[f32.i32(i), 0.0, 0.0, 0.0], 0i32..<N)
+          else
+            let prev_pos = prev_pos[0..N] in
+            map(
+              |upd:vec4f32| @[upd.x + 1.0, upd.y, upd.z, upd.w],
+              map(|elem:vec4f32| @[elem.x, elem.y, elem.z, elem.w], prev_pos))
+    "#;
+
+    let fused = compile_to_fused_tlc(src);
+    let tick = fused
+        .defs
+        .iter()
+        .find(|def| fused.symbols.get(def.name).map(|s| s.as_str()) == Some("tick"))
+        .expect("tick not found");
+    let (_, body) = extract_lambda_params(&tick.body);
+    assert!(
+        has_soac_kind(&body, "Map"),
+        "let-wrapped branch maps over equal N domains should normalize to a pointwise Map"
+    );
+
+    assert_compute_entry_reads_thread_id(src, "tick");
+}
+
+#[test]
+fn compute_if_over_different_runtime_sources_stays_branching() {
+    use crate::tlc::TermKind;
+
+    let src = r#"
+        #[compute]
+        entry pick(xs: []f32, ys: []f32, flag: bool) []f32 =
+          if flag
+            then map(|x: f32| x + 1.0, xs)
+            else map(|y: f32| y * 2.0, ys)
+    "#;
+
+    let fused = compile_to_fused_tlc(src);
+    let pick = fused
+        .defs
+        .iter()
+        .find(|def| fused.symbols.get(def.name).map(|s| s.as_str()) == Some("pick"))
+        .expect("pick not found");
+    let (_, body) = extract_lambda_params(&pick.body);
+    assert!(
+        matches!(&body.kind, TermKind::If { .. }),
+        "maps over unrelated runtime-sized inputs must not be collapsed into one output-length choice"
+    );
 }
 
 /// Nested `If` over retargetable maps. The `convert_slot_store`
