@@ -97,8 +97,7 @@ pub fn run(program: Program) -> Program {
                 // Bottom-up: fuse children first, then try one classified-use
                 // rewrite for this definition. The outer fixpoint reruns the
                 // analysis after each rewrite.
-                let (new_body, did_child_fuse) =
-                    fuse_term(def.body, &ctx, &mut symbols, &mut term_ids);
+                let (new_body, did_child_fuse) = fuse_term(def.body, &ctx, &mut symbols, &mut term_ids);
                 if did_child_fuse {
                     changed = true;
                 }
@@ -742,11 +741,8 @@ fn find_direct_horizontal_map_plan(
 ) -> Option<FusionPlan> {
     let group = find_direct_map_screma_group(bindings)?;
     let span = group.span;
-    let result_fields: Vec<_> = group
-        .maps
-        .iter()
-        .map(|consumer| bindings[consumer.binding_idx].name_ty.clone())
-        .collect();
+    let result_fields: Vec<_> =
+        group.maps.iter().map(|consumer| bindings[consumer.binding_idx].name_ty.clone()).collect();
     let map_lams: Vec<_> = group.maps.iter().map(|consumer| consumer.lam.clone()).collect();
     let projection_fields: HashMap<usize, usize> = group
         .maps
@@ -792,10 +788,7 @@ fn find_map_group_plan(
     if uses.len() < 2 || uses.iter().any(|u| !matches!(u.owner, UseOwner::Binding(_))) {
         return None;
     }
-    if uses
-        .iter()
-        .any(|u| !matches!(u.kind, UseKind::SoacInput { .. }))
-    {
+    if uses.iter().any(|u| !matches!(u.kind, UseKind::SoacInput { .. })) {
         return None;
     }
 
@@ -892,11 +885,8 @@ fn find_map_group_plan(
 
     let mut result_fields = Vec::with_capacity(maps.len() + accumulators.len());
     result_fields.extend(maps.iter().map(|consumer| bindings[consumer.binding_idx].name_ty.clone()));
-    result_fields.extend(
-        accumulators
-            .iter()
-            .map(|consumer| bindings[consumer.binding_idx].name_ty.clone()),
-    );
+    result_fields
+        .extend(accumulators.iter().map(|consumer| bindings[consumer.binding_idx].name_ty.clone()));
     let accumulator_specs: Vec<_> = accumulators
         .iter()
         .map(|consumer| super::ScremaAccumulatorSpec {
@@ -907,14 +897,14 @@ fn find_map_group_plan(
         })
         .collect();
     let mut projection_fields = HashMap::new();
+    projection_fields
+        .extend(maps.iter().enumerate().map(|(field_idx, consumer)| (consumer.binding_idx, field_idx)));
     projection_fields.extend(
-        maps.iter()
+        accumulators
+            .iter()
             .enumerate()
-            .map(|(field_idx, consumer)| (consumer.binding_idx, field_idx)),
+            .map(|(acc_idx, consumer)| (consumer.binding_idx, maps.len() + acc_idx)),
     );
-    projection_fields.extend(accumulators.iter().enumerate().map(|(acc_idx, consumer)| {
-        (consumer.binding_idx, maps.len() + acc_idx)
-    }));
     let rewrite = make_screma_rewrite(
         producer.binding_idx,
         vec![producer.binding_idx],
@@ -950,8 +940,13 @@ fn find_filter_plan(
         return None;
     }
 
-    let mut reductions: Vec<(UseOwner, TermId, super::ScremaAccumulatorSpec, Type<TypeName>, Span)> =
-        Vec::new();
+    let mut reductions: Vec<(
+        UseOwner,
+        TermId,
+        super::ScremaAccumulatorSpec,
+        Type<TypeName>,
+        Span,
+    )> = Vec::new();
     let mut lengths: Vec<(UseOwner, TermId, Type<TypeName>, Span)> = Vec::new();
     for use_site in uses {
         match &use_site.kind {
@@ -1026,7 +1021,13 @@ fn find_filter_plan(
     if let Some((_, _, count_ty, count_span)) = lengths.first().cloned() {
         let count_field = result_fields.len();
         result_fields.push(count_ty.clone());
-        accumulators.push(count_accumulator(pred, count_ty.clone(), count_span, symbols, term_ids)?);
+        accumulators.push(count_accumulator(
+            pred,
+            count_ty.clone(),
+            count_span,
+            symbols,
+            term_ids,
+        )?);
         for (owner, term_id, ty, span) in lengths {
             match owner {
                 UseOwner::Binding(idx) if bindings[idx].rhs.id == term_id => {
@@ -1051,9 +1052,8 @@ fn find_filter_plan(
         term_ids,
     );
     let mut term_replacements = HashMap::new();
-    for (term_id, field_idx, ty, span) in nested_replacement_fields
-        .into_iter()
-        .chain(length_replacement_fields)
+    for (term_id, field_idx, ty, span) in
+        nested_replacement_fields.into_iter().chain(length_replacement_fields)
     {
         term_replacements.insert(
             term_id,
@@ -1188,13 +1188,8 @@ fn apply_planned_screma_rewrite(
     bindings: &[LetBinding],
     plan: PlannedScremaRewrite,
     term_ids: &mut TermIdSource,
-) -> (
-    Vec<LetBinding>,
-    HashMap<TermId, ProjectionTemplate>,
-    Option<Term>,
-) {
-    let mut new_bindings =
-        Vec::with_capacity(bindings.len() + 1 - plan.rewrite.skip_indices.len());
+) -> (Vec<LetBinding>, HashMap<TermId, ProjectionTemplate>, Option<Term>) {
+    let mut new_bindings = Vec::with_capacity(bindings.len() + 1 - plan.rewrite.skip_indices.len());
     for (idx, binding) in bindings.iter().enumerate() {
         if idx == plan.rewrite.insert_at {
             new_bindings.push(plan.rewrite.fused_binding.clone());
@@ -1212,11 +1207,7 @@ fn apply_planned_screma_rewrite(
             ));
         } else {
             new_bindings.push(LetBinding {
-                rhs: replace_projection_terms(
-                    binding.rhs.clone(),
-                    &plan.term_replacements,
-                    term_ids,
-                ),
+                rhs: replace_projection_terms(binding.rhs.clone(), &plan.term_replacements, term_ids),
                 ..binding.clone()
             });
         }
@@ -1254,7 +1245,12 @@ fn replace_projection_terms(
     if let Some(projection) = replacements.get(&term.id) {
         return projection_term(projection, term_ids);
     }
-    let Term { id: _, ty, span, kind } = term;
+    let Term {
+        id: _,
+        ty,
+        span,
+        kind,
+    } = term;
     match kind {
         TermKind::Let {
             name,
@@ -1370,10 +1366,7 @@ fn subst_in_semantics(
 
     match sem {
         ArraySemantics::Elementwise { inputs, body } => ArraySemantics::Elementwise {
-            inputs: inputs
-                .into_iter()
-                .map(|ae| sub_ae(ae, old, replacement, term_ids))
-                .collect(),
+            inputs: inputs.into_iter().map(|ae| sub_ae(ae, old, replacement, term_ids)).collect(),
             body: sub_sb(body, old, replacement, term_ids),
         },
         ArraySemantics::Reduction { input, op, init } => ArraySemantics::Reduction {
@@ -1396,7 +1389,8 @@ fn subst_in_semantics(
 
 fn clone_term_with_fresh_ids(term: &Term, term_ids: &mut TermIdSource) -> Term {
     let mut cloned = term.clone().map_children(&mut |child| {
-        let mut child = child.map_children(&mut |grandchild| clone_term_with_fresh_ids(&grandchild, term_ids));
+        let mut child =
+            child.map_children(&mut |grandchild| clone_term_with_fresh_ids(&grandchild, term_ids));
         child.id = term_ids.next_id();
         child
     });
@@ -1411,7 +1405,9 @@ fn substitute_term_expr(
     term_ids: &mut TermIdSource,
 ) -> Term {
     match term.kind {
-        TermKind::Var(VarRef::Symbol(sym)) if sym == old => clone_term_with_fresh_ids(replacement, term_ids),
+        TermKind::Var(VarRef::Symbol(sym)) if sym == old => {
+            clone_term_with_fresh_ids(replacement, term_ids)
+        }
         TermKind::Lambda(lam) if lam.params.iter().any(|(param, _)| *param == old) => Term {
             kind: TermKind::Lambda(lam),
             ..term
@@ -1423,11 +1419,8 @@ fn substitute_term_expr(
             body,
         } => {
             let rhs = substitute_term_expr(*rhs, old, replacement, term_ids);
-            let body = if name == old {
-                *body
-            } else {
-                substitute_term_expr(*body, old, replacement, term_ids)
-            };
+            let body =
+                if name == old { *body } else { substitute_term_expr(*body, old, replacement, term_ids) };
             Term {
                 id: term_ids.next_id(),
                 kind: TermKind::Let {
@@ -1455,7 +1448,11 @@ fn substitute_term_expr(
                     if init_binding_shadows {
                         (sym, ty, extraction)
                     } else {
-                        (sym, ty, substitute_term_expr(extraction, old, replacement, term_ids))
+                        (
+                            sym,
+                            ty,
+                            substitute_term_expr(extraction, old, replacement, term_ids),
+                        )
                     }
                 })
                 .collect();
@@ -1549,10 +1546,7 @@ fn substitute_term_in_array_expr(
             }
         }
         ArrayExpr::Literal(terms) => ArrayExpr::Literal(
-            terms
-                .into_iter()
-                .map(|term| substitute_term_expr(term, old, replacement, term_ids))
-                .collect(),
+            terms.into_iter().map(|term| substitute_term_expr(term, old, replacement, term_ids)).collect(),
         ),
         ArrayExpr::Range { start, len, step } => ArrayExpr::Range {
             start: Box::new(substitute_term_expr(*start, old, replacement, term_ids)),
@@ -1592,12 +1586,7 @@ fn scoped_var_ref_count(term: &Term, sym: SymbolId) -> usize {
         TermKind::Var(VarRef::Symbol(s)) if *s == sym => 1,
         TermKind::Lambda(lam) if lam.params.iter().any(|(p, _)| *p == sym) => 0,
         TermKind::Let { name, rhs, body, .. } => {
-            scoped_var_ref_count(rhs, sym)
-                + if *name == sym {
-                    0
-                } else {
-                    scoped_var_ref_count(body, sym)
-                }
+            scoped_var_ref_count(rhs, sym) + if *name == sym { 0 } else { scoped_var_ref_count(body, sym) }
         }
         TermKind::Loop {
             loop_var,
@@ -1626,11 +1615,7 @@ fn scoped_var_ref_count(term: &Term, sym: SymbolId) -> usize {
                     *loop_var == sym
                 }
             };
-            if body_shadowed {
-                count
-            } else {
-                count + scoped_var_ref_count(body, sym)
-            }
+            if body_shadowed { count } else { count + scoped_var_ref_count(body, sym) }
         }
         _ => {
             let mut count = 0;
@@ -1789,13 +1774,7 @@ fn int_term(value: &str, ty: Type<TypeName>, span: Span, term_ids: &mut TermIdSo
     }
 }
 
-fn add_terms(
-    lhs: Term,
-    rhs: Term,
-    ty: Type<TypeName>,
-    span: Span,
-    term_ids: &mut TermIdSource,
-) -> Term {
+fn add_terms(lhs: Term, rhs: Term, ty: Type<TypeName>, span: Span, term_ids: &mut TermIdSource) -> Term {
     let func_ty = Type::Constructed(
         TypeName::Arrow,
         vec![
@@ -1807,9 +1786,7 @@ fn add_terms(
         id: term_ids.next_id(),
         ty: func_ty,
         span,
-        kind: TermKind::BinOp(crate::ast::BinaryOp {
-            op: "+".to_string(),
-        }),
+        kind: TermKind::BinOp(crate::ast::BinaryOp { op: "+".to_string() }),
     };
     Term {
         id: term_ids.next_id(),

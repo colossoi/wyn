@@ -207,10 +207,7 @@ pub(crate) fn result_soac_is_consuming_scan(graph: &EGraph, result: NodeId) -> b
 
 /// If `source` is a retargetable array projection of a fresh Screma, return
 /// the underlying Screma result and field index.
-pub(crate) fn result_soac_is_array_projection(
-    graph: &EGraph,
-    source: NodeId,
-) -> Option<(NodeId, usize)> {
+pub(crate) fn result_soac_is_array_projection(graph: &EGraph, source: NodeId) -> Option<(NodeId, usize)> {
     let ENode::Pure {
         op: PureOp::Project { index },
         operands,

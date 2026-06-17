@@ -704,10 +704,7 @@ fn parallelize_entry(
 /// synthesized per accumulator (`{entry}_phase2_combine` for N=1, or
 /// `{entry}_phase2_combine_{i}` for N>=2) via
 /// `synthesize_phase2_reduce_cloning_ne_named`.
-fn parallelize_reduce_entry(
-    entry: &mut EgirEntry,
-    plan: &ParallelizationPlan,
-) -> Option<Vec<EgirEntry>> {
+fn parallelize_reduce_entry(entry: &mut EgirEntry, plan: &ParallelizationPlan) -> Option<Vec<EgirEntry>> {
     use crate::tlc::parallelize::PlannedBindings;
 
     // 1. Pull binding/dispatch info from the plan.

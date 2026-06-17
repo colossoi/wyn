@@ -1987,7 +1987,10 @@ fn test_filter_into_reduce_fuses_to_masked_screma() {
 
             let acc = &accumulators[0];
             assert_eq!(acc.step_lam.lam.params.len(), 2);
-            assert_eq!(acc.step_lam.lam.params[1].0, x_sym, "element param is the pred's param");
+            assert_eq!(
+                acc.step_lam.lam.params[1].0, x_sym,
+                "element param is the pred's param"
+            );
             assert!(
                 matches!(&acc.step_lam.lam.body.kind, TermKind::If { .. }),
                 "filtered reduction step should be guarded by the predicate"
@@ -2181,11 +2184,7 @@ fn test_filter_multiple_reduces_and_lengths_reuses_one_count_accumulator() {
         i32_ty(),
     );
     let k_ref = |term_ids: &mut TermIdSource| {
-        mk_term(
-            TermKind::Var(VarRef::Symbol(k_sym)),
-            array_ty(i32_ty()),
-            term_ids,
-        )
+        mk_term(TermKind::Var(VarRef::Symbol(k_sym)), array_ty(i32_ty()), term_ids)
     };
     let r1 = mk_reduce(
         op1,
@@ -2204,10 +2203,7 @@ fn test_filter_multiple_reduces_and_lengths_reuses_one_count_accumulator() {
     let n1 = mk_length(k_ref(&mut term_ids), &mut term_ids);
     let n2 = mk_length(k_ref(&mut term_ids), &mut term_ids);
 
-    let tuple_ty = Type::Constructed(
-        TypeName::Tuple(4),
-        vec![i32_ty(), i32_ty(), i32_ty(), i32_ty()],
-    );
+    let tuple_ty = Type::Constructed(TypeName::Tuple(4), vec![i32_ty(), i32_ty(), i32_ty(), i32_ty()]);
     let tail = mk_term(
         TermKind::Tuple(vec![
             mk_term(TermKind::Var(VarRef::Symbol(r1_sym)), i32_ty(), &mut term_ids),
