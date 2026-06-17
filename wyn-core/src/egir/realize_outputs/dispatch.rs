@@ -67,7 +67,7 @@ pub fn compute_slot_source(
     // mapped output; field 1 is retargetable only for scan accumulators.
     if let (Some(elem_ty), Some((screma_result, field_idx))) = (
         slot_ty.elem_type().cloned(),
-        result_soac_is_screma_array_projection(graph, source),
+        result_soac_is_array_projection(graph, source),
     ) {
         let view = graph_ops::intern_storage_view(graph, binding, elem_ty.clone(), None);
         if multi_source {
@@ -84,7 +84,7 @@ pub fn compute_slot_source(
                 slot_index,
             )?;
         }
-        retarget_screma_array_projection(graph, screma_result, field_idx, view);
+        retarget_array_projection(graph, screma_result, field_idx, view);
         // The Project node operationally produces the view at runtime
         // (the Screma's loop body wrote field 0 through the view).
         // Update its type to match so verify_no_abstract doesn't flag
@@ -207,7 +207,7 @@ pub(crate) fn result_soac_is_consuming_scan(graph: &EGraph, result: NodeId) -> b
 
 /// If `source` is a retargetable array projection of a fresh Screma, return
 /// the underlying Screma result and field index.
-pub(crate) fn result_soac_is_screma_array_projection(
+pub(crate) fn result_soac_is_array_projection(
     graph: &EGraph,
     source: NodeId,
 ) -> Option<(NodeId, usize)> {
@@ -273,7 +273,7 @@ pub(crate) fn is_unsized_array(ty: &Type<TypeName>) -> bool {
 
 /// Retarget one array-producing side of the Screma producing `target_result`
 /// to write into `output_view`.
-pub(crate) fn retarget_screma_array_projection(
+pub(crate) fn retarget_array_projection(
     graph: &mut EGraph,
     target_result: NodeId,
     field_idx: usize,
@@ -295,7 +295,7 @@ pub(crate) fn retarget_screma_array_projection(
             }) = &mut se.kind
             else {
                 panic!(
-                    "retarget_screma_array_projection: side effect for \
+                    "retarget_array_projection: side effect for \
                      target_result={:?} is not Screma: {:?}",
                     target_result, se.kind
                 );
@@ -343,7 +343,7 @@ pub(crate) fn retarget_screma_array_projection(
                     acc_destinations[acc_idx] = SoacDestination::OutputView;
                     acc_views[acc_idx] = Some(output_view);
                 } else {
-                    panic!("retarget_screma_array_projection: unsupported Screma field {field_idx}");
+                    panic!("retarget_array_projection: unsupported Screma field {field_idx}");
                 }
             }
 
@@ -358,7 +358,7 @@ pub(crate) fn retarget_screma_array_projection(
         }
     }
     panic!(
-        "retarget_screma_array_projection: no side effect produced target_result={:?}",
+        "retarget_array_projection: no side effect produced target_result={:?}",
         target_result
     );
 }

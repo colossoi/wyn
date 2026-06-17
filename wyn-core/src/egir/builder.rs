@@ -130,7 +130,7 @@ impl EntryBuilder {
     /// `[input_array, init, ...captures, output_view]`. Result is a
     /// 1-tuple of the output_view's type (Screma's expansion requires a
     /// tuple result).
-    pub fn emit_pending_screma_scan_into(
+    pub fn emit_pending_scan_into(
         &mut self,
         func: String,
         input_array_nid: NodeId,
@@ -180,7 +180,7 @@ impl EntryBuilder {
     /// chunked apply-offsets pass. Operand layout:
     /// `[input_array, ...captures, output_view]`. Result is a 1-tuple
     /// of the output_view's type.
-    pub fn emit_pending_screma_map_into(
+    pub fn emit_pending_map_into(
         &mut self,
         func: String,
         input_array_nid: NodeId,

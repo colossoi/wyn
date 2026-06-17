@@ -2168,7 +2168,7 @@ impl<'a> Converter<'a> {
         // type must match the input view's type (View variant + region)
         // rather than the TLC-default result_ty (Composite variant).
         // Non-consuming scan keeps result_ty; realize_outputs fixes its
-        // variant via retarget_screma_array_projection.
+        // variant via retarget_array_projection.
         let capture_count = capture_nids.len();
         let project_ty = if matches!(destination, SoacDestination::InputBuffer) {
             arr_ty.clone()

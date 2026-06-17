@@ -241,7 +241,7 @@ pub enum PendingSoac {
     /// Wrapper marking a pointwise Screma as parallel at the entry
     /// boundary. The `egir::parallelize` pass tags a planned compute
     /// entry's tail SOAC with this; `soac_expand` dispatches to
-    /// `build_parallel_screma_maps` instead of the serial-loop builder.
+    /// `build_parallel_maps` instead of the serial-loop builder.
     /// Operand layout is identical to the inner Screma's — soac_expand
     /// peels the wrapper before consuming operands.
     Parallel {

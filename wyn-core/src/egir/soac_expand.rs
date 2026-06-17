@@ -629,7 +629,7 @@ fn expand_one(
                         .collect();
                     let len_input = (input_nids[0], input_array_types[0].clone());
 
-                    build_parallel_screma_maps(
+                    build_parallel_maps(
                         graph,
                         control_headers,
                         bid,
@@ -839,7 +839,7 @@ struct ScremaMapsIntoLoop {
     captures: Vec<Vec<NodeId>>,
 }
 
-fn build_parallel_screma_maps(
+fn build_parallel_maps(
     graph: &mut EGraph,
     control_headers: &mut HashMap<BlockId, ControlHeader>,
     bid: BlockId,

@@ -1892,7 +1892,7 @@ fn make_map_plan(
     }
 }
 
-/// True when EGIR's `transform_screma_entry` can parallelize this
+/// True when EGIR's `parallelize_entry` can parallelize this
 /// mixed Screma today. Supported shapes:
 /// - 0+ map outputs (no captures) + N>=1 Reduce accumulators (no
 ///   captures, arbitrary pure NE) — emits N+1 stages
@@ -1902,7 +1902,7 @@ fn make_map_plan(
 /// Arbitrary NE subgraphs are handled by both phase 2 paths
 /// (`synthesize_phase2_reduce_cloning_ne_named` and
 /// `synthesize_phase2_scan`) via `graph_ops::clone_pure_subgraph`.
-fn screma_egir_parallelizable(soac: &SoacOp) -> bool {
+fn egir_parallelizable(soac: &SoacOp) -> bool {
     let SoacOp::Screma {
         map_lams,
         accumulators,
@@ -1933,9 +1933,9 @@ fn screma_egir_parallelizable(soac: &SoacOp) -> bool {
 
 /// Mixed-Screma planner. Two branches:
 ///
-/// - **EGIR-parallel**: when `screma_egir_parallelizable` matches, emit
+/// - **EGIR-parallel**: when `egir_parallelizable` matches, emit
 ///   a two-stage MultiCompute pipeline (phase 1 = the entry, chunked
-///   in-place by `egir::parallelize::transform_screma_entry`; phase 2
+///   in-place by `egir::parallelize::parallelize_entry`; phase 2
 ///   = synthesized tree-reduce combiner) and a `ParallelizationPlan`
 ///   whose `PlannedBindings` carries the partials/result bindings.
 /// - **Serial fallback**: 1×1×1 Compute pipeline so the existing serial
@@ -1949,7 +1949,7 @@ fn make_screma_plan(
     sizing: PipelineSizing,
     program: &Program,
 ) -> LoweringPlan {
-    if !screma_egir_parallelizable(&analysis.soac.original) {
+    if !egir_parallelizable(&analysis.soac.original) {
         let bindings = collect_soac_bindings(&analysis.soac);
         let pipeline = Pipeline::Compute(ComputePipeline {
             entry_point: entry_name.to_string(),
@@ -2031,7 +2031,7 @@ fn make_screma_plan(
             n_accs, // result bindings only; partials reuse auto-outputs
         )
     } else {
-        // single-Scan path; gated by screma_egir_parallelizable.
+        // single-Scan path; gated by egir_parallelizable.
         debug_assert_eq!(n_accs, 1);
         debug_assert!(matches!(acc_kind, super::ScremaAccumulator::Scan));
         let scan_output_binding = BindingRef::new(AUTO_STORAGE_SET, auto_outputs_base);

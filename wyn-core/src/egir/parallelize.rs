@@ -1,6 +1,6 @@
 //! EGIR-side SOAC parallelization. Consumes the
 //! `ParallelizationPlan`s produced by `tlc::parallelize` and runs
-//! `transform_screma_entry` on each planned entry — see its doc for the
+//! `parallelize_entry` on each planned entry — see its doc for the
 //! dispatch shape.
 use std::collections::HashMap;
 
@@ -22,12 +22,12 @@ use crate::ssa::types::ControlHeader;
 use crate::tlc::parallelize::ParallelizationPlan;
 
 /// Walk every entry; for each entry that has a plan, dispatch to
-/// `transform_screma_entry`. It internally dispatches on the Screma's
+/// `parallelize_entry`. It internally dispatches on the Screma's
 /// accumulator-kind shape:
 ///
 /// - **0 accumulators** (pointwise Screma): wrap the SOAC in
 ///   `PendingSoac::Parallel` so `soac_expand` emits the lane-indexed
-///   kernel via `build_parallel_screma_maps`.
+///   kernel via `build_parallel_maps`.
 /// - **N Reduce accumulators**: phase 1 chunked rewrite (chunked input +
 ///   chunked map outputs + store-to-`partials_i[tid]`) plus one
 ///   synthesized phase-2 tree-reduce per accumulator.
@@ -42,7 +42,7 @@ pub fn run(inner: &mut EgirInner, plans: &HashMap<String, ParallelizationPlan>) 
         let Some(plan) = plans.get(&entry.name) else {
             continue;
         };
-        if let Some((phases, swap_wrapper)) = transform_screma_entry(entry, plan) {
+        if let Some((phases, swap_wrapper)) = parallelize_entry(entry, plan) {
             new_entries.extend(phases);
             if let Some(sw) = swap_wrapper {
                 new_functions.push(sw);
@@ -669,8 +669,8 @@ fn find_pending_screma(entry: &EgirEntry) -> Option<(BlockId, usize)> {
 /// Mixed-Screma migration dispatcher. Gates and routes to the
 /// per-kind transform: Reduce → 2-phase tree-reduce; Scan → 3-phase
 /// block-prefix scan. Mirrors the gate in
-/// `tlc::parallelize::screma_egir_parallelizable`.
-fn transform_screma_entry(
+/// `tlc::parallelize::egir_parallelizable`.
+fn parallelize_entry(
     entry: &mut EgirEntry,
     plan: &ParallelizationPlan,
 ) -> Option<(Vec<EgirEntry>, Option<EgirFunc>)> {
@@ -679,7 +679,7 @@ fn transform_screma_entry(
     if accumulators.is_empty() {
         // Pointwise Screma == Map: wrap in PendingSoac::Parallel so
         // soac_expand emits the lane-indexed kernel via
-        // build_parallel_screma_maps.
+        // build_parallel_maps.
         rewrite_tail_map(entry);
         return Some((vec![], None));
     }
@@ -687,10 +687,10 @@ fn transform_screma_entry(
     let single_scan =
         accumulators.len() == 1 && matches!(accumulators[0].kind, PlannedScremaAccumulatorKind::Scan);
     if all_reduce {
-        let phases = transform_screma_reduce_entry(entry, plan)?;
+        let phases = parallelize_reduce_entry(entry, plan)?;
         Some((phases, None))
     } else if single_scan {
-        let (phase2, phase3, swap_wrapper) = transform_screma_scan_entry(entry, plan)?;
+        let (phase2, phase3, swap_wrapper) = parallelize_scan_entry(entry, plan)?;
         Some((vec![phase2, phase3], Some(swap_wrapper)))
     } else {
         None
@@ -704,7 +704,7 @@ fn transform_screma_entry(
 /// synthesized per accumulator (`{entry}_phase2_combine` for N=1, or
 /// `{entry}_phase2_combine_{i}` for N>=2) via
 /// `synthesize_phase2_reduce_cloning_ne_named`.
-fn transform_screma_reduce_entry(
+fn parallelize_reduce_entry(
     entry: &mut EgirEntry,
     plan: &ParallelizationPlan,
 ) -> Option<Vec<EgirEntry>> {
@@ -995,7 +995,7 @@ fn project_root_index(graph: &super::types::EGraph, value: NodeId, root: NodeId)
 /// chunk's offset back over the scan output buffer. Phase 3 uses an
 /// arg-swapped wrapper around the combiner so the scan output's
 /// previously-written values land in the `acc` slot.
-fn transform_screma_scan_entry(
+fn parallelize_scan_entry(
     entry: &mut EgirEntry,
     plan: &ParallelizationPlan,
 ) -> Option<(EgirEntry, EgirEntry, EgirFunc)> {
@@ -1299,7 +1299,7 @@ pub fn synthesize_phase2_scan(
     let block_sums_view = b.emit_storage_view(block_sums_binding, arr_ty.clone());
     let block_offsets_view = b.emit_storage_view(block_offsets_binding, arr_ty.clone());
     let init_nid = graph_ops::clone_pure_subgraph(phase1_graph, b.graph_mut(), phase1_ne_nid)?;
-    b.emit_pending_screma_scan_into(
+    b.emit_pending_scan_into(
         op_func,
         block_sums_view,
         arr_ty.clone(),
@@ -1386,7 +1386,7 @@ pub fn synthesize_phase3_scan(
     // Call the swap-args wrapper instead of `op` directly: Map emits
     // `wrapper(elem, off)`, which the wrapper rewrites to `op(off, elem)`.
     let chunked_output_ty = arr_ty.clone();
-    b.emit_pending_screma_map_into(
+    b.emit_pending_map_into(
         swap_wrapper_name,
         chunked_output,
         arr_ty.clone(),
