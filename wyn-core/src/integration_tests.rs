@@ -1035,6 +1035,7 @@ fn has_soac_kind(term: &crate::tlc::Term, kind: &str) -> bool {
         TermKind::Soac(SoacOp::Reduce { .. }) if kind == "Reduce" => true,
         TermKind::Soac(SoacOp::Redomap { .. }) if kind == "Redomap" => true,
         TermKind::Soac(SoacOp::Screma { .. }) if kind == "Screma" => true,
+        TermKind::Soac(SoacOp::Filter { .. }) if kind == "Filter" => true,
         TermKind::Let { rhs, body, .. } => has_soac_kind(rhs, kind) || has_soac_kind(body, kind),
         TermKind::Lambda(lam) => has_soac_kind(&lam.body, kind),
         TermKind::App { func, args } => {
@@ -3536,6 +3537,34 @@ entry filt_reduce(xs: []i32) i32 =
     .expect("summing a filtered runtime array (filter → reduce) must compile");
 }
 
+#[test]
+fn filter_runtime_scalar_consumers_fuse_to_screma_and_compile() {
+    let source = "\
+#[compute]
+entry filt_stats(xs: []i32) (i32, i32) =
+  let kept = filter(|x: i32| x > 4i32, xs) in
+  (length(kept), reduce(|a: i32, b: i32| a + b, 0i32, kept))
+";
+
+    let tlc = compile_to_fused_tlc(source);
+    let entry = tlc
+        .defs
+        .iter()
+        .find(|def| tlc.symbols.get(def.name).map(|s| s.as_str()) == Some("filt_stats"))
+        .expect("filt_stats not found");
+    let (_, body) = extract_lambda_params(&entry.body);
+    assert!(
+        has_soac_kind(&body, "Screma"),
+        "filter feeding scalar consumers should fuse to a Screma"
+    );
+    assert!(
+        !has_soac_kind(&body, "Filter"),
+        "scalar filter consumers should not materialize the filtered array"
+    );
+
+    compile_to_spirv(source).expect("runtime filter feeding length+reduce scalar outputs must compile");
+}
+
 /// Companion working form for the aspiration below: let-bind first, then
 /// pass to a helper that consumes a plain `[]i32`. The `let` opens
 /// `filter`'s existential into a skolem-sized `[k]i32`, and
@@ -3626,7 +3655,7 @@ entry e(xs: [8]vec4f32) vec2f32 = sum2(xs)
 }
 
 /// True iff the pipeline for `entry` is a multi-stage compute (the two-phase
-/// shape a parallelized reduce/redomap lowers to: chunk + combine). Used to
+/// shape a parallelized scalar reduction lowers to: chunk + combine). Used to
 /// confirm the masked-redomap fusion fired — a *serial* filter→reduce would be
 /// a single-stage `Compute` instead.
 fn is_two_phase_compute(pipeline: &crate::pipeline_descriptor::PipelineDescriptor, entry: &str) -> bool {
@@ -3643,7 +3672,7 @@ fn is_two_phase_compute(pipeline: &crate::pipeline_descriptor::PipelineDescripto
 /// intermediate array — and parallelizes as a two-phase reduce. Pins that the
 /// fusion fired (not the serial scratch-view filter path).
 #[test]
-fn filter_into_reduce_fuses_to_parallel_redomap() {
+fn filter_into_reduce_fuses_to_parallel_screma() {
     let lowered = crate::compile_thru_spirv(
         "\
 #[compute]
@@ -3655,7 +3684,7 @@ entry filt_reduce(xs: []i32) i32 =
     .expect("filter→reduce compiles");
     assert!(
         is_two_phase_compute(&lowered.pipeline, "filt_reduce"),
-        "reduce(filter(..)) must fuse to a masked redomap (two-phase compute), not a serial filter",
+        "reduce(filter(..)) must fuse to filtered Screma (two-phase compute), not a serial filter",
     );
 }
 
@@ -3677,7 +3706,7 @@ entry filt_reduce(xs: []i32) i32 =
     .expect("cross-function filter→reduce compiles");
     assert!(
         is_two_phase_compute(&lowered.pipeline, "filt_reduce"),
-        "cross-function reduce(evens(xs)) must fuse to a masked redomap via function summaries",
+        "cross-function reduce(evens(xs)) must fuse to filtered Screma via function summaries",
     );
 }
 

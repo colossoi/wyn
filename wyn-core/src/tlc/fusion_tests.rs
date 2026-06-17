@@ -135,6 +135,25 @@ fn mk_filter(pred: Lambda, input: Term, result_ty: Type<TypeName>, term_ids: &mu
     )
 }
 
+fn mk_length(input: Term, term_ids: &mut TermIdSource) -> Term {
+    let func = mk_term(
+        TermKind::Var(VarRef::Builtin {
+            id: crate::builtins::catalog().known().length,
+            overload_idx: 0,
+        }),
+        Type::Variable(0),
+        term_ids,
+    );
+    mk_term(
+        TermKind::App {
+            func: Box::new(func),
+            args: vec![input],
+        },
+        i32_ty(),
+        term_ids,
+    )
+}
+
 /// Build a function def wrapping a body in a lambda
 fn mk_func_def(
     name: SymbolId,
@@ -190,6 +209,49 @@ fn contains_screma(term: &Term) -> bool {
             found
         }
     }
+}
+
+fn contains_filter(term: &Term) -> bool {
+    match &term.kind {
+        TermKind::Soac(SoacOp::Filter { .. }) => true,
+        _ => {
+            let mut found = false;
+            term.for_each_child(&mut |child| {
+                if !found && contains_filter(child) {
+                    found = true;
+                }
+            });
+            found
+        }
+    }
+}
+
+fn find_first_screma(term: &Term) -> Option<SoacOp> {
+    match &term.kind {
+        TermKind::Soac(op @ SoacOp::Screma { .. }) => Some(op.clone()),
+        _ => {
+            let mut found = None;
+            term.for_each_child(&mut |child| {
+                if found.is_none() {
+                    found = find_first_screma(child);
+                }
+            });
+            found
+        }
+    }
+}
+
+fn projection_idx_for_binding(term: &Term, sym: SymbolId) -> Option<usize> {
+    let (bindings, _) = flatten_let_chain(term.clone());
+    bindings.into_iter().find_map(|binding| {
+        if binding.name != sym {
+            return None;
+        }
+        match binding.rhs.kind {
+            TermKind::TupleProj { idx, .. } => Some(idx),
+            _ => None,
+        }
+    })
 }
 
 // -------------------------------------------------------------------------
@@ -1844,7 +1906,7 @@ fn test_screma_rejects_tail_use_of_producer() {
 }
 
 #[test]
-fn test_filter_into_reduce_fuses_to_masked_redomap() {
+fn test_filter_into_reduce_fuses_to_masked_screma() {
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
     let mut symbols = SymbolTable::default();
     let mut term_ids = TermIdSource::new();
@@ -1906,15 +1968,15 @@ fn test_filter_into_reduce_fuses_to_masked_redomap() {
 
     let fused = run(program);
 
-    // The let-chain collapses to a single masked Redomap over `xs`.
-    match &fused.defs[0].body.kind {
-        TermKind::Soac(SoacOp::Redomap {
-            op,
-            reduce_op,
-            ne,
+    assert!(!contains_filter(&fused.defs[0].body));
+    match find_first_screma(&fused.defs[0].body).expect("expected fused Screma") {
+        SoacOp::Screma {
+            map_lams,
+            accumulators,
             inputs,
-        }) => {
-            // Input is the filter's original input `xs` (no compacted array).
+        } => {
+            assert!(map_lams.is_empty());
+            assert_eq!(accumulators.len(), 1);
             assert_eq!(inputs.len(), 1);
             match &inputs[0] {
                 ArrayExpr::Ref(t) => {
@@ -1922,25 +1984,551 @@ fn test_filter_into_reduce_fuses_to_masked_redomap() {
                 }
                 other => panic!("expected Ref(Var(xs)), got {other:?}"),
             }
-            // Map-step op is `(acc, x) -> let _fused = (if p(x) then x else ne) in op(acc, _fused)`.
-            assert_eq!(op.lam.params.len(), 2, "map-step op is binary (acc, x)");
-            assert_eq!(op.lam.params[1].0, x_sym, "element param is the pred's param");
-            match &op.lam.body.kind {
-                TermKind::Let { rhs, .. } => assert!(
-                    matches!(&rhs.kind, TermKind::If { .. }),
-                    "the masked element is an `if p(x) then x else ne`, got {:?}",
-                    rhs.kind
-                ),
-                other => panic!("expected composed Let body, got {other:?}"),
-            }
-            // The pure phase-2 combiner is the original reduce op.
-            assert_eq!(reduce_op.lam.params.len(), 2);
-            assert!(matches!(&reduce_op.lam.body.kind, TermKind::Var(VarRef::Symbol(s)) if *s == a_sym));
-            // Neutral element preserved.
-            assert!(matches!(&ne.kind, TermKind::IntLit(s) if s == "0"));
+
+            let acc = &accumulators[0];
+            assert_eq!(acc.step_lam.lam.params.len(), 2);
+            assert_eq!(acc.step_lam.lam.params[1].0, x_sym, "element param is the pred's param");
+            assert!(
+                matches!(&acc.step_lam.lam.body.kind, TermKind::If { .. }),
+                "filtered reduction step should be guarded by the predicate"
+            );
+            assert_eq!(acc.reduce_op.lam.params.len(), 2);
+            assert!(
+                matches!(&acc.reduce_op.lam.body.kind, TermKind::Var(VarRef::Symbol(s)) if *s == a_sym)
+            );
+            assert!(matches!(&acc.ne.kind, TermKind::IntLit(s) if s == "0"));
         }
-        other => panic!("expected fused Soac(Redomap), got {other:?}"),
+        other => panic!("expected fused Soac(Screma), got {other:?}"),
     }
+}
+
+#[test]
+fn test_filter_into_reduce_and_length_fuses_to_one_screma() {
+    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+    let mut symbols = SymbolTable::default();
+    let mut term_ids = TermIdSource::new();
+
+    let xs_sym = symbols.alloc("xs".to_string());
+    let k_sym = symbols.alloc("k".to_string());
+    let r_sym = symbols.alloc("r".to_string());
+    let n_sym = symbols.alloc("n".to_string());
+    let x_sym = symbols.alloc("x".to_string());
+    let a_sym = symbols.alloc("a".to_string());
+    let b_sym = symbols.alloc("b".to_string());
+
+    let pred = mk_lambda1(
+        x_sym,
+        i32_ty(),
+        mk_term(TermKind::BoolLit(true), bool_ty.clone(), &mut term_ids),
+        bool_ty,
+    );
+    let producer = mk_filter(
+        pred,
+        mk_term(
+            TermKind::Var(VarRef::Symbol(xs_sym)),
+            array_ty(i32_ty()),
+            &mut term_ids,
+        ),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let op = mk_lambda2(
+        a_sym,
+        i32_ty(),
+        b_sym,
+        i32_ty(),
+        mk_term(TermKind::Var(VarRef::Symbol(a_sym)), i32_ty(), &mut term_ids),
+        i32_ty(),
+    );
+    let reduce = mk_reduce(
+        op,
+        mk_term(TermKind::IntLit("0".to_string()), i32_ty(), &mut term_ids),
+        mk_term(
+            TermKind::Var(VarRef::Symbol(k_sym)),
+            array_ty(i32_ty()),
+            &mut term_ids,
+        ),
+        i32_ty(),
+        &mut term_ids,
+    );
+    let len = mk_length(
+        mk_term(
+            TermKind::Var(VarRef::Symbol(k_sym)),
+            array_ty(i32_ty()),
+            &mut term_ids,
+        ),
+        &mut term_ids,
+    );
+    let tuple_ty = Type::Constructed(TypeName::Tuple(2), vec![i32_ty(), i32_ty()]);
+    let tail = mk_term(
+        TermKind::Tuple(vec![
+            mk_term(TermKind::Var(VarRef::Symbol(r_sym)), i32_ty(), &mut term_ids),
+            mk_term(TermKind::Var(VarRef::Symbol(n_sym)), i32_ty(), &mut term_ids),
+        ]),
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let n_let = mk_term(
+        TermKind::Let {
+            name: n_sym,
+            name_ty: i32_ty(),
+            rhs: Box::new(len),
+            body: Box::new(tail),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let r_let = mk_term(
+        TermKind::Let {
+            name: r_sym,
+            name_ty: i32_ty(),
+            rhs: Box::new(reduce),
+            body: Box::new(n_let),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let program_body = mk_term(
+        TermKind::Let {
+            name: k_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(producer),
+            body: Box::new(r_let),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+
+    let fused = run(Program {
+        defs: vec![Def {
+            name: symbols.alloc("main".to_string()),
+            ty: tuple_ty,
+            body: program_body,
+            meta: DefMeta::Function,
+            arity: 0,
+        }],
+        symbols,
+        def_syms: HashMap::new(),
+    });
+
+    assert!(!contains_filter(&fused.defs[0].body));
+    match find_first_screma(&fused.defs[0].body).expect("expected filtered Screma") {
+        SoacOp::Screma {
+            map_lams,
+            accumulators,
+            inputs,
+        } => {
+            assert!(map_lams.is_empty());
+            assert_eq!(accumulators.len(), 2);
+            assert_eq!(inputs.len(), 1);
+        }
+        other => panic!("expected Screma, got {other:?}"),
+    }
+    assert_ne!(
+        projection_idx_for_binding(&fused.defs[0].body, r_sym),
+        projection_idx_for_binding(&fused.defs[0].body, n_sym)
+    );
+}
+
+#[test]
+fn test_filter_multiple_reduces_and_lengths_reuses_one_count_accumulator() {
+    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+    let mut symbols = SymbolTable::default();
+    let mut term_ids = TermIdSource::new();
+
+    let xs_sym = symbols.alloc("xs".to_string());
+    let k_sym = symbols.alloc("k".to_string());
+    let r1_sym = symbols.alloc("r1".to_string());
+    let r2_sym = symbols.alloc("r2".to_string());
+    let n1_sym = symbols.alloc("n1".to_string());
+    let n2_sym = symbols.alloc("n2".to_string());
+    let x_sym = symbols.alloc("x".to_string());
+    let a_sym = symbols.alloc("a".to_string());
+    let b_sym = symbols.alloc("b".to_string());
+    let c_sym = symbols.alloc("c".to_string());
+    let d_sym = symbols.alloc("d".to_string());
+
+    let pred = mk_lambda1(
+        x_sym,
+        i32_ty(),
+        mk_term(TermKind::BoolLit(true), bool_ty.clone(), &mut term_ids),
+        bool_ty,
+    );
+    let producer = mk_filter(
+        pred,
+        mk_term(
+            TermKind::Var(VarRef::Symbol(xs_sym)),
+            array_ty(i32_ty()),
+            &mut term_ids,
+        ),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let op1 = mk_lambda2(
+        a_sym,
+        i32_ty(),
+        b_sym,
+        i32_ty(),
+        mk_term(TermKind::Var(VarRef::Symbol(a_sym)), i32_ty(), &mut term_ids),
+        i32_ty(),
+    );
+    let op2 = mk_lambda2(
+        c_sym,
+        i32_ty(),
+        d_sym,
+        i32_ty(),
+        mk_term(TermKind::Var(VarRef::Symbol(d_sym)), i32_ty(), &mut term_ids),
+        i32_ty(),
+    );
+    let k_ref = |term_ids: &mut TermIdSource| {
+        mk_term(
+            TermKind::Var(VarRef::Symbol(k_sym)),
+            array_ty(i32_ty()),
+            term_ids,
+        )
+    };
+    let r1 = mk_reduce(
+        op1,
+        mk_term(TermKind::IntLit("0".to_string()), i32_ty(), &mut term_ids),
+        k_ref(&mut term_ids),
+        i32_ty(),
+        &mut term_ids,
+    );
+    let r2 = mk_reduce(
+        op2,
+        mk_term(TermKind::IntLit("0".to_string()), i32_ty(), &mut term_ids),
+        k_ref(&mut term_ids),
+        i32_ty(),
+        &mut term_ids,
+    );
+    let n1 = mk_length(k_ref(&mut term_ids), &mut term_ids);
+    let n2 = mk_length(k_ref(&mut term_ids), &mut term_ids);
+
+    let tuple_ty = Type::Constructed(
+        TypeName::Tuple(4),
+        vec![i32_ty(), i32_ty(), i32_ty(), i32_ty()],
+    );
+    let tail = mk_term(
+        TermKind::Tuple(vec![
+            mk_term(TermKind::Var(VarRef::Symbol(r1_sym)), i32_ty(), &mut term_ids),
+            mk_term(TermKind::Var(VarRef::Symbol(r2_sym)), i32_ty(), &mut term_ids),
+            mk_term(TermKind::Var(VarRef::Symbol(n1_sym)), i32_ty(), &mut term_ids),
+            mk_term(TermKind::Var(VarRef::Symbol(n2_sym)), i32_ty(), &mut term_ids),
+        ]),
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let n2_let = mk_term(
+        TermKind::Let {
+            name: n2_sym,
+            name_ty: i32_ty(),
+            rhs: Box::new(n2),
+            body: Box::new(tail),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let n1_let = mk_term(
+        TermKind::Let {
+            name: n1_sym,
+            name_ty: i32_ty(),
+            rhs: Box::new(n1),
+            body: Box::new(n2_let),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let r2_let = mk_term(
+        TermKind::Let {
+            name: r2_sym,
+            name_ty: i32_ty(),
+            rhs: Box::new(r2),
+            body: Box::new(n1_let),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let r1_let = mk_term(
+        TermKind::Let {
+            name: r1_sym,
+            name_ty: i32_ty(),
+            rhs: Box::new(r1),
+            body: Box::new(r2_let),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let program_body = mk_term(
+        TermKind::Let {
+            name: k_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(producer),
+            body: Box::new(r1_let),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+
+    let fused = run(Program {
+        defs: vec![Def {
+            name: symbols.alloc("main".to_string()),
+            ty: tuple_ty,
+            body: program_body,
+            meta: DefMeta::Function,
+            arity: 0,
+        }],
+        symbols,
+        def_syms: HashMap::new(),
+    });
+
+    match find_first_screma(&fused.defs[0].body).expect("expected filtered Screma") {
+        SoacOp::Screma { accumulators, .. } => assert_eq!(accumulators.len(), 3),
+        other => panic!("expected Screma, got {other:?}"),
+    }
+    assert_eq!(
+        projection_idx_for_binding(&fused.defs[0].body, n1_sym),
+        projection_idx_for_binding(&fused.defs[0].body, n2_sym),
+        "all length calls should project the shared count accumulator"
+    );
+}
+
+#[test]
+fn test_filter_into_length_only_fuses_to_count_screma() {
+    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+    let mut symbols = SymbolTable::default();
+    let mut term_ids = TermIdSource::new();
+
+    let xs_sym = symbols.alloc("xs".to_string());
+    let k_sym = symbols.alloc("k".to_string());
+    let x_sym = symbols.alloc("x".to_string());
+    let pred = mk_lambda1(
+        x_sym,
+        i32_ty(),
+        mk_term(TermKind::BoolLit(true), bool_ty.clone(), &mut term_ids),
+        bool_ty,
+    );
+    let producer = mk_filter(
+        pred,
+        mk_term(
+            TermKind::Var(VarRef::Symbol(xs_sym)),
+            array_ty(i32_ty()),
+            &mut term_ids,
+        ),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let len = mk_length(
+        mk_term(
+            TermKind::Var(VarRef::Symbol(k_sym)),
+            array_ty(i32_ty()),
+            &mut term_ids,
+        ),
+        &mut term_ids,
+    );
+    let program_body = mk_term(
+        TermKind::Let {
+            name: k_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(producer),
+            body: Box::new(len),
+        },
+        i32_ty(),
+        &mut term_ids,
+    );
+
+    let fused = run(Program {
+        defs: vec![Def {
+            name: symbols.alloc("main".to_string()),
+            ty: i32_ty(),
+            body: program_body,
+            meta: DefMeta::Function,
+            arity: 0,
+        }],
+        symbols,
+        def_syms: HashMap::new(),
+    });
+
+    assert!(!contains_filter(&fused.defs[0].body));
+    match find_first_screma(&fused.defs[0].body).expect("expected count Screma") {
+        SoacOp::Screma {
+            map_lams,
+            accumulators,
+            ..
+        } => {
+            assert!(map_lams.is_empty());
+            assert_eq!(accumulators.len(), 1);
+        }
+        other => panic!("expected Screma, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_filter_escape_blocks_scalar_fusion() {
+    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+    let mut symbols = SymbolTable::default();
+    let mut term_ids = TermIdSource::new();
+
+    let xs_sym = symbols.alloc("xs".to_string());
+    let k_sym = symbols.alloc("k".to_string());
+    let n_sym = symbols.alloc("n".to_string());
+    let x_sym = symbols.alloc("x".to_string());
+    let pred = mk_lambda1(
+        x_sym,
+        i32_ty(),
+        mk_term(TermKind::BoolLit(true), bool_ty.clone(), &mut term_ids),
+        bool_ty,
+    );
+    let producer = mk_filter(
+        pred,
+        mk_term(
+            TermKind::Var(VarRef::Symbol(xs_sym)),
+            array_ty(i32_ty()),
+            &mut term_ids,
+        ),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let len = mk_length(
+        mk_term(
+            TermKind::Var(VarRef::Symbol(k_sym)),
+            array_ty(i32_ty()),
+            &mut term_ids,
+        ),
+        &mut term_ids,
+    );
+    let tuple_ty = Type::Constructed(TypeName::Tuple(2), vec![i32_ty(), array_ty(i32_ty())]);
+    let tail = mk_term(
+        TermKind::Tuple(vec![
+            mk_term(TermKind::Var(VarRef::Symbol(n_sym)), i32_ty(), &mut term_ids),
+            mk_term(
+                TermKind::Var(VarRef::Symbol(k_sym)),
+                array_ty(i32_ty()),
+                &mut term_ids,
+            ),
+        ]),
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let n_let = mk_term(
+        TermKind::Let {
+            name: n_sym,
+            name_ty: i32_ty(),
+            rhs: Box::new(len),
+            body: Box::new(tail),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let program_body = mk_term(
+        TermKind::Let {
+            name: k_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(producer),
+            body: Box::new(n_let),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+
+    let fused = run(Program {
+        defs: vec![Def {
+            name: symbols.alloc("main".to_string()),
+            ty: tuple_ty,
+            body: program_body,
+            meta: DefMeta::Function,
+            arity: 0,
+        }],
+        symbols,
+        def_syms: HashMap::new(),
+    });
+
+    assert!(contains_filter(&fused.defs[0].body));
+    assert!(!contains_screma(&fused.defs[0].body));
+}
+
+#[test]
+fn test_shadowed_filter_symbol_inside_lambda_is_not_an_escape() {
+    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+    let mut symbols = SymbolTable::default();
+    let mut term_ids = TermIdSource::new();
+
+    let xs_sym = symbols.alloc("xs".to_string());
+    let k_sym = symbols.alloc("k".to_string());
+    let shadow_sym = symbols.alloc("shadow".to_string());
+    let x_sym = symbols.alloc("x".to_string());
+    let pred = mk_lambda1(
+        x_sym,
+        i32_ty(),
+        mk_term(TermKind::BoolLit(true), bool_ty.clone(), &mut term_ids),
+        bool_ty,
+    );
+    let producer = mk_filter(
+        pred,
+        mk_term(
+            TermKind::Var(VarRef::Symbol(xs_sym)),
+            array_ty(i32_ty()),
+            &mut term_ids,
+        ),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let shadow_lam_ty = Type::Constructed(TypeName::Arrow, vec![i32_ty(), i32_ty()]);
+    let shadow_lam = mk_term(
+        TermKind::Lambda(Lambda {
+            params: vec![(k_sym, i32_ty())],
+            body: Box::new(mk_term(
+                TermKind::Var(VarRef::Symbol(k_sym)),
+                i32_ty(),
+                &mut term_ids,
+            )),
+            ret_ty: i32_ty(),
+        }),
+        shadow_lam_ty.clone(),
+        &mut term_ids,
+    );
+    let len = mk_length(
+        mk_term(
+            TermKind::Var(VarRef::Symbol(k_sym)),
+            array_ty(i32_ty()),
+            &mut term_ids,
+        ),
+        &mut term_ids,
+    );
+    let shadow_let = mk_term(
+        TermKind::Let {
+            name: shadow_sym,
+            name_ty: shadow_lam_ty,
+            rhs: Box::new(shadow_lam),
+            body: Box::new(len),
+        },
+        i32_ty(),
+        &mut term_ids,
+    );
+    let program_body = mk_term(
+        TermKind::Let {
+            name: k_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(producer),
+            body: Box::new(shadow_let),
+        },
+        i32_ty(),
+        &mut term_ids,
+    );
+
+    let fused = run(Program {
+        defs: vec![Def {
+            name: symbols.alloc("main".to_string()),
+            ty: i32_ty(),
+            body: program_body,
+            meta: DefMeta::Function,
+            arity: 0,
+        }],
+        symbols,
+        def_syms: HashMap::new(),
+    });
+
+    assert!(!contains_filter(&fused.defs[0].body));
+    assert!(contains_screma(&fused.defs[0].body));
 }
 
 // -------------------------------------------------------------------------
