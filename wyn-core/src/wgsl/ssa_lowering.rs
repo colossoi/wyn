@@ -1725,6 +1725,24 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             continue;
                         }
 
+                        // PlaceIndex: `{parent}[idx]` — index into another
+                        // place's expression. Used to address one element of
+                        // an Alloca'd function-local array without going
+                        // through a whole-array Load.
+                        InstKind::PlaceIndex { place, index, result } => {
+                            let parent = self.place_targets.get(place).cloned().ok_or_else(|| {
+                                crate::err_wgsl_at!(
+                                    self.blame_span(),
+                                    "PlaceIndex: parent place {:?} has no target expression",
+                                    place
+                                )
+                            })?;
+                            let idx = self.get_value(*index)?;
+                            let expr = format!("{}[{}]", parent, idx);
+                            self.place_targets.insert(*result, expr);
+                            continue;
+                        }
+
                         // ViewIndex: `buf[base_offset + idx]`.
                         InstKind::ViewIndex { view, index, result } => {
                             let view_id = view.as_ssa().ok_or_else(|| {
@@ -2646,17 +2664,20 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     Ok(format!("({}).y", view_val))
                 }
 
-                crate::op::OpTag::ViewIndex | crate::op::OpTag::OutputSlot { .. } => {
+                crate::op::OpTag::ViewIndex
+                | crate::op::OpTag::PlaceIndex
+                | crate::op::OpTag::OutputSlot { .. } => {
                     unreachable!("OpTag::{:?} is EGIR-only and must not reach SSA backend", tag)
                 }
             },
 
-            // OutputSlot / Alloca / ViewIndex / Load / Store are all
-            // handled specially in `emit_nodes` (they produce places or
+            // OutputSlot / Alloca / ViewIndex / PlaceIndex / Load / Store are
+            // all handled specially in `emit_nodes` (they produce places or
             // emit statements, not let-binding expressions). Reaching
             // lower_inst for any of them is an internal bug.
             InstKind::OutputSlot { .. }
             | InstKind::ViewIndex { .. }
+            | InstKind::PlaceIndex { .. }
             | InstKind::Alloca { .. }
             | InstKind::Load { .. }
             | InstKind::Store { .. }

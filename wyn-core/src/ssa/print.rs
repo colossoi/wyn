@@ -302,7 +302,7 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
                     format_ref(&operands[1])
                 );
             }
-            OpTag::ViewIndex | OpTag::OutputSlot { .. } => {
+            OpTag::ViewIndex | OpTag::PlaceIndex | OpTag::OutputSlot { .. } => {
                 unreachable!(
                     "OpTag::{:?} is EGIR-only and must not appear in InstKind::Op",
                     tag
@@ -323,6 +323,15 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
                 out,
                 "view_index {}[{}] -> {}",
                 format_ref(view),
+                format_ref(index),
+                fmt_place(*result)
+            );
+        }
+        InstKind::PlaceIndex { place, index, result } => {
+            let _ = write!(
+                out,
+                "place_index {}[{}] -> {}",
+                fmt_place(*place),
                 format_ref(index),
                 fmt_place(*result)
             );

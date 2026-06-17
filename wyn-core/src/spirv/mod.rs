@@ -1617,7 +1617,9 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     self.constructor.builder.load(result_ty, None, elem_ptr, None, [])?
                 }
 
-                crate::op::OpTag::ViewIndex | crate::op::OpTag::OutputSlot { .. } => {
+                crate::op::OpTag::ViewIndex
+                | crate::op::OpTag::PlaceIndex
+                | crate::op::OpTag::OutputSlot { .. } => {
                     unreachable!("OpTag::{:?} is EGIR-only and must not reach SSA backend", tag)
                 }
             },
@@ -1695,6 +1697,24 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     buffer_var,
                     [zero, actual_index],
                 )?;
+                self.place_ptr_id.insert(*result, ptr);
+                // Void instruction.
+                self.constructor.const_i32(0)
+            }
+
+            InstKind::PlaceIndex { place, index, result } => {
+                // Take an existing place (an `Alloca`'d Function-scope array,
+                // or any other indexable place) and index into it to produce
+                // a sub-place addressing one element. Lowers to OpAccessChain
+                // on the base variable.
+                let base_ptr = self.place_ptr(*place)?;
+                let index_id = self.get_value_ref(*index)?;
+                let place_elem = self.body.place_elem_ty(*result).clone();
+                let elem_ty_id = self.constructor.polytype_to_spirv(&place_elem);
+                let elem_ptr_type =
+                    self.constructor.get_or_create_ptr_type(spirv::StorageClass::Function, elem_ty_id);
+                let ptr =
+                    self.constructor.builder.access_chain(elem_ptr_type, None, base_ptr, [index_id])?;
                 self.place_ptr_id.insert(*result, ptr);
                 // Void instruction.
                 self.constructor.const_i32(0)

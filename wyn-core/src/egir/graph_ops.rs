@@ -255,6 +255,72 @@ pub fn emit_load(
     result
 }
 
+/// Emit a function-local `Alloca` side-effect in `block`. The returned NodeId
+/// represents the allocated place — pass it to `intern_place_index` for
+/// element-level addressing, or to `emit_load` / `emit_store` for whole-value
+/// access. The place's element type is `elem_ty`; for an `[T;N]` allocation
+/// `Load` returns the whole array and `PlaceIndex` produces `T`-typed sub-places.
+pub fn emit_alloca(
+    graph: &mut EGraph,
+    block: BlockId,
+    elem_ty: Type<TypeName>,
+    next_effect: &mut u32,
+    span: Option<Span>,
+) -> NodeId {
+    let effect_in = EffectToken(0); // placeholder; real chain is built by elaborate
+    let effect_out = alloc_effect(next_effect);
+    let place_nid = graph.alloc_side_effect_result(elem_ty.clone());
+    graph.skeleton.blocks[block].side_effects.push(SideEffect {
+        kind: SideEffectKind::Inst(InstKind::Alloca {
+            elem_ty,
+            // Real PlaceId is allocated by `elaborate`; the placeholder here
+            // is never read.
+            result: Default::default(),
+        }),
+        operand_nodes: smallvec![],
+        result: Some(place_nid),
+        effects: Some((effect_in, effect_out)),
+        span,
+    });
+    place_nid
+}
+
+/// Intern a `PlaceIndex` pure node: index into an existing place to produce a
+/// sub-place addressing one element. The parent place can be an `Alloca`'d
+/// array or any other place-producing node; the result has element type
+/// `elem_ty` (e.g. `T` for an `[T;N]` parent).
+pub fn intern_place_index(
+    graph: &mut EGraph,
+    parent_place_nid: NodeId,
+    index_nid: NodeId,
+    elem_ty: Type<TypeName>,
+    span: Option<Span>,
+) -> NodeId {
+    graph.intern_pure_with_span(
+        PureOp::PlaceIndex,
+        smallvec![parent_place_nid, index_nid],
+        elem_ty,
+        span,
+    )
+}
+
+/// Emit `place[index] = value` as a `PlaceIndex` sub-place + `Store` in
+/// `block`. Companion to `emit_storage_store` for function-local Alloca'd
+/// arrays — no whole-array `Load`/`Store` round-trip.
+pub fn emit_place_index_store(
+    graph: &mut EGraph,
+    block: BlockId,
+    parent_place_nid: NodeId,
+    index_nid: NodeId,
+    value_nid: NodeId,
+    elem_ty: Type<TypeName>,
+    next_effect: &mut u32,
+    span: Option<Span>,
+) {
+    let elem_place_nid = intern_place_index(graph, parent_place_nid, index_nid, elem_ty, span);
+    let _ = emit_store(graph, block, elem_place_nid, value_nid, next_effect, span);
+}
+
 /// Emit `view[index]` as a `ViewIndex` place + `Load` in `block`; returns the
 /// loaded value. Companion to `emit_storage_store`.
 pub fn emit_view_load(

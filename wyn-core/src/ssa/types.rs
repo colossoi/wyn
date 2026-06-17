@@ -221,6 +221,17 @@ pub enum InstKind {
         result: PlaceId,
     },
 
+    /// Index into a place whose element type is an array — produces a sub-place
+    /// addressing one element. Mirrors `ViewIndex` but takes a `PlaceId` instead
+    /// of a value, avoiding the whole-array `Load` that the value-form would
+    /// require. The natural pair for `Alloca { elem_ty: [T;N] }`: backends
+    /// lower to `OpAccessChain` (SPIR-V) / `var[idx]` (WGSL) directly.
+    PlaceIndex {
+        place: PlaceId,
+        index: ValueRef,
+        result: PlaceId,
+    },
+
     /// An entry-point output slot — a Place that `Store` writes into before
     /// returning. Registered in `FuncBody.places` at emit time.
     OutputSlot {
@@ -248,6 +259,7 @@ impl InstKind {
             | InstKind::ControlBarrier => vec![],
             InstKind::Store { value, .. } => vec![*value],
             InstKind::ViewIndex { view, index, .. } => vec![*view, *index],
+            InstKind::PlaceIndex { index, .. } => vec![*index],
         }
     }
 
@@ -259,6 +271,7 @@ impl InstKind {
         match self {
             InstKind::Load { place } => vec![*place],
             InstKind::Store { place, .. } => vec![*place],
+            InstKind::PlaceIndex { place, .. } => vec![*place],
             _ => vec![],
         }
     }
@@ -268,7 +281,8 @@ impl InstKind {
         match self {
             InstKind::Alloca { result, .. }
             | InstKind::OutputSlot { result, .. }
-            | InstKind::ViewIndex { result, .. } => Some(*result),
+            | InstKind::ViewIndex { result, .. }
+            | InstKind::PlaceIndex { result, .. } => Some(*result),
             _ => None,
         }
     }
@@ -291,6 +305,7 @@ impl InstKind {
                 sub(view);
                 sub(index);
             }
+            InstKind::PlaceIndex { index, .. } => sub(index),
             InstKind::Alloca { .. }
             | InstKind::OutputSlot { .. }
             | InstKind::Load { .. }
@@ -307,6 +322,10 @@ impl InstKind {
             InstKind::Alloca { result, .. }
             | InstKind::OutputSlot { result, .. }
             | InstKind::ViewIndex { result, .. } => sub(result),
+            InstKind::PlaceIndex { place, result, .. } => {
+                sub(place);
+                sub(result);
+            }
             InstKind::Op { .. } | InstKind::ControlBarrier => {}
         }
     }

@@ -319,7 +319,24 @@ impl<'a> Elaborator<'a> {
 
         // Load/Store carry a PlaceId operand in `operand_nodes[0]` rather
         // than a value; handle them explicitly so the place operand stays
-        // typed as `PlaceId`, not a ValueId.
+        // typed as `PlaceId`, not a ValueId. Alloca produces a PlaceId rather
+        // than a ValueId — register it in `elaborated_places` so downstream
+        // `PlaceIndex` / `Load` / `Store` consumers resolve it via `demand_place`.
+        if let InstKind::Alloca { elem_ty, .. } = inst_kind {
+            let result_nid =
+                se.result.expect("Alloca side-effect must carry a result NodeId for its place");
+            let place = self.builder.new_place(elem_ty.clone());
+            let kind = InstKind::Alloca {
+                elem_ty: elem_ty.clone(),
+                result: place,
+            };
+            let out_bid = self.block_map[&skel_bid];
+            self.builder.func_mut().append_void_inst_with_span(out_bid, kind, se.span);
+            let resolved = self.resolve(result_nid);
+            self.elaborated_places.insert(resolved, (place, skel_bid));
+            return;
+        }
+
         let kind = match inst_kind {
             InstKind::Load { .. } => {
                 let place = self.demand_place(se.operand_nodes[0]);
@@ -391,6 +408,23 @@ impl<'a> Elaborator<'a> {
                 let placed = self.choose_placement(&arg_placements);
                 (kind, placed)
             }
+            PureOp::PlaceIndex => {
+                // operands[0] is the parent place (resolved via demand_place),
+                // operands[1] is the index value (resolved via demand_placed).
+                let parent_place = self.demand_place(operands[0]);
+                let (index_val, index_placed) = self.demand_placed(operands[1]);
+                let elem_ty = self.graph.types[&resolved].clone();
+                let place = self.builder.new_place(elem_ty);
+                let kind = InstKind::PlaceIndex {
+                    place: parent_place,
+                    index: ValueRef::Ssa(index_val),
+                    result: place,
+                };
+                // Place this with the index's placement so it follows the
+                // control-flow point where the index becomes available.
+                let placed = self.choose_placement(&[(index_val, index_placed)]);
+                (kind, placed)
+            }
             PureOp::OutputSlot { index } => {
                 let elem_ty = self.graph.types[&resolved].clone();
                 let place = self.builder.new_place(elem_ty);
@@ -408,7 +442,9 @@ impl<'a> Elaborator<'a> {
         };
 
         let place = match &kind {
-            InstKind::ViewIndex { result, .. } | InstKind::OutputSlot { result, .. } => *result,
+            InstKind::ViewIndex { result, .. }
+            | InstKind::PlaceIndex { result, .. }
+            | InstKind::OutputSlot { result, .. } => *result,
             _ => unreachable!(),
         };
         let span = self.graph.node_spans.get(&resolved).copied();
@@ -440,7 +476,10 @@ impl<'a> Elaborator<'a> {
                 (vid, placed)
             }
             ENode::Pure { op, operands } => {
-                if matches!(op, PureOp::ViewIndex | PureOp::OutputSlot { .. }) {
+                if matches!(
+                    op,
+                    PureOp::ViewIndex | PureOp::PlaceIndex | PureOp::OutputSlot { .. }
+                ) {
                     panic!(
                         "demand_placed({:?}): {:?} produces a PlaceId, not a ValueId — \
                          its consumer (Load/Store/etc.) must call demand_place",

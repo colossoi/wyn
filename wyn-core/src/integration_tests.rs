@@ -761,10 +761,11 @@ def keep_pos(a: *[8]i32) ?k.[k]i32 = filter(|x: i32| x > 0, a)
 
 #[test]
 fn consuming_filter_skips_fresh_allocation() {
-    // Parallel of the Map / Scan allocation-count tests. Consuming
-    // filter carries the input as the destination buffer — no
-    // `_w_intrinsic_uninit` call. Non-consuming filter still
-    // allocates the destination.
+    // Filter's static-capacity lowering targets a function-local `Alloca`
+    // and writes surviving elements through `PlaceIndex`, so neither
+    // variant emits `_w_intrinsic_uninit`. The consuming case seeds the
+    // alloca with the input array (an init `Store`); the borrowing case
+    // skips the init store. Both compile and validate.
     let consuming_ssa = compile_to_ssa(
         r#"
 def keep_pos(a: *[8]i32) ?k.[k]i32 = filter(|x: i32| x > 0, a)
@@ -778,7 +779,7 @@ entry frag(c: vec4f32) vec4f32 =
     assert_eq!(
         count_uninit_in_program(&consuming_ssa),
         0,
-        "consuming filter (`*[N]T` input, dead-after) should not allocate a fresh buffer",
+        "filter lowering should not emit `_w_intrinsic_uninit`",
     );
 
     let borrowing_ssa = compile_to_ssa(
@@ -791,9 +792,10 @@ entry frag(c: vec4f32) vec4f32 =
     @[f32.i32(r[0]), 0.0, 0.0, 1.0]
 "#,
     );
-    assert!(
-        count_uninit_in_program(&borrowing_ssa) >= 1,
-        "non-consuming filter (caller-borrowed input) should allocate a fresh buffer",
+    assert_eq!(
+        count_uninit_in_program(&borrowing_ssa),
+        0,
+        "filter lowering should not emit `_w_intrinsic_uninit`",
     );
 }
 
@@ -812,6 +814,7 @@ fn inst_signature_multiset(ssa: &Program) -> std::collections::BTreeMap<String, 
             InstKind::Load { .. } => "Load".to_string(),
             InstKind::Store { .. } => "Store".to_string(),
             InstKind::ViewIndex { .. } => "ViewIndex".to_string(),
+            InstKind::PlaceIndex { .. } => "PlaceIndex".to_string(),
             InstKind::OutputSlot { .. } => "OutputSlot".to_string(),
             InstKind::ControlBarrier => "ControlBarrier".to_string(),
             InstKind::Op { tag, .. } => format!(
@@ -847,6 +850,7 @@ fn inst_signature_multiset(ssa: &Program) -> std::collections::BTreeMap<String, 
                     OpTag::StorageView(_) => "StorageView".to_string(),
                     OpTag::StorageViewLen => "StorageViewLen".to_string(),
                     OpTag::ViewIndex => "ViewIndex(pure)".to_string(),
+                    OpTag::PlaceIndex => "PlaceIndex(pure)".to_string(),
                     OpTag::OutputSlot { .. } => "OutputSlot(pure)".to_string(),
                 }
             ),
@@ -910,26 +914,30 @@ entry frag(c: vec4f32) vec4f32 =
     let mut c_tags = inst_signature_multiset(&consuming);
     let b_tags = inst_signature_multiset(&borrowing);
 
-    // Mod out the expected allocation-strategy difference: borrowing
-    // has one extra `_w_intrinsic_uninit` call.
-    let uninit = "Op:Intrinsic(_w_intrinsic_uninit)".to_string();
-    let c_uninit = c_tags.get(&uninit).copied().unwrap_or(0);
-    let b_uninit = b_tags.get(&uninit).copied().unwrap_or(0);
+    // Both variants lower to an `Alloca`'d buffer; the consuming variant
+    // adds one extra whole-array `Store` to seed it from the input
+    // before the filter loop mutates it in place. Mod that one Store
+    // out before comparing the rest of the instruction multiset — the
+    // user-visible computation (length extraction, indexed reads) must
+    // be otherwise identical.
+    let store = "Store".to_string();
+    let c_stores = c_tags.get(&store).copied().unwrap_or(0);
+    let b_stores = b_tags.get(&store).copied().unwrap_or(0);
     assert!(
-        b_uninit > c_uninit,
-        "expected borrowing to allocate more buffers than consuming \
-         (c={}, b={}) — consuming-filter probably regressed",
-        c_uninit,
-        b_uninit,
+        c_stores > b_stores,
+        "expected consuming variant to have one extra init `Store` \
+         (c={}, b={}) — InputBuffer init seed is missing",
+        c_stores,
+        b_stores,
     );
-    *c_tags.entry(uninit).or_insert(0) += b_uninit - c_uninit;
+    *c_tags.entry(store).or_insert(0) -= c_stores - b_stores;
 
     assert_eq!(
         c_tags, b_tags,
-        "consuming vs borrowing filter SSA differs in non-allocation ops — \
+        "consuming vs borrowing filter SSA differs beyond the InputBuffer init store — \
          likely a bounded-wrapper / length-extraction soundness bug. \
-         The two programs differ only in whether the filter result aliases \
-         the input buffer; the user-visible computation should be identical."
+         The two programs differ only in how the filter buffer is initialized; \
+         the user-visible computation (length, indexed reads) should be identical."
     );
 }
 

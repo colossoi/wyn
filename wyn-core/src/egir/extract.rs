@@ -91,6 +91,7 @@ fn op_cost(op: &PureOp) -> Cost {
         PureOp::OutputSlot { .. } => 0,
         PureOp::StorageView(_) => 2,
         PureOp::ViewIndex => 1,
+        PureOp::PlaceIndex => 1,
         PureOp::StorageViewLen => 0,
         PureOp::Intrinsic { .. } => 2,
         PureOp::Call(_) => 3,

@@ -73,6 +73,13 @@ pub enum OpTag {
     /// `InstKind::Op` — SSA uses `InstKind::ViewIndex` directly (carries
     /// a fresh `PlaceId`).
     ViewIndex,
+    /// EGIR-only: index into another place to produce a sub-place. Operands
+    /// `[parent_place, index]`. Mirrors `ViewIndex` but the parent is itself
+    /// a place (e.g. an `Alloca`'d `[T;N]`) rather than a value-typed view —
+    /// elaborate maps it to `InstKind::PlaceIndex` carrying a fresh `PlaceId`.
+    /// Used by `soac_expand` to write directly into a function-local array
+    /// place without going through a whole-array `Load`/`Store` round-trip.
+    PlaceIndex,
     /// EGIR-only: place-producing entry-output slot. Never appears in
     /// `InstKind::Op` — SSA uses `InstKind::OutputSlot` directly.
     OutputSlot {

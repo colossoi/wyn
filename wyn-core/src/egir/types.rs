@@ -429,11 +429,14 @@ impl EGraph {
 // ---------------------------------------------------------------------------
 
 /// Build an `InstKind::Op` from a `PureOp` + operands as `ValueRef::Ssa(ValueId)`.
-/// Panics on the place-producing tags (`ViewIndex`, `OutputSlot`) — those need
-/// `elaborate`'s place-aware path which allocates a fresh `PlaceId`.
+/// Panics on the place-producing tags (`ViewIndex`, `PlaceIndex`, `OutputSlot`) —
+/// those need `elaborate`'s place-aware path which allocates a fresh `PlaceId`.
 pub fn rebuild_inst_kind(op: &PureOp, operands: &[crate::ssa::framework::ValueId]) -> InstKind {
     use crate::ssa::types::ValueRef;
-    if matches!(op, PureOp::ViewIndex | PureOp::OutputSlot { .. }) {
+    if matches!(
+        op,
+        PureOp::ViewIndex | PureOp::PlaceIndex | PureOp::OutputSlot { .. }
+    ) {
         panic!(
             "rebuild_inst_kind: place-producing op {:?} must be built via elaborate's \
              place-aware path (allocates a fresh PlaceId from FuncBody.places)",

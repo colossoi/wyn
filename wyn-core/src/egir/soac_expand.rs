@@ -13,7 +13,9 @@ use crate::ssa::framework::BlockId;
 use polytype::Type;
 use smallvec::{SmallVec, smallvec};
 
-use super::graph_ops::{alloc_effect, next_effect_token};
+use super::graph_ops::{
+    alloc_effect, emit_alloca, emit_load, emit_place_index_store, emit_store, next_effect_token,
+};
 use super::program::EgirInner;
 use crate::ast::TypeName;
 use crate::ssa::types::{ControlHeader, InstKind, ValueRef};
@@ -1012,34 +1014,31 @@ fn build_filter_loop(
         ],
     );
 
-    // Split `bid` into preheader (bid) + after.
+    // Split `bid` into preheader (bid) + after. The suffix (side-effects
+    // that followed the Filter) is held in `suffix` until the buffer `Load`
+    // is emitted at the head of `after` — any suffix side-effect that
+    // references the filter result resolves through `Tuple(buf_load, count)`
+    // and must see `buf_load` already elaborated.
     let after = graph.skeleton.create_block();
     let suffix: Vec<SideEffect> = graph.skeleton.blocks[bid].side_effects.drain(idx_in_block..).collect();
     let old_term = std::mem::replace(
         &mut graph.skeleton.blocks[bid].term,
         SkeletonTerminator::Unreachable,
     );
-    graph.skeleton.blocks[after].side_effects = suffix;
     graph.skeleton.blocks[after].term = old_term;
     if let Some(header_meta) = control_headers.remove(&bid) {
         control_headers.insert(after, header_meta);
     }
 
-    // Allocate fresh after-block params for the two carries (buffer + count).
-    // The original spec.result_node will be rebound below to a Tuple of these.
-    // The count is carried as `i32` throughout — matches the index type
-    // expected by `array_with` and the result type of `length()` at the
-    // backend boundary; `Bounded`'s on-disk `len` field is also i32.
-    let after_buf_nid = graph.alloc_side_effect_result(buf_ty.clone());
-    graph.nodes[after_buf_nid] = ENode::BlockParam {
-        block: after,
-        index: 0,
-    };
-    graph.skeleton.blocks[after].params.push(after_buf_nid);
+    // `after` block param: the surviving count. The buffer place is
+    // referenced directly through `buf_place_nid`. Count is `i32`
+    // throughout — matches the index type taken by element-place stores,
+    // the result type of `length()` at the backend boundary, and
+    // `Bounded`'s on-disk `len` field.
     let after_count_nid = graph.alloc_side_effect_result(i32_ty.clone());
     graph.nodes[after_count_nid] = ENode::BlockParam {
         block: after,
-        index: 1,
+        index: 0,
     };
     graph.skeleton.blocks[after].params.push(after_count_nid);
 
@@ -1055,42 +1054,32 @@ fn build_filter_loop(
     let sel_merge = graph.skeleton.create_block();
     let continue_blk = graph.skeleton.create_block();
 
-    // Header block params: buf_in, count_in, i_in.
-    let buf_in_nid = graph.add_block_param(header, 0, buf_ty.clone());
-    graph.skeleton.blocks[header].params.push(buf_in_nid);
-    let count_in_nid = graph.add_block_param(header, 1, i32_ty.clone());
+    // Header block params: count_in, i_in. The buffer place is referenced
+    // through `buf_place_nid` directly.
+    let count_in_nid = graph.add_block_param(header, 0, i32_ty.clone());
     graph.skeleton.blocks[header].params.push(count_in_nid);
-    let i_in_nid = graph.add_block_param(header, 2, i32_ty.clone());
+    let i_in_nid = graph.add_block_param(header, 1, i32_ty.clone());
     graph.skeleton.blocks[header].params.push(i_in_nid);
 
-    // Preheader → header(init_buf, 0i32, 0i32).
-    // The initial carried buffer differs by destination:
-    //   Fresh        → allocate a new capacity-N buffer via `uninit()`.
-    //   InputBuffer  → carry the input array directly (write-back in place).
-    let init_buf_nid = match spec.destination {
-        SoacDestination::Fresh => {
-            let uninit_id = catalog().known().uninit;
-            graph.intern_pure(
-                PureOp::Intrinsic {
-                    id: uninit_id,
-                    overload_idx: 0,
-                },
-                smallvec![],
-                buf_ty.clone(),
-            )
-        }
-        SoacDestination::InputBuffer => spec.arr_nid,
-        SoacDestination::OutputView => {
-            panic!("Filter[OutputView] not supported — see filter-consuming-input.md")
-        }
-    };
+    // Preheader: allocate the function-local buffer place; for an
+    // `InputBuffer` destination, seed it with the input array so the result
+    // observably aliases the input. `Fresh` skips the init store — every
+    // surviving element is written through `PlaceIndex` before `count`
+    // advances past it, so unread slots are never observed.
+    let buf_place_nid = emit_alloca(graph, bid, buf_ty.clone(), next_effect, None);
+    if matches!(spec.destination, SoacDestination::InputBuffer) {
+        let _ = emit_store(graph, bid, buf_place_nid, spec.arr_nid, next_effect, None);
+    } else if !matches!(spec.destination, SoacDestination::Fresh) {
+        panic!("Filter[OutputView] not supported — see filter-consuming-input.md");
+    }
     let zero_i32_nid = graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty.clone());
     graph.skeleton.blocks[bid].term = SkeletonTerminator::Branch {
         target: header,
-        args: vec![init_buf_nid, zero_i32_nid, zero_i32_nid],
+        args: vec![zero_i32_nid, zero_i32_nid],
     };
 
-    // Header → cond_br(i<N, body, after(buf, count)).
+    // Header → cond_br(i<N, body, after(count)). The buffer place is
+    // referenced through `buf_place_nid` directly, no block-param carry.
     let len_nid = emit_length(graph, spec.arr_nid, &spec.arr_ty, &i32_ty);
     let cond_nid = graph.intern_pure(
         PureOp::BinOp("<".into()),
@@ -1102,7 +1091,7 @@ fn build_filter_loop(
         then_target: body,
         then_args: vec![],
         else_target: after,
-        else_args: vec![buf_in_nid, count_in_nid],
+        else_args: vec![count_in_nid],
     };
     control_headers.insert(
         header,
@@ -1112,7 +1101,7 @@ fn build_filter_loop(
         },
     );
 
-    // Body: elem = arr[i]; pred = pred_func(elem, captures); new_buf = array_with(buf, count, elem).
+    // Body: elem = arr[i]; pred = pred_func(elem, captures).
     let elem_nid = emit_read_element(
         graph,
         body,
@@ -1126,8 +1115,6 @@ fn build_filter_loop(
     pred_operands.extend(spec.captures.iter().copied());
     let pred_nid = graph.intern_pure(PureOp::Call(spec.pred_func), pred_operands, bool_ty.clone());
 
-    let new_buf_nid = emit_write_element(graph, buf_in_nid, count_in_nid, elem_nid, &buf_ty, &spec.elem_ty);
-
     // Body → cond_br(pred, then, else_).
     graph.skeleton.blocks[body].term = SkeletonTerminator::CondBranch {
         cond: pred_nid,
@@ -1138,7 +1125,18 @@ fn build_filter_loop(
     };
     control_headers.insert(body, ControlHeader::Selection { merge: sel_merge });
 
-    // then: count_bumped = count + 1; Branch(sel_merge, [count_bumped]).
+    // then: write the accepted element into `buf_place[count_in]`, bump
+    // count; Branch(sel_merge, [count_bumped]).
+    emit_place_index_store(
+        graph,
+        then_blk,
+        buf_place_nid,
+        count_in_nid,
+        elem_nid,
+        spec.elem_ty.clone(),
+        next_effect,
+        None,
+    );
     let one_i32_nid = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty.clone());
     let count_bumped_nid = graph.intern_pure(
         PureOp::BinOp("+".into()),
@@ -1156,34 +1154,35 @@ fn build_filter_loop(
         args: vec![count_in_nid],
     };
 
-    // sel_merge: param count_next; Branch(continue, [new_buf, count_next]).
+    // sel_merge: param count_next; Branch(continue, [count_next]).
     let count_next_nid = graph.add_block_param(sel_merge, 0, i32_ty.clone());
     graph.skeleton.blocks[sel_merge].params.push(count_next_nid);
     graph.skeleton.blocks[sel_merge].term = SkeletonTerminator::Branch {
         target: continue_blk,
-        args: vec![new_buf_nid, count_next_nid],
+        args: vec![count_next_nid],
     };
 
-    // continue: params (buf_for_continue, count_for_continue);
-    // i_next = i+1; Branch(header, [buf_for_continue, count_for_continue, i_next]).
-    let cont_buf_nid = graph.add_block_param(continue_blk, 0, buf_ty.clone());
-    graph.skeleton.blocks[continue_blk].params.push(cont_buf_nid);
-    let cont_count_nid = graph.add_block_param(continue_blk, 1, i32_ty.clone());
+    // continue: param (count_for_continue);
+    // i_next = i+1; Branch(header, [count_for_continue, i_next]).
+    let cont_count_nid = graph.add_block_param(continue_blk, 0, i32_ty.clone());
     graph.skeleton.blocks[continue_blk].params.push(cont_count_nid);
     let next_i_nid = increment(graph, i_in_nid);
     graph.skeleton.blocks[continue_blk].term = SkeletonTerminator::Branch {
         target: header,
-        args: vec![cont_buf_nid, cont_count_nid, next_i_nid],
+        args: vec![cont_count_nid, next_i_nid],
     };
 
-    // Rebind the original result NodeId to `Tuple(after_buf, after_count)`.
-    // The Tuple's type is `Array[T, Size(N), Bounded]` — the backends see
-    // it as a 2-field struct {f0: buffer, f1: u32}.
+    // `after` opens with one whole-array `Load` of the buffer place,
+    // then the suffix (held back since the split) — so any suffix
+    // side-effect that demands the filter result finds `buf_loaded_nid`
+    // already elaborated. Rebind the original result NodeId to a
+    // `Tuple(buf, count)` matching the `Bounded` struct layout.
+    let buf_loaded_nid = emit_load(graph, after, buf_place_nid, buf_ty.clone(), next_effect, None);
+    graph.skeleton.blocks[after].side_effects.extend(suffix);
     graph.nodes[spec.result_node] = ENode::Pure {
         op: PureOp::Tuple(2),
-        operands: smallvec![after_buf_nid, after_count_nid],
+        operands: smallvec![buf_loaded_nid, after_count_nid],
     };
-    let _ = next_effect;
 }
 
 /// Runtime-sized `filter` lowering: a single-thread serial scatter into the
