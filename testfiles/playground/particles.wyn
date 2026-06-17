@@ -27,7 +27,7 @@
 -- Run:
 --   wyn compile testfiles/playground/particles.wyn -o /tmp/particles.spv
 --   viz pipeline /tmp/particles.spv --feedback tick:prev_pos=tick_output --max-frames 200
-def N:i32 = 5
+def N:i32 = 512
 def CLUMPF:f32 = 0.1
 def CLUMPR:f32 = 100.0
 def UPDFACTOR:f32 = 1.0
@@ -54,24 +54,22 @@ def align(pos:vec4f32, arr:[]vec4f32) vec2f32 = ALIGNF*((reduce(|a,b| a+b, @[0.0
 #[compute]
 entry tick(#[storage(set=2, binding=0, access=read)] prev_pos: []vec4f32,
            #[uniform(set=1, binding=1)] iTime: f32) []vec4f32 =
-  if iTime < 0.1 then
-    map(|i:i32|
+  let prev_pos = prev_pos[0..N] in
+  map(|i:i32|
+        if iTime < 0.1 then
           let loc = f32(i * 9 + 103) in
           @[100.0*(hash2(@[loc,loc]).x+1.0),
             100.0*(hash2(@[loc,loc]).y+1.0),
             hash2(@[loc+1.0,loc-1.0]).x,
-            hash2(@[loc+1.0,loc+1.0]).y],
-        0i32..<N)
-  else
-    let prev_pos = prev_pos[0..N] in
-    map(
-      |upd:vec4f32| @[(upd.x + UPDFACTOR * upd.z + 512.0)%512.0,
-                     (upd.y + UPDFACTOR * upd.w + 512.0)%512.0,
-                     upd.z, upd.w],
-      map(|elem:vec4f32|
-            let deltav = clump(elem, prev_pos) + align(elem, prev_pos) in
-            @[elem.x, elem.y, elem.z + deltav.x, elem.w + deltav.y],
-          prev_pos))
+            hash2(@[loc+1.0,loc+1.0]).y]
+        else
+          let elem = prev_pos[i] in
+          let deltav = clump(elem, prev_pos) + align(elem, prev_pos) in
+          let upd = @[elem.x, elem.y, elem.z + deltav.x, elem.w + deltav.y] in
+          @[(upd.x + UPDFACTOR * upd.z + 512.0)%512.0,
+            (upd.y + UPDFACTOR * upd.w + 512.0)%512.0,
+            upd.z, upd.w],
+      0i32..<N)
 
 -- Single pass over the particles: scatter one white texel per particle into
 -- the framebuffer at its flattened pixel index. `fb` is written in place.
