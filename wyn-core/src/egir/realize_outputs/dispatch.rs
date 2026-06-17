@@ -4,10 +4,9 @@
 //!
 //!   * `compute_slot_source` — classifies a slot source NodeId and
 //!     emits the appropriate write into a storage `OutputView`. Handles
-//!     SOAC retargeting (`Map(Fresh)` / `Scan(Fresh)` → `OutputView`),
-//!     fixed-size aggregates (per-element stores), scalars/vectors
-//!     (single store at index 0), and consuming Scan (no-op — already
-//!     in its input buffer).
+//!     Screma `Project` retargeting, fixed-size aggregates (per-element
+//!     stores), scalars/vectors (single store at index 0), and consuming
+//!     Scan (no-op — already in its input buffer).
 //!   * `graphics_slot_source` — emits one store to the slot's
 //!     `OutputSlot { index }` place. Graphics outputs are scalar /
 //!     vector / matrix in practice; if a runtime-sized array ever
@@ -33,8 +32,10 @@ mod dispatch_tests;
 /// Realise one compute slot source as a DPS write into the slot's
 /// `OutputView { binding }`. Classification:
 ///
-///   1. Consuming `Scan(InputBuffer)` → no-op.
-///   2. Retargetable `Map(Fresh)` / `Scan(Fresh)` → retarget destination,
+///   1. Consuming Scan accumulator → no-op (the Screma already wrote
+///      into the input buffer).
+///   2. Retargetable `Project(Screma, k)` → flip the Screma's
+///      `map_destinations[k]` / `acc_destinations[k]` to `OutputView`,
 ///      rewrite sibling `Index` consumers to view loads.
 ///   3. Fixed-size aggregate (`[Size(n)]T`) → element stores.
 ///   4. Runtime-sized array, not from a retargetable SOAC → error.
@@ -84,12 +85,10 @@ pub fn compute_slot_source(
             )?;
         }
         retarget_screma_array_projection(graph, screma_result, field_idx, view);
-        // After retargeting, the Project node operationally produces
-        // the view at runtime (the Screma's loop body wrote field 0
-        // through the view). Update the Project node's type to match
-        // so the verify-no-abstract pass doesn't flag its stale
-        // Composite array type. Also alias it for downstream consumers
-        // that perform NodeId substitution.
+        // The Project node operationally produces the view at runtime
+        // (the Screma's loop body wrote field 0 through the view).
+        // Update its type to match so verify_no_abstract doesn't flag
+        // the Composite array type. Also alias for NodeId substitution.
         if let Some(view_ty) = graph.types.get(&view).cloned() {
             graph.types.insert(source, view_ty);
         }
@@ -364,7 +363,7 @@ pub(crate) fn retarget_screma_array_projection(
     );
 }
 
-/// For each `Index(source, k)` consumer in the graph, synthesise a
+/// For each `Index(source, k)` consumer in the graph, synthesize a
 /// `ViewIndex + Load` against the slot's output view and alias the
 /// Index NodeId to the load's result. The alias is consulted at
 /// extraction time so every downstream `demand` transparently

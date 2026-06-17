@@ -1379,14 +1379,11 @@ fn walk_for_eligible_soacs(
             }
         }
         TermKind::Soac(SoacOp::Scan { op, input, .. }) => {
-            // No tail-of-compute-entry exclusion. The parallel-scan
-            // Path B in `egir::parallelize::transform_scan_entry` knows
-            // how to consume an `InputBuffer` destination: phase 1 and
-            // phase 3 route their writes back to the input binding,
-            // and the pipeline descriptor skips the auto-output slot.
-            // For the serial-fallback path (when parallel scan doesn't
-            // fire), `rewrite_map_scan_to_into` overrides any stray
-            // `InputBuffer` destination to `OutputView`.
+            // No tail-of-compute-entry exclusion. The Screma scan path
+            // in egir::parallelize knows how to consume an `InputBuffer`
+            // destination: phase 1 and phase 3 route their writes back
+            // to the input binding, and the pipeline descriptor skips
+            // the auto-output slot.
             if let Some(input_sym) = input_is_dead_unique_var(term.id, input, model) {
                 if scan_body_ok(&op.lam) && !body_references_sym(&op.lam.body, input_sym) {
                     out.push(term.id);

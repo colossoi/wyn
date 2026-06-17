@@ -1,24 +1,6 @@
-//! SPIKE: programmatic `EgirEntry` synthesis API.
-//!
-//! Question this module answers: can the EgirEntry construction logic
-//! that today only lives inside `from_tlc::convert_entry_point` be
-//! extracted as a reusable, TLC-independent builder?
-//!
-//! Motivation: the reduce / scan / redomap migration to the EGIR-side
-//! parallelization boundary needs to synthesize multi-phase pipelines
-//! (e.g. a `phase2_combine` entry for reduce) directly at EGIR, without
-//! round-tripping through a fresh TLC `Def` + `from_tlc`. This spike
-//! demonstrates the API surface that would be required.
-//!
-//! The spike validates one shape: a phase2-style entry that reads from
-//! a runtime-sized storage view, runs a `PendingSoac::Reduce` over it,
-//! and stores the scalar result to another storage binding.
-//!
-//! Scope: deliberately *not* land-ready. The methods here re-implement
-//! primitives that already exist inside `Converter` in `from_tlc.rs`;
-//! a real landing would factor a shared `GraphBuilder` out of
-//! `Converter` and have both consumers (TLC conversion + EGIR phase
-//! synthesis) call into it.
+//! Programmatic `EgirEntry` synthesis API used by the EGIR-side
+//! parallelization phases that synthesize extra compute entries (phase
+//! 2 / phase 3 of the Screma transform).
 
 use std::collections::HashMap;
 
@@ -36,21 +18,9 @@ use super::program::EgirEntry;
 use super::types::{EGraph, NodeId, PendingSoac, SkeletonTerminator, SoacDestination};
 use crate::ssa::types::{EntryInput, EntryOutput};
 
-/// Build a synthesized `EgirEntry` programmatically. Mirrors the primitive
-/// operations `from_tlc::Converter` exposes, but holds no TLC-side state.
-///
-/// Typical usage (phase2 of a reduce):
-/// ```text
-/// let mut b = EntryBuilder::new_compute("compute_sum_phase2_combine".into(), (1, 1, 1));
-/// b.declare_intermediate_storage(0, 1, f32_ty());
-/// b.declare_output_storage(0, 2, f32_ty());
-/// let view = b.emit_storage_view(0, 1, partials_arr_ty);
-/// let init = b.emit_constant(ConstantValue::from_f32(0.0), f32_ty());
-/// let r = b.emit_pending_reduce("op_add", view, partials_arr_ty, f32_ty(), init, vec![]);
-/// let zero = b.emit_u32(0);
-/// b.emit_storage_store(0, 2, zero, r, f32_ty());
-/// let entry = b.build();
-/// ```
+/// Build a synthesized `EgirEntry` programmatically. Mirrors the
+/// primitive operations `from_tlc::Converter` exposes, but holds no
+/// TLC-side state.
 pub struct EntryBuilder {
     graph: EGraph,
     control_headers: HashMap<BlockId, ControlHeader>,

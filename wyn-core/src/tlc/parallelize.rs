@@ -345,7 +345,7 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
             } => {
                 // `tlc::normalize_outputs` emits the entry tail as a chain
                 // of `let _ = OutputSlotStore(i, <slot_value>) in …`.
-                // Treat slot 0's value as the entry's parallelisable tail
+                // Treat slot 0's value as the entry's parallelizable tail
                 // — same primary-slot policy the old direct `Tuple(...)`
                 // tail had — and keep walking the body for prefix lets.
                 if let TermKind::OutputSlotStore {
@@ -1816,9 +1816,8 @@ fn make_lowering_plan(
                 // pipeline.
                 make_screma_plan(analysis, entry_name, next_binding, sizing, program)
             } else {
-                // Pointwise-only Screma is a multi-output Map: one lane per
-                // element, no cross-lane phases. Route through the existing
-                // Map planner / EGIR `rewrite_tail_map` parallel marker.
+                // Pointwise-only Screma is a multi-output Map: one lane
+                // per element, no cross-lane phases.
                 make_map_plan(
                     analysis,
                     entry_name,
@@ -1893,7 +1892,7 @@ fn make_map_plan(
     }
 }
 
-/// True when EGIR's `transform_screma_entry` can parallelise this
+/// True when EGIR's `transform_screma_entry` can parallelize this
 /// mixed Screma today. Supported shapes:
 /// - 0+ map outputs (no captures) + N>=1 Reduce accumulators (no
 ///   captures, arbitrary pure NE) — emits N+1 stages
@@ -1903,7 +1902,7 @@ fn make_map_plan(
 /// Arbitrary NE subgraphs are handled by both phase 2 paths
 /// (`synthesize_phase2_reduce_cloning_ne_named` and
 /// `synthesize_phase2_scan`) via `graph_ops::clone_pure_subgraph`.
-fn screma_egir_parallelisable(soac: &SoacOp) -> bool {
+fn screma_egir_parallelizable(soac: &SoacOp) -> bool {
     let SoacOp::Screma {
         map_lams,
         accumulators,
@@ -1934,7 +1933,7 @@ fn screma_egir_parallelisable(soac: &SoacOp) -> bool {
 
 /// Mixed-Screma planner. Two branches:
 ///
-/// - **EGIR-parallel**: when `screma_egir_parallelisable` matches, emit
+/// - **EGIR-parallel**: when `screma_egir_parallelizable` matches, emit
 ///   a two-stage MultiCompute pipeline (phase 1 = the entry, chunked
 ///   in-place by `egir::parallelize::transform_screma_entry`; phase 2
 ///   = synthesized tree-reduce combiner) and a `ParallelizationPlan`
@@ -1950,7 +1949,7 @@ fn make_screma_plan(
     sizing: PipelineSizing,
     program: &Program,
 ) -> LoweringPlan {
-    if !screma_egir_parallelisable(&analysis.soac.original) {
+    if !screma_egir_parallelizable(&analysis.soac.original) {
         let bindings = collect_soac_bindings(&analysis.soac);
         let pipeline = Pipeline::Compute(ComputePipeline {
             entry_point: entry_name.to_string(),
@@ -2032,7 +2031,7 @@ fn make_screma_plan(
             n_accs, // result bindings only; partials reuse auto-outputs
         )
     } else {
-        // single-Scan path; gated by screma_egir_parallelisable.
+        // single-Scan path; gated by screma_egir_parallelizable.
         debug_assert_eq!(n_accs, 1);
         debug_assert!(matches!(acc_kind, super::ScremaAccumulator::Scan));
         let scan_output_binding = BindingRef::new(AUTO_STORAGE_SET, auto_outputs_base);
@@ -2084,9 +2083,7 @@ fn make_screma_plan(
 
 /// MultiCompute pipeline for a Screma with N Reduce accumulators.
 /// One phase 1 stage (reads inputs, writes M map outputs + N partials),
-/// then N phase 2 stages (one tree-reduce per accumulator). Mirrors
-/// `build_two_phase_pipeline_descriptor`'s 2-stage shape extended over
-/// the accumulator count.
+/// then N phase 2 stages (one tree-reduce per accumulator).
 fn build_screma_reduce_pipeline_descriptor(
     entry_name: &str,
     analysis: &SoacAnalysis,
@@ -2143,10 +2140,10 @@ fn build_screma_reduce_pipeline_descriptor(
 }
 
 /// Build the `Pipeline::MultiCompute` descriptor for a Screma with a
-/// single Scan accumulator. Same 3-stage shape as
-/// `build_scan_pipeline_descriptor`'s non-consuming branch, but the
-/// "scan output" binding is the entry's auto-allocated slot for the
-/// accumulator's tuple field rather than the SOAC's solo output.
+/// single Scan accumulator. Three stages: phase 1 chunks the input +
+/// writes block_sums; phase 2 sequentially scans block_sums into
+/// block_offsets; phase 3 reads block_offsets and applies each chunk's
+/// offset back over the scan output.
 fn build_screma_scan_pipeline_descriptor(
     entry_name: &str,
     analysis: &EntryAnalysis,
@@ -3081,7 +3078,7 @@ fn int_lit_of(value: i64, ty: &Type<TypeName>, span: ast::Span, term_ids: &mut T
 /// input is rebased to `(chunk_start, chunk_len)` (per-thread range), and
 /// the result is optionally stored into `partials[tid]`. Scan never
 /// reaches this builder — its parallelization is fully EGIR-side via
-/// `egir::parallelize::transform_scan_entry`.
+/// the Screma scan path.
 fn build_chunked_soac_body(
     soac: &SoacAnalysis,
     prefix_lets: &[(SymbolId, Type<TypeName>, Term)],
@@ -3145,9 +3142,7 @@ fn build_chunked_soac_body(
             }
         }
         SoacOp::Scan { .. } => {
-            unreachable!(
-                "Scan is parallelized EGIR-side via transform_scan_entry, never reaches build_chunked_soac_body"
-            )
+            unreachable!("Scan is parallelized EGIR-side, never reaches build_chunked_soac_body")
         }
         _ => unreachable!("analyze_soac rejected non-parallelizable variants"),
     };
@@ -3334,7 +3329,7 @@ fn intrinsic_term(
 ) -> Term {
     // Catalog-resolved builtins emit `Var(Builtin(id))` so downstream
     // passes dispatch structurally. The assert mirrors `tlc::build_call`
-    // and `buffer_specialize::make_app`: synthesised IR sites target
+    // and `buffer_specialize::make_app`: synthesized IR sites target
     // single-overload entries.
     let func_var = if let Some(def) = catalog().lookup_by_any_name(name) {
         assert_eq!(

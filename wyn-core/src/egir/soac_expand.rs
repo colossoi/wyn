@@ -589,9 +589,8 @@ fn expand_one(
             );
         }
         SideEffectKind::Pending(PendingSoac::Parallel { serial }) => {
-            // Peel the wrapper. After Phase 4 consolidation only the
-            // pointwise OutputView Screma case is wired up; the legacy
-            // Map[OutputView] wrap is no longer emitted.
+            // Peel the wrapper. Only the pointwise OutputView Screma
+            // case is wired up.
             match (**serial).clone() {
                 PendingSoac::Screma {
                     map_funcs,
@@ -826,18 +825,10 @@ where
 /// MapInto: `y = func(elem1, ..., ...caps); view[i] = y` per iteration. No
 /// loop-carried state (writes are effectful); the SOAC "result" is a dummy.
 
-/// Parallel `MapInto`: one lane per input element, guarded by
-/// `if tid < len then body else ()`. No loop, no phi — replaces the
-/// per-iteration serial walk with `_w_intrinsic_thread_id`-keyed
-/// scalar work.
-///
-/// The body is the same per-iteration shape `build_map_into_loop`
-/// emits inside its loop body:
-///   read each input at `i`, call the lifted lambda with per-element
-///   args + captures, write the result via the OutputView.
-
-/// Parallel pointwise Screma: one lane reads the shared inputs once and writes
-/// every mapped output field to its corresponding output view.
+/// Parallel pointwise Screma: one lane per input element, guarded by
+/// `if tid < len then body else ()`. Reads the shared inputs once and
+/// writes every mapped output field to its corresponding output view —
+/// no loop, no phi.
 struct ScremaMapsIntoLoop {
     len_input: (NodeId, Type<TypeName>),
     read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)>,

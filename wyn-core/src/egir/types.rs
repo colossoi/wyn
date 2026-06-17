@@ -238,12 +238,11 @@ pub enum PendingSoac {
         value_type: Type<TypeName>,
         dest_elem_type: Type<TypeName>,
     },
-    /// Wrapper marking a SOAC as parallelized at the entry boundary. The
-    /// `egir::parallelize` pass tags a planned compute entry's tail SOAC
-    /// with this; `soac_expand` dispatches to a parallel builder (e.g.
-    /// `build_parallel_map`) instead of the serial-loop builder, and
-    /// reads the entry's `ParallelizationPlan` to pick dispatch / bindings.
-    /// Operand layout is identical to the inner variant's — soac_expand
+    /// Wrapper marking a pointwise Screma as parallel at the entry
+    /// boundary. The `egir::parallelize` pass tags a planned compute
+    /// entry's tail SOAC with this; `soac_expand` dispatches to
+    /// `build_parallel_screma_maps` instead of the serial-loop builder.
+    /// Operand layout is identical to the inner Screma's — soac_expand
     /// peels the wrapper before consuming operands.
     Parallel {
         serial: Box<PendingSoac>,

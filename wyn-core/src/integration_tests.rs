@@ -163,8 +163,9 @@ entry mn(n: u32) u32 =
 }
 
 /// The miner's shape: a reduce whose element is an AoS `(scalar, array)`
-/// tuple. Routed (like scalars) through the EGIR `phase1_transform_redomap`
-/// chunking — phase1 chunks the range and phase2 combines the partials.
+/// tuple. Routed (like scalars) through the EGIR Screma reduce
+/// chunking — phase 1 chunks the range and phase 2 combines the
+/// partials.
 #[test]
 fn compute_soa_tuple_reduce_over_range_chunks_phase1() {
     assert_phase1_loop_depends_on_thread_id(
@@ -3910,7 +3911,7 @@ entry gen(bh: []vec4f32, #[uniform(set=1,binding=0)] nb: i32) [1]i32 =
 /// scan to `OutputView` for slot 0 but slot 1's `[offsets[0]]` still
 /// demanded the (now-vanished) in-register Composite. Fixed in
 /// `realize_outputs::rewrite_other_index_consumers_to_loads`: detect the
-/// sibling Index consumer, synthesise a `ViewIndex + Load` against slot
+/// sibling Index consumer, synthesize a `ViewIndex + Load` against slot
 /// 0's output view (both backends declare output bindings as read-write),
 /// alias the Index NodeId to the load result. Slot 0's binding doubles as
 /// the shared buffer.

@@ -1829,8 +1829,7 @@ impl<'a> Converter<'a> {
         operands.extend_from_slice(&input_nids);
         operands.extend_from_slice(&capture_nids);
 
-        // Consolidation: emit as a singleton Screma + project field 0,
-        // so all downstream EGIR passes see one PendingSoac shape.
+        // Emit as a singleton Screma + project field 0.
         let capture_count = capture_nids.len();
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![result_ty.clone()]);
         let screma_nid = self.emit_soac(
@@ -1932,10 +1931,9 @@ impl<'a> Converter<'a> {
         let elem_ty = self.value_elem_type(&arr_ty, input);
         let init_nid = self.convert_term(ne)?;
 
-        // Consolidation: emit as a singleton Screma { 0 maps, 1 Reduce
-        // accumulator } + project field 0. Reduce's `op` doubles as
-        // both the step (per-element) and the reduce_op (phase 2
-        // combiner) — for a non-fused Reduce they are the same function.
+        // Emit as Screma { 0 maps, 1 Reduce accumulator } + project field
+        // 0. Reduce's `op` is both the step (per-element) and the
+        // reduce_op (phase 2 combiner).
         let capture_count = capture_nids.len();
         let mut operands: SmallVec<[NodeId; 4]> = smallvec![arr_nid, init_nid];
         operands.extend(capture_nids.iter().copied());
@@ -1994,9 +1992,9 @@ impl<'a> Converter<'a> {
         operands.extend(capture_nids.iter().copied());
         operands.extend(reduce_capture_nids.iter().copied());
 
-        // Consolidation: emit as Screma { 0 maps, 1 Reduce accumulator
-        // with step_func=op (per-element acc combinator), reduce_op_func=
-        // reduce_func (pure combiner) } + project field 0.
+        // Emit as Screma { 0 maps, 1 Reduce accumulator } + project field
+        // 0. step_func=op (per-element acc combinator),
+        // reduce_op_func=reduce_func (pure phase 2 combiner).
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![result_ty.clone()]);
         let step_capture_count = capture_nids.len();
         let reduce_op_capture_count = reduce_capture_nids.len();
@@ -2165,14 +2163,12 @@ impl<'a> Converter<'a> {
         let mut operands: SmallVec<[NodeId; 4]> = smallvec![arr_nid, init_nid];
         operands.extend(capture_nids.iter().copied());
 
-        // Consolidation: every scan — including the consuming
-        // (InputBuffer) shape — emits Screma { 0 maps, 1 Scan acc } +
-        // project field 0. For consuming scan the result aliases the
-        // input, so the Project's type must match the input view's type
-        // (View variant + region) rather than the TLC-default
-        // result_ty (Composite variant). Non-consuming scan keeps
-        // result_ty; realize_outputs fixes its variant via
-        // retarget_screma_array_projection.
+        // Emit as Screma { 0 maps, 1 Scan acc } + project field 0. For
+        // consuming scan the result aliases the input, so the Project's
+        // type must match the input view's type (View variant + region)
+        // rather than the TLC-default result_ty (Composite variant).
+        // Non-consuming scan keeps result_ty; realize_outputs fixes its
+        // variant via retarget_screma_array_projection.
         let capture_count = capture_nids.len();
         let project_ty = if matches!(destination, SoacDestination::InputBuffer) {
             arr_ty.clone()

@@ -1,0 +1,12 @@
+# Normalize all text files to LF in the repo and in the worktree.
+* text=auto eol=lf
+
+# Binary file types present in the repo.
+*.dll  binary
+*.exe  binary
+*.gz   binary
+*.jpg  binary
+*.pdf  binary
+*.png  binary
+*.spv  binary
+*.wasm binary

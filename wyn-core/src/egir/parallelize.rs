@@ -1,13 +1,7 @@
-//! EGIR-side SOAC parallelization.
-//!
-//! Consumes the `ParallelizationPlan`s produced by `tlc::parallelize`:
-//! Map entries get their tail SOAC wrapped in `PendingSoac::Parallel`
-//! for the lane-indexed kernel; Reduce and Redomap entries get an
-//! in-place phase1 rewrite (chunked input + store-to-partials) plus a
-//! freshly-synthesized phase2-combine EgirEntry; Scan gets an in-place
-//! phase1 (chunked scan + chunked reduce → block_sums) plus two
-//! synthesized entries (phase 2: sequential scan of block_sums into
-//! block_offsets; phase 3: chunked apply of block_offsets to output).
+//! EGIR-side SOAC parallelization. Consumes the
+//! `ParallelizationPlan`s produced by `tlc::parallelize` and runs
+//! `transform_screma_entry` on each planned entry — see its doc for the
+//! dispatch shape.
 use std::collections::HashMap;
 
 use polytype::Type;
@@ -28,25 +22,20 @@ use crate::ssa::types::ControlHeader;
 use crate::tlc::parallelize::ParallelizationPlan;
 
 /// Walk every entry; for each entry that has a plan, dispatch to
-/// `transform_screma_entry`. After from_tlc consolidation every parallel
-/// compute-entry tail is a `PendingSoac::Screma`, so the per-kind
-/// transforms collapse into one. transform_screma_entry internally
-/// dispatches on the Screma's accumulator-kind shape:
+/// `transform_screma_entry`. It internally dispatches on the Screma's
+/// accumulator-kind shape:
 ///
-/// - **0 accumulators** (pointwise Screma == legacy Map): wrap the SOAC
-///   in `PendingSoac::Parallel` so `soac_expand` emits the lane-indexed
+/// - **0 accumulators** (pointwise Screma): wrap the SOAC in
+///   `PendingSoac::Parallel` so `soac_expand` emits the lane-indexed
 ///   kernel via `build_parallel_screma_maps`.
 /// - **N Reduce accumulators**: phase 1 chunked rewrite (chunked input +
 ///   chunked map outputs + store-to-`partials_i[tid]`) plus one
-///   synthesised phase-2 tree-reduce per accumulator.
+///   synthesized phase-2 tree-reduce per accumulator.
 /// - **1 Scan accumulator**: phase 1 chunked rewrite (chunked input +
 ///   chunked output view + appended chunked reduce → `block_sums[tid]`),
-///   plus synthesised phase 2 (sequential scan of `block_sums`) and
+///   plus synthesized phase 2 (sequential scan of `block_sums`) and
 ///   phase 3 (apply offsets via a swap-args wrapper).
 pub fn run(inner: &mut EgirInner, plans: &HashMap<String, ParallelizationPlan>) {
-    // After from_tlc::convert_soac_* consolidation, every compute-entry
-    // tail PendingSoac is `Screma`. The plan strategy is `Screma` for
-    // every parallelised entry, so there's a single transform path.
     let mut new_entries: Vec<EgirEntry> = Vec::new();
     let mut new_functions: Vec<EgirFunc> = Vec::new();
     for entry in inner.entry_points.iter_mut() {
@@ -66,15 +55,13 @@ pub fn run(inner: &mut EgirInner, plans: &HashMap<String, ParallelizationPlan>) 
 
 fn rewrite_tail_map(entry: &mut super::program::EgirEntry) {
     // Walk every block and locate the (unique) tail pointwise Screma.
-    // from_tlc's convert_soac_map emits a 1-map 0-accumulator Screma for
-    // every source-level `map` so this is the canonical shape now.
     for (_, block) in entry.graph.skeleton.blocks.iter_mut() {
         for se in block.side_effects.iter_mut() {
             let SideEffectKind::Pending(ref pending) = se.kind else {
                 continue;
             };
             // Only entry-tail pointwise Screma that targets output views
-            // are parallelisable here. Intermediate Fresh producers stay
+            // are parallelizable here. Intermediate Fresh producers stay
             // serial unless a strategy-specific transform rewrites them.
             match pending {
                 PendingSoac::Screma {
@@ -614,13 +601,10 @@ fn emit_storage_len(graph: &mut super::types::EGraph, br: BindingRef) -> NodeId 
     )
 }
 
-/// Rewrite an EgirEntry in place: its tail `PendingSoac::Redomap`
-/// becomes a chunked redomap + store-to-partials. Same shape as
-/// `phase1_transform_reduce` but operates on a Redomap side-effect,
-/// Programmatic phase2 synthesis where the neutral element is a
-/// (possibly compound) pure subgraph cloned from phase1. Used by
-/// Redomap whose `NO_HIT`-style NE values are tuples / arrays of
-/// constants, not scalar literals.
+/// Programmatic phase 2 synthesis where the neutral element is a
+/// (possibly compound) pure subgraph cloned from phase 1. Used by the
+/// Screma reduce path for any NE shape (scalar literal, tuple, array,
+/// etc.).
 pub fn synthesize_phase2_reduce_cloning_ne(
     entry_name: &str,
     op_func: String,
@@ -685,7 +669,7 @@ fn find_pending_screma(entry: &EgirEntry) -> Option<(BlockId, usize)> {
 /// Mixed-Screma migration dispatcher. Gates and routes to the
 /// per-kind transform: Reduce → 2-phase tree-reduce; Scan → 3-phase
 /// block-prefix scan. Mirrors the gate in
-/// `tlc::parallelize::screma_egir_parallelisable`.
+/// `tlc::parallelize::screma_egir_parallelizable`.
 fn transform_screma_entry(
     entry: &mut EgirEntry,
     plan: &ParallelizationPlan,
@@ -717,7 +701,7 @@ fn transform_screma_entry(
 /// captures, scalar-literal NEs). The entry is mutated in place into a
 /// chunked phase 1 (chunked input + chunked map output views +
 /// store-to-`partials_i[tid]` per accumulator). One phase 2 entry is
-/// synthesised per accumulator (`{entry}_phase2_combine` for N=1, or
+/// synthesized per accumulator (`{entry}_phase2_combine` for N=1, or
 /// `{entry}_phase2_combine_{i}` for N>=2) via
 /// `synthesize_phase2_reduce_cloning_ne_named`.
 fn transform_screma_reduce_entry(
@@ -953,7 +937,7 @@ fn transform_screma_reduce_entry(
         });
     }
 
-    // 6. Synthesise one phase 2 entry per accumulator. Cloning NEs from
+    // 6. Synthesize one phase 2 entry per accumulator. Cloning NEs from
     // the post-mutation graph is harmless — the NE node is pure and
     // hasn't been touched.
     let phase1_snapshot = entry.graph.clone();
@@ -1002,10 +986,9 @@ fn project_root_index(graph: &super::types::EGraph, value: NodeId, root: NodeId)
     }
 }
 
-/// 0+ map outputs (no captures) + exactly one Scan accumulator with no
-/// captures and a scalar-literal NE. Mirrors `transform_scan_entry`'s
-/// 3-phase shape, adapted to Screma's operand layout: phase 1 chunks
-/// the input + map output views + the scan output view, appends a
+/// 0+ map outputs (no captures) + exactly one Scan accumulator (no
+/// captures, arbitrary pure NE). Three-phase rewrite: phase 1 chunks
+/// the input + map output views + the scan output view, then appends a
 /// synthetic chunked Reduce that writes per-thread final accumulators
 /// to `block_sums[tid]`; phase 2 sequentially scans `block_sums` into
 /// `block_offsets`; phase 3 reads `block_offsets` and applies each
@@ -1254,7 +1237,7 @@ fn transform_screma_scan_entry(
         length: None,
     });
 
-    // 7. Synthesise phase 2 (sequential scan of block_sums) and phase 3
+    // 7. Synthesize phase 2 (sequential scan of block_sums) and phase 3
     // (apply offsets to scan output), reusing the existing Scan helpers.
     let phase2 = synthesize_phase2_scan(
         &entry.name,

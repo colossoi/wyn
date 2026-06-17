@@ -1,4 +1,7 @@
 target/
+node_modules/
+dist/
+.wrangler/
 testfiles/miner.spv
 testfiles/miner.json
 *.glsl
