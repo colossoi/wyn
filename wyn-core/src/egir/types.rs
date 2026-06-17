@@ -170,50 +170,6 @@ pub struct PendingScremaAccumulator {
 /// with a variant-specific layout (documented per-variant in `soac_expand`).
 #[derive(Clone, Debug)]
 pub enum PendingSoac {
-    /// `map f inputs` → composite output array. The `destination`
-    /// kind picks where the per-iteration result is written:
-    /// allocate fresh or write to a bound output view (compute-
-    /// shader ABI). Operand layout depends on the destination —
-    /// see `SoacDestination`.
-    Map {
-        func: String,
-        input_array_types: Vec<Type<TypeName>>,
-        input_elem_types: Vec<Type<TypeName>>,
-        output_elem_type: Type<TypeName>,
-        destination: SoacDestination,
-    },
-    /// `reduce f init input` → scalar accumulator.
-    /// Operands: `[input, init, ...captures]`.
-    Reduce {
-        func: String,
-        input_array_type: Type<TypeName>,
-        input_elem_type: Type<TypeName>,
-    },
-    /// `scan f init input` → output array. The `destination` picks
-    /// where the per-iteration accumulator is written:
-    /// `Fresh` → fresh allocation; `OutputView` → bound view
-    /// (compute-shader ABI; result is dummy/unit). Operand layout
-    /// depends on the destination — see `SoacDestination`.
-    Scan {
-        /// Element-combine `(acc, x) -> acc'` for phase 1 / phase 3. For a
-        /// `map`-fused scan this folds the producer `f` into the step.
-        func: String,
-        /// Pure associative combiner `(a, a) -> a` for phase 2 (merging block
-        /// sums). Equals `func` for a plain scan; differs for a fused scan.
-        /// Mirrors `Redomap::reduce_func`.
-        reduce_func: String,
-        input_array_type: Type<TypeName>,
-        input_elem_type: Type<TypeName>,
-        destination: SoacDestination,
-    },
-    /// Fused map+reduce: per iteration `acc = func(acc, x1, ..., xn, ...caps)`.
-    /// Operands: `[input_0, ..., input_{n-1}, init, ...captures, ...reduce_captures]`.
-    Redomap {
-        func: String,
-        reduce_func: String,
-        input_array_types: Vec<Type<TypeName>>,
-        input_elem_types: Vec<Type<TypeName>>,
-    },
     /// Multi-result map+accumulator: one pass writes mapped outputs and
     /// threads accumulator outputs. Operand layout:
     /// `[inputs..., init_accs..., map_captures..., acc_step_captures...,

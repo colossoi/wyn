@@ -212,7 +212,7 @@ fn spirv_storage_write_chain_lowers_cleanly() {
         .filter_reachable()
         .to_egraph()
         .unwrap()
-        .expand_soacs(true)
+        .expand_soacs()
         .materialize()
         .optimize_skeleton()
         .elaborate()

@@ -1314,7 +1314,7 @@ fn compile_to_spirv(src: &str) -> crate::error::Result<Vec<u32>> {
         .filter_reachable()
         .to_egraph()
         .map_err(|e| crate::error::CompilerError::FlatteningError(format!("{e:?}"), None))?
-        .expand_soacs(true)
+        .expand_soacs()
         .materialize()
         .optimize_skeleton()
         .elaborate();

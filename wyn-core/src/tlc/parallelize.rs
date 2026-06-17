@@ -941,21 +941,11 @@ pub struct ParallelizationResult {
 pub struct ParallelizationPlan {
     /// Entry surface name; matches `egir::EgirEntry::name`.
     pub entry: String,
-    pub strategy: ParallelStrategy,
     pub dispatch: DispatchModel,
     pub bindings: PlannedBindings,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ParallelStrategy {
-    Map,
-    Reduce,
-    Redomap,
-    Scan,
-    Screma,
-}
-
-/// Dispatch shape from the strategy + sizing. Carried explicitly so
+/// Dispatch shape from the planner + sizing. Carried explicitly so
 /// the host pipeline descriptor, the planning record, and the generated
 /// kernel can be verified to agree.
 #[derive(Debug, Clone, Copy)]
@@ -973,35 +963,18 @@ pub enum DispatchModel {
     },
 }
 
+/// Unified Screma binding layout that covers every parallel SOAC
+/// shape the EGIR-native path emits. Pointwise Map collapses to
+/// `{ map_outputs: [_], accumulators: [] }`; Reduce/Redomap collapses
+/// to `{ map_outputs: [], accumulators: [Reduce{partials, result}] }`;
+/// Scan collapses to `{ map_outputs: [], accumulators: [Scan{output,
+/// block_sums, block_offsets}] }`; mixed Screma populates both.
 #[derive(Debug, Clone)]
-pub enum PlannedBindings {
-    Map {
-        /// `None` means TLC defers to EGIR's `build_entry_outputs` for
-        /// the result binding. For first-cut Map we always defer; future
-        /// migrations may reserve specific bindings here.
-        output: Option<BindingRef>,
-    },
-    Reduce {
-        partials: BindingRef,
-        result: BindingRef,
-    },
-    Redomap {
-        partials: BindingRef,
-        result: BindingRef,
-    },
-    Scan {
-        /// Pinned result buffer when this is a gather pre-pass; `None` means
-        /// EGIR auto-allocates the scan's output at `param_count`.
-        output: Option<BindingRef>,
-        block_sums: BindingRef,
-        block_offsets: BindingRef,
-    },
-    Screma {
-        /// One entry per mapped output. `None` means EGIR auto-allocates the
-        /// entry output view for that field, matching Map/Scan.
-        map_outputs: Vec<Option<BindingRef>>,
-        accumulators: Vec<PlannedScremaAccumulator>,
-    },
+pub struct PlannedBindings {
+    /// One entry per mapped output. `None` means EGIR auto-allocates the
+    /// entry output view for that field.
+    pub map_outputs: Vec<Option<BindingRef>>,
+    pub accumulators: Vec<PlannedScremaAccumulator>,
 }
 
 #[derive(Debug, Clone)]
@@ -1021,19 +994,24 @@ pub enum PlannedScremaAccumulatorKind {
 }
 
 impl PlannedBindings {
-    /// The pinned result binding for SOAC kinds whose result is a single
-    /// `EntryOutput` buffer (Map, Scan). `from_tlc::build_entry_outputs`
-    /// honors this so the EGIR output lands on the buffer the consumer reads.
-    /// Reduce/Redomap manage their result binding inside `make_two_phase_plan`
-    /// (it's a store, not an `EntryOutput`), so they report `None` here.
+    /// The pinned result binding for shapes whose result is a single
+    /// `EntryOutput` buffer (pointwise Screma == Map, single-Scan Screma).
+    /// `from_tlc::build_entry_outputs` honors this so the EGIR output lands
+    /// on the buffer the consumer reads. All-Reduce Screma manages its
+    /// result bindings via partials+result allocations (Stores, not
+    /// `EntryOutput`), so it reports `None`.
     pub fn forced_output(&self) -> Option<BindingRef> {
-        match self {
-            PlannedBindings::Map { output } => *output,
-            PlannedBindings::Scan { output, .. } => *output,
-            PlannedBindings::Reduce { .. }
-            | PlannedBindings::Redomap { .. }
-            | PlannedBindings::Screma { .. } => None,
+        // Pointwise Screma: forced output from the single map slot.
+        if self.accumulators.is_empty() && self.map_outputs.len() == 1 {
+            return self.map_outputs[0];
         }
+        // Single Scan accumulator: forced output is the scan's output binding.
+        if self.accumulators.len() == 1
+            && matches!(self.accumulators[0].kind, PlannedScremaAccumulatorKind::Scan)
+        {
+            return self.accumulators[0].output;
+        }
+        None
     }
 }
 
@@ -1897,13 +1875,13 @@ fn make_map_plan(
     });
     let parallel_plan = ParallelizationPlan {
         entry: entry_name.to_string(),
-        strategy: ParallelStrategy::Map,
         dispatch: DispatchModel::DerivedFromInputLength {
             input_index: 0,
             workgroup_size: sizing.workgroup.0,
         },
-        bindings: PlannedBindings::Map {
-            output: forced_output_binding,
+        bindings: PlannedBindings {
+            map_outputs: vec![forced_output_binding],
+            accumulators: vec![],
         },
     };
     LoweringPlan {
@@ -1959,9 +1937,8 @@ fn screma_egir_parallelisable(soac: &SoacOp) -> bool {
 /// - **EGIR-parallel**: when `screma_egir_parallelisable` matches, emit
 ///   a two-stage MultiCompute pipeline (phase 1 = the entry, chunked
 ///   in-place by `egir::parallelize::transform_screma_entry`; phase 2
-///   = synthesized tree-reduce combiner) and a `ParallelStrategy::Screma`
-///   plan whose `PlannedBindings::Screma` carries the partials/result
-///   bindings.
+///   = synthesized tree-reduce combiner) and a `ParallelizationPlan`
+///   whose `PlannedBindings` carries the partials/result bindings.
 /// - **Serial fallback**: 1×1×1 Compute pipeline so the existing serial
 ///   soac_expand lowering produces correct output. `parallel_plan` is
 ///   None — the EGIR Screma arm short-circuits and the entry stays as
@@ -2047,7 +2024,7 @@ fn make_screma_plan(
             sizing,
         );
         (
-            PlannedBindings::Screma {
+            PlannedBindings {
                 map_outputs: vec![None; n_maps as usize],
                 accumulators: planned_accumulators,
             },
@@ -2079,7 +2056,7 @@ fn make_screma_plan(
             block_offsets: Some(block_offsets_binding),
         }];
         (
-            PlannedBindings::Screma {
+            PlannedBindings {
                 map_outputs: vec![None; n_maps as usize],
                 accumulators: planned_accumulators,
             },
@@ -2090,7 +2067,6 @@ fn make_screma_plan(
 
     let parallel_plan = ParallelizationPlan {
         entry: entry_name.to_string(),
-        strategy: ParallelStrategy::Screma,
         dispatch: DispatchModel::Fixed {
             groups: [1, 1, 1],
             local_size: [sizing.workgroup.0, sizing.workgroup.1, sizing.workgroup.2],
@@ -2277,16 +2253,12 @@ fn make_two_phase_plan(
     // whole-tuple partials Store route through the EGIR chunking path alongside
     // scalars.
     let routable_result = scalar_result || tuple_can_use_whole_store_partials(&elem_type);
-    let (strategy, can_route) = match &analysis.soac.original {
-        SoacOp::Reduce { .. } => (
-            ParallelStrategy::Reduce,
-            routable_result && reduce_op.captures.is_empty() && is_simple_constant_term(ne),
-        ),
-        SoacOp::Redomap { .. } => (
-            ParallelStrategy::Redomap,
-            routable_result && reduce_op.captures.is_empty(),
-        ),
-        _ => (ParallelStrategy::Reduce, false),
+    let can_route = match &analysis.soac.original {
+        SoacOp::Reduce { .. } => {
+            routable_result && reduce_op.captures.is_empty() && is_simple_constant_term(ne)
+        }
+        SoacOp::Redomap { .. } => routable_result && reduce_op.captures.is_empty(),
+        _ => false,
     };
     let egir_native = forced_result_binding.is_none() && can_route;
 
@@ -2306,19 +2278,19 @@ fn make_two_phase_plan(
             result_binding,
             sizing,
         );
-        let bindings = match strategy {
-            ParallelStrategy::Redomap => PlannedBindings::Redomap {
-                partials: partials_binding,
-                result: result_binding,
-            },
-            _ => PlannedBindings::Reduce {
-                partials: partials_binding,
-                result: result_binding,
-            },
+        let bindings = PlannedBindings {
+            map_outputs: vec![],
+            accumulators: vec![PlannedScremaAccumulator {
+                kind: PlannedScremaAccumulatorKind::Reduce,
+                partials: Some(partials_binding),
+                result: Some(result_binding),
+                output: None,
+                block_sums: None,
+                block_offsets: None,
+            }],
         };
         let parallel_plan = ParallelizationPlan {
             entry: entry_name.to_string(),
-            strategy,
             dispatch: DispatchModel::Fixed {
                 groups: [1, 1, 1],
                 local_size: [sizing.workgroup.0, sizing.workgroup.1, sizing.workgroup.2],
@@ -2541,14 +2513,19 @@ fn make_scan_plan(
         program,
     );
 
-    let bindings = PlannedBindings::Scan {
-        output: forced_result_binding,
-        block_sums: block_sums_binding,
-        block_offsets: block_offsets_binding,
+    let bindings = PlannedBindings {
+        map_outputs: vec![],
+        accumulators: vec![PlannedScremaAccumulator {
+            kind: PlannedScremaAccumulatorKind::Scan,
+            partials: None,
+            result: None,
+            output: forced_result_binding,
+            block_sums: Some(block_sums_binding),
+            block_offsets: Some(block_offsets_binding),
+        }],
     };
     let parallel_plan = ParallelizationPlan {
         entry: entry_name.to_string(),
-        strategy: ParallelStrategy::Scan,
         dispatch: DispatchModel::Fixed {
             groups: [1, 1, 1],
             local_size: [sizing.workgroup.0, sizing.workgroup.1, sizing.workgroup.2],

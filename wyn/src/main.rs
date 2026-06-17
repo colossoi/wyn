@@ -338,7 +338,7 @@ fn compile_file(
 
     // Build the raw EGIR program, then chain the passes.
     let raw = time("to_egraph", verbose, || tlc_reachable.to_egraph())?;
-    let expanded = time("expand_soacs", verbose, || raw.expand_soacs(true));
+    let expanded = time("expand_soacs", verbose, || raw.expand_soacs());
     let ssa = time("egir_passes_full", verbose, || {
         expanded.materialize().optimize_skeleton().elaborate()
     });

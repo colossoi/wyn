@@ -57,7 +57,7 @@ fn compile_to_expanded_egraph(input: &str) -> crate::egir::types::EGraph {
         .filter_reachable()
         .to_egraph()
         .expect("to_egraph")
-        .expand_soacs(true);
+        .expand_soacs();
 
     let inner = &expanded.0;
     assert_eq!(

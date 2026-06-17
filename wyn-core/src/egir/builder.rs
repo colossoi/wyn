@@ -154,43 +154,13 @@ impl EntryBuilder {
         graph_ops::intern_storage_view(&mut self.graph, binding, view_ty, span)
     }
 
-    /// Emit a `PendingSoac::Reduce` side-effect. `soac_expand` will lower
-    /// this into a serial reduce loop within the current block. Returns
-    /// the result NodeId (consumable by downstream stores).
-    ///
-    /// Operand layout matches `convert_soac_reduce`:
-    /// `[input_array, init, ...captures]`.
-    pub fn emit_pending_reduce(
-        &mut self,
-        func: String,
-        input_array_nid: NodeId,
-        input_array_ty: Type<TypeName>,
-        input_elem_ty: Type<TypeName>,
-        init_nid: NodeId,
-        captures: Vec<NodeId>,
-    ) -> NodeId {
-        let mut operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![input_array_nid, init_nid];
-        operands.extend(captures.into_iter());
-        let span = self.span();
-        graph_ops::emit_pending_soac(
-            &mut self.graph,
-            self.current_block,
-            PendingSoac::Reduce {
-                func,
-                input_array_type: input_array_ty,
-                input_elem_type: input_elem_ty.clone(),
-            },
-            operands,
-            input_elem_ty,
-            &mut self.next_effect,
-            span,
-        )
-    }
-
-    /// Emit a `PendingSoac::Scan { destination: OutputView }`. Operand layout
-    /// matches the post-`rewrite_map_scan_to_into` shape:
-    /// `[input_array, init, ...captures, output_view]`. Result is unit.
-    pub fn emit_pending_scan_into(
+    /// Emit a `PendingSoac::Screma { 0 maps, 1 Scan acc, OutputView }` —
+    /// the consolidated shape used by `synthesize_phase2_scan` for the
+    /// sequential block-sum scan. Operand layout:
+    /// `[input_array, init, ...captures, output_view]`. Result is a
+    /// 1-tuple of the output_view's type (Screma's expansion requires a
+    /// tuple result).
+    pub fn emit_pending_screma_scan_into(
         &mut self,
         func: String,
         input_array_nid: NodeId,
@@ -199,35 +169,48 @@ impl EntryBuilder {
         init_nid: NodeId,
         captures: Vec<NodeId>,
         output_view_nid: NodeId,
+        output_view_ty: Type<TypeName>,
     ) -> NodeId {
+        let capture_count = captures.len();
         let mut operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![input_array_nid, init_nid];
         operands.extend(captures.into_iter());
         operands.push(output_view_nid);
-        let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
+        let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![output_view_ty]);
         let span = self.span();
         graph_ops::emit_pending_soac(
             &mut self.graph,
             self.current_block,
-            PendingSoac::Scan {
-                // A serial into-scan (e.g. phase 2's block-sum scan) is never
-                // re-parallelized, so its element-step and pure combiner are
-                // the same function.
-                reduce_func: func.clone(),
-                func,
-                input_array_type: input_array_ty,
-                input_elem_type: input_elem_ty,
-                destination: SoacDestination::OutputView,
+            PendingSoac::Screma {
+                map_funcs: vec![],
+                accumulators: vec![super::types::PendingScremaAccumulator {
+                    kind: crate::tlc::ScremaAccumulator::Scan,
+                    // A serial into-scan is never re-parallelized, so
+                    // step_func and reduce_op_func are the same.
+                    step_func: func.clone(),
+                    reduce_op_func: func,
+                    step_capture_count: capture_count,
+                    reduce_op_capture_count: 0,
+                }],
+                input_array_types: vec![input_array_ty],
+                input_elem_types: vec![input_elem_ty],
+                map_output_elem_types: vec![],
+                map_capture_counts: vec![],
+                map_destinations: vec![],
+                acc_destinations: vec![SoacDestination::OutputView],
             },
             operands,
-            unit_ty,
+            tuple_ty,
             &mut self.next_effect,
             span,
         )
     }
 
-    /// Emit a single-input `PendingSoac::Map { destination: OutputView }`.
-    /// Operand layout: `[input_array, ...captures, output_view]`. Result is unit.
-    pub fn emit_pending_map_into(
+    /// Emit a `PendingSoac::Screma { 1 map (OutputView), 0 accs }` — the
+    /// consolidated shape used by `synthesize_phase3_scan` for the
+    /// chunked apply-offsets pass. Operand layout:
+    /// `[input_array, ...captures, output_view]`. Result is a 1-tuple
+    /// of the output_view's type.
+    pub fn emit_pending_screma_map_into(
         &mut self,
         func: String,
         input_array_nid: NodeId,
@@ -236,24 +219,29 @@ impl EntryBuilder {
         output_elem_ty: Type<TypeName>,
         captures: Vec<NodeId>,
         output_view_nid: NodeId,
+        output_view_ty: Type<TypeName>,
     ) -> NodeId {
+        let capture_count = captures.len();
         let mut operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![input_array_nid];
         operands.extend(captures.into_iter());
         operands.push(output_view_nid);
-        let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
+        let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![output_view_ty]);
         let span = self.span();
         graph_ops::emit_pending_soac(
             &mut self.graph,
             self.current_block,
-            PendingSoac::Map {
-                func,
+            PendingSoac::Screma {
+                map_funcs: vec![func],
+                accumulators: vec![],
                 input_array_types: vec![input_array_ty],
                 input_elem_types: vec![input_elem_ty],
-                output_elem_type: output_elem_ty,
-                destination: SoacDestination::OutputView,
+                map_output_elem_types: vec![output_elem_ty],
+                map_capture_counts: vec![capture_count],
+                map_destinations: vec![SoacDestination::OutputView],
+                acc_destinations: vec![],
             },
             operands,
-            unit_ty,
+            tuple_ty,
             &mut self.next_effect,
             span,
         )

@@ -18,7 +18,7 @@ use super::program::EgirInner;
 use crate::ast::TypeName;
 use crate::ssa::types::{ControlHeader, InstKind, ValueRef};
 use crate::types::TypeExt;
-use crate::types::{is_array_variant_composite, is_array_variant_view, is_virtual_array};
+use crate::types::{is_array_variant_view, is_virtual_array};
 
 use super::types::{
     EGraph, ENode, NodeId, PendingSoac, PureOp, SideEffect, SideEffectKind, SkeletonTerminator,
@@ -26,28 +26,17 @@ use super::types::{
 };
 
 /// Run `run_one_body` on every function and entry point in the program.
-///
-/// `unroll_maps`: see `run_one_body`.
-pub fn run(inner: &mut EgirInner, unroll_maps: bool) {
+pub fn run(inner: &mut EgirInner) {
     for f in &mut inner.functions {
-        run_one_body(&mut f.graph, &mut f.control_headers, unroll_maps);
+        run_one_body(&mut f.graph, &mut f.control_headers);
     }
     for e in &mut inner.entry_points {
-        run_one_body(&mut e.graph, &mut e.control_headers, unroll_maps);
+        run_one_body(&mut e.graph, &mut e.control_headers);
     }
 }
 
 /// Expand every `SideEffectKind::Pending(PendingSoac::...)` in the skeleton.
-///
-/// `unroll_maps`: when true, Map over statically-sized arrays up to 16
-/// elements is unrolled into straight-line code. Both current backends
-/// (SPIR-V, WGSL) pass `true`; the knob exists so a future textual
-/// backend that prefers loops over unrolled blocks can opt out.
-pub fn run_one_body(
-    graph: &mut EGraph,
-    control_headers: &mut HashMap<BlockId, ControlHeader>,
-    unroll_maps: bool,
-) {
+pub fn run_one_body(graph: &mut EGraph, control_headers: &mut HashMap<BlockId, ControlHeader>) {
     // Collect (block, index) of every handleable Soac in a stable order.
     // Process back-to-front within each block so earlier indices stay valid.
     let mut targets: Vec<(BlockId, usize)> = Vec::new();
@@ -64,7 +53,7 @@ pub fn run_one_body(
 
     let mut next_effect = next_effect_token(graph);
     for (bid, idx) in targets {
-        expand_one(graph, control_headers, bid, idx, &mut next_effect, unroll_maps);
+        expand_one(graph, control_headers, bid, idx, &mut next_effect);
     }
     let _ = next_effect; // silence unused when no view-array reductions
 }
@@ -78,30 +67,7 @@ fn is_handleable_soac(kind: &SideEffectKind) -> bool {
         return false;
     };
     match soac {
-        PendingSoac::Reduce { input_array_type, .. } => is_plain_array_source(input_array_type),
-        PendingSoac::Redomap {
-            input_array_types, ..
-        } => input_array_types.iter().all(is_plain_array_source),
         PendingSoac::Screma {
-            input_array_types, ..
-        } => input_array_types.iter().all(is_plain_array_source),
-        PendingSoac::Scan {
-            input_array_type,
-            destination,
-            ..
-        } => match destination {
-            // Fresh allocates a composite output via array_with; only
-            // composite inputs work for the read path today.
-            SoacDestination::Fresh => is_plain_composite(input_array_type),
-            // OutputView writes through the bound view; input may be
-            // any plain array source (composite, view, or SoA tuple).
-            SoacDestination::OutputView => is_plain_array_source(input_array_type),
-            // InputBuffer: mutate the input in place. Same source-shape
-            // rule as OutputView — the input array doubles as the
-            // destination buffer.
-            SoacDestination::InputBuffer => is_plain_array_source(input_array_type),
-        },
-        PendingSoac::Map {
             input_array_types, ..
         } => input_array_types.iter().all(is_plain_array_source),
         PendingSoac::Filter { input_array_type, .. } => is_plain_array_source(input_array_type),
@@ -124,23 +90,6 @@ fn is_handleable_soac(kind: &SideEffectKind) -> bool {
 /// `i32`), so the read must follow the array type, not the accumulator.
 /// Falls back to `acc_elem` when the array type has no extractable element
 /// (e.g. a SoA-tuple source, handled separately).
-fn input_read_elem(arr_ty: &Type<TypeName>, acc_elem: &Type<TypeName>) -> Type<TypeName> {
-    match crate::types::array_elem(arr_ty) {
-        Some(e) => crate::types::strip_unique(e),
-        None => acc_elem.clone(),
-    }
-}
-
-fn is_plain_composite(arr_ty: &Type<TypeName>) -> bool {
-    // Rank-1 invariant: SOAC expansion only handles single-dim arrays.
-    // Rank-1 array = [elem, variant, size, region] (4 args).
-    match arr_ty {
-        Type::Constructed(TypeName::Array, args) if args.len() == 4 => {
-            is_array_variant_composite(&args[1]) && !is_virtual_array(arr_ty)
-        }
-        _ => false,
-    }
-}
 
 /// Input-array shape handled today: rank-1 composite/view/virtual
 /// arrays, or SoA tuples `([n]A, [n]B, ...)` (produced by `tlc::soa`)
@@ -214,93 +163,9 @@ fn expand_one(
     bid: BlockId,
     idx: usize,
     next_effect: &mut u32,
-    unroll_maps: bool,
 ) {
     let se = graph.skeleton.blocks[bid].side_effects.remove(idx);
     match &se.kind {
-        SideEffectKind::Pending(PendingSoac::Reduce {
-            func,
-            input_array_type,
-            input_elem_type,
-            ..
-        }) => {
-            let func = func.clone();
-            let arr_ty = input_array_type.clone();
-            // The read element follows the buffer's type, not the accumulator
-            // (they differ for a map-fused reduce, e.g. a fused scan's chunk
-            // total over a `vec4f32` input accumulating `i32`).
-            let read_elem = input_read_elem(&arr_ty, input_elem_type);
-
-            // Decode operands: [arr, init, ...captures].
-            let arr_nid = se.operand_nodes[0];
-            let init_nid = se.operand_nodes[1];
-            let captures: Vec<NodeId> = se.operand_nodes[2..].to_vec();
-            let result_nid = se.result.expect("Reduce has a result");
-            let acc_ty = graph.types[&result_nid].clone();
-
-            build_accumulator_loop(
-                graph,
-                control_headers,
-                bid,
-                idx,
-                AccumulatorLoop {
-                    len_input: (arr_nid, arr_ty.clone()),
-                    read_inputs: vec![(arr_nid, arr_ty, read_elem)],
-                    init_acc: init_nid,
-                    acc_ty,
-                    result_node: result_nid,
-                    func,
-                    captures,
-                },
-                next_effect,
-            );
-        }
-        SideEffectKind::Pending(PendingSoac::Redomap {
-            func,
-            input_array_types,
-            input_elem_types,
-            ..
-        }) => {
-            let func = func.clone();
-            let arr_tys = input_array_types.clone();
-            let elem_tys = input_elem_types.clone();
-
-            // Operand layout: [input_0, input_1, ..., init, ...captures, ...reduce_captures]
-            let n_inputs = arr_tys.len();
-            let input_nids: Vec<NodeId> = se.operand_nodes[..n_inputs].to_vec();
-            let init_nid = se.operand_nodes[n_inputs];
-            // The remaining operands (captures + reduce_captures) all get
-            // passed to the per-iteration `func` — the lowering doesn't call
-            // `reduce_func` (that's only used for parallel phase-2 reductions,
-            // which the SSA lowering also skips when expanding a sequential loop).
-            let captures: Vec<NodeId> = se.operand_nodes[n_inputs + 1..].to_vec();
-            let result_nid = se.result.expect("Redomap has a result");
-            let acc_ty = graph.types[&result_nid].clone();
-
-            let read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)> = input_nids
-                .iter()
-                .zip(arr_tys.iter().zip(elem_tys.iter()))
-                .map(|(n, (a, e))| (*n, a.clone(), e.clone()))
-                .collect();
-            let len_input = (input_nids[0], arr_tys[0].clone());
-
-            build_accumulator_loop(
-                graph,
-                control_headers,
-                bid,
-                idx,
-                AccumulatorLoop {
-                    len_input,
-                    read_inputs,
-                    init_acc: init_nid,
-                    acc_ty,
-                    result_node: result_nid,
-                    func,
-                    captures,
-                },
-                next_effect,
-            );
-        }
         SideEffectKind::Pending(PendingSoac::Screma {
             map_funcs,
             accumulators,
@@ -351,9 +216,13 @@ fn expand_one(
 
             let mut view_cursor = cursor;
             let mut map_output_views = Vec::with_capacity(n_maps);
-            for dest in &map_destinations {
+            let mut map_input_buffer_inits = Vec::with_capacity(n_maps);
+            for (map_idx, dest) in map_destinations.iter().enumerate() {
                 match dest {
-                    SoacDestination::Fresh => map_output_views.push(None),
+                    SoacDestination::Fresh => {
+                        map_output_views.push(None);
+                        map_input_buffer_inits.push(None);
+                    }
                     SoacDestination::OutputView => {
                         let view = *se
                             .operand_nodes
@@ -361,16 +230,28 @@ fn expand_one(
                             .expect("Screma[OutputView] has mapped output_view operand");
                         view_cursor += 1;
                         map_output_views.push(Some(view));
+                        map_input_buffer_inits.push(None);
                     }
                     SoacDestination::InputBuffer => {
-                        panic!("Screma[InputBuffer] is not a supported map destination")
+                        // Consuming map: loop carries `inputs[map_idx]`
+                        // (or `inputs[0]` for single-input Screma) as the
+                        // initial output, so the result aliases the input
+                        // buffer in place (same shape as
+                        // `PendingSoac::Map[InputBuffer]`).
+                        let carry_from = input_nids.get(map_idx).copied().unwrap_or(input_nids[0]);
+                        map_output_views.push(None);
+                        map_input_buffer_inits.push(Some(carry_from));
                     }
                 }
             }
             let mut acc_output_views = Vec::with_capacity(n_accs);
+            let mut acc_input_buffer_inits = Vec::with_capacity(n_accs);
             for dest in &acc_destinations {
                 match dest {
-                    SoacDestination::Fresh => acc_output_views.push(None),
+                    SoacDestination::Fresh => {
+                        acc_output_views.push(None);
+                        acc_input_buffer_inits.push(None);
+                    }
                     SoacDestination::OutputView => {
                         let view = *se
                             .operand_nodes
@@ -378,9 +259,14 @@ fn expand_one(
                             .expect("Screma[OutputView] has accumulator output_view operand");
                         view_cursor += 1;
                         acc_output_views.push(Some(view));
+                        acc_input_buffer_inits.push(None);
                     }
                     SoacDestination::InputBuffer => {
-                        panic!("Screma[InputBuffer] is not a supported accumulator destination")
+                        // Consuming Scan accumulator: writes back to the
+                        // input buffer in-place. Loop carries inputs[0]
+                        // as the initial scan-output value.
+                        acc_output_views.push(None);
+                        acc_input_buffer_inits.push(Some(input_nids[0]));
                     }
                 }
             }
@@ -422,6 +308,11 @@ fn expand_one(
             for map_idx in 0..n_maps {
                 let init = if let Some(view_nid) = map_output_views[map_idx] {
                     view_nid
+                } else if let Some(input_nid) = map_input_buffer_inits[map_idx] {
+                    // InputBuffer: carry the input array as the initial
+                    // output; the loop's `emit_write_element` will fold
+                    // updates into it in place.
+                    input_nid
                 } else {
                     graph.intern_pure(
                         PureOp::Intrinsic {
@@ -434,6 +325,9 @@ fn expand_one(
                 };
                 let carried_ty = map_output_views[map_idx]
                     .and_then(|view_nid| graph.types.get(&view_nid).cloned())
+                    .or_else(|| {
+                        map_input_buffer_inits[map_idx].and_then(|nid| graph.types.get(&nid).cloned())
+                    })
                     .unwrap_or_else(|| map_result_tys[map_idx].clone());
                 map_carried_indices.push(carried.len());
                 result_indices.push(carried.len());
@@ -452,6 +346,11 @@ fn expand_one(
                     crate::tlc::ScremaAccumulator::Scan => {
                         let init_scan_out = if let Some(view_nid) = acc_output_views[acc_idx] {
                             view_nid
+                        } else if let Some(input_nid) = acc_input_buffer_inits[acc_idx] {
+                            // Consuming Scan: carry the input array as
+                            // the initial scan output; folds updates in
+                            // place via emit_write_element.
+                            input_nid
                         } else {
                             graph.intern_pure(
                                 PureOp::Intrinsic {
@@ -464,6 +363,10 @@ fn expand_one(
                         };
                         let scan_ty = acc_output_views[acc_idx]
                             .and_then(|view_nid| graph.types.get(&view_nid).cloned())
+                            .or_else(|| {
+                                acc_input_buffer_inits[acc_idx]
+                                    .and_then(|nid| graph.types.get(&nid).cloned())
+                            })
                             .unwrap_or_else(|| acc_result_tys[acc_idx].clone());
                         acc_scan_carried_indices.push(Some(carried.len()));
                         result_indices.push(carried.len());
@@ -600,314 +503,6 @@ fn expand_one(
                 },
             );
         }
-        SideEffectKind::Pending(PendingSoac::Map {
-            func,
-            input_array_types,
-            input_elem_types,
-            output_elem_type,
-            destination,
-        }) => {
-            let func = func.clone();
-            let arr_tys = input_array_types.clone();
-            let elem_tys = input_elem_types.clone();
-            let out_elem_ty = output_elem_type.clone();
-            let destination = *destination;
-
-            let n_inputs = arr_tys.len();
-            let input_nids: Vec<NodeId> = se.operand_nodes[..n_inputs].to_vec();
-            let result_nid = se.result.expect("Map has a result");
-
-            let read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)> = input_nids
-                .iter()
-                .zip(arr_tys.iter().zip(elem_tys.iter()))
-                .map(|(n, (a, e))| (*n, a.clone(), e.clone()))
-                .collect();
-            let len_input = (input_nids[0], arr_tys[0].clone());
-
-            match destination {
-                SoacDestination::Fresh => {
-                    // Operand layout: [input_0, ..., input_{n-1}, ...captures].
-                    let captures: Vec<NodeId> = se.operand_nodes[n_inputs..].to_vec();
-                    let out_arr_ty = graph.types[&result_nid].clone();
-
-                    let uninit_id = catalog().known().uninit;
-                    let init_out_nid = graph.intern_pure(
-                        PureOp::Intrinsic {
-                            id: uninit_id,
-                            overload_idx: 0,
-                        },
-                        smallvec![],
-                        out_arr_ty.clone(),
-                    );
-                    let carried = vec![(out_arr_ty.clone(), init_out_nid)];
-                    let result = ResultBinding::Carried {
-                        result_node: result_nid,
-                        idx: 0,
-                    };
-                    // Don't allow unroll when output or any input is a SoA tuple:
-                    // `_w_intrinsic_array_with` targets composite arrays only.
-                    let allow_unroll = unroll_maps
-                        && as_soa_tuple(&out_arr_ty).is_none()
-                        && read_inputs.iter().all(|(_, a, _)| as_soa_tuple(a).is_none());
-                    expand_loop(
-                        graph,
-                        control_headers,
-                        bid,
-                        idx,
-                        &len_input,
-                        &carried,
-                        &result,
-                        next_effect,
-                        allow_unroll,
-                        |graph, next_effect, body_bid, idx_nid, carried_nids| {
-                            let out_nid = carried_nids[0];
-                            let mut call_operands: SmallVec<[NodeId; 4]> = SmallVec::new();
-                            for (arr, arr_ty, elem_ty) in &read_inputs {
-                                let elem_nid = emit_read_element(
-                                    graph,
-                                    body_bid,
-                                    *arr,
-                                    idx_nid,
-                                    arr_ty,
-                                    elem_ty,
-                                    next_effect,
-                                );
-                                call_operands.push(elem_nid);
-                            }
-                            call_operands.extend(captures.iter().copied());
-                            let y_nid = graph.intern_pure(
-                                PureOp::Call(func.clone()),
-                                call_operands,
-                                out_elem_ty.clone(),
-                            );
-                            // Loop-carried phi kills the previous iteration's
-                            // value on the back-edge, so the in-place variant
-                            // is always safe for SOAC-generated output arrays.
-                            // For SoA-tuple outputs, `emit_write_element` splits
-                            // the update into per-component ArrayWith calls
-                            // plus a Tuple repack.
-                            let new_out = emit_write_element(
-                                graph,
-                                out_nid,
-                                idx_nid,
-                                y_nid,
-                                &out_arr_ty,
-                                &out_elem_ty,
-                            );
-                            vec![new_out]
-                        },
-                    );
-                }
-                SoacDestination::OutputView => {
-                    // Operand layout: [input_0, ..., input_{n-1}, ...captures, output_view].
-                    let view_nid =
-                        *se.operand_nodes.last().expect("Map[OutputView] has output_view operand");
-                    let captures: Vec<NodeId> =
-                        se.operand_nodes[n_inputs..se.operand_nodes.len() - 1].to_vec();
-
-                    build_map_into_loop(
-                        graph,
-                        control_headers,
-                        bid,
-                        idx,
-                        MapIntoLoop {
-                            len_input,
-                            read_inputs,
-                            view_nid,
-                            out_elem_ty,
-                            result_node: result_nid,
-                            func,
-                            captures,
-                        },
-                        next_effect,
-                    );
-                }
-                SoacDestination::InputBuffer => {
-                    // Operand layout: [input_0, ..., input_{n-1}, ...captures] —
-                    // identical to Fresh. The difference is the loop carries
-                    // `inputs[0]` instead of a fresh uninit allocation, so
-                    // the result aliases the input buffer.
-                    let captures: Vec<NodeId> = se.operand_nodes[n_inputs..].to_vec();
-                    let buf_nid = input_nids[0];
-                    let buf_arr_ty = arr_tys[0].clone();
-
-                    let carried = vec![(buf_arr_ty.clone(), buf_nid)];
-                    let result = ResultBinding::Carried {
-                        result_node: result_nid,
-                        idx: 0,
-                    };
-                    let allow_unroll = unroll_maps
-                        && as_soa_tuple(&buf_arr_ty).is_none()
-                        && read_inputs.iter().all(|(_, a, _)| as_soa_tuple(a).is_none());
-                    expand_loop(
-                        graph,
-                        control_headers,
-                        bid,
-                        idx,
-                        &len_input,
-                        &carried,
-                        &result,
-                        next_effect,
-                        allow_unroll,
-                        |graph, next_effect, body_bid, idx_nid, carried_nids| {
-                            let cur_buf = carried_nids[0];
-                            let mut call_operands: SmallVec<[NodeId; 4]> = SmallVec::new();
-                            for (arr, arr_ty, elem_ty) in &read_inputs {
-                                let elem_nid = emit_read_element(
-                                    graph,
-                                    body_bid,
-                                    *arr,
-                                    idx_nid,
-                                    arr_ty,
-                                    elem_ty,
-                                    next_effect,
-                                );
-                                call_operands.push(elem_nid);
-                            }
-                            call_operands.extend(captures.iter().copied());
-                            let y_nid = graph.intern_pure(
-                                PureOp::Call(func.clone()),
-                                call_operands,
-                                out_elem_ty.clone(),
-                            );
-                            let new_buf = emit_write_element(
-                                graph,
-                                cur_buf,
-                                idx_nid,
-                                y_nid,
-                                &buf_arr_ty,
-                                &out_elem_ty,
-                            );
-                            vec![new_buf]
-                        },
-                    );
-                }
-            }
-        }
-        SideEffectKind::Pending(PendingSoac::Scan {
-            func,
-            input_array_type,
-            input_elem_type,
-            destination,
-            // Serial expansion reads raw inputs via `func`; the pure combiner
-            // is only needed by the parallel phase 2 / phase 3.
-            reduce_func: _,
-        }) => {
-            let func = func.clone();
-            let arr_ty = input_array_type.clone();
-            // `elem_ty` is the accumulator/output element; the input read uses
-            // the buffer's element type (differs for a map-fused scan).
-            let elem_ty = input_elem_type.clone();
-            let read_elem = input_read_elem(&arr_ty, &elem_ty);
-            let destination = *destination;
-
-            let arr_nid = se.operand_nodes[0];
-            let init_nid = se.operand_nodes[1];
-            let result_nid = se.result.expect("Scan has a result");
-
-            match destination {
-                SoacDestination::Fresh => {
-                    // Operand layout: [input, init, ...captures].
-                    let captures: Vec<NodeId> = se.operand_nodes[2..].to_vec();
-                    // Result type lives on the result node — it's the
-                    // output array (allocated fresh inside the loop).
-                    let out_arr_ty = graph.types[&result_nid].clone();
-                    build_scan_loop(
-                        graph,
-                        control_headers,
-                        bid,
-                        idx,
-                        ScanLoop {
-                            len_input: (arr_nid, arr_ty.clone()),
-                            input: (arr_nid, arr_ty, read_elem.clone()),
-                            init_acc: init_nid,
-                            acc_ty: elem_ty,
-                            out_arr_ty,
-                            result_node: result_nid,
-                            func,
-                            captures,
-                        },
-                        next_effect,
-                    );
-                }
-                SoacDestination::OutputView => {
-                    // Operand layout: [input, init, ...captures, output_view].
-                    let view_nid =
-                        *se.operand_nodes.last().expect("Scan[OutputView] has output_view operand");
-                    let captures: Vec<NodeId> = se.operand_nodes[2..se.operand_nodes.len() - 1].to_vec();
-                    build_scan_into_loop(
-                        graph,
-                        control_headers,
-                        bid,
-                        idx,
-                        ScanIntoLoop {
-                            len_input: (arr_nid, arr_ty.clone()),
-                            input: (arr_nid, arr_ty, read_elem.clone()),
-                            init_acc: init_nid,
-                            acc_ty: elem_ty,
-                            view_nid,
-                            result_node: result_nid,
-                            func,
-                            captures,
-                        },
-                        next_effect,
-                    );
-                }
-                SoacDestination::InputBuffer => {
-                    // Operand layout: [input, init, ...captures] —
-                    // identical to Fresh. The difference is the loop
-                    // carries `input` (instead of a fresh allocation)
-                    // alongside the accumulator, and the SOAC result
-                    // aliases the input buffer at the end.
-                    let captures: Vec<NodeId> = se.operand_nodes[2..].to_vec();
-                    let buf_nid = arr_nid;
-                    let buf_arr_ty = arr_ty.clone();
-                    let acc_ty = elem_ty.clone();
-                    let len_input = (arr_nid, buf_arr_ty.clone());
-
-                    let carried = vec![(buf_arr_ty.clone(), buf_nid), (acc_ty.clone(), init_nid)];
-                    let result = ResultBinding::Carried {
-                        result_node: result_nid,
-                        idx: 0,
-                    };
-                    let allow_unroll = unroll_maps && as_soa_tuple(&buf_arr_ty).is_none();
-                    expand_loop(
-                        graph,
-                        control_headers,
-                        bid,
-                        idx,
-                        &len_input,
-                        &carried,
-                        &result,
-                        next_effect,
-                        allow_unroll,
-                        |graph, next_effect, body_bid, idx_nid, carried_nids| {
-                            let cur_buf = carried_nids[0];
-                            let acc = carried_nids[1];
-                            let elem_nid = emit_read_element(
-                                graph,
-                                body_bid,
-                                cur_buf,
-                                idx_nid,
-                                &buf_arr_ty,
-                                &acc_ty,
-                                next_effect,
-                            );
-                            let mut call_operands: SmallVec<[NodeId; 4]> = smallvec![acc, elem_nid];
-                            call_operands.extend(captures.iter().copied());
-                            let new_acc = graph.intern_pure(
-                                PureOp::Call(func.clone()),
-                                call_operands,
-                                acc_ty.clone(),
-                            );
-                            let new_buf =
-                                emit_write_element(graph, cur_buf, idx_nid, new_acc, &buf_arr_ty, &acc_ty);
-                            vec![new_buf, new_acc]
-                        },
-                    );
-                }
-            }
-        }
         SideEffectKind::Pending(PendingSoac::Filter {
             pred_func,
             input_array_type,
@@ -994,49 +589,10 @@ fn expand_one(
             );
         }
         SideEffectKind::Pending(PendingSoac::Parallel { serial }) => {
-            // Peel the wrapper. Today only the OutputView Map case is
-            // wired up; other parallel strategies are skipped by the
-            // egir::parallelize pass for now.
+            // Peel the wrapper. After Phase 4 consolidation only the
+            // pointwise OutputView Screma case is wired up; the legacy
+            // Map[OutputView] wrap is no longer emitted.
             match (**serial).clone() {
-                PendingSoac::Map {
-                    func,
-                    input_array_types,
-                    input_elem_types,
-                    output_elem_type,
-                    destination: SoacDestination::OutputView,
-                } => {
-                    let n_inputs = input_array_types.len();
-                    let input_nids: Vec<NodeId> = se.operand_nodes[..n_inputs].to_vec();
-                    let view_nid =
-                        *se.operand_nodes.last().expect("Parallel Map[OutputView] has output_view operand");
-                    let captures: Vec<NodeId> =
-                        se.operand_nodes[n_inputs..se.operand_nodes.len() - 1].to_vec();
-                    let result_nid = se.result.expect("Map has a result");
-
-                    let read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)> = input_nids
-                        .iter()
-                        .zip(input_array_types.iter().zip(input_elem_types.iter()))
-                        .map(|(n, (a, e))| (*n, a.clone(), e.clone()))
-                        .collect();
-                    let len_input = (input_nids[0], input_array_types[0].clone());
-
-                    build_parallel_map(
-                        graph,
-                        control_headers,
-                        bid,
-                        idx,
-                        MapIntoLoop {
-                            len_input,
-                            read_inputs,
-                            view_nid,
-                            out_elem_ty: output_elem_type,
-                            result_node: result_nid,
-                            func,
-                            captures,
-                        },
-                        next_effect,
-                    );
-                }
                 PendingSoac::Screma {
                     map_funcs,
                     accumulators,
@@ -1239,17 +795,8 @@ where
         debug_assert_eq!(carried_nids.len(), carried.len());
     }
 
-    // Rebind the original SOAC result NodeId. For `Carried`, alias to the
-    // final carried value by cloning its ENode into `result_node`'s slot.
+    // Rebind the original SOAC result NodeId from the carried tuple.
     match result {
-        ResultBinding::Carried { result_node, idx } => {
-            let final_nid = carried_nids[*idx];
-            if final_nid != *result_node {
-                let final_enode = graph.nodes[final_nid].clone();
-                graph.nodes[*result_node] = final_enode;
-                graph.types.insert(*result_node, carried[*idx].0.clone());
-            }
-        }
         ResultBinding::TupleFromCarried {
             result_node,
             tuple_ty,
@@ -1275,149 +822,9 @@ where
 /// `Scan[OutputView]`: `new_acc = func(acc, elem, ...caps); view[i] = new_acc`
 /// per iteration. One loop-carried value (scalar accumulator). Writes are
 /// effectful so the SOAC's `result_node` is bound to a dummy.
-struct ScanIntoLoop {
-    len_input: (NodeId, Type<TypeName>),
-    input: (NodeId, Type<TypeName>, Type<TypeName>),
-    init_acc: NodeId,
-    acc_ty: Type<TypeName>,
-    view_nid: NodeId,
-    result_node: NodeId,
-    func: String,
-    captures: Vec<NodeId>,
-}
-
-fn build_scan_into_loop(
-    graph: &mut EGraph,
-    control_headers: &mut HashMap<BlockId, ControlHeader>,
-    bid: BlockId,
-    idx_in_block: usize,
-    spec: ScanIntoLoop,
-    next_effect: &mut u32,
-) {
-    let handles = build_loop_skeleton(
-        graph,
-        control_headers,
-        bid,
-        idx_in_block,
-        LoopSkeletonSpec {
-            carried: vec![(spec.acc_ty.clone(), spec.init_acc)],
-            // Result is dummy — writes are effectful.
-            result: ResultBinding::DummyBool {
-                result_node: spec.result_node,
-            },
-            len_input: spec.len_input,
-        },
-    );
-
-    // The result is dummy but scalar acc is still threaded; override the
-    // header's else-branch to carry acc (build_loop_skeleton defaults to
-    // empty for DummyBool, which is correct when there are no carried values,
-    // but here we DO have carried — DummyBool just says "don't pass to after").
-    // The after block has no params in the dummy case; we drop the acc at exit.
-
-    let acc_nid = handles.carried[0];
-    let idx_nid = handles.idx_nid;
-
-    let (arr, arr_ty, elem_ty) = spec.input;
-    let elem_nid = emit_read_element(graph, handles.body, arr, idx_nid, &arr_ty, &elem_ty, next_effect);
-
-    let mut call_operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![acc_nid, elem_nid];
-    call_operands.extend(spec.captures.iter().copied());
-    let new_acc_nid = graph.intern_pure(PureOp::Call(spec.func), call_operands, spec.acc_ty.clone());
-
-    // view[i] = new_acc: ViewIndex (pure, produces a PlaceId) + Store (effectful).
-    let ptr_nid = graph.intern_pure(PureOp::ViewIndex, smallvec![spec.view_nid, idx_nid], spec.acc_ty);
-    let eff_in = alloc_effect(next_effect);
-    let eff_out = alloc_effect(next_effect);
-    graph.skeleton.blocks[handles.body].side_effects.push(SideEffect {
-        kind: SideEffectKind::Inst(InstKind::Store {
-            place: Default::default(),
-            value: ValueRef::Ssa(Default::default()),
-        }),
-        operand_nodes: smallvec![ptr_nid, new_acc_nid],
-        result: None,
-        effects: Some((eff_in, eff_out)),
-        span: None,
-    });
-
-    let next_i_nid = increment(graph, idx_nid);
-    graph.skeleton.blocks[handles.body].term = SkeletonTerminator::Branch {
-        target: handles.header,
-        args: vec![new_acc_nid, next_i_nid],
-    };
-}
 
 /// MapInto: `y = func(elem1, ..., ...caps); view[i] = y` per iteration. No
 /// loop-carried state (writes are effectful); the SOAC "result" is a dummy.
-struct MapIntoLoop {
-    len_input: (NodeId, Type<TypeName>),
-    read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)>,
-    /// The storage view to write into.
-    view_nid: NodeId,
-    out_elem_ty: Type<TypeName>,
-    result_node: NodeId,
-    func: String,
-    captures: Vec<NodeId>,
-}
-
-fn build_map_into_loop(
-    graph: &mut EGraph,
-    control_headers: &mut HashMap<BlockId, ControlHeader>,
-    bid: BlockId,
-    idx_in_block: usize,
-    spec: MapIntoLoop,
-    next_effect: &mut u32,
-) {
-    let handles = build_loop_skeleton(
-        graph,
-        control_headers,
-        bid,
-        idx_in_block,
-        LoopSkeletonSpec {
-            carried: vec![],
-            result: ResultBinding::DummyBool {
-                result_node: spec.result_node,
-            },
-            len_input: spec.len_input,
-        },
-    );
-
-    let idx_nid = handles.idx_nid;
-
-    // y = func(elem1, ..., ...caps)
-    let mut call_operands: smallvec::SmallVec<[NodeId; 4]> = SmallVec::new();
-    for (arr, arr_ty, elem_ty) in &spec.read_inputs {
-        let elem_nid = emit_read_element(graph, handles.body, *arr, idx_nid, arr_ty, elem_ty, next_effect);
-        call_operands.push(elem_nid);
-    }
-    call_operands.extend(spec.captures.iter().copied());
-    let y_nid = graph.intern_pure(PureOp::Call(spec.func), call_operands, spec.out_elem_ty.clone());
-
-    // view[i] = y: ViewIndex (pure, produces a PlaceId) + Store (effectful).
-    let ptr_nid = graph.intern_pure(
-        PureOp::ViewIndex,
-        smallvec![spec.view_nid, idx_nid],
-        spec.out_elem_ty,
-    );
-    let eff_in = alloc_effect(next_effect);
-    let eff_out = alloc_effect(next_effect);
-    graph.skeleton.blocks[handles.body].side_effects.push(SideEffect {
-        kind: SideEffectKind::Inst(InstKind::Store {
-            place: Default::default(),
-            value: ValueRef::Ssa(Default::default()),
-        }),
-        operand_nodes: smallvec![ptr_nid, y_nid],
-        result: None,
-        effects: Some((eff_in, eff_out)),
-        span: None,
-    });
-
-    let next_i_nid = increment(graph, idx_nid);
-    graph.skeleton.blocks[handles.body].term = SkeletonTerminator::Branch {
-        target: handles.header,
-        args: vec![next_i_nid],
-    };
-}
 
 /// Parallel `MapInto`: one lane per input element, guarded by
 /// `if tid < len then body else ()`. No loop, no phi — replaces the
@@ -1428,101 +835,6 @@ fn build_map_into_loop(
 /// emits inside its loop body:
 ///   read each input at `i`, call the lifted lambda with per-element
 ///   args + captures, write the result via the OutputView.
-fn build_parallel_map(
-    graph: &mut EGraph,
-    control_headers: &mut HashMap<BlockId, ControlHeader>,
-    bid: BlockId,
-    idx_in_block: usize,
-    spec: MapIntoLoop,
-    next_effect: &mut u32,
-) {
-    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
-    let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
-    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
-
-    // Split bid into preheader (= bid) + after (suffix + old terminator).
-    let after = graph.skeleton.create_block();
-    let suffix: Vec<SideEffect> = graph.skeleton.blocks[bid].side_effects.drain(idx_in_block..).collect();
-    let old_term = std::mem::replace(
-        &mut graph.skeleton.blocks[bid].term,
-        SkeletonTerminator::Unreachable,
-    );
-    graph.skeleton.blocks[after].side_effects = suffix;
-    graph.skeleton.blocks[after].term = old_term;
-    if let Some(header_meta) = control_headers.remove(&bid) {
-        control_headers.insert(after, header_meta);
-    }
-
-    // The SOAC's result is a dummy (effect-only OutputView destination),
-    // rebound to a `Bool(false)` constant — same convention as
-    // `build_map_into_loop`'s DummyBool ResultBinding.
-    graph.nodes[spec.result_node] = ENode::Constant(crate::ssa::types::ConstantValue::Bool(false));
-
-    let body = graph.skeleton.create_block();
-
-    // Preheader: compute tid, cast to i32, read length, build the guard.
-    let known = catalog().known();
-    let tid_nid = graph.intern_pure(
-        PureOp::Intrinsic {
-            id: known.thread_id,
-            overload_idx: 0,
-        },
-        smallvec![],
-        u32_ty,
-    );
-    // `i32.u32` is the per-type bitcast registered by per_type_conv.
-    let i32_from_u32 = catalog().lookup_by_any_name("i32.u32").expect("catalog has i32.u32 bitcast");
-    let i_nid = graph.intern_pure(
-        PureOp::Intrinsic {
-            id: i32_from_u32.id,
-            overload_idx: 0,
-        },
-        smallvec![tid_nid],
-        i32_ty.clone(),
-    );
-    let len_nid = emit_length(graph, spec.len_input.0, &spec.len_input.1, &i32_ty);
-    let cond_nid = graph.intern_pure(PureOp::BinOp("<".into()), smallvec![i_nid, len_nid], bool_ty);
-
-    graph.skeleton.blocks[bid].term = SkeletonTerminator::CondBranch {
-        cond: cond_nid,
-        then_target: body,
-        then_args: vec![],
-        else_target: after,
-        else_args: vec![],
-    };
-    control_headers.insert(bid, ControlHeader::Selection { merge: after });
-
-    // Body: emit per-input reads using `i`, call the lifted lambda,
-    // store via the bound output view.
-    let mut call_operands: smallvec::SmallVec<[NodeId; 4]> = SmallVec::new();
-    for (arr, arr_ty, elem_ty) in &spec.read_inputs {
-        let elem_nid = emit_read_element(graph, body, *arr, i_nid, arr_ty, elem_ty, next_effect);
-        call_operands.push(elem_nid);
-    }
-    call_operands.extend(spec.captures.iter().copied());
-    let y_nid = graph.intern_pure(PureOp::Call(spec.func), call_operands, spec.out_elem_ty.clone());
-    let ptr_nid = graph.intern_pure(
-        PureOp::ViewIndex,
-        smallvec![spec.view_nid, i_nid],
-        spec.out_elem_ty,
-    );
-    let eff_in = alloc_effect(next_effect);
-    let eff_out = alloc_effect(next_effect);
-    graph.skeleton.blocks[body].side_effects.push(SideEffect {
-        kind: SideEffectKind::Inst(InstKind::Store {
-            place: Default::default(),
-            value: ValueRef::Ssa(Default::default()),
-        }),
-        operand_nodes: smallvec![ptr_nid, y_nid],
-        result: None,
-        effects: Some((eff_in, eff_out)),
-        span: None,
-    });
-    graph.skeleton.blocks[body].term = SkeletonTerminator::Branch {
-        target: after,
-        args: vec![],
-    };
-}
 
 /// Parallel pointwise Screma: one lane reads the shared inputs once and writes
 /// every mapped output field to its corresponding output view.
@@ -1642,83 +954,6 @@ fn build_parallel_screma_maps(
 /// Scan: `new_acc = func(acc, elem, ...caps); out[i] = new_acc` per iteration.
 /// Two loop-carried values: the output array (built via `_w_intrinsic_array_with`)
 /// and the scalar accumulator.
-struct ScanLoop {
-    len_input: (NodeId, Type<TypeName>),
-    input: (NodeId, Type<TypeName>, Type<TypeName>),
-    init_acc: NodeId,
-    acc_ty: Type<TypeName>,
-    out_arr_ty: Type<TypeName>,
-    result_node: NodeId,
-    func: String,
-    captures: Vec<NodeId>,
-}
-
-fn build_scan_loop(
-    graph: &mut EGraph,
-    control_headers: &mut HashMap<BlockId, ControlHeader>,
-    bid: BlockId,
-    idx_in_block: usize,
-    spec: ScanLoop,
-    next_effect: &mut u32,
-) {
-    // Preheader initial for the output array: a pure `_w_intrinsic_uninit` call
-    // returning an array of the result type. The per-iteration array_with chain
-    // fills it. (The SPIR-V backend recognizes the pattern for in-place update.)
-    let uninit_id = catalog().known().uninit;
-    let init_out_nid = graph.intern_pure(
-        PureOp::Intrinsic {
-            id: uninit_id,
-            overload_idx: 0,
-        },
-        smallvec![],
-        spec.out_arr_ty.clone(),
-    );
-
-    let handles = build_loop_skeleton(
-        graph,
-        control_headers,
-        bid,
-        idx_in_block,
-        LoopSkeletonSpec {
-            carried: vec![
-                (spec.out_arr_ty.clone(), init_out_nid),
-                (spec.acc_ty.clone(), spec.init_acc),
-            ],
-            result: ResultBinding::Carried {
-                result_node: spec.result_node,
-                idx: 0,
-            }, // the output array is the result
-
-            len_input: spec.len_input,
-        },
-    );
-
-    let out_nid = handles.carried[0];
-    let acc_nid = handles.carried[1];
-    let idx_nid = handles.idx_nid;
-
-    // elem = read_element(input, i)
-    let (arr, arr_ty, elem_ty) = spec.input;
-    let elem_nid = emit_read_element(graph, handles.body, arr, idx_nid, &arr_ty, &elem_ty, next_effect);
-
-    // new_acc = func(acc, elem, ...caps)
-    let mut call_operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![acc_nid, elem_nid];
-    call_operands.extend(spec.captures.iter().copied());
-    let acc_ty = spec.acc_ty;
-    let new_acc_nid = graph.intern_pure(PureOp::Call(spec.func), call_operands, acc_ty.clone());
-
-    // out' = array_with_inplace(out, i, new_acc)
-    // Loop-carried phi kills the previous iteration's value on the back-edge,
-    // so in-place mutation is always safe here. For SoA-tuple outputs,
-    // `emit_write_element` splits into per-component ArrayWith + Tuple repack.
-    let new_out_nid = emit_write_element(graph, out_nid, idx_nid, new_acc_nid, &spec.out_arr_ty, &acc_ty);
-
-    let next_i_nid = increment(graph, idx_nid);
-    graph.skeleton.blocks[handles.body].term = SkeletonTerminator::Branch {
-        target: handles.header,
-        args: vec![new_out_nid, new_acc_nid, next_i_nid],
-    };
-}
 
 /// Filter: per iteration `keep = pred(elem, ...caps); buf' = array_with(buf, count, elem);
 /// count' = if keep then count+1 else count`. The buffer write is unconditional —
@@ -2239,74 +1474,6 @@ fn build_runtime_filter_loop(
 /// Description of an accumulator-only SOAC (Reduce, Redomap): loop over one or
 /// more input arrays, thread a scalar accumulator through a per-iteration call,
 /// and yield the final accumulator as the result. No output array.
-struct AccumulatorLoop {
-    /// The input whose length drives the loop. Usually `read_inputs[0]`.
-    len_input: (NodeId, Type<TypeName>),
-    /// Input arrays to read per iteration: (arr_nid, arr_ty, elem_ty).
-    read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)>,
-    /// Initial accumulator value; its NodeId flows into the header's acc param.
-    init_acc: NodeId,
-    /// Accumulator type.
-    acc_ty: Type<TypeName>,
-    /// Existing NodeId that consumers of this SOAC's result reference. Rebound
-    /// as the `after` block's single param.
-    result_node: NodeId,
-    /// Function called per iteration as `func(acc, elem1, [elem2, ...], ...captures)`.
-    func: String,
-    /// Captured values appended to the call's argument list.
-    captures: Vec<NodeId>,
-}
-
-fn build_accumulator_loop(
-    graph: &mut EGraph,
-    control_headers: &mut HashMap<BlockId, ControlHeader>,
-    bid: BlockId,
-    idx_in_block: usize,
-    spec: AccumulatorLoop,
-    next_effect: &mut u32,
-) {
-    // One loop-carried value: the scalar accumulator. Its exit value is the result.
-    let handles = build_loop_skeleton(
-        graph,
-        control_headers,
-        bid,
-        idx_in_block,
-        LoopSkeletonSpec {
-            carried: vec![(spec.acc_ty.clone(), spec.init_acc)],
-            result: ResultBinding::Carried {
-                result_node: spec.result_node,
-                idx: 0,
-            },
-
-            len_input: spec.len_input.clone(),
-        },
-    );
-
-    // --- Body: read each input, call func(acc, elems, caps), br header(new_acc, i+1). ---
-    let acc_nid = handles.carried[0];
-    let idx_nid = handles.idx_nid;
-    let mut call_operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![acc_nid];
-    for (arr_nid, arr_ty, elem_ty) in &spec.read_inputs {
-        let elem_nid = emit_read_element(
-            graph,
-            handles.body,
-            *arr_nid,
-            idx_nid,
-            arr_ty,
-            elem_ty,
-            next_effect,
-        );
-        call_operands.push(elem_nid);
-    }
-    call_operands.extend(spec.captures.iter().copied());
-    let new_acc_nid = graph.intern_pure(PureOp::Call(spec.func), call_operands, spec.acc_ty);
-
-    let next_i_nid = increment(graph, idx_nid);
-    graph.skeleton.blocks[handles.body].term = SkeletonTerminator::Branch {
-        target: handles.header,
-        args: vec![new_acc_nid, next_i_nid],
-    };
-}
 
 /// Common skeleton shared by every SOAC expansion: split the enclosing block
 /// at the SOAC's index, create header/body/after blocks, wire the preheader
@@ -2323,12 +1490,8 @@ struct LoopSkeletonSpec {
 
 #[derive(Clone)]
 enum ResultBinding {
-    /// Rebind `result_node` as `after`'s block param populated by
-    /// `carried[idx]` when the loop exits. Used for Reduce/Redomap/Scan/Map.
-    Carried {
-        result_node: NodeId,
-        idx: usize,
-    },
+    /// Rebind `result_node` as a tuple of carried values. Used by
+    /// Screma, which produces N maps + N accumulators into one tuple.
     TupleFromCarried {
         result_node: NodeId,
         tuple_ty: Type<TypeName>,
@@ -2389,13 +1552,6 @@ fn build_loop_skeleton(
     //     Consumers (if any) see a scalar false, matching the SSA pass's
     //     dummy-result convention for effect-only variants.
     match &spec.result {
-        ResultBinding::Carried { result_node, .. } => {
-            graph.nodes[*result_node] = ENode::BlockParam {
-                block: after,
-                index: 0,
-            };
-            graph.skeleton.blocks[after].params.push(*result_node);
-        }
         ResultBinding::TupleFromCarried {
             result_node,
             tuple_ty,
@@ -2446,7 +1602,6 @@ fn build_loop_skeleton(
     let len_nid = emit_length(graph, spec.len_input.0, &spec.len_input.1, &i32_ty);
     let cond_nid = graph.intern_pure(PureOp::BinOp("<".into()), smallvec![idx_nid, len_nid], bool_ty);
     let else_args: Vec<NodeId> = match &spec.result {
-        ResultBinding::Carried { idx, .. } => vec![carried_nids[*idx]],
         ResultBinding::TupleFromCarried { indices, .. } => {
             indices.iter().map(|idx| carried_nids[*idx]).collect()
         }

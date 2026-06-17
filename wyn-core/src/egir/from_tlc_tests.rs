@@ -55,7 +55,7 @@ fn compile_via_egir(src: &str) -> Program {
     .realize_outputs()
     .expect("egir::realize_outputs failed")
     .parallelize(&empty)
-    .expand_soacs(true)
+    .expand_soacs()
     .optimize_skeleton()
     .elaborate()
     .ssa

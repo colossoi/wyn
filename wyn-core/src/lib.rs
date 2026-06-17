@@ -1174,12 +1174,9 @@ impl EgirOutputsRealized {
 }
 
 impl EgirParallelized {
-    /// `unroll_maps`: whether to unroll small-constant-length Maps into
-    /// straight-line code. Both current backends (SPIR-V, WGSL) want
-    /// `true` — kept as a knob so future backends can opt out.
-    pub fn expand_soacs(self, unroll_maps: bool) -> EgirSoacExpanded {
+    pub fn expand_soacs(self) -> EgirSoacExpanded {
         let EgirParallelized(mut inner) = self;
-        egir::soac_expand::run(&mut inner, unroll_maps);
+        egir::soac_expand::run(&mut inner);
         EgirSoacExpanded(inner)
     }
 }
@@ -1336,7 +1333,7 @@ pub fn compile_thru_tlc(source: &str) -> error::Result<TlcReachable> {
 pub fn compile_thru_ssa(source: &str) -> std::result::Result<SsaConverted, Box<dyn std::error::Error>> {
     let tlc = compile_thru_tlc(source)?;
     let raw = tlc.to_egraph()?;
-    Ok(raw.expand_soacs(true).materialize().optimize_skeleton().elaborate())
+    Ok(raw.expand_soacs().materialize().optimize_skeleton().elaborate())
 }
 
 /// Run the full pipeline to a final SPIR-V binary.
@@ -1360,6 +1357,6 @@ pub fn compile_thru_spirv_single_stage(
         .fold_ast_constants()
         .type_check(&mut module_manager)?;
     let tlc = type_checked.to_tlc(&module_manager, false).pin_entry_regions()?.optimize_for_test(true);
-    let ssa = tlc.to_egraph()?.expand_soacs(true).materialize().optimize_skeleton().elaborate();
+    let ssa = tlc.to_egraph()?.expand_soacs().materialize().optimize_skeleton().elaborate();
     Ok(ssa.lower()?)
 }

@@ -210,8 +210,19 @@ pub fn run(
                 // entries without a plan or fallback keep the host's default
                 // sizing.
                 let dispatch_sized_outputs = plan.is_some_and(|p| {
-                    use crate::tlc::parallelize::ParallelStrategy;
-                    matches!(p.strategy, ParallelStrategy::Map | ParallelStrategy::Scan)
+                    use crate::tlc::parallelize::{PlannedBindings, PlannedScremaAccumulatorKind};
+                    // Dispatch-sized when the planned shape produces per-
+                    // element outputs: pure Map (no accumulators) or a Scan
+                    // accumulator. All-Reduce produces a single scalar.
+                    matches!(
+                        &p.bindings,
+                        PlannedBindings { accumulators, .. }
+                            if accumulators.is_empty()
+                                || accumulators.iter().any(|a| matches!(
+                                    a.kind,
+                                    PlannedScremaAccumulatorKind::Scan
+                                ))
+                    )
                 }) || (plan.is_none()
                     && gather_prepass_forced_output(entry).is_some());
                 let ep = convert_entry_point(
@@ -799,7 +810,7 @@ impl<'a> Converter<'a> {
         return_ty: Type<TypeName>,
     ) -> Option<FuncBody> {
         let (mut graph, mut control_headers) = self.into_graph_parts();
-        super::soac_expand::run_one_body(&mut graph, &mut control_headers, true);
+        super::soac_expand::run_one_body(&mut graph, &mut control_headers);
         let aliases = super::skel_opt::run_one_body(&mut graph);
         let skel_domtree = super::domtree::DomTree::build(&super::domtree::SkeletonCfgView {
             skeleton: &graph.skeleton,
@@ -1818,17 +1829,25 @@ impl<'a> Converter<'a> {
         operands.extend_from_slice(&input_nids);
         operands.extend_from_slice(&capture_nids);
 
-        Ok(self.emit_soac(
-            PendingSoac::Map {
-                func: f_name,
+        // Consolidation: emit as a singleton Screma + project field 0,
+        // so all downstream EGIR passes see one PendingSoac shape.
+        let capture_count = capture_nids.len();
+        let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![result_ty.clone()]);
+        let screma_nid = self.emit_soac(
+            PendingSoac::Screma {
+                map_funcs: vec![f_name],
+                accumulators: vec![],
                 input_array_types: input_arr_types,
                 input_elem_types,
-                output_elem_type: output_elem_ty,
-                destination,
+                map_output_elem_types: vec![output_elem_ty],
+                map_capture_counts: vec![capture_count],
+                map_destinations: vec![destination],
+                acc_destinations: vec![],
             },
             operands,
-            result_ty,
-        ))
+            tuple_ty,
+        );
+        Ok(self.intern_pure(PureOp::Project { index: 0 }, smallvec![screma_nid], result_ty))
     }
 
     /// `scatter(dest, indices, values)` → a side-effecting `PendingSoac::Scatter`.
@@ -1913,18 +1932,35 @@ impl<'a> Converter<'a> {
         let elem_ty = self.value_elem_type(&arr_ty, input);
         let init_nid = self.convert_term(ne)?;
 
+        // Consolidation: emit as a singleton Screma { 0 maps, 1 Reduce
+        // accumulator } + project field 0. Reduce's `op` doubles as
+        // both the step (per-element) and the reduce_op (phase 2
+        // combiner) — for a non-fused Reduce they are the same function.
+        let capture_count = capture_nids.len();
         let mut operands: SmallVec<[NodeId; 4]> = smallvec![arr_nid, init_nid];
         operands.extend(capture_nids.iter().copied());
-
-        Ok(self.emit_soac(
-            PendingSoac::Reduce {
-                func: op_name,
-                input_array_type: arr_ty,
-                input_elem_type: elem_ty,
+        let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![result_ty.clone()]);
+        let screma_nid = self.emit_soac(
+            PendingSoac::Screma {
+                map_funcs: vec![],
+                accumulators: vec![super::types::PendingScremaAccumulator {
+                    kind: crate::tlc::ScremaAccumulator::Reduce,
+                    step_func: op_name.clone(),
+                    reduce_op_func: op_name,
+                    step_capture_count: capture_count,
+                    reduce_op_capture_count: 0,
+                }],
+                input_array_types: vec![arr_ty],
+                input_elem_types: vec![elem_ty],
+                map_output_elem_types: vec![],
+                map_capture_counts: vec![],
+                map_destinations: vec![],
+                acc_destinations: vec![SoacDestination::Fresh],
             },
             operands,
-            result_ty,
-        ))
+            tuple_ty,
+        );
+        Ok(self.intern_pure(PureOp::Project { index: 0 }, smallvec![screma_nid], result_ty))
     }
 
     fn convert_soac_redomap(
@@ -1958,16 +1994,33 @@ impl<'a> Converter<'a> {
         operands.extend(capture_nids.iter().copied());
         operands.extend(reduce_capture_nids.iter().copied());
 
-        Ok(self.emit_soac(
-            PendingSoac::Redomap {
-                func: op_name,
-                reduce_func: reduce_func_name,
+        // Consolidation: emit as Screma { 0 maps, 1 Reduce accumulator
+        // with step_func=op (per-element acc combinator), reduce_op_func=
+        // reduce_func (pure combiner) } + project field 0.
+        let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![result_ty.clone()]);
+        let step_capture_count = capture_nids.len();
+        let reduce_op_capture_count = reduce_capture_nids.len();
+        let screma_nid = self.emit_soac(
+            PendingSoac::Screma {
+                map_funcs: vec![],
+                accumulators: vec![super::types::PendingScremaAccumulator {
+                    kind: crate::tlc::ScremaAccumulator::Reduce,
+                    step_func: op_name,
+                    reduce_op_func: reduce_func_name,
+                    step_capture_count,
+                    reduce_op_capture_count,
+                }],
                 input_array_types: input_arr_types,
                 input_elem_types,
+                map_output_elem_types: vec![],
+                map_capture_counts: vec![],
+                map_destinations: vec![],
+                acc_destinations: vec![SoacDestination::Fresh],
             },
             operands,
-            result_ty,
-        ))
+            tuple_ty,
+        );
+        Ok(self.intern_pure(PureOp::Project { index: 0 }, smallvec![screma_nid], result_ty))
     }
 
     fn convert_soac_screma(
@@ -2100,34 +2153,54 @@ impl<'a> Converter<'a> {
         let reduce_name = self.lambda_fn_name(&reduce_op.lam)?;
         let capture_nids: Vec<NodeId> =
             op.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
-        // Take the elem type from the result, not the input — for a
-        // `*[N]T` input the input-side helper returns `Unique<[N]T>`
-        // rather than `T` (see convert_soac_map's `output_elem_ty`
-        // for the same workaround). Scan's accumulator type equals
-        // the output element type.
         let arr_nid = self.convert_array_expr_value(input)?;
         let arr_ty = self.value_array_type(arr_nid, input);
-        let elem_ty = if result_ty.is_array() {
-            result_ty.elem_type().expect("Array has elem").clone()
-        } else {
-            self.value_elem_type(&arr_ty, input)
-        };
+        // Input element type can differ from the accumulator type when
+        // fusion has folded a `map` producer into the scan combiner
+        // (`scan(op, ne, map(g, xs))` ⇒ step takes `(acc: Acc, x: T)`
+        // with `T != Acc`).
+        let input_elem_ty = self.value_elem_type(&arr_ty, input);
         let init_nid = self.convert_term(ne)?;
 
         let mut operands: SmallVec<[NodeId; 4]> = smallvec![arr_nid, init_nid];
         operands.extend(capture_nids.iter().copied());
 
-        Ok(self.emit_soac(
-            PendingSoac::Scan {
-                func: op_name,
-                reduce_func: reduce_name,
-                input_array_type: arr_ty,
-                input_elem_type: elem_ty,
-                destination,
+        // Consolidation: every scan — including the consuming
+        // (InputBuffer) shape — emits Screma { 0 maps, 1 Scan acc } +
+        // project field 0. For consuming scan the result aliases the
+        // input, so the Project's type must match the input view's type
+        // (View variant + region) rather than the TLC-default
+        // result_ty (Composite variant). Non-consuming scan keeps
+        // result_ty; realize_outputs fixes its variant via
+        // retarget_screma_array_projection.
+        let capture_count = capture_nids.len();
+        let project_ty = if matches!(destination, SoacDestination::InputBuffer) {
+            arr_ty.clone()
+        } else {
+            result_ty.clone()
+        };
+        let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![project_ty.clone()]);
+        let screma_nid = self.emit_soac(
+            PendingSoac::Screma {
+                map_funcs: vec![],
+                accumulators: vec![super::types::PendingScremaAccumulator {
+                    kind: crate::tlc::ScremaAccumulator::Scan,
+                    step_func: op_name,
+                    reduce_op_func: reduce_name,
+                    step_capture_count: capture_count,
+                    reduce_op_capture_count: 0,
+                }],
+                input_array_types: vec![arr_ty],
+                input_elem_types: vec![input_elem_ty],
+                map_output_elem_types: vec![],
+                map_capture_counts: vec![],
+                map_destinations: vec![],
+                acc_destinations: vec![destination],
             },
             operands,
-            result_ty,
-        ))
+            tuple_ty,
+        );
+        Ok(self.intern_pure(PureOp::Project { index: 0 }, smallvec![screma_nid], project_ty))
     }
 
     fn convert_soac_filter(

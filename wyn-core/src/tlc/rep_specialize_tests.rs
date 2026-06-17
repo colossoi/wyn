@@ -109,13 +109,8 @@ entry tick() i32 =
         .expect("parallelize_soacs")
         .filter_reachable();
 
-    let ssa = tlc
-        .to_egraph()
-        .expect("to_egraph")
-        .expand_soacs(true)
-        .materialize()
-        .optimize_skeleton()
-        .elaborate();
+    let ssa =
+        tlc.to_egraph().expect("to_egraph").expand_soacs().materialize().optimize_skeleton().elaborate();
 
     let result = ssa.lower();
     let err = result.err().expect("verifier must reject Abstract reaching the backend");

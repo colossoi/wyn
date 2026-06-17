@@ -315,7 +315,7 @@ fn compile_to_wgsl(source: &str) -> crate::error::Result<String> {
         .filter_reachable()
         .to_egraph()
         .expect("SSA conversion failed")
-        .expand_soacs(true)
+        .expand_soacs()
         .materialize()
         .optimize_skeleton()
         .elaborate()

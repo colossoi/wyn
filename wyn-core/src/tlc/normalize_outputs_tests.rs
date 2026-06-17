@@ -65,7 +65,7 @@ fn compile_to_spirv(source: &str) -> Vec<u32> {
         .filter_reachable()
         .to_egraph()
         .expect("egraph")
-        .expand_soacs(true)
+        .expand_soacs()
         .materialize()
         .optimize_skeleton()
         .elaborate();

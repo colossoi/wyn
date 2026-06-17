@@ -17,7 +17,7 @@ use crate::BindingRef;
 use crate::ast::TypeName;
 use crate::builtins::catalog;
 use crate::ssa::framework::BlockId;
-use crate::ssa::types::{ConstantValue, InstKind};
+use crate::ssa::types::InstKind;
 
 use super::graph_ops;
 use super::program::{EgirEntry, EgirFunc, EgirInner};
@@ -25,50 +25,38 @@ use super::types::{
     EGraph, NodeId, PendingSoac, PureOp, SideEffectKind, SkeletonTerminator, SoacDestination,
 };
 use crate::ssa::types::ControlHeader;
-use crate::tlc::parallelize::{ParallelStrategy, ParallelizationPlan};
+use crate::tlc::parallelize::ParallelizationPlan;
 
-/// Walk every entry; for each entry that has a plan, do the EGIR-side
-/// transformation that strategy requires.
+/// Walk every entry; for each entry that has a plan, dispatch to
+/// `transform_screma_entry`. After from_tlc consolidation every parallel
+/// compute-entry tail is a `PendingSoac::Screma`, so the per-kind
+/// transforms collapse into one. transform_screma_entry internally
+/// dispatches on the Screma's accumulator-kind shape:
 ///
-/// Map     → wrap the tail SOAC in `PendingSoac::Parallel` so
-///            `soac_expand` emits the lane-indexed kernel.
-/// Reduce  → in-place phase1 rewrite (chunked reduce + store-to-
-///            partials), then synthesize a phase2-combine EgirEntry.
-/// Redomap → same shape as Reduce phase1/phase2, but phase2 uses the
-///            redomap's pure `reduce_func` combiner and the NE
-///            subgraph is cloned across EGraphs.
-/// Scan    → in-place phase1 rewrite (chunked scan + chunked reduce →
-///            block_sums) and two synthesized entries (phase 2 +
-///            phase 3). See `transform_scan_entry`.
+/// - **0 accumulators** (pointwise Screma == legacy Map): wrap the SOAC
+///   in `PendingSoac::Parallel` so `soac_expand` emits the lane-indexed
+///   kernel via `build_parallel_screma_maps`.
+/// - **N Reduce accumulators**: phase 1 chunked rewrite (chunked input +
+///   chunked map outputs + store-to-`partials_i[tid]`) plus one
+///   synthesised phase-2 tree-reduce per accumulator.
+/// - **1 Scan accumulator**: phase 1 chunked rewrite (chunked input +
+///   chunked output view + appended chunked reduce → `block_sums[tid]`),
+///   plus synthesised phase 2 (sequential scan of `block_sums`) and
+///   phase 3 (apply offsets via a swap-args wrapper).
 pub fn run(inner: &mut EgirInner, plans: &HashMap<String, ParallelizationPlan>) {
-    // Collect entries-to-add separately so we don't mutate
-    // `inner.entry_points` while iterating it.
+    // After from_tlc::convert_soac_* consolidation, every compute-entry
+    // tail PendingSoac is `Screma`. The plan strategy is `Screma` for
+    // every parallelised entry, so there's a single transform path.
     let mut new_entries: Vec<EgirEntry> = Vec::new();
     let mut new_functions: Vec<EgirFunc> = Vec::new();
     for entry in inner.entry_points.iter_mut() {
         let Some(plan) = plans.get(&entry.name) else {
             continue;
         };
-        match plan.strategy {
-            ParallelStrategy::Map => rewrite_tail_map(entry),
-            ParallelStrategy::Reduce | ParallelStrategy::Redomap => {
-                if let Some(phase2) = transform_accumulator_entry(entry, plan) {
-                    new_entries.push(phase2);
-                }
-            }
-            ParallelStrategy::Scan => {
-                if let Some((phases, swap_wrapper)) = transform_scan_entry(entry, plan) {
-                    new_entries.extend(phases);
-                    new_functions.push(swap_wrapper);
-                }
-            }
-            ParallelStrategy::Screma => {
-                if let Some((phases, swap_wrapper)) = transform_screma_entry(entry, plan) {
-                    new_entries.extend(phases);
-                    if let Some(sw) = swap_wrapper {
-                        new_functions.push(sw);
-                    }
-                }
+        if let Some((phases, swap_wrapper)) = transform_screma_entry(entry, plan) {
+            new_entries.extend(phases);
+            if let Some(sw) = swap_wrapper {
+                new_functions.push(sw);
             }
         }
     }
@@ -77,22 +65,18 @@ pub fn run(inner: &mut EgirInner, plans: &HashMap<String, ParallelizationPlan>) 
 }
 
 fn rewrite_tail_map(entry: &mut super::program::EgirEntry) {
-    // Walk every block and locate the (unique) tail Map. analyze_entry
-    // already proved the entry's tail expression is the Map; from_tlc
-    // turns it into a `PendingSoac::Map` side-effect. Wrap it.
+    // Walk every block and locate the (unique) tail pointwise Screma.
+    // from_tlc's convert_soac_map emits a 1-map 0-accumulator Screma for
+    // every source-level `map` so this is the canonical shape now.
     for (_, block) in entry.graph.skeleton.blocks.iter_mut() {
         for se in block.side_effects.iter_mut() {
             let SideEffectKind::Pending(ref pending) = se.kind else {
                 continue;
             };
-            // Only entry-tail pointwise SOACs that target output views are
-            // parallelizable here. Intermediate Fresh producers must stay
+            // Only entry-tail pointwise Screma that targets output views
+            // are parallelisable here. Intermediate Fresh producers stay
             // serial unless a strategy-specific transform rewrites them.
             match pending {
-                PendingSoac::Map {
-                    destination: SoacDestination::OutputView,
-                    ..
-                } => {}
                 PendingSoac::Screma {
                     accumulators,
                     map_destinations,
@@ -114,160 +98,6 @@ fn rewrite_tail_map(entry: &mut super::program::EgirEntry) {
             });
             return;
         }
-    }
-}
-
-/// Shared accumulator-style migration. Reduce and Redomap both become a
-/// chunked phase 1 that writes per-thread partials, followed by a synthesized
-/// phase 2 that combines those partials into the final result. The
-/// strategy-specific parts are represented by `AccumulatorPhase2`.
-fn transform_accumulator_entry(entry: &mut EgirEntry, plan: &ParallelizationPlan) -> Option<EgirEntry> {
-    let phase_bindings = accumulator_phase_bindings(plan, plan.strategy)?;
-    let phase2_spec = extract_accumulator_phase2(entry, plan.strategy)?;
-    let phase2 = build_accumulator_phase2(entry, phase_bindings, phase2_spec)?;
-
-    match plan.strategy {
-        ParallelStrategy::Reduce => {
-            phase1_transform_reduce(entry, phase_bindings.total_threads, phase_bindings.partials).ok()?;
-        }
-        ParallelStrategy::Redomap => {
-            phase1_transform_redomap(entry, phase_bindings.total_threads, phase_bindings.partials).ok()?;
-        }
-        _ => return None,
-    }
-    Some(phase2)
-}
-
-enum AccumulatorPhase2 {
-    ConstantNe {
-        func: String,
-        elem_ty: Type<TypeName>,
-        init: ConstantValue,
-    },
-    CloneNe {
-        func: String,
-        elem_ty: Type<TypeName>,
-        ne_nid: NodeId,
-    },
-}
-
-fn extract_accumulator_phase2(entry: &EgirEntry, strategy: ParallelStrategy) -> Option<AccumulatorPhase2> {
-    match strategy {
-        ParallelStrategy::Reduce => {
-            let (block, idx) = find_pending_reduce(entry)?;
-            let se = &entry.graph.skeleton.blocks[block].side_effects[idx];
-            let func = match &se.kind {
-                SideEffectKind::Pending(PendingSoac::Reduce { func, .. }) => func.clone(),
-                _ => return None,
-            };
-            let init_nid = *se.operand_nodes.get(1)?;
-            let init = extract_constant(&entry.graph, init_nid)?;
-            let result_nid = se.result?;
-            let elem_ty = entry.graph.types[&result_nid].clone();
-            Some(AccumulatorPhase2::ConstantNe { func, elem_ty, init })
-        }
-        ParallelStrategy::Redomap => {
-            let (block, idx) = find_pending_redomap(entry)?;
-            let se = &entry.graph.skeleton.blocks[block].side_effects[idx];
-            let (input_count, func) = match &se.kind {
-                SideEffectKind::Pending(PendingSoac::Redomap {
-                    reduce_func,
-                    input_array_types,
-                    ..
-                }) => (input_array_types.len(), reduce_func.clone()),
-                _ => return None,
-            };
-            let ne_nid = *se.operand_nodes.get(input_count)?;
-            let result_nid = se.result?;
-            let elem_ty = entry.graph.types[&result_nid].clone();
-            Some(AccumulatorPhase2::CloneNe {
-                func,
-                elem_ty,
-                ne_nid,
-            })
-        }
-        _ => None,
-    }
-}
-
-fn build_accumulator_phase2(
-    entry: &EgirEntry,
-    phase_bindings: AccumulatorPhaseBindings,
-    spec: AccumulatorPhase2,
-) -> Option<EgirEntry> {
-    match spec {
-        AccumulatorPhase2::ConstantNe { func, elem_ty, init } => Some(synthesize_phase2_reduce(
-            &entry.name,
-            func,
-            elem_ty,
-            init,
-            phase_bindings.partials,
-            phase_bindings.result,
-        )),
-        AccumulatorPhase2::CloneNe {
-            func,
-            elem_ty,
-            ne_nid,
-        } => {
-            let phase1_graph_snapshot = entry.graph.clone();
-            synthesize_phase2_reduce_cloning_ne(
-                &entry.name,
-                func,
-                elem_ty,
-                &phase1_graph_snapshot,
-                ne_nid,
-                phase_bindings.partials,
-                phase_bindings.result,
-            )
-            .ok()
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct AccumulatorPhaseBindings {
-    partials: BindingRef,
-    result: BindingRef,
-    total_threads: u32,
-}
-
-fn accumulator_phase_bindings(
-    plan: &ParallelizationPlan,
-    expected: ParallelStrategy,
-) -> Option<AccumulatorPhaseBindings> {
-    use crate::tlc::parallelize::{DispatchModel, PlannedBindings};
-    if plan.strategy != expected {
-        return None;
-    }
-    let (partials, result) = match (expected, &plan.bindings) {
-        (ParallelStrategy::Reduce, PlannedBindings::Reduce { partials, result })
-        | (ParallelStrategy::Redomap, PlannedBindings::Redomap { partials, result }) => {
-            (*partials, *result)
-        }
-        _ => return None,
-    };
-    let total_threads = match plan.dispatch {
-        DispatchModel::Fixed { local_size, .. } => local_size[0],
-        DispatchModel::DerivedFromInputLength { workgroup_size, .. } => workgroup_size,
-    };
-    Some(AccumulatorPhaseBindings {
-        partials,
-        result,
-        total_threads,
-    })
-}
-
-fn extract_constant(graph: &super::types::EGraph, nid: NodeId) -> Option<ConstantValue> {
-    match &graph.nodes[nid] {
-        super::types::ENode::Constant(c) => Some(*c),
-        super::types::ENode::Pure { op, .. } => match op {
-            super::types::PureOp::Uint(s) => s.parse::<u32>().ok().map(ConstantValue::U32),
-            super::types::PureOp::Int(s) => s.parse::<i32>().ok().map(ConstantValue::I32),
-            super::types::PureOp::Float(s) => s.parse::<f32>().ok().map(ConstantValue::from_f32),
-            super::types::PureOp::Bool(b) => Some(ConstantValue::Bool(*b)),
-            _ => None,
-        },
-        _ => None,
     }
 }
 
@@ -365,128 +195,6 @@ fn chunk_view_like(
         }
     }
     Err(format!("phase1 {context}: input is not a chunkable view"))
-}
-
-/// Rewrite an EgirEntry in place: its tail `PendingSoac::Reduce` becomes a
-/// chunked reduce + store-to-partials. Caller passes the per-workgroup
-/// thread count and the partials binding (set, binding) the TLC analysis
-/// reserved.
-///
-/// Preconditions:
-/// - Entry's body has exactly one `PendingSoac::Reduce` side-effect.
-/// - Entry's body has exactly one `InstKind::Store` whose value operand
-///   is the reduce's result (the auto-allocated output store).
-/// - The reduce's input is a `PureOp::StorageView(Storage{set, binding})`
-///   (i.e. the source array is a storage buffer, not a Range).
-pub fn phase1_transform_reduce(
-    entry: &mut EgirEntry,
-    total_threads: u32,
-    partials_binding: BindingRef,
-) -> Result<(), String> {
-    // 1. Locate the Reduce side-effect and pull the operands.
-    let (reduce_block, reduce_idx) =
-        find_pending_reduce(entry).ok_or_else(|| "no PendingSoac::Reduce in entry".to_string())?;
-    let (result_nid, input_view_nid, input_view_ty) = {
-        let se = &entry.graph.skeleton.blocks[reduce_block].side_effects[reduce_idx];
-        let input = se.operand_nodes[0];
-        let result = se.result.ok_or_else(|| "Reduce missing result".to_string())?;
-        let input_ty = entry.graph.types[&input].clone();
-        (result, input, input_ty)
-    };
-
-    // 2. Build chunk arithmetic in the same block as the reduce.
-    let chunked = chunk_soac_inputs(
-        &mut entry.graph,
-        &[(input_view_nid, input_view_ty)],
-        total_threads,
-        ChunkInputKind::StorageOnly,
-        "Reduce",
-    )?;
-
-    // 4. Swap the Reduce's input operand.
-    entry.graph.skeleton.blocks[reduce_block].side_effects[reduce_idx].operand_nodes[0] = chunked.views[0];
-
-    // 5. Find the auto-output Store (writes the reduce result), rewrite
-    //    its place to ViewIndex(partials_view, tid).
-    let (store_block, store_idx) =
-        find_store_of(entry, result_nid).ok_or_else(|| "no Store writes the Reduce result".to_string())?;
-    let elem_ty = entry.graph.types[&result_nid].clone();
-    let arr_ty = Type::Constructed(
-        TypeName::Array,
-        vec![
-            elem_ty.clone(),
-            Type::Constructed(TypeName::ArrayVariantView, vec![]),
-            Type::Variable(0),
-            // region stamped from the binding by intern_storage_view.
-            crate::types::no_region(),
-        ],
-    );
-    let partials_view = graph_ops::intern_storage_view(&mut entry.graph, partials_binding, arr_ty, None);
-    let new_place = entry.graph.intern_pure(
-        super::types::PureOp::ViewIndex,
-        smallvec![partials_view, chunked.tid],
-        elem_ty.clone(),
-    );
-    {
-        let se = &mut entry.graph.skeleton.blocks[store_block].side_effects[store_idx];
-        se.operand_nodes[0] = new_place;
-    }
-
-    // 7. The outputs[] originally pointed at the auto-allocated result
-    //    binding; phase1 no longer writes there. Clear it. (Phase2 — when
-    //    synthesized — will take ownership of that binding.) Also append
-    //    the partials Intermediate decl.
-    let result_binding = entry.outputs.get(0).and_then(|o| o.storage_binding);
-    if let Some(o) = entry.outputs.get_mut(0) {
-        o.storage_binding = None;
-    }
-    entry.storage_bindings.push(crate::interface::StorageBindingDecl {
-        binding: crate::BindingRef::new(partials_binding.set, partials_binding.binding),
-        role: crate::interface::StorageRole::Intermediate,
-        elem_ty,
-        length: None,
-    });
-    let _ = result_binding; // caller needs this for phase2 synthesis (not done here)
-
-    Ok(())
-}
-
-/// Programmatic phase2 synthesis: build a single-threaded
-/// `EgirEntry` that reads `partials`, reduces it, and stores the
-/// final scalar to `result_binding[0]`.
-///
-/// Uses `EntryBuilder` for graph construction — no TLC `Def` or
-/// `from_tlc::run` round-trip.
-///
-/// `init` is described by `ReduceInit` rather than by a NodeId because
-/// EGraph nodes don't cross between entries; the caller passes the
-/// neutral element abstractly so phase2 re-creates it inside its own
-/// graph. Today only scalar literal initializers are supported, which
-/// covers all Wyn `reduce` ne shapes that pass through this path
-/// (defunctionalization hoists complex inits to lifted-let bindings).
-pub fn synthesize_phase2_reduce(
-    entry_name: &str,
-    op_func: String,
-    elem_ty: Type<TypeName>,
-    init: ConstantValue,
-    partials_binding: BindingRef,
-    result_binding: BindingRef,
-) -> EgirEntry {
-    use super::builder::EntryBuilder;
-    let mut b = EntryBuilder::new_compute(format!("{}_phase2_combine", entry_name), (PHASE2_WIDTH, 1, 1));
-    b.declare_intermediate_storage(partials_binding, elem_ty.clone());
-    b.declare_output_storage(result_binding, elem_ty.clone());
-
-    let init_nid = b.emit_constant(init, elem_ty.clone());
-    build_tree_reduce_phase2(
-        &mut b,
-        op_func,
-        elem_ty,
-        init_nid,
-        partials_binding,
-        result_binding,
-    );
-    b.build()
 }
 
 /// Workgroup width for the single-workgroup tree-reduce phase 2: `W` threads
@@ -909,136 +617,6 @@ fn emit_storage_len(graph: &mut super::types::EGraph, br: BindingRef) -> NodeId 
 /// Rewrite an EgirEntry in place: its tail `PendingSoac::Redomap`
 /// becomes a chunked redomap + store-to-partials. Same shape as
 /// `phase1_transform_reduce` but operates on a Redomap side-effect,
-/// which has N parallel inputs that all share length.
-pub fn phase1_transform_redomap(
-    entry: &mut EgirEntry,
-    total_threads: u32,
-    partials_binding: BindingRef,
-) -> Result<(), String> {
-    let (block_id, idx) =
-        find_pending_redomap(entry).ok_or_else(|| "no PendingSoac::Redomap in entry".to_string())?;
-
-    let (input_view_data, result_nid) = {
-        let se = &entry.graph.skeleton.blocks[block_id].side_effects[idx];
-        let n = match &se.kind {
-            SideEffectKind::Pending(PendingSoac::Redomap {
-                input_array_types, ..
-            }) => input_array_types.len(),
-            _ => return Err("expected PendingSoac::Redomap".to_string()),
-        };
-        let result = se.result.ok_or_else(|| "Redomap missing result".to_string())?;
-        let mut view_data: Vec<(NodeId, Type<TypeName>)> = Vec::with_capacity(n);
-        for i in 0..n {
-            let view_nid = se.operand_nodes[i];
-            let view_ty = entry.graph.types[&view_nid].clone();
-            view_data.push((view_nid, view_ty));
-        }
-        (view_data, result)
-    };
-
-    // Chunk arith uses the first input's length.
-    let chunked = chunk_soac_inputs(
-        &mut entry.graph,
-        &input_view_data,
-        total_threads,
-        ChunkInputKind::StorageOrRange,
-        "Redomap",
-    )?;
-
-    // Build a chunked replacement for each input — same shape as the
-    // original (StorageView gets new offset/len; ArrayRange gets a new
-    // start = old_start + chunk_start, new len = chunk_len, same step).
-    let se = &mut entry.graph.skeleton.blocks[block_id].side_effects[idx];
-    for (i, &new_view) in chunked.views.iter().enumerate() {
-        se.operand_nodes[i] = new_view;
-    }
-
-    // Redirect the entry's output store(s) to `partials[tid]`, writing the
-    // *whole* result per thread (AoS). A scalar result has one Store of
-    // `result_nid`; an AoS tuple result is SoA-decomposed by
-    // `emit_compute_output_stores` into per-component / per-element Stores of
-    // `Project…(result_nid)`. Find them all (value projects from the result),
-    // repoint the first to write `result_nid` into the partials slot, and drop
-    // the rest — phase2 reads the AoS partials and writes the AoS result.
-    let elem_ty = entry.graph.types[&result_nid].clone();
-    let arr_ty = Type::Constructed(
-        TypeName::Array,
-        vec![
-            elem_ty.clone(),
-            Type::Constructed(TypeName::ArrayVariantView, vec![]),
-            Type::Variable(0),
-            // region stamped from the binding by intern_storage_view.
-            crate::types::no_region(),
-        ],
-    );
-    let partials_view = graph_ops::intern_storage_view(&mut entry.graph, partials_binding, arr_ty, None);
-    let new_place = entry.graph.intern_pure(
-        super::types::PureOp::ViewIndex,
-        smallvec![partials_view, chunked.tid],
-        elem_ty.clone(),
-    );
-
-    let mut output_stores: Vec<(BlockId, usize)> = Vec::new();
-    for (bid, block) in &entry.graph.skeleton.blocks {
-        for (i, se) in block.side_effects.iter().enumerate() {
-            if matches!(&se.kind, SideEffectKind::Inst(InstKind::Store { .. }))
-                && se
-                    .operand_nodes
-                    .get(1)
-                    .is_some_and(|&v| value_projects_from(&entry.graph, v, result_nid))
-            {
-                output_stores.push((bid, i));
-            }
-        }
-    }
-    let (keep_block, keep_idx) =
-        *output_stores.first().ok_or_else(|| "no Store writes the Redomap result".to_string())?;
-    {
-        let se = &mut entry.graph.skeleton.blocks[keep_block].side_effects[keep_idx];
-        se.operand_nodes[0] = new_place;
-        se.operand_nodes[1] = result_nid;
-    }
-    // Drop the remaining decomposed output stores (highest index first so the
-    // earlier indices — including the keeper — stay valid).
-    let mut to_remove: Vec<(BlockId, usize)> = output_stores.into_iter().skip(1).collect();
-    to_remove.sort_by(|a, b| b.1.cmp(&a.1));
-    for (bid, idx) in to_remove {
-        entry.graph.skeleton.blocks[bid].side_effects.remove(idx);
-    }
-
-    // The original output binding(s) are now unused (phase2 owns the result);
-    // clear them and register the partials buffer.
-    for o in entry.outputs.iter_mut() {
-        o.storage_binding = None;
-    }
-    entry.storage_bindings.push(crate::interface::StorageBindingDecl {
-        binding: crate::BindingRef::new(partials_binding.set, partials_binding.binding),
-        role: crate::interface::StorageRole::Intermediate,
-        elem_ty,
-        length: None,
-    });
-
-    Ok(())
-}
-
-/// True if `value` is `root` or a chain of `Project`s rooted at `root` — used
-/// to recognize the (possibly SoA-decomposed) Stores of a reduce result.
-fn value_projects_from(graph: &super::types::EGraph, value: NodeId, root: NodeId) -> bool {
-    let mut cur = value;
-    loop {
-        if cur == root {
-            return true;
-        }
-        match &graph.nodes[cur] {
-            super::types::ENode::Pure {
-                op: super::types::PureOp::Project { .. },
-                operands,
-            } => cur = operands[0],
-            _ => return false,
-        }
-    }
-}
-
 /// Programmatic phase2 synthesis where the neutral element is a
 /// (possibly compound) pure subgraph cloned from phase1. Used by
 /// Redomap whose `NO_HIT`-style NE values are tuples / arrays of
@@ -1093,52 +671,6 @@ pub fn synthesize_phase2_reduce_cloning_ne_named(
     Ok(b.build())
 }
 
-fn find_pending_redomap(entry: &EgirEntry) -> Option<(BlockId, usize)> {
-    for (bid, block) in &entry.graph.skeleton.blocks {
-        for (i, se) in block.side_effects.iter().enumerate() {
-            if let SideEffectKind::Pending(PendingSoac::Redomap { .. }) = &se.kind {
-                return Some((bid, i));
-            }
-        }
-    }
-    None
-}
-
-fn find_pending_reduce(entry: &EgirEntry) -> Option<(BlockId, usize)> {
-    for (bid, block) in &entry.graph.skeleton.blocks {
-        for (i, se) in block.side_effects.iter().enumerate() {
-            if let SideEffectKind::Pending(PendingSoac::Reduce { .. }) = &se.kind {
-                return Some((bid, i));
-            }
-        }
-    }
-    None
-}
-
-fn find_store_of(entry: &EgirEntry, value_nid: NodeId) -> Option<(BlockId, usize)> {
-    for (bid, block) in &entry.graph.skeleton.blocks {
-        for (i, se) in block.side_effects.iter().enumerate() {
-            if matches!(&se.kind, SideEffectKind::Inst(InstKind::Store { .. }))
-                && se.operand_nodes.get(1) == Some(&value_nid)
-            {
-                return Some((bid, i));
-            }
-        }
-    }
-    None
-}
-
-fn find_pending_scan(entry: &EgirEntry) -> Option<(BlockId, usize)> {
-    for (bid, block) in &entry.graph.skeleton.blocks {
-        for (i, se) in block.side_effects.iter().enumerate() {
-            if let SideEffectKind::Pending(PendingSoac::Scan { .. }) = &se.kind {
-                return Some((bid, i));
-            }
-        }
-    }
-    None
-}
-
 fn find_pending_screma(entry: &EgirEntry) -> Option<(BlockId, usize)> {
     for (bid, block) in &entry.graph.skeleton.blocks {
         for (i, se) in block.side_effects.iter().enumerate() {
@@ -1159,11 +691,13 @@ fn transform_screma_entry(
     plan: &ParallelizationPlan,
 ) -> Option<(Vec<EgirEntry>, Option<EgirFunc>)> {
     use crate::tlc::parallelize::{PlannedBindings, PlannedScremaAccumulatorKind};
-    let PlannedBindings::Screma { accumulators, .. } = &plan.bindings else {
-        return None;
-    };
-    if accumulators.len() != 1 {
-        return None;
+    let PlannedBindings { accumulators, .. } = &plan.bindings;
+    if accumulators.is_empty() {
+        // Pointwise Screma == Map: wrap in PendingSoac::Parallel so
+        // soac_expand emits the lane-indexed kernel via
+        // build_parallel_screma_maps.
+        rewrite_tail_map(entry);
+        return Some((vec![], None));
     }
     let all_reduce = accumulators.iter().all(|a| matches!(a.kind, PlannedScremaAccumulatorKind::Reduce));
     let single_scan =
@@ -1193,13 +727,10 @@ fn transform_screma_reduce_entry(
     use crate::tlc::parallelize::PlannedBindings;
 
     // 1. Pull binding/dispatch info from the plan.
-    let PlannedBindings::Screma {
+    let PlannedBindings {
         map_outputs: _,
         accumulators: planned_accs,
-    } = &plan.bindings
-    else {
-        return None;
-    };
+    } = &plan.bindings;
     if planned_accs.is_empty() {
         return None;
     }
@@ -1488,13 +1019,10 @@ fn transform_screma_scan_entry(
     use crate::tlc::parallelize::PlannedBindings;
 
     // 1. Pull binding/dispatch info from the plan.
-    let PlannedBindings::Screma {
+    let PlannedBindings {
         map_outputs: _,
         accumulators,
-    } = &plan.bindings
-    else {
-        return None;
-    };
+    } = &plan.bindings;
     if accumulators.len() != 1 {
         return None;
     }
@@ -1517,6 +1045,7 @@ fn transform_screma_scan_entry(
         scan_output_view_op,
         input_view_nid,
         input_view_ty,
+        input_elem_ty,
         init_nid,
         elem_ty,
     ) = {
@@ -1525,6 +1054,7 @@ fn transform_screma_scan_entry(
             map_funcs,
             accumulators,
             input_array_types,
+            input_elem_types,
             map_destinations,
             acc_destinations,
             map_capture_counts,
@@ -1570,6 +1100,7 @@ fn transform_screma_scan_entry(
         let map_view_ops: Vec<usize> = (0..n_maps).map(|m| base + m).collect();
         let scan_output_view_op = base + n_maps; // 1 acc, OutputView
         let input_ty = entry.graph.types[&input_nid].clone();
+        let input_elem = input_elem_types[0].clone();
         let elem = entry.graph.types[&init_nid].clone();
         (
             acc.step_func.clone(),
@@ -1578,6 +1109,7 @@ fn transform_screma_scan_entry(
             scan_output_view_op,
             input_nid,
             input_ty,
+            input_elem,
             init_nid,
             elem,
         )
@@ -1642,24 +1174,43 @@ fn transform_screma_scan_entry(
     // plain-Scan path).
     let phase1_snapshot = entry.graph.clone();
 
-    // 5. Append a chunked Reduce side-effect that computes each
-    // thread's final accumulator and stores it to `block_sums[tid]`.
-    // Operands: [chunked_input, init].
+    // 5. Append a chunked Screma{0 maps, 1 Reduce acc, Fresh} side-effect
+    // that computes each thread's final accumulator, then store the
+    // projected scalar to `block_sums[tid]`. Operands: [chunked_input,
+    // init]. The Screma's result type is a 1-tuple; we Project(_, 0) to
+    // recover the scalar before storing.
     {
         let mut next_effect = graph_ops::next_effect_token(&entry.graph);
         let reduce_operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![chunked_input_nid, init_nid];
-        let result_nid = graph_ops::emit_pending_soac(
+        let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![elem_ty.clone()]);
+        let screma_nid = graph_ops::emit_pending_soac(
             &mut entry.graph,
             block_id,
-            PendingSoac::Reduce {
-                func: op_func,
-                input_array_type: input_view_ty,
-                input_elem_type: elem_ty.clone(),
+            PendingSoac::Screma {
+                map_funcs: vec![],
+                accumulators: vec![super::types::PendingScremaAccumulator {
+                    kind: crate::tlc::ScremaAccumulator::Reduce,
+                    step_func: op_func.clone(),
+                    reduce_op_func: op_func,
+                    step_capture_count: 0,
+                    reduce_op_capture_count: 0,
+                }],
+                input_array_types: vec![input_view_ty],
+                input_elem_types: vec![input_elem_ty],
+                map_output_elem_types: vec![],
+                map_capture_counts: vec![],
+                map_destinations: vec![],
+                acc_destinations: vec![SoacDestination::Fresh],
             },
             reduce_operands,
-            elem_ty.clone(),
+            tuple_ty,
             &mut next_effect,
             None,
+        );
+        let result_nid = entry.graph.intern_pure(
+            super::types::PureOp::Project { index: 0 },
+            smallvec![screma_nid],
+            elem_ty.clone(),
         );
         // Store result_nid → block_sums[tid].
         let arr_ty = Type::Constructed(
@@ -1734,298 +1285,6 @@ fn transform_screma_scan_entry(
     Some((phase2, phase3, swap_wrapper))
 }
 
-/// Orchestrate the Scan migration. Returns `Some(vec![phase2, phase3])`
-/// on success; the original entry is mutated in place into phase 1.
-///
-/// Algorithm (three-phase parallel scan):
-/// - Phase 1 (parallel, per-thread chunk): chunked Scan writing local
-///   prefix-scans to `output[chunk]`, plus a chunked Reduce computing
-///   the final chunk accumulator stored to `block_sums[tid]`. The
-///   chunked Reduce duplicates work for cleanness — phase 1 produces
-///   ~2N total ops where optimal is ~N. Optimization deferred.
-/// - Phase 2 (sequential, 1×1×1 dispatch): standard scan of
-///   `block_sums` into `block_offsets`.
-/// - Phase 3 (parallel, per-thread chunk): chunked Map applying
-///   `op(output[i], off)` to each element. Note the argument order
-///   matches Map's convention `op(elem, captures...)`, which is
-///   correct only for commutative scan combiners. Non-commutative
-///   associative ops (string concat, matmul) would need a swap-args
-///   wrapper function — deferred as follow-up work.
-fn transform_scan_entry(
-    entry: &mut EgirEntry,
-    plan: &ParallelizationPlan,
-) -> Option<(Vec<EgirEntry>, EgirFunc)> {
-    use crate::tlc::parallelize::PlannedBindings;
-    let (block_sums_binding, block_offsets_binding) = match plan.bindings {
-        PlannedBindings::Scan {
-            block_sums,
-            block_offsets,
-            ..
-        } => (block_sums, block_offsets),
-        _ => return None,
-    };
-    let total_threads = match plan.dispatch {
-        crate::tlc::parallelize::DispatchModel::Fixed { local_size, .. } => local_size[0],
-        crate::tlc::parallelize::DispatchModel::DerivedFromInputLength { workgroup_size, .. } => {
-            workgroup_size
-        }
-    };
-
-    // Pull metadata from the existing PendingSoac::Scan before phase 1
-    // mutates the entry: op_func, elem_ty, the init NodeId (for cloning
-    // into phase 2), original captures count, and the destination kind.
-    // `OutputView` means a separate auto-bound output buffer; `InputBuffer`
-    // means writes route back to the input.
-    // `op_func` is the per-element step (phase 1, reads raw inputs);
-    // `reduce_func` is the pure combiner (phases 2 & 3, which merge already-
-    // transformed values). They differ only for a map-fused scan.
-    let (op_func, reduce_func, elem_ty, init_nid, captures_count, consuming) = {
-        let (block, idx) = find_pending_scan(entry)?;
-        let se = &entry.graph.skeleton.blocks[block].side_effects[idx];
-        let (func, reduce, elem, dest) = match &se.kind {
-            SideEffectKind::Pending(PendingSoac::Scan {
-                func,
-                reduce_func,
-                input_elem_type,
-                destination,
-                ..
-            }) => (
-                func.clone(),
-                reduce_func.clone(),
-                input_elem_type.clone(),
-                destination.clone(),
-            ),
-            _ => return None,
-        };
-        let n = se.operand_nodes.len();
-        let (captures_count, is_consuming) = match dest {
-            SoacDestination::OutputView => {
-                // [input, init, ...captures, output_view]
-                if n < 3 {
-                    return None;
-                }
-                (n - 3, false)
-            }
-            SoacDestination::InputBuffer => {
-                // [input, init, ...captures] — no output_view appended
-                if n < 2 {
-                    return None;
-                }
-                (n - 2, true)
-            }
-            SoacDestination::Fresh => return None,
-        };
-        let init = se.operand_nodes[1];
-        (func, reduce, elem, init, captures_count, is_consuming)
-    };
-
-    // Output binding: for consuming scans, write back to the input
-    // binding; otherwise use the entry's auto-bound output.
-    let output_binding = if consuming {
-        let (block, idx) = find_pending_scan(entry)?;
-        let input_view_nid = entry.graph.skeleton.blocks[block].side_effects[idx].operand_nodes[0];
-        graph_ops::extract_storage_view_source(&entry.graph, input_view_nid)?
-    } else {
-        entry.outputs.first()?.storage_binding?
-    };
-
-    // Phase 2 needs a NE NodeId in its own graph — clone from phase 1's
-    // graph BEFORE phase1 mutates the entry (the source NodeIds may grow
-    // dependents).
-    let phase2 = {
-        let phase1_graph_snapshot = entry.graph.clone();
-        // Phase 2 scans the per-chunk block sums (already-transformed values),
-        // so it uses the pure combiner, not the element-step.
-        synthesize_phase2_scan(
-            &entry.name,
-            reduce_func.clone(),
-            elem_ty.clone(),
-            &phase1_graph_snapshot,
-            init_nid,
-            block_sums_binding,
-            block_offsets_binding,
-        )
-        .ok()?
-    };
-
-    // Phase 3 adds each block's offset to its already-locally-scanned output
-    // elements — again merging transformed values, so the pure combiner.
-    let swap_wrapper_name = format!("{}_scan_op_swap", entry.name);
-    let swap_wrapper = synthesize_swap_wrapper(
-        swap_wrapper_name.clone(),
-        reduce_func.clone(),
-        elem_ty.clone(),
-        entry.span,
-    );
-
-    let phase3 = synthesize_phase3_scan(
-        &entry.name,
-        swap_wrapper_name,
-        elem_ty.clone(),
-        output_binding,
-        block_offsets_binding,
-        total_threads,
-    );
-
-    phase1_transform_scan(
-        entry,
-        total_threads,
-        op_func,
-        elem_ty,
-        captures_count,
-        block_sums_binding,
-    )
-    .ok()?;
-
-    // Phase 1 wrote a partial+local-scan to `output` and final chunk
-    // accumulators to `block_sums`; the entry's auto-bound output
-    // (`output_binding`) is now reused by phase 3, which reads from it
-    // and writes the corrected prefix back. Declare the additional
-    // intermediate binding on the entry interface.
-    entry.storage_bindings.push(crate::interface::StorageBindingDecl {
-        binding: crate::BindingRef::new(block_offsets_binding.set, block_offsets_binding.binding),
-        role: crate::interface::StorageRole::Intermediate,
-        elem_ty: entry.storage_bindings[0].elem_ty.clone(),
-        length: None,
-    });
-    let _ = output_binding;
-
-    Some((vec![phase2, phase3], swap_wrapper))
-}
-
-/// In-place rewrite of the original entry into "phase 1": the existing
-/// `PendingSoac::Scan{OutputView}` is chunked (input and output_view
-/// operands swapped for chunked StorageViews), and a chunked Reduce +
-/// Store sequence is appended so each thread also writes its final
-/// chunk accumulator to `block_sums[tid]`. The duplicate Reduce reads
-/// the same chunked input as the Scan — ~2N total ops. Acceptable
-/// tradeoff for avoiding hand-rolled EGIR loops; optimization deferred.
-pub fn phase1_transform_scan(
-    entry: &mut EgirEntry,
-    total_threads: u32,
-    op_func: String,
-    elem_ty: Type<TypeName>,
-    captures_count: usize,
-    block_sums_binding: BindingRef,
-) -> Result<(), String> {
-    let (scan_block, scan_idx) =
-        find_pending_scan(entry).ok_or_else(|| "no PendingSoac::Scan in entry".to_string())?;
-
-    // Snapshot operands and destination before we mutate.
-    let (input_view_nid, input_view_ty, init_nid, captures_vec, consuming) = {
-        let se = &entry.graph.skeleton.blocks[scan_block].side_effects[scan_idx];
-        let consuming = matches!(
-            &se.kind,
-            SideEffectKind::Pending(PendingSoac::Scan {
-                destination: SoacDestination::InputBuffer,
-                ..
-            }),
-        );
-        let input_view = se.operand_nodes[0];
-        let init = se.operand_nodes[1];
-        let captures: Vec<NodeId> = se.operand_nodes[2..2 + captures_count].to_vec();
-        let input_ty = entry.graph.types[&input_view].clone();
-        (input_view, input_ty, init, captures, consuming)
-    };
-
-    let chunked = chunk_soac_inputs(
-        &mut entry.graph,
-        &[(input_view_nid, input_view_ty.clone())],
-        total_threads,
-        ChunkInputKind::StorageOnly,
-        "Scan",
-    )?;
-    let chunked_input = chunked.views[0];
-
-    // Replace the Scan's input operand with the chunked view. For
-    // `OutputView` destination, also chunk the appended `output_view`
-    // operand. For `InputBuffer` destination, soac_expand writes back
-    // to chunked_input[i] (which IS output[chunk_start+i]) automatically
-    // — no separate output_view to chunk.
-    {
-        let se = &mut entry.graph.skeleton.blocks[scan_block].side_effects[scan_idx];
-        se.operand_nodes[0] = chunked_input;
-    }
-    if !consuming {
-        let (output_view_nid, output_view_ty) = {
-            let se = &entry.graph.skeleton.blocks[scan_block].side_effects[scan_idx];
-            let n = se.operand_nodes.len();
-            let v = se.operand_nodes[n - 1];
-            (v, entry.graph.types[&v].clone())
-        };
-        let output_storage = graph_ops::extract_storage_view_source(&entry.graph, output_view_nid)
-            .ok_or_else(|| "Scan output_view is not a StorageView".to_string())?;
-        let chunked_output = graph_ops::intern_chunked_storage_view(
-            &mut entry.graph,
-            output_storage,
-            chunked.chunk_start,
-            chunked.chunk_len,
-            output_view_ty,
-            None,
-        );
-        let se = &mut entry.graph.skeleton.blocks[scan_block].side_effects[scan_idx];
-        let last = se.operand_nodes.len() - 1;
-        se.operand_nodes[last] = chunked_output;
-    }
-
-    // Add a chunked Reduce computing the per-thread final accumulator.
-    // Operands: [chunked_input, init, ...captures].
-    let mut reduce_operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![chunked_input, init_nid];
-    reduce_operands.extend(captures_vec.iter().copied());
-    let final_acc = {
-        let mut next_effect = graph_ops::next_effect_token(&entry.graph);
-        let result = graph_ops::emit_pending_soac(
-            &mut entry.graph,
-            scan_block,
-            PendingSoac::Reduce {
-                func: op_func,
-                input_array_type: input_view_ty,
-                input_elem_type: elem_ty.clone(),
-            },
-            reduce_operands,
-            elem_ty.clone(),
-            &mut next_effect,
-            None,
-        );
-        result
-    };
-
-    // Store the final accumulator to block_sums[tid].
-    {
-        let mut next_effect = graph_ops::next_effect_token(&entry.graph);
-        let arr_ty = Type::Constructed(
-            TypeName::Array,
-            vec![
-                elem_ty.clone(),
-                Type::Constructed(TypeName::ArrayVariantView, vec![]),
-                Type::Variable(0),
-                // region stamped from the binding by intern_storage_view.
-                crate::types::no_region(),
-            ],
-        );
-        let block_sums_view =
-            graph_ops::intern_storage_view(&mut entry.graph, block_sums_binding, arr_ty, None);
-        graph_ops::emit_storage_store(
-            &mut entry.graph,
-            scan_block,
-            block_sums_view,
-            chunked.tid,
-            final_acc,
-            elem_ty.clone(),
-            &mut next_effect,
-            None,
-        );
-    }
-
-    entry.storage_bindings.push(crate::interface::StorageBindingDecl {
-        binding: crate::BindingRef::new(block_sums_binding.set, block_sums_binding.binding),
-        role: crate::interface::StorageRole::Intermediate,
-        elem_ty,
-        length: None,
-    });
-    Ok(())
-}
-
 /// Synthesize phase 2: a `1×1×1` compute entry that runs a sequential
 /// scan over `block_sums` and writes the prefixes into `block_offsets`.
 /// Uses `PendingSoac::Scan{OutputView}` so `soac_expand` handles the
@@ -2057,14 +1316,15 @@ pub fn synthesize_phase2_scan(
     let block_sums_view = b.emit_storage_view(block_sums_binding, arr_ty.clone());
     let block_offsets_view = b.emit_storage_view(block_offsets_binding, arr_ty.clone());
     let init_nid = graph_ops::clone_pure_subgraph(phase1_graph, b.graph_mut(), phase1_ne_nid)?;
-    b.emit_pending_scan_into(
+    b.emit_pending_screma_scan_into(
         op_func,
         block_sums_view,
-        arr_ty,
+        arr_ty.clone(),
         elem_ty,
         init_nid,
         vec![],
         block_offsets_view,
+        arr_ty,
     );
     Ok(b.build())
 }
@@ -2142,7 +1402,8 @@ pub fn synthesize_phase3_scan(
 
     // Call the swap-args wrapper instead of `op` directly: Map emits
     // `wrapper(elem, off)`, which the wrapper rewrites to `op(off, elem)`.
-    b.emit_pending_map_into(
+    let chunked_output_ty = arr_ty.clone();
+    b.emit_pending_screma_map_into(
         swap_wrapper_name,
         chunked_output,
         arr_ty.clone(),
@@ -2150,6 +1411,7 @@ pub fn synthesize_phase3_scan(
         elem_ty,
         vec![off],
         chunked_output,
+        chunked_output_ty,
     );
     b.build()
 }

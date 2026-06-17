@@ -62,29 +62,7 @@ pub fn compute_slot_source(
         return Ok(());
     }
 
-    // 2. Retargetable Map/Scan(Fresh).
-    if result_soac_is_map_or_scan(graph, source) {
-        let elem_ty = slot_ty.elem_type().cloned().expect("Map/Scan slot output is always an array");
-        let view = graph_ops::intern_storage_view(graph, binding, elem_ty.clone(), None);
-        if multi_source {
-            reject_sibling_consumers(graph, source, slot_index)?;
-        } else {
-            rewrite_sibling_index_consumers(
-                graph,
-                aliases,
-                block,
-                next_effect,
-                source,
-                view,
-                elem_ty,
-                slot_index,
-            )?;
-        }
-        retarget_map_scan(graph, source, view);
-        return Ok(());
-    }
-
-    // 2b. Retargetable array projection of Screma(Fresh). Field 0 is the
+    // 2. Retargetable array projection of Screma(Fresh). Field 0 is the
     // mapped output; field 1 is retargetable only for scan accumulators.
     if let (Some(elem_ty), Some((screma_result, field_idx))) = (
         slot_ty.elem_type().cloned(),
@@ -106,6 +84,16 @@ pub fn compute_slot_source(
             )?;
         }
         retarget_screma_array_projection(graph, screma_result, field_idx, view);
+        // After retargeting, the Project node operationally produces
+        // the view at runtime (the Screma's loop body wrote field 0
+        // through the view). Update the Project node's type to match
+        // so the verify-no-abstract pass doesn't flag its stale
+        // Composite array type. Also alias it for downstream consumers
+        // that perform NodeId substitution.
+        if let Some(view_ty) = graph.types.get(&view).cloned() {
+            graph.types.insert(source, view_ty);
+        }
+        aliases.insert(source, view);
         return Ok(());
     }
 
@@ -173,41 +161,45 @@ pub fn graphics_slot_source(
 // Classifier predicates
 // ----------------------------------------------------------------------------
 
-/// True iff the side-effect producing `result` is a `PendingSoac::Scan`
-/// with `destination: InputBuffer`. The scan writes its prefix into its
-/// input buffer; the entry's auto-bound output is unused.
+/// True iff `result` is `Project(Screma, k)` where the Screma's k-th
+/// tuple field is a Scan accumulator with `destination: InputBuffer` —
+/// i.e. a consuming scan. The scan writes its prefix into its input
+/// buffer; the entry's auto-bound output is unused.
 pub(crate) fn result_soac_is_consuming_scan(graph: &EGraph, result: NodeId) -> bool {
-    for (_, block) in &graph.skeleton.blocks {
-        for se in &block.side_effects {
-            if se.result == Some(result) {
-                return matches!(
-                    &se.kind,
-                    SideEffectKind::Pending(PendingSoac::Scan {
-                        destination: SoacDestination::InputBuffer,
-                        ..
-                    })
-                );
-            }
-        }
-    }
-    false
-}
-
-/// True iff the side-effect producing `result` is a Map or Scan(Fresh)
-/// SOAC retargetable to an `OutputView`. Scans already targeting
-/// `InputBuffer` are skipped here.
-pub(crate) fn result_soac_is_map_or_scan(graph: &EGraph, result: NodeId) -> bool {
-    for (_, block) in &graph.skeleton.blocks {
-        for se in &block.side_effects {
-            if se.result == Some(result) {
-                return matches!(
-                    &se.kind,
-                    SideEffectKind::Pending(PendingSoac::Map { .. })
-                        | SideEffectKind::Pending(PendingSoac::Scan {
-                            destination: SoacDestination::Fresh,
+    if let ENode::Pure {
+        op: PureOp::Project { index },
+        operands,
+    } = &graph.nodes[result]
+    {
+        let field_idx = *index as usize;
+        if let [screma_result] = operands.as_slice() {
+            for (_, block) in &graph.skeleton.blocks {
+                for se in &block.side_effects {
+                    if se.result == Some(*screma_result) {
+                        if let SideEffectKind::Pending(PendingSoac::Screma {
+                            map_destinations,
+                            accumulators,
+                            acc_destinations,
                             ..
-                        })
-                );
+                        }) = &se.kind
+                        {
+                            let n_maps = map_destinations.len();
+                            if field_idx >= n_maps {
+                                let acc_idx = field_idx - n_maps;
+                                if acc_idx < accumulators.len()
+                                    && matches!(
+                                        accumulators[acc_idx].kind,
+                                        crate::tlc::ScremaAccumulator::Scan
+                                    )
+                                    && acc_destinations.get(acc_idx) == Some(&SoacDestination::InputBuffer)
+                                {
+                                    return true;
+                                }
+                            }
+                        }
+                        return false;
+                    }
+                }
             }
         }
     }
@@ -279,66 +271,6 @@ pub(crate) fn is_unsized_array(ty: &Type<TypeName>) -> bool {
 // ----------------------------------------------------------------------------
 // Retarget + sibling-Index rewrite
 // ----------------------------------------------------------------------------
-
-/// Retarget the Map/Scan producing `target_result` to write into
-/// `output_view` instead of allocating a fresh buffer. Flips its
-/// `destination` to `OutputView` and appends the view as its last
-/// operand. Callers must pre-screen with `result_soac_is_map_or_scan`.
-pub(crate) fn retarget_map_scan(graph: &mut EGraph, target_result: NodeId, output_view: NodeId) {
-    for (_, block) in graph.skeleton.blocks.iter_mut() {
-        for se in &mut block.side_effects {
-            if se.result != Some(target_result) {
-                continue;
-            }
-            let kind = se.kind.clone();
-            match kind {
-                SideEffectKind::Pending(PendingSoac::Map {
-                    func,
-                    input_array_types,
-                    input_elem_types,
-                    output_elem_type,
-                    destination: _,
-                }) => {
-                    se.kind = SideEffectKind::Pending(PendingSoac::Map {
-                        func,
-                        input_array_types,
-                        input_elem_types,
-                        output_elem_type,
-                        destination: SoacDestination::OutputView,
-                    });
-                    se.operand_nodes.push(output_view);
-                }
-                SideEffectKind::Pending(PendingSoac::Scan {
-                    func,
-                    reduce_func,
-                    input_array_type,
-                    input_elem_type,
-                    destination: _,
-                }) => {
-                    se.kind = SideEffectKind::Pending(PendingSoac::Scan {
-                        func,
-                        reduce_func,
-                        input_array_type,
-                        input_elem_type,
-                        destination: SoacDestination::OutputView,
-                    });
-                    se.operand_nodes.push(output_view);
-                }
-                other => panic!(
-                    "retarget_map_scan: side effect for target_result={:?} \
-                     is not Map/Scan: {:?} — caller must screen with \
-                     result_soac_is_map_or_scan first",
-                    target_result, other
-                ),
-            }
-            return;
-        }
-    }
-    panic!(
-        "retarget_map_scan: no side effect produced target_result={:?}",
-        target_result
-    );
-}
 
 /// Retarget one array-producing side of the Screma producing `target_result`
 /// to write into `output_view`.
