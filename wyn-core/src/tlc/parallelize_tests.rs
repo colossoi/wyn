@@ -9,8 +9,8 @@
 //! T11 additionally verifies `required_params` — the subset of outer
 //! Lambda params that the restructured body actually references.
 
+use super::VarRef;
 use super::analyze_entry;
-use super::{PlannedBindings, PlannedScremaAccumulatorKind, VarRef, reserve_screma_bindings};
 use crate::ast::{self, Span, TypeName};
 use crate::tlc::{
     ArrayExpr, Def, DefMeta, Lambda, LoopKind, ScremaAccumulator, ScremaAccumulatorSpec, SoacBody,
@@ -270,44 +270,6 @@ fn t1c_tail_mixed_screma_is_recognised_by_analysis() {
         a.soac.original,
         SoacOp::Screma { ref accumulators, .. } if !accumulators.is_empty()
     ));
-}
-
-#[test]
-fn mixed_screma_binding_reservation_covers_reduce_and_scan_accumulators() {
-    let mut b = B::new();
-    let mut body = b.trivial_screma();
-    let TermKind::Soac(SoacOp::Screma { accumulators, .. }) = &mut body.kind else {
-        panic!("fixture should be Screma")
-    };
-    let mut scan = accumulators[0].clone();
-    scan.kind = ScremaAccumulator::Scan;
-    accumulators.push(scan);
-
-    let (bindings, next) = reserve_screma_bindings(
-        &match &body.kind {
-            TermKind::Soac(soac) => soac.clone(),
-            _ => unreachable!(),
-        },
-        7,
-    )
-    .expect("Screma bindings");
-
-    let PlannedBindings::Screma {
-        map_outputs,
-        accumulators,
-    } = bindings
-    else {
-        panic!("expected Screma planned bindings")
-    };
-    assert_eq!(map_outputs.len(), 1);
-    assert_eq!(accumulators.len(), 2);
-    assert_eq!(accumulators[0].kind, PlannedScremaAccumulatorKind::Reduce);
-    assert_eq!(accumulators[0].partials.unwrap().binding, 7);
-    assert_eq!(accumulators[0].result.unwrap().binding, 8);
-    assert_eq!(accumulators[1].kind, PlannedScremaAccumulatorKind::Scan);
-    assert_eq!(accumulators[1].block_sums.unwrap().binding, 9);
-    assert_eq!(accumulators[1].block_offsets.unwrap().binding, 10);
-    assert_eq!(next, 11);
 }
 
 /// T2: Lambda + deep Let chain + Soac. All lets should appear in

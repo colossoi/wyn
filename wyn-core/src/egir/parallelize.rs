@@ -1052,8 +1052,32 @@ pub fn synthesize_phase2_reduce_cloning_ne(
     partials_binding: BindingRef,
     result_binding: BindingRef,
 ) -> Result<EgirEntry, String> {
+    synthesize_phase2_reduce_cloning_ne_named(
+        format!("{}_phase2_combine", entry_name),
+        op_func,
+        elem_ty,
+        phase1_graph,
+        phase1_ne_nid,
+        partials_binding,
+        result_binding,
+    )
+}
+
+/// Same as `synthesize_phase2_reduce_cloning_ne` but caller picks the
+/// full entry name — Screma's multi-accumulator path uses suffixes like
+/// `_phase2_combine_0`, `_phase2_combine_1` so each combiner has a
+/// unique entry point.
+pub fn synthesize_phase2_reduce_cloning_ne_named(
+    full_name: String,
+    op_func: String,
+    elem_ty: Type<TypeName>,
+    phase1_graph: &super::types::EGraph,
+    phase1_ne_nid: NodeId,
+    partials_binding: BindingRef,
+    result_binding: BindingRef,
+) -> Result<EgirEntry, String> {
     use super::builder::EntryBuilder;
-    let mut b = EntryBuilder::new_compute(format!("{}_phase2_combine", entry_name), (PHASE2_WIDTH, 1, 1));
+    let mut b = EntryBuilder::new_compute(full_name, (PHASE2_WIDTH, 1, 1));
     b.declare_intermediate_storage(partials_binding, elem_ty.clone());
     b.declare_output_storage(result_binding, elem_ty.clone());
 
@@ -1141,41 +1165,47 @@ fn transform_screma_entry(
     if accumulators.len() != 1 {
         return None;
     }
-    match accumulators[0].kind {
-        PlannedScremaAccumulatorKind::Reduce => {
-            let phase2 = transform_screma_reduce_entry(entry, plan)?;
-            Some((vec![phase2], None))
-        }
-        PlannedScremaAccumulatorKind::Scan => {
-            let (phase2, phase3, swap_wrapper) = transform_screma_scan_entry(entry, plan)?;
-            Some((vec![phase2, phase3], Some(swap_wrapper)))
-        }
+    let all_reduce = accumulators.iter().all(|a| matches!(a.kind, PlannedScremaAccumulatorKind::Reduce));
+    let single_scan =
+        accumulators.len() == 1 && matches!(accumulators[0].kind, PlannedScremaAccumulatorKind::Scan);
+    if all_reduce {
+        let phases = transform_screma_reduce_entry(entry, plan)?;
+        Some((phases, None))
+    } else if single_scan {
+        let (phase2, phase3, swap_wrapper) = transform_screma_scan_entry(entry, plan)?;
+        Some((vec![phase2, phase3], Some(swap_wrapper)))
+    } else {
+        None
     }
 }
 
-/// 0+ map outputs (no captures) + exactly one Reduce accumulator with
-/// no captures and a scalar-literal NE. The entry is mutated in place
-/// into a chunked phase 1 (chunked input + chunked map output views
-/// + store-to-`partials[tid]` for the reduce result), and the
-/// synthesised phase 2 tree-reduces `partials` into `result` via
-/// `build_tree_reduce_phase2`.
-fn transform_screma_reduce_entry(entry: &mut EgirEntry, plan: &ParallelizationPlan) -> Option<EgirEntry> {
+/// 0+ map outputs (no captures) + N>=1 Reduce accumulators (no
+/// captures, scalar-literal NEs). The entry is mutated in place into a
+/// chunked phase 1 (chunked input + chunked map output views +
+/// store-to-`partials_i[tid]` per accumulator). One phase 2 entry is
+/// synthesised per accumulator (`{entry}_phase2_combine` for N=1, or
+/// `{entry}_phase2_combine_{i}` for N>=2) via
+/// `synthesize_phase2_reduce_cloning_ne_named`.
+fn transform_screma_reduce_entry(
+    entry: &mut EgirEntry,
+    plan: &ParallelizationPlan,
+) -> Option<Vec<EgirEntry>> {
     use crate::tlc::parallelize::PlannedBindings;
 
     // 1. Pull binding/dispatch info from the plan.
     let PlannedBindings::Screma {
         map_outputs: _,
-        accumulators,
+        accumulators: planned_accs,
     } = &plan.bindings
     else {
         return None;
     };
-    if accumulators.len() != 1 {
+    if planned_accs.is_empty() {
         return None;
     }
-    let acc_planned = &accumulators[0];
-    let partials_binding = acc_planned.partials?;
-    let result_binding = acc_planned.result?;
+    let acc_bindings: Vec<(BindingRef, BindingRef)> =
+        planned_accs.iter().map(|a| Some((a.partials?, a.result?))).collect::<Option<Vec<_>>>()?;
+    let n_accs = planned_accs.len();
     let total_threads = match plan.dispatch {
         crate::tlc::parallelize::DispatchModel::Fixed { local_size, .. } => local_size[0],
         crate::tlc::parallelize::DispatchModel::DerivedFromInputLength { workgroup_size, .. } => {
@@ -1186,14 +1216,12 @@ fn transform_screma_reduce_entry(entry: &mut EgirEntry, plan: &ParallelizationPl
     // 2. Locate the Screma side-effect and pull its metadata.
     let (block_id, idx) = find_pending_screma(entry)?;
     let (
-        reduce_func,
-        n_inputs,
-        n_accs,
+        reduce_funcs,
+        n_maps,
         map_output_view_ops,
-        input_view_nid,
-        input_view_ty,
-        init_nid,
-        elem_ty,
+        input_view_data,
+        init_nids,
+        elem_tys,
         screma_result_nid,
     ) = {
         let se = &entry.graph.skeleton.blocks[block_id].side_effects[idx];
@@ -1209,67 +1237,68 @@ fn transform_screma_reduce_entry(entry: &mut EgirEntry, plan: &ParallelizationPl
         else {
             return None;
         };
-        if accumulators.len() != 1 {
+        if accumulators.len() != n_accs {
             return None;
         }
-        let acc = &accumulators[0];
-        if !matches!(acc.kind, crate::tlc::ScremaAccumulator::Reduce) {
+        if !accumulators.iter().all(|a| matches!(a.kind, crate::tlc::ScremaAccumulator::Reduce)) {
             return None;
         }
-        if acc.step_capture_count != 0 || acc.reduce_op_capture_count != 0 {
+        if accumulators.iter().any(|a| a.step_capture_count != 0 || a.reduce_op_capture_count != 0) {
             return None;
         }
         if map_capture_counts.iter().any(|&c| c != 0) {
             return None;
         }
         let n_inputs = input_array_types.len();
-        if n_inputs != 1 {
+        if n_inputs == 0 {
             return None;
         }
-        let n_accs = accumulators.len();
         let n_maps = map_funcs.len();
-        // Phase 1 only handles map outputs that have been retargeted to
-        // OutputView (so realize_outputs already pinned their output
-        // buffer). Fresh map outputs would need the loop body to build an
-        // immutable array — incompatible with chunked parallel writes.
+        // Map outputs that have been retargeted to OutputView so the
+        // chunked writes inside the Screma loop body land in the right
+        // buffer. Fresh destinations would require building an immutable
+        // array per loop iteration — incompatible with chunked parallel
+        // writes.
         if !map_destinations.iter().all(|d| matches!(d, SoacDestination::OutputView)) {
             return None;
         }
         // Reduce accumulators expect Fresh destination (scalar result
-        // routed via a Project-based Store).
+        // routed via a Project-based Store outside the Screma loop).
         if !acc_destinations.iter().all(|d| matches!(d, SoacDestination::Fresh)) {
             return None;
         }
-        let input_nid = se.operand_nodes[0];
-        let init_nid = se.operand_nodes[n_inputs];
         // Operand layout (gate enforces zero captures everywhere):
         //   [inputs(n_inputs), init_accs(n_accs), map_output_views(n_maps),
         //    acc_output_views(0 — all Fresh)]
+        let input_view_data: Vec<(NodeId, Type<TypeName>)> = (0..n_inputs)
+            .map(|k| {
+                let v = se.operand_nodes[k];
+                (v, entry.graph.types[&v].clone())
+            })
+            .collect();
+        let init_nids: Vec<NodeId> = (0..n_accs).map(|k| se.operand_nodes[n_inputs + k]).collect();
         let base = n_inputs + n_accs;
         let map_view_ops: Vec<usize> = (0..n_maps).map(|m| base + m).collect();
-        let input_ty = entry.graph.types[&input_nid].clone();
         let result = se.result?;
-        let elem = entry.graph.types[&init_nid].clone();
+        let elem_tys: Vec<Type<TypeName>> =
+            init_nids.iter().map(|n| entry.graph.types[n].clone()).collect();
+        let reduce_funcs: Vec<String> = accumulators.iter().map(|a| a.reduce_op_func.clone()).collect();
         (
-            acc.reduce_op_func.clone(),
-            n_inputs,
-            n_accs,
+            reduce_funcs,
+            n_maps,
             map_view_ops,
-            input_nid,
-            input_ty,
-            init_nid,
-            elem,
+            input_view_data,
+            init_nids,
+            elem_tys,
             result,
         )
     };
-    debug_assert_eq!(n_inputs, 1);
-    debug_assert_eq!(n_accs, 1);
 
-    // 3. Chunk the input view and every map output view; swap them back
+    // 3. Chunk all input views and every map output view; swap them back
     // into the Screma operand list.
     let chunked = chunk_soac_inputs(
         &mut entry.graph,
-        &[(input_view_nid, input_view_ty)],
+        &input_view_data,
         total_threads,
         ChunkInputKind::StorageOrRange,
         "Screma",
@@ -1279,7 +1308,9 @@ fn transform_screma_reduce_entry(entry: &mut EgirEntry, plan: &ParallelizationPl
     let chunk_len = chunked.chunk_len;
     {
         let se = &mut entry.graph.skeleton.blocks[block_id].side_effects[idx];
-        se.operand_nodes[0] = chunked.views[0];
+        for (i, &new_view) in chunked.views.iter().enumerate() {
+            se.operand_nodes[i] = new_view;
+        }
     }
     for (m_idx, op_idx) in map_output_view_ops.iter().enumerate() {
         let orig_view = entry.graph.skeleton.blocks[block_id].side_effects[idx].operand_nodes[*op_idx];
@@ -1298,97 +1329,146 @@ fn transform_screma_reduce_entry(entry: &mut EgirEntry, plan: &ParallelizationPl
         se.operand_nodes[*op_idx] = chunked_view;
     }
 
-    // 4. Redirect the reduce result's auto-output Store(s) to
-    // `partials[tid]`. The Store's value is `Project { index: 0 } of
-    // screma_result_nid` — a chain rooted at screma_result_nid, which
-    // `value_projects_from` already accepts. Defensive multi-Store
-    // handling matches the Redomap path (mostly a no-op here — the
-    // result is a single scalar tuple field).
-    let arr_ty = Type::Constructed(
-        TypeName::Array,
-        vec![
-            elem_ty.clone(),
-            Type::Constructed(TypeName::ArrayVariantView, vec![]),
-            Type::Variable(0),
-            crate::types::no_region(),
-        ],
-    );
-    let partials_view = graph_ops::intern_storage_view(&mut entry.graph, partials_binding, arr_ty, None);
-    let new_place = entry.graph.intern_pure(
-        super::types::PureOp::ViewIndex,
-        smallvec![partials_view, chunked.tid],
-        elem_ty.clone(),
-    );
-
-    let mut output_stores: Vec<(BlockId, usize)> = Vec::new();
+    // 4. For each reduce accumulator, find the Store that consumes
+    // `Project { index: n_maps + acc_i } of screma_result_nid` and
+    // redirect its place to `partials_i[tid]`. Track the original
+    // binding for clearing the entry's output slot.
+    let mut keeper_stores: Vec<Option<(BlockId, usize, Option<BindingRef>)>> = vec![None; n_accs];
+    let mut duplicate_stores: Vec<(BlockId, usize)> = Vec::new();
     for (bid, block) in &entry.graph.skeleton.blocks {
         for (i, se) in block.side_effects.iter().enumerate() {
-            if matches!(&se.kind, SideEffectKind::Inst(InstKind::Store { .. }))
-                && se
+            if !matches!(&se.kind, SideEffectKind::Inst(InstKind::Store { .. })) {
+                continue;
+            }
+            let Some(&value_nid) = se.operand_nodes.get(1) else {
+                continue;
+            };
+            let Some(root_idx) = project_root_index(&entry.graph, value_nid, screma_result_nid) else {
+                continue;
+            };
+            if (root_idx as usize) < n_maps {
+                continue; // map output Stores aren't generated for OutputView destinations
+            }
+            let acc_i = (root_idx as usize) - n_maps;
+            if acc_i >= n_accs {
+                continue;
+            }
+            if keeper_stores[acc_i].is_none() {
+                let orig_bind = se
                     .operand_nodes
-                    .get(1)
-                    .is_some_and(|&v| value_projects_from(&entry.graph, v, screma_result_nid))
-            {
-                output_stores.push((bid, i));
+                    .get(0)
+                    .and_then(|&p| graph_ops::extract_storage_view_source(&entry.graph, p));
+                keeper_stores[acc_i] = Some((bid, i, orig_bind));
+            } else {
+                duplicate_stores.push((bid, i));
             }
         }
     }
-    let (keep_block, keep_idx) = *output_stores.first()?;
-    // Capture the original place's underlying binding (the reduce-acc's
-    // auto-allocated output) BEFORE redirecting — so step 5 below can
-    // clear exactly that slot on entry.outputs and leave the map-output
-    // bindings intact.
-    let reduce_acc_output_binding = {
-        let se = &entry.graph.skeleton.blocks[keep_block].side_effects[keep_idx];
-        se.operand_nodes.get(0).and_then(|&p| graph_ops::extract_storage_view_source(&entry.graph, p))
-    };
-    {
-        let se = &mut entry.graph.skeleton.blocks[keep_block].side_effects[keep_idx];
-        se.operand_nodes[0] = new_place;
-        // Keep value as-is — it's `Project { index: n_maps }` of the
-        // Screma tuple, which is the per-thread partial after chunking.
-    }
-    let mut to_remove: Vec<(BlockId, usize)> = output_stores.into_iter().skip(1).collect();
-    to_remove.sort_by(|a, b| b.1.cmp(&a.1));
-    for (bid, idx) in to_remove {
-        entry.graph.skeleton.blocks[bid].side_effects.remove(idx);
-    }
-
-    // 5. Clear the reduce-acc's specific output slot on the entry (phase
-    // 2 owns the result binding now). Map output slots keep their
-    // storage_binding so phase 1's chunked writes land in the right
-    // buffer. Register the partials buffer as Intermediate.
-    if let Some(rb) = reduce_acc_output_binding {
-        for o in entry.outputs.iter_mut() {
-            if o.storage_binding == Some(rb) {
-                o.storage_binding = None;
-            }
+    for (acc_i, slot) in keeper_stores.iter().enumerate() {
+        if slot.is_none() {
+            // No store for this accumulator's tuple field — bail out
+            // (caller falls back to serial via plan = None in another
+            // path; but here we've already partially mutated the entry,
+            // which is a Screma transform bug. Keep this as a hard fail
+            // for diagnosis.)
+            let _ = acc_i;
+            return None;
         }
     }
-    entry.storage_bindings.push(crate::interface::StorageBindingDecl {
-        binding: partials_binding,
-        role: crate::interface::StorageRole::Intermediate,
-        elem_ty: elem_ty.clone(),
-        length: None,
-    });
+    // Redirect each keeper store.
+    for (acc_i, (partials_binding, _)) in acc_bindings.iter().enumerate() {
+        let (blk, sx, _) = keeper_stores[acc_i].expect("checked above");
+        let elem_ty = elem_tys[acc_i].clone();
+        let arr_ty = Type::Constructed(
+            TypeName::Array,
+            vec![
+                elem_ty.clone(),
+                Type::Constructed(TypeName::ArrayVariantView, vec![]),
+                Type::Variable(0),
+                crate::types::no_region(),
+            ],
+        );
+        let partials_view =
+            graph_ops::intern_storage_view(&mut entry.graph, *partials_binding, arr_ty, None);
+        let new_place = entry.graph.intern_pure(
+            super::types::PureOp::ViewIndex,
+            smallvec![partials_view, chunked.tid],
+            elem_ty,
+        );
+        entry.graph.skeleton.blocks[blk].side_effects[sx].operand_nodes[0] = new_place;
+    }
+    // Drop duplicates highest-idx-first so earlier indices stay valid.
+    duplicate_stores.sort_by(|a, b| b.1.cmp(&a.1));
+    for (bid, sx) in duplicate_stores {
+        entry.graph.skeleton.blocks[bid].side_effects.remove(sx);
+    }
 
-    // 6. Synthesise phase 2 — tree-reduce of `partials` into `result`,
-    // cloning the NE subgraph from phase 1's graph snapshot. Snapshot
-    // before mutation would be more economical, but cloning post-mutation
-    // is harmless (the NE node is pure and untouched).
+    // 5. Clear the entry.outputs slot for each redirected accumulator
+    // binding; map output slots keep their storage_binding. Register
+    // each partials buffer as Intermediate.
+    for (acc_i, (partials_binding, _)) in acc_bindings.iter().enumerate() {
+        if let Some((_, _, Some(orig))) = keeper_stores[acc_i] {
+            for o in entry.outputs.iter_mut() {
+                if o.storage_binding == Some(orig) {
+                    o.storage_binding = None;
+                }
+            }
+        }
+        entry.storage_bindings.push(crate::interface::StorageBindingDecl {
+            binding: *partials_binding,
+            role: crate::interface::StorageRole::Intermediate,
+            elem_ty: elem_tys[acc_i].clone(),
+            length: None,
+        });
+    }
+
+    // 6. Synthesise one phase 2 entry per accumulator. Cloning NEs from
+    // the post-mutation graph is harmless — the NE node is pure and
+    // hasn't been touched.
     let phase1_snapshot = entry.graph.clone();
-    let phase2 = synthesize_phase2_reduce_cloning_ne(
-        &entry.name,
-        reduce_func,
-        elem_ty,
-        &phase1_snapshot,
-        init_nid,
-        partials_binding,
-        result_binding,
-    )
-    .ok()?;
+    let mut phase2s = Vec::with_capacity(n_accs);
+    for (acc_i, (partials_binding, result_binding)) in acc_bindings.iter().enumerate() {
+        let phase2_name = if n_accs == 1 {
+            format!("{}_phase2_combine", entry.name)
+        } else {
+            format!("{}_phase2_combine_{}", entry.name, acc_i)
+        };
+        let phase2 = synthesize_phase2_reduce_cloning_ne_named(
+            phase2_name,
+            reduce_funcs[acc_i].clone(),
+            elem_tys[acc_i].clone(),
+            &phase1_snapshot,
+            init_nids[acc_i],
+            *partials_binding,
+            *result_binding,
+        )
+        .ok()?;
+        phase2s.push(phase2);
+    }
+    Some(phase2s)
+}
 
-    Some(phase2)
+/// If `value` is a chain of `Project`s ending with `root` as the
+/// innermost operand, returns the innermost `Project`'s index. Used to
+/// match Screma tuple-field Stores back to their accumulator index.
+fn project_root_index(graph: &super::types::EGraph, value: NodeId, root: NodeId) -> Option<u32> {
+    let mut cur = value;
+    let mut last_index = None;
+    loop {
+        if cur == root {
+            return last_index;
+        }
+        match &graph.nodes[cur] {
+            super::types::ENode::Pure {
+                op: super::types::PureOp::Project { index },
+                operands,
+            } => {
+                last_index = Some(*index);
+                cur = operands[0];
+            }
+            _ => return None,
+        }
+    }
 }
 
 /// 0+ map outputs (no captures) + exactly one Scan accumulator with no
