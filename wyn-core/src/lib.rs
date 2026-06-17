@@ -667,6 +667,20 @@ impl std::ops::Deref for TlcSoaNormalized {
 }
 
 impl TlcSoaNormalized {
+    /// Force-inline every user function whose body contains a SOAC, so
+    /// multi-consumer producer/consumer patterns (e.g. `center(filt) ⇒
+    /// sum(filt) / length(filt)`) become syntactically visible to fusion.
+    /// Runs *before* `fuse_maps`: fusion's structural pattern-match expects
+    /// SOACs at the top of a let-chain, but normalization passes that run
+    /// later (`normalize_outputs`, the if-over-producer rewrite) bury the
+    /// SOACs deeper, so this is the last spot where inlining still feeds
+    /// the existing fuse_maps pipeline correctly.
+    pub fn force_inline_soac_helpers(self) -> TlcSoaNormalized {
+        let mut inner = self.0;
+        inner.tlc = tlc::inline::run_force_soac_helpers(inner.tlc);
+        TlcSoaNormalized(inner)
+    }
+
     /// Fuse consecutive SOAC operations to eliminate intermediate arrays.
     pub fn fuse_maps(self) -> TlcFused {
         let mut inner = self.0;

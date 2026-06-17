@@ -289,7 +289,10 @@ fn compile_file(
     // Each is its own pipeline step so timing breaks down per pass in
     // verbose mode.
     let tlc_normed = time("normalize_soacs", verbose, || tlc_optimized.normalize_soacs());
-    let tlc_fused = time("fuse_maps", verbose, || tlc_normed.fuse_maps());
+    let tlc_force_inlined = time("force_inline_soac_helpers", verbose, || {
+        tlc_normed.force_inline_soac_helpers()
+    });
+    let tlc_fused = time("fuse_maps", verbose, || tlc_force_inlined.fuse_maps());
     let tlc_owned = time("apply_ownership", verbose, || tlc_fused.apply_ownership())?;
 
     // Normalise compute-entry tails into explicit per-slot `OutputSlotStore`

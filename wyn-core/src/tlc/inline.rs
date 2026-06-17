@@ -16,6 +16,127 @@ use std::collections::{HashMap, HashSet};
 /// Maximum term size for a user function to be inlined.
 const INLINE_SIZE_THRESHOLD: usize = 30;
 
+/// Force-inline every helper whose body contains a SOAC anywhere in its
+/// term tree. This mirrors Futhark's "inline array/parallel callees" rule:
+/// a helper that performs SOAC work behind a call boundary blocks fusion
+/// from seeing the producer/consumer relationship across the boundary,
+/// so we expose it by inlining. Size threshold is ignored — a helper
+/// with a SOAC is by definition critical to fusion, regardless of source
+/// LOC.
+///
+/// Iterates to a fixpoint so chains like `clump → center → sum` (each a
+/// SOAC helper) fully expand: one round inlines `center`, the next sees
+/// `sum` calls inside the freshly-expanded clump body and inlines those
+/// too.
+pub fn run_force_soac_helpers(mut program: Program) -> Program {
+    // Bound iterations to guard against pathological recursion through
+    // hand-crafted call graphs; typical wyn helper depth is 2–3.
+    for _ in 0..8 {
+        let candidates = build_soac_helper_candidates(&program);
+        if candidates.is_empty() {
+            return program;
+        }
+        // Stop when nothing in the program calls any current candidate.
+        // (Inlining one round may expose new candidates — e.g. inlining
+        // `sum` into `center`'s body makes `center` SOAC-bearing and a
+        // candidate next round — so we re-detect candidates each iter.)
+        if !any_def_calls_candidate(&program, &candidates) {
+            return program;
+        }
+        let mut term_ids = TermIdSource::new();
+        let new_defs: Vec<Def> = program
+            .defs
+            .into_iter()
+            .map(|def| {
+                let body = inline_term(def.body, &candidates, &mut term_ids);
+                Def { body, ..def }
+            })
+            .collect();
+        let new_defs = dead_code_eliminate(new_defs);
+        program = Program {
+            defs: new_defs,
+            symbols: program.symbols,
+            ..program
+        };
+    }
+    program
+}
+
+fn build_soac_helper_candidates(program: &Program) -> HashMap<SymbolId, InlineBody> {
+    let mut candidates = HashMap::new();
+    for def in &program.defs {
+        if !matches!(def.meta, DefMeta::Function) {
+            continue;
+        }
+        // Entry points are roots, never call sites.
+        let (params, body) = extract_lambda_params(&def.body);
+        if params.is_empty() {
+            continue;
+        }
+        if has_control_flow(&body) {
+            continue;
+        }
+        if !contains_soac(&body) {
+            continue;
+        }
+        candidates.insert(def.name, InlineBody { params, body });
+    }
+    candidates
+}
+
+/// True if `term` contains anything fusion's classifier treats as a use of an
+/// array: a `Soac` node, *or* a call to the `length` builtin. Helpers that
+/// hide either behind a non-inlined call boundary block multi-consumer
+/// fusion the same way, so force-inline catches both.
+fn contains_soac(term: &Term) -> bool {
+    if matches!(&term.kind, TermKind::Soac(_)) {
+        return true;
+    }
+    if is_length_intrinsic_call(term) {
+        return true;
+    }
+    let mut found = false;
+    term.for_each_child(&mut |c| {
+        if !found {
+            found = contains_soac(c);
+        }
+    });
+    found
+}
+
+fn is_length_intrinsic_call(term: &Term) -> bool {
+    let TermKind::App { func, args } = &term.kind else {
+        return false;
+    };
+    if args.len() != 1 {
+        return false;
+    }
+    let TermKind::Var(super::VarRef::Builtin { id, .. }) = &func.kind else {
+        return false;
+    };
+    *id == crate::builtins::catalog().known().length
+}
+
+fn any_def_calls_candidate(program: &Program, candidates: &HashMap<SymbolId, InlineBody>) -> bool {
+    fn walk(term: &Term, cs: &HashMap<SymbolId, InlineBody>) -> bool {
+        if let TermKind::App { func, .. } = &term.kind {
+            if let TermKind::Var(VarRef::Symbol(s)) = &func.kind {
+                if cs.contains_key(s) {
+                    return true;
+                }
+            }
+        }
+        let mut found = false;
+        term.for_each_child(&mut |c| {
+            if !found {
+                found = walk(c, cs);
+            }
+        });
+        found
+    }
+    program.defs.iter().any(|def| walk(&def.body, candidates))
+}
+
 // =============================================================================
 // Public API
 // =============================================================================
@@ -306,6 +427,13 @@ fn mk(ids: &mut TermIdSource, ty: Type<TypeName>, span: Span, kind: TermKind) ->
 }
 
 /// Build Let bindings to substitute params with args, wrapping the inlined body.
+///
+/// The let's `name_ty` comes from the *arg*'s concrete type rather than the
+/// param's declared type. The param's declared type may be polymorphic
+/// (e.g. `[]T` is `Array[T, Abstract, Skolem, …]`); the arg at the call site
+/// has the concrete instantiation. Using the arg type avoids dragging the
+/// Abstract array variant into post-inline let chains where it would later
+/// hit `egir::verify_no_abstract` at backend lowering.
 pub(crate) fn build_inline_lets(
     params: &[(SymbolId, Type<TypeName>)],
     args: &[Term],
@@ -314,14 +442,14 @@ pub(crate) fn build_inline_lets(
     ids: &mut TermIdSource,
 ) -> Term {
     let mut result = body;
-    for ((sym, param_ty), arg) in params.iter().rev().zip(args.iter().rev()) {
+    for ((sym, _param_ty), arg) in params.iter().rev().zip(args.iter().rev()) {
         result = mk(
             ids,
             result.ty.clone(),
             span,
             TermKind::Let {
                 name: *sym,
-                name_ty: param_ty.clone(),
+                name_ty: arg.ty.clone(),
                 rhs: Box::new(arg.clone()),
                 body: Box::new(result),
             },

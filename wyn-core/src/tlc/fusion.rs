@@ -604,11 +604,17 @@ fn classify_uses_in_owner(
     ctx: &FusionContext<'_>,
     term_ids: &mut TermIdSource,
 ) -> Vec<UseSite> {
+    // Alias-aware classification: when inlining wraps a call body in
+    // `let X = Var(producer) in body`, the body uses `X` as an alias for
+    // the producer. Track aliases as we descend so the recognizers see
+    // through them.
+    let mut producers: std::collections::HashSet<SymbolId> = std::collections::HashSet::new();
+    producers.insert(producer_sym);
     let mut uses = Vec::new();
-    collect_classified_uses(term, owner, producer_sym, ctx, term_ids, true, &mut uses);
+    collect_classified_uses(term, owner, &producers, ctx, term_ids, true, &mut uses);
 
     let recognized_refs = uses.len();
-    let raw_refs = scoped_var_ref_count(term, producer_sym);
+    let raw_refs = aliased_var_ref_count(term, &producers);
     if raw_refs > recognized_refs {
         uses.push(UseSite {
             owner,
@@ -622,13 +628,13 @@ fn classify_uses_in_owner(
 fn collect_classified_uses(
     term: &Term,
     owner: UseOwner,
-    producer_sym: SymbolId,
+    producers: &std::collections::HashSet<SymbolId>,
     ctx: &FusionContext<'_>,
     term_ids: &mut TermIdSource,
     allow_screma_input: bool,
     uses: &mut Vec<UseSite>,
 ) {
-    if is_length_call_of(term, producer_sym) {
+    if is_length_call_of(term, producers) {
         uses.push(UseSite {
             owner,
             kind: UseKind::Length {
@@ -641,7 +647,7 @@ fn collect_classified_uses(
     }
 
     let semantics = classify_with_context(term, ctx, term_ids);
-    let input_indices = semantic_input_indices(&semantics, producer_sym);
+    let input_indices = semantic_input_indices(&semantics, producers);
     if !input_indices.is_empty() {
         for input_index in input_indices {
             uses.push(UseSite {
@@ -659,7 +665,7 @@ fn collect_classified_uses(
     }
 
     if allow_screma_input {
-        let screma_inputs = top_screma_input_count(term, producer_sym);
+        let screma_inputs = top_screma_input_count(term, producers);
         if screma_inputs > 0 {
             for _ in 0..screma_inputs {
                 uses.push(UseSite {
@@ -672,11 +678,24 @@ fn collect_classified_uses(
     }
 
     match &term.kind {
-        TermKind::Lambda(lam) if lam.params.iter().any(|(sym, _)| *sym == producer_sym) => {}
+        TermKind::Lambda(lam) if lam.params.iter().any(|(sym, _)| producers.contains(sym)) => {}
         TermKind::Let { name, rhs, body, .. } => {
-            collect_classified_uses(rhs, owner, producer_sym, ctx, term_ids, false, uses);
-            if *name != producer_sym {
-                collect_classified_uses(body, owner, producer_sym, ctx, term_ids, false, uses);
+            // Aliasing-let `let X = Var(producer-or-alias) in body`: the
+            // rhs is structural — don't classify it as a consumer use.
+            // Extend the alias set with `X` and recurse into body.
+            let is_alias_binding = matches!(
+                &rhs.kind,
+                TermKind::Var(VarRef::Symbol(s)) if producers.contains(s)
+            );
+            if is_alias_binding {
+                let mut extended = producers.clone();
+                extended.insert(*name);
+                collect_classified_uses(body, owner, &extended, ctx, term_ids, false, uses);
+            } else {
+                collect_classified_uses(rhs, owner, producers, ctx, term_ids, false, uses);
+                if !producers.contains(name) {
+                    collect_classified_uses(body, owner, producers, ctx, term_ids, false, uses);
+                }
             }
         }
         TermKind::Loop {
@@ -687,51 +706,62 @@ fn collect_classified_uses(
             body,
             ..
         } => {
-            collect_classified_uses(init, owner, producer_sym, ctx, term_ids, false, uses);
+            collect_classified_uses(init, owner, producers, ctx, term_ids, false, uses);
             for (_, _, extraction) in init_bindings {
-                collect_classified_uses(extraction, owner, producer_sym, ctx, term_ids, false, uses);
+                collect_classified_uses(extraction, owner, producers, ctx, term_ids, false, uses);
             }
             match kind {
                 super::LoopKind::For { var, iter, .. } => {
-                    collect_classified_uses(iter, owner, producer_sym, ctx, term_ids, false, uses);
-                    if *loop_var != producer_sym && *var != producer_sym {
-                        collect_classified_uses(body, owner, producer_sym, ctx, term_ids, false, uses);
+                    collect_classified_uses(iter, owner, producers, ctx, term_ids, false, uses);
+                    if !producers.contains(loop_var) && !producers.contains(var) {
+                        collect_classified_uses(body, owner, producers, ctx, term_ids, false, uses);
                     }
                 }
                 super::LoopKind::ForRange { var, bound, .. } => {
-                    collect_classified_uses(bound, owner, producer_sym, ctx, term_ids, false, uses);
-                    if *loop_var != producer_sym && *var != producer_sym {
-                        collect_classified_uses(body, owner, producer_sym, ctx, term_ids, false, uses);
+                    collect_classified_uses(bound, owner, producers, ctx, term_ids, false, uses);
+                    if !producers.contains(loop_var) && !producers.contains(var) {
+                        collect_classified_uses(body, owner, producers, ctx, term_ids, false, uses);
                     }
                 }
                 super::LoopKind::While { cond } => {
-                    collect_classified_uses(cond, owner, producer_sym, ctx, term_ids, false, uses);
-                    if *loop_var != producer_sym {
-                        collect_classified_uses(body, owner, producer_sym, ctx, term_ids, false, uses);
+                    collect_classified_uses(cond, owner, producers, ctx, term_ids, false, uses);
+                    if !producers.contains(loop_var) {
+                        collect_classified_uses(body, owner, producers, ctx, term_ids, false, uses);
                     }
                 }
             }
         }
         _ => term.for_each_child(&mut |child| {
-            collect_classified_uses(child, owner, producer_sym, ctx, term_ids, false, uses);
+            collect_classified_uses(child, owner, producers, ctx, term_ids, false, uses);
         }),
     }
 }
 
-fn semantic_input_indices(semantics: &ArraySemantics, sym: SymbolId) -> Vec<usize> {
+fn semantic_input_indices(
+    semantics: &ArraySemantics,
+    producers: &std::collections::HashSet<SymbolId>,
+) -> Vec<usize> {
     semantics
         .input_exprs()
         .iter()
         .enumerate()
-        .filter_map(|(idx, ae)| (ae.as_named_ref() == Some(sym)).then_some(idx))
+        .filter_map(|(idx, ae)| {
+            ae.as_named_ref().filter(|s| producers.contains(s)).map(|_| idx)
+        })
         .collect()
 }
 
-fn top_screma_input_count(term: &Term, sym: SymbolId) -> usize {
+fn top_screma_input_count(
+    term: &Term,
+    producers: &std::collections::HashSet<SymbolId>,
+) -> usize {
     let TermKind::Soac(SoacOp::Screma { inputs, .. }) = &term.kind else {
         return 0;
     };
-    inputs.iter().filter(|input| input.as_named_ref() == Some(sym)).count()
+    inputs
+        .iter()
+        .filter(|input| input.as_named_ref().is_some_and(|s| producers.contains(&s)))
+        .count()
 }
 
 fn find_direct_horizontal_map_plan(
@@ -1189,6 +1219,12 @@ fn apply_planned_screma_rewrite(
     plan: PlannedScremaRewrite,
     term_ids: &mut TermIdSource,
 ) -> (Vec<LetBinding>, HashMap<TermId, ProjectionTemplate>, Option<Term>) {
+    // The producer symbol(s) being replaced — their bindings disappear,
+    // so any leftover `Var(producer)` references (e.g. structural alias
+    // lets `let X = Var(filt) in body` that the classifier saw through)
+    // need to be rebound to `Var(tuple_sym)` to keep the term well-formed.
+    let producer_syms: Vec<SymbolId> =
+        plan.rewrite.skip_indices.iter().map(|&i| bindings[i].name).collect();
     let mut new_bindings = Vec::with_capacity(bindings.len() + 1 - plan.rewrite.skip_indices.len());
     for (idx, binding) in bindings.iter().enumerate() {
         if idx == plan.rewrite.insert_at {
@@ -1206,8 +1242,12 @@ fn apply_planned_screma_rewrite(
                 term_ids,
             ));
         } else {
+            let mut rhs = replace_projection_terms(binding.rhs.clone(), &plan.term_replacements, term_ids);
+            for &p in &producer_syms {
+                rhs = substitute_sym(rhs, p, plan.rewrite.tuple_sym, term_ids);
+            }
             new_bindings.push(LetBinding {
-                rhs: replace_projection_terms(binding.rhs.clone(), &plan.term_replacements, term_ids),
+                rhs,
                 ..binding.clone()
             });
         }
@@ -1562,7 +1602,7 @@ fn substitute_term_in_array_expr(
     }
 }
 
-fn is_length_call_of(term: &Term, producer_sym: SymbolId) -> bool {
+fn is_length_call_of(term: &Term, producers: &std::collections::HashSet<SymbolId>) -> bool {
     let TermKind::App { func, args } = &term.kind else {
         return false;
     };
@@ -1577,16 +1617,37 @@ fn is_length_call_of(term: &Term, producer_sym: SymbolId) -> bool {
     }
     matches!(
         &args[0].kind,
-        TermKind::Var(VarRef::Symbol(sym)) if *sym == producer_sym
+        TermKind::Var(VarRef::Symbol(sym)) if producers.contains(sym)
     )
 }
 
-fn scoped_var_ref_count(term: &Term, sym: SymbolId) -> usize {
+/// Count raw `Var(p)` references for any `p` in `producers`, ignoring the
+/// rhs of aliasing-let bindings `let X = Var(p) in body` (those are
+/// structural pass-throughs, not consumer uses; `X` joins the alias set
+/// when descending into `body`). Mirrors `collect_classified_uses`'s
+/// scoping so `raw_refs` and `recognized_refs` agree.
+fn aliased_var_ref_count(
+    term: &Term,
+    producers: &std::collections::HashSet<SymbolId>,
+) -> usize {
     match &term.kind {
-        TermKind::Var(VarRef::Symbol(s)) if *s == sym => 1,
-        TermKind::Lambda(lam) if lam.params.iter().any(|(p, _)| *p == sym) => 0,
+        TermKind::Var(VarRef::Symbol(s)) if producers.contains(s) => 1,
+        TermKind::Lambda(lam) if lam.params.iter().any(|(p, _)| producers.contains(p)) => 0,
         TermKind::Let { name, rhs, body, .. } => {
-            scoped_var_ref_count(rhs, sym) + if *name == sym { 0 } else { scoped_var_ref_count(body, sym) }
+            let is_alias_binding = matches!(
+                &rhs.kind,
+                TermKind::Var(VarRef::Symbol(s)) if producers.contains(s)
+            );
+            if is_alias_binding {
+                let mut extended = producers.clone();
+                extended.insert(*name);
+                aliased_var_ref_count(body, &extended)
+            } else {
+                let rhs_count = aliased_var_ref_count(rhs, producers);
+                let body_count =
+                    if producers.contains(name) { 0 } else { aliased_var_ref_count(body, producers) };
+                rhs_count + body_count
+            }
         }
         TermKind::Loop {
             loop_var,
@@ -1596,33 +1657,36 @@ fn scoped_var_ref_count(term: &Term, sym: SymbolId) -> usize {
             body,
             ..
         } => {
-            let mut count = scoped_var_ref_count(init, sym)
-                + init_bindings
-                    .iter()
-                    .map(|(_, _, extraction)| scoped_var_ref_count(extraction, sym))
-                    .sum::<usize>();
-            let body_shadowed = match kind {
+            let mut total = aliased_var_ref_count(init, producers);
+            for (_, _, extraction) in init_bindings {
+                total += aliased_var_ref_count(extraction, producers);
+            }
+            match kind {
                 super::LoopKind::For { var, iter, .. } => {
-                    count += scoped_var_ref_count(iter, sym);
-                    *loop_var == sym || *var == sym
+                    total += aliased_var_ref_count(iter, producers);
+                    if !producers.contains(loop_var) && !producers.contains(var) {
+                        total += aliased_var_ref_count(body, producers);
+                    }
                 }
                 super::LoopKind::ForRange { var, bound, .. } => {
-                    count += scoped_var_ref_count(bound, sym);
-                    *loop_var == sym || *var == sym
+                    total += aliased_var_ref_count(bound, producers);
+                    if !producers.contains(loop_var) && !producers.contains(var) {
+                        total += aliased_var_ref_count(body, producers);
+                    }
                 }
                 super::LoopKind::While { cond } => {
-                    count += scoped_var_ref_count(cond, sym);
-                    *loop_var == sym
+                    total += aliased_var_ref_count(cond, producers);
+                    if !producers.contains(loop_var) {
+                        total += aliased_var_ref_count(body, producers);
+                    }
                 }
-            };
-            if body_shadowed { count } else { count + scoped_var_ref_count(body, sym) }
+            }
+            total
         }
         _ => {
-            let mut count = 0;
-            term.for_each_child(&mut |child| {
-                count += scoped_var_ref_count(child, sym);
-            });
-            count
+            let mut total = 0;
+            term.for_each_child(&mut |c| total += aliased_var_ref_count(c, producers));
+            total
         }
     }
 }
