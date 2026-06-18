@@ -969,10 +969,12 @@ impl TlcGeneratedLambdasFolded {
     /// explicitly.
     pub fn to_egraph(self) -> std::result::Result<EgirParallelized, ConvertError> {
         let empty = std::collections::HashMap::new();
+        let input_lens = tlc::input_slice_bounds::compute_for_program(&self.0.tlc);
         egir::from_tlc::run(
             &self.0.tlc,
             pipeline_descriptor::PipelineDescriptor::default(),
             &empty,
+            &input_lens,
         )
         .and_then(|inner| EgirRaw(inner).realize_outputs().map(|a| a.parallelize(&empty)))
     }
@@ -1031,10 +1033,12 @@ impl TlcSmallInlined {
     /// explicitly.
     pub fn to_egraph(self) -> std::result::Result<EgirParallelized, ConvertError> {
         let empty = std::collections::HashMap::new();
+        let input_lens = tlc::input_slice_bounds::compute_for_program(&self.0.tlc);
         egir::from_tlc::run(
             &self.0.tlc,
             pipeline_descriptor::PipelineDescriptor::default(),
             &empty,
+            &input_lens,
         )
         .and_then(|inner| EgirRaw(inner).realize_outputs().map(|a| a.parallelize(&empty)))
     }
@@ -1077,7 +1081,8 @@ impl TlcParallelized {
         let TlcPipelineInner {
             tlc, pipeline, plans, ..
         } = self.0;
-        egir::from_tlc::run(&tlc, pipeline, &plans)
+        let input_lens = tlc::input_slice_bounds::compute_for_program(&tlc);
+        egir::from_tlc::run(&tlc, pipeline, &plans, &input_lens)
             .and_then(|inner| EgirRaw(inner).realize_outputs().map(|a| a.parallelize(&plans)))
     }
 }
@@ -1126,11 +1131,44 @@ impl std::ops::Deref for TlcReachable {
 }
 
 impl TlcReachable {
+    /// Run `tlc::input_slice_bounds` over every entry, returning a state
+    /// that carries the inferred per-entry minimum-required input
+    /// buffer lengths alongside the program. `TlcReachable.to_egraph()`
+    /// is intentionally absent: the only mainline path off `TlcReachable`
+    /// is through this analyzer, which keeps the descriptor's input
+    /// `length` fields populated for every storage-bound input the body
+    /// slices.
+    pub fn infer_input_slice_bounds(self) -> TlcInputSliceBoundsInferred {
+        let input_lens = tlc::input_slice_bounds::compute_for_program(&self.0.tlc);
+        TlcInputSliceBoundsInferred {
+            inner: self.0,
+            input_lens,
+        }
+    }
+}
+
+/// TLC after `input_slice_bounds` inference. Same program as
+/// `TlcReachable`; carries a per-entry-name → per-`SymbolId` map of
+/// minimum-required input buffer lengths that flows into
+/// `EntryInput.length` at `to_egraph` time.
+pub struct TlcInputSliceBoundsInferred {
+    pub inner: TlcPipelineInner,
+    pub input_lens: tlc::input_slice_bounds::ProgramBounds,
+}
+
+impl std::ops::Deref for TlcInputSliceBoundsInferred {
+    type Target = TlcPipelineInner;
+    fn deref(&self) -> &TlcPipelineInner {
+        &self.inner
+    }
+}
+
+impl TlcInputSliceBoundsInferred {
     pub fn to_egraph(self) -> std::result::Result<EgirParallelized, ConvertError> {
         let TlcPipelineInner {
             tlc, pipeline, plans, ..
-        } = self.0;
-        egir::from_tlc::run(&tlc, pipeline, &plans)
+        } = self.inner;
+        egir::from_tlc::run(&tlc, pipeline, &plans, &self.input_lens)
             .and_then(|inner| EgirRaw(inner).realize_outputs().map(|a| a.parallelize(&plans)))
     }
 }
@@ -1343,17 +1381,41 @@ pub fn compile_thru_frontend(source: &str) -> error::Result<TypeChecked> {
         .type_check(&mut module_manager)
 }
 
-/// Run the canonical TLC optimization pipeline (no compute parallelization,
-/// no hole-filling) through `filter_reachable`.
+/// Internal: run frontend + TLC pipeline with explicit
+/// `disable_parallelize`, returning `TlcReachable`. Parameterized so the
+/// canonical (`compile_thru_tlc`) and single-stage (`compile_thru_*
+/// _single_stage`) variants share the same code path.
 #[cfg(test)]
-pub fn compile_thru_tlc(source: &str) -> error::Result<TlcReachable> {
+fn compile_thru_tlc_with(source: &str, disable_parallelize: bool) -> error::Result<TlcReachable> {
     let (mut node_counter, mut module_manager) = cached_compiler_init();
     let type_checked = Compiler::parse(source, &mut node_counter)?
         .elaborate_modules(&mut module_manager, &mut node_counter)?
         .resolve(&module_manager)?
         .fold_ast_constants()
         .type_check(&mut module_manager)?;
-    Ok(type_checked.to_tlc(&module_manager, false).pin_entry_regions()?.optimize_for_test(false))
+    Ok(type_checked
+        .to_tlc(&module_manager, false)
+        .pin_entry_regions()?
+        .optimize_for_test(disable_parallelize))
+}
+
+/// Run the canonical TLC optimization pipeline (no compute parallelization,
+/// no hole-filling) through `filter_reachable`.
+#[cfg(test)]
+pub fn compile_thru_tlc(source: &str) -> error::Result<TlcReachable> {
+    compile_thru_tlc_with(source, false)
+}
+
+/// Internal: run all the way through EGIR + elaborate to SSA from a
+/// pre-built `TlcReachable`. Both `compile_thru_ssa` and
+/// `compile_thru_spirv_single_stage` build the SSA the same way; only
+/// the upstream parallelize flag differs.
+#[cfg(test)]
+fn ssa_from_reachable(
+    tlc: TlcReachable,
+) -> std::result::Result<SsaConverted, Box<dyn std::error::Error>> {
+    let raw = tlc.infer_input_slice_bounds().to_egraph()?;
+    Ok(raw.expand_soacs().materialize().optimize_skeleton().elaborate())
 }
 
 /// Run all the way through EGIR + elaborate to SSA. Materialize is enabled
@@ -1362,9 +1424,7 @@ pub fn compile_thru_tlc(source: &str) -> error::Result<TlcReachable> {
 /// conversion errors uniformly.
 #[cfg(test)]
 pub fn compile_thru_ssa(source: &str) -> std::result::Result<SsaConverted, Box<dyn std::error::Error>> {
-    let tlc = compile_thru_tlc(source)?;
-    let raw = tlc.to_egraph()?;
-    Ok(raw.expand_soacs().materialize().optimize_skeleton().elaborate())
+    ssa_from_reachable(compile_thru_tlc(source)?)
 }
 
 /// Run the full pipeline to a final SPIR-V binary.
@@ -1381,13 +1441,5 @@ pub fn compile_thru_spirv(source: &str) -> std::result::Result<Lowered, Box<dyn 
 pub fn compile_thru_spirv_single_stage(
     source: &str,
 ) -> std::result::Result<Lowered, Box<dyn std::error::Error>> {
-    let (mut node_counter, mut module_manager) = cached_compiler_init();
-    let type_checked = Compiler::parse(source, &mut node_counter)?
-        .elaborate_modules(&mut module_manager, &mut node_counter)?
-        .resolve(&module_manager)?
-        .fold_ast_constants()
-        .type_check(&mut module_manager)?;
-    let tlc = type_checked.to_tlc(&module_manager, false).pin_entry_regions()?.optimize_for_test(true);
-    let ssa = tlc.to_egraph()?.expand_soacs().materialize().optimize_skeleton().elaborate();
-    Ok(ssa.lower()?)
+    Ok(ssa_from_reachable(compile_thru_tlc_with(source, true)?)?.lower()?)
 }

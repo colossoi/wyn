@@ -11,6 +11,7 @@ pub mod fusion;
 pub mod hof_specialize;
 pub mod if_over_producer;
 pub mod inline;
+pub mod input_slice_bounds;
 pub mod lift_gathers;
 pub mod materialize_entry_soacs;
 pub mod monomorphize;

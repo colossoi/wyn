@@ -282,7 +282,11 @@ impl Binding {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BufferLen {
-    /// Exactly `bytes` bytes.
+    /// Minimum bytes the host must allocate. For an *output* binding this
+    /// is the bytes the shader will write (so it's also the maximum
+    /// useful size). For an *input* binding it's the bytes the shader
+    /// will read (e.g. inferred from a `param[0..K]` slice); the host is
+    /// free to over-allocate.
     Fixed {
         bytes: u64,
     },

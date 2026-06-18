@@ -618,11 +618,11 @@ fn compile_to_wgsl_impl(source: &str) -> CompileResultWgsl {
         Ok(t) => t,
         Err(e) => return CompileResultWgsl::err_msg(format!("parallelize_soacs: {:?}", e)),
     };
-    let raw = match tlc_parallelized.filter_reachable().to_egraph() {
+    let raw = match tlc_parallelized.filter_reachable().infer_input_slice_bounds().to_egraph() {
         Ok(s) => s,
         Err(e) => return CompileResultWgsl::err_msg(format!("SSA conversion error: {:?}", e)),
     };
-    let ssa = raw.expand_soacs(true).materialize().optimize_skeleton().elaborate();
+    let ssa = raw.expand_soacs().materialize().optimize_skeleton().elaborate();
     let mir = wyn_core::ssa::print::format_program(&ssa.ssa);
     let interface = program_interface(&ssa.ssa);
 

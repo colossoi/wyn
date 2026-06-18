@@ -50,8 +50,10 @@ fn compile_via_egir(src: &str) -> Program {
         .filter_reachable();
 
     let empty = std::collections::HashMap::new();
+    let bounds = crate::tlc::input_slice_bounds::compute_for_program(&tlc.tlc);
     crate::EgirRaw(
-        run(&tlc.tlc, PipelineDescriptor::default(), &empty).expect("egir::from_tlc conversion failed"),
+        run(&tlc.tlc, PipelineDescriptor::default(), &empty, &bounds)
+            .expect("egir::from_tlc conversion failed"),
     )
     .realize_outputs()
     .expect("egir::realize_outputs failed")
@@ -617,7 +619,8 @@ entry vertex_main(#[location(0)] position: vec3f32, #[location(1)] color: vec3f3
     );
     wrap_arrow_return_in_unique(&mut def.ty);
 
-    let egir = super::run(&tlc_program, PipelineDescriptor::default(), &HashMap::new())
+    let bounds = crate::tlc::input_slice_bounds::compute_for_program(&tlc_program);
+    let egir = super::run(&tlc_program, PipelineDescriptor::default(), &HashMap::new(), &bounds)
         .expect("from_tlc::run on graphics entry must succeed");
     let entry = egir.entry_points.iter().find(|e| e.name == "vertex_main").expect("vertex_main EgirEntry");
 

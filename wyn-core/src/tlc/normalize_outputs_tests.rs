@@ -35,44 +35,7 @@ fn compile_to_normalized_tlc(source: &str) -> Program {
 /// Panics on any pipeline error — intended for tests that expect the
 /// source to compile cleanly.
 fn compile_to_spirv(source: &str) -> Vec<u32> {
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = Compiler::parse(source, &mut node_counter).expect("parse");
-    let type_checked = parsed
-        .resolve(&mut module_manager)
-        .expect("resolve")
-        .fold_ast_constants()
-        .type_check(&mut module_manager)
-        .expect("type_check");
-
-    let ssa = type_checked
-        .to_tlc(&module_manager, false)
-        .pin_entry_regions()
-        .expect("pin_entry_regions")
-        .partial_eval()
-        .normalize_soacs()
-        .force_inline_soac_helpers()
-        .fuse_maps()
-        .apply_ownership()
-        .expect("apply_ownership")
-        .normalize_outputs()
-        .expect("normalize_outputs")
-        .lift_gathers()
-        .defunctionalize()
-        .monomorphize()
-        .fold_generated_lambdas()
-        .inline_small()
-        .rep_specialize()
-        .parallelize_soacs(false)
-        .expect("parallelize_soacs")
-        .filter_reachable()
-        .to_egraph()
-        .expect("egraph")
-        .expand_soacs()
-        .materialize()
-        .optimize_skeleton()
-        .elaborate();
-
-    ssa.lower().expect("lower").spirv
+    crate::compile_thru_spirv(source).expect("compile_thru_spirv").spirv
 }
 
 /// True iff the SPIR-V module contains at least one instruction with the

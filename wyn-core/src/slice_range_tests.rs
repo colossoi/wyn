@@ -3,7 +3,6 @@
 //! the TLC level, not by an AST-level desugar pass) compile correctly
 //! through SSA, and that constant folding in slice indices works.
 
-use crate::Compiler;
 use crate::error::CompilerError;
 use crate::ssa::types::Program;
 
@@ -426,126 +425,34 @@ def range_test: [5]i32 =
 
 #[test]
 fn test_array_param_stack_overflow() {
-    // Minimal test: a regular function that indexes an array parameter.
-    // This stack-overflows somewhere in the pipeline.
-    // Run each stage separately to isolate where.
-    let source = r#"
+    // A regular function that indexes an array parameter — once
+    // stack-overflowed somewhere in the pipeline; pins the full
+    // compile path against that.
+    crate::compile_thru_spirv(
+        r#"
 def first(arr: [4]i32) i32 = arr[0]
 
 #[fragment]
 entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     let x = first([1, 2, 3, 4]) in
     @[f32.i32(x), 0.0f32, 0.0f32, 1.0f32]
-"#;
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = Compiler::parse(source, &mut node_counter).expect("parse");
-    eprintln!("=== parse OK ===");
-
-    let type_checked = parsed
-        .resolve(&mut module_manager)
-        .expect("resolve")
-        .fold_ast_constants()
-        .type_check(&mut module_manager)
-        .expect("typecheck");
-    eprintln!("=== frontend OK ===");
-
-    let tlc = type_checked.to_tlc(&module_manager, false).pin_entry_regions().expect("pin_entry_regions");
-    eprintln!("=== to_tlc OK ===");
-
-    let tlc = tlc.partial_eval();
-    eprintln!("=== partial_eval OK ===");
-
-    let tlc = tlc
-        .normalize_soacs()
-        .force_inline_soac_helpers()
-        .fuse_maps()
-        .apply_ownership()
-        .expect("apply_ownership");
-    eprintln!("=== fuse_maps OK ===");
-
-    let tlc = tlc.normalize_outputs().expect("normalize_outputs").lift_gathers().defunctionalize();
-    eprintln!("=== defunctionalize OK ===");
-
-    let tlc = tlc.monomorphize();
-    eprintln!("=== monomorphize OK ===");
-
-    let tlc = tlc.fold_generated_lambdas();
-    eprintln!("=== inline OK ===");
-
-    let tlc = tlc.inline_small().rep_specialize();
-    eprintln!("=== inline_small OK ===");
-
-    let tlc = tlc.parallelize_soacs(false).expect("parallelize_soacs");
-    eprintln!("=== parallelize_soacs OK ===");
-
-    let tlc = tlc.filter_reachable();
-    eprintln!("=== filter_reachable OK ===");
-
-    let ssa =
-        tlc.to_egraph().expect("to_egir").expand_soacs().materialize().optimize_skeleton().elaborate();
-    eprintln!("=== EGIR chain OK ===");
-
-    let _lowered = ssa.lower().expect("lower");
-    eprintln!("=== lower OK ===");
+"#,
+    )
+    .expect("compile_thru_spirv");
 }
 
 #[test]
 fn test_view_array_param_stack_overflow() {
-    // Unsized (view) array parameter in a regular function, called from compute entry.
-    let source = r#"
+    // Unsized (view) array parameter in a regular function, called
+    // from a compute entry — once stack-overflowed somewhere in the
+    // pipeline; pins the full compile path against that.
+    crate::compile_thru_spirv(
+        r#"
 def first(arr: []i32) i32 = arr[0]
 
 #[compute]
 entry main(data: []i32) []i32 = [first(data)]
-"#;
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = Compiler::parse(source, &mut node_counter).expect("parse");
-    eprintln!("=== parse OK ===");
-
-    let type_checked = parsed
-        .resolve(&mut module_manager)
-        .expect("resolve")
-        .fold_ast_constants()
-        .type_check(&mut module_manager)
-        .expect("typecheck");
-    eprintln!("=== frontend OK ===");
-
-    let tlc = type_checked.to_tlc(&module_manager, false).pin_entry_regions().expect("pin_entry_regions");
-    eprintln!("=== to_tlc OK ===");
-
-    let tlc = tlc.partial_eval();
-    eprintln!("=== partial_eval OK ===");
-
-    let tlc = tlc
-        .normalize_soacs()
-        .force_inline_soac_helpers()
-        .fuse_maps()
-        .apply_ownership()
-        .expect("apply_ownership");
-    eprintln!("=== fuse_maps OK ===");
-
-    let tlc = tlc.normalize_outputs().expect("normalize_outputs").lift_gathers().defunctionalize();
-    eprintln!("=== defunctionalize OK ===");
-
-    let tlc = tlc.monomorphize();
-    eprintln!("=== monomorphize OK ===");
-
-    let tlc = tlc.fold_generated_lambdas();
-    eprintln!("=== inline OK ===");
-
-    let tlc = tlc.inline_small().rep_specialize();
-    eprintln!("=== inline_small OK ===");
-
-    let tlc = tlc.parallelize_soacs(false).expect("parallelize_soacs");
-    eprintln!("=== parallelize_soacs OK ===");
-
-    let tlc = tlc.filter_reachable();
-    eprintln!("=== filter_reachable OK ===");
-
-    let ssa =
-        tlc.to_egraph().expect("to_egir").expand_soacs().materialize().optimize_skeleton().elaborate();
-    eprintln!("=== EGIR chain OK ===");
-
-    let _lowered = ssa.lower().expect("lower");
-    eprintln!("=== lower OK ===");
+"#,
+    )
+    .expect("compile_thru_spirv");
 }

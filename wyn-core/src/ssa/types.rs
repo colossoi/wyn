@@ -559,6 +559,15 @@ pub struct EntryInput {
         crate::interface::StorageAccess,
         crate::pipeline_descriptor::StorageTextureSize,
     )>,
+    /// Minimum-required host allocation for a `storage_binding` input,
+    /// inferred from the entry body's slice references to this param.
+    /// `Some(Fixed { bytes: K * sizeof(elem) })` when every reference to
+    /// the param symbol appears as the first arg of a
+    /// `_w_intrinsic_slice(param, 0, K)` call with `K` a compile-time
+    /// `IntLit`; the bytes are the maximum observed `K * sizeof(elem)`.
+    /// `None` whenever any reference falls outside that pattern, so the
+    /// host has to declare the size another way.
+    pub length: Option<crate::pipeline_descriptor::BufferLen>,
 }
 
 /// Output from an entry point.

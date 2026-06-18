@@ -15,7 +15,6 @@
 //! wiring mistakes; these assertions fail loudly if any component's
 //! `arr` or `val` comes from the wrong projection.
 
-use crate::Compiler;
 use crate::ast::TypeName;
 use crate::egir::types::{ENode, PendingSoac, PureOp, SideEffectKind};
 use polytype::Type;
@@ -24,42 +23,12 @@ use polytype::Type;
 /// returning the EGraph for the (single) entry point so tests can
 /// introspect node structure.
 fn compile_to_expanded_egraph(input: &str) -> crate::egir::types::EGraph {
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let type_checked = Compiler::parse(input, &mut node_counter)
-        .expect("parse")
-        .elaborate_modules(&mut module_manager, &mut node_counter)
-        .expect("elaborate")
-        .resolve(&mut module_manager)
-        .expect("resolve")
-        .fold_ast_constants()
-        .type_check(&mut module_manager)
-        .expect("type check");
-
-    let expanded = type_checked
-        .to_tlc(&module_manager, false)
-        .pin_entry_regions()
-        .expect("pin_entry_regions")
-        .partial_eval()
-        .normalize_soacs()
-        .force_inline_soac_helpers()
-        .fuse_maps()
-        .apply_ownership()
-        .expect("apply_ownership")
-        .normalize_outputs()
-        .expect("normalize_outputs")
-        .lift_gathers()
-        .defunctionalize()
-        .monomorphize()
-        .fold_generated_lambdas()
-        .inline_small()
-        .rep_specialize()
-        .parallelize_soacs(false)
-        .expect("parallelize_soacs")
-        .filter_reachable()
+    let tlc = crate::compile_thru_tlc(input).expect("compile_thru_tlc");
+    let expanded = tlc
+        .infer_input_slice_bounds()
         .to_egraph()
         .expect("to_egraph")
         .expand_soacs();
-
     let inner = &expanded.0;
     assert_eq!(
         inner.entry_points.len(),

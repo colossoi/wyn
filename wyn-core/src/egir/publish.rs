@@ -140,7 +140,7 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                         access: Access::ReadOnly,
                         usage: BufferUsage::Input,
                         name: input.name.clone(),
-                        length: None,
+                        length: input.length.clone(),
                     });
                 } else if let Some(pc) = input.push_constant {
                     if claimed_pc_offsets.contains(&pc.offset) {

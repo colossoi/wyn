@@ -125,6 +125,7 @@ pub fn run(
     program: &TlcProgram,
     mut pipeline: PipelineDescriptor,
     plans: &HashMap<String, crate::tlc::parallelize::ParallelizationPlan>,
+    input_slice_bounds: &crate::tlc::input_slice_bounds::ProgramBounds,
 ) -> Result<EgirInner, ConvertError> {
     let top_level: HashMap<SymbolId, &TlcDef> = program.defs.iter().map(|d| (d.name, d)).collect();
     let symbols = &program.symbols;
@@ -225,6 +226,8 @@ pub fn run(
                     )
                 }) || (plan.is_none()
                     && gather_prepass_forced_output(entry).is_some());
+                let entry_name = symbol_name(symbols, def.name).unwrap_or("");
+                let entry_input_bounds = input_slice_bounds.get(entry_name);
                 let ep = convert_entry_point(
                     def,
                     entry,
@@ -233,6 +236,7 @@ pub fn run(
                     workgroup,
                     forced_output_binding,
                     dispatch_sized_outputs,
+                    entry_input_bounds,
                 )?;
                 entry_points.push(ep);
             }
@@ -355,6 +359,7 @@ fn gather_prepass_forced_output(entry: &interface::EntryDecl) -> Option<BindingR
         .map(|d| d.binding)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn convert_entry_point(
     def: &TlcDef,
     entry: &interface::EntryDecl,
@@ -363,6 +368,7 @@ fn convert_entry_point(
     workgroup: (u32, u32, u32),
     forced_output_binding: Option<BindingRef>,
     dispatch_sized_outputs: bool,
+    input_slice_bounds_for_entry: Option<&HashMap<SymbolId, BufferLen>>,
 ) -> Result<EgirEntry, ConvertError> {
     use crate::ssa::types::{EntryInput, ExecutionModel, IoDecoration, PushConstantSlot};
 
@@ -466,6 +472,7 @@ fn convert_entry_point(
                     texture_binding: None,
                     sampler_binding: None,
                     storage_image_binding: None,
+                    length: None,
                 });
                 view_nids.push(converter.emit_storage_view(slot.binding, field_ty.clone()));
             }
@@ -518,7 +525,23 @@ fn convert_entry_point(
             texture_binding,
             sampler_binding,
             storage_image_binding,
+            length: None,
         });
+    }
+
+    // Patch each storage-bound input's `length` from the caller-
+    // supplied side-table. `input_slice_bounds_for_entry` was
+    // computed by the TLC-level `input_slice_bounds` analyzer (the
+    // `TlcInputSliceBoundsInferred` typestate) and is keyed by the
+    // entry param's TLC `SymbolId`.
+    if let Some(map) = input_slice_bounds_for_entry {
+        for (input, (sym, _)) in inputs.iter_mut().zip(params.iter()) {
+            if input.storage_binding.is_some() {
+                if let Some(len) = map.get(sym).cloned() {
+                    input.length = Some(len);
+                }
+            }
+        }
     }
     // Output binding allocation starts above every claimed slot in
     // `AUTO_STORAGE_SET`: auto-allocated view-array params (the

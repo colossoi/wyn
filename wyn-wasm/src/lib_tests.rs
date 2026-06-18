@@ -36,9 +36,10 @@ fn compile_to_ssa(source: &str) -> wyn_core::ssa::types::Program {
         .parallelize_soacs(false)
         .expect("parallelize_soacs failed")
         .filter_reachable()
+        .infer_input_slice_bounds()
         .to_egraph()
         .expect("to_egraph failed")
-        .expand_soacs(true)
+        .expand_soacs()
         .materialize()
         .optimize_skeleton()
         .elaborate();
