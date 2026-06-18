@@ -1,45 +1,11 @@
-use crate::Compiler;
 use crate::error::Result;
 
+/// Compile a source string to SPIR-V words. Thin wrapper around the
+/// canonical `compile_thru_spirv` so test failures lift through `.unwrap()`.
 fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
-    // Use the typestate API to ensure proper compilation pipeline
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = Compiler::parse(source, &mut node_counter).expect("Parsing failed");
-    let type_checked = parsed
-        .resolve(&mut module_manager)
-        .expect("Name resolution failed")
-        .fold_ast_constants()
-        .type_check(&mut module_manager)
-        .expect("Type checking failed");
-
-    let ssa = type_checked
-        .to_tlc(&module_manager, false)
-        .pin_entry_regions()
-        .expect("pin_entry_regions")
-        .partial_eval()
-        .normalize_soacs()
-        .fuse_maps()
-        .apply_ownership()
-        .expect("apply_ownership")
-        .normalize_outputs()
-        .expect("normalize_outputs")
-        .lift_gathers()
-        .defunctionalize()
-        .monomorphize()
-        .fold_generated_lambdas()
-        .inline_small()
-        .rep_specialize()
-        .parallelize_soacs(false)
-        .expect("parallelize_soacs")
-        .filter_reachable()
-        .to_egraph()
-        .expect("SSA conversion failed")
-        .expand_soacs()
-        .materialize()
-        .optimize_skeleton()
-        .elaborate();
-
-    ssa.lower().map(|l| l.spirv)
+    crate::compile_thru_spirv(source)
+        .map(|l| l.spirv)
+        .map_err(|e| crate::err_spirv!("{}", e))
 }
 
 #[test]
@@ -357,45 +323,6 @@ def test(x: f32) f32 =
     assert_eq!(spirv[0], 0x07230203);
 }
 
-/// Compile source to SPIR-V through the full pipeline including TLC partial_eval
-fn compile_to_spirv_with_partial_eval(source: &str) -> Result<Vec<u32>> {
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = Compiler::parse(source, &mut node_counter).expect("Parsing failed");
-    let type_checked = parsed
-        .resolve(&mut module_manager)
-        .expect("Name resolution failed")
-        .fold_ast_constants()
-        .type_check(&mut module_manager)
-        .expect("Type checking failed");
-    let ssa = type_checked
-        .to_tlc(&module_manager, false)
-        .pin_entry_regions()
-        .expect("pin_entry_regions")
-        .partial_eval()
-        .normalize_soacs()
-        .fuse_maps()
-        .apply_ownership()
-        .expect("apply_ownership")
-        .normalize_outputs()
-        .expect("normalize_outputs")
-        .lift_gathers()
-        .defunctionalize()
-        .monomorphize()
-        .fold_generated_lambdas()
-        .inline_small()
-        .rep_specialize()
-        .parallelize_soacs(false)
-        .expect("parallelize_soacs")
-        .filter_reachable()
-        .to_egraph()
-        .expect("SSA conversion failed")
-        .expand_soacs()
-        .materialize()
-        .optimize_skeleton()
-        .elaborate();
-
-    ssa.lower().map(|l| l.spirv)
-}
 
 #[test]
 fn test_partial_eval_inlined_function_local_id_collision() {
@@ -410,7 +337,7 @@ fn test_partial_eval_inlined_function_local_id_collision() {
     // - helper() has a let binding that uses a uniform (Unknown)
     // - fragment_main has multiple locals before calling helper() with known args
     // - The helper's local collides with fragment_main's locals in local_map
-    let spirv = compile_to_spirv_with_partial_eval(
+    let spirv = compile_to_spirv(
         r#"
 -- Helper function that will be inlined when called with known args.
 -- The let binding 'weight' uses iTime which is unknown, so it gets residualized.
@@ -448,7 +375,7 @@ fn test_partial_eval_intrinsic_arg_types() {
     // Setup:
     // - dot() takes two vec3 arguments and returns f32
     // - When the vec3 arguments are known vectors, they get reified with wrong type
-    let spirv = compile_to_spirv_with_partial_eval(
+    let spirv = compile_to_spirv(
         r#"
 def verts: [3]vec4f32 =
   [@[-1.0, -1.0, 0.0, 1.0],

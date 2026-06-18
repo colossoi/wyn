@@ -21,6 +21,7 @@ fn compile_to_ssa(source: &str) -> wyn_core::ssa::types::Program {
         .pin_entry_regions().expect("pin_entry_regions")
         .partial_eval()
         .normalize_soacs()
+        .force_inline_soac_helpers()
         .fuse_maps()
         .apply_ownership()
         .expect("apply_ownership failed")

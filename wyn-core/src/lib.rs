@@ -616,6 +616,7 @@ impl TlcRegionsPinned {
     pub fn optimize_for_test(self, disable_parallelize: bool) -> TlcReachable {
         self.partial_eval()
             .normalize_soacs()
+            .force_inline_soac_helpers()
             .fuse_maps()
             .apply_ownership()
             .expect("apply_ownership")
@@ -675,12 +676,27 @@ impl TlcSoaNormalized {
     /// later (`normalize_outputs`, the if-over-producer rewrite) bury the
     /// SOACs deeper, so this is the last spot where inlining still feeds
     /// the existing fuse_maps pipeline correctly.
-    pub fn force_inline_soac_helpers(self) -> TlcSoaNormalized {
+    pub fn force_inline_soac_helpers(self) -> TlcSoacHelpersInlined {
         let mut inner = self.0;
         inner.tlc = tlc::inline::run_force_soac_helpers(inner.tlc);
-        TlcSoaNormalized(inner)
+        TlcSoacHelpersInlined(inner)
     }
+}
 
+/// TLC after force-inlining of every user function whose body contains a
+/// SOAC. Sits between `TlcSoaNormalized` and `TlcFused` so the typestate
+/// enforces that fusion only ever runs on a program where producer/
+/// consumer helper boundaries have already been opened up.
+pub struct TlcSoacHelpersInlined(pub TlcEarlyInner);
+
+impl std::ops::Deref for TlcSoacHelpersInlined {
+    type Target = TlcEarlyInner;
+    fn deref(&self) -> &TlcEarlyInner {
+        &self.0
+    }
+}
+
+impl TlcSoacHelpersInlined {
     /// Fuse consecutive SOAC operations to eliminate intermediate arrays.
     pub fn fuse_maps(self) -> TlcFused {
         let mut inner = self.0;

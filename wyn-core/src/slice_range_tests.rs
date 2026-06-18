@@ -7,77 +7,15 @@ use crate::Compiler;
 use crate::error::CompilerError;
 use crate::ssa::types::Program;
 
-/// Helper to run full pipeline through lowering.
+/// Helper to run full pipeline through SPIR-V lowering. Discards the
+/// output; only the pipeline succeeding/failing matters.
 fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = Compiler::parse(input, &mut node_counter)?;
-    let type_checked =
-        parsed.resolve(&mut module_manager)?.fold_ast_constants().type_check(&mut module_manager)?;
-
-    type_checked
-        .to_tlc(&module_manager, false)
-        .pin_entry_regions()
-        .expect("pin_entry_regions")
-        .partial_eval()
-        .normalize_soacs()
-        .fuse_maps()
-        .apply_ownership()
-        .expect("apply_ownership")
-        .normalize_outputs()
-        .expect("normalize_outputs")
-        .lift_gathers()
-        .defunctionalize()
-        .monomorphize()
-        .fold_generated_lambdas()
-        .inline_small()
-        .rep_specialize()
-        .parallelize_soacs(false)
-        .expect("parallelize_soacs")
-        .filter_reachable()
-        .to_egraph()
-        .map_err(|e| crate::err_spirv!("{}", e))?
-        .expand_soacs()
-        .materialize()
-        .optimize_skeleton()
-        .elaborate()
-        .lower()?;
-    Ok(())
+    crate::compile_thru_spirv(input).map(|_| ()).map_err(|e| crate::err_spirv!("{}", e))
 }
 
 /// Helper to run pipeline through SSA.
 fn compile_through_ssa(input: &str) -> Result<Program, CompilerError> {
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = Compiler::parse(input, &mut node_counter)?;
-    let type_checked =
-        parsed.resolve(&mut module_manager)?.fold_ast_constants().type_check(&mut module_manager)?;
-
-    let ssa = type_checked
-        .to_tlc(&module_manager, false)
-        .pin_entry_regions()
-        .expect("pin_entry_regions")
-        .partial_eval()
-        .normalize_soacs()
-        .fuse_maps()
-        .apply_ownership()
-        .expect("apply_ownership")
-        .normalize_outputs()
-        .expect("normalize_outputs")
-        .lift_gathers()
-        .defunctionalize()
-        .monomorphize()
-        .fold_generated_lambdas()
-        .inline_small()
-        .rep_specialize()
-        .parallelize_soacs(false)
-        .expect("parallelize_soacs")
-        .filter_reachable()
-        .to_egraph()
-        .map_err(|e| crate::err_spirv!("{}", e))?
-        .expand_soacs()
-        .materialize()
-        .optimize_skeleton()
-        .elaborate();
-    Ok(ssa.ssa)
+    crate::compile_thru_ssa(input).map(|s| s.ssa).map_err(|e| crate::err_spirv!("{}", e))
 }
 
 // =============================================================================
@@ -517,7 +455,7 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     let tlc = tlc.partial_eval();
     eprintln!("=== partial_eval OK ===");
 
-    let tlc = tlc.normalize_soacs().fuse_maps().apply_ownership().expect("apply_ownership");
+    let tlc = tlc.normalize_soacs().force_inline_soac_helpers().fuse_maps().apply_ownership().expect("apply_ownership");
     eprintln!("=== fuse_maps OK ===");
 
     let tlc = tlc.normalize_outputs().expect("normalize_outputs").lift_gathers().defunctionalize();
@@ -573,7 +511,7 @@ entry main(data: []i32) []i32 = [first(data)]
     let tlc = tlc.partial_eval();
     eprintln!("=== partial_eval OK ===");
 
-    let tlc = tlc.normalize_soacs().fuse_maps().apply_ownership().expect("apply_ownership");
+    let tlc = tlc.normalize_soacs().force_inline_soac_helpers().fuse_maps().apply_ownership().expect("apply_ownership");
     eprintln!("=== fuse_maps OK ===");
 
     let tlc = tlc.normalize_outputs().expect("normalize_outputs").lift_gathers().defunctionalize();

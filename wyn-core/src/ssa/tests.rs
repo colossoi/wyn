@@ -183,40 +183,7 @@ fn spirv_storage_write_chain_lowers_cleanly() {
     // surface as `resolve_buffer_by_id: not a u32 constant`.
     let source = "#[compute]\nentry double(arr: []f32) []f32 = map(|x: f32| x * 2.0, arr)\n";
 
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = crate::Compiler::parse(source, &mut node_counter).unwrap();
-    let spirv = parsed
-        .resolve(&mut module_manager)
-        .unwrap()
-        .fold_ast_constants()
-        .type_check(&mut module_manager)
-        .unwrap()
-        .to_tlc(&module_manager, false)
-        .pin_entry_regions()
-        .expect("pin_entry_regions")
-        .partial_eval()
-        .normalize_soacs()
-        .fuse_maps()
-        .apply_ownership()
-        .expect("apply_ownership")
-        .normalize_outputs()
-        .expect("normalize_outputs")
-        .lift_gathers()
-        .defunctionalize()
-        .monomorphize()
-        .fold_generated_lambdas()
-        .inline_small()
-        .rep_specialize()
-        .parallelize_soacs(false)
-        .expect("parallelize_soacs")
-        .filter_reachable()
-        .to_egraph()
-        .unwrap()
-        .expand_soacs()
-        .materialize()
-        .optimize_skeleton()
-        .elaborate()
-        .lower()
+    let spirv = crate::compile_thru_spirv(source)
         .expect("SPIR-V lowering of StorageView → ViewIndex → Store chain must succeed");
 
     assert_eq!(spirv.spirv[0], 0x07230203, "SPIR-V magic number");

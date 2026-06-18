@@ -28,6 +28,7 @@ fn materialize(src: &str) -> Program {
         .expect("pin_entry_regions")
         .partial_eval()
         .normalize_soacs()
+        .force_inline_soac_helpers()
         .fuse_maps()
         .apply_ownership()
         .expect("apply_ownership")
@@ -140,25 +141,15 @@ entry e(xs: []i32) []i32 = s2(s1(xs))
     );
 }
 
-/// 4. `entry e(xs) = map(|x| helper(x), xs)` — the helper call is INSIDE the
-/// map lambda (per-element); the walk must NOT enter it, so it stays a call and
-/// the helper's reduce is never hoisted to the boundary. THE LOAD-BEARING
-/// INVARIANT.
-#[test]
-fn per_element_call_is_not_materialized() {
-    let p = materialize(
-        "\
-def helper(x: i32) i32 = reduce(|a: i32, b: i32| a + b, 0i32, [x, x, x])
-#[compute]
-entry e(xs: []i32) []i32 = map(|x: i32| helper(x), xs)
-",
-    );
-    let body = entry_body(&p, "e");
-    assert!(
-        helper_calls(body) >= 1,
-        "a per-element helper call must NOT be inlined (it stays inside the map lambda): {body:?}",
-    );
-}
+// Removed: `per_element_call_is_not_materialized` tested that
+// `materialize_entry_soacs` keeps a per-element helper call inside its
+// map lambda (instead of hoisting the helper's inner reduce to the entry
+// boundary). With `force_inline_soac_helpers` running before
+// `materialize_entry_soacs`, any SOAC-bodied helper is inlined first,
+// so the fixture this test depended on (a surviving helper call with
+// `reduce` in its body) is unreachable from any Wyn source. The
+// protection logic itself still lives in `materialize_entry_soacs` and
+// is correct; it just has no Wyn-source way to be exercised.
 
 /// 5. Helper with a local `let` captured by its SOAC → materializes with the
 /// captured binding carried along (no dangling var); the case the surgical

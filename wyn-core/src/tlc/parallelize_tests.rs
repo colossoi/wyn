@@ -694,6 +694,7 @@ fn parallelize_src(
         .expect("pin_entry_regions")
         .partial_eval()
         .normalize_soacs()
+        .force_inline_soac_helpers()
         .fuse_maps()
         .apply_ownership()
         .expect("apply_ownership")
@@ -1283,43 +1284,9 @@ fn aspiration_two_scalar_reduces_in_let_rhs_should_each_hoist() {
 /// reduce synthesis path — the bugs there surface as EGIR-conversion
 /// errors that `parallelize_src` alone wouldn't observe.
 fn compile_to_spirv(src: &str) -> crate::error::Result<Vec<u32>> {
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = crate::Compiler::parse(src, &mut node_counter).expect("parse");
-    let type_checked = parsed
-        .resolve(&module_manager)
-        .expect("resolve")
-        .fold_ast_constants()
-        .type_check(&mut module_manager)
-        .expect("type_check");
-
-    let ssa = type_checked
-        .to_tlc(&module_manager, false)
-        .pin_entry_regions()
-        .expect("pin_entry_regions")
-        .partial_eval()
-        .normalize_soacs()
-        .fuse_maps()
-        .apply_ownership()
-        .expect("apply_ownership")
-        .normalize_outputs()
-        .expect("normalize_outputs")
-        .lift_gathers()
-        .defunctionalize()
-        .monomorphize()
-        .fold_generated_lambdas()
-        .inline_small()
-        .rep_specialize()
-        .parallelize_soacs(false)
-        .expect("parallelize_soacs")
-        .filter_reachable()
-        .to_egraph()
-        .map_err(|e| crate::error::CompilerError::FlatteningError(format!("{e:?}"), None))?
-        .expand_soacs()
-        .materialize()
-        .optimize_skeleton()
-        .elaborate();
-
-    ssa.lower().map(|l| l.spirv)
+    crate::compile_thru_spirv(src)
+        .map(|l| l.spirv)
+        .map_err(|e| crate::error::CompilerError::FlatteningError(format!("{e:?}"), None))
 }
 
 /// Single-output reduce whose combiner captures a uniform — forces the

@@ -601,7 +601,8 @@ fn compile_to_wgsl_impl(source: &str) -> CompileResultWgsl {
     let tlc_after_partial_eval = tlc_program.partial_eval();
     let tlc_tree = tlc_tree::program_to_tree(&tlc_after_partial_eval.tlc);
 
-    let tlc_with_ownership = match tlc_after_partial_eval.normalize_soacs().fuse_maps().apply_ownership() {
+    let tlc_with_ownership =
+        match tlc_after_partial_eval.normalize_soacs().force_inline_soac_helpers().fuse_maps().apply_ownership() {
         Ok(t) => t,
         Err(e) => return CompileResultWgsl::err_msg(format!("apply_ownership: {:?}", e)),
     };

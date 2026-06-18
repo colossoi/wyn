@@ -281,44 +281,8 @@ fn validate_wgsl(source: &str) {
 
 /// Compile a Wyn source through the full pipeline to WGSL text.
 fn compile_to_wgsl(source: &str) -> crate::error::Result<String> {
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = crate::Compiler::parse(source, &mut node_counter).expect("Parsing failed");
-    let parsed = parsed
-        .elaborate_modules(&mut module_manager, &mut node_counter)
-        .expect("Module elaboration failed");
-    let type_checked = parsed
-        .resolve(&mut module_manager)
-        .expect("Name resolution failed")
-        .fold_ast_constants()
-        .type_check(&mut module_manager)
-        .expect("Type checking failed");
-
-    type_checked
-        .to_tlc(&module_manager, false)
-        .pin_entry_regions()
-        .expect("pin_entry_regions")
-        .partial_eval()
-        .normalize_soacs()
-        .fuse_maps()
-        .apply_ownership()
-        .expect("apply_ownership")
-        .normalize_outputs()
-        .expect("normalize_outputs")
-        .lift_gathers()
-        .defunctionalize()
-        .monomorphize()
-        .fold_generated_lambdas()
-        .inline_small()
-        .rep_specialize()
-        .parallelize_soacs(false)
-        .expect("parallelize_soacs")
-        .filter_reachable()
-        .to_egraph()
-        .expect("SSA conversion failed")
-        .expand_soacs()
-        .materialize()
-        .optimize_skeleton()
-        .elaborate()
+    crate::compile_thru_ssa(source)
+        .map_err(|e| crate::err_spirv!("{}", e))?
         .lower_wgsl()
 }
 

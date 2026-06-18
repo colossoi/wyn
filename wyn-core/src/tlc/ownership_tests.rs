@@ -1025,6 +1025,7 @@ fn compile_to_owned(source: &str) -> Program {
         .expect("pin_entry_regions")
         .partial_eval()
         .normalize_soacs()
+        .force_inline_soac_helpers()
         .fuse_maps()
         .apply_ownership()
         .expect("apply_ownership");

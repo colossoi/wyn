@@ -68,7 +68,8 @@ passes:
 | **TlcRegionsPinned** | `tlc::pin_entry_regions` | Each storage entry-param's concrete `Region(set, binding)` is substituted into its type, so a view's buffer is a statically-known type property that flows by unification. A distinct typestate, so the rest of the pipeline can't run without it (see View Buffer Provenance below) |
 | **TlcPartialEvaled** | `tlc::partial_eval` | Constant folding and algebraic simplifications |
 | **TlcSoaNormalized** | `tlc::soa` | SoA transform (`[n](A,B)` → `([n]A, [n]B)`) + Map+Zip flattening + standalone Zip elimination |
-| **TlcFused** | `tlc::fusion` | SOAC fusion: map-map, interprocedural producer-consumer |
+| **TlcSoacHelpersInlined** | `tlc::inline::run_force_soac_helpers` | Force-inline every user function whose body (recursively) contains a SOAC, so multi-consumer producer/consumer patterns (e.g. `center(filt) ⇒ sum(filt)/length(filt)`) become syntactically visible to fusion |
+| **TlcFused** | `tlc::fusion`, `tlc::if_over_producer` | SOAC fusion (map-map, interprocedural producer-consumer, classified-use redomap), then `if-over-producer` lifting so an `if` whose arms each contain a producer can still fuse with its consumer |
 | **TlcOwnershipApplied** | `tlc::ownership` | Backward ownership-liveness analysis. Reports use-after-move; rewrites array-update operations into in-place forms when the source is mutable and dead after the call |
 | **TlcOutputsNormalized** | `tlc::normalize_outputs` | Rewrites each compute entry's tail into a chain of explicit per-slot output writes. Single-output and multi-output entries share one structural shape; the entry's `def.ty` is kept in sync with its rewritten body |
 | **TlcEntryProducersExposed** | `tlc::materialize_entry_soacs` | Inlines producer-helper calls into the entry's top-level let-chain so the next two passes can see the SOAC producer + its indexed uses in the same scope. Refuses to descend into per-element lambdas — exposing a per-element scan as an entry producer would wreck cost semantics |
@@ -79,6 +80,7 @@ passes:
 | **TlcMonomorphized** | `tlc::specialize`, `tlc::monomorphize` | Polymorphic intrinsics specialized; user functions monomorphized — including over a view's **region**, so a function called on two buffers yields two monomorphs (this subsumes the former `buffer_specialize` pass) |
 | **TlcGeneratedLambdasFolded** | `tlc::inline` | Fold compiler-generated lambda defs back at call sites + DCE |
 | **TlcSmallInlined** | `tlc::inline` | Inline small user functions and constants |
+| **TlcRepSpecialized** | `tlc::rep_specialize` | Phase 2 of array-variant-abstract: at call edges, clone any user-defined callee whose `Abstract`-typed param receives a producer-known concrete variant (Bounded / View from filter), and rewrite the call to invoke the clone. Runs before `parallelize_soacs` so the parallelizer sees a concrete representation on every call edge |
 | **TlcParallelized** | `tlc::parallelize` | Per-entry SOAC parallelization analysis: pick strategy + workgroup + dispatch shape, reserve intermediate bindings, build the host pipeline descriptor, and emit a declarative parallelization plan per entry for EGIR to consume. Kernel lowering happens EGIR-side |
 | **TlcReachable** | `tlc::inline` | Dead definition elimination |
 
@@ -86,7 +88,7 @@ passes:
 | Stage | Module | Description |
 |-------|--------|-------------|
 | **EgirRaw** | `egir::from_tlc` | TLC → EGraph; intrinsic calls become pure nodes (with explicit arms for effectful ones). Per-slot output writes are bridged back into a tail tuple so the next stage can retarget per slot |
-| **EgirOutputsAssigned** | `egir::assign_outputs` | Per-slot output retargeting: each tail-tuple slot is routed to its allocated output binding (storage view for compute, IO variable for graphics) |
+| **EgirOutputsRealized** | `egir::realize_outputs` | Per-slot output realization: each declared output's writes are materialized as side effects against the bound storage view (compute) or `OutputSlot` place (graphics); the body's `Return` carries no value. The post-pass verifier checks no runtime-sized Composite array is reachable from any entry output |
 | **EgirParallelized** | `egir::parallelize` | Consumes the parallelization plan from TLC and tags each planned compute entry's tail SOAC for parallel expansion. No-op when no entries are parallelized |
 | **EgirSoacExpanded** | `egir::soac_expand` | Every pending SOAC is rewritten into an explicit loop subgraph. Small statically-sized maps are unrolled. Compute-entry SOACs lower to lane-indexed kernels that read the global invocation id |
 | **EgirMaterialized** | `egir::materialize` | (optional, SPIR-V only) Dynamic `Index` operations are materialized into pointer-based reads and LICM-hoisted out of loops |
@@ -155,7 +157,7 @@ strategy's shape.
 | `Redomap`          | `reduce op ne (map f xs)` (fused)       | ✓      | n/a (scalar result) | ✓ (chunked + combine) |
 | `Scan`             | `scan op ne xs`                         | ✓      | ✓                   | ✓ (3-phase Blelloch-style) |
 | `Filter`           | `filter pred xs`                        | ✓ (static **and** runtime-sized) | ✓      | partial — `reduce(filter)` fuses to a parallel redomap; standalone `filter` is serial (see below) |
-| `Scatter`          | `scatter dest indices values`           | ✗ EGIR `convert_soac` rejects with `Unsupported` | n/a | ✗ |
+| `Scatter`          | `scatter(dest, indices, values)`        | ✓ (sequential per-lane indexed store; envelope `(xs..) -> (index, value)` lets the fusion engine fuse map producers into the scatter) | ✓ (writes in place into the bound storage view) | ✗ |
 | `ReduceByIndex`    | histogram-style indexed reduction       | ✗ EGIR `convert_soac` rejects with `Unsupported` | n/a | ✗ (atomics not yet implemented) |
 
 Notes:
@@ -221,18 +223,15 @@ The unimplemented cells above have a few hard dependencies between
 them, plus some softer reuse opportunities. Anything not on this list
 is independent.
 
-- **`Scatter` serial → `ReduceByIndex` serial.** Both write
-  `dest[indices[k]] = …` per iteration; ReduceByIndex adds a
-  read-combine-write step. They share an OOB-guarded indexed-write
-  loop builder, so doing Scatter first lets ReduceByIndex reuse it
-  rather than mirror the shape. Both also share a design choice on
-  whether `dest: Place` accepts `BufferSlice` (entry-bound storage)
-  or only `LocalArray` (function-local fixed array) initially;
-  picking the same answer for both keeps the `Place` story coherent.
+- **`Scatter` serial is in place** (`(xs..) -> (index, value)` envelope
+  with map-producer fusion, lowered to a sequential indexed-store loop
+  against the bound storage view). The OOB-guarded indexed-store builder
+  it produces is the natural starting point for `ReduceByIndex` serial,
+  which adds a read-combine-write step on top.
 - **Surface parsing.** `reduce_by_index` already has a producer at
-  `tlc::mod::transform_soac_reduce_by_index`. `scatter` is not in the
-  SOAC names list — Scatter needs a `transform_soac_scatter` in the
-  same shape before EGIR work matters.
+  `tlc::mod::transform_soac_reduce_by_index`; `scatter` is parsed as an
+  ordinary function call (no dedicated `SoacOp` surface form — the
+  envelope lambda is what marks it as a SOAC).
 - **Parallel `Filter` → parallel `Scan` + a scatter kernel.** The scan
   prerequisite (prefix-sum over the predicate mask → write offsets) is in
   place, but the `ParallelStrategy::Filter` synthesis and the guarded scatter
@@ -382,7 +381,7 @@ cargo build --release
 cargo test
 ```
 
-985 tests currently pass (9 ignored for pending features). All 69 SPIR-V testfiles in `testfiles/` compile and validate (`bash scripts/validate_testfiles.sh`); 67 of those also validate as WGSL (`bash scripts/validate_testfiles.sh --wgsl` — 2 skip because they depend on linked SPIR-V helpers).
+1143 tests currently pass (13 ignored: 9 pending features, 4 pending root-cause fixes — see `#[ignore]` messages on `filter_into_reduce_fuses_across_functions`, `filter_runtime_in_subroutine_compiles`, `runtime_sized_array_with_multiple_consumers_lowers`, `user_def_shadowing_map_does_not_break_prelude_unzip` for the responsible passes and upcoming commits). All SPIR-V testfiles in `testfiles/` compile and validate (`bash scripts/validate_testfiles.sh`); the WGSL subset also validates (`bash scripts/validate_testfiles.sh --wgsl` — a handful skip because they depend on linked SPIR-V helpers).
 
 ## Language Overview
 
