@@ -65,10 +65,8 @@ pub fn compute_for_program(program: &Program) -> ProgramBounds {
             None => continue,
         };
         let (params, inner_body) = extract_lambda_params(&def.body);
-        let inputs: Vec<(SymbolId, Type<TypeName>)> = params
-            .iter()
-            .map(|(sym, ty)| (*sym, crate::types::strip_unique(ty)))
-            .collect();
+        let inputs: Vec<(SymbolId, Type<TypeName>)> =
+            params.iter().map(|(sym, ty)| (*sym, crate::types::strip_unique(ty))).collect();
         let bounds = infer(&inner_body, &inputs);
         if !bounds.is_empty() {
             out.insert(entry_name, bounds);
@@ -86,7 +84,9 @@ pub fn infer(body: &Term, inputs: &[(SymbolId, Type<TypeName>)]) -> HashMap<Symb
     let mut elem_bytes: HashMap<SymbolId, u64> = HashMap::new();
     for (sym, ty) in inputs {
         let Some(et) = ty.elem_type() else { continue };
-        let Some(b) = crate::ssa::layout::type_byte_size(et) else { continue };
+        let Some(b) = crate::ssa::layout::type_byte_size(et) else {
+            continue;
+        };
         elem_bytes.insert(*sym, b as u64);
     }
     let tracked: HashSet<SymbolId> = elem_bytes.keys().copied().collect();
@@ -136,9 +136,7 @@ fn walk(
                             TermKind::IntLit(s) if s.parse::<i64>() == Ok(0)
                         );
                         let end_k = if let TermKind::IntLit(s) = &args[2].kind {
-                            s.parse::<i64>()
-                                .ok()
-                                .and_then(|i| if i >= 0 { Some(i as u64) } else { None })
+                            s.parse::<i64>().ok().and_then(|i| if i >= 0 { Some(i as u64) } else { None })
                         } else {
                             None
                         };
@@ -179,12 +177,8 @@ fn walk(
             }
         }
         TermKind::Lambda(lam) => {
-            let shadows: Vec<SymbolId> = lam
-                .params
-                .iter()
-                .map(|(p, _)| *p)
-                .filter(|p| tracked.contains(p))
-                .collect();
+            let shadows: Vec<SymbolId> =
+                lam.params.iter().map(|(p, _)| *p).filter(|p| tracked.contains(p)).collect();
             if shadows.is_empty() {
                 walk(&lam.body, slice_id, tracked, clean_max_k, dirty);
             } else {

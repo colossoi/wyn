@@ -24,11 +24,7 @@ use polytype::Type;
 /// introspect node structure.
 fn compile_to_expanded_egraph(input: &str) -> crate::egir::types::EGraph {
     let tlc = crate::compile_thru_tlc(input).expect("compile_thru_tlc");
-    let expanded = tlc
-        .infer_input_slice_bounds()
-        .to_egraph()
-        .expect("to_egraph")
-        .expand_soacs();
+    let expanded = tlc.infer_input_slice_bounds().to_egraph().expect("to_egraph").expand_soacs();
     let inner = &expanded.0;
     assert_eq!(
         inner.entry_points.len(),

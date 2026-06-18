@@ -620,8 +620,13 @@ entry vertex_main(#[location(0)] position: vec3f32, #[location(1)] color: vec3f3
     wrap_arrow_return_in_unique(&mut def.ty);
 
     let bounds = crate::tlc::input_slice_bounds::compute_for_program(&tlc_program);
-    let egir = super::run(&tlc_program, PipelineDescriptor::default(), &HashMap::new(), &bounds)
-        .expect("from_tlc::run on graphics entry must succeed");
+    let egir = super::run(
+        &tlc_program,
+        PipelineDescriptor::default(),
+        &HashMap::new(),
+        &bounds,
+    )
+    .expect("from_tlc::run on graphics entry must succeed");
     let entry = egir.entry_points.iter().find(|e| e.name == "vertex_main").expect("vertex_main EgirEntry");
 
     assert_eq!(

@@ -1411,9 +1411,7 @@ pub fn compile_thru_tlc(source: &str) -> error::Result<TlcReachable> {
 /// `compile_thru_spirv_single_stage` build the SSA the same way; only
 /// the upstream parallelize flag differs.
 #[cfg(test)]
-fn ssa_from_reachable(
-    tlc: TlcReachable,
-) -> std::result::Result<SsaConverted, Box<dyn std::error::Error>> {
+fn ssa_from_reachable(tlc: TlcReachable) -> std::result::Result<SsaConverted, Box<dyn std::error::Error>> {
     let raw = tlc.infer_input_slice_bounds().to_egraph()?;
     Ok(raw.expand_soacs().materialize().optimize_skeleton().elaborate())
 }

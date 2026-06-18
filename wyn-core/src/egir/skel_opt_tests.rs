@@ -380,18 +380,10 @@ fn optimize_skeleton_alias_closure_invariant() {
 // -- additional defensive tests -----------------------------------------
 
 #[test]
-fn phi_elim_leaves_block_alone_when_unreachable_post_fold() {
+fn optimize_skeleton_removes_block_unreachable_post_fold() {
     // entry CondBranch{true} → A/B. After fold, B is unreachable. B has
-    // a block param; because `incoming[B][0]` is empty (no remaining
-    // predecessor branches into B), phi-elim must not touch it. The
-    // param stays in place; elaborate's domtree walk won't emit B.
-    //
-    // BUT: in the current one-pass fold+collect model, the fold and the
-    // phi-elim run inside the same fixpoint iteration. The incoming
-    // collection walks *every* block's terminator, INCLUDING B. If B
-    // still branches somewhere (it does — to a return), that doesn't
-    // add to any block's incoming list for B itself. So B's slots are
-    // indeed empty and we leave its param alone. Verify that.
+    // a block param. Pruning should remove B before phi-elim gets a
+    // chance to reason from the dead edge that used to feed it.
     let mut graph = EGraph::new();
     let t = graph.intern_constant(ConstantValue::Bool(true), bool_ty());
     let entry = graph.skeleton.entry;
@@ -422,8 +414,9 @@ fn phi_elim_leaves_block_alone_when_unreachable_post_fold() {
         &graph.skeleton.blocks[entry].term,
         SkeletonTerminator::Branch { .. }
     ));
-    // Phi-elim does NOT touch B's param (no surviving incoming edges).
-    assert_eq!(graph.skeleton.blocks[b].params.len(), 1);
+    // Dead blocks are pruned before phi-elim considers their empty
+    // incoming sets.
+    assert!(!graph.skeleton.blocks.contains_key(b));
     assert!(!aliases.contains_key(&b_param));
 }
 

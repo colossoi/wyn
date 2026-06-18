@@ -7,6 +7,8 @@
 //! Rewrites today:
 //! - `fold_constant_branches`: `CondBranch { cond: literal_bool, ... }` →
 //!   `Branch` to the chosen arm.
+//! - `remove_unreachable_blocks`: after branch folding, drop skeleton
+//!   blocks no longer reachable from the entry block.
 //! - `eliminate_redundant_params`: block params whose every incoming arg
 //!   is the same NodeId are stripped from the block's param list and
 //!   from every predecessor's branch args; the stripped param is aliased
@@ -22,7 +24,7 @@
 //!    before the map is returned).
 
 use crate::ssa::framework::BlockId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ssa::types::ConstantValue;
 
@@ -47,14 +49,16 @@ pub fn run(inner: &mut EgirInner) {
 pub fn run_one_body(graph: &mut EGraph) -> HashMap<NodeId, NodeId> {
     let mut aliases: HashMap<NodeId, NodeId> = HashMap::new();
     loop {
-        // Phase order: fold first, phi-elim second. Folding can shrink a
+        // Phase order: fold first, prune dead CFG second, phi-elim third.
+        // Folding can expose unreachable arms and shrink a
         // block's predecessor set (CondBranch → Branch), newly exposing an
         // "all incoming args are the same NodeId" situation.
         let folded = fold_constant_branches(graph);
+        let pruned = remove_unreachable_blocks(graph);
         let new_aliases = eliminate_redundant_params(graph);
         let phi_elided = !new_aliases.is_empty();
         merge_aliases(&mut aliases, new_aliases);
-        if !folded && !phi_elided {
+        if !folded && !pruned && !phi_elided {
             break;
         }
     }
@@ -124,6 +128,43 @@ fn is_const_bool(nid: NodeId, nodes: &slotmap::SlotMap<NodeId, ENode>) -> Option
         } if operands.is_empty() => Some(*b),
         _ => None,
     }
+}
+
+/// Remove skeleton blocks that cannot be reached from the entry block.
+/// The pure nodes and block-param nodes owned by dead blocks stay in the
+/// sea; with no reachable demand path to them, later stages ignore them.
+fn remove_unreachable_blocks(graph: &mut EGraph) -> bool {
+    let mut reachable: HashSet<BlockId> = HashSet::new();
+    let mut stack = vec![graph.skeleton.entry];
+    while let Some(bid) = stack.pop() {
+        if !reachable.insert(bid) {
+            continue;
+        }
+        let Some(block) = graph.skeleton.blocks.get(bid) else {
+            continue;
+        };
+        match &block.term {
+            SkeletonTerminator::Branch { target, .. } => stack.push(*target),
+            SkeletonTerminator::CondBranch {
+                then_target,
+                else_target,
+                ..
+            } => {
+                stack.push(*then_target);
+                stack.push(*else_target);
+            }
+            SkeletonTerminator::Return(_) | SkeletonTerminator::Unreachable => {}
+        }
+    }
+
+    let dead: Vec<BlockId> = graph.skeleton.blocks.keys().filter(|bid| !reachable.contains(bid)).collect();
+    if dead.is_empty() {
+        return false;
+    }
+    for bid in dead {
+        graph.skeleton.blocks.remove(bid);
+    }
+    true
 }
 
 /// Eliminate every block param whose incoming arg is the same NodeId on
