@@ -5206,23 +5206,14 @@ entry e() []u32 = map(|i: i32| g.at((0x9e3779b9u32, 0x243f6a88u32), u32.i32(i)),
 // fixed to make the test a passing regression.
 // =========================================================================
 
-/// Regression: `map(|_| literal, fb)` over a consuming `*[]T`
-/// write-storage param, followed by a `scatter` into the cleared
-/// result, must compile end-to-end. This is the natural shape for
-/// "blank the framebuffer then write per-particle pixels" in a
-/// single rasterize entry.
-///
-/// Previously panicked at `spirv/mod.rs:388` (`"Composite variant
-/// unsized arrays not supported"`): the post-clear `cleared` value
-/// was projected out of the Screma tuple with the *TLC-default*
-/// `Composite[Variable, NoRegion]` array type, while the runtime
-/// tuple actually carried the input `View`. The mismatch surfaced
-/// when SPIR-V tried to lower the Project's result type.
-/// Fixed in `egir::from_tlc::convert_soac_map` by mirroring the
-/// `InputBuffer`-aware Project-typing already used by
-/// `convert_soac_scan`, and in `egir::soac_expand` by passing the
-/// post-decision carried type (not the pre-decision Composite type)
-/// to `emit_write_element`.
+/// A consuming `*[]T` map's `Project` and the carried buffer it
+/// drives must both carry the input view's type, not the TLC-
+/// default `Composite[Variable, NoRegion]`. Otherwise the SPIR-V
+/// backend tries to lower a Composite array with a runtime size
+/// (the input view's runtime length) and panics. Wired in
+/// `egir::from_tlc::convert_soac_map` (`InputBuffer`-aware project
+/// type, mirroring `convert_soac_scan`) and in `egir::soac_expand`
+/// (`emit_write_element` takes the post-decision carried type).
 #[test]
 fn clear_then_scatter_on_consuming_write_storage_compiles() {
     crate::compile_thru_spirv(
@@ -5234,4 +5225,31 @@ entry e(#[storage(set=2, binding=1, access=write)] fb: *[]vec4f32) () =
 "#,
     )
     .expect("clear-then-scatter on consuming `*[]T` write storage should compile end-to-end");
+}
+
+/// A compute entry may both *return* a Screma result and *consume*
+/// it as a downstream side-effect's array input — here `new_pos` is
+/// the entry's output and also the per-element input the scatter
+/// envelope reads. The rewrite in
+/// `egir::realize_outputs::dispatch::rewrite_sibling_index_consumers`
+/// retargets `new_pos` to the entry-output view and substitutes
+/// `source → view` in the scatter's input-region operand.
+#[test]
+fn compute_entry_returns_screma_result_and_scatters_through_it() {
+    crate::compile_thru_spirv(
+        r#"
+def N:i32 = 8
+def RES:i32 = 8
+
+#[compute]
+entry sim(#[storage(set=2, binding=0, access=read)] prev: []vec4f32,
+          #[storage(set=2, binding=1, access=write)] fb: []vec4f32) []vec4f32 =
+  let new_pos = map(|x:vec4f32| @[x.x + 1.0, x.y + 1.0, x.z, x.w], prev) in
+  let idxs = map(|p:vec4f32| i32.f32(p.y) * RES + i32.f32(p.x), new_pos) in
+  let vals = map(|p:vec4f32| @[1.0, 1.0, 1.0, 1.0], new_pos) in
+  let _ = scatter(fb, idxs, vals) in
+  new_pos
+"#,
+    )
+    .expect("returning a Screma result while a downstream scatter consumes it should compile");
 }

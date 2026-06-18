@@ -366,9 +366,18 @@ pub(crate) fn retarget_array_projection(
 /// extraction time so every downstream `demand` transparently
 /// redirects through the view.
 ///
-/// Side-effect operand uses of `source` (other than the SOAC's own
-/// `result`) and non-Index Pure consumer shapes (`Project`, `Tuple`,
-/// `ArrayLit`, `Call`, …) are rejected with a v1 `Unsupported`
+/// Side-effect operand uses of `source` are accepted only when they
+/// land in the side-effect's *input-array* region — those get
+/// rewritten in place to point at the output view (and their
+/// payload `input_array_types[k]` is updated, which is what
+/// `emit_read_element` keys off via `is_view_source(arr_ty)`).
+/// `source` reaching any other operand position (capture, init
+/// accumulator, output view operand, scatter dest, scatter
+/// capture) is rejected as v1 `Unsupported` — those positions
+/// expect something other than "read this array per element" and
+/// the substitution would be a semantic mismatch.
+/// Non-Index Pure consumer shapes (`Project`, `Tuple`, `ArrayLit`,
+/// `Call`, …) are still rejected with the original v1 `Unsupported`
 /// diagnostic.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn rewrite_sibling_index_consumers(
@@ -381,20 +390,128 @@ pub(crate) fn rewrite_sibling_index_consumers(
     elem_ty: Type<TypeName>,
     slot_index: usize,
 ) -> Result<(), ConvertError> {
-    // Reject side-effect operand uses (other than the SOAC's own result).
-    for (_, blk) in &graph.skeleton.blocks {
-        for se in &blk.side_effects {
+    // Walk every block's side-effects, classifying each operand
+    // reference to `source`. Input-region hits are queued for
+    // rewrite; everything else fails the slot. The SOAC's own
+    // `result == source` production is skipped — that one's the
+    // retargeting case `retarget_array_projection` already handles.
+    let mut input_hits: Vec<(BlockId, usize, usize)> = Vec::new();
+    for (skel_bid, blk) in &graph.skeleton.blocks {
+        for (se_idx, se) in blk.side_effects.iter().enumerate() {
             if se.result == Some(source) {
                 continue;
             }
-            if se.operand_nodes.contains(&source) {
-                return Err(ConvertError::Unsupported(format!(
-                    "compute output #{}: SOAC result is also used as a \
-                     side-effect operand; v1 supports only sibling Index reads \
-                     of the same SOAC result alongside output retargeting",
-                    slot_index
-                )));
+            for (op_idx, &op_nid) in se.operand_nodes.iter().enumerate() {
+                if op_nid != source {
+                    continue;
+                }
+                match &se.kind {
+                    SideEffectKind::Pending(PendingSoac::Screma {
+                        input_array_types,
+                        ..
+                    }) => {
+                        // Screma operand layout:
+                        //   [inputs.., init_accs.., map_captures..,
+                        //    acc_step_captures.., acc_reduce_op_captures..,
+                        //    output_views..]
+                        // Only the leading `input_array_types.len()`
+                        // slots are array inputs read per element.
+                        if op_idx < input_array_types.len() {
+                            input_hits.push((skel_bid, se_idx, op_idx));
+                            continue;
+                        }
+                        return Err(ConvertError::Unsupported(format!(
+                            "compute output #{}: SOAC result reaches a Screma \
+                             side-effect operand position that is not an array \
+                             input (op_index={}, inputs.len()={}); v1 supports \
+                             only input-array consumers via `source → output_view` \
+                             substitution",
+                            slot_index,
+                            op_idx,
+                            input_array_types.len()
+                        )));
+                    }
+                    SideEffectKind::Pending(PendingSoac::Scatter {
+                        input_array_types,
+                        ..
+                    }) => {
+                        // Scatter operand layout:
+                        //   [dest_view, inputs.., captures..]
+                        // Input region is `1..1+input_array_types.len()`.
+                        if op_idx >= 1 && op_idx < 1 + input_array_types.len() {
+                            input_hits.push((skel_bid, se_idx, op_idx));
+                            continue;
+                        }
+                        return Err(ConvertError::Unsupported(format!(
+                            "compute output #{}: SOAC result reaches a Scatter \
+                             side-effect operand position that is not an array \
+                             input (op_index={}, inputs.len()={}); v1 supports \
+                             only input-array consumers via `source → output_view` \
+                             substitution",
+                            slot_index,
+                            op_idx,
+                            input_array_types.len()
+                        )));
+                    }
+                    _ => {
+                        return Err(ConvertError::Unsupported(format!(
+                            "compute output #{}: SOAC result reaches a non-SOAC \
+                             side-effect operand (op_index={}); v1 supports only \
+                             input-array consumers of Screma/Scatter side effects",
+                            slot_index, op_idx
+                        )));
+                    }
+                }
             }
+        }
+    }
+
+    // Apply rewrites. The view's array type is the substitution
+    // target for every input-region hit; its element type must
+    // match the consumer's existing `input_elem_types[k]` (the
+    // SOAC produces values of its declared element type, which is
+    // the binding's element type, which is the view's element
+    // type — so any mismatch is an upstream bug).
+    let view_arr_ty = graph.types[&view].clone();
+    let view_elem_ty = view_arr_ty.elem_type().expect("output view must be Array").clone();
+    for (skel_bid, se_idx, op_idx) in input_hits {
+        let blk = &mut graph.skeleton.blocks[skel_bid];
+        let se = &mut blk.side_effects[se_idx];
+        se.operand_nodes[op_idx] = view;
+        match &mut se.kind {
+            SideEffectKind::Pending(PendingSoac::Screma {
+                input_array_types,
+                input_elem_types,
+                ..
+            }) => {
+                let k = op_idx;
+                assert_eq!(
+                    input_elem_types[k], view_elem_ty,
+                    "rewrite_sibling_index_consumers: Screma input_elem_types[{}] \
+                     {:?} disagrees with output view's elem type {:?}; the SOAC's \
+                     produced elements should equal the entry-output binding's \
+                     element type",
+                    k, input_elem_types[k], view_elem_ty
+                );
+                input_array_types[k] = view_arr_ty.clone();
+            }
+            SideEffectKind::Pending(PendingSoac::Scatter {
+                input_array_types,
+                input_elem_types,
+                ..
+            }) => {
+                let k = op_idx - 1;
+                assert_eq!(
+                    input_elem_types[k], view_elem_ty,
+                    "rewrite_sibling_index_consumers: Scatter input_elem_types[{}] \
+                     {:?} disagrees with output view's elem type {:?}; the SOAC's \
+                     produced elements should equal the entry-output binding's \
+                     element type",
+                    k, input_elem_types[k], view_elem_ty
+                );
+                input_array_types[k] = view_arr_ty.clone();
+            }
+            _ => unreachable!("classifier above only queues PendingSoac::Screma or PendingSoac::Scatter input-region hits"),
         }
     }
 
