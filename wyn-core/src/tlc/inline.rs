@@ -434,6 +434,19 @@ fn mk(ids: &mut TermIdSource, ty: Type<TypeName>, span: Span, kind: TermKind) ->
 /// has the concrete instantiation. Using the arg type avoids dragging the
 /// Abstract array variant into post-inline let chains where it would later
 /// hit `egir::verify_no_abstract` at backend lowering.
+///
+/// Special case: when the arg is a bare `Var(SymbolId)` reference (i.e. the
+/// caller is passing an in-scope binding straight through), we substitute
+/// `param_sym → arg_sym` into the body instead of emitting a redundant
+/// `let param_sym = arg_var in body`. The alias-let is correct in
+/// principle but downstream passes — `egir::from_tlc::convert_soac_filter`
+/// in particular — read attributes (storage region, ownership) directly
+/// off the original symbol and don't follow let-bound aliases, so a
+/// post-inline `let arr = xs in filter(p, arr)` loses the entry-param's
+/// region info. This is *not* general beta-reduction — only the trivial
+/// `let x = y in body` case where `y` is a `Var`. Non-Var args still
+/// get the `let` wrap so we don't duplicate side-effecting computation
+/// under multi-use params.
 pub(crate) fn build_inline_lets(
     params: &[(SymbolId, Type<TypeName>)],
     args: &[Term],
@@ -443,6 +456,19 @@ pub(crate) fn build_inline_lets(
 ) -> Term {
     let mut result = body;
     for ((sym, _param_ty), arg) in params.iter().rev().zip(args.iter().rev()) {
+        if let TermKind::Var(VarRef::Symbol(arg_sym)) = &arg.kind {
+            // Substituting the *symbol* alone is not enough: the param's
+            // declared type may be polymorphic (e.g. `[]T` with a region
+            // type-variable), while the call-site arg carries the
+            // concrete instantiation (a `Region(set, binding)`). If we
+            // only rewrite the symbol, the substituted `Var` still
+            // carries the param's polymorphic type and downstream type
+            // walks (notably the SPIR-V backend's view-region check)
+            // see an unresolved type variable. So replace both: the
+            // var ref *and* its type, at every occurrence.
+            result = substitute_sym_and_retype(result, *sym, *arg_sym, &arg.ty, ids);
+            continue;
+        }
         result = mk(
             ids,
             result.ty.clone(),
@@ -456,6 +482,65 @@ pub(crate) fn build_inline_lets(
         );
     }
     result
+}
+
+/// `substitute_sym` variant that *also* overrides the substituted
+/// `Var(old)`'s carried type with `new_ty`. Used by `build_inline_lets`
+/// for the bare-Var-arg fast path: when we forward a call-site
+/// concrete-region arg through a polymorphic param, the substituted
+/// `Var` must end up carrying the concrete type, not the polymorphic
+/// param type that was on the original term.
+fn substitute_sym_and_retype(
+    term: Term,
+    old: SymbolId,
+    new: SymbolId,
+    new_ty: &Type<TypeName>,
+    term_ids: &mut TermIdSource,
+) -> Term {
+    match term.kind {
+        TermKind::Var(VarRef::Symbol(s)) if s == old => Term {
+            id: term_ids.next_id(),
+            ty: new_ty.clone(),
+            kind: TermKind::Var(VarRef::Symbol(new)),
+            span: term.span,
+        },
+        TermKind::Var(VarRef::Symbol(_))
+        | TermKind::Var(VarRef::Builtin { .. })
+        | TermKind::BinOp(_)
+        | TermKind::UnOp(_)
+        | TermKind::IntLit(_)
+        | TermKind::FloatLit(_)
+        | TermKind::BoolLit(_)
+        | TermKind::Extern(_) => term,
+
+        TermKind::Lambda(ref lam) if lam.params.iter().any(|(p, _)| *p == old) => term,
+
+        TermKind::Let {
+            name,
+            name_ty,
+            rhs,
+            body,
+        } => {
+            let new_rhs = substitute_sym_and_retype(*rhs, old, new, new_ty, term_ids);
+            let new_body = if name == old {
+                *body
+            } else {
+                substitute_sym_and_retype(*body, old, new, new_ty, term_ids)
+            };
+            Term {
+                id: term_ids.next_id(),
+                kind: TermKind::Let {
+                    name,
+                    name_ty,
+                    rhs: Box::new(new_rhs),
+                    body: Box::new(new_body),
+                },
+                ..term
+            }
+        }
+
+        _ => term.map_children(&mut |child| substitute_sym_and_retype(child, old, new, new_ty, term_ids)),
+    }
 }
 
 // =============================================================================

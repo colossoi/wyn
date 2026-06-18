@@ -3510,7 +3510,6 @@ entry filt_count(xs: []i32) i32 =
 /// guard to emit anyway — that mis-numbers the binding and silently drops its
 /// host declaration (wrong-buffer codegen).
 #[test]
-#[ignore = "force_inline_soac_helpers inlines `evens` to `let arr = xs in filter(p, arr)`, after which `egir::from_tlc::convert_soac_filter` loses the entry-param region info through the let-binding alias. Fix: `build_inline_lets` bare-Var substitution (next commit)."]
 fn filter_runtime_in_subroutine_compiles() {
     compile_to_spirv(
         "\
@@ -3697,7 +3696,6 @@ entry filt_reduce(xs: []i32) i32 =
 /// **different functions** — TLC fusion sees through the `evens` call via
 /// function summaries (no inlining needed at fusion time).
 #[test]
-#[ignore = "force_inline_soac_helpers inlines `evens` to `let arr = xs in filter(p, arr)`, after which `egir::from_tlc::convert_soac_filter` loses the entry-param region info through the let-binding alias. Fix: `build_inline_lets` bare-Var substitution (next commit)."]
 fn filter_into_reduce_fuses_across_functions() {
     let lowered = crate::compile_thru_spirv(
         "\
