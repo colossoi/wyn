@@ -306,6 +306,18 @@ fn expand_one(
             let mut acc_scan_carried_indices = Vec::with_capacity(n_accs);
             let mut acc_current_carried_indices = Vec::with_capacity(n_accs);
             let mut result_field_tys = Vec::with_capacity(n_maps + n_accs);
+            // Per-map type used as `arr_ty` for the in-loop
+            // `emit_write_element` call. Differs from
+            // `map_result_tys[map_idx]` when the destination is
+            // `InputBuffer` or `OutputView`: the carried buffer is
+            // the actual input (a `View`), not the Screma's pre-
+            // decision Composite tuple-field type. Passing the
+            // pre-decision type to `emit_write_element` produces
+            // an `array_with_inplace` node whose declared result
+            // type disagrees with the carried block param's type;
+            // the SPIR-V backend then panics trying to lower the
+            // bogus `Array[..., Composite, Variable, NoRegion]`.
+            let mut map_carried_tys: Vec<Type<TypeName>> = Vec::with_capacity(n_maps);
 
             for map_idx in 0..n_maps {
                 let init = if let Some(view_nid) = map_output_views[map_idx] {
@@ -334,8 +346,13 @@ fn expand_one(
                 map_carried_indices.push(carried.len());
                 result_indices.push(carried.len());
                 result_field_tys.push(carried_ty.clone());
+                map_carried_tys.push(carried_ty.clone());
                 carried.push((carried_ty, init));
             }
+            // Per-Scan-accumulator carried type, used for
+            // `emit_write_element` exactly like `map_carried_tys` above.
+            // `None` for Reduce accumulators (no buffer carried).
+            let mut acc_scan_carried_tys: Vec<Option<Type<TypeName>>> = Vec::with_capacity(n_accs);
             for acc_idx in 0..n_accs {
                 match acc_specs[acc_idx].kind {
                     crate::tlc::ScremaAccumulator::Reduce => {
@@ -343,6 +360,7 @@ fn expand_one(
                         acc_current_carried_indices.push(carried.len());
                         result_indices.push(carried.len());
                         result_field_tys.push(acc_result_tys[acc_idx].clone());
+                        acc_scan_carried_tys.push(None);
                         carried.push((acc_elem_tys[acc_idx].clone(), init_acc_nids[acc_idx]));
                     }
                     crate::tlc::ScremaAccumulator::Scan => {
@@ -373,6 +391,7 @@ fn expand_one(
                         acc_scan_carried_indices.push(Some(carried.len()));
                         result_indices.push(carried.len());
                         result_field_tys.push(scan_ty.clone());
+                        acc_scan_carried_tys.push(Some(scan_ty.clone()));
                         carried.push((scan_ty, init_scan_out));
                         acc_current_carried_indices.push(carried.len());
                         carried.push((acc_elem_tys[acc_idx].clone(), init_acc_nids[acc_idx]));
@@ -447,7 +466,7 @@ fn expand_one(
                                 out_nid,
                                 idx_nid,
                                 mapped,
-                                &map_result_tys[map_idx],
+                                &map_carried_tys[map_idx],
                                 &map_output_elem_types[map_idx],
                             )
                         };
@@ -491,7 +510,9 @@ fn expand_one(
                                     scan_out_nid,
                                     idx_nid,
                                     new_acc,
-                                    &acc_result_tys[acc_idx],
+                                    acc_scan_carried_tys[acc_idx]
+                                        .as_ref()
+                                        .expect("Scan accumulator must have a carried type"),
                                     &acc_elem_tys[acc_idx],
                                 )
                             };

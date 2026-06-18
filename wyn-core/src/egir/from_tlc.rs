@@ -1829,9 +1829,23 @@ impl<'a> Converter<'a> {
         operands.extend_from_slice(&input_nids);
         operands.extend_from_slice(&capture_nids);
 
-        // Emit as a singleton Screma + project field 0.
+        // Emit as a singleton Screma + project field 0. For consuming
+        // (`InputBuffer`) map the result aliases the input, so the
+        // Project's type must match the input view's type (View
+        // variant + region) rather than the TLC-default `result_ty`
+        // (Composite variant with NoRegion). Mirrors the same handling
+        // in `convert_soac_scan` below — without it the SPIR-V backend
+        // panics trying to lower a `Composite[Variable, NoRegion]`
+        // array type that survives because the consumer-side Project
+        // takes the TLC logical type even when the runtime tuple
+        // carries a View.
         let capture_count = capture_nids.len();
-        let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![result_ty.clone()]);
+        let project_ty = if matches!(destination, SoacDestination::InputBuffer) {
+            input_arr_types[0].clone()
+        } else {
+            result_ty.clone()
+        };
+        let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![project_ty.clone()]);
         let screma_nid = self.emit_soac(
             PendingSoac::Screma {
                 map_funcs: vec![f_name],
@@ -1846,7 +1860,7 @@ impl<'a> Converter<'a> {
             operands,
             tuple_ty,
         );
-        Ok(self.intern_pure(PureOp::Project { index: 0 }, smallvec![screma_nid], result_ty))
+        Ok(self.intern_pure(PureOp::Project { index: 0 }, smallvec![screma_nid], project_ty))
     }
 
     /// `scatter(dest, indices, values)` → a side-effecting `PendingSoac::Scatter`.

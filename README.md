@@ -381,7 +381,7 @@ cargo build --release
 cargo test
 ```
 
-1147 tests currently pass (9 ignored for pending features). All SPIR-V testfiles in `testfiles/` compile and validate (`bash scripts/validate_testfiles.sh`); the WGSL subset also validates (`bash scripts/validate_testfiles.sh --wgsl` — a handful skip because they depend on linked SPIR-V helpers).
+1148 tests currently pass (9 ignored for pending features). All SPIR-V testfiles in `testfiles/` compile and validate (`bash scripts/validate_testfiles.sh`); the WGSL subset also validates (`bash scripts/validate_testfiles.sh --wgsl` — a handful skip because they depend on linked SPIR-V helpers).
 
 ## Language Overview
 

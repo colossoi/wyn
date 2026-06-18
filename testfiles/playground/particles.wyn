@@ -14,10 +14,10 @@
 -- framebuffer at the pixel's flat index, so per-pixel cost is O(1) instead of
 -- O(particles).
 --
--- Note: the framebuffer is written sparsely (one texel per particle), so the
--- host is expected to clear it each frame; otherwise moving particles leave
--- trails (a known v1 limitation). `scatter` lowers serially in this cut
--- (sequential semantics); a parallel version is a pure-optimization follow-up.
+-- Note: the framebuffer is self-cleared each frame by `rasterize` itself
+-- via a consuming-write `map(|_| black, fb)` ahead of the per-particle
+-- `scatter`. `scatter` lowers serially in this cut (sequential semantics);
+-- a parallel version is a pure-optimization follow-up.
 --
 -- Exercises `filter(...)` piped into a user-defined size-polymorphic
 -- helper (`center` calling `sum`) — the canonical "Abstract array
@@ -75,15 +75,21 @@ entry tick(#[storage(set=2, binding=0, access=read)] prev_pos: []vec4f32,
             @[elem.x, elem.y, elem.z + deltav.x, elem.w + deltav.y],
           prev_pos))
 
--- Single pass over the particles: scatter one white texel per particle into
--- the framebuffer at its flattened pixel index. `fb` is written in place.
+-- Single pass over the particles: blank the framebuffer to opaque black,
+-- then scatter one white texel per particle into the cleared framebuffer
+-- at its flattened pixel index. The `*[]vec4f32` annotation on `fb` is
+-- what lets the clearing `map` write back in place; the `scatter` then
+-- overwrites the cleared cells where particles land. Self-clearing means
+-- the host no longer has to clear `fb` between frames — moving particles
+-- no longer leave trails.
 #[compute]
 entry rasterize(#[storage(set=2, binding=0, access=read)] positions: []vec4f32,
-                #[storage(set=2, binding=1, access=write)] fb: []vec4f32) () =
+                #[storage(set=2, binding=1, access=write)] fb: *[]vec4f32) () =
+  let cleared = map(|_p:vec4f32| @[0.0, 0.0, 0.0, 1.0], fb) in
   let pts  = positions[0..N] in
   let idxs = map(|p:vec4f32| i32.f32(p.y) * RES + i32.f32(p.x), pts) in
   let vals = map(|p:vec4f32| @[1.0, 1.0, 1.0, 1.0], pts) in
-  let _ = scatter(fb, idxs, vals) in ()
+  let _ = scatter(cleared, idxs, vals) in ()
 
 #[vertex]
 entry vertex_main(#[builtin(vertex_index)] vid: i32)
