@@ -79,9 +79,52 @@ fn build_soac_helper_candidates(program: &Program) -> HashMap<SymbolId, InlineBo
         if !contains_soac(&body) {
             continue;
         }
+        // Skip helpers whose body carries an unresolved polytype `Variable`
+        // (a free *type* parameter — distinct from a `SizeVar`). The
+        // prelude's `unzip<[n], A, B>` is the load-bearing example: its
+        // body contains SOAC `map` calls, so it qualifies as a SOAC
+        // helper, but if we force-inline it the body's free `A`/`B`
+        // type variables go nowhere — `monomorphize` only resolves
+        // polymorphism at *function-definition* boundaries, not inside
+        // already-inlined bodies, so the variables ride all the way to
+        // the SPIR-V backend and panic on "Unresolved type variable".
+        // Defer such helpers to the canonical
+        // `monomorphize → fold_generated_lambdas → inline_small` path
+        // that actually unifies their call sites.
+        if term_contains_free_type_variable(&body)
+            || params.iter().any(|(_, ty)| type_contains_variable(ty))
+        {
+            continue;
+        }
         candidates.insert(def.name, InlineBody { params, body });
     }
     candidates
+}
+
+/// True if `ty` references any polytype `Type::Variable(_)` — an
+/// unresolved type parameter. Doesn't trigger on size-vars or any
+/// other nullary `TypeName::*`-marker.
+fn type_contains_variable(ty: &Type<TypeName>) -> bool {
+    match ty {
+        Type::Variable(_) => true,
+        Type::Constructed(_, args) => args.iter().any(type_contains_variable),
+    }
+}
+
+/// True if any subterm's carried type contains a polytype `Variable` —
+/// or, equivalently, if the def's body still carries free type
+/// parameters that monomorphize would resolve.
+fn term_contains_free_type_variable(term: &Term) -> bool {
+    if type_contains_variable(&term.ty) {
+        return true;
+    }
+    let mut found = false;
+    term.for_each_child(&mut |c| {
+        if !found {
+            found = term_contains_free_type_variable(c);
+        }
+    });
+    found
 }
 
 /// True if `term` contains anything fusion's classifier treats as a use of an

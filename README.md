@@ -381,7 +381,7 @@ cargo build --release
 cargo test
 ```
 
-1145 tests currently pass (11 ignored: 9 pending features, 2 pending one more root-cause fix — see `#[ignore]` messages on `runtime_sized_array_with_multiple_consumers_lowers` and `user_def_shadowing_map_does_not_break_prelude_unzip`). All SPIR-V testfiles in `testfiles/` compile and validate (`bash scripts/validate_testfiles.sh`); the WGSL subset also validates (`bash scripts/validate_testfiles.sh --wgsl` — a handful skip because they depend on linked SPIR-V helpers).
+1147 tests currently pass (9 ignored for pending features). All SPIR-V testfiles in `testfiles/` compile and validate (`bash scripts/validate_testfiles.sh`); the WGSL subset also validates (`bash scripts/validate_testfiles.sh --wgsl` — a handful skip because they depend on linked SPIR-V helpers).
 
 ## Language Overview
 

@@ -2016,7 +2016,6 @@ entry e(j: i32) [1]f32 = [g(256)[j]]
 /// `maximum`. Distinct from `returning_runtime_sized_array_from_fn_lowers`,
 /// which is about *returning* such an array.
 #[test]
-#[ignore = "force_inline_soac_helpers inlines a polymorphic SOAC helper without instantiating its free type variables, panicking later at `spirv/mod.rs` with an unresolved `polytype::Variable`. Fix: skip defs with free type variables in `build_soac_helper_candidates` (commit 3)."]
 fn runtime_sized_array_with_multiple_consumers_lowers() {
     let source = r#"
 def g(n: i32) f32 =
@@ -2147,7 +2146,6 @@ entry e(xs: [8]i32) i32 = reduce(i32.(+), map(0i32), xs)
 /// `globals.builtins["map"]` so the SOAC scheme resolves regardless
 /// of what the user did at file scope.
 #[test]
-#[ignore = "force_inline_soac_helpers inlines prelude `unzip<[n], A, B>` (a polymorphic SOAC helper) without instantiating its A/B type variables, panicking later at `spirv/mod.rs` with an unresolved `polytype::Variable`. Fix: skip defs with free type variables in `build_soac_helper_candidates` (commit 3)."]
 fn user_def_shadowing_map_does_not_break_prelude_unzip() {
     let source = r#"
 def map(x: i32) i32 = x + 1
