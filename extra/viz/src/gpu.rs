@@ -755,14 +755,11 @@ pub fn create_storage_textures(
                 storage_views.push(storage_view);
                 sampled_views.push(sampled_view);
             }
-            out.insert(
-                key,
-                StorageTextureResource {
-                    textures,
-                    storage_views,
-                    sampled_views,
-                },
-            );
+            out.insert(key, StorageTextureResource {
+                textures,
+                storage_views,
+                sampled_views,
+            });
         }
     }
     out
@@ -861,15 +858,12 @@ pub fn create_host_textures(
                 dimension: Some(wgpu::TextureViewDimension::D2),
                 ..Default::default()
             });
-            out.insert(
-                key,
-                HostTextureResource {
-                    texture,
-                    view,
-                    extent: (width, height),
-                    kind,
-                },
-            );
+            out.insert(key, HostTextureResource {
+                texture,
+                view,
+                extent: (width, height),
+                kind,
+            });
         }
     }
     out
@@ -936,13 +930,10 @@ pub fn create_host_buffers(
                     usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 });
-                out.insert(
-                    key,
-                    HostBufferResource {
-                        buffer,
-                        kind: HostBufferKind::Keyboard,
-                    },
-                );
+                out.insert(key, HostBufferResource {
+                    buffer,
+                    kind: HostBufferKind::Keyboard,
+                });
                 continue;
             }
 
@@ -960,13 +951,10 @@ pub fn create_host_buffers(
                     mapped_at_creation: false,
                 });
                 queue.write_buffer(&buffer, 0, &vec![0u8; bytes as usize]);
-                out.insert(
-                    key,
-                    HostBufferResource {
-                        buffer,
-                        kind: HostBufferKind::FileLoaded,
-                    },
-                );
+                out.insert(key, HostBufferResource {
+                    buffer,
+                    kind: HostBufferKind::FileLoaded,
+                });
                 continue;
             }
 
@@ -983,17 +971,14 @@ pub fn create_host_buffers(
             let buffer = device.create_buffer(&BufferDescriptor {
                 label: Some(&format!("host_buffer_{name}")),
                 size: byte_size,
-                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             });
             queue.write_buffer(&buffer, 0, &data);
-            out.insert(
-                key,
-                HostBufferResource {
-                    buffer,
-                    kind: HostBufferKind::FileLoaded,
-                },
-            );
+            out.insert(key, HostBufferResource {
+                buffer,
+                kind: HostBufferKind::FileLoaded,
+            });
         }
     }
     Ok(out)
@@ -1104,7 +1089,7 @@ pub fn create_feedback_buffers(
             let buffer = device.create_buffer(&BufferDescriptor {
                 label: Some(&format!("feedback_buffer_{name}.slot{slot}")),
                 size: byte_size,
-                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             });
             buffers.push(buffer);

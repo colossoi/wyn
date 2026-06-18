@@ -66,10 +66,18 @@ pub async fn run_pipeline(
     // path. Otherwise stick with the original headless compute runner.
     let has_graphics = desc.pipelines.iter().any(|p| matches!(p, Pipeline::Graphics(_)));
     if has_graphics {
-        if !inputs.is_empty() || !outputs.is_empty() {
+        if !inputs.is_empty() {
             eprintln!(
-                "[viz pipeline] --input / --output are ignored in interactive mode \
-                 (descriptor has a graphics pipeline; results render to the window)"
+                "[viz pipeline] --input is ignored in interactive mode \
+                 (descriptor has a graphics pipeline; inputs come from --feedback / \
+                 --zero-buffer / --storage-dir)"
+            );
+        }
+        if !outputs.is_empty() && interactive_opts.max_frames.is_none() {
+            eprintln!(
+                "[viz pipeline] --output in interactive mode dumps buffers at the \
+                 --max-frames exit; without --max-frames the run never reaches the \
+                 dump. Pass --max-frames N to snapshot after N frames."
             );
         }
         return run_pipeline_interactive(
@@ -77,6 +85,7 @@ pub async fn run_pipeline(
             desc,
             dispatch_overrides.clone(),
             feedback_specs.to_vec(),
+            outputs,
             interactive_opts,
             verbose,
         );
@@ -139,6 +148,7 @@ fn run_pipeline_interactive(
     desc: PipelineDescriptor,
     dispatch_overrides: HashMap<String, (u32, u32, u32)>,
     feedback_specs: Vec<(String, String, String)>,
+    outputs: HashMap<String, PathBuf>,
     opts: InteractiveOpts,
     verbose: bool,
 ) -> Result<()> {
@@ -178,6 +188,7 @@ fn run_pipeline_interactive(
         storage_dir: opts.storage_dir,
         zero_buffers: opts.zero_buffers,
         index_buffer: opts.index_buffer,
+        outputs,
     };
 
     let event_loop = EventLoop::new().context("failed to create event loop")?;

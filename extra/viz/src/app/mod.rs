@@ -92,6 +92,11 @@ pub struct InteractivePipelineSpec {
     /// `file_size / 4` indices in place of the non-indexed
     /// `draw(0..vertex_count)`.
     pub index_buffer: Option<PathBuf>,
+    /// Storage buffers to read back and dump as f32-array JSON when the
+    /// run ends (`--output NAME:FILE`). Keyed by binding name → output
+    /// path. Read back at the `--max-frames` exit, so pair with
+    /// `--max-frames` to get a deterministic snapshot.
+    pub outputs: HashMap<String, PathBuf>,
 }
 
 /// Embedded WGSL source compiled in-place. Used by the built-in test
@@ -131,6 +136,23 @@ struct State {
     /// Mode-specific GPU state. The `App` constructor picks one
     /// variant; the rest of the per-frame path dispatches on this.
     mode: AppMode,
+    /// `--output NAME:FILE` targets to dump at the `--max-frames` exit.
+    /// Resolved to concrete GPU buffers at construction so the exit path
+    /// is a pure readback. Empty for the testpattern/vf path.
+    output_targets: Vec<OutputTarget>,
+}
+
+/// One resolved `--output` request: where to read the bytes from and
+/// where to write the resulting f32 JSON.
+struct OutputTarget {
+    name: String,
+    path: PathBuf,
+    /// Backing buffer(s). For a plain host buffer this is length 1; for a
+    /// ping-pong feedback write-side it holds both slots and the dump
+    /// reads `frame_count % 2` (the slot last written).
+    buffers: Vec<wgpu::Buffer>,
+    byte_size: u64,
+    ping_pong: bool,
 }
 
 /// Mode-specific GPU state held by `State`. Each variant owns the
@@ -360,6 +382,7 @@ impl State {
             verbose,
             depth_view,
             mode: AppMode::VertexFragment(vf),
+            output_targets: Vec::new(),
         })
     }
 
@@ -542,6 +565,66 @@ impl State {
             spec.storage_dir.as_deref(),
             &spec.zero_buffers,
         )?;
+
+        // Resolve `--output NAME:FILE` requests to concrete buffers now,
+        // while the feedback and host pools are in scope. The actual
+        // readback happens at the `--max-frames` exit. We map each output
+        // name → its `(set, binding)` via the descriptor, then prefer the
+        // feedback write-side pool (ping-pong) and fall back to the
+        // host-buffer pool. The buffers stay alive via the bind groups;
+        // these clones are cheap Arc handles.
+        let output_targets: Vec<OutputTarget> = {
+            let mut name_to_slot: HashMap<&str, (u32, u32)> = HashMap::new();
+            for pipeline in &spec.descriptor.pipelines {
+                let bindings: &[wyn_pipeline_descriptor::Binding] = match pipeline {
+                    DescPipeline::Compute(cp) => &cp.bindings,
+                    DescPipeline::MultiCompute(mc) => &mc.bindings,
+                    DescPipeline::Graphics(gp) => &gp.bindings,
+                };
+                for b in bindings {
+                    if let wyn_pipeline_descriptor::Binding::StorageBuffer {
+                        set, binding, name, ..
+                    } = b
+                    {
+                        name_to_slot.entry(name.as_str()).or_insert((*set, *binding));
+                    }
+                }
+            }
+            let mut targets = Vec::new();
+            for (name, path) in &spec.outputs {
+                let Some(&key) = name_to_slot.get(name.as_str()) else {
+                    eprintln!(
+                        "[viz pipeline] --output '{name}': no storage_buffer binding by that \
+                         name in the descriptor; skipping"
+                    );
+                    continue;
+                };
+                if let Some(res) = feedback_buffers.get(&key) {
+                    targets.push(OutputTarget {
+                        name: name.clone(),
+                        path: path.clone(),
+                        byte_size: res.buffers[0].size(),
+                        buffers: res.buffers.clone(),
+                        ping_pong: true,
+                    });
+                } else if let Some(res) = host_buffers.get(&key) {
+                    targets.push(OutputTarget {
+                        name: name.clone(),
+                        path: path.clone(),
+                        byte_size: res.buffer.size(),
+                        buffers: vec![res.buffer.clone()],
+                        ping_pong: false,
+                    });
+                } else {
+                    eprintln!(
+                        "[viz pipeline] --output '{name}': binding ({}, {}) is neither a \
+                         feedback write-side nor a host buffer; can't read it back",
+                        key.0, key.1
+                    );
+                }
+            }
+            targets
+        };
 
         // Vertex attributes declared on a graphics pipeline (one buffer
         // per `#[location(n)]` attribute, file-loaded from
@@ -873,6 +956,7 @@ impl State {
             verbose,
             depth_view,
             mode: AppMode::Pipeline(state),
+            output_targets,
         })
     }
 
@@ -882,6 +966,28 @@ impl State {
             self.config.height = size.height;
             self.surface.configure(&self.device, &self.config);
             self.depth_view = create_depth_view(&self.device, &self.config);
+        }
+    }
+
+    /// Read back every `--output` target and write it as f32-array JSON.
+    /// Called once at the `--max-frames` exit. For a ping-pong feedback
+    /// buffer the freshest data is in the slot just written this frame
+    /// (`frame_count % 2`, matching the bind-group parity convention).
+    fn dump_outputs(&self) {
+        for t in &self.output_targets {
+            let buf = if t.ping_pong { &t.buffers[(self.frame_count as usize) % 2] } else { &t.buffers[0] };
+            match gpu::readback_buffer(&self.device, &self.queue, buf, t.byte_size) {
+                Ok(data) => match crate::json::write_f32_json(&t.path, &data) {
+                    Ok(()) => eprintln!(
+                        "[viz pipeline] wrote {} f32 from '{}' to {}",
+                        data.len(),
+                        t.name,
+                        t.path.display()
+                    ),
+                    Err(e) => eprintln!("[viz pipeline] --output '{}': write failed: {e:#}", t.name),
+                },
+                Err(e) => eprintln!("[viz pipeline] --output '{}': readback failed: {e:#}", t.name),
+            }
         }
     }
 
@@ -955,6 +1061,7 @@ impl State {
                 if let Some(max) = self.max_frames {
                     if self.frame_count >= max {
                         eprintln!("Reached {} frames, exiting.", max);
+                        self.dump_outputs();
                         self.print_memory_stats("exit");
                         std::process::exit(0);
                     }
