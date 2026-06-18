@@ -1,32 +1,36 @@
--- A minimal particle simulator demonstrating storage-buffer rasterization.
+-- A minimal boids-style particle simulator demonstrating storage-buffer
+-- rasterization with self-clearing.
 --
--- `tick` (compute) is the pure simulation: a storage-buffer feedback loop that
--- reads the previous-frame particle state via `prev_pos`, applies a soft
--- clumping + alignment force, and returns the new state.
+-- `sim` (compute) is one entry that:
+--   * evolves particle state from `prev_pos` (clumping + alignment
+--     forces) and returns the new state via `sim_output` — fed back
+--     into `prev_pos` next frame by the host.
+--   * self-clears the framebuffer via `map(|_| black, fb)` over a
+--     consuming `*[]vec4f32` and `scatter`s one white texel per
+--     particle into the cleared buffer at its flattened pixel index.
+--   * The returned `new_pos` and the scatter both consume the same
+--     SOAC result — the compiler retargets the producer's writes
+--     into the entry's output binding and rewrites the scatter's
+--     input operand to read through that view
+--     (`egir::realize_outputs::dispatch::rewrite_sibling_index_consumers`).
 --
--- `rasterize` (compute) makes a single pass over the particles and `scatter`s
--- one white texel per particle into a 1-D "framebuffer" storage buffer (a
--- flattened RES×RES image: `idx = y*RES + x`). `scatter` consumes the
--- framebuffer once and writes in place — a functional rasterization, no
--- exposed per-element mutation.
---
--- `main_image` (fragment) no longer iterates over particles — it samples the
--- framebuffer at the pixel's flat index, so per-pixel cost is O(1) instead of
--- O(particles).
---
--- Note: the framebuffer is self-cleared each frame by `rasterize` itself
--- via a consuming-write `map(|_| black, fb)` ahead of the per-particle
--- `scatter`. `scatter` lowers serially in this cut (sequential semantics);
--- a parallel version is a pure-optimization follow-up.
+-- `main_image` (fragment) samples the framebuffer at the pixel's
+-- flat index, so per-pixel cost is O(1) instead of O(particles).
 --
 -- Exercises `filter(...)` piped into a user-defined size-polymorphic
 -- helper (`center` calling `sum`) — the canonical "Abstract array
 -- crosses a non-inlined call boundary" pattern that motivates
 -- `rep_specialize`.
 --
--- Run:
---   wyn compile testfiles/playground/particles.wyn -o /tmp/particles.spv
---   viz pipeline /tmp/particles.spv --feedback tick:prev_pos=tick_output --max-frames 200
+-- Run (cmd.exe; same incantation works in bash with `^` → `\`):
+--
+--   wyn compile testfiles\playground\particles.wyn ^
+--     -o C:\Users\<you>\AppData\Local\Temp\p.spv
+--   extra\viz\target\release\viz.exe pipeline ^
+--     C:\Users\<you>\AppData\Local\Temp\p.spv ^
+--     --feedback sim:prev_pos=sim_output ^
+--     --zero-buffer fb:4194304 ^
+--     --size 512x512
 import "../../lib/noise"
 
 def N:i32 = 512
@@ -37,13 +41,6 @@ def ALIGNF:f32 = 1.0
 def ALIGNR:f32 = 100.0
 def RES:i32 = 512
 
--- Initial particle state for index `i`, drawn from the integer-hash PCG
--- generator backing lib/noise (`fasthash`). Counter-based randomness is a
--- pure function of (seed, position), so each particle gets an independent,
--- well-distributed draw — no f32-precision collapse like the old
--- `fract(x*y*(x+y))` hash, which piled most particles onto pixel (0,0).
--- Position spans the full [0, RES)² framebuffer; velocity components span
--- [-1, 1).
 def spawn(i: i32) vec4f32 =
   let k = fasthash.seed(u32.i32(i) * 2654435761u32 + 1u32) in
   @[f32(RES) * fasthash.at_f32(k, 0u32),
@@ -59,42 +56,40 @@ def clump(pos:vec4f32, arr:[]vec4f32) vec2f32 =
     CLUMPF * dist
 def align(pos:vec4f32, arr:[]vec4f32) vec2f32 = ALIGNF*((reduce(|a,b| a+b, @[0.0,0.0], map(|elem| elem.zw, arr)) / f32(N)) - pos.zw)
 
-#[compute]
-entry tick(#[storage(set=2, binding=0, access=read)] prev_pos: []vec4f32,
-           #[uniform(set=1, binding=1)] iTime: f32) []vec4f32 =
-  if iTime < 0.1 then
-    map(|i:i32| spawn(i), 0i32..<N)
-  else
-    let prev_pos = prev_pos[0..N] in
-    map(
-      |upd:vec4f32| @[(upd.x + UPDFACTOR * upd.z + 512.0)%512.0,
-                     (upd.y + UPDFACTOR * upd.w + 512.0)%512.0,
-                     upd.z, upd.w],
-      map(|elem:vec4f32|
-            let deltav = clump(elem, prev_pos) + align(elem, prev_pos) in
-            @[elem.x, elem.y, elem.z + deltav.x, elem.w + deltav.y],
-          prev_pos))
+-- Toroidal wrap of one axis of the particle position: integrate
+-- `vel` into `coord` and fold the result into `[0, RES)`.
+def wrap(coord: f32, vel: f32) f32 = (coord + UPDFACTOR * vel + f32(RES)) % f32(RES)
 
--- Single pass over the particles: blank the framebuffer to opaque black,
--- then scatter one white texel per particle into the cleared framebuffer
--- at its flattened pixel index. The `*[]vec4f32` annotation on `fb` is
--- what lets the clearing `map` write back in place; the `scatter` then
--- overwrites the cleared cells where particles land. Self-clearing means
--- the host no longer has to clear `fb` between frames — moving particles
--- no longer leave trails.
+-- Flatten `(p.x, p.y)` (a particle position or a fragment coordinate,
+-- both `vec4f32`) into a row-major framebuffer index.
+def pixel_index(p: vec4f32) i32 = i32.f32(p.y) * RES + i32.f32(p.x)
+
 #[compute]
-entry rasterize(#[storage(set=2, binding=0, access=read)] positions: []vec4f32,
-                #[storage(set=2, binding=1, access=write)] fb: *[]vec4f32) () =
+entry sim(#[storage(set=2, binding=0, access=read)] prev_pos: []vec4f32,
+          #[storage(set=2, binding=1, access=write)] fb: *[]vec4f32,
+          #[uniform(set=1, binding=1)] iTime: f32) []vec4f32 =
+  let new_pos =
+    if iTime < 0.1 then
+      map(|i:i32| spawn(i), 0i32..<N)
+    else
+      let prev_pos = prev_pos[0..N] in
+      let accelerated =
+        map(|elem:vec4f32|
+              let deltav = clump(elem, prev_pos) + align(elem, prev_pos) in
+              @[elem.x, elem.y, elem.z + deltav.x, elem.w + deltav.y],
+            prev_pos)
+      in
+      map(|upd:vec4f32| @[wrap(upd.x, upd.z), wrap(upd.y, upd.w), upd.z, upd.w],
+          accelerated) in
   let cleared = map(|_p:vec4f32| @[0.0, 0.0, 0.0, 1.0], fb) in
-  let pts  = positions[0..N] in
-  let idxs = map(|p:vec4f32| i32.f32(p.y) * RES + i32.f32(p.x), pts) in
-  let vals = map(|p:vec4f32| @[1.0, 1.0, 1.0, 1.0], pts) in
-  let _ = scatter(cleared, idxs, vals) in ()
+  let idxs = map(|p:vec4f32| pixel_index(p), new_pos) in
+  let vals = map(|p:vec4f32| @[1.0, 1.0, 1.0, 1.0], new_pos) in
+  let _ = scatter(cleared, idxs, vals) in
+  new_pos
 
 #[vertex]
 entry vertex_main(#[builtin(vertex_index)] vid: i32)
   #[builtin(position)] vec4f32 =
-  -- Full-screen triangle: three off-screen verts that cover the viewport.
   let x = if vid == 0 then -1.0 else if vid == 1 then 3.0 else -1.0 in
   let y = if vid == 0 then -1.0 else if vid == 1 then -1.0 else 3.0 in
   @[x, y, 0.0, 1.0]
@@ -103,6 +98,4 @@ entry vertex_main(#[builtin(vertex_index)] vid: i32)
 entry main_image(#[storage(set=2, binding=1, access=read)] fb: []vec4f32,
                  #[builtin(position)] fragCoord: vec4f32)
   #[location(0)] vec4f32 =
-  let x = i32.f32(fragCoord.x) in
-  let y = i32.f32(fragCoord.y) in
-  fb[y * RES + x]
+  fb[pixel_index(fragCoord)]
