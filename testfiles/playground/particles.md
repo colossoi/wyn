@@ -1,9 +1,9 @@
 # Particles (`particles.wyn`) — build and run
 
 A minimal boids-style particle simulator that demonstrates storage-buffer
-rasterization: a compute feedback loop evolves particle state, a second
-compute pass `scatter`s one texel per particle into a flat framebuffer,
-and the fragment shader samples that framebuffer at O(1) per pixel.
+rasterization: a single compute pass (`sim`) evolves particle state and
+`scatter`s one texel per particle into a flat framebuffer, and the fragment
+shader samples that framebuffer at O(1) per pixel.
 
 ## What you need
 
@@ -31,22 +31,28 @@ sizes, buffer lengths, etc.
 (cd extra/viz && cargo build --release)
 ./extra/viz/target/release/viz pipeline \
   testfiles/playground/particles.spv \
-  --feedback tick:prev_pos=tick_output \
-  --zero-buffer fb:4194304 \
+  --feedback sim:prev_pos=sim_output \
+  --buffer-init fb:4194304:0 \
+  --buffer-init seed:8192:rng \
   --size 512x512
 ```
 
 Flag by flag:
 
-- `--feedback tick:prev_pos=tick_output` — wires the simulation feedback
-  loop: `tick`'s `prev_pos` input reads the previous frame's
-  `tick_output`. The host allocates two physical buffers and swaps which
+- `--feedback sim:prev_pos=sim_output` — wires the simulation feedback
+  loop: `sim`'s `prev_pos` input reads the previous frame's
+  `sim_output`. The host allocates two physical buffers and swaps which
   is bound each frame. Without this the simulation reads zeroes every
   frame and never evolves.
-- `--zero-buffer fb:4194304` — allocates the framebuffer the `rasterize`
-  pass scatters into: `RES*RES * vec4f32 = 512*512*16 = 4194304` bytes.
-  The host zeroes it (and re-clears each frame), so moving particles
-  don't leave trails. Without it `fb` is unbound.
+- `--buffer-init fb:4194304:0` — allocates the framebuffer `sim`
+  scatters into, zero-filled: `RES*RES * vec4f32 = 512*512*16 = 4194304`
+  bytes. `sim` re-clears it each frame, so moving particles don't leave
+  trails. Without it `fb` is unbound.
+- `--buffer-init seed:8192:rng` — allocates the `seed` buffer that
+  supplies the initial particle state, filled with one uniform-random
+  `vec4f32` in `[0, 1)` per particle: `N * vec4f32 = 512*16 = 8192`
+  bytes. On the first frame `sim` maps each `seed` entry into a starting
+  position + velocity. Without it `seed` is unbound.
 - `--size 512x512` — makes the render surface match `RES` so the
   fragment's `fb[y*RES + x]` lines up 1:1 with the framebuffer. The
   shader hard-codes `RES = 512`; at any other surface size the flat
@@ -67,8 +73,7 @@ on its own.
 
 | Entry        | Stage    | Role                                                    |
 | ------------ | -------- | ------------------------------------------------------ |
-| `tick`       | compute  | Pure simulation; reads `prev_pos`, writes `tick_output`. On the first frame it spawns initial state from `lib/noise`'s `fasthash` generator. |
-| `rasterize`  | compute  | One pass over the particles; `scatter`s one white texel per particle into `fb` at its flattened pixel index. |
+| `sim`        | compute  | Reads `prev_pos`, evolves particle state, and `scatter`s one white texel per particle into the self-cleared `fb`; returns the new state via `sim_output`. On the first frame it maps the host-seeded `seed` buffer into the initial state. |
 | `vertex_main`| vertex   | Full-screen triangle.                                  |
 | `main_image` | fragment | Samples `fb` at the pixel's flat index (`y*RES + x`).  |
 
@@ -77,10 +82,9 @@ The resource layout is documented in the comment block at the top of
 
 ## Notes
 
-- **Spawn randomness comes from `lib/noise`.** Initial positions/velocities
-  are per-particle counter-based draws from `fasthash` (the PCG generator
-  backing `lib/noise`). An earlier hand-rolled `fract(x*y*(x+y))` hash lost
-  all f32 precision past particle ~40 and piled most of them onto pixel
-  (0,0); the counter-based generator is integer math and spreads cleanly.
-- **`rasterize` lowers serially in this cut** (sequential `scatter`
+- **Spawn randomness comes from the host.** Initial positions/velocities
+  are read from the `seed` buffer, which `--buffer-init seed:8192:rng`
+  fills with uniform-random `f32` in `[0, 1)`. The shader maps those draws
+  into its domain, so it needs no GPU-side RNG library.
+- **`scatter` lowers serially in this cut** (sequential `scatter`
   semantics); a parallel version is a pure-optimization follow-up.
