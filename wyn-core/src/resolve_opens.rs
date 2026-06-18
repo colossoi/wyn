@@ -65,7 +65,7 @@ impl OpenIndex {
     }
 
     /// Insert a `(module, name)` pair, also marking the module as
-    /// known. Used to build the index from spec_schemes / impl_source.
+    /// known. Builds the index from spec_schemes / impl_source.
     pub fn add_member(&mut self, module: &str, name: &str) {
         // Avoid an unconditional `module.to_string()` on the hot
         // already-present path: clone only when we have to insert.

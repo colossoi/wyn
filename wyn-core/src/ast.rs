@@ -144,7 +144,7 @@ impl std::fmt::Display for Span {
 }
 
 /// Unique identifier for AST nodes (expressions)
-/// Used to look up inferred types in the type table
+/// Looks up inferred types in the type table
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeId(pub u32);
 

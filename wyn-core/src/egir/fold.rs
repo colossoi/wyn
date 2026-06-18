@@ -130,9 +130,9 @@ impl EGraph {
     /// the exponent as `f32`. Non-integral or out-of-range exponents
     /// (e.g. `2.5`, `-1`, `0`) leave the `**` node alone.
     ///
-    /// Vector bases are skipped: `vec ** 2.0` previously folded silently
-    /// to a componentwise `v * v`, which looks like squared-magnitude but
-    /// isn't. With no fold here and no backend lowering for `**` on a
+    /// Vector bases are skipped: there is no correct scalar fold for
+    /// `vec ** k` — a componentwise `v * v` looks like squared-magnitude
+    /// but isn't. With no fold here and no backend lowering for `**` on a
     /// vec, the call falls through to a clean compile-time error so
     /// users write the intended `dot(v, v)` / `magnitude(v) ** k` form.
     fn fold_pow_to_mul_chain(

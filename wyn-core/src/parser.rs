@@ -1381,7 +1381,7 @@ impl<'a> Parser<'a> {
                     "u64" => TypeName::UInt(64),
                     // Boolean
                     "bool" => TypeName::Bool,
-                    // Opaque GPU resources (nullary in v1)
+                    // Opaque GPU resources (nullary)
                     "texture2d" => TypeName::Texture2D,
                     "sampler" => TypeName::Sampler,
                     "storage_image" => TypeName::StorageTexture,

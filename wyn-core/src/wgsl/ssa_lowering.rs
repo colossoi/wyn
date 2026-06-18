@@ -1192,8 +1192,8 @@ impl<'a> LowerCtx<'a> {
         let non_storage_outputs: Vec<(usize, &crate::ssa::types::EntryOutput)> =
             entry.outputs.iter().enumerate().filter(|(_, o)| o.storage_binding.is_none()).collect();
         // For multi-output: the generated struct name and the per-output
-        // field mapping (orig_index → field_name), used to pre-declare
-        // `var _out_struct: VsOutN;` in the body prelude and to route
+        // field mapping (orig_index → field_name), which pre-declares
+        // `var _out_struct: VsOutN;` in the body prelude and routes
         // `OutputPtr` targets into its fields.
         let mut multi_output_struct: Option<(String, HashMap<usize, String>)> = None;
         let (ret_type_str, is_compute_void) = match entry.execution_model {
@@ -1726,8 +1726,8 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         }
 
                         // PlaceIndex: `{parent}[idx]` — index into another
-                        // place's expression. Used to address one element of
-                        // an Alloca'd function-local array without going
+                        // place's expression. Addresses one element of an
+                        // Alloca'd function-local array without going
                         // through a whole-array Load.
                         InstKind::PlaceIndex { place, index, result } => {
                             let parent = self.place_targets.get(place).cloned().ok_or_else(|| {

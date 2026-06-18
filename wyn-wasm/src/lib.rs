@@ -174,10 +174,6 @@ mod tlc_tree {
     }
 }
 
-// =============================================================================
-// MIR to Tree conversion (removed — old MIR types no longer exist)
-// =============================================================================
-
 /// Initialize the compiler cache. Call this once at startup.
 /// Returns true on success.
 #[wasm_bindgen]

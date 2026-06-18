@@ -1548,10 +1548,11 @@ fn build_loop_skeleton(
     graph.skeleton.blocks[after].side_effects = suffix;
     graph.skeleton.blocks[after].term = old_term;
 
-    // If `bid` was previously a structured-control-flow header (e.g. a
-    // Selection whose CondBranch is in `old_term`), that metadata now
-    // describes `after` — bid's new terminator is an unconditional branch to
-    // the loop header and is no longer a selection/loop header itself.
+    // The split moves the branching terminator to `after`: if `bid`
+    // carries structured-control-flow header metadata (e.g. a Selection
+    // whose CondBranch is in `old_term`), that metadata follows to
+    // `after`, since `bid`'s new terminator is an unconditional branch to
+    // the loop header — `after` is the selection/loop header now.
     if let Some(header_meta) = control_headers.remove(&bid) {
         control_headers.insert(after, header_meta);
     }

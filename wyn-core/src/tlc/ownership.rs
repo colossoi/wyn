@@ -108,9 +108,9 @@ impl Origin {
 pub struct OwnershipModel {
     /// SymbolId → OwnerId. Populated as bindings are visited.
     pub var_to_owner: HashMap<SymbolId, OwnerId>,
-    /// First binder name for each owner — used to make
-    /// use-after-move error messages user-readable. Populated when an
-    /// owner is created, never overwritten.
+    /// First binder name for each owner — makes use-after-move error
+    /// messages user-readable. Populated when an owner is created, never
+    /// overwritten.
     pub owner_to_var: HashMap<OwnerId, SymbolId>,
     /// Per-owner provenance.
     pub origins: HashMap<OwnerId, Origin>,

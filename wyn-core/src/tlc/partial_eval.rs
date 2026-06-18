@@ -473,9 +473,8 @@ impl PartialEvaluator {
     /// `x + 0 → x` that returns a residual operand); `None` means it could
     /// not be reduced and the caller must rebuild residual syntax from the
     /// evaluated operands. Crucially `None` is *not* the same as "returned a
-    /// residual" — conflating them (both used to be `Value::Unknown`) makes
-    /// the caller either drop a valid simplification or leave a dissolved
-    /// let's variable dangling.
+    /// residual" — conflating them makes the caller either drop a valid
+    /// simplification or leave a dissolved let's variable dangling.
     ///
     /// `ty` is the operand type; integer folds wrap to its bit width so the
     /// result matches runtime semantics (e.g. u32 multiply is mod 2^32). The

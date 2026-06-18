@@ -321,7 +321,7 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
     let mut current: Term = def.body.clone();
     let mut extra_slots: Vec<(usize, Term)> = Vec::new();
 
-    // The entry's binding layout — used to resolve `Ref(Var(sym))` SOAC inputs
+    // The entry's binding layout, which resolves `Ref(Var(sym))` SOAC inputs
     // back to their assigned (set, binding). Empty for non-compute entries.
     let entry_slots = if let DefMeta::EntryPoint(decl) = &def.meta {
         let (params, _) = peel_lambda_params(&def.body);
@@ -1397,7 +1397,7 @@ fn maybe_hoist(
 /// params. Starts from `entry_params` and grows by walking the body's
 /// `Let` chain in source order: a let-bound symbol joins the set iff
 /// its RHS has any free var already in the set. Stops descending once
-/// the term is no longer a Lambda or Let — the tail isn't a hoist
+/// the term is neither a Lambda nor a Let — the tail isn't a hoist
 /// site, so taint propagation past it doesn't matter.
 fn compute_taint_set(
     term: &Term,
@@ -1453,8 +1453,8 @@ fn rhs_references_entry_param(
 }
 
 /// Collect `term`'s free vars that are uniform entry params, as
-/// `(symbol, type, binding)`. Used to re-declare the uniforms a hoisted
-/// SOAC reads on the generated pre-pass entry. Deduplicated by symbol.
+/// `(symbol, type, binding)`. Re-declares the uniforms a hoisted SOAC
+/// reads on the generated pre-pass entry. Deduplicated by symbol.
 fn collect_uniform_required_params(
     term: &Term,
     uniform_params: &HashMap<SymbolId, BindingRef>,
@@ -2692,9 +2692,7 @@ fn build_two_phase_entries(
     // (Input role), writes `partials` at `tid` (Intermediate). Input
     // bindings must be declared explicitly — the backend's storage-buffer
     // validation lists the entry's `storage_bindings` as the allowlist
-    // for any `storage(set, binding)` reference in the body. Previously
-    // this worked only because `partials_binding` accidentally aliased
-    // the input buffer at (0, 0) under the too-shallow allocator.
+    // for any `storage(set, binding)` reference in the body.
     let mut phase1_bindings = input_storage_decls(&analysis.soac);
     phase1_bindings.push(interface::StorageBindingDecl {
         binding: BindingRef::new(partials_binding.set, partials_binding.binding),

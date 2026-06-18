@@ -1,6 +1,6 @@
 //! Refutability check: is a given pattern irrefutable against its
-//! declared type? Used to gate `let p = e in body` and lambda
-//! parameters against patterns that could fail to match.
+//! declared type? Gates `let p = e in body` and lambda parameters
+//! against patterns that could fail to match.
 //!
 //! Refutable patterns in let/lambda positions are a Wyn-specific
 //! compile error (Futhark traps at runtime; we don't have a panic

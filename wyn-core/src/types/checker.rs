@@ -1781,14 +1781,14 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Consume the type checker and return the type table.
-    /// Used to extract the prelude type table after type-checking prelude functions.
+    /// Extracts the prelude type table after type-checking prelude functions.
     pub fn into_type_table(self) -> std::collections::HashMap<NodeId, TypeScheme> {
         self.type_table
     }
 
-    /// Get all function type schemes from the `GlobalEnv`. Used to
-    /// extract canonical schemes for prelude/user/module functions
-    /// during prelude creation and downstream lowering, so
+    /// Get all function type schemes from the `GlobalEnv`. Extracts
+    /// canonical schemes for prelude/user/module functions during
+    /// prelude creation and downstream lowering, so
     /// monomorphization has consistent type-variable IDs across
     /// params/return. Walks the four global namespaces in a
     /// deterministic order; ties broken last-write-wins per the
@@ -3398,12 +3398,12 @@ impl<'a> TypeChecker<'a> {
 
         // Open the argument's existential type at the use site if the
         // expected parameter is not itself existential. Existential
-        // elimination used to fire only at `let` binders; this mirrors
-        // that policy at every general use site so `reduce(_, _,
-        // filter(...))` inline unifies the same way `let kept =
-        // filter(...) in reduce(_, _, kept)` already does. Don't open
-        // when the param is itself existential — the existential type
-        // can flow through unchanged in that case.
+        // elimination fires both here, at function-application argument
+        // positions, and at `let` binders, so `reduce(_, _, filter(...))`
+        // inline unifies the same way `let kept = filter(...) in
+        // reduce(_, _, kept)` does. Don't open when the param is itself
+        // existential — the existential type can flow through unchanged
+        // in that case.
         let arg_stripped = if matches!(&arg_stripped, Type::Constructed(TypeName::Existential(_), _))
             && !matches!(&param_stripped, Type::Constructed(TypeName::Existential(_), _))
         {

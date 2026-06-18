@@ -201,8 +201,8 @@ impl<T: Clone> ScopeStack<ScopeEntry<T>> {
 
 /// Invoke `f` once for each name introduced by `pattern`.
 ///
-/// Central definition used by both the name-resolution pass and
-/// module-elaboration path; previously each kept its own hand-written copy.
+/// Central definition shared by the name-resolution pass and the
+/// module-elaboration path.
 /// The visitor recurses through nested patterns (tuples, records,
 /// constructors, typed/attributed wrappers) and reports every leaf
 /// `PatternKind::Name`, plus shorthand record fields (`{ name }` binds

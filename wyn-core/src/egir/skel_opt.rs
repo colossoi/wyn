@@ -333,8 +333,8 @@ fn merge_aliases(aliases: &mut HashMap<NodeId, NodeId>, new_aliases: HashMap<Nod
 /// `aliases[aliases[k]]...` until a non-aliased value is reached.
 /// Union-find-style path compression.
 ///
-/// Alias cycles are a logic bug (every alias points to something
-/// previously defined in SSA terms; cycles imply we tried to alias a
+/// Alias cycles are a logic bug (every alias points to a value defined
+/// earlier in SSA order; cycles imply we tried to alias a
 /// live value to something that depends on itself). On detection we
 /// panic so the upstream bug surfaces loudly.
 fn close_aliases(aliases: &mut HashMap<NodeId, NodeId>) {

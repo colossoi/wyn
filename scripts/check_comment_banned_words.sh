@@ -31,6 +31,28 @@ hits=$(grep -rniE --include='*.rs' "$PATTERN" "${ROOTS[@]}" || true)
 
 if [ -n "$hits" ]; then
     echo "$hits"
+    cat >&2 <<'GUIDANCE'
+
+------------------------------------------------------------------------
+How to remediate (read before editing):
+
+These words flag comments that narrate the PREVIOUS STATE of the code
+("X used to do Y", "previously Z", "no longer W"). The record of what
+the code used to do is git history, not the source. So the fix is to
+DELETE the historical clause, not to reword it into a synonym that
+dodges the regex. A comment must describe only what the code does now
+and why; if removing the history leaves nothing, delete the comment.
+
+  BAD  (history):     // Previously this folded to v*v, which was wrong.
+  BAD  (dodge):       // Earlier this folded to v*v, which was wrong.
+  GOOD (current why): // Vec bases are skipped: there is no correct
+                      // scalar fold for `vec ** k`.
+
+One genuine false positive: "Used to <verb>" meaning "serves to <verb>"
+(a purpose statement, not history). Reword to a plain verb — "Used to
+build the index" -> "Builds the index" — so the heuristic stays simple.
+------------------------------------------------------------------------
+GUIDANCE
     exit 1
 fi
 exit 0

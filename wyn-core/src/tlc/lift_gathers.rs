@@ -78,7 +78,7 @@ fn lift_entry(program: &mut Program, idx: usize, new_defs: &mut Vec<Def>) {
     };
     let slots = crate::binding_layout::compute_entry_binding_layout(&params, &decl, AUTO_STORAGE_SET);
     // A producer `map(f, src)` whose `src` is one of these params produces an
-    // array with `src`'s element count — used to size the gather buffer.
+    // array with `src`'s element count — that count sizes the gather buffer.
     // Tuple-of-views params aren't gather sources (gather references bare
     // `Var(sym)`, never tuple projections), so we only index Single bindings.
     let param_bindings: HashMap<SymbolId, (u32, u32)> = slots
@@ -322,7 +322,7 @@ fn try_lift(
     let length = gather_length(&elem_ty, &frees, param_bindings);
 
     // Chained intermediates: if the producer reads any `StorageBuffer{set,
-    // binding, …}` directly (e.g. its input was itself a previously-lifted
+    // binding, …}` directly (e.g. its input was itself an already-lifted
     // gather buffer), the pre-pass must declare each as its own Input so the
     // descriptor wires up the cross-stage read.
     let chained = producer_storage_inputs(rhs);
@@ -392,7 +392,7 @@ fn gather_length(
 ///     `Term` context when we cross into a `Ref(non-Var)`'s wrapped Term, a
 ///     `Range`'s `start`/`len`/`step`, a `Literal`'s inner terms, or a
 ///     `StorageBuffer`'s `offset`/`len` — i.e. wherever the surrounding
-///     position is no longer "a SOAC reading this array."
+///     position ceases to be "a SOAC reading this array."
 fn rewrite_uses(
     term: Term,
     arr: SymbolId,

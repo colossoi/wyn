@@ -164,7 +164,7 @@ struct Constructor {
     workgroup_vars: HashMap<u32, (spirv::Word, spirv::Word)>,
 
     /// IDs of all module-level constants (OpConstant, OpConstantTrue/False, OpConstantComposite, OpConstantNull).
-    /// Used to decide whether a composite can be emitted as OpConstantComposite.
+    /// Decides whether a composite can be emitted as OpConstantComposite.
     constant_ids: HashSet<spirv::Word>,
 
     /// Used by `polytype_to_spirv` when emitting `StorageTexture` for
@@ -1131,7 +1131,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
         })
     }
 
-    /// Source span used to blame an instruction's lowering errors. Falls back
+    /// Source span that blames an instruction's lowering errors. Falls back
     /// to the function span when the instruction has no span of its own.
     fn blame_span(&self) -> Span {
         self.current_span.unwrap_or(self.func_span)

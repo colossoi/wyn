@@ -213,7 +213,7 @@ pub enum TypeName {
     Unit,
     /// "No return value" type. Distinct from `Unit`: `Unit` IS a value
     /// (the empty tuple, `()`); `SideEffect` is the absence of a return
-    /// value, used to type functions whose only meaningful output is
+    /// value. It types functions whose only meaningful output is
     /// observable through side effects — imperative builtins like
     /// `image_store` / `storage_store`, and compute entries post-
     /// `normalize_outputs` whose body produces nothing but a chain of
@@ -282,8 +282,8 @@ pub enum TypeName {
     NoRegion,
 
     // --- Opaque GPU resources ---
-    /// A 2D, float-sampled image. Nullary (no type args) in v1: the
-    /// sampled type is fixed to `f32`, matching Wyn's `vec4f32`/`mat4f32`
+    /// A 2D, float-sampled image. Nullary (no type args): the sampled
+    /// type is fixed to `f32`, matching Wyn's `vec4f32`/`mat4f32`
     /// no-angle-bracket style. An opaque handle bound via
     /// `#[texture(set, binding)]`; read with `texture_load` /
     /// `texture_sample`.

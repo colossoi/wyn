@@ -261,7 +261,7 @@ pub fn run_large(program: Program) -> Program {
         })
         .collect();
 
-    // DCE: remove defs no longer referenced by any entry point or reachable def.
+    // DCE: remove defs not referenced by any entry point or reachable def.
     let defs = dead_code_eliminate(defs);
 
     let result = Program {

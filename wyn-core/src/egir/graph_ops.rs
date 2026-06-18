@@ -126,8 +126,8 @@ pub fn emit_workgroup_view(
 }
 
 /// `StorageView(Storage(br))` with caller-supplied `offset` and `len`.
-/// Used to build a chunked sub-view of a larger storage buffer (phase1
-/// of parallel reduce/scan).
+/// Builds a chunked sub-view of a larger storage buffer (phase1 of
+/// parallel reduce/scan).
 pub fn intern_chunked_storage_view(
     graph: &mut EGraph,
     br: BindingRef,
@@ -407,10 +407,10 @@ pub fn extract_array_range_operands(
 // ---------------------------------------------------------------------------
 
 /// Recursively clone a pure subgraph rooted at `root` from `src` into
-/// `dst`, returning the new root `NodeId`. Used to copy a reduce's
-/// neutral element (or any pure value) from one entry's EGraph into
-/// another's — phase2 needs a fresh copy of phase1's NE since EGraph
-/// NodeIds don't cross entries.
+/// `dst`, returning the new root `NodeId`. Copies a reduce's neutral
+/// element (or any pure value) from one entry's EGraph into another's —
+/// phase2 needs a fresh copy of phase1's NE since EGraph NodeIds don't
+/// cross entries.
 ///
 /// Only pure nodes and constants are cloned; encountering a
 /// `SideEffectResult` or a `BlockParam` returns `Err` because those

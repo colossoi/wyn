@@ -961,8 +961,8 @@ fn parallelize_reduce_entry(entry: &mut EgirEntry, plan: &ParallelizationPlan) -
 }
 
 /// If `value` is a chain of `Project`s ending with `root` as the
-/// innermost operand, returns the innermost `Project`'s index. Used to
-/// match Screma tuple-field Stores back to their accumulator index.
+/// innermost operand, returns the innermost `Project`'s index. Matches
+/// Screma tuple-field Stores back to their accumulator index.
 fn project_root_index(graph: &super::types::EGraph, value: NodeId, root: NodeId) -> Option<u32> {
     let mut cur = value;
     let mut last_index = None;
@@ -990,8 +990,8 @@ fn project_root_index(graph: &super::types::EGraph, value: NodeId, root: NodeId)
 /// to `block_sums[tid]`; phase 2 sequentially scans `block_sums` into
 /// `block_offsets`; phase 3 reads `block_offsets` and applies each
 /// chunk's offset back over the scan output buffer. Phase 3 uses an
-/// arg-swapped wrapper around the combiner so the scan output's
-/// previously-written values land in the `acc` slot.
+/// arg-swapped wrapper around the combiner so the scan output buffer's
+/// existing values land in the `acc` slot.
 fn parallelize_scan_entry(
     entry: &mut EgirEntry,
     plan: &ParallelizationPlan,

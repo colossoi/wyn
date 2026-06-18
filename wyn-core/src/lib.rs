@@ -118,10 +118,10 @@ pub type SymbolTable = IdArena<SymbolId, String>;
 // =============================================================================
 
 /// A `(descriptor set, binding)` pair naming a host-runtime storage /
-/// uniform / texture / sampler resource. Replaces the parallel `(u32, u32)`
-/// plumbing that used to thread through every layer (TLC `ArrayExpr`,
-/// SSA / EGIR `ViewSource`, `EntryInput`, `StorageBindingDecl`,
-/// `EntryParamBindingKind`, …). Deliberately no `Default` impl —
+/// uniform / texture / sampler resource. The one type carrying that pair
+/// through every layer (TLC `ArrayExpr`, SSA / EGIR `ViewSource`,
+/// `EntryInput`, `StorageBindingDecl`, `EntryParamBindingKind`, …),
+/// rather than parallel `(u32, u32)` fields. Deliberately no `Default` impl —
 /// `BindingRef { set: 0, binding: 0 }` is a meaningful binding, and a
 /// default value would silently mask construction bugs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -745,8 +745,8 @@ impl TlcOwnershipApplied {
     /// Normalise compute-entry bodies so the entry tail is a chain of
     /// explicit per-slot `OutputSlotStore` writes ending in `UnitLit`,
     /// not a tail expression that "returns" the entry value. After
-    /// this, single-output and multi-output entries share one shape;
-    /// `parallelize_soacs` and `egir/realize_outputs` no longer have to
+    /// this, single-output and multi-output entries share one shape, so
+    /// `parallelize_soacs` and `egir/realize_outputs` need not
     /// special-case the tail's shape (Tuple vs. Soac vs. literal).
     pub fn normalize_outputs(self) -> Result<TlcOutputsNormalized> {
         let mut inner = self.0;

@@ -30,9 +30,8 @@ type Summaries = HashMap<SymbolId, FunctionSummary>;
 /// Pass-local context threaded through every fusion-internal call.
 /// Holds artifacts that are expensive to recompute per call site:
 /// - `summaries`: borrowed from the per-outer-iteration analysis
-/// - `sym_to_def`: rebuilt once per outer iteration (previously
-///   `producer_graph::build_producer_graph` re-scanned the entire
-///   symbol table on every call).
+/// - `sym_to_def`: rebuilt once per outer iteration, not per
+///   `producer_graph::build_producer_graph` call.
 struct FusionContext<'a> {
     summaries: &'a Summaries,
     sym_to_def: HashMap<SymbolId, SymbolId>,
@@ -79,11 +78,11 @@ pub fn run(program: Program) -> Program {
         let mut term_ids = TermIdSource::new();
 
         // Precompute the Var-symbol → def-symbol map once per outer
-        // iteration. Each `build_producer_graph` call used to rebuild
-        // this from a full symbol-table scan; with N defs containing
-        // M let chains, that's N·M scans of the (growing) symbol table
-        // per outer iteration. Hoisting it makes producer-graph
-        // construction O(graph size) instead of O(symbol table size).
+        // iteration and thread it through `FusionContext`. Rebuilding it
+        // inside each `build_producer_graph` call would re-scan the full
+        // symbol table — N·M scans per outer iteration for N defs of M
+        // let chains each — so hoisting keeps producer-graph construction
+        // O(graph size) rather than O(symbol table size).
         let sym_to_def = build_sym_to_def(&symbols, &def_syms);
         let ctx = FusionContext {
             summaries: &summaries,

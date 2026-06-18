@@ -3090,7 +3090,7 @@ impl<'a> Transformer<'a> {
         self.compile_match(match_expr, ty, span)
     }
 
-    /// Produce a typed-blank Term for `ty`. Used to fill dead
+    /// Produce a typed-blank Term for `ty`. Fills dead
     /// constructor-payload slots in a flattened sum-type tuple.
     fn build_blank(&mut self, ty: &Type<TypeName>, span: Span) -> Term {
         match ty {
