@@ -131,6 +131,18 @@ enum Command {
         /// `vec4f32` framebuffer).
         #[arg(long = "storage-bytes", value_name = "NAME:BYTES", verbatim_doc_comment)]
         storage_bytes: Vec<String>,
+        /// Declare a storage binding as a framebuffer (repeatable):
+        /// allocate `W × H × format.bytes_per_texel()` bytes from
+        /// `--size W×H`, zero-initialize once, treat it as the
+        /// scatter target for the graphics pipeline. Shorthand for
+        /// `--buffer-init NAME:0 --storage-bytes NAME:W*H*B`.
+        ///
+        /// `FORMAT` defaults to `vec4f32` when omitted. Supported
+        /// formats today: `vec4f32`.
+        ///
+        /// Format: `NAME[:FORMAT]`. Examples: `fb`, `fb:vec4f32`.
+        #[arg(long = "framebuffer", value_name = "NAME[:FORMAT]", verbatim_doc_comment)]
+        framebuffers: Vec<String>,
         /// Output file: name:file.json (repeatable, omit to print to stdout)
         #[arg(long = "output", value_name = "NAME:FILE")]
         outputs: Vec<String>,
@@ -256,6 +268,7 @@ fn main() -> Result<()> {
             inputs,
             buffer_inits,
             storage_bytes,
+            framebuffers,
             outputs,
             push_constants,
             dispatch,
@@ -309,13 +322,6 @@ fn main() -> Result<()> {
                 .collect::<Result<HashMap<_, _>>>()?;
 
             // Parse `--storage-bytes NAME:BYTES` into a name → bytes map.
-            //
-            // TODO: when the descriptor publishes a concrete `length:
-            // Fixed { bytes }` for the same binding name, treat a
-            // mismatched `--storage-bytes` as an error rather than
-            // silently letting the user's value override. The two are
-            // saying different things about the same buffer; if both
-            // are present they have to agree.
             let storage_bytes_map: HashMap<String, u64> = storage_bytes
                 .iter()
                 .map(|s| {
@@ -326,6 +332,19 @@ fn main() -> Result<()> {
                         .parse()
                         .with_context(|| format!("--storage-bytes '{}': cannot parse byte size", s))?;
                     Ok((name.to_string(), bytes))
+                })
+                .collect::<Result<HashMap<_, _>>>()?;
+
+            // Parse `--framebuffer NAME[:FORMAT]` into a name → format map.
+            // Empty FORMAT defaults to `vec4f32`.
+            let framebuffer_map: HashMap<String, modes::pipeline::FramebufferFormat> = framebuffers
+                .iter()
+                .map(|s| {
+                    let (name, format) = match s.split_once(':') {
+                        Some((n, f)) => (n, f.parse::<modes::pipeline::FramebufferFormat>()?),
+                        None => (s.as_str(), modes::pipeline::FramebufferFormat::default()),
+                    };
+                    Ok((name.to_string(), format))
                 })
                 .collect::<Result<HashMap<_, _>>>()?;
 
@@ -385,6 +404,7 @@ fn main() -> Result<()> {
                     storage_dir,
                     buffer_inits: buffer_init_specs,
                     storage_bytes: storage_bytes_map,
+                    framebuffers: framebuffer_map,
                     index_buffer,
                     present_mode: present_mode.into(),
                     validate: !no_validate,

@@ -32,7 +32,7 @@ sizes, buffer lengths, etc.
 ./extra/viz/target/release/viz pipeline \
   testfiles/playground/particles.spv \
   --feedback sim:prev_pos=sim_output \
-  --buffer-init fb:0 --storage-bytes fb:4194304 \
+  --framebuffer fb \
   --buffer-init seed:rng \
   --size 512x512
 ```
@@ -44,13 +44,15 @@ Flag by flag:
   `sim_output`. The host allocates two physical buffers and swaps which
   is bound each frame. Without this the simulation reads zeroes every
   frame and never evolves.
-- `--buffer-init fb:0` plus `--storage-bytes fb:4194304` — zero-fills
-  the framebuffer `sim` scatters into. `sim` re-clears `fb` each frame,
-  so moving particles don't leave trails. The two flags split
-  concerns: `--buffer-init` says *what to seed it with*,
-  `--storage-bytes` says *how big it is*. `fb` needs the explicit byte
-  declaration because the shader reads its length via `length(fb)`
-  rather than slicing it, so the descriptor publishes `length: null`.
+- `--framebuffer fb` — declares the `fb` binding as a framebuffer:
+  viz sizes it from `--size W×H × sizeof(vec4f32) = 4194304` bytes and
+  zero-initializes at startup. Shorthand for the longer
+  `--buffer-init fb:0 --storage-bytes fb:4194304` pair; the
+  framebuffer-specific flag is preferred for the framebuffer case
+  because it derives the byte count from `--size`. `sim` re-clears
+  `fb` each frame, so moving particles don't leave trails. Format
+  defaults to `vec4f32` (the only supported format today; spell it
+  explicitly with `--framebuffer fb:vec4f32` if needed).
 - `--buffer-init seed:rng` — fills the initial-state seed buffer with
   one uniform-random `vec4f32` in `[0, 1)` per particle. On the first
   frame `sim` maps each `seed` entry into a starting position +

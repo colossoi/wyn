@@ -36,14 +36,16 @@
 --   extra\viz\target\release\viz.exe pipeline ^
 --     C:\Users\<you>\AppData\Local\Temp\p.spv ^
 --     --feedback sim:prev_pos=sim_output ^
---     --buffer-init fb:0 --storage-bytes fb:4194304 ^
+--     --framebuffer fb ^
 --     --buffer-init seed:rng ^
 --     --size 512x512
 --
--- `fb` needs `--storage-bytes` because `sim` reads its length via
--- `length(fb)` rather than slicing it, so the descriptor publishes
--- `length: null` and the host has to declare the size (RES*RES *
--- sizeof(vec4f32) = 512 * 512 * 16 = 4194304).
+-- `--framebuffer fb` is shorthand for `--storage-bytes fb:W*H*16
+-- --buffer-init fb:0`: viz sizes it from `--size` × the default
+-- `vec4f32` format and zero-initializes at startup. Used because
+-- `sim` reads `fb`'s length via `length(fb)` rather than slicing
+-- it, so the compiler doesn't publish a fixed length and the host
+-- has to compute one.
 --   (seed bytes = N * sizeof(vec4f32) = 512 * 16 = 8192)
 
 def N:i32 = 512

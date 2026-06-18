@@ -40,6 +40,11 @@ pub struct InteractiveOpts {
     /// `length: null` (e.g. a framebuffer the shader iterates via
     /// `length(fb)`).
     pub storage_bytes: HashMap<String, u64>,
+    /// Bindings declared as framebuffers (from `--framebuffer
+    /// NAME[:FORMAT]`). Sized by `--size W×H × format.bytes_per_texel()`
+    /// and always zero-initialized. Shorthand for the common
+    /// `--storage-bytes NAME:W*H*B --buffer-init NAME:0` pair.
+    pub framebuffers: HashMap<String, FramebufferFormat>,
     pub index_buffer: Option<PathBuf>,
     pub present_mode: wgpu::PresentMode,
     pub validate: bool,
@@ -49,22 +54,68 @@ pub struct InteractiveOpts {
     pub topology: wgpu::PrimitiveTopology,
 }
 
-/// Resolve each `--buffer-init NAME:SPEC` to a concrete `BufferInit`
-/// by deciding its allocation size. Precedence per name:
+/// Per-texel format for a `--framebuffer` binding. v1 supports
+/// `vec4f32` only — the format the wyn-emitted graphics pipelines
+/// scatter into today.
+#[derive(Debug, Clone, Copy)]
+pub enum FramebufferFormat {
+    Vec4F32,
+}
+
+impl Default for FramebufferFormat {
+    fn default() -> Self {
+        Self::Vec4F32
+    }
+}
+
+impl FramebufferFormat {
+    pub fn bytes_per_texel(self) -> u64 {
+        match self {
+            Self::Vec4F32 => 16,
+        }
+    }
+}
+
+impl std::str::FromStr for FramebufferFormat {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "vec4f32" => Ok(Self::Vec4F32),
+            other => Err(anyhow!(
+                "--framebuffer: unsupported format '{other}'. Supported: vec4f32"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for FramebufferFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Vec4F32 => f.write_str("vec4f32"),
+        }
+    }
+}
+
+/// Resolve every host-allocated storage buffer the run needs into a
+/// concrete `BufferInit` keyed by binding name. Two flag families feed
+/// in:
 ///
-///   1. `--storage-bytes NAME:BYTES` if supplied;
-///   2. otherwise the descriptor's `length: Fixed { bytes }` for that
-///      binding.
-///
-/// When both are present they must agree — the user and the compiler
-/// have to be saying the same thing about the same buffer or one of
-/// them is wrong. When neither is present the host has nothing to
-/// allocate against; either supply `--storage-bytes` or use a
-/// descriptor that publishes a fixed length.
+///   * `--framebuffer NAME[:FORMAT]` — sized as `W × H ×
+///     format.bytes_per_texel()` from `--size`, zero-initialized. Hard
+///     errors if the same name also appears in `--buffer-init`,
+///     `--storage-bytes`, or the descriptor's `length: Fixed { bytes }`
+///     with a disagreeing byte count.
+///   * `--buffer-init NAME:SPEC` — size precedence:
+///       1. `--storage-bytes NAME:BYTES` if supplied;
+///       2. otherwise the descriptor's `length: Fixed { bytes }`.
+///     Both present → must agree. Neither present → error pointing at
+///     `--storage-bytes`.
 fn resolve_buffer_inits(
     desc: &PipelineDescriptor,
     inits: &HashMap<String, crate::gpu::BufferInitSpec>,
     storage_bytes: &HashMap<String, u64>,
+    framebuffers: &HashMap<String, FramebufferFormat>,
+    size: Option<(u32, u32)>,
 ) -> Result<HashMap<String, crate::gpu::BufferInit>> {
     use wyn_pipeline_descriptor::{Binding, BufferLen};
     let descriptor_bytes: HashMap<&str, u64> = desc
@@ -86,6 +137,39 @@ fn resolve_buffer_inits(
         .collect();
 
     let mut out = HashMap::new();
+
+    for (name, &format) in framebuffers {
+        if inits.contains_key(name) {
+            return Err(anyhow!(
+                "--framebuffer {name} conflicts with --buffer-init {name}:<spec>; \
+                 framebuffers are always zero-initialized"
+            ));
+        }
+        if storage_bytes.contains_key(name) {
+            return Err(anyhow!(
+                "--framebuffer {name} conflicts with --storage-bytes {name}:<bytes>; \
+                 framebuffer size is computed from --size and format"
+            ));
+        }
+        let (w, h) = size.ok_or_else(|| {
+            anyhow!("--framebuffer {name} requires --size W×H to compute byte count")
+        })?;
+        let bytes = w as u64 * h as u64 * format.bytes_per_texel();
+        if let Some(&desc_bytes) = descriptor_bytes.get(name.as_str()) {
+            if desc_bytes != bytes {
+                return Err(anyhow!(
+                    "--framebuffer {name} (--size {w}×{h} × {format} = {bytes}) \
+                     disagrees with the descriptor's length:{{fixed,bytes:{desc_bytes}}} \
+                     on binding `{name}`"
+                ));
+            }
+        }
+        out.insert(name.clone(), crate::gpu::BufferInit {
+            bytes,
+            spec: crate::gpu::BufferInitSpec::Zero,
+        });
+    }
+
     for (name, &spec) in inits {
         let from_flag = storage_bytes.get(name).copied();
         let from_desc = descriptor_bytes.get(name.as_str()).copied();
@@ -242,7 +326,13 @@ fn run_pipeline_interactive(
         .find_map(|s| matches!(s.stage, ShaderStage::Fragment).then(|| s.entry_point.clone()))
         .ok_or_else(|| anyhow!("descriptor lacks a fragment stage"))?;
 
-    let resolved_buffer_inits = resolve_buffer_inits(&desc, &opts.buffer_inits, &opts.storage_bytes)?;
+    let resolved_buffer_inits = resolve_buffer_inits(
+        &desc,
+        &opts.buffer_inits,
+        &opts.storage_bytes,
+        &opts.framebuffers,
+        opts.size,
+    )?;
     let spec = InteractivePipelineSpec {
         shader_path: spv_path,
         descriptor: desc,
