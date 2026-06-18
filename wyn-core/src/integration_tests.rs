@@ -5196,3 +5196,34 @@ entry e() []u32 = map(|i: i32| g.at((0x9e3779b9u32, 0x243f6a88u32), u32.i32(i)),
     )
     .expect("deep tuple-destructure let-chain must lower without blowup or dangling vars");
 }
+
+// =========================================================================
+// Captured compiler panics — minimal reproducers
+//
+// Each test here pins a Wyn-source shape that currently panics during
+// compilation. Tests use `#[should_panic]` so the suite stays green while
+// the fixture stays committed; drop `#[should_panic]` when the panic is
+// fixed to make the test a passing regression.
+// =========================================================================
+
+/// `map(|_| literal, fb)` over a consuming `*[]T` write-storage param,
+/// followed by a `scatter` into the cleared result, panics at
+/// `spirv/mod.rs:388` (the panic surfaces here as the lowering thread
+/// wrapper `"Lowering thread panicked"`; the underlying panic message
+/// is `"Composite variant unsized arrays not supported"`). The
+/// clear+scatter sequence is the natural way to express "blank the
+/// framebuffer then write per-particle pixels" in a single rasterize
+/// entry. Surfaced trying to add self-clearing to
+/// `testfiles/playground/particles.wyn`.
+#[test]
+#[should_panic(expected = "Lowering thread panicked")]
+fn panic_clear_then_scatter_on_consuming_write_storage() {
+    let _ = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry e(#[storage(set=2, binding=1, access=write)] fb: *[]vec4f32) () =
+  let cleared = map(|_p:vec4f32| @[0.0, 0.0, 0.0, 1.0], fb) in
+  let _ = scatter(cleared, [0i32, 1i32], [@[1.0,1.0,1.0,1.0], @[1.0,1.0,1.0,1.0]]) in ()
+"#,
+    );
+}
