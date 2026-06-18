@@ -1752,6 +1752,56 @@ struct LoweringPlan {
     parallel_plan: Option<ParallelizationPlan>,
 }
 
+fn term_has_ordered_side_effect_soac(term: &Term) -> bool {
+    if let TermKind::Soac(soac) = &term.kind {
+        if soac_has_ordered_side_effect(soac) {
+            return true;
+        }
+    }
+    let mut found = false;
+    term.for_each_child(&mut |child| {
+        if !found {
+            found = term_has_ordered_side_effect_soac(child);
+        }
+    });
+    found
+}
+
+fn soac_has_ordered_side_effect(soac: &SoacOp) -> bool {
+    match soac {
+        SoacOp::Map { destination, .. }
+        | SoacOp::Scan { destination, .. }
+        | SoacOp::Filter { destination, .. } => *destination != SoacDestination::Fresh,
+        SoacOp::Scatter { .. } | SoacOp::ReduceByIndex { .. } => true,
+        SoacOp::Reduce { .. } | SoacOp::Redomap { .. } | SoacOp::Screma { .. } => false,
+    }
+}
+
+fn retained_prefix_has_ordered_side_effect(analysis: &EntryAnalysis) -> bool {
+    analysis.prefix_lets.iter().any(|(_, _, rhs)| term_has_ordered_side_effect_soac(rhs))
+        || analysis.extra_slots.iter().any(|(_, value)| term_has_ordered_side_effect_soac(value))
+}
+
+fn make_serial_compute_plan(
+    analysis: &EntryAnalysis,
+    entry_name: &str,
+    sizing: PipelineSizing,
+) -> LoweringPlan {
+    LoweringPlan {
+        removed_entry: None,
+        new_defs: Vec::new(),
+        pipeline: Pipeline::Compute(ComputePipeline {
+            entry_point: entry_name.to_string(),
+            workgroup_size: sizing.workgroup,
+            dispatch_size: DispatchSize::Fixed { x: 1, y: 1, z: 1 },
+            bindings: collect_soac_bindings(&analysis.soac),
+            default_total_threads: sizing.default_total_threads,
+        }),
+        extra_bindings_used: 0,
+        parallel_plan: None,
+    }
+}
+
 fn make_lowering_plan(
     analysis: &EntryAnalysis,
     entry_name: &str,
@@ -1762,6 +1812,9 @@ fn make_lowering_plan(
 ) -> LoweringPlan {
     let sizing = PipelineSizing::for_analyzed_entry(program, analysis);
     let shape = parallel_soac_shape(&analysis.soac.original).expect("analyzed SOAC has a parallel shape");
+    if retained_prefix_has_ordered_side_effect(analysis) {
+        return make_serial_compute_plan(analysis, entry_name, sizing);
+    }
     match shape.flavor {
         ParallelSoacFlavor::Map => {
             // `forced_result_binding` pins the map's output to a specific
@@ -2446,18 +2499,11 @@ fn make_scan_plan(
     let can_route = op.captures.is_empty() && input_likely_storage;
 
     if !can_route {
-        // Fall through to the default single-dispatch compute pipeline.
-        // `egir::parallelize` will not see a plan for this entry, so the
-        // scan stays as a serial loop inside a single-thread kernel.
         let pipeline = Pipeline::Compute(ComputePipeline {
             entry_point: entry_name.to_string(),
             workgroup_size: sizing.workgroup,
             // Serial single-thread scan, not parallelized — no EGIR pass fills
-            // this in, so derive from the entry's first input buffer here.
-            dispatch_size: DispatchSize::DerivedFrom {
-                len: default_entry_dispatch_len(program, analysis.def_name),
-                workgroup_size: sizing.workgroup.0,
-            },
+            dispatch_size: DispatchSize::Fixed { x: 1, y: 1, z: 1 },
             bindings: vec![],
             default_total_threads: sizing.default_total_threads,
         });

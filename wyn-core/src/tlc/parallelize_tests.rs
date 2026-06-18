@@ -759,6 +759,91 @@ fn nested_map_of_map_fuses_into_single_pipeline() {
     );
 }
 
+#[test]
+fn ordered_clear_scatter_suffix_serializes_entry_until_multi_dispatch_scheduler() {
+    let src = r#"
+        #[compute]
+        entry tick(xs: []i32, fb: *[]i32) []i32 =
+            let out = map(|x: i32| x + 1, xs) in
+            let cleared = map(|_p: i32| 0, fb) in
+            let _ = scatter(cleared, [0i32], [1i32]) in
+            out
+    "#;
+    let (program, desc) = parallelize_src(src);
+    assert_eq!(
+        compute_entry_count(&program),
+        1,
+        "the correctness cut should not synthesize extra stages yet"
+    );
+    let tick = desc
+        .pipelines
+        .iter()
+        .find_map(|p| match p {
+            Pipeline::Compute(cp) if cp.entry_point == "tick" => Some(cp),
+            _ => None,
+        })
+        .expect("tick should remain a single compute pipeline");
+    assert_eq!(
+        tick.dispatch_size,
+        DispatchSize::Fixed { x: 1, y: 1, z: 1 },
+        "ordered side-effect SOACs after the chosen map need a real \
+         multi-dispatch schedule; until then, keep the entry single-lane"
+    );
+}
+
+#[test]
+fn ordered_clear_scatter_suffix_serializes_reduce_until_multi_dispatch_scheduler() {
+    let src = r#"
+        #[compute]
+        entry tick(xs: []i32, fb: *[]i32) i32 =
+            let sum = reduce(|a: i32, b: i32| a + b, 0, xs) in
+            let cleared = map(|_p: i32| 0, fb) in
+            let _ = scatter(cleared, [0i32], [1i32]) in
+            sum
+    "#;
+    let (_program, desc) = parallelize_src(src);
+    let tick = desc
+        .pipelines
+        .iter()
+        .find_map(|p| match p {
+            Pipeline::Compute(cp) if cp.entry_point == "tick" => Some(cp),
+            _ => None,
+        })
+        .expect("tick should remain a single compute pipeline");
+    assert_eq!(
+        tick.dispatch_size,
+        DispatchSize::Fixed { x: 1, y: 1, z: 1 },
+        "ordered side-effect SOACs retained around a reduce need real \
+         multi-dispatch extraction before phase-1 parallelization"
+    );
+}
+
+#[test]
+fn unsupported_scan_fallback_dispatches_single_lane() {
+    let src = r#"
+        def add_with(k: i32, xs: []i32) []i32 =
+            scan(|a: i32, b: i32| a + b + k, 0, xs)
+
+        #[compute]
+        entry tick(xs: []i32, k: i32) []i32 =
+            add_with(k, xs)
+    "#;
+    let (_program, desc) = parallelize_src(src);
+    let tick = desc
+        .pipelines
+        .iter()
+        .find_map(|p| match p {
+            Pipeline::Compute(cp) if cp.entry_point == "tick" => Some(cp),
+            _ => None,
+        })
+        .expect("capturing scan should stay as the original compute entry");
+    assert_eq!(
+        tick.dispatch_size,
+        DispatchSize::Fixed { x: 1, y: 1, z: 1 },
+        "a serial scan fallback must not run once per input element"
+    );
+}
+
 /// `reduce(+, 0, map(f, xs))` becomes a redomap, which lowers to a two-phase
 /// (phase1 chunked + phase2 single-workgroup tree) multi-compute pipeline.
 #[test]
