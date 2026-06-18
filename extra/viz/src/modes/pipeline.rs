@@ -30,8 +30,16 @@ use wyn_pipeline_descriptor::ShaderStage;
 pub struct InteractiveOpts {
     pub storage_dir: Option<PathBuf>,
     /// Host storage buffers to allocate and seed once, by binding name →
-    /// init spec (from `--buffer-init NAME:BYTES:SPEC`).
-    pub buffer_inits: HashMap<String, crate::gpu::BufferInit>,
+    /// init spec (from `--buffer-init NAME:SPEC`). The byte size is
+    /// resolved at runtime per binding: explicit `--storage-bytes`
+    /// override first, otherwise the descriptor's `length: Fixed
+    /// { bytes }`, otherwise an error.
+    pub buffer_inits: HashMap<String, crate::gpu::BufferInitSpec>,
+    /// Explicit byte size for a binding (from `--storage-bytes
+    /// NAME:BYTES`). Backs any binding the descriptor publishes with
+    /// `length: null` (e.g. a framebuffer the shader iterates via
+    /// `length(fb)`).
+    pub storage_bytes: HashMap<String, u64>,
     pub index_buffer: Option<PathBuf>,
     pub present_mode: wgpu::PresentMode,
     pub validate: bool,
@@ -39,6 +47,69 @@ pub struct InteractiveOpts {
     pub max_frames: Option<u32>,
     pub vertex_count: u32,
     pub topology: wgpu::PrimitiveTopology,
+}
+
+/// Resolve each `--buffer-init NAME:SPEC` to a concrete `BufferInit`
+/// by deciding its allocation size. Precedence per name:
+///
+///   1. `--storage-bytes NAME:BYTES` if supplied;
+///   2. otherwise the descriptor's `length: Fixed { bytes }` for that
+///      binding.
+///
+/// When both are present they must agree — the user and the compiler
+/// have to be saying the same thing about the same buffer or one of
+/// them is wrong. When neither is present the host has nothing to
+/// allocate against; either supply `--storage-bytes` or use a
+/// descriptor that publishes a fixed length.
+fn resolve_buffer_inits(
+    desc: &PipelineDescriptor,
+    inits: &HashMap<String, crate::gpu::BufferInitSpec>,
+    storage_bytes: &HashMap<String, u64>,
+) -> Result<HashMap<String, crate::gpu::BufferInit>> {
+    use wyn_pipeline_descriptor::{Binding, BufferLen};
+    let descriptor_bytes: HashMap<&str, u64> = desc
+        .pipelines
+        .iter()
+        .flat_map(|p| match p {
+            Pipeline::Compute(cp) => cp.bindings.as_slice(),
+            Pipeline::MultiCompute(mp) => mp.bindings.as_slice(),
+            Pipeline::Graphics(gp) => gp.bindings.as_slice(),
+        })
+        .filter_map(|b| match b {
+            Binding::StorageBuffer {
+                name,
+                length: Some(BufferLen::Fixed { bytes }),
+                ..
+            } => Some((name.as_str(), *bytes)),
+            _ => None,
+        })
+        .collect();
+
+    let mut out = HashMap::new();
+    for (name, &spec) in inits {
+        let from_flag = storage_bytes.get(name).copied();
+        let from_desc = descriptor_bytes.get(name.as_str()).copied();
+        let bytes = match (from_flag, from_desc) {
+            (Some(a), Some(b)) if a != b => {
+                return Err(anyhow!(
+                    "--storage-bytes {name}:{a} disagrees with the descriptor's \
+                     length:{{fixed,bytes:{b}}} on binding `{name}`; the two must \
+                     match (or drop one of them)"
+                ));
+            }
+            (Some(a), _) => a,
+            (None, Some(b)) => b,
+            (None, None) => {
+                return Err(anyhow!(
+                    "--buffer-init {name}:<spec>: descriptor doesn't publish a fixed \
+                     length for binding `{name}`; declare its byte size with \
+                     `--storage-bytes {name}:BYTES`"
+                ));
+            }
+        };
+        out.insert(name.clone(), crate::gpu::BufferInit { bytes, spec });
+    }
+    Ok(out)
 }
 
 pub async fn run_pipeline(
@@ -171,6 +242,7 @@ fn run_pipeline_interactive(
         .find_map(|s| matches!(s.stage, ShaderStage::Fragment).then(|| s.entry_point.clone()))
         .ok_or_else(|| anyhow!("descriptor lacks a fragment stage"))?;
 
+    let resolved_buffer_inits = resolve_buffer_inits(&desc, &opts.buffer_inits, &opts.storage_bytes)?;
     let spec = InteractivePipelineSpec {
         shader_path: spv_path,
         descriptor: desc,
@@ -186,7 +258,7 @@ fn run_pipeline_interactive(
         vertex_count: opts.vertex_count,
         topology: opts.topology,
         storage_dir: opts.storage_dir,
-        buffer_inits: opts.buffer_inits,
+        buffer_inits: resolved_buffer_inits,
         index_buffer: opts.index_buffer,
         outputs,
     };

@@ -32,8 +32,8 @@ sizes, buffer lengths, etc.
 ./extra/viz/target/release/viz pipeline \
   testfiles/playground/particles.spv \
   --feedback sim:prev_pos=sim_output \
-  --buffer-init fb:4194304:0 \
-  --buffer-init seed:8192:rng \
+  --buffer-init fb:0 --storage-bytes fb:4194304 \
+  --buffer-init seed:rng \
   --size 512x512
 ```
 
@@ -44,15 +44,19 @@ Flag by flag:
   `sim_output`. The host allocates two physical buffers and swaps which
   is bound each frame. Without this the simulation reads zeroes every
   frame and never evolves.
-- `--buffer-init fb:4194304:0` — allocates the framebuffer `sim`
-  scatters into, zero-filled: `RES*RES * vec4f32 = 512*512*16 = 4194304`
-  bytes. `sim` re-clears it each frame, so moving particles don't leave
-  trails. Without it `fb` is unbound.
-- `--buffer-init seed:8192:rng` — allocates the `seed` buffer that
-  supplies the initial particle state, filled with one uniform-random
-  `vec4f32` in `[0, 1)` per particle: `N * vec4f32 = 512*16 = 8192`
-  bytes. On the first frame `sim` maps each `seed` entry into a starting
-  position + velocity. Without it `seed` is unbound.
+- `--buffer-init fb:0` plus `--storage-bytes fb:4194304` — zero-fills
+  the framebuffer `sim` scatters into. `sim` re-clears `fb` each frame,
+  so moving particles don't leave trails. The two flags split
+  concerns: `--buffer-init` says *what to seed it with*,
+  `--storage-bytes` says *how big it is*. `fb` needs the explicit byte
+  declaration because the shader reads its length via `length(fb)`
+  rather than slicing it, so the descriptor publishes `length: null`.
+- `--buffer-init seed:rng` — fills the initial-state seed buffer with
+  one uniform-random `vec4f32` in `[0, 1)` per particle. On the first
+  frame `sim` maps each `seed` entry into a starting position +
+  velocity. No `--storage-bytes` needed: the shader slices
+  `seed[0..N]`, the compiler publishes `length: Fixed { bytes: 8192 }`
+  in the descriptor, and viz pulls the size from there.
 - `--size 512x512` — makes the render surface match `RES` so the
   fragment's `fb[y*RES + x]` lines up 1:1 with the framebuffer. The
   shader hard-codes `RES = 512`; at any other surface size the flat
@@ -83,7 +87,7 @@ The resource layout is documented in the comment block at the top of
 ## Notes
 
 - **Spawn randomness comes from the host.** Initial positions/velocities
-  are read from the `seed` buffer, which `--buffer-init seed:8192:rng`
+  are read from the `seed` buffer, which `--buffer-init seed:rng`
   fills with uniform-random `f32` in `[0, 1)`. The shader maps those draws
   into its domain, so it needs no GPU-side RNG library.
 - **`scatter` lowers serially in this cut** (sequential `scatter`

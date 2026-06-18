@@ -103,19 +103,34 @@ enum Command {
         /// Input data: name:file.json (repeatable)
         #[arg(long = "input", value_name = "NAME:FILE")]
         inputs: Vec<String>,
-        /// Allocate `BYTES` bytes for a host storage buffer and seed it
-        /// once, by binding name (repeatable). Use for a host-provided
-        /// buffer the shader writes but no `--input`/`--feedback`
-        /// supplies — e.g. a scatter framebuffer (`0`) or a random
-        /// initial particle state (`rng`).
+        /// Seed a host storage buffer once at startup, by binding name
+        /// (repeatable). Use for a host-provided buffer the shader
+        /// writes but no `--input`/`--feedback` supplies — e.g. a
+        /// scatter framebuffer (`0`) or a random initial particle state
+        /// (`rng`).
         ///
         /// `SPEC` is `0` (zero-filled) or `rng` (uniform-random `f32`
         /// in `[0, 1)`, one per 4 bytes).
         ///
-        /// Format: `NAME:BYTES:SPEC`. Examples: `fb:4194304:0`,
-        /// `state:8192:rng`.
-        #[arg(long = "buffer-init", value_name = "NAME:BYTES:SPEC", verbatim_doc_comment)]
+        /// The byte count is taken from the descriptor's
+        /// `length: { fixed, bytes }` for that binding when the
+        /// compiler could infer it (typically inputs the shader slices
+        /// as `param[0..K]`). For bindings the compiler can't size
+        /// (e.g. a framebuffer the shader iterates via `length(fb)`),
+        /// declare it explicitly with `--storage-bytes NAME:BYTES`.
+        ///
+        /// Format: `NAME:SPEC`. Examples: `fb:0`, `state:rng`.
+        #[arg(long = "buffer-init", value_name = "NAME:SPEC", verbatim_doc_comment)]
         buffer_inits: Vec<String>,
+        /// Declare the byte size for a storage buffer whose descriptor
+        /// `length` is `null` (the compiler couldn't infer it).
+        /// Repeatable. Pairs with `--buffer-init NAME:SPEC` (or any
+        /// other consumer that needs to know the allocation size).
+        ///
+        /// Format: `NAME:BYTES`. Example: `fb:4194304` (a 512x512x16
+        /// `vec4f32` framebuffer).
+        #[arg(long = "storage-bytes", value_name = "NAME:BYTES", verbatim_doc_comment)]
+        storage_bytes: Vec<String>,
         /// Output file: name:file.json (repeatable, omit to print to stdout)
         #[arg(long = "output", value_name = "NAME:FILE")]
         outputs: Vec<String>,
@@ -240,6 +255,7 @@ fn main() -> Result<()> {
             pipeline,
             inputs,
             buffer_inits,
+            storage_bytes,
             outputs,
             push_constants,
             dispatch,
@@ -268,18 +284,15 @@ fn main() -> Result<()> {
             let input_map = parse_pairs(&inputs)?;
             let output_map = parse_pairs(&outputs)?;
 
-            // Parse `--buffer-init NAME:BYTES:SPEC` into a name → init map.
-            let buffer_init_map: HashMap<String, gpu::BufferInit> = buffer_inits
+            // Parse `--buffer-init NAME:SPEC` into a name → spec map.
+            // The byte count is resolved later from
+            // `--storage-bytes` or the descriptor's `length`.
+            let buffer_init_specs: HashMap<String, gpu::BufferInitSpec> = buffer_inits
                 .iter()
                 .map(|s| {
-                    let mut parts = s.splitn(3, ':');
-                    let (Some(name), Some(bytes), Some(spec)) = (parts.next(), parts.next(), parts.next())
-                    else {
-                        return Err(anyhow!("Invalid --buffer-init '{}'. Expected NAME:BYTES:SPEC", s));
-                    };
-                    let bytes: u64 = bytes
-                        .parse()
-                        .with_context(|| format!("--buffer-init '{}': cannot parse byte size", s))?;
+                    let (name, spec) = s
+                        .split_once(':')
+                        .ok_or_else(|| anyhow!("Invalid --buffer-init '{}'. Expected NAME:SPEC", s))?;
                     let spec = match spec {
                         "0" => gpu::BufferInitSpec::Zero,
                         "rng" => gpu::BufferInitSpec::Rng,
@@ -291,7 +304,28 @@ fn main() -> Result<()> {
                             ));
                         }
                     };
-                    Ok((name.to_string(), gpu::BufferInit { bytes, spec }))
+                    Ok((name.to_string(), spec))
+                })
+                .collect::<Result<HashMap<_, _>>>()?;
+
+            // Parse `--storage-bytes NAME:BYTES` into a name → bytes map.
+            //
+            // TODO: when the descriptor publishes a concrete `length:
+            // Fixed { bytes }` for the same binding name, treat a
+            // mismatched `--storage-bytes` as an error rather than
+            // silently letting the user's value override. The two are
+            // saying different things about the same buffer; if both
+            // are present they have to agree.
+            let storage_bytes_map: HashMap<String, u64> = storage_bytes
+                .iter()
+                .map(|s| {
+                    let (name, bytes) = s
+                        .split_once(':')
+                        .ok_or_else(|| anyhow!("Invalid --storage-bytes '{}'. Expected NAME:BYTES", s))?;
+                    let bytes: u64 = bytes
+                        .parse()
+                        .with_context(|| format!("--storage-bytes '{}': cannot parse byte size", s))?;
+                    Ok((name.to_string(), bytes))
                 })
                 .collect::<Result<HashMap<_, _>>>()?;
 
@@ -349,7 +383,8 @@ fn main() -> Result<()> {
                 &feedback_specs,
                 modes::pipeline::InteractiveOpts {
                     storage_dir,
-                    buffer_inits: buffer_init_map,
+                    buffer_inits: buffer_init_specs,
+                    storage_bytes: storage_bytes_map,
                     index_buffer,
                     present_mode: present_mode.into(),
                     validate: !no_validate,
