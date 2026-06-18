@@ -3635,16 +3635,27 @@ fn entry_binding_slots(program: &Program, def_name: SymbolId) -> Vec<Option<Entr
 /// Dispatch length for a non-parallelized compute entry:
 ///   1. its first input-view param binding, if any (the previous
 ///      "derive from the first input buffer" behavior, now explicit);
-///   2. else its first explicit `#[storage(set, binding, ...)]`
-///      view-array param — the auto-allocator skips those (host
-///      wires them), but they still describe parallel work;
-///   3. else its first `#[storage_image]` param — the natural dispatch
-///      is one thread per texel of the image being written; the host
-///      resolves the size from the descriptor's `StorageTextureSize`
-///      policy at allocation time;
-///   4. else a single-element grid (the conservative fallback for
+///   2. else, between its first explicit `#[storage(set, binding, ...)]`
+///      view-array param and its first `#[storage_image]` param,
+///      whichever matches the entry's *shape*:
+///        - an entry that **produces an array** (`map`-shaped, even when
+///          a side effect kept it off the parallel path) iterates that
+///          input view — derive from the explicit storage view-array;
+///        - an entry that **returns `()`** is a manually-`gid`-driven
+///          image writer — derive per texel from the storage image. An
+///          explicit `#[storage]` param here is usually a fixed-index
+///          *side input* (e.g. the keyboard-state buffer), not the
+///          iteration domain.
+///      (A `map` that iterates a storage view *and* writes an image and
+///      stays on the parallel path resolves its length from the map's
+///      input provenance — `resolve_dispatch_len` — so it never reaches
+///      here.)
+///   3. else a single-element grid (the conservative fallback for
 ///      entries that drive themselves entirely from push constants /
 ///      uniforms).
+///
+/// Shaders that need a different sizing source than this heuristic
+/// picks can override it at runtime with `--dispatch ENTRY:WxH`.
 fn default_entry_dispatch_len(program: &Program, def_name: SymbolId) -> DispatchLen {
     let slots = entry_binding_slots(program, def_name);
     if let Some(binding) = slots.iter().flatten().next() {
@@ -3659,36 +3670,40 @@ fn default_entry_dispatch_len(program: &Program, def_name: SymbolId) -> Dispatch
     if let Some(def) = def {
         if let DefMeta::EntryPoint(decl) = &def.meta {
             let (body_params, _) = peel_lambda_params(&def.body);
-            for (i, pattern) in decl.params.iter().enumerate() {
-                let Some(br) = crate::binding_layout::extract_storage_binding(pattern) else {
-                    continue;
-                };
-                let Some((_, ty)) = body_params.get(i) else {
-                    continue;
-                };
-                let Some((_elem_ty, elem_bytes)) = crate::binding_layout::runtime_sized_array_elem(ty)
-                else {
-                    continue;
-                };
-                return DispatchLen::InputBinding {
+
+            // First explicit `#[storage]` view-array param (host-wired;
+            // first declared wins) and first written `#[storage_image]`.
+            let explicit_view = decl.params.iter().enumerate().find_map(|(i, pattern)| {
+                let br = crate::binding_layout::extract_storage_binding(pattern)?;
+                let (_, ty) = body_params.get(i)?;
+                let (_elem_ty, elem_bytes) = crate::binding_layout::runtime_sized_array_elem(ty)?;
+                Some(DispatchLen::InputBinding {
                     set: br.set,
                     binding: br.binding,
                     elem_bytes,
-                };
-            }
-            // No view-array param — fall back to `#[storage_image]`.
-            // The first one declared wins; shaders that write multiple
-            // images and want a different sizing source can use the
-            // `--dispatch ENTRY:WxH` CLI override at runtime.
-            for pattern in &decl.params {
-                if let Some((br, _fmt, _access, _size)) =
-                    crate::binding_layout::extract_storage_image_binding(pattern)
-                {
-                    return DispatchLen::StorageImage {
-                        set: br.set,
-                        binding: br.binding,
-                    };
-                }
+                })
+            });
+            let storage_image = decl.params.iter().find_map(|pattern| {
+                let (br, _fmt, _access, _size) =
+                    crate::binding_layout::extract_storage_image_binding(pattern)?;
+                Some(DispatchLen::StorageImage {
+                    set: br.set,
+                    binding: br.binding,
+                })
+            });
+
+            // An array-producing entry (`map`-shaped) iterates its input
+            // view; a `()`-returning one writes the image per texel. Order
+            // the two candidates by that shape, then take the first present.
+            let produces_array =
+                decl.outputs.iter().any(|o| crate::types::array_size(&o.ty).is_some());
+            let (primary, secondary) = if produces_array {
+                (explicit_view, storage_image)
+            } else {
+                (storage_image, explicit_view)
+            };
+            if let Some(len) = primary.or(secondary) {
+                return len;
             }
         }
     }

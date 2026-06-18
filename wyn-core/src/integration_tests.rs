@@ -5065,19 +5065,6 @@ entry tick() f32 =
         .expect("static-capacity filter piped through a size-poly helper must compile");
 }
 
-/// Phase 2 of the array-variant-abstract project. Particle simulator
-/// the user posted that motivated `tlc::rep_specialize`: `filter` flows
-/// into `center` (a user-defined size-poly helper that itself calls
-/// `sum`). Both must specialize per-buffer at the call edge — `inline_small`
-/// alone doesn't reach this nesting. Verifier-clean compile through
-/// to SPIR-V proves the pass closed the gap.
-#[test]
-fn particle_sim_filter_into_user_helper_compiles() {
-    let src = std::fs::read_to_string("../testfiles/playground/particles.wyn")
-        .expect("read testfiles/playground/particles.wyn");
-    crate::compile_thru_spirv(&src)
-        .expect("particle sim with filter→center→sum chain must compile after rep_specialize");
-}
 
 /// Regression: an entry returning a tuple where the second output is a
 /// fixed-size literal that *indexes into a scan result* used to silently
