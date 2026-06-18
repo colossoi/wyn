@@ -29,9 +29,9 @@ use wyn_pipeline_descriptor::ShaderStage;
 /// time the interactive mode learns another flag.
 pub struct InteractiveOpts {
     pub storage_dir: Option<PathBuf>,
-    /// Host storage buffers to allocate zero-initialized, by binding name →
-    /// byte size (from `--zero-buffer NAME:BYTES`).
-    pub zero_buffers: HashMap<String, u64>,
+    /// Host storage buffers to allocate and seed once, by binding name →
+    /// init spec (from `--buffer-init NAME:BYTES:SPEC`).
+    pub buffer_inits: HashMap<String, crate::gpu::BufferInit>,
     pub index_buffer: Option<PathBuf>,
     pub present_mode: wgpu::PresentMode,
     pub validate: bool,
@@ -70,7 +70,7 @@ pub async fn run_pipeline(
             eprintln!(
                 "[viz pipeline] --input is ignored in interactive mode \
                  (descriptor has a graphics pipeline; inputs come from --feedback / \
-                 --zero-buffer / --storage-dir)"
+                 --buffer-init / --storage-dir)"
             );
         }
         if !outputs.is_empty() && interactive_opts.max_frames.is_none() {
@@ -186,7 +186,7 @@ fn run_pipeline_interactive(
         vertex_count: opts.vertex_count,
         topology: opts.topology,
         storage_dir: opts.storage_dir,
-        zero_buffers: opts.zero_buffers,
+        buffer_inits: opts.buffer_inits,
         index_buffer: opts.index_buffer,
         outputs,
     };

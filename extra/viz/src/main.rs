@@ -103,15 +103,19 @@ enum Command {
         /// Input data: name:file.json (repeatable)
         #[arg(long = "input", value_name = "NAME:FILE")]
         inputs: Vec<String>,
-        /// Hand a host storage buffer a zero-initialized allocation of
-        /// `BYTES` bytes, by binding name (repeatable). Use for a
-        /// host-provided scratch/framebuffer the shader writes but no
-        /// `--input`/`--feedback` supplies — e.g. the particles `fb`
-        /// (512*512 vec4f32 = 4194304).
+        /// Allocate `BYTES` bytes for a host storage buffer and seed it
+        /// once, by binding name (repeatable). Use for a host-provided
+        /// buffer the shader writes but no `--input`/`--feedback`
+        /// supplies — e.g. a scatter framebuffer (`0`) or a random
+        /// initial particle state (`rng`).
         ///
-        /// Format: `NAME:BYTES`. Example: `fb:4194304`.
-        #[arg(long = "zero-buffer", value_name = "NAME:BYTES", verbatim_doc_comment)]
-        zero_buffers: Vec<String>,
+        /// `SPEC` is `0` (zero-filled) or `rng` (uniform-random `f32`
+        /// in `[0, 1)`, one per 4 bytes).
+        ///
+        /// Format: `NAME:BYTES:SPEC`. Examples: `fb:4194304:0`,
+        /// `state:8192:rng`.
+        #[arg(long = "buffer-init", value_name = "NAME:BYTES:SPEC", verbatim_doc_comment)]
+        buffer_inits: Vec<String>,
         /// Output file: name:file.json (repeatable, omit to print to stdout)
         #[arg(long = "output", value_name = "NAME:FILE")]
         outputs: Vec<String>,
@@ -235,7 +239,7 @@ fn main() -> Result<()> {
             path,
             pipeline,
             inputs,
-            zero_buffers,
+            buffer_inits,
             outputs,
             push_constants,
             dispatch,
@@ -264,17 +268,30 @@ fn main() -> Result<()> {
             let input_map = parse_pairs(&inputs)?;
             let output_map = parse_pairs(&outputs)?;
 
-            // Parse `--zero-buffer NAME:BYTES` into a name → byte-size map.
-            let zero_buffer_map: HashMap<String, u64> = zero_buffers
+            // Parse `--buffer-init NAME:BYTES:SPEC` into a name → init map.
+            let buffer_init_map: HashMap<String, gpu::BufferInit> = buffer_inits
                 .iter()
                 .map(|s| {
-                    let (name, bytes) = s
-                        .split_once(':')
-                        .ok_or_else(|| anyhow!("Invalid --zero-buffer '{}'. Expected NAME:BYTES", s))?;
+                    let mut parts = s.splitn(3, ':');
+                    let (Some(name), Some(bytes), Some(spec)) = (parts.next(), parts.next(), parts.next())
+                    else {
+                        return Err(anyhow!("Invalid --buffer-init '{}'. Expected NAME:BYTES:SPEC", s));
+                    };
                     let bytes: u64 = bytes
                         .parse()
-                        .with_context(|| format!("--zero-buffer '{}': cannot parse byte size", s))?;
-                    Ok((name.to_string(), bytes))
+                        .with_context(|| format!("--buffer-init '{}': cannot parse byte size", s))?;
+                    let spec = match spec {
+                        "0" => gpu::BufferInitSpec::Zero,
+                        "rng" => gpu::BufferInitSpec::Rng,
+                        other => {
+                            return Err(anyhow!(
+                                "Invalid --buffer-init '{}': unknown spec '{}'. Expected '0' or 'rng'",
+                                s,
+                                other
+                            ));
+                        }
+                    };
+                    Ok((name.to_string(), gpu::BufferInit { bytes, spec }))
                 })
                 .collect::<Result<HashMap<_, _>>>()?;
 
@@ -332,7 +349,7 @@ fn main() -> Result<()> {
                 &feedback_specs,
                 modes::pipeline::InteractiveOpts {
                     storage_dir,
-                    zero_buffers: zero_buffer_map,
+                    buffer_inits: buffer_init_map,
                     index_buffer,
                     present_mode: present_mode.into(),
                     validate: !no_validate,

@@ -39,7 +39,7 @@
 --   cargo run --bin wyn -- compile testfiles/playground/perlin_fields.wyn -o /tmp/pf.spv
 --   (cd extra/viz && cargo run -- pipeline /tmp/pf.spv \
 --       --feedback tick:prev=tick_output \
---       --zero-buffer fb:8294400 \
+--       --buffer-init fb:8294400:0 \
 --       --size 720x720)
 --   (fb bytes = RES*RES * sizeof(vec4f32) = 720*720*16 = 8294400)
 

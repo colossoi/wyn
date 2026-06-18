@@ -83,10 +83,11 @@ pub struct InteractivePipelineSpec {
     /// recognized host-uploaded names like `keyboard`) into a storage
     /// buffer, by reading `<storage_dir>/<binding_name>.bin`.
     pub storage_dir: Option<PathBuf>,
-    /// Host storage buffers to allocate zero-initialized, by binding name →
-    /// byte size (from `--zero-buffer NAME:BYTES`). For a buffer the shader
-    /// writes but no `--input`/`--feedback` supplies (e.g. a framebuffer).
-    pub zero_buffers: HashMap<String, u64>,
+    /// Host storage buffers to allocate and seed once, by binding name →
+    /// init spec (from `--buffer-init NAME:BYTES:SPEC`). For a buffer the
+    /// shader writes but no `--input`/`--feedback` supplies (a scratch
+    /// framebuffer, `0`) or reads as random initial state (`rng`).
+    pub buffer_inits: HashMap<String, gpu::BufferInit>,
     /// Flat little-endian `u32` index buffer file. When present, the
     /// host binds it and dispatches `draw_indexed` with
     /// `file_size / 4` indices in place of the non-indexed
@@ -563,7 +564,7 @@ impl State {
             &queue,
             &spec.descriptor,
             spec.storage_dir.as_deref(),
-            &spec.zero_buffers,
+            &spec.buffer_inits,
         )?;
 
         // Resolve `--output NAME:FILE` requests to concrete buffers now,

@@ -897,6 +897,54 @@ pub enum HostBufferKind {
     FileLoaded,
 }
 
+/// How a `--buffer-init` allocation is seeded once at startup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BufferInitSpec {
+    /// Fill the allocation with zero bytes.
+    Zero,
+    /// Fill the allocation with uniform-random `f32` in `[0, 1)`, one
+    /// per 4 bytes. A shader reading the buffer as `[]f32` / `[]vec4f32`
+    /// sees independent draws it can map into its own domain (e.g.
+    /// positions and velocities), so the GPU side needs no host RNG.
+    Rng,
+}
+
+/// A host storage buffer the runtime allocates and seeds once from a
+/// `--buffer-init NAME:BYTES:SPEC` request (by binding name).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BufferInit {
+    pub bytes: u64,
+    pub spec: BufferInitSpec,
+}
+
+/// Seed bytes for a `--buffer-init` allocation per its spec. `Rng` lays
+/// down `bytes / 4` uniform `f32` in `[0, 1)` from a deterministic
+/// SplitMix64 stream (reproducible across runs); any tail of fewer than
+/// 4 bytes stays zero.
+fn buffer_init_bytes(init: BufferInit) -> Vec<u8> {
+    let mut data = vec![0u8; init.bytes as usize];
+    if init.spec == BufferInitSpec::Zero {
+        return data;
+    }
+    // SplitMix64: each step mixes one increment of the state into a
+    // well-distributed 64-bit word; we take the high 24 bits as the
+    // mantissa of a [0, 1) f32, matching the shader-side `>> 8` hash.
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    for chunk in data.chunks_mut(4) {
+        if chunk.len() < 4 {
+            break;
+        }
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        let value = (z >> 40) as f32 * (1.0 / 16_777_216.0);
+        chunk.copy_from_slice(&value.to_le_bytes());
+    }
+    data
+}
+
 /// Walk every pipeline's bindings; allocate a `wgpu::Buffer` for each
 /// `Binding::StorageBuffer` whose name matches a recognized host-
 /// uploaded pattern. Mirrors `create_host_textures` but for storage
@@ -907,7 +955,7 @@ pub fn create_host_buffers(
     queue: &wgpu::Queue,
     descriptor: &PipelineDescriptor,
     storage_dir: Option<&std::path::Path>,
-    zero_buffers: &HashMap<String, u64>,
+    buffer_inits: &HashMap<String, BufferInit>,
 ) -> Result<HashMap<(u32, u32), HostBufferResource>> {
     let mut out: HashMap<(u32, u32), HostBufferResource> = HashMap::new();
     for pipeline in &descriptor.pipelines {
@@ -946,20 +994,21 @@ pub fn create_host_buffers(
                 continue;
             }
 
-            // `--zero-buffer NAME:BYTES`: a host-provided buffer the shader
-            // writes (e.g. a scatter framebuffer) with no input data. Zero it
-            // explicitly — wgpu's lazy zero-init is skipped once a compute
-            // shader writes the buffer (it can't track shader-side writes, so it
-            // marks the whole buffer initialized), which would otherwise leave
-            // the un-scattered texels as garbage the fragment reads.
-            if let Some(&bytes) = zero_buffers.get(name.as_str()) {
+            // `--buffer-init NAME:BYTES:SPEC`: a host-provided buffer with no
+            // input data — a scratch/framebuffer the shader writes (`0`), or a
+            // random initial state it reads (`rng`). The host seeds it once
+            // explicitly: wgpu's lazy zero-init is skipped once a compute shader
+            // writes the buffer (it can't track shader-side writes, so it marks
+            // the whole buffer initialized), which would otherwise leave the
+            // un-written cells as garbage.
+            if let Some(&init) = buffer_inits.get(name.as_str()) {
                 let buffer = device.create_buffer(&BufferDescriptor {
                     label: Some(&format!("host_buffer_{name}")),
-                    size: bytes,
+                    size: init.bytes,
                     usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 });
-                queue.write_buffer(&buffer, 0, &vec![0u8; bytes as usize]);
+                queue.write_buffer(&buffer, 0, &buffer_init_bytes(init));
                 out.insert(
                     key,
                     HostBufferResource {
