@@ -42,11 +42,12 @@ def RES:i32 = 512
 -- pure function of (seed, position), so each particle gets an independent,
 -- well-distributed draw — no f32-precision collapse like the old
 -- `fract(x*y*(x+y))` hash, which piled most particles onto pixel (0,0).
--- Position spans [0, 200)²; velocity components span [-1, 1).
+-- Position spans the full [0, RES)² framebuffer; velocity components span
+-- [-1, 1).
 def spawn(i: i32) vec4f32 =
   let k = fasthash.seed(u32.i32(i) * 2654435761u32 + 1u32) in
-  @[200.0 * fasthash.at_f32(k, 0u32),
-    200.0 * fasthash.at_f32(k, 1u32),
+  @[f32(RES) * fasthash.at_f32(k, 0u32),
+    f32(RES) * fasthash.at_f32(k, 1u32),
     2.0 * fasthash.at_f32(k, 2u32) - 1.0,
     2.0 * fasthash.at_f32(k, 3u32) - 1.0]
 
