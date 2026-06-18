@@ -281,9 +281,7 @@ fn validate_wgsl(source: &str) {
 
 /// Compile a Wyn source through the full pipeline to WGSL text.
 fn compile_to_wgsl(source: &str) -> crate::error::Result<String> {
-    crate::compile_thru_ssa(source)
-        .map_err(|e| crate::err_spirv!("{}", e))?
-        .lower_wgsl()
+    crate::compile_thru_ssa(source).map_err(|e| crate::err_spirv!("{}", e))?.lower_wgsl()
 }
 
 #[test]

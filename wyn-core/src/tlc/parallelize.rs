@@ -3695,8 +3695,7 @@ fn default_entry_dispatch_len(program: &Program, def_name: SymbolId) -> Dispatch
             // An array-producing entry (`map`-shaped) iterates its input
             // view; a `()`-returning one writes the image per texel. Order
             // the two candidates by that shape, then take the first present.
-            let produces_array =
-                decl.outputs.iter().any(|o| crate::types::array_size(&o.ty).is_some());
+            let produces_array = decl.outputs.iter().any(|o| crate::types::array_size(&o.ty).is_some());
             let (primary, secondary) = if produces_array {
                 (explicit_view, storage_image)
             } else {

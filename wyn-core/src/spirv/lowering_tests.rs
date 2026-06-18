@@ -3,9 +3,7 @@ use crate::error::Result;
 /// Compile a source string to SPIR-V words. Thin wrapper around the
 /// canonical `compile_thru_spirv` so test failures lift through `.unwrap()`.
 fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
-    crate::compile_thru_spirv(source)
-        .map(|l| l.spirv)
-        .map_err(|e| crate::err_spirv!("{}", e))
+    crate::compile_thru_spirv(source).map(|l| l.spirv).map_err(|e| crate::err_spirv!("{}", e))
 }
 
 #[test]
@@ -322,7 +320,6 @@ def test(x: f32) f32 =
     assert!(!spirv.is_empty());
     assert_eq!(spirv[0], 0x07230203);
 }
-
 
 #[test]
 fn test_partial_eval_inlined_function_local_id_collision() {

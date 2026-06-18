@@ -36,8 +36,13 @@ fn compile_to_fused_tlc(input: &str) -> crate::tlc::Program {
         .type_check(&mut module_manager)
         .expect("type_check");
     let tlc = type_checked.to_tlc(&module_manager, false).pin_entry_regions().expect("pin_entry_regions");
-    let fused =
-        tlc.partial_eval().normalize_soacs().force_inline_soac_helpers().fuse_maps().apply_ownership().expect("apply_ownership");
+    let fused = tlc
+        .partial_eval()
+        .normalize_soacs()
+        .force_inline_soac_helpers()
+        .fuse_maps()
+        .apply_ownership()
+        .expect("apply_ownership");
     fused.0.tlc
 }
 
@@ -5005,7 +5010,6 @@ entry tick() f32 =
     crate::compile_thru_spirv(src)
         .expect("static-capacity filter piped through a size-poly helper must compile");
 }
-
 
 /// Regression: an entry returning a tuple where the second output is a
 /// fixed-size literal that *indexes into a scan result* used to silently

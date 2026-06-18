@@ -407,8 +407,7 @@ pub(crate) fn rewrite_sibling_index_consumers(
                 }
                 match &se.kind {
                     SideEffectKind::Pending(PendingSoac::Screma {
-                        input_array_types,
-                        ..
+                        input_array_types, ..
                     }) => {
                         // Screma operand layout:
                         //   [inputs.., init_accs.., map_captures..,
@@ -432,8 +431,7 @@ pub(crate) fn rewrite_sibling_index_consumers(
                         )));
                     }
                     SideEffectKind::Pending(PendingSoac::Scatter {
-                        input_array_types,
-                        ..
+                        input_array_types, ..
                     }) => {
                         // Scatter operand layout:
                         //   [dest_view, inputs.., captures..]
@@ -511,7 +509,9 @@ pub(crate) fn rewrite_sibling_index_consumers(
                 );
                 input_array_types[k] = view_arr_ty.clone();
             }
-            _ => unreachable!("classifier above only queues PendingSoac::Screma or PendingSoac::Scatter input-region hits"),
+            _ => unreachable!(
+                "classifier above only queues PendingSoac::Screma or PendingSoac::Scatter input-region hits"
+            ),
         }
     }
 

@@ -745,23 +745,15 @@ fn semantic_input_indices(
         .input_exprs()
         .iter()
         .enumerate()
-        .filter_map(|(idx, ae)| {
-            ae.as_named_ref().filter(|s| producers.contains(s)).map(|_| idx)
-        })
+        .filter_map(|(idx, ae)| ae.as_named_ref().filter(|s| producers.contains(s)).map(|_| idx))
         .collect()
 }
 
-fn top_screma_input_count(
-    term: &Term,
-    producers: &std::collections::HashSet<SymbolId>,
-) -> usize {
+fn top_screma_input_count(term: &Term, producers: &std::collections::HashSet<SymbolId>) -> usize {
     let TermKind::Soac(SoacOp::Screma { inputs, .. }) = &term.kind else {
         return 0;
     };
-    inputs
-        .iter()
-        .filter(|input| input.as_named_ref().is_some_and(|s| producers.contains(&s)))
-        .count()
+    inputs.iter().filter(|input| input.as_named_ref().is_some_and(|s| producers.contains(&s))).count()
 }
 
 fn find_direct_horizontal_map_plan(
@@ -1626,10 +1618,7 @@ fn is_length_call_of(term: &Term, producers: &std::collections::HashSet<SymbolId
 /// structural pass-throughs, not consumer uses; `X` joins the alias set
 /// when descending into `body`). Mirrors `collect_classified_uses`'s
 /// scoping so `raw_refs` and `recognized_refs` agree.
-fn aliased_var_ref_count(
-    term: &Term,
-    producers: &std::collections::HashSet<SymbolId>,
-) -> usize {
+fn aliased_var_ref_count(term: &Term, producers: &std::collections::HashSet<SymbolId>) -> usize {
     match &term.kind {
         TermKind::Var(VarRef::Symbol(s)) if producers.contains(s) => 1,
         TermKind::Lambda(lam) if lam.params.iter().any(|(p, _)| producers.contains(p)) => 0,

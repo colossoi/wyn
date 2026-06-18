@@ -110,21 +110,14 @@ fn rewrite_sibling_index_consumers_rejects_screma_capture_position() {
     let source = graph.alloc_side_effect_result(arr_ty.clone());
 
     // The output view we'd retarget to.
-    let view = graph_ops::intern_storage_view(
-        &mut graph,
-        crate::BindingRef::new(0, 1),
-        elem.clone(),
-        None,
-    );
+    let view = graph_ops::intern_storage_view(&mut graph, crate::BindingRef::new(0, 1), elem.clone(), None);
 
     // A downstream Screma with one input + one capture. The input
     // operand is a distinct dummy; `source` is placed at the capture
     // slot (index 1, which is past the input region).
     let dummy_input = graph.alloc_side_effect_result(arr_ty.clone());
-    let result_nid = graph.alloc_side_effect_result(Type::Constructed(
-        TypeName::Tuple(1),
-        vec![arr_ty.clone()],
-    ));
+    let result_nid =
+        graph.alloc_side_effect_result(Type::Constructed(TypeName::Tuple(1), vec![arr_ty.clone()]));
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
         kind: SideEffectKind::Pending(PendingSoac::Screma {
             map_funcs: vec!["m".into()],
@@ -145,7 +138,14 @@ fn rewrite_sibling_index_consumers_rejects_screma_capture_position() {
     let mut aliases = std::collections::HashMap::new();
     let mut next_effect = 1u32;
     let err = rewrite_sibling_index_consumers(
-        &mut graph, &mut aliases, block, &mut next_effect, source, view, elem, 0,
+        &mut graph,
+        &mut aliases,
+        block,
+        &mut next_effect,
+        source,
+        view,
+        elem,
+        0,
     )
     .expect_err("Screma capture-position consumer of `source` must be rejected");
     match err {
@@ -169,12 +169,7 @@ fn rewrite_sibling_index_consumers_rejects_scatter_dest_position() {
     let arr_ty = composite_arr_ty(elem.clone(), 4);
 
     let source = graph.alloc_side_effect_result(arr_ty.clone());
-    let view = graph_ops::intern_storage_view(
-        &mut graph,
-        crate::BindingRef::new(0, 1),
-        elem.clone(),
-        None,
-    );
+    let view = graph_ops::intern_storage_view(&mut graph, crate::BindingRef::new(0, 1), elem.clone(), None);
 
     // Scatter with `source` placed at the dest_view operand (index 0)
     // instead of the legitimate input region (`1..1+inputs.len()`).
@@ -199,7 +194,14 @@ fn rewrite_sibling_index_consumers_rejects_scatter_dest_position() {
     let mut aliases = std::collections::HashMap::new();
     let mut next_effect = 1u32;
     let err = rewrite_sibling_index_consumers(
-        &mut graph, &mut aliases, block, &mut next_effect, source, view, elem, 0,
+        &mut graph,
+        &mut aliases,
+        block,
+        &mut next_effect,
+        source,
+        view,
+        elem,
+        0,
     )
     .expect_err("Scatter dest-position consumer of `source` must be rejected");
     match err {
@@ -224,16 +226,12 @@ fn rewrite_sibling_index_consumers_rejects_scatter_capture_position() {
     let arr_ty = composite_arr_ty(elem.clone(), 4);
 
     let source = graph.alloc_side_effect_result(arr_ty.clone());
-    let view = graph_ops::intern_storage_view(
-        &mut graph,
-        crate::BindingRef::new(0, 1),
-        elem.clone(),
-        None,
-    );
+    let view = graph_ops::intern_storage_view(&mut graph, crate::BindingRef::new(0, 1), elem.clone(), None);
 
     // Scatter with one input + one capture. The capture slot (index 2,
     // past `1+inputs.len()=2`) is where `source` lives.
-    let dummy_dest = graph.alloc_side_effect_result(view_arr_ty(elem.clone(), crate::BindingRef::new(0, 1)));
+    let dummy_dest =
+        graph.alloc_side_effect_result(view_arr_ty(elem.clone(), crate::BindingRef::new(0, 1)));
     let dummy_input = graph.alloc_side_effect_result(arr_ty.clone());
     let result_nid = graph.alloc_side_effect_result(Type::Constructed(TypeName::Bool, vec![]));
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
@@ -255,7 +253,14 @@ fn rewrite_sibling_index_consumers_rejects_scatter_capture_position() {
     let mut aliases = std::collections::HashMap::new();
     let mut next_effect = 1u32;
     let err = rewrite_sibling_index_consumers(
-        &mut graph, &mut aliases, block, &mut next_effect, source, view, elem, 0,
+        &mut graph,
+        &mut aliases,
+        block,
+        &mut next_effect,
+        source,
+        view,
+        elem,
+        0,
     )
     .expect_err("Scatter capture-position consumer of `source` must be rejected");
     match err {
@@ -280,20 +285,13 @@ fn rewrite_sibling_index_consumers_rejects_screma_init_acc_position() {
     let arr_ty = composite_arr_ty(elem.clone(), 4);
 
     let source = graph.alloc_side_effect_result(arr_ty.clone());
-    let view = graph_ops::intern_storage_view(
-        &mut graph,
-        crate::BindingRef::new(0, 1),
-        elem.clone(),
-        None,
-    );
+    let view = graph_ops::intern_storage_view(&mut graph, crate::BindingRef::new(0, 1), elem.clone(), None);
 
     // Screma with one input + one Reduce accumulator. `source` at the
     // init_acc slot (operand index 1, past the input region at index 0).
     let dummy_input = graph.alloc_side_effect_result(arr_ty.clone());
-    let result_nid = graph.alloc_side_effect_result(Type::Constructed(
-        TypeName::Tuple(1),
-        vec![elem.clone()],
-    ));
+    let result_nid =
+        graph.alloc_side_effect_result(Type::Constructed(TypeName::Tuple(1), vec![elem.clone()]));
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
         kind: SideEffectKind::Pending(PendingSoac::Screma {
             map_funcs: vec![],
@@ -320,7 +318,14 @@ fn rewrite_sibling_index_consumers_rejects_screma_init_acc_position() {
     let mut aliases = std::collections::HashMap::new();
     let mut next_effect = 1u32;
     let err = rewrite_sibling_index_consumers(
-        &mut graph, &mut aliases, block, &mut next_effect, source, view, elem, 0,
+        &mut graph,
+        &mut aliases,
+        block,
+        &mut next_effect,
+        source,
+        view,
+        elem,
+        0,
     )
     .expect_err("Screma init-acc consumer of `source` must be rejected");
     match err {

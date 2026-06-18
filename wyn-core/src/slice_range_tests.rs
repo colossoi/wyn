@@ -455,7 +455,12 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     let tlc = tlc.partial_eval();
     eprintln!("=== partial_eval OK ===");
 
-    let tlc = tlc.normalize_soacs().force_inline_soac_helpers().fuse_maps().apply_ownership().expect("apply_ownership");
+    let tlc = tlc
+        .normalize_soacs()
+        .force_inline_soac_helpers()
+        .fuse_maps()
+        .apply_ownership()
+        .expect("apply_ownership");
     eprintln!("=== fuse_maps OK ===");
 
     let tlc = tlc.normalize_outputs().expect("normalize_outputs").lift_gathers().defunctionalize();
@@ -511,7 +516,12 @@ entry main(data: []i32) []i32 = [first(data)]
     let tlc = tlc.partial_eval();
     eprintln!("=== partial_eval OK ===");
 
-    let tlc = tlc.normalize_soacs().force_inline_soac_helpers().fuse_maps().apply_ownership().expect("apply_ownership");
+    let tlc = tlc
+        .normalize_soacs()
+        .force_inline_soac_helpers()
+        .fuse_maps()
+        .apply_ownership()
+        .expect("apply_ownership");
     eprintln!("=== fuse_maps OK ===");
 
     let tlc = tlc.normalize_outputs().expect("normalize_outputs").lift_gathers().defunctionalize();
