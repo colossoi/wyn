@@ -22,21 +22,27 @@ pub struct PipelineDescriptor {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Pipeline {
-    /// Single compute dispatch (Map, Scatter, simple compute).
+    /// One or more compute dispatches sharing a binding table. A
+    /// single-dispatch SOAC (Map, Scatter, simple compute) is the
+    /// `stages.len() == 1` case; multi-dispatch SOACs (Reduce, Scan,
+    /// Filter, ordered-prefix scheduling) populate multiple stages
+    /// run in order by the host runtime.
     Compute(ComputePipeline),
-    /// Multi-dispatch compute (Reduce, Scan, Filter).
-    MultiCompute(MultiComputePipeline),
     /// Graphics pipeline (Vertex → Fragment).
     Graphics(GraphicsPipeline),
 }
 
-/// Single-dispatch compute pipeline.
+/// Compute pipeline: a binding table plus N≥1 dispatch stages run in
+/// order, sharing the same bindings. The `stages.len() == 1` case
+/// covers single-dispatch SOACs; multi-stage covers Reduce/Scan/
+/// Filter phase chains and the ordered-prefix scheduler's lifted
+/// stages.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComputePipeline {
-    pub entry_point: String,
-    pub workgroup_size: (u32, u32, u32),
-    pub dispatch_size: DispatchSize,
+    /// All bindings used across all stages.
     pub bindings: Vec<Binding>,
+    /// Stages to execute in order. Length ≥ 1.
+    pub stages: Vec<ComputeStage>,
     /// Host-runtime default for the total work size, sourced from
     /// `#[size_hint(N)]` on an input parameter. When the application
     /// doesn't supply an explicit dispatch count, a thin host can
@@ -48,29 +54,20 @@ pub struct ComputePipeline {
     pub default_total_threads: Option<std::num::NonZeroU32>,
 }
 
-/// Multi-dispatch compute pipeline.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MultiComputePipeline {
-    /// All bindings used across all stages.
-    pub bindings: Vec<Binding>,
-    /// Stages to execute in order.
-    pub stages: Vec<ComputeStage>,
-    /// Host-runtime default for the total work size; same semantics as
-    /// `ComputePipeline::default_total_threads`, applied to whichever
-    /// stages dispatch `DerivedFromInputLength`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_total_threads: Option<std::num::NonZeroU32>,
-}
-
-/// A single stage in a multi-dispatch compute pipeline.
+/// A single dispatch stage within a `ComputePipeline`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComputeStage {
     pub entry_point: String,
     pub workgroup_size: (u32, u32, u32),
     pub dispatch_size: DispatchSize,
-    /// Indices into the parent pipeline's `bindings` that this stage reads.
+    /// Indices into the parent pipeline's `bindings` that this stage
+    /// reads. Empty when the host derives access from `Binding.access`
+    /// (the single-stage case has historically left this empty).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reads: Vec<usize>,
-    /// Indices into the parent pipeline's `bindings` that this stage writes.
+    /// Indices into the parent pipeline's `bindings` that this stage
+    /// writes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub writes: Vec<usize>,
 }
 

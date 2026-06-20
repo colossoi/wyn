@@ -17,8 +17,7 @@ use crate::gpu::{
     create_headless_device, readback_buffer, resolve_dispatch_size,
 };
 use crate::json::{
-    Binding, BufferUsage, ComputePipeline, MultiComputePipeline, Pipeline, PipelineDescriptor,
-    write_f32_json,
+    Binding, BufferUsage, ComputePipeline, Pipeline, PipelineDescriptor, write_f32_json,
 };
 use crate::specs::PushConstantSpec;
 use crate::spirv::load_spirv_module;
@@ -123,7 +122,6 @@ fn resolve_buffer_inits(
         .iter()
         .flat_map(|p| match p {
             Pipeline::Compute(cp) => cp.bindings.as_slice(),
-            Pipeline::MultiCompute(mp) => mp.bindings.as_slice(),
             Pipeline::Graphics(gp) => gp.bindings.as_slice(),
         })
         .filter_map(|b| match b {
@@ -258,30 +256,8 @@ pub async fn run_pipeline(
     for (pi, pipeline) in desc.pipelines.iter().enumerate() {
         match pipeline {
             Pipeline::Compute(cp) => {
-                run_single_compute(
-                    &device,
-                    &queue,
-                    &module,
-                    cp,
-                    &inputs,
-                    &outputs,
-                    push_constants,
-                    verbose,
-                )
-                .with_context(|| format!("Pipeline {} (compute) failed", pi))?;
-            }
-            Pipeline::MultiCompute(mp) => {
-                run_multi_compute(
-                    &device,
-                    &queue,
-                    &module,
-                    mp,
-                    &inputs,
-                    &outputs,
-                    push_constants,
-                    verbose,
-                )
-                .with_context(|| format!("Pipeline {} (multi_compute) failed", pi))?;
+                run_compute(&device, &queue, &module, cp, &inputs, &outputs, push_constants, verbose)
+                    .with_context(|| format!("Pipeline {} (compute) failed", pi))?;
             }
             Pipeline::Graphics(_) => {
                 // Unreachable now (caught above), kept for completeness
@@ -361,98 +337,22 @@ fn run_pipeline_interactive(
 
 /// Create wgpu buffers for a set of bindings. Returns a map from binding number
 
-fn run_single_compute(
+/// Run a compute pipeline as a sequence of dispatches over a shared
+/// binding table. Single-stage and multi-stage pipelines flow through
+/// the same path; the `mp.stages.len() == 1` case covers what used to
+/// be `run_single_compute`.
+fn run_compute(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     module: &wgpu::ShaderModule,
-    cp: &ComputePipeline,
+    mp: &ComputePipeline,
     inputs: &HashMap<String, PathBuf>,
     outputs: &HashMap<String, PathBuf>,
     push_constants: &[PushConstantSpec],
     verbose: bool,
 ) -> Result<()> {
     if verbose {
-        println!("Running compute pipeline: {}", cp.entry_point);
-    }
-
-    // Build push constant data from CLI args matched against descriptor bindings
-    let pc_bytes = build_push_constant_bytes(&cp.bindings, push_constants, verbose)?;
-    let total_pc_size = pc_bytes.len() as u32;
-
-    let buffers = create_binding_buffers(
-        device,
-        queue,
-        &cp.bindings,
-        inputs,
-        Some(&cp.dispatch_size),
-        &pc_bytes,
-        verbose,
-    )?;
-    let (layout, bind_group) = build_bind_group(device, &cp.bindings, &buffers)?;
-
-    let pc_ranges: Vec<wgpu::PushConstantRange> = if total_pc_size > 0 {
-        vec![wgpu::PushConstantRange {
-            stages: wgpu::ShaderStages::COMPUTE,
-            range: 0..total_pc_size,
-        }]
-    } else {
-        vec![]
-    };
-
-    let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-        label: Some("compute_layout"),
-        bind_group_layouts: &[&layout],
-        push_constant_ranges: &pc_ranges,
-    });
-
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("compute_pipeline"),
-        layout: Some(&pipeline_layout),
-        module,
-        entry_point: Some(&cp.entry_point),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-
-    let dispatch = resolve_dispatch_size(&cp.dispatch_size, &buffers, &pc_bytes);
-    if verbose {
-        println!("Dispatch: {} x {} x {}", dispatch.0, dispatch.1, dispatch.2);
-    }
-
-    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
-        label: Some("compute_encoder"),
-    });
-    ComputeExecutor {
-        label: "compute_pass",
-        pipeline: &pipeline,
-        bind_groups: &[&bind_group],
-        push_constant_bytes: &pc_bytes,
-        dispatch,
-        timestamps: None,
-    }
-    .record(&mut encoder);
-    queue.submit(Some(encoder.finish()));
-    let _ = device.poll(wgpu::PollType::Wait);
-
-    // Read back and output results
-    output_results(device, queue, &cp.bindings, &buffers, outputs)?;
-
-    Ok(())
-}
-
-/// Run a multi-dispatch compute pipeline (e.g. reduce with phase1 + phase2).
-fn run_multi_compute(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    module: &wgpu::ShaderModule,
-    mp: &MultiComputePipeline,
-    inputs: &HashMap<String, PathBuf>,
-    outputs: &HashMap<String, PathBuf>,
-    push_constants: &[PushConstantSpec],
-    verbose: bool,
-) -> Result<()> {
-    if verbose {
-        println!("Running multi-compute pipeline ({} stages)", mp.stages.len());
+        println!("Running compute pipeline ({} stages)", mp.stages.len());
         for (i, stage) in mp.stages.iter().enumerate() {
             println!(
                 "  Stage {}: {} (reads {:?}, writes {:?})",
@@ -465,7 +365,13 @@ fn run_multi_compute(
     let pc_bytes = build_push_constant_bytes(&mp.bindings, push_constants, verbose)?;
     let total_pc_size = pc_bytes.len() as u32;
 
-    let buffers = create_binding_buffers(device, queue, &mp.bindings, inputs, None, &pc_bytes, verbose)?;
+    // Stage-0's dispatch sizes any `SameAsDispatch` output bindings —
+    // the single-stage case carries the only-stage's dispatch, the
+    // multi-stage case carries phase 1's, which is the size primary
+    // outputs are tied to in current reduce/scan/scheduler layouts.
+    let dispatch_hint = mp.stages.first().map(|s| &s.dispatch_size);
+    let buffers =
+        create_binding_buffers(device, queue, &mp.bindings, inputs, dispatch_hint, &pc_bytes, verbose)?;
     let (layout, bind_group) = build_bind_group(device, &mp.bindings, &buffers)?;
 
     let pc_ranges: Vec<wgpu::PushConstantRange> = if total_pc_size > 0 {

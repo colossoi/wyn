@@ -627,7 +627,9 @@ fn expand_one(
                 } if accumulators.is_empty()
                     && acc_destinations.is_empty()
                     && !map_funcs.is_empty()
-                    && map_destinations.iter().all(|dest| *dest == SoacDestination::OutputView) =>
+                    && map_destinations.iter().all(|dest| {
+                        matches!(dest, SoacDestination::OutputView | SoacDestination::InputBuffer)
+                    }) =>
                 {
                     let n_inputs = input_array_types.len();
                     let input_nids: Vec<NodeId> = se.operand_nodes[..n_inputs].to_vec();
@@ -637,7 +639,12 @@ fn expand_one(
                         map_captures.push(se.operand_nodes[cursor..cursor + *count].to_vec());
                         cursor += *count;
                     }
-                    let output_views = se.operand_nodes[cursor..].to_vec();
+                    let output_views =
+                        if map_destinations.iter().all(|dest| *dest == SoacDestination::InputBuffer) {
+                            vec![input_nids[0]; map_funcs.len()]
+                        } else {
+                            se.operand_nodes[cursor..].to_vec()
+                        };
                     assert_eq!(
                         output_views.len(),
                         map_funcs.len(),
@@ -665,6 +672,45 @@ fn expand_one(
                             result_node: result_nid,
                             funcs: map_funcs,
                             captures: map_captures,
+                        },
+                        next_effect,
+                    );
+                }
+                PendingSoac::Scatter {
+                    func,
+                    input_array_types,
+                    input_elem_types,
+                    capture_count,
+                    index_type,
+                    value_type,
+                    dest_elem_type,
+                } => {
+                    let n_inputs = input_array_types.len();
+                    let dest_view = se.operand_nodes[0];
+                    let input_nids: Vec<NodeId> = se.operand_nodes[1..1 + n_inputs].to_vec();
+                    let captures = se.operand_nodes[1 + n_inputs..1 + n_inputs + capture_count].to_vec();
+                    let read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)> = input_nids
+                        .iter()
+                        .zip(input_array_types.iter().zip(input_elem_types.iter()))
+                        .map(|(n, (a, e))| (*n, a.clone(), e.clone()))
+                        .collect();
+                    let len_input = (input_nids[0], input_array_types[0].clone());
+                    let result_node = se.result.expect("Scatter has a result");
+                    build_parallel_scatter(
+                        graph,
+                        control_headers,
+                        bid,
+                        idx,
+                        ScatterLoop {
+                            dest_view,
+                            dest_elem_ty: dest_elem_type,
+                            func,
+                            read_inputs,
+                            captures,
+                            index_type,
+                            value_type,
+                            len_input,
+                            result_node,
                         },
                         next_effect,
                     );
@@ -1306,6 +1352,101 @@ fn build_scatter_loop(
     );
 }
 
+fn build_parallel_scatter(
+    graph: &mut EGraph,
+    control_headers: &mut HashMap<BlockId, ControlHeader>,
+    bid: BlockId,
+    idx_in_block: usize,
+    spec: ScatterLoop,
+    next_effect: &mut u32,
+) {
+    use super::graph_ops::emit_storage_store;
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+    let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+    let ScatterLoop {
+        dest_view,
+        dest_elem_ty,
+        func,
+        read_inputs,
+        captures,
+        index_type,
+        value_type,
+        len_input,
+        result_node,
+    } = spec;
+
+    let after = graph.skeleton.create_block();
+    let suffix: Vec<SideEffect> = graph.skeleton.blocks[bid].side_effects.drain(idx_in_block..).collect();
+    let old_term = std::mem::replace(
+        &mut graph.skeleton.blocks[bid].term,
+        SkeletonTerminator::Unreachable,
+    );
+    graph.skeleton.blocks[after].side_effects = suffix;
+    graph.skeleton.blocks[after].term = old_term;
+    if let Some(header_meta) = control_headers.remove(&bid) {
+        control_headers.insert(after, header_meta);
+    }
+
+    graph.nodes[result_node] = ENode::Constant(crate::ssa::types::ConstantValue::Bool(false));
+
+    let body = graph.skeleton.create_block();
+    let known = catalog().known();
+    let tid_nid = graph.intern_pure(
+        PureOp::Intrinsic {
+            id: known.thread_id,
+            overload_idx: 0,
+        },
+        smallvec![],
+        u32_ty,
+    );
+    let i32_from_u32 = catalog().lookup_by_any_name("i32.u32").expect("catalog has i32.u32 bitcast");
+    let i_nid = graph.intern_pure(
+        PureOp::Intrinsic {
+            id: i32_from_u32.id,
+            overload_idx: 0,
+        },
+        smallvec![tid_nid],
+        i32_ty.clone(),
+    );
+    let len_nid = emit_length(graph, len_input.0, &len_input.1, &i32_ty);
+    let cond_nid = graph.intern_pure(PureOp::BinOp("<".into()), smallvec![i_nid, len_nid], bool_ty);
+
+    graph.skeleton.blocks[bid].term = SkeletonTerminator::CondBranch {
+        cond: cond_nid,
+        then_target: body,
+        then_args: vec![],
+        else_target: after,
+        else_args: vec![],
+    };
+    control_headers.insert(bid, ControlHeader::Selection { merge: after });
+
+    let mut call_operands: smallvec::SmallVec<[NodeId; 4]> = SmallVec::new();
+    for (arr, arr_ty, elem_ty) in &read_inputs {
+        let elem = emit_read_element(graph, body, *arr, i_nid, arr_ty, elem_ty, next_effect);
+        call_operands.push(elem);
+    }
+    call_operands.extend(captures.iter().copied());
+    let pair_ty = Type::Constructed(TypeName::Tuple(2), vec![index_type.clone(), value_type.clone()]);
+    let pair_nid = graph.intern_pure(PureOp::Call(func), call_operands, pair_ty);
+    let scatter_idx = graph.intern_pure(PureOp::Project { index: 0 }, smallvec![pair_nid], index_type);
+    let val = graph.intern_pure(PureOp::Project { index: 1 }, smallvec![pair_nid], value_type);
+    emit_storage_store(
+        graph,
+        body,
+        dest_view,
+        scatter_idx,
+        val,
+        dest_elem_ty,
+        next_effect,
+        None,
+    );
+    graph.skeleton.blocks[body].term = SkeletonTerminator::Branch {
+        target: after,
+        args: vec![],
+    };
+}
+
 fn build_runtime_filter_loop(
     graph: &mut EGraph,
     control_headers: &mut HashMap<BlockId, ControlHeader>,
@@ -1661,6 +1802,8 @@ fn emit_length(
     arr_ty: &Type<TypeName>,
     i32_ty: &Type<TypeName>,
 ) -> NodeId {
+    let actual_arr_ty = graph.types.get(&arr_nid).filter(|ty| is_plain_array_source(ty)).cloned();
+    let arr_ty = actual_arr_ty.as_ref().unwrap_or(arr_ty);
     if let Some(components) = as_soa_tuple(arr_ty) {
         let first_arr = graph.intern_pure(
             PureOp::Project { index: 0 },
@@ -1692,6 +1835,8 @@ fn emit_read_element(
     elem_ty: &Type<TypeName>,
     next_effect: &mut u32,
 ) -> NodeId {
+    let actual_arr_ty = graph.types.get(&arr_nid).filter(|ty| is_plain_array_source(ty)).cloned();
+    let arr_ty = actual_arr_ty.as_ref().unwrap_or(arr_ty);
     // SoA tuple: project each component array, recursively read element i
     // from each, repack as the element tuple.
     if let Some(components) = as_soa_tuple(arr_ty) {

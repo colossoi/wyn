@@ -60,9 +60,6 @@ fn rewrite_tail_map(entry: &mut super::program::EgirEntry) {
             let SideEffectKind::Pending(ref pending) = se.kind else {
                 continue;
             };
-            // Only entry-tail pointwise Screma that targets output views
-            // are parallelizable here. Intermediate Fresh producers stay
-            // serial unless a strategy-specific transform rewrites them.
             match pending {
                 PendingSoac::Screma {
                     accumulators,
@@ -70,7 +67,10 @@ fn rewrite_tail_map(entry: &mut super::program::EgirEntry) {
                     ..
                 } if accumulators.is_empty()
                     && !map_destinations.is_empty()
-                    && map_destinations.iter().all(|dest| *dest == SoacDestination::OutputView) => {}
+                    && map_destinations.iter().all(|dest| {
+                        matches!(dest, SoacDestination::OutputView | SoacDestination::InputBuffer)
+                    }) => {}
+                PendingSoac::Scatter { .. } => {}
                 _ => continue,
             }
             // PendingSoac derives Clone, so the clean version is just to

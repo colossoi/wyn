@@ -681,9 +681,8 @@ fn set_pipeline_binding_length(
 ) {
     use crate::pipeline_descriptor::{Binding, Pipeline};
     let bindings = pipeline.pipelines.iter_mut().find_map(|p| match p {
-        Pipeline::Compute(cp) if cp.entry_point == entry_name => Some(&mut cp.bindings),
-        Pipeline::MultiCompute(mc) if mc.stages.iter().any(|s| s.entry_point == entry_name) => {
-            Some(&mut mc.bindings)
+        Pipeline::Compute(cp) if cp.stages.iter().any(|s| s.entry_point == entry_name) => {
+            Some(&mut cp.bindings)
         }
         _ => None,
     });

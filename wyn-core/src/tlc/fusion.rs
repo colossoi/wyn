@@ -1429,7 +1429,7 @@ fn clone_term_with_fresh_ids(term: &Term, term_ids: &mut TermIdSource) -> Term {
     cloned
 }
 
-fn substitute_term_expr(
+pub(super) fn substitute_term_expr(
     term: Term,
     old: SymbolId,
     replacement: &Term,
@@ -2602,7 +2602,7 @@ fn compose_map_reduce(
 /// takes the producer's params in that slot's place and binds the original
 /// slot param to the producer's body ahead of the envelope body:
 /// `λ(…, q…, …) → let p_slot = producer_body in envelope_body`.
-fn compose_map_into_envelope(
+pub(super) fn compose_map_into_envelope(
     producer: Lambda,
     envelope: Lambda,
     slot: usize,
@@ -2643,7 +2643,7 @@ fn compose_map_into_envelope(
 /// an earlier kept slot already reads, drop it and rewrite its param to the
 /// kept one. This is horizontal fusion specialised to one consumer's slots:
 /// the shared base is read once rather than per channel.
-fn dedup_envelope_inputs(
+pub(super) fn dedup_envelope_inputs(
     lam: Lambda,
     inputs: Vec<ArrayExpr>,
     term_ids: &mut TermIdSource,

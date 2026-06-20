@@ -688,7 +688,6 @@ pub fn create_storage_textures(
     for pipeline in &descriptor.pipelines {
         let bindings: &[Binding] = match pipeline {
             Pipeline::Compute(cp) => &cp.bindings,
-            Pipeline::MultiCompute(mc) => &mc.bindings,
             Pipeline::Graphics(gp) => &gp.bindings,
         };
         for b in bindings {
@@ -809,7 +808,6 @@ pub fn create_host_textures(
     for pipeline in &descriptor.pipelines {
         let bindings: &[Binding] = match pipeline {
             Pipeline::Compute(cp) => &cp.bindings,
-            Pipeline::MultiCompute(mc) => &mc.bindings,
             Pipeline::Graphics(gp) => &gp.bindings,
         };
         for b in bindings {
@@ -961,7 +959,6 @@ pub fn create_host_buffers(
     for pipeline in &descriptor.pipelines {
         let bindings: &[Binding] = match pipeline {
             Pipeline::Compute(cp) => &cp.bindings,
-            Pipeline::MultiCompute(mc) => &mc.bindings,
             Pipeline::Graphics(gp) => &gp.bindings,
         };
         for b in bindings {
@@ -1084,33 +1081,45 @@ pub fn create_feedback_buffers(
         }
 
         // Locate the compute pipeline owning the write binding so we
-        // can read its `dispatch_size` (needed for `SameAsDispatch`).
+        // can read the writer stage's `dispatch_size` (needed for
+        // `SameAsDispatch`). The writer is the stage whose
+        // `writes: Vec<usize>` mentions this binding's slot index.
+        // No declared writer + `SameAsDispatch` sizing → producer bug;
+        // surface it loudly instead of silently picking a stage and
+        // sizing the buffer wrong.
         let mut write_binding_desc: Option<&Binding> = None;
-        let mut owning_compute: Option<&wyn_pipeline_descriptor::ComputePipeline> = None;
+        let mut owning_stage: Option<&wyn_pipeline_descriptor::ComputeStage> = None;
         for pipeline in &descriptor.pipelines {
             let Pipeline::Compute(cp) = pipeline else {
                 continue;
             };
-            for b in &cp.bindings {
+            for (idx, b) in cp.bindings.iter().enumerate() {
                 if let Binding::StorageBuffer { set, binding, .. } = b {
                     if (*set, *binding) == write_key {
                         write_binding_desc = Some(b);
-                        owning_compute = Some(cp);
+                        owning_stage = cp.stages.iter().find(|s| s.writes.contains(&idx));
                     }
                 }
             }
         }
-        let (write_b, cp) = match (write_binding_desc, owning_compute) {
-            (Some(b), Some(cp)) => (b, cp),
-            _ => {
-                return Err(anyhow!(
-                    "--feedback buffer pair write side ({}, {}) names no \
-                     storage_buffer binding on any compute pipeline",
-                    write_key.0,
-                    write_key.1,
-                ));
-            }
-        };
+        let write_b = write_binding_desc.ok_or_else(|| {
+            anyhow!(
+                "--feedback buffer pair write side ({}, {}) names no \
+                 storage_buffer binding on any compute pipeline",
+                write_key.0,
+                write_key.1,
+            )
+        })?;
+        let stage = owning_stage.ok_or_else(|| {
+            anyhow!(
+                "--feedback buffer pair write side ({}, {}): no compute stage \
+                 declares it in `writes`; the producer must populate \
+                 `ComputeStage.writes` so the host can size `SameAsDispatch` \
+                 from the writer's dispatch.",
+                write_key.0,
+                write_key.1,
+            )
+        })?;
         let (name, length) = match write_b {
             Binding::StorageBuffer { name, length, .. } => (name.clone(), length.clone()),
             _ => unreachable!("filtered to StorageBuffer above"),
@@ -1128,8 +1137,8 @@ pub fn create_feedback_buffers(
         let byte_size: u64 = match &length {
             wyn_pipeline_descriptor::BufferLen::Fixed { bytes } => *bytes,
             wyn_pipeline_descriptor::BufferLen::SameAsDispatch { elem_bytes } => {
-                let (gx, gy, gz) = resolve_dispatch_size(&cp.dispatch_size, &HashMap::new(), &[]);
-                let wg = match cp.dispatch_size {
+                let (gx, gy, gz) = resolve_dispatch_size(&stage.dispatch_size, &HashMap::new(), &[]);
+                let wg = match stage.dispatch_size {
                     DispatchSize::DerivedFrom { workgroup_size, .. } => workgroup_size,
                     DispatchSize::Fixed { .. } => 1,
                 };
@@ -1176,7 +1185,6 @@ pub fn create_samplers(
     for pipeline in &descriptor.pipelines {
         let bindings: &[Binding] = match pipeline {
             Pipeline::Compute(cp) => &cp.bindings,
-            Pipeline::MultiCompute(mc) => &mc.bindings,
             Pipeline::Graphics(gp) => &gp.bindings,
         };
         for b in bindings {

@@ -1006,7 +1006,8 @@ impl TlcSmallInlined {
     /// slipped through. The canonical path goes through
     /// `.rep_specialize().parallelize_soacs(...)`.
     pub fn parallelize_soacs(self, disable: bool) -> Result<TlcParallelized> {
-        let TlcLateInner { tlc, type_table } = self.0;
+        let TlcLateInner { mut tlc, type_table } = self.0;
+        tlc = tlc::if_over_producer::run(tlc);
         let result = tlc::parallelize::run(tlc, disable)?;
         Ok(TlcParallelized(TlcPipelineInner {
             tlc: result.program,
@@ -1108,7 +1109,8 @@ impl TlcRepSpecialized {
     /// `disable` turns the pass into an effective no-op (see
     /// `TlcEntrySoacsMaterialized::parallelize_soacs`).
     pub fn parallelize_soacs(self, disable: bool) -> Result<TlcParallelized> {
-        let TlcLateInner { tlc, type_table } = self.0;
+        let TlcLateInner { mut tlc, type_table } = self.0;
+        tlc = tlc::if_over_producer::run(tlc);
         let result = tlc::parallelize::run(tlc, disable)?;
         Ok(TlcParallelized(TlcPipelineInner {
             tlc: result.program,

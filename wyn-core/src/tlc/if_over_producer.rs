@@ -11,19 +11,20 @@ use super::VarRef;
 use super::{ArrayExpr, Def, Lambda, Program, SoacBody, SoacDestination, SoacOp};
 use super::{Term, TermIdSource, TermKind};
 use crate::SymbolId;
+use crate::SymbolTable;
 use crate::ast::{Span, TypeName};
 use crate::builtins::{BuiltinId, catalog};
 use crate::types::TypeExt;
 use polytype::Type;
 use std::collections::HashSet;
 
-pub fn run(program: Program) -> Program {
+pub fn run(mut program: Program) -> Program {
     let mut term_ids = TermIdSource::new();
     let defs = program
         .defs
         .into_iter()
         .map(|def| Def {
-            body: rewrite_term(def.body, &mut term_ids),
+            body: rewrite_term(def.body, &mut program.symbols, &mut term_ids),
             ..def
         })
         .collect();
@@ -31,9 +32,9 @@ pub fn run(program: Program) -> Program {
     Program { defs, ..program }
 }
 
-fn rewrite_term(term: Term, term_ids: &mut TermIdSource) -> Term {
-    let term = term.map_children(&mut |child| rewrite_term(child, term_ids));
-    rewrite_if_over_map(term, term_ids)
+fn rewrite_term(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdSource) -> Term {
+    let term = term.map_children(&mut |child| rewrite_term(child, symbols, term_ids));
+    rewrite_if_over_map(term, symbols, term_ids)
 }
 
 #[derive(Clone)]
@@ -50,7 +51,7 @@ struct MapBranch {
     inputs: Vec<ArrayExpr>,
 }
 
-fn rewrite_if_over_map(term: Term, term_ids: &mut TermIdSource) -> Term {
+fn rewrite_if_over_map(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdSource) -> Term {
     let TermKind::If {
         cond,
         then_branch,
@@ -63,7 +64,7 @@ fn rewrite_if_over_map(term: Term, term_ids: &mut TermIdSource) -> Term {
     let then_term = *then_branch;
     let else_term = *else_branch;
 
-    let Some(then_map) = extract_map_branch(then_term.clone()) else {
+    let Some(then_map) = extract_map_branch(then_term.clone(), symbols, term_ids) else {
         return Term {
             kind: TermKind::If {
                 cond,
@@ -73,7 +74,7 @@ fn rewrite_if_over_map(term: Term, term_ids: &mut TermIdSource) -> Term {
             ..term
         };
     };
-    let Some(else_map) = extract_map_branch(else_term.clone()) else {
+    let Some(else_map) = extract_map_branch(else_term.clone(), symbols, term_ids) else {
         return Term {
             kind: TermKind::If {
                 cond,
@@ -102,7 +103,11 @@ fn rewrite_if_over_map(term: Term, term_ids: &mut TermIdSource) -> Term {
     build_fused_map_if(*cond, then_map, else_map, original_ty, original_span, term_ids)
 }
 
-fn extract_map_branch(term: Term) -> Option<MapBranch> {
+fn extract_map_branch(
+    term: Term,
+    symbols: &mut SymbolTable,
+    term_ids: &mut TermIdSource,
+) -> Option<MapBranch> {
     match term.kind {
         TermKind::Let {
             name,
@@ -111,18 +116,19 @@ fn extract_map_branch(term: Term) -> Option<MapBranch> {
             body,
         } => {
             let span = term.span;
-            let mut branch = extract_map_branch(*body)?;
-            branch.prefix.insert(
-                0,
-                PrefixLet {
-                    name,
-                    name_ty,
-                    rhs: *rhs,
-                    span,
-                },
-            );
+            let mut branch = extract_map_branch(*body, symbols, term_ids)?;
+            let prefix = PrefixLet {
+                name,
+                name_ty,
+                rhs: *rhs,
+                span,
+            };
+            if !try_compose_prefix_map(&prefix, &mut branch, symbols, term_ids) {
+                branch.prefix.insert(0, prefix);
+            }
             Some(branch)
         }
+        TermKind::Coerce { inner, .. } => extract_map_branch(*inner, symbols, term_ids),
         TermKind::Soac(SoacOp::Map {
             lam,
             inputs,
@@ -132,8 +138,75 @@ fn extract_map_branch(term: Term) -> Option<MapBranch> {
             lam,
             inputs,
         }),
+        TermKind::ArrayExpr(ArrayExpr::Soac(soac)) => match *soac {
+            SoacOp::Map {
+                lam,
+                inputs,
+                destination: _,
+            } => Some(MapBranch {
+                prefix: Vec::new(),
+                lam,
+                inputs,
+            }),
+            _ => None,
+        },
         _ => None,
     }
+}
+
+fn try_compose_prefix_map(
+    prefix: &PrefixLet,
+    branch: &mut MapBranch,
+    symbols: &mut SymbolTable,
+    term_ids: &mut TermIdSource,
+) -> bool {
+    let (producer_lam, producer_inputs) = match &prefix.rhs.kind {
+        TermKind::Soac(SoacOp::Map {
+            lam,
+            inputs,
+            destination: SoacDestination::Fresh,
+        }) => (lam, inputs),
+        TermKind::ArrayExpr(ArrayExpr::Soac(soac)) => match soac.as_ref() {
+            SoacOp::Map {
+                lam,
+                inputs,
+                destination: SoacDestination::Fresh,
+            } => (lam, inputs),
+            _ => return false,
+        },
+        _ => return false,
+    };
+    if !producer_lam.captures.is_empty() {
+        return false;
+    }
+
+    let mut composed = false;
+    let mut slot = 0;
+    while slot < branch.inputs.len() {
+        if branch.inputs[slot].as_named_ref() != Some(prefix.name) {
+            slot += 1;
+            continue;
+        }
+        branch.lam.lam = super::fusion::compose_map_into_envelope(
+            producer_lam.lam.clone(),
+            branch.lam.lam.clone(),
+            slot,
+            prefix.span,
+            symbols,
+            term_ids,
+        );
+        branch.inputs.splice(slot..=slot, producer_inputs.iter().cloned());
+        let deduped = super::fusion::dedup_envelope_inputs(
+            branch.lam.lam.clone(),
+            std::mem::take(&mut branch.inputs),
+            term_ids,
+        );
+        branch.lam.lam = deduped.0;
+        branch.inputs = deduped.1;
+        composed = true;
+        slot = 0;
+    }
+    composed
 }
 
 fn can_fuse_if_maps(

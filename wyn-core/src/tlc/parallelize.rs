@@ -13,6 +13,7 @@ use crate::builtins::catalog;
 use crate::egir::from_tlc::AUTO_STORAGE_SET;
 use crate::interface::{self, Attribute, EntryParamBinding, EntryParamBindingKind};
 use crate::pipeline_descriptor::*;
+use crate::types::TypeExt;
 use crate::{BindingRef, SymbolId, SymbolTable};
 use polytype::Type;
 use std::collections::{HashMap, HashSet};
@@ -187,6 +188,10 @@ pub(crate) struct RequiredParam {
 struct EntryAnalysis {
     pub def_name: SymbolId,
     pub soac: SoacAnalysis,
+    /// Let-bound symbol whose RHS was followed to find the tail SOAC.
+    /// Preserved so ordered-prefix scheduling can distinguish work that
+    /// must run after the tail has materialized its output buffer.
+    pub tail_alias: Option<(SymbolId, Type<TypeName>)>,
     /// Let-binding prefix before the SOAC.
     pub prefix_lets: Vec<(SymbolId, Type<TypeName>, Term)>,
     /// The subset of the original entry's params that the SOAC and
@@ -320,6 +325,7 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
     let mut scope = ScopeStack::default();
     let mut current: Term = def.body.clone();
     let mut extra_slots: Vec<(usize, Term)> = Vec::new();
+    let mut tail_alias: Option<(SymbolId, Type<TypeName>)> = None;
 
     // The entry's binding layout, which resolves `Ref(Var(sym))` SOAC inputs
     // back to their assigned (set, binding). Empty for non-compute entries.
@@ -386,6 +392,7 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
                 return Some(EntryAnalysis {
                     def_name: def.name,
                     soac: parallelizable,
+                    tail_alias,
                     prefix_lets,
                     required_params,
                     extra_slots,
@@ -399,7 +406,10 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
                 }
                 // Otherwise try to consume a let binding.
                 match scope.remove_let(sym) {
-                    Some((_ty, rhs)) => current = rhs,
+                    Some((alias_ty, rhs)) => {
+                        tail_alias.get_or_insert((sym, alias_ty));
+                        current = rhs;
+                    }
                     None => return None,
                 }
             }
@@ -411,7 +421,8 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
                     return None;
                 }
                 match scope.remove_let(sym) {
-                    Some((_ty, rhs)) if matches!(rhs.kind, TermKind::Soac(SoacOp::Screma { .. })) => {
+                    Some((alias_ty, rhs)) if matches!(rhs.kind, TermKind::Soac(SoacOp::Screma { .. })) => {
+                        tail_alias.get_or_insert((sym, alias_ty));
                         current = rhs;
                     }
                     _ => return None,
@@ -743,6 +754,17 @@ fn classify_input(input: &ArrayExpr, entry_slots: &[Option<EntryParamBinding>]) 
                     let (buf, elem_ty, elem_bytes) = slot.first_buffer();
                     return Some(ArrayProvenance::Storage {
                         binding: buf,
+                        elem_ty: elem_ty.clone(),
+                        elem_bytes,
+                    });
+                }
+            }
+            let ref_ty = crate::types::strip_unique(&t.ty);
+            if let Some(binding) = crate::types::array_view_region(&ref_ty) {
+                if let Some(elem_ty) = ref_ty.elem_type() {
+                    let elem_bytes = crate::ssa::layout::type_byte_size(elem_ty)?;
+                    return Some(ArrayProvenance::Storage {
+                        binding,
                         elem_ty: elem_ty.clone(),
                         elem_bytes,
                     });
@@ -1669,13 +1691,17 @@ pub fn run(mut program: Program, disable: bool) -> crate::error::Result<Parallel
                 let sizing = PipelineSizing::for_default_entry(&program, def.name);
                 let len = default_entry_dispatch_len(&program, def.name);
                 pipelines.push(Pipeline::Compute(ComputePipeline {
-                    entry_point: name,
-                    workgroup_size: sizing.workgroup,
-                    dispatch_size: DispatchSize::DerivedFrom {
-                        len,
-                        workgroup_size: sizing.workgroup.0,
-                    },
                     bindings: input_bindings,
+                    stages: vec![ComputeStage {
+                        entry_point: name,
+                        workgroup_size: sizing.workgroup,
+                        dispatch_size: DispatchSize::DerivedFrom {
+                            len,
+                            workgroup_size: sizing.workgroup.0,
+                        },
+                        reads: vec![],
+                        writes: vec![],
+                    }],
                     default_total_threads: sizing.default_total_threads,
                 }));
             }
@@ -1700,6 +1726,9 @@ pub fn run(mut program: Program, disable: bool) -> crate::error::Result<Parallel
         new_defs.extend(plan.new_defs);
         pipelines.push(plan.pipeline);
         if let Some(parallel_plan) = plan.parallel_plan {
+            plans.insert(parallel_plan.entry.clone(), parallel_plan);
+        }
+        for parallel_plan in plan.extra_parallel_plans {
             plans.insert(parallel_plan.entry.clone(), parallel_plan);
         }
     }
@@ -1746,6 +1775,7 @@ struct LoweringPlan {
     new_defs: Vec<Def>,
     pipeline: Pipeline,
     extra_bindings_used: u32,
+    extra_parallel_plans: Vec<ParallelizationPlan>,
     /// EGIR-bound parallelization plan, if this strategy migrated to the
     /// EGIR-side path. Populated for Map today; None for reduce / scan /
     /// redomap (still TLC-lowered until their EGIR migration).
@@ -1777,11 +1807,6 @@ fn soac_has_ordered_side_effect(soac: &SoacOp) -> bool {
     }
 }
 
-fn retained_prefix_has_ordered_side_effect(analysis: &EntryAnalysis) -> bool {
-    analysis.prefix_lets.iter().any(|(_, _, rhs)| term_has_ordered_side_effect_soac(rhs))
-        || analysis.extra_slots.iter().any(|(_, value)| term_has_ordered_side_effect_soac(value))
-}
-
 fn make_serial_compute_plan(
     analysis: &EntryAnalysis,
     entry_name: &str,
@@ -1791,14 +1816,852 @@ fn make_serial_compute_plan(
         removed_entry: None,
         new_defs: Vec::new(),
         pipeline: Pipeline::Compute(ComputePipeline {
-            entry_point: entry_name.to_string(),
-            workgroup_size: sizing.workgroup,
-            dispatch_size: DispatchSize::Fixed { x: 1, y: 1, z: 1 },
             bindings: collect_soac_bindings(&analysis.soac),
+            stages: vec![ComputeStage {
+                entry_point: entry_name.to_string(),
+                workgroup_size: sizing.workgroup,
+                dispatch_size: DispatchSize::Fixed { x: 1, y: 1, z: 1 },
+                reads: vec![],
+                writes: vec![],
+            }],
             default_total_threads: sizing.default_total_threads,
         }),
         extra_bindings_used: 0,
+        extra_parallel_plans: Vec::new(),
         parallel_plan: None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DispatchPhase {
+    PreTail,
+    PostTail,
+}
+
+struct DispatchTask {
+    stage_idx: usize,
+    rhs: Term,
+    phase: DispatchPhase,
+}
+
+struct DispatchSchedule {
+    defs: Vec<Def>,
+    pre_stages: Vec<ComputeStage>,
+    post_stages: Vec<ComputeStage>,
+    bindings: Vec<Binding>,
+    plans: Vec<ParallelizationPlan>,
+}
+
+fn retained_extra_slots_have_ordered_side_effect(analysis: &EntryAnalysis) -> bool {
+    analysis.extra_slots.iter().any(|(_, value)| term_has_ordered_side_effect_soac(value))
+}
+
+fn retained_prefix_only_has_ordered_side_effect(analysis: &EntryAnalysis) -> bool {
+    analysis.prefix_lets.iter().any(|(_, _, rhs)| term_has_ordered_side_effect_soac(rhs))
+}
+
+fn ordered_prefix_has_post_tail_dependency(analysis: &EntryAnalysis, symbols: &SymbolTable) -> bool {
+    let Some((tail_sym, _)) = analysis.tail_alias.as_ref() else {
+        return false;
+    };
+    let mut post_syms: HashSet<SymbolId> = HashSet::from([*tail_sym]);
+    for (sym, _, rhs) in &analysis.prefix_lets {
+        if term_refs_any(rhs, &post_syms, symbols) {
+            if term_has_ordered_side_effect_soac(rhs) {
+                return true;
+            }
+            post_syms.insert(*sym);
+        }
+    }
+    false
+}
+
+fn try_build_ordered_prefix_schedule(
+    analysis: &EntryAnalysis,
+    entry_name: &str,
+    sizing: PipelineSizing,
+    tail_output_binding: Option<BindingRef>,
+    program: &mut Program,
+    term_ids: &mut TermIdSource,
+) -> Option<DispatchSchedule> {
+    let tail_alias_sym = analysis.tail_alias.as_ref().map(|(sym, _)| *sym);
+    let source_def = program.defs.iter().find(|d| d.name == analysis.def_name)?.clone();
+    let entry_slots = if let DefMeta::EntryPoint(decl) = &source_def.meta {
+        let (params, _) = peel_lambda_params(&source_def.body);
+        crate::binding_layout::compute_entry_binding_layout(&params, decl, AUTO_STORAGE_SET)
+    } else {
+        Vec::new()
+    };
+    let tail_param = match (analysis.tail_alias.as_ref(), tail_output_binding) {
+        (Some((_, ty)), Some(binding)) => Some(make_synthetic_storage_param(
+            "_tail_out",
+            ty.clone(),
+            binding,
+            program,
+        )?),
+        _ => None,
+    };
+    let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
+    let mut defs = Vec::new();
+    let mut pre_stages = Vec::new();
+    let mut post_stages = Vec::new();
+    let mut bindings = Vec::new();
+    let mut plans = Vec::new();
+
+    let (tasks, removed_symbols) = extract_dispatch_tasks(
+        analysis,
+        tail_alias_sym,
+        tail_param.as_ref().map(|(_, sym, _)| *sym),
+        &mut program.symbols,
+        term_ids,
+    )?;
+
+    for task in tasks {
+        let rhs = task.rhs;
+        let TermKind::Soac(soac) = &rhs.kind else {
+            return None;
+        };
+        let mut stage_slots = entry_slots.clone();
+        if task.phase == DispatchPhase::PostTail {
+            let (tail_param_req, _, tail_binding) = tail_param.as_ref()?;
+            if let Some(binding) = &tail_param_req.binding {
+                stage_slots.push(Some(binding.clone()));
+            }
+            let tail_idx = push_or_find_storage_binding(
+                &mut bindings,
+                *tail_binding,
+                Access::ReadOnly,
+                BufferUsage::Intermediate,
+                "tail_output".to_string(),
+            );
+            if let Binding::StorageBuffer { length, .. } = &mut bindings[tail_idx] {
+                if length.is_none() {
+                    let elem_ty = tail_param_req.ty.elem_type()?;
+                    let elem_bytes = crate::ssa::layout::type_byte_size(elem_ty)?;
+                    *length = Some(BufferLen::SameAsDispatch { elem_bytes });
+                }
+            }
+        }
+        let dispatch_len = dispatch_len_for_ordered_soac(soac, &stage_slots);
+        if dispatch_len.is_none() && !matches!(soac, SoacOp::Scatter { .. } | SoacOp::ReduceByIndex { .. })
+        {
+            return None;
+        }
+        let mut required_params = if task.phase == DispatchPhase::PostTail {
+            let (tail_param_req, _, _) = tail_param.as_ref()?;
+            let Some(params) = compute_broadcast_required_params_with_extra(
+                &rhs,
+                &source_def,
+                tail_param_req.clone(),
+                &program.symbols,
+            ) else {
+                return None;
+            };
+            params
+        } else {
+            let Some(params) = compute_broadcast_required_params(&rhs, &source_def, &program.symbols)
+            else {
+                return None;
+            };
+            params
+        };
+        if append_ordered_dest_required_params(&mut required_params, soac, &source_def).is_none() {
+            return None;
+        }
+        let stage_name = format!("{}_dispatch_{}", entry_name, task.stage_idx);
+        let bind_sym = program.symbols.alloc(format!("_{}_stage_result", task.stage_idx));
+        let body = let_term(
+            bind_sym,
+            rhs.ty.clone(),
+            rhs.clone(),
+            Term {
+                id: term_ids.next_id(),
+                ty: unit_ty.clone(),
+                span: rhs.span,
+                kind: TermKind::UnitLit,
+            },
+            rhs.span,
+            term_ids,
+        );
+        defs.push(make_entry_def(
+            &stage_name,
+            body,
+            unit_ty.clone(),
+            &required_params,
+            Vec::new(),
+            program,
+            term_ids,
+        ));
+        let Some((reads, writes)) = ordered_soac_stage_bindings(soac, &stage_slots, &mut bindings) else {
+            return None;
+        };
+        let dispatch_size = match dispatch_len.clone() {
+            Some(len) => DispatchSize::DerivedFrom {
+                len,
+                workgroup_size: sizing.workgroup.0,
+            },
+            None => DispatchSize::Fixed { x: 1, y: 1, z: 1 },
+        };
+        let stage = ComputeStage {
+            entry_point: stage_name.clone(),
+            workgroup_size: sizing.workgroup,
+            dispatch_size,
+            reads,
+            writes,
+        };
+        if task.phase == DispatchPhase::PostTail {
+            post_stages.push(stage);
+        } else {
+            pre_stages.push(stage);
+        }
+        if matches!(
+            soac,
+            SoacOp::Map { .. } | SoacOp::Scan { .. } | SoacOp::Scatter { .. }
+        ) {
+            plans.push(ParallelizationPlan {
+                entry: stage_name,
+                dispatch: match dispatch_len.clone() {
+                    Some(_) => DispatchModel::DerivedFromInputLength {
+                        input_index: 0,
+                        workgroup_size: sizing.workgroup.0,
+                    },
+                    _ => DispatchModel::Fixed {
+                        groups: [1, 1, 1],
+                        local_size: [sizing.workgroup.0, sizing.workgroup.1, sizing.workgroup.2],
+                    },
+                },
+                bindings: PlannedBindings {
+                    map_outputs: vec![],
+                    accumulators: vec![],
+                },
+            });
+        }
+    }
+
+    if removed_symbols.is_empty() {
+        return None;
+    }
+    remove_lifted_prefix_lets(program, analysis.def_name, &removed_symbols);
+    Some(DispatchSchedule {
+        defs,
+        pre_stages,
+        post_stages,
+        bindings,
+        plans,
+    })
+}
+
+fn extract_dispatch_tasks(
+    analysis: &EntryAnalysis,
+    tail_alias_sym: Option<SymbolId>,
+    tail_param_sym: Option<SymbolId>,
+    symbols: &mut SymbolTable,
+    term_ids: &mut TermIdSource,
+) -> Option<(Vec<DispatchTask>, HashSet<SymbolId>)> {
+    let mut value_aliases: HashMap<SymbolId, SymbolId> = HashMap::new();
+    let mut place_aliases: HashMap<SymbolId, SymbolId> = HashMap::new();
+    let mut post_producers: HashMap<SymbolId, Term> = HashMap::new();
+    let mut post_syms: HashSet<SymbolId> =
+        tail_alias_sym.map(|sym| HashSet::from([sym])).unwrap_or_default();
+    let mut tasks = Vec::new();
+    let mut removed_symbols = HashSet::new();
+
+    for (stage_idx, (sym, _ty, rhs0)) in analysis.prefix_lets.iter().enumerate() {
+        let mut rhs = rhs0.clone();
+        for (old, new) in value_aliases.clone() {
+            rhs = super::fusion::substitute_sym(rhs, old, new, term_ids);
+        }
+        for (old, new) in place_aliases.clone() {
+            rhs = substitute_dispatch_symbol(rhs, old, new, term_ids);
+        }
+
+        let is_post_tail = analysis.tail_alias.is_some() && term_refs_any(&rhs, &post_syms, symbols);
+        if is_post_tail {
+            post_syms.insert(*sym);
+        }
+
+        if !term_has_ordered_side_effect_soac(&rhs) {
+            if is_post_tail {
+                removed_symbols.insert(*sym);
+                if can_inline_into_post_consumer(&rhs) {
+                    post_producers.insert(*sym, rhs.clone());
+                }
+            }
+            if let Some(alias) = alias_symbol_for_rhs(&rhs) {
+                value_aliases.insert(*sym, alias);
+            }
+            if let Some(alias) = input_buffer_alias_symbol_for_rhs(&rhs) {
+                place_aliases.insert(*sym, alias);
+            }
+            continue;
+        }
+
+        if is_post_tail {
+            rhs = inline_post_producers(rhs, &post_producers, symbols, term_ids);
+            rhs = substitute_dispatch_symbol(rhs, tail_alias_sym?, tail_param_sym?, term_ids);
+        }
+        let phase = if is_post_tail { DispatchPhase::PostTail } else { DispatchPhase::PreTail };
+        tasks.push(DispatchTask {
+            stage_idx,
+            rhs: rhs.clone(),
+            phase,
+        });
+        removed_symbols.insert(*sym);
+        if let Some(alias) = alias_symbol_for_rhs(&rhs) {
+            value_aliases.insert(*sym, alias);
+        }
+        if let Some(alias) = input_buffer_alias_symbol_for_rhs(&rhs) {
+            place_aliases.insert(*sym, alias);
+        }
+    }
+
+    Some((tasks, removed_symbols))
+}
+
+fn can_inline_into_post_consumer(term: &Term) -> bool {
+    matches!(
+        &term.kind,
+        TermKind::Soac(SoacOp::Map {
+            destination: SoacDestination::Fresh,
+            ..
+        })
+    )
+}
+
+fn substitute_dispatch_symbol(
+    term: Term,
+    old: SymbolId,
+    new: SymbolId,
+    term_ids: &mut TermIdSource,
+) -> Term {
+    let mut term = super::fusion::substitute_sym(term, old, new, term_ids);
+    if let TermKind::Soac(soac) = &mut term.kind {
+        substitute_dispatch_symbol_in_soac_dest(soac, old, new);
+    }
+    term
+}
+
+fn substitute_dispatch_symbol_in_soac_dest(soac: &mut SoacOp, old: SymbolId, new: SymbolId) {
+    match soac {
+        SoacOp::Scatter { dest, .. } | SoacOp::ReduceByIndex { dest, .. } => {
+            substitute_dispatch_symbol_in_place(dest, old, new);
+        }
+        _ => {}
+    }
+}
+
+fn substitute_dispatch_symbol_in_place(place: &mut super::Place, old: SymbolId, new: SymbolId) {
+    if let super::Place::LocalArray { id, .. } = place {
+        if *id == old {
+            *id = new;
+        }
+    }
+}
+
+fn inline_post_producers(
+    term: Term,
+    producers: &HashMap<SymbolId, Term>,
+    symbols: &mut SymbolTable,
+    term_ids: &mut TermIdSource,
+) -> Term {
+    match term.kind {
+        TermKind::Soac(SoacOp::Scatter { dest, lam, inputs }) => {
+            let mut scatter_lam = lam.lam;
+            let mut scatter_inputs = inputs;
+            let mut i = 0;
+            while i < scatter_inputs.len() {
+                let Some(sym) = scatter_inputs[i].as_named_ref() else {
+                    i += 1;
+                    continue;
+                };
+                let Some(producer) = producers.get(&sym) else {
+                    i += 1;
+                    continue;
+                };
+                let TermKind::Soac(SoacOp::Map {
+                    lam: prod_lam,
+                    inputs: prod_inputs,
+                    ..
+                }) = &producer.kind
+                else {
+                    i += 1;
+                    continue;
+                };
+                scatter_lam = super::fusion::compose_map_into_envelope(
+                    prod_lam.lam.clone(),
+                    scatter_lam,
+                    i,
+                    term.span,
+                    symbols,
+                    term_ids,
+                );
+                scatter_inputs.splice(i..=i, prod_inputs.iter().cloned());
+                let deduped = super::fusion::dedup_envelope_inputs(scatter_lam, scatter_inputs, term_ids);
+                scatter_lam = deduped.0;
+                scatter_inputs = deduped.1;
+                i = 0;
+            }
+            Term {
+                kind: TermKind::Soac(SoacOp::Scatter {
+                    dest,
+                    lam: super::SoacBody {
+                        lam: scatter_lam,
+                        captures: vec![],
+                    },
+                    inputs: scatter_inputs,
+                }),
+                ..term
+            }
+        }
+        _ => {
+            let mut rewritten = term;
+            for (sym, producer) in producers {
+                rewritten = super::fusion::substitute_term_expr(rewritten, *sym, producer, term_ids);
+            }
+            rewritten
+        }
+    }
+}
+
+fn alias_symbol_for_rhs(rhs: &Term) -> Option<SymbolId> {
+    match &rhs.kind {
+        TermKind::Var(VarRef::Symbol(sym)) => Some(*sym),
+        _ => input_buffer_alias_symbol_for_rhs(rhs),
+    }
+}
+
+fn input_buffer_alias_symbol_for_rhs(rhs: &Term) -> Option<SymbolId> {
+    match &rhs.kind {
+        TermKind::Soac(SoacOp::Map {
+            destination: SoacDestination::InputBuffer,
+            inputs,
+            ..
+        }) => inputs.first().and_then(ArrayExpr::as_named_ref),
+        TermKind::Soac(SoacOp::Scan {
+            destination: SoacDestination::InputBuffer,
+            input,
+            ..
+        })
+        | TermKind::Soac(SoacOp::Filter {
+            destination: SoacDestination::InputBuffer,
+            input,
+            ..
+        }) => input.as_named_ref(),
+        _ => None,
+    }
+}
+
+fn make_synthetic_storage_param(
+    name: &str,
+    array_ty: Type<TypeName>,
+    binding: BindingRef,
+    program: &mut Program,
+) -> Option<(RequiredParam, SymbolId, BindingRef)> {
+    let elem_ty = array_ty.elem_type()?.clone();
+    let elem_bytes = crate::ssa::layout::type_byte_size(&elem_ty)?;
+    let sym = program.symbols.alloc(name.to_string());
+    let param_ty = crate::types::make_array1(
+        elem_ty.clone(),
+        Type::Constructed(TypeName::ArrayVariantView, vec![]),
+        Type::Constructed(TypeName::SizePlaceholder, vec![]),
+        crate::types::region_tag(binding),
+    );
+    Some((
+        RequiredParam {
+            sym,
+            ty: param_ty,
+            attr: Some(Attribute::Storage {
+                set: binding.set,
+                binding: binding.binding,
+                layout: interface::StorageLayout::Std430,
+                access: interface::StorageAccess::ReadOnly,
+            }),
+            binding: Some(EntryParamBinding {
+                param_sym: sym,
+                kind: EntryParamBindingKind::Single {
+                    binding,
+                    elem_ty,
+                    elem_bytes,
+                },
+            }),
+        },
+        sym,
+        binding,
+    ))
+}
+
+fn compute_broadcast_required_params_with_extra(
+    term: &Term,
+    source_def: &Def,
+    extra: RequiredParam,
+    symbols: &SymbolTable,
+) -> Option<Vec<RequiredParam>> {
+    let bound: HashSet<SymbolId> = HashSet::new();
+    let empty_top: HashSet<SymbolId> = HashSet::new();
+    let empty_defs: HashSet<String> = HashSet::new();
+    let mut free: Vec<Term> = Vec::new();
+    let mut seen: HashSet<SymbolId> = HashSet::new();
+    collect_free_vars(
+        term,
+        &bound,
+        &empty_top,
+        &empty_defs,
+        symbols,
+        &mut free,
+        &mut seen,
+    );
+
+    let free_syms: HashSet<SymbolId> = free
+        .iter()
+        .filter_map(|t| match &t.kind {
+            TermKind::Var(VarRef::Symbol(s)) => Some(*s),
+            _ => None,
+        })
+        .collect();
+    let decl = match &source_def.meta {
+        DefMeta::EntryPoint(decl) => decl,
+        _ => return None,
+    };
+    let (orig_params, _) = peel_lambda_params(&source_def.body);
+    let orig_param_syms: HashSet<SymbolId> = orig_params.iter().map(|(sym, _)| *sym).collect();
+    if !free_syms.iter().all(|sym| orig_param_syms.contains(sym) || *sym == extra.sym) {
+        return None;
+    }
+
+    let mut out: Vec<RequiredParam> = orig_params
+        .iter()
+        .enumerate()
+        .filter(|(_, (sym, _))| free_syms.contains(sym))
+        .map(|(i, (sym, ty))| RequiredParam {
+            sym: *sym,
+            ty: ty.clone(),
+            attr: decl.params.get(i).and_then(forwardable_binding_attribute),
+            binding: decl.param_bindings.get(i).cloned().flatten(),
+        })
+        .collect();
+    if free_syms.contains(&extra.sym) {
+        out.push(extra);
+    }
+    Some(out)
+}
+
+fn append_ordered_dest_required_params(
+    params: &mut Vec<RequiredParam>,
+    soac: &SoacOp,
+    source_def: &Def,
+) -> Option<()> {
+    let dest_sym = match soac {
+        SoacOp::Scatter {
+            dest: super::Place::LocalArray { id, .. },
+            ..
+        }
+        | SoacOp::ReduceByIndex {
+            dest: super::Place::LocalArray { id, .. },
+            ..
+        } => *id,
+        SoacOp::Scatter { .. } | SoacOp::ReduceByIndex { .. } => return None,
+        _ => return Some(()),
+    };
+    if params.iter().any(|param| param.sym == dest_sym) {
+        return Some(());
+    }
+
+    let decl = match &source_def.meta {
+        DefMeta::EntryPoint(decl) => decl,
+        _ => return None,
+    };
+    let (orig_params, _) = peel_lambda_params(&source_def.body);
+    let (i, (_, ty)) = orig_params.iter().enumerate().find(|(_, (sym, _))| *sym == dest_sym)?;
+    params.push(RequiredParam {
+        sym: dest_sym,
+        ty: ty.clone(),
+        attr: decl.params.get(i).and_then(forwardable_binding_attribute),
+        binding: decl.param_bindings.get(i).cloned().flatten(),
+    });
+    Some(())
+}
+
+fn term_refs_any(term: &Term, syms: &HashSet<SymbolId>, symbols: &SymbolTable) -> bool {
+    let bound: HashSet<SymbolId> = HashSet::new();
+    let empty_top: HashSet<SymbolId> = HashSet::new();
+    let empty_defs: HashSet<String> = HashSet::new();
+    let mut free: Vec<Term> = Vec::new();
+    let mut seen: HashSet<SymbolId> = HashSet::new();
+    collect_free_vars(
+        term,
+        &bound,
+        &empty_top,
+        &empty_defs,
+        symbols,
+        &mut free,
+        &mut seen,
+    );
+    free.iter().any(|t| matches!(&t.kind, TermKind::Var(VarRef::Symbol(sym)) if syms.contains(sym)))
+}
+
+fn dispatch_len_for_ordered_soac(
+    soac: &SoacOp,
+    entry_slots: &[Option<EntryParamBinding>],
+) -> Option<DispatchLen> {
+    let input = match soac {
+        SoacOp::Map { inputs, .. } | SoacOp::Scatter { inputs, .. } => inputs.first()?,
+        SoacOp::Scan { input, .. } | SoacOp::Filter { input, .. } | SoacOp::Reduce { input, .. } => input,
+        SoacOp::Redomap { inputs, .. } | SoacOp::Screma { inputs, .. } => inputs.first()?,
+        SoacOp::ReduceByIndex { indices, .. } => indices,
+    };
+    match classify_input(input, entry_slots)? {
+        ArrayProvenance::Storage {
+            binding, elem_bytes, ..
+        } => Some(DispatchLen::InputBinding {
+            set: binding.set,
+            binding: binding.binding,
+            elem_bytes,
+        }),
+        ArrayProvenance::Range { bound } => match bound.kind {
+            TermKind::IntLit(s) => s.parse::<u32>().ok().map(|count| DispatchLen::Fixed { count }),
+            _ => None,
+        },
+        ArrayProvenance::Opaque => None,
+    }
+}
+
+fn ordered_soac_stage_bindings(
+    soac: &SoacOp,
+    entry_slots: &[Option<EntryParamBinding>],
+    bindings: &mut Vec<Binding>,
+) -> Option<(Vec<usize>, Vec<usize>)> {
+    let mut reads = Vec::new();
+    let mut writes = Vec::new();
+    let add_input = |ae: &ArrayExpr, bindings: &mut Vec<Binding>| -> Option<usize> {
+        let ArrayProvenance::Storage {
+            binding,
+            elem_bytes: _,
+            elem_ty: _,
+        } = classify_input(ae, entry_slots)?
+        else {
+            return None;
+        };
+        Some(push_or_find_storage_binding(
+            bindings,
+            binding,
+            Access::ReadOnly,
+            BufferUsage::Input,
+            "ordered_input".to_string(),
+        ))
+    };
+    match soac {
+        SoacOp::Map {
+            inputs, destination, ..
+        } => {
+            for input in inputs {
+                reads.push(add_input(input, bindings)?);
+            }
+            if *destination == SoacDestination::InputBuffer {
+                writes.push(reads[0]);
+                promote_storage_binding_access(&mut bindings[reads[0]], Access::ReadWrite);
+            }
+        }
+        SoacOp::Scan {
+            input, destination, ..
+        }
+        | SoacOp::Filter {
+            input, destination, ..
+        } => {
+            reads.push(add_input(input, bindings)?);
+            if *destination == SoacDestination::InputBuffer {
+                writes.push(reads[0]);
+                promote_storage_binding_access(&mut bindings[reads[0]], Access::ReadWrite);
+            }
+        }
+        SoacOp::Scatter { dest, inputs, .. } => {
+            for input in inputs {
+                if let Some(idx) = add_input(input, bindings) {
+                    reads.push(idx);
+                }
+            }
+            if let super::Place::LocalArray { id, elem_ty, .. } = dest {
+                if let Some(slot) = entry_slots.iter().flatten().find(|s| s.param_sym == *id) {
+                    let (br, _, _) = slot.first_buffer();
+                    let idx = push_or_find_storage_binding(
+                        bindings,
+                        br,
+                        Access::ReadWrite,
+                        BufferUsage::Input,
+                        "ordered_scatter_dest".to_string(),
+                    );
+                    writes.push(idx);
+                    let _ = elem_ty;
+                }
+            }
+        }
+        _ => return None,
+    }
+    Some((reads, writes))
+}
+
+fn push_or_find_storage_binding(
+    bindings: &mut Vec<Binding>,
+    br: BindingRef,
+    access: Access,
+    usage: BufferUsage,
+    name: String,
+) -> usize {
+    if let Some((idx, existing)) = bindings.iter_mut().enumerate().find(|(_, b)| match b {
+        Binding::StorageBuffer { set, binding, .. } => *set == br.set && *binding == br.binding,
+        _ => false,
+    }) {
+        promote_storage_binding_access(existing, access);
+        promote_storage_binding_usage(existing, usage);
+        return idx;
+    }
+    push_storage_binding(bindings, br, access, usage, name)
+}
+
+fn promote_storage_binding_access(binding: &mut Binding, access: Access) {
+    if let Binding::StorageBuffer { access: existing, .. } = binding {
+        if matches!(access, Access::ReadWrite)
+            || (*existing == Access::WriteOnly && access == Access::ReadOnly)
+            || (*existing == Access::ReadOnly && access == Access::WriteOnly)
+        {
+            *existing = Access::ReadWrite;
+        }
+    }
+}
+
+fn promote_storage_binding_usage(binding: &mut Binding, usage: BufferUsage) {
+    if let Binding::StorageBuffer { usage: existing, .. } = binding {
+        if matches!(usage, BufferUsage::Output)
+            || matches!(
+                (&*existing, &usage),
+                (BufferUsage::Input, BufferUsage::Intermediate)
+            )
+        {
+            *existing = usage;
+        }
+    }
+}
+
+fn remove_lifted_prefix_lets(program: &mut Program, def_name: SymbolId, removed: &HashSet<SymbolId>) {
+    let Some(def) = program.defs.iter_mut().find(|d| d.name == def_name) else {
+        return;
+    };
+    def.body = remove_lifted_lets_in_term(def.body.clone(), removed);
+}
+
+fn remove_lifted_lets_in_term(term: Term, removed: &HashSet<SymbolId>) -> Term {
+    match term.kind {
+        TermKind::Lambda(lam) => Term {
+            kind: TermKind::Lambda(Lambda {
+                params: lam.params,
+                body: Box::new(remove_lifted_lets_in_term(*lam.body, removed)),
+                ret_ty: lam.ret_ty,
+            }),
+            ..term
+        },
+        TermKind::Let {
+            name,
+            name_ty,
+            rhs,
+            body,
+        } => {
+            let new_body = remove_lifted_lets_in_term(*body, removed);
+            if removed.contains(&name) {
+                new_body
+            } else {
+                Term {
+                    kind: TermKind::Let {
+                        name,
+                        name_ty,
+                        rhs,
+                        body: Box::new(new_body),
+                    },
+                    ..term
+                }
+            }
+        }
+        _ => term,
+    }
+}
+
+fn append_ordered_schedule(mut tail: LoweringPlan, schedule: DispatchSchedule) -> LoweringPlan {
+    let mut bindings = schedule.bindings;
+    let mut stages = schedule.pre_stages;
+    let tail_forced_output = tail.parallel_plan.as_ref().and_then(|plan| plan.bindings.forced_output());
+    let default_total_threads = match tail.pipeline {
+        Pipeline::Compute(cp) => {
+            let mut remap = Vec::with_capacity(cp.bindings.len());
+            for b in cp.bindings {
+                remap.push(merge_binding(&mut bindings, b));
+            }
+            // Single-stage tails (the dep-aware scheduler's common case)
+            // don't include their forced output binding in `cp.bindings`;
+            // pull it in here so post-tail readers see the same slot.
+            // Multi-stage tails already carry their output bindings.
+            let forced_write_idx = tail_forced_output.map(|br| {
+                push_or_find_storage_binding(
+                    &mut bindings,
+                    br,
+                    Access::WriteOnly,
+                    BufferUsage::Output,
+                    "tail_output".to_string(),
+                )
+            });
+            let n_stages = cp.stages.len();
+            for (i, mut stage) in cp.stages.into_iter().enumerate() {
+                stage.reads = stage.reads.into_iter().map(|j| remap[j]).collect();
+                stage.writes = stage.writes.into_iter().map(|j| remap[j]).collect();
+                // Attribute the forced output write to the tail's last
+                // stage when it didn't already declare one.
+                if i + 1 == n_stages && stage.writes.is_empty() {
+                    if let Some(idx) = forced_write_idx {
+                        stage.writes.push(idx);
+                    }
+                }
+                stages.push(stage);
+            }
+            cp.default_total_threads
+        }
+        Pipeline::Graphics(_) => None,
+    };
+    stages.extend(schedule.post_stages);
+    tail.pipeline = Pipeline::Compute(ComputePipeline {
+        bindings,
+        stages,
+        default_total_threads,
+    });
+    tail.new_defs.extend(schedule.defs);
+    tail.extra_parallel_plans.extend(schedule.plans);
+    tail
+}
+
+fn merge_binding(bindings: &mut Vec<Binding>, binding: Binding) -> usize {
+    let key = binding_key(&binding);
+    if let Some(key) = key {
+        if let Some((idx, existing)) =
+            bindings.iter_mut().enumerate().find(|(_, existing)| binding_key(existing) == Some(key))
+        {
+            if let Binding::StorageBuffer { access, .. } = &binding {
+                promote_storage_binding_access(existing, access.clone());
+            }
+            if let Binding::StorageBuffer { usage, .. } = &binding {
+                promote_storage_binding_usage(existing, usage.clone());
+            }
+            return idx;
+        }
+    }
+    let idx = bindings.len();
+    bindings.push(binding);
+    idx
+}
+
+fn binding_key(binding: &Binding) -> Option<(u32, u32)> {
+    match binding {
+        Binding::StorageBuffer { set, binding, .. }
+        | Binding::Uniform { set, binding, .. }
+        | Binding::Texture { set, binding, .. }
+        | Binding::Sampler { set, binding, .. }
+        | Binding::StorageTexture { set, binding, .. } => Some((*set, *binding)),
+        Binding::PushConstant { .. } => None,
     }
 }
 
@@ -1812,10 +2675,32 @@ fn make_lowering_plan(
 ) -> LoweringPlan {
     let sizing = PipelineSizing::for_analyzed_entry(program, analysis);
     let shape = parallel_soac_shape(&analysis.soac.original).expect("analyzed SOAC has a parallel shape");
-    if retained_prefix_has_ordered_side_effect(analysis) {
+    if retained_extra_slots_have_ordered_side_effect(analysis) {
         return make_serial_compute_plan(analysis, entry_name, sizing);
     }
-    match shape.flavor {
+    let forced_tail_output = forced_result_binding.or_else(|| {
+        let can_force_tail = matches!(shape.flavor, ParallelSoacFlavor::Map)
+            || matches!(&analysis.soac.original, SoacOp::Screma { accumulators, .. } if accumulators.is_empty());
+        (can_force_tail && ordered_prefix_has_post_tail_dependency(analysis, &program.symbols))
+            .then(|| BindingRef::new(AUTO_STORAGE_SET, next_binding))
+    });
+    let allocated_forced_tail_output = forced_tail_output.is_some() && forced_result_binding.is_none();
+    let ordered_schedule = if retained_prefix_only_has_ordered_side_effect(analysis) {
+        match try_build_ordered_prefix_schedule(
+            analysis,
+            entry_name,
+            sizing,
+            forced_tail_output,
+            program,
+            term_ids,
+        ) {
+            Some(schedule) => Some(schedule),
+            None => return make_serial_compute_plan(analysis, entry_name, sizing),
+        }
+    } else {
+        None
+    };
+    let tail_plan = match shape.flavor {
         ParallelSoacFlavor::Map => {
             // `forced_result_binding` pins the map's output to a specific
             // buffer when this is a gather pre-pass (the consumer reads it via
@@ -1825,7 +2710,7 @@ fn make_lowering_plan(
                 entry_name,
                 next_binding,
                 sizing,
-                forced_result_binding,
+                forced_tail_output,
                 program,
             )
         }
@@ -1838,7 +2723,7 @@ fn make_lowering_plan(
                 reduce_op,
                 ne,
                 next_binding,
-                forced_result_binding,
+                forced_tail_output,
                 program,
                 sizing,
                 term_ids,
@@ -1852,7 +2737,7 @@ fn make_lowering_plan(
                 op,
                 ne,
                 next_binding,
-                forced_result_binding,
+                forced_tail_output,
                 program,
                 sizing,
             )
@@ -1876,12 +2761,21 @@ fn make_lowering_plan(
                     entry_name,
                     next_binding,
                     sizing,
-                    forced_result_binding,
+                    forced_tail_output,
                     program,
                 )
             }
         }
+    };
+    let mut tail_plan = if let Some(schedule) = ordered_schedule {
+        append_ordered_schedule(tail_plan, schedule)
+    } else {
+        tail_plan
+    };
+    if allocated_forced_tail_output {
+        tail_plan.extra_bindings_used += 1;
     }
+    tail_plan
 }
 
 fn accumulator_phase_combiner(soac: &SoacOp) -> Option<(&super::SoacBody, &Term)> {
@@ -1916,13 +2810,17 @@ fn make_map_plan(
     // (see `from_tlc.rs:164`).
     let bindings = collect_soac_bindings(&analysis.soac);
     let pipeline = Pipeline::Compute(ComputePipeline {
-        entry_point: entry_name.to_string(),
-        workgroup_size: sizing.workgroup,
-        dispatch_size: DispatchSize::DerivedFrom {
-            len: resolve_dispatch_len(analysis, 0, program),
-            workgroup_size: sizing.workgroup.0,
-        },
         bindings,
+        stages: vec![ComputeStage {
+            entry_point: entry_name.to_string(),
+            workgroup_size: sizing.workgroup,
+            dispatch_size: DispatchSize::DerivedFrom {
+                len: resolve_dispatch_len(analysis, 0, program),
+                workgroup_size: sizing.workgroup.0,
+            },
+            reads: vec![],
+            writes: vec![],
+        }],
         default_total_threads: sizing.default_total_threads,
     });
     let parallel_plan = ParallelizationPlan {
@@ -1941,6 +2839,7 @@ fn make_map_plan(
         new_defs: Vec::new(),
         pipeline,
         extra_bindings_used: 0,
+        extra_parallel_plans: Vec::new(),
         parallel_plan: Some(parallel_plan),
     }
 }
@@ -2005,10 +2904,14 @@ fn make_screma_plan(
     if !egir_parallelizable(&analysis.soac.original) {
         let bindings = collect_soac_bindings(&analysis.soac);
         let pipeline = Pipeline::Compute(ComputePipeline {
-            entry_point: entry_name.to_string(),
-            workgroup_size: sizing.workgroup,
-            dispatch_size: DispatchSize::Fixed { x: 1, y: 1, z: 1 },
             bindings,
+            stages: vec![ComputeStage {
+                entry_point: entry_name.to_string(),
+                workgroup_size: sizing.workgroup,
+                dispatch_size: DispatchSize::Fixed { x: 1, y: 1, z: 1 },
+                reads: vec![],
+                writes: vec![],
+            }],
             default_total_threads: sizing.default_total_threads,
         });
         return LoweringPlan {
@@ -2016,6 +2919,7 @@ fn make_screma_plan(
             new_defs: Vec::new(),
             pipeline,
             extra_bindings_used: 0,
+            extra_parallel_plans: Vec::new(),
             parallel_plan: None,
         };
     }
@@ -2130,6 +3034,7 @@ fn make_screma_plan(
         new_defs: Vec::new(),
         pipeline,
         extra_bindings_used: extra_used,
+        extra_parallel_plans: Vec::new(),
         parallel_plan: Some(parallel_plan),
     }
 }
@@ -2185,14 +3090,14 @@ fn build_screma_reduce_pipeline_descriptor(
         };
         stages.push(tree_phase2_stage(phase2_name, vec![*p_idx], vec![*r_idx]));
     }
-    Pipeline::MultiCompute(MultiComputePipeline {
+    Pipeline::Compute(ComputePipeline {
         bindings: all_bindings,
         stages,
         default_total_threads: sizing.default_total_threads,
     })
 }
 
-/// Build the `Pipeline::MultiCompute` descriptor for a Screma with a
+/// Build the `Pipeline::Compute` descriptor for a Screma with a
 /// single Scan accumulator. Three stages: phase 1 chunks the input +
 /// writes block_sums; phase 2 sequentially scans block_sums into
 /// block_offsets; phase 3 reads block_offsets and applies each chunk's
@@ -2236,7 +3141,7 @@ fn build_screma_scan_pipeline_descriptor(
     let phase3_name = format!("{}_phase3_add_offsets", entry_name);
 
     let scan_len = resolve_dispatch_len(analysis, 0, program);
-    Pipeline::MultiCompute(MultiComputePipeline {
+    Pipeline::Compute(ComputePipeline {
         bindings: all_bindings,
         stages: vec![
             derived_stage(
@@ -2352,6 +3257,7 @@ fn make_two_phase_plan(
             new_defs: Vec::new(),
             pipeline,
             extra_bindings_used: extra_used,
+            extra_parallel_plans: Vec::new(),
             parallel_plan: Some(parallel_plan),
         };
     }
@@ -2382,6 +3288,7 @@ fn make_two_phase_plan(
         new_defs: entries,
         pipeline,
         extra_bindings_used: extra_used,
+        extra_parallel_plans: Vec::new(),
         parallel_plan: None,
     }
 }
@@ -2427,7 +3334,7 @@ fn is_simple_constant_term(t: &Term) -> bool {
     )
 }
 
-/// Build the `Pipeline::MultiCompute` descriptor for an EGIR-side
+/// Build the `Pipeline::Compute` descriptor for an EGIR-side
 /// two-phase reduce. Phase 1 stage keeps the entry's original name
 /// (the EGIR pass rewrites the body in place); phase 2 is named
 /// `<entry>_phase2_combine`.
@@ -2457,7 +3364,7 @@ fn build_two_phase_pipeline_descriptor(
         BufferUsage::Output,
         format!("{}_result", entry_name),
     );
-    Pipeline::MultiCompute(MultiComputePipeline {
+    Pipeline::Compute(ComputePipeline {
         bindings: all_bindings,
         stages: vec![
             saturating_stage(
@@ -2500,11 +3407,15 @@ fn make_scan_plan(
 
     if !can_route {
         let pipeline = Pipeline::Compute(ComputePipeline {
-            entry_point: entry_name.to_string(),
-            workgroup_size: sizing.workgroup,
-            // Serial single-thread scan, not parallelized — no EGIR pass fills
-            dispatch_size: DispatchSize::Fixed { x: 1, y: 1, z: 1 },
             bindings: vec![],
+            stages: vec![ComputeStage {
+                entry_point: entry_name.to_string(),
+                workgroup_size: sizing.workgroup,
+                // Serial single-thread scan, not parallelized — no EGIR pass fills
+                dispatch_size: DispatchSize::Fixed { x: 1, y: 1, z: 1 },
+                reads: vec![],
+                writes: vec![],
+            }],
             default_total_threads: sizing.default_total_threads,
         });
         return LoweringPlan {
@@ -2512,6 +3423,7 @@ fn make_scan_plan(
             new_defs: Vec::new(),
             pipeline,
             extra_bindings_used: 0,
+            extra_parallel_plans: Vec::new(),
             parallel_plan: None,
         };
     }
@@ -2580,11 +3492,12 @@ fn make_scan_plan(
         new_defs: Vec::new(),
         pipeline,
         extra_bindings_used: 2,
+        extra_parallel_plans: Vec::new(),
         parallel_plan: Some(parallel_plan),
     }
 }
 
-/// Build the `Pipeline::MultiCompute` descriptor for a parallel scan.
+/// Build the `Pipeline::Compute` descriptor for a parallel scan.
 /// Three stages share three or four bindings depending on whether the
 /// scan consumes its input:
 ///
@@ -2672,7 +3585,7 @@ fn build_scan_pipeline_descriptor(
     // Phases 1 and 3 iterate one thread per scan element — the scan's
     // single input determines the length.
     let scan_len = resolve_dispatch_len(analysis, 0, program);
-    Pipeline::MultiCompute(MultiComputePipeline {
+    Pipeline::Compute(ComputePipeline {
         bindings: all_bindings,
         stages: vec![
             derived_stage(
@@ -2878,7 +3791,7 @@ fn build_two_phase_entries(
         phase2_output_indices.push(idx);
     }
 
-    let pipeline = Pipeline::MultiCompute(MultiComputePipeline {
+    let pipeline = Pipeline::Compute(ComputePipeline {
         bindings: all_bindings,
         stages: vec![
             saturating_stage(phase1_name.clone(), input_indices, vec![partials_idx], workgroup),
@@ -3937,14 +4850,18 @@ fn build_default_pipeline(program: &Program) -> PipelineDescriptor {
                 let sizing = PipelineSizing::for_default_entry(program, def.name);
                 let len = default_entry_dispatch_len(program, def.name);
                 pipelines.push(Pipeline::Compute(ComputePipeline {
-                    entry_point: name,
-                    workgroup_size: sizing.workgroup,
-                    dispatch_size: DispatchSize::DerivedFrom {
-                        len,
-                        workgroup_size: sizing.workgroup.0,
-                    },
-                    default_total_threads: sizing.default_total_threads,
                     bindings: Vec::new(),
+                    stages: vec![ComputeStage {
+                        entry_point: name,
+                        workgroup_size: sizing.workgroup,
+                        dispatch_size: DispatchSize::DerivedFrom {
+                            len,
+                            workgroup_size: sizing.workgroup.0,
+                        },
+                        reads: vec![],
+                        writes: vec![],
+                    }],
+                    default_total_threads: sizing.default_total_threads,
                 }));
             } else {
                 let stage = if decl.entry_type == Attribute::Vertex {

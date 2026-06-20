@@ -670,7 +670,7 @@ fn pick_workgroup_size_large_picks_256() {
 // (no EGIR/SSA needed — every fact is on the TLC side once parallelize ran).
 
 use crate::interface::Attribute;
-use crate::pipeline_descriptor::{DispatchSize, MultiComputePipeline, Pipeline};
+use crate::pipeline_descriptor::{ComputePipeline, DispatchSize, Pipeline};
 
 /// Run `src` through the canonical TLC pipeline including `parallelize_soacs`,
 /// returning the parallelized program + pipeline descriptor.
@@ -727,7 +727,7 @@ fn multi_stage_count(
     entry_name: &str,
 ) -> Option<usize> {
     desc.pipelines.iter().find_map(|p| match p {
-        Pipeline::MultiCompute(MultiComputePipeline { stages, .. })
+        Pipeline::Compute(ComputePipeline { stages, .. })
             if stages.iter().any(|s| s.entry_point == entry_name) =>
         {
             Some(stages.len())
@@ -772,22 +772,30 @@ fn ordered_clear_scatter_suffix_serializes_entry_until_multi_dispatch_scheduler(
     let (program, desc) = parallelize_src(src);
     assert_eq!(
         compute_entry_count(&program),
-        1,
-        "the correctness cut should not synthesize extra stages yet"
+        3,
+        "clear + scatter are extracted as ordered dispatches before the tail map"
     );
-    let tick = desc
+    let stages = desc
         .pipelines
         .iter()
         .find_map(|p| match p {
-            Pipeline::Compute(cp) if cp.entry_point == "tick" => Some(cp),
+            Pipeline::Compute(mc) if mc.stages.iter().any(|s| s.entry_point == "tick") => Some(&mc.stages),
             _ => None,
         })
-        .expect("tick should remain a single compute pipeline");
+        .expect("tick should be scheduled as an ordered multi-dispatch pipeline");
+    assert_eq!(stages.len(), 3, "clear, scatter, then tail map");
+    assert!(
+        matches!(stages[0].dispatch_size, DispatchSize::DerivedFrom { .. }),
+        "the clear map should dispatch over the framebuffer"
+    );
     assert_eq!(
-        tick.dispatch_size,
+        stages[1].dispatch_size,
         DispatchSize::Fixed { x: 1, y: 1, z: 1 },
-        "ordered side-effect SOACs after the chosen map need a real \
-         multi-dispatch schedule; until then, keep the entry single-lane"
+        "scatter is still serial until the parallel scatter lowering lands"
+    );
+    assert!(
+        matches!(stages[2].dispatch_size, DispatchSize::DerivedFrom { .. }),
+        "the tail map should remain lane-parallel"
     );
 }
 
@@ -802,19 +810,60 @@ fn ordered_clear_scatter_suffix_serializes_reduce_until_multi_dispatch_scheduler
             sum
     "#;
     let (_program, desc) = parallelize_src(src);
-    let tick = desc
+    let stages = desc
         .pipelines
         .iter()
         .find_map(|p| match p {
-            Pipeline::Compute(cp) if cp.entry_point == "tick" => Some(cp),
+            Pipeline::Compute(mc) if mc.stages.iter().any(|s| s.entry_point == "tick") => Some(&mc.stages),
             _ => None,
         })
-        .expect("tick should remain a single compute pipeline");
-    assert_eq!(
-        tick.dispatch_size,
-        DispatchSize::Fixed { x: 1, y: 1, z: 1 },
-        "ordered side-effect SOACs retained around a reduce need real \
-         multi-dispatch extraction before phase-1 parallelization"
+        .expect("tick should be scheduled as ordered dispatches plus reduce phases");
+    assert_eq!(stages.len(), 4, "clear, scatter, reduce phase 1, reduce phase 2");
+    assert!(matches!(
+        stages[0].dispatch_size,
+        DispatchSize::DerivedFrom { .. }
+    ));
+    assert_eq!(stages[1].dispatch_size, DispatchSize::Fixed { x: 1, y: 1, z: 1 });
+    assert!(stages[2].entry_point == "tick" || stages[2].entry_point.contains("phase1"));
+    assert!(stages[3].entry_point.contains("phase2"));
+}
+
+#[test]
+fn ordered_prefix_partitions_pre_tail_and_post_tail_dispatches() {
+    let src = r#"
+        #[compute]
+        entry tick(xs: []i32, fb: *[]i32) []i32 =
+            let out = map(|x: i32| x + 1, xs) in
+            let cleared = map(|_p: i32| 0, fb) in
+            let idxs = map(|p: i32| p, out) in
+            let vals = map(|p: i32| p, out) in
+            let _ = scatter(cleared, idxs, vals) in
+            out
+    "#;
+    let (_program, desc) = parallelize_src(src);
+    let stages = desc
+        .pipelines
+        .iter()
+        .find_map(|p| match p {
+            Pipeline::Compute(mc) if mc.stages.iter().any(|s| s.entry_point == "tick") => Some(&mc.stages),
+            _ => None,
+        })
+        .expect("tick should be an ordered multi-dispatch pipeline");
+    assert_eq!(stages.len(), 3, "clear, tail map, post-tail scatter");
+    assert_ne!(stages[0].entry_point, "tick");
+    assert_eq!(stages[1].entry_point, "tick");
+    assert_ne!(stages[2].entry_point, "tick");
+    assert!(
+        matches!(stages[0].dispatch_size, DispatchSize::DerivedFrom { .. }),
+        "pre-tail clear dispatches over fb"
+    );
+    assert!(
+        matches!(stages[1].dispatch_size, DispatchSize::DerivedFrom { .. }),
+        "tail map dispatches over xs"
+    );
+    assert!(
+        matches!(stages[2].dispatch_size, DispatchSize::DerivedFrom { .. }),
+        "post-tail scatter dispatches over the materialized tail output"
     );
 }
 
@@ -833,12 +882,13 @@ fn unsupported_scan_fallback_dispatches_single_lane() {
         .pipelines
         .iter()
         .find_map(|p| match p {
-            Pipeline::Compute(cp) if cp.entry_point == "tick" => Some(cp),
+            Pipeline::Compute(cp) if cp.stages.iter().any(|s| s.entry_point == "tick") => Some(cp),
             _ => None,
         })
         .expect("capturing scan should stay as the original compute entry");
+    let stage = tick.stages.iter().find(|s| s.entry_point == "tick").expect("tick stage");
     assert_eq!(
-        tick.dispatch_size,
+        stage.dispatch_size,
         DispatchSize::Fixed { x: 1, y: 1, z: 1 },
         "a serial scan fallback must not run once per input element"
     );
@@ -939,7 +989,7 @@ fn let_bound_reduce_then_map_parallelizes_the_tail_map() {
     // `lift_gathers` hoists it. Either way the descriptor must include at
     // least one pipeline for the tail map.
     assert!(
-        desc.pipelines.iter().any(|p| matches!(p, Pipeline::Compute(_) | Pipeline::MultiCompute(_))),
+        desc.pipelines.iter().any(|p| matches!(p, Pipeline::Compute(_))),
         "tail map should produce a pipeline"
     );
 }
@@ -1007,8 +1057,7 @@ fn chained_map_scan_gather_yields_two_pipelines_four_stages() {
         .pipelines
         .iter()
         .map(|p| match p {
-            Pipeline::Compute(_) => 1,
-            Pipeline::MultiCompute(mc) => mc.stages.len(),
+            Pipeline::Compute(cp) => cp.stages.len(),
             Pipeline::Graphics(_) => 0,
         })
         .sum();
@@ -1030,15 +1079,7 @@ fn parallel_pipelines_carry_resolved_dispatch_lens() {
         for p in &desc.pipelines {
             match p {
                 Pipeline::Compute(cp) => {
-                    if let DispatchSize::DerivedFrom { len, .. } = &cp.dispatch_size {
-                        assert!(
-                            !matches!(len, crate::pipeline_descriptor::DispatchLen::Fixed { count: 0 }),
-                            "placeholder Fixed{{0}} leaked: {src:?}"
-                        );
-                    }
-                }
-                Pipeline::MultiCompute(mc) => {
-                    for s in &mc.stages {
+                    for s in &cp.stages {
                         if let DispatchSize::DerivedFrom { len, .. } = &s.dispatch_size {
                             assert!(
                                 !matches!(len, crate::pipeline_descriptor::DispatchLen::Fixed { count: 0 }),
@@ -1064,15 +1105,14 @@ fn parallel_pipelines_carry_resolved_dispatch_lens() {
 // regression that changes stage counts surfaces the new shape, not just a
 // pass/fail.
 
-/// Sum the dispatch stage count across every pipeline in `desc`. A single
-/// `Compute` counts as 1 stage; a `MultiCompute` contributes
-/// `stages.len()`; graphics pipelines don't count toward compute stages.
+/// Sum the dispatch stage count across every pipeline in `desc`.
+/// Each `Compute` contributes `stages.len()`; graphics pipelines don't
+/// count toward compute stages.
 fn total_compute_stages(desc: &crate::pipeline_descriptor::PipelineDescriptor) -> usize {
     desc.pipelines
         .iter()
         .map(|p| match p {
-            Pipeline::Compute(_) => 1,
-            Pipeline::MultiCompute(mc) => mc.stages.len(),
+            Pipeline::Compute(cp) => cp.stages.len(),
             Pipeline::Graphics(_) => 0,
         })
         .sum()
@@ -1098,8 +1138,7 @@ fn single_entry_two_independent_scans_then_gather_yields_many_stages() {
         .pipelines
         .iter()
         .map(|p| match p {
-            Pipeline::Compute(cp) => format!("Compute({})", cp.entry_point),
-            Pipeline::MultiCompute(mc) => format!("MultiCompute(stages={})", mc.stages.len()),
+            Pipeline::Compute(cp) => format!("Compute(stages={})", cp.stages.len()),
             Pipeline::Graphics(_) => "Graphics".into(),
         })
         .collect();
@@ -1136,8 +1175,7 @@ fn single_entry_scan_and_scalar_reduce_both_hoist() {
         .pipelines
         .iter()
         .map(|p| match p {
-            Pipeline::Compute(cp) => format!("Compute({})", cp.entry_point),
-            Pipeline::MultiCompute(mc) => format!("MultiCompute(stages={})", mc.stages.len()),
+            Pipeline::Compute(cp) => format!("Compute(stages={})", cp.stages.len()),
             Pipeline::Graphics(_) => "Graphics".into(),
         })
         .collect();
@@ -1173,8 +1211,7 @@ fn single_entry_two_gathers_of_same_scan_share_one_producer() {
         .pipelines
         .iter()
         .map(|p| match p {
-            Pipeline::Compute(cp) => format!("Compute({})", cp.entry_point),
-            Pipeline::MultiCompute(mc) => format!("MultiCompute(stages={})", mc.stages.len()),
+            Pipeline::Compute(cp) => format!("Compute(stages={})", cp.stages.len()),
             Pipeline::Graphics(_) => "Graphics".into(),
         })
         .collect();
@@ -1213,8 +1250,7 @@ fn single_entry_scalar_reduces_in_let_rhs_each_hoist() {
         .pipelines
         .iter()
         .map(|p| match p {
-            Pipeline::Compute(cp) => format!("Compute({})", cp.entry_point),
-            Pipeline::MultiCompute(mc) => format!("MultiCompute(stages={})", mc.stages.len()),
+            Pipeline::Compute(cp) => format!("Compute(stages={})", cp.stages.len()),
             Pipeline::Graphics(_) => "Graphics".into(),
         })
         .collect();
@@ -1256,8 +1292,7 @@ fn chained_scans_within_one_entry_collapse_to_three_pipelines() {
         .pipelines
         .iter()
         .map(|p| match p {
-            Pipeline::Compute(cp) => format!("Compute({})", cp.entry_point),
-            Pipeline::MultiCompute(mc) => format!("MultiCompute(stages={})", mc.stages.len()),
+            Pipeline::Compute(cp) => format!("Compute(stages={})", cp.stages.len()),
             Pipeline::Graphics(_) => "Graphics".into(),
         })
         .collect();
@@ -1474,10 +1509,14 @@ fn explicit_storage_view_array_drives_dispatch_over_storage_image() {
     "#;
     let (_program, desc) = parallelize_src(src);
     let len = desc.pipelines.iter().find_map(|p| match p {
-        Pipeline::Compute(cp) if cp.entry_point == "tick" => match &cp.dispatch_size {
-            DispatchSize::DerivedFrom { len, .. } => Some(len.clone()),
-            _ => None,
-        },
+        Pipeline::Compute(cp) => cp.stages.iter().find_map(|s| {
+            if s.entry_point == "tick" {
+                if let DispatchSize::DerivedFrom { len, .. } = &s.dispatch_size {
+                    return Some(len.clone());
+                }
+            }
+            None
+        }),
         _ => None,
     });
     assert_eq!(

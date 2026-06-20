@@ -466,7 +466,9 @@ impl State {
                 .pipelines
                 .iter()
                 .find_map(|p| match p {
-                    DescPipeline::Compute(cp) if cp.entry_point == *entry => Some(cp),
+                    DescPipeline::Compute(cp) if cp.stages.iter().any(|s| s.entry_point == *entry) => {
+                        Some(cp)
+                    }
                     _ => None,
                 })
                 .ok_or_else(|| {
@@ -579,7 +581,6 @@ impl State {
             for pipeline in &spec.descriptor.pipelines {
                 let bindings: &[wyn_pipeline_descriptor::Binding] = match pipeline {
                     DescPipeline::Compute(cp) => &cp.bindings,
-                    DescPipeline::MultiCompute(mc) => &mc.bindings,
                     DescPipeline::Graphics(gp) => &gp.bindings,
                 };
                 for b in bindings {
@@ -673,7 +674,6 @@ impl State {
             .iter()
             .flat_map(|p| match p {
                 DescPipeline::Compute(cp) => cp.bindings.iter().cloned().collect::<Vec<_>>(),
-                DescPipeline::MultiCompute(mc) => mc.bindings.iter().cloned().collect(),
                 DescPipeline::Graphics(gp) => gp.bindings.iter().cloned().collect(),
             })
             .collect();
@@ -687,19 +687,27 @@ impl State {
 
         // Buffer-size map for dispatch resolution. `DispatchLen::InputBinding`
         // queries this by binding number to compute element count from the
-        // source buffer's byte size. Today the only buffers available in this
-        // path are the feedback ping-pong slots; the read-side binding stands
-        // in for the dispatch source. Both ping-pong slots are sized the same,
-        // so slot 0's byte size is authoritative.
-        let dispatch_buffer_sizes: HashMap<u32, (wgpu::Buffer, u64)> = buffer_feedback_pairs
-            .iter()
-            .filter_map(|pair| {
-                let res = feedback_buffers.get(&(pair.write_set, pair.write_binding))?;
+        // source buffer's byte size. Sources we publish:
+        //   * Feedback ping-pong slots — the read-side binding stands in
+        //     for the dispatch source. Both slots are sized identically,
+        //     so slot 0's byte size is authoritative.
+        //   * Host-allocated buffers — `--framebuffer` / `--buffer-init` /
+        //     `<storage_dir>/<name>.bin` allocations. A compute stage
+        //     dispatching `DerivedFrom(InputBinding(host_buf))` (e.g. a
+        //     framebuffer-clear lifted out as its own dispatch) gets the
+        //     right per-element count.
+        let mut dispatch_buffer_sizes: HashMap<u32, (wgpu::Buffer, u64)> = HashMap::new();
+        for pair in &buffer_feedback_pairs {
+            if let Some(res) = feedback_buffers.get(&(pair.write_set, pair.write_binding)) {
                 let buf = &res.buffers[0];
-                let size = buf.size();
-                Some((pair.read_binding, (buf.clone(), size)))
-            })
-            .collect();
+                dispatch_buffer_sizes.insert(pair.read_binding, (buf.clone(), buf.size()));
+            }
+        }
+        for ((_set, binding), res) in &host_buffers {
+            dispatch_buffer_sizes
+                .entry(*binding)
+                .or_insert_with(|| (res.buffer.clone(), res.buffer.size()));
+        }
 
         // ----- Compute stages -----
         let mut compute_stages: Vec<PipelineComputeStage> = Vec::new();
@@ -750,9 +758,11 @@ impl State {
                         parity,
                     )
                     .with_context(|| {
+                        let entry_points: Vec<&str> =
+                            cp.stages.iter().map(|s| s.entry_point.as_str()).collect();
                         format!(
                             "compute {:?}: build bind group for set {} (parity {})",
-                            cp.entry_point, set, parity
+                            entry_points, set, parity
                         )
                     })?;
                     if set_layout.is_none() {
@@ -764,57 +774,70 @@ impl State {
             }
 
             let bgl_borrows: Vec<&wgpu::BindGroupLayout> = bgls.iter().collect();
+            let layout_label =
+                format!("compute_layout_{}", cp.stages.first().map(|s| s.entry_point.as_str()).unwrap_or("?"));
             let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-                label: Some(&format!("compute_layout_{}", cp.entry_point)),
+                label: Some(&layout_label),
                 bind_group_layouts: &bgl_borrows,
                 push_constant_ranges: &[],
             });
-            let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some(&cp.entry_point),
-                layout: Some(&pipeline_layout),
-                module: &module,
-                entry_point: Some(&cp.entry_point),
-                compilation_options: Default::default(),
-                cache: None,
-            });
 
-            // Resolve dispatch. `DispatchLen::InputBinding` reads the source
-            // buffer's byte size from `dispatch_buffer_sizes` (populated above
-            // from the feedback pool). `DispatchLen::StorageImage` reads from
-            // `storage_textures`. CLI `--dispatch ENTRY:WxH[xD]` overrides
-            // everything per-entry — the override is in TOTAL threads on each
-            // axis, so divide by the matching workgroup-size dim to get
-            // workgroup counts.
-            let workgroups = if let Some(&(w, h, d)) = spec.dispatch_overrides.get(&cp.entry_point) {
-                let (wgx, wgy, wgz) = (
-                    cp.workgroup_size.0.max(1),
-                    cp.workgroup_size.1.max(1),
-                    cp.workgroup_size.2.max(1),
-                );
-                (w.div_ceil(wgx), h.div_ceil(wgy), d.div_ceil(wgz))
-            } else {
-                gpu::resolve_dispatch_size_with_textures(
-                    &cp.dispatch_size,
-                    cp.workgroup_size,
-                    &dispatch_buffer_sizes,
-                    &[],
-                    &storage_textures,
-                )
-            };
-            if verbose {
-                eprintln!(
-                    "[viz pipeline-interactive] compute '{}': dispatch = {} × {} × {}",
-                    cp.entry_point, workgroups.0, workgroups.1, workgroups.2
-                );
+            // One `PipelineComputeStage` per descriptor stage; bind
+            // groups + layout are shared across stages of the same
+            // `Compute` pipeline (so we clone the bgs into each
+            // per-stage record).
+            let n_stages = cp.stages.len();
+            for (si, stage) in cp.stages.iter().enumerate() {
+                let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some(&stage.entry_point),
+                    layout: Some(&pipeline_layout),
+                    module: &module,
+                    entry_point: Some(&stage.entry_point),
+                    compilation_options: Default::default(),
+                    cache: None,
+                });
+
+                // Resolve dispatch. `DispatchLen::InputBinding` reads the source
+                // buffer's byte size from `dispatch_buffer_sizes` (populated above
+                // from the feedback pool). `DispatchLen::StorageImage` reads from
+                // `storage_textures`. CLI `--dispatch ENTRY:WxH[xD]` overrides
+                // everything per-entry — the override is in TOTAL threads on each
+                // axis, so divide by the matching workgroup-size dim to get
+                // workgroup counts.
+                let workgroups =
+                    if let Some(&(w, h, d)) = spec.dispatch_overrides.get(&stage.entry_point) {
+                        let (wgx, wgy, wgz) = (
+                            stage.workgroup_size.0.max(1),
+                            stage.workgroup_size.1.max(1),
+                            stage.workgroup_size.2.max(1),
+                        );
+                        (w.div_ceil(wgx), h.div_ceil(wgy), d.div_ceil(wgz))
+                    } else {
+                        gpu::resolve_dispatch_size_with_textures(
+                            &stage.dispatch_size,
+                            stage.workgroup_size,
+                            &dispatch_buffer_sizes,
+                            &[],
+                            &storage_textures,
+                        )
+                    };
+                if verbose {
+                    eprintln!(
+                        "[viz pipeline-interactive] compute '{}': dispatch = {} × {} × {}",
+                        stage.entry_point, workgroups.0, workgroups.1, workgroups.2
+                    );
+                }
+
+                // Move bgs on the last stage; clone for earlier ones.
+                let stage_bgs = if si + 1 == n_stages { std::mem::take(&mut bgs) } else { bgs.clone() };
+                compute_stages.push(PipelineComputeStage {
+                    pipeline: compute_pipeline,
+                    bind_groups_by_set: stage_bgs,
+                    workgroups,
+                    push_constants: Vec::new(),
+                    label: format!("compute.{}", stage.entry_point),
+                });
             }
-
-            compute_stages.push(PipelineComputeStage {
-                pipeline: compute_pipeline,
-                bind_groups_by_set: bgs,
-                workgroups,
-                push_constants: Vec::new(),
-                label: format!("compute.{}", cp.entry_point),
-            });
         }
 
         // ----- Graphics pipeline -----

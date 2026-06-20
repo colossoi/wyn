@@ -3273,7 +3273,7 @@ fn compute_storage_buffers(
         .pipelines
         .iter()
         .find_map(|p| match p {
-            Pipeline::Compute(cp) if cp.entry_point == entry => Some(cp),
+            Pipeline::Compute(cp) if cp.stages.iter().any(|s| s.entry_point == entry) => Some(cp),
             _ => None,
         })
         .unwrap_or_else(|| panic!("no compute pipeline named {entry}"))
@@ -3311,8 +3311,8 @@ entry gen(bh: []vec4f32) []i32 =
         .pipelines
         .iter()
         .find_map(|p| match p {
-            crate::pipeline_descriptor::Pipeline::Compute(cp) if cp.entry_point.contains("_gather_") => {
-                Some(cp.entry_point.clone())
+            crate::pipeline_descriptor::Pipeline::Compute(cp) => {
+                cp.stages.iter().find(|s| s.entry_point.contains("_gather_")).map(|s| s.entry_point.clone())
             }
             _ => None,
         })
@@ -3668,9 +3668,7 @@ entry e(xs: [8]vec4f32) vec2f32 = sum2(xs)
 fn is_two_phase_compute(pipeline: &crate::pipeline_descriptor::PipelineDescriptor, entry: &str) -> bool {
     use crate::pipeline_descriptor::Pipeline;
     pipeline.pipelines.iter().any(|p| match p {
-        Pipeline::MultiCompute(mc) => {
-            mc.stages.len() >= 2 && mc.stages.iter().any(|s| s.entry_point == entry)
-        }
+        Pipeline::Compute(mc) => mc.stages.len() >= 2 && mc.stages.iter().any(|s| s.entry_point == entry),
         _ => false,
     })
 }
@@ -4084,7 +4082,6 @@ entry gen(xs: []i32) ([]i32, [1]i32) =
         .iter()
         .flat_map(|p| match p {
             Pipeline::Compute(cp) => cp.bindings.iter().collect::<Vec<_>>(),
-            Pipeline::MultiCompute(mc) => mc.bindings.iter().collect::<Vec<_>>(),
             Pipeline::Graphics(gp) => gp.bindings.iter().collect::<Vec<_>>(),
         })
         .filter_map(|b| match b {
@@ -4098,10 +4095,9 @@ entry gen(xs: []i32) ([]i32, [1]i32) =
     let mut violations: Vec<String> = Vec::new();
     for p in &lowered.pipeline.pipelines {
         let (label, bindings): (String, &[Binding]) = match p {
-            Pipeline::Compute(cp) => (cp.entry_point.clone(), &cp.bindings),
-            Pipeline::MultiCompute(mc) => {
-                let names: Vec<&str> = mc.stages.iter().map(|s| s.entry_point.as_str()).collect();
-                (format!("multi[{}]", names.join(",")), &mc.bindings)
+            Pipeline::Compute(cp) => {
+                let names: Vec<&str> = cp.stages.iter().map(|s| s.entry_point.as_str()).collect();
+                (format!("compute[{}]", names.join(",")), &cp.bindings)
             }
             Pipeline::Graphics(gp) => {
                 let names: Vec<&str> = gp.stages.iter().map(|s| s.entry_point.as_str()).collect();
@@ -4188,7 +4184,7 @@ entry g(xs: []i32) []i32 =
         .pipelines
         .iter()
         .find_map(|p| match p {
-            Pipeline::MultiCompute(mc) if mc.stages.iter().any(|s| s.entry_point.contains("_gather_")) => {
+            Pipeline::Compute(mc) if mc.stages.iter().any(|s| s.entry_point.contains("_gather_")) => {
                 Some(mc)
             }
             _ => None,
@@ -4237,7 +4233,9 @@ entry gen(bh: []i32) []i32 =
         .pipeline
         .pipelines
         .iter()
-        .filter(|p| matches!(p, Pipeline::Compute(cp) if cp.entry_point.contains("_gather_")))
+        .filter(|p| {
+            matches!(p, Pipeline::Compute(cp) if cp.stages.iter().any(|s| s.entry_point.contains("_gather_")))
+        })
         .count();
     assert_eq!(
         gather_prepasses, 1,
@@ -4352,7 +4350,8 @@ fn multidim_view_inner_fixed_carries_subarray_elem_bytes() {
     let Pipeline::Compute(cp) = lowered.pipeline.pipelines.first().expect("one pipeline") else {
         panic!("expected single-compute pipeline");
     };
-    match &cp.dispatch_size {
+    let stage = cp.stages.first().expect("one stage");
+    match &stage.dispatch_size {
         DispatchSize::DerivedFrom { len, .. } => match len {
             DispatchLen::InputBinding {
                 set,
@@ -5038,7 +5037,7 @@ entry gen(xs: []i32, #[uniform(set=1,binding=0)] n: i32) ([]vec4f32, [5]i32) =
         .pipelines
         .iter()
         .find_map(|p| match p {
-            Pipeline::Compute(c) if c.entry_point == "gen" => Some(c),
+            Pipeline::Compute(c) if c.stages.iter().any(|s| s.entry_point == "gen") => Some(c),
             _ => None,
         })
         .expect("compute pipeline `gen` present");

@@ -86,18 +86,16 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
             .collect();
 
         for entry in entries {
-            // Find the bindings list backing this entry. Compute entries
-            // match a single-stage `Compute` by `entry_point` or any stage
-            // of a `MultiCompute` (whose bindings are shared across stages,
-            // covering parallel reduce / redomap / scan phases). Graphics
-            // entries match a single-stage `Graphics` by stage entry_point.
+            // Find the bindings list backing this entry. A compute
+            // entry matches any stage in a `Compute` (covers both the
+            // common single-stage case and multi-stage parallel
+            // reduce / redomap / scan / ordered-prefix schedules);
+            // graphics entries match a stage of a `Graphics`.
             let bindings: &mut Vec<Binding> = match self.pipelines.iter_mut().find(|p| match p {
-                Pipeline::Compute(cp) => cp.entry_point == entry.name,
-                Pipeline::MultiCompute(mc) => mc.stages.iter().any(|s| s.entry_point == entry.name),
+                Pipeline::Compute(cp) => cp.stages.iter().any(|s| s.entry_point == entry.name),
                 Pipeline::Graphics(gp) => gp.stages.iter().any(|s| s.entry_point == entry.name),
             }) {
                 Some(Pipeline::Compute(cp)) => &mut cp.bindings,
-                Some(Pipeline::MultiCompute(mc)) => &mut mc.bindings,
                 Some(Pipeline::Graphics(gp)) => &mut gp.bindings,
                 _ => continue,
             };
@@ -254,7 +252,6 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
         for pipeline in self.pipelines.iter_mut() {
             let bindings: &mut Vec<Binding> = match pipeline {
                 Pipeline::Compute(cp) => &mut cp.bindings,
-                Pipeline::MultiCompute(mc) => &mut mc.bindings,
                 Pipeline::Graphics(gp) => &mut gp.bindings,
             };
             for b in bindings.iter_mut() {
@@ -282,14 +279,10 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
 
     fn workgroup_size_of(&self, entry_name: &str) -> (u32, u32, u32) {
         for p in &self.pipelines {
-            match p {
-                Pipeline::Compute(cp) if cp.entry_point == entry_name => return cp.workgroup_size,
-                Pipeline::MultiCompute(mp) => {
-                    if let Some(stage) = mp.stages.iter().find(|s| s.entry_point == entry_name) {
-                        return stage.workgroup_size;
-                    }
+            if let Pipeline::Compute(cp) = p {
+                if let Some(stage) = cp.stages.iter().find(|s| s.entry_point == entry_name) {
+                    return stage.workgroup_size;
                 }
-                _ => {}
             }
         }
         (64, 1, 1)
