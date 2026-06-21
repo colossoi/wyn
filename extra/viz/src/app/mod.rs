@@ -527,17 +527,55 @@ impl State {
                     ));
                 }
                 _ => {
+                    // Enumerate what the entry actually exposes so the user
+                    // can see the real binding names — auto-allocated entries
+                    // name their feedback buffers generically (e.g. `input_N`
+                    // for reads, `tail_output` for the result), which rarely
+                    // match a hand-written `--feedback` spec.
+                    let mut textures: Vec<String> = Vec::new();
+                    let mut storage_images: Vec<String> = Vec::new();
+                    let mut storage_buffers: Vec<String> = Vec::new();
+                    for b in &cp.bindings {
+                        match b {
+                            wyn_pipeline_descriptor::Binding::Texture {
+                                set, binding, name, ..
+                            } => textures.push(format!("'{name}' (set={set}, binding={binding})")),
+                            wyn_pipeline_descriptor::Binding::StorageTexture {
+                                set, binding, name, ..
+                            } => storage_images
+                                .push(format!("'{name}' (set={set}, binding={binding})")),
+                            wyn_pipeline_descriptor::Binding::StorageBuffer {
+                                set, binding, name, ..
+                            } => storage_buffers
+                                .push(format!("'{name}' (set={set}, binding={binding})")),
+                            _ => {}
+                        }
+                    }
+                    let list = |v: &[String]| {
+                        if v.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            v.join(", ")
+                        }
+                    };
+                    let status = |found: bool| if found { "found" } else { "NOT FOUND" };
                     return Err(anyhow!(
-                        "--feedback '{}:{}={}' — entry has no matching pair: expected a \
-                         texture2d named '{}' + storage_image named '{}', or storage_buffer \
-                         bindings named '{}' (read) and '{}' (write)",
-                        entry,
-                        read,
-                        write,
-                        read,
-                        write,
-                        read,
-                        write
+                        "--feedback '{entry}:{read}={write}' could not resolve a feedback pair.\n\
+                         \x20 read binding '{read}': {}\n\
+                         \x20 write binding '{write}': {}\n\
+                         A pair must be a texture2d (read) + storage_image (write), or a \
+                         storage_buffer (read) + storage_buffer (write) — both on entry '{entry}'.\n\
+                         Bindings actually declared on '{entry}':\n\
+                         \x20 storage_buffers: {}\n\
+                         \x20 textures: {}\n\
+                         \x20 storage_images: {}\n\
+                         Tip: auto-allocated entries name buffers generically (reads `input_N`, \
+                         result `tail_output`); check the names in the descriptor JSON next to the .spv.",
+                        status(tex_read.is_some() || buf_read.is_some()),
+                        status(tex_write.is_some() || buf_write.is_some()),
+                        list(&storage_buffers),
+                        list(&textures),
+                        list(&storage_images),
                     ));
                 }
             }
