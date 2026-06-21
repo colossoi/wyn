@@ -1863,31 +1863,16 @@ impl<'a> Converter<'a> {
         // takes the TLC logical type even when the runtime tuple
         // carries a View.
         let capture_count = capture_nids.len();
+        // A non-in-place `map` is shape-preserving — inherit the input's
+        // representation when `result_ty` carries an unresolved `Skolem` size
+        // (see `shape_preserving_result_ty`); otherwise keep `result_ty`.
         let project_ty = if matches!(destination, SoacDestination::InputBuffer) {
             input_arr_types[0].clone()
-        } else if matches!(
-            crate::types::array_size(&result_ty),
-            Some(Type::Constructed(TypeName::Skolem(_), _))
-        ) && !input_arr_types.is_empty()
-            && input_arr_types[0].is_array()
-        {
-            // A non-in-place `map` is shape-preserving: the result has the same
-            // representation (variant / size / region) as its input — only the
-            // element type changes. Here the TLC `result_ty` is the
-            // existential-opened type of a `filter`-produced input (a Composite
-            // variant carrying an unresolved `Skolem` size from
-            // `open_existential`), which the backend can't lower. Inherit the
-            // input's concrete representation (e.g. `Bounded[N]`, whose runtime
-            // `len` the consuming SOAC needs) instead of the Skolem artifact.
-            let inp = &input_arr_types[0];
-            crate::types::make_array1(
-                output_elem_ty.clone(),
-                inp.array_variant().expect("array input has a variant").clone(),
-                inp.array_size().expect("array input has a size").clone(),
-                inp.array_region().expect("array input has a region").clone(),
-            )
         } else {
-            result_ty.clone()
+            input_arr_types
+                .first()
+                .and_then(|inp| shape_preserving_result_ty(inp, &output_elem_ty, &result_ty))
+                .unwrap_or_else(|| result_ty.clone())
         };
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![project_ty.clone()]);
         let screma_nid = self.emit_soac(
@@ -2227,11 +2212,20 @@ impl<'a> Converter<'a> {
         // rather than the TLC-default result_ty (Composite variant).
         // Non-consuming scan keeps result_ty; realize_outputs fixes its
         // variant via retarget_array_projection.
+        // Scan is shape-preserving: inherit the input's representation when
+        // `result_ty` carries an unresolved `Skolem` size, keeping scan's own
+        // output element type (the accumulator type = `result_ty`'s element).
+        // Mirror of the `convert_soac_map` guard; without it
+        // `scan(op, ne, filter(p, xs))` leaks the filter's Skolem size into the
+        // backend.
         let capture_count = capture_nids.len();
         let project_ty = if matches!(destination, SoacDestination::InputBuffer) {
             arr_ty.clone()
         } else {
-            result_ty.clone()
+            result_ty
+                .elem_type()
+                .and_then(|elem| shape_preserving_result_ty(&arr_ty, elem, &result_ty))
+                .unwrap_or_else(|| result_ty.clone())
         };
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![project_ty.clone()]);
         let screma_nid = self.emit_soac(
@@ -2638,6 +2632,38 @@ fn unwrap_existential_array(ty: &Type<TypeName>) -> Type<TypeName> {
         Type::Constructed(TypeName::Existential(_), args) if !args.is_empty() => args[0].clone(),
         _ => ty.clone(),
     }
+}
+
+/// Shape-preserving result type for a non-in-place `map`/`scan`.
+///
+/// When the TLC `result_ty` carries an unresolved existential `Skolem` size —
+/// the type of a `filter`-produced input opened by `open_existential`, which the
+/// backend can't lower — rebuild the result from the input array's
+/// representation (variant / size / region) with `output_elem_ty`. `map`/`scan`
+/// are shape-preserving, so this is exactly the input's shape with a possibly
+/// different element type (e.g. `Bounded[N]`, whose runtime `len` a consuming
+/// SOAC needs).
+///
+/// Returns `None` — caller falls back to `result_ty` — when the size is already
+/// concrete or the input isn't a plain array. Never panics, so a malformed input
+/// degrades to the prior behavior rather than aborting the compiler.
+fn shape_preserving_result_ty(
+    input_arr_ty: &Type<TypeName>,
+    output_elem_ty: &Type<TypeName>,
+    result_ty: &Type<TypeName>,
+) -> Option<Type<TypeName>> {
+    if !matches!(
+        crate::types::array_size(result_ty),
+        Some(Type::Constructed(TypeName::Skolem(_), _))
+    ) {
+        return None;
+    }
+    Some(crate::types::make_array1(
+        output_elem_ty.clone(),
+        input_arr_ty.array_variant()?.clone(),
+        input_arr_ty.array_size()?.clone(),
+        input_arr_ty.array_region()?.clone(),
+    ))
 }
 
 fn build_entry_outputs(

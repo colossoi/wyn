@@ -5101,12 +5101,14 @@ entry e(#[storage(set=2, binding=0, access=write)] o: *[]i32) () =
 }
 
 /// GAP (open): Filter -> Scan, e.g. `scan(op, ne, filter(p, a))`. The
-/// materialized filter result leaks its existential `Skolem` size into the scan
-/// (panic at `spirv/mod.rs`: "invalid size argument: Skolem"). The
-/// shape-preserving fix landed for `map`; `scan` needs the same treatment (or a
-/// Filter->Scan fusion).
+/// shape-preserving `convert_soac_scan` `project_ty` guard (mirror of the `map`
+/// fix) stops the filter's `Skolem` size leaking into the scan, but it then hits
+/// the SAME blocker as Filter->Map: the materialized filter scratch is unsized
+/// for indexed writes ("ArrayWith: ... Unsized or view arrays may not support
+/// indexed writes"). Both filter consumers need the materialization/CompactMap
+/// work; un-ignore once that lands.
 #[test]
-#[ignore = "open: Filter->Scan leaks the filter's Skolem size into the scan (spirv panic)"]
+#[ignore = "open: Filter->Scan hits the shared materialized-filter ArrayWith (unsized scratch), same as Filter->Map"]
 fn fusion_gap_filter_into_scan() {
     let src = r#"
 #[compute]
