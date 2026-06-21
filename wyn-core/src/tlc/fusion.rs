@@ -106,7 +106,11 @@ pub fn run(program: Program) -> Program {
                 }
                 // Inline producer→consumer fusion for SOACs nested directly
                 // as another SOAC's input (map→map, map→reduce, map→scan).
-                let new_body = fuse_inline_soac_inputs(new_body, &mut symbols, &mut term_ids);
+                let (new_body, did_inline_fuse) =
+                    fuse_inline_soac_inputs(new_body, &mut symbols, &mut term_ids);
+                if did_inline_fuse {
+                    changed = true;
+                }
                 Def {
                     body: new_body,
                     ..def
@@ -1429,16 +1433,24 @@ fn clone_term_with_fresh_ids(term: &Term, term_ids: &mut TermIdSource) -> Term {
     cloned
 }
 
-pub(super) fn substitute_term_expr(
+/// Shadow-correct substitution traversal shared by `substitute_term_expr`
+/// (replace a symbol with an arbitrary term) and `substitute_sym` (rename a
+/// symbol). The only difference between the two is what a matched occurrence
+/// becomes; `make_replacement` produces that, given the matched `Var` term so a
+/// rename can preserve the occurrence's own type/span. Shadowing by `Let`,
+/// `Lambda`, and `Loop` binders is handled here once, so neither caller can grow
+/// a capture bug independently.
+fn substitute_core<F>(
     term: Term,
     old: SymbolId,
-    replacement: &Term,
+    make_replacement: &mut F,
     term_ids: &mut TermIdSource,
-) -> Term {
+) -> Term
+where
+    F: FnMut(Term, &mut TermIdSource) -> Term,
+{
     match term.kind {
-        TermKind::Var(VarRef::Symbol(sym)) if sym == old => {
-            clone_term_with_fresh_ids(replacement, term_ids)
-        }
+        TermKind::Var(VarRef::Symbol(sym)) if sym == old => make_replacement(term, term_ids),
         TermKind::Lambda(lam) if lam.params.iter().any(|(param, _)| *param == old) => Term {
             kind: TermKind::Lambda(lam),
             ..term
@@ -1449,9 +1461,9 @@ pub(super) fn substitute_term_expr(
             rhs,
             body,
         } => {
-            let rhs = substitute_term_expr(*rhs, old, replacement, term_ids);
+            let rhs = substitute_core(*rhs, old, make_replacement, term_ids);
             let body =
-                if name == old { *body } else { substitute_term_expr(*body, old, replacement, term_ids) };
+                if name == old { *body } else { substitute_core(*body, old, make_replacement, term_ids) };
             Term {
                 id: term_ids.next_id(),
                 kind: TermKind::Let {
@@ -1471,7 +1483,7 @@ pub(super) fn substitute_term_expr(
             kind,
             body,
         } => {
-            let init = substitute_term_expr(*init, old, replacement, term_ids);
+            let init = substitute_core(*init, old, make_replacement, term_ids);
             let init_binding_shadows = init_bindings.iter().any(|(sym, _, _)| *sym == old);
             let init_bindings = init_bindings
                 .into_iter()
@@ -1482,16 +1494,16 @@ pub(super) fn substitute_term_expr(
                         (
                             sym,
                             ty,
-                            substitute_term_expr(extraction, old, replacement, term_ids),
+                            substitute_core(extraction, old, make_replacement, term_ids),
                         )
                     }
                 })
                 .collect();
-            let (kind, kind_shadows) = substitute_term_in_loop_kind(kind, old, replacement, term_ids);
+            let (kind, kind_shadows) = substitute_loop_kind_core(kind, old, make_replacement, term_ids);
             let body = if loop_var == old || init_binding_shadows || kind_shadows {
                 *body
             } else {
-                substitute_term_expr(*body, old, replacement, term_ids)
+                substitute_core(*body, old, make_replacement, term_ids)
             };
             Term {
                 id: term_ids.next_id(),
@@ -1507,22 +1519,25 @@ pub(super) fn substitute_term_expr(
             }
         }
         other => Term { kind: other, ..term }
-            .map_children(&mut |child| substitute_term_expr(child, old, replacement, term_ids)),
+            .map_children(&mut |child| substitute_core(child, old, make_replacement, term_ids)),
     }
 }
 
-fn substitute_term_in_loop_kind(
+fn substitute_loop_kind_core<F>(
     kind: super::LoopKind,
     old: SymbolId,
-    replacement: &Term,
+    make_replacement: &mut F,
     term_ids: &mut TermIdSource,
-) -> (super::LoopKind, bool) {
+) -> (super::LoopKind, bool)
+where
+    F: FnMut(Term, &mut TermIdSource) -> Term,
+{
     match kind {
         super::LoopKind::For { var, var_ty, iter } => (
             super::LoopKind::For {
                 var,
                 var_ty,
-                iter: Box::new(substitute_term_expr(*iter, old, replacement, term_ids)),
+                iter: Box::new(substitute_core(*iter, old, make_replacement, term_ids)),
             },
             var == old,
         ),
@@ -1530,17 +1545,31 @@ fn substitute_term_in_loop_kind(
             super::LoopKind::ForRange {
                 var,
                 var_ty,
-                bound: Box::new(substitute_term_expr(*bound, old, replacement, term_ids)),
+                bound: Box::new(substitute_core(*bound, old, make_replacement, term_ids)),
             },
             var == old,
         ),
         super::LoopKind::While { cond } => (
             super::LoopKind::While {
-                cond: Box::new(substitute_term_expr(*cond, old, replacement, term_ids)),
+                cond: Box::new(substitute_core(*cond, old, make_replacement, term_ids)),
             },
             false,
         ),
     }
+}
+
+pub(super) fn substitute_term_expr(
+    term: Term,
+    old: SymbolId,
+    replacement: &Term,
+    term_ids: &mut TermIdSource,
+) -> Term {
+    substitute_core(
+        term,
+        old,
+        &mut |_occurrence, ids| clone_term_with_fresh_ids(replacement, ids),
+        term_ids,
+    )
 }
 
 fn substitute_term_in_array_expr(
@@ -2298,9 +2327,19 @@ fn replace_consumer(
 /// as a separate producer loop building a runtime-sized in-register array —
 /// which the SPIR-V backend cannot represent (`Composite variant unsized
 /// arrays not supported`).
-fn fuse_inline_soac_inputs(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdSource) -> Term {
-    // Recurse into children first (bottom-up).
-    let term = term.map_children(&mut |child| fuse_inline_soac_inputs(child, symbols, term_ids));
+fn fuse_inline_soac_inputs(
+    term: Term,
+    symbols: &mut SymbolTable,
+    term_ids: &mut TermIdSource,
+) -> (Term, bool) {
+    // Recurse into children first (bottom-up), OR-ing in any child rewrites so
+    // the outer fixpoint re-analyzes a program this pass mutated.
+    let mut changed = false;
+    let term = term.map_children(&mut |child| {
+        let (child, child_changed) = fuse_inline_soac_inputs(child, symbols, term_ids);
+        changed |= child_changed;
+        child
+    });
     let span = term.span;
 
     match term.kind {
@@ -2315,19 +2354,25 @@ fn fuse_inline_soac_inputs(term: Term, symbols: &mut SymbolTable, term_ids: &mut
             });
             if has_fusible {
                 let fused = fuse_inline_map_inputs(lam, inputs, symbols, term_ids);
-                return Term {
-                    kind: TermKind::Soac(fused),
+                return (
+                    Term {
+                        kind: TermKind::Soac(fused),
+                        ..term
+                    },
+                    true,
+                );
+            }
+            (
+                Term {
+                    kind: TermKind::Soac(SoacOp::Map {
+                        lam,
+                        inputs,
+                        destination,
+                    }),
                     ..term
-                };
-            }
-            Term {
-                kind: TermKind::Soac(SoacOp::Map {
-                    lam,
-                    inputs,
-                    destination,
-                }),
-                ..term
-            }
+                },
+                changed,
+            )
         }
 
         // reduce(op, ne, map(g, xs)) → redomap(op∘g, op, ne, xs)
@@ -2342,15 +2387,21 @@ fn fuse_inline_soac_inputs(term: Term, symbols: &mut SymbolTable, term_ids: &mut
                 symbols,
                 term_ids,
             ) {
-                return Term {
-                    kind: TermKind::Soac(fused),
+                return (
+                    Term {
+                        kind: TermKind::Soac(fused),
+                        ..term
+                    },
+                    true,
+                );
+            }
+            (
+                Term {
+                    kind: TermKind::Soac(SoacOp::Reduce { op, ne, input }),
                     ..term
-                };
-            }
-            Term {
-                kind: TermKind::Soac(SoacOp::Reduce { op, ne, input }),
-                ..term
-            }
+                },
+                changed,
+            )
         }
 
         // scan(op, ne, map(g, xs)) → scan(op∘g, ne, xs)   (single map input only)
@@ -2371,24 +2422,30 @@ fn fuse_inline_soac_inputs(term: Term, symbols: &mut SymbolTable, term_ids: &mut
                 symbols,
                 term_ids,
             ) {
-                return Term {
-                    kind: TermKind::Soac(fused),
+                return (
+                    Term {
+                        kind: TermKind::Soac(fused),
+                        ..term
+                    },
+                    true,
+                );
+            }
+            (
+                Term {
+                    kind: TermKind::Soac(SoacOp::Scan {
+                        op,
+                        reduce_op,
+                        ne,
+                        input,
+                        destination,
+                    }),
                     ..term
-                };
-            }
-            Term {
-                kind: TermKind::Soac(SoacOp::Scan {
-                    op,
-                    reduce_op,
-                    ne,
-                    input,
-                    destination,
-                }),
-                ..term
-            }
+                },
+                changed,
+            )
         }
 
-        _ => term,
+        _ => (term, changed),
     }
 }
 
@@ -2677,51 +2734,21 @@ pub(super) fn dedup_envelope_inputs(
 // Symbol substitution
 // =============================================================================
 
-/// Substitute all free occurrences of `old` with `Var(new)` in a term,
-/// respecting shadowing by Let names, Lambda params, and Loop vars.
+/// Rename all free occurrences of `old` to `new` in a term, respecting
+/// shadowing by Let names, Lambda params, and Loop vars. A thin wrapper over the
+/// shared [`substitute_core`] engine: each occurrence keeps its own type/span
+/// (a rename doesn't change the value's type) and only the symbol changes.
 pub fn substitute_sym(term: Term, old: SymbolId, new: SymbolId, term_ids: &mut TermIdSource) -> Term {
-    match term.kind {
-        TermKind::Var(VarRef::Symbol(s)) if s == old => Term {
-            id: term_ids.next_id(),
+    substitute_core(
+        term,
+        old,
+        &mut |occurrence, ids| Term {
+            id: ids.next_id(),
             kind: TermKind::Var(VarRef::Symbol(new)),
-            ..term
+            ..occurrence
         },
-
-        TermKind::Var(VarRef::Symbol(_))
-        | TermKind::BinOp(_)
-        | TermKind::UnOp(_)
-        | TermKind::IntLit(_)
-        | TermKind::FloatLit(_)
-        | TermKind::BoolLit(_)
-        | TermKind::Extern(_) => term,
-
-        // Lambda: stop if param shadows old
-        TermKind::Lambda(ref lam) if lam.params.iter().any(|(p, _)| *p == old) => term,
-
-        // Let: substitute in rhs, stop in body if name shadows
-        TermKind::Let {
-            name,
-            name_ty,
-            rhs,
-            body,
-        } => {
-            let new_rhs = substitute_sym(*rhs, old, new, term_ids);
-            let new_body = if name == old { *body } else { substitute_sym(*body, old, new, term_ids) };
-            Term {
-                id: term_ids.next_id(),
-                kind: TermKind::Let {
-                    name,
-                    name_ty,
-                    rhs: Box::new(new_rhs),
-                    body: Box::new(new_body),
-                },
-                ..term
-            }
-        }
-
-        // Everything else: recurse via map_children
-        _ => term.map_children(&mut |child| substitute_sym(child, old, new, term_ids)),
-    }
+        term_ids,
+    )
 }
 
 // =============================================================================
