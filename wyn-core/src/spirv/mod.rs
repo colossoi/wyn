@@ -2818,6 +2818,66 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         Some(ConstantValue::U32(v)) => Some(v as i32),
                         _ => self.constructor.get_const_i32_value(idx),
                     };
+
+                    // Bounded array: the value is a struct { buffer: [N]T, len:
+                    // i32 }. Update buffer[idx] = val (len unchanged) and
+                    // reassemble the struct. The generic path below would treat
+                    // the struct itself as a plain array and fail to find its
+                    // element type — this is the path the filter compaction loop
+                    // hits when a Bounded filter result is materialized (e.g.
+                    // filter→map / filter→scan).
+                    let is_bounded = arr_ty
+                        .array_variant()
+                        .map(|v| matches!(v, PolyType::Constructed(TypeName::ArrayVariantBounded, _)))
+                        .unwrap_or(false);
+                    if is_bounded {
+                        let elem_ty = arr_ty.elem_type().expect("Bounded has elem").clone();
+                        let n = match arr_ty.array_size() {
+                            Some(PolyType::Constructed(TypeName::Size(n), _)) => *n as u32,
+                            other => {
+                                bail_spirv!("Bounded array_with requires Size(N) capacity, got {:?}", other)
+                            }
+                        };
+                        let elem_spirv = self.constructor.polytype_to_spirv(&elem_ty);
+                        let size_const = self.constructor.const_u32(n);
+                        let buf_type = self.constructor.builder.type_array(elem_spirv, size_const);
+                        // The struct's [N]T member type must be element-resolvable
+                        // for the dynamic-index access_chain below.
+                        self.constructor.array_elem_cache.insert(buf_type, elem_spirv);
+                        let buffer =
+                            self.constructor.builder.composite_extract(buf_type, None, arr, [0u32])?;
+                        let new_buffer = if let Some(literal_idx) = literal_idx {
+                            self.constructor.builder.composite_insert(
+                                buf_type,
+                                None,
+                                val,
+                                buffer,
+                                [literal_idx as u32],
+                            )?
+                        } else {
+                            let buf_var =
+                                self.constructor.declare_variable("_bounded_buf_tmp", buf_type)?;
+                            self.constructor.builder.store(buf_var, buffer, None, [])?;
+                            let elem_ptr_ty = self.constructor.builder.type_pointer(
+                                None,
+                                spirv::StorageClass::Function,
+                                elem_spirv,
+                            );
+                            let elem_ptr =
+                                self.constructor.builder.access_chain(elem_ptr_ty, None, buf_var, [idx])?;
+                            self.constructor.builder.store(elem_ptr, val, None, [])?;
+                            self.constructor.builder.load(buf_type, None, buf_var, None, [])?
+                        };
+                        // Reassemble { buffer: new_buffer, len: <unchanged> }.
+                        return Ok(self.constructor.builder.composite_insert(
+                            result_ty,
+                            None,
+                            new_buffer,
+                            arr,
+                            [0u32],
+                        )?);
+                    }
+
                     if let Some(literal_idx) = literal_idx {
                         Ok(self.constructor.builder.composite_insert(
                             result_ty,

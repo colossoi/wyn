@@ -5056,14 +5056,13 @@ entry e(#[storage(set=2, binding=0, access=read)] arr0: []vec4f32) []vec2f32 =
 // Filter-producer cases still fail to lower a materialized filter result and
 // stay `#[ignore]`d as reproducers.
 
-/// GAP (open): Filter -> Map (a "filtered map" / mapMaybe). `map(g, filter(p, a))`
-/// used directly. The filter is materialized and its scratch hits
-/// "ArrayWith: ... Unsized or view arrays may not support indexed writes".
-/// Needs a Filter->Elementwise fusion (avoid materializing) or a sized filter
-/// scratch.
+/// Filter -> Map (a "filtered map"). `map(g, filter(p, a))` used directly.
+/// Compiles: the filter is materialized as a Bounded result and the map runs
+/// over it (unfused). Fusing it into a single compact pass (CompactMap/mapMaybe)
+/// is a perf TODO; correctness comes from `array_with` supporting the Bounded
+/// variant (the struct's [N]T buffer member).
 #[test]
-#[ignore = "open: Filter->Map materializes the filter and hits ArrayWith on an unsized scratch"]
-fn fusion_gap_filter_into_map() {
+fn filter_into_map_compiles() {
     let src = r#"
 #[compute]
 entry e(#[storage(set=2, binding=0, access=read)] a: []f32,
@@ -5100,16 +5099,14 @@ entry e(#[storage(set=2, binding=0, access=write)] o: *[]i32) () =
     crate::compile_thru_spirv(src).expect("Range->Scan should compile");
 }
 
-/// GAP (open): Filter -> Scan, e.g. `scan(op, ne, filter(p, a))`. The
-/// shape-preserving `convert_soac_scan` `project_ty` guard (mirror of the `map`
-/// fix) stops the filter's `Skolem` size leaking into the scan, but it then hits
-/// the SAME blocker as Filter->Map: the materialized filter scratch is unsized
-/// for indexed writes ("ArrayWith: ... Unsized or view arrays may not support
-/// indexed writes"). Both filter consumers need the materialization/CompactMap
-/// work; un-ignore once that lands.
+/// Filter -> Scan, e.g. `scan(op, ne, filter(p, a))`. Compiles: two fixes
+/// combine — the `convert_soac_scan` shape-preserving `project_ty` guard (stops
+/// the filter's `Skolem` size leaking into the scan) and `array_with` supporting
+/// the Bounded variant (so the filter compaction lowers). The filter is
+/// materialized as a compact result and scanned (unfused, which is the correct
+/// semantics — a compact scan, not a masked scan over the original).
 #[test]
-#[ignore = "open: Filter->Scan hits the shared materialized-filter ArrayWith (unsized scratch), same as Filter->Map"]
-fn fusion_gap_filter_into_scan() {
+fn filter_into_scan_compiles() {
     let src = r#"
 #[compute]
 entry e(#[storage(set=2, binding=0, access=read)] a: []f32,
