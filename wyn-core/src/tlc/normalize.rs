@@ -9,6 +9,16 @@
 //! ```text
 //! f(map(g, xs))  =>  let tmp = map(g, xs) in f(tmp)
 //! ```
+//!
+//! It also flattens nested `let`-in-`let`-rhs so every binding lives on one
+//! top-level chain:
+//! ```text
+//! let x = (let y = a in b) in rest  =>  let y = a in let x = b in rest
+//! ```
+//! Lifting a SOAC out of a binding's rhs (e.g. the `reduce` in
+//! `let r = reduce(..) * k`) otherwise leaves it one level deep
+//! (`let r = (let _anf = reduce(..) in _anf * k)`), where the fusion driver —
+//! which only walks the top-level let chain — can't see it to fuse.
 
 use super::VarRef;
 use crate::SymbolTable;
@@ -89,5 +99,71 @@ fn normalize_term(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdSo
         }
     }
 
-    term
+    // Flatten `let x = (let y = a in b) in rest` => `let y = a in let x = b in
+    // rest`. Children are already normalized (bottom-up), so a binding whose rhs
+    // is a `let` came from a SOAC lifted out of that rhs; hoisting it onto the
+    // outer chain is what makes the fusion driver (which only scans the
+    // top-level let chain) see the producer/consumer edge. Names are fresh, so
+    // reordering can't capture.
+    flatten_let(term, term_ids)
+}
+
+/// Rotate a `let` whose rhs is itself a `let` up onto the enclosing chain,
+/// repeating while the new rhs is still a `let` (e.g. several SOACs lifted out
+/// of one expression). Non-`let` terms pass through unchanged.
+fn flatten_let(term: Term, term_ids: &mut TermIdSource) -> Term {
+    let TermKind::Let {
+        name,
+        name_ty,
+        rhs,
+        body,
+    } = term.kind
+    else {
+        return term;
+    };
+    if !matches!(rhs.kind, TermKind::Let { .. }) {
+        return Term {
+            kind: TermKind::Let {
+                name,
+                name_ty,
+                rhs,
+                body,
+            },
+            ..term
+        };
+    }
+    let TermKind::Let {
+        name: inner_name,
+        name_ty: inner_ty,
+        rhs: inner_rhs,
+        body: inner_body,
+    } = rhs.kind
+    else {
+        unreachable!("checked rhs is a Let above")
+    };
+    // `let name = (let inner_name = inner_rhs in inner_body) in body`
+    //   => `let inner_name = inner_rhs in let name = inner_body in body`
+    let new_inner = Term {
+        id: term_ids.next_id(),
+        ty: term.ty.clone(),
+        span: term.span,
+        kind: TermKind::Let {
+            name,
+            name_ty,
+            rhs: inner_body,
+            body,
+        },
+    };
+    let rotated = Term {
+        id: term_ids.next_id(),
+        ty: term.ty,
+        span: term.span,
+        kind: TermKind::Let {
+            name: inner_name,
+            name_ty: inner_ty,
+            rhs: inner_rhs,
+            body: Box::new(new_inner),
+        },
+    };
+    flatten_let(rotated, term_ids)
 }

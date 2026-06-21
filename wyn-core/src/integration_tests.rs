@@ -5014,29 +5014,22 @@ entry tick() f32 =
         .expect("static-capacity filter piped through a size-poly helper must compile");
 }
 
-/// Reproducer (PARTIALLY FIXED — still `#[ignore]`d): a `filter -> map
-/// -> reduce` chain whose reduced result feeds a vector op + swizzle,
-/// inside a helper called from a compute `map`. Distilled from the
-/// `separation` boids force in `testfiles/playground/particles.wyn`.
-///
-/// Two layered defects:
-///   1. FIXED: the intermediate `map`'s result type was the existential
-///      `Composite` + `Skolem`-size opened from the `filter` (a backend
-///      panic at `spirv/mod.rs`: "invalid size argument: Skolem"). The
-///      shape-preserving fix in `convert_soac_map` (`egir/from_tlc.rs`)
-///      makes a non-in-place map inherit its input's representation.
-///   2. STILL OPEN: with the size fixed, the chain still does not fuse
-///      (the reduce sits under a binop/swizzle so `map->reduce` /
-///      `filter->reduce` don't fire), so the `filter` is materialized
-///      and its scratch hits "ArrayWith: ... Unsized or view arrays may
-///      not support indexed writes". The real fix is to collapse the
-///      chain (fusion) or give the materialized filter a sized scratch.
-///
-/// Kept as an `#[ignore]`d "must compile" assertion: it documents the
-/// target end state and reproduces defect 2 on demand. Remove the
-/// `#[ignore]` once the chain fuses / the materialized filter lowers.
+/// Regression: a `filter -> map -> reduce` chain whose reduced result
+/// feeds a vector op + swizzle, inside a helper called from a compute
+/// `map`. Distilled from the `separation` boids force in
+/// `testfiles/playground/particles.wyn`. Two defects had to be fixed:
+///   1. the intermediate `map`'s result carried the existential
+///      `Composite` + `Skolem` size opened from the `filter`, which the
+///      backend can't lower (panic: "invalid size argument: Skolem").
+///      `convert_soac_map` now inherits the input's shape (`from_tlc.rs`).
+///   2. the chain didn't fuse: the swizzle desugars the `reduce` under a
+///      binop (`let r = reduce(..) * k`), and `normalize` lifted it only
+///      into a *nested* let, invisible to the top-level-only fusion
+///      driver — so the `filter` was materialized and hit "ArrayWith on
+///      an unsized scratch". `normalize` now flattens nested lets so the
+///      reduce joins the top-level chain and `map->reduce` /
+///      `filter->reduce` collapse it to a masked redomap.
 #[test]
-#[ignore = "fusion/materialization gap: filter->map->reduce under a binop doesn't fuse; materialized filter hits ArrayWith on an unsized scratch"]
 fn filter_map_reduce_vecop_swizzle_in_helper_compiles() {
     let src = r#"
 def f(arr: []vec4f32) vec2f32 =
