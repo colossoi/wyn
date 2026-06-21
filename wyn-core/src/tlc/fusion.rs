@@ -17,7 +17,7 @@ use polytype::Type;
 use std::collections::HashMap;
 
 use super::array_semantics::{
-    can_fuse, classify_term, summarize_program, ArraySemantics, FunctionSummary, FusionKind,
+    can_fuse, classify_term, summarize_program, ArraySemantics, FunctionSummary, FusionRecipe,
     ResultSemantics,
 };
 use super::{
@@ -1149,11 +1149,8 @@ fn find_pairwise_plan(
                 UseOwner::Tail if *term_id == tail.id => {}
                 _ => return None,
             }
-            let fk = can_fuse(&producer.semantics, semantics);
-            if fk == FusionKind::NotFusible {
-                return None;
-            }
-            if fk == FusionKind::ComposeElementwise {
+            let recipe = can_fuse(&producer.semantics, semantics)?;
+            if recipe == FusionRecipe::ComposeElementwise {
                 if let ArraySemantics::Elementwise { inputs, .. } = semantics {
                     if inputs.len() != 1 {
                         return None;
@@ -1163,7 +1160,7 @@ fn find_pairwise_plan(
             let fused_rhs = build_fused_from_semantics(
                 &producer.semantics,
                 semantics,
-                &fk,
+                &recipe,
                 *input_index,
                 ty.clone(),
                 *span,
@@ -2026,7 +2023,7 @@ fn fuse_def_body(
 fn build_fused_from_semantics(
     producer: &ArraySemantics,
     consumer: &ArraySemantics,
-    fusion_kind: &FusionKind,
+    recipe: &FusionRecipe,
     input_index: usize,
     consumer_ty: Type<TypeName>,
     span: Span,
@@ -2039,10 +2036,10 @@ fn build_fused_from_semantics(
     // `mask = λx. if p(x) then x else ne` — the dropped elements fold in as
     // `op(acc, ne) = acc` (ne is op's neutral element by reduce's contract).
     if let (
-        FusionKind::FilterIntoReduce,
+        FusionRecipe::FilterIntoReduce,
         ArraySemantics::Filter { input, pred },
         ArraySemantics::Reduction { op, init, .. },
-    ) = (fusion_kind, producer, consumer)
+    ) = (recipe, producer, consumer)
     {
         if op.lam.params.len() != 2 || pred.lam.params.len() != 1 {
             return None;
@@ -2095,8 +2092,8 @@ fn build_fused_from_semantics(
         _ => return None,
     };
 
-    match (fusion_kind, consumer) {
-        (FusionKind::ComposeElementwise, ArraySemantics::Elementwise { body: cons_body, .. }) => {
+    match (recipe, consumer) {
+        (FusionRecipe::ComposeElementwise, ArraySemantics::Elementwise { body: cons_body, .. }) => {
             let composed =
                 compose_lambdas(prod_lam.clone(), cons_body.lam.clone(), span, symbols, term_ids);
             Some(Term {
@@ -2114,7 +2111,7 @@ fn build_fused_from_semantics(
             })
         }
 
-        (FusionKind::MapIntoReduce, ArraySemantics::Reduction { op, init, .. }) => {
+        (FusionRecipe::MapIntoReduce, ArraySemantics::Reduction { op, init, .. }) => {
             if op.lam.params.len() != 2 {
                 return None;
             }
@@ -2135,7 +2132,7 @@ fn build_fused_from_semantics(
             })
         }
 
-        (FusionKind::MapIntoScan, ArraySemantics::PrefixScan { op, init, .. }) => {
+        (FusionRecipe::MapIntoScan, ArraySemantics::PrefixScan { op, init, .. }) => {
             if input_exprs.len() != 1 {
                 return None;
             }
@@ -2163,7 +2160,7 @@ fn build_fused_from_semantics(
         }
 
         (
-            FusionKind::MapIntoScatter,
+            FusionRecipe::MapIntoScatter,
             ArraySemantics::ScatterOp {
                 dest,
                 lam: env,

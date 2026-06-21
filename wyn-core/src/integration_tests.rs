@@ -5048,13 +5048,11 @@ entry e(#[storage(set=2, binding=0, access=read)] arr0: []vec4f32) []vec2f32 =
 
 // ---- Missing fusion combinations (open gaps) --------------------------------
 //
-// `tlc::array_semantics::can_fuse` implements 6 producer->consumer pairs:
-// Map->Map, Map->Reduce, Map->Scan, Map->Scatter, Range->Map, Filter->Reduce.
-// The combinations below are NOT fused. After fixing `get_array_element_type`
-// to see through `Unique` (a `*[]T` scatter dest), the Range/Scan producers now
-// *compile* (materialized, unfused) — fusing them is a perf TODO. The two
-// Filter-producer cases still fail to lower a materialized filter result and
-// stay `#[ignore]`d as reproducers.
+// `tlc::array_semantics::can_fuse` returns a buildable `FusionRecipe` for 5
+// producer->consumer pairs: Map->Map, Map->Reduce, Map->Scan, Map->Scatter,
+// Filter->Reduce. The combinations below are NOT fused but DO compile
+// (materialized intermediates). Fusing them is a perf TODO, not a correctness
+// gap; the Filter-producer cases lower via `array_with` on the Bounded variant.
 
 /// Filter -> Map (a "filtered map"). `map(g, filter(p, a))` used directly.
 /// Compiles: the filter is materialized as a Bounded result and the map runs
@@ -5074,8 +5072,8 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32,
 }
 
 /// Range -> Reduce, e.g. `reduce(op, ne, lo..<hi)`. Compiles (iota materialized,
-/// unfused). Fusing it (inline the iota into the reduce) is a perf TODO;
-/// `RangeIntoMap` exists in `can_fuse` but is never applied in the driver.
+/// unfused). Fusing it (inline the iota into the reduce) is a perf TODO — there
+/// is no Range builder yet, so `can_fuse` returns `None` for a Range producer.
 #[test]
 fn range_into_reduce_compiles() {
     let src = r#"

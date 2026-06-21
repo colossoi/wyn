@@ -150,9 +150,13 @@ impl ArraySemantics {
 // Fusion rules — semantic compatibility
 // =============================================================================
 
-/// What kind of fusion is possible between a producer and consumer.
+/// A fusion that is both *eligible* and *buildable*. `can_fuse` returns one only
+/// when [`crate::tlc::fusion`]'s builder can construct it, so there is never a
+/// verdict the driver has to silently drop — eligibility is coupled to
+/// construction. (The old `RangeIntoMap` verdict had no builder and always
+/// no-op'd; it is gone until a Range builder exists — see plan item 4.)
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FusionKind {
+pub enum FusionRecipe {
     /// Compose elementwise bodies: map(g, map(f, a)) → map(g∘f, a)
     ComposeElementwise,
     /// Compose map into reduce: reduce(op, ne, map(f, a)) → reduce(op∘f, ne, a)
@@ -164,47 +168,48 @@ pub enum FusionKind {
     /// The producer's outputs must be fully consumed (scatter has no
     /// pass-through results), which the single-use edge filter guarantees.
     MapIntoScatter,
-    /// Inline a range into an elementwise consumer
-    RangeIntoMap,
     /// Fuse a filter into a reduce: `reduce(op, ne, filter(p, a))` →
     /// `redomap(op∘mask, op, ne, a)` where `mask = λx. if p(x) then x else ne`.
     /// Valid because `ne` is `op`'s neutral element (reduce's contract), so the
     /// masked-out elements fold in as no-ops. Avoids materializing the filtered
     /// array — the result parallelizes as an ordinary redomap.
     FilterIntoReduce,
-    /// Not fusible
-    NotFusible,
 }
 
-/// Determine if a producer can be fused into a consumer.
-pub fn can_fuse(producer: &ArraySemantics, consumer: &ArraySemantics) -> FusionKind {
+/// Determine if a producer can be fused into a consumer. Returns `None` when no
+/// fusion is possible *or* when no builder exists for the pair, so every
+/// `Some(recipe)` is guaranteed buildable.
+pub fn can_fuse(producer: &ArraySemantics, consumer: &ArraySemantics) -> Option<FusionRecipe> {
     match (producer, consumer) {
         // Elementwise → Elementwise: compose bodies
         (ArraySemantics::Elementwise { .. }, ArraySemantics::Elementwise { .. }) => {
-            FusionKind::ComposeElementwise
+            Some(FusionRecipe::ComposeElementwise)
         }
 
         // Elementwise → Reduction: compose map into reduce body
-        (ArraySemantics::Elementwise { .. }, ArraySemantics::Reduction { .. }) => FusionKind::MapIntoReduce,
+        (ArraySemantics::Elementwise { .. }, ArraySemantics::Reduction { .. }) => {
+            Some(FusionRecipe::MapIntoReduce)
+        }
 
         // Elementwise → PrefixScan: compose map into scan body
-        (ArraySemantics::Elementwise { .. }, ArraySemantics::PrefixScan { .. }) => FusionKind::MapIntoScan,
+        (ArraySemantics::Elementwise { .. }, ArraySemantics::PrefixScan { .. }) => {
+            Some(FusionRecipe::MapIntoScan)
+        }
 
         // Elementwise → ScatterOp: compose map into the scatter envelope at the
         // fused input slot (Futhark thesis §7.3.1 map-scatter rule).
         (ArraySemantics::Elementwise { .. }, ArraySemantics::ScatterOp { .. }) => {
-            FusionKind::MapIntoScatter
+            Some(FusionRecipe::MapIntoScatter)
         }
-
-        // Range → Elementwise: inline range into map body
-        (ArraySemantics::Range { .. }, ArraySemantics::Elementwise { .. }) => FusionKind::RangeIntoMap,
 
         // Filter → Reduction: fold the filter into a masked redomap, avoiding
         // the compacted intermediate array entirely.
-        (ArraySemantics::Filter { .. }, ArraySemantics::Reduction { .. }) => FusionKind::FilterIntoReduce,
+        (ArraySemantics::Filter { .. }, ArraySemantics::Reduction { .. }) => {
+            Some(FusionRecipe::FilterIntoReduce)
+        }
 
-        // Everything else: not fusible
-        _ => FusionKind::NotFusible,
+        // Everything else: not fusible (or no builder yet).
+        _ => None,
     }
 }
 
