@@ -5071,21 +5071,34 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32,
     crate::compile_thru_spirv(src).expect("Filter->Map should compile");
 }
 
-/// Range -> Reduce, e.g. `reduce(op, ne, lo..<hi)`. Compiles (iota materialized,
-/// unfused). Fusing it (inline the iota into the reduce) is a perf TODO — there
-/// is no Range builder yet, so `can_fuse` returns `None` for a Range producer.
+/// Range -> Reduce, e.g. `reduce(op, ne, lo..<hi)`. The iota is NOT
+/// materialized: a `Range` lowers to a Virtual array `{start, step, len}` and the
+/// reduce reads each element as `start + i*step` arithmetic inside its own loop
+/// (see `egir/soac_expand.rs` `is_virtual_source`). So this is already optimally
+/// fused at the backend level — no fusion-engine Range builder is needed. We
+/// assert exactly ONE loop in the MIR: a materialized-then-reduced range would
+/// emit two (one to fill the buffer, one to fold it).
 #[test]
-fn range_into_reduce_compiles() {
+fn range_into_reduce_is_virtual_single_loop() {
     let src = r#"
 #[compute]
 entry e(#[storage(set=2, binding=0, access=write)] o: *[]i32) () =
   let s = reduce(|a: i32, b: i32| a + b, 0i32, 0i32 ..< 256) in
   let _ = scatter(o, [0i32], [s]) in ()
 "#;
-    crate::compile_thru_spirv(src).expect("Range->Reduce should compile");
+    let ssa = crate::compile_thru_ssa(src).expect("Range->Reduce should compile");
+    let mir = crate::ssa::print::format_program(&ssa.ssa);
+    let loops = mir.matches("loop merge").count();
+    assert_eq!(
+        loops, 1,
+        "Range->Reduce should fuse to a single virtual-source loop (no materialized iota); \
+         found {loops} loops in MIR:\n{mir}"
+    );
 }
 
-/// Range -> Scan, e.g. `scan(op, ne, lo..<hi)`. Compiles (unfused).
+/// Range -> Scan, e.g. `scan(op, ne, lo..<hi)`. Like Range->Reduce, the iota
+/// stays Virtual (`start + i*step` read on the fly), so it compiles without
+/// materializing a backing buffer.
 #[test]
 fn range_into_scan_compiles() {
     let src = r#"
