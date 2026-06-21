@@ -25,6 +25,10 @@ use crate::SymbolTable;
 
 use super::{Def, Program, Term, TermIdSource, TermKind};
 
+#[cfg(test)]
+#[path = "normalize_tests.rs"]
+mod normalize_tests;
+
 /// Normalize a TLC program into ANF-ish form for fusion analysis.
 pub fn normalize(program: Program) -> Program {
     let mut symbols = program.symbols;
