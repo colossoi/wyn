@@ -5046,6 +5046,89 @@ entry e(#[storage(set=2, binding=0, access=read)] arr0: []vec4f32) []vec2f32 =
         .expect("filter -> map -> reduce -> vec-op -> swizzle in a non-inlined helper must compile");
 }
 
+// ---- Missing fusion combinations (open gaps) --------------------------------
+//
+// `tlc::array_semantics::can_fuse` implements 6 producer->consumer pairs:
+// Map->Map, Map->Reduce, Map->Scan, Map->Scatter, Range->Map, Filter->Reduce.
+// The combinations below are NOT implemented. Each is a real, valid program;
+// today they all panic at the same spot (`tlc/mod.rs:2856`, "Expected array
+// type, got Unique[View]") because a size-changing / range producer feeding
+// another SOAC is left unfused and materialized as a runtime View the
+// downstream SOAC lowering doesn't accept. Kept `#[ignore]`d as ready
+// reproducers; drop the `#[ignore]` (and assert success) as each lands.
+
+/// GAP: Filter -> Map (a "filtered map" / mapMaybe). `map(g, filter(p, a))`
+/// whose result is used directly (not reduced). No `Filter->Elementwise` arm.
+#[test]
+#[ignore = "fusion gap: Filter->Map not implemented"]
+fn fusion_gap_filter_into_map() {
+    let src = r#"
+#[compute]
+entry e(#[storage(set=2, binding=0, access=read)] a: []f32,
+        #[storage(set=2, binding=1, access=write)] o: *[]f32) () =
+  let m = map(|x: f32| x * 2.0, filter(|x: f32| x > 0.0, a[0..256])) in
+  let _ = scatter(o, [0i32], [m[0]]) in ()
+"#;
+    crate::compile_thru_spirv(src).expect("Filter->Map should compile");
+}
+
+/// GAP: Range -> Reduce, e.g. `reduce(op, ne, lo..<hi)` (inline the iota into
+/// the reduce). `RangeIntoMap` exists in `can_fuse` but is never applied, and
+/// no `Range->Reduce` arm exists.
+#[test]
+#[ignore = "fusion gap: Range->Reduce not implemented"]
+fn fusion_gap_range_into_reduce() {
+    let src = r#"
+#[compute]
+entry e(#[storage(set=2, binding=0, access=write)] o: *[]i32) () =
+  let s = reduce(|a: i32, b: i32| a + b, 0i32, 0i32 ..< 256) in
+  let _ = scatter(o, [0i32], [s]) in ()
+"#;
+    crate::compile_thru_spirv(src).expect("Range->Reduce should compile");
+}
+
+/// GAP: Range -> Scan, e.g. `scan(op, ne, lo..<hi)`.
+#[test]
+#[ignore = "fusion gap: Range->Scan not implemented"]
+fn fusion_gap_range_into_scan() {
+    let src = r#"
+#[compute]
+entry e(#[storage(set=2, binding=0, access=write)] o: *[]i32) () =
+  let s = scan(|a: i32, b: i32| a + b, 0i32, 0i32 ..< 256) in
+  let _ = scatter(o, [0i32], [s[0]]) in ()
+"#;
+    crate::compile_thru_spirv(src).expect("Range->Scan should compile");
+}
+
+/// GAP: Filter -> Scan, e.g. `scan(op, ne, filter(p, a))`.
+#[test]
+#[ignore = "fusion gap: Filter->Scan not implemented"]
+fn fusion_gap_filter_into_scan() {
+    let src = r#"
+#[compute]
+entry e(#[storage(set=2, binding=0, access=read)] a: []f32,
+        #[storage(set=2, binding=1, access=write)] o: *[]f32) () =
+  let s = scan(|x: f32, y: f32| x + y, 0.0, filter(|x: f32| x > 0.0, a[0..256])) in
+  let _ = scatter(o, [0i32], [s[0]]) in ()
+"#;
+    crate::compile_thru_spirv(src).expect("Filter->Scan should compile");
+}
+
+/// GAP: Scan -> Map, e.g. `map(g, scan(op, ne, a))` (post-compose an
+/// elementwise tail onto a scan's output).
+#[test]
+#[ignore = "fusion gap: Scan->Map not implemented"]
+fn fusion_gap_scan_into_map() {
+    let src = r#"
+#[compute]
+entry e(#[storage(set=2, binding=0, access=read)] a: []f32,
+        #[storage(set=2, binding=1, access=write)] o: *[]f32) () =
+  let m = map(|x: f32| x + 1.0, scan(|x: f32, y: f32| x + y, 0.0, a[0..256])) in
+  let _ = scatter(o, [0i32], [m[0]]) in ()
+"#;
+    crate::compile_thru_spirv(src).expect("Scan->Map should compile");
+}
+
 /// Regression: an entry returning a tuple where the second output is a
 /// fixed-size literal that *indexes into a scan result* used to silently
 /// drop the second output's binding from the descriptor JSON. Root
