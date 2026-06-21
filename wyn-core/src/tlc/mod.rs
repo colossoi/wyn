@@ -2850,6 +2850,11 @@ impl<'a> Transformer<'a> {
     }
 
     fn get_array_element_type(&self, ty: &Type<TypeName>) -> Type<TypeName> {
+        // See through `Unique` (`*[]T`): the uniqueness qualifier doesn't change
+        // the element type, and a `#[storage]` scatter dest arrives as
+        // `Unique[Array[..]]`. Without stripping it, `is_array()` is false and we
+        // panic on a perfectly good in-place scatter target.
+        let ty = ty.strip_unique();
         ty.elem_type()
             .filter(|_| ty.is_array())
             .cloned()
