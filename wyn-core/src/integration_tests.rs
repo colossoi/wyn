@@ -5014,29 +5014,30 @@ entry tick() f32 =
         .expect("static-capacity filter piped through a size-poly helper must compile");
 }
 
-/// Reproducer (OPEN BUG): a `filter -> map -> reduce` chain whose
-/// reduced result feeds a vector op *and* a swizzle, inside a helper
-/// called from a compute `map`, panics in SPIR-V emission with
-///   `spirv/mod.rs: BUG: Array type has invalid size argument:
-///    Constructed(Skolem(SkolemId(0)), ...)`
-/// — the filter result's abstract size escapes monomorphization and
-/// reaches the backend unresolved. Distilled from the `separation`
-/// boids force in `testfiles/playground/particles.wyn`.
+/// Reproducer (PARTIALLY FIXED — still `#[ignore]`d): a `filter -> map
+/// -> reduce` chain whose reduced result feeds a vector op + swizzle,
+/// inside a helper called from a compute `map`. Distilled from the
+/// `separation` boids force in `testfiles/playground/particles.wyn`.
 ///
-/// Trigger boundary (all three needed):
-///   * the intermediate `map` between `filter` and `reduce`
-///     (filter -> reduce directly does NOT trip it);
-///   * a vector op on the reduced value (`* scalar` or `+ vec`);
-///   * a swizzle of that op's result (drop the `.xy` and it compiles).
+/// Two layered defects:
+///   1. FIXED: the intermediate `map`'s result type was the existential
+///      `Composite` + `Skolem`-size opened from the `filter` (a backend
+///      panic at `spirv/mod.rs`: "invalid size argument: Skolem"). The
+///      shape-preserving fix in `convert_soac_map` (`egir/from_tlc.rs`)
+///      makes a non-in-place map inherit its input's representation.
+///   2. STILL OPEN: with the size fixed, the chain still does not fuse
+///      (the reduce sits under a binop/swizzle so `map->reduce` /
+///      `filter->reduce` don't fire), so the `filter` is materialized
+///      and its scratch hits "ArrayWith: ... Unsized or view arrays may
+///      not support indexed writes". The real fix is to collapse the
+///      chain (fusion) or give the materialized filter a sized scratch.
 ///
-/// The inner panic runs on the lowering thread; `lower_ssa_program`
-/// re-panics on `join` with "Lowering thread panicked", which is what
-/// propagates here. When this bug is fixed this test will start
-/// failing ("did not panic") — replace it with a positive
-/// `compile_thru_spirv(...).expect(...)` assertion at that point.
+/// Kept as an `#[ignore]`d "must compile" assertion: it documents the
+/// target end state and reproduces defect 2 on demand. Remove the
+/// `#[ignore]` once the chain fuses / the materialized filter lowers.
 #[test]
-#[should_panic(expected = "Lowering thread panicked")]
-fn filter_map_reduce_vecop_swizzle_in_helper_panics_skolem_size() {
+#[ignore = "fusion/materialization gap: filter->map->reduce under a binop doesn't fuse; materialized filter hits ArrayWith on an unsized scratch"]
+fn filter_map_reduce_vecop_swizzle_in_helper_compiles() {
     let src = r#"
 def f(arr: []vec4f32) vec2f32 =
   let selected = filter(|d| d.x < 1.0, arr) in
@@ -5048,7 +5049,8 @@ entry e(#[storage(set=2, binding=0, access=read)] arr0: []vec4f32) []vec2f32 =
   let arr = arr0[0..512] in
   map(|p: vec4f32| f(arr), arr)
 "#;
-    let _ = crate::compile_thru_spirv(src);
+    crate::compile_thru_spirv(src)
+        .expect("filter -> map -> reduce -> vec-op -> swizzle in a non-inlined helper must compile");
 }
 
 /// Regression: an entry returning a tuple where the second output is a
