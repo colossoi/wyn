@@ -30,7 +30,11 @@ fn format_type(ty: &Type<TypeName>) -> String {
         Type::Constructed(TypeName::Unit, _) => "()".to_string(),
         Type::Constructed(TypeName::Tuple(n), args) => {
             let inner: Vec<String> = args.iter().map(format_type).collect();
-            if *n == 1 { format!("({},)", inner.join(", ")) } else { format!("({})", inner.join(", ")) }
+            if *n == 1 {
+                format!("({},)", inner.join(", "))
+            } else {
+                format!("({})", inner.join(", "))
+            }
         }
         Type::Constructed(TypeName::Array, args) if args.len() >= 2 => {
             let elem = format_type(&args[0]);

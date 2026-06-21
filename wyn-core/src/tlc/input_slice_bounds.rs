@@ -36,13 +36,13 @@ use std::collections::{HashMap, HashSet};
 
 use polytype::Type;
 
-use crate::SymbolId;
 use crate::ast::TypeName;
-use crate::builtins::{BuiltinId, catalog};
+use crate::builtins::{catalog, BuiltinId};
 use crate::pipeline_descriptor::BufferLen;
 use crate::types::TypeExt;
+use crate::SymbolId;
 
-use super::{DefMeta, Program, Term, TermKind, VarRef, extract_lambda_params};
+use super::{extract_lambda_params, DefMeta, Program, Term, TermKind, VarRef};
 
 /// Per-entry-point per-symbol input slice bounds for an entire program.
 /// Outer key: entry-point surface name. Inner key: the entry's input

@@ -1,6 +1,6 @@
 use super::{SkolemId, Type, TypeExt, TypeName, TypeScheme};
 use crate::ast::*;
-use crate::builtins::{BuiltinId, by_id};
+use crate::builtins::{by_id, BuiltinId};
 use crate::error::{CompilerError, Result};
 use crate::interface::Attribute;
 use crate::module_manager::ModuleManager;
@@ -12,7 +12,7 @@ use polytype::Context;
 use std::collections::{BTreeSet, HashMap};
 
 // Import type helper functions from parent module
-use super::patterns::coverage::{CoverageError, check_match, format_cov_pat};
+use super::patterns::coverage::{check_match, format_cov_pat, CoverageError};
 use super::{
     as_arrow, bool_type, f32, function, i32, mat, no_region, record, sized_array, strip_unique, tuple,
     unit, vec,
@@ -380,7 +380,11 @@ impl<'a> TypeChecker<'a> {
             None => 0,
         };
         let end = Self::try_extract_const_int(slice.end.as_ref()?)?;
-        if end >= start { Some((end - start) as usize) } else { None }
+        if end >= start {
+            Some((end - start) as usize)
+        } else {
+            None
+        }
     }
 
     /// Pure structural equality without applying substitution.

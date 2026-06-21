@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use crate::ssa::framework::BlockId;
 use polytype::Type;
-use smallvec::{SmallVec, smallvec};
+use smallvec::{smallvec, SmallVec};
 
 use super::graph_ops::{
     alloc_effect, emit_alloca, emit_load, emit_place_index_store, emit_store, next_effect_token,
@@ -122,7 +122,11 @@ pub(super) fn as_soa_tuple(ty: &Type<TypeName>) -> Option<&[Type<TypeName>]> {
         matches!(ct, Type::Constructed(TypeName::Array, args) if args.len() == 4)
             || as_soa_tuple(ct).is_some()
     });
-    if all_soa { Some(components) } else { None }
+    if all_soa {
+        Some(components)
+    } else {
+        None
+    }
 }
 
 /// Element type of a SoA tuple: `([n]A, [n]B)` → `(A, B)`. Nested SoA tuples

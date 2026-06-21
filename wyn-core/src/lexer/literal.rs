@@ -7,13 +7,13 @@
 //! - String literals: "stringchar*"
 
 use nom::{
-    IResult,
     branch::alt,
     bytes::complete::{tag, take_while},
     character::complete::{char, digit1, hex_digit1, one_of},
     combinator::{map, opt, recognize},
     multi::many1,
     sequence::{delimited, pair, tuple},
+    IResult,
 };
 
 use super::Token;

@@ -6,7 +6,7 @@
 
 use super::VarRef;
 use super::{
-    Def, DefMeta, Program, Term, TermIdSource, TermKind, collect_var_refs, extract_lambda_params, term_size,
+    collect_var_refs, extract_lambda_params, term_size, Def, DefMeta, Program, Term, TermIdSource, TermKind,
 };
 use crate::ast::{Span, TypeName};
 use crate::{SymbolId, SymbolTable};

@@ -15,10 +15,10 @@
 
 use super::VarRef;
 use super::{ArrayExpr, Def, Lambda, LoopKind, Place, Program, SoacOp, Term, TermIdSource, TermKind};
-use crate::SymbolTable;
 use crate::ast::{Span, TypeName};
 use crate::builtins::{by_id, catalog};
 use crate::types::TypeExt;
+use crate::SymbolTable;
 use polytype::Type;
 
 // =============================================================================

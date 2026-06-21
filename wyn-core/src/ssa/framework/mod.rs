@@ -1,5 +1,5 @@
 pub use slotmap::Key;
-use slotmap::{SlotMap, new_key_type};
+use slotmap::{new_key_type, SlotMap};
 use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::fmt::Debug;

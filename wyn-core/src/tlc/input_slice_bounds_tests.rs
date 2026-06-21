@@ -2,8 +2,8 @@
 //! on `input_slice_bounds` for the contract.
 
 use crate::pipeline_descriptor::BufferLen;
-use crate::tlc::Program;
 use crate::tlc::input_slice_bounds;
+use crate::tlc::Program;
 
 /// Parse + frontend a fragment of Wyn source down to a TLC `Program`
 /// with constant folding applied (`partial_eval`), which is what the

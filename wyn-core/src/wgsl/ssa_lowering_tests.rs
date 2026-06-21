@@ -1,6 +1,6 @@
 //! WGSL backend unit tests.
 
-use super::{TypeEmitter, validate_wgsl_identifier, wgsl_mangle};
+use super::{validate_wgsl_identifier, wgsl_mangle, TypeEmitter};
 use crate::ast::TypeName;
 use polytype::Type as PolyType;
 

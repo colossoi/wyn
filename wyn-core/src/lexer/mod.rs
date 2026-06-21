@@ -4,13 +4,13 @@ mod tests;
 
 use crate::ast::Span;
 use nom::{
-    IResult,
     branch::alt,
     bytes::complete::{tag, take_until},
     character::complete::{alpha1, alphanumeric1, char, multispace0, multispace1, one_of},
     combinator::{eof, map, peek, recognize, value},
     multi::many0,
     sequence::{pair, preceded, terminated, tuple},
+    IResult,
 };
 
 use literal::{parse_float_literal, parse_int_literal, parse_string_literal};
@@ -279,7 +279,11 @@ fn parse_identifier(input: &str) -> IResult<&str, Token> {
         )),
         |s: &str| {
             // Handle underscore specially - it's a wildcard pattern, not an identifier
-            if s == "_" { Token::Underscore } else { Token::Identifier(s.to_string()) }
+            if s == "_" {
+                Token::Underscore
+            } else {
+                Token::Identifier(s.to_string())
+            }
         },
     )(input)
 }

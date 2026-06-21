@@ -1,9 +1,9 @@
 //! Tests for the gather-materialization pass (`lift_gathers`).
 
 use super::{DefMeta, Program, SoacOp, Term, TermKind, VarRef};
-use crate::Compiler;
-use crate::builtins::{BuiltinId, catalog};
+use crate::builtins::{catalog, BuiltinId};
 use crate::interface::StorageRole;
+use crate::Compiler;
 
 const GATHER_SRC: &str = "\
 #[compute]

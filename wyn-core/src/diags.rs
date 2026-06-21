@@ -154,7 +154,11 @@ fn format_constructed_type(name: &TypeName, args: &[PolyType<TypeName>]) -> Stri
         }
         TypeName::Pointer => {
             // Ptr<T>
-            if args.len() == 1 { format!("Ptr<{}>", format_type(&args[0])) } else { "Ptr<?>".to_string() }
+            if args.len() == 1 {
+                format!("Ptr<{}>", format_type(&args[0]))
+            } else {
+                "Ptr<?>".to_string()
+            }
         }
         TypeName::PointerFunction => "PtrFunction".to_string(),
         TypeName::PointerInput => "PtrInput".to_string(),

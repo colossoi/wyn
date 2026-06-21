@@ -18,7 +18,7 @@ use crate::name_resolution::NameResolution;
 use crate::types::TypeName;
 use crate::{SymbolId, SymbolTable, TypeTable};
 
-use super::{Program, Transformer, defaults};
+use super::{defaults, Program, Transformer};
 
 pub struct TlcOutput {
     pub program: Program,

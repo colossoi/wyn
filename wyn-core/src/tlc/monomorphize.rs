@@ -1192,7 +1192,11 @@ fn format_type_compact(ty: &Type<TypeName>) -> String {
         Type::Constructed(name, args) => {
             // Fallback for other constructed types
             let args_str = args.iter().map(format_type_compact).collect::<Vec<_>>().join("_");
-            if args_str.is_empty() { format!("{:?}", name) } else { format!("{:?}_{}", name, args_str) }
+            if args_str.is_empty() {
+                format!("{:?}", name)
+            } else {
+                format!("{:?}_{}", name, args_str)
+            }
         }
     }
 }

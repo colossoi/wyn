@@ -9,10 +9,10 @@ use crate::SymbolTable;
 use std::collections::HashMap;
 
 use super::{
-    ArrayExpr, Def, Lambda, Place, Program, SoacBody, SoacOp, Term, TermKind, extract_lambda_params,
+    extract_lambda_params, ArrayExpr, Def, Lambda, Place, Program, SoacBody, SoacOp, Term, TermKind,
 };
-use crate::SymbolId;
 use crate::ast::TypeName;
+use crate::SymbolId;
 use polytype::Type;
 
 // =============================================================================

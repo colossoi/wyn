@@ -15,7 +15,6 @@ use std::fmt::Write as _;
 
 use polytype::Type as PolyType;
 
-use crate::BindingRef;
 use crate::ast::{Span, TypeName};
 use crate::builtins::lowering::{BuiltinLowering, PrimOp};
 use crate::error::Result;
@@ -24,6 +23,7 @@ use crate::ssa::types::{
     WynInstNode,
 };
 use crate::types::TypeExt;
+use crate::BindingRef;
 
 /// Lower an SSA program to a WGSL module. The module contains all entry
 /// points (distinguished by `@vertex` / `@fragment` / `@compute`
@@ -2303,7 +2303,11 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             .iter()
                             .zip(f.body.params.iter())
                             .filter_map(|(arg, (_, pty, _))| {
-                                if is_view_array_ty(pty) { None } else { Some(self.get_value(*arg)) }
+                                if is_view_array_ty(pty) {
+                                    None
+                                } else {
+                                    Some(self.get_value(*arg))
+                                }
                             })
                             .collect::<Result<Vec<_>>>()?,
                         None => raw_strs,
@@ -2881,11 +2885,19 @@ fn lower_primop_wgsl(prim_op: &PrimOp, args: &[String], result_ty_str: Option<&s
         // `Bitcast` is special — WGSL needs explicit `bitcast<T>(x)`.
         SIToFP | UIToFP | FPToSI | FPToUI | FPConvert | SConvert | UConvert => {
             let result_ty = result_ty_str?;
-            if args.len() == 1 { Some(format!("{}({})", result_ty, args[0])) } else { None }
+            if args.len() == 1 {
+                Some(format!("{}({})", result_ty, args[0]))
+            } else {
+                None
+            }
         }
         Bitcast => {
             let result_ty = result_ty_str?;
-            if args.len() == 1 { Some(format!("bitcast<{}>({})", result_ty, args[0])) } else { None }
+            if args.len() == 1 {
+                Some(format!("bitcast<{}>({})", result_ty, args[0]))
+            } else {
+                None
+            }
         }
 
         // `OuterProduct`, `IsNan`, `IsInf`, and the arithmetic /

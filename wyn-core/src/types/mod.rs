@@ -980,7 +980,11 @@ pub fn sized_array_placeholder(size: usize, elem_type: Type) -> Type {
 }
 
 pub fn tuple(types: Vec<Type>) -> Type {
-    if types.is_empty() { unit() } else { Type::Constructed(TypeName::Tuple(types.len()), types) }
+    if types.is_empty() {
+        unit()
+    } else {
+        Type::Constructed(TypeName::Tuple(types.len()), types)
+    }
 }
 
 pub fn function(arg: Type, ret: Type) -> Type {
@@ -1159,7 +1163,7 @@ pub fn is_array_variant_abstract(ty: &Type) -> bool {
 
 pub mod schema_validation;
 pub use schema_validation::{
-    ArgKind, debug_assert_array_args, validate_array_args, validate_type_args, validate_type_schema,
+    debug_assert_array_args, validate_array_args, validate_type_args, validate_type_schema, ArgKind,
 };
 
 /// Get the array variant from an array type (returns the variant type argument)

@@ -10,11 +10,11 @@
 use super::VarRef;
 use super::{ArrayExpr, Def, Lambda, Program, SoacBody, SoacDestination, SoacOp};
 use super::{Term, TermIdSource, TermKind};
+use crate::ast::{Span, TypeName};
+use crate::builtins::{catalog, BuiltinId};
+use crate::types::TypeExt;
 use crate::SymbolId;
 use crate::SymbolTable;
-use crate::ast::{Span, TypeName};
-use crate::builtins::{BuiltinId, catalog};
-use crate::types::TypeExt;
 use polytype::Type;
 use std::collections::HashSet;
 

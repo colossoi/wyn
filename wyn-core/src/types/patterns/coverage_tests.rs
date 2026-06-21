@@ -8,7 +8,7 @@
 
 use super::*;
 use crate::ast::Span;
-use crate::types::{Type, TypeName, sum, tuple};
+use crate::types::{sum, tuple, Type, TypeName};
 
 fn dummy_span() -> Span {
     Span::dummy()

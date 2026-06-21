@@ -9,8 +9,8 @@
 //! T11 additionally verifies `required_params` — the subset of outer
 //! Lambda params that the restructured body actually references.
 
-use super::VarRef;
 use super::analyze_entry;
+use super::VarRef;
 use crate::ast::{self, Span, TypeName};
 use crate::tlc::{
     ArrayExpr, Def, DefMeta, Lambda, LoopKind, ScremaAccumulator, ScremaAccumulatorSpec, SoacBody,

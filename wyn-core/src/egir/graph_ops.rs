@@ -13,14 +13,14 @@
 //! effect-token counter.
 
 use polytype::Type;
-use smallvec::{SmallVec, smallvec};
+use smallvec::{smallvec, SmallVec};
 
-use crate::BindingRef;
 use crate::ast::{Span, TypeName};
-use crate::builtins::BuiltinId;
 use crate::builtins::catalog;
+use crate::builtins::BuiltinId;
 use crate::ssa::framework::BlockId;
 use crate::ssa::types::{ConstantValue, InstKind, ValueRef};
+use crate::BindingRef;
 
 use super::types::{
     EGraph, ENode, EffectToken, NodeId, PendingSoac, PureOp, PureViewSource, SideEffect, SideEffectKind,

@@ -363,7 +363,11 @@ impl<'a> Parser<'a> {
             .iter()
             .find_map(
                 |attr| {
-                    if let Attribute::Linked(name) = attr { Some(name.clone()) } else { None }
+                    if let Attribute::Linked(name) = attr {
+                        Some(name.clone())
+                    } else {
+                        None
+                    }
                 },
             )
             .ok_or_else(|| err_parse!("extern declaration requires #[linked(\"name\")] attribute"))?;
@@ -1290,7 +1294,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 self.expect(Token::RightBracket)?;
                 let elem_type = self.parse_array_or_base_type()?; // Allow nested arrays
-                // Array[elem, variant, size]
+                                                                  // Array[elem, variant, size]
                 Ok(Type::Constructed(
                     TypeName::Array,
                     vec![
@@ -1922,7 +1926,7 @@ impl<'a> Parser<'a> {
         // Parse remaining arguments separated by commas
         while self.check(&Token::Comma) {
             self.advance(); // consume ','
-            // Allow trailing comma: f(x, y,)
+                            // Allow trailing comma: f(x, y,)
             if self.check(&Token::RightParen) {
                 break;
             }
@@ -2241,7 +2245,11 @@ impl<'a> Parser<'a> {
             .enumerate()
             .filter_map(
                 |(i, arg)| {
-                    if matches!(arg, CurryArg::Placeholder) { Some(i) } else { None }
+                    if matches!(arg, CurryArg::Placeholder) {
+                        Some(i)
+                    } else {
+                        None
+                    }
                 },
             )
             .collect();

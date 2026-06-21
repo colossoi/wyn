@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use super::{SpecKey, Substitution, format_type_compact};
+use super::{format_type_compact, SpecKey, Substitution};
 use crate::ast::TypeName;
 use polytype::Type;
 

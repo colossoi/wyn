@@ -1,10 +1,10 @@
 use super::super::SoacOp;
 use super::VarRef;
-use super::{Origin, OwnershipModel, analyze, build, eligible_consuming_soacs};
-use crate::Compiler;
-use crate::SymbolTable;
+use super::{analyze, build, eligible_consuming_soacs, Origin, OwnershipModel};
 use crate::builtins::catalog;
 use crate::tlc::{Program, SoacDestination, Term, TermKind};
+use crate::Compiler;
+use crate::SymbolTable;
 
 #[test]
 fn origin_mutability() {

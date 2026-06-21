@@ -20,7 +20,7 @@ impl std::fmt::Display for EffectToken {
     }
 }
 use polytype::Type;
-use slotmap::{SlotMap, new_key_type};
+use slotmap::{new_key_type, SlotMap};
 use smallvec::SmallVec;
 use std::collections::HashMap;
 

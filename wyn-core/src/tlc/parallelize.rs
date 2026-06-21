@@ -6,8 +6,8 @@
 //!
 //! Loop creation and storage lowering stay in SSA (`to_ssa` + `soac_lower`).
 
-use super::VarRef;
 use super::closure_convert::collect_free_vars;
+use super::VarRef;
 use crate::ast::{self, TypeName};
 use crate::builtins::catalog;
 use crate::egir::from_tlc::AUTO_STORAGE_SET;
@@ -535,7 +535,11 @@ fn compute_required_params(
         .iter()
         .filter_map(
             |t| {
-                if let TermKind::Var(VarRef::Symbol(s)) = &t.kind { Some(*s) } else { None }
+                if let TermKind::Var(VarRef::Symbol(s)) = &t.kind {
+                    Some(*s)
+                } else {
+                    None
+                }
             },
         )
         .collect();
@@ -1202,7 +1206,11 @@ fn compute_broadcast_required_params(
         .iter()
         .filter_map(
             |t| {
-                if let TermKind::Var(VarRef::Symbol(s)) = &t.kind { Some(*s) } else { None }
+                if let TermKind::Var(VarRef::Symbol(s)) = &t.kind {
+                    Some(*s)
+                } else {
+                    None
+                }
             },
         )
         .collect();

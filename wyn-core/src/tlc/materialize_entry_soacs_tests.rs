@@ -9,8 +9,8 @@
 //! not here; this fixes the *materialization decision*.
 
 use super::run;
-use crate::Compiler;
 use crate::tlc::{DefMeta, Program, Term, TermKind, VarRef};
+use crate::Compiler;
 
 /// Compile `src` to the `lift_gathers` stage and run the pass on it.
 fn materialize(src: &str) -> Program {

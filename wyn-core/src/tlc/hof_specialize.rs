@@ -12,8 +12,8 @@
 //! let-alias tracking, no four-source extract — those concerns are
 //! handled by `closure_convert` upstream.
 
-use super::VarRef;
 use super::closure_convert::{CallableValue, ClosureInfo};
+use super::VarRef;
 use super::{
     ArrayExpr, Def, DefMeta, Lambda, LoopKind, Place, Program, SoacOp, Term, TermIdSource, TermKind,
 };
@@ -1492,7 +1492,11 @@ impl<'a> HofSpecializer<'a> {
                     TermKind::Var(VarRef::Symbol(s)) => *s,
                     _ => return None,
                 };
-                if self.closure_info.resolve_callable(s).is_some() { Some(i) } else { None }
+                if self.closure_info.resolve_callable(s).is_some() {
+                    Some(i)
+                } else {
+                    None
+                }
             })
             .collect();
 

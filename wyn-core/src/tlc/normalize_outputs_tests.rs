@@ -1,6 +1,6 @@
-use crate::Compiler;
 use crate::ast::TypeName;
 use crate::tlc::{Program, Term, TermKind};
+use crate::Compiler;
 use polytype::Type;
 
 /// Compile a Wyn source string up to (and including) `normalize_outputs`,
