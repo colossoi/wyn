@@ -6,12 +6,12 @@
 //!
 //! All tests include entry points to ensure monomorphization can find reachable code.
 
-use crate::Compiler;
-use crate::SymbolTable;
 use crate::ssa::types::Program;
+use crate::tlc::extract_lambda_params;
 use crate::tlc::TermKind;
 use crate::tlc::VarRef;
-use crate::tlc::extract_lambda_params;
+use crate::Compiler;
+use crate::SymbolTable;
 
 /// Run source through the pipeline up to SSA.
 fn compile_to_ssa(input: &str) -> Program {
@@ -257,8 +257,8 @@ entry sum(xs: []f32) f32 =
 /// On violation, panics with the offending sym, its symbol-table name,
 /// and the pipeline stage name.
 fn assert_no_unbound_var_refs(program: &crate::tlc::Program, stage: &str) {
-    use crate::SymbolId;
     use crate::tlc::{ArrayExpr, Lambda, LoopKind, SoacOp, Term, TermKind};
+    use crate::SymbolId;
     use std::collections::HashSet;
 
     fn walk(term: &Term, bound: &HashSet<SymbolId>, symbols: &SymbolTable, stage: &str, def_name: &str) {
@@ -3078,7 +3078,11 @@ entry sq(xs: []f32) []f32 = map(|x: f32| x * x, xs)
     // Find the gl_GlobalInvocationID input variable's id from the
     // EntryPoint interface (3rd-and-later operands of OpEntryPoint).
     let entry = module.entry_points.iter().find(|i| {
-        if let Some(Operand::LiteralString(name)) = i.operands.get(2) { name == "sq" } else { false }
+        if let Some(Operand::LiteralString(name)) = i.operands.get(2) {
+            name == "sq"
+        } else {
+            false
+        }
     });
     let entry = entry.expect("entry sq present");
     let func_id = match entry.operands.get(1) {
@@ -5008,6 +5012,43 @@ entry tick() f32 =
 "#;
     crate::compile_thru_spirv(src)
         .expect("static-capacity filter piped through a size-poly helper must compile");
+}
+
+/// Reproducer (OPEN BUG): a `filter -> map -> reduce` chain whose
+/// reduced result feeds a vector op *and* a swizzle, inside a helper
+/// called from a compute `map`, panics in SPIR-V emission with
+///   `spirv/mod.rs: BUG: Array type has invalid size argument:
+///    Constructed(Skolem(SkolemId(0)), ...)`
+/// — the filter result's abstract size escapes monomorphization and
+/// reaches the backend unresolved. Distilled from the `separation`
+/// boids force in `testfiles/playground/particles.wyn`.
+///
+/// Trigger boundary (all three needed):
+///   * the intermediate `map` between `filter` and `reduce`
+///     (filter -> reduce directly does NOT trip it);
+///   * a vector op on the reduced value (`* scalar` or `+ vec`);
+///   * a swizzle of that op's result (drop the `.xy` and it compiles).
+///
+/// The inner panic runs on the lowering thread; `lower_ssa_program`
+/// re-panics on `join` with "Lowering thread panicked", which is what
+/// propagates here. When this bug is fixed this test will start
+/// failing ("did not panic") — replace it with a positive
+/// `compile_thru_spirv(...).expect(...)` assertion at that point.
+#[test]
+#[should_panic(expected = "Lowering thread panicked")]
+fn filter_map_reduce_vecop_swizzle_in_helper_panics_skolem_size() {
+    let src = r#"
+def f(arr: []vec4f32) vec2f32 =
+  let selected = filter(|d| d.x < 1.0, arr) in
+  let contributions = map(|d| d * 2.0, selected) in
+  (reduce(|a, b| a + b, @[0.0, 0.0, 0.0, 0.0], contributions) * 0.1).xy
+
+#[compute]
+entry e(#[storage(set=2, binding=0, access=read)] arr0: []vec4f32) []vec2f32 =
+  let arr = arr0[0..512] in
+  map(|p: vec4f32| f(arr), arr)
+"#;
+    let _ = crate::compile_thru_spirv(src);
 }
 
 /// Regression: an entry returning a tuple where the second output is a
