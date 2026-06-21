@@ -5050,17 +5050,19 @@ entry e(#[storage(set=2, binding=0, access=read)] arr0: []vec4f32) []vec2f32 =
 //
 // `tlc::array_semantics::can_fuse` implements 6 producer->consumer pairs:
 // Map->Map, Map->Reduce, Map->Scan, Map->Scatter, Range->Map, Filter->Reduce.
-// The combinations below are NOT implemented. Each is a real, valid program;
-// today they all panic at the same spot (`tlc/mod.rs:2856`, "Expected array
-// type, got Unique[View]") because a size-changing / range producer feeding
-// another SOAC is left unfused and materialized as a runtime View the
-// downstream SOAC lowering doesn't accept. Kept `#[ignore]`d as ready
-// reproducers; drop the `#[ignore]` (and assert success) as each lands.
+// The combinations below are NOT fused. After fixing `get_array_element_type`
+// to see through `Unique` (a `*[]T` scatter dest), the Range/Scan producers now
+// *compile* (materialized, unfused) — fusing them is a perf TODO. The two
+// Filter-producer cases still fail to lower a materialized filter result and
+// stay `#[ignore]`d as reproducers.
 
-/// GAP: Filter -> Map (a "filtered map" / mapMaybe). `map(g, filter(p, a))`
-/// whose result is used directly (not reduced). No `Filter->Elementwise` arm.
+/// GAP (open): Filter -> Map (a "filtered map" / mapMaybe). `map(g, filter(p, a))`
+/// used directly. The filter is materialized and its scratch hits
+/// "ArrayWith: ... Unsized or view arrays may not support indexed writes".
+/// Needs a Filter->Elementwise fusion (avoid materializing) or a sized filter
+/// scratch.
 #[test]
-#[ignore = "fusion gap: Filter->Map not implemented"]
+#[ignore = "open: Filter->Map materializes the filter and hits ArrayWith on an unsized scratch"]
 fn fusion_gap_filter_into_map() {
     let src = r#"
 #[compute]
@@ -5072,12 +5074,11 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32,
     crate::compile_thru_spirv(src).expect("Filter->Map should compile");
 }
 
-/// GAP: Range -> Reduce, e.g. `reduce(op, ne, lo..<hi)` (inline the iota into
-/// the reduce). `RangeIntoMap` exists in `can_fuse` but is never applied, and
-/// no `Range->Reduce` arm exists.
+/// Range -> Reduce, e.g. `reduce(op, ne, lo..<hi)`. Compiles (iota materialized,
+/// unfused). Fusing it (inline the iota into the reduce) is a perf TODO;
+/// `RangeIntoMap` exists in `can_fuse` but is never applied in the driver.
 #[test]
-#[ignore = "fusion gap: Range->Reduce not implemented"]
-fn fusion_gap_range_into_reduce() {
+fn range_into_reduce_compiles() {
     let src = r#"
 #[compute]
 entry e(#[storage(set=2, binding=0, access=write)] o: *[]i32) () =
@@ -5087,10 +5088,9 @@ entry e(#[storage(set=2, binding=0, access=write)] o: *[]i32) () =
     crate::compile_thru_spirv(src).expect("Range->Reduce should compile");
 }
 
-/// GAP: Range -> Scan, e.g. `scan(op, ne, lo..<hi)`.
+/// Range -> Scan, e.g. `scan(op, ne, lo..<hi)`. Compiles (unfused).
 #[test]
-#[ignore = "fusion gap: Range->Scan not implemented"]
-fn fusion_gap_range_into_scan() {
+fn range_into_scan_compiles() {
     let src = r#"
 #[compute]
 entry e(#[storage(set=2, binding=0, access=write)] o: *[]i32) () =
@@ -5100,9 +5100,13 @@ entry e(#[storage(set=2, binding=0, access=write)] o: *[]i32) () =
     crate::compile_thru_spirv(src).expect("Range->Scan should compile");
 }
 
-/// GAP: Filter -> Scan, e.g. `scan(op, ne, filter(p, a))`.
+/// GAP (open): Filter -> Scan, e.g. `scan(op, ne, filter(p, a))`. The
+/// materialized filter result leaks its existential `Skolem` size into the scan
+/// (panic at `spirv/mod.rs`: "invalid size argument: Skolem"). The
+/// shape-preserving fix landed for `map`; `scan` needs the same treatment (or a
+/// Filter->Scan fusion).
 #[test]
-#[ignore = "fusion gap: Filter->Scan not implemented"]
+#[ignore = "open: Filter->Scan leaks the filter's Skolem size into the scan (spirv panic)"]
 fn fusion_gap_filter_into_scan() {
     let src = r#"
 #[compute]
@@ -5114,11 +5118,10 @@ entry e(#[storage(set=2, binding=0, access=read)] a: []f32,
     crate::compile_thru_spirv(src).expect("Filter->Scan should compile");
 }
 
-/// GAP: Scan -> Map, e.g. `map(g, scan(op, ne, a))` (post-compose an
-/// elementwise tail onto a scan's output).
+/// Scan -> Map, e.g. `map(g, scan(op, ne, a))`. Compiles (unfused). Fusing it
+/// (post-compose the map onto the scan's output) is a perf TODO.
 #[test]
-#[ignore = "fusion gap: Scan->Map not implemented"]
-fn fusion_gap_scan_into_map() {
+fn scan_into_map_compiles() {
     let src = r#"
 #[compute]
 entry e(#[storage(set=2, binding=0, access=read)] a: []f32,
