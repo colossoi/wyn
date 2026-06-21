@@ -17,8 +17,8 @@ use polytype::Type;
 use std::collections::HashMap;
 
 use super::array_semantics::{
-    can_fuse, classify_term, summarize_program, ArraySemantics, FunctionSummary, FusionRecipe,
-    ResultSemantics,
+    can_fuse, classify_soac, classify_term, summarize_program, ArraySemantics, FunctionSummary,
+    FusionRecipe, ResultSemantics,
 };
 use super::{
     extract_lambda_params, ArrayExpr, Def, Lambda, Program, SoacDestination, SoacOp, Term, TermId,
@@ -2373,69 +2373,17 @@ fn fuse_inline_soac_inputs(
         }
 
         // reduce(op, ne, map(g, xs)) → redomap(op∘g, op, ne, xs)
-        TermKind::Soac(SoacOp::Reduce { op, ne, input }) => {
-            if let Some(fused) = fuse_inline_accumulator_input(
-                InlineAccumulatorKind::Reduce,
-                op.clone(),
-                op.clone(),
-                ne.clone(),
-                input.clone(),
-                span,
-                symbols,
-                term_ids,
-            ) {
-                return (
-                    Term {
-                        kind: TermKind::Soac(fused),
-                        ..term
-                    },
-                    true,
-                );
+        // scan(op, ne, map(g, xs))   → scan(op∘g, ne, xs)   (single map input)
+        // Built through the same `build_fused_from_semantics` as the let-bound
+        // path: at this point the consumer is unfused (op == reduce_op), so the
+        // shared builder reconstructs the identical SOAC.
+        TermKind::Soac(soac @ (SoacOp::Reduce { .. } | SoacOp::Scan { .. })) => {
+            if let Some(fused) = fuse_inline_accumulator(&soac, &term.ty, span, symbols, term_ids) {
+                return (fused, true);
             }
             (
                 Term {
-                    kind: TermKind::Soac(SoacOp::Reduce { op, ne, input }),
-                    ..term
-                },
-                changed,
-            )
-        }
-
-        // scan(op, ne, map(g, xs)) → scan(op∘g, ne, xs)   (single map input only)
-        TermKind::Soac(SoacOp::Scan {
-            op,
-            reduce_op,
-            ne,
-            input,
-            destination,
-        }) => {
-            if let Some(fused) = fuse_inline_accumulator_input(
-                InlineAccumulatorKind::Scan,
-                op.clone(),
-                reduce_op.clone(),
-                ne.clone(),
-                input.clone(),
-                span,
-                symbols,
-                term_ids,
-            ) {
-                return (
-                    Term {
-                        kind: TermKind::Soac(fused),
-                        ..term
-                    },
-                    true,
-                );
-            }
-            (
-                Term {
-                    kind: TermKind::Soac(SoacOp::Scan {
-                        op,
-                        reduce_op,
-                        ne,
-                        input,
-                        destination,
-                    }),
+                    kind: TermKind::Soac(soac),
                     ..term
                 },
                 changed,
@@ -2446,52 +2394,38 @@ fn fuse_inline_soac_inputs(
     }
 }
 
-enum InlineAccumulatorKind {
-    Reduce,
-    Scan,
-}
-
-fn fuse_inline_accumulator_input(
-    kind: InlineAccumulatorKind,
-    op: super::SoacBody,
-    reduce_op: super::SoacBody,
-    ne: Box<Term>,
-    input: ArrayExpr,
+/// Fuse an inline `map` producer into an enclosing `reduce`/`scan` consumer,
+/// constructed via the shared [`build_fused_from_semantics`] so the inline path
+/// and the let-bound path build identical fused SOACs. Returns `None` if the
+/// accumulator's single input isn't an inline `map`.
+fn fuse_inline_accumulator(
+    consumer: &SoacOp,
+    consumer_ty: &Type<TypeName>,
     span: Span,
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
-) -> Option<SoacOp> {
-    if op.lam.params.len() != 2 {
-        return None;
-    }
-    let (map_sb, map_inputs) = inline_map_producer(&input)?;
-    let composed_op = compose_map_reduce(map_sb.lam, op.lam, span, symbols, term_ids);
-    let op = super::SoacBody {
-        lam: composed_op,
-        captures: vec![],
+) -> Option<Term> {
+    let input = match consumer {
+        SoacOp::Reduce { input, .. } | SoacOp::Scan { input, .. } => input,
+        _ => return None,
     };
-    match kind {
-        InlineAccumulatorKind::Reduce => Some(SoacOp::Redomap {
-            op,
-            reduce_op,
-            ne,
-            inputs: map_inputs,
-        }),
-        InlineAccumulatorKind::Scan => {
-            let mut map_inputs = map_inputs.into_iter();
-            let input = map_inputs.next()?;
-            if map_inputs.next().is_some() {
-                return None;
-            }
-            Some(SoacOp::Scan {
-                op,
-                reduce_op,
-                ne,
-                input,
-                destination: SoacDestination::Fresh,
-            })
-        }
-    }
+    let (map_lam, map_inputs) = inline_map_producer(input)?;
+    let producer = ArraySemantics::Elementwise {
+        inputs: map_inputs,
+        body: map_lam,
+    };
+    let consumer_sem = classify_soac(consumer);
+    let recipe = can_fuse(&producer, &consumer_sem)?;
+    build_fused_from_semantics(
+        &producer,
+        &consumer_sem,
+        &recipe,
+        0,
+        consumer_ty.clone(),
+        span,
+        symbols,
+        term_ids,
+    )
 }
 
 /// If `input` is an inline `map(...)` producer (`ArrayExpr::Ref` wrapping a
