@@ -1865,6 +1865,27 @@ impl<'a> Converter<'a> {
         let capture_count = capture_nids.len();
         let project_ty = if matches!(destination, SoacDestination::InputBuffer) {
             input_arr_types[0].clone()
+        } else if matches!(
+            crate::types::array_size(&result_ty),
+            Some(Type::Constructed(TypeName::Skolem(_), _))
+        ) && !input_arr_types.is_empty()
+            && input_arr_types[0].is_array()
+        {
+            // A non-in-place `map` is shape-preserving: the result has the same
+            // representation (variant / size / region) as its input — only the
+            // element type changes. Here the TLC `result_ty` is the
+            // existential-opened type of a `filter`-produced input (a Composite
+            // variant carrying an unresolved `Skolem` size from
+            // `open_existential`), which the backend can't lower. Inherit the
+            // input's concrete representation (e.g. `Bounded[N]`, whose runtime
+            // `len` the consuming SOAC needs) instead of the Skolem artifact.
+            let inp = &input_arr_types[0];
+            crate::types::make_array1(
+                output_elem_ty.clone(),
+                inp.array_variant().expect("array input has a variant").clone(),
+                inp.array_size().expect("array input has a size").clone(),
+                inp.array_region().expect("array input has a region").clone(),
+            )
         } else {
             result_ty.clone()
         };
