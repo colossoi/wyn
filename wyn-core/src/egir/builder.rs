@@ -7,11 +7,11 @@ use std::collections::HashMap;
 use polytype::Type;
 use smallvec::smallvec;
 
-use crate::BindingRef;
 use crate::ast::{Span, TypeName};
 use crate::interface;
 use crate::ssa::framework::BlockId;
 use crate::ssa::types::{ConstantValue, ControlHeader, ExecutionModel};
+use crate::BindingRef;
 
 use super::graph_ops;
 use super::program::EgirEntry;

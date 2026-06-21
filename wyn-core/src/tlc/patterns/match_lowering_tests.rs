@@ -4,8 +4,8 @@
 //! reached). End-to-end behavioral coverage happens via the
 //! testfile suite.
 
-use crate::Compiler;
 use crate::tlc::{Program, Term, TermKind};
+use crate::Compiler;
 
 fn compile_to_tlc_raw(source: &str) -> Program {
     let (mut node_counter, mut module_manager) = crate::cached_compiler_init();

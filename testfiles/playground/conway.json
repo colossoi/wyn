@@ -1,0 +1,103 @@
+{
+  "pipelines": [
+    {
+      "kind": "compute",
+      "entry_point": "step",
+      "workgroup_size": [
+        64,
+        1,
+        1
+      ],
+      "dispatch_size": {
+        "kind": "derived_from",
+        "len": {
+          "kind": "storage_image",
+          "set": 0,
+          "binding": 0
+        },
+        "workgroup_size": 64
+      },
+      "bindings": [
+        {
+          "type": "storage_texture",
+          "set": 0,
+          "binding": 0,
+          "name": "board",
+          "format": "r32_float",
+          "access": "write_only",
+          "size": {
+            "kind": "same_as_window"
+          }
+        },
+        {
+          "type": "texture",
+          "set": 0,
+          "binding": 1,
+          "name": "prev_board",
+          "sample_type": {
+            "float": {
+              "filterable": true
+            }
+          },
+          "view_dimension": "d2",
+          "multisampled": false
+        },
+        {
+          "type": "uniform",
+          "set": 1,
+          "binding": 0,
+          "name": "iResolution"
+        },
+        {
+          "type": "uniform",
+          "set": 1,
+          "binding": 3,
+          "name": "iFrame"
+        }
+      ]
+    },
+    {
+      "kind": "graphics",
+      "stages": [
+        {
+          "entry_point": "vertex_main",
+          "stage": "vertex"
+        }
+      ],
+      "bindings": [],
+      "vertex_inputs": [],
+      "fragment_outputs": []
+    },
+    {
+      "kind": "graphics",
+      "stages": [
+        {
+          "entry_point": "display",
+          "stage": "fragment"
+        }
+      ],
+      "bindings": [
+        {
+          "type": "texture",
+          "set": 0,
+          "binding": 0,
+          "name": "tex_board",
+          "sample_type": {
+            "float": {
+              "filterable": true
+            }
+          },
+          "view_dimension": "d2",
+          "multisampled": false
+        }
+      ],
+      "vertex_inputs": [],
+      "fragment_outputs": [
+        {
+          "location": 0,
+          "name": "display_output"
+        }
+      ]
+    }
+  ]
+}

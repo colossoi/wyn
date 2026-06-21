@@ -7,7 +7,7 @@ use crate::ast::{Pattern, PatternKind, PatternLiteral};
 use crate::error::CompilerError;
 use crate::scope::IdentifierKind;
 use crate::types::checker::TypeChecker;
-use crate::types::{Type, TypeName, TypeScheme, bool_type, f32, i32, tuple, vec};
+use crate::types::{bool_type, f32, i32, tuple, vec, Type, TypeName, TypeScheme};
 use crate::{bail_type_at, err_type_at};
 
 type Result<T> = std::result::Result<T, CompilerError>;

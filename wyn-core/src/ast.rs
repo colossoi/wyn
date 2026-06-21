@@ -1,9 +1,9 @@
 pub use spirv;
 
 // Re-export type system types from the types module
-use crate::IdSource;
 use crate::interface::{Attribute, EntryDecl};
 pub use crate::types::{RecordFields, Type, TypeName, TypeScheme};
+use crate::IdSource;
 
 /// Qualified name representing a path through modules to a name
 /// E.g., M.N.x is represented as QualName { qualifiers: ["M", "N"], name: "x" }
@@ -606,7 +606,11 @@ impl Pattern {
             PatternKind::Record(fields) => fields
                 .iter()
                 .flat_map(|f| {
-                    if let Some(ref pat) = f.pattern { pat.collect_names() } else { vec![f.field.clone()] }
+                    if let Some(ref pat) = f.pattern {
+                        pat.collect_names()
+                    } else {
+                        vec![f.field.clone()]
+                    }
                 })
                 .collect(),
             PatternKind::Constructor(_, patterns) => {

@@ -1,9 +1,9 @@
 //! Tests for verify_closure_calls_lowered.
 
 use super::*;
-use crate::SymbolTable;
 use crate::ast::{Span, TypeName};
 use crate::tlc::{Def, DefMeta, Program, Term, TermId, TermKind};
+use crate::SymbolTable;
 use polytype::Type;
 use std::collections::HashMap;
 

@@ -1,0 +1,56 @@
+-- Perlin noise demo — visualizes fbm_perlin animated over time.
+-- Run with viz; not source-controlled.
+--
+--   cargo run --bin wyn -- compile testfiles/playground/perlin_demo.wyn \
+--     -o testfiles/playground/perlin_demo.spv
+--   cd viz && cargo run vf ../testfiles/playground/perlin_demo.spv \
+--     --vertex vertex_main --fragment fragment_main
+
+import "../../lib/noise"
+
+open f32
+
+------------------------------------------------------------
+-- Full-screen triangle
+------------------------------------------------------------
+def verts: [3]vec4f32 =
+  [@[-1.0, -1.0, 0.0, 1.0],
+   @[ 3.0, -1.0, 0.0, 1.0],
+   @[-1.0,  3.0, 0.0, 1.0]]
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 =
+  verts[vertex_id]
+
+------------------------------------------------------------
+-- Fragment shader: 5-octave fbm-Perlin scrolling over time.
+------------------------------------------------------------
+def SEED: u32 = 0x9e3779b9u32
+
+#[fragment]
+entry fragment_main(
+  #[uniform(set=1, binding=0)] iResolution: vec3f32,
+  #[uniform(set=1, binding=1)] iTime: f32,
+  #[builtin(position)] fragCoord: vec4f32
+) #[location(0)] vec4f32 =
+  let k = fasthash.seed(SEED) in
+
+  -- Aspect-correct UV in roughly [-1, 1] vertically. Flip Y for Vulkan NDC.
+  let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
+  let uv = (fc * 2.0 - iResolution.xy) / min(iResolution.x, iResolution.y) in
+
+  -- Sample fbm_perlin at uv * scale, drifting with time so the field flows.
+  let scale = 2.5 in
+  let p : vec2f32 = @[uv.x * scale + iTime * 0.20,
+                      uv.y * scale - iTime * 0.10] in
+  let n = fhnoise.fbm_perlin(k, p, 5i32, 2.0, 0.5) in
+
+  -- fbm with gain=0.5, octaves=5 → amplitude bound ~ (1 - 0.5^5)/(1 - 0.5) ≈ 1.94
+  -- Remap [-1.94, 1.94] into [0, 1].
+  let g = clamp(0.5 + 0.5 * n / 1.94, 0.0, 1.0) in
+
+  -- Two-stop palette: deep blue → warm white. Eyeballed.
+  let cool = @[0.05, 0.10, 0.30] in
+  let warm = @[1.00, 0.95, 0.80] in
+  let col = mix(cool, warm, smoothstep(0.0, 1.0, g)) in
+  @[col.x, col.y, col.z, 1.0]

@@ -3,8 +3,8 @@
 //! `Var`-reached (let-bound) producer is left untouched.
 
 use super::*;
-use crate::Compiler;
 use crate::tlc::DefMeta;
+use crate::Compiler;
 
 /// Drive a source string to the early exposed-producer TLC slot where
 /// `static_index_fusion::run` fires and return the program.

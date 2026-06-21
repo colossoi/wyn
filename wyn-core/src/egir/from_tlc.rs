@@ -27,11 +27,11 @@ use crate::ssa::types::{ControlHeader, FuncBody, Function, InstKind, ValueRef};
 use crate::tlc::{
     ArrayExpr, Def as TlcDef, DefMeta, Lambda, LoopKind, Program as TlcProgram, SoacOp, Term, TermKind,
 };
-use crate::types::TypeExt;
 use crate::types::extract_function_signature;
+use crate::types::TypeExt;
 use crate::{BindingRef, SymbolId, SymbolTable};
 use polytype::Type;
-use smallvec::{SmallVec, smallvec};
+use smallvec::{smallvec, SmallVec};
 
 use super::program::{EgirEntry, EgirFunc, EgirInner};
 use super::types::*;

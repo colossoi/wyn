@@ -9,10 +9,10 @@
 //! Single-variant Constructor and `Unit` are valid irrefutable
 //! patterns; they're handled here.
 
-use crate::SymbolId;
 use crate::ast::{self, PatternKind, Span, TypeName};
 use crate::tlc::{PendingBinding, Term, TermKind, Transformer, VarRef};
 use crate::types::TypeExt;
+use crate::SymbolId;
 use polytype::Type;
 use std::collections::HashMap;
 

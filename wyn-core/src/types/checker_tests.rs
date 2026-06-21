@@ -460,16 +460,14 @@ fn test_lambda_application() {
 #[test]
 fn test_lambda_curried_application_rejected() {
     // Curried lambda partially applied - should be rejected
-    assert!(
-        try_typecheck_program(
-            r#"
+    assert!(try_typecheck_program(
+        r#"
 def add = |x| |y| x + y
 def add5 = add(5)
 def result: i32 = add5(10)
 "#,
-        )
-        .is_err()
-    );
+    )
+    .is_err());
 }
 
 #[test]
@@ -557,16 +555,14 @@ def result: i32 = apply((|x| x * 2), 5)
 fn test_lambda_returned_from_function_rejected() {
     // Function returning a lambda - rejected because it creates curried pattern
     // Type i32 -> (i32 -> i32) requires 2 args under no-curry policy
-    assert!(
-        try_typecheck_program(
-            r#"
+    assert!(try_typecheck_program(
+        r#"
 def make_adder(n: i32) (i32 -> i32) = |x| x + n
 def add10 = make_adder(10)
 def result: i32 = add10(5)
 "#,
-        )
-        .is_err()
-    );
+    )
+    .is_err());
 }
 
 #[test]
@@ -607,16 +603,14 @@ fn test_lambda_with_tuple_destructuring() {
 #[test]
 fn test_lambda_chained_application_rejected() {
     // Chained lambda applications - rejected under no-curry policy
-    assert!(
-        try_typecheck_program(
-            r#"
+    assert!(try_typecheck_program(
+        r#"
 def test: i32 =
     let f = |x| |y| |z| x + y + z in
     f(1)(2)(3)
 "#,
-        )
-        .is_err()
-    );
+    )
+    .is_err());
 }
 
 #[test]
@@ -696,9 +690,8 @@ def test: bool = gt10(15)
 fn test_lambda_compose_rejected() {
     // Function composition returning a lambda - rejected under no-curry policy
     // Type (i32 -> i32) -> (i32 -> i32) -> (i32 -> i32) has 3 arrows, requires 3 args
-    assert!(
-        try_typecheck_program(
-            r#"
+    assert!(try_typecheck_program(
+        r#"
 def compose(f: i32 -> i32, g: i32 -> i32) -> (i32 -> i32) =
     |x| f(g(x))
 def double = |x| x * 2
@@ -706,9 +699,8 @@ def inc = |x| x + 1
 def double_then_inc = compose(inc, double)
 def result: i32 = double_then_inc(5)
 "#,
-        )
-        .is_err()
-    );
+    )
+    .is_err());
 }
 
 #[test]
@@ -728,27 +720,23 @@ def result: i32 = compose_apply(inc, double, 5)
 #[test]
 fn test_lambda_type_error_param_mismatch() {
     // Type error: lambda parameter type mismatch
-    assert!(
-        try_typecheck_program(
-            r#"
+    assert!(try_typecheck_program(
+        r#"
 def test: i32 = (|x: f32| x + 1) 5
 "#
-        )
-        .is_err()
-    );
+    )
+    .is_err());
 }
 
 #[test]
 fn test_lambda_type_error_return_mismatch() {
     // Type error: lambda return type mismatch
-    assert!(
-        try_typecheck_program(
-            r#"
+    assert!(try_typecheck_program(
+        r#"
 def test: f32 = (|x| x + 1) 5
 "#
-        )
-        .is_err()
-    );
+    )
+    .is_err());
 }
 
 // ===== Loop Tests =====
@@ -842,31 +830,27 @@ def test: f32 =
 #[test]
 fn test_loop_type_error_body_mismatch() {
     // Type error: body type doesn't match init type
-    assert!(
-        try_typecheck_program(
-            r#"
+    assert!(try_typecheck_program(
+        r#"
 def test: i32 =
     loop acc = 0 while acc < 10 do
         3.14f32
 "#
-        )
-        .is_err()
-    );
+    )
+    .is_err());
 }
 
 #[test]
 fn test_loop_type_error_condition_not_bool() {
     // Type error: while condition must be bool
-    assert!(
-        try_typecheck_program(
-            r#"
+    assert!(try_typecheck_program(
+        r#"
 def test: i32 =
     loop acc = 0 while 42 do
         acc + 1
 "#
-        )
-        .is_err()
-    );
+    )
+    .is_err());
 }
 
 #[test]
@@ -937,9 +921,8 @@ def test: f32 = reduce_f32((|x, y| x + y), 0.0f32, [1.0f32, 2.0f32, 3.0f32, 4.0f
 #[test]
 fn test_higher_order_reduce_curried_rejected() {
     // Curried reduce pattern should be rejected
-    assert!(
-        try_typecheck_program(
-            r#"
+    assert!(try_typecheck_program(
+        r#"
 def reduce_f32(op: f32 -> f32 -> f32, init: f32, arr: [4]f32) f32 =
   let x0 = op(init)(arr[0]) in
   let x1 = op(x0)(arr[1]) in
@@ -948,9 +931,8 @@ def reduce_f32(op: f32 -> f32 -> f32, init: f32, arr: [4]f32) f32 =
 
 def test: f32 = reduce_f32((|x| |y| x + y), 0.0f32, [1.0f32, 2.0f32, 3.0f32, 4.0f32])
 "#,
-        )
-        .is_err()
-    );
+    )
+    .is_err());
 }
 
 #[test]

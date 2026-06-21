@@ -33,10 +33,10 @@ use super::{
     ArrayExpr, Def, DefMeta, Lambda, Program, SoacBody, SoacOp, StorageView, Term, TermIdSource, TermKind,
     VarRef,
 };
-use crate::BindingRef;
 use crate::ast::TypeName;
 use crate::egir::from_tlc::AUTO_STORAGE_SET;
 use crate::interface::{EntryParamBindingKind, StorageBindingDecl, StorageRole};
+use crate::BindingRef;
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
 

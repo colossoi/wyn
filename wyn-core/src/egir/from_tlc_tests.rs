@@ -2,14 +2,14 @@
 // Tests
 // ============================================================================
 
-use super::{Converter, run};
-use crate::SymbolId;
-use crate::SymbolTable;
+use super::{run, Converter};
 use crate::ast::TypeName;
 use crate::pipeline_descriptor::PipelineDescriptor;
 use crate::ssa::types::{FuncBody, InstKind, Program};
 use crate::tlc::VarRef;
 use crate::tlc::{Term, TermKind};
+use crate::SymbolId;
+use crate::SymbolTable;
 use polytype::Type;
 use std::collections::{HashMap, HashSet};
 

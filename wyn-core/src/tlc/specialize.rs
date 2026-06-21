@@ -5,11 +5,11 @@
 
 use super::VarRef;
 use super::{Def, Program, Term, TermIdSource, TermKind};
-use crate::SymbolTable;
 use crate::ast::TypeName;
 use crate::builtins::catalog::KnownBuiltinIds;
-use crate::builtins::{BuiltinId, catalog};
+use crate::builtins::{catalog, BuiltinId};
 use crate::types::TypeExt;
+use crate::SymbolTable;
 use polytype::Type;
 
 /// Specialize polymorphic intrinsics in a TLC program.

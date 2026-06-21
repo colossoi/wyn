@@ -32,8 +32,8 @@
 //! and EGIR maps it to the slot's binding.
 
 use super::{Def, DefMeta, Lambda, Program, Term, TermIdSource, TermKind};
-use crate::SymbolTable;
 use crate::ast::TypeName;
+use crate::SymbolTable;
 use polytype::Type;
 
 #[cfg(test)]

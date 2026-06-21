@@ -24,8 +24,8 @@
 //! producer is a directly-nested `Soac(Map)` under the `Index`.
 
 use super::{ArrayExpr, Lambda, Program, SoacBody, SoacOp, Term, TermIdSource, TermKind};
-use crate::SymbolId;
 use crate::ast::TypeName;
+use crate::SymbolId;
 use polytype::Type;
 
 /// Fuse every `Index(<directly-nested elementwise producer>, <literal>)` in the

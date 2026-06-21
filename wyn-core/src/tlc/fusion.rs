@@ -17,12 +17,12 @@ use polytype::Type;
 use std::collections::HashMap;
 
 use super::array_semantics::{
-    ArraySemantics, FunctionSummary, FusionKind, ResultSemantics, can_fuse, classify_term,
-    summarize_program,
+    can_fuse, classify_term, summarize_program, ArraySemantics, FunctionSummary, FusionKind,
+    ResultSemantics,
 };
 use super::{
-    ArrayExpr, Def, Lambda, Program, SoacDestination, SoacOp, Term, TermId, TermIdSource, TermKind,
-    extract_lambda_params,
+    extract_lambda_params, ArrayExpr, Def, Lambda, Program, SoacDestination, SoacOp, Term, TermId,
+    TermIdSource, TermKind,
 };
 
 type Summaries = HashMap<SymbolId, FunctionSummary>;

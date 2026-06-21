@@ -1,0 +1,89 @@
+{
+  "pipelines": [
+    {
+      "kind": "compute",
+      "entry_point": "tick",
+      "workgroup_size": [
+        64,
+        1,
+        1
+      ],
+      "dispatch_size": {
+        "kind": "derived_from",
+        "len": {
+          "kind": "fixed",
+          "count": 1
+        },
+        "workgroup_size": 64
+      },
+      "bindings": [
+        {
+          "type": "storage_buffer",
+          "set": 2,
+          "binding": 0,
+          "access": "read_only",
+          "usage": "input",
+          "name": "prev_pos",
+          "length": null
+        },
+        {
+          "type": "uniform",
+          "set": 1,
+          "binding": 1,
+          "name": "iTime"
+        },
+        {
+          "type": "storage_buffer",
+          "set": 0,
+          "binding": 0,
+          "access": "write_only",
+          "usage": "output",
+          "name": "tick_output",
+          "length": {
+            "kind": "fixed",
+            "bytes": 2064
+          }
+        }
+      ]
+    },
+    {
+      "kind": "graphics",
+      "stages": [
+        {
+          "entry_point": "vertex_main",
+          "stage": "vertex"
+        }
+      ],
+      "bindings": [],
+      "vertex_inputs": [],
+      "fragment_outputs": []
+    },
+    {
+      "kind": "graphics",
+      "stages": [
+        {
+          "entry_point": "main_image",
+          "stage": "fragment"
+        }
+      ],
+      "bindings": [
+        {
+          "type": "storage_buffer",
+          "set": 2,
+          "binding": 0,
+          "access": "read_only",
+          "usage": "input",
+          "name": "positions",
+          "length": null
+        }
+      ],
+      "vertex_inputs": [],
+      "fragment_outputs": [
+        {
+          "location": 0,
+          "name": "main_image_output"
+        }
+      ]
+    }
+  ]
+}

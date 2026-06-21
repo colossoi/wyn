@@ -1,10 +1,10 @@
 use super::run;
-use crate::Compiler;
 use crate::ast::{Span, TypeName};
 use crate::tlc::{
     ArrayExpr, Def, DefMeta, Lambda, Place, Program, Shape, SoacBody, SoacDestination, SoacOp, Term,
     TermIdSource, TermKind, VarRef,
 };
+use crate::Compiler;
 use polytype::Type;
 
 fn span() -> Span {

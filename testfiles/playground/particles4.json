@@ -1,0 +1,115 @@
+{
+  "pipelines": [
+    {
+      "kind": "compute",
+      "entry_point": "tick",
+      "workgroup_size": [
+        64,
+        1,
+        1
+      ],
+      "dispatch_size": {
+        "kind": "derived_from",
+        "len": {
+          "kind": "input_binding",
+          "set": 2,
+          "binding": 0,
+          "elem_bytes": 16
+        },
+        "workgroup_size": 64
+      },
+      "bindings": [
+        {
+          "type": "storage_buffer",
+          "set": 2,
+          "binding": 0,
+          "access": "read_only",
+          "usage": "input",
+          "name": "prev_pos",
+          "length": null
+        },
+        {
+          "type": "uniform",
+          "set": 1,
+          "binding": 1,
+          "name": "iTime"
+        },
+        {
+          "type": "storage_texture",
+          "set": 0,
+          "binding": 0,
+          "name": "img",
+          "format": "rgba8_unorm",
+          "access": "write_only",
+          "size": {
+            "kind": "fixed",
+            "width": 512,
+            "height": 512
+          }
+        },
+        {
+          "type": "storage_buffer",
+          "set": 0,
+          "binding": 1,
+          "access": "write_only",
+          "usage": "output",
+          "name": "tick_output",
+          "length": {
+            "kind": "fixed",
+            "bytes": 2064
+          }
+        }
+      ]
+    },
+    {
+      "kind": "graphics",
+      "stages": [
+        {
+          "entry_point": "vertex_main",
+          "stage": "vertex"
+        }
+      ],
+      "bindings": [],
+      "vertex_inputs": [],
+      "fragment_outputs": []
+    },
+    {
+      "kind": "graphics",
+      "stages": [
+        {
+          "entry_point": "main_image",
+          "stage": "fragment"
+        }
+      ],
+      "bindings": [
+        {
+          "type": "texture",
+          "set": 0,
+          "binding": 0,
+          "name": "tex",
+          "sample_type": {
+            "float": {
+              "filterable": true
+            }
+          },
+          "view_dimension": "d2",
+          "multisampled": false
+        },
+        {
+          "type": "sampler",
+          "set": 0,
+          "binding": 1,
+          "name": "samp",
+          "binding_type": "filtering"
+        }
+      ],
+      "vertex_inputs": [],
+      "fragment_outputs": [
+        {
+          "location": 0,
+          "name": "main_image_output"
+        }
+      ]
+    }
+  ]
+}

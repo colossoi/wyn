@@ -27,10 +27,10 @@
 //! This makes the data flow explicit at branch sites rather than requiring
 //! inspection of phi nodes to understand where values come from.
 
-use crate::BindingRef;
 use crate::ast::{Span, TypeName};
 use crate::interface;
 use crate::op::OpTag;
+use crate::BindingRef;
 use polytype::Type;
 use rspirv::spirv;
 use slotmap::SlotMap;

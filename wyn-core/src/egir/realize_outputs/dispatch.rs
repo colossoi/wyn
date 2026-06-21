@@ -16,10 +16,10 @@ use polytype::Type;
 use smallvec::smallvec;
 use std::collections::HashMap;
 
-use crate::BindingRef;
 use crate::ast::TypeName;
 use crate::ssa::framework::BlockId;
 use crate::types::TypeExt;
+use crate::BindingRef;
 
 use super::super::from_tlc::ConvertError;
 use super::super::graph_ops;
@@ -98,7 +98,11 @@ pub fn compute_slot_source(
 
     // 3. Fixed-size aggregate.
     let fixed_size = slot_ty.array_size().and_then(|s| {
-        if let Type::Constructed(TypeName::Size(n), _) = s { Some(*n) } else { None }
+        if let Type::Constructed(TypeName::Size(n), _) = s {
+            Some(*n)
+        } else {
+            None
+        }
     });
     if let (Some(n), Some(et)) = (fixed_size, slot_ty.elem_type().cloned()) {
         let view = graph_ops::intern_storage_view(graph, binding, et.clone(), None);

@@ -23,7 +23,7 @@ use crate::ast::{Declaration, ExprKind, Expression, NodeId, Program};
 use crate::builtins::{BuiltinCatalog, BuiltinId};
 use crate::error::Result;
 use crate::module_manager::ModuleManager;
-use crate::scope::{ScopeStack, for_each_pattern_name};
+use crate::scope::{for_each_pattern_name, ScopeStack};
 
 /// Insert every name bound by `pattern` into `scope`.
 fn collect_pattern_bindings(pattern: &crate::ast::Pattern, scope: &mut ScopeStack<()>) {

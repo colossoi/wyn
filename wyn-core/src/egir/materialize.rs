@@ -46,7 +46,11 @@ fn run_one_body(graph: &mut EGraph) {
             } if operands.len() == 2 => {
                 let arr = operands[0];
                 let idx = operands[1];
-                if is_const_int(graph, idx) { None } else { Some((nid, arr, idx)) }
+                if is_const_int(graph, idx) {
+                    None
+                } else {
+                    Some((nid, arr, idx))
+                }
             }
             _ => None,
         })

@@ -6,12 +6,12 @@ use std::sync::{Arc, OnceLock, RwLock};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
-use wyn_core::TypeTable;
 use wyn_core::ast::{self, NodeCounter, NodeId, Span};
 use wyn_core::interface;
 use wyn_core::lexer;
 use wyn_core::module_manager::{ModuleManager, PreElaboratedPrelude};
-use wyn_core::types::{Type, TypeName, TypeScheme, format_scheme};
+use wyn_core::types::{format_scheme, Type, TypeName, TypeScheme};
+use wyn_core::TypeTable;
 
 static VERBOSE: AtomicBool = AtomicBool::new(false);
 

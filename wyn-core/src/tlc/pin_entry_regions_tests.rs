@@ -1,8 +1,8 @@
 use super::*;
-use crate::Compiler;
 use crate::ast::TypeName;
 use crate::tlc::DefMeta;
 use crate::types::TypeExt;
+use crate::Compiler;
 use polytype::Type;
 
 /// Compile `src` through type-check → TLC → region-pinning and return the

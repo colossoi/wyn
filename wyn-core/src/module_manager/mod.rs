@@ -610,7 +610,11 @@ impl ModuleManager {
     /// E.g., "f32.sum" -> Some(("f32", "sum"))
     pub fn split_qualified_name(name: &str) -> Option<(&str, &str)> {
         let parts: Vec<&str> = name.splitn(2, '.').collect();
-        if parts.len() == 2 { Some((parts[0], parts[1])) } else { None }
+        if parts.len() == 2 {
+            Some((parts[0], parts[1]))
+        } else {
+            None
+        }
     }
 
     /// Check if a name is a top-level prelude function (auto-imported)

@@ -8,7 +8,6 @@ mod pow;
 use crate::builtins::catalog;
 use std::collections::{HashMap, HashSet};
 
-use crate::BindingRef;
 use crate::ast::Span;
 use crate::ast::TypeName;
 use crate::builtins::lowering::{BuiltinLowering, PrimOp};
@@ -20,6 +19,7 @@ use crate::ssa::types::{
 use crate::ssa::types::{EntryPoint, ExecutionModel, Function, IoDecoration, Program};
 use crate::types;
 use crate::types::TypeExt;
+use crate::BindingRef;
 use crate::{bail_spirv, bail_spirv_at, err_spirv, err_spirv_at};
 use polytype::Type as PolyType;
 use rspirv::binary::Assemble;

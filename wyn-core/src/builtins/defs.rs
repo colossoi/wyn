@@ -13,9 +13,9 @@ use crate::builtins::names::{
 use crate::builtins::scheme::{
     array_to_i32, image_load_scheme, image_store_scheme, mat_square_to_mat, mat_square_to_scalar,
     mat_x_mat, mat_x_vec, scalar_unary, texture_load_scheme, texture_sample_scheme, unit_to_t,
-    vec_binary_same, vec_binary_to_scalar, vec_clamp_scalar_lohi, vec_mix_scalar_interp,
+    vec3f32_binary, vec_binary_same, vec_binary_to_scalar, vec_clamp_scalar_lohi, vec_mix_scalar_interp,
     vec_scalar_edge_to_vec, vec_smoothstep_scalar_edges, vec_ternary_same, vec_to_scalar, vec_unary_same,
-    vec_vec_outer, vec_vec_scalar_to_vec, vec_x_mat, vec3f32_binary,
+    vec_vec_outer, vec_vec_scalar_to_vec, vec_x_mat,
 };
 
 // ---------------------------------------------------------------------------

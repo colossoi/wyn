@@ -24,12 +24,12 @@ use crate::error::CompilerError;
 use crate::tlc::var_term_builtin_id;
 use std::collections::{HashMap, HashSet};
 
-use crate::SymbolId;
 use crate::ast::{Span, TypeName};
 use crate::tlc::{
     ArrayExpr, Def, DefMeta, Lambda, LoopKind, Program, SoacDestination, SoacOp, Term, TermId, TermKind,
 };
 use crate::types;
+use crate::SymbolId;
 use polytype::Type;
 
 /// A unique identifier for an owned (non-copy) runtime slot.
@@ -632,7 +632,11 @@ impl<'p> Builder<'p> {
                     return Origin::Borrowed;
                 }
                 // No tracked owner — fall back to the term's static type.
-                if types::is_unique(&t.ty) { Origin::BorrowedMutableElement } else { Origin::Borrowed }
+                if types::is_unique(&t.ty) {
+                    Origin::BorrowedMutableElement
+                } else {
+                    Origin::Borrowed
+                }
             }
             // Fresh-producer ArrayExprs: literal/range/soac synthesize
             // a new array, so element views are mutable.

@@ -12,11 +12,11 @@ use super::VarRef;
 use crate::SymbolTable;
 use std::collections::HashMap;
 
-use super::array_semantics::{ArraySemantics, FunctionSummary, ResultSemantics, classify_term};
+use super::array_semantics::{classify_term, ArraySemantics, FunctionSummary, ResultSemantics};
 use super::fusion::substitute_sym;
 use super::{Lambda, Term, TermIdSource, TermKind};
-use crate::SymbolId;
 use crate::ast::TypeName;
+use crate::SymbolId;
 use polytype::Type;
 
 // =============================================================================

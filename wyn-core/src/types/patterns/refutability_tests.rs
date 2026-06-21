@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::ast;
-use crate::types::{Type, TypeName, sum, tuple};
+use crate::types::{sum, tuple, Type, TypeName};
 
 fn dummy_span() -> ast::Span {
     ast::Span::dummy()

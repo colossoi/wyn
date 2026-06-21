@@ -1,9 +1,9 @@
 //! Tests for verify_hof_specialized.
 
 use super::*;
-use crate::SymbolTable;
 use crate::ast::TypeName;
 use crate::tlc::{Def, DefMeta, Program, Term, TermId, TermKind};
+use crate::SymbolTable;
 use polytype::Type;
 use std::collections::HashMap;
 

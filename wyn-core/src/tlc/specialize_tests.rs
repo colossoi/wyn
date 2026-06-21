@@ -1,7 +1,7 @@
 #![cfg(test)]
 
-use super::VarRef;
 use super::run;
+use super::VarRef;
 use crate::ast::{Span, TypeName};
 use crate::builtins::by_id;
 use crate::tlc::{Def, DefMeta, Program, Term, TermId, TermIdSource, TermKind};

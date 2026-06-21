@@ -1,0 +1,129 @@
+-- particles4.wyn — particle simulator that splats white pixels into a
+-- storage_image on the compute side so the fragment is O(1) per pixel.
+--
+-- Single compute pass, no global clear:
+--   * Each lane processing particle `i` reads its OLD position from
+--     `prev_pos[i]`, writes BLACK at the old pixel (erasing its
+--     previous-frame trail), computes the new position, and writes
+--     WHITE at the new pixel.
+--   * The storage_image persists across frames — no feedback ping-pong
+--     on it. Persistence handles "render the current set of particles
+--     without re-drawing the whole framebuffer."
+--   * Races between particles whose new pixel == another's old pixel
+--     can flicker by a frame; acceptable for a visualizer.
+--
+-- Frame cost: O(N) instead of particles3's O(W*H * N) per-pixel
+-- iteration in the fragment.
+--
+-- Run:
+--   wyn compile testfiles/playground/particles4.wyn -o /tmp/particles4.spv
+--   viz pipeline /tmp/particles4.spv --feedback tick:prev_pos=tick_output
+
+def N: i32 = 129
+def CLUMPF: f32 = 0.002
+def CLUMPR: f32 = 30.0
+def UPDFACTOR: f32 = 3.0
+def ALIGNF: f32 = 0.05
+def ALIGNR: f32 = 40.0
+def SEPF: f32  = 0.05
+def SEPR: f32  = 10.0
+def WIDTH: f32 = 512.0
+def HEIGHT: f32 = 512.0
+
+-- ----------------------------------------------------------------------
+-- Flocking helpers (same shape as particles3.wyn)
+-- ----------------------------------------------------------------------
+
+def hash2(x: vec2f32) vec2f32 =
+  let k = @[0.3183099, 0.3678794] in
+  let x1 = x * k + k.yx in
+  let s = fract(x1.x * x1.y * (x1.x + x1.y)) in
+  let arg = @[16.0 * k.x * s, 16.0 * k.y * s] in
+  let f = vec.fract(arg) in
+  @[0.0 - 1.0 + 2.0 * f.x, 0.0 - 1.0 + 2.0 * f.y]
+
+def sum<[n]>(pos: vec4f32, arr: [n]vec4f32) vec2f32 =
+  reduce(|a, b| if magnitude(pos.xy - b.xy) > CLUMPR then a else a + b,
+         @[0.0, 0.0, 0.0, 0.0], arr).xy
+
+def center(pos: vec4f32, arr: []vec4f32) vec2f32 =
+  let counter = i32(reduce(
+      |a, b| if magnitude(pos.xy - b.xy) > CLUMPR then a + @[1.0, 0.0, 0.0, 0.0] else a,
+      @[0.0, 0.0, 0.0, 0.0], arr).x) in
+  sum(pos, arr) / f32(N - counter)
+
+def clump(pos: vec4f32, arr: []vec4f32) vec2f32 =
+  let dist = (center(pos, arr) - pos.xy) in
+  CLUMPF * dist
+
+def align(pos: vec4f32, arr: []vec4f32) vec2f32 =
+  ALIGNF * normalize(reduce(|a, b| a + b, @[0.0, 0.0, 0.0, 0.0],
+                            filter(|a| magnitude(pos.xy - a.xy) < ALIGNR, arr)).zw)
+
+def separate(pos: vec4f32, arr: []vec4f32) vec2f32 =
+  SEPF * reduce(
+    |a, b| if magnitude(pos.xy - b.xy) > SEPR || magnitude(pos.xy - b.xy) < 0.000001
+           then a
+           else a + @[normalize(pos.xy - b.xy).x, normalize(pos.xy - b.xy).y, 0.0, 0.0],
+    @[0.0, 0.0, 0.0, 0.0], arr).xy
+
+-- Convert particle xy (floats in 0..512) into integer pixel coords.
+def pix(p: vec4f32) vec2i32 = @[i32.f32(p.x), i32.f32(p.y)]
+
+-- ----------------------------------------------------------------------
+-- Compute entry: advance particles, erase old pixel, splat new pixel
+-- ----------------------------------------------------------------------
+
+#[compute]
+entry tick(#[storage(set=2, binding=0, access=read)] prev_pos: []vec4f32,
+           #[uniform(set=1, binding=1)] iTime: f32,
+           #[storage_image(set=0, binding=0, format=rgba8unorm, access=write_only, size=512x512)] img: storage_image)
+  []vec4f32 =
+if iTime < 0.1 then
+  -- Cold start: random initial positions. No old pixel to erase
+  -- — just splat each at its starting pixel.
+  map(|i: i32|
+        let loc = f32(i * 9 + 103) in
+        let new_pos = @[500.0 * (hash2(@[loc, f32(i)]).x + 1.0),
+                        500.0 * (hash2(@[loc, f32(i)]).y + 1.0),
+                        10.0 * hash2(@[loc + 1.0, f32(i) - 1.0]).x,
+                        10.0 * hash2(@[loc + 1.0, f32(i) + 1.0]).y] in
+        let _ = image_store(img, pix(new_pos), @[1.0, 1.0, 1.0, 1.0]) in
+        new_pos,
+      0i32 ..< N)
+else
+  let prev_pos = prev_pos[0..N] in
+  map(|elem: vec4f32|
+        let deltav = clump(elem, prev_pos) + align(elem, prev_pos) + separate(elem, prev_pos) in
+        let normal = normalize(@[elem.z + deltav.x, elem.w + deltav.y]) in
+        let new_pos = @[(elem.x + UPDFACTOR * normal.x + WIDTH)  % WIDTH,
+                        (elem.y + UPDFACTOR * normal.y + HEIGHT) % HEIGHT,
+                        normal.x,
+                        normal.y] in
+        -- Erase this particle's previous-frame pixel.
+        let _ = image_store(img, pix(elem), @[0.0, 0.0, 0.0, 1.0]) in
+        -- Splat the new one.
+        let _ = image_store(img, pix(new_pos), @[1.0, 1.0, 1.0, 1.0]) in
+        new_pos,
+      prev_pos)
+
+-- ----------------------------------------------------------------------
+-- Vertex + fragment: just sample the storage_image as a texture
+-- ----------------------------------------------------------------------
+
+def verts: [3]vec4f32 =
+  [@[-1.0, -1.0, 0.0, 1.0],
+   @[ 3.0, -1.0, 0.0, 1.0],
+   @[-1.0,  3.0, 0.0, 1.0]]
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 =
+  verts[vid]
+
+#[fragment]
+entry main_image(#[texture(set=0, binding=0)] tex: texture2d,
+                 #[sampler(set=0, binding=1)] samp: sampler,
+                 #[builtin(position)] fragCoord: vec4f32)
+  #[location(0)] vec4f32 =
+  let uv = @[fragCoord.x / WIDTH, fragCoord.y / HEIGHT] in
+  texture_sample(tex, samp, uv, 0.0)

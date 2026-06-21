@@ -34,7 +34,7 @@ pub mod specialize;
 pub mod static_index_fusion;
 
 use crate::ast::{self, NodeId, Span, TypeName};
-use crate::builtins::{BuiltinId, by_id, catalog};
+use crate::builtins::{by_id, catalog, BuiltinId};
 use crate::error::CompilerError;
 use crate::interface;
 use crate::name_resolution::{NameResolution, ResolvedValueRef, SoacKind};

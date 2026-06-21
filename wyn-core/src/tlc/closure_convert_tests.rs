@@ -1,9 +1,9 @@
 //! Tests for closure_convert and verify_closure_converted.
 
 use super::*;
-use crate::SymbolTable;
 use crate::ast::{Span, TypeName};
 use crate::tlc::{Def, DefMeta, Lambda, Place, Program, Shape, SoacBody, SoacOp, Term, TermId, TermKind};
+use crate::SymbolTable;
 use polytype::Type;
 use std::collections::HashMap;
 

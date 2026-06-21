@@ -1,5 +1,5 @@
 use crate::ast::{Header, NodeId, Pattern, PatternKind, Span};
-use crate::pattern::{PatternError, PatternValue, bound_names, extract_bindings};
+use crate::pattern::{bound_names, extract_bindings, PatternError, PatternValue};
 
 // Simple test value that can be a scalar or tuple
 #[derive(Clone, Debug, PartialEq)]

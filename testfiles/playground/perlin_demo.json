@@ -1,0 +1,46 @@
+{
+  "pipelines": [
+    {
+      "kind": "graphics",
+      "stages": [
+        {
+          "entry_point": "vertex_main",
+          "stage": "vertex"
+        }
+      ],
+      "bindings": [],
+      "vertex_inputs": [],
+      "fragment_outputs": []
+    },
+    {
+      "kind": "graphics",
+      "stages": [
+        {
+          "entry_point": "fragment_main",
+          "stage": "fragment"
+        }
+      ],
+      "bindings": [
+        {
+          "type": "uniform",
+          "set": 1,
+          "binding": 0,
+          "name": "iResolution"
+        },
+        {
+          "type": "uniform",
+          "set": 1,
+          "binding": 1,
+          "name": "iTime"
+        }
+      ],
+      "vertex_inputs": [],
+      "fragment_outputs": [
+        {
+          "location": 0,
+          "name": "fragment_main_output"
+        }
+      ]
+    }
+  ]
+}

@@ -27,7 +27,7 @@ use crate::ast::{Span, TypeName};
 use crate::binding_layout::{compute_entry_binding_layout, extract_storage_binding};
 use crate::interface::{EntryDecl, EntryParamBindingKind};
 use crate::tlc::monomorphize::apply_subst;
-use crate::types::{TypeExt, region_tag};
+use crate::types::{region_tag, TypeExt};
 use crate::{BindingRef, SymbolId};
 use polytype::Type;
 use std::collections::HashMap;

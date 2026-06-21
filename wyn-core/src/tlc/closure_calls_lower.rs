@@ -14,8 +14,8 @@
 //! forbids nested `App` in func position): it additionally rejects
 //! every non-`Var` func.
 
-use super::VarRef;
 use super::closure_convert::{CallableValue, ClosureInfo};
+use super::VarRef;
 use super::{ArrayExpr, Lambda, LoopKind, Program, SoacOp, Term, TermIdSource, TermKind};
 use crate::{SymbolId, SymbolTable};
 use std::collections::HashMap;
