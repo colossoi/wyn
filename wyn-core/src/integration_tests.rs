@@ -5341,6 +5341,44 @@ entry e() []u32 = map(|i: i32| g.at((0x9e3779b9u32, 0x243f6a88u32), u32.i32(i)),
 // fixed to make the test a passing regression.
 // =========================================================================
 
+/// In-place write to a readwrite storage buffer that's then returned
+/// by the entry: a shape SPIR-V can't yet lay out directly. Two
+/// pieces keep the failure graceful instead of a `create_storage_buffer`
+/// panic:
+///   1. `types::canonical_storage_buffer_ty` strips `Unique<_>` and
+///      top-level `Existential<_>` at the EGIR `EntryOutput`
+///      construction sites, so `*[]T` reaches the backend as a
+///      concrete runtime array.
+///   2. `spirv::verify_buffer_layouts` rejects any storage-bound
+///      type whose post-`array_elem` shape has no static size as a
+///      structured error before backend emission — the tripwire for
+///      any construction site that bypasses #1.
+///
+/// What this test pins: compilation surfaces the actionable
+/// `realize_outputs` diagnostic ("runtime-sized array … wrap the
+/// producer in a `map`") for this source shape. If we ever teach
+/// the compiler to compile `*[]T with [i] = v` returns directly,
+/// flip the assertion to expect clean success.
+#[test]
+fn inplace_write_to_returned_readwrite_storage_errors_gracefully() {
+    let result = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry tick(#[storage(set=2, binding=0, access=readwrite)] buf: *[]u32) *[]u32 =
+  buf with [0] = 42u32
+"#,
+    );
+    let err = match result {
+        Ok(_) => panic!("compilation should still surface a graceful unsupported-shape error"),
+        Err(e) => e,
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("runtime-sized") && msg.contains("map"),
+        "expected actionable 'wrap in map' diagnostic, got: {msg}"
+    );
+}
+
 /// A consuming `*[]T` map's `Project` and the carried buffer it
 /// drives must both carry the input view's type, not the TLC-
 /// default `Composite[Variable, NoRegion]`. Otherwise the SPIR-V

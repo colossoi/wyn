@@ -462,7 +462,7 @@ fn convert_entry_point(
             for (field_idx, (field_ty, slot)) in field_tys.iter().zip(fields.iter()).enumerate() {
                 inputs.push(EntryInput {
                     name: format!("{}_{}", name, field_idx),
-                    ty: field_ty.clone(),
+                    ty: crate::types::canonical_storage_buffer_ty(field_ty),
                     decoration: None,
                     size_hint: None,
                     storage_binding: Some(slot.binding),
@@ -515,7 +515,7 @@ fn convert_entry_point(
 
         inputs.push(EntryInput {
             name: name.to_string(),
-            ty: ty.clone(),
+            ty: crate::types::canonical_storage_buffer_ty(ty),
             decoration,
             size_hint,
             storage_binding,
@@ -2794,12 +2794,12 @@ fn build_entry_outputs(
             .enumerate()
             .map(|(i, output)| {
                 let raw = slot_value_tys.get(i).and_then(|t| t.as_ref()).unwrap_or(&output.ty);
-                // A runtime `filter` output is declared `?k. [k]T`; the
-                // host-visible buffer is a plain runtime `[]T` of the kept
-                // elements. Unwrap the existential so `create_storage_buffer`
-                // sees an array whose element type it can lay out (the size var
-                // is irrelevant — storage buffers are runtime arrays).
-                let ty = unwrap_existential_array(raw);
+                // Canonicalize for storage layout: strip `Unique<_>` and
+                // unwrap any top-level `Existential` (e.g. a runtime
+                // `filter` output declared `?k. [k]T`) so
+                // `create_storage_buffer` sees the concrete runtime
+                // array. See `types::canonical_storage_buffer_ty`.
+                let ty = crate::types::canonical_storage_buffer_ty(raw);
                 let storage_binding = storage_binding_for(&ty, is_compute);
                 let length = length_for(storage_binding, &ty)?;
                 Ok(EntryOutput {
@@ -2814,12 +2814,14 @@ fn build_entry_outputs(
 
     if entry.outputs.iter().all(|o| o.attribute.is_none()) && entry.outputs.len() == 1 {
         if !matches!(ret_type, Type::Constructed(TypeName::Unit, _)) {
-            let storage_binding = storage_binding_for(ret_type, is_compute);
+            let ty = crate::types::canonical_storage_buffer_ty(ret_type);
+            let storage_binding = storage_binding_for(&ty, is_compute);
+            let length = length_for(storage_binding, &ty)?;
             Ok(vec![EntryOutput {
-                ty: ret_type.clone(),
+                ty,
                 decoration: None,
                 storage_binding,
-                length: length_for(storage_binding, ret_type)?,
+                length,
             }])
         } else {
             Ok(vec![])
@@ -2830,26 +2832,30 @@ fn build_entry_outputs(
             .iter()
             .zip(component_types.iter())
             .map(|(output, ty)| {
-                let storage_binding = storage_binding_for(ty, is_compute);
+                let ty = crate::types::canonical_storage_buffer_ty(ty);
+                let storage_binding = storage_binding_for(&ty, is_compute);
+                let length = length_for(storage_binding, &ty)?;
                 Ok(EntryOutput {
-                    ty: ty.clone(),
+                    ty,
                     decoration: output.attribute.as_ref().and_then(convert_to_io_decoration),
                     storage_binding,
-                    length: length_for(storage_binding, ty)?,
+                    length,
                 })
             })
             .collect()
     } else {
-        let storage_binding = storage_binding_for(ret_type, is_compute);
+        let ty = crate::types::canonical_storage_buffer_ty(ret_type);
+        let storage_binding = storage_binding_for(&ty, is_compute);
+        let length = length_for(storage_binding, &ty)?;
         Ok(vec![EntryOutput {
-            ty: ret_type.clone(),
+            ty,
             decoration: entry
                 .outputs
                 .first()
                 .and_then(|o| o.attribute.as_ref())
                 .and_then(convert_to_io_decoration),
             storage_binding,
-            length: length_for(storage_binding, ret_type)?,
+            length,
         }])
     }
 }

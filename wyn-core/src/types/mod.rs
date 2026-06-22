@@ -1110,6 +1110,33 @@ pub fn strip_unique(ty: &Type) -> Type {
     }
 }
 
+/// Canonicalize a TLC-flavored array type for use as the declared
+/// type of a storage-bound field (`EntryInput.ty`, `EntryOutput.ty`,
+/// `StorageBindingDecl.elem_ty`). Strips:
+///   - `Unique<_>` wrappers (uniqueness is a TLC-only annotation;
+///     SPIR-V doesn't see it)
+///   - Top-level `Existential<_>` (filter results and other
+///     size-quantified shapes whose size variable the backend can't
+///     name)
+///
+/// The result is what the SPIR-V backend's `create_storage_buffer`
+/// expects to receive: a concrete array shape it can compute an
+/// element size for via `array_elem` + `type_byte_size`. Scalar /
+/// vec / struct outputs that get packed into single-element runtime
+/// arrays pass through unchanged.
+///
+/// Construction sites that produce storage-bound types should pipe
+/// through this so the SPIR-V validator (`spirv::verify_buffer_layouts`)
+/// trivially passes. The validator stays in place as a tripwire for
+/// any new construction site that bypasses this helper.
+pub fn canonical_storage_buffer_ty(ty: &Type) -> Type {
+    let stripped = strip_unique(ty);
+    match &stripped {
+        Type::Constructed(TypeName::Existential(_), args) if !args.is_empty() => args[0].clone(),
+        _ => stripped,
+    }
+}
+
 // --- Address space constructors ---
 
 /// Create a storage address space type

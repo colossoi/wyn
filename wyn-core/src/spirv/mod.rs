@@ -5,6 +5,7 @@
 #[cfg(test)]
 mod lowering_tests;
 mod pow;
+pub mod verify_buffer_layouts;
 use crate::builtins::catalog;
 use std::collections::{HashMap, HashSet};
 
@@ -3510,7 +3511,20 @@ pub fn lower_ssa_program(program: &Program) -> Result<Vec<u32>> {
         .spawn(move || lower_ssa_program_impl(&program_clone))
         .expect("Failed to spawn lowering thread");
 
-    handle.join().expect("Lowering thread panicked")
+    match handle.join() {
+        Ok(result) => result,
+        Err(payload) => {
+            // Preserve the worker thread's panic message so callers
+            // (`#[should_panic(expected = ...)]` tests, CLI users) see
+            // the real diagnostic rather than `Any { .. }`.
+            let msg = payload
+                .downcast_ref::<String>()
+                .map(|s| s.as_str())
+                .or_else(|| payload.downcast_ref::<&'static str>().copied())
+                .unwrap_or("<non-string panic payload>");
+            panic!("Lowering thread panicked: {}", msg);
+        }
+    }
 }
 
 fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {

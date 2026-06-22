@@ -1322,6 +1322,7 @@ impl SsaConverted {
     /// was called with `EgirOpts::for_spirv()`.
     pub fn lower(self) -> error::Result<Lowered> {
         egir::verify_no_abstract::run(&self.ssa)?;
+        spirv::verify_buffer_layouts::run(&self.ssa)?;
         let spirv = spirv::lower_ssa_program(&self.ssa)?;
         Ok(Lowered {
             spirv,
