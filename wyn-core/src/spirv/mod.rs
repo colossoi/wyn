@@ -53,20 +53,14 @@ enum InterfaceBlockKind {
 struct Constructor {
     builder: builder::SpirvBuilder,
 
-    // Type caching
+    // Well-known scalar type ids. `SpirvBuilder` owns the canonical
+    // copy and dedups; these mirrors are populated at init so call
+    // sites can read them without borrowing the builder.
     void_type: spirv::Word,
     bool_type: spirv::Word,
     i32_type: spirv::Word,
     u32_type: spirv::Word,
     f32_type: spirv::Word,
-
-    // Constant caching
-    int_const_cache: HashMap<i32, spirv::Word>,
-    int_const_reverse: HashMap<spirv::Word, i32>, // reverse lookup: ID -> value
-    uint_const_cache: HashMap<u32, spirv::Word>,
-    uint_const_reverse: HashMap<spirv::Word, u32>, // reverse lookup: ID -> value
-    float_const_cache: HashMap<u32, spirv::Word>,  // bits as u32
-    bool_const_cache: HashMap<bool, spirv::Word>,
 
     // Current function state
     current_block: Option<spirv::Word>,
@@ -165,10 +159,6 @@ struct Constructor {
     /// into it.
     workgroup_vars: HashMap<u32, (spirv::Word, spirv::Word)>,
 
-    /// IDs of all module-level constants (OpConstant, OpConstantTrue/False, OpConstantComposite, OpConstantNull).
-    /// Decides whether a composite can be emitted as OpConstantComposite.
-    constant_ids: HashSet<spirv::Word>,
-
     /// Used by `polytype_to_spirv` when emitting `StorageTexture` for
     /// a function signature; entry-var emission still overrides per-
     /// binding. Set once in `lower_ssa_program_impl`.
@@ -177,13 +167,13 @@ struct Constructor {
 
 impl Constructor {
     fn new() -> Self {
-        let mut builder = builder::SpirvBuilder::new();
-        let void_type = builder.type_void();
-        let bool_type = builder.type_bool();
-        let i32_type = builder.type_int(32, 1);
-        let u32_type = builder.type_int(32, 0);
-        let f32_type = builder.type_float(32);
-        let glsl_ext_inst_id = builder.ext_inst_import("GLSL.std.450");
+        let builder = builder::SpirvBuilder::new();
+        let void_type = *builder.void_type();
+        let bool_type = *builder.bool_type();
+        let i32_type = *builder.i32_type();
+        let u32_type = *builder.u32_type();
+        let f32_type = *builder.f32_type();
+        let glsl_ext_inst_id = builder.glsl_ext_inst_id();
 
         Constructor {
             builder,
@@ -192,12 +182,6 @@ impl Constructor {
             i32_type,
             u32_type,
             f32_type,
-            int_const_cache: HashMap::new(),
-            int_const_reverse: HashMap::new(),
-            uint_const_cache: HashMap::new(),
-            uint_const_reverse: HashMap::new(),
-            float_const_cache: HashMap::new(),
-            bool_const_cache: HashMap::new(),
             current_block: None,
             variables_block: None,
             first_code_block: None,
@@ -232,7 +216,6 @@ impl Constructor {
             buffer_vars: Vec::new(),
             workgroup_vars: HashMap::new(),
             buffer_id_map: HashMap::new(),
-            constant_ids: HashSet::new(),
             storage_image_default_format: None,
         }
     }
@@ -922,37 +905,35 @@ impl Constructor {
     }
 
     /// Get or create an i32 constant
+    // Thin delegators over `SpirvBuilder`'s typed constant
+    // emitters. The wrapper-returned `ConstId` is `*`-deref'd back to
+    // `spirv::Word` here so existing untyped call sites in
+    // `LowerCtx` and `pow.rs` keep working. As call sites migrate to
+    // typed `Id<K>`s the delegators will be removed.
     fn const_i32(&mut self, value: i32) -> spirv::Word {
-        if let Some(&id) = self.int_const_cache.get(&value) {
-            return id;
-        }
-        let id = self.builder.constant_bit32(self.i32_type, value as u32);
-        self.int_const_cache.insert(value, id);
-        self.int_const_reverse.insert(id, value);
-        self.constant_ids.insert(id);
-        id
+        *self.builder.const_i32(value)
     }
-
-    /// Get the literal i32 value from a constant ID (reverse lookup)
-    fn get_const_i32_value(&self, id: spirv::Word) -> Option<i32> {
-        self.int_const_reverse.get(&id).copied()
-    }
-
-    /// Get or create a u32 constant
     fn const_u32(&mut self, value: u32) -> spirv::Word {
-        if let Some(&id) = self.uint_const_cache.get(&value) {
-            return id;
-        }
-        let id = self.builder.constant_bit32(self.u32_type, value);
-        self.uint_const_cache.insert(value, id);
-        self.uint_const_reverse.insert(id, value);
-        self.constant_ids.insert(id);
-        id
+        *self.builder.const_u32(value)
+    }
+    fn const_f32(&mut self, value: f32) -> spirv::Word {
+        *self.builder.const_f32(value)
+    }
+    fn const_bool(&mut self, value: bool) -> spirv::Word {
+        *self.builder.const_bool(value)
     }
 
-    /// Get the literal u32 value from a constant ID (reverse lookup)
+    /// Get the literal i32 value from a constant id created via the
+    /// builder's `const_i32`. Thin delegator — the builder owns the
+    /// reverse-lookup table.
+    fn get_const_i32_value(&self, id: spirv::Word) -> Option<i32> {
+        self.builder.get_const_i32_value(builder::ConstId::new(id))
+    }
+
+    /// Get the literal u32 value from a constant id created via the
+    /// builder's `const_u32`. Thin delegator.
     fn get_const_u32_value(&self, id: spirv::Word) -> Option<u32> {
-        self.uint_const_reverse.get(&id).copied()
+        self.builder.get_const_u32_value(builder::ConstId::new(id))
     }
 
     /// Get the element type of an array type
@@ -963,36 +944,10 @@ impl Constructor {
             .ok_or_else(|| crate::err_spirv!("Array element type not found for type ID: {}", array_type))
     }
 
-    /// Get or create an f32 constant
-    fn const_f32(&mut self, value: f32) -> spirv::Word {
-        let bits = value.to_bits();
-        if let Some(&id) = self.float_const_cache.get(&bits) {
-            return id;
-        }
-        let id = self.builder.constant_bit32(self.f32_type, bits);
-        self.float_const_cache.insert(bits, id);
-        self.constant_ids.insert(id);
-        id
-    }
-
-    /// Get or create a bool constant
-    fn const_bool(&mut self, value: bool) -> spirv::Word {
-        if let Some(&id) = self.bool_const_cache.get(&value) {
-            return id;
-        }
-        let id = if value {
-            self.builder.constant_true(self.bool_type)
-        } else {
-            self.builder.constant_false(self.bool_type)
-        };
-        self.bool_const_cache.insert(value, id);
-        self.constant_ids.insert(id);
-        id
-    }
-
-    /// Check whether a SPIR-V ID is a module-level constant.
+    /// Check whether a SPIR-V ID is a module-level constant. Thin
+    /// delegator over the builder's id set.
     fn is_constant(&self, id: spirv::Word) -> bool {
-        self.constant_ids.contains(&id)
+        self.builder.is_constant(builder::ConstId::new(id))
     }
 
     /// Emit OpConstantComposite if all elements are constants, otherwise OpCompositeConstruct.
@@ -1007,7 +962,7 @@ impl Constructor {
                 return Ok(cached);
             }
             let id = self.builder.constant_composite(result_type, elem_ids);
-            self.constant_ids.insert(id);
+            self.builder.register_constant(builder::ConstId::new(id));
             self.composite_const_cache.insert(key, id);
             Ok(id)
         } else {
@@ -2695,7 +2650,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         Ok(cached)
                     } else {
                         let null_id = self.constructor.builder.constant_null(result_ty);
-                        self.constructor.constant_ids.insert(null_id);
+                        self.constructor.builder.register_constant(builder::ConstId::new(null_id));
                         self.constructor.null_const_cache.insert(result_ty, null_id);
                         Ok(null_id)
                     }
@@ -3040,18 +2995,16 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         Some(ConstantValue::U32(v)) => v,
                         _ => self
                             .constructor
-                            .uint_const_reverse
-                            .get(&arg_ids[0])
-                            .copied()
+                            .get_const_u32_value(arg_ids[0])
                             .ok_or_else(|| err_spirv!("_w_storage_len: set must be a u32 constant"))?,
                     };
-                    let binding =
-                        match value_refs[1].as_const() {
-                            Some(ConstantValue::U32(v)) => v,
-                            _ => self.constructor.uint_const_reverse.get(&arg_ids[1]).copied().ok_or_else(
-                                || err_spirv!("_w_storage_len: binding must be a u32 constant"),
-                            )?,
-                        };
+                    let binding = match value_refs[1].as_const() {
+                        Some(ConstantValue::U32(v)) => v,
+                        _ => self
+                            .constructor
+                            .get_const_u32_value(arg_ids[1])
+                            .ok_or_else(|| err_spirv!("_w_storage_len: binding must be a u32 constant"))?,
+                    };
                     let &(buffer_var, _, _) =
                         self.constructor.storage_buffers.get(&BindingRef::new(set, binding)).ok_or_else(
                             || err_spirv!("Storage buffer not found for set={}, binding={}", set, binding),
