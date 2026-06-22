@@ -84,11 +84,9 @@ struct Constructor {
     // Composite constant dedup: (result_type, constituents) → constant_id
     composite_const_cache: HashMap<(spirv::Word, Vec<spirv::Word>), spirv::Word>,
 
-    // Type cache: avoid recreating same types
-    vec_type_cache: HashMap<(spirv::Word, u32), spirv::Word>,
-    struct_type_cache: HashMap<Vec<spirv::Word>, spirv::Word>,
-    ptr_type_cache: HashMap<(spirv::StorageClass, spirv::Word), spirv::Word>,
-    runtime_array_cache: HashMap<(spirv::Word, u32), spirv::Word>, // (elem_type, stride) -> decorated type
+    // Structural type dedup for the more involved cases (block
+    // wrappers + nested-array lookup). The simpler `vec` / `struct`
+    // / `ptr` / `runtime_array` caches live on `SpirvBuilder`.
     buffer_block_cache: HashMap<spirv::Word, spirv::Word>, // runtime_array_type -> Block-decorated struct
     uniform_block_cache: HashMap<spirv::Word, spirv::Word>, // value_type -> Block-decorated struct with member offset 0
     interface_block_cache: HashMap<InterfaceBlockKey, spirv::Word>,
@@ -191,10 +189,6 @@ impl Constructor {
             glsl_ext_inst_id,
             polytype_cache: HashMap::new(),
             composite_const_cache: HashMap::new(),
-            vec_type_cache: HashMap::new(),
-            struct_type_cache: HashMap::new(),
-            ptr_type_cache: HashMap::new(),
-            runtime_array_cache: HashMap::new(),
             buffer_block_cache: HashMap::new(),
             uniform_block_cache: HashMap::new(),
             interface_block_cache: HashMap::new(),
@@ -253,13 +247,7 @@ impl Constructor {
         storage_class: spirv::StorageClass,
         pointee_id: spirv::Word,
     ) -> spirv::Word {
-        let key = (storage_class, pointee_id);
-        if let Some(&ty) = self.ptr_type_cache.get(&key) {
-            return ty;
-        }
-        let ty = self.builder.type_pointer(None, storage_class, pointee_id);
-        self.ptr_type_cache.insert(key, ty);
-        ty
+        *self.builder.type_pointer(storage_class, builder::TypeId::new(pointee_id))
     }
 
     /// Convert a polytype Type to a SPIR-V type ID
@@ -499,41 +487,16 @@ impl Constructor {
         }
     }
 
-    /// Get or create a vector type
     fn get_or_create_vec_type(&mut self, elem_type: spirv::Word, size: u32) -> spirv::Word {
-        let key = (elem_type, size);
-        if let Some(&ty) = self.vec_type_cache.get(&key) {
-            return ty;
-        }
-        let ty = self.builder.type_vector(elem_type, size);
-        self.vec_type_cache.insert(key, ty);
-        ty
+        *self.builder.type_vec(builder::TypeId::new(elem_type), size)
     }
 
-    /// Get or create a struct type
     fn get_or_create_struct_type(&mut self, field_types: Vec<spirv::Word>) -> spirv::Word {
-        if let Some(&ty) = self.struct_type_cache.get(&field_types) {
-            return ty;
-        }
-        let ty = self.builder.type_struct(field_types.clone());
-        self.struct_type_cache.insert(field_types, ty);
-        ty
+        *self.builder.type_struct(field_types.into_iter().map(builder::TypeId::new).collect())
     }
 
-    /// Get or create a runtime array type with ArrayStride decoration
     fn get_or_create_runtime_array_type(&mut self, elem_type: spirv::Word, stride: u32) -> spirv::Word {
-        let key = (elem_type, stride);
-        if let Some(&ty) = self.runtime_array_cache.get(&key) {
-            return ty;
-        }
-        let ty = self.builder.type_runtime_array(elem_type);
-        self.builder.decorate(
-            ty,
-            spirv::Decoration::ArrayStride,
-            [Operand::LiteralBit32(stride)],
-        );
-        self.runtime_array_cache.insert(key, ty);
-        ty
+        *self.builder.type_runtime_array(builder::TypeId::new(elem_type), stride)
     }
 
     /// Apply ArrayStride decorations for all nested fixed-size arrays in a type
@@ -604,7 +567,7 @@ impl Constructor {
 
         // Create a fresh struct — do NOT go through get_or_create_struct_type
         // to avoid sharing IDs with plain tuple structs.
-        let ty = self.builder.type_struct(member_types.iter().copied());
+        let ty = *self.builder.type_struct(member_types.iter().map(|&w| builder::TypeId::new(w)).collect());
 
         // Decorate as Block + member offsets (once per struct id).
         self.decorate_block(ty, member_offsets);
@@ -623,7 +586,7 @@ impl Constructor {
         if let Some(&ty) = self.buffer_block_cache.get(&runtime_array_type) {
             return ty;
         }
-        let ty = self.builder.type_struct([runtime_array_type]);
+        let ty = *self.builder.type_struct(vec![builder::TypeId::new(runtime_array_type)]);
         self.decorate_block(ty, &[0]);
         self.buffer_block_cache.insert(runtime_array_type, ty);
         ty
@@ -637,7 +600,7 @@ impl Constructor {
         if let Some(&ty) = self.uniform_block_cache.get(&value_type) {
             return ty;
         }
-        let ty = self.builder.type_struct([value_type]);
+        let ty = *self.builder.type_struct(vec![builder::TypeId::new(value_type)]);
         self.decorate_block(ty, &[0]);
         self.uniform_block_cache.insert(value_type, ty);
         ty
@@ -1556,11 +1519,10 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     // index reaches the array element. Other variants
                     // (Composite/View/Virtual) chain directly to the
                     // element.
-                    let elem_ptr_type = self.constructor.builder.type_pointer(
-                        None,
-                        spirv::StorageClass::Function,
-                        result_ty,
-                    );
+                    let elem_ptr_type = *self
+                        .constructor
+                        .builder
+                        .type_pointer(spirv::StorageClass::Function, builder::TypeId::new(result_ty));
                     let elem_ptr = if matches!(
                         base_ty.array_variant(),
                         Some(PolyType::Constructed(TypeName::ArrayVariantBounded, _))
@@ -2585,8 +2547,10 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             let array_var = self.constructor.declare_variable("_w_index_tmp", spirv_array_type)?;
             self.constructor.builder.store(array_var, array_id, None, [])?;
 
-            let elem_ptr_type =
-                self.constructor.builder.type_pointer(None, StorageClass::Function, result_ty);
+            let elem_ptr_type = *self
+                .constructor
+                .builder
+                .type_pointer(StorageClass::Function, builder::TypeId::new(result_ty));
             let elem_ptr =
                 self.constructor.builder.access_chain(elem_ptr_type, None, array_var, [index_id])?;
             Ok(self.constructor.builder.load(result_ty, None, elem_ptr, None, [])?)
@@ -2819,10 +2783,9 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                             let buf_var =
                                 self.constructor.declare_variable("_bounded_buf_tmp", buf_type)?;
                             self.constructor.builder.store(buf_var, buffer, None, [])?;
-                            let elem_ptr_ty = self.constructor.builder.type_pointer(
-                                None,
+                            let elem_ptr_ty = *self.constructor.builder.type_pointer(
                                 spirv::StorageClass::Function,
-                                elem_spirv,
+                                builder::TypeId::new(elem_spirv),
                             );
                             let elem_ptr =
                                 self.constructor.builder.access_chain(elem_ptr_ty, None, buf_var, [idx])?;
@@ -2857,11 +2820,10 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                                 result_ty
                             )
                         })?;
-                        let elem_ptr_ty = self.constructor.builder.type_pointer(
-                            None,
-                            spirv::StorageClass::Function,
-                            elem_ty,
-                        );
+                        let elem_ptr_ty = *self
+                            .constructor
+                            .builder
+                            .type_pointer(spirv::StorageClass::Function, builder::TypeId::new(elem_ty));
                         let elem_ptr =
                             self.constructor.builder.access_chain(elem_ptr_ty, None, arr_var, [idx])?;
                         self.constructor.builder.store(elem_ptr, val, None, [])?;

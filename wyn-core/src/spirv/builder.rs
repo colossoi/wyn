@@ -137,6 +137,15 @@ pub struct SpirvBuilder {
     // ask `is_constant(id)` to decide whether a composite can be
     // `OpConstantComposite` vs `OpCompositeConstruct`.
     constant_ids: HashSet<ConstId>,
+    // Structural type dedup. Each cache is keyed purely on SPIR-V
+    // primitives so the wrapper doesn't need to know how the caller
+    // organizes types upstream — a `PolyType` → `TypeId` map lives
+    // on the lowering layer and calls these helpers with the
+    // already-resolved SPIR-V components.
+    vec_type_cache: HashMap<(TypeId, u32), TypeId>,
+    struct_type_cache: HashMap<Vec<TypeId>, TypeId>,
+    ptr_type_cache: HashMap<(spirv::StorageClass, TypeId), TypeId>,
+    runtime_array_cache: HashMap<(TypeId, u32), TypeId>, // (elem_type, stride) -> decorated type
 }
 
 impl SpirvBuilder {
@@ -170,6 +179,10 @@ impl SpirvBuilder {
             float_const_cache: HashMap::new(),
             bool_const_cache: HashMap::new(),
             constant_ids: HashSet::new(),
+            vec_type_cache: HashMap::new(),
+            struct_type_cache: HashMap::new(),
+            ptr_type_cache: HashMap::new(),
+            runtime_array_cache: HashMap::new(),
         }
     }
 
@@ -273,6 +286,59 @@ impl SpirvBuilder {
     /// `is_constant` returns true for it.
     pub fn register_constant(&mut self, id: ConstId) {
         self.constant_ids.insert(id);
+    }
+
+    /// Get or create `OpTypeVector elem size`.
+    pub fn type_vec(&mut self, elem: TypeId, size: u32) -> TypeId {
+        let key = (elem, size);
+        if let Some(&ty) = self.vec_type_cache.get(&key) {
+            return ty;
+        }
+        let ty = TypeId::new(self.inner.type_vector(*elem, size));
+        self.vec_type_cache.insert(key, ty);
+        ty
+    }
+
+    /// Get or create `OpTypeStruct field0 field1 …`. Pure structural
+    /// dedup — interface blocks (push-constant / uniform / storage
+    /// wrappers) need their own dedup keyed on `(kind, members)` so
+    /// they never share with a plain struct of the same shape.
+    pub fn type_struct(&mut self, fields: Vec<TypeId>) -> TypeId {
+        if let Some(&ty) = self.struct_type_cache.get(&fields) {
+            return ty;
+        }
+        let raw_fields: Vec<spirv::Word> = fields.iter().map(|t| **t).collect();
+        let ty = TypeId::new(self.inner.type_struct(raw_fields));
+        self.struct_type_cache.insert(fields, ty);
+        ty
+    }
+
+    /// Get or create `OpTypePointer storage_class pointee`.
+    pub fn type_pointer(&mut self, storage_class: spirv::StorageClass, pointee: TypeId) -> TypeId {
+        let key = (storage_class, pointee);
+        if let Some(&ty) = self.ptr_type_cache.get(&key) {
+            return ty;
+        }
+        let ty = TypeId::new(self.inner.type_pointer(None, storage_class, *pointee));
+        self.ptr_type_cache.insert(key, ty);
+        ty
+    }
+
+    /// Get or create `OpTypeRuntimeArray elem`, decorated once with
+    /// `ArrayStride stride`.
+    pub fn type_runtime_array(&mut self, elem: TypeId, stride: u32) -> TypeId {
+        let key = (elem, stride);
+        if let Some(&ty) = self.runtime_array_cache.get(&key) {
+            return ty;
+        }
+        let ty = TypeId::new(self.inner.type_runtime_array(*elem));
+        self.inner.decorate(
+            *ty,
+            spirv::Decoration::ArrayStride,
+            [rspirv::dr::Operand::LiteralBit32(stride)],
+        );
+        self.runtime_array_cache.insert(key, ty);
+        ty
     }
 }
 
