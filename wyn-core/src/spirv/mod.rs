@@ -414,7 +414,9 @@ impl Constructor {
                         self.builder.type_matrix(col_vec_type, cols)
                     }
                     TypeName::Record(_fields) => {
-                        panic!("should never get here")
+                        let field_types: Vec<spirv::Word> =
+                            args.iter().map(|a| self.polytype_to_spirv(a)).collect();
+                        self.get_or_create_struct_type(field_types)
                     }
                     TypeName::Pointer => {
                         // Pointer type: args[0] is pointee type, args[1] is address space
@@ -697,10 +699,16 @@ impl Constructor {
         // Ensure nested array types have ArrayStride for buffer layout
         self.apply_buffer_array_strides(elem_spirv, &elem_ty);
 
-        // If the element type is a tuple/struct, add member offset decorations
-        // for the buffer layout. We add them to the elem type directly since
-        // it will be used inside a runtime array in a storage buffer.
-        if let PolyType::Constructed(TypeName::Tuple(_), args) = &elem_ty {
+        // If the element type is a tuple/record/struct, add member offset
+        // decorations for the buffer layout. We add them to the elem type
+        // directly since it will be used inside a runtime array in a storage
+        // buffer.
+        let struct_fields: Option<&Vec<PolyType<TypeName>>> = match &elem_ty {
+            PolyType::Constructed(TypeName::Tuple(_), args) => Some(args),
+            PolyType::Constructed(TypeName::Record(_), args) => Some(args),
+            _ => None,
+        };
+        if let Some(args) = struct_fields {
             if self.buffer_stride_decorated.insert(elem_spirv) {
                 let mut offset = 0u32;
                 for (i, field_ty) in args.iter().enumerate() {
@@ -711,7 +719,7 @@ impl Constructor {
                         [Operand::LiteralBit32(offset)],
                     );
                     offset += type_byte_size(field_ty)
-                        .unwrap_or_else(|| panic!("tuple field {:?} has unknown byte size", field_ty));
+                        .unwrap_or_else(|| panic!("struct field {:?} has unknown byte size", field_ty));
                 }
             }
         }

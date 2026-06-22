@@ -5387,6 +5387,34 @@ entry tick(#[storage(set=2, binding=0, access=readwrite)] buf: *[]u32) *[]u32 =
 /// `egir::from_tlc::convert_soac_map` (`InputBuffer`-aware project
 /// type, mirroring `convert_soac_scan`) and in `egir::soac_expand`
 /// (`emit_write_element` takes the post-decision carried type).
+/// Structural records lower to `OpTypeStruct` in SPIR-V (via the
+/// alias to `draw_args`). Member offsets get added when the record is
+/// the leaf of a runtime-sized storage buffer, mirroring the tuple
+/// path. Two shapes exercised: returning a record from a fragment
+/// entry, and scattering records into a `*[]point` storage buffer.
+#[test]
+fn structural_record_lowers_through_spirv() {
+    crate::compile_thru_spirv(
+        r#"
+type draw_args = {x: f32, y: f32, z: f32, w: f32}
+#[fragment]
+entry frag(#[uniform(set=1, binding=0)] iTime: f32) #[location(0)] draw_args =
+  {x = iTime, y = 0.0, z = 0.0, w = 1.0}
+"#,
+    )
+    .expect("fragment returning a structural record should lower");
+
+    crate::compile_thru_spirv(
+        r#"
+type point = {x: f32, y: f32}
+#[compute]
+entry e(#[storage(set=2, binding=1, access=write)] o: *[]point) () =
+  let _ = scatter(o, [0i32], [{x = 1.0, y = 2.0}]) in ()
+"#,
+    )
+    .expect("compute scatter into *[]record should lower");
+}
+
 #[test]
 fn clear_then_scatter_on_consuming_write_storage_compiles() {
     crate::compile_thru_spirv(

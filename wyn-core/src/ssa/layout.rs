@@ -89,6 +89,13 @@ pub fn type_byte_size(ty: &Type) -> Option<u32> {
             }
             Some(total)
         }
+        Type::Constructed(TypeName::Record(_), args) => {
+            let mut total = 0u32;
+            for arg in args {
+                total += type_byte_size(arg)?;
+            }
+            Some(total)
+        }
         _ => None,
     }
 }
