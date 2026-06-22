@@ -109,10 +109,38 @@ pub type BlockId = Id<BlockKind>;
 /// internal caches keyed only on SPIR-V primitives — no compiler
 /// types reach this struct.
 ///
-/// At this stage of the refactor only the lifecycle / capability
-/// setup is delegated through here; the rest is still in
-/// `spirv::mod`'s `Constructor`. Subsequent commits will move
-/// type-emission, constant-emission, and decoration tracking here.
+/// What lives here today:
+/// - Lifecycle / capability setup (SPIR-V 1.5, Shader, Logical, GLSL450).
+/// - Well-known scalar types (void/bool/i32/u32/f32) and GLSL ext id.
+/// - Constant dedup: `const_i32` / `const_u32` / `const_f32` /
+///   `const_bool` / `const_null` / `composite_or_construct`, with
+///   reverse lookup for the integer kinds and `is_constant` for the
+///   composite-vs-construct decision.
+/// - Structural type dedup: `type_vec` / `type_struct` /
+///   `type_pointer` / `type_runtime_array` + the block-wrapped
+///   variants `buffer_block_type` / `uniform_block_type`.
+/// - Decoration trackers: `decorate_block_once` (Block + member
+///   offsets), `decorate_nonwritable_once`, `decorate_array_stride_once`,
+///   `mark_buffer_layout_decorated_once`.
+/// - SPIR-V array → element registry: `register_array_element`
+///   plus `array_element_type` lookup.
+///
+/// What stays in the compiler-aware lowering layer (`spirv/mod.rs`'s
+/// `Constructor`):
+/// - `PolyType<TypeName> → Id<TypeKind>` mapping (`polytype_cache`).
+/// - Compiler-aware buffer / binding registries (`storage_buffers`,
+///   `buffer_vars`, `workgroup_vars`, `buffer_id_map`).
+/// - Per-function lowering state (current block, env, param ids,
+///   per-entry-point output vars).
+/// - Compiler-symbol → id maps (`functions`, `linked_functions`,
+///   `int_pow_functions`).
+/// - Walks over `PolyType` that produce SPIR-V types
+///   (`polytype_to_spirv`, `apply_buffer_array_strides`,
+///   `create_interface_block_type`).
+///
+/// Existing call sites still reach the underlying rspirv API
+/// through the `Deref`/`DerefMut` bridge below — future migrations
+/// add typed methods here and trim the bridge usage.
 pub struct SpirvBuilder {
     inner: Builder,
     // Well-known types eagerly created at construction so call sites
