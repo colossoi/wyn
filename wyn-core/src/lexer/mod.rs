@@ -9,7 +9,7 @@ use nom::{
     character::complete::{alpha1, alphanumeric1, char, multispace0, multispace1, one_of},
     combinator::{eof, map, peek, recognize, value},
     multi::many0,
-    sequence::{pair, preceded, terminated, tuple},
+    sequence::{pair, preceded, terminated},
     IResult,
 };
 
@@ -260,17 +260,6 @@ fn parse_keyword(input: &str) -> IResult<&str, Token> {
 // Removed parse_type - i32 and f32 are now treated as regular identifiers
 // They are only special in type position (handled by parser) and as suffixes on literals
 
-fn parse_type_variable(input: &str) -> IResult<&str, Token> {
-    map(
-        recognize(tuple((
-            tag("'"),
-            alt((alpha1, tag("_"))),
-            many0(alt((alphanumeric1, tag("_")))),
-        ))),
-        |s: &str| Token::Identifier(s.to_string()),
-    )(input)
-}
-
 fn parse_identifier(input: &str) -> IResult<&str, Token> {
     map(
         recognize(pair(
@@ -390,7 +379,6 @@ fn parse_token(input: &str) -> IResult<&str, Token> {
             parse_string_literal,
             parse_keyword,
             parse_float_literal,
-            parse_type_variable,
             parse_identifier,
             parse_int_literal,
             parse_delimiter,   // Must come before parse_operator to match @[ before @

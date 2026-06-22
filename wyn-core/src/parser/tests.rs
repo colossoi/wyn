@@ -2993,9 +2993,9 @@ fn test_parse_def_rejects_short_circuit_operator_names() {
 
 #[test]
 fn test_parse_def_rejects_juxtaposed_generic_params() {
-    // Futhark-style juxtaposed generics (`def f [n] 'a (x: a) = x`) are
+    // Futhark-style juxtaposed generics (`def f [n] A (x: A) = x`) are
     // not Wyn syntax — only the `<[n], A>` angle-bracket form is.
-    expect_parse_error("def f [n] 'a (x: a) = x", |err| match err {
+    expect_parse_error("def f [n] A (x: A) = x", |err| match err {
         CompilerError::ParseError(_, _) => Ok(()),
         other => Err(format!("expected parse error, got {:?}", other)),
     });
@@ -3080,6 +3080,18 @@ fn test_parse_uppercase_type_variable() {
     // Uppercase single letters should be type variables
     let decl = single_decl("def f<A>(x: A) A = x");
     assert_eq!(decl.type_params, vec!["A"]);
+}
+
+#[test]
+fn test_apostrophe_prefix_type_variable_does_not_tokenize() {
+    // The Futhark `'a` syntax is not Wyn syntax — uppercase identifiers
+    // are the sole type-variable form. A leading apostrophe in source
+    // should fail to tokenize.
+    let result = crate::lexer::tokenize("def f<'a>(x: 'a) 'a = x");
+    assert!(
+        result.is_err(),
+        "apostrophe-prefixed type variable should not tokenize, got: {result:?}"
+    );
 }
 
 #[test]
