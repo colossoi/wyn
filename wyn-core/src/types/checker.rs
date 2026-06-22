@@ -573,11 +573,12 @@ impl<'a> TypeChecker<'a> {
                 if name.contains('.') {
                     // Already qualified - try as-is
                     keys.push(name.clone());
-                } else if let Some(m) = current_module {
-                    // Unqualified in module context - try qualified
-                    keys.push(format!("{}.{}", m, name));
+                } else {
+                    if let Some(m) = current_module {
+                        keys.push(format!("{}.{}", m, name));
+                    }
+                    keys.push(name.clone());
                 }
-                // No prelude fallback - unqualified without context stays unresolved
 
                 for key in keys {
                     // Check for cycles before resolving

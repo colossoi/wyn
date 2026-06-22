@@ -2,7 +2,7 @@ use crate::ast::*;
 use crate::error::Result;
 use crate::lexer::Token;
 use crate::parser::Parser;
-use crate::{bail_parse, err_parse};
+use crate::{bail_parse, bail_parse_at, err_parse};
 use log::trace;
 
 impl Parser<'_> {
@@ -29,7 +29,16 @@ impl Parser<'_> {
             _ => bail_parse!("Expected 'type', 'type~', or 'type^' keyword"),
         };
 
+        let name_span = self.current_span();
         let name = self.expect_identifier()?;
+        if name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+            bail_parse_at!(
+                name_span,
+                "type alias names must be lowercase ('{}' starts with an uppercase letter); \
+                 uppercase identifiers are reserved for type variables",
+                name
+            );
+        }
 
         // Parse type parameters: <[n], A, B>
         let type_params = self.parse_type_params()?;

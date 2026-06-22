@@ -690,6 +690,10 @@ A type abbreviation is a shorthand: after `type t1 = t2`, the name
 not introduce distinct types; the abbreviation and its definition
 denote the same type.
 
+The bound name must start with a lowercase letter or underscore.
+Uppercase identifiers in type position are reserved for type
+parameters (see `UpperName` above).
+
 ### Lifted Types
 
 A type abbreviation must be marked **size-lifted** (`type~`) if its

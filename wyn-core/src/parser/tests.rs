@@ -1523,15 +1523,28 @@ fn test_parse_pattern_lowercase_not_constructor() {
 
 #[test]
 fn test_parse_type_bind_simple() {
-    let program = parse_ok("type Point = (i32, i32)");
+    let program = parse_ok("type point = (i32, i32)");
     assert_eq!(program.declarations.len(), 1);
 
     let bind = match &program.declarations[0] {
         Declaration::TypeBind(b) => b,
         _ => panic!("Expected TypeBind declaration"),
     };
-    assert_eq!(bind.name, "Point");
+    assert_eq!(bind.name, "point");
     assert_eq!(bind.type_params.len(), 0);
+}
+
+#[test]
+fn test_parse_type_bind_uppercase_name_rejected() {
+    let tokens = crate::lexer::tokenize("type Point = (i32, i32)").expect("tokenize");
+    let mut nc = crate::ast::NodeCounter::new();
+    let mut parser = crate::parser::Parser::new(tokens, &mut nc);
+    let err = parser.parse().expect_err("uppercase alias names must not parse");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("lowercase") && msg.contains("Point"),
+        "error should name the offending alias and direct at lowercase, got: {msg}"
+    );
 }
 
 #[test]

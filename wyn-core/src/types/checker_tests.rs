@@ -1875,6 +1875,16 @@ def get_x: f32 =
 }
 
 #[test]
+fn test_top_level_type_alias_unifies_with_record_literal() {
+    typecheck_program(
+        r#"
+type draw_args = {x: f32, y: f32, z: f32, w: f32}
+def make: draw_args = {x = 1.0f32, y = 2.0f32, z = 3.0f32, w = 4.0f32}
+        "#,
+    );
+}
+
+#[test]
 fn test_sum_constructor_with_annotation() {
     typecheck_program("let x: #left(i32) | #right(f32) = #left(3)");
 }

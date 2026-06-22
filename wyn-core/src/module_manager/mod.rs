@@ -2,7 +2,7 @@
 
 use crate::ast::{
     Decl, Declaration, ModuleExpression, ModuleTypeExpression, Node, NodeCounter, Pattern, PatternKind,
-    Program, Spec, Type,
+    Program, Spec, Type, TypeBind, TypeLifting, TypeName,
 };
 use crate::error::Result;
 use crate::lexer;
@@ -296,15 +296,24 @@ impl ModuleManager {
         // Register module types first
         self.register_module_types(program)?;
 
-        // Elaborate each module declaration
         for decl in &program.declarations {
-            if let Declaration::Module(md) = decl {
-                let name = match md {
-                    crate::ast::ModuleDecl::Module { name, .. } => name.clone(),
-                    crate::ast::ModuleDecl::Functor { name, .. } => name.clone(),
-                };
-                self.user_module_names.insert(name);
-                self.elaborate_module_decl(md, node_counter)?;
+            match decl {
+                Declaration::Module(md) => {
+                    let name = match md {
+                        crate::ast::ModuleDecl::Module { name, .. } => name.clone(),
+                        crate::ast::ModuleDecl::Functor { name, .. } => name.clone(),
+                    };
+                    self.user_module_names.insert(name);
+                    self.elaborate_module_decl(md, node_counter)?;
+                }
+                Declaration::TypeBind(tb) => {
+                    enforce_lifting_rule(tb)?;
+                    if self.type_aliases.contains_key(&tb.name) {
+                        bail_module!("Top-level type alias '{}' is already defined", tb.name);
+                    }
+                    self.type_aliases.insert(tb.name.clone(), tb.definition.clone());
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -1023,6 +1032,48 @@ impl<'a> crate::name_resolution::ResolveContext for ModuleElaborationResolver<'a
             ));
         }
         None
+    }
+}
+
+/// Spec §"Lifted Types": a plain `type X = T` may not have a function
+/// or existential `T`; `type~` admits existentials; `type^` admits
+/// either. The parser carries the marker; this is the first pass that
+/// actually rejects mismatches.
+fn enforce_lifting_rule(tb: &TypeBind) -> Result<()> {
+    let allow_existential = matches!(
+        tb.lifting,
+        Some(TypeLifting::SizeLifted) | Some(TypeLifting::FullyLifted)
+    );
+    let allow_function = matches!(tb.lifting, Some(TypeLifting::FullyLifted));
+
+    if !allow_function && contains_function(&tb.definition) {
+        return Err(crate::err_type!(
+            "plain `type {0}` must not have a function type as its RHS; use `type^ {0}` for a fully-lifted alias",
+            tb.name
+        ));
+    }
+    if !allow_existential && contains_existential(&tb.definition) {
+        return Err(crate::err_type!(
+            "plain `type {0}` must not have an existential size as its RHS; use `type~ {0}` (or `type^`) to admit existentials",
+            tb.name
+        ));
+    }
+    Ok(())
+}
+
+fn contains_function(ty: &Type) -> bool {
+    match ty {
+        Type::Constructed(TypeName::Arrow, _) => true,
+        Type::Constructed(_, args) => args.iter().any(contains_function),
+        Type::Variable(_) => false,
+    }
+}
+
+fn contains_existential(ty: &Type) -> bool {
+    match ty {
+        Type::Constructed(TypeName::Existential(_), _) => true,
+        Type::Constructed(_, args) => args.iter().any(contains_existential),
+        Type::Variable(_) => false,
     }
 }
 
