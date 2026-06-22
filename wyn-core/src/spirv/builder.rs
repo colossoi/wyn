@@ -128,18 +128,29 @@ impl SpirvBuilder {
         SpirvBuilder { inner }
     }
 
-    /// Direct access to the underlying rspirv Builder. The refactor
-    /// will narrow this down over time as call sites migrate to
-    /// typed methods on `SpirvBuilder`; for now it's the bridge that
-    /// lets `spirv::mod`'s `Constructor` continue to call rspirv
-    /// directly while caches and decorations move here piecewise.
-    pub fn rspirv(&mut self) -> &mut Builder {
-        &mut self.inner
-    }
-
     /// Consume the builder and produce the finished SPIR-V module.
     pub fn into_module(self) -> rspirv::dr::Module {
         self.inner.module()
+    }
+}
+
+/// Temporary bridge: existing call sites can keep writing
+/// `builder.type_int(32, 1)` etc. directly during the refactor.
+/// Each subsequent stage adds typed `SpirvBuilder` methods and the
+/// matching call sites switch to them; the final commit removes
+/// these `Deref` impls and the build flags any remaining raw rspirv
+/// access. **Do not add new `Deref`-using call sites** — write
+/// against the typed `SpirvBuilder` API instead.
+impl std::ops::Deref for SpirvBuilder {
+    type Target = Builder;
+    fn deref(&self) -> &Builder {
+        &self.inner
+    }
+}
+
+impl std::ops::DerefMut for SpirvBuilder {
+    fn deref_mut(&mut self) -> &mut Builder {
+        &mut self.inner
     }
 }
 

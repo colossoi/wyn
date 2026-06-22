@@ -25,8 +25,8 @@ use crate::BindingRef;
 use crate::{bail_spirv, bail_spirv_at, err_spirv, err_spirv_at};
 use polytype::Type as PolyType;
 use rspirv::binary::Assemble;
-use rspirv::dr::{Builder, InsertPoint, Operand};
-use rspirv::spirv::{self, AddressingModel, Capability, MemoryModel, StorageClass};
+use rspirv::dr::{InsertPoint, Operand};
+use rspirv::spirv::{self, Capability, StorageClass};
 
 // =============================================================================
 // Constructor - SPIR-V Builder Wrapper
@@ -51,7 +51,7 @@ enum InterfaceBlockKind {
 /// - Block management with implicit branch from variables block to code
 /// - Value and type caching
 struct Constructor {
-    builder: Builder,
+    builder: builder::SpirvBuilder,
 
     // Type caching
     void_type: spirv::Word,
@@ -177,11 +177,7 @@ struct Constructor {
 
 impl Constructor {
     fn new() -> Self {
-        let mut builder = Builder::new();
-        builder.set_version(1, 5);
-        builder.capability(Capability::Shader);
-        builder.memory_model(AddressingModel::Logical, MemoryModel::GLSL450);
-
+        let mut builder = builder::SpirvBuilder::new();
         let void_type = builder.type_void();
         let bool_type = builder.type_bool();
         let i32_type = builder.type_int(32, 1);
@@ -3764,7 +3760,7 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
         }
     }
 
-    Ok(constructor.builder.module().assemble())
+    Ok(constructor.builder.into_module().assemble())
 }
 
 /// Lower an SSA function to SPIR-V.
