@@ -146,6 +146,18 @@ pub struct SpirvBuilder {
     struct_type_cache: HashMap<Vec<TypeId>, TypeId>,
     ptr_type_cache: HashMap<(spirv::StorageClass, TypeId), TypeId>,
     runtime_array_cache: HashMap<(TypeId, u32), TypeId>, // (elem_type, stride) -> decorated type
+    // Block-decorated struct wrappers around a runtime array (storage
+    // buffer) or a single value (uniform / push-constant). Cached per
+    // wrapped-type so two `#[uniform]` params of the same shape don't
+    // produce double `Block`/`Offset` decorations that spirv-val
+    // rejects.
+    buffer_block_cache: HashMap<TypeId, TypeId>, // runtime_array_type -> Block-decorated struct
+    uniform_block_cache: HashMap<TypeId, TypeId>, // value_type -> Block-decorated struct
+    // Struct ids already decorated `Block` + member offsets (once
+    // per id). Distinct from the caches above because `rspirv`
+    // structurally dedups `OpTypeStruct`s — different wrappers can
+    // land on the same id and would re-decorate without this guard.
+    block_decorated: HashSet<TypeId>,
 }
 
 impl SpirvBuilder {
@@ -183,6 +195,9 @@ impl SpirvBuilder {
             struct_type_cache: HashMap::new(),
             ptr_type_cache: HashMap::new(),
             runtime_array_cache: HashMap::new(),
+            buffer_block_cache: HashMap::new(),
+            uniform_block_cache: HashMap::new(),
+            block_decorated: HashSet::new(),
         }
     }
 
@@ -338,6 +353,53 @@ impl SpirvBuilder {
             [rspirv::dr::Operand::LiteralBit32(stride)],
         );
         self.runtime_array_cache.insert(key, ty);
+        ty
+    }
+
+    /// Decorate `ty` as `Block` with the given member byte offsets,
+    /// exactly once per struct id. Multiple wrappers (uniform /
+    /// push-constant / storage buffer) over the same inner layout
+    /// can share an id due to rspirv's structural dedup; this guard
+    /// keeps spirv-val happy by not re-decorating.
+    pub fn decorate_block_once(&mut self, ty: TypeId, member_offsets: &[u32]) {
+        if !self.block_decorated.insert(ty) {
+            return;
+        }
+        self.inner.decorate(*ty, spirv::Decoration::Block, []);
+        for (i, &offset) in member_offsets.iter().enumerate() {
+            self.inner.member_decorate(
+                *ty,
+                i as u32,
+                spirv::Decoration::Offset,
+                [rspirv::dr::Operand::LiteralBit32(offset)],
+            );
+        }
+    }
+
+    /// `{runtime_array}` struct decorated as `Block` with member
+    /// offset 0 — the Vulkan storage-buffer block shape. Cached per
+    /// `runtime_array` so two storage buffers of the same shape share
+    /// one block-wrapped struct id.
+    pub fn buffer_block_type(&mut self, runtime_array: TypeId) -> TypeId {
+        if let Some(&ty) = self.buffer_block_cache.get(&runtime_array) {
+            return ty;
+        }
+        let ty = self.type_struct(vec![runtime_array]);
+        self.decorate_block_once(ty, &[0]);
+        self.buffer_block_cache.insert(runtime_array, ty);
+        ty
+    }
+
+    /// `{value}` struct decorated as `Block` with member offset 0 —
+    /// the Vulkan uniform-buffer block shape. Cached per `value` so
+    /// two `#[uniform]` params of the same shape share one block.
+    pub fn uniform_block_type(&mut self, value: TypeId) -> TypeId {
+        if let Some(&ty) = self.uniform_block_cache.get(&value) {
+            return ty;
+        }
+        let ty = self.type_struct(vec![value]);
+        self.decorate_block_once(ty, &[0]);
+        self.uniform_block_cache.insert(value, ty);
         ty
     }
 }

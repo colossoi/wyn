@@ -84,11 +84,11 @@ struct Constructor {
     // Composite constant dedup: (result_type, constituents) → constant_id
     composite_const_cache: HashMap<(spirv::Word, Vec<spirv::Word>), spirv::Word>,
 
-    // Structural type dedup for the more involved cases (block
-    // wrappers + nested-array lookup). The simpler `vec` / `struct`
-    // / `ptr` / `runtime_array` caches live on `SpirvBuilder`.
-    buffer_block_cache: HashMap<spirv::Word, spirv::Word>, // runtime_array_type -> Block-decorated struct
-    uniform_block_cache: HashMap<spirv::Word, spirv::Word>, // value_type -> Block-decorated struct with member offset 0
+    // Interface-block + nested-array lookups stay here for now —
+    // they're entangled with the compiler's `PolyType` walks
+    // (interface members need `apply_buffer_array_strides`, which is
+    // PolyType-driven). The simpler block wrappers and structural
+    // type caches live on `SpirvBuilder`.
     interface_block_cache: HashMap<InterfaceBlockKey, spirv::Word>,
     array_elem_cache: HashMap<spirv::Word, spirv::Word>, // array_type -> element_type
 
@@ -130,14 +130,6 @@ struct Constructor {
     buffer_stride_decorated: HashSet<spirv::Word>,
 
     /// Tracks struct types already decorated with `Block` (+ member offsets).
-    /// `rspirv` deduplicates structurally-identical `OpTypeStruct`s, so a
-    /// `{float}` uniform-block wrapper and a `{float}` push-constant-block
-    /// wrapper collapse to one type id. Both wrapper paths want to decorate
-    /// it `Block`, but `spirv-val` rejects a type decorated `Block` (or a
-    /// member decorated `Offset`) more than once. This set ensures each
-    /// struct id is block-decorated exactly once.
-    block_decorated: HashSet<spirv::Word>,
-
     /// Tracks storage-buffer variables already decorated `NonWritable`.
     /// `create_storage_buffer` is idempotent, so a binding read (and never
     /// written) by more than one entry point reaches the decoration site
@@ -189,8 +181,6 @@ impl Constructor {
             glsl_ext_inst_id,
             polytype_cache: HashMap::new(),
             composite_const_cache: HashMap::new(),
-            buffer_block_cache: HashMap::new(),
-            uniform_block_cache: HashMap::new(),
             interface_block_cache: HashMap::new(),
             array_elem_cache: HashMap::new(),
             entry_point_interfaces: HashMap::new(),
@@ -205,7 +195,6 @@ impl Constructor {
             int_pow_functions: HashMap::new(),
             current_entry_outputs: Vec::new(),
             buffer_stride_decorated: HashSet::new(),
-            block_decorated: HashSet::new(),
             nonwritable_decorated: HashSet::new(),
             buffer_vars: Vec::new(),
             workgroup_vars: HashMap::new(),
@@ -526,24 +515,9 @@ impl Constructor {
         }
     }
 
-    /// Decorate `ty` as a `Block` with the given member byte offsets, exactly
-    /// once per struct id. `rspirv` collapses structurally-identical structs,
-    /// so distinct block wrappers (uniform / push-constant / buffer) over the
-    /// same inner layout reach this with the same `ty`; re-decorating would
-    /// make `spirv-val` reject the duplicate `Block` / `Offset`.
+    /// Thin delegator over `SpirvBuilder::decorate_block_once`.
     fn decorate_block(&mut self, ty: spirv::Word, member_offsets: &[u32]) {
-        if !self.block_decorated.insert(ty) {
-            return;
-        }
-        self.builder.decorate(ty, spirv::Decoration::Block, []);
-        for (i, &offset) in member_offsets.iter().enumerate() {
-            self.builder.member_decorate(
-                ty,
-                i as u32,
-                spirv::Decoration::Offset,
-                [Operand::LiteralBit32(offset)],
-            );
-        }
+        self.builder.decorate_block_once(builder::TypeId::new(ty), member_offsets);
     }
 
     /// Create a decorated interface block struct type.
@@ -581,29 +555,12 @@ impl Constructor {
         ty
     }
 
-    /// Get or create a Block-decorated struct wrapping a runtime array (for storage buffers)
     fn get_or_create_buffer_block_type(&mut self, runtime_array_type: spirv::Word) -> spirv::Word {
-        if let Some(&ty) = self.buffer_block_cache.get(&runtime_array_type) {
-            return ty;
-        }
-        let ty = *self.builder.type_struct(vec![builder::TypeId::new(runtime_array_type)]);
-        self.decorate_block(ty, &[0]);
-        self.buffer_block_cache.insert(runtime_array_type, ty);
-        ty
+        *self.builder.buffer_block_type(builder::TypeId::new(runtime_array_type))
     }
 
-    /// `{value_type}` struct decorated with `Block` and `MemberDecorate Offset 0`
-    /// — the Vulkan shape for a uniform-buffer block. Cached per value_type so
-    /// two `#[uniform]` params with the same type don't double-decorate
-    /// (spirv-val rejects member decorated with Offset twice).
     fn get_or_create_uniform_block_type(&mut self, value_type: spirv::Word) -> spirv::Word {
-        if let Some(&ty) = self.uniform_block_cache.get(&value_type) {
-            return ty;
-        }
-        let ty = *self.builder.type_struct(vec![builder::TypeId::new(value_type)]);
-        self.decorate_block(ty, &[0]);
-        self.uniform_block_cache.insert(value_type, ty);
-        ty
+        *self.builder.uniform_block_type(builder::TypeId::new(value_type))
     }
 
     /// Create a storage buffer variable for compute shaders.
