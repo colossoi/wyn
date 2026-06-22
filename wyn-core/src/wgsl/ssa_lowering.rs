@@ -1297,7 +1297,28 @@ impl<'a> LowerCtx<'a> {
             param_strs.push("@builtin(num_workgroups) _wgsl_nwg: vec3<u32>".to_string());
         }
 
-        let name = self.mangle_tracked(&entry.name)?;
+        // Entry-point names are kept verbatim so the pipeline descriptor's
+        // `entry_point` strings match what's actually in the WGSL output.
+        // Internal symbols still go through `mangle_tracked`; entries are
+        // user-written and the parser's identifier rules already restrict
+        // them to a subset of legal WGSL identifiers — we re-check here.
+        let name = entry.name.clone();
+        validate_wgsl_identifier(&name).map_err(|e| {
+            crate::err_wgsl!(
+                "entry-point name '{}' is not a legal WGSL identifier: {}",
+                name,
+                e
+            )
+        })?;
+        if let Some(prev) = self.mangled_names.insert(name.clone(), name.clone()) {
+            if prev != name {
+                return Err(crate::err_wgsl!(
+                    "entry-point name '{}' collides with mangled symbol from '{}'",
+                    name,
+                    prev
+                ));
+            }
+        }
         writeln!(output, "{}", entry_attr).unwrap();
         if is_compute_void {
             writeln!(output, "fn {}({}) {{", name, param_strs.join(", ")).unwrap();
