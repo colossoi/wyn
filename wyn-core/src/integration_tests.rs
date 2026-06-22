@@ -5364,17 +5364,18 @@ fn constructor_form_same_type_conversion_is_identity() {
 }
 
 /// A global `def` whose initializer contains a *function call*
-/// referencing other globals errors at SPIR-V emission with
-/// "Unknown global: ELEV" when the synthesized global is then used
-/// inside another function. Isolating contrast: a global initialized
-/// by plain constant arithmetic (e.g. `def g4 = base * 3.0`) compiles
-/// — the trigger is specifically "function-call-in-initializer +
-/// use-from-another-function." Likely a globals-lowering ordering
-/// issue: the call's transitive global refs aren't registered as
-/// global-constant functions in `Constructor.functions` before the
-/// consumer body's lowering walks them.
+/// referencing other globals used to error at SPIR-V emission with
+/// "Unknown global: ELEV" when the synthesized global was then used
+/// inside another function. Contrast: a global initialized by plain
+/// constant arithmetic (e.g. `def g4 = base * 3.0`) compiled because
+/// the entire chain got constant-folded — the failure shape only
+/// surfaced when a function-call initializer prevented folding and
+/// the SPIR-V backend had to actually emit the consumer body. The
+/// fix: forward-declare and lower `program.constants` as zero-arg
+/// functions, mirroring the existing handling of `program.functions`
+/// (the WGSL backend handled them already; the SPIR-V backend did
+/// not).
 #[test]
-#[ignore = "function-call-initialized global isn't registered before consumer lowering"]
 fn function_call_initialized_global_compiles() {
     crate::compile_thru_spirv(
         r#"

@@ -3577,6 +3577,18 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
         constructor.forward_declare_function(&func.name, &param_types, return_type);
     }
 
+    // Forward-declare program-level constants too. Each is a zero-arg
+    // function whose body returns the folded literal; consumer bodies
+    // reach them via `InstKind::Global(name)`, which looks up
+    // `Constructor.functions`. Without this step the SPIR-V emit
+    // fails with "Unknown global: <name>" whenever a non-constant
+    // initializer (function call etc.) references a hoisted pure
+    // constant.
+    for constant in &program.constants {
+        let return_type = constructor.polytype_to_spirv(&constant.body.return_ty);
+        constructor.forward_declare_function(&constant.name, &[], return_type);
+    }
+
     // Forward-declare extern (linked) functions with Import linkage
     for func in &program.functions {
         if let Some(linkage_name) = &func.linkage_name {
@@ -3642,6 +3654,18 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
         }
 
         lower_ssa_function(&mut constructor, func)?;
+    }
+
+    // Lower program-level constants as zero-arg functions. Their
+    // forward-declared IDs are already in `Constructor.functions`
+    // (the loop above ran before any body lowering); now emit the
+    // body so calls to `Global(name)` from other functions resolve.
+    for constant in &program.constants {
+        let return_type = constructor.polytype_to_spirv(&constant.body.return_ty);
+        constructor.begin_function(&constant.name, &[], &[], return_type)?;
+        lower_ssa_body(&mut constructor, &constant.body, Span::new(0, 0, 0, 0))
+            .map_err(|e| err_spirv!("in constant '{}': {}", constant.name, e))?;
+        constructor.end_function()?;
     }
 
     // Lower all entry points
