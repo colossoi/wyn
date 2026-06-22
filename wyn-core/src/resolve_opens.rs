@@ -221,9 +221,20 @@ impl<'a> OpenResolver<'a> {
             if self.locally_bound(name) {
                 return Ok(());
             }
-            // Rule 3: opened-module candidates.
-            let candidates: Vec<String> =
-                self.opens.iter().rev().filter(|m| self.index.has_member(m, name)).cloned().collect();
+            // Rule 3: opened-module candidates. Dedupe by module name
+            // (preserving innermost-first order) so two `open M` entries
+            // on the stack — typically one from a library re-export and
+            // one from the importer — collapse to a single candidate
+            // instead of looking ambiguous to the user.
+            let mut seen = HashSet::new();
+            let candidates: Vec<String> = self
+                .opens
+                .iter()
+                .rev()
+                .filter(|m| self.index.has_member(m, name))
+                .filter(|m| seen.insert((*m).clone()))
+                .cloned()
+                .collect();
             match candidates.len() {
                 0 => {} // Rule 4: leave bare for downstream resolution.
                 1 => {

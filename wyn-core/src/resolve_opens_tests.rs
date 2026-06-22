@@ -389,3 +389,24 @@ fn innermost_open_wins_when_unique() {
     let cos = find_ident(body, "cos");
     assert_eq!(ident_quals(cos), &["f32".to_string()]);
 }
+
+#[test]
+fn identical_open_does_not_cause_ambiguity() {
+    // A library re-exports `open f32`; the importer also `open f32`.
+    // Both stack entries point at the same module, so `clamp` resolves
+    // unambiguously to `f32.clamp` instead of being flagged ambiguous.
+    let mut prog = parse(
+        r#"
+        open f32
+        open f32
+        def f (x: f32) f32 = clamp(x)
+        "#,
+    );
+    let idx = make_index(&[("f32", "clamp")]);
+    let mut r = OpenResolver::new(&idx);
+    r.resolve_program(&mut prog).expect("resolve");
+
+    let body = first_decl_body(&prog);
+    let c = find_ident(body, "clamp");
+    assert_eq!(ident_quals(c), &["f32".to_string()]);
+}
