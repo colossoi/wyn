@@ -217,8 +217,13 @@ impl<'a> OpenResolver<'a> {
             if !quals.is_empty() {
                 return Ok(());
             }
-            // Rule 2: locally bound.
-            if self.locally_bound(name) {
+            // Rule 2: already in scope — a local binding, or a name
+            // that's globally available (a module name like `f32`,
+            // `u32`, … which doubles as a polymorphic conversion
+            // constructor per the spec). An open must not shadow
+            // either: `open f32` exports `f32.u32` as a member, but
+            // rewriting bare `u32` would hijack the constructor.
+            if self.locally_bound(name) || self.index.has_module(name) {
                 return Ok(());
             }
             // Rule 3: opened-module candidates. Dedupe by module name
