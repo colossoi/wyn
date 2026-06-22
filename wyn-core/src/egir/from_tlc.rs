@@ -171,6 +171,13 @@ pub fn run(
     let mut functions: Vec<EgirFunc> = Vec::new();
     let mut externs: Vec<Function> = Vec::new();
     let mut entry_points: Vec<EgirEntry> = Vec::new();
+    // Module-wide cursor: compiler-allocated set-0 bindings (entry
+    // outputs and storage intermediates) must not collide across
+    // entries, because in SPIR-V every `OpVariable` at a given
+    // `(set, binding)` is module-scope — sharing across entries
+    // requires identical types. Each entry's auto-allocator advances
+    // this past whatever it claimed; the next entry starts above.
+    let mut module_auto_binding_floor: u32 = 0;
 
     for def in &program.defs {
         match &def.meta {
@@ -237,6 +244,7 @@ pub fn run(
                     forced_output_binding,
                     dispatch_sized_outputs,
                     entry_input_bounds,
+                    &mut module_auto_binding_floor,
                 )?;
                 entry_points.push(ep);
             }
@@ -369,6 +377,7 @@ fn convert_entry_point(
     forced_output_binding: Option<BindingRef>,
     dispatch_sized_outputs: bool,
     input_slice_bounds_for_entry: Option<&HashMap<SymbolId, BufferLen>>,
+    module_auto_binding_floor: &mut u32,
 ) -> Result<EgirEntry, ConvertError> {
     use crate::ssa::types::{EntryInput, ExecutionModel, IoDecoration, PushConstantSlot};
 
@@ -572,6 +581,13 @@ fn convert_entry_point(
             .max()
             .unwrap_or(0)
             .max(auto_count)
+            // Module-wide collision avoidance: every prior entry's
+            // compiler-allocated set-0 bindings sit below this floor.
+            // Sharing OK for inputs that happen to land on the same
+            // slot with the same type (e.g. two entries both reading
+            // `xs: []u32` at binding 0), but outputs must allocate
+            // above to keep one OpVariable per (set, binding).
+            .max(*module_auto_binding_floor)
     };
 
     let execution_model = match &entry.entry_type {
@@ -673,6 +689,24 @@ fn convert_entry_point(
         control_headers,
     );
     entry.slot_sources = slot_sources;
+
+    // Advance the module-wide floor past every set-0 binding this
+    // entry claimed (inputs, outputs, compiler-managed storage decls),
+    // so the next entry's auto-allocator starts above.
+    let entry_max = entry
+        .inputs
+        .iter()
+        .filter_map(|i| i.storage_binding)
+        .chain(entry.outputs.iter().filter_map(|o| o.storage_binding))
+        .chain(entry.storage_bindings.iter().map(|d| d.binding))
+        .filter(|b| b.set == AUTO_STORAGE_SET)
+        .map(|b| b.binding + 1)
+        .max()
+        .unwrap_or(0);
+    if entry_max > *module_auto_binding_floor {
+        *module_auto_binding_floor = entry_max;
+    }
+
     Ok(entry)
 }
 

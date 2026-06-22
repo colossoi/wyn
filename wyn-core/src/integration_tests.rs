@@ -5363,6 +5363,33 @@ fn constructor_form_same_type_conversion_is_identity() {
         .expect("i32(x) where x: i32 should resolve as the identity conversion");
 }
 
+/// Two compute entries in one module used to independently
+/// auto-allocate their (set=0, binding=N) slots starting from 0.
+/// With both having the same input shape, both outputs landed on
+/// (0, 1) — but with different element types (vec4f32 vs f32),
+/// emitting one `OpVariable` for binding 1 that the other entry's
+/// access trips spirv-val on. Fix: thread a module-wide
+/// `module_auto_binding_floor` cursor through `convert_entry_point`
+/// so each entry's auto-allocator starts above every prior entry's
+/// compiler-claimed bindings.
+#[test]
+fn two_compute_entries_do_not_collide_on_auto_bindings() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry a(xs: []u32) []vec4f32 = map(|x| @[f32.u32(x), 0.0, 0.0, 0.0], xs)
+#[compute]
+entry b(xs: []u32) []f32 = map(|x| f32.u32(x), xs)
+"#,
+    )
+    .expect("two compute entries with same input shape should compile to one valid SPIR-V module");
+    // The SPIR-V should pass spirv-val. Smoke-check that the byte
+    // count looks plausible; the real assertion is that the call
+    // above returned Ok and the descriptor doesn't put two
+    // differently-typed buffers on the same (set, binding).
+    assert!(!lowered.spirv.is_empty());
+}
+
 /// A global `def` whose initializer contains a *function call*
 /// referencing other globals used to error at SPIR-V emission with
 /// "Unknown global: ELEV" when the synthesized global was then used
