@@ -120,9 +120,6 @@ struct Constructor {
     /// Set during entry point setup, cleared at end. Used by OutputPtr lowering.
     current_entry_outputs: Vec<spirv::Word>,
 
-    /// Tracks which SPIR-V types already have ArrayStride decorations for buffer layout.
-    buffer_stride_decorated: HashSet<spirv::Word>,
-
     /// buffer_id → (buffer_var, elem_spirv_type). The buffer_id is recovered
     /// from a view's type via `array_view_region` → `get_or_assign_buffer_id`.
     buffer_vars: Vec<(spirv::Word, spirv::Word)>,
@@ -177,7 +174,6 @@ impl Constructor {
             linked_functions: HashMap::new(),
             int_pow_functions: HashMap::new(),
             current_entry_outputs: Vec::new(),
-            buffer_stride_decorated: HashSet::new(),
             buffer_vars: Vec::new(),
             workgroup_vars: HashMap::new(),
             buffer_id_map: HashMap::new(),
@@ -481,14 +477,9 @@ impl Constructor {
         }
         let mut current = spirv_type;
         for stride in strides {
-            if !self.buffer_stride_decorated.insert(current) {
+            if !self.builder.decorate_array_stride_once(builder::TypeId::new(current), stride) {
                 break; // already decorated — nested types are too
             }
-            self.builder.decorate(
-                current,
-                spirv::Decoration::ArrayStride,
-                [Operand::LiteralBit32(stride)],
-            );
             if let Some(&inner) = self.array_elem_cache.get(&current) {
                 current = inner;
             } else {
@@ -591,7 +582,7 @@ impl Constructor {
             _ => None,
         };
         if let Some(args) = struct_fields {
-            if self.buffer_stride_decorated.insert(elem_spirv) {
+            if self.builder.mark_buffer_layout_decorated_once(builder::TypeId::new(elem_spirv)) {
                 let mut offset = 0u32;
                 for (i, field_ty) in args.iter().enumerate() {
                     self.builder.member_decorate(

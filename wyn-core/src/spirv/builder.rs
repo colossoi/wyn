@@ -169,6 +169,12 @@ pub struct SpirvBuilder {
     // the decoration site once per entry with the same var id;
     // spirv-val rejects the repeated decoration.
     nonwritable_decorated: HashSet<VarId>,
+    // Types whose buffer-layout decorations (ArrayStride on array
+    // types, member offsets on struct-element types) have already
+    // been emitted. A single set across both decoration kinds
+    // because both fire from the buffer-layout pass and share the
+    // "once per type per buffer-layout context" semantics.
+    buffer_layout_decorated: HashSet<TypeId>,
 }
 
 impl SpirvBuilder {
@@ -212,6 +218,7 @@ impl SpirvBuilder {
             composite_const_cache: HashMap::new(),
             null_const_cache: HashMap::new(),
             nonwritable_decorated: HashSet::new(),
+            buffer_layout_decorated: HashSet::new(),
         }
     }
 
@@ -473,6 +480,30 @@ impl SpirvBuilder {
             std::iter::empty::<rspirv::dr::Operand>(),
         );
         true
+    }
+
+    /// Decorate `ty` as `ArrayStride stride` exactly once per buffer-
+    /// layout context. Returns true on first decoration, false if `ty`
+    /// already saw a buffer-layout decoration (caller treats nested
+    /// types in the same chain as already-decorated).
+    pub fn decorate_array_stride_once(&mut self, ty: TypeId, stride: u32) -> bool {
+        if !self.buffer_layout_decorated.insert(ty) {
+            return false;
+        }
+        self.inner.decorate(
+            *ty,
+            spirv::Decoration::ArrayStride,
+            [rspirv::dr::Operand::LiteralBit32(stride)],
+        );
+        true
+    }
+
+    /// Mark `ty` as having had its buffer-layout decorations applied,
+    /// returning true on first mark. Lets callers that don't go
+    /// through `decorate_array_stride_once` (member-offset paths)
+    /// still participate in the same "once-per-type" dedup.
+    pub fn mark_buffer_layout_decorated_once(&mut self, ty: TypeId) -> bool {
+        self.buffer_layout_decorated.insert(ty)
     }
 }
 
