@@ -5388,3 +5388,149 @@ entry sim(#[storage(set=2, binding=0, access=read)] prev: []vec4f32,
     )
     .expect("returning a Screma result while a downstream scatter consumes it should compile");
 }
+
+// ============================================================================
+// Module-system spec-gap tests (ignored).
+//
+// These tests pin the behavior that `SPECIFICATION.md` describes but the
+// current compiler does NOT yet implement. They are `#[ignore]`d so the
+// suite stays green; running `cargo test -- --ignored` reveals the gap.
+//
+// When the implementation catches up:
+//   1. Un-ignore the relevant test(s).
+//   2. Remove the matching "Implementation discrepancy" callout in
+//      `SPECIFICATION.md` (search for "DISCREPANCY:" — there are two
+//      callouts, one in §Declaration Modifiers and one in §Referencing
+//      Other Files).
+// ============================================================================
+
+/// SPEC (`SPECIFICATION.md`, "Declaration Modifiers"):
+///   `local dec` binds the names defined by `dec` in the current scope
+///   but hides them from users of the enclosing module.
+///
+/// CURRENT IMPL: no `local` keyword exists. Parser errors with
+///   "Expected declaration, got Identifier(\"local\")".
+///
+/// IMPLEMENTATION OPTIONS (smallest → largest scope):
+///   A. Parser stub. Add `Local` keyword in `lexer/mod.rs`, a
+///      `Declaration::Local(Box<Declaration>)` AST variant, and parse it
+///      in `parser.rs`. Treat as equivalent to non-local everywhere else.
+///      Reserves the keyword and unblocks libraries that want to write
+///      `local open` for future-compat; does not yet hide anything.
+///   B. Filter at the user-module boundary. In
+///      `module_manager::elaborate_module_body`, drop `Local(...)` decls
+///      when building the exported `items` list. Hides locals from users
+///      of `module foo = { ... }` bodies.
+///   C. Filter at the file-import boundary. `import "lib.wyn"` is
+///      currently literal-inlining (`resolve_imports::run`), so by the
+///      time `resolve_opens` runs there's no remaining "this came from
+///      lib.wyn" boundary. Two paths: (i) run `resolve_opens` per-file
+///      before inlining and strip `Local(...)` from the inlined result,
+///      or (ii) inject begin/end-file scope markers around inlined
+///      decls and teach the resolver to pop opens at end markers.
+#[test]
+#[ignore = "SPEC: `local <dec>` / `local open` not implemented; see DISCREPANCY in SPECIFICATION.md"]
+fn local_open_parses_per_spec() {
+    let src = r#"
+        local open f32
+        def f (x: f32) f32 = clamp(x, 0.0f32, 1.0f32)
+    "#;
+    compile_to_ssa(src);
+}
+
+/// SPEC (`SPECIFICATION.md`, "Referencing Other Files"):
+///   Qualified imports: `module M = import "file"` creates a module
+///   whose members are the file's top-level non-local decls, accessed
+///   as `M.foo`.
+///
+/// CURRENT IMPL: the parser accepts `module M = import "..."` (because
+/// `parse_module_expression` handles the `Import` form), but
+/// `module_manager::elaborate_module_body` returns
+/// "Unsupported module expression type" — it has no case for
+/// `ModuleExpression::Import`.
+///
+/// IMPLEMENTATION OPTIONS:
+///   A. In `elaborate_module_body`, when seeing
+///      `ModuleExpression::Import(path)`, resolve `path` to a file,
+///      parse it, and recursively elaborate its top-level non-local
+///      decls as if they were the body of a synthetic struct. Requires
+///      filesystem access at elaboration time — the manager would need
+///      a `base_dir` thread-through (which `resolve_imports::run`
+///      already does for its case).
+///   B. Desugar at parse time: rewrite `module M = import "path"` into
+///      `module M = { <inlined parsed decls> }` in a pass that runs
+///      after `resolve_imports` but before `elaborate_modules`.
+#[test]
+#[ignore = "SPEC: `module M = import \"...\"` not implemented; see DISCREPANCY in SPECIFICATION.md"]
+fn qualified_module_import_per_spec() {
+    // For a self-contained test, we'd usually point at a real file via
+    // `import`. Here we just exercise the elaboration path — when this
+    // form is supported, the test should be expanded to write a temp
+    // file and reference it.
+    let src = r#"
+        module M = import "nonexistent_for_now"
+        def use_it: f32 = M.something
+    "#;
+    compile_to_ssa(src);
+}
+
+/// SPEC (`SPECIFICATION.md`, "Referencing Other Files"):
+///   A plain `import "file"` is equivalent to `local open import "file"`
+///   — it pulls in another file's exports without re-exporting them.
+///
+/// CURRENT IMPL: `resolve_imports::run` literally inlines the imported
+/// file's decls into the importer's top-level declaration list. Every
+/// non-local decl AND every `open` from the imported file becomes a
+/// top-level decl in the importer's program. This is the opposite of
+/// "without re-exporting them" — closer to the spec's
+/// `open import "file"` semantics (re-export).
+///
+/// The dedupe fix in [`crate::resolve_opens`] for two identical
+/// `open M` entries papers over the most-visible symptom of this
+/// mismatch (importer + library both doing `open f32` no longer
+/// ambiguates), but does not restore the spec's hiding semantics.
+///
+/// IMPLEMENTATION OPTIONS: see the C-variants documented on
+/// [`local_open_parses_per_spec`] — same machinery.
+#[test]
+#[ignore = "SPEC: plain `import \"file\"` should not re-export; see DISCREPANCY in SPECIFICATION.md"]
+fn bare_import_does_not_reexport_per_spec() {
+    // Sketch only — exercising this properly needs a real on-disk
+    // import. The intended assertion: after `import "lib"`, a name
+    // that `lib` opened (e.g. `f32.clamp` brought in by lib's
+    // `open f32`) is NOT visible bare in the importer; the importer
+    // must do its own `open f32` to see it.
+    let src = r#"
+        import "lib_that_opens_f32"
+        def f (x: f32) f32 = clamp(x, 0.0f32, 1.0f32)
+    "#;
+    compile_to_ssa(src);
+}
+
+/// SPEC (`SPECIFICATION.md`, "Declaration Modifiers"):
+///   `local dec` is general — `dec` can be any declaration form,
+///   including `import "file"`. `local import "file"` is the explicit
+///   spelling of the same thing plain `import "file"` is *already*
+///   defined to mean (`local open import "file"`); writing it
+///   explicitly should still parse.
+///
+/// More generally: the parser should accept `local` in front of every
+/// declaration kind — `local def`, `local type`, `local module`,
+/// `local open`, `local import`, etc. — and each should hide its
+/// bound name(s) from users of the enclosing module while keeping
+/// them visible to siblings.
+///
+/// CURRENT IMPL: no `local` keyword; all of these are parse errors.
+///
+/// IMPLEMENTATION OPTIONS: see `local_open_parses_per_spec`. The
+/// parser-stub option (A) covers every `local <dec>` form uniformly
+/// by wrapping the inner decl in `Declaration::Local(Box<_>)`.
+#[test]
+#[ignore = "SPEC: `local <dec>` (including `local import`) not implemented; see DISCREPANCY in SPECIFICATION.md"]
+fn local_import_parses_per_spec() {
+    let src = r#"
+        local import "lib_that_opens_f32"
+        def f (x: f32) f32 = clamp(x, 0.0f32, 1.0f32)
+    "#;
+    compile_to_ssa(src);
+}

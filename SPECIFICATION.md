@@ -529,6 +529,17 @@ this.
   expression `import "foo"` (see Modules) — it pulls in another
   file's exports without re-exporting them.
 
+> **DISCREPANCY:** The current compiler does not implement the
+> `local` modifier (no `local` keyword in the lexer) and does not
+> apply local-open semantics to plain `import "foo"` —
+> `resolve_imports::run` literally inlines the imported file's
+> top-level decls into the importer, which re-exports them. See the
+> ignored tests `local_open_parses_per_spec` and
+> `bare_import_does_not_reexport_per_spec` in
+> `wyn-core/src/integration_tests.rs` for the intended behavior and
+> implementation options. Remove this callout when both tests pass
+> without `#[ignore]`.
+
 - **`#[attr] dec`** attaches an attribute to the declaration it
   precedes (see Attributes).
 
@@ -1855,6 +1866,27 @@ To re-export names from another file in the current module, use:
 ```wyn
 open import "file"
 ```
+
+> **DISCREPANCY:** The current compiler does not implement any of the
+> three forms above as specified.
+>
+> - Plain `import "file"` is handled by `resolve_imports::run` as a
+>   literal inline of the imported file's top-level decls into the
+>   importer's declaration list. This matches the spec's
+>   `open import "file"` (re-export) form, not the intended
+>   `local open import "file"` (use without re-export) form.
+> - `module M = import "file"` parses but errors at elaboration
+>   ("Unsupported module expression type") — `module_manager`'s
+>   `elaborate_module_body` has no case for
+>   `ModuleExpression::Import`.
+> - `open import "file"` parses but reaches the same elaboration
+>   gap.
+>
+> See the ignored tests `bare_import_does_not_reexport_per_spec` and
+> `qualified_module_import_per_spec` in
+> `wyn-core/src/integration_tests.rs` for the intended behavior and
+> implementation options. Remove this callout when both tests pass
+> without `#[ignore]`.
 
 ---
 
