@@ -5363,6 +5363,35 @@ fn constructor_form_same_type_conversion_is_identity() {
         .expect("i32(x) where x: i32 should resolve as the identity conversion");
 }
 
+/// A global `def` whose initializer contains a *function call*
+/// referencing other globals errors at SPIR-V emission with
+/// "Unknown global: ELEV" when the synthesized global is then used
+/// inside another function. Isolating contrast: a global initialized
+/// by plain constant arithmetic (e.g. `def g4 = base * 3.0`) compiles
+/// — the trigger is specifically "function-call-in-initializer +
+/// use-from-another-function." Likely a globals-lowering ordering
+/// issue: the call's transitive global refs aren't registered as
+/// global-constant functions in `Constructor.functions` before the
+/// consumer body's lowering walks them.
+#[test]
+#[ignore = "function-call-initialized global isn't registered before consumer lowering"]
+fn function_call_initialized_global_compiles() {
+    crate::compile_thru_spirv(
+        r#"
+def DIST: f32 = 5.0
+def ELEV: f32 = 0.7
+def rotm(a: f32) mat3f32 =
+  @[[f32.cos(a), 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, f32.cos(a)]]
+def eye: vec3f32 = rotm(ELEV) * @[0.0, 0.0, DIST]
+def use_eye(p: vec3f32) vec3f32 = p + eye
+#[fragment]
+entry f() #[location(0)] vec4f32 =
+  let q = use_eye(@[1.0, 2.0, 3.0]) in @[q.x, q.y, q.z, 1.0]
+"#,
+    )
+    .expect("global whose initializer calls a function should lower like any other global");
+}
+
 /// `filter` allocates a scratch storage binding (`filt_gather_b<n>`)
 /// that the same compute stage writes into via the SOAC expansion.
 /// `egir::from_tlc::convert_soac_filter` declares that scratch with
