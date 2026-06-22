@@ -21,7 +21,7 @@
 //! rule blocks a regular `impl` block here too. A trait owned by
 //! `wyn-core` is the standard workaround.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::egir::program::EgirEntry;
 use crate::pipeline_descriptor::{
@@ -49,6 +49,14 @@ pub trait PipelineDescriptorPublish {
     /// descriptor (e.g. graphics entries — non-compute call sites skip
     /// this anyway).
     fn workgroup_size_of(&self, entry_name: &str) -> (u32, u32, u32);
+
+    /// Restore source-parameter names onto input storage bindings. The
+    /// parallelization path names its storage inputs positionally
+    /// (`input_0`, `input_1`, …); `names` maps each `(set, binding)` back
+    /// to the name the source declared. Only `BufferUsage::Input` storage
+    /// buffers are touched, so outputs and intermediates keep their
+    /// synthesized names even if some other entry's input shares a slot.
+    fn relabel_input_storage_names(&mut self, names: &HashMap<(u32, u32), String>);
 }
 
 impl PipelineDescriptorPublish for PipelineDescriptor {
@@ -286,6 +294,32 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
             }
         }
         (64, 1, 1)
+    }
+
+    fn relabel_input_storage_names(&mut self, names: &HashMap<(u32, u32), String>) {
+        if names.is_empty() {
+            return;
+        }
+        for pipeline in self.pipelines.iter_mut() {
+            let bindings: &mut Vec<Binding> = match pipeline {
+                Pipeline::Compute(cp) => &mut cp.bindings,
+                Pipeline::Graphics(gp) => &mut gp.bindings,
+            };
+            for b in bindings.iter_mut() {
+                if let Binding::StorageBuffer {
+                    set,
+                    binding,
+                    usage: BufferUsage::Input,
+                    name,
+                    ..
+                } = b
+                {
+                    if let Some(real) = names.get(&(*set, *binding)) {
+                        *name = real.clone();
+                    }
+                }
+            }
+        }
     }
 }
 

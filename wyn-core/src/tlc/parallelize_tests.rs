@@ -1529,3 +1529,143 @@ fn explicit_storage_view_array_drives_dispatch_over_storage_image() {
         "tick's dispatch must derive from prev (set=2, binding=0), not the storage_image"
     );
 }
+
+// ----- Source buffer names survive parallelization -----
+//
+// The parallel path names storage inputs positionally (`input_0`, …); the
+// relabel pass in `to_egraph` restores the source-parameter names so viz's
+// `--feedback`/`--buffer-init` can reference buffers by the names the user
+// wrote. These go through `compile_thru_ssa` (the real mainline) because the
+// relabel only runs at the EGIR boundary, not at the TLC `parallelize_src`
+// stage above.
+
+/// Every `Input` storage buffer in the descriptor as `((set, binding), name)`.
+fn input_storage_names(desc: &crate::pipeline_descriptor::PipelineDescriptor) -> Vec<((u32, u32), String)> {
+    use crate::pipeline_descriptor::{Binding, BufferUsage};
+    desc.pipelines
+        .iter()
+        .flat_map(|p| match p {
+            Pipeline::Compute(cp) => cp.bindings.iter().collect::<Vec<_>>(),
+            Pipeline::Graphics(gp) => gp.bindings.iter().collect::<Vec<_>>(),
+        })
+        .filter_map(|b| match b {
+            Binding::StorageBuffer {
+                set,
+                binding,
+                usage: BufferUsage::Input,
+                name,
+                ..
+            } => Some(((*set, *binding), name.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn parallelized_compute_keeps_source_input_buffer_name() {
+    let src = r#"
+        #[compute]
+        entry sim(#[storage(set=2, binding=0, access=read)] prev_pos: []f32) []f32 =
+            map(|p: f32| p + 1.0, prev_pos)
+    "#;
+    let converted = crate::compile_thru_ssa(src).expect("compile thru ssa");
+    let names = input_storage_names(&converted.pipeline);
+    assert!(
+        names.contains(&((2, 0), "prev_pos".to_string())),
+        "input (2,0) must be named `prev_pos`, got {names:?}"
+    );
+    assert!(
+        !names.iter().any(|(_, n)| n.starts_with("input_")),
+        "no fabricated `input_N` names should survive, got {names:?}"
+    );
+}
+
+#[test]
+fn parallelized_compute_keeps_auto_set_input_buffer_name() {
+    // No explicit `#[storage]` attribute: the param lands at the auto storage
+    // set (0), binding 0. Its source name `xs` must still survive.
+    let src = r#"
+        #[compute]
+        entry e(xs: []i32) []i32 = map(|x: i32| x + 1, xs)
+    "#;
+    let converted = crate::compile_thru_ssa(src).expect("compile thru ssa");
+    let names = input_storage_names(&converted.pipeline);
+    assert!(
+        names.contains(&((0, 0), "xs".to_string())),
+        "input (0,0) must be named `xs`, got {names:?}"
+    );
+    assert!(
+        !names.iter().any(|(_, n)| n.starts_with("input_")),
+        "no fabricated `input_N` names should survive, got {names:?}"
+    );
+}
+
+#[test]
+fn parallelized_compute_keeps_all_source_input_names() {
+    // Particles' `sim` shape: several named storage inputs read element-wise
+    // through the parallel path. Each keeps its source name (none positional).
+    let src = r#"
+        #[compute]
+        entry sim(#[storage(set=2, binding=0, access=read)] prev_pos: []f32,
+                  #[storage(set=2, binding=1, access=read)] seed: []f32) []f32 =
+            let prev_pos = prev_pos[0..4] in
+            let seed = seed[0..4] in
+            map(|i: i32| prev_pos[i] + seed[i], 0i32..<4)
+    "#;
+    let converted = crate::compile_thru_ssa(src).expect("compile thru ssa");
+    let names = input_storage_names(&converted.pipeline);
+    assert!(
+        names.contains(&((2, 0), "prev_pos".to_string())),
+        "input (2,0) must be named `prev_pos`, got {names:?}"
+    );
+    assert!(
+        names.contains(&((2, 1), "seed".to_string())),
+        "input (2,1) must be named `seed`, got {names:?}"
+    );
+    assert!(
+        !names.iter().any(|(_, n)| n.starts_with("input_")),
+        "no fabricated `input_N` names should survive, got {names:?}"
+    );
+}
+
+#[test]
+fn ordered_schedule_output_uses_entry_output_name() {
+    // The ordered (clear + scatter + tail-map) schedule names its host-facing
+    // output `{entry}_output`, matching the non-parallel convention — not the
+    // generic `tail_output`. `tick` returns the tail map's result.
+    use crate::pipeline_descriptor::{Binding, BufferUsage};
+    let src = r#"
+        #[compute]
+        entry tick(xs: []i32, fb: *[]i32) []i32 =
+            let out = map(|x: i32| x + 1, xs) in
+            let cleared = map(|_p: i32| 0, fb) in
+            let _ = scatter(cleared, [0i32], [1i32]) in
+            out
+    "#;
+    let converted = crate::compile_thru_ssa(src).expect("compile thru ssa");
+    let outputs: Vec<String> = converted
+        .pipeline
+        .pipelines
+        .iter()
+        .flat_map(|p| match p {
+            Pipeline::Compute(cp) => cp.bindings.iter().collect::<Vec<_>>(),
+            Pipeline::Graphics(gp) => gp.bindings.iter().collect::<Vec<_>>(),
+        })
+        .filter_map(|b| match b {
+            Binding::StorageBuffer {
+                usage: BufferUsage::Output,
+                name,
+                ..
+            } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        outputs.contains(&"tick_output".to_string()),
+        "ordered tail output must be `tick_output`, got {outputs:?}"
+    );
+    assert!(
+        !outputs.iter().any(|n| n == "tail_output"),
+        "the generic `tail_output` name must not survive, got {outputs:?}"
+    );
+}

@@ -956,6 +956,12 @@ pub struct ParallelizationResult {
     /// TLC path. Map planning is the only strategy populated until the
     /// EGIR migration broadens.
     pub plans: HashMap<String, ParallelizationPlan>,
+    /// Source-parameter name for each storage `(set, binding)`, captured
+    /// from the original compute entries before they are replaced by phase
+    /// entries. The relabel pass in `to_egraph` restores these onto the
+    /// finalized descriptor's input bindings, which the parallel path would
+    /// otherwise name positionally (`input_0`, `input_1`, …).
+    pub input_names: HashMap<(u32, u32), String>,
 }
 
 /// Per-entry, compiler-internal description of how EGIR should lower a
@@ -1607,6 +1613,74 @@ fn build_prepass_def(
     )
 }
 
+/// Source-parameter name for each storage `(set, binding)` declared by a
+/// compute entry. Reuses `compute_entry_binding_layout` so the `(set, binding)`
+/// numbers match exactly what `from_tlc` assigns, and names tuple-of-views
+/// fields `{base}_{idx}` to match the non-parallel path (`from_tlc.rs`).
+///
+/// Distinct compute entries restart binding numbering at 0, so the same
+/// `(set, binding)` can name different params across entries. On conflict the
+/// key is dropped — the buffer keeps its synthesized `input_N` name rather than
+/// risk a wrong one. Single-compute-entry modules never conflict.
+fn collect_entry_input_names(program: &Program) -> HashMap<(u32, u32), String> {
+    let mut out: HashMap<(u32, u32), String> = HashMap::new();
+    let mut ambiguous: HashSet<(u32, u32)> = HashSet::new();
+    let mut put = |out: &mut HashMap<(u32, u32), String>, key: (u32, u32), name: String| {
+        if ambiguous.contains(&key) {
+            return;
+        }
+        match out.get(&key) {
+            Some(existing) if *existing != name => {
+                out.remove(&key);
+                ambiguous.insert(key);
+            }
+            Some(_) => {}
+            None => {
+                out.insert(key, name);
+            }
+        }
+    };
+    for def in &program.defs {
+        let DefMeta::EntryPoint(decl) = &def.meta else {
+            continue;
+        };
+        if !decl.entry_type.is_compute() {
+            continue;
+        }
+        let (params, _) = peel_lambda_params(&def.body);
+        // Host-wired params carry an explicit `#[storage(set, binding)]`; the
+        // auto-allocator (and `compute_entry_binding_layout`) leaves those slots
+        // to the declared binding. Capture both kinds: explicit bindings from
+        // the attribute, auto-allocated ones from the layout.
+        let layout = crate::binding_layout::compute_entry_binding_layout(&params, decl, AUTO_STORAGE_SET);
+        for (i, (sym, _)) in params.iter().enumerate() {
+            let name = crate::symbol_name_or_bug(&program.symbols, *sym).to_string();
+            if let Some(br) = decl.params.get(i).and_then(crate::binding_layout::extract_storage_binding) {
+                put(&mut out, (br.set, br.binding), name);
+                continue;
+            }
+            let Some(pb) = layout.get(i).and_then(|slot| slot.as_ref()) else {
+                continue;
+            };
+            match &pb.kind {
+                EntryParamBindingKind::Single { binding, .. } => {
+                    put(&mut out, (binding.set, binding.binding), name);
+                }
+                EntryParamBindingKind::TupleOfViews(fields) => {
+                    for (idx, f) in fields.iter().enumerate() {
+                        put(
+                            &mut out,
+                            (f.binding.set, f.binding.binding),
+                            format!("{}_{}", name, idx),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Parallelize SOACs in compute entry points.
 ///
 /// `disable` short-circuits the whole pass — every compute entry runs
@@ -1615,12 +1689,18 @@ fn build_prepass_def(
 /// program. Useful for debugging (keeps the SSA close to the source)
 /// and for backends that can't handle multi-entry pipelines.
 pub fn run(mut program: Program, disable: bool) -> crate::error::Result<ParallelizationResult> {
+    // Capture source-parameter names now, before the original compute entries
+    // are replaced by phase entries (`program.defs.retain` below). The relabel
+    // pass in `to_egraph` restores these onto the finalized descriptor.
+    let input_names = collect_entry_input_names(&program);
+
     if disable {
         let pipeline = build_default_pipeline(&program);
         return Ok(ParallelizationResult {
             program,
             pipeline,
             plans: HashMap::new(),
+            input_names,
         });
     }
 
@@ -1678,6 +1758,7 @@ pub fn run(mut program: Program, disable: bool) -> crate::error::Result<Parallel
             program,
             pipeline,
             plans: HashMap::new(),
+            input_names,
         });
     }
 
@@ -1771,6 +1852,7 @@ pub fn run(mut program: Program, disable: bool) -> crate::error::Result<Parallel
         program,
         pipeline: PipelineDescriptor { pipelines },
         plans,
+        input_names,
     })
 }
 
@@ -1940,7 +2022,7 @@ fn try_build_ordered_prefix_schedule(
                 *tail_binding,
                 Access::ReadOnly,
                 BufferUsage::Intermediate,
-                "tail_output".to_string(),
+                format!("{}_output", entry_name),
             );
             if let Binding::StorageBuffer { length, .. } = &mut bindings[tail_idx] {
                 if length.is_none() {
@@ -2591,7 +2673,11 @@ fn remove_lifted_lets_in_term(term: Term, removed: &HashSet<SymbolId>) -> Term {
     }
 }
 
-fn append_ordered_schedule(mut tail: LoweringPlan, schedule: DispatchSchedule) -> LoweringPlan {
+fn append_ordered_schedule(
+    mut tail: LoweringPlan,
+    schedule: DispatchSchedule,
+    entry_name: &str,
+) -> LoweringPlan {
     let mut bindings = schedule.bindings;
     let mut stages = schedule.pre_stages;
     let tail_forced_output = tail.parallel_plan.as_ref().and_then(|plan| plan.bindings.forced_output());
@@ -2611,7 +2697,7 @@ fn append_ordered_schedule(mut tail: LoweringPlan, schedule: DispatchSchedule) -
                     br,
                     Access::WriteOnly,
                     BufferUsage::Output,
-                    "tail_output".to_string(),
+                    format!("{}_output", entry_name),
                 )
             });
             let n_stages = cp.stages.len();
@@ -2776,7 +2862,7 @@ fn make_lowering_plan(
         }
     };
     let mut tail_plan = if let Some(schedule) = ordered_schedule {
-        append_ordered_schedule(tail_plan, schedule)
+        append_ordered_schedule(tail_plan, schedule, entry_name)
     } else {
         tail_plan
     };

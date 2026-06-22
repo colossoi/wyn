@@ -47,6 +47,7 @@ use std::marker::PhantomData;
 
 use egir::from_tlc::ConvertError;
 use egir::program::EgirInner;
+use egir::publish::PipelineDescriptorPublish;
 
 use indexmap::IndexMap;
 
@@ -961,6 +962,7 @@ impl TlcGeneratedLambdasFolded {
             pipeline: pipeline_descriptor::PipelineDescriptor::default(),
             type_table,
             plans: std::collections::HashMap::new(),
+            input_names: std::collections::HashMap::new(),
         })
     }
 
@@ -1014,6 +1016,7 @@ impl TlcSmallInlined {
             pipeline: result.pipeline,
             type_table,
             plans: result.plans,
+            input_names: result.input_names,
         }))
     }
 
@@ -1026,6 +1029,7 @@ impl TlcSmallInlined {
             pipeline: pipeline_descriptor::PipelineDescriptor::default(),
             type_table,
             plans: std::collections::HashMap::new(),
+            input_names: std::collections::HashMap::new(),
         })
     }
 
@@ -1056,6 +1060,11 @@ pub struct TlcPipelineInner {
     /// whose strategies haven't migrated to EGIR-side lowering yet
     /// (reduce / scan / redomap today). Keyed by entry surface name.
     pub plans: std::collections::HashMap<String, tlc::parallelize::ParallelizationPlan>,
+    /// Source-parameter name for each storage `(set, binding)`, captured
+    /// before parallelization replaced the original compute entries.
+    /// `to_egraph` applies these to the finalized descriptor's input
+    /// bindings, which the parallel path otherwise names positionally.
+    pub input_names: std::collections::HashMap<(u32, u32), String>,
 }
 
 /// TLC after SOAC parallelization
@@ -1080,10 +1089,18 @@ impl TlcParallelized {
 
     pub fn to_egraph(self) -> std::result::Result<EgirParallelized, ConvertError> {
         let TlcPipelineInner {
-            tlc, pipeline, plans, ..
+            tlc,
+            pipeline,
+            plans,
+            input_names,
+            ..
         } = self.0;
         let input_lens = tlc::input_slice_bounds::compute_for_program(&tlc);
         egir::from_tlc::run(&tlc, pipeline, &plans, &input_lens)
+            .map(|mut inner| {
+                inner.pipeline.relabel_input_storage_names(&input_names);
+                inner
+            })
             .and_then(|inner| EgirRaw(inner).realize_outputs().map(|a| a.parallelize(&plans)))
     }
 }
@@ -1117,6 +1134,7 @@ impl TlcRepSpecialized {
             pipeline: result.pipeline,
             type_table,
             plans: result.plans,
+            input_names: result.input_names,
         }))
     }
 }
@@ -1168,9 +1186,17 @@ impl std::ops::Deref for TlcInputSliceBoundsInferred {
 impl TlcInputSliceBoundsInferred {
     pub fn to_egraph(self) -> std::result::Result<EgirParallelized, ConvertError> {
         let TlcPipelineInner {
-            tlc, pipeline, plans, ..
+            tlc,
+            pipeline,
+            plans,
+            input_names,
+            ..
         } = self.inner;
         egir::from_tlc::run(&tlc, pipeline, &plans, &self.input_lens)
+            .map(|mut inner| {
+                inner.pipeline.relabel_input_storage_names(&input_names);
+                inner
+            })
             .and_then(|inner| EgirRaw(inner).realize_outputs().map(|a| a.parallelize(&plans)))
     }
 }
