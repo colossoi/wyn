@@ -123,14 +123,6 @@ struct Constructor {
     /// Tracks which SPIR-V types already have ArrayStride decorations for buffer layout.
     buffer_stride_decorated: HashSet<spirv::Word>,
 
-    /// Tracks struct types already decorated with `Block` (+ member offsets).
-    /// Tracks storage-buffer variables already decorated `NonWritable`.
-    /// `create_storage_buffer` is idempotent, so a binding read (and never
-    /// written) by more than one entry point reaches the decoration site
-    /// once per entry with the same var id; `spirv-val` rejects the repeated
-    /// `NonWritable`. This set ensures each var is decorated at most once.
-    nonwritable_decorated: HashSet<spirv::Word>,
-
     /// buffer_id → (buffer_var, elem_spirv_type). The buffer_id is recovered
     /// from a view's type via `array_view_region` → `get_or_assign_buffer_id`.
     buffer_vars: Vec<(spirv::Word, spirv::Word)>,
@@ -186,7 +178,6 @@ impl Constructor {
             int_pow_functions: HashMap::new(),
             current_entry_outputs: Vec::new(),
             buffer_stride_decorated: HashSet::new(),
-            nonwritable_decorated: HashSet::new(),
             buffer_vars: Vec::new(),
             workgroup_vars: HashMap::new(),
             buffer_id_map: HashMap::new(),
@@ -3889,12 +3880,8 @@ fn lower_ssa_entry_point(
             // binding, so guard the decoration to fire once per var — two
             // entries reading the same never-written input would otherwise
             // decorate it `NonWritable` twice (spirv-val rejects).
-            if !written_bindings.contains(&br) && constructor.nonwritable_decorated.insert(var_id) {
-                constructor.builder.decorate(
-                    var_id,
-                    spirv::Decoration::NonWritable,
-                    std::iter::empty::<Operand>(),
-                );
+            if !written_bindings.contains(&br) {
+                constructor.builder.decorate_nonwritable_once(builder::VarId::new(var_id));
             }
             interfaces.push(var_id);
         } else {

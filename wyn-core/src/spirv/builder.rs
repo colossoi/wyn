@@ -164,6 +164,11 @@ pub struct SpirvBuilder {
     composite_const_cache: HashMap<(TypeId, Vec<ConstId>), ConstId>,
     // OpConstantNull dedup, one id per type.
     null_const_cache: HashMap<TypeId, ConstId>,
+    // Storage-buffer variables already decorated `NonWritable`. A
+    // binding shared across entries (multi-entry modules) reaches
+    // the decoration site once per entry with the same var id;
+    // spirv-val rejects the repeated decoration.
+    nonwritable_decorated: HashSet<VarId>,
 }
 
 impl SpirvBuilder {
@@ -206,6 +211,7 @@ impl SpirvBuilder {
             block_decorated: HashSet::new(),
             composite_const_cache: HashMap::new(),
             null_const_cache: HashMap::new(),
+            nonwritable_decorated: HashSet::new(),
         }
     }
 
@@ -452,6 +458,21 @@ impl SpirvBuilder {
         self.null_const_cache.insert(ty, id);
         self.constant_ids.insert(id);
         id
+    }
+
+    /// Decorate a storage-buffer variable `NonWritable` exactly once.
+    /// Returns true if the decoration was emitted this call (false if
+    /// the var was already decorated).
+    pub fn decorate_nonwritable_once(&mut self, var: VarId) -> bool {
+        if !self.nonwritable_decorated.insert(var) {
+            return false;
+        }
+        self.inner.decorate(
+            *var,
+            spirv::Decoration::NonWritable,
+            std::iter::empty::<rspirv::dr::Operand>(),
+        );
+        true
     }
 }
 
