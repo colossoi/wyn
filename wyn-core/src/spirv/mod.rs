@@ -2,6 +2,7 @@
 //!
 //! This module contains the lowering pass from SSA to SPIR-V.
 
+mod builder;
 #[cfg(test)]
 mod lowering_tests;
 mod pow;
