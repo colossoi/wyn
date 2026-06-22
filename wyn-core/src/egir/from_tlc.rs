@@ -2328,7 +2328,7 @@ impl<'a> Converter<'a> {
         let scratch_out = self.alloc_scratch_binding();
         self.extra_storage_bindings.push(crate::interface::StorageBindingDecl {
             binding: scratch_out,
-            role: crate::interface::StorageRole::Intermediate,
+            role: crate::interface::StorageRole::Output,
             elem_ty: elem_ty.clone(),
             // Host sizes the scratch buffer to the input's element count; both
             // hold `elem_ty`, so src/dst element bytes match.

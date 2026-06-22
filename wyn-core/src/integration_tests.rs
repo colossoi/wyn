@@ -5363,6 +5363,54 @@ fn constructor_form_same_type_conversion_is_identity() {
         .expect("i32(x) where x: i32 should resolve as the identity conversion");
 }
 
+/// `filter` allocates a scratch storage binding (`filt_gather_b<n>`)
+/// that the same compute stage writes into via the SOAC expansion.
+/// `egir::from_tlc::convert_soac_filter` declares that scratch with
+/// `role: Output` so the descriptor reports it as write-capable —
+/// previously the role was `Intermediate`, which fell through to
+/// `Access::ReadOnly` in `publish.rs` and produced an "unwritten
+/// read-only intermediate" the host couldn't safely bind without
+/// zero-initing.
+#[test]
+fn filter_scratch_binding_is_not_read_only() {
+    use crate::pipeline_descriptor::{Access, Binding, BufferUsage};
+    let lowered = compile_parallel(
+        r#"
+def keep(x: u32) bool = x != 0u32
+#[compute]
+entry filt(xs: []u32) ([]u32, [1]u32) =
+  let ys = filter(keep, xs) in
+  (ys, [u32.i32(length(ys))])
+"#,
+    );
+    let bufs = compute_storage_buffers(&lowered.pipeline, "filt");
+    let intermediates: Vec<&Binding> = bufs
+        .iter()
+        .filter(|b| {
+            matches!(
+                b,
+                Binding::StorageBuffer {
+                    usage: BufferUsage::Intermediate,
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert!(
+        !intermediates.is_empty(),
+        "filter pipeline should declare at least one scratch intermediate: {bufs:?}"
+    );
+    for b in intermediates {
+        if let Binding::StorageBuffer { access, name, .. } = b {
+            assert!(
+                !matches!(access, Access::ReadOnly),
+                "scratch intermediate `{name}` is host-allocated and shader-written; \
+                 must not surface as read_only: {b:?}"
+            );
+        }
+    }
+}
+
 /// In-place write to a readwrite storage buffer that's then returned
 /// by the entry: a shape SPIR-V can't yet lay out directly. Two
 /// pieces keep the failure graceful instead of a `create_storage_buffer`
