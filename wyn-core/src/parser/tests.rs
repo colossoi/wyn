@@ -2347,7 +2347,7 @@ fn test_parse_record_literal_empty() {
 
 #[test]
 fn test_parse_record_literal_single_field() {
-    let input = "def test = {x: 42}";
+    let input = "def test = {x = 42}";
     let decl = single_decl(input);
 
     match &decl.body.kind {
@@ -2364,8 +2364,22 @@ fn test_parse_record_literal_single_field() {
 }
 
 #[test]
+fn test_parse_record_literal_rejects_colon_field_separator() {
+    let input = "def test = {x: 42}";
+    let tokens = crate::lexer::tokenize(input).expect("tokenize");
+    let mut nc = crate::ast::NodeCounter::new();
+    let mut parser = crate::parser::Parser::new(tokens, &mut nc);
+    let err = parser.parse().expect_err("`:` field separator must not parse");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Assign") || msg.contains("="),
+        "error should mention the expected `=` token, got: {msg}"
+    );
+}
+
+#[test]
 fn test_parse_record_literal_multiple_fields() {
-    let input = "def test = {x: 0, v3s: v3s}";
+    let input = "def test = {x = 0, v3s = v3s}";
     let decl = single_decl(input);
 
     match &decl.body.kind {

@@ -1219,7 +1219,7 @@ fn test_data_structures() {
         r#"
 def arr = [1, 2, 3]
 
-def record = {x: 1, y: 2}
+def record = {x = 1, y = 2}
 
 def tuple_destruct: i32 =
     let (a, b) = (1, 2) in a + b

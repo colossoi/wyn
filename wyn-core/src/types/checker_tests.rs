@@ -1868,7 +1868,7 @@ fn test_record_projection_with_annotation() {
     typecheck_program(
         r#"
 def get_x: f32 =
-    let r: { x: f32, y: f32 } = {x: 1.0f32, y: 2.0f32} in
+    let r: { x: f32, y: f32 } = {x = 1.0f32, y = 2.0f32} in
     r.x
         "#,
     );

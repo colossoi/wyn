@@ -2471,8 +2471,7 @@ impl<'a> Parser<'a> {
                 );
             };
 
-            // Expect colon
-            self.expect(Token::Colon)?;
+            self.expect(Token::Assign)?;
 
             // Parse field value
             let field_value = self.parse_expression()?;
