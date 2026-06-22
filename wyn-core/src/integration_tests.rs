@@ -5341,6 +5341,28 @@ entry e() []u32 = map(|i: i32| g.at((0x9e3779b9u32, 0x243f6a88u32), u32.i32(i)),
 // fixed to make the test a passing regression.
 // =========================================================================
 
+/// `T(value)` where `value` is already of type `T` errors with
+/// "Partial application not allowed: result is function type T -> T"
+/// instead of resolving as the identity conversion.
+///
+/// Root cause: `try_resolve_constructor_call` builds its candidate set
+/// from `lookup_by_surface_prefix(T)`, which returns every `T.*`
+/// catalog entry — operators (`T.+ : T -> T -> T`), unary intrinsics
+/// (`T.abs : T -> T`), as well as conversions (`T.<source> : source -> T`).
+/// Overload resolution picks a 2-arg operator (catalog insertion order
+/// puts operators before conversions); applying it to one arg yields
+/// a function-typed result that `ensure_not_partial` rejects.
+///
+/// Fix direction: filter `lookup_by_surface_prefix` results to only
+/// the conversion entries (those whose suffix is a primitive type
+/// name) before handing them to the overload resolver. Or carry a
+/// `is_conversion` marker on the catalog entry.
+#[test]
+fn constructor_form_same_type_conversion_is_identity() {
+    crate::compile_thru_frontend("def f(x: i32) i32 = i32(x)")
+        .expect("i32(x) where x: i32 should resolve as the identity conversion");
+}
+
 /// In-place write to a readwrite storage buffer that's then returned
 /// by the entry: a shape SPIR-V can't yet lay out directly. Two
 /// pieces keep the failure graceful instead of a `create_storage_buffer`

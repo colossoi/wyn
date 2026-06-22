@@ -861,16 +861,14 @@ fn generate_per_type_ops() -> Vec<BuiltinDefRaw> {
     }
     for &target in signed_ints {
         for &source in signed_ints {
-            if target != source {
-                defs.push(per_type_conv(target, source, L(SConvert)));
-            }
+            let lowering = if target == source { L(Bitcast) } else { L(SConvert) };
+            defs.push(per_type_conv(target, source, lowering));
         }
     }
     for &target in unsigned_ints {
         for &source in unsigned_ints {
-            if target != source {
-                defs.push(per_type_conv(target, source, L(UConvert)));
-            }
+            let lowering = if target == source { L(Bitcast) } else { L(UConvert) };
+            defs.push(per_type_conv(target, source, lowering));
         }
     }
     for (i, &s_ty) in signed_ints.iter().enumerate() {
@@ -952,11 +950,12 @@ fn generate_per_type_ops() -> Vec<BuiltinDefRaw> {
             ));
         }
         for &source in floats {
+            let mk_lowering = || if source == ty { L(Bitcast) } else { L(FPConvert) };
+            defs.push(per_type_conv(ty, source, mk_lowering()));
             if source != ty {
-                defs.push(per_type_conv(ty, source, L(FPConvert)));
                 defs.push(intrinsic_only(
                     leak_str(format!("_w_intrinsic_{}_from_{}", ty, source)),
-                    L(FPConvert),
+                    mk_lowering(),
                 ));
             }
         }

@@ -3002,6 +3002,15 @@ impl<'a> TypeChecker<'a> {
             let mut candidates: Vec<Candidate> = Vec::with_capacity(entries.len());
             let mut catalog_ids: Vec<BuiltinId> = Vec::with_capacity(entries.len());
             for def in &entries {
+                // Only `per_type_conv` entries are valid `T(value)`
+                // dispatch targets. The same prefix scan also turns up
+                // operators (`T.+`, `T.abs`, …) — those are kind
+                // `Operator`/other; including them would let overload
+                // resolution pick a 2-arg `T.+` and report the result
+                // as a partial application.
+                if !matches!(def.raw.kind, crate::builtins::catalog::BuiltinKind::ModuleBuiltin) {
+                    continue;
+                }
                 // Per-type conversion entries (`per_type_conv` in
                 // `builtins/defs.rs`) carry `scheme: None`; their
                 // schemes come from prelude module signatures via
