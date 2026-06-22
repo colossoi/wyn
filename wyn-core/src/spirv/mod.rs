@@ -87,7 +87,6 @@ struct Constructor {
     // PolyType-driven). The simpler block wrappers and structural
     // type caches live on `SpirvBuilder`.
     interface_block_cache: HashMap<InterfaceBlockKey, spirv::Word>,
-    array_elem_cache: HashMap<spirv::Word, spirv::Word>, // array_type -> element_type
 
     // Entry point interface tracking
     entry_point_interfaces: HashMap<String, Vec<spirv::Word>>,
@@ -164,7 +163,6 @@ impl Constructor {
             glsl_ext_inst_id,
             polytype_cache: HashMap::new(),
             interface_block_cache: HashMap::new(),
-            array_elem_cache: HashMap::new(),
             entry_point_interfaces: HashMap::new(),
             storage_buffers: HashMap::new(),
             global_invocation_id: None,
@@ -303,7 +301,10 @@ impl Constructor {
                             };
                             let size_const = self.const_u32(n);
                             let buf_type = self.builder.type_array(elem_type, size_const);
-                            self.array_elem_cache.insert(buf_type, elem_type);
+                            self.builder.register_array_element(
+                                builder::TypeId::new(buf_type),
+                                builder::TypeId::new(elem_type),
+                            );
                             self.get_or_create_struct_type(vec![buf_type, self.i32_type])
                         } else {
                             // Composite variant (or placeholder): sized array value
@@ -312,8 +313,10 @@ impl Constructor {
                                     // Fixed-size array (use unsigned int for array size per SPIR-V convention)
                                     let size_const = self.const_u32(*n as u32);
                                     let arr_type = self.builder.type_array(elem_type, size_const);
-                                    // Cache element type for later lookup
-                                    self.array_elem_cache.insert(arr_type, elem_type);
+                                    self.builder.register_array_element(
+                                        builder::TypeId::new(arr_type),
+                                        builder::TypeId::new(elem_type),
+                                    );
                                     arr_type
                                 }
                                 PolyType::Constructed(TypeName::SizePlaceholder, _) => {
@@ -468,7 +471,8 @@ impl Constructor {
 
     /// Apply ArrayStride decorations for all nested fixed-size arrays in a type
     /// used inside a storage buffer. Uses layout::buffer_array_strides() for the
-    /// stride values and walks nested arrays via array_elem_cache for SPIR-V IDs.
+    /// stride values and walks nested arrays via the builder's
+    /// array-element registry for SPIR-V IDs.
     /// Skips types that have already been decorated.
     fn apply_buffer_array_strides(&mut self, spirv_type: spirv::Word, poly_type: &PolyType<TypeName>) {
         let strides = buffer_array_strides(poly_type);
@@ -480,8 +484,8 @@ impl Constructor {
             if !self.builder.decorate_array_stride_once(builder::TypeId::new(current), stride) {
                 break; // already decorated — nested types are too
             }
-            if let Some(&inner) = self.array_elem_cache.get(&current) {
-                current = inner;
+            if let Some(inner) = self.builder.array_element_type(builder::TypeId::new(current)) {
+                current = *inner;
             } else {
                 break;
             }
@@ -828,11 +832,14 @@ impl Constructor {
         self.builder.get_const_u32_value(builder::ConstId::new(id))
     }
 
-    /// Get the element type of an array type
+    /// Get the element type of an array type. Thin delegator over
+    /// `SpirvBuilder::array_element_type`, surfacing a structured
+    /// error for missing entries (callers couldn't continue without
+    /// the elem id).
     fn get_array_element_type(&self, array_type: spirv::Word) -> Result<spirv::Word> {
-        self.array_elem_cache
-            .get(&array_type)
-            .copied()
+        self.builder
+            .array_element_type(builder::TypeId::new(array_type))
+            .map(|t| *t)
             .ok_or_else(|| crate::err_spirv!("Array element type not found for type ID: {}", array_type))
     }
 
@@ -2289,7 +2296,10 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     };
                     let size_const = self.constructor.const_u32(n);
                     let buf_ty = self.constructor.builder.type_array(result_ty, size_const);
-                    self.constructor.array_elem_cache.insert(buf_ty, result_ty);
+                    self.constructor.builder.register_array_element(
+                        builder::TypeId::new(buf_ty),
+                        builder::TypeId::new(result_ty),
+                    );
                     let buf_id =
                         self.constructor.builder.composite_extract(buf_ty, None, base_id, [0u32])?;
                     if let Some(const_idx) = self.try_resolve_const_index(index) {
@@ -2672,7 +2682,10 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         let buf_type = self.constructor.builder.type_array(elem_spirv, size_const);
                         // The struct's [N]T member type must be element-resolvable
                         // for the dynamic-index access_chain below.
-                        self.constructor.array_elem_cache.insert(buf_type, elem_spirv);
+                        self.constructor.builder.register_array_element(
+                            builder::TypeId::new(buf_type),
+                            builder::TypeId::new(elem_spirv),
+                        );
                         let buffer =
                             self.constructor.builder.composite_extract(buf_type, None, arr, [0u32])?;
                         let new_buffer = if let Some(literal_idx) = literal_idx {

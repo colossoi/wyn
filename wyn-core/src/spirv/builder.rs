@@ -175,6 +175,11 @@ pub struct SpirvBuilder {
     // because both fire from the buffer-layout pass and share the
     // "once per type per buffer-layout context" semantics.
     buffer_layout_decorated: HashSet<TypeId>,
+    // SPIR-V array → element-type lookup. Populated by callers when
+    // they create array types (fixed-size or runtime) so later passes
+    // (buffer-layout walks, `with []` lowering) can recover the elem
+    // type id without re-deriving from the compiler-side PolyType.
+    array_elem: HashMap<TypeId, TypeId>,
 }
 
 impl SpirvBuilder {
@@ -219,6 +224,7 @@ impl SpirvBuilder {
             null_const_cache: HashMap::new(),
             nonwritable_decorated: HashSet::new(),
             buffer_layout_decorated: HashSet::new(),
+            array_elem: HashMap::new(),
         }
     }
 
@@ -504,6 +510,21 @@ impl SpirvBuilder {
     /// still participate in the same "once-per-type" dedup.
     pub fn mark_buffer_layout_decorated_once(&mut self, ty: TypeId) -> bool {
         self.buffer_layout_decorated.insert(ty)
+    }
+
+    /// Register that SPIR-V array type `arr` has element type `elem`.
+    /// Caller emits the array type via rspirv (or via `type_runtime_array`)
+    /// and reports the relationship here so subsequent
+    /// `array_element_type` lookups can recover the elem id without
+    /// re-deriving from the compiler-side PolyType.
+    pub fn register_array_element(&mut self, arr: TypeId, elem: TypeId) {
+        self.array_elem.insert(arr, elem);
+    }
+
+    /// Element type of a previously-registered SPIR-V array type.
+    /// `None` if no array of that id has been registered.
+    pub fn array_element_type(&self, arr: TypeId) -> Option<TypeId> {
+        self.array_elem.get(&arr).copied()
     }
 }
 
