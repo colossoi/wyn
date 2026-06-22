@@ -81,9 +81,6 @@ struct Constructor {
     // Top-level polytype → SPIR-V memoization (subsumes type + constant dedup for wyn types)
     polytype_cache: HashMap<PolyType<TypeName>, spirv::Word>,
 
-    // Composite constant dedup: (result_type, constituents) → constant_id
-    composite_const_cache: HashMap<(spirv::Word, Vec<spirv::Word>), spirv::Word>,
-
     // Interface-block + nested-array lookups stay here for now —
     // they're entangled with the compiler's `PolyType` walks
     // (interface members need `apply_buffer_array_strides`, which is
@@ -94,9 +91,6 @@ struct Constructor {
 
     // Entry point interface tracking
     entry_point_interfaces: HashMap<String, Vec<spirv::Word>>,
-
-    extract_cache: HashMap<(spirv::Word, u32), spirv::Word>, // CSE for OpCompositeExtract
-    null_const_cache: HashMap<spirv::Word, spirv::Word>,     // type -> OpConstantNull id
 
     /// Storage buffers for compute shaders: (set, binding) -> (buffer_var, elem_type_id, buffer_ptr_type)
     storage_buffers: HashMap<BindingRef, (spirv::Word, spirv::Word, spirv::Word)>,
@@ -180,12 +174,9 @@ impl Constructor {
             functions: HashMap::new(),
             glsl_ext_inst_id,
             polytype_cache: HashMap::new(),
-            composite_const_cache: HashMap::new(),
             interface_block_cache: HashMap::new(),
             array_elem_cache: HashMap::new(),
             entry_point_interfaces: HashMap::new(),
-            extract_cache: HashMap::new(),
-            null_const_cache: HashMap::new(),
             storage_buffers: HashMap::new(),
             global_invocation_id: None,
             local_invocation_id: None,
@@ -792,7 +783,6 @@ impl Constructor {
         self.variables_block = None;
         self.first_code_block = None;
         self.env.clear();
-        self.extract_cache.clear();
 
         Ok(())
     }
@@ -864,30 +854,13 @@ impl Constructor {
             .ok_or_else(|| crate::err_spirv!("Array element type not found for type ID: {}", array_type))
     }
 
-    /// Check whether a SPIR-V ID is a module-level constant. Thin
-    /// delegator over the builder's id set.
-    fn is_constant(&self, id: spirv::Word) -> bool {
-        self.builder.is_constant(builder::ConstId::new(id))
-    }
-
-    /// Emit OpConstantComposite if all elements are constants, otherwise OpCompositeConstruct.
+    /// Thin delegator over `SpirvBuilder::composite_or_construct`.
     fn composite_or_constant(
         &mut self,
         result_type: spirv::Word,
         elem_ids: Vec<spirv::Word>,
     ) -> Result<spirv::Word> {
-        if elem_ids.iter().all(|&id| self.is_constant(id)) {
-            let key = (result_type, elem_ids.clone());
-            if let Some(&cached) = self.composite_const_cache.get(&key) {
-                return Ok(cached);
-            }
-            let id = self.builder.constant_composite(result_type, elem_ids);
-            self.builder.register_constant(builder::ConstId::new(id));
-            self.composite_const_cache.insert(key, id);
-            Ok(id)
-        } else {
-            Ok(self.builder.composite_construct(result_type, None, elem_ids)?)
-        }
+        Ok(self.builder.composite_or_construct(builder::TypeId::new(result_type), elem_ids)?)
     }
 
     /// Begin a block (must be called before emitting instructions into it)
@@ -895,7 +868,6 @@ impl Constructor {
         self.builder.begin_block(Some(block_id))?;
         self.current_block = Some(block_id);
         // Clear extract cache since values from previous blocks may not dominate this block
-        self.extract_cache.clear();
         Ok(())
     }
 }
@@ -2567,14 +2539,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 let known = catalog().known();
                 if id == known.uninit {
                     // Zero-initialized value (OpConstantNull), cached by type.
-                    if let Some(&cached) = self.constructor.null_const_cache.get(&result_ty) {
-                        Ok(cached)
-                    } else {
-                        let null_id = self.constructor.builder.constant_null(result_ty);
-                        self.constructor.builder.register_constant(builder::ConstId::new(null_id));
-                        self.constructor.null_const_cache.insert(result_ty, null_id);
-                        Ok(null_id)
-                    }
+                    Ok(*self.constructor.builder.const_null(builder::TypeId::new(result_ty)))
                 } else if id == known.texture_load {
                     // texture_load(tex, coord, lod) → OpImageFetch. Raw texel
                     // fetch; referentially transparent (no derivatives).

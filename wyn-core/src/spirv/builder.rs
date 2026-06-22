@@ -158,6 +158,12 @@ pub struct SpirvBuilder {
     // structurally dedups `OpTypeStruct`s — different wrappers can
     // land on the same id and would re-decorate without this guard.
     block_decorated: HashSet<TypeId>,
+    // Composite-constant dedup: emitting the same `OpConstantComposite`
+    // twice would produce two distinct ids that wgpu treats as
+    // separate constants. Keyed on `(result_type, constituent_ids)`.
+    composite_const_cache: HashMap<(TypeId, Vec<ConstId>), ConstId>,
+    // OpConstantNull dedup, one id per type.
+    null_const_cache: HashMap<TypeId, ConstId>,
 }
 
 impl SpirvBuilder {
@@ -198,6 +204,8 @@ impl SpirvBuilder {
             buffer_block_cache: HashMap::new(),
             uniform_block_cache: HashMap::new(),
             block_decorated: HashSet::new(),
+            composite_const_cache: HashMap::new(),
+            null_const_cache: HashMap::new(),
         }
     }
 
@@ -401,6 +409,49 @@ impl SpirvBuilder {
         self.decorate_block_once(ty, &[0]);
         self.uniform_block_cache.insert(value, ty);
         ty
+    }
+
+    /// Emit `OpConstantComposite ty elems…` if all `elems` are
+    /// constants minted through this builder, else
+    /// `OpCompositeConstruct ty elems…`. Both forms are cached so
+    /// repeated builds of the same shape collapse to one id.
+    pub fn composite_or_construct(
+        &mut self,
+        ty: TypeId,
+        elems: Vec<spirv::Word>,
+    ) -> Result<spirv::Word, rspirv::dr::Error> {
+        let elem_const_ids: Option<Vec<ConstId>> = elems
+            .iter()
+            .map(|&w| {
+                let c = ConstId::new(w);
+                self.constant_ids.contains(&c).then_some(c)
+            })
+            .collect();
+        if let Some(const_ids) = elem_const_ids {
+            let key = (ty, const_ids.clone());
+            if let Some(&cached) = self.composite_const_cache.get(&key) {
+                return Ok(*cached);
+            }
+            let id = ConstId::new(
+                self.inner.constant_composite(*ty, const_ids.iter().map(|c| **c).collect::<Vec<_>>()),
+            );
+            self.constant_ids.insert(id);
+            self.composite_const_cache.insert(key, id);
+            Ok(*id)
+        } else {
+            self.inner.composite_construct(*ty, None, elems)
+        }
+    }
+
+    /// Get or create `OpConstantNull ty`.
+    pub fn const_null(&mut self, ty: TypeId) -> ConstId {
+        if let Some(&id) = self.null_const_cache.get(&ty) {
+            return id;
+        }
+        let id = ConstId::new(self.inner.constant_null(*ty));
+        self.null_const_cache.insert(ty, id);
+        self.constant_ids.insert(id);
+        id
     }
 }
 
