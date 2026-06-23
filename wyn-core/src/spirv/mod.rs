@@ -8,6 +8,7 @@
 use wspirv as builder;
 mod entry;
 mod lower;
+mod lower_builtin;
 #[cfg(test)]
 mod lowering_tests;
 mod pow;
