@@ -74,12 +74,25 @@ impl GpuContext {
             overlay(&mut limits, &adapter);
         }
 
+        // SPIR-V passthrough is gated behind wgpu's experimental-features
+        // opt-in token. We rely on passthrough to load modules naga would
+        // otherwise reject (Linkage capability, etc.), so agree to it when
+        // the adapter offers the feature. SAFETY: passthrough hands raw
+        // SPIR-V to the backend; we only ever feed it `wyn`-compiled or
+        // spirv-val'd modules.
+        let experimental_features =
+            if supported_features.contains(Features::EXPERIMENTAL_PASSTHROUGH_SHADERS) {
+                unsafe { wgpu::ExperimentalFeatures::enabled() }
+            } else {
+                wgpu::ExperimentalFeatures::disabled()
+            };
+
         let (device, queue) = adapter
             .request_device(&DeviceDescriptor {
                 label: None,
                 required_features: supported_features,
                 required_limits: limits,
-                experimental_features: wgpu::ExperimentalFeatures::default(),
+                experimental_features,
                 memory_hints: MemoryHints::Performance,
                 trace: Trace::Off,
             })
