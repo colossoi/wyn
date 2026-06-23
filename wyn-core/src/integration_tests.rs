@@ -5363,15 +5363,11 @@ fn constructor_form_same_type_conversion_is_identity() {
         .expect("i32(x) where x: i32 should resolve as the identity conversion");
 }
 
-/// Two compute entries in one module used to independently
-/// auto-allocate their (set=0, binding=N) slots starting from 0.
-/// With both having the same input shape, both outputs landed on
-/// (0, 1) — but with different element types (vec4f32 vs f32),
-/// emitting one `OpVariable` for binding 1 that the other entry's
-/// access trips spirv-val on. Fix: thread a module-wide
-/// `module_auto_binding_floor` cursor through `convert_entry_point`
-/// so each entry's auto-allocator starts above every prior entry's
-/// compiler-claimed bindings.
+/// Two compute entries in one module: both entries' outputs land on
+/// distinct `(set 0, binding N)` slots even when their input shapes
+/// are identical. Single shared `IdSource<u32>` across all
+/// compiler-allocated set-0 bindings guarantees no two `OpVariable`s
+/// share a slot.
 #[test]
 fn two_compute_entries_do_not_collide_on_auto_bindings() {
     let lowered = crate::compile_thru_spirv(

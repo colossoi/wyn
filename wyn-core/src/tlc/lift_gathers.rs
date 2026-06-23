@@ -42,7 +42,7 @@ use polytype::Type;
 
 /// Lift every randomly-indexed computed array out of each compute entry into
 /// a gather pre-pass + a `storage_index` read.
-pub fn run(mut program: Program) -> Program {
+pub fn run(mut program: Program, binding_ids: &mut crate::IdSource<u32>) -> Program {
     let entry_indices: Vec<usize> = program
         .defs
         .iter()
@@ -55,40 +55,34 @@ pub fn run(mut program: Program) -> Program {
 
     let mut new_defs: Vec<Def> = Vec::new();
     for idx in entry_indices {
-        lift_entry(&mut program, idx, &mut new_defs);
+        lift_entry(&mut program, idx, &mut new_defs, binding_ids);
     }
     program.defs.extend(new_defs);
     program
 }
 
 /// Lift gather sites out of a single compute entry at `program.defs[idx]`.
-fn lift_entry(program: &mut Program, idx: usize, new_defs: &mut Vec<Def>) {
+fn lift_entry(
+    program: &mut Program,
+    idx: usize,
+    new_defs: &mut Vec<Def>,
+    binding_ids: &mut crate::IdSource<u32>,
+) {
     let entry_name = crate::symbol_name_or_bug(&program.symbols, program.defs[idx].name).to_string();
     let body = program.defs[idx].body.clone();
 
-    // Gather buffers must sit above the consumer's own auto-allocated
-    // bindings: input-view params occupy `0..view_count`, and `from_tlc`
-    // places this entry's storage outputs at `view_count..view_count +
-    // out_count` (see `build_entry_outputs`). So the first free binding for a
-    // gather intermediate is `view_count + out_count`.
     let decl = match &program.defs[idx].meta {
         DefMeta::EntryPoint(d) => (**d).clone(),
         _ => return,
     };
     let outer_slots: &[Option<EntryParamBinding>] = &decl.param_bindings;
-    // First binding slot above this entry's inputs + outputs, where
-    // gather intermediates land.
-    let max_input_binding =
-        outer_slots.iter().flatten().map(|b| b.max_binding().binding).max().map(|m| m + 1).unwrap_or(0);
-    let out_count = decl.outputs.len() as u32;
-    let mut next_gather = max_input_binding + out_count;
 
     let mut added_decls: Vec<StorageBindingDecl> = Vec::new();
     let new_body = lift_in_term(
         body,
         &entry_name,
         outer_slots,
-        &mut next_gather,
+        binding_ids,
         &mut added_decls,
         new_defs,
         program,
@@ -106,7 +100,7 @@ fn lift_in_term(
     term: Term,
     entry_name: &str,
     outer_slots: &[Option<EntryParamBinding>],
-    next_gather: &mut u32,
+    binding_ids: &mut crate::IdSource<u32>,
     added_decls: &mut Vec<StorageBindingDecl>,
     new_defs: &mut Vec<Def>,
     program: &mut Program,
@@ -118,7 +112,7 @@ fn lift_in_term(
                 *body,
                 entry_name,
                 outer_slots,
-                next_gather,
+                binding_ids,
                 added_decls,
                 new_defs,
                 program,
@@ -138,6 +132,11 @@ fn lift_in_term(
             rhs,
             body,
         } => {
+            // Peek the next binding id and offer it to `try_lift` as the
+            // gather-buffer slot. Commit (advance the factory) only if the
+            // lift succeeded — failed eligibility checks leave the id free
+            // for the next attempt.
+            let candidate_binding = binding_ids.peek_id();
             if let Some((prepass, decl, rewritten_body)) = try_lift(
                 name,
                 &name_ty,
@@ -145,11 +144,11 @@ fn lift_in_term(
                 *body.clone(),
                 entry_name,
                 outer_slots,
-                *next_gather,
+                candidate_binding,
                 new_defs.len(),
                 program,
             ) {
-                *next_gather += 1;
+                let _ = binding_ids.next_id();
                 new_defs.push(prepass);
                 added_decls.push(decl);
                 // The dropped `let` is gone; keep lifting in the rewritten body.
@@ -157,7 +156,7 @@ fn lift_in_term(
                     rewritten_body,
                     entry_name,
                     outer_slots,
-                    next_gather,
+                    binding_ids,
                     added_decls,
                     new_defs,
                     program,
@@ -167,7 +166,7 @@ fn lift_in_term(
                 *body,
                 entry_name,
                 outer_slots,
-                next_gather,
+                binding_ids,
                 added_decls,
                 new_defs,
                 program,
@@ -181,7 +180,7 @@ fn lift_in_term(
                     *rhs,
                     entry_name,
                     outer_slots,
-                    next_gather,
+                    binding_ids,
                     added_decls,
                     new_defs,
                     program,
@@ -204,7 +203,7 @@ fn lift_in_term(
                 *value,
                 entry_name,
                 outer_slots,
-                next_gather,
+                binding_ids,
                 added_decls,
                 new_defs,
                 program,

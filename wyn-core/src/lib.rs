@@ -81,6 +81,12 @@ impl<Id: From<u32>> IdSource<Id> {
         self.next_id += 1;
         id
     }
+
+    /// Read the next id without consuming it. Useful for "would-allocate"
+    /// dry-runs: peek, attempt, commit via `next_id()` only on success.
+    pub fn peek_id(&self) -> Id {
+        Id::from(self.next_id)
+    }
 }
 
 impl<Id: From<u32>> Default for IdSource<Id> {
@@ -851,7 +857,7 @@ impl TlcRuntimeIndexProducersFloated {
     /// are still in the same pre-defunctionalization term.
     pub fn plan_execute_gather_residency(self) -> TlcGathersLifted {
         let mut inner = self.0;
-        inner.tlc = tlc::lift_gathers::run(inner.tlc);
+        inner.tlc = tlc::lift_gathers::run(inner.tlc, &mut inner.auto_storage_binding_ids);
         TlcGathersLifted(inner)
     }
 }
@@ -1038,10 +1044,10 @@ impl TlcSmallInlined {
         let TlcLateInner {
             mut tlc,
             type_table,
-            auto_storage_binding_ids,
+            mut auto_storage_binding_ids,
         } = self.0;
         tlc = tlc::if_over_producer::run(tlc);
-        let result = tlc::parallelize::run(tlc, disable)?;
+        let result = tlc::parallelize::run(tlc, disable, &mut auto_storage_binding_ids)?;
         Ok(TlcParallelized(TlcPipelineInner {
             tlc: result.program,
             pipeline: result.pipeline,
@@ -1169,10 +1175,10 @@ impl TlcRepSpecialized {
         let TlcLateInner {
             mut tlc,
             type_table,
-            auto_storage_binding_ids,
+            mut auto_storage_binding_ids,
         } = self.0;
         tlc = tlc::if_over_producer::run(tlc);
-        let result = tlc::parallelize::run(tlc, disable)?;
+        let result = tlc::parallelize::run(tlc, disable, &mut auto_storage_binding_ids)?;
         Ok(TlcParallelized(TlcPipelineInner {
             tlc: result.program,
             pipeline: result.pipeline,

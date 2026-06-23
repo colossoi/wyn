@@ -16,7 +16,7 @@ use crate::tlc::{
     ArrayExpr, Def, DefMeta, Lambda, LoopKind, ScremaAccumulator, ScremaAccumulatorSpec, SoacBody,
     SoacDestination, SoacOp, Term, TermId, TermIdSource, TermKind,
 };
-use crate::{BindingRef, SymbolId, SymbolTable};
+use crate::{SymbolId, SymbolTable};
 use polytype::Type;
 
 // ---------- type helpers ----------
@@ -501,125 +501,6 @@ fn t11_required_params_closure() {
         "only q is referenced; p should be filtered out"
     );
     assert_eq!(a.required_params[0].sym, q);
-}
-
-// ----------------------------------------------------------------------
-// Binding registry tests
-// ----------------------------------------------------------------------
-
-use super::collect_all_used_bindings;
-use crate::tlc::Program;
-use std::collections::HashMap;
-
-/// Build a minimal `Program` wrapping a single def body, for binding
-/// registry tests. No uniforms or user-declared storage.
-fn program_wrapping_body(b: &mut B, body: Term) -> Program {
-    let name = b.sym("entry");
-    let def = b.entry_def(name, vec![], body);
-    Program {
-        defs: vec![def],
-        symbols: std::mem::replace(&mut b.symbols, SymbolTable::new()),
-        def_syms: HashMap::new(),
-    }
-}
-
-/// Binding registry finds `ArrayExpr::StorageBuffer` nested inside a
-/// SOAC input. The scan/reduce allocator must see these so it doesn't
-/// pick a colliding (set, binding) for its phase buffers.
-#[test]
-fn binding_registry_finds_storage_buffer_in_soac_input() {
-    let mut b = B::new();
-    let u32_ty_v = u32_ty();
-
-    // Construct: map(identity, StorageBuffer{set=0, binding=3, offset=0, len=16, elem_ty=i32})
-    let x = b.sym("x");
-    let lam = Lambda {
-        params: vec![(x, i32_ty())],
-        body: Box::new(b.var(x, i32_ty())),
-        ret_ty: i32_ty(),
-    };
-    let offset = b.term(TermKind::IntLit("0".into()), u32_ty_v.clone());
-    let len = b.term(TermKind::IntLit("16".into()), u32_ty_v);
-    let input = ArrayExpr::StorageView(crate::tlc::StorageView {
-        binding: BindingRef::new(0, 3),
-        offset: Box::new(offset),
-        len: Box::new(len),
-        elem_ty: i32_ty(),
-    });
-    let soac = b.term(
-        TermKind::Soac(SoacOp::Map {
-            lam: SoacBody {
-                lam,
-                captures: vec![],
-            },
-            inputs: vec![input],
-            destination: SoacDestination::Fresh,
-        }),
-        arr_i32_ty(),
-    );
-
-    let program = program_wrapping_body(&mut b, soac);
-    let used = collect_all_used_bindings(&program);
-    assert!(
-        used.contains(&BindingRef::new(0, 3)),
-        "expected set=0,binding=3 in used bindings; got {:?}",
-        used
-    );
-}
-
-/// Binding registry also sees `StorageBuffer` bindings threaded through
-/// nested `ArrayExpr::Zip` / `ArrayExpr::Ref` wrappers, and through
-/// nested `Soac` inside the SOAC (Redomap + inner Scan case).
-#[test]
-fn binding_registry_finds_nested_storage_buffers() {
-    let mut b = B::new();
-    let u32_ty_v = u32_ty();
-
-    let mk_sb = |b: &mut B, binding: u32| -> ArrayExpr {
-        let offset = b.term(TermKind::IntLit("0".into()), u32_ty_v.clone());
-        let len = b.term(TermKind::IntLit("8".into()), u32_ty_v.clone());
-        ArrayExpr::StorageView(crate::tlc::StorageView {
-            binding: BindingRef::new(0, binding),
-            offset: Box::new(offset),
-            len: Box::new(len),
-            elem_ty: i32_ty(),
-        })
-    };
-
-    let x = b.sym("x");
-    let y = b.sym("y");
-    let inner_lam = Lambda {
-        params: vec![(x, i32_ty()), (y, i32_ty())],
-        body: Box::new(b.var(x, i32_ty())),
-        ret_ty: i32_ty(),
-    };
-    let sb_a = mk_sb(&mut b, 5);
-    let sb_b = mk_sb(&mut b, 7);
-    let zip = ArrayExpr::Zip(vec![sb_a, sb_b]);
-    let soac = b.term(
-        TermKind::Soac(SoacOp::Map {
-            lam: SoacBody {
-                lam: inner_lam,
-                captures: vec![],
-            },
-            inputs: vec![zip],
-            destination: SoacDestination::Fresh,
-        }),
-        arr_i32_ty(),
-    );
-
-    let program = program_wrapping_body(&mut b, soac);
-    let used = collect_all_used_bindings(&program);
-    assert!(
-        used.contains(&BindingRef::new(0, 5)),
-        "missing set=0,binding=5: {:?}",
-        used
-    );
-    assert!(
-        used.contains(&BindingRef::new(0, 7)),
-        "missing set=0,binding=7: {:?}",
-        used
-    );
 }
 
 // =============================================================================

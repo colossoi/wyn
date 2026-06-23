@@ -1683,7 +1683,11 @@ fn collect_entry_input_names(program: &Program) -> HashMap<(u32, u32), String> {
 /// lifting, and the pipeline descriptor is built from the untouched
 /// program. Useful for debugging (keeps the SSA close to the source)
 /// and for backends that can't handle multi-entry pipelines.
-pub fn run(mut program: Program, disable: bool) -> crate::error::Result<ParallelizationResult> {
+pub fn run(
+    mut program: Program,
+    disable: bool,
+    binding_ids: &mut crate::IdSource<u32>,
+) -> crate::error::Result<ParallelizationResult> {
     // Capture source-parameter names now, before the original compute entries
     // are replaced by phase entries (`program.defs.retain` below). The relabel
     // pass in `to_egraph` restores these onto the finalized descriptor.
@@ -1699,12 +1703,13 @@ pub fn run(mut program: Program, disable: bool) -> crate::error::Result<Parallel
         });
     }
 
-    // Track max binding across every `(set, binding)` the program already
-    // uses — including implicit `ArrayExpr::StorageBuffer` bindings
-    // introduced by lift_gathers / buffer_specialize / mono for SOAC inputs.
-    // Missing these would let fresh intermediates collide with input buffers.
-    let mut next_binding: u32 =
-        collect_all_used_bindings(&program).iter().map(|br| br.binding + 1).max().unwrap_or(0);
+    // Draw the starting offset from the module-wide id factory so any
+    // bindings parallelize allocates land above every prior pass's
+    // claims. The local counter below tracks our own consumption; we
+    // push the factory forward at the end of `run` so any later pass
+    // sees them too.
+    let starting_binding = binding_ids.peek_id();
+    let mut next_binding: u32 = starting_binding;
 
     // Pass-local TermIdSource. TLC TermIds on synthesized terms aren't
     // load-bearing past parallelize, but every synthesized term still
@@ -1842,6 +1847,12 @@ pub fn run(mut program: Program, disable: bool) -> crate::error::Result<Parallel
 
     program.defs.retain(|d| !removed_entries.contains(&d.name));
     program.defs.extend(new_defs);
+
+    // Push the module-wide id factory past every binding we consumed
+    // so later passes start above them.
+    for _ in starting_binding..next_binding {
+        let _ = binding_ids.next_id();
+    }
 
     Ok(ParallelizationResult {
         program,
@@ -4859,69 +4870,6 @@ fn input_storage_decls(soac: &SoacAnalysis) -> Vec<interface::StorageBindingDecl
             length: None,
         })
         .collect()
-}
-
-/// Collect every `BindingRef` already claimed anywhere in the
-/// program so `parallelize::run` can hand out fresh intermediate bindings
-/// that don't collide with anything. Walks every term, picking up
-/// implicit bindings attached by earlier passes as `ArrayExpr::StorageView`
-/// inside SOAC inputs — scan's three-way collision (partials, result,
-/// input) would otherwise emit a broken shader.
-fn collect_all_used_bindings(program: &Program) -> HashSet<BindingRef> {
-    let mut used: HashSet<BindingRef> = HashSet::new();
-    for def in &program.defs {
-        collect_bindings_in_term(&def.body, &mut used);
-    }
-    used
-}
-
-fn collect_bindings_in_term(term: &Term, used: &mut HashSet<BindingRef>) {
-    // At a TermKind wrapping ArrayExpr/Soac, inspect the wrapped shape so
-    // `StorageView` bindings aren't skipped by `for_each_child` (which
-    // only visits Term children and can't extract binding fields).
-    match &term.kind {
-        TermKind::ArrayExpr(ae) => collect_bindings_in_ae(ae, used),
-        TermKind::Soac(op) => collect_bindings_in_soac(op, used),
-        _ => {}
-    }
-    term.for_each_child(&mut |c| collect_bindings_in_term(c, used));
-}
-
-fn collect_bindings_in_ae(ae: &ArrayExpr, used: &mut HashSet<BindingRef>) {
-    if let ArrayExpr::StorageView(crate::tlc::StorageView { binding: br, .. }) = ae {
-        used.insert(*br);
-    }
-    match ae {
-        ArrayExpr::Zip(aes) => {
-            for a in aes {
-                collect_bindings_in_ae(a, used);
-            }
-        }
-        ArrayExpr::Soac(op) => collect_bindings_in_soac(op, used),
-        _ => {}
-    }
-}
-
-fn collect_bindings_in_soac(op: &SoacOp, used: &mut HashSet<BindingRef>) {
-    match op {
-        SoacOp::Map { inputs, .. } | SoacOp::Redomap { inputs, .. } | SoacOp::Screma { inputs, .. } => {
-            for ae in inputs {
-                collect_bindings_in_ae(ae, used);
-            }
-        }
-        SoacOp::Reduce { input, .. } | SoacOp::Scan { input, .. } | SoacOp::Filter { input, .. } => {
-            collect_bindings_in_ae(input, used);
-        }
-        SoacOp::Scatter { inputs, .. } => {
-            for ae in inputs {
-                collect_bindings_in_ae(ae, used);
-            }
-        }
-        SoacOp::ReduceByIndex { indices, values, .. } => {
-            collect_bindings_in_ae(indices, used);
-            collect_bindings_in_ae(values, used);
-        }
-    }
 }
 
 fn build_default_pipeline(program: &Program) -> PipelineDescriptor {
