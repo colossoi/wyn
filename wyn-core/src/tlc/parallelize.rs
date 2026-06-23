@@ -212,8 +212,11 @@ struct EntryAnalysis {
 // Stage A: Analysis
 // =============================================================================
 
-fn analyze_program(program: &Program) -> HashMap<SymbolId, EntryAnalysis> {
-    let mut results = HashMap::new();
+fn analyze_program(program: &Program) -> indexmap::IndexMap<SymbolId, EntryAnalysis> {
+    // IndexMap (not HashMap): the iteration order in `run` drives binding
+    // allocation through the module-wide `IdSource`, so a HashMap's
+    // randomized iteration would shuffle binding numbers on every compile.
+    let mut results = indexmap::IndexMap::new();
 
     for def in &program.defs {
         let DefMeta::EntryPoint(ref entry_decl) = def.meta else {
