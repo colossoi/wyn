@@ -1,17 +1,7 @@
-//! Storage-buffer / uniform-buffer / push-constant layout.
-//!
-//! Owns the `Constructor` methods that turn a Wyn `#[storage]` /
-//! `#[uniform]` binding (with its declared element type) into a
-//! SPIR-V variable with the right Block-decorated struct wrapper,
-//! ArrayStride decorations on nested array members, and member
-//! offsets — plus the runtime `(set, binding) → buffer_id` map
-//! the view-indexing path uses to recover a buffer var from a
-//! `Region(set, binding)` type.
-//!
-//! Methods are added to `Constructor` via an `impl` block.
-//! Sibling files (entry.rs / lower.rs / types_lowering.rs / mod.rs)
-//! call them via `self.method()` — the same method-resolution
-//! works regardless of which file defines the impl.
+//! `Constructor` methods that turn `#[storage]` / `#[uniform]`
+//! bindings into Block-decorated SPIR-V variables with ArrayStride
+//! and member-offset decorations, plus the `(set, binding) → buffer_id`
+//! map view-indexing uses to recover a buffer var.
 
 use super::*;
 

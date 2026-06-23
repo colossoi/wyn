@@ -1,20 +1,7 @@
-//! Compiler-agnostic typed wrapper around `rspirv`'s `Builder`.
-//!
-//! Consumers depend on this crate (typically renamed to `wspirv` via
-//! Cargo's `package = "wyn-spirv"` shorthand) and reach rspirv through
-//! the re-exported `binary` / `dr` / `spirv` submodules below — they
+//! Compiler-agnostic typed wrapper around `rspirv`'s `Builder`. Owns
+//! the typed `Id<K>` phantoms, the type / constant / decoration dedup
+//! caches, and re-exports `rspirv::{binary, dr, spirv}` so consumers
 //! don't need a direct rspirv dep.
-//!
-//! What this crate owns: typed `Id<K>` phantoms that keep
-//! type/const/value/var/func/block ids distinct at compile time;
-//! deduped scalar/composite/null constant emission; deduped
-//! vec/struct/pointer/runtime-array/Block-wrapped struct types;
-//! once-only decoration trackers (`Block`, `NonWritable`,
-//! `ArrayStride`); a SPIR-V array → element-type registry.
-//!
-//! Compiler types (`PolyType`, `BindingRef`, etc.) never reach this
-//! crate — every method takes plain SPIR-V primitives or typed
-//! `Id<K>`s.
 
 pub use rspirv::{binary, dr, spirv};
 

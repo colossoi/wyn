@@ -1,12 +1,5 @@
-//! Entry-point lowering — `lower_ssa_entry_point` and its helpers.
-//!
-//! Per-entry I/O setup: storage / uniform / push-constant / texture /
-//! sampler / storage-image inputs, location-decorated graphics I/O,
-//! compute-shader builtin variables (`GlobalInvocationId`,
-//! `LocalInvocationId`, `NumWorkgroups`), and the deferred per-input
-//! `OpLoad` wiring. The function body itself is lowered by
-//! `lower_ssa_body_for_entry` (in `mod.rs`); this file is everything
-//! that goes around it.
+//! Entry-point I/O setup. The function body itself is lowered by
+//! `lower_ssa_body_for_entry` in `mod.rs`.
 
 use super::*;
 

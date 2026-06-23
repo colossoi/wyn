@@ -1,17 +1,5 @@
-//! Arithmetic / comparison / primitive-op lowering on `LowerCtx`.
-//!
-//! Holds the five methods that emit per-instruction SPIR-V for the
-//! scalar / vector arithmetic surface:
-//!   - `lower_binop`     — `+ - * / %  ==  &&` and friends
-//!   - `emit_int_pow_call` — integer pow→loop helper invocation
-//!   - `splat_scalar`    — scalar→vec broadcast for mixed-arity ops
-//!   - `lower_unaryop`   — `- !` and component-wise unary
-//!   - `lower_primop`    — typed `PrimOp` dispatch (derivatives,
-//!     bit ops, conversions, comparisons that aren't a plain binop)
-//!
-//! Defined here as an `impl LowerCtx` block; sibling-file
-//! dispatchers (`lower.rs::lower_inst`, `lower_builtin.rs`) call
-//! into these methods as if they lived in `lower.rs`.
+//! `LowerCtx` arithmetic / comparison / primop dispatch
+//! (`lower_binop`, `lower_unaryop`, `lower_primop` + helpers).
 
 use super::lower::LowerCtx;
 use super::*;

@@ -1,16 +1,5 @@
-//! Wyn type → SPIR-V type lowering.
-//!
-//! Owns `Constructor::polytype_to_spirv` and the small structural-type
-//! delegators it consumes (`get_or_create_ptr_type`,
-//! `get_or_create_vec_type`, `get_or_create_struct_type`,
-//! `get_or_create_runtime_array_type`). These call into `SpirvBuilder`
-//! for dedup; this file is the PolyType-walking glue that turns
-//! Wyn-language types into SPIR-V type ids.
-//!
-//! Methods are added to `Constructor` via an `impl` block. Other
-//! methods Constructor depends on (storage-buffer / interface-block /
-//! decoration helpers) live in sibling files; cross-file calls are
-//! transparent.
+//! Wyn `PolyType` → SPIR-V type lowering: `Constructor::polytype_to_spirv`
+//! and the structural-type delegators it dispatches to.
 
 use super::*;
 

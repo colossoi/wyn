@@ -1,11 +1,5 @@
-//! `LowerCtx::lower_builtin_call` — the dispatch surface for every
-//! builtin the SSA stage emits (reduce / scatter / gather /
-//! transpose / texture sampling / storage-image read+write /
-//! atomic ops / extern intrinsics / barrier).
-//!
-//! Defined here as an `impl LowerCtx` block; the parent's
-//! `lower_inst` dispatcher routes to `self.lower_builtin_call(...)`
-//! exactly as if it lived in `lower.rs`.
+//! `LowerCtx::lower_builtin_call` — SPIR-V dispatch for every
+//! builtin (reduce / scatter / gather / texture / atomic / extern).
 
 use super::lower::LowerCtx;
 use super::*;

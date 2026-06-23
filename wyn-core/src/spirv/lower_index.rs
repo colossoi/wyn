@@ -1,15 +1,5 @@
-//! Array / slice / view indexing surface on `LowerCtx`.
-//!
-//! Holds the methods that turn an SSA `Index` / `Slice` /
-//! `ViewIndex` / `VirtualIndex` / `CompositeIndex` instruction
-//! into the right combination of `OpAccessChain` + `OpLoad` +
-//! `OpCompositeExtract` — including the slice-view ↔ slice-composite
-//! materialization routines that handle the boundary between
-//! storage-backed and register-backed array data.
-//!
-//! Defined here as an `impl LowerCtx` block; sibling-file
-//! dispatchers (`lower.rs::lower_inst`, `lower_builtin.rs`) call
-//! into these methods as if they lived in `lower.rs`.
+//! `LowerCtx` array / slice / view indexing — `OpAccessChain` +
+//! `OpLoad` + `OpCompositeExtract` plus view↔composite materialization.
 
 use super::lower::LowerCtx;
 use super::*;

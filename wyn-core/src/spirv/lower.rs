@@ -1,26 +1,12 @@
-//! Per-function SSA-body lowering — `LowerCtx` and its huge `impl`
-//! that walks instructions and emits SPIR-V.
-//!
-//! Held together: the per-instruction `lower_inst()` dispatch
-//! (`OpTag::*` arms), terminator + phi-node insertion, array /
-//! slice / view indexing, binary / unary / primop arithmetic,
-//! the builtin call surface (reduce / scatter / gather / texture
-//! / extern intrinsics), and the value / block-id mapping helpers.
-//!
-//! Public API surface (everything else is private to this file):
-//! - `LowerCtx::new(constructor, body, is_entry, span)`
-//! - `LowerCtx::lower(self)` — drains the body, returns the SPIR-V
-//!   function id.
+//! Per-function SSA-body lowering. `LowerCtx::new` → `lower()` is
+//! the entry surface; everything else is internal.
 
 use super::*;
 
-/// Context for lowering SSA to SPIR-V.
-///
-/// Fields are `pub(super)` so sibling files (`lower_builtin.rs`,
-/// `lower_ops.rs`, `lower_index.rs`) hosting `impl LowerCtx` blocks
-/// can read and mutate them. Treat the struct as private to
-/// `mod spirv` — outside callers reach it only through
-/// `LowerCtx::new` / `LowerCtx::lower`.
+/// Per-function SSA → SPIR-V lowering state. Fields are
+/// `pub(super)` so sibling-file `impl LowerCtx` blocks
+/// (`lower_ops.rs`, `lower_index.rs`, `lower_builtin.rs`) can reach
+/// them.
 pub(super) struct LowerCtx<'a, 'b> {
     pub(super) constructor: &'a mut Constructor,
     pub(super) body: &'b FuncBody,
