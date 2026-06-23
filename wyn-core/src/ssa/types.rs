@@ -32,9 +32,9 @@ use crate::interface;
 use crate::op::OpTag;
 use crate::BindingRef;
 use polytype::Type;
-use rspirv::spirv;
 use slotmap::SlotMap;
 use std::collections::HashMap;
+use wspirv::spirv;
 
 // Re-export ID types from wyn-ssa.
 pub use crate::ssa::framework::{BlockId, InstId, PlaceId, ValueId};

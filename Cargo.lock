@@ -1510,7 +1510,6 @@ dependencies = [
  "naga",
  "nom",
  "polytype",
- "rspirv",
  "serde",
  "serde_json",
  "slotmap",
@@ -1518,6 +1517,7 @@ dependencies = [
  "spirv",
  "thiserror 1.0.69",
  "wyn-pipeline-descriptor",
+ "wyn-spirv",
 ]
 
 [[package]]
@@ -1526,6 +1526,14 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "wyn-spirv"
+version = "0.1.0"
+dependencies = [
+ "rspirv",
+ "spirv",
 ]
 
 [[package]]

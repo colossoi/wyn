@@ -34,7 +34,7 @@
 //! [exponentiation by squaring]:
 //!     https://en.wikipedia.org/wiki/Exponentiation_by_squaring
 
-use rspirv::spirv;
+use wspirv::spirv;
 
 use super::Constructor;
 use crate::error::Result;

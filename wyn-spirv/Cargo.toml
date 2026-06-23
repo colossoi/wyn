@@ -1,0 +1,11 @@
+[package]
+name = "wyn-spirv"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Compiler-agnostic typed wrapper around rspirv's Builder. Owns the cache/dedup machinery the wyn-core SPIR-V backend layers compiler-aware lowering on top of."
+
+[dependencies]
+rspirv = "0.12"
+spirv.workspace = true

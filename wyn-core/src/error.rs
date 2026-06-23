@@ -40,7 +40,7 @@ pub enum CompilerError {
     IoError(#[from] std::io::Error),
 
     #[error("SPIR-V builder error: {0}")]
-    SpirvBuilderError(#[from] rspirv::dr::Error),
+    SpirvBuilderError(#[from] wspirv::dr::Error),
 }
 
 impl CompilerError {

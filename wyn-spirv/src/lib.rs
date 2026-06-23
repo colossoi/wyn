@@ -1,37 +1,25 @@
-// Most of this module is a target for an in-progress refactor —
-// subsequent commits move call sites here and these items become
-// referenced. Suppressing the dead-code warning at module scope
-// keeps the build clean during the transition.
-#![allow(dead_code)]
+//! Compiler-agnostic typed wrapper around `rspirv`'s `Builder`.
+//!
+//! Consumers depend on this crate (typically renamed to `wspirv` via
+//! Cargo's `package = "wyn-spirv"` shorthand) and reach rspirv through
+//! the re-exported `binary` / `dr` / `spirv` submodules below — they
+//! don't need a direct rspirv dep.
+//!
+//! What this crate owns: typed `Id<K>` phantoms that keep
+//! type/const/value/var/func/block ids distinct at compile time;
+//! deduped scalar/composite/null constant emission; deduped
+//! vec/struct/pointer/runtime-array/Block-wrapped struct types;
+//! once-only decoration trackers (`Block`, `NonWritable`,
+//! `ArrayStride`); a SPIR-V array → element-type registry.
+//!
+//! Compiler types (`PolyType`, `BindingRef`, etc.) never reach this
+//! crate — every method takes plain SPIR-V primitives or typed
+//! `Id<K>`s.
 
-//! Compiler-agnostic wrapper around `rspirv`'s `Builder`.
-//!
-//! This module is the target for an ongoing refactor of `spirv/mod.rs`.
-//! Goal: every SPIR-V emission path goes through this builder, and the
-//! builder itself knows nothing about Wyn's compiler types
-//! (`PolyType<TypeName>`, `BindingRef`, etc.). The compiler-aware
-//! lowering layer in `spirv/mod.rs` calls into the builder with plain
-//! SPIR-V primitives (`spirv::Word`, sizes, decorations) and owns its
-//! own compiler-type → SPIR-V mappings on top.
-//!
-//! What the builder will own (incrementally moved here):
-//! - rspirv `Builder` lifecycle + capability/memory-model setup.
-//! - Structurally-deduped type emission (`OpTypeVector`,
-//!   `OpTypeStruct`, `OpTypePointer`, `OpTypeRuntimeArray`, etc.).
-//! - Value-keyed constant emission (`OpConstant*`).
-//! - Once-only decoration tracking (`Block`, `NonWritable`,
-//!   `ArrayStride`, …).
-//! - Function/block/instruction emission.
-//!
-//! What stays in `spirv/mod.rs`:
-//! - `PolyType<TypeName> → Id<TypeKind>` mappings.
-//! - `BindingRef → buffer/var` mappings.
-//! - Per-function lowering state (current block, env, output vars).
-//! - Compiler-symbol → function-id maps.
-//! - The `lower_*` family that walks SSA and calls into the builder.
+pub use rspirv::{binary, dr, spirv};
 
 use rspirv::dr::Builder;
-use rspirv::spirv::{self, AddressingModel, Capability, MemoryModel};
+use rspirv::spirv::{AddressingModel, Capability, MemoryModel};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::marker::PhantomData;
@@ -583,5 +571,5 @@ impl Default for SpirvBuilder {
 }
 
 #[cfg(test)]
-#[path = "builder_tests.rs"]
+#[path = "lib_tests.rs"]
 mod tests;

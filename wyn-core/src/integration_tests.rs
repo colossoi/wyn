@@ -1814,9 +1814,9 @@ entry fragment_main(#[uniform(set=1, binding=0)] iTime: f32, #[builtin(position)
 /// backend-conversion path.
 #[test]
 fn pow_float_base_int_exp_lowers_via_convert_then_pow() {
-    use rspirv::binary::parse_words;
-    use rspirv::dr::Loader;
-    use rspirv::spirv::Op;
+    use wspirv::binary::parse_words;
+    use wspirv::dr::Loader;
+    use wspirv::spirv::Op;
 
     let spirv = compile_to_spirv(
         "\
@@ -1839,7 +1839,7 @@ entry e(xs: []f32) []f32 = map(|x: f32| x ** 9, xs)
                     Op::ConvertSToF => converts += 1,
                     Op::ExtInst => {
                         // GLSL.std.450 Pow = opcode 26 (operand index 1).
-                        if let Some(rspirv::dr::Operand::LiteralExtInstInteger(26)) = inst.operands.get(1) {
+                        if let Some(wspirv::dr::Operand::LiteralExtInstInteger(26)) = inst.operands.get(1) {
                             pows += 1;
                         }
                     }
@@ -2880,17 +2880,17 @@ entry main() #[location(0)] vec4f32 =
 /// type that results from indexing into the base`; the in-process check
 /// catches the same shape so tests don't need `spirv-val` on $PATH.
 fn assert_spirv_storage_access_chain_pointee_types_match(spirv_words: &[u32]) {
-    use rspirv::binary::parse_words;
-    use rspirv::dr::{Loader, Operand};
-    use rspirv::spirv::{Op, StorageClass};
     use std::collections::HashMap;
+    use wspirv::binary::parse_words;
+    use wspirv::dr::{Loader, Operand};
+    use wspirv::spirv::{Op, StorageClass};
 
     let mut loader = Loader::new();
     parse_words(spirv_words, &mut loader).expect("parse spirv");
     let module = loader.module();
 
     // First pass: index every type-defining instruction by its result id.
-    let mut types: HashMap<u32, &rspirv::dr::Instruction> = HashMap::new();
+    let mut types: HashMap<u32, &wspirv::dr::Instruction> = HashMap::new();
     for inst in module.types_global_values.iter() {
         if let Some(id) = inst.result_id {
             types.insert(id, inst);
@@ -3008,9 +3008,9 @@ fn assert_spirv_storage_access_chain_pointee_types_match(spirv_words: &[u32]) {
 /// parameter count. The arity-mismatch class of bug above produces
 /// SPIR-V that round-trips through rspirv but fails this invariant.
 fn assert_spirv_call_arities_match(spirv_words: &[u32]) {
-    use rspirv::binary::parse_words;
-    use rspirv::dr::{Loader, Operand};
-    use rspirv::spirv::Op;
+    use wspirv::binary::parse_words;
+    use wspirv::dr::{Loader, Operand};
+    use wspirv::spirv::Op;
 
     let mut loader = Loader::new();
     parse_words(spirv_words, &mut loader).expect("parse spirv");
@@ -3062,9 +3062,9 @@ fn assert_spirv_call_arities_match(spirv_words: &[u32]) {
 /// driver loop over `0..N`.
 #[test]
 fn compute_map_loads_global_invocation_id() {
-    use rspirv::binary::parse_words;
-    use rspirv::dr::{Loader, Operand};
-    use rspirv::spirv::Op;
+    use wspirv::binary::parse_words;
+    use wspirv::dr::{Loader, Operand};
+    use wspirv::spirv::Op;
     let src = r#"
 #[compute]
 entry sq(xs: []f32) []f32 = map(|x: f32| x * x, xs)
@@ -3101,7 +3101,7 @@ entry sq(xs: []f32) []f32 = map(|x: f32| x * x, xs)
             inst.class.opcode == Op::Decorate
                 && matches!(
                     inst.operands.get(2),
-                    Some(Operand::BuiltIn(rspirv::spirv::BuiltIn::GlobalInvocationId))
+                    Some(Operand::BuiltIn(wspirv::spirv::BuiltIn::GlobalInvocationId))
                 )
         })
         .and_then(|inst| match inst.operands.first() {
@@ -3134,9 +3134,9 @@ entry sq(xs: []f32) []f32 = map(|x: f32| x * x, xs)
 /// branch. Inner function loops (e.g. raymarch) are not affected.
 #[test]
 fn compute_map_has_no_full_serial_loop() {
-    use rspirv::binary::parse_words;
-    use rspirv::dr::{Loader, Operand};
-    use rspirv::spirv::Op;
+    use wspirv::binary::parse_words;
+    use wspirv::dr::{Loader, Operand};
+    use wspirv::spirv::Op;
     let src = r#"
 #[compute]
 entry sq(xs: []f32) []f32 = map(|x: f32| x * x, xs)
@@ -4650,10 +4650,10 @@ fn compute_multi_output_tuple_of_ifs_compiles() {
 /// lambda's reads went to the (wrong) output descriptor and the input buffer
 /// was declared but never accessed.
 fn assert_storage_descriptor_is_accessed(spirv_words: &[u32], set: u32, binding: u32) {
-    use rspirv::binary::parse_words;
-    use rspirv::dr::{Loader, Operand};
-    use rspirv::spirv::{Decoration, Op};
     use std::collections::HashMap;
+    use wspirv::binary::parse_words;
+    use wspirv::dr::{Loader, Operand};
+    use wspirv::spirv::{Decoration, Op};
 
     let mut loader = Loader::new();
     parse_words(spirv_words, &mut loader).expect("parse spirv");
@@ -4795,10 +4795,10 @@ fn view_as_map_input_reads_own_buffer() {
 /// `assert_storage_descriptor_is_accessed`: a length query is an `OpArrayLength`
 /// on the buffer struct, not an `OpAccessChain` into it.
 fn assert_array_length_queried_on_descriptor(spirv_words: &[u32], set: u32, binding: u32) {
-    use rspirv::binary::parse_words;
-    use rspirv::dr::{Loader, Operand};
-    use rspirv::spirv::{Decoration, Op};
     use std::collections::HashMap;
+    use wspirv::binary::parse_words;
+    use wspirv::dr::{Loader, Operand};
+    use wspirv::spirv::{Decoration, Op};
 
     let mut loader = Loader::new();
     parse_words(spirv_words, &mut loader).expect("parse spirv");
@@ -5196,9 +5196,9 @@ entry gen(xs: []i32, #[uniform(set=1,binding=0)] n: i32) ([]vec4f32, [5]i32) =
 /// unsigned so this also pins the (UInt, _) arm of `lower_binop`.
 #[test]
 fn bitwise_shift_ops_lower_to_spirv() {
-    use rspirv::binary::parse_words;
-    use rspirv::dr::Loader;
-    use rspirv::spirv::Op;
+    use wspirv::binary::parse_words;
+    use wspirv::dr::Loader;
+    use wspirv::spirv::Op;
 
     let spirv = compile_to_spirv(
         "\

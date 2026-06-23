@@ -2,7 +2,10 @@
 //!
 //! This module contains the lowering pass from SSA to SPIR-V.
 
-mod builder;
+// `builder::TypeId` / `builder::ConstId` / etc. path literals
+// throughout this module reach the typed wrapper that lives in the
+// `wyn-spirv` crate (renamed to `wspirv` in our `Cargo.toml`).
+use wspirv as builder;
 #[cfg(test)]
 mod lowering_tests;
 mod pow;
@@ -24,15 +27,15 @@ use crate::types::TypeExt;
 use crate::BindingRef;
 use crate::{bail_spirv, bail_spirv_at, err_spirv, err_spirv_at};
 use polytype::Type as PolyType;
-use rspirv::binary::Assemble;
-use rspirv::dr::{InsertPoint, Operand};
-use rspirv::spirv::{self, Capability, StorageClass};
+use wspirv::binary::Assemble;
+use wspirv::dr::{InsertPoint, Operand};
+use wspirv::spirv::{self, Capability, StorageClass};
 
 // =============================================================================
 // Constructor - SPIR-V Builder Wrapper
 // =============================================================================
 
-/// Constructor wraps rspirv::Builder with an ergonomic API that handles:
+/// Constructor wraps wspirv::Builder with an ergonomic API that handles:
 /// - Automatic variable hoisting to function entry block
 /// Cache key for interface block types (push constants, storage buffers, uniforms).
 /// These are distinct from plain struct types even when member types match.
