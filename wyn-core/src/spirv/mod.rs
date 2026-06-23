@@ -10,6 +10,7 @@ mod entry;
 mod lower;
 mod lower_builtin;
 mod lower_index;
+mod lower_ops;
 #[cfg(test)]
 mod lowering_tests;
 mod pow;
