@@ -27,7 +27,11 @@ impl Constructor {
     /// stride values and walks nested arrays via the builder's
     /// array-element registry for SPIR-V IDs.
     /// Skips types that have already been decorated.
-    pub(super) fn apply_buffer_array_strides(&mut self, spirv_type: spirv::Word, poly_type: &PolyType<TypeName>) {
+    pub(super) fn apply_buffer_array_strides(
+        &mut self,
+        spirv_type: spirv::Word,
+        poly_type: &PolyType<TypeName>,
+    ) {
         let strides = buffer_array_strides(poly_type);
         if strides.is_empty() {
             return;
@@ -85,7 +89,10 @@ impl Constructor {
         ty
     }
 
-    pub(super) fn get_or_create_buffer_block_type(&mut self, runtime_array_type: spirv::Word) -> spirv::Word {
+    pub(super) fn get_or_create_buffer_block_type(
+        &mut self,
+        runtime_array_type: spirv::Word,
+    ) -> spirv::Word {
         *self.builder.buffer_block_type(builder::TypeId::new(runtime_array_type))
     }
 

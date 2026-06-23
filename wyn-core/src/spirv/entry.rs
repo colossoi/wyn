@@ -397,11 +397,12 @@ pub(super) fn lower_ssa_entry_point(
     // Set output variables for OutputPtr lowering
     constructor.current_entry_outputs = output_vars;
 
-    // Begin void function for entry point (no parameters - I/O is via variables)
+    // Begin void function for entry point — I/O is via variables, not params.
     let void_type = constructor.void_type;
     let param_names: Vec<&str> = Vec::new();
     let param_types: Vec<spirv::Word> = Vec::new();
-    constructor.begin_function(&entry.name, &param_names, &param_types, void_type)?;
+    let (_, _, first_code_block) =
+        constructor.begin_function(&entry.name, &param_names, &param_types, void_type)?;
 
     // Load push constant members via AccessChain from the push constant variable.
     if let Some(pc_var_id) = pc_var {
@@ -469,7 +470,7 @@ pub(super) fn lower_ssa_entry_point(
 
     // Lower the body (stores to outputs are now explicit in SSA)
     // ReturnUnit blocks now emit ret() directly, so no extra return needed here.
-    let _result = lower_ssa_body_for_entry(constructor, body, entry.span)?;
+    let _result = lower_ssa_body_for_entry(constructor, body, entry.span, first_code_block)?;
 
     constructor.end_function()?;
 

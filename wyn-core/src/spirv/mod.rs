@@ -72,15 +72,14 @@ struct Constructor {
     u32_type: spirv::Word,
     f32_type: spirv::Word,
 
-    // Current function state
-    current_block: Option<spirv::Word>,
-    variables_block: Option<spirv::Word>, // Block for OpVariable declarations
-    first_code_block: Option<spirv::Word>, // First block with actual code
+    // Open-function bookkeeping for `declare_variable` (needs the
+    // vars block to back-emit `OpVariable`) and `end_function`
+    // (needs both to wire the vars→code branch).
+    variables_block: Option<spirv::Word>,
+    first_code_block: Option<spirv::Word>,
 
     // Environment: name -> value ID
     env: HashMap<String, spirv::Word>,
-    // Function parameter SPIR-V IDs in declaration order (positional mapping)
-    param_ids: Vec<spirv::Word>,
 
     // Function map: name -> function ID
     functions: HashMap<String, spirv::Word>,
@@ -164,11 +163,9 @@ impl Constructor {
             i32_type,
             u32_type,
             f32_type,
-            current_block: None,
             variables_block: None,
             first_code_block: None,
             env: HashMap::new(),
-            param_ids: Vec::new(),
             functions: HashMap::new(),
             glsl_ext_inst_id,
             polytype_cache: HashMap::new(),
@@ -254,14 +251,14 @@ impl Constructor {
         func_id
     }
 
-    /// Begin a new function
+    /// Begin a new function. Returns `(func_id, param_ids, first_code_block)`.
     fn begin_function(
         &mut self,
         name: &str,
         param_names: &[&str],
         param_types: &[spirv::Word],
         return_type: spirv::Word,
-    ) -> Result<spirv::Word> {
+    ) -> Result<(spirv::Word, Vec<spirv::Word>, spirv::Word)> {
         let func_type = self.builder.type_function(return_type, param_types.to_vec());
 
         // Check if this function was forward-declared
@@ -281,11 +278,11 @@ impl Constructor {
         };
 
         // Create function parameters
-        self.param_ids.clear();
+        let mut param_ids = Vec::with_capacity(param_names.len());
         for (i, &param_name) in param_names.iter().enumerate() {
             let param_id = self.builder.function_parameter(param_types[i])?;
             self.env.insert(param_name.to_string(), param_id);
-            self.param_ids.push(param_id);
+            param_ids.push(param_id);
         }
 
         // Create two blocks: one for variables, one for code
@@ -302,9 +299,8 @@ impl Constructor {
 
         // Begin code block - this is where we'll emit code
         self.builder.begin_block(Some(code_block_id))?;
-        self.current_block = Some(code_block_id);
 
-        Ok(func_id)
+        Ok((func_id, param_ids, code_block_id))
     }
 
     /// End the current function
@@ -327,7 +323,6 @@ impl Constructor {
         self.builder.end_function()?;
 
         // Clear function state
-        self.current_block = None;
         self.variables_block = None;
         self.first_code_block = None;
         self.env.clear();
@@ -413,14 +408,6 @@ impl Constructor {
     ) -> Result<spirv::Word> {
         Ok(self.builder.composite_or_construct(builder::TypeId::new(result_type), elem_ids)?)
     }
-
-    /// Begin a block (must be called before emitting instructions into it)
-    fn begin_block(&mut self, block_id: spirv::Word) -> Result<()> {
-        self.builder.begin_block(Some(block_id))?;
-        self.current_block = Some(block_id);
-        // Clear extract cache since values from previous blocks may not dominate this block
-        Ok(())
-    }
 }
 
 // =============================================================================
@@ -450,8 +437,14 @@ fn storage_image_format_to_spirv(f: crate::pipeline_descriptor::StorageImageForm
     }
 }
 
-fn lower_ssa_body(constructor: &mut Constructor, body: &FuncBody, func_span: Span) -> Result<spirv::Word> {
-    let mut ctx = lower::LowerCtx::new(constructor, body, false, func_span);
+fn lower_ssa_body(
+    constructor: &mut Constructor,
+    body: &FuncBody,
+    func_span: Span,
+    param_ids: Vec<spirv::Word>,
+    first_code_block: spirv::Word,
+) -> Result<spirv::Word> {
+    let mut ctx = lower::LowerCtx::new(constructor, body, false, func_span, param_ids, first_code_block);
     ctx.lower()
 }
 
@@ -464,8 +457,9 @@ fn lower_ssa_body_for_entry(
     constructor: &mut Constructor,
     body: &FuncBody,
     func_span: Span,
+    first_code_block: spirv::Word,
 ) -> Result<spirv::Word> {
-    let mut ctx = lower::LowerCtx::new(constructor, body, true, func_span);
+    let mut ctx = lower::LowerCtx::new(constructor, body, true, func_span, Vec::new(), first_code_block);
     ctx.lower()
 }
 
@@ -630,9 +624,16 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
     // body so calls to `Global(name)` from other functions resolve.
     for constant in &program.constants {
         let return_type = constructor.polytype_to_spirv(&constant.body.return_ty);
-        constructor.begin_function(&constant.name, &[], &[], return_type)?;
-        lower_ssa_body(&mut constructor, &constant.body, Span::new(0, 0, 0, 0))
-            .map_err(|e| err_spirv!("in constant '{}': {}", constant.name, e))?;
+        let (_, param_ids, first_code_block) =
+            constructor.begin_function(&constant.name, &[], &[], return_type)?;
+        lower_ssa_body(
+            &mut constructor,
+            &constant.body,
+            Span::new(0, 0, 0, 0),
+            param_ids,
+            first_code_block,
+        )
+        .map_err(|e| err_spirv!("in constant '{}': {}", constant.name, e))?;
         constructor.end_function()?;
     }
 
@@ -745,8 +746,9 @@ fn lower_ssa_function(constructor: &mut Constructor, func: &Function) -> Result<
 
     let return_type = constructor.polytype_to_spirv(&body.return_ty);
 
-    constructor.begin_function(&func.name, &param_names, &param_types, return_type)?;
-    lower_ssa_body(constructor, body, func.span)
+    let (_, param_ids, first_code_block) =
+        constructor.begin_function(&func.name, &param_names, &param_types, return_type)?;
+    lower_ssa_body(constructor, body, func.span, param_ids, first_code_block)
         .map_err(|e| err_spirv!("in function '{}': {}", func.name, e))?;
     constructor.end_function()?;
 

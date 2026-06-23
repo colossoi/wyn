@@ -328,5 +328,4 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             Ok(self.constructor.builder.load(result_ty, None, elem_ptr, None, [])?)
         }
     }
-
 }

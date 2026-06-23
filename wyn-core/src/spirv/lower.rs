@@ -35,6 +35,13 @@ pub(super) struct LowerCtx<'a, 'b> {
     pub(super) current_span: Option<Span>,
     /// Function-level span fallback when an instruction has no span.
     pub(super) func_span: Span,
+    /// SPIR-V function-parameter ids in declaration order. Empty for
+    /// entry points (which take I/O via variables, not params).
+    pub(super) param_ids: Vec<spirv::Word>,
+    /// SPIR-V label of the block currently being emitted into. Updated
+    /// by `begin_block()` as the lowering walk advances; read by phi-
+    /// tracking in `lower_terminator`.
+    pub(super) current_block: spirv::Word,
 }
 
 impl<'a, 'b> LowerCtx<'a, 'b> {
@@ -43,6 +50,8 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
         body: &'b FuncBody,
         is_entry_point: bool,
         func_span: Span,
+        param_ids: Vec<spirv::Word>,
+        first_code_block: spirv::Word,
     ) -> Self {
         LowerCtx {
             constructor,
@@ -56,7 +65,16 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             place_ptr_id: HashMap::new(),
             current_span: None,
             func_span,
+            param_ids,
+            current_block: first_code_block,
         }
+    }
+
+    /// Begin a SPIR-V block and track it as the current emission target.
+    pub(super) fn begin_block(&mut self, block_id: spirv::Word) -> Result<()> {
+        self.constructor.builder.begin_block(Some(block_id))?;
+        self.current_block = block_id;
+        Ok(())
     }
 
     /// SPIR-V pointer word for a `PlaceId` — set by the defining instruction
@@ -83,11 +101,9 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
         // For regular functions, use positional mapping (param_ids) to avoid
         // name collisions when two params share a string name.
         // For entry points (no param_ids), fall back to name-based env lookup.
-        if self.constructor.param_ids.len() == self.body.params.len()
-            && !self.constructor.param_ids.is_empty()
-        {
+        if self.param_ids.len() == self.body.params.len() && !self.param_ids.is_empty() {
             for (i, (value_id, _, _)) in self.body.params.iter().enumerate() {
-                self.value_map.insert(*value_id, self.constructor.param_ids[i]);
+                self.value_map.insert(*value_id, self.param_ids[i]);
             }
         } else {
             for (value_id, _, name) in &self.body.params {
@@ -107,8 +123,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 continue;
             }
             if block_id == entry_block {
-                let current = self.constructor.current_block.unwrap();
-                self.block_map.insert(block_id, current);
+                self.block_map.insert(block_id, self.current_block);
             } else {
                 let spirv_block = self.constructor.builder.id();
                 self.block_map.insert(block_id, spirv_block);
@@ -127,7 +142,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
 
             if block_id != entry_block {
                 let spirv_block = self.block_map[&block_id];
-                self.constructor.begin_block(spirv_block)?;
+                self.begin_block(spirv_block)?;
             }
 
             // Record block index for phi insertion
@@ -703,7 +718,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
         _block: &crate::ssa::framework::BasicBlock,
         term: &Terminator,
     ) -> Result<()> {
-        let current_block = self.constructor.current_block.unwrap();
+        let current_block = self.current_block;
 
         match term {
             Terminator::Branch { target, args } => {
@@ -860,5 +875,4 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             },
         }
     }
-
 }

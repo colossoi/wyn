@@ -57,12 +57,10 @@ fn emit_one(c: &mut Constructor, signed: bool) -> Result<spirv::Word> {
     let int_ty = if signed { c.i32_type } else { c.u32_type };
     let name = if signed { "_w_int_pow_i32" } else { "_w_int_pow_u32" };
 
-    // The Constructor's begin_function opens both a vars block (for
-    // OpVariable declarations) and a first code block (for the
-    // initialization code); current_block is the code block on return.
-    let func_id = c.begin_function(name, &["base", "exp"], &[int_ty, int_ty], int_ty)?;
-    let param_base = c.param_ids[0];
-    let param_exp = c.param_ids[1];
+    let (func_id, param_ids, _code_block) =
+        c.begin_function(name, &["base", "exp"], &[int_ty, int_ty], int_ty)?;
+    let param_base = param_ids[0];
+    let param_exp = param_ids[1];
 
     // Function-scope mutable state: result, base, exp.
     let result_var = c.declare_variable("result", int_ty)?;
