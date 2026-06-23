@@ -211,9 +211,16 @@ impl PartialEvaluator {
                 self.apply(func, arg_vals, term)
             }
 
-            // Lambda - descend into body to fold constant sub-expressions.
+            // Residual lambda. Its body may reference env-bound captures —
+            // the arguments of a function being inlined around it — so
+            // substitute those in, leaving the lambda closed over reified
+            // values rather than vars that depend on a binder being in
+            // scope. Binder-aware: the lambda's own params shadow env. Then
+            // fold constant sub-expressions in the result.
             TermKind::Lambda(lam) => {
-                let body = self.fold_in_body(&lam.body);
+                let mut bound: LookupSet<SymbolId> = lam.params.iter().map(|(p, _)| *p).collect();
+                let substituted = self.substitute_residual_vars((*lam.body).clone(), &mut bound);
+                let body = self.fold_in_body(&substituted);
                 Value::Unknown(self.mk_term(
                     term.ty.clone(),
                     term.span,

@@ -2061,17 +2061,15 @@ entry e() f32 = fbm_perlin(1u32, @[0.0f32, 0.0f32], 4i32)
         .expect("a named def passed as a function-typed argument should be specialized away");
 }
 
-/// Gap: a local lambda that closes over an *enclosing function's parameter*
-/// and is applied more than once panics the backend with `Unknown global: k`
-/// (`spirv/mod.rs`). Applied exactly once it lowers fine — the captured param
-/// is inlined at the single call site — but a second application leaves a
-/// reference to the capture (`k`) that resolves to neither a local nor a
-/// global at code-gen time. Surfaced writing the perlin-noise-fields
-/// playground, where `let fb = |q| fhnoise.fbm_perlin(k, q, …)` is called five
-/// times; the workaround there was to inline the five calls and drop the
-/// lambda.
+/// A local lambda closing over an *enclosing function's parameter*, applied
+/// more than once, must lower. `partial_eval` inlines the enclosing function
+/// and residualizes the lambda (it can't beta-reduce a value used twice); the
+/// captured param has to be substituted into that residual body, otherwise it
+/// survives as a free var and SPIR-V gen fails with `Unknown global: k`. Fixed
+/// by substituting env-bound captures into residual lambda bodies in
+/// `partial_eval::eval`. Surfaced writing the perlin-noise-fields playground,
+/// where `let fb = |q| fhnoise.fbm_perlin(k, q, …)` is called five times.
 #[test]
-#[ignore = "backend gap: a local lambda capturing an enclosing fn parameter, applied more than once, fails SPIR-V gen with `Unknown global`"]
 fn local_lambda_capturing_param_applied_twice_lowers() {
     let source = r#"
 def f(k: u32, p: f32) f32 =
