@@ -20,19 +20,16 @@ pub mod verify_buffer_layouts;
 use crate::builtins::catalog;
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::Span;
-use crate::ast::TypeName;
+use crate::ast::{Span, TypeName};
 use crate::builtins::lowering::{BuiltinLowering, PrimOp};
 use crate::error::Result;
 use crate::ssa::layout::{buffer_array_strides, std430_alignment, type_byte_size};
 use crate::ssa::types::{
-    BlockId, ConstantValue, ControlHeader, FuncBody, InstKind, Terminator, ValueId, ValueRef, WynInstNode,
+    BlockId, ConstantValue, ControlHeader, EntryPoint, ExecutionModel, FuncBody, Function, InstKind,
+    IoDecoration, Program, Terminator, ValueId, ValueRef, WynInstNode,
 };
-use crate::ssa::types::{EntryPoint, ExecutionModel, Function, IoDecoration, Program};
-use crate::types;
 use crate::types::TypeExt;
-use crate::BindingRef;
-use crate::{bail_spirv, bail_spirv_at, err_spirv, err_spirv_at};
+use crate::{bail_spirv, bail_spirv_at, err_spirv, err_spirv_at, types, BindingRef};
 use polytype::Type as PolyType;
 use wspirv::binary::Assemble;
 use wspirv::dr::{InsertPoint, Operand};
@@ -437,32 +434,6 @@ fn storage_image_format_to_spirv(f: crate::pipeline_descriptor::StorageImageForm
     }
 }
 
-fn lower_ssa_body(
-    constructor: &mut Constructor,
-    body: &FuncBody,
-    func_span: Span,
-    param_ids: Vec<spirv::Word>,
-    first_code_block: spirv::Word,
-) -> Result<spirv::Word> {
-    let mut ctx = lower::LowerCtx::new(constructor, body, false, func_span, param_ids, first_code_block);
-    ctx.lower()
-}
-
-/// Lower an SSA function body for an entry point.
-///
-/// Entry points are void functions — OpReturnValue is invalid.
-/// SSA for entry points should use OutputPtr+Store then ReturnUnit;
-/// Return(value) will produce an error.
-fn lower_ssa_body_for_entry(
-    constructor: &mut Constructor,
-    body: &FuncBody,
-    func_span: Span,
-    first_code_block: spirv::Word,
-) -> Result<spirv::Word> {
-    let mut ctx = lower::LowerCtx::new(constructor, body, true, func_span, Vec::new(), first_code_block);
-    ctx.lower()
-}
-
 // =============================================================================
 // SSA Program Lowering (new direct path)
 // =============================================================================
@@ -626,13 +597,15 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
         let return_type = constructor.polytype_to_spirv(&constant.body.return_ty);
         let (_, param_ids, first_code_block) =
             constructor.begin_function(&constant.name, &[], &[], return_type)?;
-        lower_ssa_body(
+        lower::LowerCtx::new(
             &mut constructor,
             &constant.body,
+            false,
             Span::new(0, 0, 0, 0),
             param_ids,
             first_code_block,
         )
+        .lower()
         .map_err(|e| err_spirv!("in constant '{}': {}", constant.name, e))?;
         constructor.end_function()?;
     }
@@ -748,7 +721,8 @@ fn lower_ssa_function(constructor: &mut Constructor, func: &Function) -> Result<
 
     let (_, param_ids, first_code_block) =
         constructor.begin_function(&func.name, &param_names, &param_types, return_type)?;
-    lower_ssa_body(constructor, body, func.span, param_ids, first_code_block)
+    lower::LowerCtx::new(constructor, body, false, func.span, param_ids, first_code_block)
+        .lower()
         .map_err(|e| err_spirv!("in function '{}': {}", func.name, e))?;
     constructor.end_function()?;
 

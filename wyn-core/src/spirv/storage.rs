@@ -49,11 +49,6 @@ impl Constructor {
         }
     }
 
-    /// Thin delegator over `SpirvBuilder::decorate_block_once`.
-    pub(super) fn decorate_block(&mut self, ty: spirv::Word, member_offsets: &[u32]) {
-        self.builder.decorate_block_once(builder::TypeId::new(ty), member_offsets);
-    }
-
     /// Create a decorated interface block struct type.
     /// Atomically creates the OpTypeStruct AND all required decorations.
     /// Cached by kind + layout so identical blocks share one ID, but
@@ -78,7 +73,7 @@ impl Constructor {
         let ty = *self.builder.type_struct(member_types.iter().map(|&w| builder::TypeId::new(w)).collect());
 
         // Decorate as Block + member offsets (once per struct id).
-        self.decorate_block(ty, member_offsets);
+        self.builder.decorate_block_once(builder::TypeId::new(ty), member_offsets);
 
         // Apply ArrayStride for array members
         for (i, poly_ty) in member_poly_types.iter().enumerate() {

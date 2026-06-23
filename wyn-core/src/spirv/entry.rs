@@ -468,9 +468,10 @@ pub(super) fn lower_ssa_entry_point(
         }
     }
 
-    // Lower the body (stores to outputs are now explicit in SSA)
-    // ReturnUnit blocks now emit ret() directly, so no extra return needed here.
-    let _result = lower_ssa_body_for_entry(constructor, body, entry.span, first_code_block)?;
+    // Lower the body — entry points are void functions, so SSA must
+    // use OutputPtr+Store then ReturnUnit; a Return(value) terminator
+    // will produce an error.
+    lower::LowerCtx::new(constructor, body, true, entry.span, Vec::new(), first_code_block).lower()?;
 
     constructor.end_function()?;
 
