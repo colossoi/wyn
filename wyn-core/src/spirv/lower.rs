@@ -357,8 +357,8 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     // identifiers — but plain names like `step` can, and
                     // checking the user table first lets the user's `def
                     // step` win the resolution.
-                    if let Some(&func_id) = self.constructor.functions.get(func) {
-                        self.constructor.builder.function_call(result_ty, None, func_id, arg_ids)?
+                    if let Some(func_id) = self.constructor.builder.get_function(func) {
+                        self.constructor.builder.function_call(result_ty, None, *func_id, arg_ids)?
                     } else if let Some(def) = catalog().lookup_by_any_name(func) {
                         let builtin_impl = &def.overloads()[0].lowering;
                         self.lower_builtin_call(
@@ -376,10 +376,10 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 }
 
                 crate::op::OpTag::Global(name) => {
-                    if let Some(&func_id) = self.constructor.functions.get(name) {
+                    if let Some(func_id) = self.constructor.builder.get_function(name) {
                         // Global constant function - call it with no args to get the value.
                         // This handles `def verts: [3]vec4f32 = [...]` referenced as just `verts`.
-                        self.constructor.builder.function_call(result_ty, None, func_id, [])?
+                        self.constructor.builder.function_call(result_ty, None, *func_id, [])?
                     } else {
                         bail_spirv_at!(self.blame_span(), "Unknown global: {}", name)
                     }

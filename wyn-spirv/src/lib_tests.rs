@@ -46,10 +46,8 @@ fn builder_emits_minimal_valid_module() {
     let mut b = SpirvBuilder::new();
     // Add an OpTypeVoid + a no-op function so the assembled module
     // has *something* in it. Pure smoke test that the setup is right.
-    let void = b.type_void();
-    let fn_ty = b.type_function(void, vec![]);
-    let _fn_id = b.begin_function(void, None, spirv::FunctionControl::NONE, fn_ty).expect("begin_function");
-    b.begin_block(None).expect("begin_block");
+    let void = b.void_type();
+    let (_fn_id, _params, _code_block) = b.begin_function("main", &[], void).expect("begin_function");
     b.ret().expect("ret");
     b.end_function().expect("end_function");
     let module = b.into_module();

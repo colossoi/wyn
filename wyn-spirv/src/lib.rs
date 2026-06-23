@@ -79,43 +79,13 @@ pub type VarId = Id<VarKind>;
 pub type FuncId = Id<FuncKind>;
 pub type BlockId = Id<BlockKind>;
 
-/// Wrapper around `rspirv::dr::Builder`. Methods that emit dedupable
-/// constructs (types, constants, certain decorations) maintain
-/// internal caches keyed only on SPIR-V primitives — no compiler
-/// types reach this struct.
+/// Wrapper around `rspirv::dr::Builder` that maintains the SPIR-V
+/// dedup caches (types, constants, decorations) and the function-
+/// lifecycle state, all keyed purely on SPIR-V primitives — no
+/// compiler types reach this struct.
 ///
-/// What lives here today:
-/// - Lifecycle / capability setup (SPIR-V 1.5, Shader, Logical, GLSL450).
-/// - Well-known scalar types (void/bool/i32/u32/f32) and GLSL ext id.
-/// - Constant dedup: `const_i32` / `const_u32` / `const_f32` /
-///   `const_bool` / `const_null` / `composite_or_construct`, with
-///   reverse lookup for the integer kinds and `is_constant` for the
-///   composite-vs-construct decision.
-/// - Structural type dedup: `type_vec` / `type_struct` /
-///   `type_pointer` / `type_runtime_array` + the block-wrapped
-///   variants `buffer_block_type` / `uniform_block_type`.
-/// - Decoration trackers: `decorate_block_once` (Block + member
-///   offsets), `decorate_nonwritable_once`, `decorate_array_stride_once`,
-///   `mark_buffer_layout_decorated_once`.
-/// - SPIR-V array → element registry: `register_array_element`
-///   plus `array_element_type` lookup.
-///
-/// What stays in the compiler-aware lowering layer (`spirv/mod.rs`'s
-/// `Constructor`):
-/// - `PolyType<TypeName> → Id<TypeKind>` mapping (`polytype_cache`).
-/// - Compiler-aware buffer / binding registries (`storage_buffers`,
-///   `buffer_vars`, `workgroup_vars`, `buffer_id_map`).
-/// - Per-function lowering state (current block, env, param ids,
-///   per-entry-point output vars).
-/// - Compiler-symbol → id maps (`functions`, `linked_functions`,
-///   `int_pow_functions`).
-/// - Walks over `PolyType` that produce SPIR-V types
-///   (`polytype_to_spirv`, `apply_buffer_array_strides`,
-///   `create_interface_block_type`).
-///
-/// Existing call sites still reach the underlying rspirv API
-/// through the `Deref`/`DerefMut` bridge below — future migrations
-/// add typed methods here and trim the bridge usage.
+/// `Deref<Target = rspirv::dr::Builder>` is provided so callers can
+/// reach raw rspirv methods that this wrapper hasn't typed yet.
 pub struct SpirvBuilder {
     inner: Builder,
     // Well-known types eagerly created at construction so call sites
@@ -183,6 +153,14 @@ pub struct SpirvBuilder {
     // (buffer-layout walks, `with []` lowering) can recover the elem
     // type id without re-deriving from the compiler-side PolyType.
     array_elem: HashMap<TypeId, TypeId>,
+    // Forward-declared function ids keyed by name, so a body emission
+    // can land on the id its callers already reference.
+    functions: HashMap<String, FuncId>,
+    // Open-function block layout. Local variables hoist into the
+    // variables block; the body emits into the code block; at function
+    // close, an unconditional branch wires the former to the latter.
+    variables_block: Option<BlockId>,
+    first_code_block: Option<BlockId>,
 }
 
 impl SpirvBuilder {
@@ -228,6 +206,9 @@ impl SpirvBuilder {
             nonwritable_decorated: HashSet::new(),
             buffer_layout_decorated: HashSet::new(),
             array_elem: HashMap::new(),
+            functions: HashMap::new(),
+            variables_block: None,
+            first_code_block: None,
         }
     }
 
@@ -528,6 +509,147 @@ impl SpirvBuilder {
     /// `None` if no array of that id has been registered.
     pub fn array_element_type(&self, arr: TypeId) -> Option<TypeId> {
         self.array_elem.get(&arr).copied()
+    }
+
+    /// Look up the SPIR-V id of a function declared via
+    /// `forward_declare_function` or already opened by `begin_function`.
+    pub fn get_function(&self, name: &str) -> Option<FuncId> {
+        self.functions.get(name).copied()
+    }
+
+    /// Reserve a SPIR-V id for a function whose body comes later.
+    /// Idempotent on `name` — repeat calls return the same id, so
+    /// callers can resolve cross-function references without ordering
+    /// constraints.
+    pub fn forward_declare_function(&mut self, name: &str) -> FuncId {
+        if let Some(&id) = self.functions.get(name) {
+            return id;
+        }
+        let func_id = FuncId::new(self.inner.id());
+        self.functions.insert(name.to_string(), func_id);
+        func_id
+    }
+
+    /// Emit an extern function stub with `Import` linkage — body is
+    /// supplied at link time. Adds the `Linkage` capability on first
+    /// use. The id is registered under `name` so subsequent calls
+    /// resolve to it.
+    pub fn forward_declare_linked_function(
+        &mut self,
+        name: &str,
+        linkage_name: &str,
+        param_types: &[TypeId],
+        return_type: TypeId,
+    ) -> FuncId {
+        self.inner.capability(Capability::Linkage);
+        let func_type =
+            self.inner.type_function(*return_type, param_types.iter().map(|t| **t).collect::<Vec<_>>());
+        let func_id = self
+            .inner
+            .begin_function(*return_type, None, spirv::FunctionControl::NONE, func_type)
+            .expect("rspirv begin_function failed for linked function");
+        for &param_ty in param_types {
+            self.inner.function_parameter(*param_ty).expect("rspirv function_parameter failed");
+        }
+        self.inner.end_function().expect("rspirv end_function failed for linked function");
+        self.inner.decorate(
+            func_id,
+            spirv::Decoration::LinkageAttributes,
+            [
+                dr::Operand::LiteralString(linkage_name.to_string()),
+                dr::Operand::LinkageType(spirv::LinkageType::Import),
+            ],
+        );
+        let func_id = FuncId::new(func_id);
+        self.functions.insert(name.to_string(), func_id);
+        func_id
+    }
+
+    /// Open a new function. Picks up the forward-declared id under
+    /// `name` if one exists, otherwise allocates fresh. Opens both
+    /// the variables block (where `declare_variable` hoists locals)
+    /// and the first code block (selected as the current emission
+    /// target on return).
+    ///
+    /// Returns `(func_id, param_ids, first_code_block)`.
+    pub fn begin_function(
+        &mut self,
+        name: &str,
+        param_types: &[TypeId],
+        return_type: TypeId,
+    ) -> Result<(FuncId, Vec<spirv::Word>, BlockId), dr::Error> {
+        let func_type =
+            self.inner.type_function(*return_type, param_types.iter().map(|t| **t).collect::<Vec<_>>());
+        let func_id = if let Some(&pre_id) = self.functions.get(name) {
+            FuncId::new(self.inner.begin_function(
+                *return_type,
+                Some(*pre_id),
+                spirv::FunctionControl::NONE,
+                func_type,
+            )?)
+        } else {
+            let id =
+                self.inner.begin_function(*return_type, None, spirv::FunctionControl::NONE, func_type)?;
+            let fid = FuncId::new(id);
+            self.functions.insert(name.to_string(), fid);
+            fid
+        };
+
+        let mut param_ids = Vec::with_capacity(param_types.len());
+        for &param_ty in param_types {
+            param_ids.push(self.inner.function_parameter(*param_ty)?);
+        }
+
+        let vars_block_id = BlockId::new(self.inner.id());
+        let code_block_id = BlockId::new(self.inner.id());
+        self.variables_block = Some(vars_block_id);
+        self.first_code_block = Some(code_block_id);
+
+        self.inner.begin_block(Some(*vars_block_id))?;
+        self.inner.select_block(None)?;
+        self.inner.begin_block(Some(*code_block_id))?;
+
+        Ok((func_id, param_ids, code_block_id))
+    }
+
+    /// Close the current function: branch the variables block to the
+    /// first code block, emit `OpFunctionEnd`, and clear the
+    /// open-function layout state.
+    pub fn end_function(&mut self) -> Result<(), dr::Error> {
+        if let (Some(vars_block), Some(code_block)) = (self.variables_block, self.first_code_block) {
+            let func = self.inner.module_ref().functions.last().expect("end_function: no open function");
+            let vars_idx = func
+                .blocks
+                .iter()
+                .position(|b| b.label.as_ref().map(|l| l.result_id) == Some(Some(*vars_block)));
+            if let Some(idx) = vars_idx {
+                self.inner.select_block(Some(idx))?;
+                self.inner.branch(*code_block)?;
+            }
+        }
+        self.inner.end_function()?;
+        self.variables_block = None;
+        self.first_code_block = None;
+        Ok(())
+    }
+
+    /// Emit an `OpVariable` of `value_type` into the open function's
+    /// variables block, then restore the previously-selected block so
+    /// subsequent emission lands where the caller expects.
+    pub fn declare_variable(&mut self, value_type: TypeId) -> Result<VarId, dr::Error> {
+        let ptr_type = self.type_pointer(spirv::StorageClass::Function, value_type);
+        let current_idx = self.inner.selected_block();
+        let vars_block = self.variables_block.expect("declare_variable called outside an open function");
+        let func = self.inner.module_ref().functions.last().expect("declare_variable: no open function");
+        let vars_idx = func
+            .blocks
+            .iter()
+            .position(|b| b.label.as_ref().map(|l| l.result_id) == Some(Some(*vars_block)))
+            .expect("declare_variable: variables block not in module");
+        self.inner.select_block(Some(vars_idx))?;
+        let var_id = self.inner.variable(*ptr_type, None, spirv::StorageClass::Function, None);
+        self.inner.select_block(current_idx)?;
+        Ok(VarId::new(var_id))
     }
 }
 

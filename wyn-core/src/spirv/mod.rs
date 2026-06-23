@@ -33,7 +33,7 @@ use crate::{bail_spirv, bail_spirv_at, err_spirv, err_spirv_at, types, BindingRe
 use polytype::Type as PolyType;
 use wspirv::binary::Assemble;
 use wspirv::dr::{InsertPoint, Operand};
-use wspirv::spirv::{self, Capability, StorageClass};
+use wspirv::spirv::{self, StorageClass};
 
 // =============================================================================
 // Constructor - SPIR-V Builder Wrapper
@@ -69,17 +69,11 @@ struct Constructor {
     u32_type: spirv::Word,
     f32_type: spirv::Word,
 
-    // Open-function bookkeeping for `declare_variable` (needs the
-    // vars block to back-emit `OpVariable`) and `end_function`
-    // (needs both to wire the vars→code branch).
-    variables_block: Option<spirv::Word>,
-    first_code_block: Option<spirv::Word>,
-
-    // Environment: name -> value ID
+    // Per-entry-point name → loaded-value lookup. Populated by
+    // entry-point I/O setup (push constants / uniforms / locations
+    // load through here so the SSA body can fetch the value by the
+    // input's declared name).
     env: HashMap<String, spirv::Word>,
-
-    // Function map: name -> function ID
-    functions: HashMap<String, spirv::Word>,
 
     // GLSL extended instruction set
     glsl_ext_inst_id: spirv::Word,
@@ -160,10 +154,7 @@ impl Constructor {
             i32_type,
             u32_type,
             f32_type,
-            variables_block: None,
-            first_code_block: None,
             env: HashMap::new(),
-            functions: HashMap::new(),
             glsl_ext_inst_id,
             polytype_cache: HashMap::new(),
             interface_block_cache: HashMap::new(),
@@ -191,18 +182,7 @@ impl Constructor {
         _param_types: &[spirv::Word],
         _return_type: spirv::Word,
     ) -> spirv::Word {
-        // Check if already declared
-        if let Some(&id) = self.functions.get(name) {
-            return id;
-        }
-
-        // Reserve an ID for the function
-        let func_id = self.builder.id();
-
-        // Store the mapping (we'll use this ID when we actually define the function)
-        self.functions.insert(name.to_string(), func_id);
-
-        func_id
+        *self.builder.forward_declare_function(name)
     }
 
     /// Forward-declare a linked (extern) function with Import linkage.
@@ -214,144 +194,41 @@ impl Constructor {
         param_types: &[spirv::Word],
         return_type: spirv::Word,
     ) -> spirv::Word {
-        // Add Linkage capability
-        self.builder.capability(Capability::Linkage);
-
-        // Create function type
-        let func_type = self.builder.type_function(return_type, param_types.to_vec());
-
-        // Declare function with no body (Import linkage)
-        let func_id = self
-            .builder
-            .begin_function(return_type, None, spirv::FunctionControl::NONE, func_type)
-            .expect("BUG: failed to begin linked function");
-
-        // Add parameters (required by SPIR-V)
-        for &param_ty in param_types {
-            self.builder.function_parameter(param_ty).expect("BUG: failed to add function parameter");
-        }
-        self.builder.end_function().expect("BUG: failed to end linked function");
-
-        // Decorate with Import linkage
-        self.builder.decorate(
-            func_id,
-            spirv::Decoration::LinkageAttributes,
-            [
-                Operand::LiteralString(linkage_name.to_string()),
-                Operand::LinkageType(spirv::LinkageType::Import),
-            ],
-        );
-
-        // Register in functions map so Call instructions can find it
-        self.functions.insert(name.to_string(), func_id);
-
-        func_id
+        let param_types_typed: Vec<builder::TypeId> =
+            param_types.iter().map(|&w| builder::TypeId::new(w)).collect();
+        *self.builder.forward_declare_linked_function(
+            name,
+            linkage_name,
+            &param_types_typed,
+            builder::TypeId::new(return_type),
+        )
     }
 
     /// Begin a new function. Returns `(func_id, param_ids, first_code_block)`.
     fn begin_function(
         &mut self,
         name: &str,
-        param_names: &[&str],
+        _param_names: &[&str],
         param_types: &[spirv::Word],
         return_type: spirv::Word,
     ) -> Result<(spirv::Word, Vec<spirv::Word>, spirv::Word)> {
-        let func_type = self.builder.type_function(return_type, param_types.to_vec());
-
-        // Check if this function was forward-declared
-        let func_id = if let Some(&pre_id) = self.functions.get(name) {
-            // Use the pre-allocated ID
-            self.builder.begin_function(
-                return_type,
-                Some(pre_id),
-                spirv::FunctionControl::NONE,
-                func_type,
-            )?
-        } else {
-            let id =
-                self.builder.begin_function(return_type, None, spirv::FunctionControl::NONE, func_type)?;
-            self.functions.insert(name.to_string(), id);
-            id
-        };
-
-        // Create function parameters
-        let mut param_ids = Vec::with_capacity(param_names.len());
-        for (i, &param_name) in param_names.iter().enumerate() {
-            let param_id = self.builder.function_parameter(param_types[i])?;
-            self.env.insert(param_name.to_string(), param_id);
-            param_ids.push(param_id);
-        }
-
-        // Create two blocks: one for variables, one for code
-        let vars_block_id = self.builder.id();
-        let code_block_id = self.builder.id();
-        self.variables_block = Some(vars_block_id);
-        self.first_code_block = Some(code_block_id);
-
-        // Begin variables block (leave it open - no terminator yet)
-        self.builder.begin_block(Some(vars_block_id))?;
-
-        // Deselect current block so we can begin a new one
-        self.builder.select_block(None)?;
-
-        // Begin code block - this is where we'll emit code
-        self.builder.begin_block(Some(code_block_id))?;
-
-        Ok((func_id, param_ids, code_block_id))
+        let param_types_typed: Vec<builder::TypeId> =
+            param_types.iter().map(|&w| builder::TypeId::new(w)).collect();
+        let (func_id, param_ids, code_block) =
+            self.builder.begin_function(name, &param_types_typed, builder::TypeId::new(return_type))?;
+        Ok((*func_id, param_ids, *code_block))
     }
 
-    /// End the current function
+    /// End the current function and clear per-entry-point name bindings.
     fn end_function(&mut self) -> Result<()> {
-        // Terminate the variables block with a branch to the code block
-        if let (Some(vars_block), Some(code_block)) = (self.variables_block, self.first_code_block) {
-            // Find the variables block index and select it
-            let func = self.builder.module_ref().functions.last().expect("No function");
-            let vars_idx = func
-                .blocks
-                .iter()
-                .position(|b| b.label.as_ref().map(|l| l.result_id) == Some(Some(vars_block)));
-
-            if let Some(idx) = vars_idx {
-                self.builder.select_block(Some(idx))?;
-                self.builder.branch(code_block)?;
-            }
-        }
-
         self.builder.end_function()?;
-
-        // Clear function state
-        self.variables_block = None;
-        self.first_code_block = None;
         self.env.clear();
-
         Ok(())
     }
 
     /// Declare a variable in the function's variables block
     fn declare_variable(&mut self, _name: &str, value_type: spirv::Word) -> Result<spirv::Word> {
-        let ptr_type = self.get_or_create_ptr_type(StorageClass::Function, value_type);
-
-        // Save current block
-        let current_idx = self.builder.selected_block();
-
-        // Find and select the variables block
-        let vars_block = self.variables_block.expect("declare_variable called outside function");
-        let func = self.builder.module_ref().functions.last().expect("No function");
-        let vars_idx = func
-            .blocks
-            .iter()
-            .position(|b| b.label.as_ref().map(|l| l.result_id) == Some(Some(vars_block)))
-            .expect("Variables block not found");
-
-        self.builder.select_block(Some(vars_idx))?;
-
-        // Emit the variable
-        let var_id = self.builder.variable(ptr_type, None, StorageClass::Function, None);
-
-        // Restore current block
-        self.builder.select_block(current_idx)?;
-
-        Ok(var_id)
+        Ok(*self.builder.declare_variable(builder::TypeId::new(value_type))?)
     }
 
     /// Get or create an i32 constant
@@ -648,7 +525,8 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
 
     // Emit entry point declarations
     for (name, model, local_size) in &entry_info {
-        if let Some(&func_id) = constructor.functions.get(name) {
+        if let Some(func_id) = constructor.builder.get_function(name) {
+            let func_id = *func_id;
             let mut interfaces = constructor.entry_point_interfaces.get(name).cloned().unwrap_or_default();
 
             // Add storage buffer variables that this entry point declares
