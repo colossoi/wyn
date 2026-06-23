@@ -28,8 +28,8 @@
 use crate::ast::{self, Declaration, ExprKind, Expression, ModuleExpression, Pattern, Program, TypeName};
 use crate::builtins::catalog::BuiltinCatalog;
 use crate::error::Result;
+use crate::{LookupMap, LookupSet};
 use polytype::TypeScheme;
-use std::collections::{HashMap, HashSet};
 
 #[cfg(test)]
 #[path = "resolve_opens_tests.rs"]
@@ -40,7 +40,7 @@ mod tests;
 /// modules, etc.) update only the index construction.
 ///
 /// Storage is `module → set of member names` rather than a flat
-/// `HashSet<(String, String)>` so `has_member(m, n)` can probe with
+/// `LookupSet<(String, String)>` so `has_member(m, n)` can probe with
 /// `&str` borrows instead of allocating two owned `String`s per call
 /// — the resolver checks every identifier in every expression, so the
 /// per-probe `to_string()` allocations were a hot path.
@@ -48,7 +48,7 @@ mod tests;
 pub struct OpenIndex {
     /// Value-namespace members keyed by module. Module-presence is
     /// `members.contains_key(m)`; there's no separate `modules` set.
-    members: HashMap<String, HashSet<String>>,
+    members: LookupMap<String, LookupSet<String>>,
 }
 
 impl OpenIndex {
@@ -74,7 +74,7 @@ impl OpenIndex {
                 set.insert(name.to_string());
             }
         } else {
-            let mut set = HashSet::new();
+            let mut set = LookupSet::new();
             set.insert(name.to_string());
             self.members.insert(module.to_string(), set);
         }
@@ -114,7 +114,7 @@ pub struct OpenResolver<'a> {
     /// Stack of frames; each frame holds the names introduced by
     /// patterns / let-bindings / function params at that nesting
     /// level. Lookup walks frames top-down.
-    locals: Vec<HashSet<String>>,
+    locals: Vec<LookupSet<String>>,
 }
 
 impl<'a> OpenResolver<'a> {
@@ -122,7 +122,7 @@ impl<'a> OpenResolver<'a> {
         Self {
             index,
             opens: Vec::new(),
-            locals: vec![HashSet::new()],
+            locals: vec![LookupSet::new()],
         }
     }
 
@@ -149,7 +149,7 @@ impl<'a> OpenResolver<'a> {
         match decl {
             Declaration::Open(mod_exp) => self.handle_open(mod_exp),
             Declaration::Decl(d) => {
-                self.locals.push(HashSet::new());
+                self.locals.push(LookupSet::new());
                 for p in &d.params {
                     self.bind_pattern(p);
                 }
@@ -158,7 +158,7 @@ impl<'a> OpenResolver<'a> {
                 Ok(())
             }
             Declaration::Entry(e) => {
-                self.locals.push(HashSet::new());
+                self.locals.push(LookupSet::new());
                 for p in &e.params {
                     self.bind_pattern(p);
                 }
@@ -231,7 +231,7 @@ impl<'a> OpenResolver<'a> {
             // on the stack — typically one from a library re-export and
             // one from the importer — collapse to a single candidate
             // instead of looking ambiguous to the user.
-            let mut seen = HashSet::new();
+            let mut seen = LookupSet::new();
             let candidates: Vec<String> = self
                 .opens
                 .iter()
@@ -269,7 +269,7 @@ impl<'a> OpenResolver<'a> {
         // binding sites so introduced names shadow opens correctly.
         match &mut expr.kind {
             ExprKind::Lambda(lambda) => {
-                self.locals.push(HashSet::new());
+                self.locals.push(LookupSet::new());
                 for p in &lambda.params {
                     self.bind_pattern(p);
                 }
@@ -286,7 +286,7 @@ impl<'a> OpenResolver<'a> {
                 // Value is in the parent frame's scope.
                 self.resolve_expression(&mut let_in.value)?;
                 // Body sees the let-bound names.
-                self.locals.push(HashSet::new());
+                self.locals.push(LookupSet::new());
                 self.bind_pattern(&let_in.pattern);
                 self.resolve_expression(&mut let_in.body)?;
                 self.locals.pop();
@@ -359,7 +359,7 @@ impl<'a> OpenResolver<'a> {
             ExprKind::Match(m) => {
                 self.resolve_expression(&mut m.scrutinee)?;
                 for case in &mut m.cases {
-                    self.locals.push(HashSet::new());
+                    self.locals.push(LookupSet::new());
                     self.bind_pattern(&case.pattern);
                     self.resolve_expression(&mut case.body)?;
                     self.locals.pop();
@@ -373,7 +373,7 @@ impl<'a> OpenResolver<'a> {
                     self.resolve_expression(init)?;
                 }
                 // Loop pattern binds names visible in form + body.
-                self.locals.push(HashSet::new());
+                self.locals.push(LookupSet::new());
                 self.bind_pattern(&loop_expr.pattern);
                 match &mut loop_expr.form {
                     ast::LoopForm::For(_, bound) => {
@@ -412,7 +412,7 @@ impl<'a> OpenResolver<'a> {
 /// prelude-elaborated-decls loop in `types::run`) should build once
 /// and reuse via `run_with_index` / `run_in_module_with_index`.
 pub fn build_index(
-    spec_schemes: &HashMap<String, TypeScheme<TypeName>>,
+    spec_schemes: &LookupMap<String, TypeScheme<TypeName>>,
     catalog: &BuiltinCatalog,
 ) -> OpenIndex {
     let scheme_keys = spec_schemes.keys().cloned();
@@ -437,7 +437,7 @@ pub fn build_index(
 /// once with `build_index` and use `run_with_index`.
 pub fn run(
     program: &mut Program,
-    spec_schemes: &HashMap<String, TypeScheme<TypeName>>,
+    spec_schemes: &LookupMap<String, TypeScheme<TypeName>>,
     catalog: &BuiltinCatalog,
 ) -> Result<()> {
     let index = build_index(spec_schemes, catalog);
@@ -461,7 +461,7 @@ pub fn run_with_index(program: &mut Program, index: &OpenIndex) -> Result<()> {
 pub fn run_in_module(
     expr: &mut crate::ast::Expression,
     module_name: &str,
-    spec_schemes: &HashMap<String, TypeScheme<TypeName>>,
+    spec_schemes: &LookupMap<String, TypeScheme<TypeName>>,
     catalog: &BuiltinCatalog,
 ) -> Result<()> {
     let index = build_index(spec_schemes, catalog);

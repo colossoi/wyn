@@ -28,12 +28,12 @@ use crate::binding_layout::{compute_entry_binding_layout, extract_storage_bindin
 use crate::interface::{EntryDecl, EntryParamBindingKind};
 use crate::tlc::monomorphize::apply_subst;
 use crate::types::{region_tag, TypeExt};
+use crate::LookupMap;
 use crate::{BindingRef, SymbolId};
 use polytype::Type;
-use std::collections::HashMap;
 
 /// Region-variable → concrete `Region(set, binding)` substitution.
-type RegionSubst = HashMap<usize, Type<TypeName>>;
+type RegionSubst = LookupMap<usize, Type<TypeName>>;
 
 pub fn run(program: &mut Program, binding_ids: &mut crate::IdSource<u32>) -> crate::error::Result<()> {
     for def in program.defs.iter_mut() {
@@ -44,7 +44,7 @@ pub fn run(program: &mut Program, binding_ids: &mut crate::IdSource<u32>) -> cra
         let (params, _) = extract_params(&def.body);
 
         let mut subst = RegionSubst::new();
-        let mut region_env = HashMap::new();
+        let mut region_env = LookupMap::new();
         if let DefMeta::EntryPoint(entry) = &mut def.meta {
             entry.param_bindings = compute_entry_binding_layout(
                 &params,
@@ -86,7 +86,7 @@ fn collect_region_subst(
     params: &[(SymbolId, Type<TypeName>)],
     entry: &EntryDecl,
     subst: &mut RegionSubst,
-    region_env: &mut HashMap<SymbolId, Type<TypeName>>,
+    region_env: &mut LookupMap<SymbolId, Type<TypeName>>,
     span: Span,
 ) -> crate::error::Result<()> {
     let layout = &entry.param_bindings;
@@ -163,7 +163,7 @@ fn pin_view_region(
 fn collect_view_slice_region_subst(
     term: &Term,
     subst: &mut RegionSubst,
-    region_env: &HashMap<SymbolId, Type<TypeName>>,
+    region_env: &LookupMap<SymbolId, Type<TypeName>>,
 ) -> crate::error::Result<bool> {
     if let TermKind::Let {
         name,
@@ -216,7 +216,7 @@ fn collect_view_slice_region_subst(
 fn view_region_for_term(
     term: &Term,
     subst: &RegionSubst,
-    region_env: &HashMap<SymbolId, Type<TypeName>>,
+    region_env: &LookupMap<SymbolId, Type<TypeName>>,
 ) -> Option<Type<TypeName>> {
     if let Some(region @ Type::Constructed(TypeName::Region(_), _)) =
         apply_subst(&term.ty, subst).array_region().cloned()

@@ -13,10 +13,10 @@ use super::{Term, TermIdSource, TermKind};
 use crate::ast::{Span, TypeName};
 use crate::builtins::{catalog, BuiltinId};
 use crate::types::TypeExt;
+use crate::LookupSet;
 use crate::SymbolId;
 use crate::SymbolTable;
 use polytype::Type;
-use std::collections::HashSet;
 
 pub fn run(mut program: Program) -> Program {
     let mut term_ids = TermIdSource::new();
@@ -327,11 +327,11 @@ fn static_array_dims_match(result_ty: &Type<TypeName>) -> bool {
 fn branch_len_key(branch: &MapBranch) -> Option<LenKey> {
     let env: Vec<(SymbolId, &Term)> =
         branch.prefix.iter().map(|prefix| (prefix.name, &prefix.rhs)).collect();
-    array_expr_len_key(branch.inputs.first()?, &env, &mut HashSet::new())
+    array_expr_len_key(branch.inputs.first()?, &env, &mut LookupSet::new())
 }
 
 fn prefixes_can_be_hoisted(cond: &Term, then_map: &MapBranch, else_map: &MapBranch) -> bool {
-    let mut names = HashSet::new();
+    let mut names = LookupSet::new();
     for prefix in then_map.prefix.iter().chain(&else_map.prefix) {
         if !names.insert(prefix.name) {
             return false;
@@ -341,26 +341,26 @@ fn prefixes_can_be_hoisted(cond: &Term, then_map: &MapBranch, else_map: &MapBran
         return true;
     }
 
-    let mut cond_refs = HashSet::new();
+    let mut cond_refs = LookupSet::new();
     collect_symbol_refs(cond, &mut cond_refs);
     if names.iter().any(|name| cond_refs.contains(name)) {
         return false;
     }
 
-    let mut then_refs = HashSet::new();
+    let mut then_refs = LookupSet::new();
     for input in &then_map.inputs {
         collect_symbol_refs_array(input, &mut then_refs);
     }
     collect_symbol_refs_soac_body(&then_map.lam, &mut then_refs);
 
-    let mut else_refs = HashSet::new();
+    let mut else_refs = LookupSet::new();
     for input in &else_map.inputs {
         collect_symbol_refs_array(input, &mut else_refs);
     }
     collect_symbol_refs_soac_body(&else_map.lam, &mut else_refs);
 
-    let then_names: HashSet<_> = then_map.prefix.iter().map(|prefix| prefix.name).collect();
-    let else_names: HashSet<_> = else_map.prefix.iter().map(|prefix| prefix.name).collect();
+    let then_names: LookupSet<_> = then_map.prefix.iter().map(|prefix| prefix.name).collect();
+    let else_names: LookupSet<_> = else_map.prefix.iter().map(|prefix| prefix.name).collect();
     if then_names.iter().any(|name| else_refs.contains(name)) {
         return false;
     }
@@ -387,7 +387,7 @@ enum LenKey {
 fn array_expr_len_key(
     ae: &ArrayExpr,
     env: &[(SymbolId, &Term)],
-    resolving: &mut HashSet<SymbolId>,
+    resolving: &mut LookupSet<SymbolId>,
 ) -> Option<LenKey> {
     match ae {
         ArrayExpr::Ref(term) => term_array_len_key(term, env, resolving),
@@ -402,7 +402,7 @@ fn array_expr_len_key(
 fn term_array_len_key(
     term: &Term,
     env: &[(SymbolId, &Term)],
-    resolving: &mut HashSet<SymbolId>,
+    resolving: &mut LookupSet<SymbolId>,
 ) -> Option<LenKey> {
     if let Some(bound) = extract_iota_bound(term) {
         return len_key(&bound, env, resolving);
@@ -436,7 +436,7 @@ fn term_array_len_key(
     }
 }
 
-fn len_key(term: &Term, env: &[(SymbolId, &Term)], resolving: &mut HashSet<SymbolId>) -> Option<LenKey> {
+fn len_key(term: &Term, env: &[(SymbolId, &Term)], resolving: &mut LookupSet<SymbolId>) -> Option<LenKey> {
     match &term.kind {
         TermKind::IntLit(s) if s == "0" => Some(LenKey::Zero),
         TermKind::IntLit(s) => Some(LenKey::Int(s.clone())),
@@ -496,7 +496,7 @@ fn len_key_sub(
     lhs: &Term,
     rhs: &Term,
     env: &[(SymbolId, &Term)],
-    resolving: &mut HashSet<SymbolId>,
+    resolving: &mut LookupSet<SymbolId>,
 ) -> Option<LenKey> {
     let lhs = len_key(lhs, env, resolving)?;
     let rhs = len_key(rhs, env, resolving)?;
@@ -545,7 +545,7 @@ fn is_zero_term(term: &Term) -> bool {
     matches!(&term.kind, TermKind::IntLit(s) if s == "0")
 }
 
-fn collect_symbol_refs(term: &Term, out: &mut HashSet<SymbolId>) {
+fn collect_symbol_refs(term: &Term, out: &mut LookupSet<SymbolId>) {
     if let TermKind::Var(VarRef::Symbol(sym)) = &term.kind {
         out.insert(*sym);
     }
@@ -553,14 +553,14 @@ fn collect_symbol_refs(term: &Term, out: &mut HashSet<SymbolId>) {
     term.for_each_child(&mut |child| collect_symbol_refs(child, out));
 }
 
-fn collect_symbol_refs_soac_body(body: &SoacBody, out: &mut HashSet<SymbolId>) {
+fn collect_symbol_refs_soac_body(body: &SoacBody, out: &mut LookupSet<SymbolId>) {
     collect_symbol_refs(&body.lam.body, out);
     for (_, _, expr) in &body.captures {
         collect_symbol_refs(expr, out);
     }
 }
 
-fn collect_symbol_refs_array(ae: &ArrayExpr, out: &mut HashSet<SymbolId>) {
+fn collect_symbol_refs_array(ae: &ArrayExpr, out: &mut LookupSet<SymbolId>) {
     match ae {
         ArrayExpr::Ref(term) => collect_symbol_refs(term, out),
         ArrayExpr::Zip(items) => {
@@ -588,7 +588,7 @@ fn collect_symbol_refs_array(ae: &ArrayExpr, out: &mut HashSet<SymbolId>) {
     }
 }
 
-fn collect_symbol_refs_soac(soac: &SoacOp, out: &mut HashSet<SymbolId>) {
+fn collect_symbol_refs_soac(soac: &SoacOp, out: &mut LookupSet<SymbolId>) {
     match soac {
         SoacOp::Map { lam, inputs, .. } => {
             collect_symbol_refs_soac_body(lam, out);
@@ -670,7 +670,7 @@ fn collect_symbol_refs_soac(soac: &SoacOp, out: &mut HashSet<SymbolId>) {
     }
 }
 
-fn collect_symbol_refs_in_soac_places(term: &Term, out: &mut HashSet<SymbolId>) {
+fn collect_symbol_refs_in_soac_places(term: &Term, out: &mut LookupSet<SymbolId>) {
     if let TermKind::Soac(soac) = &term.kind {
         match soac {
             SoacOp::Scatter { dest, .. } | SoacOp::ReduceByIndex { dest, .. } => {
@@ -681,7 +681,7 @@ fn collect_symbol_refs_in_soac_places(term: &Term, out: &mut HashSet<SymbolId>) 
     }
 }
 
-fn collect_symbol_refs_place(place: &super::Place, out: &mut HashSet<SymbolId>) {
+fn collect_symbol_refs_place(place: &super::Place, out: &mut LookupSet<SymbolId>) {
     match place {
         super::Place::BufferSlice { base, offset, .. } => {
             collect_symbol_refs(base, out);

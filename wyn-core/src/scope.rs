@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use crate::LookupMap;
 
 /// What kind of identifier a scope entry represents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,7 +29,7 @@ pub struct ScopeEntry<T> {
 /// A single scope containing variable bindings
 #[derive(Debug, Clone)]
 pub struct Scope<T> {
-    bindings: HashMap<String, T>,
+    bindings: LookupMap<String, T>,
 }
 
 impl<T: Clone> Default for Scope<T> {
@@ -41,7 +41,7 @@ impl<T: Clone> Default for Scope<T> {
 impl<T: Clone> Scope<T> {
     pub fn new() -> Self {
         Scope {
-            bindings: HashMap::new(),
+            bindings: LookupMap::new(),
         }
     }
 

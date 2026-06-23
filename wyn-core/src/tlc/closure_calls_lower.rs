@@ -17,8 +17,8 @@
 use super::closure_convert::{CallableValue, ClosureInfo};
 use super::VarRef;
 use super::{ArrayExpr, Lambda, LoopKind, Program, SoacOp, Term, TermIdSource, TermKind};
+use crate::LookupMap;
 use crate::{SymbolId, SymbolTable};
-use std::collections::HashMap;
 
 #[derive(Debug)]
 pub enum ClosureCallsLowerError {
@@ -46,7 +46,7 @@ pub fn verify_closure_calls_lowered(program: &Program) -> Result<(), ClosureCall
     // catalog-derived arity for each builtin). Targets the catalog
     // doesn't know about are skipped — those are operator dispatch
     // helpers whose arity is enforced by the backend.
-    let arities: HashMap<SymbolId, usize> = program.defs.iter().map(|d| (d.name, d.arity)).collect();
+    let arities: LookupMap<SymbolId, usize> = program.defs.iter().map(|d| (d.name, d.arity)).collect();
     for def in &program.defs {
         walk(&def.body, def.name, &arities, &program.symbols)?;
     }
@@ -56,7 +56,7 @@ pub fn verify_closure_calls_lowered(program: &Program) -> Result<(), ClosureCall
 fn walk(
     term: &Term,
     def: SymbolId,
-    arities: &HashMap<SymbolId, usize>,
+    arities: &LookupMap<SymbolId, usize>,
     symbols: &SymbolTable,
 ) -> Result<(), ClosureCallsLowerError> {
     if let TermKind::App { func, args } = &term.kind {

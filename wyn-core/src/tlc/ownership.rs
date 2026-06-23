@@ -22,7 +22,7 @@ use super::VarRef;
 use crate::builtins::catalog;
 use crate::error::CompilerError;
 use crate::tlc::var_term_builtin_id;
-use std::collections::{HashMap, HashSet};
+use crate::{LookupMap, LookupSet};
 
 use crate::ast::{Span, TypeName};
 use crate::tlc::{
@@ -107,24 +107,24 @@ impl Origin {
 #[derive(Default, Debug)]
 pub struct OwnershipModel {
     /// SymbolId → OwnerId. Populated as bindings are visited.
-    pub var_to_owner: HashMap<SymbolId, OwnerId>,
+    pub var_to_owner: LookupMap<SymbolId, OwnerId>,
     /// First binder name for each owner — makes use-after-move error
     /// messages user-readable. Populated when an owner is created, never
     /// overwritten.
-    pub owner_to_var: HashMap<OwnerId, SymbolId>,
+    pub owner_to_var: LookupMap<OwnerId, SymbolId>,
     /// Per-owner provenance.
-    pub origins: HashMap<OwnerId, Origin>,
+    pub origins: LookupMap<OwnerId, Origin>,
     /// Per-term span — for error reporting.
-    pub term_spans: HashMap<TermId, Span>,
+    pub term_spans: LookupMap<TermId, Span>,
     /// Per-term: owners read here.
-    pub uses: HashMap<TermId, HashSet<OwnerId>>,
+    pub uses: LookupMap<TermId, LookupSet<OwnerId>>,
     /// Per-term: owners consumed/moved here (e.g. function arg with
     /// `*T` parameter type).
-    pub kills: HashMap<TermId, HashSet<OwnerId>>,
+    pub kills: LookupMap<TermId, LookupSet<OwnerId>>,
     /// Per-term: owners newly introduced here.
-    pub defs: HashMap<TermId, HashSet<OwnerId>>,
+    pub defs: LookupMap<TermId, LookupSet<OwnerId>>,
     /// Per-term: live-out set. Empty until liveness runs.
-    pub live_out: HashMap<TermId, HashSet<OwnerId>>,
+    pub live_out: LookupMap<TermId, LookupSet<OwnerId>>,
     /// Diagnostics detected during the build walk that don't fall
     /// out of the standard `kills ∩ live_out` check. Currently
     /// intra-call duplicate consumption (`f(arr, arr)` to two `*T`
@@ -274,7 +274,7 @@ impl<'p> Builder<'p> {
             TermKind::App { func, args } => {
                 self.visit_term(func);
                 let param_tys = collect_param_types(&func.ty, args.len());
-                let mut killed_this_call: HashSet<OwnerId> = HashSet::new();
+                let mut killed_this_call: LookupSet<OwnerId> = LookupSet::new();
                 for (arg, param_ty) in args.iter().zip(&param_tys) {
                     self.visit_term(arg);
                     if types::is_unique(param_ty) {
@@ -797,7 +797,7 @@ struct Liveness<'m> {
     model: &'m mut OwnershipModel,
 }
 
-type LiveSet = HashSet<OwnerId>;
+type LiveSet = LookupSet<OwnerId>;
 
 impl<'m> Liveness<'m> {
     fn analyze_def(&mut self, def: &Def) {
@@ -1143,7 +1143,8 @@ pub fn apply_ownership(mut program: Program) -> crate::error::Result<Program> {
     if let Some(err) = check_use_after_move(&program, &model) {
         return Err(err);
     }
-    let consuming_soacs: HashSet<TermId> = eligible_consuming_soacs(&program, &model).into_iter().collect();
+    let consuming_soacs: LookupSet<TermId> =
+        eligible_consuming_soacs(&program, &model).into_iter().collect();
 
     // Promotion of `array_with` → `array_with_inplace` is keyed by the
     // catalog (BuiltinId for the in-place form is looked up at the
@@ -1216,7 +1217,7 @@ fn check_use_after_move(program: &Program, model: &OwnershipModel) -> Option<Com
 struct Rewriter<'m> {
     model: &'m OwnershipModel,
     program: &'m Program,
-    consuming_soacs: &'m HashSet<TermId>,
+    consuming_soacs: &'m LookupSet<TermId>,
 }
 
 impl<'m> Rewriter<'m> {
@@ -1324,8 +1325,8 @@ pub fn eligible_consuming_soacs(program: &Program, model: &OwnershipModel) -> Ve
     out
 }
 
-fn collect_entry_output_soac_ids(program: &Program) -> HashSet<TermId> {
-    let mut out = HashSet::new();
+fn collect_entry_output_soac_ids(program: &Program) -> LookupSet<TermId> {
+    let mut out = LookupSet::new();
     for def in &program.defs {
         let entry = match &def.meta {
             DefMeta::EntryPoint(e) => e,
@@ -1345,7 +1346,7 @@ fn collect_entry_output_soac_ids(program: &Program) -> HashSet<TermId> {
     out
 }
 
-fn collect_tail_soac_ids(term: &Term, out: &mut HashSet<TermId>) {
+fn collect_tail_soac_ids(term: &Term, out: &mut LookupSet<TermId>) {
     match &term.kind {
         TermKind::Soac(_) => {
             out.insert(term.id);
@@ -1367,7 +1368,7 @@ fn walk_for_eligible_soacs(
     term: &Term,
     model: &OwnershipModel,
     program: &Program,
-    entry_output_soacs: &HashSet<TermId>,
+    entry_output_soacs: &LookupSet<TermId>,
     out: &mut Vec<TermId>,
 ) {
     match &term.kind {

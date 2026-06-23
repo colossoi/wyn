@@ -24,7 +24,7 @@
 //!    before the map is returned).
 
 use crate::ssa::framework::BlockId;
-use std::collections::{HashMap, HashSet};
+use crate::{LookupMap, LookupSet};
 
 use crate::ssa::types::ConstantValue;
 
@@ -46,8 +46,8 @@ pub fn run(inner: &mut EgirInner) {
 
 /// Run all enabled skeleton rewrites to fixpoint. Returns an alias map
 /// mapping stripped block-param NodeIds to their replacement NodeIds.
-pub fn run_one_body(graph: &mut EGraph) -> HashMap<NodeId, NodeId> {
-    let mut aliases: HashMap<NodeId, NodeId> = HashMap::new();
+pub fn run_one_body(graph: &mut EGraph) -> LookupMap<NodeId, NodeId> {
+    let mut aliases: LookupMap<NodeId, NodeId> = LookupMap::new();
     loop {
         // Phase order: fold first, prune dead CFG second, phi-elim third.
         // Folding can expose unreachable arms and shrink a
@@ -134,7 +134,7 @@ fn is_const_bool(nid: NodeId, nodes: &slotmap::SlotMap<NodeId, ENode>) -> Option
 /// The pure nodes and block-param nodes owned by dead blocks stay in the
 /// sea; with no reachable demand path to them, later stages ignore them.
 fn remove_unreachable_blocks(graph: &mut EGraph) -> bool {
-    let mut reachable: HashSet<BlockId> = HashSet::new();
+    let mut reachable: LookupSet<BlockId> = LookupSet::new();
     let mut stack = vec![graph.skeleton.entry];
     while let Some(bid) = stack.pop() {
         if !reachable.insert(bid) {
@@ -175,34 +175,35 @@ fn remove_unreachable_blocks(graph: &mut EGraph) -> bool {
 /// the `best` map. Hash-consing at intern time should have already
 /// dedup'd structurally-equal subtrees; mixing CFG rewriting with
 /// e-graph equivalence reasoning is where subtle bugs live.
-fn eliminate_redundant_params(graph: &mut EGraph) -> HashMap<NodeId, NodeId> {
+fn eliminate_redundant_params(graph: &mut EGraph) -> LookupMap<NodeId, NodeId> {
     use smallvec::SmallVec;
 
     // incoming[B][i] = every distinct NodeId passed into B.params[i] by
     // some predecessor branch terminator. We only need to know "is the
     // set of size 1?", so track up to two distinct values.
-    let mut incoming: HashMap<BlockId, Vec<SmallVec<[NodeId; 2]>>> = HashMap::new();
+    let mut incoming: LookupMap<BlockId, Vec<SmallVec<[NodeId; 2]>>> = LookupMap::new();
     for (bid, block) in &graph.skeleton.blocks {
         let mut per_param = Vec::with_capacity(block.params.len());
         per_param.resize(block.params.len(), SmallVec::<[NodeId; 2]>::new());
         incoming.insert(bid, per_param);
     }
 
-    let collect =
-        |target: BlockId, args: &[NodeId], incoming: &mut HashMap<BlockId, Vec<SmallVec<[NodeId; 2]>>>| {
-            let slots = incoming.get_mut(&target).expect("target in skeleton");
-            debug_assert_eq!(
-                slots.len(),
-                args.len(),
-                "arity mismatch at branch to {:?}",
-                target
-            );
-            for (i, &arg) in args.iter().enumerate() {
-                if !slots[i].contains(&arg) && slots[i].len() < 2 {
-                    slots[i].push(arg);
-                }
+    let collect = |target: BlockId,
+                   args: &[NodeId],
+                   incoming: &mut LookupMap<BlockId, Vec<SmallVec<[NodeId; 2]>>>| {
+        let slots = incoming.get_mut(&target).expect("target in skeleton");
+        debug_assert_eq!(
+            slots.len(),
+            args.len(),
+            "arity mismatch at branch to {:?}",
+            target
+        );
+        for (i, &arg) in args.iter().enumerate() {
+            if !slots[i].contains(&arg) && slots[i].len() < 2 {
+                slots[i].push(arg);
             }
-        };
+        }
+    };
 
     for (_bid, block) in &graph.skeleton.blocks {
         match &block.term {
@@ -225,8 +226,8 @@ fn eliminate_redundant_params(graph: &mut EGraph) -> HashMap<NodeId, NodeId> {
     // no predecessors and its params (when present) come from the source
     // function params, not from a branch.
     let entry = graph.skeleton.entry;
-    let mut redundant: HashMap<BlockId, Vec<(usize, NodeId)>> = HashMap::new();
-    let mut aliases: HashMap<NodeId, NodeId> = HashMap::new();
+    let mut redundant: LookupMap<BlockId, Vec<(usize, NodeId)>> = LookupMap::new();
+    let mut aliases: LookupMap<NodeId, NodeId> = LookupMap::new();
     for (bid, block) in &graph.skeleton.blocks {
         if bid == entry {
             continue;
@@ -359,7 +360,7 @@ fn check_branch_arity(graph: &EGraph) -> bool {
 /// of-truth closure is done by `close_aliases` after the last iteration
 /// of the fixpoint loop. Re-running closure on every iteration would be
 /// wasted work.
-fn merge_aliases(aliases: &mut HashMap<NodeId, NodeId>, new_aliases: HashMap<NodeId, NodeId>) {
+fn merge_aliases(aliases: &mut LookupMap<NodeId, NodeId>, new_aliases: LookupMap<NodeId, NodeId>) {
     for (_k, v) in aliases.iter_mut() {
         if let Some(&forwarded) = new_aliases.get(v) {
             *v = forwarded;
@@ -378,10 +379,10 @@ fn merge_aliases(aliases: &mut HashMap<NodeId, NodeId>, new_aliases: HashMap<Nod
 /// earlier in SSA order; cycles imply we tried to alias a
 /// live value to something that depends on itself). On detection we
 /// panic so the upstream bug surfaces loudly.
-fn close_aliases(aliases: &mut HashMap<NodeId, NodeId>) {
+fn close_aliases(aliases: &mut LookupMap<NodeId, NodeId>) {
     let keys: Vec<NodeId> = aliases.keys().copied().collect();
     for k in keys {
-        let mut visited: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+        let mut visited: LookupSet<NodeId> = LookupSet::new();
         visited.insert(k);
         let mut cur = aliases[&k];
         while let Some(&next) = aliases.get(&cur) {

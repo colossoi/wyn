@@ -8,9 +8,9 @@ use crate::error::Result;
 use crate::lexer;
 use crate::parser::Parser;
 use crate::scope::ScopeStack;
+use crate::StableMap;
 use crate::{bail_module, err_module, err_parse};
-use indexmap::IndexMap;
-use std::collections::{HashMap, HashSet};
+use crate::{LookupMap, LookupSet};
 
 /// Represents a single item in an elaborated module
 #[derive(Debug, Clone)]
@@ -50,47 +50,47 @@ pub struct FunctorModule {
 #[derive(Clone)]
 pub struct PreElaboratedPrelude {
     /// Module type registry: type name -> ModuleTypeExpression
-    pub module_type_registry: HashMap<String, ModuleTypeExpression>,
+    pub module_type_registry: LookupMap<String, ModuleTypeExpression>,
     /// Elaborated modules: module_name -> ElaboratedModule.
-    /// IndexMap to preserve insertion order (declaration order). Module
+    /// StableMap to preserve insertion order (declaration order). Module
     /// members are type-checked in this order, and a functor instance is
     /// always declared after its argument module — so declaration order is a
-    /// valid dependency order. A `HashMap` here randomizes it and makes
+    /// valid dependency order. A `LookupMap` here randomizes it and makes
     /// programs with functors compile or not depending on the run.
-    pub(crate) elaborated_modules: IndexMap<String, ElaboratedModule>,
+    pub(crate) elaborated_modules: StableMap<String, ElaboratedModule>,
     /// Set of known module names (for name resolution)
-    pub known_modules: HashSet<String>,
+    pub known_modules: LookupSet<String>,
     /// Type aliases from modules: "module.typename" -> underlying Type
-    pub type_aliases: HashMap<String, Type>,
+    pub type_aliases: LookupMap<String, Type>,
     /// Top-level prelude function declarations (auto-imported)
-    /// Uses IndexMap to preserve insertion order (file order) for proper type-checking
-    pub prelude_functions: IndexMap<String, Decl>,
+    /// Uses StableMap to preserve insertion order (file order) for proper type-checking
+    pub prelude_functions: StableMap<String, Decl>,
 }
 
 /// Manages lazy loading of module files
 pub struct ModuleManager {
     /// Module type registry: type name -> ModuleTypeExpression
-    module_type_registry: HashMap<String, ModuleTypeExpression>,
+    module_type_registry: LookupMap<String, ModuleTypeExpression>,
     /// Elaborated modules: module_name -> ElaboratedModule.
-    /// IndexMap to preserve insertion order (declaration order). Module
+    /// StableMap to preserve insertion order (declaration order). Module
     /// members are type-checked in this order, and a functor instance is
     /// always declared after its argument module — so declaration order is a
-    /// valid dependency order. A `HashMap` here randomizes it and makes
+    /// valid dependency order. A `LookupMap` here randomizes it and makes
     /// programs with functors compile or not depending on the run.
-    pub(crate) elaborated_modules: IndexMap<String, ElaboratedModule>,
+    pub(crate) elaborated_modules: StableMap<String, ElaboratedModule>,
     /// Functor modules: functor_name -> FunctorModule (unevaluated parameterized modules)
-    functor_modules: HashMap<String, FunctorModule>,
+    functor_modules: LookupMap<String, FunctorModule>,
     /// Set of known module names (for name resolution)
-    known_modules: HashSet<String>,
+    known_modules: LookupSet<String>,
     /// Type aliases from modules: "module.typename" -> underlying Type
-    type_aliases: HashMap<String, Type>,
+    type_aliases: LookupMap<String, Type>,
     /// Top-level prelude function declarations (auto-imported)
-    /// Uses IndexMap to preserve insertion order (file order) for proper type-checking
-    prelude_functions: IndexMap<String, Decl>,
+    /// Uses StableMap to preserve insertion order (file order) for proper type-checking
+    prelude_functions: StableMap<String, Decl>,
     /// Names of modules elaborated from a user program (`module foo = { ... }`
     /// declarations in the user's source), as opposed to the prelude /
     /// imported modules. Populated by `elaborate_modules`.
-    pub user_module_names: HashSet<String>,
+    pub user_module_names: LookupSet<String>,
 }
 
 impl ModuleManager {
@@ -111,13 +111,13 @@ impl ModuleManager {
         let known_modules = Self::BUILTIN_MODULES.iter().map(|s| s.to_string()).collect();
 
         ModuleManager {
-            module_type_registry: HashMap::new(),
-            elaborated_modules: IndexMap::new(),
-            functor_modules: HashMap::new(),
+            module_type_registry: LookupMap::new(),
+            elaborated_modules: StableMap::new(),
+            functor_modules: LookupMap::new(),
             known_modules,
-            type_aliases: HashMap::new(),
-            prelude_functions: IndexMap::new(),
-            user_module_names: HashSet::new(),
+            type_aliases: LookupMap::new(),
+            prelude_functions: StableMap::new(),
+            user_module_names: LookupSet::new(),
         }
     }
 
@@ -166,11 +166,11 @@ impl ModuleManager {
         ModuleManager {
             module_type_registry: prelude.module_type_registry,
             elaborated_modules: prelude.elaborated_modules,
-            functor_modules: HashMap::new(), // Prelude doesn't have functors
+            functor_modules: LookupMap::new(), // Prelude doesn't have functors
             known_modules: prelude.known_modules,
             type_aliases: prelude.type_aliases,
             prelude_functions: prelude.prelude_functions,
-            user_module_names: HashSet::new(),
+            user_module_names: LookupSet::new(),
         }
     }
 
@@ -241,20 +241,25 @@ impl ModuleManager {
                 let substitutions = if let Some(sig) = signature {
                     self.extract_substitutions(sig)?
                 } else {
-                    HashMap::new()
+                    LookupMap::new()
                 };
 
                 let mut items = Vec::new();
 
                 // Elaborate the module signature if it exists
                 if let Some(sig) = signature {
-                    let specs = self.elaborate_module_type(sig, &HashMap::new())?;
+                    let specs = self.elaborate_module_type(sig, &LookupMap::new())?;
                     items.extend(specs.into_iter().map(ElaboratedItem::Spec));
                 }
 
                 // Elaborate the module body
-                let body_items =
-                    self.elaborate_module_body(body, name, &substitutions, &HashMap::new(), node_counter)?;
+                let body_items = self.elaborate_module_body(
+                    body,
+                    name,
+                    &substitutions,
+                    &LookupMap::new(),
+                    node_counter,
+                )?;
                 items.extend(body_items);
 
                 // Add type aliases from `with` substitutions in the signature
@@ -337,8 +342,8 @@ impl ModuleManager {
 
     /// Extract type substitutions from a module signature
     /// e.g., (float with t = f32 with int_t = u32) -> {t: f32, int_t: u32}
-    fn extract_substitutions(&self, mte: &ModuleTypeExpression) -> Result<HashMap<String, Type>> {
-        let mut substitutions = HashMap::new();
+    fn extract_substitutions(&self, mte: &ModuleTypeExpression) -> Result<LookupMap<String, Type>> {
+        let mut substitutions = LookupMap::new();
         let mut current = mte;
 
         // Walk through nested With expressions
@@ -368,7 +373,7 @@ impl ModuleManager {
     fn elaborate_module_type(
         &self,
         mte: &ModuleTypeExpression,
-        substitutions: &HashMap<String, Type>,
+        substitutions: &LookupMap<String, Type>,
     ) -> Result<Vec<Spec>> {
         match mte {
             ModuleTypeExpression::Name(name) => {
@@ -416,7 +421,7 @@ impl ModuleManager {
     }
 
     /// Apply type substitutions to a spec
-    fn substitute_in_spec(&self, spec: &Spec, substitutions: &HashMap<String, Type>) -> Spec {
+    fn substitute_in_spec(&self, spec: &Spec, substitutions: &LookupMap<String, Type>) -> Spec {
         match spec {
             Spec::Sig(name, type_params, ty) => {
                 let substituted_ty = self.substitute_in_type(ty, substitutions);
@@ -449,7 +454,7 @@ impl ModuleManager {
     fn substitute_in_module_type_expr(
         &self,
         mte: &ModuleTypeExpression,
-        substitutions: &HashMap<String, Type>,
+        substitutions: &LookupMap<String, Type>,
     ) -> ModuleTypeExpression {
         match mte {
             ModuleTypeExpression::Name(_) => mte.clone(),
@@ -470,7 +475,7 @@ impl ModuleManager {
     }
 
     /// Apply type substitutions to a type
-    fn substitute_in_type(&self, ty: &Type, substitutions: &HashMap<String, Type>) -> Type {
+    fn substitute_in_type(&self, ty: &Type, substitutions: &LookupMap<String, Type>) -> Type {
         use crate::ast::TypeName;
 
         match ty {
@@ -637,12 +642,12 @@ impl ModuleManager {
     }
 
     /// Get mutable access to prelude functions for placeholder resolution
-    pub fn prelude_functions_mut(&mut self) -> &mut IndexMap<String, Decl> {
+    pub fn prelude_functions_mut(&mut self) -> &mut StableMap<String, Decl> {
         &mut self.prelude_functions
     }
 
     /// Get mutable access to elaborated modules for placeholder resolution
-    pub fn elaborated_modules_mut(&mut self) -> &mut IndexMap<String, ElaboratedModule> {
+    pub fn elaborated_modules_mut(&mut self) -> &mut StableMap<String, ElaboratedModule> {
         &mut self.elaborated_modules
     }
 
@@ -658,14 +663,14 @@ impl ModuleManager {
         &self,
         module_expr: &ModuleExpression,
         module_name: &str,
-        substitutions: &HashMap<String, Type>,
-        param_bindings: &HashMap<String, ElaboratedModule>,
+        substitutions: &LookupMap<String, Type>,
+        param_bindings: &LookupMap<String, ElaboratedModule>,
         node_counter: &mut NodeCounter,
     ) -> Result<Vec<ElaboratedItem>> {
         match module_expr {
             ModuleExpression::Struct(declarations) => {
                 // First pass: collect all function names in this module (for intra-module resolution)
-                let mut module_functions: HashSet<String> = HashSet::new();
+                let mut module_functions: LookupSet<String> = LookupSet::new();
                 for decl in declarations {
                     match decl {
                         Declaration::Decl(d) => {
@@ -840,9 +845,9 @@ impl ModuleManager {
         &self,
         decl: &Decl,
         module_name: &str,
-        module_functions: &HashSet<String>,
-        substitutions: &HashMap<String, Type>,
-        param_bindings: &HashMap<String, ElaboratedModule>,
+        module_functions: &LookupSet<String>,
+        substitutions: &LookupMap<String, Type>,
+        param_bindings: &LookupMap<String, ElaboratedModule>,
         node_counter: &mut NodeCounter,
     ) -> Decl {
         use crate::ast_renumber::{clone_expr_fresh_ids, clone_pattern_fresh_ids};
@@ -863,7 +868,7 @@ impl ModuleManager {
         let new_ty = decl.ty.as_ref().map(|ty| self.substitute_in_type(ty, substitutions));
 
         // Collect parameter names to avoid qualifying them as module functions
-        let param_names: HashSet<String> =
+        let param_names: LookupSet<String> =
             decl.params.iter().flat_map(|p| self.collect_pattern_names(p)).collect();
 
         // Resolve names in body (convert FieldAccess to QualifiedName, qualify intra-module refs)
@@ -910,7 +915,7 @@ impl ModuleManager {
     /// first via `clone_pattern_fresh_ids`; calling this directly on a
     /// source pattern reintroduces the cross-instance NodeId collision
     /// bug that motivated functor-instance ID freshening.
-    fn substitute_in_pattern(&self, pattern: &Pattern, substitutions: &HashMap<String, Type>) -> Pattern {
+    fn substitute_in_pattern(&self, pattern: &Pattern, substitutions: &LookupMap<String, Type>) -> Pattern {
         let new_kind = match &pattern.kind {
             PatternKind::Typed(inner, ty) => {
                 let new_inner = Box::new(self.substitute_in_pattern(inner, substitutions));
@@ -960,9 +965,9 @@ impl ModuleManager {
         &self,
         expr: &mut crate::ast::Expression,
         module_name: &str,
-        module_functions: &HashSet<String>,
-        local_bindings: &HashSet<String>,
-        param_bindings: &HashMap<String, ElaboratedModule>,
+        module_functions: &LookupSet<String>,
+        local_bindings: &LookupSet<String>,
+        param_bindings: &LookupMap<String, ElaboratedModule>,
     ) {
         // Seed a ScopeStack from the caller-provided locals so the shared
         // walker sees them as "visible locals that should shadow intra-module
@@ -992,9 +997,9 @@ impl ModuleManager {
 /// descent and scope bookkeeping.
 struct ModuleElaborationResolver<'a> {
     module_name: &'a str,
-    module_functions: &'a HashSet<String>,
-    param_bindings: &'a HashMap<String, ElaboratedModule>,
-    known_modules: &'a HashSet<String>,
+    module_functions: &'a LookupSet<String>,
+    param_bindings: &'a LookupMap<String, ElaboratedModule>,
+    known_modules: &'a LookupSet<String>,
 }
 
 impl<'a> crate::name_resolution::ResolveContext for ModuleElaborationResolver<'a> {

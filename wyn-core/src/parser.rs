@@ -3,6 +3,7 @@ use crate::error::Result;
 use crate::interface::{AttrExt, Attribute, EntryDecl, EntryOutput, StorageAccess, StorageLayout};
 use crate::lexer::{LocatedToken, Token};
 use crate::types;
+use crate::LookupMap;
 use crate::{bail_parse_at, err_parse, err_parse_at};
 use log::trace;
 use std::sync::OnceLock;
@@ -13,14 +14,14 @@ mod pattern;
 mod tests;
 
 // Lazily initialized type constructor maps
-static VECTOR_TYPES: OnceLock<std::collections::HashMap<String, Type>> = OnceLock::new();
-static MATRIX_TYPES: OnceLock<std::collections::HashMap<String, Type>> = OnceLock::new();
+static VECTOR_TYPES: OnceLock<LookupMap<String, Type>> = OnceLock::new();
+static MATRIX_TYPES: OnceLock<LookupMap<String, Type>> = OnceLock::new();
 
-fn get_vector_types() -> &'static std::collections::HashMap<String, Type> {
+fn get_vector_types() -> &'static LookupMap<String, Type> {
     VECTOR_TYPES.get_or_init(types::vector_type_constructors)
 }
 
-fn get_matrix_types() -> &'static std::collections::HashMap<String, Type> {
+fn get_matrix_types() -> &'static LookupMap<String, Type> {
     MATRIX_TYPES.get_or_init(types::matrix_type_constructors)
 }
 

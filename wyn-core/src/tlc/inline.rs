@@ -9,9 +9,9 @@ use super::{
     collect_var_refs, extract_lambda_params, term_size, Def, DefMeta, Program, Term, TermIdSource, TermKind,
 };
 use crate::ast::{Span, TypeName};
+use crate::{LookupMap, LookupSet};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
-use std::collections::{HashMap, HashSet};
 
 /// Maximum term size for a user function to be inlined.
 const INLINE_SIZE_THRESHOLD: usize = 30;
@@ -62,8 +62,8 @@ pub fn run_force_soac_helpers(mut program: Program) -> Program {
     program
 }
 
-fn build_soac_helper_candidates(program: &Program) -> HashMap<SymbolId, InlineBody> {
-    let mut candidates = HashMap::new();
+fn build_soac_helper_candidates(program: &Program) -> LookupMap<SymbolId, InlineBody> {
+    let mut candidates = LookupMap::new();
     for def in &program.defs {
         if !matches!(def.meta, DefMeta::Function) {
             continue;
@@ -160,8 +160,8 @@ fn is_length_intrinsic_call(term: &Term) -> bool {
     *id == crate::builtins::catalog().known().length
 }
 
-fn any_def_calls_candidate(program: &Program, candidates: &HashMap<SymbolId, InlineBody>) -> bool {
-    fn walk(term: &Term, cs: &HashMap<SymbolId, InlineBody>) -> bool {
+fn any_def_calls_candidate(program: &Program, candidates: &LookupMap<SymbolId, InlineBody>) -> bool {
+    fn walk(term: &Term, cs: &LookupMap<SymbolId, InlineBody>) -> bool {
         if let TermKind::App { func, .. } = &term.kind {
             if let TermKind::Var(VarRef::Symbol(s)) = &func.kind {
                 if cs.contains_key(s) {
@@ -291,8 +291,8 @@ struct InlineBody {
 /// - It has parameters (not a constant)
 /// - Its body is small (term_size ≤ threshold)
 /// - Its body has no control flow (If, Loop) or SOACs
-fn find_small_candidates(defs: &[Def], _symbols: &SymbolTable) -> HashMap<SymbolId, InlineBody> {
-    let mut candidates = HashMap::new();
+fn find_small_candidates(defs: &[Def], _symbols: &SymbolTable) -> LookupMap<SymbolId, InlineBody> {
+    let mut candidates = LookupMap::new();
 
     for def in defs {
         if !matches!(def.meta, DefMeta::Function) {
@@ -326,10 +326,10 @@ fn find_small_candidates(defs: &[Def], _symbols: &SymbolTable) -> HashMap<Symbol
 /// A constant is an arity-0, non-entry, non-extern function def.
 /// After monomorphization, the same constant name may be referenced through
 /// different SymbolIds, so we index by name as well as by def SymbolId.
-fn find_all_constants(program: &Program) -> HashMap<SymbolId, Term> {
+fn find_all_constants(program: &Program) -> LookupMap<SymbolId, Term> {
     // Find the canonical constant defs.
-    let mut by_sym: HashMap<SymbolId, Term> = HashMap::new();
-    let mut by_name: HashMap<String, Term> = HashMap::new();
+    let mut by_sym: LookupMap<SymbolId, Term> = LookupMap::new();
+    let mut by_name: LookupMap<String, Term> = LookupMap::new();
 
     for def in &program.defs {
         if !matches!(def.meta, DefMeta::Function) {
@@ -381,7 +381,7 @@ fn has_control_flow(term: &Term) -> bool {
 }
 
 /// Replace `Var(sym)` references with the constant body when `sym` is a constant candidate.
-fn inline_constants(term: Term, constants: &HashMap<SymbolId, Term>) -> Term {
+fn inline_constants(term: Term, constants: &LookupMap<SymbolId, Term>) -> Term {
     let term = term.map_children(&mut |child| inline_constants(child, constants));
 
     if let TermKind::Var(VarRef::Symbol(sym)) = &term.kind {
@@ -396,8 +396,8 @@ fn inline_constants(term: Term, constants: &HashMap<SymbolId, Term>) -> Term {
 /// Determine which defs are candidates for inlining.
 /// Inlines all `DefMeta::LiftedLambda` defs — closure_convert-produced lifted
 /// lambdas that we're putting back where they came from.
-fn find_inline_candidates(defs: &[Def], _symbols: &SymbolTable) -> HashMap<SymbolId, InlineBody> {
-    let mut candidates = HashMap::new();
+fn find_inline_candidates(defs: &[Def], _symbols: &SymbolTable) -> LookupMap<SymbolId, InlineBody> {
+    let mut candidates = LookupMap::new();
 
     for def in defs {
         if !matches!(def.meta, DefMeta::LiftedLambda) {
@@ -431,7 +431,7 @@ fn find_inline_candidates(defs: &[Def], _symbols: &SymbolTable) -> HashMap<Symbo
 /// SOAC lambda bodies are bare Var refs to lifted defs after defunctionalization,
 /// so recursing into them via map_children is harmless — the inline rewrite only
 /// fires on fully-saturated App nodes matching candidates.
-fn inline_term(term: Term, candidates: &HashMap<SymbolId, InlineBody>, ids: &mut TermIdSource) -> Term {
+fn inline_term(term: Term, candidates: &LookupMap<SymbolId, InlineBody>, ids: &mut TermIdSource) -> Term {
     let term = term.map_children(&mut |child| inline_term(child, candidates, ids));
 
     // Only App nodes can be inline sites.
@@ -596,7 +596,7 @@ fn substitute_sym_and_retype(
 /// - All entry points and their transitive dependencies
 /// - Extern defs (linked SPIR-V functions, needed even if not directly referenced)
 pub fn dead_code_eliminate(defs: Vec<Def>) -> Vec<Def> {
-    let mut reachable: HashSet<SymbolId> = HashSet::new();
+    let mut reachable: LookupSet<SymbolId> = LookupSet::new();
     let mut worklist: Vec<SymbolId> = Vec::new();
 
     // Seed with entry points and extern defs.
@@ -609,7 +609,7 @@ pub fn dead_code_eliminate(defs: Vec<Def>) -> Vec<Def> {
         }
     }
 
-    let def_map: HashMap<SymbolId, &Def> = defs.iter().map(|d| (d.name, d)).collect();
+    let def_map: LookupMap<SymbolId, &Def> = defs.iter().map(|d| (d.name, d)).collect();
 
     while let Some(sym) = worklist.pop() {
         if let Some(def) = def_map.get(&sym) {

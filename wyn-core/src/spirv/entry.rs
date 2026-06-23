@@ -7,7 +7,7 @@ use super::*;
 pub(super) fn lower_ssa_entry_point(
     constructor: &mut Constructor,
     entry: &EntryPoint,
-    written_bindings: &HashSet<BindingRef>,
+    written_bindings: &LookupSet<BindingRef>,
 ) -> Result<()> {
     let body = &entry.body;
     let is_compute = matches!(entry.execution_model, ExecutionModel::Compute { .. });

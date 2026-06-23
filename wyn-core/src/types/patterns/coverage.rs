@@ -21,6 +21,7 @@
 
 use crate::ast::{self, PatternKind, PatternLiteral, Span};
 use crate::types::{Type, TypeName};
+use crate::LookupSet;
 
 /// Pattern in coverage form. AST `Typed`/`Attributed` are stripped
 /// (delegated to inner). `Name` collapses to `Wild` — name bindings
@@ -567,8 +568,8 @@ fn reassemble_record(field_names: &[String], witness: Vec<CovPat>) -> Vec<CovPat
 
 /// Quick lookup table for which head shapes appear in the first column.
 struct Heads {
-    ctors: std::collections::HashSet<String>,
-    lits: std::collections::HashSet<CovLit>,
+    ctors: LookupSet<String>,
+    lits: LookupSet<CovLit>,
     has_unit: bool,
     has_wild: bool,
 }

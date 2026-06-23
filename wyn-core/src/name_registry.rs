@@ -3,7 +3,8 @@
 //! Collects all top-level names from every source (builtins, modules, prelude,
 //! user code) into a single `BTreeMap` for deterministic SymbolId assignment.
 
-use std::collections::{BTreeMap, HashSet};
+use crate::LookupSet;
+use std::collections::BTreeMap;
 
 use crate::ast;
 use crate::module_manager;
@@ -114,8 +115,8 @@ impl NameRegistry {
         self.names.iter().map(|(k, v)| (k.as_str(), *v))
     }
 
-    /// Collect every registered name into an owned `HashSet`.
-    pub fn name_set(&self) -> HashSet<String> {
+    /// Collect every registered name into an owned `LookupSet`.
+    pub fn name_set(&self) -> LookupSet<String> {
         self.names.keys().cloned().collect()
     }
 }

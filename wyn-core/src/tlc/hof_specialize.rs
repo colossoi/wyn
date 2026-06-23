@@ -18,9 +18,9 @@ use super::{
     ArrayExpr, Def, DefMeta, Lambda, LoopKind, Place, Program, SoacOp, Term, TermIdSource, TermKind,
 };
 use crate::ast::{Span, TypeName};
+use crate::{LookupMap, LookupSet};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
-use std::collections::{HashMap, HashSet};
 
 // =============================================================================
 // Verifier
@@ -97,8 +97,8 @@ pub(super) fn extract_param_types(ty: &Type<TypeName>) -> Vec<Type<TypeName>> {
 }
 
 /// Detect which definitions are HOFs (have function-typed parameters).
-pub(super) fn detect_hofs(defs: &[Def]) -> HashMap<SymbolId, HofInfo> {
-    let mut hof_info = HashMap::new();
+pub(super) fn detect_hofs(defs: &[Def]) -> LookupMap<SymbolId, HofInfo> {
+    let mut hof_info = LookupMap::new();
     for def in defs {
         let param_types = extract_param_types(&def.ty);
         let func_param_indices: Vec<usize> =
@@ -123,7 +123,7 @@ pub(super) fn detect_hofs(defs: &[Def]) -> HashMap<SymbolId, HofInfo> {
 // Used by the specialization pass to clone a HOF body and rewrite it for
 // the concrete types the call site supplies.
 
-pub(super) type TypeSubst = HashMap<polytype::Variable, Type<TypeName>>;
+pub(super) type TypeSubst = LookupMap<polytype::Variable, Type<TypeName>>;
 
 /// Build a type substitution by unifying a polymorphic type with a concrete type.
 pub(super) fn build_type_subst(
@@ -925,22 +925,22 @@ fn substitute_var_array_expr(
 
 struct HofSpecializer<'a> {
     symbols: SymbolTable,
-    top_level: HashSet<SymbolId>,
+    top_level: LookupSet<SymbolId>,
     closure_info: &'a ClosureInfo,
-    hof_info: HashMap<SymbolId, HofInfo>,
+    hof_info: LookupMap<SymbolId, HofInfo>,
     specialized_defs: Vec<Def>,
-    specialization_cache: HashMap<(SymbolId, SymbolId, Vec<String>), SymbolId>,
+    specialization_cache: LookupMap<(SymbolId, SymbolId, Vec<String>), SymbolId>,
     /// Cache: `(lifted_def_sym, [callable_sym at each callable-cap slot])`
     /// → specialized lifted def sym. Keyed by the lifted def we're cloning
     /// plus the resolved callables that flow into its callable-typed
     /// captures, so a second SoacBody asking for the same specialization
     /// reuses the variant instead of minting another.
-    closure_spec_cache: HashMap<(SymbolId, Vec<SymbolId>), SymbolId>,
+    closure_spec_cache: LookupMap<(SymbolId, Vec<SymbolId>), SymbolId>,
     /// Lookup by sym for every def the cascade may need to clone — built
     /// once after the main loop from `transformed + specialized_defs`,
     /// then read-only during cascade. New cascade-specialized defs are
     /// added back in.
-    defs_by_sym: HashMap<SymbolId, Def>,
+    defs_by_sym: LookupMap<SymbolId, Def>,
     specialization_counter: usize,
     term_ids: TermIdSource,
 }
@@ -948,7 +948,7 @@ struct HofSpecializer<'a> {
 impl<'a> HofSpecializer<'a> {
     fn run(program: Program, closure_info: &'a ClosureInfo) -> Program {
         let hof_info = detect_hofs(&program.defs);
-        let top_level: HashSet<SymbolId> = program.defs.iter().map(|d| d.name).collect();
+        let top_level: LookupSet<SymbolId> = program.defs.iter().map(|d| d.name).collect();
 
         let mut hs = Self {
             symbols: program.symbols,
@@ -956,9 +956,9 @@ impl<'a> HofSpecializer<'a> {
             closure_info,
             hof_info,
             specialized_defs: vec![],
-            specialization_cache: HashMap::new(),
-            closure_spec_cache: HashMap::new(),
-            defs_by_sym: HashMap::new(),
+            specialization_cache: LookupMap::new(),
+            closure_spec_cache: LookupMap::new(),
+            defs_by_sym: LookupMap::new(),
             specialization_counter: 0,
             term_ids: TermIdSource::new(),
         };
@@ -1574,7 +1574,7 @@ impl<'a> HofSpecializer<'a> {
             .clone();
         let (params, inner_body) = super::extract_lambda_params(&lifted_def.body);
 
-        let drop_set: HashSet<SymbolId> = callable_indices.iter().map(|&i| captures[i].0).collect();
+        let drop_set: LookupSet<SymbolId> = callable_indices.iter().map(|&i| captures[i].0).collect();
         let mut new_body = inner_body.clone();
         for (k, &i) in callable_indices.iter().enumerate() {
             let local_sym = captures[i].0;

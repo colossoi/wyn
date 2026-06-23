@@ -6,6 +6,7 @@
 //! the wyn-core elaborator needs.
 
 use crate::ast::{Span, TypeName};
+use crate::LookupMap;
 use polytype::Type;
 
 use super::types::{
@@ -19,7 +20,7 @@ pub type BuilderError = crate::ssa::framework::BuilderError;
 /// Builder for constructing SSA functions.
 pub struct FuncBuilder {
     inner: crate::ssa::framework::FuncBuilder<InstKind, Type<TypeName>>,
-    control_headers: std::collections::HashMap<BlockId, ControlHeader>,
+    control_headers: LookupMap<BlockId, ControlHeader>,
     params: Vec<(ValueId, Type<TypeName>, String)>,
     return_ty: Type<TypeName>,
     dps_output: Option<ValueId>,
@@ -40,7 +41,7 @@ impl FuncBuilder {
 
         FuncBuilder {
             inner,
-            control_headers: std::collections::HashMap::new(),
+            control_headers: LookupMap::new(),
             params: func_params,
             return_ty,
             dps_output: None,

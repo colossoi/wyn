@@ -21,7 +21,7 @@
 //! producer and wreck the program's cost semantics. This is the same
 //! nested-vs-tail line `array_semantics::analyze_body` draws.
 
-use std::collections::HashMap;
+use crate::LookupMap;
 
 use polytype::Type;
 
@@ -56,7 +56,7 @@ pub fn run(mut program: Program) -> Program {
     // SOAC — `ResultSemantics::Produces`. The summary's tail-isolation is what
     // keeps per-element-internal SOACs (whose tail is the outer `map`) from
     // counting, so we never materialize a genuinely-nested SOAC.
-    let producers: HashMap<SymbolId, Producer> = program
+    let producers: LookupMap<SymbolId, Producer> = program
         .defs
         .iter()
         .filter(|d| matches!(d.meta, DefMeta::Function) && !matches!(d.body.kind, TermKind::Extern(_)))
@@ -104,8 +104,8 @@ pub fn run(mut program: Program) -> Program {
 /// operator bodies.
 fn expose(
     term: Term,
-    producers: &HashMap<SymbolId, Producer>,
-    sym_to_def: &HashMap<SymbolId, SymbolId>,
+    producers: &LookupMap<SymbolId, Producer>,
+    sym_to_def: &LookupMap<SymbolId, SymbolId>,
     ids: &mut TermIdSource,
     depth: usize,
 ) -> Term {
@@ -270,8 +270,8 @@ fn expose(
 /// SOAC operands or lambdas.
 fn expose_array_expr(
     ae: ArrayExpr,
-    producers: &HashMap<SymbolId, Producer>,
-    sym_to_def: &HashMap<SymbolId, SymbolId>,
+    producers: &LookupMap<SymbolId, Producer>,
+    sym_to_def: &LookupMap<SymbolId, SymbolId>,
     ids: &mut TermIdSource,
     depth: usize,
 ) -> ArrayExpr {
@@ -302,8 +302,8 @@ fn expose_array_expr(
 
 fn maybe_inline(
     term: Term,
-    producers: &HashMap<SymbolId, Producer>,
-    sym_to_def: &HashMap<SymbolId, SymbolId>,
+    producers: &LookupMap<SymbolId, Producer>,
+    sym_to_def: &LookupMap<SymbolId, SymbolId>,
     ids: &mut TermIdSource,
     depth: usize,
 ) -> Term {
@@ -315,8 +315,8 @@ fn maybe_inline(
 
 fn inline_if_producer(
     term: &Term,
-    producers: &HashMap<SymbolId, Producer>,
-    sym_to_def: &HashMap<SymbolId, SymbolId>,
+    producers: &LookupMap<SymbolId, Producer>,
+    sym_to_def: &LookupMap<SymbolId, SymbolId>,
     ids: &mut TermIdSource,
     depth: usize,
 ) -> Option<Term> {

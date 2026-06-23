@@ -39,9 +39,9 @@ use crate::error::CompilerError;
 use crate::interface;
 use crate::name_resolution::{NameResolution, ResolvedValueRef, SoacKind};
 use crate::types::TypeExt;
+use crate::LookupMap;
 use crate::{BindingRef, SymbolId, SymbolTable, TypeTable};
 use polytype::Type;
-use std::collections::HashMap;
 
 // =============================================================================
 // Helper functions
@@ -718,7 +718,7 @@ pub struct Program {
     pub symbols: SymbolTable,
     /// Canonical function name → def SymbolId mapping.
     /// Used by fusion to resolve call-site SymbolIds to def SymbolIds.
-    pub def_syms: HashMap<String, SymbolId>,
+    pub def_syms: LookupMap<String, SymbolId>,
 }
 
 impl Program {
@@ -735,7 +735,7 @@ impl Program {
     /// hoisted to program scope as pure constants, and the resolution target
     /// when a downstream `Var(sym)` reference has lost its symbol context and
     /// needs to look the def up by name.
-    pub fn value_defs_by_name(&self) -> HashMap<String, SymbolId> {
+    pub fn value_defs_by_name(&self) -> LookupMap<String, SymbolId> {
         self.defs
             .iter()
             .filter(|d| d.arity == 0 && matches!(&d.meta, DefMeta::Function))
@@ -753,7 +753,7 @@ pub struct ProgramParts {
 
 impl ProgramParts {
     /// Combine with a symbol table to create a complete Program.
-    pub fn with_symbols(self, symbols: SymbolTable, def_syms: HashMap<String, SymbolId>) -> Program {
+    pub fn with_symbols(self, symbols: SymbolTable, def_syms: LookupMap<String, SymbolId>) -> Program {
         Program {
             defs: self.defs,
             symbols,
@@ -1357,7 +1357,7 @@ pub(super) struct SumLayout {
     pub(super) slot_types: Vec<Type<TypeName>>,
     /// For each constructor name: its tag value (source-order index)
     /// and the starting slot index of its payload in `slot_types`.
-    pub(super) constructor_info: std::collections::HashMap<String, (u32, usize)>,
+    pub(super) constructor_info: LookupMap<String, (u32, usize)>,
 }
 
 /// Context for transforming AST to TLC.
@@ -1367,11 +1367,11 @@ pub struct Transformer<'a> {
     /// Shared symbol table: maps SymbolId to original name (for errors/debugging).
     symbols: &'a mut SymbolTable,
     /// Current scope for name resolution: maps string name to SymbolId.
-    scope: HashMap<String, SymbolId>,
+    scope: LookupMap<String, SymbolId>,
     /// Top-level symbols that persist across function transformations.
     /// This ensures function references use the same SymbolId as the Def.
     /// Shared across all transformers via mutable reference.
-    top_level_symbols: &'a mut HashMap<String, SymbolId>,
+    top_level_symbols: &'a mut LookupMap<String, SymbolId>,
     /// Side table from name resolution: AST NodeId → BuiltinId for
     /// catalog-resolved identifiers. Lets `Var`-position idents be
     /// classified as `VarRef::Builtin(id)` directly without round-
@@ -1401,7 +1401,7 @@ impl<'a> Transformer<'a> {
     pub fn new(
         type_table: &'a TypeTable,
         symbols: &'a mut SymbolTable,
-        top_level_symbols: &'a mut HashMap<String, SymbolId>,
+        top_level_symbols: &'a mut LookupMap<String, SymbolId>,
         name_resolution: &'a NameResolution,
         fill_holes: bool,
         fill_hole_errors: &'a mut Vec<CompilerError>,
@@ -1411,7 +1411,7 @@ impl<'a> Transformer<'a> {
             type_table,
             term_ids: TermIdSource::new(),
             symbols,
-            scope: HashMap::new(),
+            scope: LookupMap::new(),
             top_level_symbols,
             name_resolution,
             namespace: None,
@@ -1425,7 +1425,7 @@ impl<'a> Transformer<'a> {
     pub fn with_namespace(
         type_table: &'a TypeTable,
         symbols: &'a mut SymbolTable,
-        top_level_symbols: &'a mut HashMap<String, SymbolId>,
+        top_level_symbols: &'a mut LookupMap<String, SymbolId>,
         name_resolution: &'a NameResolution,
         namespace: &str,
         fill_holes: bool,
@@ -1436,7 +1436,7 @@ impl<'a> Transformer<'a> {
             type_table,
             term_ids: TermIdSource::new(),
             symbols,
-            scope: HashMap::new(),
+            scope: LookupMap::new(),
             top_level_symbols,
             name_resolution,
             namespace: Some(namespace.to_string()),
@@ -1897,7 +1897,7 @@ impl<'a> Transformer<'a> {
 
             ast::ExprKind::RecordLiteral(fields) => {
                 // Records are tuples - reorder fields to match type's field order
-                let field_map: HashMap<&str, &ast::Expression> =
+                let field_map: LookupMap<&str, &ast::Expression> =
                     fields.iter().map(|(name, expr)| (name.as_str(), expr)).collect();
 
                 let ordered_exprs: Vec<ast::Expression> = match &ty {
@@ -3324,7 +3324,7 @@ impl<'a> Transformer<'a> {
     pub(super) fn sum_layout(variants: &[(String, Vec<Type<TypeName>>)]) -> SumLayout {
         let tag_ty = Type::Constructed(TypeName::UInt(32), vec![]);
         let mut slot_types = vec![tag_ty];
-        let mut constructor_info = std::collections::HashMap::new();
+        let mut constructor_info = LookupMap::new();
         for (i, (name, payload)) in variants.iter().enumerate() {
             constructor_info.insert(name.clone(), (i as u32, slot_types.len()));
             for p in payload {

@@ -12,9 +12,9 @@
 use crate::ast::{self, PatternKind, Span, TypeName};
 use crate::tlc::{PendingBinding, Term, TermKind, Transformer, VarRef};
 use crate::types::TypeExt;
+use crate::LookupMap;
 use crate::SymbolId;
 use polytype::Type;
-use std::collections::HashMap;
 
 impl<'a> Transformer<'a> {
     /// Top-level entry: compute the binding plan for a pattern against
@@ -323,12 +323,12 @@ impl<'a> Transformer<'a> {
     pub(in crate::tlc) fn extract_record_types(
         &self,
         ty: &Type<TypeName>,
-    ) -> HashMap<String, Type<TypeName>> {
+    ) -> LookupMap<String, Type<TypeName>> {
         match ty {
             Type::Constructed(TypeName::Record(fields), args) => {
                 fields.iter().cloned().zip(args.iter().cloned()).collect()
             }
-            _ => HashMap::new(),
+            _ => LookupMap::new(),
         }
     }
 }

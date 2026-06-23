@@ -10,7 +10,7 @@
 //! - `is_in_loop(b, header)` — is block `b` inside the loop rooted at `header`?
 
 use crate::ssa::framework::BlockId;
-use std::collections::{HashMap, HashSet};
+use crate::{LookupMap, LookupSet};
 
 use crate::ssa::types::ControlHeader;
 
@@ -18,12 +18,12 @@ use super::types::{Skeleton, SkeletonTerminator};
 
 pub struct LoopAnalysis {
     /// All blocks inside each loop (key = loop header).
-    bodies: HashMap<BlockId, HashSet<BlockId>>,
+    bodies: LookupMap<BlockId, LookupSet<BlockId>>,
 }
 
 impl LoopAnalysis {
-    pub fn build(skeleton: &Skeleton, control_headers: &HashMap<BlockId, ControlHeader>) -> Self {
-        let mut bodies: HashMap<BlockId, HashSet<BlockId>> = HashMap::new();
+    pub fn build(skeleton: &Skeleton, control_headers: &LookupMap<BlockId, ControlHeader>) -> Self {
+        let mut bodies: LookupMap<BlockId, LookupSet<BlockId>> = LookupMap::new();
 
         // Collect every header and DFS its body, stopping at `merge`.
         for (&header, ch) in control_headers {
@@ -49,8 +49,8 @@ impl LoopAnalysis {
 
 /// DFS the skeleton from `header`, stopping at `merge`. The header itself
 /// is included; `merge` is not.
-fn collect_loop_body(skeleton: &Skeleton, header: BlockId, merge: BlockId) -> HashSet<BlockId> {
-    let mut body = HashSet::new();
+fn collect_loop_body(skeleton: &Skeleton, header: BlockId, merge: BlockId) -> LookupSet<BlockId> {
+    let mut body = LookupSet::new();
     let mut stack = vec![header];
     while let Some(b) = stack.pop() {
         if b == merge || !body.insert(b) {

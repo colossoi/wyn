@@ -9,7 +9,7 @@ pub mod checker;
 pub mod patterns;
 pub mod run;
 
-use std::collections::HashMap;
+use crate::LookupMap;
 
 /// Map a swizzle letter to its component index. Supports both the
 /// `xyzw` (position) and `rgba` (color) sets, following WGSL — `r`/`g`/
@@ -814,8 +814,8 @@ pub fn vec(size: usize, element_type: Type) -> Type {
 }
 
 /// Generate all vector type constructors using cartesian product of sizes and element types
-/// Returns a HashMap mapping names like "vec2f32", "vec3i32", "vec4bool" to their Type representations
-pub fn vector_type_constructors() -> HashMap<String, Type> {
+/// Returns a LookupMap mapping names like "vec2f32", "vec3i32", "vec4bool" to their Type representations
+pub fn vector_type_constructors() -> LookupMap<String, Type> {
     use itertools::Itertools;
 
     let sizes = [2, 3, 4];
@@ -852,8 +852,8 @@ pub fn mat(rows: usize, cols: usize, elem_type: Type) -> Type {
 }
 
 /// Generate all matrix type constructors using cartesian product of dimensions and element types
-/// Returns a HashMap mapping names like "mat2f32", "mat3x4i32" to their Type representations
-pub fn matrix_type_constructors() -> HashMap<String, Type> {
+/// Returns a LookupMap mapping names like "mat2f32", "mat3x4i32" to their Type representations
+pub fn matrix_type_constructors() -> LookupMap<String, Type> {
     use itertools::Itertools;
 
     let dims = [2, 3, 4];

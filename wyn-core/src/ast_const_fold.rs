@@ -22,12 +22,12 @@ use crate::ast::{
     RangeExpr, Type, TypeName,
 };
 use crate::interface::EntryDecl;
-use std::collections::HashMap;
+use crate::LookupMap;
 
 /// AST-level constant folder for integer constants.
 pub struct AstConstFolder {
     /// Known integer constants: name → value
-    constants: HashMap<String, i64>,
+    constants: LookupMap<String, i64>,
 }
 
 impl AstConstFolder {
@@ -47,7 +47,7 @@ impl Default for AstConstFolder {
 impl AstConstFolder {
     pub fn new() -> Self {
         Self {
-            constants: HashMap::new(),
+            constants: LookupMap::new(),
         }
     }
 

@@ -2,7 +2,7 @@
 //! parallelization phases that synthesize extra compute entries (phase
 //! 2 / phase 3 of the Screma transform).
 
-use std::collections::HashMap;
+use crate::LookupMap;
 
 use polytype::Type;
 use smallvec::smallvec;
@@ -23,7 +23,7 @@ use crate::ssa::types::{EntryInput, EntryOutput};
 /// TLC-side state.
 pub struct EntryBuilder {
     graph: EGraph,
-    control_headers: HashMap<BlockId, ControlHeader>,
+    control_headers: LookupMap<BlockId, ControlHeader>,
     current_block: BlockId,
     name: String,
     span: Span,
@@ -44,7 +44,7 @@ impl EntryBuilder {
         let entry = graph.skeleton.entry;
         EntryBuilder {
             graph,
-            control_headers: HashMap::new(),
+            control_headers: LookupMap::new(),
             current_block: entry,
             name,
             span: Span::new(0, 0, 0, 0),
@@ -99,7 +99,7 @@ impl EntryBuilder {
     /// Mutable access to the control-header map — used when hand-building
     /// structured control flow (loops / selections) directly on the graph,
     /// e.g. the workgroup-parallel phase2 tree reduce.
-    pub fn control_headers_mut(&mut self) -> &mut HashMap<BlockId, ControlHeader> {
+    pub fn control_headers_mut(&mut self) -> &mut LookupMap<BlockId, ControlHeader> {
         &mut self.control_headers
     }
 

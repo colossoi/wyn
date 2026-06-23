@@ -9,8 +9,9 @@
 //! in downstream SOAC inputs create edges.
 
 use super::VarRef;
+use crate::LookupMap;
+use crate::LookupSet;
 use crate::SymbolTable;
-use std::collections::HashMap;
 
 use super::array_semantics::{classify_term, ArraySemantics, FunctionSummary, ResultSemantics};
 use super::fusion::substitute_sym;
@@ -57,7 +58,7 @@ pub struct ProducerGraph {
     nodes: Vec<ProducerNode>,
     edges: Vec<ProducerEdge>,
     /// Map from let-bound SymbolId to the ProducerId that produces it.
-    binding_map: HashMap<SymbolId, ProducerId>,
+    binding_map: LookupMap<SymbolId, ProducerId>,
 }
 
 impl ProducerGraph {
@@ -107,13 +108,13 @@ impl ProducerGraph {
 /// rather than O(graph size + symbol table size).
 pub fn build_producer_graph(
     body: &Term,
-    summaries: &HashMap<SymbolId, FunctionSummary>,
-    sym_to_def: &HashMap<SymbolId, SymbolId>,
+    summaries: &LookupMap<SymbolId, FunctionSummary>,
+    sym_to_def: &LookupMap<SymbolId, SymbolId>,
 ) -> ProducerGraph {
     let mut builder = GraphBuilder {
         nodes: Vec::new(),
         edges: Vec::new(),
-        binding_map: HashMap::new(),
+        binding_map: LookupMap::new(),
         summaries,
         sym_to_def,
         term_ids: TermIdSource::new(),
@@ -132,12 +133,12 @@ pub fn build_producer_graph(
 struct GraphBuilder<'a> {
     nodes: Vec<ProducerNode>,
     edges: Vec<ProducerEdge>,
-    binding_map: HashMap<SymbolId, ProducerId>,
-    summaries: &'a HashMap<SymbolId, FunctionSummary>,
+    binding_map: LookupMap<SymbolId, ProducerId>,
+    summaries: &'a LookupMap<SymbolId, FunctionSummary>,
     /// Resolves call-site SymbolIds to canonical def SymbolIds for summary
     /// lookup. Borrowed from the fusion pass's `FusionContext` so the map
     /// is built once per outer iteration, not once per graph build.
-    sym_to_def: &'a HashMap<SymbolId, SymbolId>,
+    sym_to_def: &'a LookupMap<SymbolId, SymbolId>,
     term_ids: TermIdSource,
 }
 
@@ -183,7 +184,7 @@ impl<'a> GraphBuilder<'a> {
         call_args: &[Term],
     ) -> ArraySemantics {
         // Build a param_sym → arg_sym mapping
-        let param_to_arg: HashMap<SymbolId, SymbolId> = summary_params
+        let param_to_arg: LookupMap<SymbolId, SymbolId> = summary_params
             .iter()
             .zip(call_args)
             .filter_map(|((param_sym, _), arg)| {
@@ -272,9 +273,9 @@ impl<'a> GraphBuilder<'a> {
     /// the SOAC edge, drop its let-binding, and leave the non-SOAC
     /// reference dangling.
     fn compute_use_counts(&mut self, body: &Term) {
-        use std::collections::HashSet;
-        let producer_syms: HashSet<SymbolId> = self.binding_map.keys().copied().collect();
-        let mut tally: HashMap<SymbolId, usize> = HashMap::new();
+        use crate::LookupSet;
+        let producer_syms: LookupSet<SymbolId> = self.binding_map.keys().copied().collect();
+        let mut tally: LookupMap<SymbolId, usize> = LookupMap::new();
         walk_vars(body, &producer_syms, &mut tally);
         for (sym, n) in tally {
             if let Some(&pid) = self.binding_map.get(&sym) {
@@ -284,11 +285,7 @@ impl<'a> GraphBuilder<'a> {
     }
 }
 
-fn walk_vars(
-    t: &Term,
-    producers: &std::collections::HashSet<SymbolId>,
-    tally: &mut HashMap<SymbolId, usize>,
-) {
+fn walk_vars(t: &Term, producers: &LookupSet<SymbolId>, tally: &mut LookupMap<SymbolId, usize>) {
     if let TermKind::Var(VarRef::Symbol(s)) = &t.kind {
         if producers.contains(s) {
             *tally.entry(*s).or_insert(0) += 1;

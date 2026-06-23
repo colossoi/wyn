@@ -7,9 +7,10 @@ use super::VarRef;
 use super::{Def, Lambda, Program, Term, TermIdSource, TermKind};
 use crate::ast::{BinaryOp, Span, TypeName, UnaryOp};
 use crate::types::TypeExt;
+use crate::LookupMap;
+use crate::LookupSet;
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
-use std::collections::HashMap;
 
 // =============================================================================
 // Values
@@ -55,11 +56,11 @@ pub struct PartialEvaluator {
     /// Symbol table for name lookup
     symbols: SymbolTable,
     /// Function definitions with their arities
-    defs: HashMap<SymbolId, Def>,
+    defs: LookupMap<SymbolId, Def>,
     /// Term ID source for generating new terms
     term_ids: TermIdSource,
     /// Environment: symbol -> Value
-    env: HashMap<SymbolId, Value>,
+    env: LookupMap<SymbolId, Value>,
 }
 
 impl PartialEvaluator {
@@ -69,7 +70,7 @@ impl PartialEvaluator {
             symbols: program.symbols,
             defs: program.defs.iter().map(|d| (d.name, d.clone())).collect(),
             term_ids: TermIdSource::new(),
-            env: HashMap::new(),
+            env: LookupMap::new(),
         };
 
         let defs = program
@@ -342,7 +343,7 @@ impl PartialEvaluator {
     /// codegen; and not a `reify`-based rebuild, which reconstructs operands
     /// (e.g. partial applications) and can corrupt closure-call arities.
     fn residualize_unreduced(&mut self, term: &Term) -> Value {
-        let mut bound = std::collections::HashSet::new();
+        let mut bound = LookupSet::new();
         Value::Unknown(self.substitute_residual_vars(term.clone(), &mut bound))
     }
 
@@ -687,11 +688,7 @@ impl PartialEvaluator {
     ///
     /// `bound` tracks symbols currently in scope (shadowing env). It's
     /// mutated in place as we descend into binders and restored on exit.
-    fn substitute_residual_vars(
-        &mut self,
-        term: Term,
-        bound: &mut std::collections::HashSet<SymbolId>,
-    ) -> Term {
+    fn substitute_residual_vars(&mut self, term: Term, bound: &mut LookupSet<SymbolId>) -> Term {
         let ty = term.ty.clone();
         let span = term.span;
         match term.kind {

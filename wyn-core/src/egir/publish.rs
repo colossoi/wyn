@@ -21,7 +21,7 @@
 //! rule blocks a regular `impl` block here too. A trait owned by
 //! `wyn-core` is the standard workaround.
 
-use std::collections::{HashMap, HashSet};
+use crate::{LookupMap, LookupSet};
 
 use crate::egir::program::EgirEntry;
 use crate::pipeline_descriptor::{
@@ -56,7 +56,7 @@ pub trait PipelineDescriptorPublish {
     /// to the name the source declared. Only `BufferUsage::Input` storage
     /// buffers are touched, so outputs and intermediates keep their
     /// synthesized names even if some other entry's input shares a slot.
-    fn relabel_input_storage_names(&mut self, names: &HashMap<(u32, u32), String>);
+    fn relabel_input_storage_names(&mut self, names: &LookupMap<(u32, u32), String>);
 }
 
 impl PipelineDescriptorPublish for PipelineDescriptor {
@@ -71,7 +71,7 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
         // `Storage class Storage{LOAD} doesn't match shader Storage{LOAD
         // | STORE}`. Compute the set of module-writable bindings here
         // and promote `ReadOnly → ReadWrite` in a final post-pass below.
-        let written_bindings: HashSet<(u32, u32)> = entries
+        let written_bindings: LookupSet<(u32, u32)> = entries
             .iter()
             .flat_map(|e| e.outputs.iter().filter_map(|o| o.storage_binding))
             .map(|br| (br.set, br.binding))
@@ -110,7 +110,7 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
 
             // Snapshot existing (set, binding) and push-constant offsets to
             // skip what `parallelize` already surfaced.
-            let mut claimed: HashSet<(u32, u32)> = bindings
+            let mut claimed: LookupSet<(u32, u32)> = bindings
                 .iter()
                 .filter_map(|b| match b {
                     Binding::StorageBuffer { set, binding, .. } => Some((*set, *binding)),
@@ -118,7 +118,7 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                     _ => None,
                 })
                 .collect();
-            let claimed_pc_offsets: HashSet<u32> = bindings
+            let claimed_pc_offsets: LookupSet<u32> = bindings
                 .iter()
                 .filter_map(|b| match b {
                     Binding::PushConstant { offset, .. } => Some(*offset),
@@ -296,7 +296,7 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
         (64, 1, 1)
     }
 
-    fn relabel_input_storage_names(&mut self, names: &HashMap<(u32, u32), String>) {
+    fn relabel_input_storage_names(&mut self, names: &LookupMap<(u32, u32), String>) {
         if names.is_empty() {
             return;
         }

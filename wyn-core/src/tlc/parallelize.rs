@@ -14,9 +14,10 @@ use crate::egir::from_tlc::AUTO_STORAGE_SET;
 use crate::interface::{self, Attribute, EntryParamBinding, EntryParamBindingKind};
 use crate::pipeline_descriptor::*;
 use crate::types::TypeExt;
+use crate::StableMap;
 use crate::{BindingRef, SymbolId, SymbolTable};
+use crate::{LookupMap, LookupSet};
 use polytype::Type;
-use std::collections::{HashMap, HashSet};
 
 use super::{
     ArrayExpr, Def, DefMeta, Lambda, Program, SoacDestination, SoacOp, Term, TermIdSource, TermKind,
@@ -212,11 +213,11 @@ struct EntryAnalysis {
 // Stage A: Analysis
 // =============================================================================
 
-fn analyze_program(program: &Program) -> indexmap::IndexMap<SymbolId, EntryAnalysis> {
-    // IndexMap (not HashMap): the iteration order in `run` drives binding
-    // allocation through the module-wide `IdSource`, so a HashMap's
+fn analyze_program(program: &Program) -> StableMap<SymbolId, EntryAnalysis> {
+    // StableMap (not LookupMap): the iteration order in `run` drives binding
+    // allocation through the module-wide `IdSource`, so a LookupMap's
     // randomized iteration would shuffle binding numbers on every compile.
-    let mut results = indexmap::IndexMap::new();
+    let mut results = StableMap::new();
 
     for def in &program.defs {
         let DefMeta::EntryPoint(ref entry_decl) = def.meta else {
@@ -473,12 +474,12 @@ fn compute_required_params(
     def: &Def,
     symbols: &SymbolTable,
 ) -> Vec<RequiredParam> {
-    use std::collections::HashSet;
-    let empty_top: HashSet<SymbolId> = HashSet::new();
-    let empty_defs: HashSet<String> = HashSet::new();
-    let mut bound: HashSet<SymbolId> = HashSet::new();
+    use crate::LookupSet;
+    let empty_top: LookupSet<SymbolId> = LookupSet::new();
+    let empty_defs: LookupSet<String> = LookupSet::new();
+    let mut bound: LookupSet<SymbolId> = LookupSet::new();
     let mut free: Vec<Term> = Vec::new();
-    let mut seen: HashSet<SymbolId> = HashSet::new();
+    let mut seen: LookupSet<SymbolId> = LookupSet::new();
 
     // Each prefix RHS is evaluated with all *previous* prefix names in
     // scope. The SOAC sees the full prefix in scope.
@@ -530,7 +531,7 @@ fn compute_required_params(
         );
     }
 
-    let free_syms: HashSet<SymbolId> = free
+    let free_syms: LookupSet<SymbolId> = free
         .iter()
         .filter_map(
             |t| {
@@ -954,13 +955,13 @@ pub struct ParallelizationResult {
     /// reduce/redomap/scan entries — those still lower through the old
     /// TLC path. Map planning is the only strategy populated until the
     /// EGIR migration broadens.
-    pub plans: HashMap<String, ParallelizationPlan>,
+    pub plans: LookupMap<String, ParallelizationPlan>,
     /// Source-parameter name for each storage `(set, binding)`, captured
     /// from the original compute entries before they are replaced by phase
     /// entries. The relabel pass in `to_egraph` restores these onto the
     /// finalized descriptor's input bindings, which the parallel path would
     /// otherwise name positionally (`input_0`, `input_1`, …).
-    pub input_names: HashMap<(u32, u32), String>,
+    pub input_names: LookupMap<(u32, u32), String>,
 }
 
 /// Per-entry, compiler-internal description of how EGIR should lower a
@@ -1072,8 +1073,8 @@ impl PlannedBindings {
 /// (array results) and deeply nested lets are left for a follow-up.
 enum ScalarPrepassPolicy {
     GraphicalInvariant {
-        tainted: HashSet<SymbolId>,
-        uniform_params: HashMap<SymbolId, BindingRef>,
+        tainted: LookupSet<SymbolId>,
+        uniform_params: LookupMap<SymbolId, BindingRef>,
     },
     ComputeBroadcast {
         source_def: Def,
@@ -1083,10 +1084,10 @@ enum ScalarPrepassPolicy {
 fn lift_scalar_soac_prepasses(
     program: &mut Program,
     next_binding: &mut u32,
-    prepass_result_bindings: &mut HashMap<SymbolId, BindingRef>,
+    prepass_result_bindings: &mut LookupMap<SymbolId, BindingRef>,
     term_ids: &mut TermIdSource,
 ) {
-    use std::collections::HashSet;
+    use crate::LookupSet;
 
     // Snapshot indices of graphical entry defs — we'll mutate program.defs
     // in the loop, but only the def at `idx` (its body + storage_bindings).
@@ -1121,8 +1122,8 @@ fn lift_scalar_soac_prepasses(
                     _ => Vec::new(),
                 };
                 let (peeled, _) = peel_lambda_params(&body);
-                let mut entry_params: HashSet<SymbolId> = HashSet::new();
-                let mut uniform_params: HashMap<SymbolId, BindingRef> = HashMap::new();
+                let mut entry_params: LookupSet<SymbolId> = LookupSet::new();
+                let mut uniform_params: LookupMap<SymbolId, BindingRef> = LookupMap::new();
                 for (i, (sym, _)) in peeled.iter().enumerate() {
                     match decl_params.get(i).and_then(crate::binding_layout::extract_uniform_binding) {
                         Some(br) => {
@@ -1192,11 +1193,11 @@ fn compute_broadcast_required_params(
     source_def: &Def,
     symbols: &SymbolTable,
 ) -> Option<Vec<RequiredParam>> {
-    let bound: HashSet<SymbolId> = HashSet::new();
-    let empty_top: HashSet<SymbolId> = HashSet::new();
-    let empty_defs: HashSet<String> = HashSet::new();
+    let bound: LookupSet<SymbolId> = LookupSet::new();
+    let empty_top: LookupSet<SymbolId> = LookupSet::new();
+    let empty_defs: LookupSet<String> = LookupSet::new();
     let mut free: Vec<Term> = Vec::new();
-    let mut seen: HashSet<SymbolId> = HashSet::new();
+    let mut seen: LookupSet<SymbolId> = LookupSet::new();
     collect_free_vars(
         term,
         &bound,
@@ -1207,7 +1208,7 @@ fn compute_broadcast_required_params(
         &mut seen,
     );
 
-    let free_syms: HashSet<SymbolId> = free
+    let free_syms: LookupSet<SymbolId> = free
         .iter()
         .filter_map(
             |t| {
@@ -1224,7 +1225,7 @@ fn compute_broadcast_required_params(
         _ => return None,
     };
     let (orig_params, _) = peel_lambda_params(&source_def.body);
-    let orig_param_syms: HashSet<SymbolId> = orig_params.iter().map(|(sym, _)| *sym).collect();
+    let orig_param_syms: LookupSet<SymbolId> = orig_params.iter().map(|(sym, _)| *sym).collect();
     if !free_syms.iter().all(|sym| orig_param_syms.contains(sym)) {
         return None;
     }
@@ -1251,7 +1252,7 @@ fn lift_in_term(
     next_binding: &mut u32,
     added_decls: &mut Vec<interface::StorageBindingDecl>,
     new_defs: &mut Vec<Def>,
-    prepass_result_bindings: &mut HashMap<SymbolId, BindingRef>,
+    prepass_result_bindings: &mut LookupMap<SymbolId, BindingRef>,
     program: &mut Program,
     term_ids: &mut TermIdSource,
 ) -> Term {
@@ -1337,7 +1338,7 @@ fn maybe_hoist(
     next_binding: &mut u32,
     added_decls: &mut Vec<interface::StorageBindingDecl>,
     new_defs: &mut Vec<Def>,
-    prepass_result_bindings: &mut HashMap<SymbolId, BindingRef>,
+    prepass_result_bindings: &mut LookupMap<SymbolId, BindingRef>,
     program: &mut Program,
     term_ids: &mut TermIdSource,
 ) -> Term {
@@ -1436,15 +1437,15 @@ fn maybe_hoist(
 /// site, so taint propagation past it doesn't matter.
 fn compute_taint_set(
     term: &Term,
-    entry_params: &std::collections::HashSet<SymbolId>,
+    entry_params: &LookupSet<SymbolId>,
     symbols: &SymbolTable,
-) -> std::collections::HashSet<SymbolId> {
+) -> LookupSet<SymbolId> {
     let mut tainted = entry_params.clone();
     walk_taint(term, &mut tainted, symbols);
     tainted
 }
 
-fn walk_taint(term: &Term, tainted: &mut std::collections::HashSet<SymbolId>, symbols: &SymbolTable) {
+fn walk_taint(term: &Term, tainted: &mut LookupSet<SymbolId>, symbols: &SymbolTable) {
     match &term.kind {
         TermKind::Lambda(lam) => {
             walk_taint(&lam.body, tainted, symbols);
@@ -1466,15 +1467,15 @@ fn walk_taint(term: &Term, tainted: &mut std::collections::HashSet<SymbolId>, sy
 /// `compute_required_params`).
 fn rhs_references_entry_param(
     term: &Term,
-    entry_params: &std::collections::HashSet<SymbolId>,
+    entry_params: &LookupSet<SymbolId>,
     symbols: &SymbolTable,
 ) -> bool {
-    use std::collections::HashSet;
-    let bound: HashSet<SymbolId> = HashSet::new();
-    let empty_top: HashSet<SymbolId> = HashSet::new();
-    let empty_defs: HashSet<String> = HashSet::new();
+    use crate::LookupSet;
+    let bound: LookupSet<SymbolId> = LookupSet::new();
+    let empty_top: LookupSet<SymbolId> = LookupSet::new();
+    let empty_defs: LookupSet<String> = LookupSet::new();
     let mut free: Vec<Term> = Vec::new();
-    let mut seen: HashSet<SymbolId> = HashSet::new();
+    let mut seen: LookupSet<SymbolId> = LookupSet::new();
     collect_free_vars(
         term,
         &bound,
@@ -1492,14 +1493,14 @@ fn rhs_references_entry_param(
 /// reads on the generated pre-pass entry. Deduplicated by symbol.
 fn collect_uniform_required_params(
     term: &Term,
-    uniform_params: &HashMap<SymbolId, BindingRef>,
+    uniform_params: &LookupMap<SymbolId, BindingRef>,
     symbols: &SymbolTable,
 ) -> Vec<RequiredParam> {
-    let bound: HashSet<SymbolId> = HashSet::new();
-    let empty_top: HashSet<SymbolId> = HashSet::new();
-    let empty_defs: HashSet<String> = HashSet::new();
+    let bound: LookupSet<SymbolId> = LookupSet::new();
+    let empty_top: LookupSet<SymbolId> = LookupSet::new();
+    let empty_defs: LookupSet<String> = LookupSet::new();
     let mut free: Vec<Term> = Vec::new();
-    let mut seen: HashSet<SymbolId> = HashSet::new();
+    let mut seen: LookupSet<SymbolId> = LookupSet::new();
     collect_free_vars(
         term,
         &bound,
@@ -1511,7 +1512,7 @@ fn collect_uniform_required_params(
     );
 
     let mut out: Vec<RequiredParam> = Vec::new();
-    let mut added: HashSet<SymbolId> = HashSet::new();
+    let mut added: LookupSet<SymbolId> = LookupSet::new();
     for t in &free {
         if let TermKind::Var(VarRef::Symbol(s)) = &t.kind {
             if let Some(binding) = uniform_params.get(s) {
@@ -1538,15 +1539,15 @@ fn collect_uniform_required_params(
 /// silently emitting the lift produces a broken shader.
 fn assert_hoist_free_vars_are_grounded(
     term: &Term,
-    entry_params: &std::collections::HashSet<SymbolId>,
+    entry_params: &LookupSet<SymbolId>,
     symbols: &SymbolTable,
 ) {
-    use std::collections::HashSet;
-    let bound: HashSet<SymbolId> = HashSet::new();
-    let empty_top: HashSet<SymbolId> = HashSet::new();
-    let empty_defs: HashSet<String> = HashSet::new();
+    use crate::LookupSet;
+    let bound: LookupSet<SymbolId> = LookupSet::new();
+    let empty_top: LookupSet<SymbolId> = LookupSet::new();
+    let empty_defs: LookupSet<String> = LookupSet::new();
     let mut free: Vec<Term> = Vec::new();
-    let mut seen: HashSet<SymbolId> = HashSet::new();
+    let mut seen: LookupSet<SymbolId> = LookupSet::new();
     collect_free_vars(
         term,
         &bound,
@@ -1621,10 +1622,10 @@ fn build_prepass_def(
 /// `(set, binding)` can name different params across entries. On conflict the
 /// key is dropped — the buffer keeps its synthesized `input_N` name rather than
 /// risk a wrong one. Single-compute-entry modules never conflict.
-fn collect_entry_input_names(program: &Program) -> HashMap<(u32, u32), String> {
-    let mut out: HashMap<(u32, u32), String> = HashMap::new();
-    let mut ambiguous: HashSet<(u32, u32)> = HashSet::new();
-    let mut put = |out: &mut HashMap<(u32, u32), String>, key: (u32, u32), name: String| {
+fn collect_entry_input_names(program: &Program) -> LookupMap<(u32, u32), String> {
+    let mut out: LookupMap<(u32, u32), String> = LookupMap::new();
+    let mut ambiguous: LookupSet<(u32, u32)> = LookupSet::new();
+    let mut put = |out: &mut LookupMap<(u32, u32), String>, key: (u32, u32), name: String| {
         if ambiguous.contains(&key) {
             return;
         }
@@ -1701,7 +1702,7 @@ pub fn run(
         return Ok(ParallelizationResult {
             program,
             pipeline,
-            plans: HashMap::new(),
+            plans: LookupMap::new(),
             input_names,
         });
     }
@@ -1730,7 +1731,7 @@ pub fn run(
     // to the storage binding the graphical entry reads from; Stage B's
     // `make_two_phase_plan` consults this so phase 2's result store goes
     // exactly there (instead of a freshly-allocated binding).
-    let mut prepass_result_bindings: HashMap<SymbolId, BindingRef> = HashMap::new();
+    let mut prepass_result_bindings: LookupMap<SymbolId, BindingRef> = LookupMap::new();
     lift_scalar_soac_prepasses(
         &mut program,
         &mut next_binding,
@@ -1760,7 +1761,7 @@ pub fn run(
         return Ok(ParallelizationResult {
             program,
             pipeline,
-            plans: HashMap::new(),
+            plans: LookupMap::new(),
             input_names,
         });
     }
@@ -1768,7 +1769,7 @@ pub fn run(
     let mut pipelines = Vec::new();
     let mut new_defs = Vec::new();
     let mut removed_entries: Vec<SymbolId> = Vec::new();
-    let mut plans: HashMap<String, ParallelizationPlan> = HashMap::new();
+    let mut plans: LookupMap<String, ParallelizationPlan> = LookupMap::new();
 
     // Default pipelines for non-parallelized compute entries.
     for def in &program.defs {
@@ -1963,7 +1964,7 @@ fn ordered_prefix_has_post_tail_dependency(analysis: &EntryAnalysis, symbols: &S
     let Some((tail_sym, _)) = analysis.tail_alias.as_ref() else {
         return false;
     };
-    let mut post_syms: HashSet<SymbolId> = HashSet::from([*tail_sym]);
+    let mut post_syms: LookupSet<SymbolId> = LookupSet::from([*tail_sym]);
     for (sym, _, rhs) in &analysis.prefix_lets {
         if term_refs_any(rhs, &post_syms, symbols) {
             if term_has_ordered_side_effect_soac(rhs) {
@@ -2152,14 +2153,14 @@ fn extract_dispatch_tasks(
     tail_param_sym: Option<SymbolId>,
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
-) -> Option<(Vec<DispatchTask>, HashSet<SymbolId>)> {
-    let mut value_aliases: HashMap<SymbolId, SymbolId> = HashMap::new();
-    let mut place_aliases: HashMap<SymbolId, SymbolId> = HashMap::new();
-    let mut post_producers: HashMap<SymbolId, Term> = HashMap::new();
-    let mut post_syms: HashSet<SymbolId> =
-        tail_alias_sym.map(|sym| HashSet::from([sym])).unwrap_or_default();
+) -> Option<(Vec<DispatchTask>, LookupSet<SymbolId>)> {
+    let mut value_aliases: LookupMap<SymbolId, SymbolId> = LookupMap::new();
+    let mut place_aliases: LookupMap<SymbolId, SymbolId> = LookupMap::new();
+    let mut post_producers: LookupMap<SymbolId, Term> = LookupMap::new();
+    let mut post_syms: LookupSet<SymbolId> =
+        tail_alias_sym.map(|sym| LookupSet::from([sym])).unwrap_or_default();
     let mut tasks = Vec::new();
-    let mut removed_symbols = HashSet::new();
+    let mut removed_symbols = LookupSet::new();
 
     for (stage_idx, (sym, _ty, rhs0)) in analysis.prefix_lets.iter().enumerate() {
         let mut rhs = rhs0.clone();
@@ -2255,7 +2256,7 @@ fn substitute_dispatch_symbol_in_place(place: &mut super::Place, old: SymbolId, 
 
 fn inline_post_producers(
     term: Term,
-    producers: &HashMap<SymbolId, Term>,
+    producers: &LookupMap<SymbolId, Term>,
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
 ) -> Term {
@@ -2391,11 +2392,11 @@ fn compute_broadcast_required_params_with_extra(
     extra: RequiredParam,
     symbols: &SymbolTable,
 ) -> Option<Vec<RequiredParam>> {
-    let bound: HashSet<SymbolId> = HashSet::new();
-    let empty_top: HashSet<SymbolId> = HashSet::new();
-    let empty_defs: HashSet<String> = HashSet::new();
+    let bound: LookupSet<SymbolId> = LookupSet::new();
+    let empty_top: LookupSet<SymbolId> = LookupSet::new();
+    let empty_defs: LookupSet<String> = LookupSet::new();
     let mut free: Vec<Term> = Vec::new();
-    let mut seen: HashSet<SymbolId> = HashSet::new();
+    let mut seen: LookupSet<SymbolId> = LookupSet::new();
     collect_free_vars(
         term,
         &bound,
@@ -2406,7 +2407,7 @@ fn compute_broadcast_required_params_with_extra(
         &mut seen,
     );
 
-    let free_syms: HashSet<SymbolId> = free
+    let free_syms: LookupSet<SymbolId> = free
         .iter()
         .filter_map(|t| match &t.kind {
             TermKind::Var(VarRef::Symbol(s)) => Some(*s),
@@ -2418,7 +2419,7 @@ fn compute_broadcast_required_params_with_extra(
         _ => return None,
     };
     let (orig_params, _) = peel_lambda_params(&source_def.body);
-    let orig_param_syms: HashSet<SymbolId> = orig_params.iter().map(|(sym, _)| *sym).collect();
+    let orig_param_syms: LookupSet<SymbolId> = orig_params.iter().map(|(sym, _)| *sym).collect();
     if !free_syms.iter().all(|sym| orig_param_syms.contains(sym) || *sym == extra.sym) {
         return None;
     }
@@ -2476,12 +2477,12 @@ fn append_ordered_dest_required_params(
     Some(())
 }
 
-fn term_refs_any(term: &Term, syms: &HashSet<SymbolId>, symbols: &SymbolTable) -> bool {
-    let bound: HashSet<SymbolId> = HashSet::new();
-    let empty_top: HashSet<SymbolId> = HashSet::new();
-    let empty_defs: HashSet<String> = HashSet::new();
+fn term_refs_any(term: &Term, syms: &LookupSet<SymbolId>, symbols: &SymbolTable) -> bool {
+    let bound: LookupSet<SymbolId> = LookupSet::new();
+    let empty_top: LookupSet<SymbolId> = LookupSet::new();
+    let empty_defs: LookupSet<String> = LookupSet::new();
     let mut free: Vec<Term> = Vec::new();
-    let mut seen: HashSet<SymbolId> = HashSet::new();
+    let mut seen: LookupSet<SymbolId> = LookupSet::new();
     collect_free_vars(
         term,
         &bound,
@@ -2636,14 +2637,14 @@ fn promote_storage_binding_usage(binding: &mut Binding, usage: BufferUsage) {
     }
 }
 
-fn remove_lifted_prefix_lets(program: &mut Program, def_name: SymbolId, removed: &HashSet<SymbolId>) {
+fn remove_lifted_prefix_lets(program: &mut Program, def_name: SymbolId, removed: &LookupSet<SymbolId>) {
     let Some(def) = program.defs.iter_mut().find(|d| d.name == def_name) else {
         return;
     };
     def.body = remove_lifted_lets_in_term(def.body.clone(), removed);
 }
 
-fn remove_lifted_lets_in_term(term: Term, removed: &HashSet<SymbolId>) -> Term {
+fn remove_lifted_lets_in_term(term: Term, removed: &LookupSet<SymbolId>) -> Term {
     match term.kind {
         TermKind::Lambda(lam) => Term {
             kind: TermKind::Lambda(Lambda {

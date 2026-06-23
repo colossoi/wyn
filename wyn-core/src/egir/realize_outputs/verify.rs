@@ -23,6 +23,7 @@
 //! calls `check` automatically. Release builds skip the check —
 //! production compilation is the same as today.
 
+use crate::LookupSet;
 use polytype::Type;
 
 use crate::ast::TypeName;
@@ -69,7 +70,7 @@ fn check_entry(entry_name: &str, graph: &super::super::types::EGraph) -> Result<
 
     // BFS over Pure operand edges from each root, checking each
     // node's type.
-    let mut seen: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+    let mut seen: LookupSet<NodeId> = LookupSet::new();
     let mut work: Vec<NodeId> = roots;
     while let Some(nid) = work.pop() {
         if !seen.insert(nid) {

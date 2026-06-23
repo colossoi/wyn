@@ -5,7 +5,7 @@
 //! file's directory. A canonical-path dedup set prevents infinite loops on
 //! cyclic imports and dedupes diamond imports.
 
-use std::collections::HashSet;
+use crate::LookupSet;
 use std::path::{Path, PathBuf};
 
 use crate::ast::{self, NodeCounter};
@@ -27,7 +27,7 @@ pub fn run(
     base_dir: &Path,
     node_counter: &mut NodeCounter,
 ) -> Result<Vec<ast::Declaration>> {
-    let mut visited: HashSet<PathBuf> = HashSet::new();
+    let mut visited: LookupSet<PathBuf> = LookupSet::new();
     expand(decls, base_dir, node_counter, &mut visited)
 }
 
@@ -35,7 +35,7 @@ fn expand(
     decls: Vec<ast::Declaration>,
     base_dir: &Path,
     node_counter: &mut NodeCounter,
-    visited: &mut HashSet<PathBuf>,
+    visited: &mut LookupSet<PathBuf>,
 ) -> Result<Vec<ast::Declaration>> {
     let mut out: Vec<ast::Declaration> = Vec::with_capacity(decls.len());
     for decl in decls {

@@ -1,7 +1,7 @@
+use crate::LookupMap;
 pub use slotmap::Key;
 use slotmap::{new_key_type, SlotMap};
 use smallvec::SmallVec;
-use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::Hash;
 
@@ -276,8 +276,8 @@ impl<I, T: Clone + Debug> Function<I, T> {
         value
     }
 
-    pub fn predecessors(&self) -> HashMap<BlockId, Vec<BlockId>> {
-        let mut preds: HashMap<BlockId, Vec<BlockId>> =
+    pub fn predecessors(&self) -> LookupMap<BlockId, Vec<BlockId>> {
+        let mut preds: LookupMap<BlockId, Vec<BlockId>> =
             self.blocks.keys().map(|b| (b, Vec::new())).collect();
 
         for (bid, block) in &self.blocks {
@@ -288,8 +288,8 @@ impl<I, T: Clone + Debug> Function<I, T> {
         preds
     }
 
-    pub fn block_order_index_map(&self) -> HashMap<InstId, usize> {
-        let mut out = HashMap::new();
+    pub fn block_order_index_map(&self) -> LookupMap<InstId, usize> {
+        let mut out = LookupMap::new();
         for (_bid, block) in &self.blocks {
             for (idx, &inst) in block.insts.iter().enumerate() {
                 out.insert(inst, idx);

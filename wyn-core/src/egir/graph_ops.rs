@@ -12,6 +12,7 @@
 //! `emit_pending_soac`) also take the target `BlockId` and a mutable
 //! effect-token counter.
 
+use crate::LookupMap;
 use polytype::Type;
 use smallvec::{smallvec, SmallVec};
 
@@ -416,7 +417,7 @@ pub fn extract_array_range_operands(
 /// `SideEffectResult` or a `BlockParam` returns `Err` because those
 /// reference cross-block / cross-effect data that doesn't translate.
 pub fn clone_pure_subgraph(src: &EGraph, dst: &mut EGraph, root: NodeId) -> Result<NodeId, String> {
-    let mut memo: std::collections::HashMap<NodeId, NodeId> = std::collections::HashMap::new();
+    let mut memo: LookupMap<NodeId, NodeId> = LookupMap::new();
     clone_inner(src, dst, root, &mut memo)
 }
 
@@ -424,7 +425,7 @@ fn clone_inner(
     src: &EGraph,
     dst: &mut EGraph,
     nid: NodeId,
-    memo: &mut std::collections::HashMap<NodeId, NodeId>,
+    memo: &mut LookupMap<NodeId, NodeId>,
 ) -> Result<NodeId, String> {
     if let Some(&existing) = memo.get(&nid) {
         return Ok(existing);

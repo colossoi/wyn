@@ -7,7 +7,7 @@
 //! fallback. Any `Pending` left in the skeleton at elaboration time is a bug.
 
 use crate::builtins::catalog;
-use std::collections::HashMap;
+use crate::LookupMap;
 
 use crate::ssa::framework::BlockId;
 use polytype::Type;
@@ -38,7 +38,7 @@ pub fn run(inner: &mut EgirInner) {
 }
 
 /// Expand every `SideEffectKind::Pending(PendingSoac::...)` in the skeleton.
-pub fn run_one_body(graph: &mut EGraph, control_headers: &mut HashMap<BlockId, ControlHeader>) {
+pub fn run_one_body(graph: &mut EGraph, control_headers: &mut LookupMap<BlockId, ControlHeader>) {
     // Collect (block, index) of every handleable Soac in a stable order.
     // Process back-to-front within each block so earlier indices stay valid.
     let mut targets: Vec<(BlockId, usize)> = Vec::new();
@@ -165,7 +165,7 @@ fn is_virtual_source(arr_ty: &Type<TypeName>) -> bool {
 
 fn expand_one(
     graph: &mut EGraph,
-    control_headers: &mut HashMap<BlockId, ControlHeader>,
+    control_headers: &mut LookupMap<BlockId, ControlHeader>,
     bid: BlockId,
     idx: usize,
     next_effect: &mut u32,
@@ -733,7 +733,7 @@ fn expand_one(
 /// body block to produce the new carried values, then wire the back-edge.
 fn build_loop<F>(
     graph: &mut EGraph,
-    control_headers: &mut HashMap<BlockId, ControlHeader>,
+    control_headers: &mut LookupMap<BlockId, ControlHeader>,
     bid: BlockId,
     idx_in_block: usize,
     len_input: &(NodeId, Type<TypeName>),
@@ -777,7 +777,7 @@ fn build_loop<F>(
 /// same `emit_body` closure — write iteration logic once.
 fn expand_loop<F>(
     graph: &mut EGraph,
-    control_headers: &mut HashMap<BlockId, ControlHeader>,
+    control_headers: &mut LookupMap<BlockId, ControlHeader>,
     bid: BlockId,
     idx_in_block: usize,
     len_input: &(NodeId, Type<TypeName>),
@@ -914,7 +914,7 @@ struct ScremaMapsIntoLoop {
 
 fn build_parallel_maps(
     graph: &mut EGraph,
-    control_headers: &mut HashMap<BlockId, ControlHeader>,
+    control_headers: &mut LookupMap<BlockId, ControlHeader>,
     bid: BlockId,
     idx_in_block: usize,
     spec: ScremaMapsIntoLoop,
@@ -1054,7 +1054,7 @@ struct FilterLoop {
 
 fn build_filter_loop(
     graph: &mut EGraph,
-    control_headers: &mut HashMap<BlockId, ControlHeader>,
+    control_headers: &mut LookupMap<BlockId, ControlHeader>,
     bid: BlockId,
     idx_in_block: usize,
     spec: FilterLoop,
@@ -1289,7 +1289,7 @@ struct ScatterLoop {
 /// pure optimization.
 fn build_scatter_loop(
     graph: &mut EGraph,
-    control_headers: &mut HashMap<BlockId, ControlHeader>,
+    control_headers: &mut LookupMap<BlockId, ControlHeader>,
     bid: BlockId,
     idx_in_block: usize,
     spec: ScatterLoop,
@@ -1358,7 +1358,7 @@ fn build_scatter_loop(
 
 fn build_parallel_scatter(
     graph: &mut EGraph,
-    control_headers: &mut HashMap<BlockId, ControlHeader>,
+    control_headers: &mut LookupMap<BlockId, ControlHeader>,
     bid: BlockId,
     idx_in_block: usize,
     spec: ScatterLoop,
@@ -1453,7 +1453,7 @@ fn build_parallel_scatter(
 
 fn build_runtime_filter_loop(
     graph: &mut EGraph,
-    control_headers: &mut HashMap<BlockId, ControlHeader>,
+    control_headers: &mut LookupMap<BlockId, ControlHeader>,
     bid: BlockId,
     idx_in_block: usize,
     spec: FilterLoop,
@@ -1675,7 +1675,7 @@ struct LoopHandles {
 
 fn build_loop_skeleton(
     graph: &mut EGraph,
-    control_headers: &mut HashMap<BlockId, ControlHeader>,
+    control_headers: &mut LookupMap<BlockId, ControlHeader>,
     bid: BlockId,
     idx_in_block: usize,
     spec: LoopSkeletonSpec,

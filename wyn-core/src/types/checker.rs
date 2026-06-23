@@ -6,10 +6,12 @@ use crate::interface::Attribute;
 use crate::module_manager::ModuleManager;
 use crate::name_resolution::NameResolution;
 use crate::scope::{IdentifierKind, ScopeEntry, ScopeStack};
+use crate::LookupMap;
 use crate::{bail_type_at, err_module, err_type, err_type_at, err_undef_at};
+use crate::{LookupSet, StableMap};
 use log::debug;
 use polytype::Context;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 
 // Import type helper functions from parent module
 use super::patterns::coverage::{check_match, format_cov_pat, CoverageError};
@@ -132,28 +134,28 @@ impl LookupContext {
 /// before any read path depends on it. Lookups still go through
 /// `scope_stack` until Phase 3 swaps in the per-context precedence.
 ///
-/// Each map is `IndexMap` to preserve insertion order across runs —
+/// Each map is `StableMap` to preserve insertion order across runs —
 /// same reason `module_manager.elaborated_modules` / `prelude_functions`
-/// are `IndexMap` (`module_manager/mod.rs:55-67`): deterministic
+/// are `StableMap` (`module_manager/mod.rs:55-67`): deterministic
 /// type-check order, stable diagnostic output, stable golden
 /// downstream. Lookups don't care; iteration does.
 #[derive(Debug, Default, Clone)]
 pub struct GlobalEnv {
     /// Catalog builtins (`map`, `reduce`, `length`, `f32.sin`, …).
     /// Populated by `load_builtins`.
-    pub builtins: indexmap::IndexMap<String, TypeScheme>,
+    pub builtins: StableMap<String, TypeScheme>,
     /// Top-level prelude defs (`unzip`, `rotate`, `iota`, …).
     /// Populated by `check_prelude_functions`.
-    pub prelude_defs: indexmap::IndexMap<String, TypeScheme>,
+    pub prelude_defs: StableMap<String, TypeScheme>,
     /// File-scope user `def`s and `entry`s. Populated by
     /// `forward_declare_ascribed_file_scope` (for ascribed defs)
     /// and the main `check_program` walk (for everything).
-    pub user_file_defs: indexmap::IndexMap<String, TypeScheme>,
+    pub user_file_defs: StableMap<String, TypeScheme>,
     /// Module function schemes keyed by qualified name
     /// (`"f32.sin"`, `"rand.init"`). Populated by
     /// `check_module_functions` and seeded with `Spec::Sig` /
     /// `Spec::SigOp` schemes from `resolve_placeholders`.
-    pub module_schemes: indexmap::IndexMap<String, TypeScheme>,
+    pub module_schemes: StableMap<String, TypeScheme>,
 }
 
 pub struct TypeChecker<'a> {
@@ -171,12 +173,12 @@ pub struct TypeChecker<'a> {
     /// `check_decl_as_in_module`'s prologue/epilogue.
     pub(super) current_context: LookupContext,
     pub(super) context: Context<TypeName>, // Polytype unification context
-    record_field_map: HashMap<(String, String), Type>, // Map (type_name, field_name) -> field_type
+    record_field_map: LookupMap<(String, String), Type>, // Map (type_name, field_name) -> field_type
     module_manager: &'a ModuleManager,     // Lazy module loading
-    pub(super) type_table: HashMap<NodeId, TypeScheme>, // Maps NodeId to type scheme
+    pub(super) type_table: LookupMap<NodeId, TypeScheme>, // Maps NodeId to type scheme
     warnings: Vec<TypeWarning>,            // Collected warnings
     type_holes: Vec<(NodeId, Span)>,       // Track type hole locations for warning emission
-    arity_map: HashMap<String, usize>,     // function name -> required arity (number of params)
+    arity_map: LookupMap<String, usize>,   // function name -> required arity (number of params)
     /// ID source for generating unique skolem constants when opening existential types.
     skolem_ids: crate::IdSource<SkolemId>,
     /// Current module context for resolving unqualified type aliases in expressions.
@@ -199,7 +201,7 @@ pub struct TypeChecker<'a> {
     /// winner index, the type checker writes the winning `BuiltinId`
     /// back into `name_resolution.values` so downstream consumers see a
     /// resolved per-type conversion catalog entry (e.g. `i32.f32`).
-    constructor_call_catalog_ids: HashMap<NodeId, Vec<BuiltinId>>,
+    constructor_call_catalog_ids: LookupMap<NodeId, Vec<BuiltinId>>,
 }
 
 /// Compute free type variables in a Type
@@ -894,38 +896,41 @@ impl<'a> TypeChecker<'a> {
 
     /// Create a new TypeChecker with a reference to a ModuleManager
     pub fn new(module_manager: &'a ModuleManager) -> Self {
-        Self::with_type_table(module_manager, HashMap::new())
+        Self::with_type_table(module_manager, LookupMap::new())
     }
 
     /// Create a TypeChecker with an empty type table (for building prelude)
     pub fn new_empty(module_manager: &'a ModuleManager) -> Self {
-        Self::with_type_table(module_manager, HashMap::new())
+        Self::with_type_table(module_manager, LookupMap::new())
     }
 
     /// Create a TypeChecker with an existing Context and spec_schemes (from resolve_placeholders pass).
     pub fn with_context_and_schemes(
         module_manager: &'a ModuleManager,
         context: Context<TypeName>,
-        spec_schemes: HashMap<String, TypeScheme>,
+        spec_schemes: LookupMap<String, TypeScheme>,
     ) -> Self {
-        Self::with_context_and_type_table(module_manager, context, HashMap::new(), spec_schemes)
+        Self::with_context_and_type_table(module_manager, context, LookupMap::new(), spec_schemes)
     }
 
     /// Create a TypeChecker with a given initial type table
-    fn with_type_table(module_manager: &'a ModuleManager, type_table: HashMap<NodeId, TypeScheme>) -> Self {
-        Self::with_context_and_type_table(module_manager, Context::default(), type_table, HashMap::new())
+    fn with_type_table(
+        module_manager: &'a ModuleManager,
+        type_table: LookupMap<NodeId, TypeScheme>,
+    ) -> Self {
+        Self::with_context_and_type_table(module_manager, Context::default(), type_table, LookupMap::new())
     }
 
     /// Create a TypeChecker with both an existing Context and type table.
     fn with_context_and_type_table(
         module_manager: &'a ModuleManager,
         context: Context<TypeName>,
-        type_table: HashMap<NodeId, TypeScheme>,
-        spec_schemes: HashMap<String, TypeScheme>,
+        type_table: LookupMap<NodeId, TypeScheme>,
+        spec_schemes: LookupMap<String, TypeScheme>,
     ) -> Self {
         let mut globals = GlobalEnv::default();
         // Seed `globals.module_schemes` from the spec_schemes computed
-        // by `resolve_placeholders`. Sort the HashMap entries for
+        // by `resolve_placeholders`. Sort the LookupMap entries for
         // stable iteration order downstream.
         let mut spec_seeded: Vec<_> = spec_schemes.into_iter().collect();
         spec_seeded.sort_by(|a, b| a.0.cmp(&b.0));
@@ -937,17 +942,17 @@ impl<'a> TypeChecker<'a> {
             globals,
             current_context: LookupContext::UserFile,
             context,
-            record_field_map: HashMap::new(),
+            record_field_map: LookupMap::new(),
             module_manager,
             type_table,
             warnings: Vec::new(),
             type_holes: Vec::new(),
-            arity_map: HashMap::new(),
+            arity_map: LookupMap::new(),
             skolem_ids: crate::IdSource::new(),
             current_module: None,
             name_resolution: NameResolution::default(),
             pending_cycle_error: std::cell::RefCell::new(None),
-            constructor_call_catalog_ids: HashMap::new(),
+            constructor_call_catalog_ids: LookupMap::new(),
         }
     }
 
@@ -1436,7 +1441,7 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Names registered by `load_builtins`. Sourced from
-    /// `globals.builtins`'s `IndexMap` for deterministic order.
+    /// `globals.builtins`'s `StableMap` for deterministic order.
     pub fn builtin_names(&self) -> Vec<String> {
         self.globals.builtins.keys().cloned().collect()
     }
@@ -1453,7 +1458,7 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    pub fn check_program(&mut self, program: &Program) -> Result<HashMap<NodeId, TypeScheme>> {
+    pub fn check_program(&mut self, program: &Program) -> Result<LookupMap<NodeId, TypeScheme>> {
         // Forward-declare ascribed file-scope `def`s into
         // `globals.user_file_defs` so module function bodies can close
         // over them. No `scope_stack.push_scope()` needed — `GlobalEnv`
@@ -1480,7 +1485,7 @@ impl<'a> TypeChecker<'a> {
         self.emit_hole_warnings();
 
         // Apply the context to all types in the type table to resolve type variables
-        let resolved_table: HashMap<NodeId, TypeScheme> =
+        let resolved_table: LookupMap<NodeId, TypeScheme> =
             self.type_table.iter().map(|(node_id, scheme)| (*node_id, self.apply_scheme(scheme))).collect();
 
         Ok(resolved_table)
@@ -1574,7 +1579,7 @@ impl<'a> TypeChecker<'a> {
                     _ => &[],
                 }
             }
-            let mut seen_locations = std::collections::HashSet::new();
+            let mut seen_locations = LookupSet::new();
             for (param, param_type) in params.iter().zip(param_types.iter()) {
                 if matches!(param.kind, PatternKind::Unit) {
                     continue;
@@ -1787,7 +1792,7 @@ impl<'a> TypeChecker<'a> {
 
     /// Consume the type checker and return the type table.
     /// Extracts the prelude type table after type-checking prelude functions.
-    pub fn into_type_table(self) -> std::collections::HashMap<NodeId, TypeScheme> {
+    pub fn into_type_table(self) -> LookupMap<NodeId, TypeScheme> {
         self.type_table
     }
 
@@ -1798,8 +1803,8 @@ impl<'a> TypeChecker<'a> {
     /// params/return. Walks the four global namespaces in a
     /// deterministic order; ties broken last-write-wins per the
     /// insert order.
-    pub fn get_function_schemes(&self) -> std::collections::HashMap<String, TypeScheme> {
-        let mut schemes = std::collections::HashMap::new();
+    pub fn get_function_schemes(&self) -> LookupMap<String, TypeScheme> {
+        let mut schemes = LookupMap::new();
         let mut insert = |name: &str, scheme: &TypeScheme| {
             schemes.insert(name.to_string(), self.apply_context_to_scheme(scheme));
         };

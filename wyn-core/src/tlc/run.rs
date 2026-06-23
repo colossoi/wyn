@@ -6,7 +6,8 @@
 //! `tlc::Program` plus the supporting metadata (type_table, known_defs,
 //! schemes, fill-hole errors).
 
-use std::collections::HashMap;
+use crate::LookupMap;
+use crate::LookupSet;
 
 use polytype::TypeScheme;
 
@@ -23,15 +24,15 @@ use super::{defaults, Program, Transformer};
 pub struct TlcOutput {
     pub program: Program,
     pub type_table: TypeTable,
-    pub known_defs: std::collections::HashSet<String>,
-    pub schemes: HashMap<SymbolId, TypeScheme<TypeName>>,
+    pub known_defs: LookupSet<String>,
+    pub schemes: LookupMap<SymbolId, TypeScheme<TypeName>>,
     pub fill_hole_errors: Vec<CompilerError>,
 }
 
 pub fn run(
     ast: &ast::Program,
     mut type_table: TypeTable,
-    schemes: &HashMap<String, TypeScheme<TypeName>>,
+    schemes: &LookupMap<String, TypeScheme<TypeName>>,
     checker_builtins: &[String],
     name_resolution: &NameResolution,
     module_manager: &ModuleManager,
@@ -44,7 +45,7 @@ pub fn run(
     let registry = NameRegistry::build(ast, module_manager, checker_builtins);
 
     let mut symbols = SymbolTable::new();
-    let mut top_level_symbols: HashMap<String, SymbolId> = HashMap::new();
+    let mut top_level_symbols: LookupMap<String, SymbolId> = LookupMap::new();
     for (name, _kind) in registry.iter() {
         let sym = symbols.alloc(name.to_string());
         top_level_symbols.insert(name.to_string(), sym);
@@ -104,7 +105,7 @@ pub fn run(
 
     // Schemes the type checker recorded for non-top-level bindings
     // have no SymbolId in `top_level_symbols`; filter them out.
-    let schemes_by_sym: HashMap<SymbolId, TypeScheme<TypeName>> = schemes
+    let schemes_by_sym: LookupMap<SymbolId, TypeScheme<TypeName>> = schemes
         .iter()
         .filter_map(|(name, scheme)| top_level_symbols.get(name).map(|&sym| (sym, scheme.clone())))
         .collect();

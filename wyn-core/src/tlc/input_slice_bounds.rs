@@ -32,7 +32,7 @@
 //! `egir::from_tlc::convert_entry_point` when it builds the descriptor
 //! entry for each input binding.
 
-use std::collections::{HashMap, HashSet};
+use crate::{LookupMap, LookupSet};
 
 use polytype::Type;
 
@@ -48,14 +48,14 @@ use super::{extract_lambda_params, DefMeta, Program, Term, TermKind, VarRef};
 /// Outer key: entry-point surface name. Inner key: the entry's input
 /// parameter `SymbolId` for a storage-bound input. Inner value: inferred
 /// minimum byte length (see `infer`).
-pub type ProgramBounds = HashMap<String, HashMap<SymbolId, BufferLen>>;
+pub type ProgramBounds = LookupMap<String, LookupMap<SymbolId, BufferLen>>;
 
 /// Run `infer` on every entry point in `program`. Each entry's storage-
 /// bound params are extracted from its outer lambda chain (paired with
 /// each param's declared type) and fed to `infer` alongside the inner
 /// body.
 pub fn compute_for_program(program: &Program) -> ProgramBounds {
-    let mut out: ProgramBounds = HashMap::new();
+    let mut out: ProgramBounds = LookupMap::new();
     for def in &program.defs {
         if !matches!(def.meta, DefMeta::EntryPoint(_)) {
             continue;
@@ -78,10 +78,10 @@ pub fn compute_for_program(program: &Program) -> ProgramBounds {
 /// Per `(SymbolId, array_type)` input, infer a minimum-required buffer
 /// length from how the entry body slices that input. See the module
 /// docs for the exact contract.
-pub fn infer(body: &Term, inputs: &[(SymbolId, Type<TypeName>)]) -> HashMap<SymbolId, BufferLen> {
+pub fn infer(body: &Term, inputs: &[(SymbolId, Type<TypeName>)]) -> LookupMap<SymbolId, BufferLen> {
     let slice_id = catalog().known().slice;
 
-    let mut elem_bytes: HashMap<SymbolId, u64> = HashMap::new();
+    let mut elem_bytes: LookupMap<SymbolId, u64> = LookupMap::new();
     for (sym, ty) in inputs {
         let Some(et) = ty.elem_type() else { continue };
         let Some(b) = crate::ssa::layout::type_byte_size(et) else {
@@ -89,10 +89,10 @@ pub fn infer(body: &Term, inputs: &[(SymbolId, Type<TypeName>)]) -> HashMap<Symb
         };
         elem_bytes.insert(*sym, b as u64);
     }
-    let tracked: HashSet<SymbolId> = elem_bytes.keys().copied().collect();
+    let tracked: LookupSet<SymbolId> = elem_bytes.keys().copied().collect();
 
-    let mut clean_max_k: HashMap<SymbolId, u64> = HashMap::new();
-    let mut dirty: HashSet<SymbolId> = HashSet::new();
+    let mut clean_max_k: LookupMap<SymbolId, u64> = LookupMap::new();
+    let mut dirty: LookupSet<SymbolId> = LookupSet::new();
     walk(body, slice_id, &tracked, &mut clean_max_k, &mut dirty);
 
     clean_max_k
@@ -114,9 +114,9 @@ pub fn infer(body: &Term, inputs: &[(SymbolId, Type<TypeName>)]) -> HashMap<Symb
 fn walk(
     term: &Term,
     slice_id: BuiltinId,
-    tracked: &HashSet<SymbolId>,
-    clean_max_k: &mut HashMap<SymbolId, u64>,
-    dirty: &mut HashSet<SymbolId>,
+    tracked: &LookupSet<SymbolId>,
+    clean_max_k: &mut LookupMap<SymbolId, u64>,
+    dirty: &mut LookupSet<SymbolId>,
 ) {
     // 1. Atomic recognition: `slice(Var(sym), IntLit(0), IntLit(K))`
     // for a tracked `sym`. Does NOT recurse into args[0] (the bare

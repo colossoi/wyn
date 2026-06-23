@@ -19,10 +19,10 @@ impl std::fmt::Display for EffectToken {
         write!(f, "!{}", self.0)
     }
 }
+use crate::LookupMap;
 use polytype::Type;
 use slotmap::{new_key_type, SlotMap};
 use smallvec::SmallVec;
-use std::collections::HashMap;
 
 new_key_type! {
     /// Identity of a node in the e-graph. Every pure node, union node,
@@ -317,27 +317,27 @@ pub struct EGraph {
     /// All nodes (pure, union, params, constants, side-effect results).
     pub nodes: SlotMap<NodeId, ENode>,
     /// Type of each node's result.
-    pub types: HashMap<NodeId, Type<TypeName>>,
+    pub types: LookupMap<NodeId, Type<TypeName>>,
     /// Hash-cons table: NodeKey → existing NodeId.
-    pub hash_cons: HashMap<NodeKey, NodeId>,
+    pub hash_cons: LookupMap<NodeKey, NodeId>,
     /// Constant dedup cache.
-    pub const_cache: HashMap<ConstantValue, NodeId>,
+    pub const_cache: LookupMap<ConstantValue, NodeId>,
     /// The CFG skeleton.
     pub skeleton: Skeleton,
     /// Source span associated with each pure node (first-writer-wins —
     /// later interns of the same hash-consed node keep the original span).
-    pub node_spans: HashMap<NodeId, Span>,
+    pub node_spans: LookupMap<NodeId, Span>,
 }
 
 impl EGraph {
     pub fn new() -> Self {
         EGraph {
             nodes: SlotMap::with_key(),
-            types: HashMap::new(),
-            hash_cons: HashMap::new(),
-            const_cache: HashMap::new(),
+            types: LookupMap::new(),
+            hash_cons: LookupMap::new(),
+            const_cache: LookupMap::new(),
             skeleton: Skeleton::new(),
-            node_spans: HashMap::new(),
+            node_spans: LookupMap::new(),
         }
     }
 

@@ -13,22 +13,22 @@ pub(super) struct LowerCtx<'a, 'b> {
     /// True when lowering an entry point (void function — OpReturnValue is invalid).
     pub(super) is_entry_point: bool,
     /// Map from SSA ValueId to SPIR-V Word.
-    pub(super) value_map: HashMap<ValueId, spirv::Word>,
+    pub(super) value_map: LookupMap<ValueId, spirv::Word>,
     /// Map from SSA BlockId to SPIR-V block label.
-    pub(super) block_map: HashMap<BlockId, spirv::Word>,
+    pub(super) block_map: LookupMap<BlockId, spirv::Word>,
     /// Map from block to its SPIR-V block index (for phi insertion).
-    pub(super) block_indices: HashMap<BlockId, usize>,
+    pub(super) block_indices: LookupMap<BlockId, usize>,
     /// Phi node info: (target_block, param_idx, value, source_block)
     /// Collected during terminator lowering, inserted after all blocks processed.
     pub(super) phi_inputs: Vec<(BlockId, usize, spirv::Word, spirv::Word)>,
     /// Map from a `StorageView(Workgroup)` result ValueId to its workgroup
     /// array id (key into `Constructor::workgroup_vars`), so `ViewIndex` can
     /// access-chain into the workgroup variable instead of a storage buffer.
-    pub(super) workgroup_view: HashMap<ValueId, u32>,
+    pub(super) workgroup_view: LookupMap<ValueId, u32>,
     /// Map from a `PlaceId` to the SPIR-V pointer word that addresses it.
     /// Populated by place-producing instructions (`OutputSlot`,
     /// `ViewIndex`, `Alloca`) and read by `Load` / `Store`.
-    pub(super) place_ptr_id: HashMap<crate::ssa::types::PlaceId, spirv::Word>,
+    pub(super) place_ptr_id: LookupMap<crate::ssa::types::PlaceId, spirv::Word>,
     /// Span of the instruction currently being lowered (set by `lower_inst`).
     /// Consumed via `blame_span()` so backend errors blame the source line of
     /// the originating expression.
@@ -57,12 +57,12 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             constructor,
             body,
             is_entry_point,
-            value_map: HashMap::new(),
-            block_map: HashMap::new(),
-            block_indices: HashMap::new(),
+            value_map: LookupMap::new(),
+            block_map: LookupMap::new(),
+            block_indices: LookupMap::new(),
             phi_inputs: Vec::new(),
-            workgroup_view: HashMap::new(),
-            place_ptr_id: HashMap::new(),
+            workgroup_view: LookupMap::new(),
+            place_ptr_id: LookupMap::new(),
             current_span: None,
             func_span,
             param_ids,
@@ -174,10 +174,15 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
     /// (e.g. placing a loop's merge before its continue block). This traversal
     /// defers merge blocks until after all construct-interior blocks are visited.
     pub(super) fn compute_rpo(&self) -> Vec<BlockId> {
-        let mut visited: HashSet<BlockId> = HashSet::new();
+        let mut visited: LookupSet<BlockId> = LookupSet::new();
         let mut order = Vec::with_capacity(self.body.inner.blocks.len());
 
-        fn visit(body: &FuncBody, bid: BlockId, visited: &mut HashSet<BlockId>, order: &mut Vec<BlockId>) {
+        fn visit(
+            body: &FuncBody,
+            bid: BlockId,
+            visited: &mut LookupSet<BlockId>,
+            order: &mut Vec<BlockId>,
+        ) {
             if visited.contains(&bid) {
                 return;
             }
@@ -804,7 +809,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
 
     pub(super) fn insert_phi_nodes(&mut self) -> Result<()> {
         // Group phi inputs by (target_block, param_idx)
-        let mut phi_map: HashMap<(BlockId, usize), Vec<(spirv::Word, spirv::Word)>> = HashMap::new();
+        let mut phi_map: LookupMap<(BlockId, usize), Vec<(spirv::Word, spirv::Word)>> = LookupMap::new();
 
         for (target_block, param_idx, value, source_block) in &self.phi_inputs {
             phi_map.entry((*target_block, *param_idx)).or_default().push((*value, *source_block));

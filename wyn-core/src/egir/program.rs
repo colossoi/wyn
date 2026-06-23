@@ -9,7 +9,7 @@
 //! `EGraph` + control-headers + alias map, plus program-level metadata
 //! (constants, uniforms, storage decls, pipeline descriptor, extern stubs).
 
-use std::collections::HashMap;
+use crate::LookupMap;
 
 use polytype::Type;
 
@@ -29,8 +29,8 @@ pub struct EgirFunc {
     pub params: Vec<(Type<TypeName>, String)>,
     pub return_ty: Type<TypeName>,
     pub graph: EGraph,
-    pub control_headers: HashMap<BlockId, ControlHeader>,
-    pub aliases: HashMap<NodeId, NodeId>,
+    pub control_headers: LookupMap<BlockId, ControlHeader>,
+    pub aliases: LookupMap<NodeId, NodeId>,
 }
 
 impl EgirFunc {
@@ -41,7 +41,7 @@ impl EgirFunc {
         params: Vec<(Type<TypeName>, String)>,
         return_ty: Type<TypeName>,
         graph: EGraph,
-        control_headers: HashMap<BlockId, ControlHeader>,
+        control_headers: LookupMap<BlockId, ControlHeader>,
     ) -> Self {
         EgirFunc {
             name,
@@ -51,7 +51,7 @@ impl EgirFunc {
             return_ty,
             graph,
             control_headers,
-            aliases: HashMap::new(),
+            aliases: LookupMap::new(),
         }
     }
 }
@@ -81,8 +81,8 @@ pub struct EgirEntry {
     pub params: Vec<(Type<TypeName>, String)>,
     pub return_ty: Type<TypeName>,
     pub graph: EGraph,
-    pub control_headers: HashMap<BlockId, ControlHeader>,
-    pub aliases: HashMap<NodeId, NodeId>,
+    pub control_headers: LookupMap<BlockId, ControlHeader>,
+    pub aliases: LookupMap<NodeId, NodeId>,
     /// Per-slot list of (producing-block, value) pairs. Indexed by
     /// declared output slot. A slot with one source has `vec![one]`;
     /// a slot written from both arms of an `If` has two. Empty for
@@ -103,7 +103,7 @@ impl EgirEntry {
         params: Vec<(Type<TypeName>, String)>,
         return_ty: Type<TypeName>,
         graph: EGraph,
-        control_headers: HashMap<BlockId, ControlHeader>,
+        control_headers: LookupMap<BlockId, ControlHeader>,
     ) -> Self {
         EgirEntry {
             name,
@@ -116,7 +116,7 @@ impl EgirEntry {
             return_ty,
             graph,
             control_headers,
-            aliases: HashMap::new(),
+            aliases: LookupMap::new(),
             slot_sources: Vec::new(),
         }
     }

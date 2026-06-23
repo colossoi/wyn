@@ -18,7 +18,7 @@ mod storage;
 mod types_lowering;
 pub mod verify_buffer_layouts;
 use crate::builtins::catalog;
-use std::collections::{HashMap, HashSet};
+use crate::{LookupMap, LookupSet};
 
 use crate::ast::{Span, TypeName};
 use crate::builtins::lowering::{BuiltinLowering, PrimOp};
@@ -73,26 +73,26 @@ struct Constructor {
     // entry-point I/O setup (push constants / uniforms / locations
     // load through here so the SSA body can fetch the value by the
     // input's declared name).
-    env: HashMap<String, spirv::Word>,
+    env: LookupMap<String, spirv::Word>,
 
     // GLSL extended instruction set
     glsl_ext_inst_id: spirv::Word,
 
     // Top-level polytype → SPIR-V memoization (subsumes type + constant dedup for wyn types)
-    polytype_cache: HashMap<PolyType<TypeName>, spirv::Word>,
+    polytype_cache: LookupMap<PolyType<TypeName>, spirv::Word>,
 
     // Interface-block + nested-array lookups stay here for now —
     // they're entangled with the compiler's `PolyType` walks
     // (interface members need `apply_buffer_array_strides`, which is
     // PolyType-driven). The simpler block wrappers and structural
     // type caches live on `SpirvBuilder`.
-    interface_block_cache: HashMap<InterfaceBlockKey, spirv::Word>,
+    interface_block_cache: LookupMap<InterfaceBlockKey, spirv::Word>,
 
     // Entry point interface tracking
-    entry_point_interfaces: HashMap<String, Vec<spirv::Word>>,
+    entry_point_interfaces: LookupMap<String, Vec<spirv::Word>>,
 
     /// Storage buffers for compute shaders: (set, binding) -> (buffer_var, elem_type_id, buffer_ptr_type)
-    storage_buffers: HashMap<BindingRef, (spirv::Word, spirv::Word, spirv::Word)>,
+    storage_buffers: LookupMap<BindingRef, (spirv::Word, spirv::Word, spirv::Word)>,
 
     /// GlobalInvocationId variable for compute shaders (set during entry point setup)
     global_invocation_id: Option<spirv::Word>,
@@ -107,13 +107,13 @@ struct Constructor {
     push_constant_var: Option<spirv::Word>,
 
     /// Linked SPIR-V functions: linkage_name -> function_id
-    linked_functions: HashMap<String, spirv::Word>,
+    linked_functions: LookupMap<String, spirv::Word>,
 
     /// Compiler-generated integer-pow helpers (see `spirv::pow`), keyed
     /// by `signed`. Emitted once per module after function forward
     /// declarations; `PrimOp::IntPow` lowers to `OpFunctionCall` against
     /// the cached id.
-    int_pow_functions: HashMap<bool, spirv::Word>,
+    int_pow_functions: LookupMap<bool, spirv::Word>,
 
     /// Output variables for the current entry point being lowered.
     /// Set during entry point setup, cleared at end. Used by OutputPtr lowering.
@@ -123,13 +123,13 @@ struct Constructor {
     /// from a view's type via `array_view_region` → `get_or_assign_buffer_id`.
     buffer_vars: Vec<(spirv::Word, spirv::Word)>,
     /// (set, binding) → buffer_id, for deduplication in get_or_assign_buffer_id.
-    buffer_id_map: HashMap<BindingRef, u32>,
+    buffer_id_map: LookupMap<BindingRef, u32>,
     /// Workgroup-shared arrays: id → (workgroup `OpVariable`, element type).
     /// Created in `lower_ssa_entry_point` by pre-scanning the body for
     /// `StorageView(Workgroup{id, count})` ops, so the var exists (and is in
     /// the entry interface, required by SPIR-V ≥1.4) before `ViewIndex` chains
     /// into it.
-    workgroup_vars: HashMap<u32, (spirv::Word, spirv::Word)>,
+    workgroup_vars: LookupMap<u32, (spirv::Word, spirv::Word)>,
 
     /// Used by `polytype_to_spirv` when emitting `StorageTexture` for
     /// a function signature; entry-var emission still overrides per-
@@ -154,22 +154,22 @@ impl Constructor {
             i32_type,
             u32_type,
             f32_type,
-            env: HashMap::new(),
+            env: LookupMap::new(),
             glsl_ext_inst_id,
-            polytype_cache: HashMap::new(),
-            interface_block_cache: HashMap::new(),
-            entry_point_interfaces: HashMap::new(),
-            storage_buffers: HashMap::new(),
+            polytype_cache: LookupMap::new(),
+            interface_block_cache: LookupMap::new(),
+            entry_point_interfaces: LookupMap::new(),
+            storage_buffers: LookupMap::new(),
             global_invocation_id: None,
             local_invocation_id: None,
             num_workgroups: None,
             push_constant_var: None,
-            linked_functions: HashMap::new(),
-            int_pow_functions: HashMap::new(),
+            linked_functions: LookupMap::new(),
+            int_pow_functions: LookupMap::new(),
             current_entry_outputs: Vec::new(),
             buffer_vars: Vec::new(),
-            workgroup_vars: HashMap::new(),
-            buffer_id_map: HashMap::new(),
+            workgroup_vars: LookupMap::new(),
+            buffer_id_map: LookupMap::new(),
             storage_image_default_format: None,
         }
     }
@@ -494,7 +494,7 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
     // entry — including entries that only read the binding — so the shader's
     // declared access stays consistent across the module and matches the
     // descriptor's promoted `ReadWrite` (mirrors `egir::publish` written_bindings).
-    let written_bindings: HashSet<BindingRef> = program
+    let written_bindings: LookupSet<BindingRef> = program
         .entry_points
         .iter()
         .flat_map(|e| e.outputs.iter().filter_map(|o| o.storage_binding))

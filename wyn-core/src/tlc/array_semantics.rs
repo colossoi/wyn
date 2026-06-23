@@ -5,8 +5,8 @@
 //! based on semantic compatibility rather than syntactic pattern matching.
 
 use super::VarRef;
+use crate::LookupMap;
 use crate::SymbolTable;
-use std::collections::HashMap;
 
 use super::{
     extract_lambda_params, ArrayExpr, Def, Lambda, Place, Program, SoacBody, SoacOp, Term, TermKind,
@@ -493,9 +493,9 @@ pub enum ResultSemantics {
 
 /// Compute function summaries for all defs in a program, with fixpoint
 /// propagation for interprocedural analysis.
-pub fn summarize_program(program: &Program) -> HashMap<SymbolId, FunctionSummary> {
+pub fn summarize_program(program: &Program) -> LookupMap<SymbolId, FunctionSummary> {
     // Initial pass: summarize each def without interprocedural info
-    let mut summaries: HashMap<SymbolId, FunctionSummary> = HashMap::new();
+    let mut summaries: LookupMap<SymbolId, FunctionSummary> = LookupMap::new();
     for def in &program.defs {
         let summary = summarize_def(def);
         summaries.insert(def.name, summary);
@@ -589,7 +589,7 @@ fn analyze_body(body: &Term, params: &[SymbolId]) -> ResultSemantics {
 fn analyze_body_with_summaries(
     body: &Term,
     params: &[SymbolId],
-    summaries: &HashMap<SymbolId, FunctionSummary>,
+    summaries: &LookupMap<SymbolId, FunctionSummary>,
 ) -> ResultSemantics {
     match &body.kind {
         TermKind::Soac(soac) => {

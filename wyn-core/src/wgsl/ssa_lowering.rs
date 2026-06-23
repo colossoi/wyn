@@ -10,7 +10,7 @@
 //! - [`lower`]: entry point.
 
 use crate::builtins::{by_id, catalog};
-use std::collections::{HashMap, HashSet};
+use crate::{LookupMap, LookupSet};
 use std::fmt::Write as _;
 
 use polytype::Type as PolyType;
@@ -95,9 +95,9 @@ pub fn validate_wgsl_identifier(name: &str) -> core::result::Result<(), String> 
     Ok(())
 }
 
-fn wgsl_keyword_set() -> &'static std::collections::HashSet<&'static str> {
+fn wgsl_keyword_set() -> &'static LookupSet<&'static str> {
     use std::sync::OnceLock;
-    static SET: OnceLock<std::collections::HashSet<&'static str>> = OnceLock::new();
+    static SET: OnceLock<LookupSet<&'static str>> = OnceLock::new();
     SET.get_or_init(|| {
         [
             // Keywords (WGSL §2.4)
@@ -323,8 +323,8 @@ fn wgsl_keyword_set() -> &'static std::collections::HashSet<&'static str> {
 
 /// Lower Wyn polytypes to WGSL type strings, caching generated tuple structs.
 pub struct TypeEmitter {
-    tuple_type_cache: HashMap<String, String>,
-    pub tuple_structs: HashMap<String, Vec<String>>,
+    tuple_type_cache: LookupMap<String, String>,
+    pub tuple_structs: LookupMap<String, Vec<String>>,
     tuple_counter: usize,
     /// Virtual-array range structs, cached by element type string. A
     /// virtual array (produced by `ArrayRange`) lowers to a struct
@@ -332,13 +332,13 @@ pub struct TypeEmitter {
     /// names match `Project`'s `.f{index}` emission so start/step/len
     /// project naturally; `Index` and `_w_intrinsic_length` have
     /// dedicated handling.
-    virtual_range_cache: HashMap<String, String>,
+    virtual_range_cache: LookupMap<String, String>,
     pub virtual_range_structs: Vec<(String, String)>, // (struct_name, elem_ty)
     virtual_range_counter: usize,
     /// `array_variant_bounded` arrays — function-local fixed-capacity
     /// buffer plus a runtime length. Lowers to `{ buffer: array<T, N>,
     /// len: u32 }`. Key: `(elem_wgsl_ty, capacity)`.
-    bounded_cache: HashMap<(String, u32), String>,
+    bounded_cache: LookupMap<(String, u32), String>,
     /// `(struct_name, elem_ty, capacity)` for emission.
     pub bounded_structs: Vec<(String, String, u32)>,
     bounded_counter: usize,
@@ -353,13 +353,13 @@ impl Default for TypeEmitter {
 impl TypeEmitter {
     pub fn new() -> Self {
         Self {
-            tuple_type_cache: HashMap::new(),
-            tuple_structs: HashMap::new(),
+            tuple_type_cache: LookupMap::new(),
+            tuple_structs: LookupMap::new(),
             tuple_counter: 0,
-            virtual_range_cache: HashMap::new(),
+            virtual_range_cache: LookupMap::new(),
             virtual_range_structs: Vec::new(),
             virtual_range_counter: 0,
-            bounded_cache: HashMap::new(),
+            bounded_cache: LookupMap::new(),
             bounded_structs: Vec::new(),
             bounded_counter: 0,
         }
@@ -553,15 +553,15 @@ fn is_view_array_ty(ty: &polytype::Type<TypeName>) -> bool {
 struct LowerCtx<'a> {
     program: &'a Program,
     type_emitter: TypeEmitter,
-    lowered: HashSet<String>,
+    lowered: LookupSet<String>,
     indent: usize,
     /// Track mangled names for collision detection.
-    mangled_names: HashMap<String, String>,
+    mangled_names: LookupMap<String, String>,
     /// Entry-point output structs keyed by their field signature
     /// ("attr0+ty0,attr1+ty1,..."). Maps sig → (struct_name, fields).
     /// `fields` is an ordered list of (field_name, attribute_prefix,
     /// wgsl_type) tuples.
-    output_structs: HashMap<String, (String, Vec<(String, String, String)>)>,
+    output_structs: LookupMap<String, (String, Vec<(String, String, String)>)>,
     output_struct_counter: usize,
     /// Push-constant block info per entry-point name. Compute entries
     /// whose inputs carry `push_constant_offset` are backed by a uniform
@@ -569,7 +569,7 @@ struct LowerCtx<'a> {
     /// one field per push-constant input; fields are keyed by the input
     /// index in `entry.inputs` so `lower_entry_point` can route the
     /// corresponding SSA `ValueId` to `<block_var>.<field_name>`.
-    pc_blocks: HashMap<String, PcBlock>,
+    pc_blocks: LookupMap<String, PcBlock>,
     /// If the current compute entry's source declared its own
     /// `#[builtin(global_invocation_id)]` param, this holds that param's
     /// mangled WGSL name. `_w_intrinsic_thread_id()` lowering reads from
@@ -595,12 +595,12 @@ impl<'a> LowerCtx<'a> {
         Self {
             program,
             type_emitter: TypeEmitter::new(),
-            lowered: HashSet::new(),
+            lowered: LookupSet::new(),
             indent: 0,
-            mangled_names: HashMap::new(),
-            output_structs: HashMap::new(),
+            mangled_names: LookupMap::new(),
+            output_structs: LookupMap::new(),
             output_struct_counter: 0,
-            pc_blocks: HashMap::new(),
+            pc_blocks: LookupMap::new(),
             wgsl_gid_alias: None,
         }
     }
@@ -743,7 +743,7 @@ impl<'a> LowerCtx<'a> {
         // backed I/O. WGSL needs these at module scope; dedupe by
         // (set, binding) and coalesce access modes so an (in, out) pair
         // on the same slot becomes `read_write`.
-        let mut synth: HashMap<BindingRef, (String, String, bool, bool)> = HashMap::new();
+        let mut synth: LookupMap<BindingRef, (String, String, bool, bool)> = LookupMap::new();
         // Key → (elem_ty_str, module_name, has_read, has_write).
         let is_declared = |_: BindingRef| false;
         for entry in &self.program.entry_points {
@@ -890,7 +890,7 @@ impl<'a> LowerCtx<'a> {
         // the mangled form of the param name so it matches body
         // references. Dedupe by mangled name across entries — same
         // name in two entries must agree on (set, binding, type).
-        let mut uniforms: HashMap<String, (u32, u32, String)> = HashMap::new();
+        let mut uniforms: LookupMap<String, (u32, u32, String)> = LookupMap::new();
         for entry in &self.program.entry_points {
             for input in &entry.inputs {
                 if let Some(br) = input.uniform_binding {
@@ -925,7 +925,7 @@ impl<'a> LowerCtx<'a> {
         // module-scope handle vars (no address space). Same dedupe-by-name
         // discipline as uniforms. The WGSL type comes from the param type
         // (`texture_2d<f32>` / `sampler`).
-        let mut handles: HashMap<String, (u32, u32, String)> = HashMap::new();
+        let mut handles: LookupMap<String, (u32, u32, String)> = LookupMap::new();
         for entry in &self.program.entry_points {
             for input in &entry.inputs {
                 let set_binding = input.texture_binding.or(input.sampler_binding);
@@ -962,7 +962,7 @@ impl<'a> LowerCtx<'a> {
         // mode on the binding's type: `texture_storage_2d<format,
         // access>`. Dedupe by name in case multiple entries declare
         // the same param (cross-stage sharing).
-        let mut storage_images: HashMap<String, (u32, u32, String)> = HashMap::new();
+        let mut storage_images: LookupMap<String, (u32, u32, String)> = LookupMap::new();
         for entry in &self.program.entry_points {
             for input in &entry.inputs {
                 let Some((br, format, access, _size)) = input.storage_image_binding else {
@@ -1195,7 +1195,7 @@ impl<'a> LowerCtx<'a> {
         // field mapping (orig_index → field_name), which pre-declares
         // `var _out_struct: VsOutN;` in the body prelude and routes
         // `OutputPtr` targets into its fields.
-        let mut multi_output_struct: Option<(String, HashMap<usize, String>)> = None;
+        let mut multi_output_struct: Option<(String, LookupMap<usize, String>)> = None;
         let (ret_type_str, is_compute_void) = match entry.execution_model {
             ExecutionModel::Compute { .. } => (String::new(), true),
             _ => {
@@ -1225,7 +1225,7 @@ impl<'a> LowerCtx<'a> {
                     // `@location(N)` attribute (WGSL requires these on
                     // struct members, not on the return type).
                     let mut field_specs: Vec<(String, String)> = Vec::new();
-                    let mut index_to_field: HashMap<usize, String> = HashMap::new();
+                    let mut index_to_field: LookupMap<usize, String> = LookupMap::new();
                     for (orig_index, out) in &non_storage_outputs {
                         let ty_str = self.type_emitter.type_to_wgsl(&out.ty)?;
                         let attr = match &out.decoration {
@@ -1495,17 +1495,17 @@ struct BodyLowerCtx<'a, 'b> {
     body: &'a FuncBody,
     /// Emitted WGSL expression (or var name) per ValueId, tagged with
     /// its value category (rvalue-safe alias vs. lvalue place).
-    value_map: HashMap<ValueId, ValueBinding>,
+    value_map: LookupMap<ValueId, ValueBinding>,
     /// Set of names declared with `let`/`var` in the current scope.
-    declared: HashSet<String>,
+    declared: LookupSet<String>,
     /// Workgroup view name (`_wg_<id>`) keyed by `StorageView` result ValueId.
     /// Storage views recover their buffer name from the type's region; only
     /// workgroup views (whose `_wg_<id>` isn't in any type) need this.
-    workgroup_view_name: HashMap<ValueId, String>,
+    workgroup_view_name: LookupMap<ValueId, String>,
     /// WGSL place expression per `PlaceId` — output variable name,
     /// `_alloca_N` for function-local `Alloca`s, or `buf[offset+idx]`
     /// for `ViewIndex`. Consumed by `Load` / `Store` in `emit_nodes`.
-    place_targets: HashMap<crate::ssa::types::PlaceId, String>,
+    place_targets: LookupMap<crate::ssa::types::PlaceId, String>,
     /// Set to `true` if at least one `OutputSlot` was lowered; the entry
     /// wrapper then returns the declared `_out0` (or builds a return
     /// struct for multi-output) instead of emitting a `return <expr>;`
@@ -1516,7 +1516,7 @@ struct BodyLowerCtx<'a, 'b> {
     /// otherwise the default `_out{index}` is used. Populated by
     /// `lower_entry_point` when it's packing outputs into a struct —
     /// then the name is `_out_struct.f{index}`.
-    output_target_names: HashMap<usize, String>,
+    output_target_names: LookupMap<usize, String>,
     /// Span of the instruction currently being lowered.
     current_span: Option<Span>,
     func_span: Span,
@@ -1527,12 +1527,12 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         Self {
             ctx,
             body,
-            value_map: HashMap::new(),
-            declared: HashSet::new(),
-            workgroup_view_name: HashMap::new(),
-            place_targets: HashMap::new(),
+            value_map: LookupMap::new(),
+            declared: LookupSet::new(),
+            workgroup_view_name: LookupMap::new(),
+            place_targets: LookupMap::new(),
             uses_output_ptrs: false,
-            output_target_names: HashMap::new(),
+            output_target_names: LookupMap::new(),
             current_span: None,
             func_span,
         }

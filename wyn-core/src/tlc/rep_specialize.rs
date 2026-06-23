@@ -31,9 +31,9 @@
 use super::{Def, DefMeta, Lambda, LoopKind, Program, SoacOp, Term, TermIdSource, TermKind, VarRef};
 use crate::ast::TypeName;
 use crate::tlc::ArrayExpr;
+use crate::LookupMap;
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
-use std::collections::HashMap;
 
 /// Concrete array representation variant chosen by a known producer.
 /// `Bounded` carries the producer's static capacity — the consumer's
@@ -92,15 +92,15 @@ type SpecKey = Vec<Option<ConcreteVariant>>;
 struct RepSpecializer {
     symbols: SymbolTable,
     term_ids: TermIdSource,
-    def_map: HashMap<SymbolId, Def>,
+    def_map: LookupMap<SymbolId, Def>,
     /// Cache: `(orig_callee_sym, spec_key) → specialized_sym`.
-    specializations: HashMap<(SymbolId, SpecKey), SymbolId>,
+    specializations: LookupMap<(SymbolId, SpecKey), SymbolId>,
     /// Newly generated specialized defs, appended to the program.
     new_defs: Vec<Def>,
     /// Scoped per-def env. Stack of frames pushed/popped at every Let
     /// (and at every nested Lambda — captures don't leak across defs).
     /// Each frame maps a bound symbol to the producer-derived variant.
-    env_stack: Vec<HashMap<SymbolId, ConcreteVariant>>,
+    env_stack: Vec<LookupMap<SymbolId, ConcreteVariant>>,
 }
 
 /// Entry point: rewrite every def's body to insert call-edge
@@ -128,12 +128,12 @@ pub fn run(program: Program) -> Program {
 
 impl RepSpecializer {
     fn new(program: &Program) -> Self {
-        let def_map: HashMap<SymbolId, Def> = program.defs.iter().map(|d| (d.name, d.clone())).collect();
+        let def_map: LookupMap<SymbolId, Def> = program.defs.iter().map(|d| (d.name, d.clone())).collect();
         Self {
             symbols: program.symbols.clone(),
             term_ids: TermIdSource::new(),
             def_map,
-            specializations: HashMap::new(),
+            specializations: LookupMap::new(),
             new_defs: Vec::new(),
             env_stack: Vec::new(),
         }
@@ -144,7 +144,7 @@ impl RepSpecializer {
     // ------------------------------------------------------------------
 
     fn push_scope(&mut self) {
-        self.env_stack.push(HashMap::new());
+        self.env_stack.push(LookupMap::new());
     }
 
     fn pop_scope(&mut self) {

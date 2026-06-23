@@ -14,7 +14,7 @@
 //! live in a generated operator def while the producer survives only as a SOAC
 //! capture, which is exactly the interprocedural rewrite this pass avoids.
 
-use std::collections::HashSet;
+use crate::LookupSet;
 
 use polytype::Type;
 
@@ -32,7 +32,7 @@ struct Binding {
 
 pub fn run(mut program: Program) -> Program {
     let mut ids = TermIdSource::new();
-    let blocked = HashSet::new();
+    let blocked = LookupSet::new();
 
     for idx in 0..program.defs.len() {
         let body = program.defs[idx].body.clone();
@@ -45,7 +45,7 @@ pub fn run(mut program: Program) -> Program {
 
 fn float_term(
     term: Term,
-    blocked: &HashSet<SymbolId>,
+    blocked: &LookupSet<SymbolId>,
     ids: &mut TermIdSource,
     symbols: &mut crate::SymbolTable,
     collect: bool,
@@ -219,7 +219,7 @@ fn float_term(
 
 fn float_soac(
     soac: SoacOp,
-    blocked: &HashSet<SymbolId>,
+    blocked: &LookupSet<SymbolId>,
     ids: &mut TermIdSource,
     symbols: &mut crate::SymbolTable,
 ) -> (Vec<Binding>, SoacOp) {
@@ -430,7 +430,7 @@ fn float_soac(
 
 fn float_soac_body(
     body: SoacBody,
-    blocked: &HashSet<SymbolId>,
+    blocked: &LookupSet<SymbolId>,
     ids: &mut TermIdSource,
     symbols: &mut crate::SymbolTable,
 ) -> (Vec<Binding>, SoacBody) {
@@ -462,7 +462,7 @@ fn float_soac_body(
 
 fn float_array_expr(
     ae: ArrayExpr,
-    blocked: &HashSet<SymbolId>,
+    blocked: &LookupSet<SymbolId>,
     ids: &mut TermIdSource,
     symbols: &mut crate::SymbolTable,
 ) -> (Vec<Binding>, ArrayExpr) {
@@ -583,7 +583,7 @@ fn is_int_lit(term: &Term) -> bool {
     matches!(term.kind, TermKind::IntLit(_))
 }
 
-fn references_any(term: &Term, blocked: &HashSet<SymbolId>) -> bool {
+fn references_any(term: &Term, blocked: &LookupSet<SymbolId>) -> bool {
     let mut found = false;
     term.for_each_child(&mut |child| {
         if !found {

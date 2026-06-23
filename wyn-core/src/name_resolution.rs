@@ -17,7 +17,7 @@
 //! top-level defs, module values) are absent from the side table — the
 //! type checker handles them via scope/module lookup.
 
-use std::collections::HashMap;
+use crate::LookupMap;
 
 use crate::ast::{Declaration, ExprKind, Expression, NodeId, Program};
 use crate::builtins::{BuiltinCatalog, BuiltinId};
@@ -356,7 +356,7 @@ pub enum ResolvedValueRef {
 /// catalog (locals, top-level defs, module values) are absent.
 #[derive(Debug, Clone, Default)]
 pub struct NameResolution {
-    pub values: HashMap<NodeId, ResolvedValueRef>,
+    pub values: LookupMap<NodeId, ResolvedValueRef>,
 }
 
 impl NameResolution {

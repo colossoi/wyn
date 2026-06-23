@@ -11,10 +11,11 @@
 
 use super::VarRef;
 use crate::ast::{Span, TypeName};
+use crate::LookupSet;
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
 
-use std::collections::HashMap;
+use crate::LookupMap;
 
 use super::array_semantics::{
     can_fuse, classify_soac, classify_term, summarize_program, ArraySemantics, FunctionSummary,
@@ -25,7 +26,7 @@ use super::{
     TermIdSource, TermKind,
 };
 
-type Summaries = HashMap<SymbolId, FunctionSummary>;
+type Summaries = LookupMap<SymbolId, FunctionSummary>;
 
 /// Pass-local context threaded through every fusion-internal call.
 /// Holds artifacts that are expensive to recompute per call site:
@@ -34,7 +35,7 @@ type Summaries = HashMap<SymbolId, FunctionSummary>;
 ///   `producer_graph::build_producer_graph` call.
 struct FusionContext<'a> {
     summaries: &'a Summaries,
-    sym_to_def: HashMap<SymbolId, SymbolId>,
+    sym_to_def: LookupMap<SymbolId, SymbolId>,
 }
 
 /// Build the `Var-symbol → def-symbol` lookup once. The fusion pass
@@ -42,9 +43,9 @@ struct FusionContext<'a> {
 /// none of those name a def, so the map stays valid across the sweep.
 pub(crate) fn build_sym_to_def(
     symbols: &SymbolTable,
-    def_syms: &HashMap<String, SymbolId>,
-) -> HashMap<SymbolId, SymbolId> {
-    let mut sym_to_def: HashMap<SymbolId, SymbolId> = HashMap::new();
+    def_syms: &LookupMap<String, SymbolId>,
+) -> LookupMap<SymbolId, SymbolId> {
+    let mut sym_to_def: LookupMap<SymbolId, SymbolId> = LookupMap::new();
     for (sym, name) in symbols.iter() {
         if let Some(&def_sym) = def_syms.get(name) {
             sym_to_def.insert(*sym, def_sym);
@@ -189,7 +190,7 @@ struct ProjectionTemplate {
 
 struct PlannedScremaRewrite {
     rewrite: ScremaRewrite,
-    term_replacements: HashMap<TermId, ProjectionTemplate>,
+    term_replacements: LookupMap<TermId, ProjectionTemplate>,
     tail_projection: Option<ProjectionTemplate>,
 }
 
@@ -208,7 +209,7 @@ struct ScremaRewrite {
     tuple_sym: SymbolId,
     tuple_ty: Type<TypeName>,
     fused_binding: LetBinding,
-    projection_fields: HashMap<usize, usize>,
+    projection_fields: LookupMap<usize, usize>,
 }
 
 struct ScremaProducer {
@@ -468,7 +469,7 @@ fn make_screma_rewrite(
     accumulators: Vec<super::ScremaAccumulatorSpec>,
     inputs: Vec<ArrayExpr>,
     span: Span,
-    projection_fields: HashMap<usize, usize>,
+    projection_fields: LookupMap<usize, usize>,
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
 ) -> ScremaRewrite {
@@ -611,7 +612,7 @@ fn classify_uses_in_owner(
     // `let X = Var(producer) in body`, the body uses `X` as an alias for
     // the producer. Track aliases as we descend so the recognizers see
     // through them.
-    let mut producers: std::collections::HashSet<SymbolId> = std::collections::HashSet::new();
+    let mut producers: LookupSet<SymbolId> = LookupSet::new();
     producers.insert(producer_sym);
     let mut uses = Vec::new();
     collect_classified_uses(term, owner, &producers, ctx, term_ids, true, &mut uses);
@@ -631,7 +632,7 @@ fn classify_uses_in_owner(
 fn collect_classified_uses(
     term: &Term,
     owner: UseOwner,
-    producers: &std::collections::HashSet<SymbolId>,
+    producers: &LookupSet<SymbolId>,
     ctx: &FusionContext<'_>,
     term_ids: &mut TermIdSource,
     allow_screma_input: bool,
@@ -740,10 +741,7 @@ fn collect_classified_uses(
     }
 }
 
-fn semantic_input_indices(
-    semantics: &ArraySemantics,
-    producers: &std::collections::HashSet<SymbolId>,
-) -> Vec<usize> {
+fn semantic_input_indices(semantics: &ArraySemantics, producers: &LookupSet<SymbolId>) -> Vec<usize> {
     semantics
         .input_exprs()
         .iter()
@@ -752,7 +750,7 @@ fn semantic_input_indices(
         .collect()
 }
 
-fn top_screma_input_count(term: &Term, producers: &std::collections::HashSet<SymbolId>) -> usize {
+fn top_screma_input_count(term: &Term, producers: &LookupSet<SymbolId>) -> usize {
     let TermKind::Soac(SoacOp::Screma { inputs, .. }) = &term.kind else {
         return 0;
     };
@@ -769,7 +767,7 @@ fn find_direct_horizontal_map_plan(
     let result_fields: Vec<_> =
         group.maps.iter().map(|consumer| bindings[consumer.binding_idx].name_ty.clone()).collect();
     let map_lams: Vec<_> = group.maps.iter().map(|consumer| consumer.lam.clone()).collect();
-    let projection_fields: HashMap<usize, usize> = group
+    let projection_fields: LookupMap<usize, usize> = group
         .maps
         .iter()
         .enumerate()
@@ -790,7 +788,7 @@ fn find_direct_horizontal_map_plan(
     );
     Some(FusionPlan::Screma(PlannedScremaRewrite {
         rewrite,
-        term_replacements: HashMap::new(),
+        term_replacements: LookupMap::new(),
         tail_projection: None,
     }))
 }
@@ -921,7 +919,7 @@ fn find_map_group_plan(
             ne: consumer.ne.clone(),
         })
         .collect();
-    let mut projection_fields = HashMap::new();
+    let mut projection_fields = LookupMap::new();
     projection_fields
         .extend(maps.iter().enumerate().map(|(field_idx, consumer)| (consumer.binding_idx, field_idx)));
     projection_fields.extend(
@@ -945,7 +943,7 @@ fn find_map_group_plan(
     );
     Some(FusionPlan::Screma(PlannedScremaRewrite {
         rewrite,
-        term_replacements: HashMap::new(),
+        term_replacements: LookupMap::new(),
         tail_projection: None,
     }))
 }
@@ -1017,7 +1015,7 @@ fn find_filter_plan(
 
     let mut result_fields = Vec::new();
     let mut accumulators = Vec::new();
-    let mut projection_fields = HashMap::new();
+    let mut projection_fields = LookupMap::new();
     let mut tail_projection_field: Option<(usize, Type<TypeName>, Span)> = None;
     let mut nested_replacement_fields: Vec<(TermId, usize, Type<TypeName>, Span)> = Vec::new();
     let skip_indices = vec![producer.binding_idx];
@@ -1076,7 +1074,7 @@ fn find_filter_plan(
         symbols,
         term_ids,
     );
-    let mut term_replacements = HashMap::new();
+    let mut term_replacements = LookupMap::new();
     for (term_id, field_idx, ty, span) in
         nested_replacement_fields.into_iter().chain(length_replacement_fields)
     {
@@ -1210,7 +1208,11 @@ fn apply_planned_screma_rewrite(
     bindings: &[LetBinding],
     plan: PlannedScremaRewrite,
     term_ids: &mut TermIdSource,
-) -> (Vec<LetBinding>, HashMap<TermId, ProjectionTemplate>, Option<Term>) {
+) -> (
+    Vec<LetBinding>,
+    LookupMap<TermId, ProjectionTemplate>,
+    Option<Term>,
+) {
     // The producer symbol(s) being replaced — their bindings disappear,
     // so any leftover `Var(producer)` references (e.g. structural alias
     // lets `let X = Var(filt) in body` that the classifier saw through)
@@ -1271,7 +1273,7 @@ fn projection_term(projection: &ProjectionTemplate, term_ids: &mut TermIdSource)
 
 fn replace_projection_terms(
     term: Term,
-    replacements: &HashMap<TermId, ProjectionTemplate>,
+    replacements: &LookupMap<TermId, ProjectionTemplate>,
     term_ids: &mut TermIdSource,
 ) -> Term {
     if let Some(projection) = replacements.get(&term.id) {
@@ -1350,7 +1352,7 @@ fn substitute_summary_args(
     call_args: &[Term],
     term_ids: &mut TermIdSource,
 ) -> ArraySemantics {
-    let param_to_arg: HashMap<SymbolId, Term> = summary_params
+    let param_to_arg: LookupMap<SymbolId, Term> = summary_params
         .iter()
         .zip(call_args)
         .map(|((param_sym, _), arg)| (*param_sym, arg.clone()))
@@ -1619,7 +1621,7 @@ fn substitute_term_in_array_expr(
     }
 }
 
-fn is_length_call_of(term: &Term, producers: &std::collections::HashSet<SymbolId>) -> bool {
+fn is_length_call_of(term: &Term, producers: &LookupSet<SymbolId>) -> bool {
     let TermKind::App { func, args } = &term.kind else {
         return false;
     };
@@ -1643,7 +1645,7 @@ fn is_length_call_of(term: &Term, producers: &std::collections::HashSet<SymbolId
 /// structural pass-throughs, not consumer uses; `X` joins the alias set
 /// when descending into `body`). Mirrors `collect_classified_uses`'s
 /// scoping so `raw_refs` and `recognized_refs` agree.
-fn aliased_var_ref_count(term: &Term, producers: &std::collections::HashSet<SymbolId>) -> usize {
+fn aliased_var_ref_count(term: &Term, producers: &LookupSet<SymbolId>) -> usize {
     match &term.kind {
         TermKind::Var(VarRef::Symbol(s)) if producers.contains(s) => 1,
         TermKind::Lambda(lam) if lam.params.iter().any(|(p, _)| producers.contains(p)) => 0,

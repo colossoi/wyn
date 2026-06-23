@@ -4,7 +4,7 @@
 //! is its own best representative. When union nodes exist, bottom-up DP
 //! picks the cheaper child at each union.
 
-use std::collections::HashMap;
+use crate::LookupMap;
 
 use super::types::{EGraph, ENode, NodeId, PureOp};
 
@@ -16,9 +16,9 @@ pub type Cost = u32;
 /// Returns a map from NodeId → best concrete NodeId (the chosen representative).
 /// For non-union nodes, this maps to themselves.
 /// For union nodes, this maps to the best leaf of the union tree.
-pub fn extract(graph: &EGraph) -> HashMap<NodeId, NodeId> {
-    let mut best_cost: HashMap<NodeId, Cost> = HashMap::new();
-    let mut best_node: HashMap<NodeId, NodeId> = HashMap::new();
+pub fn extract(graph: &EGraph) -> LookupMap<NodeId, NodeId> {
+    let mut best_cost: LookupMap<NodeId, Cost> = LookupMap::new();
+    let mut best_node: LookupMap<NodeId, NodeId> = LookupMap::new();
 
     // Topological sort of the acyclic graph.
     let topo = topological_sort(graph);
@@ -100,7 +100,7 @@ fn op_cost(op: &PureOp) -> Cost {
 
 /// Kahn's algorithm for topological sort on the acyclic e-graph.
 fn topological_sort(graph: &EGraph) -> Vec<NodeId> {
-    let mut in_degree: HashMap<NodeId, usize> = HashMap::new();
+    let mut in_degree: LookupMap<NodeId, usize> = LookupMap::new();
     for (nid, _) in &graph.nodes {
         in_degree.entry(nid).or_insert(0);
     }
@@ -129,7 +129,7 @@ fn topological_sort(graph: &EGraph) -> Vec<NodeId> {
     }
 
     // Build reverse adjacency: child → list of parents that depend on it.
-    let mut users: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    let mut users: LookupMap<NodeId, Vec<NodeId>> = LookupMap::new();
     for (nid, node) in &graph.nodes {
         for child in node.children() {
             users.entry(child).or_default().push(nid);

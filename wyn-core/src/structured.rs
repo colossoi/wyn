@@ -8,7 +8,7 @@
 
 use crate::ssa::framework::InstId;
 use crate::ssa::types::{BlockId, ControlHeader, FuncBody, Terminator, ValueId};
-use std::collections::HashSet;
+use crate::LookupSet;
 
 /// A node in the structured control flow tree.
 #[derive(Debug)]
@@ -74,7 +74,7 @@ impl<'a> StructCtx<'a> {
         let mut nodes = Vec::new();
         let mut current = block_id;
         let mut current_args: Vec<ValueId> = args.to_vec();
-        let mut visited = HashSet::new();
+        let mut visited = LookupSet::new();
 
         loop {
             if !visited.insert(current) {
@@ -195,7 +195,7 @@ impl<'a> StructCtx<'a> {
         let mut nodes = Vec::new();
         let mut current = start;
         let mut current_args: Vec<ValueId> = args.to_vec();
-        let mut visited = HashSet::new();
+        let mut visited = LookupSet::new();
         let d = self.depth.get();
         self.depth.set(d + 1);
         if d > 100 {
@@ -362,7 +362,7 @@ impl<'a> StructCtx<'a> {
 
     /// Check if `from` reaches `target` without going through `avoid`.
     fn reaches_without_header(&self, from: BlockId, target: BlockId, avoid: BlockId) -> bool {
-        let mut visited = HashSet::new();
+        let mut visited = LookupSet::new();
         let mut queue = std::collections::VecDeque::new();
         queue.push_back(from);
         while let Some(b) = queue.pop_front() {
@@ -403,12 +403,12 @@ impl<'a> StructCtx<'a> {
         }
         // Fallback: BFS for first common target
         let then_reachable = self.reachable_from(then_block);
-        let else_reachable: HashSet<_> = self.reachable_from(else_block).into_iter().collect();
+        let else_reachable: LookupSet<_> = self.reachable_from(else_block).into_iter().collect();
         then_reachable.into_iter().find(|b| else_reachable.contains(b))
     }
 
     fn reachable_from(&self, start: BlockId) -> Vec<BlockId> {
-        let mut visited = HashSet::new();
+        let mut visited = LookupSet::new();
         let mut queue = std::collections::VecDeque::new();
         let mut result = Vec::new();
         queue.push_back(start);

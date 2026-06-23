@@ -12,9 +12,9 @@
 //!     vector / matrix in practice; if a runtime-sized array ever
 //!     surfaces here it's a contract violation upstream.
 
+use crate::LookupMap;
 use polytype::Type;
 use smallvec::smallvec;
-use std::collections::HashMap;
 
 use crate::ast::TypeName;
 use crate::ssa::framework::BlockId;
@@ -49,7 +49,7 @@ mod dispatch_tests;
 #[allow(clippy::too_many_arguments)]
 pub fn compute_slot_source(
     graph: &mut EGraph,
-    aliases: &mut HashMap<NodeId, NodeId>,
+    aliases: &mut LookupMap<NodeId, NodeId>,
     next_effect: &mut u32,
     block: BlockId,
     source: NodeId,
@@ -386,7 +386,7 @@ pub(crate) fn retarget_array_projection(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn rewrite_sibling_index_consumers(
     graph: &mut EGraph,
-    aliases: &mut HashMap<NodeId, NodeId>,
+    aliases: &mut LookupMap<NodeId, NodeId>,
     block: BlockId,
     next_effect: &mut u32,
     source: NodeId,

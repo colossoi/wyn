@@ -8,7 +8,7 @@
 //! 3. `TypeChecker` — load builtins, run inference, collect schemes/warnings.
 
 use crate::builtins::catalog;
-use std::collections::HashMap;
+use crate::LookupMap;
 
 use polytype::TypeScheme;
 
@@ -21,8 +21,8 @@ use crate::resolve_placeholders;
 use crate::types::checker::{TypeChecker, TypeWarning};
 
 pub struct TypeCheckOutput {
-    pub type_table: HashMap<NodeId, TypeScheme<TypeName>>,
-    pub schemes: HashMap<String, TypeScheme<TypeName>>,
+    pub type_table: LookupMap<NodeId, TypeScheme<TypeName>>,
+    pub schemes: LookupMap<String, TypeScheme<TypeName>>,
     pub warnings: Vec<TypeWarning>,
     pub builtin_names: Vec<String>,
     pub name_resolution: NameResolution,

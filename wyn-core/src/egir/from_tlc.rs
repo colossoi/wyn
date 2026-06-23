@@ -11,7 +11,7 @@ use crate::ssa::types::EntryOutput;
 use crate::ssa::types::IoDecoration;
 use crate::tlc::SoacBody;
 use crate::tlc::VarRef;
-use std::collections::{HashMap, HashSet};
+use crate::{LookupMap, LookupSet};
 
 use super::publish::PipelineDescriptorPublish;
 use super::types::EffectToken;
@@ -97,15 +97,15 @@ fn symbol_name(symbols: &SymbolTable, sym: SymbolId) -> Result<&str, ConvertErro
 /// caller's current `pure_constants` set into a fresh `Converter`,
 /// keeping the per-call `clone()` inside one method.
 struct GlobalContext<'a> {
-    top_level: &'a HashMap<SymbolId, &'a TlcDef>,
-    constants_by_name: &'a HashMap<String, SymbolId>,
+    top_level: &'a LookupMap<SymbolId, &'a TlcDef>,
+    constants_by_name: &'a LookupMap<String, SymbolId>,
     symbols: &'a SymbolTable,
 }
 
 impl<'a> GlobalContext<'a> {
     fn new_converter<'b>(
         &self,
-        pure_constants: &HashSet<String>,
+        pure_constants: &LookupSet<String>,
         binding_ids: &'b mut crate::IdSource<u32>,
     ) -> Converter<'a, 'b> {
         Converter::new(
@@ -129,11 +129,11 @@ impl<'a> GlobalContext<'a> {
 pub fn run(
     program: &TlcProgram,
     mut pipeline: PipelineDescriptor,
-    plans: &HashMap<String, crate::tlc::parallelize::ParallelizationPlan>,
+    plans: &LookupMap<String, crate::tlc::parallelize::ParallelizationPlan>,
     input_slice_bounds: &crate::tlc::input_slice_bounds::ProgramBounds,
     binding_ids: &mut crate::IdSource<u32>,
 ) -> Result<EgirInner, ConvertError> {
-    let top_level: HashMap<SymbolId, &TlcDef> = program.defs.iter().map(|d| (d.name, d)).collect();
+    let top_level: LookupMap<SymbolId, &TlcDef> = program.defs.iter().map(|d| (d.name, d)).collect();
     let symbols = &program.symbols;
 
     let constants_by_name = program.value_defs_by_name();
@@ -148,7 +148,7 @@ pub fn run(
     // through the full EGIR pipeline once (using a throwaway chain) to see if
     // it collapses to a purely-constant FuncBody. Constants are hoisted to
     // program scope and referenced by `PureOp::Global`.
-    let mut pure_constant_names: HashSet<String> = HashSet::new();
+    let mut pure_constant_names: LookupSet<String> = LookupSet::new();
     let mut constants = Vec::new();
 
     for def in &program.defs {
@@ -281,7 +281,7 @@ enum ConvertedFunc {
 fn convert_function<'a>(
     def: &TlcDef,
     ctx: &GlobalContext<'a>,
-    pure_constants: &HashSet<String>,
+    pure_constants: &LookupSet<String>,
     binding_ids: &'a mut crate::IdSource<u32>,
 ) -> Result<ConvertedFunc, ConvertError> {
     let symbols = ctx.symbols;
@@ -372,11 +372,11 @@ fn convert_entry_point(
     def: &TlcDef,
     entry: &interface::EntryDecl,
     ctx: &GlobalContext,
-    pure_constants: &HashSet<String>,
+    pure_constants: &LookupSet<String>,
     workgroup: (u32, u32, u32),
     forced_output_binding: Option<BindingRef>,
     dispatch_sized_outputs: bool,
-    input_slice_bounds_for_entry: Option<&HashMap<SymbolId, BufferLen>>,
+    input_slice_bounds_for_entry: Option<&LookupMap<SymbolId, BufferLen>>,
     binding_ids: &mut crate::IdSource<u32>,
 ) -> Result<EgirEntry, ConvertError> {
     use crate::ssa::types::{EntryInput, ExecutionModel, IoDecoration, PushConstantSlot};
@@ -644,19 +644,19 @@ struct Converter<'a, 'b> {
     /// Current skeleton block for side effects and terminators.
     current_block: BlockId,
     /// TLC variable → EGraph node mapping.
-    locals: HashMap<SymbolId, NodeId>,
+    locals: LookupMap<SymbolId, NodeId>,
     /// Top-level definitions.
-    top_level: &'a HashMap<SymbolId, &'a TlcDef>,
+    top_level: &'a LookupMap<SymbolId, &'a TlcDef>,
     /// Arity-0 defs indexed by name.
-    constants_by_name: &'a HashMap<String, SymbolId>,
+    constants_by_name: &'a LookupMap<String, SymbolId>,
     /// Symbol table.
     symbols: &'a SymbolTable,
     /// Cache for inlined constant bodies.
-    inlined_constants: HashMap<String, NodeId>,
+    inlined_constants: LookupMap<String, NodeId>,
     /// Names of hoisted pure constants.
-    pure_constants: HashSet<String>,
+    pure_constants: LookupSet<String>,
     /// Control headers for structured control flow (SPIR-V).
-    control_headers: HashMap<BlockId, ControlHeader>,
+    control_headers: LookupMap<BlockId, ControlHeader>,
     /// Effect token counter.
     next_effect: u32,
     /// Span of the term currently being converted. Threaded through every
@@ -693,10 +693,10 @@ struct Converter<'a, 'b> {
 
 impl<'a, 'b> Converter<'a, 'b> {
     fn new(
-        top_level: &'a HashMap<SymbolId, &'a TlcDef>,
-        constants_by_name: &'a HashMap<String, SymbolId>,
+        top_level: &'a LookupMap<SymbolId, &'a TlcDef>,
+        constants_by_name: &'a LookupMap<String, SymbolId>,
         symbols: &'a SymbolTable,
-        pure_constants: HashSet<String>,
+        pure_constants: LookupSet<String>,
         binding_ids: &'b mut crate::IdSource<u32>,
     ) -> Self {
         let graph = EGraph::new();
@@ -704,13 +704,13 @@ impl<'a, 'b> Converter<'a, 'b> {
         Converter {
             graph,
             current_block: entry,
-            locals: HashMap::new(),
+            locals: LookupMap::new(),
             top_level,
             constants_by_name,
             symbols,
-            inlined_constants: HashMap::new(),
+            inlined_constants: LookupMap::new(),
             pure_constants,
-            control_headers: HashMap::new(),
+            control_headers: LookupMap::new(),
             next_effect: 1,
             current_span: None,
             slot_sources_accum: Vec::new(),
@@ -769,7 +769,7 @@ impl<'a, 'b> Converter<'a, 'b> {
     /// Extract the built EGraph + control_headers, leaving the rest of the
     /// Converter state behind. Used by the top-level `convert_program`
     /// phase to feed a ready-to-chain `EgirFunc` / `EgirEntry`.
-    fn into_graph_parts(self) -> (EGraph, HashMap<BlockId, ControlHeader>) {
+    fn into_graph_parts(self) -> (EGraph, LookupMap<BlockId, ControlHeader>) {
         (self.graph, self.control_headers)
     }
 
@@ -794,7 +794,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let skel_domtree = super::domtree::DomTree::build(&super::domtree::SkeletonCfgView {
             skeleton: &graph.skeleton,
         });
-        let identity_map: HashMap<BlockId, BlockId> =
+        let identity_map: LookupMap<BlockId, BlockId> =
             graph.skeleton.blocks.keys().map(|b| (b, b)).collect();
         Some(super::elaborate::run(
             &graph,

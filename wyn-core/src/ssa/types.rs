@@ -31,9 +31,9 @@ use crate::ast::{Span, TypeName};
 use crate::interface;
 use crate::op::OpTag;
 use crate::BindingRef;
+use crate::LookupMap;
 use polytype::Type;
 use slotmap::SlotMap;
-use std::collections::HashMap;
 use wspirv::spirv;
 
 // Re-export ID types from wyn-ssa.
@@ -378,7 +378,7 @@ pub struct FuncBody {
     pub inner: WynFunction,
 
     /// Structured control flow headers (for SPIR-V lowering).
-    pub control_headers: HashMap<BlockId, ControlHeader>,
+    pub control_headers: LookupMap<BlockId, ControlHeader>,
 
     /// Function parameters (value, type, name).
     pub params: Vec<(ValueId, Type<TypeName>, String)>,

@@ -2,7 +2,7 @@
 //! `ParallelizationPlan`s produced by `tlc::parallelize` and runs
 //! `parallelize_entry` on each planned entry — see its doc for the
 //! dispatch shape.
-use std::collections::HashMap;
+use crate::LookupMap;
 
 use polytype::Type;
 use smallvec::smallvec;
@@ -35,7 +35,7 @@ use crate::tlc::parallelize::ParallelizationPlan;
 ///   chunked output view + appended chunked reduce → `block_sums[tid]`),
 ///   plus synthesized phase 2 (sequential scan of `block_sums`) and
 ///   phase 3 (apply offsets via a swap-args wrapper).
-pub fn run(inner: &mut EgirInner, plans: &HashMap<String, ParallelizationPlan>) {
+pub fn run(inner: &mut EgirInner, plans: &LookupMap<String, ParallelizationPlan>) {
     let mut new_entries: Vec<EgirEntry> = Vec::new();
     let mut new_functions: Vec<EgirFunc> = Vec::new();
     for entry in inner.entry_points.iter_mut() {
@@ -1421,6 +1421,6 @@ fn synthesize_swap_wrapper(
         ],
         elem_ty,
         graph,
-        HashMap::new(),
+        LookupMap::new(),
     )
 }

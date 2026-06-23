@@ -3,13 +3,13 @@
 //! Each scope corresponds to a subtree in the dominator tree.
 //! Values inserted in a child scope are invisible after popping back to the parent.
 
-use std::collections::HashMap;
+use crate::LookupMap;
 use std::hash::Hash;
 
 /// A hashmap with push/pop scope operations.
 pub struct ScopedMap<K: Hash + Eq, V> {
     /// Key → stack of (depth, value). Top of stack is the most recent.
-    map: HashMap<K, Vec<(usize, V)>>,
+    map: LookupMap<K, Vec<(usize, V)>>,
     /// Current scope depth (0 = root).
     depth: usize,
     /// Keys inserted at each depth, for cleanup on pop.
@@ -19,7 +19,7 @@ pub struct ScopedMap<K: Hash + Eq, V> {
 impl<K: Hash + Eq + Clone, V: Copy> ScopedMap<K, V> {
     pub fn new() -> Self {
         ScopedMap {
-            map: HashMap::new(),
+            map: LookupMap::new(),
             depth: 0,
             scope_keys: vec![Vec::new()],
         }

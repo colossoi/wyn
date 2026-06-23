@@ -17,9 +17,9 @@ use crate::ssa::framework::BlockId as SkelBlockId;
 use crate::ssa::types::{
     BlockId, ControlHeader, EntryPoint, FuncBody, Function, InstKind, PlaceId, Program, ValueId, ValueRef,
 };
+use crate::LookupMap;
 use polytype::Type;
 use smallvec::SmallVec;
-use std::collections::HashMap;
 
 use super::domtree::{DomTree, SkeletonCfgView};
 use super::extract;
@@ -75,15 +75,15 @@ pub fn run_program(inner: EgirInner) -> (Program, PipelineDescriptor) {
 
 fn elaborate_one_body(
     graph: EGraph,
-    control_headers: &HashMap<BlockId, ControlHeader>,
-    aliases: &HashMap<NodeId, NodeId>,
+    control_headers: &LookupMap<BlockId, ControlHeader>,
+    aliases: &LookupMap<NodeId, NodeId>,
     params: &[(Type<TypeName>, String)],
     return_ty: Type<TypeName>,
 ) -> FuncBody {
     let skel_domtree = DomTree::build(&SkeletonCfgView {
         skeleton: &graph.skeleton,
     });
-    let identity_map: HashMap<BlockId, BlockId> = graph.skeleton.blocks.keys().map(|b| (b, b)).collect();
+    let identity_map: LookupMap<BlockId, BlockId> = graph.skeleton.blocks.keys().map(|b| (b, b)).collect();
     run(
         &graph,
         &skel_domtree,
@@ -107,9 +107,9 @@ pub fn run(
     domtree: &DomTree,
     params: &[(Type<TypeName>, String)],
     return_ty: Type<TypeName>,
-    control_headers: &HashMap<BlockId, ControlHeader>,
-    orig_block_map: &HashMap<BlockId, SkelBlockId>,
-    aliases: &HashMap<NodeId, NodeId>,
+    control_headers: &LookupMap<BlockId, ControlHeader>,
+    orig_block_map: &LookupMap<BlockId, SkelBlockId>,
+    aliases: &LookupMap<NodeId, NodeId>,
 ) -> FuncBody {
     // Phase 1: cost-based extraction.
     let mut best = extract::extract(graph);
@@ -134,7 +134,7 @@ pub fn run(
         elaborated: ScopedMap::new(),
         elaborated_places: ScopedMap::new(),
         builder: FuncBuilder::new(params.to_vec(), return_ty),
-        block_map: HashMap::new(),
+        block_map: LookupMap::new(),
         current_block: None,
         current_skel_block: None,
     };
@@ -175,7 +175,7 @@ pub fn run(
 
     // Map control headers from original blocks → output blocks.
     let skel_to_output = &elab.block_map;
-    let mut reverse_orig_map: HashMap<SkelBlockId, BlockId> = HashMap::new();
+    let mut reverse_orig_map: LookupMap<SkelBlockId, BlockId> = LookupMap::new();
     for (&orig, &skel) in orig_block_map {
         reverse_orig_map.insert(skel, orig);
     }
@@ -225,7 +225,7 @@ struct LoopStackEntry {
 
 struct Elaborator<'a> {
     graph: &'a EGraph,
-    best: HashMap<NodeId, NodeId>,
+    best: LookupMap<NodeId, NodeId>,
     domtree: &'a DomTree,
     loop_analysis: &'a LoopAnalysis,
     loop_stack: SmallVec<[LoopStackEntry; 4]>,
@@ -240,7 +240,7 @@ struct Elaborator<'a> {
     /// handles that via its scope-depth pop).
     elaborated_places: ScopedMap<NodeId, (PlaceId, SkelBlockId)>,
     builder: FuncBuilder,
-    block_map: HashMap<SkelBlockId, BlockId>,
+    block_map: LookupMap<SkelBlockId, BlockId>,
     current_block: Option<BlockId>,
     current_skel_block: Option<SkelBlockId>,
 }

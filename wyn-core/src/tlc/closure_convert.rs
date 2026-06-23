@@ -16,9 +16,9 @@
 use super::VarRef;
 use super::{ArrayExpr, Def, DefMeta, Lambda, LoopKind, Program, SoacOp, Term, TermIdSource, TermKind};
 use crate::ast::{Span, TypeName};
+use crate::{LookupMap, LookupSet};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
-use std::collections::{HashMap, HashSet};
 
 // =============================================================================
 // Lambda construction helpers
@@ -167,25 +167,25 @@ pub fn append_capture_params(
 /// occurrence).
 pub fn compute_free_vars(
     term: &Term,
-    bound: &HashSet<SymbolId>,
-    top_level: &HashSet<SymbolId>,
-    known_defs: &HashSet<String>,
+    bound: &LookupSet<SymbolId>,
+    top_level: &LookupSet<SymbolId>,
+    known_defs: &LookupSet<String>,
     symbols: &SymbolTable,
 ) -> Vec<Term> {
     let mut free = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen = LookupSet::new();
     collect_free_vars(term, bound, top_level, known_defs, symbols, &mut free, &mut seen);
     free
 }
 
 pub fn collect_free_vars(
     term: &Term,
-    bound: &HashSet<SymbolId>,
-    top_level: &HashSet<SymbolId>,
-    known_defs: &HashSet<String>,
+    bound: &LookupSet<SymbolId>,
+    top_level: &LookupSet<SymbolId>,
+    known_defs: &LookupSet<String>,
     symbols: &SymbolTable,
     free: &mut Vec<Term>,
-    seen: &mut HashSet<SymbolId>,
+    seen: &mut LookupSet<SymbolId>,
 ) {
     match &term.kind {
         TermKind::Var(VarRef::Symbol(sym)) => {
@@ -301,12 +301,12 @@ pub fn collect_free_vars(
 
 pub fn collect_free_vars_lambda(
     lam: &Lambda,
-    bound: &HashSet<SymbolId>,
-    top_level: &HashSet<SymbolId>,
-    known_defs: &HashSet<String>,
+    bound: &LookupSet<SymbolId>,
+    top_level: &LookupSet<SymbolId>,
+    known_defs: &LookupSet<String>,
     symbols: &SymbolTable,
     free: &mut Vec<Term>,
-    seen: &mut HashSet<SymbolId>,
+    seen: &mut LookupSet<SymbolId>,
 ) {
     let mut inner_bound = bound.clone();
     for (p, _) in &lam.params {
@@ -325,12 +325,12 @@ pub fn collect_free_vars_lambda(
 
 pub fn collect_free_vars_soac_body(
     sb: &super::SoacBody,
-    bound: &HashSet<SymbolId>,
-    top_level: &HashSet<SymbolId>,
-    known_defs: &HashSet<String>,
+    bound: &LookupSet<SymbolId>,
+    top_level: &LookupSet<SymbolId>,
+    known_defs: &LookupSet<String>,
     symbols: &SymbolTable,
     free: &mut Vec<Term>,
-    seen: &mut HashSet<SymbolId>,
+    seen: &mut LookupSet<SymbolId>,
 ) {
     collect_free_vars_lambda(&sb.lam, bound, top_level, known_defs, symbols, free, seen);
     for (_, _, cap_term) in &sb.captures {
@@ -340,12 +340,12 @@ pub fn collect_free_vars_soac_body(
 
 pub fn collect_free_vars_soac(
     soac: &SoacOp,
-    bound: &HashSet<SymbolId>,
-    top_level: &HashSet<SymbolId>,
-    known_defs: &HashSet<String>,
+    bound: &LookupSet<SymbolId>,
+    top_level: &LookupSet<SymbolId>,
+    known_defs: &LookupSet<String>,
     symbols: &SymbolTable,
     free: &mut Vec<Term>,
-    seen: &mut HashSet<SymbolId>,
+    seen: &mut LookupSet<SymbolId>,
 ) {
     match soac {
         SoacOp::Map { lam, inputs, .. } => {
@@ -438,12 +438,12 @@ pub fn collect_free_vars_soac(
 
 pub fn collect_free_vars_array_expr(
     ae: &ArrayExpr,
-    bound: &HashSet<SymbolId>,
-    top_level: &HashSet<SymbolId>,
-    known_defs: &HashSet<String>,
+    bound: &LookupSet<SymbolId>,
+    top_level: &LookupSet<SymbolId>,
+    known_defs: &LookupSet<String>,
     symbols: &SymbolTable,
     free: &mut Vec<Term>,
-    seen: &mut HashSet<SymbolId>,
+    seen: &mut LookupSet<SymbolId>,
 ) {
     match ae {
         ArrayExpr::Ref(t) => collect_free_vars(t, bound, top_level, known_defs, symbols, free, seen),
@@ -500,14 +500,14 @@ pub enum ClosureConvertError {
 /// Walk every def and assert phase-1 invariants. Returns Ok(()) iff the
 /// program is in valid post-closure-converted shape.
 pub fn verify_closure_converted(program: &Program) -> Result<(), ClosureConvertError> {
-    let top_level: HashSet<SymbolId> = program.defs.iter().map(|d| d.name).collect();
+    let top_level: LookupSet<SymbolId> = program.defs.iter().map(|d| d.name).collect();
     for def in &program.defs {
         verify_def(def, &top_level)?;
     }
     Ok(())
 }
 
-fn verify_def(def: &Def, top_level: &HashSet<SymbolId>) -> Result<(), ClosureConvertError> {
+fn verify_def(def: &Def, top_level: &LookupSet<SymbolId>) -> Result<(), ClosureConvertError> {
     let inner = strip_param_spine(&def.body);
     walk_no_lambdas(inner, def.name, top_level)
 }
@@ -529,7 +529,7 @@ fn strip_param_spine(term: &Term) -> &Term {
 fn walk_no_lambdas(
     term: &Term,
     def_name: SymbolId,
-    top_level: &HashSet<SymbolId>,
+    top_level: &LookupSet<SymbolId>,
 ) -> Result<(), ClosureConvertError> {
     match &term.kind {
         TermKind::Lambda(_) => return Err(ClosureConvertError::UnliftedLambda { def: def_name }),
@@ -549,7 +549,7 @@ fn walk_no_lambdas(
 fn check_soac_envelopes(
     soac: &SoacOp,
     def_name: SymbolId,
-    top_level: &HashSet<SymbolId>,
+    top_level: &LookupSet<SymbolId>,
 ) -> Result<(), ClosureConvertError> {
     let bodies: Vec<&super::SoacBody> = match soac {
         SoacOp::Map { lam, .. } => vec![lam],
@@ -580,7 +580,7 @@ fn check_soac_envelopes(
     Ok(())
 }
 
-fn is_lifted_body(body: &Term, top_level: &HashSet<SymbolId>) -> bool {
+fn is_lifted_body(body: &Term, top_level: &LookupSet<SymbolId>) -> bool {
     matches!(&body.kind, TermKind::Var(VarRef::Symbol(sym)) if top_level.contains(sym))
 }
 
@@ -620,7 +620,7 @@ pub struct ClosureInfo {
     ///   - Lifted lambda symbols allocated by this pass
     ///   - Top-level defs with arrow type
     /// Symbols not in this map are non-callable values.
-    pub callable_values: HashMap<SymbolId, CallableValue>,
+    pub callable_values: LookupMap<SymbolId, CallableValue>,
 }
 
 impl ClosureInfo {
@@ -635,19 +635,19 @@ impl ClosureInfo {
 
 struct ClosureConverter<'a> {
     symbols: SymbolTable,
-    top_level: HashSet<SymbolId>,
-    known_defs: &'a HashSet<String>,
+    top_level: LookupSet<SymbolId>,
+    known_defs: &'a LookupSet<String>,
     lifted_defs: Vec<Def>,
-    callable_values: HashMap<SymbolId, CallableValue>,
+    callable_values: LookupMap<SymbolId, CallableValue>,
     lambda_counter: u32,
     term_ids: TermIdSource,
 }
 
 impl<'a> ClosureConverter<'a> {
-    fn run(program: Program, known_defs: &'a HashSet<String>) -> (Program, ClosureInfo) {
-        let top_level: HashSet<SymbolId> = program.defs.iter().map(|d| d.name).collect();
+    fn run(program: Program, known_defs: &'a LookupSet<String>) -> (Program, ClosureInfo) {
+        let top_level: LookupSet<SymbolId> = program.defs.iter().map(|d| d.name).collect();
 
-        let mut callable_values = HashMap::new();
+        let mut callable_values = LookupMap::new();
         for def in &program.defs {
             if is_arrow_param(&def.ty) {
                 callable_values.insert(def.name, CallableValue::Direct(def.name));
@@ -956,7 +956,7 @@ impl<'a> ClosureConverter<'a> {
         let (params, inner_body) = super::extract_lambda_params(&term);
         let converted_body = self.convert_term(inner_body);
 
-        let bound: HashSet<SymbolId> = params.iter().map(|(p, _)| *p).collect();
+        let bound: LookupSet<SymbolId> = params.iter().map(|(p, _)| *p).collect();
         let captures = self.compute_transitive_captures(&converted_body, &bound);
 
         // Eta-reduction: a pure forwarder `λp̄. g p̄` to a top-level function
@@ -1210,9 +1210,9 @@ impl<'a> ClosureConverter<'a> {
     /// every call site. If those captures are not bound by the
     /// surrounding lambda's params, the surrounding lambda needs to
     /// capture them so they remain in scope after lifting.
-    fn compute_transitive_captures(&self, body: &Term, bound: &HashSet<SymbolId>) -> Vec<Term> {
+    fn compute_transitive_captures(&self, body: &Term, bound: &LookupSet<SymbolId>) -> Vec<Term> {
         let mut result = compute_free_vars(body, bound, &self.top_level, self.known_defs, &self.symbols);
-        let mut seen: HashSet<SymbolId> = result
+        let mut seen: LookupSet<SymbolId> = result
             .iter()
             .filter_map(|t| match &t.kind {
                 TermKind::Var(VarRef::Symbol(s)) => Some(*s),
@@ -1229,7 +1229,7 @@ impl<'a> ClosureConverter<'a> {
         let body_bound = collect_bound_syms(body);
 
         let mut worklist: Vec<SymbolId> = super::collect_var_refs(body);
-        let mut visited: HashSet<SymbolId> = HashSet::new();
+        let mut visited: LookupSet<SymbolId> = LookupSet::new();
         while let Some(sym) = worklist.pop() {
             if !visited.insert(sym) {
                 continue;
@@ -1274,13 +1274,13 @@ fn is_arrow_param(ty: &Type<TypeName>) -> bool {
 /// Used by `compute_transitive_captures` to avoid propagating a nested
 /// closure's capture upward when that symbol is actually a local of the
 /// enclosing body. `for_each_child` handles the recursion into sub-terms.
-fn collect_bound_syms(term: &Term) -> HashSet<SymbolId> {
-    let mut out = HashSet::new();
+fn collect_bound_syms(term: &Term) -> LookupSet<SymbolId> {
+    let mut out = LookupSet::new();
     collect_bound_syms_inner(term, &mut out);
     out
 }
 
-fn collect_bound_syms_inner(term: &Term, out: &mut HashSet<SymbolId>) {
+fn collect_bound_syms_inner(term: &Term, out: &mut LookupSet<SymbolId>) {
     match &term.kind {
         TermKind::Let { name, .. } => {
             out.insert(*name);
@@ -1309,8 +1309,8 @@ fn collect_bound_syms_inner(term: &Term, out: &mut HashSet<SymbolId>) {
     term.for_each_child(&mut |child| collect_bound_syms_inner(child, out));
 }
 
-fn collect_soac_bound_syms(soac: &SoacOp, out: &mut HashSet<SymbolId>) {
-    fn body(sb: &super::SoacBody, out: &mut HashSet<SymbolId>) {
+fn collect_soac_bound_syms(soac: &SoacOp, out: &mut LookupSet<SymbolId>) {
+    fn body(sb: &super::SoacBody, out: &mut LookupSet<SymbolId>) {
         out.extend(sb.lam.params.iter().map(|(p, _)| *p));
         out.extend(sb.captures.iter().map(|(s, _, _)| *s));
     }
@@ -1347,7 +1347,7 @@ fn collect_soac_bound_syms(soac: &SoacOp, out: &mut HashSet<SymbolId>) {
 /// Run closure conversion. Lifts every `Lambda` node to a top-level def,
 /// substitutes let-aliased callable Vars away, and returns a side-table
 /// describing every callable symbol's captures (or lack thereof).
-pub fn run(program: Program, known_defs: &HashSet<String>) -> (Program, ClosureInfo) {
+pub fn run(program: Program, known_defs: &LookupSet<String>) -> (Program, ClosureInfo) {
     let result = ClosureConverter::run(program, known_defs);
     verify_closure_converted(&result.0)
         .unwrap_or_else(|e| panic!("closure-conversion verifier failed: {:?}", e));

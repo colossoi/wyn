@@ -17,8 +17,9 @@
 use crate::ast::{self, Declaration, Expression, Pattern, PatternKind, Program, TypeParam};
 use crate::interface::EntryDecl;
 use crate::types::TypeName;
+use crate::LookupMap;
+use crate::StableMap;
 use polytype::{Context, Type, TypeScheme};
-use std::collections::HashMap;
 
 #[cfg(test)]
 #[path = "resolve_placeholders_tests.rs"]
@@ -29,7 +30,7 @@ pub struct PlaceholderResolver {
     context: Context<TypeName>,
     /// Bindings for named type parameters within the current declaration scope.
     /// Maps size param names (e.g., "n") and type param names (e.g., "T") to type variables.
-    type_param_bindings: HashMap<String, Type<TypeName>>,
+    type_param_bindings: LookupMap<String, Type<TypeName>>,
     /// Outer `Option` distinguishes "inside a `resolve_decl` scope"
     /// (`Some(_)`) from "outside any def scope" (`None`); inner `Option`
     /// lazily allocates the shared variable on first `[]T`. Inside the
@@ -42,7 +43,7 @@ pub struct PlaceholderResolver {
     decl_anon_size: Option<Option<Type<TypeName>>>,
     /// Pre-built TypeSchemes for module specs (e.g., "f32.sin" -> its polytype).
     /// Built during resolve_elaborated_modules so the type checker can use them directly.
-    spec_schemes: HashMap<String, TypeScheme<TypeName>>,
+    spec_schemes: LookupMap<String, TypeScheme<TypeName>>,
 }
 
 impl PlaceholderResolver {
@@ -50,9 +51,9 @@ impl PlaceholderResolver {
     pub fn new() -> Self {
         Self {
             context: Context::default(),
-            type_param_bindings: HashMap::new(),
+            type_param_bindings: LookupMap::new(),
             decl_anon_size: None,
-            spec_schemes: HashMap::new(),
+            spec_schemes: LookupMap::new(),
         }
     }
 
@@ -60,9 +61,9 @@ impl PlaceholderResolver {
     pub fn with_context(context: Context<TypeName>) -> Self {
         Self {
             context,
-            type_param_bindings: HashMap::new(),
+            type_param_bindings: LookupMap::new(),
             decl_anon_size: None,
-            spec_schemes: HashMap::new(),
+            spec_schemes: LookupMap::new(),
         }
     }
 
@@ -72,12 +73,12 @@ impl PlaceholderResolver {
     }
 
     /// Consume the resolver and return both the Context and spec schemes.
-    pub fn into_parts(self) -> (Context<TypeName>, HashMap<String, TypeScheme<TypeName>>) {
+    pub fn into_parts(self) -> (Context<TypeName>, LookupMap<String, TypeScheme<TypeName>>) {
         (self.context, self.spec_schemes)
     }
 
     /// Get the pre-built spec schemes (for module functions like f32.sin).
-    pub fn spec_schemes(&self) -> &HashMap<String, TypeScheme<TypeName>> {
+    pub fn spec_schemes(&self) -> &LookupMap<String, TypeScheme<TypeName>> {
         &self.spec_schemes
     }
 
@@ -101,7 +102,7 @@ impl PlaceholderResolver {
     }
 
     /// Resolve all placeholders in prelude function declarations.
-    fn resolve_prelude(&mut self, prelude_functions: &mut indexmap::IndexMap<String, ast::Decl>) {
+    fn resolve_prelude(&mut self, prelude_functions: &mut StableMap<String, ast::Decl>) {
         for decl in prelude_functions.values_mut() {
             self.resolve_decl(decl);
         }
@@ -111,7 +112,7 @@ impl PlaceholderResolver {
     /// Also builds TypeSchemes for Spec::Sig items and stores them in spec_schemes.
     fn resolve_elaborated_modules(
         &mut self,
-        modules: &mut indexmap::IndexMap<String, crate::module_manager::ElaboratedModule>,
+        modules: &mut StableMap<String, crate::module_manager::ElaboratedModule>,
     ) {
         for (module_name, module) in modules.iter_mut() {
             for item in &mut module.items {

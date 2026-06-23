@@ -41,7 +41,6 @@ mod integration_tests;
 #[cfg(test)]
 mod slice_range_tests;
 
-use std::collections::HashMap;
 use std::hash::Hash;
 use std::marker::PhantomData;
 
@@ -49,11 +48,30 @@ use egir::from_tlc::ConvertError;
 use egir::program::EgirInner;
 use egir::publish::PipelineDescriptorPublish;
 
-use indexmap::IndexMap;
-
 use ast::{NodeCounter, NodeId};
 use error::Result;
 use polytype::TypeScheme;
+
+// =============================================================================
+// Collection aliases
+// =============================================================================
+
+/// Use for maps whose iteration order affects program output (binding
+/// allocation, code emission order, etc.). Insertion order is stable
+/// across compiles; `HashMap`'s randomized hasher is not.
+pub type StableMap<K, V> = indexmap::IndexMap<K, V>;
+
+/// Set companion to [`StableMap`]: insertion-order iteration.
+pub type StableSet<T> = indexmap::IndexSet<T>;
+
+/// Use for maps consulted only via `get`/`contains_key`. Iteration
+/// order doesn't escape into observable output, so `HashMap`'s
+/// per-process random hash is fine — and we get the slightly faster
+/// lookups in exchange.
+pub type LookupMap<K, V> = std::collections::HashMap<K, V>;
+
+/// Set companion to [`LookupMap`].
+pub type LookupSet<T> = std::collections::HashSet<T>;
 
 // =============================================================================
 // Generic ID allocation
@@ -165,18 +183,18 @@ pub fn symbol_name_or_bug(symbols: &SymbolTable, sym: SymbolId) -> &str {
 /// Arena that allocates IDs and stores associated items.
 ///
 /// Combines ID generation with storage, ensuring each item gets a unique ID.
-/// Uses IndexMap for deterministic iteration order (insertion order).
+/// Uses StableMap for deterministic iteration order (insertion order).
 #[derive(Debug, Clone)]
 pub struct IdArena<Id, T> {
     source: IdSource<Id>,
-    items: IndexMap<Id, T>,
+    items: StableMap<Id, T>,
 }
 
 impl<Id: From<u32> + Copy + Eq + Hash, T> IdArena<Id, T> {
     pub fn new() -> Self {
         IdArena {
             source: IdSource::new(),
-            items: IndexMap::new(),
+            items: StableMap::new(),
         }
     }
 
@@ -267,7 +285,7 @@ impl<'a, Id: From<u32> + Copy + Eq + Hash, T> IntoIterator for &'a mut IdArena<I
 // Re-export key types for the public API
 pub use ast::TypeName;
 pub use polytype::Context as PolytypeContext;
-pub type TypeTable = HashMap<NodeId, TypeScheme<TypeName>>;
+pub type TypeTable = LookupMap<NodeId, TypeScheme<TypeName>>;
 
 // =============================================================================
 // Typestate Compiler Pipeline
@@ -462,7 +480,7 @@ pub struct TypeChecked {
     pub type_table: TypeTable,
     pub warnings: Vec<type_checker::TypeWarning>,
     pub checker_builtins: Vec<String>,
-    pub schemes: HashMap<String, TypeScheme<TypeName>>,
+    pub schemes: LookupMap<String, TypeScheme<TypeName>>,
     pub name_resolution: name_resolution::NameResolution,
 }
 
@@ -556,9 +574,9 @@ pub struct TlcEarlyInner {
     pub tlc: tlc::Program,
     pub type_table: TypeTable,
     /// Built-in names that should not be captured as free variables
-    known_defs: std::collections::HashSet<String>,
+    known_defs: LookupSet<String>,
     /// Type schemes for functions (for monomorphization)
-    schemes: HashMap<SymbolId, types::TypeScheme>,
+    schemes: LookupMap<SymbolId, types::TypeScheme>,
     /// Errors surfaced while default-filling `???` type holes with
     /// `--fill-holes`. Empty unless `to_tlc` was called with
     /// `fill_holes = true` and some hole had a type that couldn't
@@ -909,7 +927,7 @@ pub struct TlcDefunctionalized {
     pub tlc: tlc::Program,
     pub type_table: TypeTable,
     /// Type schemes for functions (for monomorphization)
-    schemes: HashMap<SymbolId, types::TypeScheme>,
+    schemes: LookupMap<SymbolId, types::TypeScheme>,
     pub auto_storage_binding_ids: IdSource<u32>,
 }
 
@@ -984,8 +1002,8 @@ impl TlcGeneratedLambdasFolded {
             tlc,
             pipeline: pipeline_descriptor::PipelineDescriptor::default(),
             type_table,
-            plans: std::collections::HashMap::new(),
-            input_names: std::collections::HashMap::new(),
+            plans: LookupMap::new(),
+            input_names: LookupMap::new(),
             auto_storage_binding_ids,
         })
     }
@@ -994,7 +1012,7 @@ impl TlcGeneratedLambdasFolded {
     /// (`expand_soacs → materialize → optimize_skeleton → elaborate`)
     /// explicitly.
     pub fn to_egraph(mut self) -> std::result::Result<EgirParallelized, ConvertError> {
-        let empty = std::collections::HashMap::new();
+        let empty = LookupMap::new();
         let input_lens = tlc::input_slice_bounds::compute_for_program(&self.0.tlc);
         egir::from_tlc::run(
             &self.0.tlc,
@@ -1070,8 +1088,8 @@ impl TlcSmallInlined {
             tlc,
             pipeline: pipeline_descriptor::PipelineDescriptor::default(),
             type_table,
-            plans: std::collections::HashMap::new(),
-            input_names: std::collections::HashMap::new(),
+            plans: LookupMap::new(),
+            input_names: LookupMap::new(),
             auto_storage_binding_ids,
         })
     }
@@ -1080,7 +1098,7 @@ impl TlcSmallInlined {
     /// (`expand_soacs → materialize → optimize_skeleton → elaborate`)
     /// explicitly.
     pub fn to_egraph(mut self) -> std::result::Result<EgirParallelized, ConvertError> {
-        let empty = std::collections::HashMap::new();
+        let empty = LookupMap::new();
         let input_lens = tlc::input_slice_bounds::compute_for_program(&self.0.tlc);
         egir::from_tlc::run(
             &self.0.tlc,
@@ -1104,12 +1122,12 @@ pub struct TlcPipelineInner {
     /// consume. Empty for the `disable=true` fast path and for entries
     /// whose strategies haven't migrated to EGIR-side lowering yet
     /// (reduce / scan / redomap today). Keyed by entry surface name.
-    pub plans: std::collections::HashMap<String, tlc::parallelize::ParallelizationPlan>,
+    pub plans: LookupMap<String, tlc::parallelize::ParallelizationPlan>,
     /// Source-parameter name for each storage `(set, binding)`, captured
     /// before parallelization replaced the original compute entries.
     /// `to_egraph` applies these to the finalized descriptor's input
     /// bindings, which the parallel path otherwise names positionally.
-    pub input_names: std::collections::HashMap<(u32, u32), String>,
+    pub input_names: LookupMap<(u32, u32), String>,
 }
 
 /// TLC after SOAC parallelization
@@ -1320,7 +1338,7 @@ impl EgirOutputsRealized {
     /// SOAC Parallelization Boundary section in the README.
     pub fn parallelize(
         self,
-        plans: &std::collections::HashMap<String, tlc::parallelize::ParallelizationPlan>,
+        plans: &LookupMap<String, tlc::parallelize::ParallelizationPlan>,
     ) -> EgirParallelized {
         let EgirOutputsRealized(mut inner) = self;
         egir::parallelize::run(&mut inner, plans);

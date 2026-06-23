@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use crate::LookupMap;
 
 use crate::builtins::lowering::BuiltinLowering;
 use crate::builtins::scheme::SchemeBuilder;
@@ -150,8 +150,8 @@ pub struct KnownBuiltinIds {
 #[derive(Debug)]
 pub struct BuiltinCatalog {
     defs: Vec<BuiltinDef>,
-    by_surface_name: HashMap<&'static str, BuiltinId>,
-    by_internal_name: HashMap<&'static str, BuiltinId>,
+    by_surface_name: LookupMap<&'static str, BuiltinId>,
+    by_internal_name: LookupMap<&'static str, BuiltinId>,
     known: KnownBuiltinIds,
 }
 
@@ -162,8 +162,8 @@ impl BuiltinCatalog {
     /// every catalog name a `&'static str` lifetime.
     pub fn build(raw_defs: Vec<BuiltinDefRaw>) -> Self {
         let mut defs = Vec::with_capacity(raw_defs.len());
-        let mut by_surface_name = HashMap::with_capacity(raw_defs.len());
-        let mut by_internal_name = HashMap::new();
+        let mut by_surface_name = LookupMap::with_capacity(raw_defs.len());
+        let mut by_internal_name = LookupMap::new();
         for (i, raw) in raw_defs.into_iter().enumerate() {
             let id = BuiltinId::new(i as u32);
             if by_surface_name.insert(raw.surface_name, id).is_some() {

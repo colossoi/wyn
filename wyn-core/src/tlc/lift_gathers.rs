@@ -25,7 +25,7 @@
 //! used *solely* via dynamic `Index`, and the producer's free variables are
 //! all input arrays (no captured uniforms/sizes yet).
 
-use std::collections::{HashMap, HashSet};
+use crate::{LookupMap, LookupSet};
 
 use super::closure_convert::collect_free_vars;
 use super::parallelize::make_entry_def;
@@ -779,13 +779,13 @@ fn is_liftable_array_producer(term: &Term) -> bool {
 fn free_symbol_vars(
     term: &Term,
     symbols: &SymbolTable,
-    def_syms: &HashMap<String, SymbolId>,
+    def_syms: &LookupMap<String, SymbolId>,
 ) -> Vec<(SymbolId, Type<TypeName>)> {
-    let bound: HashSet<SymbolId> = HashSet::new();
-    let empty_top: HashSet<SymbolId> = HashSet::new();
-    let known_defs: HashSet<String> = def_syms.keys().cloned().collect();
+    let bound: LookupSet<SymbolId> = LookupSet::new();
+    let empty_top: LookupSet<SymbolId> = LookupSet::new();
+    let known_defs: LookupSet<String> = def_syms.keys().cloned().collect();
     let mut free: Vec<Term> = Vec::new();
-    let mut seen: HashSet<SymbolId> = HashSet::new();
+    let mut seen: LookupSet<SymbolId> = LookupSet::new();
     collect_free_vars(
         term,
         &bound,

@@ -4,7 +4,7 @@
 //! Used by canonicalization (preorder traversal) and elaboration (scoping).
 
 use crate::ssa::framework::BlockId;
-use std::collections::{HashMap, HashSet};
+use crate::{LookupMap, LookupSet};
 
 #[cfg(test)]
 #[path = "domtree_tests.rs"]
@@ -13,9 +13,9 @@ mod domtree_tests;
 /// Dominator tree.
 pub struct DomTree {
     /// Immediate dominator of each block (entry has no idom).
-    idom: HashMap<BlockId, BlockId>,
+    idom: LookupMap<BlockId, BlockId>,
     /// Children in the dominator tree.
-    children: HashMap<BlockId, Vec<BlockId>>,
+    children: LookupMap<BlockId, Vec<BlockId>>,
     /// Preorder traversal of the domtree.
     preorder_list: Vec<BlockId>,
 }
@@ -44,8 +44,8 @@ impl DomTree {
 
         // Forward BFS from entry to collect the reachable subgraph.
         // Everything else is left out of the analysis entirely.
-        let reachable: HashSet<BlockId> = {
-            let mut visited: HashSet<BlockId> = HashSet::new();
+        let reachable: LookupSet<BlockId> = {
+            let mut visited: LookupSet<BlockId> = LookupSet::new();
             let mut stack = vec![entry];
             while let Some(b) = stack.pop() {
                 if !visited.insert(b) {
@@ -64,7 +64,7 @@ impl DomTree {
         // Build predecessor map, restricted to edges between reachable
         // blocks. An unreachable predecessor would still poison the
         // intersection even if the destination is reachable.
-        let mut preds: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
+        let mut preds: LookupMap<BlockId, Vec<BlockId>> = LookupMap::new();
         for &b in &reachable_blocks {
             preds.entry(b).or_default();
         }
@@ -77,10 +77,10 @@ impl DomTree {
         }
 
         // Iterative fixpoint dominator computation.
-        let mut doms: HashMap<BlockId, HashSet<BlockId>> = HashMap::new();
+        let mut doms: LookupMap<BlockId, LookupSet<BlockId>> = LookupMap::new();
         for &b in &reachable_blocks {
             if b == entry {
-                doms.insert(b, HashSet::from([entry]));
+                doms.insert(b, LookupSet::from([entry]));
             } else {
                 doms.insert(b, reachable.clone());
             }
@@ -98,7 +98,7 @@ impl DomTree {
                 // reachable), so the intersection is well-defined.
                 let mut iter = pred_list.iter();
                 let first = doms[iter.next().expect("reachable non-entry block has a predecessor")].clone();
-                let mut new_set: HashSet<BlockId> =
+                let mut new_set: LookupSet<BlockId> =
                     iter.fold(first, |acc, p| acc.intersection(&doms[p]).copied().collect());
                 new_set.insert(b);
                 if new_set != doms[&b] {
@@ -114,7 +114,7 @@ impl DomTree {
         let all_blocks = reachable_blocks;
 
         // Extract idom.
-        let mut idom = HashMap::new();
+        let mut idom = LookupMap::new();
         for &b in &all_blocks {
             if b == entry {
                 continue;
@@ -138,7 +138,7 @@ impl DomTree {
         }
 
         // Build children map.
-        let mut children: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
+        let mut children: LookupMap<BlockId, Vec<BlockId>> = LookupMap::new();
         for &b in &all_blocks {
             children.entry(b).or_default();
         }
