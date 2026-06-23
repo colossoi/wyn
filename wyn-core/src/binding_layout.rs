@@ -55,18 +55,18 @@ pub fn runtime_sized_array_elem(ty: &Type<TypeName>) -> Option<(&Type<TypeName>,
 /// - Other params (scalars, fixed-size arrays, structs) are skipped
 ///   and will be routed to push constants by the caller.
 ///
-/// Binding numbers are assigned `set, 0..N` in declaration order.
+/// Binding numbers come from `binding_ids` in declaration order.
 pub fn compute_entry_binding_layout(
     body_params: &[(SymbolId, Type<TypeName>)],
     entry: &EntryDecl,
     set: u32,
+    binding_ids: &mut crate::IdSource<u32>,
 ) -> Vec<Option<EntryParamBinding>> {
     if !matches!(entry.entry_type, Attribute::Compute) {
         return vec![None; body_params.len()];
     }
 
     let mut out: Vec<Option<EntryParamBinding>> = Vec::with_capacity(body_params.len());
-    let mut binding_num: u32 = 0;
 
     for (i, (sym, ty)) in body_params.iter().enumerate() {
         let decoration = entry.params.get(i).and_then(extract_io_decoration);
@@ -95,14 +95,10 @@ pub fn compute_entry_binding_layout(
                 if let Some(field_elems) = field_elems {
                     let fields = field_elems
                         .into_iter()
-                        .map(|(elem_ty, elem_bytes)| {
-                            let slot = TupleFieldBinding {
-                                binding: BindingRef::new(set, binding_num),
-                                elem_ty: elem_ty.clone(),
-                                elem_bytes,
-                            };
-                            binding_num += 1;
-                            slot
+                        .map(|(elem_ty, elem_bytes)| TupleFieldBinding {
+                            binding: BindingRef::new(set, binding_ids.next_id()),
+                            elem_ty: elem_ty.clone(),
+                            elem_bytes,
                         })
                         .collect();
                     out.push(Some(EntryParamBinding {
@@ -123,12 +119,11 @@ pub fn compute_entry_binding_layout(
             out.push(Some(EntryParamBinding {
                 param_sym: *sym,
                 kind: EntryParamBindingKind::Single {
-                    binding: BindingRef::new(set, binding_num),
+                    binding: BindingRef::new(set, binding_ids.next_id()),
                     elem_ty: elem_ty.clone(),
                     elem_bytes,
                 },
             }));
-            binding_num += 1;
         } else {
             out.push(None);
         }

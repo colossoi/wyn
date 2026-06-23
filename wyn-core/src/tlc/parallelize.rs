@@ -329,12 +329,8 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
 
     // The entry's binding layout, which resolves `Ref(Var(sym))` SOAC inputs
     // back to their assigned (set, binding). Empty for non-compute entries.
-    let entry_slots = if let DefMeta::EntryPoint(decl) = &def.meta {
-        let (params, _) = peel_lambda_params(&def.body);
-        crate::binding_layout::compute_entry_binding_layout(&params, decl, AUTO_STORAGE_SET)
-    } else {
-        Vec::new()
-    };
+    let entry_slots: &[Option<EntryParamBinding>] =
+        if let DefMeta::EntryPoint(decl) = &def.meta { &decl.param_bindings } else { &[] };
 
     loop {
         let Term { ty, kind, .. } = current;
@@ -1648,11 +1644,10 @@ fn collect_entry_input_names(program: &Program) -> HashMap<(u32, u32), String> {
             continue;
         }
         let (params, _) = peel_lambda_params(&def.body);
-        // Host-wired params carry an explicit `#[storage(set, binding)]`; the
-        // auto-allocator (and `compute_entry_binding_layout`) leaves those slots
-        // to the declared binding. Capture both kinds: explicit bindings from
-        // the attribute, auto-allocated ones from the layout.
-        let layout = crate::binding_layout::compute_entry_binding_layout(&params, decl, AUTO_STORAGE_SET);
+        // Capture both binding kinds: explicit `#[storage(set, binding)]`
+        // attributes (which the auto-allocator leaves alone) and the
+        // auto-allocated slots cached on `decl.param_bindings`.
+        let layout = &decl.param_bindings;
         for (i, (sym, _)) in params.iter().enumerate() {
             let name = crate::symbol_name_or_bug(&program.symbols, *sym).to_string();
             if let Some(br) = decl.params.get(i).and_then(crate::binding_layout::extract_storage_binding) {
@@ -1976,12 +1971,8 @@ fn try_build_ordered_prefix_schedule(
 ) -> Option<DispatchSchedule> {
     let tail_alias_sym = analysis.tail_alias.as_ref().map(|(sym, _)| *sym);
     let source_def = program.defs.iter().find(|d| d.name == analysis.def_name)?.clone();
-    let entry_slots = if let DefMeta::EntryPoint(decl) = &source_def.meta {
-        let (params, _) = peel_lambda_params(&source_def.body);
-        crate::binding_layout::compute_entry_binding_layout(&params, decl, AUTO_STORAGE_SET)
-    } else {
-        Vec::new()
-    };
+    let entry_slots: &[Option<EntryParamBinding>] =
+        if let DefMeta::EntryPoint(decl) = &source_def.meta { &decl.param_bindings } else { &[] };
     let tail_param = match (analysis.tail_alias.as_ref(), tail_output_binding) {
         (Some((_, ty)), Some(binding)) => Some(make_synthetic_storage_param(
             "_tail_out",
@@ -2011,7 +2002,7 @@ fn try_build_ordered_prefix_schedule(
         let TermKind::Soac(soac) = &rhs.kind else {
             return None;
         };
-        let mut stage_slots = entry_slots.clone();
+        let mut stage_slots = entry_slots.to_vec();
         if task.phase == DispatchPhase::PostTail {
             let (tail_param_req, _, tail_binding) = tail_param.as_ref()?;
             if let Some(binding) = &tail_param_req.binding {
@@ -4679,8 +4670,7 @@ fn entry_binding_slots(program: &Program, def_name: SymbolId) -> Vec<Option<Entr
     let DefMeta::EntryPoint(decl) = &def.meta else {
         return Vec::new();
     };
-    let (params, _) = peel_lambda_params(&def.body);
-    crate::binding_layout::compute_entry_binding_layout(&params, decl, AUTO_STORAGE_SET)
+    decl.param_bindings.clone()
 }
 
 /// Dispatch length for a non-parallelized compute entry:

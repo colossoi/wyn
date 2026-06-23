@@ -36,6 +36,13 @@ use std::collections::HashMap;
 type RegionSubst = HashMap<usize, Type<TypeName>>;
 
 pub fn run(program: &mut Program) -> crate::error::Result<()> {
+    // Sole allocator of compute-entry auto-storage binding ids in the
+    // module. Threaded across entries so two entries can't claim the
+    // same `(set, binding)` for differently-typed buffers. The
+    // computed layouts are cached on each `EntryDecl::param_bindings`;
+    // downstream passes read that cache.
+    let mut binding_ids: crate::IdSource<u32> = crate::IdSource::new();
+
     for def in program.defs.iter_mut() {
         if !matches!(&def.meta, DefMeta::EntryPoint(_)) {
             continue;
@@ -43,15 +50,15 @@ pub fn run(program: &mut Program) -> crate::error::Result<()> {
         let span = def.body.span;
         let (params, _) = extract_params(&def.body);
 
-        // Cache the auto-storage binding layout on the entry — `from_tlc` and
-        // `parallelize` read `entry.param_bindings` to route storage. The entry
-        // params don't change downstream (entries are roots, not monomorphized),
-        // so computing the layout here is equivalent to doing it later.
         let mut subst = RegionSubst::new();
         let mut region_env = HashMap::new();
         if let DefMeta::EntryPoint(entry) = &mut def.meta {
-            entry.param_bindings =
-                compute_entry_binding_layout(&params, entry, crate::egir::from_tlc::AUTO_STORAGE_SET);
+            entry.param_bindings = compute_entry_binding_layout(
+                &params,
+                entry,
+                crate::egir::from_tlc::AUTO_STORAGE_SET,
+                &mut binding_ids,
+            );
             collect_region_subst(&params, entry, &mut subst, &mut region_env, span)?;
         }
 
@@ -89,7 +96,7 @@ fn collect_region_subst(
     region_env: &mut HashMap<SymbolId, Type<TypeName>>,
     span: Span,
 ) -> crate::error::Result<()> {
-    let layout = compute_entry_binding_layout(params, entry, crate::egir::from_tlc::AUTO_STORAGE_SET);
+    let layout = &entry.param_bindings;
 
     for (i, (_sym, ty)) in params.iter().enumerate() {
         let ty = TypeExt::strip_unique(ty);

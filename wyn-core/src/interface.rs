@@ -189,6 +189,18 @@ impl EntryParamBinding {
         }
     }
 
+    /// Highest binding number this param consumed. For `Single`, the
+    /// only binding; for `TupleOfViews`, the last field's (the slots
+    /// are allocated sequentially).
+    pub fn max_binding(&self) -> BindingRef {
+        match &self.kind {
+            EntryParamBindingKind::Single { binding, .. } => *binding,
+            EntryParamBindingKind::TupleOfViews(fields) => {
+                fields.last().expect("tuple-of-views with zero fields").binding
+            }
+        }
+    }
+
     /// First `(binding, elem_ty, elem_bytes)` for this param —
     /// the only buffer for `Single`, the field-0 buffer for
     /// `TupleOfViews`. Callers that need to size a dispatch from the

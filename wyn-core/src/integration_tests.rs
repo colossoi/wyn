@@ -5390,6 +5390,26 @@ entry b(xs: []u32) []f32 = map(|x| f32.u32(x), xs)
     assert!(!lowered.spirv.is_empty());
 }
 
+/// Two compute entries whose inputs auto-allocate to the same `(set 0,
+/// binding 0)` slot with DIFFERENT element types must each get a fresh
+/// slot — sharing one `OpVariable` between a `[]u32` and a `[]f32`
+/// trips `spirv-val: OpAccessChain result type '%float' does not match
+/// indexing into base '%uint'`. Fix: `pin_entry_regions` owns a single
+/// `IdSource<u32>` across all entries so input bindings can't alias.
+#[test]
+fn two_compute_entries_with_differently_typed_inputs_do_not_alias() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry a(xs: []u32) []u32 = map(|x| x, xs)
+#[compute]
+entry b(ys: []f32) []f32 = map(|y| y, ys)
+"#,
+    )
+    .expect("heterogeneously-typed compute-entry inputs must compile to one valid SPIR-V module");
+    assert!(!lowered.spirv.is_empty());
+}
+
 /// A global `def` whose initializer contains a *function call*
 /// referencing other globals used to error at SPIR-V emission with
 /// "Unknown global: ELEV" when the synthesized global was then used

@@ -35,7 +35,7 @@ use super::{
 };
 use crate::ast::TypeName;
 use crate::egir::from_tlc::AUTO_STORAGE_SET;
-use crate::interface::{EntryParamBindingKind, StorageBindingDecl, StorageRole};
+use crate::interface::{EntryParamBinding, EntryParamBindingKind, StorageBindingDecl, StorageRole};
 use crate::BindingRef;
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
@@ -71,54 +71,23 @@ fn lift_entry(program: &mut Program, idx: usize, new_defs: &mut Vec<Def>) {
     // places this entry's storage outputs at `view_count..view_count +
     // out_count` (see `build_entry_outputs`). So the first free binding for a
     // gather intermediate is `view_count + out_count`.
-    let (params, _tail) = peel_lambda_params(&body);
     let decl = match &program.defs[idx].meta {
         DefMeta::EntryPoint(d) => (**d).clone(),
         _ => return,
     };
-    let slots = crate::binding_layout::compute_entry_binding_layout(&params, &decl, AUTO_STORAGE_SET);
-    // A producer `map(f, src)` whose `src` is one of these params produces an
-    // array with `src`'s element count — that count sizes the gather buffer.
-    // Tuple-of-views params aren't gather sources (gather references bare
-    // `Var(sym)`, never tuple projections), so we only index Single bindings.
-    let param_bindings: HashMap<SymbolId, (u32, u32)> = slots
-        .iter()
-        .flatten()
-        .filter_map(|b| match &b.kind {
-            EntryParamBindingKind::Single { binding, .. } => {
-                Some((b.param_sym, (binding.set, binding.binding)))
-            }
-            EntryParamBindingKind::TupleOfViews(_) => None,
-        })
-        .collect();
-    let view_count: u32 = slots.iter().flatten().map(|b| b.buffer_count()).sum();
-    // Number of storage-output slots the entry declared. Reading off
-    // `decl.outputs.len()` is exact — one entry per declared output
-    // (tuple-returning entries get one EntryOutput per field).
-    //
-    // We can NOT read this off `def.ty`'s arrow-return position even
-    // though that LOOKS like the source of truth: `tlc::normalize_outputs`
-    // rewrites the def.ty's return slot to `SideEffect` to match the
-    // body's new `OutputSlotStore` tail, so any pass running after
-    // normalize_outputs that reads `def.ty.return` sees `SideEffect`
-    // and undercounts.
-    //
-    // Why this mattered: if `out_count` undercounts by N, the gather
-    // intermediate `next_gather = view_count + out_count` lands on a
-    // binding slot the (N-th) output expected, and the descriptor
-    // emitter overwrites the output's binding entry with the gather's
-    // intermediate role — the output slot silently vanishes from the
-    // JSON descriptor (regression first surfaced by an entry returning
-    // `([]vec4f32, [5]i32)` whose `[5]i32` literal indexed into a
-    // `scan` result, gather-lifting the scan).
+    let outer_slots: &[Option<EntryParamBinding>] = &decl.param_bindings;
+    // First binding slot above this entry's inputs + outputs, where
+    // gather intermediates land.
+    let max_input_binding =
+        outer_slots.iter().flatten().map(|b| b.max_binding().binding).max().map(|m| m + 1).unwrap_or(0);
     let out_count = decl.outputs.len() as u32;
-    let mut next_gather = view_count + out_count;
+    let mut next_gather = max_input_binding + out_count;
 
     let mut added_decls: Vec<StorageBindingDecl> = Vec::new();
     let new_body = lift_in_term(
         body,
         &entry_name,
-        &param_bindings,
+        outer_slots,
         &mut next_gather,
         &mut added_decls,
         new_defs,
@@ -136,7 +105,7 @@ fn lift_entry(program: &mut Program, idx: usize, new_defs: &mut Vec<Def>) {
 fn lift_in_term(
     term: Term,
     entry_name: &str,
-    param_bindings: &HashMap<SymbolId, (u32, u32)>,
+    outer_slots: &[Option<EntryParamBinding>],
     next_gather: &mut u32,
     added_decls: &mut Vec<StorageBindingDecl>,
     new_defs: &mut Vec<Def>,
@@ -148,7 +117,7 @@ fn lift_in_term(
             let new_body = lift_in_term(
                 *body,
                 entry_name,
-                param_bindings,
+                outer_slots,
                 next_gather,
                 added_decls,
                 new_defs,
@@ -175,7 +144,7 @@ fn lift_in_term(
                 &rhs,
                 *body.clone(),
                 entry_name,
-                param_bindings,
+                outer_slots,
                 *next_gather,
                 new_defs.len(),
                 program,
@@ -187,7 +156,7 @@ fn lift_in_term(
                 return lift_in_term(
                     rewritten_body,
                     entry_name,
-                    param_bindings,
+                    outer_slots,
                     next_gather,
                     added_decls,
                     new_defs,
@@ -197,7 +166,7 @@ fn lift_in_term(
             let new_body = lift_in_term(
                 *body,
                 entry_name,
-                param_bindings,
+                outer_slots,
                 next_gather,
                 added_decls,
                 new_defs,
@@ -211,7 +180,7 @@ fn lift_in_term(
                 Box::new(lift_in_term(
                     *rhs,
                     entry_name,
-                    param_bindings,
+                    outer_slots,
                     next_gather,
                     added_decls,
                     new_defs,
@@ -234,7 +203,7 @@ fn lift_in_term(
             let new_value = lift_in_term(
                 *value,
                 entry_name,
-                param_bindings,
+                outer_slots,
                 next_gather,
                 added_decls,
                 new_defs,
@@ -262,7 +231,7 @@ fn try_lift(
     rhs: &Term,
     body: Term,
     entry_name: &str,
-    param_bindings: &HashMap<SymbolId, (u32, u32)>,
+    outer_slots: &[Option<EntryParamBinding>],
     binding_num: u32,
     gather_idx: usize,
     program: &mut Program,
@@ -284,7 +253,10 @@ fn try_lift(
     // folded any `map` producer into the scan/map, so a `scan(op, ne, map(g,
     // xs))` arrives reading `xs` directly.)
     let frees = free_symbol_vars(rhs, &program.symbols, &program.def_syms);
-    if !frees.iter().all(|(s, ty)| is_runtime_sized_array(ty) && param_bindings.contains_key(s)) {
+    if !frees
+        .iter()
+        .all(|(s, ty)| is_runtime_sized_array(ty) && find_outer_single(outer_slots, *s).is_some())
+    {
         return None;
     }
 
@@ -319,7 +291,7 @@ fn try_lift(
     // The gather buffer holds `map(f, src)`'s output: one element per `src`
     // element, so its length tracks `src`'s element count (element sizes may
     // differ). `from_tlc` allocates the host buffer from this policy.
-    let length = gather_length(&elem_ty, &frees, param_bindings);
+    let length = gather_length(&elem_ty, &frees, outer_slots);
 
     // Chained intermediates: if the producer reads any `StorageBuffer{set,
     // binding, …}` directly (e.g. its input was itself an already-lifted
@@ -333,6 +305,7 @@ fn try_lift(
         rhs.clone(),
         name_ty.clone(),
         &frees,
+        outer_slots,
         binding,
         length.clone(),
         &chained,
@@ -358,18 +331,31 @@ fn try_lift(
 fn gather_length(
     elem_ty: &Type<TypeName>,
     producer_inputs: &[(SymbolId, Type<TypeName>)],
-    param_bindings: &HashMap<SymbolId, (u32, u32)>,
+    outer_slots: &[Option<EntryParamBinding>],
 ) -> Option<crate::pipeline_descriptor::BufferLen> {
     let elem_bytes = crate::ssa::layout::type_byte_size(elem_ty)?;
     let (src_sym, src_ty) = producer_inputs.first()?;
-    let (set, binding) = param_bindings.get(src_sym).copied()?;
+    let br = find_outer_single(outer_slots, *src_sym)?;
     let src_elem_ty = crate::types::array_elem(src_ty)?;
     let src_elem_bytes = crate::ssa::layout::type_byte_size(src_elem_ty)?;
     Some(crate::pipeline_descriptor::BufferLen::LikeInput {
-        set,
-        binding,
+        set: br.set,
+        binding: br.binding,
         elem_bytes,
         src_elem_bytes,
+    })
+}
+
+/// Scan the outer entry's cached param-binding slots for a Single-kind binding
+/// matching `sym`. Tuple-of-views bindings are skipped — gather captures are
+/// always bare `Var(sym)` references, never tuple projections.
+fn find_outer_single(
+    outer_slots: &[Option<EntryParamBinding>],
+    sym: SymbolId,
+) -> Option<crate::BindingRef> {
+    outer_slots.iter().flatten().find_map(|b| match &b.kind {
+        EntryParamBindingKind::Single { binding, .. } if b.param_sym == sym => Some(*binding),
+        _ => None,
     })
 }
 
@@ -706,6 +692,7 @@ fn build_gather_prepass(
     producer: Term,
     result_ty: Type<TypeName>,
     captured_inputs: &[(SymbolId, Type<TypeName>)],
+    outer_slots: &[Option<EntryParamBinding>],
     binding: (u32, u32),
     length: Option<crate::pipeline_descriptor::BufferLen>,
     chained_intermediates: &[(u32, u32, Type<TypeName>)],
@@ -716,13 +703,19 @@ fn build_gather_prepass(
     let elem_ty = crate::types::array_elem(&result_ty)
         .cloned()
         .expect("try_lift's is_runtime_sized_array(name_ty) gate guarantees an array elem");
+    // Each captured input was a view-array param of the outer entry, so it
+    // already has a binding pinned by `pin_entry_regions`. Re-use that binding
+    // in the synthesized pre-pass so both entries reference the same SPIR-V
+    // OpVariable at the same `(set, binding)`. Captures that don't match an
+    // outer slot (scalars, etc.) keep `binding: None` and get push-constant
+    // routed by `egir/from_tlc`.
     let required_params: Vec<super::parallelize::RequiredParam> = captured_inputs
         .iter()
         .map(|(s, ty)| super::parallelize::RequiredParam {
             sym: *s,
             ty: ty.clone(),
             attr: None,
-            binding: None,
+            binding: outer_slots.iter().flatten().find(|b| b.param_sym == *s).cloned(),
         })
         .collect();
     let mut storage_bindings = vec![StorageBindingDecl {
@@ -756,19 +749,6 @@ fn build_gather_prepass(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// Peel outer `Lambda` layers, returning the flattened params and the tail.
-fn peel_lambda_params(term: &Term) -> (Vec<(SymbolId, Type<TypeName>)>, &Term) {
-    match &term.kind {
-        TermKind::Lambda(lam) => {
-            let (mut inner, tail) = peel_lambda_params(&lam.body);
-            let mut params = lam.params.clone();
-            params.append(&mut inner);
-            (params, tail)
-        }
-        _ => (vec![], term),
-    }
-}
 
 /// True if `ty` is a runtime-sized array (size is a type variable or
 /// placeholder) — mirrors `binding_layout::is_runtime_sized_array`.

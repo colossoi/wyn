@@ -414,13 +414,8 @@ fn convert_entry_point(
     let mut pc_offset: u32 = 0;
 
     // The auto-storage binding layout is dense — same length as `params`,
-    // with `None` for non-storage params — so we walk them in lockstep. It's
-    // computed here from the entry's own params: deterministic and cheap, so
-    // each consumer recomputes rather than threading a cached value that an
-    // intervening pass (monomorphize, parallelize's synthesized entries) might
-    // drop. `pin_entry_regions` computes the same layout to pin regions.
-    let param_bindings =
-        crate::binding_layout::compute_entry_binding_layout(&params, entry, AUTO_STORAGE_SET);
+    // with `None` for non-storage params — so we walk them in lockstep.
+    let param_bindings: &[Option<EntryParamBinding>] = &entry.param_bindings;
 
     for (i, ((sym, ty), param_binding)) in params.iter().zip(param_bindings.iter()).enumerate() {
         let name = symbol_name(symbols, *sym)?;
@@ -571,24 +566,24 @@ fn convert_entry_point(
                 .chain(i.storage_image_binding.map(|(br, _, _, _)| br))
         })
         .collect();
-    let binding_num: u32 = {
-        let auto_count: u32 = param_bindings.iter().flatten().map(|b| b.buffer_count()).sum();
-        input_explicit_bindings
-            .iter()
-            .copied()
-            .filter(|b| b.set == AUTO_STORAGE_SET)
-            .map(|b| b.binding + 1)
-            .max()
-            .unwrap_or(0)
-            .max(auto_count)
-            // Module-wide collision avoidance: every prior entry's
-            // compiler-allocated set-0 bindings sit below this floor.
-            // Sharing OK for inputs that happen to land on the same
-            // slot with the same type (e.g. two entries both reading
-            // `xs: []u32` at binding 0), but outputs must allocate
-            // above to keep one OpVariable per (set, binding).
-            .max(*module_auto_binding_floor)
-    };
+    // First free set-0 slot for this entry's compiler-allocated
+    // outputs / scratch — above every binding this entry's inputs
+    // already claimed (auto or explicit) AND above every prior
+    // entry's set-0 bindings (the module-wide cursor).
+    let binding_num: u32 = param_bindings
+        .iter()
+        .flatten()
+        .map(|b| b.max_binding().binding + 1)
+        .chain(
+            input_explicit_bindings
+                .iter()
+                .copied()
+                .filter(|b| b.set == AUTO_STORAGE_SET)
+                .map(|b| b.binding + 1),
+        )
+        .max()
+        .unwrap_or(0)
+        .max(*module_auto_binding_floor);
 
     let execution_model = match &entry.entry_type {
         interface::Attribute::Vertex => ExecutionModel::Vertex,
