@@ -35,14 +35,7 @@ use std::collections::HashMap;
 /// Region-variable → concrete `Region(set, binding)` substitution.
 type RegionSubst = HashMap<usize, Type<TypeName>>;
 
-pub fn run(program: &mut Program) -> crate::error::Result<()> {
-    // Sole allocator of compute-entry auto-storage binding ids in the
-    // module. Threaded across entries so two entries can't claim the
-    // same `(set, binding)` for differently-typed buffers. The
-    // computed layouts are cached on each `EntryDecl::param_bindings`;
-    // downstream passes read that cache.
-    let mut binding_ids: crate::IdSource<u32> = crate::IdSource::new();
-
+pub fn run(program: &mut Program, binding_ids: &mut crate::IdSource<u32>) -> crate::error::Result<()> {
     for def in program.defs.iter_mut() {
         if !matches!(&def.meta, DefMeta::EntryPoint(_)) {
             continue;
@@ -57,7 +50,7 @@ pub fn run(program: &mut Program) -> crate::error::Result<()> {
                 &params,
                 entry,
                 crate::egir::from_tlc::AUTO_STORAGE_SET,
-                &mut binding_ids,
+                &mut *binding_ids,
             );
             collect_region_subst(&params, entry, &mut subst, &mut region_env, span)?;
         }

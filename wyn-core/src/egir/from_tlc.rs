@@ -103,12 +103,17 @@ struct GlobalContext<'a> {
 }
 
 impl<'a> GlobalContext<'a> {
-    fn new_converter(&self, pure_constants: &HashSet<String>) -> Converter<'a> {
+    fn new_converter<'b>(
+        &self,
+        pure_constants: &HashSet<String>,
+        binding_ids: &'b mut crate::IdSource<u32>,
+    ) -> Converter<'a, 'b> {
         Converter::new(
             self.top_level,
             self.constants_by_name,
             self.symbols,
             pure_constants.clone(),
+            binding_ids,
         )
     }
 }
@@ -126,6 +131,7 @@ pub fn run(
     mut pipeline: PipelineDescriptor,
     plans: &HashMap<String, crate::tlc::parallelize::ParallelizationPlan>,
     input_slice_bounds: &crate::tlc::input_slice_bounds::ProgramBounds,
+    binding_ids: &mut crate::IdSource<u32>,
 ) -> Result<EgirInner, ConvertError> {
     let top_level: HashMap<SymbolId, &TlcDef> = program.defs.iter().map(|d| (d.name, d)).collect();
     let symbols = &program.symbols;
@@ -154,7 +160,7 @@ pub fn run(
         }
         let def_name = symbols.get(def.name).expect("BUG: symbol not in table").clone();
 
-        let mut converter = ctx.new_converter(&pure_constant_names);
+        let mut converter = ctx.new_converter(&pure_constant_names, binding_ids);
         if let Ok(result_nid) = converter.convert_term(&def.body) {
             converter.set_return(Some(result_nid));
             if let Some(body) = converter.probe_constant_body(def.body.ty.clone()) {
@@ -171,13 +177,6 @@ pub fn run(
     let mut functions: Vec<EgirFunc> = Vec::new();
     let mut externs: Vec<Function> = Vec::new();
     let mut entry_points: Vec<EgirEntry> = Vec::new();
-    // Module-wide cursor: compiler-allocated set-0 bindings (entry
-    // outputs and storage intermediates) must not collide across
-    // entries, because in SPIR-V every `OpVariable` at a given
-    // `(set, binding)` is module-scope — sharing across entries
-    // requires identical types. Each entry's auto-allocator advances
-    // this past whatever it claimed; the next entry starts above.
-    let mut module_auto_binding_floor: u32 = 0;
 
     for def in &program.defs {
         match &def.meta {
@@ -186,7 +185,7 @@ pub fn run(
                 if pure_constant_names.contains(def_name) {
                     continue;
                 }
-                match convert_function(def, &ctx, &pure_constant_names)? {
+                match convert_function(def, &ctx, &pure_constant_names, binding_ids)? {
                     ConvertedFunc::Extern(f) => externs.push(f),
                     ConvertedFunc::Regular(fe) => functions.push(fe),
                 }
@@ -244,7 +243,7 @@ pub fn run(
                     forced_output_binding,
                     dispatch_sized_outputs,
                     entry_input_bounds,
-                    &mut module_auto_binding_floor,
+                    binding_ids,
                 )?;
                 entry_points.push(ep);
             }
@@ -279,10 +278,11 @@ enum ConvertedFunc {
 // Function conversion
 // ============================================================================
 
-fn convert_function(
+fn convert_function<'a>(
     def: &TlcDef,
-    ctx: &GlobalContext,
+    ctx: &GlobalContext<'a>,
     pure_constants: &HashSet<String>,
+    binding_ids: &'a mut crate::IdSource<u32>,
 ) -> Result<ConvertedFunc, ConvertError> {
     let symbols = ctx.symbols;
     let def_name = symbol_name(symbols, def.name)?.to_string();
@@ -314,7 +314,7 @@ fn convert_function(
         .map(|(sym, ty)| Ok((ty.clone(), symbol_name(symbols, *sym)?.to_string())))
         .collect::<Result<_, ConvertError>>()?;
 
-    let mut converter = ctx.new_converter(pure_constants);
+    let mut converter = ctx.new_converter(pure_constants, binding_ids);
     for (i, (sym, ty)) in params.iter().enumerate() {
         let nid = converter.graph.add_func_param(i, ty.clone());
         converter.locals.insert(*sym, nid);
@@ -377,7 +377,7 @@ fn convert_entry_point(
     forced_output_binding: Option<BindingRef>,
     dispatch_sized_outputs: bool,
     input_slice_bounds_for_entry: Option<&HashMap<SymbolId, BufferLen>>,
-    module_auto_binding_floor: &mut u32,
+    binding_ids: &mut crate::IdSource<u32>,
 ) -> Result<EgirEntry, ConvertError> {
     use crate::ssa::types::{EntryInput, ExecutionModel, IoDecoration, PushConstantSlot};
 
@@ -402,7 +402,7 @@ fn convert_entry_point(
         .map(|(sym, ty)| Ok((ty.clone(), symbol_name(symbols, *sym)?.to_string())))
         .collect::<Result<_, ConvertError>>()?;
 
-    let mut converter = ctx.new_converter(pure_constants);
+    let mut converter = ctx.new_converter(pure_constants, binding_ids);
 
     // Build entry inputs alongside the symbol → NodeId bindings. A compute
     // entry param that's a tuple-of-unsized-arrays gets one storage binding
@@ -547,44 +547,6 @@ fn convert_entry_point(
             }
         }
     }
-    // Output binding allocation starts above every claimed slot in
-    // `AUTO_STORAGE_SET`: auto-allocated view-array params (the
-    // `buffer_count()` sum) plus any explicit input binding the user
-    // placed in this set (`#[storage_image(set=0, …)]`, `#[texture(
-    // set=0, …)]`, …). Without the explicit-binding term, an output
-    // gets allocated at `binding=0` and collides with e.g. the
-    // user's `img: storage_image` already living there — the host's
-    // bind-group-layout builder then rejects the duplicate.
-    let input_explicit_bindings: Vec<BindingRef> = inputs
-        .iter()
-        .flat_map(|i| {
-            i.storage_binding
-                .into_iter()
-                .chain(i.uniform_binding)
-                .chain(i.texture_binding)
-                .chain(i.sampler_binding)
-                .chain(i.storage_image_binding.map(|(br, _, _, _)| br))
-        })
-        .collect();
-    // First free set-0 slot for this entry's compiler-allocated
-    // outputs / scratch — above every binding this entry's inputs
-    // already claimed (auto or explicit) AND above every prior
-    // entry's set-0 bindings (the module-wide cursor).
-    let binding_num: u32 = param_bindings
-        .iter()
-        .flatten()
-        .map(|b| b.max_binding().binding + 1)
-        .chain(
-            input_explicit_bindings
-                .iter()
-                .copied()
-                .filter(|b| b.set == AUTO_STORAGE_SET)
-                .map(|b| b.binding + 1),
-        )
-        .max()
-        .unwrap_or(0)
-        .max(*module_auto_binding_floor);
-
     let execution_model = match &entry.entry_type {
         interface::Attribute::Vertex => ExecutionModel::Vertex,
         interface::Attribute::Fragment => ExecutionModel::Fragment,
@@ -600,7 +562,7 @@ fn convert_entry_point(
         &slot_value_tys,
         &inputs,
         is_compute,
-        binding_num,
+        converter.binding_ids,
         forced_output_binding,
         dispatch_sized_outputs,
     )?;
@@ -608,22 +570,6 @@ fn convert_entry_point(
         ret_type,
         Type::Constructed(TypeName::Unit, _) | Type::Constructed(TypeName::SideEffect, _)
     );
-
-    // Seed the scratch-binding cursor just above every auto-storage binding
-    // already claimed by params, outputs, and pre-declared gather buffers, so
-    // a runtime `filter`'s scratch buffer (allocated during body conversion)
-    // never collides with them. Explicit non-storage-buffer input bindings
-    // (`#[storage_image]`, `#[texture]`, …) in `AUTO_STORAGE_SET` count too.
-    converter.next_auto_binding = input_explicit_bindings
-        .iter()
-        .copied()
-        .chain(outputs.iter().filter_map(|o| o.storage_binding))
-        .chain(entry.storage_bindings.iter().map(|d| d.binding))
-        .filter(|b| b.set == AUTO_STORAGE_SET)
-        .map(|b| b.binding + 1)
-        .max()
-        .unwrap_or(binding_num)
-        .max(binding_num);
 
     // Convert body. Output assignment (storing the result into the bound
     // storage views / graphics output slots, and retargeting tail
@@ -685,23 +631,6 @@ fn convert_entry_point(
     );
     entry.slot_sources = slot_sources;
 
-    // Advance the module-wide floor past every set-0 binding this
-    // entry claimed (inputs, outputs, compiler-managed storage decls),
-    // so the next entry's auto-allocator starts above.
-    let entry_max = entry
-        .inputs
-        .iter()
-        .filter_map(|i| i.storage_binding)
-        .chain(entry.outputs.iter().filter_map(|o| o.storage_binding))
-        .chain(entry.storage_bindings.iter().map(|d| d.binding))
-        .filter(|b| b.set == AUTO_STORAGE_SET)
-        .map(|b| b.binding + 1)
-        .max()
-        .unwrap_or(0);
-    if entry_max > *module_auto_binding_floor {
-        *module_auto_binding_floor = entry_max;
-    }
-
     Ok(entry)
 }
 
@@ -709,7 +638,7 @@ fn convert_entry_point(
 // Converter
 // ============================================================================
 
-struct Converter<'a> {
+struct Converter<'a, 'b> {
     /// The e-graph being built.
     graph: EGraph,
     /// Current skeleton block for side effects and terminators.
@@ -749,12 +678,12 @@ struct Converter<'a> {
     /// same slot) has two. Empty for unit-returning entries that never
     /// went through `normalize_outputs`.
     slot_sources_accum: Vec<Vec<crate::egir::program::SlotSource>>,
-    /// Next free auto-storage binding number for compiler-introduced scratch
-    /// buffers (runtime `filter` output). Seeded by `convert_entry_point`
-    /// just above the entry's param + output bindings; bumped by
-    /// `alloc_scratch_binding`. The pre-seed value (0) is only used by
-    /// non-entry conversions, which never allocate scratch.
-    next_auto_binding: u32,
+    /// Module-wide id factory for auto-storage binding numbers.
+    /// `alloc_scratch_binding` draws scratch slots (runtime `filter`
+    /// output buffers) from it during body conversion; the enclosing
+    /// `convert_entry_point` reborrows it through the converter to
+    /// allocate output bindings.
+    binding_ids: &'b mut crate::IdSource<u32>,
     /// Compiler-introduced storage-binding declarations accumulated during
     /// body conversion (runtime `filter` scratch buffers). Merged into the
     /// `EgirEntry.storage_bindings` at construction, where `publish.rs`
@@ -762,12 +691,13 @@ struct Converter<'a> {
     extra_storage_bindings: Vec<crate::interface::StorageBindingDecl>,
 }
 
-impl<'a> Converter<'a> {
+impl<'a, 'b> Converter<'a, 'b> {
     fn new(
         top_level: &'a HashMap<SymbolId, &'a TlcDef>,
         constants_by_name: &'a HashMap<String, SymbolId>,
         symbols: &'a SymbolTable,
         pure_constants: HashSet<String>,
+        binding_ids: &'b mut crate::IdSource<u32>,
     ) -> Self {
         let graph = EGraph::new();
         let entry = graph.skeleton.entry;
@@ -784,18 +714,15 @@ impl<'a> Converter<'a> {
             next_effect: 1,
             current_span: None,
             slot_sources_accum: Vec::new(),
-            next_auto_binding: 0,
+            binding_ids,
             extra_storage_bindings: Vec::new(),
         }
     }
 
     /// Reserve a fresh auto-storage binding for a compiler-introduced scratch
-    /// buffer. Only valid during entry-body conversion (the cursor is seeded
-    /// in `convert_entry_point`).
+    /// buffer (runtime `filter` output). Draws from the module-wide id factory.
     fn alloc_scratch_binding(&mut self) -> BindingRef {
-        let br = BindingRef::new(AUTO_STORAGE_SET, self.next_auto_binding);
-        self.next_auto_binding += 1;
-        br
+        BindingRef::new(AUTO_STORAGE_SET, self.binding_ids.next_id())
     }
 
     /// Intern a pure node, attaching the current term's span (if any).
@@ -2701,12 +2628,11 @@ fn build_entry_outputs(
     slot_value_tys: &[Option<Type<TypeName>>],
     inputs: &[EntryInput],
     is_compute: bool,
-    binding_start: u32,
+    binding_ids: &mut crate::IdSource<u32>,
     forced_output_binding: Option<BindingRef>,
     dispatch_sized: bool,
 ) -> Result<Vec<EntryOutput>, ConvertError> {
     use EntryOutput;
-    let mut binding_num = binding_start;
     let mut forced_remaining = forced_output_binding;
     // Pick a `BufferLen` policy for the output binding, in order:
     //
@@ -2783,9 +2709,7 @@ fn build_entry_outputs(
             if let Some(b) = forced_remaining.take() {
                 return Some(b);
             }
-            let b = BindingRef::new(AUTO_STORAGE_SET, binding_num);
-            binding_num += 1;
-            Some(b)
+            Some(BindingRef::new(AUTO_STORAGE_SET, binding_ids.next_id()))
         } else {
             None
         }

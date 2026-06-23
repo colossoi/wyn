@@ -1,0 +1,13 @@
+-- Regression: two compute entries whose inputs auto-allocate to the same
+-- (set 0, binding N) slot but with different element types used to
+-- collapse to one SPIR-V OpVariable, tripping spirv-val with
+-- "OpAccessChain result type does not match indexing into base".
+-- Fixed by routing all auto-allocated set-0 storage bindings through a
+-- single module-wide IdSource shared between pin_entry_regions (inputs)
+-- and egir::from_tlc (outputs + scratch).
+
+#[compute]
+entry a(xs: []u32) []u32 = map(|x| x, xs)
+
+#[compute]
+entry b(ys: []f32) []f32 = map(|y| y, ys)

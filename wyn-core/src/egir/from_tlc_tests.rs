@@ -51,9 +51,16 @@ fn compile_via_egir(src: &str) -> Program {
 
     let empty = std::collections::HashMap::new();
     let bounds = crate::tlc::input_slice_bounds::compute_for_program(&tlc.tlc);
+    let mut binding_ids = crate::IdSource::<u32>::new();
     crate::EgirRaw(
-        run(&tlc.tlc, PipelineDescriptor::default(), &empty, &bounds)
-            .expect("egir::from_tlc conversion failed"),
+        run(
+            &tlc.tlc,
+            PipelineDescriptor::default(),
+            &empty,
+            &bounds,
+            &mut binding_ids,
+        )
+        .expect("egir::from_tlc conversion failed"),
     )
     .realize_outputs()
     .expect("egir::realize_outputs failed")
@@ -91,7 +98,14 @@ fn convert_simple_def(body: Term, params: Vec<(SymbolId, Type<TypeName>)>) -> Fu
     let param_info: Vec<(Type<TypeName>, String)> =
         params.iter().enumerate().map(|(i, (_, ty))| (ty.clone(), format!("p{}", i))).collect();
 
-    let mut converter = Converter::new(&top_level, &constants_by_name, &symbols, pure_constants);
+    let mut binding_ids = crate::IdSource::<u32>::new();
+    let mut converter = Converter::new(
+        &top_level,
+        &constants_by_name,
+        &symbols,
+        pure_constants,
+        &mut binding_ids,
+    );
     for (i, (sym, ty)) in params.iter().enumerate() {
         let nid = converter.graph.add_func_param(i, ty.clone());
         converter.locals.insert(*sym, nid);
@@ -137,7 +151,14 @@ fn test_add_roundtrip() {
     let constants_by_name = HashMap::new();
     let pure_constants = HashSet::new();
 
-    let mut converter = Converter::new(&top_level, &constants_by_name, &symbols, pure_constants);
+    let mut binding_ids = crate::IdSource::<u32>::new();
+    let mut converter = Converter::new(
+        &top_level,
+        &constants_by_name,
+        &symbols,
+        pure_constants,
+        &mut binding_ids,
+    );
     let a_nid = converter.graph.add_func_param(0, i32_ty());
     converter.locals.insert(a_sym, a_nid);
     let b_nid = converter.graph.add_func_param(1, i32_ty());
@@ -201,7 +222,14 @@ fn test_gvn_via_let() {
     let constants_by_name = HashMap::new();
     let pure_constants = HashSet::new();
 
-    let mut converter = Converter::new(&top_level, &constants_by_name, &symbols, pure_constants);
+    let mut binding_ids = crate::IdSource::<u32>::new();
+    let mut converter = Converter::new(
+        &top_level,
+        &constants_by_name,
+        &symbols,
+        pure_constants,
+        &mut binding_ids,
+    );
     let result = converter.convert_term(&outer_let).expect("conversion failed");
     converter.set_return(Some(result));
 
@@ -287,7 +315,14 @@ fn test_if_else_roundtrip() {
     let constants_by_name = HashMap::new();
     let pure_constants = HashSet::new();
 
-    let mut converter = Converter::new(&top_level, &constants_by_name, &symbols, pure_constants);
+    let mut binding_ids = crate::IdSource::<u32>::new();
+    let mut converter = Converter::new(
+        &top_level,
+        &constants_by_name,
+        &symbols,
+        pure_constants,
+        &mut binding_ids,
+    );
     let c_nid = converter.graph.add_func_param(0, bool_ty);
     converter.locals.insert(c_sym, c_nid);
 
@@ -620,11 +655,13 @@ entry vertex_main(#[location(0)] position: vec3f32, #[location(1)] color: vec3f3
     wrap_arrow_return_in_unique(&mut def.ty);
 
     let bounds = crate::tlc::input_slice_bounds::compute_for_program(&tlc_program);
+    let mut binding_ids = crate::IdSource::<u32>::new();
     let egir = super::run(
         &tlc_program,
         PipelineDescriptor::default(),
         &HashMap::new(),
         &bounds,
+        &mut binding_ids,
     )
     .expect("from_tlc::run on graphics entry must succeed");
     let entry = egir.entry_points.iter().find(|e| e.name == "vertex_main").expect("vertex_main EgirEntry");

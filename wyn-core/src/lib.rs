@@ -533,6 +533,7 @@ impl TypeChecked {
             known_defs: out.known_defs,
             schemes: out.schemes,
             fill_hole_errors: out.fill_hole_errors,
+            auto_storage_binding_ids: IdSource::new(),
         })
     }
 }
@@ -559,6 +560,13 @@ pub struct TlcEarlyInner {
     /// later TLC passes and turns a non-empty list into a
     /// `CompilerError::TypeHole`.
     pub fill_hole_errors: Vec<error::CompilerError>,
+    /// Module-wide id factory for compiler-auto-allocated storage
+    /// bindings (the ones not pinned by a user `#[storage(set, binding)]`
+    /// attribute). `pin_entry_regions` draws inputs from it; `egir::from_tlc`
+    /// draws outputs and scratch slots from the same factory. Sharing
+    /// one counter across passes guarantees no two `OpVariable`s land
+    /// on the same `(set, binding)` slot regardless of declared type.
+    pub auto_storage_binding_ids: IdSource<u32>,
 }
 
 /// AST has been transformed to TLC
@@ -580,7 +588,7 @@ impl TlcTransformed {
     /// consumes, so the rest of the pipeline cannot run without it.
     pub fn pin_entry_regions(self) -> Result<TlcRegionsPinned> {
         let mut inner = self.0;
-        tlc::pin_entry_regions::run(&mut inner.tlc)?;
+        tlc::pin_entry_regions::run(&mut inner.tlc, &mut inner.auto_storage_binding_ids)?;
         Ok(TlcRegionsPinned(inner))
     }
 }
@@ -876,6 +884,7 @@ impl TlcGathersLifted {
             known_defs,
             schemes,
             fill_hole_errors: _,
+            auto_storage_binding_ids,
         } = self.0;
         let (cc, closure_info) = tlc::closure_convert::run(tlc, &known_defs);
         let hof_free = tlc::hof_specialize::run(cc, &closure_info);
@@ -884,6 +893,7 @@ impl TlcGathersLifted {
             tlc: lowered,
             type_table,
             schemes,
+            auto_storage_binding_ids,
         }
     }
 }
@@ -894,6 +904,7 @@ pub struct TlcDefunctionalized {
     pub type_table: TypeTable,
     /// Type schemes for functions (for monomorphization)
     schemes: HashMap<SymbolId, types::TypeScheme>,
+    pub auto_storage_binding_ids: IdSource<u32>,
 }
 
 impl TlcDefunctionalized {
@@ -904,6 +915,7 @@ impl TlcDefunctionalized {
         TlcMonomorphized(TlcLateInner {
             tlc: monomorphized,
             type_table: self.type_table,
+            auto_storage_binding_ids: self.auto_storage_binding_ids,
         })
     }
 }
@@ -913,6 +925,7 @@ impl TlcDefunctionalized {
 pub struct TlcLateInner {
     pub tlc: tlc::Program,
     pub type_table: TypeTable,
+    pub auto_storage_binding_ids: IdSource<u32>,
 }
 
 /// TLC with all functions monomorphized (no type variables remain)
@@ -955,7 +968,11 @@ impl TlcGeneratedLambdasFolded {
 
     /// Eliminate unreachable defs (dead code elimination at TLC level).
     pub fn filter_reachable(self) -> TlcReachable {
-        let TlcLateInner { tlc, type_table } = self.0;
+        let TlcLateInner {
+            tlc,
+            type_table,
+            auto_storage_binding_ids,
+        } = self.0;
         let tlc = tlc::inline::run_reachable(tlc);
         TlcReachable(TlcPipelineInner {
             tlc,
@@ -963,13 +980,14 @@ impl TlcGeneratedLambdasFolded {
             type_table,
             plans: std::collections::HashMap::new(),
             input_names: std::collections::HashMap::new(),
+            auto_storage_binding_ids,
         })
     }
 
     /// Build the raw EGIR program. Callers chain the pipeline
     /// (`expand_soacs → materialize → optimize_skeleton → elaborate`)
     /// explicitly.
-    pub fn to_egraph(self) -> std::result::Result<EgirParallelized, ConvertError> {
+    pub fn to_egraph(mut self) -> std::result::Result<EgirParallelized, ConvertError> {
         let empty = std::collections::HashMap::new();
         let input_lens = tlc::input_slice_bounds::compute_for_program(&self.0.tlc);
         egir::from_tlc::run(
@@ -977,6 +995,7 @@ impl TlcGeneratedLambdasFolded {
             pipeline_descriptor::PipelineDescriptor::default(),
             &empty,
             &input_lens,
+            &mut self.0.auto_storage_binding_ids,
         )
         .and_then(|inner| EgirRaw(inner).realize_outputs().map(|a| a.parallelize(&empty)))
     }
@@ -996,9 +1015,17 @@ impl TlcSmallInlined {
     /// Representation-specialize call edges whose array representation is known
     /// only at the producer site.
     pub fn rep_specialize(self) -> TlcRepSpecialized {
-        let TlcLateInner { tlc, type_table } = self.0;
+        let TlcLateInner {
+            tlc,
+            type_table,
+            auto_storage_binding_ids,
+        } = self.0;
         let tlc = tlc::rep_specialize::run(tlc);
-        TlcRepSpecialized(TlcLateInner { tlc, type_table })
+        TlcRepSpecialized(TlcLateInner {
+            tlc,
+            type_table,
+            auto_storage_binding_ids,
+        })
     }
 
     /// Direct shortcut: parallelize without the rep-specialize step.
@@ -1008,7 +1035,11 @@ impl TlcSmallInlined {
     /// slipped through. The canonical path goes through
     /// `.rep_specialize().parallelize_soacs(...)`.
     pub fn parallelize_soacs(self, disable: bool) -> Result<TlcParallelized> {
-        let TlcLateInner { mut tlc, type_table } = self.0;
+        let TlcLateInner {
+            mut tlc,
+            type_table,
+            auto_storage_binding_ids,
+        } = self.0;
         tlc = tlc::if_over_producer::run(tlc);
         let result = tlc::parallelize::run(tlc, disable)?;
         Ok(TlcParallelized(TlcPipelineInner {
@@ -1017,12 +1048,17 @@ impl TlcSmallInlined {
             type_table,
             plans: result.plans,
             input_names: result.input_names,
+            auto_storage_binding_ids,
         }))
     }
 
     /// Eliminate unreachable defs (dead code elimination at TLC level).
     pub fn filter_reachable(self) -> TlcReachable {
-        let TlcLateInner { tlc, type_table } = self.0;
+        let TlcLateInner {
+            tlc,
+            type_table,
+            auto_storage_binding_ids,
+        } = self.0;
         let tlc = tlc::inline::run_reachable(tlc);
         TlcReachable(TlcPipelineInner {
             tlc,
@@ -1030,13 +1066,14 @@ impl TlcSmallInlined {
             type_table,
             plans: std::collections::HashMap::new(),
             input_names: std::collections::HashMap::new(),
+            auto_storage_binding_ids,
         })
     }
 
     /// Build the raw EGIR program. Callers chain the pipeline
     /// (`expand_soacs → materialize → optimize_skeleton → elaborate`)
     /// explicitly.
-    pub fn to_egraph(self) -> std::result::Result<EgirParallelized, ConvertError> {
+    pub fn to_egraph(mut self) -> std::result::Result<EgirParallelized, ConvertError> {
         let empty = std::collections::HashMap::new();
         let input_lens = tlc::input_slice_bounds::compute_for_program(&self.0.tlc);
         egir::from_tlc::run(
@@ -1044,6 +1081,7 @@ impl TlcSmallInlined {
             pipeline_descriptor::PipelineDescriptor::default(),
             &empty,
             &input_lens,
+            &mut self.0.auto_storage_binding_ids,
         )
         .and_then(|inner| EgirRaw(inner).realize_outputs().map(|a| a.parallelize(&empty)))
     }
@@ -1055,6 +1093,7 @@ pub struct TlcPipelineInner {
     pub tlc: tlc::Program,
     pub pipeline: pipeline_descriptor::PipelineDescriptor,
     pub type_table: TypeTable,
+    pub auto_storage_binding_ids: IdSource<u32>,
     /// Compiler-internal per-entry parallelization plans for EGIR to
     /// consume. Empty for the `disable=true` fast path and for entries
     /// whose strategies haven't migrated to EGIR-side lowering yet
@@ -1093,10 +1132,11 @@ impl TlcParallelized {
             pipeline,
             plans,
             input_names,
+            mut auto_storage_binding_ids,
             ..
         } = self.0;
         let input_lens = tlc::input_slice_bounds::compute_for_program(&tlc);
-        egir::from_tlc::run(&tlc, pipeline, &plans, &input_lens)
+        egir::from_tlc::run(&tlc, pipeline, &plans, &input_lens, &mut auto_storage_binding_ids)
             .map(|mut inner| {
                 inner.pipeline.relabel_input_storage_names(&input_names);
                 inner
@@ -1126,7 +1166,11 @@ impl TlcRepSpecialized {
     /// `disable` turns the pass into an effective no-op (see
     /// `TlcEntrySoacsMaterialized::parallelize_soacs`).
     pub fn parallelize_soacs(self, disable: bool) -> Result<TlcParallelized> {
-        let TlcLateInner { mut tlc, type_table } = self.0;
+        let TlcLateInner {
+            mut tlc,
+            type_table,
+            auto_storage_binding_ids,
+        } = self.0;
         tlc = tlc::if_over_producer::run(tlc);
         let result = tlc::parallelize::run(tlc, disable)?;
         Ok(TlcParallelized(TlcPipelineInner {
@@ -1135,6 +1179,7 @@ impl TlcRepSpecialized {
             type_table,
             plans: result.plans,
             input_names: result.input_names,
+            auto_storage_binding_ids,
         }))
     }
 }
@@ -1190,14 +1235,21 @@ impl TlcInputSliceBoundsInferred {
             pipeline,
             plans,
             input_names,
+            mut auto_storage_binding_ids,
             ..
         } = self.inner;
-        egir::from_tlc::run(&tlc, pipeline, &plans, &self.input_lens)
-            .map(|mut inner| {
-                inner.pipeline.relabel_input_storage_names(&input_names);
-                inner
-            })
-            .and_then(|inner| EgirRaw(inner).realize_outputs().map(|a| a.parallelize(&plans)))
+        egir::from_tlc::run(
+            &tlc,
+            pipeline,
+            &plans,
+            &self.input_lens,
+            &mut auto_storage_binding_ids,
+        )
+        .map(|mut inner| {
+            inner.pipeline.relabel_input_storage_names(&input_names);
+            inner
+        })
+        .and_then(|inner| EgirRaw(inner).realize_outputs().map(|a| a.parallelize(&plans)))
     }
 }
 
