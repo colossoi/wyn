@@ -79,6 +79,7 @@ impl GpuContext {
                 label: None,
                 required_features: supported_features,
                 required_limits: limits,
+                experimental_features: wgpu::ExperimentalFeatures::default(),
                 memory_hints: MemoryHints::Performance,
                 trace: Trace::Off,
             })
@@ -169,7 +170,7 @@ impl ComputeExecutor<'_> {
 /// support), plus the adapter's max push-constant size as the limit.
 pub async fn create_headless_device(verbose: bool) -> Result<(Device, Queue)> {
     let ctx = GpuContext::request(DeviceRequest {
-        desired_features: Features::SPIRV_SHADER_PASSTHROUGH
+        desired_features: Features::EXPERIMENTAL_PASSTHROUGH_SHADERS
             | Features::PUSH_CONSTANTS
             | Features::TIMESTAMP_QUERY,
         limits_overlay: Some(Box::new(|limits, adapter| {
@@ -185,7 +186,7 @@ pub async fn create_headless_device(verbose: bool) -> Result<(Device, Queue)> {
         println!("Driver: {} {}", info.driver, info.driver_info);
         println!(
             "SPIRV_SHADER_PASSTHROUGH supported: {}",
-            ctx.device.features().contains(Features::SPIRV_SHADER_PASSTHROUGH)
+            ctx.device.features().contains(Features::EXPERIMENTAL_PASSTHROUGH_SHADERS)
         );
     }
 
@@ -487,14 +488,14 @@ pub fn readback_buffer(
     });
     encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, byte_size);
     queue.submit(Some(encoder.finish()));
-    let _ = device.poll(wgpu::PollType::Wait);
+    let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
     let slice = staging.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |result| {
         tx.send(result).unwrap();
     });
-    let _ = device.poll(wgpu::PollType::Wait);
+    let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
     rx.recv().unwrap()?;
 
     let data = slice.get_mapped_range();

@@ -288,7 +288,7 @@ impl State {
             } else {
                 InstanceFlags::empty()
             },
-            desired_features: wgpu::Features::SPIRV_SHADER_PASSTHROUGH,
+            desired_features: wgpu::Features::EXPERIMENTAL_PASSTHROUGH_SHADERS,
             surface_target: Some(Box::new(move |inst| {
                 inst.create_surface(win).context("failed to create wgpu surface")
             })),
@@ -309,12 +309,12 @@ impl State {
             eprintln!("[viz] Driver info: {}", info.driver_info);
             eprintln!(
                 "[viz] SPIRV_SHADER_PASSTHROUGH supported: {}",
-                device.features().contains(wgpu::Features::SPIRV_SHADER_PASSTHROUGH)
+                device.features().contains(wgpu::Features::EXPERIMENTAL_PASSTHROUGH_SHADERS)
             );
         }
 
         // Set up uncaptured error handler to catch GPU errors at runtime
-        device.on_uncaptured_error(Box::new(|error| {
+        device.on_uncaptured_error(std::sync::Arc::new(|error| {
             eprintln!("\n╔══════════════════════════════════════════════════════════════╗");
             eprintln!("║                     GPU VALIDATION ERROR                     ║");
             eprintln!("╚══════════════════════════════════════════════════════════════╝");
@@ -416,7 +416,7 @@ impl State {
             // painting the heightmap) need so per-frame brush
             // increments at the edges of the brush don't round to
             // zero under f16 precision.
-            desired_features: wgpu::Features::SPIRV_SHADER_PASSTHROUGH
+            desired_features: wgpu::Features::EXPERIMENTAL_PASSTHROUGH_SHADERS
                 | wgpu::Features::PUSH_CONSTANTS
                 | wgpu::Features::FLOAT32_FILTERABLE,
             limits_overlay: Some(Box::new(|limits, _adapter| {
@@ -440,7 +440,7 @@ impl State {
                 info.name, info.backend
             );
         }
-        device.on_uncaptured_error(Box::new(|error| {
+        device.on_uncaptured_error(std::sync::Arc::new(|error| {
             eprintln!("\n[GPU validation error]\n{:?}\n", error);
         }));
 
@@ -1101,7 +1101,7 @@ impl State {
 
                 // Wait for GPU to finish to get accurate frame timing (only when verbose)
                 if let Some(frame_start) = frame_start {
-                    let _ = self.device.poll(wgpu::PollType::Wait);
+                    let _ = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
                     let frame_time_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
                     self.frame_times[self.frame_time_idx] = frame_time_ms;

@@ -422,7 +422,7 @@ fn run_compute(
         }
         .record(&mut encoder);
         queue.submit(Some(encoder.finish()));
-        let _ = device.poll(wgpu::PollType::Wait);
+        let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
     }
 
     // Read back and output results

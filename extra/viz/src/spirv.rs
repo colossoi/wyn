@@ -30,7 +30,7 @@ pub fn load_spirv_module(device: &wgpu::Device, path: &Path) -> Result<wgpu::Sha
     }
 
     // Check if SPIRV_SHADER_PASSTHROUGH is supported
-    if device.features().contains(wgpu::Features::SPIRV_SHADER_PASSTHROUGH) {
+    if device.features().contains(wgpu::Features::EXPERIMENTAL_PASSTHROUGH_SHADERS) {
         // Convert bytes to u32 words for SPIR-V passthrough
         let mut spirv_data = Vec::new();
         for chunk in bytes.chunks_exact(4) {
@@ -43,12 +43,11 @@ pub fn load_spirv_module(device: &wgpu::Device, path: &Path) -> Result<wgpu::Sha
         device.push_error_scope(wgpu::ErrorFilter::Validation);
 
         let shader_module = unsafe {
-            device.create_shader_module_passthrough(ShaderModuleDescriptorPassthrough::SpirV(
-                wgpu::ShaderModuleDescriptorSpirV {
-                    label: Some(&format!("{}", path.display())),
-                    source: std::borrow::Cow::Borrowed(&spirv_data),
-                },
-            ))
+            device.create_shader_module_passthrough(ShaderModuleDescriptorPassthrough {
+                label: Some(&format!("{}", path.display())),
+                spirv: Some(std::borrow::Cow::Borrowed(&spirv_data)),
+                ..Default::default()
+            })
         };
 
         // Check for validation errors even with passthrough

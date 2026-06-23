@@ -6,10 +6,13 @@ edition = "2021"
 [dependencies]
 winit = "0.30"
 # Enable DirectX 12 on Windows and SPIR-V input
-wgpu = { version = "26.0.1", features = ["dx12", "spirv"] }
+wgpu = { version = "27", features = ["dx12", "spirv"] }
 # naga (pinned to wgpu's transitive version) for headless WGSL
-# parse+validate in the `validate` subcommand.
-naga = { version = "26.0", features = ["wgsl-in"] }
+# parse+validate in the `validate` subcommand. `termcolor` keeps
+# `ShaderError`'s `Display` impl compiling — without it, naga's
+# `DiagnosticBufferInner` defaults to `String`, which doesn't
+# implement `termcolor::WriteColor`.
+naga = { version = "27.0", features = ["wgsl-in", "termcolor"] }
 pollster = "0.3"
 anyhow = "1"
 clap = { version = "4.5", features = ["derive"] }
