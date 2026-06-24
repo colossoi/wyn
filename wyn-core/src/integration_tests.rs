@@ -1176,11 +1176,9 @@ entry gen(src: []f32) ([]f32, []f32) =
 }
 
 /// A compute entry returning a tuple of pointwise maps over *different*
-/// runtime-sized inputs must split into one parallel stage per output slot,
-/// each dispatched over its own input's length — not a single serial kernel
-/// over the first input's grid (which re-ran the whole double loop on every
-/// thread). The two slots have unequal (independent) domains, so they become
-/// independent dispatches.
+/// runtime-sized inputs splits into one parallel stage per output slot, each
+/// dispatched over its own input's length. The two slots have independent
+/// domains, so they become independent dispatches over their own inputs.
 #[test]
 fn multidomain_maps_split_into_per_domain_stages() {
     use crate::pipeline_descriptor::{DispatchLen, DispatchSize, Pipeline};
@@ -1226,11 +1224,10 @@ entry two(a: []f32, b: []f32) ([]f32, []f32) =
     );
 }
 
-/// Equal-domain sibling maps over *different* symbols sharing one size var
-/// (`<[n]>(xs, ys)`) still split into one parallel stage per slot under
-/// Patch A — each dispatched over its own input — rather than degrading to a
-/// serial kernel. (Collapsing the two equal-domain stages into one guarded
-/// kernel is the later Patch B fusion; correctness here does not depend on it.)
+/// Sibling maps over *different* symbols that share one size var
+/// (`<[n]>(xs, ys)`) each become their own parallel stage, dispatched over
+/// their own input. The equal-domain fuser collapses only same-symbol lanes
+/// into one kernel; distinct-buffer lanes remain separate parallel dispatches.
 #[test]
 fn equal_domain_sibling_maps_each_parallel() {
     use crate::pipeline_descriptor::{DispatchSize, Pipeline};
@@ -1263,11 +1260,11 @@ entry eqn<[n]>(xs: [n]f32, ys: [n]f32) ([n]f32, [n]f32) =
 }
 
 /// Same-symbol sibling maps returned as a direct tuple (`(map(f, xs),
-/// map(g, xs))`) split into two parallel stages, both dispatched over `xs`'s
-/// own length — not the old single serial kernel that re-ran the whole double
-/// loop on every thread of an `xs`-sized grid.
+/// map(g, xs))`) share one domain (the same input `xs`) and fuse into a
+/// single parallel compute stage that writes both outputs from one `tid`
+/// grid, dispatched over `xs`'s length.
 #[test]
-fn same_symbol_sibling_maps_are_parallel_not_serial() {
+fn same_symbol_sibling_maps_fuse_to_one_stage() {
     use crate::pipeline_descriptor::{DispatchLen, DispatchSize, Pipeline};
     let lowered = crate::compile_thru_spirv(
         r#"
@@ -1286,16 +1283,16 @@ entry same(xs: []f32) ([]f32, []f32) =
             _ => None,
         })
         .expect("one compute pipeline");
-    assert_eq!(compute.stages.len(), 2, "two output slots → two parallel stages");
+    assert_eq!(compute.stages.len(), 1, "same-domain slots fuse into one stage");
     assert!(
-        compute.stages.iter().all(|s| matches!(
-            s.dispatch_size,
+        matches!(
+            compute.stages[0].dispatch_size,
             DispatchSize::DerivedFrom {
                 len: DispatchLen::InputBinding { binding: 0, .. },
                 ..
             }
-        )),
-        "both stages dispatch over xs (binding 0)"
+        ),
+        "the fused stage dispatches over xs (binding 0)"
     );
 }
 

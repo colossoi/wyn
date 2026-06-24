@@ -813,12 +813,6 @@ fn soac_primary_input(soac: &SoacOp) -> Option<&ArrayExpr> {
 /// the same size `Variable` / `SizeVar` / `Size`. `None` when the domain
 /// can't be read off the input type; the caller treats an unknown domain
 /// as its own singleton class rather than assuming equality.
-//
-// The equal-domain fusion that would collapse Patch A's separate same-domain
-// stages into one guarded kernel needs EGIR to parallelize multi-output
-// pointwise Scremas (today they lower serially); until that lands this is
-// exercised only by the domain-key unit tests.
-#[allow(dead_code)]
 fn soac_domain_key(soac: &SoacOp) -> Option<Type<TypeName>> {
     let ArrayExpr::Ref(t) = soac_primary_input(soac)? else {
         return None;
@@ -832,7 +826,6 @@ fn soac_domain_key(soac: &SoacOp) -> Option<Type<TypeName>> {
 /// their own singleton class — an unknown domain is never assumed equal to
 /// another. Order is preserved: a class carries its members in slot order,
 /// and classes appear in first-seen order.
-#[allow(dead_code)]
 fn partition_by_domain(keys: &[Option<Type<TypeName>>]) -> Vec<Vec<usize>> {
     let mut classes: Vec<(Option<Type<TypeName>>, Vec<usize>)> = Vec::new();
     for (i, key) in keys.iter().enumerate() {
@@ -850,6 +843,249 @@ fn partition_by_domain(keys: &[Option<Type<TypeName>>]) -> Vec<Vec<usize>> {
         }
     }
     classes.into_iter().map(|(_, members)| members).collect()
+}
+
+/// One output slot recognised by the equal-domain fuser: a plain
+/// captureless `map(lam, ref)` over a single named entry-param array.
+struct FusibleMapSlot {
+    slot_index: usize,
+    input: ArrayExpr,
+    input_sym: SymbolId,
+    lam: Lambda,
+    output_ty: Type<TypeName>,
+    domain: Type<TypeName>,
+}
+
+fn fusible_map_slot(slot_index: usize, term: &Term) -> Option<FusibleMapSlot> {
+    let TermKind::Soac(
+        soac @ SoacOp::Map {
+            lam,
+            inputs,
+            destination,
+        },
+    ) = &term.kind
+    else {
+        return None;
+    };
+    if *destination != SoacDestination::Fresh || !lam.captures.is_empty() {
+        return None;
+    }
+    if inputs.len() != 1 || lam.lam.params.len() != 1 {
+        return None;
+    }
+    let input = &inputs[0];
+    let input_sym = input.as_named_ref()?;
+    let ArrayExpr::Ref(_) = input else {
+        return None;
+    };
+    let domain = soac_domain_key(soac)?;
+    Some(FusibleMapSlot {
+        slot_index,
+        input: input.clone(),
+        input_sym,
+        lam: lam.lam.clone(),
+        output_ty: term.ty.clone(),
+        domain,
+    })
+}
+
+/// Fuse the sibling output maps of an all-pointwise multi-output compute entry
+/// whose slots all read the **same single input array** into one multi-output
+/// pointwise `Screma`. Such an entry then has one tail SOAC (the Screma) and no
+/// sibling SOAC slots, so the multi-output-Screma path (`make_map_plan` → EGIR
+/// `build_parallel_maps`) lowers it as one guarded parallel kernel with one
+/// lane per output.
+///
+/// Entries left untouched (handled by the per-slot split in
+/// `make_multidomain_map_plan`): those whose slots read different input arrays,
+/// and those with any slot that isn't a captureless single-input `map` over a
+/// named entry param. Distinct-buffer fusion needs each map function to take
+/// every shared input and ignore the ones it doesn't use, which a
+/// defunctionalized fixed-arity SOAC function can't express.
+fn fuse_equal_domain_sibling_maps(program: &mut Program, term_ids: &mut TermIdSource) {
+    let indices: Vec<usize> = program
+        .defs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, d)| match &d.meta {
+            DefMeta::EntryPoint(decl) if decl.entry_type.is_compute() => Some(i),
+            _ => None,
+        })
+        .collect();
+    for idx in indices {
+        let body = program.defs[idx].body.clone();
+        if let Some(fused) = fuse_entry_body(body, &mut program.symbols, term_ids) {
+            program.defs[idx].body = fused;
+        }
+    }
+}
+
+/// Descend through the entry's `Lambda` params to the `OutputSlotStore`
+/// chain and try to fuse it. Returns the rewritten full body, or `None` if
+/// nothing fused.
+fn fuse_entry_body(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdSource) -> Option<Term> {
+    match term.kind {
+        TermKind::Lambda(lam) => {
+            let new_body = fuse_entry_body(*lam.body, symbols, term_ids)?;
+            Some(Term {
+                kind: TermKind::Lambda(Lambda {
+                    params: lam.params,
+                    body: Box::new(new_body),
+                    ret_ty: lam.ret_ty,
+                }),
+                ..term
+            })
+        }
+        _ => fuse_output_slot_chain(&term, symbols, term_ids),
+    }
+}
+
+fn fuse_output_slot_chain(
+    chain: &Term,
+    symbols: &mut SymbolTable,
+    term_ids: &mut TermIdSource,
+) -> Option<Term> {
+    let mut slots: Vec<(usize, Term)> = Vec::new();
+    collect_extra_slot_stores(chain, &mut slots);
+    if slots.len() < 2 {
+        return None;
+    }
+    let fusible: Vec<FusibleMapSlot> =
+        slots.iter().map(|(i, t)| fusible_map_slot(*i, t)).collect::<Option<Vec<_>>>()?;
+
+    // Fuse only when every slot shares one iteration domain. Mixed-domain
+    // entries belong to the per-slot split path.
+    let domains: Vec<Option<Type<TypeName>>> = fusible.iter().map(|s| Some(s.domain.clone())).collect();
+    if partition_by_domain(&domains).len() != 1 {
+        return None;
+    }
+
+    // Fuse only when every lane reads the same single input array, so each
+    // lane's map function consumes exactly that one element. Lanes over
+    // distinct buffers (`<[n]>(xs, ys)`) would need each map function to take
+    // every shared input and ignore the ones it doesn't use, which a
+    // defunctionalized fixed-arity SOAC function can't express; those stay as
+    // separate parallel stages (`make_multidomain_map_plan`).
+    if fusible.iter().any(|s| s.input_sym != fusible[0].input_sym) {
+        return None;
+    }
+    let inputs: Vec<ArrayExpr> = vec![fusible[0].input.clone()];
+
+    // Each lane keeps its own map function over the shared input element.
+    let map_lams: Vec<super::SoacBody> = fusible
+        .iter()
+        .map(|slot| super::SoacBody {
+            lam: slot.lam.clone(),
+            captures: vec![],
+        })
+        .collect();
+
+    let result_fields: Vec<Type<TypeName>> = fusible.iter().map(|s| s.output_ty.clone()).collect();
+    let tuple_ty = Type::Constructed(TypeName::Tuple(result_fields.len()), result_fields);
+    let screma = Term {
+        id: term_ids.next_id(),
+        ty: tuple_ty.clone(),
+        span: chain.span,
+        kind: TermKind::Soac(SoacOp::Screma {
+            map_lams,
+            accumulators: vec![],
+            inputs,
+        }),
+    };
+    let tuple_sym = symbols.alloc("_fused_maps".to_string());
+
+    // Per lane, a let-bound projection of the fused tuple. The original
+    // `OutputSlotStore` chain is rewritten in place to store these projection
+    // vars instead of the maps — preserving its `SideEffect`-typed terminator
+    // (which `build_entry_outputs` reads as the entry's return type) and
+    // mirroring the let-bound-projection shape `find_direct_map_screma_group`
+    // produces, so EGIR's SOAC→OutputView retargeting recognises each output
+    // and `build_parallel_maps` fires.
+    let proj_syms: Vec<SymbolId> =
+        fusible.iter().map(|_| symbols.alloc("_fused_proj".to_string())).collect();
+    let mut slot_proj: LookupMap<usize, (SymbolId, Type<TypeName>)> = LookupMap::new();
+    for (lane, slot) in fusible.iter().enumerate() {
+        slot_proj.insert(slot.slot_index, (proj_syms[lane], slot.output_ty.clone()));
+    }
+    let mut acc = rewrite_output_slot_values(chain, &slot_proj, term_ids);
+    for (lane, slot) in fusible.iter().enumerate().rev() {
+        let proj = Term {
+            id: term_ids.next_id(),
+            ty: slot.output_ty.clone(),
+            span: chain.span,
+            kind: TermKind::TupleProj {
+                tuple: Box::new(Term {
+                    id: term_ids.next_id(),
+                    ty: tuple_ty.clone(),
+                    span: chain.span,
+                    kind: TermKind::Var(VarRef::Symbol(tuple_sym)),
+                }),
+                idx: lane,
+            },
+        };
+        acc = let_term(
+            proj_syms[lane],
+            slot.output_ty.clone(),
+            proj,
+            acc,
+            chain.span,
+            term_ids,
+        );
+    }
+
+    Some(let_term(tuple_sym, tuple_ty, screma, acc, chain.span, term_ids))
+}
+
+/// Clone an `OutputSlotStore` let-chain, replacing each store's value with a
+/// reference to the projection var assigned to that slot. The chain's let
+/// structure and types (including its `SideEffect`-typed terminator) are
+/// preserved.
+fn rewrite_output_slot_values(
+    term: &Term,
+    slot_proj: &LookupMap<usize, (SymbolId, Type<TypeName>)>,
+    term_ids: &mut TermIdSource,
+) -> Term {
+    match &term.kind {
+        TermKind::Let {
+            name,
+            name_ty,
+            rhs,
+            body,
+        } => {
+            let new_rhs = match &rhs.kind {
+                TermKind::OutputSlotStore { slot_index, .. } if slot_proj.contains_key(slot_index) => {
+                    let (psym, pty) = &slot_proj[slot_index];
+                    Term {
+                        id: term_ids.next_id(),
+                        ty: rhs.ty.clone(),
+                        span: rhs.span,
+                        kind: TermKind::OutputSlotStore {
+                            slot_index: *slot_index,
+                            value: Box::new(Term {
+                                id: term_ids.next_id(),
+                                ty: pty.clone(),
+                                span: rhs.span,
+                                kind: TermKind::Var(VarRef::Symbol(*psym)),
+                            }),
+                        },
+                    }
+                }
+                _ => (**rhs).clone(),
+            };
+            Term {
+                id: term_ids.next_id(),
+                ty: term.ty.clone(),
+                span: term.span,
+                kind: TermKind::Let {
+                    name: *name,
+                    name_ty: name_ty.clone(),
+                    rhs: Box::new(new_rhs),
+                    body: Box::new(rewrite_output_slot_values(body, slot_proj, term_ids)),
+                },
+            }
+        }
+        _ => term.clone(),
+    }
 }
 
 /// A SOAC output slot that the multi-domain map split can lower as its
@@ -1837,6 +2073,12 @@ pub fn run(
         }
     }
 
+    // Horizontal fusion: collapse the sibling output maps of a single-domain
+    // multi-output entry into one multi-output Screma so the analysis below
+    // sees one parallel tail (one guarded kernel, one lane per output).
+    // Mixed-domain entries are left for the per-slot split in `make_lowering_plan`.
+    fuse_equal_domain_sibling_maps(&mut program, &mut term_ids);
+
     let analyses = analyze_program(&program);
 
     if analyses.is_empty() {
@@ -2019,10 +2261,11 @@ fn make_serial_compute_plan(
 /// output slot into its own parallel compute stage. Each stage is a
 /// single-output map over its slot's own input domain, dispatched over that
 /// input's length and pinned to its own output binding. Slots over different
-/// domains (`two(a,b)`) thus become independent dispatches; slots over the
-/// same domain (`<[n]>(xs,ys)`) become separate-but-equal dispatches (one
-/// shared guard is the Patch B fusion). All stages share one pipeline and its
-/// binding table, so the host targets the same buffers the single entry would.
+/// domains (`two(a,b)`) become independent dispatches; distinct-buffer slots
+/// over the same domain (`<[n]>(xs,ys)`) each get their own equal-length
+/// dispatch (same-symbol same-domain slots fuse upstream into one kernel).
+/// All stages share one pipeline and its binding table, so the host targets
+/// the same buffers the single entry would.
 ///
 /// Falls back to a safe serial `1×1×1` plan if any slot's domain or captures
 /// can't be resolved off entry params (e.g. a slot body references a
