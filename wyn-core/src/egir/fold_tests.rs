@@ -131,3 +131,41 @@ fn pow_non_const_exponent_does_not_fold() {
     assert!(matches!(op, PureOp::BinOp(n) if n == "**"));
     assert_eq!(operands.as_slice(), &[base, exp]);
 }
+
+#[test]
+fn unary_neg_of_float_literal_folds_to_constant() {
+    // `-(0.5)` must fold to the constant -0.5, not stay a runtime `OpFNegate`.
+    // Otherwise an array element written `-0.5` keeps a non-constant operand
+    // and the whole array lowers to `OpCompositeConstruct` (rebuilt per call)
+    // instead of an `OpConstantComposite` that can hoist to a shared global.
+    let mut g = EGraph::new();
+    let half = g.intern_pure(PureOp::Float("0.5".into()), smallvec![], f32_ty());
+    let neg = g.intern_pure(PureOp::UnaryOp("-".into()), smallvec![half], f32_ty());
+    match &g.nodes[neg] {
+        ENode::Constant(ConstantValue::F32(bits)) => assert_eq!(f32::from_bits(*bits), -0.5),
+        _ => panic!("expected -(0.5) to fold to the constant -0.5"),
+    }
+}
+
+#[test]
+fn unary_neg_of_int_literal_folds_to_constant() {
+    let mut g = EGraph::new();
+    let five = g.intern_pure(PureOp::Int("5".into()), smallvec![], i32_ty());
+    let neg = g.intern_pure(PureOp::UnaryOp("-".into()), smallvec![five], i32_ty());
+    match &g.nodes[neg] {
+        ENode::Constant(ConstantValue::I32(v)) => assert_eq!(*v, -5),
+        _ => panic!("expected -(5) to fold to the constant -5"),
+    }
+}
+
+#[test]
+fn unary_neg_of_runtime_value_does_not_fold() {
+    let mut g = EGraph::new();
+    let x = g.add_func_param(0, f32_ty()); // runtime
+    let neg = g.intern_pure(PureOp::UnaryOp("-".into()), smallvec![x], f32_ty());
+    let ENode::Pure { op, operands } = &g.nodes[neg] else {
+        panic!("expected a pure node")
+    };
+    assert!(matches!(op, PureOp::UnaryOp(n) if n == "-"));
+    assert_eq!(operands.as_slice(), &[x]);
+}

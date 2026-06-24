@@ -162,6 +162,33 @@ fn test_parse_let_decl() {
 }
 
 #[test]
+fn test_parse_negative_literal_is_a_literal() {
+    // `-0.5` / `-5` are negative literals, not runtime negations: the lexer's
+    // number tokens carry no sign, so the parser folds a unary minus applied
+    // to a numeric literal. This keeps a negative constant compile-time
+    // constant (e.g. an array element `-0.5`), so a constant array of them can
+    // hoist to a shared global instead of being rebuilt per invocation.
+    let decl = single_decl("let x: f32 = -0.5");
+    assert!(
+        matches!(decl.body.kind, ExprKind::FloatLiteral(f) if f == -0.5),
+        "expected a -0.5 FloatLiteral"
+    );
+
+    let decl = single_decl("let y: i32 = -5");
+    assert!(
+        matches!(decl.body.kind, ExprKind::IntLiteral(ref n) if n.as_str() == "-5"),
+        "expected a -5 IntLiteral"
+    );
+
+    // Negation of a non-literal stays a runtime unary op.
+    let decl = single_decl("let z: i32 = -y");
+    assert!(
+        matches!(decl.body.kind, ExprKind::UnaryOp(ref op, _) if op.op == "-"),
+        "negation of a variable must stay a UnaryOp"
+    );
+}
+
+#[test]
 fn test_parse_array_type() {
     let decl = single_decl("let arr: [3][4]f32 = [[1.0f32, 2.0f32], [3.0f32, 4.0f32]]");
     assert_eq!(decl.name, "arr");

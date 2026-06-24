@@ -2222,10 +2222,22 @@ impl<'a> Parser<'a> {
                 self.advance();
                 let operand = self.parse_unary_expression()?; // Right-associative for chaining: --x
                 let span = start_span.merge(&operand.h.span);
-                Ok(self.node_counter.mk_node(
-                    ExprKind::UnaryOp(UnaryOp { op: "-".to_string() }, Box::new(operand)),
-                    span,
-                ))
+                // Negation of a numeric literal is itself a literal (the lexer's
+                // `floatnumber` / `intnumber` carry no sign). Fold it at parse
+                // time so a negative constant — e.g. an array element `-0.5` —
+                // stays a compile-time constant rather than a runtime negation.
+                let negated = match &operand.kind {
+                    ExprKind::IntLiteral(s) => Some(ExprKind::IntLiteral(s.negated())),
+                    ExprKind::FloatLiteral(f) => Some(ExprKind::FloatLiteral(-*f)),
+                    _ => None,
+                };
+                Ok(match negated {
+                    Some(kind) => self.node_counter.mk_node(kind, span),
+                    None => self.node_counter.mk_node(
+                        ExprKind::UnaryOp(UnaryOp { op: "-".to_string() }, Box::new(operand)),
+                        span,
+                    ),
+                })
             }
             Some(Token::Bang) => {
                 let start_span = self.current_span();

@@ -6,6 +6,7 @@
 //! - identity elim: `x+0`, `0+x`, `x-0`, `x*1`, `1*x`, `x/1`
 //! - absorbing:    `x*0 → 0`, `0*x → 0`
 //! - double negation: `-(-x) → x`, `!(!x) → x`
+//! - negate literal:   `-(c) → const` for an i32/f32 literal `c`
 //! - constant-constant: `BinOp(c1, c2) → const` for `+ - * /` over i32/u32/f32
 //!
 //! Rules never keep borrows across mutations: constant folding extracts
@@ -35,7 +36,7 @@ impl EGraph {
                     .or_else(|| self.fold_binop_const(name, a, b, result_ty))
                     .or_else(|| self.fold_pow_to_mul_chain(name, a, b, result_ty))
             }
-            PureOp::UnaryOp(name) if operands.len() == 1 => self.fold_unary(name, operands[0]),
+            PureOp::UnaryOp(name) if operands.len() == 1 => self.fold_unary(name, operands[0], result_ty),
             _ => None,
         }
     }
@@ -177,10 +178,25 @@ impl EGraph {
         Some(acc)
     }
 
-    /// `-(-x) → x` and `!(!x) → x` (no-op for any other unary op).
-    fn fold_unary(&self, name: &str, inner: NodeId) -> Option<NodeId> {
+    /// `-(const) → negated const`, plus `-(-x) → x` and `!(!x) → x`.
+    ///
+    /// Folding a negated numeric literal matters for constant arrays: a
+    /// negative element is written `-0.5`, which parses as a negation of the
+    /// (unsigned) literal `0.5`. Left unfolded, the array has a runtime
+    /// operand and lowers to `OpCompositeConstruct` rebuilt per invocation —
+    /// it can't become an `OpConstantComposite`, so it never hoists to a
+    /// shared `Private` global. Folding the negation keeps the array constant.
+    fn fold_unary(&mut self, name: &str, inner: NodeId, result_ty: &Type<TypeName>) -> Option<NodeId> {
         if name != "-" && name != "!" {
             return None;
+        }
+        if name == "-" {
+            if let Some(v) = self.as_i32(inner) {
+                return Some(self.intern_constant(ConstantValue::I32(v.wrapping_neg()), result_ty.clone()));
+            }
+            if let Some(v) = self.as_f32(inner) {
+                return Some(self.intern_constant(ConstantValue::F32((-v).to_bits()), result_ty.clone()));
+            }
         }
         let ENode::Pure {
             op: PureOp::UnaryOp(inner_name),
