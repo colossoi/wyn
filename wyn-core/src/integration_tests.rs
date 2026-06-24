@@ -1175,6 +1175,130 @@ entry gen(src: []f32) ([]f32, []f32) =
     // Compilation success (no panic) is the test.
 }
 
+/// A compute entry returning a tuple of pointwise maps over *different*
+/// runtime-sized inputs must split into one parallel stage per output slot,
+/// each dispatched over its own input's length — not a single serial kernel
+/// over the first input's grid (which re-ran the whole double loop on every
+/// thread). The two slots have unequal (independent) domains, so they become
+/// independent dispatches.
+#[test]
+fn multidomain_maps_split_into_per_domain_stages() {
+    use crate::pipeline_descriptor::{DispatchLen, DispatchSize, Pipeline};
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry two(a: []f32, b: []f32) ([]f32, []f32) =
+    (map(|x: f32| x + 1.0, a), map(|x: f32| x + 2.0, b))
+"#,
+    )
+    .expect("two compiles");
+
+    let computes: Vec<_> = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .filter_map(|p| match p {
+            Pipeline::Compute(c) => Some(c),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(computes.len(), 1, "one compute pipeline backs entry two");
+    let stages = &computes[0].stages;
+    assert_eq!(
+        stages.len(),
+        2,
+        "two output slots → two parallel stages, not one serial kernel"
+    );
+
+    let dispatch_binding = |i: usize| match &stages[i].dispatch_size {
+        DispatchSize::DerivedFrom {
+            len: DispatchLen::InputBinding { binding, .. },
+            ..
+        } => Some(*binding),
+        _ => None,
+    };
+    let mut domains: Vec<u32> = (0..2).filter_map(dispatch_binding).collect();
+    domains.sort();
+    assert_eq!(
+        domains,
+        vec![0, 1],
+        "the two stages dispatch over their own inputs (bindings 0 and 1), not a shared grid"
+    );
+}
+
+/// Equal-domain sibling maps over *different* symbols sharing one size var
+/// (`<[n]>(xs, ys)`) still split into one parallel stage per slot under
+/// Patch A — each dispatched over its own input — rather than degrading to a
+/// serial kernel. (Collapsing the two equal-domain stages into one guarded
+/// kernel is the later Patch B fusion; correctness here does not depend on it.)
+#[test]
+fn equal_domain_sibling_maps_each_parallel() {
+    use crate::pipeline_descriptor::{DispatchSize, Pipeline};
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry eqn<[n]>(xs: [n]f32, ys: [n]f32) ([n]f32, [n]f32) =
+    (map(|x: f32| x + 1.0, xs), map(|y: f32| y + 2.0, ys))
+"#,
+    )
+    .expect("eqn compiles");
+    let compute = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .find_map(|p| match p {
+            Pipeline::Compute(c) => Some(c),
+            _ => None,
+        })
+        .expect("one compute pipeline");
+    assert_eq!(
+        compute.stages.len(),
+        2,
+        "two equal-domain slots → two parallel stages"
+    );
+    assert!(
+        compute.stages.iter().all(|s| matches!(s.dispatch_size, DispatchSize::DerivedFrom { .. })),
+        "each stage dispatches over a runtime length, not a fixed serial 1×1×1"
+    );
+}
+
+/// Same-symbol sibling maps returned as a direct tuple (`(map(f, xs),
+/// map(g, xs))`) split into two parallel stages, both dispatched over `xs`'s
+/// own length — not the old single serial kernel that re-ran the whole double
+/// loop on every thread of an `xs`-sized grid.
+#[test]
+fn same_symbol_sibling_maps_are_parallel_not_serial() {
+    use crate::pipeline_descriptor::{DispatchLen, DispatchSize, Pipeline};
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry same(xs: []f32) ([]f32, []f32) =
+    (map(|x: f32| x + 1.0, xs), map(|x: f32| x + 2.0, xs))
+"#,
+    )
+    .expect("same compiles");
+    let compute = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .find_map(|p| match p {
+            Pipeline::Compute(c) => Some(c),
+            _ => None,
+        })
+        .expect("one compute pipeline");
+    assert_eq!(compute.stages.len(), 2, "two output slots → two parallel stages");
+    assert!(
+        compute.stages.iter().all(|s| matches!(
+            s.dispatch_size,
+            DispatchSize::DerivedFrom {
+                len: DispatchLen::InputBinding { binding: 0, .. },
+                ..
+            }
+        )),
+        "both stages dispatch over xs (binding 0)"
+    );
+}
+
 // =============================================================================
 // Basic Expressions
 // =============================================================================
@@ -5452,6 +5576,32 @@ entry ent_b(idx: []u32, #[storage(set=1, binding=0, access=read)] buf: []f32) []
 "#,
     )
     .expect("entries that agree on a shared (set, binding) element type must compile");
+    assert!(!lowered.spirv.is_empty());
+}
+
+/// An array-of-tuples entry input (`pts: [](f32, f32)`) is split by the
+/// SoA transform into a tuple-of-arrays whose component arrays share one
+/// outer length. Two maps over those components are therefore the same
+/// size class, so they must stay horizontally fused: one parallel kernel
+/// driving both maps as lanes over the shared length, not two separate
+/// dispatches. This is the SoA case that the size-class scheduling must
+/// keep together.
+///
+/// `#[ignore]`d: array-of-tuples *entry inputs* do not lower today — the
+/// input lowers to a storage buffer whose element type stays
+/// `Tuple(2, [Array, Array])`, which has no static size. Un-ignore once
+/// the SoA-input lowering and per-size-class scheduling land.
+#[test]
+#[ignore = "array-of-tuples entry input does not lower (element type Tuple(2) has no static size); blocks the SoA same-size-class case"]
+fn soa_array_of_tuples_components_stay_one_size_class() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry main(pts: [](f32, f32)) ([]f32, []f32) =
+  (map(|p| p.0 + 1.0, pts), map(|p| p.1 + 2.0, pts))
+"#,
+    )
+    .expect("array-of-tuples entry with two component maps must compile to one valid module");
     assert!(!lowered.spirv.is_empty());
 }
 

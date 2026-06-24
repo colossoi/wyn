@@ -365,11 +365,17 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
                     // analysis itself descends into slot 0's value.
                     collect_extra_slot_stores(&body, &mut extra_slots);
                     if extra_slots.iter().any(|(_, v)| matches!(v.kind, TermKind::Soac(_))) {
-                        // Sibling slot computed by another SOAC would
-                        // need its own parallel kernel; not handled by
-                        // the two-phase synthesis yet — bail and let
-                        // the entry stay unparallelized.
-                        return None;
+                        // Sibling output slots are SOACs. `make_multidomain_map_plan`
+                        // handles the all-pointwise case — slot 0 and every sibling
+                        // a fresh map — by splitting each slot into its own parallel
+                        // stage over its own domain. Any other sibling shape (reduce
+                        // / scan / filter / scatter / in-place) has no parallel split
+                        // yet, so keep the entry serial.
+                        let all_pointwise = is_pointwise_fresh_map_term(&value)
+                            && extra_slots.iter().all(|(_, v)| is_pointwise_fresh_map_term(v));
+                        if !all_pointwise {
+                            return None;
+                        }
                     }
                     current = *value;
                     continue;
@@ -783,6 +789,83 @@ fn classify_input(input: &ArrayExpr, entry_slots: &[Option<EntryParamBinding>]) 
             None
         }
         _ => None,
+    }
+}
+
+/// The primary input array of a SOAC — the one whose length is its
+/// iteration domain.
+fn soac_primary_input(soac: &SoacOp) -> Option<&ArrayExpr> {
+    match soac {
+        SoacOp::Map { inputs, .. }
+        | SoacOp::Redomap { inputs, .. }
+        | SoacOp::Screma { inputs, .. }
+        | SoacOp::Scatter { inputs, .. } => inputs.first(),
+        SoacOp::Reduce { input, .. } | SoacOp::Scan { input, .. } | SoacOp::Filter { input, .. } => {
+            Some(input)
+        }
+        SoacOp::ReduceByIndex { indices, .. } => Some(indices),
+    }
+}
+
+/// The iteration domain of a SOAC, identified by the size component of its
+/// primary input's array type. Two SOACs share a domain — and so may be
+/// horizontally fused into one kernel — exactly when these compare equal:
+/// the same size `Variable` / `SizeVar` / `Size`. `None` when the domain
+/// can't be read off the input type; the caller treats an unknown domain
+/// as its own singleton class rather than assuming equality.
+//
+// The equal-domain fusion that would collapse Patch A's separate same-domain
+// stages into one guarded kernel needs EGIR to parallelize multi-output
+// pointwise Scremas (today they lower serially); until that lands this is
+// exercised only by the domain-key unit tests.
+#[allow(dead_code)]
+fn soac_domain_key(soac: &SoacOp) -> Option<Type<TypeName>> {
+    let ArrayExpr::Ref(t) = soac_primary_input(soac)? else {
+        return None;
+    };
+    let stripped = crate::types::strip_unique(&t.ty);
+    crate::types::array_size(&stripped).cloned()
+}
+
+/// Partition slot positions by iteration domain. Slots whose key compares
+/// equal land in one class (fusible); slots with a `None` key each form
+/// their own singleton class — an unknown domain is never assumed equal to
+/// another. Order is preserved: a class carries its members in slot order,
+/// and classes appear in first-seen order.
+#[allow(dead_code)]
+fn partition_by_domain(keys: &[Option<Type<TypeName>>]) -> Vec<Vec<usize>> {
+    let mut classes: Vec<(Option<Type<TypeName>>, Vec<usize>)> = Vec::new();
+    for (i, key) in keys.iter().enumerate() {
+        match key {
+            Some(k) => {
+                if let Some((_, members)) =
+                    classes.iter_mut().find(|(class_key, _)| class_key.as_ref() == Some(k))
+                {
+                    members.push(i);
+                } else {
+                    classes.push((Some(k.clone()), vec![i]));
+                }
+            }
+            None => classes.push((None, vec![i])),
+        }
+    }
+    classes.into_iter().map(|(_, members)| members).collect()
+}
+
+/// A SOAC output slot that the multi-domain map split can lower as its
+/// own parallel stage: a pointwise map producing a fresh array. A plain
+/// `Map` qualifies; a pointwise `Screma` (map lambdas only, no
+/// accumulators — the shape horizontal fusion produces for same-symbol
+/// sibling maps) qualifies too. Reduce / scan / filter / scatter and
+/// in-place maps do not.
+fn is_pointwise_fresh_map_term(t: &Term) -> bool {
+    match &t.kind {
+        TermKind::Soac(SoacOp::Map {
+            destination: SoacDestination::Fresh,
+            ..
+        }) => true,
+        TermKind::Soac(SoacOp::Screma { accumulators, .. }) => accumulators.is_empty(),
+        _ => false,
     }
 }
 
@@ -1932,6 +2015,187 @@ fn make_serial_compute_plan(
     }
 }
 
+/// Lower an all-pointwise-map multi-output compute entry by splitting each
+/// output slot into its own parallel compute stage. Each stage is a
+/// single-output map over its slot's own input domain, dispatched over that
+/// input's length and pinned to its own output binding. Slots over different
+/// domains (`two(a,b)`) thus become independent dispatches; slots over the
+/// same domain (`<[n]>(xs,ys)`) become separate-but-equal dispatches (one
+/// shared guard is the Patch B fusion). All stages share one pipeline and its
+/// binding table, so the host targets the same buffers the single entry would.
+///
+/// Falls back to a safe serial `1×1×1` plan if any slot's domain or captures
+/// can't be resolved off entry params (e.g. a slot body references a
+/// prefix-`let` value rather than an entry parameter).
+fn make_multidomain_map_plan(
+    analysis: &EntryAnalysis,
+    entry_name: &str,
+    next_binding: u32,
+    sizing: PipelineSizing,
+    program: &mut Program,
+    term_ids: &mut TermIdSource,
+) -> LoweringPlan {
+    match try_make_multidomain_map_plan(analysis, entry_name, next_binding, sizing, program, term_ids) {
+        Some(plan) => plan,
+        None => make_serial_compute_plan(analysis, entry_name, sizing),
+    }
+}
+
+fn try_make_multidomain_map_plan(
+    analysis: &EntryAnalysis,
+    entry_name: &str,
+    next_binding: u32,
+    sizing: PipelineSizing,
+    program: &mut Program,
+    term_ids: &mut TermIdSource,
+) -> Option<LoweringPlan> {
+    let source_def = program.defs.iter().find(|d| d.name == analysis.def_name)?.clone();
+    let entry_slots: Vec<Option<EntryParamBinding>> = match &source_def.meta {
+        DefMeta::EntryPoint(decl) => decl.param_bindings.clone(),
+        _ => return None,
+    };
+
+    // Recover every output slot's producing term (with its full type) by
+    // walking the `normalize_outputs` `OutputSlotStore` chain. `analyze_entry`
+    // already guaranteed each is a pointwise fresh map.
+    let (_, inner) = peel_lambda_params(&source_def.body);
+    let mut slots: Vec<(usize, Term)> = Vec::new();
+    collect_extra_slot_stores(inner, &mut slots);
+    slots.sort_by_key(|(slot_index, _)| *slot_index);
+    if slots.len() < 2 {
+        return None;
+    }
+
+    let mut bindings: Vec<Binding> = Vec::new();
+    let mut defs: Vec<Def> = Vec::new();
+    let mut stages: Vec<ComputeStage> = Vec::new();
+    let mut plans: Vec<ParallelizationPlan> = Vec::new();
+
+    for (rank, (slot_index, slot_term)) in slots.iter().enumerate() {
+        let TermKind::Soac(soac) = &slot_term.kind else {
+            return None;
+        };
+        if !is_pointwise_fresh_map_term(slot_term) {
+            return None;
+        }
+
+        // The slot's iteration domain: its primary input must be a storage
+        // buffer (entry param or view) so the stage can dispatch over its
+        // length. Anything else (range/iota, opaque) bails to the safe path.
+        let primary = soac_primary_input(soac)?;
+        let primary_sym = primary.as_named_ref()?;
+        let ArrayProvenance::Storage {
+            binding: primary_br,
+            elem_bytes: in_elem_bytes,
+            ..
+        } = classify_input(primary, &entry_slots)?
+        else {
+            return None;
+        };
+
+        // Every entry param the slot body references becomes a stage param,
+        // carrying its original binding so EGIR routes it to the same buffer.
+        // The primary input is rotated to index 0 so the `DerivedFromInputLength`
+        // dispatch model points at the slot's domain.
+        let mut required = compute_broadcast_required_params(slot_term, &source_def, &program.symbols)?;
+        let primary_pos = required.iter().position(|r| r.sym == primary_sym)?;
+        let primary_param = required.remove(primary_pos);
+        required.insert(0, primary_param);
+
+        let out_elem_ty = slot_term.ty.elem_type()?;
+        let out_elem_bytes = crate::ssa::layout::type_byte_size(out_elem_ty)?;
+        let out_binding = BindingRef::new(AUTO_STORAGE_SET, next_binding + rank as u32);
+
+        let stage_name = if *slot_index == 0 {
+            entry_name.to_string()
+        } else {
+            format!("{}_dispatch_{}", entry_name, slot_index)
+        };
+
+        defs.push(make_entry_def(
+            &stage_name,
+            slot_term.clone(),
+            slot_term.ty.clone(),
+            &required,
+            Vec::new(),
+            program,
+            term_ids,
+        ));
+
+        let mut reads = Vec::new();
+        for input in soac_inputs(soac) {
+            if let Some(ArrayProvenance::Storage { binding, .. }) = classify_input(input, &entry_slots) {
+                reads.push(push_or_find_storage_binding(
+                    &mut bindings,
+                    binding,
+                    Access::ReadOnly,
+                    BufferUsage::Input,
+                    "input".to_string(),
+                ));
+            }
+        }
+        let write_idx = push_or_find_storage_binding(
+            &mut bindings,
+            out_binding,
+            Access::WriteOnly,
+            BufferUsage::Output,
+            format!("{}_output_{}", entry_name, slot_index),
+        );
+        if let Binding::StorageBuffer { length, .. } = &mut bindings[write_idx] {
+            *length = Some(BufferLen::LikeInput {
+                set: primary_br.set,
+                binding: primary_br.binding,
+                elem_bytes: out_elem_bytes,
+                src_elem_bytes: in_elem_bytes,
+            });
+        }
+
+        stages.push(ComputeStage {
+            entry_point: stage_name.clone(),
+            workgroup_size: sizing.workgroup,
+            dispatch_size: DispatchSize::DerivedFrom {
+                len: DispatchLen::InputBinding {
+                    set: primary_br.set,
+                    binding: primary_br.binding,
+                    elem_bytes: in_elem_bytes,
+                },
+                workgroup_size: sizing.workgroup.0,
+            },
+            reads,
+            writes: vec![write_idx],
+        });
+        plans.push(ParallelizationPlan {
+            entry: stage_name,
+            dispatch: DispatchModel::DerivedFromInputLength {
+                input_index: 0,
+                workgroup_size: sizing.workgroup.0,
+            },
+            bindings: PlannedBindings {
+                map_outputs: vec![Some(out_binding)],
+                accumulators: vec![],
+            },
+        });
+    }
+
+    let extra_bindings_used = slots.len() as u32;
+    let mut plans = plans.into_iter();
+    let parallel_plan = plans.next();
+    let extra_parallel_plans: Vec<ParallelizationPlan> = plans.collect();
+
+    Some(LoweringPlan {
+        removed_entry: Some(analysis.def_name),
+        new_defs: defs,
+        pipeline: Pipeline::Compute(ComputePipeline {
+            bindings,
+            stages,
+            default_total_threads: sizing.default_total_threads,
+        }),
+        extra_bindings_used,
+        extra_parallel_plans,
+        parallel_plan,
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchPhase {
     PreTail,
@@ -2775,6 +3039,13 @@ fn make_lowering_plan(
 ) -> LoweringPlan {
     let sizing = PipelineSizing::for_analyzed_entry(program, analysis);
     let shape = parallel_soac_shape(&analysis.soac.original).expect("analyzed SOAC has a parallel shape");
+    // Sibling output slots that are themselves SOACs only reach here when
+    // `analyze_entry` admitted an all-pointwise-map multi-output entry.
+    // Each such entry splits into one parallel stage per output slot,
+    // dispatched over that slot's own input domain.
+    if analysis.extra_slots.iter().any(|(_, v)| matches!(v.kind, TermKind::Soac(_))) {
+        return make_multidomain_map_plan(analysis, entry_name, next_binding, sizing, program, term_ids);
+    }
     if retained_extra_slots_have_ordered_side_effect(analysis) {
         return make_serial_compute_plan(analysis, entry_name, sizing);
     }

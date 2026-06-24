@@ -1550,3 +1550,63 @@ fn ordered_schedule_output_uses_entry_output_name() {
         "the generic `tail_output` name must not survive, got {outputs:?}"
     );
 }
+
+// ---------- domain-key / partition helpers ----------
+//
+// `soac_domain_key` + `partition_by_domain` identify which output slots
+// share an iteration domain (and so may be horizontally fused). The split
+// in `make_multidomain_map_plan` is correct regardless of partitioning;
+// these helpers drive the equal-domain fusion that collapses same-domain
+// stages into one guarded kernel.
+
+fn size_ty(n: usize) -> Type<TypeName> {
+    Type::Constructed(TypeName::Size(n), vec![])
+}
+
+#[test]
+fn partition_groups_equal_size_terms() {
+    let keys = vec![Some(size_ty(8)), Some(size_ty(8)), Some(size_ty(4))];
+    assert_eq!(super::partition_by_domain(&keys), vec![vec![0, 1], vec![2]]);
+}
+
+#[test]
+fn partition_distinguishes_size_variables_by_id() {
+    let keys = vec![
+        Some(Type::Variable(1)),
+        Some(Type::Variable(2)),
+        Some(Type::Variable(1)),
+    ];
+    assert_eq!(super::partition_by_domain(&keys), vec![vec![0, 2], vec![1]]);
+}
+
+#[test]
+fn partition_treats_unknown_domain_as_singleton() {
+    let keys = vec![Some(size_ty(8)), None, Some(size_ty(8)), None];
+    assert_eq!(
+        super::partition_by_domain(&keys),
+        vec![vec![0, 2], vec![1], vec![3]]
+    );
+}
+
+#[test]
+fn soac_domain_key_reads_primary_input_size() {
+    // `map(|x| x, ref: [8]i32)` — the domain key is the input's outer size.
+    let mut b = B::new();
+    let x = b.sym("x");
+    let body = b.var(x, i32_ty());
+    let arr = b.sym("arr");
+    let input_ref = b.var(arr, arr_i32_ty());
+    let map = SoacOp::Map {
+        lam: SoacBody {
+            lam: Lambda {
+                params: vec![(x, i32_ty())],
+                body: Box::new(body),
+                ret_ty: i32_ty(),
+            },
+            captures: vec![],
+        },
+        inputs: vec![ArrayExpr::Ref(Box::new(input_ref))],
+        destination: SoacDestination::Fresh,
+    };
+    assert_eq!(super::soac_domain_key(&map), Some(size_ty(8)));
+}
