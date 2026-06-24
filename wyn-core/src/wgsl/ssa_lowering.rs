@@ -576,6 +576,13 @@ struct LowerCtx<'a> {
     /// this in preference to the synthesized `_wgsl_gid`, since WGSL
     /// rejects duplicate `@builtin` declarations on the same entry.
     wgsl_gid_alias: Option<String>,
+    /// Compile-time-constant arrays promoted to module-scope `var<private>`
+    /// globals so a runtime index addresses one shared materialization
+    /// instead of a per-occurrence `var<function>` (the WGSL analog of the
+    /// SPIR-V `Private`-global hoist). Keyed by the initializer expression,
+    /// which is already value-deduped, so equal arrays collapse to one
+    /// global. Value is `(global_name, wgsl_type)`.
+    private_const_globals: LookupMap<String, (String, String)>,
 }
 
 /// Uniform-block stand-in for a compute entry's push-constant inputs.
@@ -602,6 +609,7 @@ impl<'a> LowerCtx<'a> {
             output_struct_counter: 0,
             pc_blocks: LookupMap::new(),
             wgsl_gid_alias: None,
+            private_const_globals: LookupMap::new(),
         }
     }
 
@@ -711,6 +719,19 @@ impl<'a> LowerCtx<'a> {
                 writeln!(output, "    {}{}: {},", attr, field_name, ty).unwrap();
             }
             writeln!(output, "}}").unwrap();
+            writeln!(output).unwrap();
+        }
+
+        // Compile-time-constant arrays hoisted to shared module-scope
+        // `var<private>` globals (the WGSL analog of the SPIR-V Private-global
+        // hoist): a runtime index addresses one materialization instead of a
+        // per-occurrence `var<function>`. Populated while lowering bodies
+        // above; emitted here, after the struct declarations its types may
+        // reference. Sorted by name for deterministic output.
+        let mut const_globals: Vec<_> = self.private_const_globals.iter().collect();
+        const_globals.sort_by_key(|(_, (name, _))| name.clone());
+        for (init, (name, ty)) in const_globals {
+            writeln!(output, "var<private> {}: {} = {};", name, ty, init).unwrap();
             writeln!(output).unwrap();
         }
 
@@ -1567,6 +1588,98 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         }
     }
 
+    /// True iff `v` is a compile-time constant: a numeric/bool literal, or a
+    /// composite (array / vector / tuple / matrix) whose elements are all
+    /// recursively constant. Such a value can be promoted to a module-scope
+    /// `var<private>` whose initializer is a WGSL const-expression.
+    fn is_const_value(&self, v: ValueRef) -> bool {
+        use crate::op::OpTag;
+        let id = match v {
+            ValueRef::Const(_) => return true,
+            ValueRef::Ssa(id) => id,
+        };
+        let Some(val) = self.body.inner.values.get(id) else {
+            return false;
+        };
+        let inst_id = match val.def {
+            crate::ssa::framework::ValueDef::Inst { inst } => inst,
+            _ => return false,
+        };
+        let Some(inst) = self.body.inner.insts.get(inst_id) else {
+            return false;
+        };
+        match &inst.data {
+            InstKind::Op { tag, operands } => match tag {
+                OpTag::Int(_) | OpTag::Uint(_) | OpTag::Float(_) | OpTag::Bool(_) | OpTag::Unit => true,
+                OpTag::Tuple(_) | OpTag::Vector(_) | OpTag::ArrayLit(_) | OpTag::Matrix { .. } => {
+                    operands.iter().all(|o| self.is_const_value(*o))
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// Emit a constant value as a fully-inlined WGSL const-expression
+    /// (literals + `vecN<T>(…)` / `array<T,N>(…)` / struct constructors),
+    /// independent of the per-occurrence `var` bindings the body otherwise
+    /// uses. Required for a module-scope `var<private>` initializer, which
+    /// must be a const-expression and can't name function-local bindings.
+    /// Caller guarantees `is_const_value(v)`.
+    fn const_expr_of(&mut self, v: ValueRef) -> Result<String> {
+        use crate::op::OpTag;
+        let id = match v {
+            ValueRef::Const(c) => return self.format_constant(&c),
+            ValueRef::Ssa(id) => id,
+        };
+        let result_ty = self.body.get_value_type(id).clone();
+        let val = self
+            .body
+            .inner
+            .values
+            .get(id)
+            .ok_or_else(|| crate::err_wgsl_at!(self.blame_span(), "const hoist: value not found"))?;
+        let inst_id = match val.def {
+            crate::ssa::framework::ValueDef::Inst { inst } => inst,
+            _ => {
+                return Err(crate::err_wgsl_at!(
+                    self.blame_span(),
+                    "const hoist: value has no instruction"
+                ))
+            }
+        };
+        let (tag, operands) = match self.body.inner.insts.get(inst_id).map(|i| &i.data) {
+            Some(InstKind::Op { tag, operands }) => (tag.clone(), operands.clone()),
+            _ => return Err(crate::err_wgsl_at!(self.blame_span(), "const hoist: not an Op")),
+        };
+        match &tag {
+            OpTag::Int(s) | OpTag::Uint(s) => {
+                if matches!(result_ty, PolyType::Constructed(TypeName::UInt(32), _)) {
+                    Ok(format!("{}u", s))
+                } else {
+                    Ok(format!("{}i", s))
+                }
+            }
+            OpTag::Float(s) => {
+                if s.contains('.') || s.contains('e') || s.contains('E') {
+                    Ok(format!("{}f", s))
+                } else {
+                    Ok(format!("{}.0f", s))
+                }
+            }
+            OpTag::Bool(b) => Ok((if *b { "true" } else { "false" }).to_string()),
+            OpTag::Vector(_) | OpTag::ArrayLit(_) | OpTag::Tuple(_) => {
+                let wgsl_ty = self.ctx.type_emitter.type_to_wgsl(&result_ty)?;
+                let parts: Result<Vec<_>> = operands.iter().map(|o| self.const_expr_of(*o)).collect();
+                Ok(format!("{}({})", wgsl_ty, parts?.join(", ")))
+            }
+            _ => Err(crate::err_wgsl_at!(
+                self.blame_span(),
+                "const hoist: unsupported op"
+            )),
+        }
+    }
+
     /// Resolve a storage binding (set, binding) to its module-scope name.
     /// Uses the synthesized `_buf_{set}_{binding}` naming used for
     /// compiler-introduced compute-entry bindings.
@@ -1930,7 +2043,9 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         // the value becomes subscriptable via
                         // DynamicExtract's `x[i]`. WGSL forbids dynamic
                         // indexing of `let`-bound values, so this must
-                        // be a `var`.
+                        // be a `var`. A *constant* array is hoisted once
+                        // to a shared module-scope `var<private>` instead
+                        // of being rebuilt per occurrence.
                         InstKind::Op {
                             tag: crate::op::OpTag::Materialize,
                             operands,
@@ -1940,12 +2055,39 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             })?;
                             let ty =
                                 self.ctx.type_emitter.type_to_wgsl(self.body.get_value_type(result_id))?;
-                            let var = wgsl_var(result_id);
-                            let val = self.get_value(operands[0])?;
-                            writeln!(output, "{}var {}: {} = {};", self.ctx.indent_str(), var, ty, val)
-                                .unwrap();
-                            self.declared.insert(var.clone());
-                            self.value_map.insert(result_id, ValueBinding::Alias(var));
+                            if self.is_const_value(operands[0]) {
+                                // Promote to a deduped module-scope `var<private>`
+                                // and alias the result to it; the runtime index then
+                                // addresses one shared materialization. `var<private>`
+                                // (a reference) is dynamically indexable, unlike a
+                                // `const` value. The initializer is the fully-inlined
+                                // const-expression, which also serves as the value-
+                                // based dedup key (equal arrays → one global).
+                                let init = self.const_expr_of(operands[0])?;
+                                let existing =
+                                    self.ctx.private_const_globals.get(&init).map(|(name, _)| name.clone());
+                                let name = match existing {
+                                    Some(name) => name,
+                                    None => {
+                                        let name = format!(
+                                            "_const_global_{}",
+                                            self.ctx.private_const_globals.len()
+                                        );
+                                        self.ctx
+                                            .private_const_globals
+                                            .insert(init.clone(), (name.clone(), ty));
+                                        name
+                                    }
+                                };
+                                self.value_map.insert(result_id, ValueBinding::Alias(name));
+                            } else {
+                                let var = wgsl_var(result_id);
+                                let val = self.get_value(operands[0])?;
+                                writeln!(output, "{}var {}: {} = {};", self.ctx.indent_str(), var, ty, val)
+                                    .unwrap();
+                                self.declared.insert(var.clone());
+                                self.value_map.insert(result_id, ValueBinding::Alias(var));
+                            }
                             continue;
                         }
 

@@ -754,3 +754,43 @@ entry rasterize(#[storage(set=2, binding=0, access=read)] positions: []vec4f32,
         "scatter must emit indexed stores into the framebuffer:\n{wgsl}"
     );
 }
+
+#[test]
+fn wgsl_const_array_dynamic_index_hoists_to_private_global() {
+    // A compile-time-constant array indexed by a runtime value is hoisted
+    // once to a module-scope `var<private>` (the WGSL analog of the SPIR-V
+    // Private-global hoist) and indexed there, instead of being copied into
+    // a per-call `var<function>` materialization.
+    let wgsl = compile_to_wgsl(
+        "def t: [4]i32 = [10, 20, 30, 40]\n\
+         #[compute]\n\
+         entry pick() []i32 = map(|i| t[i % 4], iota(100))",
+    )
+    .expect("compile");
+    validate_wgsl(&wgsl);
+    assert!(
+        wgsl.contains("var<private> _const_global_0:"),
+        "expected a hoisted private global:\n{wgsl}"
+    );
+    assert!(
+        wgsl.contains("_const_global_0["),
+        "the runtime index must address the global:\n{wgsl}"
+    );
+}
+
+#[test]
+fn wgsl_const_array_hoist_is_deduped() {
+    // The same constant array indexed at two sites shares one global.
+    let wgsl = compile_to_wgsl(
+        "def t: [4]i32 = [10, 20, 30, 40]\n\
+         #[compute]\n\
+         entry pick() []i32 = map(|i| t[i % 4] + t[(i + 1) % 4], iota(100))",
+    )
+    .expect("compile");
+    validate_wgsl(&wgsl);
+    let n = wgsl.matches("var<private> _const_global").count();
+    assert_eq!(
+        n, 1,
+        "two indexings of one constant must share one global:\n{wgsl}"
+    );
+}
