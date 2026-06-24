@@ -516,3 +516,61 @@ entry rasterize(#[storage(set=2, binding=0, access=read)] positions: []vec4f32,
         "expected >= 5 OpStore (one per scattered particle), got {stores}"
     );
 }
+
+/// Disassemble SPIR-V words to text for instruction-level assertions.
+fn disasm(words: &[u32]) -> String {
+    use wspirv::binary::Disassemble;
+    wspirv::dr::load_words(words).expect("backend emitted valid SPIR-V").disassemble()
+}
+
+/// Lines per `(set, binding)` storage class help locate hoisted globals: a
+/// compile-time-constant array indexed by a runtime value is materialized once
+/// into a module-scope `Private` global (initializer = the constant), not
+/// `OpStore`d wholesale into a per-occurrence `Function` array variable.
+#[test]
+fn dynamic_const_array_index_hoists_to_private_global() {
+    let spirv = compile_to_spirv(
+        "def t: [4]i32 = [10, 20, 30, 40]\n\
+         #[compute]\n\
+         entry pick() []i32 = map(|i| t[i % 4], iota(100))",
+    )
+    .unwrap();
+    let text = disasm(&spirv);
+    let private_vars: Vec<&str> =
+        text.lines().filter(|l| l.contains("OpVariable") && l.contains(" Private ")).collect();
+    assert_eq!(
+        private_vars.len(),
+        1,
+        "expected one hoisted Private global:\n{text}"
+    );
+    // The Private global carries a constant initializer (trailing operand).
+    let last = private_vars[0].trim_end().rsplit(' ').next().unwrap();
+    assert!(
+        last.starts_with('%'),
+        "Private global must have an initializer: {}",
+        private_vars[0]
+    );
+    // The constant is not also materialized into a Function-storage array.
+    assert!(
+        !text.contains("_ptr_Function__arr"),
+        "constant array must not be stored into a Function variable:\n{text}"
+    );
+}
+
+/// The hoist is deduped by constant value: the same constant array indexed at
+/// two sites collapses to a single `Private` global.
+#[test]
+fn const_array_hoist_is_deduped() {
+    let spirv = compile_to_spirv(
+        "def t: [4]i32 = [10, 20, 30, 40]\n\
+         #[compute]\n\
+         entry pick() []i32 = map(|i| t[i % 4] + t[(i + 1) % 4], iota(100))",
+    )
+    .unwrap();
+    let text = disasm(&spirv);
+    let n = text.lines().filter(|l| l.contains("OpVariable") && l.contains(" Private ")).count();
+    assert_eq!(
+        n, 1,
+        "two indexings of one constant must share one Private global:\n{text}"
+    );
+}

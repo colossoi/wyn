@@ -523,11 +523,24 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
         entry::lower_ssa_entry_point(&mut constructor, entry, &written_bindings)?;
     }
 
+    // Hoisted constant `Private` globals must be listed in each entry's
+    // interface (SPIR-V ≥1.4 lists every referenced global). They are
+    // shared module-wide and may be reached through helper functions
+    // called by several entries, so list them in every entry — a superset
+    // (one an entry doesn't reach) is valid and avoids call-graph tracking.
+    // Collected once here, after all bodies are lowered.
+    let private_global_ids: Vec<spirv::Word> = constructor.builder.private_globals().map(|v| *v).collect();
+
     // Emit entry point declarations
     for (name, model, local_size) in &entry_info {
         if let Some(func_id) = constructor.builder.get_function(name) {
             let func_id = *func_id;
             let mut interfaces = constructor.entry_point_interfaces.get(name).cloned().unwrap_or_default();
+            for &var_id in &private_global_ids {
+                if !interfaces.contains(&var_id) {
+                    interfaces.push(var_id);
+                }
+            }
 
             // Add storage buffer variables that this entry point declares
             // (via its inputs/outputs). Don't add ALL storage vars — other

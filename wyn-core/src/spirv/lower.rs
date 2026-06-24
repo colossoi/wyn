@@ -539,9 +539,25 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     let value_id = self.get_value_ref(value)?;
                     let value_ty = self.get_value_type_ref(value);
                     let spirv_type = self.constructor.polytype_to_spirv(&value_ty);
-                    let var = self.constructor.declare_variable("_materialize", spirv_type)?;
-                    self.constructor.builder.store(var, value_id, None, [])?;
-                    var
+                    if self.constructor.builder.is_constant(builder::ConstId::new(value_id)) {
+                        // A compile-time-constant array (e.g. a literal table)
+                        // materialized only so a runtime index can address it:
+                        // hoist it once to a module-scope `Private` global
+                        // (initializer = the `OpConstantComposite`, deduped by
+                        // constant id) instead of an `OpStore` of the whole
+                        // array into a per-occurrence `Function` variable. The
+                        // same constant — inlined across many sites — collapses
+                        // to one global. `DynamicExtract` chains through it with
+                        // `StorageClass::Private`.
+                        *self.constructor.builder.hoist_constant_global(
+                            builder::ConstId::new(value_id),
+                            builder::TypeId::new(spirv_type),
+                        )
+                    } else {
+                        let var = self.constructor.declare_variable("_materialize", spirv_type)?;
+                        self.constructor.builder.store(var, value_id, None, [])?;
+                        var
+                    }
                 }
 
                 crate::op::OpTag::DynamicExtract => {
@@ -556,10 +572,19 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     // index reaches the array element. Other variants
                     // (Composite/View/Virtual) chain directly to the
                     // element.
+                    // A constant base hoisted by `Materialize` lives in a
+                    // `Private` global; everything else is a `Function` var.
+                    // The access-chain pointer's storage class must match.
+                    let storage_class =
+                        if self.constructor.builder.is_private_global(builder::VarId::new(base_var)) {
+                            spirv::StorageClass::Private
+                        } else {
+                            spirv::StorageClass::Function
+                        };
                     let elem_ptr_type = *self
                         .constructor
                         .builder
-                        .type_pointer(spirv::StorageClass::Function, builder::TypeId::new(result_ty));
+                        .type_pointer(storage_class, builder::TypeId::new(result_ty));
                     let elem_ptr = if matches!(
                         base_ty.array_variant(),
                         Some(PolyType::Constructed(TypeName::ArrayVariantBounded, _))

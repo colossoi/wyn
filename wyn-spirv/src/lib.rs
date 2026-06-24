@@ -137,6 +137,14 @@ pub struct SpirvBuilder {
     composite_const_cache: HashMap<(TypeId, Vec<ConstId>), ConstId>,
     // OpConstantNull dedup, one id per type.
     null_const_cache: HashMap<TypeId, ConstId>,
+    // Compile-time-constant arrays promoted to a module-scope `Private`
+    // OpVariable (initializer = the OpConstantComposite), so a runtime
+    // index becomes an OpAccessChain into a shared global instead of a
+    // per-occurrence Function var + whole-array OpStore. Keyed on the
+    // constant id, which `composite_const_cache` already interns by
+    // value — so equal arrays (inline literal, local `let`, module
+    // `def`, or many inlined copies) collapse to one global.
+    private_global_cache: HashMap<ConstId, VarId>,
     // Storage-buffer variables already decorated `NonWritable`. A
     // binding shared across entries (multi-entry modules) reaches
     // the decoration site once per entry with the same var id;
@@ -203,6 +211,7 @@ impl SpirvBuilder {
             block_decorated: HashSet::new(),
             composite_const_cache: HashMap::new(),
             null_const_cache: HashMap::new(),
+            private_global_cache: HashMap::new(),
             nonwritable_decorated: HashSet::new(),
             buffer_layout_decorated: HashSet::new(),
             array_elem: HashMap::new(),
@@ -312,6 +321,44 @@ impl SpirvBuilder {
     /// `is_constant` returns true for it.
     pub fn register_constant(&mut self, id: ConstId) {
         self.constant_ids.insert(id);
+    }
+
+    /// Get or create a module-scope `Private` `OpVariable` whose
+    /// initializer is `const_id` (an `OpConstantComposite` / `OpConstant`),
+    /// with pointee `value_type`. Deduped by `const_id`, so equal
+    /// constants — already interned to one id by `composite_const_cache` —
+    /// share one global. Lets a dynamic index of a constant array become
+    /// an `OpAccessChain` into a single materialization instead of a
+    /// per-occurrence Function var + whole-array `OpStore`.
+    ///
+    /// The variable must land at module scope (`types_global_values`), so
+    /// the current block is deselected around the `variable` call — rspirv
+    /// routes `OpVariable` there only when no block is selected (the same
+    /// reason workgroup-shared globals are emitted between functions).
+    pub fn hoist_constant_global(&mut self, const_id: ConstId, value_type: TypeId) -> VarId {
+        if let Some(&var) = self.private_global_cache.get(&const_id) {
+            return var;
+        }
+        let ptr_type = self.type_pointer(spirv::StorageClass::Private, value_type);
+        let saved = self.inner.selected_block();
+        self.inner.select_block(None).expect("deselect block for module-scope variable");
+        let var =
+            VarId::new(self.inner.variable(*ptr_type, None, spirv::StorageClass::Private, Some(*const_id)));
+        self.inner.select_block(saved).expect("restore selected block");
+        self.private_global_cache.insert(const_id, var);
+        var
+    }
+
+    /// All hoisted `Private` constant globals, for `OpEntryPoint`
+    /// interface registration (SPIR-V ≥1.4 lists every referenced global).
+    pub fn private_globals(&self) -> impl Iterator<Item = VarId> + '_ {
+        self.private_global_cache.values().copied()
+    }
+
+    /// True iff `var` is a hoisted `Private` constant global — so an access
+    /// chain into it must use `StorageClass::Private`, not `Function`.
+    pub fn is_private_global(&self, var: VarId) -> bool {
+        self.private_global_cache.values().any(|&v| v == var)
     }
 
     /// Get or create `OpTypeVector elem size`.
