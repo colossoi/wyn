@@ -39,6 +39,22 @@ pub(crate) fn type_name_to_module(ty: &Type) -> Option<String> {
     }
 }
 
+/// Canonical, variable-insensitive signature of a resource type, used to
+/// decide whether two entries name the same buffer at a `(set, binding)`.
+/// Unbound type/size variables render as `_` so that two entries each
+/// declaring `[]f32` (whose array-length variables differ) compare equal,
+/// while `[]f32` vs `[]vec4f32` compare distinct.
+fn resource_signature(ty: &Type) -> String {
+    match ty {
+        Type::Variable(_) => "_".to_string(),
+        Type::Constructed(name, args) if args.is_empty() => format!("{:?}", name),
+        Type::Constructed(name, args) => {
+            let inner: Vec<String> = args.iter().map(resource_signature).collect();
+            format!("{:?}({})", name, inner.join(","))
+        }
+    }
+}
+
 fn swizzle_letter(idx: u8) -> char {
     match idx {
         0 => 'x',
@@ -1481,6 +1497,8 @@ impl<'a> TypeChecker<'a> {
             return Err(err);
         }
 
+        self.check_resource_binding_consistency(program)?;
+
         // Emit warnings for all type holes now that types are fully inferred
         self.emit_hole_warnings();
 
@@ -1489,6 +1507,96 @@ impl<'a> TypeChecker<'a> {
             self.type_table.iter().map(|(node_id, scheme)| (*node_id, self.apply_scheme(scheme))).collect();
 
         Ok(resolved_table)
+    }
+
+    /// A `(set, binding)` slot may be shared across entry points, but only
+    /// if every entry that names it agrees on the resource. Two entries
+    /// binding the same slot to different resource kinds (e.g. `storage`
+    /// in one, `uniform` in another) or to buffers with different element
+    /// types coalesce to a single module-global of one type that the other
+    /// entry then indexes as another — invalid SPIR-V that both spirv-val
+    /// and naga reject. Reject it here with a precise diagnostic instead of
+    /// silently emitting a broken module.
+    fn check_resource_binding_consistency(&self, program: &Program) -> Result<()> {
+        // Entry params parse as `Typed(Attributed([attrs], Name), ty)` —
+        // peel `Typed`/`Attributed` to reach the attribute list.
+        fn param_attrs(p: &Pattern) -> &[Attribute] {
+            match &p.kind {
+                PatternKind::Attributed(attrs, _) => attrs,
+                PatternKind::Typed(inner, _) => param_attrs(inner),
+                _ => &[],
+            }
+        }
+
+        // What a slot resolves to: its resource kind plus a canonical,
+        // variable-insensitive signature of the declared type (buffers pin
+        // an element type; texture/sampler have none, so `sig` is just the
+        // kind there). `display` is the human-readable form kept for the
+        // diagnostic. The first occurrence of each slot records the entry it
+        // came from so a later conflict can point at both sides.
+        struct SlotUse {
+            sig: String,
+            display: String,
+            entry: String,
+        }
+        let mut seen: LookupMap<(u32, u32), SlotUse> = LookupMap::new();
+
+        for decl in &program.declarations {
+            let Declaration::Entry(entry) = decl else {
+                continue;
+            };
+            for param in &entry.params {
+                let Some((set, binding, kind)) = param_attrs(param).iter().find_map(|a| match a {
+                    Attribute::Storage { set, binding, .. } => Some((*set, *binding, "storage")),
+                    Attribute::Uniform { set, binding } => Some((*set, *binding, "uniform")),
+                    Attribute::Texture { set, binding } => Some((*set, *binding, "texture")),
+                    Attribute::Sampler { set, binding } => Some((*set, *binding, "sampler")),
+                    Attribute::StorageImage { set, binding, .. } => Some((*set, *binding, "storage_image")),
+                    _ => None,
+                }) else {
+                    continue;
+                };
+
+                let ty = param.pattern_type().map(|t| self.normalize_annotation_type(t, None));
+                let sig = match &ty {
+                    Some(t) => format!("{} {}", kind, resource_signature(t)),
+                    None => kind.to_string(),
+                };
+                let display = match &ty {
+                    Some(t) => format!("{} {}", kind, self.format_type(t)),
+                    None => kind.to_string(),
+                };
+
+                match seen.get(&(set, binding)) {
+                    Some(prev) if prev.sig != sig => {
+                        bail_type_at!(
+                            param.h.span,
+                            "resource binding (set={}, binding={}) is declared as `{}` in entry \
+                             `{}`, but as `{}` in entry `{}`; a (set, binding) slot must name the \
+                             same resource across every entry point in a module",
+                            set,
+                            binding,
+                            display,
+                            entry.name,
+                            prev.display,
+                            prev.entry
+                        );
+                    }
+                    Some(_) => {}
+                    None => {
+                        seen.insert(
+                            (set, binding),
+                            SlotUse {
+                                sig,
+                                display,
+                                entry: entry.name.clone(),
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Emit warnings for all type holes showing their inferred types

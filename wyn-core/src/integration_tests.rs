@@ -5404,6 +5404,57 @@ entry b(ys: []f32) []f32 = map(|y| y, ys)
     assert!(!lowered.spirv.is_empty());
 }
 
+/// Two entries binding the *same* explicit `#[storage(set, binding)]`
+/// slot to buffers with different element types (`[]f32` vs `[]vec4f32`)
+/// must be rejected at compile time. The compiler coalesces same-slot
+/// storage into one module-global whose type is the first declaration's;
+/// the other entry then indexes it as the wrong element type, producing
+/// `spirv-val: OpAccessChain result type ... does not match indexing into
+/// base ...`. Reaching SPIR-V at all is the bug — the type checker must
+/// reject the conflicting interface first.
+#[test]
+fn conflicting_explicit_storage_binding_across_entries_is_rejected() {
+    let result = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry ent_a(idx: []u32, #[storage(set=1, binding=0, access=read)] buf: []f32) []f32 =
+  map(|s| buf[i32.u32(s)], idx)
+#[compute]
+entry ent_b(idx: []u32, #[storage(set=1, binding=0, access=read)] buf: []vec4f32) []f32 =
+  map(|s| buf[i32.u32(s)].x, idx)
+"#,
+    );
+    let msg = match result {
+        Ok(_) => panic!("a (set, binding) reused with a conflicting element type must be a compile error"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        msg.contains("set=1, binding=0") && msg.contains("must name the same resource"),
+        "expected a binding-conflict diagnostic, got: {msg}"
+    );
+}
+
+/// The dual of the rejection test: two entries may legitimately share an
+/// explicit `#[storage(set, binding)]` slot when they agree on the
+/// element type — that's how a pipeline wires one buffer into several
+/// stages. This must compile to one valid module, not trip the
+/// conflict check on the differing array-length variables.
+#[test]
+fn matching_explicit_storage_binding_across_entries_compiles() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry ent_a(idx: []u32, #[storage(set=1, binding=0, access=read)] buf: []f32) []f32 =
+  map(|s| buf[i32.u32(s)], idx)
+#[compute]
+entry ent_b(idx: []u32, #[storage(set=1, binding=0, access=read)] buf: []f32) []f32 =
+  map(|s| buf[i32.u32(s)] * 2.0, idx)
+"#,
+    )
+    .expect("entries that agree on a shared (set, binding) element type must compile");
+    assert!(!lowered.spirv.is_empty());
+}
+
 /// A global `def` whose initializer contains a *function call*
 /// referencing other globals used to error at SPIR-V emission with
 /// "Unknown global: ELEV" when the synthesized global was then used
