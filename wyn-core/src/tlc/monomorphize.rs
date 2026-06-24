@@ -685,6 +685,7 @@ impl<'a> Monomorphizer<'a> {
                 map_lams,
                 accumulators,
                 inputs,
+                map_input_indices,
             } => SoacOp::Screma {
                 map_lams: map_lams.iter().map(|body| self.process_soac_body(body)).collect(),
                 accumulators: accumulators
@@ -697,6 +698,7 @@ impl<'a> Monomorphizer<'a> {
                     })
                     .collect(),
                 inputs: inputs.iter().map(|ae| self.process_array_expr(ae)).collect(),
+                map_input_indices: map_input_indices.clone(),
             },
         }
     }
@@ -1067,6 +1069,7 @@ impl<'a> Monomorphizer<'a> {
                 map_lams,
                 accumulators,
                 inputs,
+                map_input_indices,
             } => SoacOp::Screma {
                 map_lams: map_lams.iter().map(|body| self.apply_subst_soac_body(body, subst)).collect(),
                 accumulators: accumulators
@@ -1079,6 +1082,7 @@ impl<'a> Monomorphizer<'a> {
                     })
                     .collect(),
                 inputs: inputs.iter().map(|ae| self.apply_subst_array_expr(ae, subst)).collect(),
+                map_input_indices: map_input_indices.clone(),
             },
         }
     }

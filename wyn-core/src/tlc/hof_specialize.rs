@@ -404,6 +404,7 @@ pub(super) fn apply_type_subst_to_soac(
             map_lams,
             accumulators,
             inputs,
+            map_input_indices,
         } => SoacOp::Screma {
             map_lams: map_lams
                 .iter()
@@ -419,6 +420,7 @@ pub(super) fn apply_type_subst_to_soac(
                 })
                 .collect(),
             inputs: inputs.iter().map(|ae| apply_type_subst_to_array_expr(ae, subst, term_ids)).collect(),
+            map_input_indices: map_input_indices.clone(),
         },
     }
 }
@@ -866,6 +868,7 @@ fn substitute_var_soac(
             map_lams,
             accumulators,
             inputs,
+            map_input_indices,
         } => SoacOp::Screma {
             map_lams: map_lams
                 .iter()
@@ -884,6 +887,7 @@ fn substitute_var_soac(
                 .iter()
                 .map(|ae| substitute_var_array_expr(ae, old_sym, new_sym, term_ids))
                 .collect(),
+            map_input_indices: map_input_indices.clone(),
         },
     }
 }
@@ -1460,6 +1464,7 @@ impl<'a> HofSpecializer<'a> {
                 map_lams,
                 accumulators,
                 inputs,
+                map_input_indices,
             } => SoacOp::Screma {
                 map_lams: map_lams
                     .into_iter()
@@ -1475,6 +1480,7 @@ impl<'a> HofSpecializer<'a> {
                     })
                     .collect(),
                 inputs,
+                map_input_indices,
             },
         }
     }

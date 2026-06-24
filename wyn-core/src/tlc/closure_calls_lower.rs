@@ -512,6 +512,7 @@ impl<'a> CallLowerer<'a> {
                 map_lams,
                 accumulators,
                 inputs,
+                map_input_indices,
             } => {
                 fn lower_body(this: &mut CallLowerer<'_>, body: super::SoacBody) -> super::SoacBody {
                     super::SoacBody {
@@ -535,6 +536,7 @@ impl<'a> CallLowerer<'a> {
                         })
                         .collect(),
                     inputs: inputs.into_iter().map(|ae| self.lower_array_expr(ae)).collect(),
+                    map_input_indices,
                 }
             }
         }

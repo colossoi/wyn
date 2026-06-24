@@ -442,6 +442,13 @@ pub struct SoacBody {
     pub captures: Vec<(SymbolId, Type<TypeName>, Term)>,
 }
 
+/// The default `map_input_indices` for a `SoacOp::Screma`: every map lane reads
+/// every input. Used by all constructors except the equal-domain fuser, which
+/// gives each lane its own input subset.
+pub fn screma_all_inputs_indices(n_inputs: usize, n_lams: usize) -> Vec<Vec<usize>> {
+    vec![(0..n_inputs).collect(); n_lams]
+}
+
 /// A symbolic dimension expression.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Dim {
@@ -611,6 +618,13 @@ pub enum SoacOp {
     Screma {
         /// Elementwise mapped outputs: each `(x1, ..., xn) -> y`.
         map_lams: Vec<SoacBody>,
+        /// Which inputs each map lane consumes. `map_input_indices[k]` lists the
+        /// positions into `inputs` whose elements feed `map_lams[k]`, in order,
+        /// as the leading args to its function. Invariant:
+        /// `map_input_indices.len() == map_lams.len()`. The common case (every
+        /// lane reads every input) is `(0..inputs.len())` per lane; the
+        /// equal-domain fuser gives each lane its own input subset.
+        map_input_indices: Vec<Vec<usize>>,
         /// Per-element accumulator outputs.
         accumulators: Vec<ScremaAccumulatorSpec>,
         inputs: Vec<ArrayExpr>,
@@ -1083,6 +1097,7 @@ where
             map_lams,
             accumulators,
             inputs,
+            map_input_indices: _,
         } => {
             for map_lam in map_lams {
                 visit_soac_body_children(map_lam, f);
@@ -1248,6 +1263,7 @@ where
             map_lams,
             accumulators,
             inputs,
+            map_input_indices,
         } => SoacOp::Screma {
             map_lams: map_lams.into_iter().map(|map_lam| map_soac_body_children(map_lam, f)).collect(),
             accumulators: accumulators
@@ -1260,6 +1276,7 @@ where
                 })
                 .collect(),
             inputs: inputs.into_iter().map(|ae| map_array_expr_children(ae, f)).collect(),
+            map_input_indices,
         },
     }
 }

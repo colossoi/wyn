@@ -1178,6 +1178,7 @@ fn parallelize_scan_entry(
                 input_array_types: vec![input_view_ty],
                 input_elem_types: vec![input_elem_ty],
                 map_output_elem_types: vec![],
+                map_input_indices: vec![],
                 map_capture_counts: vec![],
                 map_destinations: vec![],
                 acc_destinations: vec![SoacDestination::Fresh],

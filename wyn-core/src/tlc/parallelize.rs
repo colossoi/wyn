@@ -119,6 +119,7 @@ fn parallel_soac_shape(soac: &SoacOp) -> Option<ParallelSoacShape<'_>> {
             inputs,
             map_lams,
             accumulators,
+            map_input_indices: _,
         } => {
             let result_elem_type = accumulators
                 .first()
@@ -371,8 +372,8 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
                         // stage over its own domain. Any other sibling shape (reduce
                         // / scan / filter / scatter / in-place) has no parallel split
                         // yet, so keep the entry serial.
-                        let all_pointwise = is_pointwise_fresh_map_term(&value)
-                            && extra_slots.iter().all(|(_, v)| is_pointwise_fresh_map_term(v));
+                        let all_pointwise = is_map_only_fresh_soac_term(&value)
+                            && extra_slots.iter().all(|(_, v)| is_map_only_fresh_soac_term(v));
                         if !all_pointwise {
                             return None;
                         }
@@ -671,10 +672,12 @@ fn analyze_soac(
             map_lams,
             accumulators,
             inputs,
+            map_input_indices,
         } => SoacOp::Screma {
             map_lams: map_lams.clone(),
             accumulators: accumulators.clone(),
             inputs: inputs.clone(),
+            map_input_indices: map_input_indices.clone(),
         },
         SoacOp::Scan {
             op,
@@ -890,18 +893,21 @@ fn fusible_map_slot(slot_index: usize, term: &Term) -> Option<FusibleMapSlot> {
 }
 
 /// Fuse the sibling output maps of an all-pointwise multi-output compute entry
-/// whose slots all read the **same single input array** into one multi-output
-/// pointwise `Screma`. Such an entry then has one tail SOAC (the Screma) and no
-/// sibling SOAC slots, so the multi-output-Screma path (`make_map_plan` → EGIR
-/// `build_parallel_maps`) lowers it as one guarded parallel kernel with one
-/// lane per output.
+/// whose slots all share **one iteration domain** into a single multi-output
+/// pointwise `Screma`. The domain is the slots' common outer size
+/// (`soac_domain_key`); slots over distinct buffers (`<[n]>(xs, ys)`) fuse as
+/// long as they share that size. Each lane reads its own input via the Screma's
+/// `map_input_indices`; same-symbol lanes index one shared input.
+///
+/// Such an entry then has one tail SOAC (the Screma) and no sibling SOAC slots,
+/// so the multi-output-Screma path (`make_map_plan` → EGIR `build_parallel_maps`)
+/// lowers it as one guarded parallel kernel with one lane per output.
 ///
 /// Entries left untouched (handled by the per-slot split in
-/// `make_multidomain_map_plan`): those whose slots read different input arrays,
+/// `make_multidomain_map_plan`): those whose slots span more than one domain,
 /// and those with any slot that isn't a captureless single-input `map` over a
-/// named entry param. Distinct-buffer fusion needs each map function to take
-/// every shared input and ignore the ones it doesn't use, which a
-/// defunctionalized fixed-arity SOAC function can't express.
+/// named entry param. Per-domain fusion of a mixed-domain entry's matching
+/// slots is not done here — each slot becomes its own stage.
 fn fuse_equal_domain_sibling_maps(program: &mut Program, term_ids: &mut TermIdSource) {
     let indices: Vec<usize> = program
         .defs
@@ -953,25 +959,44 @@ fn fuse_output_slot_chain(
     let fusible: Vec<FusibleMapSlot> =
         slots.iter().map(|(i, t)| fusible_map_slot(*i, t)).collect::<Option<Vec<_>>>()?;
 
-    // Fuse only when every slot shares one iteration domain. Mixed-domain
-    // entries belong to the per-slot split path.
+    // Fuse only when every lane shares one iteration domain. Mixed-domain
+    // entries belong to the per-slot split path (`make_multidomain_map_plan`).
     let domains: Vec<Option<Type<TypeName>>> = fusible.iter().map(|s| Some(s.domain.clone())).collect();
     if partition_by_domain(&domains).len() != 1 {
         return None;
     }
 
-    // Fuse only when every lane reads the same single input array, so each
-    // lane's map function consumes exactly that one element. Lanes over
-    // distinct buffers (`<[n]>(xs, ys)`) would need each map function to take
-    // every shared input and ignore the ones it doesn't use, which a
-    // defunctionalized fixed-arity SOAC function can't express; those stay as
-    // separate parallel stages (`make_multidomain_map_plan`).
-    if fusible.iter().any(|s| s.input_sym != fusible[0].input_sym) {
-        return None;
-    }
-    let inputs: Vec<ArrayExpr> = vec![fusible[0].input.clone()];
+    // The fused Screma's guard length is taken from `inputs[0]` downstream
+    // (`build_parallel_maps`); that is sound only because every fused input
+    // shares one domain. Restate the proven invariant at this construction
+    // boundary so the lowering can simply trust the Screma it receives.
+    debug_assert!(
+        fusible.iter().all(|s| s.domain == fusible[0].domain),
+        "equal-domain fuser built a Screma whose lanes span different domains"
+    );
 
-    // Each lane keeps its own map function over the shared input element.
+    // Deduplicated union of the lanes' input arrays, first-seen order. Each lane
+    // reads exactly its own input via `map_input_indices`; same-symbol lanes
+    // collapse to one union entry that several lanes index.
+    let mut union: Vec<(SymbolId, ArrayExpr)> = Vec::new();
+    for slot in &fusible {
+        if !union.iter().any(|(sym, _)| *sym == slot.input_sym) {
+            union.push((slot.input_sym, slot.input.clone()));
+        }
+    }
+    let inputs: Vec<ArrayExpr> = union.iter().map(|(_, ae)| ae.clone()).collect();
+    let map_input_indices: Vec<Vec<usize>> = fusible
+        .iter()
+        .map(|slot| {
+            let pos = union
+                .iter()
+                .position(|(sym, _)| *sym == slot.input_sym)
+                .expect("union built from these lanes");
+            vec![pos]
+        })
+        .collect();
+
+    // Each lane keeps its own single-input map function.
     let map_lams: Vec<super::SoacBody> = fusible
         .iter()
         .map(|slot| super::SoacBody {
@@ -988,6 +1013,7 @@ fn fuse_output_slot_chain(
         span: chain.span,
         kind: TermKind::Soac(SoacOp::Screma {
             map_lams,
+            map_input_indices,
             accumulators: vec![],
             inputs,
         }),
@@ -1088,13 +1114,13 @@ fn rewrite_output_slot_values(
     }
 }
 
-/// A SOAC output slot that the multi-domain map split can lower as its
-/// own parallel stage: a pointwise map producing a fresh array. A plain
-/// `Map` qualifies; a pointwise `Screma` (map lambdas only, no
-/// accumulators — the shape horizontal fusion produces for same-symbol
-/// sibling maps) qualifies too. Reduce / scan / filter / scatter and
-/// in-place maps do not.
-fn is_pointwise_fresh_map_term(t: &Term) -> bool {
+/// A SOAC output slot the multi-domain map split can lower as its own parallel
+/// stage: a map-only SOAC producing a fresh array. A plain `Map` qualifies, as
+/// does a `Screma` with map lambdas and no accumulators. Reduce / scan / filter
+/// / scatter and in-place maps do not. A map-only `Screma` may have several
+/// inputs; the split dispatches over `inputs.first()`, relying on the type
+/// checker's invariant that a SOAC's inputs all share one length.
+fn is_map_only_fresh_soac_term(t: &Term) -> bool {
     match &t.kind {
         TermKind::Soac(SoacOp::Map {
             destination: SoacDestination::Fresh,
@@ -2232,7 +2258,11 @@ fn soac_has_ordered_side_effect(soac: &SoacOp) -> bool {
     }
 }
 
-fn make_serial_compute_plan(
+/// Lower an entry as one `1×1×1` dispatch: a single GPU invocation runs the
+/// whole serial body once. `parallel_plan: None` keeps EGIR's serial SOAC
+/// lowering, so every output is written exactly once — never a grid of
+/// invocations each re-running the body.
+fn make_single_invocation_serial_compute_plan(
     analysis: &EntryAnalysis,
     entry_name: &str,
     sizing: PipelineSizing,
@@ -2261,14 +2291,16 @@ fn make_serial_compute_plan(
 /// output slot into its own parallel compute stage. Each stage is a
 /// single-output map over its slot's own input domain, dispatched over that
 /// input's length and pinned to its own output binding. Slots over different
-/// domains (`two(a,b)`) become independent dispatches; distinct-buffer slots
-/// over the same domain (`<[n]>(xs,ys)`) each get their own equal-length
-/// dispatch (same-symbol same-domain slots fuse upstream into one kernel).
-/// All stages share one pipeline and its binding table, so the host targets
-/// the same buffers the single entry would.
+/// domains (`two(a,b)`) become independent dispatches. All stages share one
+/// pipeline and its binding table, so the host targets the same buffers the
+/// single entry would.
 ///
-/// Falls back to a safe serial `1×1×1` plan if any slot's domain or captures
-/// can't be resolved off entry params (e.g. a slot body references a
+/// Slots that share one domain fuse upstream (`fuse_equal_domain_sibling_maps`)
+/// before analysis, so by the time an entry reaches this split its remaining
+/// SOAC slots are over distinct domains.
+///
+/// Falls back to a safe single-invocation serial plan if any slot's domain or
+/// captures can't be resolved off entry params (e.g. a slot body references a
 /// prefix-`let` value rather than an entry parameter).
 fn make_multidomain_map_plan(
     analysis: &EntryAnalysis,
@@ -2280,7 +2312,7 @@ fn make_multidomain_map_plan(
 ) -> LoweringPlan {
     match try_make_multidomain_map_plan(analysis, entry_name, next_binding, sizing, program, term_ids) {
         Some(plan) => plan,
-        None => make_serial_compute_plan(analysis, entry_name, sizing),
+        None => make_single_invocation_serial_compute_plan(analysis, entry_name, sizing),
     }
 }
 
@@ -2315,10 +2347,16 @@ fn try_make_multidomain_map_plan(
     let mut plans: Vec<ParallelizationPlan> = Vec::new();
 
     for (rank, (slot_index, slot_term)) in slots.iter().enumerate() {
+        // Output bindings below are allocated `next_binding + rank`, which must
+        // match `build_entry_outputs`' per-slot allocation in `slot_index`
+        // order. `slots` is the dense, sorted `OutputSlotStore` chain, so the
+        // two coincide; pin that so a future non-dense slot layout can't write
+        // to the wrong output buffer silently.
+        debug_assert_eq!(rank, *slot_index, "output slots must be dense and sorted");
         let TermKind::Soac(soac) = &slot_term.kind else {
             return None;
         };
-        if !is_pointwise_fresh_map_term(slot_term) {
+        if !is_map_only_fresh_soac_term(slot_term) {
             return None;
         }
 
@@ -2365,16 +2403,35 @@ fn try_make_multidomain_map_plan(
             term_ids,
         ));
 
+        // Read every storage buffer the stage's body touches — its SOAC inputs
+        // and any entry-param buffer the map captures (e.g. `map(|x| x + t[0],
+        // a)` captures `t`). `required` already collected exactly those params,
+        // so drive the descriptor reads from it rather than from the SOAC's
+        // input list alone (which omits captures).
         let mut reads = Vec::new();
-        for input in soac_inputs(soac) {
-            if let Some(ArrayProvenance::Storage { binding, .. }) = classify_input(input, &entry_slots) {
-                reads.push(push_or_find_storage_binding(
-                    &mut bindings,
-                    binding,
-                    Access::ReadOnly,
-                    BufferUsage::Input,
-                    "input".to_string(),
-                ));
+        for param in &required {
+            let Some(epb) = &param.binding else { continue };
+            match &epb.kind {
+                EntryParamBindingKind::Single { binding, .. } => {
+                    reads.push(push_or_find_storage_binding(
+                        &mut bindings,
+                        *binding,
+                        Access::ReadOnly,
+                        BufferUsage::Input,
+                        "input".to_string(),
+                    ));
+                }
+                EntryParamBindingKind::TupleOfViews(fields) => {
+                    for f in fields {
+                        reads.push(push_or_find_storage_binding(
+                            &mut bindings,
+                            f.binding,
+                            Access::ReadOnly,
+                            BufferUsage::Input,
+                            "input".to_string(),
+                        ));
+                    }
+                }
             }
         }
         let write_idx = push_or_find_storage_binding(
@@ -3290,7 +3347,7 @@ fn make_lowering_plan(
         return make_multidomain_map_plan(analysis, entry_name, next_binding, sizing, program, term_ids);
     }
     if retained_extra_slots_have_ordered_side_effect(analysis) {
-        return make_serial_compute_plan(analysis, entry_name, sizing);
+        return make_single_invocation_serial_compute_plan(analysis, entry_name, sizing);
     }
     let forced_tail_output = forced_result_binding.or_else(|| {
         let can_force_tail = matches!(shape.flavor, ParallelSoacFlavor::Map)
@@ -3309,7 +3366,7 @@ fn make_lowering_plan(
             term_ids,
         ) {
             Some(schedule) => Some(schedule),
-            None => return make_serial_compute_plan(analysis, entry_name, sizing),
+            None => return make_single_invocation_serial_compute_plan(analysis, entry_name, sizing),
         }
     } else {
         None

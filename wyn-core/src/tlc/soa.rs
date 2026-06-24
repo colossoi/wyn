@@ -731,6 +731,7 @@ impl SoaTransformer {
                 map_lams,
                 accumulators,
                 inputs,
+                map_input_indices,
             } => {
                 let new_inputs: Vec<ArrayExpr> =
                     inputs.iter().map(|ae| self.transform_array_expr(ae)).collect();
@@ -746,6 +747,7 @@ impl SoaTransformer {
                         })
                         .collect(),
                     inputs: new_inputs,
+                    map_input_indices: map_input_indices.clone(),
                 }
             }
         }

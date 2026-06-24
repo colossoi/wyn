@@ -452,6 +452,7 @@ fn test_horizontal_sibling_maps_merge_to_multi_output_screma() {
             map_lams,
             accumulators,
             inputs,
+            map_input_indices: _,
         }) => {
             assert_eq!(inputs.len(), 1);
             assert!(matches!(
@@ -720,6 +721,7 @@ fn test_horizontal_sibling_maps_merge_same_input_vector() {
             map_lams,
             accumulators,
             inputs,
+            map_input_indices: _,
         }) => {
             assert_eq!(inputs.len(), 2);
             assert!(accumulators.is_empty());
@@ -860,6 +862,7 @@ fn test_horizontal_sibling_maps_enable_shared_producer_vertical_fusion() {
             map_lams,
             accumulators,
             inputs,
+            map_input_indices: _,
         }) => {
             assert_eq!(inputs.len(), 1);
             assert!(matches!(
@@ -1974,6 +1977,7 @@ fn test_filter_into_reduce_fuses_to_masked_screma() {
             map_lams,
             accumulators,
             inputs,
+            map_input_indices: _,
         } => {
             assert!(map_lams.is_empty());
             assert_eq!(accumulators.len(), 1);
@@ -2120,6 +2124,7 @@ fn test_filter_into_reduce_and_length_fuses_to_one_screma() {
             map_lams,
             accumulators,
             inputs,
+            map_input_indices: _,
         } => {
             assert!(map_lams.is_empty());
             assert_eq!(accumulators.len(), 2);

@@ -1717,7 +1717,8 @@ impl<'a, 'b> Converter<'a, 'b> {
                 map_lams,
                 accumulators,
                 inputs,
-            } => self.convert_soac_screma(map_lams, accumulators, inputs, ty),
+                map_input_indices,
+            } => self.convert_soac_screma(map_lams, map_input_indices, accumulators, inputs, ty),
             SoacOp::Scan {
                 op,
                 reduce_op,
@@ -1831,6 +1832,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                 .unwrap_or_else(|| result_ty.clone())
         };
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![project_ty.clone()]);
+        let map_input_indices = crate::tlc::screma_all_inputs_indices(input_arr_types.len(), 1);
         let screma_nid = self.emit_soac(
             PendingSoac::Screma {
                 map_funcs: vec![f_name],
@@ -1838,6 +1840,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                 input_array_types: input_arr_types,
                 input_elem_types,
                 map_output_elem_types: vec![output_elem_ty],
+                map_input_indices,
                 map_capture_counts: vec![capture_count],
                 map_destinations: vec![destination],
                 acc_destinations: vec![],
@@ -1950,6 +1953,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                 input_array_types: vec![arr_ty],
                 input_elem_types: vec![elem_ty],
                 map_output_elem_types: vec![],
+                map_input_indices: vec![],
                 map_capture_counts: vec![],
                 map_destinations: vec![],
                 acc_destinations: vec![SoacDestination::Fresh],
@@ -2010,6 +2014,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                 input_array_types: input_arr_types,
                 input_elem_types,
                 map_output_elem_types: vec![],
+                map_input_indices: vec![],
                 map_capture_counts: vec![],
                 map_destinations: vec![],
                 acc_destinations: vec![SoacDestination::Fresh],
@@ -2023,6 +2028,7 @@ impl<'a, 'b> Converter<'a, 'b> {
     fn convert_soac_screma(
         &mut self,
         map_lams: &[SoacBody],
+        map_input_indices: &[Vec<usize>],
         accumulators: &[crate::tlc::ScremaAccumulatorSpec],
         inputs: &[ArrayExpr],
         result_ty: Type<TypeName>,
@@ -2128,6 +2134,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                 input_array_types: input_arr_types,
                 input_elem_types,
                 map_output_elem_types,
+                map_input_indices: map_input_indices.to_vec(),
                 map_capture_counts: map_capture_nids.iter().map(Vec::len).collect(),
                 map_destinations: vec![SoacDestination::Fresh; map_lams.len()],
                 acc_destinations: vec![SoacDestination::Fresh; accumulators.len()],
@@ -2197,6 +2204,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                 input_array_types: vec![arr_ty],
                 input_elem_types: vec![input_elem_ty],
                 map_output_elem_types: vec![],
+                map_input_indices: vec![],
                 map_capture_counts: vec![],
                 map_destinations: vec![],
                 acc_destinations: vec![destination],

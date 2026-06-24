@@ -379,6 +379,7 @@ fn map_into_screma_rhs(
         map_lams,
         accumulators,
         inputs,
+        map_input_indices: _,
     }) = &consumer.kind
     else {
         return None;
@@ -395,7 +396,7 @@ fn map_into_screma_rhs(
         return None;
     }
 
-    let map_lams = map_lams
+    let map_lams: Vec<super::SoacBody> = map_lams
         .iter()
         .map(|map_lam| super::SoacBody {
             lam: compose_lambdas(
@@ -427,6 +428,9 @@ fn map_into_screma_rhs(
         })
         .collect();
 
+    // Folding the producer in makes every lane consume all of the producer's
+    // inputs (the composed lambdas take them as their leading args).
+    let map_input_indices = super::screma_all_inputs_indices(producer.inputs.len(), map_lams.len());
     Some(Term {
         id: term_ids.next_id(),
         ty: consumer.ty.clone(),
@@ -435,6 +439,7 @@ fn map_into_screma_rhs(
             map_lams,
             accumulators,
             inputs: producer.inputs.clone(),
+            map_input_indices,
         }),
     })
 }
@@ -448,6 +453,9 @@ fn make_screma_term(
     term_ids: &mut TermIdSource,
 ) -> Term {
     let ty = Type::Constructed(TypeName::Tuple(result_fields.len()), result_fields);
+    // This horizontal-fusion path groups maps that read the same inputs, so
+    // every lane consumes all inputs.
+    let map_input_indices = super::screma_all_inputs_indices(inputs.len(), map_lams.len());
     Term {
         id: term_ids.next_id(),
         ty,
@@ -456,6 +464,7 @@ fn make_screma_term(
             map_lams,
             accumulators,
             inputs,
+            map_input_indices,
         }),
     }
 }

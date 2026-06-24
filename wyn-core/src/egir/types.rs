@@ -180,6 +180,11 @@ pub enum PendingSoac {
         input_array_types: Vec<Type<TypeName>>,
         input_elem_types: Vec<Type<TypeName>>,
         map_output_elem_types: Vec<Type<TypeName>>,
+        /// Which inputs each map func consumes: `map_input_indices[k]` lists the
+        /// positions into the input arrays whose elements feed `map_funcs[k]`,
+        /// in order, before its captures. Invariant: one entry per map func.
+        /// Default (every func reads every input) is `(0..n_inputs)` per func.
+        map_input_indices: Vec<Vec<usize>>,
         map_capture_counts: Vec<usize>,
         map_destinations: Vec<SoacDestination>,
         acc_destinations: Vec<SoacDestination>,

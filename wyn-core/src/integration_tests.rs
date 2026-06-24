@@ -410,6 +410,7 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::Program, stage: &str) {
                 map_lams,
                 accumulators,
                 inputs,
+                map_input_indices: _,
             } => {
                 for acc in accumulators {
                     walk(&acc.ne, bound, symbols, stage, def_name);
@@ -1224,12 +1225,12 @@ entry two(a: []f32, b: []f32) ([]f32, []f32) =
     );
 }
 
-/// Sibling maps over *different* symbols that share one size var
-/// (`<[n]>(xs, ys)`) each become their own parallel stage, dispatched over
-/// their own input. The equal-domain fuser collapses only same-symbol lanes
-/// into one kernel; distinct-buffer lanes remain separate parallel dispatches.
+/// Sibling maps over *different* buffers that share one size var
+/// (`<[n]>(xs, ys)`) fuse into a single parallel kernel: both lanes read their
+/// own input at the same `tid` under one guard and write both outputs. This is
+/// equal-domain fusion — the buffers differ but the domain `n` is shared.
 #[test]
-fn equal_domain_sibling_maps_each_parallel() {
+fn equal_domain_sibling_maps_fuse_to_one_stage() {
     use crate::pipeline_descriptor::{DispatchSize, Pipeline};
     let lowered = crate::compile_thru_spirv(
         r#"
@@ -1248,15 +1249,66 @@ entry eqn<[n]>(xs: [n]f32, ys: [n]f32) ([n]f32, [n]f32) =
             _ => None,
         })
         .expect("one compute pipeline");
+    assert_eq!(compute.stages.len(), 1, "equal-domain slots fuse into one stage");
+    assert!(
+        matches!(compute.stages[0].dispatch_size, DispatchSize::DerivedFrom { .. }),
+        "the fused stage dispatches over the shared runtime length"
+    );
+}
+
+/// When a split entry's maps capture a storage entry param (`table`), every
+/// synthesized stage declares that buffer in its `reads`. The host binds each
+/// stage's inputs from that list, so a captured buffer missing from `reads`
+/// would be read unbound. Pins that captures — not just SOAC inputs — reach the
+/// descriptor.
+#[test]
+fn split_stage_reads_include_captured_storage_param() {
+    use crate::pipeline_descriptor::{Binding, Pipeline};
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry cap(a: []f32, b: []f32, table: []f32) ([]f32, []f32) =
+    (map(|x: f32| x + table[0], a), map(|y: f32| y + table[0], b))
+"#,
+    )
+    .expect("cap compiles");
+    let compute = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .find_map(|p| match p {
+            Pipeline::Compute(c) => Some(c),
+            _ => None,
+        })
+        .expect("one compute pipeline");
     assert_eq!(
         compute.stages.len(),
         2,
-        "two equal-domain slots → two parallel stages"
+        "a and b are distinct domains → two stages"
     );
-    assert!(
-        compute.stages.iter().all(|s| matches!(s.dispatch_size, DispatchSize::DerivedFrom { .. })),
-        "each stage dispatches over a runtime length, not a fixed serial 1×1×1"
-    );
+
+    // `table` is the third input param, bound at (set 0, binding 2).
+    let table_idx = compute
+        .bindings
+        .iter()
+        .position(|b| {
+            matches!(
+                b,
+                Binding::StorageBuffer {
+                    set: 0,
+                    binding: 2,
+                    ..
+                }
+            )
+        })
+        .expect("captured `table` buffer is declared in the pipeline bindings");
+    for (i, stage) in compute.stages.iter().enumerate() {
+        assert!(
+            stage.reads.contains(&table_idx),
+            "stage {i} captures `table`, so it must read that buffer; reads = {:?}",
+            stage.reads
+        );
+    }
 }
 
 /// Same-symbol sibling maps returned as a direct tuple (`(map(f, xs),

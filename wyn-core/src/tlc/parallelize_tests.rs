@@ -149,6 +149,7 @@ impl B {
                     lam: map_lam,
                     captures: vec![],
                 }],
+                map_input_indices: vec![vec![0]],
                 accumulators: vec![],
                 inputs: vec![input],
             }),
@@ -189,6 +190,7 @@ impl B {
                     lam: map_lam,
                     captures: vec![],
                 }],
+                map_input_indices: vec![vec![0]],
                 accumulators: vec![ScremaAccumulatorSpec {
                     kind: ScremaAccumulator::Reduce,
                     step_lam: SoacBody {

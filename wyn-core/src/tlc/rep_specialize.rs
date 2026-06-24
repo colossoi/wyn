@@ -456,6 +456,7 @@ impl RepSpecializer {
                 map_lams,
                 accumulators,
                 inputs,
+                map_input_indices,
             } => SoacOp::Screma {
                 map_lams: map_lams.into_iter().map(|body| self.rewrite_soac_body(body)).collect(),
                 accumulators: accumulators
@@ -468,6 +469,7 @@ impl RepSpecializer {
                     })
                     .collect(),
                 inputs: inputs.into_iter().map(|ae| self.rewrite_array_expr(ae)).collect(),
+                map_input_indices,
             },
         }
     }

@@ -295,6 +295,7 @@ fn float_soac(
             map_lams,
             accumulators,
             inputs,
+            map_input_indices,
         } => {
             let mut floats = Vec::new();
             let map_lams = map_lams
@@ -336,6 +337,7 @@ fn float_soac(
                     map_lams,
                     accumulators,
                     inputs,
+                    map_input_indices,
                 },
             )
         }

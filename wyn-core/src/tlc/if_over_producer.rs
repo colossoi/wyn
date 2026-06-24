@@ -618,6 +618,7 @@ fn collect_symbol_refs_soac(soac: &SoacOp, out: &mut LookupSet<SymbolId>) {
             map_lams,
             accumulators,
             inputs,
+            map_input_indices: _,
         } => {
             for lam in map_lams {
                 collect_symbol_refs_soac_body(lam, out);

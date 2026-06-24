@@ -404,6 +404,7 @@ pub fn collect_free_vars_soac(
             map_lams,
             accumulators,
             inputs,
+            map_input_indices: _,
         } => {
             for map_lam in map_lams {
                 collect_free_vars_soac_body(map_lam, bound, top_level, known_defs, symbols, free, seen);
@@ -1154,6 +1155,7 @@ impl<'a> ClosureConverter<'a> {
                 map_lams,
                 accumulators,
                 inputs,
+                map_input_indices,
             } => SoacOp::Screma {
                 map_lams: map_lams.into_iter().map(|body| self.lift_soac_lambda(body.lam, span)).collect(),
                 accumulators: accumulators
@@ -1166,6 +1168,7 @@ impl<'a> ClosureConverter<'a> {
                     })
                     .collect(),
                 inputs: inputs.into_iter().map(|ae| self.convert_array_expr(ae, span)).collect(),
+                map_input_indices,
             },
         }
     }
