@@ -5602,8 +5602,8 @@ entry ent_b(idx: []u32, #[storage(set=1, binding=0, access=read)] buf: []vec4f32
         Err(e) => e.to_string(),
     };
     assert!(
-        msg.contains("set=1, binding=0") && msg.contains("must name the same resource"),
-        "expected a binding-conflict diagnostic, got: {msg}"
+        msg.contains("set=1, binding=0") && msg.contains("must use the same element type"),
+        "expected a buffer element-type conflict diagnostic, got: {msg}"
     );
 }
 
@@ -5626,6 +5626,87 @@ entry ent_b(idx: []u32, #[storage(set=1, binding=0, access=read)] buf: []f32) []
     )
     .expect("entries that agree on a shared (set, binding) element type must compile");
     assert!(!lowered.spirv.is_empty());
+}
+
+/// A compute entry writing a `storage_image` and a fragment entry sampling a
+/// `texture2d` at the *same* `(set, binding)` is valid multi-pass aliasing —
+/// the runtime binds one image to both, written then sampled. Different
+/// resource kinds get separate per-entry SPIR-V variables, so this is not a
+/// conflict (the narrow guard only compares same-kind buffers).
+#[test]
+fn cross_kind_image_aliasing_compiles() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry paint(#[storage_image(set=0, binding=0, format=rgba8unorm, access=write_only)] img: storage_image,
+            #[builtin(global_invocation_id)] gid: vec3u32) () =
+  image_store(img, @[i32.u32(gid.x), i32.u32(gid.y)], @[1.0, 0.0, 0.0, 1.0])
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 =
+  let verts = [@[-1.0, -1.0, 0.0, 1.0], @[3.0, -1.0, 0.0, 1.0], @[-1.0, 3.0, 0.0, 1.0]] in
+  verts[vid]
+#[fragment]
+entry fragment_main(#[builtin(position)] pos: vec4f32,
+                    #[texture(set=0, binding=0)] tex: texture2d,
+                    #[sampler(set=0, binding=1)] samp: sampler) #[location(0)] vec4f32 =
+  texture_sample(tex, samp, @[pos.x / 1024.0, pos.y / 1024.0], 0.0)
+"#,
+    )
+    .expect("cross-kind image aliasing at one (set, binding) must compile");
+    assert!(!lowered.spirv.is_empty());
+}
+
+/// A named `resource` viewed `storage_write` by a compute entry and `sampled`
+/// by a fragment entry compiles to one valid module — the resource/view form
+/// of the compute-write / fragment-sample handoff. The resource omits `layout`,
+/// so the compiler auto-assigns its binding.
+#[test]
+fn resource_view_ping_pong_compiles() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+resource color: image2d {
+  format = rgba8unorm
+  size   = 1024x1024
+  usages = [storage_write, sampled]
+}
+#[compute]
+entry paint(#[view(color, storage_write)] img: storage_image,
+            #[builtin(global_invocation_id)] gid: vec3u32) () =
+  image_store(img, @[i32.u32(gid.x), i32.u32(gid.y)], @[1.0, 0.0, 0.0, 1.0])
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 =
+  let verts = [@[-1.0, -1.0, 0.0, 1.0], @[3.0, -1.0, 0.0, 1.0], @[-1.0, 3.0, 0.0, 1.0]] in
+  verts[vid]
+#[fragment]
+entry show(#[builtin(position)] pos: vec4f32,
+           #[view(color, sampled)] tex: texture2d,
+           #[sampler(set=0, binding=1)] samp: sampler) #[location(0)] vec4f32 =
+  texture_sample(tex, samp, @[pos.x / 1024.0, pos.y / 1024.0], 0.0)
+"#,
+    )
+    .expect("a resource viewed write+sampled across entries must compile");
+    assert!(!lowered.spirv.is_empty());
+}
+
+/// A `#[view(...)]` naming a resource that doesn't exist is a compile error.
+#[test]
+fn view_of_unknown_resource_is_rejected() {
+    let result = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry paint(#[view(nope, storage_write)] img: storage_image,
+            #[builtin(global_invocation_id)] gid: vec3u32) () =
+  image_store(img, @[i32.u32(gid.x), i32.u32(gid.y)], @[1.0, 0.0, 0.0, 1.0])
+"#,
+    );
+    let msg = match result {
+        Ok(_) => panic!("a view of an undeclared resource must be a compile error"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        msg.contains("unknown resource") && msg.contains("nope"),
+        "got: {msg}"
+    );
 }
 
 /// An array-of-tuples entry input (`pts: [](f32, f32)`) is split by the

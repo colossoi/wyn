@@ -5117,6 +5117,7 @@ pub(crate) fn make_entry_def(
             params: ast_params,
             outputs,
             storage_bindings,
+            feedback: vec![],
             body: dummy_expr,
         })),
         arity: required_params.len(),

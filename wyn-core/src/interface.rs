@@ -69,6 +69,18 @@ pub enum Attribute {
         access: StorageAccess,
         size: crate::pipeline_descriptor::StorageTextureSize,
     },
+    /// A view of a named top-level `resource`, e.g.
+    /// `#[view(color, storage_write)]`. Transient: the resource-resolution
+    /// pass rewrites each `View` into the concrete `StorageImage` / `Texture`
+    /// attribute (with the resource's derived `(set, binding)` and
+    /// `format`/`size`) before type checking, so later passes never see it.
+    View {
+        resource: String,
+        usage: ResourceUsage,
+        /// `true` for `#[view(r, sampled, previous)]` — samples the prior
+        /// frame of a `history` resource (resolves to its previous binding).
+        previous: bool,
+    },
     /// Hint for the expected size of a dynamic array (in elements).
     /// Used for parallelization decisions. Ignored on non-arrays or
     /// statically sized arrays. `NonZeroU32` encodes that
@@ -99,6 +111,7 @@ pub trait AttrExt {
     fn has_texture(&self) -> bool;
     fn has_sampler(&self) -> bool;
     fn has_storage_image(&self) -> bool;
+    fn has_view(&self) -> bool;
 }
 
 impl AttrExt for [Attribute] {
@@ -125,6 +138,9 @@ impl AttrExt for [Attribute] {
     }
     fn has_storage_image(&self) -> bool {
         self.has(|a| matches!(a, Attribute::StorageImage { .. }))
+    }
+    fn has_view(&self) -> bool {
+        self.has(|a| matches!(a, Attribute::View { .. }))
     }
 }
 
@@ -247,6 +263,10 @@ pub struct EntryDecl {
     /// in lockstep with body params is the contract — consumers should
     /// `zip` rather than rebuild a sym→binding map.
     pub param_bindings: Vec<Option<EntryParamBinding>>,
+    /// Ping-pong feedback pairs derived from `history` resources viewed
+    /// `previous` in this entry. Empty unless the resource-resolution pass
+    /// found a previous-frame view. Flows to the pipeline descriptor.
+    pub feedback: Vec<FeedbackPair>,
     pub body: Expression,
 }
 
@@ -269,6 +289,59 @@ pub enum StorageAccess {
     WriteOnly,
     #[default]
     ReadWrite,
+}
+
+/// How a `#[view(resource, usage)]` accesses its backing resource. Each usage
+/// resolves to a concrete binding attribute on the viewing param: a
+/// `storage_*` usage becomes a `StorageImage` binding (with the matching
+/// `StorageAccess`); `Sampled` becomes a `Texture` binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceUsage {
+    StorageWrite,
+    StorageRead,
+    Sampled,
+}
+
+/// A ping-pong feedback pair on an entry: the `read` binding samples the
+/// *previous frame's* contents of the `write` binding (a `history` resource's
+/// `previous` view). Emitted into the pipeline descriptor so the runtime
+/// double-buffers and swaps each frame — the declarative form of a
+/// `--feedback ENTRY:READ=WRITE` flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FeedbackPair {
+    pub read: crate::BindingRef,
+    pub write: crate::BindingRef,
+}
+
+/// The backing kind of a top-level `resource` declaration. Only 2D images are
+/// supported today (the compute-write / fragment-sample ping-pong).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceKind {
+    Image2d,
+}
+
+/// A top-level `resource <name>: <kind> { format, size, usages, layout }`
+/// declaration. Names a single GPU resource once; entry params reference it as
+/// `#[view(name, usage)]`. The resource-resolution pass derives a
+/// `(set, binding)` (from `layout`, or auto-assigned) and rewrites each view
+/// into the concrete binding attribute.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResourceDecl {
+    pub name: String,
+    pub kind: ResourceKind,
+    pub format: crate::pipeline_descriptor::StorageImageFormat,
+    pub size: crate::pipeline_descriptor::StorageTextureSize,
+    pub usages: Vec<ResourceUsage>,
+    /// Explicit `layout = binding(set, binding)` pin for the current-frame
+    /// binding, or `None` to let the compiler assign the slot.
+    pub layout: Option<crate::BindingRef>,
+    /// Number of previous frames kept (double-buffering). `0` = no history;
+    /// `1` = a `previous` view reads last frame (v1 supports 0 or 1).
+    pub history: u32,
+    /// Explicit pin for the `previous`-frame binding (only meaningful when
+    /// `history >= 1`), or `None` to auto-assign.
+    pub previous_layout: Option<crate::BindingRef>,
+    pub span: crate::ast::Span,
 }
 
 /// Role a storage buffer plays in a compute entry point's interface.

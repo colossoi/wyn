@@ -141,6 +141,7 @@ pub enum Token {
     Include,
     With,
     Extern,
+    Resource,
 
     // Identifiers and literals
     Identifier(String),
@@ -229,6 +230,7 @@ fn parse_keyword(input: &str) -> IResult<&str, Token> {
         )),
         alt((
             keyword("extern", Token::Extern),
+            keyword("resource", Token::Resource),
             keyword("entry", Token::Entry),
             keyword("let", Token::Let),
             keyword("loop", Token::Loop),

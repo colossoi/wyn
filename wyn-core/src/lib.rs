@@ -31,6 +31,7 @@ pub use wyn_pipeline_descriptor as pipeline_descriptor;
 pub mod resolve_imports;
 pub mod resolve_opens;
 pub mod resolve_placeholders;
+pub mod resolve_resources;
 pub mod spirv;
 pub mod structured;
 pub mod wgsl;
@@ -441,6 +442,7 @@ impl Parsed {
     /// Resolve names: rewrite FieldAccess -> QualifiedName and load modules
     pub fn resolve(mut self, module_manager: &module_manager::ModuleManager) -> Result<Resolved> {
         name_resolution::run(&mut self.0.ast, module_manager)?;
+        resolve_resources::run(&mut self.0.ast)?;
         Ok(Resolved(self.0))
     }
 }

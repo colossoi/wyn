@@ -55,6 +55,20 @@ fn resource_signature(ty: &Type) -> String {
     }
 }
 
+/// The element-type signature of a storage/uniform buffer param, used to detect
+/// destructive slot sharing. Peels the `*` uniqueness marker and one array
+/// layer so the same buffer seen as `[]T` in one entry and `*[]T` (owned) in
+/// another compares equal; only the leaf element type (the thing that fixes the
+/// SPIR-V struct layout) matters.
+fn buffer_element_signature(ty: &Type) -> String {
+    use crate::types::TypeName;
+    let stripped = crate::types::strip_unique(ty);
+    match &stripped {
+        Type::Constructed(TypeName::Array, args) if !args.is_empty() => resource_signature(&args[0]),
+        other => resource_signature(other),
+    }
+}
+
 fn swizzle_letter(idx: u8) -> char {
     match idx {
         0 => 'x',
@@ -1509,17 +1523,18 @@ impl<'a> TypeChecker<'a> {
         Ok(resolved_table)
     }
 
-    /// A `(set, binding)` slot may be shared across entry points, but only
-    /// if every entry that names it agrees on the resource. Two entries
-    /// binding the same slot to different resource kinds (e.g. `storage`
-    /// in one, `uniform` in another) or to buffers with different element
-    /// types coalesce to a single module-global of one type that the other
-    /// entry then indexes as another — invalid SPIR-V that both spirv-val
-    /// and naga reject. Reject it here with a precise diagnostic instead of
-    /// silently emitting a broken module.
+    /// A `(set, binding)` slot is fine to share across entry points — different
+    /// pipelines have independent descriptor layouts, and the runtime can bind
+    /// one resource through several views (an image written as a `storage_image`
+    /// by one entry and sampled as a `texture` by another; a buffer read by
+    /// two). The one thing that breaks is two `storage`/`uniform` **buffers**
+    /// at the same slot with **different element types** (`[]f32` vs
+    /// `[]vec4f32`): codegen coalesces them to one module-global of one element
+    /// type that the other entry then indexes as another — invalid SPIR-V both
+    /// spirv-val and naga reject. Reject exactly that; the element comparison
+    /// peels `*[…]` / array-view wrappers so the same buffer seen as a view in
+    /// one entry and a pointer-to-array in another is not a conflict.
     fn check_resource_binding_consistency(&self, program: &Program) -> Result<()> {
-        // Entry params parse as `Typed(Attributed([attrs], Name), ty)` —
-        // peel `Typed`/`Attributed` to reach the attribute list.
         fn param_attrs(p: &Pattern) -> &[Attribute] {
             match &p.kind {
                 PatternKind::Attributed(attrs, _) => attrs,
@@ -1528,52 +1543,45 @@ impl<'a> TypeChecker<'a> {
             }
         }
 
-        // What a slot resolves to: its resource kind plus a canonical,
-        // variable-insensitive signature of the declared type (buffers pin
-        // an element type; texture/sampler have none, so `sig` is just the
-        // kind there). `display` is the human-readable form kept for the
-        // diagnostic. The first occurrence of each slot records the entry it
-        // came from so a later conflict can point at both sides.
-        struct SlotUse {
-            sig: String,
+        struct BufferUse {
+            kind: &'static str,
+            elem: String,
             display: String,
             entry: String,
         }
-        let mut seen: LookupMap<(u32, u32), SlotUse> = LookupMap::new();
+        let mut seen: LookupMap<(u32, u32), BufferUse> = LookupMap::new();
 
         for decl in &program.declarations {
             let Declaration::Entry(entry) = decl else {
                 continue;
             };
             for param in &entry.params {
+                // Only buffers can coalesce destructively. Textures / samplers /
+                // storage images get a separate global per entry, so cross-kind
+                // reuse of a slot is valid aliasing, not a conflict.
                 let Some((set, binding, kind)) = param_attrs(param).iter().find_map(|a| match a {
                     Attribute::Storage { set, binding, .. } => Some((*set, *binding, "storage")),
                     Attribute::Uniform { set, binding } => Some((*set, *binding, "uniform")),
-                    Attribute::Texture { set, binding } => Some((*set, *binding, "texture")),
-                    Attribute::Sampler { set, binding } => Some((*set, *binding, "sampler")),
-                    Attribute::StorageImage { set, binding, .. } => Some((*set, *binding, "storage_image")),
                     _ => None,
                 }) else {
                     continue;
                 };
 
                 let ty = param.pattern_type().map(|t| self.normalize_annotation_type(t, None));
-                let sig = match &ty {
-                    Some(t) => format!("{} {}", kind, resource_signature(t)),
-                    None => kind.to_string(),
-                };
+                let elem = ty.as_ref().map(buffer_element_signature).unwrap_or_default();
                 let display = match &ty {
                     Some(t) => format!("{} {}", kind, self.format_type(t)),
                     None => kind.to_string(),
                 };
 
                 match seen.get(&(set, binding)) {
-                    Some(prev) if prev.sig != sig => {
+                    Some(prev) if prev.kind == kind && prev.elem != elem => {
                         bail_type_at!(
                             param.h.span,
-                            "resource binding (set={}, binding={}) is declared as `{}` in entry \
-                             `{}`, but as `{}` in entry `{}`; a (set, binding) slot must name the \
-                             same resource across every entry point in a module",
+                            "{} buffer (set={}, binding={}) is declared as `{}` in entry `{}`, \
+                             but as `{}` in entry `{}`; a buffer slot shared across entries must \
+                             use the same element type",
+                            kind,
                             set,
                             binding,
                             display,
@@ -1586,8 +1594,9 @@ impl<'a> TypeChecker<'a> {
                     None => {
                         seen.insert(
                             (set, binding),
-                            SlotUse {
-                                sig,
+                            BufferUse {
+                                kind,
+                                elem,
                                 display,
                                 entry: entry.name.clone(),
                             },
@@ -2038,6 +2047,11 @@ impl<'a> TypeChecker<'a> {
             Declaration::Extern(extern_decl) => {
                 debug!("Checking Extern declaration: {}", extern_decl.name);
                 self.check_extern_decl(extern_decl)
+            }
+            Declaration::Resource(_) => {
+                // Resources carry no body to check; views were rewritten to
+                // concrete binding attributes before type checking.
+                Ok(())
             }
         }
     }

@@ -152,6 +152,7 @@ impl<'a> Parser<'a> {
                 Ok(Declaration::Import(path))
             }
             Some(Token::Extern) => self.parse_extern_decl(attributes),
+            Some(Token::Resource) => Ok(Declaration::Resource(self.parse_resource_decl()?)),
             _ => Err(err_parse_at!(
                 self.current_span(),
                 "Expected declaration, got {:?}",
@@ -501,6 +502,7 @@ impl<'a> Parser<'a> {
             outputs,
             storage_bindings: Vec::new(),
             param_bindings: Vec::new(),
+            feedback: Vec::new(),
             body,
         }))
     }
@@ -633,6 +635,151 @@ impl<'a> Parser<'a> {
                 ),
             }
         }
+    }
+
+    /// Parse a top-level `resource <name>: <kind> { format = …, size = …,
+    /// usages = [ … ], layout = binding(s, b) }` declaration.
+    fn parse_resource_decl(&mut self) -> Result<crate::interface::ResourceDecl> {
+        use crate::interface::{ResourceDecl, ResourceKind, ResourceUsage};
+        use crate::pipeline_descriptor::{StorageImageFormat, StorageTextureSize};
+        let start_span = self.current_span();
+        self.expect(Token::Resource)?;
+        let name = self.expect_identifier()?;
+        self.expect(Token::Colon)?;
+        let kind_name = self.expect_identifier()?;
+        let kind = match kind_name.as_str() {
+            "image2d" => ResourceKind::Image2d,
+            other => bail_parse_at!(
+                self.current_span(),
+                "Unknown resource kind: '{}'. Supported: image2d",
+                other
+            ),
+        };
+        self.expect(Token::LeftBrace)?;
+
+        let mut format: Option<StorageImageFormat> = None;
+        let mut size: StorageTextureSize = StorageTextureSize::default();
+        let mut usages: Vec<ResourceUsage> = Vec::new();
+        let mut layout: Option<crate::BindingRef> = None;
+        let mut history: u32 = 0;
+        let mut previous_layout: Option<crate::BindingRef> = None;
+
+        while !self.check(&Token::RightBrace) {
+            let field = self.expect_identifier()?;
+            self.expect(Token::Assign)?;
+            match field.as_str() {
+                "format" => {
+                    let fmt = self.expect_identifier()?;
+                    format = Some(match fmt.as_str() {
+                        "rgba8unorm" => StorageImageFormat::Rgba8Unorm,
+                        "rgba16float" => StorageImageFormat::Rgba16Float,
+                        "rgba32float" => StorageImageFormat::Rgba32Float,
+                        "r32float" => StorageImageFormat::R32Float,
+                        other => bail_parse_at!(
+                            self.current_span(),
+                            "Unknown resource format: '{}'. Supported: rgba8unorm, rgba16float, rgba32float, r32float",
+                            other
+                        ),
+                    });
+                }
+                "size" => size = self.parse_storage_texture_size()?,
+                "usages" => usages = self.parse_resource_usages()?,
+                "layout" => layout = Some(self.parse_resource_layout()?),
+                "history" => history = self.expect_integer()?,
+                "previous" => previous_layout = Some(self.parse_resource_layout()?),
+                other => bail_parse_at!(
+                    self.current_span(),
+                    "Unknown resource field: '{}'. Supported: format, size, usages, layout, history, previous",
+                    other
+                ),
+            }
+            if self.check(&Token::Comma) {
+                self.advance();
+            }
+        }
+        self.expect(Token::RightBrace)?;
+
+        let format = format.ok_or_else(|| err_parse!("resource '{}' requires a 'format' field", name))?;
+        if usages.is_empty() {
+            bail_parse_at!(
+                start_span,
+                "resource '{}' requires a non-empty 'usages' list",
+                name
+            );
+        }
+        if history > 1 {
+            bail_parse_at!(
+                start_span,
+                "resource '{}': history > 1 is not supported yet",
+                name
+            );
+        }
+        if previous_layout.is_some() && history == 0 {
+            bail_parse_at!(
+                start_span,
+                "resource '{}': `previous` binding requires `history = 1`",
+                name
+            );
+        }
+
+        Ok(ResourceDecl {
+            name,
+            kind,
+            format,
+            size,
+            usages,
+            layout,
+            history,
+            previous_layout,
+            span: start_span,
+        })
+    }
+
+    /// Parse `[storage_write, sampled, …]` for a resource's `usages` field.
+    fn parse_resource_usages(&mut self) -> Result<Vec<crate::interface::ResourceUsage>> {
+        use crate::interface::ResourceUsage;
+        // `[` may lex as bracketed-spaced after `usages = `.
+        if !(self.check(&Token::LeftBracket) || self.check(&Token::LeftBracketSpaced)) {
+            bail_parse_at!(self.current_span(), "expected `[` to open a usages list");
+        }
+        self.advance();
+        let mut usages = Vec::new();
+        while !self.check(&Token::RightBracket) {
+            let name = self.expect_identifier()?;
+            usages.push(match name.as_str() {
+                "storage_write" => ResourceUsage::StorageWrite,
+                "storage_read" => ResourceUsage::StorageRead,
+                "sampled" => ResourceUsage::Sampled,
+                other => bail_parse_at!(
+                    self.current_span(),
+                    "Unknown usage: '{}'. Supported: storage_write, storage_read, sampled",
+                    other
+                ),
+            });
+            if self.check(&Token::Comma) {
+                self.advance();
+            }
+        }
+        self.expect(Token::RightBracket)?;
+        Ok(usages)
+    }
+
+    /// Parse `binding(set, binding)` for a resource's `layout` field.
+    fn parse_resource_layout(&mut self) -> Result<crate::BindingRef> {
+        let kw = self.expect_identifier()?;
+        if kw != "binding" {
+            bail_parse_at!(
+                self.current_span(),
+                "expected `binding(set, binding)`, got '{}'",
+                kw
+            );
+        }
+        self.expect(Token::LeftParen)?;
+        let set = self.expect_integer()?;
+        self.expect(Token::Comma)?;
+        let binding = self.expect_integer()?;
+        self.expect(Token::RightParen)?;
+        Ok(crate::BindingRef::new(set, binding))
     }
 
     fn parse_attribute(&mut self) -> Result<Attribute> {
@@ -826,6 +973,47 @@ impl<'a> Parser<'a> {
                     format,
                     access,
                     size,
+                })
+            }
+            "view" => {
+                // `#[view(resource_name, usage)]` — references a top-level
+                // `resource`. The resolution pass rewrites this into the
+                // concrete `StorageImage` / `Texture` binding attribute.
+                use crate::interface::ResourceUsage;
+                self.expect(Token::LeftParen)?;
+                let resource = self.expect_identifier()?;
+                self.expect(Token::Comma)?;
+                let usage_name = self.expect_identifier()?;
+                let usage = match usage_name.as_str() {
+                    "storage_write" => ResourceUsage::StorageWrite,
+                    "storage_read" => ResourceUsage::StorageRead,
+                    "sampled" => ResourceUsage::Sampled,
+                    other => bail_parse_at!(
+                        self.current_span(),
+                        "Unknown view usage: '{}'. Supported: storage_write, storage_read, sampled",
+                        other
+                    ),
+                };
+                // Optional temporal selector: `#[view(r, sampled, previous)]`.
+                let mut previous = false;
+                if self.check(&Token::Comma) {
+                    self.advance();
+                    let sel = self.expect_identifier()?;
+                    if sel != "previous" {
+                        bail_parse_at!(
+                            self.current_span(),
+                            "Unknown view selector: '{}'. Supported: previous",
+                            sel
+                        );
+                    }
+                    previous = true;
+                }
+                self.expect(Token::RightParen)?;
+                self.expect(Token::RightBracket)?;
+                Ok(Attribute::View {
+                    resource,
+                    usage,
+                    previous,
                 })
             }
             "builtin" => {

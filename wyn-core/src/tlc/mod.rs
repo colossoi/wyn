@@ -1569,7 +1569,8 @@ impl<'a> Transformer<'a> {
                 | ast::Declaration::Module(_)
                 | ast::Declaration::ModuleTypeBind(_)
                 | ast::Declaration::Open(_)
-                | ast::Declaration::Import(_) => {}
+                | ast::Declaration::Import(_)
+                | ast::Declaration::Resource(_) => {}
             }
         }
 

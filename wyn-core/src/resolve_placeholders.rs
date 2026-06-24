@@ -215,7 +215,8 @@ impl PlaceholderResolver {
             | Declaration::Import(_)
             | Declaration::Module(_)
             | Declaration::ModuleTypeBind(_)
-            | Declaration::Open(_) => {
+            | Declaration::Open(_)
+            | Declaration::Resource(_) => {
                 // No type annotations to resolve
             }
             Declaration::Extern(e) => {

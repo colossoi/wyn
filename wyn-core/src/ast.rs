@@ -226,12 +226,13 @@ pub enum Declaration {
     Decl(Decl),       // Unified let/def declarations
     Entry(EntryDecl), // Entry point declarations (vertex/fragment shaders)
     Sig(SigDecl),
-    Extern(ExternDecl),             // External linked SPIR-V function
-    TypeBind(TypeBind),             // Type declarations
-    Module(ModuleDecl),             // Module and functor declarations
-    ModuleTypeBind(ModuleTypeBind), // Module type declarations
-    Open(ModuleExpression),         // open mod_exp
-    Import(String),                 // import "path"
+    Extern(ExternDecl),                       // External linked SPIR-V function
+    TypeBind(TypeBind),                       // Type declarations
+    Module(ModuleDecl),                       // Module and functor declarations
+    ModuleTypeBind(ModuleTypeBind),           // Module type declarations
+    Open(ModuleExpression),                   // open mod_exp
+    Import(String),                           // import "path"
+    Resource(crate::interface::ResourceDecl), // named GPU resource (image2d)
 }
 
 #[derive(Debug, Clone, PartialEq)]

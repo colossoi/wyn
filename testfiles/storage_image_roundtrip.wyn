@@ -1,10 +1,17 @@
--- Phase 1b smoke: compute writes a 2D pattern to a storage image,
--- fragment samples it bilinearly via the same (set, binding) slot.
--- Exercises the cross-stage compute-write / fragment-sample handoff
--- the Mountains-port plan depends on.
+-- [SPEC: Resources and Views]
+-- compute writes a 2D pattern to a storage image, fragment samples it
+-- bilinearly — the compute-write / fragment-sample handoff named as one
+-- `resource` viewed two ways, instead of two coincidental `(set, binding)`s.
+
+-- No `layout` pin: the compiler auto-assigns the slot.
+resource color: image2d {
+  format = rgba8unorm
+  size   = 1024x1024
+  usages = [storage_write, sampled]
+}
 
 #[compute]
-entry paint(#[storage_image(set=0, binding=0, format=rgba8unorm, access=write_only)] img: storage_image,
+entry paint(#[view(color, storage_write)] img: storage_image,
             #[builtin(global_invocation_id)] gid: vec3u32) () =
   let xy = @[i32.u32(gid.x), i32.u32(gid.y)]
   let fx = f32.u32(gid.x) / 1024.0
@@ -20,7 +27,7 @@ entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f3
 
 #[fragment]
 entry fragment_main(#[builtin(position)] pos: vec4f32,
-                    #[texture(set=0, binding=0)] tex: texture2d,
+                    #[view(color, sampled)] tex: texture2d,
                     #[sampler(set=0, binding=1)] samp: sampler)
   #[location(0)] vec4f32 =
   let uv = @[pos.x / 1024.0, pos.y / 1024.0] in

@@ -174,7 +174,8 @@ impl<'a> OpenResolver<'a> {
             | Declaration::Sig(_)
             | Declaration::TypeBind(_)
             | Declaration::Extern(_)
-            | Declaration::Import(_) => Ok(()),
+            | Declaration::Import(_)
+            | Declaration::Resource(_) => Ok(()),
         }
     }
 
@@ -492,6 +493,7 @@ fn top_level_name(decl: &Declaration) -> Option<String> {
         | Declaration::ModuleTypeBind(_)
         | Declaration::TypeBind(_)
         | Declaration::Open(_)
-        | Declaration::Import(_) => None,
+        | Declaration::Import(_)
+        | Declaration::Resource(_) => None,
     }
 }

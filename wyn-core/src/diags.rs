@@ -286,6 +286,12 @@ impl AstFormatter {
                     e.linkage_name, e.name, e.ty
                 ));
             }
+            Declaration::Resource(r) => {
+                self.write_line(&format!(
+                    "resource {}: {:?} {{ format = {:?}, usages = {:?} }}",
+                    r.name, r.kind, r.format, r.usages
+                ));
+            }
         }
     }
 

@@ -2390,6 +2390,99 @@ The two user-declared uniforms remain on set 1 as written.
 
 ---
 
+## Resources and Views
+
+A multi-pass shader often binds one physical GPU resource into several entry
+points with different access — a compute pass writes an image, a later fragment
+pass samples it. Rather than repeat a `(set, binding)` on each param and rely on
+the numbers lining up, name the resource once with a top-level `resource`
+declaration and reference it from params as **views**.
+
+```
+resource color: image2d {
+  format = rgba8unorm
+  size   = 1024x1024          -- or `window` to track the swapchain
+  usages = [storage_write, sampled]
+  layout = binding(0, 0)      -- optional ABI pin; omit to auto-assign
+}
+
+#[compute]
+entry paint(#[view(color, storage_write)] img: storage_image, …) () =
+  image_store(img, …)
+
+#[fragment]
+entry show(#[view(color, sampled)] tex: texture2d,
+           #[sampler(set=0, binding=1)] samp: sampler, …) #[location(0)] vec4f32 =
+  texture_sample(tex, samp, uv, 0.0)
+```
+
+A `resource` names one backing image. Its fields:
+
+- `format` — pixel format (`rgba8unorm`, `rgba16float`, `rgba32float`, `r32float`).
+- `size` — `WxH` (e.g. `1024x1024`) or `window` (tracks the swapchain).
+- `usages` — the access kinds it may be viewed by: `storage_write`,
+  `storage_read`, `sampled`.
+- `layout = binding(set, binding)` — optional pin for the current-frame binding;
+  omitted, the compiler assigns a free slot on a user set.
+- `history = 1` and `previous = binding(set, binding)` — see *Temporal feedback*.
+
+A `#[view(resource, usage)]` param references a resource. The compiler validates
+that `usage` is in the resource's `usages` and matches the param's handle type
+(`storage_write`/`storage_read` ⇒ `storage_image`, `sampled` ⇒ `texture2d`),
+then lowers the view to the resource's derived `(set, binding)` with its
+`format`/`size`. Two views of one resource at the same slot — written then
+sampled — are the standard handoff: the host binds one image and the compiler
+emits a separate descriptor binding per entry, so each pipeline's descriptor set
+sees the resource through its own view.
+
+Because a resource is typed once, its views cannot disagree on the backing
+format — the cross-entry element-type conflict that raw `#[storage(...)]`
+buffers can still hit (`[]f32` in one entry, `[]vec4f32` in another) is
+unrepresentable for a resource.
+
+### Storage images
+
+A `storage_image` is an opaque 2D image handle a compute entry writes (and may
+point-read). Element type is fixed to `vec4f32`; the binding's `format` decides
+the on-GPU pixel format.
+
+- `image_store(img: storage_image, coord: vec2i32, value: vec4f32) -> ()`
+- `image_load(img: storage_image, coord: vec2i32) -> vec4f32`
+
+The same physical image may be declared `storage_image` (write) in one pipeline
+and `texture2d` (sample) in another at the same `(set, binding)` — the runtime
+allocates one image and binds it through both descriptor types. The `resource`
+form above is the recommended way to express that aliasing.
+
+### Temporal feedback
+
+A `history = 1` resource is **double-buffered**: a `#[view(r, sampled,
+previous)]` reads the *previous frame's* contents while a `storage_write` view
+writes the current frame. The compiler assigns the previous-frame binding (pin
+it with `previous = binding(set, binding)`, or let it auto-assign) and records a
+feedback pair in the pipeline descriptor, so the runtime ping-pongs two textures
+and swaps them each frame.
+
+```
+resource buffer_a: image2d {
+  format   = rgba32float
+  size     = window
+  usages   = [storage_write, sampled]
+  history  = 1
+  layout   = binding(0, 0)    -- current frame
+  previous = binding(0, 10)   -- previous frame
+}
+
+#[compute]
+entry buffer_a(#[view(buffer_a, storage_write)]      out_a:  storage_image,
+               #[view(buffer_a, sampled, previous)]  prev_a: texture2d, …) () = …
+```
+
+This is the declarative form of the host-side `--feedback ENTRY:READ=WRITE`
+wiring: the previous-frame view *is* the feedback declaration.
+
+---
+
 ## Appendix: Wyn Compared to Other Functional Languages
 
 This guide is intended for programmers who are familiar with other functional languages and want to start working with Wyn.
