@@ -662,7 +662,6 @@ impl<'a> Parser<'a> {
         let mut usages: Vec<ResourceUsage> = Vec::new();
         let mut layout: Option<crate::BindingRef> = None;
         let mut history: u32 = 0;
-        let mut previous_layout: Option<crate::BindingRef> = None;
 
         while !self.check(&Token::RightBrace) {
             let field = self.expect_identifier()?;
@@ -686,10 +685,9 @@ impl<'a> Parser<'a> {
                 "usages" => usages = self.parse_resource_usages()?,
                 "layout" => layout = Some(self.parse_resource_layout()?),
                 "history" => history = self.expect_integer()?,
-                "previous" => previous_layout = Some(self.parse_resource_layout()?),
                 other => bail_parse_at!(
                     self.current_span(),
-                    "Unknown resource field: '{}'. Supported: format, size, usages, layout, history, previous",
+                    "Unknown resource field: '{}'. Supported: format, size, usages, layout, history",
                     other
                 ),
             }
@@ -714,14 +712,6 @@ impl<'a> Parser<'a> {
                 name
             );
         }
-        if previous_layout.is_some() && history == 0 {
-            bail_parse_at!(
-                start_span,
-                "resource '{}': `previous` binding requires `history = 1`",
-                name
-            );
-        }
-
         Ok(ResourceDecl {
             name,
             kind,
@@ -730,7 +720,6 @@ impl<'a> Parser<'a> {
             usages,
             layout,
             history,
-            previous_layout,
             span: start_span,
         })
     }
@@ -888,7 +877,11 @@ impl<'a> Parser<'a> {
                     .ok_or_else(|| err_parse!("{} attribute requires 'binding' parameter", attr_name))?;
 
                 if is_texture {
-                    Ok(Attribute::Texture { set, binding })
+                    Ok(Attribute::Texture {
+                        set,
+                        binding,
+                        backing: None,
+                    })
                 } else {
                     Ok(Attribute::Sampler { set, binding })
                 }

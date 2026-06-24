@@ -580,6 +580,37 @@ impl State {
                 }
             }
         }
+
+        // Also honor feedback pairs the compiler declared in the descriptor (a
+        // `history` resource's `previous` view) — no `--feedback` flag needed.
+        // Classify each by the write binding's kind: a storage-image write is a
+        // texture pair, a storage-buffer write is a buffer pair.
+        for p in &spec.descriptor.pipelines {
+            let DescPipeline::Compute(cp) = p else {
+                continue;
+            };
+            for fb in &cp.feedback {
+                let writes_storage_image = cp.bindings.iter().any(|b| {
+                    matches!(
+                        b,
+                        wyn_pipeline_descriptor::Binding::StorageTexture { set, binding, .. }
+                            if *set == fb.write_set && *binding == fb.write_binding
+                    )
+                });
+                let pair = gpu::FeedbackPair {
+                    read_set: fb.read_set,
+                    read_binding: fb.read_binding,
+                    write_set: fb.write_set,
+                    write_binding: fb.write_binding,
+                };
+                if writes_storage_image {
+                    texture_feedback_pairs.push(pair);
+                } else {
+                    buffer_feedback_pairs.push(pair);
+                }
+            }
+        }
+
         let feedback_reads: HashMap<(u32, u32), (u32, u32)> = texture_feedback_pairs
             .iter()
             .map(|p| ((p.read_set, p.read_binding), (p.write_set, p.write_binding)))

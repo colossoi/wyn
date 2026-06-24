@@ -500,9 +500,29 @@ def mouse_world_pos(ro: vec3f32, mrd: vec3f32, planeHeight: f32) vec3f32 =
   let t = (planeHeight - ro.y) / mrd.y in
   ro + mrd * t
 
+-- [SPEC: Resources and Views] Buffer A is double-buffered (`history = 1`):
+-- buffer_a writes the current frame and samples its `previous` frame; the
+-- feedback is declared here, not via a `--feedback` flag.
+resource buf_a: image2d {
+  format  = rgba32float
+  size    = window
+  usages  = [storage_write, sampled]
+  history = 1
+}
+resource buf_b: image2d {
+  format = rgba32float
+  size   = window
+  usages = [storage_write, sampled]
+}
+resource buf_c: image2d {
+  format = rgba32float
+  size   = window
+  usages = [storage_write, sampled]
+}
+
 #[compute]
-entry buffer_a(#[storage_image(set=0, binding=0, format=rgba32float, access=write_only)] out_a: storage_image,
-               #[texture(set=0, binding=10)] prev_a: texture2d,
+entry buffer_a(#[view(buf_a, storage_write)] out_a: storage_image,
+               #[view(buf_a, sampled, previous)] prev_a: texture2d,
                #[sampler(set=0, binding=3)] samp: sampler,
                #[storage(set=2, binding=0, access=read)] keyboard: []u32,
                #[builtin(global_invocation_id)] gid: vec3u32,
@@ -568,8 +588,8 @@ entry buffer_a(#[storage_image(set=0, binding=0, format=rgba32float, access=writ
 ------------------------------------------------------------
 
 #[compute]
-entry buffer_b(#[storage_image(set=0, binding=1, format=rgba32float, access=write_only)] out_b: storage_image,
-               #[texture(set=0, binding=0)] tex_a: texture2d,
+entry buffer_b(#[view(buf_b, storage_write)] out_b: storage_image,
+               #[view(buf_a, sampled)] tex_a: texture2d,
                #[sampler(set=0, binding=3)] samp: sampler,
                #[storage(set=2, binding=0, access=read)] keyboard: []u32,
                #[builtin(global_invocation_id)] gid: vec3u32,
@@ -593,7 +613,7 @@ entry buffer_b(#[storage_image(set=0, binding=1, format=rgba32float, access=writ
 ------------------------------------------------------------
 
 #[compute]
-entry buffer_c(#[storage_image(set=0, binding=2, format=rgba32float, access=write_only)] out_c: storage_image,
+entry buffer_c(#[view(buf_c, storage_write)] out_c: storage_image,
                #[builtin(global_invocation_id)] gid: vec3u32,
                #[uniform(set=1, binding=0)] iResolution: vec3f32) () =
   let xy_i = @[i32.u32(gid.x), i32.u32(gid.y)] in
@@ -754,8 +774,8 @@ def AtmosphereShade(ro: vec3f32, rd: vec3f32, t_in: f32, sun: vec3f32,
 
 #[fragment]
 entry fragment_main(#[builtin(position)] pos_in: vec4f32,
-                    #[texture(set=0, binding=1)] tex_b: texture2d,
-                    #[texture(set=0, binding=2)] tex_c: texture2d,
+                    #[view(buf_b, sampled)] tex_b: texture2d,
+                    #[view(buf_c, sampled)] tex_c: texture2d,
                     #[sampler(set=0, binding=3)] samp: sampler,
                     #[uniform(set=1, binding=0)] iResolution: vec3f32,
                     #[uniform(set=1, binding=1)] iTime: f32,

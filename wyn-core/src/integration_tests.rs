@@ -5709,6 +5709,46 @@ entry paint(#[view(nope, storage_write)] img: storage_image,
     );
 }
 
+/// A raw `#[storage_image]` and `#[texture]` reusing one `(set, binding)` with
+/// different image types is invalid: it emits two descriptor variables of
+/// different types at one slot, which the runtime can't bind. The `resource`
+/// form makes this unrepresentable, but hand-written raw bindings can still
+/// express it; a future resolution-time check should reject it with an
+/// incompatible-descriptor-kind error.
+///
+/// `#[ignore]`d: the collision check is not implemented yet — the module
+/// currently compiles (and `cross_kind_image_aliasing_compiles` documents
+/// that). Un-ignore once the check lands.
+#[test]
+#[ignore = "collision check not implemented: raw storage_image+texture at one (set,binding) still compiles"]
+fn raw_cross_kind_same_binding_is_rejected() {
+    let result = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry paint(#[storage_image(set=0, binding=0, format=rgba8unorm, access=write_only)] img: storage_image,
+            #[builtin(global_invocation_id)] gid: vec3u32) () =
+  image_store(img, @[i32.u32(gid.x), i32.u32(gid.y)], @[1.0, 0.0, 0.0, 1.0])
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 =
+  let verts = [@[-1.0, -1.0, 0.0, 1.0], @[3.0, -1.0, 0.0, 1.0], @[-1.0, 3.0, 0.0, 1.0]] in
+  verts[vid]
+#[fragment]
+entry fragment_main(#[builtin(position)] pos: vec4f32,
+                    #[texture(set=0, binding=0)] tex: texture2d,
+                    #[sampler(set=0, binding=1)] samp: sampler) #[location(0)] vec4f32 =
+  texture_sample(tex, samp, @[pos.x / 1024.0, pos.y / 1024.0], 0.0)
+"#,
+    );
+    let msg = match result {
+        Ok(_) => panic!("storage_image + texture at one (set, binding) must be rejected"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        msg.contains("set") && msg.contains("binding"),
+        "expected an incompatible-descriptor-kind error, got: {msg}"
+    );
+}
+
 /// An array-of-tuples entry input (`pts: [](f32, f32)`) is split by the
 /// SoA transform into a tuple-of-arrays whose component arrays share one
 /// outer length. Two maps over those components are therefore the same

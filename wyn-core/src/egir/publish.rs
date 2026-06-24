@@ -25,8 +25,8 @@ use crate::{LookupMap, LookupSet};
 
 use crate::egir::program::EgirEntry;
 use crate::pipeline_descriptor::{
-    Access, Binding, BufferUsage, FragmentOutput, Pipeline, PipelineDescriptor, SamplerBindingType,
-    TextureSampleType, TextureViewDimension, VertexAttribute,
+    Access, BackingRef, Binding, BufferUsage, FragmentOutput, Pipeline, PipelineDescriptor,
+    SamplerBindingType, TextureSampleType, TextureViewDimension, VertexAttribute,
 };
 use crate::ssa::types::{ExecutionModel, IoDecoration};
 
@@ -168,6 +168,10 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                         sample_type: TextureSampleType::Float { filterable: true },
                         view_dimension: TextureViewDimension::D2,
                         multisampled: false,
+                        backing: input.texture_backing.map(|b| BackingRef {
+                            set: b.set,
+                            binding: b.binding,
+                        }),
                     });
                 } else if let Some(br) = input.sampler_binding {
                     if claimed.contains(&(br.set, br.binding)) {

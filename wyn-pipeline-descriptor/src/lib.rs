@@ -52,6 +52,30 @@ pub struct ComputePipeline {
     /// it remains dynamic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_total_threads: Option<std::num::NonZeroU32>,
+    /// Ping-pong feedback pairs: each entry's `read` slot samples the previous
+    /// frame of its `write` slot (a `history` resource's `previous` view). The
+    /// runtime double-buffers and swaps each frame — the declarative form of a
+    /// `--feedback ENTRY:READ=WRITE` flag.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub feedback: Vec<FeedbackPair>,
+}
+
+/// A ping-pong feedback pair within a pipeline: the read slot samples the
+/// previous frame of the write slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeedbackPair {
+    pub read_set: u32,
+    pub read_binding: u32,
+    pub write_set: u32,
+    pub write_binding: u32,
+}
+
+/// The `(set, binding)` of a `StorageTexture` allocation that a sampled
+/// `Texture` binding is a view of. See `Binding::Texture::backing`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackingRef {
+    pub set: u32,
+    pub binding: u32,
 }
 
 /// A single dispatch stage within a `ComputePipeline`.
@@ -78,6 +102,9 @@ pub struct GraphicsPipeline {
     pub bindings: Vec<Binding>,
     pub vertex_inputs: Vec<VertexAttribute>,
     pub fragment_outputs: Vec<FragmentOutput>,
+    /// Ping-pong feedback pairs (see `ComputePipeline::feedback`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub feedback: Vec<FeedbackPair>,
 }
 
 /// A stage in a graphics pipeline.
@@ -185,6 +212,13 @@ pub enum Binding {
     },
     /// Sampled texture (descriptor set binding). Bound from a
     /// `#[texture(set, binding)]` entry-point param of type `texture2d`.
+    ///
+    /// `backing`, when present, names the `StorageTexture` binding whose
+    /// allocation this is a sampled *view* of — a `resource`'s `sampled`
+    /// view aliasing its `storage_write` allocation. The runtime binds this
+    /// slot to that allocation's sampled view (current frame); a previous
+    /// view of the same allocation is additionally listed in `feedback`.
+    /// `None` is a host-provided / external texture.
     Texture {
         set: u32,
         binding: u32,
@@ -192,6 +226,8 @@ pub enum Binding {
         sample_type: TextureSampleType,
         view_dimension: TextureViewDimension,
         multisampled: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        backing: Option<BackingRef>,
     },
     /// Sampler (descriptor set binding). Bound from a
     /// `#[sampler(set, binding)]` entry-point param of type `sampler`.

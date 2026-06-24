@@ -2147,6 +2147,7 @@ pub fn run(
                         writes: vec![],
                     }],
                     default_total_threads: sizing.default_total_threads,
+                    feedback: Vec::new(),
                 }));
             }
         }
@@ -2195,6 +2196,7 @@ pub fn run(
                     bindings: Vec::new(),
                     vertex_inputs: vec![],
                     fragment_outputs: vec![],
+                    feedback: Vec::new(),
                 }));
             }
         }
@@ -2202,6 +2204,8 @@ pub fn run(
 
     program.defs.retain(|d| !removed_entries.contains(&d.name));
     program.defs.extend(new_defs);
+
+    attach_feedback_pairs(&mut pipelines, &program);
 
     // Push the module-wide id factory past every binding we consumed
     // so later passes start above them.
@@ -2280,6 +2284,7 @@ fn make_single_invocation_serial_compute_plan(
                 writes: vec![],
             }],
             default_total_threads: sizing.default_total_threads,
+            feedback: Vec::new(),
         }),
         extra_bindings_used: 0,
         extra_parallel_plans: Vec::new(),
@@ -2489,6 +2494,7 @@ fn try_make_multidomain_map_plan(
             bindings,
             stages,
             default_total_threads: sizing.default_total_threads,
+            feedback: Vec::new(),
         }),
         extra_bindings_used,
         extra_parallel_plans,
@@ -3292,6 +3298,7 @@ fn append_ordered_schedule(
         bindings,
         stages,
         default_total_threads,
+        feedback: Vec::new(),
     });
     tail.new_defs.extend(schedule.defs);
     tail.extra_parallel_plans.extend(schedule.plans);
@@ -3493,6 +3500,7 @@ fn make_map_plan(
             writes: vec![],
         }],
         default_total_threads: sizing.default_total_threads,
+        feedback: Vec::new(),
     });
     let parallel_plan = ParallelizationPlan {
         entry: entry_name.to_string(),
@@ -3584,6 +3592,7 @@ fn make_screma_plan(
                 writes: vec![],
             }],
             default_total_threads: sizing.default_total_threads,
+            feedback: Vec::new(),
         });
         return LoweringPlan {
             removed_entry: None,
@@ -3765,6 +3774,7 @@ fn build_screma_reduce_pipeline_descriptor(
         bindings: all_bindings,
         stages,
         default_total_threads: sizing.default_total_threads,
+        feedback: Vec::new(),
     })
 }
 
@@ -3832,6 +3842,7 @@ fn build_screma_scan_pipeline_descriptor(
             ),
         ],
         default_total_threads: sizing.default_total_threads,
+        feedback: Vec::new(),
     })
 }
 
@@ -4047,6 +4058,7 @@ fn build_two_phase_pipeline_descriptor(
             tree_phase2_stage(phase2_name, vec![partials_idx], vec![result_idx]),
         ],
         default_total_threads: sizing.default_total_threads,
+        feedback: Vec::new(),
     })
 }
 
@@ -4088,6 +4100,7 @@ fn make_scan_plan(
                 writes: vec![],
             }],
             default_total_threads: sizing.default_total_threads,
+            feedback: Vec::new(),
         });
         return LoweringPlan {
             removed_entry: None,
@@ -4276,6 +4289,7 @@ fn build_scan_pipeline_descriptor(
             ),
         ],
         default_total_threads: sizing.default_total_threads,
+        feedback: Vec::new(),
     })
 }
 
@@ -4469,6 +4483,7 @@ fn build_two_phase_entries(
             tree_phase2_stage(phase2_name.clone(), vec![partials_idx], phase2_output_indices),
         ],
         default_total_threads: sizing.default_total_threads,
+        feedback: Vec::new(),
     });
 
     (vec![phase1_def, phase2_def], pipeline)
@@ -5448,6 +5463,43 @@ fn input_storage_decls(soac: &SoacAnalysis) -> Vec<interface::StorageBindingDecl
         .collect()
 }
 
+/// Copy each source entry's declarative feedback pairs (from `history`/
+/// `previous` resource views) onto its pipeline, keyed by entry name.
+/// Synthesized split / phase entries carry none.
+fn attach_feedback_pairs(pipelines: &mut [Pipeline], program: &Program) {
+    let feedback_by_entry: LookupMap<String, Vec<crate::pipeline_descriptor::FeedbackPair>> = program
+        .defs
+        .iter()
+        .filter_map(|d| match &d.meta {
+            DefMeta::EntryPoint(decl) if !decl.feedback.is_empty() => Some((
+                decl.name.clone(),
+                decl.feedback
+                    .iter()
+                    .map(|f| crate::pipeline_descriptor::FeedbackPair {
+                        read_set: f.read.set,
+                        read_binding: f.read.binding,
+                        write_set: f.write.set,
+                        write_binding: f.write.binding,
+                    })
+                    .collect(),
+            )),
+            _ => None,
+        })
+        .collect();
+    if feedback_by_entry.is_empty() {
+        return;
+    }
+    for pipeline in pipelines.iter_mut() {
+        let (entry, slot) = match pipeline {
+            Pipeline::Compute(cp) => (cp.stages.first().map(|s| s.entry_point.clone()), &mut cp.feedback),
+            Pipeline::Graphics(gp) => (gp.stages.first().map(|s| s.entry_point.clone()), &mut gp.feedback),
+        };
+        if let Some(fb) = entry.and_then(|name| feedback_by_entry.get(&name)) {
+            *slot = fb.clone();
+        }
+    }
+}
+
 fn build_default_pipeline(program: &Program) -> PipelineDescriptor {
     let mut pipelines = Vec::new();
 
@@ -5470,6 +5522,7 @@ fn build_default_pipeline(program: &Program) -> PipelineDescriptor {
                         writes: vec![],
                     }],
                     default_total_threads: sizing.default_total_threads,
+                    feedback: Vec::new(),
                 }));
             } else {
                 let stage = if decl.entry_type == Attribute::Vertex {
@@ -5485,11 +5538,13 @@ fn build_default_pipeline(program: &Program) -> PipelineDescriptor {
                     bindings: Vec::new(),
                     vertex_inputs: vec![],
                     fragment_outputs: vec![],
+                    feedback: Vec::new(),
                 }));
             }
         }
     }
 
+    attach_feedback_pairs(&mut pipelines, program);
     PipelineDescriptor { pipelines }
 }
 

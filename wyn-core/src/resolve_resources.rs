@@ -20,12 +20,21 @@ use crate::{bail_type_at, BindingRef, LookupMap, LookupSet};
 /// compiler-reserved; user resources live on set 1+.
 const DEFAULT_RESOURCE_SET: u32 = 1;
 
-/// A resource's derived bindings.
+/// A resource's derived bindings — one distinct descriptor slot per *view
+/// kind*, since a storage-write view and a sampled view are different
+/// descriptor types and must not share a `(set, binding)`. All slots name
+/// views of the single backing texture allocation (`current_storage`).
 struct ResolvedResource {
     decl: ResourceDecl,
-    current: BindingRef,
-    /// The previous-frame binding, present iff `decl.history >= 1`.
-    previous: Option<BindingRef>,
+    /// Write/read storage-image view of the current frame. Present iff the
+    /// resource declares a `storage_write`/`storage_read` usage. This is the
+    /// allocation key the sampled views are `backing`ed by.
+    current_storage: Option<BindingRef>,
+    /// Sampled view of the current frame. Present iff `sampled` is declared.
+    current_sampled: Option<BindingRef>,
+    /// Sampled view of the previous frame, present iff `decl.history >= 1`
+    /// and `sampled` is declared.
+    previous_sampled: Option<BindingRef>,
 }
 
 pub fn run(program: &mut ast::Program) -> Result<()> {
@@ -68,19 +77,19 @@ fn derive_bindings(
         if let Some(b) = r.layout {
             used.insert((b.set, b.binding));
         }
-        if let Some(b) = r.previous_layout {
-            used.insert((b.set, b.binding));
-        }
     }
 
-    let auto_next = |used: &mut LookupSet<(u32, u32)>| -> BindingRef {
+    // Next free binding on a given set.
+    let auto_next = |used: &mut LookupSet<(u32, u32)>, set: u32| -> BindingRef {
         let mut b = 0u32;
-        while used.contains(&(DEFAULT_RESOURCE_SET, b)) {
+        while used.contains(&(set, b)) {
             b += 1;
         }
-        used.insert((DEFAULT_RESOURCE_SET, b));
-        BindingRef::new(DEFAULT_RESOURCE_SET, b)
+        used.insert((set, b));
+        BindingRef::new(set, b)
     };
+
+    let has = |r: &ResourceDecl, u: ResourceUsage| r.usages.contains(&u);
 
     let mut table: LookupMap<String, ResolvedResource> = LookupMap::new();
     let mut pinned: LookupMap<(u32, u32), String> = LookupMap::new();
@@ -88,33 +97,49 @@ fn derive_bindings(
         if table.contains_key(&r.name) {
             bail_type_at!(r.span, "duplicate resource '{}'", r.name);
         }
-        let current = r.layout.unwrap_or_else(|| auto_next(&mut used));
-        let previous = if r.history >= 1 {
-            Some(r.previous_layout.unwrap_or_else(|| auto_next(&mut used)))
+        let wants_storage = has(r, ResourceUsage::StorageWrite) || has(r, ResourceUsage::StorageRead);
+        let wants_sampled = has(r, ResourceUsage::Sampled);
+
+        // One distinct slot per view kind, assigned storage → sampled →
+        // previous so the pin (if any) lands on the storage allocation and
+        // the views stay grouped. A `layout =` pin applies to the primary
+        // slot (storage if present, else sampled).
+        let pin_set = r.layout.map(|b| b.set).unwrap_or(DEFAULT_RESOURCE_SET);
+        let next = |used: &mut LookupSet<(u32, u32)>| auto_next(used, pin_set);
+
+        let current_storage =
+            if wants_storage { Some(r.layout.unwrap_or_else(|| next(&mut used))) } else { None };
+        let current_sampled = if wants_sampled {
+            // If sampled is the primary (no storage) view, a pin lands here.
+            Some(match (current_storage, r.layout) {
+                (None, Some(pin)) => pin,
+                _ => next(&mut used),
+            })
         } else {
             None
         };
-        // Distinct resources must not pin the same slot.
-        for b in [Some(current), previous].into_iter().flatten() {
-            if r.layout == Some(b) || r.previous_layout == Some(b) {
-                if let Some(prev) = pinned.insert((b.set, b.binding), r.name.clone()) {
-                    bail_type_at!(
-                        r.span,
-                        "resources '{}' and '{}' both pin (set={}, binding={})",
-                        r.name,
-                        prev,
-                        b.set,
-                        b.binding
-                    );
-                }
+        let previous_sampled = (r.history >= 1 && wants_sampled).then(|| next(&mut used));
+
+        // Two distinct resources must not pin the same primary slot.
+        if let Some(pin) = r.layout {
+            if let Some(prev) = pinned.insert((pin.set, pin.binding), r.name.clone()) {
+                bail_type_at!(
+                    r.span,
+                    "resources '{}' and '{}' both pin (set={}, binding={})",
+                    r.name,
+                    prev,
+                    pin.set,
+                    pin.binding
+                );
             }
         }
         table.insert(
             r.name.clone(),
             ResolvedResource {
                 decl: r.clone(),
-                current,
-                previous,
+                current_storage,
+                current_sampled,
+                previous_sampled,
             },
         );
     }
@@ -150,24 +175,12 @@ fn rewrite_view_param(
         if !res.decl.usages.contains(usage) {
             bail_type_at!(span, "resource '{}' does not declare usage {:?}", resource, usage);
         }
-        // Pick the binding: previous frame (history resource) or current.
-        let binding = if *previous {
-            let prev = res.previous.ok_or_else(|| {
-                crate::err_type_at!(
-                    span,
-                    "view of '{}' uses `previous`, but the resource has no `history`",
-                    resource
-                )
-            })?;
-            feedback.push(FeedbackPair {
-                read: prev,
-                write: res.current,
-            });
-            prev
-        } else {
-            res.current
-        };
-        // Validate usage against the param's handle type, then desugar.
+        // Lower each view to its own descriptor slot: storage and sampled
+        // views are distinct descriptor types of the same backing texture,
+        // never the same `(set, binding)`. Sampled views carry `backing` —
+        // the storage allocation they view — so the runtime aliases one
+        // allocation across both; a `previous` view also records the
+        // ping-pong feedback pair.
         *attr = match usage {
             ResourceUsage::StorageWrite | ResourceUsage::StorageRead => {
                 if handle != Some(TypeName::StorageTexture) {
@@ -178,6 +191,7 @@ fn rewrite_view_param(
                         resource
                     );
                 }
+                let binding = res.current_storage.expect("storage usage implies a storage slot");
                 let access = if matches!(usage, ResourceUsage::StorageWrite) {
                     StorageAccess::WriteOnly
                 } else {
@@ -199,9 +213,25 @@ fn rewrite_view_param(
                         resource
                     );
                 }
+                let binding = if *previous {
+                    let prev = res.previous_sampled.ok_or_else(|| {
+                        crate::err_type_at!(
+                            span,
+                            "view of '{}' uses `previous`, but the resource has no `history`",
+                            resource
+                        )
+                    })?;
+                    if let Some(write) = res.current_storage {
+                        feedback.push(FeedbackPair { read: prev, write });
+                    }
+                    prev
+                } else {
+                    res.current_sampled.expect("sampled usage implies a sampled slot")
+                };
                 Attribute::Texture {
                     set: binding.set,
                     binding: binding.binding,
+                    backing: res.current_storage,
                 }
             }
         };
@@ -232,7 +262,7 @@ fn explicit_slot(attr: &Attribute) -> Option<(u32, u32)> {
     match attr {
         Attribute::Storage { set, binding, .. }
         | Attribute::Uniform { set, binding }
-        | Attribute::Texture { set, binding }
+        | Attribute::Texture { set, binding, .. }
         | Attribute::Sampler { set, binding }
         | Attribute::StorageImage { set, binding, .. } => Some((*set, *binding)),
         _ => None,

@@ -548,6 +548,10 @@ pub struct EntryInput {
     pub push_constant: Option<PushConstantSlot>,
     /// Programmer-attributed `#[texture(set, binding)]` on a `texture2d` param.
     pub texture_binding: Option<BindingRef>,
+    /// The storage-image binding this texture is a sampled view of, when it
+    /// aliases a compiler-managed `resource` allocation. `None` for host
+    /// textures. Flows to the descriptor's `Binding::Texture.backing`.
+    pub texture_backing: Option<BindingRef>,
     /// Programmer-attributed `#[sampler(set, binding)]` on a `sampler` param.
     pub sampler_binding: Option<BindingRef>,
     /// Programmer-attributed `#[storage_image(set, binding, format, access,

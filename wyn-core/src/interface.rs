@@ -43,10 +43,14 @@ pub enum Attribute {
         access: StorageAccess,
     },
     /// A 2D float texture resource bound at (set, binding). Carried on an
-    /// entry-point param of type `texture2d`.
+    /// entry-point param of type `texture2d`. `backing`, when present, names
+    /// the storage-image binding whose allocation this is a sampled view of
+    /// (a `resource`'s `sampled` view aliases its `storage_write` allocation).
+    /// `None` means a host-provided / external texture.
     Texture {
         set: u32,
         binding: u32,
+        backing: Option<crate::BindingRef>,
     },
     /// A sampler resource bound at (set, binding). Carried on an
     /// entry-point param of type `sampler`.
@@ -336,11 +340,10 @@ pub struct ResourceDecl {
     /// binding, or `None` to let the compiler assign the slot.
     pub layout: Option<crate::BindingRef>,
     /// Number of previous frames kept (double-buffering). `0` = no history;
-    /// `1` = a `previous` view reads last frame (v1 supports 0 or 1).
+    /// `1` = a `previous` view reads last frame (v1 supports 0 or 1). The
+    /// previous-frame binding is always compiler-assigned; the descriptor's
+    /// feedback pair, not a fixed slot number, is what the runtime consumes.
     pub history: u32,
-    /// Explicit pin for the `previous`-frame binding (only meaningful when
-    /// `history >= 1`), or `None` to auto-assign.
-    pub previous_layout: Option<crate::BindingRef>,
     pub span: crate::ast::Span,
 }
 

@@ -209,13 +209,31 @@ pub fn extract_texture_binding(pattern: &Pattern) -> Option<BindingRef> {
     match &pattern.kind {
         PatternKind::Attributed(attrs, inner) => {
             for attr in attrs {
-                if let Attribute::Texture { set, binding } = attr {
+                if let Attribute::Texture { set, binding, .. } = attr {
                     return Some(BindingRef::new(*set, *binding));
                 }
             }
             extract_texture_binding(inner)
         }
         PatternKind::Typed(inner, _) => extract_texture_binding(inner),
+        _ => None,
+    }
+}
+
+/// Extract the backing storage-image binding of a texture param, if the
+/// texture is a sampled view of a compiler-managed storage allocation
+/// (a `resource`'s `sampled` view). `None` for host/external textures.
+pub fn extract_texture_backing(pattern: &Pattern) -> Option<BindingRef> {
+    match &pattern.kind {
+        PatternKind::Attributed(attrs, inner) => {
+            for attr in attrs {
+                if let Attribute::Texture { backing, .. } = attr {
+                    return *backing;
+                }
+            }
+            extract_texture_backing(inner)
+        }
+        PatternKind::Typed(inner, _) => extract_texture_backing(inner),
         _ => None,
     }
 }

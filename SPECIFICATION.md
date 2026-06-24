@@ -2422,18 +2422,19 @@ A `resource` names one backing image. Its fields:
 - `size` — `WxH` (e.g. `1024x1024`) or `window` (tracks the swapchain).
 - `usages` — the access kinds it may be viewed by: `storage_write`,
   `storage_read`, `sampled`.
-- `layout = binding(set, binding)` — optional pin for the current-frame binding;
-  omitted, the compiler assigns a free slot on a user set.
-- `history = 1` and `previous = binding(set, binding)` — see *Temporal feedback*.
+- `layout = binding(set, binding)` — optional pin for the resource's primary
+  (storage) binding; omitted, the compiler assigns a free slot on a user set.
+- `history = 1` — see *Temporal feedback*.
 
 A `#[view(resource, usage)]` param references a resource. The compiler validates
 that `usage` is in the resource's `usages` and matches the param's handle type
 (`storage_write`/`storage_read` ⇒ `storage_image`, `sampled` ⇒ `texture2d`),
-then lowers the view to the resource's derived `(set, binding)` with its
-`format`/`size`. Two views of one resource at the same slot — written then
-sampled — are the standard handoff: the host binds one image and the compiler
-emits a separate descriptor binding per entry, so each pipeline's descriptor set
-sees the resource through its own view.
+then lowers the view to a descriptor binding with the resource's `format`/`size`.
+Each *view kind* gets its **own** `(set, binding)` — a storage-write view and a
+sampled view are different descriptor types and never share a slot. The compiler
+assigns one binding per view kind (storage, sampled, previous-sampled) and the
+host binds all of them to one backing image allocation, so each pipeline samples
+or writes the same image through its own descriptor.
 
 Because a resource is typed once, its views cannot disagree on the backing
 format — the cross-entry element-type conflict that raw `#[storage(...)]`
@@ -2449,19 +2450,20 @@ the on-GPU pixel format.
 - `image_store(img: storage_image, coord: vec2i32, value: vec4f32) -> ()`
 - `image_load(img: storage_image, coord: vec2i32) -> vec4f32`
 
-The same physical image may be declared `storage_image` (write) in one pipeline
-and `texture2d` (sample) in another at the same `(set, binding)` — the runtime
-allocates one image and binds it through both descriptor types. The `resource`
-form above is the recommended way to express that aliasing.
+The same physical image may be written as a `storage_image` in one pipeline and
+sampled as a `texture2d` in another. Each is a distinct descriptor binding of
+its own type; the runtime allocates one image and binds it through both. The
+`resource` form above is the recommended way to express that aliasing — a raw
+`#[storage_image]`/`#[texture]` pair that reuses one `(set, binding)` for both
+types is invalid.
 
 ### Temporal feedback
 
 A `history = 1` resource is **double-buffered**: a `#[view(r, sampled,
 previous)]` reads the *previous frame's* contents while a `storage_write` view
-writes the current frame. The compiler assigns the previous-frame binding (pin
-it with `previous = binding(set, binding)`, or let it auto-assign) and records a
-feedback pair in the pipeline descriptor, so the runtime ping-pongs two textures
-and swaps them each frame.
+writes the current frame. The compiler auto-assigns the previous-frame sampled
+binding and records a feedback pair in the pipeline descriptor, so the runtime
+ping-pongs two textures and swaps them each frame.
 
 ```
 resource buffer_a: image2d {
@@ -2469,8 +2471,7 @@ resource buffer_a: image2d {
   size     = window
   usages   = [storage_write, sampled]
   history  = 1
-  layout   = binding(0, 0)    -- current frame
-  previous = binding(0, 10)   -- previous frame
+  -- bindings (current-storage, current-sampled, previous-sampled) auto-assign
 }
 
 #[compute]

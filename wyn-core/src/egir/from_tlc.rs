@@ -18,7 +18,8 @@ use super::types::EffectToken;
 use crate::ast::{Span, TypeName};
 use crate::binding_layout::{
     extract_io_decoration, extract_sampler_binding, extract_storage_access, extract_storage_binding,
-    extract_storage_image_binding, extract_texture_binding, extract_uniform_binding,
+    extract_storage_image_binding, extract_texture_backing, extract_texture_binding,
+    extract_uniform_binding,
 };
 use crate::interface;
 use crate::interface::{EntryParamBinding, EntryParamBindingKind};
@@ -425,6 +426,7 @@ fn convert_entry_point(
         let attr_storage_binding = entry.params.get(i).and_then(extract_storage_binding);
         let storage_access = entry.params.get(i).and_then(extract_storage_access);
         let texture_binding = entry.params.get(i).and_then(extract_texture_binding);
+        let texture_backing = entry.params.get(i).and_then(extract_texture_backing);
         let sampler_binding = entry.params.get(i).and_then(extract_sampler_binding);
         let storage_image_binding = entry.params.get(i).and_then(extract_storage_image_binding);
 
@@ -474,6 +476,7 @@ fn convert_entry_point(
                     uniform_binding: None,
                     push_constant: None,
                     texture_binding: None,
+                    texture_backing: None,
                     sampler_binding: None,
                     storage_image_binding: None,
                     length: None,
@@ -527,6 +530,7 @@ fn convert_entry_point(
             uniform_binding,
             push_constant,
             texture_binding,
+            texture_backing,
             sampler_binding,
             storage_image_binding,
             length: None,

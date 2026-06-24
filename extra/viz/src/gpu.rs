@@ -1259,6 +1259,12 @@ pub fn build_resource_bind_group_for_set(
 ) -> Result<(wgpu::BindGroupLayout, BindGroup)> {
     let mut layout_entries: Vec<BindGroupLayoutEntry> = Vec::new();
     let mut group_entries: Vec<BindGroupEntry> = Vec::new();
+    let pad_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("bgl_pad"),
+        size: 16,
+        usage: wgpu::BufferUsages::UNIFORM,
+        mapped_at_creation: false,
+    });
 
     for b in bindings {
         match b {
@@ -1298,18 +1304,48 @@ pub fn build_resource_bind_group_for_set(
                 view_dimension,
                 multisampled,
                 sample_type,
+                backing,
                 ..
             } if *bset == set => {
                 let key = (*bset, *binding);
-                // Resolve the sampled view: storage_texture pool first
-                // (cross-stage compute-write / fragment-sample handoff),
-                // then host-uploaded pool (keyboard, etc.).
-                //
-                // If this binding is the READ side of a feedback pair,
-                // its view comes from the WRITE side's storage texture
-                // at the OPPOSITE parity ("previous frame's value");
-                // otherwise we use the current-parity sampled view.
-                let view = if let Some(&(ws, wb)) = feedback_reads.get(&key) {
+                // A sampled view's frame parity: a `previous` view (the read
+                // side of a feedback pair) samples the OPPOSITE parity (last
+                // frame); every other sampled view samples the current parity.
+                let is_previous = feedback_reads.contains_key(&key);
+                // Resolve the sampled view, in order:
+                //   1. `backing` set — a compiler-managed `resource` sampled
+                //      view: sample the named storage allocation (current or,
+                //      for `previous`, opposite parity).
+                //   2. legacy `--feedback` read with no `backing`: sample the
+                //      write side's storage texture at the opposite parity.
+                //   3. otherwise — a legacy shared-binding handoff or a
+                //      host-uploaded texture (keyboard, etc.).
+                let view = if let Some(b) = backing {
+                    let sk = (b.set, b.binding);
+                    let res = storage_textures.get(&sk).ok_or_else(|| {
+                        anyhow!(
+                            "Texture ({}, {}) backs storage ({}, {}) but no storage \
+                             texture is allocated there",
+                            bset,
+                            binding,
+                            b.set,
+                            b.binding
+                        )
+                    })?;
+                    let n = res.sampled_views.len();
+                    if is_previous && n < 2 {
+                        return Err(anyhow!(
+                            "previous-frame view ({}, {}) backs non-ping-pong \
+                             storage ({}, {}); the write side must be allocated \
+                             with 2 slots",
+                            bset,
+                            binding,
+                            b.set,
+                            b.binding
+                        ));
+                    }
+                    &res.sampled_views[(parity + is_previous as usize) % n]
+                } else if let Some(&(ws, wb)) = feedback_reads.get(&key) {
                     let res = storage_textures.get(&(ws, wb)).ok_or_else(|| {
                         anyhow!(
                             "Feedback read at ({}, {}) targets ({}, {}) but no \
@@ -1516,6 +1552,39 @@ pub fn build_resource_bind_group_for_set(
                 });
             }
             _ => {}
+        }
+    }
+
+    // wgpu's Vulkan HAL packs descriptor bindings densely by sorted order. With
+    // SPIR-V passthrough the shader keeps its authored binding numbers, so a
+    // sparse set (a used binding with an unused lower index) shifts and the
+    // shader's binding goes missing. Pad every hole up to the max with an
+    // unused dummy uniform so the set is contiguous and the packing is the
+    // identity.
+    if let Some(max_binding) = layout_entries.iter().map(|e| e.binding).max() {
+        let present: std::collections::HashSet<u32> = layout_entries.iter().map(|e| e.binding).collect();
+        for i in 0..max_binding {
+            if present.contains(&i) {
+                continue;
+            }
+            layout_entries.push(BindGroupLayoutEntry {
+                binding: i,
+                visibility,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            });
+            group_entries.push(BindGroupEntry {
+                binding: i,
+                resource: BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &pad_buffer,
+                    offset: 0,
+                    size: None,
+                }),
+            });
         }
     }
 
