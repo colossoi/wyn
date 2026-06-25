@@ -95,6 +95,7 @@ pub fn run(mut program: Program) -> Program {
     // Inlined-then-dead producer helpers are removed by the later reachability
     // DCE (`inline::run_reachable`); we deliberately don't DCE here, so a lone
     // producer def with no entry caller (as in unit-test fragments) survives.
+    super::anf::debug_check(&program, "materialize_entry_soacs");
     program
 }
 
@@ -276,7 +277,9 @@ fn expose_array_expr(
     depth: usize,
 ) -> ArrayExpr {
     match ae {
-        ArrayExpr::Ref(t) => ArrayExpr::Ref(Box::new(expose(*t, producers, sym_to_def, ids, depth))),
+        // A named input — the producer call it might name lives in a `let` rhs
+        // (a Term position `expose` handles), so there is nothing to do here.
+        ArrayExpr::Var(vr, ty) => ArrayExpr::Var(vr, ty),
         ArrayExpr::Zip(children) => ArrayExpr::Zip(
             children.into_iter().map(|c| expose_array_expr(c, producers, sym_to_def, ids, depth)).collect(),
         ),
@@ -294,9 +297,6 @@ fn expose_array_expr(
             len: Box::new(expose(*sv.len, producers, sym_to_def, ids, depth)),
             elem_ty: sv.elem_ty,
         }),
-        // Do not enter nested SOAC operators here; the pass's safety contract is
-        // about exposing entry-tail producers, not changing per-element work.
-        ArrayExpr::Soac(op) => ArrayExpr::Soac(op),
     }
 }
 

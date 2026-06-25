@@ -762,18 +762,18 @@ impl SoaTransformer {
 
     fn transform_array_expr(&mut self, ae: &ArrayExpr) -> ArrayExpr {
         match ae {
-            ArrayExpr::Ref(term) => {
-                let new_term = self.transform_term(term);
-                ArrayExpr::Ref(Box::new(new_term))
+            ArrayExpr::Var(vr, ty) => {
+                let t = crate::tlc::atom_var_term(*vr, ty.clone(), &mut self.term_ids);
+                let new = self.transform_term(&t);
+                match new.kind {
+                    TermKind::Var(new_vr) => ArrayExpr::Var(new_vr, new.ty),
+                    _ => unreachable!("SoA transform of a named input yields a named input"),
+                }
             }
             ArrayExpr::Zip(exprs) => {
                 let new_exprs: Vec<ArrayExpr> =
                     exprs.iter().map(|e| self.transform_array_expr(e)).collect();
                 ArrayExpr::Zip(new_exprs)
-            }
-            ArrayExpr::Soac(op) => {
-                let new_op = self.transform_soac(op);
-                ArrayExpr::Soac(Box::new(new_op))
             }
             ArrayExpr::Literal(terms) => {
                 let new_terms: Vec<Term> = terms.iter().map(|t| self.transform_term(t)).collect();
@@ -813,7 +813,10 @@ impl SoaTransformer {
                 let components: Vec<Term> = exprs
                     .iter()
                     .map(|inner_ae| match inner_ae {
-                        ArrayExpr::Ref(t) => self.transform_term(t),
+                        ArrayExpr::Var(vr, ty) => {
+                            let t = crate::tlc::atom_var_term(*vr, ty.clone(), &mut self.term_ids);
+                            self.transform_term(&t)
+                        }
                         _ => {
                             let new_inner = self.transform_array_expr(inner_ae);
                             self.mk_term(new_ty.clone(), span, TermKind::ArrayExpr(new_inner))

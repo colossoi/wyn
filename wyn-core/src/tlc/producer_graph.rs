@@ -304,9 +304,11 @@ fn subst_in_semantics(
 ) -> ArraySemantics {
     use super::ArrayExpr;
 
-    fn sub_ae(ae: ArrayExpr, old: SymbolId, new: SymbolId, ids: &mut TermIdSource) -> ArrayExpr {
+    fn sub_ae(ae: ArrayExpr, old: SymbolId, new: SymbolId) -> ArrayExpr {
         match ae {
-            ArrayExpr::Ref(t) => ArrayExpr::Ref(Box::new(substitute_sym(*t, old, new, ids))),
+            ArrayExpr::Var(super::VarRef::Symbol(s), ty) if s == old => {
+                ArrayExpr::Var(super::VarRef::Symbol(new), ty)
+            }
             other => other,
         }
     }
@@ -328,7 +330,7 @@ fn subst_in_semantics(
 
     match sem {
         ArraySemantics::Elementwise { inputs, body } => ArraySemantics::Elementwise {
-            inputs: inputs.into_iter().map(|ae| sub_ae(ae, old, new, term_ids)).collect(),
+            inputs: inputs.into_iter().map(|ae| sub_ae(ae, old, new)).collect(),
             body: sub_sb(body, old, new, term_ids),
         },
         ArraySemantics::Reduction {
@@ -337,18 +339,18 @@ fn subst_in_semantics(
             reduce_op,
             init,
         } => ArraySemantics::Reduction {
-            input: sub_ae(input, old, new, term_ids),
+            input: sub_ae(input, old, new),
             op: sub_sb(op, old, new, term_ids),
             reduce_op: sub_sb(reduce_op, old, new, term_ids),
             init,
         },
         ArraySemantics::PrefixScan { input, op, init } => ArraySemantics::PrefixScan {
-            input: sub_ae(input, old, new, term_ids),
+            input: sub_ae(input, old, new),
             op: sub_sb(op, old, new, term_ids),
             init,
         },
         ArraySemantics::Filter { input, pred } => ArraySemantics::Filter {
-            input: sub_ae(input, old, new, term_ids),
+            input: sub_ae(input, old, new),
             pred: sub_sb(pred, old, new, term_ids),
         },
         other => other,

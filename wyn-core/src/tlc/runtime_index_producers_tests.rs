@@ -7,6 +7,16 @@ use crate::tlc::{
 use crate::Compiler;
 use polytype::Type;
 
+fn input_ae(boxed: Box<crate::tlc::Term>) -> crate::tlc::ArrayExpr {
+    use crate::tlc::{ArrayExpr, TermKind};
+    let t = *boxed;
+    match t.kind {
+        TermKind::Var(vr) => ArrayExpr::Var(vr, t.ty),
+        TermKind::ArrayExpr(ae) => ae,
+        other => panic!("test SOAC input must be a variable or array expr, got {other:?}"),
+    }
+}
+
 fn span() -> Span {
     Span::dummy()
 }
@@ -188,7 +198,7 @@ fn runtime_index_inside_fused_scatter_envelope_becomes_let_bound_gather_shape() 
                 },
                 captures: vec![],
             },
-            inputs: vec![ArrayExpr::Ref(Box::new(range_expr(
+            inputs: vec![input_ae(Box::new(range_expr(
                 8,
                 static_array_ty(i32_ty(), 8),
                 &mut ids,
@@ -241,8 +251,8 @@ fn runtime_index_inside_fused_scatter_envelope_becomes_let_bound_gather_shape() 
                 captures: vec![],
             },
             inputs: vec![
-                ArrayExpr::Ref(Box::new(range_expr(4, static_array_ty(i32_ty(), 4), &mut ids))),
-                ArrayExpr::Ref(Box::new(range_expr(4, static_array_ty(f32_ty(), 4), &mut ids))),
+                input_ae(Box::new(range_expr(4, static_array_ty(i32_ty(), 4), &mut ids))),
+                input_ae(Box::new(range_expr(4, static_array_ty(f32_ty(), 4), &mut ids))),
             ],
         }),
         runtime_array_ty(f32_ty()),

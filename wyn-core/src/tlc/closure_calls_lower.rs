@@ -519,11 +519,11 @@ impl<'a> CallLowerer<'a> {
 
     fn lower_array_expr(&mut self, ae: ArrayExpr) -> ArrayExpr {
         match ae {
-            ArrayExpr::Ref(t) => ArrayExpr::Ref(Box::new(self.lower_term(*t))),
+            // A named input has no closure call to lower.
+            ArrayExpr::Var(vr, ty) => ArrayExpr::Var(vr, ty),
             ArrayExpr::Zip(exprs) => {
                 ArrayExpr::Zip(exprs.into_iter().map(|e| self.lower_array_expr(e)).collect())
             }
-            ArrayExpr::Soac(op) => ArrayExpr::Soac(Box::new(self.lower_soac(*op))),
             ArrayExpr::Literal(terms) => {
                 ArrayExpr::Literal(terms.into_iter().map(|t| self.lower_term(t)).collect())
             }

@@ -57,12 +57,21 @@ fn array_ty(elem: Type<TypeName>) -> Type<TypeName> {
     )
 }
 
+/// Wrap a variable `Term` as an ANF SOAC input atom.
+fn input_ae(input: Box<Term>) -> ArrayExpr {
+    let t = *input;
+    match t.kind {
+        TermKind::Var(vr) => ArrayExpr::Var(vr, t.ty),
+        other => panic!("test SOAC input must be a variable, got {other:?}"),
+    }
+}
+
 /// Build a simple map: `map(lam, [input])`
 fn mk_map(lam: Lambda, input: Term, result_ty: Type<TypeName>, term_ids: &mut TermIdSource) -> Term {
     mk_term(
         TermKind::Soac(SoacOp::Map {
             lam: mk_soac_body(lam),
-            inputs: vec![ArrayExpr::Ref(Box::new(input))],
+            inputs: vec![input_ae(Box::new(input))],
             destination: SoacDestination::Fresh,
         }),
         result_ty,
@@ -115,7 +124,7 @@ fn mk_reduce(
         TermKind::Soac(SoacOp::Reduce {
             op: mk_soac_body(op),
             ne: Box::new(ne),
-            input: ArrayExpr::Ref(Box::new(input)),
+            input: input_ae(Box::new(input)),
         }),
         result_ty,
         term_ids,
@@ -135,7 +144,7 @@ fn mk_scan(
             // A freshly-built scan is non-fused: pure combiner == element step.
             reduce_op: mk_soac_body(op),
             ne: Box::new(ne),
-            input: ArrayExpr::Ref(Box::new(input)),
+            input: input_ae(Box::new(input)),
             destination: SoacDestination::Fresh,
         }),
         result_ty,
@@ -147,7 +156,7 @@ fn mk_filter(pred: Lambda, input: Term, result_ty: Type<TypeName>, term_ids: &mu
     mk_term(
         TermKind::Soac(SoacOp::Filter {
             pred: mk_soac_body(pred),
-            input: ArrayExpr::Ref(Box::new(input)),
+            input: input_ae(Box::new(input)),
             destination: SoacDestination::Fresh,
         }),
         result_ty,
@@ -364,11 +373,8 @@ fn test_simple_map_fusion() {
             // Input should be 'a' (the original array)
             assert_eq!(inputs.len(), 1);
             match &inputs[0] {
-                ArrayExpr::Ref(t) => match &t.kind {
-                    TermKind::Var(VarRef::Symbol(s)) => assert_eq!(*s, a_sym),
-                    other => panic!("Expected Var(a), got {:?}", other),
-                },
-                other => panic!("Expected Ref, got {:?}", other),
+                ArrayExpr::Var(VarRef::Symbol(s), _) => assert_eq!(*s, a_sym),
+                other => panic!("Expected Var(a), got {:?}", other),
             }
 
             // Lambda should have f's param (x)
@@ -495,7 +501,7 @@ fn test_horizontal_sibling_maps_merge_to_multi_output_screma() {
             assert_eq!(inputs.len(), 1);
             assert!(matches!(
                 &inputs[0],
-                ArrayExpr::Ref(t) if matches!(&t.kind, TermKind::Var(VarRef::Symbol(sym)) if *sym == xs_sym)
+                ArrayExpr::Var(VarRef::Symbol(sym), _) if *sym == xs_sym
             ));
             assert!(accumulators.is_empty());
             assert_eq!(map_lams.len(), 2);
@@ -678,8 +684,8 @@ fn test_horizontal_sibling_maps_merge_same_input_vector() {
         TermKind::Soac(SoacOp::Map {
             lam: mk_soac_body(f),
             inputs: vec![
-                ArrayExpr::Ref(Box::new(mk_input(xs_sym, &mut term_ids))),
-                ArrayExpr::Ref(Box::new(mk_input(ys_sym, &mut term_ids))),
+                input_ae(Box::new(mk_input(xs_sym, &mut term_ids))),
+                input_ae(Box::new(mk_input(ys_sym, &mut term_ids))),
             ],
             destination: SoacDestination::Fresh,
         }),
@@ -690,8 +696,8 @@ fn test_horizontal_sibling_maps_merge_same_input_vector() {
         TermKind::Soac(SoacOp::Map {
             lam: mk_soac_body(g),
             inputs: vec![
-                ArrayExpr::Ref(Box::new(mk_input(xs_sym, &mut term_ids))),
-                ArrayExpr::Ref(Box::new(mk_input(ys_sym, &mut term_ids))),
+                input_ae(Box::new(mk_input(xs_sym, &mut term_ids))),
+                input_ae(Box::new(mk_input(ys_sym, &mut term_ids))),
             ],
             destination: SoacDestination::Fresh,
         }),
@@ -905,7 +911,7 @@ fn test_horizontal_sibling_maps_enable_shared_producer_vertical_fusion() {
             assert_eq!(inputs.len(), 1);
             assert!(matches!(
                 &inputs[0],
-                ArrayExpr::Ref(t) if matches!(&t.kind, TermKind::Var(VarRef::Symbol(sym)) if *sym == xs_sym)
+                ArrayExpr::Var(VarRef::Symbol(sym), _) if *sym == xs_sym
             ));
             assert!(accumulators.is_empty());
             assert_eq!(map_lams.len(), 2);
@@ -1050,7 +1056,7 @@ fn test_screma_fuses_shared_map_producer_into_map_and_reduce() {
             assert_eq!(inputs.len(), 1);
             assert!(matches!(
                 &inputs[0],
-                ArrayExpr::Ref(t) if matches!(&t.kind, TermKind::Var(VarRef::Symbol(sym)) if *sym == xs_sym)
+                ArrayExpr::Var(VarRef::Symbol(sym), _) if *sym == xs_sym
             ));
             assert_eq!(map_lams.len(), 1);
             assert_eq!(accumulators.len(), 1);
@@ -2024,8 +2030,8 @@ fn test_filter_into_reduce_fuses_to_masked_screma() {
             assert_eq!(accumulators.len(), 1);
             assert_eq!(inputs.len(), 1);
             match &inputs[0] {
-                ArrayExpr::Ref(t) => {
-                    assert!(matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == xs_sym))
+                ArrayExpr::Var(vr, _) => {
+                    assert!(matches!(vr, VarRef::Symbol(s) if *s == xs_sym))
                 }
                 other => panic!("expected Ref(Var(xs)), got {other:?}"),
             }
@@ -2671,8 +2677,8 @@ fn test_chain_of_three_maps() {
         TermKind::Soac(SoacOp::Map { inputs, lam, .. }) => {
             assert_eq!(inputs.len(), 1);
             match &inputs[0] {
-                ArrayExpr::Ref(t) => {
-                    assert!(matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == a_sym))
+                ArrayExpr::Var(vr, _) => {
+                    assert!(matches!(vr, VarRef::Symbol(s) if *s == a_sym))
                 }
                 other => panic!("Expected Ref(a), got {:?}", other),
             }
@@ -2812,7 +2818,7 @@ fn test_zip_fused_producer() {
     let producer = mk_term(
         TermKind::Soac(SoacOp::Map {
             lam: mk_soac_body(f),
-            inputs: vec![ArrayExpr::Ref(Box::new(a)), ArrayExpr::Ref(Box::new(b))],
+            inputs: vec![input_ae(Box::new(a)), input_ae(Box::new(b))],
             destination: SoacDestination::Fresh,
         }),
         array_ty(i32_ty()),
@@ -2928,7 +2934,7 @@ fn test_consumer_multi_input_no_fusion() {
     let consumer = mk_term(
         TermKind::Soac(SoacOp::Map {
             lam: mk_soac_body(g),
-            inputs: vec![ArrayExpr::Ref(Box::new(b_ref)), ArrayExpr::Ref(Box::new(other))],
+            inputs: vec![input_ae(Box::new(b_ref)), input_ae(Box::new(other))],
             destination: SoacDestination::Fresh,
         }),
         array_ty(i32_ty()),
@@ -2962,461 +2968,6 @@ fn test_consumer_multi_input_no_fusion() {
 
     // Should NOT fuse — consumer has multiple inputs
     assert!(matches!(&result.defs[0].body.kind, TermKind::Let { .. }));
-}
-
-// -------------------------------------------------------------------------
-// Test: inline map(f, map(g, a)) — no Let binding
-// -------------------------------------------------------------------------
-#[test]
-fn test_inline_map_fusion() {
-    let mut symbols = SymbolTable::default();
-    let mut term_ids = TermIdSource::new();
-
-    let a_sym = symbols.alloc("a".to_string());
-    let x_sym = symbols.alloc("x".to_string());
-    let y_sym = symbols.alloc("y".to_string());
-
-    // Inner: map(g, a) where g(x) = x
-    let g = mk_lambda1(
-        x_sym,
-        i32_ty(),
-        mk_term(TermKind::Var(VarRef::Symbol(x_sym)), i32_ty(), &mut term_ids),
-        i32_ty(),
-    );
-    let a = mk_term(
-        TermKind::Var(VarRef::Symbol(a_sym)),
-        array_ty(i32_ty()),
-        &mut term_ids,
-    );
-    let inner_map = mk_map(g, a, array_ty(i32_ty()), &mut term_ids);
-
-    // Outer: map(f, inner_map) where f(y) = y — inner_map is inline (Ref)
-    let f = mk_lambda1(
-        y_sym,
-        i32_ty(),
-        mk_term(TermKind::Var(VarRef::Symbol(y_sym)), i32_ty(), &mut term_ids),
-        i32_ty(),
-    );
-    let outer = mk_term(
-        TermKind::Soac(SoacOp::Map {
-            lam: mk_soac_body(f),
-            inputs: vec![ArrayExpr::Ref(Box::new(inner_map))],
-            destination: SoacDestination::Fresh,
-        }),
-        array_ty(i32_ty()),
-        &mut term_ids,
-    );
-
-    let program = Program {
-        defs: vec![Def {
-            name: symbols.alloc("main".to_string()),
-            ty: array_ty(i32_ty()),
-            body: outer,
-            meta: DefMeta::Function,
-            arity: 0,
-        }],
-        symbols,
-        def_syms: HashMap::new(),
-    };
-
-    let fused = run(program);
-
-    // Should be a single Map with a's input, param x (inner g's param)
-    match &fused.defs[0].body.kind {
-        TermKind::Soac(SoacOp::Map { lam, inputs, .. }) => {
-            assert_eq!(inputs.len(), 1);
-            match &inputs[0] {
-                ArrayExpr::Ref(t) => {
-                    assert!(matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == a_sym))
-                }
-                other => panic!("Expected Ref(a), got {:?}", other),
-            }
-            // Lambda should have g's param (x), not f's param (y)
-            assert_eq!(lam.lam.params.len(), 1);
-            assert_eq!(lam.lam.params[0].0, x_sym);
-        }
-        other => panic!("Expected fused Map, got {:?}", other),
-    }
-}
-
-// -------------------------------------------------------------------------
-// Test: scan(op, ne, map(g, a)) fuses g into the per-element step but keeps
-// the original pure combiner as `reduce_op` (needed by the parallel scan's
-// phase 2, which merges already-transformed block sums). Regression guard
-// for the fused-scan `OpFunctionCall` type mismatch.
-// -------------------------------------------------------------------------
-#[test]
-fn test_map_into_scan_keeps_pure_reduce_op() {
-    let mut symbols = SymbolTable::default();
-    let mut term_ids = TermIdSource::new();
-
-    let a_sym = symbols.alloc("a".to_string());
-    let x_sym = symbols.alloc("x".to_string());
-    let acc_sym = symbols.alloc("acc".to_string());
-    let b_sym = symbols.alloc("b".to_string());
-
-    // Inner: map(g, a) where g(x) = x
-    let g = mk_lambda1(
-        x_sym,
-        i32_ty(),
-        mk_term(TermKind::Var(VarRef::Symbol(x_sym)), i32_ty(), &mut term_ids),
-        i32_ty(),
-    );
-    let a = mk_term(
-        TermKind::Var(VarRef::Symbol(a_sym)),
-        array_ty(i32_ty()),
-        &mut term_ids,
-    );
-    let inner_map = mk_map(g, a, array_ty(i32_ty()), &mut term_ids);
-
-    // Outer: scan(plus, 0, inner_map) where plus(acc, b) = acc
-    let plus = mk_lambda2(
-        acc_sym,
-        i32_ty(),
-        b_sym,
-        i32_ty(),
-        mk_term(TermKind::Var(VarRef::Symbol(acc_sym)), i32_ty(), &mut term_ids),
-        i32_ty(),
-    );
-    let ne = mk_term(TermKind::IntLit("0".to_string()), i32_ty(), &mut term_ids);
-    let outer = mk_scan(plus, ne, inner_map, array_ty(i32_ty()), &mut term_ids);
-
-    let program = Program {
-        defs: vec![Def {
-            name: symbols.alloc("main".to_string()),
-            ty: array_ty(i32_ty()),
-            body: outer,
-            meta: DefMeta::Function,
-            arity: 0,
-        }],
-        symbols,
-        def_syms: HashMap::new(),
-    };
-
-    let fused = run(program);
-
-    match &fused.defs[0].body.kind {
-        TermKind::Soac(SoacOp::Scan {
-            op, reduce_op, input, ..
-        }) => {
-            // The map fused away — the scan now reads `a` directly.
-            match input {
-                ArrayExpr::Ref(t) => {
-                    assert!(matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == a_sym))
-                }
-                other => panic!("Expected Ref(a), got {:?}", other),
-            }
-            // The pure combiner (phase 2) is preserved verbatim — still
-            // `plus`'s params — rather than being lost to the fused step.
-            assert_eq!(reduce_op.lam.params.len(), 2);
-            assert_eq!(reduce_op.lam.params[0].0, acc_sym);
-            assert_eq!(reduce_op.lam.params[1].0, b_sym);
-            // The element step exists independently (it folds `g` in).
-            assert_eq!(op.lam.params.len(), 2);
-        }
-        other => panic!("Expected fused Scan, got {:?}", other),
-    }
-}
-
-// -------------------------------------------------------------------------
-// Test: inline chain map(f, map(g, map(h, a))) — no Let bindings
-// -------------------------------------------------------------------------
-#[test]
-fn test_inline_chain_of_three() {
-    let mut symbols = SymbolTable::default();
-    let mut term_ids = TermIdSource::new();
-
-    let a_sym = symbols.alloc("a".to_string());
-    let x_sym = symbols.alloc("x".to_string());
-    let y_sym = symbols.alloc("y".to_string());
-    let z_sym = symbols.alloc("z".to_string());
-
-    // h(x) = x
-    let h = mk_lambda1(
-        x_sym,
-        i32_ty(),
-        mk_term(TermKind::Var(VarRef::Symbol(x_sym)), i32_ty(), &mut term_ids),
-        i32_ty(),
-    );
-    let a = mk_term(
-        TermKind::Var(VarRef::Symbol(a_sym)),
-        array_ty(i32_ty()),
-        &mut term_ids,
-    );
-    let inner = mk_map(h, a, array_ty(i32_ty()), &mut term_ids);
-
-    // g(y) = y
-    let g = mk_lambda1(
-        y_sym,
-        i32_ty(),
-        mk_term(TermKind::Var(VarRef::Symbol(y_sym)), i32_ty(), &mut term_ids),
-        i32_ty(),
-    );
-    let middle = mk_term(
-        TermKind::Soac(SoacOp::Map {
-            lam: mk_soac_body(g),
-            inputs: vec![ArrayExpr::Ref(Box::new(inner))],
-            destination: SoacDestination::Fresh,
-        }),
-        array_ty(i32_ty()),
-        &mut term_ids,
-    );
-
-    // f(z) = z
-    let f = mk_lambda1(
-        z_sym,
-        i32_ty(),
-        mk_term(TermKind::Var(VarRef::Symbol(z_sym)), i32_ty(), &mut term_ids),
-        i32_ty(),
-    );
-    let outer = mk_term(
-        TermKind::Soac(SoacOp::Map {
-            lam: mk_soac_body(f),
-            inputs: vec![ArrayExpr::Ref(Box::new(middle))],
-            destination: SoacDestination::Fresh,
-        }),
-        array_ty(i32_ty()),
-        &mut term_ids,
-    );
-
-    let program = Program {
-        defs: vec![Def {
-            name: symbols.alloc("main".to_string()),
-            ty: array_ty(i32_ty()),
-            body: outer,
-            meta: DefMeta::Function,
-            arity: 0,
-        }],
-        symbols,
-        def_syms: HashMap::new(),
-    };
-
-    let fused = run(program);
-
-    // All three fused into one Map over a
-    match &fused.defs[0].body.kind {
-        TermKind::Soac(SoacOp::Map { lam, inputs, .. }) => {
-            assert_eq!(inputs.len(), 1);
-            match &inputs[0] {
-                ArrayExpr::Ref(t) => {
-                    assert!(matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == a_sym))
-                }
-                other => panic!("Expected Ref(a), got {:?}", other),
-            }
-            // Innermost param (h's param x) should be the lambda param
-            assert_eq!(lam.lam.params.len(), 1);
-            assert_eq!(lam.lam.params[0].0, x_sym);
-        }
-        other => panic!("Expected fully fused Map, got {:?}", other),
-    }
-}
-
-// -------------------------------------------------------------------------
-// Test: zip-fused consumer — map(f, zip(map(g, a), b))
-// One input is an inline nested map, the other is not
-// -------------------------------------------------------------------------
-#[test]
-fn test_zip_fused_consumer_inline() {
-    let mut symbols = SymbolTable::default();
-    let mut term_ids = TermIdSource::new();
-
-    let a_sym = symbols.alloc("a".to_string());
-    let b_sym = symbols.alloc("b".to_string());
-    let x_sym = symbols.alloc("x".to_string());
-    let y1_sym = symbols.alloc("y1".to_string());
-    let y2_sym = symbols.alloc("y2".to_string());
-
-    // Inner: map(g, a) where g(x) = x
-    let g = mk_lambda1(
-        x_sym,
-        i32_ty(),
-        mk_term(TermKind::Var(VarRef::Symbol(x_sym)), i32_ty(), &mut term_ids),
-        i32_ty(),
-    );
-    let a = mk_term(
-        TermKind::Var(VarRef::Symbol(a_sym)),
-        array_ty(i32_ty()),
-        &mut term_ids,
-    );
-    let inner_map = mk_map(g, a, array_ty(i32_ty()), &mut term_ids);
-
-    // Outer: map(f, zip(map(g, a), b)) — zip already absorbed into multi-input
-    // f(y1, y2) = y1  (takes two params from zip)
-    let f = Lambda {
-        params: vec![(y1_sym, i32_ty()), (y2_sym, f32_ty())],
-        body: Box::new(mk_term(
-            TermKind::Var(VarRef::Symbol(y1_sym)),
-            i32_ty(),
-            &mut term_ids,
-        )),
-        ret_ty: i32_ty(),
-    };
-    let b = mk_term(
-        TermKind::Var(VarRef::Symbol(b_sym)),
-        array_ty(f32_ty()),
-        &mut term_ids,
-    );
-    let outer = mk_term(
-        TermKind::Soac(SoacOp::Map {
-            lam: mk_soac_body(f),
-            inputs: vec![
-                ArrayExpr::Ref(Box::new(inner_map)), // will be fused
-                ArrayExpr::Ref(Box::new(b)),         // stays as-is
-            ],
-            destination: SoacDestination::Fresh,
-        }),
-        array_ty(i32_ty()),
-        &mut term_ids,
-    );
-
-    let program = Program {
-        defs: vec![Def {
-            name: symbols.alloc("main".to_string()),
-            ty: array_ty(i32_ty()),
-            body: outer,
-            meta: DefMeta::Function,
-            arity: 0,
-        }],
-        symbols,
-        def_syms: HashMap::new(),
-    };
-
-    let fused = run(program);
-
-    // The inner map should be fused: y1's slot replaced by g's param x,
-    // input[0] is now Ref(a), input[1] is Ref(b)
-    match &fused.defs[0].body.kind {
-        TermKind::Soac(SoacOp::Map { lam, inputs, .. }) => {
-            assert_eq!(inputs.len(), 2);
-            // First input: a (was map(g, a), now fused)
-            match &inputs[0] {
-                ArrayExpr::Ref(t) => {
-                    assert!(matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == a_sym))
-                }
-                other => panic!("Expected Ref(a), got {:?}", other),
-            }
-            // Second input: b (unchanged)
-            match &inputs[1] {
-                ArrayExpr::Ref(t) => {
-                    assert!(matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == b_sym))
-                }
-                other => panic!("Expected Ref(b), got {:?}", other),
-            }
-            // Params: x (from g), y2 (from f — kept)
-            assert_eq!(lam.lam.params.len(), 2);
-            assert_eq!(lam.lam.params[0].0, x_sym);
-            assert_eq!(lam.lam.params[1].0, y2_sym);
-        }
-        other => panic!("Expected fused Map with 2 inputs, got {:?}", other),
-    }
-}
-
-// -------------------------------------------------------------------------
-// Test: map-zip-map — map(f, zip(map(g, a), map(h, b)))
-// Both zip inputs are inline maps, both should be fused
-// -------------------------------------------------------------------------
-#[test]
-fn test_map_zip_map() {
-    let mut symbols = SymbolTable::default();
-    let mut term_ids = TermIdSource::new();
-
-    let a_sym = symbols.alloc("a".to_string());
-    let b_sym = symbols.alloc("b".to_string());
-    let x_sym = symbols.alloc("x".to_string()); // g's param
-    let w_sym = symbols.alloc("w".to_string()); // h's param
-    let y1_sym = symbols.alloc("y1".to_string()); // f's param 1
-    let y2_sym = symbols.alloc("y2".to_string()); // f's param 2
-
-    // g(x) = x : i32 → i32
-    let g = mk_lambda1(
-        x_sym,
-        i32_ty(),
-        mk_term(TermKind::Var(VarRef::Symbol(x_sym)), i32_ty(), &mut term_ids),
-        i32_ty(),
-    );
-    let a = mk_term(
-        TermKind::Var(VarRef::Symbol(a_sym)),
-        array_ty(i32_ty()),
-        &mut term_ids,
-    );
-    let map_g_a = mk_map(g, a, array_ty(i32_ty()), &mut term_ids);
-
-    // h(w) = w : f32 → f32
-    let h = mk_lambda1(
-        w_sym,
-        f32_ty(),
-        mk_term(TermKind::Var(VarRef::Symbol(w_sym)), f32_ty(), &mut term_ids),
-        f32_ty(),
-    );
-    let b = mk_term(
-        TermKind::Var(VarRef::Symbol(b_sym)),
-        array_ty(f32_ty()),
-        &mut term_ids,
-    );
-    let map_h_b = mk_map(h, b, array_ty(f32_ty()), &mut term_ids);
-
-    // f(y1: i32, y2: f32) = y1
-    let f = Lambda {
-        params: vec![(y1_sym, i32_ty()), (y2_sym, f32_ty())],
-        body: Box::new(mk_term(
-            TermKind::Var(VarRef::Symbol(y1_sym)),
-            i32_ty(),
-            &mut term_ids,
-        )),
-        ret_ty: i32_ty(),
-    };
-
-    // map(f, zip(map(g, a), map(h, b))) — zip absorbed
-    let outer = mk_term(
-        TermKind::Soac(SoacOp::Map {
-            lam: mk_soac_body(f),
-            inputs: vec![
-                ArrayExpr::Ref(Box::new(map_g_a)),
-                ArrayExpr::Ref(Box::new(map_h_b)),
-            ],
-            destination: SoacDestination::Fresh,
-        }),
-        array_ty(i32_ty()),
-        &mut term_ids,
-    );
-
-    let program = Program {
-        defs: vec![Def {
-            name: symbols.alloc("main".to_string()),
-            ty: array_ty(i32_ty()),
-            body: outer,
-            meta: DefMeta::Function,
-            arity: 0,
-        }],
-        symbols,
-        def_syms: HashMap::new(),
-    };
-
-    let fused = run(program);
-
-    match &fused.defs[0].body.kind {
-        TermKind::Soac(SoacOp::Map { lam, inputs, .. }) => {
-            // Both intermediates eliminated: inputs are [a, b]
-            assert_eq!(inputs.len(), 2);
-            match &inputs[0] {
-                ArrayExpr::Ref(t) => {
-                    assert!(matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == a_sym))
-                }
-                other => panic!("Expected Ref(a), got {:?}", other),
-            }
-            match &inputs[1] {
-                ArrayExpr::Ref(t) => {
-                    assert!(matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == b_sym))
-                }
-                other => panic!("Expected Ref(b), got {:?}", other),
-            }
-            // Params: x (from g), w (from h)
-            assert_eq!(lam.lam.params.len(), 2);
-            assert_eq!(lam.lam.params[0].0, x_sym);
-            assert_eq!(lam.lam.params[1].0, w_sym);
-        }
-        other => panic!("Expected fused Map, got {:?}", other),
-    }
 }
 
 // =========================================================================
@@ -3492,8 +3043,8 @@ fn test_raytrace_step1_local_map_reduce() {
     let (op, inputs) = as_fused_map_reduce(&fused.defs[0].body);
     assert_eq!(inputs.len(), 1);
     match &inputs[0] {
-        ArrayExpr::Ref(t) => {
-            assert!(matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == xs_sym))
+        ArrayExpr::Var(vr, _) => {
+            assert!(matches!(vr, VarRef::Symbol(s) if *s == xs_sym))
         }
         other => panic!("Expected Ref(xs), got {:?}", other),
     }
@@ -3604,8 +3155,8 @@ fn test_raytrace_step2_interprocedural_reduce_consumer() {
     let (op, inputs) = as_fused_map_reduce(&main.body);
     assert_eq!(inputs.len(), 1);
     match &inputs[0] {
-        ArrayExpr::Ref(t) => {
-            assert!(matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == arr_sym))
+        ArrayExpr::Var(vr, _) => {
+            assert!(matches!(vr, VarRef::Symbol(s) if *s == arr_sym))
         }
         other => panic!("Expected Ref(arr), got {:?}", other),
     }
@@ -3718,8 +3269,8 @@ fn test_raytrace_step3_interprocedural_map_producer() {
     let (op, inputs) = as_fused_map_reduce(&main.body);
     assert_eq!(inputs.len(), 1);
     match &inputs[0] {
-        ArrayExpr::Ref(t) => {
-            assert!(matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == arr_sym))
+        ArrayExpr::Var(vr, _) => {
+            assert!(matches!(vr, VarRef::Symbol(s) if *s == arr_sym))
         }
         other => panic!("Expected Ref(arr), got {:?}", other),
     }
@@ -3857,8 +3408,8 @@ fn test_raytrace_step4_both_interprocedural() {
     let (op, inputs) = as_fused_map_reduce(&main.body);
     assert_eq!(inputs.len(), 1);
     match &inputs[0] {
-        ArrayExpr::Ref(t) => {
-            assert!(matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == arr_sym))
+        ArrayExpr::Var(vr, _) => {
+            assert!(matches!(vr, VarRef::Symbol(s) if *s == arr_sym))
         }
         other => panic!("Expected Ref(arr), got {:?}", other),
     }
@@ -4051,10 +3602,7 @@ fn test_map_into_scatter_fuses() {
                 elem_ty: i32_ty(),
             },
             lam: mk_soac_body(env),
-            inputs: vec![
-                ArrayExpr::Ref(Box::new(idxs_ref)),
-                ArrayExpr::Ref(Box::new(vals_ref)),
-            ],
+            inputs: vec![input_ae(Box::new(idxs_ref)), input_ae(Box::new(vals_ref))],
         }),
         array_ty(i32_ty()),
         &mut term_ids,
@@ -4090,14 +3638,12 @@ fn test_map_into_scatter_fuses() {
             // Slot 0 input is now `pts`; slot 1 stays `vals`.
             assert_eq!(inputs.len(), 2);
             assert!(
-                matches!(&inputs[0], ArrayExpr::Ref(t)
-                    if matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == pts_sym)),
+                matches!(&inputs[0], ArrayExpr::Var(VarRef::Symbol(s), _) if *s == pts_sym),
                 "index slot input should be pts, got {:?}",
                 inputs[0]
             );
             assert!(
-                matches!(&inputs[1], ArrayExpr::Ref(t)
-                    if matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == vals_sym)),
+                matches!(&inputs[1], ArrayExpr::Var(VarRef::Symbol(s), _) if *s == vals_sym),
                 "value slot input should stay vals, got {:?}",
                 inputs[1]
             );
@@ -4190,10 +3736,7 @@ fn test_map_scatter_both_producers_fuse() {
                 elem_ty: i32_ty(),
             },
             lam: mk_soac_body(env),
-            inputs: vec![
-                ArrayExpr::Ref(Box::new(idxs_ref)),
-                ArrayExpr::Ref(Box::new(vals_ref)),
-            ],
+            inputs: vec![input_ae(Box::new(idxs_ref)), input_ae(Box::new(vals_ref))],
         }),
         array_ty(i32_ty()),
         &mut term_ids,
@@ -4241,8 +3784,7 @@ fn test_map_scatter_both_producers_fuse() {
             // shared base is deduped to a SINGLE input slot — pts read once.
             assert_eq!(inputs.len(), 1, "duplicate pts slots collapse to one");
             assert!(
-                matches!(&inputs[0], ArrayExpr::Ref(t)
-                    if matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == pts_sym)),
+                matches!(&inputs[0], ArrayExpr::Var(VarRef::Symbol(s), _) if *s == pts_sym),
                 "the one input slot reads pts, got {:?}",
                 inputs[0]
             );

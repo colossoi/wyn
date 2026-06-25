@@ -479,11 +479,10 @@ impl RepSpecializer {
 
     fn rewrite_array_expr(&mut self, ae: ArrayExpr) -> ArrayExpr {
         match ae {
-            ArrayExpr::Ref(t) => ArrayExpr::Ref(Box::new(self.rewrite_term(*t))),
+            ArrayExpr::Var(vr, ty) => ArrayExpr::Var(vr, ty),
             ArrayExpr::Zip(aes) => {
                 ArrayExpr::Zip(aes.into_iter().map(|a| self.rewrite_array_expr(a)).collect())
             }
-            ArrayExpr::Soac(op) => ArrayExpr::Soac(Box::new(self.rewrite_soac(*op))),
             ArrayExpr::Literal(terms) => {
                 ArrayExpr::Literal(terms.into_iter().map(|t| self.rewrite_term(t)).collect())
             }
@@ -515,7 +514,7 @@ impl RepSpecializer {
     fn detect_producer_variant(&self, rhs: &Term) -> Option<ConcreteVariant> {
         match &rhs.kind {
             TermKind::Soac(SoacOp::Filter { input, .. }) => {
-                let input_ty = array_expr_type(input)?;
+                let input_ty = input.array_type();
                 let size = array_size(&input_ty)?;
                 Some(match size {
                     Type::Constructed(TypeName::Size(n), _) => ConcreteVariant::Bounded { capacity: *n },
@@ -777,17 +776,6 @@ fn array_size(ty: &Type<TypeName>) -> Option<&Type<TypeName>> {
 /// fused chains; we don't need them for the simple producer-detection
 /// case, so return `None` — the call site falls through to "no
 /// producer-derived variant".
-fn array_expr_type(ae: &ArrayExpr) -> Option<Type<TypeName>> {
-    match ae {
-        ArrayExpr::Ref(t) => Some(t.ty.clone()),
-        ArrayExpr::StorageView(sv) => Some(crate::types::view_array_of(
-            &sv.elem_ty,
-            crate::types::region_tag(sv.binding),
-        )),
-        _ => None,
-    }
-}
-
 /// Return `true` if any representation-polymorphic array variant appears
 /// anywhere in the type tree. `ArrayVariantAbstract` comes from filter's
 /// existential result; a `Type::Variable` in the variant slot comes from a

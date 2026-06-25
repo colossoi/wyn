@@ -43,11 +43,56 @@ pub fn normalize(program: Program) -> Program {
         })
         .collect();
 
-    Program {
+    let result = Program {
         defs,
         symbols,
         ..program
+    };
+    debug_assert!(
+        verify_flattened(&result).is_ok(),
+        "normalize postcondition: {}",
+        verify_flattened(&result).unwrap_err()
+    );
+    result
+}
+
+/// `debug_assert` the flat-chain invariant at a pass boundary (no-op in
+/// release). Sprinkle at the end of any pass that fusion/parallelize rely on to
+/// see producer/consumer edges: a violation localizes exactly which pass buried
+/// an edge inside a binding's rhs.
+pub fn debug_check_flattened(program: &Program, stage: &'static str) {
+    debug_assert!(
+        verify_flattened(program).is_ok(),
+        "flat-chain invariant violated after {}: {}",
+        stage,
+        verify_flattened(program).err().unwrap_or("")
+    );
+}
+
+/// Postcondition of `normalize`: every binding lives on a single flat chain, so
+/// no `let`'s rhs is itself a `let`. The chain-walking fusion driver only sees
+/// producer/consumer edges that sit on one chain, so a surviving `let x = (let y
+/// = .. in ..)` silently hides a fusion (the bug this guards against). A
+/// `debug_assert` only — in a correct pass it never fires.
+pub fn verify_flattened(program: &Program) -> Result<(), &'static str> {
+    fn walk(t: &Term) -> Result<(), &'static str> {
+        if let TermKind::Let { rhs, .. } = &t.kind {
+            if matches!(rhs.kind, TermKind::Let { .. }) {
+                return Err("a let binding has a let-expression as its rhs (chain not flattened)");
+            }
+        }
+        let mut result = Ok(());
+        t.for_each_child(&mut |c| {
+            if result.is_ok() {
+                result = walk(c);
+            }
+        });
+        result
     }
+    for def in &program.defs {
+        walk(&def.body)?;
+    }
+    Ok(())
 }
 
 /// Bottom-up: recurse into children, then lift SOAC args in App nodes.
@@ -114,7 +159,10 @@ fn normalize_term(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdSo
 
 /// Rotate a `let` whose rhs is itself a `let` up onto the enclosing chain,
 /// repeating while the new rhs is still a `let` (e.g. several SOACs lifted out
-/// of one expression). Non-`let` terms pass through unchanged.
+/// of one expression). Once a binding's rhs is non-`let`, the chain continues
+/// in its body, so flatten that too — a rotation can leave a freshly nested
+/// `let` deeper in the body (`let s2 = (let _m = … in scan _m)`), and the fusion
+/// driver only sees producer/consumer edges on one flat top-level chain.
 fn flatten_let(term: Term, term_ids: &mut TermIdSource) -> Term {
     let TermKind::Let {
         name,
@@ -131,7 +179,7 @@ fn flatten_let(term: Term, term_ids: &mut TermIdSource) -> Term {
                 name,
                 name_ty,
                 rhs,
-                body,
+                body: Box::new(flatten_let(*body, term_ids)),
             },
             ..term
         };

@@ -7,6 +7,16 @@ use crate::SymbolTable;
 use polytype::Type;
 use std::collections::HashMap;
 
+fn input_ae(boxed: Box<crate::tlc::Term>) -> crate::tlc::ArrayExpr {
+    use crate::tlc::{ArrayExpr, TermKind};
+    let t = *boxed;
+    match t.kind {
+        TermKind::Var(vr) => ArrayExpr::Var(vr, t.ty),
+        TermKind::ArrayExpr(ae) => ae,
+        other => panic!("test SOAC input must be a variable or array expr, got {other:?}"),
+    }
+}
+
 fn span() -> Span {
     Span::dummy()
 }
@@ -283,10 +293,7 @@ fn reduce_with_operator(
         TermKind::Soac(SoacOp::Reduce {
             op,
             ne: Box::new(term(TermKind::UnitLit, elem.clone())),
-            input: crate::tlc::ArrayExpr::Ref(Box::new(term(
-                TermKind::Var(VarRef::Symbol(arr)),
-                elem.clone(),
-            ))),
+            input: input_ae(Box::new(term(TermKind::Var(VarRef::Symbol(arr)), elem.clone()))),
         }),
         elem.clone(),
     );

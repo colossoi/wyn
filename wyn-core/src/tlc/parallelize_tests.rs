@@ -21,6 +21,16 @@ use polytype::Type;
 
 // ---------- type helpers ----------
 
+fn input_ae(boxed: Box<crate::tlc::Term>) -> crate::tlc::ArrayExpr {
+    use crate::tlc::{ArrayExpr, TermKind};
+    let t = *boxed;
+    match t.kind {
+        TermKind::Var(vr) => ArrayExpr::Var(vr, t.ty),
+        TermKind::ArrayExpr(ae) => ae,
+        other => panic!("test SOAC input must be a variable or array expr, got {other:?}"),
+    }
+}
+
 fn i32_ty() -> Type<TypeName> {
     Type::Constructed(TypeName::Int(32), vec![])
 }
@@ -1608,7 +1618,7 @@ fn soac_domain_key_reads_primary_input_size() {
             },
             captures: vec![],
         },
-        inputs: vec![ArrayExpr::Ref(Box::new(input_ref))],
+        inputs: vec![input_ae(Box::new(input_ref))],
         destination: SoacDestination::Fresh,
     };
     assert_eq!(super::soac_domain_key(&map), Some(size_ty(8)));

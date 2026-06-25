@@ -405,9 +405,8 @@ fn subst_soac(soac: &mut SoacOp, s: &RegionSubst) {
 
 fn subst_array_expr(ae: &mut ArrayExpr, s: &RegionSubst) {
     match ae {
-        ArrayExpr::Ref(t) => subst_term(t, s),
+        ArrayExpr::Var(_, ty) => *ty = apply_subst(ty, s),
         ArrayExpr::Zip(exprs) => exprs.iter_mut().for_each(|e| subst_array_expr(e, s)),
-        ArrayExpr::Soac(op) => subst_soac(op, s),
         ArrayExpr::Literal(terms) => terms.iter_mut().for_each(|t| subst_term(t, s)),
         ArrayExpr::Range { start, len, step } => {
             subst_term(start, s);

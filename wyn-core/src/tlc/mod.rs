@@ -507,12 +507,13 @@ pub struct Shape(pub Vec<Dim>);
 // are fine until that pays for itself.
 #[derive(Debug, Clone)]
 pub enum ArrayExpr {
-    /// A TLC term producing an array value.
-    Ref(Box<Term>),
+    /// A named array value — the canonical atom shape for a SOAC input,
+    /// carrying the variable reference and the array's type. A SOAC consumes a
+    /// producer only by name: the producer is let-bound and referenced here,
+    /// so a producer cannot sit directly in an input position.
+    Var(VarRef, Type<TypeName>),
     /// Logical zip — not materialized, consumed by enclosing Map.
     Zip(Vec<ArrayExpr>),
-    /// SOAC producing an array.
-    Soac(Box<SoacOp>),
     /// Literal small array.
     Literal(Vec<Term>),
     /// Range / iota. `step` defaults to 1 when `None`.
@@ -541,18 +542,65 @@ pub struct StorageView {
 }
 
 impl ArrayExpr {
-    /// `Ref(Var(sym))` → `Some(sym)`. The canonical "named SOAC input"
+    /// `Var(Symbol(sym), _)` → `Some(sym)`. The canonical "named SOAC input"
     /// shape — used by `producer_graph::wire_edges` and
     /// `parallelize::classify_input` to recognize an array input that's
     /// just a bare name (an entry parameter, an intermediate, a
     /// let-bound result of a prior SOAC).
     pub fn as_named_ref(&self) -> Option<SymbolId> {
-        if let ArrayExpr::Ref(t) = self {
-            if let TermKind::Var(VarRef::Symbol(sym)) = &t.kind {
-                return Some(*sym);
-            }
+        if let ArrayExpr::Var(VarRef::Symbol(sym), _) = self {
+            return Some(*sym);
         }
         None
+    }
+
+    /// The array type of this input atom. `Var` carries its type verbatim
+    /// (consumers that need the bare type strip uniqueness themselves);
+    /// `Literal` is a composite array sized to its element count; `Range` a
+    /// virtual array; `StorageView` a view array tagged with its binding's
+    /// region; `Zip` a virtual array of the tuple of its children's element
+    /// types. Inverse of the per-variant `array_expr_type` recomputation that
+    /// EGIR lowering and the representation passes each used to carry.
+    pub fn array_type(&self) -> Type<TypeName> {
+        use crate::types::{make_array1, no_region, region_tag};
+        let virtual_array = |elem: Type<TypeName>| {
+            make_array1(
+                elem,
+                Type::Constructed(TypeName::ArrayVariantVirtual, vec![]),
+                Type::Constructed(TypeName::SizePlaceholder, vec![]),
+                no_region(),
+            )
+        };
+        match self {
+            ArrayExpr::Var(_, ty) => ty.clone(),
+            ArrayExpr::Literal(terms) => make_array1(
+                terms
+                    .first()
+                    .map(|t| t.ty.clone())
+                    .unwrap_or_else(|| Type::Constructed(TypeName::Unit, vec![])),
+                Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
+                Type::Constructed(TypeName::Size(terms.len()), vec![]),
+                no_region(),
+            ),
+            ArrayExpr::Range { start, .. } => virtual_array(start.ty.clone()),
+            ArrayExpr::StorageView(sv) => make_array1(
+                sv.elem_ty.clone(),
+                Type::Constructed(TypeName::ArrayVariantView, vec![]),
+                Type::Constructed(TypeName::SizePlaceholder, vec![]),
+                region_tag(sv.binding),
+            ),
+            ArrayExpr::Zip(children) => {
+                let elems: Vec<Type<TypeName>> = children
+                    .iter()
+                    .map(|c| {
+                        crate::types::array_elem(&c.array_type())
+                            .cloned()
+                            .unwrap_or_else(|| Type::Constructed(TypeName::Unit, vec![]))
+                    })
+                    .collect();
+                virtual_array(Type::Constructed(TypeName::Tuple(elems.len()), elems))
+            }
+        }
     }
 }
 
@@ -1107,13 +1155,17 @@ where
     F: FnMut(&Term),
 {
     match ae {
-        ArrayExpr::Ref(t) => f(t),
+        // Visit the named input as a var term, so analyses (free-var / capture
+        // collection, etc.) see the reference.
+        ArrayExpr::Var(vr, ty) => {
+            let mut ids = TermIdSource::new();
+            f(&atom_var_term(*vr, ty.clone(), &mut ids));
+        }
         ArrayExpr::Zip(aes) => {
             for ae in aes {
                 visit_array_expr_children(ae, f);
             }
         }
-        ArrayExpr::Soac(op) => visit_soac_children(op, f),
         ArrayExpr::Literal(terms) => {
             for t in terms {
                 f(t);
@@ -1258,16 +1310,67 @@ where
     }
 }
 
+/// Build a var-reference `Term` for a SOAC-input atom (`Var(vr, ty)`), for
+/// passes that walk a SOAC input as a `Term` (ownership analysis, substitution,
+/// EGIR conversion). A SOAC-input atom has no span of its own, but it still
+/// gets a real pass-local `TermId` so synthetic terms never alias on a sentinel
+/// placeholder.
+pub fn atom_var_term(vr: VarRef, ty: Type<TypeName>, term_ids: &mut TermIdSource) -> Term {
+    Term {
+        id: term_ids.next_id(),
+        ty,
+        span: Span::new(0, 0, 0, 0),
+        kind: TermKind::Var(vr),
+    }
+}
+
+/// Convert a `Term` standing in a SOAC-input position into an input atom: a bare
+/// name stays a name; an array expression is itself an atom; a tuple-of-arrays
+/// (the SoA form of a `zip`) becomes a `Zip` of atoms. Used where a `Term`-level
+/// rewrite (substitution, inlining) lands on a SOAC input and the result must be
+/// re-atomized. A producer term has no atomic form for an input position.
+pub fn term_as_input_atom(t: Term) -> ArrayExpr {
+    match t.kind {
+        TermKind::Var(vr) => ArrayExpr::Var(vr, t.ty),
+        TermKind::ArrayExpr(ae) => ae,
+        TermKind::Tuple(elems) => ArrayExpr::Zip(elems.into_iter().map(term_as_input_atom).collect()),
+        other => panic!("ANF: cannot use a non-atom term as a SOAC input: {other:?}"),
+    }
+}
+
+/// Peel leading `let` bindings off `term`, returning them (outermost first)
+/// plus the inner non-`let` term. Lets a SOAC transform lift binding lets above
+/// the SOAC so the SOAC input stays a bare zip / atom (ANF).
+fn peel_lets(mut term: Term) -> (Vec<(SymbolId, Type<TypeName>, Term)>, Term) {
+    let mut binds = Vec::new();
+    while let TermKind::Let {
+        name,
+        name_ty,
+        rhs,
+        body,
+    } = term.kind
+    {
+        binds.push((name, name_ty, *rhs));
+        term = *body;
+    }
+    (binds, term)
+}
+
 fn map_array_expr_children<F>(ae: ArrayExpr, f: &mut F) -> ArrayExpr
 where
     F: FnMut(Term) -> Term,
 {
     match ae {
-        ArrayExpr::Ref(t) => ArrayExpr::Ref(Box::new(f(*t))),
+        // Apply `f` to the named input through a reconstructed var term, so
+        // substitutions that rename (or inline) a variable reach SOAC inputs,
+        // then re-atomize the result.
+        ArrayExpr::Var(vr, ty) => {
+            let mut ids = TermIdSource::new();
+            term_as_input_atom(f(atom_var_term(vr, ty, &mut ids)))
+        }
         ArrayExpr::Zip(aes) => {
             ArrayExpr::Zip(aes.into_iter().map(|ae| map_array_expr_children(ae, f)).collect())
         }
-        ArrayExpr::Soac(op) => ArrayExpr::Soac(Box::new(map_soac_children(*op, f))),
         ArrayExpr::Literal(terms) => ArrayExpr::Literal(terms.into_iter().map(f).collect()),
         ArrayExpr::Range { start, len, step } => ArrayExpr::Range {
             start: Box::new(f(*start)),
@@ -2407,6 +2510,53 @@ impl<'a> Transformer<'a> {
         }
     }
 
+    /// Convert a transformed array-argument term into an ANF SOAC input. A bare
+    /// variable passes through as `Var`; any other term (a producer SOAC, a
+    /// call, …) is let-bound to a fresh `_anf` name, with the binding pushed to
+    /// `binds` for the caller to wrap around the SOAC via [`Self::wrap_binds`].
+    fn soac_input(
+        &mut self,
+        arr_term: Term,
+        binds: &mut Vec<(SymbolId, Type<TypeName>, Term)>,
+    ) -> ArrayExpr {
+        // Lift any binding lets above the SOAC (e.g. `iota(N)` desugars to
+        // `let arg = N in Range{…}`), keeping the input itself atomic.
+        let (mut peeled, core) = peel_lets(arr_term);
+        binds.append(&mut peeled);
+        match core.kind {
+            TermKind::Var(vr) => ArrayExpr::Var(vr, core.ty),
+            // An array expression (Range / Literal / StorageView / Zip) is
+            // itself an atomic SOAC input; consume it directly rather than
+            // let-binding a name to it.
+            TermKind::ArrayExpr(ae) => ae,
+            _ => {
+                let ty = core.ty.clone();
+                let sym = self.symbols.alloc("_anf".to_string());
+                binds.push((sym, ty.clone(), core));
+                ArrayExpr::Var(VarRef::Symbol(sym), ty)
+            }
+        }
+    }
+
+    /// Wrap `binds` as nested `let`s (outermost first) around `body`.
+    fn wrap_binds(&mut self, binds: Vec<(SymbolId, Type<TypeName>, Term)>, body: Term, span: Span) -> Term {
+        let mut result = body;
+        for (name, name_ty, rhs) in binds.into_iter().rev() {
+            let body_ty = result.ty.clone();
+            result = self.mk_term(
+                body_ty,
+                span,
+                TermKind::Let {
+                    name,
+                    name_ty,
+                    rhs: Box::new(rhs),
+                    body: Box::new(result),
+                },
+            );
+        }
+        result
+    }
+
     /// Transform `map(f, arr)` → `Soac(Map { lam, inputs })`.
     fn transform_soac_map(&mut self, args: &[ast::Expression], ty: Type<TypeName>, span: Span) -> Term {
         assert!(args.len() >= 2, "map requires at least 2 arguments");
@@ -2417,13 +2567,16 @@ impl<'a> Transformer<'a> {
 
         // Absorb zip: if arr_term is ArrayExpr(Zip(...)), flatten into inputs.
         // The lambda still takes a single tuple param — the soa::normalize pass
-        // will rewrite it to take separate params.
-        let inputs = match arr_term.kind {
+        // will rewrite it to take separate params. A zip whose children needed
+        // let-binding arrives wrapped in those lets (from `transform_soac_zip`),
+        // so peel them off and re-wrap around the whole map.
+        let (mut binds, core) = peel_lets(arr_term);
+        let inputs = match core.kind {
             TermKind::ArrayExpr(ArrayExpr::Zip(exprs)) => exprs,
-            _ => vec![ArrayExpr::Ref(Box::new(arr_term))],
+            _ => vec![self.soac_input(core, &mut binds)],
         };
 
-        self.mk_term(
+        let soac = self.mk_term(
             ty,
             span,
             TermKind::Soac(SoacOp::Map {
@@ -2431,7 +2584,8 @@ impl<'a> Transformer<'a> {
                 inputs,
                 destination: SoacDestination::Fresh,
             }),
-        )
+        );
+        self.wrap_binds(binds, soac, span)
     }
 
     /// Transform `reduce(op, ne, arr)` → `Soac(Reduce { op, ne, input })`.
@@ -2443,15 +2597,18 @@ impl<'a> Transformer<'a> {
 
         let op = self.term_to_lambda(op_term);
 
-        self.mk_term(
+        let mut binds = Vec::new();
+        let input = self.soac_input(arr_term, &mut binds);
+        let soac = self.mk_term(
             ty,
             span,
             TermKind::Soac(SoacOp::Reduce {
                 op,
                 ne: Box::new(ne_term),
-                input: ArrayExpr::Ref(Box::new(arr_term)),
+                input,
             }),
-        )
+        );
+        self.wrap_binds(binds, soac, span)
     }
 
     /// Transform `scan(op, ne, arr)` → `Soac(Scan { op, ne, input })`.
@@ -2463,7 +2620,9 @@ impl<'a> Transformer<'a> {
 
         let op = self.term_to_lambda(op_term);
 
-        self.mk_term(
+        let mut binds = Vec::new();
+        let input = self.soac_input(arr_term, &mut binds);
+        let soac = self.mk_term(
             ty,
             span,
             TermKind::Soac(SoacOp::Scan {
@@ -2472,11 +2631,12 @@ impl<'a> Transformer<'a> {
                 reduce_op: op.clone(),
                 op,
                 ne: Box::new(ne_term),
-                input: ArrayExpr::Ref(Box::new(arr_term)),
+                input,
                 // Initial construction; apply_ownership may flip later.
                 destination: SoacDestination::Fresh,
             }),
-        )
+        );
+        self.wrap_binds(binds, soac, span)
     }
 
     /// Transform `filter(pred, arr)` → `Soac(Filter { pred, input })`.
@@ -2487,23 +2647,33 @@ impl<'a> Transformer<'a> {
 
         let pred = self.term_to_lambda(pred_term);
 
-        self.mk_term(
+        let mut binds = Vec::new();
+        let input = self.soac_input(arr_term, &mut binds);
+        let soac = self.mk_term(
             ty,
             span,
             TermKind::Soac(SoacOp::Filter {
                 pred,
-                input: ArrayExpr::Ref(Box::new(arr_term)),
+                input,
                 // Initial construction; apply_ownership may flip later.
                 destination: SoacDestination::Fresh,
             }),
-        )
+        );
+        self.wrap_binds(binds, soac, span)
     }
 
-    /// Transform `zip(a, b, ...)` → `ArrayExpr(Zip(...))`.
+    /// Transform `zip(a, b, ...)` → `ArrayExpr(Zip(...))`. Each child becomes an
+    /// ANF atom; any producer child is let-bound, the bindings wrapping the zip
+    /// term (a consuming `map` peels them back off — see `transform_soac_map`).
     fn transform_soac_zip(&mut self, args: &[ast::Expression], ty: Type<TypeName>, span: Span) -> Term {
-        let exprs: Vec<ArrayExpr> =
-            args.iter().map(|a| ArrayExpr::Ref(Box::new(self.transform_expr(a)))).collect();
-        self.mk_term(ty, span, TermKind::ArrayExpr(ArrayExpr::Zip(exprs)))
+        let mut binds = Vec::new();
+        let mut exprs = Vec::with_capacity(args.len());
+        for a in args {
+            let t = self.transform_expr(a);
+            exprs.push(self.soac_input(t, &mut binds));
+        }
+        let zip = self.mk_term(ty, span, TermKind::ArrayExpr(ArrayExpr::Zip(exprs)));
+        self.wrap_binds(binds, zip, span)
     }
 
     /// Transform `reduce_by_index(dest, op, ne, indices, values)`.
@@ -2537,17 +2707,21 @@ impl<'a> Transformer<'a> {
             elem_ty: dest_elem_ty,
         };
 
-        self.mk_term(
+        let mut binds = Vec::new();
+        let indices = self.soac_input(indices_term, &mut binds);
+        let values = self.soac_input(values_term, &mut binds);
+        let soac = self.mk_term(
             ty,
             span,
             TermKind::Soac(SoacOp::ReduceByIndex {
                 dest,
                 op,
                 ne: Box::new(ne_term),
-                indices: ArrayExpr::Ref(Box::new(indices_term)),
-                values: ArrayExpr::Ref(Box::new(values_term)),
+                indices,
+                values,
             }),
-        )
+        );
+        self.wrap_binds(binds, soac, span)
     }
 
     /// `scatter(dest, indices, values)` → `SoacOp::Scatter`. Writes
@@ -2591,18 +2765,19 @@ impl<'a> Transformer<'a> {
             captures: vec![],
         };
 
-        self.mk_term(
+        let mut binds = Vec::new();
+        let indices = self.soac_input(indices_term, &mut binds);
+        let values = self.soac_input(values_term, &mut binds);
+        let soac = self.mk_term(
             ty,
             span,
             TermKind::Soac(SoacOp::Scatter {
                 dest,
                 lam,
-                inputs: vec![
-                    ArrayExpr::Ref(Box::new(indices_term)),
-                    ArrayExpr::Ref(Box::new(values_term)),
-                ],
+                inputs: vec![indices, values],
             }),
-        )
+        );
+        self.wrap_binds(binds, soac, span)
     }
 
     /// Convert a term to a SoacBody. If it's already a Lambda, wrap it.

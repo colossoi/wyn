@@ -138,18 +138,6 @@ fn extract_map_branch(
             lam,
             inputs,
         }),
-        TermKind::ArrayExpr(ArrayExpr::Soac(soac)) => match *soac {
-            SoacOp::Map {
-                lam,
-                inputs,
-                destination: _,
-            } => Some(MapBranch {
-                prefix: Vec::new(),
-                lam,
-                inputs,
-            }),
-            _ => None,
-        },
         _ => None,
     }
 }
@@ -166,14 +154,6 @@ fn try_compose_prefix_map(
             inputs,
             destination: SoacDestination::Fresh,
         }) => (lam, inputs),
-        TermKind::ArrayExpr(ArrayExpr::Soac(soac)) => match soac.as_ref() {
-            SoacOp::Map {
-                lam,
-                inputs,
-                destination: SoacDestination::Fresh,
-            } => (lam, inputs),
-            _ => return false,
-        },
         _ => return false,
     };
     if !producer_lam.captures.is_empty() {
@@ -390,12 +370,15 @@ fn array_expr_len_key(
     resolving: &mut LookupSet<SymbolId>,
 ) -> Option<LenKey> {
     match ae {
-        ArrayExpr::Ref(term) => term_array_len_key(term, env, resolving),
+        ArrayExpr::Var(vr, ty) => {
+            let mut ids = TermIdSource::new();
+            let t = crate::tlc::atom_var_term(*vr, ty.clone(), &mut ids);
+            term_array_len_key(&t, env, resolving)
+        }
         ArrayExpr::Range { len, .. } => len_key(len, env, resolving),
         ArrayExpr::StorageView(crate::tlc::StorageView { len, .. }) => len_key(len, env, resolving),
         ArrayExpr::Literal(items) => Some(LenKey::Int(items.len().to_string())),
         ArrayExpr::Zip(items) => items.first().and_then(|item| array_expr_len_key(item, env, resolving)),
-        ArrayExpr::Soac(_) => None,
     }
 }
 
@@ -562,13 +545,16 @@ fn collect_symbol_refs_soac_body(body: &SoacBody, out: &mut LookupSet<SymbolId>)
 
 fn collect_symbol_refs_array(ae: &ArrayExpr, out: &mut LookupSet<SymbolId>) {
     match ae {
-        ArrayExpr::Ref(term) => collect_symbol_refs(term, out),
+        ArrayExpr::Var(vr, _) => {
+            if let VarRef::Symbol(s) = vr {
+                out.insert(*s);
+            }
+        }
         ArrayExpr::Zip(items) => {
             for item in items {
                 collect_symbol_refs_array(item, out);
             }
         }
-        ArrayExpr::Soac(soac) => collect_symbol_refs_soac(soac, out),
         ArrayExpr::Literal(items) => {
             for item in items {
                 collect_symbol_refs(item, out);
@@ -584,76 +570,6 @@ fn collect_symbol_refs_array(ae: &ArrayExpr, out: &mut LookupSet<SymbolId>) {
         ArrayExpr::StorageView(crate::tlc::StorageView { offset, len, .. }) => {
             collect_symbol_refs(offset, out);
             collect_symbol_refs(len, out);
-        }
-    }
-}
-
-fn collect_symbol_refs_soac(soac: &SoacOp, out: &mut LookupSet<SymbolId>) {
-    match soac {
-        SoacOp::Map { lam, inputs, .. } => {
-            collect_symbol_refs_soac_body(lam, out);
-            for input in inputs {
-                collect_symbol_refs_array(input, out);
-            }
-        }
-        SoacOp::Reduce { op, ne, input } => {
-            collect_symbol_refs_soac_body(op, out);
-            collect_symbol_refs(ne, out);
-            collect_symbol_refs_array(input, out);
-        }
-        SoacOp::Screma {
-            map_lams,
-            accumulators,
-            inputs,
-            map_input_indices: _,
-        } => {
-            for lam in map_lams {
-                collect_symbol_refs_soac_body(lam, out);
-            }
-            for acc in accumulators {
-                collect_symbol_refs_soac_body(&acc.step_lam, out);
-                collect_symbol_refs_soac_body(&acc.reduce_op, out);
-                collect_symbol_refs(&acc.ne, out);
-            }
-            for input in inputs {
-                collect_symbol_refs_array(input, out);
-            }
-        }
-        SoacOp::Scan {
-            op,
-            reduce_op,
-            ne,
-            input,
-            ..
-        } => {
-            collect_symbol_refs_soac_body(op, out);
-            collect_symbol_refs_soac_body(reduce_op, out);
-            collect_symbol_refs(ne, out);
-            collect_symbol_refs_array(input, out);
-        }
-        SoacOp::Filter { pred, input, .. } => {
-            collect_symbol_refs_soac_body(pred, out);
-            collect_symbol_refs_array(input, out);
-        }
-        SoacOp::Scatter { dest, lam, inputs } => {
-            collect_symbol_refs_place(dest, out);
-            collect_symbol_refs_soac_body(lam, out);
-            for input in inputs {
-                collect_symbol_refs_array(input, out);
-            }
-        }
-        SoacOp::ReduceByIndex {
-            dest,
-            op,
-            ne,
-            indices,
-            values,
-        } => {
-            collect_symbol_refs_place(dest, out);
-            collect_symbol_refs_soac_body(op, out);
-            collect_symbol_refs(ne, out);
-            collect_symbol_refs_array(indices, out);
-            collect_symbol_refs_array(values, out);
         }
     }
 }

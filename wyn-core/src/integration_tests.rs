@@ -445,13 +445,16 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::Program, stage: &str) {
         def_name: &str,
     ) {
         match ae {
-            ArrayExpr::Ref(t) => walk(t, bound, symbols, stage, def_name),
+            ArrayExpr::Var(vr, ty) => {
+                let mut ids = crate::tlc::TermIdSource::new();
+                let t = crate::tlc::atom_var_term(*vr, ty.clone(), &mut ids);
+                walk(&t, bound, symbols, stage, def_name);
+            }
             ArrayExpr::Zip(arrs) => {
                 for a in arrs {
                     walk_array_expr(a, bound, symbols, stage, def_name);
                 }
             }
-            ArrayExpr::Soac(soac) => walk_soac(soac, bound, symbols, stage, def_name),
             ArrayExpr::Literal(elems) => {
                 for e in elems {
                     walk(e, bound, symbols, stage, def_name);

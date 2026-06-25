@@ -743,7 +743,7 @@ fn classify_input(input: &ArrayExpr, entry_slots: &[Option<EntryParamBinding>]) 
                 elem_bytes,
             })
         }
-        ArrayExpr::Ref(t) => {
+        ArrayExpr::Var(_, ty) => {
             // A bare entry-param storage-buffer reference. Resolve the
             // assigned (set, binding) via the entry's binding layout — the
             // same lookup `default_entry_dispatch_len` uses. Tuple-of-views
@@ -758,7 +758,7 @@ fn classify_input(input: &ArrayExpr, entry_slots: &[Option<EntryParamBinding>]) 
                     });
                 }
             }
-            let ref_ty = crate::types::strip_unique(&t.ty);
+            let ref_ty = crate::types::strip_unique(ty);
             if let Some(binding) = crate::types::array_view_region(&ref_ty) {
                 if let Some(elem_ty) = ref_ty.elem_type() {
                     let elem_bytes = crate::ssa::layout::type_byte_size(elem_ty)?;
@@ -769,14 +769,12 @@ fn classify_input(input: &ArrayExpr, entry_slots: &[Option<EntryParamBinding>]) 
                     });
                 }
             }
-            // `iota(N)` desugars to
-            // `let arg = N in Range{ start: 0, len: arg - 0, step: None }`.
-            // The dispatch length is `N` itself; lift it out as the Range bound.
-            if let Some(bound) = extract_iota_bound(t) {
-                return Some(ArrayProvenance::Range { bound });
-            }
             None
         }
+        // An `iota(N)` input is a `Range`; its `len` is the dispatch length.
+        ArrayExpr::Range { len, .. } => Some(ArrayProvenance::Range {
+            bound: (**len).clone(),
+        }),
         _ => None,
     }
 }
@@ -802,10 +800,10 @@ fn soac_primary_input(soac: &SoacOp) -> Option<&ArrayExpr> {
 /// can't be read off the input type; the caller treats an unknown domain
 /// as its own singleton class rather than assuming equality.
 fn soac_domain_key(soac: &SoacOp) -> Option<Type<TypeName>> {
-    let ArrayExpr::Ref(t) = soac_primary_input(soac)? else {
+    let ArrayExpr::Var(_, ty) = soac_primary_input(soac)? else {
         return None;
     };
-    let stripped = crate::types::strip_unique(&t.ty);
+    let stripped = crate::types::strip_unique(ty);
     crate::types::array_size(&stripped).cloned()
 }
 
@@ -863,7 +861,7 @@ fn fusible_map_slot(slot_index: usize, term: &Term) -> Option<FusibleMapSlot> {
     }
     let input = &inputs[0];
     let input_sym = input.as_named_ref()?;
-    let ArrayExpr::Ref(_) = input else {
+    let ArrayExpr::Var(..) = input else {
         return None;
     };
     let domain = soac_domain_key(soac)?;
@@ -1114,30 +1112,6 @@ fn is_map_only_fresh_soac_term(t: &Term) -> bool {
         TermKind::Soac(SoacOp::Screma { accumulators, .. }) => accumulators.is_empty(),
         _ => false,
     }
-}
-
-/// Recognize the `iota(N)` desugaring
-/// `let arg = N in Range { start: 0, len: arg - 0 }` and recover `N`.
-fn extract_iota_bound(t: &Term) -> Option<Term> {
-    let TermKind::Let { name, rhs, body, .. } = &t.kind else {
-        return None;
-    };
-    let TermKind::ArrayExpr(ArrayExpr::Range { start, len, .. }) = &body.kind else {
-        return None;
-    };
-    let TermKind::App { func, args } = &len.kind else {
-        return None;
-    };
-    let [arg, zero] = args.as_slice() else { return None };
-    let TermKind::BinOp(op) = &func.kind else {
-        return None;
-    };
-    let arg_is_name = matches!(&arg.kind, TermKind::Var(VarRef::Symbol(s)) if s == name);
-    (op.op == "-" && is_zero_int(start) && is_zero_int(zero) && arg_is_name).then(|| (**rhs).clone())
-}
-
-fn is_zero_int(t: &Term) -> bool {
-    matches!(&t.kind, TermKind::IntLit(s) if s == "0")
 }
 
 // =============================================================================
@@ -2039,6 +2013,7 @@ pub fn run(
     let input_names = collect_entry_input_names(&program);
 
     if disable {
+        super::anf::debug_check(&program, "parallelize");
         let pipeline = build_default_pipeline(&program);
         return Ok(ParallelizationResult {
             program,
@@ -2104,6 +2079,7 @@ pub fn run(
     let analyses = analyze_program(&program);
 
     if analyses.is_empty() {
+        super::anf::debug_check(&program, "parallelize");
         let pipeline = build_default_pipeline(&program);
         return Ok(ParallelizationResult {
             program,
@@ -2209,6 +2185,7 @@ pub fn run(
         let _ = binding_ids.next_id();
     }
 
+    super::anf::debug_check(&program, "parallelize");
     Ok(ParallelizationResult {
         program,
         pipeline: PipelineDescriptor { pipelines },
@@ -4075,11 +4052,10 @@ fn make_scan_plan(
     // don't plumb them through; non-Var/non-Storage inputs (Range,
     // literal, etc.) fail because phase 1 needs a `(set, binding)`
     // pair to chunk.
-    let input_likely_storage = match analysis.soac.inputs().first() {
-        Some(ArrayExpr::StorageView(_)) => true,
-        Some(ArrayExpr::Ref(t)) => matches!(&t.kind, TermKind::Var(VarRef::Symbol(_))),
-        _ => false,
-    };
+    let input_likely_storage = matches!(
+        analysis.soac.provenances.first(),
+        Some(ArrayProvenance::Storage { .. })
+    );
     let can_route = op.captures.is_empty() && input_likely_storage;
 
     if !can_route {
@@ -5160,7 +5136,7 @@ fn resolve_dispatch_len(analysis: &EntryAnalysis, input_index: usize, program: &
         Some(ArrayProvenance::Opaque) | None => inputs
             .get(input_index)
             .and_then(|ae| match ae {
-                ArrayExpr::Ref(t) => fixed_array_count(&t.ty),
+                ArrayExpr::Var(_, ty) => fixed_array_count(ty),
                 _ => None,
             })
             .map(|count| DispatchLen::Fixed { count })

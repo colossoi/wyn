@@ -2339,9 +2339,26 @@ impl<'a, 'b> Converter<'a, 'b> {
 
     fn convert_array_expr(&mut self, ae: &ArrayExpr, ty: Type<TypeName>) -> Result<NodeId, ConvertError> {
         match ae {
-            ArrayExpr::Ref(term) => self.convert_term(term),
-            ArrayExpr::Zip(_) => panic!("ArrayExpr::Zip should have been eliminated by soa::normalize"),
-            ArrayExpr::Soac(op) => self.convert_soac(op, ty),
+            ArrayExpr::Var(vr, var_ty) => {
+                let mut ids = crate::tlc::TermIdSource::new();
+                let t = crate::tlc::atom_var_term(*vr, var_ty.clone(), &mut ids);
+                self.convert_term(&t)
+            }
+            // A `Zip` is the SoA form of a tuple-element array input: it lowers
+            // to a `Tuple` of its component arrays (`[N](A,B)` ≡ `([N]A, [N]B)`),
+            // the same node a `Tuple`-term input would build. `soa::normalize`
+            // flattens `Map`-over-`Zip` ahead of EGIR, but an SoA constant
+            // inlined into a non-`Map` consumer (e.g. `reduce`) still arrives as
+            // a `Zip` here.
+            ArrayExpr::Zip(children) => {
+                let operands: SmallVec<[NodeId; 4]> =
+                    children.iter().map(|c| self.convert_array_expr_value(c)).collect::<Result<_, _>>()?;
+                let component_tys: Vec<Type<TypeName>> =
+                    children.iter().map(|c| self.array_expr_type(c)).collect();
+                let tuple_ty = Type::Constructed(TypeName::Tuple(component_tys.len()), component_tys);
+                let n = operands.len();
+                Ok(self.intern_pure(PureOp::Tuple(n), operands, tuple_ty))
+            }
             ArrayExpr::Literal(terms) => {
                 let operands: SmallVec<[NodeId; 4]> =
                     terms.iter().map(|t| self.convert_term(t)).collect::<Result<_, _>>()?;
@@ -2399,48 +2416,21 @@ impl<'a, 'b> Converter<'a, 'b> {
     }
 
     fn convert_array_expr_value(&mut self, ae: &ArrayExpr) -> Result<NodeId, ConvertError> {
-        match ae {
-            ArrayExpr::Ref(term) => self.convert_term(term),
-            _ => {
-                let ty = self.array_expr_type(ae);
-                self.convert_array_expr(ae, ty)
-            }
-        }
+        let ty = self.array_expr_type(ae);
+        self.convert_array_expr(ae, ty)
     }
 
     fn array_expr_type(&self, ae: &ArrayExpr) -> Type<TypeName> {
-        match ae {
-            // Strip `*` at the EGIR boundary — uniqueness is a TLC
-            // concern; downstream array-shape checks (composite vs
-            // view vs virtual) operate on the bare array type.
-            ArrayExpr::Ref(t) => crate::types::strip_unique(&t.ty),
-            ArrayExpr::Zip(_) => unreachable!("Zip eliminated"),
-            ArrayExpr::Soac(_) => Type::Constructed(TypeName::Unit, vec![]),
-            ArrayExpr::Literal(_) => Type::Constructed(TypeName::Unit, vec![]),
-            ArrayExpr::Range { start, .. } => Type::Constructed(
-                TypeName::Array,
-                vec![
-                    start.ty.clone(),
-                    Type::Constructed(TypeName::ArrayVariantVirtual, vec![]),
-                    Type::Constructed(TypeName::SizePlaceholder, vec![]),
-                    crate::types::no_region(),
-                ],
-            ),
-            ArrayExpr::StorageView(crate::tlc::StorageView { elem_ty, binding, .. }) => Type::Constructed(
-                TypeName::Array,
-                vec![
-                    elem_ty.clone(),
-                    Type::Constructed(TypeName::ArrayVariantView, vec![]),
-                    Type::Constructed(TypeName::SizePlaceholder, vec![]),
-                    crate::types::region_tag(*binding),
-                ],
-            ),
-        }
+        // Strip `*` at the EGIR boundary — uniqueness is a TLC concern;
+        // downstream array-shape checks (composite vs view vs virtual) operate
+        // on the bare array type. Only `Var` can carry uniqueness; for the other
+        // atoms `strip_unique` is a no-op.
+        crate::types::strip_unique(&ae.array_type())
     }
 
     fn array_expr_elem_type(&self, ae: &ArrayExpr) -> Type<TypeName> {
         match ae {
-            ArrayExpr::Ref(t) => match &t.ty {
+            ArrayExpr::Var(_, ty) => match ty {
                 Type::Constructed(TypeName::Array, args) if !args.is_empty() => args[0].clone(),
                 // After `tlc::soa`, `[N](A, B)` becomes `([N]A, [N]B)` — an
                 // SoA tuple. The per-iteration element type is the
@@ -2449,10 +2439,15 @@ impl<'a, 'b> Converter<'a, 'b> {
                 ty if super::soac_expand::as_soa_tuple(ty).is_some() => {
                     super::soac_expand::soa_element_type(ty)
                 }
-                _ => t.ty.clone(),
+                _ => ty.clone(),
             },
-            ArrayExpr::Zip(_) => unreachable!("Zip eliminated"),
-            ArrayExpr::Soac(_) => Type::Constructed(TypeName::Unit, vec![]),
+            // SoA tuple input: the per-iteration element is the tuple of each
+            // component array's element type.
+            ArrayExpr::Zip(children) => {
+                let elem_tys: Vec<Type<TypeName>> =
+                    children.iter().map(|c| self.array_expr_elem_type(c)).collect();
+                Type::Constructed(TypeName::Tuple(elem_tys.len()), elem_tys)
+            }
             ArrayExpr::Literal(terms) => {
                 terms.first().map(|t| t.ty.clone()).unwrap_or(Type::Constructed(TypeName::Unit, vec![]))
             }

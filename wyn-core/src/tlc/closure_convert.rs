@@ -440,14 +440,15 @@ pub fn collect_free_vars_array_expr(
     seen: &mut LookupSet<SymbolId>,
 ) {
     match ae {
-        ArrayExpr::Ref(t) => collect_free_vars(t, bound, top_level, known_defs, symbols, free, seen),
+        ArrayExpr::Var(vr, ty) => {
+            let mut ids = TermIdSource::new();
+            let t = crate::tlc::atom_var_term(*vr, ty.clone(), &mut ids);
+            collect_free_vars(&t, bound, top_level, known_defs, symbols, free, seen);
+        }
         ArrayExpr::Zip(exprs) => {
             for e in exprs {
                 collect_free_vars_array_expr(e, bound, top_level, known_defs, symbols, free, seen);
             }
-        }
-        ArrayExpr::Soac(op) => {
-            collect_free_vars_soac(op, bound, top_level, known_defs, symbols, free, seen)
         }
         ArrayExpr::Literal(terms) => {
             for t in terms {
@@ -1156,11 +1157,11 @@ impl<'a> ClosureConverter<'a> {
 
     fn convert_array_expr(&mut self, ae: ArrayExpr, span: Span) -> ArrayExpr {
         match ae {
-            ArrayExpr::Ref(t) => ArrayExpr::Ref(Box::new(self.convert_term(*t))),
+            // A named input is not a closure — nothing to defunctionalize.
+            ArrayExpr::Var(vr, ty) => ArrayExpr::Var(vr, ty),
             ArrayExpr::Zip(exprs) => {
                 ArrayExpr::Zip(exprs.into_iter().map(|e| self.convert_array_expr(e, span)).collect())
             }
-            ArrayExpr::Soac(op) => ArrayExpr::Soac(Box::new(self.convert_soac(*op, span))),
             ArrayExpr::Literal(terms) => {
                 ArrayExpr::Literal(terms.into_iter().map(|t| self.convert_term(t)).collect())
             }

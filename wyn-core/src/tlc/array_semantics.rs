@@ -459,9 +459,8 @@ pub fn classify_soac(soac: &SoacOp) -> ArraySemantics {
 /// Extract ArraySemantics from an ArrayExpr.
 pub fn classify_array_expr(ae: &ArrayExpr) -> ArraySemantics {
     match ae {
-        ArrayExpr::Ref(_) => ArraySemantics::Opaque, // just a reference, not a producer
-        ArrayExpr::Zip(_) => ArraySemantics::Opaque, // zip is consumed by enclosing Map
-        ArrayExpr::Soac(op) => classify_soac(op),
+        ArrayExpr::Var(..) => ArraySemantics::Opaque, // a named input, not a producer
+        ArrayExpr::Zip(_) => ArraySemantics::Opaque,  // zip is consumed by enclosing Map
         ArrayExpr::Literal(terms) => ArraySemantics::Literal(terms.clone()),
         ArrayExpr::Range { start, len, .. } => ArraySemantics::Range {
             start: start.clone(),

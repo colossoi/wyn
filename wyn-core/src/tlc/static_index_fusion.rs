@@ -113,27 +113,37 @@ fn try_fuse(
     }
 }
 
-/// The element of `input` at `[index]` — `Index(t, index)` for a `Ref(t)`. Other
-/// input shapes (raw `Range`/`Zip`/`Literal` not wrapped in `Ref`) aren't fused
-/// here; returning `None` leaves the original `Index` in place.
+/// The element of `input` at `[index]` — `Index(t, index)`, where `t` is the
+/// input atom reconstructed as a `Term`. A `Var` becomes the named array; a
+/// `Range`/`Literal` becomes its `ArrayExpr` term so the resulting `(0..<n)[k]`
+/// / `[a,b,c][k]` is handed to the runtime-index / gather path downstream. `Zip`
+/// and `StorageView` aren't fused here; returning `None` leaves the `Index` in
+/// place.
 fn index_elem(
     input: &ArrayExpr,
     elem_ty: Type<TypeName>,
     index: &Term,
     ids: &mut TermIdSource,
 ) -> Option<Term> {
-    match input {
-        ArrayExpr::Ref(t) => Some(Term {
+    let array = match input {
+        ArrayExpr::Var(vr, ty) => super::atom_var_term(*vr, ty.clone(), ids),
+        ArrayExpr::Range { .. } | ArrayExpr::Literal(_) => Term {
             id: ids.next_id(),
-            ty: elem_ty,
-            span: t.span,
-            kind: TermKind::Index {
-                array: t.clone(),
-                index: Box::new(index.clone()),
-            },
-        }),
-        _ => None,
-    }
+            ty: input.array_type(),
+            span: index.span,
+            kind: TermKind::ArrayExpr(input.clone()),
+        },
+        ArrayExpr::Zip(_) | ArrayExpr::StorageView(_) => return None,
+    };
+    Some(Term {
+        id: ids.next_id(),
+        ty: elem_ty,
+        span: index.span,
+        kind: TermKind::Index {
+            array: Box::new(array),
+            index: Box::new(index.clone()),
+        },
+    })
 }
 
 fn make_index(array: &Term, index: &Term, result_ty: &Type<TypeName>, ids: &mut TermIdSource) -> Term {

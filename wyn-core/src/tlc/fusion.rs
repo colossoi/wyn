@@ -18,8 +18,8 @@ use polytype::Type;
 use crate::LookupMap;
 
 use super::array_semantics::{
-    can_fuse, classify_soac, classify_term, summarize_program, ArraySemantics, FunctionSummary,
-    FusionRecipe, ResultSemantics,
+    can_fuse, classify_term, summarize_program, ArraySemantics, FunctionSummary, FusionRecipe,
+    ResultSemantics,
 };
 use super::{
     extract_lambda_params, ArrayExpr, Def, Lambda, Program, SoacDestination, SoacOp, Term, TermId,
@@ -105,13 +105,6 @@ pub fn run(program: Program) -> Program {
                 if did_fuse {
                     changed = true;
                 }
-                // Inline producer→consumer fusion for SOACs nested directly
-                // as another SOAC's input (map→map, map→reduce, map→scan).
-                let (new_body, did_inline_fuse) =
-                    fuse_inline_soac_inputs(new_body, &mut symbols, &mut term_ids);
-                if did_inline_fuse {
-                    changed = true;
-                }
                 Def {
                     body: new_body,
                     ..def
@@ -127,6 +120,7 @@ pub fn run(program: Program) -> Program {
         };
     }
 
+    super::anf::debug_check(&program, "fusion");
     program
 }
 
@@ -836,18 +830,36 @@ fn find_map_group_plan(
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
 ) -> Option<FusionPlan> {
+    // Self-documenting declines: a `debug_assertions`-only trace of *why* this
+    // builder turns an edge down, so a "didn't fuse" can be diagnosed from the
+    // reason rather than inferred from IR dumps.
+    macro_rules! reject {
+        ($($arg:tt)*) => {{
+            #[cfg(debug_assertions)]
+            eprintln!("fuse map-group decline (producer {:?}): {}", producer.symbol, format!($($arg)*));
+            return None;
+        }};
+    }
+
     let ArraySemantics::Elementwise {
         inputs: producer_inputs,
         body: producer_body,
     } = &producer.semantics
     else {
-        return None;
+        reject!("producer is not an elementwise map");
     };
-    if uses.len() < 2 || uses.iter().any(|u| !matches!(u.owner, UseOwner::Binding(_))) {
-        return None;
+    // Horizontal grouping only: ≥2 consumers fused into one Screma exposed via
+    // tail projections. Single-consumer *vertical* edges (`let m = map(..) in
+    // scan(.., m)`) are handled by `find_vertical_accumulator_plan`, which has
+    // none of this projection / tail-value machinery.
+    if uses.len() < 2 {
+        reject!("only {} consumer(s) — horizontal grouping needs ≥2", uses.len());
+    }
+    if uses.iter().any(|u| !matches!(u.owner, UseOwner::Binding(_))) {
+        reject!("a consumer is the entry tail, not a let binding");
     }
     if uses.iter().any(|u| !matches!(u.kind, UseKind::SoacInput { .. })) {
-        return None;
+        reject!("a use is not a SOAC input");
     }
 
     let mut maps = Vec::new();
@@ -855,7 +867,7 @@ fn find_map_group_plan(
     let mut consumer_indices = Vec::new();
     for use_site in uses {
         let UseOwner::Binding(binding_idx) = use_site.owner else {
-            return None;
+            reject!("consumer owner is not a binding");
         };
         let UseKind::SoacInput {
             term_id,
@@ -864,13 +876,13 @@ fn find_map_group_plan(
             ..
         } = &use_site.kind
         else {
-            return None;
+            reject!("consumer use is not a SOAC input");
         };
         if *term_id != bindings[binding_idx].rhs.id {
-            return None;
+            reject!("consumer input not the producer (term_id mismatch)");
         }
         if *input_index != 0 {
-            return None;
+            reject!("producer feeds input index {}, not 0", input_index);
         }
         match semantics {
             ArraySemantics::Elementwise { inputs, body } if inputs.len() == 1 => {
@@ -918,10 +930,13 @@ fn find_map_group_plan(
                     .any(|binding| term_mentions_any(&binding.rhs, &[scan_sym]))
                     || !symbol_uses_are_direct_tail_values(tail, scan_sym)
                 {
-                    return None;
+                    reject!("scan result is re-read by a later binding or not a direct tail value");
                 }
-                let mut accumulator =
-                    screma_consumer_accumulator(&bindings[binding_idx].rhs, producer.symbol)?;
+                let Some(mut accumulator) =
+                    screma_consumer_accumulator(&bindings[binding_idx].rhs, producer.symbol)
+                else {
+                    reject!("scan accumulator unsupported (input not producer sym, or arity mismatch)");
+                };
                 accumulator.op = super::SoacBody {
                     lam: compose_map_reduce(
                         producer_body.lam.clone(),
@@ -936,11 +951,14 @@ fn find_map_group_plan(
                 accumulators.push(accumulator);
                 consumer_indices.push(binding_idx);
             }
-            _ => return None,
+            other => reject!(
+                "consumer semantics unsupported for grouping: {:?}",
+                std::mem::discriminant(other)
+            ),
         }
     }
     if consumer_indices_are_dependent(bindings, &consumer_indices) {
-        return None;
+        reject!("grouped consumers are mutually dependent");
     }
 
     let mut result_fields = Vec::with_capacity(maps.len() + accumulators.len());
@@ -1630,6 +1648,19 @@ pub(super) fn substitute_term_expr(
     )
 }
 
+/// Convert a `replacement` term being substituted into a SOAC input position
+/// into an ANF input atom: a bare name stays a name; an array expression is
+/// itself an atom; a tuple-of-arrays (the SoA form of a `zip`) becomes a `Zip`
+/// of atoms. A producer term has no atomic form for an input position.
+fn term_to_input_atom(t: &Term) -> ArrayExpr {
+    match &t.kind {
+        TermKind::Var(vr) => ArrayExpr::Var(*vr, t.ty.clone()),
+        TermKind::ArrayExpr(ae) => ae.clone(),
+        TermKind::Tuple(elems) => ArrayExpr::Zip(elems.iter().map(term_to_input_atom).collect()),
+        other => panic!("ANF: cannot use a non-atom term as a SOAC input: {other:?}"),
+    }
+}
+
 fn substitute_term_in_array_expr(
     ae: ArrayExpr,
     old: SymbolId,
@@ -1637,8 +1668,15 @@ fn substitute_term_in_array_expr(
     term_ids: &mut TermIdSource,
 ) -> ArrayExpr {
     match ae {
-        ArrayExpr::Ref(term) => {
-            ArrayExpr::Ref(Box::new(substitute_term_expr(*term, old, replacement, term_ids)))
+        ArrayExpr::Var(vr, ty) => {
+            // Substituting a SOAC-input name with `replacement`. The result must
+            // stay an atom: a substituted name, or an array expression that is
+            // itself atomic. A producer replacement would inline a producer into
+            // an input position, which the IR forbids.
+            if matches!(vr, VarRef::Symbol(s) if s == old) {
+                return term_to_input_atom(replacement);
+            }
+            ArrayExpr::Var(vr, ty)
         }
         ArrayExpr::Zip(items) => ArrayExpr::Zip(
             items
@@ -1646,23 +1684,6 @@ fn substitute_term_in_array_expr(
                 .map(|item| substitute_term_in_array_expr(item, old, replacement, term_ids))
                 .collect(),
         ),
-        ArrayExpr::Soac(op) => {
-            let term = Term {
-                id: term_ids.next_id(),
-                ty: Type::Variable(0),
-                span: replacement.span,
-                kind: TermKind::Soac(*op),
-            };
-            match substitute_term_expr(term, old, replacement, term_ids).kind {
-                TermKind::Soac(op) => ArrayExpr::Soac(Box::new(op)),
-                other => ArrayExpr::Ref(Box::new(Term {
-                    id: term_ids.next_id(),
-                    ty: Type::Variable(0),
-                    span: replacement.span,
-                    kind: other,
-                })),
-            }
-        }
         ArrayExpr::Literal(terms) => ArrayExpr::Literal(
             terms.into_iter().map(|term| substitute_term_expr(term, old, replacement, term_ids)).collect(),
         ),
@@ -2389,208 +2410,6 @@ fn replace_consumer(
                 _ => None,
             }
         }
-    }
-}
-
-// =============================================================================
-// Inline map fusion: map(f, map(g, a)) → map(f∘g, a)
-// =============================================================================
-
-/// Bottom-up pass: fuse nested Maps in SOAC inputs.
-/// Fuse an inline SOAC producer that appears directly as another SOAC's
-/// input — the inline counterpart of the graph-driven let-chain fusion.
-/// Covers the same producer/consumer pairs as `build_fused_from_semantics`:
-/// `map → map` (compose into one Map), `map → reduce` (a single-accumulator
-/// `Screma`), and `map → scan` (fused Scan whose operator includes the map
-/// transform).
-///
-/// Inline nested SOACs (`scan(op, ne, map(g, xs))`) never get a let binding
-/// for the summary-based path to recognize, so without this they reach EGIR
-/// as a separate producer loop building a runtime-sized in-register array —
-/// which the SPIR-V backend cannot represent (`Composite variant unsized
-/// arrays not supported`).
-fn fuse_inline_soac_inputs(
-    term: Term,
-    symbols: &mut SymbolTable,
-    term_ids: &mut TermIdSource,
-) -> (Term, bool) {
-    // Recurse into children first (bottom-up), OR-ing in any child rewrites so
-    // the outer fixpoint re-analyzes a program this pass mutated.
-    let mut changed = false;
-    let term = term.map_children(&mut |child| {
-        let (child, child_changed) = fuse_inline_soac_inputs(child, symbols, term_ids);
-        changed |= child_changed;
-        child
-    });
-    let span = term.span;
-
-    match term.kind {
-        // map(f, map(g, xs)) → map(f∘g, xs)
-        TermKind::Soac(SoacOp::Map {
-            lam,
-            inputs,
-            destination,
-        }) => {
-            let has_fusible = inputs.iter().any(|input| {
-                matches!(input, ArrayExpr::Ref(t) if matches!(t.kind, TermKind::Soac(SoacOp::Map { .. })))
-            });
-            if has_fusible {
-                let fused = fuse_inline_map_inputs(lam, inputs, symbols, term_ids);
-                return (
-                    Term {
-                        kind: TermKind::Soac(fused),
-                        ..term
-                    },
-                    true,
-                );
-            }
-            (
-                Term {
-                    kind: TermKind::Soac(SoacOp::Map {
-                        lam,
-                        inputs,
-                        destination,
-                    }),
-                    ..term
-                },
-                changed,
-            )
-        }
-
-        // reduce(op, ne, map(g, xs)) → reducing Screma (step op∘g, combiner op, ne, xs)
-        // scan(op, ne, map(g, xs))   → scan(op∘g, ne, xs)   (single map input)
-        // Built through the same `build_fused_from_semantics` as the let-bound
-        // path: at this point the consumer is unfused (op == reduce_op), so the
-        // shared builder reconstructs the identical SOAC.
-        TermKind::Soac(soac @ (SoacOp::Reduce { .. } | SoacOp::Scan { .. })) => {
-            if let Some(fused) = fuse_inline_accumulator(&soac, &term.ty, span, symbols, term_ids) {
-                return (fused, true);
-            }
-            (
-                Term {
-                    kind: TermKind::Soac(soac),
-                    ..term
-                },
-                changed,
-            )
-        }
-
-        _ => (term, changed),
-    }
-}
-
-/// Fuse an inline `map` producer into an enclosing `reduce`/`scan` consumer,
-/// constructed via the shared [`build_fused_from_semantics`] so the inline path
-/// and the let-bound path build identical fused SOACs. Returns `None` if the
-/// accumulator's single input isn't an inline `map`.
-fn fuse_inline_accumulator(
-    consumer: &SoacOp,
-    consumer_ty: &Type<TypeName>,
-    span: Span,
-    symbols: &mut SymbolTable,
-    term_ids: &mut TermIdSource,
-) -> Option<Term> {
-    let input = match consumer {
-        SoacOp::Reduce { input, .. } | SoacOp::Scan { input, .. } => input,
-        _ => return None,
-    };
-    let (map_lam, map_inputs) = inline_map_producer(input)?;
-    let producer = ArraySemantics::Elementwise {
-        inputs: map_inputs,
-        body: map_lam,
-    };
-    let consumer_sem = classify_soac(consumer);
-    let recipe = can_fuse(&producer, &consumer_sem)?;
-    build_fused_from_semantics(
-        &producer,
-        &consumer_sem,
-        &recipe,
-        0,
-        consumer_ty.clone(),
-        span,
-        symbols,
-        term_ids,
-    )
-}
-
-/// If `input` is an inline `map(...)` producer (`ArrayExpr::Ref` wrapping a
-/// `Map` SOAC), return its lambda body + parallel inputs; else `None`.
-fn inline_map_producer(input: &ArrayExpr) -> Option<(super::SoacBody, Vec<ArrayExpr>)> {
-    if let ArrayExpr::Ref(t) = input {
-        if let TermKind::Soac(SoacOp::Map { lam, inputs, .. }) = &t.kind {
-            return Some((lam.clone(), inputs.clone()));
-        }
-    }
-    None
-}
-
-/// Fuse inline nested Maps from a Map's inputs.
-fn fuse_inline_map_inputs(
-    lam: super::SoacBody,
-    inputs: Vec<ArrayExpr>,
-    symbols: &mut SymbolTable,
-    term_ids: &mut TermIdSource,
-) -> SoacOp {
-    // Pre-defunc, captures are empty — operate on the inner Lambda.
-    let lam = lam.lam;
-    let mut new_params = Vec::new();
-    let mut new_inputs = Vec::new();
-    let mut body = *lam.body;
-    let span = body.span;
-
-    for (i, input) in inputs.into_iter().enumerate() {
-        let is_inner_map = matches!(
-            &input,
-            ArrayExpr::Ref(t) if matches!(t.kind, TermKind::Soac(SoacOp::Map { .. }))
-        );
-
-        if is_inner_map {
-            let inner_term = match input {
-                ArrayExpr::Ref(t) => *t,
-                _ => unreachable!(),
-            };
-            let (inner_sb, inner_inputs) = match inner_term.kind {
-                TermKind::Soac(SoacOp::Map { lam, inputs, .. }) => (lam, inputs),
-                _ => unreachable!(),
-            };
-            let inner_lam = inner_sb.lam;
-
-            let fresh = symbols.alloc("_fused".to_string());
-            let outer_param = lam.params[i].0;
-
-            body = substitute_sym(body, outer_param, fresh, term_ids);
-
-            body = Term {
-                id: term_ids.next_id(),
-                ty: body.ty.clone(),
-                span,
-                kind: TermKind::Let {
-                    name: fresh,
-                    name_ty: inner_lam.ret_ty,
-                    rhs: inner_lam.body,
-                    body: Box::new(body),
-                },
-            };
-
-            new_params.extend(inner_lam.params);
-            new_inputs.extend(inner_inputs);
-        } else {
-            new_params.push(lam.params[i].clone());
-            new_inputs.push(input);
-        }
-    }
-
-    SoacOp::Map {
-        lam: super::SoacBody {
-            lam: Lambda {
-                params: new_params,
-                body: Box::new(body),
-                ret_ty: lam.ret_ty,
-            },
-            captures: vec![],
-        },
-        inputs: new_inputs,
-        destination: SoacDestination::Fresh,
     }
 }
 

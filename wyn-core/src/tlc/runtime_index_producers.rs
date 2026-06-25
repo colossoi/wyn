@@ -40,6 +40,7 @@ pub fn run(mut program: Program) -> Program {
         program.defs[idx].body = wrap_lets(floats, body, &mut ids);
     }
 
+    super::anf::debug_check(&program, "runtime_index_producers");
     program
 }
 
@@ -440,10 +441,8 @@ fn float_array_expr(
     symbols: &mut crate::SymbolTable,
 ) -> (Vec<Binding>, ArrayExpr) {
     match ae {
-        ArrayExpr::Ref(term) => {
-            let (floats, term) = float_term(*term, blocked, ids, symbols, true);
-            (floats, ArrayExpr::Ref(Box::new(term)))
-        }
+        // A named input has no producer to float.
+        ArrayExpr::Var(vr, ty) => (vec![], ArrayExpr::Var(vr, ty)),
         ArrayExpr::Zip(children) => {
             let mut floats = Vec::new();
             let children = children
@@ -455,10 +454,6 @@ fn float_array_expr(
                 })
                 .collect();
             (floats, ArrayExpr::Zip(children))
-        }
-        ArrayExpr::Soac(soac) => {
-            let (floats, soac) = float_soac(*soac, blocked, ids, symbols);
-            (floats, ArrayExpr::Soac(Box::new(soac)))
         }
         ArrayExpr::Literal(terms) => {
             let mut floats = Vec::new();

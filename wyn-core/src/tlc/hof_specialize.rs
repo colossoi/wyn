@@ -420,11 +420,10 @@ pub(super) fn apply_type_subst_to_array_expr(
     term_ids: &mut TermIdSource,
 ) -> ArrayExpr {
     match ae {
-        ArrayExpr::Ref(t) => ArrayExpr::Ref(Box::new(apply_type_subst_to_term(t, subst, term_ids))),
+        ArrayExpr::Var(vr, ty) => ArrayExpr::Var(*vr, apply_type_subst(ty, subst)),
         ArrayExpr::Zip(exprs) => ArrayExpr::Zip(
             exprs.iter().map(|e| apply_type_subst_to_array_expr(e, subst, term_ids)).collect(),
         ),
-        ArrayExpr::Soac(op) => ArrayExpr::Soac(Box::new(apply_type_subst_to_soac(op, subst, term_ids))),
         ArrayExpr::Literal(terms) => {
             ArrayExpr::Literal(terms.iter().map(|t| apply_type_subst_to_term(t, subst, term_ids)).collect())
         }
@@ -874,13 +873,16 @@ fn substitute_var_array_expr(
     term_ids: &mut TermIdSource,
 ) -> ArrayExpr {
     match ae {
-        ArrayExpr::Ref(t) => ArrayExpr::Ref(Box::new(substitute_var(t, old_sym, new_sym, term_ids))),
+        ArrayExpr::Var(vr, ty) => {
+            let renamed = match vr {
+                VarRef::Symbol(s) if *s == old_sym => VarRef::Symbol(new_sym),
+                other => *other,
+            };
+            ArrayExpr::Var(renamed, ty.clone())
+        }
         ArrayExpr::Zip(exprs) => ArrayExpr::Zip(
             exprs.iter().map(|e| substitute_var_array_expr(e, old_sym, new_sym, term_ids)).collect(),
         ),
-        ArrayExpr::Soac(op) => {
-            ArrayExpr::Soac(Box::new(substitute_var_soac(op, old_sym, new_sym, term_ids)))
-        }
         ArrayExpr::Literal(terms) => ArrayExpr::Literal(
             terms.iter().map(|t| substitute_var(t, old_sym, new_sym, term_ids)).collect(),
         ),
@@ -1353,18 +1355,10 @@ impl<'a> HofSpecializer<'a> {
                 kind: TermKind::Soac(self.cascade_specialize_soac(soac)),
                 ..term
             },
-            TermKind::ArrayExpr(ae) => Term {
-                kind: TermKind::ArrayExpr(self.cascade_specialize_array_expr(ae)),
-                ..term
-            },
+            // An `ArrayExpr`'s inputs are atoms — a producer is a `TermKind::Soac`
+            // (cascaded above), never nested in an array expression — so an
+            // `ArrayExpr` term passes through unchanged.
             _ => term,
-        }
-    }
-
-    fn cascade_specialize_array_expr(&mut self, ae: ArrayExpr) -> ArrayExpr {
-        match ae {
-            ArrayExpr::Soac(boxed) => ArrayExpr::Soac(Box::new(self.cascade_specialize_soac(*boxed))),
-            other => other,
         }
     }
 

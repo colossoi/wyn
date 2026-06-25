@@ -584,25 +584,25 @@ impl<'p> Builder<'p> {
     /// element views; everything else borrows.
     fn element_origin_from_input(&self, ae: &ArrayExpr) -> Origin {
         match ae {
-            ArrayExpr::Ref(t) => {
-                if let Some(owner) = self.alias_target(t) {
+            ArrayExpr::Var(vr, ty) => {
+                let mut ids = super::TermIdSource::new();
+                let t = super::atom_var_term(*vr, ty.clone(), &mut ids);
+                if let Some(owner) = self.alias_target(&t) {
                     if self.model.origin(owner).map(|o| o.is_mutable()).unwrap_or(false) {
                         return Origin::BorrowedMutableElement;
                     }
                     return Origin::Borrowed;
                 }
-                // No tracked owner — fall back to the term's static type.
-                if types::is_unique(&t.ty) {
+                // No tracked owner — fall back to the named input's static type.
+                if types::is_unique(ty) {
                     Origin::BorrowedMutableElement
                 } else {
                     Origin::Borrowed
                 }
             }
-            // Fresh-producer ArrayExprs: literal/range/soac synthesize
-            // a new array, so element views are mutable.
-            ArrayExpr::Literal(_) | ArrayExpr::Range { .. } | ArrayExpr::Soac(_) => {
-                Origin::BorrowedMutableElement
-            }
+            // Fresh-producer ArrayExprs: literal/range synthesize a new array,
+            // so element views are mutable.
+            ArrayExpr::Literal(_) | ArrayExpr::Range { .. } => Origin::BorrowedMutableElement,
             // Storage-buffer-backed views: conservative borrow.
             ArrayExpr::StorageView(_) => Origin::Borrowed,
             // Zip is a phase-scoped sentinel that should be absorbed
@@ -614,18 +614,17 @@ impl<'p> Builder<'p> {
 
     fn visit_array_expr(&mut self, ae: &ArrayExpr) {
         match ae {
-            ArrayExpr::Ref(t) => self.visit_term(t),
+            // A named SOAC-input atom carries no `TermId` of its own, so its use
+            // can't be recorded in the id-keyed `uses` table without fabricating
+            // a placeholder id (which would alias a real term and corrupt
+            // `transfer`). Liveness reads this use natively in
+            // `Liveness::analyze_array_expr` instead; nothing else consumes it.
+            ArrayExpr::Var(..) => {}
             ArrayExpr::Zip(aes) => {
                 for ae in aes {
                     self.visit_array_expr(ae);
                 }
             }
-            // Nested SOAC inside an ArrayExpr: there is no
-            // dedicated TermId for it (the SOAC isn't wrapped in a
-            // Term here), so per-call defs land under a sentinel.
-            // `lambda_body_fixed_point` looks up by the call site's
-            // own id, so this sentinel collision is harmless.
-            ArrayExpr::Soac(op) => self.visit_soac(op, TermId(u32::MAX)),
             ArrayExpr::Literal(terms) => {
                 for t in terms {
                     self.visit_term(t);
@@ -1012,7 +1011,18 @@ impl<'m> Liveness<'m> {
 
     fn analyze_array_expr(&mut self, ae: &ArrayExpr, live_after: LiveSet) -> LiveSet {
         match ae {
-            ArrayExpr::Ref(t) => self.analyze(t, live_after),
+            // A named SOAC-input atom is a use of `sym`, so its owner is live
+            // before the SOAC. It has no `TermId`, so add the use directly rather
+            // than routing through `transfer` on a fabricated (and colliding)
+            // placeholder id.
+            ArrayExpr::Var(VarRef::Symbol(sym), _) => {
+                let mut live = live_after;
+                if let Some(owner) = self.model.owner_of(*sym) {
+                    live.insert(owner);
+                }
+                live
+            }
+            ArrayExpr::Var(VarRef::Builtin { .. }, _) => live_after,
             ArrayExpr::Zip(aes) => {
                 let mut live = live_after;
                 for ae in aes.iter().rev() {
@@ -1020,7 +1030,6 @@ impl<'m> Liveness<'m> {
                 }
                 live
             }
-            ArrayExpr::Soac(op) => self.analyze_soac(op, live_after, TermId(u32::MAX)),
             ArrayExpr::Literal(terms) => {
                 let mut live = live_after;
                 for t in terms.iter().rev() {
@@ -1366,12 +1375,8 @@ fn input_is_dead_unique_var(
     input: &ArrayExpr,
     model: &OwnershipModel,
 ) -> Option<SymbolId> {
-    let input_term = match input {
-        ArrayExpr::Ref(t) => &**t,
-        _ => return None,
-    };
-    let input_sym = match &input_term.kind {
-        TermKind::Var(VarRef::Symbol(s)) => *s,
+    let input_sym = match input {
+        ArrayExpr::Var(VarRef::Symbol(s), _) => *s,
         _ => return None,
     };
     let owner = model.owner_of(input_sym)?;

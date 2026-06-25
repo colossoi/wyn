@@ -58,6 +58,7 @@ pub fn run(mut program: Program, binding_ids: &mut crate::IdSource<u32>) -> Prog
         lift_entry(&mut program, idx, &mut new_defs, binding_ids);
     }
     program.defs.extend(new_defs);
+    super::anf::debug_check(&program, "lift_gathers");
     program
 }
 
@@ -86,6 +87,7 @@ fn lift_entry(
         &mut added_decls,
         new_defs,
         program,
+        &[],
     );
 
     program.defs[idx].body = new_body;
@@ -104,6 +106,7 @@ fn lift_in_term(
     added_decls: &mut Vec<StorageBindingDecl>,
     new_defs: &mut Vec<Def>,
     program: &mut Program,
+    local_lets: &[(SymbolId, Type<TypeName>, Term)],
 ) -> Term {
     match term.kind {
         TermKind::Lambda(lam) => {
@@ -116,6 +119,7 @@ fn lift_in_term(
                 added_decls,
                 new_defs,
                 program,
+                local_lets,
             );
             Term {
                 kind: TermKind::Lambda(Lambda {
@@ -147,6 +151,7 @@ fn lift_in_term(
                 candidate_binding,
                 new_defs.len(),
                 program,
+                local_lets,
             ) {
                 let _ = binding_ids.next_id();
                 new_defs.push(prepass);
@@ -160,8 +165,12 @@ fn lift_in_term(
                     added_decls,
                     new_defs,
                     program,
+                    local_lets,
                 );
             }
+            let rhs_for_scope = (*rhs).clone();
+            let mut body_local_lets = local_lets.to_vec();
+            body_local_lets.push((name, name_ty.clone(), rhs_for_scope));
             let new_body = lift_in_term(
                 *body,
                 entry_name,
@@ -170,6 +179,7 @@ fn lift_in_term(
                 added_decls,
                 new_defs,
                 program,
+                &body_local_lets,
             );
             // After normalize_outputs, the rhs of a sequencing let is an
             // OutputSlotStore that may wrap further gather candidates
@@ -184,6 +194,7 @@ fn lift_in_term(
                     added_decls,
                     new_defs,
                     program,
+                    local_lets,
                 ))
             } else {
                 rhs
@@ -207,6 +218,7 @@ fn lift_in_term(
                 added_decls,
                 new_defs,
                 program,
+                local_lets,
             );
             Term {
                 kind: TermKind::OutputSlotStore {
@@ -234,6 +246,7 @@ fn try_lift(
     binding_num: u32,
     gather_idx: usize,
     program: &mut Program,
+    local_lets: &[(SymbolId, Type<TypeName>, Term)],
 ) -> Option<(Def, StorageBindingDecl, Term)> {
     // Producer must be an array-yielding SOAC (`map` or `scan`) of a
     // runtime-sized array. Both preserve element count, so the gather buffer
@@ -251,7 +264,10 @@ fn try_lift(
     // keeps the pre-pass self-contained over real buffers. (Fusion has already
     // folded any `map` producer into the scan/map, so a `scan(op, ne, map(g,
     // xs))` arrives reading `xs` directly.)
-    let frees = free_symbol_vars(rhs, &program.symbols, &program.def_syms);
+    let local_deps =
+        local_gather_dependencies(rhs, local_lets, outer_slots, &program.symbols, &program.def_syms)?;
+    let producer = wrap_local_gather_dependencies(rhs.clone(), &local_deps);
+    let frees = free_symbol_vars(&producer, &program.symbols, &program.def_syms);
     if !frees
         .iter()
         .all(|(s, ty)| is_runtime_sized_array(ty) && find_outer_single(outer_slots, *s).is_some())
@@ -296,12 +312,12 @@ fn try_lift(
     // binding, …}` directly (e.g. its input was itself an already-lifted
     // gather buffer), the pre-pass must declare each as its own Input so the
     // descriptor wires up the cross-stage read.
-    let chained = producer_storage_inputs(rhs);
+    let chained = producer_storage_inputs(&producer);
 
     let prepass = build_gather_prepass(
         entry_name,
         gather_idx,
-        rhs.clone(),
+        producer,
         name_ty.clone(),
         &frees,
         outer_slots,
@@ -348,6 +364,88 @@ fn gather_length(
 /// Scan the outer entry's cached param-binding slots for a Single-kind binding
 /// matching `sym`. Tuple-of-views bindings are skipped — gather captures are
 /// always bare `Var(sym)` references, never tuple projections.
+fn local_gather_dependencies(
+    term: &Term,
+    local_lets: &[(SymbolId, Type<TypeName>, Term)],
+    outer_slots: &[Option<EntryParamBinding>],
+    symbols: &SymbolTable,
+    def_syms: &LookupMap<String, SymbolId>,
+) -> Option<Vec<(SymbolId, Type<TypeName>, Term)>> {
+    let mut needed: LookupSet<SymbolId> = free_symbol_vars(term, symbols, def_syms)
+        .into_iter()
+        .filter_map(|(sym, ty)| {
+            let outer_input = is_runtime_sized_array(&ty) && find_outer_single(outer_slots, sym).is_some();
+            (!outer_input).then_some(sym)
+        })
+        .collect();
+    if needed.is_empty() {
+        return Some(Vec::new());
+    }
+
+    let mut deps = Vec::new();
+    for (sym, ty, rhs) in local_lets.iter().rev() {
+        if !needed.contains(sym) {
+            continue;
+        }
+        if !is_local_gather_dependency(rhs) {
+            return None;
+        }
+        needed.remove(sym);
+        for (dep_sym, dep_ty) in free_symbol_vars(rhs, symbols, def_syms) {
+            let outer_input =
+                is_runtime_sized_array(&dep_ty) && find_outer_single(outer_slots, dep_sym).is_some();
+            if !outer_input {
+                needed.insert(dep_sym);
+            }
+        }
+        deps.push((*sym, ty.clone(), rhs.clone()));
+    }
+
+    if !needed.is_empty() {
+        return None;
+    }
+    deps.reverse();
+    Some(deps)
+}
+
+fn is_local_gather_dependency(term: &Term) -> bool {
+    is_array_type(&term.ty) && !contains_local_gather_dependency_blocker(term)
+}
+
+fn is_array_type(ty: &Type<TypeName>) -> bool {
+    crate::types::array_size(&crate::types::strip_unique(ty)).is_some()
+}
+
+fn contains_local_gather_dependency_blocker(term: &Term) -> bool {
+    if matches!(term.kind, TermKind::Soac(_) | TermKind::OutputSlotStore { .. }) {
+        return true;
+    }
+    let mut blocked = false;
+    term.for_each_child(&mut |child| {
+        if !blocked {
+            blocked = contains_local_gather_dependency_blocker(child);
+        }
+    });
+    blocked
+}
+
+fn wrap_local_gather_dependencies(mut producer: Term, deps: &[(SymbolId, Type<TypeName>, Term)]) -> Term {
+    for (name, name_ty, rhs) in deps.iter().rev() {
+        producer = Term {
+            id: producer.id,
+            ty: producer.ty.clone(),
+            span: rhs.span,
+            kind: TermKind::Let {
+                name: *name,
+                name_ty: name_ty.clone(),
+                rhs: Box::new(rhs.clone()),
+                body: Box::new(producer),
+            },
+        };
+    }
+    producer
+}
+
 fn find_outer_single(
     outer_slots: &[Option<EntryParamBinding>],
     sym: SymbolId,
@@ -645,8 +743,8 @@ fn rewrite_array_input(
     term_ids: &mut TermIdSource,
 ) -> ArrayExpr {
     match ae {
-        ArrayExpr::Ref(t) => {
-            if matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == arr) {
+        ArrayExpr::Var(vr, ty) => {
+            if matches!(vr, VarRef::Symbol(s) if s == arr) {
                 *soac_uses += 1;
                 let bref = BindingRef::new(binding.0, binding.1);
                 let len = super::storage_len_call(bref, span, term_ids);
@@ -657,11 +755,8 @@ fn rewrite_array_input(
                     elem_ty: elem_ty.clone(),
                 })
             } else {
-                // The wrapped term is a generic Term context (not itself an
-                // input position) — descend via `rewrite_uses`.
-                ArrayExpr::Ref(Box::new(rewrite_uses(
-                    *t, arr, binding, elem_ty, bail, dyn_uses, soac_uses, term_ids,
-                )))
+                // A different named input — a leaf, nothing to rewrite.
+                ArrayExpr::Var(vr, ty)
             }
         }
         ArrayExpr::Zip(children) => ArrayExpr::Zip(
@@ -674,9 +769,6 @@ fn rewrite_array_input(
                 })
                 .collect(),
         ),
-        ArrayExpr::Soac(boxed) => ArrayExpr::Soac(Box::new(rewrite_soac(
-            *boxed, arr, binding, elem_ty, bail, dyn_uses, soac_uses, span, term_ids,
-        ))),
         ArrayExpr::Literal(terms) => ArrayExpr::Literal(
             terms
                 .into_iter()
@@ -846,6 +938,9 @@ fn producer_storage_inputs(rhs: &Term) -> Vec<(u32, u32, Type<TypeName>)> {
 }
 
 fn collect_storage_in_term(term: &Term, out: &mut Vec<(u32, u32, Type<TypeName>)>) {
+    if let Some((set, binding, elem_ty)) = storage_index_input(term) {
+        push_storage_input(out, set, binding, elem_ty);
+    }
     if let TermKind::Soac(soac) = &term.kind {
         collect_storage_in_soac(soac, out);
     }
@@ -869,22 +964,19 @@ fn collect_storage_in_soac(soac: &SoacOp, out: &mut Vec<(u32, u32, Type<TypeName
 fn collect_storage_in_ae(ae: &ArrayExpr, out: &mut Vec<(u32, u32, Type<TypeName>)>) {
     match ae {
         ArrayExpr::StorageView(sv) => {
-            let key = (sv.binding.set, sv.binding.binding);
-            if !out.iter().any(|(s, b, _)| (*s, *b) == key) {
-                out.push((sv.binding.set, sv.binding.binding, sv.elem_ty.clone()));
-            }
+            push_storage_input(out, sv.binding.set, sv.binding.binding, sv.elem_ty.clone());
             // The offset/len Terms can themselves contain SOACs reading
             // other storage buffers — keep descending.
             collect_storage_in_term(&sv.offset, out);
             collect_storage_in_term(&sv.len, out);
         }
-        ArrayExpr::Ref(t) => collect_storage_in_term(t, out),
+        // A named input is a leaf — no storage view to collect.
+        ArrayExpr::Var(_, _) => {}
         ArrayExpr::Zip(children) => {
             for c in children {
                 collect_storage_in_ae(c, out);
             }
         }
-        ArrayExpr::Soac(boxed) => collect_storage_in_soac(boxed, out),
         ArrayExpr::Literal(terms) => {
             for t in terms {
                 collect_storage_in_term(t, out);
@@ -897,6 +989,37 @@ fn collect_storage_in_ae(ae: &ArrayExpr, out: &mut Vec<(u32, u32, Type<TypeName>
                 collect_storage_in_term(s, out);
             }
         }
+    }
+}
+
+fn storage_index_input(term: &Term) -> Option<(u32, u32, Type<TypeName>)> {
+    let TermKind::App { func, args } = &term.kind else {
+        return None;
+    };
+    let TermKind::Var(VarRef::Builtin { id, .. }) = &func.kind else {
+        return None;
+    };
+    if *id != crate::builtins::catalog().known().storage_index || args.len() != 3 {
+        return None;
+    }
+    Some((u32_int_lit(&args[0])?, u32_int_lit(&args[1])?, term.ty.clone()))
+}
+
+fn u32_int_lit(term: &Term) -> Option<u32> {
+    match &term.kind {
+        TermKind::IntLit(s) => s.parse::<u32>().ok(),
+        _ => None,
+    }
+}
+
+fn push_storage_input(
+    out: &mut Vec<(u32, u32, Type<TypeName>)>,
+    set: u32,
+    binding: u32,
+    elem_ty: Type<TypeName>,
+) {
+    if !out.iter().any(|(s, b, _)| *s == set && *b == binding) {
+        out.push((set, binding, elem_ty));
     }
 }
 

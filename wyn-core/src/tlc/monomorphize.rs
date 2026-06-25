@@ -694,11 +694,17 @@ impl<'a> Monomorphizer<'a> {
 
     fn process_array_expr(&mut self, ae: &ArrayExpr) -> ArrayExpr {
         match ae {
-            ArrayExpr::Ref(t) => ArrayExpr::Ref(Box::new(self.process_term(t))),
+            // Route the named input through `process_term`: a var referencing a
+            // top-level constant must reach `ensure_in_worklist` so the constant
+            // survives monomorphization's worklist-driven DCE, and a reference to
+            // a polymorphic def gets its symbol rewritten to the specialization.
+            ArrayExpr::Var(vr, ty) => {
+                let t = super::atom_var_term(*vr, ty.clone(), &mut self.term_ids);
+                super::term_as_input_atom(self.process_term(&t))
+            }
             ArrayExpr::Zip(exprs) => {
                 ArrayExpr::Zip(exprs.iter().map(|e| self.process_array_expr(e)).collect())
             }
-            ArrayExpr::Soac(op) => ArrayExpr::Soac(Box::new(self.process_soac(op))),
             ArrayExpr::Literal(terms) => {
                 ArrayExpr::Literal(terms.iter().map(|t| self.process_term(t)).collect())
             }
@@ -1067,11 +1073,10 @@ impl<'a> Monomorphizer<'a> {
 
     fn apply_subst_array_expr(&mut self, ae: &ArrayExpr, subst: &Substitution) -> ArrayExpr {
         match ae {
-            ArrayExpr::Ref(t) => ArrayExpr::Ref(Box::new(self.apply_subst_term(t, subst))),
+            ArrayExpr::Var(vr, ty) => ArrayExpr::Var(*vr, apply_subst(ty, subst)),
             ArrayExpr::Zip(exprs) => {
                 ArrayExpr::Zip(exprs.iter().map(|e| self.apply_subst_array_expr(e, subst)).collect())
             }
-            ArrayExpr::Soac(op) => ArrayExpr::Soac(Box::new(self.apply_subst_soac(op, subst))),
             ArrayExpr::Literal(terms) => {
                 ArrayExpr::Literal(terms.iter().map(|t| self.apply_subst_term(t, subst)).collect())
             }

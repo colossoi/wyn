@@ -40,10 +40,6 @@ fn term(kind: TermKind, ty: Type<TypeName>, ids: &mut TermIdSource) -> Term {
     }
 }
 
-fn var(sym: u32, ty: Type<TypeName>, ids: &mut TermIdSource) -> Term {
-    term(TermKind::Var(VarRef::Symbol(SymbolId::from(sym))), ty, ids)
-}
-
 /// A trivial single-param lambda returning `lit` — stands in as a Filter
 /// predicate or a Map's elementwise body.
 fn trivial_lam(ret: Type<TypeName>, lit: TermKind, ids: &mut TermIdSource) -> SoacBody {
@@ -57,11 +53,16 @@ fn trivial_lam(ret: Type<TypeName>, lit: TermKind, ids: &mut TermIdSource) -> So
     }
 }
 
+/// A named array input atom over symbol `sym`.
+fn arr_var(sym: u32) -> ArrayExpr {
+    ArrayExpr::Var(VarRef::Symbol(SymbolId::from(sym)), arr_ty())
+}
+
 /// `map(λx. 0, xs)` — a producer over a named input `xs` (itself ANF).
 fn map_producer(xs: u32, ids: &mut TermIdSource) -> SoacOp {
     SoacOp::Map {
         lam: trivial_lam(i32_ty(), TermKind::IntLit("0".into()), ids),
-        inputs: vec![ArrayExpr::Ref(Box::new(var(xs, arr_ty(), ids)))],
+        inputs: vec![arr_var(xs)],
         destination: SoacDestination::Fresh,
     }
 }
@@ -99,28 +100,14 @@ fn prog(body: Term) -> Program {
 fn named_filter_input_is_anf() {
     // filter(p, ys) where ys is a bare name — the canonical ANF input.
     let mut ids = TermIdSource::new();
-    let body = filter_term(ArrayExpr::Ref(Box::new(var(0, arr_ty(), &mut ids))), &mut ids);
+    let body = filter_term(arr_var(0), &mut ids);
     assert!(check(&prog(body)).is_ok());
 }
 
-#[test]
-fn inline_soac_filter_input_is_rejected() {
-    // filter(p, map(f, xs)) with the producer as `ArrayExpr::Soac`.
-    let mut ids = TermIdSource::new();
-    let input = ArrayExpr::Soac(Box::new(map_producer(0, &mut ids)));
-    let err = check(&prog(filter_term(input, &mut ids))).unwrap_err();
-    assert!(err.contains("SOAC array input"), "{err}");
-}
-
-#[test]
-fn ref_wrapped_soac_filter_input_is_rejected() {
-    // filter(p, map(f, xs)) with the producer as `Ref(Term{Soac})` — the
-    // common inline encoding.
-    let mut ids = TermIdSource::new();
-    let map_t = term(TermKind::Soac(map_producer(0, &mut ids)), arr_ty(), &mut ids);
-    let input = ArrayExpr::Ref(Box::new(map_t));
-    assert!(check(&prog(filter_term(input, &mut ids))).is_err());
-}
+// An inline producer in a SOAC input — `filter(p, map(f, xs))` — is
+// unrepresentable: the `ArrayExpr` type admits only atoms, so the type itself
+// rules out that position. The validator's job is the `Index`/`App` Term
+// positions below, which the type cannot constrain.
 
 #[test]
 fn inline_producer_in_index_is_rejected() {
@@ -146,7 +133,7 @@ fn let_bound_producer_then_named_consumer_is_anf() {
     // consumer over the name. No violation.
     let mut ids = TermIdSource::new();
     let rhs = term(TermKind::Soac(map_producer(0, &mut ids)), arr_ty(), &mut ids);
-    let consumer = filter_term(ArrayExpr::Ref(Box::new(var(1, arr_ty(), &mut ids))), &mut ids);
+    let consumer = filter_term(arr_var(1), &mut ids);
     let body = term(
         TermKind::Let {
             name: SymbolId::from(1),

@@ -209,6 +209,35 @@ entry gen(xs: []i32) []i32 =
 }
 
 #[test]
+fn lifts_chained_scan_with_fused_gather_input() {
+    // `s2` is a scan over a map that dynamically indexes `s1`; fusion composes
+    // the map into the scan. The first gather lift materializes `s1`, and the
+    // second must still see `s2` as a liftable scan producer.
+    let src = "\
+#[compute]
+entry gen(bh: []vec4f32) []i32 =
+  let counts = map(|h:vec4f32| 4 + 5*(if h.x>4.0 then 3 else 1), bh) in
+  let s1 = scan(|a:i32,b:i32| a+b, 0, counts) in
+  let s2 = scan(|a:i32,b:i32| a+b, 0,
+      map(|i:i32| s1[i % 256], iota(6144))) in
+  map(|i:i32| s2[i % 128], iota(2048))
+";
+    let lifted = super::run(ownership_applied(src), &mut crate::IdSource::<u32>::new());
+    let prepasses = lifted
+        .defs
+        .iter()
+        .filter(|d| {
+            matches!(d.meta, super::DefMeta::EntryPoint(_))
+                && lifted.symbols.get(d.name).is_some_and(|n| n.contains("_gather_"))
+        })
+        .count();
+    assert_eq!(
+        prepasses, 2,
+        "expected gather pre-passes for both s1 and the fused s2 scan"
+    );
+}
+
+#[test]
 fn declines_bare_var_in_non_materializable_position() {
     // `counts` appears both as `counts[i % 256]` (materializable → would
     // become `storage_index`) and as a bare `Var(counts)` argument to the
