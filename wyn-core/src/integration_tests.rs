@@ -3964,6 +3964,63 @@ entry cmptest(idx: []u32) ?k. [k]vec4f32 =
     );
 }
 
+/// An entry returning *both* a filtered array and a value derived from its
+/// `length`, with the existential over the WHOLE tuple: `?k. ([k]u32, [1]u32)`.
+/// The `?k.` packs over the tuple — `normalize_outputs` must see through the
+/// existential wrapper and count the tuple's two outputs, not treat the whole
+/// `?k.(…)` as a single output. (Form A.)
+#[test]
+fn filter_array_and_length_existential_over_tuple_compiles() {
+    compile_parallel(
+        "\
+open f32
+#[compute]
+entry both(xs: []u32) ?k. ([k]u32, [1]u32) =
+  let v = filter(|x| x < 100u32, xs) in
+  let n = length(v) in
+  (v, [u32(n)])
+",
+    );
+}
+
+/// Same body as Form A, but the existential is on just the first tuple
+/// component: `(?k. [k]u32, [1]u32)`. The per-component existential must unify
+/// with the filter result's skolem-pinned size, so the entry still type-checks
+/// and lowers. (Form B.)
+#[test]
+fn filter_array_and_length_per_component_existential_compiles() {
+    compile_parallel(
+        "\
+open f32
+#[compute]
+entry both(xs: []u32) (?k. [k]u32, [1]u32) =
+  let v = filter(|x| x < 100u32, xs) in
+  let n = length(v) in
+  (v, [u32(n)])
+",
+    );
+}
+
+/// Two filters with *independent* runtime lengths, returned as a tuple under
+/// stacked existentials — `?k. ?j. ([k]u32, [j]u32)`. Exercises both halves of
+/// the existential-over-tuple handling: the output-count see-through peels the
+/// stacked `?k. ?j.` wrappers to the tuple (two output slots), and the return
+/// check packs each quantifier to its *own* fresh witness — so the two distinct
+/// skolem lengths are kept distinct, never conflated into one.
+#[test]
+fn two_filters_distinct_existential_lengths_compile() {
+    compile_parallel(
+        "\
+open f32
+#[compute]
+entry both2(xs: []u32) ?k. ?j. ([k]u32, [j]u32) =
+  let v = filter(|x| x < 100u32, xs) in
+  let w = filter(|x| x > 5u32, xs) in
+  (v, w)
+",
+    );
+}
+
 /// A `map → filter → map → reduce` chain (the `separation`-style shape: a
 /// producer map feeds a filter, whose result feeds another map then a reduce)
 /// must collapse to a single masked `Screma`. The trailing map fuses into the

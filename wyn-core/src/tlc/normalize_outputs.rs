@@ -88,6 +88,20 @@ pub fn run(mut program: Program) -> Result<Program, NormalizeError> {
     Ok(program)
 }
 
+/// The tuple arity reachable by peeling existential / uniqueness markers off a
+/// type, or `None` if it isn't a (wrapped) tuple. Mirrors how those markers are
+/// seen through elsewhere — a `?k. (A, B)` or `*(A, B)` entry output is N
+/// separate bindings.
+fn tuple_arity_through_markers(ty: &Type<TypeName>) -> Option<usize> {
+    match ty {
+        Type::Constructed(TypeName::Existential(_) | TypeName::Unique, args) if args.len() == 1 => {
+            tuple_arity_through_markers(&args[0])
+        }
+        Type::Constructed(TypeName::Tuple(n), _) => Some(*n),
+        _ => None,
+    }
+}
+
 fn normalize_entry(
     def: &mut Def,
     term_ids: &mut TermIdSource,
@@ -97,7 +111,16 @@ fn normalize_entry(
         unreachable!("filtered to EntryPoint")
     };
     let entry_name = decl.name.clone();
-    let n_outputs = decl.outputs.len();
+    // A single declared output that is an existential (and/or unique) wrapper
+    // over a tuple denotes one binding *per tuple component* — the quantifier /
+    // uniqueness marker is seen through, the same way uniqueness markers are
+    // elsewhere, with the single `?k.` binder shared across the components.
+    // `?k. (A, B)` is two output slots, not one.
+    let n_outputs = if decl.outputs.len() == 1 {
+        tuple_arity_through_markers(&decl.outputs[0].ty).unwrap_or(1)
+    } else {
+        decl.outputs.len()
+    };
 
     // Peel the outer Lambda (entry params) and any tail Let-chain; the
     // tail expression is what we decompose. We rebuild the same

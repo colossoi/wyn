@@ -558,6 +558,12 @@ impl<'a> TypeChecker<'a> {
     /// let-opening, and packing the declared `?k.` return to a fresh variable
     /// lets that variable solve to the skolem. Non-existential types pass
     /// through unchanged.
+    ///
+    /// Recurses into type components, so an existential nested in a position
+    /// other than the top — e.g. a per-component `(?k. [k]u32, [1]u32)` tuple
+    /// return — is packed too. Each existential is instantiated independently,
+    /// so distinct components reusing the same bound name (`?k`) get distinct
+    /// fresh variables.
     fn instantiate_existential(&mut self, ty: Type) -> Type {
         match ty {
             Type::Constructed(TypeName::Existential(vars), args) if !args.is_empty() => {
@@ -566,9 +572,14 @@ impl<'a> TypeChecker<'a> {
                     let fresh = self.context.new_variable();
                     inner = Self::substitute_size_var(&inner, &var_name, &fresh);
                 }
-                inner
+                // The instantiated body may itself hold further existentials.
+                self.instantiate_existential(inner)
             }
-            _ => ty,
+            Type::Constructed(name, args) => Type::Constructed(
+                name,
+                args.into_iter().map(|a| self.instantiate_existential(a)).collect(),
+            ),
+            Type::Variable(_) => ty,
         }
     }
 
