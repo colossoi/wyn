@@ -3903,8 +3903,6 @@ fn compute_entry_points(pipeline: &crate::pipeline_descriptor::PipelineDescripto
 /// recording that the gather must run first. A host runtime can neither wire the
 /// gather's output into the filter's input nor order the two dispatches.
 #[test]
-#[ignore = "map→filter emits two unwired, unordered pipelines with mismatched \
-            intermediate names instead of one coherent pipeline"]
 fn map_into_filter_is_one_wired_pipeline() {
     let lowered = compile_parallel(
         "\
@@ -3923,15 +3921,38 @@ entry pick(xs: []u32) ?k. [k]u32 =
     );
 }
 
-/// Inlining the `map` directly into `filter` (instead of let-binding it first)
-/// should compile to the same thing as the let-bound form. Today it fails in
-/// EGraph conversion: the inlined `map` result is a runtime-sized array with no
-/// concrete buffer region, and `filter`'s lowering requires its input to be
-/// backed by a storage buffer. The let-bound form at least lowers (see
-/// `map_into_filter_is_one_wired_pipeline`); the inlined form doesn't compile.
+/// A capturing producer map folded into a filter: `map(|x| x + bound, xs)`
+/// captures the runtime value `bound`, so the fused filter's `map_lam` carries a
+/// capture. That capture must survive closure conversion's free-variable
+/// analysis, ownership/liveness (it is read inside the fused map), and the filter
+/// lowering (where it becomes an extra operand of the per-element map call,
+/// split out by `map_capture_count`). Still one coherent pipeline.
 #[test]
-#[ignore = "filter(pred, map(...)) inlined fails EGraph conversion: the map \
-            result is runtime-sized with no concrete buffer region"]
+fn capturing_map_into_filter_is_one_pipeline() {
+    let lowered = compile_parallel(
+        "\
+open f32
+#[compute]
+entry pick(xs: []u32) ?k. [k]u32 =
+  let bound = xs[0] in
+  let ys = map(|x| x + bound, xs) in
+  filter(|y| y < 100u32, ys)
+",
+    );
+    assert_eq!(
+        lowered.pipeline.pipelines.len(),
+        1,
+        "capturing map→filter should still compact to one pipeline; got {:?}",
+        compute_entry_points(&lowered.pipeline),
+    );
+}
+
+/// Inlining the `map` directly into `filter` (instead of let-binding it first)
+/// compiles to the same thing as the let-bound form, and the map *changes the
+/// element type* (`u32` → `vec4f32`), exercising the filter lowering's distinct
+/// input vs. output element types: the buffer/view are sized in the output type
+/// while elements are read in the input type.
+#[test]
 fn inlined_filter_over_map_compiles() {
     compile_parallel(
         "\

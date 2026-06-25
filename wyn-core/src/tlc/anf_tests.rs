@@ -71,6 +71,7 @@ fn map_producer(xs: u32, ids: &mut TermIdSource) -> SoacOp {
 fn filter_term(input: ArrayExpr, ids: &mut TermIdSource) -> Term {
     term(
         TermKind::Soac(SoacOp::Filter {
+            map_lam: None,
             pred: trivial_lam(bool_ty(), TermKind::BoolLit(true), ids),
             input,
             destination: SoacDestination::Fresh,

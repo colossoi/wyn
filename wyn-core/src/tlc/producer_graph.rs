@@ -349,7 +349,8 @@ fn subst_in_semantics(
             op: sub_sb(op, old, new, term_ids),
             init,
         },
-        ArraySemantics::Filter { input, pred } => ArraySemantics::Filter {
+        ArraySemantics::Filter { map_lam, input, pred } => ArraySemantics::Filter {
+            map_lam: map_lam.map(|ml| sub_sb(ml, old, new, term_ids)),
             input: sub_ae(input, old, new),
             pred: sub_sb(pred, old, new, term_ids),
         },

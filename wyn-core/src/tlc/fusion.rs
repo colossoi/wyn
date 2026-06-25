@@ -951,10 +951,7 @@ fn find_map_group_plan(
                 accumulators.push(accumulator);
                 consumer_indices.push(binding_idx);
             }
-            other => reject!(
-                "consumer semantics unsupported for grouping: {:?}",
-                std::mem::discriminant(other)
-            ),
+            _ => reject!("consumer semantics unsupported for grouping (not map/reduce/scan)"),
         }
     }
     if consumer_indices_are_dependent(bindings, &consumer_indices) {
@@ -1011,7 +1008,7 @@ fn find_filter_plan(
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
 ) -> Option<FusionPlan> {
-    let ArraySemantics::Filter { input, pred } = &producer.semantics else {
+    let ArraySemantics::Filter { map_lam, input, pred } = &producer.semantics else {
         return None;
     };
     if pred.lam.params.len() != 1 || uses.is_empty() {
@@ -1047,7 +1044,7 @@ fn find_filter_plan(
                 if op.lam.params.len() != 2 {
                     return None;
                 }
-                let step_lam = filtered_reduce_step(pred, op, *span, symbols, term_ids)?;
+                let step_lam = filtered_reduce_step(map_lam.as_ref(), pred, op, *span, symbols, term_ids)?;
                 reductions.push((
                     use_site.owner,
                     *term_id,
@@ -1103,6 +1100,7 @@ fn find_filter_plan(
         let count_field = result_fields.len();
         result_fields.push(count_ty.clone());
         accumulators.push(count_accumulator(
+            map_lam.as_ref(),
             pred,
             count_ty.clone(),
             count_span,
@@ -1490,7 +1488,8 @@ fn subst_in_semantics(
             op: sub_sb(op, old, replacement, term_ids),
             init: Box::new(substitute_term_expr(*init, old, replacement, term_ids)),
         },
-        ArraySemantics::Filter { input, pred } => ArraySemantics::Filter {
+        ArraySemantics::Filter { map_lam, input, pred } => ArraySemantics::Filter {
+            map_lam: map_lam.map(|ml| sub_sb(ml, old, replacement, term_ids)),
             input: sub_ae(input, old, replacement, term_ids),
             pred: sub_sb(pred, old, replacement, term_ids),
         },
@@ -1819,22 +1818,33 @@ fn symbol_uses_are_direct_tail_values(term: &Term, sym: SymbolId) -> bool {
 }
 
 fn filtered_reduce_step(
+    map_lam: Option<&super::SoacBody>,
     pred: &super::SoacBody,
     op: &super::SoacBody,
     span: Span,
-    _symbols: &mut SymbolTable,
+    symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
 ) -> Option<Lambda> {
     if pred.lam.params.len() != 1 || op.lam.params.len() != 2 {
         return None;
     }
-    let acc_param = op.lam.params[0].clone();
-    let elem_param = pred.lam.params[0].clone();
-    let op_elem = op.lam.params[1].0;
-    let then_branch = substitute_sym(*op.lam.body.clone(), op_elem, elem_param.0, term_ids);
+    // A fused producer map folds in by composing `f` into the predicate and the
+    // op, so the masked step tests/accumulates `f(x)`. `f` is pure, so applying
+    // it in both is redundant but correct.
+    let (pred_lam, op_lam) = match map_lam {
+        Some(f) => (
+            compose_lambdas(f.lam.clone(), pred.lam.clone(), span, symbols, term_ids),
+            compose_map_reduce(f.lam.clone(), op.lam.clone(), span, symbols, term_ids),
+        ),
+        None => (pred.lam.clone(), op.lam.clone()),
+    };
+    let acc_param = op_lam.params[0].clone();
+    let elem_param = pred_lam.params[0].clone();
+    let op_elem = op_lam.params[1].0;
+    let then_branch = substitute_sym(*op_lam.body.clone(), op_elem, elem_param.0, term_ids);
     let else_branch = Term {
         id: term_ids.next_id(),
-        ty: op.lam.ret_ty.clone(),
+        ty: op_lam.ret_ty.clone(),
         span,
         kind: TermKind::Var(VarRef::Symbol(acc_param.0)),
     };
@@ -1842,19 +1852,20 @@ fn filtered_reduce_step(
         params: vec![acc_param, elem_param],
         body: Box::new(Term {
             id: term_ids.next_id(),
-            ty: op.lam.ret_ty.clone(),
+            ty: op_lam.ret_ty.clone(),
             span,
             kind: TermKind::If {
-                cond: pred.lam.body.clone(),
+                cond: pred_lam.body.clone(),
                 then_branch: Box::new(then_branch),
                 else_branch: Box::new(else_branch),
             },
         }),
-        ret_ty: op.lam.ret_ty.clone(),
+        ret_ty: op_lam.ret_ty.clone(),
     })
 }
 
 fn count_accumulator(
+    map_lam: Option<&super::SoacBody>,
     pred: &super::SoacBody,
     count_ty: Type<TypeName>,
     span: Span,
@@ -1864,9 +1875,15 @@ fn count_accumulator(
     if pred.lam.params.len() != 1 {
         return None;
     }
+    // A fused producer map tests `pred(f(x))`, so count over the composed
+    // predicate; the surviving count is unchanged by what value is kept.
+    let pred_lam = match map_lam {
+        Some(f) => compose_lambdas(f.lam.clone(), pred.lam.clone(), span, symbols, term_ids),
+        None => pred.lam.clone(),
+    };
     let acc_sym = symbols.alloc("_count".to_string());
     let acc_param = (acc_sym, count_ty.clone());
-    let elem_param = pred.lam.params[0].clone();
+    let elem_param = pred_lam.params[0].clone();
     let plus_one = add_terms(
         var_term(acc_sym, count_ty.clone(), span, term_ids),
         int_term("1", count_ty.clone(), span, term_ids),
@@ -1881,7 +1898,7 @@ fn count_accumulator(
             ty: count_ty.clone(),
             span,
             kind: TermKind::If {
-                cond: pred.lam.body.clone(),
+                cond: pred_lam.body.clone(),
                 then_branch: Box::new(plus_one),
                 else_branch: Box::new(var_term(acc_sym, count_ty.clone(), span, term_ids)),
             },
@@ -2120,7 +2137,7 @@ fn build_fused_from_semantics(
     // neutral element by reduce's contract).
     if let (
         FusionRecipe::FilterIntoReduce,
-        ArraySemantics::Filter { input, pred },
+        ArraySemantics::Filter { map_lam, input, pred },
         ArraySemantics::Reduction {
             op, reduce_op, init, ..
         },
@@ -2150,6 +2167,12 @@ fn build_fused_from_semantics(
                 },
             }),
             ret_ty: elem_ty,
+        };
+        // A fused producer map composes in front: `mask∘f = λraw. if p(f(raw))
+        // then f(raw) else ne` — `compose_lambdas` binds `f(raw)` once.
+        let mask_lam = match map_lam {
+            Some(f) => compose_lambdas(f.lam.clone(), mask_lam, span, symbols, term_ids),
+            None => mask_lam,
         };
         // op∘mask: (acc, x) -> op(acc, mask(x)). The per-element step gains the
         // mask; the pure phase-2 combiner stays the consumer's `reduce_op`
@@ -2199,6 +2222,34 @@ fn build_fused_from_semantics(
                         captures: vec![],
                     },
                     inputs: input_exprs,
+                    destination: SoacDestination::Fresh,
+                }),
+            })
+        }
+
+        (
+            FusionRecipe::MapIntoFilter,
+            ArraySemantics::Filter {
+                map_lam: None, pred, ..
+            },
+        ) => {
+            // `filter(p, map(f, xs))` → a `Filter` carrying `f` as its `map_lam`,
+            // reading the producer's own input `xs`. Per element the filter
+            // computes `v = f(x)`, tests `p(v)`, keeps `v` — no intermediate array.
+            if input_exprs.len() != 1 {
+                return None;
+            }
+            Some(Term {
+                id: term_ids.next_id(),
+                ty: consumer_ty,
+                span,
+                kind: TermKind::Soac(SoacOp::Filter {
+                    map_lam: Some(super::SoacBody {
+                        lam: prod_lam.clone(),
+                        captures: vec![],
+                    }),
+                    pred: pred.clone(),
+                    input: input_exprs[0].clone(),
                     destination: SoacDestination::Fresh,
                 }),
             })

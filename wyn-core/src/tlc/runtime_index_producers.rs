@@ -339,16 +339,26 @@ fn float_soac(
             )
         }
         SoacOp::Filter {
+            map_lam,
             pred,
             input,
             destination,
         } => {
-            let (mut floats, pred) = float_soac_body(pred, blocked, ids, symbols);
+            let (mut floats, map_lam) = match map_lam {
+                Some(ml) => {
+                    let (f, ml) = float_soac_body(ml, blocked, ids, symbols);
+                    (f, Some(ml))
+                }
+                None => (Vec::new(), None),
+            };
+            let (mut pred_floats, pred) = float_soac_body(pred, blocked, ids, symbols);
+            floats.append(&mut pred_floats);
             let (mut input_floats, input) = float_array_expr(input, blocked, ids, symbols);
             floats.append(&mut input_floats);
             (
                 floats,
                 SoacOp::Filter {
+                    map_lam,
                     pred,
                     input,
                     destination,

@@ -436,10 +436,19 @@ impl<'a> CallLowerer<'a> {
                 destination,
             },
             SoacOp::Filter {
+                map_lam,
                 pred,
                 input,
                 destination,
             } => SoacOp::Filter {
+                map_lam: map_lam.map(|ml| super::SoacBody {
+                    lam: ml.lam,
+                    captures: ml
+                        .captures
+                        .into_iter()
+                        .map(|(s, ty, t)| (s, ty, self.lower_term(t)))
+                        .collect(),
+                }),
                 pred: super::SoacBody {
                     lam: pred.lam,
                     captures: pred

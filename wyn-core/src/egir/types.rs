@@ -204,6 +204,15 @@ pub enum PendingSoac {
     ///   `len` operand (an SSA value). A runtime-sized input cannot back a
     ///   function-local array, so it compacts into a descriptor-bound buffer.
     Filter {
+        /// `Some(name)` folds an elementwise producer `map(f, …)` in: per element
+        /// the loop computes `v = f(x)` (`map_capture_count` leading operands are
+        /// `f`'s captures), tests `pred(v)`, and keeps `v`. `None` is a plain
+        /// filter (the surviving input element is kept and `pred` tests it).
+        map_func: Option<String>,
+        map_capture_count: usize,
+        /// The filter's output element type — `f`'s return type when a map is
+        /// fused, else `input_elem_type`. Sizes the result buffer/view.
+        output_elem_type: Type<TypeName>,
         pred_func: String,
         input_array_type: Type<TypeName>,
         input_elem_type: Type<TypeName>,

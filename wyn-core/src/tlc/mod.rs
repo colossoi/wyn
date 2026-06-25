@@ -700,6 +700,13 @@ pub enum SoacOp {
         destination: SoacDestination,
     },
     Filter {
+        /// Optional fused elementwise producer. `None` is a plain filter: the
+        /// surviving input element is kept and `pred` tests it. `Some(f)` folds a
+        /// `map(f, …)` producer in: per element `x` the filter computes `v = f(x)`
+        /// once, tests `pred(v)`, and keeps `v` — no materialized intermediate
+        /// array. The filter's output element type is then `f`'s return type, not
+        /// the input element type.
+        map_lam: Option<SoacBody>,
         pred: SoacBody,
         input: ArrayExpr,
         /// Picked by the ownership pass: `InputBuffer` when the filter's
@@ -1104,7 +1111,12 @@ where
             f(ne);
             visit_array_expr_children(input, f);
         }
-        SoacOp::Filter { pred, input, .. } => {
+        SoacOp::Filter {
+            map_lam, pred, input, ..
+        } => {
+            if let Some(map_lam) = map_lam {
+                visit_soac_body_children(map_lam, f);
+            }
             visit_soac_body_children(pred, f);
             visit_array_expr_children(input, f);
         }
@@ -1262,10 +1274,12 @@ where
             destination,
         },
         SoacOp::Filter {
+            map_lam,
             pred,
             input,
             destination,
         } => SoacOp::Filter {
+            map_lam: map_lam.map(|ml| map_soac_body_children(ml, f)),
             pred: map_soac_body_children(pred, f),
             input: map_array_expr_children(input, f),
             destination,
@@ -2653,6 +2667,7 @@ impl<'a> Transformer<'a> {
             ty,
             span,
             TermKind::Soac(SoacOp::Filter {
+                map_lam: None,
                 pred,
                 input,
                 // Initial construction; apply_ownership may flip later.

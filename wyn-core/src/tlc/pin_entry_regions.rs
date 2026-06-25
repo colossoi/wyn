@@ -362,7 +362,12 @@ fn subst_soac(soac: &mut SoacOp, s: &RegionSubst) {
             subst_term(ne, s);
             subst_array_expr(input, s);
         }
-        SoacOp::Filter { pred, input, .. } => {
+        SoacOp::Filter {
+            map_lam, pred, input, ..
+        } => {
+            if let Some(map_lam) = map_lam {
+                subst_soac_body(map_lam, s);
+            }
             subst_soac_body(pred, s);
             subst_array_expr(input, s);
         }

@@ -644,10 +644,12 @@ impl<'a> Monomorphizer<'a> {
                 destination: *destination,
             },
             SoacOp::Filter {
+                map_lam,
                 pred,
                 input,
                 destination,
             } => SoacOp::Filter {
+                map_lam: map_lam.as_ref().map(|ml| self.process_soac_body(ml)),
                 pred: self.process_soac_body(pred),
                 input: self.process_array_expr(input),
                 destination: *destination,
@@ -1023,10 +1025,12 @@ impl<'a> Monomorphizer<'a> {
                 destination: *destination,
             },
             SoacOp::Filter {
+                map_lam,
                 pred,
                 input,
                 destination,
             } => SoacOp::Filter {
+                map_lam: map_lam.as_ref().map(|ml| self.apply_subst_soac_body(ml, subst)),
                 pred: self.apply_subst_soac_body(pred, subst),
                 input: self.apply_subst_array_expr(input, subst),
                 destination: *destination,

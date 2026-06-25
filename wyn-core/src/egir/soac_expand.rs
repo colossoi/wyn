@@ -533,6 +533,9 @@ fn expand_one(
             );
         }
         SideEffectKind::Pending(PendingSoac::Filter {
+            map_func,
+            map_capture_count,
+            output_elem_type,
             pred_func,
             input_array_type,
             input_elem_type,
@@ -541,6 +544,9 @@ fn expand_one(
             scratch_out,
             len_out,
         }) => {
+            let map_func = map_func.clone();
+            let map_capture_count = *map_capture_count;
+            let output_elem_ty = output_elem_type.clone();
             let pred_func = pred_func.clone();
             let arr_ty = input_array_type.clone();
             let elem_ty = input_elem_type.clone();
@@ -549,9 +555,10 @@ fn expand_one(
             let scratch_out = *scratch_out;
             let len_out = *len_out;
 
-            // Operand layout: [input, ...pred_captures].
+            // Operand layout: [input, ...map_captures, ...pred_captures].
             let arr_nid = se.operand_nodes[0];
-            let captures: Vec<NodeId> = se.operand_nodes[1..].to_vec();
+            let map_captures: Vec<NodeId> = se.operand_nodes[1..1 + map_capture_count].to_vec();
+            let captures: Vec<NodeId> = se.operand_nodes[1 + map_capture_count..].to_vec();
             let result_nid = se.result.expect("Filter has a result");
 
             build_filter_loop(
@@ -563,7 +570,10 @@ fn expand_one(
                     arr_nid,
                     arr_ty,
                     elem_ty,
+                    output_elem_ty,
                     capacity_size,
+                    map_func,
+                    map_captures,
                     pred_func,
                     captures,
                     result_node: result_nid,
@@ -1036,10 +1046,18 @@ struct FilterLoop {
     /// The input array node, used both for the read path and for length.
     arr_nid: NodeId,
     arr_ty: Type<TypeName>,
+    /// The input element type (what `emit_read_element` yields).
     elem_ty: Type<TypeName>,
+    /// The output element type: `map_func`'s return type when a map is fused,
+    /// else equal to `elem_ty`. The buffer/result hold this type.
+    output_elem_ty: Type<TypeName>,
     /// `Size(N)` — the input's static capacity, reused as the output buffer's
     /// capacity (the upper bound on filtered count).
     capacity_size: Type<TypeName>,
+    /// `Some(name)` folds a producer `map(f, …)` in: per element compute
+    /// `v = f(elem, ...map_captures)` and keep/test `v` instead of `elem`.
+    map_func: Option<String>,
+    map_captures: Vec<NodeId>,
     pred_func: String,
     captures: Vec<NodeId>,
     /// The original SOAC result NodeId. After expansion this becomes a
@@ -1059,6 +1077,19 @@ struct FilterLoop {
     /// `br[0]`, a host-readable length cell paired with the output buffer (set
     /// when the filter is a compute-entry output). `None` otherwise.
     len_out: Option<crate::BindingRef>,
+}
+
+/// The value the filter keeps and tests for a read element: `f(elem, ..caps)`
+/// when a producer map is fused, else the element itself.
+fn filter_kept_value(graph: &mut EGraph, elem_nid: NodeId, spec: &FilterLoop) -> NodeId {
+    match &spec.map_func {
+        Some(name) => {
+            let mut ops: SmallVec<[NodeId; 4]> = smallvec![elem_nid];
+            ops.extend(spec.map_captures.iter().copied());
+            graph.intern_pure(PureOp::Call(name.clone()), ops, spec.output_elem_ty.clone())
+        }
+        None => elem_nid,
+    }
 }
 
 fn build_filter_loop(
@@ -1083,11 +1114,12 @@ fn build_filter_loop(
     }
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
-    // Composite buffer type — the underlying storage of the Bounded result.
+    // Composite buffer type — the underlying storage of the Bounded result. It
+    // holds the kept (output) elements, so it is typed in `output_elem_ty`.
     let buf_ty = Type::Constructed(
         TypeName::Array,
         vec![
-            spec.elem_ty.clone(),
+            spec.output_elem_ty.clone(),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             spec.capacity_size.clone(),
             crate::types::no_region(),
@@ -1191,7 +1223,10 @@ fn build_filter_loop(
         &spec.elem_ty,
         next_effect,
     );
-    let mut pred_operands: SmallVec<[NodeId; 4]> = smallvec![elem_nid];
+    // A fused producer map computes the kept value `v = f(elem)`; `pred` tests
+    // `v` and `v` is what's written. A plain filter keeps the input element.
+    let kept_nid = filter_kept_value(graph, elem_nid, &spec);
+    let mut pred_operands: SmallVec<[NodeId; 4]> = smallvec![kept_nid];
     pred_operands.extend(spec.captures.iter().copied());
     let pred_nid = graph.intern_pure(PureOp::Call(spec.pred_func), pred_operands, bool_ty.clone());
 
@@ -1205,15 +1240,15 @@ fn build_filter_loop(
     };
     control_headers.insert(body, ControlHeader::Selection { merge: sel_merge });
 
-    // then: write the accepted element into `buf_place[count_in]`, bump
+    // then: write the accepted value into `buf_place[count_in]`, bump
     // count; Branch(sel_merge, [count_bumped]).
     emit_place_index_store(
         graph,
         then_blk,
         buf_place_nid,
         count_in_nid,
-        elem_nid,
-        spec.elem_ty.clone(),
+        kept_nid,
+        spec.output_elem_ty.clone(),
         next_effect,
         None,
     );
@@ -1473,8 +1508,9 @@ fn build_runtime_filter_loop(
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
 
-    // A view over the whole scratch buffer, for the per-iteration store.
-    let scratch_view = intern_storage_view(graph, scratch_out, spec.elem_ty.clone(), None);
+    // A view over the whole scratch buffer, for the per-iteration store. The
+    // scratch holds the kept (output) elements.
+    let scratch_view = intern_storage_view(graph, scratch_out, spec.output_elem_ty.clone(), None);
 
     // Split `bid` into preheader (bid) + after, moving the suffix + terminator.
     let after = graph.skeleton.create_block();
@@ -1546,7 +1582,10 @@ fn build_runtime_filter_loop(
         &spec.elem_ty,
         next_effect,
     );
-    let mut pred_operands: SmallVec<[NodeId; 4]> = smallvec![elem_nid];
+    // A fused producer map computes the kept value `v = f(elem)`; `pred` tests
+    // `v` and `v` is what's compacted into the scratch buffer.
+    let kept_nid = filter_kept_value(graph, elem_nid, &spec);
+    let mut pred_operands: SmallVec<[NodeId; 4]> = smallvec![kept_nid];
     pred_operands.extend(spec.captures.iter().copied());
     let pred_nid = graph.intern_pure(PureOp::Call(spec.pred_func), pred_operands, bool_ty.clone());
     graph.skeleton.blocks[body].term = SkeletonTerminator::CondBranch {
@@ -1558,14 +1597,14 @@ fn build_runtime_filter_loop(
     };
     control_headers.insert(body, ControlHeader::Selection { merge: sel_merge });
 
-    // then: scratch_out[count] = elem; count_bumped = count + 1; Branch(sel_merge, [count_bumped]).
+    // then: scratch_out[count] = v; count_bumped = count + 1; Branch(sel_merge, [count_bumped]).
     emit_storage_store(
         graph,
         then_blk,
         scratch_view,
         count_in_nid,
-        elem_nid,
-        spec.elem_ty.clone(),
+        kept_nid,
+        spec.output_elem_ty.clone(),
         next_effect,
         None,
     );

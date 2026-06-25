@@ -55,8 +55,12 @@ pub enum ArraySemantics {
         init: Box<Term>,
     },
 
-    /// Filter: output = input where pred(elem) — shape-changing.
+    /// Filter: output = input where pred(elem) — shape-changing. `map_lam`
+    /// carries an already-fused elementwise producer (`Some(f)` ⇒ each element is
+    /// `f(x)`, tested and kept), so a downstream `FilterIntoReduce` can compose it
+    /// into the masked step instead of dropping it.
     Filter {
+        map_lam: Option<SoacBody>,
         input: ArrayExpr,
         pred: SoacBody,
     },
@@ -185,6 +189,10 @@ pub enum FusionRecipe {
     /// as no-ops. Avoids materializing the filtered array — the result
     /// parallelizes as an ordinary fused map→reduce.
     FilterIntoReduce,
+    /// Fuse a map into a filter: `filter(p, map(f, a))` → a `Filter` carrying
+    /// `f` as its `map_lam`, so each element computes `v = f(x)` once, tests
+    /// `p(v)`, and keeps `v` — no materialized intermediate array.
+    MapIntoFilter,
 }
 
 /// Determine if a producer can be fused into a consumer. Returns `None` when no
@@ -211,6 +219,13 @@ pub fn can_fuse(producer: &ArraySemantics, consumer: &ArraySemantics) -> Option<
         // fused input slot (Futhark thesis §7.3.1 map-scatter rule).
         (ArraySemantics::Elementwise { .. }, ArraySemantics::ScatterOp { .. }) => {
             Some(FusionRecipe::MapIntoScatter)
+        }
+
+        // Elementwise → Filter: fold the map into the filter as its `map_lam`, so
+        // each kept element is `f(x)` (tested by `pred`) with no materialized
+        // intermediate. Only when the filter has no fused map yet.
+        (ArraySemantics::Elementwise { .. }, ArraySemantics::Filter { map_lam: None, .. }) => {
+            Some(FusionRecipe::MapIntoFilter)
         }
 
         // Filter → Reduction: fold the filter into a masked single-accumulator
@@ -407,7 +422,10 @@ pub fn classify_soac(soac: &SoacOp) -> ArraySemantics {
             op: op.clone(),
             init: ne.clone(),
         },
-        SoacOp::Filter { pred, input, .. } => ArraySemantics::Filter {
+        SoacOp::Filter {
+            map_lam, pred, input, ..
+        } => ArraySemantics::Filter {
+            map_lam: map_lam.clone(),
             input: input.clone(),
             pred: pred.clone(),
         },

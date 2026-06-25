@@ -415,10 +415,12 @@ impl RepSpecializer {
                 destination,
             },
             SoacOp::Filter {
+                map_lam,
                 pred,
                 input,
                 destination,
             } => SoacOp::Filter {
+                map_lam: map_lam.map(|ml| self.rewrite_soac_body(ml)),
                 pred: self.rewrite_soac_body(pred),
                 input: self.rewrite_array_expr(input),
                 destination,

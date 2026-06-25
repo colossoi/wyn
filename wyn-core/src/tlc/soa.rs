@@ -666,13 +666,16 @@ impl SoaTransformer {
                 }
             }
             SoacOp::Filter {
+                map_lam,
                 pred,
                 input,
                 destination,
             } => {
+                let new_map_lam = map_lam.as_ref().map(|ml| self.transform_soac_body(ml));
                 let new_pred = self.transform_soac_body(pred);
                 let new_input = self.transform_array_expr(input);
                 SoacOp::Filter {
+                    map_lam: new_map_lam,
                     pred: new_pred,
                     input: new_input,
                     destination: *destination,

@@ -155,6 +155,7 @@ fn mk_scan(
 fn mk_filter(pred: Lambda, input: Term, result_ty: Type<TypeName>, term_ids: &mut TermIdSource) -> Term {
     mk_term(
         TermKind::Soac(SoacOp::Filter {
+            map_lam: None,
             pred: mk_soac_body(pred),
             input: input_ae(Box::new(input)),
             destination: SoacDestination::Fresh,

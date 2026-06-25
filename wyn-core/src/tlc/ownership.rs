@@ -462,8 +462,24 @@ impl<'p> Builder<'p> {
                 self.bind_reducer_params(&op.lam, input, soac_id);
                 self.visit_soac_body(op);
             }
-            SoacOp::Filter { pred, input, .. } => {
+            SoacOp::Filter {
+                map_lam, pred, input, ..
+            } => {
                 self.visit_array_expr(input);
+                // A fused producer map reads the input element and may capture or
+                // consume outer values; bind its element param and track its body
+                // so those dependencies are visible to liveness / move checking.
+                if let Some(map_lam) = map_lam {
+                    if let Some((sym, ty)) = map_lam.lam.params.first() {
+                        if !types::is_copy(ty) {
+                            let origin = self.element_origin_from_input(input);
+                            let owner = self.fresh_owner(origin);
+                            self.bind(*sym, owner);
+                            self.record_per_call_def(soac_id, owner);
+                        }
+                    }
+                    self.visit_soac_body(map_lam);
+                }
                 if let Some((sym, ty)) = pred.lam.params.first() {
                     if !types::is_copy(ty) {
                         let origin = self.element_origin_from_input(input);
@@ -921,9 +937,18 @@ impl<'m> Liveness<'m> {
                 let after_input = self.analyze_array_expr(input, after_op);
                 self.analyze(ne, after_input)
             }
-            SoacOp::Filter { pred, input, .. } => {
+            SoacOp::Filter {
+                map_lam, pred, input, ..
+            } => {
+                // Backward dataflow: input → map_lam → pred. A fused map's
+                // captures are live before the filter, so thread its envelope
+                // between the predicate and the input.
                 let after_pred = self.soac_envelope_fixed_point(pred, &per_call_defs, live_after);
-                self.analyze_array_expr(input, after_pred)
+                let after_map = match map_lam {
+                    Some(ml) => self.soac_envelope_fixed_point(ml, &per_call_defs, after_pred),
+                    None => after_pred,
+                };
+                self.analyze_array_expr(input, after_map)
             }
             SoacOp::Scatter { lam, inputs, .. } => {
                 let mut live = self.soac_envelope_fixed_point(lam, &per_call_defs, live_after);
@@ -1349,8 +1374,14 @@ fn walk_for_eligible_soacs(
                 }
             }
         }
-        TermKind::Soac(SoacOp::Filter { pred, input, .. }) => {
-            if !entry_output_soacs.contains(&term.id) {
+        TermKind::Soac(SoacOp::Filter {
+            map_lam, pred, input, ..
+        }) => {
+            // A fused producer map can change the element type (so `f(x)` no
+            // longer fits the input slot) and may read the input array at other
+            // indices, so reusing the input buffer in place is only sound for a
+            // plain filter.
+            if map_lam.is_none() && !entry_output_soacs.contains(&term.id) {
                 if let Some(input_sym) = input_is_dead_unique_var(term.id, input, model) {
                     if filter_body_ok(&pred.lam) && !body_references_sym(&pred.lam.body, input_sym) {
                         out.push(term.id);

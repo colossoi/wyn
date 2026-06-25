@@ -1735,10 +1735,11 @@ impl<'a, 'b> Converter<'a, 'b> {
                 destination,
             } => self.convert_soac_scan(op, reduce_op, ne, input, *destination, ty),
             SoacOp::Filter {
+                map_lam,
                 pred,
                 input,
                 destination,
-            } => self.convert_soac_filter(pred, input, *destination, ty),
+            } => self.convert_soac_filter(map_lam.as_ref(), pred, input, *destination, ty),
             SoacOp::Scatter { dest, lam, inputs } => self.convert_soac_scatter(dest, lam, inputs, ty),
             // TODO(reduce_by_index): parallel path needs atomic-op emission
             // (atomicAdd/atomicMin/etc.) in spirv/wgsl backends — not yet wired.
@@ -2229,6 +2230,7 @@ impl<'a, 'b> Converter<'a, 'b> {
 
     fn convert_soac_filter(
         &mut self,
+        map_lam: Option<&SoacBody>,
         pred: &SoacBody,
         input: &ArrayExpr,
         destination: SoacDestination,
@@ -2241,7 +2243,27 @@ impl<'a, 'b> Converter<'a, 'b> {
         let arr_ty = self.array_expr_type(input);
         let arr_nid = self.convert_array_expr_value(input)?;
 
+        // A fused producer map (`filter(p, map(f, xs))`): the loop applies `f` to
+        // each input element before the predicate and keeps `f(x)`. The output
+        // element type is `f`'s return type; the input element type stays the
+        // array's. `f`'s captures lead the operand list (before the predicate's).
+        let (map_func, map_capture_nids, output_elem_ty): (Option<String>, Vec<NodeId>, Type<TypeName>) =
+            match map_lam {
+                Some(f) => {
+                    let name = self.lambda_fn_name(&f.lam)?;
+                    let caps: Vec<NodeId> = f
+                        .captures
+                        .iter()
+                        .map(|(_, _, t)| self.convert_term(t))
+                        .collect::<Result<_, _>>()?;
+                    (Some(name), caps, f.lam.ret_ty.clone())
+                }
+                None => (None, Vec::new(), elem_ty.clone()),
+            };
+        let map_capture_count = map_capture_nids.len();
+
         let mut operands: SmallVec<[NodeId; 4]> = smallvec![arr_nid];
+        operands.extend(map_capture_nids.iter().copied());
         operands.extend(capture_nids.iter().copied());
 
         // The TLC-level result type is an existential `?k. [k]T`; after
@@ -2259,7 +2281,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             let bounded_result_ty = Type::Constructed(
                 TypeName::Array,
                 vec![
-                    elem_ty.clone(),
+                    output_elem_ty.clone(),
                     Type::Constructed(TypeName::ArrayVariantBounded, vec![]),
                     size.clone(),
                     crate::types::no_region(),
@@ -2267,6 +2289,9 @@ impl<'a, 'b> Converter<'a, 'b> {
             );
             return Ok(self.emit_soac(
                 PendingSoac::Filter {
+                    map_func,
+                    map_capture_count,
+                    output_elem_type: output_elem_ty,
                     pred_func: pred_name,
                     input_array_type: arr_ty,
                     input_elem_type: elem_ty,
@@ -2298,26 +2323,37 @@ impl<'a, 'b> Converter<'a, 'b> {
                     .into(),
             )
         })?;
-        let elem_bytes = crate::ssa::layout::type_byte_size(&elem_ty).ok_or_else(|| {
+        let input_elem_bytes = crate::ssa::layout::type_byte_size(&elem_ty).ok_or_else(|| {
             ConvertError::GraphError("filter: element type has no static byte size".into())
+        })?;
+        // The scratch buffer holds the kept output values (`f(x)` when a map is
+        // fused), so it is sized in `output_elem_ty`; the surviving-count bound
+        // still comes from the input buffer's element count.
+        let output_elem_bytes = crate::ssa::layout::type_byte_size(&output_elem_ty).ok_or_else(|| {
+            ConvertError::GraphError("filter: output element type has no static byte size".into())
         })?;
         let scratch_out = self.alloc_scratch_binding();
         self.extra_storage_bindings.push(crate::interface::StorageBindingDecl {
             binding: scratch_out,
             role: crate::interface::StorageRole::Output,
-            elem_ty: elem_ty.clone(),
-            // Host sizes the scratch buffer to the input's element count; both
-            // hold `elem_ty`, so src/dst element bytes match.
+            elem_ty: output_elem_ty.clone(),
+            // Host derives the element count from the input buffer
+            // (`src_elem_bytes`), then sizes the output buffer in output elements
+            // (`elem_bytes`); these differ when a fused map changes the element type.
             length: Some(crate::pipeline_descriptor::BufferLen::LikeInput {
                 set: input_binding.set,
                 binding: input_binding.binding,
-                elem_bytes,
-                src_elem_bytes: elem_bytes,
+                elem_bytes: output_elem_bytes,
+                src_elem_bytes: input_elem_bytes,
             }),
         });
-        let view_result_ty = crate::types::view_array_of(&elem_ty, crate::types::region_tag(scratch_out));
+        let view_result_ty =
+            crate::types::view_array_of(&output_elem_ty, crate::types::region_tag(scratch_out));
         Ok(self.emit_soac(
             PendingSoac::Filter {
+                map_func,
+                map_capture_count,
+                output_elem_type: output_elem_ty,
                 pred_func: pred_name,
                 input_array_type: arr_ty,
                 input_elem_type: elem_ty,

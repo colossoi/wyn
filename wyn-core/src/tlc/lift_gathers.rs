@@ -651,10 +651,14 @@ fn rewrite_soac(
             map_input_indices,
         },
         SoacOp::Filter {
+            map_lam,
             pred,
             input,
             destination,
         } => SoacOp::Filter {
+            map_lam: map_lam.map(|ml| {
+                rewrite_soac_body(ml, arr, binding, elem_ty, bail, dyn_uses, soac_uses, term_ids)
+            }),
             pred: rewrite_soac_body(pred, arr, binding, elem_ty, bail, dyn_uses, soac_uses, term_ids),
             input: rewrite_array_input(
                 input, arr, binding, elem_ty, bail, dyn_uses, soac_uses, span, term_ids,

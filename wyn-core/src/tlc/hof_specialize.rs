@@ -363,10 +363,12 @@ pub(super) fn apply_type_subst_to_soac(
             destination: *destination,
         },
         SoacOp::Filter {
+            map_lam,
             pred,
             input,
             destination,
         } => SoacOp::Filter {
+            map_lam: map_lam.as_ref().map(|ml| apply_type_subst_to_soac_body(ml, subst, term_ids)),
             pred: apply_type_subst_to_soac_body(pred, subst, term_ids),
             input: apply_type_subst_to_array_expr(input, subst, term_ids),
             destination: *destination,
@@ -809,10 +811,12 @@ fn substitute_var_soac(
             destination: *destination,
         },
         SoacOp::Filter {
+            map_lam,
             pred,
             input,
             destination,
         } => SoacOp::Filter {
+            map_lam: map_lam.as_ref().map(|ml| substitute_var_soac_body(ml, old_sym, new_sym, term_ids)),
             pred: substitute_var_soac_body(pred, old_sym, new_sym, term_ids),
             input: substitute_var_array_expr(input, old_sym, new_sym, term_ids),
             destination: *destination,
@@ -1392,10 +1396,12 @@ impl<'a> HofSpecializer<'a> {
                 destination,
             },
             SoacOp::Filter {
+                map_lam,
                 pred,
                 input,
                 destination,
             } => SoacOp::Filter {
+                map_lam: map_lam.map(|ml| self.cascade_specialize_soac_body(ml)),
                 pred: self.cascade_specialize_soac_body(pred),
                 input,
                 destination,

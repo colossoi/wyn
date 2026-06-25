@@ -371,7 +371,12 @@ pub fn collect_free_vars_soac(
             collect_free_vars(ne, bound, top_level, known_defs, symbols, free, seen);
             collect_free_vars_array_expr(input, bound, top_level, known_defs, symbols, free, seen);
         }
-        SoacOp::Filter { pred, input, .. } => {
+        SoacOp::Filter {
+            map_lam, pred, input, ..
+        } => {
+            if let Some(map_lam) = map_lam {
+                collect_free_vars_soac_body(map_lam, bound, top_level, known_defs, symbols, free, seen);
+            }
             collect_free_vars_soac_body(pred, bound, top_level, known_defs, symbols, free, seen);
             collect_free_vars_array_expr(input, bound, top_level, known_defs, symbols, free, seen);
         }
@@ -550,7 +555,7 @@ fn check_soac_envelopes(
         SoacOp::Map { lam, .. } => vec![lam],
         SoacOp::Reduce { op, .. } => vec![op],
         SoacOp::Scan { op, reduce_op, .. } => vec![op, reduce_op],
-        SoacOp::Filter { pred, .. } => vec![pred],
+        SoacOp::Filter { map_lam, pred, .. } => map_lam.iter().chain(std::iter::once(pred)).collect(),
         SoacOp::ReduceByIndex { op, .. } => vec![op],
         SoacOp::Scatter { lam, .. } => vec![lam],
         SoacOp::Screma {
@@ -1107,10 +1112,12 @@ impl<'a> ClosureConverter<'a> {
                 destination,
             },
             SoacOp::Filter {
+                map_lam,
                 pred,
                 input,
                 destination,
             } => SoacOp::Filter {
+                map_lam: map_lam.map(|ml| self.lift_soac_lambda(ml.lam, span)),
                 pred: self.lift_soac_lambda(pred.lam, span),
                 input: self.convert_array_expr(input, span),
                 destination,
@@ -1306,7 +1313,12 @@ fn collect_soac_bound_syms(soac: &SoacOp, out: &mut LookupSet<SymbolId>) {
             body(op, out);
             body(reduce_op, out);
         }
-        SoacOp::Filter { pred, .. } => body(pred, out),
+        SoacOp::Filter { map_lam, pred, .. } => {
+            if let Some(map_lam) = map_lam {
+                body(map_lam, out);
+            }
+            body(pred, out);
+        }
         SoacOp::ReduceByIndex { op, .. } => body(op, out),
         SoacOp::Scatter { lam, .. } => body(lam, out),
         SoacOp::Screma {
