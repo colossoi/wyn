@@ -1123,7 +1123,7 @@ pub struct TlcPipelineInner {
     /// Compiler-internal per-entry parallelization plans for EGIR to
     /// consume. Empty for the `disable=true` fast path and for entries
     /// whose strategies haven't migrated to EGIR-side lowering yet
-    /// (reduce / scan / redomap today). Keyed by entry surface name.
+    /// (reduce / scan today). Keyed by entry surface name.
     pub plans: LookupMap<String, tlc::parallelize::ParallelizationPlan>,
     /// Source-parameter name for each storage `(set, binding)`, captured
     /// before parallelization replaced the original compute entries.

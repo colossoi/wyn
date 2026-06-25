@@ -66,7 +66,7 @@ fn assert_phase1_loop_depends_on_thread_id(src: &str) {
 
     // The phase1 entry is the parallelized worker — the one that reads
     // `thread_id` (the per-thread partials slot). phase2 is single-threaded.
-    // (The EGIR redomap path mutates the original entry in place, so phase1
+    // (The EGIR reduce path mutates the original entry in place, so phase1
     // keeps the source entry name rather than gaining a `_phase1` suffix.)
     let has_thread_id = |body: &FuncBody| -> bool {
         body.inner.blocks.iter().any(|(_, block)| {
@@ -391,20 +391,6 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::Program, stage: &str) {
                 walk(ne, bound, symbols, stage, def_name);
                 walk_array_expr(input, bound, symbols, stage, def_name);
                 walk_lambda(&op.lam, bound, symbols, stage, def_name);
-            }
-            SoacOp::Redomap {
-                op,
-                reduce_op,
-                ne,
-                inputs,
-                ..
-            } => {
-                walk(ne, bound, symbols, stage, def_name);
-                for i in inputs {
-                    walk_array_expr(i, bound, symbols, stage, def_name);
-                }
-                walk_lambda(&op.lam, bound, symbols, stage, def_name);
-                walk_lambda(&reduce_op.lam, bound, symbols, stage, def_name);
             }
             SoacOp::Screma {
                 map_lams,
@@ -968,11 +954,12 @@ entry fragment_main() #[location(0)] vec4f32 =
         .expect("fragment_main not found");
 
     let (_, frag_body) = extract_lambda_params(&fragment_main.body);
-    let frag_has_redomap = has_soac_kind(&frag_body, "Redomap");
+    // A fused `map → reduce` lowers to a single-accumulator `Screma`.
+    let frag_has_screma = has_soac_kind(&frag_body, "Screma");
     let frag_has_reduce = has_soac_kind(&frag_body, "Reduce");
     let frag_has_map = has_soac_kind(&frag_body, "Map");
 
-    eprintln!("fragment_main has Redomap: {}", frag_has_redomap);
+    eprintln!("fragment_main has Screma: {}", frag_has_screma);
     eprintln!("fragment_main has Reduce: {}", frag_has_reduce);
     eprintln!("fragment_main has Map: {}", frag_has_map);
     eprintln!(
@@ -1014,8 +1001,8 @@ entry fragment_main() #[location(0)] vec4f32 =
     // The fusion should have replaced the let chain with a fused SOAC
     // or at minimum the fragment_main should contain a Reduce
     assert!(
-        frag_has_redomap || frag_has_reduce,
-        "Expected fragment_main to contain a fused Redomap or Reduce after interprocedural fusion"
+        frag_has_screma || frag_has_reduce,
+        "Expected fragment_main to contain a fused Screma or Reduce after interprocedural fusion"
     );
 }
 
@@ -1024,7 +1011,6 @@ fn has_soac_kind(term: &crate::tlc::Term, kind: &str) -> bool {
     match &term.kind {
         TermKind::Soac(SoacOp::Map { .. }) if kind == "Map" => true,
         TermKind::Soac(SoacOp::Reduce { .. }) if kind == "Reduce" => true,
-        TermKind::Soac(SoacOp::Redomap { .. }) if kind == "Redomap" => true,
         TermKind::Soac(SoacOp::Screma { .. }) if kind == "Screma" => true,
         TermKind::Soac(SoacOp::Filter { .. }) if kind == "Filter" => true,
         TermKind::Let { rhs, body, .. } => has_soac_kind(rhs, kind) || has_soac_kind(body, kind),
@@ -1681,13 +1667,13 @@ entry main(x: []f32) [4]f32 = f(x[0])
 /// direct free vars of a candidate SOAC for entry-param refs. A
 /// fragment-shader-local `let uv = fragCoord.x` introduces `uv` as a
 /// fresh symbol that's *not* an entry param but transitively depends on
-/// one. A reduce/redomap whose body reads `uv` would then be wrongly
+/// one. A reduce (plain or fused map→reduce) whose body reads `uv` would then be wrongly
 /// classified as graphical-invariant and hoisted into a compute prepass
 /// that references `@uv` as an unbound global — SPIR-V codegen panics
 /// with `Unknown global: uv`. The check needs to follow let bindings
 /// transitively.
 #[test]
-fn test_no_overhoist_redomap_through_let_bound_dependency() {
+fn test_no_overhoist_fused_reduce_through_let_bound_dependency() {
     let source = r#"
 def cands: [12]i32 = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
 
@@ -1700,7 +1686,7 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32)
   @[total, 0.0, 0.0, 1.0]
 "#;
     compile_to_spirv(source).expect(
-        "redomap whose body reads a let-bound local that transitively \
+        "a fused reduce whose body reads a let-bound local that transitively \
          depends on an entry param must remain in the fragment shader; \
          the lift pass must not classify it as graphical-invariant",
     );
@@ -3838,7 +3824,7 @@ entry e(xs: [8]vec4f32) vec2f32 = sum2(xs)
 
 /// True iff the pipeline for `entry` is a multi-stage compute (the two-phase
 /// shape a parallelized scalar reduction lowers to: chunk + combine). Used to
-/// confirm the masked-redomap fusion fired — a *serial* filter→reduce would be
+/// confirm the masked fused-reduce fusion fired — a *serial* filter→reduce would be
 /// a single-stage `Compute` instead.
 fn is_two_phase_compute(pipeline: &crate::pipeline_descriptor::PipelineDescriptor, entry: &str) -> bool {
     use crate::pipeline_descriptor::Pipeline;
@@ -3848,7 +3834,7 @@ fn is_two_phase_compute(pipeline: &crate::pipeline_descriptor::PipelineDescripto
     })
 }
 
-/// `reduce(op, ne, filter(p, xs))` fuses into a masked redomap — no compacted
+/// `reduce(op, ne, filter(p, xs))` fuses into a masked single-accumulator Screma — no compacted
 /// intermediate array — and parallelizes as a two-phase reduce. Pins that the
 /// fusion fired (not the serial scratch-view filter path).
 #[test]
@@ -3868,7 +3854,7 @@ entry filt_reduce(xs: []i32) i32 =
     );
 }
 
-/// The masked-redomap fusion must fire even when `filter` and `reduce` live in
+/// The masked fused-reduce fusion must fire even when `filter` and `reduce` live in
 /// **different functions** — TLC fusion sees through the `evens` call via
 /// function summaries (no inlining needed at fusion time).
 #[test]
@@ -5199,7 +5185,7 @@ entry tick() f32 =
 ///      driver — so the `filter` was materialized and hit "ArrayWith on
 ///      an unsized scratch". `normalize` now flattens nested lets so the
 ///      reduce joins the top-level chain and `map->reduce` /
-///      `filter->reduce` collapse it to a masked redomap.
+///      `filter->reduce` collapse it to a masked fused reduce.
 #[test]
 fn filter_map_reduce_vecop_swizzle_in_helper_compiles() {
     let src = r#"

@@ -262,35 +262,6 @@ fn float_soac(
                 },
             )
         }
-        SoacOp::Redomap {
-            op,
-            reduce_op,
-            ne,
-            inputs,
-        } => {
-            let (mut floats, op) = float_soac_body(op, blocked, ids, symbols);
-            let (mut reduce_floats, reduce_op) = float_soac_body(reduce_op, blocked, ids, symbols);
-            let (mut ne_floats, ne) = float_term(*ne, blocked, ids, symbols, true);
-            floats.append(&mut reduce_floats);
-            floats.append(&mut ne_floats);
-            let inputs = inputs
-                .into_iter()
-                .map(|input| {
-                    let (mut input_floats, input) = float_array_expr(input, blocked, ids, symbols);
-                    floats.append(&mut input_floats);
-                    input
-                })
-                .collect();
-            (
-                floats,
-                SoacOp::Redomap {
-                    op,
-                    reduce_op,
-                    ne: Box::new(ne),
-                    inputs,
-                },
-            )
-        }
         SoacOp::Screma {
             map_lams,
             accumulators,

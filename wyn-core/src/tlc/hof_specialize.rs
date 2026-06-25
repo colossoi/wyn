@@ -389,17 +389,6 @@ pub(super) fn apply_type_subst_to_soac(
             indices: apply_type_subst_to_array_expr(indices, subst, term_ids),
             values: apply_type_subst_to_array_expr(values, subst, term_ids),
         },
-        SoacOp::Redomap {
-            op,
-            reduce_op,
-            ne,
-            inputs,
-        } => SoacOp::Redomap {
-            op: apply_type_subst_to_soac_body(op, subst, term_ids),
-            reduce_op: apply_type_subst_to_soac_body(reduce_op, subst, term_ids),
-            ne: Box::new(apply_type_subst_to_term(ne, subst, term_ids)),
-            inputs: inputs.iter().map(|ae| apply_type_subst_to_array_expr(ae, subst, term_ids)).collect(),
-        },
         SoacOp::Screma {
             map_lams,
             accumulators,
@@ -849,20 +838,6 @@ fn substitute_var_soac(
             ne: Box::new(substitute_var(ne, old_sym, new_sym, term_ids)),
             indices: substitute_var_array_expr(indices, old_sym, new_sym, term_ids),
             values: substitute_var_array_expr(values, old_sym, new_sym, term_ids),
-        },
-        SoacOp::Redomap {
-            op,
-            reduce_op,
-            ne,
-            inputs,
-        } => SoacOp::Redomap {
-            op: substitute_var_soac_body(op, old_sym, new_sym, term_ids),
-            reduce_op: substitute_var_soac_body(reduce_op, old_sym, new_sym, term_ids),
-            ne: Box::new(substitute_var(ne, old_sym, new_sym, term_ids)),
-            inputs: inputs
-                .iter()
-                .map(|ae| substitute_var_array_expr(ae, old_sym, new_sym, term_ids))
-                .collect(),
         },
         SoacOp::Screma {
             map_lams,
@@ -1448,17 +1423,6 @@ impl<'a> HofSpecializer<'a> {
                 ne,
                 indices,
                 values,
-            },
-            SoacOp::Redomap {
-                op,
-                reduce_op,
-                ne,
-                inputs,
-            } => SoacOp::Redomap {
-                op: self.cascade_specialize_soac_body(op),
-                reduce_op: self.cascade_specialize_soac_body(reduce_op),
-                ne,
-                inputs,
             },
             SoacOp::Screma {
                 map_lams,

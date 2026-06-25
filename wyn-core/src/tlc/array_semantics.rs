@@ -168,11 +168,12 @@ pub enum FusionRecipe {
     /// The producer's outputs must be fully consumed (scatter has no
     /// pass-through results), which the single-use edge filter guarantees.
     MapIntoScatter,
-    /// Fuse a filter into a reduce: `reduce(op, ne, filter(p, a))` →
-    /// `redomap(op∘mask, op, ne, a)` where `mask = λx. if p(x) then x else ne`.
-    /// Valid because `ne` is `op`'s neutral element (reduce's contract), so the
-    /// masked-out elements fold in as no-ops. Avoids materializing the filtered
-    /// array — the result parallelizes as an ordinary redomap.
+    /// Fuse a filter into a reduce: `reduce(op, ne, filter(p, a))` → a
+    /// single-`Reduce`-accumulator `Screma` over `a` whose step is `op∘mask`,
+    /// where `mask = λx. if p(x) then x else ne`. Valid because `ne` is `op`'s
+    /// neutral element (reduce's contract), so the masked-out elements fold in
+    /// as no-ops. Avoids materializing the filtered array — the result
+    /// parallelizes as an ordinary fused map→reduce.
     FilterIntoReduce,
 }
 
@@ -202,8 +203,8 @@ pub fn can_fuse(producer: &ArraySemantics, consumer: &ArraySemantics) -> Option<
             Some(FusionRecipe::MapIntoScatter)
         }
 
-        // Filter → Reduction: fold the filter into a masked redomap, avoiding
-        // the compacted intermediate array entirely.
+        // Filter → Reduction: fold the filter into a masked single-accumulator
+        // Screma, avoiding the compacted intermediate array entirely.
         (ArraySemantics::Filter { .. }, ArraySemantics::Reduction { .. }) => {
             Some(FusionRecipe::FilterIntoReduce)
         }
@@ -413,9 +414,10 @@ pub fn classify_soac(soac: &SoacOp) -> ArraySemantics {
             op: op.clone(),
             init: ne.clone(),
         },
-        // Redomap is a fused map+reduce produced by fusion; classified as opaque
-        // because it is not analyzed further by the semantic framework.
-        SoacOp::Redomap { .. } | SoacOp::Screma { .. } => ArraySemantics::Opaque,
+        // A multi-result map+accumulator SOAC (the fused form, including a
+        // map-into-reduce); classified as opaque because it is not analyzed
+        // further by the semantic framework.
+        SoacOp::Screma { .. } => ArraySemantics::Opaque,
     }
 }
 

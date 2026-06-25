@@ -1636,7 +1636,7 @@ fn build_runtime_filter_loop(
     };
 }
 
-/// Description of an accumulator-only SOAC (Reduce, Redomap): loop over one or
+/// Description of an accumulator-only SOAC (Reduce, reducing Screma): loop over one or
 /// more input arrays, thread a scalar accumulator through a per-iteration call,
 /// and yield the final accumulator as the result. No output array.
 

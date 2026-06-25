@@ -8,6 +8,29 @@ fn dummy_span() -> Span {
     Span::new(0, 0, 0, 0)
 }
 
+/// A fused `map → reduce` lowers to a single-`Reduce`-accumulator `Screma`
+/// projected to its scalar field 0. Destructure that shape, returning the
+/// step lambda (the composed `(acc, x) -> acc'`) and the SOAC inputs.
+fn as_fused_map_reduce(term: &Term) -> (&SoacBody, &[ArrayExpr]) {
+    let TermKind::TupleProj { tuple, idx: 0 } = &term.kind else {
+        panic!("Expected TupleProj of fused Screma, got {:?}", term.kind);
+    };
+    match &tuple.kind {
+        TermKind::Soac(SoacOp::Screma {
+            map_lams,
+            accumulators,
+            inputs,
+            ..
+        }) if map_lams.is_empty()
+            && accumulators.len() == 1
+            && matches!(accumulators[0].kind, ScremaAccumulator::Reduce) =>
+        {
+            (&accumulators[0].step_lam, inputs)
+        }
+        other => panic!("Expected fused single-reduce Screma, got {:?}", other),
+    }
+}
+
 fn mk_term(kind: TermKind, ty: Type<TypeName>, term_ids: &mut TermIdSource) -> Term {
     Term {
         id: term_ids.next_id(),
@@ -211,6 +234,24 @@ fn contains_screma(term: &Term) -> bool {
     }
 }
 
+/// A *map-bearing* Screma — i.e. one with at least one mapped array output,
+/// the signature of horizontal map fusion. A single-accumulator Screma with
+/// no map outputs (a fused `map → reduce`) does not count.
+fn contains_map_screma(term: &Term) -> bool {
+    match &term.kind {
+        TermKind::Soac(SoacOp::Screma { map_lams, .. }) if !map_lams.is_empty() => true,
+        _ => {
+            let mut found = false;
+            term.for_each_child(&mut |child| {
+                if !found && contains_map_screma(child) {
+                    found = true;
+                }
+            });
+            found
+        }
+    }
+}
+
 fn contains_filter(term: &Term) -> bool {
     match &term.kind {
         TermKind::Soac(SoacOp::Filter { .. }) => true,
@@ -354,7 +395,7 @@ fn test_simple_map_fusion() {
 }
 
 // -------------------------------------------------------------------------
-// Test: reduce(op, ne, filter(p, xs)) → redomap(op∘mask, op, ne, xs)
+// Test: reduce(op, ne, filter(p, xs)) → masked single-accumulator Screma (step op∘mask, combiner op, ne, xs)
 // -------------------------------------------------------------------------
 #[test]
 fn test_horizontal_sibling_maps_merge_to_multi_output_screma() {
@@ -1770,7 +1811,10 @@ fn test_screma_rejects_different_producers() {
     };
 
     let fused = run(program);
-    assert!(!contains_screma(&fused.defs[0].body));
+    // `e = map(h, ys); d = reduce(op, 0, e)` legitimately fuses to a
+    // single-accumulator Screma (no map outputs). The maps with *different*
+    // producers must not horizontally fuse into a map-bearing Screma.
+    assert!(!contains_map_screma(&fused.defs[0].body));
 }
 
 #[test]
@@ -3448,21 +3492,17 @@ fn test_raytrace_step1_local_map_reduce() {
     };
 
     let fused = run(program);
-    match &fused.defs[0].body.kind {
-        TermKind::Soac(SoacOp::Redomap { op, inputs, .. }) => {
-            assert_eq!(inputs.len(), 1);
-            match &inputs[0] {
-                ArrayExpr::Ref(t) => {
-                    assert!(matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == xs_sym))
-                }
-                other => panic!("Expected Ref(xs), got {:?}", other),
-            }
-            // Redomap op has (acc, x) params — acc from reduce, x from map
-            assert_eq!(op.lam.params.len(), 2);
-            assert_eq!(op.lam.params[0].0, acc_sym);
+    let (op, inputs) = as_fused_map_reduce(&fused.defs[0].body);
+    assert_eq!(inputs.len(), 1);
+    match &inputs[0] {
+        ArrayExpr::Ref(t) => {
+            assert!(matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == xs_sym))
         }
-        other => panic!("Expected fused Redomap, got {:?}", other),
+        other => panic!("Expected Ref(xs), got {:?}", other),
     }
+    // step has (acc, x) params — acc from reduce, x from map
+    assert_eq!(op.lam.params.len(), 2);
+    assert_eq!(op.lam.params[0].0, acc_sym);
 }
 
 // Test 2: Reduce in a separate def, consumer recognized via summary
@@ -3564,19 +3604,15 @@ fn test_raytrace_step2_interprocedural_reduce_consumer() {
 
     let fused = run(program);
     let main = fused.defs.iter().find(|d| d.name == main_sym).unwrap();
-    match &main.body.kind {
-        TermKind::Soac(SoacOp::Redomap { op, inputs, .. }) => {
-            assert_eq!(inputs.len(), 1);
-            match &inputs[0] {
-                ArrayExpr::Ref(t) => {
-                    assert!(matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == arr_sym))
-                }
-                other => panic!("Expected Ref(arr), got {:?}", other),
-            }
-            assert_eq!(op.lam.params.len(), 2);
+    let (op, inputs) = as_fused_map_reduce(&main.body);
+    assert_eq!(inputs.len(), 1);
+    match &inputs[0] {
+        ArrayExpr::Ref(t) => {
+            assert!(matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == arr_sym))
         }
-        other => panic!("Expected fused Redomap in main, got {:?}", other),
+        other => panic!("Expected Ref(arr), got {:?}", other),
     }
+    assert_eq!(op.lam.params.len(), 2);
 }
 
 // Test 3: Map in a separate def, producer recognized via summary
@@ -3682,19 +3718,15 @@ fn test_raytrace_step3_interprocedural_map_producer() {
 
     let fused = run(program);
     let main = fused.defs.iter().find(|d| d.name == main_sym).unwrap();
-    match &main.body.kind {
-        TermKind::Soac(SoacOp::Redomap { op, inputs, .. }) => {
-            assert_eq!(inputs.len(), 1);
-            match &inputs[0] {
-                ArrayExpr::Ref(t) => {
-                    assert!(matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == arr_sym))
-                }
-                other => panic!("Expected Ref(arr), got {:?}", other),
-            }
-            assert_eq!(op.lam.params.len(), 2);
+    let (op, inputs) = as_fused_map_reduce(&main.body);
+    assert_eq!(inputs.len(), 1);
+    match &inputs[0] {
+        ArrayExpr::Ref(t) => {
+            assert!(matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == arr_sym))
         }
-        other => panic!("Expected fused Redomap in main, got {:?}", other),
+        other => panic!("Expected Ref(arr), got {:?}", other),
     }
+    assert_eq!(op.lam.params.len(), 2);
 }
 
 // Test 4: Both map and reduce in separate defs (full interprocedural)
@@ -3825,19 +3857,15 @@ fn test_raytrace_step4_both_interprocedural() {
 
     let fused = run(program);
     let main = fused.defs.iter().find(|d| d.name == main_sym).unwrap();
-    match &main.body.kind {
-        TermKind::Soac(SoacOp::Redomap { op, inputs, .. }) => {
-            assert_eq!(inputs.len(), 1);
-            match &inputs[0] {
-                ArrayExpr::Ref(t) => {
-                    assert!(matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == arr_sym))
-                }
-                other => panic!("Expected Ref(arr), got {:?}", other),
-            }
-            assert_eq!(op.lam.params.len(), 2);
+    let (op, inputs) = as_fused_map_reduce(&main.body);
+    assert_eq!(inputs.len(), 1);
+    match &inputs[0] {
+        ArrayExpr::Ref(t) => {
+            assert!(matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if *s == arr_sym))
         }
-        other => panic!("Expected fused Redomap in main, got {:?}", other),
+        other => panic!("Expected Ref(arr), got {:?}", other),
     }
+    assert_eq!(op.lam.params.len(), 2);
 }
 
 // Test 5: Raytrace pattern — map inputs from globals, not params
@@ -3969,12 +3997,8 @@ fn test_raytrace_step5_globals_pattern_fused() {
     let fused = run(program);
     let main = fused.defs.iter().find(|d| d.name == main_sym).unwrap();
     // Should fuse: intersectAll produces a Map (ProducesMap summary)
-    match &main.body.kind {
-        TermKind::Soac(SoacOp::Redomap { op, .. }) => {
-            assert_eq!(op.lam.params.len(), 2);
-        }
-        other => panic!("Expected fused Redomap, got {:?}", other),
-    }
+    let (op, _) = as_fused_map_reduce(&main.body);
+    assert_eq!(op.lam.params.len(), 2);
 }
 
 // -------------------------------------------------------------------------

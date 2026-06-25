@@ -2042,10 +2042,11 @@ fn build_fused_from_semantics(
     term_ids: &mut TermIdSource,
 ) -> Option<Term> {
     // Filter → Reduction: the producer is a `Filter` (not `Elementwise`), so
-    // build the masked redomap here, before the Elementwise extraction below.
-    // `reduce(op, ne, filter(p, xs))` ≡ `redomap(op∘mask, op, ne, xs)` with
-    // `mask = λx. if p(x) then x else ne` — the dropped elements fold in as
-    // `op(acc, ne) = acc` (ne is op's neutral element by reduce's contract).
+    // build the masked fused reduce here, before the Elementwise extraction
+    // below. `reduce(op, ne, filter(p, xs))` ≡ a single-`Reduce`-accumulator
+    // `Screma` over `xs` with step `op∘mask`, `mask = λx. if p(x) then x else
+    // ne` — the dropped elements fold in as `op(acc, ne) = acc` (ne is op's
+    // neutral element by reduce's contract).
     if let (
         FusionRecipe::FilterIntoReduce,
         ArraySemantics::Filter { input, pred },
@@ -2080,19 +2081,36 @@ fn build_fused_from_semantics(
         // op∘mask: (acc, x) -> op(acc, mask(x)); the pure phase-2 combiner is
         // the original `op`.
         let composed_op = compose_map_reduce(mask_lam, op.lam.clone(), span, symbols, term_ids);
+        // A `Screma` yields a tuple of its outputs; a single-accumulator
+        // fused reduce is field 0. Wrap in a `TupleProj` so the replacement
+        // keeps the consumer's scalar type.
+        let screma = Term {
+            id: term_ids.next_id(),
+            ty: Type::Constructed(TypeName::Tuple(1), vec![consumer_ty.clone()]),
+            span,
+            kind: TermKind::Soac(SoacOp::Screma {
+                map_lams: vec![],
+                map_input_indices: vec![],
+                accumulators: vec![super::ScremaAccumulatorSpec {
+                    kind: super::ScremaAccumulator::Reduce,
+                    step_lam: super::SoacBody {
+                        lam: composed_op,
+                        captures: vec![],
+                    },
+                    reduce_op: op.clone(),
+                    ne: init.clone(),
+                }],
+                inputs: vec![input.clone()],
+            }),
+        };
         return Some(Term {
             id: term_ids.next_id(),
             ty: consumer_ty,
             span,
-            kind: TermKind::Soac(SoacOp::Redomap {
-                op: super::SoacBody {
-                    lam: composed_op,
-                    captures: vec![],
-                },
-                reduce_op: op.clone(),
-                ne: init.clone(),
-                inputs: vec![input.clone()],
-            }),
+            kind: TermKind::TupleProj {
+                tuple: Box::new(screma),
+                idx: 0,
+            },
         });
     }
 
@@ -2127,19 +2145,35 @@ fn build_fused_from_semantics(
                 return None;
             }
             let composed_op = compose_map_reduce(prod_lam.clone(), op.lam.clone(), span, symbols, term_ids);
+            // A `Screma` yields a tuple of its outputs; the fused reduce is
+            // field 0. Wrap in a `TupleProj` to keep the consumer's scalar type.
+            let screma = Term {
+                id: term_ids.next_id(),
+                ty: Type::Constructed(TypeName::Tuple(1), vec![consumer_ty.clone()]),
+                span,
+                kind: TermKind::Soac(SoacOp::Screma {
+                    map_lams: vec![],
+                    map_input_indices: vec![],
+                    accumulators: vec![super::ScremaAccumulatorSpec {
+                        kind: super::ScremaAccumulator::Reduce,
+                        step_lam: super::SoacBody {
+                            lam: composed_op,
+                            captures: vec![],
+                        },
+                        reduce_op: op.clone(),
+                        ne: init.clone(),
+                    }],
+                    inputs: input_exprs,
+                }),
+            };
             Some(Term {
                 id: term_ids.next_id(),
                 ty: consumer_ty,
                 span,
-                kind: TermKind::Soac(SoacOp::Redomap {
-                    op: super::SoacBody {
-                        lam: composed_op,
-                        captures: vec![],
-                    },
-                    reduce_op: op.clone(),
-                    ne: init.clone(),
-                    inputs: input_exprs,
-                }),
+                kind: TermKind::TupleProj {
+                    tuple: Box::new(screma),
+                    idx: 0,
+                },
             })
         }
 
@@ -2327,8 +2361,9 @@ fn replace_consumer(
 /// Fuse an inline SOAC producer that appears directly as another SOAC's
 /// input — the inline counterpart of the graph-driven let-chain fusion.
 /// Covers the same producer/consumer pairs as `build_fused_from_semantics`:
-/// `map → map` (compose into one Map), `map → reduce` (Redomap), and
-/// `map → scan` (fused Scan whose operator includes the map transform).
+/// `map → map` (compose into one Map), `map → reduce` (a single-accumulator
+/// `Screma`), and `map → scan` (fused Scan whose operator includes the map
+/// transform).
 ///
 /// Inline nested SOACs (`scan(op, ne, map(g, xs))`) never get a let binding
 /// for the summary-based path to recognize, so without this they reach EGIR
@@ -2383,7 +2418,7 @@ fn fuse_inline_soac_inputs(
             )
         }
 
-        // reduce(op, ne, map(g, xs)) → redomap(op∘g, op, ne, xs)
+        // reduce(op, ne, map(g, xs)) → reducing Screma (step op∘g, combiner op, ne, xs)
         // scan(op, ne, map(g, xs))   → scan(op∘g, ne, xs)   (single map input)
         // Built through the same `build_fused_from_semantics` as the let-bound
         // path: at this point the consumer is unfused (op == reduce_op), so the

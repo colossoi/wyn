@@ -441,17 +441,6 @@ impl RepSpecializer {
                 indices: self.rewrite_array_expr(indices),
                 values: self.rewrite_array_expr(values),
             },
-            SoacOp::Redomap {
-                op,
-                reduce_op,
-                ne,
-                inputs,
-            } => SoacOp::Redomap {
-                op: self.rewrite_soac_body(op),
-                reduce_op: self.rewrite_soac_body(reduce_op),
-                ne: Box::new(self.rewrite_term(*ne)),
-                inputs: inputs.into_iter().map(|ae| self.rewrite_array_expr(ae)).collect(),
-            },
             SoacOp::Screma {
                 map_lams,
                 accumulators,

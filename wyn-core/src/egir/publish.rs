@@ -97,7 +97,7 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
             // Find the bindings list backing this entry. A compute
             // entry matches any stage in a `Compute` (covers both the
             // common single-stage case and multi-stage parallel
-            // reduce / redomap / scan / ordered-prefix schedules);
+            // reduce / scan / ordered-prefix schedules);
             // graphics entries match a stage of a `Graphics`.
             let bindings: &mut Vec<Binding> = match self.pipelines.iter_mut().find(|p| match p {
                 Pipeline::Compute(cp) => cp.stages.iter().any(|s| s.entry_point == entry.name),

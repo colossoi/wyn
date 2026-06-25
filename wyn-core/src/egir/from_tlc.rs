@@ -197,8 +197,8 @@ pub fn run(
                 // for this entry, honor it; otherwise auto-allocate.
                 // Map and Scan results are single `EntryOutput` buffers whose
                 // binding `build_entry_outputs` may pin (gather pre-passes do).
-                // Reduce/Redomap manage their result inside the TLC two-phase
-                // plan, so `forced_output` reports `None` for them.
+                // Reduce / reducing Screma manage their result inside the
+                // two-phase plan, so `forced_output` reports `None` for them.
                 //
                 // Fallback for `--single-stage` / `parallelize_soacs(disable=
                 // true)`: no plan exists, but `lift_gathers` still records its
@@ -214,7 +214,7 @@ pub fn run(
                 // A parallel map/scan writes one output element per thread, so
                 // its storage output is dispatch-sized. Gather pre-passes are
                 // parallel maps too; treat the lift_gathers fallback above the
-                // same way. Reduce/Redomap results are single elements;
+                // same way. Reduce / reducing Screma results are single elements;
                 // entries without a plan or fallback keep the host's default
                 // sizing.
                 let dispatch_sized_outputs = plan.is_some_and(|p| {
@@ -1710,13 +1710,6 @@ impl<'a, 'b> Converter<'a, 'b> {
                 destination,
             } => self.convert_soac_map(lam, inputs, *destination, ty),
             SoacOp::Reduce { op, ne, input, .. } => self.convert_soac_reduce(op, ne, input, ty),
-            SoacOp::Redomap {
-                op,
-                reduce_op,
-                ne,
-                inputs,
-                ..
-            } => self.convert_soac_redomap(op, reduce_op, ne, inputs, ty),
             SoacOp::Screma {
                 map_lams,
                 accumulators,
@@ -1956,67 +1949,6 @@ impl<'a, 'b> Converter<'a, 'b> {
                 }],
                 input_array_types: vec![arr_ty],
                 input_elem_types: vec![elem_ty],
-                map_output_elem_types: vec![],
-                map_input_indices: vec![],
-                map_capture_counts: vec![],
-                map_destinations: vec![],
-                acc_destinations: vec![SoacDestination::Fresh],
-            },
-            operands,
-            tuple_ty,
-        );
-        Ok(self.intern_pure(PureOp::Project { index: 0 }, smallvec![screma_nid], result_ty))
-    }
-
-    fn convert_soac_redomap(
-        &mut self,
-        op: &SoacBody,
-        reduce_op: &SoacBody,
-        ne: &Term,
-        inputs: &[ArrayExpr],
-        result_ty: Type<TypeName>,
-    ) -> Result<NodeId, ConvertError> {
-        let op_name = self.lambda_fn_name(&op.lam)?;
-        let reduce_func_name = self.lambda_fn_name(&reduce_op.lam)?;
-        let capture_nids: Vec<NodeId> =
-            op.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
-        let reduce_capture_nids: Vec<NodeId> =
-            reduce_op.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
-        let input_nids: Vec<NodeId> =
-            inputs.iter().map(|ae| self.convert_array_expr_value(ae)).collect::<Result<_, _>>()?;
-        let input_arr_types: Vec<Type<TypeName>> =
-            inputs.iter().zip(input_nids.iter()).map(|(ae, nid)| self.value_array_type(*nid, ae)).collect();
-        let input_elem_types: Vec<Type<TypeName>> = input_arr_types
-            .iter()
-            .zip(inputs.iter())
-            .map(|(ty, ae)| self.value_elem_type(ty, ae))
-            .collect();
-        let init_nid = self.convert_term(ne)?;
-
-        let mut operands: SmallVec<[NodeId; 4]> = SmallVec::new();
-        operands.extend(input_nids.iter().copied());
-        operands.push(init_nid);
-        operands.extend(capture_nids.iter().copied());
-        operands.extend(reduce_capture_nids.iter().copied());
-
-        // Emit as Screma { 0 maps, 1 Reduce accumulator } + project field
-        // 0. step_func=op (per-element acc combinator),
-        // reduce_op_func=reduce_func (pure phase 2 combiner).
-        let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![result_ty.clone()]);
-        let step_capture_count = capture_nids.len();
-        let reduce_op_capture_count = reduce_capture_nids.len();
-        let screma_nid = self.emit_soac(
-            PendingSoac::Screma {
-                map_funcs: vec![],
-                accumulators: vec![super::types::PendingScremaAccumulator {
-                    kind: crate::tlc::ScremaAccumulator::Reduce,
-                    step_func: op_name,
-                    reduce_op_func: reduce_func_name,
-                    step_capture_count,
-                    reduce_op_capture_count,
-                }],
-                input_array_types: input_arr_types,
-                input_elem_types,
                 map_output_elem_types: vec![],
                 map_input_indices: vec![],
                 map_capture_counts: vec![],

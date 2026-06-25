@@ -90,7 +90,7 @@ impl EntryBuilder {
 
     /// Direct mutable access to the underlying EGraph — used when a
     /// caller needs `graph_ops` operations not yet wrapped on the
-    /// builder (e.g. `clone_pure_subgraph` for copying a Redomap
+    /// builder (e.g. `clone_pure_subgraph` for copying a reducing Screma's
     /// neutral-element subgraph across entries).
     pub fn graph_mut(&mut self) -> &mut EGraph {
         &mut self.graph

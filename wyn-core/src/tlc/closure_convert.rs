@@ -393,13 +393,6 @@ pub fn collect_free_vars_soac(
             collect_free_vars_array_expr(indices, bound, top_level, known_defs, symbols, free, seen);
             collect_free_vars_array_expr(values, bound, top_level, known_defs, symbols, free, seen);
         }
-        SoacOp::Redomap { op, ne, inputs, .. } => {
-            collect_free_vars_soac_body(op, bound, top_level, known_defs, symbols, free, seen);
-            collect_free_vars(ne, bound, top_level, known_defs, symbols, free, seen);
-            for input in inputs {
-                collect_free_vars_array_expr(input, bound, top_level, known_defs, symbols, free, seen);
-            }
-        }
         SoacOp::Screma {
             map_lams,
             accumulators,
@@ -558,7 +551,6 @@ fn check_soac_envelopes(
         SoacOp::Scan { op, reduce_op, .. } => vec![op, reduce_op],
         SoacOp::Filter { pred, .. } => vec![pred],
         SoacOp::ReduceByIndex { op, .. } => vec![op],
-        SoacOp::Redomap { op, reduce_op, .. } => vec![op, reduce_op],
         SoacOp::Scatter { lam, .. } => vec![lam],
         SoacOp::Screma {
             map_lams,
@@ -1140,17 +1132,6 @@ impl<'a> ClosureConverter<'a> {
                 indices: self.convert_array_expr(indices, span),
                 values: self.convert_array_expr(values, span),
             },
-            SoacOp::Redomap {
-                op,
-                reduce_op,
-                ne,
-                inputs,
-            } => SoacOp::Redomap {
-                op: self.lift_soac_lambda(op.lam, span),
-                reduce_op: self.lift_soac_lambda(reduce_op.lam, span),
-                ne: Box::new(self.convert_term(*ne)),
-                inputs: inputs.into_iter().map(|ae| self.convert_array_expr(ae, span)).collect(),
-            },
             SoacOp::Screma {
                 map_lams,
                 accumulators,
@@ -1325,10 +1306,6 @@ fn collect_soac_bound_syms(soac: &SoacOp, out: &mut LookupSet<SymbolId>) {
             body(reduce_op, out);
         }
         SoacOp::Filter { pred, .. } => body(pred, out),
-        SoacOp::Redomap { op, reduce_op, .. } => {
-            body(op, out);
-            body(reduce_op, out);
-        }
         SoacOp::ReduceByIndex { op, .. } => body(op, out),
         SoacOp::Scatter { lam, .. } => body(lam, out),
         SoacOp::Screma {

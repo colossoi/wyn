@@ -424,9 +424,9 @@ impl<'p> Builder<'p> {
     }
 
     /// SOACs: each input array contributes uses; element params
-    /// inherit mutability from their matched input (Map/Redomap), or
+    /// inherit mutability from their matched input (Map/Screma), or
     /// from the single input (Reduce/Scan/Filter/ReduceByIndex).
-    /// Accumulator params (Reduce/Scan/Redomap) are the body's
+    /// Accumulator params (Reduce/Scan/Screma) are the body's
     /// per-iteration output — Fresh.
     ///
     /// Each per-iteration owner introduced here is also recorded
@@ -492,46 +492,6 @@ impl<'p> Builder<'p> {
                 self.visit_array_expr(values);
                 self.bind_reducer_params(&op.lam, values, soac_id);
                 self.visit_soac_body(op);
-            }
-            SoacOp::Redomap {
-                op,
-                reduce_op,
-                ne,
-                inputs,
-                ..
-            } => {
-                self.visit_term(ne);
-                for ae in inputs {
-                    self.visit_array_expr(ae);
-                }
-                // op has shape (acc, x1, ..., xN). Bind acc as Fresh,
-                // each xi from inputs[i].
-                if let Some(((acc_sym, acc_ty), elem_params)) = op.lam.params.split_first() {
-                    if !types::is_copy(acc_ty) {
-                        let owner = self.fresh_owner(Origin::Fresh);
-                        self.bind(*acc_sym, owner);
-                        self.record_per_call_def(soac_id, owner);
-                    }
-                    for ((sym, ty), input) in elem_params.iter().zip(inputs.iter()) {
-                        if !types::is_copy(ty) {
-                            let origin = self.element_origin_from_input(input);
-                            let owner = self.fresh_owner(origin);
-                            self.bind(*sym, owner);
-                            self.record_per_call_def(soac_id, owner);
-                        }
-                    }
-                }
-                self.visit_soac_body(op);
-                // reduce_op is the parallel-phase combiner: (acc, acc) → acc.
-                // Both params are accumulator-typed; Fresh per call.
-                for (sym, ty) in &reduce_op.lam.params {
-                    if !types::is_copy(ty) {
-                        let owner = self.fresh_owner(Origin::Fresh);
-                        self.bind(*sym, owner);
-                        self.record_per_call_def(soac_id, owner);
-                    }
-                }
-                self.visit_soac_body(reduce_op);
             }
             SoacOp::Screma {
                 map_lams,
@@ -984,21 +944,6 @@ impl<'m> Liveness<'m> {
                 let after_values = self.analyze_array_expr(values, after_op);
                 let after_indices = self.analyze_array_expr(indices, after_values);
                 self.analyze(ne, after_indices)
-            }
-            SoacOp::Redomap {
-                op,
-                reduce_op,
-                ne,
-                inputs,
-                ..
-            } => {
-                let after_op = self.soac_envelope_fixed_point(op, &per_call_defs, live_after);
-                let after_reduce = self.soac_envelope_fixed_point(reduce_op, &per_call_defs, after_op);
-                let mut live = after_reduce;
-                for ae in inputs.iter().rev() {
-                    live = self.analyze_array_expr(ae, live);
-                }
-                self.analyze(ne, live)
             }
             SoacOp::Screma {
                 map_lams,

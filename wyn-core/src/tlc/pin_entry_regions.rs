@@ -384,17 +384,6 @@ fn subst_soac(soac: &mut SoacOp, s: &RegionSubst) {
             subst_array_expr(indices, s);
             subst_array_expr(values, s);
         }
-        SoacOp::Redomap {
-            op,
-            reduce_op,
-            ne,
-            inputs,
-        } => {
-            subst_soac_body(op, s);
-            subst_soac_body(reduce_op, s);
-            subst_term(ne, s);
-            inputs.iter_mut().for_each(|ae| subst_array_expr(ae, s));
-        }
         SoacOp::Screma {
             map_lams,
             accumulators,

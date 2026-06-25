@@ -577,7 +577,7 @@ pub struct ScremaAccumulatorSpec {
 
 /// A second-order array combinator (SOAC) operation.
 ///
-/// `Reduce`, `Redomap`, `Scan`, and `ReduceByIndex` parallelize freely on
+/// `Reduce`, `Screma`, `Scan`, and `ReduceByIndex` parallelize freely on
 /// the assumption that their reducer is associative (Futhark convention:
 /// the caller asserts associativity by using the SOAC). The compiler
 /// never verifies this — float reductions are reordered just like int
@@ -597,20 +597,6 @@ pub enum SoacOp {
         op: SoacBody,
         ne: Box<Term>,
         input: ArrayExpr,
-    },
-    /// Fused map+reduce: `op(acc, x1, ..., xn) -> acc'` over parallel inputs.
-    /// Produced by fusion when a Map feeds directly into a Reduce.
-    /// Lowered as a single loop without materializing the intermediate array.
-    Redomap {
-        /// Combined operator: `(acc, x1, ..., xn) -> acc'`
-        /// First param is the accumulator, rest are elements from each input.
-        op: SoacBody,
-        /// Pure reduce combiner: `(acc, acc) -> acc` for parallel phase 2.
-        reduce_op: SoacBody,
-        /// Initial accumulator value.
-        ne: Box<Term>,
-        /// Parallel input arrays (one per element param in op).
-        inputs: Vec<ArrayExpr>,
     },
     /// Multi-result map+accumulator SOAC: one loop over `inputs` writes zero
     /// or more mapped array results and threads zero or more accumulator
@@ -639,9 +625,10 @@ pub enum SoacOp {
         /// Pure associative combiner `(a, a) -> a` on the value type, for the
         /// parallel scan's phase 2 (combine two already-scanned block sums).
         /// Equals `op` for a plain scan; for a fused scan it is the original
-        /// scan combiner without the producer `f`. Mirrors `Redomap::reduce_op`
-        /// — a parallel scan needs both the elementwise step and a pure
-        /// combiner, since phase 2 combines transformed values, not raw inputs.
+        /// scan combiner without the producer `f`. Mirrors a `Screma` Reduce
+        /// accumulator's `reduce_op` — a parallel scan needs both the
+        /// elementwise step and a pure combiner, since phase 2 combines
+        /// transformed values, not raw inputs.
         reduce_op: SoacBody,
         ne: Box<Term>,
         input: ArrayExpr,
@@ -1079,20 +1066,6 @@ where
             visit_array_expr_children(indices, f);
             visit_array_expr_children(values, f);
         }
-        SoacOp::Redomap {
-            op,
-            reduce_op,
-            ne,
-            inputs,
-            ..
-        } => {
-            visit_soac_body_children(op, f);
-            visit_soac_body_children(reduce_op, f);
-            f(ne);
-            for ae in inputs {
-                visit_array_expr_children(ae, f);
-            }
-        }
         SoacOp::Screma {
             map_lams,
             accumulators,
@@ -1247,17 +1220,6 @@ where
             ne: Box::new(f(*ne)),
             indices: map_array_expr_children(indices, f),
             values: map_array_expr_children(values, f),
-        },
-        SoacOp::Redomap {
-            op,
-            reduce_op,
-            ne,
-            inputs,
-        } => SoacOp::Redomap {
-            op: map_soac_body_children(op, f),
-            reduce_op: map_soac_body_children(reduce_op, f),
-            ne: Box::new(f(*ne)),
-            inputs: inputs.into_iter().map(|ae| map_array_expr_children(ae, f)).collect(),
         },
         SoacOp::Screma {
             map_lams,

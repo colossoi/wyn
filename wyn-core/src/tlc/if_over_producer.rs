@@ -601,19 +601,6 @@ fn collect_symbol_refs_soac(soac: &SoacOp, out: &mut LookupSet<SymbolId>) {
             collect_symbol_refs(ne, out);
             collect_symbol_refs_array(input, out);
         }
-        SoacOp::Redomap {
-            op,
-            reduce_op,
-            ne,
-            inputs,
-        } => {
-            collect_symbol_refs_soac_body(op, out);
-            collect_symbol_refs_soac_body(reduce_op, out);
-            collect_symbol_refs(ne, out);
-            for input in inputs {
-                collect_symbol_refs_array(input, out);
-            }
-        }
         SoacOp::Screma {
             map_lams,
             accumulators,

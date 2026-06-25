@@ -483,31 +483,6 @@ impl<'a> CallLowerer<'a> {
                 indices: self.lower_array_expr(indices),
                 values: self.lower_array_expr(values),
             },
-            SoacOp::Redomap {
-                op,
-                reduce_op,
-                ne,
-                inputs,
-            } => SoacOp::Redomap {
-                op: super::SoacBody {
-                    lam: op.lam,
-                    captures: op
-                        .captures
-                        .into_iter()
-                        .map(|(s, ty, t)| (s, ty, self.lower_term(t)))
-                        .collect(),
-                },
-                reduce_op: super::SoacBody {
-                    lam: reduce_op.lam,
-                    captures: reduce_op
-                        .captures
-                        .into_iter()
-                        .map(|(s, ty, t)| (s, ty, self.lower_term(t)))
-                        .collect(),
-                },
-                ne: Box::new(self.lower_term(*ne)),
-                inputs: inputs.into_iter().map(|ae| self.lower_array_expr(ae)).collect(),
-            },
             SoacOp::Screma {
                 map_lams,
                 accumulators,

@@ -501,19 +501,47 @@ fn rewrite_soac(
             ),
             destination,
         },
-        SoacOp::Redomap {
-            op,
-            reduce_op,
-            ne,
+        SoacOp::Screma {
+            map_lams,
+            accumulators,
             inputs,
-        } => SoacOp::Redomap {
-            op: rewrite_soac_body(op, arr, binding, elem_ty, bail, dyn_uses, soac_uses, term_ids),
-            reduce_op: rewrite_soac_body(
-                reduce_op, arr, binding, elem_ty, bail, dyn_uses, soac_uses, term_ids,
-            ),
-            ne: Box::new(rewrite_uses(
-                *ne, arr, binding, elem_ty, bail, dyn_uses, soac_uses, term_ids,
-            )),
+            map_input_indices,
+        } => SoacOp::Screma {
+            map_lams: map_lams
+                .into_iter()
+                .map(|body| {
+                    rewrite_soac_body(body, arr, binding, elem_ty, bail, dyn_uses, soac_uses, term_ids)
+                })
+                .collect(),
+            accumulators: accumulators
+                .into_iter()
+                .map(|acc| super::ScremaAccumulatorSpec {
+                    kind: acc.kind,
+                    step_lam: rewrite_soac_body(
+                        acc.step_lam,
+                        arr,
+                        binding,
+                        elem_ty,
+                        bail,
+                        dyn_uses,
+                        soac_uses,
+                        term_ids,
+                    ),
+                    reduce_op: rewrite_soac_body(
+                        acc.reduce_op,
+                        arr,
+                        binding,
+                        elem_ty,
+                        bail,
+                        dyn_uses,
+                        soac_uses,
+                        term_ids,
+                    ),
+                    ne: Box::new(rewrite_uses(
+                        *acc.ne, arr, binding, elem_ty, bail, dyn_uses, soac_uses, term_ids,
+                    )),
+                })
+                .collect(),
             inputs: inputs
                 .into_iter()
                 .map(|ae| {
@@ -522,6 +550,7 @@ fn rewrite_soac(
                     )
                 })
                 .collect(),
+            map_input_indices,
         },
         SoacOp::Filter {
             pred,
@@ -825,7 +854,7 @@ fn collect_storage_in_term(term: &Term, out: &mut Vec<(u32, u32, Type<TypeName>)
 
 fn collect_storage_in_soac(soac: &SoacOp, out: &mut Vec<(u32, u32, Type<TypeName>)>) {
     match soac {
-        SoacOp::Map { inputs, .. } | SoacOp::Redomap { inputs, .. } => {
+        SoacOp::Map { inputs, .. } | SoacOp::Screma { inputs, .. } => {
             for ae in inputs {
                 collect_storage_in_ae(ae, out);
             }

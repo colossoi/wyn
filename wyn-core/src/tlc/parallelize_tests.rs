@@ -777,7 +777,8 @@ fn unsupported_scan_fallback_dispatches_single_lane() {
     );
 }
 
-/// `reduce(+, 0, map(f, xs))` becomes a redomap, which lowers to a two-phase
+/// `reduce(+, 0, map(f, xs))` becomes a fused map→reduce (a single-accumulator
+/// Screma), which lowers to a two-phase
 /// (phase1 chunked + phase2 single-workgroup tree) multi-compute pipeline.
 #[test]
 fn nested_reduce_of_map_becomes_two_phase_multi_compute() {
@@ -796,7 +797,7 @@ fn nested_reduce_of_map_becomes_two_phase_multi_compute() {
 
 /// A shared producer feeding both a map and a reduce fuses to a Screma
 /// (map outputs + 1 reduce accumulator). After Step 2 the Screma path
-/// emits the same two-stage shape as the Redomap path — phase 1 chunks
+/// emits the same two-stage shape as a plain reduce — phase 1 chunks
 /// the input and the map output view + writes the reduce partial to
 /// `partials[tid]`, phase 2 tree-reduces partials into the result.
 #[test]
@@ -1224,7 +1225,7 @@ fn two_entries_each_with_scan_then_gather_yield_many_stages() {
 // Scalar-reduce hoisting (producer-consumer planner ScalarBroadcast)
 // =============================================================================
 //
-// A scalar SOAC result (`reduce`/`redomap`) bound in a top-level let and
+// A scalar SOAC result (`reduce` or fused `map→reduce`) bound in a top-level let and
 // consumed *per element* inside the tail SOAC's operator lambda is marked
 // `StoragePrepass(ScalarBroadcast)` by the producer-consumer planner and
 // hoisted by `lift_compute_scalar_reduces` into its own two-phase reduce

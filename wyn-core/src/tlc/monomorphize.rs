@@ -670,17 +670,6 @@ impl<'a> Monomorphizer<'a> {
                 indices: self.process_array_expr(indices),
                 values: self.process_array_expr(values),
             },
-            SoacOp::Redomap {
-                op,
-                reduce_op,
-                ne,
-                inputs,
-            } => SoacOp::Redomap {
-                op: self.process_soac_body(op),
-                reduce_op: self.process_soac_body(reduce_op),
-                ne: Box::new(self.process_term(ne)),
-                inputs: inputs.iter().map(|ae| self.process_array_expr(ae)).collect(),
-            },
             SoacOp::Screma {
                 map_lams,
                 accumulators,
@@ -1053,17 +1042,6 @@ impl<'a> Monomorphizer<'a> {
                 ne: Box::new(self.apply_subst_term(ne, subst)),
                 indices: self.apply_subst_array_expr(indices, subst),
                 values: self.apply_subst_array_expr(values, subst),
-            },
-            SoacOp::Redomap {
-                op,
-                reduce_op,
-                ne,
-                inputs,
-            } => SoacOp::Redomap {
-                op: self.apply_subst_soac_body(op, subst),
-                reduce_op: self.apply_subst_soac_body(reduce_op, subst),
-                ne: Box::new(self.apply_subst_term(ne, subst)),
-                inputs: inputs.iter().map(|ae| self.apply_subst_array_expr(ae, subst)).collect(),
             },
             SoacOp::Screma {
                 map_lams,

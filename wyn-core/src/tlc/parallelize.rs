@@ -49,7 +49,7 @@ pub enum ArrayProvenance {
     /// can — the from_tlc / soac_expand machinery already handles
     /// `Ref(Var(sym))` and `as_soa_tuple` shapes correctly. Accepted
     /// by every SOAC's parallelization gate post-EGIR-migration of
-    /// Map / Reduce / Redomap / Scan.
+    /// Map / Reduce / Scan / Screma.
     Opaque,
 }
 
@@ -57,10 +57,10 @@ pub enum ArrayProvenance {
 ///
 /// Holds the original `SoacOp` — callers that need per-variant logic
 /// pattern-match `original`. `provenances` carries one entry per input
-/// (length 1 for Reduce/Scan, N for Map/Redomap with N inputs).
+/// (length 1 for Reduce/Scan, N for Map/Screma with N inputs).
 ///
 /// `analyze_soac` is the only constructor and guarantees `original` is
-/// one of `Map`/`Reduce`/`Redomap`/`Scan` — the non-parallelizable
+/// one of `Map`/`Reduce`/`Scan`/`Screma` — the non-parallelizable
 /// variants (Filter, Scatter, ReduceByIndex) never appear here.
 #[derive(Debug, Clone)]
 pub struct SoacAnalysis {
@@ -72,7 +72,6 @@ pub struct SoacAnalysis {
 enum ParallelSoacFlavor {
     Map,
     Reduce,
-    Redomap,
     Scan,
     Screma,
 }
@@ -97,13 +96,6 @@ fn parallel_soac_shape(soac: &SoacOp) -> Option<ParallelSoacShape<'_>> {
         SoacOp::Reduce { ne, input, .. } => Some(ParallelSoacShape {
             flavor: ParallelSoacFlavor::Reduce,
             inputs: vec![input],
-            ne: Some(ne),
-            result_elem_type: ne.ty.clone(),
-            lowerable_today: true,
-        }),
-        SoacOp::Redomap { ne, inputs, .. } => Some(ParallelSoacShape {
-            flavor: ParallelSoacFlavor::Redomap,
-            inputs: inputs.iter().collect(),
             ne: Some(ne),
             result_elem_type: ne.ty.clone(),
             lowerable_today: true,
@@ -158,13 +150,13 @@ impl SoacAnalysis {
         soac_inputs(&self.original)
     }
 
-    /// Neutral/initial value — present for Reduce/Redomap/Scan, `None` for Map.
+    /// Neutral/initial value — present for Reduce/Scan, `None` for Map/Screma.
     pub fn ne(&self) -> Option<&Term> {
         parallel_soac_shape(&self.original).expect("non-parallel SOAC in SoacAnalysis").ne
     }
 
     /// Element type of one iteration's output — Map/Scan elem type (from the
-    /// per-element lambda's ret_ty); Reduce/Redomap acc type (from `ne.ty`).
+    /// per-element lambda's ret_ty); Reduce acc type (from `ne.ty`).
     pub fn result_elem_type(&self) -> Type<TypeName> {
         parallel_soac_shape(&self.original).expect("non-parallel SOAC in SoacAnalysis").result_elem_type
     }
@@ -420,21 +412,31 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
                     None => return None,
                 }
             }
-            TermKind::TupleProj { tuple, idx: 0 } => {
-                let TermKind::Var(VarRef::Symbol(sym)) = tuple.kind else {
-                    return None;
-                };
-                if scope.is_lambda_param(sym) {
-                    return None;
+            TermKind::TupleProj { tuple, idx: 0 } => match tuple.kind {
+                // Inline single-accumulator `Screma` (a fused `map → reduce`):
+                // field 0 is the reduce result. Descend into the SOAC directly
+                // — the `Soac` arm picks it up next iteration.
+                TermKind::Soac(SoacOp::Screma { .. }) => {
+                    current = *tuple;
                 }
-                match scope.remove_let(sym) {
-                    Some((alias_ty, rhs)) if matches!(rhs.kind, TermKind::Soac(SoacOp::Screma { .. })) => {
-                        tail_alias.get_or_insert((sym, alias_ty));
-                        current = rhs;
+                // Let-bound Screma whose tail use is `proj(sym, 0)` — follow
+                // the binding (the `find_filter_plan` shape).
+                TermKind::Var(VarRef::Symbol(sym)) => {
+                    if scope.is_lambda_param(sym) {
+                        return None;
                     }
-                    _ => return None,
+                    match scope.remove_let(sym) {
+                        Some((alias_ty, rhs))
+                            if matches!(rhs.kind, TermKind::Soac(SoacOp::Screma { .. })) =>
+                        {
+                            tail_alias.get_or_insert((sym, alias_ty));
+                            current = rhs;
+                        }
+                        _ => return None,
+                    }
                 }
-            }
+                _ => return None,
+            },
             _ => return None,
         }
     }
@@ -625,7 +627,6 @@ fn analyze_soac(
         shape.flavor,
         ParallelSoacFlavor::Map
             | ParallelSoacFlavor::Reduce
-            | ParallelSoacFlavor::Redomap
             | ParallelSoacFlavor::Scan
             | ParallelSoacFlavor::Screma
     ));
@@ -657,17 +658,6 @@ fn analyze_soac(
                 input: input.clone(),
             }
         }
-        SoacOp::Redomap {
-            op,
-            reduce_op,
-            ne,
-            inputs,
-        } => SoacOp::Redomap {
-            op: op.clone(),
-            reduce_op: reduce_op.clone(),
-            ne: ne.clone(),
-            inputs: inputs.clone(),
-        },
         SoacOp::Screma {
             map_lams,
             accumulators,
@@ -699,7 +689,7 @@ fn analyze_soac(
     // is the single source of truth for "what are the inputs". Map
     // inputs that don't classify (e.g. `Ref(Var(tuple_sym))` for SoA
     // tuple entry params) fall back to `Opaque` — the EGIR lowering
-    // path rediscovers their concrete shape. Reduce/Scan/Redomap reject
+    // path rediscovers their concrete shape. Reduce/Scan/Screma reject
     // such inputs at their own gates above; reaching this loop with
     // Opaque can only happen for Map.
     let provenances: Vec<ArrayProvenance> = soac_inputs(&normalized)
@@ -799,10 +789,9 @@ fn classify_input(input: &ArrayExpr, entry_slots: &[Option<EntryParamBinding>]) 
 /// iteration domain.
 fn soac_primary_input(soac: &SoacOp) -> Option<&ArrayExpr> {
     match soac {
-        SoacOp::Map { inputs, .. }
-        | SoacOp::Redomap { inputs, .. }
-        | SoacOp::Screma { inputs, .. }
-        | SoacOp::Scatter { inputs, .. } => inputs.first(),
+        SoacOp::Map { inputs, .. } | SoacOp::Screma { inputs, .. } | SoacOp::Scatter { inputs, .. } => {
+            inputs.first()
+        }
         SoacOp::Reduce { input, .. } | SoacOp::Scan { input, .. } | SoacOp::Filter { input, .. } => {
             Some(input)
         }
@@ -1161,7 +1150,7 @@ fn is_zero_int(t: &Term) -> bool {
 
 const DEFAULT_WORKGROUP_X: u32 = 64;
 
-/// Workgroup count for a reduce/redomap phase 1 grid. The grid is fixed
+/// Workgroup count for a reduce phase 1 grid. The grid is fixed
 /// (not derived from input length) and sized to roughly saturate the GPU;
 /// the kernel grid-strides over the input via the `num_workgroups`
 /// intrinsic, so this bounds the `partials` count to one per worker
@@ -1297,7 +1286,7 @@ pub struct ParallelizationResult {
     /// Compiler-internal per-entry plans for EGIR to consume. Keyed by the
     /// entry's surface name (matches `egir::EgirEntry::name`). Empty for
     /// graphics entries, non-parallelized compute entries, and (today)
-    /// reduce/redomap/scan entries — those still lower through the old
+    /// reduce/scan entries — those still lower through the old
     /// TLC path. Map planning is the only strategy populated until the
     /// EGIR migration broadens.
     pub plans: LookupMap<String, ParallelizationPlan>,
@@ -1342,7 +1331,7 @@ pub enum DispatchModel {
 
 /// Unified Screma binding layout that covers every parallel SOAC
 /// shape the EGIR-native path emits. Pointwise Map collapses to
-/// `{ map_outputs: [_], accumulators: [] }`; Reduce/Redomap collapses
+/// `{ map_outputs: [_], accumulators: [] }`; Reduce / fused map→reduce collapses
 /// to `{ map_outputs: [], accumulators: [Reduce{partials, result}] }`;
 /// Scan collapses to `{ map_outputs: [], accumulators: [Scan{output,
 /// block_sums, block_offsets}] }`; mixed Screma populates both.
@@ -1397,7 +1386,7 @@ impl PlannedBindings {
 // =============================================================================
 
 /// For each graphical entry, walk its body's outer let-chain and hoist
-/// reduce/redomap bindings whose RHS is invariant with respect to the
+/// reduce bindings (plain or fused map→reduce) whose RHS is invariant with respect to the
 /// entry's per-invocation params. Each lift:
 ///   * allocates a fresh storage buffer for the scalar result,
 ///   * emits a compute pre-pass entry `<entry>_prepass_<n>` that
@@ -1414,7 +1403,7 @@ impl PlannedBindings {
 /// source file compiles to a chunk/combine pair plus the original
 /// vertex+fragment stages.
 ///
-/// Scope (MVP): only reduce/redomap whose result is a scalar. Scan/Map
+/// Scope (MVP): only a reduce (plain or fused map→reduce) whose result is a scalar. Scan/Map
 /// (array results) and deeply nested lets are left for a follow-up.
 enum ScalarPrepassPolicy {
     GraphicalInvariant {
@@ -1671,10 +1660,27 @@ fn lift_in_term(
     }
 }
 
-/// If `rhs` is a scalar-returning SOAC (reduce/redomap) whose free
-/// vars don't reference entry params, allocate a storage binding,
-/// emit a pre-pass compute entry, and replace `rhs` with a load of
-/// that binding. Otherwise return `rhs` unchanged.
+/// A scalar-result reduction: either a bare `Reduce`, or a fused
+/// `map → reduce` — a single-`Reduce`-accumulator, no-map `Screma`
+/// projected to its scalar field 0.
+fn is_scalar_reduction(term: &Term) -> bool {
+    match &term.kind {
+        TermKind::Soac(SoacOp::Reduce { .. }) => true,
+        TermKind::TupleProj { tuple, idx: 0 } => matches!(
+            &tuple.kind,
+            TermKind::Soac(SoacOp::Screma { map_lams, accumulators, .. })
+                if map_lams.is_empty()
+                    && accumulators.len() == 1
+                    && matches!(accumulators[0].kind, super::ScremaAccumulator::Reduce)
+        ),
+        _ => false,
+    }
+}
+
+/// If `rhs` is a scalar-returning reduction (reduce or fused map→reduce)
+/// whose free vars don't reference entry params, allocate a storage
+/// binding, emit a pre-pass compute entry, and replace `rhs` with a load
+/// of that binding. Otherwise return `rhs` unchanged.
 fn maybe_hoist(
     rhs: Term,
     entry_name: &str,
@@ -1691,12 +1697,9 @@ fn maybe_hoist(
     // emitting an array would need to write N slots to storage, the
     // fragment would read back by index instead of at position 0, and
     // Stage B's two-phase plan would grow an array-sized output path.
-    // For the scalar-result cases (Reduce, Redomap) the single-slot
-    // shape already works end-to-end.
-    let is_scalar_soac = matches!(
-        &rhs.kind,
-        TermKind::Soac(SoacOp::Reduce { .. }) | TermKind::Soac(SoacOp::Redomap { .. })
-    );
+    // For the scalar-result reduction case the single-slot shape already
+    // works end-to-end.
+    let is_scalar_soac = is_scalar_reduction(&rhs);
     if !is_scalar_soac {
         return rhs;
     }
@@ -2232,8 +2235,8 @@ struct LoweringPlan {
     extra_bindings_used: u32,
     extra_parallel_plans: Vec<ParallelizationPlan>,
     /// EGIR-bound parallelization plan, if this strategy migrated to the
-    /// EGIR-side path. Populated for Map today; None for reduce / scan /
-    /// redomap (still TLC-lowered until their EGIR migration).
+    /// EGIR-side path. Populated for Map today; None for reduce / scan
+    /// (still TLC-lowered until their EGIR migration).
     parallel_plan: Option<ParallelizationPlan>,
 }
 
@@ -2258,7 +2261,7 @@ fn soac_has_ordered_side_effect(soac: &SoacOp) -> bool {
         | SoacOp::Scan { destination, .. }
         | SoacOp::Filter { destination, .. } => *destination != SoacDestination::Fresh,
         SoacOp::Scatter { .. } | SoacOp::ReduceByIndex { .. } => true,
-        SoacOp::Reduce { .. } | SoacOp::Redomap { .. } | SoacOp::Screma { .. } => false,
+        SoacOp::Reduce { .. } | SoacOp::Screma { .. } => false,
     }
 }
 
@@ -3072,7 +3075,7 @@ fn dispatch_len_for_ordered_soac(
     let input = match soac {
         SoacOp::Map { inputs, .. } | SoacOp::Scatter { inputs, .. } => inputs.first()?,
         SoacOp::Scan { input, .. } | SoacOp::Filter { input, .. } | SoacOp::Reduce { input, .. } => input,
-        SoacOp::Redomap { inputs, .. } | SoacOp::Screma { inputs, .. } => inputs.first()?,
+        SoacOp::Screma { inputs, .. } => inputs.first()?,
         SoacOp::ReduceByIndex { indices, .. } => indices,
     };
     match classify_input(input, entry_slots)? {
@@ -3392,7 +3395,7 @@ fn make_lowering_plan(
                 program,
             )
         }
-        ParallelSoacFlavor::Reduce | ParallelSoacFlavor::Redomap => {
+        ParallelSoacFlavor::Reduce => {
             let (reduce_op, ne) =
                 accumulator_phase_combiner(&analysis.soac.original).expect("reduce-like SOAC has combiner");
             make_two_phase_plan(
@@ -3459,7 +3462,6 @@ fn make_lowering_plan(
 fn accumulator_phase_combiner(soac: &SoacOp) -> Option<(&super::SoacBody, &Term)> {
     match soac {
         SoacOp::Reduce { op, ne, .. } => Some((op, ne)),
-        SoacOp::Redomap { reduce_op, ne, .. } => Some((reduce_op, ne)),
         _ => None,
     }
 }
@@ -3872,12 +3874,12 @@ fn make_two_phase_plan(
     };
     let elem_type = analysis.soac.result_elem_type();
 
-    // Reduce / Redomap both qualify for the EGIR-side migration when
-    // their combiner has no captures and the result is a scalar (for
+    // A plain Reduce qualifies for the EGIR-side migration when
+    // its combiner has no captures and the result is a scalar (for
     // tuple results, `emit_compute_output_stores` emits per-component
     // Stores that phase1's `find_store_of` doesn't yet locate).
     // Reduce additionally requires a scalar-literal NE (phase2 re-emits
-    // via `intern_constant`); Redomap clones the NE subgraph at EGIR,
+    // via `intern_constant`); a reducing Screma clones the NE subgraph at EGIR,
     // so any pure NE works.
     let scalar_result = matches!(
         &elem_type,
@@ -3894,7 +3896,6 @@ fn make_two_phase_plan(
         SoacOp::Reduce { .. } => {
             routable_result && reduce_op.captures.is_empty() && is_simple_constant_term(ne)
         }
-        SoacOp::Redomap { .. } => routable_result && reduce_op.captures.is_empty(),
         _ => false,
     };
     let egir_native = forced_result_binding.is_none() && can_route;
@@ -3944,8 +3945,8 @@ fn make_two_phase_plan(
         };
     }
 
-    // TLC-side synthesis path (used by Redomap and complex Reduce
-    // shapes not yet covered by the EGIR-side migration). Allocates
+    // TLC-side synthesis path (used by complex Reduce shapes not yet
+    // covered by the EGIR-side migration). Allocates
     // one extra Output binding per `extra_slots` entry so the original
     // entry's multi-output shape survives into phase 2.
     let extra_slot_bindings: Vec<BindingRef> = (0..analysis.extra_slots.len() as u32)
@@ -4294,7 +4295,7 @@ fn build_scan_pipeline_descriptor(
 }
 
 // =============================================================================
-// Two-phase entry builder (Reduce / Redomap)
+// Two-phase entry builder (Reduce)
 // =============================================================================
 
 fn build_two_phase_entries(
@@ -4508,7 +4509,7 @@ fn build_two_phase_entries(
 /// <body>
 /// ```
 ///
-/// Reused by both `build_chunked_soac_body` (reduce/map/redomap) and
+/// Reused by both `build_chunked_soac_body` (reduce/map) and
 /// `build_scan_phase_def` (scan phases 1 and 3).
 struct ChunkArithmetic {
     /// Type of `total`, `input_len`, `chunk_size`, `chunk_start`,
@@ -4518,7 +4519,7 @@ struct ChunkArithmetic {
     index_ty: Type<TypeName>,
     /// Total thread count for this phase. Equals the workgroup X
     /// dimension under the single-workgroup design used by reduce /
-    /// redomap / scan today; chosen from `pick_workgroup_size`.
+    /// reduce / scan today; chosen from `pick_workgroup_size`.
     total_threads: u32,
     tid_sym: SymbolId,
     total_sym: SymbolId,
@@ -4691,7 +4692,7 @@ fn u32_ty() -> Type<TypeName> {
 /// literals) is indexed by u32.
 fn soac_input_index_ty(soac: &SoacOp) -> Type<TypeName> {
     let first = match soac {
-        SoacOp::Map { inputs, .. } | SoacOp::Redomap { inputs, .. } => inputs.first(),
+        SoacOp::Map { inputs, .. } | SoacOp::Screma { inputs, .. } => inputs.first(),
         SoacOp::Reduce { input, .. } | SoacOp::Scan { input, .. } => Some(input),
         _ => None,
     };
@@ -4717,7 +4718,7 @@ fn int_lit_of(value: i64, ty: &Type<TypeName>, span: ast::Span, term_ids: &mut T
 // Chunked SOAC body builder
 // =============================================================================
 
-/// Build a chunked SOAC body for reduce/redomap/map phase 1. The SOAC's
+/// Build a chunked SOAC body for reduce/map phase 1. The SOAC's
 /// input is rebased to `(chunk_start, chunk_len)` (per-thread range), and
 /// the result is optionally stored into `partials[tid]`. Scan never
 /// reaches this builder — its parallelization is fully EGIR-side via
@@ -4767,23 +4768,6 @@ fn build_chunked_soac_body(
             ne: ne.clone(),
             input: chunk_array_expr(input, &chunk_start_var, &chunk_len_var, term_ids),
         },
-        SoacOp::Redomap {
-            op,
-            reduce_op,
-            ne,
-            inputs,
-        } => {
-            let chunked_inputs = inputs
-                .iter()
-                .map(|input| chunk_array_expr(input, &chunk_start_var, &chunk_len_var, term_ids))
-                .collect();
-            SoacOp::Redomap {
-                op: op.clone(),
-                reduce_op: reduce_op.clone(),
-                ne: ne.clone(),
-                inputs: chunked_inputs,
-            }
-        }
         SoacOp::Scan { .. } => {
             unreachable!("Scan is parallelized EGIR-side, never reaches build_chunked_soac_body")
         }
@@ -5373,7 +5357,7 @@ fn derived_stage(
     }
 }
 
-/// A `ComputeStage` for a reduce/redomap phase 1: a fixed, hardware-saturating
+/// A `ComputeStage` for a reduce phase 1: a fixed, hardware-saturating
 /// grid (`PHASE1_SATURATING_GROUPS` workgroups), *not* derived from input
 /// length. The kernel grid-strides over the input via the `num_workgroups`
 /// intrinsic, so a bounded grid yields a bounded `partials` count — one partial
@@ -5410,7 +5394,7 @@ fn fixed_stage(entry_point: String, reads: Vec<usize>, writes: Vec<usize>) -> Co
     }
 }
 
-/// A reduce/redomap phase 2 stage: one workgroup of `PHASE2_WIDTH` threads
+/// A reduce phase 2 stage: one workgroup of `PHASE2_WIDTH` threads
 /// (`LocalSize(W,1,1)`, dispatch `[1,1,1]`) that tree-reduces the partials in
 /// workgroup-shared memory. Mirrors the `W` baked into the synthesized phase2
 /// entry (`egir::parallelize::build_tree_reduce_phase2`).
