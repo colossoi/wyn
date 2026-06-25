@@ -3876,6 +3876,70 @@ entry filt_reduce(xs: []i32) i32 =
     );
 }
 
+/// Every compute entry point generated for a program, across all pipelines and
+/// their stages (the source entries plus any lifted `_gather_` pre-passes).
+/// Lets a test assert how many GPU dispatches one source entry expands to.
+fn compute_entry_points(pipeline: &crate::pipeline_descriptor::PipelineDescriptor) -> Vec<String> {
+    use crate::pipeline_descriptor::Pipeline;
+    pipeline
+        .pipelines
+        .iter()
+        .flat_map(|p| match p {
+            Pipeline::Compute(cp) => cp.stages.iter().map(|s| s.entry_point.clone()).collect::<Vec<_>>(),
+            Pipeline::Graphics(_) => Vec::new(),
+        })
+        .collect()
+}
+
+/// A `map` feeding a `filter` in one entry should compact in a single coherent
+/// pipeline — exactly as `filter` alone does, where the gather is an internal
+/// stage of *one* pipeline. Today it instead splits into TWO compute pipelines
+/// (`pick` plus a `pick_gather_0` pre-pass) whose intermediate buffers don't
+/// even share a name — `pick` reads `pick_gather_b1` while `pick_gather_0`
+/// writes `pick_gather_0_gather_b1` — and with nothing in the descriptor
+/// recording that the gather must run first. A host runtime can neither wire the
+/// gather's output into the filter's input nor order the two dispatches.
+#[test]
+#[ignore = "map→filter emits two unwired, unordered pipelines with mismatched \
+            intermediate names instead of one coherent pipeline"]
+fn map_into_filter_is_one_wired_pipeline() {
+    let lowered = compile_parallel(
+        "\
+open f32
+#[compute]
+entry pick(xs: []u32) ?k. [k]u32 =
+  let ys = map(|x| x + 1u32, xs) in
+  filter(|y| y < 100u32, ys)
+",
+    );
+    assert_eq!(
+        lowered.pipeline.pipelines.len(),
+        1,
+        "map→filter should compact in one pipeline (filter alone does); got entry points {:?}",
+        compute_entry_points(&lowered.pipeline),
+    );
+}
+
+/// Inlining the `map` directly into `filter` (instead of let-binding it first)
+/// should compile to the same thing as the let-bound form. Today it fails in
+/// EGraph conversion: the inlined `map` result is a runtime-sized array with no
+/// concrete buffer region, and `filter`'s lowering requires its input to be
+/// backed by a storage buffer. The let-bound form at least lowers (see
+/// `map_into_filter_is_one_wired_pipeline`); the inlined form doesn't compile.
+#[test]
+#[ignore = "filter(pred, map(...)) inlined fails EGraph conversion: the map \
+            result is runtime-sized with no concrete buffer region"]
+fn inlined_filter_over_map_compiles() {
+    compile_parallel(
+        "\
+open f32
+#[compute]
+entry cmptest(idx: []u32) ?k. [k]vec4f32 =
+  filter(|c| c.x < 100.0, map(|s| @[f32(i32(s)), 0.0, 0.0, 0.0], idx))
+",
+    );
+}
+
 /// A `map → filter → map → reduce` chain (the `separation`-style shape: a
 /// producer map feeds a filter, whose result feeds another map then a reduce)
 /// must collapse to a single masked `Screma`. The trailing map fuses into the
