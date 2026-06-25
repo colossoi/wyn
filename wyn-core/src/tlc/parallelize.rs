@@ -1661,9 +1661,11 @@ fn lift_in_term(
 fn is_scalar_reduction(term: &Term) -> bool {
     match &term.kind {
         TermKind::Soac(SoacOp::Reduce { .. }) => true,
-        TermKind::Soac(SoacOp::Screma { map_lams, accumulators, .. }) => {
-            super::is_scalar_reduce_screma(map_lams, accumulators)
-        }
+        TermKind::Soac(SoacOp::Screma {
+            map_lams,
+            accumulators,
+            ..
+        }) => super::is_scalar_reduce_screma(map_lams, accumulators),
         _ => false,
     }
 }
