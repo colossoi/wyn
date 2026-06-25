@@ -2793,6 +2793,42 @@ entry tick(#[storage(set=2, binding=0, access=read)] xs: []f32) f32 =
     );
 }
 
+#[test]
+fn filter_array_and_its_length_from_one_entry() {
+    // Returning a compacted array *and* a value derived from its length from a
+    // single entry. Let-binding the `filter` result opens its existential to a
+    // rigid skolem (`length(v)` then reads that skolem-sized array), so the
+    // body's inferred type is a bare `Array[u32, abstract, #skolem, _]`. The
+    // declared `?k. (...)` return is *packed*: its bound `k` instantiates to a
+    // fresh variable that unifies with the skolem, so one entry can emit both
+    // the compacted array and its count (no two-entry re-filter workaround).
+    typecheck_program(
+        r#"
+open f32
+#[compute]
+entry both(xs: []u32) ?k. ([k]u32, [1]u32) =
+  let v = filter(|x| x < 100u32, xs)
+  let n = length(v) in
+  (v, [u32(n)])
+"#,
+    );
+}
+
+#[test]
+fn existential_entry_return_is_independent_of_variable_name() {
+    // Packing the declared existential makes the return check robust to the
+    // *name* of the bound size variable. `filter` spells its existential `k`
+    // internally; an entry declaring `?m. [m]u32` must still typecheck, rather
+    // than failing because `m` and `k` are different `SizeVar` names.
+    typecheck_program(
+        r#"
+open f32
+#[compute]
+entry f(xs: []u32) ?m. [m]u32 = filter(|x| x < 100u32, xs)
+"#,
+    );
+}
+
 // ---- Infix bitwise / shift operators ----
 //
 // `^ & | << >>` typecheck over integer operands as `t -> t -> t`, and are

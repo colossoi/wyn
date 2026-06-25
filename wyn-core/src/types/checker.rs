@@ -546,6 +546,32 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
+    /// Instantiate an existential for *introduction* (packing): `?k. T` becomes
+    /// `T[?α/k]` where each bound size variable is replaced by a fresh
+    /// unification variable. This is the dual of `open_existential`: opening
+    /// (elimination, at a let-binding) uses rigid skolems so the size stays
+    /// opaque, whereas packing (a return position) uses fresh variables that
+    /// unification solves to the witness size the body actually produces.
+    ///
+    /// Returning a `filter` result that also flows through `length` is the
+    /// motivating case: the body's array carries a rigid skolem from its
+    /// let-opening, and packing the declared `?k.` return to a fresh variable
+    /// lets that variable solve to the skolem. Non-existential types pass
+    /// through unchanged.
+    fn instantiate_existential(&mut self, ty: Type) -> Type {
+        match ty {
+            Type::Constructed(TypeName::Existential(vars), args) if !args.is_empty() => {
+                let mut inner = args.into_iter().next().unwrap();
+                for var_name in vars {
+                    let fresh = self.context.new_variable();
+                    inner = Self::substitute_size_var(&inner, &var_name, &fresh);
+                }
+                inner
+            }
+            _ => ty,
+        }
+    }
+
     /// Substitute a size variable name with a type in a type expression.
     fn substitute_size_var(ty: &Type, var_name: &str, replacement: &Type) -> Type {
         match ty {
@@ -2001,8 +2027,19 @@ impl<'a> TypeChecker<'a> {
                 // Resolve type aliases (e.g., rand.state -> f32)
                 let expected_type = self.resolve_type_aliases_scoped(&expected_type, None);
 
+                // An existential return (`?k. T`) is *packed*: instantiate the
+                // declared bound size vars — and any existential the body
+                // itself still carries — as fresh unification variables, then
+                // unify the inner types. The fresh var solves to the witness
+                // size the body produces (e.g. the runtime length of a `filter`
+                // result that also feeds `length`). Unifying the raw `?k.`
+                // wrapper instead only matched a body that happened to spell its
+                // existential with the same variable name.
+                let expected_inner = self.instantiate_existential(expected_type.clone());
+                let body_inner = self.instantiate_existential(body_type.clone());
+
                 // Validate body type matches declared outputs
-                self.context.unify(&body_type, &expected_type).map_err(|_| {
+                self.context.unify(&body_inner, &expected_inner).map_err(|_| {
                     err_type_at!(
                         entry.body.h.span,
                         "Entry point '{}' return type mismatch: declared {}, inferred {}",
