@@ -186,6 +186,11 @@ struct ProjectionTemplate {
     field_idx: usize,
     ty: Type<TypeName>,
     span: Span,
+    /// The fused Screma is scalar-output (a single `Reduce`, no maps): its
+    /// symbol IS the value, so reference it directly instead of projecting.
+    /// Set from the rewrite's shape, never inferred from `tuple_ty` (which can
+    /// be a tuple when the reduce result is itself a tuple value).
+    scalar: bool,
 }
 
 struct PlannedScremaRewrite {
@@ -210,6 +215,9 @@ struct ScremaRewrite {
     tuple_ty: Type<TypeName>,
     fused_binding: LetBinding,
     projection_fields: LookupMap<usize, usize>,
+    /// The fused Screma is scalar-output (single `Reduce`, no maps) — consumers
+    /// alias its symbol directly rather than projecting a field.
+    scalar_result: bool,
 }
 
 struct ScremaProducer {
@@ -452,7 +460,14 @@ fn make_screma_term(
     span: Span,
     term_ids: &mut TermIdSource,
 ) -> Term {
-    let ty = Type::Constructed(TypeName::Tuple(result_fields.len()), result_fields);
+    // A single-accumulator, 0-map reducing Screma is scalar-typed: its sole
+    // output is the reduce result, so consumers reference it directly. Only
+    // genuine multi-output fusions carry a tuple.
+    let ty = if super::is_scalar_reduce_screma(&map_lams, &accumulators) {
+        result_fields[0].clone()
+    } else {
+        Type::Constructed(TypeName::Tuple(result_fields.len()), result_fields)
+    };
     // This horizontal-fusion path groups maps that read the same inputs, so
     // every lane consumes all inputs.
     let map_input_indices = super::screma_all_inputs_indices(inputs.len(), map_lams.len());
@@ -483,6 +498,7 @@ fn make_screma_rewrite(
     term_ids: &mut TermIdSource,
 ) -> ScremaRewrite {
     let tuple_sym = symbols.alloc(symbol_name.to_string());
+    let scalar_result = super::is_scalar_reduce_screma(&map_lams, &accumulators);
     let rhs = make_screma_term(result_fields, map_lams, accumulators, inputs, span, term_ids);
     let tuple_ty = rhs.ty.clone();
     let fused_binding = LetBinding {
@@ -498,6 +514,7 @@ fn make_screma_rewrite(
         tuple_ty,
         fused_binding,
         projection_fields,
+        scalar_result,
     }
 }
 
@@ -506,13 +523,25 @@ fn tuple_projection_binding(
     tuple_sym: SymbolId,
     tuple_ty: &Type<TypeName>,
     proj_idx: usize,
+    scalar: bool,
     term_ids: &mut TermIdSource,
 ) -> LetBinding {
-    let tuple_ref = Term {
-        id: term_ids.next_id(),
-        ty: tuple_ty.clone(),
-        span: original.span,
-        kind: TermKind::Var(VarRef::Symbol(tuple_sym)),
+    // Scalar-output fused reduce: the Screma's result IS the consumer's value,
+    // so alias its symbol directly rather than projecting. (`scalar` comes from
+    // the rewrite's shape — never from `tuple_ty`, which is a tuple when the
+    // reduce result is itself a tuple value.)
+    let rhs_kind = if scalar {
+        TermKind::Var(VarRef::Symbol(tuple_sym))
+    } else {
+        TermKind::TupleProj {
+            tuple: Box::new(Term {
+                id: term_ids.next_id(),
+                ty: tuple_ty.clone(),
+                span: original.span,
+                kind: TermKind::Var(VarRef::Symbol(tuple_sym)),
+            }),
+            idx: proj_idx,
+        }
     };
     LetBinding {
         name: original.name,
@@ -521,10 +550,7 @@ fn tuple_projection_binding(
             id: term_ids.next_id(),
             ty: original.name_ty.clone(),
             span: original.span,
-            kind: TermKind::TupleProj {
-                tuple: Box::new(tuple_ref),
-                idx: proj_idx,
-            },
+            kind: rhs_kind,
         },
         span: original.span,
     }
@@ -863,7 +889,9 @@ fn find_map_group_plan(
                 });
                 consumer_indices.push(binding_idx);
             }
-            ArraySemantics::Reduction { op, init, .. } if op.lam.params.len() == 2 => {
+            ArraySemantics::Reduction {
+                op, reduce_op, init, ..
+            } if op.lam.params.len() == 2 => {
                 accumulators.push(ScremaReduceConsumer {
                     binding_idx,
                     op: super::SoacBody {
@@ -876,7 +904,7 @@ fn find_map_group_plan(
                         ),
                         captures: vec![],
                     },
-                    reduce_op: op.clone(),
+                    reduce_op: reduce_op.clone(),
                     ne: init.clone(),
                     accumulator: super::ScremaAccumulator::Reduce,
                 });
@@ -992,7 +1020,10 @@ fn find_filter_plan(
                 span,
                 ..
             } => {
-                let ArraySemantics::Reduction { op, init, .. } = semantics else {
+                let ArraySemantics::Reduction {
+                    op, reduce_op, init, ..
+                } = semantics
+                else {
                     return None;
                 };
                 if op.lam.params.len() != 2 {
@@ -1008,7 +1039,7 @@ fn find_filter_plan(
                             lam: step_lam,
                             captures: vec![],
                         },
-                        reduce_op: op.clone(),
+                        reduce_op: reduce_op.clone(),
                         ne: init.clone(),
                     },
                     ty.clone(),
@@ -1095,6 +1126,7 @@ fn find_filter_plan(
                 field_idx,
                 ty,
                 span,
+                scalar: rewrite.scalar_result,
             },
         );
     }
@@ -1104,6 +1136,7 @@ fn find_filter_plan(
         field_idx,
         ty,
         span,
+        scalar: rewrite.scalar_result,
     });
     Some(FusionPlan::Screma(PlannedScremaRewrite {
         rewrite,
@@ -1242,6 +1275,7 @@ fn apply_planned_screma_rewrite(
                 plan.rewrite.tuple_sym,
                 &plan.rewrite.tuple_ty,
                 proj_idx,
+                plan.rewrite.scalar_result,
                 term_ids,
             ));
         } else {
@@ -1263,6 +1297,16 @@ fn apply_planned_screma_rewrite(
 }
 
 fn projection_term(projection: &ProjectionTemplate, term_ids: &mut TermIdSource) -> Term {
+    // Scalar-output fused reduce: no tuple to project — reference the Screma
+    // symbol directly (its result type equals `projection.ty`).
+    if projection.scalar {
+        return Term {
+            id: term_ids.next_id(),
+            ty: projection.ty.clone(),
+            span: projection.span,
+            kind: TermKind::Var(VarRef::Symbol(projection.tuple_sym)),
+        };
+    }
     let tuple_ref = Term {
         id: term_ids.next_id(),
         ty: projection.tuple_ty.clone(),
@@ -1412,9 +1456,15 @@ fn subst_in_semantics(
             inputs: inputs.into_iter().map(|ae| sub_ae(ae, old, replacement, term_ids)).collect(),
             body: sub_sb(body, old, replacement, term_ids),
         },
-        ArraySemantics::Reduction { input, op, init } => ArraySemantics::Reduction {
+        ArraySemantics::Reduction {
+            input,
+            op,
+            reduce_op,
+            init,
+        } => ArraySemantics::Reduction {
             input: sub_ae(input, old, replacement, term_ids),
             op: sub_sb(op, old, replacement, term_ids),
+            reduce_op: sub_sb(reduce_op, old, replacement, term_ids),
             init: Box::new(substitute_term_expr(*init, old, replacement, term_ids)),
         },
         ArraySemantics::PrefixScan { input, op, init } => ArraySemantics::PrefixScan {
@@ -2050,7 +2100,9 @@ fn build_fused_from_semantics(
     if let (
         FusionRecipe::FilterIntoReduce,
         ArraySemantics::Filter { input, pred },
-        ArraySemantics::Reduction { op, init, .. },
+        ArraySemantics::Reduction {
+            op, reduce_op, init, ..
+        },
     ) = (recipe, producer, consumer)
     {
         if op.lam.params.len() != 2 || pred.lam.params.len() != 1 {
@@ -2078,15 +2130,15 @@ fn build_fused_from_semantics(
             }),
             ret_ty: elem_ty,
         };
-        // op∘mask: (acc, x) -> op(acc, mask(x)); the pure phase-2 combiner is
-        // the original `op`.
+        // op∘mask: (acc, x) -> op(acc, mask(x)). The per-element step gains the
+        // mask; the pure phase-2 combiner stays the consumer's `reduce_op`
+        // (which differs from `op` when a map was already folded into the step).
         let composed_op = compose_map_reduce(mask_lam, op.lam.clone(), span, symbols, term_ids);
-        // A `Screma` yields a tuple of its outputs; a single-accumulator
-        // fused reduce is field 0. Wrap in a `TupleProj` so the replacement
-        // keeps the consumer's scalar type.
-        let screma = Term {
+        // Scalar-typed single-accumulator reducing `Screma` (egir re-wraps to
+        // `Tuple(1)+Project` at lowering) — no `TupleProj` wrapper.
+        return Some(Term {
             id: term_ids.next_id(),
-            ty: Type::Constructed(TypeName::Tuple(1), vec![consumer_ty.clone()]),
+            ty: consumer_ty,
             span,
             kind: TermKind::Soac(SoacOp::Screma {
                 map_lams: vec![],
@@ -2097,20 +2149,11 @@ fn build_fused_from_semantics(
                         lam: composed_op,
                         captures: vec![],
                     },
-                    reduce_op: op.clone(),
+                    reduce_op: reduce_op.clone(),
                     ne: init.clone(),
                 }],
                 inputs: vec![input.clone()],
             }),
-        };
-        return Some(Term {
-            id: term_ids.next_id(),
-            ty: consumer_ty,
-            span,
-            kind: TermKind::TupleProj {
-                tuple: Box::new(screma),
-                idx: 0,
-            },
         });
     }
 
@@ -2140,16 +2183,21 @@ fn build_fused_from_semantics(
             })
         }
 
-        (FusionRecipe::MapIntoReduce, ArraySemantics::Reduction { op, init, .. }) => {
+        (
+            FusionRecipe::MapIntoReduce,
+            ArraySemantics::Reduction {
+                op, reduce_op, init, ..
+            },
+        ) => {
             if op.lam.params.len() != 2 {
                 return None;
             }
             let composed_op = compose_map_reduce(prod_lam.clone(), op.lam.clone(), span, symbols, term_ids);
-            // A `Screma` yields a tuple of its outputs; the fused reduce is
-            // field 0. Wrap in a `TupleProj` to keep the consumer's scalar type.
-            let screma = Term {
+            // Scalar-typed single-accumulator reducing `Screma` (egir re-wraps
+            // to `Tuple(1)+Project` at lowering) — no `TupleProj` wrapper.
+            Some(Term {
                 id: term_ids.next_id(),
-                ty: Type::Constructed(TypeName::Tuple(1), vec![consumer_ty.clone()]),
+                ty: consumer_ty,
                 span,
                 kind: TermKind::Soac(SoacOp::Screma {
                     map_lams: vec![],
@@ -2160,20 +2208,11 @@ fn build_fused_from_semantics(
                             lam: composed_op,
                             captures: vec![],
                         },
-                        reduce_op: op.clone(),
+                        reduce_op: reduce_op.clone(),
                         ne: init.clone(),
                     }],
                     inputs: input_exprs,
                 }),
-            };
-            Some(Term {
-                id: term_ids.next_id(),
-                ty: consumer_ty,
-                span,
-                kind: TermKind::TupleProj {
-                    tuple: Box::new(screma),
-                    idx: 0,
-                },
             })
         }
 

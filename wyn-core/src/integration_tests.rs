@@ -3876,6 +3876,54 @@ entry filt_reduce(xs: []i32) i32 =
     );
 }
 
+/// A `map → filter → map → reduce` chain (the `separation`-style shape: a
+/// producer map feeds a filter, whose result feeds another map then a reduce)
+/// must collapse to a single masked `Screma`. The trailing map fuses into the
+/// reduce (a reducing `Screma`); the filter then folds into that Screma's step
+/// — preserving its pure combiner — and the leading map folds in too, leaving
+/// no materialized intermediate array. Before reducing-`Screma`s exposed
+/// `Reduction` semantics this stalled at three separate loops.
+#[test]
+fn map_filter_map_reduce_collapses_to_one_screma() {
+    let tlc = compile_to_fused_tlc(
+        "\
+#[compute]
+entry e(#[storage(set=2, binding=0, access=read)] xs: []f32,
+        #[storage(set=2, binding=1, access=write)] out: *[]f32) []f32 =
+  let p = xs[0..512] in
+  map(|x: f32|
+        let ys = map(|v: f32| v - x, p) in
+        let zs = filter(|y: f32| y < 10.0, ys) in
+        let ws = map(|z: f32| z * 2.0, zs) in
+        reduce(|a: f32, b: f32| a + b, 0.0, ws),
+      p)
+",
+    );
+    use crate::tlc::SoacOp;
+    fn count_soac(term: &crate::tlc::Term, pred: &dyn Fn(&SoacOp) -> bool) -> usize {
+        let mut n = if let TermKind::Soac(s) = &term.kind { usize::from(pred(s)) } else { 0 };
+        term.for_each_child(&mut |c| n += count_soac(c, pred));
+        n
+    }
+    let e = tlc
+        .defs
+        .iter()
+        .find(|d| tlc.symbols.get(d.name).map(|s| s.as_str()) == Some("e"))
+        .expect("entry e not found");
+    let filters = count_soac(&e.body, &|s| matches!(s, SoacOp::Filter { .. }));
+    let reduces = count_soac(&e.body, &|s| matches!(s, SoacOp::Reduce { .. }));
+    let scremas = count_soac(&e.body, &|s| matches!(s, SoacOp::Screma { .. }));
+    assert_eq!(
+        filters, 0,
+        "the filter must fold into the reducing Screma, not survive as a Filter SOAC"
+    );
+    assert_eq!(reduces, 0, "the reduce must fold into the Screma");
+    assert_eq!(
+        scremas, 1,
+        "the fused map→filter→map→reduce should collapse to a single Screma"
+    );
+}
+
 /// Cross-function auto-parallelization: a `scan` factored into a helper that
 /// `inline_small` will NOT fold (its operator has control flow, so the
 /// size/control-flow gate skips it) still parallelizes — `materialize_entry_soacs`

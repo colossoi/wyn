@@ -9,7 +9,8 @@ use crate::LookupMap;
 use crate::SymbolTable;
 
 use super::{
-    extract_lambda_params, ArrayExpr, Def, Lambda, Place, Program, SoacBody, SoacOp, Term, TermKind,
+    extract_lambda_params, ArrayExpr, Def, Lambda, Place, Program, ScremaAccumulator, SoacBody, SoacOp,
+    Term, TermKind,
 };
 use crate::ast::TypeName;
 use crate::SymbolId;
@@ -32,9 +33,18 @@ pub enum ArraySemantics {
     },
 
     /// Reduction: scalar = fold(op, init, input).
+    ///
+    /// `op` is the per-element step `(acc, x) -> acc'`. `reduce_op` is the
+    /// pure associative phase-2 combiner `(acc, acc) -> acc`. For a plain
+    /// `reduce` the two are equal; for a fused map→reduce (a reducing
+    /// `Screma`) `op` has the producer map folded into it while `reduce_op`
+    /// stays the original combiner. Folding a further producer (`map`/filter
+    /// mask) into a reduction composes into `op` only — `reduce_op` is
+    /// preserved.
     Reduction {
         input: ArrayExpr,
         op: SoacBody,
+        reduce_op: SoacBody,
         init: Box<Term>,
     },
 
@@ -255,17 +265,21 @@ pub fn compose_map_into_reduce(
         ArraySemantics::Elementwise { inputs, body } => (inputs, body),
         _ => return None,
     };
-    let (cons_op, cons_init) = match consumer {
-        ArraySemantics::Reduction { op, init, .. } => (op, init),
+    let (cons_op, cons_reduce_op, cons_init) = match consumer {
+        ArraySemantics::Reduction {
+            op, reduce_op, init, ..
+        } => (op, reduce_op, init),
         _ => return None,
     };
 
-    // Compose: map body feeds into reduce op's element parameter
+    // Compose: map body feeds into reduce op's element parameter. Only the
+    // per-element step gains the producer map; the pure combiner is preserved.
     let composed_op = compose_map_into_op(prod_body, cons_op, symbols, term_ids);
 
     Some(ArraySemantics::Reduction {
         input: prod_inputs.first().cloned().unwrap_or(ArrayExpr::Literal(vec![])),
         op: composed_op,
+        reduce_op: cons_reduce_op.clone(),
         init: cons_init.clone(),
     })
 }
@@ -385,6 +399,7 @@ pub fn classify_soac(soac: &SoacOp) -> ArraySemantics {
         SoacOp::Reduce { op, ne, input } => ArraySemantics::Reduction {
             input: input.clone(),
             op: op.clone(),
+            reduce_op: op.clone(),
             init: ne.clone(),
         },
         SoacOp::Scan { op, ne, input, .. } => ArraySemantics::PrefixScan {
@@ -414,8 +429,28 @@ pub fn classify_soac(soac: &SoacOp) -> ArraySemantics {
             op: op.clone(),
             init: ne.clone(),
         },
-        // A multi-result map+accumulator SOAC (the fused form, including a
-        // map-into-reduce); classified as opaque because it is not analyzed
+        // A reducing `Screma` (no map outputs, one `Reduce` accumulator) is a
+        // fused map→reduce — expose it as a `Reduction` so the fusion recipes
+        // (map-into-reduce, filter-into-reduce) can fold further producers
+        // into its step while preserving its pure `reduce_op` combiner.
+        SoacOp::Screma {
+            map_lams,
+            accumulators,
+            inputs,
+            ..
+        } if map_lams.is_empty()
+            && accumulators.len() == 1
+            && matches!(accumulators[0].kind, ScremaAccumulator::Reduce)
+            && inputs.len() == 1 =>
+        {
+            ArraySemantics::Reduction {
+                input: inputs[0].clone(),
+                op: accumulators[0].step_lam.clone(),
+                reduce_op: accumulators[0].reduce_op.clone(),
+                init: accumulators[0].ne.clone(),
+            }
+        }
+        // Any other multi-result map+accumulator SOAC is opaque — not analyzed
         // further by the semantic framework.
         SoacOp::Screma { .. } => ArraySemantics::Opaque,
     }

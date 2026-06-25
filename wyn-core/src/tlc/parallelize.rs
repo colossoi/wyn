@@ -412,15 +412,11 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
                     None => return None,
                 }
             }
+            // A genuine multi-output `Screma` let-bound and projected at field 0
+            // (`proj(sym, 0)`). A fused `map → reduce` is scalar-output — a bare
+            // `Soac(Screma)` inline, or an alias `Var(sym)` when let-bound — so
+            // the `Soac`/`Var` arms handle it, not this one.
             TermKind::TupleProj { tuple, idx: 0 } => match tuple.kind {
-                // Inline single-accumulator `Screma` (a fused `map → reduce`):
-                // field 0 is the reduce result. Descend into the SOAC directly
-                // — the `Soac` arm picks it up next iteration.
-                TermKind::Soac(SoacOp::Screma { .. }) => {
-                    current = *tuple;
-                }
-                // Let-bound Screma whose tail use is `proj(sym, 0)` — follow
-                // the binding (the `find_filter_plan` shape).
                 TermKind::Var(VarRef::Symbol(sym)) => {
                     if scope.is_lambda_param(sym) {
                         return None;
@@ -1660,19 +1656,14 @@ fn lift_in_term(
     }
 }
 
-/// A scalar-result reduction: either a bare `Reduce`, or a fused
-/// `map → reduce` — a single-`Reduce`-accumulator, no-map `Screma`
-/// projected to its scalar field 0.
+/// A scalar-result reduction: either a bare `Reduce`, or a fused `map → reduce`
+/// — a scalar-output, single-`Reduce`, no-map `Screma`.
 fn is_scalar_reduction(term: &Term) -> bool {
     match &term.kind {
         TermKind::Soac(SoacOp::Reduce { .. }) => true,
-        TermKind::TupleProj { tuple, idx: 0 } => matches!(
-            &tuple.kind,
-            TermKind::Soac(SoacOp::Screma { map_lams, accumulators, .. })
-                if map_lams.is_empty()
-                    && accumulators.len() == 1
-                    && matches!(accumulators[0].kind, super::ScremaAccumulator::Reduce)
-        ),
+        TermKind::Soac(SoacOp::Screma { map_lams, accumulators, .. }) => {
+            super::is_scalar_reduce_screma(map_lams, accumulators)
+        }
         _ => false,
     }
 }

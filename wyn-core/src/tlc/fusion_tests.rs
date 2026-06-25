@@ -8,14 +8,11 @@ fn dummy_span() -> Span {
     Span::new(0, 0, 0, 0)
 }
 
-/// A fused `map → reduce` lowers to a single-`Reduce`-accumulator `Screma`
-/// projected to its scalar field 0. Destructure that shape, returning the
-/// step lambda (the composed `(acc, x) -> acc'`) and the SOAC inputs.
+/// A fused `map → reduce` is a scalar-output single-`Reduce`-accumulator,
+/// no-map `Screma` (no `TupleProj` wrapper). Destructure that shape, returning
+/// the step lambda (the composed `(acc, x) -> acc'`) and the SOAC inputs.
 fn as_fused_map_reduce(term: &Term) -> (&SoacBody, &[ArrayExpr]) {
-    let TermKind::TupleProj { tuple, idx: 0 } = &term.kind else {
-        panic!("Expected TupleProj of fused Screma, got {:?}", term.kind);
-    };
-    match &tuple.kind {
+    match &term.kind {
         TermKind::Soac(SoacOp::Screma {
             map_lams,
             accumulators,

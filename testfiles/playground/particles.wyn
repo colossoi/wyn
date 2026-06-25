@@ -70,6 +70,15 @@ def clump(pos:vec4f32, arr:[]vec4f32) vec2f32 =
     CLUMPF * dist
 def align(pos:vec4f32, arr:[]vec4f32) vec2f32 = ALIGNF*((reduce(|a,b| a+b, @[0.0,0.0], map(|elem| elem.zw, arr)) / f32(N)) - pos.zw)
 
+def SEPR:f32 = 20.0
+def SEPF:f32 = 5.0
+def separation(pos:vec4f32, arr:[]vec4f32) vec2f32 =
+  let diffs = map(|x| pos.xy - x.xy, arr)
+  let local_diffs = filter(|d| magnitude(d)<SEPR, diffs)
+  let contribs = map(|d| let mag = magnitude(d) in if mag < 0.001 then @[0.0,0.0] else d/(mag**2.0), local_diffs)
+  let reduced = reduce(|a,b| a+b, @[0.0,0.0], contribs) * SEPF in
+  reduced
+
 -- Toroidal wrap of one axis of the particle position: integrate
 -- `vel` into `coord` and fold the result into `[0, RES)`.
 def wrap(coord: f32, vel: f32) f32 = (coord + UPDFACTOR * vel + f32(RES)) % f32(RES)
@@ -91,7 +100,7 @@ entry sim(#[storage(set=2, binding=0, access=read)] prev_pos: []vec4f32,
       let prev_pos = prev_pos[0..N] in
       let accelerated =
         map(|elem:vec4f32|
-              let deltav = clump(elem, prev_pos) + align(elem, prev_pos) in
+              let deltav = clump(elem, prev_pos) + align(elem, prev_pos) + separation(elem, prev_pos) in
               @[elem.x, elem.y, elem.z + deltav.x, elem.w + deltav.y],
             prev_pos)
       in

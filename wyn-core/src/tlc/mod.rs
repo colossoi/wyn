@@ -449,6 +449,20 @@ pub fn screma_all_inputs_indices(n_inputs: usize, n_lams: usize) -> Vec<Vec<usiz
     vec![(0..n_inputs).collect(); n_lams]
 }
 
+/// Whether a `Screma` with these `map_lams`/`accumulators` is a fused
+/// `map → reduce`: no map outputs and exactly one `Reduce` accumulator.
+///
+/// Such a Screma is **scalar-output** — its sole result is the reduce value,
+/// which may itself be a tuple — so it is TLC-typed as that result directly
+/// (no `Tuple(num_outputs)` wrapper) and needs no `TupleProj`. Always
+/// discriminate single-output-reduce from a genuine multi-output Screma by
+/// THIS shape, never by whether the result type happens to be a `Tuple`.
+pub fn is_scalar_reduce_screma(map_lams: &[SoacBody], accumulators: &[ScremaAccumulatorSpec]) -> bool {
+    map_lams.is_empty()
+        && accumulators.len() == 1
+        && matches!(accumulators[0].kind, ScremaAccumulator::Reduce)
+}
+
 /// A symbolic dimension expression.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Dim {

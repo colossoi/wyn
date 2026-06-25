@@ -331,9 +331,15 @@ fn subst_in_semantics(
             inputs: inputs.into_iter().map(|ae| sub_ae(ae, old, new, term_ids)).collect(),
             body: sub_sb(body, old, new, term_ids),
         },
-        ArraySemantics::Reduction { input, op, init } => ArraySemantics::Reduction {
+        ArraySemantics::Reduction {
+            input,
+            op,
+            reduce_op,
+            init,
+        } => ArraySemantics::Reduction {
             input: sub_ae(input, old, new, term_ids),
             op: sub_sb(op, old, new, term_ids),
+            reduce_op: sub_sb(reduce_op, old, new, term_ids),
             init,
         },
         ArraySemantics::PrefixScan { input, op, init } => ArraySemantics::PrefixScan {
