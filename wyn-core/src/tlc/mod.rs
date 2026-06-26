@@ -68,6 +68,20 @@ pub fn extract_lambda_params(term: &Term) -> (Vec<(SymbolId, Type<TypeName>)>, T
     }
 }
 
+/// Borrowed, all-levels counterpart to [`extract_lambda_params`]: walk through
+/// nested `Lambda`s and return the inner non-lambda body by reference plus the
+/// accumulated params. (`extract_lambda_params` clones and peels a single level;
+/// this avoids the clone and handles curried nesting.)
+pub(crate) fn extract_lambda_params_ref(term: &Term) -> (&Term, Vec<(SymbolId, Type<TypeName>)>) {
+    let mut params = Vec::new();
+    let mut current = term;
+    while let TermKind::Lambda(lam) = &current.kind {
+        params.extend(lam.params.iter().cloned());
+        current = &lam.body;
+    }
+    (current, params)
+}
+
 /// Count the number of nodes in a term tree.
 /// Used as a size heuristic for inlining decisions.
 pub fn term_size(term: &Term) -> usize {
@@ -82,6 +96,24 @@ pub fn collect_var_refs(term: &Term) -> Vec<SymbolId> {
     let mut refs = Vec::new();
     collect_var_refs_inner(term, &mut refs);
     refs
+}
+
+/// True if `term` references any symbol in `syms` via a `Var` leaf. A
+/// short-circuiting walk — cheaper than `collect_var_refs(..).iter().any(..)`
+/// when the answer is usually found early or the set is small.
+pub(crate) fn mentions_any(term: &Term, syms: &[SymbolId]) -> bool {
+    match &term.kind {
+        TermKind::Var(VarRef::Symbol(sym)) => syms.contains(sym),
+        _ => {
+            let mut found = false;
+            term.for_each_child(&mut |child| {
+                if !found && mentions_any(child, syms) {
+                    found = true;
+                }
+            });
+            found
+        }
+    }
 }
 
 fn collect_var_refs_inner(term: &Term, refs: &mut Vec<SymbolId>) {
@@ -1000,6 +1032,19 @@ impl Term {
         };
 
         Term { kind, ..self }
+    }
+
+    /// Deep-clone this term, assigning a fresh `TermId` to every node so the
+    /// copy shares no ids with the original — needed when splicing a term into
+    /// more than one position (e.g. substituting a replacement at several sites).
+    pub(crate) fn clone_with_fresh_ids(&self, term_ids: &mut TermIdSource) -> Term {
+        let mut cloned = self.clone().map_children(&mut |child| {
+            let mut child = child.map_children(&mut |grandchild| grandchild.clone_with_fresh_ids(term_ids));
+            child.id = term_ids.next_id();
+            child
+        });
+        cloned.id = term_ids.next_id();
+        cloned
     }
 
     /// Visit every immediate `Term` child by reference. This is the by-ref

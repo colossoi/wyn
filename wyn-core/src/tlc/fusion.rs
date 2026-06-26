@@ -11,32 +11,16 @@
 
 use super::VarRef;
 use crate::ast::{Span, TypeName};
-use crate::LookupSet;
-use crate::{SymbolId, SymbolTable};
+use crate::{LookupSet, SymbolId, SymbolTable};
 use polytype::Type;
 
 use crate::LookupMap;
 
-use super::array_semantics::{
-    can_fuse, classify_term, summarize_program, ArraySemantics, FunctionSummary, FusionRecipe,
-    ResultSemantics,
-};
+use super::array_semantics::{can_fuse, classify_term, ArraySemantics, FusionRecipe};
 use super::{
-    extract_lambda_params, ArrayExpr, Def, Lambda, Program, SoacDestination, SoacOp, Term, TermId,
-    TermIdSource, TermKind,
+    extract_lambda_params, mentions_any, ArrayExpr, Def, Lambda, Program, SoacDestination, SoacOp, Term,
+    TermId, TermIdSource, TermKind,
 };
-
-type Summaries = LookupMap<SymbolId, FunctionSummary>;
-
-/// Pass-local context threaded through every fusion-internal call.
-/// Holds artifacts that are expensive to recompute per call site:
-/// - `summaries`: borrowed from the per-outer-iteration analysis
-/// - `sym_to_def`: rebuilt once per outer iteration, not per
-///   `producer_graph::build_producer_graph` call.
-struct FusionContext<'a> {
-    summaries: &'a Summaries,
-    sym_to_def: LookupMap<SymbolId, SymbolId>,
-}
 
 /// Build the `Var-symbol → def-symbol` lookup once. The fusion pass
 /// allocates fresh let-binding / lambda symbols during a sweep, but
@@ -85,12 +69,8 @@ pub struct CalledSoacHelper {
 /// violation rather than the first, so the report is a complete picture of
 /// where the invariant breaks.
 pub fn verify_soac_helpers_inlined(program: &Program) -> Result<(), Vec<CalledSoacHelper>> {
-    let soac_bearing: LookupSet<SymbolId> = program
-        .defs
-        .iter()
-        .filter(|d| super::inline::contains_soac(&d.body))
-        .map(|d| d.name)
-        .collect();
+    let soac_bearing: LookupSet<SymbolId> =
+        program.defs.iter().filter(|d| super::inline::contains_soac(&d.body)).map(|d| d.name).collect();
 
     let mut violations = Vec::new();
     for def in &program.defs {
@@ -147,23 +127,9 @@ pub fn run(program: Program) -> Program {
     while changed {
         changed = false;
 
-        let summaries = summarize_program(&program);
-
         let mut symbols = program.symbols;
         let def_syms = program.def_syms;
         let mut term_ids = TermIdSource::new();
-
-        // Precompute the Var-symbol → def-symbol map once per outer
-        // iteration and thread it through `FusionContext`. Rebuilding it
-        // inside each `build_producer_graph` call would re-scan the full
-        // symbol table — N·M scans per outer iteration for N defs of M
-        // let chains each — so hoisting keeps producer-graph construction
-        // O(graph size) rather than O(symbol table size).
-        let sym_to_def = build_sym_to_def(&symbols, &def_syms);
-        let ctx = FusionContext {
-            summaries: &summaries,
-            sym_to_def,
-        };
 
         let defs = program
             .defs
@@ -172,11 +138,11 @@ pub fn run(program: Program) -> Program {
                 // Bottom-up: fuse children first, then try one classified-use
                 // rewrite for this definition. The outer fixpoint reruns the
                 // analysis after each rewrite.
-                let (new_body, did_child_fuse) = fuse_term(def.body, &ctx, &mut symbols, &mut term_ids);
+                let (new_body, did_child_fuse) = fuse_term(def.body, &mut symbols, &mut term_ids);
                 if did_child_fuse {
                     changed = true;
                 }
-                let (new_body, did_fuse) = fuse_def_body(new_body, &ctx, &mut symbols, &mut term_ids);
+                let (new_body, did_fuse) = fuse_def_body(new_body, &mut symbols, &mut term_ids);
                 if did_fuse {
                     changed = true;
                 }
@@ -284,16 +250,11 @@ struct UseEdge {
 }
 
 impl FusionRegion {
-    fn new(
-        bindings: &[LetBinding],
-        tail: &Term,
-        ctx: &FusionContext<'_>,
-        term_ids: &mut TermIdSource,
-    ) -> Self {
+    fn new(bindings: &[LetBinding], tail: &Term) -> Self {
         let mut producers = Vec::new();
         let mut binding_nodes = vec![None; bindings.len()];
         for (binding_idx, binding) in bindings.iter().enumerate() {
-            let semantics = classify_with_context(&binding.rhs, ctx, term_ids);
+            let semantics = classify_term(&binding.rhs);
             if matches!(semantics, ArraySemantics::Opaque) {
                 continue;
             }
@@ -318,7 +279,7 @@ impl FusionRegion {
         let edges = producers
             .iter()
             .flat_map(|producer| {
-                classify_uses_for_producer(producer, bindings, tail, ctx, term_ids)
+                classify_uses_for_producer(producer, bindings, tail)
                     .into_iter()
                     .map(|site| UseEdge {
                         producer: producer.id,
@@ -650,7 +611,7 @@ fn find_direct_map_screma_group(region: &FusionRegion, bindings: &[LetBinding]) 
 
         if maps.len() >= 2 {
             let candidate_names: Vec<SymbolId> = bindings[start..end].iter().map(|b| b.name).collect();
-            if !bindings[start..end].iter().any(|binding| term_mentions_any(&binding.rhs, &candidate_names))
+            if !bindings[start..end].iter().any(|binding| mentions_any(&binding.rhs, &candidate_names))
             {
                 return Some(ScremaGroup {
                     insert_at: start,
@@ -831,8 +792,7 @@ fn lower_fused_screma(
     let num_lanes = outputs.iter().filter(|o| matches!(o.kind, FusedOutputKind::Lane(_))).count();
     let mut result_fields: Vec<Option<Type<TypeName>>> = vec![None; outputs.len()];
     let mut map_lams: Vec<super::SoacBody> = Vec::with_capacity(num_lanes);
-    let mut accumulators: Vec<super::ScremaAccumulatorSpec> =
-        Vec::with_capacity(outputs.len() - num_lanes);
+    let mut accumulators: Vec<super::ScremaAccumulatorSpec> = Vec::with_capacity(outputs.len() - num_lanes);
     let mut distribution: Vec<(usize, Vec<OutputConsumer>)> = Vec::with_capacity(outputs.len());
     for output in outputs {
         let FusedOutput { ty, kind, consumers } = output;
@@ -960,11 +920,10 @@ fn tuple_projection_binding(
 fn find_fusion_plan(
     bindings: &[LetBinding],
     tail: &Term,
-    ctx: &FusionContext<'_>,
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
 ) -> Option<FusionPlan> {
-    let region = FusionRegion::new(bindings, tail, ctx, term_ids);
+    let region = FusionRegion::new(bindings, tail);
     // TODO(fusion-union): each builder below independently emits a
     // `Vec<FusedOutput>` for a single producer/group and lowers it on its own.
     // Because `OutputConsumer` already supports one field feeding many sites and
@@ -1001,8 +960,6 @@ fn classify_uses_for_producer(
     producer: &ProducerInfo,
     bindings: &[LetBinding],
     tail: &Term,
-    ctx: &FusionContext<'_>,
-    term_ids: &mut TermIdSource,
 ) -> Vec<UseSite> {
     let mut uses = Vec::new();
     for (idx, binding) in bindings.iter().enumerate().skip(producer.binding_idx + 1) {
@@ -1010,27 +967,17 @@ fn classify_uses_for_producer(
             &binding.rhs,
             UseOwner::Binding(idx),
             producer.output_symbol(),
-            ctx,
-            term_ids,
         ));
     }
     uses.extend(classify_uses_in_owner(
         tail,
         UseOwner::Tail,
         producer.output_symbol(),
-        ctx,
-        term_ids,
     ));
     uses
 }
 
-fn classify_uses_in_owner(
-    term: &Term,
-    owner: UseOwner,
-    producer_sym: SymbolId,
-    ctx: &FusionContext<'_>,
-    term_ids: &mut TermIdSource,
-) -> Vec<UseSite> {
+fn classify_uses_in_owner(term: &Term, owner: UseOwner, producer_sym: SymbolId) -> Vec<UseSite> {
     // Alias-aware classification: when inlining wraps a call body in
     // `let X = Var(producer) in body`, the body uses `X` as an alias for
     // the producer. Track aliases as we descend so the recognizers see
@@ -1038,7 +985,7 @@ fn classify_uses_in_owner(
     let mut producers: LookupSet<SymbolId> = LookupSet::new();
     producers.insert(producer_sym);
     let mut uses = Vec::new();
-    collect_classified_uses(term, owner, &producers, ctx, term_ids, true, &mut uses);
+    collect_classified_uses(term, owner, &producers, true, &mut uses);
 
     let recognized_refs = uses.len();
     let raw_refs = aliased_var_ref_count(term, &producers);
@@ -1056,8 +1003,6 @@ fn collect_classified_uses(
     term: &Term,
     owner: UseOwner,
     producers: &LookupSet<SymbolId>,
-    ctx: &FusionContext<'_>,
-    term_ids: &mut TermIdSource,
     allow_screma_input: bool,
     uses: &mut Vec<UseSite>,
 ) {
@@ -1073,7 +1018,7 @@ fn collect_classified_uses(
         return;
     }
 
-    let semantics = classify_with_context(term, ctx, term_ids);
+    let semantics = classify_term(term);
     let input_slots = semantic_input_slots(&semantics, producers);
     if !input_slots.is_empty() {
         for input in input_slots {
@@ -1118,11 +1063,11 @@ fn collect_classified_uses(
             if is_alias_binding {
                 let mut extended = producers.clone();
                 extended.insert(*name);
-                collect_classified_uses(body, owner, &extended, ctx, term_ids, false, uses);
+                collect_classified_uses(body, owner, &extended, false, uses);
             } else {
-                collect_classified_uses(rhs, owner, producers, ctx, term_ids, false, uses);
+                collect_classified_uses(rhs, owner, producers, false, uses);
                 if !producers.contains(name) {
-                    collect_classified_uses(body, owner, producers, ctx, term_ids, false, uses);
+                    collect_classified_uses(body, owner, producers, false, uses);
                 }
             }
         }
@@ -1134,33 +1079,33 @@ fn collect_classified_uses(
             body,
             ..
         } => {
-            collect_classified_uses(init, owner, producers, ctx, term_ids, false, uses);
+            collect_classified_uses(init, owner, producers, false, uses);
             for (_, _, extraction) in init_bindings {
-                collect_classified_uses(extraction, owner, producers, ctx, term_ids, false, uses);
+                collect_classified_uses(extraction, owner, producers, false, uses);
             }
             match kind {
                 super::LoopKind::For { var, iter, .. } => {
-                    collect_classified_uses(iter, owner, producers, ctx, term_ids, false, uses);
+                    collect_classified_uses(iter, owner, producers, false, uses);
                     if !producers.contains(loop_var) && !producers.contains(var) {
-                        collect_classified_uses(body, owner, producers, ctx, term_ids, false, uses);
+                        collect_classified_uses(body, owner, producers, false, uses);
                     }
                 }
                 super::LoopKind::ForRange { var, bound, .. } => {
-                    collect_classified_uses(bound, owner, producers, ctx, term_ids, false, uses);
+                    collect_classified_uses(bound, owner, producers, false, uses);
                     if !producers.contains(loop_var) && !producers.contains(var) {
-                        collect_classified_uses(body, owner, producers, ctx, term_ids, false, uses);
+                        collect_classified_uses(body, owner, producers, false, uses);
                     }
                 }
                 super::LoopKind::While { cond } => {
-                    collect_classified_uses(cond, owner, producers, ctx, term_ids, false, uses);
+                    collect_classified_uses(cond, owner, producers, false, uses);
                     if !producers.contains(loop_var) {
-                        collect_classified_uses(body, owner, producers, ctx, term_ids, false, uses);
+                        collect_classified_uses(body, owner, producers, false, uses);
                     }
                 }
             }
         }
         _ => term.for_each_child(&mut |child| {
-            collect_classified_uses(child, owner, producers, ctx, term_ids, false, uses);
+            collect_classified_uses(child, owner, producers, false, uses);
         }),
     }
 }
@@ -1278,15 +1223,9 @@ fn find_map_group_plan(
             reject!("producer feeds input index {}, not 0", use_site.input.slot);
         }
         let kind = match &use_site.semantics {
-            ArraySemantics::Elementwise { inputs, body } if inputs.len() == 1 => {
-                FusedOutputKind::Lane(compose_soac_bodies(
-                    producer_body,
-                    body,
-                    bindings[binding_idx].span,
-                    symbols,
-                    term_ids,
-                ))
-            }
+            ArraySemantics::Elementwise { inputs, body } if inputs.len() == 1 => FusedOutputKind::Lane(
+                compose_soac_bodies(producer_body, body, bindings[binding_idx].span, symbols, term_ids),
+            ),
             ArraySemantics::Reduction {
                 op, reduce_op, init, ..
             } if op.lam.params.len() == 2 => FusedOutputKind::Accumulator(super::ScremaAccumulatorSpec {
@@ -1306,7 +1245,7 @@ fn find_map_group_plan(
                 if bindings
                     .iter()
                     .skip(binding_idx + 1)
-                    .any(|binding| term_mentions_any(&binding.rhs, &[scan_sym]))
+                    .any(|binding| mentions_any(&binding.rhs, &[scan_sym]))
                     || !symbol_uses_are_direct_tail_values(tail, scan_sym)
                 {
                     reject!("scan result is re-read by a later binding or not a direct tail value");
@@ -1422,7 +1361,8 @@ fn find_filter_plan(
     // A reduction's whole-tail use projects via `tail_projection`; nested and
     // non-direct-binding uses rewrite in place. (Lengths never use the tail
     // sink — see below.)
-    let reduction_consumer = |owner: UseOwner, term_id: TermId, ty: Type<TypeName>, span: Span| match owner {
+    let reduction_consumer = |owner: UseOwner, term_id: TermId, ty: Type<TypeName>, span: Span| match owner
+    {
         UseOwner::Binding(idx) if bindings[idx].rhs.id == term_id => OutputConsumer::Binding(idx),
         UseOwner::Tail if tail.id == term_id => OutputConsumer::Tail { ty, span },
         _ => OutputConsumer::NestedTerm { term_id, ty, span },
@@ -1522,11 +1462,21 @@ fn find_pairwise_plan(
             span,
             ..
         } => {
-            match use_site.owner {
-                UseOwner::Binding(idx) if *term_id == bindings[idx].rhs.id => {}
-                UseOwner::Tail if *term_id == tail.id => {}
+            // The raw consumer term (a top-level binding rhs, or the tail) and
+            // where its fused value flows. Pairwise fusion only rewrites these two
+            // sinks — never a nested occurrence.
+            let consumer_term = match use_site.owner {
+                UseOwner::Binding(idx) if *term_id == bindings[idx].rhs.id => &bindings[idx].rhs,
+                UseOwner::Tail if *term_id == tail.id => tail,
                 _ => return None,
-            }
+            };
+            let consumer_sink = match use_site.owner {
+                UseOwner::Binding(idx) => OutputConsumer::Binding(idx),
+                UseOwner::Tail => OutputConsumer::Tail {
+                    ty: ty.clone(),
+                    span: *span,
+                },
+            };
             let recipe = can_fuse(&producer.semantics, semantics)?;
             if recipe == FusionRecipe::ComposeElementwise {
                 if let ArraySemantics::Elementwise { inputs, .. } = semantics {
@@ -1535,6 +1485,41 @@ fn find_pairwise_plan(
                     }
                 }
             }
+
+            // `map∘map`, `map→reduce`, and `map→scan` are all expressible as a
+            // single-output `Screma`, so fold the elementwise producer into the
+            // lone consumer and lower through the union path. Recipes whose result
+            // is a non-`Screma` SOAC (`MapIntoFilter` → `Filter`, `MapIntoScatter`
+            // → `Scatter`) fall through to direct composition below.
+            if let ArraySemantics::Elementwise {
+                inputs: producer_inputs,
+                body: producer_body,
+            } = &producer.semantics
+            {
+                if let Some(output) = pairwise_screma_output(
+                    producer_body,
+                    semantics,
+                    consumer_term,
+                    producer.output_symbol(),
+                    consumer_sink,
+                    ty.clone(),
+                    *span,
+                    symbols,
+                    term_ids,
+                ) {
+                    return Some(FusionPlan::Screma(lower_fused_screma(
+                        producer.binding_idx,
+                        vec![producer.binding_idx],
+                        "_screma",
+                        producer_inputs.clone(),
+                        bindings[producer.binding_idx].span,
+                        vec![output],
+                        symbols,
+                        term_ids,
+                    )));
+                }
+            }
+
             let fused_rhs = build_fused_from_semantics(
                 &producer.semantics,
                 semantics,
@@ -1556,6 +1541,57 @@ fn find_pairwise_plan(
         }
         UseKind::Length { .. } | UseKind::Escape => None,
     }
+}
+
+/// Build the single fused output that folds an elementwise `producer_body` into
+/// its lone `consumer` — for the recipes the union `Screma` representation can
+/// express: `map∘map` (a `Lane`), `map→reduce` / `map→scan` (an `Accumulator`).
+/// Returns `None` for a consumer whose fused result is a non-`Screma` SOAC
+/// (`Filter`, `Scatter`), which [`build_fused_from_semantics`] lowers directly.
+#[allow(clippy::too_many_arguments)]
+fn pairwise_screma_output(
+    producer_body: &super::SoacBody,
+    consumer_semantics: &ArraySemantics,
+    consumer_term: &Term,
+    producer_sym: SymbolId,
+    consumer: OutputConsumer,
+    output_ty: Type<TypeName>,
+    span: Span,
+    symbols: &mut SymbolTable,
+    term_ids: &mut TermIdSource,
+) -> Option<FusedOutput> {
+    let kind = match consumer_semantics {
+        ArraySemantics::Elementwise { inputs, .. } if inputs.len() == 1 => {
+            let ArraySemantics::Elementwise { body: cons_body, .. } = consumer_semantics else {
+                unreachable!()
+            };
+            FusedOutputKind::Lane(compose_soac_bodies(
+                producer_body,
+                cons_body,
+                span,
+                symbols,
+                term_ids,
+            ))
+        }
+        ArraySemantics::Reduction { .. } | ArraySemantics::PrefixScan { .. } => {
+            // Read the accumulator (reduce vs scan, op/reduce_op/ne) off the raw
+            // consumer term, then compose the producer map into its per-element
+            // step — the same construction the horizontal map-group builder uses.
+            let acc = screma_consumer_accumulator(consumer_term, producer_sym)?;
+            FusedOutputKind::Accumulator(super::ScremaAccumulatorSpec {
+                kind: acc.accumulator,
+                step_lam: compose_soac_map_reduce(producer_body, &acc.op, span, symbols, term_ids),
+                reduce_op: acc.reduce_op,
+                ne: acc.ne,
+            })
+        }
+        _ => return None,
+    };
+    Some(FusedOutput {
+        ty: output_ty,
+        kind,
+        consumers: vec![consumer],
+    })
 }
 
 fn apply_fusion_plan(
@@ -1712,124 +1748,6 @@ fn replace_projection_terms(
     }
 }
 
-fn classify_with_context(
-    term: &Term,
-    ctx: &FusionContext<'_>,
-    term_ids: &mut TermIdSource,
-) -> ArraySemantics {
-    let direct = classify_term(term);
-    if !matches!(direct, ArraySemantics::Opaque) {
-        return direct;
-    }
-    let TermKind::App { func, args } = &term.kind else {
-        return ArraySemantics::Opaque;
-    };
-    let TermKind::Var(VarRef::Symbol(callee_sym)) = &func.kind else {
-        return ArraySemantics::Opaque;
-    };
-    let def_sym = ctx.sym_to_def.get(callee_sym).unwrap_or(callee_sym);
-    let Some(summary) = ctx.summaries.get(def_sym) else {
-        return ArraySemantics::Opaque;
-    };
-    let ResultSemantics::Produces(semantics) = &summary.result else {
-        return ArraySemantics::Opaque;
-    };
-    substitute_summary_args(semantics, &summary.params, args, term_ids)
-}
-
-fn substitute_summary_args(
-    semantics: &ArraySemantics,
-    summary_params: &[(SymbolId, Type<TypeName>)],
-    call_args: &[Term],
-    term_ids: &mut TermIdSource,
-) -> ArraySemantics {
-    let param_to_arg: LookupMap<SymbolId, Term> = summary_params
-        .iter()
-        .zip(call_args)
-        .map(|((param_sym, _), arg)| (*param_sym, arg.clone()))
-        .collect();
-
-    let mut result = semantics.clone();
-    for (&param_sym, arg) in &param_to_arg {
-        result = subst_in_semantics(result, param_sym, arg, term_ids);
-    }
-    result
-}
-
-fn subst_in_semantics(
-    sem: ArraySemantics,
-    old: SymbolId,
-    replacement: &Term,
-    term_ids: &mut TermIdSource,
-) -> ArraySemantics {
-    fn sub_ae(ae: ArrayExpr, old: SymbolId, replacement: &Term, ids: &mut TermIdSource) -> ArrayExpr {
-        substitute_term_in_array_expr(ae, old, replacement, ids)
-    }
-
-    fn sub_sb(
-        sb: super::SoacBody,
-        old: SymbolId,
-        replacement: &Term,
-        ids: &mut TermIdSource,
-    ) -> super::SoacBody {
-        super::SoacBody {
-            lam: Lambda {
-                body: if sb.lam.params.iter().any(|(param, _)| *param == old) {
-                    sb.lam.body
-                } else {
-                    Box::new(substitute_term_expr(*sb.lam.body, old, replacement, ids))
-                },
-                ..sb.lam
-            },
-            captures: sb
-                .captures
-                .into_iter()
-                .map(|(sym, ty, expr)| (sym, ty, substitute_term_expr(expr, old, replacement, ids)))
-                .collect(),
-        }
-    }
-
-    match sem {
-        ArraySemantics::Elementwise { inputs, body } => ArraySemantics::Elementwise {
-            inputs: inputs.into_iter().map(|ae| sub_ae(ae, old, replacement, term_ids)).collect(),
-            body: sub_sb(body, old, replacement, term_ids),
-        },
-        ArraySemantics::Reduction {
-            input,
-            op,
-            reduce_op,
-            init,
-        } => ArraySemantics::Reduction {
-            input: sub_ae(input, old, replacement, term_ids),
-            op: sub_sb(op, old, replacement, term_ids),
-            reduce_op: sub_sb(reduce_op, old, replacement, term_ids),
-            init: Box::new(substitute_term_expr(*init, old, replacement, term_ids)),
-        },
-        ArraySemantics::PrefixScan { input, op, init } => ArraySemantics::PrefixScan {
-            input: sub_ae(input, old, replacement, term_ids),
-            op: sub_sb(op, old, replacement, term_ids),
-            init: Box::new(substitute_term_expr(*init, old, replacement, term_ids)),
-        },
-        ArraySemantics::Filter { map_lam, input, pred } => ArraySemantics::Filter {
-            map_lam: map_lam.map(|ml| sub_sb(ml, old, replacement, term_ids)),
-            input: sub_ae(input, old, replacement, term_ids),
-            pred: sub_sb(pred, old, replacement, term_ids),
-        },
-        other => other,
-    }
-}
-
-fn clone_term_with_fresh_ids(term: &Term, term_ids: &mut TermIdSource) -> Term {
-    let mut cloned = term.clone().map_children(&mut |child| {
-        let mut child =
-            child.map_children(&mut |grandchild| clone_term_with_fresh_ids(&grandchild, term_ids));
-        child.id = term_ids.next_id();
-        child
-    });
-    cloned.id = term_ids.next_id();
-    cloned
-}
-
 /// Shadow-correct substitution traversal shared by `substitute_term_expr`
 /// (replace a symbol with an arbitrary term) and `substitute_sym` (rename a
 /// symbol). The only difference between the two is what a matched occurrence
@@ -1964,7 +1882,7 @@ pub(super) fn substitute_term_expr(
     substitute_core(
         term,
         old,
-        &mut |_occurrence, ids| clone_term_with_fresh_ids(replacement, ids),
+        &mut |_occurrence, ids| replacement.clone_with_fresh_ids(ids),
         term_ids,
     )
 }
@@ -1973,55 +1891,6 @@ pub(super) fn substitute_term_expr(
 /// into an ANF input atom: a bare name stays a name; an array expression is
 /// itself an atom; a tuple-of-arrays (the SoA form of a `zip`) becomes a `Zip`
 /// of atoms. A producer term has no atomic form for an input position.
-fn term_to_input_atom(t: &Term) -> ArrayExpr {
-    match &t.kind {
-        TermKind::Var(vr) => ArrayExpr::Var(*vr, t.ty.clone()),
-        TermKind::ArrayExpr(ae) => ae.clone(),
-        TermKind::Tuple(elems) => ArrayExpr::Zip(elems.iter().map(term_to_input_atom).collect()),
-        other => panic!("ANF: cannot use a non-atom term as a SOAC input: {other:?}"),
-    }
-}
-
-fn substitute_term_in_array_expr(
-    ae: ArrayExpr,
-    old: SymbolId,
-    replacement: &Term,
-    term_ids: &mut TermIdSource,
-) -> ArrayExpr {
-    match ae {
-        ArrayExpr::Var(vr, ty) => {
-            // Substituting a SOAC-input name with `replacement`. The result must
-            // stay an atom: a substituted name, or an array expression that is
-            // itself atomic. A producer replacement would inline a producer into
-            // an input position, which the IR forbids.
-            if matches!(vr, VarRef::Symbol(s) if s == old) {
-                return term_to_input_atom(replacement);
-            }
-            ArrayExpr::Var(vr, ty)
-        }
-        ArrayExpr::Zip(items) => ArrayExpr::Zip(
-            items
-                .into_iter()
-                .map(|item| substitute_term_in_array_expr(item, old, replacement, term_ids))
-                .collect(),
-        ),
-        ArrayExpr::Literal(terms) => ArrayExpr::Literal(
-            terms.into_iter().map(|term| substitute_term_expr(term, old, replacement, term_ids)).collect(),
-        ),
-        ArrayExpr::Range { start, len, step } => ArrayExpr::Range {
-            start: Box::new(substitute_term_expr(*start, old, replacement, term_ids)),
-            len: Box::new(substitute_term_expr(*len, old, replacement, term_ids)),
-            step: step.map(|step| Box::new(substitute_term_expr(*step, old, replacement, term_ids))),
-        },
-        ArrayExpr::StorageView(view) => ArrayExpr::StorageView(super::StorageView {
-            binding: view.binding,
-            offset: Box::new(substitute_term_expr(*view.offset, old, replacement, term_ids)),
-            len: Box::new(substitute_term_expr(*view.len, old, replacement, term_ids)),
-            elem_ty: view.elem_ty,
-        }),
-    }
-}
-
 fn is_length_call_of(term: &Term, producers: &LookupSet<SymbolId>) -> bool {
     let TermKind::App { func, args } = &term.kind else {
         return false;
@@ -2111,7 +1980,7 @@ fn aliased_var_ref_count(term: &Term, producers: &LookupSet<SymbolId>) -> usize 
 fn consumer_indices_are_dependent(bindings: &[LetBinding], consumer_indices: &[usize]) -> bool {
     for (pos, idx) in consumer_indices.iter().enumerate() {
         let prior: Vec<_> = consumer_indices[..pos].iter().map(|i| bindings[*i].name).collect();
-        if !prior.is_empty() && term_mentions_any(&bindings[*idx].rhs, &prior) {
+        if !prior.is_empty() && mentions_any(&bindings[*idx].rhs, &prior) {
             return true;
         }
     }
@@ -2135,7 +2004,7 @@ fn symbol_uses_are_direct_tail_values(term: &Term, sym: SymbolId) -> bool {
         | TermKind::BinOp(_)
         | TermKind::UnOp(_)
         | TermKind::Extern(_) => true,
-        _ => !term_mentions_any(term, &[sym]),
+        _ => !mentions_any(term, &[sym]),
     }
 }
 
@@ -2371,38 +2240,19 @@ fn rebuild_lambda_params(
     }
 }
 
-fn term_mentions_any(term: &Term, syms: &[SymbolId]) -> bool {
-    match &term.kind {
-        TermKind::Var(VarRef::Symbol(sym)) => syms.contains(sym),
-        _ => {
-            let mut found = false;
-            term.for_each_child(&mut |child| {
-                if !found && term_mentions_any(child, syms) {
-                    found = true;
-                }
-            });
-            found
-        }
-    }
-}
 
 /// Bottom-up: recurse into children, applying graph-driven fusion at each
 /// sub-expression that contains a Let chain with SOAC producers/consumers.
-fn fuse_term(
-    term: Term,
-    ctx: &FusionContext<'_>,
-    symbols: &mut SymbolTable,
-    term_ids: &mut TermIdSource,
-) -> (Term, bool) {
+fn fuse_term(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdSource) -> (Term, bool) {
     let mut changed = false;
     let term = term.map_children(&mut |child| {
-        let (child, did_fuse) = fuse_term(child, ctx, symbols, term_ids);
+        let (child, did_fuse) = fuse_term(child, symbols, term_ids);
         changed |= did_fuse;
         child
     });
 
     if matches!(term.kind, TermKind::Let { .. }) {
-        let (fused, did_fuse) = fuse_def_body(term, ctx, symbols, term_ids);
+        let (fused, did_fuse) = fuse_def_body(term, symbols, term_ids);
         return (fused, changed || did_fuse);
     }
 
@@ -2410,19 +2260,14 @@ fn fuse_term(
 }
 
 /// Fuse within a body term. Returns the new body and whether any fusion happened.
-fn fuse_def_body(
-    body: Term,
-    ctx: &FusionContext<'_>,
-    symbols: &mut SymbolTable,
-    term_ids: &mut TermIdSource,
-) -> (Term, bool) {
+fn fuse_def_body(body: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdSource) -> (Term, bool) {
     let (params, inner) = extract_lambda_params(&body);
     let (bindings, tail) = flatten_let_chain(inner.clone());
     if bindings.is_empty() {
         return (body, false);
     }
 
-    let Some(plan) = find_fusion_plan(&bindings, &tail, ctx, symbols, term_ids) else {
+    let Some(plan) = find_fusion_plan(&bindings, &tail, symbols, term_ids) else {
         return (body, false);
     };
 
@@ -2449,99 +2294,16 @@ fn build_fused_from_semantics(
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
 ) -> Option<Term> {
-    // Filter → Reduction: the producer is a `Filter` (not `Elementwise`), so
-    // build the masked fused reduce here, before the Elementwise extraction
-    // below. `reduce(op, ne, filter(p, xs))` ≡ a single-`Reduce`-accumulator
-    // `Screma` over `xs` with step `op∘mask`, `mask = λx. if p(x) then x else
-    // ne` — the dropped elements fold in as `op(acc, ne) = acc` (ne is op's
-    // neutral element by reduce's contract).
-    if let (
-        FusionRecipe::FilterIntoReduce,
-        ArraySemantics::Filter { map_lam, input, pred },
-        ArraySemantics::Reduction {
-            op, reduce_op, init, ..
-        },
-    ) = (recipe, producer, consumer)
-    {
-        if op.lam.params.len() != 2 || pred.lam.params.len() != 1 {
-            return None;
-        }
-        let x_sym = pred.lam.params[0].0;
-        let elem_ty = pred.lam.params[0].1.clone();
-        // mask = λx. if p(x) then x else ne
-        let mask_lam = Lambda {
-            params: vec![(x_sym, elem_ty.clone())],
-            body: Box::new(Term {
-                id: term_ids.next_id(),
-                ty: elem_ty.clone(),
-                span,
-                kind: TermKind::If {
-                    cond: pred.lam.body.clone(),
-                    then_branch: Box::new(Term {
-                        id: term_ids.next_id(),
-                        ty: elem_ty.clone(),
-                        span,
-                        kind: TermKind::Var(VarRef::Symbol(x_sym)),
-                    }),
-                    else_branch: init.clone(),
-                },
-            }),
-            ret_ty: elem_ty,
-        };
-        // A fused producer map composes in front: `mask∘f = λraw. if p(f(raw))
-        // then f(raw) else ne` — `compose_lambdas` binds `f(raw)` once.
-        let mask_body = super::SoacBody {
-            lam: mask_lam,
-            captures: pred.captures.clone(),
-        };
-        let mask_body = match map_lam {
-            Some(f) => compose_soac_bodies(f, &mask_body, span, symbols, term_ids),
-            None => mask_body,
-        };
-        // op∘mask: (acc, x) -> op(acc, mask(x)). The per-element step gains the
-        // mask; the pure phase-2 combiner stays the consumer's `reduce_op`
-        // (which differs from `op` when a map was already folded into the step).
-        let composed_op = compose_soac_map_reduce(&mask_body, op, span, symbols, term_ids);
-        // Scalar-typed single-accumulator reducing `Screma` (egir re-wraps to
-        // `Tuple(1)+Project` at lowering) — no `TupleProj` wrapper.
-        return Some(Term {
-            id: term_ids.next_id(),
-            ty: consumer_ty,
-            span,
-            kind: TermKind::Soac(SoacOp::Screma {
-                lanes: vec![],
-                accumulators: vec![super::ScremaAccumulatorSpec {
-                    kind: super::ScremaAccumulator::Reduce,
-                    step_lam: composed_op,
-                    reduce_op: reduce_op.clone(),
-                    ne: init.clone(),
-                }],
-                inputs: vec![input.clone()],
-            }),
-        });
-    }
-
-    // Keep the producer body whole so pairwise fusion preserves captures.
+    // Only the two recipes whose fused result is a non-`Screma` SOAC survive
+    // here — `map→filter` (→ `Filter`) and `map→scatter` (→ `Scatter`). The
+    // `Screma`-expressible recipes (`map∘map`, `map→reduce`, `map→scan`) are
+    // lowered through `lower_fused_screma` by `pairwise_screma_output`.
     let (prod_body, input_exprs) = match producer {
         ArraySemantics::Elementwise { body, inputs } => (body, inputs.clone()),
         _ => return None,
     };
 
     match (recipe, consumer) {
-        (FusionRecipe::ComposeElementwise, ArraySemantics::Elementwise { body: cons_body, .. }) => {
-            let composed = compose_soac_bodies(prod_body, cons_body, span, symbols, term_ids);
-            Some(Term {
-                id: term_ids.next_id(),
-                ty: consumer_ty,
-                span,
-                kind: TermKind::Soac(SoacOp::Map {
-                    lam: composed,
-                    inputs: input_exprs,
-                    destination: SoacDestination::Fresh,
-                }),
-            })
-        }
-
         (
             FusionRecipe::MapIntoFilter,
             ArraySemantics::Filter {
@@ -2562,59 +2324,6 @@ fn build_fused_from_semantics(
                     map_lam: Some(prod_body.clone()),
                     pred: pred.clone(),
                     input: input_exprs[0].clone(),
-                    destination: SoacDestination::Fresh,
-                }),
-            })
-        }
-
-        (
-            FusionRecipe::MapIntoReduce,
-            ArraySemantics::Reduction {
-                op, reduce_op, init, ..
-            },
-        ) => {
-            if op.lam.params.len() != 2 {
-                return None;
-            }
-            let composed_op = compose_soac_map_reduce(prod_body, op, span, symbols, term_ids);
-            // Scalar-typed single-accumulator reducing `Screma` (egir re-wraps
-            // to `Tuple(1)+Project` at lowering) — no `TupleProj` wrapper.
-            Some(Term {
-                id: term_ids.next_id(),
-                ty: consumer_ty,
-                span,
-                kind: TermKind::Soac(SoacOp::Screma {
-                    lanes: vec![],
-                    accumulators: vec![super::ScremaAccumulatorSpec {
-                        kind: super::ScremaAccumulator::Reduce,
-                        step_lam: composed_op,
-                        reduce_op: reduce_op.clone(),
-                        ne: init.clone(),
-                    }],
-                    inputs: input_exprs,
-                }),
-            })
-        }
-
-        (FusionRecipe::MapIntoScan, ArraySemantics::PrefixScan { op, init, .. }) => {
-            if input_exprs.len() != 1 {
-                return None;
-            }
-            let composed_op = compose_soac_map_reduce(prod_body, op, span, symbols, term_ids);
-            Some(Term {
-                id: term_ids.next_id(),
-                ty: consumer_ty,
-                span,
-                kind: TermKind::Soac(SoacOp::Scan {
-                    op: composed_op,
-                    // The pure combiner is the original scan op (without the
-                    // producer `f`); phase 2 combines already-transformed block
-                    // sums, so it must not re-apply `f`.
-                    reduce_op: op.clone(),
-                    ne: init.clone(),
-                    input: input_exprs[0].clone(),
-                    // Fusion runs before apply_ownership; ownership pass
-                    // will (re-)decide destination on this fused Scan.
                     destination: SoacDestination::Fresh,
                 }),
             })

@@ -308,7 +308,7 @@ fn convert_function<'a>(
     }
 
     // Regular functions: extract lambda params and build an EGraph.
-    let (inner_body, params) = extract_lambda_params(&def.body);
+    let (inner_body, params) = crate::tlc::extract_lambda_params_ref(&def.body);
     let ret_type = inner_body.ty.clone();
     let param_info: Vec<(Type<TypeName>, String)> = params
         .iter()
@@ -384,7 +384,7 @@ fn convert_entry_point(
 
     let symbols = ctx.symbols;
     let def_name = symbol_name(symbols, def.name)?;
-    let (inner_body, params) = extract_lambda_params(&def.body);
+    let (inner_body, params) = crate::tlc::extract_lambda_params_ref(&def.body);
     let is_compute = matches!(entry.entry_type, interface::Attribute::Compute);
 
     // After `normalize_outputs`, `def.ty == def.body.ty` (the body
@@ -2552,17 +2552,6 @@ fn is_purely_constant_body(body: &FuncBody) -> bool {
         ),
         _ => false,
     })
-}
-
-/// Walk through nested Lambdas to extract parameters and the inner body.
-fn extract_lambda_params(term: &Term) -> (&Term, Vec<(SymbolId, Type<TypeName>)>) {
-    let mut params = Vec::new();
-    let mut current = term;
-    while let TermKind::Lambda(lam) = &current.kind {
-        params.extend(lam.params.iter().cloned());
-        current = &lam.body;
-    }
-    (current, params)
 }
 
 /// Extract a `#[size_hint(N)]` attribute from a pattern.
