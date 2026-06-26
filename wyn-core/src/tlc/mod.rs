@@ -1034,6 +1034,26 @@ impl Term {
         Term { kind, ..self }
     }
 
+    /// Construct a `Var(sym)` term with the given id.
+    pub(crate) fn var(sym: SymbolId, ty: Type<TypeName>, span: Span, id: TermId) -> Term {
+        Term {
+            id,
+            ty,
+            span,
+            kind: TermKind::Var(VarRef::Symbol(sym)),
+        }
+    }
+
+    /// Construct an integer-literal term with the given id.
+    pub(crate) fn int_lit(value: impl Into<String>, ty: Type<TypeName>, span: Span, id: TermId) -> Term {
+        Term {
+            id,
+            ty,
+            span,
+            kind: TermKind::IntLit(value.into()),
+        }
+    }
+
     /// Deep-clone this term, assigning a fresh `TermId` to every node so the
     /// copy shares no ids with the original — needed when splicing a term into
     /// more than one position (e.g. substituting a replacement at several sites).

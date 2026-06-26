@@ -2082,8 +2082,8 @@ fn count_accumulator(
     let acc_param = (acc_sym, count_ty.clone());
     let elem_param = pred_lam.params[0].clone();
     let plus_one = add_terms(
-        var_term(acc_sym, count_ty.clone(), span, term_ids),
-        int_term("1", count_ty.clone(), span, term_ids),
+        Term::var(acc_sym, count_ty.clone(), span, term_ids.next_id()),
+        Term::int_lit("1", count_ty.clone(), span, term_ids.next_id()),
         count_ty.clone(),
         span,
         term_ids,
@@ -2097,7 +2097,7 @@ fn count_accumulator(
             kind: TermKind::If {
                 cond: pred_lam.body.clone(),
                 then_branch: Box::new(plus_one),
-                else_branch: Box::new(var_term(acc_sym, count_ty.clone(), span, term_ids)),
+                else_branch: Box::new(Term::var(acc_sym, count_ty.clone(), span, term_ids.next_id())),
             },
         }),
         ret_ty: count_ty.clone(),
@@ -2107,8 +2107,8 @@ fn count_accumulator(
     let reduce_op = Lambda {
         params: vec![acc_param, (rhs_sym, count_ty.clone())],
         body: Box::new(add_terms(
-            var_term(acc_sym, count_ty.clone(), span, term_ids),
-            var_term(rhs_sym, count_ty.clone(), span, term_ids),
+            Term::var(acc_sym, count_ty.clone(), span, term_ids.next_id()),
+            Term::var(rhs_sym, count_ty.clone(), span, term_ids.next_id()),
             count_ty.clone(),
             span,
             term_ids,
@@ -2126,26 +2126,8 @@ fn count_accumulator(
             lam: reduce_op,
             captures: vec![],
         },
-        ne: Box::new(int_term("0", count_ty, span, term_ids)),
+        ne: Box::new(Term::int_lit("0", count_ty, span, term_ids.next_id())),
     })
-}
-
-fn var_term(sym: SymbolId, ty: Type<TypeName>, span: Span, term_ids: &mut TermIdSource) -> Term {
-    Term {
-        id: term_ids.next_id(),
-        ty,
-        span,
-        kind: TermKind::Var(VarRef::Symbol(sym)),
-    }
-}
-
-fn int_term(value: &str, ty: Type<TypeName>, span: Span, term_ids: &mut TermIdSource) -> Term {
-    Term {
-        id: term_ids.next_id(),
-        ty,
-        span,
-        kind: TermKind::IntLit(value.to_string()),
-    }
 }
 
 fn add_terms(lhs: Term, rhs: Term, ty: Type<TypeName>, span: Span, term_ids: &mut TermIdSource) -> Term {
