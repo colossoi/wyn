@@ -1007,11 +1007,16 @@ entry double(arr: []i32) []i32 = map(|x: i32| x + 1, arr)
 // `destination` flag flipping by apply_ownership (Phase C)
 // =============================================================================
 
-/// Drive the program through to `TlcOwnershipApplied` (post-fusion,
-/// post-apply_ownership). Returns the post-rewrite Program for
-/// inspecting `SoacOp::Map { destination, .. }`.
+/// Apply just the ownership rewrite — the pass these tests exercise — to an
+/// early-stage program (`compile_to_tlc`, where the inspected def is still
+/// present). Returns the post-rewrite Program for inspecting
+/// `SoacOp::{Map,Scan,Filter} { destination, .. }`.
+///
+/// Deliberately NOT the full pipeline: running further would monomorphize-drop
+/// an uncalled `def f`, or force-inline a called soac helper away — neither of
+/// which is what the destination flag-flip under test depends on.
 fn compile_to_owned(source: &str) -> Program {
-    crate::test_pipeline::compile_to_tlc_program(source)
+    super::apply_ownership(compile_to_tlc(source)).expect("apply_ownership")
 }
 
 fn map_destination(program: &Program, fn_name: &str) -> Option<SoacDestination> {
