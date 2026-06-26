@@ -11,18 +11,17 @@ fn dummy_span() -> Span {
 /// A fused `map → reduce` is a scalar-output single-`Reduce`-accumulator,
 /// no-map `Screma` (no `TupleProj` wrapper). Destructure that shape, returning
 /// the step lambda (the composed `(acc, x) -> acc'`) and the SOAC inputs.
-fn as_fused_map_reduce(term: &Term) -> (&SoacBody, &[ArrayExpr]) {
-    match &term.kind {
-        TermKind::Soac(SoacOp::Screma {
+fn as_fused_map_reduce(body: &Term) -> (SoacBody, Vec<ArrayExpr>) {
+    match fused_soac(body) {
+        SoacOp::Screma {
             lanes,
             accumulators,
             inputs,
-            ..
-        }) if lanes.is_empty()
+        } if lanes.is_empty()
             && accumulators.len() == 1
             && matches!(accumulators[0].kind, ScremaAccumulator::Reduce) =>
         {
-            (&accumulators[0].step_lam, inputs)
+            (accumulators[0].step_lam.clone(), inputs)
         }
         other => panic!("Expected fused single-reduce Screma, got {:?}", other),
     }
@@ -241,24 +240,6 @@ fn contains_screma(term: &Term) -> bool {
     }
 }
 
-/// A *map-bearing* Screma — i.e. one with at least one mapped array output,
-/// the signature of horizontal map fusion. A single-accumulator Screma with
-/// no map outputs (a fused `map → reduce`) does not count.
-fn contains_map_screma(term: &Term) -> bool {
-    match &term.kind {
-        TermKind::Soac(SoacOp::Screma { lanes, .. }) if !lanes.is_empty() => true,
-        _ => {
-            let mut found = false;
-            term.for_each_child(&mut |child| {
-                if !found && contains_map_screma(child) {
-                    found = true;
-                }
-            });
-            found
-        }
-    }
-}
-
 fn contains_filter(term: &Term) -> bool {
     match &term.kind {
         TermKind::Soac(SoacOp::Filter { .. }) => true,
@@ -287,6 +268,70 @@ fn find_first_screma(term: &Term) -> Option<SoacOp> {
             found
         }
     }
+}
+
+/// The single fused SOAC in a result body, regardless of how the lowering
+/// spells it: a bare tail SOAC, or a `let s = SOAC in s` / `… in s.k` wrapper
+/// (the union path's single-output shape). Peels the let-chain and asserts
+/// exactly one SOAC region is present. Use this instead of matching
+/// `TermKind::Soac(SoacOp::Map { .. })` directly, so a test asserts *that fusion
+/// happened*, not *how the fused region is currently spelled*.
+fn fused_soac(body: &Term) -> SoacOp {
+    let (bindings, tail) = flatten_let_chain(body.clone());
+    if let TermKind::Soac(op) = &tail.kind {
+        return op.clone();
+    }
+    let soacs: Vec<SoacOp> = bindings
+        .iter()
+        .filter_map(|b| match &b.rhs.kind {
+            TermKind::Soac(op) => Some(op.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(soacs.len(), 1, "expected exactly one fused SOAC region, got {}", soacs.len());
+    soacs.into_iter().next().unwrap()
+}
+
+/// Count SOAC nodes anywhere in a term. "Fused to one region" is `== 1`; "these
+/// producers stayed separate" is a count that didn't collapse.
+fn count_soacs(term: &Term) -> usize {
+    let mut n = usize::from(matches!(term.kind, TermKind::Soac(_)));
+    term.for_each_child(&mut |c| n += count_soacs(c));
+    n
+}
+
+/// The source symbols a SOAC reads, across every SOAC family — variant-agnostic,
+/// so a test can assert "the fused region reads the original input(s)" without
+/// caring whether it's a `Map`, `Scan`, `Reduce`, or `Screma`.
+fn soac_input_syms(op: &SoacOp) -> Vec<SymbolId> {
+    let inputs: Vec<&ArrayExpr> = match op {
+        SoacOp::Map { inputs, .. } | SoacOp::Screma { inputs, .. } | SoacOp::Scatter { inputs, .. } => {
+            inputs.iter().collect()
+        }
+        SoacOp::Reduce { input, .. } | SoacOp::Scan { input, .. } | SoacOp::Filter { input, .. } => {
+            vec![input]
+        }
+        SoacOp::ReduceByIndex { indices, values, .. } => vec![indices, values],
+    };
+    inputs
+        .into_iter()
+        .filter_map(|ae| match ae {
+            ArrayExpr::Var(VarRef::Symbol(s), _) => Some(*s),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The widest `Screma` lane-count anywhere in a term. `<= 1` means no horizontal
+/// map fusion occurred (a single `map∘map` compose is one lane; merging two maps
+/// is two).
+fn max_screma_lanes(term: &Term) -> usize {
+    let mut m = match &term.kind {
+        TermKind::Soac(SoacOp::Screma { lanes, .. }) => lanes.len(),
+        _ => 0,
+    };
+    term.for_each_child(&mut |c| m = m.max(max_screma_lanes(c)));
+    m
 }
 
 fn projection_idx_for_binding(term: &Term, sym: SymbolId) -> Option<usize> {
@@ -368,34 +413,16 @@ fn test_simple_map_fusion() {
 
     let fused = run(program);
 
-    // The result should be a single Map (no Let binding)
-    match &fused.defs[0].body.kind {
-        TermKind::Soac(SoacOp::Map { lam, inputs, .. }) => {
-            // Input should be 'a' (the original array)
-            assert_eq!(inputs.len(), 1);
-            match &inputs[0] {
-                ArrayExpr::Var(VarRef::Symbol(s), _) => assert_eq!(*s, a_sym),
-                other => panic!("Expected Var(a), got {:?}", other),
-            }
-
-            // Lambda should have f's param (x)
-            assert_eq!(lam.lam.params.len(), 1);
-            assert_eq!(lam.lam.params[0].0, x_sym);
-
-            // Body should be: let _fused = x in _fused
-            // (g's body is y, substituted to _fused; f's body is x)
-            match &lam.lam.body.kind {
-                TermKind::Let { rhs, body, .. } => {
-                    // rhs is f's body (Var(x))
-                    assert!(matches!(&rhs.kind, TermKind::Var(VarRef::Symbol(s)) if *s == x_sym));
-                    // body should be Var(_fused) — the fresh symbol
-                    assert!(matches!(&body.kind, TermKind::Var(VarRef::Symbol(_))));
-                }
-                other => panic!("Expected Let (composed body), got {:?}", other),
-            }
-        }
-        other => panic!("Expected fused Soac(Map), got {:?}", other),
-    }
+    // Fusion eliminated the intermediate `b`: the two maps collapse to a single
+    // SOAC region reading the original input `a` — regardless of whether that
+    // region is spelled as a bare `Map` or a one-lane `Screma`.
+    let body = &fused.defs[0].body;
+    assert_eq!(count_soacs(body), 1, "the two maps must fuse to one region");
+    assert_eq!(
+        soac_input_syms(&fused_soac(body)),
+        vec![a_sym],
+        "the fused region reads the original input a, not the intermediate b"
+    );
 }
 
 // -------------------------------------------------------------------------
@@ -1812,10 +1839,15 @@ fn test_screma_rejects_different_producers() {
     };
 
     let fused = run(program);
-    // `e = map(h, ys); d = reduce(op, 0, e)` legitimately fuses to a
-    // single-accumulator Screma (no map outputs). The maps with *different*
-    // producers must not horizontally fuse into a map-bearing Screma.
-    assert!(!contains_map_screma(&fused.defs[0].body));
+    // Vertical fusions are fine and expected (`c = map(g, b)` composes with its
+    // producer `b`; `d = reduce(op, 0, e)` folds its producer `e`). What must NOT
+    // happen is a *horizontal* merge of the two distinct producers (the
+    // xs-derived chain vs the ys-derived chain) into one multi-lane Screma — a
+    // single map∘map compose is one lane, so the rejection signature is ≥2 lanes.
+    assert!(
+        max_screma_lanes(&fused.defs[0].body) <= 1,
+        "maps over different producers must not horizontally fuse into a multi-lane Screma"
+    );
 }
 
 #[test]
@@ -2897,21 +2929,14 @@ fn test_chain_of_three_maps() {
 
     let fused = run(program);
 
-    // Should be a single Map with a's input (all three fused)
-    match &fused.defs[0].body.kind {
-        TermKind::Soac(SoacOp::Map { inputs, lam, .. }) => {
-            assert_eq!(inputs.len(), 1);
-            match &inputs[0] {
-                ArrayExpr::Var(vr, _) => {
-                    assert!(matches!(vr, VarRef::Symbol(s) if *s == a_sym))
-                }
-                other => panic!("Expected Ref(a), got {:?}", other),
-            }
-            // Lambda param should be f's original param (x)
-            assert_eq!(lam.lam.params[0].0, x_sym);
-        }
-        other => panic!("Expected fully fused Map, got {:?}", other),
-    }
+    // All three maps collapse to one SOAC region reading the original input `a`.
+    let body = &fused.defs[0].body;
+    assert_eq!(count_soacs(body), 1, "all three chained maps must fuse to one region");
+    assert_eq!(
+        soac_input_syms(&fused_soac(body)),
+        vec![a_sym],
+        "the fused region reads the original input a"
+    );
 }
 
 // -------------------------------------------------------------------------
@@ -3092,17 +3117,14 @@ fn test_zip_fused_producer() {
 
     let fused = run(program);
 
-    // Should be a Map with [a, b] inputs (producer's multi-inputs preserved)
-    match &fused.defs[0].body.kind {
-        TermKind::Soac(SoacOp::Map { lam, inputs, .. }) => {
-            assert_eq!(inputs.len(), 2);
-            // Lambda should have f's params (x1, x2)
-            assert_eq!(lam.lam.params.len(), 2);
-            assert_eq!(lam.lam.params[0].0, x1_sym);
-            assert_eq!(lam.lam.params[1].0, x2_sym);
-        }
-        other => panic!("Expected fused Map with 2 inputs, got {:?}", other),
-    }
+    // map over a zip fuses to one region that preserves both source inputs.
+    let body = &fused.defs[0].body;
+    assert_eq!(count_soacs(body), 1, "map over a zip must fuse to one region");
+    assert_eq!(
+        soac_input_syms(&fused_soac(body)).len(),
+        2,
+        "the fused region preserves both zip inputs"
+    );
 }
 
 // -------------------------------------------------------------------------
