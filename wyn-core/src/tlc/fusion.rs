@@ -138,9 +138,163 @@ struct LetBinding {
 
 #[derive(Clone)]
 struct ProducerInfo {
+    id: SoacNodeId,
     binding_idx: usize,
     symbol: SymbolId,
     semantics: ArraySemantics,
+    inputs: Vec<SoacInputSlot>,
+    outputs: Vec<SoacOutputSlot>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct SoacNodeId(usize);
+
+#[derive(Clone)]
+struct SoacInputSlot {
+    slot: usize,
+    array: ArrayExpr,
+    param: Option<(SymbolId, Type<TypeName>)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NamedInputSlot {
+    slot: usize,
+    array_sym: SymbolId,
+    array_ty: Type<TypeName>,
+    param_ty: Type<TypeName>,
+}
+
+#[derive(Clone)]
+struct SoacOutputSlot {
+    slot: usize,
+    value: SymbolId,
+    ty: Type<TypeName>,
+    kind: SoacOutputKind,
+}
+
+/// What a producer's output *is*, named by the SOAC that yields it. Only
+/// `ReduceScalar` is a scalar; every other kind is an array, which is what gates
+/// a binding from being a fusion producer (`has_array_output`). The richer
+/// vocabulary (vs a bare `Array`/`Scalar`) keeps the producer's shape legible at
+/// the use sites and is the seam for slot-aware multi-output producers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SoacOutputKind {
+    MapArray,
+    ReduceScalar,
+    ScanArray,
+    FilterArray,
+    /// Scatter / reduce-by-index / literal / range / storage-buffer — array
+    /// producers that fusion treats uniformly (it never fuses *into* them here).
+    OtherArray,
+}
+
+impl SoacOutputKind {
+    fn is_array(self) -> bool {
+        !matches!(self, SoacOutputKind::ReduceScalar)
+    }
+}
+
+#[derive(Clone)]
+struct FusionRegion {
+    producers: Vec<ProducerInfo>,
+    binding_nodes: Vec<Option<SoacNodeId>>,
+    edges: Vec<UseEdge>,
+}
+
+#[derive(Clone)]
+struct UseEdge {
+    producer: SoacNodeId,
+    output_slot: usize,
+    site: UseSite,
+}
+
+impl FusionRegion {
+    fn new(
+        bindings: &[LetBinding],
+        tail: &Term,
+        ctx: &FusionContext<'_>,
+        term_ids: &mut TermIdSource,
+    ) -> Self {
+        let mut producers = Vec::new();
+        let mut binding_nodes = vec![None; bindings.len()];
+        for (binding_idx, binding) in bindings.iter().enumerate() {
+            let semantics = classify_with_context(&binding.rhs, ctx, term_ids);
+            if matches!(semantics, ArraySemantics::Opaque) {
+                continue;
+            }
+            let id = SoacNodeId(producers.len());
+            binding_nodes[binding_idx] = Some(id);
+            let producer = ProducerInfo {
+                id,
+                binding_idx,
+                symbol: binding.name,
+                inputs: soac_input_slots(&semantics),
+                outputs: soac_output_slots(binding, &semantics),
+                semantics,
+            };
+            // The output slot mirrors the binding's declared type; a producer's
+            // array output is exactly what a fused consumer projects.
+            debug_assert!(
+                producer.array_output_ty().map(|ty| ty == &binding.name_ty).unwrap_or(true),
+                "producer output type must match its binding's declared type"
+            );
+            producers.push(producer);
+        }
+        let edges = producers
+            .iter()
+            .flat_map(|producer| {
+                classify_uses_for_producer(producer, bindings, tail, ctx, term_ids)
+                    .into_iter()
+                    .map(|site| UseEdge {
+                        producer: producer.id,
+                        output_slot: 0,
+                        site,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        FusionRegion {
+            producers,
+            binding_nodes,
+            edges,
+        }
+    }
+
+    fn uses_for(&self, producer: &ProducerInfo) -> Vec<UseSite> {
+        self.edges
+            .iter()
+            .filter(|edge| edge.producer == producer.id && edge.output_slot == 0)
+            .map(|edge| edge.site.clone())
+            .collect()
+    }
+
+    fn node_for_binding(&self, binding_idx: usize) -> Option<&ProducerInfo> {
+        self.binding_nodes.get(binding_idx).and_then(|id| id.map(|SoacNodeId(idx)| &self.producers[idx]))
+    }
+}
+
+impl ProducerInfo {
+    fn output_symbol(&self) -> SymbolId {
+        self.outputs
+            .first()
+            .map(|output| {
+                debug_assert_eq!(output.slot, 0);
+                output.value
+            })
+            .unwrap_or(self.symbol)
+    }
+
+    fn has_array_output(&self) -> bool {
+        self.outputs.iter().any(|output| output.kind.is_array())
+    }
+
+    /// The element type of this producer's array output, if it has one — the
+    /// field type a consumer projects when the producer is unioned into a
+    /// fused Screma. (Currently every producer has exactly one output; this is
+    /// the seam for slot-aware multi-output producers.)
+    fn array_output_ty(&self) -> Option<&Type<TypeName>> {
+        self.outputs.iter().find(|output| output.kind.is_array()).map(|output| &output.ty)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -156,21 +310,59 @@ struct UseSite {
 }
 
 #[derive(Clone)]
+struct BindingSoacUse {
+    binding_idx: usize,
+    input: SoacInputSlot,
+    semantics: ArraySemantics,
+}
+
+#[derive(Clone)]
 enum UseKind {
     SoacInput {
         term_id: TermId,
         input_index: usize,
+        input: SoacInputSlot,
         semantics: ArraySemantics,
         ty: Type<TypeName>,
         span: Span,
     },
-    ScremaInput,
+    ScremaInput {
+        input_index: usize,
+        input: ArrayExpr,
+    },
     Length {
         term_id: TermId,
         ty: Type<TypeName>,
         span: Span,
     },
     Escape,
+}
+
+fn binding_soac_uses(uses: &[UseSite], bindings: &[LetBinding]) -> Option<Vec<BindingSoacUse>> {
+    uses.iter()
+        .map(|use_site| {
+            let UseOwner::Binding(binding_idx) = use_site.owner else {
+                return None;
+            };
+            let UseKind::SoacInput {
+                term_id,
+                input,
+                semantics,
+                ..
+            } = &use_site.kind
+            else {
+                return None;
+            };
+            if *term_id != bindings[binding_idx].rhs.id {
+                return None;
+            }
+            Some(BindingSoacUse {
+                binding_idx,
+                input: input.clone(),
+                semantics: semantics.clone(),
+            })
+        })
+        .collect()
 }
 
 #[derive(Clone)]
@@ -214,13 +406,50 @@ struct ScremaRewrite {
     scalar_result: bool,
 }
 
+/// One output field of a fused `Screma`: what it computes and every site that
+/// reads it. A builder produces a `Vec<FusedOutput>`; `lower_fused_screma` owns
+/// the field-ordering invariant (lanes first, then accumulators) and the
+/// projection routing, so no builder hand-computes a field index.
+struct FusedOutput {
+    ty: Type<TypeName>,
+    kind: FusedOutputKind,
+    /// Every site that reads THIS field. A field can serve many consumers — a
+    /// filter's `length` count feeds every `length` call.
+    consumers: Vec<OutputConsumer>,
+}
+
+enum FusedOutputKind {
+    /// An elementwise output lane (becomes a `ScremaLane`).
+    Lane(super::SoacBody),
+    /// A reduce/scan output (becomes a `ScremaAccumulatorSpec`).
+    Accumulator(super::ScremaAccumulatorSpec),
+}
+
+/// Where a fused output's value flows. The three variants mirror the three sinks
+/// consumed by `apply_planned_screma_rewrite`.
+enum OutputConsumer {
+    /// A top-level let binding aliasing/projecting this field.
+    Binding(usize),
+    /// A use nested inside another term (e.g. `length(filt)` inside a later
+    /// binding's RHS), rewritten in place via `term_replacements`.
+    NestedTerm {
+        term_id: TermId,
+        ty: Type<TypeName>,
+        span: Span,
+    },
+    /// The whole entry tail value, replaced via `tail_projection`.
+    Tail {
+        ty: Type<TypeName>,
+        span: Span,
+    },
+}
+
 struct ScremaProducer {
     lam: super::SoacBody,
     inputs: Vec<ArrayExpr>,
 }
 
 struct ScremaReduceConsumer {
-    binding_idx: usize,
     op: super::SoacBody,
     reduce_op: super::SoacBody,
     ne: Box<Term>,
@@ -241,32 +470,100 @@ struct ScremaGroup {
     maps: Vec<ScremaMapGroupConsumer>,
 }
 
-fn find_direct_map_screma_group(bindings: &[LetBinding]) -> Option<ScremaGroup> {
+fn soac_input_slots(semantics: &ArraySemantics) -> Vec<SoacInputSlot> {
+    let params: Vec<(SymbolId, Type<TypeName>)> = match semantics {
+        ArraySemantics::Elementwise { body, .. } => body.lam.params.clone(),
+        ArraySemantics::Reduction { op, .. } | ArraySemantics::PrefixScan { op, .. } => {
+            op.lam.params.iter().skip(1).cloned().collect()
+        }
+        ArraySemantics::Filter { pred, .. } => pred.lam.params.clone(),
+        ArraySemantics::ScatterOp { lam, .. } => lam.lam.params.clone(),
+        ArraySemantics::IndexedReduction { op, .. } => op.lam.params.iter().skip(1).cloned().collect(),
+        _ => vec![],
+    };
+
+    semantics
+        .input_exprs()
+        .into_iter()
+        .enumerate()
+        .map(|(slot, input)| SoacInputSlot {
+            slot,
+            array: input.clone(),
+            param: params.get(slot).cloned(),
+        })
+        .collect()
+}
+
+fn soac_output_slots(binding: &LetBinding, semantics: &ArraySemantics) -> Vec<SoacOutputSlot> {
+    let kind = match semantics {
+        ArraySemantics::Elementwise { .. } => SoacOutputKind::MapArray,
+        ArraySemantics::Reduction { .. } => SoacOutputKind::ReduceScalar,
+        ArraySemantics::PrefixScan { .. } => SoacOutputKind::ScanArray,
+        ArraySemantics::Filter { .. } => SoacOutputKind::FilterArray,
+        _ => SoacOutputKind::OtherArray,
+    };
+    // The derived kind must agree with the independent `produces_array`
+    // classification — a mismatch means a new semantics variant slipped the
+    // match above.
+    debug_assert_eq!(kind.is_array(), semantics.produces_array());
+    vec![SoacOutputSlot {
+        slot: 0,
+        value: binding.name,
+        ty: binding.name_ty.clone(),
+        kind,
+    }]
+}
+
+fn named_input_slot_domain(slots: &[SoacInputSlot]) -> Option<Vec<NamedInputSlot>> {
+    slots
+        .iter()
+        .map(|slot| {
+            let (_, param_ty) = slot.param.as_ref()?;
+            match &slot.array {
+                ArrayExpr::Var(VarRef::Symbol(array_sym), array_ty) => Some(NamedInputSlot {
+                    slot: slot.slot,
+                    array_sym: *array_sym,
+                    array_ty: array_ty.clone(),
+                    param_ty: param_ty.clone(),
+                }),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+fn find_direct_map_screma_group(region: &FusionRegion, bindings: &[LetBinding]) -> Option<ScremaGroup> {
     let mut start = 0;
     while start < bindings.len() {
-        let Some(first) = direct_screma_map(&bindings[start].rhs) else {
+        let Some(first_node) = region.node_for_binding(start) else {
+            start += 1;
+            continue;
+        };
+        let Some(first) = map_screma_producer(&bindings[start].rhs, MapProducerPolicy::Direct) else {
             start += 1;
             continue;
         };
 
-        let Some(first_input_syms) = array_ref_symbols(&first.inputs) else {
+        let Some(first_domain) = named_input_slot_domain(&first_node.inputs) else {
             start += 1;
             continue;
         };
-        let first_param_tys = param_types(&first.lam.lam.params);
         let mut maps = vec![ScremaMapGroupConsumer {
             binding_idx: start,
             lam: first.lam,
         }];
         let mut end = start + 1;
         while end < bindings.len() {
-            let Some(next) = direct_screma_map(&bindings[end].rhs) else {
+            let Some(next_node) = region.node_for_binding(end) else {
                 break;
             };
-            let Some(next_input_syms) = array_ref_symbols(&next.inputs) else {
+            let Some(next) = map_screma_producer(&bindings[end].rhs, MapProducerPolicy::Direct) else {
                 break;
             };
-            if next_input_syms != first_input_syms || param_types(&next.lam.lam.params) != first_param_tys {
+            let Some(next_domain) = named_input_slot_domain(&next_node.inputs) else {
+                break;
+            };
+            if next_domain != first_domain {
                 break;
             }
             maps.push(ScremaMapGroupConsumer {
@@ -295,14 +592,6 @@ fn find_direct_map_screma_group(bindings: &[LetBinding]) -> Option<ScremaGroup> 
     None
 }
 
-fn screma_producer_map(term: &Term) -> Option<ScremaProducer> {
-    map_screma_producer(term, MapProducerPolicy::Producer)
-}
-
-fn direct_screma_map(term: &Term) -> Option<ScremaProducer> {
-    map_screma_producer(term, MapProducerPolicy::Direct)
-}
-
 enum MapProducerPolicy {
     Producer,
     Direct,
@@ -317,9 +606,6 @@ fn map_screma_producer(term: &Term, policy: MapProducerPolicy) -> Option<ScremaP
     else {
         return None;
     };
-    if !lam.captures.is_empty() {
-        return None;
-    }
     match policy {
         MapProducerPolicy::Producer if lam.lam.params.is_empty() => return None,
         MapProducerPolicy::Direct if inputs.is_empty() || inputs.len() != lam.lam.params.len() => {
@@ -340,7 +626,6 @@ fn screma_consumer_accumulator(term: &Term, input_sym: SymbolId) -> Option<Screm
                 return None;
             }
             Some(ScremaReduceConsumer {
-                binding_idx: usize::MAX,
                 op: op.clone(),
                 reduce_op: op.clone(),
                 ne: ne.clone(),
@@ -358,7 +643,6 @@ fn screma_consumer_accumulator(term: &Term, input_sym: SymbolId) -> Option<Screm
                 return None;
             }
             Some(ScremaReduceConsumer {
-                binding_idx: usize::MAX,
                 op: op.clone(),
                 reduce_op: reduce_op.clone(),
                 ne: ne.clone(),
@@ -388,42 +672,19 @@ fn map_into_screma_rhs(
     if inputs.len() != 1 || inputs[0].as_named_ref() != Some(producer_sym) {
         return None;
     }
-    if lanes.iter().any(|lane| !lane.lam.captures.is_empty())
-        || accumulators.iter().any(|acc| !acc.step_lam.captures.is_empty())
-    {
-        return None;
-    }
     if accumulators.iter().any(|acc| acc.step_lam.lam.params.len() != 2) {
         return None;
     }
 
     let composed_lams: Vec<super::SoacBody> = lanes
         .iter()
-        .map(|lane| super::SoacBody {
-            lam: compose_lambdas(
-                producer.lam.lam.clone(),
-                lane.lam.lam.clone(),
-                span,
-                symbols,
-                term_ids,
-            ),
-            captures: vec![],
-        })
+        .map(|lane| compose_soac_bodies(&producer.lam, &lane.lam, span, symbols, term_ids))
         .collect();
     let accumulators = accumulators
         .iter()
         .map(|acc| super::ScremaAccumulatorSpec {
             kind: acc.kind,
-            step_lam: super::SoacBody {
-                lam: compose_map_reduce(
-                    producer.lam.lam.clone(),
-                    acc.step_lam.lam.clone(),
-                    span,
-                    symbols,
-                    term_ids,
-                ),
-                captures: vec![],
-            },
+            step_lam: compose_soac_map_reduce(&producer.lam, &acc.step_lam, span, symbols, term_ids),
             reduce_op: acc.reduce_op.clone(),
             ne: acc.ne.clone(),
         })
@@ -472,24 +733,57 @@ fn make_screma_term(
     }
 }
 
-fn make_screma_rewrite(
+/// Union a set of self-describing outputs into one multi-output `Screma` and
+/// route each output's consumers to the right rewrite sink. This is the single
+/// place the lanes-first/accumulators-second field ordering (the contract
+/// `convert_soac_screma` asserts) is materialized — builders never compute a
+/// field index by hand.
+fn lower_fused_screma(
     insert_at: usize,
     skip_indices: Vec<usize>,
     symbol_name: &str,
-    result_fields: Vec<Type<TypeName>>,
-    map_lams: Vec<super::SoacBody>,
-    accumulators: Vec<super::ScremaAccumulatorSpec>,
     inputs: Vec<ArrayExpr>,
     span: Span,
-    projection_fields: LookupMap<usize, usize>,
+    outputs: Vec<FusedOutput>,
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
-) -> ScremaRewrite {
+) -> PlannedScremaRewrite {
+    // Lanes occupy field indices `0..num_lanes`, accumulators
+    // `num_lanes..num_lanes+num_accs`, each in emit order. Assigning indices up
+    // front (rather than partitioning then re-deriving) keeps every output's
+    // consumer list attached to its final field — the off-by-one class the old
+    // per-builder `maps.len() + acc_idx` arithmetic was prone to.
+    let num_lanes = outputs.iter().filter(|o| matches!(o.kind, FusedOutputKind::Lane(_))).count();
+    let mut result_fields: Vec<Option<Type<TypeName>>> = vec![None; outputs.len()];
+    let mut map_lams: Vec<super::SoacBody> = Vec::with_capacity(num_lanes);
+    let mut accumulators: Vec<super::ScremaAccumulatorSpec> =
+        Vec::with_capacity(outputs.len() - num_lanes);
+    let mut distribution: Vec<(usize, Vec<OutputConsumer>)> = Vec::with_capacity(outputs.len());
+    for output in outputs {
+        let FusedOutput { ty, kind, consumers } = output;
+        let field_idx = match kind {
+            FusedOutputKind::Lane(body) => {
+                let idx = map_lams.len();
+                map_lams.push(body);
+                idx
+            }
+            FusedOutputKind::Accumulator(spec) => {
+                let idx = num_lanes + accumulators.len();
+                accumulators.push(spec);
+                idx
+            }
+        };
+        result_fields[field_idx] = Some(ty);
+        distribution.push((field_idx, consumers));
+    }
+    let result_fields: Vec<Type<TypeName>> =
+        result_fields.into_iter().map(|ty| ty.expect("every field index assigned exactly once")).collect();
+
     let tuple_sym = symbols.alloc(symbol_name.to_string());
-    // This horizontal-fusion path groups maps that read the same inputs, so
-    // every lane consumes all inputs.
+    // Every lane consumes all inputs (the fusion paths read the same domain).
     let lanes = super::screma_lanes_all_inputs(map_lams, inputs.len());
     let scalar_result = super::is_scalar_reduce_screma(&lanes, &accumulators);
+    debug_assert_eq!(result_fields.len(), lanes.len() + accumulators.len());
     let rhs = make_screma_term(result_fields, lanes, accumulators, inputs, span, term_ids);
     let tuple_ty = rhs.ty.clone();
     let fused_binding = LetBinding {
@@ -498,14 +792,55 @@ fn make_screma_rewrite(
         rhs,
         span,
     };
-    ScremaRewrite {
-        insert_at,
-        skip_indices,
-        tuple_sym,
-        tuple_ty,
-        fused_binding,
-        projection_fields,
-        scalar_result,
+
+    let mut projection_fields = LookupMap::new();
+    let mut term_replacements = LookupMap::new();
+    let mut tail_projection = None;
+    for (field_idx, consumers) in distribution {
+        for consumer in consumers {
+            match consumer {
+                OutputConsumer::Binding(idx) => {
+                    projection_fields.insert(idx, field_idx);
+                }
+                OutputConsumer::NestedTerm { term_id, ty, span } => {
+                    term_replacements.insert(
+                        term_id,
+                        ProjectionTemplate {
+                            tuple_sym,
+                            tuple_ty: tuple_ty.clone(),
+                            field_idx,
+                            ty,
+                            span,
+                            scalar: scalar_result,
+                        },
+                    );
+                }
+                OutputConsumer::Tail { ty, span } => {
+                    tail_projection = Some(ProjectionTemplate {
+                        tuple_sym,
+                        tuple_ty: tuple_ty.clone(),
+                        field_idx,
+                        ty,
+                        span,
+                        scalar: scalar_result,
+                    });
+                }
+            }
+        }
+    }
+
+    PlannedScremaRewrite {
+        rewrite: ScremaRewrite {
+            insert_at,
+            skip_indices,
+            tuple_sym,
+            tuple_ty,
+            fused_binding,
+            projection_fields,
+            scalar_result,
+        },
+        term_replacements,
+        tail_projection,
     }
 }
 
@@ -554,13 +889,23 @@ fn find_fusion_plan(
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
 ) -> Option<FusionPlan> {
-    if let Some(plan) = find_direct_horizontal_map_plan(bindings, symbols, term_ids) {
+    let region = FusionRegion::new(bindings, tail, ctx, term_ids);
+    // TODO(fusion-union): each builder below independently emits a
+    // `Vec<FusedOutput>` for a single producer/group and lowers it on its own.
+    // Because `OutputConsumer` already supports one field feeding many sites and
+    // a node mixing lane + accumulator outputs, the next step is to let several
+    // builders contribute to a *shared* `Vec<FusedOutput>` (e.g. a filter group
+    // and a map group over the same input) before one `lower_fused_screma` call
+    // — turning "first matching builder wins" into a real multi-output merge.
+    if let Some(plan) = find_direct_horizontal_map_plan(&region, bindings, symbols, term_ids) {
         return Some(plan);
     }
 
-    let producers = producer_infos(bindings, ctx, term_ids);
-    for producer in &producers {
-        let uses = classify_uses_for_producer(producer, bindings, tail, ctx, term_ids);
+    for producer in &region.producers {
+        if !producer.has_array_output() {
+            continue;
+        }
+        let uses = region.uses_for(producer);
         if uses.iter().any(|u| matches!(u.kind, UseKind::Escape)) || uses.is_empty() {
             continue;
         }
@@ -577,29 +922,6 @@ fn find_fusion_plan(
     None
 }
 
-fn producer_infos(
-    bindings: &[LetBinding],
-    ctx: &FusionContext<'_>,
-    term_ids: &mut TermIdSource,
-) -> Vec<ProducerInfo> {
-    bindings
-        .iter()
-        .enumerate()
-        .filter_map(|(binding_idx, binding)| {
-            let semantics = classify_with_context(&binding.rhs, ctx, term_ids);
-            if matches!(semantics, ArraySemantics::Opaque) {
-                None
-            } else {
-                Some(ProducerInfo {
-                    binding_idx,
-                    symbol: binding.name,
-                    semantics,
-                })
-            }
-        })
-        .collect()
-}
-
 fn classify_uses_for_producer(
     producer: &ProducerInfo,
     bindings: &[LetBinding],
@@ -612,7 +934,7 @@ fn classify_uses_for_producer(
         uses.extend(classify_uses_in_owner(
             &binding.rhs,
             UseOwner::Binding(idx),
-            producer.symbol,
+            producer.output_symbol(),
             ctx,
             term_ids,
         ));
@@ -620,7 +942,7 @@ fn classify_uses_for_producer(
     uses.extend(classify_uses_in_owner(
         tail,
         UseOwner::Tail,
-        producer.symbol,
+        producer.output_symbol(),
         ctx,
         term_ids,
     ));
@@ -677,14 +999,15 @@ fn collect_classified_uses(
     }
 
     let semantics = classify_with_context(term, ctx, term_ids);
-    let input_indices = semantic_input_indices(&semantics, producers);
-    if !input_indices.is_empty() {
-        for input_index in input_indices {
+    let input_slots = semantic_input_slots(&semantics, producers);
+    if !input_slots.is_empty() {
+        for input in input_slots {
             uses.push(UseSite {
                 owner,
                 kind: UseKind::SoacInput {
                     term_id: term.id,
-                    input_index,
+                    input_index: input.slot,
+                    input,
                     semantics: semantics.clone(),
                     ty: term.ty.clone(),
                     span: term.span,
@@ -695,12 +1018,12 @@ fn collect_classified_uses(
     }
 
     if allow_screma_input {
-        let screma_inputs = top_screma_input_count(term, producers);
-        if screma_inputs > 0 {
-            for _ in 0..screma_inputs {
+        let screma_inputs = top_screma_input_slots(term, producers);
+        if !screma_inputs.is_empty() {
+            for (input_index, input) in screma_inputs {
                 uses.push(UseSite {
                     owner,
-                    kind: UseKind::ScremaInput,
+                    kind: UseKind::ScremaInput { input_index, input },
                 });
             }
             return;
@@ -767,56 +1090,62 @@ fn collect_classified_uses(
     }
 }
 
-fn semantic_input_indices(semantics: &ArraySemantics, producers: &LookupSet<SymbolId>) -> Vec<usize> {
-    semantics
-        .input_exprs()
+fn semantic_input_slots(semantics: &ArraySemantics, producers: &LookupSet<SymbolId>) -> Vec<SoacInputSlot> {
+    semantic_input_slots_from_slots(&soac_input_slots(semantics), producers)
+}
+
+fn semantic_input_slots_from_slots(
+    slots: &[SoacInputSlot],
+    producers: &LookupSet<SymbolId>,
+) -> Vec<SoacInputSlot> {
+    slots
         .iter()
-        .enumerate()
-        .filter_map(|(idx, ae)| ae.as_named_ref().filter(|s| producers.contains(s)).map(|_| idx))
+        .filter_map(|slot| {
+            slot.param.as_ref()?;
+            slot.array.as_named_ref().filter(|s| producers.contains(s)).map(|_| slot.clone())
+        })
         .collect()
 }
 
-fn top_screma_input_count(term: &Term, producers: &LookupSet<SymbolId>) -> usize {
+fn top_screma_input_slots(term: &Term, producers: &LookupSet<SymbolId>) -> Vec<(usize, ArrayExpr)> {
     let TermKind::Soac(SoacOp::Screma { inputs, .. }) = &term.kind else {
-        return 0;
+        return vec![];
     };
-    inputs.iter().filter(|input| input.as_named_ref().is_some_and(|s| producers.contains(&s))).count()
+    inputs
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, input)| {
+            input.as_named_ref().filter(|s| producers.contains(s)).map(|_| (idx, input.clone()))
+        })
+        .collect()
 }
 
 fn find_direct_horizontal_map_plan(
+    region: &FusionRegion,
     bindings: &[LetBinding],
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
 ) -> Option<FusionPlan> {
-    let group = find_direct_map_screma_group(bindings)?;
-    let span = group.span;
-    let result_fields: Vec<_> =
-        group.maps.iter().map(|consumer| bindings[consumer.binding_idx].name_ty.clone()).collect();
-    let map_lams: Vec<_> = group.maps.iter().map(|consumer| consumer.lam.clone()).collect();
-    let projection_fields: LookupMap<usize, usize> = group
+    let group = find_direct_map_screma_group(region, bindings)?;
+    let outputs: Vec<FusedOutput> = group
         .maps
         .iter()
-        .enumerate()
-        .map(|(field_idx, consumer)| (consumer.binding_idx, field_idx))
+        .map(|consumer| FusedOutput {
+            ty: bindings[consumer.binding_idx].name_ty.clone(),
+            kind: FusedOutputKind::Lane(consumer.lam.clone()),
+            consumers: vec![OutputConsumer::Binding(consumer.binding_idx)],
+        })
         .collect();
-    let rewrite = make_screma_rewrite(
+    Some(FusionPlan::Screma(lower_fused_screma(
         group.insert_at,
         group.skip_indices,
         group.symbol_name,
-        result_fields,
-        map_lams,
-        vec![],
         group.inputs,
-        span,
-        projection_fields,
+        group.span,
+        outputs,
         symbols,
         term_ids,
-    );
-    Some(FusionPlan::Screma(PlannedScremaRewrite {
-        rewrite,
-        term_replacements: LookupMap::new(),
-        tail_projection: None,
-    }))
+    )))
 }
 
 fn find_map_group_plan(
@@ -849,76 +1178,54 @@ fn find_map_group_plan(
     // tail projections. Single-consumer *vertical* edges (`let m = map(..) in
     // scan(.., m)`) are handled by `find_vertical_accumulator_plan`, which has
     // none of this projection / tail-value machinery.
+    if producer.inputs.len() != producer_inputs.len() {
+        reject!("producer input slots are not aligned with its elementwise inputs");
+    }
     if uses.len() < 2 {
         reject!("only {} consumer(s) — horizontal grouping needs ≥2", uses.len());
     }
-    if uses.iter().any(|u| !matches!(u.owner, UseOwner::Binding(_))) {
-        reject!("a consumer is the entry tail, not a let binding");
-    }
-    if uses.iter().any(|u| !matches!(u.kind, UseKind::SoacInput { .. })) {
-        reject!("a use is not a SOAC input");
-    }
+    let Some(binding_uses) = binding_soac_uses(uses, bindings) else {
+        reject!("not every use is a top-level binding SOAC input");
+    };
 
-    let mut maps = Vec::new();
-    let mut accumulators = Vec::new();
+    // Each consumer contributes one output reading THIS binding (field ordering
+    // — lanes before accumulators — is `lower_fused_screma`'s job, so consumers
+    // are emitted in encounter order regardless of kind).
+    let mut outputs: Vec<FusedOutput> = Vec::new();
     let mut consumer_indices = Vec::new();
-    for use_site in uses {
-        let UseOwner::Binding(binding_idx) = use_site.owner else {
-            reject!("consumer owner is not a binding");
-        };
-        let UseKind::SoacInput {
-            term_id,
-            input_index,
-            semantics,
-            ..
-        } = &use_site.kind
-        else {
-            reject!("consumer use is not a SOAC input");
-        };
-        if *term_id != bindings[binding_idx].rhs.id {
-            reject!("consumer input not the producer (term_id mismatch)");
+    for use_site in binding_uses {
+        let binding_idx = use_site.binding_idx;
+        // TODO(fusion-union): `SoacInputSlot.slot` is carried end-to-end, so
+        // composing a producer into a consumer's input slot ≠ 0 is now a
+        // localized change here (route the producer body to the right param),
+        // not a representational one.
+        if use_site.input.slot != 0 {
+            reject!("producer feeds input index {}, not 0", use_site.input.slot);
         }
-        if *input_index != 0 {
-            reject!("producer feeds input index {}, not 0", input_index);
-        }
-        match semantics {
+        let kind = match &use_site.semantics {
             ArraySemantics::Elementwise { inputs, body } if inputs.len() == 1 => {
-                maps.push(ScremaMapGroupConsumer {
-                    binding_idx,
-                    lam: super::SoacBody {
-                        lam: compose_lambdas(
-                            producer_body.lam.clone(),
-                            body.lam.clone(),
-                            bindings[binding_idx].span,
-                            symbols,
-                            term_ids,
-                        ),
-                        captures: vec![],
-                    },
-                });
-                consumer_indices.push(binding_idx);
+                FusedOutputKind::Lane(compose_soac_bodies(
+                    producer_body,
+                    body,
+                    bindings[binding_idx].span,
+                    symbols,
+                    term_ids,
+                ))
             }
             ArraySemantics::Reduction {
                 op, reduce_op, init, ..
-            } if op.lam.params.len() == 2 => {
-                accumulators.push(ScremaReduceConsumer {
-                    binding_idx,
-                    op: super::SoacBody {
-                        lam: compose_map_reduce(
-                            producer_body.lam.clone(),
-                            op.lam.clone(),
-                            bindings[binding_idx].span,
-                            symbols,
-                            term_ids,
-                        ),
-                        captures: vec![],
-                    },
-                    reduce_op: reduce_op.clone(),
-                    ne: init.clone(),
-                    accumulator: super::ScremaAccumulator::Reduce,
-                });
-                consumer_indices.push(binding_idx);
-            }
+            } if op.lam.params.len() == 2 => FusedOutputKind::Accumulator(super::ScremaAccumulatorSpec {
+                kind: super::ScremaAccumulator::Reduce,
+                step_lam: compose_soac_map_reduce(
+                    producer_body,
+                    op,
+                    bindings[binding_idx].span,
+                    symbols,
+                    term_ids,
+                ),
+                reduce_op: reduce_op.clone(),
+                ne: init.clone(),
+            }),
             ArraySemantics::PrefixScan { .. } => {
                 let scan_sym = bindings[binding_idx].name;
                 if bindings
@@ -929,72 +1236,47 @@ fn find_map_group_plan(
                 {
                     reject!("scan result is re-read by a later binding or not a direct tail value");
                 }
-                let Some(mut accumulator) =
+                let Some(accumulator) =
                     screma_consumer_accumulator(&bindings[binding_idx].rhs, producer.symbol)
                 else {
                     reject!("scan accumulator unsupported (input not producer sym, or arity mismatch)");
                 };
-                accumulator.op = super::SoacBody {
-                    lam: compose_map_reduce(
-                        producer_body.lam.clone(),
-                        accumulator.op.lam.clone(),
+                FusedOutputKind::Accumulator(super::ScremaAccumulatorSpec {
+                    kind: accumulator.accumulator,
+                    step_lam: compose_soac_map_reduce(
+                        producer_body,
+                        &accumulator.op,
                         bindings[binding_idx].span,
                         symbols,
                         term_ids,
                     ),
-                    captures: vec![],
-                };
-                accumulator.binding_idx = binding_idx;
-                accumulators.push(accumulator);
-                consumer_indices.push(binding_idx);
+                    reduce_op: accumulator.reduce_op,
+                    ne: accumulator.ne,
+                })
             }
             _ => reject!("consumer semantics unsupported for grouping (not map/reduce/scan)"),
-        }
+        };
+        outputs.push(FusedOutput {
+            ty: bindings[binding_idx].name_ty.clone(),
+            kind,
+            consumers: vec![OutputConsumer::Binding(binding_idx)],
+        });
+        consumer_indices.push(binding_idx);
     }
     if consumer_indices_are_dependent(bindings, &consumer_indices) {
         reject!("grouped consumers are mutually dependent");
     }
 
-    let mut result_fields = Vec::with_capacity(maps.len() + accumulators.len());
-    result_fields.extend(maps.iter().map(|consumer| bindings[consumer.binding_idx].name_ty.clone()));
-    result_fields
-        .extend(accumulators.iter().map(|consumer| bindings[consumer.binding_idx].name_ty.clone()));
-    let accumulator_specs: Vec<_> = accumulators
-        .iter()
-        .map(|consumer| super::ScremaAccumulatorSpec {
-            kind: consumer.accumulator,
-            step_lam: consumer.op.clone(),
-            reduce_op: consumer.reduce_op.clone(),
-            ne: consumer.ne.clone(),
-        })
-        .collect();
-    let mut projection_fields = LookupMap::new();
-    projection_fields
-        .extend(maps.iter().enumerate().map(|(field_idx, consumer)| (consumer.binding_idx, field_idx)));
-    projection_fields.extend(
-        accumulators
-            .iter()
-            .enumerate()
-            .map(|(acc_idx, consumer)| (consumer.binding_idx, maps.len() + acc_idx)),
-    );
-    let rewrite = make_screma_rewrite(
+    Some(FusionPlan::Screma(lower_fused_screma(
         producer.binding_idx,
         vec![producer.binding_idx],
         "_screma",
-        result_fields,
-        maps.into_iter().map(|m| m.lam).collect(),
-        accumulator_specs,
         producer_inputs.clone(),
         bindings[producer.binding_idx].span,
-        projection_fields,
+        outputs,
         symbols,
         term_ids,
-    );
-    Some(FusionPlan::Screma(PlannedScremaRewrite {
-        rewrite,
-        term_replacements: LookupMap::new(),
-        tail_projection: None,
-    }))
+    )))
 }
 
 fn find_filter_plan(
@@ -1047,10 +1329,7 @@ fn find_filter_plan(
                     *term_id,
                     super::ScremaAccumulatorSpec {
                         kind: super::ScremaAccumulator::Reduce,
-                        step_lam: super::SoacBody {
-                            lam: step_lam,
-                            captures: vec![],
-                        },
+                        step_lam,
                         reduce_op: reduce_op.clone(),
                         ne: init.clone(),
                     },
@@ -1058,104 +1337,70 @@ fn find_filter_plan(
                     *span,
                 ));
             }
-            UseKind::ScremaInput | UseKind::Escape => return None,
+            UseKind::ScremaInput { .. } | UseKind::Escape => return None,
         }
     }
     if reductions.is_empty() && lengths.is_empty() {
         return None;
     }
 
-    let mut result_fields = Vec::new();
-    let mut accumulators = Vec::new();
-    let mut projection_fields = LookupMap::new();
-    let mut tail_projection_field: Option<(usize, Type<TypeName>, Span)> = None;
-    let mut nested_replacement_fields: Vec<(TermId, usize, Type<TypeName>, Span)> = Vec::new();
-    let skip_indices = vec![producer.binding_idx];
+    // A reduction's whole-tail use projects via `tail_projection`; nested and
+    // non-direct-binding uses rewrite in place. (Lengths never use the tail
+    // sink — see below.)
+    let reduction_consumer = |owner: UseOwner, term_id: TermId, ty: Type<TypeName>, span: Span| match owner {
+        UseOwner::Binding(idx) if bindings[idx].rhs.id == term_id => OutputConsumer::Binding(idx),
+        UseOwner::Tail if tail.id == term_id => OutputConsumer::Tail { ty, span },
+        _ => OutputConsumer::NestedTerm { term_id, ty, span },
+    };
 
+    // Reductions first, then the (single) count — so the count is the last
+    // accumulator field. `lower_fused_screma` partitions lanes before
+    // accumulators but preserves order *within* accumulators, so this emit order
+    // is what fixes the count's field index; keep it.
+    let mut outputs: Vec<FusedOutput> = Vec::new();
     for (owner, term_id, acc, ty, span) in reductions {
-        let field_idx = result_fields.len();
-        result_fields.push(ty.clone());
-        accumulators.push(acc);
-        match owner {
-            UseOwner::Binding(idx) if bindings[idx].rhs.id == term_id => {
-                projection_fields.insert(idx, field_idx);
-            }
-            UseOwner::Binding(_) => {
-                nested_replacement_fields.push((term_id, field_idx, ty, span));
-            }
-            UseOwner::Tail if tail.id == term_id => {
-                tail_projection_field = Some((field_idx, ty, span));
-            }
-            UseOwner::Tail => {
-                nested_replacement_fields.push((term_id, field_idx, ty, span));
-            }
-        }
+        outputs.push(FusedOutput {
+            ty: ty.clone(),
+            kind: FusedOutputKind::Accumulator(acc),
+            consumers: vec![reduction_consumer(owner, term_id, ty, span)],
+        });
     }
 
-    let mut length_replacement_fields: Vec<(TermId, usize, Type<TypeName>, Span)> = Vec::new();
     if let Some((_, _, count_ty, count_span)) = lengths.first().cloned() {
-        let count_field = result_fields.len();
-        result_fields.push(count_ty.clone());
-        accumulators.push(count_accumulator(
-            map_lam.as_ref(),
-            pred,
-            count_ty.clone(),
-            count_span,
-            symbols,
-            term_ids,
-        )?);
-        for (owner, term_id, ty, span) in lengths {
-            match owner {
-                UseOwner::Binding(idx) if bindings[idx].rhs.id == term_id => {
-                    projection_fields.insert(idx, count_field);
-                }
-                _ => length_replacement_fields.push((term_id, count_field, ty, span)),
-            }
-        }
+        // One shared count field feeds every `length` call. A whole-tail length
+        // routes through `NestedTerm`, not `Tail` — `replace_projection_terms`
+        // rewrites it inside the tail in place (matching prior behavior).
+        let count_consumers: Vec<OutputConsumer> = lengths
+            .into_iter()
+            .map(|(owner, term_id, ty, span)| match owner {
+                UseOwner::Binding(idx) if bindings[idx].rhs.id == term_id => OutputConsumer::Binding(idx),
+                _ => OutputConsumer::NestedTerm { term_id, ty, span },
+            })
+            .collect();
+        outputs.push(FusedOutput {
+            ty: count_ty.clone(),
+            kind: FusedOutputKind::Accumulator(count_accumulator(
+                map_lam.as_ref(),
+                pred,
+                count_ty,
+                count_span,
+                symbols,
+                term_ids,
+            )?),
+            consumers: count_consumers,
+        });
     }
 
-    let rewrite = make_screma_rewrite(
+    Some(FusionPlan::Screma(lower_fused_screma(
         producer.binding_idx,
-        skip_indices,
+        vec![producer.binding_idx],
         "_filtered_screma",
-        result_fields,
-        vec![],
-        accumulators,
         vec![input.clone()],
         bindings[producer.binding_idx].span,
-        projection_fields,
+        outputs,
         symbols,
         term_ids,
-    );
-    let mut term_replacements = LookupMap::new();
-    for (term_id, field_idx, ty, span) in
-        nested_replacement_fields.into_iter().chain(length_replacement_fields)
-    {
-        term_replacements.insert(
-            term_id,
-            ProjectionTemplate {
-                tuple_sym: rewrite.tuple_sym,
-                tuple_ty: rewrite.tuple_ty.clone(),
-                field_idx,
-                ty,
-                span,
-                scalar: rewrite.scalar_result,
-            },
-        );
-    }
-    let tail_projection = tail_projection_field.map(|(field_idx, ty, span)| ProjectionTemplate {
-        tuple_sym: rewrite.tuple_sym,
-        tuple_ty: rewrite.tuple_ty.clone(),
-        field_idx,
-        ty,
-        span,
-        scalar: rewrite.scalar_result,
-    });
-    Some(FusionPlan::Screma(PlannedScremaRewrite {
-        rewrite,
-        term_replacements,
-        tail_projection,
-    }))
+    )))
 }
 
 fn find_pairwise_plan(
@@ -1171,11 +1416,15 @@ fn find_pairwise_plan(
     }
     let use_site = &uses[0];
     match &use_site.kind {
-        UseKind::ScremaInput => {
+        UseKind::ScremaInput { input_index, input } => {
             let UseOwner::Binding(consumer_idx) = use_site.owner else {
                 return None;
             };
-            let map_producer = screma_producer_map(&bindings[producer.binding_idx].rhs)?;
+            if *input_index != 0 || input.as_named_ref() != Some(producer.output_symbol()) {
+                return None;
+            }
+            let map_producer =
+                map_screma_producer(&bindings[producer.binding_idx].rhs, MapProducerPolicy::Producer)?;
             let fused_rhs = map_into_screma_rhs(
                 &map_producer,
                 bindings[producer.binding_idx].name,
@@ -1196,6 +1445,7 @@ fn find_pairwise_plan(
             semantics,
             ty,
             span,
+            ..
         } => {
             match use_site.owner {
                 UseOwner::Binding(idx) if *term_id == bindings[idx].rhs.id => {}
@@ -1821,20 +2071,22 @@ fn filtered_reduce_step(
     span: Span,
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
-) -> Option<Lambda> {
+) -> Option<super::SoacBody> {
     if pred.lam.params.len() != 1 || op.lam.params.len() != 2 {
         return None;
     }
     // A fused producer map folds in by composing `f` into the predicate and the
     // op, so the masked step tests/accumulates `f(x)`. `f` is pure, so applying
     // it in both is redundant but correct.
-    let (pred_lam, op_lam) = match map_lam {
+    let (pred_body, op_body) = match map_lam {
         Some(f) => (
-            compose_lambdas(f.lam.clone(), pred.lam.clone(), span, symbols, term_ids),
-            compose_map_reduce(f.lam.clone(), op.lam.clone(), span, symbols, term_ids),
+            compose_soac_bodies(f, pred, span, symbols, term_ids),
+            compose_soac_map_reduce(f, op, span, symbols, term_ids),
         ),
-        None => (pred.lam.clone(), op.lam.clone()),
+        None => (pred.clone(), op.clone()),
     };
+    let pred_lam = pred_body.lam.clone();
+    let op_lam = op_body.lam.clone();
     let acc_param = op_lam.params[0].clone();
     let elem_param = pred_lam.params[0].clone();
     let op_elem = op_lam.params[1].0;
@@ -1845,19 +2097,22 @@ fn filtered_reduce_step(
         span,
         kind: TermKind::Var(VarRef::Symbol(acc_param.0)),
     };
-    Some(Lambda {
-        params: vec![acc_param, elem_param],
-        body: Box::new(Term {
-            id: term_ids.next_id(),
-            ty: op_lam.ret_ty.clone(),
-            span,
-            kind: TermKind::If {
-                cond: pred_lam.body.clone(),
-                then_branch: Box::new(then_branch),
-                else_branch: Box::new(else_branch),
-            },
-        }),
-        ret_ty: op_lam.ret_ty.clone(),
+    Some(super::SoacBody {
+        lam: Lambda {
+            params: vec![acc_param, elem_param],
+            body: Box::new(Term {
+                id: term_ids.next_id(),
+                ty: op_lam.ret_ty.clone(),
+                span,
+                kind: TermKind::If {
+                    cond: pred_lam.body.clone(),
+                    then_branch: Box::new(then_branch),
+                    else_branch: Box::new(else_branch),
+                },
+            }),
+            ret_ty: op_lam.ret_ty.clone(),
+        },
+        captures: merged_captures(&pred_body.captures, &op_body.captures),
     })
 }
 
@@ -1874,10 +2129,11 @@ fn count_accumulator(
     }
     // A fused producer map tests `pred(f(x))`, so count over the composed
     // predicate; the surviving count is unchanged by what value is kept.
-    let pred_lam = match map_lam {
-        Some(f) => compose_lambdas(f.lam.clone(), pred.lam.clone(), span, symbols, term_ids),
-        None => pred.lam.clone(),
+    let pred_body = match map_lam {
+        Some(f) => compose_soac_bodies(f, pred, span, symbols, term_ids),
+        None => pred.clone(),
     };
+    let pred_lam = pred_body.lam.clone();
     let acc_sym = symbols.alloc("_count".to_string());
     let acc_param = (acc_sym, count_ty.clone());
     let elem_param = pred_lam.params[0].clone();
@@ -1920,7 +2176,7 @@ fn count_accumulator(
         kind: super::ScremaAccumulator::Reduce,
         step_lam: super::SoacBody {
             lam: step_lam,
-            captures: vec![],
+            captures: pred_body.captures,
         },
         reduce_op: super::SoacBody {
             lam: reduce_op,
@@ -2038,14 +2294,6 @@ fn rebuild_lambda_params(
             ret_ty,
         }),
     }
-}
-
-fn param_types(params: &[(SymbolId, Type<TypeName>)]) -> Vec<Type<TypeName>> {
-    params.iter().map(|(_, ty)| ty.clone()).collect()
-}
-
-fn array_ref_symbols(inputs: &[ArrayExpr]) -> Option<Vec<SymbolId>> {
-    inputs.iter().map(ArrayExpr::as_named_ref).collect()
 }
 
 fn term_mentions_any(term: &Term, syms: &[SymbolId]) -> bool {
@@ -2167,14 +2415,18 @@ fn build_fused_from_semantics(
         };
         // A fused producer map composes in front: `mask∘f = λraw. if p(f(raw))
         // then f(raw) else ne` — `compose_lambdas` binds `f(raw)` once.
-        let mask_lam = match map_lam {
-            Some(f) => compose_lambdas(f.lam.clone(), mask_lam, span, symbols, term_ids),
-            None => mask_lam,
+        let mask_body = super::SoacBody {
+            lam: mask_lam,
+            captures: pred.captures.clone(),
+        };
+        let mask_body = match map_lam {
+            Some(f) => compose_soac_bodies(f, &mask_body, span, symbols, term_ids),
+            None => mask_body,
         };
         // op∘mask: (acc, x) -> op(acc, mask(x)). The per-element step gains the
         // mask; the pure phase-2 combiner stays the consumer's `reduce_op`
         // (which differs from `op` when a map was already folded into the step).
-        let composed_op = compose_map_reduce(mask_lam, op.lam.clone(), span, symbols, term_ids);
+        let composed_op = compose_soac_map_reduce(&mask_body, op, span, symbols, term_ids);
         // Scalar-typed single-accumulator reducing `Screma` (egir re-wraps to
         // `Tuple(1)+Project` at lowering) — no `TupleProj` wrapper.
         return Some(Term {
@@ -2185,10 +2437,7 @@ fn build_fused_from_semantics(
                 lanes: vec![],
                 accumulators: vec![super::ScremaAccumulatorSpec {
                     kind: super::ScremaAccumulator::Reduce,
-                    step_lam: super::SoacBody {
-                        lam: composed_op,
-                        captures: vec![],
-                    },
+                    step_lam: composed_op,
                     reduce_op: reduce_op.clone(),
                     ne: init.clone(),
                 }],
@@ -2197,26 +2446,21 @@ fn build_fused_from_semantics(
         });
     }
 
-    // Fusion runs pre-defunctionalize, so SoacBody.captures is always
-    // empty here — extract the inner Lambda for composition.
-    let (prod_lam, input_exprs) = match producer {
-        ArraySemantics::Elementwise { body, inputs } => (&body.lam, inputs.clone()),
+    // Keep the producer body whole so pairwise fusion preserves captures.
+    let (prod_body, input_exprs) = match producer {
+        ArraySemantics::Elementwise { body, inputs } => (body, inputs.clone()),
         _ => return None,
     };
 
     match (recipe, consumer) {
         (FusionRecipe::ComposeElementwise, ArraySemantics::Elementwise { body: cons_body, .. }) => {
-            let composed =
-                compose_lambdas(prod_lam.clone(), cons_body.lam.clone(), span, symbols, term_ids);
+            let composed = compose_soac_bodies(prod_body, cons_body, span, symbols, term_ids);
             Some(Term {
                 id: term_ids.next_id(),
                 ty: consumer_ty,
                 span,
                 kind: TermKind::Soac(SoacOp::Map {
-                    lam: super::SoacBody {
-                        lam: composed,
-                        captures: vec![],
-                    },
+                    lam: composed,
                     inputs: input_exprs,
                     destination: SoacDestination::Fresh,
                 }),
@@ -2240,10 +2484,7 @@ fn build_fused_from_semantics(
                 ty: consumer_ty,
                 span,
                 kind: TermKind::Soac(SoacOp::Filter {
-                    map_lam: Some(super::SoacBody {
-                        lam: prod_lam.clone(),
-                        captures: vec![],
-                    }),
+                    map_lam: Some(prod_body.clone()),
                     pred: pred.clone(),
                     input: input_exprs[0].clone(),
                     destination: SoacDestination::Fresh,
@@ -2260,7 +2501,7 @@ fn build_fused_from_semantics(
             if op.lam.params.len() != 2 {
                 return None;
             }
-            let composed_op = compose_map_reduce(prod_lam.clone(), op.lam.clone(), span, symbols, term_ids);
+            let composed_op = compose_soac_map_reduce(prod_body, op, span, symbols, term_ids);
             // Scalar-typed single-accumulator reducing `Screma` (egir re-wraps
             // to `Tuple(1)+Project` at lowering) — no `TupleProj` wrapper.
             Some(Term {
@@ -2271,10 +2512,7 @@ fn build_fused_from_semantics(
                     lanes: vec![],
                     accumulators: vec![super::ScremaAccumulatorSpec {
                         kind: super::ScremaAccumulator::Reduce,
-                        step_lam: super::SoacBody {
-                            lam: composed_op,
-                            captures: vec![],
-                        },
+                        step_lam: composed_op,
                         reduce_op: reduce_op.clone(),
                         ne: init.clone(),
                     }],
@@ -2287,16 +2525,13 @@ fn build_fused_from_semantics(
             if input_exprs.len() != 1 {
                 return None;
             }
-            let composed_op = compose_map_reduce(prod_lam.clone(), op.lam.clone(), span, symbols, term_ids);
+            let composed_op = compose_soac_map_reduce(prod_body, op, span, symbols, term_ids);
             Some(Term {
                 id: term_ids.next_id(),
                 ty: consumer_ty,
                 span,
                 kind: TermKind::Soac(SoacOp::Scan {
-                    op: super::SoacBody {
-                        lam: composed_op,
-                        captures: vec![],
-                    },
+                    op: composed_op,
                     // The pure combiner is the original scan op (without the
                     // producer `f`); phase 2 combines already-transformed block
                     // sums, so it must not re-apply `f`.
@@ -2323,7 +2558,7 @@ fn build_fused_from_semantics(
             // materialized array (Futhark thesis §7.3.1:
             // `h = λx y → let y = f x in g y`).
             let composed = compose_map_into_envelope(
-                prod_lam.clone(),
+                prod_body.lam.clone(),
                 env.lam.clone(),
                 input_index,
                 span,
@@ -2345,7 +2580,7 @@ fn build_fused_from_semantics(
                     dest: dest.clone(),
                     lam: super::SoacBody {
                         lam: composed,
-                        captures: vec![],
+                        captures: merged_captures(&prod_body.captures, &env.captures),
                     },
                     inputs: new_inputs,
                 }),
@@ -2462,6 +2697,52 @@ fn replace_consumer(
 // =============================================================================
 // Lambda composition
 // =============================================================================
+
+fn merged_captures(
+    first: &[(SymbolId, Type<TypeName>, Term)],
+    second: &[(SymbolId, Type<TypeName>, Term)],
+) -> Vec<(SymbolId, Type<TypeName>, Term)> {
+    let mut captures = Vec::with_capacity(first.len() + second.len());
+    captures.extend(first.iter().cloned());
+    for capture in second {
+        if !captures.iter().any(|(sym, _, _)| *sym == capture.0) {
+            captures.push(capture.clone());
+        }
+    }
+    captures
+}
+
+fn compose_soac_bodies(
+    f: &super::SoacBody,
+    g: &super::SoacBody,
+    span: Span,
+    symbols: &mut SymbolTable,
+    term_ids: &mut TermIdSource,
+) -> super::SoacBody {
+    super::SoacBody {
+        lam: compose_lambdas(f.lam.clone(), g.lam.clone(), span, symbols, term_ids),
+        captures: merged_captures(&f.captures, &g.captures),
+    }
+}
+
+fn compose_soac_map_reduce(
+    map_lam: &super::SoacBody,
+    reduce_op: &super::SoacBody,
+    span: Span,
+    symbols: &mut SymbolTable,
+    term_ids: &mut TermIdSource,
+) -> super::SoacBody {
+    super::SoacBody {
+        lam: compose_map_reduce(
+            map_lam.lam.clone(),
+            reduce_op.lam.clone(),
+            span,
+            symbols,
+            term_ids,
+        ),
+        captures: merged_captures(&map_lam.captures, &reduce_op.captures),
+    }
+}
 
 /// Compose two lambdas: f then g, producing g∘f.
 /// f: A→B, g: B→C → composed: A→C

@@ -2336,6 +2336,237 @@ fn test_filter_multiple_reduces_and_lengths_reuses_one_count_accumulator() {
     );
 }
 
+fn contains_length(term: &Term) -> bool {
+    match &term.kind {
+        TermKind::Var(VarRef::Builtin { id, .. }) if *id == crate::builtins::catalog().known().length => {
+            true
+        }
+        _ => {
+            let mut found = false;
+            term.for_each_child(&mut |child| {
+                if !found && contains_length(child) {
+                    found = true;
+                }
+            });
+            found
+        }
+    }
+}
+
+// Risk 1 (field-ordering): the shared `length` count is always the LAST
+// accumulator field, even when the `length` binding precedes the `reduce` in
+// source order. The filter builder collects reductions and lengths separately
+// and emits reductions before the count, so `lower_fused_screma` assigns the
+// reduction field 0 and the count field 1 regardless of `uses` order. If a
+// future refactor folded these into one source-order loop, a length-first
+// program would shift the count field and mis-route every reduction projection.
+#[test]
+fn test_filter_count_field_is_last_when_length_precedes_reduce() {
+    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+    let mut symbols = SymbolTable::default();
+    let mut term_ids = TermIdSource::new();
+
+    let xs_sym = symbols.alloc("xs".to_string());
+    let k_sym = symbols.alloc("k".to_string());
+    let n_sym = symbols.alloc("n".to_string()); // length binding — comes FIRST
+    let r_sym = symbols.alloc("r".to_string()); // reduce binding — comes SECOND
+    let x_sym = symbols.alloc("x".to_string());
+    let a_sym = symbols.alloc("a".to_string());
+    let b_sym = symbols.alloc("b".to_string());
+
+    let pred = mk_lambda1(
+        x_sym,
+        i32_ty(),
+        mk_term(TermKind::BoolLit(true), bool_ty.clone(), &mut term_ids),
+        bool_ty,
+    );
+    let producer = mk_filter(
+        pred,
+        mk_term(TermKind::Var(VarRef::Symbol(xs_sym)), array_ty(i32_ty()), &mut term_ids),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let op = mk_lambda2(
+        a_sym,
+        i32_ty(),
+        b_sym,
+        i32_ty(),
+        mk_term(TermKind::Var(VarRef::Symbol(a_sym)), i32_ty(), &mut term_ids),
+        i32_ty(),
+    );
+    let k_ref = |term_ids: &mut TermIdSource| {
+        mk_term(TermKind::Var(VarRef::Symbol(k_sym)), array_ty(i32_ty()), term_ids)
+    };
+    let len = mk_length(k_ref(&mut term_ids), &mut term_ids);
+    let reduce = mk_reduce(
+        op,
+        mk_term(TermKind::IntLit("0".to_string()), i32_ty(), &mut term_ids),
+        k_ref(&mut term_ids),
+        i32_ty(),
+        &mut term_ids,
+    );
+    let tuple_ty = Type::Constructed(TypeName::Tuple(2), vec![i32_ty(), i32_ty()]);
+    let tail = mk_term(
+        TermKind::Tuple(vec![
+            mk_term(TermKind::Var(VarRef::Symbol(r_sym)), i32_ty(), &mut term_ids),
+            mk_term(TermKind::Var(VarRef::Symbol(n_sym)), i32_ty(), &mut term_ids),
+        ]),
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let r_let = mk_term(
+        TermKind::Let {
+            name: r_sym,
+            name_ty: i32_ty(),
+            rhs: Box::new(reduce),
+            body: Box::new(tail),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let n_let = mk_term(
+        TermKind::Let {
+            name: n_sym,
+            name_ty: i32_ty(),
+            rhs: Box::new(len),
+            body: Box::new(r_let),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+    let program_body = mk_term(
+        TermKind::Let {
+            name: k_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(producer),
+            body: Box::new(n_let),
+        },
+        tuple_ty.clone(),
+        &mut term_ids,
+    );
+
+    let fused = run(Program {
+        defs: vec![Def {
+            name: symbols.alloc("main".to_string()),
+            ty: tuple_ty,
+            body: program_body,
+            meta: DefMeta::Function,
+            arity: 0,
+        }],
+        symbols,
+        def_syms: HashMap::new(),
+    });
+
+    assert!(!contains_filter(&fused.defs[0].body));
+    match find_first_screma(&fused.defs[0].body).expect("expected filtered Screma") {
+        SoacOp::Screma { accumulators, .. } => assert_eq!(accumulators.len(), 2),
+        other => panic!("expected Screma, got {other:?}"),
+    }
+    // The reduction is field 0, the count field 1 — *despite* the length binding
+    // appearing before the reduce binding in source order.
+    assert_eq!(projection_idx_for_binding(&fused.defs[0].body, r_sym), Some(0));
+    assert_eq!(projection_idx_for_binding(&fused.defs[0].body, n_sym), Some(1));
+}
+
+// Risk 2 (consumer routing): a `length` that is the whole entry tail is routed
+// through the `term_replacements` (NestedTerm) sink, not `tail_projection` —
+// `replace_projection_terms` rewrites it in place. Exercises the term-
+// replacement path for a tail-owned use, which the binding-owned length tests
+// do not cover.
+#[test]
+fn test_filter_whole_tail_length_rewrites_in_place() {
+    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+    let mut symbols = SymbolTable::default();
+    let mut term_ids = TermIdSource::new();
+
+    let xs_sym = symbols.alloc("xs".to_string());
+    let k_sym = symbols.alloc("k".to_string());
+    let r_sym = symbols.alloc("r".to_string());
+    let x_sym = symbols.alloc("x".to_string());
+    let a_sym = symbols.alloc("a".to_string());
+    let b_sym = symbols.alloc("b".to_string());
+
+    let pred = mk_lambda1(
+        x_sym,
+        i32_ty(),
+        mk_term(TermKind::BoolLit(true), bool_ty.clone(), &mut term_ids),
+        bool_ty,
+    );
+    let producer = mk_filter(
+        pred,
+        mk_term(TermKind::Var(VarRef::Symbol(xs_sym)), array_ty(i32_ty()), &mut term_ids),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let op = mk_lambda2(
+        a_sym,
+        i32_ty(),
+        b_sym,
+        i32_ty(),
+        mk_term(TermKind::Var(VarRef::Symbol(a_sym)), i32_ty(), &mut term_ids),
+        i32_ty(),
+    );
+    let k_ref = |term_ids: &mut TermIdSource| {
+        mk_term(TermKind::Var(VarRef::Symbol(k_sym)), array_ty(i32_ty()), term_ids)
+    };
+    // A reduce keeps the result a 2-output tuple (not a scalar-reduce Screma),
+    // so the whole-tail length projects field 1 via a real TupleProj.
+    let reduce = mk_reduce(
+        op,
+        mk_term(TermKind::IntLit("0".to_string()), i32_ty(), &mut term_ids),
+        k_ref(&mut term_ids),
+        i32_ty(),
+        &mut term_ids,
+    );
+    // The entry tail IS `length(k)`.
+    let tail = mk_length(k_ref(&mut term_ids), &mut term_ids);
+    let r_let = mk_term(
+        TermKind::Let {
+            name: r_sym,
+            name_ty: i32_ty(),
+            rhs: Box::new(reduce),
+            body: Box::new(tail),
+        },
+        i32_ty(),
+        &mut term_ids,
+    );
+    let program_body = mk_term(
+        TermKind::Let {
+            name: k_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(producer),
+            body: Box::new(r_let),
+        },
+        i32_ty(),
+        &mut term_ids,
+    );
+
+    let fused = run(Program {
+        defs: vec![Def {
+            name: symbols.alloc("main".to_string()),
+            ty: i32_ty(),
+            body: program_body,
+            meta: DefMeta::Function,
+            arity: 0,
+        }],
+        symbols,
+        def_syms: HashMap::new(),
+    });
+
+    assert!(!contains_filter(&fused.defs[0].body));
+    // Both the reduce and the whole-tail length folded in: the filter and the
+    // `length` builtin are gone, replaced by a 2-accumulator Screma + projection.
+    assert!(!contains_length(&fused.defs[0].body), "whole-tail length must be rewritten to a projection");
+    match find_first_screma(&fused.defs[0].body).expect("expected filtered Screma") {
+        SoacOp::Screma { lanes, accumulators, .. } => {
+            assert!(lanes.is_empty());
+            assert_eq!(accumulators.len(), 2);
+        }
+        other => panic!("expected Screma, got {other:?}"),
+    }
+    assert_eq!(projection_idx_for_binding(&fused.defs[0].body, r_sym), Some(0));
+}
+
 #[test]
 fn test_filter_into_length_only_fuses_to_count_screma() {
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
