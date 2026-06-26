@@ -1,33 +1,12 @@
 use crate::ast::TypeName;
 use crate::tlc::{Program, Term, TermKind};
-use crate::Compiler;
 use polytype::Type;
 
 /// Compile a Wyn source string up to (and including) `normalize_outputs`,
 /// returning the resulting TLC `Program`. Used by tests that need to
 /// inspect post-normalize_outputs term structure directly.
 fn compile_to_normalized_tlc(source: &str) -> Program {
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = Compiler::parse(source, &mut node_counter).expect("parse");
-    let type_checked = parsed
-        .resolve(&mut module_manager)
-        .expect("resolve")
-        .fold_ast_constants()
-        .type_check(&mut module_manager)
-        .expect("type_check");
-    let normalized = type_checked
-        .to_tlc(&module_manager, false)
-        .pin_entry_regions()
-        .expect("pin_entry_regions")
-        .partial_eval()
-        .normalize_soacs()
-        .force_inline_soac_helpers()
-        .fuse_maps()
-        .apply_ownership()
-        .expect("apply_ownership")
-        .normalize_outputs()
-        .expect("normalize_outputs");
-    normalized.0.tlc
+    crate::dyn_pipeline::compile_to_tlc_program(source)
 }
 
 /// Compile a Wyn source string through the full pipeline (parse →

@@ -4,7 +4,6 @@ use crate::tlc::{
     ArrayExpr, Def, DefMeta, Lambda, Place, Program, Shape, SoacBody, SoacDestination, SoacOp, Term,
     TermIdSource, TermKind, VarRef,
 };
-use crate::Compiler;
 use polytype::Type;
 
 fn input_ae(boxed: Box<crate::tlc::Term>) -> crate::tlc::ArrayExpr {
@@ -79,30 +78,7 @@ fn range_expr(n: usize, ty: Type<TypeName>, ids: &mut TermIdSource) -> Term {
 }
 
 fn prepared(source: &str) -> Program {
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = Compiler::parse(source, &mut node_counter).expect("parse");
-    let tc = parsed
-        .resolve(&mut module_manager)
-        .expect("resolve")
-        .fold_ast_constants()
-        .type_check(&mut module_manager)
-        .expect("type_check");
-    tc.to_tlc(&module_manager, false)
-        .pin_entry_regions()
-        .expect("pin_entry_regions")
-        .partial_eval()
-        .normalize_soacs()
-        .force_inline_soac_helpers()
-        .fuse_maps()
-        .apply_ownership()
-        .expect("apply_ownership")
-        .normalize_outputs()
-        .expect("normalize_outputs")
-        .expose_entry_producer_helpers()
-        .fuse_static_indices()
-        .0
-        .tlc
-        .clone()
+    crate::dyn_pipeline::compile_to_tlc_program(source)
 }
 
 fn entry_body(program: &Program) -> &Term {

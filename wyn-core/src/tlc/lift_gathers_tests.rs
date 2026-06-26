@@ -3,7 +3,6 @@
 use super::{DefMeta, Program, SoacOp, Term, TermKind, VarRef};
 use crate::builtins::{catalog, BuiltinId};
 use crate::interface::StorageRole;
-use crate::Compiler;
 
 const GATHER_SRC: &str = "\
 #[compute]
@@ -15,26 +14,7 @@ entry gen(bh: []vec4f32) []i32 =
 /// Run the front-end through `apply_ownership` (the stage `lift_gathers`
 /// consumes), returning the TLC program just before the pass.
 fn ownership_applied(src: &str) -> Program {
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let type_checked = Compiler::parse(src, &mut node_counter)
-        .expect("parse")
-        .resolve(&module_manager)
-        .expect("resolve")
-        .fold_ast_constants()
-        .type_check(&mut module_manager)
-        .expect("type_check");
-    type_checked
-        .to_tlc(&module_manager, false)
-        .pin_entry_regions()
-        .expect("pin_entry_regions")
-        .partial_eval()
-        .normalize_soacs()
-        .force_inline_soac_helpers()
-        .fuse_maps()
-        .apply_ownership()
-        .expect("apply_ownership")
-        .0
-        .tlc
+    crate::dyn_pipeline::compile_to_tlc_program(src)
 }
 
 fn def_named<'a>(program: &'a Program, name: &str) -> &'a super::Def {

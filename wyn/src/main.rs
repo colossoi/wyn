@@ -285,22 +285,26 @@ fn compile_file(
 
     let tlc_optimized = time("tlc_partial_eval", verbose, || tlc_transformed.partial_eval());
 
-    // SOA + SOAC normalize, map fusion, then ownership-driven rewrites.
-    // Each is its own pipeline step so timing breaks down per pass in
-    // verbose mode.
+    // EXPERIMENTAL ORDER: defunctionalize + monomorphize + inline the whole
+    // program up front, so fusion runs on a concrete, first-order program and is
+    // purely intraprocedural. Residency / output-normalization / ownership /
+    // parallelize follow at the tail. Each step is timed separately.
     let tlc_normed = time("normalize_soacs", verbose, || tlc_optimized.normalize_soacs());
+    let tlc_defunc = time("defunctionalize", verbose, || tlc_normed.defunctionalize());
+    let tlc_mono = time("tlc_monomorphize", verbose, || tlc_defunc.monomorphize());
+    let tlc_rep_specialized = time("tlc_rep_specialize", verbose, || tlc_mono.rep_specialize());
+    let tlc_folded = time("inline", verbose, || tlc_rep_specialized.fold_generated_lambdas());
+    let tlc_inlined = time("tlc_inline_small", verbose, || tlc_folded.inline_small());
     let tlc_force_inlined = time("force_inline_soac_helpers", verbose, || {
-        tlc_normed.force_inline_soac_helpers()
+        tlc_inlined.force_inline_soac_helpers()
     });
-    let tlc_fused = time("fuse_maps", verbose, || tlc_force_inlined.fuse_maps());
-    let tlc_owned = time("apply_ownership", verbose, || tlc_fused.apply_ownership())?;
-
-    // Normalise compute-entry tails into explicit per-slot `OutputSlotStore`
-    // chains so downstream passes see a uniform unit-producing body shape.
-    let tlc_normed_outputs = time("normalize_outputs", verbose, || tlc_owned.normalize_outputs())?;
+    let tlc_canon = time("canonicalize_producers", verbose, || {
+        tlc_force_inlined.canonicalize_producers()
+    });
+    let tlc_fused = time("fuse_maps", verbose, || tlc_canon.fuse_maps());
 
     let tlc_exposed = time("expose_entry_producer_helpers", verbose, || {
-        tlc_normed_outputs.expose_entry_producer_helpers()
+        tlc_fused.expose_entry_producer_helpers()
     });
     let tlc_static_fused = time("static_index_fusion", verbose, || {
         tlc_exposed.fuse_static_indices()
@@ -312,26 +316,13 @@ fn compile_file(
         tlc_runtime_floated.plan_execute_gather_residency()
     });
 
-    // Defunctionalize: lift lambdas and flatten SOAC captures
-    let tlc_defunc = time("defunctionalize", verbose, || tlc_gathered.defunctionalize());
+    // Normalise compute-entry tails into explicit per-slot `OutputSlotStore`
+    // chains, then ownership/liveness — late, after residency/output rewrites.
+    let tlc_normed_outputs = time("normalize_outputs", verbose, || tlc_gathered.normalize_outputs())?;
+    let tlc_owned = time("apply_ownership", verbose, || tlc_normed_outputs.apply_ownership())?;
 
-    // Monomorphize polymorphic functions at TLC level
-    let tlc_mono = time("tlc_monomorphize", verbose, || tlc_defunc.monomorphize());
-
-    // Inline compiler-generated lambda defs + DCE
-    let tlc_folded = time("inline", verbose, || tlc_mono.fold_generated_lambdas());
-
-    // Inline small user functions and constants at TLC level
-    let tlc_inlined = time("tlc_inline_small", verbose, || tlc_folded.inline_small());
-
-    // Phase 2 of array-variant-abstract: at call edges, specialize a
-    // user-defined callee whose `Abstract`-typed param receives a
-    // producer-known concrete variant (Bounded / View from filter).
-    // Runs before `parallelize_soacs` so the parallelizer sees
-    // concrete representations on every call edge.
-    let tlc_rep_specialized = time("tlc_rep_specialize", verbose, || tlc_inlined.rep_specialize());
     let tlc_parallel = time("tlc_parallelize", verbose, || {
-        tlc_rep_specialized.parallelize_soacs(single_stage)
+        tlc_owned.parallelize_soacs(single_stage)
     })?;
 
     // Eliminate dead TLC defs

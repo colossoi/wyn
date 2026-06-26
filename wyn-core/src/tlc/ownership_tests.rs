@@ -1011,25 +1011,7 @@ entry double(arr: []i32) []i32 = map(|x: i32| x + 1, arr)
 /// post-apply_ownership). Returns the post-rewrite Program for
 /// inspecting `SoacOp::Map { destination, .. }`.
 fn compile_to_owned(source: &str) -> Program {
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = Compiler::parse(source, &mut node_counter).expect("parse");
-    let type_checked = parsed
-        .resolve(&mut module_manager)
-        .expect("resolve")
-        .fold_ast_constants()
-        .type_check(&mut module_manager)
-        .expect("type_check");
-    let owned = type_checked
-        .to_tlc(&module_manager, false)
-        .pin_entry_regions()
-        .expect("pin_entry_regions")
-        .partial_eval()
-        .normalize_soacs()
-        .force_inline_soac_helpers()
-        .fuse_maps()
-        .apply_ownership()
-        .expect("apply_ownership");
-    owned.0.tlc
+    crate::dyn_pipeline::compile_to_tlc_program(source)
 }
 
 fn map_destination(program: &Program, fn_name: &str) -> Option<SoacDestination> {

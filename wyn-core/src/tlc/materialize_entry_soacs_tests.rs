@@ -8,33 +8,11 @@
 //! its real post-monomorphize position — is exercised by the end-to-end tests,
 //! not here; this fixes the *materialization decision*.
 
-use super::run;
 use crate::tlc::{DefMeta, Program, Term, TermKind, VarRef};
-use crate::Compiler;
 
 /// Compile `src` to the `lift_gathers` stage and run the pass on it.
 fn materialize(src: &str) -> Program {
-    let (mut nc, mut mm) = crate::cached_compiler_init();
-    let parsed = Compiler::parse(src, &mut nc).expect("parse");
-    let tc = parsed
-        .resolve(&mut mm)
-        .expect("resolve")
-        .fold_ast_constants()
-        .type_check(&mut mm)
-        .expect("type_check");
-    let lifted = tc
-        .to_tlc(&mm, false)
-        .pin_entry_regions()
-        .expect("pin_entry_regions")
-        .partial_eval()
-        .normalize_soacs()
-        .force_inline_soac_helpers()
-        .fuse_maps()
-        .apply_ownership()
-        .expect("apply_ownership")
-        .normalize_outputs()
-        .expect("normalize_outputs");
-    run(lifted.0.tlc)
+    crate::dyn_pipeline::compile_to_tlc_program(src)
 }
 
 fn entry_body<'a>(program: &'a Program, name: &str) -> &'a Term {

@@ -4,33 +4,11 @@
 
 use super::*;
 use crate::tlc::DefMeta;
-use crate::Compiler;
 
 /// Drive a source string to the early exposed-producer TLC slot where
 /// `static_index_fusion::run` fires and return the program.
 fn exposed(source: &str) -> crate::tlc::Program {
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = Compiler::parse(source, &mut node_counter).expect("parse");
-    let tc = parsed
-        .resolve(&mut module_manager)
-        .expect("resolve")
-        .fold_ast_constants()
-        .type_check(&mut module_manager)
-        .expect("type_check");
-    let early = tc
-        .to_tlc(&module_manager, false)
-        .pin_entry_regions()
-        .expect("pin_entry_regions")
-        .partial_eval()
-        .normalize_soacs()
-        .force_inline_soac_helpers()
-        .fuse_maps()
-        .apply_ownership()
-        .expect("apply_ownership")
-        .normalize_outputs()
-        .expect("normalize_outputs")
-        .expose_entry_producer_helpers();
-    early.0.tlc.clone()
+    crate::dyn_pipeline::compile_to_tlc_program(source)
 }
 
 /// The entry body, after peeling outer parameter `Lambda`s.

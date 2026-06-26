@@ -10,29 +10,12 @@
 //! gaps for some of these shapes.
 
 use crate::tlc::{Program, Term, TermKind};
-use crate::Compiler;
 
 /// Compile a Wyn source string up to (and including) `fuse_maps` — where
 /// `tlc::normalize::normalize` (SOAC-lift + let-flatten) actually runs —
 /// returning the TLC `Program` for structural inspection.
 fn normalized_program(source: &str) -> Program {
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    Compiler::parse(source, &mut node_counter)
-        .expect("parse")
-        .resolve(&mut module_manager)
-        .expect("resolve")
-        .fold_ast_constants()
-        .type_check(&mut module_manager)
-        .expect("type_check")
-        .to_tlc(&module_manager, false)
-        .pin_entry_regions()
-        .expect("pin_entry_regions")
-        .partial_eval()
-        .normalize_soacs()
-        .force_inline_soac_helpers()
-        .fuse_maps()
-        .0
-        .tlc
+    crate::dyn_pipeline::compile_to_tlc_program(source)
 }
 
 /// Assert no `let` in the program has a `let` as its rhs.

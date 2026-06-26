@@ -577,34 +577,7 @@ fn parallelize_src(
     crate::tlc::Program,
     crate::pipeline_descriptor::PipelineDescriptor,
 ) {
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = crate::Compiler::parse(src, &mut node_counter).expect("parse");
-    let type_checked = parsed
-        .resolve(&module_manager)
-        .expect("resolve")
-        .fold_ast_constants()
-        .type_check(&mut module_manager)
-        .expect("type_check");
-    let tlc = type_checked
-        .to_tlc(&module_manager, false)
-        .pin_entry_regions()
-        .expect("pin_entry_regions")
-        .partial_eval()
-        .normalize_soacs()
-        .force_inline_soac_helpers()
-        .fuse_maps()
-        .apply_ownership()
-        .expect("apply_ownership")
-        .normalize_outputs()
-        .expect("normalize_outputs")
-        .lift_gathers()
-        .defunctionalize()
-        .monomorphize()
-        .fold_generated_lambdas()
-        .inline_small()
-        .rep_specialize()
-        .parallelize_soacs(false)
-        .expect("parallelize_soacs");
+    let tlc = crate::dyn_pipeline::compile_to_reachable(src, false);
     (tlc.tlc.clone(), tlc.pipeline.clone())
 }
 

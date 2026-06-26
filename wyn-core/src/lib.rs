@@ -40,6 +40,9 @@ pub mod wgsl;
 mod integration_tests;
 
 #[cfg(test)]
+mod dyn_pipeline;
+
+#[cfg(test)]
 mod slice_range_tests;
 
 use std::hash::Hash;
@@ -576,9 +579,9 @@ pub struct TlcEarlyInner {
     pub tlc: tlc::Program,
     pub type_table: TypeTable,
     /// Built-in names that should not be captured as free variables
-    known_defs: LookupSet<String>,
+    pub known_defs: LookupSet<String>,
     /// Type schemes for functions (for monomorphization)
-    schemes: LookupMap<SymbolId, types::TypeScheme>,
+    pub schemes: LookupMap<SymbolId, types::TypeScheme>,
     /// Errors surfaced while default-filling `???` type holes with
     /// `--fill-holes`. Empty unless `to_tlc` was called with
     /// `fill_holes = true` and some hole had a type that couldn't
@@ -649,23 +652,27 @@ impl TlcRegionsPinned {
     /// mode, what most tests want); `true` ⇒ disabled (the `--single-stage`
     /// flag).
     pub fn optimize_for_test(self, disable_parallelize: bool) -> TlcReachable {
+        // EXPERIMENTAL ORDER: monomorphize + inline the whole program BEFORE
+        // fusion, so fusion is purely intraprocedural (no summary path), then
+        // residency / output-normalization / ownership / parallelize at the tail.
         self.partial_eval()
             .normalize_soacs()
+            .defunctionalize()
+            .monomorphize()
+            .rep_specialize()
+            .fold_generated_lambdas()
+            .inline_small()
             .force_inline_soac_helpers()
+            .canonicalize_producers()
             .fuse_maps()
-            .apply_ownership()
-            .expect("apply_ownership")
-            .normalize_outputs()
-            .expect("normalize_outputs")
             .expose_entry_producer_helpers()
             .fuse_static_indices()
             .float_runtime_index_nested_producers()
             .plan_execute_gather_residency()
-            .defunctionalize()
-            .monomorphize()
-            .fold_generated_lambdas()
-            .inline_small()
-            .rep_specialize()
+            .normalize_outputs()
+            .expect("normalize_outputs")
+            .apply_ownership()
+            .expect("apply_ownership")
             .parallelize_soacs(disable_parallelize)
             .expect("parallelize_soacs")
             .filter_reachable()
@@ -703,25 +710,23 @@ impl std::ops::Deref for TlcSoaNormalized {
 }
 
 impl TlcSoaNormalized {
-    /// Force-inline every user function whose body contains a SOAC, so
-    /// multi-consumer producer/consumer patterns (e.g. `center(filt) ⇒
-    /// sum(filt) / length(filt)`) become syntactically visible to fusion.
-    /// Runs *before* `fuse_maps`: fusion's structural pattern-match expects
-    /// SOACs at the top of a let-chain, but normalization passes that run
-    /// later (`normalize_outputs`, the if-over-producer rewrite) bury the
-    /// SOACs deeper, so this is the last spot where inlining still feeds
-    /// the existing fuse_maps pipeline correctly.
-    pub fn force_inline_soac_helpers(self) -> TlcSoacHelpersInlined {
+    /// EXPERIMENTAL REORDER: defunctionalize right after early SoA cleanup, so
+    /// monomorphization (and everything downstream, including fusion) runs on a
+    /// concrete, first-order program. Closure-converts + specializes HOFs +
+    /// threads captures; SOAC envelopes stay inline (not lowered to loops).
+    pub fn defunctionalize(self) -> TlcDefunctionalized {
         let mut inner = self.0;
-        inner.tlc = tlc::inline::run_force_soac_helpers(inner.tlc);
-        TlcSoacHelpersInlined(inner)
+        let (cc, closure_info) = tlc::closure_convert::run(inner.tlc, &inner.known_defs);
+        let hof_free = tlc::hof_specialize::run(cc, &closure_info);
+        inner.tlc = tlc::closure_calls_lower::run(hof_free, &closure_info);
+        TlcDefunctionalized(inner)
     }
 }
 
-/// TLC after force-inlining of every user function whose body contains a
-/// SOAC. Sits between `TlcSoaNormalized` and `TlcFused` so the typestate
-/// enforces that fusion only ever runs on a program where producer/
-/// consumer helper boundaries have already been opened up.
+/// TLC after force-inlining of every user function whose body contains a SOAC.
+/// In the experimental order this runs *post-monomorphize* (helpers are already
+/// concrete), so it opens producer/consumer boundaries for intraprocedural
+/// fusion without any cross-call summary reasoning.
 pub struct TlcSoacHelpersInlined(pub TlcEarlyInner);
 
 impl std::ops::Deref for TlcSoacHelpersInlined {
@@ -732,11 +737,36 @@ impl std::ops::Deref for TlcSoacHelpersInlined {
 }
 
 impl TlcSoacHelpersInlined {
-    /// Fuse consecutive SOAC operations to eliminate intermediate arrays.
+    /// Re-run SoA normalization (inlining exposed new tuple/zip/map structure)
+    /// then canonicalize producers (`if_over_producer`) so fusion sees clean
+    /// top-of-let-chain SOACs.
+    pub fn canonicalize_producers(self) -> TlcProducerCanonicalized {
+        let mut inner = self.0;
+        inner.tlc = tlc::soa::run(inner.tlc);
+        inner.tlc = tlc::if_over_producer::run(inner.tlc);
+        TlcProducerCanonicalized(inner)
+    }
+}
+
+/// TLC after producer canonicalization, ready to fuse.
+pub struct TlcProducerCanonicalized(pub TlcEarlyInner);
+
+impl std::ops::Deref for TlcProducerCanonicalized {
+    type Target = TlcEarlyInner;
+    fn deref(&self) -> &TlcEarlyInner {
+        &self.0
+    }
+}
+
+impl TlcProducerCanonicalized {
+    /// Fuse consecutive SOAC operations to eliminate intermediate arrays, then
+    /// DCE. With monomorphize + inlining already done, every producer/consumer
+    /// pair is intraprocedural — no interprocedural summary path is needed.
     pub fn fuse_maps(self) -> TlcFused {
         let mut inner = self.0;
         inner.tlc = tlc::fusion::run(inner.tlc);
         inner.tlc = tlc::if_over_producer::run(inner.tlc);
+        inner.tlc = tlc::inline::run_reachable(inner.tlc);
         TlcFused(inner)
     }
 }
@@ -752,15 +782,13 @@ impl std::ops::Deref for TlcFused {
 }
 
 impl TlcFused {
-    /// Run the TLC ownership/liveness analysis on the post-fusion IR.
-    /// Reports use-after-move errors and applies ownership-driven
-    /// rewrites: `_w_intrinsic_array_with` → `_w_intrinsic_array_with_inplace`
-    /// where the source is mutable and dead-after, and (in subsequent
-    /// phases) consuming-input marking on eligible Map SOACs.
-    pub fn apply_ownership(self) -> Result<TlcOwnershipApplied> {
+    /// Entry-boundary producer exposure (normalization, not residency).
+    /// Inline helper calls whose result is an array producer while the caller's
+    /// indexed uses are still local in the entry body.
+    pub fn expose_entry_producer_helpers(self) -> TlcEntryProducersExposed {
         let mut inner = self.0;
-        inner.tlc = tlc::ownership::apply_ownership(inner.tlc)?;
-        Ok(TlcOwnershipApplied(inner))
+        inner.tlc = tlc::materialize_entry_soacs::run(inner.tlc);
+        TlcEntryProducersExposed(inner)
     }
 }
 
@@ -777,17 +805,20 @@ impl std::ops::Deref for TlcOwnershipApplied {
 }
 
 impl TlcOwnershipApplied {
-    /// Normalise compute-entry bodies so the entry tail is a chain of
-    /// explicit per-slot `OutputSlotStore` writes ending in `UnitLit`,
-    /// not a tail expression that "returns" the entry value. After
-    /// this, single-output and multi-output entries share one shape, so
-    /// `parallelize_soacs` and `egir/realize_outputs` need not
-    /// special-case the tail's shape (Tuple vs. Soac vs. literal).
-    pub fn normalize_outputs(self) -> Result<TlcOutputsNormalized> {
+    /// Parallelize SOACs in compute entry points at the TLC level (terminal
+    /// TLC pass in the experimental order). `disable` makes it a near no-op.
+    pub fn parallelize_soacs(self, disable: bool) -> Result<TlcParallelized> {
         let mut inner = self.0;
-        inner.tlc = tlc::normalize_outputs::run(inner.tlc)
-            .map_err(|e| crate::error::CompilerError::NormalizeOutputsError(format!("{e}"), None))?;
-        Ok(TlcOutputsNormalized(inner))
+        inner.tlc = tlc::if_over_producer::run(inner.tlc);
+        let result = tlc::parallelize::run(inner.tlc, disable, &mut inner.auto_storage_binding_ids)?;
+        Ok(TlcParallelized(TlcPipelineInner {
+            tlc: result.program,
+            pipeline: result.pipeline,
+            type_table: inner.type_table,
+            plans: result.plans,
+            input_names: result.input_names,
+            auto_storage_binding_ids: inner.auto_storage_binding_ids,
+        }))
     }
 }
 
@@ -803,22 +834,12 @@ impl std::ops::Deref for TlcOutputsNormalized {
 }
 
 impl TlcOutputsNormalized {
-    /// Entry-boundary producer exposure (normalization, not residency).
-    /// Inline helper calls whose result is an array producer while the caller's
-    /// indexed uses are still local in the entry body.
-    pub fn expose_entry_producer_helpers(self) -> TlcEntryProducersExposed {
+    /// Ownership/liveness analysis + ownership-driven rewrites, late in the
+    /// experimental order (after residency and output normalization).
+    pub fn apply_ownership(self) -> Result<TlcOwnershipApplied> {
         let mut inner = self.0;
-        inner.tlc = tlc::materialize_entry_soacs::run(inner.tlc);
-        TlcEntryProducersExposed(inner)
-    }
-
-    /// Compatibility shortcut for older off-milestone tests. Runs the new
-    /// pre-defunc residency preparation sequence before the gather executor.
-    pub fn lift_gathers(self) -> TlcGathersLifted {
-        self.expose_entry_producer_helpers()
-            .fuse_static_indices()
-            .float_runtime_index_nested_producers()
-            .plan_execute_gather_residency()
+        inner.tlc = tlc::ownership::apply_ownership(inner.tlc)?;
+        Ok(TlcOwnershipApplied(inner))
     }
 }
 
@@ -894,55 +915,35 @@ impl std::ops::Deref for TlcGathersLifted {
 }
 
 impl TlcGathersLifted {
-    /// Run the three-phase closure pipeline:
-    /// 1. `closure_convert::run` lifts every lambda to a top-level def
-    ///    and produces a `ClosureInfo` side-table describing captures
-    ///    per callable symbol.
-    /// 2. `hof_specialize::run` clones each HOF for the concrete
-    ///    callable that flows in, eliminating function-typed params.
-    /// 3. `closure_calls_lower::run` threads captures into call sites
-    ///    and verifies every call resolves to a direct, fully-applied
-    ///    `Var`-position callee.
-    pub fn defunctionalize(self) -> TlcDefunctionalized {
-        let TlcEarlyInner {
-            tlc,
-            type_table,
-            known_defs,
-            schemes,
-            fill_hole_errors: _,
-            auto_storage_binding_ids,
-        } = self.0;
-        let (cc, closure_info) = tlc::closure_convert::run(tlc, &known_defs);
-        let hof_free = tlc::hof_specialize::run(cc, &closure_info);
-        let lowered = tlc::closure_calls_lower::run(hof_free, &closure_info);
-        TlcDefunctionalized {
-            tlc: lowered,
-            type_table,
-            schemes,
-            auto_storage_binding_ids,
-        }
+    /// Normalise compute-entry bodies into per-slot `OutputSlotStore` writes.
+    /// Runs late, after residency/output rewrites (experimental order).
+    pub fn normalize_outputs(self) -> Result<TlcOutputsNormalized> {
+        let mut inner = self.0;
+        inner.tlc = tlc::normalize_outputs::run(inner.tlc)
+            .map_err(|e| crate::error::CompilerError::NormalizeOutputsError(format!("{e}"), None))?;
+        Ok(TlcOutputsNormalized(inner))
     }
 }
 
-/// TLC with all lambdas defunctionalized (lifted + SOAC captures flattened)
-pub struct TlcDefunctionalized {
-    pub tlc: tlc::Program,
-    pub type_table: TypeTable,
-    /// Type schemes for functions (for monomorphization)
-    schemes: LookupMap<SymbolId, types::TypeScheme>,
-    pub auto_storage_binding_ids: IdSource<u32>,
+/// TLC with all lambdas defunctionalized (lifted + SOAC captures flattened).
+/// Carries the full early bag so `schemes` is available to `monomorphize`.
+pub struct TlcDefunctionalized(pub TlcEarlyInner);
+
+impl std::ops::Deref for TlcDefunctionalized {
+    type Target = TlcEarlyInner;
+    fn deref(&self) -> &TlcEarlyInner {
+        &self.0
+    }
 }
 
 impl TlcDefunctionalized {
-    /// Specialize polymorphic intrinsics and monomorphize user functions.
+    /// Specialize polymorphic intrinsics and monomorphize user functions
+    /// (region-specialized). After this no `Type::Variable` remains.
     pub fn monomorphize(self) -> TlcMonomorphized {
-        let specialized = tlc::specialize::run(self.tlc);
-        let monomorphized = tlc::monomorphize::run(specialized, &self.schemes);
-        TlcMonomorphized(TlcLateInner {
-            tlc: monomorphized,
-            type_table: self.type_table,
-            auto_storage_binding_ids: self.auto_storage_binding_ids,
-        })
+        let mut inner = self.0;
+        let specialized = tlc::specialize::run(inner.tlc);
+        inner.tlc = tlc::monomorphize::run(specialized, &inner.schemes);
+        TlcMonomorphized(inner)
     }
 }
 
@@ -955,31 +956,32 @@ pub struct TlcLateInner {
 }
 
 /// TLC with all functions monomorphized (no type variables remain)
-pub struct TlcMonomorphized(pub TlcLateInner);
+pub struct TlcMonomorphized(pub TlcEarlyInner);
 
 impl std::ops::Deref for TlcMonomorphized {
-    type Target = TlcLateInner;
-    fn deref(&self) -> &TlcLateInner {
+    type Target = TlcEarlyInner;
+    fn deref(&self) -> &TlcEarlyInner {
         &self.0
     }
 }
 
 impl TlcMonomorphized {
-    /// Inline compiler-generated `_w_lambda_*` defs back at their call sites,
-    /// then remove unreferenced defs (DCE).
-    pub fn fold_generated_lambdas(self) -> TlcGeneratedLambdasFolded {
+    /// Representation-specialize call edges whose array representation is known
+    /// only at the producer site. Moved early (pre-fusion) in the experimental
+    /// order so fusion sees concrete reps.
+    pub fn rep_specialize(self) -> TlcRepSpecialized {
         let mut inner = self.0;
-        inner.tlc = tlc::inline::run_large(inner.tlc);
-        TlcGeneratedLambdasFolded(inner)
+        inner.tlc = tlc::rep_specialize::run(inner.tlc);
+        TlcRepSpecialized(inner)
     }
 }
 
 /// TLC after inlining compiler-generated lambda defs and DCE
-pub struct TlcGeneratedLambdasFolded(pub TlcLateInner);
+pub struct TlcGeneratedLambdasFolded(pub TlcEarlyInner);
 
 impl std::ops::Deref for TlcGeneratedLambdasFolded {
-    type Target = TlcLateInner;
-    fn deref(&self) -> &TlcLateInner {
+    type Target = TlcEarlyInner;
+    fn deref(&self) -> &TlcEarlyInner {
         &self.0
     }
 }
@@ -994,19 +996,15 @@ impl TlcGeneratedLambdasFolded {
 
     /// Eliminate unreachable defs (dead code elimination at TLC level).
     pub fn filter_reachable(self) -> TlcReachable {
-        let TlcLateInner {
-            tlc,
-            type_table,
-            auto_storage_binding_ids,
-        } = self.0;
-        let tlc = tlc::inline::run_reachable(tlc);
+        let inner = self.0;
+        let tlc = tlc::inline::run_reachable(inner.tlc);
         TlcReachable(TlcPipelineInner {
             tlc,
             pipeline: pipeline_descriptor::PipelineDescriptor::default(),
-            type_table,
+            type_table: inner.type_table,
             plans: LookupMap::new(),
             input_names: LookupMap::new(),
-            auto_storage_binding_ids,
+            auto_storage_binding_ids: inner.auto_storage_binding_ids,
         })
     }
 
@@ -1028,30 +1026,23 @@ impl TlcGeneratedLambdasFolded {
 }
 
 /// TLC after small function and constant inlining
-pub struct TlcSmallInlined(pub TlcLateInner);
+pub struct TlcSmallInlined(pub TlcEarlyInner);
 
 impl std::ops::Deref for TlcSmallInlined {
-    type Target = TlcLateInner;
-    fn deref(&self) -> &TlcLateInner {
+    type Target = TlcEarlyInner;
+    fn deref(&self) -> &TlcEarlyInner {
         &self.0
     }
 }
 
 impl TlcSmallInlined {
-    /// Representation-specialize call edges whose array representation is known
-    /// only at the producer site.
-    pub fn rep_specialize(self) -> TlcRepSpecialized {
-        let TlcLateInner {
-            tlc,
-            type_table,
-            auto_storage_binding_ids,
-        } = self.0;
-        let tlc = tlc::rep_specialize::run(tlc);
-        TlcRepSpecialized(TlcLateInner {
-            tlc,
-            type_table,
-            auto_storage_binding_ids,
-        })
+    /// Force-inline every user function whose body contains a SOAC. In the
+    /// experimental order this runs post-monomorphize, so helpers are concrete
+    /// and inlining opens every producer/consumer boundary for fusion.
+    pub fn force_inline_soac_helpers(self) -> TlcSoacHelpersInlined {
+        let mut inner = self.0;
+        inner.tlc = tlc::inline::run_force_soac_helpers(inner.tlc);
+        TlcSoacHelpersInlined(inner)
     }
 
     /// Direct shortcut: parallelize without the rep-specialize step.
@@ -1061,55 +1052,31 @@ impl TlcSmallInlined {
     /// slipped through. The canonical path goes through
     /// `.rep_specialize().parallelize_soacs(...)`.
     pub fn parallelize_soacs(self, disable: bool) -> Result<TlcParallelized> {
-        let TlcLateInner {
-            mut tlc,
-            type_table,
-            mut auto_storage_binding_ids,
-        } = self.0;
-        tlc = tlc::if_over_producer::run(tlc);
-        let result = tlc::parallelize::run(tlc, disable, &mut auto_storage_binding_ids)?;
+        let mut inner = self.0;
+        inner.tlc = tlc::if_over_producer::run(inner.tlc);
+        let result = tlc::parallelize::run(inner.tlc, disable, &mut inner.auto_storage_binding_ids)?;
         Ok(TlcParallelized(TlcPipelineInner {
             tlc: result.program,
             pipeline: result.pipeline,
-            type_table,
+            type_table: inner.type_table,
             plans: result.plans,
             input_names: result.input_names,
-            auto_storage_binding_ids,
+            auto_storage_binding_ids: inner.auto_storage_binding_ids,
         }))
     }
 
     /// Eliminate unreachable defs (dead code elimination at TLC level).
     pub fn filter_reachable(self) -> TlcReachable {
-        let TlcLateInner {
-            tlc,
-            type_table,
-            auto_storage_binding_ids,
-        } = self.0;
-        let tlc = tlc::inline::run_reachable(tlc);
+        let inner = self.0;
+        let tlc = tlc::inline::run_reachable(inner.tlc);
         TlcReachable(TlcPipelineInner {
             tlc,
             pipeline: pipeline_descriptor::PipelineDescriptor::default(),
-            type_table,
+            type_table: inner.type_table,
             plans: LookupMap::new(),
             input_names: LookupMap::new(),
-            auto_storage_binding_ids,
+            auto_storage_binding_ids: inner.auto_storage_binding_ids,
         })
-    }
-
-    /// Build the raw EGIR program. Callers chain the pipeline
-    /// (`expand_soacs → materialize → optimize_skeleton → elaborate`)
-    /// explicitly.
-    pub fn to_egraph(mut self) -> std::result::Result<EgirParallelized, ConvertError> {
-        let empty = LookupMap::new();
-        let input_lens = tlc::input_slice_bounds::compute_for_program(&self.0.tlc);
-        egir::from_tlc::run(
-            &self.0.tlc,
-            pipeline_descriptor::PipelineDescriptor::default(),
-            &empty,
-            &input_lens,
-            &mut self.0.auto_storage_binding_ids,
-        )
-        .and_then(|inner| EgirRaw(inner).realize_outputs().map(|a| a.parallelize(&empty)))
     }
 }
 
@@ -1178,35 +1145,22 @@ impl TlcParallelized {
 /// variant baked in. Lives between `materialize_entry_soacs` and
 /// `parallelize_soacs` so the parallelizer sees concrete reps on every
 /// call edge.
-pub struct TlcRepSpecialized(pub TlcLateInner);
+pub struct TlcRepSpecialized(pub TlcEarlyInner);
 
 impl std::ops::Deref for TlcRepSpecialized {
-    type Target = TlcLateInner;
-    fn deref(&self) -> &TlcLateInner {
+    type Target = TlcEarlyInner;
+    fn deref(&self) -> &TlcEarlyInner {
         &self.0
     }
 }
 
 impl TlcRepSpecialized {
-    /// Parallelize SOACs in compute entry points at the TLC level.
-    /// `disable` turns the pass into an effective no-op (see
-    /// `TlcEntrySoacsMaterialized::parallelize_soacs`).
-    pub fn parallelize_soacs(self, disable: bool) -> Result<TlcParallelized> {
-        let TlcLateInner {
-            mut tlc,
-            type_table,
-            mut auto_storage_binding_ids,
-        } = self.0;
-        tlc = tlc::if_over_producer::run(tlc);
-        let result = tlc::parallelize::run(tlc, disable, &mut auto_storage_binding_ids)?;
-        Ok(TlcParallelized(TlcPipelineInner {
-            tlc: result.program,
-            pipeline: result.pipeline,
-            type_table,
-            plans: result.plans,
-            input_names: result.input_names,
-            auto_storage_binding_ids,
-        }))
+    /// Inline compiler-generated `_w_lambda_*` defs back at their call sites,
+    /// then DCE.
+    pub fn fold_generated_lambdas(self) -> TlcGeneratedLambdasFolded {
+        let mut inner = self.0;
+        inner.tlc = tlc::inline::run_large(inner.tlc);
+        TlcGeneratedLambdasFolded(inner)
     }
 }
 

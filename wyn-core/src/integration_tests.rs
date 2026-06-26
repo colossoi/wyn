@@ -27,23 +27,7 @@ fn should_fail_type_check(input: &str) -> bool {
 /// Off-milestone stop — drives the typestate API directly so the same
 /// `module_manager` covers both `type_check` and `to_tlc`.
 fn compile_to_fused_tlc(input: &str) -> crate::tlc::Program {
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let type_checked = Compiler::parse(input, &mut node_counter)
-        .expect("parse")
-        .resolve(&module_manager)
-        .expect("resolve")
-        .fold_ast_constants()
-        .type_check(&mut module_manager)
-        .expect("type_check");
-    let tlc = type_checked.to_tlc(&module_manager, false).pin_entry_regions().expect("pin_entry_regions");
-    let fused = tlc
-        .partial_eval()
-        .normalize_soacs()
-        .force_inline_soac_helpers()
-        .fuse_maps()
-        .apply_ownership()
-        .expect("apply_ownership");
-    fused.0.tlc
+    crate::dyn_pipeline::compile_to_tlc_program(input)
 }
 
 /// Assert that a compute `reduce`-over-`map`-of-range `src` parallelizes and
@@ -2704,41 +2688,9 @@ entry frag(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
 // maps after a zip-map should fold to tuple projections) is now an EGIR-level
 // question and would need a different shape of test.
 
-/// Pipeline that includes TLC inline_small (the new pass).
+/// Pipeline that includes TLC inline_small (now always part of the mainline).
 fn compile_to_ssa_with_inline_small(input: &str) -> Program {
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = Compiler::parse(input, &mut node_counter).expect("Parsing failed");
-    let type_checked = parsed
-        .resolve(&mut module_manager)
-        .expect("Name resolution failed")
-        .fold_ast_constants()
-        .type_check(&mut module_manager)
-        .expect("Type checking failed");
-
-    type_checked
-        .to_tlc(&module_manager, false)
-        .pin_entry_regions()
-        .expect("pin_entry_regions")
-        .partial_eval()
-        .normalize_soacs()
-        .force_inline_soac_helpers()
-        .fuse_maps()
-        .apply_ownership()
-        .expect("apply_ownership")
-        .normalize_outputs()
-        .expect("normalize_outputs")
-        .lift_gathers()
-        .defunctionalize()
-        .monomorphize()
-        .fold_generated_lambdas()
-        .inline_small()
-        .to_egraph()
-        .expect("SSA conversion failed")
-        .expand_soacs()
-        .materialize()
-        .optimize_skeleton()
-        .elaborate()
-        .ssa
+    compile_to_ssa(input)
 }
 
 #[test]

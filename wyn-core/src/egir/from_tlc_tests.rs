@@ -18,36 +18,7 @@ use std::collections::{HashMap, HashSet};
 /// → elaborate`) to a `Program`. No `materialize` — tests don't exercise
 /// SPIR-V-specific dynamic-index rewrites.
 fn compile_via_egir(src: &str) -> Program {
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = crate::Compiler::parse(src, &mut node_counter).expect("Parsing failed");
-    let type_checked = parsed
-        .resolve(&mut module_manager)
-        .expect("Name resolution failed")
-        .fold_ast_constants()
-        .type_check(&mut module_manager)
-        .expect("Type checking failed");
-
-    let tlc = type_checked
-        .to_tlc(&module_manager, false)
-        .pin_entry_regions()
-        .expect("pin_entry_regions")
-        .partial_eval()
-        .normalize_soacs()
-        .force_inline_soac_helpers()
-        .fuse_maps()
-        .apply_ownership()
-        .expect("apply_ownership")
-        .normalize_outputs()
-        .expect("normalize_outputs")
-        .lift_gathers()
-        .defunctionalize()
-        .monomorphize()
-        .fold_generated_lambdas()
-        .inline_small()
-        .rep_specialize()
-        .parallelize_soacs(false)
-        .expect("parallelize_soacs")
-        .filter_reachable();
+    let tlc = crate::dyn_pipeline::compile_to_reachable(src, false);
 
     let empty = std::collections::HashMap::new();
     let bounds = crate::tlc::input_slice_bounds::compute_for_program(&tlc.tlc);
@@ -607,35 +578,7 @@ entry vertex_main(#[location(0)] position: vec3f32, #[location(1)] color: vec3f3
   (#[builtin(position)] vec4f32, #[location(0)] vec3f32) =
   (@[position.x, position.y, position.z, 1.0], color)
 "#;
-    let (mut node_counter, mut module_manager) = crate::cached_compiler_init();
-    let parsed = crate::Compiler::parse(src, &mut node_counter).expect("parse");
-    let type_checked = parsed
-        .resolve(&mut module_manager)
-        .expect("resolve")
-        .fold_ast_constants()
-        .type_check(&mut module_manager)
-        .expect("type_check");
-    let tlc = type_checked
-        .to_tlc(&module_manager, false)
-        .pin_entry_regions()
-        .expect("pin_entry_regions")
-        .partial_eval()
-        .normalize_soacs()
-        .force_inline_soac_helpers()
-        .fuse_maps()
-        .apply_ownership()
-        .expect("apply_ownership")
-        .normalize_outputs()
-        .expect("normalize_outputs")
-        .lift_gathers()
-        .defunctionalize()
-        .monomorphize()
-        .fold_generated_lambdas()
-        .inline_small()
-        .rep_specialize()
-        .parallelize_soacs(false)
-        .expect("parallelize_soacs")
-        .filter_reachable();
+    let tlc = crate::dyn_pipeline::compile_to_reachable(src, false);
 
     let mut tlc_program = tlc.tlc.clone();
 
