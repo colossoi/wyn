@@ -285,16 +285,10 @@ fn compile_file(
 
     let tlc_optimized = time("tlc_partial_eval", verbose, || tlc_transformed.partial_eval());
 
-    // EXPERIMENTAL ORDER: defunctionalize + monomorphize + inline the whole
-    // program up front, so fusion runs on a concrete, first-order program and is
-    // purely intraprocedural. Residency / output-normalization / ownership /
-    // parallelize follow at the tail. Each step is timed separately.
     let tlc_normed = time("normalize_soacs", verbose, || tlc_optimized.normalize_soacs());
-    let tlc_defunc = time("defunctionalize", verbose, || tlc_normed.defunctionalize());
-    let tlc_mono = time("tlc_monomorphize", verbose, || tlc_defunc.monomorphize());
+    let tlc_mono = time("tlc_monomorphize", verbose, || tlc_normed.monomorphize());
     let tlc_rep_specialized = time("tlc_rep_specialize", verbose, || tlc_mono.rep_specialize());
-    let tlc_folded = time("inline", verbose, || tlc_rep_specialized.fold_generated_lambdas());
-    let tlc_inlined = time("tlc_inline_small", verbose, || tlc_folded.inline_small());
+    let tlc_inlined = time("tlc_inline_small", verbose, || tlc_rep_specialized.inline_small());
     let tlc_force_inlined = time("force_inline_soac_helpers", verbose, || {
         tlc_inlined.force_inline_soac_helpers()
     });
@@ -302,9 +296,11 @@ fn compile_file(
         tlc_force_inlined.canonicalize_producers()
     });
     let tlc_fused = time("fuse_maps", verbose, || tlc_canon.fuse_maps());
+    let tlc_defunc = time("defunctionalize", verbose, || tlc_fused.defunctionalize());
+    let tlc_folded = time("inline", verbose, || tlc_defunc.fold_generated_lambdas());
 
     let tlc_exposed = time("expose_entry_producer_helpers", verbose, || {
-        tlc_fused.expose_entry_producer_helpers()
+        tlc_folded.expose_entry_producer_helpers()
     });
     let tlc_static_fused = time("static_index_fusion", verbose, || {
         tlc_exposed.fuse_static_indices()

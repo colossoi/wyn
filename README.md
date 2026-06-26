@@ -68,14 +68,14 @@ passes:
 | **TlcRegionsPinned** | `tlc::pin_entry_regions` | Each storage entry-param's concrete `Region(set, binding)` is substituted into its type, so a view's buffer is a statically-known type property that flows by unification. A distinct typestate, so the rest of the pipeline can't run without it (see View Buffer Provenance below) |
 | **TlcPartialEvaled** | `tlc::partial_eval` | Constant folding and algebraic simplifications |
 | **TlcSoaNormalized** | `tlc::soa` | SoA transform (`[n](A,B)` → `([n]A, [n]B)`) + Map+Zip flattening + standalone Zip elimination |
-| **TlcDefunctionalized** | `tlc::closure_convert` → `tlc::hof_specialize` → `tlc::closure_calls_lower` | Three sequential passes: lambdas lifted to top-level defs, higher-order functions specialized away, captures threaded into call sites. Verifier-checked invariants guard each phase boundary (see Defunctionalization below) |
 | **TlcMonomorphized** | `tlc::specialize`, `tlc::monomorphize` | Polymorphic intrinsics specialized; user functions monomorphized — including over a view's **region**, so a function called on two buffers yields two monomorphs (this subsumes the former `buffer_specialize` pass) |
 | **TlcRepSpecialized** | `tlc::rep_specialize` | Phase 2 of array-variant-abstract: at call edges, clone any user-defined callee whose `Abstract`-typed param receives a producer-known concrete variant (Bounded / View from filter), and rewrite the call to invoke the clone. Runs before force-inline so SOAC helpers are representation-concrete when it inlines them |
-| **TlcGeneratedLambdasFolded** | `tlc::inline` | Fold compiler-generated lambda defs back at call sites + DCE |
 | **TlcSmallInlined** | `tlc::inline` | Inline small user functions and constants |
 | **TlcSoacHelpersInlined** | `tlc::inline::run_force_soac_helpers` | Force-inline every user function whose body (recursively) contains a SOAC (or `length`), regardless of control flow, so no SOAC is reachable behind a call and fusion is purely intraprocedural. Checked by `fusion::verify_soac_helpers_inlined` |
 | **TlcProducerCanonicalized** | `tlc::soa`, `tlc::if_over_producer` | Re-run SoA normalization (inlining may have exposed new tuple/zip/map structure), then `if-over-producer` lifting, so fusion sees clean top-of-let-chain SOAC producers |
-| **TlcFused** | `tlc::fusion`, `tlc::if_over_producer` | Intraprocedural SOAC fusion (horizontal map, map+reduce/scan, filter+length — "merge compatible nodes, union outputs"), then `if-over-producer` lifting and reachable-DCE. No cross-function summary path: every producer/consumer edge is within one def (force-inline guarantees it) |
+| **TlcFused** | `tlc::fusion`, `tlc::if_over_producer` | Intraprocedural SOAC fusion (horizontal map, map+reduce/scan, filter+length — "merge compatible nodes, union outputs"), then `if-over-producer` lifting and reachable-DCE. No cross-function summary path: every producer/consumer edge is within one def (force-inline guarantees it). Runs on **inline** SOAC operators (pre-defunctionalize) so `compose_*` can fold operator bodies directly |
+| **TlcDefunctionalized** | `tlc::closure_convert` → `tlc::hof_specialize` → `tlc::closure_calls_lower` | Three sequential passes: lambdas lifted to top-level defs, higher-order functions specialized away, captures threaded into call sites — including the SOAC operators fusion just composed. Verifier-checked invariants guard each phase boundary (see Defunctionalization below) |
+| **TlcGeneratedLambdasFolded** | `tlc::inline` | Fold compiler-generated lambda defs back at call sites + DCE |
 | **TlcEntryProducersExposed** | `tlc::materialize_entry_soacs` | Inlines producer-helper calls into the entry's top-level let-chain so the next two passes can see the SOAC producer + its indexed uses in the same scope. Refuses to descend into per-element lambdas — exposing a per-element scan as an entry producer would wreck cost semantics |
 | **TlcStaticIndexFused** | `tlc::static_index_fusion` | `map(f, src)[k]` (constant `k`) collapses to `f(src[k])`. A producer demanded only at a known slot becomes a scalar element computation rather than a runtime-sized buffer materialization |
 | **TlcRuntimeIndexProducersFloated** | `tlc::runtime_index_producers` | `map(\i. (map(f, xs))[i], is)` floats the inner producer out into a let-binding so it looks like an ordinary gather (`let p = map(f, xs) in map(\i. p[i], is)`) for the residency pass to rewrite |
@@ -92,9 +92,13 @@ The table above is one valid topological sort of the constraints below
 `wyn/src/main.rs` must stay in sync with it). `A ≺ B` means A runs before B.
 Each notes how it's enforced; when you move a pass, check it here.
 
-- **`defunctionalize` ≺ `monomorphize`** — mono specializes type parameters over
-  first-order code; defunc removes function-typed params first. *Enforced by:*
-  convention (adjacent, in this order, in every pipeline to date).
+- **`monomorphize` ≺ `defunctionalize`** — fusion must run post-mono
+  (intraprocedural) *and* pre-defunc (so it composes **inline** SOAC operators,
+  not function references), so mono runs first. Mono handles the still-higher-
+  order program; defunc removes function-typed params and lifts the fused
+  operators to refs afterward. *Enforced by:* convention.
+- **`defunctionalize` ≺ `fold_generated_lambdas`** — fold inlines the
+  `_w_lambda_*` defs that defunc generates. *Enforced by:* convention.
 - **`monomorphize` ≺ `force_inline_soac_helpers`** — force-inline's free-type-var
   guard skips any helper still carrying an unresolved element-type `Variable`, so
   helpers must be concrete first. *Enforced by:* indirectly via the validator
@@ -112,15 +116,8 @@ Each notes how it's enforced; when you move a pass, check it here.
 
 **Open tensions** (constraints we'd like that don't currently hold):
 
-- **`fuse_maps` wants pre-`defunctionalize` operators.** Fusion's `compose_*`
-  helpers were built for inline SOAC operator bodies; post-defunc an operator is
-  `λparams. Var(fn)`, and composing references yields operators egir rejects
-  (`"SOAC lambda body should be a function reference post-defunc"`). Fusion needs
-  post-*mono*, not post-*defunc* — the only coupling is `defunc ≺ mono`.
-  Resolutions: make `compose_*` operator-aware (emit `App` + lift composed
-  operators), or establish `mono ≺ defunc` so defunc can move after fusion.
 - **`lift_gathers` / `runtime_index_producers` want pre-`defunctionalize`
-  producers** (recognizable as `Soac(Map/Scan)`), but now run after it.
+  producers** (recognizable as `Soac(Map/Scan)`), but run after it.
 
 ### EGIR (Acyclic E-Graph IR)
 | Stage | Module | Description |

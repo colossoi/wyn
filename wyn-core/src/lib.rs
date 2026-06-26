@@ -652,19 +652,16 @@ impl TlcRegionsPinned {
     /// mode, what most tests want); `true` ⇒ disabled (the `--single-stage`
     /// flag).
     pub fn optimize_for_test(self, disable_parallelize: bool) -> TlcReachable {
-        // EXPERIMENTAL ORDER: monomorphize + inline the whole program BEFORE
-        // fusion, so fusion is purely intraprocedural (no summary path), then
-        // residency / output-normalization / ownership / parallelize at the tail.
         self.partial_eval()
             .normalize_soacs()
-            .defunctionalize()
             .monomorphize()
             .rep_specialize()
-            .fold_generated_lambdas()
             .inline_small()
             .force_inline_soac_helpers()
             .canonicalize_producers()
             .fuse_maps()
+            .defunctionalize()
+            .fold_generated_lambdas()
             .expose_entry_producer_helpers()
             .fuse_static_indices()
             .float_runtime_index_nested_producers()
@@ -709,11 +706,10 @@ impl std::ops::Deref for TlcSoaNormalized {
     }
 }
 
-impl TlcSoaNormalized {
-    /// EXPERIMENTAL REORDER: defunctionalize right after early SoA cleanup, so
-    /// monomorphization (and everything downstream, including fusion) runs on a
-    /// concrete, first-order program. Closure-converts + specializes HOFs +
-    /// threads captures; SOAC envelopes stay inline (not lowered to loops).
+impl TlcFused {
+    /// Closure-converts + specializes HOFs + threads captures, lifting SOAC
+    /// operators (including the ones fusion just composed) to function
+    /// references. SOAC envelopes stay inline (not lowered to loops).
     pub fn defunctionalize(self) -> TlcDefunctionalized {
         let mut inner = self.0;
         let (cc, closure_info) = tlc::closure_convert::run(inner.tlc, &inner.known_defs);
@@ -781,7 +777,7 @@ impl std::ops::Deref for TlcFused {
     }
 }
 
-impl TlcFused {
+impl TlcGeneratedLambdasFolded {
     /// Entry-boundary producer exposure (normalization, not residency).
     /// Inline helper calls whose result is an array producer while the caller's
     /// indexed uses are still local in the entry body.
@@ -939,7 +935,7 @@ impl std::ops::Deref for TlcDefunctionalized {
     }
 }
 
-impl TlcDefunctionalized {
+impl TlcSoaNormalized {
     /// Specialize polymorphic intrinsics and monomorphize user functions
     /// (region-specialized). After this no `Type::Variable` remains.
     pub fn monomorphize(self) -> TlcMonomorphized {
@@ -989,14 +985,16 @@ impl std::ops::Deref for TlcGeneratedLambdasFolded {
     }
 }
 
-impl TlcGeneratedLambdasFolded {
+impl TlcRepSpecialized {
     /// Inline small user functions and constants at their call/reference sites.
     pub fn inline_small(self) -> TlcSmallInlined {
         let mut inner = self.0;
         inner.tlc = tlc::inline::run_small(inner.tlc);
         TlcSmallInlined(inner)
     }
+}
 
+impl TlcGeneratedLambdasFolded {
     /// Eliminate unreachable defs (dead code elimination at TLC level).
     pub fn filter_reachable(self) -> TlcReachable {
         let inner = self.0;
@@ -1157,9 +1155,9 @@ impl std::ops::Deref for TlcRepSpecialized {
     }
 }
 
-impl TlcRepSpecialized {
+impl TlcDefunctionalized {
     /// Inline compiler-generated `_w_lambda_*` defs back at their call sites,
-    /// then DCE.
+    /// then DCE. Runs after defunctionalize (which produces those lambdas).
     pub fn fold_generated_lambdas(self) -> TlcGeneratedLambdasFolded {
         let mut inner = self.0;
         inner.tlc = tlc::inline::run_large(inner.tlc);
