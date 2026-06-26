@@ -660,12 +660,12 @@ impl TlcRegionsPinned {
             .force_inline_soac_helpers()
             .canonicalize_producers()
             .fuse_maps()
-            .defunctionalize()
-            .fold_generated_lambdas()
             .expose_entry_producer_helpers()
             .fuse_static_indices()
             .float_runtime_index_nested_producers()
             .plan_execute_gather_residency()
+            .defunctionalize()
+            .fold_generated_lambdas()
             .apply_ownership()
             .expect("apply_ownership")
             .normalize_outputs()
@@ -706,7 +706,7 @@ impl std::ops::Deref for TlcSoaNormalized {
     }
 }
 
-impl TlcFused {
+impl TlcGathersLifted {
     /// Closure-converts + specializes HOFs + threads captures, lifting SOAC
     /// operators (including the ones fusion just composed) to function
     /// references. SOAC envelopes stay inline (not lowered to loops).
@@ -777,7 +777,7 @@ impl std::ops::Deref for TlcFused {
     }
 }
 
-impl TlcGeneratedLambdasFolded {
+impl TlcFused {
     /// Entry-boundary producer exposure (normalization, not residency).
     /// Inline helper calls whose result is an array producer while the caller's
     /// indexed uses are still local in the entry body.
@@ -829,7 +829,7 @@ impl std::ops::Deref for TlcOutputsNormalized {
     }
 }
 
-impl TlcGathersLifted {
+impl TlcGeneratedLambdasFolded {
     /// Ownership/liveness analysis + ownership-driven rewrites. Runs after
     /// gather residency and before output normalization, so the liveness walk
     /// never encounters an `OutputSlotStore` (which `normalize_outputs`

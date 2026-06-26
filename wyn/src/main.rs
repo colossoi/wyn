@@ -296,11 +296,11 @@ fn compile_file(
         tlc_force_inlined.canonicalize_producers()
     });
     let tlc_fused = time("fuse_maps", verbose, || tlc_canon.fuse_maps());
-    let tlc_defunc = time("defunctionalize", verbose, || tlc_fused.defunctionalize());
-    let tlc_folded = time("inline", verbose, || tlc_defunc.fold_generated_lambdas());
 
+    // Residency cluster runs before defunctionalize, while producers are still
+    // recognizable as `Soac(Map/Scan)`.
     let tlc_exposed = time("expose_entry_producer_helpers", verbose, || {
-        tlc_folded.expose_entry_producer_helpers()
+        tlc_fused.expose_entry_producer_helpers()
     });
     let tlc_static_fused = time("static_index_fusion", verbose, || {
         tlc_exposed.fuse_static_indices()
@@ -311,11 +311,13 @@ fn compile_file(
     let tlc_gathered = time("gather_residency", verbose, || {
         tlc_runtime_floated.plan_execute_gather_residency()
     });
+    let tlc_defunc = time("defunctionalize", verbose, || tlc_gathered.defunctionalize());
+    let tlc_folded = time("inline", verbose, || tlc_defunc.fold_generated_lambdas());
 
     // Ownership/liveness before output normalization, so the liveness walk runs
     // on the pre-slot-store form; then normalize compute-entry tails into
     // explicit per-slot `OutputSlotStore` chains.
-    let tlc_owned = time("apply_ownership", verbose, || tlc_gathered.apply_ownership())?;
+    let tlc_owned = time("apply_ownership", verbose, || tlc_folded.apply_ownership())?;
     let tlc_normed_outputs = time("normalize_outputs", verbose, || tlc_owned.normalize_outputs())?;
 
     let tlc_parallel = time("tlc_parallelize", verbose, || {
