@@ -28,7 +28,18 @@ const INLINE_SIZE_THRESHOLD: usize = 30;
 /// SOAC helper) fully expand: one round inlines `center`, the next sees
 /// `sum` calls inside the freshly-expanded clump body and inlines those
 /// too.
-pub fn run_force_soac_helpers(mut program: Program) -> Program {
+pub fn run_force_soac_helpers(program: Program) -> Program {
+    let program = force_inline_soac_helpers_to_fixpoint(program);
+    debug_assert!(
+        super::fusion::verify_soac_helpers_inlined(&program).is_ok(),
+        "force-inline left a SOAC helper behind a call boundary; \
+         fusion would need an interprocedural path: {:?}",
+        super::fusion::verify_soac_helpers_inlined(&program).err(),
+    );
+    program
+}
+
+fn force_inline_soac_helpers_to_fixpoint(mut program: Program) -> Program {
     // Bound iterations to guard against pathological recursion through
     // hand-crafted call graphs; typical wyn helper depth is 2–3.
     for _ in 0..8 {
@@ -131,7 +142,10 @@ fn term_contains_free_type_variable(term: &Term) -> bool {
 /// array: a `Soac` node, *or* a call to the `length` builtin. Helpers that
 /// hide either behind a non-inlined call boundary block multi-consumer
 /// fusion the same way, so force-inline catches both.
-fn contains_soac(term: &Term) -> bool {
+///
+/// Shared with `fusion::verify_soac_helpers_inlined`, which uses the exact
+/// same predicate to assert force-inline left no such helper behind a call.
+pub(super) fn contains_soac(term: &Term) -> bool {
     if matches!(&term.kind, TermKind::Soac(_)) {
         return true;
     }

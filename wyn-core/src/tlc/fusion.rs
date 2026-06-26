@@ -55,6 +55,74 @@ pub(crate) fn build_sym_to_def(
 }
 
 // =============================================================================
+// Verifier: SOACs never hide behind a call boundary
+// =============================================================================
+
+/// A call site where a user function calls another user function whose body
+/// still hides a SOAC (or a `length` intrinsic) behind the call boundary.
+#[derive(Debug, PartialEq, Eq)]
+pub struct CalledSoacHelper {
+    /// The def whose body contains the offending call.
+    pub caller: SymbolId,
+    /// The SOAC-bearing def it calls.
+    pub callee: SymbolId,
+}
+
+/// Verify that no def calls a SOAC-bearing user function — i.e. every SOAC
+/// lives in the def fusion will optimize, never behind a call. This is the
+/// precondition that lets fusion be purely *intra*procedural: a clean result
+/// means interprocedural fusion needn't exist, because there is no
+/// producer/consumer edge that crosses a call.
+///
+/// `inline::run_force_soac_helpers` is responsible for establishing this by
+/// expanding every SOAC-bearing helper at its call sites before fusion runs.
+/// It defers two categories — helpers with control flow, and (pre-monomorphize)
+/// helpers with free type variables — so this validator only holds once those
+/// have been resolved upstream (e.g. by running fusion after monomorphization).
+///
+/// Entry points are exempt by construction: they are roots, so no `App` names
+/// them, and a SOAC in an entry body is never a *called* SOAC. Returns every
+/// violation rather than the first, so the report is a complete picture of
+/// where the invariant breaks.
+pub fn verify_soac_helpers_inlined(program: &Program) -> Result<(), Vec<CalledSoacHelper>> {
+    let soac_bearing: LookupSet<SymbolId> = program
+        .defs
+        .iter()
+        .filter(|d| super::inline::contains_soac(&d.body))
+        .map(|d| d.name)
+        .collect();
+
+    let mut violations = Vec::new();
+    for def in &program.defs {
+        collect_called_soac_helpers(&def.body, def.name, &soac_bearing, &mut violations);
+    }
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(violations)
+    }
+}
+
+fn collect_called_soac_helpers(
+    term: &Term,
+    caller: SymbolId,
+    soac_bearing: &LookupSet<SymbolId>,
+    out: &mut Vec<CalledSoacHelper>,
+) {
+    if let TermKind::App { func, .. } = &term.kind {
+        if let TermKind::Var(VarRef::Symbol(callee)) = &func.kind {
+            if soac_bearing.contains(callee) {
+                out.push(CalledSoacHelper {
+                    caller,
+                    callee: *callee,
+                });
+            }
+        }
+    }
+    term.for_each_child(&mut |c| collect_called_soac_helpers(c, caller, soac_bearing, out));
+}
+
+// =============================================================================
 // Public entry point
 // =============================================================================
 
@@ -65,6 +133,13 @@ pub(crate) fn build_sym_to_def(
 /// 3. Classifies producer uses, plans fusion groups, and rewrites them
 /// 4. Repeats until fixpoint
 pub fn run(program: Program) -> Program {
+    debug_assert!(
+        verify_soac_helpers_inlined(&program).is_ok(),
+        "fusion entered with a SOAC helper behind a call boundary; \
+         force-inline (or a pass between it and fusion) failed to expose it: {:?}",
+        verify_soac_helpers_inlined(&program).err(),
+    );
+
     // Normalize: lift SOACs out of nested positions into let bindings
     let mut program = super::normalize::normalize(program);
 
