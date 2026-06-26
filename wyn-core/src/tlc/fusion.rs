@@ -19,10 +19,9 @@ use crate::LookupMap;
 use super::array_semantics::{can_fuse, classify_term, ArraySemantics, FusionRecipe};
 use super::subst::substitute_sym;
 use super::{
-    extract_lambda_params, mentions_any, ArrayExpr, Def, Lambda, Program, SoacDestination, SoacOp, Term,
-    TermId, TermIdSource, TermKind,
+    extract_lambda_params, mentions_any, ArrayExpr, Def, Lambda, LetBinding, LetChain, Program,
+    SoacDestination, SoacOp, Term, TermId, TermIdSource, TermKind,
 };
-
 
 // =============================================================================
 // Verifier: SOACs never hide behind a call boundary
@@ -154,14 +153,6 @@ pub fn run(program: Program) -> Program {
 // =============================================================================
 // Per-def fusion
 // =============================================================================
-
-#[derive(Clone)]
-struct LetBinding {
-    name: SymbolId,
-    name_ty: Type<TypeName>,
-    rhs: Term,
-    span: Span,
-}
 
 #[derive(Clone)]
 struct ProducerInfo {
@@ -597,8 +588,7 @@ fn find_direct_map_screma_group(region: &FusionRegion, bindings: &[LetBinding]) 
 
         if maps.len() >= 2 {
             let candidate_names: Vec<SymbolId> = bindings[start..end].iter().map(|b| b.name).collect();
-            if !bindings[start..end].iter().any(|binding| mentions_any(&binding.rhs, &candidate_names))
-            {
+            if !bindings[start..end].iter().any(|binding| mentions_any(&binding.rhs, &candidate_names)) {
                 return Some(ScremaGroup {
                     insert_at: start,
                     skip_indices: vec![],
@@ -1580,80 +1570,100 @@ fn pairwise_screma_output(
     })
 }
 
-fn apply_fusion_plan(
-    inner: &Term,
-    bindings: &[LetBinding],
-    tail: Term,
-    plan: FusionPlan,
-    term_ids: &mut TermIdSource,
-) -> Option<Term> {
+fn apply_fusion_plan(mut chain: LetChain, plan: FusionPlan, term_ids: &mut TermIdSource) -> Option<Term> {
     match plan {
         FusionPlan::ReplaceConsumer {
             producer_idx,
             consumer_idx,
             fused_rhs,
         } => {
-            let prod_sym = bindings[producer_idx].name;
-            let cons_sym = consumer_idx.map(|idx| bindings[idx].name);
-            rewrite_let_chain(inner, prod_sym, cons_sym, fused_rhs, term_ids)
+            match consumer_idx {
+                Some(idx) => {
+                    let rhs_ty = chain.binding(idx)?.rhs.ty.clone();
+                    chain.replace_binding_rhs(
+                        idx,
+                        Term {
+                            ty: rhs_ty,
+                            ..fused_rhs
+                        },
+                    );
+                }
+                None => {
+                    let tail_ty = chain.tail().ty.clone();
+                    chain.replace_tail(Term {
+                        ty: tail_ty,
+                        ..fused_rhs
+                    });
+                }
+            }
+            chain.remove_binding(producer_idx);
+            Some(chain.into_term(term_ids))
         }
         FusionPlan::Screma(plan) => {
-            let new_bindings = apply_planned_screma_rewrite(bindings, plan, term_ids);
-            let tail = replace_projection_terms(tail, &new_bindings.1, term_ids);
-            let tail = new_bindings.2.unwrap_or(tail);
-            Some(rebuild_let_chain(new_bindings.0, tail, term_ids))
+            let chain = apply_planned_screma_rewrite(chain, plan, term_ids);
+            Some(chain.into_term(term_ids))
         }
     }
 }
 
 fn apply_planned_screma_rewrite(
-    bindings: &[LetBinding],
+    mut chain: LetChain,
     plan: PlannedScremaRewrite,
     term_ids: &mut TermIdSource,
-) -> (
-    Vec<LetBinding>,
-    LookupMap<TermId, ProjectionTemplate>,
-    Option<Term>,
-) {
+) -> LetChain {
+    let PlannedScremaRewrite {
+        rewrite,
+        term_replacements,
+        tail_projection,
+    } = plan;
     // The producer symbol(s) being replaced — their bindings disappear,
     // so any leftover `Var(producer)` references (e.g. structural alias
     // lets `let X = Var(filt) in body` that the classifier saw through)
     // need to be rebound to `Var(tuple_sym)` to keep the term well-formed.
     let producer_syms: Vec<SymbolId> =
-        plan.rewrite.skip_indices.iter().map(|&i| bindings[i].name).collect();
-    let mut new_bindings = Vec::with_capacity(bindings.len() + 1 - plan.rewrite.skip_indices.len());
-    for (idx, binding) in bindings.iter().enumerate() {
-        if idx == plan.rewrite.insert_at {
-            new_bindings.push(plan.rewrite.fused_binding.clone());
-        }
-        if plan.rewrite.skip_indices.contains(&idx) {
+        rewrite.skip_indices.iter().map(|&i| chain.bindings()[i].name).collect();
+
+    for idx in 0..chain.bindings().len() {
+        if rewrite.skip_indices.contains(&idx) {
             continue;
         }
-        if let Some(&proj_idx) = plan.rewrite.projection_fields.get(&idx) {
-            new_bindings.push(tuple_projection_binding(
-                binding,
-                plan.rewrite.tuple_sym,
-                &plan.rewrite.tuple_ty,
+        if let Some(&proj_idx) = rewrite.projection_fields.get(&idx) {
+            let projection = tuple_projection_binding(
+                chain.binding(idx).expect("projection binding index in range"),
+                rewrite.tuple_sym,
+                &rewrite.tuple_ty,
                 proj_idx,
-                plan.rewrite.scalar_result,
+                rewrite.scalar_result,
                 term_ids,
-            ));
+            );
+            chain.replace_binding(idx, projection);
         } else {
-            let mut rhs = replace_projection_terms(binding.rhs.clone(), &plan.term_replacements, term_ids);
-            for &p in &producer_syms {
-                rhs = substitute_sym(rhs, p, plan.rewrite.tuple_sym, term_ids);
-            }
-            new_bindings.push(LetBinding {
-                rhs,
-                ..binding.clone()
+            chain.rewrite_binding_rhs(idx, |rhs| {
+                let mut rhs =
+                    rewrite_terms_by_id(rhs, &term_replacements, term_ids, &mut |projection, ids| {
+                        projection_term(projection, ids)
+                    });
+                for &p in &producer_syms {
+                    rhs = substitute_sym(rhs, p, rewrite.tuple_sym, term_ids);
+                }
+                rhs
             });
         }
     }
-    if plan.rewrite.insert_at >= bindings.len() {
-        new_bindings.push(plan.rewrite.fused_binding);
+
+    if let Some(projection) = tail_projection {
+        chain.replace_tail(projection_term(&projection, term_ids));
+    } else {
+        chain.rewrite_tail(|tail| {
+            rewrite_terms_by_id(tail, &term_replacements, term_ids, &mut |projection, ids| {
+                projection_term(projection, ids)
+            })
+        });
     }
-    let tail = plan.tail_projection.map(|projection| projection_term(&projection, term_ids));
-    (new_bindings, plan.term_replacements, tail)
+
+    chain.remove_bindings(&rewrite.skip_indices);
+    chain.insert_binding_at_original_index(rewrite.insert_at, &rewrite.skip_indices, rewrite.fused_binding);
+    chain
 }
 
 fn projection_term(projection: &ProjectionTemplate, term_ids: &mut TermIdSource) -> Term {
@@ -1684,56 +1694,23 @@ fn projection_term(projection: &ProjectionTemplate, term_ids: &mut TermIdSource)
     }
 }
 
-fn replace_projection_terms(
+fn rewrite_terms_by_id<T, F>(
     term: Term,
-    replacements: &LookupMap<TermId, ProjectionTemplate>,
+    replacements: &LookupMap<TermId, T>,
     term_ids: &mut TermIdSource,
-) -> Term {
-    if let Some(projection) = replacements.get(&term.id) {
-        return projection_term(projection, term_ids);
+    make_replacement: &mut F,
+) -> Term
+where
+    F: FnMut(&T, &mut TermIdSource) -> Term,
+{
+    if let Some(replacement) = replacements.get(&term.id) {
+        return make_replacement(replacement, term_ids);
     }
-    let Term {
-        id: _,
-        ty,
-        span,
-        kind,
-    } = term;
-    match kind {
-        TermKind::Let {
-            name,
-            name_ty,
-            rhs,
-            body,
-        } => Term {
-            id: term_ids.next_id(),
-            ty,
-            span,
-            kind: TermKind::Let {
-                name,
-                name_ty,
-                rhs: Box::new(replace_projection_terms(*rhs, replacements, term_ids)),
-                body: Box::new(replace_projection_terms(*body, replacements, term_ids)),
-            },
-        },
-        TermKind::Lambda(lam) => Term {
-            id: term_ids.next_id(),
-            ty,
-            span,
-            kind: TermKind::Lambda(Lambda {
-                body: Box::new(replace_projection_terms(*lam.body, replacements, term_ids)),
-                ..lam
-            }),
-        },
-        other => Term {
-            id: term_ids.next_id(),
-            ty,
-            span,
-            kind: other,
-        }
-        .map_children(&mut |child| replace_projection_terms(child, replacements, term_ids)),
-    }
+    let mut rewritten = term
+        .map_children(&mut |child| rewrite_terms_by_id(child, replacements, term_ids, make_replacement));
+    rewritten.id = term_ids.next_id();
+    rewritten
 }
-
 
 /// Convert a `replacement` term being substituted into a SOAC input position
 /// into an ANF input atom: a bare name stays a name; an array expression is
@@ -2003,47 +1980,6 @@ fn add_terms(lhs: Term, rhs: Term, ty: Type<TypeName>, span: Span, term_ids: &mu
     }
 }
 
-fn flatten_let_chain(mut term: Term) -> (Vec<LetBinding>, Term) {
-    let mut bindings = Vec::new();
-    loop {
-        match term.kind {
-            TermKind::Let {
-                name,
-                name_ty,
-                rhs,
-                body,
-            } => {
-                bindings.push(LetBinding {
-                    name,
-                    name_ty,
-                    rhs: *rhs,
-                    span: term.span,
-                });
-                term = *body;
-            }
-            _ => return (bindings, term),
-        }
-    }
-}
-
-fn rebuild_let_chain(bindings: Vec<LetBinding>, mut body: Term, term_ids: &mut TermIdSource) -> Term {
-    for binding in bindings.into_iter().rev() {
-        let ty = body.ty.clone();
-        body = Term {
-            id: term_ids.next_id(),
-            ty,
-            span: binding.span,
-            kind: TermKind::Let {
-                name: binding.name,
-                name_ty: binding.name_ty,
-                rhs: Box::new(binding.rhs),
-                body: Box::new(body),
-            },
-        };
-    }
-    body
-}
-
 fn rebuild_lambda_params(
     params: Vec<(SymbolId, Type<TypeName>)>,
     body: Term,
@@ -2070,7 +2006,6 @@ fn rebuild_lambda_params(
     }
 }
 
-
 /// Bottom-up: recurse into children, applying graph-driven fusion at each
 /// sub-expression that contains a Let chain with SOAC producers/consumers.
 fn fuse_term(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdSource) -> (Term, bool) {
@@ -2092,16 +2027,16 @@ fn fuse_term(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdSource)
 /// Fuse within a body term. Returns the new body and whether any fusion happened.
 fn fuse_def_body(body: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdSource) -> (Term, bool) {
     let (params, inner) = extract_lambda_params(&body);
-    let (bindings, tail) = flatten_let_chain(inner.clone());
-    if bindings.is_empty() {
+    let chain = LetChain::from_term(inner);
+    if chain.is_empty() {
         return (body, false);
     }
 
-    let Some(plan) = find_fusion_plan(&bindings, &tail, symbols, term_ids) else {
+    let Some(plan) = find_fusion_plan(chain.bindings(), chain.tail(), symbols, term_ids) else {
         return (body, false);
     };
 
-    let Some(fused_inner) = apply_fusion_plan(&inner, &bindings, tail, plan, term_ids) else {
+    let Some(fused_inner) = apply_fusion_plan(chain, plan, term_ids) else {
         return (body, false);
     };
 
@@ -2202,106 +2137,6 @@ fn build_fused_from_semantics(
         }
 
         _ => None,
-    }
-}
-
-// =============================================================================
-// Let-chain rewriting
-// =============================================================================
-
-/// Rewrite the Let chain: remove the producer Let, replace the consumer
-/// (Let-bound or tail expression) with the fused SOAC.
-fn rewrite_let_chain(
-    term: &Term,
-    prod_sym: SymbolId,
-    cons_sym: Option<SymbolId>,
-    fused: Term,
-    term_ids: &mut TermIdSource,
-) -> Option<Term> {
-    match &term.kind {
-        TermKind::Let {
-            name,
-            name_ty,
-            rhs,
-            body,
-        } => {
-            if *name == prod_sym {
-                // Skip the producer Let, replace consumer in body
-                return replace_consumer(body, cons_sym, fused, term_ids);
-            }
-            // Recurse
-            let new_body = rewrite_let_chain(body, prod_sym, cons_sym, fused, term_ids)?;
-            Some(Term {
-                id: term_ids.next_id(),
-                ty: term.ty.clone(),
-                span: term.span,
-                kind: TermKind::Let {
-                    name: *name,
-                    name_ty: name_ty.clone(),
-                    rhs: rhs.clone(),
-                    body: Box::new(new_body),
-                },
-            })
-        }
-        _ => None,
-    }
-}
-
-/// Replace the consumer in the body with the fused SOAC.
-/// If cons_sym is None, the body itself is the consumer (tail expression).
-fn replace_consumer(
-    body: &Term,
-    cons_sym: Option<SymbolId>,
-    fused: Term,
-    term_ids: &mut TermIdSource,
-) -> Option<Term> {
-    match cons_sym {
-        None => {
-            // Tail expression — replace entirely, but keep the consumer's type
-            Some(Term {
-                ty: body.ty.clone(),
-                ..fused
-            })
-        }
-        Some(target) => {
-            match &body.kind {
-                TermKind::Let {
-                    name,
-                    name_ty,
-                    rhs,
-                    body: inner,
-                } => {
-                    if *name == target {
-                        // Replace this Let's RHS with the fused SOAC
-                        let new_rhs = Term {
-                            ty: rhs.ty.clone(),
-                            ..fused
-                        };
-                        Some(body.with_kind(
-                            TermKind::Let {
-                                name: *name,
-                                name_ty: name_ty.clone(),
-                                rhs: Box::new(new_rhs),
-                                body: inner.clone(),
-                            },
-                            term_ids.next_id(),
-                        ))
-                    } else {
-                        let new_inner = replace_consumer(inner, cons_sym, fused, term_ids)?;
-                        Some(body.with_kind(
-                            TermKind::Let {
-                                name: *name,
-                                name_ty: name_ty.clone(),
-                                rhs: rhs.clone(),
-                                body: Box::new(new_inner),
-                            },
-                            term_ids.next_id(),
-                        ))
-                    }
-                }
-                _ => None,
-            }
-        }
     }
 }
 

@@ -277,7 +277,7 @@ fn find_first_screma(term: &Term) -> Option<SoacOp> {
 /// `TermKind::Soac(SoacOp::Map { .. })` directly, so a test asserts *that fusion
 /// happened*, not *how the fused region is currently spelled*.
 fn fused_soac(body: &Term) -> SoacOp {
-    let (bindings, tail) = flatten_let_chain(body.clone());
+    let (bindings, tail) = crate::tlc::LetChain::from_term(body.clone()).into_parts();
     if let TermKind::Soac(op) = &tail.kind {
         return op.clone();
     }
@@ -340,7 +340,7 @@ fn max_screma_lanes(term: &Term) -> usize {
 }
 
 fn projection_idx_for_binding(term: &Term, sym: SymbolId) -> Option<usize> {
-    let (bindings, _) = flatten_let_chain(term.clone());
+    let (bindings, _) = crate::tlc::LetChain::from_term(term.clone()).into_parts();
     bindings.into_iter().find_map(|binding| {
         if binding.name != sym {
             return None;

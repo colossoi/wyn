@@ -99,6 +99,149 @@ pub(crate) fn build_sym_to_def(
     sym_to_def
 }
 
+/// One binding of a flattened `let` chain: `let name: name_ty = rhs in …`.
+#[derive(Clone)]
+pub(crate) struct LetBinding {
+    pub(crate) name: SymbolId,
+    pub(crate) name_ty: Type<TypeName>,
+    pub(crate) rhs: Term,
+    pub(crate) span: Span,
+}
+
+/// A `let` chain peeled into its flat list of bindings plus the inner non-`let`
+/// tail. Manipulating a chain as a first-class value — insert / remove / replace
+/// a binding by index, rewrite the tail — keeps passes from re-deriving the
+/// nesting and the index bookkeeping by hand. Rebuild with [`LetChain::into_term`].
+#[derive(Clone)]
+pub(crate) struct LetChain {
+    bindings: Vec<LetBinding>,
+    tail: Term,
+}
+
+impl LetChain {
+    pub(crate) fn from_term(mut term: Term) -> Self {
+        let mut bindings = Vec::new();
+        loop {
+            match term.kind {
+                TermKind::Let {
+                    name,
+                    name_ty,
+                    rhs,
+                    body,
+                } => {
+                    bindings.push(LetBinding {
+                        name,
+                        name_ty,
+                        rhs: *rhs,
+                        span: term.span,
+                    });
+                    term = *body;
+                }
+                _ => return LetChain { bindings, tail: term },
+            }
+        }
+    }
+
+    /// Decompose into the raw bindings + tail.
+    #[cfg(test)]
+    pub(crate) fn into_parts(self) -> (Vec<LetBinding>, Term) {
+        (self.bindings, self.tail)
+    }
+
+    /// Re-nest the chain into a single `Term`, minting a fresh id per `Let` node.
+    pub(crate) fn into_term(self, term_ids: &mut TermIdSource) -> Term {
+        let mut body = self.tail;
+        for binding in self.bindings.into_iter().rev() {
+            let ty = body.ty.clone();
+            body = Term {
+                id: term_ids.next_id(),
+                ty,
+                span: binding.span,
+                kind: TermKind::Let {
+                    name: binding.name,
+                    name_ty: binding.name_ty,
+                    rhs: Box::new(binding.rhs),
+                    body: Box::new(body),
+                },
+            };
+        }
+        body
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.bindings.is_empty()
+    }
+
+    pub(crate) fn bindings(&self) -> &[LetBinding] {
+        &self.bindings
+    }
+
+    pub(crate) fn tail(&self) -> &Term {
+        &self.tail
+    }
+
+    pub(crate) fn binding(&self, index: usize) -> Option<&LetBinding> {
+        self.bindings.get(index)
+    }
+
+    pub(crate) fn insert_binding(&mut self, index: usize, binding: LetBinding) {
+        self.bindings.insert(index.min(self.bindings.len()), binding);
+    }
+
+    /// Insert using coordinates from the original chain, after bindings named
+    /// in `removed_original_indices` have already been removed.
+    pub(crate) fn insert_binding_at_original_index(
+        &mut self,
+        original_index: usize,
+        removed_original_indices: &[usize],
+        binding: LetBinding,
+    ) {
+        let removed_before = removed_original_indices.iter().filter(|&&idx| idx < original_index).count();
+        self.insert_binding(original_index.saturating_sub(removed_before), binding);
+    }
+
+    pub(crate) fn remove_binding(&mut self, index: usize) -> LetBinding {
+        self.bindings.remove(index)
+    }
+
+    pub(crate) fn remove_bindings(&mut self, indices: &[usize]) {
+        let mut sorted = indices.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        for index in sorted.into_iter().rev() {
+            self.remove_binding(index);
+        }
+    }
+
+    pub(crate) fn replace_binding(&mut self, index: usize, binding: LetBinding) {
+        self.bindings[index] = binding;
+    }
+
+    pub(crate) fn replace_binding_rhs(&mut self, index: usize, rhs: Term) {
+        self.bindings[index].rhs = rhs;
+    }
+
+    pub(crate) fn rewrite_binding_rhs<F>(&mut self, index: usize, f: F)
+    where
+        F: FnOnce(Term) -> Term,
+    {
+        let rhs = self.bindings[index].rhs.clone();
+        self.replace_binding_rhs(index, f(rhs));
+    }
+
+    pub(crate) fn replace_tail(&mut self, tail: Term) {
+        self.tail = tail;
+    }
+
+    pub(crate) fn rewrite_tail<F>(&mut self, f: F)
+    where
+        F: FnOnce(Term) -> Term,
+    {
+        let tail = self.tail.clone();
+        self.replace_tail(f(tail));
+    }
+}
+
 /// Count the number of nodes in a term tree.
 /// Used as a size heuristic for inlining decisions.
 pub fn term_size(term: &Term) -> usize {
@@ -1068,18 +1211,6 @@ impl Term {
             ty,
             span,
             kind: TermKind::IntLit(value.into()),
-        }
-    }
-
-    /// Build a term that keeps this term's `ty` and `span` but swaps in a new
-    /// `kind` and `id` — the functional-record-update ("`body` with kind = …")
-    /// shape, without the `..self.clone()` cost of deep-cloning the old `kind`.
-    pub(crate) fn with_kind(&self, kind: TermKind, id: TermId) -> Term {
-        Term {
-            id,
-            ty: self.ty.clone(),
-            span: self.span,
-            kind,
         }
     }
 
