@@ -29,7 +29,8 @@ use crate::ast::TypeName;
 use crate::SymbolId;
 
 use super::array_semantics::{summarize_program, ArraySemantics, FunctionSummary, ResultSemantics};
-use super::fusion::{build_sym_to_def, substitute_sym};
+use super::build_sym_to_def;
+use super::fusion::substitute_sym;
 use super::inline::build_inline_lets;
 use super::{
     extract_lambda_params, ArrayExpr, DefMeta, Lambda, Program, StorageView, Term, TermIdSource, TermKind,

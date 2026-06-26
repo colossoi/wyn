@@ -22,21 +22,6 @@ use super::{
     TermId, TermIdSource, TermKind,
 };
 
-/// Build the `Var-symbol → def-symbol` lookup once. The fusion pass
-/// allocates fresh let-binding / lambda symbols during a sweep, but
-/// none of those name a def, so the map stays valid across the sweep.
-pub(crate) fn build_sym_to_def(
-    symbols: &SymbolTable,
-    def_syms: &LookupMap<String, SymbolId>,
-) -> LookupMap<SymbolId, SymbolId> {
-    let mut sym_to_def: LookupMap<SymbolId, SymbolId> = LookupMap::new();
-    for (sym, name) in symbols.iter() {
-        if let Some(&def_sym) = def_syms.get(name) {
-            sym_to_def.insert(*sym, def_sym);
-        }
-    }
-    sym_to_def
-}
 
 // =============================================================================
 // Verifier: SOACs never hide behind a call boundary

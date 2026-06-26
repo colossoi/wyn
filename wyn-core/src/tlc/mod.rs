@@ -82,6 +82,22 @@ pub(crate) fn extract_lambda_params_ref(term: &Term) -> (&Term, Vec<(SymbolId, T
     (current, params)
 }
 
+/// Map each interned symbol whose name matches a top-level def to that def's
+/// symbol, yielding a `Var-symbol → def-symbol` lookup. Symbols that don't name
+/// a def are absent, so a hit means "this `Var` refers to a callable def."
+pub(crate) fn build_sym_to_def(
+    symbols: &SymbolTable,
+    def_syms: &LookupMap<String, SymbolId>,
+) -> LookupMap<SymbolId, SymbolId> {
+    let mut sym_to_def: LookupMap<SymbolId, SymbolId> = LookupMap::new();
+    for (sym, name) in symbols.iter() {
+        if let Some(&def_sym) = def_syms.get(name) {
+            sym_to_def.insert(*sym, def_sym);
+        }
+    }
+    sym_to_def
+}
+
 /// Count the number of nodes in a term tree.
 /// Used as a size heuristic for inlining decisions.
 pub fn term_size(term: &Term) -> usize {
