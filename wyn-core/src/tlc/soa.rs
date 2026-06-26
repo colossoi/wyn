@@ -75,31 +75,44 @@ pub fn soa_type(ty: &Type<TypeName>) -> Type<TypeName> {
     }
 }
 
-/// Check if a type was an array-of-tuple before SoA transformation.
-/// Returns Some(n) where n is the tuple arity if it was.
-fn is_array_of_tuple(ty: &Type<TypeName>) -> Option<usize> {
+/// The BROAD predicate: will SoA expand this array's element into a tuple (so
+/// the array as a whole becomes a tuple-of-arrays)? True when the element is
+/// directly a tuple, OR becomes one after `soa_type` (a nested array-of-tuple
+/// element). Returns the resulting tuple arity.
+///
+/// Use this ONLY where you need the yes/no shape question and then call
+/// `soa_type` yourself (e.g. `uninit`/`length` rewrites). Do NOT use it to guard
+/// `array_of_tuple_parts`: this predicate is strictly broader than that
+/// extractor's domain (it also accepts the nested case, for which no flat tuple
+/// components exist), so guarding with it and then unwrapping the parts panics.
+/// Guard with `array_of_tuple_parts` directly instead.
+fn soa_yields_tuple_arrays(ty: &Type<TypeName>) -> Option<usize> {
     let elem = ty.elem_type()?;
     if !ty.is_array() {
         return None;
     }
     match elem {
         Type::Constructed(TypeName::Tuple(n), _) => Some(*n),
-        // Check recursively: the element might become a tuple after soa_type
-        _ => {
-            let elem_soa = soa_type(elem);
-            match elem_soa {
-                Type::Constructed(TypeName::Tuple(n), _) => Some(n),
-                _ => None,
-            }
-        }
+        // The element might become a tuple after soa_type (nested array-of-tuple).
+        _ => match soa_type(elem) {
+            Type::Constructed(TypeName::Tuple(n), _) => Some(n),
+            _ => None,
+        },
     }
 }
 
-/// Extract the tuple component types from an array-of-tuple type.
-/// Returns (component_types, variant, size).
+/// Extract the parts of an array whose element is DIRECTLY a tuple:
+/// `(arity, component_types, variant, size, region)`. Returns `None` for any
+/// other type — including the nested array-of-tuple case that
+/// `soa_yields_tuple_arrays` accepts but for which no flat components exist.
+///
+/// This IS its own guard: `if let Some(parts) = array_of_tuple_parts(ty)`. The
+/// invariant "the thing I checked has extractable parts" holds by construction
+/// because the check and the extraction are the same function.
 fn array_of_tuple_parts(
     ty: &Type<TypeName>,
 ) -> Option<(
+    usize,
     Vec<Type<TypeName>>,
     Type<TypeName>,
     Type<TypeName>,
@@ -109,11 +122,11 @@ fn array_of_tuple_parts(
         return None;
     }
     match ty.elem_type()? {
-        Type::Constructed(TypeName::Tuple(_), components) => {
+        Type::Constructed(TypeName::Tuple(n), components) => {
             let variant = ty.array_variant().expect("Array has variant").clone();
             let size = ty.array_size().expect("Array has size").clone();
             let region = ty.array_region().expect("Array has region").clone();
-            Some((components.clone(), variant, size, region))
+            Some((*n, components.clone(), variant, size, region))
         }
         _ => None,
     }
@@ -334,8 +347,7 @@ impl SoaTransformer {
             TermKind::Index { array, index } => {
                 // Array-of-tuple index: distribute over per-component arrays.
                 let arr_orig_ty = &array.ty;
-                if let Some(n) = is_array_of_tuple(arr_orig_ty) {
-                    let (comp_tys, variant, size, region) = array_of_tuple_parts(arr_orig_ty).unwrap();
+                if let Some((n, comp_tys, variant, size, region)) = array_of_tuple_parts(arr_orig_ty) {
                     let new_arr = self.transform_term(array);
                     let new_idx = self.transform_term(index);
                     return self.rewrite_index_aot(
@@ -378,8 +390,7 @@ impl SoaTransformer {
             // array_with(arr, i, val) where arr was [n](A,B)
             if (id == known.array_with || id == known.array_with_in_place) && args.len() == 3 {
                 let arr_orig_ty = &args[0].ty;
-                if let Some(n) = is_array_of_tuple(arr_orig_ty) {
-                    let (comp_tys, variant, size, region) = array_of_tuple_parts(arr_orig_ty).unwrap();
+                if let Some((n, comp_tys, variant, size, region)) = array_of_tuple_parts(arr_orig_ty) {
                     let new_arr = self.transform_term(&args[0]);
                     let new_idx = self.transform_term(&args[1]);
                     let new_val = self.transform_term(&args[2]);
@@ -391,7 +402,7 @@ impl SoaTransformer {
 
             // _w_intrinsic_uninit() where result was [n](A,B)
             if id == known.uninit && args.is_empty() {
-                if is_array_of_tuple(orig_result_ty).is_some() {
+                if soa_yields_tuple_arrays(orig_result_ty).is_some() {
                     let sym = match &func.kind {
                         TermKind::Var(VarRef::Symbol(s)) => *s,
                         // For Builtin form, we need a Symbol for `rewrite_uninit_aot`.
@@ -406,7 +417,7 @@ impl SoaTransformer {
             // _w_intrinsic_length(arr) where arr was [n](A,B)
             if id == known.length && args.len() == 1 {
                 let arr_orig_ty = &args[0].ty;
-                if is_array_of_tuple(arr_orig_ty).is_some() {
+                if soa_yields_tuple_arrays(arr_orig_ty).is_some() {
                     let sym = match &func.kind {
                         TermKind::Var(VarRef::Symbol(s)) => *s,
                         _ => self.symbols.alloc(by_id(id).raw.surface_name.to_string()),
@@ -836,10 +847,12 @@ impl SoaTransformer {
 
         // Array-of-tuple literal: distribute into per-component arrays.
         if let ArrayExpr::Literal(elems) = ae {
-            if !elems.is_empty() && is_array_of_tuple(orig_ty).is_some() {
-                let (comp_tys, variant, size, region) = array_of_tuple_parts(orig_ty).unwrap();
-                let new_elems: Vec<Term> = elems.iter().map(|t| self.transform_term(t)).collect();
-                return self.rewrite_array_lit_aot(&new_elems, &comp_tys, &variant, &size, &region, span);
+            if !elems.is_empty() {
+                if let Some((_n, comp_tys, variant, size, region)) = array_of_tuple_parts(orig_ty) {
+                    let new_elems: Vec<Term> = elems.iter().map(|t| self.transform_term(t)).collect();
+                    return self
+                        .rewrite_array_lit_aot(&new_elems, &comp_tys, &variant, &size, &region, span);
+                }
             }
         }
 
