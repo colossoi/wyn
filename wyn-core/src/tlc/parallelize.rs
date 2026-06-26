@@ -352,24 +352,83 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
                 {
                     // The let's `body` is the rest of the
                     // `normalize_outputs` sequencing chain (slots 1..N
-                    // stores ending in `UnitLit`). Walk it here so the
-                    // sibling slot values reach phase synthesis; the
-                    // analysis itself descends into slot 0's value.
-                    collect_extra_slot_stores(&body, &mut extra_slots);
-                    if extra_slots.iter().any(|(_, v)| matches!(v.kind, TermKind::Soac(_))) {
-                        // Sibling output slots are SOACs. `make_multidomain_map_plan`
-                        // handles the all-pointwise case — slot 0 and every sibling
-                        // a fresh map — by splitting each slot into its own parallel
-                        // stage over its own domain. Any other sibling shape (reduce
-                        // / scan / filter / scatter / in-place) has no parallel split
-                        // yet, so keep the entry serial.
-                        let all_pointwise = is_map_only_fresh_soac_term(&value)
-                            && extra_slots.iter().all(|(_, v)| is_map_only_fresh_soac_term(v));
-                        if !all_pointwise {
-                            return None;
+                    // stores ending in `UnitLit`). Collect those sibling
+                    // stores so the parallelizable tail can be chosen from
+                    // *any* output slot, not just slot 0 — a streamed SOAC
+                    // in a later slot must still parallelize even when an
+                    // earlier slot holds a fixed value.
+                    let slot0_value = *value;
+                    let mut siblings: Vec<(usize, Term)> = Vec::new();
+                    collect_extra_slot_stores(&body, &mut siblings);
+
+                    let sibling_soac_count =
+                        siblings.iter().filter(|(_, v)| matches!(v.kind, TermKind::Soac(_))).count();
+                    let sibling_map_count =
+                        siblings.iter().filter(|(_, v)| is_map_only_fresh_soac_term(v)).count();
+
+                    // Slot 0 is the tail itself (a SOAC) or follows through to
+                    // one (`Var` alias / `TupleProj`). Keep the original
+                    // primary-slot policy verbatim: every sibling is an extra
+                    // slot, and a multi-SOAC entry must be all-pointwise-map
+                    // (the multidomain split handles those; any other sibling
+                    // shape — reduce / scan / filter / scatter / in-place — has
+                    // no parallel split yet, so keep the entry serial).
+                    if matches!(
+                        slot0_value.kind,
+                        TermKind::Soac(_) | TermKind::Var(_) | TermKind::TupleProj { .. }
+                    ) {
+                        if siblings.iter().any(|(_, v)| matches!(v.kind, TermKind::Soac(_))) {
+                            let all_pointwise = is_map_only_fresh_soac_term(&slot0_value)
+                                && siblings.iter().all(|(_, v)| is_map_only_fresh_soac_term(v));
+                            if !all_pointwise {
+                                return None;
+                            }
+                        }
+                        extra_slots = siblings;
+                        current = slot0_value;
+                        continue;
+                    }
+
+                    // Slot 0 is a plain fixed value (no input domain). Promote a
+                    // sibling to the primary tail so output order doesn't force a
+                    // serial lowering, demoting slot 0 (and other fixed siblings)
+                    // to extra slots:
+                    //   * exactly one sibling SOAC -> it is the primary tail
+                    //     (any flavor); other slots ride as fixed extras.
+                    //   * >= 2 sibling SOACs, all pointwise maps -> multidomain:
+                    //     the first map is primary, the rest (maps + fixed) are
+                    //     extras. The EGIR split gives each map its own domain
+                    //     and each fixed slot a 1x1x1 constant-write stage.
+                    let promote: Option<usize> = if sibling_soac_count == 1 {
+                        siblings.iter().position(|(_, v)| matches!(v.kind, TermKind::Soac(_)))
+                    } else if sibling_soac_count >= 2 && sibling_map_count == sibling_soac_count {
+                        siblings.iter().position(|(_, v)| is_map_only_fresh_soac_term(v))
+                    } else {
+                        None
+                    };
+
+                    match promote {
+                        Some(pos) => {
+                            extra_slots.push((0, slot0_value));
+                            let mut primary_value = None;
+                            for (idx, (i, v)) in siblings.into_iter().enumerate() {
+                                if idx == pos {
+                                    primary_value = Some(v);
+                                } else {
+                                    extra_slots.push((i, v));
+                                }
+                            }
+                            current = primary_value.expect("promoted slot present");
+                        }
+                        None => {
+                            // All outputs fixed (nothing to parallelize) or an
+                            // unsupported mix: retain every sibling as an extra
+                            // slot and fall through to slot 0, which the non-SOAC
+                            // tail arm rejects.
+                            extra_slots = siblings;
+                            current = slot0_value;
                         }
                     }
-                    current = *value;
                     continue;
                 }
                 scope.push_let(name, name_ty, *rhs);
@@ -2324,8 +2383,102 @@ fn try_make_multidomain_map_plan(
         // two coincide; pin that so a future non-dense slot layout can't write
         // to the wrong output buffer silently.
         debug_assert_eq!(rank, *slot_index, "output slots must be dense and sorted");
+
+        // A non-SOAC output slot has no input domain to dispatch over. When
+        // it's a self-contained fixed value (a constant array literal, or an
+        // expression over entry params), emit it as its own single-invocation
+        // 1x1x1 stage that writes it once — keeping the sibling maps parallel
+        // instead of dragging the whole entry serial for one small output.
+        // `Var` / `TupleProj` slot values would need their defining lets (not
+        // carried into a synthesized stage), so bail to the safe serial path.
+        if !matches!(slot_term.kind, TermKind::Soac(_)) {
+            if matches!(slot_term.kind, TermKind::Var(_) | TermKind::TupleProj { .. }) {
+                return None;
+            }
+            let out_binding = BindingRef::new(AUTO_STORAGE_SET, next_binding + rank as u32);
+            let out_bytes = crate::ssa::layout::type_byte_size(&slot_term.ty)?;
+            let required = compute_broadcast_required_params(slot_term, &source_def, &program.symbols)?;
+            let stage_name = if *slot_index == 0 {
+                entry_name.to_string()
+            } else {
+                format!("{}_dispatch_{}", entry_name, slot_index)
+            };
+            defs.push(make_entry_def(
+                &stage_name,
+                slot_term.clone(),
+                slot_term.ty.clone(),
+                &required,
+                Vec::new(),
+                program,
+                term_ids,
+            ));
+            // Read any param buffers the fixed value references (e.g. `[t[0]]`).
+            let mut reads = Vec::new();
+            for param in &required {
+                let Some(epb) = &param.binding else { continue };
+                match &epb.kind {
+                    EntryParamBindingKind::Single { binding, .. } => {
+                        reads.push(push_or_find_storage_binding(
+                            &mut bindings,
+                            *binding,
+                            Access::ReadOnly,
+                            BufferUsage::Input,
+                            "input".to_string(),
+                        ));
+                    }
+                    EntryParamBindingKind::TupleOfViews(fields) => {
+                        for f in fields {
+                            reads.push(push_or_find_storage_binding(
+                                &mut bindings,
+                                f.binding,
+                                Access::ReadOnly,
+                                BufferUsage::Input,
+                                "input".to_string(),
+                            ));
+                        }
+                    }
+                }
+            }
+            let write_idx = push_or_find_storage_binding(
+                &mut bindings,
+                out_binding,
+                Access::WriteOnly,
+                BufferUsage::Output,
+                format!("{}_output_{}", entry_name, slot_index),
+            );
+            if let Binding::StorageBuffer { length, .. } = &mut bindings[write_idx] {
+                *length = Some(BufferLen::Fixed {
+                    bytes: out_bytes as u64,
+                });
+            }
+            // 1x1x1: exactly one invocation writes the constant once. LocalSize 1
+            // is load-bearing — a wider workgroup would re-run the body per lane.
+            stages.push(ComputeStage {
+                entry_point: stage_name.clone(),
+                workgroup_size: (1, 1, 1),
+                dispatch_size: DispatchSize::Fixed { x: 1, y: 1, z: 1 },
+                reads,
+                writes: vec![write_idx],
+            });
+            // A plan with no accumulators + the pinned output: EGIR's map rewrite
+            // finds no Screma to wrap (a no-op), but `build_entry_outputs` honors
+            // `forced_output` so the stage writes the buffer the host expects.
+            plans.push(ParallelizationPlan {
+                entry: stage_name,
+                dispatch: DispatchModel::Fixed {
+                    groups: [1, 1, 1],
+                    local_size: [1, 1, 1],
+                },
+                bindings: PlannedBindings {
+                    map_outputs: vec![Some(out_binding)],
+                    accumulators: vec![],
+                },
+            });
+            continue;
+        }
+
         let TermKind::Soac(soac) = &slot_term.kind else {
-            return None;
+            unreachable!("non-SOAC slots handled above");
         };
         if !is_map_only_fresh_soac_term(slot_term) {
             return None;

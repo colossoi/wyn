@@ -3286,6 +3286,97 @@ entry sq(xs: []f32) []f32 = map(|x: f32| x * x, xs)
     );
 }
 
+/// True iff the named compute entry's function body `OpLoad`s
+/// `gl_GlobalInvocationID` — i.e. it lowered to a lane-indexed parallel
+/// kernel rather than a serial driver loop. Returns false if the entry
+/// or the GID builtin isn't present.
+fn entry_loads_global_invocation_id(spirv: &[u32], entry_name: &str) -> bool {
+    use wspirv::binary::parse_words;
+    use wspirv::dr::{Loader, Operand};
+    use wspirv::spirv::Op;
+
+    let mut loader = Loader::new();
+    parse_words(spirv, &mut loader).expect("parse spirv");
+    let module = loader.module();
+
+    let Some(entry) = module
+        .entry_points
+        .iter()
+        .find(|i| matches!(i.operands.get(2), Some(Operand::LiteralString(name)) if name == entry_name))
+    else {
+        return false;
+    };
+    let Some(Operand::IdRef(func_id)) = entry.operands.get(1).cloned() else {
+        return false;
+    };
+    let Some(gid_var) = module
+        .annotations
+        .iter()
+        .find(|inst| {
+            inst.class.opcode == Op::Decorate
+                && matches!(
+                    inst.operands.get(2),
+                    Some(Operand::BuiltIn(wspirv::spirv::BuiltIn::GlobalInvocationId))
+                )
+        })
+        .and_then(|inst| match inst.operands.first() {
+            Some(Operand::IdRef(id)) => Some(*id),
+            _ => None,
+        })
+    else {
+        return false;
+    };
+    let Some(func) =
+        module.functions.iter().find(|f| f.def.as_ref().and_then(|d| d.result_id) == Some(func_id))
+    else {
+        return false;
+    };
+    func.blocks.iter().any(|b| {
+        b.instructions.iter().any(|inst| {
+            inst.class.opcode == Op::Load
+                && matches!(inst.operands.first(), Some(Operand::IdRef(id)) if *id == gid_var)
+        })
+    })
+}
+
+/// A fixed-size output ahead of a streamed `map` must not force the entry
+/// serial — the map still lowers to a GID-indexed kernel. Regression: the
+/// planner used to treat only output slot 0 as the parallelizable tail, so
+/// `([2]u32, []u32)` (fixed first) lowered serial while `([]u32, [2]u32)`
+/// sharded.
+#[test]
+fn fixed_output_before_streamed_map_still_shards() {
+    let spirv = compile_to_spirv(
+        "#[compute]\nentry r(a: []u32) ([2]u32, []u32) = ([7u32, 9u32], map(|x| x + 1u32, a))\n",
+    )
+    .expect("fixed-then-map compute compiles");
+    assert!(
+        entry_loads_global_invocation_id(&spirv, "r"),
+        "a map after a fixed output must still shard (load gl_GlobalInvocationID)"
+    );
+}
+
+/// A fixed-size output alongside several *different-domain* maps: the fixed
+/// slot becomes its own 1×1×1 constant-write stage while each map keeps its
+/// own GID-indexed per-domain dispatch. Regression: any non-map slot used to
+/// drag the whole multidomain entry onto the serial fallback.
+#[test]
+fn fixed_output_with_multidomain_maps_shards() {
+    let spirv = compile_to_spirv(
+        "#[compute]\nentry r(a: []u32, b: []u32) ([2]u32, []u32, []u32) = \
+         ([7u32, 9u32], map(|x| x + 1u32, a), map(|y| y + 2u32, b))\n",
+    )
+    .expect("fixed + multidomain maps compiles");
+    assert!(
+        entry_loads_global_invocation_id(&spirv, "r_dispatch_1"),
+        "first map dispatch must shard"
+    );
+    assert!(
+        entry_loads_global_invocation_id(&spirv, "r_dispatch_2"),
+        "second map dispatch must shard"
+    );
+}
+
 /// A compute entry whose body is `map(f, xs)` should not contain an
 /// `OpLoopMerge` — the parallel kernel is a single guarded scalar
 /// branch. Inner function loops (e.g. raymarch) are not affected.
