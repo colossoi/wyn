@@ -77,8 +77,12 @@ fn range_expr(n: usize, ty: Type<TypeName>, ids: &mut TermIdSource) -> Term {
     )
 }
 
+/// Drive a source string to the slot just before
+/// `float_runtime_index_nested_producers` (after `fuse_static_indices`), the
+/// pass under test — so the inlined runtime-indexed producer is still present
+/// for `run` to float.
 fn prepared(source: &str) -> Program {
-    crate::test_pipeline::compile_to_tlc_program(source)
+    crate::test_pipeline::compile_thru_static_index(source)
 }
 
 fn entry_body(program: &Program) -> &Term {

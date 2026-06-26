@@ -652,15 +652,7 @@ impl TlcRegionsPinned {
     /// mode, what most tests want); `true` ⇒ disabled (the `--single-stage`
     /// flag).
     pub fn optimize_for_test(self, disable_parallelize: bool) -> TlcReachable {
-        self.partial_eval()
-            .normalize_soacs()
-            .monomorphize()
-            .rep_specialize()
-            .inline_small()
-            .force_inline_soac_helpers()
-            .canonicalize_producers()
-            .fuse_maps()
-            .expose_entry_producer_helpers()
+        self.optimize_for_test_thru_expose_producers()
             .fuse_static_indices()
             .float_runtime_index_nested_producers()
             .plan_execute_gather_residency()
@@ -673,6 +665,25 @@ impl TlcRegionsPinned {
             .parallelize_soacs(disable_parallelize)
             .expect("parallelize_soacs")
             .filter_reachable()
+    }
+
+    /// The shared `optimize_for_test` prefix up to and including
+    /// `expose_entry_producer_helpers` — the boundary just before the residency
+    /// cluster (`fuse_static_indices` → `float_runtime_index_nested_producers`
+    /// → `plan_execute_gather_residency`). Per-pass tests in that cluster start
+    /// here (chaining a couple more public stage methods as needed) so each pass
+    /// gets its real pre-pass input rather than re-running the whole pipeline.
+    /// A reorder of the prefix still only touches this method.
+    pub fn optimize_for_test_thru_expose_producers(self) -> TlcEntryProducersExposed {
+        self.partial_eval()
+            .normalize_soacs()
+            .monomorphize()
+            .rep_specialize()
+            .inline_small()
+            .force_inline_soac_helpers()
+            .canonicalize_producers()
+            .fuse_maps()
+            .expose_entry_producer_helpers()
     }
 }
 

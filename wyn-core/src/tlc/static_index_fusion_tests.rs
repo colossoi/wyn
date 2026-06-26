@@ -5,10 +5,12 @@
 use super::*;
 use crate::tlc::DefMeta;
 
-/// Drive a source string to the early exposed-producer TLC slot where
-/// `static_index_fusion::run` fires and return the program.
+/// Drive a source string to the exposed-producer slot (after
+/// `expose_entry_producer_helpers`, before `fuse_static_indices`) where
+/// `static_index_fusion::run` fires, and return the program — so the unfused
+/// `map(..)[k]` is still present for the pass under test to remove.
 fn exposed(source: &str) -> crate::tlc::Program {
-    crate::test_pipeline::compile_to_tlc_program(source)
+    crate::test_pipeline::compile_thru_expose_producers(source)
 }
 
 /// The entry body, after peeling outer parameter `Lambda`s.

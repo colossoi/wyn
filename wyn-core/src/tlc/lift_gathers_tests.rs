@@ -11,10 +11,11 @@ entry gen(bh: []vec4f32) []i32 =
   map(|i:i32| counts[i % 256], iota(6144))
 ";
 
-/// Run the front-end through `apply_ownership` (the stage `lift_gathers`
-/// consumes), returning the TLC program just before the pass.
-fn ownership_applied(src: &str) -> Program {
-    crate::test_pipeline::compile_to_tlc_program(src)
+/// Run the front-end through `float_runtime_index_nested_producers` — the slot
+/// just before `plan_execute_gather_residency` (which runs `lift_gathers::run`)
+/// in the residency cluster — returning the TLC program the pass consumes.
+fn pre_residency(src: &str) -> Program {
+    crate::test_pipeline::compile_thru_runtime_index(src)
 }
 
 fn def_named<'a>(program: &'a Program, name: &str) -> &'a super::Def {
@@ -58,7 +59,7 @@ fn walk(term: &Term, f: &mut impl FnMut(&Term)) {
 
 #[test]
 fn lifts_map_gather_into_prepass_and_storage_index() {
-    let program = ownership_applied(GATHER_SRC);
+    let program = pre_residency(GATHER_SRC);
     assert!(
         has_map_producing_let(&def_named(&program, "gen").body),
         "precondition: the consumer starts with a map-producing `let counts`"
@@ -131,7 +132,7 @@ entry g(xs: []i32) []i32 =
   let o = scan(|a:i32,b:i32| a+b, 0, xs) in
   map(|i:i32| o[i % 256], iota(6144))
 ";
-    let lifted = super::run(ownership_applied(src), &mut crate::IdSource::<u32>::new());
+    let lifted = super::run(pre_residency(src), &mut crate::IdSource::<u32>::new());
     assert!(
         has_gather_prepass(&lifted),
         "scan over an input array must be lifted into a gather pre-pass"
@@ -151,7 +152,7 @@ entry gen(bh: []vec4f32) []i32 =
   let offsets = scan(|a:i32,b:i32| a+b, 0, counts) in
   map(|i:i32| offsets[i % 256], iota(6144))
 ";
-    let lifted = super::run(ownership_applied(src), &mut crate::IdSource::<u32>::new());
+    let lifted = super::run(pre_residency(src), &mut crate::IdSource::<u32>::new());
     assert!(
         has_gather_prepass(&lifted),
         "a scan over a (map-fused) computed array must be lifted into a gather pre-pass"
@@ -173,7 +174,7 @@ entry gen(xs: []i32) []i32 =
   let outer = scan(|a:i32,b:i32| a*b, 1, mid) in
   map(|i:i32| outer[i % 256], iota(6144))
 ";
-    let lifted = super::run(ownership_applied(src), &mut crate::IdSource::<u32>::new());
+    let lifted = super::run(pre_residency(src), &mut crate::IdSource::<u32>::new());
     let prepasses = lifted
         .defs
         .iter()
@@ -202,7 +203,7 @@ entry gen(bh: []vec4f32) []i32 =
       map(|i:i32| s1[i % 256], iota(6144))) in
   map(|i:i32| s2[i % 128], iota(2048))
 ";
-    let lifted = super::run(ownership_applied(src), &mut crate::IdSource::<u32>::new());
+    let lifted = super::run(pre_residency(src), &mut crate::IdSource::<u32>::new());
     let prepasses = lifted
         .defs
         .iter()
@@ -235,7 +236,7 @@ entry gen(xs: []i32) []i32 =
   let n: i32 = length(counts) in
   map(|i: i32| counts[i % 256] + n, iota(6144))
 ";
-    let lifted = super::run(ownership_applied(src), &mut crate::IdSource::<u32>::new());
+    let lifted = super::run(pre_residency(src), &mut crate::IdSource::<u32>::new());
     assert!(
         !has_gather_prepass(&lifted),
         "a bare Var(counts) in a non-materializable position must trip the bail \
@@ -257,7 +258,7 @@ entry gen(bh: []i32) []i32 =
   let counts = map(|x:i32| x + 1, bh) in
   map(|c:i32| c * 2, counts)
 ";
-    let program = ownership_applied(src);
+    let program = pre_residency(src);
     let n_before = program.defs.len();
     let lifted = super::run(program, &mut crate::IdSource::<u32>::new());
     assert_eq!(
@@ -292,7 +293,7 @@ entry gen(bh: []vec4f32) ([]i32, []i32) =
      map(|i:i32| counts[i % 256], iota(6144)),
    iota(100))
 ";
-    let program = ownership_applied(src);
+    let program = pre_residency(src);
     let normalized = crate::tlc::normalize_outputs::run(program).expect("normalize_outputs");
     let lifted = super::run(normalized, &mut crate::IdSource::<u32>::new());
     assert!(
