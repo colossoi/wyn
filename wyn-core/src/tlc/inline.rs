@@ -111,12 +111,15 @@ fn build_soac_helper_candidates(program: &Program) -> LookupMap<SymbolId, Inline
     candidates
 }
 
-/// True if `ty` references any polytype `Type::Variable(_)` — an
-/// unresolved type parameter. Doesn't trigger on size-vars or any
-/// other nullary `TypeName::*`-marker.
+/// True if `ty` references an unresolved *value* type parameter (a free
+/// polytype `Type::Variable`). For an array, only the element slot can carry
+/// one; the variant / size / region slots carry representation, size, and
+/// region variables that are resolved on their own axes and don't leak to the
+/// backend as "unresolved type variable", so they are not counted.
 fn type_contains_variable(ty: &Type<TypeName>) -> bool {
     match ty {
         Type::Variable(_) => true,
+        Type::Constructed(TypeName::Array, args) => args.first().is_some_and(type_contains_variable),
         Type::Constructed(_, args) => args.iter().any(type_contains_variable),
     }
 }
