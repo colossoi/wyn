@@ -2854,7 +2854,7 @@ fn extract_dispatch_tasks(
     for (stage_idx, (sym, _ty, rhs0)) in analysis.prefix_lets.iter().enumerate() {
         let mut rhs = rhs0.clone();
         for (old, new) in value_aliases.clone() {
-            rhs = super::fusion::substitute_sym(rhs, old, new, term_ids);
+            rhs = super::subst::substitute_sym(rhs, old, new, term_ids);
         }
         for (old, new) in place_aliases.clone() {
             rhs = substitute_dispatch_symbol(rhs, old, new, term_ids);
@@ -2919,7 +2919,7 @@ fn substitute_dispatch_symbol(
     new: SymbolId,
     term_ids: &mut TermIdSource,
 ) -> Term {
-    let mut term = super::fusion::substitute_sym(term, old, new, term_ids);
+    let mut term = super::subst::substitute_sym(term, old, new, term_ids);
     if let TermKind::Soac(soac) = &mut term.kind {
         substitute_dispatch_symbol_in_soac_dest(soac, old, new);
     }
@@ -3001,7 +3001,7 @@ fn inline_post_producers(
         _ => {
             let mut rewritten = term;
             for (sym, producer) in producers {
-                rewritten = super::fusion::substitute_term_expr(rewritten, *sym, producer, term_ids);
+                rewritten = super::subst::substitute_term_expr(rewritten, *sym, producer, term_ids);
             }
             rewritten
         }

@@ -12,6 +12,7 @@ pub mod fusion;
 pub mod hof_specialize;
 pub mod if_over_producer;
 pub mod inline;
+pub mod subst;
 pub mod input_slice_bounds;
 pub mod lift_gathers;
 pub mod materialize_entry_soacs;
@@ -1067,6 +1068,18 @@ impl Term {
             ty,
             span,
             kind: TermKind::IntLit(value.into()),
+        }
+    }
+
+    /// Build a term that keeps this term's `ty` and `span` but swaps in a new
+    /// `kind` and `id` — the functional-record-update ("`body` with kind = …")
+    /// shape, without the `..self.clone()` cost of deep-cloning the old `kind`.
+    pub(crate) fn with_kind(&self, kind: TermKind, id: TermId) -> Term {
+        Term {
+            id,
+            ty: self.ty.clone(),
+            span: self.span,
+            kind,
         }
     }
 

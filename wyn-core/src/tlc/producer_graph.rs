@@ -14,7 +14,7 @@ use crate::LookupSet;
 use crate::SymbolTable;
 
 use super::array_semantics::{classify_term, ArraySemantics, FunctionSummary, ResultSemantics};
-use super::fusion::substitute_sym;
+use super::subst::substitute_sym;
 use super::{Lambda, Term, TermIdSource, TermKind};
 use crate::ast::TypeName;
 use crate::SymbolId;

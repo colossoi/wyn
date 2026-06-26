@@ -338,7 +338,7 @@ fn compose_lambda_bodies(
     // Substitute g's first parameter with the fresh symbol in g's body
     let g_param = g.lam.params[0].0;
     let g_body_substituted =
-        super::fusion::substitute_sym(*g.lam.body.clone(), g_param, fresh_sym, term_ids);
+        super::subst::substitute_sym(*g.lam.body.clone(), g_param, fresh_sym, term_ids);
 
     let composed_body = Term {
         id: term_ids.next_id(),
@@ -376,7 +376,7 @@ fn compose_map_into_op(
     // The op has params [acc, elem]. Substitute elem with fresh.
     let elem_param = op.lam.params[1].0;
     let op_body_substituted =
-        super::fusion::substitute_sym(*op.lam.body.clone(), elem_param, fresh_sym, term_ids);
+        super::subst::substitute_sym(*op.lam.body.clone(), elem_param, fresh_sym, term_ids);
 
     let composed_body = Term {
         id: term_ids.next_id(),
