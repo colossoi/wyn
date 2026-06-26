@@ -264,18 +264,20 @@ fn float_soac(
             )
         }
         SoacOp::Screma {
-            map_lams,
+            lanes,
             accumulators,
             inputs,
-            map_input_indices,
         } => {
             let mut floats = Vec::new();
-            let map_lams = map_lams
+            let lanes = lanes
                 .into_iter()
-                .map(|body| {
-                    let (mut body_floats, body) = float_soac_body(body, blocked, ids, symbols);
+                .map(|lane| {
+                    let (mut body_floats, lam) = float_soac_body(lane.lam, blocked, ids, symbols);
                     floats.append(&mut body_floats);
-                    body
+                    super::ScremaLane {
+                        lam,
+                        input_indices: lane.input_indices,
+                    }
                 })
                 .collect();
             let accumulators = accumulators
@@ -306,10 +308,9 @@ fn float_soac(
             (
                 floats,
                 SoacOp::Screma {
-                    map_lams,
+                    lanes,
                     accumulators,
                     inputs,
-                    map_input_indices,
                 },
             )
         }

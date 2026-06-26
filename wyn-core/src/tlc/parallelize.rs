@@ -109,14 +109,13 @@ fn parallel_soac_shape(soac: &SoacOp) -> Option<ParallelSoacShape<'_>> {
         }),
         SoacOp::Screma {
             inputs,
-            map_lams,
+            lanes,
             accumulators,
-            map_input_indices: _,
         } => {
             let result_elem_type = accumulators
                 .first()
                 .map(|acc| acc.ne.ty.clone())
-                .or_else(|| map_lams.first().map(|lam| lam.lam.ret_ty.clone()))
+                .or_else(|| lanes.first().map(|lane| lane.lam.lam.ret_ty.clone()))
                 .unwrap_or_else(|| Type::Constructed(TypeName::Unit, vec![]));
             // Pointwise (no accumulators, all maps) routes through the
             // multi-output map path. Mixed Screma (accumulators + maps) is
@@ -124,7 +123,7 @@ fn parallel_soac_shape(soac: &SoacOp) -> Option<ParallelSoacShape<'_>> {
             // serial single-thread compute pipeline — the EGIR-side
             // parallel transform lights up in a follow-up. A Screma with
             // no maps and no accumulators is meaningless; reject it.
-            let lowerable_today = !inputs.is_empty() && (!accumulators.is_empty() || !map_lams.is_empty());
+            let lowerable_today = !inputs.is_empty() && (!accumulators.is_empty() || !lanes.is_empty());
             Some(ParallelSoacShape {
                 flavor: ParallelSoacFlavor::Screma,
                 inputs: inputs.iter().collect(),
@@ -655,15 +654,13 @@ fn analyze_soac(
             }
         }
         SoacOp::Screma {
-            map_lams,
+            lanes,
             accumulators,
             inputs,
-            map_input_indices,
         } => SoacOp::Screma {
-            map_lams: map_lams.clone(),
+            lanes: lanes.clone(),
             accumulators: accumulators.clone(),
             inputs: inputs.clone(),
-            map_input_indices: map_input_indices.clone(),
         },
         SoacOp::Scan {
             op,
@@ -968,23 +965,22 @@ fn fuse_output_slot_chain(
         }
     }
     let inputs: Vec<ArrayExpr> = union.iter().map(|(_, ae)| ae.clone()).collect();
-    let map_input_indices: Vec<Vec<usize>> = fusible
+    // Each lane keeps its own single-input map function, reading exactly its own
+    // input via `input_indices`; same-symbol lanes index one shared union entry.
+    let lanes: Vec<super::ScremaLane> = fusible
         .iter()
         .map(|slot| {
             let pos = union
                 .iter()
                 .position(|(sym, _)| *sym == slot.input_sym)
                 .expect("union built from these lanes");
-            vec![pos]
-        })
-        .collect();
-
-    // Each lane keeps its own single-input map function.
-    let map_lams: Vec<super::SoacBody> = fusible
-        .iter()
-        .map(|slot| super::SoacBody {
-            lam: slot.lam.clone(),
-            captures: vec![],
+            super::ScremaLane {
+                lam: super::SoacBody {
+                    lam: slot.lam.clone(),
+                    captures: vec![],
+                },
+                input_indices: vec![pos],
+            }
         })
         .collect();
 
@@ -995,8 +991,7 @@ fn fuse_output_slot_chain(
         ty: tuple_ty.clone(),
         span: chain.span,
         kind: TermKind::Soac(SoacOp::Screma {
-            map_lams,
-            map_input_indices,
+            lanes,
             accumulators: vec![],
             inputs,
         }),
@@ -1636,10 +1631,8 @@ fn is_scalar_reduction(term: &Term) -> bool {
     match &term.kind {
         TermKind::Soac(SoacOp::Reduce { .. }) => true,
         TermKind::Soac(SoacOp::Screma {
-            map_lams,
-            accumulators,
-            ..
-        }) => super::is_scalar_reduce_screma(map_lams, accumulators),
+            lanes, accumulators, ..
+        }) => super::is_scalar_reduce_screma(lanes, accumulators),
         _ => false,
     }
 }
@@ -3507,9 +3500,7 @@ fn make_map_plan(
 /// `synthesize_phase2_scan`) via `graph_ops::clone_pure_subgraph`.
 fn egir_parallelizable(soac: &SoacOp) -> bool {
     let SoacOp::Screma {
-        map_lams,
-        accumulators,
-        ..
+        lanes, accumulators, ..
     } = soac
     else {
         return false;
@@ -3517,7 +3508,7 @@ fn egir_parallelizable(soac: &SoacOp) -> bool {
     if accumulators.is_empty() {
         return false;
     }
-    if map_lams.iter().any(|m| !m.captures.is_empty()) {
+    if lanes.iter().any(|lane| !lane.lam.captures.is_empty()) {
         return false;
     }
     let all_reduce = accumulators.iter().all(|a| matches!(a.kind, super::ScremaAccumulator::Reduce));
@@ -3596,10 +3587,8 @@ fn make_screma_plan(
     let auto_input_count = count_view_param_bindings(program, analysis.def_name);
     let (n_maps, accumulators_src) = match &analysis.soac.original {
         SoacOp::Screma {
-            map_lams,
-            accumulators,
-            ..
-        } => (map_lams.len() as u32, accumulators.clone()),
+            lanes, accumulators, ..
+        } => (lanes.len() as u32, accumulators.clone()),
         _ => unreachable!(),
     };
     let n_accs = accumulators_src.len() as u32;

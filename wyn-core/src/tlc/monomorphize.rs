@@ -673,12 +673,17 @@ impl<'a> Monomorphizer<'a> {
                 values: self.process_array_expr(values),
             },
             SoacOp::Screma {
-                map_lams,
+                lanes,
                 accumulators,
                 inputs,
-                map_input_indices,
             } => SoacOp::Screma {
-                map_lams: map_lams.iter().map(|body| self.process_soac_body(body)).collect(),
+                lanes: lanes
+                    .iter()
+                    .map(|lane| super::ScremaLane {
+                        lam: self.process_soac_body(&lane.lam),
+                        input_indices: lane.input_indices.clone(),
+                    })
+                    .collect(),
                 accumulators: accumulators
                     .iter()
                     .map(|acc| super::ScremaAccumulatorSpec {
@@ -689,7 +694,6 @@ impl<'a> Monomorphizer<'a> {
                     })
                     .collect(),
                 inputs: inputs.iter().map(|ae| self.process_array_expr(ae)).collect(),
-                map_input_indices: map_input_indices.clone(),
             },
         }
     }
@@ -1054,12 +1058,17 @@ impl<'a> Monomorphizer<'a> {
                 values: self.apply_subst_array_expr(values, subst),
             },
             SoacOp::Screma {
-                map_lams,
+                lanes,
                 accumulators,
                 inputs,
-                map_input_indices,
             } => SoacOp::Screma {
-                map_lams: map_lams.iter().map(|body| self.apply_subst_soac_body(body, subst)).collect(),
+                lanes: lanes
+                    .iter()
+                    .map(|lane| super::ScremaLane {
+                        lam: self.apply_subst_soac_body(&lane.lam, subst),
+                        input_indices: lane.input_indices.clone(),
+                    })
+                    .collect(),
                 accumulators: accumulators
                     .iter()
                     .map(|acc| super::ScremaAccumulatorSpec {
@@ -1070,7 +1079,6 @@ impl<'a> Monomorphizer<'a> {
                     })
                     .collect(),
                 inputs: inputs.iter().map(|ae| self.apply_subst_array_expr(ae, subst)).collect(),
-                map_input_indices: map_input_indices.clone(),
             },
         }
     }

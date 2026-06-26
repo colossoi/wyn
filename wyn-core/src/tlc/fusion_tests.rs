@@ -14,11 +14,11 @@ fn dummy_span() -> Span {
 fn as_fused_map_reduce(term: &Term) -> (&SoacBody, &[ArrayExpr]) {
     match &term.kind {
         TermKind::Soac(SoacOp::Screma {
-            map_lams,
+            lanes,
             accumulators,
             inputs,
             ..
-        }) if map_lams.is_empty()
+        }) if lanes.is_empty()
             && accumulators.len() == 1
             && matches!(accumulators[0].kind, ScremaAccumulator::Reduce) =>
         {
@@ -246,7 +246,7 @@ fn contains_screma(term: &Term) -> bool {
 /// no map outputs (a fused `map → reduce`) does not count.
 fn contains_map_screma(term: &Term) -> bool {
     match &term.kind {
-        TermKind::Soac(SoacOp::Screma { map_lams, .. }) if !map_lams.is_empty() => true,
+        TermKind::Soac(SoacOp::Screma { lanes, .. }) if !lanes.is_empty() => true,
         _ => {
             let mut found = false;
             term.for_each_child(&mut |child| {
@@ -494,10 +494,9 @@ fn test_horizontal_sibling_maps_merge_to_multi_output_screma() {
 
     match &merged_rhs.kind {
         TermKind::Soac(SoacOp::Screma {
-            map_lams,
+            lanes,
             accumulators,
             inputs,
-            map_input_indices: _,
         }) => {
             assert_eq!(inputs.len(), 1);
             assert!(matches!(
@@ -505,16 +504,16 @@ fn test_horizontal_sibling_maps_merge_to_multi_output_screma() {
                 ArrayExpr::Var(VarRef::Symbol(sym), _) if *sym == xs_sym
             ));
             assert!(accumulators.is_empty());
-            assert_eq!(map_lams.len(), 2);
-            assert_eq!(map_lams[0].lam.params.len(), 1);
-            assert_eq!(map_lams[0].lam.params[0].0, x_sym);
-            assert_eq!(map_lams[1].lam.params.len(), 1);
-            assert_eq!(map_lams[1].lam.params[0].0, y_sym);
+            assert_eq!(lanes.len(), 2);
+            assert_eq!(lanes[0].lam.lam.params.len(), 1);
+            assert_eq!(lanes[0].lam.lam.params[0].0, x_sym);
+            assert_eq!(lanes[1].lam.lam.params.len(), 1);
+            assert_eq!(lanes[1].lam.lam.params[0].0, y_sym);
             assert!(
-                matches!(&map_lams[0].lam.body.kind, TermKind::Var(VarRef::Symbol(sym)) if *sym == x_sym)
+                matches!(&lanes[0].lam.lam.body.kind, TermKind::Var(VarRef::Symbol(sym)) if *sym == x_sym)
             );
             assert!(
-                matches!(&map_lams[1].lam.body.kind, TermKind::Var(VarRef::Symbol(sym)) if *sym == y_sym)
+                matches!(&lanes[1].lam.lam.body.kind, TermKind::Var(VarRef::Symbol(sym)) if *sym == y_sym)
             );
         }
         other => panic!("expected merged Screma rhs, got {:?}", other),
@@ -763,25 +762,24 @@ fn test_horizontal_sibling_maps_merge_same_input_vector() {
 
     match &merged_rhs.kind {
         TermKind::Soac(SoacOp::Screma {
-            map_lams,
+            lanes,
             accumulators,
             inputs,
-            map_input_indices: _,
         }) => {
             assert_eq!(inputs.len(), 2);
             assert!(accumulators.is_empty());
-            assert_eq!(map_lams.len(), 2);
-            assert_eq!(map_lams[0].lam.params.len(), 2);
-            assert_eq!(map_lams[0].lam.params[0].0, x1_sym);
-            assert_eq!(map_lams[0].lam.params[1].0, y1_sym);
-            assert_eq!(map_lams[1].lam.params.len(), 2);
-            assert_eq!(map_lams[1].lam.params[0].0, x2_sym);
-            assert_eq!(map_lams[1].lam.params[1].0, y2_sym);
+            assert_eq!(lanes.len(), 2);
+            assert_eq!(lanes[0].lam.lam.params.len(), 2);
+            assert_eq!(lanes[0].lam.lam.params[0].0, x1_sym);
+            assert_eq!(lanes[0].lam.lam.params[1].0, y1_sym);
+            assert_eq!(lanes[1].lam.lam.params.len(), 2);
+            assert_eq!(lanes[1].lam.lam.params[0].0, x2_sym);
+            assert_eq!(lanes[1].lam.lam.params[1].0, y2_sym);
             assert!(
-                matches!(&map_lams[0].lam.body.kind, TermKind::Var(VarRef::Symbol(sym)) if *sym == x1_sym)
+                matches!(&lanes[0].lam.lam.body.kind, TermKind::Var(VarRef::Symbol(sym)) if *sym == x1_sym)
             );
             assert!(
-                matches!(&map_lams[1].lam.body.kind, TermKind::Var(VarRef::Symbol(sym)) if *sym == y2_sym)
+                matches!(&lanes[1].lam.lam.body.kind, TermKind::Var(VarRef::Symbol(sym)) if *sym == y2_sym)
             );
         }
         other => panic!("expected merged Screma rhs, got {:?}", other),
@@ -904,10 +902,9 @@ fn test_horizontal_sibling_maps_enable_shared_producer_vertical_fusion() {
 
     match &merged_rhs.kind {
         TermKind::Soac(SoacOp::Screma {
-            map_lams,
+            lanes,
             accumulators,
             inputs,
-            map_input_indices: _,
         }) => {
             assert_eq!(inputs.len(), 1);
             assert!(matches!(
@@ -915,13 +912,13 @@ fn test_horizontal_sibling_maps_enable_shared_producer_vertical_fusion() {
                 ArrayExpr::Var(VarRef::Symbol(sym), _) if *sym == xs_sym
             ));
             assert!(accumulators.is_empty());
-            assert_eq!(map_lams.len(), 2);
-            assert_eq!(map_lams[0].lam.params.len(), 1);
-            assert_eq!(map_lams[0].lam.params[0].0, x_sym);
-            assert_eq!(map_lams[1].lam.params.len(), 1);
-            assert_eq!(map_lams[1].lam.params[0].0, x_sym);
-            assert!(matches!(&map_lams[0].lam.body.kind, TermKind::Let { .. }));
-            assert!(matches!(&map_lams[1].lam.body.kind, TermKind::Let { .. }));
+            assert_eq!(lanes.len(), 2);
+            assert_eq!(lanes[0].lam.lam.params.len(), 1);
+            assert_eq!(lanes[0].lam.lam.params[0].0, x_sym);
+            assert_eq!(lanes[1].lam.lam.params.len(), 1);
+            assert_eq!(lanes[1].lam.lam.params[0].0, x_sym);
+            assert!(matches!(&lanes[0].lam.lam.body.kind, TermKind::Let { .. }));
+            assert!(matches!(&lanes[1].lam.lam.body.kind, TermKind::Let { .. }));
         }
         other => panic!("expected merged Screma rhs, got {:?}", other),
     }
@@ -1049,7 +1046,7 @@ fn test_screma_fuses_shared_map_producer_into_map_and_reduce() {
     assert_ne!(*screma_sym, b_sym);
     match &screma_rhs.kind {
         TermKind::Soac(SoacOp::Screma {
-            map_lams,
+            lanes,
             accumulators,
             inputs,
             ..
@@ -1059,9 +1056,9 @@ fn test_screma_fuses_shared_map_producer_into_map_and_reduce() {
                 &inputs[0],
                 ArrayExpr::Var(VarRef::Symbol(sym), _) if *sym == xs_sym
             ));
-            assert_eq!(map_lams.len(), 1);
+            assert_eq!(lanes.len(), 1);
             assert_eq!(accumulators.len(), 1);
-            let map_lam = &map_lams[0];
+            let map_lam = &lanes[0].lam;
             let reduce_lam = &accumulators[0].step_lam;
             assert_eq!(map_lam.lam.params.len(), 1);
             assert_eq!(map_lam.lam.params[0].0, x_sym);
@@ -1355,10 +1352,10 @@ fn test_screma_fuses_across_independent_let() {
     assert!(matches!(
         &screma_rhs.kind,
         TermKind::Soac(SoacOp::Screma {
-            map_lams,
+            lanes,
             accumulators,
             ..
-        }) if map_lams.len() == 1 && accumulators.len() == 1
+        }) if lanes.len() == 1 && accumulators.len() == 1
     ));
     assert!(matches!(
         &k_let.kind,
@@ -2022,12 +2019,11 @@ fn test_filter_into_reduce_fuses_to_masked_screma() {
     assert!(!contains_filter(&fused.defs[0].body));
     match find_first_screma(&fused.defs[0].body).expect("expected fused Screma") {
         SoacOp::Screma {
-            map_lams,
+            lanes,
             accumulators,
             inputs,
-            map_input_indices: _,
         } => {
-            assert!(map_lams.is_empty());
+            assert!(lanes.is_empty());
             assert_eq!(accumulators.len(), 1);
             assert_eq!(inputs.len(), 1);
             match &inputs[0] {
@@ -2169,12 +2165,11 @@ fn test_filter_into_reduce_and_length_fuses_to_one_screma() {
     assert!(!contains_filter(&fused.defs[0].body));
     match find_first_screma(&fused.defs[0].body).expect("expected filtered Screma") {
         SoacOp::Screma {
-            map_lams,
+            lanes,
             accumulators,
             inputs,
-            map_input_indices: _,
         } => {
-            assert!(map_lams.is_empty());
+            assert!(lanes.is_empty());
             assert_eq!(accumulators.len(), 2);
             assert_eq!(inputs.len(), 1);
         }
@@ -2400,11 +2395,9 @@ fn test_filter_into_length_only_fuses_to_count_screma() {
     assert!(!contains_filter(&fused.defs[0].body));
     match find_first_screma(&fused.defs[0].body).expect("expected count Screma") {
         SoacOp::Screma {
-            map_lams,
-            accumulators,
-            ..
+            lanes, accumulators, ..
         } => {
-            assert!(map_lams.is_empty());
+            assert!(lanes.is_empty());
             assert_eq!(accumulators.len(), 1);
         }
         other => panic!("expected Screma, got {other:?}"),

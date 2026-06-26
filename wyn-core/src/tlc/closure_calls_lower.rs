@@ -493,10 +493,9 @@ impl<'a> CallLowerer<'a> {
                 values: self.lower_array_expr(values),
             },
             SoacOp::Screma {
-                map_lams,
+                lanes,
                 accumulators,
                 inputs,
-                map_input_indices,
             } => {
                 fn lower_body(this: &mut CallLowerer<'_>, body: super::SoacBody) -> super::SoacBody {
                     super::SoacBody {
@@ -509,7 +508,13 @@ impl<'a> CallLowerer<'a> {
                     }
                 }
                 SoacOp::Screma {
-                    map_lams: map_lams.into_iter().map(|body| lower_body(self, body)).collect(),
+                    lanes: lanes
+                        .into_iter()
+                        .map(|lane| super::ScremaLane {
+                            lam: lower_body(self, lane.lam),
+                            input_indices: lane.input_indices,
+                        })
+                        .collect(),
                     accumulators: accumulators
                         .into_iter()
                         .map(|acc| super::ScremaAccumulatorSpec {
@@ -520,7 +525,6 @@ impl<'a> CallLowerer<'a> {
                         })
                         .collect(),
                     inputs: inputs.into_iter().map(|ae| self.lower_array_expr(ae)).collect(),
-                    map_input_indices,
                 }
             }
         }

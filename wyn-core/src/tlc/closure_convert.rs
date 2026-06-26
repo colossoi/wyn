@@ -399,13 +399,12 @@ pub fn collect_free_vars_soac(
             collect_free_vars_array_expr(values, bound, top_level, known_defs, symbols, free, seen);
         }
         SoacOp::Screma {
-            map_lams,
+            lanes,
             accumulators,
             inputs,
-            map_input_indices: _,
         } => {
-            for map_lam in map_lams {
-                collect_free_vars_soac_body(map_lam, bound, top_level, known_defs, symbols, free, seen);
+            for lane in lanes {
+                collect_free_vars_soac_body(&lane.lam, bound, top_level, known_defs, symbols, free, seen);
             }
             for acc in accumulators {
                 collect_free_vars_soac_body(
@@ -559,11 +558,9 @@ fn check_soac_envelopes(
         SoacOp::ReduceByIndex { op, .. } => vec![op],
         SoacOp::Scatter { lam, .. } => vec![lam],
         SoacOp::Screma {
-            map_lams,
-            accumulators,
-            ..
+            lanes, accumulators, ..
         } => {
-            let mut bodies: Vec<&super::SoacBody> = map_lams.iter().collect();
+            let mut bodies: Vec<&super::SoacBody> = lanes.iter().map(|lane| &lane.lam).collect();
             for acc in accumulators {
                 bodies.push(&acc.step_lam);
                 bodies.push(&acc.reduce_op);
@@ -1141,12 +1138,17 @@ impl<'a> ClosureConverter<'a> {
                 values: self.convert_array_expr(values, span),
             },
             SoacOp::Screma {
-                map_lams,
+                lanes,
                 accumulators,
                 inputs,
-                map_input_indices,
             } => SoacOp::Screma {
-                map_lams: map_lams.into_iter().map(|body| self.lift_soac_lambda(body.lam, span)).collect(),
+                lanes: lanes
+                    .into_iter()
+                    .map(|lane| super::ScremaLane {
+                        lam: self.lift_soac_lambda(lane.lam.lam, span),
+                        input_indices: lane.input_indices,
+                    })
+                    .collect(),
                 accumulators: accumulators
                     .into_iter()
                     .map(|acc| super::ScremaAccumulatorSpec {
@@ -1157,7 +1159,6 @@ impl<'a> ClosureConverter<'a> {
                     })
                     .collect(),
                 inputs: inputs.into_iter().map(|ae| self.convert_array_expr(ae, span)).collect(),
-                map_input_indices,
             },
         }
     }
@@ -1322,12 +1323,10 @@ fn collect_soac_bound_syms(soac: &SoacOp, out: &mut LookupSet<SymbolId>) {
         SoacOp::ReduceByIndex { op, .. } => body(op, out),
         SoacOp::Scatter { lam, .. } => body(lam, out),
         SoacOp::Screma {
-            map_lams,
-            accumulators,
-            ..
+            lanes, accumulators, ..
         } => {
-            for map_lam in map_lams {
-                body(map_lam, out);
+            for lane in lanes {
+                body(&lane.lam, out);
             }
             for acc in accumulators {
                 body(&acc.step_lam, out);

@@ -510,10 +510,9 @@ impl<'p> Builder<'p> {
                 self.visit_soac_body(op);
             }
             SoacOp::Screma {
-                map_lams,
+                lanes,
                 accumulators,
                 inputs,
-                ..
             } => {
                 for acc in accumulators {
                     self.visit_term(&acc.ne);
@@ -521,8 +520,8 @@ impl<'p> Builder<'p> {
                 for ae in inputs {
                     self.visit_array_expr(ae);
                 }
-                for map_lam in map_lams {
-                    for ((sym, ty), input) in map_lam.lam.params.iter().zip(inputs.iter()) {
+                for lane in lanes {
+                    for ((sym, ty), input) in lane.lam.lam.params.iter().zip(inputs.iter()) {
                         if !types::is_copy(ty) {
                             let origin = self.element_origin_from_input(input);
                             let owner = self.fresh_owner(origin);
@@ -555,8 +554,8 @@ impl<'p> Builder<'p> {
                         }
                     }
                 }
-                for map_lam in map_lams {
-                    self.visit_soac_body(map_lam);
+                for lane in lanes {
+                    self.visit_soac_body(&lane.lam);
                 }
                 for acc in accumulators {
                     self.visit_soac_body(&acc.step_lam);
@@ -970,14 +969,13 @@ impl<'m> Liveness<'m> {
                 self.analyze(ne, after_indices)
             }
             SoacOp::Screma {
-                map_lams,
+                lanes,
                 accumulators,
                 inputs,
-                ..
             } => {
                 let mut live = live_after;
-                for map_lam in map_lams {
-                    live = self.soac_envelope_fixed_point(map_lam, &per_call_defs, live);
+                for lane in lanes {
+                    live = self.soac_envelope_fixed_point(&lane.lam, &per_call_defs, live);
                 }
                 for acc in accumulators {
                     live = self.soac_envelope_fixed_point(&acc.step_lam, &per_call_defs, live);

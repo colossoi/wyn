@@ -390,13 +390,12 @@ fn subst_soac(soac: &mut SoacOp, s: &RegionSubst) {
             subst_array_expr(values, s);
         }
         SoacOp::Screma {
-            map_lams,
+            lanes,
             accumulators,
             inputs,
-            ..
         } => {
-            for map_lam in map_lams {
-                subst_soac_body(map_lam, s);
+            for lane in lanes {
+                subst_soac_body(&mut lane.lam, s);
             }
             for acc in accumulators {
                 subst_soac_body(&mut acc.step_lam, s);

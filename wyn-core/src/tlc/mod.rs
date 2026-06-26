@@ -443,14 +443,19 @@ pub struct SoacBody {
     pub captures: Vec<(SymbolId, Type<TypeName>, Term)>,
 }
 
-/// The default `map_input_indices` for a `SoacOp::Screma`: every map lane reads
-/// every input. Used by all constructors except the equal-domain fuser, which
-/// gives each lane its own input subset.
-pub fn screma_all_inputs_indices(n_inputs: usize, n_lams: usize) -> Vec<Vec<usize>> {
-    vec![(0..n_inputs).collect(); n_lams]
+/// Build `ScremaLane`s where every lane reads every input — the common case for
+/// all constructors except the equal-domain fuser, which gives each lane its
+/// own input subset.
+pub fn screma_lanes_all_inputs(lams: Vec<SoacBody>, n_inputs: usize) -> Vec<ScremaLane> {
+    lams.into_iter()
+        .map(|lam| ScremaLane {
+            lam,
+            input_indices: (0..n_inputs).collect(),
+        })
+        .collect()
 }
 
-/// Whether a `Screma` with these `map_lams`/`accumulators` is a fused
+/// Whether a `Screma` with these `lanes`/`accumulators` is a fused
 /// `map → reduce`: no map outputs and exactly one `Reduce` accumulator.
 ///
 /// Such a Screma is **scalar-output** — its sole result is the reduce value,
@@ -458,10 +463,8 @@ pub fn screma_all_inputs_indices(n_inputs: usize, n_lams: usize) -> Vec<Vec<usiz
 /// (no `Tuple(num_outputs)` wrapper) and needs no `TupleProj`. Always
 /// discriminate single-output-reduce from a genuine multi-output Screma by
 /// THIS shape, never by whether the result type happens to be a `Tuple`.
-pub fn is_scalar_reduce_screma(map_lams: &[SoacBody], accumulators: &[ScremaAccumulatorSpec]) -> bool {
-    map_lams.is_empty()
-        && accumulators.len() == 1
-        && matches!(accumulators[0].kind, ScremaAccumulator::Reduce)
+pub fn is_scalar_reduce_screma(lanes: &[ScremaLane], accumulators: &[ScremaAccumulatorSpec]) -> bool {
+    lanes.is_empty() && accumulators.len() == 1 && matches!(accumulators[0].kind, ScremaAccumulator::Reduce)
 }
 
 /// A symbolic dimension expression.
@@ -638,6 +641,21 @@ pub struct ScremaAccumulatorSpec {
     pub ne: Box<Term>,
 }
 
+/// One elementwise output lane of a `SoacOp::Screma`. Bundling the lambda with
+/// the inputs it reads makes a lane's two halves travel together — the old
+/// parallel `map_lams` / `map_input_indices` vecs could desync in length and
+/// silently mis-route a lane's inputs; that state is now unrepresentable.
+#[derive(Debug, Clone)]
+pub struct ScremaLane {
+    /// Elementwise function `(x1, ..., xn) -> y`.
+    pub lam: SoacBody,
+    /// Positions into the Screma's `inputs` whose elements feed `lam`, in
+    /// order, as the leading args to its function. The common case (read every
+    /// input) is `(0..inputs.len())`; the equal-domain fuser gives each lane its
+    /// own input subset.
+    pub input_indices: Vec<usize>,
+}
+
 /// A second-order array combinator (SOAC) operation.
 ///
 /// `Reduce`, `Screma`, `Scan`, and `ReduceByIndex` parallelize freely on
@@ -665,15 +683,9 @@ pub enum SoacOp {
     /// or more mapped array results and threads zero or more accumulator
     /// results. Result order is all mapped outputs, then accumulator outputs.
     Screma {
-        /// Elementwise mapped outputs: each `(x1, ..., xn) -> y`.
-        map_lams: Vec<SoacBody>,
-        /// Which inputs each map lane consumes. `map_input_indices[k]` lists the
-        /// positions into `inputs` whose elements feed `map_lams[k]`, in order,
-        /// as the leading args to its function. Invariant:
-        /// `map_input_indices.len() == map_lams.len()`. The common case (every
-        /// lane reads every input) is `(0..inputs.len())` per lane; the
-        /// equal-domain fuser gives each lane its own input subset.
-        map_input_indices: Vec<Vec<usize>>,
+        /// Elementwise output lanes, each pairing its function with the inputs
+        /// it reads (see `ScremaLane`).
+        lanes: Vec<ScremaLane>,
         /// Per-element accumulator outputs.
         accumulators: Vec<ScremaAccumulatorSpec>,
         inputs: Vec<ArrayExpr>,
@@ -1142,13 +1154,12 @@ where
             visit_array_expr_children(values, f);
         }
         SoacOp::Screma {
-            map_lams,
+            lanes,
             accumulators,
             inputs,
-            map_input_indices: _,
         } => {
-            for map_lam in map_lams {
-                visit_soac_body_children(map_lam, f);
+            for lane in lanes {
+                visit_soac_body_children(&lane.lam, f);
             }
             for acc in accumulators {
                 visit_soac_body_children(&acc.step_lam, f);
@@ -1303,12 +1314,17 @@ where
             values: map_array_expr_children(values, f),
         },
         SoacOp::Screma {
-            map_lams,
+            lanes,
             accumulators,
             inputs,
-            map_input_indices,
         } => SoacOp::Screma {
-            map_lams: map_lams.into_iter().map(|map_lam| map_soac_body_children(map_lam, f)).collect(),
+            lanes: lanes
+                .into_iter()
+                .map(|lane| ScremaLane {
+                    lam: map_soac_body_children(lane.lam, f),
+                    input_indices: lane.input_indices,
+                })
+                .collect(),
             accumulators: accumulators
                 .into_iter()
                 .map(|acc| ScremaAccumulatorSpec {
@@ -1319,7 +1335,6 @@ where
                 })
                 .collect(),
             inputs: inputs.into_iter().map(|ae| map_array_expr_children(ae, f)).collect(),
-            map_input_indices,
         },
     }
 }

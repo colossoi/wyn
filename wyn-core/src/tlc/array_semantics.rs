@@ -452,11 +452,10 @@ pub fn classify_soac(soac: &SoacOp) -> ArraySemantics {
         // (map-into-reduce, filter-into-reduce) can fold further producers
         // into its step while preserving its pure `reduce_op` combiner.
         SoacOp::Screma {
-            map_lams,
+            lanes,
             accumulators,
             inputs,
-            ..
-        } if map_lams.is_empty()
+        } if lanes.is_empty()
             && accumulators.len() == 1
             && matches!(accumulators[0].kind, ScremaAccumulator::Reduce)
             && inputs.len() == 1 =>

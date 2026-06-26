@@ -392,14 +392,16 @@ pub(super) fn apply_type_subst_to_soac(
             values: apply_type_subst_to_array_expr(values, subst, term_ids),
         },
         SoacOp::Screma {
-            map_lams,
+            lanes,
             accumulators,
             inputs,
-            map_input_indices,
         } => SoacOp::Screma {
-            map_lams: map_lams
+            lanes: lanes
                 .iter()
-                .map(|body| apply_type_subst_to_soac_body(body, subst, term_ids))
+                .map(|lane| super::ScremaLane {
+                    lam: apply_type_subst_to_soac_body(&lane.lam, subst, term_ids),
+                    input_indices: lane.input_indices.clone(),
+                })
                 .collect(),
             accumulators: accumulators
                 .iter()
@@ -411,7 +413,6 @@ pub(super) fn apply_type_subst_to_soac(
                 })
                 .collect(),
             inputs: inputs.iter().map(|ae| apply_type_subst_to_array_expr(ae, subst, term_ids)).collect(),
-            map_input_indices: map_input_indices.clone(),
         },
     }
 }
@@ -843,14 +844,16 @@ fn substitute_var_soac(
             values: substitute_var_array_expr(values, old_sym, new_sym, term_ids),
         },
         SoacOp::Screma {
-            map_lams,
+            lanes,
             accumulators,
             inputs,
-            map_input_indices,
         } => SoacOp::Screma {
-            map_lams: map_lams
+            lanes: lanes
                 .iter()
-                .map(|body| substitute_var_soac_body(body, old_sym, new_sym, term_ids))
+                .map(|lane| super::ScremaLane {
+                    lam: substitute_var_soac_body(&lane.lam, old_sym, new_sym, term_ids),
+                    input_indices: lane.input_indices.clone(),
+                })
                 .collect(),
             accumulators: accumulators
                 .iter()
@@ -865,7 +868,6 @@ fn substitute_var_soac(
                 .iter()
                 .map(|ae| substitute_var_array_expr(ae, old_sym, new_sym, term_ids))
                 .collect(),
-            map_input_indices: map_input_indices.clone(),
         },
     }
 }
@@ -1425,14 +1427,16 @@ impl<'a> HofSpecializer<'a> {
                 values,
             },
             SoacOp::Screma {
-                map_lams,
+                lanes,
                 accumulators,
                 inputs,
-                map_input_indices,
             } => SoacOp::Screma {
-                map_lams: map_lams
+                lanes: lanes
                     .into_iter()
-                    .map(|body| self.cascade_specialize_soac_body(body))
+                    .map(|lane| super::ScremaLane {
+                        lam: self.cascade_specialize_soac_body(lane.lam),
+                        input_indices: lane.input_indices,
+                    })
                     .collect(),
                 accumulators: accumulators
                     .into_iter()
@@ -1444,7 +1448,6 @@ impl<'a> HofSpecializer<'a> {
                     })
                     .collect(),
                 inputs,
-                map_input_indices,
             },
         }
     }

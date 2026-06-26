@@ -13,8 +13,8 @@ use super::analyze_entry;
 use super::VarRef;
 use crate::ast::{self, Span, TypeName};
 use crate::tlc::{
-    ArrayExpr, Def, DefMeta, Lambda, LoopKind, ScremaAccumulator, ScremaAccumulatorSpec, SoacBody,
-    SoacDestination, SoacOp, Term, TermId, TermIdSource, TermKind,
+    ArrayExpr, Def, DefMeta, Lambda, LoopKind, ScremaAccumulator, ScremaAccumulatorSpec, ScremaLane,
+    SoacBody, SoacDestination, SoacOp, Term, TermId, TermIdSource, TermKind,
 };
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
@@ -155,11 +155,13 @@ impl B {
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![arr_i32_ty()]);
         self.term(
             TermKind::Soac(SoacOp::Screma {
-                map_lams: vec![SoacBody {
-                    lam: map_lam,
-                    captures: vec![],
+                lanes: vec![ScremaLane {
+                    lam: SoacBody {
+                        lam: map_lam,
+                        captures: vec![],
+                    },
+                    input_indices: vec![0],
                 }],
-                map_input_indices: vec![vec![0]],
                 accumulators: vec![],
                 inputs: vec![input],
             }),
@@ -196,11 +198,13 @@ impl B {
         let tuple_ty = Type::Constructed(TypeName::Tuple(2), vec![arr_i32_ty(), i32_ty()]);
         self.term(
             TermKind::Soac(SoacOp::Screma {
-                map_lams: vec![SoacBody {
-                    lam: map_lam,
-                    captures: vec![],
+                lanes: vec![ScremaLane {
+                    lam: SoacBody {
+                        lam: map_lam,
+                        captures: vec![],
+                    },
+                    input_indices: vec![0],
                 }],
-                map_input_indices: vec![vec![0]],
                 accumulators: vec![ScremaAccumulatorSpec {
                     kind: ScremaAccumulator::Reduce,
                     step_lam: SoacBody {

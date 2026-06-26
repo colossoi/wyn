@@ -1711,20 +1711,19 @@ impl<'a, 'b> Converter<'a, 'b> {
             } => self.convert_soac_map(lam, inputs, *destination, ty),
             SoacOp::Reduce { op, ne, input, .. } => self.convert_soac_reduce(op, ne, input, ty),
             SoacOp::Screma {
-                map_lams,
+                lanes,
                 accumulators,
                 inputs,
-                map_input_indices,
             } => {
                 // Discriminate single-output (scalar) vs multi-output by SHAPE,
                 // not by the result type: a fused `map→reduce`'s sole output may
                 // itself be a tuple value, so `Tuple(_)` in `ty` does NOT imply a
                 // multi-output Screma. A scalar-output Screma's `ty` is the
                 // reduce result directly; egir re-wraps it to `Tuple(1)+Project`.
-                if crate::tlc::is_scalar_reduce_screma(map_lams, accumulators) {
+                if crate::tlc::is_scalar_reduce_screma(lanes, accumulators) {
                     self.convert_soac_screma_scalar(&accumulators[0], inputs, ty)
                 } else {
-                    self.convert_soac_screma(map_lams, map_input_indices, accumulators, inputs, ty)
+                    self.convert_soac_screma(lanes, accumulators, inputs, ty)
                 }
             }
             SoacOp::Scan {
@@ -1841,7 +1840,8 @@ impl<'a, 'b> Converter<'a, 'b> {
                 .unwrap_or_else(|| result_ty.clone())
         };
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![project_ty.clone()]);
-        let map_input_indices = crate::tlc::screma_all_inputs_indices(input_arr_types.len(), 1);
+        // Singleton map: its one lane reads every input.
+        let map_input_indices = vec![(0..input_arr_types.len()).collect::<Vec<usize>>()];
         let screma_nid = self.emit_soac(
             PendingSoac::Screma {
                 map_funcs: vec![f_name],
@@ -2040,33 +2040,36 @@ impl<'a, 'b> Converter<'a, 'b> {
 
     fn convert_soac_screma(
         &mut self,
-        map_lams: &[SoacBody],
-        map_input_indices: &[Vec<usize>],
+        lanes: &[crate::tlc::ScremaLane],
         accumulators: &[crate::tlc::ScremaAccumulatorSpec],
         inputs: &[ArrayExpr],
         result_ty: Type<TypeName>,
     ) -> Result<NodeId, ConvertError> {
         let result_fields = match &result_ty {
             Type::Constructed(TypeName::Tuple(_), fields)
-                if fields.len() == map_lams.len() + accumulators.len() =>
+                if fields.len() == lanes.len() + accumulators.len() =>
             {
                 fields.clone()
             }
             other => {
                 return Err(ConvertError::GraphError(format!(
                     "screma result must be a tuple with {} mapped and {} accumulator fields, got {other:?}",
-                    map_lams.len(),
+                    lanes.len(),
                     accumulators.len()
                 )));
             }
         };
 
         let map_funcs: Vec<String> =
-            map_lams.iter().map(|body| self.lambda_fn_name(&body.lam)).collect::<Result<_, _>>()?;
-        let map_capture_nids: Vec<Vec<NodeId>> = map_lams
+            lanes.iter().map(|lane| self.lambda_fn_name(&lane.lam.lam)).collect::<Result<_, _>>()?;
+        let map_capture_nids: Vec<Vec<NodeId>> = lanes
             .iter()
-            .map(|body| {
-                body.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<Vec<_>, _>>()
+            .map(|lane| {
+                lane.lam
+                    .captures
+                    .iter()
+                    .map(|(_, _, t)| self.convert_term(t))
+                    .collect::<Result<Vec<_>, _>>()
             })
             .collect::<Result<_, _>>()?;
 
@@ -2112,8 +2115,8 @@ impl<'a, 'b> Converter<'a, 'b> {
             .map(|(ty, ae)| self.value_elem_type(ty, ae))
             .collect();
 
-        let mut map_output_elem_types = Vec::with_capacity(map_lams.len());
-        for map_idx in 0..map_lams.len() {
+        let mut map_output_elem_types = Vec::with_capacity(lanes.len());
+        for map_idx in 0..lanes.len() {
             let map_array_ty = result_fields[map_idx].clone();
             let elem_ty = if map_array_ty.is_array() {
                 map_array_ty.elem_type().expect("Array has elem").clone()
@@ -2147,9 +2150,9 @@ impl<'a, 'b> Converter<'a, 'b> {
                 input_array_types: input_arr_types,
                 input_elem_types,
                 map_output_elem_types,
-                map_input_indices: map_input_indices.to_vec(),
+                map_input_indices: lanes.iter().map(|lane| lane.input_indices.clone()).collect(),
                 map_capture_counts: map_capture_nids.iter().map(Vec::len).collect(),
-                map_destinations: vec![SoacDestination::Fresh; map_lams.len()],
+                map_destinations: vec![SoacDestination::Fresh; lanes.len()],
                 acc_destinations: vec![SoacDestination::Fresh; accumulators.len()],
             },
             operands,

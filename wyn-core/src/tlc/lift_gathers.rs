@@ -600,15 +600,17 @@ fn rewrite_soac(
             destination,
         },
         SoacOp::Screma {
-            map_lams,
+            lanes,
             accumulators,
             inputs,
-            map_input_indices,
         } => SoacOp::Screma {
-            map_lams: map_lams
+            lanes: lanes
                 .into_iter()
-                .map(|body| {
-                    rewrite_soac_body(body, arr, binding, elem_ty, bail, dyn_uses, soac_uses, term_ids)
+                .map(|lane| super::ScremaLane {
+                    lam: rewrite_soac_body(
+                        lane.lam, arr, binding, elem_ty, bail, dyn_uses, soac_uses, term_ids,
+                    ),
+                    input_indices: lane.input_indices,
                 })
                 .collect(),
             accumulators: accumulators
@@ -648,7 +650,6 @@ fn rewrite_soac(
                     )
                 })
                 .collect(),
-            map_input_indices,
         },
         SoacOp::Filter {
             map_lam,

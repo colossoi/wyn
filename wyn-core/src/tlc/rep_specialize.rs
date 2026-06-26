@@ -444,12 +444,17 @@ impl RepSpecializer {
                 values: self.rewrite_array_expr(values),
             },
             SoacOp::Screma {
-                map_lams,
+                lanes,
                 accumulators,
                 inputs,
-                map_input_indices,
             } => SoacOp::Screma {
-                map_lams: map_lams.into_iter().map(|body| self.rewrite_soac_body(body)).collect(),
+                lanes: lanes
+                    .into_iter()
+                    .map(|lane| super::ScremaLane {
+                        lam: self.rewrite_soac_body(lane.lam),
+                        input_indices: lane.input_indices,
+                    })
+                    .collect(),
                 accumulators: accumulators
                     .into_iter()
                     .map(|acc| super::ScremaAccumulatorSpec {
@@ -460,7 +465,6 @@ impl RepSpecializer {
                     })
                     .collect(),
                 inputs: inputs.into_iter().map(|ae| self.rewrite_array_expr(ae)).collect(),
-                map_input_indices,
             },
         }
     }

@@ -378,10 +378,9 @@ fn map_into_screma_rhs(
     term_ids: &mut TermIdSource,
 ) -> Option<Term> {
     let TermKind::Soac(SoacOp::Screma {
-        map_lams,
+        lanes,
         accumulators,
         inputs,
-        map_input_indices: _,
     }) = &consumer.kind
     else {
         return None;
@@ -389,7 +388,7 @@ fn map_into_screma_rhs(
     if inputs.len() != 1 || inputs[0].as_named_ref() != Some(producer_sym) {
         return None;
     }
-    if map_lams.iter().any(|map_lam| !map_lam.captures.is_empty())
+    if lanes.iter().any(|lane| !lane.lam.captures.is_empty())
         || accumulators.iter().any(|acc| !acc.step_lam.captures.is_empty())
     {
         return None;
@@ -398,12 +397,12 @@ fn map_into_screma_rhs(
         return None;
     }
 
-    let map_lams: Vec<super::SoacBody> = map_lams
+    let composed_lams: Vec<super::SoacBody> = lanes
         .iter()
-        .map(|map_lam| super::SoacBody {
+        .map(|lane| super::SoacBody {
             lam: compose_lambdas(
                 producer.lam.lam.clone(),
-                map_lam.lam.clone(),
+                lane.lam.lam.clone(),
                 span,
                 symbols,
                 term_ids,
@@ -432,23 +431,22 @@ fn map_into_screma_rhs(
 
     // Folding the producer in makes every lane consume all of the producer's
     // inputs (the composed lambdas take them as their leading args).
-    let map_input_indices = super::screma_all_inputs_indices(producer.inputs.len(), map_lams.len());
+    let lanes = super::screma_lanes_all_inputs(composed_lams, producer.inputs.len());
     Some(Term {
         id: term_ids.next_id(),
         ty: consumer.ty.clone(),
         span: consumer.span,
         kind: TermKind::Soac(SoacOp::Screma {
-            map_lams,
+            lanes,
             accumulators,
             inputs: producer.inputs.clone(),
-            map_input_indices,
         }),
     })
 }
 
 fn make_screma_term(
     result_fields: Vec<Type<TypeName>>,
-    map_lams: Vec<super::SoacBody>,
+    lanes: Vec<super::ScremaLane>,
     accumulators: Vec<super::ScremaAccumulatorSpec>,
     inputs: Vec<ArrayExpr>,
     span: Span,
@@ -457,23 +455,19 @@ fn make_screma_term(
     // A single-accumulator, 0-map reducing Screma is scalar-typed: its sole
     // output is the reduce result, so consumers reference it directly. Only
     // genuine multi-output fusions carry a tuple.
-    let ty = if super::is_scalar_reduce_screma(&map_lams, &accumulators) {
+    let ty = if super::is_scalar_reduce_screma(&lanes, &accumulators) {
         result_fields[0].clone()
     } else {
         Type::Constructed(TypeName::Tuple(result_fields.len()), result_fields)
     };
-    // This horizontal-fusion path groups maps that read the same inputs, so
-    // every lane consumes all inputs.
-    let map_input_indices = super::screma_all_inputs_indices(inputs.len(), map_lams.len());
     Term {
         id: term_ids.next_id(),
         ty,
         span,
         kind: TermKind::Soac(SoacOp::Screma {
-            map_lams,
+            lanes,
             accumulators,
             inputs,
-            map_input_indices,
         }),
     }
 }
@@ -492,8 +486,11 @@ fn make_screma_rewrite(
     term_ids: &mut TermIdSource,
 ) -> ScremaRewrite {
     let tuple_sym = symbols.alloc(symbol_name.to_string());
-    let scalar_result = super::is_scalar_reduce_screma(&map_lams, &accumulators);
-    let rhs = make_screma_term(result_fields, map_lams, accumulators, inputs, span, term_ids);
+    // This horizontal-fusion path groups maps that read the same inputs, so
+    // every lane consumes all inputs.
+    let lanes = super::screma_lanes_all_inputs(map_lams, inputs.len());
+    let scalar_result = super::is_scalar_reduce_screma(&lanes, &accumulators);
+    let rhs = make_screma_term(result_fields, lanes, accumulators, inputs, span, term_ids);
     let tuple_ty = rhs.ty.clone();
     let fused_binding = LetBinding {
         name: tuple_sym,
@@ -2185,8 +2182,7 @@ fn build_fused_from_semantics(
             ty: consumer_ty,
             span,
             kind: TermKind::Soac(SoacOp::Screma {
-                map_lams: vec![],
-                map_input_indices: vec![],
+                lanes: vec![],
                 accumulators: vec![super::ScremaAccumulatorSpec {
                     kind: super::ScremaAccumulator::Reduce,
                     step_lam: super::SoacBody {
@@ -2272,8 +2268,7 @@ fn build_fused_from_semantics(
                 ty: consumer_ty,
                 span,
                 kind: TermKind::Soac(SoacOp::Screma {
-                    map_lams: vec![],
-                    map_input_indices: vec![],
+                    lanes: vec![],
                     accumulators: vec![super::ScremaAccumulatorSpec {
                         kind: super::ScremaAccumulator::Reduce,
                         step_lam: super::SoacBody {

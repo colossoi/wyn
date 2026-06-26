@@ -393,10 +393,9 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::Program, stage: &str) {
                 walk_lambda(&op.lam, bound, symbols, stage, def_name);
             }
             SoacOp::Screma {
-                map_lams,
+                lanes,
                 accumulators,
                 inputs,
-                map_input_indices: _,
             } => {
                 for acc in accumulators {
                     walk(&acc.ne, bound, symbols, stage, def_name);
@@ -404,8 +403,8 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::Program, stage: &str) {
                 for i in inputs {
                     walk_array_expr(i, bound, symbols, stage, def_name);
                 }
-                for map_lam in map_lams {
-                    walk_lambda(&map_lam.lam, bound, symbols, stage, def_name);
+                for lane in lanes {
+                    walk_lambda(&lane.lam.lam, bound, symbols, stage, def_name);
                 }
                 for acc in accumulators {
                     walk_lambda(&acc.step_lam.lam, bound, symbols, stage, def_name);
@@ -1120,11 +1119,9 @@ entry gen(xs: []i32) ([]i32, []i32, [1]i32, []i32) =
         use crate::tlc::{ScremaAccumulator, SoacOp, TermKind};
         match &term.kind {
             TermKind::Soac(SoacOp::Screma {
-                map_lams,
-                accumulators,
-                ..
+                lanes, accumulators, ..
             }) => Some((
-                map_lams.len(),
+                lanes.len(),
                 accumulators.len(),
                 accumulators.iter().filter(|acc| acc.kind == ScremaAccumulator::Reduce).count(),
                 accumulators.iter().filter(|acc| acc.kind == ScremaAccumulator::Scan).count(),
