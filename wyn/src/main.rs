@@ -316,13 +316,14 @@ fn compile_file(
         tlc_runtime_floated.plan_execute_gather_residency()
     });
 
-    // Normalise compute-entry tails into explicit per-slot `OutputSlotStore`
-    // chains, then ownership/liveness — late, after residency/output rewrites.
-    let tlc_normed_outputs = time("normalize_outputs", verbose, || tlc_gathered.normalize_outputs())?;
-    let tlc_owned = time("apply_ownership", verbose, || tlc_normed_outputs.apply_ownership())?;
+    // Ownership/liveness before output normalization, so the liveness walk runs
+    // on the pre-slot-store form; then normalize compute-entry tails into
+    // explicit per-slot `OutputSlotStore` chains.
+    let tlc_owned = time("apply_ownership", verbose, || tlc_gathered.apply_ownership())?;
+    let tlc_normed_outputs = time("normalize_outputs", verbose, || tlc_owned.normalize_outputs())?;
 
     let tlc_parallel = time("tlc_parallelize", verbose, || {
-        tlc_owned.parallelize_soacs(single_stage)
+        tlc_normed_outputs.parallelize_soacs(single_stage)
     })?;
 
     // Eliminate dead TLC defs

@@ -669,10 +669,10 @@ impl TlcRegionsPinned {
             .fuse_static_indices()
             .float_runtime_index_nested_producers()
             .plan_execute_gather_residency()
-            .normalize_outputs()
-            .expect("normalize_outputs")
             .apply_ownership()
             .expect("apply_ownership")
+            .normalize_outputs()
+            .expect("normalize_outputs")
             .parallelize_soacs(disable_parallelize)
             .expect("parallelize_soacs")
             .filter_reachable()
@@ -804,7 +804,7 @@ impl std::ops::Deref for TlcOwnershipApplied {
     }
 }
 
-impl TlcOwnershipApplied {
+impl TlcOutputsNormalized {
     /// Parallelize SOACs in compute entry points at the TLC level (terminal
     /// TLC pass in the experimental order). `disable` makes it a near no-op.
     pub fn parallelize_soacs(self, disable: bool) -> Result<TlcParallelized> {
@@ -833,9 +833,11 @@ impl std::ops::Deref for TlcOutputsNormalized {
     }
 }
 
-impl TlcOutputsNormalized {
-    /// Ownership/liveness analysis + ownership-driven rewrites, late in the
-    /// experimental order (after residency and output normalization).
+impl TlcGathersLifted {
+    /// Ownership/liveness analysis + ownership-driven rewrites. Runs after
+    /// gather residency and before output normalization, so the liveness walk
+    /// never encounters an `OutputSlotStore` (which `normalize_outputs`
+    /// introduces in the next step).
     pub fn apply_ownership(self) -> Result<TlcOwnershipApplied> {
         let mut inner = self.0;
         inner.tlc = tlc::ownership::apply_ownership(inner.tlc)?;
@@ -914,9 +916,10 @@ impl std::ops::Deref for TlcGathersLifted {
     }
 }
 
-impl TlcGathersLifted {
+impl TlcOwnershipApplied {
     /// Normalise compute-entry bodies into per-slot `OutputSlotStore` writes.
-    /// Runs late, after residency/output rewrites (experimental order).
+    /// Runs after ownership, so `apply_ownership`'s liveness analysis sees the
+    /// pre-slot-store form.
     pub fn normalize_outputs(self) -> Result<TlcOutputsNormalized> {
         let mut inner = self.0;
         inner.tlc = tlc::normalize_outputs::run(inner.tlc)
