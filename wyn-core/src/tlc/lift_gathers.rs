@@ -892,6 +892,17 @@ fn is_liftable_array_producer(term: &Term) -> bool {
     match &term.kind {
         TermKind::Let { body, .. } => is_liftable_array_producer(body),
         TermKind::Soac(SoacOp::Map { .. } | SoacOp::Scan { .. }) => true,
+        // A single-output *array* Screma — one map lane, or one `Scan`
+        // accumulator (a fused map→scan arrives this way) — is a liftable
+        // producer just like a bare Map/Scan. A single `Reduce` is scalar.
+        TermKind::Soac(SoacOp::Screma {
+            lanes, accumulators, ..
+        }) => {
+            (lanes.len() == 1 && accumulators.is_empty())
+                || (lanes.is_empty()
+                    && accumulators.len() == 1
+                    && matches!(accumulators[0].kind, super::ScremaAccumulator::Scan))
+        }
         _ => false,
     }
 }

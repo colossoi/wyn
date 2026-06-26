@@ -1715,13 +1715,13 @@ impl<'a, 'b> Converter<'a, 'b> {
                 accumulators,
                 inputs,
             } => {
-                // Discriminate single-output (scalar) vs multi-output by SHAPE,
-                // not by the result type: a fused `map→reduce`'s sole output may
-                // itself be a tuple value, so `Tuple(_)` in `ty` does NOT imply a
-                // multi-output Screma. A scalar-output Screma's `ty` is the
-                // reduce result directly; egir re-wraps it to `Tuple(1)+Project`.
-                if crate::tlc::is_scalar_reduce_screma(lanes, accumulators) {
-                    self.convert_soac_screma_scalar(&accumulators[0], inputs, ty)
+                // Discriminate single-output vs multi-output by SHAPE, not by the
+                // result type: a single-output Screma's sole output may itself be
+                // a tuple value, so `Tuple(_)` in `ty` does NOT imply a
+                // multi-output Screma. A single-output Screma's `ty` is that
+                // output directly; egir re-wraps it to `Tuple(1)+Project`.
+                if crate::tlc::is_single_output_screma(lanes, accumulators) {
+                    self.convert_soac_screma_single(lanes, accumulators, inputs, ty)
                 } else {
                     self.convert_soac_screma(lanes, accumulators, inputs, ty)
                 }
@@ -1973,68 +1973,22 @@ impl<'a, 'b> Converter<'a, 'b> {
         Ok(self.intern_pure(PureOp::Project { index: 0 }, smallvec![screma_nid], result_ty))
     }
 
-    /// Lower a scalar-typed single-accumulator reducing `Screma` (a fused
-    /// `map→reduce`): emit a `Screma { 0 maps, 1 Reduce acc }` with a `Tuple(1)`
-    /// result then project field 0 to recover the scalar. The accumulator's
-    /// `step_lam` is the per-element step (may have a producer map folded in),
-    /// `reduce_op` the pure phase-2 combiner. Mirrors `convert_soac_reduce`,
-    /// sourcing the funcs/captures from the accumulator spec. (The general
-    /// tuple-result Screma path is `convert_soac_screma`.)
-    fn convert_soac_screma_scalar(
+    /// Lower a single-output `Screma` (one map lane xor one accumulator) whose
+    /// TLC `result_ty` is that output directly (no tuple wrapper). Builds the
+    /// general `Tuple(1)` Screma via `convert_soac_screma`, then projects field
+    /// 0 to recover the bare output — scalar for a single `Reduce`, an array for
+    /// a single `Scan` or map lane. (The genuine multi-output path is
+    /// `convert_soac_screma` directly.)
+    fn convert_soac_screma_single(
         &mut self,
-        acc: &crate::tlc::ScremaAccumulatorSpec,
+        lanes: &[crate::tlc::ScremaLane],
+        accumulators: &[crate::tlc::ScremaAccumulatorSpec],
         inputs: &[ArrayExpr],
         result_ty: Type<TypeName>,
     ) -> Result<NodeId, ConvertError> {
-        let step_func = self.lambda_fn_name(&acc.step_lam.lam)?;
-        let reduce_op_func = self.lambda_fn_name(&acc.reduce_op.lam)?;
-        let step_capture_nids: Vec<NodeId> =
-            acc.step_lam.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
-        let reduce_op_capture_nids: Vec<NodeId> = acc
-            .reduce_op
-            .captures
-            .iter()
-            .map(|(_, _, t)| self.convert_term(t))
-            .collect::<Result<_, _>>()?;
-        let input_nids: Vec<NodeId> =
-            inputs.iter().map(|ae| self.convert_array_expr_value(ae)).collect::<Result<_, _>>()?;
-        let input_arr_types: Vec<Type<TypeName>> =
-            inputs.iter().zip(input_nids.iter()).map(|(ae, nid)| self.value_array_type(*nid, ae)).collect();
-        let input_elem_types: Vec<Type<TypeName>> = input_arr_types
-            .iter()
-            .zip(inputs.iter())
-            .map(|(ty, ae)| self.value_elem_type(ty, ae))
-            .collect();
-        let init_nid = self.convert_term(&acc.ne)?;
-
-        let mut operands: SmallVec<[NodeId; 4]> = SmallVec::new();
-        operands.extend(input_nids.iter().copied());
-        operands.push(init_nid);
-        operands.extend(step_capture_nids.iter().copied());
-        operands.extend(reduce_op_capture_nids.iter().copied());
-
+        debug_assert_eq!(lanes.len() + accumulators.len(), 1, "single-output Screma");
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![result_ty.clone()]);
-        let screma_nid = self.emit_soac(
-            PendingSoac::Screma {
-                map_funcs: vec![],
-                accumulators: vec![super::types::PendingScremaAccumulator {
-                    kind: crate::tlc::ScremaAccumulator::Reduce,
-                    step_func,
-                    reduce_op_func,
-                    step_capture_count: step_capture_nids.len(),
-                    reduce_op_capture_count: reduce_op_capture_nids.len(),
-                }],
-                input_array_types: input_arr_types,
-                input_elem_types,
-                map_output_elem_types: vec![],
-                map_input_indices: vec![],
-                map_capture_counts: vec![],
-                map_destinations: vec![],
-                acc_destinations: vec![SoacDestination::Fresh],
-            },
-            operands,
-            tuple_ty,
-        );
+        let screma_nid = self.convert_soac_screma(lanes, accumulators, inputs, tuple_ty)?;
         Ok(self.intern_pure(PureOp::Project { index: 0 }, smallvec![screma_nid], result_ty))
     }
 

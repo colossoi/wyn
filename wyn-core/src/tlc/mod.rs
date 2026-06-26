@@ -659,6 +659,17 @@ pub fn is_scalar_reduce_screma(lanes: &[ScremaLane], accumulators: &[ScremaAccum
     lanes.is_empty() && accumulators.len() == 1 && matches!(accumulators[0].kind, ScremaAccumulator::Reduce)
 }
 
+/// Whether a `Screma` has exactly one output — one map lane xor one
+/// accumulator. Its sole result is that output directly, so (like the scalar
+/// reducing Screma) it is TLC-typed as the output itself with no
+/// `Tuple(num_outputs)` wrapper and no `TupleProj`; egir re-wraps to
+/// `Tuple(1) + Project` at lowering. A single `Reduce` is scalar-valued; a
+/// single `Scan` or map lane is array-valued. Discriminate by THIS shape, never
+/// by whether the result type happens to be a `Tuple`.
+pub fn is_single_output_screma(lanes: &[ScremaLane], accumulators: &[ScremaAccumulatorSpec]) -> bool {
+    lanes.len() + accumulators.len() == 1
+}
+
 /// A symbolic dimension expression.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Dim {

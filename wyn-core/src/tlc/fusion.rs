@@ -385,11 +385,11 @@ struct ProjectionTemplate {
     field_idx: usize,
     ty: Type<TypeName>,
     span: Span,
-    /// The fused Screma is scalar-output (a single `Reduce`, no maps): its
-    /// symbol IS the value, so reference it directly instead of projecting.
+    /// The fused Screma has a single output (one map lane xor one accumulator):
+    /// its symbol IS that value, so reference it directly instead of projecting.
     /// Set from the rewrite's shape, never inferred from `tuple_ty` (which can
-    /// be a tuple when the reduce result is itself a tuple value).
-    scalar: bool,
+    /// be a tuple when the sole output is itself a tuple value).
+    single_output: bool,
 }
 
 struct PlannedScremaRewrite {
@@ -414,9 +414,9 @@ struct ScremaRewrite {
     tuple_ty: Type<TypeName>,
     fused_binding: LetBinding,
     projection_fields: LookupMap<usize, usize>,
-    /// The fused Screma is scalar-output (single `Reduce`, no maps) — consumers
-    /// alias its symbol directly rather than projecting a field.
-    scalar_result: bool,
+    /// The fused Screma has a single output — consumers alias its symbol
+    /// directly rather than projecting a field.
+    single_output: bool,
 }
 
 /// One output field of a fused `Screma`: what it computes and every site that
@@ -725,10 +725,10 @@ fn make_screma_term(
     span: Span,
     term_ids: &mut TermIdSource,
 ) -> Term {
-    // A single-accumulator, 0-map reducing Screma is scalar-typed: its sole
-    // output is the reduce result, so consumers reference it directly. Only
-    // genuine multi-output fusions carry a tuple.
-    let ty = if super::is_scalar_reduce_screma(&lanes, &accumulators) {
+    // A single-output Screma (one map lane xor one accumulator) is typed as that
+    // output directly, so consumers reference it by name. Only genuine
+    // multi-output fusions carry a tuple.
+    let ty = if super::is_single_output_screma(&lanes, &accumulators) {
         result_fields[0].clone()
     } else {
         Type::Constructed(TypeName::Tuple(result_fields.len()), result_fields)
@@ -793,7 +793,7 @@ fn lower_fused_screma(
     let tuple_sym = symbols.alloc(symbol_name.to_string());
     // Every lane consumes all inputs (the fusion paths read the same domain).
     let lanes = super::screma_lanes_all_inputs(map_lams, inputs.len());
-    let scalar_result = super::is_scalar_reduce_screma(&lanes, &accumulators);
+    let single_output = super::is_single_output_screma(&lanes, &accumulators);
     debug_assert_eq!(result_fields.len(), lanes.len() + accumulators.len());
     let rhs = make_screma_term(result_fields, lanes, accumulators, inputs, span, term_ids);
     let tuple_ty = rhs.ty.clone();
@@ -822,7 +822,7 @@ fn lower_fused_screma(
                             field_idx,
                             ty,
                             span,
-                            scalar: scalar_result,
+                            single_output,
                         },
                     );
                 }
@@ -833,7 +833,7 @@ fn lower_fused_screma(
                         field_idx,
                         ty,
                         span,
-                        scalar: scalar_result,
+                        single_output,
                     });
                 }
             }
@@ -848,7 +848,7 @@ fn lower_fused_screma(
             tuple_ty,
             fused_binding,
             projection_fields,
-            scalar_result,
+            single_output,
         },
         term_replacements,
         tail_projection,
@@ -860,14 +860,14 @@ fn tuple_projection_binding(
     tuple_sym: SymbolId,
     tuple_ty: &Type<TypeName>,
     proj_idx: usize,
-    scalar: bool,
+    single_output: bool,
     term_ids: &mut TermIdSource,
 ) -> LetBinding {
-    // Scalar-output fused reduce: the Screma's result IS the consumer's value,
-    // so alias its symbol directly rather than projecting. (`scalar` comes from
-    // the rewrite's shape — never from `tuple_ty`, which is a tuple when the
-    // reduce result is itself a tuple value.)
-    let rhs_kind = if scalar {
+    // Single-output Screma: its result IS the consumer's value, so alias its
+    // symbol directly rather than projecting. (`single_output` comes from the
+    // rewrite's shape — never from `tuple_ty`, which is a tuple when the sole
+    // output is itself a tuple value.)
+    let rhs_kind = if single_output {
         TermKind::Var(VarRef::Symbol(tuple_sym))
     } else {
         TermKind::TupleProj {
@@ -1616,6 +1616,23 @@ fn apply_planned_screma_rewrite(
         term_replacements,
         tail_projection,
     } = plan;
+
+    // Single-output Screma feeding exactly one `let` (no nested-term or tail
+    // consumers): bind the Screma straight to that consumer's symbol — no
+    // `tuple_sym`, no `Var(tuple_sym)` alias. Downstream passes (gather
+    // residency) then see the producer as a bare `Soac(Screma)` under its own
+    // name, not hidden behind an alias of an intermediate tuple symbol.
+    if rewrite.single_output
+        && term_replacements.is_empty()
+        && tail_projection.is_none()
+        && rewrite.projection_fields.len() == 1
+    {
+        let consumer_idx = *rewrite.projection_fields.keys().next().expect("one consumer");
+        chain.replace_binding_rhs(consumer_idx, rewrite.fused_binding.rhs);
+        chain.remove_bindings(&rewrite.skip_indices);
+        return chain;
+    }
+
     // The producer symbol(s) being replaced — their bindings disappear,
     // so any leftover `Var(producer)` references (e.g. structural alias
     // lets `let X = Var(filt) in body` that the classifier saw through)
@@ -1633,7 +1650,7 @@ fn apply_planned_screma_rewrite(
                 rewrite.tuple_sym,
                 &rewrite.tuple_ty,
                 proj_idx,
-                rewrite.scalar_result,
+                rewrite.single_output,
                 term_ids,
             );
             chain.replace_binding(idx, projection);
@@ -1667,9 +1684,9 @@ fn apply_planned_screma_rewrite(
 }
 
 fn projection_term(projection: &ProjectionTemplate, term_ids: &mut TermIdSource) -> Term {
-    // Scalar-output fused reduce: no tuple to project — reference the Screma
-    // symbol directly (its result type equals `projection.ty`).
-    if projection.scalar {
+    // Single-output Screma: no tuple to project — reference the Screma symbol
+    // directly (its result type equals `projection.ty`).
+    if projection.single_output {
         return Term {
             id: term_ids.next_id(),
             ty: projection.ty.clone(),
