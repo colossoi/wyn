@@ -84,9 +84,8 @@ fn build_soac_helper_candidates(program: &Program) -> LookupMap<SymbolId, Inline
         if params.is_empty() {
             continue;
         }
-        if has_control_flow(&body) {
-            continue;
-        }
+        // Any helper containing a SOAC is a candidate, control flow or not, so
+        // no SOAC is reachable behind a call (`fusion::verify_soac_helpers_inlined`).
         if !contains_soac(&body) {
             continue;
         }
