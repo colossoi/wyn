@@ -78,7 +78,7 @@ fn range_expr(n: usize, ty: Type<TypeName>, ids: &mut TermIdSource) -> Term {
 }
 
 fn prepared(source: &str) -> Program {
-    crate::dyn_pipeline::compile_to_tlc_program(source)
+    crate::test_pipeline::compile_to_tlc_program(source)
 }
 
 fn entry_body(program: &Program) -> &Term {

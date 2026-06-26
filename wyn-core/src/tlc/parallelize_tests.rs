@@ -577,7 +577,7 @@ fn parallelize_src(
     crate::tlc::Program,
     crate::pipeline_descriptor::PipelineDescriptor,
 ) {
-    let tlc = crate::dyn_pipeline::compile_to_reachable(src, false);
+    let tlc = crate::test_pipeline::compile_to_reachable(src, false);
     (tlc.tlc.clone(), tlc.pipeline.clone())
 }
 

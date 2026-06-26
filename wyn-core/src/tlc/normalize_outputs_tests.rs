@@ -6,7 +6,7 @@ use polytype::Type;
 /// returning the resulting TLC `Program`. Used by tests that need to
 /// inspect post-normalize_outputs term structure directly.
 fn compile_to_normalized_tlc(source: &str) -> Program {
-    crate::dyn_pipeline::compile_to_tlc_program(source)
+    crate::test_pipeline::compile_to_tlc_program(source)
 }
 
 /// Compile a Wyn source string through the full pipeline (parse →

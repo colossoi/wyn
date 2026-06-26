@@ -14,7 +14,7 @@ entry gen(bh: []vec4f32) []i32 =
 /// Run the front-end through `apply_ownership` (the stage `lift_gathers`
 /// consumes), returning the TLC program just before the pass.
 fn ownership_applied(src: &str) -> Program {
-    crate::dyn_pipeline::compile_to_tlc_program(src)
+    crate::test_pipeline::compile_to_tlc_program(src)
 }
 
 fn def_named<'a>(program: &'a Program, name: &str) -> &'a super::Def {

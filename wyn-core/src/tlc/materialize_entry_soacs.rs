@@ -30,8 +30,8 @@ use crate::SymbolId;
 
 use super::array_semantics::{summarize_program, ArraySemantics, FunctionSummary, ResultSemantics};
 use super::build_sym_to_def;
-use super::subst::substitute_sym;
 use super::inline::build_inline_lets;
+use super::subst::substitute_sym;
 use super::{
     extract_lambda_params, ArrayExpr, DefMeta, Lambda, Program, StorageView, Term, TermIdSource, TermKind,
     VarRef,

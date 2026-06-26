@@ -12,7 +12,7 @@ use crate::tlc::{DefMeta, Program, Term, TermKind, VarRef};
 
 /// Compile `src` to the `lift_gathers` stage and run the pass on it.
 fn materialize(src: &str) -> Program {
-    crate::dyn_pipeline::compile_to_tlc_program(src)
+    crate::test_pipeline::compile_to_tlc_program(src)
 }
 
 fn entry_body<'a>(program: &'a Program, name: &str) -> &'a Term {

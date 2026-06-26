@@ -15,7 +15,7 @@ use crate::tlc::{Program, Term, TermKind};
 /// `tlc::normalize::normalize` (SOAC-lift + let-flatten) actually runs —
 /// returning the TLC `Program` for structural inspection.
 fn normalized_program(source: &str) -> Program {
-    crate::dyn_pipeline::compile_to_tlc_program(source)
+    crate::test_pipeline::compile_to_tlc_program(source)
 }
 
 /// Assert no `let` in the program has a `let` as its rhs.

@@ -12,7 +12,6 @@ pub mod fusion;
 pub mod hof_specialize;
 pub mod if_over_producer;
 pub mod inline;
-pub mod subst;
 pub mod input_slice_bounds;
 pub mod lift_gathers;
 pub mod materialize_entry_soacs;
@@ -34,6 +33,7 @@ pub mod runtime_index_producers;
 pub mod soa;
 pub mod specialize;
 pub mod static_index_fusion;
+pub mod subst;
 
 use crate::ast::{self, NodeId, Span, TypeName};
 use crate::builtins::{by_id, catalog, BuiltinId};

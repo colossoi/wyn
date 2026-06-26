@@ -27,7 +27,7 @@ fn should_fail_type_check(input: &str) -> bool {
 /// Off-milestone stop — drives the typestate API directly so the same
 /// `module_manager` covers both `type_check` and `to_tlc`.
 fn compile_to_fused_tlc(input: &str) -> crate::tlc::Program {
-    crate::dyn_pipeline::compile_to_tlc_program(input)
+    crate::test_pipeline::compile_to_tlc_program(input)
 }
 
 /// Assert that a compute `reduce`-over-`map`-of-range `src` parallelizes and

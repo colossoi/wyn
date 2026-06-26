@@ -288,7 +288,12 @@ fn fused_soac(body: &Term) -> SoacOp {
             _ => None,
         })
         .collect();
-    assert_eq!(soacs.len(), 1, "expected exactly one fused SOAC region, got {}", soacs.len());
+    assert_eq!(
+        soacs.len(),
+        1,
+        "expected exactly one fused SOAC region, got {}",
+        soacs.len()
+    );
     soacs.into_iter().next().unwrap()
 }
 
@@ -2414,7 +2419,11 @@ fn test_filter_count_field_is_last_when_length_precedes_reduce() {
     );
     let producer = mk_filter(
         pred,
-        mk_term(TermKind::Var(VarRef::Symbol(xs_sym)), array_ty(i32_ty()), &mut term_ids),
+        mk_term(
+            TermKind::Var(VarRef::Symbol(xs_sym)),
+            array_ty(i32_ty()),
+            &mut term_ids,
+        ),
         array_ty(i32_ty()),
         &mut term_ids,
     );
@@ -2526,7 +2535,11 @@ fn test_filter_whole_tail_length_rewrites_in_place() {
     );
     let producer = mk_filter(
         pred,
-        mk_term(TermKind::Var(VarRef::Symbol(xs_sym)), array_ty(i32_ty()), &mut term_ids),
+        mk_term(
+            TermKind::Var(VarRef::Symbol(xs_sym)),
+            array_ty(i32_ty()),
+            &mut term_ids,
+        ),
         array_ty(i32_ty()),
         &mut term_ids,
     );
@@ -2588,9 +2601,14 @@ fn test_filter_whole_tail_length_rewrites_in_place() {
     assert!(!contains_filter(&fused.defs[0].body));
     // Both the reduce and the whole-tail length folded in: the filter and the
     // `length` builtin are gone, replaced by a 2-accumulator Screma + projection.
-    assert!(!contains_length(&fused.defs[0].body), "whole-tail length must be rewritten to a projection");
+    assert!(
+        !contains_length(&fused.defs[0].body),
+        "whole-tail length must be rewritten to a projection"
+    );
     match find_first_screma(&fused.defs[0].body).expect("expected filtered Screma") {
-        SoacOp::Screma { lanes, accumulators, .. } => {
+        SoacOp::Screma {
+            lanes, accumulators, ..
+        } => {
             assert!(lanes.is_empty());
             assert_eq!(accumulators.len(), 2);
         }
@@ -2931,7 +2949,11 @@ fn test_chain_of_three_maps() {
 
     // All three maps collapse to one SOAC region reading the original input `a`.
     let body = &fused.defs[0].body;
-    assert_eq!(count_soacs(body), 1, "all three chained maps must fuse to one region");
+    assert_eq!(
+        count_soacs(body),
+        1,
+        "all three chained maps must fuse to one region"
+    );
     assert_eq!(
         soac_input_syms(&fused_soac(body)),
         vec![a_sym],

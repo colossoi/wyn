@@ -40,7 +40,7 @@ pub mod wgsl;
 mod integration_tests;
 
 #[cfg(test)]
-mod dyn_pipeline;
+mod test_pipeline;
 
 #[cfg(test)]
 mod slice_range_tests;

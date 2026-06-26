@@ -8,7 +8,7 @@ use crate::tlc::DefMeta;
 /// Drive a source string to the early exposed-producer TLC slot where
 /// `static_index_fusion::run` fires and return the program.
 fn exposed(source: &str) -> crate::tlc::Program {
-    crate::dyn_pipeline::compile_to_tlc_program(source)
+    crate::test_pipeline::compile_to_tlc_program(source)
 }
 
 /// The entry body, after peeling outer parameter `Lambda`s.

@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 /// → elaborate`) to a `Program`. No `materialize` — tests don't exercise
 /// SPIR-V-specific dynamic-index rewrites.
 fn compile_via_egir(src: &str) -> Program {
-    let tlc = crate::dyn_pipeline::compile_to_reachable(src, false);
+    let tlc = crate::test_pipeline::compile_to_reachable(src, false);
 
     let empty = std::collections::HashMap::new();
     let bounds = crate::tlc::input_slice_bounds::compute_for_program(&tlc.tlc);
@@ -578,7 +578,7 @@ entry vertex_main(#[location(0)] position: vec3f32, #[location(1)] color: vec3f3
   (#[builtin(position)] vec4f32, #[location(0)] vec3f32) =
   (@[position.x, position.y, position.z, 1.0], color)
 "#;
-    let tlc = crate::dyn_pipeline::compile_to_reachable(src, false);
+    let tlc = crate::test_pipeline::compile_to_reachable(src, false);
 
     let mut tlc_program = tlc.tlc.clone();
 

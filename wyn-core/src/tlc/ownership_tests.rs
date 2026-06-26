@@ -1011,7 +1011,7 @@ entry double(arr: []i32) []i32 = map(|x: i32| x + 1, arr)
 /// post-apply_ownership). Returns the post-rewrite Program for
 /// inspecting `SoacOp::Map { destination, .. }`.
 fn compile_to_owned(source: &str) -> Program {
-    crate::dyn_pipeline::compile_to_tlc_program(source)
+    crate::test_pipeline::compile_to_tlc_program(source)
 }
 
 fn map_destination(program: &Program, fn_name: &str) -> Option<SoacDestination> {

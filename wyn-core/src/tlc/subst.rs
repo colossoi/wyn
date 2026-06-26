@@ -152,7 +152,12 @@ pub(crate) fn substitute_term_expr(
 /// shadowing by Let names, Lambda params, and Loop vars. Each renamed
 /// occurrence keeps its own type/span (a rename doesn't change the value's
 /// type); only the symbol changes.
-pub(crate) fn substitute_sym(term: Term, old: SymbolId, new: SymbolId, term_ids: &mut TermIdSource) -> Term {
+pub(crate) fn substitute_sym(
+    term: Term,
+    old: SymbolId,
+    new: SymbolId,
+    term_ids: &mut TermIdSource,
+) -> Term {
     substitute_core(
         term,
         old,
