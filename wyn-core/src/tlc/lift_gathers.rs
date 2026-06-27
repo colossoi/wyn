@@ -408,12 +408,13 @@ fn local_gather_dependencies(
     Some(deps)
 }
 
+/// A local `let` is pullable into the pre-pass if it is pure and reproducible:
+/// any term free of a SOAC or output-store. Scalars (e.g. the length argument
+/// of an `iota`) qualify alongside arrays — the producer's own free-variable
+/// resolution downstream rejects anything that can't be grounded in the
+/// pre-pass.
 fn is_local_gather_dependency(term: &Term) -> bool {
-    is_array_type(&term.ty) && !contains_local_gather_dependency_blocker(term)
-}
-
-fn is_array_type(ty: &Type<TypeName>) -> bool {
-    crate::types::array_size(&crate::types::strip_unique(ty)).is_some()
+    !contains_local_gather_dependency_blocker(term)
 }
 
 fn contains_local_gather_dependency_blocker(term: &Term) -> bool {
