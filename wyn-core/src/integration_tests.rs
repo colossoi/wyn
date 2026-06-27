@@ -4177,14 +4177,18 @@ entry e(#[storage(set=2, binding=0, access=read)] xs: []f32,
         term.for_each_child(&mut |c| n += count_soac(c, pred));
         n
     }
-    let e = tlc
-        .defs
-        .iter()
-        .find(|d| tlc.symbols.get(d.name).map(|s| s.as_str()) == Some("e"))
-        .expect("entry e not found");
-    let filters = count_soac(&e.body, &|s| matches!(s, SoacOp::Filter { .. }));
-    let reduces = count_soac(&e.body, &|s| matches!(s, SoacOp::Reduce { .. }));
-    let scremas = count_soac(&e.body, &|s| matches!(s, SoacOp::Screma { .. }));
+    // Count across the whole reachable program, not just entry `e`'s body:
+    // defunctionalize (now after fusion) lifts the outer map's operator lambda
+    // — which carries the fused Screma — into a separate top-level def, so the
+    // Screma no longer lives inside `e.body`. A real fusion regression would
+    // leave a surviving Filter/Reduce somewhere in the reachable set, so the
+    // program-wide filter/reduce counts still catch it.
+    let count_all = |pred: &dyn Fn(&SoacOp) -> bool| -> usize {
+        tlc.defs.iter().map(|d| count_soac(&d.body, pred)).sum()
+    };
+    let filters = count_all(&|s| matches!(s, SoacOp::Filter { .. }));
+    let reduces = count_all(&|s| matches!(s, SoacOp::Reduce { .. }));
+    let scremas = count_all(&|s| matches!(s, SoacOp::Screma { .. }));
     assert_eq!(
         filters, 0,
         "the filter must fold into the reducing Screma, not survive as a Filter SOAC"
@@ -4943,7 +4947,10 @@ fn compute_if_over_two_maps_becomes_parallel_pointwise_map() {
             else map(|p: vec2f32| @[p.x + 1.0f32, p.y + 1.0f32], prev)
     "#;
 
-    let fused = compile_to_fused_tlc(src);
+    // Inspect at the pre-defunctionalize stage: `if_over_producer` normalizes
+    // here, and later passes obscure it (`normalize_outputs` wraps the result
+    // in an OutputSlotStore, `defunctionalize` lifts the Map operator to a ref).
+    let fused = crate::test_pipeline::compile_thru_expose_producers(src);
     let tick = fused
         .defs
         .iter()
@@ -4982,7 +4989,9 @@ fn compute_if_over_range_and_let_wrapped_slice_map_parallelizes() {
               map(|elem:vec4f32| @[elem.x, elem.y, elem.z, elem.w], prev_pos))
     "#;
 
-    let fused = compile_to_fused_tlc(src);
+    // Pre-defunctionalize: see `if_over_producer`'s normalized Map before
+    // `normalize_outputs`/`defunctionalize` obscure it.
+    let fused = crate::test_pipeline::compile_thru_expose_producers(src);
     let tick = fused
         .defs
         .iter()
@@ -5009,7 +5018,9 @@ fn compute_if_over_different_runtime_sources_stays_branching() {
             else map(|y: f32| y * 2.0, ys)
     "#;
 
-    let fused = compile_to_fused_tlc(src);
+    // Pre-defunctionalize: maps over distinct domains must stay a branching
+    // `If` here (`if_over_producer` only merges branches over one domain).
+    let fused = crate::test_pipeline::compile_thru_expose_producers(src);
     let pick = fused
         .defs
         .iter()
