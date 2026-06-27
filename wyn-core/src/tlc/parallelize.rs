@@ -3422,7 +3422,14 @@ fn make_lowering_plan(
                 // an EGIR-parallel two-phase shape when the shape is
                 // supported, else falls back to a serial 1×1×1 Compute
                 // pipeline.
-                make_screma_plan(analysis, entry_name, next_binding, sizing, program)
+                make_screma_plan(
+                    analysis,
+                    entry_name,
+                    next_binding,
+                    forced_tail_output,
+                    sizing,
+                    program,
+                )
             } else {
                 // Pointwise-only Screma is a multi-output Map: one lane
                 // per element, no cross-lane phases.
@@ -3566,6 +3573,7 @@ fn make_screma_plan(
     analysis: &EntryAnalysis,
     entry_name: &str,
     next_binding: u32,
+    forced_result_binding: Option<BindingRef>,
     sizing: PipelineSizing,
     program: &Program,
 ) -> LoweringPlan {
@@ -3658,9 +3666,16 @@ fn make_screma_plan(
         // single-Scan path; gated by egir_parallelizable.
         debug_assert_eq!(n_accs, 1);
         debug_assert!(matches!(acc_kind, super::ScremaAccumulator::Scan));
-        let scan_output_binding = BindingRef::new(AUTO_STORAGE_SET, auto_outputs_base);
-        let block_sums_binding = BindingRef::new(AUTO_STORAGE_SET, fresh_base);
-        let block_offsets_binding = BindingRef::new(AUTO_STORAGE_SET, fresh_base + 1);
+        // A fused gather pre-pass pins its scan output to the buffer the
+        // consumer reads (via `storage_index`); honor that forced binding
+        // instead of the auto-output slot, mirroring `make_scan_plan`. The
+        // forced binding may sit below `auto_outputs_base`, so the scratch
+        // intermediates start above both to avoid colliding with it.
+        let scan_output_binding =
+            forced_result_binding.unwrap_or(BindingRef::new(AUTO_STORAGE_SET, auto_outputs_base));
+        let scratch_start = fresh_base.max(scan_output_binding.binding + 1);
+        let block_sums_binding = BindingRef::new(AUTO_STORAGE_SET, scratch_start);
+        let block_offsets_binding = BindingRef::new(AUTO_STORAGE_SET, scratch_start + 1);
         let pipeline = build_screma_scan_pipeline_descriptor(
             entry_name,
             analysis,
