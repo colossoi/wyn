@@ -1564,67 +1564,87 @@ impl ScalarPrepassHoister<'_> {
 /// non-SOAC definitions are reproducible in a separate dispatch; anything else
 /// makes the candidate stay inline.
 impl ScalarPrepassHoister<'_> {
-    fn collect_local_deps(&self, rhs: &Term) -> Option<Vec<LocalPrepassBinding>> {
-        let local_syms: LookupSet<_> = self.locals.iter().map(|(symbol, _, _)| *symbol).collect();
-        let empty_syms = LookupSet::new();
-        let empty_defs = LookupSet::new();
-        let free_symbols = |term: &Term| {
-            compute_free_vars(term, &empty_syms, &empty_syms, &empty_defs, &self.program.symbols)
-                .into_iter()
-                .filter_map(|term| match term.kind {
-                    TermKind::Var(VarRef::Symbol(symbol)) => Some(symbol),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-        };
-        let mut needed = LookupSet::new();
-        for symbol in free_symbols(rhs) {
-            if !self.classify(symbol, &local_syms, &mut needed) {
-                return None;
-            }
-        }
-
-        let mut dependencies = Vec::new();
-        for (symbol, ty, dep_rhs) in self.locals.iter().rev() {
-            if !needed.remove(symbol) {
-                continue;
-            }
-            if !is_pullable_prepass_dependency(dep_rhs) {
-                return None;
-            }
-            for free_symbol in free_symbols(dep_rhs) {
-                if !self.classify(free_symbol, &local_syms, &mut needed) {
-                    return None;
-                }
-            }
-            dependencies.push((*symbol, ty.clone(), dep_rhs.clone()));
-        }
-        if !needed.is_empty() {
-            return None;
-        }
-        dependencies.reverse();
-        Some(dependencies)
-    }
-
-    fn classify(
-        &self,
-        symbol: SymbolId,
-        local_syms: &LookupSet<SymbolId>,
-        needed: &mut LookupSet<SymbolId>,
-    ) -> bool {
-        if local_syms.contains(&symbol) {
-            needed.insert(symbol);
-            true
-        } else {
-            match &self.policy {
+    fn close_over_local_deps(&mut self, rhs: &Term) -> Option<Term> {
+        close_term_over_carryable_locals(
+            rhs,
+            &self.locals,
+            &self.program.symbols,
+            |symbol| match &self.policy {
                 ScalarPrepassEntryPolicy::Graphics { tainted, uniforms } => {
                     !tainted.contains(&symbol)
                         && (uniforms.contains_key(&symbol) || self.top_level.contains(&symbol))
                 }
                 ScalarPrepassEntryPolicy::Compute { params, .. } => params.contains(&symbol),
-            }
+            },
+            self.term_ids,
+        )
+    }
+}
+
+fn close_term_over_carryable_locals(
+    term: &Term,
+    locals: &[LocalPrepassBinding],
+    symbols: &SymbolTable,
+    allow_external: impl FnMut(SymbolId) -> bool,
+    term_ids: &mut TermIdSource,
+) -> Option<Term> {
+    let dependencies = collect_carryable_local_deps(term, locals, symbols, allow_external)?;
+    Some(wrap_prepass_local_deps(term.clone(), &dependencies, term_ids))
+}
+
+fn collect_carryable_local_deps(
+    term: &Term,
+    locals: &[LocalPrepassBinding],
+    symbols: &SymbolTable,
+    mut allow_external: impl FnMut(SymbolId) -> bool,
+) -> Option<Vec<LocalPrepassBinding>> {
+    let local_syms: LookupSet<_> = locals.iter().map(|(symbol, _, _)| *symbol).collect();
+    let empty_syms = LookupSet::new();
+    let empty_defs = LookupSet::new();
+    let free_symbols = |term: &Term| {
+        compute_free_vars(term, &empty_syms, &empty_syms, &empty_defs, symbols)
+            .into_iter()
+            .filter_map(|term| match term.kind {
+                TermKind::Var(VarRef::Symbol(symbol)) => Some(symbol),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut needed = LookupSet::new();
+    let mut classify = |symbol, needed: &mut LookupSet<SymbolId>| {
+        if local_syms.contains(&symbol) {
+            needed.insert(symbol);
+            true
+        } else {
+            allow_external(symbol)
+        }
+    };
+    for symbol in free_symbols(term) {
+        if !classify(symbol, &mut needed) {
+            return None;
         }
     }
+
+    let mut dependencies = Vec::new();
+    for (symbol, ty, rhs) in locals.iter().rev() {
+        if !needed.remove(symbol) {
+            continue;
+        }
+        if !is_pullable_prepass_dependency(rhs) {
+            return None;
+        }
+        for free_symbol in free_symbols(rhs) {
+            if !classify(free_symbol, &mut needed) {
+                return None;
+            }
+        }
+        dependencies.push((*symbol, ty.clone(), rhs.clone()));
+    }
+    if !needed.is_empty() {
+        return None;
+    }
+    dependencies.reverse();
+    Some(dependencies)
 }
 
 fn is_pullable_prepass_dependency(term: &Term) -> bool {
@@ -1666,12 +1686,11 @@ impl ScalarPrepassHoister<'_> {
         if !is_scalar_reduction(&rhs) {
             return rhs;
         }
-        let Some(dependencies) = self.collect_local_deps(&rhs) else {
+        let Some(prepass_body) = self.close_over_local_deps(&rhs) else {
             return rhs;
         };
 
         let span = rhs.span;
-        let prepass_body = wrap_prepass_local_deps(rhs, &dependencies, self.term_ids);
         let required_params = match &self.policy {
             ScalarPrepassEntryPolicy::Graphics { uniforms, .. } => {
                 // A uniform may occur only inside a pulled dependency.
@@ -2239,6 +2258,8 @@ fn try_make_multidomain_map_plan(
     term_ids: &mut TermIdSource,
 ) -> Option<LoweringPlan> {
     let source_def = program.defs.iter().find(|d| d.name == analysis.def_name)?.clone();
+    let (source_params, _) = peel_lambda_params(&source_def.body);
+    let source_param_syms: LookupSet<_> = source_params.iter().map(|(symbol, _)| *symbol).collect();
     let entry_slots: Vec<Option<EntryParamBinding>> = match &source_def.meta {
         DefMeta::EntryPoint(decl) => decl.param_bindings.clone(),
         _ => return None,
@@ -2268,20 +2289,25 @@ fn try_make_multidomain_map_plan(
         // to the wrong output buffer silently.
         debug_assert_eq!(rank, *slot_index, "output slots must be dense and sorted");
 
+        // Every synthesized stage must be lexically closed. Compute a fresh
+        // transitive slice per stage because pure prefix values may be shared
+        // by any number of fixed outputs and SOAC captures.
+        let stage_body = close_term_over_carryable_locals(
+            slot_term,
+            &analysis.prefix_lets,
+            &program.symbols,
+            |symbol| source_param_syms.contains(&symbol),
+            term_ids,
+        )?;
+
         // A non-SOAC output slot has no input domain to dispatch over. When
-        // it's a self-contained fixed value (a constant array literal, or an
-        // expression over entry params), emit it as its own single-invocation
-        // 1x1x1 stage that writes it once — keeping the sibling maps parallel
-        // instead of dragging the whole entry serial for one small output.
-        // `Var` / `TupleProj` slot values would need their defining lets (not
-        // carried into a synthesized stage), so bail to the safe serial path.
+        // it can be reproduced from entry params and pure prefix lets, emit it
+        // as its own single-invocation 1x1x1 stage that writes it once — keeping
+        // the sibling maps parallel instead of dragging the whole entry serial.
         if !matches!(slot_term.kind, TermKind::Soac(_)) {
-            if matches!(slot_term.kind, TermKind::Var(_) | TermKind::TupleProj { .. }) {
-                return None;
-            }
             let out_binding = BindingRef::new(AUTO_STORAGE_SET, next_binding + rank as u32);
             let out_bytes = crate::ssa::layout::type_byte_size(&slot_term.ty)?;
-            let required = compute_broadcast_required_params(slot_term, &source_def, &program.symbols)?;
+            let required = compute_broadcast_required_params(&stage_body, &source_def, &program.symbols)?;
             let stage_name = if *slot_index == 0 {
                 entry_name.to_string()
             } else {
@@ -2289,7 +2315,7 @@ fn try_make_multidomain_map_plan(
             };
             defs.push(make_entry_def(
                 &stage_name,
-                slot_term.clone(),
+                stage_body,
                 slot_term.ty.clone(),
                 &required,
                 Vec::new(),
@@ -2386,7 +2412,7 @@ fn try_make_multidomain_map_plan(
         // carrying its original binding so EGIR routes it to the same buffer.
         // The primary input is rotated to index 0 so the `DerivedFromInputLength`
         // dispatch model points at the slot's domain.
-        let mut required = compute_broadcast_required_params(slot_term, &source_def, &program.symbols)?;
+        let mut required = compute_broadcast_required_params(&stage_body, &source_def, &program.symbols)?;
         let primary_pos = required.iter().position(|r| r.sym == primary_sym)?;
         let primary_param = required.remove(primary_pos);
         required.insert(0, primary_param);
@@ -2403,7 +2429,7 @@ fn try_make_multidomain_map_plan(
 
         defs.push(make_entry_def(
             &stage_name,
-            slot_term.clone(),
+            stage_body,
             slot_term.ty.clone(),
             &required,
             Vec::new(),

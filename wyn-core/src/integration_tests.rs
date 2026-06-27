@@ -3416,6 +3416,40 @@ fn fixed_output_with_multidomain_maps_shards() {
     );
 }
 
+/// A fixed output derived through a pure prefix let must carry that lexical
+/// dependency into its 1x1x1 stage without serializing sibling map domains.
+#[test]
+fn fixed_output_from_storage_scalar_with_multidomain_maps_shards() {
+    let spirv = compile_to_spirv(
+        r#"
+#[compute]
+entry r(a: []u32, b: []u32, st: []u32) ([2]u32, []u32, []u32) =
+  let g = st[0] in
+  ([g, g + 1u32], map(|x| x + 1u32, a), map(|y| y + 2u32, b))
+"#,
+    )
+    .expect("captured fixed output + multidomain maps compiles");
+    assert!(entry_loads_global_invocation_id(&spirv, "r_dispatch_1"));
+    assert!(entry_loads_global_invocation_id(&spirv, "r_dispatch_2"));
+}
+
+/// A pure prefix value may be reproduced by more than one synthesized stage:
+/// here the fixed output and the first map both depend on `g`.
+#[test]
+fn fixed_output_and_map_share_storage_scalar_and_multidomain_maps_shard() {
+    let spirv = compile_to_spirv(
+        r#"
+#[compute]
+entry r(a: []u32, b: []u32, st: []u32) ([2]u32, []u32, []u32) =
+  let g = st[0] in
+  ([g, g + 1u32], map(|x| x + g, a), map(|y| y + 2u32, b))
+"#,
+    )
+    .expect("shared captured scalar + multidomain maps compiles");
+    assert!(entry_loads_global_invocation_id(&spirv, "r_dispatch_1"));
+    assert!(entry_loads_global_invocation_id(&spirv, "r_dispatch_2"));
+}
+
 /// A compute entry whose body is `map(f, xs)` should not contain an
 /// `OpLoopMerge` — the parallel kernel is a single guarded scalar
 /// branch. Inner function loops (e.g. raymarch) are not affected.
