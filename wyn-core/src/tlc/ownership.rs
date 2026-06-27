@@ -29,6 +29,7 @@ use crate::tlc::{
     ArrayExpr, Def, DefMeta, Lambda, LoopKind, Program, SoacDestination, SoacOp, Term, TermId, TermKind,
 };
 use crate::types;
+use crate::types::TypeExt;
 use crate::SymbolId;
 use polytype::Type;
 
@@ -1405,7 +1406,19 @@ fn input_is_dead_unique_var(
     model: &OwnershipModel,
 ) -> Option<SymbolId> {
     let input_sym = match input {
-        ArrayExpr::Var(VarRef::Symbol(s), _) => *s,
+        ArrayExpr::Var(VarRef::Symbol(s), ty) => {
+            // In-place consumption writes the result over the input's buffer.
+            // A Virtual array (a range / `iota`) has no buffer to write into,
+            // so a map over one must allocate a Fresh result rather than be
+            // marked consuming — otherwise the backend has no buffer to retarget.
+            if matches!(
+                ty.array_variant(),
+                Some(Type::Constructed(TypeName::ArrayVariantVirtual, _))
+            ) {
+                return None;
+            }
+            *s
+        }
         _ => return None,
     };
     let owner = model.owner_of(input_sym)?;
