@@ -311,7 +311,12 @@ fn compile_file(
     let tlc_gathered = time("gather_residency", verbose, || {
         tlc_runtime_floated.plan_execute_gather_residency()
     });
-    let tlc_defunc = time("defunctionalize", verbose, || tlc_gathered.defunctionalize());
+    let tlc_scalar_hoisted = time("hoist_scalar_prepasses", verbose, || {
+        tlc_gathered.hoist_scalar_prepasses(single_stage)
+    });
+    let tlc_defunc = time("defunctionalize", verbose, || {
+        tlc_scalar_hoisted.defunctionalize()
+    });
     let tlc_folded = time("inline", verbose, || tlc_defunc.fold_generated_lambdas());
 
     // Ownership/liveness before output normalization, so the liveness walk runs

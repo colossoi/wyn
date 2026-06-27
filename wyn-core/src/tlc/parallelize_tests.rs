@@ -1029,8 +1029,8 @@ fn single_entry_two_independent_scans_then_gather_yields_many_stages() {
 /// Single entry with a reduce + scan + tail map, where the tail gathers the
 /// scan and consumes the reduce as a captured scalar. Both hoist: the scan via
 /// `lift_gathers` (its array result is indexed), the reduce via
-/// `lift_compute_scalar_reduces` (the planner marks the captured scalar
-/// `ScalarBroadcast`). 3 pipelines (scan + reduce + consumer), 6 stages
+/// the pre-defunctionalization scalar-prepass pass. 3 pipelines (scan +
+/// reduce + consumer), 6 stages
 /// (3 scan + 2 reduce + 1 consumer).
 #[test]
 fn single_entry_scan_and_scalar_reduce_both_hoist() {
@@ -1053,7 +1053,7 @@ fn single_entry_scan_and_scalar_reduce_both_hoist() {
     assert_eq!(
         desc.pipelines.len(),
         3,
-        "scan hoisted (gathered) + reduce hoisted (ScalarBroadcast) + consumer: {kinds:?}, \
+        "scan hoisted (gathered) + reduce hoisted (scalar pre-pass) + consumer: {kinds:?}, \
          compute entries={}",
         compute_entry_count(&program)
     );
@@ -1103,8 +1103,8 @@ fn single_entry_two_gathers_of_same_scan_share_one_producer() {
 /// Single entry with three independent reduces in let-RHS, all consumed as
 /// scalars in the tail map. Each reduce is captured into the consumer lambda
 /// (the lane var `i` is out of scope at the lets), so the planner marks all
-/// three `ScalarBroadcast` and `lift_compute_scalar_reduces` hoists each into
-/// its own two-phase pre-pass: 4 pipelines (3 reduces + consumer), 7 stages
+/// `hoist_scalar_prepasses` outlines each into its own two-phase pre-pass:
+/// 4 pipelines (3 reduces + consumer), 7 stages
 /// (2 + 2 + 2 + 1).
 #[test]
 fn single_entry_scalar_reduces_in_let_rhs_each_hoist() {
@@ -1209,15 +1209,14 @@ fn two_entries_each_with_scan_then_gather_yield_many_stages() {
 }
 
 // =============================================================================
-// Scalar-reduce hoisting (producer-consumer planner ScalarBroadcast)
+// Scalar-reduce pre-defunctionalization hoisting
 // =============================================================================
 //
 // A scalar SOAC result (`reduce` or fused `map→reduce`) bound in a top-level let and
-// consumed *per element* inside the tail SOAC's operator lambda is marked
-// `StoragePrepass(ScalarBroadcast)` by the producer-consumer planner and
-// hoisted by `lift_compute_scalar_reduces` into its own two-phase reduce
-// pre-pass — instead of being serialized inline in the consumer kernel (which
-// would run the O(N) reduce once per consumer thread).
+// consumed *per element* inside the tail SOAC's operator lambda is outlined by
+// `hoist_scalar_prepasses` into its own two-phase reduce pre-pass — instead of
+// being serialized inline in the consumer kernel (which would run the O(N)
+// reduce once per consumer thread).
 
 /// One captured scalar reduce → 2 pipelines (reduce 2-stage + consumer map
 /// 1-stage), 3 stages. The lane variable `i` is the consumer lambda's
@@ -1242,6 +1241,21 @@ fn aspiration_scalar_reduce_in_let_rhs_should_hoist() {
         3,
         "2 (reduce phase1+phase2) + 1 (consumer map) = 3"
     );
+}
+
+#[test]
+fn compute_scalar_prepass_carries_local_dependency() {
+    let src = r#"
+        #[compute]
+        entry e(xs: []i32) []i32 =
+            let scale = 2 in
+            let s = reduce(|a: i32, b: i32| a + b, 0,
+                map(|x: i32| x * scale, xs)) in
+            map(|i: i32| i + s, iota(2048))
+    "#;
+    let (_, desc) = parallelize_src(src);
+    assert_eq!(desc.pipelines.len(), 2);
+    assert_eq!(total_compute_stages(&desc), 3);
 }
 
 /// Two independent captured scalar reduces → each hoists into its own

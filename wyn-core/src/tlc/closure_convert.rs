@@ -629,19 +629,27 @@ impl ClosureInfo {
 // ClosureConverter pass
 // =============================================================================
 
-struct ClosureConverter<'a> {
+struct ClosureConverter {
     symbols: SymbolTable,
     top_level: LookupSet<SymbolId>,
-    known_defs: &'a LookupSet<String>,
+    /// Canonical symbols for registry-known definitions. Tracking these by
+    /// SymbolId is essential: a lexical parameter may shadow a top-level name
+    /// and must still be captured by a lifted lambda.
+    known_def_symbols: LookupSet<SymbolId>,
     lifted_defs: Vec<Def>,
     callable_values: LookupMap<SymbolId, CallableValue>,
     lambda_counter: u32,
     term_ids: TermIdSource,
 }
 
-impl<'a> ClosureConverter<'a> {
-    fn run(program: Program, known_defs: &'a LookupSet<String>) -> (Program, ClosureInfo) {
+impl ClosureConverter {
+    fn run(program: Program, known_defs: &LookupSet<String>) -> (Program, ClosureInfo) {
         let top_level: LookupSet<SymbolId> = program.defs.iter().map(|d| d.name).collect();
+        let known_def_symbols: LookupSet<SymbolId> = program
+            .def_syms
+            .iter()
+            .filter_map(|(name, symbol)| known_defs.contains(name).then_some(*symbol))
+            .collect();
 
         let mut callable_values = LookupMap::new();
         for def in &program.defs {
@@ -653,7 +661,7 @@ impl<'a> ClosureConverter<'a> {
         let mut cc = Self {
             symbols: program.symbols,
             top_level,
-            known_defs,
+            known_def_symbols,
             lifted_defs: vec![],
             callable_values,
             lambda_counter: 0,
@@ -1204,7 +1212,15 @@ impl<'a> ClosureConverter<'a> {
     /// surrounding lambda's params, the surrounding lambda needs to
     /// capture them so they remain in scope after lifting.
     fn compute_transitive_captures(&self, body: &Term, bound: &LookupSet<SymbolId>) -> Vec<Term> {
-        let mut result = compute_free_vars(body, bound, &self.top_level, self.known_defs, &self.symbols);
+        // Collect by symbol identity, then discard only canonical registry
+        // definitions. Passing registry *names* to the generic collector would
+        // also discard a local shadow with the same spelling (`lightDir` in
+        // raytrace), leaving the lifted lambda with an unresolved global.
+        let empty_known_defs = LookupSet::new();
+        let mut result = compute_free_vars(body, bound, &self.top_level, &empty_known_defs, &self.symbols);
+        result.retain(|term| {
+            !matches!(&term.kind, TermKind::Var(VarRef::Symbol(symbol)) if self.known_def_symbols.contains(symbol))
+        });
         let mut seen: LookupSet<SymbolId> = result
             .iter()
             .filter_map(|t| match &t.kind {
@@ -1240,10 +1256,9 @@ impl<'a> ClosureConverter<'a> {
                     worklist.push(cap_sym);
                     continue;
                 }
-                let name = self.symbols.get(cap_sym).expect("BUG: capture sym not in table");
                 if self.top_level.contains(&cap_sym)
-                    || self.known_defs.contains(name)
-                    || name.starts_with("_w_")
+                    || self.known_def_symbols.contains(&cap_sym)
+                    || self.symbols.get(cap_sym).expect("BUG: capture sym not in table").starts_with("_w_")
                 {
                     worklist.push(cap_sym);
                     continue;

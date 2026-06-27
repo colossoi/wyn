@@ -1676,6 +1676,61 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32)
     );
 }
 
+/// A graphical-invariant reduction may capture a lexical scalar introduced
+/// before the reduction. The pre-pass must carry that definition into its own
+/// scope before defunctionalization attaches the composed map/reduce capture.
+#[test]
+fn test_graphical_fused_reduce_carries_local_scalar_into_prepass() {
+    let source = r#"
+def globalData: [12]f32 = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0]
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vid: i32)
+  #[builtin(position)] vec4f32 =
+  let x = 2.0 in
+  let total = reduce(
+    |acc: f32, value: f32| acc + value,
+    0.0,
+    map(|value: f32| value * x, globalData)
+  ) in
+  @[total, 0.0, 0.0, 1.0]
+"#;
+
+    compile_to_spirv(source).expect(
+        "a fused graphical reduce must carry its invariant local scalar into \
+         the generated pre-pass instead of emitting an unresolved global",
+    );
+}
+
+/// Capture classification is by SymbolId, not spelling: the parameter named
+/// `lightDir` shadows a top-level constant and must still be captured when its
+/// map is fused into a graphical reduction.
+#[test]
+fn test_graphical_fused_reduce_captures_shadowing_local() {
+    let source = r#"
+def lightDir: vec3f32 = @[0.5, 0.5, -0.5]
+def globalData: [12]f32 = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0]
+
+def shade(lightDir: vec3f32) f32 =
+  reduce(
+    |acc: f32, value: f32| acc + value,
+    0.0,
+    map(|value: f32| value * lightDir.x, globalData)
+  )
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vid: i32)
+  #[builtin(position)] vec4f32 =
+  let total = shade(lightDir) in
+  @[total, 0.0, 0.0, 1.0]
+"#;
+
+    compile_to_spirv(source).expect(
+        "a captured parameter that shadows a top-level constant must not be \
+         mistaken for that global during closure conversion",
+    );
+}
+
 /// Companion to the over-hoist test above: a reduce whose only
 /// non-constant dependency is a `#[uniform]` param IS graphical-invariant
 /// (a uniform is constant across invocations), so it must lift into a
@@ -1730,6 +1785,32 @@ entry fragment_main(
     compile_to_spirv(source).expect(
         "a fragment reduce depending only on a uniform must lift into a \
          compute pre-pass that re-declares the uniform and compiles to SPIR-V",
+    );
+}
+
+/// Uniform discovery must include pulled local definitions, not only direct
+/// free variables of the reduction. Here the reduction captures `scale`, and
+/// only `scale`'s definition references the entry uniform.
+#[test]
+fn test_uniform_reached_through_local_prepass_dependency_is_redeclared() {
+    let source = r#"
+def samples: [12]f32 = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0]
+
+#[fragment]
+entry fragment_main(#[uniform(set=1, binding=0)] iTime: f32)
+  #[location(0)] vec4f32 =
+  let scale = iTime * 2.0 in
+  let total = reduce(
+    |acc: f32, value: f32| acc + value,
+    0.0,
+    map(|value: f32| value * scale, samples)
+  ) in
+  @[total, 0.0, 0.0, 1.0]
+"#;
+
+    compile_to_spirv(source).expect(
+        "a uniform used through a pulled local definition must be declared on \
+         the generated pre-pass",
     );
 }
 
@@ -2655,10 +2736,16 @@ fn test_ssa_raytrace_well_formed() {
 
     let ssa = compile_to_ssa_with_modules(&source);
 
-    // Verify key functions exist
+    // SOAC-bearing helpers such as `trace` are intentionally force-inlined
+    // before SSA and then removed by DCE. Verify the durable contract instead:
+    // both graphical entry points survived and SSA construction completed.
     assert!(
-        ssa.functions.iter().any(|f| f.name == "trace"),
-        "trace should be in SSA output"
+        ssa.entry_points.iter().any(|entry| entry.name == "vertex_main"),
+        "vertex_main should be in SSA output"
+    );
+    assert!(
+        ssa.entry_points.iter().any(|entry| entry.name == "fragment_main"),
+        "fragment_main should be in SSA output"
     );
 }
 

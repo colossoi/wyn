@@ -318,6 +318,7 @@ pub type TypeTable = LookupMap<NodeId, TypeScheme<TypeName>>;
 //       .fuse_static_indices()                     -> TlcStaticIndexFused
 //       .float_runtime_index_nested_producers()    -> TlcRuntimeIndexProducersFloated
 //       .plan_execute_gather_residency()           -> TlcGathersLifted
+//       .hoist_scalar_prepasses(disable)            -> TlcScalarPrepassesHoisted
 //       .defunctionalize()                         -> TlcDefunctionalized
 //       .monomorphize()                            -> TlcMonomorphized
 //       .fold_generated_lambdas()                  -> TlcGeneratedLambdasFolded
@@ -656,6 +657,7 @@ impl TlcRegionsPinned {
             .fuse_static_indices()
             .float_runtime_index_nested_producers()
             .plan_execute_gather_residency()
+            .hoist_scalar_prepasses(disable_parallelize)
             .defunctionalize()
             .fold_generated_lambdas()
             .apply_ownership()
@@ -718,6 +720,31 @@ impl std::ops::Deref for TlcSoaNormalized {
 }
 
 impl TlcGathersLifted {
+    /// Outline scalar reductions as compute pre-passes while their lexical
+    /// dependencies and lambda captures are still intact.
+    /// `disable` keeps single-stage compilation free of generated pre-passes.
+    pub fn hoist_scalar_prepasses(self, disable: bool) -> TlcScalarPrepassesHoisted {
+        let mut inner = self.0;
+        if !disable {
+            inner.tlc =
+                tlc::parallelize::hoist_scalar_prepasses(inner.tlc, &mut inner.auto_storage_binding_ids);
+        }
+        TlcScalarPrepassesHoisted(inner)
+    }
+}
+
+/// TLC after scalar reductions have either been outlined before closure
+/// conversion or deliberately left inline in single-stage mode.
+pub struct TlcScalarPrepassesHoisted(pub TlcEarlyInner);
+
+impl std::ops::Deref for TlcScalarPrepassesHoisted {
+    type Target = TlcEarlyInner;
+    fn deref(&self) -> &TlcEarlyInner {
+        &self.0
+    }
+}
+
+impl TlcScalarPrepassesHoisted {
     /// Closure-converts + specializes HOFs + threads captures, lifting SOAC
     /// operators (including the ones fusion just composed) to function
     /// references. SOAC envelopes stay inline (not lowered to loops).
