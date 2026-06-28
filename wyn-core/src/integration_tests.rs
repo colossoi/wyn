@@ -3395,6 +3395,76 @@ fn fixed_output_before_streamed_map_still_shards() {
     );
 }
 
+/// A fixed slot's direct local alias is still a fixed producer; its surface
+/// `Var` form must not prevent sibling maps from supplying the domain.
+#[test]
+fn let_bound_literal_fixed_output_with_multidomain_maps_shards() {
+    let spirv = compile_to_spirv(
+        r#"
+#[compute]
+entry r(a: []u32, b: []u32) ([2]u32, []u32, []u32) =
+  let o0 = [1u32, 2u32] in
+  (o0, map(|x| x + 1u32, a), map(|y| y + 2u32, b))
+"#,
+    )
+    .expect("let-bound fixed output + multidomain maps compiles");
+    assert!(entry_loads_global_invocation_id(&spirv, "r_dispatch_1"));
+    assert!(entry_loads_global_invocation_id(&spirv, "r_dispatch_2"));
+}
+
+/// Output-slot analysis must classify a let-bound map by its producer,
+/// even when a fixed output occupies the first slot.
+#[test]
+fn fixed_output_before_let_bound_map_still_shards() {
+    let spirv = compile_to_spirv(
+        r#"
+#[compute]
+entry r(a: []u32) ([2]u32, []u32) =
+  let m = map(|x| x + 1u32, a) in
+  ([1u32, 2u32], m)
+"#,
+    )
+    .expect("fixed output + let-bound map compiles");
+    assert!(entry_loads_global_invocation_id(&spirv, "r"));
+}
+
+/// Canonical resolved slots must also reach the per-domain stage splitter;
+/// otherwise admission succeeds but planning sees the original alias syntax.
+#[test]
+fn fixed_output_with_let_bound_multidomain_maps_shards() {
+    let spirv = compile_to_spirv(
+        r#"
+#[compute]
+entry r(a: []u32, b: []u32) ([2]u32, []u32, []u32) =
+  let ma = map(|x| x + 1u32, a) in
+  let mb = map(|y| y + 2u32, b) in
+  ([1u32, 2u32], ma, mb)
+"#,
+    )
+    .expect("fixed output + let-bound multidomain maps compiles");
+    assert!(entry_loads_global_invocation_id(&spirv, "r_dispatch_1"));
+    assert!(entry_loads_global_invocation_id(&spirv, "r_dispatch_2"));
+}
+
+/// Let-bound maps with nested scalar lets and captured storage inputs must use
+/// the same resolved-slot path as syntactically inline maps.
+#[test]
+fn let_bound_complex_same_domain_maps_shard() {
+    let spirv = compile_to_spirv(
+        r#"
+#[compute]
+entry r(tidx: []u32, src: []vec4f32, st: []f32) ([2]f32, []vec4f32, []vec4f32) =
+  let g = st[0]
+  let o0 = [g, g]
+  let m1 = map(|s| let i = i32(s) in let it = src[i % 4] in @[it.x, 0.0, it.y, it.z], tidx)
+  let m2 = map(|s| let i = i32(s) in let it = src[i % 4] in @[0.0, 1.0, 0.0, it.w], tidx) in
+  (o0, m1, m2)
+"#,
+    )
+    .expect("let-bound complex same-domain maps compile");
+    assert!(entry_loads_global_invocation_id(&spirv, "r"));
+}
+
 /// A fixed-size output alongside several *different-domain* maps: the fixed
 /// slot becomes its own 1×1×1 constant-write stage while each map keeps its
 /// own GID-indexed per-domain dispatch. Regression: any non-map slot used to

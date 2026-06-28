@@ -199,6 +199,10 @@ struct EntryAnalysis {
     /// so the TLC-side two-phase synthesis can append direct
     /// `storage_store` calls for them to phase 2's body.
     pub extra_slots: Vec<(usize, Term)>,
+    /// Every normalized output slot after following direct local aliases to
+    /// SOAC producers. Downstream per-slot planning consumes this canonical
+    /// list instead of rediscovering the original syntax from the source def.
+    pub output_slots: Vec<(usize, Term)>,
 }
 
 // =============================================================================
@@ -291,6 +295,12 @@ impl ScopeStack {
             _ => unreachable!(),
         }
     }
+    fn get_let(&self, sym: SymbolId) -> Option<(Type<TypeName>, Term)> {
+        self.frames.iter().rev().find_map(|frame| match frame {
+            ScopeFrame::Let { sym: s, ty, rhs } if *s == sym => Some((ty.clone(), rhs.clone())),
+            _ => None,
+        })
+    }
     fn is_lambda_param(&self, sym: SymbolId) -> bool {
         self.frames.iter().any(|f| matches!(f, ScopeFrame::LambdaParam { sym: s, .. } if *s == sym))
     }
@@ -321,6 +331,7 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
     let mut scope = ScopeStack::default();
     let mut current: Term = def.body.clone();
     let mut extra_slots: Vec<(usize, Term)> = Vec::new();
+    let mut output_slots: Vec<(usize, Term)> = Vec::new();
     let mut tail_alias: Option<(SymbolId, Type<TypeName>)> = None;
 
     // The entry's binding layout, which resolves `Ref(Var(sym))` SOAC inputs
@@ -357,14 +368,47 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
                     // *any* output slot, not just slot 0 — a streamed SOAC
                     // in a later slot must still parallelize even when an
                     // earlier slot holds a fixed value.
-                    let slot0_value = *value;
+                    let mut slot0_value = *value;
                     let mut siblings: Vec<(usize, Term)> = Vec::new();
                     collect_extra_slot_stores(&body, &mut siblings);
 
+                    // Classify slots by their producer, not by whether the
+                    // normalized store happens to contain that producer
+                    // inline. This applies the same direct-alias following to
+                    // every output position that tail analysis already gives
+                    // its chosen primary SOAC.
+                    let mut consumed_aliases_by_slot: LookupMap<usize, Vec<(SymbolId, Type<TypeName>)>> =
+                        LookupMap::new();
+                    if let Some((resolved, aliases, consume_aliases)) =
+                        resolve_output_alias(&slot0_value, &scope)
+                    {
+                        slot0_value = resolved;
+                        if consume_aliases {
+                            consumed_aliases_by_slot.insert(0, aliases);
+                        }
+                    }
+                    for (slot_index, value) in &mut siblings {
+                        if let Some((resolved, aliases, consume_aliases)) =
+                            resolve_output_alias(value, &scope)
+                        {
+                            *value = resolved;
+                            if consume_aliases {
+                                consumed_aliases_by_slot.insert(*slot_index, aliases);
+                            }
+                        }
+                    }
+                    for aliases in consumed_aliases_by_slot.values() {
+                        for (symbol, _) in aliases {
+                            let _ = scope.remove_let(*symbol);
+                        }
+                    }
+                    output_slots =
+                        std::iter::once((0, slot0_value.clone())).chain(siblings.iter().cloned()).collect();
+
                     let sibling_soac_count =
-                        siblings.iter().filter(|(_, v)| matches!(v.kind, TermKind::Soac(_))).count();
+                        siblings.iter().filter(|(_, v)| is_soac_output_candidate(v, &scope)).count();
                     let sibling_map_count =
-                        siblings.iter().filter(|(_, v)| is_map_only_fresh_soac_term(v)).count();
+                        siblings.iter().filter(|(_, v)| is_map_output_candidate(v, &scope)).count();
 
                     // Slot 0 is the tail itself (a SOAC) or follows through to
                     // one (`Var` alias / `TupleProj`). Keep the original
@@ -373,13 +417,15 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
                     // (the multidomain split handles those; any other sibling
                     // shape — reduce / scan / filter / scatter / in-place — has
                     // no parallel split yet, so keep the entry serial).
-                    if matches!(
-                        slot0_value.kind,
-                        TermKind::Soac(_) | TermKind::Var(_) | TermKind::TupleProj { .. }
-                    ) {
-                        if siblings.iter().any(|(_, v)| matches!(v.kind, TermKind::Soac(_))) {
-                            let all_pointwise = is_map_only_fresh_soac_term(&slot0_value)
-                                && siblings.iter().all(|(_, v)| is_map_only_fresh_soac_term(v));
+                    if is_soac_output_candidate(&slot0_value, &scope) {
+                        if let Some(aliases) = consumed_aliases_by_slot.get(&0) {
+                            if let Some(alias) = aliases.first() {
+                                tail_alias.get_or_insert(alias.clone());
+                            }
+                        }
+                        if siblings.iter().any(|(_, v)| is_soac_output_candidate(v, &scope)) {
+                            let all_pointwise = is_map_output_candidate(&slot0_value, &scope)
+                                && siblings.iter().all(|(_, v)| is_map_output_candidate(v, &scope));
                             if !all_pointwise {
                                 return None;
                             }
@@ -400,15 +446,20 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
                     //     extras. The EGIR split gives each map its own domain
                     //     and each fixed slot a 1x1x1 constant-write stage.
                     let promote: Option<usize> = if sibling_soac_count == 1 {
-                        siblings.iter().position(|(_, v)| matches!(v.kind, TermKind::Soac(_)))
+                        siblings.iter().position(|(_, v)| is_soac_output_candidate(v, &scope))
                     } else if sibling_soac_count >= 2 && sibling_map_count == sibling_soac_count {
-                        siblings.iter().position(|(_, v)| is_map_only_fresh_soac_term(v))
+                        siblings.iter().position(|(_, v)| is_map_output_candidate(v, &scope))
                     } else {
                         None
                     };
 
                     match promote {
                         Some(pos) => {
+                            if let Some(aliases) = consumed_aliases_by_slot.get(&siblings[pos].0) {
+                                if let Some(alias) = aliases.first() {
+                                    tail_alias.get_or_insert(alias.clone());
+                                }
+                            }
                             extra_slots.push((0, slot0_value));
                             let mut primary_value = None;
                             for (idx, (i, v)) in siblings.into_iter().enumerate() {
@@ -453,6 +504,7 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
                     prefix_lets,
                     required_params,
                     extra_slots,
+                    output_slots,
                 });
             }
             TermKind::Var(VarRef::Symbol(sym)) => {
@@ -493,6 +545,71 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
             },
             _ => return None,
         }
+    }
+}
+
+/// Resolve a direct local alias chain for output-slot classification. Aliases
+/// leading to a SOAC (including a shared-Screma projection) are marked for
+/// consumption; fixed aliases remain available for sibling-stage captures.
+fn resolve_output_alias(
+    term: &Term,
+    scope: &ScopeStack,
+) -> Option<(Term, Vec<(SymbolId, Type<TypeName>)>, bool)> {
+    let mut current = term.clone();
+    let mut aliases = Vec::new();
+    let mut seen = LookupSet::new();
+    loop {
+        match current.kind {
+            TermKind::Var(VarRef::Symbol(symbol)) => {
+                if !seen.insert(symbol) {
+                    return None;
+                }
+                let (ty, rhs) = scope.get_let(symbol)?;
+                aliases.push((symbol, ty));
+                current = rhs;
+            }
+            _ if aliases.is_empty() => return None,
+            _ => {
+                let consume_aliases = is_soac_output_candidate(&current, scope);
+                return Some((current, aliases, consume_aliases));
+            }
+        }
+    }
+}
+
+/// Whether a normalized output value is itself the parallel producer. A tuple
+/// projection qualifies only for the established field-0 shared-Screma shape;
+/// ordinary variables and projections are fixed outputs.
+fn is_soac_output_candidate(term: &Term, scope: &ScopeStack) -> bool {
+    match &term.kind {
+        TermKind::Soac(_) => true,
+        TermKind::TupleProj { tuple, idx: 0 } => {
+            let TermKind::Var(VarRef::Symbol(symbol)) = tuple.kind else {
+                return false;
+            };
+            scope
+                .get_let(symbol)
+                .is_some_and(|(_, rhs)| matches!(rhs.kind, TermKind::Soac(SoacOp::Screma { .. })))
+        }
+        _ => false,
+    }
+}
+
+/// Whether an output candidate is pointwise and safe for the per-slot map
+/// path. A field-0 projection represents its entire shared Screma producer;
+/// sibling projections are outputs of that producer, not additional SOACs.
+fn is_map_output_candidate(term: &Term, scope: &ScopeStack) -> bool {
+    match &term.kind {
+        TermKind::Soac(_) => is_map_only_fresh_soac_term(term),
+        TermKind::TupleProj { tuple, idx: 0 } => {
+            let TermKind::Var(VarRef::Symbol(symbol)) = tuple.kind else {
+                return false;
+            };
+            scope.get_let(symbol).is_some_and(|(_, rhs)| {
+                matches!(rhs.kind, TermKind::Soac(SoacOp::Screma { ref accumulators, .. }) if accumulators.is_empty())
+            })
+        }
+        _ => false,
     }
 }
 
@@ -2265,12 +2382,10 @@ fn try_make_multidomain_map_plan(
         _ => return None,
     };
 
-    // Recover every output slot's producing term (with its full type) by
-    // walking the `normalize_outputs` `OutputSlotStore` chain. `analyze_entry`
-    // already guaranteed each is a pointwise fresh map.
-    let (_, inner) = peel_lambda_params(&source_def.body);
-    let mut slots: Vec<(usize, Term)> = Vec::new();
-    collect_extra_slot_stores(inner, &mut slots);
+    // `analyze_entry` has already resolved direct local aliases in every
+    // output position, so stage construction cannot regress to classifying
+    // the original `Var(m)` syntax instead of the map producer it denotes.
+    let mut slots = analysis.output_slots.clone();
     slots.sort_by_key(|(slot_index, _)| *slot_index);
     if slots.len() < 2 {
         return None;
