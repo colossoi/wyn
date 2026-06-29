@@ -35,7 +35,7 @@ fn compile_via_egir(src: &str) -> Program {
     )
     .realize_outputs()
     .expect("egir::realize_outputs failed")
-    .parallelize(&empty)
+    .parallelize(&empty, &mut binding_ids)
     .expand_soacs()
     .optimize_skeleton()
     .elaborate()

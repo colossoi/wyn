@@ -1053,14 +1053,15 @@ impl TlcGeneratedLambdasFolded {
     pub fn to_egraph(mut self) -> std::result::Result<EgirParallelized, ConvertError> {
         let empty = LookupMap::new();
         let input_lens = tlc::input_slice_bounds::compute_for_program(&self.0.tlc);
-        egir::from_tlc::run(
+        let inner = egir::from_tlc::run(
             &self.0.tlc,
             pipeline_descriptor::PipelineDescriptor::default(),
             &empty,
             &input_lens,
             &mut self.0.auto_storage_binding_ids,
-        )
-        .and_then(|inner| EgirRaw(inner).realize_outputs().map(|a| a.parallelize(&empty)))
+        )?;
+        let realized = EgirRaw(inner).realize_outputs()?;
+        Ok(realized.parallelize(&empty, &mut self.0.auto_storage_binding_ids))
     }
 }
 
@@ -1166,22 +1167,16 @@ impl TlcParallelized {
             ..
         } = self.0;
         let input_lens = tlc::input_slice_bounds::compute_for_program(&tlc);
-        egir::from_tlc::run(
+        let mut inner = egir::from_tlc::run(
             &tlc,
             pipeline,
             &recognitions,
             &input_lens,
             &mut auto_storage_binding_ids,
-        )
-        .map(|mut inner| {
-            inner.pipeline.relabel_input_storage_names(&input_names);
-            inner
-        })
-        .and_then(|inner| {
-            EgirRaw(inner)
-                .realize_outputs()
-                .map(|a| a.parallelize(&recognitions))
-        })
+        )?;
+        inner.pipeline.relabel_input_storage_names(&input_names);
+        let realized = EgirRaw(inner).realize_outputs()?;
+        Ok(realized.parallelize(&recognitions, &mut auto_storage_binding_ids))
     }
 }
 
@@ -1265,22 +1260,16 @@ impl TlcInputSliceBoundsInferred {
             mut auto_storage_binding_ids,
             ..
         } = self.inner;
-        egir::from_tlc::run(
+        let mut inner = egir::from_tlc::run(
             &tlc,
             pipeline,
             &recognitions,
             &self.input_lens,
             &mut auto_storage_binding_ids,
-        )
-        .map(|mut inner| {
-            inner.pipeline.relabel_input_storage_names(&input_names);
-            inner
-        })
-        .and_then(|inner| {
-            EgirRaw(inner)
-                .realize_outputs()
-                .map(|a| a.parallelize(&recognitions))
-        })
+        )?;
+        inner.pipeline.relabel_input_storage_names(&input_names);
+        let realized = EgirRaw(inner).realize_outputs()?;
+        Ok(realized.parallelize(&recognitions, &mut auto_storage_binding_ids))
     }
 }
 
@@ -1346,9 +1335,10 @@ impl EgirOutputsRealized {
     pub fn parallelize(
         self,
         recognitions: &LookupMap<String, tlc::parallelize::EntryRecognition>,
+        binding_ids: &mut IdSource<u32>,
     ) -> EgirParallelized {
         let EgirOutputsRealized(mut inner) = self;
-        egir::parallelize::run(&mut inner, recognitions);
+        egir::parallelize::run(&mut inner, recognitions, binding_ids);
         EgirParallelized(inner)
     }
 }
