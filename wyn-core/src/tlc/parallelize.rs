@@ -1315,7 +1315,507 @@ pub fn run(
     })
 }
 
-/// Currently performs no scalar-reduction outlining.
-pub fn hoist_scalar_prepasses(program: Program, _binding_ids: &mut crate::IdSource<u32>) -> Program {
+type LocalPrepassBinding = (SymbolId, Type<TypeName>, Term);
+
+enum ScalarPrepassEntryPolicy {
+    Graphics {
+        tainted: LookupSet<SymbolId>,
+        uniforms: LookupMap<SymbolId, BindingRef>,
+    },
+    Compute {
+        source_def: Def,
+        params: LookupSet<SymbolId>,
+    },
+}
+
+struct ScalarPrepassHoister<'a> {
+    entry_name: &'a str,
+    policy: ScalarPrepassEntryPolicy,
+    top_level: &'a LookupSet<SymbolId>,
+    locals: Vec<LocalPrepassBinding>,
+    binding_ids: &'a mut crate::IdSource<u32>,
+    added_decls: Vec<interface::StorageBindingDecl>,
+    new_defs: Vec<Def>,
+    program: &'a mut Program,
+    term_ids: &'a mut TermIdSource,
+}
+
+/// Outline scalar reductions before closure conversion.
+///
+/// The generated compute entry carries the transitive, reproducible portion of
+/// the surrounding `let` scope that its reduction needs. Its result binding is
+/// declared as an Output on the pre-pass itself, allowing the later
+/// parallelization recognition to discover the forced result binding without a
+/// side table. Defunctionalization then sees the generated entry as ordinary
+/// source-shaped TLC and attaches lambda captures in the correct scope.
+pub fn hoist_scalar_prepasses(mut program: Program, binding_ids: &mut crate::IdSource<u32>) -> Program {
+    let top_level_syms: LookupSet<SymbolId> = program.defs.iter().map(|d| d.name).collect();
+    let entry_indices: Vec<usize> = program
+        .defs
+        .iter()
+        .enumerate()
+        .filter_map(|(index, def)| matches!(def.meta, DefMeta::EntryPoint(_)).then_some(index))
+        .collect();
+
+    let mut term_ids = TermIdSource::new();
+    let mut new_defs = Vec::new();
+
+    for index in entry_indices {
+        let entry_name = crate::symbol_name_or_bug(&program.symbols, program.defs[index].name).to_string();
+        let body = program.defs[index].body.clone();
+        let (params, _) = peel_lambda_params(&body);
+        let policy = match &program.defs[index].meta {
+            DefMeta::EntryPoint(decl) if decl.entry_type.is_compute() => {
+                if !compute_entry_can_broadcast_scalar_prepasses(&program.defs[index], &program.symbols) {
+                    continue;
+                }
+                ScalarPrepassEntryPolicy::Compute {
+                    source_def: program.defs[index].clone(),
+                    params: params.iter().map(|(symbol, _)| *symbol).collect(),
+                }
+            }
+            DefMeta::EntryPoint(decl) => {
+                let mut varying = LookupSet::new();
+                let mut uniforms = LookupMap::new();
+                for (param_index, (symbol, _)) in params.iter().enumerate() {
+                    match decl
+                        .params
+                        .get(param_index)
+                        .and_then(crate::binding_layout::extract_uniform_binding)
+                    {
+                        Some(binding) => {
+                            uniforms.insert(*symbol, binding);
+                        }
+                        None => {
+                            varying.insert(*symbol);
+                        }
+                    }
+                }
+                ScalarPrepassEntryPolicy::Graphics {
+                    tainted: compute_taint_set(&body, &varying, &program.symbols),
+                    uniforms,
+                }
+            }
+            _ => unreachable!("entry_indices contains only entry points"),
+        };
+
+        let (new_body, added_decls, mut entry_defs) = {
+            let mut hoister = ScalarPrepassHoister {
+                entry_name: &entry_name,
+                policy,
+                top_level: &top_level_syms,
+                locals: Vec::new(),
+                binding_ids,
+                added_decls: Vec::new(),
+                new_defs: Vec::new(),
+                program: &mut program,
+                term_ids: &mut term_ids,
+            };
+            let body = hoister.rewrite(body);
+            (body, hoister.added_decls, hoister.new_defs)
+        };
+        new_defs.append(&mut entry_defs);
+
+        program.defs[index].body = new_body;
+        if let DefMeta::EntryPoint(decl) = &mut program.defs[index].meta {
+            decl.storage_bindings.extend(added_decls);
+        }
+    }
+
+    program.defs.extend(new_defs);
+    super::anf::debug_check(&program, "hoist_scalar_prepasses");
     program
+}
+
+impl ScalarPrepassHoister<'_> {
+    fn rewrite(&mut self, term: Term) -> Term {
+        match term.kind {
+            TermKind::Lambda(Lambda { params, body, ret_ty }) => Term {
+                kind: TermKind::Lambda(Lambda {
+                    params,
+                    body: Box::new(self.rewrite(*body)),
+                    ret_ty,
+                }),
+                ..term
+            },
+            TermKind::Let {
+                name,
+                name_ty,
+                rhs,
+                body,
+            } => {
+                // Keep the source-shaped RHS for dependency slicing. A SOAC
+                // dependency is rejected rather than duplicated.
+                let dependency = (*rhs).clone();
+                let rhs = self.try_hoist(*rhs, &name_ty);
+                self.locals.push((name, name_ty.clone(), dependency));
+                let body = self.rewrite(*body);
+                self.locals.pop();
+                Term {
+                    kind: TermKind::Let {
+                        name,
+                        name_ty,
+                        rhs: Box::new(rhs),
+                        body: Box::new(body),
+                    },
+                    ..term
+                }
+            }
+            _ => term,
+        }
+    }
+}
+
+/// Find the transitive local definition slice required by `rhs`. Only pure,
+/// non-SOAC definitions are reproducible in a separate dispatch; anything else
+/// makes the candidate stay inline.
+impl ScalarPrepassHoister<'_> {
+    fn close_over_local_deps(&mut self, rhs: &Term) -> Option<Term> {
+        close_term_over_carryable_locals(
+            rhs,
+            &self.locals,
+            &self.program.symbols,
+            |symbol| match &self.policy {
+                ScalarPrepassEntryPolicy::Graphics { tainted, uniforms } => {
+                    !tainted.contains(&symbol)
+                        && (uniforms.contains_key(&symbol) || self.top_level.contains(&symbol))
+                }
+                ScalarPrepassEntryPolicy::Compute { params, .. } => params.contains(&symbol),
+            },
+            self.term_ids,
+        )
+    }
+}
+
+impl ScalarPrepassHoister<'_> {
+    fn try_hoist(&mut self, rhs: Term, result_ty: &Type<TypeName>) -> Term {
+        if !is_scalar_reduction(&rhs) {
+            return rhs;
+        }
+        let Some(prepass_body) = self.close_over_local_deps(&rhs) else {
+            return rhs;
+        };
+
+        let span = rhs.span;
+        let required_params = match &self.policy {
+            ScalarPrepassEntryPolicy::Graphics { uniforms, .. } => {
+                // A uniform may occur only inside a pulled dependency.
+                collect_uniform_required_params(&prepass_body, uniforms, &self.program.symbols)
+            }
+            ScalarPrepassEntryPolicy::Compute { source_def, .. } => {
+                compute_broadcast_required_params(&prepass_body, source_def, &self.program.symbols)
+                    .expect("compute pre-pass dependencies were classified as forwardable")
+            }
+        };
+        let binding = BindingRef::new(AUTO_STORAGE_SET, self.binding_ids.next_id());
+        let name = format!("{}_prepass_{}", self.entry_name, self.added_decls.len());
+        self.new_defs.push(make_entry_def(
+            &name,
+            prepass_body,
+            result_ty.clone(),
+            &required_params,
+            vec![interface::StorageBindingDecl {
+                binding,
+                role: interface::StorageRole::Output,
+                elem_ty: result_ty.clone(),
+                length: None,
+            }],
+            self.program,
+            self.term_ids,
+        ));
+        self.added_decls.push(interface::StorageBindingDecl {
+            binding,
+            role: interface::StorageRole::Input,
+            elem_ty: result_ty.clone(),
+            length: None,
+        });
+
+        intrinsic_term_by_id(
+            catalog().known().storage_index,
+            vec![
+                uint_lit(binding.set as u64, span, self.term_ids),
+                uint_lit(binding.binding as u64, span, self.term_ids),
+                uint_lit(0, span, self.term_ids),
+            ],
+            result_ty.clone(),
+            span,
+            self.term_ids,
+        )
+    }
+}
+
+fn close_term_over_carryable_locals(
+    term: &Term,
+    locals: &[LocalPrepassBinding],
+    symbols: &SymbolTable,
+    allow_external: impl FnMut(SymbolId) -> bool,
+    term_ids: &mut TermIdSource,
+) -> Option<Term> {
+    let dependencies = collect_carryable_local_deps(term, locals, symbols, allow_external)?;
+    Some(wrap_prepass_local_deps(term.clone(), &dependencies, term_ids))
+}
+
+fn collect_carryable_local_deps(
+    term: &Term,
+    locals: &[LocalPrepassBinding],
+    symbols: &SymbolTable,
+    mut allow_external: impl FnMut(SymbolId) -> bool,
+) -> Option<Vec<LocalPrepassBinding>> {
+    let local_syms: LookupSet<_> = locals.iter().map(|(symbol, _, _)| *symbol).collect();
+    let empty_syms = LookupSet::new();
+    let empty_defs = LookupSet::new();
+    let free_symbols = |term: &Term| {
+        compute_free_vars(term, &empty_syms, &empty_syms, &empty_defs, symbols)
+            .into_iter()
+            .filter_map(|term| match term.kind {
+                TermKind::Var(VarRef::Symbol(symbol)) => Some(symbol),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut needed = LookupSet::new();
+    let mut classify = |symbol, needed: &mut LookupSet<SymbolId>| {
+        if local_syms.contains(&symbol) {
+            needed.insert(symbol);
+            true
+        } else {
+            allow_external(symbol)
+        }
+    };
+    for symbol in free_symbols(term) {
+        if !classify(symbol, &mut needed) {
+            return None;
+        }
+    }
+
+    let mut dependencies = Vec::new();
+    for (symbol, ty, rhs) in locals.iter().rev() {
+        if !needed.remove(symbol) {
+            continue;
+        }
+        if !is_pullable_prepass_dependency(rhs) {
+            return None;
+        }
+        for free_symbol in free_symbols(rhs) {
+            if !classify(free_symbol, &mut needed) {
+                return None;
+            }
+        }
+        dependencies.push((*symbol, ty.clone(), rhs.clone()));
+    }
+    if !needed.is_empty() {
+        return None;
+    }
+    dependencies.reverse();
+    Some(dependencies)
+}
+
+fn is_pullable_prepass_dependency(term: &Term) -> bool {
+    if matches!(term.kind, TermKind::Soac(_) | TermKind::OutputSlotStore { .. }) {
+        return false;
+    }
+    let mut pullable = true;
+    term.for_each_child(&mut |child| {
+        if pullable {
+            pullable = is_pullable_prepass_dependency(child);
+        }
+    });
+    pullable
+}
+
+fn wrap_prepass_local_deps(
+    mut body: Term,
+    dependencies: &[(SymbolId, Type<TypeName>, Term)],
+    term_ids: &mut TermIdSource,
+) -> Term {
+    for (symbol, ty, rhs) in dependencies.iter().rev() {
+        body = Term {
+            id: term_ids.next_id(),
+            ty: body.ty.clone(),
+            span: rhs.span,
+            kind: TermKind::Let {
+                name: *symbol,
+                name_ty: ty.clone(),
+                rhs: Box::new(rhs.clone()),
+                body: Box::new(body),
+            },
+        };
+    }
+    body
+}
+
+fn compute_entry_can_broadcast_scalar_prepasses(def: &Def, symbols: &SymbolTable) -> bool {
+    let Some(analysis) = analyze_entry(def, symbols) else {
+        return false;
+    };
+    matches!(analysis.soac.original, SoacOp::Map { .. } | SoacOp::Scan { .. })
+}
+
+fn compute_broadcast_required_params(
+    term: &Term,
+    source_def: &Def,
+    symbols: &SymbolTable,
+) -> Option<Vec<RequiredParam>> {
+    let empty_syms = LookupSet::new();
+    let empty_defs = LookupSet::new();
+    let free = compute_free_vars(term, &empty_syms, &empty_syms, &empty_defs, symbols);
+
+    let free_syms: LookupSet<SymbolId> = free
+        .iter()
+        .filter_map(
+            |t| {
+                if let TermKind::Var(VarRef::Symbol(s)) = &t.kind {
+                    Some(*s)
+                } else {
+                    None
+                }
+            },
+        )
+        .collect();
+    let decl = match &source_def.meta {
+        DefMeta::EntryPoint(decl) => decl,
+        _ => return None,
+    };
+    let (orig_params, _) = peel_lambda_params(&source_def.body);
+    let orig_param_syms: LookupSet<SymbolId> = orig_params.iter().map(|(sym, _)| *sym).collect();
+    if !free_syms.iter().all(|sym| orig_param_syms.contains(sym)) {
+        return None;
+    }
+
+    Some(
+        orig_params
+            .iter()
+            .enumerate()
+            .filter(|(_, (sym, _))| free_syms.contains(sym))
+            .map(|(i, (sym, ty))| RequiredParam {
+                sym: *sym,
+                ty: ty.clone(),
+                attr: decl.params.get(i).and_then(forwardable_binding_attribute),
+                binding: decl.param_bindings.get(i).cloned().flatten(),
+            })
+            .collect(),
+    )
+}
+
+/// A scalar-result reduction: either a bare `Reduce`, or a fused `map → reduce`
+/// — a scalar-output, single-`Reduce`, no-map `Screma`.
+fn is_scalar_reduction(term: &Term) -> bool {
+    match &term.kind {
+        TermKind::Soac(SoacOp::Reduce { .. }) => true,
+        TermKind::Soac(SoacOp::Screma {
+            lanes, accumulators, ..
+        }) => super::is_scalar_reduce_screma(lanes, accumulators),
+        _ => false,
+    }
+}
+
+/// Compute the *transitive* taint set of symbols that depend on entry
+/// params. Starts from `entry_params` and grows by walking the body's
+/// `Let` chain in source order: a let-bound symbol joins the set iff
+/// its RHS has any free var already in the set. Stops descending once
+/// the term is neither a Lambda nor a Let — the tail isn't a hoist
+/// site, so taint propagation past it doesn't matter.
+fn compute_taint_set(
+    term: &Term,
+    entry_params: &LookupSet<SymbolId>,
+    symbols: &SymbolTable,
+) -> LookupSet<SymbolId> {
+    let mut tainted = entry_params.clone();
+    walk_taint(term, &mut tainted, symbols);
+    tainted
+}
+
+fn walk_taint(term: &Term, tainted: &mut LookupSet<SymbolId>, symbols: &SymbolTable) {
+    match &term.kind {
+        TermKind::Lambda(lam) => {
+            walk_taint(&lam.body, tainted, symbols);
+        }
+        TermKind::Let { name, rhs, body, .. } => {
+            if rhs_references_entry_param(rhs, tainted, symbols) {
+                tainted.insert(*name);
+            }
+            walk_taint(body, tainted, symbols);
+        }
+        _ => {}
+    }
+}
+
+/// True if `term` has any free SymbolId that's in the given taint set
+/// (entry params plus everything transitively derived from them).
+fn rhs_references_entry_param(
+    term: &Term,
+    entry_params: &LookupSet<SymbolId>,
+    symbols: &SymbolTable,
+) -> bool {
+    let empty_syms = LookupSet::new();
+    let empty_defs = LookupSet::new();
+    let free = compute_free_vars(term, &empty_syms, &empty_syms, &empty_defs, symbols);
+    free.iter().any(|t| matches!(&t.kind, TermKind::Var(VarRef::Symbol(s)) if entry_params.contains(s)))
+}
+
+/// Collect `term`'s free vars that are uniform entry params, as
+/// `(symbol, type, binding)`. Re-declares the uniforms a hoisted SOAC
+/// reads on the generated pre-pass entry. Deduplicated by symbol.
+fn collect_uniform_required_params(
+    term: &Term,
+    uniform_params: &LookupMap<SymbolId, BindingRef>,
+    symbols: &SymbolTable,
+) -> Vec<RequiredParam> {
+    let empty_syms = LookupSet::new();
+    let empty_defs = LookupSet::new();
+    let free = compute_free_vars(term, &empty_syms, &empty_syms, &empty_defs, symbols);
+
+    let mut out: Vec<RequiredParam> = Vec::new();
+    let mut added: LookupSet<SymbolId> = LookupSet::new();
+    for t in &free {
+        if let TermKind::Var(VarRef::Symbol(s)) = &t.kind {
+            if let Some(binding) = uniform_params.get(s) {
+                if added.insert(*s) {
+                    out.push(RequiredParam {
+                        sym: *s,
+                        ty: t.ty.clone(),
+                        attr: Some(Attribute::Uniform {
+                            set: binding.set,
+                            binding: binding.binding,
+                        }),
+                        binding: None,
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+pub(crate) fn intrinsic_term_by_id(
+    id: crate::builtins::BuiltinId,
+    args: Vec<Term>,
+    ret_ty: Type<TypeName>,
+    span: ast::Span,
+    term_ids: &mut TermIdSource,
+) -> Term {
+    let func_term = Term {
+        id: term_ids.next_id(),
+        ty: Type::Variable(0),
+        span,
+        kind: TermKind::Var(VarRef::Builtin { id, overload_idx: 0 }),
+    };
+    Term {
+        id: term_ids.next_id(),
+        ty: ret_ty,
+        span,
+        kind: TermKind::App {
+            func: Box::new(func_term),
+            args,
+        },
+    }
+}
+
+fn uint_lit(val: u64, span: ast::Span, term_ids: &mut TermIdSource) -> Term {
+    Term {
+        id: term_ids.next_id(),
+        ty: Type::Constructed(TypeName::UInt(32), vec![]),
+        span,
+        kind: TermKind::IntLit(val.to_string()),
+    }
 }
