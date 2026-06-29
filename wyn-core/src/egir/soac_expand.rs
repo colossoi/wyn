@@ -78,10 +78,10 @@ fn is_handleable_soac(kind: &SideEffectKind) -> bool {
         PendingSoac::Scatter {
             input_array_types, ..
         } => !input_array_types.is_empty() && input_array_types.iter().all(is_plain_array_source),
-        // Peel the wrapper and re-check; the inner SOAC's source rules apply.
-        PendingSoac::Parallel { serial } => {
-            is_handleable_soac(&SideEffectKind::Pending((**serial).clone()))
-        }
+        // A reified parallel map/reduce/scan; same source rules as its inputs.
+        PendingSoac::Seg {
+            input_array_types, ..
+        } => input_array_types.iter().all(is_plain_array_source),
     }
 }
 
@@ -592,6 +592,7 @@ fn expand_one(
             index_type,
             value_type,
             dest_elem_type,
+            space,
         }) => {
             // Operands: [dest_view, inputs.., captures..].
             let dest_view = se.operand_nodes[0];
@@ -608,137 +609,87 @@ fn expand_one(
             let len_input = (input_nids[0], input_array_types[0].clone());
             let result_nid = se.result.expect("Scatter has a result");
 
-            build_scatter_loop(
+            let scatter = ScatterLoop {
+                dest_view,
+                dest_elem_ty: dest_elem_type.clone(),
+                func: func.clone(),
+                read_inputs,
+                captures,
+                index_type: index_type.clone(),
+                value_type: value_type.clone(),
+                len_input,
+                result_node: result_nid,
+            };
+            if space.is_some() {
+                build_parallel_scatter(graph, control_headers, bid, idx, scatter, next_effect);
+            } else {
+                build_scatter_loop(graph, control_headers, bid, idx, scatter, next_effect);
+            }
+        }
+        SideEffectKind::Pending(PendingSoac::Seg {
+            map_funcs,
+            accumulators,
+            input_array_types,
+            input_elem_types,
+            map_output_elem_types,
+            map_input_indices,
+            map_capture_counts,
+            map_destinations,
+            acc_destinations,
+            ..
+        }) => {
+            // Only the pointwise (no-accumulator) map case expands here;
+            // reduce/scan Segs are lowered into chunked phase entries by
+            // `egir::parallelize` before expansion reaches them.
+            assert!(
+                accumulators.is_empty() && acc_destinations.is_empty(),
+                "reduce/scan Seg should be lowered before soac_expand"
+            );
+            let n_inputs = input_array_types.len();
+            let input_nids: Vec<NodeId> = se.operand_nodes[..n_inputs].to_vec();
+            let mut cursor = n_inputs;
+            let mut map_captures = Vec::with_capacity(map_capture_counts.len());
+            for count in map_capture_counts {
+                map_captures.push(se.operand_nodes[cursor..cursor + *count].to_vec());
+                cursor += *count;
+            }
+            let output_views =
+                if map_destinations.iter().all(|dest| *dest == SoacDestination::InputBuffer) {
+                    vec![input_nids[0]; map_funcs.len()]
+                } else {
+                    se.operand_nodes[cursor..].to_vec()
+                };
+            assert_eq!(
+                output_views.len(),
+                map_funcs.len(),
+                "Seg map has one output view per map"
+            );
+            let result_nid = se.result.expect("Seg has a result");
+            let read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)> = input_nids
+                .iter()
+                .zip(input_array_types.iter().zip(input_elem_types.iter()))
+                .map(|(n, (a, e))| (*n, a.clone(), e.clone()))
+                .collect();
+            let len_input = (input_nids[0], input_array_types[0].clone());
+            build_parallel_maps(
                 graph,
                 control_headers,
                 bid,
                 idx,
-                ScatterLoop {
-                    dest_view,
-                    dest_elem_ty: dest_elem_type.clone(),
-                    func: func.clone(),
-                    read_inputs,
-                    captures,
-                    index_type: index_type.clone(),
-                    value_type: value_type.clone(),
+                ScremaMapsIntoLoop {
                     len_input,
+                    read_inputs,
+                    func_input_indices: map_input_indices.clone(),
+                    output_views,
+                    output_elem_tys: map_output_elem_types.clone(),
                     result_node: result_nid,
+                    funcs: map_funcs.clone(),
+                    captures: map_captures,
                 },
                 next_effect,
             );
         }
-        SideEffectKind::Pending(PendingSoac::Parallel { serial }) => {
-            // Peel the wrapper. Only the pointwise OutputView Screma
-            // case is wired up.
-            match (**serial).clone() {
-                PendingSoac::Screma {
-                    map_funcs,
-                    accumulators,
-                    input_array_types,
-                    input_elem_types,
-                    map_output_elem_types,
-                    map_input_indices,
-                    map_capture_counts,
-                    map_destinations,
-                    acc_destinations,
-                } if accumulators.is_empty()
-                    && acc_destinations.is_empty()
-                    && !map_funcs.is_empty()
-                    && map_destinations.iter().all(|dest| {
-                        matches!(dest, SoacDestination::OutputView | SoacDestination::InputBuffer)
-                    }) =>
-                {
-                    let n_inputs = input_array_types.len();
-                    let input_nids: Vec<NodeId> = se.operand_nodes[..n_inputs].to_vec();
-                    let mut cursor = n_inputs;
-                    let mut map_captures = Vec::with_capacity(map_capture_counts.len());
-                    for count in &map_capture_counts {
-                        map_captures.push(se.operand_nodes[cursor..cursor + *count].to_vec());
-                        cursor += *count;
-                    }
-                    let output_views =
-                        if map_destinations.iter().all(|dest| *dest == SoacDestination::InputBuffer) {
-                            vec![input_nids[0]; map_funcs.len()]
-                        } else {
-                            se.operand_nodes[cursor..].to_vec()
-                        };
-                    assert_eq!(
-                        output_views.len(),
-                        map_funcs.len(),
-                        "Parallel Screma has one output view per map"
-                    );
-                    let result_nid = se.result.expect("Screma has a result");
 
-                    let read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)> = input_nids
-                        .iter()
-                        .zip(input_array_types.iter().zip(input_elem_types.iter()))
-                        .map(|(n, (a, e))| (*n, a.clone(), e.clone()))
-                        .collect();
-                    let len_input = (input_nids[0], input_array_types[0].clone());
-
-                    build_parallel_maps(
-                        graph,
-                        control_headers,
-                        bid,
-                        idx,
-                        ScremaMapsIntoLoop {
-                            len_input,
-                            read_inputs,
-                            func_input_indices: map_input_indices,
-                            output_views,
-                            output_elem_tys: map_output_elem_types,
-                            result_node: result_nid,
-                            funcs: map_funcs,
-                            captures: map_captures,
-                        },
-                        next_effect,
-                    );
-                }
-                PendingSoac::Scatter {
-                    func,
-                    input_array_types,
-                    input_elem_types,
-                    capture_count,
-                    index_type,
-                    value_type,
-                    dest_elem_type,
-                } => {
-                    let n_inputs = input_array_types.len();
-                    let dest_view = se.operand_nodes[0];
-                    let input_nids: Vec<NodeId> = se.operand_nodes[1..1 + n_inputs].to_vec();
-                    let captures = se.operand_nodes[1 + n_inputs..1 + n_inputs + capture_count].to_vec();
-                    let read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)> = input_nids
-                        .iter()
-                        .zip(input_array_types.iter().zip(input_elem_types.iter()))
-                        .map(|(n, (a, e))| (*n, a.clone(), e.clone()))
-                        .collect();
-                    let len_input = (input_nids[0], input_array_types[0].clone());
-                    let result_node = se.result.expect("Scatter has a result");
-                    build_parallel_scatter(
-                        graph,
-                        control_headers,
-                        bid,
-                        idx,
-                        ScatterLoop {
-                            dest_view,
-                            dest_elem_ty: dest_elem_type,
-                            func,
-                            read_inputs,
-                            captures,
-                            index_type,
-                            value_type,
-                            len_input,
-                            result_node,
-                        },
-                        next_effect,
-                    );
-                }
-                other => unreachable!(
-                    "PendingSoac::Parallel wrapping unsupported variant: {:?}",
-                    std::mem::discriminant(&other)
-                ),
-            }
-        }
         _ => unreachable!("is_handleable_soac filtered to supported variants"),
     }
 }

@@ -81,6 +81,7 @@ fn scatter_handleability_checks_every_input() {
         index_type: i32_ty,
         value_type: f32_ty.clone(),
         dest_elem_type: f32_ty,
+        space: None,
     });
 
     assert!(

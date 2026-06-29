@@ -16,7 +16,8 @@ use crate::BindingRef;
 use super::graph_ops;
 use super::program::{EgirEntry, EgirFunc, EgirInner};
 use super::types::{
-    EGraph, NodeId, PendingSoac, PureOp, SideEffectKind, SkeletonTerminator, SoacDestination,
+    EGraph, NodeId, PendingSoac, PureOp, SegLevel, SegSpace, SideEffectKind, SkeletonTerminator,
+    SoacDestination,
 };
 use crate::ssa::types::ControlHeader;
 use crate::tlc::parallelize::ParallelizationPlan;
@@ -69,21 +70,52 @@ fn rewrite_tail_map(entry: &mut super::program::EgirEntry) {
                     && !map_destinations.is_empty()
                     && map_destinations.iter().all(|dest| {
                         matches!(dest, SoacDestination::OutputView | SoacDestination::InputBuffer)
-                    }) => {}
-                PendingSoac::Scatter { .. } => {}
+                    }) =>
+                {
+                    let SideEffectKind::Pending(PendingSoac::Screma {
+                        map_funcs,
+                        input_array_types,
+                        input_elem_types,
+                        map_output_elem_types,
+                        map_input_indices,
+                        map_capture_counts,
+                        map_destinations,
+                        acc_destinations,
+                        ..
+                    }) = se.kind.clone()
+                    else {
+                        unreachable!()
+                    };
+                    let result_types = map_output_elem_types.clone();
+                    se.kind = SideEffectKind::Pending(PendingSoac::Seg {
+                        space: SegSpace {
+                            level: SegLevel::Thread,
+                            len: None,
+                        },
+                        map_funcs,
+                        accumulators: vec![],
+                        input_array_types,
+                        input_elem_types,
+                        map_output_elem_types,
+                        map_input_indices,
+                        map_capture_counts,
+                        map_destinations,
+                        acc_destinations,
+                        result_types,
+                    });
+                    return;
+                }
+                PendingSoac::Scatter { space: None, .. } => {
+                    if let SideEffectKind::Pending(PendingSoac::Scatter { space, .. }) = &mut se.kind {
+                        *space = Some(SegSpace {
+                            level: SegLevel::Thread,
+                            len: None,
+                        });
+                    }
+                    return;
+                }
                 _ => continue,
             }
-            // PendingSoac derives Clone, so the clean version is just to
-            // clone the inner SOAC out, then overwrite. The wrapper is
-            // dominantly a thin marker — clone cost is one Vec<Type> per
-            // entry per compilation.
-            let SideEffectKind::Pending(inner) = se.kind.clone() else {
-                unreachable!()
-            };
-            se.kind = SideEffectKind::Pending(PendingSoac::Parallel {
-                serial: Box::new(inner),
-            });
-            return;
         }
     }
 }

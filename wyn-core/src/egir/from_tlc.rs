@@ -1921,6 +1921,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                 index_type,
                 value_type,
                 dest_elem_type: dest_elem_ty,
+                space: None,
             },
             operands,
             result_ty,

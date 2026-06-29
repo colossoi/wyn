@@ -165,6 +165,40 @@ pub struct PendingScremaAccumulator {
     pub reduce_op_capture_count: usize,
 }
 
+/// Execution level of a `Seg` op. wyn currently only emits thread-level
+/// kernels (one invocation per lane); block-level would be added here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SegLevel {
+    Thread,
+}
+
+/// The parallel iteration space of a `Seg` op. wyn is 1-D: a flat global
+/// thread index ranging over `len` elements. The thread index node itself is
+/// bound during expansion (`build_parallel_maps`/`chunk_soac_inputs`), not at
+/// node-construction time.
+#[derive(Clone, Debug)]
+pub struct SegSpace {
+    pub level: SegLevel,
+    /// Iteration length. `None` derives it from the op's primary input length
+    /// at expansion (the usual case); `Some(n)` pins it explicitly.
+    pub len: Option<NodeId>,
+}
+
+/// A reduce/scan operator of a `Seg` op: the (fused map+)step body, the bare
+/// combiner, and whether it commutes (lets the tree-reduce reorder operands).
+/// The neutral element is supplied as an `init_acc` operand, matching the
+/// `Screma` layout. This is the reified `SegBinOp`; cross-lane combination is
+/// explicit in the operator rather than implicit in the loop body.
+#[derive(Clone, Debug)]
+pub struct SegBinOp {
+    pub kind: ScremaAccumulator,
+    pub step_func: String,
+    pub reduce_op_func: String,
+    pub step_capture_count: usize,
+    pub reduce_op_capture_count: usize,
+    pub commutative: bool,
+}
+
 /// An unexpanded SOAC operation held in the skeleton until `soac_expand` rewrites
 /// it into an explicit loop. All operand NodeIds live in `SideEffect.operand_nodes`
 /// with a variant-specific layout (documented per-variant in `soac_expand`).
@@ -251,15 +285,30 @@ pub enum PendingSoac {
         index_type: Type<TypeName>,
         value_type: Type<TypeName>,
         dest_elem_type: Type<TypeName>,
+        /// `Some` marks a thread-parallel scatter (Futhark's `SegHist` shape):
+        /// `soac_expand` lowers it via `build_parallel_scatter` over the space.
+        /// `None` is the serial `tid==0`-guarded loop (`build_scatter_loop`).
+        space: Option<SegSpace>,
     },
-    /// Wrapper marking a pointwise Screma as parallel at the entry
-    /// boundary. The `egir::parallelize` pass tags a planned compute
-    /// entry's tail SOAC with this; `soac_expand` dispatches to
-    /// `build_parallel_maps` instead of the serial-loop builder.
-    /// Operand layout is identical to the inner Screma's — soac_expand
-    /// peels the wrapper before consuming operands.
-    Parallel {
-        serial: Box<PendingSoac>,
+    /// A reified parallel SOAC — the `SegOp`. Semantically a (1-D) map nest
+    /// over `space`, with pointwise `map_funcs` lanes and optional reduce/scan
+    /// `accumulators` (`SegBinOp`s) combining across lanes. Replaces the old
+    /// `Parallel { serial }` wrapper: `egir::parallelize` builds this from a
+    /// recognized compute-entry tail, and `soac_expand`/`parallelize` drive
+    /// lowering (lane-indexed map kernel; chunked two-phase reduce; three-phase
+    /// scan) from its fields. Operand layout matches the serial `Screma`'s.
+    Seg {
+        space: SegSpace,
+        map_funcs: Vec<String>,
+        accumulators: Vec<SegBinOp>,
+        input_array_types: Vec<Type<TypeName>>,
+        input_elem_types: Vec<Type<TypeName>>,
+        map_output_elem_types: Vec<Type<TypeName>>,
+        map_input_indices: Vec<Vec<usize>>,
+        map_capture_counts: Vec<usize>,
+        map_destinations: Vec<SoacDestination>,
+        acc_destinations: Vec<SoacDestination>,
+        result_types: Vec<Type<TypeName>>,
     },
 }
 
