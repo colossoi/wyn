@@ -329,7 +329,10 @@ pub type TypeTable = LookupMap<NodeId, TypeScheme<TypeName>>;
 //       .to_egraph()                               -> EgirRaw
 //
 // EGIR stages:
-//       .expand_soacs(unroll)                      -> EgirSoacExpanded
+//       .realize_outputs()                         -> EgirOutputsRealized
+//       .segment(recognitions)                     -> EgirSegmented
+//       .schedule(binding_ids)                     -> EgirScheduled
+//       .expand_soacs()                            -> EgirSoacExpanded
 //       [.materialize()]                           -> EgirMaterialized
 //       .optimize_skeleton()                       -> EgirSkelOptimized
 //       .elaborate()                               -> SsaConverted
@@ -1050,7 +1053,7 @@ impl TlcGeneratedLambdasFolded {
     /// Build the raw EGIR program. Callers chain the pipeline
     /// (`expand_soacs → materialize → optimize_skeleton → elaborate`)
     /// explicitly.
-    pub fn to_egraph(mut self) -> std::result::Result<EgirParallelized, ConvertError> {
+    pub fn to_egraph(mut self) -> std::result::Result<EgirScheduled, ConvertError> {
         let empty = LookupMap::new();
         let input_lens = tlc::input_slice_bounds::compute_for_program(&self.0.tlc);
         let inner = egir::from_tlc::run(
@@ -1061,7 +1064,7 @@ impl TlcGeneratedLambdasFolded {
             &mut self.0.auto_storage_binding_ids,
         )?;
         let realized = EgirRaw(inner).realize_outputs()?;
-        Ok(realized.parallelize(&empty, &mut self.0.auto_storage_binding_ids))
+        Ok(realized.segment(&empty).schedule(&mut self.0.auto_storage_binding_ids))
     }
 }
 
@@ -1157,7 +1160,7 @@ impl TlcParallelized {
         TlcReachable(inner)
     }
 
-    pub fn to_egraph(self) -> std::result::Result<EgirParallelized, ConvertError> {
+    pub fn to_egraph(self) -> std::result::Result<EgirScheduled, ConvertError> {
         let TlcPipelineInner {
             tlc,
             pipeline,
@@ -1176,7 +1179,7 @@ impl TlcParallelized {
         )?;
         inner.pipeline.relabel_input_storage_names(&input_names);
         let realized = EgirRaw(inner).realize_outputs()?;
-        Ok(realized.parallelize(&recognitions, &mut auto_storage_binding_ids))
+        Ok(realized.segment(&recognitions).schedule(&mut auto_storage_binding_ids))
     }
 }
 
@@ -1251,7 +1254,7 @@ impl std::ops::Deref for TlcInputSliceBoundsInferred {
 }
 
 impl TlcInputSliceBoundsInferred {
-    pub fn to_egraph(self) -> std::result::Result<EgirParallelized, ConvertError> {
+    pub fn to_egraph(self) -> std::result::Result<EgirScheduled, ConvertError> {
         let TlcPipelineInner {
             tlc,
             pipeline,
@@ -1269,7 +1272,7 @@ impl TlcInputSliceBoundsInferred {
         )?;
         inner.pipeline.relabel_input_storage_names(&input_names);
         let realized = EgirRaw(inner).realize_outputs()?;
-        Ok(realized.parallelize(&recognitions, &mut auto_storage_binding_ids))
+        Ok(realized.segment(&recognitions).schedule(&mut auto_storage_binding_ids))
     }
 }
 
@@ -1291,11 +1294,15 @@ pub struct EgirRaw(EgirInner);
 /// terminator carries no value. See `egir::realize_outputs`.
 pub struct EgirOutputsRealized(EgirInner);
 
-/// EGIR after compute-entry SOAC parallelization tagging. Tail SOACs on
-/// planned compute entries are wrapped in `PendingSoac::Parallel` so
-/// `soac_expand` dispatches to the lane-indexed builder. A no-op when
-/// the plan map is empty (graphics-only programs, `disable=true`, etc.).
-pub struct EgirParallelized(EgirInner);
+/// EGIR after recognized entry-tail SOACs have been reified as semantic
+/// `SegMap`, `SegRed`, or `SegScan` operations. No dispatch schedule or scratch
+/// storage has been chosen yet.
+pub struct EgirSegmented(EgirInner);
+
+/// EGIR after segmented operations have been assigned concrete kernel phases.
+/// Pointwise SegMaps remain for lane expansion; SegReds have become phase
+/// entries; unsupported SegScans have been restored to their serial fallback.
+pub struct EgirScheduled(EgirInner);
 
 /// EGIR after SOAC lowering: every `PendingSoac::{Map, Scan, Reduce, …}` in
 /// the skeleton has been expanded to explicit loops / unrolled code.
@@ -1332,20 +1339,29 @@ impl EgirOutputsRealized {
     /// and tags each planned compute entry's tail SOAC for lane-indexed
     /// lowering downstream. Always called before `expand_soacs` — see the
     /// SOAC Parallelization Boundary section in the README.
-    pub fn parallelize(
+    pub fn segment(
         self,
         recognitions: &LookupMap<String, tlc::parallelize::EntryRecognition>,
-        binding_ids: &mut IdSource<u32>,
-    ) -> EgirParallelized {
+    ) -> EgirSegmented {
         let EgirOutputsRealized(mut inner) = self;
-        egir::parallelize::run(&mut inner, recognitions, binding_ids);
-        EgirParallelized(inner)
+        egir::parallelize::reify(&mut inner, recognitions);
+        EgirSegmented(inner)
     }
 }
 
-impl EgirParallelized {
+impl EgirSegmented {
+    /// Choose concrete kernel phases for each semantic SegOp and allocate any
+    /// scratch bindings required by that schedule.
+    pub fn schedule(mut self, binding_ids: &mut IdSource<u32>) -> EgirScheduled {
+        egir::parallelize::lower(&mut self.0, binding_ids);
+        egir::publish::finalize_compute_io(&mut self.0.pipeline, &self.0.entry_points);
+        EgirScheduled(self.0)
+    }
+}
+
+impl EgirScheduled {
     pub fn expand_soacs(self) -> EgirSoacExpanded {
-        let EgirParallelized(mut inner) = self;
+        let EgirScheduled(mut inner) = self;
         egir::soac_expand::run(&mut inner);
         EgirSoacExpanded(inner)
     }

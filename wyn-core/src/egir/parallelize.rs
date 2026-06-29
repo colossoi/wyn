@@ -1,8 +1,10 @@
-//! EGIR-side SOAC parallelization. From each entry's recognition: a Map /
-//! pointwise Screma is tagged as a reified `Seg` for `soac_expand`'s
-//! lane-indexed kernel; a Reduce is split into a chunked phase-1 partial reduce
-//! plus a synthesized workgroup tree-reduce phase 2. Scratch bindings
-//! (partials/result) are allocated here.
+//! EGIR-side SOAC parallelization in two explicit stages:
+//!
+//! 1. `reify` turns recognized entry-tail Scremas into semantic `SegMap`,
+//!    `SegRed`, or `SegScan` operations.
+//! 2. `lower` schedules those operations: maps remain segmented for
+//!    `soac_expand`, reductions become chunked phase-1 plus tree-reduce phase
+//!    2 entries, and scans currently return to the serial Screma fallback.
 use crate::LookupMap;
 
 use polytype::Type;
@@ -15,10 +17,10 @@ use crate::ssa::types::{ControlHeader, InstKind};
 use crate::BindingRef;
 
 use super::graph_ops;
-use super::program::{EgirEntry, EgirFunc, EgirInner};
+use super::program::{EgirEntry, EgirInner};
 use super::types::{
-    EGraph, NodeId, PendingSoac, PureOp, SegLevel, SegSpace, SideEffectKind, SkeletonTerminator,
-    SoacDestination,
+    EGraph, NodeId, PendingScremaAccumulator, PendingSoac, PureOp, SegBinOp, SegLevel, SegOpKind, SegSpace,
+    SideEffectKind, SkeletonTerminator, SoacDestination,
 };
 use crate::tlc::parallelize::EntryRecognition;
 
@@ -27,109 +29,153 @@ pub const PHASE2_WIDTH: u32 = 256;
 /// Per-workgroup width used to chunk a phase-1 partial reduce.
 const REDUCE_PHASE1_WIDTH: u32 = 64;
 
-/// Lower each recognized compute entry's tail SOAC by its strategy:
-///
-/// - **Map / pointwise Screma**: tag the tail as a reified `Seg`
-///   (`rewrite_tail_map`); `soac_expand` emits the lane-indexed kernel.
-/// - **Reduce**: split into a chunked phase-1 partial reduce (each thread
-///   reduces its chunk to `partials[tid]`) plus a synthesized workgroup
-///   tree-reduce phase 2. Scratch bindings are allocated from `binding_ids`.
-///
-/// Scan / multidomain / ordered strategies are not yet wired here.
-pub fn run(
-    inner: &mut EgirInner,
-    recognitions: &LookupMap<String, EntryRecognition>,
-    binding_ids: &mut crate::IdSource<u32>,
-) {
-    use crate::tlc::parallelize::ParallelStrategy;
-    let mut new_entries: Vec<EgirEntry> = Vec::new();
-    let new_functions: Vec<EgirFunc> = Vec::new();
+/// Reify each recognized entry's tail Screma as a semantic segmented op.
+/// This pass performs no scheduling and allocates no bindings.
+pub fn reify(inner: &mut EgirInner, recognitions: &LookupMap<String, EntryRecognition>) {
     for entry in inner.entry_points.iter_mut() {
-        let Some(rec) = recognitions.get(&entry.name) else {
+        if recognitions.contains_key(&entry.name) {
+            reify_tail_soac(entry);
+        }
+    }
+}
+
+/// Lower semantic segmented operations into executable kernel entries.
+/// Pointwise `SegMap`s remain for `soac_expand`; `SegRed`s become a chunked
+/// phase 1 plus synthesized phase-2 tree reductions. `SegScan` scheduling is
+/// not migrated yet, so it is deliberately restored to a serial Screma.
+pub fn lower(inner: &mut EgirInner, binding_ids: &mut crate::IdSource<u32>) {
+    let mut new_entries: Vec<EgirEntry> = Vec::new();
+    for entry in inner.entry_points.iter_mut() {
+        let Some(kind) = find_pending_seg(entry).map(|(bid, idx)| {
+            let se = &entry.graph.skeleton.blocks[bid].side_effects[idx];
+            let SideEffectKind::Pending(PendingSoac::Seg { kind, .. }) = &se.kind else {
+                unreachable!()
+            };
+            kind.clone()
+        }) else {
             continue;
         };
-        match rec.strategy {
-            ParallelStrategy::Map | ParallelStrategy::Screma if !screma_has_reduce_acc(entry) => {
-                rewrite_tail_map(entry);
-            }
-            ParallelStrategy::Map | ParallelStrategy::Screma => {
+        match kind {
+            SegOpKind::SegMap => {}
+            SegOpKind::SegRed { .. } => {
                 if let Some(phases) = lower_reduce_entry(entry, binding_ids) {
                     new_entries.extend(phases);
+                } else {
+                    restore_serial_seg(entry);
                 }
             }
-            ParallelStrategy::Reduce => {
-                if let Some(phases) = lower_reduce_entry(entry, binding_ids) {
-                    new_entries.extend(phases);
-                }
+            SegOpKind::SegScan { .. } => {
+                restore_serial_seg(entry);
             }
-            ParallelStrategy::Scan => {}
         }
     }
     inner.entry_points.extend(new_entries);
-    inner.functions.extend(new_functions);
 }
 
-fn rewrite_tail_map(entry: &mut super::program::EgirEntry) {
-    // Walk every block and locate the (unique) tail pointwise Screma.
+fn reify_tail_soac(entry: &mut EgirEntry) {
+    let Some((block_id, idx)) = find_pending_screma(entry) else {
+        reify_parallel_scatter(entry);
+        return;
+    };
+    let se = &entry.graph.skeleton.blocks[block_id].side_effects[idx];
+    let SideEffectKind::Pending(PendingSoac::Screma {
+        map_funcs,
+        accumulators,
+        input_array_types,
+        input_elem_types,
+        map_output_elem_types,
+        map_input_indices,
+        map_capture_counts,
+        map_destinations,
+        acc_destinations,
+    }) = &se.kind
+    else {
+        unreachable!()
+    };
+
+    let n_inputs = input_array_types.len();
+    let neutrals: Vec<NodeId> = (0..accumulators.len()).map(|i| se.operand_nodes[n_inputs + i]).collect();
+    let Some(kind) = reify_seg_kind(accumulators, &neutrals) else {
+        // Mixed reduce+scan Scremas remain serial until EGIR can schedule both
+        // result classes coherently.
+        return;
+    };
+    if matches!(kind, SegOpKind::SegMap)
+        && (map_funcs.is_empty()
+            || !map_destinations
+                .iter()
+                .all(|dest| matches!(dest, SoacDestination::OutputView | SoacDestination::InputBuffer)))
+    {
+        return;
+    }
+
+    let result_types = se
+        .result
+        .and_then(|result| entry.graph.types.get(&result))
+        .map(|ty| match ty {
+            Type::Constructed(TypeName::Tuple(_), fields) => fields.clone(),
+            other => vec![other.clone()],
+        })
+        .unwrap_or_default();
+    let seg = PendingSoac::Seg {
+        space: SegSpace {
+            level: SegLevel::Thread,
+            len: None,
+        },
+        kind,
+        map_funcs: map_funcs.clone(),
+        input_array_types: input_array_types.clone(),
+        input_elem_types: input_elem_types.clone(),
+        map_output_elem_types: map_output_elem_types.clone(),
+        map_input_indices: map_input_indices.clone(),
+        map_capture_counts: map_capture_counts.clone(),
+        map_destinations: map_destinations.clone(),
+        acc_destinations: acc_destinations.clone(),
+        result_types,
+    };
+    entry.graph.skeleton.blocks[block_id].side_effects[idx].kind = SideEffectKind::Pending(seg);
+}
+
+fn reify_seg_kind(accumulators: &[PendingScremaAccumulator], neutrals: &[NodeId]) -> Option<SegOpKind> {
+    debug_assert_eq!(accumulators.len(), neutrals.len());
+    let operators: Vec<SegBinOp> = accumulators
+        .iter()
+        .zip(neutrals)
+        .map(|(acc, &neutral)| SegBinOp {
+            kind: acc.kind,
+            step_func: acc.step_func.clone(),
+            reduce_op_func: acc.reduce_op_func.clone(),
+            neutral,
+            shape: Vec::new(),
+            step_capture_count: acc.step_capture_count,
+            reduce_op_capture_count: acc.reduce_op_capture_count,
+            // Wyn's source reduction contract is associative but currently has
+            // no commutativity annotation, so preserve left-to-right order.
+            commutative: false,
+        })
+        .collect();
+    if operators.is_empty() {
+        Some(SegOpKind::SegMap)
+    } else if operators.iter().all(|op| matches!(op.kind, crate::tlc::ScremaAccumulator::Reduce)) {
+        Some(SegOpKind::SegRed { operators })
+    } else if operators.iter().all(|op| matches!(op.kind, crate::tlc::ScremaAccumulator::Scan)) {
+        Some(SegOpKind::SegScan { operators })
+    } else {
+        None
+    }
+}
+
+fn reify_parallel_scatter(entry: &mut EgirEntry) {
     for (_, block) in entry.graph.skeleton.blocks.iter_mut() {
         for se in block.side_effects.iter_mut() {
-            let SideEffectKind::Pending(ref pending) = se.kind else {
-                continue;
-            };
-            match pending {
-                PendingSoac::Screma {
-                    accumulators,
-                    map_destinations,
-                    ..
-                } if accumulators.is_empty()
-                    && !map_destinations.is_empty()
-                    && map_destinations.iter().all(|dest| {
-                        matches!(dest, SoacDestination::OutputView | SoacDestination::InputBuffer)
-                    }) =>
-                {
-                    let SideEffectKind::Pending(PendingSoac::Screma {
-                        map_funcs,
-                        input_array_types,
-                        input_elem_types,
-                        map_output_elem_types,
-                        map_input_indices,
-                        map_capture_counts,
-                        map_destinations,
-                        acc_destinations,
-                        ..
-                    }) = se.kind.clone()
-                    else {
-                        unreachable!()
-                    };
-                    let result_types = map_output_elem_types.clone();
-                    se.kind = SideEffectKind::Pending(PendingSoac::Seg {
-                        space: SegSpace {
-                            level: SegLevel::Thread,
-                            len: None,
-                        },
-                        map_funcs,
-                        accumulators: vec![],
-                        input_array_types,
-                        input_elem_types,
-                        map_output_elem_types,
-                        map_input_indices,
-                        map_capture_counts,
-                        map_destinations,
-                        acc_destinations,
-                        result_types,
+            if let SideEffectKind::Pending(PendingSoac::Scatter { space, .. }) = &mut se.kind {
+                if space.is_none() {
+                    *space = Some(SegSpace {
+                        level: SegLevel::Thread,
+                        len: None,
                     });
-                    return;
                 }
-                PendingSoac::Scatter { space: None, .. } => {
-                    if let SideEffectKind::Pending(PendingSoac::Scatter { space, .. }) = &mut se.kind {
-                        *space = Some(SegSpace {
-                            level: SegLevel::Thread,
-                            len: None,
-                        });
-                    }
-                    return;
-                }
-                _ => continue,
+                return;
             }
         }
     }
@@ -532,6 +578,10 @@ fn emit_chunk_arithmetic(
     total_threads: u32,
     input_len: NodeId,
 ) -> Result<(NodeId, NodeId, NodeId), String> {
+    // TODO(parallelize-egir): add an execution-level regression for `n <
+    // dispatched_threads`.  `chunk_start >= input_len` must produce an empty
+    // chunk; an unchecked `input_len - chunk_start` underflows for u32 and can
+    // turn an idle invocation into an out-of-bounds reader.
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     // The chunk arithmetic runs in the input's *index* type: storage-view
     // inputs index in u32 (`_w_intrinsic_storage_len`), Range inputs in the
@@ -698,20 +748,63 @@ fn find_pending_screma(entry: &EgirEntry) -> Option<(BlockId, usize)> {
     None
 }
 
-/// True when the entry's tail Screma carries any Reduce accumulator (a
-/// redomap), so it must be lowered as a two-phase reduce rather than a
-/// pointwise map.
-fn screma_has_reduce_acc(entry: &EgirEntry) -> bool {
-    for (_, block) in &entry.graph.skeleton.blocks {
-        for se in &block.side_effects {
-            if let SideEffectKind::Pending(PendingSoac::Screma { accumulators, .. }) = &se.kind {
-                return accumulators
-                    .iter()
-                    .any(|a| matches!(a.kind, crate::tlc::ScremaAccumulator::Reduce));
+fn find_pending_seg(entry: &EgirEntry) -> Option<(BlockId, usize)> {
+    for (bid, block) in &entry.graph.skeleton.blocks {
+        for (i, se) in block.side_effects.iter().enumerate() {
+            if matches!(&se.kind, SideEffectKind::Pending(PendingSoac::Seg { .. })) {
+                return Some((bid, i));
             }
         }
     }
-    false
+    None
+}
+
+fn restore_serial_seg(entry: &mut EgirEntry) {
+    let Some((block_id, idx)) = find_pending_seg(entry) else {
+        return;
+    };
+    let kind = entry.graph.skeleton.blocks[block_id].side_effects[idx].kind.clone();
+    let SideEffectKind::Pending(PendingSoac::Seg {
+        kind,
+        map_funcs,
+        input_array_types,
+        input_elem_types,
+        map_output_elem_types,
+        map_input_indices,
+        map_capture_counts,
+        map_destinations,
+        acc_destinations,
+        ..
+    }) = kind
+    else {
+        unreachable!()
+    };
+    let operators = match kind {
+        SegOpKind::SegMap => Vec::new(),
+        SegOpKind::SegRed { operators } | SegOpKind::SegScan { operators } => operators,
+    };
+    let accumulators = operators
+        .into_iter()
+        .map(|op| PendingScremaAccumulator {
+            kind: op.kind,
+            step_func: op.step_func,
+            reduce_op_func: op.reduce_op_func,
+            step_capture_count: op.step_capture_count,
+            reduce_op_capture_count: op.reduce_op_capture_count,
+        })
+        .collect();
+    entry.graph.skeleton.blocks[block_id].side_effects[idx].kind =
+        SideEffectKind::Pending(PendingSoac::Screma {
+            map_funcs,
+            accumulators,
+            input_array_types,
+            input_elem_types,
+            map_output_elem_types,
+            map_input_indices,
+            map_capture_counts,
+            map_destinations,
+            acc_destinations,
+        });
 }
 
 fn project_root_index(graph: &super::types::EGraph, value: NodeId, root: NodeId) -> Option<u32> {
@@ -740,8 +833,8 @@ fn lower_reduce_entry(
 ) -> Option<Vec<EgirEntry>> {
     let total_threads = REDUCE_PHASE1_WIDTH;
 
-    // 2. Locate the Screma side-effect and pull its metadata.
-    let Some((block_id, idx)) = find_pending_screma(entry) else {
+    // 2. Locate the semantic SegRed and pull its metadata.
+    let Some((block_id, idx)) = find_pending_seg(entry) else {
         return None;
     };
     let (
@@ -754,9 +847,9 @@ fn lower_reduce_entry(
         screma_result_nid,
     ) = {
         let se = &entry.graph.skeleton.blocks[block_id].side_effects[idx];
-        let SideEffectKind::Pending(PendingSoac::Screma {
+        let SideEffectKind::Pending(PendingSoac::Seg {
+            kind: SegOpKind::SegRed { operators },
             map_funcs,
-            accumulators,
             input_array_types,
             map_destinations,
             acc_destinations,
@@ -766,11 +859,12 @@ fn lower_reduce_entry(
         else {
             return None;
         };
-        let n_accs = accumulators.len();
-        if !accumulators.iter().all(|a| matches!(a.kind, crate::tlc::ScremaAccumulator::Reduce)) {
-            return None;
-        }
-        if accumulators.iter().any(|a| a.step_capture_count != 0 || a.reduce_op_capture_count != 0) {
+        let n_accs = operators.len();
+        // TODO(parallelize-egir): add a positive test for a SegRed whose map,
+        // step, and/or combine lambda captures a scalar.  Falling back to the
+        // serial Screma is correct today, but the parallel path must eventually
+        // thread these captures through both generated phases.
+        if operators.iter().any(|a| a.step_capture_count != 0 || a.reduce_op_capture_count != 0) {
             return None;
         }
         if map_capture_counts.iter().any(|&c| c != 0) {
@@ -803,13 +897,13 @@ fn lower_reduce_entry(
                 (v, entry.graph.types[&v].clone())
             })
             .collect();
-        let init_nids: Vec<NodeId> = (0..n_accs).map(|k| se.operand_nodes[n_inputs + k]).collect();
+        let init_nids: Vec<NodeId> = operators.iter().map(|op| op.neutral).collect();
         let base = n_inputs + n_accs;
         let map_view_ops: Vec<usize> = (0..n_maps).map(|m| base + m).collect();
         let result = se.result?;
         let elem_tys: Vec<Type<TypeName>> =
             init_nids.iter().map(|n| entry.graph.types[n].clone()).collect();
-        let reduce_funcs: Vec<String> = accumulators.iter().map(|a| a.reduce_op_func.clone()).collect();
+        let reduce_funcs: Vec<String> = operators.iter().map(|a| a.reduce_op_func.clone()).collect();
         (
             reduce_funcs,
             n_maps,
@@ -831,6 +925,11 @@ fn lower_reduce_entry(
         })
         .collect();
 
+    // TODO(parallelize-egir): make this lowering transactional and add a test
+    // where a late routing check fails.  All validation must happen before the
+    // first graph mutation so returning `None` can never leave a half-lowered
+    // entry behind.
+
     // 3. Chunk all input views and every map output view; swap them back
     // into the Screma operand list.
     let chunked = chunk_soac_inputs(
@@ -838,7 +937,7 @@ fn lower_reduce_entry(
         &input_view_data,
         total_threads,
         ChunkInputKind::StorageOrRange,
-        "Screma",
+        "SegRed",
     )
     .ok()?;
     let chunk_start = chunked.chunk_start;
@@ -859,7 +958,7 @@ fn lower_reduce_entry(
             chunk_start,
             chunk_len,
             ChunkInputKind::StorageOnly,
-            &format!("Screma map output {m_idx}"),
+            &format!("SegRed map output {m_idx}"),
         )
         .ok()?;
         let se = &mut entry.graph.skeleton.blocks[block_id].side_effects[idx];
@@ -982,5 +1081,71 @@ fn lower_reduce_entry(
         .ok()?;
         phase2s.push(phase2);
     }
+    // Scheduling consumed the semantic SegRed. Phase 1 is now an ordinary
+    // per-invocation Screma over the thread's chunk; `soac_expand` lowers that
+    // local loop while the synthesized phase-2 entries combine its partials.
+    restore_serial_seg(entry);
     Some(phase2s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tlc::ScremaAccumulator;
+
+    fn accumulator(kind: ScremaAccumulator, stem: &str) -> PendingScremaAccumulator {
+        PendingScremaAccumulator {
+            kind,
+            step_func: format!("{stem}_step"),
+            reduce_op_func: format!("{stem}_combine"),
+            step_capture_count: 1,
+            reduce_op_capture_count: 2,
+        }
+    }
+
+    fn neutral(graph: &mut EGraph, index: usize) -> NodeId {
+        graph.add_func_param(index, Type::Constructed(TypeName::Unit, vec![]))
+    }
+
+    #[test]
+    fn reduction_accumulator_reifies_as_seg_red_operator() {
+        let mut graph = EGraph::new();
+        let ne = neutral(&mut graph, 0);
+        let kind = reify_seg_kind(&[accumulator(ScremaAccumulator::Reduce, "sum")], &[ne])
+            .expect("a reduction is a supported semantic SegOp");
+        let SegOpKind::SegRed { operators } = kind else {
+            panic!("reduction must reify as SegRed")
+        };
+        assert_eq!(operators.len(), 1);
+        assert_eq!(operators[0].step_func, "sum_step");
+        assert_eq!(operators[0].reduce_op_func, "sum_combine");
+        assert_eq!(operators[0].neutral, ne);
+        assert!(operators[0].shape.is_empty());
+        assert_eq!(operators[0].step_capture_count, 1);
+        assert_eq!(operators[0].reduce_op_capture_count, 2);
+        assert!(
+            !operators[0].commutative,
+            "Wyn does not yet declare commutativity"
+        );
+    }
+
+    #[test]
+    fn scan_accumulator_reifies_as_seg_scan_operator() {
+        let mut graph = EGraph::new();
+        let ne = neutral(&mut graph, 0);
+        let kind = reify_seg_kind(&[accumulator(ScremaAccumulator::Scan, "prefix")], &[ne])
+            .expect("a scan is a supported semantic SegOp");
+        assert!(matches!(kind, SegOpKind::SegScan { operators } if operators.len() == 1));
+    }
+
+    #[test]
+    fn mixed_reduce_and_scan_stays_serial_until_joint_scheduler_exists() {
+        let accumulators = [
+            accumulator(ScremaAccumulator::Reduce, "sum"),
+            accumulator(ScremaAccumulator::Scan, "prefix"),
+        ];
+        let mut graph = EGraph::new();
+        let neutrals = [neutral(&mut graph, 0), neutral(&mut graph, 1)];
+        assert!(reify_seg_kind(&accumulators, &neutrals).is_none());
+    }
 }

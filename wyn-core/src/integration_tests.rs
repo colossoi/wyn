@@ -1681,6 +1681,9 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32)
 /// scope before defunctionalization attaches the composed map/reduce capture.
 #[test]
 fn test_graphical_fused_reduce_carries_local_scalar_into_prepass() {
+    // TODO(parallelize-egir): strengthen this beyond "compiles": inspect the
+    // generated schedule/SSA and assert that the reduction is still parallel.
+    // A serial fallback also compiles and would make this regression toothless.
     let source = r#"
 def globalData: [12]f32 = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0]
 

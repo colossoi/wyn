@@ -194,9 +194,33 @@ pub struct SegBinOp {
     pub kind: ScremaAccumulator,
     pub step_func: String,
     pub reduce_op_func: String,
+    /// Neutral value for this operator, interned in the surrounding EGraph.
+    pub neutral: NodeId,
+    /// Logical vectorized-operator dimensions. Empty for today's scalar and
+    /// aggregate Wyn reductions; retained explicitly for Futhark-style
+    /// vectorized operators rather than baking that assumption into lowering.
+    pub shape: Vec<NodeId>,
     pub step_capture_count: usize,
     pub reduce_op_capture_count: usize,
     pub commutative: bool,
+}
+
+/// The semantic operation performed over a segmented iteration space.
+///
+/// This mirrors Futhark's `SegMap` / `SegRed` / `SegScan` distinction: the
+/// operator kind is explicit in EGIR instead of being rediscovered from a
+/// generic Screma accumulator list during lowering. `Scatter { space: Some }`
+/// remains the current `SegHist` representation until scatter scheduling is
+/// migrated into this same boundary.
+#[derive(Clone, Debug)]
+pub enum SegOpKind {
+    SegMap,
+    SegRed {
+        operators: Vec<SegBinOp>,
+    },
+    SegScan {
+        operators: Vec<SegBinOp>,
+    },
 }
 
 /// An unexpanded SOAC operation held in the skeleton until `soac_expand` rewrites
@@ -299,8 +323,8 @@ pub enum PendingSoac {
     /// scan) from its fields. Operand layout matches the serial `Screma`'s.
     Seg {
         space: SegSpace,
+        kind: SegOpKind,
         map_funcs: Vec<String>,
-        accumulators: Vec<SegBinOp>,
         input_array_types: Vec<Type<TypeName>>,
         input_elem_types: Vec<Type<TypeName>>,
         map_output_elem_types: Vec<Type<TypeName>>,

@@ -180,6 +180,10 @@ pub(crate) struct RequiredParam {
 /// Result of analyzing a compute entry point.
 #[derive(Debug, Clone)]
 struct EntryAnalysis {
+    // TODO(parallelize-egir): once EGIR derives domains and dependencies from
+    // `slot_sources`, delete the legacy lowering-only fields below (and their
+    // unused imports/helpers) under a warning-free build test.  Keeping a dead
+    // shadow planner here risks the TLC and EGIR analyses drifting apart.
     pub def_name: SymbolId,
     pub soac: SoacAnalysis,
     /// Let-bound symbol whose RHS was followed to find the tail SOAC.
@@ -1009,7 +1013,6 @@ pub struct ParallelizationResult {
     pub input_names: LookupMap<(u32, u32), String>,
 }
 
-
 pub(crate) fn let_term(
     name: SymbolId,
     name_ty: Type<TypeName>,
@@ -1243,24 +1246,19 @@ pub fn run(
             SoacOp::Reduce { .. } => (ParallelStrategy::Reduce, false),
             SoacOp::Scan { .. } => (ParallelStrategy::Scan, true),
             SoacOp::Screma { accumulators, .. } => {
-                let has_scan =
-                    accumulators.iter().any(|a| matches!(a.kind, ScremaAccumulator::Scan));
+                let has_scan = accumulators.iter().any(|a| matches!(a.kind, ScremaAccumulator::Scan));
                 (ParallelStrategy::Screma, accumulators.is_empty() || has_scan)
             }
             _ => continue,
         };
-        let forced_output = program
-            .defs
-            .iter()
-            .find(|d| d.name == *def_name)
-            .and_then(|d| match &d.meta {
-                DefMeta::EntryPoint(decl) => decl
-                    .storage_bindings
-                    .iter()
-                    .find(|b| matches!(b.role, interface::StorageRole::Output))
-                    .map(|b| b.binding),
-                _ => None,
-            });
+        let forced_output = program.defs.iter().find(|d| d.name == *def_name).and_then(|d| match &d.meta {
+            DefMeta::EntryPoint(decl) => decl
+                .storage_bindings
+                .iter()
+                .find(|b| matches!(b.role, interface::StorageRole::Output))
+                .map(|b| b.binding),
+            _ => None,
+        });
         let name = crate::symbol_name_or_bug(&program.symbols, *def_name).to_string();
         recognitions.insert(
             name,

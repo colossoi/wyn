@@ -23,7 +23,7 @@ use crate::types::TypeExt;
 use crate::types::{is_array_variant_view, is_virtual_array};
 
 use super::types::{
-    EGraph, ENode, NodeId, PendingSoac, PureOp, SideEffect, SideEffectKind, SkeletonTerminator,
+    EGraph, ENode, NodeId, PendingSoac, PureOp, SegOpKind, SideEffect, SideEffectKind, SkeletonTerminator,
     SoacDestination,
 };
 
@@ -80,8 +80,11 @@ fn is_handleable_soac(kind: &SideEffectKind) -> bool {
         } => !input_array_types.is_empty() && input_array_types.iter().all(is_plain_array_source),
         // A reified parallel map/reduce/scan; same source rules as its inputs.
         PendingSoac::Seg {
-            input_array_types, ..
+            kind: SegOpKind::SegMap,
+            input_array_types,
+            ..
         } => input_array_types.iter().all(is_plain_array_source),
+        PendingSoac::Seg { .. } => false,
     }
 }
 
@@ -627,8 +630,8 @@ fn expand_one(
             }
         }
         SideEffectKind::Pending(PendingSoac::Seg {
+            kind: SegOpKind::SegMap,
             map_funcs,
-            accumulators,
             input_array_types,
             input_elem_types,
             map_output_elem_types,
@@ -638,13 +641,9 @@ fn expand_one(
             acc_destinations,
             ..
         }) => {
-            // Only the pointwise (no-accumulator) map case expands here;
-            // reduce/scan Segs are lowered into chunked phase entries by
-            // `egir::parallelize` before expansion reaches them.
-            assert!(
-                accumulators.is_empty() && acc_destinations.is_empty(),
-                "reduce/scan Seg should be lowered before soac_expand"
-            );
+            // SegRed/SegScan are consumed by `egir::parallelize::lower`
+            // before expansion. This arm is therefore semantically map-only.
+            assert!(acc_destinations.is_empty(), "SegMap has no accumulators");
             let n_inputs = input_array_types.len();
             let input_nids: Vec<NodeId> = se.operand_nodes[..n_inputs].to_vec();
             let mut cursor = n_inputs;
@@ -653,12 +652,12 @@ fn expand_one(
                 map_captures.push(se.operand_nodes[cursor..cursor + *count].to_vec());
                 cursor += *count;
             }
-            let output_views =
-                if map_destinations.iter().all(|dest| *dest == SoacDestination::InputBuffer) {
-                    vec![input_nids[0]; map_funcs.len()]
-                } else {
-                    se.operand_nodes[cursor..].to_vec()
-                };
+            let output_views = if map_destinations.iter().all(|dest| *dest == SoacDestination::InputBuffer)
+            {
+                vec![input_nids[0]; map_funcs.len()]
+            } else {
+                se.operand_nodes[cursor..].to_vec()
+            };
             assert_eq!(
                 output_views.len(),
                 map_funcs.len(),
