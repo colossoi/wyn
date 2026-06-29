@@ -20,7 +20,7 @@ use super::graph_ops;
 use super::program::{EgirEntry, EgirInner};
 use super::types::{
     EGraph, NodeId, PendingScremaAccumulator, PendingSoac, PureOp, SegBinOp, SegLevel, SegOpKind, SegSpace,
-    SideEffectKind, SkeletonTerminator, SoacDestination,
+    SideEffect, SideEffectKind, SkeletonTerminator, SoacDestination,
 };
 use crate::tlc::parallelize::EntryRecognition;
 
@@ -86,51 +86,60 @@ pub fn lower(inner: &mut EgirInner, binding_ids: &mut crate::IdSource<u32>) {
     entry_points.extend(split_clones);
 }
 
-/// Locate every pointwise `SegMap` side-effect that writes an output view,
-/// paired with the output slot it targets. Used to decide whether an entry
-/// holds several independent map domains that must split into separate kernels.
-fn output_seg_maps(entry: &EgirEntry) -> Vec<(BlockId, usize, usize)> {
-    let mut segs = Vec::new();
-    for (bid, block) in &entry.graph.skeleton.blocks {
-        for (i, se) in block.side_effects.iter().enumerate() {
-            let SideEffectKind::Pending(PendingSoac::Seg {
-                kind: SegOpKind::SegMap,
-                input_array_types,
-                map_destinations,
-                map_capture_counts,
-                ..
-            }) = &se.kind
-            else {
-                continue;
-            };
-            if !map_destinations.iter().all(|d| matches!(d, SoacDestination::OutputView)) {
-                continue;
+/// The output slot a side-effect contributes to, found by scanning its operand
+/// subgraph for a storage view that names one of the entry's output bindings.
+/// `None` for a side-effect that touches no output (shared prefix computation,
+/// kept by every split stage). A side-effect spanning more than one output
+/// binding also returns `None` — it can't be assigned to a single domain.
+fn side_effect_output_slot(entry: &EgirEntry, se: &SideEffect) -> Option<usize> {
+    use std::collections::HashSet;
+    let mut seen: HashSet<NodeId> = HashSet::new();
+    let mut stack: Vec<NodeId> = se.operand_nodes.to_vec();
+    let mut slot: Option<usize> = None;
+    while let Some(n) = stack.pop() {
+        if !seen.insert(n) {
+            continue;
+        }
+        if let Some(br) = graph_ops::extract_storage_view_source(&entry.graph, n) {
+            if let Some(s) = entry.outputs.iter().position(|o| o.storage_binding == Some(br)) {
+                match slot {
+                    None => slot = Some(s),
+                    Some(prev) if prev != s => return None,
+                    _ => {}
+                }
             }
-            // SegMap operand layout: `[inputs, map_captures, output_views]`
-            // (no accumulators). The first output view follows every input and
-            // every capture.
-            let view_base = input_array_types.len() + map_capture_counts.iter().sum::<usize>();
-            let Some(&out_view) = se.operand_nodes.get(view_base) else {
-                continue;
-            };
-            let Some(br) = graph_ops::extract_storage_view_source(&entry.graph, out_view) else {
-                continue;
-            };
-            let Some(slot) = entry.outputs.iter().position(|o| o.storage_binding == Some(br)) else {
-                continue;
-            };
-            segs.push((bid, i, slot));
+        }
+        if let Some(node) = entry.graph.nodes.get(n) {
+            stack.extend(node.children());
         }
     }
-    segs
+    slot
 }
 
-/// Drop the side-effects named by `drop` from `entry` and restrict its outputs
-/// to the single slot `keep_slot`. The dropped maps' kernels are no longer
-/// emitted; their now-dead pure nodes are pruned downstream.
-fn keep_only_seg(entry: &mut EgirEntry, drop: &[(BlockId, usize)], keep_slot: usize) {
+/// True for a pointwise `SegMap` side-effect (a parallel output domain).
+fn is_seg_map(se: &SideEffect) -> bool {
+    matches!(
+        &se.kind,
+        SideEffectKind::Pending(PendingSoac::Seg {
+            kind: SegOpKind::SegMap,
+            ..
+        })
+    )
+}
+
+/// Restrict `entry` to a single output slot: keep the side-effects that
+/// produce `keep_slot` plus the shared ones, drop everything that produces a
+/// different slot, and narrow `outputs` to that slot. Dropped kernels are no
+/// longer emitted; their now-dead pure nodes are pruned downstream.
+fn restrict_to_slot(entry: &mut EgirEntry, keep_slot: usize, slot_of: &LookupMap<(BlockId, usize), usize>) {
     for (bid, block) in entry.graph.skeleton.blocks.iter_mut() {
-        let mut drops: Vec<usize> = drop.iter().filter(|(b, _)| *b == bid).map(|(_, i)| *i).collect();
+        let mut drops: Vec<usize> = block
+            .side_effects
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| matches!(slot_of.get(&(bid, *i)), Some(s) if *s != keep_slot))
+            .map(|(i, _)| i)
+            .collect();
         drops.sort_unstable_by(|a, b| b.cmp(a));
         for i in drops {
             block.side_effects.remove(i);
@@ -140,33 +149,50 @@ fn keep_only_seg(entry: &mut EgirEntry, drop: &[(BlockId, usize)], keep_slot: us
     entry.outputs = vec![kept];
 }
 
-/// If `entry` holds more than one pointwise output `SegMap`, split it into one
-/// entry per map. The original keeps the slot-0 map (under its own name); each
-/// remaining map becomes a `{name}_dispatch_{slot}` clone with its own pipeline
-/// stage. Returns the clones (empty when no split is needed).
+/// Split a multi-output entry into one kernel per output slot — Futhark's
+/// one-SegOp-per-SegSpace structure. Sibling maps over distinct domains, plus
+/// any fixed (non-SOAC) output slots, each become their own entry and pipeline
+/// stage: the lowest produced slot keeps the entry's name; the rest become
+/// `{name}_dispatch_{slot}`. Only fires when at least one slot is a parallel
+/// `SegMap` and at least two slots are produced. Returns the new clones.
 fn split_multidomain_seg_maps(
     entry: &mut EgirEntry,
     pipeline: &mut crate::pipeline_descriptor::PipelineDescriptor,
 ) -> Vec<EgirEntry> {
-    let mut segs = output_seg_maps(entry);
-    if segs.len() <= 1 {
+    if entry.outputs.len() <= 1 {
         return Vec::new();
     }
-    segs.sort_by_key(|&(_, _, slot)| slot);
-    let all_locs: Vec<(BlockId, usize)> = segs.iter().map(|&(b, i, _)| (b, i)).collect();
+    let mut slot_of: LookupMap<(BlockId, usize), usize> = LookupMap::new();
+    let mut produced: Vec<usize> = Vec::new();
+    let mut seg_map_slots: Vec<usize> = Vec::new();
+    for (bid, block) in &entry.graph.skeleton.blocks {
+        for (i, se) in block.side_effects.iter().enumerate() {
+            if let Some(slot) = side_effect_output_slot(entry, se) {
+                slot_of.insert((bid, i), slot);
+                if !produced.contains(&slot) {
+                    produced.push(slot);
+                }
+                if is_seg_map(se) && !seg_map_slots.contains(&slot) {
+                    seg_map_slots.push(slot);
+                }
+            }
+        }
+    }
+    produced.sort_unstable();
+    // Split only when there are at least two independent parallel domains. A
+    // single map alongside fixed output slots stays one kernel that shards and
+    // writes those fixed slots in the same dispatch.
+    if seg_map_slots.len() < 2 {
+        return Vec::new();
+    }
 
-    // Add a stub stage per clone to the same pipeline that backs `entry`, so
-    // `finalize_compute_io` can resolve each one's dispatch and IO.
     use crate::pipeline_descriptor::{ComputeStage, DispatchSize, Pipeline};
     let base_name = entry.name.clone();
-
     let mut clones = Vec::new();
-    for &(_, _, slot) in &segs[1..] {
+    for &slot in &produced[1..] {
         let mut clone = entry.clone();
         clone.name = format!("{base_name}_dispatch_{slot}");
-        let drop: Vec<(BlockId, usize)> =
-            all_locs.iter().copied().filter(|loc| !is_seg_for_slot(&segs, *loc, slot)).collect();
-        keep_only_seg(&mut clone, &drop, slot);
+        restrict_to_slot(&mut clone, slot, &slot_of);
         if let Some(Pipeline::Compute(cp)) = pipeline.pipelines.iter_mut().find(|p| match p {
             Pipeline::Compute(c) => c.stages.iter().any(|s| s.entry_point == base_name),
             _ => false,
@@ -182,17 +208,9 @@ fn split_multidomain_seg_maps(
         clones.push(clone);
     }
 
-    // The original retains the slot-0 map only.
-    let slot0 = segs[0].2;
-    let drop0: Vec<(BlockId, usize)> =
-        all_locs.iter().copied().filter(|loc| !is_seg_for_slot(&segs, *loc, slot0)).collect();
-    keep_only_seg(entry, &drop0, slot0);
-
+    // The original retains the lowest produced slot under its own name.
+    restrict_to_slot(entry, produced[0], &slot_of);
     clones
-}
-
-fn is_seg_for_slot(segs: &[(BlockId, usize, usize)], loc: (BlockId, usize), slot: usize) -> bool {
-    segs.iter().any(|&(b, i, s)| (b, i) == loc && s == slot)
 }
 
 fn reify_tail_soac(entry: &mut EgirEntry) {

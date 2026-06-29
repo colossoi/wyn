@@ -394,9 +394,6 @@ use crate::pipeline_descriptor::{DispatchLen, DispatchSize};
 /// it reads and writes (by index into the pipeline's binding table).
 pub fn finalize_compute_io(pipeline: &mut PipelineDescriptor, entries: &[EgirEntry]) {
     for entry in entries {
-        let Some(len) = seg_map_dispatch_len(entry) else {
-            continue;
-        };
         let Some(Pipeline::Compute(cp)) = pipeline.pipelines.iter_mut().find(|p| match p {
             Pipeline::Compute(c) => c.stages.iter().any(|s| s.entry_point == entry.name),
             _ => false,
@@ -405,13 +402,18 @@ pub fn finalize_compute_io(pipeline: &mut PipelineDescriptor, entries: &[EgirEnt
         };
         let reads = entry_read_indices(entry, &cp.bindings);
         let writes = entry_write_indices(entry, &cp.bindings);
+        let dispatch = seg_map_dispatch_len(entry);
         let Some(stage) = cp.stages.iter_mut().find(|s| s.entry_point == entry.name) else {
             continue;
         };
-        stage.dispatch_size = DispatchSize::DerivedFrom {
-            len,
-            workgroup_size: stage.workgroup_size.0,
-        };
+        // A pointwise map dispatches one thread per input element; a fixed
+        // (non-SOAC) output slot keeps its single-invocation 1×1×1 placeholder.
+        if let Some(len) = dispatch {
+            stage.dispatch_size = DispatchSize::DerivedFrom {
+                len,
+                workgroup_size: stage.workgroup_size.0,
+            };
+        }
         stage.reads = reads;
         stage.writes = writes;
     }
