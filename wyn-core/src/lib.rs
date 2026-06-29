@@ -849,7 +849,7 @@ impl TlcOutputsNormalized {
             tlc: result.program,
             pipeline: result.pipeline,
             type_table: inner.type_table,
-            plans: result.plans,
+            recognitions: result.recognitions,
             input_names: result.input_names,
             auto_storage_binding_ids: inner.auto_storage_binding_ids,
         }))
@@ -1041,7 +1041,7 @@ impl TlcGeneratedLambdasFolded {
             tlc,
             pipeline: pipeline_descriptor::PipelineDescriptor::default(),
             type_table: inner.type_table,
-            plans: LookupMap::new(),
+            recognitions: LookupMap::new(),
             input_names: LookupMap::new(),
             auto_storage_binding_ids: inner.auto_storage_binding_ids,
         })
@@ -1098,7 +1098,7 @@ impl TlcSmallInlined {
             tlc: result.program,
             pipeline: result.pipeline,
             type_table: inner.type_table,
-            plans: result.plans,
+            recognitions: result.recognitions,
             input_names: result.input_names,
             auto_storage_binding_ids: inner.auto_storage_binding_ids,
         }))
@@ -1112,7 +1112,7 @@ impl TlcSmallInlined {
             tlc,
             pipeline: pipeline_descriptor::PipelineDescriptor::default(),
             type_table: inner.type_table,
-            plans: LookupMap::new(),
+            recognitions: LookupMap::new(),
             input_names: LookupMap::new(),
             auto_storage_binding_ids: inner.auto_storage_binding_ids,
         })
@@ -1126,11 +1126,9 @@ pub struct TlcPipelineInner {
     pub pipeline: pipeline_descriptor::PipelineDescriptor,
     pub type_table: TypeTable,
     pub auto_storage_binding_ids: IdSource<u32>,
-    /// Compiler-internal per-entry parallelization plans for EGIR to
-    /// consume. Empty for the `disable=true` fast path and for entries
-    /// whose strategies haven't migrated to EGIR-side lowering yet
-    /// (reduce / scan today). Keyed by entry surface name.
-    pub plans: LookupMap<String, tlc::parallelize::ParallelizationPlan>,
+    /// Per-entry parallel recognition for EGIR to lower. Keyed by entry
+    /// surface name; present only for parallelizable compute entries.
+    pub recognitions: LookupMap<String, tlc::parallelize::EntryRecognition>,
     /// Source-parameter name for each storage `(set, binding)`, captured
     /// before parallelization replaced the original compute entries.
     /// `to_egraph` applies these to the finalized descriptor's input
@@ -1162,18 +1160,28 @@ impl TlcParallelized {
         let TlcPipelineInner {
             tlc,
             pipeline,
-            plans,
+            recognitions,
             input_names,
             mut auto_storage_binding_ids,
             ..
         } = self.0;
         let input_lens = tlc::input_slice_bounds::compute_for_program(&tlc);
-        egir::from_tlc::run(&tlc, pipeline, &plans, &input_lens, &mut auto_storage_binding_ids)
-            .map(|mut inner| {
-                inner.pipeline.relabel_input_storage_names(&input_names);
-                inner
-            })
-            .and_then(|inner| EgirRaw(inner).realize_outputs().map(|a| a.parallelize(&plans)))
+        egir::from_tlc::run(
+            &tlc,
+            pipeline,
+            &recognitions,
+            &input_lens,
+            &mut auto_storage_binding_ids,
+        )
+        .map(|mut inner| {
+            inner.pipeline.relabel_input_storage_names(&input_names);
+            inner
+        })
+        .and_then(|inner| {
+            EgirRaw(inner)
+                .realize_outputs()
+                .map(|a| a.parallelize(&recognitions))
+        })
     }
 }
 
@@ -1252,7 +1260,7 @@ impl TlcInputSliceBoundsInferred {
         let TlcPipelineInner {
             tlc,
             pipeline,
-            plans,
+            recognitions,
             input_names,
             mut auto_storage_binding_ids,
             ..
@@ -1260,7 +1268,7 @@ impl TlcInputSliceBoundsInferred {
         egir::from_tlc::run(
             &tlc,
             pipeline,
-            &plans,
+            &recognitions,
             &self.input_lens,
             &mut auto_storage_binding_ids,
         )
@@ -1268,7 +1276,11 @@ impl TlcInputSliceBoundsInferred {
             inner.pipeline.relabel_input_storage_names(&input_names);
             inner
         })
-        .and_then(|inner| EgirRaw(inner).realize_outputs().map(|a| a.parallelize(&plans)))
+        .and_then(|inner| {
+            EgirRaw(inner)
+                .realize_outputs()
+                .map(|a| a.parallelize(&recognitions))
+        })
     }
 }
 
@@ -1333,10 +1345,10 @@ impl EgirOutputsRealized {
     /// SOAC Parallelization Boundary section in the README.
     pub fn parallelize(
         self,
-        plans: &LookupMap<String, tlc::parallelize::ParallelizationPlan>,
+        recognitions: &LookupMap<String, tlc::parallelize::EntryRecognition>,
     ) -> EgirParallelized {
         let EgirOutputsRealized(mut inner) = self;
-        egir::parallelize::run(&mut inner, plans);
+        egir::parallelize::run(&mut inner, recognitions);
         EgirParallelized(inner)
     }
 }

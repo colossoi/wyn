@@ -20,7 +20,8 @@ use crate::{LookupMap, LookupSet};
 use polytype::Type;
 
 use super::{
-    ArrayExpr, Def, DefMeta, Lambda, Program, SoacDestination, SoacOp, Term, TermIdSource, TermKind,
+    ArrayExpr, Def, DefMeta, Lambda, Program, ScremaAccumulator, SoacDestination, SoacOp, Term,
+    TermIdSource, TermKind,
 };
 
 // =============================================================================
@@ -969,16 +970,37 @@ fn is_map_only_fresh_soac_term(t: &Term) -> bool {
     }
 }
 
+/// The parallel strategy recognized for a compute entry's tail SOAC. EGIR
+/// drives the actual lowering (Seg creation, phasing, scratch allocation) from
+/// this plus the entry body; TLC only recognizes the shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParallelStrategy {
+    Map,
+    Reduce,
+    Scan,
+    Screma,
+}
+
+/// Per-entry recognition output. The two host-facing facts (`dispatch_sized`,
+/// `forced_output`) are what `egir::from_tlc` needs to size outputs at
+/// conversion; `strategy` is what `egir::parallelize` keys lowering on. No
+/// binding numbers — EGIR allocates all scratch itself.
+#[derive(Debug, Clone)]
+pub struct EntryRecognition {
+    pub strategy: ParallelStrategy,
+    /// Output is one element per thread (Map/Scan) vs a single scalar (Reduce).
+    pub dispatch_sized: bool,
+    /// A pre-pinned output binding (a gather pre-pass's result); else EGIR
+    /// auto-allocates the entry output.
+    pub forced_output: Option<BindingRef>,
+}
+
 pub struct ParallelizationResult {
     pub program: Program,
     pub pipeline: PipelineDescriptor,
-    /// Compiler-internal per-entry plans for EGIR to consume. Keyed by the
-    /// entry's surface name (matches `egir::EgirEntry::name`). Empty for
-    /// graphics entries, non-parallelized compute entries, and (today)
-    /// reduce/scan entries — those still lower through the old
-    /// TLC path. Map planning is the only strategy populated until the
-    /// EGIR migration broadens.
-    pub plans: LookupMap<String, ParallelizationPlan>,
+    /// Per-entry recognition keyed by surface name (matches `EgirEntry::name`).
+    /// Present only for parallelizable compute entries.
+    pub recognitions: LookupMap<String, EntryRecognition>,
     /// Source-parameter name for each storage `(set, binding)`, captured
     /// from the original compute entries before they are replaced by phase
     /// entries. The relabel pass in `to_egraph` restores these onto the
@@ -987,88 +1009,6 @@ pub struct ParallelizationResult {
     pub input_names: LookupMap<(u32, u32), String>,
 }
 
-/// Per-entry, compiler-internal description of how EGIR should lower a
-/// parallelized SOAC. The plan stays declarative: it picks a strategy,
-/// declares the dispatch shape, and reserves binding numbers. It does
-/// not encode element access — EGIR rediscovers the SOAC's inputs,
-/// captures, lambda, and output view from the entry body itself.
-#[derive(Debug, Clone)]
-pub struct ParallelizationPlan {
-    /// Entry surface name; matches `egir::EgirEntry::name`.
-    pub entry: String,
-    pub dispatch: DispatchModel,
-    pub bindings: PlannedBindings,
-}
-
-/// Dispatch shape from the planner + sizing. Carried explicitly so
-/// the host pipeline descriptor, the planning record, and the generated
-/// kernel can be verified to agree.
-#[derive(Debug, Clone, Copy)]
-pub enum DispatchModel {
-    /// Host computes `ceil(N / workgroup_size)` groups at submit time,
-    /// where `N` is the length of the SOAC's `input_index`th input.
-    DerivedFromInputLength {
-        input_index: usize,
-        workgroup_size: u32,
-    },
-    /// Fixed group + local size. Used by reduce/scan combine phases.
-    Fixed {
-        groups: [u32; 3],
-        local_size: [u32; 3],
-    },
-}
-
-/// Unified Screma binding layout that covers every parallel SOAC
-/// shape the EGIR-native path emits. Pointwise Map collapses to
-/// `{ map_outputs: [_], accumulators: [] }`; Reduce / fused map→reduce collapses
-/// to `{ map_outputs: [], accumulators: [Reduce{partials, result}] }`;
-/// Scan collapses to `{ map_outputs: [], accumulators: [Scan{output,
-/// block_sums, block_offsets}] }`; mixed Screma populates both.
-#[derive(Debug, Clone)]
-pub struct PlannedBindings {
-    /// One entry per mapped output. `None` means EGIR auto-allocates the
-    /// entry output view for that field.
-    pub map_outputs: Vec<Option<BindingRef>>,
-    pub accumulators: Vec<PlannedScremaAccumulator>,
-}
-
-#[derive(Debug, Clone)]
-pub struct PlannedScremaAccumulator {
-    pub kind: PlannedScremaAccumulatorKind,
-    pub partials: Option<BindingRef>,
-    pub result: Option<BindingRef>,
-    pub output: Option<BindingRef>,
-    pub block_sums: Option<BindingRef>,
-    pub block_offsets: Option<BindingRef>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlannedScremaAccumulatorKind {
-    Reduce,
-    Scan,
-}
-
-impl PlannedBindings {
-    /// The pinned result binding for shapes whose result is a single
-    /// `EntryOutput` buffer (pointwise Screma == Map, single-Scan Screma).
-    /// `from_tlc::build_entry_outputs` honors this so the EGIR output lands
-    /// on the buffer the consumer reads. All-Reduce Screma manages its
-    /// result bindings via partials+result allocations (Stores, not
-    /// `EntryOutput`), so it reports `None`.
-    pub fn forced_output(&self) -> Option<BindingRef> {
-        // Pointwise Screma: forced output from the single map slot.
-        if self.accumulators.is_empty() && self.map_outputs.len() == 1 {
-            return self.map_outputs[0];
-        }
-        // Single Scan accumulator: forced output is the scan's output binding.
-        if self.accumulators.len() == 1
-            && matches!(self.accumulators[0].kind, PlannedScremaAccumulatorKind::Scan)
-        {
-            return self.accumulators[0].output;
-        }
-        None
-    }
-}
 
 pub(crate) fn let_term(
     name: SymbolId,
@@ -1284,11 +1224,54 @@ pub(crate) fn make_entry_def(
 /// Carries the program through with a serial default pipeline and no
 /// parallelization plans.
 pub fn run(
-    program: Program,
+    mut program: Program,
     _disable: bool,
     _binding_ids: &mut crate::IdSource<u32>,
 ) -> crate::error::Result<ParallelizationResult> {
     let input_names = collect_entry_input_names(&program);
+
+    // Recognition: collapse equal-domain sibling output maps, then analyze each
+    // compute entry's tail SOAC. EGIR does the lowering from these recognitions.
+    let mut term_ids = TermIdSource::new();
+    super::fusion::fuse_equal_domain_sibling_maps(&mut program, &mut term_ids);
+    let analyses = analyze_program(&program);
+
+    let mut recognitions: LookupMap<String, EntryRecognition> = LookupMap::new();
+    for (def_name, analysis) in &analyses {
+        let (strategy, dispatch_sized) = match &analysis.soac.original {
+            SoacOp::Map { .. } => (ParallelStrategy::Map, true),
+            SoacOp::Reduce { .. } => (ParallelStrategy::Reduce, false),
+            SoacOp::Scan { .. } => (ParallelStrategy::Scan, true),
+            SoacOp::Screma { accumulators, .. } => {
+                let has_scan =
+                    accumulators.iter().any(|a| matches!(a.kind, ScremaAccumulator::Scan));
+                (ParallelStrategy::Screma, accumulators.is_empty() || has_scan)
+            }
+            _ => continue,
+        };
+        let forced_output = program
+            .defs
+            .iter()
+            .find(|d| d.name == *def_name)
+            .and_then(|d| match &d.meta {
+                DefMeta::EntryPoint(decl) => decl
+                    .storage_bindings
+                    .iter()
+                    .find(|b| matches!(b.role, interface::StorageRole::Output))
+                    .map(|b| b.binding),
+                _ => None,
+            });
+        let name = crate::symbol_name_or_bug(&program.symbols, *def_name).to_string();
+        recognitions.insert(
+            name,
+            EntryRecognition {
+                strategy,
+                dispatch_sized,
+                forced_output,
+            },
+        );
+    }
+
     let mut pipelines = Vec::new();
     for def in &program.defs {
         let DefMeta::EntryPoint(decl) = &def.meta else {
@@ -1329,7 +1312,7 @@ pub fn run(
     Ok(ParallelizationResult {
         program,
         pipeline: PipelineDescriptor { pipelines },
-        plans: LookupMap::new(),
+        recognitions,
         input_names,
     })
 }

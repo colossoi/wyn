@@ -130,7 +130,7 @@ impl<'a> GlobalContext<'a> {
 pub fn run(
     program: &TlcProgram,
     mut pipeline: PipelineDescriptor,
-    plans: &LookupMap<String, crate::tlc::parallelize::ParallelizationPlan>,
+    recognitions: &LookupMap<String, crate::tlc::parallelize::EntryRecognition>,
     input_slice_bounds: &crate::tlc::input_slice_bounds::ProgramBounds,
     binding_ids: &mut crate::IdSource<u32>,
 ) -> Result<EgirInner, ConvertError> {
@@ -207,32 +207,17 @@ pub fn run(
                 // marker shape). Use that as the forced output so the prepass
                 // map writes the gather buffer instead of having its result
                 // auto-allocated onto a colliding binding.
-                let plan = plans.get(&entry.name);
-                let forced_output_binding = plan
-                    .and_then(|p| p.bindings.forced_output())
+                // The recognition (from `tlc::parallelize`) carries the two
+                // facts conversion needs: whether the output is one element per
+                // thread (Map/Scan) vs a single scalar (Reduce), and any
+                // pre-pinned output binding. Gather pre-passes that the
+                // recognition didn't tag fall back to the in-body marker.
+                let recognition = recognitions.get(&entry.name);
+                let forced_output_binding = recognition
+                    .and_then(|r| r.forced_output)
                     .or_else(|| gather_prepass_forced_output(entry));
-                // A parallel map/scan writes one output element per thread, so
-                // its storage output is dispatch-sized. Gather pre-passes are
-                // parallel maps too; treat the lift_gathers fallback above the
-                // same way. Reduce / reducing Screma results are single elements;
-                // entries without a plan or fallback keep the host's default
-                // sizing.
-                let dispatch_sized_outputs = plan.is_some_and(|p| {
-                    use crate::tlc::parallelize::{PlannedBindings, PlannedScremaAccumulatorKind};
-                    // Dispatch-sized when the planned shape produces per-
-                    // element outputs: pure Map (no accumulators) or a Scan
-                    // accumulator. All-Reduce produces a single scalar.
-                    matches!(
-                        &p.bindings,
-                        PlannedBindings { accumulators, .. }
-                            if accumulators.is_empty()
-                                || accumulators.iter().any(|a| matches!(
-                                    a.kind,
-                                    PlannedScremaAccumulatorKind::Scan
-                                ))
-                    )
-                }) || (plan.is_none()
-                    && gather_prepass_forced_output(entry).is_some());
+                let dispatch_sized_outputs = recognition.is_some_and(|r| r.dispatch_sized)
+                    || (recognition.is_none() && gather_prepass_forced_output(entry).is_some());
                 let entry_name = symbol_name(symbols, def.name).unwrap_or("");
                 let entry_input_bounds = input_slice_bounds.get(entry_name);
                 let ep = convert_entry_point(

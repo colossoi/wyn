@@ -2472,7 +2472,7 @@ fn fusible_map_slot(slot_index: usize, term: &Term) -> Option<FusibleMapSlot> {
 /// and those with any slot that isn't a captureless single-input `map` over a
 /// named entry param. Per-domain fusion of a mixed-domain entry's matching
 /// slots is not done here — each slot becomes its own stage.
-fn fuse_equal_domain_sibling_maps(program: &mut Program, term_ids: &mut TermIdSource) {
+pub(crate) fn fuse_equal_domain_sibling_maps(program: &mut Program, term_ids: &mut TermIdSource) {
     let indices: Vec<usize> = program
         .defs
         .iter()

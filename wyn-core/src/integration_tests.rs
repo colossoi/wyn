@@ -195,7 +195,7 @@ entry sum(xs: []f32) f32 =
 
     match &phase2.execution_model {
         ExecutionModel::Compute { local_size } => {
-            assert_eq!(local_size.0, crate::egir::parallelize::PHASE2_WIDTH);
+            assert_eq!(local_size.0, 256);
             assert_eq!((local_size.1, local_size.2), (1, 1));
         }
         other => panic!("phase2 not compute: {:?}", other),
