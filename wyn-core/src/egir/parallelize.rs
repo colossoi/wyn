@@ -45,6 +45,9 @@ pub fn reify(inner: &mut EgirInner, recognitions: &LookupMap<String, EntryRecogn
 /// not migrated yet, so it is deliberately restored to a serial Screma.
 pub fn lower(inner: &mut EgirInner, binding_ids: &mut crate::IdSource<u32>) {
     let mut new_entries: Vec<EgirEntry> = Vec::new();
+    // (new phase entry name, parent entry name): each synthesized reduce phase 2
+    // becomes its own pipeline stage in the parent compute pipeline.
+    let mut new_phase_stages: Vec<(String, String)> = Vec::new();
     for entry in inner.entry_points.iter_mut() {
         let Some(kind) = find_pending_seg(entry).map(|(bid, idx)| {
             let se = &entry.graph.skeleton.blocks[bid].side_effects[idx];
@@ -59,6 +62,9 @@ pub fn lower(inner: &mut EgirInner, binding_ids: &mut crate::IdSource<u32>) {
             SegOpKind::SegMap => {}
             SegOpKind::SegRed { .. } => {
                 if let Some(phases) = lower_reduce_entry(entry, binding_ids) {
+                    for ph in &phases {
+                        new_phase_stages.push((ph.name.clone(), entry.name.clone()));
+                    }
                     new_entries.extend(phases);
                 } else {
                     restore_serial_seg(entry);
@@ -70,6 +76,12 @@ pub fn lower(inner: &mut EgirInner, binding_ids: &mut crate::IdSource<u32>) {
         }
     }
     inner.entry_points.extend(new_entries);
+
+    // A synthesized phase-2 tree-reduce runs as a single workgroup, dispatched
+    // 1×1×1 after the chunked phase-1 stage in the same pipeline.
+    for (name, parent) in new_phase_stages {
+        push_phase_stage(&mut inner.pipeline, &parent, &name, (PHASE2_WIDTH, 1, 1));
+    }
 
     // Each distinct iteration space is its own kernel (Futhark: one SegOp per
     // SegSpace). An entry holding several pointwise SegMaps over different
@@ -84,6 +96,30 @@ pub fn lower(inner: &mut EgirInner, binding_ids: &mut crate::IdSource<u32>) {
         split_clones.extend(split_multidomain_seg_maps(entry, pipeline));
     }
     entry_points.extend(split_clones);
+}
+
+/// Append a single-invocation compute stage `name` to the pipeline that backs
+/// `parent`. Used for synthesized reduce phase-2 combine entries, which share
+/// the parent reduction's pipeline (`finalize_compute_io` fills its IO).
+fn push_phase_stage(
+    pipeline: &mut crate::pipeline_descriptor::PipelineDescriptor,
+    parent: &str,
+    name: &str,
+    workgroup: (u32, u32, u32),
+) {
+    use crate::pipeline_descriptor::{ComputeStage, DispatchSize, Pipeline};
+    if let Some(Pipeline::Compute(cp)) = pipeline.pipelines.iter_mut().find(|p| match p {
+        Pipeline::Compute(c) => c.stages.iter().any(|s| s.entry_point == parent),
+        _ => false,
+    }) {
+        cp.stages.push(ComputeStage {
+            entry_point: name.to_string(),
+            workgroup_size: workgroup,
+            dispatch_size: DispatchSize::Fixed { x: 1, y: 1, z: 1 },
+            reads: vec![],
+            writes: vec![],
+        });
+    }
 }
 
 /// The output slot a side-effect contributes to, found by scanning its operand
