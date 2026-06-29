@@ -71,6 +71,7 @@ pub struct SlotSource {
     pub value: NodeId,
 }
 
+#[derive(Clone)]
 pub struct EgirEntry {
     pub name: String,
     pub span: Span,

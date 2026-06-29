@@ -70,13 +70,159 @@ pub fn lower(inner: &mut EgirInner, binding_ids: &mut crate::IdSource<u32>) {
         }
     }
     inner.entry_points.extend(new_entries);
+
+    // Each distinct iteration space is its own kernel (Futhark: one SegOp per
+    // SegSpace). An entry holding several pointwise SegMaps over different
+    // domains is split into one entry — and one pipeline stage — per domain.
+    let EgirInner {
+        entry_points,
+        pipeline,
+        ..
+    } = inner;
+    let mut split_clones: Vec<EgirEntry> = Vec::new();
+    for entry in entry_points.iter_mut() {
+        split_clones.extend(split_multidomain_seg_maps(entry, pipeline));
+    }
+    entry_points.extend(split_clones);
+}
+
+/// Locate every pointwise `SegMap` side-effect that writes an output view,
+/// paired with the output slot it targets. Used to decide whether an entry
+/// holds several independent map domains that must split into separate kernels.
+fn output_seg_maps(entry: &EgirEntry) -> Vec<(BlockId, usize, usize)> {
+    let mut segs = Vec::new();
+    for (bid, block) in &entry.graph.skeleton.blocks {
+        for (i, se) in block.side_effects.iter().enumerate() {
+            let SideEffectKind::Pending(PendingSoac::Seg {
+                kind: SegOpKind::SegMap,
+                input_array_types,
+                map_destinations,
+                map_capture_counts,
+                ..
+            }) = &se.kind
+            else {
+                continue;
+            };
+            if !map_destinations.iter().all(|d| matches!(d, SoacDestination::OutputView)) {
+                continue;
+            }
+            // SegMap operand layout: `[inputs, map_captures, output_views]`
+            // (no accumulators). The first output view follows every input and
+            // every capture.
+            let view_base = input_array_types.len() + map_capture_counts.iter().sum::<usize>();
+            let Some(&out_view) = se.operand_nodes.get(view_base) else {
+                continue;
+            };
+            let Some(br) = graph_ops::extract_storage_view_source(&entry.graph, out_view) else {
+                continue;
+            };
+            let Some(slot) = entry.outputs.iter().position(|o| o.storage_binding == Some(br)) else {
+                continue;
+            };
+            segs.push((bid, i, slot));
+        }
+    }
+    segs
+}
+
+/// Drop the side-effects named by `drop` from `entry` and restrict its outputs
+/// to the single slot `keep_slot`. The dropped maps' kernels are no longer
+/// emitted; their now-dead pure nodes are pruned downstream.
+fn keep_only_seg(entry: &mut EgirEntry, drop: &[(BlockId, usize)], keep_slot: usize) {
+    for (bid, block) in entry.graph.skeleton.blocks.iter_mut() {
+        let mut drops: Vec<usize> = drop.iter().filter(|(b, _)| *b == bid).map(|(_, i)| *i).collect();
+        drops.sort_unstable_by(|a, b| b.cmp(a));
+        for i in drops {
+            block.side_effects.remove(i);
+        }
+    }
+    let kept = entry.outputs[keep_slot].clone();
+    entry.outputs = vec![kept];
+}
+
+/// If `entry` holds more than one pointwise output `SegMap`, split it into one
+/// entry per map. The original keeps the slot-0 map (under its own name); each
+/// remaining map becomes a `{name}_dispatch_{slot}` clone with its own pipeline
+/// stage. Returns the clones (empty when no split is needed).
+fn split_multidomain_seg_maps(
+    entry: &mut EgirEntry,
+    pipeline: &mut crate::pipeline_descriptor::PipelineDescriptor,
+) -> Vec<EgirEntry> {
+    let mut segs = output_seg_maps(entry);
+    if segs.len() <= 1 {
+        return Vec::new();
+    }
+    segs.sort_by_key(|&(_, _, slot)| slot);
+    let all_locs: Vec<(BlockId, usize)> = segs.iter().map(|&(b, i, _)| (b, i)).collect();
+
+    // Add a stub stage per clone to the same pipeline that backs `entry`, so
+    // `finalize_compute_io` can resolve each one's dispatch and IO.
+    use crate::pipeline_descriptor::{ComputeStage, DispatchSize, Pipeline};
+    let base_name = entry.name.clone();
+
+    let mut clones = Vec::new();
+    for &(_, _, slot) in &segs[1..] {
+        let mut clone = entry.clone();
+        clone.name = format!("{base_name}_dispatch_{slot}");
+        let drop: Vec<(BlockId, usize)> =
+            all_locs.iter().copied().filter(|loc| !is_seg_for_slot(&segs, *loc, slot)).collect();
+        keep_only_seg(&mut clone, &drop, slot);
+        if let Some(Pipeline::Compute(cp)) = pipeline.pipelines.iter_mut().find(|p| match p {
+            Pipeline::Compute(c) => c.stages.iter().any(|s| s.entry_point == base_name),
+            _ => false,
+        }) {
+            cp.stages.push(ComputeStage {
+                entry_point: clone.name.clone(),
+                workgroup_size: (64, 1, 1),
+                dispatch_size: DispatchSize::Fixed { x: 1, y: 1, z: 1 },
+                reads: vec![],
+                writes: vec![],
+            });
+        }
+        clones.push(clone);
+    }
+
+    // The original retains the slot-0 map only.
+    let slot0 = segs[0].2;
+    let drop0: Vec<(BlockId, usize)> =
+        all_locs.iter().copied().filter(|loc| !is_seg_for_slot(&segs, *loc, slot0)).collect();
+    keep_only_seg(entry, &drop0, slot0);
+
+    clones
+}
+
+fn is_seg_for_slot(segs: &[(BlockId, usize, usize)], loc: (BlockId, usize), slot: usize) -> bool {
+    segs.iter().any(|&(b, i, s)| (b, i) == loc && s == slot)
 }
 
 fn reify_tail_soac(entry: &mut EgirEntry) {
-    let Some((block_id, idx)) = find_pending_screma(entry) else {
+    // A multi-output entry returning a tuple of sibling maps over distinct
+    // domains carries one Screma side-effect per output (TLC fusion already
+    // merged equal-domain siblings into a single multi-lane Screma). Reify
+    // every one — each becomes its own SegOp, matching Futhark's one-SegOp-
+    // per-SegSpace structure; the schedule pass then splits distinct spaces
+    // into separate kernels.
+    let locs: Vec<(BlockId, usize)> = entry
+        .graph
+        .skeleton
+        .blocks
+        .iter()
+        .flat_map(|(bid, block)| {
+            block.side_effects.iter().enumerate().filter_map(move |(i, se)| {
+                matches!(&se.kind, SideEffectKind::Pending(PendingSoac::Screma { .. })).then_some((bid, i))
+            })
+        })
+        .collect();
+    if locs.is_empty() {
         reify_parallel_scatter(entry);
         return;
-    };
+    }
+    for (block_id, idx) in locs {
+        reify_one_screma(entry, block_id, idx);
+    }
+}
+
+fn reify_one_screma(entry: &mut EgirEntry, block_id: BlockId, idx: usize) {
     let se = &entry.graph.skeleton.blocks[block_id].side_effects[idx];
     let SideEffectKind::Pending(PendingSoac::Screma {
         map_funcs,
@@ -735,17 +881,6 @@ pub fn synthesize_phase2_reduce_cloning_ne_named(
         result_binding,
     );
     Ok(b.build())
-}
-
-fn find_pending_screma(entry: &EgirEntry) -> Option<(BlockId, usize)> {
-    for (bid, block) in &entry.graph.skeleton.blocks {
-        for (i, se) in block.side_effects.iter().enumerate() {
-            if let SideEffectKind::Pending(PendingSoac::Screma { .. }) = &se.kind {
-                return Some((bid, i));
-            }
-        }
-    }
-    None
 }
 
 fn find_pending_seg(entry: &EgirEntry) -> Option<(BlockId, usize)> {
