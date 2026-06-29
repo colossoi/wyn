@@ -1146,6 +1146,87 @@ entry gen(src: []f32) ([]f32, []f32) =
     // Compilation success (no panic) is the test.
 }
 
+/// A multidomain split where two map outputs share an input domain. TLC fuses
+/// the equal-domain pair into one multi-lane SegMap that writes *two* output
+/// slots; the split must keep that fused side-effect — and both its output
+/// bindings — together in one kernel, not strand it as "shared" while dropping
+/// its bindings from `outputs`. Regression: a computed-fixed output plus a
+/// shared-domain map pair plus enough distinct-domain maps to reach five
+/// outputs used to lower to a stage whose output binding wasn't allocated
+/// ("Storage buffer not found").
+#[test]
+fn multidomain_split_with_shared_domain_map_pair_compiles() {
+    use crate::pipeline_descriptor::Pipeline;
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry r(a: []u32, b: []u32, c: []u32, st: []f32)
+  ([2]f32, []u32, []u32, []u32, []u32) =
+  let g = st[0] in
+  let o0 = [g, g] in
+  let m1 = map(|s: u32| s + 1u32, a) in
+  let m2 = map(|s: u32| s + 2u32, b) in
+  let m3 = map(|s: u32| s + 3u32, c) in
+  let m4 = map(|s: u32| s + 4u32, c) in
+  (o0, m1, m2, m3, m4)
+"#,
+    )
+    .expect("fixed + distinct maps + shared-domain map pair compiles");
+    let compute = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .find_map(|p| match p {
+            Pipeline::Compute(c) => Some(c),
+            _ => None,
+        })
+        .expect("one compute pipeline");
+    // Five outputs, but m3 and m4 share domain `c` and fuse into one kernel:
+    // o0 (fixed) + m1 + m2 + (m3,m4) = four stages.
+    assert_eq!(
+        compute.stages.len(),
+        4,
+        "the shared-domain map pair fuses into one stage; stages = {:?}",
+        compute.stages.iter().map(|s| &s.entry_point).collect::<Vec<_>>()
+    );
+}
+
+/// An in-place map that prepares a buffer consumed by a later `scatter` is an
+/// internal producer, not an entry output. It must stay wired into the scatter
+/// pipeline — not reify into an independent output `SegMap` stage — otherwise
+/// the scatter's view resolution is left with a bogus placeholder and the
+/// backend emits an invalid `OpCompositeExtract` from a non-aggregate.
+/// Regression distilled from `testfiles/playground/particles.wyn`.
+#[test]
+fn inplace_clear_feeding_scatter_stays_wired() {
+    use crate::pipeline_descriptor::Pipeline;
+    let src = r#"
+#[compute]
+entry sim(#[storage(set=2, binding=1, access=write)] fb: *[]u32, pos: []u32) []u32 =
+  let cleared = map(|_p: u32| 0u32, fb) in
+  let idxs = map(|p: u32| i32.u32(p), pos) in
+  let vals = map(|_p: u32| 1u32, pos) in
+  let _ = scatter(cleared, idxs, vals) in
+  map(|p: u32| p + 1u32, pos)
+"#;
+    let lowered = crate::compile_thru_spirv(src).expect("in-place clear + scatter compiles");
+    // The framebuffer clear is internal to the scatter, so it must not appear
+    // as its own `_dispatch_` output stage.
+    let stage_names: Vec<&str> = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .flat_map(|p| match p {
+            Pipeline::Compute(c) => c.stages.iter().map(|s| s.entry_point.as_str()).collect(),
+            Pipeline::Graphics(_) => Vec::new(),
+        })
+        .collect();
+    assert!(
+        !stage_names.iter().any(|n| n.contains("_dispatch_")),
+        "the in-place clear must not split into an independent output stage; stages = {stage_names:?}"
+    );
+}
+
 /// A compute entry returning a tuple of pointwise maps over *different*
 /// runtime-sized inputs splits into one parallel stage per output slot, each
 /// dispatched over its own input's length. The two slots have independent

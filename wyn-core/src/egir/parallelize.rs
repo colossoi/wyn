@@ -139,26 +139,24 @@ fn push_phase_stage(
     }
 }
 
-/// The output slot a side-effect contributes to, found by scanning its operand
-/// subgraph for a storage view that names one of the entry's output bindings.
-/// `None` for a side-effect that touches no output (shared prefix computation,
-/// kept by every split stage). A side-effect spanning more than one output
-/// binding also returns `None` — it can't be assigned to a single domain.
-fn side_effect_output_slot(entry: &EgirEntry, se: &SideEffect) -> Option<usize> {
+/// The output slots a side-effect contributes to, found by scanning its operand
+/// subgraph for storage views that name the entry's output bindings. A pointwise
+/// map writes one slot; a fused equal-domain multi-lane map writes several (one
+/// per lane). Empty for a side-effect that touches no output — shared prefix
+/// computation, kept by every split stage.
+fn side_effect_output_slots(entry: &EgirEntry, se: &SideEffect) -> Vec<usize> {
     use std::collections::HashSet;
     let mut seen: HashSet<NodeId> = HashSet::new();
     let mut stack: Vec<NodeId> = se.operand_nodes.to_vec();
-    let mut slot: Option<usize> = None;
+    let mut slots: Vec<usize> = Vec::new();
     while let Some(n) = stack.pop() {
         if !seen.insert(n) {
             continue;
         }
         if let Some(br) = graph_ops::extract_storage_view_source(&entry.graph, n) {
             if let Some(s) = entry.outputs.iter().position(|o| o.storage_binding == Some(br)) {
-                match slot {
-                    None => slot = Some(s),
-                    Some(prev) if prev != s => return None,
-                    _ => {}
+                if !slots.contains(&s) {
+                    slots.push(s);
                 }
             }
         }
@@ -166,7 +164,8 @@ fn side_effect_output_slot(entry: &EgirEntry, se: &SideEffect) -> Option<usize> 
             stack.extend(node.children());
         }
     }
-    slot
+    slots.sort_unstable();
+    slots
 }
 
 /// True for a pointwise `SegMap` side-effect (a parallel output domain).
@@ -180,17 +179,22 @@ fn is_seg_map(se: &SideEffect) -> bool {
     )
 }
 
-/// Restrict `entry` to a single output slot: keep the side-effects that
-/// produce `keep_slot` plus the shared ones, drop everything that produces a
-/// different slot, and narrow `outputs` to that slot. Dropped kernels are no
-/// longer emitted; their now-dead pure nodes are pruned downstream.
-fn restrict_to_slot(entry: &mut EgirEntry, keep_slot: usize, slot_of: &LookupMap<(BlockId, usize), usize>) {
+/// Restrict `entry` to one domain group: keep the side-effects whose group is
+/// `keep_group` (plus the shared ones, group `None`), drop the rest, and narrow
+/// `outputs` to that group's slots. Dropped kernels are no longer emitted; their
+/// now-dead pure nodes are pruned downstream.
+fn restrict_to_group(
+    entry: &mut EgirEntry,
+    keep_group: usize,
+    keep_slots: &[usize],
+    group_of: &LookupMap<(BlockId, usize), usize>,
+) {
     for (bid, block) in entry.graph.skeleton.blocks.iter_mut() {
         let mut drops: Vec<usize> = block
             .side_effects
             .iter()
             .enumerate()
-            .filter(|(i, _)| matches!(slot_of.get(&(bid, *i)), Some(s) if *s != keep_slot))
+            .filter(|(i, _)| matches!(group_of.get(&(bid, *i)), Some(g) if *g != keep_group))
             .map(|(i, _)| i)
             .collect();
         drops.sort_unstable_by(|a, b| b.cmp(a));
@@ -198,54 +202,94 @@ fn restrict_to_slot(entry: &mut EgirEntry, keep_slot: usize, slot_of: &LookupMap
             block.side_effects.remove(i);
         }
     }
-    let kept = entry.outputs[keep_slot].clone();
-    entry.outputs = vec![kept];
+    entry.outputs = keep_slots.iter().map(|&s| entry.outputs[s].clone()).collect();
 }
 
-/// Split a multi-output entry into one kernel per output slot — Futhark's
-/// one-SegOp-per-SegSpace structure. Sibling maps over distinct domains, plus
-/// any fixed (non-SOAC) output slots, each become their own entry and pipeline
-/// stage: the lowest produced slot keeps the entry's name; the rest become
-/// `{name}_dispatch_{slot}`. Only fires when at least one slot is a parallel
-/// `SegMap` and at least two slots are produced. Returns the new clones.
+/// Split a multi-output entry into one kernel per iteration domain — Futhark's
+/// one-SegOp-per-SegSpace structure. Side-effects are grouped by the set of
+/// output slots they write (a fused equal-domain multi-lane map is one group
+/// writing several slots; sibling maps over distinct domains are separate
+/// groups; fixed non-SOAC outputs each form their own group). Each group
+/// becomes its own entry and pipeline stage: the group owning the lowest slot
+/// keeps the entry's name, the rest become `{name}_dispatch_{slot}`. Only fires
+/// when at least two groups contain a parallel `SegMap`, so a single map
+/// alongside fixed slots stays one sharding kernel. Returns the new clones.
 fn split_multidomain_seg_maps(
     entry: &mut EgirEntry,
     pipeline: &mut crate::pipeline_descriptor::PipelineDescriptor,
 ) -> Vec<EgirEntry> {
-    if entry.outputs.len() <= 1 {
+    let n_out = entry.outputs.len();
+    if n_out <= 1 {
         return Vec::new();
     }
-    let mut slot_of: LookupMap<(BlockId, usize), usize> = LookupMap::new();
-    let mut produced: Vec<usize> = Vec::new();
-    let mut seg_map_slots: Vec<usize> = Vec::new();
+
+    // Union-find over output slots: union the slots co-written by any single
+    // side-effect, so a fused multi-lane map keeps its slots in one group.
+    let mut parent: Vec<usize> = (0..n_out).collect();
+    fn find(parent: &mut [usize], x: usize) -> usize {
+        let mut r = x;
+        while parent[r] != r {
+            r = parent[r];
+        }
+        let mut cur = x;
+        while parent[cur] != r {
+            let next = parent[cur];
+            parent[cur] = r;
+            cur = next;
+        }
+        r
+    }
+    let mut producers: Vec<((BlockId, usize), Vec<usize>, bool)> = Vec::new();
     for (bid, block) in &entry.graph.skeleton.blocks {
         for (i, se) in block.side_effects.iter().enumerate() {
-            if let Some(slot) = side_effect_output_slot(entry, se) {
-                slot_of.insert((bid, i), slot);
-                if !produced.contains(&slot) {
-                    produced.push(slot);
-                }
-                if is_seg_map(se) && !seg_map_slots.contains(&slot) {
-                    seg_map_slots.push(slot);
-                }
+            let slots = side_effect_output_slots(entry, se);
+            if slots.is_empty() {
+                continue;
             }
+            for &s in &slots[1..] {
+                let (a, b) = (find(&mut parent, slots[0]), find(&mut parent, s));
+                parent[a] = b;
+            }
+            producers.push(((bid, i), slots, is_seg_map(se)));
         }
     }
-    produced.sort_unstable();
-    // Split only when there are at least two independent parallel domains. A
-    // single map alongside fixed output slots stays one kernel that shards and
-    // writes those fixed slots in the same dispatch.
-    if seg_map_slots.len() < 2 {
+
+    // Assign each producing side-effect to its group root; collect each group's
+    // slots and whether it contains a parallel map.
+    let mut group_of: LookupMap<(BlockId, usize), usize> = LookupMap::new();
+    let mut group_slots: LookupMap<usize, Vec<usize>> = LookupMap::new();
+    let mut parallel_groups: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for (loc, slots, is_map) in &producers {
+        let root = find(&mut parent, slots[0]);
+        group_of.insert(*loc, root);
+        let entry_slots = group_slots.entry(root).or_default();
+        for &s in slots {
+            if !entry_slots.contains(&s) {
+                entry_slots.push(s);
+            }
+        }
+        if *is_map {
+            parallel_groups.insert(root);
+        }
+    }
+    if parallel_groups.len() < 2 {
         return Vec::new();
     }
+
+    // Order groups by their lowest slot; the first keeps the entry's name.
+    let mut groups: Vec<(usize, Vec<usize>)> = group_slots.into_iter().collect();
+    for (_, slots) in groups.iter_mut() {
+        slots.sort_unstable();
+    }
+    groups.sort_by_key(|(_, slots)| slots[0]);
 
     use crate::pipeline_descriptor::{ComputeStage, DispatchSize, Pipeline};
     let base_name = entry.name.clone();
     let mut clones = Vec::new();
-    for &slot in &produced[1..] {
+    for (root, slots) in &groups[1..] {
         let mut clone = entry.clone();
-        clone.name = format!("{base_name}_dispatch_{slot}");
-        restrict_to_slot(&mut clone, slot, &slot_of);
+        clone.name = format!("{base_name}_dispatch_{}", slots[0]);
+        restrict_to_group(&mut clone, *root, slots, &group_of);
         if let Some(Pipeline::Compute(cp)) = pipeline.pipelines.iter_mut().find(|p| match p {
             Pipeline::Compute(c) => c.stages.iter().any(|s| s.entry_point == base_name),
             _ => false,
@@ -261,18 +305,22 @@ fn split_multidomain_seg_maps(
         clones.push(clone);
     }
 
-    // The original retains the lowest produced slot under its own name.
-    restrict_to_slot(entry, produced[0], &slot_of);
+    // The original retains the group owning the lowest slot under its own name.
+    let (root0, slots0) = &groups[0];
+    restrict_to_group(entry, *root0, slots0, &group_of);
     clones
 }
 
 fn reify_tail_soac(entry: &mut EgirEntry) {
     // A multi-output entry returning a tuple of sibling maps over distinct
     // domains carries one Screma side-effect per output (TLC fusion already
-    // merged equal-domain siblings into a single multi-lane Screma). Reify
-    // every one — each becomes its own SegOp, matching Futhark's one-SegOp-
-    // per-SegSpace structure; the schedule pass then splits distinct spaces
-    // into separate kernels.
+    // merged equal-domain siblings into a single multi-lane Screma). Reify each
+    // output-rooted one — it becomes its own SegOp, matching Futhark's
+    // one-SegOp-per-SegSpace structure; the schedule pass then splits distinct
+    // spaces into separate kernels. Intermediate Scremas (a map feeding a
+    // downstream scatter/filter/map) are left serial so `soac_expand` keeps
+    // them wired into that consumer's pipeline.
+    let soac_consumed = soac_consumed_nodes(entry);
     let locs: Vec<(BlockId, usize)> = entry
         .graph
         .skeleton
@@ -283,6 +331,11 @@ fn reify_tail_soac(entry: &mut EgirEntry) {
                 matches!(&se.kind, SideEffectKind::Pending(PendingSoac::Screma { .. })).then_some((bid, i))
             })
         })
+        .filter(|&(bid, idx)| {
+            entry.graph.skeleton.blocks[bid].side_effects[idx]
+                .result
+                .is_none_or(|r| !soac_consumed.contains(&r))
+        })
         .collect();
     if locs.is_empty() {
         reify_parallel_scatter(entry);
@@ -291,6 +344,34 @@ fn reify_tail_soac(entry: &mut EgirEntry) {
     for (block_id, idx) in locs {
         reify_one_screma(entry, block_id, idx);
     }
+}
+
+/// Every node read as input by a `Pending` SOAC in the entry — the union of all
+/// SOAC operand subgraphs. A Screma whose result lands here is an internal
+/// producer feeding a downstream scatter/filter/map; reifying it would detach
+/// it from that consumer's ordered pipeline, so it stays serial. A Screma whose
+/// result is not consumed by any SOAC (it routes to an entry output via the
+/// terminator or an output `Store`) is an output root and may reify into its
+/// own kernel.
+fn soac_consumed_nodes(entry: &EgirEntry) -> std::collections::HashSet<NodeId> {
+    let mut set: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+    let mut stack: Vec<NodeId> = Vec::new();
+    for (_, block) in &entry.graph.skeleton.blocks {
+        for se in &block.side_effects {
+            if matches!(se.kind, SideEffectKind::Pending(_)) {
+                stack.extend(se.operand_nodes.iter().copied());
+            }
+        }
+    }
+    while let Some(n) = stack.pop() {
+        if !set.insert(n) {
+            continue;
+        }
+        if let Some(node) = entry.graph.nodes.get(n) {
+            stack.extend(node.children());
+        }
+    }
+    set
 }
 
 fn reify_one_screma(entry: &mut EgirEntry, block_id: BlockId, idx: usize) {
