@@ -17,7 +17,7 @@ use crate::ssa::types::{ControlHeader, InstKind};
 use crate::BindingRef;
 
 use super::graph_ops;
-use super::program::{EgirEntry, EgirInner};
+use super::program::{EgirEntry, EgirFunc, EgirInner};
 use super::types::{
     EGraph, NodeId, PendingScremaAccumulator, PendingSoac, PureOp, SegBinOp, SegLevel, SegOpKind, SegSpace,
     SideEffect, SideEffectKind, SkeletonTerminator, SoacDestination,
@@ -45,9 +45,10 @@ pub fn reify(inner: &mut EgirInner, recognitions: &LookupMap<String, EntryRecogn
 /// not migrated yet, so it is deliberately restored to a serial Screma.
 pub fn lower(inner: &mut EgirInner, binding_ids: &mut crate::IdSource<u32>) {
     let mut new_entries: Vec<EgirEntry> = Vec::new();
-    // (new phase entry name, parent entry name): each synthesized reduce phase 2
+    let mut new_functions: Vec<EgirFunc> = Vec::new();
+    // (new phase entry name, parent entry name): each synthesized later phase
     // becomes its own pipeline stage in the parent compute pipeline.
-    let mut new_phase_stages: Vec<(String, String)> = Vec::new();
+    let mut new_phase_stages: Vec<(String, String, (u32, u32, u32))> = Vec::new();
     for entry in inner.entry_points.iter_mut() {
         let Some(kind) = find_pending_seg(entry).map(|(bid, idx)| {
             let se = &entry.graph.skeleton.blocks[bid].side_effects[idx];
@@ -63,7 +64,7 @@ pub fn lower(inner: &mut EgirInner, binding_ids: &mut crate::IdSource<u32>) {
             SegOpKind::SegRed { .. } => {
                 if let Some(phases) = lower_reduce_entry(entry, binding_ids) {
                     for ph in &phases {
-                        new_phase_stages.push((ph.name.clone(), entry.name.clone()));
+                        new_phase_stages.push((ph.name.clone(), entry.name.clone(), (PHASE2_WIDTH, 1, 1)));
                     }
                     new_entries.extend(phases);
                 } else {
@@ -71,16 +72,32 @@ pub fn lower(inner: &mut EgirInner, binding_ids: &mut crate::IdSource<u32>) {
                 }
             }
             SegOpKind::SegScan { .. } => {
-                restore_serial_seg(entry);
+                if let Some((phases, swap_wrapper)) = lower_scan_entry(entry, binding_ids) {
+                    for ph in &phases {
+                        // Phase 2 scans the block sums in one workgroup; phase 3
+                        // adds offsets over a chunked dispatch.
+                        let wg = if ph.name.contains("phase2") {
+                            (1, 1, 1)
+                        } else {
+                            (REDUCE_PHASE1_WIDTH, 1, 1)
+                        };
+                        new_phase_stages.push((ph.name.clone(), entry.name.clone(), wg));
+                    }
+                    new_entries.extend(phases);
+                    new_functions.push(swap_wrapper);
+                } else {
+                    restore_serial_seg(entry);
+                }
             }
         }
     }
     inner.entry_points.extend(new_entries);
+    inner.functions.extend(new_functions);
 
-    // A synthesized phase-2 tree-reduce runs as a single workgroup, dispatched
-    // 1×1×1 after the chunked phase-1 stage in the same pipeline.
-    for (name, parent) in new_phase_stages {
-        push_phase_stage(&mut inner.pipeline, &parent, &name, (PHASE2_WIDTH, 1, 1));
+    // Each synthesized later phase runs as its own stage in the parent
+    // reduction/scan pipeline, after the chunked phase-1 stage.
+    for (name, parent, workgroup) in new_phase_stages {
+        push_phase_stage(&mut inner.pipeline, &parent, &name, workgroup);
     }
 
     // Each distinct iteration space is its own kernel (Futhark: one SegOp per
@@ -1275,6 +1292,384 @@ fn lower_reduce_entry(
     // local loop while the synthesized phase-2 entries combine its partials.
     restore_serial_seg(entry);
     Some(phase2s)
+}
+
+/// Lower a `SegScan` into a three-phase block scan. Phase 1 (the original
+/// entry) scans each thread's chunk into the output buffer and reduces the
+/// chunk to `block_sums[tid]`; phase 2 sequentially scans `block_sums` into
+/// `block_offsets`; phase 3 adds each chunk's offset back over the output
+/// buffer through an arg-swapped wrapper around the combiner (so a
+/// non-commutative op keeps the running prefix in its `acc` slot). Returns the
+/// phase-2 and phase-3 entries plus the swap-wrapper function, or `None` for an
+/// unsupported shape (captures, multiple inputs/accumulators).
+fn lower_scan_entry(
+    entry: &mut EgirEntry,
+    binding_ids: &mut crate::IdSource<u32>,
+) -> Option<(Vec<EgirEntry>, EgirFunc)> {
+    let total_threads = REDUCE_PHASE1_WIDTH;
+
+    let (block_id, idx) = find_pending_seg(entry)?;
+    let (
+        op_func,
+        reduce_func,
+        scan_output_view_op,
+        input_view_nid,
+        input_view_ty,
+        input_elem_ty,
+        init_nid,
+        elem_ty,
+    ) = {
+        let se = &entry.graph.skeleton.blocks[block_id].side_effects[idx];
+        let SideEffectKind::Pending(PendingSoac::Seg {
+            kind: SegOpKind::SegScan { operators },
+            map_funcs,
+            input_array_types,
+            input_elem_types,
+            map_destinations,
+            acc_destinations,
+            map_capture_counts,
+            ..
+        }) = &se.kind
+        else {
+            return None;
+        };
+        if operators.len() != 1 {
+            return None;
+        }
+        let op = &operators[0];
+        if op.step_capture_count != 0 || op.reduce_op_capture_count != 0 {
+            return None;
+        }
+        if map_capture_counts.iter().any(|&c| c != 0) {
+            return None;
+        }
+        let n_inputs = input_array_types.len();
+        if n_inputs != 1 {
+            return None;
+        }
+        if !map_destinations.iter().all(|d| matches!(d, SoacDestination::OutputView)) {
+            return None;
+        }
+        // `realize_outputs` retargets the scan accumulator to OutputView (its
+        // prefixes feed the entry output) and appends the scan output buffer.
+        if !acc_destinations.iter().all(|d| matches!(d, SoacDestination::OutputView)) {
+            return None;
+        }
+        let n_accs = operators.len();
+        let n_maps = map_funcs.len();
+        let input_nid = se.operand_nodes[0];
+        let init_nid = op.neutral;
+        // Operand layout: `[inputs, init_accs, map_output_views,
+        // acc_output_views]` (captures gated out).
+        let scan_output_view_op = n_inputs + n_accs + n_maps;
+        let input_ty = entry.graph.types[&input_nid].clone();
+        let input_elem = input_elem_types[0].clone();
+        let elem = entry.graph.types[&init_nid].clone();
+        (
+            op.step_func.clone(),
+            op.reduce_op_func.clone(),
+            scan_output_view_op,
+            input_nid,
+            input_ty,
+            input_elem,
+            init_nid,
+            elem,
+        )
+    };
+
+    let block_sums_binding =
+        BindingRef::new(crate::egir::from_tlc::AUTO_STORAGE_SET, binding_ids.next_id());
+    let block_offsets_binding =
+        BindingRef::new(crate::egir::from_tlc::AUTO_STORAGE_SET, binding_ids.next_id());
+
+    // Chunk the input and the scan output view; swap them into the operand list.
+    let chunked = chunk_soac_inputs(
+        &mut entry.graph,
+        &[(input_view_nid, input_view_ty.clone())],
+        total_threads,
+        ChunkInputKind::StorageOnly,
+        "SegScan",
+    )
+    .ok()?;
+    let chunk_start = chunked.chunk_start;
+    let chunk_len = chunked.chunk_len;
+    let chunked_input_nid = chunked.views[0];
+    {
+        let se = &mut entry.graph.skeleton.blocks[block_id].side_effects[idx];
+        se.operand_nodes[0] = chunked_input_nid;
+    }
+    let (scan_output_storage, orig_scan_output_view_ty) = {
+        let se = &entry.graph.skeleton.blocks[block_id].side_effects[idx];
+        let v = se.operand_nodes[scan_output_view_op];
+        let ty = entry.graph.types[&v].clone();
+        let storage = graph_ops::extract_storage_view_source(&entry.graph, v)?;
+        (storage, ty)
+    };
+    let chunked_scan_output = graph_ops::intern_chunked_storage_view(
+        &mut entry.graph,
+        scan_output_storage,
+        chunk_start,
+        chunk_len,
+        orig_scan_output_view_ty,
+        None,
+    );
+    {
+        let se = &mut entry.graph.skeleton.blocks[block_id].side_effects[idx];
+        se.operand_nodes[scan_output_view_op] = chunked_scan_output;
+    }
+
+    // Snapshot phase 1 before appending the chunked reduce so phase 2's
+    // neutral-element clone sees a clean graph.
+    let phase1_snapshot = entry.graph.clone();
+
+    // Append a chunked reduce over the same input that stores each thread's
+    // final accumulator to `block_sums[tid]`.
+    {
+        let mut next_effect = graph_ops::next_effect_token(&entry.graph);
+        let reduce_operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![chunked_input_nid, init_nid];
+        let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![elem_ty.clone()]);
+        let screma_nid = graph_ops::emit_pending_soac(
+            &mut entry.graph,
+            block_id,
+            PendingSoac::Screma {
+                map_funcs: vec![],
+                accumulators: vec![PendingScremaAccumulator {
+                    kind: crate::tlc::ScremaAccumulator::Reduce,
+                    step_func: op_func.clone(),
+                    reduce_op_func: op_func,
+                    step_capture_count: 0,
+                    reduce_op_capture_count: 0,
+                }],
+                input_array_types: vec![input_view_ty],
+                input_elem_types: vec![input_elem_ty],
+                map_output_elem_types: vec![],
+                map_input_indices: vec![],
+                map_capture_counts: vec![],
+                map_destinations: vec![],
+                acc_destinations: vec![SoacDestination::Fresh],
+            },
+            reduce_operands,
+            tuple_ty,
+            &mut next_effect,
+            None,
+        );
+        let result_nid = entry.graph.intern_pure(
+            super::types::PureOp::Project { index: 0 },
+            smallvec![screma_nid],
+            elem_ty.clone(),
+        );
+        let arr_ty = Type::Constructed(
+            TypeName::Array,
+            vec![
+                elem_ty.clone(),
+                Type::Constructed(TypeName::ArrayVariantView, vec![]),
+                Type::Variable(0),
+                crate::types::no_region(),
+            ],
+        );
+        let block_sums_view =
+            graph_ops::intern_storage_view(&mut entry.graph, block_sums_binding, arr_ty, None);
+        graph_ops::emit_storage_store(
+            &mut entry.graph,
+            block_id,
+            block_sums_view,
+            chunked.tid,
+            result_nid,
+            elem_ty.clone(),
+            &mut next_effect,
+            None,
+        );
+    }
+
+    // Both intermediates are declared on phase 1 (block_sums is written here,
+    // block_offsets is read by phase 3) so the verifiers and `realize_outputs`
+    // see a consistent interface.
+    for binding in [block_sums_binding, block_offsets_binding] {
+        entry.storage_bindings.push(crate::interface::StorageBindingDecl {
+            binding,
+            role: crate::interface::StorageRole::Intermediate,
+            elem_ty: elem_ty.clone(),
+            length: None,
+        });
+    }
+
+    let phase2 = synthesize_phase2_scan(
+        &entry.name,
+        reduce_func.clone(),
+        elem_ty.clone(),
+        &phase1_snapshot,
+        init_nid,
+        block_sums_binding,
+        block_offsets_binding,
+    )
+    .ok()?;
+    let swap_wrapper_name = format!("{}_scan_op_swap", entry.name);
+    let swap_wrapper = synthesize_swap_wrapper(
+        swap_wrapper_name.clone(),
+        reduce_func,
+        elem_ty.clone(),
+        entry.span,
+    );
+    let phase3 = synthesize_phase3_scan(
+        &entry.name,
+        swap_wrapper_name,
+        elem_ty,
+        scan_output_storage,
+        block_offsets_binding,
+        total_threads,
+    );
+
+    // Phase 1 is now a per-invocation Screma scan over the thread's chunk plus
+    // the appended block-sum reduce; `soac_expand` lowers both.
+    restore_serial_seg(entry);
+    Some((vec![phase2, phase3], swap_wrapper))
+}
+
+/// Synthesize phase 2 of a parallel scan: a single-invocation sequential scan
+/// over `block_sums` writing prefixes into `block_offsets`.
+pub fn synthesize_phase2_scan(
+    entry_name: &str,
+    op_func: String,
+    elem_ty: Type<TypeName>,
+    phase1_graph: &super::types::EGraph,
+    phase1_ne_nid: NodeId,
+    block_sums_binding: BindingRef,
+    block_offsets_binding: BindingRef,
+) -> Result<EgirEntry, String> {
+    use super::builder::EntryBuilder;
+    let mut b = EntryBuilder::new_compute(format!("{}_phase2_scan_sums", entry_name), (1, 1, 1));
+    b.declare_intermediate_storage(block_sums_binding, elem_ty.clone());
+    b.declare_intermediate_storage(block_offsets_binding, elem_ty.clone());
+
+    let arr_ty = Type::Constructed(
+        TypeName::Array,
+        vec![
+            elem_ty.clone(),
+            Type::Constructed(TypeName::ArrayVariantView, vec![]),
+            Type::Variable(0),
+            crate::types::no_region(),
+        ],
+    );
+    let block_sums_view = b.emit_storage_view(block_sums_binding, arr_ty.clone());
+    let block_offsets_view = b.emit_storage_view(block_offsets_binding, arr_ty.clone());
+    let init_nid = graph_ops::clone_pure_subgraph(phase1_graph, b.graph_mut(), phase1_ne_nid)?;
+    b.emit_pending_scan_into(
+        op_func,
+        block_sums_view,
+        arr_ty.clone(),
+        elem_ty,
+        init_nid,
+        vec![],
+        block_offsets_view,
+        arr_ty,
+    );
+    Ok(b.build())
+}
+
+/// Synthesize phase 3 of a parallel scan: a chunked compute entry where each
+/// thread reads `off = block_offsets[tid]` and applies `op(off, output[i])` to
+/// every element of its chunk of `output`. Map's call convention is
+/// `func(elem, ...captures)`, so phase 3 routes through `swap_wrapper_name`
+/// (`\(elem, off) -> op(off, elem)`) to keep `off` in the accumulator slot for
+/// non-commutative ops.
+pub fn synthesize_phase3_scan(
+    entry_name: &str,
+    swap_wrapper_name: String,
+    elem_ty: Type<TypeName>,
+    output_binding: BindingRef,
+    block_offsets_binding: BindingRef,
+    total_threads: u32,
+) -> EgirEntry {
+    use super::builder::EntryBuilder;
+    let mut b = EntryBuilder::new_compute(
+        format!("{}_phase3_add_offsets", entry_name),
+        (total_threads, 1, 1),
+    );
+    b.declare_output_storage(output_binding, elem_ty.clone());
+    b.declare_intermediate_storage(block_offsets_binding, elem_ty.clone());
+
+    let arr_ty = Type::Constructed(
+        TypeName::Array,
+        vec![
+            elem_ty.clone(),
+            Type::Constructed(TypeName::ArrayVariantView, vec![]),
+            Type::Variable(0),
+            crate::types::no_region(),
+        ],
+    );
+    let _output_view = b.emit_storage_view(output_binding, arr_ty.clone());
+    let block_offsets_view = b.emit_storage_view(block_offsets_binding, arr_ty.clone());
+
+    let output_len = {
+        let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+        let set_nid = graph_ops::intern_u32(b.graph_mut(), output_binding.set, None);
+        let binding_nid = graph_ops::intern_u32(b.graph_mut(), output_binding.binding, None);
+        graph_ops::intern_intrinsic(
+            b.graph_mut(),
+            catalog().known().storage_len,
+            smallvec![set_nid, binding_nid],
+            u32_ty,
+            None,
+        )
+    };
+    let (tid, chunk_start, chunk_len) = emit_chunk_arithmetic(b.graph_mut(), total_threads, output_len)
+        .expect("phase3: chunk arithmetic must succeed (u32.min is in the prelude)");
+
+    let off_place = b.graph_mut().intern_pure(
+        super::types::PureOp::ViewIndex,
+        smallvec![block_offsets_view, tid],
+        elem_ty.clone(),
+    );
+    let off = b.emit_load(off_place, elem_ty.clone());
+
+    let chunked_output = graph_ops::intern_chunked_storage_view(
+        b.graph_mut(),
+        output_binding,
+        chunk_start,
+        chunk_len,
+        arr_ty.clone(),
+        None,
+    );
+
+    b.emit_pending_map_into(
+        swap_wrapper_name,
+        chunked_output,
+        arr_ty.clone(),
+        elem_ty.clone(),
+        elem_ty,
+        vec![off],
+        chunked_output,
+        arr_ty,
+    );
+    b.build()
+}
+
+/// Build a two-argument helper function named `wrapper_name` whose body is
+/// `inner(b, a)` — an arg-swapped wrapper around a `T -> T -> T` combiner.
+fn synthesize_swap_wrapper(
+    wrapper_name: String,
+    inner: String,
+    elem_ty: Type<TypeName>,
+    span: crate::ast::Span,
+) -> EgirFunc {
+    let mut graph = EGraph::new();
+    let a_nid = graph.add_func_param(0, elem_ty.clone());
+    let b_nid = graph.add_func_param(1, elem_ty.clone());
+    let call_nid = graph.intern_pure(PureOp::Call(inner), smallvec![b_nid, a_nid], elem_ty.clone());
+    let entry_block = graph.skeleton.entry;
+    graph.skeleton.blocks[entry_block].term = SkeletonTerminator::Return(Some(call_nid));
+    EgirFunc::new(
+        wrapper_name,
+        span,
+        None,
+        vec![
+            (elem_ty.clone(), "a".to_string()),
+            (elem_ty.clone(), "b".to_string()),
+        ],
+        elem_ty,
+        graph,
+        LookupMap::new(),
+    )
 }
 
 #[cfg(test)]
