@@ -40,10 +40,11 @@ fn compile_to_ssa(source: &str) -> wyn_core::ssa::types::Program {
         .infer_input_slice_bounds()
         .to_egraph()
         .expect("to_egraph failed")
-        .expand_soacs()
-        .materialize()
-        .optimize_skeleton()
-        .elaborate();
+        .lower_to_ssa(wyn_core::LoweringProfile::new(
+            wyn_core::CodegenTarget::Wgsl,
+            wyn_core::SchedulePolicy::Parallel,
+        ))
+        .expect("semantic EGIR lowering failed");
     ssa.ssa
 }
 

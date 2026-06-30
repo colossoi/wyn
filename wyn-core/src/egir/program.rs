@@ -1,8 +1,8 @@
 //! Whole-program EGIR container + per-body records.
 //!
 //! These are plain (non-generic) structs. State tracking happens at the
-//! public API boundary via the `EgirRaw` / `EgirSoacExpanded` /
-//! `EgirMaterialized` / `EgirSkelOptimized` newtypes in `crate::lib`, each
+//! public API boundary via the semantic `EgirRaw` / `EgirSegmented` /
+//! `EgirOptimized` / `EgirAllocated` newtypes in `crate::lib`, each
 //! of which wraps an `EgirInner`.
 //!
 //! `EgirInner` carries, for each function and entry point, a per-body
@@ -16,12 +16,185 @@ use polytype::Type;
 use crate::ast::{Span, TypeName};
 use crate::interface;
 use crate::pipeline_descriptor::PipelineDescriptor;
+use crate::types::TypeExt;
 use crate::ssa::types::{
     BlockId, Constant, ControlHeader, EntryInput, EntryOutput, ExecutionModel, Function,
 };
 
+use std::collections::HashMap;
+
 use super::parallelize::schedule::KernelSchedule;
-use super::types::{EGraph, NodeId};
+use super::types::{EGraph, NodeId, RegionId};
+
+/// Name ↔ arena-index interner for callable regions.
+///
+/// Region identity is the assigned `RegionId` (a dense index). The textual
+/// name is retained because it is the SSA `Call` ABI — a region lowers to a
+/// named function, and operator/lane Calls reference it by that name. Interning
+/// the same name twice returns the same index, so SegBody construction and the
+/// function arena agree without a separate resolution pass.
+#[derive(Clone, Debug, Default)]
+pub struct RegionInterner {
+    by_name: HashMap<String, RegionId>,
+    names: Vec<String>,
+}
+
+impl RegionInterner {
+    pub fn intern(&mut self, name: impl AsRef<str>) -> RegionId {
+        let name = name.as_ref();
+        if let Some(id) = self.by_name.get(name) {
+            return *id;
+        }
+        let id = RegionId::from_index(self.names.len() as u32);
+        self.names.push(name.to_string());
+        self.by_name.insert(name.to_string(), id);
+        id
+    }
+
+    pub fn get(&self, name: &str) -> Option<RegionId> {
+        self.by_name.get(name).copied()
+    }
+
+    /// Recover the SSA function name backing a region index.
+    pub fn name(&self, id: RegionId) -> &str {
+        &self.names[id.index() as usize]
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SemanticOpId {
+    pub scope: String,
+    pub result: NodeId,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SemanticDependencyKind {
+    Value,
+    Effect,
+    Resource,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SemanticDependency {
+    pub producer: SemanticOpId,
+    pub consumer: SemanticOpId,
+    pub kind: SemanticDependencyKind,
+}
+
+/// Callable body arena entry used by semantic SegOps.
+#[derive(Clone)]
+pub struct EgirRegion {
+    pub name: String,
+    pub params: Vec<(Type<TypeName>, String)>,
+    pub return_ty: Type<TypeName>,
+    pub graph: EGraph,
+    pub control_headers: LookupMap<BlockId, ControlHeader>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ResourceId(pub u32);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LogicalSize {
+    FixedBytes(u64),
+    LikeBinding {
+        binding: crate::BindingRef,
+        elem_bytes: u32,
+        src_elem_bytes: u32,
+    },
+    SameAsDispatch {
+        elem_bytes: u32,
+    },
+    Unspecified,
+}
+
+#[derive(Clone, Debug)]
+pub enum ResourceOrigin {
+    Host(crate::BindingRef),
+    Compiler,
+}
+
+#[derive(Clone, Debug)]
+pub struct LogicalResource {
+    pub id: ResourceId,
+    pub origin: ResourceOrigin,
+    /// Transitional identity used by storage-view types until terminal
+    /// lowering rewrites compiler resources to their allocated binding.
+    pub legacy_binding: crate::BindingRef,
+    pub elem_ty: Type<TypeName>,
+    pub size: LogicalSize,
+}
+
+pub fn plan_logical_resources(inner: &mut EgirInner) {
+    let mut resources: LookupMap<crate::BindingRef, LogicalResource> = LookupMap::new();
+    for entry in &inner.entry_points {
+        for input in &entry.inputs {
+            if let Some(binding) = input.storage_binding {
+                resources.entry(binding).or_insert(LogicalResource {
+                    id: ResourceId(0),
+                    origin: ResourceOrigin::Host(binding),
+                    legacy_binding: binding,
+                    elem_ty: input.ty.elem_type().cloned().unwrap_or_else(|| input.ty.clone()),
+                    size: logical_size(input.length.as_ref()),
+                });
+            }
+        }
+        for output in &entry.outputs {
+            if let Some(binding) = output.storage_binding {
+                resources.entry(binding).or_insert(LogicalResource {
+                    id: ResourceId(0),
+                    origin: ResourceOrigin::Host(binding),
+                    legacy_binding: binding,
+                    elem_ty: output.ty.elem_type().cloned().unwrap_or_else(|| output.ty.clone()),
+                    size: logical_size(output.length.as_ref()),
+                });
+            }
+        }
+        for declaration in &entry.storage_bindings {
+            let size = logical_size(declaration.length.as_ref());
+            let origin = if declaration.role == interface::StorageRole::Intermediate {
+                ResourceOrigin::Compiler
+            } else {
+                ResourceOrigin::Host(declaration.binding)
+            };
+            resources.entry(declaration.binding).or_insert(LogicalResource {
+                id: ResourceId(0),
+                origin,
+                legacy_binding: declaration.binding,
+                elem_ty: declaration.elem_ty.clone(),
+                size,
+            });
+        }
+    }
+    let mut resources: Vec<_> = resources.into_values().collect();
+    resources.sort_by_key(|resource| (resource.legacy_binding.set, resource.legacy_binding.binding));
+    for (index, resource) in resources.iter_mut().enumerate() {
+        resource.id = ResourceId(index as u32);
+    }
+    inner.resources = resources;
+}
+
+fn logical_size(length: Option<&crate::pipeline_descriptor::BufferLen>) -> LogicalSize {
+    match length {
+        Some(crate::pipeline_descriptor::BufferLen::Fixed { bytes }) => LogicalSize::FixedBytes(*bytes),
+        Some(crate::pipeline_descriptor::BufferLen::LikeInput {
+            set,
+            binding,
+            elem_bytes,
+            src_elem_bytes,
+        }) => LogicalSize::LikeBinding {
+            binding: crate::BindingRef::new(*set, *binding),
+            elem_bytes: *elem_bytes,
+            src_elem_bytes: *src_elem_bytes,
+        },
+        Some(crate::pipeline_descriptor::BufferLen::SameAsDispatch { elem_bytes }) => {
+            LogicalSize::SameAsDispatch {
+                elem_bytes: *elem_bytes,
+            }
+        }
+        None => LogicalSize::Unspecified,
+    }
+}
 
 pub struct EgirFunc {
     pub name: String,
@@ -124,8 +297,8 @@ impl EgirEntry {
     }
 }
 
-/// Whole-program EGIR container. Wrapped by the `EgirRaw` /
-/// `EgirSoacExpanded` / `EgirMaterialized` / `EgirSkelOptimized` newtypes at
+/// Whole-program EGIR container. Wrapped by the semantic `EgirRaw` /
+/// `EgirSegmented` / `EgirOptimized` / `EgirAllocated` newtypes at
 /// the public-API layer (see `crate::lib`).
 pub struct EgirInner {
     pub functions: Vec<EgirFunc>,
@@ -136,6 +309,21 @@ pub struct EgirInner {
     pub entry_points: Vec<EgirEntry>,
     pub constants: Vec<Constant>,
     pub pipeline: PipelineDescriptor,
+    /// Source names retained until the descriptor is published atomically at
+    /// terminal lowering.
+    pub input_names: LookupMap<(u32, u32), String>,
+    /// Complete callable regions referenced by semantic Seg bodies, keyed by
+    /// their arena index.
+    pub regions: LookupMap<RegionId, EgirRegion>,
+    /// Name ↔ index interner shared with construction. Synthesized regions
+    /// (e.g. scan offset wrappers) intern here to obtain a fresh index.
+    pub region_interner: RegionInterner,
+    /// Logical host and compiler resources. Compiler resources receive a
+    /// physical binding only during target-aware lowering.
+    pub resources: Vec<LogicalResource>,
+    /// Whole-program semantic dependency DAG. Edges come from values, effect
+    /// tokens, and conflicting logical resource accesses.
+    pub semantic_dependencies: Vec<SemanticDependency>,
     /// Concrete compute schedule produced after segmented-operation lowering.
     /// It remains attached to EGIR so later passes and descriptor publication
     /// consume the same phase/resource graph instead of rediscovering it.
@@ -149,13 +337,36 @@ impl EgirInner {
         entry_points: Vec<EgirEntry>,
         constants: Vec<Constant>,
         pipeline: PipelineDescriptor,
+        mut region_interner: RegionInterner,
     ) -> Self {
+        // Every function is callable, so it owns a region index. Names already
+        // interned during construction keep their index; the rest are assigned
+        // here. The arena is then keyed by that index.
+        let mut regions = LookupMap::new();
+        for function in &functions {
+            let id = region_interner.intern(&function.name);
+            regions.insert(
+                id,
+                EgirRegion {
+                    name: function.name.clone(),
+                    params: function.params.clone(),
+                    return_ty: function.return_ty.clone(),
+                    graph: function.graph.clone(),
+                    control_headers: function.control_headers.clone(),
+                },
+            );
+        }
         EgirInner {
             functions,
             externs,
             entry_points,
             constants,
             pipeline,
+            input_names: LookupMap::new(),
+            regions,
+            region_interner,
+            resources: Vec::new(),
+            semantic_dependencies: Vec::new(),
             kernel_schedule: KernelSchedule::default(),
         }
     }
@@ -163,6 +374,24 @@ impl EgirInner {
     /// Convenience: build an EGIR program wrapping a single function body.
     /// Used by the probe path in `from_tlc`.
     pub fn single_function(func: EgirFunc) -> Self {
-        Self::new(vec![func], vec![], vec![], vec![], PipelineDescriptor::default())
+        Self::new(
+            vec![func],
+            vec![],
+            vec![],
+            vec![],
+            PipelineDescriptor::default(),
+            RegionInterner::default(),
+        )
+    }
+
+    /// Intern (or look up) the region backing a callable name. Synthesized
+    /// regions created after construction obtain their index this way.
+    pub fn intern_region(&mut self, name: impl AsRef<str>) -> RegionId {
+        self.region_interner.intern(name)
+    }
+
+    /// SSA function name backing a region index (the `PureOp::Call` ABI).
+    pub fn region_name(&self, id: RegionId) -> &str {
+        self.region_interner.name(id)
     }
 }

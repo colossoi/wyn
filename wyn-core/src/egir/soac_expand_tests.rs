@@ -16,7 +16,7 @@
 //! `arr` or `val` comes from the wrong projection.
 
 use crate::ast::TypeName;
-use crate::egir::types::{ENode, PendingSoac, PureOp, SideEffectKind};
+use crate::egir::types::{EgirSoac, ENode, PureOp, SideEffectKind};
 use polytype::Type;
 
 /// Compile source through the pipeline to just-past `expand_soacs`,
@@ -24,8 +24,15 @@ use polytype::Type;
 /// introspect node structure.
 fn compile_to_expanded_egraph(input: &str) -> crate::egir::types::EGraph {
     let tlc = crate::compile_thru_tlc(input).expect("compile_thru_tlc");
-    let expanded = tlc.infer_input_slice_bounds().to_egraph().expect("to_egraph").expand_soacs();
-    let inner = &expanded.0;
+    let mut allocated = tlc.infer_input_slice_bounds().to_egraph().expect("to_egraph");
+    crate::egir::target_lowering::schedule(
+        &mut allocated.inner,
+        &mut allocated.binding_ids,
+        crate::LoweringProfile::PORTABLE,
+    )
+    .expect("terminal schedule");
+    crate::egir::soac_expand::run(&mut allocated.inner);
+    let inner = &allocated.inner;
     assert_eq!(
         inner.entry_points.len(),
         1,
@@ -73,14 +80,17 @@ fn scatter_handleability_checks_every_input() {
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
     let f32_ty = Type::Constructed(TypeName::Float(32), vec![]);
     let bad_input_ty = Type::Constructed(TypeName::Tuple(2), vec![i32_ty.clone(), f32_ty.clone()]);
-    let kind = SideEffectKind::Pending(PendingSoac::Scatter {
-        func: "scatter_env".to_string(),
+    let kind = SideEffectKind::Soac(EgirSoac::Hist {
+        body: crate::egir::types::SegBody {
+            region: crate::egir::types::RegionId::from_index(0),
+            captures: vec![],
+        },
         input_array_types: vec![plain_array_ty(i32_ty.clone()), bad_input_ty],
         input_elem_types: vec![i32_ty.clone(), f32_ty.clone()],
-        capture_count: 0,
         index_type: i32_ty,
         value_type: f32_ty.clone(),
         dest_elem_type: f32_ty,
+        update_policy: crate::egir::types::HistUpdatePolicy::OrderedOverwrite,
         space: None,
     });
 

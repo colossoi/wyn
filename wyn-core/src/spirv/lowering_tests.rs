@@ -490,7 +490,7 @@ entry fragment_main(#[builtin(position)] _p: vec4f32)
 }
 
 /// `scatter` into a `#[storage]` framebuffer lowers end-to-end: the full
-/// `SoacKind::Scatter` → `SoacOp::Scatter` → `PendingSoac::Scatter` →
+/// `SoacKind::Scatter` → `SoacOp::Scatter` → `EgirSoac::Hist` →
 /// `build_scatter_loop` path emits indexed `OpStore`s into the destination
 /// view (one per scattered element; N=5 here, unrolled).
 #[test]

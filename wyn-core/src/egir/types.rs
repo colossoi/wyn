@@ -27,7 +27,26 @@ use smallvec::SmallVec;
 new_key_type! {
     /// Identity of a node in the e-graph. Every pure node, union node,
     /// block param, function param, and constant gets one.
-    pub struct NodeId;
+pub struct NodeId;
+}
+
+/// Opaque handle into the program-level region arena (`EgirInner::regions`).
+///
+/// Region *identity* is a checked arena index, never a re-derived string. A
+/// region still lowers to a named SSA function — that name is the call ABI and
+/// lives on `EgirRegion`/the `RegionInterner`, recovered via the arena when a
+/// `PureOp::Call` is emitted. Semantic SegOps carry only this index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RegionId(u32);
+
+impl RegionId {
+    pub const fn from_index(index: u32) -> Self {
+        Self(index)
+    }
+
+    pub const fn index(self) -> u32 {
+        self.0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -114,7 +133,7 @@ impl ENode {
 #[derive(Clone, Debug)]
 pub struct SideEffect {
     /// What this side-effect is. Either an SSA `InstKind` that survives into
-    /// the final `FuncBody`, or an intermediate `PendingSoac` that must be
+    /// the final `FuncBody`, or an intermediate `EgirSoac` that must be
     /// rewritten by `soac_expand` before `elaborate` runs.
     pub kind: SideEffectKind,
     /// Operands resolved to NodeIds.
@@ -137,14 +156,14 @@ pub enum SideEffectKind {
     Inst(InstKind),
     /// A placeholder for an unexpanded SOAC. Produced by `from_tlc` and
     /// consumed by `soac_expand`. Never reaches elaborate.
-    Pending(PendingSoac),
+    Soac(EgirSoac),
 }
 
 /// Where an array-producing SOAC's per-iteration result is written.
 /// Defined in `crate::tlc` and re-exported here so EGIR consumers see
 /// the same type that TLC's `SoacOp::{Map, Scan, Filter}` carry.
 ///
-/// Operand layouts in `PendingSoac` are variant-dependent and follow
+/// Operand layouts in `EgirSoac` are variant-dependent and follow
 /// each destination:
 /// - `Fresh` (Map): `[input_0, ..., input_{n-1}, ...captures]`
 /// - `Fresh` (Scan): `[input, init, ...captures]`
@@ -157,12 +176,10 @@ pub enum SideEffectKind {
 pub use crate::tlc::{ScremaAccumulator, SoacDestination};
 
 #[derive(Clone, Debug)]
-pub struct PendingScremaAccumulator {
+pub struct ScremaOperator {
     pub kind: ScremaAccumulator,
-    pub step_func: String,
-    pub reduce_op_func: String,
-    pub step_capture_count: usize,
-    pub reduce_op_capture_count: usize,
+    pub step: SegBody,
+    pub combine: SegBody,
 }
 
 /// Execution level of a `Seg` op. wyn currently only emits thread-level
@@ -172,6 +189,24 @@ pub enum SegLevel {
     Thread,
 }
 
+/// One concrete dimension of a segmented iteration space.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SegExtent {
+    Fixed(u32),
+    PushConstant {
+        node: NodeId,
+        offset: u32,
+    },
+    ResourceLength {
+        node: NodeId,
+        binding: crate::BindingRef,
+        elem_bytes: u32,
+    },
+    /// A concrete EGIR value whose provenance is not host-dispatchable. Such
+    /// spaces remain valid for lane-local/serial lowering.
+    Value(NodeId),
+}
+
 /// The parallel iteration space of a `Seg` op. wyn is 1-D: a flat global
 /// thread index ranging over `len` elements. The thread index node itself is
 /// bound during expansion (`build_parallel_maps`/`chunk_soac_inputs`), not at
@@ -179,9 +214,43 @@ pub enum SegLevel {
 #[derive(Clone, Debug)]
 pub struct SegSpace {
     pub level: SegLevel,
-    /// Iteration length. `None` derives it from the op's primary input length
-    /// at expansion (the usual case); `Some(n)` pins it explicitly.
-    pub len: Option<NodeId>,
+    pub dims: Vec<SegExtent>,
+}
+
+/// Placement selected independently of the backend scheduling strategy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SegPlacement {
+    Kernel,
+    LaneLocal,
+}
+
+/// A complete callable body and the values captured from its surrounding
+/// graph. Captures are explicit values, never an operand-count convention.
+#[derive(Clone, Debug)]
+pub struct SegBody {
+    pub region: RegionId,
+    pub captures: Vec<NodeId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SegResourceAccessKind {
+    Read,
+    Write,
+    ReadWrite,
+}
+
+/// Conflict semantics for histogram/scatter updates. Ordered overwrite is the
+/// source-language scatter behavior and therefore remains serial unless a
+/// later proof replaces it with a parallel-safe policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HistUpdatePolicy {
+    OrderedOverwrite,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SegResourceAccess {
+    pub binding: crate::BindingRef,
+    pub access: SegResourceAccessKind,
 }
 
 /// A reduce/scan operator of a `Seg` op: the (fused map+)step body, the bare
@@ -192,16 +261,14 @@ pub struct SegSpace {
 #[derive(Clone, Debug)]
 pub struct SegBinOp {
     pub kind: ScremaAccumulator,
-    pub step_func: String,
-    pub reduce_op_func: String,
+    pub step: SegBody,
+    pub combine: SegBody,
     /// Neutral value for this operator, interned in the surrounding EGraph.
     pub neutral: NodeId,
     /// Logical vectorized-operator dimensions. Empty for today's scalar and
     /// aggregate Wyn reductions; retained explicitly for Futhark-style
     /// vectorized operators rather than baking that assumption into lowering.
     pub shape: Vec<NodeId>,
-    pub step_capture_count: usize,
-    pub reduce_op_capture_count: usize,
     pub commutative: bool,
 }
 
@@ -221,20 +288,26 @@ pub enum SegOpKind {
     SegScan {
         operators: Vec<SegBinOp>,
     },
+    /// A same-space Screma containing more than one accumulator class. It is
+    /// retained semantically and scheduled conservatively until the target
+    /// lowering can split the shared pure mapping region safely.
+    SegComposite {
+        operators: Vec<SegBinOp>,
+    },
 }
 
 /// An unexpanded SOAC operation held in the skeleton until `soac_expand` rewrites
 /// it into an explicit loop. All operand NodeIds live in `SideEffect.operand_nodes`
 /// with a variant-specific layout (documented per-variant in `soac_expand`).
 #[derive(Clone, Debug)]
-pub enum PendingSoac {
+pub enum EgirSoac {
     /// Multi-result map+accumulator: one pass writes mapped outputs and
     /// threads accumulator outputs. Operand layout:
     /// `[inputs..., init_accs..., map_captures..., acc_step_captures...,
     /// acc_reduce_op_captures..., output_views...]`.
     Screma {
-        map_funcs: Vec<String>,
-        accumulators: Vec<PendingScremaAccumulator>,
+        map_bodies: Vec<SegBody>,
+        accumulators: Vec<ScremaOperator>,
         input_array_types: Vec<Type<TypeName>>,
         input_elem_types: Vec<Type<TypeName>>,
         map_output_elem_types: Vec<Type<TypeName>>,
@@ -243,7 +316,6 @@ pub enum PendingSoac {
         /// in order, before its captures. Invariant: one entry per map func.
         /// Default (every func reads every input) is `(0..n_inputs)` per func.
         map_input_indices: Vec<Vec<usize>>,
-        map_capture_counts: Vec<usize>,
         map_destinations: Vec<SoacDestination>,
         acc_destinations: Vec<SoacDestination>,
     },
@@ -262,16 +334,17 @@ pub enum PendingSoac {
     ///   `len` operand (an SSA value). A runtime-sized input cannot back a
     ///   function-local array, so it compacts into a descriptor-bound buffer.
     Filter {
+        /// Concrete semantic iteration space, filled by segmentation.
+        space: Option<SegSpace>,
         /// `Some(name)` folds an elementwise producer `map(f, …)` in: per element
         /// the loop computes `v = f(x)` (`map_capture_count` leading operands are
         /// `f`'s captures), tests `pred(v)`, and keeps `v`. `None` is a plain
         /// filter (the surviving input element is kept and `pred` tests it).
-        map_func: Option<String>,
-        map_capture_count: usize,
+        map_body: Option<SegBody>,
         /// The filter's output element type — `f`'s return type when a map is
         /// fused, else `input_elem_type`. Sizes the result buffer/view.
         output_elem_type: Type<TypeName>,
-        pred_func: String,
+        pred_body: SegBody,
         input_array_type: Type<TypeName>,
         input_elem_type: Type<TypeName>,
         /// `Size(N)` — the input's static capacity (static lowering only;
@@ -301,14 +374,14 @@ pub enum PendingSoac {
     /// writes are the effect). Operands: `[dest_view, inputs.., captures..]` —
     /// `dest_view` is the destination's lowered `StorageView`, and the trailing
     /// `capture_count` operands are the envelope captures.
-    Scatter {
-        func: String,
+    Hist {
+        body: SegBody,
         input_array_types: Vec<Type<TypeName>>,
         input_elem_types: Vec<Type<TypeName>>,
-        capture_count: usize,
         index_type: Type<TypeName>,
         value_type: Type<TypeName>,
         dest_elem_type: Type<TypeName>,
+        update_policy: HistUpdatePolicy,
         /// `Some` marks a thread-parallel scatter (Futhark's `SegHist` shape):
         /// `soac_expand` lowers it via `build_parallel_scatter` over the space.
         /// `None` is the serial `tid==0`-guarded loop (`build_scatter_loop`).
@@ -323,16 +396,21 @@ pub enum PendingSoac {
     /// scan) from its fields. Operand layout matches the serial `Screma`'s.
     Seg {
         space: SegSpace,
+        placement: SegPlacement,
         kind: SegOpKind,
-        map_funcs: Vec<String>,
+        map_bodies: Vec<SegBody>,
         input_array_types: Vec<Type<TypeName>>,
         input_elem_types: Vec<Type<TypeName>>,
         map_output_elem_types: Vec<Type<TypeName>>,
         map_input_indices: Vec<Vec<usize>>,
-        map_capture_counts: Vec<usize>,
         map_destinations: Vec<SoacDestination>,
         acc_destinations: Vec<SoacDestination>,
         result_types: Vec<Type<TypeName>>,
+        /// Entry-output slots written by this operation, fixed at semantic
+        /// construction time rather than recovered while scheduling.
+        output_slots: Vec<usize>,
+        /// Conservative logical resource summary owned by the semantic op.
+        resources: Vec<SegResourceAccess>,
     },
 }
 

@@ -1,4 +1,4 @@
-//! Expand `SideEffectKind::Pending(PendingSoac::...)` skeleton side-effects
+//! Expand `SideEffectKind::Soac(EgirSoac::...)` skeleton side-effects
 //! into explicit loop subgraphs with pure ops in the sea and block params
 //! carrying accumulators.
 //!
@@ -16,29 +16,41 @@ use smallvec::{smallvec, SmallVec};
 use super::graph_ops::{
     alloc_effect, emit_alloca, emit_load, emit_place_index_store, emit_store, next_effect_token,
 };
-use super::program::EgirInner;
+use super::program::{EgirInner, RegionInterner};
 use crate::ast::TypeName;
 use crate::ssa::types::{ControlHeader, InstKind, ValueRef};
 use crate::types::TypeExt;
 use crate::types::{is_array_variant_view, is_virtual_array};
 
 use super::types::{
-    EGraph, ENode, NodeId, PendingSoac, PureOp, SegOpKind, SideEffect, SideEffectKind, SkeletonTerminator,
+    EGraph, EgirSoac, ENode, NodeId, PureOp, SegOpKind, SideEffect, SideEffectKind, SkeletonTerminator,
     SoacDestination,
 };
 
 /// Run `run_one_body` on every function and entry point in the program.
 pub fn run(inner: &mut EgirInner) {
-    for f in &mut inner.functions {
-        run_one_body(&mut f.graph, &mut f.control_headers);
+    // Borrow the region interner disjointly from the bodies being expanded; it
+    // is read-only here (recovering the SSA `Call` name for each region).
+    let EgirInner {
+        functions,
+        entry_points,
+        region_interner,
+        ..
+    } = inner;
+    for f in functions.iter_mut() {
+        run_one_body(&mut f.graph, &mut f.control_headers, region_interner);
     }
-    for e in &mut inner.entry_points {
-        run_one_body(&mut e.graph, &mut e.control_headers);
+    for e in entry_points.iter_mut() {
+        run_one_body(&mut e.graph, &mut e.control_headers, region_interner);
     }
 }
 
-/// Expand every `SideEffectKind::Pending(PendingSoac::...)` in the skeleton.
-pub fn run_one_body(graph: &mut EGraph, control_headers: &mut LookupMap<BlockId, ControlHeader>) {
+/// Expand every `SideEffectKind::Soac(EgirSoac::...)` in the skeleton.
+pub fn run_one_body(
+    graph: &mut EGraph,
+    control_headers: &mut LookupMap<BlockId, ControlHeader>,
+    regions: &RegionInterner,
+) {
     // Collect (block, index) of every handleable Soac in a stable order.
     // Process back-to-front within each block so earlier indices stay valid.
     let mut targets: Vec<(BlockId, usize)> = Vec::new();
@@ -55,7 +67,7 @@ pub fn run_one_body(graph: &mut EGraph, control_headers: &mut LookupMap<BlockId,
 
     let mut next_effect = next_effect_token(graph);
     for (bid, idx) in targets {
-        expand_one(graph, control_headers, bid, idx, &mut next_effect);
+        expand_one(graph, control_headers, bid, idx, &mut next_effect, regions);
     }
     let _ = next_effect; // silence unused when no view-array reductions
 }
@@ -65,26 +77,26 @@ pub fn run_one_body(graph: &mut EGraph, control_headers: &mut LookupMap<BlockId,
 
 /// Does this SOAC kind have a TLC→EGIR expansion implemented here?
 fn is_handleable_soac(kind: &SideEffectKind) -> bool {
-    let SideEffectKind::Pending(soac) = kind else {
+    let SideEffectKind::Soac(soac) = kind else {
         return false;
     };
     match soac {
-        PendingSoac::Screma {
+        EgirSoac::Screma {
             input_array_types, ..
         } => input_array_types.iter().all(is_plain_array_source),
-        PendingSoac::Filter { input_array_type, .. } => is_plain_array_source(input_array_type),
+        EgirSoac::Filter { input_array_type, .. } => is_plain_array_source(input_array_type),
         // Scatter reads all input arrays per element; loop length comes from
         // the first input, but every input must support the read path.
-        PendingSoac::Scatter {
+        EgirSoac::Hist {
             input_array_types, ..
         } => !input_array_types.is_empty() && input_array_types.iter().all(is_plain_array_source),
         // A reified parallel map/reduce/scan; same source rules as its inputs.
-        PendingSoac::Seg {
+        EgirSoac::Seg {
             kind: SegOpKind::SegMap,
             input_array_types,
             ..
         } => input_array_types.iter().all(is_plain_array_source),
-        PendingSoac::Seg { .. } => false,
+        EgirSoac::Seg { .. } => false,
     }
 }
 
@@ -172,27 +184,34 @@ fn expand_one(
     bid: BlockId,
     idx: usize,
     next_effect: &mut u32,
+    regions: &RegionInterner,
 ) {
     let se = graph.skeleton.blocks[bid].side_effects.remove(idx);
     match &se.kind {
-        SideEffectKind::Pending(PendingSoac::Screma {
-            map_funcs,
+        SideEffectKind::Soac(EgirSoac::Screma {
+            map_bodies,
             accumulators,
             input_array_types,
             input_elem_types,
             map_output_elem_types,
             map_input_indices,
-            map_capture_counts,
             map_destinations,
             acc_destinations,
         }) => {
             let map_input_indices = map_input_indices.clone();
-            let map_funcs = map_funcs.clone();
+            // Captures and the callee region are explicit on each `SegBody`;
+            // the serial loop reads them directly rather than reslicing the
+            // operand list by a separate capture-count layout.
+            let map_funcs: Vec<String> =
+                map_bodies.iter().map(|body| regions.name(body.region).to_string()).collect();
+            let map_captures: Vec<Vec<NodeId>> =
+                map_bodies.iter().map(|body| body.captures.clone()).collect();
             let acc_specs = accumulators.clone();
+            let acc_step_captures: Vec<Vec<NodeId>> =
+                acc_specs.iter().map(|acc| acc.step.captures.clone()).collect();
             let arr_tys = input_array_types.clone();
             let elem_tys = input_elem_types.clone();
             let map_output_elem_types = map_output_elem_types.clone();
-            let map_capture_counts = map_capture_counts.clone();
             let map_destinations = map_destinations.clone();
             let acc_destinations = acc_destinations.clone();
             let n_maps = map_funcs.len();
@@ -200,20 +219,13 @@ fn expand_one(
             let n_inputs = arr_tys.len();
             let input_nids: Vec<NodeId> = se.operand_nodes[..n_inputs].to_vec();
             let init_acc_nids: Vec<NodeId> = se.operand_nodes[n_inputs..n_inputs + n_accs].to_vec();
-            let mut cursor = n_inputs + n_accs;
-            let mut map_captures = Vec::with_capacity(n_maps);
-            for count in &map_capture_counts {
-                map_captures.push(se.operand_nodes[cursor..cursor + *count].to_vec());
-                cursor += *count;
-            }
-            let mut acc_step_captures = Vec::with_capacity(n_accs);
-            for acc in &acc_specs {
-                acc_step_captures.push(se.operand_nodes[cursor..cursor + acc.step_capture_count].to_vec());
-                cursor += acc.step_capture_count;
-            }
-            for acc in &acc_specs {
-                cursor += acc.reduce_op_capture_count;
-            }
+            // Operand prefix consumed before the trailing output views:
+            // inputs, init accumulators, then every region's capture list.
+            let cursor = n_inputs
+                + n_accs
+                + map_captures.iter().map(Vec::len).sum::<usize>()
+                + acc_specs.iter().map(|acc| acc.step.captures.len()).sum::<usize>()
+                + acc_specs.iter().map(|acc| acc.combine.captures.len()).sum::<usize>();
             let result_nid = se.result.expect("Screma has a result");
             let result_ty = graph.types[&result_nid].clone();
             let Type::Constructed(TypeName::Tuple(_), result_fields) = &result_ty else {
@@ -248,7 +260,7 @@ fn expand_one(
                         // (or `inputs[0]` for single-input Screma) as the
                         // initial output, so the result aliases the input
                         // buffer in place (same shape as
-                        // `PendingSoac::Map[InputBuffer]`).
+                        // `EgirSoac::Map[InputBuffer]`).
                         let carry_from = input_nids.get(map_idx).copied().unwrap_or(input_nids[0]);
                         map_output_views.push(None);
                         map_input_buffer_inits.push(Some(carry_from));
@@ -488,7 +500,7 @@ fn expand_one(
                         reduce_operands.extend(elem_nids.iter().copied());
                         reduce_operands.extend(acc_step_captures[acc_idx].iter().copied());
                         let new_acc = graph.intern_pure(
-                            PureOp::Call(acc_specs[acc_idx].step_func.clone()),
+                            PureOp::Call(regions.name(acc_specs[acc_idx].step.region).to_string()),
                             reduce_operands,
                             acc_elem_tys[acc_idx].clone(),
                         );
@@ -535,11 +547,11 @@ fn expand_one(
                 },
             );
         }
-        SideEffectKind::Pending(PendingSoac::Filter {
-            map_func,
-            map_capture_count,
+        SideEffectKind::Soac(EgirSoac::Filter {
+            space: _,
+            map_body,
             output_elem_type,
-            pred_func,
+            pred_body,
             input_array_type,
             input_elem_type,
             output_capacity_size,
@@ -547,10 +559,9 @@ fn expand_one(
             scratch_out,
             len_out,
         }) => {
-            let map_func = map_func.clone();
-            let map_capture_count = *map_capture_count;
+            let map_func = map_body.as_ref().map(|body| regions.name(body.region).to_string());
             let output_elem_ty = output_elem_type.clone();
-            let pred_func = pred_func.clone();
+            let pred_func = regions.name(pred_body.region).to_string();
             let arr_ty = input_array_type.clone();
             let elem_ty = input_elem_type.clone();
             let capacity_size = output_capacity_size.clone();
@@ -560,8 +571,11 @@ fn expand_one(
 
             // Operand layout: [input, ...map_captures, ...pred_captures].
             let arr_nid = se.operand_nodes[0];
-            let map_captures: Vec<NodeId> = se.operand_nodes[1..1 + map_capture_count].to_vec();
-            let captures: Vec<NodeId> = se.operand_nodes[1 + map_capture_count..].to_vec();
+            let map_captures = map_body
+                .as_ref()
+                .map(|body| body.captures.clone())
+                .unwrap_or_default();
+            let captures = pred_body.captures.clone();
             let result_nid = se.result.expect("Filter has a result");
 
             build_filter_loop(
@@ -587,22 +601,21 @@ fn expand_one(
                 next_effect,
             );
         }
-        SideEffectKind::Pending(PendingSoac::Scatter {
-            func,
+        SideEffectKind::Soac(EgirSoac::Hist {
+            body,
             input_array_types,
             input_elem_types,
-            capture_count,
             index_type,
             value_type,
             dest_elem_type,
+            update_policy: _,
             space,
         }) => {
             // Operands: [dest_view, inputs.., captures..].
             let dest_view = se.operand_nodes[0];
             let n_inputs = input_array_types.len();
             let input_nids = &se.operand_nodes[1..1 + n_inputs];
-            let captures: Vec<NodeId> =
-                se.operand_nodes[1 + n_inputs..1 + n_inputs + capture_count].to_vec();
+            let captures = body.captures.clone();
             let read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)> = input_nids
                 .iter()
                 .zip(input_array_types.iter())
@@ -615,7 +628,7 @@ fn expand_one(
             let scatter = ScatterLoop {
                 dest_view,
                 dest_elem_ty: dest_elem_type.clone(),
-                func: func.clone(),
+                func: regions.name(body.region).to_string(),
                 read_inputs,
                 captures,
                 index_type: index_type.clone(),
@@ -623,20 +636,20 @@ fn expand_one(
                 len_input,
                 result_node: result_nid,
             };
-            if space.is_some() {
-                build_parallel_scatter(graph, control_headers, bid, idx, scatter, next_effect);
-            } else {
-                build_scatter_loop(graph, control_headers, bid, idx, scatter, next_effect);
-            }
+            // Ordered overwrite is non-commutative when indices conflict.
+            // Preserve source order until a future update policy proves a
+            // conflict-safe parallel implementation.
+            let _semantic_space = space;
+            build_scatter_loop(graph, control_headers, bid, idx, scatter, next_effect);
         }
-        SideEffectKind::Pending(PendingSoac::Seg {
+        SideEffectKind::Soac(EgirSoac::Seg {
+            space,
             kind: SegOpKind::SegMap,
-            map_funcs,
+            map_bodies,
             input_array_types,
             input_elem_types,
             map_output_elem_types,
             map_input_indices,
-            map_capture_counts,
             map_destinations,
             acc_destinations,
             ..
@@ -646,12 +659,11 @@ fn expand_one(
             assert!(acc_destinations.is_empty(), "SegMap has no accumulators");
             let n_inputs = input_array_types.len();
             let input_nids: Vec<NodeId> = se.operand_nodes[..n_inputs].to_vec();
-            let mut cursor = n_inputs;
-            let mut map_captures = Vec::with_capacity(map_capture_counts.len());
-            for count in map_capture_counts {
-                map_captures.push(se.operand_nodes[cursor..cursor + *count].to_vec());
-                cursor += *count;
-            }
+            let cursor = n_inputs + map_bodies.iter().map(|body| body.captures.len()).sum::<usize>();
+            let map_captures: Vec<Vec<NodeId>> =
+                map_bodies.iter().map(|body| body.captures.clone()).collect();
+            let map_funcs: Vec<String> =
+                map_bodies.iter().map(|body| regions.name(body.region).to_string()).collect();
             let output_views = if map_destinations.iter().all(|dest| *dest == SoacDestination::InputBuffer)
             {
                 vec![input_nids[0]; map_funcs.len()]
@@ -676,6 +688,7 @@ fn expand_one(
                 bid,
                 idx,
                 ScremaMapsIntoLoop {
+                    space: space.clone(),
                     len_input,
                     read_inputs,
                     func_input_indices: map_input_indices.clone(),
@@ -867,6 +880,7 @@ where
 /// writes every mapped output field to its corresponding output view —
 /// no loop, no phi.
 struct ScremaMapsIntoLoop {
+    space: crate::egir::types::SegSpace,
     len_input: (NodeId, Type<TypeName>),
     read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)>,
     /// Which `read_inputs` each lane consumes: `func_input_indices[k]` lists the
@@ -925,7 +939,7 @@ fn build_parallel_maps(
         smallvec![tid_nid],
         i32_ty.clone(),
     );
-    let len_nid = emit_length(graph, spec.len_input.0, &spec.len_input.1, &i32_ty);
+    let len_nid = emit_seg_space_len(graph, &spec.space, &spec.len_input, &i32_ty);
     let cond_nid = graph.intern_pure(PureOp::BinOp("<".into()), smallvec![i_nid, len_nid], bool_ty);
 
     graph.skeleton.blocks[bid].term = SkeletonTerminator::CondBranch {
@@ -982,6 +996,42 @@ fn build_parallel_maps(
         target: after,
         args: vec![],
     };
+}
+
+fn emit_seg_space_len(
+    graph: &mut EGraph,
+    space: &crate::egir::types::SegSpace,
+    fallback: &(NodeId, Type<TypeName>),
+    i32_ty: &Type<TypeName>,
+) -> NodeId {
+    use crate::egir::types::SegExtent;
+
+    let mut dimensions = Vec::with_capacity(space.dims.len());
+    for extent in &space.dims {
+        let dimension = match extent {
+            SegExtent::Fixed(count) => graph.intern_pure(
+                PureOp::Int(count.to_string()),
+                smallvec![],
+                i32_ty.clone(),
+            ),
+            SegExtent::PushConstant { node, .. } | SegExtent::Value(node) => *node,
+            SegExtent::ResourceLength { node, .. } => {
+                let ty = graph.types[node].clone();
+                emit_length(graph, *node, &ty, i32_ty)
+            }
+        };
+        dimensions.push(dimension);
+    }
+    let Some(first) = dimensions.first().copied() else {
+        return emit_length(graph, fallback.0, &fallback.1, i32_ty);
+    };
+    dimensions.into_iter().skip(1).fold(first, |product, dimension| {
+        graph.intern_pure(
+            PureOp::BinOp("*".into()),
+            smallvec![product, dimension],
+            i32_ty.clone(),
+        )
+    })
 }
 
 /// Scan: `new_acc = func(acc, elem, ...caps); out[i] = new_acc` per iteration.
@@ -1350,6 +1400,7 @@ fn build_scatter_loop(
     );
 }
 
+#[allow(dead_code)]
 fn build_parallel_scatter(
     graph: &mut EGraph,
     control_headers: &mut LookupMap<BlockId, ControlHeader>,

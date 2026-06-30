@@ -10,7 +10,9 @@ use std::collections::{HashMap, HashSet};
 
 use crate::egir::graph_ops;
 use crate::egir::program::EgirEntry;
-use crate::egir::types::{ENode, PendingSoac, PureOp, SideEffectKind};
+use crate::egir::types::{
+    EgirSoac, SegExtent, SegPlacement, SegResourceAccessKind, SideEffectKind,
+};
 use crate::pipeline_descriptor::{
     Binding, ComputePipeline, ComputeStage, DispatchLen, DispatchSize, Pipeline, PipelineDescriptor,
 };
@@ -90,6 +92,10 @@ impl ResourceAccess {
 }
 
 impl KernelSchedule {
+    pub fn phases(&self) -> impl Iterator<Item = &KernelPhase> {
+        self.pipelines.iter().flat_map(|pipeline| pipeline.phases.iter())
+    }
+
     /// Seed a schedule from the source-level descriptor.  At this point every
     /// compute pipeline contains its original entry stage; later lowerings add
     /// phases to this graph without touching the descriptor.
@@ -415,9 +421,38 @@ fn phase_from_entry(entry: &EgirEntry, fallback: KernelDomain) -> KernelPhase {
         entry_point: entry.name.clone(),
         workgroup_size: entry_workgroup(entry),
         domain: segmented_domain(entry).unwrap_or(fallback),
-        resources: entry_resources(entry),
+        resources: segmented_resources(entry).unwrap_or_else(|| entry_resources(entry)),
         dependencies: Vec::new(),
     }
+}
+
+fn segmented_resources(entry: &EgirEntry) -> Option<Vec<ScheduledResource>> {
+    for (_, block) in &entry.graph.skeleton.blocks {
+        for side_effect in &block.side_effects {
+            let SideEffectKind::Soac(EgirSoac::Seg {
+                placement: SegPlacement::Kernel,
+                resources,
+                ..
+            }) = &side_effect.kind
+            else {
+                continue;
+            };
+            return Some(
+                resources
+                    .iter()
+                    .map(|resource| ScheduledResource {
+                        binding: resource.binding,
+                        access: match resource.access {
+                            SegResourceAccessKind::Read => ResourceAccess::Read,
+                            SegResourceAccessKind::Write => ResourceAccess::Write,
+                            SegResourceAccessKind::ReadWrite => ResourceAccess::ReadWrite,
+                        },
+                    })
+                    .collect(),
+            );
+        }
+    }
+    None
 }
 
 fn entry_workgroup(entry: &EgirEntry) -> (u32, u32, u32) {
@@ -437,37 +472,41 @@ fn domain_from_dispatch(dispatch: &DispatchSize) -> KernelDomain {
 fn segmented_domain(entry: &EgirEntry) -> Option<KernelDomain> {
     for (_, block) in &entry.graph.skeleton.blocks {
         for side_effect in &block.side_effects {
-            let SideEffectKind::Pending(PendingSoac::Seg { input_elem_types, .. }) = &side_effect.kind
+            let SideEffectKind::Soac(EgirSoac::Seg {
+                space,
+                placement: SegPlacement::Kernel,
+                ..
+            }) = &side_effect.kind
             else {
                 continue;
             };
-            let primary = *side_effect.operand_nodes.first()?;
-            if let Some(binding) = graph_ops::extract_storage_view_source(&entry.graph, primary) {
-                let elem_bytes = crate::ssa::layout::type_byte_size(input_elem_types.first()?)? as u32;
-                return Some(KernelDomain::Elements(DispatchLen::InputBinding {
-                    set: binding.set,
-                    binding: binding.binding,
-                    elem_bytes,
-                }));
-            }
-            let (_, len, _) = graph_ops::extract_array_range_operands(&entry.graph, primary)?;
-            return dispatch_len_from_node(entry, len).map(KernelDomain::Elements);
+            return domain_from_space(space);
         }
     }
     None
 }
 
-fn dispatch_len_from_node(entry: &EgirEntry, node: crate::egir::types::NodeId) -> Option<DispatchLen> {
-    match &entry.graph.nodes[node] {
-        ENode::Pure {
-            op: PureOp::Int(value) | PureOp::Uint(value),
+fn domain_from_space(space: &crate::egir::types::SegSpace) -> Option<KernelDomain> {
+    if space.dims.iter().all(|extent| matches!(extent, SegExtent::Fixed(_))) {
+        let count = space.dims.iter().try_fold(1u32, |product, extent| match extent {
+            SegExtent::Fixed(n) => product.checked_mul(*n),
+            _ => None,
+        })?;
+        return Some(KernelDomain::Elements(DispatchLen::Fixed { count }));
+    }
+    match space.dims.as_slice() {
+        [SegExtent::PushConstant { offset, .. }] => {
+            Some(KernelDomain::Elements(DispatchLen::PushConstant { offset: *offset }))
+        }
+        [SegExtent::ResourceLength {
+            binding,
+            elem_bytes,
             ..
-        } => value.parse().ok().map(|count| DispatchLen::Fixed { count }),
-        ENode::FuncParam { index } => entry
-            .inputs
-            .get(*index)
-            .and_then(|input| input.push_constant)
-            .map(|slot| DispatchLen::PushConstant { offset: slot.offset }),
+        }] => Some(KernelDomain::Elements(DispatchLen::InputBinding {
+            set: binding.set,
+            binding: binding.binding,
+            elem_bytes: *elem_bytes,
+        })),
         _ => None,
     }
 }

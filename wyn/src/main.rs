@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 use thiserror::Error;
-use wyn_core::Compiler;
+use wyn_core::{CodegenTarget, Compiler, LoweringProfile, SchedulePolicy};
 
 /// Target output format
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -338,11 +338,19 @@ fn compile_file(
     let tlc_with_bounds = time("infer_input_slice_bounds", verbose, || {
         tlc_reachable.infer_input_slice_bounds()
     });
-    let raw = time("to_egraph", verbose, || tlc_with_bounds.to_egraph())?;
-    let expanded = time("expand_soacs", verbose, || raw.expand_soacs());
-    let ssa = time("egir_passes_full", verbose, || {
-        expanded.materialize().optimize_skeleton().elaborate()
-    });
+    let allocated = time("to_egraph", verbose, || tlc_with_bounds.to_egraph())?;
+    let profile = LoweringProfile::new(
+        match target {
+            Target::Spirv => CodegenTarget::Spirv,
+            Target::Wgsl => CodegenTarget::Wgsl,
+        },
+        if single_stage {
+            SchedulePolicy::SingleStage
+        } else {
+            SchedulePolicy::Parallel
+        },
+    );
+    let ssa = time("egir_lower_to_ssa", verbose, || allocated.lower_to_ssa(profile))?;
 
     // Dump MIR if requested
     if let Some(ref path) = output_mir {

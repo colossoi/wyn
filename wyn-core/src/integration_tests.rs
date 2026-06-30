@@ -30,6 +30,108 @@ fn compile_to_fused_tlc(input: &str) -> crate::tlc::Program {
     crate::test_pipeline::compile_to_tlc_program(input)
 }
 
+#[test]
+fn semantic_segops_survive_optimization_and_logical_allocation() {
+    use crate::egir::types::{EgirSoac, SegExtent, SegOpKind, SideEffectKind};
+
+    let tlc = crate::compile_thru_tlc(
+        r#"
+#[compute]
+entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
+"#,
+    )
+    .expect("TLC");
+    let allocated = tlc
+        .infer_input_slice_bounds()
+        .to_egraph()
+        .expect("semantic EGIR allocation");
+    crate::egir::parallelize::verify_semantic(&allocated.inner).expect("complete semantic EGIR");
+    let seg = allocated
+        .inner
+        .entry_points
+        .iter()
+        .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
+        .find_map(|effect| match &effect.kind {
+            SideEffectKind::Soac(EgirSoac::Seg { space, kind, .. }) => Some((space, kind)),
+            _ => None,
+        })
+        .expect("SegRed remains present before target lowering");
+    assert!(matches!(seg.1, SegOpKind::SegRed { .. }));
+    assert!(matches!(seg.0.dims.as_slice(), [SegExtent::ResourceLength { .. }]));
+    assert!(
+        allocated.inner.resources.len() >= 2,
+        "input and output resources are planned logically"
+    );
+    assert!(allocated.semantic_ir().contains("SegRed"));
+    assert!(allocated.semantic_ir().contains("ResourceLength"));
+}
+
+#[test]
+fn terminal_schedule_and_descriptor_are_atomic_and_deterministic() {
+    let source = r#"
+#[compute]
+entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
+"#;
+    let allocated = crate::compile_thru_tlc(source)
+        .expect("TLC")
+        .infer_input_slice_bounds()
+        .to_egraph()
+        .expect("semantic allocation");
+    for pipeline in &allocated.inner.pipeline.pipelines {
+        if let crate::pipeline_descriptor::Pipeline::Compute(compute) = pipeline {
+            assert!(compute.bindings.is_empty(), "bindings publish only at terminal lowering");
+        }
+    }
+    let first = allocated
+        .lower_to_ssa(crate::LoweringProfile::PORTABLE)
+        .expect("terminal lowering");
+    let phases: Vec<_> = first.kernel_schedule.phases().collect();
+    assert!(phases.len() >= 2, "parallel reduction owns at least two phases");
+    assert!(phases.iter().skip(1).any(|phase| !phase.dependencies.is_empty()));
+    assert!(phases.iter().all(|phase| !phase.resources.is_empty()));
+
+    let second = crate::compile_thru_ssa(source).expect("second lowering");
+    assert_eq!(
+        serde_json::to_string(&first.pipeline).unwrap(),
+        serde_json::to_string(&second.pipeline).unwrap(),
+        "descriptor publication is deterministic"
+    );
+}
+
+#[test]
+fn single_stage_is_a_terminal_schedule_policy() {
+    let source = r#"
+#[compute]
+entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
+"#;
+    let tlc = crate::compile_thru_tlc(source).expect("TLC");
+    let allocated = tlc.infer_input_slice_bounds().to_egraph().expect("semantic allocation");
+    assert!(allocated.semantic_ir().contains("SegRed"));
+    let lowered = allocated
+        .lower_to_ssa(crate::LoweringProfile::new(
+            crate::CodegenTarget::Portable,
+            crate::SchedulePolicy::SingleStage,
+        ))
+        .expect("single-stage terminal lowering");
+    assert_eq!(lowered.kernel_schedule.phases().count(), 1);
+    assert!(!lowered.ssa.entry_points.iter().any(|entry| entry.name.contains("phase2")));
+}
+
+#[test]
+fn target_profiles_are_selected_before_ssa_lowering() {
+    let portable = crate::compile_thru_ssa(
+        "#[compute] entry e(xs: []i32) []i32 = map(|x: i32| x + 1, xs)",
+    )
+    .expect("portable SSA");
+    assert_eq!(portable.profile.target, crate::CodegenTarget::Portable);
+
+    let spirv = crate::compile_thru_spirv(
+        "#[compute] entry e(xs: []i32) []i32 = map(|x: i32| x + 1, xs)",
+    )
+    .expect("SPIR-V-targeted lowering");
+    assert!(!spirv.spirv.is_empty());
+}
+
 /// Assert that a compute `reduce`-over-`map`-of-range `src` parallelizes and
 /// that phase1's per-thread loop trip-count transitively depends on
 /// `thread_id` — i.e. each thread reduces only its *chunk* of the range.
@@ -4397,7 +4499,7 @@ entry filt_count(xs: []i32) i32 =
 /// Summing a filtered runtime-sized array — `reduce(+, 0, filter(p, xs))` over
 /// an entry-param view. `filter` yields a runtime-length scratch view; `reduce`
 /// consumes it like any reduce-over-view. (Was a gap: the static-literal form
-/// left an unexpanded `PendingSoac` panicking at `elaborate.rs`.)
+/// left an unexpanded `EgirSoac` panicking at `elaborate.rs`.)
 #[test]
 fn filter_into_reduce_compiles() {
     compile_to_spirv(
@@ -4975,7 +5077,7 @@ entry gen(xs: []i32) []i32 =
 /// `gen`'s body where `parallelize::make_scan_plan` fell back to the serial
 /// pipeline, and EGIR's `is_handleable_soac` rejected the resulting
 /// `Scan { destination: Fresh, input: View }` combination → unexpanded
-/// `PendingSoac` panic at `egir/elaborate.rs:314`. With the fix, top-level
+/// `EgirSoac` panic at `egir/elaborate.rs:314`. With the fix, top-level
 /// defs are filtered out of the predicate, the scan lifts into a gather
 /// pre-pass, and the rest of the pipeline handles it normally.
 #[test]

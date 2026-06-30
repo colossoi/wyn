@@ -23,7 +23,7 @@ use crate::BindingRef;
 
 use super::super::from_tlc::ConvertError;
 use super::super::graph_ops;
-use super::super::types::{EGraph, ENode, NodeId, PendingSoac, PureOp, SideEffectKind, SoacDestination};
+use super::super::types::{EGraph, EgirSoac, ENode, NodeId, PureOp, SideEffectKind, SoacDestination};
 
 #[cfg(test)]
 #[path = "dispatch_tests.rs"]
@@ -179,7 +179,7 @@ pub(crate) fn result_soac_is_consuming_scan(graph: &EGraph, result: NodeId) -> b
             for (_, block) in &graph.skeleton.blocks {
                 for se in &block.side_effects {
                     if se.result == Some(*screma_result) {
-                        if let SideEffectKind::Pending(PendingSoac::Screma {
+                        if let SideEffectKind::Soac(EgirSoac::Screma {
                             map_destinations,
                             accumulators,
                             acc_destinations,
@@ -227,13 +227,13 @@ pub(crate) fn result_soac_is_array_projection(graph: &EGraph, source: NodeId) ->
         for se in &block.side_effects {
             if se.result == Some(*screma_result) {
                 return match &se.kind {
-                    SideEffectKind::Pending(PendingSoac::Screma { map_destinations, .. })
+                    SideEffectKind::Soac(EgirSoac::Screma { map_destinations, .. })
                         if field_idx < map_destinations.len()
                             && map_destinations[field_idx] == SoacDestination::Fresh =>
                     {
                         Some((*screma_result, field_idx))
                     }
-                    SideEffectKind::Pending(PendingSoac::Screma {
+                    SideEffectKind::Soac(EgirSoac::Screma {
                         map_destinations,
                         accumulators,
                         acc_destinations,
@@ -286,10 +286,10 @@ pub(crate) fn retarget_array_projection(
                 continue;
             }
 
-            let SideEffectKind::Pending(PendingSoac::Screma {
+            let SideEffectKind::Soac(EgirSoac::Screma {
                 input_array_types,
                 accumulators,
-                map_capture_counts,
+                map_bodies,
                 map_destinations,
                 acc_destinations,
                 ..
@@ -302,11 +302,14 @@ pub(crate) fn retarget_array_projection(
                 );
             };
 
+            // Captures are explicit on each `SegBody`, so the operand prefix
+            // before the trailing output views is `inputs + init_accs +
+            // every region's capture list`.
             let base_len = input_array_types.len()
                 + accumulators.len()
-                + map_capture_counts.iter().sum::<usize>()
-                + accumulators.iter().map(|acc| acc.step_capture_count).sum::<usize>()
-                + accumulators.iter().map(|acc| acc.reduce_op_capture_count).sum::<usize>();
+                + map_bodies.iter().map(|body| body.captures.len()).sum::<usize>()
+                + accumulators.iter().map(|acc| acc.step.captures.len()).sum::<usize>()
+                + accumulators.iter().map(|acc| acc.combine.captures.len()).sum::<usize>();
             let mut cursor = base_len;
             let mut map_views = Vec::with_capacity(map_destinations.len());
             for dest in map_destinations.iter() {
@@ -410,7 +413,7 @@ pub(crate) fn rewrite_sibling_index_consumers(
                     continue;
                 }
                 match &se.kind {
-                    SideEffectKind::Pending(PendingSoac::Screma {
+                    SideEffectKind::Soac(EgirSoac::Screma {
                         input_array_types, ..
                     }) => {
                         // Screma operand layout:
@@ -434,7 +437,7 @@ pub(crate) fn rewrite_sibling_index_consumers(
                             input_array_types.len()
                         )));
                     }
-                    SideEffectKind::Pending(PendingSoac::Scatter {
+                    SideEffectKind::Soac(EgirSoac::Hist {
                         input_array_types, ..
                     }) => {
                         // Scatter operand layout:
@@ -481,7 +484,7 @@ pub(crate) fn rewrite_sibling_index_consumers(
         let se = &mut blk.side_effects[se_idx];
         se.operand_nodes[op_idx] = view;
         match &mut se.kind {
-            SideEffectKind::Pending(PendingSoac::Screma {
+            SideEffectKind::Soac(EgirSoac::Screma {
                 input_array_types,
                 input_elem_types,
                 ..
@@ -497,7 +500,7 @@ pub(crate) fn rewrite_sibling_index_consumers(
                 );
                 input_array_types[k] = view_arr_ty.clone();
             }
-            SideEffectKind::Pending(PendingSoac::Scatter {
+            SideEffectKind::Soac(EgirSoac::Hist {
                 input_array_types,
                 input_elem_types,
                 ..
@@ -514,7 +517,7 @@ pub(crate) fn rewrite_sibling_index_consumers(
                 input_array_types[k] = view_arr_ty.clone();
             }
             _ => unreachable!(
-                "classifier above only queues PendingSoac::Screma or PendingSoac::Scatter input-region hits"
+                "classifier above only queues EgirSoac::Screma or EgirSoac::Hist input-region hits"
             ),
         }
     }
@@ -584,7 +587,7 @@ pub(crate) fn reject_sibling_consumers(
     Ok(())
 }
 
-/// If `source` is produced by a runtime `filter` (a `PendingSoac::Filter` with
+/// If `source` is produced by a runtime `filter` (a `EgirSoac::Filter` with
 /// `scratch_out = Some(_)`), retarget it so its serial compaction writes the
 /// entry's output buffer directly and skip the normal DPS store. Returns
 /// `false` (no retarget) for a static Bounded filter or any non-filter source —
@@ -600,8 +603,6 @@ pub fn retarget_filter_output(
     storage_bindings: &mut [crate::interface::StorageBindingDecl],
     output: &mut crate::ssa::types::EntryOutput,
     source: NodeId,
-    pipeline: &mut crate::pipeline_descriptor::PipelineDescriptor,
-    entry_name: &str,
 ) -> Result<bool, ConvertError> {
     use crate::pipeline_descriptor::BufferLen;
     let out_binding = output.storage_binding.expect("compute output has a storage binding");
@@ -613,7 +614,7 @@ pub fn retarget_filter_output(
             if se.result != Some(source) {
                 continue;
             }
-            if let SideEffectKind::Pending(PendingSoac::Filter {
+            if let SideEffectKind::Soac(EgirSoac::Filter {
                 scratch_out,
                 len_out,
                 input_array_type,
@@ -663,43 +664,6 @@ pub fn retarget_filter_output(
             src_elem_bytes: elem_bytes,
         })
     });
-    output.length = out_len.clone();
-
-    // `publish_implicit_bindings` already ran (in `from_tlc`), so patch the
-    // already-published descriptor bindings to match: the output buffer's
-    // host-facing length, and the repurposed length cell.
-    if let Some(out_len) = out_len {
-        set_pipeline_binding_length(pipeline, entry_name, out_binding, out_len);
-    }
-    set_pipeline_binding_length(pipeline, entry_name, scratch, len_cell_len);
+    output.length = out_len;
     Ok(true)
-}
-
-/// Update the host descriptor's `length` for the storage binding `br` in the
-/// pipeline owning `entry_name`. A no-op if the binding isn't found.
-fn set_pipeline_binding_length(
-    pipeline: &mut crate::pipeline_descriptor::PipelineDescriptor,
-    entry_name: &str,
-    br: BindingRef,
-    len: crate::pipeline_descriptor::BufferLen,
-) {
-    use crate::pipeline_descriptor::{Binding, Pipeline};
-    let bindings = pipeline.pipelines.iter_mut().find_map(|p| match p {
-        Pipeline::Compute(cp) if cp.stages.iter().any(|s| s.entry_point == entry_name) => {
-            Some(&mut cp.bindings)
-        }
-        _ => None,
-    });
-    let Some(bindings) = bindings else { return };
-    for b in bindings.iter_mut() {
-        if let Binding::StorageBuffer {
-            set, binding, length, ..
-        } = b
-        {
-            if *set == br.set && *binding == br.binding {
-                *length = Some(len);
-                return;
-            }
-        }
-    }
 }

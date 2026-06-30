@@ -15,7 +15,7 @@ use crate::BindingRef;
 
 use super::graph_ops;
 use super::program::EgirEntry;
-use super::types::{EGraph, NodeId, PendingSoac, SkeletonTerminator, SoacDestination};
+use super::types::{EGraph, EgirSoac, NodeId, SkeletonTerminator, SoacDestination};
 use crate::ssa::types::{EntryInput, EntryOutput};
 
 /// Build a synthesized `EgirEntry` programmatically. Mirrors the
@@ -142,7 +142,7 @@ impl EntryBuilder {
         graph_ops::intern_storage_view(&mut self.graph, binding, view_ty, span)
     }
 
-    /// Emit a `PendingSoac::Screma { 0 maps, 1 Scan acc, OutputView }` —
+    /// Emit a `EgirSoac::Screma { 0 maps, 1 Scan acc, OutputView }` —
     /// the consolidated shape used by `synthesize_phase2_scan` for the
     /// sequential block-sum scan. Operand layout:
     /// `[input_array, init, ...captures, output_view]`. Result is a
@@ -150,7 +150,7 @@ impl EntryBuilder {
     /// tuple result).
     pub fn emit_pending_scan_into(
         &mut self,
-        func: String,
+        region: super::types::RegionId,
         input_array_nid: NodeId,
         input_array_ty: Type<TypeName>,
         input_elem_ty: Type<TypeName>,
@@ -159,7 +159,10 @@ impl EntryBuilder {
         output_view_nid: NodeId,
         output_view_ty: Type<TypeName>,
     ) -> NodeId {
-        let capture_count = captures.len();
+        let step_body = super::types::SegBody {
+            region,
+            captures: captures.clone(),
+        };
         let mut operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![input_array_nid, init_nid];
         operands.extend(captures.into_iter());
         operands.push(output_view_nid);
@@ -168,22 +171,22 @@ impl EntryBuilder {
         graph_ops::emit_pending_soac(
             &mut self.graph,
             self.current_block,
-            PendingSoac::Screma {
-                map_funcs: vec![],
-                accumulators: vec![super::types::PendingScremaAccumulator {
+            EgirSoac::Screma {
+                map_bodies: vec![],
+                accumulators: vec![super::types::ScremaOperator {
                     kind: crate::tlc::ScremaAccumulator::Scan,
-                    // A serial into-scan is never re-parallelized, so
-                    // step_func and reduce_op_func are the same.
-                    step_func: func.clone(),
-                    reduce_op_func: func,
-                    step_capture_count: capture_count,
-                    reduce_op_capture_count: 0,
+                    // A serial into-scan is never re-parallelized, so the step
+                    // and combine reference the same region.
+                    step: step_body,
+                    combine: super::types::SegBody {
+                        region,
+                        captures: vec![],
+                    },
                 }],
                 input_array_types: vec![input_array_ty],
                 input_elem_types: vec![input_elem_ty],
                 map_output_elem_types: vec![],
                 map_input_indices: vec![],
-                map_capture_counts: vec![],
                 map_destinations: vec![],
                 acc_destinations: vec![SoacDestination::OutputView],
             },
@@ -194,14 +197,14 @@ impl EntryBuilder {
         )
     }
 
-    /// Emit a `PendingSoac::Screma { 1 map (OutputView), 0 accs }` — the
+    /// Emit a `EgirSoac::Screma { 1 map (OutputView), 0 accs }` — the
     /// consolidated shape used by `synthesize_phase3_scan` for the
     /// chunked apply-offsets pass. Operand layout:
     /// `[input_array, ...captures, output_view]`. Result is a 1-tuple
     /// of the output_view's type.
     pub fn emit_pending_map_into(
         &mut self,
-        func: String,
+        region: super::types::RegionId,
         input_array_nid: NodeId,
         input_array_ty: Type<TypeName>,
         input_elem_ty: Type<TypeName>,
@@ -210,7 +213,10 @@ impl EntryBuilder {
         output_view_nid: NodeId,
         output_view_ty: Type<TypeName>,
     ) -> NodeId {
-        let capture_count = captures.len();
+        let map_body = super::types::SegBody {
+            region,
+            captures: captures.clone(),
+        };
         let mut operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![input_array_nid];
         operands.extend(captures.into_iter());
         operands.push(output_view_nid);
@@ -219,14 +225,13 @@ impl EntryBuilder {
         graph_ops::emit_pending_soac(
             &mut self.graph,
             self.current_block,
-            PendingSoac::Screma {
-                map_funcs: vec![func],
+            EgirSoac::Screma {
+                map_bodies: vec![map_body],
                 accumulators: vec![],
                 input_array_types: vec![input_array_ty],
                 input_elem_types: vec![input_elem_ty],
                 map_output_elem_types: vec![output_elem_ty],
                 map_input_indices: vec![vec![0]],
-                map_capture_counts: vec![capture_count],
                 map_destinations: vec![SoacDestination::OutputView],
                 acc_destinations: vec![],
             },

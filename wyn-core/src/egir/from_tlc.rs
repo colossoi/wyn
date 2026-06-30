@@ -13,7 +13,6 @@ use crate::tlc::SoacBody;
 use crate::tlc::VarRef;
 use crate::{LookupMap, LookupSet};
 
-use super::publish::PipelineDescriptorPublish;
 use super::types::EffectToken;
 use crate::ast::{Span, TypeName};
 use crate::binding_layout::{
@@ -35,6 +34,7 @@ use polytype::Type;
 use smallvec::{smallvec, SmallVec};
 
 use super::program::{EgirEntry, EgirFunc, EgirInner};
+use super::publish::PipelineDescriptorPublish;
 use super::types::*;
 use crate::pipeline_descriptor::{BufferLen, PipelineDescriptor};
 
@@ -101,6 +101,7 @@ struct GlobalContext<'a> {
     top_level: &'a LookupMap<SymbolId, &'a TlcDef>,
     constants_by_name: &'a LookupMap<String, SymbolId>,
     symbols: &'a SymbolTable,
+    region_interner: &'a std::cell::RefCell<crate::egir::program::RegionInterner>,
 }
 
 impl<'a> GlobalContext<'a> {
@@ -115,6 +116,7 @@ impl<'a> GlobalContext<'a> {
             self.symbols,
             pure_constants.clone(),
             binding_ids,
+            self.region_interner,
         )
     }
 }
@@ -129,7 +131,7 @@ impl<'a> GlobalContext<'a> {
 /// elaborate`).
 pub fn run(
     program: &TlcProgram,
-    mut pipeline: PipelineDescriptor,
+    pipeline: PipelineDescriptor,
     recognitions: &LookupMap<String, crate::tlc::parallelize::EntryRecognition>,
     input_slice_bounds: &crate::tlc::input_slice_bounds::ProgramBounds,
     binding_ids: &mut crate::IdSource<u32>,
@@ -139,10 +141,15 @@ pub fn run(
 
     let constants_by_name = program.value_defs_by_name();
 
+    // Region interner shared by every converter, then handed to `EgirInner` so
+    // the function arena keys agree with the SegBody indices built here.
+    let region_interner = std::cell::RefCell::new(crate::egir::program::RegionInterner::default());
+
     let ctx = GlobalContext {
         top_level: &top_level,
         constants_by_name: &constants_by_name,
         symbols,
+        region_interner: &region_interner,
     };
 
     // Phase 1: detect pure constants. We elaborate each arity-0 def's body
@@ -236,22 +243,15 @@ pub fn run(
         }
     }
 
-    // Publish per-entry state from EGIR into the host-runtime-shared
-    // `PipelineDescriptor` (see `egir::publish`):
-    //   - implicit bindings the compiler invented to communicate
-    //     between auto-generated entry points / phases, plus
-    //     descriptor-level binding declarations routed from each
-    //     entry's `#[storage]`/`#[uniform]`/etc. attributes
-    //   - `#[location(N)]` graphics IO on vertex/fragment entries
-    pipeline.publish_implicit_bindings(&entry_points);
-    pipeline.publish_graphics_io(&entry_points);
-
+    // Converters are done borrowing the interner; reclaim it for the arena.
+    drop(ctx);
     Ok(EgirInner::new(
         functions,
         externs,
         entry_points,
         constants,
         pipeline,
+        region_interner.into_inner(),
     ))
 }
 
@@ -678,6 +678,9 @@ struct Converter<'a, 'b> {
     /// `EgirEntry.storage_bindings` at construction, where `publish.rs`
     /// surfaces them to the host descriptor as `Intermediate`s.
     extra_storage_bindings: Vec<crate::interface::StorageBindingDecl>,
+    /// Program-wide region interner, shared across every converter so SegBody
+    /// region indices agree with the final function arena.
+    region_interner: &'a std::cell::RefCell<crate::egir::program::RegionInterner>,
 }
 
 impl<'a, 'b> Converter<'a, 'b> {
@@ -687,6 +690,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         symbols: &'a SymbolTable,
         pure_constants: LookupSet<String>,
         binding_ids: &'b mut crate::IdSource<u32>,
+        region_interner: &'a std::cell::RefCell<crate::egir::program::RegionInterner>,
     ) -> Self {
         let graph = EGraph::new();
         let entry = graph.skeleton.entry;
@@ -705,7 +709,13 @@ impl<'a, 'b> Converter<'a, 'b> {
             slot_sources_accum: Vec::new(),
             binding_ids,
             extra_storage_bindings: Vec::new(),
+            region_interner,
         }
+    }
+
+    /// Resolve a callable name to its region index, interning it on first use.
+    fn region(&self, name: impl AsRef<str>) -> RegionId {
+        self.region_interner.borrow_mut().intern(name)
     }
 
     /// Reserve a fresh auto-storage binding for a compiler-introduced scratch
@@ -777,8 +787,9 @@ impl<'a, 'b> Converter<'a, 'b> {
         params: &[(Type<TypeName>, String)],
         return_ty: Type<TypeName>,
     ) -> Option<FuncBody> {
+        let region_interner = self.region_interner;
         let (mut graph, mut control_headers) = self.into_graph_parts();
-        super::soac_expand::run_one_body(&mut graph, &mut control_headers);
+        super::soac_expand::run_one_body(&mut graph, &mut control_headers, &region_interner.borrow());
         let aliases = super::skel_opt::run_one_body(&mut graph);
         let skel_domtree = super::domtree::DomTree::build(&super::domtree::SkeletonCfgView {
             skeleton: &graph.skeleton,
@@ -1748,7 +1759,7 @@ impl<'a, 'b> Converter<'a, 'b> {
     /// result NodeId that `soac_expand` will rebind during expansion.
     fn emit_soac(
         &mut self,
-        soac: PendingSoac,
+        soac: EgirSoac,
         operands: SmallVec<[NodeId; 4]>,
         ty: Type<TypeName>,
     ) -> NodeId {
@@ -1812,7 +1823,6 @@ impl<'a, 'b> Converter<'a, 'b> {
         // array type that survives because the consumer-side Project
         // takes the TLC logical type even when the runtime tuple
         // carries a View.
-        let capture_count = capture_nids.len();
         // A non-in-place `map` is shape-preserving — inherit the input's
         // representation when `result_ty` carries an unresolved `Skolem` size
         // (see `shape_preserving_result_ty`); otherwise keep `result_ty`.
@@ -1828,14 +1838,16 @@ impl<'a, 'b> Converter<'a, 'b> {
         // Singleton map: its one lane reads every input.
         let map_input_indices = vec![(0..input_arr_types.len()).collect::<Vec<usize>>()];
         let screma_nid = self.emit_soac(
-            PendingSoac::Screma {
-                map_funcs: vec![f_name],
+            EgirSoac::Screma {
+                map_bodies: vec![SegBody {
+                    region: self.region(f_name),
+                    captures: capture_nids.clone(),
+                }],
                 accumulators: vec![],
                 input_array_types: input_arr_types,
                 input_elem_types,
                 map_output_elem_types: vec![output_elem_ty],
                 map_input_indices,
-                map_capture_counts: vec![capture_count],
                 map_destinations: vec![destination],
                 acc_destinations: vec![],
             },
@@ -1845,7 +1857,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         Ok(self.intern_pure(PureOp::Project { index: 0 }, smallvec![screma_nid], project_ty))
     }
 
-    /// `scatter(dest, indices, values)` → a side-effecting `PendingSoac::Scatter`.
+    /// `scatter(dest, indices, values)` → a side-effecting `EgirSoac::Hist`.
     /// `dest` is a `#[storage]` buffer param whose `StorageView` was already
     /// interned at param setup and stored in `self.locals`; the writes target
     /// that view. The result node is discarded (rebound during expansion).
@@ -1898,14 +1910,17 @@ impl<'a, 'b> Converter<'a, 'b> {
         operands.extend_from_slice(&capture_nids);
 
         Ok(self.emit_soac(
-            PendingSoac::Scatter {
-                func,
+            EgirSoac::Hist {
+                body: SegBody {
+                    region: self.region(func),
+                    captures: capture_nids.clone(),
+                },
                 input_array_types,
                 input_elem_types,
-                capture_count: capture_nids.len(),
                 index_type,
                 value_type,
                 dest_elem_type: dest_elem_ty,
+                update_policy: HistUpdatePolicy::OrderedOverwrite,
                 space: None,
             },
             operands,
@@ -1931,25 +1946,27 @@ impl<'a, 'b> Converter<'a, 'b> {
         // Emit as Screma { 0 maps, 1 Reduce accumulator } + project field
         // 0. Reduce's `op` is both the step (per-element) and the
         // reduce_op (phase 2 combiner).
-        let capture_count = capture_nids.len();
         let mut operands: SmallVec<[NodeId; 4]> = smallvec![arr_nid, init_nid];
         operands.extend(capture_nids.iter().copied());
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![result_ty.clone()]);
         let screma_nid = self.emit_soac(
-            PendingSoac::Screma {
-                map_funcs: vec![],
-                accumulators: vec![super::types::PendingScremaAccumulator {
+            EgirSoac::Screma {
+                map_bodies: vec![],
+                accumulators: vec![super::types::ScremaOperator {
                     kind: crate::tlc::ScremaAccumulator::Reduce,
-                    step_func: op_name.clone(),
-                    reduce_op_func: op_name,
-                    step_capture_count: capture_count,
-                    reduce_op_capture_count: 0,
+                    step: SegBody {
+                        region: self.region(op_name.clone()),
+                        captures: capture_nids.clone(),
+                    },
+                    combine: SegBody {
+                        region: self.region(op_name),
+                        captures: vec![],
+                    },
                 }],
                 input_array_types: vec![arr_ty],
                 input_elem_types: vec![elem_ty],
                 map_output_elem_types: vec![],
                 map_input_indices: vec![],
-                map_capture_counts: vec![],
                 map_destinations: vec![],
                 acc_destinations: vec![SoacDestination::Fresh],
             },
@@ -2033,12 +2050,16 @@ impl<'a, 'b> Converter<'a, 'b> {
                 .map(|(_, _, t)| self.convert_term(t))
                 .collect::<Result<_, _>>()?;
             let init_nid = self.convert_term(&acc.ne)?;
-            pending_accs.push(super::types::PendingScremaAccumulator {
+            pending_accs.push(super::types::ScremaOperator {
                 kind: acc.kind,
-                step_func,
-                reduce_op_func,
-                step_capture_count: step_caps.len(),
-                reduce_op_capture_count: reduce_op_caps.len(),
+                step: SegBody {
+                    region: self.region(step_func),
+                    captures: step_caps.clone(),
+                },
+                combine: SegBody {
+                    region: self.region(reduce_op_func),
+                    captures: reduce_op_caps.clone(),
+                },
             });
             acc_init_nids.push(init_nid);
             acc_step_capture_nids.push(step_caps);
@@ -2084,14 +2105,20 @@ impl<'a, 'b> Converter<'a, 'b> {
         }
 
         Ok(self.emit_soac(
-            PendingSoac::Screma {
-                map_funcs,
+            EgirSoac::Screma {
+                map_bodies: map_funcs
+                    .into_iter()
+                    .zip(map_capture_nids.iter())
+                    .map(|(name, captures)| SegBody {
+                        region: self.region(name),
+                        captures: captures.clone(),
+                    })
+                    .collect(),
                 accumulators: pending_accs,
                 input_array_types: input_arr_types,
                 input_elem_types,
                 map_output_elem_types,
                 map_input_indices: lanes.iter().map(|lane| lane.input_indices.clone()).collect(),
-                map_capture_counts: map_capture_nids.iter().map(Vec::len).collect(),
                 map_destinations: vec![SoacDestination::Fresh; lanes.len()],
                 acc_destinations: vec![SoacDestination::Fresh; accumulators.len()],
             },
@@ -2137,7 +2164,6 @@ impl<'a, 'b> Converter<'a, 'b> {
         // Mirror of the `convert_soac_map` guard; without it
         // `scan(op, ne, filter(p, xs))` leaks the filter's Skolem size into the
         // backend.
-        let capture_count = capture_nids.len();
         let project_ty = if matches!(destination, SoacDestination::InputBuffer) {
             arr_ty.clone()
         } else {
@@ -2148,20 +2174,23 @@ impl<'a, 'b> Converter<'a, 'b> {
         };
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![project_ty.clone()]);
         let screma_nid = self.emit_soac(
-            PendingSoac::Screma {
-                map_funcs: vec![],
-                accumulators: vec![super::types::PendingScremaAccumulator {
+            EgirSoac::Screma {
+                map_bodies: vec![],
+                accumulators: vec![super::types::ScremaOperator {
                     kind: crate::tlc::ScremaAccumulator::Scan,
-                    step_func: op_name,
-                    reduce_op_func: reduce_name,
-                    step_capture_count: capture_count,
-                    reduce_op_capture_count: 0,
+                    step: SegBody {
+                        region: self.region(op_name),
+                        captures: capture_nids.clone(),
+                    },
+                    combine: SegBody {
+                        region: self.region(reduce_name),
+                        captures: vec![],
+                    },
                 }],
                 input_array_types: vec![arr_ty],
                 input_elem_types: vec![input_elem_ty],
                 map_output_elem_types: vec![],
                 map_input_indices: vec![],
-                map_capture_counts: vec![],
                 map_destinations: vec![],
                 acc_destinations: vec![destination],
             },
@@ -2190,7 +2219,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         // each input element before the predicate and keeps `f(x)`. The output
         // element type is `f`'s return type; the input element type stays the
         // array's. `f`'s captures lead the operand list (before the predicate's).
-        let (map_func, map_capture_nids, output_elem_ty): (Option<String>, Vec<NodeId>, Type<TypeName>) =
+        let (map_body, map_capture_nids, output_elem_ty): (Option<SegBody>, Vec<NodeId>, Type<TypeName>) =
             match map_lam {
                 Some(f) => {
                     let name = self.lambda_fn_name(&f.lam)?;
@@ -2199,11 +2228,21 @@ impl<'a, 'b> Converter<'a, 'b> {
                         .iter()
                         .map(|(_, _, t)| self.convert_term(t))
                         .collect::<Result<_, _>>()?;
-                    (Some(name), caps, f.lam.ret_ty.clone())
+                    (
+                        Some(SegBody {
+                            region: self.region(name),
+                            captures: caps.clone(),
+                        }),
+                        caps,
+                        f.lam.ret_ty.clone(),
+                    )
                 }
                 None => (None, Vec::new(), elem_ty.clone()),
             };
-        let map_capture_count = map_capture_nids.len();
+        let pred_body = SegBody {
+            region: self.region(pred_name),
+            captures: capture_nids.clone(),
+        };
 
         let mut operands: SmallVec<[NodeId; 4]> = smallvec![arr_nid];
         operands.extend(map_capture_nids.iter().copied());
@@ -2231,11 +2270,11 @@ impl<'a, 'b> Converter<'a, 'b> {
                 ],
             );
             return Ok(self.emit_soac(
-                PendingSoac::Filter {
-                    map_func,
-                    map_capture_count,
+                EgirSoac::Filter {
+                    space: None,
+                    map_body,
                     output_elem_type: output_elem_ty,
-                    pred_func: pred_name,
+                    pred_body,
                     input_array_type: arr_ty,
                     input_elem_type: elem_ty,
                     output_capacity_size: size,
@@ -2293,11 +2332,11 @@ impl<'a, 'b> Converter<'a, 'b> {
         let view_result_ty =
             crate::types::view_array_of(&output_elem_ty, crate::types::region_tag(scratch_out));
         Ok(self.emit_soac(
-            PendingSoac::Filter {
-                map_func,
-                map_capture_count,
+            EgirSoac::Filter {
+                space: None,
+                map_body,
                 output_elem_type: output_elem_ty,
-                pred_func: pred_name,
+                pred_body,
                 input_array_type: arr_ty,
                 input_elem_type: elem_ty,
                 output_capacity_size: size,

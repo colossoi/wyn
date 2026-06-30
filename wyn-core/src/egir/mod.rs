@@ -28,5 +28,10 @@ pub mod builder;
 pub mod from_tlc;
 pub mod graph_ops;
 pub mod parallelize;
+pub(crate) mod target_lowering;
+pub(crate) mod semantic_opt;
 pub mod realize_outputs;
 pub mod verify_no_abstract;
+
+#[cfg(test)]
+mod semantic_exec;

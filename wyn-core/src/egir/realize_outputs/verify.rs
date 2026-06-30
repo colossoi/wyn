@@ -45,7 +45,7 @@ pub fn check(inner: &EgirInner) -> Result<(), ConvertError> {
 fn check_entry(entry_name: &str, graph: &super::super::types::EGraph) -> Result<(), ConvertError> {
     // Roots: the operand of every Return(Some(_)) terminator, plus
     // every Pure NodeId referenced by a side-effect store's operands.
-    // We don't walk SOAC `PendingSoac` operands here: those are
+    // We don't walk SOAC `EgirSoac` operands here: those are
     // legitimate consumers of arrays at the SOAC's input position,
     // not output operands. The runtime-sized check applies to values
     // that flow into a store or off the entry's return.
@@ -56,11 +56,11 @@ fn check_entry(entry_name: &str, graph: &super::super::types::EGraph) -> Result<
         }
         for se in &block.side_effects {
             // Stores' operand_nodes carry the value being written.
-            // Skip PendingSoacs — their array operands are inputs,
+            // Skip EgirSoacs — their array operands are inputs,
             // not output writes.
             use super::super::types::SideEffectKind;
             match &se.kind {
-                SideEffectKind::Pending(_) => continue,
+                SideEffectKind::Soac(_) => continue,
                 _ => {
                     roots.extend(se.operand_nodes.iter().copied());
                 }

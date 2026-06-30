@@ -50,7 +50,6 @@ use std::marker::PhantomData;
 
 use egir::from_tlc::ConvertError;
 use egir::program::EgirInner;
-use egir::publish::PipelineDescriptorPublish;
 
 use ast::{NodeCounter, NodeId};
 use error::Result;
@@ -330,12 +329,10 @@ pub type TypeTable = LookupMap<NodeId, TypeScheme<TypeName>>;
 //
 // EGIR stages:
 //       .realize_outputs()                         -> EgirOutputsRealized
-//       .segment(recognitions)                     -> EgirSegmented
-//       .schedule(binding_ids)                     -> EgirScheduled
-//       .expand_soacs()                            -> EgirSoacExpanded
-//       [.materialize()]                           -> EgirMaterialized
-//       .optimize_skeleton()                       -> EgirSkelOptimized
-//       .elaborate()                               -> SsaConverted
+//       .segment()                                 -> EgirSegmented
+//       .optimize()                                -> EgirOptimized
+//       .allocate(binding_ids)                     -> EgirAllocated
+//       .lower_to_ssa(profile)                     -> SsaConverted
 //
 // Backend:
 //       .lower() | .lower_wgsl()
@@ -1053,7 +1050,7 @@ impl TlcGeneratedLambdasFolded {
     /// Build the raw EGIR program. Callers chain the pipeline
     /// (`expand_soacs → materialize → optimize_skeleton → elaborate`)
     /// explicitly.
-    pub fn to_egraph(mut self) -> std::result::Result<EgirScheduled, ConvertError> {
+    pub fn to_egraph(mut self) -> std::result::Result<EgirAllocated, ConvertError> {
         let empty = LookupMap::new();
         let input_lens = tlc::input_slice_bounds::compute_for_program(&self.0.tlc);
         let inner = egir::from_tlc::run(
@@ -1064,7 +1061,7 @@ impl TlcGeneratedLambdasFolded {
             &mut self.0.auto_storage_binding_ids,
         )?;
         let realized = EgirRaw(inner).realize_outputs()?;
-        Ok(realized.segment(&empty).schedule(&mut self.0.auto_storage_binding_ids))
+        Ok(realized.segment().optimize().allocate(&self.0.auto_storage_binding_ids))
     }
 }
 
@@ -1160,7 +1157,7 @@ impl TlcParallelized {
         TlcReachable(inner)
     }
 
-    pub fn to_egraph(self) -> std::result::Result<EgirScheduled, ConvertError> {
+    pub fn to_egraph(self) -> std::result::Result<EgirAllocated, ConvertError> {
         let TlcPipelineInner {
             tlc,
             pipeline,
@@ -1177,9 +1174,9 @@ impl TlcParallelized {
             &input_lens,
             &mut auto_storage_binding_ids,
         )?;
-        inner.pipeline.relabel_input_storage_names(&input_names);
+        inner.input_names = input_names;
         let realized = EgirRaw(inner).realize_outputs()?;
-        Ok(realized.segment(&recognitions).schedule(&mut auto_storage_binding_ids))
+        Ok(realized.segment().optimize().allocate(&auto_storage_binding_ids))
     }
 }
 
@@ -1254,7 +1251,7 @@ impl std::ops::Deref for TlcInputSliceBoundsInferred {
 }
 
 impl TlcInputSliceBoundsInferred {
-    pub fn to_egraph(self) -> std::result::Result<EgirScheduled, ConvertError> {
+    pub fn to_egraph(self) -> std::result::Result<EgirAllocated, ConvertError> {
         let TlcPipelineInner {
             tlc,
             pipeline,
@@ -1270,9 +1267,9 @@ impl TlcInputSliceBoundsInferred {
             &self.input_lens,
             &mut auto_storage_binding_ids,
         )?;
-        inner.pipeline.relabel_input_storage_names(&input_names);
+        inner.input_names = input_names;
         let realized = EgirRaw(inner).realize_outputs()?;
-        Ok(realized.segment(&recognitions).schedule(&mut auto_storage_binding_ids))
+        Ok(realized.segment().optimize().allocate(&auto_storage_binding_ids))
     }
 }
 
@@ -1284,6 +1281,43 @@ impl TlcInputSliceBoundsInferred {
 // Pass modules in `egir::*` are called per-body from inside the transitions
 // and are unaware of the newtype wrapping.
 // =============================================================================
+
+/// Target capability profile selected before semantic EGIR is lowered to SSA.
+/// `Portable` deliberately uses the common SPIR-V/WGSL capability subset and
+/// is retained for tools and tests that want to inspect one shared SSA module.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodegenTarget {
+    Portable,
+    Spirv,
+    Wgsl,
+}
+
+/// Whether semantic segmented operations may expand into multiple host
+/// dispatches.  Single-stage mode still constructs semantic SegOps; only the
+/// terminal scheduling decision changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SchedulePolicy {
+    Parallel,
+    SingleStage,
+}
+
+/// Target and scheduling policy for the semantic-EGIR-to-SSA boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LoweringProfile {
+    pub target: CodegenTarget,
+    pub schedule: SchedulePolicy,
+}
+
+impl LoweringProfile {
+    pub const PORTABLE: Self = Self {
+        target: CodegenTarget::Portable,
+        schedule: SchedulePolicy::Parallel,
+    };
+
+    pub const fn new(target: CodegenTarget, schedule: SchedulePolicy) -> Self {
+        Self { target, schedule }
+    }
+}
 
 /// Raw EGIR program, directly produced by TLC → EGIR conversion.
 pub struct EgirRaw(EgirInner);
@@ -1299,21 +1333,17 @@ pub struct EgirOutputsRealized(EgirInner);
 /// storage has been chosen yet.
 pub struct EgirSegmented(EgirInner);
 
-/// EGIR after segmented operations have been assigned concrete kernel phases.
-/// Pointwise SegMaps remain for lane expansion; SegReds and SegScans have
-/// become ordered phase entries in a first-class kernel schedule.
-pub struct EgirScheduled(EgirInner);
+/// Semantic EGIR after graph-level optimization. SegOps remain intact.
+pub struct EgirOptimized(EgirInner);
 
-/// EGIR after SOAC lowering: every `PendingSoac::{Map, Scan, Reduce, …}` in
-/// the skeleton has been expanded to explicit loops / unrolled code.
-pub struct EgirSoacExpanded(EgirInner);
+/// Semantic EGIR after logical resource planning. Physical scratch bindings,
+/// phase kernels, and descriptor publication are intentionally deferred until
+/// `lower_to_ssa` receives a target profile.
+pub struct EgirAllocated {
+    inner: EgirInner,
+    binding_ids: IdSource<u32>,
+}
 
-/// EGIR after materialization: dynamic `Index` into non-materialized composite
-/// values has been rewritten to `Materialize` + `DynamicExtract`. SPIR-V only.
-pub struct EgirMaterialized(EgirInner);
-
-/// EGIR after skeleton-CFG optimizations (LICM, dead-block elim, etc).
-pub struct EgirSkelOptimized(EgirInner);
 
 impl EgirRaw {
     /// Realize every entry's outputs into side-effect writes. For
@@ -1339,77 +1369,88 @@ impl EgirOutputsRealized {
     /// and tags each recognized compute entry's tail SOAC for lane-indexed
     /// lowering downstream. Always called before `expand_soacs` — see the
     /// SOAC Parallelization Boundary section in the README.
-    pub fn segment(
-        self,
-        recognitions: &LookupMap<String, tlc::parallelize::EntryRecognition>,
-    ) -> EgirSegmented {
+    pub fn segment(self) -> EgirSegmented {
         let EgirOutputsRealized(mut inner) = self;
-        egir::parallelize::reify(&mut inner, recognitions);
+        egir::parallelize::reify(&mut inner);
+        if cfg!(debug_assertions) {
+            egir::parallelize::verify_semantic(&inner).expect("invalid semantic EGIR");
+        }
         EgirSegmented(inner)
     }
 }
 
 impl EgirSegmented {
-    /// Choose concrete kernel phases for each semantic SegOp and allocate any
-    /// scratch bindings required by that schedule.
-    pub fn schedule(mut self, binding_ids: &mut IdSource<u32>) -> EgirScheduled {
-        egir::parallelize::lower(&mut self.0, binding_ids);
-        // Scheduling may synthesize entries and bindings, so publish the final
-        // interface only after the schedule graph is complete.
-        self.0
-            .kernel_schedule
-            .install_phase_shells(&mut self.0.pipeline)
-            .expect("invalid EGIR kernel schedule");
-        self.0.pipeline.publish_implicit_bindings(&self.0.entry_points);
-        self.0.kernel_schedule.publish(&mut self.0.pipeline).expect("invalid EGIR kernel schedule");
-        EgirScheduled(self.0)
+    /// Preserve semantic SegOps while running graph-level optimizations.  The
+    /// first migration cut has no Seg-specific rewrites here; the typestate is
+    /// nevertheless load-bearing because scheduling is no longer permitted
+    /// before this boundary.
+    pub fn optimize(self) -> EgirOptimized {
+        let mut inner = self.0;
+        egir::semantic_opt::run(&mut inner);
+        EgirOptimized(inner)
     }
 }
 
-impl EgirScheduled {
-    pub fn expand_soacs(self) -> EgirSoacExpanded {
-        let EgirScheduled(mut inner) = self;
-        egir::soac_expand::run(&mut inner);
-        EgirSoacExpanded(inner)
+impl EgirOptimized {
+    /// Record the logical-allocation boundary without choosing physical
+    /// descriptor bindings. The allocator is cloned so terminal lowering can
+    /// allocate scratch transactionally without mutating upstream TLC state.
+    pub fn allocate(self, binding_ids: &IdSource<u32>) -> EgirAllocated {
+        let mut inner = self.0;
+        if cfg!(debug_assertions) {
+            egir::parallelize::verify_semantic(&inner).expect("invalid optimized semantic EGIR");
+        }
+        egir::program::plan_logical_resources(&mut inner);
+        EgirAllocated {
+            inner,
+            binding_ids: binding_ids.clone(),
+        }
     }
 }
 
-impl EgirSoacExpanded {
-    pub fn materialize(self) -> EgirMaterialized {
-        let EgirSoacExpanded(mut inner) = self;
-        egir::materialize::run(&mut inner);
-        EgirMaterialized(inner)
+impl EgirAllocated {
+    /// Human-readable semantic IR including concrete spaces, region captures,
+    /// output routing, and logical resource accesses.
+    pub fn semantic_ir(&self) -> String {
+        egir::parallelize::semantic_summary(&self.inner)
     }
 
-    pub fn optimize_skeleton(self) -> EgirSkelOptimized {
-        let EgirSoacExpanded(mut inner) = self;
-        egir::skel_opt::run(&mut inner);
-        EgirSkelOptimized(inner)
+    pub fn logical_resources(&self) -> &[egir::program::LogicalResource] {
+        &self.inner.resources
     }
-}
 
-impl EgirMaterialized {
-    pub fn optimize_skeleton(self) -> EgirSkelOptimized {
-        let EgirMaterialized(mut inner) = self;
-        egir::skel_opt::run(&mut inner);
-        EgirSkelOptimized(inner)
+    pub fn semantic_dependencies(&self) -> &[egir::program::SemanticDependency] {
+        &self.inner.semantic_dependencies
     }
-}
 
-impl EgirSkelOptimized {
-    /// Terminal step: lower each per-body e-graph to SSA and assemble the
-    /// final `SsaConverted`.
-    pub fn elaborate(self) -> SsaConverted {
-        let EgirSkelOptimized(inner) = self;
-        let (ssa, pipeline) = egir::elaborate::run_program(inner);
-        SsaConverted { ssa, pipeline }
+    /// Target-aware terminal lowering. This is the only production boundary
+    /// allowed to destroy semantic SegRed/SegScan operations.
+    pub fn lower_to_ssa(
+        mut self,
+        profile: LoweringProfile,
+    ) -> std::result::Result<SsaConverted, ConvertError> {
+        egir::target_lowering::schedule(&mut self.inner, &mut self.binding_ids, profile)?;
+        let schedule = self.inner.kernel_schedule.clone();
+        egir::soac_expand::run(&mut self.inner);
+        egir::materialize::run(&mut self.inner);
+        egir::skel_opt::run(&mut self.inner);
+        let (ssa, pipeline) = egir::elaborate::run_program(self.inner);
+        Ok(SsaConverted {
+            ssa,
+            pipeline,
+            profile,
+            kernel_schedule: schedule,
+        })
     }
+
 }
 
 /// TLC has been converted directly to SSA (via EGIR).
 pub struct SsaConverted {
     pub ssa: ssa::types::Program,
     pub pipeline: pipeline_descriptor::PipelineDescriptor,
+    pub profile: LoweringProfile,
+    pub kernel_schedule: egir::parallelize::schedule::KernelSchedule,
 }
 
 impl SsaConverted {
@@ -1417,6 +1458,11 @@ impl SsaConverted {
     /// `DynamicExtract`) was already done by the EGIR pipeline if `to_egir`
     /// was called with `EgirOpts::for_spirv()`.
     pub fn lower(self) -> error::Result<Lowered> {
+        if self.profile.target == CodegenTarget::Wgsl {
+            return Err(crate::err_spirv!(
+                "SSA was scheduled for WGSL and cannot be lowered as SPIR-V"
+            ));
+        }
         egir::verify_no_abstract::run(&self.ssa)?;
         spirv::verify_buffer_layouts::run(&self.ssa)?;
         let spirv = spirv::lower_ssa_program(&self.ssa)?;
@@ -1427,6 +1473,11 @@ impl SsaConverted {
     }
 
     pub fn lower_wgsl(self) -> error::Result<String> {
+        if self.profile.target == CodegenTarget::Spirv {
+            return Err(crate::err_spirv!(
+                "SSA was scheduled for SPIR-V and cannot be lowered as WGSL"
+            ));
+        }
         egir::verify_no_abstract::run(&self.ssa)?;
         wgsl::lower(&self.ssa)
     }
@@ -1536,9 +1587,12 @@ pub fn compile_thru_tlc(source: &str) -> error::Result<TlcReachable> {
 /// `compile_thru_spirv_single_stage` build the SSA the same way; only
 /// the upstream parallelize flag differs.
 #[cfg(test)]
-fn ssa_from_reachable(tlc: TlcReachable) -> std::result::Result<SsaConverted, Box<dyn std::error::Error>> {
-    let raw = tlc.infer_input_slice_bounds().to_egraph()?;
-    Ok(raw.expand_soacs().materialize().optimize_skeleton().elaborate())
+fn ssa_from_reachable(
+    tlc: TlcReachable,
+    profile: LoweringProfile,
+) -> std::result::Result<SsaConverted, Box<dyn std::error::Error>> {
+    let allocated = tlc.infer_input_slice_bounds().to_egraph()?;
+    Ok(allocated.lower_to_ssa(profile)?)
 }
 
 /// Run all the way through EGIR + elaborate to SSA. Materialize is enabled
@@ -1547,13 +1601,17 @@ fn ssa_from_reachable(tlc: TlcReachable) -> std::result::Result<SsaConverted, Bo
 /// conversion errors uniformly.
 #[cfg(test)]
 pub fn compile_thru_ssa(source: &str) -> std::result::Result<SsaConverted, Box<dyn std::error::Error>> {
-    ssa_from_reachable(compile_thru_tlc(source)?)
+    ssa_from_reachable(compile_thru_tlc(source)?, LoweringProfile::PORTABLE)
 }
 
 /// Run the full pipeline to a final SPIR-V binary.
 #[cfg(test)]
 pub fn compile_thru_spirv(source: &str) -> std::result::Result<Lowered, Box<dyn std::error::Error>> {
-    Ok(compile_thru_ssa(source)?.lower()?)
+    Ok(ssa_from_reachable(
+        compile_thru_tlc(source)?,
+        LoweringProfile::new(CodegenTarget::Spirv, SchedulePolicy::Parallel),
+    )?
+    .lower()?)
 }
 
 /// Single-stage equivalent of `compile_thru_spirv`: matches the CLI's
@@ -1564,5 +1622,9 @@ pub fn compile_thru_spirv(source: &str) -> std::result::Result<Lowered, Box<dyn 
 pub fn compile_thru_spirv_single_stage(
     source: &str,
 ) -> std::result::Result<Lowered, Box<dyn std::error::Error>> {
-    Ok(ssa_from_reachable(compile_thru_tlc_with(source, true)?)?.lower()?)
+    Ok(ssa_from_reachable(
+        compile_thru_tlc_with(source, true)?,
+        LoweringProfile::new(CodegenTarget::Spirv, SchedulePolicy::SingleStage),
+    )?
+    .lower()?)
 }

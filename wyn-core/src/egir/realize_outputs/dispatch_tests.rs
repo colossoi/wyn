@@ -1,7 +1,9 @@
 //! Unit tests for the dispatch helpers.
 
 use super::*;
-use crate::egir::types::{EGraph, PendingScremaAccumulator, ScremaAccumulator, SideEffect};
+use crate::egir::types::{
+    EGraph, RegionId, ScremaAccumulator, ScremaOperator, SegBody, SideEffect,
+};
 use smallvec::smallvec;
 
 /// A runtime-sized compute output that no retargetable Map/Scan produced
@@ -119,14 +121,16 @@ fn rewrite_sibling_index_consumers_rejects_screma_capture_position() {
     let result_nid =
         graph.alloc_side_effect_result(Type::Constructed(TypeName::Tuple(1), vec![arr_ty.clone()]));
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
-        kind: SideEffectKind::Pending(PendingSoac::Screma {
-            map_funcs: vec!["m".into()],
+        kind: SideEffectKind::Soac(EgirSoac::Screma {
+            map_bodies: vec![SegBody {
+                region: RegionId::from_index(0),
+                captures: vec![source],
+            }],
             accumulators: vec![],
             input_array_types: vec![arr_ty.clone()],
             input_elem_types: vec![elem.clone()],
             map_output_elem_types: vec![elem.clone()],
             map_input_indices: vec![vec![0]],
-            map_capture_counts: vec![1],
             map_destinations: vec![SoacDestination::Fresh],
             acc_destinations: vec![],
         }),
@@ -177,14 +181,17 @@ fn rewrite_sibling_index_consumers_rejects_scatter_dest_position() {
     let dummy_input = graph.alloc_side_effect_result(arr_ty.clone());
     let result_nid = graph.alloc_side_effect_result(Type::Constructed(TypeName::Bool, vec![]));
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
-        kind: SideEffectKind::Pending(PendingSoac::Scatter {
-            func: "s".into(),
+        kind: SideEffectKind::Soac(EgirSoac::Hist {
+            body: crate::egir::types::SegBody {
+                region: crate::egir::types::RegionId::from_index(0),
+                captures: vec![],
+            },
             input_array_types: vec![arr_ty.clone()],
             input_elem_types: vec![elem.clone()],
-            capture_count: 0,
             index_type: Type::Constructed(TypeName::Int(32), vec![]),
             value_type: elem.clone(),
             dest_elem_type: elem.clone(),
+            update_policy: crate::egir::types::HistUpdatePolicy::OrderedOverwrite,
             space: None,
         }),
         operand_nodes: smallvec![source, dummy_input],
@@ -237,14 +244,17 @@ fn rewrite_sibling_index_consumers_rejects_scatter_capture_position() {
     let dummy_input = graph.alloc_side_effect_result(arr_ty.clone());
     let result_nid = graph.alloc_side_effect_result(Type::Constructed(TypeName::Bool, vec![]));
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
-        kind: SideEffectKind::Pending(PendingSoac::Scatter {
-            func: "s".into(),
+        kind: SideEffectKind::Soac(EgirSoac::Hist {
+            body: crate::egir::types::SegBody {
+                region: crate::egir::types::RegionId::from_index(0),
+                captures: vec![source],
+            },
             input_array_types: vec![arr_ty.clone()],
             input_elem_types: vec![elem.clone()],
-            capture_count: 1,
             index_type: Type::Constructed(TypeName::Int(32), vec![]),
             value_type: elem.clone(),
             dest_elem_type: elem.clone(),
+            update_policy: crate::egir::types::HistUpdatePolicy::OrderedOverwrite,
             space: None,
         }),
         operand_nodes: smallvec![dummy_dest, dummy_input, source],
@@ -296,20 +306,23 @@ fn rewrite_sibling_index_consumers_rejects_screma_init_acc_position() {
     let result_nid =
         graph.alloc_side_effect_result(Type::Constructed(TypeName::Tuple(1), vec![elem.clone()]));
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
-        kind: SideEffectKind::Pending(PendingSoac::Screma {
-            map_funcs: vec![],
-            accumulators: vec![PendingScremaAccumulator {
+        kind: SideEffectKind::Soac(EgirSoac::Screma {
+            map_bodies: vec![],
+            accumulators: vec![ScremaOperator {
                 kind: ScremaAccumulator::Reduce,
-                step_func: "r".into(),
-                reduce_op_func: "ro".into(),
-                step_capture_count: 0,
-                reduce_op_capture_count: 0,
+                step: SegBody {
+                    region: RegionId::from_index(0),
+                    captures: vec![],
+                },
+                combine: SegBody {
+                    region: RegionId::from_index(1),
+                    captures: vec![],
+                },
             }],
             input_array_types: vec![arr_ty.clone()],
             input_elem_types: vec![elem.clone()],
             map_output_elem_types: vec![],
             map_input_indices: vec![],
-            map_capture_counts: vec![],
             map_destinations: vec![],
             acc_destinations: vec![SoacDestination::Fresh],
         }),

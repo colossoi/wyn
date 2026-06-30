@@ -35,11 +35,11 @@ fn compile_via_egir(src: &str) -> Program {
     )
     .realize_outputs()
     .expect("egir::realize_outputs failed")
-    .segment(&empty)
-    .schedule(&mut binding_ids)
-    .expand_soacs()
-    .optimize_skeleton()
-    .elaborate()
+    .segment()
+    .optimize()
+    .allocate(&binding_ids)
+    .lower_to_ssa(crate::LoweringProfile::PORTABLE)
+    .expect("semantic EGIR lowering failed")
     .ssa
 }
 
@@ -71,12 +71,14 @@ fn convert_simple_def(body: Term, params: Vec<(SymbolId, Type<TypeName>)>) -> Fu
         params.iter().enumerate().map(|(i, (_, ty))| (ty.clone(), format!("p{}", i))).collect();
 
     let mut binding_ids = crate::IdSource::<u32>::new();
+    let region_interner = std::cell::RefCell::new(crate::egir::program::RegionInterner::default());
     let mut converter = Converter::new(
         &top_level,
         &constants_by_name,
         &symbols,
         pure_constants,
         &mut binding_ids,
+        &region_interner,
     );
     for (i, (sym, ty)) in params.iter().enumerate() {
         let nid = converter.graph.add_func_param(i, ty.clone());
@@ -124,12 +126,14 @@ fn test_add_roundtrip() {
     let pure_constants = HashSet::new();
 
     let mut binding_ids = crate::IdSource::<u32>::new();
+    let region_interner = std::cell::RefCell::new(crate::egir::program::RegionInterner::default());
     let mut converter = Converter::new(
         &top_level,
         &constants_by_name,
         &symbols,
         pure_constants,
         &mut binding_ids,
+        &region_interner,
     );
     let a_nid = converter.graph.add_func_param(0, i32_ty());
     converter.locals.insert(a_sym, a_nid);
@@ -195,12 +199,14 @@ fn test_gvn_via_let() {
     let pure_constants = HashSet::new();
 
     let mut binding_ids = crate::IdSource::<u32>::new();
+    let region_interner = std::cell::RefCell::new(crate::egir::program::RegionInterner::default());
     let mut converter = Converter::new(
         &top_level,
         &constants_by_name,
         &symbols,
         pure_constants,
         &mut binding_ids,
+        &region_interner,
     );
     let result = converter.convert_term(&outer_let).expect("conversion failed");
     converter.set_return(Some(result));
@@ -288,12 +294,14 @@ fn test_if_else_roundtrip() {
     let pure_constants = HashSet::new();
 
     let mut binding_ids = crate::IdSource::<u32>::new();
+    let region_interner = std::cell::RefCell::new(crate::egir::program::RegionInterner::default());
     let mut converter = Converter::new(
         &top_level,
         &constants_by_name,
         &symbols,
         pure_constants,
         &mut binding_ids,
+        &region_interner,
     );
     let c_nid = converter.graph.add_func_param(0, bool_ty);
     converter.locals.insert(c_sym, c_nid);

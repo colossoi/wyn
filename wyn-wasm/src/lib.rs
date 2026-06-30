@@ -4,6 +4,7 @@ use wasm_bindgen::prelude::*;
 use wyn_core::ast::NodeCounter;
 use wyn_core::error::CompilerError;
 use wyn_core::module_manager::{ModuleManager, PreElaboratedPrelude};
+use wyn_core::{CodegenTarget, LoweringProfile, SchedulePolicy};
 
 /// Cached prelude and starting node counter
 /// Creating the prelude parses all prelude files, which is expensive.
@@ -622,11 +623,17 @@ fn compile_to_wgsl_impl(source: &str) -> CompileResultWgsl {
         Ok(t) => t,
         Err(e) => return CompileResultWgsl::err_msg(format!("parallelize_soacs: {:?}", e)),
     };
-    let raw = match tlc_parallelized.filter_reachable().infer_input_slice_bounds().to_egraph() {
+    let allocated = match tlc_parallelized.filter_reachable().infer_input_slice_bounds().to_egraph() {
         Ok(s) => s,
         Err(e) => return CompileResultWgsl::err_msg(format!("SSA conversion error: {:?}", e)),
     };
-    let ssa = raw.expand_soacs().materialize().optimize_skeleton().elaborate();
+    let ssa = match allocated.lower_to_ssa(LoweringProfile::new(
+        CodegenTarget::Wgsl,
+        SchedulePolicy::Parallel,
+    )) {
+        Ok(s) => s,
+        Err(e) => return CompileResultWgsl::err_msg(format!("SSA lowering error: {:?}", e)),
+    };
     let mir = wyn_core::ssa::print::format_program(&ssa.ssa);
     let interface = program_interface(&ssa.ssa);
 

@@ -24,7 +24,7 @@ use crate::ssa::types::{ConstantValue, InstKind, ValueRef};
 use crate::BindingRef;
 
 use super::types::{
-    EGraph, ENode, EffectToken, NodeId, PendingSoac, PureOp, PureViewSource, SideEffect, SideEffectKind,
+    EGraph, EgirSoac, ENode, EffectToken, NodeId, PureOp, PureViewSource, SideEffect, SideEffectKind,
 };
 
 // ---------------------------------------------------------------------------
@@ -342,14 +342,14 @@ pub fn emit_view_load(
     emit_load(graph, block, place_nid, elem_ty, next_effect, span)
 }
 
-/// Push a `SideEffectKind::Pending(soac)` side-effect into `block` with
+/// Push a `SideEffectKind::Soac(soac)` side-effect into `block` with
 /// the given operands; returns the allocated `result_nid` (typed as
 /// `result_ty`, which the SOAC's lowering recovers from
 /// `graph.types[result_nid]`).
 pub fn emit_pending_soac(
     graph: &mut EGraph,
     block: BlockId,
-    soac: PendingSoac,
+    soac: EgirSoac,
     operands: SmallVec<[NodeId; 4]>,
     result_ty: Type<TypeName>,
     next_effect: &mut u32,
@@ -359,7 +359,7 @@ pub fn emit_pending_soac(
     let effect_in = EffectToken(0);
     let effect_out = alloc_effect(next_effect);
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
-        kind: SideEffectKind::Pending(soac),
+        kind: SideEffectKind::Soac(soac),
         operand_nodes: operands,
         result: Some(result_nid),
         effects: Some((effect_in, effect_out)),

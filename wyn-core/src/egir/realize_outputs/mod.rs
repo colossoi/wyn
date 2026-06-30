@@ -43,16 +43,8 @@ pub mod verify;
 /// Realize every entry's outputs into side-effect stores. After this
 /// pass, `verify::check` confirms the invariant.
 pub fn run(inner: &mut EgirInner) -> Result<(), ConvertError> {
-    // `publish_implicit_bindings` already ran in `from_tlc`, so a runtime
-    // `filter` output retarget here must patch the host descriptor in
-    // `inner.pipeline` directly (split-borrowed from `entry_points`).
-    let EgirInner {
-        entry_points,
-        pipeline,
-        ..
-    } = inner;
-    for entry in entry_points.iter_mut() {
-        realize_entry(entry, pipeline)?;
+    for entry in inner.entry_points.iter_mut() {
+        realize_entry(entry)?;
     }
     if cfg!(debug_assertions) {
         verify::check(inner)?;
@@ -62,14 +54,13 @@ pub fn run(inner: &mut EgirInner) -> Result<(), ConvertError> {
 
 fn realize_entry(
     entry: &mut EgirEntry,
-    pipeline: &mut crate::pipeline_descriptor::PipelineDescriptor,
 ) -> Result<(), ConvertError> {
     if entry.outputs.is_empty() {
         return Ok(());
     }
     if !entry.slot_sources.is_empty() {
         // DPS path: slot-collected entries (post-`normalize_outputs`).
-        realize_compute_slots(entry, pipeline)
+        realize_compute_slots(entry)
     } else {
         // Return-value classifier: graphics entries, plus compute
         // entries synthesised after `normalize_outputs` (gather
@@ -87,9 +78,7 @@ fn realize_entry(
 /// share one view; runtime CFG picks which source's write fires.
 fn realize_compute_slots(
     entry: &mut EgirEntry,
-    pipeline: &mut crate::pipeline_descriptor::PipelineDescriptor,
 ) -> Result<(), ConvertError> {
-    let entry_name = entry.name.clone();
     let EgirEntry {
         graph,
         outputs,
@@ -121,8 +110,6 @@ fn realize_compute_slots(
                 storage_bindings,
                 output,
                 sources[0].value,
-                pipeline,
-                &entry_name,
             )?
         {
             continue;
