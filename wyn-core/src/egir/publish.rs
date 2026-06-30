@@ -91,6 +91,15 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                     }
                 })
             }))
+            .chain(entries.iter().flat_map(|e| {
+                e.storage_bindings.iter().filter_map(|decl| {
+                    matches!(
+                        decl.role,
+                        crate::interface::StorageRole::Output | crate::interface::StorageRole::Intermediate
+                    )
+                    .then_some((decl.binding.set, decl.binding.binding))
+                })
+            }))
             .collect();
 
         for entry in entries {
@@ -202,30 +211,32 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                 }
             }
 
-            // Compiler-managed gather buffers: storage bindings carrying an
-            // explicit `length` (a `lift_gathers` intermediate, referenced via
-            // `storage_index` rather than a param). Emit these *before* outputs so
+            // Compiler-managed storage declarations, including gather buffers,
+            // scalar-prepass links, and EGIR-scheduled phase scratch. Emit these
+            // *before* outputs so
             // the producer's matching `EntryOutput` (same set/binding) doesn't
             // also claim it as a host-read `Output`. The producer declares it
             // Output (it writes) and the consumer Input (it reads); both surface
             // as a compiler-managed `Intermediate`, with access from the role.
             for decl in &entry.storage_bindings {
-                if decl.length.is_none() {
-                    continue;
-                }
                 if !claimed.insert((decl.binding.set, decl.binding.binding)) {
                     continue;
                 }
                 let access = match decl.role {
                     crate::interface::StorageRole::Output => Access::WriteOnly,
-                    _ => Access::ReadOnly,
+                    crate::interface::StorageRole::Input => Access::ReadOnly,
+                    crate::interface::StorageRole::Intermediate => Access::ReadWrite,
                 };
                 bindings.push(Binding::StorageBuffer {
                     set: decl.binding.set,
                     binding: decl.binding.binding,
                     access,
                     usage: BufferUsage::Intermediate,
-                    name: format!("{}_gather_b{}", entry.name, decl.binding.binding),
+                    name: if decl.length.is_some() {
+                        format!("{}_gather_b{}", entry.name, decl.binding.binding)
+                    } else {
+                        format!("{}_intermediate_b{}", entry.name, decl.binding.binding)
+                    },
                     length: decl.length.clone(),
                 });
             }
@@ -381,120 +392,4 @@ fn publish_fragment_outputs(pipeline: &mut PipelineDescriptor, entry: &EgirEntry
             if multi { format!("{}_output_{}", entry.name, i) } else { format!("{}_output", entry.name) };
         fragment_outputs.push(FragmentOutput { location, name });
     }
-}
-
-use crate::egir::types::{PendingSoac, SegOpKind, SideEffectKind};
-use crate::pipeline_descriptor::{DispatchLen, DispatchSize};
-
-/// Resolve a compute stage's iteration domain and buffer access from the
-/// scheduled EGIR entries. The TLC-side descriptor seeds each compute entry
-/// with a placeholder `Fixed { 1,1,1 }` stage carrying no `reads`/`writes`;
-/// here each stage backed by a pointwise `SegMap` is rewritten to dispatch
-/// over its primary input's element count and to declare every storage buffer
-/// it reads and writes (by index into the pipeline's binding table).
-pub fn finalize_compute_io(pipeline: &mut PipelineDescriptor, entries: &[EgirEntry]) {
-    for entry in entries {
-        let Some(Pipeline::Compute(cp)) = pipeline.pipelines.iter_mut().find(|p| match p {
-            Pipeline::Compute(c) => c.stages.iter().any(|s| s.entry_point == entry.name),
-            _ => false,
-        }) else {
-            continue;
-        };
-        let reads = entry_read_indices(entry, &cp.bindings);
-        let writes = entry_write_indices(entry, &cp.bindings);
-        let dispatch = seg_map_dispatch_len(entry);
-        let Some(stage) = cp.stages.iter_mut().find(|s| s.entry_point == entry.name) else {
-            continue;
-        };
-        // A pointwise map dispatches one thread per input element; a fixed
-        // (non-SOAC) output slot keeps its single-invocation 1×1×1 placeholder.
-        if let Some(len) = dispatch {
-            stage.dispatch_size = DispatchSize::DerivedFrom {
-                len,
-                workgroup_size: stage.workgroup_size.0,
-            };
-        }
-        stage.reads = reads;
-        stage.writes = writes;
-    }
-}
-
-/// The iteration count of a pointwise `SegMap` entry: one element per item of
-/// its primary input's storage buffer. `None` for non-map entries and for maps
-/// whose primary input is not a storage buffer (e.g. an `iota` range — those
-/// keep the placeholder dispatch until range sizing is wired here).
-fn seg_map_dispatch_len(entry: &EgirEntry) -> Option<DispatchLen> {
-    for (_, block) in &entry.graph.skeleton.blocks {
-        for se in &block.side_effects {
-            let SideEffectKind::Pending(PendingSoac::Seg {
-                kind: SegOpKind::SegMap,
-                input_elem_types,
-                ..
-            }) = &se.kind
-            else {
-                continue;
-            };
-            let primary = *se.operand_nodes.first()?;
-            let br = crate::egir::graph_ops::extract_storage_view_source(&entry.graph, primary)?;
-            let elem_bytes = crate::ssa::layout::type_byte_size(input_elem_types.first()?)? as u32;
-            return Some(DispatchLen::InputBinding {
-                set: br.set,
-                binding: br.binding,
-                elem_bytes,
-            });
-        }
-    }
-    None
-}
-
-/// Indices (into `bindings`) of every storage / uniform buffer the entry reads.
-fn entry_read_indices(entry: &EgirEntry, bindings: &[Binding]) -> Vec<usize> {
-    let mut reads = Vec::new();
-    let push = |set: u32, binding: u32, reads: &mut Vec<usize>| {
-        if let Some(i) = binding_index(bindings, set, binding) {
-            if !reads.contains(&i) {
-                reads.push(i);
-            }
-        }
-    };
-    for input in &entry.inputs {
-        if let Some(br) = input.storage_binding {
-            push(br.set, br.binding, &mut reads);
-        } else if let Some(br) = input.uniform_binding {
-            push(br.set, br.binding, &mut reads);
-        }
-    }
-    for decl in &entry.storage_bindings {
-        if matches!(decl.role, crate::interface::StorageRole::Input) {
-            push(decl.binding.set, decl.binding.binding, &mut reads);
-        }
-    }
-    reads
-}
-
-/// Indices (into `bindings`) of every storage buffer the entry writes.
-fn entry_write_indices(entry: &EgirEntry, bindings: &[Binding]) -> Vec<usize> {
-    let mut writes = Vec::new();
-    for output in &entry.outputs {
-        if let Some(br) = output.storage_binding {
-            if let Some(i) = binding_index(bindings, br.set, br.binding) {
-                if !writes.contains(&i) {
-                    writes.push(i);
-                }
-            }
-        }
-    }
-    writes
-}
-
-fn binding_index(bindings: &[Binding], set: u32, binding: u32) -> Option<usize> {
-    bindings.iter().position(|b| match b {
-        Binding::StorageBuffer {
-            set: s, binding: bd, ..
-        }
-        | Binding::Uniform {
-            set: s, binding: bd, ..
-        } => *s == set && *bd == binding,
-        _ => false,
-    })
 }

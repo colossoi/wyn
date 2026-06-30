@@ -1300,8 +1300,8 @@ pub struct EgirOutputsRealized(EgirInner);
 pub struct EgirSegmented(EgirInner);
 
 /// EGIR after segmented operations have been assigned concrete kernel phases.
-/// Pointwise SegMaps remain for lane expansion; SegReds have become phase
-/// entries; unsupported SegScans have been restored to their serial fallback.
+/// Pointwise SegMaps remain for lane expansion; SegReds and SegScans have
+/// become ordered phase entries in a first-class kernel schedule.
 pub struct EgirScheduled(EgirInner);
 
 /// EGIR after SOAC lowering: every `PendingSoac::{Map, Scan, Reduce, …}` in
@@ -1335,8 +1335,8 @@ impl EgirRaw {
 }
 
 impl EgirOutputsRealized {
-    /// EGIR-side SOAC parallelization. Consumes `plans` from TLC analysis
-    /// and tags each planned compute entry's tail SOAC for lane-indexed
+    /// EGIR-side SOAC parallelization. Consumes recognition from TLC analysis
+    /// and tags each recognized compute entry's tail SOAC for lane-indexed
     /// lowering downstream. Always called before `expand_soacs` — see the
     /// SOAC Parallelization Boundary section in the README.
     pub fn segment(
@@ -1354,7 +1354,14 @@ impl EgirSegmented {
     /// scratch bindings required by that schedule.
     pub fn schedule(mut self, binding_ids: &mut IdSource<u32>) -> EgirScheduled {
         egir::parallelize::lower(&mut self.0, binding_ids);
-        egir::publish::finalize_compute_io(&mut self.0.pipeline, &self.0.entry_points);
+        // Scheduling may synthesize entries and bindings, so publish the final
+        // interface only after the schedule graph is complete.
+        self.0
+            .kernel_schedule
+            .install_phase_shells(&mut self.0.pipeline)
+            .expect("invalid EGIR kernel schedule");
+        self.0.pipeline.publish_implicit_bindings(&self.0.entry_points);
+        self.0.kernel_schedule.publish(&mut self.0.pipeline).expect("invalid EGIR kernel schedule");
         EgirScheduled(self.0)
     }
 }

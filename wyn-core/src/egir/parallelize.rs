@@ -3,8 +3,10 @@
 //! 1. `reify` turns recognized entry-tail Scremas into semantic `SegMap`,
 //!    `SegRed`, or `SegScan` operations.
 //! 2. `lower` schedules those operations: maps remain segmented for
-//!    `soac_expand`, reductions become chunked phase-1 plus tree-reduce phase
-//!    2 entries, and scans currently return to the serial Screma fallback.
+//!    `soac_expand`, reductions become two-phase trees, and scans become
+//!    three-phase block scans.
+pub mod schedule;
+
 use crate::LookupMap;
 
 use polytype::Type;
@@ -41,14 +43,14 @@ pub fn reify(inner: &mut EgirInner, recognitions: &LookupMap<String, EntryRecogn
 
 /// Lower semantic segmented operations into executable kernel entries.
 /// Pointwise `SegMap`s remain for `soac_expand`; `SegRed`s become a chunked
-/// phase 1 plus synthesized phase-2 tree reductions. `SegScan` scheduling is
-/// not migrated yet, so it is deliberately restored to a serial Screma.
+/// phase 1 plus a synthesized tree reduction; `SegScan`s become chunk scans,
+/// an exclusive scan of block sums, and offset-application phases.
 pub fn lower(inner: &mut EgirInner, binding_ids: &mut crate::IdSource<u32>) {
+    use schedule::{KernelDomain, KernelSchedule};
+
+    let mut schedule = KernelSchedule::seed(&inner.pipeline, &inner.entry_points);
     let mut new_entries: Vec<EgirEntry> = Vec::new();
     let mut new_functions: Vec<EgirFunc> = Vec::new();
-    // (new phase entry name, parent entry name): each synthesized later phase
-    // becomes its own pipeline stage in the parent compute pipeline.
-    let mut new_phase_stages: Vec<(String, String, (u32, u32, u32))> = Vec::new();
     for entry in inner.entry_points.iter_mut() {
         let Some(kind) = find_pending_seg(entry).map(|(bid, idx)| {
             let se = &entry.graph.skeleton.blocks[bid].side_effects[idx];
@@ -62,30 +64,42 @@ pub fn lower(inner: &mut EgirInner, binding_ids: &mut crate::IdSource<u32>) {
         match kind {
             SegOpKind::SegMap => {}
             SegOpKind::SegRed { .. } => {
+                let original = entry.clone();
                 if let Some(phases) = lower_reduce_entry(entry, binding_ids) {
+                    let mut predecessor = entry.name.clone();
                     for ph in &phases {
-                        new_phase_stages.push((ph.name.clone(), entry.name.clone(), (PHASE2_WIDTH, 1, 1)));
+                        schedule.add_phase_after(
+                            &predecessor,
+                            ph,
+                            KernelDomain::Fixed { x: 1, y: 1, z: 1 },
+                        );
+                        predecessor = ph.name.clone();
                     }
                     new_entries.extend(phases);
                 } else {
+                    *entry = original;
                     restore_serial_seg(entry);
                 }
             }
             SegOpKind::SegScan { .. } => {
+                let original = entry.clone();
                 if let Some((phases, swap_wrapper)) = lower_scan_entry(entry, binding_ids) {
-                    for ph in &phases {
-                        // Phase 2 scans the block sums in one workgroup; phase 3
-                        // adds offsets over a chunked dispatch.
-                        let wg = if ph.name.contains("phase2") {
-                            (1, 1, 1)
+                    let mut predecessor = entry.name.clone();
+                    let phase1_domain =
+                        schedule.domain_of(&entry.name).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
+                    for (phase_index, ph) in phases.iter().enumerate() {
+                        let domain = if phase_index == 0 {
+                            KernelDomain::Fixed { x: 1, y: 1, z: 1 }
                         } else {
-                            (REDUCE_PHASE1_WIDTH, 1, 1)
+                            phase1_domain.clone()
                         };
-                        new_phase_stages.push((ph.name.clone(), entry.name.clone(), wg));
+                        schedule.add_phase_after(&predecessor, ph, domain);
+                        predecessor = ph.name.clone();
                     }
                     new_entries.extend(phases);
                     new_functions.push(swap_wrapper);
                 } else {
+                    *entry = original;
                     restore_serial_seg(entry);
                 }
             }
@@ -94,49 +108,23 @@ pub fn lower(inner: &mut EgirInner, binding_ids: &mut crate::IdSource<u32>) {
     inner.entry_points.extend(new_entries);
     inner.functions.extend(new_functions);
 
-    // Each synthesized later phase runs as its own stage in the parent
-    // reduction/scan pipeline, after the chunked phase-1 stage.
-    for (name, parent, workgroup) in new_phase_stages {
-        push_phase_stage(&mut inner.pipeline, &parent, &name, workgroup);
-    }
-
     // Each distinct iteration space is its own kernel (Futhark: one SegOp per
     // SegSpace). An entry holding several pointwise SegMaps over different
     // domains is split into one entry — and one pipeline stage — per domain.
-    let EgirInner {
-        entry_points,
-        pipeline,
-        ..
-    } = inner;
+    let EgirInner { entry_points, .. } = inner;
     let mut split_clones: Vec<EgirEntry> = Vec::new();
     for entry in entry_points.iter_mut() {
-        split_clones.extend(split_multidomain_seg_maps(entry, pipeline));
+        let parent = entry.name.clone();
+        let clones = split_multidomain_seg_maps(entry);
+        for clone in &clones {
+            schedule.add_sibling(&parent, clone, KernelDomain::Fixed { x: 1, y: 1, z: 1 });
+        }
+        split_clones.extend(clones);
     }
     entry_points.extend(split_clones);
-}
-
-/// Append a single-invocation compute stage `name` to the pipeline that backs
-/// `parent`. Used for synthesized reduce phase-2 combine entries, which share
-/// the parent reduction's pipeline (`finalize_compute_io` fills its IO).
-fn push_phase_stage(
-    pipeline: &mut crate::pipeline_descriptor::PipelineDescriptor,
-    parent: &str,
-    name: &str,
-    workgroup: (u32, u32, u32),
-) {
-    use crate::pipeline_descriptor::{ComputeStage, DispatchSize, Pipeline};
-    if let Some(Pipeline::Compute(cp)) = pipeline.pipelines.iter_mut().find(|p| match p {
-        Pipeline::Compute(c) => c.stages.iter().any(|s| s.entry_point == parent),
-        _ => false,
-    }) {
-        cp.stages.push(ComputeStage {
-            entry_point: name.to_string(),
-            workgroup_size: workgroup,
-            dispatch_size: DispatchSize::Fixed { x: 1, y: 1, z: 1 },
-            reads: vec![],
-            writes: vec![],
-        });
-    }
+    schedule.reconcile_entries(entry_points);
+    schedule.coalesce_compiler_dependencies(entry_points);
+    inner.kernel_schedule = schedule;
 }
 
 /// The output slots a side-effect contributes to, found by scanning its operand
@@ -214,10 +202,7 @@ fn restrict_to_group(
 /// keeps the entry's name, the rest become `{name}_dispatch_{slot}`. Only fires
 /// when at least two groups contain a parallel `SegMap`, so a single map
 /// alongside fixed slots stays one sharding kernel. Returns the new clones.
-fn split_multidomain_seg_maps(
-    entry: &mut EgirEntry,
-    pipeline: &mut crate::pipeline_descriptor::PipelineDescriptor,
-) -> Vec<EgirEntry> {
+fn split_multidomain_seg_maps(entry: &mut EgirEntry) -> Vec<EgirEntry> {
     let n_out = entry.outputs.len();
     if n_out <= 1 {
         return Vec::new();
@@ -283,25 +268,12 @@ fn split_multidomain_seg_maps(
     }
     groups.sort_by_key(|(_, slots)| slots[0]);
 
-    use crate::pipeline_descriptor::{ComputeStage, DispatchSize, Pipeline};
     let base_name = entry.name.clone();
     let mut clones = Vec::new();
     for (root, slots) in &groups[1..] {
         let mut clone = entry.clone();
         clone.name = format!("{base_name}_dispatch_{}", slots[0]);
         restrict_to_group(&mut clone, *root, slots, &group_of);
-        if let Some(Pipeline::Compute(cp)) = pipeline.pipelines.iter_mut().find(|p| match p {
-            Pipeline::Compute(c) => c.stages.iter().any(|s| s.entry_point == base_name),
-            _ => false,
-        }) {
-            cp.stages.push(ComputeStage {
-                entry_point: clone.name.clone(),
-                workgroup_size: (64, 1, 1),
-                dispatch_size: DispatchSize::Fixed { x: 1, y: 1, z: 1 },
-                reads: vec![],
-                writes: vec![],
-            });
-        }
         clones.push(clone);
     }
 
@@ -564,7 +536,12 @@ fn chunk_view_like(
         if let Some((orig_start, _, step)) = graph_ops::extract_array_range_operands(graph, view_nid) {
             let has_step = step.is_some();
             let start_ty = graph.types[&orig_start].clone();
-            let new_start = graph_ops::intern_binop(graph, "+", orig_start, chunk_start, start_ty, None);
+            let start_delta = if let Some(step) = step {
+                graph_ops::intern_binop(graph, "*", chunk_start, step, start_ty.clone(), None)
+            } else {
+                chunk_start
+            };
+            let new_start = graph_ops::intern_binop(graph, "+", orig_start, start_delta, start_ty, None);
             let mut ops: smallvec::SmallVec<[NodeId; 4]> = smallvec![new_start, chunk_len];
             if let Some(s) = step {
                 ops.push(s);
@@ -716,7 +693,7 @@ fn build_tree_reduce_phase2(
         args: vec![acc_c, i_next],
     };
 
-    // grid_after(acc_final): shared[lid] = acc_final; barrier; → tree_header(W/2)
+    // grid_after(acc_final): shared[lid] = acc_final; barrier; → tree_header(1)
     let acc_final = graph.add_block_param(grid_after, 0, elem_ty.clone());
     graph.skeleton.blocks[grid_after].params.push(acc_final);
     graph_ops::emit_storage_store(
@@ -730,16 +707,16 @@ fn build_tree_reduce_phase2(
         None,
     );
     graph_ops::emit_workgroup_barrier(graph, grid_after, &mut eff);
-    let w_half = graph_ops::intern_u32(graph, w / 2, None);
     graph.skeleton.blocks[grid_after].term = SkeletonTerminator::Branch {
         target: tree_header,
-        args: vec![w_half],
+        args: vec![one_u32],
     };
 
-    // tree_header(stride): stride > 0 ? tree_body : tree_after
+    // Grow an adjacent-pair tree from stride 1. This preserves source order
+    // for associative, non-commutative operators.
     let stride_in = graph.add_block_param(tree_header, 0, u32_ty.clone());
     graph.skeleton.blocks[tree_header].params.push(stride_in);
-    let stride_cond = graph_ops::intern_binop(graph, ">", stride_in, zero_u32, bool_ty.clone(), None);
+    let stride_cond = graph_ops::intern_binop(graph, "<", stride_in, w_nid, bool_ty.clone(), None);
     graph.skeleton.blocks[tree_header].term = SkeletonTerminator::CondBranch {
         cond: stride_cond,
         then_target: tree_body,
@@ -755,9 +732,12 @@ fn build_tree_reduce_phase2(
         },
     );
 
-    // tree_body: lid < stride ? tree_then : tree_sel_merge  (selection)
+    // Only the first lane in each adjacent pair combines the two runs.
     let graph = b.graph_mut();
-    let active = graph_ops::intern_binop(graph, "<", lid, stride_in, bool_ty.clone(), None);
+    let two = graph_ops::intern_u32(graph, 2, None);
+    let pair_width = graph_ops::intern_binop(graph, "*", stride_in, two, u32_ty.clone(), None);
+    let lane_in_pair = graph_ops::intern_binop(graph, "%", lid, pair_width, u32_ty.clone(), None);
+    let active = graph_ops::intern_binop(graph, "==", lane_in_pair, zero_u32, bool_ty.clone(), None);
     graph.skeleton.blocks[tree_body].term = SkeletonTerminator::CondBranch {
         cond: active,
         then_target: tree_then,
@@ -815,10 +795,9 @@ fn build_tree_reduce_phase2(
         args: vec![],
     };
 
-    // tree_cont: barrier; stride_next = stride/2; → tree_header(stride_next)
+    // tree_cont: barrier; stride_next = stride*2; → tree_header(stride_next)
     graph_ops::emit_workgroup_barrier(graph, tree_cont, &mut eff);
-    let two = graph_ops::intern_u32(graph, 2, None);
-    let stride_next = graph_ops::intern_binop(graph, "/", stride_in, two, u32_ty.clone(), None);
+    let stride_next = graph_ops::intern_binop(graph, "*", stride_in, two, u32_ty.clone(), None);
     graph.skeleton.blocks[tree_cont].term = SkeletonTerminator::Branch {
         target: tree_header,
         args: vec![stride_next],
@@ -876,10 +855,6 @@ fn emit_chunk_arithmetic(
     total_threads: u32,
     input_len: NodeId,
 ) -> Result<(NodeId, NodeId, NodeId), String> {
-    // TODO(parallelize-egir): add an execution-level regression for `n <
-    // dispatched_threads`.  `chunk_start >= input_len` must produce an empty
-    // chunk; an unchecked `input_len - chunk_start` underflows for u32 and can
-    // turn an idle invocation into an out-of-bounds reader.
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     // The chunk arithmetic runs in the input's *index* type: storage-view
     // inputs index in u32 (`_w_intrinsic_storage_len`), Range inputs in the
@@ -922,11 +897,20 @@ fn emit_chunk_arithmetic(
     let total_minus_one = graph_ops::intern_binop(graph, "-", total, one, index_ty.clone(), None);
     let len_plus = graph_ops::intern_binop(graph, "+", input_len, total_minus_one, index_ty.clone(), None);
     let chunk_size = graph_ops::intern_binop(graph, "/", len_plus, total, index_ty.clone(), None);
-    let chunk_start = graph_ops::intern_binop(graph, "*", tid_idx, chunk_size, index_ty.clone(), None);
-    let remaining = graph_ops::intern_binop(graph, "-", input_len, chunk_start, index_ty.clone(), None);
+    let raw_chunk_start = graph_ops::intern_binop(graph, "*", tid_idx, chunk_size, index_ty.clone(), None);
     let min_name = if is_u32 { "u32.min" } else { "i32.min" };
     let min_op =
         catalog().lookup_by_any_name(min_name).ok_or_else(|| format!("{} not in catalog", min_name))?;
+    // Clamp idle workers to the end before subtraction. For n < workers this
+    // produces `(start=n,len=0)` instead of underflowing `n-start`.
+    let chunk_start = graph_ops::intern_intrinsic(
+        graph,
+        min_op.id,
+        smallvec![raw_chunk_start, input_len],
+        index_ty.clone(),
+        None,
+    );
+    let remaining = graph_ops::intern_binop(graph, "-", input_len, chunk_start, index_ty.clone(), None);
     let chunk_len =
         graph_ops::intern_intrinsic(graph, min_op.id, smallvec![chunk_size, remaining], index_ty, None);
     Ok((tid, chunk_start, chunk_len))
@@ -981,6 +965,14 @@ fn emit_storage_len(graph: &mut super::types::EGraph, br: BindingRef) -> NodeId 
     )
 }
 
+fn dispatch_worker_buffer_len(elem_ty: &Type<TypeName>) -> Option<crate::pipeline_descriptor::BufferLen> {
+    crate::ssa::layout::type_byte_size(elem_ty).map(|bytes| {
+        crate::pipeline_descriptor::BufferLen::SameAsDispatch {
+            elem_bytes: bytes as u32,
+        }
+    })
+}
+
 /// Programmatic phase 2 synthesis where the neutral element is a
 /// (possibly compound) pure subgraph cloned from phase 1. Used by the
 /// Screma reduce path for any NE shape (scalar literal, tuple, array,
@@ -1020,7 +1012,11 @@ pub fn synthesize_phase2_reduce_cloning_ne_named(
 ) -> Result<EgirEntry, String> {
     use super::builder::EntryBuilder;
     let mut b = EntryBuilder::new_compute(full_name, (PHASE2_WIDTH, 1, 1));
-    b.declare_intermediate_storage(partials_binding, elem_ty.clone());
+    b.declare_intermediate_storage_sized(
+        partials_binding,
+        elem_ty.clone(),
+        dispatch_worker_buffer_len(&elem_ty),
+    );
     b.declare_output_storage(result_binding, elem_ty.clone());
 
     let init_nid = graph_ops::clone_pure_subgraph(phase1_graph, b.graph_mut(), phase1_ne_nid)?;
@@ -1114,6 +1110,21 @@ fn project_root_index(graph: &super::types::EGraph, value: NodeId, root: NodeId)
     }
 }
 
+fn storage_binding_under(graph: &super::types::EGraph, root: NodeId) -> Option<BindingRef> {
+    let mut seen = std::collections::HashSet::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if !seen.insert(node) {
+            continue;
+        }
+        if let Some(binding) = graph_ops::extract_storage_view_source(graph, node) {
+            return Some(binding);
+        }
+        stack.extend(graph.nodes[node].children());
+    }
+    None
+}
+
 fn lower_reduce_entry(
     entry: &mut EgirEntry,
     binding_ids: &mut crate::IdSource<u32>,
@@ -1147,14 +1158,9 @@ fn lower_reduce_entry(
             return None;
         };
         let n_accs = operators.len();
-        // TODO(parallelize-egir): add a positive test for a SegRed whose map,
-        // step, and/or combine lambda captures a scalar.  Falling back to the
-        // serial Screma is correct today, but the parallel path must eventually
-        // thread these captures through both generated phases.
-        if operators.iter().any(|a| a.step_capture_count != 0 || a.reduce_op_capture_count != 0) {
-            return None;
-        }
-        if map_capture_counts.iter().any(|&c| c != 0) {
+        // Map and step captures remain in the original phase-1 envelope.
+        // Combine captures require an explicit environment on phase 2.
+        if operators.iter().any(|operator| operator.reduce_op_capture_count != 0) {
             return None;
         }
         let n_inputs = input_array_types.len();
@@ -1185,7 +1191,11 @@ fn lower_reduce_entry(
             })
             .collect();
         let init_nids: Vec<NodeId> = operators.iter().map(|op| op.neutral).collect();
-        let base = n_inputs + n_accs;
+        let base = n_inputs
+            + n_accs
+            + map_capture_counts.iter().sum::<usize>()
+            + operators.iter().map(|operator| operator.step_capture_count).sum::<usize>()
+            + operators.iter().map(|operator| operator.reduce_op_capture_count).sum::<usize>();
         let map_view_ops: Vec<usize> = (0..n_maps).map(|m| base + m).collect();
         let result = se.result?;
         let elem_tys: Vec<Type<TypeName>> =
@@ -1203,19 +1213,12 @@ fn lower_reduce_entry(
     };
 
     let n_accs = elem_tys.len();
-    let acc_bindings: Vec<(BindingRef, BindingRef)> = (0..n_accs)
-        .map(|_| {
-            (
-                BindingRef::new(crate::egir::from_tlc::AUTO_STORAGE_SET, binding_ids.next_id()),
-                BindingRef::new(crate::egir::from_tlc::AUTO_STORAGE_SET, binding_ids.next_id()),
-            )
-        })
+    let partial_bindings: Vec<BindingRef> = (0..n_accs)
+        .map(|_| BindingRef::new(crate::egir::from_tlc::AUTO_STORAGE_SET, binding_ids.next_id()))
         .collect();
 
-    // TODO(parallelize-egir): make this lowering transactional and add a test
-    // where a late routing check fails.  All validation must happen before the
-    // first graph mutation so returning `None` can never leave a half-lowered
-    // entry behind.
+    // The caller snapshots the entry before invoking this lowering, so any
+    // late routing failure restores the complete pre-lowering graph.
 
     // 3. Chunk all input views and every map output view; swap them back
     // into the Screma operand list.
@@ -1277,10 +1280,8 @@ fn lower_reduce_entry(
                 continue;
             }
             if keeper_stores[acc_i].is_none() {
-                let orig_bind = se
-                    .operand_nodes
-                    .get(0)
-                    .and_then(|&p| graph_ops::extract_storage_view_source(&entry.graph, p));
+                let orig_bind =
+                    se.operand_nodes.get(0).and_then(|&place| storage_binding_under(&entry.graph, place));
                 keeper_stores[acc_i] = Some((bid, i, orig_bind));
             } else {
                 duplicate_stores.push((bid, i));
@@ -1288,16 +1289,19 @@ fn lower_reduce_entry(
         }
     }
     for (acc_i, slot) in keeper_stores.iter().enumerate() {
-        if slot.is_none() {
-            // No store for this accumulator's tuple field — bail out
-            // (caller falls back to serial via plan = None in another
-            // path; but here we've already partially mutated the entry,
-            // which is a Screma transform bug. Keep this as a hard fail
-            // for diagnosis.)
+        if slot.is_none() || slot.and_then(|(_, _, binding)| binding).is_none() {
+            // No routed store for this accumulator's tuple field. The caller
+            // restores its snapshot and leaves the operation serial.
             let _ = acc_i;
             return None;
         }
     }
+    let result_bindings: Vec<BindingRef> = keeper_stores
+        .iter()
+        .map(|slot| slot.and_then(|(_, _, binding)| binding).expect("checked above"))
+        .collect();
+    let acc_bindings: Vec<(BindingRef, BindingRef)> =
+        partial_bindings.into_iter().zip(result_bindings).collect();
     // Redirect each keeper store.
     for (acc_i, (partials_binding, _)) in acc_bindings.iter().enumerate() {
         let (blk, sx, _) = keeper_stores[acc_i].expect("checked above");
@@ -1341,9 +1345,16 @@ fn lower_reduce_entry(
             binding: *partials_binding,
             role: crate::interface::StorageRole::Intermediate,
             elem_ty: elem_tys[acc_i].clone(),
-            length: None,
+            length: dispatch_worker_buffer_len(&elem_tys[acc_i]),
         });
     }
+    // A compiler-produced scalar (for example a hoisted prepass result) may
+    // also be represented by an Output storage declaration. Phase 1 no longer
+    // writes that binding; phase 2 declares and owns the final write.
+    entry.storage_bindings.retain(|declaration| {
+        declaration.role != crate::interface::StorageRole::Output
+            || !acc_bindings.iter().any(|(_, result_binding)| declaration.binding == *result_binding)
+    });
 
     // 6. Synthesize one phase 2 entry per accumulator. Cloning NEs from
     // the post-mutation graph is harmless — the NE node is pure and
@@ -1393,10 +1404,12 @@ fn lower_scan_entry(
     let (
         op_func,
         reduce_func,
+        map_output_view_ops,
         scan_output_view_op,
         input_view_nid,
         input_view_ty,
         input_elem_ty,
+        step_capture_nodes,
         init_nid,
         elem_ty,
     ) = {
@@ -1418,10 +1431,7 @@ fn lower_scan_entry(
             return None;
         }
         let op = &operators[0];
-        if op.step_capture_count != 0 || op.reduce_op_capture_count != 0 {
-            return None;
-        }
-        if map_capture_counts.iter().any(|&c| c != 0) {
+        if op.reduce_op_capture_count != 0 {
             return None;
         }
         let n_inputs = input_array_types.len();
@@ -1440,19 +1450,27 @@ fn lower_scan_entry(
         let n_maps = map_funcs.len();
         let input_nid = se.operand_nodes[0];
         let init_nid = op.neutral;
-        // Operand layout: `[inputs, init_accs, map_output_views,
-        // acc_output_views]` (captures gated out).
-        let scan_output_view_op = n_inputs + n_accs + n_maps;
+        let map_capture_total = map_capture_counts.iter().sum::<usize>();
+        let step_capture_base = n_inputs + n_accs + map_capture_total;
+        let step_capture_nodes =
+            se.operand_nodes[step_capture_base..step_capture_base + op.step_capture_count].to_vec();
+        let output_view_base = step_capture_base
+            + operators.iter().map(|operator| operator.step_capture_count).sum::<usize>()
+            + operators.iter().map(|operator| operator.reduce_op_capture_count).sum::<usize>();
+        let scan_output_view_op = output_view_base + n_maps;
+        let map_output_view_ops: Vec<usize> = (0..n_maps).map(|map| output_view_base + map).collect();
         let input_ty = entry.graph.types[&input_nid].clone();
         let input_elem = input_elem_types[0].clone();
         let elem = entry.graph.types[&init_nid].clone();
         (
             op.step_func.clone(),
             op.reduce_op_func.clone(),
+            map_output_view_ops,
             scan_output_view_op,
             input_nid,
             input_ty,
             input_elem,
+            step_capture_nodes,
             init_nid,
             elem,
         )
@@ -1468,7 +1486,7 @@ fn lower_scan_entry(
         &mut entry.graph,
         &[(input_view_nid, input_view_ty.clone())],
         total_threads,
-        ChunkInputKind::StorageOnly,
+        ChunkInputKind::StorageOrRange,
         "SegScan",
     )
     .ok()?;
@@ -1478,6 +1496,23 @@ fn lower_scan_entry(
     {
         let se = &mut entry.graph.skeleton.blocks[block_id].side_effects[idx];
         se.operand_nodes[0] = chunked_input_nid;
+    }
+    for (map_index, operand_index) in map_output_view_ops.iter().enumerate() {
+        let original =
+            entry.graph.skeleton.blocks[block_id].side_effects[idx].operand_nodes[*operand_index];
+        let view_ty = entry.graph.types[&original].clone();
+        let chunked_view = chunk_view_like(
+            &mut entry.graph,
+            original,
+            view_ty,
+            chunk_start,
+            chunk_len,
+            ChunkInputKind::StorageOnly,
+            &format!("SegScan map output {map_index}"),
+        )
+        .ok()?;
+        entry.graph.skeleton.blocks[block_id].side_effects[idx].operand_nodes[*operand_index] =
+            chunked_view;
     }
     let (scan_output_storage, orig_scan_output_view_ty) = {
         let se = &entry.graph.skeleton.blocks[block_id].side_effects[idx];
@@ -1507,7 +1542,8 @@ fn lower_scan_entry(
     // final accumulator to `block_sums[tid]`.
     {
         let mut next_effect = graph_ops::next_effect_token(&entry.graph);
-        let reduce_operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![chunked_input_nid, init_nid];
+        let mut reduce_operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![chunked_input_nid, init_nid];
+        reduce_operands.extend(step_capture_nodes.iter().copied());
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![elem_ty.clone()]);
         let screma_nid = graph_ops::emit_pending_soac(
             &mut entry.graph,
@@ -1518,7 +1554,7 @@ fn lower_scan_entry(
                     kind: crate::tlc::ScremaAccumulator::Reduce,
                     step_func: op_func.clone(),
                     reduce_op_func: op_func,
-                    step_capture_count: 0,
+                    step_capture_count: step_capture_nodes.len(),
                     reduce_op_capture_count: 0,
                 }],
                 input_array_types: vec![input_view_ty],
@@ -1570,7 +1606,7 @@ fn lower_scan_entry(
             binding,
             role: crate::interface::StorageRole::Intermediate,
             elem_ty: elem_ty.clone(),
-            length: None,
+            length: dispatch_worker_buffer_len(&elem_ty),
         });
     }
 
@@ -1606,8 +1642,9 @@ fn lower_scan_entry(
     Some((vec![phase2, phase3], swap_wrapper))
 }
 
-/// Synthesize phase 2 of a parallel scan: a single-invocation sequential scan
-/// over `block_sums` writing prefixes into `block_offsets`.
+/// Synthesize phase 2 of a parallel scan: a single-invocation sequential
+/// exclusive scan over `block_sums`. `block_offsets[i]` is the prefix of
+/// blocks strictly before `i`, which phase 3 can safely prepend to chunk `i`.
 pub fn synthesize_phase2_scan(
     entry_name: &str,
     op_func: String,
@@ -1619,9 +1656,32 @@ pub fn synthesize_phase2_scan(
 ) -> Result<EgirEntry, String> {
     use super::builder::EntryBuilder;
     let mut b = EntryBuilder::new_compute(format!("{}_phase2_scan_sums", entry_name), (1, 1, 1));
-    b.declare_intermediate_storage(block_sums_binding, elem_ty.clone());
-    b.declare_intermediate_storage(block_offsets_binding, elem_ty.clone());
+    let scratch_len = dispatch_worker_buffer_len(&elem_ty);
+    b.declare_intermediate_storage_sized(block_sums_binding, elem_ty.clone(), scratch_len.clone());
+    b.declare_intermediate_storage_sized(block_offsets_binding, elem_ty.clone(), scratch_len);
 
+    let init_nid = graph_ops::clone_pure_subgraph(phase1_graph, b.graph_mut(), phase1_ne_nid)?;
+    build_exclusive_scan_phase2(
+        &mut b,
+        op_func,
+        elem_ty,
+        init_nid,
+        block_sums_binding,
+        block_offsets_binding,
+    );
+    Ok(b.build())
+}
+
+fn build_exclusive_scan_phase2(
+    b: &mut super::builder::EntryBuilder,
+    op_func: String,
+    elem_ty: Type<TypeName>,
+    init_nid: NodeId,
+    block_sums_binding: BindingRef,
+    block_offsets_binding: BindingRef,
+) {
+    let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
     let arr_ty = Type::Constructed(
         TypeName::Array,
         vec![
@@ -1631,20 +1691,68 @@ pub fn synthesize_phase2_scan(
             crate::types::no_region(),
         ],
     );
-    let block_sums_view = b.emit_storage_view(block_sums_binding, arr_ty.clone());
-    let block_offsets_view = b.emit_storage_view(block_offsets_binding, arr_ty.clone());
-    let init_nid = graph_ops::clone_pure_subgraph(phase1_graph, b.graph_mut(), phase1_ne_nid)?;
-    b.emit_pending_scan_into(
-        op_func,
-        block_sums_view,
-        arr_ty.clone(),
-        elem_ty,
-        init_nid,
-        vec![],
-        block_offsets_view,
-        arr_ty,
+    let entry_block = b.graph_mut().skeleton.entry;
+    let graph = b.graph_mut();
+    let sums = graph_ops::intern_storage_view(graph, block_sums_binding, arr_ty.clone(), None);
+    let offsets = graph_ops::intern_storage_view(graph, block_offsets_binding, arr_ty, None);
+    let len = emit_storage_len(graph, block_sums_binding);
+    let zero = graph_ops::intern_u32(graph, 0, None);
+    let one = graph_ops::intern_u32(graph, 1, None);
+    let mut effect = graph_ops::next_effect_token(graph);
+
+    let header = graph.skeleton.create_block();
+    let body = graph.skeleton.create_block();
+    let cont = graph.skeleton.create_block();
+    let after = graph.skeleton.create_block();
+    let acc = graph.add_block_param(header, 0, elem_ty.clone());
+    graph.skeleton.blocks[header].params.push(acc);
+    let index = graph.add_block_param(header, 1, u32_ty.clone());
+    graph.skeleton.blocks[header].params.push(index);
+    graph.skeleton.blocks[entry_block].term = SkeletonTerminator::Branch {
+        target: header,
+        args: vec![init_nid, zero],
+    };
+    let condition = graph_ops::intern_binop(graph, "<", index, len, bool_ty, None);
+    graph.skeleton.blocks[header].term = SkeletonTerminator::CondBranch {
+        cond: condition,
+        then_target: body,
+        then_args: vec![],
+        else_target: after,
+        else_args: vec![],
+    };
+    b.control_headers_mut().insert(
+        header,
+        ControlHeader::Loop {
+            merge: after,
+            continue_block: cont,
+        },
     );
-    Ok(b.build())
+
+    let graph = b.graph_mut();
+    graph_ops::emit_storage_store(
+        graph,
+        body,
+        offsets,
+        index,
+        acc,
+        elem_ty.clone(),
+        &mut effect,
+        None,
+    );
+    let value = graph_ops::emit_view_load(graph, body, sums, index, elem_ty.clone(), &mut effect, None);
+    let next_acc = graph.intern_pure(PureOp::Call(op_func), smallvec![acc, value], elem_ty);
+    graph.skeleton.blocks[body].term = SkeletonTerminator::Branch {
+        target: cont,
+        args: vec![next_acc],
+    };
+    let continued_acc = graph.add_block_param(cont, 0, graph.types[&acc].clone());
+    graph.skeleton.blocks[cont].params.push(continued_acc);
+    let next_index = graph_ops::intern_binop(graph, "+", index, one, u32_ty, None);
+    graph.skeleton.blocks[cont].term = SkeletonTerminator::Branch {
+        target: header,
+        args: vec![continued_acc, next_index],
+    };
+    b.set_current_block(after);
 }
 
 /// Synthesize phase 3 of a parallel scan: a chunked compute entry where each
@@ -1667,7 +1775,11 @@ pub fn synthesize_phase3_scan(
         (total_threads, 1, 1),
     );
     b.declare_output_storage(output_binding, elem_ty.clone());
-    b.declare_intermediate_storage(block_offsets_binding, elem_ty.clone());
+    b.declare_intermediate_storage_sized(
+        block_offsets_binding,
+        elem_ty.clone(),
+        dispatch_worker_buffer_len(&elem_ty),
+    );
 
     let arr_ty = Type::Constructed(
         TypeName::Array,
@@ -1812,5 +1924,59 @@ mod tests {
         let mut graph = EGraph::new();
         let neutrals = [neutral(&mut graph, 0), neutral(&mut graph, 1)];
         assert!(reify_seg_kind(&accumulators, &neutrals).is_none());
+    }
+
+    #[test]
+    fn idle_chunk_start_is_clamped_before_remaining_subtraction() {
+        let mut graph = EGraph::new();
+        let len = graph.add_func_param(0, Type::Constructed(TypeName::UInt(32), vec![]));
+        let (_, start, _) =
+            emit_chunk_arithmetic(&mut graph, REDUCE_PHASE1_WIDTH, len).expect("u32 chunk arithmetic");
+        assert!(matches!(
+            &graph.nodes[start],
+            super::super::types::ENode::Pure {
+                op: PureOp::Intrinsic { .. },
+                operands,
+            } if operands.as_slice().last() == Some(&len)
+        ));
+    }
+
+    #[test]
+    fn scan_phase2_writes_exclusive_prefix_before_combining_current_block() {
+        let elem_ty = Type::Constructed(TypeName::Int(32), vec![]);
+        let mut phase1 = EGraph::new();
+        let neutral = phase1.intern_pure(PureOp::Int("0".into()), smallvec![], elem_ty.clone());
+        let sums = BindingRef::new(0, 40);
+        let offsets = BindingRef::new(0, 41);
+        let phase2 = synthesize_phase2_scan(
+            "prefix",
+            "combine".into(),
+            elem_ty,
+            &phase1,
+            neutral,
+            sums,
+            offsets,
+        )
+        .expect("phase2 synthesis");
+
+        let stored_value = phase2
+            .graph
+            .skeleton
+            .blocks
+            .iter()
+            .flat_map(|(_, block)| &block.side_effects)
+            .find_map(|effect| {
+                if !matches!(effect.kind, SideEffectKind::Inst(InstKind::Store { .. })) {
+                    return None;
+                }
+                let place = *effect.operand_nodes.first()?;
+                (storage_binding_under(&phase2.graph, place) == Some(offsets))
+                    .then(|| effect.operand_nodes[1])
+            })
+            .expect("block-offset store");
+        assert!(matches!(
+            phase2.graph.nodes[stored_value],
+            super::super::types::ENode::BlockParam { .. }
+        ));
     }
 }

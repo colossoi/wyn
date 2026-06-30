@@ -228,6 +228,240 @@ entry sum(xs: []f32) f32 =
     );
 }
 
+#[test]
+fn parallel_reduce_descriptor_wires_partials_and_original_output() {
+    use crate::pipeline_descriptor::{Binding, BufferLen, BufferUsage, Pipeline};
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry sum(xs: []f32) f32 = reduce(|a: f32, b: f32| a + b, 0.0, xs)
+"#,
+    )
+    .expect("parallel reduction compiles");
+    let compute = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .find_map(|pipeline| match pipeline {
+            Pipeline::Compute(compute) if compute.stages.iter().any(|stage| stage.entry_point == "sum") => {
+                Some(compute)
+            }
+            _ => None,
+        })
+        .expect("sum compute pipeline");
+    assert_eq!(compute.stages.len(), 2, "phase 1 plus phase 2");
+    let partial_index = compute
+        .bindings
+        .iter()
+        .position(|binding| {
+            matches!(
+                binding,
+                Binding::StorageBuffer {
+                    usage: BufferUsage::Intermediate,
+                    length: Some(BufferLen::SameAsDispatch { .. }),
+                    ..
+                }
+            )
+        })
+        .expect("dispatch-sized partial buffer is published");
+    let output_index = compute
+        .bindings
+        .iter()
+        .position(|binding| {
+            matches!(
+                binding,
+                Binding::StorageBuffer {
+                    usage: BufferUsage::Output,
+                    name,
+                    ..
+                } if name == "sum_output"
+            )
+        })
+        .expect("original host output remains published");
+    assert!(compute.stages[0].writes.contains(&partial_index));
+    assert!(compute.stages[1].reads.contains(&partial_index));
+    assert!(compute.stages[1].writes.contains(&output_index));
+}
+
+#[test]
+fn mapped_reduce_with_phase1_capture_stays_parallel() {
+    use crate::pipeline_descriptor::Pipeline;
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry scaled_sum(xs: []i32, scale: i32) i32 =
+  reduce(|a: i32, b: i32| a + b, 0, map(|x: i32| x * scale, xs))
+"#,
+    )
+    .expect("capturing mapped reduction compiles");
+    let stages = lowered.pipeline.pipelines.iter().find_map(|pipeline| match pipeline {
+        Pipeline::Compute(compute)
+            if compute.stages.iter().any(|stage| stage.entry_point == "scaled_sum") =>
+        {
+            Some(&compute.stages)
+        }
+        _ => None,
+    });
+    assert_eq!(stages.expect("scaled_sum pipeline").len(), 2);
+}
+
+#[test]
+fn parallel_scan_descriptor_wires_three_phases_and_scratch() {
+    use crate::pipeline_descriptor::{Binding, BufferLen, BufferUsage, Pipeline};
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)
+"#,
+    )
+    .expect("parallel scan compiles");
+    let compute = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .find_map(|pipeline| match pipeline {
+            Pipeline::Compute(compute)
+                if compute.stages.iter().any(|stage| stage.entry_point == "prefix") =>
+            {
+                Some(compute)
+            }
+            _ => None,
+        })
+        .expect("prefix compute pipeline");
+    assert_eq!(
+        compute.stages.len(),
+        3,
+        "chunk scan, exclusive block scan, offset application"
+    );
+    let scratch: Vec<usize> = compute
+        .bindings
+        .iter()
+        .enumerate()
+        .filter_map(|(index, binding)| {
+            matches!(
+                binding,
+                Binding::StorageBuffer {
+                    usage: BufferUsage::Intermediate,
+                    length: Some(BufferLen::SameAsDispatch { .. }),
+                    ..
+                }
+            )
+            .then_some(index)
+        })
+        .collect();
+    assert_eq!(scratch.len(), 2, "block sums and exclusive block offsets");
+    for index in scratch {
+        assert!(compute.stages.iter().any(|stage| stage.writes.contains(&index)));
+        assert!(compute.stages.iter().any(|stage| stage.reads.contains(&index)));
+    }
+}
+
+#[test]
+fn mapped_scan_with_phase1_capture_stays_parallel() {
+    use crate::pipeline_descriptor::Pipeline;
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry scaled_prefix(xs: []i32, scale: i32) []i32 =
+  scan(|a: i32, b: i32| a + b, 0, map(|x: i32| x * scale, xs))
+"#,
+    )
+    .expect("capturing mapped scan compiles");
+    let stages = lowered.pipeline.pipelines.iter().find_map(|pipeline| match pipeline {
+        Pipeline::Compute(compute)
+            if compute.stages.iter().any(|stage| stage.entry_point == "scaled_prefix") =>
+        {
+            Some(&compute.stages)
+        }
+        _ => None,
+    });
+    assert_eq!(stages.expect("scaled_prefix pipeline").len(), 3);
+}
+
+#[test]
+fn range_map_dispatch_uses_range_length() {
+    use crate::pipeline_descriptor::{DispatchLen, DispatchSize, Pipeline};
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry generated() []i32 = map(|i: i32| i + 1, 0i32..<2048)
+"#,
+    )
+    .expect("range map compiles");
+    let stage = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .find_map(|pipeline| match pipeline {
+            Pipeline::Compute(compute) => {
+                compute.stages.iter().find(|stage| stage.entry_point == "generated")
+            }
+            _ => None,
+        })
+        .expect("generated stage");
+    assert_eq!(
+        stage.dispatch_size,
+        DispatchSize::DerivedFrom {
+            len: DispatchLen::Fixed { count: 2048 },
+            workgroup_size: 64,
+        }
+    );
+}
+
+#[test]
+fn scalar_prepass_and_consumer_share_one_scheduled_pipeline() {
+    use crate::pipeline_descriptor::Pipeline;
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry add_sum(xs: []i32) []i32 =
+  let total = reduce(|a: i32, b: i32| a + b, 0, xs) in
+  map(|x: i32| x + total, xs)
+"#,
+    )
+    .expect("scalar prepass feeding a map compiles");
+
+    let matching: Vec<_> = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .filter_map(|pipeline| match pipeline {
+            Pipeline::Compute(compute)
+                if compute.stages.iter().any(|stage| {
+                    stage.entry_point == "add_sum" || stage.entry_point.starts_with("add_sum_prepass_")
+                }) =>
+            {
+                Some(compute)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "compiler producer and consumer must share one binding table"
+    );
+    let stages = &matching[0].stages;
+    assert_eq!(
+        stages.len(),
+        3,
+        "two reduction phases followed by the map consumer"
+    );
+    assert!(stages[0].entry_point.starts_with("add_sum_prepass_"));
+    assert!(stages[1].entry_point.contains("phase2"));
+    assert_eq!(stages[2].entry_point, "add_sum");
+    let handoff = stages[1]
+        .writes
+        .iter()
+        .copied()
+        .find(|binding| stages[2].reads.contains(binding))
+        .expect("phase 2 result feeds the map consumer");
+    assert!(
+        !stages[0].writes.contains(&handoff),
+        "phase 1 writes partials, not the final scalar handoff"
+    );
+}
+
 // =============================================================================
 // Phase 2 regression: unbound `Var(Symbol(sym))` references through TLC passes
 // =============================================================================
@@ -1762,9 +1996,6 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32)
 /// scope before defunctionalization attaches the composed map/reduce capture.
 #[test]
 fn test_graphical_fused_reduce_carries_local_scalar_into_prepass() {
-    // TODO(parallelize-egir): strengthen this beyond "compiles": inspect the
-    // generated schedule/SSA and assert that the reduction is still parallel.
-    // A serial fallback also compiles and would make this regression toothless.
     let source = r#"
 def globalData: [12]f32 = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0]
 
@@ -1780,7 +2011,7 @@ entry vertex_main(#[builtin(vertex_index)] vid: i32)
   @[total, 0.0, 0.0, 1.0]
 "#;
 
-    compile_to_spirv(source).expect(
+    crate::compile_thru_spirv(source).expect(
         "a fused graphical reduce must carry its invariant local scalar into \
          the generated pre-pass instead of emitting an unresolved global",
     );
@@ -3828,14 +4059,14 @@ entry gen(bh: []vec4f32) []i32 =
     else {
         unreachable!()
     };
-    // The pre-pass writes the gather binding as its EntryOutput — that
-    // shows up as `WriteOnly` in the producer pipeline. `publish` then
-    // promotes any `ReadOnly` consumer reference of a module-written
-    // binding to `ReadWrite` (see the consumer assertion below), so
-    // wgpu/Naga sees consistent module-level access. `WriteOnly` is
-    // already `read_only=false` at the wgpu layer, so the producer side
-    // doesn't need widening.
-    assert_eq!(*access, Access::WriteOnly, "pre-pass writes the gather buffer");
+    // Producer and consumer are phases of one scheduled pipeline and share
+    // one binding table. The intermediate therefore carries their combined
+    // access; stage-level `reads`/`writes` below retain the precise direction.
+    assert_eq!(
+        *access,
+        Access::ReadWrite,
+        "gather phases share a read/write binding"
+    );
     assert_eq!(
         length.as_ref(),
         Some(&BufferLen::LikeInput {
@@ -3846,6 +4077,41 @@ entry gen(bh: []vec4f32) []i32 =
         }),
         "gather buffer must be sized from its input array's element count"
     );
+
+    let shared_pipeline = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .find_map(|pipeline| match pipeline {
+            crate::pipeline_descriptor::Pipeline::Compute(compute)
+                if compute.stages.iter().any(|stage| stage.entry_point == gather_entry) =>
+            {
+                Some(compute)
+            }
+            _ => None,
+        })
+        .expect("gather pipeline");
+    let gather_index = shared_pipeline
+        .bindings
+        .iter()
+        .position(|binding| {
+            matches!(binding, Binding::StorageBuffer { binding, .. } if binding == gather_binding)
+        })
+        .expect("gather binding index");
+    assert!(shared_pipeline
+        .stages
+        .iter()
+        .find(|stage| stage.entry_point == gather_entry)
+        .expect("gather producer stage")
+        .writes
+        .contains(&gather_index));
+    assert!(shared_pipeline
+        .stages
+        .iter()
+        .find(|stage| stage.entry_point == "gen")
+        .expect("gather consumer stage")
+        .reads
+        .contains(&gather_index));
 
     // The consumer reads that same binding as an Intermediate. Access is
     // `ReadWrite` because of the module-level promotion described above —

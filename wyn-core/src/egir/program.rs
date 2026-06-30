@@ -20,6 +20,7 @@ use crate::ssa::types::{
     BlockId, Constant, ControlHeader, EntryInput, EntryOutput, ExecutionModel, Function,
 };
 
+use super::parallelize::schedule::KernelSchedule;
 use super::types::{EGraph, NodeId};
 
 pub struct EgirFunc {
@@ -135,6 +136,10 @@ pub struct EgirInner {
     pub entry_points: Vec<EgirEntry>,
     pub constants: Vec<Constant>,
     pub pipeline: PipelineDescriptor,
+    /// Concrete compute schedule produced after segmented-operation lowering.
+    /// It remains attached to EGIR so later passes and descriptor publication
+    /// consume the same phase/resource graph instead of rediscovering it.
+    pub kernel_schedule: KernelSchedule,
 }
 
 impl EgirInner {
@@ -151,6 +156,7 @@ impl EgirInner {
             entry_points,
             constants,
             pipeline,
+            kernel_schedule: KernelSchedule::default(),
         }
     }
 
