@@ -6,7 +6,7 @@
 //!
 //! Loop creation and storage lowering stay in SSA (`to_ssa` + `soac_lower`).
 
-use super::closure_convert::{collect_free_vars, compute_free_vars};
+use super::closure_convert::compute_free_vars;
 use super::VarRef;
 use crate::ast::{self, TypeName};
 use crate::builtins::catalog;
@@ -177,37 +177,12 @@ pub(crate) struct RequiredParam {
     pub binding: Option<interface::EntryParamBinding>,
 }
 
-/// Result of analyzing a compute entry point.
+/// Result of analyzing a compute entry point: its recognized tail SOAC. EGIR
+/// derives domains, dependencies, and per-slot lowering from the entry's
+/// `slot_sources`, so recognition keeps only the SOAC classification.
 #[derive(Debug, Clone)]
 struct EntryAnalysis {
-    // TODO(parallelize-egir): once EGIR derives domains and dependencies from
-    // `slot_sources`, delete the legacy lowering-only fields below (and their
-    // unused imports/helpers) under a warning-free build test.  Keeping a dead
-    // shadow planner here risks the TLC and EGIR analyses drifting apart.
-    pub def_name: SymbolId,
     pub soac: SoacAnalysis,
-    /// Let-bound symbol whose RHS was followed to find the tail SOAC.
-    /// Preserved so ordered-prefix scheduling can distinguish work that
-    /// must run after the tail has materialized its output buffer.
-    pub tail_alias: Option<(SymbolId, Type<TypeName>)>,
-    /// Let-binding prefix before the SOAC.
-    pub prefix_lets: Vec<(SymbolId, Type<TypeName>, Term)>,
-    /// The subset of the original entry's params that the SOAC and
-    /// `prefix_lets` actually reference, each annotated with its
-    /// original attribute + `EntryParamBinding`. Phase entries must
-    /// re-declare these as params so the references don't leak out as
-    /// free globals during SPIR-V emission.
-    pub required_params: Vec<RequiredParam>,
-    /// `(slot_index, value)` for each output slot whose value isn't
-    /// the SOAC itself. The SOAC consumes slot 0's value; remaining
-    /// `OutputSlotStore` terms from the post-SOAC let-chain land here
-    /// so the TLC-side two-phase synthesis can append direct
-    /// `storage_store` calls for them to phase 2's body.
-    pub extra_slots: Vec<(usize, Term)>,
-    /// Every normalized output slot after following direct local aliases to
-    /// SOAC producers. Downstream per-slot planning consumes this canonical
-    /// list instead of rediscovering the original syntax from the source def.
-    pub output_slots: Vec<(usize, Term)>,
 }
 
 // =============================================================================
@@ -264,7 +239,6 @@ fn analyze_program(program: &Program) -> StableMap<SymbolId, EntryAnalysis> {
 enum ScopeFrame {
     LambdaParam {
         sym: SymbolId,
-        ty: Type<TypeName>,
     },
     Let {
         sym: SymbolId,
@@ -280,11 +254,8 @@ struct ScopeStack {
 
 impl ScopeStack {
     fn push_lambda_params<'a>(&mut self, params: impl IntoIterator<Item = &'a (SymbolId, Type<TypeName>)>) {
-        for (s, t) in params {
-            self.frames.push(ScopeFrame::LambdaParam {
-                sym: *s,
-                ty: t.clone(),
-            });
+        for (s, _) in params {
+            self.frames.push(ScopeFrame::LambdaParam { sym: *s });
         }
     }
     fn push_let(&mut self, sym: SymbolId, ty: Type<TypeName>, rhs: Term) {
@@ -309,34 +280,12 @@ impl ScopeStack {
     fn is_lambda_param(&self, sym: SymbolId) -> bool {
         self.frames.iter().any(|f| matches!(f, ScopeFrame::LambdaParam { sym: s, .. } if *s == sym))
     }
-    /// Return captured Lambda params in insertion order (outermost first).
-    fn captured_params(&self) -> Vec<(SymbolId, Type<TypeName>)> {
-        self.frames
-            .iter()
-            .filter_map(|f| match f {
-                ScopeFrame::LambdaParam { sym, ty } => Some((*sym, ty.clone())),
-                _ => None,
-            })
-            .collect()
-    }
-    /// Consume the stack and return its `Let` frames in insertion order
-    /// (outermost first), i.e. the `prefix_lets` array for the phase bodies.
-    fn into_prefix_lets(self) -> Vec<(SymbolId, Type<TypeName>, Term)> {
-        self.frames
-            .into_iter()
-            .filter_map(|f| match f {
-                ScopeFrame::Let { sym, ty, rhs } => Some((sym, ty, rhs)),
-                _ => None,
-            })
-            .collect()
-    }
 }
 
 fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
     let mut scope = ScopeStack::default();
     let mut current: Term = def.body.clone();
     let mut extra_slots: Vec<(usize, Term)> = Vec::new();
-    let mut output_slots: Vec<(usize, Term)> = Vec::new();
     let mut tail_alias: Option<(SymbolId, Type<TypeName>)> = None;
 
     // The entry's binding layout, which resolves `Ref(Var(sym))` SOAC inputs
@@ -407,9 +356,6 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
                             let _ = scope.remove_let(*symbol);
                         }
                     }
-                    output_slots =
-                        std::iter::once((0, slot0_value.clone())).chain(siblings.iter().cloned()).collect();
-
                     let sibling_soac_count =
                         siblings.iter().filter(|(_, v)| is_soac_output_candidate(v, &scope)).count();
                     let sibling_map_count =
@@ -492,25 +438,7 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
             }
             TermKind::Soac(soac) => {
                 let parallelizable = analyze_soac(&soac, &ty, symbols, &entry_slots)?;
-                let captured_params = scope.captured_params();
-                let prefix_lets = scope.into_prefix_lets();
-                let required_params = compute_required_params(
-                    &parallelizable,
-                    &prefix_lets,
-                    &extra_slots,
-                    &captured_params,
-                    def,
-                    symbols,
-                );
-                return Some(EntryAnalysis {
-                    def_name: def.name,
-                    soac: parallelizable,
-                    tail_alias,
-                    prefix_lets,
-                    required_params,
-                    extra_slots,
-                    output_slots,
-                });
+                return Some(EntryAnalysis { soac: parallelizable });
             }
             TermKind::Var(VarRef::Symbol(sym)) => {
                 // Var-follow: the tail is an alias. If `sym` is an entry
@@ -640,125 +568,6 @@ pub(crate) fn collect_extra_slot_stores(term: &Term, out: &mut Vec<(usize, Term)
     }
 }
 
-/// Compute the subset of outer entry params that the tail SOAC + retained
-/// prefix_lets actually reference, each annotated with the attribute +
-/// `EntryParamBinding` carried forward from the original entry. Phase
-/// entries must re-declare these as params (or the references leak out
-/// as undefined globals during SPIR-V emission) AND reproduce the
-/// original binding metadata (or a runtime-sized array param falls into
-/// EGIR's push-constant path and fails its static-layout check).
-///
-/// Reuses `closure_convert::collect_free_vars` with empty `top_level` /
-/// `known_defs` sets — no top-level filtering, just "bound vs free"
-/// within the fragment we walk.
-fn compute_required_params(
-    soac: &SoacAnalysis,
-    prefix_lets: &[(SymbolId, Type<TypeName>, Term)],
-    extra_slots: &[(usize, Term)],
-    captured_params: &[(SymbolId, Type<TypeName>)],
-    def: &Def,
-    symbols: &SymbolTable,
-) -> Vec<RequiredParam> {
-    use crate::LookupSet;
-    let empty_top: LookupSet<SymbolId> = LookupSet::new();
-    let empty_defs: LookupSet<String> = LookupSet::new();
-    let mut bound: LookupSet<SymbolId> = LookupSet::new();
-    let mut free: Vec<Term> = Vec::new();
-    let mut seen: LookupSet<SymbolId> = LookupSet::new();
-
-    // Each prefix RHS is evaluated with all *previous* prefix names in
-    // scope. The SOAC sees the full prefix in scope.
-    for (name, _ty, rhs) in prefix_lets {
-        collect_free_vars(
-            rhs,
-            &bound,
-            &empty_top,
-            &empty_defs,
-            symbols,
-            &mut free,
-            &mut seen,
-        );
-        bound.insert(*name);
-    }
-    // Wrap the SOAC in a throwaway Term so we can reuse the same walker.
-    // `collect_free_vars` reads the term's `kind` and structure but never
-    // queries the id; a local TermIdSource keeps the "no placeholders"
-    // invariant without threading a source down through the analysis API.
-    let mut throwaway_ids = TermIdSource::new();
-    let soac_term = Term {
-        id: throwaway_ids.next_id(),
-        ty: Type::Variable(0),
-        span: ast::Span::new(0, 0, 0, 0),
-        kind: TermKind::Soac(soac.original.clone()),
-    };
-    collect_free_vars(
-        &soac_term,
-        &bound,
-        &empty_top,
-        &empty_defs,
-        symbols,
-        &mut free,
-        &mut seen,
-    );
-
-    // Sibling slot values evaluate in phase 2 alongside the reduce
-    // result store; their free vars must also be re-declared on the
-    // phase entries.
-    for (_, sval) in extra_slots {
-        collect_free_vars(
-            sval,
-            &bound,
-            &empty_top,
-            &empty_defs,
-            symbols,
-            &mut free,
-            &mut seen,
-        );
-    }
-
-    let free_syms: LookupSet<SymbolId> = free
-        .iter()
-        .filter_map(
-            |t| {
-                if let TermKind::Var(VarRef::Symbol(s)) = &t.kind {
-                    Some(*s)
-                } else {
-                    None
-                }
-            },
-        )
-        .collect();
-
-    // Zip in each captured param's attribute and `EntryParamBinding`
-    // from the original entry. `peel_lambda_params` indexes the entry
-    // body's outer Lambda; that index aligns with `EntryDecl.params`
-    // and `EntryDecl.param_bindings`.
-    let decl = match &def.meta {
-        DefMeta::EntryPoint(d) => Some(d),
-        _ => None,
-    };
-    let (orig_params, _) = peel_lambda_params(&def.body);
-
-    captured_params
-        .iter()
-        .filter(|(s, _)| free_syms.contains(s))
-        .map(|(sym, ty)| {
-            let orig_idx = orig_params.iter().position(|(s, _)| s == sym);
-            let attr = decl
-                .and_then(|d| orig_idx.and_then(|i| d.params.get(i)))
-                .and_then(forwardable_binding_attribute);
-            let binding =
-                decl.and_then(|d| orig_idx.and_then(|i| d.param_bindings.get(i).cloned())).flatten();
-            RequiredParam {
-                sym: *sym,
-                ty: ty.clone(),
-                attr,
-                binding,
-            }
-        })
-        .collect()
-}
-
 /// Find the first `#[storage]` / `#[uniform]` / `#[texture]` / `#[sampler]`
 /// / `#[storage_image]` attribute on an entry-param pattern, peeling
 /// through `Typed` and `Attributed` wrappers to reach it. Phase entries
@@ -874,37 +683,6 @@ fn analyze_soac(
         original: normalized,
         provenances,
     })
-}
-
-fn binop(
-    op: &str,
-    lhs: Term,
-    rhs: Term,
-    ty: Type<TypeName>,
-    span: ast::Span,
-    term_ids: &mut TermIdSource,
-) -> Term {
-    let func = Term {
-        id: term_ids.next_id(),
-        ty: Type::Constructed(
-            TypeName::Arrow,
-            vec![
-                ty.clone(),
-                Type::Constructed(TypeName::Arrow, vec![ty.clone(), ty.clone()]),
-            ],
-        ),
-        span,
-        kind: TermKind::BinOp(ast::BinaryOp { op: op.to_string() }),
-    };
-    Term {
-        id: term_ids.next_id(),
-        ty,
-        span,
-        kind: TermKind::App {
-            func: Box::new(func),
-            args: vec![lhs, rhs],
-        },
-    }
 }
 
 fn classify_input(input: &ArrayExpr, entry_slots: &[Option<EntryParamBinding>]) -> Option<ArrayProvenance> {

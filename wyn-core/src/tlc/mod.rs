@@ -1225,19 +1225,6 @@ impl Term {
         }
     }
 
-    /// Deep-clone this term, assigning a fresh `TermId` to every node so the
-    /// copy shares no ids with the original — needed when splicing a term into
-    /// more than one position (e.g. substituting a replacement at several sites).
-    pub(crate) fn clone_with_fresh_ids(&self, term_ids: &mut TermIdSource) -> Term {
-        let mut cloned = self.clone().map_children(&mut |child| {
-            let mut child = child.map_children(&mut |grandchild| grandchild.clone_with_fresh_ids(term_ids));
-            child.id = term_ids.next_id();
-            child
-        });
-        cloned.id = term_ids.next_id();
-        cloned
-    }
-
     /// Visit every immediate `Term` child by reference. This is the by-ref
     /// counterpart to `map_children` — use it for analysis passes that
     /// inspect without transforming.

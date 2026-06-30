@@ -133,21 +133,6 @@ where
     }
 }
 
-/// Replace every free occurrence of `old` with a fresh-id clone of `replacement`.
-pub(crate) fn substitute_term_expr(
-    term: Term,
-    old: SymbolId,
-    replacement: &Term,
-    term_ids: &mut TermIdSource,
-) -> Term {
-    substitute_core(
-        term,
-        old,
-        &mut |_occurrence, ids| replacement.clone_with_fresh_ids(ids),
-        term_ids,
-    )
-}
-
 /// Rename all free occurrences of `old` to `new` in a term, respecting
 /// shadowing by Let names, Lambda params, and Loop vars. Each renamed
 /// occurrence keeps its own type/span (a rename doesn't change the value's
