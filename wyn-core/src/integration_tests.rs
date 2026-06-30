@@ -1461,6 +1461,62 @@ entry sim(#[storage(set=2, binding=1, access=write)] fb: *[]u32, pos: []u32) []u
     );
 }
 
+/// When a multi-output entry splits across distinct output domains, a shared
+/// effectful side-effect (a `scatter` and the in-place clear / producer maps
+/// feeding it) must run in exactly one of the split kernels — not be duplicated
+/// into every clone, which would apply the scatter once per dispatch. The
+/// scatter and its serial producers lower to loops; the other domain's map
+/// kernel is loop-free, so exactly one compute entry contains a loop. Producers
+/// orphaned in the non-host clone are dead-code pruned, so that clone stays
+/// loop-free.
+#[test]
+fn multidomain_split_runs_shared_scatter_in_one_kernel() {
+    use crate::pipeline_descriptor::Pipeline;
+    use crate::ssa::types::ControlHeader;
+    let src = r#"
+#[compute]
+entry r(a: []u32, b: []u32, #[storage(set=2, binding=0, access=write)] fb: *[]u32, pos: []u32)
+  ([]u32, []u32) =
+  let cleared = map(|_p: u32| 0u32, fb) in
+  let idxs = map(|p: u32| i32.u32(p), pos) in
+  let vals = map(|_p: u32| 1u32, pos) in
+  let _ = scatter(cleared, idxs, vals) in
+  (map(|x: u32| x + 1u32, a), map(|y: u32| y + 2u32, b))
+"#;
+
+    // Two distinct output domains → two map kernels.
+    let lowered = crate::compile_thru_spirv(src).expect("multidomain split + shared scatter compiles");
+    let compute = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .find_map(|p| match p {
+            Pipeline::Compute(c) => Some(c),
+            _ => None,
+        })
+        .expect("one compute pipeline");
+    assert_eq!(
+        compute.stages.len(),
+        2,
+        "the two map outputs split into two stages; stages = {:?}",
+        compute.stages.iter().map(|s| &s.entry_point).collect::<Vec<_>>()
+    );
+
+    // The shared scatter (a serial loop) plus its serial producers live in
+    // exactly one kernel; the other map kernel is loop-free after pruning.
+    let program = compile_to_ssa(src);
+    let entries_with_loops = program
+        .entry_points
+        .iter()
+        .filter(|e| e.body.control_headers.values().any(|h| matches!(h, ControlHeader::Loop { .. })))
+        .count();
+    assert_eq!(
+        entries_with_loops, 1,
+        "the shared scatter must run in exactly one split kernel, not be duplicated; \
+         entries with loops = {entries_with_loops}"
+    );
+}
+
 /// A compute entry returning a tuple of pointwise maps over *different*
 /// runtime-sized inputs splits into one parallel stage per output slot, each
 /// dispatched over its own input's length. The two slots have independent

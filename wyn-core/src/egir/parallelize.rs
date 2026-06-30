@@ -167,6 +167,36 @@ fn is_seg_map(se: &SideEffect) -> bool {
     )
 }
 
+/// True when the side-effect writes externally observable state: a `scatter`, a
+/// `filter` (compacted output + length cell), a SOAC writing a non-`Fresh`
+/// buffer (an `OutputView` output or an in-place `InputBuffer`), or a `Store`.
+/// Such an effect must run in exactly one kernel when an entry splits across
+/// output domains, and it is never dead-code-pruned. Pure producers (`Fresh`
+/// SOACs, `Load`, `ViewIndex`) are safe to duplicate because each split kernel
+/// recomputes what it consumes.
+fn is_write_effectful(se: &SideEffect) -> bool {
+    match &se.kind {
+        SideEffectKind::Pending(PendingSoac::Scatter { .. } | PendingSoac::Filter { .. }) => true,
+        SideEffectKind::Pending(
+            PendingSoac::Screma {
+                map_destinations,
+                acc_destinations,
+                ..
+            }
+            | PendingSoac::Seg {
+                map_destinations,
+                acc_destinations,
+                ..
+            },
+        ) => map_destinations
+            .iter()
+            .chain(acc_destinations)
+            .any(|d| matches!(d, SoacDestination::OutputView | SoacDestination::InputBuffer)),
+        SideEffectKind::Inst(InstKind::Store { .. }) => true,
+        _ => false,
+    }
+}
+
 /// Restrict `entry` to one domain group: keep the side-effects whose group is
 /// `keep_group` (plus the shared ones, group `None`), drop the rest, and narrow
 /// `outputs` to that group's slots. Dropped kernels are no longer emitted; their
@@ -191,6 +221,62 @@ fn restrict_to_group(
         }
     }
     entry.outputs = keep_slots.iter().map(|&s| entry.outputs[s].clone()).collect();
+}
+
+/// Remove pure producer side-effects left dead by a split. A side-effect is
+/// dead when it isn't `is_write_effectful` and its result is read by nothing
+/// that remains — no other side-effect's operands, no terminator. Iterated to a
+/// fixpoint so a chain of producers (a map feeding a map feeding a dropped
+/// scatter) collapses fully; write-effects and producers still feeding a kept
+/// effect or an output are retained.
+fn prune_dead_side_effects(entry: &mut EgirEntry) {
+    use std::collections::HashSet;
+    loop {
+        // Live = every node reachable from a side-effect operand or a terminator.
+        let mut live: HashSet<NodeId> = HashSet::new();
+        let mut stack: Vec<NodeId> = Vec::new();
+        for (_, block) in &entry.graph.skeleton.blocks {
+            for se in &block.side_effects {
+                stack.extend(se.operand_nodes.iter().copied());
+            }
+            match &block.term {
+                SkeletonTerminator::Return(Some(v)) => stack.push(*v),
+                SkeletonTerminator::Branch { args, .. } => stack.extend(args.iter().copied()),
+                SkeletonTerminator::CondBranch {
+                    cond,
+                    then_args,
+                    else_args,
+                    ..
+                } => {
+                    stack.push(*cond);
+                    stack.extend(then_args.iter().copied());
+                    stack.extend(else_args.iter().copied());
+                }
+                _ => {}
+            }
+        }
+        while let Some(n) = stack.pop() {
+            if !live.insert(n) {
+                continue;
+            }
+            if let Some(node) = entry.graph.nodes.get(n) {
+                stack.extend(node.children());
+            }
+        }
+
+        let dead = entry.graph.skeleton.blocks.iter().find_map(|(bid, block)| {
+            block.side_effects.iter().enumerate().find_map(|(i, se)| {
+                let result = se.result?;
+                (!is_write_effectful(se) && !live.contains(&result)).then_some((bid, i))
+            })
+        });
+        match dead {
+            Some((bid, i)) => {
+                entry.graph.skeleton.blocks[bid].side_effects.remove(i);
+            }
+            None => break,
+        }
+    }
 }
 
 /// Split a multi-output entry into one kernel per iteration domain — Futhark's
@@ -268,18 +354,38 @@ fn split_multidomain_seg_maps(entry: &mut EgirEntry) -> Vec<EgirEntry> {
     }
     groups.sort_by_key(|(_, slots)| slots[0]);
 
+    // A shared write-effectful side-effect (a scatter / filter / in-place store
+    // that writes external state but is tied to no output slot) must run in
+    // exactly one kernel. Assign each to the lowest-slot group that dispatches a
+    // map, so it keeps a real iteration domain — mirroring the unsplit entry —
+    // and `restrict_to_group` then drops it from every other clone.
+    let host_root = groups
+        .iter()
+        .map(|(root, _)| *root)
+        .find(|root| parallel_groups.contains(root))
+        .expect("split fires only with at least two parallel groups");
+    for (bid, block) in &entry.graph.skeleton.blocks {
+        for (i, se) in block.side_effects.iter().enumerate() {
+            if side_effect_output_slots(entry, se).is_empty() && is_write_effectful(se) {
+                group_of.insert((bid, i), host_root);
+            }
+        }
+    }
+
     let base_name = entry.name.clone();
     let mut clones = Vec::new();
     for (root, slots) in &groups[1..] {
         let mut clone = entry.clone();
         clone.name = format!("{base_name}_dispatch_{}", slots[0]);
         restrict_to_group(&mut clone, *root, slots, &group_of);
+        prune_dead_side_effects(&mut clone);
         clones.push(clone);
     }
 
     // The original retains the group owning the lowest slot under its own name.
     let (root0, slots0) = &groups[0];
     restrict_to_group(entry, *root0, slots0, &group_of);
+    prune_dead_side_effects(entry);
     clones
 }
 
