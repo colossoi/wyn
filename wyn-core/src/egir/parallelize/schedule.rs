@@ -10,9 +10,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::egir::graph_ops;
 use crate::egir::program::EgirEntry;
-use crate::egir::types::{
-    EgirSoac, SegExtent, SegPlacement, SegResourceAccessKind, SideEffectKind,
-};
+use crate::egir::types::{EgirSoac, SegExtent, SegPlacement, SegResourceAccessKind, SideEffectKind};
 use crate::pipeline_descriptor::{
     Binding, ComputePipeline, ComputeStage, DispatchLen, DispatchSize, Pipeline, PipelineDescriptor,
 };
@@ -496,12 +494,12 @@ fn domain_from_space(space: &crate::egir::types::SegSpace) -> Option<KernelDomai
     }
     match space.dims.as_slice() {
         [SegExtent::PushConstant { offset, .. }] => {
-            Some(KernelDomain::Elements(DispatchLen::PushConstant { offset: *offset }))
+            Some(KernelDomain::Elements(DispatchLen::PushConstant {
+                offset: *offset,
+            }))
         }
         [SegExtent::ResourceLength {
-            binding,
-            elem_bytes,
-            ..
+            binding, elem_bytes, ..
         }] => Some(KernelDomain::Elements(DispatchLen::InputBinding {
             set: binding.set,
             binding: binding.binding,

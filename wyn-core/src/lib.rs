@@ -849,7 +849,6 @@ impl TlcOutputsNormalized {
             tlc: result.program,
             pipeline: result.pipeline,
             type_table: inner.type_table,
-            recognitions: result.recognitions,
             input_names: result.input_names,
             auto_storage_binding_ids: inner.auto_storage_binding_ids,
         }))
@@ -1041,7 +1040,6 @@ impl TlcGeneratedLambdasFolded {
             tlc,
             pipeline: pipeline_descriptor::PipelineDescriptor::default(),
             type_table: inner.type_table,
-            recognitions: LookupMap::new(),
             input_names: LookupMap::new(),
             auto_storage_binding_ids: inner.auto_storage_binding_ids,
         })
@@ -1051,12 +1049,10 @@ impl TlcGeneratedLambdasFolded {
     /// (`expand_soacs → materialize → optimize_skeleton → elaborate`)
     /// explicitly.
     pub fn to_egraph(mut self) -> std::result::Result<EgirAllocated, ConvertError> {
-        let empty = LookupMap::new();
         let input_lens = tlc::input_slice_bounds::compute_for_program(&self.0.tlc);
         let inner = egir::from_tlc::run(
             &self.0.tlc,
             pipeline_descriptor::PipelineDescriptor::default(),
-            &empty,
             &input_lens,
             &mut self.0.auto_storage_binding_ids,
         )?;
@@ -1099,7 +1095,6 @@ impl TlcSmallInlined {
             tlc: result.program,
             pipeline: result.pipeline,
             type_table: inner.type_table,
-            recognitions: result.recognitions,
             input_names: result.input_names,
             auto_storage_binding_ids: inner.auto_storage_binding_ids,
         }))
@@ -1113,7 +1108,6 @@ impl TlcSmallInlined {
             tlc,
             pipeline: pipeline_descriptor::PipelineDescriptor::default(),
             type_table: inner.type_table,
-            recognitions: LookupMap::new(),
             input_names: LookupMap::new(),
             auto_storage_binding_ids: inner.auto_storage_binding_ids,
         })
@@ -1127,9 +1121,6 @@ pub struct TlcPipelineInner {
     pub pipeline: pipeline_descriptor::PipelineDescriptor,
     pub type_table: TypeTable,
     pub auto_storage_binding_ids: IdSource<u32>,
-    /// Per-entry parallel recognition for EGIR to lower. Keyed by entry
-    /// surface name; present only for parallelizable compute entries.
-    pub recognitions: LookupMap<String, tlc::parallelize::EntryRecognition>,
     /// Source-parameter name for each storage `(set, binding)`, captured
     /// before parallelization replaced the original compute entries.
     /// `to_egraph` applies these to the finalized descriptor's input
@@ -1161,19 +1152,12 @@ impl TlcParallelized {
         let TlcPipelineInner {
             tlc,
             pipeline,
-            recognitions,
             input_names,
             mut auto_storage_binding_ids,
             ..
         } = self.0;
         let input_lens = tlc::input_slice_bounds::compute_for_program(&tlc);
-        let mut inner = egir::from_tlc::run(
-            &tlc,
-            pipeline,
-            &recognitions,
-            &input_lens,
-            &mut auto_storage_binding_ids,
-        )?;
+        let mut inner = egir::from_tlc::run(&tlc, pipeline, &input_lens, &mut auto_storage_binding_ids)?;
         inner.input_names = input_names;
         let realized = EgirRaw(inner).realize_outputs()?;
         Ok(realized.segment().optimize().allocate(&auto_storage_binding_ids))
@@ -1255,18 +1239,12 @@ impl TlcInputSliceBoundsInferred {
         let TlcPipelineInner {
             tlc,
             pipeline,
-            recognitions,
             input_names,
             mut auto_storage_binding_ids,
             ..
         } = self.inner;
-        let mut inner = egir::from_tlc::run(
-            &tlc,
-            pipeline,
-            &recognitions,
-            &self.input_lens,
-            &mut auto_storage_binding_ids,
-        )?;
+        let mut inner =
+            egir::from_tlc::run(&tlc, pipeline, &self.input_lens, &mut auto_storage_binding_ids)?;
         inner.input_names = input_names;
         let realized = EgirRaw(inner).realize_outputs()?;
         Ok(realized.segment().optimize().allocate(&auto_storage_binding_ids))
@@ -1328,7 +1306,7 @@ pub struct EgirRaw(EgirInner);
 /// terminator carries no value. See `egir::realize_outputs`.
 pub struct EgirOutputsRealized(EgirInner);
 
-/// EGIR after recognized entry-tail SOACs have been reified as semantic
+/// EGIR after all reachable SOACs have been reified as semantic
 /// `SegMap`, `SegRed`, or `SegScan` operations. No dispatch schedule or scratch
 /// storage has been chosen yet.
 pub struct EgirSegmented(EgirInner);
@@ -1343,7 +1321,6 @@ pub struct EgirAllocated {
     inner: EgirInner,
     binding_ids: IdSource<u32>,
 }
-
 
 impl EgirRaw {
     /// Realize every entry's outputs into side-effect writes. For
@@ -1365,10 +1342,8 @@ impl EgirRaw {
 }
 
 impl EgirOutputsRealized {
-    /// EGIR-side SOAC parallelization. Consumes recognition from TLC analysis
-    /// and tags each recognized compute entry's tail SOAC for lane-indexed
-    /// lowering downstream. Always called before `expand_soacs` — see the
-    /// SOAC Parallelization Boundary section in the README.
+    /// Reify every reachable SOAC as a semantic segmented operation and choose
+    /// kernel versus lane-local placement from EGIR value/effect context.
     pub fn segment(self) -> EgirSegmented {
         let EgirOutputsRealized(mut inner) = self;
         egir::parallelize::reify(&mut inner);
@@ -1442,7 +1417,6 @@ impl EgirAllocated {
             kernel_schedule: schedule,
         })
     }
-
 }
 
 /// TLC has been converted directly to SSA (via EGIR).

@@ -23,7 +23,7 @@ use crate::BindingRef;
 
 use super::super::from_tlc::ConvertError;
 use super::super::graph_ops;
-use super::super::types::{EGraph, EgirSoac, ENode, NodeId, PureOp, SideEffectKind, SoacDestination};
+use super::super::types::{EGraph, ENode, EgirSoac, NodeId, PureOp, SideEffectKind, SoacDestination};
 
 #[cfg(test)]
 #[path = "dispatch_tests.rs"]

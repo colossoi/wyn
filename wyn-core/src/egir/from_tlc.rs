@@ -132,7 +132,6 @@ impl<'a> GlobalContext<'a> {
 pub fn run(
     program: &TlcProgram,
     pipeline: PipelineDescriptor,
-    recognitions: &LookupMap<String, crate::tlc::parallelize::EntryRecognition>,
     input_slice_bounds: &crate::tlc::input_slice_bounds::ProgramBounds,
     binding_ids: &mut crate::IdSource<u32>,
 ) -> Result<EgirInner, ConvertError> {
@@ -214,17 +213,12 @@ pub fn run(
                 // marker shape). Use that as the forced output so the prepass
                 // map writes the gather buffer instead of having its result
                 // auto-allocated onto a colliding binding.
-                // The recognition (from `tlc::parallelize`) carries the two
-                // facts conversion needs: whether the output is one element per
-                // thread (Map/Scan) vs a single scalar (Reduce), and any
-                // pre-pinned output binding. Gather pre-passes that the
-                // recognition didn't tag fall back to the in-body marker.
-                let recognition = recognitions.get(&entry.name);
-                let forced_output_binding = recognition
-                    .and_then(|r| r.forced_output)
+                let forced_output_binding = entry
+                    .storage_bindings
+                    .iter()
+                    .find(|binding| binding.role == interface::StorageRole::Output)
+                    .map(|binding| binding.binding)
                     .or_else(|| gather_prepass_forced_output(entry));
-                let dispatch_sized_outputs = recognition.is_some_and(|r| r.dispatch_sized)
-                    || (recognition.is_none() && gather_prepass_forced_output(entry).is_some());
                 let entry_name = symbol_name(symbols, def.name).unwrap_or("");
                 let entry_input_bounds = input_slice_bounds.get(entry_name);
                 let ep = convert_entry_point(
@@ -234,7 +228,6 @@ pub fn run(
                     &pure_constant_names,
                     workgroup,
                     forced_output_binding,
-                    dispatch_sized_outputs,
                     entry_input_bounds,
                     binding_ids,
                 )?;
@@ -361,7 +354,6 @@ fn convert_entry_point(
     pure_constants: &LookupSet<String>,
     workgroup: (u32, u32, u32),
     forced_output_binding: Option<BindingRef>,
-    dispatch_sized_outputs: bool,
     input_slice_bounds_for_entry: Option<&LookupMap<SymbolId, BufferLen>>,
     binding_ids: &mut crate::IdSource<u32>,
 ) -> Result<EgirEntry, ConvertError> {
@@ -553,7 +545,6 @@ fn convert_entry_point(
         is_compute,
         converter.binding_ids,
         forced_output_binding,
-        dispatch_sized_outputs,
     )?;
     let is_unit_return = matches!(
         ret_type,
@@ -1757,12 +1748,7 @@ impl<'a, 'b> Converter<'a, 'b> {
 
     /// Emit a SOAC placeholder as a side effect in the skeleton. Returns the
     /// result NodeId that `soac_expand` will rebind during expansion.
-    fn emit_soac(
-        &mut self,
-        soac: EgirSoac,
-        operands: SmallVec<[NodeId; 4]>,
-        ty: Type<TypeName>,
-    ) -> NodeId {
+    fn emit_soac(&mut self, soac: EgirSoac, operands: SmallVec<[NodeId; 4]>, ty: Type<TypeName>) -> NodeId {
         let span = self.current_span;
         super::graph_ops::emit_pending_soac(
             &mut self.graph,
@@ -2211,11 +2197,8 @@ impl<'a, 'b> Converter<'a, 'b> {
         let (map_body, output_elem_ty): (Option<SegBody>, Type<TypeName>) = match map_lam {
             Some(f) => {
                 let name = self.lambda_fn_name(&f.lam)?;
-                let caps: Vec<NodeId> = f
-                    .captures
-                    .iter()
-                    .map(|(_, _, t)| self.convert_term(t))
-                    .collect::<Result<_, _>>()?;
+                let caps: Vec<NodeId> =
+                    f.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
                 (
                     Some(SegBody {
                         region: self.region(name),
@@ -2638,7 +2621,6 @@ fn build_entry_outputs(
     is_compute: bool,
     binding_ids: &mut crate::IdSource<u32>,
     forced_output_binding: Option<BindingRef>,
-    dispatch_sized: bool,
 ) -> Result<Vec<EntryOutput>, ConvertError> {
     use EntryOutput;
     let mut forced_remaining = forced_output_binding;
@@ -2703,8 +2685,9 @@ fn build_entry_outputs(
                     }
                 }
             }
-            // Rule 3: existing dispatch-sized path.
-            if dispatch_sized {
+            // Rule 3: dynamic arrays without a fixed or matching-input size
+            // are sized from the finalized semantic dispatch domain.
+            if ty.is_array() {
                 return Ok(Some(BufferLen::SameAsDispatch { elem_bytes }));
             }
             Ok(None)

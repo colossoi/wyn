@@ -1,6 +1,6 @@
 //! EGIR-side SOAC parallelization in two explicit stages:
 //!
-//! 1. `reify` turns recognized entry-tail Scremas into semantic `SegMap`,
+//! 1. `reify` turns every reachable Screma into a semantic `SegMap`,
 //!    `SegRed`, or `SegScan` operations.
 //! 2. `lower` schedules those operations: maps remain segmented for
 //!    `soac_expand`, reductions become two-phase trees, and scans become
@@ -16,18 +16,18 @@ use crate::ast::TypeName;
 use crate::builtins::catalog;
 use crate::ssa::framework::BlockId;
 use crate::ssa::types::{ControlHeader, InstKind};
-use crate::BindingRef;
 use crate::types::TypeExt;
+use crate::BindingRef;
 
 use super::graph_ops;
 use super::program::{
-    EgirEntry, EgirFunc, EgirInner, RegionInterner, SemanticDependency, SemanticDependencyKind,
+    EgirEntry, EgirFunc, EgirInner, EgirRegion, RegionInterner, SemanticDependency, SemanticDependencyKind,
     SemanticOpId,
 };
 use super::types::{
-    EGraph, EgirSoac, ENode, NodeId, PureOp, RegionId, ScremaOperator, SegBinOp, SegBody,
-    SegExtent, SegLevel, SegOpKind, SegPlacement, SegResourceAccess, SegResourceAccessKind, SegSpace,
-    SideEffect, SideEffectKind, SkeletonTerminator, SoacDestination,
+    EGraph, ENode, EgirSoac, NodeId, PureOp, RegionId, ScremaOperator, SegBinOp, SegBody, SegExtent,
+    SegLevel, SegOpKind, SegPlacement, SegResourceAccess, SegResourceAccessKind, SegSpace, SideEffect,
+    SideEffectKind, SkeletonTerminator, SoacDestination,
 };
 
 /// Per-workgroup width of a synthesized phase-2 tree reduce.
@@ -80,9 +80,7 @@ fn collect_graph_dependencies(scope: &str, graph: &EGraph, output: &mut Vec<Sema
                 let resources = match soac {
                     EgirSoac::Seg { resources, .. } => resources.clone(),
                     EgirSoac::Filter {
-                        scratch_out,
-                        len_out,
-                        ..
+                        scratch_out, len_out, ..
                     } => {
                         let mut resources = semantic_read_resources(graph, effect);
                         for binding in scratch_out.iter().chain(len_out.iter()) {
@@ -147,7 +145,12 @@ fn collect_graph_dependencies(scope: &str, graph: &EGraph, output: &mut Vec<Sema
                             || right.access != SegResourceAccessKind::Read)
                 })
             }) {
-                push_dependency(output, &producer.id, &consumer.id, SemanticDependencyKind::Resource);
+                push_dependency(
+                    output,
+                    &producer.id,
+                    &consumer.id,
+                    SemanticDependencyKind::Resource,
+                );
             }
         }
     }
@@ -180,7 +183,10 @@ pub fn verify_semantic(inner: &EgirInner) -> Result<(), String> {
                 return Err(format!("{scope}: semantic SegHist has no concrete dimensions"));
             }
             if !inner.regions.contains_key(&body.region) {
-                return Err(format!("{scope}: histogram region `{}` is absent", body.region.index()));
+                return Err(format!(
+                    "{scope}: histogram region `{}` is absent",
+                    body.region.index()
+                ));
             }
             return Ok(());
         }
@@ -196,7 +202,10 @@ pub fn verify_semantic(inner: &EgirInner) -> Result<(), String> {
             }
             for body in map_body.iter().chain(std::iter::once(pred_body)) {
                 if !inner.regions.contains_key(&body.region) {
-                    return Err(format!("{scope}: filter region `{}` is absent", body.region.index()));
+                    return Err(format!(
+                        "{scope}: filter region `{}` is absent",
+                        body.region.index()
+                    ));
                 }
             }
             return Ok(());
@@ -361,12 +370,7 @@ fn reify_function_screma(function: &mut EgirFunc, block_id: BlockId, index: usiz
             other => vec![other.clone()],
         })
         .unwrap_or_default();
-    let space = semantic_space_for_graph(
-        &function.graph,
-        &effect,
-        input_array_types,
-        input_elem_types,
-    );
+    let space = semantic_space_for_graph(&function.graph, &effect, input_array_types, input_elem_types);
     let resources = semantic_read_resources(&function.graph, &effect);
     function.graph.skeleton.blocks[block_id].side_effects[index].kind =
         SideEffectKind::Soac(EgirSoac::Seg {
@@ -400,6 +404,7 @@ pub fn lower(inner: &mut EgirInner, binding_ids: &mut crate::IdSource<u32>) {
     let mut schedule = KernelSchedule::seed(&inner.pipeline, &inner.entry_points);
     let mut new_entries: Vec<EgirEntry> = Vec::new();
     let mut new_functions: Vec<EgirFunc> = Vec::new();
+    let mut new_regions: Vec<(RegionId, EgirRegion)> = Vec::new();
     for entry in inner.entry_points.iter_mut() {
         let Some(kind) = find_pending_kernel_seg(entry).map(|(bid, idx)| {
             let se = &entry.graph.skeleton.blocks[bid].side_effects[idx];
@@ -446,6 +451,9 @@ pub fn lower(inner: &mut EgirInner, binding_ids: &mut crate::IdSource<u32>) {
                         predecessor = ph.name.clone();
                     }
                     new_entries.extend(phases);
+                    let region =
+                        regions.get(&swap_wrapper.name).expect("synthesized scan wrapper was interned");
+                    new_regions.push((region, EgirRegion::from_function(&swap_wrapper)));
                     new_functions.push(swap_wrapper);
                 } else {
                     *entry = original;
@@ -462,6 +470,7 @@ pub fn lower(inner: &mut EgirInner, binding_ids: &mut crate::IdSource<u32>) {
     }
     inner.entry_points.extend(new_entries);
     inner.functions.extend(new_functions);
+    inner.regions.extend(new_regions);
 
     restore_lane_local(inner);
 
@@ -513,8 +522,79 @@ fn side_effect_output_slots(entry: &EgirEntry, se: &SideEffect) -> Vec<usize> {
             stack.extend(node.children());
         }
     }
+    // Scalar/tuple reductions commonly feed a later Store instead of carrying
+    // an OutputView operand themselves. Follow those value edges once, at
+    // semantic construction time, so output routing remains attached to the
+    // SegOp and placement does not mistake an entry-root reduction for a
+    // lane-local helper.
+    let routes_scalar_result = matches!(
+        &se.kind,
+        SideEffectKind::Soac(EgirSoac::Screma { accumulators, .. }) if !accumulators.is_empty()
+    ) || matches!(
+        &se.kind,
+        SideEffectKind::Soac(EgirSoac::Seg {
+            kind: SegOpKind::SegRed { .. } | SegOpKind::SegScan { .. } | SegOpKind::SegComposite { .. },
+            ..
+        })
+    );
+    if let Some(result) = se.result.filter(|_| routes_scalar_result) {
+        for (_, block) in &entry.graph.skeleton.blocks {
+            for consumer in &block.side_effects {
+                let SideEffectKind::Inst(InstKind::Store { .. }) = &consumer.kind else {
+                    continue;
+                };
+                let (Some(&place), Some(&value)) =
+                    (consumer.operand_nodes.first(), consumer.operand_nodes.get(1))
+                else {
+                    continue;
+                };
+                if !node_reaches(&entry.graph, value, result) {
+                    continue;
+                }
+                let Some(binding) = storage_binding_reachable(&entry.graph, place) else {
+                    continue;
+                };
+                if let Some(slot) =
+                    entry.outputs.iter().position(|output| output.storage_binding == Some(binding))
+                {
+                    if !slots.contains(&slot) {
+                        slots.push(slot);
+                    }
+                }
+            }
+        }
+    }
     slots.sort_unstable();
     slots
+}
+
+fn storage_binding_reachable(graph: &EGraph, start: NodeId) -> Option<BindingRef> {
+    let mut seen = std::collections::HashSet::new();
+    let mut stack = vec![start];
+    while let Some(node) = stack.pop() {
+        if !seen.insert(node) {
+            continue;
+        }
+        if let Some(binding) = graph_ops::extract_storage_view_source(graph, node) {
+            return Some(binding);
+        }
+        stack.extend(graph.nodes[node].children());
+    }
+    None
+}
+
+fn node_reaches(graph: &EGraph, start: NodeId, target: NodeId) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    let mut stack = vec![start];
+    while let Some(node) = stack.pop() {
+        if node == target {
+            return true;
+        }
+        if seen.insert(node) {
+            stack.extend(graph.nodes[node].children());
+        }
+    }
+    false
 }
 
 /// True for a pointwise `SegMap` side-effect (a parallel output domain).
@@ -761,7 +841,10 @@ fn reify_tail_soac(entry: &mut EgirEntry) {
     // them wired into that consumer's pipeline.
     let soac_consumed = soac_consumed_nodes(entry);
     let consumed = &soac_consumed;
-    let kernel_scope = matches!(entry.execution_model, crate::ssa::types::ExecutionModel::Compute { .. });
+    let kernel_scope = matches!(
+        entry.execution_model,
+        crate::ssa::types::ExecutionModel::Compute { .. }
+    );
     let locs: Vec<(BlockId, usize, SegPlacement)> = entry
         .graph
         .skeleton
@@ -788,6 +871,41 @@ fn reify_tail_soac(entry: &mut EgirEntry) {
     }
     for (block_id, idx, placement) in locs {
         reify_one_screma(entry, block_id, idx, placement);
+    }
+    // Several scalar reductions contributing fields of one aggregate output
+    // cannot yet be independently published: each would require its own
+    // materialized scalar plus a final assembly phase. Keep the semantic ops,
+    // but place them lane-locally until that DAG rewrite is available.
+    let kernel_accumulators = entry
+        .graph
+        .skeleton
+        .blocks
+        .iter()
+        .flat_map(|(_, block)| &block.side_effects)
+        .filter(|effect| {
+            matches!(
+                effect.kind,
+                SideEffectKind::Soac(EgirSoac::Seg {
+                    placement: SegPlacement::Kernel,
+                    kind: SegOpKind::SegRed { .. } | SegOpKind::SegScan { .. },
+                    ..
+                })
+            )
+        })
+        .count();
+    if kernel_accumulators > 1 {
+        for (_, block) in entry.graph.skeleton.blocks.iter_mut() {
+            for effect in &mut block.side_effects {
+                if let SideEffectKind::Soac(EgirSoac::Seg {
+                    placement,
+                    kind: SegOpKind::SegRed { .. } | SegOpKind::SegScan { .. },
+                    ..
+                }) = &mut effect.kind
+                {
+                    *placement = SegPlacement::LaneLocal;
+                }
+            }
+        }
     }
     reify_parallel_scatter(entry);
     reify_entry_filter_spaces(entry);
@@ -867,7 +985,7 @@ fn reify_function_filter_spaces(function: &mut EgirFunc) {
     }
 }
 
-/// Every node read as input by a `Pending` SOAC in the entry — the union of all
+/// Every node read as input by a semantic SOAC in the entry — the union of all
 /// SOAC operand subgraphs. A Screma whose result lands here is an internal
 /// producer feeding a downstream scatter/filter/map; reifying it would detach
 /// it from that consumer's ordered pipeline, so it stays serial. A Screma whose
@@ -999,10 +1117,8 @@ fn semantic_space(
     let primary = se.operand_nodes.first().copied();
     let extent = primary.map(|node| {
         if let Some(binding) = graph_ops::extract_storage_view_source(&entry.graph, node) {
-            let elem_bytes = input_elem_types
-                .first()
-                .and_then(crate::ssa::layout::type_byte_size)
-                .unwrap_or(1) as u32;
+            let elem_bytes =
+                input_elem_types.first().and_then(crate::ssa::layout::type_byte_size).unwrap_or(1) as u32;
             return SegExtent::ResourceLength {
                 node,
                 binding,
@@ -1012,7 +1128,9 @@ fn semantic_space(
         if let Some((_, len, _)) = graph_ops::extract_array_range_operands(&entry.graph, node) {
             return extent_from_node(entry, len);
         }
-        if let Some(Type::Constructed(TypeName::Size(n), _)) = input_array_types.first().and_then(Type::array_size) {
+        if let Some(Type::Constructed(TypeName::Size(n), _)) =
+            input_array_types.first().and_then(Type::array_size)
+        {
             return SegExtent::Fixed(*n as u32);
         }
         SegExtent::Value(node)
@@ -1031,10 +1149,8 @@ fn semantic_space_for_graph(
 ) -> SegSpace {
     let extent = se.operand_nodes.first().copied().map(|node| {
         if let Some(binding) = graph_ops::extract_storage_view_source(graph, node) {
-            let elem_bytes = input_elem_types
-                .first()
-                .and_then(crate::ssa::layout::type_byte_size)
-                .unwrap_or(1) as u32;
+            let elem_bytes =
+                input_elem_types.first().and_then(crate::ssa::layout::type_byte_size).unwrap_or(1) as u32;
             return SegExtent::ResourceLength {
                 node,
                 binding,
@@ -1106,7 +1222,11 @@ fn extent_from_node(entry: &EgirEntry, node: NodeId) -> SegExtent {
     }
 }
 
-fn semantic_resources(entry: &EgirEntry, se: &SideEffect, output_slots: &[usize]) -> Vec<SegResourceAccess> {
+fn semantic_resources(
+    entry: &EgirEntry,
+    se: &SideEffect,
+    output_slots: &[usize],
+) -> Vec<SegResourceAccess> {
     use std::collections::HashMap;
     let mut accesses: HashMap<BindingRef, SegResourceAccessKind> = HashMap::new();
     let mut seen = std::collections::HashSet::new();
@@ -1128,10 +1248,8 @@ fn semantic_resources(entry: &EgirEntry, se: &SideEffect, output_slots: &[usize]
                 .or_insert(SegResourceAccessKind::Write);
         }
     }
-    let mut result: Vec<_> = accesses
-        .into_iter()
-        .map(|(binding, access)| SegResourceAccess { binding, access })
-        .collect();
+    let mut result: Vec<_> =
+        accesses.into_iter().map(|(binding, access)| SegResourceAccess { binding, access }).collect();
     result.sort_by_key(|resource| (resource.binding.set, resource.binding.binding));
     result
 }
@@ -1813,17 +1931,16 @@ fn restore_serial_seg_in_graph(graph: &mut EGraph, block_id: BlockId, idx: usize
             combine: op.combine,
         })
         .collect();
-    graph.skeleton.blocks[block_id].side_effects[idx].kind =
-        SideEffectKind::Soac(EgirSoac::Screma {
-            map_bodies,
-            accumulators,
-            input_array_types,
-            input_elem_types,
-            map_output_elem_types,
-            map_input_indices,
-            map_destinations,
-            acc_destinations,
-        });
+    graph.skeleton.blocks[block_id].side_effects[idx].kind = SideEffectKind::Soac(EgirSoac::Screma {
+        map_bodies,
+        accumulators,
+        input_array_types,
+        input_elem_types,
+        map_output_elem_types,
+        map_input_indices,
+        map_destinations,
+        acc_destinations,
+    });
 }
 
 /// Convert every semantic SegOp back to its local serial SOAC form. This is
@@ -2448,10 +2565,8 @@ fn lower_scan_entry(
         elem_ty.clone(),
         entry.span,
     );
-    // Intern the synthesized wrapper so `soac_expand` recovers its `Call` name.
-    // It is deliberately not added to `inner.regions`: that arena is consulted
-    // only before terminal lowering (segmentation/`verify_semantic`), and this
-    // region is born here, during lowering.
+    // Intern the synthesized wrapper so `soac_expand` recovers its `Call` name;
+    // the caller also publishes its complete body into the region arena.
     let swap_region = regions.intern(&swap_wrapper_name);
     let phase3 = synthesize_phase3_scan(
         &entry.name,
@@ -2752,10 +2867,7 @@ mod tests {
     fn scan_accumulator_reifies_as_seg_scan_operator() {
         let mut graph = EGraph::new();
         let ne = neutral(&mut graph, 0);
-        let kind = reify_seg_kind(
-            &[accumulator(ScremaAccumulator::Scan, vec![], vec![])],
-            &[ne],
-        );
+        let kind = reify_seg_kind(&[accumulator(ScremaAccumulator::Scan, vec![], vec![])], &[ne]);
         assert!(matches!(kind, SegOpKind::SegScan { operators } if operators.len() == 1));
     }
 

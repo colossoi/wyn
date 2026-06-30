@@ -29,15 +29,13 @@ pub fn schedule(
         parallelize::lower(inner, binding_ids);
     } else {
         parallelize::restore_all_serial(inner);
-        inner.kernel_schedule = parallelize::schedule::KernelSchedule::seed(&inner.pipeline, &inner.entry_points);
+        inner.kernel_schedule =
+            parallelize::schedule::KernelSchedule::seed(&inner.pipeline, &inner.entry_points);
     }
     plan_logical_resources(inner);
 
     let mut descriptor = unpublished_descriptor;
-    inner
-        .kernel_schedule
-        .install_phase_shells(&mut descriptor)
-        .map_err(ConvertError::Internal)?;
+    inner.kernel_schedule.install_phase_shells(&mut descriptor).map_err(ConvertError::Internal)?;
     descriptor.publish_implicit_bindings(&inner.entry_points);
     descriptor.publish_graphics_io(&inner.entry_points);
     inner.kernel_schedule.publish(&mut descriptor).map_err(ConvertError::Internal)?;

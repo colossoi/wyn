@@ -1,9 +1,7 @@
 //! Unit tests for the dispatch helpers.
 
 use super::*;
-use crate::egir::types::{
-    EGraph, RegionId, ScremaAccumulator, ScremaOperator, SegBody, SideEffect,
-};
+use crate::egir::types::{EGraph, RegionId, ScremaAccumulator, ScremaOperator, SegBody, SideEffect};
 use smallvec::smallvec;
 
 /// A runtime-sized compute output that no retargetable Map/Scan produced

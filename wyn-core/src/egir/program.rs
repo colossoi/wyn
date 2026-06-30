@@ -16,10 +16,10 @@ use polytype::Type;
 use crate::ast::{Span, TypeName};
 use crate::interface;
 use crate::pipeline_descriptor::PipelineDescriptor;
-use crate::types::TypeExt;
 use crate::ssa::types::{
     BlockId, Constant, ControlHeader, EntryInput, EntryOutput, ExecutionModel, Function,
 };
+use crate::types::TypeExt;
 
 use std::collections::HashMap;
 
@@ -100,6 +100,18 @@ pub struct EgirRegion {
     pub return_ty: Type<TypeName>,
     pub graph: EGraph,
     pub control_headers: LookupMap<BlockId, ControlHeader>,
+}
+
+impl EgirRegion {
+    pub fn from_function(function: &EgirFunc) -> Self {
+        Self {
+            name: function.name.clone(),
+            params: function.params.clone(),
+            return_ty: function.return_ty.clone(),
+            graph: function.graph.clone(),
+            control_headers: function.control_headers.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -356,16 +368,7 @@ impl EgirInner {
         let mut regions = LookupMap::new();
         for function in &functions {
             let id = region_interner.intern(&function.name);
-            regions.insert(
-                id,
-                EgirRegion {
-                    name: function.name.clone(),
-                    params: function.params.clone(),
-                    return_ty: function.return_ty.clone(),
-                    graph: function.graph.clone(),
-                    control_headers: function.control_headers.clone(),
-                },
-            );
+            regions.insert(id, EgirRegion::from_function(function));
         }
         EgirInner {
             functions,

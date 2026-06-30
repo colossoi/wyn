@@ -469,7 +469,6 @@ dependencies = [
  "log",
  "nom",
  "polytype",
- "rspirv",
  "serde",
  "serde_json",
  "slotmap",
@@ -477,6 +476,7 @@ dependencies = [
  "spirv",
  "thiserror",
  "wyn-pipeline-descriptor",
+ "wyn-spirv",
 ]
 
 [[package]]
@@ -484,6 +484,14 @@ name = "wyn-pipeline-descriptor"
 version = "0.1.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "wyn-spirv"
+version = "0.1.0"
+dependencies = [
+ "rspirv",
+ "spirv",
 ]
 
 [[package]]

@@ -27,11 +27,10 @@ impl<'a> RegionExecutor<'a> {
     }
 
     pub fn call(&self, region: &RegionId, arguments: &[Value]) -> Result<Value, String> {
-        let body = self
-            .regions
-            .get(region)
-            .ok_or_else(|| format!("unknown EGIR region #{}", region.index()))?;
-        let SkeletonTerminator::Return(Some(result)) = body.graph.skeleton.blocks[body.graph.skeleton.entry].term
+        let body =
+            self.regions.get(region).ok_or_else(|| format!("unknown EGIR region #{}", region.index()))?;
+        let SkeletonTerminator::Return(Some(result)) =
+            body.graph.skeleton.blocks[body.graph.skeleton.entry].term
         else {
             return Err(format!("region `{}` is not a pure return region", body.name));
         };
@@ -50,10 +49,9 @@ impl<'a> RegionExecutor<'a> {
             return Ok(value.clone());
         }
         let value = match &region.graph.nodes[node] {
-            ENode::FuncParam { index } => arguments
-                .get(*index)
-                .cloned()
-                .ok_or_else(|| format!("missing region argument {index}"))?,
+            ENode::FuncParam { index } => {
+                arguments.get(*index).cloned().ok_or_else(|| format!("missing region argument {index}"))?
+            }
             ENode::Constant(crate::ssa::types::ConstantValue::I32(value)) => Value::Int(*value as i64),
             ENode::Constant(crate::ssa::types::ConstantValue::U32(value)) => Value::Int(*value as i64),
             ENode::Constant(crate::ssa::types::ConstantValue::Bool(value)) => Value::Bool(*value),
@@ -87,10 +85,9 @@ impl<'a> RegionExecutor<'a> {
                 .collect()
         };
         match op {
-            PureOp::Int(value) | PureOp::Uint(value) => value
-                .parse()
-                .map(Value::Int)
-                .map_err(|_| format!("invalid integer literal `{value}`")),
+            PureOp::Int(value) | PureOp::Uint(value) => {
+                value.parse().map(Value::Int).map_err(|_| format!("invalid integer literal `{value}`"))
+            }
             PureOp::Bool(value) => Ok(Value::Bool(*value)),
             PureOp::Tuple(_) => Ok(Value::Tuple(values.to_vec())),
             PureOp::Project { index } => match values.first() {

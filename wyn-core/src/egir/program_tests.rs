@@ -28,7 +28,11 @@ fn interner_assigns_dense_indices_and_deduplicates_names() {
     let mut interner = RegionInterner::default();
     let foo = interner.intern("foo");
     let bar = interner.intern("bar");
-    assert_eq!(foo, interner.intern("foo"), "same name re-interns to the same index");
+    assert_eq!(
+        foo,
+        interner.intern("foo"),
+        "same name re-interns to the same index"
+    );
     assert_ne!(foo, bar);
     assert_eq!(foo.index(), 0);
     assert_eq!(bar.index(), 1);
@@ -61,7 +65,10 @@ fn segbody_index_resolves_to_its_arena_function() {
 
     // The pre-interned index is preserved and points at the right body.
     assert_eq!(inner.region_interner.get("op"), Some(op_id));
-    assert!(inner.regions.contains_key(&op_id), "callee region must be in the arena");
+    assert!(
+        inner.regions.contains_key(&op_id),
+        "callee region must be in the arena"
+    );
     assert_eq!(inner.region_name(op_id), "op");
     assert_eq!(inner.regions.get(&op_id).unwrap().name, "op");
     // `main` was assigned its index by `EgirInner::new`, after `op`.

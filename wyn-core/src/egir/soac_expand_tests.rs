@@ -16,7 +16,7 @@
 //! `arr` or `val` comes from the wrong projection.
 
 use crate::ast::TypeName;
-use crate::egir::types::{EgirSoac, ENode, PureOp, SideEffectKind};
+use crate::egir::types::{ENode, EgirSoac, PureOp, SideEffectKind};
 use polytype::Type;
 
 /// Compile source through the pipeline to just-past `expand_soacs`,

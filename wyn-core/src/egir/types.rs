@@ -336,9 +336,9 @@ pub enum EgirSoac {
     Filter {
         /// Concrete semantic iteration space, filled by segmentation.
         space: Option<SegSpace>,
-        /// `Some(name)` folds an elementwise producer `map(f, …)` in: per element
-        /// the loop computes `v = f(x)` (`map_capture_count` leading operands are
-        /// `f`'s captures), tests `pred(v)`, and keeps `v`. `None` is a plain
+        /// `Some(body)` folds an elementwise producer `map(f, …)` in: per element
+        /// the loop computes `v = f(x)` with the body's explicit captures,
+        /// tests `pred(v)`, and keeps `v`. `None` is a plain
         /// filter (the surviving input element is kept and `pred` tests it).
         map_body: Option<SegBody>,
         /// The filter's output element type — `f`'s return type when a map is
@@ -391,7 +391,7 @@ pub enum EgirSoac {
     /// over `space`, with pointwise `map_funcs` lanes and optional reduce/scan
     /// `accumulators` (`SegBinOp`s) combining across lanes. Replaces the old
     /// `Parallel { serial }` wrapper: `egir::parallelize` builds this from a
-    /// recognized compute-entry tail, and `soac_expand`/`parallelize` drive
+    /// semantic compute operation, and terminal lowering drives
     /// lowering (lane-indexed map kernel; chunked two-phase reduce; three-phase
     /// scan) from its fields. Operand layout matches the serial `Screma`'s.
     Seg {
@@ -456,21 +456,77 @@ impl EgirSoac {
     pub fn capture_nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
         self.seg_bodies().into_iter().flat_map(|body| body.captures.iter().copied())
     }
+
+    pub fn visit_capture_nodes_mut(&mut self, mut visit: impl FnMut(&mut NodeId)) {
+        let mut visit_body = |body: &mut SegBody| {
+            for capture in &mut body.captures {
+                visit(capture);
+            }
+        };
+        match self {
+            EgirSoac::Screma {
+                map_bodies,
+                accumulators,
+                ..
+            } => {
+                for body in map_bodies {
+                    visit_body(body);
+                }
+                for operator in accumulators {
+                    visit_body(&mut operator.step);
+                    visit_body(&mut operator.combine);
+                }
+            }
+            EgirSoac::Seg { map_bodies, kind, .. } => {
+                for body in map_bodies {
+                    visit_body(body);
+                }
+                for operator in match kind {
+                    SegOpKind::SegMap => &mut [][..],
+                    SegOpKind::SegRed { operators }
+                    | SegOpKind::SegScan { operators }
+                    | SegOpKind::SegComposite { operators } => operators.as_mut_slice(),
+                } {
+                    visit_body(&mut operator.step);
+                    visit_body(&mut operator.combine);
+                }
+            }
+            EgirSoac::Filter {
+                map_body, pred_body, ..
+            } => {
+                if let Some(body) = map_body {
+                    visit_body(body);
+                }
+                visit_body(pred_body);
+            }
+            EgirSoac::Hist { body, .. } => visit_body(body),
+        }
+    }
 }
 
 impl SideEffect {
     /// Every graph node this side-effect references: its operands plus, for a
     /// SOAC, its bodies' captures. This is the authoritative use-set for
     /// liveness and reachability now that captures are not inlined into
-    /// `operand_nodes`. (Captures are never substituted — they bind a lambda's
-    /// free variables, not a retargetable input or output — so there is no
-    /// mutable counterpart.)
+    /// `operand_nodes`.
     pub fn referenced_nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
         let captures = match &self.kind {
             SideEffectKind::Soac(soac) => Some(soac.capture_nodes()),
             SideEffectKind::Inst(_) => None,
         };
         self.operand_nodes.iter().copied().chain(captures.into_iter().flatten())
+    }
+
+    /// Mutate every value edge, including explicit captures. Rewriters must
+    /// use this rather than editing `operand_nodes` alone when substituting a
+    /// graph value globally.
+    pub fn visit_referenced_nodes_mut(&mut self, mut visit: impl FnMut(&mut NodeId)) {
+        for operand in &mut self.operand_nodes {
+            visit(operand);
+        }
+        if let SideEffectKind::Soac(soac) = &mut self.kind {
+            soac.visit_capture_nodes_mut(visit);
+        }
     }
 }
 

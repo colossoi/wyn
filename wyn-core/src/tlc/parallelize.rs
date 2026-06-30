@@ -2,7 +2,7 @@
 //!
 //! Stage A: Analyze compute entry points to find parallelizable SOACs.
 //! Stage B: Restructure the program — create new entry points with chunked SOACs,
-//!          allocate intermediate storage buffers, build pipeline descriptor.
+//!          retain the source-level pipeline shells consumed by terminal EGIR lowering.
 //!
 //! Loop creation and storage lowering stay in SSA (`to_ssa` + `soac_lower`).
 
@@ -14,14 +14,12 @@ use crate::egir::from_tlc::AUTO_STORAGE_SET;
 use crate::interface::{self, Attribute, EntryParamBinding, EntryParamBindingKind};
 use crate::pipeline_descriptor::*;
 use crate::types::TypeExt;
-use crate::StableMap;
 use crate::{BindingRef, SymbolId, SymbolTable};
 use crate::{LookupMap, LookupSet};
 use polytype::Type;
 
 use super::{
-    ArrayExpr, Def, DefMeta, Lambda, Program, ScremaAccumulator, SoacDestination, SoacOp, Term,
-    TermIdSource, TermKind,
+    ArrayExpr, Def, DefMeta, Lambda, Program, SoacDestination, SoacOp, Term, TermIdSource, TermKind,
 };
 
 // =============================================================================
@@ -188,28 +186,6 @@ struct EntryAnalysis {
 // =============================================================================
 // Stage A: Analysis
 // =============================================================================
-
-fn analyze_program(program: &Program) -> StableMap<SymbolId, EntryAnalysis> {
-    // StableMap (not LookupMap): the iteration order in `run` drives binding
-    // allocation through the module-wide `IdSource`, so a LookupMap's
-    // randomized iteration would shuffle binding numbers on every compile.
-    let mut results = StableMap::new();
-
-    for def in &program.defs {
-        let DefMeta::EntryPoint(ref entry_decl) = def.meta else {
-            continue;
-        };
-        if !entry_decl.entry_type.is_compute() {
-            continue;
-        }
-
-        if let Some(analysis) = analyze_entry(def, &program.symbols) {
-            results.insert(def.name, analysis);
-        }
-    }
-
-    results
-}
 
 /// Find the SOAC (if any) that structurally produces the entry's return
 /// value, along with the `prefix_lets` that must be rebuilt around each
@@ -752,37 +728,9 @@ fn is_map_only_fresh_soac_term(t: &Term) -> bool {
     }
 }
 
-/// The parallel strategy recognized for a compute entry's tail SOAC. EGIR
-/// drives the actual lowering (Seg creation, phasing, scratch allocation) from
-/// this plus the entry body; TLC only recognizes the shape.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ParallelStrategy {
-    Map,
-    Reduce,
-    Scan,
-    Screma,
-}
-
-/// Per-entry recognition output. The two host-facing facts (`dispatch_sized`,
-/// `forced_output`) are what `egir::from_tlc` needs to size outputs at
-/// conversion; `strategy` is what `egir::parallelize` keys lowering on. No
-/// binding numbers — EGIR allocates all scratch itself.
-#[derive(Debug, Clone)]
-pub struct EntryRecognition {
-    pub strategy: ParallelStrategy,
-    /// Output is one element per thread (Map/Scan) vs a single scalar (Reduce).
-    pub dispatch_sized: bool,
-    /// A pre-pinned output binding (a gather pre-pass's result); else EGIR
-    /// auto-allocates the entry output.
-    pub forced_output: Option<BindingRef>,
-}
-
 pub struct ParallelizationResult {
     pub program: Program,
     pub pipeline: PipelineDescriptor,
-    /// Per-entry recognition keyed by surface name (matches `EgirEntry::name`).
-    /// Present only for parallelizable compute entries.
-    pub recognitions: LookupMap<String, EntryRecognition>,
     /// Source-parameter name for each storage `(set, binding)`, captured
     /// from the original compute entries before they are replaced by phase
     /// entries. The relabel pass in `to_egraph` restores these onto the
@@ -1011,42 +959,10 @@ pub fn run(
 ) -> crate::error::Result<ParallelizationResult> {
     let input_names = collect_entry_input_names(&program);
 
-    // Recognition: collapse equal-domain sibling output maps, then analyze each
-    // compute entry's tail SOAC. EGIR does the lowering from these recognitions.
+    // Equal-domain sibling maps remain a source-level fusion; EGIR derives
+    // semantic placement and scheduling from the resulting program.
     let mut term_ids = TermIdSource::new();
     super::fusion::fuse_equal_domain_sibling_maps(&mut program, &mut term_ids);
-    let analyses = analyze_program(&program);
-
-    let mut recognitions: LookupMap<String, EntryRecognition> = LookupMap::new();
-    for (def_name, analysis) in &analyses {
-        let (strategy, dispatch_sized) = match &analysis.soac.original {
-            SoacOp::Map { .. } => (ParallelStrategy::Map, true),
-            SoacOp::Reduce { .. } => (ParallelStrategy::Reduce, false),
-            SoacOp::Scan { .. } => (ParallelStrategy::Scan, true),
-            SoacOp::Screma { accumulators, .. } => {
-                let has_scan = accumulators.iter().any(|a| matches!(a.kind, ScremaAccumulator::Scan));
-                (ParallelStrategy::Screma, accumulators.is_empty() || has_scan)
-            }
-            _ => continue,
-        };
-        let forced_output = program.defs.iter().find(|d| d.name == *def_name).and_then(|d| match &d.meta {
-            DefMeta::EntryPoint(decl) => decl
-                .storage_bindings
-                .iter()
-                .find(|b| matches!(b.role, interface::StorageRole::Output))
-                .map(|b| b.binding),
-            _ => None,
-        });
-        let name = crate::symbol_name_or_bug(&program.symbols, *def_name).to_string();
-        recognitions.insert(
-            name,
-            EntryRecognition {
-                strategy,
-                dispatch_sized,
-                forced_output,
-            },
-        );
-    }
 
     let mut pipelines = Vec::new();
     for def in &program.defs {
@@ -1088,7 +1004,6 @@ pub fn run(
     Ok(ParallelizationResult {
         program,
         pipeline: PipelineDescriptor { pipelines },
-        recognitions,
         input_names,
     })
 }

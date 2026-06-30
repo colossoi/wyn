@@ -4,7 +4,7 @@
 //!
 //! Runs after `from_tlc` populates the EGraph and before `elaborate` produces
 //! the final `FuncBody`. Every variant must be handled here — there is no
-//! fallback. Any `Pending` left in the skeleton at elaboration time is a bug.
+//! fallback. Any semantic SOAC left in the skeleton at elaboration time is a bug.
 
 use crate::builtins::catalog;
 use crate::LookupMap;
@@ -23,7 +23,7 @@ use crate::types::TypeExt;
 use crate::types::{is_array_variant_view, is_virtual_array};
 
 use super::types::{
-    EGraph, EgirSoac, ENode, NodeId, PureOp, SegOpKind, SideEffect, SideEffectKind, SkeletonTerminator,
+    EGraph, ENode, EgirSoac, NodeId, PureOp, SegOpKind, SideEffect, SideEffectKind, SkeletonTerminator,
     SoacDestination,
 };
 
@@ -566,10 +566,7 @@ fn expand_one(
 
             // Operand layout: [input, ...map_captures, ...pred_captures].
             let arr_nid = se.operand_nodes[0];
-            let map_captures = map_body
-                .as_ref()
-                .map(|body| body.captures.clone())
-                .unwrap_or_default();
+            let map_captures = map_body.as_ref().map(|body| body.captures.clone()).unwrap_or_default();
             let captures = pred_body.captures.clone();
             let result_nid = se.result.expect("Filter has a result");
 
@@ -1004,11 +1001,9 @@ fn emit_seg_space_len(
     let mut dimensions = Vec::with_capacity(space.dims.len());
     for extent in &space.dims {
         let dimension = match extent {
-            SegExtent::Fixed(count) => graph.intern_pure(
-                PureOp::Int(count.to_string()),
-                smallvec![],
-                i32_ty.clone(),
-            ),
+            SegExtent::Fixed(count) => {
+                graph.intern_pure(PureOp::Int(count.to_string()), smallvec![], i32_ty.clone())
+            }
             SegExtent::PushConstant { node, .. } | SegExtent::Value(node) => *node,
             SegExtent::ResourceLength { node, .. } => {
                 let ty = graph.types[node].clone();

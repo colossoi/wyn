@@ -41,10 +41,7 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
 "#,
     )
     .expect("TLC");
-    let allocated = tlc
-        .infer_input_slice_bounds()
-        .to_egraph()
-        .expect("semantic EGIR allocation");
+    let allocated = tlc.infer_input_slice_bounds().to_egraph().expect("semantic EGIR allocation");
     crate::egir::parallelize::verify_semantic(&allocated.inner).expect("complete semantic EGIR");
     let seg = allocated
         .inner
@@ -57,7 +54,10 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
         })
         .expect("SegRed remains present before target lowering");
     assert!(matches!(seg.1, SegOpKind::SegRed { .. }));
-    assert!(matches!(seg.0.dims.as_slice(), [SegExtent::ResourceLength { .. }]));
+    assert!(matches!(
+        seg.0.dims.as_slice(),
+        [SegExtent::ResourceLength { .. }]
+    ));
     assert!(
         allocated.inner.resources.len() >= 2,
         "input and output resources are planned logically"
@@ -79,12 +79,13 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
         .expect("semantic allocation");
     for pipeline in &allocated.inner.pipeline.pipelines {
         if let crate::pipeline_descriptor::Pipeline::Compute(compute) = pipeline {
-            assert!(compute.bindings.is_empty(), "bindings publish only at terminal lowering");
+            assert!(
+                compute.bindings.is_empty(),
+                "bindings publish only at terminal lowering"
+            );
         }
     }
-    let first = allocated
-        .lower_to_ssa(crate::LoweringProfile::PORTABLE)
-        .expect("terminal lowering");
+    let first = allocated.lower_to_ssa(crate::LoweringProfile::PORTABLE).expect("terminal lowering");
     let phases: Vec<_> = first.kernel_schedule.phases().collect();
     assert!(phases.len() >= 2, "parallel reduction owns at least two phases");
     assert!(phases.iter().skip(1).any(|phase| !phase.dependencies.is_empty()));
@@ -119,17 +120,36 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
 
 #[test]
 fn target_profiles_are_selected_before_ssa_lowering() {
-    let portable = crate::compile_thru_ssa(
-        "#[compute] entry e(xs: []i32) []i32 = map(|x: i32| x + 1, xs)",
-    )
-    .expect("portable SSA");
+    let portable = crate::compile_thru_ssa("#[compute] entry e(xs: []i32) []i32 = map(|x: i32| x + 1, xs)")
+        .expect("portable SSA");
     assert_eq!(portable.profile.target, crate::CodegenTarget::Portable);
 
-    let spirv = crate::compile_thru_spirv(
-        "#[compute] entry e(xs: []i32) []i32 = map(|x: i32| x + 1, xs)",
-    )
-    .expect("SPIR-V-targeted lowering");
+    let spirv = crate::compile_thru_spirv("#[compute] entry e(xs: []i32) []i32 = map(|x: i32| x + 1, xs)")
+        .expect("SPIR-V-targeted lowering");
     assert!(!spirv.spirv.is_empty());
+}
+
+#[test]
+fn terminal_scan_helpers_are_complete_region_arena_members() {
+    let tlc = crate::compile_thru_tlc(
+        "#[compute] entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)",
+    )
+    .expect("TLC");
+    let mut allocated = tlc.infer_input_slice_bounds().to_egraph().expect("semantic EGIR");
+    crate::egir::target_lowering::schedule(
+        &mut allocated.inner,
+        &mut allocated.binding_ids,
+        crate::LoweringProfile::PORTABLE,
+    )
+    .expect("terminal schedule");
+    let helper = allocated
+        .inner
+        .functions
+        .iter()
+        .find(|function| function.name.ends_with("_scan_op_swap"))
+        .expect("scan swap helper");
+    let region = allocated.inner.region_interner.get(&helper.name).expect("helper region id");
+    assert!(allocated.inner.regions.contains_key(&region));
 }
 
 /// Assert that a compute `reduce`-over-`map`-of-range `src` parallelizes and
@@ -4731,7 +4751,7 @@ entry pick(xs: []u32) ?k. [k]u32 =
 /// capture. That capture must survive closure conversion's free-variable
 /// analysis, ownership/liveness (it is read inside the fused map), and the filter
 /// lowering (where it becomes an extra operand of the per-element map call,
-/// split out by `map_capture_count`). Still one coherent pipeline.
+/// carried by the map body's explicit capture list. Still one coherent pipeline.
 #[test]
 fn capturing_map_into_filter_is_one_pipeline() {
     let lowered = compile_parallel(

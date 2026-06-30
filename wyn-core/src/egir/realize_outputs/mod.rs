@@ -52,9 +52,7 @@ pub fn run(inner: &mut EgirInner) -> Result<(), ConvertError> {
     Ok(())
 }
 
-fn realize_entry(
-    entry: &mut EgirEntry,
-) -> Result<(), ConvertError> {
+fn realize_entry(entry: &mut EgirEntry) -> Result<(), ConvertError> {
     if entry.outputs.is_empty() {
         return Ok(());
     }
@@ -76,9 +74,7 @@ fn realize_entry(
 /// declared output's `SlotSource`s independently lower to a DPS write
 /// into the shared `OutputView`. Multi-source slots (`If`-forks etc.)
 /// share one view; runtime CFG picks which source's write fires.
-fn realize_compute_slots(
-    entry: &mut EgirEntry,
-) -> Result<(), ConvertError> {
+fn realize_compute_slots(entry: &mut EgirEntry) -> Result<(), ConvertError> {
     let EgirEntry {
         graph,
         outputs,
@@ -105,12 +101,7 @@ fn realize_compute_slots(
         // its serial loop compacts into the output buffer and writes a paired
         // length cell. No DPS store is emitted — the filter *is* the writer.
         if sources.len() == 1
-            && dispatch::retarget_filter_output(
-                graph,
-                storage_bindings,
-                output,
-                sources[0].value,
-            )?
+            && dispatch::retarget_filter_output(graph, storage_bindings, output, sources[0].value)?
         {
             continue;
         }

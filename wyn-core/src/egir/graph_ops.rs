@@ -3,7 +3,7 @@
 //! the in-place rewrite helpers in `egir::parallelize` — all need to
 //! intern the same set of pure ops (literals, intrinsics, BinOps,
 //! StorageViews) and push the same shapes of side-effects (`Store`,
-//! `Pending(soac)`). This module owns those primitives so the three
+//! semantic `Soac` effects). This module owns those primitives so the three
 //! contexts don't drift in their representation.
 //!
 //! The functions take `Option<Span>` for span attachment; pass
@@ -24,7 +24,7 @@ use crate::ssa::types::{ConstantValue, InstKind, ValueRef};
 use crate::BindingRef;
 
 use super::types::{
-    EGraph, EgirSoac, ENode, EffectToken, NodeId, PureOp, PureViewSource, SideEffect, SideEffectKind,
+    EGraph, ENode, EffectToken, EgirSoac, NodeId, PureOp, PureViewSource, SideEffect, SideEffectKind,
 };
 
 // ---------------------------------------------------------------------------

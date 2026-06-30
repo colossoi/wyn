@@ -344,11 +344,7 @@ fn compile_file(
             Target::Spirv => CodegenTarget::Spirv,
             Target::Wgsl => CodegenTarget::Wgsl,
         },
-        if single_stage {
-            SchedulePolicy::SingleStage
-        } else {
-            SchedulePolicy::Parallel
-        },
+        if single_stage { SchedulePolicy::SingleStage } else { SchedulePolicy::Parallel },
     );
     let ssa = time("egir_lower_to_ssa", verbose, || allocated.lower_to_ssa(profile))?;
 

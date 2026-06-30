@@ -317,8 +317,8 @@ fn fmt_ssa_type(ty: &polytype::Type<wyn_core::ast::TypeName>) -> String {
 }
 
 fn entry_binding_from_input(input: &wyn_core::ssa::types::EntryInput) -> EntryBinding {
-    use wyn_core::BindingRef;
     use wyn_core::ssa::types::IoDecoration;
+    use wyn_core::BindingRef;
     let decoration = if let Some(BindingRef { set, binding }) = input.storage_binding {
         format!("storage({},{})", set, binding)
     } else if let Some(BindingRef { set, binding }) = input.uniform_binding {
@@ -344,8 +344,8 @@ fn entry_binding_from_input(input: &wyn_core::ssa::types::EntryInput) -> EntryBi
 }
 
 fn entry_binding_from_output(idx: usize, output: &wyn_core::ssa::types::EntryOutput) -> EntryBinding {
-    use wyn_core::BindingRef;
     use wyn_core::ssa::types::IoDecoration;
+    use wyn_core::BindingRef;
     let decoration = if let Some(BindingRef { set, binding }) = output.storage_binding {
         format!("storage({},{})", set, binding)
     } else {
@@ -571,8 +571,7 @@ fn compile_to_wgsl_impl(source: &str) -> CompileResultWgsl {
     };
 
     // Frontend pipeline: parse → elaborate → resolve → fold → type-check →
-    // TLC → EGIR (`expand_soacs(true) → materialize → optimize_skeleton →
-    // elaborate`) → WGSL.
+    // TLC → semantic EGIR → target-aware SSA lowering → WGSL.
     let parsed = match wyn_core::Compiler::parse(source, &mut node_counter) {
         Ok(p) => p,
         Err(e) => return CompileResultWgsl::err(e),
@@ -598,12 +597,21 @@ fn compile_to_wgsl_impl(source: &str) -> CompileResultWgsl {
     let tlc_after_partial_eval = tlc_program.partial_eval();
     let tlc_tree = tlc_tree::program_to_tree(&tlc_after_partial_eval.tlc);
 
-    let tlc_with_ownership = match tlc_after_partial_eval
-        .normalize_soacs()
-        .force_inline_soac_helpers()
-        .fuse_maps()
-        .apply_ownership()
-    {
+    let tlc_normed = tlc_after_partial_eval.normalize_soacs();
+    let tlc_mono = tlc_normed.monomorphize();
+    let tlc_rep_specialized = tlc_mono.rep_specialize();
+    let tlc_inlined = tlc_rep_specialized.inline_small();
+    let tlc_force_inlined = tlc_inlined.force_inline_soac_helpers();
+    let tlc_canon = tlc_force_inlined.canonicalize_producers();
+    let tlc_fused = tlc_canon.fuse_maps();
+    let tlc_exposed = tlc_fused.expose_entry_producer_helpers();
+    let tlc_static_fused = tlc_exposed.fuse_static_indices();
+    let tlc_runtime_floated = tlc_static_fused.float_runtime_index_nested_producers();
+    let tlc_gathered = tlc_runtime_floated.plan_execute_gather_residency();
+    let tlc_scalar_hoisted = tlc_gathered.hoist_scalar_prepasses(false);
+    let tlc_defunc = tlc_scalar_hoisted.defunctionalize();
+    let tlc_folded = tlc_defunc.fold_generated_lambdas();
+    let tlc_with_ownership = match tlc_folded.apply_ownership() {
         Ok(t) => t,
         Err(e) => return CompileResultWgsl::err_msg(format!("apply_ownership: {:?}", e)),
     };
@@ -611,15 +619,7 @@ fn compile_to_wgsl_impl(source: &str) -> CompileResultWgsl {
         Ok(t) => t,
         Err(e) => return CompileResultWgsl::err_msg(format!("normalize_outputs: {:?}", e)),
     };
-    let tlc_parallelized = match tlc_outputs_normalized
-        .lift_gathers()
-        .defunctionalize()
-        .monomorphize()
-        .fold_generated_lambdas()
-        .inline_small()
-        .rep_specialize()
-        .parallelize_soacs(false)
-    {
+    let tlc_parallelized = match tlc_outputs_normalized.parallelize_soacs(false) {
         Ok(t) => t,
         Err(e) => return CompileResultWgsl::err_msg(format!("parallelize_soacs: {:?}", e)),
     };

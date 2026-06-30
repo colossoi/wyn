@@ -159,10 +159,7 @@ impl EntryBuilder {
         output_view_nid: NodeId,
         output_view_ty: Type<TypeName>,
     ) -> NodeId {
-        let step_body = super::types::SegBody {
-            region,
-            captures,
-        };
+        let step_body = super::types::SegBody { region, captures };
         // `[input, init, output_view]` — captures live on `step_body`.
         let operands: smallvec::SmallVec<[NodeId; 4]> =
             smallvec![input_array_nid, init_nid, output_view_nid];
@@ -213,10 +210,7 @@ impl EntryBuilder {
         output_view_nid: NodeId,
         output_view_ty: Type<TypeName>,
     ) -> NodeId {
-        let map_body = super::types::SegBody {
-            region,
-            captures,
-        };
+        let map_body = super::types::SegBody { region, captures };
         // `[input, output_view]` — captures live on `map_body`.
         let operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![input_array_nid, output_view_nid];
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![output_view_ty]);

@@ -20,18 +20,11 @@ use std::collections::{HashMap, HashSet};
 fn compile_via_egir(src: &str) -> Program {
     let tlc = crate::test_pipeline::compile_to_reachable(src, false);
 
-    let empty = std::collections::HashMap::new();
     let bounds = crate::tlc::input_slice_bounds::compute_for_program(&tlc.tlc);
     let mut binding_ids = crate::IdSource::<u32>::new();
     crate::EgirRaw(
-        run(
-            &tlc.tlc,
-            PipelineDescriptor::default(),
-            &empty,
-            &bounds,
-            &mut binding_ids,
-        )
-        .expect("egir::from_tlc conversion failed"),
+        run(&tlc.tlc, PipelineDescriptor::default(), &bounds, &mut binding_ids)
+            .expect("egir::from_tlc conversion failed"),
     )
     .realize_outputs()
     .expect("egir::realize_outputs failed")
@@ -611,7 +604,6 @@ entry vertex_main(#[location(0)] position: vec3f32, #[location(1)] color: vec3f3
     let egir = super::run(
         &tlc_program,
         PipelineDescriptor::default(),
-        &HashMap::new(),
         &bounds,
         &mut binding_ids,
     )
@@ -653,7 +645,7 @@ fn wrap_arrow_return_in_unique(mut ty: &mut Type<TypeName>) {
 /// that path end to end.
 #[test]
 fn parallel_scan_synthesized_swap_region_is_name_recoverable() {
-    let src = "entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)";
+    let src = "#[compute] entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)";
     crate::compile_thru_ssa(src)
         .expect("parallel scan lowers, recovering its synthesized swap-wrapper region");
 }

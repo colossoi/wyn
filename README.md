@@ -82,7 +82,7 @@ passes:
 | **TlcGathersLifted** | `tlc::lift_gathers` | Plans and executes gather residency: materializes randomly-indexed computed arrays into storage buffers by splitting the producer into its own pre-pass compute entry, then rewrites the consumer's indexed reads to load from that buffer |
 | **TlcOwnershipApplied** | `tlc::ownership` | Backward ownership-liveness analysis. Reports use-after-move; rewrites array-update operations into in-place forms when the source is mutable and dead after the call. Runs before output normalization so its liveness walk never sees `OutputSlotStore` |
 | **TlcOutputsNormalized** | `tlc::normalize_outputs` | Rewrites each compute entry's tail into a chain of explicit per-slot output writes. Single-output and multi-output entries share one structural shape; the entry's `def.ty` is kept in sync with its rewritten body |
-| **TlcParallelized** | `tlc::parallelize` | Per-entry SOAC parallelization analysis: pick strategy + workgroup + dispatch shape, reserve intermediate bindings, build the host pipeline descriptor, and emit a declarative parallelization plan per entry for EGIR to consume. Kernel lowering happens EGIR-side |
+| **TlcParallelized** | `tlc::parallelize` | Remaining source-level equal-domain map fusion plus empty host pipeline shells. No strategy or recognition facts are emitted; EGIR derives placement and scheduling from semantic operations |
 | **TlcReachable** | `tlc::inline` | Dead definition elimination |
 
 #### Pass-ordering dependency assertions
@@ -114,25 +114,20 @@ Each notes how it's enforced; when you move a pass, check it here.
   no case for `OutputSlotStore`, which `normalize_outputs` introduces. *Enforced
   by:* `unreachable!` in `ownership.rs`'s `analyze`.
 
-**Open tensions** (constraints we'd like that don't currently hold):
-
-- **`lift_gathers` / `runtime_index_producers` want pre-`defunctionalize`
-  producers** (recognizable as `Soac(Map/Scan)`), but run after it.
-
 ### EGIR (Acyclic E-Graph IR)
 | Stage | Module | Description |
 |-------|--------|-------------|
 | **EgirRaw** | `egir::from_tlc` | TLC → EGraph; intrinsic calls become pure nodes (with explicit arms for effectful ones). Per-slot output writes are bridged back into a tail tuple so the next stage can retarget per slot |
 | **EgirOutputsRealized** | `egir::realize_outputs` | Per-slot output realization: each declared output's writes are materialized as side effects against the bound storage view (compute) or `OutputSlot` place (graphics); the body's `Return` carries no value. The post-pass verifier checks no runtime-sized Composite array is reachable from any entry output |
-| **EgirParallelized** | `egir::parallelize` | Consumes the parallelization plan from TLC and tags each planned compute entry's tail SOAC for parallel expansion. No-op when no entries are parallelized |
-| **EgirSoacExpanded** | `egir::soac_expand` | Every pending SOAC is rewritten into an explicit loop subgraph. Small statically-sized maps are unrolled. Compute-entry SOACs lower to lane-indexed kernels that read the global invocation id |
-| **EgirMaterialized** | `egir::materialize` | (optional, SPIR-V only) Dynamic `Index` operations are materialized into pointer-based reads and LICM-hoisted out of loops |
-| **EgirSkelOptimized** | `egir::skel_opt` | Skeleton CFG rewrites: branch folding, redundant-phi elimination |
+| **EgirSegmented** | `egir::parallelize::reify` | Every reachable Screma becomes a semantic SegMap/SegRed/SegScan with authoritative SegSpace, typed bodies, explicit captures, output routing, effects, placement, and dependencies. No phases are selected here |
+| **EgirOptimized** | `egir::semantic_opt` | Target-independent semantic cleanup; SegOps remain intact |
+| **EgirAllocated** | `egir::program` | Plans logical resources without publishing a descriptor or choosing target phases |
+| **SsaConverted** | `egir::target_lowering` | `lower_to_ssa(LoweringProfile)` transactionally chooses algorithms, scratch, bindings, domains, KernelSchedule, and the final descriptor, then expands SegOps to SSA |
 
 ### SSA (codegen only)
 | Stage | Source | Description |
 |-------|--------|-------------|
-| **SsaConverted** | `EgirSkelOptimized::elaborate` | EGIR chain elaborated into SSA `Program` |
+| **SsaConverted** | `EgirAllocated::lower_to_ssa` | Target-aware terminal EGIR lowering produces SSA, schedule, and descriptor together |
 | **Lowered** | `spirv` / `wgsl` | SSA to SPIR-V or WGSL |
 
 SSA is intentionally minimal: all mid-end machinery (effect tokens,
@@ -149,15 +144,13 @@ Key properties:
 
 ### SOAC Parallelization Boundary
 
-Parallelization of compute-entry SOACs splits cleanly across the two
-mid-end passes. **TLC `parallelize` is analysis-only**: it picks a
-strategy + workgroup + dispatch shape per entry, reserves intermediate
-bindings, and emits a declarative plan plus the host-facing pipeline
-descriptor. It does not hand-roll kernel bodies — EGIR already builds
-those well.
+Parallel semantics live in EGIR. TLC performs source-level normalization and
+fusion but emits no per-entry strategy record. EGIR reifies every reachable
+SOAC, retains it through semantic optimization and logical allocation, and
+destroys it only at the target-aware lower-to-SSA boundary. That terminal
+operation produces SSA kernels, the dependency/resource schedule, and the
+descriptor as one result. Its initial portable scheduler implements:
 
-**EGIR `parallelize` consumes the plans** and rewrites entries per
-strategy:
 
 - **Map** — lane-indexed scalar kernel: one thread per element, guarded
   by a bounds check. The serial-loop builder is still used for
@@ -245,11 +238,11 @@ function summaries (`reduce(+, 0, evens(xs))` where `def evens = filter(…)`).
 runs through the serial scratch-view loop above. The parallel algorithm is
 map (predicate → flags) → parallel scan (flags → offsets) → scatter
 (`if flags[i] { out[offsets[i]-1] = xs[i] }`) → len (`offsets[n-1]`). Two
-pieces are missing: a `ParallelStrategy::Filter` synthesis mirroring
-`transform_scan_entry` (reusing the parallel scan for the offsets prefix-sum),
+pieces are missing: a target-lowering `SegFilter` schedule reusing the
+  parallel scan for the offsets prefix-sum,
 and a guarded parallel **scatter** kernel — `EntryBuilder` only emits
 straight-line SOAC phase bodies, so the conditional store needs hand-built CFG
-(`Scatter` is also still rejected in `egir::convert_soac`). Until then,
+(the existing ordered `SegHist`/scatter lowering is serial). Until then,
 `reduce(filter)` is the only parallel filter path.
 
 #### Remaining-work ordering
@@ -269,7 +262,7 @@ is independent.
   envelope lambda is what marks it as a SOAC).
 - **Parallel `Filter` → parallel `Scan` + a scatter kernel.** The scan
   prerequisite (prefix-sum over the predicate mask → write offsets) is in
-  place, but the `ParallelStrategy::Filter` synthesis and the guarded scatter
+  place, but the `SegFilter` schedule and the guarded scatter
   kernel are not built (see "`Filter` — runtime-sized inputs" above). Today
   `reduce(filter)` parallelizes via the masked-redomap fusion; standalone
   `filter` is serial.

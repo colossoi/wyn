@@ -4,8 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::program::EgirInner;
 use super::types::{
-    EGraph, EgirSoac, NodeId, SegResourceAccess, SegResourceAccessKind, SideEffectKind,
-    SkeletonTerminator,
+    EGraph, EgirSoac, NodeId, SegResourceAccess, SegResourceAccessKind, SideEffectKind, SkeletonTerminator,
 };
 
 pub fn run(inner: &mut EgirInner) {
@@ -42,10 +41,8 @@ fn canonicalize_resource_accesses(graph: &mut EGraph) {
                     })
                     .or_insert(resource.access);
             }
-            let mut normalized: Vec<_> = merged
-                .into_iter()
-                .map(|(binding, access)| SegResourceAccess { binding, access })
-                .collect();
+            let mut normalized: Vec<_> =
+                merged.into_iter().map(|(binding, access)| SegResourceAccess { binding, access }).collect();
             normalized.sort_by_key(|resource| (resource.binding.set, resource.binding.binding));
             *resources = normalized;
         }
@@ -87,9 +84,8 @@ fn eliminate_dead_lane_local_ops(graph: &mut EGraph) {
             else {
                 return true;
             };
-            let observable_resource = resources
-                .iter()
-                .any(|resource| resource.access != SegResourceAccessKind::Read);
+            let observable_resource =
+                resources.iter().any(|resource| resource.access != SegResourceAccessKind::Read);
             observable_resource || effect.result.is_some_and(|result| used.contains(&result))
         });
     }
