@@ -26,6 +26,7 @@ pub mod types;
 
 pub mod builder;
 pub mod from_tlc;
+pub(crate) mod fusion;
 pub mod graph_ops;
 pub mod parallelize;
 pub mod realize_outputs;
