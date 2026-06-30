@@ -1597,3 +1597,7 @@ fn uint_lit(val: u64, span: ast::Span, term_ids: &mut TermIdSource) -> Term {
         kind: TermKind::IntLit(val.to_string()),
     }
 }
+
+#[cfg(test)]
+#[path = "parallelize_tests.rs"]
+mod parallelize_tests;
