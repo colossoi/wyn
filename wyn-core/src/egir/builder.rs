@@ -79,11 +79,20 @@ impl EntryBuilder {
     }
 
     pub fn declare_output_storage(&mut self, binding: BindingRef, elem_ty: Type<TypeName>) {
+        self.declare_output_storage_sized(binding, elem_ty, None);
+    }
+
+    pub fn declare_output_storage_sized(
+        &mut self,
+        binding: BindingRef,
+        elem_ty: Type<TypeName>,
+        length: Option<crate::pipeline_descriptor::BufferLen>,
+    ) {
         self.storage_bindings.push(interface::StorageBindingDecl {
             binding,
             role: interface::StorageRole::Output,
             elem_ty,
-            length: None,
+            length,
         });
     }
 

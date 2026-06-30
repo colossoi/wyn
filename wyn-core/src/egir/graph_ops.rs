@@ -421,6 +421,21 @@ pub fn clone_pure_subgraph(src: &EGraph, dst: &mut EGraph, root: NodeId) -> Resu
     clone_inner(src, dst, root, &mut memo)
 }
 
+/// Clone a pure subgraph of `src` into `dst`, but substitute the given `src`
+/// nodes for already-existing `dst` nodes: any `(from, to)` pre-seeds the clone
+/// memo, so a reference to `from` in `src` becomes `to` in `dst`. Lets a value
+/// rooted at a non-pure node (e.g. a SOAC result) be re-expressed over a
+/// replacement `dst` value without rebuilding its projection structure by hand.
+pub fn clone_pure_subgraph_substituting(
+    src: &EGraph,
+    dst: &mut EGraph,
+    root: NodeId,
+    subs: &[(NodeId, NodeId)],
+) -> Result<NodeId, String> {
+    let mut memo: LookupMap<NodeId, NodeId> = subs.iter().copied().collect();
+    clone_inner(src, dst, root, &mut memo)
+}
+
 fn clone_inner(
     src: &EGraph,
     dst: &mut EGraph,

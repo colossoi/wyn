@@ -170,6 +170,72 @@ entry mn(n: u32) (u32, [4]u32) =
     );
 }
 
+/// A reduce whose element is a tuple is decomposed across one output buffer per
+/// field. Phase 1 must store the whole accumulator tuple to its partials buffer,
+/// and phase 2 must write *every* output field from the combined result.
+/// Regression: the lowering kept only the first field's store (writing a scalar
+/// into the tuple-typed partials → invalid SPIR-V) and dropped the array field's
+/// output entirely. `compile_to_spirv` alone doesn't catch it — the malformed
+/// store only fails `spirv-val` (see `testfiles/miner.wyn`); this asserts the
+/// descriptor invariant that no output buffer is left unwritten.
+#[test]
+fn tuple_reduce_writes_every_output_field() {
+    use crate::pipeline_descriptor::{Binding, BufferUsage, Pipeline};
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry mn(n: u32) (u32, [4]u32) =
+  let cands = map(|i: u32| (i, [i, i, i, i]), 0u32..<n) in
+  reduce(
+    |a: (u32, [4]u32), b: (u32, [4]u32)| if a.0 < b.0 then a else b,
+    (4294967295u32, [0u32, 0u32, 0u32, 0u32]),
+    cands)
+"#,
+    )
+    .expect("tuple-element reduce compiles");
+    let cp = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .find_map(|p| match p {
+            Pipeline::Compute(c) => Some(c),
+            _ => None,
+        })
+        .expect("one compute pipeline");
+    assert!(
+        cp.stages.iter().any(|s| s.entry_point.contains("phase2_combine")),
+        "a parallel reduce splits into phase 1 + phase2_combine"
+    );
+    let output_indices: Vec<usize> = cp
+        .bindings
+        .iter()
+        .enumerate()
+        .filter_map(|(i, b)| {
+            matches!(
+                b,
+                Binding::StorageBuffer {
+                    usage: BufferUsage::Output,
+                    ..
+                }
+            )
+            .then_some(i)
+        })
+        .collect();
+    assert_eq!(
+        output_indices.len(),
+        2,
+        "the tuple `(u32, [4]u32)` yields two output buffers"
+    );
+    for idx in output_indices {
+        assert!(
+            cp.stages.iter().any(|s| s.writes.contains(&idx)),
+            "output buffer #{idx} must be written by some stage; \
+             stage writes = {:?}",
+            cp.stages.iter().map(|s| &s.writes).collect::<Vec<_>>()
+        );
+    }
+}
+
 /// The reduce phase2 is a workgroup-parallel tree reduce: a `LocalSize(W,1,1)`
 /// `*_phase2_combine` entry that uses `local_id`, a workgroup-shared array, and
 /// `ControlBarrier`s — not a single-threaded combine loop.

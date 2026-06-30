@@ -664,14 +664,17 @@ fn chunk_view_like(
 /// workgroup shared-memory budget (256 × a 36-byte tuple ≈ 9 KB). The phase2
 /// `ComputeStage` in `tlc::parallelize` must dispatch this same width.
 
+#[allow(clippy::too_many_arguments)]
 fn build_tree_reduce_phase2(
     b: &mut super::builder::EntryBuilder,
     op_func: String,
     elem_ty: Type<TypeName>,
     init_nid: NodeId,
     partials_binding: BindingRef,
-    result_binding: BindingRef,
-) {
+    phase1_graph: &super::types::EGraph,
+    accumulator_value: NodeId,
+    output_stores: &[(NodeId, NodeId)],
+) -> Result<(), String> {
     let w = PHASE2_WIDTH;
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
@@ -700,7 +703,6 @@ fn build_tree_reduce_phase2(
     );
     let partials_view = graph_ops::intern_storage_view(graph, partials_binding, view_arr_ty.clone(), None);
     let len = emit_storage_len(graph, partials_binding);
-    let result_view = graph_ops::intern_storage_view(graph, result_binding, view_arr_ty.clone(), None);
     // Workgroup-shared `array<elem, W>` (id 0 within this entry).
     let shared_view = graph_ops::emit_workgroup_view(graph, 0, w, view_arr_ty.clone(), None);
     let w_nid = graph_ops::intern_u32(graph, w, None);
@@ -920,7 +922,10 @@ fn build_tree_reduce_phase2(
     };
     b.control_headers_mut().insert(tree_after, ControlHeader::Selection { merge: end_blk });
 
-    // write_blk: result[0] = shared[0]; → end_blk
+    // write_blk: combined = shared[0]; replay each captured output store reading
+    // `combined` in place of the per-thread accumulator value. A scalar reduce
+    // has one store (`out[0] = combined`); a tuple-element reduce decomposes
+    // across one store per field.
     let graph = b.graph_mut();
     let s0 = graph_ops::emit_view_load(
         graph,
@@ -931,16 +936,16 @@ fn build_tree_reduce_phase2(
         &mut eff,
         None,
     );
-    graph_ops::emit_storage_store(
-        graph,
-        write_blk,
-        result_view,
-        zero_u32,
-        s0,
-        elem_ty.clone(),
-        &mut eff,
-        None,
-    );
+    for &(place, value) in output_stores {
+        let cloned_place = graph_ops::clone_pure_subgraph(phase1_graph, graph, place)?;
+        let cloned_value = graph_ops::clone_pure_subgraph_substituting(
+            phase1_graph,
+            graph,
+            value,
+            &[(accumulator_value, s0)],
+        )?;
+        graph_ops::emit_store(graph, write_blk, cloned_place, cloned_value, &mut eff, None);
+    }
     graph.skeleton.blocks[write_blk].term = SkeletonTerminator::Branch {
         target: end_blk,
         args: vec![],
@@ -948,6 +953,7 @@ fn build_tree_reduce_phase2(
 
     // end_blk is the exit; `build()` finalizes it with Return(None).
     b.set_current_block(end_blk);
+    Ok(())
 }
 
 /// Emit the chunk-arithmetic preamble (`tid`, `chunk_start`,
@@ -1083,30 +1089,13 @@ fn dispatch_worker_buffer_len(elem_ty: &Type<TypeName>) -> Option<crate::pipelin
 /// (possibly compound) pure subgraph cloned from phase 1. Used by the
 /// Screma reduce path for any NE shape (scalar literal, tuple, array,
 /// etc.).
-pub fn synthesize_phase2_reduce_cloning_ne(
-    entry_name: &str,
-    op_func: String,
-    elem_ty: Type<TypeName>,
-    phase1_graph: &super::types::EGraph,
-    phase1_ne_nid: NodeId,
-    partials_binding: BindingRef,
-    result_binding: BindingRef,
-) -> Result<EgirEntry, String> {
-    synthesize_phase2_reduce_cloning_ne_named(
-        format!("{}_phase2_combine", entry_name),
-        op_func,
-        elem_ty,
-        phase1_graph,
-        phase1_ne_nid,
-        partials_binding,
-        result_binding,
-    )
-}
-
-/// Same as `synthesize_phase2_reduce_cloning_ne` but caller picks the
-/// full entry name — Screma's multi-accumulator path uses suffixes like
-/// `_phase2_combine_0`, `_phase2_combine_1` so each combiner has a
-/// unique entry point.
+/// Synthesize a reduce phase-2 combine entry. Its `partials` buffer is typed as
+/// the (possibly tuple) accumulator element; the workgroup tree reduces them to
+/// one combined value and replays the accumulator's captured output stores
+/// (`output_stores`, `(place, value)` nodes from `phase1_graph`) against it,
+/// substituting `accumulator_value` for the combined result. `output_decls`
+/// declares the output bindings this entry writes. Screma's multi-accumulator
+/// path passes a `_phase2_combine_{i}` `full_name` per combiner.
 pub fn synthesize_phase2_reduce_cloning_ne_named(
     full_name: String,
     op_func: String,
@@ -1114,7 +1103,13 @@ pub fn synthesize_phase2_reduce_cloning_ne_named(
     phase1_graph: &super::types::EGraph,
     phase1_ne_nid: NodeId,
     partials_binding: BindingRef,
-    result_binding: BindingRef,
+    accumulator_value: NodeId,
+    output_stores: &[(NodeId, NodeId)],
+    output_decls: &[(
+        BindingRef,
+        Type<TypeName>,
+        Option<crate::pipeline_descriptor::BufferLen>,
+    )],
 ) -> Result<EgirEntry, String> {
     use super::builder::EntryBuilder;
     let mut b = EntryBuilder::new_compute(full_name, (PHASE2_WIDTH, 1, 1));
@@ -1123,7 +1118,9 @@ pub fn synthesize_phase2_reduce_cloning_ne_named(
         elem_ty.clone(),
         dispatch_worker_buffer_len(&elem_ty),
     );
-    b.declare_output_storage(result_binding, elem_ty.clone());
+    for (binding, ty, length) in output_decls {
+        b.declare_output_storage_sized(*binding, ty.clone(), length.clone());
+    }
 
     let init_nid = graph_ops::clone_pure_subgraph(phase1_graph, b.graph_mut(), phase1_ne_nid)?;
     build_tree_reduce_phase2(
@@ -1132,8 +1129,10 @@ pub fn synthesize_phase2_reduce_cloning_ne_named(
         elem_ty,
         init_nid,
         partials_binding,
-        result_binding,
-    );
+        phase1_graph,
+        accumulator_value,
+        output_stores,
+    )?;
     Ok(b.build())
 }
 
@@ -1361,21 +1360,31 @@ fn lower_reduce_entry(
         se.operand_nodes[*op_idx] = chunked_view;
     }
 
-    // 4. For each reduce accumulator, find the Store that consumes
-    // `Project { index: n_maps + acc_i } of screma_result_nid` and
-    // redirect its place to `partials_i[tid]`. Track the original
-    // binding for clearing the entry's output slot.
-    let mut keeper_stores: Vec<Option<(BlockId, usize, Option<BindingRef>)>> = vec![None; n_accs];
-    let mut duplicate_stores: Vec<(BlockId, usize)> = Vec::new();
+    // 4. Capture every output store of each accumulator. `realize_outputs`
+    // decomposes a tuple-element accumulator across one store per scalar field
+    // (`Project{field}(…Project{acc_pos}(screma_result))`), so an accumulator may
+    // own several stores. Bucket them by `acc_i = project_root_index − n_maps`
+    // (the index adjacent to the Screma result), recording each store's
+    // `(place, value)` nodes plus the distinct output bindings it targets and
+    // their entry-output sizing.
+    let mut acc_stores: Vec<Vec<(NodeId, NodeId)>> = vec![Vec::new(); n_accs];
+    let mut acc_output_decls: Vec<
+        Vec<(
+            BindingRef,
+            Type<TypeName>,
+            Option<crate::pipeline_descriptor::BufferLen>,
+        )>,
+    > = vec![Vec::new(); n_accs];
+    let mut drop_locations: Vec<(BlockId, usize)> = Vec::new();
     for (bid, block) in &entry.graph.skeleton.blocks {
         for (i, se) in block.side_effects.iter().enumerate() {
             if !matches!(&se.kind, SideEffectKind::Inst(InstKind::Store { .. })) {
                 continue;
             }
-            let Some(&value_nid) = se.operand_nodes.get(1) else {
+            let (Some(&place), Some(&value)) = (se.operand_nodes.first(), se.operand_nodes.get(1)) else {
                 continue;
             };
-            let Some(root_idx) = project_root_index(&entry.graph, value_nid, screma_result_nid) else {
+            let Some(root_idx) = project_root_index(&entry.graph, value, screma_result_nid) else {
                 continue;
             };
             if (root_idx as usize) < n_maps {
@@ -1385,32 +1394,45 @@ fn lower_reduce_entry(
             if acc_i >= n_accs {
                 continue;
             }
-            if keeper_stores[acc_i].is_none() {
-                let orig_bind =
-                    se.operand_nodes.get(0).and_then(|&place| storage_binding_under(&entry.graph, place));
-                keeper_stores[acc_i] = Some((bid, i, orig_bind));
-            } else {
-                duplicate_stores.push((bid, i));
+            acc_stores[acc_i].push((place, value));
+            if let Some(binding) = storage_binding_under(&entry.graph, place) {
+                if !acc_output_decls[acc_i].iter().any(|(b, _, _)| *b == binding) {
+                    let Some(out) = entry.outputs.iter().find(|o| o.storage_binding == Some(binding))
+                    else {
+                        return None;
+                    };
+                    acc_output_decls[acc_i].push((binding, out.ty.clone(), out.length.clone()));
+                }
             }
+            drop_locations.push((bid, i));
         }
     }
-    for (acc_i, slot) in keeper_stores.iter().enumerate() {
-        if slot.is_none() || slot.and_then(|(_, _, binding)| binding).is_none() {
-            // No routed store for this accumulator's tuple field. The caller
-            // restores its snapshot and leaves the operation serial.
-            let _ = acc_i;
-            return None;
-        }
+    if (0..n_accs).any(|acc_i| acc_stores[acc_i].is_empty() || acc_output_decls[acc_i].is_empty()) {
+        return None;
     }
-    let result_bindings: Vec<BindingRef> = keeper_stores
-        .iter()
-        .map(|slot| slot.and_then(|(_, _, binding)| binding).expect("checked above"))
+
+    // 5. Phase 1 stores each thread's whole accumulator value to `partials[tid]`
+    // and no longer writes the outputs. `accumulator_value` is the hash-consed
+    // `Project{acc_pos}(screma_result)` node — phase 2 substitutes it for the
+    // combined result when replaying the captured stores.
+    let accumulator_values: Vec<NodeId> = (0..n_accs)
+        .map(|acc_i| {
+            entry.graph.intern_pure(
+                super::types::PureOp::Project {
+                    index: (n_maps + acc_i) as u32,
+                },
+                smallvec![screma_result_nid],
+                elem_tys[acc_i].clone(),
+            )
+        })
         .collect();
-    let acc_bindings: Vec<(BindingRef, BindingRef)> =
-        partial_bindings.into_iter().zip(result_bindings).collect();
-    // Redirect each keeper store.
-    for (acc_i, (partials_binding, _)) in acc_bindings.iter().enumerate() {
-        let (blk, sx, _) = keeper_stores[acc_i].expect("checked above");
+    // Drop the decomposed output stores (highest index first per block).
+    drop_locations.sort_by(|a, b| b.1.cmp(&a.1));
+    for (bid, sx) in drop_locations {
+        entry.graph.skeleton.blocks[bid].side_effects.remove(sx);
+    }
+    let mut next_effect = graph_ops::next_effect_token(&entry.graph);
+    for acc_i in 0..n_accs {
         let elem_ty = elem_tys[acc_i].clone();
         let arr_ty = Type::Constructed(
             TypeName::Array,
@@ -1422,52 +1444,46 @@ fn lower_reduce_entry(
             ],
         );
         let partials_view =
-            graph_ops::intern_storage_view(&mut entry.graph, *partials_binding, arr_ty, None);
-        let new_place = entry.graph.intern_pure(
-            super::types::PureOp::ViewIndex,
-            smallvec![partials_view, chunked.tid],
+            graph_ops::intern_storage_view(&mut entry.graph, partial_bindings[acc_i], arr_ty, None);
+        graph_ops::emit_storage_store(
+            &mut entry.graph,
+            block_id,
+            partials_view,
+            chunked.tid,
+            accumulator_values[acc_i],
             elem_ty,
+            &mut next_effect,
+            None,
         );
-        entry.graph.skeleton.blocks[blk].side_effects[sx].operand_nodes[0] = new_place;
-    }
-    // Drop duplicates highest-idx-first so earlier indices stay valid.
-    duplicate_stores.sort_by(|a, b| b.1.cmp(&a.1));
-    for (bid, sx) in duplicate_stores {
-        entry.graph.skeleton.blocks[bid].side_effects.remove(sx);
-    }
-
-    // 5. Clear the entry.outputs slot for each redirected accumulator
-    // binding; map output slots keep their storage_binding. Register
-    // each partials buffer as Intermediate.
-    for (acc_i, (partials_binding, _)) in acc_bindings.iter().enumerate() {
-        if let Some((_, _, Some(orig))) = keeper_stores[acc_i] {
+        // Clear the moved output bindings from phase 1; register partials.
+        for (binding, _, _) in &acc_output_decls[acc_i] {
             for o in entry.outputs.iter_mut() {
-                if o.storage_binding == Some(orig) {
+                if o.storage_binding == Some(*binding) {
                     o.storage_binding = None;
                 }
             }
         }
         entry.storage_bindings.push(crate::interface::StorageBindingDecl {
-            binding: *partials_binding,
+            binding: partial_bindings[acc_i],
             role: crate::interface::StorageRole::Intermediate,
             elem_ty: elem_tys[acc_i].clone(),
             length: dispatch_worker_buffer_len(&elem_tys[acc_i]),
         });
     }
-    // A compiler-produced scalar (for example a hoisted prepass result) may
-    // also be represented by an Output storage declaration. Phase 1 no longer
-    // writes that binding; phase 2 declares and owns the final write.
+    // A moved output binding may also carry an Output storage declaration (e.g. a
+    // hoisted prepass result). Phase 1 no longer writes it; phase 2 owns it.
+    let moved: std::collections::HashSet<BindingRef> =
+        acc_output_decls.iter().flatten().map(|(b, _, _)| *b).collect();
     entry.storage_bindings.retain(|declaration| {
-        declaration.role != crate::interface::StorageRole::Output
-            || !acc_bindings.iter().any(|(_, result_binding)| declaration.binding == *result_binding)
+        declaration.role != crate::interface::StorageRole::Output || !moved.contains(&declaration.binding)
     });
 
-    // 6. Synthesize one phase 2 entry per accumulator. Cloning NEs from
-    // the post-mutation graph is harmless — the NE node is pure and
-    // hasn't been touched.
+    // 6. Synthesize one phase 2 entry per accumulator. The phase-1 snapshot still
+    // holds the captured store nodes (dropping the side-effects left the pure
+    // value/place subgraphs intact) and `accumulator_values`.
     let phase1_snapshot = entry.graph.clone();
     let mut phase2s = Vec::with_capacity(n_accs);
-    for (acc_i, (partials_binding, result_binding)) in acc_bindings.iter().enumerate() {
+    for acc_i in 0..n_accs {
         let phase2_name = if n_accs == 1 {
             format!("{}_phase2_combine", entry.name)
         } else {
@@ -1479,8 +1495,10 @@ fn lower_reduce_entry(
             elem_tys[acc_i].clone(),
             &phase1_snapshot,
             init_nids[acc_i],
-            *partials_binding,
-            *result_binding,
+            partial_bindings[acc_i],
+            accumulator_values[acc_i],
+            &acc_stores[acc_i],
+            &acc_output_decls[acc_i],
         )
         .ok()?;
         phase2s.push(phase2);
