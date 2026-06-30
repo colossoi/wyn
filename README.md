@@ -74,12 +74,13 @@ passes:
 | **TlcSoacHelpersInlined** | `tlc::inline::run_force_soac_helpers` | Force-inline every user function whose body (recursively) contains a SOAC (or `length`), regardless of control flow, so no SOAC is reachable behind a call and fusion is purely intraprocedural. Checked by `fusion::verify_soac_helpers_inlined` |
 | **TlcProducerCanonicalized** | `tlc::soa`, `tlc::if_over_producer` | Re-run SoA normalization (inlining may have exposed new tuple/zip/map structure), then `if-over-producer` lifting, so fusion sees clean top-of-let-chain SOAC producers |
 | **TlcFused** | `tlc::fusion`, `tlc::if_over_producer` | Intraprocedural SOAC fusion (horizontal map, map+reduce/scan, filter+length — "merge compatible nodes, union outputs"), then `if-over-producer` lifting and reachable-DCE. No cross-function summary path: every producer/consumer edge is within one def (force-inline guarantees it). Runs on **inline** SOAC operators (pre-defunctionalize) so `compose_*` can fold operator bodies directly |
-| **TlcDefunctionalized** | `tlc::closure_convert` → `tlc::hof_specialize` → `tlc::closure_calls_lower` | Three sequential passes: lambdas lifted to top-level defs, higher-order functions specialized away, captures threaded into call sites — including the SOAC operators fusion just composed. Verifier-checked invariants guard each phase boundary (see Defunctionalization below) |
-| **TlcGeneratedLambdasFolded** | `tlc::inline` | Fold compiler-generated lambda defs back at call sites + DCE |
 | **TlcEntryProducersExposed** | `tlc::materialize_entry_soacs` | Inlines producer-helper calls into the entry's top-level let-chain so the next two passes can see the SOAC producer + its indexed uses in the same scope. Refuses to descend into per-element lambdas — exposing a per-element scan as an entry producer would wreck cost semantics |
 | **TlcStaticIndexFused** | `tlc::static_index_fusion` | `map(f, src)[k]` (constant `k`) collapses to `f(src[k])`. A producer demanded only at a known slot becomes a scalar element computation rather than a runtime-sized buffer materialization |
 | **TlcRuntimeIndexProducersFloated** | `tlc::runtime_index_producers` | `map(\i. (map(f, xs))[i], is)` floats the inner producer out into a let-binding so it looks like an ordinary gather (`let p = map(f, xs) in map(\i. p[i], is)`) for the residency pass to rewrite |
-| **TlcGathersLifted** | `tlc::lift_gathers` | Plans and executes gather residency: materializes randomly-indexed computed arrays into storage buffers by splitting the producer into its own pre-pass compute entry, then rewrites the consumer's indexed reads to load from that buffer |
+| **TlcGathersLifted** | `tlc::lift_gathers` | Plans and executes gather residency (the `plan_execute_gather_residency` transition): materializes randomly-indexed computed arrays into storage buffers by splitting the producer into its own pre-pass compute entry, then rewrites the consumer's indexed reads to load from that buffer |
+| **TlcScalarPrepassesHoisted** | `tlc::parallelize` | Hoists a compute entry's scalar pre-pass computations (e.g. a reduction whose result a later phase consumes) into their own pre-pass compute entry, so the value is resident at dispatch. Skipped under `--single-stage` (the `disable` flag). Runs in the residency cluster, before defunctionalize, while producers are still recognizable as `Soac(Map/Scan)` |
+| **TlcDefunctionalized** | `tlc::closure_convert` → `tlc::hof_specialize` → `tlc::closure_calls_lower` | Three sequential passes: lambdas lifted to top-level defs, higher-order functions specialized away, captures threaded into call sites — including the SOAC operators fusion composed earlier. Verifier-checked invariants guard each phase boundary (see Defunctionalization below) |
+| **TlcGeneratedLambdasFolded** | `tlc::inline` | Fold compiler-generated lambda defs back at call sites + DCE |
 | **TlcOwnershipApplied** | `tlc::ownership` | Backward ownership-liveness analysis. Reports use-after-move; rewrites array-update operations into in-place forms when the source is mutable and dead after the call. Runs before output normalization so its liveness walk never sees `OutputSlotStore` |
 | **TlcOutputsNormalized** | `tlc::normalize_outputs` | Rewrites each compute entry's tail into a chain of explicit per-slot output writes. Single-output and multi-output entries share one structural shape; the entry's `def.ty` is kept in sync with its rewritten body |
 | **TlcParallelized** | `tlc::parallelize` | Remaining source-level equal-domain map fusion plus empty host pipeline shells. No strategy or recognition facts are emitted; EGIR derives placement and scheduling from semantic operations |
@@ -113,6 +114,11 @@ Each notes how it's enforced; when you move a pass, check it here.
 - **`apply_ownership` ≺ `normalize_outputs`** — ownership's liveness analysis has
   no case for `OutputSlotStore`, which `normalize_outputs` introduces. *Enforced
   by:* `unreachable!` in `ownership.rs`'s `analyze`.
+- **residency cluster (`expose_entry_producer_helpers` … `hoist_scalar_prepasses`)
+  ≺ `defunctionalize`** — the gather/static-index/scalar-prepass passes match on
+  `Soac(Map/Scan)` producers, which only survive while operators are still
+  function values; defunctionalize lifts them to refs and must run after. *Enforced
+  by:* convention (see the comment in `compile_file`).
 
 ### EGIR (Acyclic E-Graph IR)
 | Stage | Module | Description |

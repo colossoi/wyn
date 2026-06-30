@@ -493,6 +493,57 @@ entry scaled_sum(xs: []i32, scale: i32) i32 =
     assert_eq!(stages.expect("scaled_sum pipeline").len(), 2);
 }
 
+/// Output sizing (review finding #2): `build_entry_outputs` now sizes a runtime
+/// output to the dispatch domain (`SameAsDispatch`) per *output type*
+/// (`ty.is_array()`) instead of a per-*entry* `dispatch_sized` flag. A reduction
+/// returns a scalar, so its output buffer must NOT be dispatch-sized — that rule
+/// is only for one-element-per-thread map/scan arrays. (No source construct
+/// currently yields a reduction whose result is a runtime-sized array; if one is
+/// added, this is where its sizing must be pinned.)
+#[test]
+fn reduce_scalar_output_is_not_dispatch_sized() {
+    use crate::pipeline_descriptor::{Binding, BufferLen, BufferUsage, Pipeline};
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry total(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
+"#,
+    )
+    .expect("scalar reduction compiles");
+    let compute = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .find_map(|pipeline| match pipeline {
+            Pipeline::Compute(compute)
+                if compute.stages.iter().any(|stage| stage.entry_point == "total") =>
+            {
+                Some(compute)
+            }
+            _ => None,
+        })
+        .expect("total compute pipeline");
+    let output_lengths: Vec<_> = compute
+        .bindings
+        .iter()
+        .filter_map(|binding| match binding {
+            Binding::StorageBuffer {
+                usage: BufferUsage::Output,
+                length,
+                ..
+            } => Some(length.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(!output_lengths.is_empty(), "reduce entry has an output buffer");
+    for length in output_lengths {
+        assert!(
+            !matches!(length, Some(BufferLen::SameAsDispatch { .. })),
+            "scalar reduction output must not be dispatch-sized, got {length:?}"
+        );
+    }
+}
+
 #[test]
 fn parallel_scan_descriptor_wires_three_phases_and_scratch() {
     use crate::pipeline_descriptor::{Binding, BufferLen, BufferUsage, Pipeline};

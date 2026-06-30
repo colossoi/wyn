@@ -307,22 +307,24 @@ pub type TypeTable = LookupMap<NodeId, TypeScheme<TypeName>>;
 //
 // TLC stages (AST → SSA):
 //       .to_tlc(&module_manager, fill_holes)       -> TlcTransformed
-//       .pin_entry_regions()                       -> TlcTransformed
+//       .pin_entry_regions()                       -> TlcRegionsPinned
 //       .partial_eval()                            -> TlcPartialEvaled
 //       .normalize_soacs()                         -> TlcSoaNormalized
+//       .monomorphize()                            -> TlcMonomorphized
+//       .rep_specialize()                          -> TlcRepSpecialized
+//       .inline_small()                            -> TlcSmallInlined
+//       .force_inline_soac_helpers()               -> TlcSoacHelpersInlined
+//       .canonicalize_producers()                  -> TlcProducerCanonicalized
 //       .fuse_maps()                               -> TlcFused
-//       .apply_ownership()                         -> TlcOwnershipApplied
-//       .normalize_outputs()                       -> TlcOutputsNormalized
 //       .expose_entry_producer_helpers()           -> TlcEntryProducersExposed
 //       .fuse_static_indices()                     -> TlcStaticIndexFused
 //       .float_runtime_index_nested_producers()    -> TlcRuntimeIndexProducersFloated
 //       .plan_execute_gather_residency()           -> TlcGathersLifted
-//       .hoist_scalar_prepasses(disable)            -> TlcScalarPrepassesHoisted
+//       .hoist_scalar_prepasses(disable)           -> TlcScalarPrepassesHoisted
 //       .defunctionalize()                         -> TlcDefunctionalized
-//       .monomorphize()                            -> TlcMonomorphized
 //       .fold_generated_lambdas()                  -> TlcGeneratedLambdasFolded
-//       .inline_small()                            -> TlcSmallInlined
-//       .rep_specialize()                          -> TlcRepSpecialized
+//       .apply_ownership()                         -> TlcOwnershipApplied
+//       .normalize_outputs()                       -> TlcOutputsNormalized
 //       .parallelize_soacs(disable)                -> TlcParallelized
 //       .filter_reachable()                        -> TlcReachable
 //       .to_egraph()                               -> EgirRaw
