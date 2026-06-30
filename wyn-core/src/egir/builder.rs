@@ -161,11 +161,11 @@ impl EntryBuilder {
     ) -> NodeId {
         let step_body = super::types::SegBody {
             region,
-            captures: captures.clone(),
+            captures,
         };
-        let mut operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![input_array_nid, init_nid];
-        operands.extend(captures.into_iter());
-        operands.push(output_view_nid);
+        // `[input, init, output_view]` — captures live on `step_body`.
+        let operands: smallvec::SmallVec<[NodeId; 4]> =
+            smallvec![input_array_nid, init_nid, output_view_nid];
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![output_view_ty]);
         let span = self.span();
         graph_ops::emit_pending_soac(
@@ -215,11 +215,10 @@ impl EntryBuilder {
     ) -> NodeId {
         let map_body = super::types::SegBody {
             region,
-            captures: captures.clone(),
+            captures,
         };
-        let mut operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![input_array_nid];
-        operands.extend(captures.into_iter());
-        operands.push(output_view_nid);
+        // `[input, output_view]` — captures live on `map_body`.
+        let operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![input_array_nid, output_view_nid];
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![output_view_ty]);
         let span = self.span();
         graph_ops::emit_pending_soac(

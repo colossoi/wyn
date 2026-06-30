@@ -414,6 +414,66 @@ pub enum EgirSoac {
     },
 }
 
+impl SegOpKind {
+    /// The reduce/scan operators, empty for a plain `SegMap`.
+    pub fn operators(&self) -> &[SegBinOp] {
+        match self {
+            SegOpKind::SegMap => &[],
+            SegOpKind::SegRed { operators }
+            | SegOpKind::SegScan { operators }
+            | SegOpKind::SegComposite { operators } => operators,
+        }
+    }
+}
+
+impl EgirSoac {
+    /// Every `SegBody` this SOAC carries, in a stable order: map lanes first,
+    /// then each accumulator's step and combine. Captures and the callee region
+    /// live here, never inline in `SideEffect::operand_nodes`.
+    fn seg_bodies(&self) -> Vec<&SegBody> {
+        match self {
+            EgirSoac::Screma {
+                map_bodies,
+                accumulators,
+                ..
+            } => map_bodies
+                .iter()
+                .chain(accumulators.iter().flat_map(|op| [&op.step, &op.combine]))
+                .collect(),
+            EgirSoac::Seg { map_bodies, kind, .. } => map_bodies
+                .iter()
+                .chain(kind.operators().iter().flat_map(|op| [&op.step, &op.combine]))
+                .collect(),
+            EgirSoac::Filter {
+                map_body, pred_body, ..
+            } => map_body.iter().chain(std::iter::once(pred_body)).collect(),
+            EgirSoac::Hist { body, .. } => vec![body],
+        }
+    }
+
+    /// All capture nodes across every body. Captures are graph references that
+    /// generic reachability must treat exactly like operands.
+    pub fn capture_nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.seg_bodies().into_iter().flat_map(|body| body.captures.iter().copied())
+    }
+}
+
+impl SideEffect {
+    /// Every graph node this side-effect references: its operands plus, for a
+    /// SOAC, its bodies' captures. This is the authoritative use-set for
+    /// liveness and reachability now that captures are not inlined into
+    /// `operand_nodes`. (Captures are never substituted — they bind a lambda's
+    /// free variables, not a retargetable input or output — so there is no
+    /// mutable counterpart.)
+    pub fn referenced_nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
+        let captures = match &self.kind {
+            SideEffectKind::Soac(soac) => Some(soac.capture_nodes()),
+            SideEffectKind::Inst(_) => None,
+        };
+        self.operand_nodes.iter().copied().chain(captures.into_iter().flatten())
+    }
+}
+
 /// Terminator using NodeIds for value references.
 #[derive(Clone, Debug)]
 pub enum SkeletonTerminator {

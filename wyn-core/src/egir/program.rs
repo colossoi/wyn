@@ -26,6 +26,10 @@ use std::collections::HashMap;
 use super::parallelize::schedule::KernelSchedule;
 use super::types::{EGraph, NodeId, RegionId};
 
+#[cfg(test)]
+#[path = "program_tests.rs"]
+mod program_tests;
+
 /// Name ↔ arena-index interner for callable regions.
 ///
 /// Region identity is the assigned `RegionId` (a dense index). The textual
@@ -58,6 +62,13 @@ impl RegionInterner {
     /// Recover the SSA function name backing a region index.
     pub fn name(&self, id: RegionId) -> &str {
         &self.names[id.index() as usize]
+    }
+
+    /// Recover the owned SSA names for a sequence of regions — e.g. a SOAC's
+    /// map lanes or a reduction's per-operator combiners, which lower to
+    /// `PureOp::Call`s by name.
+    pub fn names(&self, ids: impl IntoIterator<Item = RegionId>) -> Vec<String> {
+        ids.into_iter().map(|id| self.name(id).to_string()).collect()
     }
 }
 

@@ -96,11 +96,11 @@ fn composite_arr_ty(elem: Type<TypeName>, n: usize) -> Type<TypeName> {
     )
 }
 
-/// `source` at `Screma` capture position (past `input_array_types.len()`)
-/// must be rejected as non-input — those operands feed the per-element
-/// lambda, not a per-element view read.
+/// `source` at a `Screma` operand position past `input_array_types.len()`
+/// (an init-accumulator / output-view slot) must be rejected as non-input —
+/// only the leading input operands are per-element view reads.
 #[test]
-fn rewrite_sibling_index_consumers_rejects_screma_capture_position() {
+fn rewrite_sibling_index_consumers_rejects_screma_noninput_operand() {
     let mut graph = EGraph::new();
     let block = graph.skeleton.entry;
     let elem = vec4_ty();
@@ -114,9 +114,9 @@ fn rewrite_sibling_index_consumers_rejects_screma_capture_position() {
     // The output view we'd retarget to.
     let view = graph_ops::intern_storage_view(&mut graph, crate::BindingRef::new(0, 1), elem.clone(), None);
 
-    // A downstream Screma with one input + one capture. The input
-    // operand is a distinct dummy; `source` is placed at the capture
-    // slot (index 1, which is past the input region).
+    // A downstream Screma with one input. The input operand is a distinct
+    // dummy; `source` is placed at operand index 1, past the single input
+    // (an init-accumulator / output-view slot).
     let dummy_input = graph.alloc_side_effect_result(arr_ty.clone());
     let result_nid =
         graph.alloc_side_effect_result(Type::Constructed(TypeName::Tuple(1), vec![arr_ty.clone()]));

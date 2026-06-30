@@ -59,7 +59,7 @@ fn eliminate_dead_lane_local_ops(graph: &mut EGraph) {
     }
     for (_, block) in &graph.skeleton.blocks {
         for effect in &block.side_effects {
-            used.extend(effect.operand_nodes.iter().copied());
+            used.extend(effect.referenced_nodes());
         }
         match &block.term {
             SkeletonTerminator::Return(value) => used.extend(value.iter().copied()),

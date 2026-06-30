@@ -289,7 +289,6 @@ pub(crate) fn retarget_array_projection(
             let SideEffectKind::Soac(EgirSoac::Screma {
                 input_array_types,
                 accumulators,
-                map_bodies,
                 map_destinations,
                 acc_destinations,
                 ..
@@ -302,14 +301,9 @@ pub(crate) fn retarget_array_projection(
                 );
             };
 
-            // Captures are explicit on each `SegBody`, so the operand prefix
-            // before the trailing output views is `inputs + init_accs +
-            // every region's capture list`.
-            let base_len = input_array_types.len()
-                + accumulators.len()
-                + map_bodies.iter().map(|body| body.captures.len()).sum::<usize>()
-                + accumulators.iter().map(|acc| acc.step.captures.len()).sum::<usize>()
-                + accumulators.iter().map(|acc| acc.combine.captures.len()).sum::<usize>();
+            // Operand layout is `[inputs.., init_accs.., output_views..]`;
+            // captures live on the `SegBody`s, not here.
+            let base_len = input_array_types.len() + accumulators.len();
             let mut cursor = base_len;
             let mut map_views = Vec::with_capacity(map_destinations.len());
             for dest in map_destinations.iter() {

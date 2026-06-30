@@ -1809,9 +1809,10 @@ impl<'a, 'b> Converter<'a, 'b> {
             ));
         };
 
+        // Operands carry positional data flow only; captures live on the
+        // `SegBody` below.
         let mut operands: SmallVec<[NodeId; 4]> = SmallVec::new();
         operands.extend_from_slice(&input_nids);
-        operands.extend_from_slice(&capture_nids);
 
         // Emit as a singleton Screma + project field 0. For consuming
         // (`InputBuffer`) map the result aliases the input, so the
@@ -1841,7 +1842,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             EgirSoac::Screma {
                 map_bodies: vec![SegBody {
                     region: self.region(f_name),
-                    captures: capture_nids.clone(),
+                    captures: capture_nids,
                 }],
                 accumulators: vec![],
                 input_array_types: input_arr_types,
@@ -1905,15 +1906,15 @@ impl<'a, 'b> Converter<'a, 'b> {
         let capture_nids: Vec<NodeId> =
             lam.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
 
+        // `[dest_view, inputs..]` — captures live on the `SegBody`.
         let mut operands: SmallVec<[NodeId; 4]> = smallvec![dest_view];
         operands.extend_from_slice(&input_nids);
-        operands.extend_from_slice(&capture_nids);
 
         Ok(self.emit_soac(
             EgirSoac::Hist {
                 body: SegBody {
                     region: self.region(func),
-                    captures: capture_nids.clone(),
+                    captures: capture_nids,
                 },
                 input_array_types,
                 input_elem_types,
@@ -1946,8 +1947,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         // Emit as Screma { 0 maps, 1 Reduce accumulator } + project field
         // 0. Reduce's `op` is both the step (per-element) and the
         // reduce_op (phase 2 combiner).
-        let mut operands: SmallVec<[NodeId; 4]> = smallvec![arr_nid, init_nid];
-        operands.extend(capture_nids.iter().copied());
+        let operands: SmallVec<[NodeId; 4]> = smallvec![arr_nid, init_nid];
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![result_ty.clone()]);
         let screma_nid = self.emit_soac(
             EgirSoac::Screma {
@@ -1956,7 +1956,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                     kind: crate::tlc::ScremaAccumulator::Reduce,
                     step: SegBody {
                         region: self.region(op_name.clone()),
-                        captures: capture_nids.clone(),
+                        captures: capture_nids,
                     },
                     combine: SegBody {
                         region: self.region(op_name),
@@ -2032,8 +2032,6 @@ impl<'a, 'b> Converter<'a, 'b> {
 
         let mut pending_accs = Vec::with_capacity(accumulators.len());
         let mut acc_init_nids = Vec::with_capacity(accumulators.len());
-        let mut acc_step_capture_nids = Vec::with_capacity(accumulators.len());
-        let mut acc_reduce_op_capture_nids = Vec::with_capacity(accumulators.len());
         for acc in accumulators {
             let step_func = self.lambda_fn_name(&acc.step_lam.lam)?;
             let reduce_op_func = self.lambda_fn_name(&acc.reduce_op.lam)?;
@@ -2054,16 +2052,14 @@ impl<'a, 'b> Converter<'a, 'b> {
                 kind: acc.kind,
                 step: SegBody {
                     region: self.region(step_func),
-                    captures: step_caps.clone(),
+                    captures: step_caps,
                 },
                 combine: SegBody {
                     region: self.region(reduce_op_func),
-                    captures: reduce_op_caps.clone(),
+                    captures: reduce_op_caps,
                 },
             });
             acc_init_nids.push(init_nid);
-            acc_step_capture_nids.push(step_caps);
-            acc_reduce_op_capture_nids.push(reduce_op_caps);
         }
 
         let input_nids: Vec<NodeId> =
@@ -2091,18 +2087,12 @@ impl<'a, 'b> Converter<'a, 'b> {
             map_output_elem_types.push(elem_ty);
         }
 
+        // Captures live on each `SegBody`; the operand list is positional
+        // data flow only: `[inputs.., init_accs.., output_views..]`. Output
+        // views are appended later by output realization / chunking.
         let mut operands: SmallVec<[NodeId; 4]> = SmallVec::new();
         operands.extend(input_nids.iter().copied());
         operands.extend(acc_init_nids.iter().copied());
-        for caps in &map_capture_nids {
-            operands.extend(caps.iter().copied());
-        }
-        for caps in &acc_step_capture_nids {
-            operands.extend(caps.iter().copied());
-        }
-        for caps in &acc_reduce_op_capture_nids {
-            operands.extend(caps.iter().copied());
-        }
 
         Ok(self.emit_soac(
             EgirSoac::Screma {
@@ -2149,8 +2139,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let input_elem_ty = self.value_elem_type(&arr_ty, input);
         let init_nid = self.convert_term(ne)?;
 
-        let mut operands: SmallVec<[NodeId; 4]> = smallvec![arr_nid, init_nid];
-        operands.extend(capture_nids.iter().copied());
+        let operands: SmallVec<[NodeId; 4]> = smallvec![arr_nid, init_nid];
 
         // Emit as Screma { 0 maps, 1 Scan acc } + project field 0. For
         // consuming scan the result aliases the input, so the Project's
@@ -2180,7 +2169,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                     kind: crate::tlc::ScremaAccumulator::Scan,
                     step: SegBody {
                         region: self.region(op_name),
-                        captures: capture_nids.clone(),
+                        captures: capture_nids,
                     },
                     combine: SegBody {
                         region: self.region(reduce_name),
@@ -2218,35 +2207,32 @@ impl<'a, 'b> Converter<'a, 'b> {
         // A fused producer map (`filter(p, map(f, xs))`): the loop applies `f` to
         // each input element before the predicate and keeps `f(x)`. The output
         // element type is `f`'s return type; the input element type stays the
-        // array's. `f`'s captures lead the operand list (before the predicate's).
-        let (map_body, map_capture_nids, output_elem_ty): (Option<SegBody>, Vec<NodeId>, Type<TypeName>) =
-            match map_lam {
-                Some(f) => {
-                    let name = self.lambda_fn_name(&f.lam)?;
-                    let caps: Vec<NodeId> = f
-                        .captures
-                        .iter()
-                        .map(|(_, _, t)| self.convert_term(t))
-                        .collect::<Result<_, _>>()?;
-                    (
-                        Some(SegBody {
-                            region: self.region(name),
-                            captures: caps.clone(),
-                        }),
-                        caps,
-                        f.lam.ret_ty.clone(),
-                    )
-                }
-                None => (None, Vec::new(), elem_ty.clone()),
-            };
+        // array's. The fused map's captures live on its `SegBody`.
+        let (map_body, output_elem_ty): (Option<SegBody>, Type<TypeName>) = match map_lam {
+            Some(f) => {
+                let name = self.lambda_fn_name(&f.lam)?;
+                let caps: Vec<NodeId> = f
+                    .captures
+                    .iter()
+                    .map(|(_, _, t)| self.convert_term(t))
+                    .collect::<Result<_, _>>()?;
+                (
+                    Some(SegBody {
+                        region: self.region(name),
+                        captures: caps,
+                    }),
+                    f.lam.ret_ty.clone(),
+                )
+            }
+            None => (None, elem_ty.clone()),
+        };
         let pred_body = SegBody {
             region: self.region(pred_name),
-            captures: capture_nids.clone(),
+            captures: capture_nids,
         };
 
-        let mut operands: SmallVec<[NodeId; 4]> = smallvec![arr_nid];
-        operands.extend(map_capture_nids.iter().copied());
-        operands.extend(capture_nids.iter().copied());
+        // `[input]` only — map/pred captures live on their `SegBody`s.
+        let operands: SmallVec<[NodeId; 4]> = smallvec![arr_nid];
 
         // The TLC-level result type is an existential `?k. [k]T`; after
         // `open_existential` its size is a `Skolem(k)`. Two lowerings,

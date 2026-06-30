@@ -644,3 +644,16 @@ fn wrap_arrow_return_in_unique(mut ty: &mut Type<TypeName>) {
         ty = inner;
     }
 }
+
+/// Correctness risk #2 — terminal lowering of a parallel scan synthesizes a
+/// swap-wrapper region (`{entry}_scan_op_swap`). That region is interned during
+/// `lower`, not present in the pre-lowering arena, and `soac_expand` recovers
+/// its SSA `Call` name through the interner. If the synthesized region were not
+/// interned, name recovery would panic. Compiling a parallel scan to SSA drives
+/// that path end to end.
+#[test]
+fn parallel_scan_synthesized_swap_region_is_name_recoverable() {
+    let src = "entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)";
+    crate::compile_thru_ssa(src)
+        .expect("parallel scan lowers, recovering its synthesized swap-wrapper region");
+}

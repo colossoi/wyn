@@ -549,7 +549,7 @@ fn entry_resources(entry: &EgirEntry) -> Vec<ScheduledResource> {
     for (_, block) in &entry.graph.skeleton.blocks {
         for side_effect in &block.side_effects {
             let mut seen = HashSet::new();
-            let mut stack = side_effect.operand_nodes.to_vec();
+            let mut stack = side_effect.referenced_nodes().collect::<Vec<_>>();
             while let Some(node) = stack.pop() {
                 if !seen.insert(node) {
                     continue;

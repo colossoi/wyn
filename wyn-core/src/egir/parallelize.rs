@@ -125,7 +125,7 @@ fn collect_graph_dependencies(scope: &str, graph: &EGraph, output: &mut Vec<Sema
     for consumer_index in 0..records.len() {
         let consumer = &records[consumer_index];
         let mut reachable = std::collections::HashSet::new();
-        let mut stack = consumer.effect.operand_nodes.to_vec();
+        let mut stack = consumer.effect.referenced_nodes().collect::<Vec<_>>();
         while let Some(node) = stack.pop() {
             if reachable.insert(node) {
                 stack.extend(graph.nodes[node].children());
@@ -496,7 +496,7 @@ fn side_effect_output_slots(entry: &EgirEntry, se: &SideEffect) -> Vec<usize> {
     }
     use std::collections::HashSet;
     let mut seen: HashSet<NodeId> = HashSet::new();
-    let mut stack: Vec<NodeId> = se.operand_nodes.to_vec();
+    let mut stack: Vec<NodeId> = se.referenced_nodes().collect::<Vec<_>>();
     let mut slots: Vec<usize> = Vec::new();
     while let Some(n) = stack.pop() {
         if !seen.insert(n) {
@@ -598,7 +598,7 @@ fn prune_dead_side_effects(entry: &mut EgirEntry) {
         let mut stack: Vec<NodeId> = Vec::new();
         for (_, block) in &entry.graph.skeleton.blocks {
             for se in &block.side_effects {
-                stack.extend(se.operand_nodes.iter().copied());
+                stack.extend(se.referenced_nodes());
             }
             match &block.term {
                 SkeletonTerminator::Return(Some(v)) => stack.push(*v),
@@ -880,7 +880,7 @@ fn soac_consumed_nodes(entry: &EgirEntry) -> std::collections::HashSet<NodeId> {
     for (_, block) in &entry.graph.skeleton.blocks {
         for se in &block.side_effects {
             if matches!(se.kind, SideEffectKind::Soac(_)) {
-                stack.extend(se.operand_nodes.iter().copied());
+                stack.extend(se.referenced_nodes());
             }
         }
     }
@@ -1066,7 +1066,7 @@ fn semantic_space_for_graph(
 fn semantic_read_resources(graph: &EGraph, se: &SideEffect) -> Vec<SegResourceAccess> {
     let mut bindings = std::collections::HashSet::new();
     let mut seen = std::collections::HashSet::new();
-    let mut stack = se.operand_nodes.to_vec();
+    let mut stack = se.referenced_nodes().collect::<Vec<_>>();
     while let Some(node) = stack.pop() {
         if !seen.insert(node) {
             continue;
@@ -1110,7 +1110,7 @@ fn semantic_resources(entry: &EgirEntry, se: &SideEffect, output_slots: &[usize]
     use std::collections::HashMap;
     let mut accesses: HashMap<BindingRef, SegResourceAccessKind> = HashMap::new();
     let mut seen = std::collections::HashSet::new();
-    let mut stack = se.operand_nodes.to_vec();
+    let mut stack = se.referenced_nodes().collect::<Vec<_>>();
     while let Some(node) = stack.pop() {
         if !seen.insert(node) {
             continue;
@@ -1995,17 +1995,14 @@ fn lower_reduce_entry(
             })
             .collect();
         let init_nids: Vec<NodeId> = operators.iter().map(|op| op.neutral).collect();
-        let base = n_inputs
-            + n_accs
-            + map_bodies.iter().map(|body| body.captures.len()).sum::<usize>()
-            + operators.iter().map(|operator| operator.step.captures.len()).sum::<usize>()
-            + operators.iter().map(|operator| operator.combine.captures.len()).sum::<usize>();
+        // `[inputs.., init_accs.., map_output_views..]`: views follow the
+        // init accumulators (captures live on the SegBodies).
+        let base = n_inputs + n_accs;
         let map_view_ops: Vec<usize> = (0..n_maps).map(|m| base + m).collect();
         let result = se.result?;
         let elem_tys: Vec<Type<TypeName>> =
             init_nids.iter().map(|n| entry.graph.types[n].clone()).collect();
-        let reduce_funcs: Vec<String> =
-            operators.iter().map(|a| regions.name(a.combine.region).to_string()).collect();
+        let reduce_funcs = regions.names(operators.iter().map(|a| a.combine.region));
         (
             reduce_funcs,
             n_maps,
@@ -2274,12 +2271,10 @@ fn lower_scan_entry(
         let n_maps = map_bodies.len();
         let input_nid = se.operand_nodes[0];
         let init_nid = op.neutral;
-        let map_capture_total = map_bodies.iter().map(|body| body.captures.len()).sum::<usize>();
-        let step_capture_base = n_inputs + n_accs + map_capture_total;
         let step_capture_nodes = op.step.captures.clone();
-        let output_view_base = step_capture_base
-            + operators.iter().map(|operator| operator.step.captures.len()).sum::<usize>()
-            + operators.iter().map(|operator| operator.combine.captures.len()).sum::<usize>();
+        // `[inputs.., init_accs.., map_output_views.., scan_output_view]`:
+        // output views follow the init accumulators (captures live on SegBodies).
+        let output_view_base = n_inputs + n_accs;
         let scan_output_view_op = output_view_base + n_maps;
         let map_output_view_ops: Vec<usize> = (0..n_maps).map(|map| output_view_base + map).collect();
         let input_ty = entry.graph.types[&input_nid].clone();
@@ -2365,8 +2360,8 @@ fn lower_scan_entry(
     // final accumulator to `block_sums[tid]`.
     {
         let mut next_effect = graph_ops::next_effect_token(&entry.graph);
-        let mut reduce_operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![chunked_input_nid, init_nid];
-        reduce_operands.extend(step_capture_nodes.iter().copied());
+        // `[chunked_input, init]` — the step captures live on the SegBody below.
+        let reduce_operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![chunked_input_nid, init_nid];
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![elem_ty.clone()]);
         let screma_nid = graph_ops::emit_pending_soac(
             &mut entry.graph,
@@ -2377,7 +2372,7 @@ fn lower_scan_entry(
                     kind: crate::tlc::ScremaAccumulator::Reduce,
                     step: SegBody {
                         region: regions.intern(&op_func),
-                        captures: step_capture_nodes.clone(),
+                        captures: step_capture_nodes,
                     },
                     combine: SegBody {
                         region: regions.intern(&op_func),
@@ -2453,6 +2448,10 @@ fn lower_scan_entry(
         elem_ty.clone(),
         entry.span,
     );
+    // Intern the synthesized wrapper so `soac_expand` recovers its `Call` name.
+    // It is deliberately not added to `inner.regions`: that arena is consulted
+    // only before terminal lowering (segmentation/`verify_semantic`), and this
+    // region is born here, during lowering.
     let swap_region = regions.intern(&swap_wrapper_name);
     let phase3 = synthesize_phase3_scan(
         &entry.name,

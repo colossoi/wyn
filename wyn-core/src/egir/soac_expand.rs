@@ -202,8 +202,7 @@ fn expand_one(
             // Captures and the callee region are explicit on each `SegBody`;
             // the serial loop reads them directly rather than reslicing the
             // operand list by a separate capture-count layout.
-            let map_funcs: Vec<String> =
-                map_bodies.iter().map(|body| regions.name(body.region).to_string()).collect();
+            let map_funcs = regions.names(map_bodies.iter().map(|body| body.region));
             let map_captures: Vec<Vec<NodeId>> =
                 map_bodies.iter().map(|body| body.captures.clone()).collect();
             let acc_specs = accumulators.clone();
@@ -219,13 +218,9 @@ fn expand_one(
             let n_inputs = arr_tys.len();
             let input_nids: Vec<NodeId> = se.operand_nodes[..n_inputs].to_vec();
             let init_acc_nids: Vec<NodeId> = se.operand_nodes[n_inputs..n_inputs + n_accs].to_vec();
-            // Operand prefix consumed before the trailing output views:
-            // inputs, init accumulators, then every region's capture list.
-            let cursor = n_inputs
-                + n_accs
-                + map_captures.iter().map(Vec::len).sum::<usize>()
-                + acc_specs.iter().map(|acc| acc.step.captures.len()).sum::<usize>()
-                + acc_specs.iter().map(|acc| acc.combine.captures.len()).sum::<usize>();
+            // Operand layout is `[inputs.., init_accs.., output_views..]`; the
+            // trailing output views start right after the init accumulators.
+            let cursor = n_inputs + n_accs;
             let result_nid = se.result.expect("Screma has a result");
             let result_ty = graph.types[&result_nid].clone();
             let Type::Constructed(TypeName::Tuple(_), result_fields) = &result_ty else {
@@ -659,11 +654,11 @@ fn expand_one(
             assert!(acc_destinations.is_empty(), "SegMap has no accumulators");
             let n_inputs = input_array_types.len();
             let input_nids: Vec<NodeId> = se.operand_nodes[..n_inputs].to_vec();
-            let cursor = n_inputs + map_bodies.iter().map(|body| body.captures.len()).sum::<usize>();
+            // `[inputs.., output_views..]`: views start right after the inputs.
+            let cursor = n_inputs;
             let map_captures: Vec<Vec<NodeId>> =
                 map_bodies.iter().map(|body| body.captures.clone()).collect();
-            let map_funcs: Vec<String> =
-                map_bodies.iter().map(|body| regions.name(body.region).to_string()).collect();
+            let map_funcs = regions.names(map_bodies.iter().map(|body| body.region));
             let output_views = if map_destinations.iter().all(|dest| *dest == SoacDestination::InputBuffer)
             {
                 vec![input_nids[0]; map_funcs.len()]
