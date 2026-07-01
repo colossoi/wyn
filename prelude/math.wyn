@@ -504,3 +504,24 @@ module f16 : (float with t = f16 with int_t = u16) = {
   def maximum<[n]>(x: [n]t) t = reduce(f16.max, f16.lowest, x)
   def minimum<[n]>(x: [n]t) t = reduce(f16.min, f16.highest, x)
 }
+
+-- | Fast approximate `f32` math for GPU inner loops — bit-level and
+-- polynomial approximations that trade accuracy for speed. Each def
+-- documents its error envelope; use the exact `f32.*` versions when
+-- accuracy matters more than throughput.
+module fastmath = {
+  -- | Approximate square root by halving the exponent bits
+  -- (http://h14s.p5r.org/2012/09/0x5f3759df.html, [Drobot 2014]
+  -- "Low Level Optimizations for GCN"). Domain `x ≥ 0`; relative
+  -- error under ~4%. Negative inputs and NaN are not handled.
+  def sqrt(x: f32) f32 =
+    f32.from_bits(0x1fbd1df5u32 + (f32.to_bits(x) >> 1u32))
+
+  -- | Approximate arccosine: input `[-1, 1]`, output `[0, π]`
+  -- (Lagarde 2014, "Inverse trigonometric functions GPU optimization
+  -- for AMD GCN architecture"). Absolute error under ~0.01 rad.
+  def acos(x: f32) f32 =
+    let ax = f32.abs(x) in
+    let res = ((0.0f32 - 0.156583f32) * ax + 1.570796f32) * sqrt(1.0f32 - ax) in
+    if x >= 0.0f32 then res else f32.pi - res
+}

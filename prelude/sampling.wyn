@@ -1,0 +1,50 @@
+-- | Low-discrepancy sampling: quasirandom sequences and the Hilbert
+-- space-filling curve.
+--
+-- Quasirandom (low-discrepancy) sequences cover a domain far more
+-- evenly than independent random draws, so Monte-Carlo estimates
+-- converge with many fewer samples. Unlike the hash generators in
+-- `lib/rng`, consecutive indices are *correlated by design* — use one
+-- stream per integration domain, not as a general-purpose RNG.
+--
+-- A common GPU pattern (e.g. stratified per-pixel sampling) maps each
+-- pixel to a `hilbert_index` and feeds that index — plus a per-frame
+-- offset — into `r2`: nearby pixels get nearby curve indices, which R2
+-- turns into well-spread sample positions.
+module sampling = {
+  -- | The R1 sequence: `fract(0.5 + i * φ⁻¹)` where φ is the golden
+  -- ratio — the optimal one-dimensional low-discrepancy sequence
+  -- (Roberts 2018, "The Unreasonable Effectiveness of Quasirandom
+  -- Sequences"). `f32` precision degrades for `i` beyond ~2^24.
+  def r1(i: u32) f32 =
+    f32.fract(0.5f32 + f32.u32(i) * 0.6180339887498948482f32)
+
+  -- | The R2 sequence — R1's two-dimensional generalisation, built on
+  -- the plastic constant. Returns a point in `[0, 1)²`; consecutive
+  -- indices land far apart, filling the square evenly.
+  def r2(i: u32) vec2f32 =
+    @[f32.fract(0.5f32 + f32.u32(i) * 0.75487766624669276f32),
+      f32.fract(0.5f32 + f32.u32(i) * 0.56984029099805327f32)]
+
+  -- | Index of `(x, y)` along the Hilbert curve of the given level
+  -- (a `2^level × 2^level` grid; the result is in
+  -- `[0, 4^level)`). Nearby cells get nearby indices, so it doubles
+  -- as a cache-friendly 2D→1D order and as a stratification key for
+  -- `r1`/`r2`. Coordinates must be within the grid.
+  def hilbert_index(level: u32, x: u32, y: u32) u32 =
+    let width = 1u32 << level in
+    let (index, _, _, _) =
+      loop (index, px, py, cur) = (0u32, x, y, width / 2u32) while cur > 0u32 do
+        let region_x = if (px & cur) > 0u32 then 1u32 else 0u32 in
+        let region_y = if (py & cur) > 0u32 then 1u32 else 0u32 in
+        let index = index + cur * cur * ((3u32 * region_x) ^ region_y) in
+        if region_y == 0u32 then
+          let (px, py) =
+            if region_x == 1u32
+            then (width - 1u32 - px, width - 1u32 - py)
+            else (px, py) in
+          (index, py, px, cur / 2u32)
+        else
+          (index, px, py, cur / 2u32)
+    in index
+}

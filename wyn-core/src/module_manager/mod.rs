@@ -127,6 +127,7 @@ impl ModuleManager {
         self.load_str(include_str!("../../../prelude/math.wyn"), node_counter)?;
         self.load_str(include_str!("../../../prelude/stats.wyn"), node_counter)?;
         self.load_str(include_str!("../../../prelude/trig.wyn"), node_counter)?;
+        self.load_str(include_str!("../../../prelude/sampling.wyn"), node_counter)?;
         self.load_str(include_str!("../../../prelude/graphics.wyn"), node_counter)?;
         self.load_str(include_str!("../../../prelude/soacs.wyn"), node_counter)?;
         self.load_str(include_str!("../../../prelude/compute.wyn"), node_counter)?;
