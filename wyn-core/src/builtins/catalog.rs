@@ -1,4 +1,4 @@
-use crate::LookupMap;
+use crate::{LookupMap, StableMap};
 
 use crate::builtins::lowering::BuiltinLowering;
 use crate::builtins::scheme::SchemeBuilder;
@@ -150,7 +150,11 @@ pub struct KnownBuiltinIds {
 #[derive(Debug)]
 pub struct BuiltinCatalog {
     defs: Vec<BuiltinDef>,
-    by_surface_name: LookupMap<&'static str, BuiltinId>,
+    /// Iterated by `lookup_by_surface_prefix` to build the candidate list for
+    /// constructor-style conversions (`i32(x)`, …). A `StableMap` keeps that
+    /// order = catalog insertion order, so overload-candidate order — and the
+    /// type-var numbers their instantiation allocates — are reproducible.
+    by_surface_name: StableMap<&'static str, BuiltinId>,
     by_internal_name: LookupMap<&'static str, BuiltinId>,
     known: KnownBuiltinIds,
 }
@@ -162,7 +166,7 @@ impl BuiltinCatalog {
     /// every catalog name a `&'static str` lifetime.
     pub fn build(raw_defs: Vec<BuiltinDefRaw>) -> Self {
         let mut defs = Vec::with_capacity(raw_defs.len());
-        let mut by_surface_name = LookupMap::with_capacity(raw_defs.len());
+        let mut by_surface_name = StableMap::with_capacity(raw_defs.len());
         let mut by_internal_name = LookupMap::new();
         for (i, raw) in raw_defs.into_iter().enumerate() {
             let id = BuiltinId::new(i as u32);
