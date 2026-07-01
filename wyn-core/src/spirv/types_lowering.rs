@@ -237,25 +237,9 @@ impl Constructor {
                     }
                     TypeName::Sampler => *self.builder.type_sampler(),
                     TypeName::StorageTexture => {
-                        // Use the program-wide default format (set in
-                        // `lower_ssa_program_impl`) so function signatures
-                        // match the entry-point variable's format-aware type.
-                        // None → fall back to Unknown; only happens when no
-                        // entry uses a storage_image, in which case nothing
-                        // reaches this type anyway.
-                        let format = self
-                            .storage_image_default_format
-                            .map(storage_image_format_to_spirv)
-                            .unwrap_or(spirv::ImageFormat::Unknown);
-                        *self.builder.type_image(
-                            builder::TypeId::new(self.f32_type),
-                            spirv::Dim::Dim2D,
-                            0,
-                            0,
-                            0,
-                            2, // sampled=2 = storage image
-                            format,
-                            None,
+                        panic!(
+                            "BUG: StorageTexture reached runtime SPIR-V type lowering; \
+                             terminal EGIR resource erasure must remove image handles from SSA"
                         )
                     }
                     _ => {

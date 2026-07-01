@@ -1142,7 +1142,16 @@ impl<'a, 'b> Converter<'a, 'b> {
                 } else if *id == known.storage_store && args.len() == 4 {
                     self.lower_storage_store(args)
                 } else if *id == known.image_store && args.len() == 3 {
-                    self.lower_image_store(args, *id, *overload_idx)
+                    self.lower_image_store(args)
+                } else if *id == known.image_load && args.len() == 2 {
+                    let binding = crate::types::storage_image_region(&args[0].ty).ok_or_else(|| {
+                        ConvertError::GraphError(
+                            "image_load operand has no concrete storage-image region after monomorphization"
+                                .into(),
+                        )
+                    })?;
+                    let coord = self.convert_term(&args[1])?;
+                    Ok(self.intern_pure(PureOp::StorageImageLoad(binding), smallvec![coord], ty))
                 } else {
                     let arg_nids: SmallVec<[NodeId; 4]> =
                         args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
@@ -1309,19 +1318,16 @@ impl<'a, 'b> Converter<'a, 'b> {
     }
 
     /// Convert `image_store(image, ivec2, vec4) -> unit` into a
-    /// side-effect Inst tagged as `OpTag::Intrinsic`. The SPIR-V
-    /// backend recognizes the intrinsic id and emits `OpImageWrite`.
-    /// Modeled after `lower_storage_store`: the operands flow through
-    /// as `operand_nodes`, an effect token is allocated, the App
-    /// result is unit.
-    fn lower_image_store(
-        &mut self,
-        args: &[Term],
-        id: crate::builtins::BuiltinId,
-        overload_idx: usize,
-    ) -> Result<NodeId, ConvertError> {
+    /// binding-qualified side effect. The image is a compile-time resource,
+    /// so only coordinate and texel remain as runtime operands.
+    fn lower_image_store(&mut self, args: &[Term]) -> Result<NodeId, ConvertError> {
+        let binding = crate::types::storage_image_region(&args[0].ty).ok_or_else(|| {
+            ConvertError::GraphError(
+                "image_store operand has no concrete storage-image region after monomorphization".into(),
+            )
+        })?;
         let arg_nids: SmallVec<[NodeId; 4]> =
-            args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
+            args[1..].iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
         let arg_vrefs: Vec<ValueRef> =
             (0..arg_nids.len()).map(|_| ValueRef::Ssa(crate::ssa::types::ValueId::default())).collect();
         let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
@@ -1330,7 +1336,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let effect_out = self.alloc_effect();
         self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
             kind: SideEffectKind::Inst(InstKind::Op {
-                tag: crate::op::OpTag::Intrinsic { id, overload_idx },
+                tag: crate::op::OpTag::StorageImageStore(binding),
                 operands: arg_vrefs,
             }),
             operand_nodes: arg_nids,

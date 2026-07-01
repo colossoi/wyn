@@ -423,9 +423,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                             || *id == known.array_with
                             || *id == known.array_with_in_place
                             || *id == known.texture_load
-                            || *id == known.texture_sample
-                            || *id == known.image_store
-                            || *id == known.image_load));
+                            || *id == known.texture_sample));
                     if typed_dispatch {
                         self.lower_builtin_call(
                             *id,
@@ -447,6 +445,20 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                             lowering
                         )
                     }
+                }
+
+                crate::op::OpTag::StorageImageLoad(binding) => {
+                    let coord = self.get_value_ref(operands[0])?;
+                    let image = self.constructor.load_storage_image(*binding)?;
+                    self.constructor.builder.image_read(result_ty, None, image, coord, None, [])?
+                }
+
+                crate::op::OpTag::StorageImageStore(binding) => {
+                    let coord = self.get_value_ref(operands[0])?;
+                    let texel = self.get_value_ref(operands[1])?;
+                    let image = self.constructor.load_storage_image(*binding)?;
+                    self.constructor.builder.image_write(image, coord, texel, None, [])?;
+                    self.constructor.const_i32(0)
                 }
 
                 crate::op::OpTag::StorageView(src) => {

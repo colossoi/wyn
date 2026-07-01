@@ -1947,6 +1947,8 @@ fn inst_signature_multiset(ssa: &Program) -> std::collections::BTreeMap<String, 
                     OpTag::DynamicExtract => "DynamicExtract".to_string(),
                     OpTag::StorageView(_) => "StorageView".to_string(),
                     OpTag::StorageViewLen => "StorageViewLen".to_string(),
+                    OpTag::StorageImageLoad(_) => "StorageImageLoad".to_string(),
+                    OpTag::StorageImageStore(_) => "StorageImageStore".to_string(),
                     OpTag::ViewIndex => "ViewIndex(pure)".to_string(),
                     OpTag::PlaceIndex => "PlaceIndex(pure)".to_string(),
                     OpTag::OutputSlot { .. } => "OutputSlot(pure)".to_string(),
@@ -7419,7 +7421,7 @@ fn loop_bodied_map_uses_storage_image_globals_not_function_parameters() {
 #[compute]
 entry r(xs: []u32,
         #[storage_image(set=1, binding=0, format=r32float, access=read_only)] src: storage_image,
-        #[storage_image(set=1, binding=1, format=r32float, access=write_only)] dst: storage_image) []u32 =
+        #[storage_image(set=1, binding=1, format=rgba8unorm, access=write_only)] dst: storage_image) []u32 =
   map(|s|
         let x = i32(s) in
         let (_, total) = loop (j, total) = (0, 0.0) while j < 2 do
@@ -7431,6 +7433,8 @@ entry r(xs: []u32,
 "#,
     )
     .expect("loop-bodied map with two storage images compiles");
+
+    assert_no_runtime_storage_image_handles(&lowered.spirv);
 
     let mut loader = Loader::new();
     parse_words(&lowered.spirv, &mut loader).expect("parse generated SPIR-V");
@@ -7496,6 +7500,148 @@ entry r(xs: []u32,
         assert_eq!(global_bindings.get(global), Some(&expected_binding));
     }
     assert!(image_ops >= 2, "expected image_load and image_store");
+}
+
+#[test]
+fn straight_line_map_has_no_runtime_storage_image_handles() {
+    let source = r#"
+#[compute]
+entry r(xs: []u32,
+        #[storage_image(set=1, binding=0, format=r32float, access=write_only)] img: storage_image) []u32 =
+  map(|s|
+        let i = i32(s)
+        let _ = image_store(img, @[i, 0], @[1.0, 1.0, 1.0, 1.0]) in
+        0u32,
+      xs)
+"#;
+    let lowered = crate::compile_thru_spirv(source).expect("straight-line image map compiles");
+    assert_no_runtime_storage_image_handles(&lowered.spirv);
+
+    let wgsl = crate::compile_thru_tlc(source)
+        .expect("WGSL TLC")
+        .infer_input_slice_bounds()
+        .to_egraph()
+        .expect("WGSL EGIR")
+        .lower_to_ssa(crate::LoweringProfile::new(
+            crate::CodegenTarget::Wgsl,
+            crate::SchedulePolicy::Parallel,
+        ))
+        .expect("WGSL SSA")
+        .lower_wgsl()
+        .expect("WGSL lowering");
+    assert!(
+        wgsl.contains("textureStore("),
+        "binding-qualified image store missing:\n{wgsl}"
+    );
+    assert!(
+        !wgsl.lines().any(|line| line.starts_with("fn ") && line.contains("texture_storage_2d")),
+        "storage image survived in a WGSL helper signature:\n{wgsl}"
+    );
+    let module = naga::front::wgsl::parse_str(&wgsl)
+        .unwrap_or_else(|error| panic!("Naga rejected generated WGSL: {error:?}\n{wgsl}"));
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|error| panic!("Naga validation rejected generated WGSL: {error:?}\n{wgsl}"));
+}
+
+#[test]
+fn user_helper_specializes_storage_image_without_runtime_handle() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+def read_pixel(img: storage_image, x: i32) f32 =
+  let pixel = image_load(img, @[x, 0]) in pixel.x
+
+#[compute]
+entry r(xs: []u32,
+        #[storage_image(set=1, binding=0, format=r32float, access=read_only)] src: storage_image) []u32 =
+  map(|s| if read_pixel(src, i32(s)) > 0.0 then 1u32 else 0u32, xs)
+"#,
+    )
+    .expect("storage-image helper specializes by binding");
+    assert_no_runtime_storage_image_handles(&lowered.spirv);
+}
+
+fn assert_no_runtime_storage_image_handles(words: &[u32]) {
+    use std::collections::{HashMap, HashSet};
+    use wspirv::binary::parse_words;
+    use wspirv::dr::{Loader, Operand};
+    use wspirv::spirv::Op;
+
+    let mut loader = Loader::new();
+    parse_words(words, &mut loader).expect("parse generated SPIR-V");
+    let module = loader.module();
+    let image_types: HashSet<_> = module
+        .types_global_values
+        .iter()
+        .filter(|instruction| instruction.class.opcode == Op::TypeImage)
+        .filter_map(|instruction| instruction.result_id)
+        .collect();
+
+    for function_type in
+        module.types_global_values.iter().filter(|instruction| instruction.class.opcode == Op::TypeFunction)
+    {
+        for operand in &function_type.operands {
+            if let Operand::IdRef(ty) = operand {
+                assert!(
+                    !image_types.contains(ty),
+                    "OpTypeFunction contains a storage-image return or parameter type"
+                );
+            }
+        }
+    }
+
+    let mut value_types: HashMap<_, _> = HashMap::new();
+    for instruction in &module.types_global_values {
+        if let (Some(id), Some(ty)) = (instruction.result_id, instruction.result_type) {
+            value_types.insert(id, ty);
+        }
+    }
+    for function in &module.functions {
+        for parameter in &function.parameters {
+            if let (Some(id), Some(ty)) = (parameter.result_id, parameter.result_type) {
+                assert!(
+                    !image_types.contains(&ty),
+                    "storage image survived as OpFunctionParameter"
+                );
+                value_types.insert(id, ty);
+            }
+        }
+        for instruction in function.blocks.iter().flat_map(|block| &block.instructions) {
+            if let (Some(id), Some(ty)) = (instruction.result_id, instruction.result_type) {
+                value_types.insert(id, ty);
+            }
+        }
+    }
+
+    for call in module
+        .functions
+        .iter()
+        .flat_map(|function| &function.blocks)
+        .flat_map(|block| &block.instructions)
+        .filter(|instruction| instruction.class.opcode == Op::FunctionCall)
+    {
+        for operand in call.operands.iter().skip(1) {
+            if let Operand::IdRef(argument) = operand {
+                assert!(
+                    value_types.get(argument).is_none_or(|ty| !image_types.contains(ty)),
+                    "OpFunctionCall passes a storage-image argument"
+                );
+            }
+        }
+    }
+
+    let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+    let naga_module = naga::front::spv::parse_u8_slice(&bytes, &naga::front::spv::Options::default())
+        .unwrap_or_else(|error| panic!("Naga rejected generated SPIR-V: {error:?}"));
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&naga_module)
+    .unwrap_or_else(|error| panic!("Naga validation rejected generated SPIR-V: {error:?}"));
 }
 
 /// A `#[view(...)]` naming a resource that doesn't exist is a compile error.

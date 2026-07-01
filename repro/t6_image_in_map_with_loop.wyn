@@ -1,8 +1,7 @@
--- Reproducer 2: image ops in a `map` lambda whose body contains a `loop`. The
--- simple case (t5) now inlines correctly (image write targets a global load), but
--- when the map body has a loop that image_loads and then image_stores, the map
--- body is still emitted as an OpFunction taking the image as an OpFunctionParameter
--- and the image op targets the param -> naga "Not a global variable".
+-- Regression case: image ops in a `map` lambda whose body contains a `loop`.
+-- Storage images are compile-time resources: the lifted map function must be
+-- specialized by binding and must not receive either image as a runtime
+-- OpFunctionParameter/OpFunctionCall argument.
 open f32
 
 resource src: image2d {

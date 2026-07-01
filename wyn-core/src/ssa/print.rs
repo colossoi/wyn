@@ -275,6 +275,25 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
                 let name = crate::builtins::by_id(*id).dispatch_name();
                 let _ = write!(out, "intrinsic @{name}#{overload_idx}({})", format_refs(operands));
             }
+            OpTag::StorageImageLoad(binding) => {
+                let _ = write!(
+                    out,
+                    "storage_image_load @({}, {})({})",
+                    binding.set,
+                    binding.binding,
+                    format_ref(&operands[0])
+                );
+            }
+            OpTag::StorageImageStore(binding) => {
+                let _ = write!(
+                    out,
+                    "storage_image_store @({}, {})({}, {})",
+                    binding.set,
+                    binding.binding,
+                    format_ref(&operands[0]),
+                    format_ref(&operands[1])
+                );
+            }
             OpTag::StorageView(src) => {
                 let src_str = match src {
                     PureViewSource::Storage(br) => {

@@ -19,6 +19,8 @@
 //! - `Materialize`: `[value]`
 //! - `DynamicExtract`: `[base, index]`
 //! - `Call(name)` / `Intrinsic { .. }`: variable-arity arg list
+//! - `StorageImageLoad(binding)`: `[coord]`
+//! - `StorageImageStore(binding)`: `[coord, texel]`
 //! - `StorageView(Storage)`: `[offset, len]`
 //! - `StorageView(Inherited)`: `[offset, len, parent]`
 //! - `StorageViewLen`: `[view]`
@@ -64,6 +66,13 @@ pub enum OpTag {
         id: crate::builtins::BuiltinId,
         overload_idx: usize,
     },
+    /// Read a storage image whose descriptor is fixed by region
+    /// monomorphization. The image handle is absent from the runtime operands:
+    /// `binding` is the complete resource identity.
+    StorageImageLoad(BindingRef),
+    /// Write a storage image whose descriptor is fixed by region
+    /// monomorphization. Runtime operands are coordinate and texel only.
+    StorageImageStore(BindingRef),
     /// Storage buffer view creation. The `Inherited` parent (if any) is
     /// carried in the operands tail, not in this tag, so equivalent views
     /// with the same backing source hash-cons together.

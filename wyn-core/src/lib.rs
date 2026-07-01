@@ -1412,6 +1412,7 @@ impl EgirAllocated {
         egir::soac_expand::run(&mut self.inner);
         egir::materialize::run(&mut self.inner);
         egir::skel_opt::run(&mut self.inner);
+        egir::resource_erasure::run(&mut self.inner)?;
         let (ssa, pipeline) = egir::elaborate::run_program(self.inner);
         Ok(SsaConverted {
             ssa,

@@ -945,6 +945,20 @@ pub fn array_view_region(ty: &Type) -> Option<crate::BindingRef> {
     }
 }
 
+/// Concrete descriptor carried by a monomorphized storage-image type.
+/// Storage images have no runtime payload; this region is their complete
+/// identity during EGIR and backend lowering.
+pub fn storage_image_region(ty: &Type) -> Option<crate::BindingRef> {
+    let ty = TypeExt::strip_unique(ty);
+    match ty {
+        Type::Constructed(TypeName::StorageTexture, args) => match args.first() {
+            Some(Type::Constructed(TypeName::Region(binding), _)) => Some(*binding),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Build a rank-1 `Array[elem, variant, size, region]`, validating the kind
 /// schema in debug builds so a mis-ordered/short construction fails loudly
 /// instead of silently producing a type that won't unify.

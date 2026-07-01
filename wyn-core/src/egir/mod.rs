@@ -19,6 +19,7 @@ pub(crate) mod materialize;
 pub(crate) mod multi_consumer;
 pub mod program;
 pub mod publish;
+pub(crate) mod resource_erasure;
 pub mod rewrite;
 mod scoped_map;
 pub(crate) mod skel_opt;

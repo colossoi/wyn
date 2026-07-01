@@ -112,6 +112,15 @@ pub(super) fn lower_ssa_entry_point(
             continue;
         }
 
+        if let Some((br, format, access, _size)) = input.storage_image_binding {
+            // Storage images are module-scope resources, never SSA values.
+            // Binding-qualified image operations load this exact global.
+            let var_id = constructor.create_storage_image(br, format, access);
+            constructor.env.insert(input.name.clone(), var_id);
+            interfaces.push(var_id);
+            continue;
+        }
+
         let input_type = constructor.polytype_to_spirv(&input.ty);
 
         if let Some(IoDecoration::BuiltIn(builtin)) = &input.decoration {
@@ -187,14 +196,6 @@ pub(super) fn lower_ssa_entry_point(
             );
             interfaces.push(var_id);
             uniform_loads.push((input.name.clone(), var_id, input_type));
-        } else if let Some((br, format, access, _size)) = input.storage_image_binding {
-            // `#[storage_image]` → opaque OpTypeImage in UniformConstant
-            // storage. Pre-created before function bodies (see
-            // `lower_ssa_program_impl`) so image ops inside SOAC-body functions
-            // resolve the same global; the call here is idempotent.
-            let var_id = constructor.create_storage_image(br, format, access);
-            constructor.env.insert(input.name.clone(), var_id);
-            interfaces.push(var_id);
         } else if let Some(br) = input.texture_binding.or(input.sampler_binding) {
             // `#[texture]` / `#[sampler]` → opaque handle in UniformConstant
             // storage, decorated DescriptorSet/Binding. Unlike a uniform

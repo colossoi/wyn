@@ -93,6 +93,7 @@ fn op_cost(op: &PureOp) -> Cost {
         PureOp::ViewIndex => 1,
         PureOp::PlaceIndex => 1,
         PureOp::StorageViewLen => 0,
+        PureOp::StorageImageLoad(_) | PureOp::StorageImageStore(_) => 2,
         PureOp::Intrinsic { .. } => 2,
         PureOp::Call(_) => 3,
     }

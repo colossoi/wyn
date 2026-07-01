@@ -402,13 +402,10 @@ impl TypeEmitter {
                 // Opaque GPU resources (v1: 2D float texture + sampler).
                 TypeName::Texture2D => Ok("texture_2d<f32>".to_string()),
                 TypeName::Sampler => Ok("sampler".to_string()),
-                // Storage images: like SPIR-V, the language-level type is
-                // nullary. The actual format-aware
-                // `texture_storage_2d<format, access>` is emitted at the
-                // binding site, where `storage_image_binding` carries
-                // the per-param format + access. This placeholder isn't
-                // referenced by any body code.
-                TypeName::StorageTexture => Ok("texture_storage_2d<rgba8unorm, write>".to_string()),
+                TypeName::StorageTexture => Err(crate::err_wgsl!(
+                    "StorageTexture reached runtime WGSL type lowering; terminal EGIR resource \
+                     erasure must remove image handles from SSA"
+                )),
                 TypeName::Float(bits) | TypeName::Int(bits) | TypeName::UInt(bits) if *bits != 32 => Err(
                     crate::err_wgsl!("WGSL does not support {}-bit scalars (found {:?})", bits, ty),
                 ),
@@ -526,6 +523,10 @@ fn wgsl_var(id: ValueId) -> String {
     let idx = ffi & 0xFFFFFFFF;
     let ver = ffi >> 32;
     format!("v{}_{}", idx, ver)
+}
+
+fn storage_image_global_name(binding: BindingRef) -> String {
+    format!("_img_{}_{}", binding.set, binding.binding)
 }
 
 fn wgsl_place(id: crate::ssa::types::PlaceId) -> String {
@@ -981,9 +982,9 @@ impl<'a> LowerCtx<'a> {
 
         // Storage-image bindings. WGSL renders the format and access
         // mode on the binding's type: `texture_storage_2d<format,
-        // access>`. Dedupe by name in case multiple entries declare
-        // the same param (cross-stage sharing).
-        let mut storage_images: LookupMap<String, (u32, u32, String)> = LookupMap::new();
+        // access>`. Resource identity is the binding, not an entry-local
+        // parameter name, so shared bindings receive one canonical global.
+        let mut storage_images: LookupMap<BindingRef, String> = LookupMap::new();
         for entry in &self.program.entry_points {
             for input in &entry.inputs {
                 let Some((br, format, access, _size)) = input.storage_image_binding else {
@@ -994,26 +995,28 @@ impl<'a> LowerCtx<'a> {
                     wgsl_storage_image_format(format),
                     wgsl_storage_access(access),
                 );
-                let key = self.mangle_tracked(&input.name)?;
-                if let Some(prev) = storage_images.get(&key) {
-                    if *prev != (br.set, br.binding, ty_str.clone()) {
+                if let Some(previous_ty) = storage_images.get(&br) {
+                    if previous_ty != &ty_str {
                         return Err(crate::err_wgsl!(
-                            "storage_image '{}' declared with conflicting \
-                             (set, binding, format, access) across entries",
-                            input.name
+                            "storage_image binding ({}, {}) has conflicting format/access across entries",
+                            br.set,
+                            br.binding
                         ));
                     }
                 }
-                storage_images.insert(key, (br.set, br.binding, ty_str));
+                storage_images.insert(br, ty_str);
             }
         }
         let mut storage_images_sorted: Vec<_> = storage_images.into_iter().collect();
-        storage_images_sorted.sort_by_key(|(_, (set, binding, _))| (*set, *binding));
-        for (name, (set, binding, ty_str)) in storage_images_sorted {
+        storage_images_sorted.sort_by_key(|(binding, _)| (binding.set, binding.binding));
+        for (binding, ty_str) in storage_images_sorted {
             writeln!(
                 output,
                 "@group({}) @binding({}) var {}: {};",
-                set, binding, name, ty_str
+                binding.set,
+                binding.binding,
+                storage_image_global_name(binding),
+                ty_str
             )
             .unwrap();
             writeln!(output).unwrap();
@@ -1718,6 +1721,22 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             set,
             binding
         ))
+    }
+
+    fn storage_image_name(&self, binding: BindingRef) -> Result<String> {
+        let declared =
+            self.ctx.program.entry_points.iter().flat_map(|entry| &entry.inputs).any(|input| {
+                input.storage_image_binding.is_some_and(|(candidate, ..)| candidate == binding)
+            });
+        if !declared {
+            return Err(crate::err_wgsl_at!(
+                self.blame_span(),
+                "no storage-image binding at (set={}, binding={})",
+                binding.set,
+                binding.binding
+            ));
+        }
+        Ok(storage_image_global_name(binding))
     }
 
     fn blame_span(&self) -> Span {
@@ -2545,20 +2564,6 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             arg_strs[0], arg_strs[1], arg_strs[2]
                         ));
                     }
-                    // image_load(img, coord) → textureLoad. Storage images
-                    // have no LOD argument; the fetched texel comes from
-                    // the bound storage texture at the given pixel.
-                    if *id == known.image_load && args.len() == 2 {
-                        return Ok(format!("textureLoad({}, {})", arg_strs[0], arg_strs[1]));
-                    }
-                    // image_store(img, coord, value) → textureStore. Side-
-                    // effecting write to the bound storage texture.
-                    if *id == known.image_store && args.len() == 3 {
-                        return Ok(format!(
-                            "textureStore({}, {}, {})",
-                            arg_strs[0], arg_strs[1], arg_strs[2]
-                        ));
-                    }
                     // texture_sample(tex, samp, uv, lod) → textureSampleLevel.
                     // v1 uses EXPLICIT LOD (the trailing arg), not implicit
                     // `textureSample`, so the result is a pure function of its
@@ -2730,6 +2735,19 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     }
                     let name = by_id(*id).dispatch_name();
                     self.lower_intrinsic(name, &arg_strs, result_ty.as_ref())
+                }
+
+                crate::op::OpTag::StorageImageLoad(binding) => {
+                    let image = self.storage_image_name(*binding)?;
+                    let coord = self.get_value(operands[0])?;
+                    Ok(format!("textureLoad({}, {})", image, coord))
+                }
+
+                crate::op::OpTag::StorageImageStore(binding) => {
+                    let image = self.storage_image_name(*binding)?;
+                    let coord = self.get_value(operands[0])?;
+                    let texel = self.get_value(operands[1])?;
+                    Ok(format!("textureStore({}, {}, {})", image, coord, texel))
                 }
 
                 crate::op::OpTag::Extern(linkage) => Err(crate::err_wgsl_at!(

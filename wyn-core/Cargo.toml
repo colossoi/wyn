@@ -22,8 +22,6 @@ wspirv = { package = "wyn-spirv", path = "../wyn-spirv" }
 
 [dev-dependencies]
 env_logger.workspace = true
-# Pinned to match `extra/viz`'s wgpu transitive naga version so the
-# workspace resolves to a single naga build. Used for in-process WGSL
-# validation in backend tests.
-naga = { version = "26.0", features = ["wgsl-in"] }
+# Used for in-process WGSL and SPIR-V validation in backend tests.
+naga = { version = "26.0", features = ["wgsl-in", "spv-in"] }
 anyhow = "1.0"

@@ -95,11 +95,9 @@ struct Constructor {
     storage_buffers: LookupMap<BindingRef, (spirv::Word, spirv::Word, spirv::Word)>,
 
     /// Storage-image globals: (set, binding) -> (image `OpVariable`, image type).
-    /// Registered when an entry emits the image variable. `image_store` /
-    /// `image_load` re-load the global from here so the op targets a
-    /// module-scope variable (which naga/Vulkan require) even when the op sits
-    /// inside a SOAC-body function, where the handle would otherwise arrive as
-    /// an `OpFunctionParameter`.
+    /// Predeclared from entry resource metadata before function bodies are
+    /// lowered. Binding-qualified image operations load the global from here;
+    /// no opaque image handle enters a runtime function signature.
     storage_images: LookupMap<BindingRef, (spirv::Word, spirv::Word)>,
 
     /// GlobalInvocationId variable for compute shaders (set during entry point setup)
@@ -138,11 +136,6 @@ struct Constructor {
     /// the entry interface, required by SPIR-V ≥1.4) before `ViewIndex` chains
     /// into it.
     workgroup_vars: LookupMap<u32, (spirv::Word, spirv::Word)>,
-
-    /// Used by `polytype_to_spirv` when emitting `StorageTexture` for
-    /// a function signature; entry-var emission still overrides per-
-    /// binding. Set once in `lower_ssa_program_impl`.
-    storage_image_default_format: Option<crate::pipeline_descriptor::StorageImageFormat>,
 }
 
 impl Constructor {
@@ -179,7 +172,6 @@ impl Constructor {
             buffer_vars: Vec::new(),
             workgroup_vars: LookupMap::new(),
             buffer_id_map: LookupMap::new(),
-            storage_image_default_format: None,
         }
     }
 
@@ -370,30 +362,6 @@ pub fn lower_ssa_program(program: &Program) -> Result<Vec<u32>> {
 
 fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
     let mut constructor = Constructor::new();
-
-    // Pin the program-wide `storage_image` format used by
-    // `polytype_to_spirv` for function-signature `StorageTexture`
-    // params. v1 requires a uniform format across entries; mixed
-    // formats need per-function monomorphization.
-    let mut formats: Vec<crate::pipeline_descriptor::StorageImageFormat> = Vec::new();
-    for entry in &program.entry_points {
-        for input in &entry.inputs {
-            if let Some((_, fmt, _, _)) = input.storage_image_binding {
-                if !formats.contains(&fmt) {
-                    formats.push(fmt);
-                }
-            }
-        }
-    }
-    if formats.len() > 1 {
-        return Err(crate::err_spirv!(
-            "spirv backend: multiple storage_image formats in one program ({:?}) — \
-             only uniform-format programs are supported until per-function \
-             monomorphization over format lands",
-            formats
-        ));
-    }
-    constructor.storage_image_default_format = formats.into_iter().next();
 
     // Collect entry point info for later
     let mut entry_info: Vec<(String, spirv::ExecutionModel, Option<(u32, u32, u32)>)> = Vec::new();
