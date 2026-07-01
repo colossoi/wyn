@@ -14,6 +14,8 @@ wgpu = { version = "27", features = ["dx12", "spirv"] }
 # implement `termcolor::WriteColor`.
 naga = { version = "27.0", features = ["wgsl-in", "termcolor"] }
 pollster = "0.3"
+# Decoding for `--image NAME:FILE` host-uploaded textures.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 anyhow = "1"
 clap = { version = "4.5", features = ["derive"] }
 env_logger = "0.11"

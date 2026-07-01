@@ -103,6 +103,24 @@ enum Command {
         /// Input data: name:file.json (repeatable)
         #[arg(long = "input", value_name = "NAME:FILE")]
         inputs: Vec<String>,
+        /// Upload an image file (PNG/JPEG) as the texture binding named
+        /// NAME (repeatable). The shader side is a plain
+        /// `#[texture(...)] NAME: texture2d` entry parameter; the
+        /// texture is Rgba8Unorm at the image's native size, uploaded
+        /// once at startup. Interactive mode only.
+        ///
+        /// Format: `NAME:FILE`. Example: `input_image:photo.png`.
+        #[arg(long = "image", value_name = "NAME:FILE", verbatim_doc_comment)]
+        images: Vec<String>,
+        /// Read back the storage texture behind the named resource and
+        /// write it as a PNG when the run ends (repeatable). Float
+        /// formats are clamped to [0,1]; r32float dumps as grayscale.
+        /// Pair with --max-frames for a deterministic snapshot.
+        ///
+        /// Format: `NAME:FILE`. Example: `ao_final:ao.png` (NAME is the
+        /// storage-write view's parameter name).
+        #[arg(long = "dump-texture", value_name = "NAME:FILE", verbatim_doc_comment)]
+        dump_textures: Vec<String>,
         /// Seed a host storage buffer once at startup, by binding name
         /// (repeatable). Use for a host-provided buffer the shader
         /// writes but no `--input`/`--feedback` supplies — e.g. a
@@ -266,6 +284,8 @@ fn main() -> Result<()> {
             path,
             pipeline,
             inputs,
+            images,
+            dump_textures,
             buffer_inits,
             storage_bytes,
             framebuffers,
@@ -295,6 +315,8 @@ fn main() -> Result<()> {
                     .collect()
             };
             let input_map = parse_pairs(&inputs)?;
+            let image_map = parse_pairs(&images)?;
+            let dump_texture_map = parse_pairs(&dump_textures)?;
             let output_map = parse_pairs(&outputs)?;
 
             // Parse `--buffer-init NAME:SPEC` into a name → spec map.
@@ -412,6 +434,8 @@ fn main() -> Result<()> {
                     max_frames,
                     vertex_count,
                     topology: topology.into(),
+                    images: image_map,
+                    dump_textures: dump_texture_map,
                 },
                 verbose,
             ))?;

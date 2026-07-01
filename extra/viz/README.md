@@ -16,6 +16,42 @@ viz info                     # Show GPU device info
 viz testpattern              # Render a built-in test pattern
 ```
 
+## Host-provided images
+
+`--image NAME:FILE` (repeatable) uploads a PNG/JPEG once at startup as
+the texture binding named `NAME`. The shader side is a plain entry
+parameter — no `resource` declaration:
+
+```wyn
+#[fragment]
+entry fragment_main(#[texture(set=0, binding=0)] input_image: texture2d,
+                    #[sampler(set=0, binding=1)] samp: sampler, ...) ... =
+  texture_sample(input_image, samp, uv, 0.0)
+```
+
+```
+viz pipeline shader.spv --image input_image:photo.png
+```
+
+The texture is Rgba8Unorm at the file's native size; sample with
+normalized UVs to fit any window. Raw file bytes are uploaded as-is
+(sRGB stays sRGB-encoded, Shadertoy-style). Interactive mode only.
+
+## Texture snapshots
+
+`--dump-texture NAME:FILE` (repeatable) reads back the storage texture
+whose binding is named `NAME` (the storage-write view's parameter name)
+and writes it as a PNG when the run ends — pair with `--max-frames N`
+for a deterministic snapshot without watching the window:
+
+```
+viz pipeline shader.spv --max-frames 30 --dump-texture ao_out:ao.png
+```
+
+Float formats are clamped to [0, 1] before 8-bit quantization;
+`r32float` dumps as grayscale. See `lib/testfiles/gtao_demo.wyn` for a
+multi-pass pipeline whose AO output is snapshotted this way.
+
 ## Miner
 
 The Bitcoin miner moved to **tephra** (the Vulkan compute runner) — see

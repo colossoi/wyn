@@ -98,6 +98,13 @@ pub struct InteractivePipelineSpec {
     /// path. Read back at the `--max-frames` exit, so pair with
     /// `--max-frames` to get a deterministic snapshot.
     pub outputs: HashMap<String, PathBuf>,
+    /// Decoded `--image NAME:FILE` textures, keyed by binding name.
+    /// Uploaded once into the host-texture pool at state construction.
+    pub images: HashMap<String, gpu::LoadedImage>,
+    /// Storage textures to read back and write as PNG when the run ends
+    /// (`--dump-texture NAME:FILE`). Keyed by binding name → output
+    /// path; dumped at the `--max-frames` exit like `outputs`.
+    pub dump_textures: HashMap<String, PathBuf>,
 }
 
 /// Embedded WGSL source compiled in-place. Used by the built-in test
@@ -141,6 +148,9 @@ struct State {
     /// Resolved to concrete GPU buffers at construction so the exit path
     /// is a pure readback. Empty for the testpattern/vf path.
     output_targets: Vec<OutputTarget>,
+    /// `--dump-texture NAME:FILE` targets, dumped alongside
+    /// `output_targets`. Empty for the testpattern/vf path.
+    dump_texture_targets: Vec<DumpTextureTarget>,
 }
 
 /// One resolved `--output` request: where to read the bytes from and
@@ -154,6 +164,17 @@ struct OutputTarget {
     buffers: Vec<wgpu::Buffer>,
     byte_size: u64,
     ping_pong: bool,
+}
+
+/// One resolved `--dump-texture` request: the storage texture slots to
+/// read back (RGBA8-converted) and the PNG path to write.
+struct DumpTextureTarget {
+    name: String,
+    path: PathBuf,
+    /// Physical slots, mirroring `StorageTextureResource.textures`:
+    /// length 1 normally, 2 for ping-pong write sides (dump reads
+    /// `frame_count % 2`, the slot last written).
+    textures: Vec<wgpu::Texture>,
 }
 
 /// Mode-specific GPU state held by `State`. Each variant owns the
@@ -384,6 +405,7 @@ impl State {
             depth_view,
             mode: AppMode::VertexFragment(vf),
             output_targets: Vec::new(),
+            dump_texture_targets: Vec::new(),
         })
     }
 
@@ -629,7 +651,8 @@ impl State {
         );
         let feedback_buffers =
             gpu::create_feedback_buffers(&device, &spec.descriptor, &buffer_feedback_pairs)?;
-        let host_textures = gpu::create_host_textures(&device, &spec.descriptor, &storage_textures);
+        let host_textures =
+            gpu::create_host_textures(&device, &queue, &spec.descriptor, &storage_textures, &spec.images);
         let host_buffers = gpu::create_host_buffers(
             &device,
             &queue,
@@ -692,6 +715,41 @@ impl State {
                          feedback write-side nor a host buffer; can't read it back",
                         key.0, key.1
                     );
+                }
+            }
+            targets
+        };
+
+        // Resolve `--dump-texture NAME:FILE` requests against the
+        // storage-texture pool (by StorageTexture binding name).
+        let dump_texture_targets: Vec<DumpTextureTarget> = {
+            let mut targets = Vec::new();
+            for (name, path) in &spec.dump_textures {
+                let slot = spec.descriptor.pipelines.iter().find_map(|pipeline| {
+                    let bindings: &[wyn_pipeline_descriptor::Binding] = match pipeline {
+                        DescPipeline::Compute(cp) => &cp.bindings,
+                        DescPipeline::Graphics(gp) => &gp.bindings,
+                    };
+                    bindings.iter().find_map(|b| match b {
+                        wyn_pipeline_descriptor::Binding::StorageTexture {
+                            set,
+                            binding,
+                            name: bname,
+                            ..
+                        } if bname == name => Some((*set, *binding)),
+                        _ => None,
+                    })
+                });
+                match slot.and_then(|key| storage_textures.get(&key)) {
+                    Some(res) => targets.push(DumpTextureTarget {
+                        name: name.clone(),
+                        path: path.clone(),
+                        textures: res.textures.clone(),
+                    }),
+                    None => eprintln!(
+                        "[viz pipeline] --dump-texture '{name}': no storage texture by \
+                         that binding name in the descriptor"
+                    ),
                 }
             }
             targets
@@ -1050,6 +1108,7 @@ impl State {
             depth_view,
             mode: AppMode::Pipeline(state),
             output_targets,
+            dump_texture_targets,
         })
     }
 
@@ -1080,6 +1139,28 @@ impl State {
                     Err(e) => eprintln!("[viz pipeline] --output '{}': write failed: {e:#}", t.name),
                 },
                 Err(e) => eprintln!("[viz pipeline] --output '{}': readback failed: {e:#}", t.name),
+            }
+        }
+        for t in &self.dump_texture_targets {
+            let tex = &t.textures[(self.frame_count as usize) % t.textures.len()];
+            match gpu::readback_texture_rgba8(&self.device, &self.queue, tex) {
+                Ok((rgba, w, h)) => {
+                    match image::save_buffer(&t.path, &rgba, w, h, image::ColorType::Rgba8) {
+                        Ok(()) => eprintln!(
+                            "[viz pipeline] wrote {}x{} PNG from '{}' to {}",
+                            w,
+                            h,
+                            t.name,
+                            t.path.display()
+                        ),
+                        Err(e) => {
+                            eprintln!("[viz pipeline] --dump-texture '{}': write failed: {e:#}", t.name)
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[viz pipeline] --dump-texture '{}': readback failed: {e:#}", t.name)
+                }
             }
         }
     }
@@ -1418,6 +1499,8 @@ fn render_pipeline(
                     },
                 );
             }
+            // Static content, uploaded once at creation.
+            gpu::HostTextureKind::Image => {}
         }
     }
     // Push host-uploaded storage buffers (keyboard as 768 u32 entries,

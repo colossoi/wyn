@@ -70,6 +70,20 @@ impl GpuContext {
         let supported_features = adapter.features() & req.desired_features;
 
         let mut limits = Limits::default();
+        // Sparse resource sets get their binding holes padded with dummy
+        // uniform buffers (see `build_resource_bind_group_for_set`), so
+        // binding-heavy pipelines can exceed wgpu's conservative default
+        // per-stage descriptor counts (e.g. 12 uniform buffers) long
+        // before the hardware cares. Take the adapter's real limits for
+        // the descriptor-count knobs.
+        let adapter_limits = adapter.limits();
+        limits.max_uniform_buffers_per_shader_stage = adapter_limits.max_uniform_buffers_per_shader_stage;
+        limits.max_sampled_textures_per_shader_stage = adapter_limits.max_sampled_textures_per_shader_stage;
+        limits.max_storage_textures_per_shader_stage = adapter_limits.max_storage_textures_per_shader_stage;
+        limits.max_storage_buffers_per_shader_stage = adapter_limits.max_storage_buffers_per_shader_stage;
+        limits.max_samplers_per_shader_stage = adapter_limits.max_samplers_per_shader_stage;
+        limits.max_bindings_per_bind_group = adapter_limits.max_bindings_per_bind_group;
+        limits.max_bind_groups = adapter_limits.max_bind_groups;
         if let Some(overlay) = req.limits_overlay {
             overlay(&mut limits, &adapter);
         }
@@ -520,6 +534,131 @@ pub fn readback_buffer(
     Ok(f32_data)
 }
 
+/// Read a texture back to tightly-packed RGBA8 bytes (top-left origin),
+/// converting from its native format. Float formats are clamped to
+/// [0, 1] before quantization; single-channel formats replicate into
+/// RGB with alpha 255. Used by `--dump-texture`.
+pub fn readback_texture_rgba8(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+) -> Result<(Vec<u8>, u32, u32)> {
+    let (width, height) = (texture.width(), texture.height());
+    let format = texture.format();
+    let bpt: u32 = match format {
+        wgpu::TextureFormat::Rgba8Unorm => 4,
+        wgpu::TextureFormat::R32Float => 4,
+        wgpu::TextureFormat::Rgba16Float => 8,
+        wgpu::TextureFormat::Rgba32Float => 16,
+        other => return Err(anyhow!("--dump-texture: unsupported format {:?}", other)),
+    };
+    // Buffer-copy rows must be 256-byte aligned (unlike Queue::write_texture).
+    let unpadded = width * bpt;
+    let padded = unpadded.div_ceil(256) * 256;
+    let staging = device.create_buffer(&BufferDescriptor {
+        label: Some("texture_readback_staging"),
+        size: (padded * height) as u64,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("texture_readback_encoder"),
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &staging,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit(Some(encoder.finish()));
+    let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+
+    let slice = staging.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        tx.send(result).unwrap();
+    });
+    let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+    rx.recv().unwrap()?;
+    let data = slice.get_mapped_range();
+
+    let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+    let f16_to_f32 = |h: u16| -> f32 {
+        let sign = ((h >> 15) & 1) as u32;
+        let exp = ((h >> 10) & 0x1f) as u32;
+        let frac = (h & 0x3ff) as u32;
+        let bits = match (exp, frac) {
+            (0, 0) => sign << 31,
+            (0, _) => {
+                // Subnormal: renormalize.
+                let shift = frac.leading_zeros() - 21;
+                (sign << 31) | ((127 - 15 - shift + 1) << 23) | ((frac << (shift + 13)) & 0x7fffff)
+            }
+            (0x1f, 0) => (sign << 31) | 0x7f80_0000,
+            (0x1f, _) => (sign << 31) | 0x7fc0_0000,
+            _ => (sign << 31) | ((exp + 127 - 15) << 23) | (frac << 13),
+        };
+        f32::from_bits(bits)
+    };
+
+    let mut out = Vec::with_capacity((width * height * 4) as usize);
+    for row in 0..height {
+        let start = (row * padded) as usize;
+        let row_bytes = &data[start..start + unpadded as usize];
+        match format {
+            wgpu::TextureFormat::Rgba8Unorm => out.extend_from_slice(row_bytes),
+            wgpu::TextureFormat::R32Float => {
+                for px in row_bytes.chunks_exact(4) {
+                    let v = q(f32::from_le_bytes([px[0], px[1], px[2], px[3]]));
+                    out.extend_from_slice(&[v, v, v, 255]);
+                }
+            }
+            wgpu::TextureFormat::Rgba16Float => {
+                for px in row_bytes.chunks_exact(8) {
+                    for ch in 0..3 {
+                        let h = u16::from_le_bytes([px[ch * 2], px[ch * 2 + 1]]);
+                        out.push(q(f16_to_f32(h)));
+                    }
+                    out.push(255);
+                }
+            }
+            wgpu::TextureFormat::Rgba32Float => {
+                for px in row_bytes.chunks_exact(16) {
+                    for ch in 0..3 {
+                        let v = f32::from_le_bytes([
+                            px[ch * 4],
+                            px[ch * 4 + 1],
+                            px[ch * 4 + 2],
+                            px[ch * 4 + 3],
+                        ]);
+                        out.push(q(v));
+                    }
+                    out.push(255);
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+    drop(data);
+    staging.unmap();
+    Ok((out, width, height))
+}
+
 /// Build push constant bytes from descriptor PushConstant bindings + CLI --push-constant args.
 /// The descriptor provides the layout (offsets and sizes); the CLI provides values by name.
 pub fn build_push_constant_bytes(
@@ -800,6 +939,19 @@ pub enum HostTextureKind {
     /// Shadertoy's 256×3 keyboard texture. Row 0 = currently-down,
     /// row 1 = pressed-this-frame, row 2 = toggled. R8Unorm.
     Keyboard,
+    /// An image file uploaded once at creation (`--image NAME:FILE`).
+    /// Rgba8Unorm at the file's native extent; static after upload.
+    Image,
+}
+
+/// A decoded `--image` file, ready to upload: tightly-packed RGBA8
+/// rows at the image's native size. Values are raw file bytes — sRGB
+/// stays sRGB-encoded (Shadertoy convention); shaders that need linear
+/// light decode it themselves.
+pub struct LoadedImage {
+    pub rgba8: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
 }
 
 /// Walk every pipeline's bindings; allocate one `wgpu::Texture` for
@@ -810,13 +962,17 @@ pub enum HostTextureKind {
 /// through `create_storage_textures`'s `sampled_view` instead; this
 /// pool is only for textures whose contents come from the CPU.
 ///
-/// Today the only recognized host pattern is "keyboard" (case-
-/// insensitive) → 256×3 R8Unorm. Future host-uploaded textures
-/// (image files, video, audio) would add their own match arms.
+/// Recognized host patterns: "keyboard" (case-insensitive) → 256×3
+/// R8Unorm, re-written each frame; any name in `images` (from
+/// `--image NAME:FILE`) → Rgba8Unorm at the image's native extent,
+/// uploaded once here. Future host-uploaded textures (video, audio)
+/// would add their own match arms.
 pub fn create_host_textures(
     device: &wgpu::Device,
+    queue: &wgpu::Queue,
     descriptor: &PipelineDescriptor,
     storage_textures: &HashMap<(u32, u32), StorageTextureResource>,
+    images: &HashMap<String, LoadedImage>,
 ) -> HashMap<(u32, u32), HostTextureResource> {
     let mut out: HashMap<(u32, u32), HostTextureResource> = HashMap::new();
     for pipeline in &descriptor.pipelines {
@@ -840,9 +996,12 @@ pub fn create_host_textures(
             if out.contains_key(&key) {
                 continue;
             }
-            // Name-based classification. v1 recognizes "keyboard" only.
+            // Name-based classification. `--image` names take
+            // precedence over the keyboard pattern.
             let lower = name.to_ascii_lowercase();
-            let kind = if lower == "keyboard" || lower == "ikeyboard" {
+            let kind = if images.contains_key(name.as_str()) {
+                HostTextureKind::Image
+            } else if lower == "keyboard" || lower == "ikeyboard" {
                 HostTextureKind::Keyboard
             } else {
                 // Unrecognized — leave it out; the bind-group builder
@@ -852,6 +1011,10 @@ pub fn create_host_textures(
             };
             let (width, height, format) = match kind {
                 HostTextureKind::Keyboard => (256u32, 3u32, wgpu::TextureFormat::R8Unorm),
+                HostTextureKind::Image => {
+                    let img = &images[name.as_str()];
+                    (img.width, img.height, wgpu::TextureFormat::Rgba8Unorm)
+                }
             };
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(&format!("host_texture_{}", name)),
@@ -867,6 +1030,28 @@ pub fn create_host_textures(
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             });
+            if kind == HostTextureKind::Image {
+                let img = &images[name.as_str()];
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &img.rgba8,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(4 * width),
+                        rows_per_image: Some(height),
+                    },
+                    wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
             let view = texture.create_view(&wgpu::TextureViewDescriptor {
                 label: Some(&format!("host_view_{}", name)),
                 format: Some(format),

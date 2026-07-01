@@ -51,6 +51,12 @@ pub struct InteractiveOpts {
     pub max_frames: Option<u32>,
     pub vertex_count: u32,
     pub topology: wgpu::PrimitiveTopology,
+    /// Image files to upload as host textures, by binding name (from
+    /// `--image NAME:FILE`). Decoded eagerly on the interactive path.
+    pub images: HashMap<String, PathBuf>,
+    /// Storage textures to dump as PNG at the `--max-frames` exit, by
+    /// binding name (from `--dump-texture NAME:FILE`).
+    pub dump_textures: HashMap<String, PathBuf>,
 }
 
 /// Per-texel format for a `--framebuffer` binding. v1 supports
@@ -249,6 +255,12 @@ pub async fn run_pipeline(
              (no frames, no previous-state notion)"
         );
     }
+    if !interactive_opts.images.is_empty() {
+        eprintln!(
+            "[viz pipeline] --image is ignored in headless mode \
+             (texture bindings are only wired on the interactive path)"
+        );
+    }
 
     let (device, queue) = create_headless_device(verbose).await?;
     let module = load_spirv_module(&device, &spv_path)?;
@@ -309,6 +321,29 @@ fn run_pipeline_interactive(
         &opts.framebuffers,
         opts.size,
     )?;
+    // Decode `--image` files eagerly so a bad path or unsupported
+    // format fails before the window opens.
+    let images: HashMap<String, crate::gpu::LoadedImage> = opts
+        .images
+        .iter()
+        .map(|(name, path)| {
+            let img = image::open(path)
+                .with_context(|| format!("--image {}: failed to load {}", name, path.display()))?
+                .to_rgba8();
+            let (width, height) = img.dimensions();
+            if verbose {
+                println!("[viz pipeline] --image {}: {} ({}x{})", name, path.display(), width, height);
+            }
+            Ok((
+                name.clone(),
+                crate::gpu::LoadedImage {
+                    rgba8: img.into_raw(),
+                    width,
+                    height,
+                },
+            ))
+        })
+        .collect::<Result<_>>()?;
     let spec = InteractivePipelineSpec {
         shader_path: spv_path,
         descriptor: desc,
@@ -327,6 +362,8 @@ fn run_pipeline_interactive(
         buffer_inits: resolved_buffer_inits,
         index_buffer: opts.index_buffer,
         outputs,
+        images,
+        dump_textures: opts.dump_textures,
     };
 
     let event_loop = EventLoop::new().context("failed to create event loop")?;
