@@ -316,6 +316,26 @@ impl Constructor {
 /// SPIR-V `ImageFormat` literal used in `OpTypeImage`. Kept in lock-step
 /// with the wgpu side: every format we emit here must also be allocated
 /// by the host with the matching `wgpu::TextureFormat`.
+/// Combine two views' accesses to the same storage image. Reads and writes
+/// accumulate independently: a binding read by one view and written by another
+/// is genuinely `ReadWrite`, so the shared global carries neither `NonReadable`
+/// nor `NonWritable`.
+fn union_storage_access(
+    a: crate::interface::StorageAccess,
+    b: crate::interface::StorageAccess,
+) -> crate::interface::StorageAccess {
+    use crate::interface::StorageAccess::{ReadOnly, ReadWrite, WriteOnly};
+    let reads = |x| matches!(x, ReadOnly | ReadWrite);
+    let writes = |x| matches!(x, WriteOnly | ReadWrite);
+    match (reads(a) || reads(b), writes(a) || writes(b)) {
+        (true, true) => ReadWrite,
+        (false, true) => WriteOnly,
+        // A view always reads or writes, so `(false, false)` is unreachable;
+        // treat read-only as the conservative default for that impossible case.
+        _ => ReadOnly,
+    }
+}
+
 fn storage_image_format_to_spirv(f: crate::pipeline_descriptor::StorageImageFormat) -> spirv::ImageFormat {
     use crate::pipeline_descriptor::StorageImageFormat as F;
     match f {
@@ -447,10 +467,28 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
     // Pre-create storage-image globals for all entry bindings so that image
     // ops inside SOAC-body functions (lowered before entry points) reference
     // the module-scope variable rather than an OpFunctionParameter.
+    //
+    // A binding shared across entries with mixed access (read in one, written in
+    // another — e.g. a compute pass writes an image a later pass reads)
+    // collapses to one global, so its `NonReadable`/`NonWritable` decoration
+    // must be the *union* of every view's access. Compute the union first (map
+    // values, so iteration order doesn't matter), then create in deterministic
+    // entry/input order (`create_storage_image` is idempotent).
+    let mut image_access: LookupMap<BindingRef, crate::interface::StorageAccess> = LookupMap::new();
     for entry in &program.entry_points {
         for input in &entry.inputs {
-            if let Some((br, format, access, _size)) = input.storage_image_binding {
-                constructor.create_storage_image(br, format, access);
+            if let Some((br, _format, access, _size)) = input.storage_image_binding {
+                image_access
+                    .entry(br)
+                    .and_modify(|acc| *acc = union_storage_access(*acc, access))
+                    .or_insert(access);
+            }
+        }
+    }
+    for entry in &program.entry_points {
+        for input in &entry.inputs {
+            if let Some((br, format, _access, _size)) = input.storage_image_binding {
+                constructor.create_storage_image(br, format, image_access[&br]);
             }
         }
     }

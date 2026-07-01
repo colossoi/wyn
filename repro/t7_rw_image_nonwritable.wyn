@@ -1,0 +1,12 @@
+-- Reproducer 3: one storage_image shared read+write across two entries. The
+-- reader entry appears first, so before the fix the shared global was decorated
+-- NonWritable and the writer entry's OpImageWrite violated it (naga reject).
+resource shared: image2d { format = r32float  size = 64x64  usages = [storage_read, storage_write] }
+
+#[compute]
+entry reader(xs: []u32, #[view(shared, storage_read)] s: storage_image) []f32 =
+  map(|e| let p = image_load(s, @[i32(e), 0]) in p.x, xs)
+
+#[compute]
+entry writer(xs: []u32, #[view(shared, storage_write)] d: storage_image) []u32 =
+  map(|e| let _ = image_store(d, @[i32(e), 0], @[1.0, 1.0, 1.0, 1.0]) in 0u32, xs)

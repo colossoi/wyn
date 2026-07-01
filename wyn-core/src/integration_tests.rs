@@ -7502,6 +7502,29 @@ entry r(xs: []u32,
     assert!(image_ops >= 2, "expected image_load and image_store");
 }
 
+/// A storage image shared across entries with mixed access — read in one entry,
+/// written in another — collapses to a single module global. Its access
+/// decoration must be the union of every view, so a read+write image carries
+/// neither `NonReadable` nor `NonWritable`. With the reader entry first (as
+/// here), the pre-fix behaviour decorated the global `NonWritable` and naga
+/// rejected the writer's `OpImageWrite`; `assert_no_runtime_storage_image_handles`
+/// runs naga validation, so it fails if the decoration regresses.
+#[test]
+fn storage_image_shared_read_and_write_across_entries_validates() {
+    let source = r#"
+#[compute]
+entry reader(xs: []u32,
+             #[storage_image(set=1, binding=0, format=r32float, access=read_only)] img: storage_image) []f32 =
+  map(|s| let p = image_load(img, @[i32(s), 0]) in p.x, xs)
+#[compute]
+entry writer(xs: []u32,
+             #[storage_image(set=1, binding=0, format=r32float, access=write_only)] img: storage_image) []u32 =
+  map(|s| let _ = image_store(img, @[i32(s), 0], @[1.0, 1.0, 1.0, 1.0]) in 0u32, xs)
+"#;
+    let lowered = crate::compile_thru_spirv(source).expect("shared read+write storage image compiles");
+    assert_no_runtime_storage_image_handles(&lowered.spirv);
+}
+
 #[test]
 fn straight_line_map_has_no_runtime_storage_image_handles() {
     let source = r#"
