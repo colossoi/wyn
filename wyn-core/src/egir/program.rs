@@ -134,7 +134,7 @@ pub enum LogicalSize {
 /// Why a compiler-introduced resource exists. The kind fixes its physical
 /// storage role and lets descriptor publication build the right
 /// `StorageBindingDecl` without re-deriving it from the lowering site.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CompilerResourceKind {
     /// A pre-existing intermediate surfaced from a `StorageBindingDecl`
     /// (gather prepass / generic staging) — not owned by a Seg op.
@@ -147,14 +147,47 @@ pub enum CompilerResourceKind {
     /// A runtime `filter`'s compaction buffer and its paired length cell.
     FilterScratch,
     FilterLenCell,
+    FilterFlags,
+    FilterOffsets,
+    /// Scalar result produced by a compiler-hoisted prepass and consumed by a
+    /// later source entry phase.
+    ScalarHandoff,
+    /// One shared materialization for an array-valued SegMap with more than
+    /// one semantic consumer.
+    MultiConsumerArray,
 }
 
 impl CompilerResourceKind {
     /// The physical storage role a resource of this kind lowers to.
     pub fn role(self) -> interface::StorageRole {
         match self {
-            CompilerResourceKind::FilterScratch => interface::StorageRole::Output,
+            CompilerResourceKind::FilterScratch
+            | CompilerResourceKind::ScalarHandoff
+            | CompilerResourceKind::MultiConsumerArray => interface::StorageRole::Output,
             _ => interface::StorageRole::Intermediate,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CompilerResource {
+    pub kind: CompilerResourceKind,
+    pub role: interface::StorageRole,
+    /// Semantic operation that owns the resource. Generic staging resources
+    /// introduced before segmentation have no single owner.
+    pub owner: Option<SemanticOpId>,
+    /// Stable resource position within the owner (accumulator/lane/scratch
+    /// index, depending on `kind`).
+    pub slot: usize,
+}
+
+impl CompilerResource {
+    pub fn new(kind: CompilerResourceKind, owner: Option<SemanticOpId>, slot: usize) -> Self {
+        Self {
+            role: kind.role(),
+            kind,
+            owner,
+            slot,
         }
     }
 }
@@ -162,7 +195,7 @@ impl CompilerResourceKind {
 #[derive(Clone, Debug)]
 pub enum ResourceOrigin {
     Host(crate::BindingRef),
-    Compiler(CompilerResourceKind),
+    Compiler(CompilerResource),
 }
 
 #[derive(Clone, Debug)]
@@ -183,14 +216,24 @@ pub struct LogicalResource {
 /// here and their `ResourceId`s recorded on the owning Seg op, so terminal
 /// lowering consumes the manifest instead of allocating scratch ad hoc.
 pub fn plan_logical_resources(inner: &mut EgirInner, binding_ids: &mut crate::IdSource<u32>) {
+    super::multi_consumer::run(inner, binding_ids);
+    let mut filter_work = allocate_filter_work_resources(inner, binding_ids);
+    let scalar_handoffs = scalar_handoff_resources(inner);
+    inner.resource_hints.extend(scalar_handoffs);
     let filter_kinds = filter_resource_kinds(inner);
-    let mut host = mirror_storage_resources(inner, &filter_kinds);
+    inner.resource_hints.extend(filter_kinds);
+    let mut host = mirror_storage_resources(inner, &inner.resource_hints);
     host.sort_by_key(|resource| (resource.legacy_binding.set, resource.legacy_binding.binding));
     for (index, resource) in host.iter_mut().enumerate() {
         resource.id = ResourceId(index as u32);
     }
-    let mut scratch = super::parallelize::enumerate_seg_scratch(inner, binding_ids, host.len() as u32);
+    attach_materialization_resources(inner, &host);
     let mut resources = host;
+    for resource in &mut filter_work {
+        resource.id = ResourceId(resources.len() as u32);
+        resources.push(resource.clone());
+    }
+    let mut scratch = super::parallelize::enumerate_seg_scratch(inner, binding_ids, resources.len() as u32);
     resources.append(&mut scratch);
     inner.resources = resources;
     if cfg!(debug_assertions) {
@@ -198,19 +241,245 @@ pub fn plan_logical_resources(inner: &mut EgirInner, binding_ids: &mut crate::Id
     }
 }
 
+fn allocate_filter_work_resources(
+    inner: &mut EgirInner,
+    binding_ids: &mut crate::IdSource<u32>,
+) -> Vec<LogicalResource> {
+    use super::types::{EgirSoac, FilterWorkBuffers, SegExtent, SideEffectKind};
+    let mut used: std::collections::HashSet<_> = inner
+        .entry_points
+        .iter()
+        .flat_map(|entry| {
+            entry
+                .inputs
+                .iter()
+                .filter_map(|input| input.storage_binding)
+                .chain(entry.outputs.iter().filter_map(|output| output.storage_binding))
+                .chain(entry.storage_bindings.iter().map(|declaration| declaration.binding))
+        })
+        .collect();
+    let mut resources = Vec::new();
+    for entry in &mut inner.entry_points {
+        for (_, block) in entry.graph.skeleton.blocks.iter_mut() {
+            for effect in &mut block.side_effects {
+                let SideEffectKind::Soac(EgirSoac::Filter {
+                    space,
+                    scratch_out: Some(_),
+                    work_buffers,
+                    ..
+                }) = &mut effect.kind
+                else {
+                    continue;
+                };
+                if work_buffers.is_some() {
+                    continue;
+                }
+                let mut next_binding = || loop {
+                    let binding =
+                        crate::BindingRef::new(super::from_tlc::AUTO_STORAGE_SET, binding_ids.next_id());
+                    if used.insert(binding) {
+                        break binding;
+                    }
+                };
+                let buffers = FilterWorkBuffers {
+                    flags: next_binding(),
+                    offsets: next_binding(),
+                };
+                *work_buffers = Some(buffers);
+                let size = match space.as_ref().and_then(|space| space.dims.first()) {
+                    Some(SegExtent::Fixed(count)) if space.as_ref().is_some_and(|s| s.dims.len() == 1) => {
+                        LogicalSize::FixedBytes(*count as u64 * 4)
+                    }
+                    Some(SegExtent::ResourceLength {
+                        binding, elem_bytes, ..
+                    }) if space.as_ref().is_some_and(|s| s.dims.len() == 1) => LogicalSize::LikeBinding {
+                        binding: *binding,
+                        elem_bytes: 4,
+                        src_elem_bytes: *elem_bytes,
+                    },
+                    _ => LogicalSize::SameAsDispatch { elem_bytes: 4 },
+                };
+                let owner = effect.result.map(|result| SemanticOpId {
+                    scope: entry.name.clone(),
+                    result,
+                });
+                for (slot, (binding, kind)) in [
+                    (buffers.flags, CompilerResourceKind::FilterFlags),
+                    (buffers.offsets, CompilerResourceKind::FilterOffsets),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let compiler = CompilerResource::new(kind, owner.clone(), slot);
+                    inner.resource_hints.insert(binding, compiler.clone());
+                    resources.push(LogicalResource {
+                        id: ResourceId(0),
+                        origin: ResourceOrigin::Compiler(compiler),
+                        legacy_binding: binding,
+                        elem_ty: Type::Constructed(TypeName::UInt(32), vec![]),
+                        size: size.clone(),
+                    });
+                }
+            }
+        }
+    }
+    resources
+}
+
+fn attach_materialization_resources(inner: &mut EgirInner, resources: &[LogicalResource]) {
+    for resource in resources {
+        let ResourceOrigin::Compiler(compiler) = &resource.origin else {
+            continue;
+        };
+        if compiler.kind != CompilerResourceKind::MultiConsumerArray {
+            continue;
+        }
+        let Some(owner) = &compiler.owner else {
+            continue;
+        };
+        let Some(entry) = inner.entry_points.iter_mut().find(|entry| entry.name == owner.scope) else {
+            continue;
+        };
+        for (_, block) in entry.graph.skeleton.blocks.iter_mut() {
+            for effect in &mut block.side_effects {
+                if effect.result != Some(owner.result) {
+                    continue;
+                }
+                if let super::types::SideEffectKind::Soac(super::types::EgirSoac::Seg {
+                    scratch_resources,
+                    ..
+                }) = &mut effect.kind
+                {
+                    if !scratch_resources.contains(&resource.id) {
+                        scratch_resources.push(resource.id);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Refresh the manifest after terminal lowering has introduced phase entries
+/// and physical declarations.  Unlike `plan_logical_resources`, this never
+/// allocates a binding or rewrites an owning SegOp; it preserves the precise
+/// compiler origin assigned at the allocation boundary.
+pub fn refresh_logical_resources(inner: &mut EgirInner) {
+    let previous: HashMap<_, _> =
+        inner.resources.drain(..).map(|resource| (resource.legacy_binding, resource)).collect();
+    let filter_kinds = filter_resource_kinds(inner);
+    let scalar_handoffs = scalar_handoff_resources(inner);
+    inner.resource_hints.extend(scalar_handoffs);
+    inner.resource_hints.extend(filter_kinds);
+    let mut refreshed = mirror_storage_resources(inner, &inner.resource_hints);
+    for resource in &mut refreshed {
+        if let Some(old) = previous.get(&resource.legacy_binding) {
+            if matches!(old.origin, ResourceOrigin::Compiler(_)) {
+                resource.origin = old.origin.clone();
+                resource.elem_ty = old.elem_ty.clone();
+                resource.size = old.size.clone();
+            }
+        }
+    }
+    // A compiler resource may not be repeated on every synthesized phase, but
+    // remains part of the program-level manifest.
+    for (binding, resource) in previous {
+        if matches!(resource.origin, ResourceOrigin::Compiler(_))
+            && !refreshed.iter().any(|candidate| candidate.legacy_binding == binding)
+        {
+            refreshed.push(resource);
+        }
+    }
+    refreshed.sort_by_key(|resource| (resource.legacy_binding.set, resource.legacy_binding.binding));
+    for (index, resource) in refreshed.iter_mut().enumerate() {
+        resource.id = ResourceId(index as u32);
+    }
+    inner.resources = refreshed;
+    if cfg!(debug_assertions) {
+        verify_manifest_covers_storage(inner);
+    }
+}
+
+/// Bindings introduced by TLC scalar-prepass hoisting already have a stable
+/// physical ABI, but are compiler-owned logical resources rather than host
+/// inputs. Record that ownership at the allocation boundary so schedule and
+/// descriptor publication do not have to infer it again.
+fn scalar_handoff_resources(inner: &EgirInner) -> HashMap<crate::BindingRef, CompilerResource> {
+    let consumer_inputs: std::collections::HashSet<_> = inner
+        .entry_points
+        .iter()
+        .flat_map(|entry| {
+            entry.storage_bindings.iter().filter_map(|declaration| {
+                (declaration.role == interface::StorageRole::Input).then_some(declaration.binding)
+            })
+        })
+        .collect();
+    let mut resources = HashMap::new();
+    for entry in &inner.entry_points {
+        if !entry.name.contains("_prepass_") {
+            continue;
+        }
+        let owner = entry.graph.skeleton.blocks.iter().find_map(|(_, block)| {
+            block.side_effects.iter().find_map(|effect| {
+                effect.result.map(|result| SemanticOpId {
+                    scope: entry.name.clone(),
+                    result,
+                })
+            })
+        });
+        for declaration in &entry.storage_bindings {
+            if declaration.role == interface::StorageRole::Output
+                && declaration.length.is_none()
+                && consumer_inputs.contains(&declaration.binding)
+            {
+                resources.insert(
+                    declaration.binding,
+                    CompilerResource::new(CompilerResourceKind::ScalarHandoff, owner.clone(), 0),
+                );
+            }
+        }
+    }
+    resources
+}
+
 /// Runtime `filter` bindings, classified so the mirror gives them a precise
 /// `CompilerResourceKind` rather than generic `Staging`.
-fn filter_resource_kinds(inner: &EgirInner) -> HashMap<crate::BindingRef, CompilerResourceKind> {
+fn filter_resource_kinds(inner: &EgirInner) -> HashMap<crate::BindingRef, CompilerResource> {
     let mut kinds = HashMap::new();
     for entry in &inner.entry_points {
         for (_, block) in &entry.graph.skeleton.blocks {
             for effect in &block.side_effects {
                 if let super::types::SideEffectKind::Soac(super::types::EgirSoac::Filter {
-                    len_out, ..
+                    scratch_out,
+                    len_out,
+                    work_buffers,
+                    ..
                 }) = &effect.kind
                 {
+                    let owner = effect.result.map(|result| SemanticOpId {
+                        scope: entry.name.clone(),
+                        result,
+                    });
+                    if let Some(scratch) = scratch_out {
+                        kinds.insert(
+                            *scratch,
+                            CompilerResource::new(CompilerResourceKind::FilterScratch, owner.clone(), 0),
+                        );
+                    }
                     if let Some(len) = len_out {
-                        kinds.insert(*len, CompilerResourceKind::FilterLenCell);
+                        kinds.insert(
+                            *len,
+                            CompilerResource::new(CompilerResourceKind::FilterLenCell, owner.clone(), 1),
+                        );
+                    }
+                    if let Some(work) = work_buffers {
+                        kinds.insert(
+                            work.flags,
+                            CompilerResource::new(CompilerResourceKind::FilterFlags, owner.clone(), 2),
+                        );
+                        kinds.insert(
+                            work.offsets,
+                            CompilerResource::new(CompilerResourceKind::FilterOffsets, owner, 3),
+                        );
                     }
                 }
             }
@@ -224,21 +493,26 @@ fn filter_resource_kinds(inner: &EgirInner) -> HashMap<crate::BindingRef, Compil
 /// `Compiler` resources; a filter length cell is tagged precisely.
 fn mirror_storage_resources(
     inner: &EgirInner,
-    filter_kinds: &HashMap<crate::BindingRef, CompilerResourceKind>,
+    filter_kinds: &HashMap<crate::BindingRef, CompilerResource>,
 ) -> Vec<LogicalResource> {
     let mut resources: LookupMap<crate::BindingRef, LogicalResource> = LookupMap::new();
-    let host = |binding: crate::BindingRef, elem_ty: Type<TypeName>, size: LogicalSize| LogicalResource {
-        id: ResourceId(0),
-        origin: ResourceOrigin::Host(binding),
-        legacy_binding: binding,
-        elem_ty,
-        size,
-    };
+    let resource =
+        |binding: crate::BindingRef, elem_ty: Type<TypeName>, size: LogicalSize| LogicalResource {
+            id: ResourceId(0),
+            origin: filter_kinds
+                .get(&binding)
+                .cloned()
+                .map(ResourceOrigin::Compiler)
+                .unwrap_or(ResourceOrigin::Host(binding)),
+            legacy_binding: binding,
+            elem_ty,
+            size,
+        };
     for entry in &inner.entry_points {
         for input in &entry.inputs {
             if let Some(binding) = input.storage_binding {
                 resources.entry(binding).or_insert_with(|| {
-                    host(
+                    resource(
                         binding,
                         input.ty.elem_type().cloned().unwrap_or_else(|| input.ty.clone()),
                         logical_size(input.length.as_ref()),
@@ -249,7 +523,7 @@ fn mirror_storage_resources(
         for output in &entry.outputs {
             if let Some(binding) = output.storage_binding {
                 resources.entry(binding).or_insert_with(|| {
-                    host(
+                    resource(
                         binding,
                         output.ty.elem_type().cloned().unwrap_or_else(|| output.ty.clone()),
                         logical_size(output.length.as_ref()),
@@ -259,9 +533,9 @@ fn mirror_storage_resources(
         }
         for declaration in &entry.storage_bindings {
             let origin = if let Some(kind) = filter_kinds.get(&declaration.binding) {
-                ResourceOrigin::Compiler(*kind)
+                ResourceOrigin::Compiler(kind.clone())
             } else if declaration.role == interface::StorageRole::Intermediate {
-                ResourceOrigin::Compiler(CompilerResourceKind::Staging)
+                ResourceOrigin::Compiler(CompilerResource::new(CompilerResourceKind::Staging, None, 0))
             } else {
                 ResourceOrigin::Host(declaration.binding)
             };
@@ -291,8 +565,35 @@ fn verify_manifest_covers_storage(inner: &EgirInner) {
                 declaration.binding,
                 declaration.role,
             );
+            if declaration.role == interface::StorageRole::Intermediate {
+                let resource = inner
+                    .resources
+                    .iter()
+                    .find(|resource| resource.legacy_binding == declaration.binding)
+                    .expect("coverage checked above");
+                debug_assert!(
+                    matches!(resource.origin, ResourceOrigin::Compiler(_)),
+                    "intermediate binding {:?} is not compiler-owned",
+                    declaration.binding,
+                );
+            }
         }
     }
+    let unique = inner
+        .resources
+        .iter()
+        .map(|resource| resource.legacy_binding)
+        .collect::<std::collections::HashSet<_>>();
+    debug_assert_eq!(
+        unique.len(),
+        inner.resources.len(),
+        "resource manifest contains duplicate bindings: {:?}",
+        inner
+            .resources
+            .iter()
+            .map(|resource| (resource.legacy_binding, &resource.origin))
+            .collect::<Vec<_>>()
+    );
 }
 
 pub fn logical_size(length: Option<&crate::pipeline_descriptor::BufferLen>) -> LogicalSize {
@@ -466,6 +767,9 @@ pub struct EgirInner {
     /// Logical host and compiler resources. Compiler resources receive a
     /// physical binding only during target-aware lowering.
     pub resources: Vec<LogicalResource>,
+    /// Precise compiler ownership for physical declarations that exist before
+    /// the numbered logical-resource table is rebuilt.
+    pub resource_hints: LookupMap<crate::BindingRef, CompilerResource>,
     /// Whole-program semantic dependency DAG. Edges come from values, effect
     /// tokens, and conflicting logical resource accesses.
     pub semantic_dependencies: Vec<SemanticDependency>,
@@ -502,6 +806,7 @@ impl EgirInner {
             regions,
             region_interner,
             resources: Vec::new(),
+            resource_hints: LookupMap::new(),
             semantic_dependencies: Vec::new(),
             kernel_schedule: KernelSchedule::default(),
         }

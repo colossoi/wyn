@@ -492,7 +492,13 @@ fn expand_one(
                     for acc_idx in 0..n_accs {
                         let acc_nid = carried_nids[acc_current_carried_indices[acc_idx]];
                         let mut reduce_operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![acc_nid];
-                        reduce_operands.extend(elem_nids.iter().copied());
+                        if acc_specs[acc_idx].input_indices.is_empty() {
+                            reduce_operands.extend(elem_nids.iter().copied());
+                        } else {
+                            reduce_operands.extend(
+                                acc_specs[acc_idx].input_indices.iter().map(|&index| elem_nids[index]),
+                            );
+                        }
                         reduce_operands.extend(acc_step_captures[acc_idx].iter().copied());
                         let new_acc = graph.intern_pure(
                             PureOp::Call(regions.name(acc_specs[acc_idx].step.region).to_string()),
@@ -553,6 +559,8 @@ fn expand_one(
             destination,
             scratch_out,
             len_out,
+            work_buffers,
+            phase,
         }) => {
             let map_func = map_body.as_ref().map(|body| regions.name(body.region).to_string());
             let output_elem_ty = output_elem_type.clone();
@@ -563,6 +571,8 @@ fn expand_one(
             let destination = *destination;
             let scratch_out = *scratch_out;
             let len_out = *len_out;
+            let work_buffers = *work_buffers;
+            let phase = *phase;
 
             // Operand layout: [input, ...map_captures, ...pred_captures].
             let arr_nid = se.operand_nodes[0];
@@ -570,28 +580,33 @@ fn expand_one(
             let captures = pred_body.captures.clone();
             let result_nid = se.result.expect("Filter has a result");
 
-            build_filter_loop(
-                graph,
-                control_headers,
-                bid,
-                idx,
-                FilterLoop {
-                    arr_nid,
-                    arr_ty,
-                    elem_ty,
-                    output_elem_ty,
-                    capacity_size,
-                    map_func,
-                    map_captures,
-                    pred_func,
-                    captures,
-                    result_node: result_nid,
-                    destination,
-                    scratch_out,
-                    len_out,
-                },
-                next_effect,
-            );
+            let spec = FilterLoop {
+                arr_nid,
+                arr_ty,
+                elem_ty,
+                output_elem_ty,
+                capacity_size,
+                map_func,
+                map_captures,
+                pred_func,
+                captures,
+                result_node: result_nid,
+                destination,
+                scratch_out,
+                len_out,
+            };
+            match (phase, work_buffers) {
+                (super::types::FilterPhase::Flags, Some(work)) => {
+                    build_filter_flags(graph, control_headers, bid, idx, spec, work.flags, next_effect)
+                }
+                (super::types::FilterPhase::Scan, Some(work)) => {
+                    build_filter_scan(graph, control_headers, bid, idx, spec, work, next_effect)
+                }
+                (super::types::FilterPhase::Scatter, Some(work)) => {
+                    build_filter_scatter(graph, control_headers, bid, idx, spec, work, next_effect)
+                }
+                _ => build_filter_loop(graph, control_headers, bid, idx, spec, next_effect),
+            }
         }
         SideEffectKind::Soac(EgirSoac::Hist {
             body,
@@ -1483,6 +1498,278 @@ fn build_parallel_scatter(
     graph.skeleton.blocks[body].term = SkeletonTerminator::Branch {
         target: after,
         args: vec![],
+    };
+}
+
+fn filter_thread_index(graph: &mut EGraph) -> NodeId {
+    graph.intern_pure(
+        PureOp::Intrinsic {
+            id: catalog().known().thread_id,
+            overload_idx: 0,
+        },
+        smallvec![],
+        Type::Constructed(TypeName::UInt(32), vec![]),
+    )
+}
+
+fn build_filter_flags(
+    graph: &mut EGraph,
+    control_headers: &mut LookupMap<BlockId, ControlHeader>,
+    bid: BlockId,
+    idx: usize,
+    spec: FilterLoop,
+    flags: crate::BindingRef,
+    next_effect: &mut u32,
+) {
+    use super::graph_ops::{emit_storage_store, intern_storage_view, intern_u32};
+    graph.skeleton.blocks[bid].side_effects.drain(idx..);
+    let after = graph.skeleton.create_block();
+    let in_range = graph.skeleton.create_block();
+    let keep = graph.skeleton.create_block();
+    let drop = graph.skeleton.create_block();
+    let pred_merge = graph.skeleton.create_block();
+    graph.skeleton.blocks[after].term = SkeletonTerminator::Return(None);
+    let gid = filter_thread_index(graph);
+    let len = graph.intern_pure(
+        PureOp::StorageViewLen,
+        smallvec![spec.arr_nid],
+        Type::Constructed(TypeName::UInt(32), vec![]),
+    );
+    let bounded = graph.intern_pure(
+        PureOp::BinOp("<".into()),
+        smallvec![gid, len],
+        Type::Constructed(TypeName::Bool, vec![]),
+    );
+    graph.skeleton.blocks[bid].term = SkeletonTerminator::CondBranch {
+        cond: bounded,
+        then_target: in_range,
+        then_args: vec![],
+        else_target: after,
+        else_args: vec![],
+    };
+    control_headers.insert(bid, ControlHeader::Selection { merge: after });
+    let elem = emit_read_element(
+        graph,
+        in_range,
+        spec.arr_nid,
+        gid,
+        &spec.arr_ty,
+        &spec.elem_ty,
+        next_effect,
+    );
+    let kept = filter_kept_value(graph, elem, &spec);
+    let mut operands: SmallVec<[NodeId; 4]> = smallvec![kept];
+    operands.extend(spec.captures.iter().copied());
+    let pred = graph.intern_pure(
+        PureOp::Call(spec.pred_func.clone()),
+        operands,
+        Type::Constructed(TypeName::Bool, vec![]),
+    );
+    graph.skeleton.blocks[in_range].term = SkeletonTerminator::CondBranch {
+        cond: pred,
+        then_target: keep,
+        then_args: vec![],
+        else_target: drop,
+        else_args: vec![],
+    };
+    control_headers.insert(in_range, ControlHeader::Selection { merge: pred_merge });
+    let view = intern_storage_view(graph, flags, Type::Constructed(TypeName::UInt(32), vec![]), None);
+    for (block, value) in [(keep, 1), (drop, 0)] {
+        let flag = intern_u32(graph, value, None);
+        emit_storage_store(
+            graph,
+            block,
+            view,
+            gid,
+            flag,
+            Type::Constructed(TypeName::UInt(32), vec![]),
+            next_effect,
+            None,
+        );
+        graph.skeleton.blocks[block].term = SkeletonTerminator::Branch {
+            target: pred_merge,
+            args: vec![],
+        };
+    }
+    graph.skeleton.blocks[pred_merge].term = SkeletonTerminator::Branch {
+        target: after,
+        args: vec![],
+    };
+    graph.nodes[spec.result_node] = ENode::Constant(crate::ssa::types::ConstantValue::Bool(false));
+}
+
+fn build_filter_scan(
+    graph: &mut EGraph,
+    control_headers: &mut LookupMap<BlockId, ControlHeader>,
+    bid: BlockId,
+    idx: usize,
+    spec: FilterLoop,
+    work: super::types::FilterWorkBuffers,
+    next_effect: &mut u32,
+) {
+    use super::graph_ops::{emit_load, emit_storage_store, intern_storage_view, intern_u32};
+    graph.skeleton.blocks[bid].side_effects.drain(idx..);
+    let header = graph.skeleton.create_block();
+    let body = graph.skeleton.create_block();
+    let after = graph.skeleton.create_block();
+    let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+    let zero = intern_u32(graph, 0, None);
+    graph.skeleton.blocks[bid].term = SkeletonTerminator::Branch {
+        target: header,
+        args: vec![zero, zero],
+    };
+    let i = graph.add_block_param(header, 0, u32_ty.clone());
+    let acc = graph.add_block_param(header, 1, u32_ty.clone());
+    graph.skeleton.blocks[header].params.extend([i, acc]);
+    let len = graph.intern_pure(PureOp::StorageViewLen, smallvec![spec.arr_nid], u32_ty.clone());
+    let cond = graph.intern_pure(
+        PureOp::BinOp("<".into()),
+        smallvec![i, len],
+        Type::Constructed(TypeName::Bool, vec![]),
+    );
+    graph.skeleton.blocks[header].term = SkeletonTerminator::CondBranch {
+        cond,
+        then_target: body,
+        then_args: vec![],
+        else_target: after,
+        else_args: vec![acc],
+    };
+    control_headers.insert(
+        header,
+        ControlHeader::Loop {
+            merge: after,
+            continue_block: body,
+        },
+    );
+    let flags = intern_storage_view(graph, work.flags, u32_ty.clone(), None);
+    let offsets = intern_storage_view(graph, work.offsets, u32_ty.clone(), None);
+    let flag_place = graph.intern_pure(PureOp::ViewIndex, smallvec![flags, i], u32_ty.clone());
+    let flag = emit_load(graph, body, flag_place, u32_ty.clone(), next_effect, None);
+    let next = graph.intern_pure(PureOp::BinOp("+".into()), smallvec![acc, flag], u32_ty.clone());
+    emit_storage_store(graph, body, offsets, i, next, u32_ty.clone(), next_effect, None);
+    let one = intern_u32(graph, 1, None);
+    let next_i = graph.intern_pure(PureOp::BinOp("+".into()), smallvec![i, one], u32_ty.clone());
+    graph.skeleton.blocks[body].term = SkeletonTerminator::Branch {
+        target: header,
+        args: vec![next_i, next],
+    };
+    let final_count = graph.add_block_param(after, 0, u32_ty.clone());
+    graph.skeleton.blocks[after].params.push(final_count);
+    if let Some(len_out) = spec.len_out {
+        let len_view = intern_storage_view(graph, len_out, u32_ty.clone(), None);
+        emit_storage_store(
+            graph,
+            after,
+            len_view,
+            zero,
+            final_count,
+            u32_ty.clone(),
+            next_effect,
+            None,
+        );
+    }
+    graph.skeleton.blocks[after].term = SkeletonTerminator::Return(None);
+    graph.nodes[spec.result_node] = ENode::Constant(crate::ssa::types::ConstantValue::Bool(false));
+}
+
+fn build_filter_scatter(
+    graph: &mut EGraph,
+    control_headers: &mut LookupMap<BlockId, ControlHeader>,
+    bid: BlockId,
+    idx: usize,
+    spec: FilterLoop,
+    work: super::types::FilterWorkBuffers,
+    next_effect: &mut u32,
+) {
+    use super::graph_ops::{emit_load, emit_storage_store, intern_storage_view, intern_u32};
+    let after = graph.skeleton.create_block();
+    let suffix: Vec<_> = graph.skeleton.blocks[bid].side_effects.drain(idx..).collect();
+    let old_term = std::mem::replace(
+        &mut graph.skeleton.blocks[bid].term,
+        SkeletonTerminator::Unreachable,
+    );
+    graph.skeleton.blocks[after].side_effects = suffix;
+    graph.skeleton.blocks[after].term = old_term;
+    let in_range = graph.skeleton.create_block();
+    let write = graph.skeleton.create_block();
+    let skip = graph.skeleton.create_block();
+    let merge = graph.skeleton.create_block();
+    let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+    let gid = filter_thread_index(graph);
+    let len = graph.intern_pure(PureOp::StorageViewLen, smallvec![spec.arr_nid], u32_ty.clone());
+    let bounded = graph.intern_pure(PureOp::BinOp("<".into()), smallvec![gid, len], bool_ty.clone());
+    graph.skeleton.blocks[bid].term = SkeletonTerminator::CondBranch {
+        cond: bounded,
+        then_target: in_range,
+        then_args: vec![],
+        else_target: after,
+        else_args: vec![],
+    };
+    control_headers.insert(bid, ControlHeader::Selection { merge: after });
+    let flags = intern_storage_view(graph, work.flags, u32_ty.clone(), None);
+    let offsets = intern_storage_view(graph, work.offsets, u32_ty.clone(), None);
+    let flag_place = graph.intern_pure(PureOp::ViewIndex, smallvec![flags, gid], u32_ty.clone());
+    let flag = emit_load(graph, in_range, flag_place, u32_ty.clone(), next_effect, None);
+    let one = intern_u32(graph, 1, None);
+    let keep = graph.intern_pure(PureOp::BinOp("==".into()), smallvec![flag, one], bool_ty);
+    graph.skeleton.blocks[in_range].term = SkeletonTerminator::CondBranch {
+        cond: keep,
+        then_target: write,
+        then_args: vec![],
+        else_target: skip,
+        else_args: vec![],
+    };
+    control_headers.insert(in_range, ControlHeader::Selection { merge });
+    let offset_place = graph.intern_pure(PureOp::ViewIndex, smallvec![offsets, gid], u32_ty.clone());
+    let inclusive = emit_load(graph, write, offset_place, u32_ty.clone(), next_effect, None);
+    let output_index = graph.intern_pure(
+        PureOp::BinOp("-".into()),
+        smallvec![inclusive, one],
+        u32_ty.clone(),
+    );
+    let elem = emit_read_element(
+        graph,
+        write,
+        spec.arr_nid,
+        gid,
+        &spec.arr_ty,
+        &spec.elem_ty,
+        next_effect,
+    );
+    let kept = filter_kept_value(graph, elem, &spec);
+    let out_binding = spec.scratch_out.expect("parallel filter scatter has output storage");
+    let output = intern_storage_view(graph, out_binding, spec.output_elem_ty.clone(), None);
+    emit_storage_store(
+        graph,
+        write,
+        output,
+        output_index,
+        kept,
+        spec.output_elem_ty.clone(),
+        next_effect,
+        None,
+    );
+    graph.skeleton.blocks[write].term = SkeletonTerminator::Branch {
+        target: merge,
+        args: vec![],
+    };
+    graph.skeleton.blocks[skip].term = SkeletonTerminator::Branch {
+        target: merge,
+        args: vec![],
+    };
+    graph.skeleton.blocks[merge].term = SkeletonTerminator::Branch {
+        target: after,
+        args: vec![],
+    };
+    let len_binding = spec.len_out.expect("parallel filter scatter has count storage");
+    let len_view = intern_storage_view(graph, len_binding, u32_ty.clone(), None);
+    let zero = intern_u32(graph, 0, None);
+    let len_place = graph.intern_pure(PureOp::ViewIndex, smallvec![len_view, zero], u32_ty.clone());
+    let count = emit_load(graph, bid, len_place, u32_ty.clone(), next_effect, None);
+    graph.nodes[spec.result_node] = ENode::Pure {
+        op: PureOp::StorageView(crate::op::PureViewSource::Storage(out_binding)),
+        operands: smallvec![zero, count],
     };
 }
 

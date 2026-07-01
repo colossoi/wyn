@@ -37,11 +37,11 @@ fn oracle_distinguishes_conflict_flow_and_value_edges() {
     ];
     let g = SemanticGraph::new(&deps);
 
-    // Only resource edges are conflicts (both directions); effect ordering and
-    // value edges are not.
+    // Resource and effect edges are reordering conflicts (both directions);
+    // value edges are represented separately.
     assert!(g.conflicts(&a, &b), "resource edge is a conflict");
     assert!(g.conflicts(&b, &a));
-    assert!(!g.conflicts(&b, &c), "effect ordering alone is not a conflict");
+    assert!(g.conflicts(&b, &c), "effect ordering is a reordering conflict");
     assert!(
         !g.conflicts(&a, &c),
         "a value edge alone is fusable, not a conflict"
@@ -58,6 +58,8 @@ fn oracle_distinguishes_conflict_flow_and_value_edges() {
         "a--b is resource-only, not a value edge"
     );
     assert!(!g.reachable_between(&c, &a), "no back edge");
+    assert_eq!(g.value_consumer_count(&a), 1);
+    assert_eq!(g.value_consumer_count(&b), 0);
 }
 
 #[test]

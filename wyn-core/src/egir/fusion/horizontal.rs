@@ -161,7 +161,12 @@ fn fuse_pair(graph: &mut EGraph, block_id: BlockId, i: usize, j: usize) {
     acc_destinations.extend(q.acc_destinations.iter().cloned());
 
     let mut operators = p.kind.operators().to_vec();
-    operators.extend(q.kind.operators().iter().cloned());
+    operators.extend(q.kind.operators().iter().cloned().map(|mut operator| {
+        for input in &mut operator.input_indices {
+            *input += base;
+        }
+        operator
+    }));
     let kind = reify_seg_kind_operators(operators);
 
     let mut result_types = p.result_types.clone();
@@ -190,8 +195,14 @@ fn fuse_pair(graph: &mut EGraph, block_id: BlockId, i: usize, j: usize) {
 
     // Re-point consumers: `Project(P.result, f)` → `Project(fused, f)`,
     // `Project(Q.result, f)` → `Project(fused, base_fields + f)`.
-    reproject(graph, p.result, fused_result, 0);
-    reproject(graph, q.result, fused_result, p.result_types.len() as u32);
+    reproject(graph, p.result, fused_result, 0, &p.result_types);
+    reproject(
+        graph,
+        q.result,
+        fused_result,
+        p.result_types.len() as u32,
+        &q.result_types,
+    );
 
     let fused = EgirSoac::Seg {
         space: p.space.clone(),
@@ -296,8 +307,14 @@ fn extract_seg(graph: &EGraph, block_id: BlockId, idx: usize) -> SegParts {
 }
 
 /// Rewrite every `Project(old_result, f)` to `Project(new_result, f + offset)`,
-/// and any direct use of `old_result` to `new_result`.
-fn reproject(graph: &mut EGraph, old_result: NodeId, new_result: NodeId, offset: u32) {
+/// and rebuild any whole-result use with the old tuple type.
+fn reproject(
+    graph: &mut EGraph,
+    old_result: NodeId,
+    new_result: NodeId,
+    offset: u32,
+    field_types: &[Type<TypeName>],
+) {
     let projects: Vec<(NodeId, u32)> = graph
         .nodes
         .iter()
@@ -317,8 +334,24 @@ fn reproject(graph: &mut EGraph, old_result: NodeId, new_result: NodeId, offset:
             operands[0] = new_result;
         }
     }
-    // Any non-Project use of the old result now refers to the fused tuple.
-    graph_ops::replace_all_references(graph, old_result, new_result);
+    // Preserve the old tuple type for whole-result users. Pointing those users
+    // at the larger fused tuple would silently change their argument type.
+    let fields: SmallVec<[NodeId; 4]> = field_types
+        .iter()
+        .enumerate()
+        .map(|(index, ty)| {
+            graph.intern_pure(
+                PureOp::Project {
+                    index: offset + index as u32,
+                },
+                smallvec::smallvec![new_result],
+                ty.clone(),
+            )
+        })
+        .collect();
+    let old_ty = graph.types[&old_result].clone();
+    let rebuilt = graph.intern_pure(PureOp::Tuple(field_types.len()), fields, old_ty);
+    graph_ops::replace_all_references(graph, old_result, rebuilt);
 }
 
 fn merge_resources(a: &[SegResourceAccess], b: &[SegResourceAccess]) -> Vec<SegResourceAccess> {

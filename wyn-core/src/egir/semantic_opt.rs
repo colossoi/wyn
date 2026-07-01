@@ -33,6 +33,9 @@ pub fn run(inner: &mut EgirInner) {
             changed = super::fusion::horizontal::fuse_sibling_seg_ops(inner, &oracle);
         }
         if !changed {
+            changed = super::fusion::vertical::fuse_producer_into_consumer(inner, &oracle);
+        }
+        if !changed {
             break;
         }
     }
@@ -40,6 +43,11 @@ pub fn run(inner: &mut EgirInner) {
     super::parallelize::rebuild_semantic_dependencies(inner);
     let mut seen = HashSet::new();
     inner.semantic_dependencies.retain(|dependency| seen.insert(dependency.clone()));
+    if cfg!(debug_assertions) {
+        if let Err(error) = super::parallelize::verify_semantic(inner) {
+            panic!("semantic optimization produced invalid EGIR: {error}");
+        }
+    }
 }
 
 fn canonicalize_resource_accesses(graph: &mut EGraph) {
@@ -82,29 +90,37 @@ fn eliminate_dead_seg_ops(inner: &mut EgirInner) -> bool {
     changed
 }
 
-fn eliminate_dead_seg_ops_in_graph(graph: &mut EGraph) -> bool {
+pub(super) fn eliminate_dead_seg_ops_in_graph(graph: &mut EGraph) -> bool {
+    // Live values are those reachable from an observable root.  Looking at
+    // children of every interned node is too conservative: dead Project nodes
+    // remain in an e-graph and would otherwise keep their producer alive.
     let mut used = HashSet::<NodeId>::new();
-    for (_, node) in &graph.nodes {
-        used.extend(node.children());
-    }
+    let mut stack = Vec::<NodeId>::new();
     for (_, block) in &graph.skeleton.blocks {
         for effect in &block.side_effects {
-            used.extend(effect.referenced_nodes());
+            stack.extend(effect.referenced_nodes());
         }
         match &block.term {
-            SkeletonTerminator::Return(value) => used.extend(value.iter().copied()),
-            SkeletonTerminator::Branch { args, .. } => used.extend(args.iter().copied()),
+            SkeletonTerminator::Return(value) => stack.extend(value.iter().copied()),
+            SkeletonTerminator::Branch { args, .. } => stack.extend(args.iter().copied()),
             SkeletonTerminator::CondBranch {
                 cond,
                 then_args,
                 else_args,
                 ..
             } => {
-                used.insert(*cond);
-                used.extend(then_args.iter().copied());
-                used.extend(else_args.iter().copied());
+                stack.push(*cond);
+                stack.extend(then_args.iter().copied());
+                stack.extend(else_args.iter().copied());
             }
             SkeletonTerminator::Unreachable => {}
+        }
+    }
+    while let Some(node) = stack.pop() {
+        if used.insert(node) {
+            if let Some(definition) = graph.nodes.get(node) {
+                stack.extend(definition.children());
+            }
         }
     }
     let mut changed = false;
@@ -134,4 +150,51 @@ fn eliminate_dead_seg_ops_in_graph(graph: &mut EGraph) -> bool {
         changed |= block.side_effects.len() != before;
     }
     changed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::TypeName;
+    use crate::egir::types::{
+        EgirSoac, PureOp, SegLevel, SegOpKind, SegPlacement, SegSpace, SideEffect, SoacDestination,
+    };
+    use polytype::Type;
+    use smallvec::smallvec;
+
+    #[test]
+    fn unreachable_project_does_not_keep_dead_segop_alive() {
+        let mut graph = EGraph::new();
+        let int = Type::Constructed(TypeName::Int(32), vec![]);
+        let tuple = Type::Constructed(TypeName::Tuple(1), vec![int.clone()]);
+        let result = graph.alloc_side_effect_result(tuple);
+        let _dead_project = graph.intern_pure(PureOp::Project { index: 0 }, smallvec![result], int.clone());
+        graph.skeleton.blocks[graph.skeleton.entry].side_effects.push(SideEffect {
+            kind: SideEffectKind::Soac(EgirSoac::Seg {
+                space: SegSpace {
+                    level: SegLevel::Thread,
+                    dims: vec![crate::egir::types::SegExtent::Fixed(1)],
+                },
+                placement: SegPlacement::LaneLocal,
+                kind: SegOpKind::SegMap,
+                map_bodies: vec![],
+                input_array_types: vec![],
+                input_elem_types: vec![],
+                map_output_elem_types: vec![int],
+                map_input_indices: vec![],
+                map_destinations: vec![SoacDestination::Fresh],
+                acc_destinations: vec![],
+                result_types: vec![],
+                output_slots: vec![],
+                resources: vec![],
+                scratch_resources: vec![],
+            }),
+            operand_nodes: smallvec![],
+            result: Some(result),
+            effects: None,
+            span: None,
+        });
+        assert!(eliminate_dead_seg_ops_in_graph(&mut graph));
+        assert!(graph.skeleton.blocks[graph.skeleton.entry].side_effects.is_empty());
+    }
 }

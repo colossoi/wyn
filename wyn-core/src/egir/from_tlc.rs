@@ -1948,6 +1948,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                         region: self.region(op_name),
                         captures: vec![],
                     },
+                    input_indices: vec![0],
                 }],
                 input_array_types: vec![arr_ty],
                 input_elem_types: vec![elem_ty],
@@ -2044,6 +2045,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                     region: self.region(reduce_op_func),
                     captures: reduce_op_caps,
                 },
+                input_indices: vec![],
             });
             acc_init_nids.push(init_nid);
         }
@@ -2161,6 +2163,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                         region: self.region(reduce_name),
                         captures: vec![],
                     },
+                    input_indices: vec![0],
                 }],
                 input_array_types: vec![arr_ty],
                 input_elem_types: vec![input_elem_ty],
@@ -2250,6 +2253,8 @@ impl<'a, 'b> Converter<'a, 'b> {
                     destination,
                     scratch_out: None,
                     len_out: None,
+                    work_buffers: None,
+                    phase: super::types::FilterPhase::Semantic,
                 },
                 operands,
                 bounded_result_ty,
@@ -2314,6 +2319,8 @@ impl<'a, 'b> Converter<'a, 'b> {
                 // Set by `realize_outputs` only when this filter is a compute
                 // entry's output (it then needs a host-readable length cell).
                 len_out: None,
+                work_buffers: None,
+                phase: super::types::FilterPhase::Semantic,
             },
             operands,
             view_result_ty,

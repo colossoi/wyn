@@ -126,8 +126,8 @@ Each notes how it's enforced; when you move a pass, check it here.
 | **EgirRaw** | `egir::from_tlc` | TLC → EGraph; intrinsic calls become pure nodes (with explicit arms for effectful ones). Per-slot output writes are bridged back into a tail tuple so the next stage can retarget per slot |
 | **EgirOutputsRealized** | `egir::realize_outputs` | Per-slot output realization: each declared output's writes are materialized as side effects against the bound storage view (compute) or `OutputSlot` place (graphics); the body's `Return` carries no value. The post-pass verifier checks no runtime-sized Composite array is reachable from any entry output |
 | **EgirSegmented** | `egir::parallelize::reify` | Every reachable Screma becomes a semantic SegMap/SegRed/SegScan with authoritative SegSpace, typed bodies, explicit captures, output routing, effects, placement, and dependencies. No phases are selected here |
-| **EgirOptimized** | `egir::semantic_opt` | Target-independent semantic cleanup; SegOps remain intact |
-| **EgirAllocated** | `egir::program` | Plans logical resources without publishing a descriptor or choosing target phases |
+| **EgirOptimized** | `egir::semantic_opt`, `egir::fusion` | Conflict-aware same-space sibling fusion, single-consumer producer/consumer region composition, and dead-SegOp elimination; SegOps remain semantic |
+| **EgirAllocated** | `egir::program`, `egir::multi_consumer` | Owns the authoritative host/compiler resource manifest. Scalar handoffs, reduce/scan/filter scratch, and shared multi-consumer array materializations have `ResourceId`s; physical publication still waits for terminal lowering |
 | **SsaConverted** | `egir::target_lowering` | `lower_to_ssa(LoweringProfile)` transactionally chooses algorithms, scratch, bindings, domains, KernelSchedule, and the final descriptor, then expands SegOps to SSA |
 
 ### SSA (codegen only)

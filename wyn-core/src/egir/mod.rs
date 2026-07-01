@@ -16,6 +16,7 @@ mod extract;
 mod fold;
 mod loop_analysis;
 pub(crate) mod materialize;
+pub(crate) mod multi_consumer;
 pub mod program;
 pub mod publish;
 pub mod rewrite;
@@ -35,4 +36,4 @@ pub(crate) mod target_lowering;
 pub mod verify_no_abstract;
 
 #[cfg(test)]
-mod semantic_exec;
+pub(crate) mod semantic_exec;

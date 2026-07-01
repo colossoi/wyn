@@ -180,6 +180,9 @@ pub struct ScremaOperator {
     pub kind: ScremaAccumulator,
     pub step: SegBody,
     pub combine: SegBody,
+    /// Input-array positions consumed by `step`, after its accumulator.
+    /// Empty on legacy construction means every Screma input.
+    pub input_indices: Vec<usize>,
 }
 
 /// Execution level of a `Seg` op. wyn currently only emits thread-level
@@ -263,6 +266,8 @@ pub struct SegBinOp {
     pub kind: ScremaAccumulator,
     pub step: SegBody,
     pub combine: SegBody,
+    /// Input-array positions consumed by the per-element step body.
+    pub input_indices: Vec<usize>,
     /// Neutral value for this operator, interned in the surrounding EGraph.
     pub neutral: NodeId,
     /// Logical vectorized-operator dimensions. Empty for today's scalar and
@@ -294,6 +299,22 @@ pub enum SegOpKind {
     SegComposite {
         operators: Vec<SegBinOp>,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FilterWorkBuffers {
+    pub flags: crate::BindingRef,
+    pub offsets: crate::BindingRef,
+}
+
+/// Runtime filter algorithm selected only at terminal lowering. Semantic EGIR
+/// remains `Semantic`; the target scheduler clones it into these three phases.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FilterPhase {
+    Semantic,
+    Flags,
+    Scan,
+    Scatter,
 }
 
 /// An unexpanded SOAC operation held in the skeleton until `soac_expand` rewrites
@@ -366,6 +387,10 @@ pub enum EgirSoac {
         /// output. `None` when the count flows only as the result view's `len`
         /// operand (in-kernel consumers like `reduce` / `length`).
         len_out: Option<crate::BindingRef>,
+        /// u32 keep flags and inclusive offsets, reserved by logical
+        /// allocation and consumed by terminal filter scheduling.
+        work_buffers: Option<FilterWorkBuffers>,
+        phase: FilterPhase,
     },
     /// `scatter`: over the parallel `input` arrays, the lifted `func` yields an
     /// `(index, value)` pair per element, written as `dest[index] = value`;

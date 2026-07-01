@@ -316,6 +316,7 @@ fn rewrite_sibling_index_consumers_rejects_screma_init_acc_position() {
                     region: RegionId::from_index(1),
                     captures: vec![],
                 },
+                input_indices: vec![0],
             }],
             input_array_types: vec![arr_ty.clone()],
             input_elem_types: vec![elem.clone()],

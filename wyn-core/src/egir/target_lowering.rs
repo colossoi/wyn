@@ -6,7 +6,7 @@
 
 use super::from_tlc::ConvertError;
 use super::parallelize;
-use super::program::{plan_logical_resources, EgirInner};
+use super::program::{refresh_logical_resources, EgirInner};
 use super::publish::PipelineDescriptorPublish;
 use crate::{IdSource, LoweringProfile, SchedulePolicy};
 
@@ -29,13 +29,18 @@ pub fn schedule(
         parallelize::lower(inner);
     } else {
         parallelize::restore_all_serial(inner);
-        inner.kernel_schedule =
+        let mut schedule =
             parallelize::schedule::KernelSchedule::seed(&inner.pipeline, &inner.entry_points);
+        parallelize::attach_materialization_prepasses(inner, &mut schedule);
+        schedule.reconcile_entries(&inner.entry_points);
+        schedule.coalesce_compiler_dependencies(&inner.entry_points);
+        inner.kernel_schedule = schedule;
     }
     // Re-mirror after lowering (split clones / phase entries added new host and
     // intermediate storage); the parallel SegRed/SegScan ops are gone, so no
     // further scratch is drawn here.
-    plan_logical_resources(inner, binding_ids);
+    let _ = binding_ids;
+    refresh_logical_resources(inner);
 
     let mut descriptor = unpublished_descriptor;
     inner.kernel_schedule.install_phase_shells(&mut descriptor).map_err(ConvertError::Internal)?;

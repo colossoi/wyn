@@ -15,7 +15,7 @@ pub struct SemanticGraph {
     index: HashMap<SemanticOpId, usize>,
     /// Value successors (consumers that read the producer's result).
     value_succ: Vec<Vec<usize>>,
-    /// Unordered resource-conflict pairs, stored both ways.
+    /// Unordered resource/effect reordering conflicts, stored both ways.
     conflict: HashSet<(usize, usize)>,
 }
 
@@ -38,12 +38,11 @@ impl SemanticGraph {
             let c = intern(&dep.consumer);
             match dep.kind {
                 SemanticDependencyKind::Value => value_pairs.push((p, c)),
-                // Effect edges are program *ordering*, not aliasing and not a
-                // value chain. Two effect-adjacent ops that touch no common
-                // binding may be fused (the fused op performs both effects in
-                // order), so effects gate neither conflict nor reachability.
-                SemanticDependencyKind::Effect => {}
-                SemanticDependencyKind::Resource => {
+                // Both explicit effect ordering and resource aliasing prohibit
+                // moving another operation across this edge.  A directly
+                // adjacent pair may still be fused in source order; callers use
+                // this relation for the operations *between* that pair.
+                SemanticDependencyKind::Effect | SemanticDependencyKind::Resource => {
                     conflict.insert((p, c));
                     conflict.insert((c, p));
                 }
@@ -63,10 +62,9 @@ impl SemanticGraph {
         }
     }
 
-    /// Two ops conflict if they share a binding with a non-Read access (a
-    /// `Resource` edge) — i.e. they alias. Fusing across a resource conflict is
-    /// never legal. Effect *ordering* alone is not a conflict. An op with no
-    /// edges conflicts with nothing.
+    /// Resource and Effect edges are both reordering conflicts. A caller may
+    /// still combine a directly adjacent pair while preserving source order,
+    /// but cannot move either operation across such an edge.
     pub fn conflicts(&self, a: &SemanticOpId, b: &SemanticOpId) -> bool {
         match (self.index.get(a), self.index.get(b)) {
             (Some(&i), Some(&j)) => self.conflict.contains(&(i, j)),
@@ -92,6 +90,13 @@ impl SemanticGraph {
             }
         }
         false
+    }
+
+    /// Number of semantic operations that directly consume `producer`'s
+    /// result.  Multiple uses inside one consumer count once because the DAG is
+    /// operation-granular.
+    pub fn value_consumer_count(&self, producer: &SemanticOpId) -> usize {
+        self.index.get(producer).map(|&index| self.value_succ[index].len()).unwrap_or(0)
     }
 }
 

@@ -179,6 +179,7 @@ impl EntryBuilder {
                         region,
                         captures: vec![],
                     },
+                    input_indices: vec![0],
                 }],
                 input_array_types: vec![input_array_ty],
                 input_elem_types: vec![input_elem_ty],

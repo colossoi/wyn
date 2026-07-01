@@ -94,6 +94,12 @@ impl KernelSchedule {
         self.pipelines.iter().flat_map(|pipeline| pipeline.phases.iter())
     }
 
+    pub fn contains_entry(&self, entry_point: &str) -> bool {
+        self.pipelines
+            .iter()
+            .any(|pipeline| pipeline.phases.iter().any(|phase| phase.entry_point == entry_point))
+    }
+
     /// Seed a schedule from the source-level descriptor.  At this point every
     /// compute pipeline contains its original entry stage; later lowerings add
     /// phases to this graph without touching the descriptor.
@@ -148,6 +154,40 @@ impl KernelSchedule {
         pipeline.phases.push(phase);
     }
 
+    /// Insert a compiler-generated producer immediately before `consumer` and
+    /// make the consumer depend on it. Existing dependency indices are shifted
+    /// transactionally with the insertion.
+    pub fn add_phase_before(&mut self, consumer: &str, entry: &EgirEntry, domain: KernelDomain) {
+        let pipeline = self
+            .pipelines
+            .iter_mut()
+            .find(|pipeline| pipeline.phases.iter().any(|phase| phase.entry_point == consumer))
+            .unwrap_or_else(|| {
+                panic!("no scheduled compute pipeline contains consumer entry `{consumer}`")
+            });
+        let consumer_index = pipeline
+            .phases
+            .iter()
+            .position(|phase| phase.entry_point == consumer)
+            .expect("consumer was found above");
+        let inherited_dependencies = pipeline.phases[consumer_index].dependencies.clone();
+        for phase in &mut pipeline.phases {
+            for dependency in &mut phase.dependencies {
+                if *dependency >= consumer_index {
+                    *dependency += 1;
+                }
+            }
+        }
+        let mut producer = phase_from_entry(entry, domain);
+        producer.dependencies = inherited_dependencies;
+        pipeline.phases.insert(consumer_index, producer);
+        let consumer_phase = &mut pipeline.phases[consumer_index + 1];
+        if !consumer_phase.dependencies.contains(&consumer_index) {
+            consumer_phase.dependencies.push(consumer_index);
+            consumer_phase.dependencies.sort_unstable();
+        }
+    }
+
     /// Add an independent sibling kernel to the same host pipeline. This is
     /// used for distinct output domains: source order is retained by the
     /// published phase list, but no data dependency is fabricated.
@@ -183,7 +223,24 @@ impl KernelSchedule {
                 if let Some(domain) = segmented_domain(entry) {
                     phase.domain = domain;
                 }
-                phase.resources = entry_resources(entry);
+                let filter_phase = entry.graph.skeleton.blocks.iter().any(|(_, block)| {
+                    block.side_effects.iter().any(|effect| {
+                        matches!(
+                            effect.kind,
+                            SideEffectKind::Soac(EgirSoac::Filter {
+                                phase: crate::egir::types::FilterPhase::Flags
+                                    | crate::egir::types::FilterPhase::Scan
+                                    | crate::egir::types::FilterPhase::Scatter,
+                                ..
+                            })
+                        )
+                    })
+                });
+                phase.resources = if filter_phase || entry.name.contains("_materialize_shared") {
+                    segmented_resources(entry).unwrap_or_else(|| entry_resources(entry))
+                } else {
+                    entry_resources(entry)
+                };
             }
         }
     }
@@ -427,6 +484,61 @@ fn phase_from_entry(entry: &EgirEntry, fallback: KernelDomain) -> KernelPhase {
 fn segmented_resources(entry: &EgirEntry) -> Option<Vec<ScheduledResource>> {
     for (_, block) in &entry.graph.skeleton.blocks {
         for side_effect in &block.side_effects {
+            if let SideEffectKind::Soac(EgirSoac::Filter {
+                phase,
+                scratch_out,
+                len_out,
+                work_buffers: Some(work),
+                ..
+            }) = &side_effect.kind
+            {
+                let mut resources = Vec::new();
+                let mut push = |binding: BindingRef, access: ResourceAccess| {
+                    if let Some(existing) = resources
+                        .iter_mut()
+                        .find(|resource: &&mut ScheduledResource| resource.binding == binding)
+                    {
+                        existing.access = existing.access.merge(access);
+                    } else {
+                        resources.push(ScheduledResource { binding, access });
+                    }
+                };
+                match phase {
+                    crate::egir::types::FilterPhase::Flags => {
+                        for input in &entry.inputs {
+                            if let Some(binding) = input.storage_binding.or(input.uniform_binding) {
+                                push(binding, ResourceAccess::Read);
+                            }
+                        }
+                        push(work.flags, ResourceAccess::Write);
+                    }
+                    crate::egir::types::FilterPhase::Scan => {
+                        push(work.flags, ResourceAccess::Read);
+                        push(work.offsets, ResourceAccess::Write);
+                        if let Some(binding) = len_out {
+                            push(*binding, ResourceAccess::Write);
+                        }
+                    }
+                    crate::egir::types::FilterPhase::Scatter => {
+                        for input in &entry.inputs {
+                            if let Some(binding) = input.storage_binding.or(input.uniform_binding) {
+                                push(binding, ResourceAccess::Read);
+                            }
+                        }
+                        push(work.flags, ResourceAccess::Read);
+                        push(work.offsets, ResourceAccess::Read);
+                        if let Some(binding) = len_out {
+                            push(*binding, ResourceAccess::Read);
+                        }
+                        if let Some(binding) = scratch_out {
+                            push(*binding, ResourceAccess::Write);
+                        }
+                    }
+                    crate::egir::types::FilterPhase::Semantic => continue,
+                }
+                resources.sort_by_key(|resource| (resource.binding.set, resource.binding.binding));
+                return Some(resources);
+            }
             let SideEffectKind::Soac(EgirSoac::Seg {
                 placement: SegPlacement::Kernel,
                 resources,
@@ -470,21 +582,25 @@ fn domain_from_dispatch(dispatch: &DispatchSize) -> KernelDomain {
 fn segmented_domain(entry: &EgirEntry) -> Option<KernelDomain> {
     for (_, block) in &entry.graph.skeleton.blocks {
         for side_effect in &block.side_effects {
-            let SideEffectKind::Soac(EgirSoac::Seg {
-                space,
-                placement: SegPlacement::Kernel,
-                ..
-            }) = &side_effect.kind
-            else {
-                continue;
-            };
-            return domain_from_space(space);
+            match &side_effect.kind {
+                SideEffectKind::Soac(EgirSoac::Seg {
+                    space,
+                    placement: SegPlacement::Kernel,
+                    ..
+                }) => return domain_from_space(space),
+                SideEffectKind::Soac(EgirSoac::Filter {
+                    space: Some(space),
+                    phase: crate::egir::types::FilterPhase::Flags | crate::egir::types::FilterPhase::Scatter,
+                    ..
+                }) => return domain_from_space(space),
+                _ => {}
+            }
         }
     }
     None
 }
 
-fn domain_from_space(space: &crate::egir::types::SegSpace) -> Option<KernelDomain> {
+pub(crate) fn domain_from_space(space: &crate::egir::types::SegSpace) -> Option<KernelDomain> {
     if space.dims.iter().all(|extent| matches!(extent, SegExtent::Fixed(_))) {
         let count = space.dims.iter().try_fold(1u32, |product, extent| match extent {
             SegExtent::Fixed(n) => product.checked_mul(*n),
