@@ -33,9 +33,6 @@ pub fn run(inner: &mut EgirInner) {
             changed = super::fusion::horizontal::fuse_sibling_seg_ops(inner, &oracle);
         }
         if !changed {
-            changed = super::fusion::vertical::fuse_producer_into_consumer(inner, &oracle);
-        }
-        if !changed {
             break;
         }
     }

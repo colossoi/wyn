@@ -47,10 +47,6 @@ fn oracle_distinguishes_conflict_flow_and_value_edges() {
         "a value edge alone is fusable, not a conflict"
     );
 
-    // Value consumers come only from Value edges.
-    assert_eq!(g.value_consumer_count(&a), 1);
-    assert_eq!(g.value_consumer_count(&b), 0);
-
     // Reachability follows value edges only — not effect ordering or resource.
     assert!(g.reachable_between(&a, &c), "a --Value--> c");
     assert!(
@@ -72,6 +68,5 @@ fn unknown_ops_have_no_edges() {
     let lonely = op("e", r2);
     let g = SemanticGraph::new(&[dep(&a, &a, SemanticDependencyKind::Value)]);
     assert!(!g.conflicts(&lonely, &a));
-    assert_eq!(g.value_consumer_count(&lonely), 0);
     assert!(!g.reachable_between(&lonely, &a));
 }

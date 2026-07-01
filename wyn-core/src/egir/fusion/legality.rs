@@ -74,11 +74,6 @@ impl SemanticGraph {
         }
     }
 
-    /// Number of value consumers of `producer` (cheaper than `value_consumers`).
-    pub fn value_consumer_count(&self, producer: &SemanticOpId) -> usize {
-        self.index.get(producer).map_or(0, |&i| self.value_succ[i].len())
-    }
-
     /// True iff `b` is transitively reachable from `a` along *value* edges —
     /// i.e. `a`'s result flows (directly or indirectly) into `b`, making them a
     /// producer/consumer chain rather than fusable siblings.

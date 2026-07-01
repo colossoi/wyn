@@ -97,13 +97,6 @@ fn sibling_fusable(
     if pl_i != pl_j || !seg_space_fusable(sp_i, sp_j) {
         return false;
     }
-    // Fusing performs P's effects then Q's, in order, so a P–Q resource conflict
-    // (e.g. both writing fields of one aggregate output) is *not* blocking. What
-    // would be unsafe is moving Q up past an intervening effectful op that
-    // aliases it, so require no effectful side-effect strictly between them.
-    if ((i + 1)..j).any(|k| block.side_effects[k].effects.is_some()) {
-        return false;
-    }
     let op_i = SemanticOpId {
         scope: scope.to_string(),
         result: res_i,
@@ -112,9 +105,30 @@ fn sibling_fusable(
         scope: scope.to_string(),
         result: res_j,
     };
-    // A value edge either way makes them a producer/consumer chain, which is
-    // vertical fusion's job, not horizontal.
-    !oracle.reachable_between(&op_i, &op_j) && !oracle.reachable_between(&op_j, &op_i)
+    // A value edge either way makes them a producer/consumer chain (fused at the
+    // TLC level), never fusable siblings.
+    if oracle.reachable_between(&op_i, &op_j) || oracle.reachable_between(&op_j, &op_i) {
+        return false;
+    }
+    // Fusing performs P's effects then Q's, in order, so a P–Q resource conflict
+    // (e.g. both writing fields of one aggregate output) is *not* blocking.
+    // Moving Q up past an *intervening* op is, though, if that op aliases P or Q:
+    // require every op strictly between them to be conflict-free. A non-Seg
+    // effectful op (not summarized in the DAG) is treated conservatively as a
+    // possible aliaser.
+    ((i + 1)..j).all(|k| {
+        let effect = &block.side_effects[k];
+        match (&effect.kind, effect.result) {
+            (SideEffectKind::Soac(EgirSoac::Seg { .. }), Some(result)) => {
+                let op_k = SemanticOpId {
+                    scope: scope.to_string(),
+                    result,
+                };
+                !oracle.conflicts(&op_k, &op_i) && !oracle.conflicts(&op_k, &op_j)
+            }
+            _ => effect.effects.is_none(),
+        }
+    })
 }
 
 /// Merge the Seg at `j` into the Seg at `i`, remove `j`, and rewire results.
