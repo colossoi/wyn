@@ -971,14 +971,26 @@ fn generate_per_type_ops() -> Vec<BuiltinDefRaw> {
                 L(FPToUI),
             ));
         }
-        defs.push(intrinsic_only(
-            leak_str(format!("_w_intrinsic_{}_from_bits", ty)),
-            L(Bitcast),
-        ));
-        defs.push(intrinsic_only(
-            leak_str(format!("_w_intrinsic_{}_to_bits", ty)),
-            L(Bitcast),
-        ));
+        // Bit reinterpretation to/from the same-width integer. Published
+        // under the member names so call sites lower directly (the module
+        // defs `f32.from_bits`/`f32.to_bits` are sig-only to the backend,
+        // like the other per-type conversions); schemes come from the
+        // prelude module signatures.
+        for member in ["from_bits", "to_bits"] {
+            let surface = leak_str(format!("{}.{}", ty, member));
+            let internal = leak_str(format!("_w_intrinsic_{}_{}", ty, member));
+            defs.push(BuiltinDefRaw {
+                surface_name: surface,
+                intrinsic_source_names: &[],
+                impl_source_names: leak_two(surface, internal),
+                kind: BuiltinKind::ModuleBuiltin,
+                purity: Purity::Pure,
+                overloads: Box::leak(Box::new([BuiltinOverload {
+                    scheme: None,
+                    lowering: L(Bitcast),
+                }])),
+            });
+        }
     }
 
     defs

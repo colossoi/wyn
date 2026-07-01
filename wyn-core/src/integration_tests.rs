@@ -8260,3 +8260,25 @@ fn local_import_parses_per_spec() {
     "#;
     compile_to_ssa(src);
 }
+
+/// `f32.from_bits` / `f32.to_bits` are per-type members whose schemes
+/// come from the prelude `float` signature but whose lowering must be
+/// published in the builtin catalog under the member names — the module
+/// defs are sig-only to the backend, like the other per-type
+/// conversions. Surfaced by `prelude/math.wyn`'s `fastmath.sqrt`
+/// (exponent-halving bit trick): without catalog entries the call
+/// survives to SPIR-V lowering and fails with "Unknown function:
+/// f32.to_bits".
+#[test]
+fn f32_bit_reinterpret_members_lower_through_spirv() {
+    crate::compile_thru_spirv(
+        r#"
+def fsqrt(x: f32) f32 =
+  f32.from_bits(0x1fbd1df5u32 + (f32.to_bits(x) >> 1u32))
+
+#[compute]
+entry e() [1]f32 = [fsqrt(4.0f32)]
+"#,
+    )
+    .expect("f32.from_bits/to_bits should lower to OpBitcast");
+}
