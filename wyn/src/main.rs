@@ -47,9 +47,11 @@ enum Commands {
         #[arg(value_name = "FILE", required = true)]
         inputs: Vec<PathBuf>,
 
-        /// Output file (only valid with a single input; multi-input
-        /// runs auto-derive each output's name from its input).
-        #[arg(short, long, value_name = "FILE")]
+        /// Output file, or an existing directory to write
+        /// <input-stem>.<ext> into. Omitted: each output is written
+        /// next to its input. A non-directory path is only valid with
+        /// a single input.
+        #[arg(short, long, value_name = "FILE|DIR")]
         output: Option<PathBuf>,
 
         /// Target output format
@@ -158,36 +160,33 @@ fn run(cli: Cli) -> Result<(), DriverError> {
             fill_holes,
             verbose,
         } => {
-            // Output handling for multi-input:
-            //   omitted     → each output written next to its input
-            //   directory   → DIR/<input-stem>.<ext> per file
-            //   regular file → only valid with a single input
-            let out_dir: Option<PathBuf> = match (inputs.len(), &output) {
-                (n, Some(p)) if n > 1 => {
-                    if p.is_dir() {
-                        Some(p.clone())
-                    } else {
-                        eprintln!(
-                            "error: --output must be an existing directory when compiling multiple files (got {})",
-                            p.display()
-                        );
-                        std::process::exit(1);
-                    }
+            // Output handling:
+            //   omitted            → each output written next to its input
+            //   existing directory → DIR/<input-stem>.<ext> per file
+            //   regular file path  → only valid with a single input
+            let out_dir: Option<PathBuf> = match &output {
+                Some(p) if p.is_dir() => Some(p.clone()),
+                Some(p) if inputs.len() > 1 => {
+                    eprintln!(
+                        "error: --output must be an existing directory when compiling multiple files (got {})",
+                        p.display()
+                    );
+                    std::process::exit(1);
                 }
                 _ => None,
             };
             for (i, input) in inputs.iter().enumerate() {
-                let per_output = match (inputs.len(), &out_dir, &output) {
-                    (1, _, opt) => opt.clone(),
-                    (_, Some(dir), _) => {
-                        let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
-                        let ext = match target {
-                            Target::Spirv => "spv",
-                            Target::Wgsl => "wgsl",
-                        };
-                        Some(dir.join(format!("{stem}.{ext}")))
-                    }
-                    _ => None,
+                let per_output = if let Some(dir) = &out_dir {
+                    let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
+                    let ext = match target {
+                        Target::Spirv => "spv",
+                        Target::Wgsl => "wgsl",
+                    };
+                    Some(dir.join(format!("{stem}.{ext}")))
+                } else if inputs.len() == 1 {
+                    output.clone()
+                } else {
+                    None
                 };
                 if verbose && inputs.len() > 1 {
                     eprintln!("[{}/{}] {}", i + 1, inputs.len(), input.display());

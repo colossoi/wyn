@@ -1153,13 +1153,12 @@ fn find_map_group_plan(
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
 ) -> Option<FusionPlan> {
-    // Self-documenting declines: a `debug_assertions`-only trace of *why* this
-    // builder turns an edge down, so a "didn't fuse" can be diagnosed from the
-    // reason rather than inferred from IR dumps.
+    // Self-documenting declines: a `log::debug!` trace of *why* this builder
+    // turns an edge down, so a "didn't fuse" can be diagnosed from the reason
+    // rather than inferred from IR dumps. Enable with RUST_LOG=debug.
     macro_rules! reject {
         ($($arg:tt)*) => {{
-            #[cfg(debug_assertions)]
-            eprintln!("fuse map-group decline (producer {:?}): {}", producer.symbol, format!($($arg)*));
+            log::debug!("fuse map-group decline (producer {:?}): {}", producer.symbol, format!($($arg)*));
             return None;
         }};
     }

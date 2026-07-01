@@ -73,9 +73,18 @@ cargo run --bin wyn -- check test.wyn
   `egir/from_tlc.rs`, `ssa/builder.rs`.
 
 ### Visualizing SPIR-V Output
+The viz runner lives in `extra/viz` and is driven by the pipeline descriptor
+JSON that `wyn compile` writes next to the `.spv` (a descriptor with a
+graphics pipeline opens an interactive window and feeds the Shadertoy-style
+uniforms; a compute-only descriptor runs headless with `--input`/`--output`):
 ```bash
-cd viz && cargo run vf ../complete_shader_example.spv --vertex vertex_main --fragment fragment_main
+cargo run --release --bin wyn -- compile testfiles/playground/one_weekend.wyn -o one_weekend.spv
+cd extra/viz && cargo run --release -- pipeline ../../one_weekend.spv
 ```
+`-p <desc.json>` overrides the descriptor path (default: the sibling
+`<name>.json`, i.e. the `.spv` path with its extension replaced).
+Other subcommands: `validate <shader.spv>` (headless naga validation),
+`info` (GPU/driver info), `testpattern` (built-in render sanity check).
 
 ### Minimizing a Failing Wyn Program (treereduce-wyn)
 
