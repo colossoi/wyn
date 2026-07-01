@@ -1,0 +1,366 @@
+-- "Ray Tracing in One Weekend" — the final render, in Wyn.
+-- https://raytracing.github.io/books/RayTracingInOneWeekend.html
+--
+-- A progressive path tracer with the book's full closing scene: a ground
+-- sphere, a 22x22 grid of small randomly-placed spheres (lambertian / metal /
+-- glass chosen by the book's probabilities), and the three hero spheres,
+-- rendered through a thin-lens camera with defocus blur.
+--
+-- Progressive accumulation: a `history = 1` resource double-buffers the
+-- running Monte-Carlo sum. Each frame a compute pass adds SPP_PER_FRAME fresh
+-- samples per pixel to the previous frame's sum (rgb = radiance sum,
+-- w = sample count) and the fragment pass just displays sum / count. The
+-- image sharpens over time and freezes once MAX_SPP samples have landed
+-- (set MAX_SPP = 0 to refine forever).
+--
+-- Wyn-isms vs. the C++ book:
+--   * No recursion: `ray_color` is a `loop` over bounces threading
+--     (origin, direction, attenuation, accumulated color, rng seed).
+--   * No mutable RNG: a u32 PCG seed is threaded through every draw as
+--     `(value, nextSeed)` tuples.
+--   * The 484 grid spheres are never stored: each cell's center and material
+--     are re-derived from a hash of its index, and the scene intersection is
+--     a data-parallel map over the grid + reduce to the closest hit.
+
+open f32
+
+------------------------------------------------------------
+-- Quality knobs
+------------------------------------------------------------
+def SPP_PER_FRAME: i32 = 5    -- fresh samples added per pixel per frame
+def MAX_SPP: i32 = 500        -- stop refining after this many (book: 500);
+                              -- 0 = accumulate indefinitely
+def MAX_BOUNCES: i32 = 8      -- path depth (book: 50)
+
+def EPS: f32 = 0.001
+def MAX_DIST: f32 = 10000.0
+def TWO_PI: f32 = 6.283185307179586
+
+-- Material kinds
+def MISS: i32 = 0 - 1
+def LAMBERT: i32 = 0
+def METAL: i32 = 1
+def DIELECTRIC: i32 = 2
+def IOR: f32 = 1.5
+
+------------------------------------------------------------
+-- Vertex shader: full-screen triangle
+------------------------------------------------------------
+def verts: [3]vec4f32 =
+  [@[-1.0, -1.0, 0.0, 1.0],
+   @[3.0, -1.0, 0.0, 1.0],
+   @[-1.0, 3.0, 0.0, 1.0]]
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 = verts[vertex_id]
+
+------------------------------------------------------------
+-- RNG: PCG hash, seed threaded through every draw
+------------------------------------------------------------
+
+def pcg(state: u32) u32 =
+  let s = state * 747796405u32 + 2891336453u32 in
+  let w = ((s >> ((s >> 28u32) + 4u32)) ^ s) * 277803737u32 in
+  (w >> 22u32) ^ w
+
+-- Uniform f32 in [0, 1) plus the advanced seed.
+def rnd(seed: u32) (f32, u32) =
+  let s = pcg(seed) in
+  (f32(s >> 8u32) * (1.0 / 16777216.0), s)
+
+def rnd3(seed: u32) (vec3f32, u32) =
+  let (x, s1) = rnd(seed) in
+  let (y, s2) = rnd(s1) in
+  let (z, s3) = rnd(s2) in
+  (@[x, y, z], s3)
+
+-- Uniform point on the unit sphere (drives lambertian scatter).
+def randUnitVec(seed: u32) (vec3f32, u32) =
+  let (u1, s1) = rnd(seed) in
+  let (u2, s2) = rnd(s1) in
+  let z = 1.0 - 2.0 * u1 in
+  let r = sqrt(max(0.0, 1.0 - z * z)) in
+  let phi = TWO_PI * u2 in
+  (@[r * cos(phi), r * sin(phi), z], s2)
+
+-- Uniform point inside the unit sphere (metal fuzz).
+def randInSphere(seed: u32) (vec3f32, u32) =
+  let (v, s1) = randUnitVec(seed) in
+  let (u1, s2) = rnd(s1) in
+  (v * (u1 ** (1.0 / 3.0)), s2)
+
+-- Uniform point on the unit disk (defocus blur).
+def randInDisk(seed: u32) (vec2f32, u32) =
+  let (u1, s1) = rnd(seed) in
+  let (u2, s2) = rnd(s1) in
+  let r = sqrt(u1) in
+  let th = TWO_PI * u2 in
+  (@[r * cos(th), r * sin(th)], s2)
+
+------------------------------------------------------------
+-- The book's scene.
+--
+-- Fixed spheres (SOA, like the book's world.add calls):
+--   ground, glass hero, brown lambertian hero, metal hero.
+------------------------------------------------------------
+
+def fixedCenters: [4]vec3f32 =
+  [@[0.0, -1000.0, 0.0],
+   @[0.0, 1.0, 0.0],
+   @[-4.0, 1.0, 0.0],
+   @[4.0, 1.0, 0.0]]
+
+def fixedRadii: [4]f32 = [1000.0, 1.0, 1.0, 1.0]
+def fixedKinds: [4]i32 = [0, 2, 0, 1]  -- lambert, glass, lambert, metal
+def fixedAlbedos: [4]vec3f32 =
+  [@[0.5, 0.5, 0.5],
+   @[1.0, 1.0, 1.0],
+   @[0.4, 0.2, 0.1],
+   @[0.7, 0.6, 0.5]]
+
+-- The 22x22 grid of little spheres, cell index i in 0 ..< 484.
+-- Center jitter and material are hashed from i, so the scene is identical
+-- every frame without storing 484 spheres.
+def GRID: i32 = 22
+def GRIDN: i32 = 484  -- GRID * GRID
+
+-- (center, radius); radius 0 marks the book's "skip if too close to the
+-- metal hero" placement rule.
+def cellSphere(i: i32) (vec3f32, f32) =
+  let a = f32(i / GRID - 11) in
+  let b = f32(i % GRID - 11) in
+  let s0 = pcg(u32(i) * 2654435761u32 + 1u32) in
+  let (ox, s1) = rnd(s0) in
+  let (oz, s2) = rnd(s1) in
+  let center = @[a + 0.9 * ox, 0.2, b + 0.9 * oz] in
+  let d = center - @[4.0, 0.2, 0.0] in
+  let radius = if dot(d, d) > 0.81 then 0.2 else 0.0 in
+  (center, radius)
+
+-- (kind, albedo, fuzz), with the book's probabilities:
+-- < 0.8 diffuse (albedo = random * random), < 0.95 metal, else glass.
+def cellMaterial(i: i32) (i32, vec3f32, f32) =
+  let s0 = pcg(u32(i) * 747796405u32 + 7u32) in
+  let (choose, s1) = rnd(s0) in
+  if choose < 0.8 then
+    let (c1, s2) = rnd3(s1) in
+    let (c2, s3) = rnd3(s2) in
+    (LAMBERT, c1 * c2, 0.0)
+  else if choose < 0.95 then
+    let (c1, s2) = rnd3(s1) in
+    let (fz, s3) = rnd(s2) in
+    (METAL, c1 * 0.5 + 0.5, fz * 0.5)
+  else
+    (DIELECTRIC, @[1.0, 1.0, 1.0], 0.0)
+
+------------------------------------------------------------
+-- Ray-sphere intersection (nearest positive root or -1)
+------------------------------------------------------------
+
+def intersectSphere(ro: vec3f32, rd: vec3f32, center: vec3f32, radius: f32) f32 =
+  let oc = ro - center in
+  let b = dot(oc, rd) in
+  let c = dot(oc, oc) - radius * radius in
+  let disc = b * b - c in
+  if disc < 0.0 then 0.0 - 1.0
+  else
+    let sq = sqrt(disc) in
+    let t1 = 0.0 - b - sq in
+    let t2 = 0.0 - b + sq in
+    if t1 > EPS then t1
+    else if t2 > EPS then t2
+    else 0.0 - 1.0
+
+------------------------------------------------------------
+-- Scene intersection: data-parallel over the grid + the four fixed spheres
+------------------------------------------------------------
+
+-- Closest grid hit as (t, cellIndex).
+def intersectGrid(ro: vec3f32, rd: vec3f32) (f32, i32) =
+  let hits =
+    map(|i: i32|
+          let (c, r) = cellSphere(i) in
+          let t = if r > 0.0 then intersectSphere(ro, rd, c, r) else 0.0 - 1.0 in
+          (if t > 0.0 then t else MAX_DIST, i),
+        0i32 ..< GRIDN) in
+  reduce(|(t1, i1): (f32, i32), (t2, i2): (f32, i32)|
+           if t1 < t2 then (t1, i1) else (t2, i2),
+         (MAX_DIST, 0 - 1),
+         hits)
+
+-- Closest fixed-sphere hit as (t, sphereIndex).
+def intersectFixed(ro: vec3f32, rd: vec3f32) (f32, i32) =
+  let hits =
+    map(|k: i32|
+          let t = intersectSphere(ro, rd, fixedCenters[k], fixedRadii[k]) in
+          (if t > 0.0 then t else MAX_DIST, k),
+        0i32 ..< 4) in
+  reduce(|(t1, i1): (f32, i32), (t2, i2): (f32, i32)|
+           if t1 < t2 then (t1, i1) else (t2, i2),
+         (MAX_DIST, 0 - 1),
+         hits)
+
+-- Full hit record: (t, outwardNormal, kind, albedo, fuzz). kind == MISS on no hit.
+def intersectScene(ro: vec3f32, rd: vec3f32) (f32, vec3f32, i32, vec3f32, f32) =
+  let (tg, gi) = intersectGrid(ro, rd) in
+  let (tf, fi) = intersectFixed(ro, rd) in
+  if tg < tf then
+    let (c, r) = cellSphere(gi) in
+    let (kind, alb, fz) = cellMaterial(gi) in
+    let n = (ro + rd * tg - c) * (1.0 / r) in
+    (tg, n, kind, alb, fz)
+  else if tf < MAX_DIST then
+    let c = fixedCenters[fi] in
+    let n = (ro + rd * tf - c) * (1.0 / fixedRadii[fi]) in
+    (tf, n, fixedKinds[fi], fixedAlbedos[fi], 0.0)
+  else
+    (MAX_DIST, @[0.0, 1.0, 0.0], MISS, @[0.0, 0.0, 0.0], 0.0)
+
+------------------------------------------------------------
+-- Materials
+------------------------------------------------------------
+
+def schlick(cosine: f32, ratio: f32) f32 =
+  let r0 = (1.0 - ratio) / (1.0 + ratio) in
+  let r02 = r0 * r0 in
+  r02 + (1.0 - r02) * ((1.0 - cosine) ** 5)
+
+------------------------------------------------------------
+-- ray_color as an iterative bounce loop.
+-- State: (origin, direction, attenuation, color, seed, bounce);
+-- setting bounce = MAX_BOUNCES exits (miss or absorbed ray).
+------------------------------------------------------------
+
+def rayColor(ro0: vec3f32, rd0: vec3f32, seed0: u32) (vec3f32, u32) =
+  let res =
+    loop (ro, rd, atten, col, seed, bounce) =
+         (ro0, rd0, @[1.0, 1.0, 1.0], @[0.0, 0.0, 0.0], seed0, 0)
+    while bounce < MAX_BOUNCES do
+      let (t, nOut, kind, alb, fuzz) = intersectScene(ro, rd) in
+      if kind == MISS then
+        -- The book's white-to-blue vertical sky gradient.
+        let ud = normalize(rd) in
+        let a = 0.5 * (ud.y + 1.0) in
+        let sky = mix(@[1.0, 1.0, 1.0], @[0.5, 0.7, 1.0], a) in
+        (ro, rd, atten, col + atten * sky, seed, MAX_BOUNCES)
+      else
+        let p = ro + rd * t in
+        let frontFace = dot(rd, nOut) < 0.0 in
+        let n = if frontFace then nOut else -nOut in
+        if kind == LAMBERT then
+          -- Scatter along normal + random unit vector (degenerate sum -> normal).
+          let (uv, s1) = randUnitVec(seed) in
+          let sd0 = n + uv in
+          let sd = if dot(sd0, sd0) < 1.0e-8 then n else normalize(sd0) in
+          (p + n * EPS, sd, atten * alb, col, s1, bounce + 1)
+        else if kind == METAL then
+          let refl = reflect(normalize(rd), n) in
+          let (us, s1) = randInSphere(seed) in
+          let sd = refl + us * fuzz in
+          if dot(sd, n) > 0.0 then
+            (p + n * EPS, normalize(sd), atten * alb, col, s1, bounce + 1)
+          else
+            -- Fuzzed ray dipped below the surface: absorbed.
+            (p, rd, atten, col, s1, MAX_BOUNCES)
+        else
+          -- Dielectric: refract when Snell allows and Schlick says transmit.
+          let ratio = if frontFace then 1.0 / IOR else IOR in
+          let ud = normalize(rd) in
+          let cosT = min(dot(-ud, n), 1.0) in
+          let sinT = sqrt(max(0.0, 1.0 - cosT * cosT)) in
+          let (u1, s1) = rnd(seed) in
+          let mustReflect = ratio * sinT > 1.0 in
+          let doReflect = if mustReflect then true else schlick(cosT, ratio) > u1 in
+          if doReflect then
+            (p + n * EPS, reflect(ud, n), atten, col, s1, bounce + 1)
+          else
+            (p - n * EPS, refract(ud, n, ratio), atten, col, s1, bounce + 1)
+  in (res.3, res.4)
+
+------------------------------------------------------------
+-- Thin-lens camera: lookfrom (13,2,3) -> (0,0,0), vfov 20 degrees,
+-- aperture 0.1, focus distance 10 — the book's final-render camera.
+------------------------------------------------------------
+
+def LOOKFROM: vec3f32 = @[13.0, 2.0, 3.0]
+def LOOKAT: vec3f32 = @[0.0, 0.0, 0.0]
+def FOCUS_DIST: f32 = 10.0
+def LENS_RADIUS: f32 = 0.05          -- aperture 0.1 / 2
+def HALF_VFOV_TAN: f32 = 0.17632698  -- tan(20 degrees / 2)
+
+-- (s, t) in [0,1]^2 across the viewport -> primary ray (ro, rd, seed').
+def getRay(s: f32, t: f32, aspect: f32, seed: u32) (vec3f32, vec3f32, u32) =
+  let w = normalize(LOOKFROM - LOOKAT) in
+  let u = normalize(cross(@[0.0, 1.0, 0.0], w)) in
+  let v = cross(w, u) in
+  let vpH = 2.0 * HALF_VFOV_TAN in
+  let vpW = aspect * vpH in
+  let horizontal = u * (FOCUS_DIST * vpW) in
+  let vertical = v * (FOCUS_DIST * vpH) in
+  let lowerLeft = LOOKFROM - horizontal * 0.5 - vertical * 0.5 - w * FOCUS_DIST in
+  let (dk, s1) = randInDisk(seed) in
+  let offset = u * (dk.x * LENS_RADIUS) + v * (dk.y * LENS_RADIUS) in
+  let ro = LOOKFROM + offset in
+  let rd = normalize(lowerLeft + horizontal * s + vertical * t - ro) in
+  (ro, rd, s1)
+
+------------------------------------------------------------
+-- Progressive accumulation buffer: rgb = Monte-Carlo radiance sum,
+-- w = sample count. `history = 1` double-buffers it so this frame
+-- reads last frame's sum (`previous` view) and writes the new one.
+------------------------------------------------------------
+
+resource acc: image2d {
+  format  = rgba32float
+  size    = window
+  usages  = [storage_write, sampled]
+  history = 1
+}
+
+#[compute]
+entry accumulate(#[view(acc, storage_write)] out_acc: storage_image,
+                 #[view(acc, sampled, previous)] prev_acc: texture2d,
+                 #[builtin(global_invocation_id)] gid: vec3u32,
+                 #[uniform(set=1, binding=0)] iResolution: vec3f32,
+                 #[uniform(set=1, binding=3)] iFrame: u32) () =
+  let xy = @[i32(gid.x), i32(gid.y)] in
+  let prev = texture_load(prev_acc, xy, 0) in
+  -- Startup (and window-resize) leaves no valid history: restart the sum.
+  let fresh = iFrame < 2u32 in
+  let sum0 = if fresh then @[0.0, 0.0, 0.0] else prev.xyz in
+  let count0 = if fresh then 0.0 else prev.w in
+
+  let converged = if MAX_SPP > 0 then count0 >= f32(MAX_SPP) else false in
+  -- Select the texel to write, store once at the tail. When converged the
+  -- ping-pong still swaps buffers each frame, so carry the finished sum over.
+  let texel =
+    if converged then prev
+    else
+      let aspect = iResolution.x / iResolution.y in
+      let base = pcg(gid.x * 1973u32 + gid.y * 9277u32 + iFrame * 26699u32) in
+      let batch =
+        loop (col, seed, k) = (@[0.0, 0.0, 0.0], base, 0) while k < SPP_PER_FRAME do
+          let (jx, s1) = rnd(seed) in
+          let (jy, s2) = rnd(s1) in
+          let s = (f32(gid.x) + jx) / iResolution.x in
+          let t = 1.0 - (f32(gid.y) + jy) / iResolution.y in
+          let (ro, rd, s3) = getRay(s, t, aspect, s2) in
+          let (c, s4) = rayColor(ro, rd, s3) in
+          (col + c, s4, k + 1)
+      in
+      let sum = sum0 + batch.0 in
+      @[sum.x, sum.y, sum.z, count0 + f32(SPP_PER_FRAME)]
+  in
+  image_store(out_acc, xy, texel)
+
+------------------------------------------------------------
+-- Display pass: sum / count, gamma 2 (the book's sqrt write).
+------------------------------------------------------------
+
+#[fragment]
+entry fragment_main(#[builtin(position)] pos_in: vec4f32,
+                    #[view(acc, sampled)] tex_acc: texture2d) #[location(0)] vec4f32 =
+  let xy = @[i32(pos_in.x), i32(pos_in.y)] in
+  let v = texture_load(tex_acc, xy, 0) in
+  let c = v.xyz * (1.0 / max(v.w, 1.0)) in
+  @[sqrt(c.x), sqrt(c.y), sqrt(c.z), 1.0]
