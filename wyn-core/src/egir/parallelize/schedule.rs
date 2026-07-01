@@ -475,10 +475,31 @@ fn phase_from_entry(entry: &EgirEntry, fallback: KernelDomain) -> KernelPhase {
     KernelPhase {
         entry_point: entry.name.clone(),
         workgroup_size: entry_workgroup(entry),
-        domain: segmented_domain(entry).unwrap_or(fallback),
+        domain: segmented_domain(entry)
+            .or_else(|| storage_image_domain(entry, &fallback))
+            .unwrap_or(fallback),
         resources: segmented_resources(entry).unwrap_or_else(|| entry_resources(entry)),
         dependencies: Vec::new(),
     }
+}
+
+/// A compute entry with no SOAC-derived domain, no storage-buffer input, and a
+/// `#[storage_image]` param runs one thread per texel of the image (the
+/// mountains / one_weekend per-pixel pass shape) — the host resolves the size
+/// from the bound texture's extent. Only upgrades the single-workgroup
+/// placeholder domain; an explicit fixed grid stays as scheduled.
+fn storage_image_domain(entry: &EgirEntry, fallback: &KernelDomain) -> Option<KernelDomain> {
+    if !matches!(fallback, KernelDomain::Fixed { x: 1, y: 1, z: 1 }) {
+        return None;
+    }
+    if entry.inputs.iter().any(|input| input.storage_binding.is_some()) {
+        return None;
+    }
+    let (binding, ..) = entry.inputs.iter().find_map(|input| input.storage_image_binding)?;
+    Some(KernelDomain::Elements(DispatchLen::StorageImage {
+        set: binding.set,
+        binding: binding.binding,
+    }))
 }
 
 fn segmented_resources(entry: &EgirEntry) -> Option<Vec<ScheduledResource>> {

@@ -7587,6 +7587,39 @@ fn history_resource_bindings_are_not_duplicated() {
     }
 }
 
+/// A compute entry with no buffer input that writes a `#[storage_image]`
+/// dispatches one thread per texel: `DerivedFrom { len: StorageImage }`, which
+/// the host resolves from the bound texture's extent. Regression test: the
+/// skeletal `Fixed {1,1,1}` survived scheduling for serial per-texel entries
+/// (fresh mountains.wyn compiles disagreed with its committed descriptor), so
+/// a window-sized pass only ever ran one workgroup.
+#[test]
+fn storage_image_entry_dispatch_derives_from_image() {
+    use crate::pipeline_descriptor::{DispatchLen, DispatchSize, Pipeline};
+
+    let lowered = crate::compile_thru_ssa(HISTORY_FEEDBACK_SOURCE).expect("history feedback compiles");
+    let stage = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .find_map(|pipeline| match pipeline {
+            Pipeline::Compute(compute) => compute.stages.iter().find(|stage| stage.entry_point == "step"),
+            _ => None,
+        })
+        .expect("step compute stage");
+    assert!(
+        matches!(
+            &stage.dispatch_size,
+            DispatchSize::DerivedFrom {
+                len: DispatchLen::StorageImage { .. },
+                ..
+            }
+        ),
+        "per-texel entry should dispatch from its storage image, got {:?}",
+        stage.dispatch_size
+    );
+}
+
 /// KNOWN BUG: a unit-typed `if` whose branches both end in `image_store`
 /// lowers to an `OpPhi %void` at the merge — `image_store`'s placeholder `0`
 /// result id flows into the phi, and spirv-val rejects the module ("OpPhi
