@@ -970,6 +970,19 @@ pub fn run(
             continue;
         };
         let name = crate::symbol_name_or_bug(&program.symbols, def.name).to_string();
+        // The entry's `previous`-view ping-pong pairs (recorded by
+        // `resolve_resources`) seed the pipeline here; `KernelSchedule`
+        // carries them through scheduling into the published descriptor.
+        let feedback: Vec<crate::pipeline_descriptor::FeedbackPair> = decl
+            .feedback
+            .iter()
+            .map(|pair| crate::pipeline_descriptor::FeedbackPair {
+                read_set: pair.read.set,
+                read_binding: pair.read.binding,
+                write_set: pair.write.set,
+                write_binding: pair.write.binding,
+            })
+            .collect();
         if decl.entry_type.is_compute() {
             pipelines.push(Pipeline::Compute(ComputePipeline {
                 bindings: Vec::new(),
@@ -981,7 +994,7 @@ pub fn run(
                     writes: vec![],
                 }],
                 default_total_threads: None,
-                feedback: Vec::new(),
+                feedback,
             }));
         } else {
             let stage = if decl.entry_type == Attribute::Vertex {
@@ -997,7 +1010,7 @@ pub fn run(
                 bindings: Vec::new(),
                 vertex_inputs: vec![],
                 fragment_outputs: vec![],
-                feedback: Vec::new(),
+                feedback,
             }));
         }
     }
