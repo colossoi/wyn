@@ -410,7 +410,10 @@ impl TypeEmitter {
                     crate::err_wgsl!("WGSL does not support {}-bit scalars (found {:?})", bits, ty),
                 ),
                 TypeName::Unit => Ok("/* unit */".to_string()),
-                TypeName::Tuple(_) => {
+                // Records are tuples with named fields by this point:
+                // construction and projection are index-based, so both
+                // share the positional struct lowering.
+                TypeName::Tuple(_) | TypeName::Record(_) => {
                     let elem_types: Result<Vec<String>> =
                         args.iter().map(|a| self.type_to_wgsl(a)).collect();
                     let elem_types = elem_types?;
@@ -502,10 +505,6 @@ impl TypeEmitter {
                         _ => Ok(format!("array<{}>", elem)),
                     }
                 }
-                TypeName::Record(fields) => Err(crate::err_wgsl!(
-                    "Record type reached WGSL lowering (should have been lowered earlier): {:?}",
-                    fields
-                )),
                 _ => Err(crate::err_wgsl!("unsupported type in WGSL lowering: {:?}", ty)),
             },
             _ => Err(crate::err_wgsl!("unsupported type in WGSL lowering: {:?}", ty)),
