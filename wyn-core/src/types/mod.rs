@@ -292,7 +292,7 @@ pub enum TypeName {
     /// `#[sampler(set, binding)]`; paired with a `Texture2D` in
     /// `texture_sample`.
     Sampler,
-    /// A 2D storage image — a texture a compute entry can write via
+    /// A 2D storage image with one hidden region argument — a texture a compute entry can write via
     /// `image_store` (and point-read via `image_load`). Bound via
     /// `#[storage_image(set, binding, format, access)]`. Element type
     /// is fixed to vec4f32; the binding's `format` attribute decides
@@ -300,6 +300,8 @@ pub enum TypeName {
     /// declared as `Texture2D` in another pipeline; viz binds the same
     /// underlying `wgpu::Texture` to both, so a compute-written
     /// storage image can be sampled bilinearly by a later fragment.
+    /// The region is pinned from `#[storage_image]` and participates in
+    /// monomorphization just like a storage-view array region.
     StorageTexture,
 
     // --- Type system internals ---

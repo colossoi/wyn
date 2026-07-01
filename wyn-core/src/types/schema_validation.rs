@@ -118,6 +118,7 @@ pub fn validate_type_args(name: &TypeName, args: &[Type]) -> Result<(), String> 
         TypeName::Vec => Some((&[ArgKind::Type, ArgKind::Size] as &[ArgKind], None)),
         TypeName::Mat => Some((&[ArgKind::Type, ArgKind::Size, ArgKind::Size] as &[ArgKind], None)),
         TypeName::Pointer => Some((&[ArgKind::Type, ArgKind::AddrSpace] as &[ArgKind], None)),
+        TypeName::StorageTexture => Some((&[ArgKind::Region] as &[ArgKind], None)),
         _ => None,
     };
 

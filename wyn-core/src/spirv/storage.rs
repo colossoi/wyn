@@ -181,4 +181,63 @@ impl Constructor {
 
         var_id
     }
+
+    /// Create (once) the `#[storage_image]` global for `br`: a format-aware
+    /// `OpTypeImage` in `UniformConstant` storage, decorated with its
+    /// descriptor set/binding and the source access qualifier. Registered in
+    /// `storage_images` so both the entry (interface / `env`) and
+    /// `image_store`/`image_load` inside functions resolve the same
+    /// module-scope variable. Idempotent — a binding shared across entries
+    /// returns the existing var.
+    pub(super) fn create_storage_image(
+        &mut self,
+        br: BindingRef,
+        format: crate::pipeline_descriptor::StorageImageFormat,
+        access: crate::interface::StorageAccess,
+    ) -> spirv::Word {
+        if let Some(&(var_id, _)) = self.storage_images.get(&br) {
+            return var_id;
+        }
+        let img_type = *self.builder.type_image(
+            builder::TypeId::new(self.f32_type),
+            spirv::Dim::Dim2D,
+            0,
+            0,
+            0,
+            2,
+            storage_image_format_to_spirv(format),
+            None,
+        );
+        let ptr_type = self.get_or_create_ptr_type(spirv::StorageClass::UniformConstant, img_type);
+        let var_id = self.builder.variable(ptr_type, None, spirv::StorageClass::UniformConstant, None);
+        self.builder.decorate(
+            var_id,
+            spirv::Decoration::DescriptorSet,
+            [Operand::LiteralBit32(br.set)],
+        );
+        self.builder.decorate(
+            var_id,
+            spirv::Decoration::Binding,
+            [Operand::LiteralBit32(br.binding)],
+        );
+        // Encode the access qualifier as `NonReadable` / `NonWritable` so
+        // naga/wgpu doesn't infer `ReadWrite` and reject a narrower host
+        // descriptor.
+        use crate::interface::StorageAccess;
+        match access {
+            StorageAccess::WriteOnly => self.builder.decorate(
+                var_id,
+                spirv::Decoration::NonReadable,
+                std::iter::empty::<Operand>(),
+            ),
+            StorageAccess::ReadOnly => self.builder.decorate(
+                var_id,
+                spirv::Decoration::NonWritable,
+                std::iter::empty::<Operand>(),
+            ),
+            StorageAccess::ReadWrite => {}
+        }
+        self.storage_images.insert(br, (var_id, img_type));
+        var_id
+    }
 }

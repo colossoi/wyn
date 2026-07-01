@@ -24,7 +24,9 @@ mod pin_entry_regions_tests;
 
 use super::{ArrayExpr, DefMeta, Lambda, LoopKind, Program, SoacOp, Term, TermKind, VarRef};
 use crate::ast::{Span, TypeName};
-use crate::binding_layout::{compute_entry_binding_layout, extract_storage_binding};
+use crate::binding_layout::{
+    compute_entry_binding_layout, extract_storage_binding, extract_storage_image_binding,
+};
 use crate::interface::{EntryDecl, EntryParamBindingKind};
 use crate::tlc::monomorphize::apply_subst;
 use crate::types::{region_tag, TypeExt};
@@ -94,22 +96,28 @@ fn collect_region_subst(
     for (i, (_sym, ty)) in params.iter().enumerate() {
         let ty = TypeExt::strip_unique(ty);
 
+        if let Some((binding, ..)) = entry.params.get(i).and_then(extract_storage_image_binding) {
+            pin_resource_region(ty, binding, subst, span)?;
+            region_env.insert(params[i].0, region_tag(binding));
+            continue;
+        }
+
         // Host-wired explicit binding: the region is the attribute's.
         if let Some(binding) = entry.params.get(i).and_then(extract_storage_binding) {
-            pin_view_region(ty, binding, subst, span)?;
+            pin_resource_region(ty, binding, subst, span)?;
             region_env.insert(params[i].0, region_tag(binding));
             continue;
         }
 
         match layout.get(i).and_then(|b| b.as_ref()).map(|b| &b.kind) {
             Some(EntryParamBindingKind::Single { binding, .. }) => {
-                pin_view_region(ty, *binding, subst, span)?;
+                pin_resource_region(ty, *binding, subst, span)?;
                 region_env.insert(params[i].0, region_tag(*binding));
             }
             Some(EntryParamBindingKind::TupleOfViews(fields)) => {
                 if let Type::Constructed(TypeName::Tuple(_), comps) = ty {
                     for (field, comp_ty) in fields.iter().zip(comps) {
-                        pin_view_region(TypeExt::strip_unique(comp_ty), field.binding, subst, span)?;
+                        pin_resource_region(TypeExt::strip_unique(comp_ty), field.binding, subst, span)?;
                     }
                 }
             }
@@ -127,13 +135,17 @@ fn collect_region_subst(
 /// pinned to two *distinct* buffers is the merge-over-distinct-descriptors
 /// case: there's no single static binding, so it's a type error rather than a
 /// silent wrong-buffer read.
-fn pin_view_region(
+fn pin_resource_region(
     view_ty: &Type<TypeName>,
     binding: BindingRef,
     subst: &mut RegionSubst,
     span: Span,
 ) -> crate::error::Result<()> {
-    if let Some(Type::Variable(id)) = view_ty.array_region() {
+    let region_slot = match view_ty {
+        Type::Constructed(TypeName::StorageTexture, args) => args.first(),
+        _ => view_ty.array_region(),
+    };
+    if let Some(Type::Variable(id)) = region_slot {
         let region = region_tag(binding);
         if let Some(existing) = subst.get(id) {
             if *existing != region {
@@ -143,11 +155,11 @@ fn pin_view_region(
                 };
                 return Err(crate::err_type_at!(
                     span,
-                    "this view merges two distinct storage buffers — \
+                    "this resource merges two distinct descriptor bindings — \
                      region(set={}, binding={}) and region(set={}, binding={}); \
                      a view's descriptor must be a single compile-time constant, \
                      so `if … then … else …` (or any merge) across different \
-                     buffers cannot be lowered",
+                     resources cannot be lowered",
                     prev.set,
                     prev.binding,
                     binding.set,

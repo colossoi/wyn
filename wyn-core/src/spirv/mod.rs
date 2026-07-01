@@ -94,6 +94,14 @@ struct Constructor {
     /// Storage buffers for compute shaders: (set, binding) -> (buffer_var, elem_type_id, buffer_ptr_type)
     storage_buffers: LookupMap<BindingRef, (spirv::Word, spirv::Word, spirv::Word)>,
 
+    /// Storage-image globals: (set, binding) -> (image `OpVariable`, image type).
+    /// Registered when an entry emits the image variable. `image_store` /
+    /// `image_load` re-load the global from here so the op targets a
+    /// module-scope variable (which naga/Vulkan require) even when the op sits
+    /// inside a SOAC-body function, where the handle would otherwise arrive as
+    /// an `OpFunctionParameter`.
+    storage_images: LookupMap<BindingRef, (spirv::Word, spirv::Word)>,
+
     /// GlobalInvocationId variable for compute shaders (set during entry point setup)
     global_invocation_id: Option<spirv::Word>,
 
@@ -160,6 +168,7 @@ impl Constructor {
             interface_block_cache: LookupMap::new(),
             entry_point_interfaces: LookupMap::new(),
             storage_buffers: LookupMap::new(),
+            storage_images: LookupMap::new(),
             global_invocation_id: None,
             local_invocation_id: None,
             num_workgroups: None,
@@ -229,6 +238,20 @@ impl Constructor {
     /// Declare a variable in the function's variables block
     fn declare_variable(&mut self, _name: &str, value_type: spirv::Word) -> Result<spirv::Word> {
         Ok(*self.builder.declare_variable(builder::TypeId::new(value_type))?)
+    }
+
+    /// Load the storage-image global selected by the operand's pinned region.
+    /// This supports multiple images and keeps image operations on module-scope
+    /// variables even inside captured loop/SOAC bodies.
+    fn load_storage_image(&mut self, binding: BindingRef) -> Result<spirv::Word> {
+        let &(var, img_type) = self.storage_images.get(&binding).ok_or_else(|| {
+            err_spirv!(
+                "storage image region(set={}, binding={}) has no declared global",
+                binding.set,
+                binding.binding
+            )
+        })?;
+        Ok(self.builder.load(img_type, None, var, None, [])?)
     }
 
     /// Get or create an i32 constant
@@ -449,6 +472,17 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
         for sb in &entry.storage_bindings {
             if !constructor.storage_buffers.contains_key(&sb.binding) {
                 constructor.create_storage_buffer(&sb.elem_ty, sb.binding.set, sb.binding.binding);
+            }
+        }
+    }
+
+    // Pre-create storage-image globals for all entry bindings so that image
+    // ops inside SOAC-body functions (lowered before entry points) reference
+    // the module-scope variable rather than an OpFunctionParameter.
+    for entry in &program.entry_points {
+        for input in &entry.inputs {
+            if let Some((br, format, access, _size)) = input.storage_image_binding {
+                constructor.create_storage_image(br, format, access);
             }
         }
     }

@@ -356,8 +356,8 @@ fn texture2d_ty() -> Type {
 fn sampler_ty() -> Type {
     Type::Constructed(TypeName::Sampler, vec![])
 }
-fn storage_image_ty() -> Type {
-    Type::Constructed(TypeName::StorageTexture, vec![])
+fn storage_image_ty(region: Type) -> Type {
+    Type::Constructed(TypeName::StorageTexture, vec![region])
 }
 fn unit_ty_local() -> Type {
     Type::Constructed(TypeName::Unit, vec![])
@@ -391,10 +391,13 @@ pub fn texture_sample_scheme(_ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
 /// `storage_image -> vec2<i32> -> vec4<f32> -> unit` — write one texel
 /// to a storage image at integer coordinates. Bound via `#[storage_image]`;
 /// pixel format from the binding attribute decides on-GPU storage.
-pub fn image_store_scheme(_ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+pub fn image_store_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     let coord = vec_n(i32_ty(), 2);
     let texel = vec_n(f32_ty(), 4);
-    TypeScheme::Monotype(arrow_chain(&[storage_image_ty(), coord, texel], unit_ty_local()))
+    quantify(arrow_chain(
+        &[storage_image_ty(ctx.new_variable()), coord, texel],
+        unit_ty_local(),
+    ))
 }
 
 /// `storage_image -> vec2<i32> -> vec4<f32>` — point-read one texel
@@ -402,8 +405,11 @@ pub fn image_store_scheme(_ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
 /// `image_store`; used by compute stages to read raw bytes without
 /// hardware filtering (filtering happens via `texture_sample` on a
 /// `texture2d` view of the same underlying resource).
-pub fn image_load_scheme(_ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+pub fn image_load_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     let coord = vec_n(i32_ty(), 2);
     let result = vec_n(f32_ty(), 4);
-    TypeScheme::Monotype(arrow_chain(&[storage_image_ty(), coord], result))
+    quantify(arrow_chain(
+        &[storage_image_ty(ctx.new_variable()), coord],
+        result,
+    ))
 }

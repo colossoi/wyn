@@ -1567,10 +1567,17 @@ impl<'a> Parser<'a> {
                     "u64" => TypeName::UInt(64),
                     // Boolean
                     "bool" => TypeName::Bool,
-                    // Opaque GPU resources (nullary)
+                    // Opaque GPU resources. Storage images carry a hidden
+                    // region slot so their descriptor binding survives
+                    // capture and monomorphization.
                     "texture2d" => TypeName::Texture2D,
                     "sampler" => TypeName::Sampler,
-                    "storage_image" => TypeName::StorageTexture,
+                    "storage_image" => {
+                        return Ok(Type::Constructed(
+                            TypeName::StorageTexture,
+                            vec![Type::Constructed(TypeName::AddressPlaceholder, vec![])],
+                        ));
+                    }
                     // User-defined type alias or unrecognized type
                     _ => TypeName::Named(type_name),
                 };

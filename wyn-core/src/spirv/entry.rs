@@ -188,54 +188,11 @@ pub(super) fn lower_ssa_entry_point(
             interfaces.push(var_id);
             uniform_loads.push((input.name.clone(), var_id, input_type));
         } else if let Some((br, format, access, _size)) = input.storage_image_binding {
-            // `#[storage_image]` → opaque OpTypeImage(Sampled=2, Format=FMT)
-            // in UniformConstant storage. The format comes from the binding
-            // attribute (per-param), not from the language type, so we build
-            // the image type here rather than reuse `input_type` (which used
-            // the placeholder format from `polytype_to_spirv`).
-            let img_type = *constructor.builder.type_image(
-                wspirv::TypeId::new(constructor.f32_type),
-                spirv::Dim::Dim2D,
-                0,
-                0,
-                0,
-                2,
-                storage_image_format_to_spirv(format),
-                None,
-            );
-            let ptr_type =
-                constructor.get_or_create_ptr_type(spirv::StorageClass::UniformConstant, img_type);
-            let var_id =
-                constructor.builder.variable(ptr_type, None, spirv::StorageClass::UniformConstant, None);
-            constructor.builder.decorate(
-                var_id,
-                spirv::Decoration::DescriptorSet,
-                [Operand::LiteralBit32(br.set)],
-            );
-            constructor.builder.decorate(
-                var_id,
-                spirv::Decoration::Binding,
-                [Operand::LiteralBit32(br.binding)],
-            );
-            // Encode the source-level access qualifier as SPIR-V
-            // `NonReadable` / `NonWritable` decorations on the variable.
-            // Without these naga/wgpu infers `ReadWrite` and rejects the
-            // pipeline at create-time when the host descriptor declares a
-            // narrower access (e.g. `write_only`).
-            use crate::interface::StorageAccess;
-            match access {
-                StorageAccess::WriteOnly => constructor.builder.decorate(
-                    var_id,
-                    spirv::Decoration::NonReadable,
-                    std::iter::empty::<Operand>(),
-                ),
-                StorageAccess::ReadOnly => constructor.builder.decorate(
-                    var_id,
-                    spirv::Decoration::NonWritable,
-                    std::iter::empty::<Operand>(),
-                ),
-                StorageAccess::ReadWrite => {}
-            }
+            // `#[storage_image]` → opaque OpTypeImage in UniformConstant
+            // storage. Pre-created before function bodies (see
+            // `lower_ssa_program_impl`) so image ops inside SOAC-body functions
+            // resolve the same global; the call here is idempotent.
+            let var_id = constructor.create_storage_image(br, format, access);
             constructor.env.insert(input.name.clone(), var_id);
             interfaces.push(var_id);
         } else if let Some(br) = input.texture_binding.or(input.sampler_binding) {

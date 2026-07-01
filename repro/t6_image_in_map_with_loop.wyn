@@ -1,0 +1,33 @@
+-- Reproducer 2: image ops in a `map` lambda whose body contains a `loop`. The
+-- simple case (t5) now inlines correctly (image write targets a global load), but
+-- when the map body has a loop that image_loads and then image_stores, the map
+-- body is still emitted as an OpFunction taking the image as an OpFunctionParameter
+-- and the image op targets the param -> naga "Not a global variable".
+open f32
+
+resource src: image2d {
+  format = r32float
+  size   = 64x64
+  usages = [storage_read]
+}
+
+resource dst: image2d {
+  format = r32float
+  size   = 64x64
+  usages = [storage_write]
+}
+
+#[compute]
+entry r(xs: []u32,
+        #[view(src, storage_read)]  s: storage_image,
+        #[view(dst, storage_write)] d: storage_image)
+  []u32 =
+  map(|e|
+    let i = i32(e)
+    let m =
+      loop m = 1.0 for k < 4 do
+        let v = image_load(s, @[i + k, 0]) in
+        f32.min(m, v.x)
+    let _ = image_store(d, @[i, 0], @[m, m, m, m]) in
+    0u32
+    , xs)

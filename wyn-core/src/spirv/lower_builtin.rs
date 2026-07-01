@@ -83,7 +83,15 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     if arg_ids.len() != 3 {
                         bail_spirv!("image_store requires 3 arguments");
                     }
-                    self.constructor.builder.image_write(arg_ids[0], arg_ids[1], arg_ids[2], None, [])?;
+                    let binding = storage_image_binding(&self.get_value_type_ref(value_refs[0]))
+                        .ok_or_else(|| {
+                            err_spirv_at!(
+                                self.blame_span(),
+                                "image_store operand has no concrete resource region"
+                            )
+                        })?;
+                    let image = self.constructor.load_storage_image(binding)?;
+                    self.constructor.builder.image_write(image, arg_ids[1], arg_ids[2], None, [])?;
                     Ok(0)
                 } else if id == known.image_load {
                     // image_load(image, ivec2) → OpImageRead.
@@ -91,14 +99,24 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     if arg_ids.len() != 2 {
                         bail_spirv!("image_load requires 2 arguments");
                     }
-                    Ok(self.constructor.builder.image_read(
-                        result_ty,
-                        None,
-                        arg_ids[0],
-                        arg_ids[1],
-                        None,
-                        [],
-                    )?)
+                    let binding = storage_image_binding(&self.get_value_type_ref(value_refs[0]))
+                        .ok_or_else(|| {
+                            err_spirv_at!(
+                                self.blame_span(),
+                                "image_load operand has no concrete resource region"
+                            )
+                        })?;
+                    let image = self.constructor.load_storage_image(binding)?;
+                    Ok(
+                        self.constructor.builder.image_read(
+                            result_ty,
+                            None,
+                            image,
+                            arg_ids[1],
+                            None,
+                            [],
+                        )?,
+                    )
                 } else if id == known.texture_sample {
                     // texture_sample(tex, samp, uv, lod) → OpSampledImage +
                     // OpImageSampleExplicitLod. v1 uses EXPLICIT LOD (the
@@ -480,5 +498,15 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 }
             }
         }
+    }
+}
+
+fn storage_image_binding(ty: &PolyType<TypeName>) -> Option<BindingRef> {
+    match ty {
+        PolyType::Constructed(TypeName::StorageTexture, args) => match args.first() {
+            Some(PolyType::Constructed(TypeName::Region(binding), _)) => Some(*binding),
+            _ => None,
+        },
+        _ => None,
     }
 }

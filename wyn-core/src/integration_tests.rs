@@ -7387,6 +7387,7 @@ resource color: image2d {
   size   = 1024x1024
   usages = [storage_write, sampled]
 }
+
 #[compute]
 entry paint(#[view(color, storage_write)] img: storage_image,
             #[builtin(global_invocation_id)] gid: vec3u32) () =
@@ -7404,6 +7405,97 @@ entry show(#[builtin(position)] pos: vec4f32,
     )
     .expect("a resource viewed write+sampled across entries must compile");
     assert!(!lowered.spirv.is_empty());
+}
+
+#[test]
+fn loop_bodied_map_uses_storage_image_globals_not_function_parameters() {
+    use std::collections::{HashMap, HashSet};
+    use wspirv::binary::parse_words;
+    use wspirv::dr::{Loader, Operand};
+    use wspirv::spirv::Op;
+
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry r(xs: []u32,
+        #[storage_image(set=1, binding=0, format=r32float, access=read_only)] src: storage_image,
+        #[storage_image(set=1, binding=1, format=r32float, access=write_only)] dst: storage_image) []u32 =
+  map(|s|
+        let x = i32(s) in
+        let (_, total) = loop (j, total) = (0, 0.0) while j < 2 do
+          let px = image_load(src, @[x, j]) in
+          (j + 1, total + px.x)
+        let _ = image_store(dst, @[x, 0], @[total, 0.0, 0.0, 1.0]) in
+        0u32,
+      xs)
+"#,
+    )
+    .expect("loop-bodied map with two storage images compiles");
+
+    let mut loader = Loader::new();
+    parse_words(&lowered.spirv, &mut loader).expect("parse generated SPIR-V");
+    let module = loader.module();
+    let parameters: HashSet<_> = module
+        .functions
+        .iter()
+        .flat_map(|function| function.parameters.iter().filter_map(|parameter| parameter.result_id))
+        .collect();
+    let loads: HashMap<_, _> = module
+        .functions
+        .iter()
+        .flat_map(|function| &function.blocks)
+        .flat_map(|block| &block.instructions)
+        .filter_map(|instruction| {
+            if instruction.class.opcode != Op::Load {
+                return None;
+            }
+            match (instruction.result_id, instruction.operands.first()) {
+                (Some(result), Some(Operand::IdRef(pointer))) => Some((result, *pointer)),
+                _ => None,
+            }
+        })
+        .collect();
+    let globals: HashSet<_> = module
+        .types_global_values
+        .iter()
+        .filter(|instruction| instruction.class.opcode == Op::Variable)
+        .filter_map(|instruction| instruction.result_id)
+        .collect();
+    let global_bindings: HashMap<_, _> = module
+        .annotations
+        .iter()
+        .filter_map(|instruction| match instruction.operands.as_slice() {
+            [Operand::IdRef(variable), Operand::Decoration(wspirv::spirv::Decoration::Binding), Operand::LiteralBit32(binding)] => {
+                Some((*variable, *binding))
+            }
+            _ => None,
+        })
+        .collect();
+    let mut image_ops = 0;
+    for instruction in module
+        .functions
+        .iter()
+        .flat_map(|function| &function.blocks)
+        .flat_map(|block| &block.instructions)
+        .filter(|instruction| matches!(instruction.class.opcode, Op::ImageRead | Op::ImageWrite))
+    {
+        image_ops += 1;
+        let Some(Operand::IdRef(image)) = instruction.operands.first() else {
+            panic!("image operation has no image operand")
+        };
+        assert!(
+            !parameters.contains(image),
+            "image operation targets OpFunctionParameter"
+        );
+        let global = loads.get(image).expect("image operand is loaded from its descriptor global");
+        assert!(
+            globals.contains(global),
+            "image load pointer is not a module-scope OpVariable"
+        );
+        let expected_binding = if instruction.class.opcode == Op::ImageRead { 0 } else { 1 };
+        assert_eq!(global_bindings.get(global), Some(&expected_binding));
+    }
+    assert!(image_ops >= 2, "expected image_load and image_store");
 }
 
 /// A `#[view(...)]` naming a resource that doesn't exist is a compile error.
