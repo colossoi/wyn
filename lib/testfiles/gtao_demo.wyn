@@ -1,0 +1,203 @@
+import "../gtao"
+
+-- GTAO end to end over a real depth buffer: pass 1 raycasts a simple
+-- analytic scene (spheres resting on a ground plane, walled corner) and
+-- writes true viewspace depth; the lib/gtao.wyn passes then build the
+-- depth chain, integrate AO (normals reconstructed from depth), and
+-- denoise. The fragment shader raycasts the same scene for shading and
+-- multiplies the AO term in.
+--
+-- Run (from the repo root):
+--   cargo run --release --bin wyn -- compile lib/testfiles/gtao_demo.wyn -o gtao_demo.spv
+--   cd extra/viz && cargo run --release -- pipeline ../../gtao_demo.spv --size 1920x1080
+--
+-- Move the mouse right to sweep the no-AO | AO split (AO on the right of
+-- the cursor). Add `--max-frames 30 --dump-texture outf:ao.png` to
+-- snapshot the final AO term (r = visibility) without watching the
+-- window. Expected: contact shadows where the spheres meet the ground,
+-- darkening along the wall/floor corner, open floor near white.
+
+def W: f32 = 1920.0
+def H: f32 = 1080.0
+
+def C: gtao.consts =
+  -- tan(30°): a 60° vertical FOV; scene depths span roughly [3, 16].
+  gtao.make_constants(@[W, H], 0.5773503f32, 0.1f32, 100.0f32, 0u32,
+                      gtao.default_settings)
+
+------------------------------------------------------------
+-- The scene, in view space (camera at the origin, +z forward, y up).
+-- Analytic raycast: rays are (dx, dy, 1) per pixel, so the hit
+-- parameter t IS the viewspace depth.
+------------------------------------------------------------
+
+def GROUND_Y: f32 = -1.5
+def BACK_Z: f32 = 14.0
+def LEFT_X: f32 = -6.5
+
+-- Ray direction (unnormalized, z = 1) through a normalized screen pos.
+def ray_dir(sp: vec2f32) vec3f32 =
+  @[C.ndc_to_view_mul.x * sp.x + C.ndc_to_view_add.x,
+    C.ndc_to_view_mul.y * sp.y + C.ndc_to_view_add.y,
+    1.0f32]
+
+def sphere_t(rd: vec3f32, center: vec3f32, radius: f32) f32 =
+  let a = dot(rd, rd) in
+  let b = 0.0f32 - 2.0f32 * dot(center, rd) in
+  let cc = dot(center, center) - radius * radius in
+  let disc = b * b - 4.0f32 * a * cc in
+  if disc < 0.0f32 then 1.0e9f32
+  else
+    let t = ((0.0f32 - b) - f32.sqrt(disc)) / (2.0f32 * a) in
+    if t > 0.001f32 then t else 1.0e9f32
+
+-- Nearest hit along `rd`: (t, normal, albedo). The walls close the
+-- scene, so every ray hits something.
+def scene_hit(rd: vec3f32) (f32, vec3f32, vec3f32) =
+  -- Ground plane and the two walls forming a corner.
+  let tg = if rd.y < 0.0f32 then GROUND_Y / rd.y else 1.0e9f32 in
+  let tb = BACK_Z / rd.z in
+  let tl = if rd.x < 0.0f32 then LEFT_X / rd.x else 1.0e9f32 in
+  let (t, n, alb) =
+    if tg < tb && tg < tl
+    then (tg, @[0.0f32, 1.0f32, 0.0f32], @[0.75f32, 0.75f32, 0.75f32])
+    else if tl < tb
+    then (tl, @[1.0f32, 0.0f32, 0.0f32], @[0.75f32, 0.70f32, 0.60f32])
+    else (tb, @[0.0f32, 0.0f32, 0.0f32 - 1.0f32], @[0.65f32, 0.70f32, 0.78f32]) in
+  -- Spheres resting on (or near) the ground; the close pair leaves a
+  -- crevice between them.
+  let s0c = @[0.0f32 - 1.8f32, 0.0f32 - 0.75f32, 6.0f32] in
+  let s1c = @[0.0f32 - 0.65f32, 0.0f32 - 1.05f32, 5.5f32] in
+  let s2c = @[0.5f32, 0.0f32 - 1.1f32, 4.2f32] in
+  let s3c = @[2.0f32, 0.0f32 - 0.85f32, 6.8f32] in
+  let t0 = sphere_t(rd, s0c, 0.75f32) in
+  let t1 = sphere_t(rd, s1c, 0.45f32) in
+  let t2 = sphere_t(rd, s2c, 0.4f32) in
+  let t3 = sphere_t(rd, s3c, 0.65f32) in
+  let (t, n, alb) = if t0 < t then (t0, normalize(t0 * rd - s0c), @[0.80f32, 0.45f32, 0.35f32]) else (t, n, alb) in
+  let (t, n, alb) = if t1 < t then (t1, normalize(t1 * rd - s1c), @[0.40f32, 0.60f32, 0.80f32]) else (t, n, alb) in
+  let (t, n, alb) = if t2 < t then (t2, normalize(t2 * rd - s2c), @[0.45f32, 0.70f32, 0.45f32]) else (t, n, alb) in
+  let (t, n, alb) = if t3 < t then (t3, normalize(t3 * rd - s3c), @[0.80f32, 0.70f32, 0.40f32]) else (t, n, alb) in
+  (t, n, alb)
+
+------------------------------------------------------------
+-- Resources: the viewspace-depth chain (level m is
+-- max(1, floor(viewport / 2^m))) and the AO working textures
+-- (.x = visibility term, .y = packed edges, from main_pass).
+------------------------------------------------------------
+
+resource depth_mip0: image2d { format = r32float  size = 1920x1080  usages = [storage_write, sampled] }
+resource depth_mip1: image2d { format = r32float  size = 960x540    usages = [storage_write, sampled] }
+resource depth_mip2: image2d { format = r32float  size = 480x270    usages = [storage_write, sampled] }
+resource depth_mip3: image2d { format = r32float  size = 240x135    usages = [storage_write, sampled] }
+resource depth_mip4: image2d { format = r32float  size = 120x67     usages = [storage_write, sampled] }
+
+resource ao_work:  image2d { format = rgba16float  size = 1920x1080  usages = [storage_write, sampled] }
+resource ao_ping:  image2d { format = rgba16float  size = 1920x1080  usages = [storage_write, sampled] }
+resource ao_final: image2d { format = rgba16float  size = 1920x1080  usages = [storage_write, sampled] }
+
+-- Pass 1: raycast the scene, store viewspace depth. A real renderer
+-- would instead linearize its depth buffer here with
+-- gtao.screen_to_viewspace_depth.
+#[compute]
+entry derive_depth(#[view(depth_mip0, storage_write)] out0: storage_image,
+                   #[builtin(global_invocation_id)] gid: vec3u32) () =
+  let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
+  let sp = @[(f32.u32(gid.x) + 0.5f32) / W, (f32.u32(gid.y) + 0.5f32) / H] in
+  let (t, _, _) = scene_hit(ray_dir(sp)) in
+  image_store(out0, xy, @[gtao.clamp_depth(t), 0.0f32, 0.0f32, 1.0f32])
+
+-- Passes 2-5: the depth chain.
+#[compute]
+entry prefilter_mip1(#[view(depth_mip1, storage_write)] out1: storage_image,
+                     #[view(depth_mip0, sampled)] src0: texture2d,
+                     #[builtin(global_invocation_id)] gid: vec3u32) () =
+  let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
+  let d = gtao.downsample_depth(xy, src0, gtao.mip_extent(C, 0i32), C) in
+  image_store(out1, xy, @[d, 0.0f32, 0.0f32, 1.0f32])
+
+#[compute]
+entry prefilter_mip2(#[view(depth_mip2, storage_write)] out2: storage_image,
+                     #[view(depth_mip1, sampled)] src1: texture2d,
+                     #[builtin(global_invocation_id)] gid: vec3u32) () =
+  let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
+  let d = gtao.downsample_depth(xy, src1, gtao.mip_extent(C, 1i32), C) in
+  image_store(out2, xy, @[d, 0.0f32, 0.0f32, 1.0f32])
+
+#[compute]
+entry prefilter_mip3(#[view(depth_mip3, storage_write)] out3: storage_image,
+                     #[view(depth_mip2, sampled)] src2: texture2d,
+                     #[builtin(global_invocation_id)] gid: vec3u32) () =
+  let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
+  let d = gtao.downsample_depth(xy, src2, gtao.mip_extent(C, 2i32), C) in
+  image_store(out3, xy, @[d, 0.0f32, 0.0f32, 1.0f32])
+
+#[compute]
+entry prefilter_mip4(#[view(depth_mip4, storage_write)] out4: storage_image,
+                     #[view(depth_mip3, sampled)] src3: texture2d,
+                     #[builtin(global_invocation_id)] gid: vec3u32) () =
+  let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
+  let d = gtao.downsample_depth(xy, src3, gtao.mip_extent(C, 3i32), C) in
+  image_store(out4, xy, @[d, 0.0f32, 0.0f32, 1.0f32])
+
+-- Pass 6: the GTAO main pass (High preset), normals from depth.
+#[compute]
+entry gtao_main(#[view(ao_work, storage_write)] outw: storage_image,
+                #[view(depth_mip0, sampled)] m0: texture2d,
+                #[view(depth_mip1, sampled)] m1: texture2d,
+                #[view(depth_mip2, sampled)] m2: texture2d,
+                #[view(depth_mip3, sampled)] m3: texture2d,
+                #[view(depth_mip4, sampled)] m4: texture2d,
+                #[builtin(global_invocation_id)] gid: vec3u32,
+                #[uniform(set=1, binding=3)] iFrame: u32) () =
+  let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
+  let normal = gtao.compute_viewspace_normal(xy, m0, C) in
+  let noise = gtao.spatiotemporal_noise(@[gid.x, gid.y], iFrame % 64u32) in
+  let (slices, steps) = gtao.preset_high in
+  let (vis, edges) = gtao.main_pass(xy, slices, steps, noise, normal, C,
+                                    m0, m1, m2, m3, m4) in
+  image_store(outw, xy, @[vis, edges, 0.0f32, 1.0f32])
+
+-- Passes 7-8: two denoise passes; the second applies the final scale.
+#[compute]
+entry denoise_a(#[view(ao_ping, storage_write)] outp: storage_image,
+                #[view(ao_work, sampled)] work: texture2d,
+                #[builtin(global_invocation_id)] gid: vec3u32) () =
+  let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
+  let (ao, edges) = gtao.denoise(xy, work, C, false) in
+  image_store(outp, xy, @[ao, edges, 0.0f32, 1.0f32])
+
+#[compute]
+entry denoise_b(#[view(ao_final, storage_write)] outf: storage_image,
+                #[view(ao_ping, sampled)] ping: texture2d,
+                #[builtin(global_invocation_id)] gid: vec3u32) () =
+  let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
+  let (ao, edges) = gtao.denoise(xy, ping, C, true) in
+  image_store(outf, xy, @[ao, edges, 0.0f32, 1.0f32])
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 =
+  let verts = [@[-1.0, -1.0, 0.0, 1.0],
+               @[3.0, -1.0, 0.0, 1.0],
+               @[-1.0, 3.0, 0.0, 1.0]] in
+  verts[vid]
+
+-- Shade: raycast the same scene for albedo/normal, simple two-term
+-- lighting with AO attenuating the ambient. Mouse-swept split: left of
+-- the cursor ignores AO, right applies it.
+#[fragment]
+entry fragment_main(#[builtin(position)] pos: vec4f32,
+                    #[sampler(set=0, binding=3)] samp: sampler,
+                    #[view(ao_final, sampled)] ao_tex: texture2d,
+                    #[uniform(set=1, binding=0)] iResolution: vec3f32,
+                    #[uniform(set=1, binding=2)] iMouse: vec4f32)
+  #[location(0)] vec4f32 =
+  let uv = @[pos.x / iResolution.x, pos.y / iResolution.y] in
+  let (_, n, alb) = scene_hit(ray_dir(uv)) in
+  let ao = texture_sample(ao_tex, samp, uv, 0.0f32).x in
+  let split = iMouse.x / iResolution.x in
+  let ao = if uv.x < split then 1.0f32 else ao in
+  let l = normalize(@[0.0f32 - 0.3f32, 0.8f32, 0.0f32 - 0.5f32]) in
+  let ndl = f32.max(0.0f32, dot(n, l)) in
+  let lit = 0.55f32 * ao + 0.5f32 * ndl * ao in
+  @[alb.x * lit, alb.y * lit, alb.z * lit, 1.0]

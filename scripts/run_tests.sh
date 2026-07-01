@@ -42,6 +42,16 @@ $WYN compile lib/testfiles/noise_smoke.wyn -o /tmp/noise_smoke.spv
 spirv-val /tmp/noise_smoke.spv
 $WYN compile lib/testfiles/noise_smoke.wyn -t wgsl -o /tmp/noise_smoke.wgsl
 
+$WYN compile lib/testfiles/gtao_smoke.wyn -o /tmp/gtao_smoke.spv
+spirv-val /tmp/gtao_smoke.spv
+$WYN compile lib/testfiles/gtao_smoke.wyn -t wgsl -o /tmp/gtao_smoke.wgsl
+
+# Compile-only (the demo needs a window, a GPU, and an input image; see
+# the header of gtao_demo.wyn for the interactive run command).
+$WYN compile lib/testfiles/gtao_demo.wyn -o /tmp/gtao_demo.spv
+spirv-val /tmp/gtao_demo.spv
+$WYN compile lib/testfiles/gtao_demo.wyn -t wgsl -o /tmp/gtao_demo.wgsl
+
 echo "compile + validate: OK"
 
 if ! $RUN; then
@@ -84,3 +94,9 @@ $TEPHRA run /tmp/noise_smoke.spv --entry noise_smoke -n 5 -w 64
 echo "Slots: [value2, perlin2, simplex2, worley2, fbm_perlin(6oct, lac=2, gain=0.5)]."
 echo "Expect: first three in [-1, 1]; worley2 a small positive distance (~0..1.5);"
 echo "        fbm_perlin a damped sum of octaves (no fixed range, but bounded)."
+
+echo
+echo "--- gtao_smoke (lib/gtao.wyn pure-math invariants) ---"
+$TEPHRA run /tmp/gtao_smoke.spv --entry gtao_smoke -n 16 -w 64
+echo "Slots: see the key in lib/testfiles/gtao_smoke.wyn."
+echo "Expect: [0, 1, 3, 2730, ~0.905, ~0.614, ~0, 1, <0.06, <0.05, ~0, 1, 2, 0, 0.4667, 6]"

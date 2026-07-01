@@ -1,0 +1,78 @@
+import "../gtao"
+
+-- Smoke test for the texture-free half of lib/gtao.wyn. Each slot is an
+-- invariant that should hold analytically; see the expectations in
+-- scripts/run_tests.sh.
+--
+-- Slots:
+--   0: hilbert_index(6, 0, 0)                        -> 0
+--   1: hilbert_index(6, 1, 0)                        -> 1
+--   2: hilbert_index(6, 0, 1)                        -> 3
+--   3: hilbert_index(6, 63, 63)                      -> in [0, 4096)
+--   4: spatiotemporal_noise((0,0), 1).x              -> in [0, 1)
+--   5: spatiotemporal_noise((0,0), 1).y              -> in [0, 1)
+--   6: edge pack/unpack roundtrip max abs error      -> 0
+--   7: pack_edges of a flat plane (all edges open)   -> 1 (= 255/255)
+--   8: fastmath.acos max abs error vs f32.acos       -> < 0.06 rad
+--      (the approximation uses fastmath.sqrt internally, as XeGTAO does)
+--   9: fastmath.sqrt max rel error over [0.01, ~100] -> < 0.05
+--  10: depth linearize roundtrip at view_z = 5       -> ~0
+--  11: depth_mip_filter(1,1,1,1)                     -> 1
+--  12: depth_mip_filter(1,1,1,2) (distant wins)      -> 2
+--  13: viewspace position known value                -> ~0
+--  14: decode(encode(0.7)) visibility roundtrip      -> ~0.7/1.5 (0.4667)
+--  15: preset_high as f32 (slices + steps)           -> 6
+
+def C: gtao.consts =
+  gtao.make_constants(@[1920.0f32, 1080.0f32], 0.5773503f32, 0.1f32, 100.0f32,
+                      0u32, gtao.default_settings)
+
+def edge_roundtrip_err: f32 =
+  let e = @[1.0f32, 1.0f32 / 3.0f32, 2.0f32 / 3.0f32, 0.0f32] in
+  let u = gtao.unpack_edges(gtao.pack_edges(e)) in
+  f32.max(f32.max(f32.abs(u.x - e.x), f32.abs(u.y - e.y)),
+          f32.max(f32.abs(u.z - e.z), f32.abs(u.w - e.w)))
+
+def acos_max_err: f32 =
+  loop max_err = 0.0f32 for i < 65i32 do
+    let x = (0.0f32 - 1.0f32) + 2.0f32 * f32.i32(i) / 64.0f32 in
+    f32.max(max_err, f32.abs(fastmath.acos(x) - f32.acos(x)))
+
+def sqrt_max_rel_err: f32 =
+  loop max_err = 0.0f32 for i < 64i32 do
+    let x = 0.01f32 * f32.exp2(f32.i32(i) * 0.21f32) in
+    f32.max(max_err, f32.abs(fastmath.sqrt(x) / f32.sqrt(x) - 1.0f32))
+
+def depth_roundtrip_err: f32 =
+  let view_z = 5.0f32 in
+  let ndc = C.depth_unpack.y - C.depth_unpack.x / view_z in
+  f32.abs(gtao.screen_to_viewspace_depth(ndc, C) - view_z)
+
+def viewspace_pos_err: f32 =
+  -- Center of the viewport at depth 5 must sit on the view axis.
+  let p = gtao.compute_viewspace_position(@[0.5f32, 0.5f32], 5.0f32, C) in
+  magnitude(p - @[0.0f32, 0.0f32, 5.0f32])
+
+#[compute]
+entry gtao_smoke() [16]f32 =
+  let noise = gtao.spatiotemporal_noise(@[0u32, 0u32], 1u32) in
+  let flat_edges = gtao.calculate_edges(5.0f32, 5.0f32, 5.0f32, 5.0f32, 5.0f32) in
+  let (slices, steps) = gtao.preset_high in
+  [
+    f32.u32(sampling.hilbert_index(6u32, 0u32, 0u32)),
+    f32.u32(sampling.hilbert_index(6u32, 1u32, 0u32)),
+    f32.u32(sampling.hilbert_index(6u32, 0u32, 1u32)),
+    f32.u32(sampling.hilbert_index(6u32, 63u32, 63u32)),
+    noise.x,
+    noise.y,
+    edge_roundtrip_err,
+    gtao.pack_edges(flat_edges),
+    acos_max_err,
+    sqrt_max_rel_err,
+    depth_roundtrip_err,
+    gtao.depth_mip_filter(1.0f32, 1.0f32, 1.0f32, 1.0f32, C),
+    gtao.depth_mip_filter(1.0f32, 1.0f32, 1.0f32, 2.0f32, C),
+    viewspace_pos_err,
+    gtao.decode_visibility(gtao.encode_visibility(0.7f32)),
+    f32.i32(slices + steps)
+  ]

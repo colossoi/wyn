@@ -39,6 +39,16 @@ spirv-val "%TEMP%\stats_uniform_int.spv" || exit /b 1
 spirv-val "%TEMP%\noise_smoke.spv" || exit /b 1
 "%WYN%" compile lib\testfiles\noise_smoke.wyn -t wgsl -o "%TEMP%\noise_smoke.wgsl" || exit /b 1
 
+"%WYN%" compile lib\testfiles\gtao_smoke.wyn -o "%TEMP%\gtao_smoke.spv" || exit /b 1
+spirv-val "%TEMP%\gtao_smoke.spv" || exit /b 1
+"%WYN%" compile lib\testfiles\gtao_smoke.wyn -t wgsl -o "%TEMP%\gtao_smoke.wgsl" || exit /b 1
+
+rem Compile-only (the demo needs a window, a GPU, and an input image; see
+rem the header of gtao_demo.wyn for the interactive run command).
+"%WYN%" compile lib\testfiles\gtao_demo.wyn -o "%TEMP%\gtao_demo.spv" || exit /b 1
+spirv-val "%TEMP%\gtao_demo.spv" || exit /b 1
+"%WYN%" compile lib\testfiles\gtao_demo.wyn -t wgsl -o "%TEMP%\gtao_demo.wgsl" || exit /b 1
+
 echo compile + validate: OK
 
 if "%RUN%"=="0" (
@@ -83,3 +93,9 @@ echo --- noise_smoke (one query at p=(3.5, 7.25), seed 0x9e3779b9) ---
 echo Slots: [value2, perlin2, simplex2, worley2, fbm_perlin(6oct, lac=2, gain=0.5)].
 echo Expect: first three in [-1, 1]; worley2 a small positive distance (~0..1.5);
 echo         fbm_perlin a damped sum of octaves (no fixed range, but bounded).
+
+echo.
+echo --- gtao_smoke (lib/gtao.wyn pure-math invariants) ---
+"%TEPHRA%" run "%TEMP%\gtao_smoke.spv" --entry gtao_smoke -n 16 -w 64
+echo Slots: see the key in lib/testfiles/gtao_smoke.wyn.
+echo Expect: [0, 1, 3, 2730, ~0.905, ~0.614, ~0, 1, ^<0.06, ^<0.05, ~0, 1, 2, 0, 0.4667, 6]
