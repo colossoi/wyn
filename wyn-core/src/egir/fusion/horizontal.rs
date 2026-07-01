@@ -1,0 +1,314 @@
+//! Same-space horizontal fusion: merge sibling SegOps over an equal iteration
+//! space into one multi-output SegOp so a single kernel produces several
+//! outputs. This is the structural inverse of `split_multidomain_seg_maps` and
+//! the rewrite that retires the ad-hoc multi-reduce demotion guard.
+//!
+//! One fusion per call: the driver rebuilds the dependency DAG and re-invokes,
+//! so the legality oracle is never stale.
+
+use polytype::Type;
+use smallvec::SmallVec;
+
+use super::legality::SemanticGraph;
+use super::space::seg_space_fusable;
+use crate::ast::TypeName;
+use crate::egir::graph_ops;
+use crate::egir::program::{EgirInner, SemanticOpId};
+use crate::egir::types::{
+    reify_seg_kind_operators, EGraph, EgirSoac, NodeId, PureOp, SegBody, SegOpKind, SegPlacement,
+    SegResourceAccess, SideEffectKind, SoacDestination,
+};
+use crate::ssa::framework::BlockId;
+
+/// Find one legal sibling pair anywhere in the program and fuse it. Returns
+/// whether a fusion happened.
+pub fn fuse_sibling_seg_ops(inner: &mut EgirInner, oracle: &SemanticGraph) -> bool {
+    for idx in 0..inner.entry_points.len() {
+        let scope = inner.entry_points[idx].name.clone();
+        if fuse_in_graph(&mut inner.entry_points[idx].graph, &scope, oracle) {
+            return true;
+        }
+    }
+    for idx in 0..inner.functions.len() {
+        let scope = inner.functions[idx].name.clone();
+        if fuse_in_graph(&mut inner.functions[idx].graph, &scope, oracle) {
+            return true;
+        }
+    }
+    false
+}
+
+fn fuse_in_graph(graph: &mut EGraph, scope: &str, oracle: &SemanticGraph) -> bool {
+    let block_ids: Vec<BlockId> = graph.skeleton.blocks.iter().map(|(id, _)| id).collect();
+    for block_id in block_ids {
+        let segs: Vec<usize> = (0..graph.skeleton.blocks[block_id].side_effects.len())
+            .filter(|&i| is_fusable_seg(&graph.skeleton.blocks[block_id].side_effects[i].kind))
+            .collect();
+        for a in 0..segs.len() {
+            for b in (a + 1)..segs.len() {
+                let (i, j) = (segs[a], segs[b]);
+                if sibling_fusable(graph, block_id, i, j, scope, oracle) {
+                    fuse_pair(graph, block_id, i, j);
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn is_fusable_seg(kind: &SideEffectKind) -> bool {
+    matches!(kind, SideEffectKind::Soac(EgirSoac::Seg { .. }))
+}
+
+/// Legality: equal space, compatible placement, no resource/effect conflict, and
+/// not a producer/consumer chain (that is vertical fusion's job).
+fn sibling_fusable(
+    graph: &EGraph,
+    block_id: BlockId,
+    i: usize,
+    j: usize,
+    scope: &str,
+    oracle: &SemanticGraph,
+) -> bool {
+    let block = &graph.skeleton.blocks[block_id];
+    let (
+        SideEffectKind::Soac(EgirSoac::Seg {
+            space: sp_i,
+            placement: pl_i,
+            ..
+        }),
+        Some(res_i),
+    ) = (&block.side_effects[i].kind, block.side_effects[i].result)
+    else {
+        return false;
+    };
+    let (
+        SideEffectKind::Soac(EgirSoac::Seg {
+            space: sp_j,
+            placement: pl_j,
+            ..
+        }),
+        Some(res_j),
+    ) = (&block.side_effects[j].kind, block.side_effects[j].result)
+    else {
+        return false;
+    };
+    if pl_i != pl_j || !seg_space_fusable(sp_i, sp_j) {
+        return false;
+    }
+    let op_i = SemanticOpId {
+        scope: scope.to_string(),
+        result: res_i,
+    };
+    let op_j = SemanticOpId {
+        scope: scope.to_string(),
+        result: res_j,
+    };
+    if oracle.conflicts(&op_i, &op_j) {
+        return false;
+    }
+    // A value edge either way makes them a chain, handled by vertical fusion.
+    !oracle.reachable_between(&op_i, &op_j) && !oracle.reachable_between(&op_j, &op_i)
+}
+
+/// Merge the Seg at `j` into the Seg at `i`, remove `j`, and rewire results.
+/// Fields concatenate lane-wise; the operand vector is rebuilt in the canonical
+/// `[inputs, init_accs, output_views]` order with `map_input_indices` rebased by
+/// the input offset. The fused op produces a tuple of both operands' outputs, so
+/// consumers of each original result are re-pointed at the corresponding fields.
+fn fuse_pair(graph: &mut EGraph, block_id: BlockId, i: usize, j: usize) {
+    let p = extract_seg(graph, block_id, i);
+    let q = extract_seg(graph, block_id, j);
+
+    let base = p.input_array_types.len();
+    let mut input_array_types = p.input_array_types.clone();
+    input_array_types.extend(q.input_array_types.iter().cloned());
+    let mut input_elem_types = p.input_elem_types.clone();
+    input_elem_types.extend(q.input_elem_types.iter().cloned());
+
+    let mut map_bodies = p.map_bodies.clone();
+    map_bodies.extend(q.map_bodies.iter().cloned());
+    // Q's map funcs now read inputs shifted right by P's input count.
+    let mut map_input_indices = p.map_input_indices.clone();
+    map_input_indices
+        .extend(q.map_input_indices.iter().map(|lane| lane.iter().map(|&k| k + base).collect()));
+
+    let mut map_output_elem_types = p.map_output_elem_types.clone();
+    map_output_elem_types.extend(q.map_output_elem_types.iter().cloned());
+    let mut map_destinations = p.map_destinations.clone();
+    map_destinations.extend(q.map_destinations.iter().cloned());
+    let mut acc_destinations = p.acc_destinations.clone();
+    acc_destinations.extend(q.acc_destinations.iter().cloned());
+
+    let mut operators = p.kind.operators().to_vec();
+    operators.extend(q.kind.operators().iter().cloned());
+    let kind = reify_seg_kind_operators(operators);
+
+    let mut result_types = p.result_types.clone();
+    result_types.extend(q.result_types.iter().cloned());
+
+    let mut output_slots = p.output_slots.clone();
+    output_slots.extend(q.output_slots.iter().copied());
+    output_slots.sort_unstable();
+    output_slots.dedup();
+
+    let resources = merge_resources(&p.resources, &q.resources);
+
+    // Rebuild `[inputs, init_accs, output_views]`. init_accs are the operators'
+    // neutrals; output views are the trailing operands of each original op.
+    let mut operands: SmallVec<[NodeId; 4]> = SmallVec::new();
+    operands.extend(p.inputs.iter().copied());
+    operands.extend(q.inputs.iter().copied());
+    operands.extend(p.init_accs.iter().copied());
+    operands.extend(q.init_accs.iter().copied());
+    operands.extend(p.output_views.iter().copied());
+    operands.extend(q.output_views.iter().copied());
+
+    // Fused tuple result: fields are P's outputs then Q's.
+    let tuple_ty = Type::Constructed(TypeName::Tuple(result_types.len()), result_types.clone());
+    let fused_result = graph.alloc_side_effect_result(tuple_ty);
+
+    // Re-point consumers: `Project(P.result, f)` → `Project(fused, f)`,
+    // `Project(Q.result, f)` → `Project(fused, base_fields + f)`.
+    reproject(graph, p.result, fused_result, 0);
+    reproject(graph, q.result, fused_result, p.result_types.len() as u32);
+
+    let fused = EgirSoac::Seg {
+        space: p.space.clone(),
+        placement: p.placement,
+        kind,
+        map_bodies,
+        input_array_types,
+        input_elem_types,
+        map_output_elem_types,
+        map_input_indices,
+        map_destinations,
+        acc_destinations,
+        result_types,
+        output_slots,
+        resources,
+        scratch_resources: Vec::new(),
+    };
+
+    let block = &mut graph.skeleton.blocks[block_id];
+    block.side_effects[i].kind = SideEffectKind::Soac(fused);
+    block.side_effects[i].operand_nodes = operands;
+    block.side_effects[i].result = Some(fused_result);
+    block.side_effects.remove(j);
+}
+
+/// Everything `fuse_pair` needs from one Seg side-effect, cloned so the two can
+/// be read independently while the block is rebuilt.
+struct SegParts {
+    space: crate::egir::types::SegSpace,
+    placement: SegPlacement,
+    kind: SegOpKind,
+    map_bodies: Vec<SegBody>,
+    input_array_types: Vec<Type<TypeName>>,
+    input_elem_types: Vec<Type<TypeName>>,
+    map_output_elem_types: Vec<Type<TypeName>>,
+    map_input_indices: Vec<Vec<usize>>,
+    map_destinations: Vec<SoacDestination>,
+    acc_destinations: Vec<SoacDestination>,
+    result_types: Vec<Type<TypeName>>,
+    output_slots: Vec<usize>,
+    resources: Vec<SegResourceAccess>,
+    result: NodeId,
+    inputs: Vec<NodeId>,
+    init_accs: Vec<NodeId>,
+    output_views: Vec<NodeId>,
+}
+
+fn extract_seg(graph: &EGraph, block_id: BlockId, idx: usize) -> SegParts {
+    let effect = &graph.skeleton.blocks[block_id].side_effects[idx];
+    let SideEffectKind::Soac(EgirSoac::Seg {
+        space,
+        placement,
+        kind,
+        map_bodies,
+        input_array_types,
+        input_elem_types,
+        map_output_elem_types,
+        map_input_indices,
+        map_destinations,
+        acc_destinations,
+        result_types,
+        output_slots,
+        resources,
+        ..
+    }) = &effect.kind
+    else {
+        unreachable!("extract_seg on non-Seg");
+    };
+    let n_inputs = input_array_types.len();
+    let n_accs = kind.operators().len();
+    let inputs = effect.operand_nodes[..n_inputs].to_vec();
+    let init_accs = effect.operand_nodes[n_inputs..n_inputs + n_accs].to_vec();
+    let output_views = effect.operand_nodes[n_inputs + n_accs..].to_vec();
+    SegParts {
+        space: space.clone(),
+        placement: *placement,
+        kind: kind.clone(),
+        map_bodies: map_bodies.clone(),
+        input_array_types: input_array_types.clone(),
+        input_elem_types: input_elem_types.clone(),
+        map_output_elem_types: map_output_elem_types.clone(),
+        map_input_indices: map_input_indices.clone(),
+        map_destinations: map_destinations.clone(),
+        acc_destinations: acc_destinations.clone(),
+        result_types: result_types.clone(),
+        output_slots: output_slots.clone(),
+        resources: resources.clone(),
+        result: effect.result.expect("fusable Seg has a result"),
+        inputs,
+        init_accs,
+        output_views,
+    }
+}
+
+/// Rewrite every `Project(old_result, f)` to `Project(new_result, f + offset)`,
+/// and any direct use of `old_result` to `new_result`.
+fn reproject(graph: &mut EGraph, old_result: NodeId, new_result: NodeId, offset: u32) {
+    let projects: Vec<(NodeId, u32)> = graph
+        .nodes
+        .iter()
+        .filter_map(|(nid, node)| match node {
+            crate::egir::types::ENode::Pure {
+                op: PureOp::Project { index },
+                operands,
+            } if operands.first() == Some(&old_result) => Some((nid, *index)),
+            _ => None,
+        })
+        .collect();
+    for (project_nid, index) in projects {
+        if let crate::egir::types::ENode::Pure { op, operands } = &mut graph.nodes[project_nid] {
+            *op = PureOp::Project {
+                index: index + offset,
+            };
+            operands[0] = new_result;
+        }
+    }
+    // Any non-Project use of the old result now refers to the fused tuple.
+    graph_ops::replace_all_references(graph, old_result, new_result);
+}
+
+fn merge_resources(a: &[SegResourceAccess], b: &[SegResourceAccess]) -> Vec<SegResourceAccess> {
+    use crate::egir::types::SegResourceAccessKind;
+    let mut merged: std::collections::HashMap<crate::BindingRef, SegResourceAccessKind> =
+        std::collections::HashMap::new();
+    for resource in a.iter().chain(b) {
+        merged
+            .entry(resource.binding)
+            .and_modify(|access| {
+                if *access != resource.access {
+                    *access = SegResourceAccessKind::ReadWrite;
+                }
+            })
+            .or_insert(resource.access);
+    }
+    let mut out: Vec<_> =
+        merged.into_iter().map(|(binding, access)| SegResourceAccess { binding, access }).collect();
+    out.sort_by_key(|resource| (resource.binding.set, resource.binding.binding));
+    out
+}

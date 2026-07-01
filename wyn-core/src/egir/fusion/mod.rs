@@ -7,9 +7,7 @@
 //! the whole milestone rests on: never fuse or reorder two ops that conflict on
 //! a resource or effect.
 
-// These primitives are consumed by the semantic-opt rewrite passes; the
-// crate-internal surface is exercised by the unit tests alongside them.
-#![allow(dead_code)]
-
+pub(crate) mod horizontal;
 pub(crate) mod legality;
 pub(crate) mod space;
+pub(crate) mod vertical;

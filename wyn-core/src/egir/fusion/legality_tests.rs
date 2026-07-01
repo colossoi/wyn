@@ -48,7 +48,6 @@ fn oracle_distinguishes_conflict_flow_and_value_edges() {
 
     // Value consumers come only from Value edges.
     assert_eq!(g.value_consumer_count(&a), 1);
-    assert_eq!(g.value_consumers(&a), vec![&c]);
     assert_eq!(g.value_consumer_count(&b), 0);
 
     // Reachability follows value + effect edges, not resource-only edges.
@@ -70,6 +69,5 @@ fn unknown_ops_have_no_edges() {
     let g = SemanticGraph::new(&[dep(&a, &a, SemanticDependencyKind::Value)]);
     assert!(!g.conflicts(&lonely, &a));
     assert_eq!(g.value_consumer_count(&lonely), 0);
-    assert!(g.value_consumers(&lonely).is_empty());
     assert!(!g.reachable_between(&lonely, &a));
 }

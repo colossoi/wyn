@@ -12,7 +12,6 @@ use crate::egir::program::{SemanticDependency, SemanticDependencyKind, SemanticO
 /// transitively downstream of another.
 pub struct SemanticGraph {
     /// Dense interning of every op that appears in any edge.
-    ops: Vec<SemanticOpId>,
     index: HashMap<SemanticOpId, usize>,
     /// Value successors (consumers that read the producer's result).
     value_succ: Vec<Vec<usize>>,
@@ -24,14 +23,12 @@ pub struct SemanticGraph {
 
 impl SemanticGraph {
     pub fn new(deps: &[SemanticDependency]) -> Self {
-        let mut ops: Vec<SemanticOpId> = Vec::new();
         let mut index: HashMap<SemanticOpId, usize> = HashMap::new();
         let mut intern = |op: &SemanticOpId| -> usize {
             if let Some(&i) = index.get(op) {
                 return i;
             }
-            let i = ops.len();
-            ops.push(op.clone());
+            let i = index.len();
             index.insert(op.clone(), i);
             i
         };
@@ -59,7 +56,7 @@ impl SemanticGraph {
             }
         }
 
-        let n = ops.len();
+        let n = index.len();
         let mut value_succ = vec![Vec::new(); n];
         for (p, c) in value_pairs {
             value_succ[p].push(c);
@@ -70,7 +67,6 @@ impl SemanticGraph {
         }
 
         Self {
-            ops,
             index,
             value_succ,
             flow_succ,
@@ -86,14 +82,6 @@ impl SemanticGraph {
         match (self.index.get(a), self.index.get(b)) {
             (Some(&i), Some(&j)) => self.conflict.contains(&(i, j)),
             _ => false,
-        }
-    }
-
-    /// The ops that read `producer`'s result (its `Value` successors).
-    pub fn value_consumers(&self, producer: &SemanticOpId) -> Vec<&SemanticOpId> {
-        match self.index.get(producer) {
-            Some(&i) => self.value_succ[i].iter().map(|&j| &self.ops[j]).collect(),
-            None => Vec::new(),
         }
     }
 

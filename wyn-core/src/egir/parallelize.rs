@@ -883,7 +883,8 @@ fn reify_tail_soac(entry: &mut EgirEntry) {
     // Several scalar reductions contributing fields of one aggregate output
     // cannot yet be independently published: each would require its own
     // materialized scalar plus a final assembly phase. Keep the semantic ops,
-    // but place them lane-locally until that DAG rewrite is available.
+    // but place them lane-locally. (Same-space horizontal fusion in `optimize`
+    // will subsume this once its reduce-merge rewrite is complete.)
     let kernel_accumulators = entry
         .graph
         .skeleton

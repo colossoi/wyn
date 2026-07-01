@@ -430,6 +430,21 @@ impl SegOpKind {
     }
 }
 
+/// Classify an already-built operator list into the matching `SegOpKind`:
+/// empty is a map, all-reduce a `SegRed`, all-scan a `SegScan`, otherwise a
+/// mixed `SegComposite`. Shared by segmentation and horizontal fusion.
+pub fn reify_seg_kind_operators(operators: Vec<SegBinOp>) -> SegOpKind {
+    if operators.is_empty() {
+        SegOpKind::SegMap
+    } else if operators.iter().all(|op| matches!(op.kind, ScremaAccumulator::Reduce)) {
+        SegOpKind::SegRed { operators }
+    } else if operators.iter().all(|op| matches!(op.kind, ScremaAccumulator::Scan)) {
+        SegOpKind::SegScan { operators }
+    } else {
+        SegOpKind::SegComposite { operators }
+    }
+}
+
 impl EgirSoac {
     /// Every `SegBody` this SOAC carries, in a stable order: map lanes first,
     /// then each accumulator's step and combine. Captures and the callee region

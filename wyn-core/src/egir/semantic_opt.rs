@@ -1,7 +1,12 @@
-//! Target-independent optimization of semantic EGIR.
+//! Target-independent optimization of semantic EGIR: resource-access
+//! canonicalization, dead-SegOp elimination, and graph-rewriting fusion
+//! (same-space horizontal, single-consumer producer/consumer). Every rewrite is
+//! gated by the semantic dependency DAG so two ops are never fused or reordered
+//! across a conflicting resource or effect.
 
 use std::collections::{HashMap, HashSet};
 
+use super::fusion::legality::SemanticGraph;
 use super::program::EgirInner;
 use super::types::{
     EGraph, EgirSoac, NodeId, SegResourceAccess, SegResourceAccessKind, SideEffectKind, SkeletonTerminator,
@@ -9,19 +14,35 @@ use super::types::{
 
 pub fn run(inner: &mut EgirInner) {
     for entry in &mut inner.entry_points {
-        optimize_graph(&mut entry.graph);
+        canonicalize_resource_accesses(&mut entry.graph);
     }
     for function in &mut inner.functions {
-        optimize_graph(&mut function.graph);
+        canonicalize_resource_accesses(&mut function.graph);
     }
+
+    // Fixpoint: rebuild the DAG, take one legal rewrite, repeat. Rebuilding
+    // between rewrites keeps the legality oracle sound — a stale DAG is the
+    // top correctness risk. Dead elimination runs first to shrink the graph.
+    loop {
+        super::parallelize::rebuild_semantic_dependencies(inner);
+        let deps = inner.semantic_dependencies.clone();
+        let oracle = SemanticGraph::new(&deps);
+
+        let mut changed = eliminate_dead_seg_ops(inner);
+        if !changed {
+            changed = super::fusion::horizontal::fuse_sibling_seg_ops(inner, &oracle);
+        }
+        if !changed {
+            changed = super::fusion::vertical::fuse_producer_into_consumer(inner, &oracle);
+        }
+        if !changed {
+            break;
+        }
+    }
+
     super::parallelize::rebuild_semantic_dependencies(inner);
     let mut seen = HashSet::new();
     inner.semantic_dependencies.retain(|dependency| seen.insert(dependency.clone()));
-}
-
-fn optimize_graph(graph: &mut EGraph) {
-    canonicalize_resource_accesses(graph);
-    eliminate_dead_lane_local_ops(graph);
 }
 
 fn canonicalize_resource_accesses(graph: &mut EGraph) {
@@ -49,7 +70,22 @@ fn canonicalize_resource_accesses(graph: &mut EGraph) {
     }
 }
 
-fn eliminate_dead_lane_local_ops(graph: &mut EGraph) {
+/// Remove SegOps (of any placement) that write no observable resource and whose
+/// result is unused. Generalizes the former lane-local-only elimination; the
+/// outer fixpoint re-runs it so producer chains collapse. Returns whether any
+/// graph changed.
+fn eliminate_dead_seg_ops(inner: &mut EgirInner) -> bool {
+    let mut changed = false;
+    for entry in &mut inner.entry_points {
+        changed |= eliminate_dead_seg_ops_in_graph(&mut entry.graph);
+    }
+    for function in &mut inner.functions {
+        changed |= eliminate_dead_seg_ops_in_graph(&mut function.graph);
+    }
+    changed
+}
+
+fn eliminate_dead_seg_ops_in_graph(graph: &mut EGraph) -> bool {
     let mut used = HashSet::<NodeId>::new();
     for (_, node) in &graph.nodes {
         used.extend(node.children());
@@ -74,19 +110,31 @@ fn eliminate_dead_lane_local_ops(graph: &mut EGraph) {
             SkeletonTerminator::Unreachable => {}
         }
     }
+    let mut changed = false;
     for (_, block) in graph.skeleton.blocks.iter_mut() {
+        let before = block.side_effects.len();
         block.side_effects.retain(|effect| {
-            let SideEffectKind::Soac(EgirSoac::Seg {
-                placement: super::types::SegPlacement::LaneLocal,
-                resources,
-                ..
-            }) = &effect.kind
-            else {
+            let SideEffectKind::Soac(soac) = &effect.kind else {
                 return true;
             };
-            let observable_resource =
-                resources.iter().any(|resource| resource.access != SegResourceAccessKind::Read);
-            observable_resource || effect.result.is_some_and(|result| used.contains(&result))
+            // A Seg with no resource write and no output routing is observable
+            // only through its result. Filter/Hist/Screma may write in ways not
+            // summarized here, so keep them conservatively.
+            let observable = match soac {
+                EgirSoac::Seg {
+                    placement: _,
+                    resources,
+                    output_slots,
+                    ..
+                } => {
+                    !output_slots.is_empty()
+                        || resources.iter().any(|r| r.access != SegResourceAccessKind::Read)
+                }
+                _ => true,
+            };
+            observable || effect.result.is_some_and(|result| used.contains(&result))
         });
+        changed |= block.side_effects.len() != before;
     }
+    changed
 }

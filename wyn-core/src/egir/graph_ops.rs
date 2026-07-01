@@ -465,3 +465,55 @@ fn clone_inner(
     memo.insert(nid, new_nid);
     Ok(new_nid)
 }
+
+/// Replace every *reference* to `old` with `new` across a whole body — pure
+/// node operands, side-effect operands, SOAC captures, and terminator args. The
+/// `old` node's definition is left intact (now unreferenced). Fusion uses this
+/// to rewire the results of a producer/sibling op onto the fused op's result.
+pub fn replace_all_references(graph: &mut EGraph, old: NodeId, new: NodeId) {
+    use super::types::SkeletonTerminator;
+    if old == new {
+        return;
+    }
+    let swap = |slot: &mut NodeId| {
+        if *slot == old {
+            *slot = new;
+        }
+    };
+    for (_, node) in graph.nodes.iter_mut() {
+        match node {
+            ENode::Pure { operands, .. } => operands.iter_mut().for_each(swap),
+            ENode::Union { left, right } => {
+                swap(left);
+                swap(right);
+            }
+            ENode::FuncParam { .. }
+            | ENode::BlockParam { .. }
+            | ENode::Constant(_)
+            | ENode::SideEffectResult => {}
+        }
+    }
+    for (_, block) in graph.skeleton.blocks.iter_mut() {
+        for effect in &mut block.side_effects {
+            effect.operand_nodes.iter_mut().for_each(swap);
+            if let SideEffectKind::Soac(soac) = &mut effect.kind {
+                soac.visit_capture_nodes_mut(swap);
+            }
+        }
+        match &mut block.term {
+            SkeletonTerminator::Return(value) => value.iter_mut().for_each(swap),
+            SkeletonTerminator::Branch { args, .. } => args.iter_mut().for_each(swap),
+            SkeletonTerminator::CondBranch {
+                cond,
+                then_args,
+                else_args,
+                ..
+            } => {
+                swap(cond);
+                then_args.iter_mut().for_each(swap);
+                else_args.iter_mut().for_each(swap);
+            }
+            SkeletonTerminator::Unreachable => {}
+        }
+    }
+}
