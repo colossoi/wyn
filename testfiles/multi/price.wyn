@@ -5,11 +5,10 @@
 
 import "crr"
 
-#[uniform(set=1, binding=0)] def now: f32
-#[uniform(set=1, binding=1)] def rfr: f32
-
 #[compute]
-entry price_options(opts: [](f32, f32, i32, f32, f32)) []f32 =
+entry price_options(opts: [](f32, f32, i32, f32, f32),
+                    #[uniform(set=1, binding=0)] now: f32,
+                    #[uniform(set=1, binding=1)] rfr: f32) []f32 =
   map(|(s, k, t, tte, sigma): (f32, f32, i32, f32, f32)|
         crr_price(now, rfr, s, k, t, tte, sigma),
       opts)

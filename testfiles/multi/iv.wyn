@@ -11,19 +11,18 @@
 import "crr"
 import "numerical"
 
-#[uniform(set=1, binding=0)] def now: f32
-#[uniform(set=1, binding=1)] def rfr: f32
-
 -- Per-option residual: drop the row's data into the price function,
 -- subtract the market price. The lambda below captures (now, rfr,
 -- spot, strike, opt_type, tte, market) so `secant` only sees a
 -- `f32 -> f32`.
-def implied_vol(spot: f32, strike: f32, opt_type: i32, tte: f32, market: f32) f32 =
+def implied_vol(now: f32, rfr: f32, spot: f32, strike: f32, opt_type: i32, tte: f32, market: f32) f32 =
   let g = |sigma: f32| crr_price(now, rfr, spot, strike, opt_type, tte, sigma) - market in
   secant(g, 0.10, 0.30, 1.0e-4, 30)
 
 #[compute]
-entry implied_vols(opts: [](f32, f32, i32, f32, f32)) []f32 =
+entry implied_vols(opts: [](f32, f32, i32, f32, f32),
+                   #[uniform(set=1, binding=0)] now: f32,
+                   #[uniform(set=1, binding=1)] rfr: f32) []f32 =
   map(|(s, k, t, tte, mkt): (f32, f32, i32, f32, f32)|
-        implied_vol(s, k, t, tte, mkt),
+        implied_vol(now, rfr, s, k, t, tte, mkt),
       opts)
