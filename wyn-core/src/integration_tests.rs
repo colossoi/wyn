@@ -99,6 +99,48 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
     assert!(records_scratch, "SegRed records its reserved partial ResourceId");
 }
 
+/// Milestone-5 horizontal fusion: the four same-space reductions of
+/// `[sum, product, min, max]` — separate lane-local reductions over one input,
+/// writing fields of one aggregate output — merge into a single
+/// four-accumulator SegOp instead of four one-accumulator ops.
+#[test]
+fn same_space_reductions_fuse_into_one_multi_accumulator_op() {
+    use crate::egir::types::{EgirSoac, SegOpKind, SideEffectKind};
+
+    let tlc = crate::compile_thru_tlc(
+        r#"
+def N: i32 = 256
+#[compute]
+entry e() [4]f32 =
+    let xs = map(|i: i32| f32.i32(i), 0i32 ..< N) in
+    [f32.sum(xs), f32.product(xs), f32.minimum(xs), f32.maximum(xs)]
+"#,
+    )
+    .expect("TLC");
+    let allocated = tlc.infer_input_slice_bounds().to_egraph().expect("semantic EGIR allocation");
+    let operator_counts: Vec<usize> = allocated
+        .inner
+        .entry_points
+        .iter()
+        .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
+        .filter_map(|effect| match &effect.kind {
+            SideEffectKind::Soac(EgirSoac::Seg {
+                kind:
+                    SegOpKind::SegRed { operators }
+                    | SegOpKind::SegScan { operators }
+                    | SegOpKind::SegComposite { operators },
+                ..
+            }) => Some(operators.len()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        operator_counts,
+        vec![4],
+        "the four same-space reductions fuse into one four-accumulator op"
+    );
+}
+
 #[test]
 fn terminal_schedule_and_descriptor_are_atomic_and_deterministic() {
     let source = r#"

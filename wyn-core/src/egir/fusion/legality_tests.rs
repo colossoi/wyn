@@ -37,10 +37,11 @@ fn oracle_distinguishes_conflict_flow_and_value_edges() {
     ];
     let g = SemanticGraph::new(&deps);
 
-    // Conflicts: resource + effect, both directions; a Value edge is NOT a conflict.
-    assert!(g.conflicts(&a, &b));
+    // Only resource edges are conflicts (both directions); effect ordering and
+    // value edges are not.
+    assert!(g.conflicts(&a, &b), "resource edge is a conflict");
     assert!(g.conflicts(&b, &a));
-    assert!(g.conflicts(&b, &c));
+    assert!(!g.conflicts(&b, &c), "effect ordering alone is not a conflict");
     assert!(
         !g.conflicts(&a, &c),
         "a value edge alone is fusable, not a conflict"
@@ -50,12 +51,15 @@ fn oracle_distinguishes_conflict_flow_and_value_edges() {
     assert_eq!(g.value_consumer_count(&a), 1);
     assert_eq!(g.value_consumer_count(&b), 0);
 
-    // Reachability follows value + effect edges, not resource-only edges.
+    // Reachability follows value edges only — not effect ordering or resource.
     assert!(g.reachable_between(&a, &c), "a --Value--> c");
-    assert!(g.reachable_between(&b, &c), "b --Effect--> c");
+    assert!(
+        !g.reachable_between(&b, &c),
+        "b --Effect--> c is ordering, not a value chain"
+    );
     assert!(
         !g.reachable_between(&a, &b),
-        "a--b is resource-only, not a flow edge"
+        "a--b is resource-only, not a value edge"
     );
     assert!(!g.reachable_between(&c, &a), "no back edge");
 }

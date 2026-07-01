@@ -880,11 +880,11 @@ fn reify_tail_soac(entry: &mut EgirEntry) {
     for (block_id, idx, placement) in locs {
         reify_one_screma(entry, block_id, idx, placement);
     }
-    // Several scalar reductions contributing fields of one aggregate output
-    // cannot yet be independently published: each would require its own
-    // materialized scalar plus a final assembly phase. Keep the semantic ops,
-    // but place them lane-locally. (Same-space horizontal fusion in `optimize`
-    // will subsume this once its reduce-merge rewrite is complete.)
+    // Several kernel reductions/scans in one entry write fields of a shared
+    // aggregate output; independently parallel-lowering each would need its own
+    // materialized scalar plus a final assembly phase (not yet available). Place
+    // them lane-locally so they lower serially — horizontal fusion in `optimize`
+    // then merges same-space lane-local siblings into one serial loop.
     let kernel_accumulators = entry
         .graph
         .skeleton

@@ -15,9 +15,7 @@ pub struct SemanticGraph {
     index: HashMap<SemanticOpId, usize>,
     /// Value successors (consumers that read the producer's result).
     value_succ: Vec<Vec<usize>>,
-    /// Value + Effect successors, for transitive ordering queries.
-    flow_succ: Vec<Vec<usize>>,
-    /// Unordered conflict pairs (Resource or Effect edge), stored both ways.
+    /// Unordered resource-conflict pairs, stored both ways.
     conflict: HashSet<(usize, usize)>,
 }
 
@@ -34,21 +32,17 @@ impl SemanticGraph {
         };
 
         let mut value_pairs = Vec::new();
-        let mut flow_pairs = Vec::new();
         let mut conflict = HashSet::new();
         for dep in deps {
             let p = intern(&dep.producer);
             let c = intern(&dep.consumer);
             match dep.kind {
-                SemanticDependencyKind::Value => {
-                    value_pairs.push((p, c));
-                    flow_pairs.push((p, c));
-                }
-                SemanticDependencyKind::Effect => {
-                    flow_pairs.push((p, c));
-                    conflict.insert((p, c));
-                    conflict.insert((c, p));
-                }
+                SemanticDependencyKind::Value => value_pairs.push((p, c)),
+                // Effect edges are program *ordering*, not aliasing and not a
+                // value chain. Two effect-adjacent ops that touch no common
+                // binding may be fused (the fused op performs both effects in
+                // order), so effects gate neither conflict nor reachability.
+                SemanticDependencyKind::Effect => {}
                 SemanticDependencyKind::Resource => {
                     conflict.insert((p, c));
                     conflict.insert((c, p));
@@ -61,23 +55,18 @@ impl SemanticGraph {
         for (p, c) in value_pairs {
             value_succ[p].push(c);
         }
-        let mut flow_succ = vec![Vec::new(); n];
-        for (p, c) in flow_pairs {
-            flow_succ[p].push(c);
-        }
 
         Self {
             index,
             value_succ,
-            flow_succ,
             conflict,
         }
     }
 
     /// Two ops conflict if they share a binding with a non-Read access (a
-    /// `Resource` edge) or an effect token (an `Effect` edge). Fusing or
-    /// reordering across a conflict is never legal. An op with no edges
-    /// conflicts with nothing.
+    /// `Resource` edge) — i.e. they alias. Fusing across a resource conflict is
+    /// never legal. Effect *ordering* alone is not a conflict. An op with no
+    /// edges conflicts with nothing.
     pub fn conflicts(&self, a: &SemanticOpId, b: &SemanticOpId) -> bool {
         match (self.index.get(a), self.index.get(b)) {
             (Some(&i), Some(&j)) => self.conflict.contains(&(i, j)),
@@ -90,8 +79,9 @@ impl SemanticGraph {
         self.index.get(producer).map_or(0, |&i| self.value_succ[i].len())
     }
 
-    /// True iff `b` is transitively reachable from `a` along value/effect
-    /// edges — i.e. `a` is (directly or indirectly) ordered before `b`.
+    /// True iff `b` is transitively reachable from `a` along *value* edges —
+    /// i.e. `a`'s result flows (directly or indirectly) into `b`, making them a
+    /// producer/consumer chain rather than fusable siblings.
     pub fn reachable_between(&self, a: &SemanticOpId, b: &SemanticOpId) -> bool {
         let (Some(&start), Some(&target)) = (self.index.get(a), self.index.get(b)) else {
             return false;
@@ -103,7 +93,7 @@ impl SemanticGraph {
                 return true;
             }
             if seen.insert(node) {
-                stack.extend(self.flow_succ[node].iter().copied());
+                stack.extend(self.value_succ[node].iter().copied());
             }
         }
         false

@@ -97,6 +97,13 @@ fn sibling_fusable(
     if pl_i != pl_j || !seg_space_fusable(sp_i, sp_j) {
         return false;
     }
+    // Fusing performs P's effects then Q's, in order, so a P–Q resource conflict
+    // (e.g. both writing fields of one aggregate output) is *not* blocking. What
+    // would be unsafe is moving Q up past an intervening effectful op that
+    // aliases it, so require no effectful side-effect strictly between them.
+    if ((i + 1)..j).any(|k| block.side_effects[k].effects.is_some()) {
+        return false;
+    }
     let op_i = SemanticOpId {
         scope: scope.to_string(),
         result: res_i,
@@ -105,10 +112,8 @@ fn sibling_fusable(
         scope: scope.to_string(),
         result: res_j,
     };
-    if oracle.conflicts(&op_i, &op_j) {
-        return false;
-    }
-    // A value edge either way makes them a chain, handled by vertical fusion.
+    // A value edge either way makes them a producer/consumer chain, which is
+    // vertical fusion's job, not horizontal.
     !oracle.reachable_between(&op_i, &op_j) && !oracle.reachable_between(&op_j, &op_i)
 }
 
@@ -192,9 +197,18 @@ fn fuse_pair(graph: &mut EGraph, block_id: BlockId, i: usize, j: usize) {
     };
 
     let block = &mut graph.skeleton.blocks[block_id];
+    // Splice the effect chain: the fused op spans from P's input token to Q's
+    // output token (P precedes Q in the block), so any downstream effect that
+    // read Q's output stays connected once Q is removed.
+    let fused_effects = match (block.side_effects[i].effects, block.side_effects[j].effects) {
+        (Some((p_in, _)), Some((_, q_out))) => Some((p_in, q_out)),
+        (Some(effects), None) | (None, Some(effects)) => Some(effects),
+        (None, None) => None,
+    };
     block.side_effects[i].kind = SideEffectKind::Soac(fused);
     block.side_effects[i].operand_nodes = operands;
     block.side_effects[i].result = Some(fused_result);
+    block.side_effects[i].effects = fused_effects;
     block.side_effects.remove(j);
 }
 
