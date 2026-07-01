@@ -434,6 +434,41 @@ entry r(xs: []u32) (?k. [k]u32, [1]u32) =
     assert_eq!(compute.stages[1].entry_point, "r_filter_scan");
 }
 
+#[test]
+fn widened_filter_output_uses_output_element_size() {
+    use crate::pipeline_descriptor::{BufferLen, BufferUsage, Pipeline};
+
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry r(bidx: []u32) ?k. [k]vec4f32 =
+  let cand = map(|s| let i = i32(s) in @[f32(i), 0.0, f32(i), 1.0], bidx) in
+  filter(|c| c.z > 0.0, cand)
+"#,
+    )
+    .expect("widening map-filter compiles");
+    let output_length = lowered.pipeline.pipelines.iter().find_map(|pipeline| match pipeline {
+        Pipeline::Compute(compute) => compute.bindings.iter().find_map(|binding| match binding {
+            crate::pipeline_descriptor::Binding::StorageBuffer {
+                usage: BufferUsage::Output,
+                length,
+                ..
+            } => length.as_ref(),
+            _ => None,
+        }),
+        _ => None,
+    });
+    assert_eq!(
+        output_length,
+        Some(&BufferLen::LikeInput {
+            set: 0,
+            binding: 0,
+            elem_bytes: 16,
+            src_elem_bytes: 4,
+        })
+    );
+}
+
 /// Characterizes which multi-consumer array shapes are resolved before the EGIR
 /// semantic layer and which survive as a genuine multi-consumer producer (a
 /// SegMap result with >=2 value consumers in the semantic dependency DAG).

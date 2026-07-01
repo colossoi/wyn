@@ -602,7 +602,7 @@ pub fn retarget_filter_output(
     let out_binding = output.storage_binding.expect("compute output has a storage binding");
 
     // Find the filter side-effect producing `source` and retarget it in place.
-    let mut retargeted: Option<(BindingRef, Type<TypeName>, Type<TypeName>)> = None;
+    let mut retargeted: Option<(BindingRef, Type<TypeName>, Type<TypeName>, Type<TypeName>)> = None;
     'outer: for (_bid, block) in graph.skeleton.blocks.iter_mut() {
         for se in block.side_effects.iter_mut() {
             if se.result != Some(source) {
@@ -613,6 +613,7 @@ pub fn retarget_filter_output(
                 len_out,
                 input_array_type,
                 input_elem_type,
+                output_elem_type,
                 ..
             }) = &mut se.kind
             {
@@ -621,17 +622,18 @@ pub fn retarget_filter_output(
                     return Ok(false);
                 };
                 let input_arr_ty = input_array_type.clone();
-                let elem_ty = input_elem_type.clone();
+                let input_elem_ty = input_elem_type.clone();
+                let output_elem_ty = output_elem_type.clone();
                 // Compact straight into the output buffer; reuse the scratch
                 // binding as the paired length cell.
                 *scratch_out = Some(out_binding);
                 *len_out = Some(scratch);
-                retargeted = Some((scratch, input_arr_ty, elem_ty));
+                retargeted = Some((scratch, input_arr_ty, input_elem_ty, output_elem_ty));
             }
             break 'outer;
         }
     }
-    let Some((scratch, input_arr_ty, elem_ty)) = retargeted else {
+    let Some((scratch, input_arr_ty, input_elem_ty, output_elem_ty)) = retargeted else {
         return Ok(false);
     };
 
@@ -650,12 +652,13 @@ pub fn retarget_filter_output(
     // input region is concrete after `pin_entry_regions`; if it isn't (no
     // host buffer to mirror), leave the host to size it.
     let out_len = crate::types::array_view_region(&input_arr_ty).and_then(|in_binding| {
-        let elem_bytes = crate::ssa::layout::type_byte_size(&elem_ty)?;
+        let src_elem_bytes = crate::ssa::layout::type_byte_size(&input_elem_ty)?;
+        let elem_bytes = crate::ssa::layout::type_byte_size(&output_elem_ty)?;
         Some(BufferLen::LikeInput {
             set: in_binding.set,
             binding: in_binding.binding,
             elem_bytes,
-            src_elem_bytes: elem_bytes,
+            src_elem_bytes,
         })
     });
     output.length = out_len;
