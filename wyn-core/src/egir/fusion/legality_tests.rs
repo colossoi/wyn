@@ -41,7 +41,10 @@ fn oracle_distinguishes_conflict_flow_and_value_edges() {
     assert!(g.conflicts(&a, &b));
     assert!(g.conflicts(&b, &a));
     assert!(g.conflicts(&b, &c));
-    assert!(!g.conflicts(&a, &c), "a value edge alone is fusable, not a conflict");
+    assert!(
+        !g.conflicts(&a, &c),
+        "a value edge alone is fusable, not a conflict"
+    );
 
     // Value consumers come only from Value edges.
     assert_eq!(g.value_consumer_count(&a), 1);
@@ -51,7 +54,10 @@ fn oracle_distinguishes_conflict_flow_and_value_edges() {
     // Reachability follows value + effect edges, not resource-only edges.
     assert!(g.reachable_between(&a, &c), "a --Value--> c");
     assert!(g.reachable_between(&b, &c), "b --Effect--> c");
-    assert!(!g.reachable_between(&a, &b), "a--b is resource-only, not a flow edge");
+    assert!(
+        !g.reachable_between(&a, &b),
+        "a--b is resource-only, not a flow edge"
+    );
     assert!(!g.reachable_between(&c, &a), "no back edge");
 }
 

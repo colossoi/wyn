@@ -411,6 +411,10 @@ pub enum EgirSoac {
         output_slots: Vec<usize>,
         /// Conservative logical resource summary owned by the semantic op.
         resources: Vec<SegResourceAccess>,
+        /// Logical scratch this op owns (reduce partials / scan block scratch),
+        /// assigned by `plan_logical_resources` at the allocation boundary and
+        /// consumed by terminal lowering. Empty until then and for `SegMap`.
+        scratch_resources: Vec<super::program::ResourceId>,
     },
 }
 

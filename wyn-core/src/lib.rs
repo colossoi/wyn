@@ -1377,11 +1377,12 @@ impl EgirOptimized {
         if cfg!(debug_assertions) {
             egir::parallelize::verify_semantic(&inner).expect("invalid optimized semantic EGIR");
         }
-        egir::program::plan_logical_resources(&mut inner);
-        EgirAllocated {
-            inner,
-            binding_ids: binding_ids.clone(),
-        }
+        // Draw scratch bindings for the manifest from a private clone so the
+        // advanced counter travels into `EgirAllocated` (terminal lowering
+        // resolves the reserved scratch through it) without mutating TLC state.
+        let mut binding_ids = binding_ids.clone();
+        egir::program::plan_logical_resources(&mut inner, &mut binding_ids);
+        EgirAllocated { inner, binding_ids }
     }
 }
 

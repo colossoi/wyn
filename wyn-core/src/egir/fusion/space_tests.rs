@@ -36,8 +36,14 @@ fn resource_length_compares_by_binding_and_stride_ignoring_node() {
         elem_bytes,
     };
     assert!(seg_extent_fusable(&mk(a, 0, 1, 4), &mk(b, 0, 1, 4)));
-    assert!(!seg_extent_fusable(&mk(a, 0, 1, 4), &mk(b, 0, 2, 4)), "different binding");
-    assert!(!seg_extent_fusable(&mk(a, 0, 1, 4), &mk(b, 0, 1, 8)), "different stride");
+    assert!(
+        !seg_extent_fusable(&mk(a, 0, 1, 4), &mk(b, 0, 2, 4)),
+        "different binding"
+    );
+    assert!(
+        !seg_extent_fusable(&mk(a, 0, 1, 4), &mk(b, 0, 1, 8)),
+        "different stride"
+    );
 }
 
 #[test]
@@ -55,7 +61,10 @@ fn mismatched_variants_never_fuse() {
 
 #[test]
 fn spaces_fuse_dimensionwise() {
-    let space = |dims| SegSpace { level: SegLevel::Thread, dims };
+    let space = |dims| SegSpace {
+        level: SegLevel::Thread,
+        dims,
+    };
     assert!(seg_space_fusable(
         &space(vec![SegExtent::Fixed(8)]),
         &space(vec![SegExtent::Fixed(8)]),

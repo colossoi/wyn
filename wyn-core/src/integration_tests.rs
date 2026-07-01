@@ -64,6 +64,39 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
     );
     assert!(allocated.semantic_ir().contains("SegRed"));
     assert!(allocated.semantic_ir().contains("ResourceLength"));
+
+    // Milestone 5: the reduce's partial buffer is now an authoritative logical
+    // resource (drawn at the allocation boundary), and the SegRed op records the
+    // reserved `ResourceId` for terminal lowering to consume.
+    use crate::egir::program::{CompilerResourceKind, ResourceOrigin};
+    let partials = allocated
+        .inner
+        .resources
+        .iter()
+        .filter(|resource| {
+            matches!(
+                resource.origin,
+                ResourceOrigin::Compiler(CompilerResourceKind::ReducePartial)
+            )
+        })
+        .count();
+    assert_eq!(partials, 1, "one reduce partial reserved as a logical resource");
+    let records_scratch = allocated
+        .inner
+        .entry_points
+        .iter()
+        .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
+        .any(|effect| {
+            matches!(
+                &effect.kind,
+                SideEffectKind::Soac(EgirSoac::Seg {
+                    kind: SegOpKind::SegRed { .. },
+                    scratch_resources,
+                    ..
+                }) if scratch_resources.len() == 1
+            )
+        });
+    assert!(records_scratch, "SegRed records its reserved partial ResourceId");
 }
 
 #[test]

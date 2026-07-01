@@ -26,13 +26,16 @@ pub fn schedule(
     inner.pipeline = source_descriptor;
 
     if profile.schedule == SchedulePolicy::Parallel {
-        parallelize::lower(inner, binding_ids);
+        parallelize::lower(inner);
     } else {
         parallelize::restore_all_serial(inner);
         inner.kernel_schedule =
             parallelize::schedule::KernelSchedule::seed(&inner.pipeline, &inner.entry_points);
     }
-    plan_logical_resources(inner);
+    // Re-mirror after lowering (split clones / phase entries added new host and
+    // intermediate storage); the parallel SegRed/SegScan ops are gone, so no
+    // further scratch is drawn here.
+    plan_logical_resources(inner, binding_ids);
 
     let mut descriptor = unpublished_descriptor;
     inner.kernel_schedule.install_phase_shells(&mut descriptor).map_err(ConvertError::Internal)?;

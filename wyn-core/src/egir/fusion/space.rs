@@ -24,10 +24,7 @@ pub fn seg_extent_fusable(a: &SegExtent, b: &SegExtent) -> bool {
         (SegExtent::Fixed(x), SegExtent::Fixed(y)) => x == y,
         // The node is a re-interned `FuncParam`; the offset is the host
         // dispatch identity (matches `domain_from_space`).
-        (
-            SegExtent::PushConstant { offset: x, .. },
-            SegExtent::PushConstant { offset: y, .. },
-        ) => x == y,
+        (SegExtent::PushConstant { offset: x, .. }, SegExtent::PushConstant { offset: y, .. }) => x == y,
         // Same buffer + element stride ⇒ same length, regardless of which
         // re-interned length node each op holds.
         (

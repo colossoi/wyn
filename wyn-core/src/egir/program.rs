@@ -131,10 +131,38 @@ pub enum LogicalSize {
     Unspecified,
 }
 
+/// Why a compiler-introduced resource exists. The kind fixes its physical
+/// storage role and lets descriptor publication build the right
+/// `StorageBindingDecl` without re-deriving it from the lowering site.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompilerResourceKind {
+    /// A pre-existing intermediate surfaced from a `StorageBindingDecl`
+    /// (gather prepass / generic staging) — not owned by a Seg op.
+    Staging,
+    /// One per-accumulator partial buffer of a parallel `SegRed`.
+    ReducePartial,
+    /// The two scratch buffers of a parallel `SegScan`.
+    ScanBlockSums,
+    ScanBlockOffsets,
+    /// A runtime `filter`'s compaction buffer and its paired length cell.
+    FilterScratch,
+    FilterLenCell,
+}
+
+impl CompilerResourceKind {
+    /// The physical storage role a resource of this kind lowers to.
+    pub fn role(self) -> interface::StorageRole {
+        match self {
+            CompilerResourceKind::FilterScratch => interface::StorageRole::Output,
+            _ => interface::StorageRole::Intermediate,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum ResourceOrigin {
     Host(crate::BindingRef),
-    Compiler,
+    Compiler(CompilerResourceKind),
 }
 
 #[derive(Clone, Debug)]
@@ -148,35 +176,92 @@ pub struct LogicalResource {
     pub size: LogicalSize,
 }
 
-pub fn plan_logical_resources(inner: &mut EgirInner) {
+/// Build the authoritative logical-resource manifest at the allocation
+/// boundary. Host storage (entry inputs/outputs plus pre-existing compiler
+/// intermediates) is mirrored as today; then every parallel `SegRed`/`SegScan`
+/// contributes its scratch as `Compiler` resources — fresh bindings are drawn
+/// here and their `ResourceId`s recorded on the owning Seg op, so terminal
+/// lowering consumes the manifest instead of allocating scratch ad hoc.
+pub fn plan_logical_resources(inner: &mut EgirInner, binding_ids: &mut crate::IdSource<u32>) {
+    let filter_kinds = filter_resource_kinds(inner);
+    let mut host = mirror_storage_resources(inner, &filter_kinds);
+    host.sort_by_key(|resource| (resource.legacy_binding.set, resource.legacy_binding.binding));
+    for (index, resource) in host.iter_mut().enumerate() {
+        resource.id = ResourceId(index as u32);
+    }
+    let mut scratch = super::parallelize::enumerate_seg_scratch(inner, binding_ids, host.len() as u32);
+    let mut resources = host;
+    resources.append(&mut scratch);
+    inner.resources = resources;
+    if cfg!(debug_assertions) {
+        verify_manifest_covers_storage(inner);
+    }
+}
+
+/// Runtime `filter` bindings, classified so the mirror gives them a precise
+/// `CompilerResourceKind` rather than generic `Staging`.
+fn filter_resource_kinds(inner: &EgirInner) -> HashMap<crate::BindingRef, CompilerResourceKind> {
+    let mut kinds = HashMap::new();
+    for entry in &inner.entry_points {
+        for (_, block) in &entry.graph.skeleton.blocks {
+            for effect in &block.side_effects {
+                if let super::types::SideEffectKind::Soac(super::types::EgirSoac::Filter {
+                    len_out, ..
+                }) = &effect.kind
+                {
+                    if let Some(len) = len_out {
+                        kinds.insert(*len, CompilerResourceKind::FilterLenCell);
+                    }
+                }
+            }
+        }
+    }
+    kinds
+}
+
+/// Mirror entry inputs, outputs, and declared storage bindings into logical
+/// resources (deduped by binding). `Intermediate`-role declarations become
+/// `Compiler` resources; a filter length cell is tagged precisely.
+fn mirror_storage_resources(
+    inner: &EgirInner,
+    filter_kinds: &HashMap<crate::BindingRef, CompilerResourceKind>,
+) -> Vec<LogicalResource> {
     let mut resources: LookupMap<crate::BindingRef, LogicalResource> = LookupMap::new();
+    let host = |binding: crate::BindingRef, elem_ty: Type<TypeName>, size: LogicalSize| LogicalResource {
+        id: ResourceId(0),
+        origin: ResourceOrigin::Host(binding),
+        legacy_binding: binding,
+        elem_ty,
+        size,
+    };
     for entry in &inner.entry_points {
         for input in &entry.inputs {
             if let Some(binding) = input.storage_binding {
-                resources.entry(binding).or_insert(LogicalResource {
-                    id: ResourceId(0),
-                    origin: ResourceOrigin::Host(binding),
-                    legacy_binding: binding,
-                    elem_ty: input.ty.elem_type().cloned().unwrap_or_else(|| input.ty.clone()),
-                    size: logical_size(input.length.as_ref()),
+                resources.entry(binding).or_insert_with(|| {
+                    host(
+                        binding,
+                        input.ty.elem_type().cloned().unwrap_or_else(|| input.ty.clone()),
+                        logical_size(input.length.as_ref()),
+                    )
                 });
             }
         }
         for output in &entry.outputs {
             if let Some(binding) = output.storage_binding {
-                resources.entry(binding).or_insert(LogicalResource {
-                    id: ResourceId(0),
-                    origin: ResourceOrigin::Host(binding),
-                    legacy_binding: binding,
-                    elem_ty: output.ty.elem_type().cloned().unwrap_or_else(|| output.ty.clone()),
-                    size: logical_size(output.length.as_ref()),
+                resources.entry(binding).or_insert_with(|| {
+                    host(
+                        binding,
+                        output.ty.elem_type().cloned().unwrap_or_else(|| output.ty.clone()),
+                        logical_size(output.length.as_ref()),
+                    )
                 });
             }
         }
         for declaration in &entry.storage_bindings {
-            let size = logical_size(declaration.length.as_ref());
-            let origin = if declaration.role == interface::StorageRole::Intermediate {
-                ResourceOrigin::Compiler
+            let origin = if let Some(kind) = filter_kinds.get(&declaration.binding) {
+                ResourceOrigin::Compiler(*kind)
+            } else if declaration.role == interface::StorageRole::Intermediate {
+                ResourceOrigin::Compiler(CompilerResourceKind::Staging)
             } else {
                 ResourceOrigin::Host(declaration.binding)
             };
@@ -185,19 +270,32 @@ pub fn plan_logical_resources(inner: &mut EgirInner) {
                 origin,
                 legacy_binding: declaration.binding,
                 elem_ty: declaration.elem_ty.clone(),
-                size,
+                size: logical_size(declaration.length.as_ref()),
             });
         }
     }
-    let mut resources: Vec<_> = resources.into_values().collect();
-    resources.sort_by_key(|resource| (resource.legacy_binding.set, resource.legacy_binding.binding));
-    for (index, resource) in resources.iter_mut().enumerate() {
-        resource.id = ResourceId(index as u32);
-    }
-    inner.resources = resources;
+    resources.into_values().collect()
 }
 
-fn logical_size(length: Option<&crate::pipeline_descriptor::BufferLen>) -> LogicalSize {
+/// Debug invariant: every physical storage binding the program declares is
+/// covered by a logical resource. Catches a scratch site that escaped the
+/// manifest before it can silently corrupt the descriptor.
+fn verify_manifest_covers_storage(inner: &EgirInner) {
+    let covered: std::collections::HashSet<crate::BindingRef> =
+        inner.resources.iter().map(|resource| resource.legacy_binding).collect();
+    for entry in &inner.entry_points {
+        for declaration in &entry.storage_bindings {
+            debug_assert!(
+                covered.contains(&declaration.binding),
+                "storage binding {:?} ({:?}) is missing from the logical-resource manifest",
+                declaration.binding,
+                declaration.role,
+            );
+        }
+    }
+}
+
+pub fn logical_size(length: Option<&crate::pipeline_descriptor::BufferLen>) -> LogicalSize {
     match length {
         Some(crate::pipeline_descriptor::BufferLen::Fixed { bytes }) => LogicalSize::FixedBytes(*bytes),
         Some(crate::pipeline_descriptor::BufferLen::LikeInput {
@@ -216,6 +314,30 @@ fn logical_size(length: Option<&crate::pipeline_descriptor::BufferLen>) -> Logic
             }
         }
         None => LogicalSize::Unspecified,
+    }
+}
+
+/// Physical `BufferLen` for a logical size, or `None` for `Unspecified` (a
+/// host-supplied length). Inverse of `logical_size`, used when a compiler
+/// resource is published as a `StorageBindingDecl`.
+pub fn buffer_len(size: &LogicalSize) -> Option<crate::pipeline_descriptor::BufferLen> {
+    use crate::pipeline_descriptor::BufferLen;
+    match size {
+        LogicalSize::FixedBytes(bytes) => Some(BufferLen::Fixed { bytes: *bytes }),
+        LogicalSize::LikeBinding {
+            binding,
+            elem_bytes,
+            src_elem_bytes,
+        } => Some(BufferLen::LikeInput {
+            set: binding.set,
+            binding: binding.binding,
+            elem_bytes: *elem_bytes,
+            src_elem_bytes: *src_elem_bytes,
+        }),
+        LogicalSize::SameAsDispatch { elem_bytes } => Some(BufferLen::SameAsDispatch {
+            elem_bytes: *elem_bytes,
+        }),
+        LogicalSize::Unspecified => None,
     }
 }
 
@@ -407,5 +529,13 @@ impl EgirInner {
     /// SSA function name backing a region index (the `PureOp::Call` ABI).
     pub fn region_name(&self, id: RegionId) -> &str {
         self.region_interner.name(id)
+    }
+
+    /// Physical binding currently backing a logical resource. Resources are
+    /// stored in `ResourceId` order, so this is a direct index. Until terminal
+    /// lowering rewrites compiler resources to allocated bindings, this returns
+    /// the `legacy_binding`.
+    pub fn binding_of(&self, id: ResourceId) -> crate::BindingRef {
+        self.resources[id.0 as usize].legacy_binding
     }
 }
