@@ -7587,37 +7587,62 @@ fn history_resource_bindings_are_not_duplicated() {
     }
 }
 
-/// A compute entry with no buffer input that writes a `#[storage_image]`
-/// dispatches one thread per texel: `DerivedFrom { len: StorageImage }`, which
-/// the host resolves from the bound texture's extent. Regression test: the
-/// skeletal `Fixed {1,1,1}` survived scheduling for serial per-texel entries
-/// (fresh mountains.wyn compiles disagreed with its committed descriptor), so
-/// a window-sized pass only ever ran one workgroup.
+/// A compute entry that writes a `#[storage_image]` (and has no SOAC-derived
+/// domain) dispatches one thread per texel: `DerivedFrom { len: StorageImage }`,
+/// which the host resolves from the bound texture's extent. An incidental
+/// storage-buffer input (mountains' keyboard buffer) doesn't opt out — the
+/// image is the domain. Regression test: the skeletal `Fixed {1,1,1}` survived
+/// scheduling for serial per-texel entries (fresh mountains.wyn compiles
+/// disagreed with its committed descriptor), so a window-sized pass only ever
+/// ran one workgroup.
 #[test]
 fn storage_image_entry_dispatch_derives_from_image() {
     use crate::pipeline_descriptor::{DispatchLen, DispatchSize, Pipeline};
 
-    let lowered = crate::compile_thru_ssa(HISTORY_FEEDBACK_SOURCE).expect("history feedback compiles");
-    let stage = lowered
-        .pipeline
-        .pipelines
-        .iter()
-        .find_map(|pipeline| match pipeline {
-            Pipeline::Compute(compute) => compute.stages.iter().find(|stage| stage.entry_point == "step"),
-            _ => None,
-        })
-        .expect("step compute stage");
-    assert!(
-        matches!(
-            &stage.dispatch_size,
-            DispatchSize::DerivedFrom {
-                len: DispatchLen::StorageImage { .. },
-                ..
-            }
-        ),
-        "per-texel entry should dispatch from its storage image, got {:?}",
-        stage.dispatch_size
-    );
+    // The mountains buffer_a shape: per-texel image pass that also reads a
+    // raw storage buffer.
+    let with_buffer_input = r#"
+resource acc: image2d {
+  format  = rgba32float
+  size    = 64x64
+  usages  = [storage_write, sampled]
+  history = 1
+}
+#[compute]
+entry step(#[view(acc, storage_write)] out_acc: storage_image,
+           #[view(acc, sampled, previous)] prev_acc: texture2d,
+           #[storage(set=2, binding=0, access=read)] keyboard: []u32,
+           #[builtin(global_invocation_id)] gid: vec3u32) () =
+  let xy = @[i32(gid.x), i32(gid.y)] in
+  let prev = texture_load(prev_acc, xy, 0) in
+  let bump = if keyboard[0] != 0u32 then 1.0 else 0.0 in
+  image_store(out_acc, xy, prev + @[bump, 0.0, 0.0, 0.0])
+"#;
+    for source in [HISTORY_FEEDBACK_SOURCE, with_buffer_input] {
+        let lowered = crate::compile_thru_ssa(source).expect("per-texel image pass compiles");
+        let stage = lowered
+            .pipeline
+            .pipelines
+            .iter()
+            .find_map(|pipeline| match pipeline {
+                Pipeline::Compute(compute) => {
+                    compute.stages.iter().find(|stage| stage.entry_point == "step")
+                }
+                _ => None,
+            })
+            .expect("step compute stage");
+        assert!(
+            matches!(
+                &stage.dispatch_size,
+                DispatchSize::DerivedFrom {
+                    len: DispatchLen::StorageImage { .. },
+                    ..
+                }
+            ),
+            "per-texel entry should dispatch from its storage image, got {:?}",
+            stage.dispatch_size
+        );
+    }
 }
 
 /// KNOWN BUG: a unit-typed `if` whose branches both end in `image_store`

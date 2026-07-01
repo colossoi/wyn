@@ -483,16 +483,14 @@ fn phase_from_entry(entry: &EgirEntry, fallback: KernelDomain) -> KernelPhase {
     }
 }
 
-/// A compute entry with no SOAC-derived domain, no storage-buffer input, and a
-/// `#[storage_image]` param runs one thread per texel of the image (the
-/// mountains / one_weekend per-pixel pass shape) — the host resolves the size
-/// from the bound texture's extent. Only upgrades the single-workgroup
+/// A compute entry with no SOAC-derived domain and a `#[storage_image]` param
+/// runs one thread per texel of the image (the mountains / one_weekend
+/// per-pixel pass shape) — the host resolves the size from the bound texture's
+/// extent. Incidental storage-buffer inputs (e.g. mountains' keyboard buffer)
+/// don't opt out; the image is the domain. Only upgrades the single-workgroup
 /// placeholder domain; an explicit fixed grid stays as scheduled.
 fn storage_image_domain(entry: &EgirEntry, fallback: &KernelDomain) -> Option<KernelDomain> {
     if !matches!(fallback, KernelDomain::Fixed { x: 1, y: 1, z: 1 }) {
-        return None;
-    }
-    if entry.inputs.iter().any(|input| input.storage_binding.is_some()) {
         return None;
     }
     let (binding, ..) = entry.inputs.iter().find_map(|input| input.storage_image_binding)?;
