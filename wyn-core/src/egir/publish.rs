@@ -118,13 +118,19 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
             };
 
             // Snapshot existing (set, binding) and push-constant offsets to
-            // skip what `parallelize` already surfaced.
+            // skip what `parallelize` (or an earlier publication pass) already
+            // surfaced. Every slotted kind must be collected — a kind missing
+            // here gets re-pushed on the next pass and the duplicate slot
+            // fails bind-group-layout creation at runtime.
             let mut claimed: LookupSet<(u32, u32)> = bindings
                 .iter()
                 .filter_map(|b| match b {
                     Binding::StorageBuffer { set, binding, .. } => Some((*set, *binding)),
                     Binding::Uniform { set, binding, .. } => Some((*set, *binding)),
-                    _ => None,
+                    Binding::Texture { set, binding, .. } => Some((*set, *binding)),
+                    Binding::Sampler { set, binding, .. } => Some((*set, *binding)),
+                    Binding::StorageTexture { set, binding, .. } => Some((*set, *binding)),
+                    Binding::PushConstant { .. } => None,
                 })
                 .collect();
             let claimed_pc_offsets: LookupSet<u32> = bindings

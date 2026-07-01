@@ -7563,11 +7563,11 @@ fn history_resource_feedback_pair_reaches_descriptor() {
     );
 }
 
-/// KNOWN BUG: the same program publishes every binding twice — the compute
-/// pipeline's `bindings` list contains exact duplicates of the storage-image
-/// and sampled-texture entries. Un-ignore when bindings are deduplicated.
+/// Descriptor bindings must be slot-unique — a duplicated (set, binding)
+/// fails wgpu bind-group-layout creation ("Conflicting binding"). Regression
+/// test: the publication pass's claimed-slot snapshot skipped the texture /
+/// sampler / storage-texture kinds, so a second pass re-pushed exactly those.
 #[test]
-#[ignore = "history-resource bindings are published twice in the descriptor"]
 fn history_resource_bindings_are_not_duplicated() {
     use crate::pipeline_descriptor::Pipeline;
 
