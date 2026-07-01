@@ -54,9 +54,9 @@ impl Constructor {
                 match name {
                     TypeName::Int(32) => self.i32_type,
                     TypeName::Float(32) => self.f32_type,
-                    TypeName::Int(bits) => self.builder.type_int(*bits as u32, 1),
-                    TypeName::UInt(bits) => self.builder.type_int(*bits as u32, 0),
-                    TypeName::Float(bits) => self.builder.type_float(*bits as u32),
+                    TypeName::Int(bits) => *self.builder.type_int(*bits as u32, 1),
+                    TypeName::UInt(bits) => *self.builder.type_int(*bits as u32, 0),
+                    TypeName::Float(bits) => *self.builder.type_float(*bits as u32),
                     TypeName::Bool => self.bool_type,
                     TypeName::Unit => {
                         // Unit type - use void type
@@ -109,7 +109,8 @@ impl Constructor {
                                 _ => panic!("BUG: Bounded array requires Size(N) capacity, got {:?}", size),
                             };
                             let size_const = self.const_u32(n);
-                            let buf_type = self.builder.type_array(elem_type, size_const);
+                            let buf_type =
+                                *self.builder.type_array(builder::TypeId::new(elem_type), size_const);
                             self.builder.register_array_element(
                                 builder::TypeId::new(buf_type),
                                 builder::TypeId::new(elem_type),
@@ -121,7 +122,9 @@ impl Constructor {
                                 PolyType::Constructed(TypeName::Size(n), _) => {
                                     // Fixed-size array (use unsigned int for array size per SPIR-V convention)
                                     let size_const = self.const_u32(*n as u32);
-                                    let arr_type = self.builder.type_array(elem_type, size_const);
+                                    let arr_type = *self
+                                        .builder
+                                        .type_array(builder::TypeId::new(elem_type), size_const);
                                     self.builder.register_array_element(
                                         builder::TypeId::new(arr_type),
                                         builder::TypeId::new(elem_type),
@@ -158,7 +161,7 @@ impl Constructor {
                         let cols = ty.mat_cols().expect("Mat has concrete cols") as u32;
                         let rows = ty.mat_rows().expect("Mat has concrete rows") as u32;
                         let col_vec_type = self.get_or_create_vec_type(elem_type, rows);
-                        self.builder.type_matrix(col_vec_type, cols)
+                        *self.builder.type_matrix(builder::TypeId::new(col_vec_type), cols)
                     }
                     TypeName::Record(_fields) => {
                         let field_types: Vec<spirv::Word> =
@@ -221,8 +224,8 @@ impl Constructor {
                         // 2D float sampled image. sampled=1 (used with a
                         // sampler), Unknown format (sampled images don't
                         // carry a format). rspirv dedups type_image.
-                        self.builder.type_image(
-                            self.f32_type,
+                        *self.builder.type_image(
+                            builder::TypeId::new(self.f32_type),
                             spirv::Dim::Dim2D,
                             0, // depth: not a depth texture
                             0, // arrayed: single image
@@ -232,7 +235,7 @@ impl Constructor {
                             None,
                         )
                     }
-                    TypeName::Sampler => self.builder.type_sampler(),
+                    TypeName::Sampler => *self.builder.type_sampler(),
                     TypeName::StorageTexture => {
                         // Use the program-wide default format (set in
                         // `lower_ssa_program_impl`) so function signatures
@@ -244,8 +247,8 @@ impl Constructor {
                             .storage_image_default_format
                             .map(storage_image_format_to_spirv)
                             .unwrap_or(spirv::ImageFormat::Unknown);
-                        self.builder.type_image(
-                            self.f32_type,
+                        *self.builder.type_image(
+                            builder::TypeId::new(self.f32_type),
                             spirv::Dim::Dim2D,
                             0,
                             0,

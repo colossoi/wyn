@@ -193,8 +193,8 @@ pub(super) fn lower_ssa_entry_point(
             // attribute (per-param), not from the language type, so we build
             // the image type here rather than reuse `input_type` (which used
             // the placeholder format from `polytype_to_spirv`).
-            let img_type = constructor.builder.type_image(
-                constructor.f32_type,
+            let img_type = *constructor.builder.type_image(
+                wspirv::TypeId::new(constructor.f32_type),
                 spirv::Dim::Dim2D,
                 0,
                 0,
@@ -383,7 +383,7 @@ pub(super) fn lower_ssa_entry_point(
             // buffer<->shared boundary; deferred.
             let elem_spirv = constructor.polytype_to_spirv(&elem_ty);
             let count_const = constructor.const_u32(*count);
-            let arr_ty = constructor.builder.type_array(elem_spirv, count_const);
+            let arr_ty = *constructor.builder.type_array(wspirv::TypeId::new(elem_spirv), count_const);
             let ptr_ty = constructor.get_or_create_ptr_type(spirv::StorageClass::Workgroup, arr_ty);
             let var = constructor.builder.variable(ptr_ty, None, spirv::StorageClass::Workgroup, None);
             constructor.workgroup_vars.insert(*id, (var, elem_spirv));
@@ -449,8 +449,8 @@ pub(super) fn lower_ssa_entry_point(
         // and doesn't match the variable's pointee type. Rebuild with
         // the binding's format for the load result type.
         let input_type = if let Some((_, format, _, _)) = input.storage_image_binding {
-            constructor.builder.type_image(
-                constructor.f32_type,
+            *constructor.builder.type_image(
+                wspirv::TypeId::new(constructor.f32_type),
                 spirv::Dim::Dim2D,
                 0,
                 0,

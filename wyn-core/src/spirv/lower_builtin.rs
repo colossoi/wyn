@@ -113,7 +113,8 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     let image_ty = self
                         .constructor
                         .polytype_to_spirv(&PolyType::Constructed(TypeName::Texture2D, vec![]));
-                    let sampled_img_ty = self.constructor.builder.type_sampled_image(image_ty);
+                    let sampled_img_ty =
+                        *self.constructor.builder.type_sampled_image(builder::TypeId::new(image_ty));
                     let sampled = self.constructor.builder.sampled_image(
                         sampled_img_ty,
                         None,
@@ -206,7 +207,10 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         };
                         let elem_spirv = self.constructor.polytype_to_spirv(&elem_ty);
                         let size_const = self.constructor.const_u32(n);
-                        let buf_type = self.constructor.builder.type_array(elem_spirv, size_const);
+                        let buf_type = *self
+                            .constructor
+                            .builder
+                            .type_array(builder::TypeId::new(elem_spirv), size_const);
                         // The struct's [N]T member type must be element-resolvable
                         // for the dynamic-index access_chain below.
                         self.constructor.builder.register_array_element(

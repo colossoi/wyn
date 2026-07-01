@@ -146,7 +146,8 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         _ => bail_spirv!("Bounded array must have Size(N) capacity"),
                     };
                     let size_const = self.constructor.const_u32(n);
-                    let buf_ty = self.constructor.builder.type_array(result_ty, size_const);
+                    let buf_ty =
+                        *self.constructor.builder.type_array(builder::TypeId::new(result_ty), size_const);
                     self.constructor.builder.register_array_element(
                         builder::TypeId::new(buf_ty),
                         builder::TypeId::new(result_ty),

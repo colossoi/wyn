@@ -86,6 +86,19 @@ pub type BlockId = Id<BlockKind>;
 ///
 /// `Deref<Target = rspirv::dr::Builder>` is provided so callers can
 /// reach raw rspirv methods that this wrapper hasn't typed yet.
+/// Dedup key for `OpTypeImage`: its full operand tuple
+/// `(sampled_type, dim, depth, arrayed, ms, sampled, format, access)`.
+type ImageTypeKey = (
+    TypeId,
+    spirv::Dim,
+    u32,
+    u32,
+    u32,
+    u32,
+    spirv::ImageFormat,
+    Option<spirv::AccessQualifier>,
+);
+
 pub struct SpirvBuilder {
     inner: Builder,
     // Well-known types eagerly created at construction so call sites
@@ -119,6 +132,13 @@ pub struct SpirvBuilder {
     struct_type_cache: HashMap<Vec<TypeId>, TypeId>,
     ptr_type_cache: HashMap<(spirv::StorageClass, TypeId), TypeId>,
     runtime_array_cache: HashMap<(TypeId, u32), TypeId>, // (elem_type, stride) -> decorated type
+    array_type_cache: HashMap<(TypeId, spirv::Word), TypeId>, // (elem_type, length-constant) -> sized array
+    image_type_cache: HashMap<ImageTypeKey, TypeId>,
+    sampled_image_cache: HashMap<TypeId, TypeId>, // image type -> OpTypeSampledImage
+    sampler_type: Option<TypeId>,                 // the single OpTypeSampler
+    matrix_type_cache: HashMap<(TypeId, u32), TypeId>, // (column vector, column count) -> OpTypeMatrix
+    int_type_cache: HashMap<(u32, u32), TypeId>,  // (width, signedness) -> OpTypeInt
+    float_type_cache: HashMap<u32, TypeId>,       // width -> OpTypeFloat
     // Block-decorated struct wrappers around a runtime array (storage
     // buffer) or a single value (uniform / push-constant). Cached per
     // wrapped-type so two `#[uniform]` params of the same shape don't
@@ -206,6 +226,15 @@ impl SpirvBuilder {
             struct_type_cache: HashMap::new(),
             ptr_type_cache: HashMap::new(),
             runtime_array_cache: HashMap::new(),
+            array_type_cache: HashMap::new(),
+            image_type_cache: HashMap::new(),
+            sampled_image_cache: HashMap::new(),
+            sampler_type: None,
+            matrix_type_cache: HashMap::new(),
+            // Seed with the eagerly-created scalar types so `type_int`/`type_float`
+            // never re-declare them.
+            int_type_cache: HashMap::from([((32, 1), i32_type), ((32, 0), u32_type)]),
+            float_type_cache: HashMap::from([(32, f32_type)]),
             buffer_block_cache: HashMap::new(),
             uniform_block_cache: HashMap::new(),
             block_decorated: HashSet::new(),
@@ -411,6 +440,101 @@ impl SpirvBuilder {
             [rspirv::dr::Operand::LiteralBit32(stride)],
         );
         self.runtime_array_cache.insert(key, ty);
+        ty
+    }
+
+    /// Get or create a sized `OpTypeArray elem length`, where `length` is a
+    /// constant id.
+    pub fn type_array(&mut self, elem: TypeId, length: spirv::Word) -> TypeId {
+        let key = (elem, length);
+        if let Some(&ty) = self.array_type_cache.get(&key) {
+            return ty;
+        }
+        let ty = TypeId::new(self.inner.type_array(*elem, length));
+        self.array_type_cache.insert(key, ty);
+        ty
+    }
+
+    /// Get or create an `OpTypeImage` from its full operand tuple.
+    #[allow(clippy::too_many_arguments)]
+    pub fn type_image(
+        &mut self,
+        sampled_type: TypeId,
+        dim: spirv::Dim,
+        depth: u32,
+        arrayed: u32,
+        ms: u32,
+        sampled: u32,
+        format: spirv::ImageFormat,
+        access: Option<spirv::AccessQualifier>,
+    ) -> TypeId {
+        let key = (sampled_type, dim, depth, arrayed, ms, sampled, format, access);
+        if let Some(&ty) = self.image_type_cache.get(&key) {
+            return ty;
+        }
+        let ty = TypeId::new(self.inner.type_image(
+            *sampled_type,
+            dim,
+            depth,
+            arrayed,
+            ms,
+            sampled,
+            format,
+            access,
+        ));
+        self.image_type_cache.insert(key, ty);
+        ty
+    }
+
+    /// Get or create `OpTypeSampledImage image`.
+    pub fn type_sampled_image(&mut self, image: TypeId) -> TypeId {
+        if let Some(&ty) = self.sampled_image_cache.get(&image) {
+            return ty;
+        }
+        let ty = TypeId::new(self.inner.type_sampled_image(*image));
+        self.sampled_image_cache.insert(image, ty);
+        ty
+    }
+
+    /// Get or create the single `OpTypeSampler`.
+    pub fn type_sampler(&mut self) -> TypeId {
+        if let Some(ty) = self.sampler_type {
+            return ty;
+        }
+        let ty = TypeId::new(self.inner.type_sampler());
+        self.sampler_type = Some(ty);
+        ty
+    }
+
+    /// Get or create `OpTypeMatrix column_type column_count`.
+    pub fn type_matrix(&mut self, column_type: TypeId, column_count: u32) -> TypeId {
+        let key = (column_type, column_count);
+        if let Some(&ty) = self.matrix_type_cache.get(&key) {
+            return ty;
+        }
+        let ty = TypeId::new(self.inner.type_matrix(*column_type, column_count));
+        self.matrix_type_cache.insert(key, ty);
+        ty
+    }
+
+    /// Get or create `OpTypeInt width signedness`.
+    pub fn type_int(&mut self, width: u32, signedness: u32) -> TypeId {
+        let key = (width, signedness);
+        if let Some(&ty) = self.int_type_cache.get(&key) {
+            return ty;
+        }
+        let ty = TypeId::new(self.inner.type_int(width, signedness));
+        self.int_type_cache.insert(key, ty);
+        ty
+    }
+
+    /// Get or create `OpTypeFloat width`.
+    pub fn type_float(&mut self, width: u32) -> TypeId {
+        if let Some(&ty) = self.float_type_cache.get(&width) {
+            return ty;
+        }
+        let ty = TypeId::new(self.inner.type_float(width));
+        self.float_type_cache.insert(width, ty);
         ty
     }
 
