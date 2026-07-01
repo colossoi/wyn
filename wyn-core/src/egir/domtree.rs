@@ -4,7 +4,7 @@
 //! Used by canonicalization (preorder traversal) and elaboration (scoping).
 
 use crate::ssa::framework::BlockId;
-use crate::{LookupMap, LookupSet};
+use crate::{LookupMap, StableMap, StableSet};
 
 #[cfg(test)]
 #[path = "domtree_tests.rs"]
@@ -13,7 +13,7 @@ mod domtree_tests;
 /// Dominator tree.
 pub struct DomTree {
     /// Immediate dominator of each block (entry has no idom).
-    idom: LookupMap<BlockId, BlockId>,
+    idom: StableMap<BlockId, BlockId>,
     /// Children in the dominator tree.
     children: LookupMap<BlockId, Vec<BlockId>>,
     /// Preorder traversal of the domtree.
@@ -44,8 +44,8 @@ impl DomTree {
 
         // Forward BFS from entry to collect the reachable subgraph.
         // Everything else is left out of the analysis entirely.
-        let reachable: LookupSet<BlockId> = {
-            let mut visited: LookupSet<BlockId> = LookupSet::new();
+        let reachable: StableSet<BlockId> = {
+            let mut visited: StableSet<BlockId> = StableSet::new();
             let mut stack = vec![entry];
             while let Some(b) = stack.pop() {
                 if !visited.insert(b) {
@@ -77,10 +77,10 @@ impl DomTree {
         }
 
         // Iterative fixpoint dominator computation.
-        let mut doms: LookupMap<BlockId, LookupSet<BlockId>> = LookupMap::new();
+        let mut doms: LookupMap<BlockId, StableSet<BlockId>> = LookupMap::new();
         for &b in &reachable_blocks {
             if b == entry {
-                doms.insert(b, LookupSet::from([entry]));
+                doms.insert(b, std::iter::once(entry).collect());
             } else {
                 doms.insert(b, reachable.clone());
             }
@@ -98,7 +98,7 @@ impl DomTree {
                 // reachable), so the intersection is well-defined.
                 let mut iter = pred_list.iter();
                 let first = doms[iter.next().expect("reachable non-entry block has a predecessor")].clone();
-                let mut new_set: LookupSet<BlockId> =
+                let mut new_set: StableSet<BlockId> =
                     iter.fold(first, |acc, p| acc.intersection(&doms[p]).copied().collect());
                 new_set.insert(b);
                 if new_set != doms[&b] {
@@ -113,8 +113,9 @@ impl DomTree {
         // Rebind so the idom extraction below iterates the same set.
         let all_blocks = reachable_blocks;
 
-        // Extract idom.
-        let mut idom = LookupMap::new();
+        // Extract idom. `StableMap` so its insertion order (which follows
+        // `all_blocks`) is what later drives `children` push order.
+        let mut idom = StableMap::new();
         for &b in &all_blocks {
             if b == entry {
                 continue;
@@ -142,6 +143,11 @@ impl DomTree {
         for &b in &all_blocks {
             children.entry(b).or_default();
         }
+        // `idom` is a `StableMap` populated in `all_blocks` (BFS-discovery)
+        // order, so iterating it here pushes each parent's children in a
+        // deterministic order. Elaboration recurses through `dom_children` to
+        // allocate ValueId/PlaceId, so this ordering is what keeps the MIR dump
+        // reproducible across runs.
         for (&child, &parent) in &idom {
             children.entry(parent).or_default().push(child);
         }
