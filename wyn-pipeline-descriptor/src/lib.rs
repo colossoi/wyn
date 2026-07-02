@@ -181,6 +181,15 @@ pub enum DispatchLen {
     },
 }
 
+/// One member of a uniform block: where the host writes the value.
+/// Mirrors the `PushConstant { offset, size }` contract, per member.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UniformMember {
+    pub name: String,
+    pub offset: u32,
+    pub size: u32,
+}
+
 /// A GPU resource binding used by the pipeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -203,6 +212,15 @@ pub enum Binding {
         set: u32,
         binding: u32,
         name: String,
+        /// std140 byte size of the block. `0` in descriptors that
+        /// predate block-layout publication (hosts fall back to their
+        /// known-name tables).
+        #[serde(default)]
+        size: u32,
+        /// Flattened block members in declaration order — the record
+        /// fields of a record-typed uniform. Empty when unpublished.
+        #[serde(default)]
+        members: Vec<UniformMember>,
     },
     /// Push constant range.
     PushConstant {

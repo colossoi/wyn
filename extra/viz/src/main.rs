@@ -174,6 +174,18 @@ enum Command {
         ///   "header_base:u32x19=0,0,0,..."
         #[arg(long = "push-constant", value_name = "SPEC", verbatim_doc_comment, value_parser = PushConstantSpec::parse)]
         push_constants: Vec<PushConstantSpec>,
+        /// Set a uniform block member once at startup (repeatable).
+        /// Placement comes from the descriptor's published member
+        /// layout; value syntax matches --push-constant.
+        ///
+        /// Format: `name.member:type=value` (or `name:type=value` for
+        /// a bare scalar/vector uniform).
+        ///
+        /// Examples:
+        ///   "c.radius:f32=0.35"
+        ///   "c.tint:f32x2=0.9,0.2"
+        #[arg(long = "uniform", value_name = "SPEC", verbatim_doc_comment, value_parser = specs::UniformSpec::parse)]
+        uniform_values: Vec<specs::UniformSpec>,
         /// Override the per-frame compute dispatch for one compute
         /// entry (repeatable). Format: `ENTRY:WxH[xD]`.
         ///
@@ -291,6 +303,7 @@ fn main() -> Result<()> {
             framebuffers,
             outputs,
             push_constants,
+            uniform_values,
             dispatch,
             feedback,
             storage_dir,
@@ -436,6 +449,7 @@ fn main() -> Result<()> {
                     topology: topology.into(),
                     images: image_map,
                     dump_textures: dump_texture_map,
+                    uniform_values,
                 },
                 verbose,
             ))?;

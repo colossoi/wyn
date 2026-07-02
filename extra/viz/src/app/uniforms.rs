@@ -150,7 +150,14 @@ pub fn build_pipeline_uniforms(
     let mut by_set_binding: HashMap<(u32, u32), wgpu::Buffer> = HashMap::new();
 
     for b in all_uniform_bindings {
-        let Binding::Uniform { set, binding, name } = b else {
+        let Binding::Uniform {
+            set,
+            binding,
+            name,
+            size,
+            ..
+        } = b
+        else {
             continue;
         };
         // Same (set, binding) may be declared by multiple pipelines —
@@ -161,33 +168,38 @@ pub fn build_pipeline_uniforms(
         let (size_bytes, label) = match name.as_str() {
             "iResolution" => (
                 std::mem::size_of::<ResolutionUniform>() as u64,
-                "pipeline.uniform.iResolution",
+                "pipeline.uniform.iResolution".to_string(),
             ),
             "iTime" => (
                 // Pad to 16 bytes — wgpu's UNIFORM minimum binding size
                 // is 16 on many adapters.
                 16u64,
-                "pipeline.uniform.iTime",
+                "pipeline.uniform.iTime".to_string(),
             ),
             "iMouse" => (
                 std::mem::size_of::<MouseUniform>() as u64,
-                "pipeline.uniform.iMouse",
+                "pipeline.uniform.iMouse".to_string(),
             ),
             "iFrame" => (
                 std::mem::size_of::<FrameUniform>() as u64,
-                "pipeline.uniform.iFrame",
+                "pipeline.uniform.iFrame".to_string(),
             ),
+            // Any other uniform with a published block size gets a
+            // zero-initialized buffer of that size; `--uniform` writes
+            // member values into it at startup. Descriptors that
+            // predate size publication carry 0 and keep erroring.
+            other if *size > 0 => ((*size).max(16) as u64, format!("pipeline.uniform.{other}")),
             other => {
                 return Err(anyhow!(
-                    "viz pipeline-interactive: graphics pipeline declares unknown uniform `{}`. \
-                     Known names: iResolution, iTime, iMouse, iFrame.",
+                    "viz pipeline-interactive: graphics pipeline declares unknown uniform `{}` \
+                     with no published size. Known names: iResolution, iTime, iMouse, iFrame.",
                     other
                 ));
             }
         };
 
         let buffer = device.create_buffer(&BufferDescriptor {
-            label: Some(label),
+            label: Some(&label),
             size: size_bytes,
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -202,7 +214,9 @@ pub fn build_pipeline_uniforms(
             "iTime" => time = Some(buffer),
             "iMouse" => mouse = Some(buffer),
             "iFrame" => frame = Some(buffer),
-            _ => unreachable!(),
+            // User block uniforms live only in by_set_binding; their
+            // content is zeroed at creation and written by --uniform.
+            _ => {}
         }
     }
 

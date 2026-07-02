@@ -173,3 +173,83 @@ fn collect_array_strides(ty: &Type, out: &mut Vec<u32>) {
         }
     }
 }
+
+/// Block layout rule set for interface blocks (uniform / storage).
+/// For the member shapes `block_layout` supports (32-bit scalars and
+/// vectors of them) the two sets produce identical member offsets;
+/// they differ only in the final size rounding — std140 rounds the
+/// block size up to 16.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LayoutRules {
+    Std140,
+    Std430,
+}
+
+/// Computed layout for an interface block value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockLayout {
+    /// Total block size in bytes, rounded to the block alignment (and
+    /// to 16 under std140).
+    pub size: u32,
+    /// The block's alignment: the largest member alignment.
+    pub align: u32,
+    /// Byte offset of each member, in declaration order. A bare
+    /// scalar/vector is a single member at offset 0.
+    pub member_offsets: Vec<u32>,
+}
+
+/// Layout for an interface-block value: a 32-bit `f32`/`i32`/`u32`
+/// scalar, a vec2/3/4 of them, or a FLAT record/tuple of those.
+/// Returns `None` for anything else (bool, matrices, arrays, nested
+/// aggregates, runtime arrays, non-32-bit scalars) — callers gate
+/// support on this.
+pub fn block_layout(ty: &Type, rules: LayoutRules) -> Option<BlockLayout> {
+    // (size, alignment) of one supported member.
+    fn member(ty: &Type) -> Option<(u32, u32)> {
+        match ty {
+            Type::Constructed(TypeName::Int(32), _)
+            | Type::Constructed(TypeName::UInt(32), _)
+            | Type::Constructed(TypeName::Float(32), _) => Some((4, 4)),
+            _ if ty.is_vec() => {
+                // Element must itself be a supported 32-bit scalar.
+                member(ty.elem_type()?)?;
+                let n = ty.vec_size()? as u32;
+                if !(2..=4).contains(&n) {
+                    return None;
+                }
+                Some((4 * n, if n == 2 { 8 } else { 16 }))
+            }
+            _ => None,
+        }
+    }
+
+    let fields: Vec<&Type> = match ty {
+        Type::Constructed(TypeName::Tuple(_), args) | Type::Constructed(TypeName::Record(_), args) => {
+            args.iter().collect()
+        }
+        other => vec![other],
+    };
+    if fields.is_empty() {
+        return None;
+    }
+
+    let mut member_offsets = Vec::with_capacity(fields.len());
+    let mut offset = 0u32;
+    let mut align = 4u32;
+    for field in fields {
+        let (field_size, field_align) = member(field)?;
+        offset = offset.div_ceil(field_align) * field_align;
+        member_offsets.push(offset);
+        offset += field_size;
+        align = align.max(field_align);
+    }
+    let mut size = offset.div_ceil(align) * align;
+    if rules == LayoutRules::Std140 {
+        size = size.div_ceil(16) * 16;
+    }
+    Some(BlockLayout {
+        size,
+        align,
+        member_offsets,
+    })
+}

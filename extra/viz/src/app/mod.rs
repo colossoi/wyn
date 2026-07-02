@@ -105,6 +105,10 @@ pub struct InteractivePipelineSpec {
     /// (`--dump-texture NAME:FILE`). Keyed by binding name → output
     /// path; dumped at the `--max-frames` exit like `outputs`.
     pub dump_textures: HashMap<String, PathBuf>,
+    /// Uniform block member values written once at state construction
+    /// (`--uniform NAME.MEMBER:TYPE=VALUE`), placed via the
+    /// descriptor's published member layout.
+    pub uniform_values: Vec<crate::specs::UniformSpec>,
 }
 
 /// Embedded WGSL source compiled in-place. Used by the built-in test
@@ -806,6 +810,59 @@ impl State {
             .collect();
         let uniforms = uniforms::build_pipeline_uniforms(&device, &all_uniform_bindings)
             .context("build_pipeline_uniforms")?;
+
+        // `--uniform NAME.MEMBER:TYPE=VALUE`: write user-supplied block
+        // member values once, placed by the descriptor's published
+        // member layout (the block buffers were zero-initialized above).
+        for spec_value in &spec.uniform_values {
+            let (set, binding, offset, size) = all_uniform_bindings
+                .iter()
+                .find_map(|b| {
+                    let wyn_pipeline_descriptor::Binding::Uniform {
+                        set,
+                        binding,
+                        name,
+                        size,
+                        members,
+                    } = b
+                    else {
+                        return None;
+                    };
+                    if *name != spec_value.name {
+                        return None;
+                    }
+                    match &spec_value.member {
+                        Some(member) => members
+                            .iter()
+                            .find(|m| m.name == *member)
+                            .map(|m| (*set, *binding, m.offset, m.size)),
+                        None => Some((*set, *binding, 0, *size)),
+                    }
+                })
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "--uniform {}{}: no matching uniform member in the descriptor",
+                        spec_value.name,
+                        spec_value
+                            .member
+                            .as_ref()
+                            .map(|m| format!(".{m}"))
+                            .unwrap_or_default()
+                    )
+                })?;
+            if spec_value.data.len() as u32 != size {
+                return Err(anyhow::anyhow!(
+                    "--uniform {}: value is {} bytes but the member is {} bytes",
+                    spec_value.name,
+                    spec_value.data.len(),
+                    size
+                ));
+            }
+            let buffer = uniforms.by_set_binding.get(&(set, binding)).ok_or_else(|| {
+                anyhow::anyhow!("--uniform {}: uniform buffer was not allocated", spec_value.name)
+            })?;
+            queue.write_buffer(buffer, offset as u64, &spec_value.data);
+        }
 
         // Load the SPIR-V module once; both compute and graphics
         // pipelines reuse the same shader binary.

@@ -146,10 +146,13 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                     if claimed.contains(&(br.set, br.binding)) {
                         continue;
                     }
+                    let (size, members) = uniform_block_members(&input.ty);
                     bindings.push(Binding::Uniform {
                         set: br.set,
                         binding: br.binding,
                         name: input.name.clone(),
+                        size,
+                        members,
                     });
                 } else if let Some(br) = input.storage_binding {
                     if claimed.contains(&(br.set, br.binding)) {
@@ -398,4 +401,43 @@ fn publish_fragment_outputs(pipeline: &mut PipelineDescriptor, entry: &EgirEntry
             if multi { format!("{}_output_{}", entry.name, i) } else { format!("{}_output", entry.name) };
         fragment_outputs.push(FragmentOutput { location, name });
     }
+}
+
+/// std140 block size + member layout for a uniform binding's value
+/// type. Record uniforms publish one member per field (source field
+/// names); tuples publish `f0..fn`; bare scalars/vectors publish a
+/// single member at offset 0 named after nothing the host needs to
+/// qualify — size 0 / empty members when the type has no block layout
+/// (hosts fall back to their known-name tables).
+fn uniform_block_members(
+    ty: &polytype::Type<crate::ast::TypeName>,
+) -> (u32, Vec<wyn_pipeline_descriptor::UniformMember>) {
+    use crate::ast::TypeName;
+    use crate::ssa::layout::{block_layout, type_byte_size, LayoutRules};
+    let Some(layout) = block_layout(ty, LayoutRules::Std140) else {
+        return (0, Vec::new());
+    };
+    let (names, field_tys): (Vec<String>, Vec<&polytype::Type<crate::ast::TypeName>>) = match ty {
+        polytype::Type::Constructed(TypeName::Record(fields), args) => {
+            (fields.iter().cloned().collect(), args.iter().collect())
+        }
+        polytype::Type::Constructed(TypeName::Tuple(_), args) => (
+            (0..args.len()).map(|i| format!("f{i}")).collect(),
+            args.iter().collect(),
+        ),
+        other => (vec![String::new()], vec![other]),
+    };
+    let members = names
+        .into_iter()
+        .zip(field_tys)
+        .zip(&layout.member_offsets)
+        .map(
+            |((name, field_ty), &offset)| wyn_pipeline_descriptor::UniformMember {
+                name,
+                offset,
+                size: type_byte_size(field_ty).unwrap_or(0),
+            },
+        )
+        .collect();
+    (layout.size, members)
 }

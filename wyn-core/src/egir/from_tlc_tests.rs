@@ -500,7 +500,7 @@ fn vertex_uniform_param_compiles_and_surfaces_binding() {
     assert!(
         vs.bindings.iter().any(|b| matches!(
             b,
-            Binding::Uniform { set: 1, binding: 0, name } if name == "scale"
+            Binding::Uniform { set: 1, binding: 0, name, .. } if name == "scale"
         )),
         "vertex uniform `scale` should surface as a binding, got {:?}",
         vs.bindings

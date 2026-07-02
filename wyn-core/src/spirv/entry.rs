@@ -104,8 +104,10 @@ pub(super) fn lower_ssa_entry_point(
     // Handle inputs
     let mut location = 0u32;
     // Uniform-bound inputs need their access-chain + load deferred until
-    // after `begin_function`. Each entry here: (input.name, var_id, value_type).
-    let mut uniform_loads: Vec<(String, spirv::Word, spirv::Word)> = Vec::new();
+    // after `begin_function`. Each entry here: (input.name, var_id,
+    // value_type, member_types) — member_types is Some for a record
+    // uniform whose fields are the block's members.
+    let mut uniform_loads: Vec<(String, spirv::Word, spirv::Word, Option<Vec<spirv::Word>>)> = Vec::new();
     for input in &entry.inputs {
         // Push constant inputs are handled separately above
         if input.push_constant.is_some() {
@@ -177,11 +179,43 @@ pub(super) fn lower_ssa_entry_point(
                 interfaces.push(var_id);
             }
         } else if let Some(br) = input.uniform_binding {
-            // `#[uniform(set, binding)]` → Block-decorated `{value}` struct
-            // in Uniform storage class; the helper caches the struct so
-            // two params with the same value type don't double-decorate
+            // `#[uniform(set, binding)]` → Block-decorated struct in
+            // Uniform storage class. A scalar/vector uniform is a
+            // single-member `{value}` block; a record uniform's fields
+            // become the block's members directly, at std140 offsets
+            // (the interface-block cache mints a fresh struct id, so the
+            // shared plain record struct — also used for function-local
+            // values — is never Offset-decorated). Both helpers cache so
+            // shared bindings across entries don't double-decorate
             // (spirv-val rejects member-Offset applied twice).
-            let block_struct = constructor.get_or_create_uniform_block_type(input_type);
+            let record_fields: Option<&[PolyType<TypeName>]> = match &input.ty {
+                PolyType::Constructed(TypeName::Record(_), args)
+                | PolyType::Constructed(TypeName::Tuple(_), args) => Some(args.as_slice()),
+                _ => None,
+            };
+            let (block_struct, member_types) = if let Some(args) = record_fields {
+                let layout =
+                    crate::ssa::layout::block_layout(&input.ty, crate::ssa::layout::LayoutRules::Std140)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "uniform block `{}`: members must be 32-bit scalars or \
+                                 vectors of them (flat record), got {:?}",
+                                input.name, input.ty
+                            )
+                        });
+                let member_types: Vec<spirv::Word> =
+                    args.iter().map(|a| constructor.polytype_to_spirv(a)).collect();
+                let member_poly_types: Vec<&PolyType<TypeName>> = args.iter().collect();
+                let block = constructor.create_interface_block_type(
+                    InterfaceBlockKind::Uniform,
+                    &member_types,
+                    &layout.member_offsets,
+                    &member_poly_types,
+                );
+                (block, Some(member_types))
+            } else {
+                (constructor.get_or_create_uniform_block_type(input_type), None)
+            };
             let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::Uniform, block_struct);
             let var_id = constructor.builder.variable(ptr_type, None, spirv::StorageClass::Uniform, None);
             constructor.builder.decorate(
@@ -195,7 +229,7 @@ pub(super) fn lower_ssa_entry_point(
                 [Operand::LiteralBit32(br.binding)],
             );
             interfaces.push(var_id);
-            uniform_loads.push((input.name.clone(), var_id, input_type));
+            uniform_loads.push((input.name.clone(), var_id, input_type, member_types));
         } else if let Some(br) = input.texture_binding.or(input.sampler_binding) {
             // `#[texture]` / `#[sampler]` → opaque handle in UniformConstant
             // storage, decorated DescriptorSet/Binding. Unlike a uniform
@@ -377,15 +411,36 @@ pub(super) fn lower_ssa_entry_point(
         }
     }
 
-    // Load uniform members: each `#[uniform]` param is an OpVariable
-    // pointing at a Block-decorated `{value_type}` struct in Uniform
-    // storage. The body references the value, so AccessChain to
-    // member 0 + Load and put the loaded value in env.
-    for (name, var_id, value_type) in &uniform_loads {
-        let member_ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::Uniform, *value_type);
-        let zero = constructor.const_i32(0);
-        let access_chain = constructor.builder.access_chain(member_ptr_type, None, *var_id, [zero])?;
-        let loaded = constructor.builder.load(*value_type, None, access_chain, None, [])?;
+    // Load uniform values. A scalar/vector uniform is a Block-decorated
+    // `{value_type}` struct: AccessChain to member 0 + Load. A record
+    // uniform's block members ARE the record's fields: load each member
+    // and CompositeConstruct the plain record value. (Per-member loads
+    // rather than OpCopyLogical: naga's SPIR-V frontend — which viz
+    // feeds this module through — doesn't handle OpCopyLogical, and the
+    // member loop mirrors the push-constant prologue above.)
+    for (name, var_id, value_type, member_types) in &uniform_loads {
+        let loaded = match member_types {
+            Some(member_types) => {
+                let mut members = Vec::with_capacity(member_types.len());
+                for (i, &member_type) in member_types.iter().enumerate() {
+                    let member_ptr_type =
+                        constructor.get_or_create_ptr_type(spirv::StorageClass::Uniform, member_type);
+                    let idx = constructor.const_u32(i as u32);
+                    let access_chain =
+                        constructor.builder.access_chain(member_ptr_type, None, *var_id, [idx])?;
+                    members.push(constructor.builder.load(member_type, None, access_chain, None, [])?);
+                }
+                constructor.builder.composite_construct(*value_type, None, members)?
+            }
+            None => {
+                let member_ptr_type =
+                    constructor.get_or_create_ptr_type(spirv::StorageClass::Uniform, *value_type);
+                let zero = constructor.const_i32(0);
+                let access_chain =
+                    constructor.builder.access_chain(member_ptr_type, None, *var_id, [zero])?;
+                constructor.builder.load(*value_type, None, access_chain, None, [])?
+            }
+        };
         constructor.env.insert(name.clone(), loaded);
     }
 

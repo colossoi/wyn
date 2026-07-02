@@ -113,3 +113,35 @@ fn parse_push_constant_value(ty: &str, value: &str) -> Result<Vec<u8>> {
         _ => Err(anyhow!("Unknown push constant type: {}", ty)),
     }
 }
+
+/// CLI spec for `--uniform` on the `pipeline` subcommand: one member
+/// value of a uniform block, placed via the descriptor's published
+/// member layout.
+#[derive(Debug, Clone)]
+pub struct UniformSpec {
+    /// Uniform binding name (the entry parameter name).
+    pub name: String,
+    /// Block member name; `None` addresses a bare scalar/vector
+    /// uniform's whole value.
+    pub member: Option<String>,
+    pub data: Vec<u8>,
+}
+
+impl UniformSpec {
+    /// Parse from "name.member:type=value" (or "name:type=value" for a
+    /// bare scalar/vector uniform). Value syntax matches
+    /// `--push-constant`: `c.radius:f32=0.35`, `c.tint:f32x2=0.9,0.2`.
+    pub fn parse(spec: &str) -> Result<Self> {
+        let (name_type, value) =
+            spec.split_once('=').ok_or_else(|| anyhow!("Uniform spec must contain '=': {}", spec))?;
+        let (path, ty) = name_type
+            .split_once(':')
+            .ok_or_else(|| anyhow!("Uniform spec must have format name[.member]:type=value: {}", spec))?;
+        let (name, member) = match path.split_once('.') {
+            Some((n, m)) => (n.to_string(), Some(m.to_string())),
+            None => (path.to_string(), None),
+        };
+        let data = parse_push_constant_value(ty, value)?;
+        Ok(Self { name, member, data })
+    }
+}

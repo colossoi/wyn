@@ -53,6 +53,9 @@ struct InterfaceBlockKey {
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 enum InterfaceBlockKind {
     PushConstant,
+    /// A record-typed `#[uniform]` block: the record's fields are the
+    /// block's members, laid out std140.
+    Uniform,
 }
 
 /// - Block management with implicit branch from variables block to code

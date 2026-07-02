@@ -57,6 +57,10 @@ pub struct InteractiveOpts {
     /// Storage textures to dump as PNG at the `--max-frames` exit, by
     /// binding name (from `--dump-texture NAME:FILE`).
     pub dump_textures: HashMap<String, PathBuf>,
+    /// Uniform block member values to write once at startup (from
+    /// `--uniform NAME.MEMBER:TYPE=VALUE`), placed via the
+    /// descriptor's published member layout.
+    pub uniform_values: Vec<crate::specs::UniformSpec>,
 }
 
 /// Per-texel format for a `--framebuffer` binding. v1 supports
@@ -364,6 +368,7 @@ fn run_pipeline_interactive(
         outputs,
         images,
         dump_textures: opts.dump_textures,
+        uniform_values: opts.uniform_values,
     };
 
     let event_loop = EventLoop::new().context("failed to create event loop")?;
