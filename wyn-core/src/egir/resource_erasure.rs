@@ -156,6 +156,12 @@ fn erase_function_params(function: &mut EgirFunc) -> Result<(), ConvertError> {
                 function.name
             )));
         }
+        // Drop the dead param node: its index is stale after the
+        // renumbering above and can collide with a surviving param's new
+        // index, making elaboration's index-keyed param registration pick
+        // the corpse over the real param.
+        function.graph.nodes.remove(erased);
+        function.graph.types.remove(&erased);
     }
 
     function.params = function

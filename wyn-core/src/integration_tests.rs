@@ -8282,3 +8282,45 @@ entry e() [1]f32 = [fsqrt(4.0f32)]
     )
     .expect("f32.from_bits/to_bits should lower to OpBitcast");
 }
+
+/// A `map` compute entry whose lambda runs a loop containing an
+/// `image_load` (storage image) and THEN does a `texture_load` (sampled
+/// texture) panics during EGIR elaboration:
+///
+///   elaborate.rs: "FuncParam/BlockParam NodeId(..) should have been
+///   pre-populated in elaborated map"
+///
+/// Both operations and their order are load-bearing: texture_load
+/// before the loop, or an image_load in place of the texture_load,
+/// compiles fine. This is the light-pass shape for driving lib/gtao.wyn
+/// from the map/iota idiom (loop over shadow taps, then sample the AO
+/// result).
+#[test]
+fn texture_load_after_image_load_loop_in_map_lambda() {
+    crate::compile_thru_spirv(
+        r#"
+open f32
+resource src: image2d { format = r32float  size = window  usages = [storage_read, storage_write] }
+resource tex: image2d { format = r32float  size = window  usages = [storage_write, sampled] }
+resource dst: image2d { format = r32float  size = window  usages = [storage_read, storage_write] }
+
+#[compute]
+entry g6(pxl: []u32,
+         #[view(src, storage_read)]  s: storage_image,
+         #[view(tex, sampled)]       tx: texture2d,
+         #[view(dst, storage_write)] d: storage_image)
+  []u32 =
+  map(|t|
+    let i = i32(t)  let x = i % 1280  let y = i / 1280
+    let acc =
+      loop acc = 0.0 for k < 8 do
+        let v = image_load(s, @[x, y]).x in
+        acc + v
+    let base = texture_load(tx, @[x, y], 0).x in
+    let _ = image_store(d, @[x, y], @[acc + base, 0.0, 0.0, 1.0]) in
+    0u32
+    , pxl)
+"#,
+    )
+    .expect("texture_load after an image_load loop inside a map lambda should lower");
+}
