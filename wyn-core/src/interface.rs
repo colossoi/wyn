@@ -244,6 +244,10 @@ impl EntryParamBinding {
 /// Entry point declaration (vertex/fragment/compute shader).
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntryDecl {
+    /// Whether this entry came from source or was synthesized for a specific
+    /// compiler phase.  Generated names remain presentation-only; downstream
+    /// passes must use this field for behavior.
+    pub origin: EntryOrigin,
     pub entry_type: Attribute, // Attribute::Vertex, Attribute::Fragment, or Attribute::Compute
     pub name: String,
     pub name_span: Span,
@@ -272,6 +276,27 @@ pub struct EntryDecl {
     /// found a previous-frame view. Flows to the pipeline descriptor.
     pub feedback: Vec<FeedbackPair>,
     pub body: Expression,
+}
+
+/// Provenance and semantic role of an entry point.
+///
+/// Source entries normally retain `Source`; entries split out or rewritten as
+/// semantically distinct compiler phases receive a precise variant at the
+/// point where that happens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EntryOrigin {
+    #[default]
+    Source,
+    ScalarPrepass,
+    GatherPrepass,
+    MultiConsumerMaterialization,
+    /// A compiler-created runtime-filter helper entry. The concrete phase is
+    /// authoritative on the entry's `EgirSoac::Filter` side effect.
+    RuntimeFilter,
+    ReducePhase2,
+    ScanPhase2,
+    ScanPhase3,
+    OutputDomainSplit,
 }
 
 // ---------------------------------------------------------------------------

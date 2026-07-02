@@ -844,6 +844,7 @@ fn collect_entry_input_names(program: &Program) -> LookupMap<(u32, u32), String>
 
 pub(crate) fn make_entry_def(
     name: &str,
+    origin: interface::EntryOrigin,
     body: Term,
     return_ty: Type<TypeName>,
     required_params: &[RequiredParam],
@@ -934,6 +935,7 @@ pub(crate) fn make_entry_def(
         ty: full_ty,
         body,
         meta: DefMeta::EntryPoint(Box::new(interface::EntryDecl {
+            origin,
             entry_type: Attribute::Compute,
             name: name.to_string(),
             name_span: dummy_span,
@@ -1217,6 +1219,7 @@ impl ScalarPrepassHoister<'_> {
         let name = format!("{}_prepass_{}", self.entry_name, self.added_decls.len());
         self.new_defs.push(make_entry_def(
             &name,
+            interface::EntryOrigin::ScalarPrepass,
             prepass_body,
             result_ty.clone(),
             &required_params,

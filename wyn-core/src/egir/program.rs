@@ -415,7 +415,7 @@ fn scalar_handoff_resources(inner: &EgirInner) -> HashMap<crate::BindingRef, Com
         .collect();
     let mut resources = HashMap::new();
     for entry in &inner.entry_points {
-        if !entry.name.contains("_prepass_") {
+        if entry.origin != interface::EntryOrigin::ScalarPrepass {
             continue;
         }
         let owner = entry.graph.skeleton.blocks.iter().find_map(|(_, block)| {
@@ -693,6 +693,8 @@ pub struct SlotSource {
 
 #[derive(Clone)]
 pub struct EgirEntry {
+    /// Source/compiler provenance. Generated names are not semantic tags.
+    pub origin: interface::EntryOrigin,
     pub name: String,
     pub span: Span,
     pub execution_model: ExecutionModel,
@@ -715,6 +717,7 @@ pub struct EgirEntry {
 
 impl EgirEntry {
     pub fn new(
+        origin: interface::EntryOrigin,
         name: String,
         span: Span,
         execution_model: ExecutionModel,
@@ -727,6 +730,7 @@ impl EgirEntry {
         control_headers: LookupMap<BlockId, ControlHeader>,
     ) -> Self {
         EgirEntry {
+            origin,
             name,
             span,
             execution_model,

@@ -5,6 +5,7 @@ use super::*;
 use crate::ast::{Span, TypeName};
 use crate::egir::types::{EGraph, RegionId};
 use crate::pipeline_descriptor::PipelineDescriptor;
+use crate::ssa::types::ExecutionModel;
 use polytype::Type;
 
 fn unit_ty() -> Type<TypeName> {
@@ -21,6 +22,69 @@ fn empty_func(name: &str) -> EgirFunc {
         EGraph::new(),
         LookupMap::new(),
     )
+}
+
+fn empty_entry(name: &str) -> EgirEntry {
+    EgirEntry::new(
+        crate::interface::EntryOrigin::Source,
+        name.to_string(),
+        Span::dummy(),
+        ExecutionModel::Compute {
+            local_size: (1, 1, 1),
+        },
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+        unit_ty(),
+        EGraph::new(),
+        LookupMap::new(),
+    )
+}
+
+#[test]
+fn scalar_handoff_classification_uses_entry_origin_not_name() {
+    let typed_binding = crate::BindingRef::new(0, 10);
+    let misleading_binding = crate::BindingRef::new(0, 11);
+    let output = |binding| crate::interface::StorageBindingDecl {
+        binding,
+        role: crate::interface::StorageRole::Output,
+        elem_ty: unit_ty(),
+        length: None,
+    };
+    let input = |binding| crate::interface::StorageBindingDecl {
+        binding,
+        role: crate::interface::StorageRole::Input,
+        elem_ty: unit_ty(),
+        length: None,
+    };
+
+    let mut typed = empty_entry("renamed_without_magic_marker");
+    typed.origin = crate::interface::EntryOrigin::ScalarPrepass;
+    typed.storage_bindings.push(output(typed_binding));
+
+    let mut misleading = empty_entry("user_prepass_name");
+    misleading.storage_bindings.push(output(misleading_binding));
+
+    let mut consumer = empty_entry("consumer");
+    consumer.storage_bindings.push(input(typed_binding));
+    consumer.storage_bindings.push(input(misleading_binding));
+
+    let inner = EgirInner::new(
+        vec![],
+        vec![],
+        vec![typed, misleading, consumer],
+        vec![],
+        PipelineDescriptor::default(),
+        RegionInterner::default(),
+    );
+    let resources = scalar_handoff_resources(&inner);
+
+    assert_eq!(
+        resources.get(&typed_binding).map(|resource| resource.kind),
+        Some(CompilerResourceKind::ScalarHandoff)
+    );
+    assert!(!resources.contains_key(&misleading_binding));
 }
 
 #[test]

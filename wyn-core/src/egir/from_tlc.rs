@@ -598,6 +598,7 @@ fn convert_entry_point(
     storage_bindings.extend(std::mem::take(&mut converter.extra_storage_bindings));
     let (graph, control_headers) = converter.into_graph_parts();
     let mut entry = EgirEntry::new(
+        entry.origin,
         def_name.to_string(),
         def.body.span,
         execution_model,

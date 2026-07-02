@@ -834,6 +834,7 @@ mod tests {
         );
         graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(output));
         let entry = EgirEntry::new(
+            crate::interface::EntryOrigin::Source,
             "entry".into(),
             Span::new(0, 0, 0, 0),
             ExecutionModel::Compute {

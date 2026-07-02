@@ -632,6 +632,59 @@ impl Skeleton {
     }
 }
 
+/// Stable-for-a-snapshot location of a side effect in the skeleton.
+///
+/// Side effects are still stored in ordered per-block vectors, so a site must
+/// not outlive an insertion/removal/reorder in those vectors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SideEffectSite {
+    pub block: BlockId,
+    pub index: usize,
+}
+
+/// Read-side index from every `SideEffectResult` node to its producer.
+///
+/// Build this once for a graph snapshot and share it across related queries.
+/// Rebuild it after any structural skeleton mutation.
+pub struct SideEffectIndex {
+    by_result: LookupMap<NodeId, SideEffectSite>,
+}
+
+impl SideEffectIndex {
+    pub fn build(graph: &EGraph) -> Self {
+        let mut by_result = LookupMap::new();
+        for (block, skeleton_block) in &graph.skeleton.blocks {
+            for (index, effect) in skeleton_block.side_effects.iter().enumerate() {
+                let Some(result) = effect.result else {
+                    continue;
+                };
+                let previous = by_result.insert(result, SideEffectSite { block, index });
+                assert!(
+                    previous.is_none(),
+                    "side-effect result has more than one producer: {result:?}"
+                );
+            }
+        }
+        Self { by_result }
+    }
+
+    pub fn site(&self, result: NodeId) -> Option<SideEffectSite> {
+        self.by_result.get(&result).copied()
+    }
+
+    pub fn effect<'a>(&self, graph: &'a EGraph, result: NodeId) -> Option<&'a SideEffect> {
+        let site = self.site(result)?;
+        let effect = graph.skeleton.blocks.get(site.block)?.side_effects.get(site.index)?;
+        (effect.result == Some(result)).then_some(effect)
+    }
+
+    pub fn effect_mut<'a>(&self, graph: &'a mut EGraph, result: NodeId) -> Option<&'a mut SideEffect> {
+        let site = self.site(result)?;
+        let effect = graph.skeleton.blocks.get_mut(site.block)?.side_effects.get_mut(site.index)?;
+        (effect.result == Some(result)).then_some(effect)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // EGraph — the main container
 // ---------------------------------------------------------------------------
@@ -664,6 +717,10 @@ impl EGraph {
             skeleton: Skeleton::new(),
             node_spans: LookupMap::new(),
         }
+    }
+
+    pub fn side_effect_index(&self) -> SideEffectIndex {
+        SideEffectIndex::build(self)
     }
 
     /// Allocate a function parameter node.
@@ -748,6 +805,10 @@ impl EGraph {
         id
     }
 }
+
+#[cfg(test)]
+#[path = "types_tests.rs"]
+mod types_tests;
 
 // ---------------------------------------------------------------------------
 // Conversion helpers: InstKind ↔ PureOp

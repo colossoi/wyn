@@ -39,6 +39,10 @@ pub struct KernelPhase {
     pub entry_point: String,
     pub workgroup_size: (u32, u32, u32),
     pub domain: KernelDomain,
+    /// The authoritative selection request. Inferred selections retain their
+    /// original fallback so reconciliation can recompute the complete domain
+    /// after entry rewrites.
+    pub domain_selection: DomainSelection,
     pub resources: Vec<ScheduledResource>,
     /// Phase indices in this pipeline that must complete first.
     pub dependencies: Vec<usize>,
@@ -55,6 +59,13 @@ pub enum KernelDomain {
     },
     /// One logical invocation per element of a concrete length source.
     Elements(DispatchLen),
+}
+
+/// A domain together with the authority the caller assigns to it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DomainSelection {
+    Inferred(KernelDomain),
+    Explicit(KernelDomain),
 }
 
 /// Conservative resource access for a phase.
@@ -116,11 +127,19 @@ impl KernelSchedule {
                 .map(|stage| {
                     by_name
                         .get(stage.entry_point.as_str())
-                        .map(|entry| phase_from_entry(entry, domain_from_dispatch(&stage.dispatch_size)))
+                        .map(|entry| {
+                            phase_from_entry(
+                                entry,
+                                DomainSelection::Inferred(domain_from_dispatch(&stage.dispatch_size)),
+                            )
+                        })
                         .unwrap_or_else(|| KernelPhase {
                             entry_point: stage.entry_point.clone(),
                             workgroup_size: stage.workgroup_size,
                             domain: domain_from_dispatch(&stage.dispatch_size),
+                            domain_selection: DomainSelection::Inferred(domain_from_dispatch(
+                                &stage.dispatch_size,
+                            )),
                             resources: Vec::new(),
                             dependencies: Vec::new(),
                         })
@@ -138,7 +157,7 @@ impl KernelSchedule {
     /// Add a generated phase after the current last phase of `parent`'s
     /// pipeline.  Dependencies are explicit even though host publication
     /// currently emits phases in topological order.
-    pub fn add_phase_after(&mut self, parent: &str, entry: &EgirEntry, domain: KernelDomain) {
+    pub fn add_phase_after(&mut self, parent: &str, entry: &EgirEntry, domain: DomainSelection) {
         let pipeline = self
             .pipelines
             .iter_mut()
@@ -157,7 +176,7 @@ impl KernelSchedule {
     /// Insert a compiler-generated producer immediately before `consumer` and
     /// make the consumer depend on it. Existing dependency indices are shifted
     /// transactionally with the insertion.
-    pub fn add_phase_before(&mut self, consumer: &str, entry: &EgirEntry, domain: KernelDomain) {
+    pub fn add_phase_before(&mut self, consumer: &str, entry: &EgirEntry, domain: DomainSelection) {
         let pipeline = self
             .pipelines
             .iter_mut()
@@ -191,7 +210,7 @@ impl KernelSchedule {
     /// Add an independent sibling kernel to the same host pipeline. This is
     /// used for distinct output domains: source order is retained by the
     /// published phase list, but no data dependency is fabricated.
-    pub fn add_sibling(&mut self, parent: &str, entry: &EgirEntry, domain: KernelDomain) {
+    pub fn add_sibling(&mut self, parent: &str, entry: &EgirEntry, domain: DomainSelection) {
         let pipeline = self
             .pipelines
             .iter_mut()
@@ -220,8 +239,8 @@ impl KernelSchedule {
                     continue;
                 };
                 phase.workgroup_size = entry_workgroup(entry);
-                if let Some(domain) = segmented_domain(entry) {
-                    phase.domain = domain;
+                if let DomainSelection::Inferred(fallback) = &phase.domain_selection {
+                    phase.domain = inferred_domain(entry, fallback.clone());
                 }
                 let filter_phase = entry.graph.skeleton.blocks.iter().any(|(_, block)| {
                     block.side_effects.iter().any(|effect| {
@@ -236,7 +255,9 @@ impl KernelSchedule {
                         )
                     })
                 });
-                phase.resources = if filter_phase || entry.name.contains("_materialize_shared") {
+                let semantic_resources = filter_phase
+                    || entry.origin == crate::interface::EntryOrigin::MultiConsumerMaterialization;
+                phase.resources = if semantic_resources {
                     segmented_resources(entry).unwrap_or_else(|| entry_resources(entry))
                 } else {
                     entry_resources(entry)
@@ -471,16 +492,23 @@ impl KernelSchedule {
     }
 }
 
-fn phase_from_entry(entry: &EgirEntry, fallback: KernelDomain) -> KernelPhase {
+fn phase_from_entry(entry: &EgirEntry, selection: DomainSelection) -> KernelPhase {
+    let domain = match &selection {
+        DomainSelection::Inferred(fallback) => inferred_domain(entry, fallback.clone()),
+        DomainSelection::Explicit(domain) => domain.clone(),
+    };
     KernelPhase {
         entry_point: entry.name.clone(),
         workgroup_size: entry_workgroup(entry),
-        domain: segmented_domain(entry)
-            .or_else(|| storage_image_domain(entry, &fallback))
-            .unwrap_or(fallback),
+        domain,
+        domain_selection: selection,
         resources: segmented_resources(entry).unwrap_or_else(|| entry_resources(entry)),
         dependencies: Vec::new(),
     }
+}
+
+fn inferred_domain(entry: &EgirEntry, fallback: KernelDomain) -> KernelDomain {
+    segmented_domain(entry).or_else(|| storage_image_domain(entry, &fallback)).unwrap_or(fallback)
 }
 
 /// A compute entry with no SOAC-derived domain and a `#[storage_image]` param
@@ -490,15 +518,8 @@ fn phase_from_entry(entry: &EgirEntry, fallback: KernelDomain) -> KernelPhase {
 /// don't opt out; the image is the domain. Only upgrades the single-workgroup
 /// placeholder domain; an explicit fixed grid stays as scheduled.
 ///
-/// Runtime-filter kernels DO opt out: the flags/scan/scatter stages are
-/// clones of the host entry, so they inherit its storage-image inputs, but
-/// their domains belong to the filter machinery — the scan's 1×1×1 in
-/// particular is a serial prefix scan, not a placeholder.
 fn storage_image_domain(entry: &EgirEntry, fallback: &KernelDomain) -> Option<KernelDomain> {
     if !matches!(fallback, KernelDomain::Fixed { x: 1, y: 1, z: 1 }) {
-        return None;
-    }
-    if has_runtime_filter(entry) {
         return None;
     }
     let (binding, ..) = entry.inputs.iter().find_map(|input| input.storage_image_binding)?;
@@ -506,18 +527,6 @@ fn storage_image_domain(entry: &EgirEntry, fallback: &KernelDomain) -> Option<Ke
         set: binding.set,
         binding: binding.binding,
     }))
-}
-
-fn has_runtime_filter(entry: &EgirEntry) -> bool {
-    entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects).any(|effect| {
-        matches!(
-            effect.kind,
-            SideEffectKind::Soac(EgirSoac::Filter {
-                work_buffers: Some(_),
-                ..
-            })
-        )
-    })
 }
 
 fn segmented_resources(entry: &EgirEntry) -> Option<Vec<ScheduledResource>> {
@@ -618,7 +627,7 @@ fn domain_from_dispatch(dispatch: &DispatchSize) -> KernelDomain {
     }
 }
 
-fn segmented_domain(entry: &EgirEntry) -> Option<KernelDomain> {
+pub(crate) fn segmented_domain(entry: &EgirEntry) -> Option<KernelDomain> {
     for (_, block) in &entry.graph.skeleton.blocks {
         for side_effect in &block.side_effects {
             match &side_effect.kind {
@@ -834,6 +843,12 @@ fn same_binding_slot(left: &Binding, right: &Binding) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use polytype::Type;
+
+    use crate::ast::{Span, TypeName};
+    use crate::egir::types::EGraph;
+    use crate::ssa::types::EntryInput;
+    use crate::LookupMap;
 
     #[test]
     fn resource_access_merge_is_monotone() {
@@ -848,6 +863,75 @@ mod tests {
         assert_eq!(
             ResourceAccess::Read.merge(ResourceAccess::Read),
             ResourceAccess::Read
+        );
+    }
+
+    #[test]
+    fn explicit_serial_domain_is_not_reinterpreted_from_storage_image() {
+        let image = BindingRef::new(2, 7);
+        let unit = Type::Constructed(TypeName::Unit, vec![]);
+        let input = EntryInput {
+            name: "image".into(),
+            ty: unit.clone(),
+            decoration: None,
+            size_hint: None,
+            storage_binding: None,
+            storage_access: None,
+            uniform_binding: None,
+            push_constant: None,
+            texture_binding: None,
+            texture_backing: None,
+            sampler_binding: None,
+            storage_image_binding: Some((
+                image,
+                crate::pipeline_descriptor::StorageImageFormat::R32Float,
+                crate::interface::StorageAccess::ReadOnly,
+                crate::pipeline_descriptor::StorageTextureSize::SameAsWindow,
+            )),
+            length: None,
+        };
+        let mut entry = EgirEntry::new(
+            crate::interface::EntryOrigin::Source,
+            "serial".into(),
+            Span::dummy(),
+            ExecutionModel::Compute {
+                local_size: (1, 1, 1),
+            },
+            vec![input],
+            vec![],
+            vec![],
+            vec![],
+            unit,
+            EGraph::new(),
+            LookupMap::new(),
+        );
+        let fixed = KernelDomain::Fixed { x: 1, y: 1, z: 1 };
+
+        let explicit = phase_from_entry(&entry, DomainSelection::Explicit(fixed.clone()));
+        assert_eq!(explicit.domain, fixed);
+        assert_eq!(
+            explicit.domain_selection,
+            DomainSelection::Explicit(fixed.clone())
+        );
+
+        let inferred = phase_from_entry(&entry, DomainSelection::Inferred(fixed.clone()));
+        assert_eq!(
+            inferred.domain,
+            KernelDomain::Elements(DispatchLen::StorageImage {
+                set: image.set,
+                binding: image.binding,
+            })
+        );
+        assert_eq!(inferred.domain_selection, DomainSelection::Inferred(fixed));
+
+        entry.inputs[0].storage_image_binding = None;
+        let DomainSelection::Inferred(fallback) = &inferred.domain_selection else {
+            unreachable!()
+        };
+        assert_eq!(
+            inferred_domain(&entry, fallback.clone()),
+            KernelDomain::Fixed { x: 1, y: 1, z: 1 },
+            "reconciliation must recompute from the retained fallback, not the old resolved domain"
         );
     }
 }

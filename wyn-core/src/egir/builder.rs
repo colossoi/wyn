@@ -25,6 +25,7 @@ pub struct EntryBuilder {
     graph: EGraph,
     control_headers: LookupMap<BlockId, ControlHeader>,
     current_block: BlockId,
+    origin: interface::EntryOrigin,
     name: String,
     span: Span,
     execution_model: ExecutionModel,
@@ -39,13 +40,14 @@ pub struct EntryBuilder {
 impl EntryBuilder {
     /// New compute-shader entry. Always returns Unit; effectful writes
     /// happen via `emit_storage_store`.
-    pub fn new_compute(name: String, local_size: (u32, u32, u32)) -> Self {
+    pub fn new_compute(origin: interface::EntryOrigin, name: String, local_size: (u32, u32, u32)) -> Self {
         let graph = EGraph::new();
         let entry = graph.skeleton.entry;
         EntryBuilder {
             graph,
             control_headers: LookupMap::new(),
             current_block: entry,
+            origin,
             name,
             span: Span::new(0, 0, 0, 0),
             execution_model: ExecutionModel::Compute { local_size },
@@ -295,6 +297,7 @@ impl EntryBuilder {
     pub fn build(mut self) -> EgirEntry {
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Return(None);
         EgirEntry::new(
+            self.origin,
             self.name,
             self.span,
             self.execution_model,

@@ -445,7 +445,7 @@ pub fn lower(inner: &mut EgirInner) {
                         schedule.add_phase_after(
                             &predecessor,
                             ph,
-                            KernelDomain::Fixed { x: 1, y: 1, z: 1 },
+                            schedule::DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
                         );
                         predecessor = ph.name.clone();
                     }
@@ -469,7 +469,11 @@ pub fn lower(inner: &mut EgirInner) {
                         } else {
                             phase1_domain.clone()
                         };
-                        schedule.add_phase_after(&predecessor, ph, domain);
+                        schedule.add_phase_after(
+                            &predecessor,
+                            ph,
+                            schedule::DomainSelection::Explicit(domain),
+                        );
                         predecessor = ph.name.clone();
                     }
                     new_entries.extend(phases);
@@ -505,7 +509,11 @@ pub fn lower(inner: &mut EgirInner) {
         let parent = entry.name.clone();
         let clones = split_multidomain_seg_maps(entry);
         for clone in &clones {
-            schedule.add_sibling(&parent, clone, KernelDomain::Fixed { x: 1, y: 1, z: 1 });
+            schedule.add_sibling(
+                &parent,
+                clone,
+                schedule::DomainSelection::Inferred(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+            );
         }
         split_clones.extend(clones);
     }
@@ -566,6 +574,7 @@ fn lower_runtime_filters(inner: &mut EgirInner, schedule: &mut schedule::KernelS
         let domain =
             schedule::domain_from_space(&space).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
         let mut flags = entry.clone();
+        flags.origin = crate::interface::EntryOrigin::RuntimeFilter;
         flags.name = format!("{}_filter_flags", entry.name);
         flags.outputs.clear();
         flags.slot_sources.clear();
@@ -584,6 +593,7 @@ fn lower_runtime_filters(inner: &mut EgirInner, schedule: &mut schedule::KernelS
         set_filter_phase(&mut flags, work, FilterPhase::Flags);
 
         let mut scan = entry.clone();
+        scan.origin = crate::interface::EntryOrigin::RuntimeFilter;
         scan.name = format!("{}_filter_scan", entry.name);
         scan.execution_model = crate::ssa::types::ExecutionModel::Compute {
             local_size: (1, 1, 1),
@@ -636,8 +646,12 @@ fn lower_runtime_filters(inner: &mut EgirInner, schedule: &mut schedule::KernelS
                 .and_then(|resource| super::program::buffer_len(&resource.size)),
         });
         set_filter_phase(entry, work, FilterPhase::Scatter);
-        schedule.add_phase_before(&entry.name, &flags, domain);
-        schedule.add_phase_before(&entry.name, &scan, KernelDomain::Fixed { x: 1, y: 1, z: 1 });
+        schedule.add_phase_before(&entry.name, &flags, schedule::DomainSelection::Explicit(domain));
+        schedule.add_phase_before(
+            &entry.name,
+            &scan,
+            schedule::DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+        );
         phases.push(flags);
         phases.push(scan);
     }
@@ -695,11 +709,10 @@ pub(crate) fn attach_materialization_prepasses(inner: &EgirInner, schedule: &mut
                 .map(|consumer| (consumer.name.clone(), producer_index))
         })
     {
-        schedule.add_phase_before(
-            &consumer,
-            &inner.entry_points[producer_index],
-            KernelDomain::Fixed { x: 1, y: 1, z: 1 },
-        );
+        let producer = &inner.entry_points[producer_index];
+        let domain =
+            schedule::segmented_domain(producer).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
+        schedule.add_phase_before(&consumer, producer, schedule::DomainSelection::Explicit(domain));
     }
 }
 
@@ -1026,6 +1039,7 @@ fn split_multidomain_seg_maps(entry: &mut EgirEntry) -> Vec<EgirEntry> {
     let mut clones = Vec::new();
     for (root, slots) in &groups[1..] {
         let mut clone = entry.clone();
+        clone.origin = crate::interface::EntryOrigin::OutputDomainSplit;
         clone.name = format!("{base_name}_dispatch_{}", slots[0]);
         restrict_to_group(&mut clone, *root, slots, &group_of);
         prune_dead_side_effects(&mut clone);
@@ -2054,7 +2068,11 @@ pub fn synthesize_phase2_reduce_cloning_ne_named(
     )],
 ) -> Result<EgirEntry, String> {
     use super::builder::EntryBuilder;
-    let mut b = EntryBuilder::new_compute(full_name, (PHASE2_WIDTH, 1, 1));
+    let mut b = EntryBuilder::new_compute(
+        crate::interface::EntryOrigin::ReducePhase2,
+        full_name,
+        (PHASE2_WIDTH, 1, 1),
+    );
     b.declare_intermediate_storage_sized(
         partials_binding,
         elem_ty.clone(),
@@ -2995,7 +3013,11 @@ pub fn synthesize_phase2_scan(
     block_offsets_binding: BindingRef,
 ) -> Result<EgirEntry, String> {
     use super::builder::EntryBuilder;
-    let mut b = EntryBuilder::new_compute(format!("{}_phase2_scan_sums", entry_name), (1, 1, 1));
+    let mut b = EntryBuilder::new_compute(
+        crate::interface::EntryOrigin::ScanPhase2,
+        format!("{}_phase2_scan_sums", entry_name),
+        (1, 1, 1),
+    );
     let scratch_len = dispatch_worker_buffer_len(&elem_ty);
     b.declare_intermediate_storage_sized(block_sums_binding, elem_ty.clone(), scratch_len.clone());
     b.declare_intermediate_storage_sized(block_offsets_binding, elem_ty.clone(), scratch_len);
@@ -3111,6 +3133,7 @@ pub fn synthesize_phase3_scan(
 ) -> EgirEntry {
     use super::builder::EntryBuilder;
     let mut b = EntryBuilder::new_compute(
+        crate::interface::EntryOrigin::ScanPhase3,
         format!("{}_phase3_add_offsets", entry_name),
         (total_threads, 1, 1),
     );

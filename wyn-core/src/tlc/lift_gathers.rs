@@ -863,6 +863,7 @@ fn build_gather_prepass(
     }
     make_entry_def(
         &name,
+        crate::interface::EntryOrigin::GatherPrepass,
         producer,
         result_ty,
         &required_params,

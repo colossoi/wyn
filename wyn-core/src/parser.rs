@@ -493,6 +493,7 @@ impl<'a> Parser<'a> {
         let body = self.parse_expression()?;
 
         Ok(Declaration::Entry(EntryDecl {
+            origin: crate::interface::EntryOrigin::Source,
             entry_type,
             name,
             name_span,

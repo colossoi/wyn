@@ -185,19 +185,9 @@ fn dependencies_are_cloneable(
 
 fn materialize_candidate(inner: &mut EgirInner, binding_ids: &mut IdSource<u32>, candidate: Candidate) {
     let entry = &inner.entry_points[candidate.entry];
-    let (block_id, effect_index) = entry
-        .graph
-        .skeleton
-        .blocks
-        .iter()
-        .find_map(|(block_id, block)| {
-            block
-                .side_effects
-                .iter()
-                .position(|effect| effect.result == Some(candidate.result))
-                .map(|index| (block_id, index))
-        })
-        .expect("multi-consumer producer disappeared");
+    let producer_index = entry.graph.side_effect_index();
+    let producer_site = producer_index.site(candidate.result).expect("multi-consumer producer disappeared");
+    let (block_id, effect_index) = (producer_site.block, producer_site.index);
     let producer_effect = entry.graph.skeleton.blocks[block_id].side_effects[effect_index].clone();
     let producer_dependencies = dependency_effects(&entry.graph, block_id, effect_index);
     let dependency_bindings = dependency_bindings(&entry.graph, block_id, &producer_dependencies);
@@ -222,6 +212,7 @@ fn materialize_candidate(inner: &mut EgirInner, binding_ids: &mut IdSource<u32>,
     }
 
     let mut producer = entry.clone();
+    producer.origin = crate::interface::EntryOrigin::MultiConsumerMaterialization;
     producer.name = fresh_entry_name(inner, &format!("{}_materialize_shared", entry.name));
     producer.outputs.clear();
     producer.slot_sources.clear();
@@ -258,10 +249,9 @@ fn materialize_candidate(inner: &mut EgirInner, binding_ids: &mut IdSource<u32>,
         }
         block.term = SkeletonTerminator::Return(None);
     }
-    let producer_effect = producer_graph.skeleton.blocks[block_id]
-        .side_effects
-        .iter_mut()
-        .find(|effect| effect.result == Some(candidate.result))
+    let retained_index = producer_graph.side_effect_index();
+    let producer_effect = retained_index
+        .effect_mut(producer_graph, candidate.result)
         .expect("producer clone retained its SegMap");
     if let SideEffectKind::Soac(EgirSoac::Seg {
         placement,
