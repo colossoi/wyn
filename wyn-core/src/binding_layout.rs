@@ -38,7 +38,7 @@ pub fn runtime_sized_array_elem(ty: &Type<TypeName>) -> Option<(&Type<TypeName>,
         return None;
     }
     let elem = ty.elem_type()?;
-    let elem_bytes = crate::ssa::layout::type_byte_size(elem)?;
+    let elem_bytes = crate::ssa::layout::storage_elem_stride(elem)?;
     Some((elem, elem_bytes))
 }
 

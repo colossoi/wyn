@@ -123,36 +123,47 @@ impl Constructor {
         // The std430 array stride is the element size rounded up to the
         // element's alignment — a `vec3<T>` is 12 bytes but aligns to 16, so
         // its runtime-array stride must be 16, not the packed 12 (Vulkan
-        // rejects a stride not satisfying the element alignment).
-        let elem_size = type_byte_size(&elem_ty).expect("storage buffer element type must have known size");
-        let elem_align = std430_alignment(&elem_ty).unwrap_or(elem_size.max(1));
-        let stride = elem_size.div_ceil(elem_align) * elem_align;
+        // rejects a stride not satisfying the element alignment). Struct
+        // elements take their aligned size from `block_layout`, which also
+        // supplies the member offsets below (a tight `type_byte_size` sum
+        // under-strides structs whose members pad).
+        let layout = crate::ssa::layout::block_layout(&elem_ty, crate::ssa::layout::LayoutRules::Std430);
+        let stride = match &layout {
+            Some(l) => l.size,
+            None => {
+                let elem_size =
+                    type_byte_size(&elem_ty).expect("storage buffer element type must have known size");
+                let elem_align = std430_alignment(&elem_ty).unwrap_or(elem_size.max(1));
+                elem_size.div_ceil(elem_align) * elem_align
+            }
+        };
 
         // Ensure nested array types have ArrayStride for buffer layout
         self.apply_buffer_array_strides(elem_spirv, &elem_ty);
 
-        // If the element type is a tuple/record/struct, add member offset
-        // decorations for the buffer layout. We add them to the elem type
-        // directly since it will be used inside a runtime array in a storage
-        // buffer.
-        let struct_fields: Option<&Vec<PolyType<TypeName>>> = match &elem_ty {
-            PolyType::Constructed(TypeName::Tuple(_), args) => Some(args),
-            PolyType::Constructed(TypeName::Record(_), args) => Some(args),
-            _ => None,
-        };
-        if let Some(args) = struct_fields {
-            if self.builder.mark_buffer_layout_decorated_once(builder::TypeId::new(elem_spirv)) {
-                let mut offset = 0u32;
-                for (i, field_ty) in args.iter().enumerate() {
-                    self.builder.member_decorate(
-                        elem_spirv,
-                        i as u32,
-                        spirv::Decoration::Offset,
-                        [Operand::LiteralBit32(offset)],
-                    );
-                    offset += type_byte_size(field_ty)
-                        .unwrap_or_else(|| panic!("struct field {:?} has unknown byte size", field_ty));
-                }
+        // If the element type is a tuple/record/struct, add std430 member
+        // offset decorations for the buffer layout. We add them to the elem
+        // type directly since it will be used inside a runtime array in a
+        // storage buffer.
+        let is_struct = matches!(
+            &elem_ty,
+            PolyType::Constructed(TypeName::Tuple(_), _) | PolyType::Constructed(TypeName::Record(_), _)
+        );
+        if is_struct && self.builder.mark_buffer_layout_decorated_once(builder::TypeId::new(elem_spirv)) {
+            let layout = layout.as_ref().unwrap_or_else(|| {
+                panic!(
+                    "storage buffer element {:?}: struct members must be 32-bit \
+                     scalars or vectors of them (std430)",
+                    elem_ty
+                )
+            });
+            for (i, &offset) in layout.member_offsets.iter().enumerate() {
+                self.builder.member_decorate(
+                    elem_spirv,
+                    i as u32,
+                    spirv::Decoration::Offset,
+                    [Operand::LiteralBit32(offset)],
+                );
             }
         }
 

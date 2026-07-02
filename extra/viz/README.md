@@ -37,6 +37,23 @@ The texture is Rgba8Unorm at the file's native size; sample with
 normalized UVs to fit any window. Raw file bytes are uploaded as-is
 (sRGB stays sRGB-encoded, Shadertoy-style). Interactive mode only.
 
+## Uniform block values
+
+`--uniform NAME.MEMBER:TYPE=VALUE` (repeatable) writes one member of a
+uniform block once at startup, placed by the descriptor's published
+member layout (`Binding::Uniform { size, members }`). Value syntax
+matches `--push-constant`; use `NAME:TYPE=VALUE` for a bare
+scalar/vector uniform. Block buffers are zero-initialized, so unset
+members read as zero.
+
+```
+viz pipeline shader.spv --uniform c.radius:f32=0.35 --uniform c.tint:f32x2=0.9,0.2
+```
+
+The Shadertoy names (`iResolution`/`iTime`/`iMouse`/`iFrame`) keep
+their per-frame automatic values. See `testfiles/uniform_block_smoke.wyn`
+for a record-uniform pipeline driven this way.
+
 ## Texture snapshots
 
 `--dump-texture NAME:FILE` (repeatable) reads back the storage texture

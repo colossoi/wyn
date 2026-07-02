@@ -62,8 +62,10 @@ fn check_entry(entry: &EntryPoint) -> Result<()> {
 fn check_storage_binding_decl(entry_name: &str, sb: &StorageBindingDecl) -> Result<()> {
     // `StorageBindingDecl.elem_ty` is conventionally already the array
     // *element* type, not the array — `create_storage_buffer` doesn't
-    // strip an array wrapper off it. So measure it directly.
-    if type_byte_size(&sb.elem_ty).is_some() {
+    // strip an array wrapper off it. So measure it directly. Struct
+    // elements additionally need a std430 block layout (member offsets),
+    // so gate on that for composites.
+    if elem_is_layoutable(&sb.elem_ty) {
         return Ok(());
     }
     Err(CompilerError::SpirvError(
@@ -89,7 +91,7 @@ fn check_buffer_elem(
     // `array_elem`, fall back to `array_ty` itself (the scalar/vec
     // outputs that get packed into a single-element runtime array).
     let elem_ty = crate::types::array_elem(array_ty).unwrap_or(array_ty);
-    if type_byte_size(elem_ty).is_some() {
+    if elem_is_layoutable(elem_ty) {
         return Ok(());
     }
     Err(CompilerError::SpirvError(
@@ -119,3 +121,20 @@ fn input_label(input: &EntryInput) -> String {
 #[cfg(test)]
 #[path = "verify_buffer_layouts_tests.rs"]
 mod tests;
+
+/// A buffer element is layoutable when it has a static size AND — for
+/// struct elements — a std430 block layout (`create_storage_buffer`
+/// decorates member offsets from it; a struct whose members it can't
+/// lay out would panic there).
+fn elem_is_layoutable(elem_ty: &Type<TypeName>) -> bool {
+    use crate::ast::TypeName as TN;
+    let is_struct = matches!(
+        elem_ty,
+        Type::Constructed(TN::Tuple(_), _) | Type::Constructed(TN::Record(_), _)
+    );
+    if is_struct {
+        crate::ssa::layout::block_layout(elem_ty, crate::ssa::layout::LayoutRules::Std430).is_some()
+    } else {
+        type_byte_size(elem_ty).is_some()
+    }
+}

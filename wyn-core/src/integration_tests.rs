@@ -8379,3 +8379,253 @@ entry cull(xs: []u32,
         stage.dispatch_size
     );
 }
+
+/// A record-typed `#[uniform]` param must reach SSA as ONE EntryInput
+/// carrying the Record type and the uniform binding — no TLC pass may
+/// flatten it into per-field params (the SPIR-V backend builds the
+/// uniform block from exactly this input).
+#[test]
+fn record_uniform_reaches_ssa_as_single_input() {
+    let lowered = crate::compile_thru_ssa(
+        r#"
+type block = { radius: f32, tint: vec2f32, center: vec2f32 }
+#[compute]
+entry e(xs: []u32, #[uniform(set=1, binding=0)] c: block) []u32 =
+  map(|x| x + u32(c.radius + c.tint.x + c.center.y), xs)
+"#,
+    )
+    .expect("record uniform reaches SSA");
+    let entry = lowered.ssa.entry_points.iter().find(|e| e.name == "e").expect("entry `e`");
+    let c: Vec<_> = entry.inputs.iter().filter(|i| i.name == "c").collect();
+    assert_eq!(c.len(), 1, "record uniform must stay one input, got {:?}", c);
+    assert!(
+        c[0].uniform_binding.is_some(),
+        "input `c` must carry the uniform binding"
+    );
+    assert!(
+        matches!(
+            &c[0].ty,
+            polytype::Type::Constructed(crate::ast::TypeName::Record(_), _)
+        ),
+        "input `c` must keep its Record type, got {:?}",
+        c[0].ty
+    );
+}
+
+/// The record uniform lowers to a Block-decorated struct whose members
+/// carry std140 Offsets, and the Uniform-class variable points at that
+/// laid-out struct (never at the shared plain record struct).
+#[test]
+fn record_uniform_emits_std140_offset_decorated_block() {
+    use std::collections::HashMap;
+    use wspirv::binary::parse_words;
+    use wspirv::dr::{Loader, Operand};
+    use wspirv::spirv::{Decoration, Op, StorageClass};
+
+    let lowered = crate::compile_thru_spirv(
+        r#"
+type block = { radius: f32, tint: vec2f32, center: vec2f32 }
+#[compute]
+entry e(xs: []u32, #[uniform(set=1, binding=0)] c: block) []u32 =
+  map(|x| x + u32(c.radius + c.tint.x + c.center.y), xs)
+"#,
+    )
+    .expect("record uniform emits SPIR-V");
+
+    let mut loader = Loader::new();
+    parse_words(&lowered.spirv, &mut loader).expect("parse spirv");
+    let module = loader.module();
+
+    // Member offsets per struct id, and the set of Block-decorated ids.
+    let mut offsets: HashMap<u32, Vec<(u32, u32)>> = HashMap::new();
+    let mut blocks: Vec<u32> = Vec::new();
+    for inst in &module.annotations {
+        match inst.class.opcode {
+            Op::MemberDecorate => {
+                let id = inst.operands[0].unwrap_id_ref();
+                let member = inst.operands[1].unwrap_literal_bit32();
+                if inst.operands[2] == Operand::Decoration(Decoration::Offset) {
+                    let off = inst.operands[3].unwrap_literal_bit32();
+                    offsets.entry(id).or_default().push((member, off));
+                }
+            }
+            Op::Decorate if inst.operands[1] == Operand::Decoration(Decoration::Block) => {
+                blocks.push(inst.operands[0].unwrap_id_ref());
+            }
+            _ => {}
+        }
+    }
+
+    // A Block struct with the record's std140 offsets exists...
+    let block_id = blocks
+        .iter()
+        .copied()
+        .find(|id| {
+            let mut o = offsets.get(id).cloned().unwrap_or_default();
+            o.sort_unstable();
+            o == vec![(0, 0), (1, 8), (2, 16)]
+        })
+        .expect("a Block struct with member offsets [0, 8, 16] must exist");
+
+    // ...and a Uniform-storage variable points at it (via its pointer type).
+    let pointee_of: HashMap<u32, u32> = module
+        .types_global_values
+        .iter()
+        .filter(|i| i.class.opcode == Op::TypePointer)
+        .filter_map(|i| Some((i.result_id?, i.operands[1].unwrap_id_ref())))
+        .collect();
+    let uniform_points_at_block = module.types_global_values.iter().any(|i| {
+        i.class.opcode == Op::Variable
+            && i.operands.first() == Some(&Operand::StorageClass(StorageClass::Uniform))
+            && i.result_type.and_then(|t| pointee_of.get(&t)).copied() == Some(block_id)
+    });
+    assert!(
+        uniform_points_at_block,
+        "a Uniform-class OpVariable must point at the laid-out block struct"
+    );
+}
+
+/// Two stages sharing the same record uniform (set, binding) compile —
+/// the interface-block cache prevents double Offset decoration and the
+/// cross-entry consistency check accepts the matching types.
+#[test]
+fn record_uniform_shared_across_stages_compiles() {
+    crate::compile_thru_spirv(
+        r#"
+type block = { radius: f32, tint: vec2f32 }
+
+#[compute]
+entry step(xs: []u32, #[uniform(set=1, binding=0)] c: block) []u32 =
+  map(|x| x + u32(c.radius), xs)
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 =
+  let verts = [@[-1.0, -1.0, 0.0, 1.0],
+               @[3.0, -1.0, 0.0, 1.0],
+               @[-1.0, 3.0, 0.0, 1.0]] in
+  verts[vid]
+
+#[fragment]
+entry fragment_main(#[builtin(position)] pos: vec4f32,
+                    #[uniform(set=1, binding=0)] c: block)
+  #[location(0)] vec4f32 =
+  @[c.tint.x, c.tint.y, c.radius, 1.0]
+"#,
+    )
+    .expect("stages sharing a record uniform block should lower");
+}
+
+/// Storage-buffer struct elements get std430 member offsets and an
+/// aligned ArrayStride. Regression: the offsets used to be a tight
+/// unaligned sum ({f32, vec2f32} → [0, 4], stride 12), which is
+/// std430-nonconformant AND disagrees with naga's layout of the same
+/// struct on the WGSL path — silent data corruption for records with
+/// vector members.
+#[test]
+fn storage_record_elements_get_std430_offsets_and_stride() {
+    use std::collections::HashMap;
+    use wspirv::binary::parse_words;
+    use wspirv::dr::{Loader, Operand};
+    use wspirv::spirv::{Decoration, Op};
+
+    let lowered = crate::compile_thru_spirv(
+        r#"
+type point = { w: f32, uv: vec2f32 }
+#[compute]
+entry e(#[storage(set=2, binding=1, access=write)] o: *[]point) () =
+  let _ = scatter(o, [0i32], [{w = 1.0, uv = @[2.0, 3.0]}]) in ()
+"#,
+    )
+    .expect("record storage element lowers");
+
+    let mut loader = Loader::new();
+    parse_words(&lowered.spirv, &mut loader).expect("parse spirv");
+    let module = loader.module();
+
+    let mut offsets: HashMap<u32, Vec<(u32, u32)>> = HashMap::new();
+    let mut strides: Vec<u32> = Vec::new();
+    for inst in &module.annotations {
+        match inst.class.opcode {
+            Op::MemberDecorate if inst.operands[2] == Operand::Decoration(Decoration::Offset) => {
+                offsets.entry(inst.operands[0].unwrap_id_ref()).or_default().push((
+                    inst.operands[1].unwrap_literal_bit32(),
+                    inst.operands[3].unwrap_literal_bit32(),
+                ));
+            }
+            Op::Decorate if inst.operands[1] == Operand::Decoration(Decoration::ArrayStride) => {
+                strides.push(inst.operands[2].unwrap_literal_bit32());
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        offsets.values().any(|o| {
+            let mut o = o.clone();
+            o.sort_unstable();
+            o == vec![(0, 0), (1, 8)]
+        }),
+        "the point struct must carry std430 offsets [0, 8], got {offsets:?}"
+    );
+    assert!(
+        strides.contains(&16),
+        "the runtime array of point must have ArrayStride 16, got {strides:?}"
+    );
+}
+
+/// The descriptor publishes a uniform block's std140 size and member
+/// layout: record fields under their source names, tuples as `f0..`,
+/// bare scalars/vectors as a single member at offset 0 — the same
+/// host contract push constants have.
+#[test]
+fn uniform_bindings_publish_size_and_members() {
+    use crate::pipeline_descriptor::{Binding, Pipeline};
+
+    let lowered = crate::compile_thru_spirv(
+        r#"
+type block = { radius: f32, tint: vec2f32, center: vec2f32 }
+#[compute]
+entry e(xs: []u32,
+        #[uniform(set=1, binding=0)] c: block,
+        #[uniform(set=1, binding=1)] pair: (f32, vec2f32),
+        #[uniform(set=1, binding=2)] t: f32) []u32 =
+  map(|x| x + u32(c.radius + c.tint.x + c.center.y + pair.0 + pair.1.x + t), xs)
+"#,
+    )
+    .expect("uniform shapes compile");
+
+    let uniforms: Vec<_> = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .flat_map(|p| match p {
+            Pipeline::Compute(cp) => cp.bindings.iter(),
+            Pipeline::Graphics(gp) => gp.bindings.iter(),
+        })
+        .filter_map(|b| match b {
+            Binding::Uniform {
+                binding,
+                name,
+                size,
+                members,
+                ..
+            } => Some((*binding, name.clone(), *size, members.clone())),
+            _ => None,
+        })
+        .collect();
+
+    let (_, _, size, members) = uniforms.iter().find(|(b, ..)| *b == 0).expect("record uniform");
+    assert_eq!(*size, 32);
+    let shape: Vec<_> = members.iter().map(|m| (m.name.as_str(), m.offset, m.size)).collect();
+    assert_eq!(shape, vec![("radius", 0, 4), ("tint", 8, 8), ("center", 16, 8)]);
+
+    let (_, _, size, members) = uniforms.iter().find(|(b, ..)| *b == 1).expect("tuple uniform");
+    assert_eq!(*size, 16);
+    let shape: Vec<_> = members.iter().map(|m| (m.name.as_str(), m.offset, m.size)).collect();
+    assert_eq!(shape, vec![("f0", 0, 4), ("f1", 8, 8)]);
+
+    let (_, _, size, members) = uniforms.iter().find(|(b, ..)| *b == 2).expect("scalar uniform");
+    assert_eq!(*size, 16);
+    assert_eq!(members.len(), 1);
+    assert_eq!((members[0].offset, members[0].size), (0, 4));
+}

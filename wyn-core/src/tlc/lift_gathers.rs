@@ -348,11 +348,11 @@ fn gather_length(
     producer_inputs: &[(SymbolId, Type<TypeName>)],
     outer_slots: &[Option<EntryParamBinding>],
 ) -> Option<crate::pipeline_descriptor::BufferLen> {
-    let elem_bytes = crate::ssa::layout::type_byte_size(elem_ty)?;
+    let elem_bytes = crate::ssa::layout::storage_elem_stride(elem_ty)?;
     let (src_sym, src_ty) = producer_inputs.first()?;
     let br = find_outer_single(outer_slots, *src_sym)?;
     let src_elem_ty = crate::types::array_elem(src_ty)?;
-    let src_elem_bytes = crate::ssa::layout::type_byte_size(src_elem_ty)?;
+    let src_elem_bytes = crate::ssa::layout::storage_elem_stride(src_elem_ty)?;
     Some(crate::pipeline_descriptor::BufferLen::LikeInput {
         set: br.set,
         binding: br.binding,

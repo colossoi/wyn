@@ -2340,6 +2340,47 @@ entry sim(
 ) ... = ...
 ```
 
+### Uniform Blocks
+
+A `#[uniform]` parameter may be record-typed (inline or via a `type`
+alias): the record's fields become the members of one uniform block,
+so a group of related constants is a single binding instead of N.
+
+```wyn
+type camera = { view_z: f32, tan_half_fov: vec2f32, origin: vec2f32 }
+
+#[compute]
+entry shade(
+    #[uniform(set=1, binding=0)] cam: camera,   -- one block, one binding
+    ...
+) ... = ... cam.tan_half_fov.x ...
+```
+
+Uniform values are laid out **std140**. The supported member types are
+32-bit scalars (`f32`, `i32`, `u32`) and `vec2`/`vec3`/`vec4` of them;
+the uniform itself is one of those or a flat record/tuple of them.
+`bool`, matrices, arrays, and nested records are compile-time errors
+naming the rule.
+
+The pipeline descriptor publishes the block's layout so hosts fill it
+by name — the same contract push constants have:
+
+```json
+{
+  "type": "uniform", "set": 1, "binding": 0, "name": "cam",
+  "size": 32,
+  "members": [
+    { "name": "view_z",       "offset": 0,  "size": 4 },
+    { "name": "tan_half_fov", "offset": 8,  "size": 8 },
+    { "name": "origin",       "offset": 16, "size": 8 }
+  ]
+}
+```
+
+`size` is the std140 block size (rounded up to 16). Bare
+scalar/vector uniforms publish a single member at offset 0; tuple
+uniforms publish members named `f0..fn`.
+
 ### Descriptor Set Layout
 
 Every binding lives in a numbered descriptor `set`; each set is a

@@ -2286,15 +2286,16 @@ impl<'a, 'b> Converter<'a, 'b> {
                     .into(),
             )
         })?;
-        let input_elem_bytes = crate::ssa::layout::type_byte_size(&elem_ty).ok_or_else(|| {
+        let input_elem_bytes = crate::ssa::layout::storage_elem_stride(&elem_ty).ok_or_else(|| {
             ConvertError::GraphError("filter: element type has no static byte size".into())
         })?;
         // The scratch buffer holds the kept output values (`f(x)` when a map is
         // fused), so it is sized in `output_elem_ty`; the surviving-count bound
         // still comes from the input buffer's element count.
-        let output_elem_bytes = crate::ssa::layout::type_byte_size(&output_elem_ty).ok_or_else(|| {
-            ConvertError::GraphError("filter: output element type has no static byte size".into())
-        })?;
+        let output_elem_bytes =
+            crate::ssa::layout::storage_elem_stride(&output_elem_ty).ok_or_else(|| {
+                ConvertError::GraphError("filter: output element type has no static byte size".into())
+            })?;
         let scratch_out = self.alloc_scratch_binding();
         self.extra_storage_bindings.push(crate::interface::StorageBindingDecl {
             binding: scratch_out,
@@ -2662,7 +2663,7 @@ fn build_entry_outputs(
             let Some(elem_ty) = ty.elem_type() else {
                 return Ok(None);
             };
-            let elem_bytes = crate::ssa::layout::type_byte_size(elem_ty).ok_or_else(|| {
+            let elem_bytes = crate::ssa::layout::storage_elem_stride(elem_ty).ok_or_else(|| {
                 ConvertError::Internal(format!("output element has no static byte layout: {elem_ty:?}"))
             })?;
             if let Some(out_size) = crate::types::array_size(ty) {
@@ -2684,8 +2685,8 @@ fn build_entry_outputs(
                         let Some(in_elem_ty) = input.ty.elem_type() else {
                             continue;
                         };
-                        let src_elem_bytes =
-                            crate::ssa::layout::type_byte_size(in_elem_ty).ok_or_else(|| {
+                        let src_elem_bytes = crate::ssa::layout::storage_elem_stride(in_elem_ty)
+                            .ok_or_else(|| {
                                 ConvertError::Internal(format!(
                                     "input element has no static byte layout: {in_elem_ty:?}"
                                 ))

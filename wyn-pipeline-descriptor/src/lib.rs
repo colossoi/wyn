@@ -606,6 +606,49 @@ mod tests {
     }
 
     #[test]
+    fn uniform_binding_members_serde_round_trip() {
+        let binding = Binding::Uniform {
+            set: 1,
+            binding: 0,
+            name: "c".to_string(),
+            size: 32,
+            members: vec![
+                UniformMember {
+                    name: "radius".to_string(),
+                    offset: 0,
+                    size: 4,
+                },
+                UniformMember {
+                    name: "tint".to_string(),
+                    offset: 8,
+                    size: 8,
+                },
+            ],
+        };
+        let json = serde_json::to_string(&binding).unwrap();
+        assert!(json.contains("\"members\""), "got: {json}");
+        let back: Binding = serde_json::from_str(&json).unwrap();
+        let Binding::Uniform { size, members, .. } = back else {
+            panic!("round trip changed the variant");
+        };
+        assert_eq!(size, 32);
+        assert_eq!(members.len(), 2);
+        assert_eq!(
+            (members[1].name.as_str(), members[1].offset, members[1].size),
+            ("tint", 8, 8)
+        );
+
+        // Descriptors that predate size/members publication still parse:
+        // the fields default to 0 / empty.
+        let old = r#"{"type":"uniform","set":1,"binding":0,"name":"iTime"}"#;
+        let Binding::Uniform { size, members, .. } = serde_json::from_str::<Binding>(old).unwrap() else {
+            panic!("old-shape uniform must still parse");
+        };
+        assert_eq!(size, 0);
+        assert!(members.is_empty());
+    }
+
+    #[test]
     fn vertex_attribute_serde_round_trip() {
         let attr = VertexAttribute {
             location: 1,

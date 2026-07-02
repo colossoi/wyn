@@ -1605,6 +1605,30 @@ impl<'a> TypeChecker<'a> {
                 };
 
                 let ty = param.pattern_type().map(|t| self.normalize_annotation_type(t, None));
+
+                // A uniform must have a block layout: a 32-bit scalar, a
+                // vec2/3/4 of them, or a flat record/tuple of those
+                // (std140). Reject the rest here with a source span —
+                // the backends assume the layout exists.
+                if kind == "uniform" {
+                    if let Some(t) = &ty {
+                        if crate::ssa::layout::block_layout(t, crate::ssa::layout::LayoutRules::Std140)
+                            .is_none()
+                        {
+                            bail_type_at!(
+                                param.h.span,
+                                "uniform (set={}, binding={}) has type `{}`, which cannot be a 
+                                 uniform block: supported are 32-bit scalars (f32/i32/u32), 
+                                 vec2/3/4 of them, and flat records/tuples of those (std140). 
+                                 bools, matrices, arrays, and nested records are not supported",
+                                set,
+                                binding,
+                                self.format_type(t)
+                            );
+                        }
+                    }
+                }
+
                 let elem = ty.as_ref().map(buffer_element_signature).unwrap_or_default();
                 let display = match &ty {
                     Some(t) => format!("{} {}", kind, self.format_type(t)),

@@ -119,6 +119,14 @@ pub fn std430_alignment(ty: &Type) -> Option<u32> {
             Some(if rows == 2 { 2 * elem_align } else { 4 * elem_align })
         }
         _ if ty.is_array() => std430_alignment(ty.elem_type().expect("Array has elem")),
+        // A struct's std430 alignment is its largest member alignment.
+        Type::Constructed(TypeName::Tuple(_), args) | Type::Constructed(TypeName::Record(_), args) => {
+            let mut align = 1u32;
+            for arg in args {
+                align = align.max(std430_alignment(arg)?);
+            }
+            Some(align)
+        }
         _ => None,
     }
 }
@@ -199,25 +207,38 @@ pub struct BlockLayout {
 }
 
 /// Layout for an interface-block value: a 32-bit `f32`/`i32`/`u32`
-/// scalar, a vec2/3/4 of them, or a FLAT record/tuple of those.
-/// Returns `None` for anything else (bool, matrices, arrays, nested
+/// scalar, a vec2/3/4 of them, or a FLAT record/tuple of those. Under
+/// Std430 (storage buffers) a member may also be a fixed-size array of
+/// supported scalars/vectors (the SOAC passes synthesize tuple
+/// elements like `(u32, [4]u32)`); std140's array rules (16-rounded
+/// strides) are not implemented, so arrays stay unsupported for
+/// uniforms. Returns `None` for anything else (bool, matrices, nested
 /// aggregates, runtime arrays, non-32-bit scalars) — callers gate
 /// support on this.
 pub fn block_layout(ty: &Type, rules: LayoutRules) -> Option<BlockLayout> {
     // (size, alignment) of one supported member.
-    fn member(ty: &Type) -> Option<(u32, u32)> {
+    fn member(ty: &Type, rules: LayoutRules) -> Option<(u32, u32)> {
         match ty {
             Type::Constructed(TypeName::Int(32), _)
             | Type::Constructed(TypeName::UInt(32), _)
             | Type::Constructed(TypeName::Float(32), _) => Some((4, 4)),
             _ if ty.is_vec() => {
                 // Element must itself be a supported 32-bit scalar.
-                member(ty.elem_type()?)?;
+                member(ty.elem_type()?, rules)?;
                 let n = ty.vec_size()? as u32;
                 if !(2..=4).contains(&n) {
                     return None;
                 }
                 Some((4 * n, if n == 2 { 8 } else { 16 }))
+            }
+            _ if ty.is_array() && rules == LayoutRules::Std430 => {
+                let (elem_size, elem_align) = member(ty.elem_type()?, rules)?;
+                let n = match ty.array_size()? {
+                    Type::Constructed(TypeName::Size(n), _) => *n as u32,
+                    _ => return None,
+                };
+                let elem_stride = elem_size.div_ceil(elem_align) * elem_align;
+                Some((n * elem_stride, elem_align))
             }
             _ => None,
         }
@@ -237,7 +258,7 @@ pub fn block_layout(ty: &Type, rules: LayoutRules) -> Option<BlockLayout> {
     let mut offset = 0u32;
     let mut align = 4u32;
     for field in fields {
-        let (field_size, field_align) = member(field)?;
+        let (field_size, field_align) = member(field, rules)?;
         offset = offset.div_ceil(field_align) * field_align;
         member_offsets.push(offset);
         offset += field_size;
@@ -252,4 +273,19 @@ pub fn block_layout(ty: &Type, rules: LayoutRules) -> Option<BlockLayout> {
         align,
         member_offsets,
     })
+}
+
+/// Host-facing byte stride of a storage-buffer ELEMENT: what hosts use
+/// to size and index the buffer, so it must match the `ArrayStride`
+/// the SPIR-V backend decorates. Struct elements use their aligned
+/// std430 size; scalars and vectors keep their tight `type_byte_size`.
+/// (vec3 is the known exception where the tight size 12 differs from
+/// the decorated stride 16 — long-standing behavior, kept as is.)
+pub fn storage_elem_stride(ty: &Type) -> Option<u32> {
+    match ty {
+        Type::Constructed(TypeName::Tuple(_), _) | Type::Constructed(TypeName::Record(_), _) => {
+            block_layout(ty, LayoutRules::Std430).map(|l| l.size)
+        }
+        _ => type_byte_size(ty),
+    }
 }

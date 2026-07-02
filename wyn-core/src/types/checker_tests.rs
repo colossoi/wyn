@@ -2916,3 +2916,71 @@ def use_it(x: u32) u32 = fa.call(x, 1u32)
 "#,
     );
 }
+
+// ---- uniform block type gate ----------------------------------------------
+
+/// Uniform params must have a std140 block layout: 32-bit scalars,
+/// vec2/3/4 of them, or a flat record/tuple of those.
+#[test]
+fn uniform_block_accepts_flat_record_and_scalars() {
+    typecheck_program(
+        r#"
+type block = { radius: f32, tint: vec2f32, n: u32 }
+#[compute]
+entry e(xs: []u32,
+        #[uniform(set=1, binding=0)] c: block,
+        #[uniform(set=1, binding=1)] t: f32,
+        #[uniform(set=1, binding=2)] r: vec3f32) []u32 =
+  map(|x| x + u32(c.radius + t + r.x + c.tint.x) + c.n, xs)
+"#,
+    );
+}
+
+#[test]
+fn uniform_block_rejects_unsupported_member_types() {
+    for (label, src) in [
+        (
+            "bool member",
+            r#"
+#[compute]
+entry e(xs: []u32, #[uniform(set=1, binding=0)] c: { flag: bool, x: f32 }) []u32 =
+  map(|v| if c.flag then v else u32(c.x), xs)
+"#,
+        ),
+        (
+            "nested record",
+            r#"
+#[compute]
+entry e(xs: []u32, #[uniform(set=1, binding=0)] c: { inner: { x: f32 }, y: f32 }) []u32 =
+  map(|v| v + u32(c.inner.x + c.y), xs)
+"#,
+        ),
+        (
+            "fixed array member",
+            r#"
+#[compute]
+entry e(xs: []u32, #[uniform(set=1, binding=0)] c: { taps: [4]f32 }) []u32 =
+  map(|v| v + u32(c.taps[0]), xs)
+"#,
+        ),
+        (
+            "bare matrix",
+            r#"
+#[compute]
+entry e(xs: []u32, #[uniform(set=1, binding=0)] m: mat3f32) []u32 =
+  xs
+"#,
+        ),
+    ] {
+        let result = try_typecheck_program(src);
+        assert!(
+            matches!(result, Err(CompilerError::TypeError(_, _))),
+            "{label}: expected a uniform-block type error, got {result:?}"
+        );
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            msg.contains("uniform block"),
+            "{label}: error should name the uniform-block rule, got {msg}"
+        );
+    }
+}

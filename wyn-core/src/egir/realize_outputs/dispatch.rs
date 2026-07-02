@@ -648,8 +648,8 @@ pub fn retarget_filter_output(
     // input region is concrete after `pin_entry_regions`; if it isn't (no
     // host buffer to mirror), leave the host to size it.
     let out_len = crate::types::array_view_region(&input_arr_ty).and_then(|in_binding| {
-        let src_elem_bytes = crate::ssa::layout::type_byte_size(&input_elem_ty)?;
-        let elem_bytes = crate::ssa::layout::type_byte_size(&output_elem_ty)?;
+        let src_elem_bytes = crate::ssa::layout::storage_elem_stride(&input_elem_ty)?;
+        let elem_bytes = crate::ssa::layout::storage_elem_stride(&output_elem_ty)?;
         Some(BufferLen::LikeInput {
             set: in_binding.set,
             binding: in_binding.binding,

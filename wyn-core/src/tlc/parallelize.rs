@@ -664,7 +664,7 @@ fn analyze_soac(
 fn classify_input(input: &ArrayExpr, entry_slots: &[Option<EntryParamBinding>]) -> Option<ArrayProvenance> {
     match input {
         ArrayExpr::StorageView(crate::tlc::StorageView { binding, elem_ty, .. }) => {
-            let elem_bytes = crate::ssa::layout::type_byte_size(elem_ty).expect(
+            let elem_bytes = crate::ssa::layout::storage_elem_stride(elem_ty).expect(
                 "ArrayExpr::StorageView elem_ty must have a static byte layout — \
                  every constructor (lift_gathers / buffer_specialize / parallelize \
                  synthesis) is responsible for only ever producing sized elem types",

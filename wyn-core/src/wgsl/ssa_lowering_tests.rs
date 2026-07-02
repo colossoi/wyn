@@ -794,3 +794,40 @@ fn wgsl_const_array_hoist_is_deduped() {
         "two indexings of one constant must share one global:\n{wgsl}"
     );
 }
+
+#[test]
+fn wgsl_record_uniform_emits_struct_var_and_validates() {
+    // A record uniform emits the shared positional struct as the
+    // `var<uniform>` type with no layout attributes: for the supported
+    // member set (32-bit scalars + vectors) WGSL's default layout
+    // equals the std140 offsets the SPIR-V backend decorates, and naga
+    // validation (uniform address space rules) is the gate proving it.
+    let wgsl = compile_to_wgsl(
+        r#"
+type block = { radius: f32, tint: vec2f32, center: vec2f32 }
+
+#[compute]
+entry step(xs: []u32, #[uniform(set=1, binding=0)] c: block) []u32 =
+  map(|x| x + u32(c.radius), xs)
+
+#[fragment]
+entry fragment_main(#[builtin(position)] pos: vec4f32,
+                    #[uniform(set=1, binding=0)] c: block)
+  #[location(0)] vec4f32 =
+  @[c.tint.x, c.tint.y, c.radius + c.center.x, 1.0]
+"#,
+    )
+    .expect("compile");
+    validate_wgsl(&wgsl);
+    assert!(
+        wgsl.contains("var<uniform> w_c:"),
+        "record uniform must emit a module-scope var<uniform>, got:\n{wgsl}"
+    );
+    // Shared across entries: exactly one declaration (the cross-entry
+    // dedupe), pointing at a struct type.
+    assert_eq!(
+        wgsl.matches("var<uniform> w_c:").count(),
+        1,
+        "same (set, binding) uniform must dedupe to one declaration"
+    );
+}
