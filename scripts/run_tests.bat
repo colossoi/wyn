@@ -98,4 +98,4 @@ echo.
 echo --- gtao_smoke (lib/gtao.wyn pure-math invariants) ---
 "%TEPHRA%" run "%TEMP%\gtao_smoke.spv" --entry gtao_smoke -n 16 -w 64
 echo Slots: see the key in lib/testfiles/gtao_smoke.wyn.
-echo Expect: [0, 1, 3, 2730, ~0.905, ~0.614, ~0, 1, ^<0.06, ^<0.05, ~0, 1, 2, 0, 0.4667, 6]
+echo Expect: [0, 1, 3, 2730, ~0.905, ~0.614, ~0, 1, ^<0.06, ^<0.05, ~0, 1, 2, 0, 0.7, 6]

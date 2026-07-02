@@ -20,7 +20,7 @@ import "../gtao"
 --  11: depth_mip_filter(1,1,1,1)                     -> 1
 --  12: depth_mip_filter(1,1,1,2) (distant wins)      -> 2
 --  13: viewspace position known value                -> ~0
---  14: decode(encode(0.7)) visibility roundtrip      -> ~0.7/1.5 (0.4667)
+--  14: decode(encode(0.7)) visibility roundtrip      -> ~0.7
 --  15: preset_high as f32 (slices + steps)           -> 6
 
 def C: gtao.consts =

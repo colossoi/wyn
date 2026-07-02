@@ -3,22 +3,88 @@
 -- (extra/XeGTAO/Source/Rendering/Shaders/XeGTAO.h / XeGTAO.hlsli, MIT,
 -- Copyright (C) 2016-2021 Intel Corporation).
 --
--- The library is the analogue of XeGTAO.hlsli: pure per-pixel functions.
--- Resource declarations, entry points, dispatch, and ping-pong wiring are
--- the caller's job — see lib/testfiles/gtao_demo.wyn for a worked pipeline.
+-- Every function is pure — value in, value out; nothing returns `()`.
+-- Resource declarations, entry points, dispatch, image stores, and
+-- ping-pong wiring are the caller's job. AO term only (no bent
+-- normals); f32 throughout.
 --
--- The effect runs in three passes over a depth buffer:
---   1. prefilter: linearize NDC depth to viewspace and build a 5-level
---      "MIP" chain of it (`screen_to_viewspace_depth`, `clamp_depth`,
---      `depth_mip_filter`) — one r32float resource per level, since
---      resources have no real MIP chains;
---   2. main: per-pixel horizon-slice integration producing a raw
---      visibility term and packed depth-discontinuity edges;
---   3. denoise: an edge-aware spatial blur over the working term, the
---      last pass scaling by `occlusion_term_scale`.
+-- The API is layered:
 --
--- AO term only (no bent normals); f32 throughout (no fp16 paths). The
--- spatio-temporal noise is the Hilbert-curve + R2 scheme, computed
+--   * The KERNEL layer is texture-free: the caller fetches every depth
+--     texel and owns the slice/step loops (`setup_pixel`, `setup_slice`,
+--     `step_sample`, `horizon_fold`, `slice_visibility`,
+--     `finalize_visibility`, `viewspace_normal_from_depths`,
+--     `denoise_kernel`).
+--   * CONVENIENCE wrappers bundle the fetches and loops for the common
+--     case of one full-res depth texture (`main_pass_single`,
+--     `compute_viewspace_normal`, `denoise`). They are ~15 lines each —
+--     read them as living examples of driving the kernel layer.
+--   * The DEPTH-CHAIN layer is an optional bandwidth optimization for
+--     large effect radii: a 5-level viewspace-depth pyramid
+--     (`downsample_depth`, `load_depth_mip`, `main_pass`). Quality is
+--     highest WITHOUT it (far samples never coarsen); it only saves
+--     memory traffic.
+--
+-- ---------------------------------------------------------------------
+-- Usage: the minimal pipeline is TWO per-texel compute passes plus your
+-- composite. Everything marked (optional) below can be dropped.
+--
+--   def C: gtao.consts =
+--     gtao.make_constants(@[1920.0f32, 1080.0f32], tan_half_fovy,
+--                         near, far, 0u32, gtao.default_settings)
+--
+--   resource depth: image2d { format = r32float    size = 1920x1080
+--                             usages = [storage_write, sampled] }
+--   resource ao:    image2d { format = rgba16float size = 1920x1080
+--                             usages = [storage_write, sampled] }
+--
+--   -- Pass 1: viewspace depth. From a raw depth buffer, linearize with
+--   -- gtao.screen_to_viewspace_depth(ndc, C); any other source works as
+--   -- long as texels are positive viewspace depth.
+--   #[compute]
+--   entry write_depth(#[view(depth, storage_write)] outd: storage_image,
+--                     #[builtin(global_invocation_id)] gid: vec3u32) () =
+--     let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
+--     image_store(outd, xy, @[gtao.clamp_depth(my_depth(xy)), 0.0f32, 0.0f32, 1.0f32])
+--
+--   -- Pass 2: AO. `.y` (packed edges) is only needed if you denoise.
+--   #[compute]
+--   entry ao_main(#[view(ao, storage_write)] outa: storage_image,
+--                 #[view(depth, sampled)] d: texture2d,
+--                 #[builtin(global_invocation_id)] gid: vec3u32,
+--                 #[uniform(set=1, binding=3)] iFrame: u32) () =
+--     let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
+--     -- (optional) use your G-buffer normals instead:
+--     let n = gtao.compute_viewspace_normal(xy, d, C) in
+--     -- (optional) pass 0u32 instead of the frame index without TAA:
+--     let noise = gtao.spatiotemporal_noise(@[gid.x, gid.y], iFrame % 64u32) in
+--     let (slices, steps) = gtao.preset_high in
+--     let (vis, edges) = gtao.main_pass_single(xy, slices, steps, noise, n, C, d) in
+--     image_store(outa, xy, @[vis, edges, 0.0f32, 1.0f32])
+--
+--   -- (optional) Denoise: 1-3 passes ping-ponging two ao-shaped
+--   -- textures, `final_apply = true` on the last. Skipping denoise
+--   -- entirely is fine — just `saturate` the raw term when compositing.
+--   #[compute]
+--   entry ao_denoise(#[view(ao_out, storage_write)] outa: storage_image,
+--                    #[view(ao, sampled)] a: texture2d,
+--                    #[builtin(global_invocation_id)] gid: vec3u32) () =
+--     let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
+--     let (v, e) = gtao.denoise(xy, a, C, true) in
+--     image_store(outa, xy, @[v, e, 0.0f32, 1.0f32])
+--
+--   -- Composite: sample the final texture, multiply the AO term in.
+--
+-- Storage note: the raw (pre-denoise) visibility can overshoot 1.0
+-- slightly; denoising averages it back down. Float formats
+-- (r32float/rgba16float) hold it as-is. Only if you pack into 8-bit
+-- UNORM do you need the `encode_visibility` / `decode_visibility` pair,
+-- which builds in `occlusion_term_scale` headroom (this is the one
+-- place the port deviates from XeGTAO's plumbing, which bakes that
+-- scale into its passes because its working buffers are R8).
+-- ---------------------------------------------------------------------
+--
+-- The spatio-temporal noise is the Hilbert-curve + R2 scheme, computed
 -- arithmetically via the prelude `sampling` module (no LUT).
 
 module gtao = {
@@ -126,9 +192,15 @@ module gtao = {
       (c.ndc_to_view_mul.y * screen_pos.y + c.ndc_to_view_add.y) * viewspace_depth,
       viewspace_depth]
 
+  -- | Normalized screen position of a pixel center.
+  def pixel_screen_pos(pix: vec2i32, c: consts) vec2f32 =
+    @[(f32.i32(pix.x) + 0.5f32) * c.viewport_pixel_size.x,
+      (f32.i32(pix.y) + 0.5f32) * c.viewport_pixel_size.y]
+
   -- | Depth-discontinuity edges against the four neighbours, each in
   -- [0, 1] (1 = no edge, i.e. the neighbour is blendable). Slope-
   -- adjusted so smooth surfaces at grazing angles don't read as edges.
+  -- Only needed to feed the denoiser — skip if you don't denoise.
   def calculate_edges(center_z: f32, left_z: f32, right_z: f32,
                       top_z: f32, bottom_z: f32) vec4f32 =
     let ex = left_z - center_z in
@@ -182,7 +254,24 @@ module gtao = {
     normalize(accepted_lt * cross(l, t) + accepted_tr * cross(t, r)
             + accepted_rb * cross(r, b) + accepted_bl * cross(b, l))
 
-  -- | Weighted-average depth downsample for the viewspace-depth chain:
+  -- | Viewspace normal from five caller-fetched depths. Kernel-layer
+  -- twin of `compute_viewspace_normal`; skip both if you have G-buffer
+  -- normals (always preferable).
+  def viewspace_normal_from_depths(pix: vec2i32, center_z: f32,
+                                   left_z: f32, right_z: f32,
+                                   top_z: f32, bottom_z: f32,
+                                   c: consts) vec3f32 =
+    let px = c.viewport_pixel_size in
+    let nsp = pixel_screen_pos(pix, c) in
+    let edges = calculate_edges(center_z, left_z, right_z, top_z, bottom_z) in
+    let center = compute_viewspace_position(nsp, center_z, c) in
+    let left   = compute_viewspace_position(@[nsp.x - px.x, nsp.y], left_z, c) in
+    let right  = compute_viewspace_position(@[nsp.x + px.x, nsp.y], right_z, c) in
+    let top    = compute_viewspace_position(@[nsp.x, nsp.y - px.y], top_z, c) in
+    let bottom = compute_viewspace_position(@[nsp.x, nsp.y + px.y], bottom_z, c) in
+    calculate_normal(edges, center, left, right, top, bottom)
+
+  -- | Weighted-average depth downsample for the (optional) depth chain:
   -- weights fall off with distance from the most distant of the four
   -- samples, giving a natural thin-occluder bias that is stable under
   -- motion.
@@ -201,24 +290,23 @@ module gtao = {
     let w3 = saturate((max_depth - depth3) * falloff_mul + falloff_add) in
     (w0 * depth0 + w1 * depth1 + w2 * depth2 + w3 * depth3) / (w0 + w1 + w2 + w3)
 
-  -- | Headroom factor for storing the raw (pre-denoise) visibility term
-  -- in a UNORM channel: the raw term can overshoot 1 but averages back
-  -- out under the denoiser, whose final pass multiplies this back in.
+  -- | Headroom factor for packing the raw visibility term into a UNORM
+  -- channel: the raw term can overshoot 1 but averages back out under
+  -- the denoiser. Only relevant to `encode_visibility` /
+  -- `decode_visibility`; float storage needs neither.
   def occlusion_term_scale: f32 = 1.5f32
 
-  -- | Visibility term to/from its 8-bit working encoding
-  -- (`encode` divides by `occlusion_term_scale`; the final denoise pass
-  -- is what re-applies it).
   def encode_visibility(visibility: f32) u32 =
     u32.f32(saturate(visibility / occlusion_term_scale) * 255.0f32 + 0.5f32)
 
   def decode_visibility(packed: u32) f32 =
-    f32.u32(packed) / 255.0f32
+    f32.u32(packed) / 255.0f32 * occlusion_term_scale
 
   -- | Per-pixel, per-frame low-discrepancy noise pair for the main
   -- pass: `.x` picks the slice angle, `.y` the step offset. Maps the
   -- pixel onto a 64×64 Hilbert tile driving the R2 sequence, with the
-  -- empirical 288-per-frame temporal offset from XeGTAO.
+  -- empirical 288-per-frame temporal offset from XeGTAO. Pass
+  -- `temporal_index = 0` when not accumulating over frames.
   def spatiotemporal_noise(pix: vec2u32, temporal_index: u32) vec2f32 =
     let h = sampling.hilbert_index(6u32, pix.x % 64u32, pix.y % 64u32) in
     sampling.r2(h + 288u32 * (temporal_index % 64u32))
@@ -231,241 +319,156 @@ module gtao = {
   def preset_high: (i32, i32) = (3i32, 3i32)
   def preset_ultra: (i32, i32) = (9i32, 3i32)
 
-  -- The depth chain contract: level m is a separate r32float resource of
-  -- extent max(1, floor(viewport_size / 2^m)), m in 0..4, holding
-  -- viewspace (linearized) depth. Level 0 is written by the caller
-  -- (`screen_to_viewspace_depth` + `clamp_depth` per texel, or any other
-  -- depth source); levels 1-4 by a `downsample_depth` pass each.
+  ------------------------------------------------------------------
+  -- Kernel layer: the main pass as pure pieces. The caller fetches
+  -- depths and owns the loops; see `main_pass_single` below for the
+  -- canonical driving pattern.
+  ------------------------------------------------------------------
 
-  def mip_extent(c: consts, mip: i32) vec2f32 =
-    let s = f32.exp2(f32.i32(mip)) in
-    @[f32.max(1.0f32, f32.floor(c.viewport_size.x / s)),
-      f32.max(1.0f32, f32.floor(c.viewport_size.y / s))]
+  -- | Everything about one pixel that every slice shares.
+  type pixel_setup = {
+    nsp: vec2f32,
+    pix_center_pos: vec3f32,
+    view_vec: vec3f32,
+    screenspace_radius: f32,
+    min_s: f32,
+    visibility_base: f32,
+    falloff_mul: f32,
+    falloff_add: f32,
+  }
 
-  -- | Depth at integer texel coordinates, clamped to the given extent.
-  def load_depth_texel(tex: texture2d, x: i32, y: i32, extent: vec2f32) f32 =
-    let cx = clamp(x, 0i32, i32.f32(extent.x) - 1i32) in
-    let cy = clamp(y, 0i32, i32.f32(extent.y) - 1i32) in
-    texture_load(tex, @[cx, cy], 0i32).x
-
-  -- | Depth at a normalized screen coordinate from the chain level
-  -- nearest `mip` (point sampling — depth values must never be
-  -- interpolated across texels or levels).
-  def load_depth_mip(m0: texture2d, m1: texture2d, m2: texture2d,
-                     m3: texture2d, m4: texture2d,
-                     uv: vec2f32, mip: f32, c: consts) f32 =
-    let level = i32.f32(f32.round(clamp(mip, 0.0f32, 4.0f32))) in
-    let extent = mip_extent(c, level) in
-    let x = i32.f32(f32.floor(uv.x * extent.x)) in
-    let y = i32.f32(f32.floor(uv.y * extent.y)) in
-    if level <= 0i32 then load_depth_texel(m0, x, y, extent)
-    else if level == 1i32 then load_depth_texel(m1, x, y, extent)
-    else if level == 2i32 then load_depth_texel(m2, x, y, extent)
-    else if level == 3i32 then load_depth_texel(m3, x, y, extent)
-    else load_depth_texel(m4, x, y, extent)
-
-  -- | One texel of a depth-chain downsample pass: `pix` indexes the
-  -- destination level whose source (one level up the chain) has extent
-  -- `prev_extent`. The per-texel body of XeGTAO's PrefilterDepths.
-  def downsample_depth(pix: vec2i32, prev_mip: texture2d,
-                       prev_extent: vec2f32, c: consts) f32 =
-    let bx = pix.x * 2i32 in
-    let by = pix.y * 2i32 in
-    let d0 = load_depth_texel(prev_mip, bx, by, prev_extent) in
-    let d1 = load_depth_texel(prev_mip, bx + 1i32, by, prev_extent) in
-    let d2 = load_depth_texel(prev_mip, bx, by + 1i32, prev_extent) in
-    let d3 = load_depth_texel(prev_mip, bx + 1i32, by + 1i32, prev_extent) in
-    depth_mip_filter(d0, d1, d2, d3, c)
-
-  -- | Viewspace normal at a pixel, reconstructed from the level-0
-  -- viewspace depth. Use when no screen-space normals are available;
-  -- supplying real normals to `main_pass` is always preferable.
-  def compute_viewspace_normal(pix: vec2i32, view_depth: texture2d,
-                               c: consts) vec3f32 =
-    let extent = c.viewport_size in
-    let px = c.viewport_pixel_size in
-    let nsp = @[(f32.i32(pix.x) + 0.5f32) * px.x, (f32.i32(pix.y) + 0.5f32) * px.y] in
-    let cz = load_depth_texel(view_depth, pix.x, pix.y, extent) in
-    let lz = load_depth_texel(view_depth, pix.x - 1i32, pix.y, extent) in
-    let rz = load_depth_texel(view_depth, pix.x + 1i32, pix.y, extent) in
-    let tz = load_depth_texel(view_depth, pix.x, pix.y - 1i32, extent) in
-    let bz = load_depth_texel(view_depth, pix.x, pix.y + 1i32, extent) in
-    let edges = calculate_edges(cz, lz, rz, tz, bz) in
-    let center = compute_viewspace_position(nsp, cz, c) in
-    let left   = compute_viewspace_position(@[nsp.x - px.x, nsp.y], lz, c) in
-    let right  = compute_viewspace_position(@[nsp.x + px.x, nsp.y], rz, c) in
-    let top    = compute_viewspace_position(@[nsp.x, nsp.y - px.y], tz, c) in
-    let bottom = compute_viewspace_position(@[nsp.x, nsp.y + px.y], bz, c) in
-    calculate_normal(edges, center, left, right, top, bottom)
-
-  -- | The GTAO main pass for one pixel ("Algorithm 1" of the paper):
-  -- integrates visibility over `slice_count` hemisphere slices with
-  -- `steps_per_slice` horizon samples per side, sampling the depth
-  -- chain at a level matching each sample's screen distance.
-  --
-  -- `noise` is the per-pixel/per-frame pair from
-  -- `spatiotemporal_noise`; `viewspace_normal` from
-  -- `compute_viewspace_normal` or the caller's G-buffer.
-  --
-  -- Returns (working visibility term, packed edges): the visibility is
-  -- on the working scale — divided by `occlusion_term_scale` — ready to
-  -- store in a UNORM/float channel; the final `denoise` pass scales it
-  -- back.
-  def main_pass(pix: vec2i32, slice_count: i32, steps_per_slice: i32,
-                noise: vec2f32, viewspace_normal: vec3f32, c: consts,
-                m0: texture2d, m1: texture2d, m2: texture2d,
-                m3: texture2d, m4: texture2d) (f32, f32) =
-    let px = c.viewport_pixel_size in
-    let extent = c.viewport_size in
-    let nsp = @[(f32.i32(pix.x) + 0.5f32) * px.x, (f32.i32(pix.y) + 0.5f32) * px.y] in
-
-    let cz0 = load_depth_texel(m0, pix.x, pix.y, extent) in
-    let lz = load_depth_texel(m0, pix.x - 1i32, pix.y, extent) in
-    let rz = load_depth_texel(m0, pix.x + 1i32, pix.y, extent) in
-    let tz = load_depth_texel(m0, pix.x, pix.y - 1i32, extent) in
-    let bz = load_depth_texel(m0, pix.x, pix.y + 1i32, extent) in
-    let packed_edges = pack_edges(calculate_edges(cz0, lz, rz, tz, bz)) in
-
-    -- Nudge toward the camera to keep the center pixel from occluding
-    -- itself through depth-precision noise.
-    let viewspace_z = cz0 * 0.99999f32 in
+  -- | Build the per-pixel state from the caller-fetched center depth
+  -- (applies the toward-camera precision nudge itself). Start the
+  -- visibility sum from `visibility_base` (the small-radius fadeout).
+  def setup_pixel(pix: vec2i32, center_z: f32, c: consts) pixel_setup =
+    let nsp = pixel_screen_pos(pix, c) in
+    let viewspace_z = center_z * 0.99999f32 in
     let pix_center_pos = compute_viewspace_position(nsp, viewspace_z, c) in
-    let view_vec = normalize(@[0.0f32, 0.0f32, 0.0f32] - pix_center_pos) in
-
     let effect_radius = c.effect_radius * c.radius_multiplier in
     let falloff_range = c.effect_falloff_range * effect_radius in
     let falloff_from = effect_radius * (1.0f32 - c.effect_falloff_range) in
-    let falloff_mul = (0.0f32 - 1.0f32) / falloff_range in
-    let falloff_add = falloff_from / falloff_range + 1.0f32 in
-
-    let pixel_too_close_threshold = 1.3f32 in
-    -- Approximate viewspace size of one pixel at the center depth.
     let pixel_viewspace_size = viewspace_z * c.ndc_to_view_mul_x_pixel_size.x in
     let screenspace_radius = effect_radius / pixel_viewspace_size in
-    -- Fade the effect out entirely for sub-pixel radii.
-    let visibility_base = saturate((10.0f32 - screenspace_radius) / 100.0f32) * 0.5f32 in
-    let min_s = pixel_too_close_threshold / screenspace_radius in
+    { nsp = nsp,
+      pix_center_pos = pix_center_pos,
+      view_vec = normalize(@[0.0f32, 0.0f32, 0.0f32] - pix_center_pos),
+      screenspace_radius = screenspace_radius,
+      min_s = 1.3f32 / screenspace_radius,
+      visibility_base = saturate((10.0f32 - screenspace_radius) / 100.0f32) * 0.5f32,
+      falloff_mul = (0.0f32 - 1.0f32) / falloff_range,
+      falloff_add = falloff_from / falloff_range + 1.0f32 }
 
-    let visibility =
-      loop vis = visibility_base for slice < slice_count do
-        let slice_k = (f32.i32(slice) + noise.x) / f32.i32(slice_count) in
-        let phi = slice_k * f32.pi in
-        let cos_phi = f32.cos(phi) in
-        let sin_phi = f32.sin(phi) in
-        let omega = @[cos_phi * screenspace_radius, (0.0f32 - sin_phi) * screenspace_radius] in
+  -- | Everything about one hemisphere slice.
+  type slice_setup = {
+    omega: vec2f32,
+    n: f32,
+    cos_norm: f32,
+    low_horizon_cos0: f32,
+    low_horizon_cos1: f32,
+    projected_normal_len: f32,
+  }
 
-        let direction_vec = @[cos_phi, sin_phi, 0.0f32] in
-        let ortho_direction_vec = direction_vec - dot(direction_vec, view_vec) * view_vec in
-        let axis_vec = normalize(cross(ortho_direction_vec, view_vec)) in
-        let projected_normal_vec = viewspace_normal - axis_vec * dot(viewspace_normal, axis_vec) in
+  def setup_slice(p: pixel_setup, slice: i32, slice_count: i32,
+                  noise_slice: f32, viewspace_normal: vec3f32) slice_setup =
+    let slice_k = (f32.i32(slice) + noise_slice) / f32.i32(slice_count) in
+    let phi = slice_k * f32.pi in
+    let cos_phi = f32.cos(phi) in
+    let sin_phi = f32.sin(phi) in
+    let direction_vec = @[cos_phi, sin_phi, 0.0f32] in
+    let ortho_direction_vec = direction_vec - dot(direction_vec, p.view_vec) * p.view_vec in
+    let axis_vec = normalize(cross(ortho_direction_vec, p.view_vec)) in
+    let projected_normal_vec = viewspace_normal - axis_vec * dot(viewspace_normal, axis_vec) in
+    let sign_norm = f32.sign(dot(ortho_direction_vec, projected_normal_vec)) in
+    let projected_normal_len = magnitude(projected_normal_vec) in
+    let cos_norm = saturate(dot(projected_normal_vec, p.view_vec) / projected_normal_len) in
+    let n = sign_norm * fastmath.acos(cos_norm) in
+    -- Out-of-radius samples interpolate toward the hemisphere horizon
+    -- for this normal, not -1 — keeps the falloff independent of the
+    -- projected normal (see the XeGTAO readme).
+    let half_pi = 1.5707963267948966f32 in
+    { omega = @[cos_phi * p.screenspace_radius, (0.0f32 - sin_phi) * p.screenspace_radius],
+      n = n,
+      cos_norm = cos_norm,
+      low_horizon_cos0 = f32.cos(n + half_pi),
+      low_horizon_cos1 = f32.cos(n - half_pi),
+      projected_normal_len = projected_normal_len }
 
-        let sign_norm = f32.sign(dot(ortho_direction_vec, projected_normal_vec)) in
-        let projected_normal_len = magnitude(projected_normal_vec) in
-        let cos_norm = saturate(dot(projected_normal_vec, view_vec) / projected_normal_len) in
-        let n = sign_norm * fastmath.acos(cos_norm) in
+  -- | Where to sample for one step: the offset from `p.nsp` in
+  -- normalized screen units (snapped to full-res texel centers so the
+  -- slope math sees the texel actually fetched), and the depth-chain
+  -- level that screen distance wants. Fetch depth at `p.nsp + offset`
+  -- AND `p.nsp - offset`; ignore the mip if you sample one texture.
+  def step_sample(p: pixel_setup, s: slice_setup, slice: i32, step: i32,
+                  steps_per_slice: i32, noise_sample: f32,
+                  c: consts) (vec2f32, f32) =
+    -- R1 quasirandom offset per step, decorrelated across slices.
+    let step_base_noise = f32.i32(slice + step * steps_per_slice) * 0.6180339887498948482f32 in
+    let step_noise = f32.fract(noise_sample + step_base_noise) in
+    let s_lin = (f32.i32(step) + step_noise) / f32.i32(steps_per_slice) in
+    let dist = f32.pow(s_lin, c.sample_distribution_power) + p.min_s in
+    let offset_px = @[dist * s.omega.x, dist * s.omega.y] in
+    let mip_level = f32.log2(magnitude(offset_px)) - c.depth_mip_sampling_offset in
+    (@[f32.round(offset_px.x) * c.viewport_pixel_size.x,
+       f32.round(offset_px.y) * c.viewport_pixel_size.y],
+     mip_level)
 
-        -- Out-of-radius samples interpolate toward the hemisphere
-        -- horizon for this normal, not -1 — keeps the falloff
-        -- independent of the projected normal (see the XeGTAO readme).
-        let half_pi = 1.5707963267948966f32 in
-        let low_horizon_cos0 = f32.cos(n + half_pi) in
-        let low_horizon_cos1 = f32.cos(n - half_pi) in
+  -- | Fold one caller-fetched ± sample pair into the horizon cosines.
+  -- `uv0`/`sz0` are the screen position and viewspace depth of the
+  -- `+offset` sample, `uv1`/`sz1` of the `-offset` sample. Thread
+  -- (hc0, hc1) through the step loop, starting from
+  -- (low_horizon_cos0, low_horizon_cos1).
+  def horizon_fold(p: pixel_setup, s: slice_setup,
+                   uv0: vec2f32, sz0: f32, uv1: vec2f32, sz1: f32,
+                   hc0: f32, hc1: f32, c: consts) (f32, f32) =
+    let sample_delta0 = compute_viewspace_position(uv0, sz0, c) - p.pix_center_pos in
+    let sample_delta1 = compute_viewspace_position(uv1, sz1, c) - p.pix_center_pos in
+    let sample_dist0 = magnitude(sample_delta0) in
+    let sample_dist1 = magnitude(sample_delta1) in
+    let sample_horizon_vec0 = (1.0f32 / sample_dist0) * sample_delta0 in
+    let sample_horizon_vec1 = (1.0f32 / sample_dist1) * sample_delta1 in
+    -- Falloff over distance, with the optional thin-occluder bias
+    -- along the view axis (compensation 0 = plain distance).
+    let toc = 1.0f32 + c.thin_occluder_compensation in
+    let falloff_base0 = magnitude(@[sample_delta0.x, sample_delta0.y, sample_delta0.z * toc]) in
+    let falloff_base1 = magnitude(@[sample_delta1.x, sample_delta1.y, sample_delta1.z * toc]) in
+    let weight0 = saturate(falloff_base0 * p.falloff_mul + p.falloff_add) in
+    let weight1 = saturate(falloff_base1 * p.falloff_mul + p.falloff_add) in
+    let shc0 = mix(s.low_horizon_cos0, dot(sample_horizon_vec0, p.view_vec), weight0) in
+    let shc1 = mix(s.low_horizon_cos1, dot(sample_horizon_vec1, p.view_vec), weight1) in
+    (f32.max(hc0, shc0), f32.max(hc1, shc1))
 
-        let (horizon_cos0, horizon_cos1) =
-          loop (hc0, hc1) = (low_horizon_cos0, low_horizon_cos1) for step < steps_per_slice do
-            -- R1 quasirandom offset per step, decorrelated across slices.
-            let step_base_noise = f32.i32(slice + step * steps_per_slice) * 0.6180339887498948482f32 in
-            let step_noise = f32.fract(noise.y + step_base_noise) in
-            let s_lin = (f32.i32(step) + step_noise) / f32.i32(steps_per_slice) in
-            let s = f32.pow(s_lin, c.sample_distribution_power) + min_s in
+  -- | Visibility contribution of one finished slice (the
+  -- horizon-to-visibility arc integral, paper eq. ~27). Add to the
+  -- running sum.
+  def slice_visibility(s: slice_setup, hc0: f32, hc1: f32) f32 =
+    -- Fudge against slight over-darkening on high slopes (matches
+    -- XeGTAO's PSNR-tuned 0.05).
+    let pnl = mix(s.projected_normal_len, 1.0f32, 0.05f32) in
+    let h0 = 0.0f32 - fastmath.acos(hc1) in
+    let h1 = fastmath.acos(hc0) in
+    let sin_n = f32.sin(s.n) in
+    let iarc0 = (s.cos_norm + 2.0f32 * h0 * sin_n - f32.cos(2.0f32 * h0 - s.n)) / 4.0f32 in
+    let iarc1 = (s.cos_norm + 2.0f32 * h1 * sin_n - f32.cos(2.0f32 * h1 - s.n)) / 4.0f32 in
+    pnl * (iarc0 + iarc1)
 
-            let sample_offset_px = @[s * omega.x, s * omega.y] in
-            let sample_offset_len = magnitude(sample_offset_px) in
-            let mip_level = f32.log2(sample_offset_len) - c.depth_mip_sampling_offset in
+  -- | Slice sum -> the RAW visibility term: `max(0.03, pow(mean,
+  -- final_value_power))`. May slightly overshoot 1; denoising averages
+  -- it back down, or `saturate` it directly when skipping denoise.
+  def finalize_visibility(vis: f32, slice_count: i32, c: consts) f32 =
+    f32.max(0.03f32, f32.pow(vis / f32.i32(slice_count), c.final_value_power))
 
-            -- Snap to texel centers so the slope math sees the depth
-            -- texel that is actually sampled.
-            let sample_offset = @[f32.round(sample_offset_px.x) * px.x,
-                                  f32.round(sample_offset_px.y) * px.y] in
-
-            let sspos0 = nsp + sample_offset in
-            let sz0 = load_depth_mip(m0, m1, m2, m3, m4, sspos0, mip_level, c) in
-            let sample_pos0 = compute_viewspace_position(sspos0, sz0, c) in
-
-            let sspos1 = nsp - sample_offset in
-            let sz1 = load_depth_mip(m0, m1, m2, m3, m4, sspos1, mip_level, c) in
-            let sample_pos1 = compute_viewspace_position(sspos1, sz1, c) in
-
-            let sample_delta0 = sample_pos0 - pix_center_pos in
-            let sample_delta1 = sample_pos1 - pix_center_pos in
-            let sample_dist0 = magnitude(sample_delta0) in
-            let sample_dist1 = magnitude(sample_delta1) in
-            let sample_horizon_vec0 = (1.0f32 / sample_dist0) * sample_delta0 in
-            let sample_horizon_vec1 = (1.0f32 / sample_dist1) * sample_delta1 in
-
-            -- Falloff over distance, with the optional thin-occluder
-            -- bias along the view axis (compensation 0 = plain
-            -- distance).
-            let toc = 1.0f32 + c.thin_occluder_compensation in
-            let falloff_base0 = magnitude(@[sample_delta0.x, sample_delta0.y, sample_delta0.z * toc]) in
-            let falloff_base1 = magnitude(@[sample_delta1.x, sample_delta1.y, sample_delta1.z * toc]) in
-            let weight0 = saturate(falloff_base0 * falloff_mul + falloff_add) in
-            let weight1 = saturate(falloff_base1 * falloff_mul + falloff_add) in
-
-            let shc0 = mix(low_horizon_cos0, dot(sample_horizon_vec0, view_vec), weight0) in
-            let shc1 = mix(low_horizon_cos1, dot(sample_horizon_vec1, view_vec), weight1) in
-            (f32.max(hc0, shc0), f32.max(hc1, shc1))
-        in
-
-        -- Fudge against slight over-darkening on high slopes (matches
-        -- XeGTAO's PSNR-tuned 0.05).
-        let projected_normal_len2 = mix(projected_normal_len, 1.0f32, 0.05f32) in
-
-        -- Horizon-to-visibility arc integral (paper eq. ~27, unrolled).
-        let h0 = 0.0f32 - fastmath.acos(horizon_cos1) in
-        let h1 = fastmath.acos(horizon_cos0) in
-        let sin_n = f32.sin(n) in
-        let iarc0 = (cos_norm + 2.0f32 * h0 * sin_n - f32.cos(2.0f32 * h0 - n)) / 4.0f32 in
-        let iarc1 = (cos_norm + 2.0f32 * h1 * sin_n - f32.cos(2.0f32 * h1 - n)) / 4.0f32 in
-        vis + projected_normal_len2 * (iarc0 + iarc1)
-    in
-    let v = visibility / f32.i32(slice_count) in
-    let v = f32.pow(v, c.final_value_power) in
-    -- Disallow total occlusion — the pixel itself is visible.
-    let v = f32.max(0.03f32, v) in
-    (saturate(v / occlusion_term_scale), packed_edges)
-
-  def load_ao_edges(tex: texture2d, x: i32, y: i32, c: consts) vec2f32 =
-    let cx = clamp(x, 0i32, i32.f32(c.viewport_size.x) - 1i32) in
-    let cy = clamp(y, 0i32, i32.f32(c.viewport_size.y) - 1i32) in
-    texture_load(tex, @[cx, cy], 0i32).xy
-
-  -- | One edge-aware denoise pass for one pixel. `ao_edges` is a
-  -- working texture whose `.x` holds the working visibility term and
-  -- `.y` the packed edges (both straight from `main_pass`). Returns the
-  -- blurred (visibility, packed edges) pair to store in the ping-pong
-  -- target; edges pass through unchanged so further passes keep working.
-  --
-  -- Run `denoise_blur_beta`-many passes ping-ponging two textures, the
-  -- last with `final_apply = true` — that pass re-applies
-  -- `occlusion_term_scale`, yielding the final AO term in [0, 1]. Even
-  -- with denoising off, one `final_apply` pass must run (a
-  -- `denoise_blur_beta` of ~1e4 makes it a pure passthrough).
-  def denoise(pix: vec2i32, ao_edges: texture2d, c: consts,
-              final_apply: bool) (f32, f32) =
+  -- | One edge-aware denoise blur over nine caller-fetched
+  -- (visibility, packed_edges) texels. Returns (visibility, packed
+  -- edges) — edges pass through unchanged so further passes keep
+  -- working. `final_apply` selects the sharper final center weight and
+  -- saturates the result; use it on the last pass (only pass, if one).
+  def denoise_kernel(center: vec2f32, l: vec2f32, r: vec2f32,
+                     t: vec2f32, b: vec2f32,
+                     tl: vec2f32, tr: vec2f32, bl: vec2f32, br: vec2f32,
+                     c: consts, final_apply: bool) (f32, f32) =
     let blur_amount = if final_apply then c.denoise_blur_beta
                       else c.denoise_blur_beta / 5.0f32 in
     let diag_weight = 0.85f32 * 0.5f32 in
-
-    let center = load_ao_edges(ao_edges, pix.x, pix.y, c) in
-    let l  = load_ao_edges(ao_edges, pix.x - 1i32, pix.y, c) in
-    let r  = load_ao_edges(ao_edges, pix.x + 1i32, pix.y, c) in
-    let t  = load_ao_edges(ao_edges, pix.x, pix.y - 1i32, c) in
-    let b  = load_ao_edges(ao_edges, pix.x, pix.y + 1i32, c) in
-    let tl = load_ao_edges(ao_edges, pix.x - 1i32, pix.y - 1i32, c) in
-    let tr = load_ao_edges(ao_edges, pix.x + 1i32, pix.y - 1i32, c) in
-    let bl = load_ao_edges(ao_edges, pix.x - 1i32, pix.y + 1i32, c) in
-    let br = load_ao_edges(ao_edges, pix.x + 1i32, pix.y + 1i32, c) in
 
     let edges_c = unpack_edges(center.y) in
     let edges_l = unpack_edges(l.y) in
@@ -499,6 +502,173 @@ module gtao = {
               + tl.x * weight_tl + tr.x * weight_tr
               + bl.x * weight_bl + br.x * weight_br in
     let ao = sum / sum_weight in
-    let ao = ao * (if final_apply then occlusion_term_scale else 1.0f32) in
-    (ao, center.y)
+    (if final_apply then saturate(ao) else ao, center.y)
+
+  ------------------------------------------------------------------
+  -- Convenience wrappers: one full-res depth texture, fetched with
+  -- integer loads (no sampler). These are the canonical examples of
+  -- driving the kernel layer.
+  ------------------------------------------------------------------
+
+  -- | Depth at integer texel coordinates, clamped to the given extent.
+  def load_depth_texel(tex: texture2d, x: i32, y: i32, extent: vec2f32) f32 =
+    let cx = clamp(x, 0i32, i32.f32(extent.x) - 1i32) in
+    let cy = clamp(y, 0i32, i32.f32(extent.y) - 1i32) in
+    texture_load(tex, @[cx, cy], 0i32).x
+
+  -- | Full-res depth at a normalized screen coordinate (point fetch —
+  -- depth values must never be interpolated).
+  def load_depth_uv(tex: texture2d, uv: vec2f32, c: consts) f32 =
+    load_depth_texel(tex,
+                     i32.f32(f32.floor(uv.x * c.viewport_size.x)),
+                     i32.f32(f32.floor(uv.y * c.viewport_size.y)),
+                     c.viewport_size)
+
+  -- | Viewspace normal at a pixel, reconstructed from full-res
+  -- viewspace depth. Skip when you have G-buffer normals.
+  def compute_viewspace_normal(pix: vec2i32, view_depth: texture2d,
+                               c: consts) vec3f32 =
+    let extent = c.viewport_size in
+    let cz = load_depth_texel(view_depth, pix.x, pix.y, extent) in
+    let lz = load_depth_texel(view_depth, pix.x - 1i32, pix.y, extent) in
+    let rz = load_depth_texel(view_depth, pix.x + 1i32, pix.y, extent) in
+    let tz = load_depth_texel(view_depth, pix.x, pix.y - 1i32, extent) in
+    let bz = load_depth_texel(view_depth, pix.x, pix.y + 1i32, extent) in
+    viewspace_normal_from_depths(pix, cz, lz, rz, tz, bz, c)
+
+  -- | The GTAO main pass for one pixel over a single full-res
+  -- viewspace-depth texture ("Algorithm 1" of the paper): integrates
+  -- visibility over `slice_count` hemisphere slices with
+  -- `steps_per_slice` horizon samples per side.
+  --
+  -- `noise` is the pair from `spatiotemporal_noise`;
+  -- `viewspace_normal` from `compute_viewspace_normal` or the caller's
+  -- G-buffer.
+  --
+  -- Returns (raw visibility term, packed edges). The edges half is only
+  -- needed by `denoise`.
+  def main_pass_single(pix: vec2i32, slice_count: i32, steps_per_slice: i32,
+                       noise: vec2f32, viewspace_normal: vec3f32, c: consts,
+                       depth: texture2d) (f32, f32) =
+    let extent = c.viewport_size in
+    let cz = load_depth_texel(depth, pix.x, pix.y, extent) in
+    let lz = load_depth_texel(depth, pix.x - 1i32, pix.y, extent) in
+    let rz = load_depth_texel(depth, pix.x + 1i32, pix.y, extent) in
+    let tz = load_depth_texel(depth, pix.x, pix.y - 1i32, extent) in
+    let bz = load_depth_texel(depth, pix.x, pix.y + 1i32, extent) in
+    let packed_edges = pack_edges(calculate_edges(cz, lz, rz, tz, bz)) in
+    let p = setup_pixel(pix, cz, c) in
+    let visibility =
+      loop vis = p.visibility_base for slice < slice_count do
+        let s = setup_slice(p, slice, slice_count, noise.x, viewspace_normal) in
+        let (hc0, hc1) =
+          loop (hc0, hc1) = (s.low_horizon_cos0, s.low_horizon_cos1)
+          for step < steps_per_slice do
+            let (off, _) = step_sample(p, s, slice, step, steps_per_slice, noise.y, c) in
+            let uv0 = p.nsp + off in
+            let uv1 = p.nsp - off in
+            let sz0 = load_depth_uv(depth, uv0, c) in
+            let sz1 = load_depth_uv(depth, uv1, c) in
+            horizon_fold(p, s, uv0, sz0, uv1, sz1, hc0, hc1, c)
+        in
+        vis + slice_visibility(s, hc0, hc1)
+    in
+    (finalize_visibility(visibility, slice_count, c), packed_edges)
+
+  def load_ao_edges(tex: texture2d, x: i32, y: i32, c: consts) vec2f32 =
+    let cx = clamp(x, 0i32, i32.f32(c.viewport_size.x) - 1i32) in
+    let cy = clamp(y, 0i32, i32.f32(c.viewport_size.y) - 1i32) in
+    texture_load(tex, @[cx, cy], 0i32).xy
+
+  -- | One edge-aware denoise pass for one pixel. `ao_edges` is a
+  -- working texture whose `.x` holds the visibility term and `.y` the
+  -- packed edges (both straight from a main pass). Run 1-3 passes
+  -- ping-ponging two textures, the last with `final_apply = true`; or
+  -- run none and `saturate` the raw term yourself.
+  def denoise(pix: vec2i32, ao_edges: texture2d, c: consts,
+              final_apply: bool) (f32, f32) =
+    let center = load_ao_edges(ao_edges, pix.x, pix.y, c) in
+    let l  = load_ao_edges(ao_edges, pix.x - 1i32, pix.y, c) in
+    let r  = load_ao_edges(ao_edges, pix.x + 1i32, pix.y, c) in
+    let t  = load_ao_edges(ao_edges, pix.x, pix.y - 1i32, c) in
+    let b  = load_ao_edges(ao_edges, pix.x, pix.y + 1i32, c) in
+    let tl = load_ao_edges(ao_edges, pix.x - 1i32, pix.y - 1i32, c) in
+    let tr = load_ao_edges(ao_edges, pix.x + 1i32, pix.y - 1i32, c) in
+    let bl = load_ao_edges(ao_edges, pix.x - 1i32, pix.y + 1i32, c) in
+    let br = load_ao_edges(ao_edges, pix.x + 1i32, pix.y + 1i32, c) in
+    denoise_kernel(center, l, r, t, b, tl, tr, bl, br, c, final_apply)
+
+  ------------------------------------------------------------------
+  -- Depth-chain layer (optional): a 5-level viewspace-depth pyramid
+  -- that lets distant horizon samples read coarser levels, trading a
+  -- little quality for memory bandwidth on large effect radii. Level m
+  -- is a separate r32float resource of extent
+  -- max(1, floor(viewport_size / 2^m)), m in 0..4; level 0 is the
+  -- caller's depth pass, levels 1-4 one `downsample_depth` pass each.
+  ------------------------------------------------------------------
+
+  def mip_extent(c: consts, mip: i32) vec2f32 =
+    let s = f32.exp2(f32.i32(mip)) in
+    @[f32.max(1.0f32, f32.floor(c.viewport_size.x / s)),
+      f32.max(1.0f32, f32.floor(c.viewport_size.y / s))]
+
+  -- | Depth at a normalized screen coordinate from the chain level
+  -- nearest `mip` (point fetch; levels must never be interpolated).
+  def load_depth_mip(m0: texture2d, m1: texture2d, m2: texture2d,
+                     m3: texture2d, m4: texture2d,
+                     uv: vec2f32, mip: f32, c: consts) f32 =
+    let level = i32.f32(f32.round(clamp(mip, 0.0f32, 4.0f32))) in
+    let extent = mip_extent(c, level) in
+    let x = i32.f32(f32.floor(uv.x * extent.x)) in
+    let y = i32.f32(f32.floor(uv.y * extent.y)) in
+    if level <= 0i32 then load_depth_texel(m0, x, y, extent)
+    else if level == 1i32 then load_depth_texel(m1, x, y, extent)
+    else if level == 2i32 then load_depth_texel(m2, x, y, extent)
+    else if level == 3i32 then load_depth_texel(m3, x, y, extent)
+    else load_depth_texel(m4, x, y, extent)
+
+  -- | One texel of a depth-chain downsample pass: `pix` indexes the
+  -- destination level whose source (one level up the chain) has extent
+  -- `prev_extent`. The per-texel body of XeGTAO's PrefilterDepths.
+  def downsample_depth(pix: vec2i32, prev_mip: texture2d,
+                       prev_extent: vec2f32, c: consts) f32 =
+    let bx = pix.x * 2i32 in
+    let by = pix.y * 2i32 in
+    let d0 = load_depth_texel(prev_mip, bx, by, prev_extent) in
+    let d1 = load_depth_texel(prev_mip, bx + 1i32, by, prev_extent) in
+    let d2 = load_depth_texel(prev_mip, bx, by + 1i32, prev_extent) in
+    let d3 = load_depth_texel(prev_mip, bx + 1i32, by + 1i32, prev_extent) in
+    depth_mip_filter(d0, d1, d2, d3, c)
+
+  -- | `main_pass_single` over the 5-level depth chain: identical math,
+  -- but each horizon sample reads the chain level matching its screen
+  -- distance.
+  def main_pass(pix: vec2i32, slice_count: i32, steps_per_slice: i32,
+                noise: vec2f32, viewspace_normal: vec3f32, c: consts,
+                m0: texture2d, m1: texture2d, m2: texture2d,
+                m3: texture2d, m4: texture2d) (f32, f32) =
+    let extent = c.viewport_size in
+    let cz = load_depth_texel(m0, pix.x, pix.y, extent) in
+    let lz = load_depth_texel(m0, pix.x - 1i32, pix.y, extent) in
+    let rz = load_depth_texel(m0, pix.x + 1i32, pix.y, extent) in
+    let tz = load_depth_texel(m0, pix.x, pix.y - 1i32, extent) in
+    let bz = load_depth_texel(m0, pix.x, pix.y + 1i32, extent) in
+    let packed_edges = pack_edges(calculate_edges(cz, lz, rz, tz, bz)) in
+    let p = setup_pixel(pix, cz, c) in
+    let visibility =
+      loop vis = p.visibility_base for slice < slice_count do
+        let s = setup_slice(p, slice, slice_count, noise.x, viewspace_normal) in
+        let (hc0, hc1) =
+          loop (hc0, hc1) = (s.low_horizon_cos0, s.low_horizon_cos1)
+          for step < steps_per_slice do
+            let (off, mip) = step_sample(p, s, slice, step, steps_per_slice, noise.y, c) in
+            let uv0 = p.nsp + off in
+            let uv1 = p.nsp - off in
+            let sz0 = load_depth_mip(m0, m1, m2, m3, m4, uv0, mip, c) in
+            let sz1 = load_depth_mip(m0, m1, m2, m3, m4, uv1, mip, c) in
+            horizon_fold(p, s, uv0, sz0, uv1, sz1, hc0, hc1, c)
+        in
+        vis + slice_visibility(s, hc0, hc1)
+    in
+    (finalize_visibility(visibility, slice_count, c), packed_edges)
 }
