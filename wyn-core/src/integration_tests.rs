@@ -8324,3 +8324,58 @@ entry g6(pxl: []u32,
     )
     .expect("texture_load after an image_load loop inside a map lambda should lower");
 }
+
+/// A runtime filter whose host entry also binds a storage image keeps the
+/// serial scan stage at `Fixed {1,1,1}`. The filter stages are clones of
+/// the host entry, so they inherit its storage-image input — and the
+/// per-texel dispatch upgrade must not seize their domains: the scan's
+/// 1×1×1 is semantic (a serial prefix scan), not a placeholder. Regressed
+/// when the storage-buffer opt-out was dropped from the upgrade rule: the
+/// scan's dispatch length got wired to the unrelated image's pixel count
+/// (and emitted a `storage_image` len the host driver can't size).
+#[test]
+fn filter_scan_stays_serial_when_entry_binds_storage_image() {
+    use crate::egir::parallelize::schedule::KernelDomain;
+    use crate::pipeline_descriptor::{DispatchSize, Pipeline};
+
+    let src = r#"
+resource occ: image2d { format = r32float  size = 256x256  usages = [storage_read, storage_write] }
+
+#[compute]
+entry cull(xs: []u32,
+           #[view(occ, storage_read)] od: storage_image) ?k. [k]u32 =
+  filter(|x|
+    let d = image_load(od, @[i32(x % 256u32), i32(x / 256u32)]).x in
+    d < 0.5
+    , xs)
+"#;
+    let converted = crate::compile_thru_ssa(src).expect("image-reading filter reaches SSA");
+    let scan = converted
+        .kernel_schedule
+        .phases()
+        .find(|phase| phase.entry_point == "cull_filter_scan")
+        .expect("scan phase scheduled");
+    assert!(
+        matches!(scan.domain, KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+        "scan domain must stay the serial 1x1x1, got {:?}",
+        scan.domain
+    );
+
+    let lowered = crate::compile_thru_spirv(src).expect("image-reading filter emits SPIR-V");
+    let stage = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .find_map(|pipeline| match pipeline {
+            Pipeline::Compute(compute) => {
+                compute.stages.iter().find(|stage| stage.entry_point == "cull_filter_scan")
+            }
+            _ => None,
+        })
+        .expect("scan stage published");
+    assert!(
+        matches!(stage.dispatch_size, DispatchSize::Fixed { x: 1, y: 1, z: 1 }),
+        "scan dispatch must publish as fixed 1x1x1, got {:?}",
+        stage.dispatch_size
+    );
+}

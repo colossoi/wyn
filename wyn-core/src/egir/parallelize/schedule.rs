@@ -489,8 +489,16 @@ fn phase_from_entry(entry: &EgirEntry, fallback: KernelDomain) -> KernelPhase {
 /// extent. Incidental storage-buffer inputs (e.g. mountains' keyboard buffer)
 /// don't opt out; the image is the domain. Only upgrades the single-workgroup
 /// placeholder domain; an explicit fixed grid stays as scheduled.
+///
+/// Runtime-filter kernels DO opt out: the flags/scan/scatter stages are
+/// clones of the host entry, so they inherit its storage-image inputs, but
+/// their domains belong to the filter machinery — the scan's 1×1×1 in
+/// particular is a serial prefix scan, not a placeholder.
 fn storage_image_domain(entry: &EgirEntry, fallback: &KernelDomain) -> Option<KernelDomain> {
     if !matches!(fallback, KernelDomain::Fixed { x: 1, y: 1, z: 1 }) {
+        return None;
+    }
+    if has_runtime_filter(entry) {
         return None;
     }
     let (binding, ..) = entry.inputs.iter().find_map(|input| input.storage_image_binding)?;
@@ -498,6 +506,18 @@ fn storage_image_domain(entry: &EgirEntry, fallback: &KernelDomain) -> Option<Ke
         set: binding.set,
         binding: binding.binding,
     }))
+}
+
+fn has_runtime_filter(entry: &EgirEntry) -> bool {
+    entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects).any(|effect| {
+        matches!(
+            effect.kind,
+            SideEffectKind::Soac(EgirSoac::Filter {
+                work_buffers: Some(_),
+                ..
+            })
+        )
+    })
 }
 
 fn segmented_resources(entry: &EgirEntry) -> Option<Vec<ScheduledResource>> {
