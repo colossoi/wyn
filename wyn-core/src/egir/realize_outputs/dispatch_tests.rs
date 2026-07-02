@@ -27,8 +27,10 @@ fn compute_slot_source_rejects_unsized_array_without_soac() {
     let mut next_effect = 1u32;
     let mut aliases = std::collections::HashMap::new();
 
+    let effect_index = graph.side_effect_index();
     let err = compute_slot_source(
         &mut graph,
+        &effect_index,
         &mut aliases,
         &mut next_effect,
         block,

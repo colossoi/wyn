@@ -84,6 +84,9 @@ fn realize_compute_slots(entry: &mut EgirEntry) -> Result<(), ConvertError> {
         ..
     } = entry;
     let mut next_effect = graph_ops::next_effect_token(graph);
+    // One producer snapshot for the whole slot loop: everything below
+    // appends side effects or rewrites them in place, so sites stay valid.
+    let effect_index = graph.side_effect_index();
 
     for (slot_index, output) in outputs.iter_mut().enumerate() {
         let binding = output.storage_binding.expect("BUG: compute output without storage binding");
@@ -110,6 +113,7 @@ fn realize_compute_slots(entry: &mut EgirEntry) -> Result<(), ConvertError> {
         for src in &sources {
             dispatch::compute_slot_source(
                 graph,
+                &effect_index,
                 aliases,
                 &mut next_effect,
                 src.block,
@@ -161,6 +165,7 @@ fn realize_legacy_return(entry: &mut EgirEntry) -> Result<(), ConvertError> {
     };
 
     let mut next_effect = graph_ops::next_effect_token(graph);
+    let effect_index = graph.side_effect_index();
 
     let sources = output_sources(graph, result, outputs);
 
@@ -173,6 +178,7 @@ fn realize_legacy_return(entry: &mut EgirEntry) -> Result<(), ConvertError> {
             // result NodeId).
             dispatch::compute_slot_source(
                 graph,
+                &effect_index,
                 aliases,
                 &mut next_effect,
                 return_block,

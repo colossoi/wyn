@@ -48,9 +48,15 @@ mod dispatch_tests;
 /// reject any sibling `Pure` consumer of the source — sibling-Index
 /// rewrites for multi-source slots would need Phi-tracking across CFG
 /// paths.
+///
+/// `effect_index` is the caller's snapshot of the graph's side-effect
+/// producers. Every mutation on this path appends side effects or
+/// rewrites them in place, so existing sites stay valid across the
+/// caller's whole slot loop.
 #[allow(clippy::too_many_arguments)]
 pub fn compute_slot_source(
     graph: &mut EGraph,
+    effect_index: &SideEffectIndex,
     aliases: &mut LookupMap<NodeId, NodeId>,
     next_effect: &mut u32,
     block: BlockId,
@@ -60,9 +66,8 @@ pub fn compute_slot_source(
     binding: BindingRef,
     multi_source: bool,
 ) -> Result<(), ConvertError> {
-    let effect_index = graph.side_effect_index();
     // 1. Consuming Scan: nothing to emit.
-    if result_soac_is_consuming_scan(graph, &effect_index, source) {
+    if result_soac_is_consuming_scan(graph, effect_index, source) {
         return Ok(());
     }
 
@@ -70,7 +75,7 @@ pub fn compute_slot_source(
     // mapped output; field 1 is retargetable only for scan accumulators.
     if let (Some(elem_ty), Some((screma_result, field_idx))) = (
         slot_ty.elem_type().cloned(),
-        result_soac_is_array_projection(graph, &effect_index, source),
+        result_soac_is_array_projection(graph, effect_index, source),
     ) {
         let view = graph_ops::intern_storage_view(graph, binding, elem_ty.clone(), None);
         if multi_source {
@@ -87,8 +92,7 @@ pub fn compute_slot_source(
                 slot_index,
             )?;
         }
-        let effect_index = graph.side_effect_index();
-        retarget_array_projection(graph, &effect_index, screma_result, field_idx, view);
+        retarget_array_projection(graph, effect_index, screma_result, field_idx, view);
         // The Project node operationally produces the view at runtime
         // (the Screma's loop body wrote field 0 through the view).
         // Update its type to match so verify_no_abstract doesn't flag
