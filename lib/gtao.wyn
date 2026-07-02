@@ -3,10 +3,9 @@
 -- (extra/XeGTAO/Source/Rendering/Shaders/XeGTAO.h / XeGTAO.hlsli, MIT,
 -- Copyright (C) 2016-2021 Intel Corporation).
 --
--- Every function is pure — value in, value out; nothing returns `()`.
--- Resource declarations, entry points, dispatch, image stores, and
--- ping-pong wiring are the caller's job. AO term only (no bent
--- normals); f32 throughout.
+-- Every function is pure — value in, value out. Resource declarations,
+-- entry points, dispatch, image stores, and ping-pong wiring are the
+-- caller's job. AO term only (no bent normals); f32 throughout.
 --
 -- The API is layered:
 --
@@ -79,9 +78,8 @@
 -- slightly; denoising averages it back down. Float formats
 -- (r32float/rgba16float) hold it as-is. Only if you pack into 8-bit
 -- UNORM do you need the `encode_visibility` / `decode_visibility` pair,
--- which builds in `occlusion_term_scale` headroom (this is the one
--- place the port deviates from XeGTAO's plumbing, which bakes that
--- scale into its passes because its working buffers are R8).
+-- which builds in `occlusion_term_scale` headroom. (XeGTAO bakes that
+-- scale into its passes instead, since its working buffers are R8.)
 -- ---------------------------------------------------------------------
 --
 -- The spatio-temporal noise is the Hilbert-curve + R2 scheme, computed
@@ -451,7 +449,7 @@ module gtao = {
     let iarc1 = (s.cos_norm + 2.0f32 * h1 * sin_n - f32.cos(2.0f32 * h1 - s.n)) / 4.0f32 in
     pnl * (iarc0 + iarc1)
 
-  -- | Slice sum -> the RAW visibility term: `max(0.03, pow(mean,
+  -- | Slice sum -> the raw visibility term: `max(0.03, pow(mean,
   -- final_value_power))`. May slightly overshoot 1; denoising averages
   -- it back down, or `saturate` it directly when skipping denoise.
   def finalize_visibility(vis: f32, slice_count: i32, c: consts) f32 =
