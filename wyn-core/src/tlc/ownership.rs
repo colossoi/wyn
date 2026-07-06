@@ -29,6 +29,7 @@ use crate::tlc::{
     ArrayExpr, Def, DefMeta, Lambda, LoopKind, Program, SoacDestination, SoacOp, Term, TermId, TermKind,
 };
 use crate::types;
+use crate::types::Diet;
 use crate::types::TypeExt;
 use crate::SymbolId;
 use polytype::Type;
@@ -254,6 +255,9 @@ struct Builder<'p> {
     model: OwnershipModel,
     next_owner: u32,
     program: &'p Program,
+    /// Def symbol → index into `program.defs`, so a call site can read
+    /// its callee's consumption diet by symbol.
+    def_index: LookupMap<SymbolId, usize>,
     /// Memoized `alias_value` results, cleared per def (term ids are
     /// unique only within one). Sound because every query runs after
     /// the term's free variables are bound and a symbol's alias value
@@ -263,12 +267,48 @@ struct Builder<'p> {
 
 impl<'p> Builder<'p> {
     fn new(program: &'p Program) -> Self {
+        let def_index = program.defs.iter().enumerate().map(|(i, d)| (d.name, i)).collect();
         Self {
             model: OwnershipModel::new(),
             next_owner: 0,
             program,
+            def_index,
             alias_cache: LookupMap::new(),
         }
+    }
+
+    /// The consumption diet of the function `func` resolves to: the
+    /// callee def's `(param_diets, return_diet)` for a `Var(Symbol)`, or a
+    /// builtin's diet. Consuming builtins are the two `array_with`
+    /// intrinsics (first parameter consuming); every other callee is
+    /// observing. Returns `None` when the callee can't be resolved to a
+    /// named function (e.g. a variable of function type before
+    /// defunctionalization) — the caller then treats it as observing.
+    fn callee_diet(&self, func: &Term) -> Option<(&'p [Diet], &'p Diet)> {
+        if let TermKind::Var(VarRef::Symbol(sym)) = &func.kind {
+            if let Some(&i) = self.def_index.get(sym) {
+                let def = &self.program.defs[i];
+                return Some((&def.param_diets, &def.return_diet));
+            }
+        }
+        None
+    }
+
+    /// Whether the callee consumes (moves out) its `index`-th argument.
+    /// Builtins never do — the `array_with` intrinsics alias or freshly
+    /// copy their input, handled by `alias_value`, not by a kill.
+    fn callee_param_consumes(&self, func: &Term, index: usize) -> bool {
+        self.callee_diet(func).and_then(|(p, _)| p.get(index)).map(Diet::is_consuming).unwrap_or(false)
+    }
+
+    /// The callee's return diet — `Diet::observing()` when unknown.
+    fn callee_return_diet(&self, func: &Term) -> Diet {
+        let known = catalog().known();
+        if var_term_builtin_id(func, &self.program.symbols) == Some(known.array_with) {
+            // A functional `array_with` returns a fresh (alias-free) array.
+            return Diet::Leaf(true);
+        }
+        self.callee_diet(func).map(|(_, r)| r.clone()).unwrap_or_else(Diet::observing)
     }
 
     fn fresh_owner(&mut self, origin: Origin) -> OwnerId {
@@ -321,12 +361,10 @@ impl<'p> Builder<'p> {
     ) {
         let mut value = self.alias_value(rhs);
         let inherited = value.flattened();
-        // Materialize fresh owners against the producer's `*` structure,
-        // not the binder's annotation: expression types no longer carry
-        // uniqueness, so a `*`-returning call is recognized through its
-        // signature return type.
-        let shape = self.producer_shape_type(rhs);
-        self.materialize_term_value(&mut value, &shape, rhs);
+        // Materialize fresh owners against the producer's `*` structure
+        // (its diet), read from the callee's signature for a call.
+        let (shape_ty, shape_diet) = self.producer_shape(rhs);
+        self.materialize_term_value(&mut value, &shape_ty, &shape_diet, rhs);
         let mut owners = value.flattened();
         if owners.is_empty() {
             let origin = self.origin_for_unaliased(rhs);
@@ -340,15 +378,17 @@ impl<'p> Builder<'p> {
         self.bind_alias_value(sym, value);
     }
 
-    /// The `*`-bearing type describing what `rhs` produces. Expression
-    /// types are uniqueness-free, so a call's fresh components are read
-    /// from the callee's signature return type; other producers keep
-    /// their (already uniqueness-free) type.
-    fn producer_shape_type(&self, rhs: &Term) -> Type<TypeName> {
+    /// The type and diet describing what `rhs` produces: a call's fresh
+    /// components come from the callee's return type and diet; other
+    /// producers are observing over their own type.
+    fn producer_shape(&self, rhs: &Term) -> (Type<TypeName>, Diet) {
         match &rhs.kind {
-            TermKind::App { func, args } => callee_return_type(&func.ty, args.len()),
-            TermKind::Coerce { inner, .. } => self.producer_shape_type(inner),
-            _ => rhs.ty.clone(),
+            TermKind::App { func, args } => (
+                callee_return_type(&func.ty, args.len()),
+                self.callee_return_diet(func),
+            ),
+            TermKind::Coerce { inner, .. } => self.producer_shape(inner),
+            _ => (rhs.ty.clone(), Diet::observing()),
         }
     }
 
@@ -361,10 +401,10 @@ impl<'p> Builder<'p> {
         // constants and have no slots to track here.
         if let TermKind::Lambda(lam) = &def.body.kind {
             let is_entry = matches!(def.meta, DefMeta::EntryPoint(_));
-            self.bind_params(lam, is_entry);
+            self.bind_params(lam, &def.param_diets, is_entry);
             self.visit_term(&lam.body);
             if !is_entry {
-                self.check_alias_free_return(&lam.ret_ty, &lam.body);
+                self.check_alias_free_return(&lam.ret_ty, &def.return_diet, &lam.body);
             }
         } else {
             self.visit_term(&def.body);
@@ -377,12 +417,12 @@ impl<'p> Builder<'p> {
     /// component must be backed only by mutable storage — freshly
     /// allocated, or ownership surrendered by a consuming parameter —
     /// never by an observing parameter or a shared global.
-    fn check_alias_free_return(&mut self, ret_ty: &Type<TypeName>, body: &Term) {
-        if !types::is_consuming_parameter_type(ret_ty) {
+    fn check_alias_free_return(&mut self, ret_ty: &Type<TypeName>, ret_diet: &Diet, body: &Term) {
+        if !ret_diet.is_consuming() {
             return;
         }
         let value = self.alias_value(body);
-        if !self.return_component_ok(ret_ty, Some(body), &value) {
+        if !self.return_component_ok(ret_ty, ret_diet, Some(body), &value) {
             let span = self.model.term_spans.get(&body.id).copied();
             self.model.build_errors.push((
                 "cannot prove the `*` (alias-free) result is alias-free; \
@@ -394,30 +434,31 @@ impl<'p> Builder<'p> {
         }
     }
 
-    /// Recursively check that every `*`-marked component of `ret_ty` is
-    /// alias-free. `term` is the sub-expression producing this component
-    /// when one is syntactically available (used to recognize a fresh
-    /// producer for an untracked component).
+    /// Recursively check that every `*`-marked (per the diet) component of
+    /// the return is alias-free. `term` is the sub-expression producing
+    /// this component when syntactically available (used to recognize a
+    /// fresh producer for an untracked component).
     fn return_component_ok(
         &mut self,
         ret_ty: &Type<TypeName>,
+        ret_diet: &Diet,
         term: Option<&Term>,
         value: &AliasValue,
     ) -> bool {
+        if ret_diet.is_consuming_at_root() {
+            let owners = value.flattened();
+            return if owners.is_empty() {
+                // No tracked storage: accept only a recognized fresh
+                // producer (an untracked component of a call result is
+                // vouched for by the callee's own checked signature).
+                term.map_or(true, |t| self.is_definitely_alias_free(t))
+            } else {
+                owners
+                    .iter()
+                    .all(|owner| self.model.origin(*owner).map(Origin::is_mutable).unwrap_or(false))
+            };
+        }
         match ret_ty {
-            Type::Constructed(TypeName::Unique, args) if args.len() == 1 => {
-                let owners = value.flattened();
-                if owners.is_empty() {
-                    // No tracked storage: accept only a recognized fresh
-                    // producer (an untracked component of a call result is
-                    // vouched for by the callee's own checked signature).
-                    term.map_or(true, |t| self.is_definitely_alias_free(t))
-                } else {
-                    owners
-                        .iter()
-                        .all(|owner| self.model.origin(*owner).map(Origin::is_mutable).unwrap_or(false))
-                }
-            }
             Type::Constructed(TypeName::Tuple(_), args) | Type::Constructed(TypeName::Record(_), args) => {
                 let parts = match term.map(|t| &t.kind) {
                     Some(TermKind::Tuple(parts)) if parts.len() == args.len() => Some(parts.as_slice()),
@@ -426,27 +467,29 @@ impl<'p> Builder<'p> {
                 args.iter().enumerate().all(|(i, arg_ty)| {
                     let component_term = parts.and_then(|p| p.get(i));
                     let component_value = value.project(i);
-                    self.return_component_ok(arg_ty, component_term, &component_value)
+                    self.return_component_ok(
+                        arg_ty,
+                        &ret_diet.component(i),
+                        component_term,
+                        &component_value,
+                    )
                 })
             }
             _ => true,
         }
     }
 
-    fn bind_params(&mut self, lam: &Lambda, is_entry: bool) {
-        for (sym, ty) in &lam.params {
+    fn bind_params(&mut self, lam: &Lambda, param_diets: &[Diet], is_entry: bool) {
+        for (index, (sym, ty)) in lam.params.iter().enumerate() {
             if types::is_copy(ty) {
                 continue;
             }
-            // Entry params are mutable iff explicitly marked unique
-            // (`*[]T`). Non-unique entry-typed inputs (e.g. plain
-            // `[]T` view arrays read by a compute entry) are
-            // immutable, mirroring non-unique function params; an
-            // unsoundly-mutable `Origin::Entry` here would let
-            // ownership mark non-tail SOACs as consuming and rewrite
-            // them to InputBuffer destinations that clobber the
-            // caller's data.
-            let consuming = types::is_consuming_parameter_type(ty);
+            // Entry params are mutable iff explicitly marked `*`. A plain
+            // `[]T` view read by a compute entry is immutable, mirroring a
+            // non-consuming function param; an unsoundly-mutable
+            // `Origin::Entry` here would let ownership rewrite non-tail
+            // SOACs to InputBuffer destinations that clobber the caller.
+            let consuming = param_diets.get(index).map(Diet::is_consuming).unwrap_or(false);
             let origin = if is_entry && consuming {
                 Origin::Entry
             } else if consuming {
@@ -486,11 +529,10 @@ impl<'p> Builder<'p> {
             }
             TermKind::App { func, args } => {
                 self.visit_term(func);
-                let param_tys = collect_param_types(&func.ty, args.len());
                 let mut killed_this_call: LookupSet<OwnerId> = LookupSet::new();
                 for (arg_index, arg) in args.iter().enumerate() {
                     self.visit_term(arg);
-                    if param_tys.get(arg_index).map(types::is_consuming_parameter_type).unwrap_or(false) {
+                    if self.callee_param_consumes(func, arg_index) {
                         let aliases = self.alias_targets(arg);
                         if !aliases.is_empty() {
                             let rejected: Vec<OwnerId> = aliases
@@ -832,12 +874,10 @@ impl<'p> Builder<'p> {
                     }
                     return Origin::Borrowed;
                 }
-                // No tracked owner — fall back to the named input's static type.
-                if types::is_unique(ty) {
-                    Origin::BorrowedMutableElement
-                } else {
-                    Origin::Borrowed
-                }
+                // No tracked owner (an untracked SOAC input): observe it.
+                // A `*` input is a bound parameter, so it always has a
+                // tracked owner handled above.
+                Origin::Borrowed
             }
             // Fresh-producer ArrayExprs: literal/range synthesize a new array,
             // so element views are mutable.
@@ -949,30 +989,25 @@ impl<'p> Builder<'p> {
                 }
 
                 // The result's per-component uniqueness comes from the
-                // callee's declared return type — expression types no
-                // longer carry `*`. A `*` component is fresh (alias-free);
+                // callee's return diet (a `*` component is fresh/alias-free);
                 // an observing component aliases every argument passed to a
                 // non-consuming parameter.
                 let return_ty = callee_return_type(&func.ty, args.len());
-                if types::is_unique(&return_ty) {
-                    return Self::empty_alias_value_for_type(&return_ty);
-                }
-
-                let param_tys = collect_param_types(&func.ty, args.len());
+                let return_diet = self.callee_return_diet(func);
                 let mut aliases = LookupSet::new();
                 for (index, arg) in args.iter().enumerate() {
-                    let consumes =
-                        param_tys.get(index).map(types::is_consuming_parameter_type).unwrap_or(false);
-                    if !consumes {
+                    if !self.callee_param_consumes(func, index) {
                         aliases.extend(self.alias_targets(arg));
                     }
                 }
-                Self::observing_alias_value_for_type(&return_ty, &aliases)
+                Self::observing_alias_value_for_type(&return_ty, &return_diet, &aliases)
             }
             TermKind::ArrayExpr(ae) => AliasValue::leaf(self.array_expr_aliases(ae)),
             TermKind::Soac(op) => {
+                // A SOAC result carries no `*`; it is observing over the
+                // aliases its inputs/accumulators contribute.
                 let aliases = self.soac_result_aliases(op, &term.ty);
-                Self::observing_alias_value_for_type(&term.ty, &aliases)
+                Self::observing_alias_value_for_type(&term.ty, &Diet::observing(), &aliases)
             }
             TermKind::Lambda(_)
             | TermKind::IntLit(_)
@@ -989,20 +1024,35 @@ impl<'p> Builder<'p> {
     /// The ownerless skeleton of `ty`: aggregates become component
     /// trees, everything else an empty leaf.
     fn empty_alias_value_for_type(ty: &Type<TypeName>) -> AliasValue {
-        Self::observing_alias_value_for_type(ty, &LookupSet::new())
+        match ty {
+            Type::Constructed(TypeName::Tuple(_), args) | Type::Constructed(TypeName::Record(_), args) => {
+                AliasValue::aggregate(args.iter().map(Self::empty_alias_value_for_type).collect())
+            }
+            _ => AliasValue::default(),
+        }
     }
 
     /// Futhark's interprocedural rule: every non-alias-free result component
-    /// aliases all arguments passed to observing parameters. Components
-    /// marked `*` remain empty and receive fresh owners when bound.
-    fn observing_alias_value_for_type(ty: &Type<TypeName>, aliases: &LookupSet<OwnerId>) -> AliasValue {
+    /// aliases all arguments passed to observing parameters. Components the
+    /// `diet` marks `*` are fresh (empty skeleton) and receive fresh owners
+    /// when bound.
+    fn observing_alias_value_for_type(
+        ty: &Type<TypeName>,
+        diet: &Diet,
+        aliases: &LookupSet<OwnerId>,
+    ) -> AliasValue {
+        if diet.is_consuming_at_root() {
+            return Self::empty_alias_value_for_type(ty);
+        }
         match ty {
-            Type::Constructed(TypeName::Unique, args) if args.len() == 1 => {
-                Self::empty_alias_value_for_type(&args[0])
-            }
             Type::Constructed(TypeName::Tuple(_), args) | Type::Constructed(TypeName::Record(_), args) => {
                 AliasValue::aggregate(
-                    args.iter().map(|arg| Self::observing_alias_value_for_type(arg, aliases)).collect(),
+                    args.iter()
+                        .enumerate()
+                        .map(|(i, arg)| {
+                            Self::observing_alias_value_for_type(arg, &diet.component(i), aliases)
+                        })
+                        .collect(),
                 )
             }
             _ if types::is_copy(ty) => AliasValue::default(),
@@ -1010,14 +1060,22 @@ impl<'p> Builder<'p> {
         }
     }
 
-    fn materialize_term_value(&mut self, value: &mut AliasValue, ty: &Type<TypeName>, term: &Term) {
-        match ty {
-            Type::Constructed(TypeName::Unique, args) if args.len() == 1 => {
-                self.materialize_all_missing(value, &args[0], Origin::Fresh);
-                if value.flattened().is_empty() {
-                    value.owners.insert(self.fresh_owner(Origin::Fresh));
-                }
+    fn materialize_term_value(
+        &mut self,
+        value: &mut AliasValue,
+        ty: &Type<TypeName>,
+        diet: &Diet,
+        term: &Term,
+    ) {
+        // A `*` at this node means the whole value is freshly owned.
+        if diet.is_consuming_at_root() {
+            self.materialize_all_missing(value, ty, Origin::Fresh);
+            if value.flattened().is_empty() {
+                value.owners.insert(self.fresh_owner(Origin::Fresh));
             }
+            return;
+        }
+        match ty {
             Type::Constructed(TypeName::Tuple(_), args) | Type::Constructed(TypeName::Record(_), args) => {
                 if value.components.is_none() {
                     *value = Self::empty_alias_value_for_type(ty);
@@ -1029,7 +1087,12 @@ impl<'p> Builder<'p> {
                     };
                     for (index, (component, component_ty)) in components.iter_mut().zip(args).enumerate() {
                         let component_term = term_parts.and_then(|parts| parts.get(index)).unwrap_or(term);
-                        self.materialize_term_value(component, component_ty, component_term);
+                        self.materialize_term_value(
+                            component,
+                            component_ty,
+                            &diet.component(index),
+                            component_term,
+                        );
                     }
                 }
             }
@@ -1045,16 +1108,10 @@ impl<'p> Builder<'p> {
     }
 
     /// Fill every ownerless non-copy leaf of `value` with a fresh owner
-    /// of `origin`; a `*`-marked subtree that stays empty (all-copy
-    /// interior) gets one owner at the unique boundary itself.
+    /// of `origin`; an all-copy subtree under a `*` boundary gets one
+    /// owner at the boundary itself.
     fn materialize_all_missing(&mut self, value: &mut AliasValue, ty: &Type<TypeName>, origin: Origin) {
         match ty {
-            Type::Constructed(TypeName::Unique, args) if args.len() == 1 => {
-                self.materialize_all_missing(value, &args[0], origin);
-                if value.flattened().is_empty() {
-                    value.owners.insert(self.fresh_owner(origin));
-                }
-            }
             Type::Constructed(TypeName::Tuple(_), args) | Type::Constructed(TypeName::Record(_), args) => {
                 if value.components.is_none() {
                     *value = Self::empty_alias_value_for_type(ty);
@@ -1082,7 +1139,7 @@ impl<'p> Builder<'p> {
         match &term.kind {
             TermKind::ArrayExpr(ArrayExpr::Literal(_) | ArrayExpr::Range { .. }) => true,
             TermKind::Soac(SoacOp::Map { .. } | SoacOp::Scan { .. } | SoacOp::Filter { .. }) => true,
-            TermKind::Soac(SoacOp::Screma { .. }) => ty.strip_unique().is_array(),
+            TermKind::Soac(SoacOp::Screma { .. }) => ty.is_array(),
             TermKind::App { func, .. } => {
                 var_term_builtin_id(func, &self.program.symbols) == Some(catalog().known().array_with)
             }
@@ -1117,10 +1174,7 @@ impl<'p> Builder<'p> {
     /// SOACs allocate fresh outer arrays. Existing aliases matter when a
     /// result can itself contain non-copy elements, or when the SOAC returns
     /// an accumulator directly.
-    fn soac_result_aliases(&mut self, op: &SoacOp, result_ty: &Type<TypeName>) -> LookupSet<OwnerId> {
-        if types::is_unique(result_ty) {
-            return LookupSet::new();
-        }
+    fn soac_result_aliases(&mut self, op: &SoacOp, _result_ty: &Type<TypeName>) -> LookupSet<OwnerId> {
         match op {
             SoacOp::Map { .. } | SoacOp::Filter { .. } | SoacOp::Scan { .. } => LookupSet::new(),
             SoacOp::Scatter { inputs, .. } => self.aliases_of_array_exprs(inputs),
@@ -1184,7 +1238,7 @@ impl<'p> Builder<'p> {
             // `*` return; otherwise it may alias storage reachable through
             // the callee (top-level constants, captured state) that no
             // argument-derived alias set can see.
-            TermKind::App { func, args } => types::is_unique(&callee_return_type(&func.ty, args.len())),
+            TermKind::App { func, .. } => self.callee_return_diet(func).is_consuming(),
             // A non-array Screma result is the accumulator; its aliases
             // are the `ne` aliases, which the empty-alias guard covered.
             TermKind::Soac(SoacOp::Screma { .. }) => true,

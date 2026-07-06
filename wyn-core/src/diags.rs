@@ -30,10 +30,6 @@ fn format_swizzle(components: &[u8]) -> String {
 }
 
 pub fn format_type(ty: &PolyType<TypeName>) -> String {
-    // Handle unique types first via dedicated API
-    if let Some(inner) = ty.as_unique_inner() {
-        return format!("*{}", format_type(inner));
-    }
     match ty {
         PolyType::Variable(id) => format!("?{}", id),
         PolyType::Constructed(name, args) => format_constructed_type(name, args),
@@ -133,10 +129,6 @@ fn format_constructed_type(name: &TypeName, args: &[PolyType<TypeName>]) -> Stri
                 })
                 .collect();
             items.join(" | ")
-        }
-        TypeName::Unique => {
-            // Handled in format_type() via TypeExt
-            unreachable!("Unique types should be handled in format_type")
         }
         TypeName::UserVar(s) => s.clone(),
         TypeName::Named(s) => {

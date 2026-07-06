@@ -21,9 +21,6 @@ fn fresh_nodes(n: usize) -> Vec<NodeId> {
 fn is_storage_image_sees_through_unique() {
     let img = Type::Constructed(TypeName::StorageTexture, vec![]);
     assert!(is_storage_image(&img));
-    // Written resources arrive `*storage_image`; erasure must see through it.
-    let unique = Type::Constructed(TypeName::Unique, vec![img]);
-    assert!(is_storage_image(&unique));
     // A view-array parameter is a real runtime value, not erasable.
     assert!(!is_storage_image(&Type::Constructed(TypeName::Array, vec![])));
 }

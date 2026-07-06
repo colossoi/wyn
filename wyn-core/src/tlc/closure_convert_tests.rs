@@ -58,6 +58,8 @@ fn def_with_simple_body_passes_verifier() {
         body: term(TermKind::IntLit("0".into()), unit_ty()),
         meta: DefMeta::Function,
         arity: 0,
+        param_diets: vec![],
+        return_diet: crate::types::Diet::observing(),
     });
     assert!(verify_closure_converted(&program).is_ok());
 }
@@ -89,6 +91,8 @@ fn unlifted_lambda_in_body_fails_verifier() {
         body,
         meta: DefMeta::Function,
         arity: 0,
+        param_diets: vec![],
+        return_diet: crate::types::Diet::observing(),
     });
     let err = verify_closure_converted(&program).unwrap_err();
     assert!(matches!(err, ClosureConvertError::UnliftedLambda { .. }));
@@ -150,6 +154,8 @@ fn param_spine_lambdas_are_skipped() {
         body,
         meta: DefMeta::Function,
         arity: 1,
+        param_diets: vec![],
+        return_diet: crate::types::Diet::observing(),
     });
     assert!(verify_closure_converted(&program).is_ok());
 }
@@ -184,6 +190,8 @@ fn unlifted_scatter_envelope_fails_verifier() {
         body: scatter,
         meta: DefMeta::Function,
         arity: 0,
+        param_diets: vec![],
+        return_diet: crate::types::Diet::observing(),
     });
 
     let err = verify_closure_converted(&program).unwrap_err();
@@ -265,6 +273,8 @@ fn reduce_with_operator(
         ),
         meta: DefMeta::Function,
         arity: 2,
+        param_diets: vec![],
+        return_diet: crate::types::Diet::observing(),
     });
 
     let p0 = program.symbols.alloc("p0".to_string());
@@ -312,6 +322,8 @@ fn reduce_with_operator(
         ),
         meta: DefMeta::Function,
         arity: 1,
+        param_diets: vec![],
+        return_diet: crate::types::Diet::observing(),
     });
 
     let (result, info) = run(program, &std::collections::HashSet::new());

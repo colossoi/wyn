@@ -984,12 +984,17 @@ impl ClosureConverter {
         self.top_level.insert(lifted_sym);
 
         if captures.is_empty() {
+            let arity = params.len();
             self.lifted_defs.push(Def {
                 name: lifted_sym,
                 ty: rebuilt.ty.clone(),
                 body: rebuilt,
                 meta: DefMeta::LiftedLambda,
-                arity: params.len(),
+                arity,
+                // A lifted lambda cannot consume (lambdas are never
+                // consuming), so its diet is all-observing.
+                param_diets: vec![crate::types::Diet::observing(); arity],
+                return_diet: crate::types::Diet::observing(),
             });
             self.callable_values.insert(lifted_sym, CallableValue::Direct(lifted_sym));
         } else {
@@ -1012,6 +1017,8 @@ impl ClosureConverter {
                 body: wrapped,
                 meta: DefMeta::LiftedLambda,
                 arity,
+                param_diets: vec![crate::types::Diet::observing(); arity],
+                return_diet: crate::types::Diet::observing(),
             });
             self.callable_values.insert(
                 lifted_sym,

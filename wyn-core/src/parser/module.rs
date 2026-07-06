@@ -44,7 +44,7 @@ impl Parser<'_> {
         let type_params = self.parse_type_params()?;
 
         self.expect(Token::Assign)?;
-        let definition = self.parse_type()?;
+        let (definition, _diet) = self.parse_type()?;
 
         Ok(TypeBind {
             name,
@@ -403,7 +403,7 @@ impl Parser<'_> {
                     let type_params = self.parse_type_params()?;
 
                     self.expect(Token::Assign)?;
-                    let ty = self.parse_type()?;
+                    let (ty, _diet) = self.parse_type()?;
 
                     expr = ModuleTypeExpression::With(Box::new(expr), qualname, type_params, ty);
                 }
@@ -493,7 +493,7 @@ impl Parser<'_> {
                     };
 
                     self.expect(Token::RightParen)?;
-                    let ty = self.parse_sig_type()?;
+                    let (ty, _pd, _rd) = self.parse_sig_type()?;
                     return Ok(Spec::SigOp(op, ty));
                 }
 
@@ -502,7 +502,7 @@ impl Parser<'_> {
                 // Parse type parameters: <[n], A>
                 let type_params = self.parse_type_params()?;
 
-                let ty = self.parse_sig_type()?;
+                let (ty, _pd, _rd) = self.parse_sig_type()?;
 
                 Ok(Spec::Sig(name, type_params, ty))
             }
@@ -516,7 +516,7 @@ impl Parser<'_> {
 
                 let definition = if self.check(&Token::Assign) {
                     self.advance();
-                    Some(self.parse_type()?)
+                    Some(self.parse_type()?.0)
                 } else {
                     None
                 };

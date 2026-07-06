@@ -15,7 +15,6 @@ use crate::egir::from_tlc::ConvertError;
 use crate::egir::program::{EgirFunc, EgirInner};
 use crate::egir::types::{EGraph, ENode, PureOp, SideEffectKind, SkeletonTerminator};
 use crate::ssa::types::{InstKind, ValueRef};
-use crate::types::TypeExt;
 use crate::{LookupMap, LookupSet};
 use polytype::Type;
 use smallvec::SmallVec;
@@ -43,10 +42,7 @@ pub fn run(inner: &mut EgirInner) -> Result<(), ConvertError> {
 }
 
 fn is_storage_image(ty: &Type<TypeName>) -> bool {
-    matches!(
-        TypeExt::strip_unique(ty),
-        Type::Constructed(TypeName::StorageTexture, _)
-    )
+    matches!(ty, Type::Constructed(TypeName::StorageTexture, _))
 }
 
 fn rewrite_graph(graph: &mut EGraph, erasures: &LookupMap<String, Vec<bool>>) -> Result<(), ConvertError> {

@@ -186,12 +186,6 @@ impl TypeKey {
                     TypeName::SizeVar(s) => format!("sizevar_{}", s),
                     TypeName::UserVar(s) => format!("uservar_{}", s),
                     TypeName::Named(s) => s.clone(),
-                    TypeName::Unique => {
-                        return TypeKey::Constructed(
-                            "unique".to_string(),
-                            args.iter().map(TypeKey::from_type).collect(),
-                        );
-                    }
                     TypeName::Unit => "unit".to_string(),
                     TypeName::Tuple(n) => format!("tuple{}", n),
                     TypeName::Pointer => "ptr".to_string(),
@@ -254,7 +248,6 @@ impl TypeKey {
                     "arrow" => TypeName::Arrow,
                     "unit" => TypeName::Unit,
                     "ptr" => TypeName::Pointer,
-                    "unique" => TypeName::Unique,
                     "array_view" => TypeName::ArrayVariantView,
                     "array_composite" => TypeName::ArrayVariantComposite,
                     "array_virtual" => TypeName::ArrayVariantVirtual,
@@ -852,6 +845,10 @@ impl<'a> Monomorphizer<'a> {
             body: self.apply_subst_term(&def.body, subst),
             meta: def.meta,
             arity: def.arity,
+            // Consumption is positional, independent of the type
+            // substitution, so the parent's diet applies verbatim.
+            param_diets: def.param_diets,
+            return_diet: def.return_diet,
         }
     }
 

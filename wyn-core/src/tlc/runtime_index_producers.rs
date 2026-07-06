@@ -548,7 +548,7 @@ fn is_liftable_array_producer(term: &Term) -> bool {
 }
 
 fn is_runtime_sized_array(ty: &Type<TypeName>) -> bool {
-    crate::types::array_size(&crate::types::strip_unique(ty))
+    crate::types::array_size(ty)
         .map(|s| {
             matches!(
                 s,

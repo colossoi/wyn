@@ -94,7 +94,7 @@ pub fn run(mut program: Program) -> Result<Program, NormalizeError> {
 /// separate bindings.
 fn tuple_arity_through_markers(ty: &Type<TypeName>) -> Option<usize> {
     match ty {
-        Type::Constructed(TypeName::Existential(_) | TypeName::Unique, args) if args.len() == 1 => {
+        Type::Constructed(TypeName::Existential(_), args) if args.len() == 1 => {
             tuple_arity_through_markers(&args[0])
         }
         Type::Constructed(TypeName::Tuple(n), _) => Some(*n),

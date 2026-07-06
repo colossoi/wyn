@@ -180,14 +180,6 @@ impl Constructor {
                             .unwrap_or(StorageClass::Function);
                         self.get_or_create_ptr_type(sc, pointee_type)
                     }
-                    TypeName::Unique => {
-                        // Unique type wrapper: strip and convert underlying type
-                        // Unique is only used for alias checking, has no runtime representation
-                        if args.is_empty() {
-                            panic!("BUG: Unique type requires an underlying type argument.");
-                        }
-                        self.polytype_to_spirv(&args[0])
-                    }
                     TypeName::Existential(_) => {
                         // Existential type: unwrap and convert the inner type (in args[0])
                         // The size variable is runtime-determined, handled by Slice representation

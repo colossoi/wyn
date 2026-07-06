@@ -47,6 +47,8 @@ fn def_with_no_arrow_params_passes() {
         body: dummy_body(),
         meta: DefMeta::Function,
         arity: 1,
+        param_diets: vec![],
+        return_diet: crate::types::Diet::observing(),
     });
     assert!(verify_hof_specialized(&p).is_ok());
 }
@@ -62,6 +64,8 @@ fn def_with_function_typed_param_fails() {
         body: dummy_body(),
         meta: DefMeta::Function,
         arity: 1,
+        param_diets: vec![],
+        return_diet: crate::types::Diet::observing(),
     });
     let err = verify_hof_specialized(&p).unwrap_err();
     assert!(matches!(
@@ -81,6 +85,8 @@ fn function_typed_return_is_ignored() {
         body: dummy_body(),
         meta: DefMeta::Function,
         arity: 1,
+        param_diets: vec![],
+        return_diet: crate::types::Diet::observing(),
     });
     assert!(verify_hof_specialized(&p).is_ok());
 }

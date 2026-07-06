@@ -2,7 +2,7 @@ pub use spirv;
 
 // Re-export type system types from the types module
 use crate::interface::{Attribute, EntryDecl};
-pub use crate::types::{RecordFields, Type, TypeName, TypeScheme};
+pub use crate::types::{Diet, RecordFields, Type, TypeName, TypeScheme};
 use crate::IdSource;
 
 /// Qualified name representing a path through modules to a name
@@ -246,6 +246,8 @@ pub struct Decl {
     pub params: Vec<Pattern>,     // Parameters as patterns (name, name:type, tuples, etc.)
     pub ty: Option<Type>,         // Return type for functions or type annotation for variables
     pub body: Expression,         // The value/expression for let/def declarations
+    pub param_diets: Vec<Diet>,
+    pub return_diet: Diet,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -262,6 +264,8 @@ pub struct SigDecl {
     pub size_params: Vec<String>, // Size parameters: [n], [m]
     pub type_params: Vec<String>, // Type parameters: 'a, 'b
     pub ty: Type,                 // The function type signature
+    pub param_diets: Vec<Diet>,
+    pub return_diet: Diet,
 }
 
 /// External function declaration - linked from pre-compiled SPIR-V
@@ -273,6 +277,8 @@ pub struct ExternDecl {
     pub type_params: Vec<String>, // Type parameters: 'a, 'b
     pub ty: Type,                 // Function type signature
     pub span: Span,               // Source location
+    pub param_diets: Vec<Diet>,
+    pub return_diet: Diet,
 }
 
 // Module system types

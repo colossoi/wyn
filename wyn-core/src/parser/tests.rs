@@ -348,7 +348,9 @@ fn test_parse_array_type_unique_nested() {
             Type::Constructed(TypeName::AddressPlaceholder, vec![]),
         ],
     );
-    assert_eq!(decl.ty.as_ref(), Some(&crate::types::unique(outer)));
+    // The `*` is lifted off the type into the diet; the type is `*`-free.
+    assert_eq!(decl.ty.as_ref(), Some(&outer));
+    assert!(decl.return_diet.is_consuming());
 }
 
 #[test]
@@ -1062,12 +1064,13 @@ entry test_vertex() #[builtin(position)] vec4 =
 
 #[test]
 fn test_parse_unique_type() {
+    // `*` is lifted off the parameter type into its diet.
     let decl = single_decl("def foo (x:*i32) i32 = x");
 
     assert_eq!(decl.params.len(), 1);
     let param_ty = decl.params[0].pattern_type().expect("Expected typed parameter");
-    assert!(types::is_unique(param_ty));
-    assert_eq!(types::strip_unique(param_ty), crate::types::i32());
+    assert_eq!(param_ty, &crate::types::i32());
+    assert!(decl.param_diets[0].is_consuming());
 }
 
 #[test]
@@ -1076,11 +1079,11 @@ fn test_parse_unique_array_type() {
 
     assert_eq!(decl.params.len(), 1);
     let param_ty = decl.params[0].pattern_type().expect("Expected typed parameter");
-    assert!(types::is_unique(param_ty));
     assert_eq!(
-        types::strip_unique(param_ty),
-        crate::types::sized_array_placeholder(3, crate::types::f32())
+        param_ty,
+        &crate::types::sized_array_placeholder(3, crate::types::f32())
     );
+    assert!(decl.param_diets[0].is_consuming());
 }
 
 #[test]
@@ -1090,14 +1093,14 @@ fn test_parse_nested_unique() {
 
     assert_eq!(decl.params.len(), 1);
     let param_ty = decl.params[0].pattern_type().expect("Expected typed parameter");
-    assert!(types::is_unique(param_ty));
     assert_eq!(
-        types::strip_unique(param_ty),
-        crate::types::sized_array_placeholder(
+        param_ty,
+        &crate::types::sized_array_placeholder(
             2,
             crate::types::sized_array_placeholder(3, crate::types::i32())
         )
     );
+    assert!(decl.param_diets[0].is_consuming());
 }
 
 #[test]

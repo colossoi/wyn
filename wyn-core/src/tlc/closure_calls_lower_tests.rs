@@ -48,6 +48,8 @@ fn direct_call_passes() {
         body,
         meta: DefMeta::Function,
         arity: 0,
+        param_diets: vec![],
+        return_diet: crate::types::Diet::observing(),
     });
     assert!(verify_closure_calls_lowered(&p).is_ok());
 }
@@ -64,6 +66,8 @@ fn arity_mismatch_fails() {
         body: term(TermKind::IntLit("0".into())),
         meta: DefMeta::Function,
         arity: 2,
+        param_diets: vec![],
+        return_diet: crate::types::Diet::observing(),
     });
     // f calls g with only 1 arg — wrong.
     let body = term(TermKind::App {
@@ -76,6 +80,8 @@ fn arity_mismatch_fails() {
         body,
         meta: DefMeta::Function,
         arity: 0,
+        param_diets: vec![],
+        return_diet: crate::types::Diet::observing(),
     });
     let err = verify_closure_calls_lowered(&p).unwrap_err();
     assert!(
@@ -111,6 +117,8 @@ fn nested_app_in_func_position_fails() {
         body,
         meta: DefMeta::Function,
         arity: 0,
+        param_diets: vec![],
+        return_diet: crate::types::Diet::observing(),
     });
     let err = verify_closure_calls_lowered(&p).unwrap_err();
     assert!(matches!(err, ClosureCallsLowerError::IndirectCall { .. }));

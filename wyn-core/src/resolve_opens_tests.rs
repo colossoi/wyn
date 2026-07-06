@@ -239,6 +239,8 @@ fn manually_qualified_identifier_left_alone() {
         params: vec![],
         ty: None,
         body,
+        param_diets: vec![],
+        return_diet: crate::types::Diet::observing(),
     });
     let mut prog = Program {
         declarations: vec![

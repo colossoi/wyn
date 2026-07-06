@@ -91,6 +91,8 @@ fn prog(body: Term) -> Program {
             body,
             meta: DefMeta::Function,
             arity: 1,
+            param_diets: vec![],
+            return_diet: crate::types::Diet::observing(),
         }],
         symbols: SymbolTable::new(),
         def_syms: LookupMap::new(),

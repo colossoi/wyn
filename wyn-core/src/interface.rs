@@ -276,6 +276,8 @@ pub struct EntryDecl {
     /// found a previous-frame view. Flows to the pipeline descriptor.
     pub feedback: Vec<FeedbackPair>,
     pub body: Expression,
+    pub param_diets: Vec<crate::types::Diet>,
+    pub return_diet: crate::types::Diet,
 }
 
 /// Provenance and semantic role of an entry point.

@@ -204,8 +204,6 @@ pub enum TypeName {
     UserVar(String),
     /// Type names parsed from source code (user-defined types, type aliases)
     Named(String),
-    /// Uniqueness/consuming type marker (corresponds to "*" prefix)
-    Unique,
     /// Record type: {field1: type1, field2: type2}
     /// Preserves source order of fields, but equality is order-independent
     Record(RecordFields),
@@ -327,7 +325,6 @@ impl std::fmt::Display for TypeName {
             TypeName::SizeVar(name) => write!(f, "{}", name),
             TypeName::UserVar(name) => write!(f, "'{}", name),
             TypeName::Named(name) => write!(f, "{}", name),
-            TypeName::Unique => write!(f, "*"),
             TypeName::Record(fields) => {
                 write!(f, "{{")?;
                 for (i, name) in fields.iter().enumerate() {
@@ -398,7 +395,6 @@ impl polytype::Name for TypeName {
             TypeName::SizeVar(v) => format!("[{}]", v),
             TypeName::UserVar(v) => format!("'{}", v),
             TypeName::Named(name) => name.clone(),
-            TypeName::Unique => "*".to_string(),
             TypeName::Record(fields) => {
                 let field_strs: Vec<String> = fields.iter().cloned().collect();
                 format!("{{{}}}", field_strs.join(", "))
@@ -466,18 +462,6 @@ impl polytype::Name for TypeName {
 /// today; the variadic dim suffix is the entry point for multi-dim
 /// representations in a future effort.
 pub trait TypeExt {
-    /// Create a unique (consuming/alias-free) type: *T
-    fn unique(inner: Type) -> Type;
-
-    /// Check if this type is marked as unique/consuming
-    fn is_unique(&self) -> bool;
-
-    /// Get the inner type if this is a unique type, None otherwise
-    fn as_unique_inner(&self) -> Option<&Type>;
-
-    /// Strip the uniqueness marker if present, otherwise return self
-    fn strip_unique(&self) -> &Type;
-
     /// Check if this type is an array type
     fn is_array(&self) -> bool;
 
@@ -541,27 +525,6 @@ pub trait TypeExt {
 }
 
 impl TypeExt for Type {
-    fn unique(inner: Type) -> Type {
-        Type::Constructed(TypeName::Unique, vec![inner])
-    }
-
-    fn is_unique(&self) -> bool {
-        matches!(self, Type::Constructed(TypeName::Unique, _))
-    }
-
-    fn as_unique_inner(&self) -> Option<&Type> {
-        if let Type::Constructed(TypeName::Unique, args) = self {
-            debug_assert_eq!(args.len(), 1, "Unique type must have exactly one inner type");
-            args.first()
-        } else {
-            None
-        }
-    }
-
-    fn strip_unique(&self) -> &Type {
-        self.as_unique_inner().unwrap_or(self)
-    }
-
     fn is_array(&self) -> bool {
         matches!(self, Type::Constructed(TypeName::Array, _))
     }
@@ -949,7 +912,6 @@ pub fn array_view_region(ty: &Type) -> Option<crate::BindingRef> {
 /// Storage images have no runtime payload; this region is their complete
 /// identity during EGIR and backend lowering.
 pub fn storage_image_region(ty: &Type) -> Option<crate::BindingRef> {
-    let ty = TypeExt::strip_unique(ty);
     match ty {
         Type::Constructed(TypeName::StorageTexture, args) => match args.first() {
             Some(Type::Constructed(TypeName::Region(binding), _)) => Some(*binding),
@@ -1061,76 +1023,120 @@ pub fn size_var(name: String) -> Type {
     Type::Constructed(TypeName::SizeVar(name), vec![])
 }
 
-/// Create a unique (consuming/alias-free) type: *t
-pub fn unique(inner: Type) -> Type {
-    Type::Constructed(TypeName::Unique, vec![inner])
+/// The consumption ("diet") of a value, mirroring a type's structure but
+/// carrying only its `*` markers. Uniqueness lives here, on signatures —
+/// never inside `Type`. A leaf holds one `*` bit; an aggregate holds a
+/// `*` bit for the whole plus a per-component diet; an arrow holds its
+/// parameter and result diets, so a `*` behind an arrow (a consuming
+/// function value) is still visible for the value-function ban.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Diet {
+    /// A scalar / array / opaque leaf. `true` means `*` (consuming /
+    /// alias-free) here.
+    Leaf(bool),
+    /// A tuple or record. `unique` is `*` on the whole aggregate;
+    /// `components` are the per-field diets.
+    Aggregate {
+        unique: bool,
+        components: Vec<Diet>,
+    },
+    /// A function type: `(param_diet, result_diet)`.
+    Arrow(Box<Diet>, Box<Diet>),
 }
 
-/// Check if a type is marked as unique/consuming
-pub fn is_unique(ty: &Type) -> bool {
-    matches!(ty, Type::Constructed(TypeName::Unique, _))
-}
-
-/// Whether a parameter type carries a consuming `*` contract.
-///
-/// A `*` nested in a tuple/record makes the aggregate parameter consuming,
-/// matching Futhark. Function arrows are boundaries: a callback that itself
-/// accepts a consuming parameter does not make the callback value consuming.
-pub fn is_consuming_parameter_type(ty: &Type) -> bool {
-    match ty {
-        Type::Constructed(TypeName::Unique, _) => true,
-        Type::Constructed(TypeName::Arrow, _) => false,
-        Type::Constructed(_, args) => args.iter().any(is_consuming_parameter_type),
-        Type::Variable(_) => false,
+impl Default for Diet {
+    fn default() -> Self {
+        Diet::Leaf(false)
     }
 }
 
-/// Whether `ty` contains a function type that mentions `*` anywhere in
-/// its own parameters or result — i.e. a consuming function used as a
-/// value. `is_consuming_parameter_type` deliberately stops at arrows;
-/// this is the complementary check for the values arrows are not
-/// allowed to carry.
-pub fn arrow_contains_unique(ty: &Type) -> bool {
-    fn mentions_unique(ty: &Type) -> bool {
-        match ty {
-            Type::Constructed(TypeName::Unique, _) => true,
-            Type::Constructed(_, args) => args.iter().any(mentions_unique),
-            Type::Variable(_) => false,
+impl Diet {
+    /// An all-observing diet (no `*` anywhere). Structure is irrelevant to
+    /// the consuming/observing queries, so a leaf suffices.
+    pub fn observing() -> Diet {
+        Diet::Leaf(false)
+    }
+
+    /// Mark this whole value consuming (the effect of a leading `*`): a
+    /// `*` distributes over the entire inner value, so an aggregate
+    /// becomes wholly consuming.
+    pub fn into_consuming(self) -> Diet {
+        match self {
+            Diet::Leaf(_) => Diet::Leaf(true),
+            Diet::Aggregate { components, .. } => Diet::Aggregate {
+                unique: true,
+                components,
+            },
+            Diet::Arrow(_, _) => Diet::Leaf(true),
         }
     }
-    match ty {
-        Type::Constructed(TypeName::Arrow, args) => args.iter().any(mentions_unique),
-        Type::Constructed(_, args) => args.iter().any(arrow_contains_unique),
-        Type::Variable(_) => false,
+
+    /// Whether this value's own storage is consumed / alias-free: a `*`
+    /// in any value position, stopping at arrows (a callback that itself
+    /// consumes does not make the callback value consuming). Mirrors the
+    /// former `is_consuming_parameter_type`.
+    pub fn is_consuming(&self) -> bool {
+        match self {
+            Diet::Leaf(u) => *u,
+            Diet::Aggregate { unique, components } => *unique || components.iter().any(Diet::is_consuming),
+            Diet::Arrow(_, _) => false,
+        }
+    }
+
+    /// Whether a `*` appears inside a function type here — a consuming
+    /// function used as a value. Mirrors the former `arrow_contains_unique`.
+    pub fn mentions_consuming_function(&self) -> bool {
+        fn any_star(d: &Diet) -> bool {
+            match d {
+                Diet::Leaf(u) => *u,
+                Diet::Aggregate { unique, components } => *unique || components.iter().any(any_star),
+                Diet::Arrow(p, r) => any_star(p) || any_star(r),
+            }
+        }
+        match self {
+            Diet::Arrow(p, r) => any_star(p) || any_star(r),
+            Diet::Aggregate { components, .. } => components.iter().any(Diet::mentions_consuming_function),
+            Diet::Leaf(_) => false,
+        }
+    }
+
+    /// The diet of the `i`th component of an aggregate; an observing leaf
+    /// for anything else (so callers can descend uniformly).
+    pub fn component(&self, i: usize) -> Diet {
+        match self {
+            Diet::Aggregate { components, .. } => components.get(i).cloned().unwrap_or(Diet::Leaf(false)),
+            _ => Diet::Leaf(false),
+        }
+    }
+
+    /// The result diet of an arrow; observing for anything else.
+    pub fn arrow_result(&self) -> Diet {
+        match self {
+            Diet::Arrow(_, r) => (**r).clone(),
+            _ => Diet::Leaf(false),
+        }
+    }
+
+    /// Whether the value at this node (not its components) is marked `*` —
+    /// a `*` on the whole leaf or the whole aggregate.
+    pub fn is_consuming_at_root(&self) -> bool {
+        match self {
+            Diet::Leaf(u) => *u,
+            Diet::Aggregate { unique, .. } => *unique,
+            Diet::Arrow(_, _) => false,
+        }
     }
 }
 
-/// Forget uniqueness in covariant value positions while preserving function
-/// signatures. Arrow parameters encode consumption effects and must be
-/// compared with variance-aware function subtyping rather than erased by a
-/// generic tree walk.
-pub fn forget_value_uniqueness(ty: &Type) -> Type {
-    match ty {
-        Type::Constructed(TypeName::Unique, args) if args.len() == 1 => forget_value_uniqueness(&args[0]),
-        Type::Constructed(TypeName::Arrow, _) => ty.clone(),
-        Type::Constructed(name, args) => {
-            Type::Constructed(name.clone(), args.iter().map(forget_value_uniqueness).collect())
-        }
-        Type::Variable(_) => ty.clone(),
-    }
+/// Whether a parameter's diet carries a consuming `*` contract.
+pub fn is_consuming_parameter_type(diet: &Diet) -> bool {
+    diet.is_consuming()
 }
 
 /// Whether a type's runtime values are pure value-semantics (cheap to
 /// copy, no backing-store identity). The complement is "non-copy" — the
 /// alias and ownership systems track only non-copy values.
-///
-/// `*T` is non-copy regardless of `T`'s shape: uniqueness implies
-/// ownership tracking even for primitives (the `*` is a contract about
-/// the slot, not the value's structure).
 pub fn is_copy(ty: &Type) -> bool {
-    if is_unique(ty) {
-        return false;
-    }
     match ty {
         Type::Constructed(name, args) => match name {
             TypeName::Int(_)
@@ -1143,7 +1149,6 @@ pub fn is_copy(ty: &Type) -> bool {
             | TypeName::Arrow => true,
             TypeName::Array => false,
             TypeName::Tuple(_) => args.iter().all(is_copy),
-            TypeName::Unique => unreachable!("handled above by is_unique"),
             // Opaque GPU resource handles are not copyable values — they
             // must reach the backend as the original binding, not be
             // duplicated by ownership/move analysis.
@@ -1154,51 +1159,21 @@ pub fn is_copy(ty: &Type) -> bool {
     }
 }
 
-/// Strip uniqueness marker from a type, returning the inner type
-pub fn strip_unique(ty: &Type) -> Type {
-    match ty {
-        Type::Constructed(TypeName::Unique, args) => {
-            // Recursively strip from the inner type. `Unique` always has
-            // exactly one inner arg (enforced at every constructor: see
-            // `unique`, `TypeExt::unique`, `as_unique_inner`'s debug_assert).
-            let [inner] = args.as_slice() else {
-                panic!("Unique type must have exactly one inner arg, got {args:?}");
-            };
-            strip_unique(inner)
-        }
-        Type::Constructed(name, args) => {
-            // Recursively strip from constructor arguments (e.g., arrow types)
-            let stripped_args: Vec<Type> = args.iter().map(strip_unique).collect();
-            Type::Constructed(name.clone(), stripped_args)
-        }
-        _ => ty.clone(),
-    }
-}
-
 /// Canonicalize a TLC-flavored array type for use as the declared
 /// type of a storage-bound field (`EntryInput.ty`, `EntryOutput.ty`,
-/// `StorageBindingDecl.elem_ty`). Strips:
-///   - `Unique<_>` wrappers (uniqueness is a TLC-only annotation;
-///     SPIR-V doesn't see it)
-///   - Top-level `Existential<_>` (filter results and other
-///     size-quantified shapes whose size variable the backend can't
-///     name)
+/// `StorageBindingDecl.elem_ty`). Strips top-level `Existential<_>`
+/// (filter results and other size-quantified shapes whose size variable
+/// the backend can't name).
 ///
 /// The result is what the SPIR-V backend's `create_storage_buffer`
 /// expects to receive: a concrete array shape it can compute an
 /// element size for via `array_elem` + `type_byte_size`. Scalar /
 /// vec / struct outputs that get packed into single-element runtime
 /// arrays pass through unchanged.
-///
-/// Construction sites that produce storage-bound types should pipe
-/// through this so the SPIR-V validator (`spirv::verify_buffer_layouts`)
-/// trivially passes. The validator stays in place as a tripwire for
-/// any new construction site that bypasses this helper.
 pub fn canonical_storage_buffer_ty(ty: &Type) -> Type {
-    let stripped = strip_unique(ty);
-    match &stripped {
+    match ty {
         Type::Constructed(TypeName::Existential(_), args) if !args.is_empty() => args[0].clone(),
-        _ => stripped,
+        _ => ty.clone(),
     }
 }
 
@@ -1568,27 +1543,28 @@ mod tests {
     }
 
     #[test]
-    fn consuming_parameter_search_stops_at_function_arrows() {
-        let unique_array = unique(rank1_arr(4));
-        let tuple_with_unique = tuple(vec![unique_array.clone(), i32_ty()]);
-        assert!(is_consuming_parameter_type(&tuple_with_unique));
+    fn diet_consuming_stops_at_function_arrows() {
+        // A `*` nested in a tuple makes the whole aggregate consuming...
+        let tuple_with_unique = Diet::Aggregate {
+            unique: false,
+            components: vec![Diet::Leaf(true), Diet::Leaf(false)],
+        };
+        assert!(tuple_with_unique.is_consuming());
 
-        let callback = arrow(unique_array, i32_ty());
-        assert!(
-            !is_consuming_parameter_type(&callback),
-            "a callback's own consuming parameter does not consume the callback value",
-        );
+        // ...but a `*` behind an arrow does not make the callback value
+        // consuming (it is the callback's own parameter contract).
+        let callback = Diet::Arrow(Box::new(Diet::Leaf(true)), Box::new(Diet::Leaf(false)));
+        assert!(!callback.is_consuming());
+        assert!(callback.mentions_consuming_function());
     }
 
     #[test]
-    fn forgetting_value_uniqueness_preserves_arrow_contracts() {
-        let callback = arrow(unique(rank1_arr(4)), unique(rank1_arr(4)));
-        assert_eq!(forget_value_uniqueness(&callback), callback);
-
-        let aggregate = tuple(vec![unique(rank1_arr(4)), i32_ty()]);
-        assert_eq!(
-            forget_value_uniqueness(&aggregate),
-            tuple(vec![rank1_arr(4), i32_ty()])
-        );
+    fn diet_observing_mentions_no_consuming_function() {
+        let observing = Diet::Aggregate {
+            unique: false,
+            components: vec![Diet::Leaf(false), Diet::Leaf(false)],
+        };
+        assert!(!observing.is_consuming());
+        assert!(!observing.mentions_consuming_function());
     }
 }

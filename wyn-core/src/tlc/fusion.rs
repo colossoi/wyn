@@ -2383,7 +2383,7 @@ fn soac_domain_key(soac: &SoacOp) -> Option<Type<TypeName>> {
     let ArrayExpr::Var(_, ty) = soac_primary_input(soac)? else {
         return None;
     };
-    let stripped = crate::types::strip_unique(ty);
+    let stripped = ty.clone();
     crate::types::array_size(&stripped).cloned()
 }
 

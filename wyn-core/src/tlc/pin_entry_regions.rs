@@ -94,7 +94,7 @@ fn collect_region_subst(
     let layout = &entry.param_bindings;
 
     for (i, (_sym, ty)) in params.iter().enumerate() {
-        let ty = TypeExt::strip_unique(ty);
+        let ty = ty;
 
         if let Some((binding, ..)) = entry.params.get(i).and_then(extract_storage_image_binding) {
             pin_resource_region(ty, binding, subst, span)?;
@@ -117,7 +117,7 @@ fn collect_region_subst(
             Some(EntryParamBindingKind::TupleOfViews(fields)) => {
                 if let Type::Constructed(TypeName::Tuple(_), comps) = ty {
                     for (field, comp_ty) in fields.iter().zip(comps) {
-                        pin_resource_region(TypeExt::strip_unique(comp_ty), field.binding, subst, span)?;
+                        pin_resource_region(comp_ty, field.binding, subst, span)?;
                     }
                 }
             }

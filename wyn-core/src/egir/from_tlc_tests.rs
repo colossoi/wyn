@@ -597,7 +597,7 @@ entry vertex_main(#[location(0)] position: vec3f32, #[location(1)] color: vec3f3
         matches!(&def.meta, DefMeta::EntryPoint(e) if !e.entry_type.is_compute()),
         "precondition: vertex_main is a graphics entry"
     );
-    wrap_arrow_return_in_unique(&mut def.ty);
+    wrap_arrow_return_in_marker(&mut def.ty);
 
     let bounds = crate::tlc::input_slice_bounds::compute_for_program(&tlc_program);
     let mut binding_ids = crate::IdSource::<u32>::new();
@@ -619,10 +619,12 @@ entry vertex_main(#[location(0)] position: vec3f32, #[location(1)] color: vec3f3
     );
 }
 
-/// Walk an arrow chain `P1 -> P2 -> ... -> Pn -> R` and replace `R` with
-/// `Unique(R)`. Used to synthesise a divergence between `def.ty`'s
-/// arrow-return position and `inner_body.ty`.
-fn wrap_arrow_return_in_unique(mut ty: &mut Type<TypeName>) {
+/// Walk an arrow chain `P1 -> P2 -> ... -> Pn -> R` and wrap `R` in a
+/// spurious single-element `Tuple(1)`. Used to synthesise a divergence
+/// between `def.ty`'s arrow-return position and `inner_body.ty` (the
+/// real 2-tuple), so the test can assert EGIR derives outputs from the
+/// body, not `def.ty`.
+fn wrap_arrow_return_in_marker(mut ty: &mut Type<TypeName>) {
     loop {
         let inner = match ty {
             Type::Constructed(TypeName::Arrow, args) if args.len() == 2 => &mut args[1],
@@ -630,7 +632,7 @@ fn wrap_arrow_return_in_unique(mut ty: &mut Type<TypeName>) {
         };
         if !matches!(inner, Type::Constructed(TypeName::Arrow, _)) {
             let old = std::mem::replace(inner, Type::Constructed(TypeName::Unit, vec![]));
-            *inner = Type::Constructed(TypeName::Unique, vec![old]);
+            *inner = Type::Constructed(TypeName::Tuple(1), vec![old]);
             return;
         }
         ty = inner;

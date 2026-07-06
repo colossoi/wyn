@@ -410,7 +410,7 @@ fn convert_entry_point(
         // Uniqueness is an ownership-tracking concept that's already been
         // consumed by `apply_ownership`; codegen operates on the stripped
         // shape so `*[N]T` and `[N]T` lower identically.
-        let ty = crate::types::strip_unique(ty);
+        let ty = ty.clone();
         let ty = &ty;
 
         // Always register a FuncParam placeholder so param indexing stays
@@ -2427,7 +2427,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         // downstream array-shape checks (composite vs view vs virtual) operate
         // on the bare array type. Only `Var` can carry uniqueness; for the other
         // atoms `strip_unique` is a no-op.
-        crate::types::strip_unique(&ae.array_type())
+        ae.array_type()
     }
 
     fn array_expr_elem_type(&self, ae: &ArrayExpr) -> Type<TypeName> {

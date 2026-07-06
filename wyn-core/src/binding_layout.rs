@@ -29,7 +29,7 @@ use crate::{BindingRef, SymbolId};
 /// multi-dim is not yet shipped). Callers don't need a separate
 /// `type_byte_size` retry — admission *is* the proof.
 pub fn runtime_sized_array_elem(ty: &Type<TypeName>) -> Option<(&Type<TypeName>, u32)> {
-    let ty = TypeExt::strip_unique(ty);
+    let ty = ty;
     let size = ty.array_size()?;
     if !matches!(
         size,
@@ -83,7 +83,7 @@ pub fn compute_entry_binding_layout(
 
         // Uniqueness is an ownership marker; for binding allocation, `*[]T`
         // and `[]T` lower identically.
-        let ty = TypeExt::strip_unique(ty);
+        let ty = ty;
 
         // Tuple-of-views: one slot per field. Each field's elem type +
         // byte size come from `runtime_sized_array_elem`, so the test

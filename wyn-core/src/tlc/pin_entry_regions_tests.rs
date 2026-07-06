@@ -27,7 +27,7 @@ fn entry_param_region(program: &Program, param_index: usize) -> Type<TypeName> {
         .find(|d| matches!(&d.meta, DefMeta::EntryPoint(_)))
         .expect("program has an entry point");
     let (params, _) = extract_params(&def.body);
-    let ty = TypeExt::strip_unique(&params[param_index].1);
+    let ty = &params[param_index].1;
     ty.array_region().expect("param is an array").clone()
 }
 

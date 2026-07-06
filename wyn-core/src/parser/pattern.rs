@@ -45,6 +45,13 @@ impl Parser<'_> {
     ///       | "#[" attr "]" pat
     /// ```
     pub fn parse_pattern(&mut self) -> Result<Pattern> {
+        Ok(self.parse_pattern_with_diet()?.0)
+    }
+
+    /// As `parse_pattern`, also returning the diet lifted off the type
+    /// annotation's `*` markers (observing when unannotated). Parameter
+    /// parsers keep the diet; other pattern positions discard it.
+    pub fn parse_pattern_with_diet(&mut self) -> Result<(Pattern, crate::types::Diet)> {
         trace!("parse_pattern: next token = {:?}", self.peek());
         let start_span = self.current_span();
 
@@ -66,13 +73,16 @@ impl Parser<'_> {
         if self.check(&Token::Colon) {
             self.advance();
             trace!("parsing pattern type suffix: next token = {:?}", self.peek());
-            let ty = self.parse_type()?;
+            let (ty, diet) = self.parse_type()?;
             // Use the pattern's span since Type doesn't have a span field
             let span = pattern.h.span;
-            return Ok(self.node_counter.mk_node(PatternKind::Typed(Box::new(pattern), ty), span));
+            return Ok((
+                self.node_counter.mk_node(PatternKind::Typed(Box::new(pattern), ty), span),
+                diet,
+            ));
         }
 
-        Ok(pattern)
+        Ok((pattern, crate::types::Diet::observing()))
     }
 
     fn parse_pattern_without_attributes(&mut self) -> Result<Pattern> {

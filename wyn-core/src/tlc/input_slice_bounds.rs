@@ -66,7 +66,7 @@ pub fn compute_for_program(program: &Program) -> ProgramBounds {
         };
         let (params, inner_body) = extract_lambda_params(&def.body);
         let inputs: Vec<(SymbolId, Type<TypeName>)> =
-            params.iter().map(|(sym, ty)| (*sym, crate::types::strip_unique(ty))).collect();
+            params.iter().map(|(sym, ty)| (*sym, ty.clone())).collect();
         let bounds = infer(&inner_body, &inputs);
         if !bounds.is_empty() {
             out.insert(entry_name, bounds);

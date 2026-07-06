@@ -242,10 +242,10 @@ impl<'a> Parser<'a> {
             //   - def foo(x: T, y: U) R = ...  (function with params)
             //   - def foo: T = ...              (constant binding)
             // For let: type annotation with colon: let x: type = expr - no params
-            let (params, ty) = if keyword == "def" {
+            let (params, param_diets, ty, return_diet) = if keyword == "def" {
                 if self.check(&Token::LeftParen) {
                     // Function: def foo(params) R = ...
-                    let params = self.parse_comma_separated_params()?;
+                    let (params, param_diets) = self.parse_comma_separated_params()?;
 
                     // Reject zero-argument functions - use constant syntax instead
                     if params.is_empty() {
@@ -257,32 +257,34 @@ impl<'a> Parser<'a> {
                     }
 
                     // Return type directly after params (no arrow): def foo(x: T) R = ...
-                    let ty = if !self.check(&Token::Assign) {
-                        Some(self.parse_return_type_simple()?)
+                    let (ty, return_diet) = if !self.check(&Token::Assign) {
+                        let (ty, diet) = self.parse_return_type_simple()?;
+                        (Some(ty), diet)
                     } else {
-                        None
+                        (None, Diet::observing())
                     };
-                    (params, ty)
+                    (params, param_diets, ty, return_diet)
                 } else if self.check(&Token::Colon) {
                     // Constant binding with type: def foo: T = ...
                     self.advance();
-                    let ty = Some(self.parse_type()?);
-                    (vec![], ty)
+                    let (ty, diet) = self.parse_type()?;
+                    (vec![], vec![], Some(ty), diet)
                 } else if self.check(&Token::Assign) {
                     // Constant binding without type: def foo = ...
-                    (vec![], None)
+                    (vec![], vec![], None, Diet::observing())
                 } else {
                     bail_parse_at!(self.current_span(), "Expected '(' or ':' after def name");
                 }
             } else {
                 // let declarations don't have params, just optional type annotation
-                let ty = if self.check(&Token::Colon) {
+                let (ty, diet) = if self.check(&Token::Colon) {
                     self.advance();
-                    Some(self.parse_type()?)
+                    let (ty, diet) = self.parse_type()?;
+                    (Some(ty), diet)
                 } else {
-                    None
+                    (None, Diet::observing())
                 };
-                (vec![], ty)
+                (vec![], vec![], ty, diet)
             };
 
             self.expect(Token::Assign)?;
@@ -298,6 +300,8 @@ impl<'a> Parser<'a> {
                 params,
                 ty,
                 body,
+                param_diets,
+                return_diet,
             }))
         }
     }
@@ -317,7 +321,7 @@ impl<'a> Parser<'a> {
         let (size_params, type_params) =
             if self.check_binop("<") { self.parse_generic_params()? } else { (vec![], vec![]) };
 
-        let ty = self.parse_sig_type()?;
+        let (ty, param_diets, return_diet) = self.parse_sig_type()?;
 
         Ok(SigDecl {
             attributes: vec![],
@@ -325,6 +329,8 @@ impl<'a> Parser<'a> {
             size_params,
             type_params,
             ty,
+            param_diets,
+            return_diet,
         })
     }
 
@@ -334,21 +340,23 @@ impl<'a> Parser<'a> {
     ///   `: T`             → a constant of type `T` (nullary, like `def x: T`)
     /// There is no arrow-chain spelling; a `sig` mirrors the function's own
     /// parameter list so the two read in parallel.
-    fn parse_sig_type(&mut self) -> Result<Type> {
+    fn parse_sig_type(&mut self) -> Result<(Type, Vec<Diet>, Diet)> {
         if self.check(&Token::LeftParen) {
-            let params = self.parse_extern_params()?;
+            let (params, param_diets) = self.parse_extern_params()?;
             if params.is_empty() {
                 bail_parse_at!(
                     self.current_span(),
                     "Zero-argument sig must use constant syntax: `sig name: T`"
                 );
             }
-            let ret = self.parse_return_type_simple()?;
+            let (ret, return_diet) = self.parse_return_type_simple()?;
             // Fold params right-to-left into the curried arrow representation.
-            Ok(params.into_iter().rev().fold(ret, |acc, (_, pty)| types::function(pty, acc)))
+            let ty = params.into_iter().rev().fold(ret, |acc, (_, pty)| types::function(pty, acc));
+            Ok((ty, param_diets, return_diet))
         } else if self.check(&Token::Colon) {
             self.advance();
-            self.parse_type()
+            let (ty, diet) = self.parse_type()?;
+            Ok((ty, vec![], diet))
         } else {
             bail_parse_at!(self.current_span(), "Expected '(' or ':' after sig name")
         }
@@ -382,10 +390,10 @@ impl<'a> Parser<'a> {
             if self.check_binop("<") { self.parse_generic_params()? } else { (vec![], vec![]) };
 
         // Parse parameters: (param: Type, ...)
-        let params = self.parse_extern_params()?;
+        let (params, param_diets) = self.parse_extern_params()?;
 
         // Parse return type (required for extern functions)
-        let ret_type = self.parse_return_type_simple()?;
+        let (ret_type, return_diet) = self.parse_return_type_simple()?;
 
         let end_span = self.current_span();
 
@@ -404,21 +412,25 @@ impl<'a> Parser<'a> {
             type_params,
             ty,
             span: start_span.merge(&end_span),
+            param_diets,
+            return_diet,
         }))
     }
 
     /// Parse extern function parameters: (name: Type, ...)
     /// Returns (name, type) pairs.
-    fn parse_extern_params(&mut self) -> Result<Vec<(String, Type)>> {
+    fn parse_extern_params(&mut self) -> Result<(Vec<(String, Type)>, Vec<Diet>)> {
         self.expect(Token::LeftParen)?;
         let mut params = Vec::new();
+        let mut diets = Vec::new();
 
         if !self.check(&Token::RightParen) {
             loop {
                 let param_name = self.expect_identifier()?;
                 self.expect(Token::Colon)?;
-                let ty = self.parse_type()?;
+                let (ty, diet) = self.parse_type()?;
                 params.push((param_name, ty));
+                diets.push(diet);
 
                 if !self.check(&Token::Comma) {
                     break;
@@ -428,7 +440,7 @@ impl<'a> Parser<'a> {
         }
 
         self.expect(Token::RightParen)?;
-        Ok(params)
+        Ok((params, diets))
     }
 
     /// Parse an entry point declaration.
@@ -458,7 +470,7 @@ impl<'a> Parser<'a> {
 
         // Parse restrictive parameters: (id: type, id: type, ...)
         // Only typed identifiers allowed, not general patterns
-        let params = self.parse_entry_params()?;
+        let (params, param_diets) = self.parse_entry_params()?;
 
         // Compute entry params are normally auto-bound (storage buffers
         // numbered 0..N by `binding_layout`); an explicit
@@ -467,20 +479,29 @@ impl<'a> Parser<'a> {
         // keyboard state).
 
         // Parse return type (which may have optional attributes) - no arrow required
-        let (return_types, return_attributes) =
+        let (return_types, return_attributes, return_diets) =
             if self.check(&Token::AttributeStart) || self.check(&Token::LeftParen) {
                 // Attributed return type(s)
                 self.parse_return_type()?
             } else if !self.check(&Token::Assign) {
                 // Simple unattributed return type
-                let ty = self.parse_type()?;
-                (vec![ty], vec![None])
+                let (ty, diet) = self.parse_type()?;
+                (vec![ty], vec![None], vec![diet])
             } else {
                 bail_parse_at!(
                     self.current_span(),
                     "Entry point declarations must have an explicit return type"
                 );
             };
+        // One output → its diet; several → an aggregate mirroring the tuple.
+        let return_diet = if return_diets.len() == 1 {
+            return_diets.into_iter().next().unwrap()
+        } else {
+            Diet::Aggregate {
+                unique: false,
+                components: return_diets,
+            }
+        };
 
         // Combine into EntryOutput structs
         let outputs: Vec<EntryOutput> = return_types
@@ -505,16 +526,19 @@ impl<'a> Parser<'a> {
             param_bindings: Vec::new(),
             feedback: Vec::new(),
             body,
+            param_diets,
+            return_diet,
         }))
     }
 
     /// Parse entry point parameters with restrictive syntax.
     /// Only allows `id: type` or `#[attr] id: type`, not general patterns.
-    fn parse_entry_params(&mut self) -> Result<Vec<Pattern>> {
+    fn parse_entry_params(&mut self) -> Result<(Vec<Pattern>, Vec<Diet>)> {
         trace!("parse_entry_params: next token = {:?}", self.peek());
         let _start_span = self.current_span();
         self.expect(Token::LeftParen)?;
         let mut params = Vec::new();
+        let mut diets = Vec::new();
 
         if !self.check(&Token::RightParen) {
             loop {
@@ -530,7 +554,8 @@ impl<'a> Parser<'a> {
 
                 // Must have : type
                 self.expect(Token::Colon)?;
-                let ty = self.parse_type()?;
+                let (ty, diet) = self.parse_type()?;
+                diets.push(diet);
 
                 // Build pattern: if attrs present, Typed(Attributed(attrs, Name), ty)
                 // otherwise just Typed(Name, ty)
@@ -557,12 +582,12 @@ impl<'a> Parser<'a> {
         }
 
         self.expect(Token::RightParen)?;
-        Ok(params)
+        Ok((params, diets))
     }
 
     /// Parse return type with optional attributes, returning parallel arrays
     /// Returns (return_types, return_attributes)
-    fn parse_return_type(&mut self) -> Result<(Vec<Type>, Vec<Option<Attribute>>)> {
+    fn parse_return_type(&mut self) -> Result<(Vec<Type>, Vec<Option<Attribute>>, Vec<Diet>)> {
         trace!("parse_return_type: next token = {:?}", self.peek());
 
         // Check if it's a tuple: ([attr1] type1, [attr2] type2, ...)
@@ -570,6 +595,7 @@ impl<'a> Parser<'a> {
             self.advance(); // consume '('
             let mut types = Vec::new();
             let mut attributes = Vec::new();
+            let mut diets = Vec::new();
 
             if !self.check(&Token::RightParen) {
                 loop {
@@ -583,10 +609,11 @@ impl<'a> Parser<'a> {
                     };
 
                     // Parse the type
-                    let ty = self.parse_type()?;
+                    let (ty, diet) = self.parse_type()?;
 
                     types.push(ty);
                     attributes.push(attr);
+                    diets.push(diet);
 
                     if !self.check(&Token::Comma) {
                         break;
@@ -596,18 +623,18 @@ impl<'a> Parser<'a> {
             }
 
             self.expect(Token::RightParen)?;
-            Ok((types, attributes))
+            Ok((types, attributes, diets))
         } else if self.check(&Token::AttributeStart) {
             // Single attributed type: #[attribute] type
             self.advance(); // consume '#['
             let attribute = self.parse_attribute()?;
-            let ty = self.parse_type()?;
+            let (ty, diet) = self.parse_type()?;
 
-            Ok((vec![ty], vec![Some(attribute)]))
+            Ok((vec![ty], vec![Some(attribute)], vec![diet]))
         } else {
             // Regular single return type without attributes
-            let ty = self.parse_type()?;
-            Ok((vec![ty], vec![None]))
+            let (ty, diet) = self.parse_type()?;
+            Ok((vec![ty], vec![None], vec![diet]))
         }
     }
 
@@ -1215,14 +1242,17 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse comma-separated function parameters: (x: T, y: U)
-    fn parse_comma_separated_params(&mut self) -> Result<Vec<Pattern>> {
+    fn parse_comma_separated_params(&mut self) -> Result<(Vec<Pattern>, Vec<Diet>)> {
         trace!("parse_comma_separated_params: next token = {:?}", self.peek());
         self.expect(Token::LeftParen)?;
         let mut params = Vec::new();
+        let mut diets = Vec::new();
 
         if !self.check(&Token::RightParen) {
             loop {
-                params.push(self.parse_pattern()?);
+                let (pat, diet) = self.parse_pattern_with_diet()?;
+                params.push(pat);
+                diets.push(diet);
                 if !self.check(&Token::Comma) {
                     break;
                 }
@@ -1231,10 +1261,10 @@ impl<'a> Parser<'a> {
         }
 
         self.expect(Token::RightParen)?;
-        Ok(params)
+        Ok((params, diets))
     }
 
-    fn parse_type(&mut self) -> Result<Type> {
+    fn parse_type(&mut self) -> Result<(Type, Diet)> {
         trace!("parse_type: next token = {:?}", self.peek());
 
         // Existential size quantifier `?[n].T` (spec line 243):
@@ -1259,15 +1289,18 @@ impl<'a> Parser<'a> {
                 if self.check(&Token::Colon) {
                     // It's a named parameter - parse but drop the name
                     self.advance(); // consume ':'
-                    let param_type = self.parse_type()?;
+                    let (param_type, param_diet) = self.parse_type()?;
                     self.expect(Token::RightParen)?;
 
                     // Must be followed by ->
                     if self.check(&Token::Arrow) {
                         self.advance();
-                        let return_type = self.parse_type()?;
+                        let (return_type, return_diet) = self.parse_type()?;
                         // Just use the param_type directly, ignoring the name
-                        return Ok(types::function(param_type, return_type));
+                        return Ok((
+                            types::function(param_type, return_type),
+                            Diet::Arrow(Box::new(param_diet), Box::new(return_diet)),
+                        ));
                     } else {
                         bail_parse_at!(self.current_span(), "Named parameter must be followed by ->");
                     }
@@ -1279,22 +1312,25 @@ impl<'a> Parser<'a> {
         }
 
         // Regular function type or type application
-        let left = self.parse_type_application()?;
+        let (left, left_diet) = self.parse_type_application()?;
 
         // Handle function arrows: T1 -> T2 -> T3
         // Arrow is right-associative: a -> b -> c means a -> (b -> c)
         if self.check(&Token::Arrow) {
             self.advance();
-            let right = self.parse_type()?; // Recursive call for right-associativity
-            Ok(types::function(left, right))
+            let (right, right_diet) = self.parse_type()?; // Recursive call for right-associativity
+            Ok((
+                types::function(left, right),
+                Diet::Arrow(Box::new(left_diet), Box::new(right_diet)),
+            ))
         } else {
-            Ok(left)
+            Ok((left, left_diet))
         }
     }
 
     /// Parse a return type, which may include an existential quantifier.
     /// Existential types (?k. [k]T) are only valid in return position.
-    fn parse_return_type_simple(&mut self) -> Result<Type> {
+    fn parse_return_type_simple(&mut self) -> Result<(Type, Diet)> {
         trace!("parse_return_type_simple: next token = {:?}", self.peek());
         // Check for existential size: ?k. type or ?k l. type
         if self.check(&Token::QuestionMark) {
@@ -1303,7 +1339,7 @@ impl<'a> Parser<'a> {
         self.parse_type()
     }
 
-    fn parse_existential_type(&mut self) -> Result<Type> {
+    fn parse_existential_type(&mut self) -> Result<(Type, Diet)> {
         self.expect(Token::QuestionMark)?;
         let mut size_vars = Vec::new();
 
@@ -1321,19 +1357,25 @@ impl<'a> Parser<'a> {
         }
 
         self.expect(Token::Dot)?;
-        let inner_type = self.parse_type()?;
+        // Uniqueness sits on the inner value; the existential just quantifies
+        // a size, so the diet passes through.
+        let (inner_type, inner_diet) = self.parse_type()?;
 
-        Ok(types::existential(size_vars, inner_type))
+        Ok((types::existential(size_vars, inner_type), inner_diet))
     }
 
-    fn parse_type_application(&mut self) -> Result<Type> {
+    fn parse_type_application(&mut self) -> Result<(Type, Diet)> {
         trace!("parse_type_application: next token = {:?}", self.peek());
 
-        let mut base = self.parse_array_or_base_type()?;
+        let (mut base, base_diet) = self.parse_array_or_base_type()?;
 
         // Type application loop: keep applying type arguments
         // Grammar: type_application ::= type type_arg | "*" type
         //          type_arg         ::= "[" [dim] "]" | type
+        // Track whether any array dimension wraps `base`: if so, the outer
+        // value is an array (a diet leaf, consuming iff a `*` is buried in
+        // it); otherwise the base's own diet stands.
+        let mut wrapped_in_array = false;
         loop {
             if self.is_at_type_boundary() {
                 break;
@@ -1343,6 +1385,7 @@ impl<'a> Parser<'a> {
                 // Array dimension application: [n] or []
                 Some(Token::LeftBracket) | Some(Token::LeftBracketSpaced) => {
                     self.advance();
+                    wrapped_in_array = true;
 
                     if self.check(&Token::RightBracket) {
                         // Empty brackets [] - unsized array with placeholder address space
@@ -1405,7 +1448,8 @@ impl<'a> Parser<'a> {
             }
         }
 
-        Ok(base)
+        let diet = if wrapped_in_array { Diet::Leaf(base_diet.is_consuming()) } else { base_diet };
+        Ok((base, diet))
     }
 
     // Helper to check if current token can start a type
@@ -1440,13 +1484,15 @@ impl<'a> Parser<'a> {
         ) || !self.can_start_type()
     }
 
-    fn parse_array_or_base_type(&mut self) -> Result<Type> {
+    fn parse_array_or_base_type(&mut self) -> Result<(Type, Diet)> {
         trace!("parse_array_or_base_type: next token = {:?}", self.peek());
-        // Check for uniqueness prefix *
+        // Uniqueness prefix `*`: strip it off the type and mark the diet
+        // at this position consuming. `*` distributes over the whole inner
+        // value, so an aggregate becomes wholly consuming.
         if matches!(self.peek(), Some(Token::BinOp(op)) if op == "*") {
             self.advance(); // consume '*'
-            let inner_type = self.parse_array_or_base_type()?;
-            return Ok(types::unique(inner_type));
+            let (inner_type, inner_diet) = self.parse_array_or_base_type()?;
+            return Ok((inner_type, inner_diet.into_consuming()));
         }
 
         // Check for array type [dim]baseType (Futhark style)
@@ -1454,20 +1500,32 @@ impl<'a> Parser<'a> {
         if self.check(&Token::LeftBracket) || self.check(&Token::LeftBracketSpaced) {
             self.advance(); // consume '['
 
+            // An array is one storage unit: its diet is a leaf, consuming
+            // only if a `*` was buried inside it.
+            let build = |elem_type: Type, elem_diet: Diet, size: Type| {
+                (
+                    Type::Constructed(
+                        TypeName::Array,
+                        vec![
+                            elem_type,
+                            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
+                            size,
+                            // region placeholder, resolved to a fresh var by resolve_placeholders.
+                            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
+                        ],
+                    ),
+                    Diet::Leaf(elem_diet.is_consuming()),
+                )
+            };
+
             // Check for empty brackets [] - unsized array with unknown address space
             if self.check(&Token::RightBracket) {
                 self.advance();
-                let elem_type = self.parse_array_or_base_type()?;
-                // Array[elem, variant, size]
-                return Ok(Type::Constructed(
-                    TypeName::Array,
-                    vec![
-                        elem_type,
-                        Type::Constructed(TypeName::AddressPlaceholder, vec![]),
-                        Type::Constructed(TypeName::SizePlaceholder, vec![]),
-                        // region placeholder, resolved to a fresh var by resolve_placeholders.
-                        Type::Constructed(TypeName::AddressPlaceholder, vec![]),
-                    ],
+                let (elem_type, elem_diet) = self.parse_array_or_base_type()?;
+                return Ok(build(
+                    elem_type,
+                    elem_diet,
+                    Type::Constructed(TypeName::SizePlaceholder, vec![]),
                 ));
             }
 
@@ -1476,35 +1534,19 @@ impl<'a> Parser<'a> {
                 let size = usize::try_from(n).map_err(|_| err_parse!("Invalid array size"))?;
                 self.advance();
                 self.expect(Token::RightBracket)?;
-                let elem_type = self.parse_array_or_base_type()?; // Allow nested arrays
-                                                                  // Array[elem, variant, size]
-                Ok(Type::Constructed(
-                    TypeName::Array,
-                    vec![
-                        elem_type,
-                        Type::Constructed(TypeName::AddressPlaceholder, vec![]),
-                        Type::Constructed(TypeName::Size(size), vec![]),
-                        // region placeholder, resolved to a fresh var by resolve_placeholders.
-                        Type::Constructed(TypeName::AddressPlaceholder, vec![]),
-                    ],
+                let (elem_type, elem_diet) = self.parse_array_or_base_type()?; // Allow nested arrays
+                Ok(build(
+                    elem_type,
+                    elem_diet,
+                    Type::Constructed(TypeName::Size(size), vec![]),
                 ))
             } else if let Some(Token::Identifier(name)) = self.peek() {
                 // Size variable [n]
                 let size_var = name.clone();
                 self.advance();
                 self.expect(Token::RightBracket)?;
-                let elem_type = self.parse_array_or_base_type()?;
-                // Array[elem, variant, size]
-                Ok(Type::Constructed(
-                    TypeName::Array,
-                    vec![
-                        elem_type,
-                        Type::Constructed(TypeName::AddressPlaceholder, vec![]),
-                        types::size_var(size_var),
-                        // region placeholder, resolved to a fresh var by resolve_placeholders.
-                        Type::Constructed(TypeName::AddressPlaceholder, vec![]),
-                    ],
-                ))
+                let (elem_type, elem_diet) = self.parse_array_or_base_type()?;
+                Ok(build(elem_type, elem_diet, types::size_var(size_var)))
             } else {
                 Err(err_parse!("Expected size literal or variable in array type"))
             }
@@ -1513,7 +1555,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_base_type(&mut self) -> Result<Type> {
+    fn parse_base_type(&mut self) -> Result<(Type, Diet)> {
         trace!("parse_base_type: next token = {:?}", self.peek());
 
         // Check for vector/matrix types first to avoid borrow issues
@@ -1521,22 +1563,22 @@ impl<'a> Parser<'a> {
             let name_str = name.clone();
             if let Some(ty) = get_vector_types().get(&name_str) {
                 self.advance();
-                return Ok(ty.clone());
+                return Ok((ty.clone(), Diet::Leaf(false)));
             }
             if let Some(ty) = get_matrix_types().get(&name_str) {
                 self.advance();
-                return Ok(ty.clone());
+                return Ok((ty.clone(), Diet::Leaf(false)));
             }
         }
 
         match self.peek() {
             Some(Token::Identifier(name)) if name == "i32" => {
                 self.advance();
-                Ok(types::i32())
+                Ok((types::i32(), Diet::Leaf(false)))
             }
             Some(Token::Identifier(name)) if name == "f32" => {
                 self.advance();
-                Ok(types::f32())
+                Ok((types::f32(), Diet::Leaf(false)))
             }
             Some(Token::Identifier(name)) if name.chars().next().unwrap().is_lowercase() => {
                 let type_name = name.clone();
@@ -1547,7 +1589,10 @@ impl<'a> Parser<'a> {
                     self.advance(); // consume '.'
                     let inner_name = self.expect_identifier()?;
                     let qualified = format!("{}.{}", type_name, inner_name);
-                    return Ok(Type::Constructed(TypeName::Named(qualified), vec![]));
+                    return Ok((
+                        Type::Constructed(TypeName::Named(qualified), vec![]),
+                        Diet::Leaf(false),
+                    ));
                 }
 
                 // Check if this is a builtin primitive type
@@ -1574,25 +1619,31 @@ impl<'a> Parser<'a> {
                     "texture2d" => TypeName::Texture2D,
                     "sampler" => TypeName::Sampler,
                     "storage_image" => {
-                        return Ok(Type::Constructed(
-                            TypeName::StorageTexture,
-                            vec![Type::Constructed(TypeName::AddressPlaceholder, vec![])],
+                        return Ok((
+                            Type::Constructed(
+                                TypeName::StorageTexture,
+                                vec![Type::Constructed(TypeName::AddressPlaceholder, vec![])],
+                            ),
+                            Diet::Leaf(false),
                         ));
                     }
                     // User-defined type alias or unrecognized type
                     _ => TypeName::Named(type_name),
                 };
-                Ok(Type::Constructed(type_name_variant, vec![]))
+                Ok((Type::Constructed(type_name_variant, vec![]), Diet::Leaf(false)))
             }
             Some(Token::LeftParen) => {
                 // Tuple type (T1, T2, T3), empty tuple (), or parenthesized type (T)
                 self.advance(); // consume '('
                 let mut tuple_types = Vec::new();
+                let mut tuple_diets = Vec::new();
                 let mut has_comma = false;
 
                 if !self.check(&Token::RightParen) {
                     loop {
-                        tuple_types.push(self.parse_type()?);
+                        let (ty, diet) = self.parse_type()?;
+                        tuple_types.push(ty);
+                        tuple_diets.push(diet);
                         if !self.check(&Token::Comma) {
                             break;
                         }
@@ -1605,9 +1656,16 @@ impl<'a> Parser<'a> {
 
                 // If exactly one type with no comma, it's just grouping parens, not a tuple
                 if tuple_types.len() == 1 && !has_comma {
-                    Ok(tuple_types.into_iter().next().unwrap())
+                    Ok((
+                        tuple_types.into_iter().next().unwrap(),
+                        tuple_diets.into_iter().next().unwrap(),
+                    ))
                 } else {
-                    Ok(types::tuple(tuple_types))
+                    let diet = Diet::Aggregate {
+                        unique: false,
+                        components: tuple_diets,
+                    };
+                    Ok((types::tuple(tuple_types), diet))
                 }
             }
             Some(Token::LeftBrace) => {
@@ -1623,13 +1681,19 @@ impl<'a> Parser<'a> {
                     self.advance();
                     let member = self.expect_identifier()?;
                     let qualified = format!("{}.{}", name, member);
-                    return Ok(Type::Constructed(TypeName::Named(qualified), vec![]));
+                    return Ok((
+                        Type::Constructed(TypeName::Named(qualified), vec![]),
+                        Diet::Leaf(false),
+                    ));
                 }
 
                 // Uppercase identifiers in type position are type variables
                 // (e.g. `T`, `UV`). Sum types use `#name` constructors and
                 // dispatch via the Token::Constructor arm below.
-                Ok(Type::Constructed(TypeName::UserVar(name), vec![]))
+                Ok((
+                    Type::Constructed(TypeName::UserVar(name), vec![]),
+                    Diet::Leaf(false),
+                ))
             }
             Some(Token::Constructor(_)) => self.parse_sum_type(),
             _ => {
@@ -1639,9 +1703,10 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_record_type(&mut self) -> Result<Type> {
+    fn parse_record_type(&mut self) -> Result<(Type, Diet)> {
         self.expect(Token::LeftBrace)?;
         let mut fields = Vec::new();
+        let mut field_diets = Vec::new();
 
         if !self.check(&Token::RightBrace) {
             loop {
@@ -1663,8 +1728,9 @@ impl<'a> Parser<'a> {
                 };
 
                 self.expect(Token::Colon)?;
-                let field_type = self.parse_type()?;
+                let (field_type, field_diet) = self.parse_type()?;
                 fields.push((field_name, field_type));
+                field_diets.push(field_diet);
 
                 if !self.check(&Token::Comma) {
                     break;
@@ -1679,10 +1745,14 @@ impl<'a> Parser<'a> {
         }
 
         self.expect(Token::RightBrace)?;
-        Ok(types::record(fields))
+        let diet = Diet::Aggregate {
+            unique: false,
+            components: field_diets,
+        };
+        Ok((types::record(fields), diet))
     }
 
-    fn parse_sum_type(&mut self) -> Result<Type> {
+    fn parse_sum_type(&mut self) -> Result<(Type, Diet)> {
         let mut variants = Vec::new();
 
         loop {
@@ -1703,7 +1773,8 @@ impl<'a> Parser<'a> {
                 self.advance(); // consume `(`
                 if !self.check(&Token::RightParen) {
                     loop {
-                        arg_types.push(self.parse_type()?);
+                        let (ty, _diet) = self.parse_type()?;
+                        arg_types.push(ty);
                         if self.check(&Token::Comma) {
                             self.advance();
                         } else {
@@ -1723,7 +1794,8 @@ impl<'a> Parser<'a> {
             }
         }
 
-        Ok(types::sum(variants))
+        // A sum type is a value leaf; `*` on its payloads is not meaningful.
+        Ok((types::sum(variants), Diet::Leaf(false)))
     }
 
     fn parse_expression(&mut self) -> Result<Expression> {
@@ -1740,7 +1812,7 @@ impl<'a> Parser<'a> {
             Some(Token::Colon) => {
                 let start_span = expr.h.span;
                 self.advance();
-                let ty = self.parse_type()?;
+                let (ty, _diet) = self.parse_type()?;
                 let end_span = self.previous_span();
                 let span = start_span.merge(&end_span);
                 expr = self.node_counter.mk_node(ExprKind::TypeAscription(Box::new(expr), ty), span);
@@ -1748,7 +1820,7 @@ impl<'a> Parser<'a> {
             Some(Token::TypeCoercion) => {
                 let start_span = expr.h.span;
                 self.advance();
-                let ty = self.parse_type()?;
+                let (ty, _diet) = self.parse_type()?;
                 let end_span = self.previous_span();
                 let span = start_span.merge(&end_span);
                 expr = self.node_counter.mk_node(ExprKind::TypeCoercion(Box::new(expr), ty), span);
@@ -2752,7 +2824,7 @@ impl<'a> Parser<'a> {
         // `(...)` inside `parse_pattern` above.
         if pattern.simple_name().is_some() && self.check(&Token::LeftParen) {
             let params_span = self.current_span();
-            let params = self.parse_comma_separated_params()?;
+            let (params, _param_diets) = self.parse_comma_separated_params()?;
             self.expect(Token::Assign)?;
             let body_expr = self.parse_expression()?;
             let lam_span = params_span.merge(&body_expr.h.span);
@@ -2784,7 +2856,8 @@ impl<'a> Parser<'a> {
         // Optional type annotation
         let ty = if self.check(&Token::Colon) {
             self.advance(); // consume ':'
-            Some(self.parse_type()?)
+            let (ty, _diet) = self.parse_type()?;
+            Some(ty)
         } else {
             None
         };

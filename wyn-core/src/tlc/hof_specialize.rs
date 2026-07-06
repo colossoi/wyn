@@ -1328,6 +1328,13 @@ impl<'a> HofSpecializer<'a> {
             body: rebuilt,
             meta: DefMeta::Function,
             arity: new_params.len(),
+            // The specialized-away function parameter is non-consuming and
+            // the appended captures are observing reads; retained data
+            // params are observing in every HOF the language builds today
+            // (SOACs are builtins, not user HOFs). Runs after the
+            // source-level ownership gate.
+            param_diets: vec![crate::types::Diet::observing(); new_params.len()],
+            return_diet: crate::types::Diet::observing(),
         };
 
         self.top_level.insert(specialized_sym);
@@ -1579,6 +1586,8 @@ impl<'a> HofSpecializer<'a> {
             body: rebuilt,
             meta: lifted_def.meta,
             arity: new_params.len(),
+            param_diets: vec![crate::types::Diet::observing(); new_params.len()],
+            return_diet: crate::types::Diet::observing(),
         };
 
         let key = (lifted_sym, callable_syms.to_vec());

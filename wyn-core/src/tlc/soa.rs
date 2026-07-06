@@ -204,6 +204,8 @@ impl SoaTransformer {
             body: new_body,
             meta: def.meta,
             arity: def.arity,
+            param_diets: def.param_diets,
+            return_diet: def.return_diet,
         }
     }
 

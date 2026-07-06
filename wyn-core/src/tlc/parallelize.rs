@@ -690,7 +690,7 @@ fn classify_input(input: &ArrayExpr, entry_slots: &[Option<EntryParamBinding>]) 
                     });
                 }
             }
-            let ref_ty = crate::types::strip_unique(ty);
+            let ref_ty = ty.clone();
             if let Some(binding) = crate::types::array_view_region(&ref_ty) {
                 if let Some(elem_ty) = ref_ty.elem_type() {
                     let elem_bytes = crate::ssa::layout::type_byte_size(elem_ty)?;
@@ -930,6 +930,7 @@ pub(crate) fn make_entry_def(
         attribute: None,
     }];
 
+    let param_diets = vec![crate::types::Diet::observing(); required_params.len()];
     Def {
         name: sym,
         ty: full_ty,
@@ -947,8 +948,12 @@ pub(crate) fn make_entry_def(
             storage_bindings,
             feedback: vec![],
             body: dummy_expr,
+            param_diets: param_diets.clone(),
+            return_diet: crate::types::Diet::observing(),
         })),
         arity: required_params.len(),
+        param_diets,
+        return_diet: crate::types::Diet::observing(),
     }
 }
 

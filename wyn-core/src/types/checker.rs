@@ -16,8 +16,7 @@ use std::collections::BTreeSet;
 // Import type helper functions from parent module
 use super::patterns::coverage::{check_match, format_cov_pat, CoverageError};
 use super::{
-    as_arrow, bool_type, f32, forget_value_uniqueness, function, i32, mat, no_region, record, sized_array,
-    strip_unique, tuple, unit, vec,
+    as_arrow, bool_type, f32, function, i32, mat, no_region, record, sized_array, tuple, unit, vec, Diet,
 };
 
 /// Render a single swizzle slot index as its `xyzw` letter. Used by
@@ -62,7 +61,7 @@ fn resource_signature(ty: &Type) -> String {
 /// SPIR-V struct layout) matters.
 fn buffer_element_signature(ty: &Type) -> String {
     use crate::types::TypeName;
-    let stripped = crate::types::strip_unique(ty);
+    let stripped = ty.clone();
     match &stripped {
         Type::Constructed(TypeName::Array, args) if !args.is_empty() => resource_signature(&args[0]),
         other => resource_signature(other),
@@ -209,6 +208,10 @@ pub struct TypeChecker<'a> {
     warnings: Vec<TypeWarning>,            // Collected warnings
     type_holes: Vec<(NodeId, Span)>,       // Track type hole locations for warning emission
     arity_map: LookupMap<String, usize>,   // function name -> required arity (number of params)
+    /// Names of top-level functions that consume an argument — a consuming
+    /// function may not be passed as a value, so a call passing one is
+    /// rejected.
+    consuming_defs: crate::LookupSet<String>,
     /// ID source for generating unique skolem constants when opening existential types.
     skolem_ids: crate::IdSource<SkolemId>,
     /// Current module context for resolving unqualified type aliases in expressions.
@@ -424,7 +427,7 @@ impl<'a> TypeChecker<'a> {
     /// Sized arrays (e.g. [19]u32) stay Composite — only unsized arrays become View.
     fn constrain_array_to_storage(&mut self, ty: &Type) -> Result<()> {
         let resolved = ty.apply(&self.context);
-        let resolved = strip_unique(&resolved);
+
         if !resolved.is_array() {
             return Ok(());
         }
@@ -1001,6 +1004,7 @@ impl<'a> TypeChecker<'a> {
             warnings: Vec::new(),
             type_holes: Vec::new(),
             arity_map: LookupMap::new(),
+            consuming_defs: crate::LookupSet::new(),
             skolem_ids: crate::IdSource::new(),
             current_module: None,
             name_resolution: NameResolution::default(),
@@ -1140,21 +1144,6 @@ impl<'a> TypeChecker<'a> {
     /// substitution is handled upstream by `resolve_placeholders`.
     pub(super) fn normalize_annotation_type(&self, ty: &Type, module: Option<&str>) -> Type {
         self.resolve_type_aliases_scoped(ty, module)
-    }
-
-    /// Reject `*` on a value-position annotation (a `let`, a type
-    /// ascription, a non-function `def`). Uniqueness is a consumption
-    /// contract that only means something on a function's parameters and
-    /// return type; on a plain value it has no referent.
-    fn reject_value_uniqueness(&self, ty: &Type, span: Span) -> Result<()> {
-        if super::is_consuming_parameter_type(ty) {
-            bail_type_at!(
-                span,
-                "`*` (uniqueness) is only allowed on function parameter and return types, \
-                 not on a value binding or ascription"
-            );
-        }
-        Ok(())
     }
 
     /// Allocate a fresh type variable and return its ID.
@@ -1298,19 +1287,10 @@ impl<'a> TypeChecker<'a> {
                 self.fresh_type_for_pattern(param)
             };
 
-            if super::arrow_contains_unique(&param_type) {
-                bail_type_at!(
-                    param.h.span,
-                    "a consuming function may not be used as a value: parameter type {} \
-                     contains a function with a `*` (consuming) parameter or result",
-                    self.format_type(&param_type)
-                );
-            }
-
             param_types.push(param_type.clone());
             // Bind the parameter as an observation (no `*`); the lambda's
             // own arrow type keeps the consumption contract.
-            self.bind_irrefutable_pattern(param, &forget_value_uniqueness(&param_type), false)?;
+            self.bind_irrefutable_pattern(param, &param_type, false)?;
         }
 
         // Type check the body
@@ -1740,18 +1720,6 @@ impl<'a> TypeChecker<'a> {
                     "Existential types (?k. ...) are only allowed in return types, not parameter types"
                 );
             }
-            // A consuming function may not be passed as a value (the
-            // language cannot bound how many times, or to what, a callback
-            // is applied), so a parameter's type may not be a function that
-            // consumes its own arguments.
-            if super::arrow_contains_unique(param_type) {
-                bail_type_at!(
-                    param.h.span,
-                    "a consuming function may not be used as a value: parameter type {} \
-                     contains a function with a `*` (consuming) parameter or result",
-                    self.format_type(param_type)
-                );
-            }
         }
 
         // Vertex entries: validate `#[location(n)]` input parameters.
@@ -1846,17 +1814,9 @@ impl<'a> TypeChecker<'a> {
                     )
                 })?
                 .to_string();
-            // The parameter's declared type — `*` and all — is stored on
-            // the pattern node so `to_tlc` builds the signature (and the
-            // ownership pass reads the consumption contract) from it.
             let resolved_param_type = param_type.apply(&self.context);
-            self.type_table.insert(param.h.id, TypeScheme::Monotype(resolved_param_type));
-
-            // As a value in the body, though, the parameter is an ordinary
-            // observation: bind it without `*` so no expression type
-            // carries uniqueness.
-            let value_type = forget_value_uniqueness(param_type);
-            let type_scheme = TypeScheme::Monotype(value_type);
+            self.type_table.insert(param.h.id, TypeScheme::Monotype(resolved_param_type.clone()));
+            let type_scheme = TypeScheme::Monotype(resolved_param_type);
 
             debug!(
                 "Adding parameter '{}' to scope with type: {:?}",
@@ -2178,10 +2138,6 @@ impl<'a> TypeChecker<'a> {
             let resolved_declared_type =
                 decl.ty.as_ref().map(|ty| self.resolve_type_aliases_scoped(ty, module_name));
 
-            if let Some(ref declared_type) = resolved_declared_type {
-                self.reject_value_uniqueness(declared_type, decl.body.h.span)?;
-            }
-
             let expr_type = if let Some(ref declared_type) = resolved_declared_type {
                 // Use bidirectional checking when type annotation is present
                 self.check_expression(&decl.body, declared_type)?
@@ -2204,6 +2160,24 @@ impl<'a> TypeChecker<'a> {
         } else {
             // Function declaration: let/def name param1 param2 = body
 
+            // A consuming function may not be used as a value: a parameter
+            // whose diet mentions a `*` behind an arrow (e.g. `f: *T -> U`)
+            // is rejected.
+            for (param, diet) in decl.params.iter().zip(&decl.param_diets) {
+                if diet.mentions_consuming_function() {
+                    bail_type_at!(
+                        param.h.span,
+                        "a consuming function may not be used as a value: \
+                         a parameter's type may not be a function that consumes its argument"
+                    );
+                }
+            }
+            // Record whether this def is itself a consuming function, so a
+            // call site can reject passing it as a value.
+            if decl.param_diets.iter().any(Diet::is_consuming) {
+                self.consuming_defs.insert(decl.name.clone());
+            }
+
             let (param_types, body_type) =
                 self.check_function_with_params(&decl.params, &decl.body, module_name)?;
             debug!(
@@ -2211,11 +2185,10 @@ impl<'a> TypeChecker<'a> {
                 decl.name, body_type
             );
 
-            // The signature's return type is the declared one (which keeps
-            // its `*` contract); the inferred body type is a `*`-free
-            // expression type, so shape-check the body against the declared
-            // return with uniqueness forgotten. Whether the body actually
-            // satisfies a `*` return is verified by tlc::ownership.
+            // Uniqueness lives on the signature diet, never in the type, so
+            // the body's value type and the declared return shape-check
+            // directly. Whether the body satisfies a `*` return is verified
+            // by tlc::ownership from the diet.
             let return_type = if let Some(declared_type) = &decl.ty {
                 let normalized_return_type = self.normalize_annotation_type(declared_type, module_name);
                 let ctx = if !decl.params.is_empty() {
@@ -2223,26 +2196,11 @@ impl<'a> TypeChecker<'a> {
                 } else {
                     format!("Type mismatch for '{}'", decl.name)
                 };
-                self.unify_or_err(
-                    &body_type,
-                    &forget_value_uniqueness(&normalized_return_type),
-                    decl.body.h.span,
-                    &ctx,
-                )?;
+                self.unify_or_err(&body_type, &normalized_return_type, decl.body.h.span, &ctx)?;
                 normalized_return_type
             } else {
                 body_type.clone()
             };
-
-            // Carry a `*` (alias-free) return contract onto the body node
-            // so `to_tlc` builds the signature — and the ownership pass
-            // reads the contract — with uniqueness intact. The function
-            // body is a return (signature) position, not an interior
-            // expression, so this does not reintroduce `*` into value
-            // positions that unification sees.
-            if super::is_consuming_parameter_type(&return_type) {
-                self.type_table.insert(decl.body.h.id, TypeScheme::Monotype(return_type.clone()));
-            }
 
             // Build function type: param1 -> param2 -> ... -> return_type
             let func_type =
@@ -2337,7 +2295,7 @@ impl<'a> TypeChecker<'a> {
 
                     // Futhark restriction: arrays of functions are not permitted
                     // Strip uniqueness to catch Unique(Arrow(...)) as well
-                    let resolved_first = strip_unique(&first_type.apply(&self.context));
+                    let resolved_first = first_type.apply(&self.context);
                     if as_arrow(&resolved_first).is_some() {
                         bail_type_at!(
                             expr.h.span,
@@ -2444,7 +2402,7 @@ impl<'a> TypeChecker<'a> {
                 })?;
 
                 // Constrain array type - strip uniqueness (indexing *[n]T works like [n]T)
-                let array_type_stripped = strip_unique(&array_type);
+                let array_type_stripped = array_type.clone();
                 let (elem_var, _, _, _) = self.constrain_array_type(
                     &array_type_stripped,
                     &array_expr.h.span,
@@ -2470,7 +2428,7 @@ impl<'a> TypeChecker<'a> {
                 })?;
 
                 // Constrain array type - strip uniqueness
-                let array_type_stripped = strip_unique(&array_type);
+                let array_type_stripped = array_type.clone();
                 let (elem_var, _, _, _) = self.constrain_array_type(
                     &array_type_stripped,
                     &array.h.span,
@@ -2498,7 +2456,7 @@ impl<'a> TypeChecker<'a> {
                 let mut current_ty = outer_ty.clone();
                 for segment in path {
                     let resolved = current_ty.apply(&self.context);
-                    let stripped = strip_unique(&resolved);
+                    let stripped = resolved.clone();
                     let (fields, field_types) = match &stripped {
                         Type::Constructed(TypeName::Record(fs), tys) => (fs, tys),
                         _ => bail_type_at!(
@@ -2644,7 +2602,6 @@ impl<'a> TypeChecker<'a> {
                     .as_ref()
                     .map(|ty| self.normalize_annotation_type(ty, self.current_module.as_deref()));
                 if let Some(declared_type) = &resolved_annotation {
-                    self.reject_value_uniqueness(declared_type, let_in.value.h.span)?;
                     self.unify_or_err_weakening(
                         &value_type,
                         declared_type,
@@ -2752,7 +2709,7 @@ impl<'a> TypeChecker<'a> {
                 let base_type = self.infer_expression(inner_expr)?;
 
                 // Apply context and strip uniqueness
-                let base_type = base_type.apply(&self.context).strip_unique().clone();
+                let base_type = base_type.apply(&self.context);
 
                 // Use unified field access helper
                 let field_type = self.infer_field_access(&base_type, field, &expr.h.span)?;
@@ -3063,7 +3020,7 @@ impl<'a> TypeChecker<'a> {
                 // - result is Array[elem, addrspace, size'] where size' = end - start
 
                 let array_type = self.infer_expression(&slice.array)?;
-                let array_type_stripped = strip_unique(&array_type);
+                let array_type_stripped = array_type.clone();
 
                 // Constrain array to be Array[elem, addrspace, size, region]
                 let (elem_var, addrspace_var, _, region_var) = self.constrain_array_type(
@@ -3124,7 +3081,6 @@ impl<'a> TypeChecker<'a> {
                 // This allows integer literals to take on the ascribed type (e.g., 42u32)
                 let normalized =
                     self.normalize_annotation_type(ascribed_ty, self.current_module.as_deref());
-                self.reject_value_uniqueness(&normalized, expr.h.span)?;
                 self.check_expression(inner, &normalized)?;
                 Ok(normalized)
             }
@@ -3388,7 +3344,7 @@ impl<'a> TypeChecker<'a> {
         span: Span,
         ctx: &str,
     ) -> Result<()> {
-        let expected = forget_value_uniqueness(&expected.apply(&self.context));
+        let expected = expected.apply(&self.context);
         self.unify_or_err(actual, &expected, span, ctx)
     }
 
@@ -3642,23 +3598,19 @@ impl<'a> TypeChecker<'a> {
         // reduce(_, _, kept)` does. Don't open when the param is itself
         // existential — the existential type can flow through unchanged
         // in that case.
-        let arg_for_check =
-            if Self::is_top_existential(&arg_applied) && !Self::is_top_existential(&param_applied) {
-                self.open_top_existential_preserving_unique(arg_applied)
-            } else {
-                arg_applied
-            };
+        let is_existential = |ty: &Type| matches!(ty, Type::Constructed(TypeName::Existential(_), _));
+        let arg_for_check = if is_existential(&arg_applied) && !is_existential(&param_applied) {
+            self.open_existential(arg_applied)
+        } else {
+            arg_applied
+        };
 
-        // Compare value shapes after forgetting the `*` contract on the
-        // parameter (argument types carry no uniqueness). Whether the
-        // argument is actually legal to consume is an alias/provenance
-        // question checked by `tlc::ownership`: a fresh local array is
-        // consumable, an observing parameter is not, though both have the
-        // same value type here.
-        let arg_shape = forget_value_uniqueness(&arg_for_check);
-        let param_shape = forget_value_uniqueness(&param_applied);
+        // Compare value shapes. Whether the argument is actually legal to
+        // consume is an alias/provenance question checked by `tlc::ownership`
+        // from the callee's diet: a fresh local array is consumable, an
+        // observing parameter is not, though both have the same value type.
         let checkpoint = self.context.len();
-        if self.context.unify(&arg_shape, &param_shape).is_err() {
+        if self.context.unify(&arg_for_check, &param_applied).is_err() {
             self.context.rollback(checkpoint);
             let base = format!(
                 "Function argument type mismatch at argument {}: expected {}, got {}",
@@ -3675,33 +3627,6 @@ impl<'a> TypeChecker<'a> {
         }
 
         Ok(result_var)
-    }
-
-    /// Whether `ty` is an existential after looking through a top-level
-    /// uniqueness marker. This is the application-site analogue of
-    /// `open_existential`, which otherwise intentionally opens only a bare
-    /// existential.
-    fn is_top_existential(ty: &Type) -> bool {
-        match ty {
-            Type::Constructed(TypeName::Unique, args) if args.len() == 1 => {
-                Self::is_top_existential(&args[0])
-            }
-            Type::Constructed(TypeName::Existential(_), _) => true,
-            _ => false,
-        }
-    }
-
-    /// Open a top-level existential while preserving any surrounding
-    /// uniqueness marker, so subtype checking still sees the ownership
-    /// contract after existential elimination.
-    fn open_top_existential_preserving_unique(&mut self, ty: Type) -> Type {
-        match ty {
-            Type::Constructed(TypeName::Unique, mut args) if args.len() == 1 => {
-                let inner = self.open_top_existential_preserving_unique(args.remove(0));
-                Type::Constructed(TypeName::Unique, vec![inner])
-            }
-            other => self.open_existential(other),
-        }
     }
 
     /// Constrain a type to be an Array and return its components.
@@ -3898,6 +3823,19 @@ impl<'a> TypeChecker<'a> {
 
         // First pass: process arguments to constrain type variables
         for (i, arg) in args.iter().enumerate() {
+            // A consuming function may not be passed as a value: reject an
+            // argument that names a top-level consuming function.
+            if let ExprKind::Identifier(path, name) = &arg.kind {
+                let qualified =
+                    if path.is_empty() { name.clone() } else { format!("{}.{}", path.join("."), name) };
+                if self.consuming_defs.contains(name) || self.consuming_defs.contains(&qualified) {
+                    bail_type_at!(
+                        arg.h.span,
+                        "a consuming function may not be passed as a value: `{}` consumes its argument",
+                        name
+                    );
+                }
+            }
             if let ExprKind::Lambda(lambda) = &arg.kind {
                 // For lambdas with k params: build k arrows for the expected lambda type
                 // This ensures check_expression can extract all k parameter types
@@ -3948,17 +3886,6 @@ impl<'a> TypeChecker<'a> {
             } else {
                 // For non-lambda argument: infer type and unify with expected param
                 let arg_type = self.infer_expression(arg)?;
-                // Passing a named consuming function (e.g. a def whose
-                // signature is `*T -> …`) as a value is the same violation
-                // the parameter/lambda bans catch on the declaration side.
-                if super::arrow_contains_unique(&arg_type.apply(&self.context)) {
-                    bail_type_at!(
-                        arg.h.span,
-                        "a consuming function may not be passed as a value: argument type {} \
-                         contains a function with a `*` (consuming) parameter or result",
-                        self.format_type(&arg_type.apply(&self.context))
-                    );
-                }
                 func_type = self.unify_apply_arg(&func_type, &arg_type, arg, i)?;
             }
         }
@@ -3982,7 +3909,7 @@ impl<'a> TypeChecker<'a> {
 
         // A `*` return is a signature-level contract; the applied value
         // is an ordinary observation, so no expression type carries it.
-        Ok(forget_value_uniqueness(&func_type.apply(&self.context)))
+        Ok(func_type.apply(&self.context))
     }
 }
 

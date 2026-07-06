@@ -717,6 +717,8 @@ impl RepSpecializer {
             body: new_body,
             meta: DefMeta::Function,
             arity: callee_def.arity,
+            param_diets: callee_def.param_diets.clone(),
+            return_diet: callee_def.return_diet.clone(),
         };
         self.new_defs.push(new_def);
         spec_sym

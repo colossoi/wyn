@@ -132,7 +132,9 @@ fn synth_program_with_alias_let() -> (Program, crate::SymbolId, crate::SymbolId)
             crate::types::no_region(),
         ],
     );
-    let unique_arr_ty = Type::Constructed(TypeName::Unique, vec![arr_ty.clone()]);
+    // `*` is a signature diet now, not part of the type; the consuming
+    // contract is set on the def's `param_diets` below.
+    let unique_arr_ty = arr_ty.clone();
 
     // Body: Let b = a in 0    (rhs `a` aliases `b`; `0` body keeps test trivial)
     let var_a = Term {
@@ -178,6 +180,8 @@ fn synth_program_with_alias_let() -> (Program, crate::SymbolId, crate::SymbolId)
         body: lambda_term,
         meta: DefMeta::Function,
         arity: 1,
+        param_diets: vec![crate::types::Diet::Leaf(true)],
+        return_diet: crate::types::Diet::observing(),
     };
     let program = Program {
         defs: vec![def],
@@ -1531,7 +1535,7 @@ fn synth_program_with_with_through_index() -> Program {
             crate::types::no_region(),
         ],
     );
-    let unique_outer_ty = Type::Constructed(TypeName::Unique, vec![outer_arr_ty.clone()]);
+    let unique_outer_ty = outer_arr_ty.clone();
 
     // _w_intrinsic_array_with : [4]i32 -> i32 -> i32 -> [4]i32
     let with_fn_ty = Type::Constructed(
@@ -1625,6 +1629,8 @@ fn synth_program_with_with_through_index() -> Program {
         body: lambda_term,
         meta: DefMeta::Function,
         arity: 1,
+        param_diets: vec![crate::types::Diet::Leaf(true)],
+        return_diet: crate::types::Diet::observing(),
     };
 
     Program {
@@ -1725,7 +1731,7 @@ fn synth_program_with_populated_soac_captures() -> Program {
             crate::types::no_region(),
         ],
     );
-    let unique_arr_ty = Type::Constructed(TypeName::Unique, vec![arr_ty.clone()]);
+    let unique_arr_ty = arr_ty.clone();
     let consume_ty = Type::Constructed(TypeName::Arrow, vec![unique_arr_ty.clone(), i32_ty.clone()]);
 
     let consume_body = Term {
@@ -1751,6 +1757,8 @@ fn synth_program_with_populated_soac_captures() -> Program {
         body: consume_lam_term,
         meta: DefMeta::Function,
         arity: 1,
+        param_diets: vec![crate::types::Diet::Leaf(true)],
+        return_diet: crate::types::Diet::observing(),
     };
 
     let var_consume = Term {
@@ -1892,6 +1900,8 @@ fn synth_program_with_populated_soac_captures() -> Program {
         body: outer_let,
         meta: DefMeta::Function,
         arity: 0,
+        param_diets: vec![],
+        return_diet: crate::types::Diet::observing(),
     };
 
     Program {
@@ -2056,6 +2066,8 @@ fn soac_capture_term_is_analyzed_for_liveness() {
         body: outer_let,
         meta: DefMeta::Function,
         arity: 0,
+        param_diets: vec![],
+        return_diet: crate::types::Diet::observing(),
     };
 
     let program = Program {

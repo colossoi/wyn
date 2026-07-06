@@ -231,6 +231,8 @@ impl B {
             body: lam_term,
             meta: DefMeta::Function,
             arity: 1,
+            param_diets: vec![],
+            return_diet: crate::types::Diet::observing(),
         }
     }
 }

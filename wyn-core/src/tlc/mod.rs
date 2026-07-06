@@ -994,6 +994,8 @@ pub struct Def {
     pub meta: DefMeta,
     /// Number of arguments this function expects.
     pub arity: usize,
+    pub param_diets: Vec<crate::types::Diet>,
+    pub return_diet: crate::types::Diet,
 }
 
 /// A TLC program (collection of definitions).
@@ -1894,6 +1896,8 @@ impl<'a> Transformer<'a> {
                         body,
                         meta: DefMeta::Function,
                         arity,
+                        param_diets: e.param_diets.clone(),
+                        return_diet: e.return_diet.clone(),
                     });
                 }
                 ast::Declaration::Sig(_)
@@ -1938,6 +1942,8 @@ impl<'a> Transformer<'a> {
             body,
             meta: DefMeta::Function,
             arity: decl.params.len(),
+            param_diets: decl.param_diets.clone(),
+            return_diet: decl.return_diet.clone(),
         })
     }
 
@@ -1963,6 +1969,8 @@ impl<'a> Transformer<'a> {
             body,
             meta: DefMeta::EntryPoint(Box::new(entry.clone())),
             arity: entry.params.len(),
+            param_diets: entry.param_diets.clone(),
+            return_diet: entry.return_diet.clone(),
         })
     }
 
@@ -3273,11 +3281,6 @@ impl<'a> Transformer<'a> {
     }
 
     fn get_array_element_type(&self, ty: &Type<TypeName>) -> Type<TypeName> {
-        // See through `Unique` (`*[]T`): the uniqueness qualifier doesn't change
-        // the element type, and a `#[storage]` scatter dest arrives as
-        // `Unique[Array[..]]`. Without stripping it, `is_array()` is false and we
-        // panic on a perfectly good in-place scatter target.
-        let ty = ty.strip_unique();
         ty.elem_type()
             .filter(|_| ty.is_array())
             .cloned()

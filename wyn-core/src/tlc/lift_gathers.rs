@@ -880,7 +880,7 @@ fn build_gather_prepass(
 /// True if `ty` is a runtime-sized array (size is a type variable or
 /// placeholder) — mirrors `binding_layout::is_runtime_sized_array`.
 fn is_runtime_sized_array(ty: &Type<TypeName>) -> bool {
-    crate::types::array_size(&crate::types::strip_unique(ty))
+    crate::types::array_size(ty)
         .map(|s| {
             matches!(
                 s,

@@ -896,6 +896,8 @@ impl ModuleManager {
             params: new_params,
             ty: new_ty,
             body: new_body,
+            param_diets: decl.param_diets.clone(),
+            return_diet: decl.return_diet.clone(),
         }
     }
 

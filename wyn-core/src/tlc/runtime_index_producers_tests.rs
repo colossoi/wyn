@@ -245,6 +245,8 @@ fn runtime_index_inside_fused_scatter_envelope_becomes_let_bound_gather_shape() 
             body: scatter,
             meta: DefMeta::Function,
             arity: 0,
+            param_diets: vec![],
+            return_diet: crate::types::Diet::observing(),
         }],
         symbols,
         def_syms: std::collections::HashMap::new(),
