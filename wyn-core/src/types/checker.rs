@@ -1297,6 +1297,15 @@ impl<'a> TypeChecker<'a> {
                 self.fresh_type_for_pattern(param)
             };
 
+            if super::arrow_contains_unique(&param_type) {
+                bail_type_at!(
+                    param.h.span,
+                    "a consuming function may not be used as a value: parameter type {} \
+                     contains a function with a `*` (consuming) parameter or result",
+                    self.format_type(&param_type)
+                );
+            }
+
             param_types.push(param_type.clone());
             self.bind_irrefutable_pattern(param, &param_type, false)?;
         }
@@ -1726,6 +1735,18 @@ impl<'a> TypeChecker<'a> {
                 bail_type_at!(
                     param.h.span,
                     "Existential types (?k. ...) are only allowed in return types, not parameter types"
+                );
+            }
+            // A consuming function may not be passed as a value (the
+            // language cannot bound how many times, or to what, a callback
+            // is applied), so a parameter's type may not be a function that
+            // consumes its own arguments.
+            if super::arrow_contains_unique(param_type) {
+                bail_type_at!(
+                    param.h.span,
+                    "a consuming function may not be used as a value: parameter type {} \
+                     contains a function with a `*` (consuming) parameter or result",
+                    self.format_type(param_type)
                 );
             }
         }
@@ -2908,7 +2929,14 @@ impl<'a> TypeChecker<'a> {
                     }
                 }
 
-                Ok(result_ty.expect("non-empty match checked above"))
+                // Futhark restriction: functions cannot be returned from
+                // match expressions (as for `if`).
+                let result = result_ty.expect("non-empty match checked above");
+                if as_arrow(&result.apply(&self.context)).is_some() {
+                    bail_type_at!(expr.h.span, "Functions cannot be returned from match expressions");
+                }
+
+                Ok(result)
             }
 
             // A bare `#name(args)` doesn't pin down which sum type it
@@ -4073,6 +4101,17 @@ impl<'a> TypeChecker<'a> {
             } else {
                 // For non-lambda argument: infer type and unify with expected param
                 let arg_type = self.infer_expression(arg)?;
+                // Passing a named consuming function (e.g. a def whose
+                // signature is `*T -> …`) as a value is the same violation
+                // the parameter/lambda bans catch on the declaration side.
+                if super::arrow_contains_unique(&arg_type.apply(&self.context)) {
+                    bail_type_at!(
+                        arg.h.span,
+                        "a consuming function may not be passed as a value: argument type {} \
+                         contains a function with a `*` (consuming) parameter or result",
+                        self.format_type(&arg_type.apply(&self.context))
+                    );
+                }
                 func_type = self.unify_apply_arg(&func_type, &arg_type, arg, i)?;
             }
         }

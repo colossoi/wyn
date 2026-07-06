@@ -149,9 +149,10 @@ fn weakening_diagnostic_prints_each_type_once() {
 }
 
 #[test]
-fn consuming_function_cannot_be_hidden_as_observing_function() {
-    // Weakening is covariant for values inside tuples/records, but it must
-    // not cross an arrow and erase the callee's consuming-input effect.
+fn consuming_function_cannot_be_passed_as_a_value() {
+    // The language cannot bound how many times, or to what, a callback is
+    // applied, so a function that consumes its argument may not be passed
+    // as a value — caught at the call site.
     let result = try_typecheck_program(
         r#"
 def consume(x: *[4]i32) i32 = x[0]
@@ -163,29 +164,47 @@ def main(x: *[4]i32) i32 = apply_observing(consume, x)
 }
 
 #[test]
-fn observing_callback_may_satisfy_consuming_callback_contract() {
-    // Safe contravariant direction: `observe` needs less ownership than the
-    // callback contract promises to provide.
+fn consuming_callback_parameter_type_is_rejected() {
+    // A parameter whose type is a consuming function is itself illegal —
+    // rejected at the declaration, not just at any call.
+    let result = try_typecheck_program(
+        r#"
+def apply_consuming(f: *[4]i32 -> i32, x: *[4]i32) i32 = f(x)
+"#,
+    );
+    assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
+
+    let result_in_result = try_typecheck_program(
+        r#"
+def apply_update(f: *[4]i32 -> [4]i32, x: *[4]i32) [4]i32 = f(x)
+"#,
+    );
+    assert!(matches!(result_in_result, Err(CompilerError::TypeError(_, _))));
+}
+
+#[test]
+fn observing_callback_flows_freely() {
+    // An ordinary observing callback carries no `*` and is unrestricted.
     typecheck_program(
         r#"
 def observe(x: [4]i32) i32 = x[0]
-def apply_consuming(f: *[4]i32 -> i32, x: *[4]i32) i32 = f(x)
-def main(x: *[4]i32) i32 = apply_consuming(observe, x)
+def apply_observing(f: [4]i32 -> i32, x: [4]i32) i32 = f(x)
+def main(x: [4]i32) i32 = apply_observing(observe, x)
 "#,
     );
 }
 
 #[test]
-fn alias_free_callback_result_may_be_weakened() {
-    // Function parameters are contravariant and returns are covariant: callers
-    // may forget that a callback result is alias-free.
-    typecheck_program(
+fn functions_cannot_be_returned_from_match() {
+    let result = try_typecheck_program(
         r#"
-def update(x: *[4]i32) *[4]i32 = x with [0] = 1
-def apply_update(f: *[4]i32 -> [4]i32, x: *[4]i32) [4]i32 = f(x)
-def main(x: *[4]i32) [4]i32 = apply_update(update, x)
+def pick(v: #a | #b, f: [4]i32 -> i32, g: [4]i32 -> i32) [4]i32 -> i32 =
+    match v
+    case #a -> f
+    case #b -> g
 "#,
     );
+    assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
 }
 
 #[test]

@@ -1085,6 +1085,26 @@ pub fn is_consuming_parameter_type(ty: &Type) -> bool {
     }
 }
 
+/// Whether `ty` contains a function type that mentions `*` anywhere in
+/// its own parameters or result — i.e. a consuming function used as a
+/// value. `is_consuming_parameter_type` deliberately stops at arrows;
+/// this is the complementary check for the values arrows are not
+/// allowed to carry.
+pub fn arrow_contains_unique(ty: &Type) -> bool {
+    fn mentions_unique(ty: &Type) -> bool {
+        match ty {
+            Type::Constructed(TypeName::Unique, _) => true,
+            Type::Constructed(_, args) => args.iter().any(mentions_unique),
+            Type::Variable(_) => false,
+        }
+    }
+    match ty {
+        Type::Constructed(TypeName::Arrow, args) => args.iter().any(mentions_unique),
+        Type::Constructed(_, args) => args.iter().any(arrow_contains_unique),
+        Type::Variable(_) => false,
+    }
+}
+
 /// Forget uniqueness in covariant value positions while preserving function
 /// signatures. Arrow parameters encode consumption effects and must be
 /// compared with variance-aware function subtyping rather than erased by a
