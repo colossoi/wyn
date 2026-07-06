@@ -1071,6 +1071,35 @@ pub fn is_unique(ty: &Type) -> bool {
     matches!(ty, Type::Constructed(TypeName::Unique, _))
 }
 
+/// Whether a parameter type carries a consuming `*` contract.
+///
+/// A `*` nested in a tuple/record makes the aggregate parameter consuming,
+/// matching Futhark. Function arrows are boundaries: a callback that itself
+/// accepts a consuming parameter does not make the callback value consuming.
+pub fn is_consuming_parameter_type(ty: &Type) -> bool {
+    match ty {
+        Type::Constructed(TypeName::Unique, _) => true,
+        Type::Constructed(TypeName::Arrow, _) => false,
+        Type::Constructed(_, args) => args.iter().any(is_consuming_parameter_type),
+        Type::Variable(_) => false,
+    }
+}
+
+/// Forget uniqueness in covariant value positions while preserving function
+/// signatures. Arrow parameters encode consumption effects and must be
+/// compared with variance-aware function subtyping rather than erased by a
+/// generic tree walk.
+pub fn forget_value_uniqueness(ty: &Type) -> Type {
+    match ty {
+        Type::Constructed(TypeName::Unique, args) if args.len() == 1 => forget_value_uniqueness(&args[0]),
+        Type::Constructed(TypeName::Arrow, _) => ty.clone(),
+        Type::Constructed(name, args) => {
+            Type::Constructed(name.clone(), args.iter().map(forget_value_uniqueness).collect())
+        }
+        Type::Variable(_) => ty.clone(),
+    }
+}
+
 /// Whether a type's runtime values are pure value-semantics (cheap to
 /// copy, no backing-store identity). The complement is "non-copy" — the
 /// alias and ownership systems track only non-copy values.
@@ -1516,5 +1545,30 @@ mod tests {
     fn array_dim_zero_matches_array_size() {
         let arr = rank1_arr(8);
         assert_eq!(arr.array_dim(0), arr.array_size());
+    }
+
+    #[test]
+    fn consuming_parameter_search_stops_at_function_arrows() {
+        let unique_array = unique(rank1_arr(4));
+        let tuple_with_unique = tuple(vec![unique_array.clone(), i32_ty()]);
+        assert!(is_consuming_parameter_type(&tuple_with_unique));
+
+        let callback = arrow(unique_array, i32_ty());
+        assert!(
+            !is_consuming_parameter_type(&callback),
+            "a callback's own consuming parameter does not consume the callback value",
+        );
+    }
+
+    #[test]
+    fn forgetting_value_uniqueness_preserves_arrow_contracts() {
+        let callback = arrow(unique(rank1_arr(4)), unique(rank1_arr(4)));
+        assert_eq!(forget_value_uniqueness(&callback), callback);
+
+        let aggregate = tuple(vec![unique(rank1_arr(4)), i32_ty()]);
+        assert_eq!(
+            forget_value_uniqueness(&aggregate),
+            tuple(vec![rank1_arr(4), i32_ty()])
+        );
     }
 }

@@ -282,7 +282,10 @@ fn compile_file(
         }
     }
 
-    let tlc_optimized = time("tlc_partial_eval", verbose, || tlc_transformed.partial_eval());
+    let tlc_validated = time("validate_ownership", verbose, || {
+        tlc_transformed.validate_ownership()
+    })?;
+    let tlc_optimized = time("tlc_partial_eval", verbose, || tlc_validated.partial_eval());
 
     let tlc_normed = time("normalize_soacs", verbose, || tlc_optimized.normalize_soacs());
     let tlc_mono = time("tlc_monomorphize", verbose, || tlc_normed.monomorphize());
@@ -439,9 +442,7 @@ fn check_file(input: PathBuf, verbose: bool) -> Result<(), DriverError> {
 
     type_checked.print_warnings();
 
-    let tlc_after_norm =
-        type_checked.to_tlc(&module_manager, false).pin_entry_regions()?.partial_eval().normalize_soacs();
-    wyn_core::tlc::ownership::check(&tlc_after_norm.0.tlc)?;
+    type_checked.to_tlc(&module_manager, false).pin_entry_regions()?.validate_ownership()?;
 
     if verbose {
         info!("✓ {} is valid", input.display());

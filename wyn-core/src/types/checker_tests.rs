@@ -134,6 +134,21 @@ fn observing_return_cannot_satisfy_alias_free_contract() {
 }
 
 #[test]
+fn weakening_diagnostic_prints_each_type_once() {
+    let error = try_typecheck_program("def bad(x: [4]i32) *[4]i32 = x").unwrap_err();
+    let CompilerError::TypeError(message, _) = error else {
+        panic!("expected type error");
+    };
+    assert_eq!(
+        message.matches("Array[").count(),
+        2,
+        "expected and actual should each be rendered once: {message}",
+    );
+    assert_eq!(message.matches("expected").count(), 1, "{message}");
+    assert_eq!(message.matches("got").count(), 1, "{message}");
+}
+
+#[test]
 fn consuming_function_cannot_be_hidden_as_observing_function() {
     // Weakening is covariant for values inside tuples/records, but it must
     // not cross an arrow and erase the callee's consuming-input effect.
@@ -148,8 +163,21 @@ def main(x: *[4]i32) i32 = apply_observing(consume, x)
 }
 
 #[test]
+fn observing_callback_may_satisfy_consuming_callback_contract() {
+    // Safe contravariant direction: `observe` needs less ownership than the
+    // callback contract promises to provide.
+    typecheck_program(
+        r#"
+def observe(x: [4]i32) i32 = x[0]
+def apply_consuming(f: *[4]i32 -> i32, x: *[4]i32) i32 = f(x)
+def main(x: *[4]i32) i32 = apply_consuming(observe, x)
+"#,
+    );
+}
+
+#[test]
 fn alias_free_callback_result_may_be_weakened() {
-    // Function parameters stay invariant, but returns are covariant: callers
+    // Function parameters are contravariant and returns are covariant: callers
     // may forget that a callback result is alias-free.
     typecheck_program(
         r#"
@@ -158,6 +186,73 @@ def apply_update(f: *[4]i32 -> [4]i32, x: *[4]i32) [4]i32 = f(x)
 def main(x: *[4]i32) [4]i32 = apply_update(update, x)
 "#,
     );
+}
+
+#[test]
+fn unannotated_parameter_infers_unique_from_result_contract() {
+    typecheck_program("def pass(x) *[4]i32 = x");
+}
+
+#[test]
+fn control_flow_join_preserves_unanimous_uniqueness() {
+    typecheck_program(
+        r#"
+def choose(c: bool, a: *[4]i32, b: *[4]i32) *[4]i32 =
+    if c then a else b
+
+def choose_match(v: #left | #right, a: *[4]i32, b: *[4]i32) *[4]i32 =
+    match v
+    case #left -> a
+    case #right -> b
+"#,
+    );
+}
+
+#[test]
+#[ignore = "open bug: match arms are inferred independently, so a bare \
+            constructor arm no longer resolves its sum type from an earlier \
+            arm and fails 'ambiguous constructor'"]
+fn match_constructor_arm_resolves_from_sibling_arms() {
+    typecheck_program(
+        r#"
+def f(x: #some(i32) | #none) #some(i32) | #none =
+    match x
+    case #some(v) -> x
+    case #none -> #some(0)
+"#,
+    );
+}
+
+#[test]
+#[ignore = "open bug: match arms are inferred independently, so a bare integer \
+            literal arm defaults to i32 before the join instead of adopting a \
+            sibling arm's u32"]
+fn match_literal_arm_adopts_sibling_arm_type() {
+    typecheck_program(
+        r#"
+def pick(v: #a | #b, x: u32) u32 =
+    match v
+    case #a -> x
+    case #b -> 1
+"#,
+    );
+}
+
+#[test]
+fn control_flow_join_weakens_mixed_uniqueness() {
+    typecheck_program(
+        r#"
+def choose(c: bool, owned: *[4]i32, observed: [4]i32) [4]i32 =
+    if c then owned else observed
+"#,
+    );
+    let result = try_typecheck_program(
+        r#"
+def choose(c: bool, owned: *[4]i32, observed: [4]i32) *[4]i32 =
+    if c then owned else observed
+"#,
+    );
+    assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
 }
 
 #[test]

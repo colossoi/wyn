@@ -538,12 +538,7 @@ fn has_use_after_move(source: &str) -> bool {
         .fold_ast_constants()
         .type_check(&mut module_manager)
         .expect("type_check");
-    let tlc = type_checked
-        .to_tlc(&module_manager, false)
-        .pin_entry_regions()
-        .expect("pin_entry_regions")
-        .partial_eval()
-        .normalize_soacs();
+    let tlc = type_checked.to_tlc(&module_manager, false).pin_entry_regions().expect("pin_entry_regions");
     super::check(&tlc.0.tlc).is_err()
 }
 
@@ -590,6 +585,155 @@ def main: i32 =
         !has_use_after_move(source),
         "a fresh alias-free local should satisfy a consuming call",
     );
+}
+
+#[test]
+fn tuple_literal_cannot_launder_observing_storage() {
+    let source = r#"
+def consume_pair(p: (*[4]i32, i32)) i32 = p.0[0]
+def main(a: [4]i32) i32 = consume_pair((a, 0))
+"#;
+    assert!(
+        has_use_after_move(source),
+        "an observing array remains observing when wrapped in a tuple",
+    );
+}
+
+#[test]
+fn mixed_unique_result_retains_observing_component_alias() {
+    let source = r#"
+def mixed(x: [4]i32, y: *[4]i32) (*[4]i32, [4]i32) = (y, x)
+def consume_pair(p: (*[4]i32, [4]i32)) i32 = p.0[0]
+def main(x: [4]i32, y: *[4]i32) i32 = consume_pair(mixed(x, y))
+"#;
+    assert!(
+        has_use_after_move(source),
+        "a nested unique result must not make its observing sibling consumable",
+    );
+}
+
+#[test]
+fn mixed_result_projections_keep_component_ownership_separate() {
+    let sibling_use = r#"
+def mixed(x: [4]i32, y: *[4]i32) (*[4]i32, [4]i32) = (y, x)
+def consume(a: *[4]i32) i32 = a[0]
+def main(x: [4]i32, y: *[4]i32) i32 =
+    let p = mixed(x, y) in
+    let _ = consume(p.0) in
+    p.1[0]
+"#;
+    assert!(
+        !has_use_after_move(sibling_use),
+        "consuming the unique component must not consume its observing sibling",
+    );
+
+    let consumed_component_reuse = r#"
+def mixed(x: [4]i32, y: *[4]i32) (*[4]i32, [4]i32) = (y, x)
+def consume(a: *[4]i32) i32 = a[0]
+def main(x: [4]i32, y: *[4]i32) i32 =
+    let p = mixed(x, y) in
+    let _ = consume(p.0) in
+    p.0[0]
+"#;
+    assert!(
+        has_use_after_move(consumed_component_reuse),
+        "the consumed component itself must still be dead",
+    );
+}
+
+#[test]
+fn allocating_expressions_may_feed_consuming_parameters() {
+    let map_result = r#"
+def consume(a: *[4]i32) i32 = a[0]
+def main(a: [4]i32) i32 = consume(map(|x: i32| x + 1, a))
+"#;
+    assert!(!has_use_after_move(map_result), "map allocates a fresh result");
+
+    let helper_result = r#"
+def consume(a: *[4]i32) i32 = a[0]
+def update(a: *[4]i32) *[4]i32 = a with [0] = 1
+def main(a: *[4]i32) i32 = consume(update(a))
+"#;
+    assert!(
+        !has_use_after_move(helper_result),
+        "a helper's top-level unique result is alias-free",
+    );
+
+    let conditional_result = r#"
+def consume(a: *[4]i32) i32 = a[0]
+def update(a: *[4]i32) *[4]i32 = a with [0] = 1
+def main(c: bool, a: *[4]i32, b: *[4]i32) i32 =
+    consume(if c then update(a) else update(b))
+"#;
+    assert!(
+        !has_use_after_move(conditional_result),
+        "an if whose branches are alias-free remains alias-free",
+    );
+}
+
+#[test]
+#[ignore = "open bug: a call whose arguments are all copy is judged alias-free, \
+            but its result may alias callee-reachable storage (a zero-arity \
+            top-level constant here); is_definitely_alias_free's App arm trusts \
+            an alias set that never sees the callee's own reachable stores"]
+fn call_result_aliasing_global_storage_is_not_consumable() {
+    let source = r#"
+def table: [4]i32 = [1, 2, 3, 4]
+def get(i: i32) [4]i32 = table
+def consume(a: *[4]i32) i32 = a[0]
+def main(i: i32) i32 = consume(get(i))
+"#;
+    assert!(
+        has_use_after_move(source),
+        "a call result reaching a top-level constant must not be consumable",
+    );
+}
+
+#[test]
+#[ignore = "open bug: a zero-trip loop returns init unchanged, but \
+            is_definitely_alias_free's Loop arm inspects only the body"]
+fn zero_trip_loop_result_keeps_init_alias() {
+    let source = r#"
+def table: [4]i32 = [1, 2, 3, 4]
+def consume(a: *[4]i32) i32 = a[0]
+def main(c: bool) i32 =
+    consume(loop x = table while c do map(|v: i32| v, x))
+"#;
+    assert!(
+        has_use_after_move(source),
+        "with zero trips the consumed value IS the loop's init",
+    );
+}
+
+#[test]
+#[ignore = "open bug: join_value_types' (Variable, _) arm plain-unifies, binding an \
+            unannotated parameter's inference variable to *T when joined with a \
+            unique arm; the parameter becomes consuming and observing callers reject"]
+fn control_flow_join_keeps_unannotated_parameter_observing() {
+    let source = r#"
+def f(x, y: *[4]i32, c: bool) [4]i32 =
+    if c then x else y
+
+def main(obs: [4]i32, own: *[4]i32, c: bool) i32 =
+    let r = f(obs, own, c) in r[0]
+"#;
+    assert!(
+        !has_use_after_move(source),
+        "joining with a unique arm must weaken the join, not promote `x` to *T",
+    );
+}
+
+#[test]
+fn compile_pipeline_checks_consumption_before_optimization() {
+    let source = r#"
+def consume(arr: *[4]i32) i32 = arr[0]
+def main(arr: [4]i32) i32 = consume(arr)
+"#;
+    let error = match crate::compile_thru_tlc(source) {
+        Ok(_) => panic!("compile must reject observing consumption"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, crate::error::CompilerError::AliasError(_, _)));
 }
 
 #[test]
@@ -777,10 +921,9 @@ def f(grid: *[3][4]i32, i: i32) i32 =
 }
 
 #[test]
-fn unrecognized_call_returning_non_copy_is_borrowed() {
-    // `view` returns its arg; we don't track that interprocedurally,
-    // so `r = view(arr)` must be Borrowed (immutable) — refusing
-    // promotion is sound under-approximation.
+fn observing_call_result_retains_argument_alias() {
+    // A non-unique call result may alias its observing arguments, so `r`
+    // shares `arr`'s immutable owner.
     let program = compile_to_tlc(
         r#"
 def view(a: [4]i32) [4]i32 = a
@@ -788,12 +931,15 @@ def main(arr: [4]i32) i32 =
     let r = view(arr) in r[0]
 "#,
     );
-    let (_, origin) = binder_origin(&program, "main", "r");
-    assert_eq!(
-        origin,
-        Origin::Borrowed,
-        "result of an unrecognized non-copy call should be Borrowed",
-    );
+    let model = build(&program);
+    let (result_owner, origin) = binder_origin(&program, "main", "r");
+    let main_lam = match &find_def(&program, "main").body.kind {
+        TermKind::Lambda(lam) => lam,
+        _ => panic!("main should be a lambda"),
+    };
+    let arr_owner = model.owner_of(main_lam.params[0].0).expect("arr owner");
+    assert_eq!(result_owner, arr_owner);
+    assert_eq!(origin, Origin::NonUniqueParam);
 }
 
 #[test]

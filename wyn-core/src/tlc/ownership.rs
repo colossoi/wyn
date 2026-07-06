@@ -52,6 +52,67 @@ impl OwnerId {
     }
 }
 
+/// Component-sensitive alias information for aggregate values. Futhark tracks
+/// tuple/record aliases per field: consuming the whole aggregate flattens all
+/// fields, while a projection sees only the selected component.
+#[derive(Clone, Debug, Default)]
+struct AliasValue {
+    owners: LookupSet<OwnerId>,
+    components: Option<Vec<AliasValue>>,
+}
+
+impl AliasValue {
+    fn leaf(owners: LookupSet<OwnerId>) -> Self {
+        Self {
+            owners,
+            components: None,
+        }
+    }
+
+    fn aggregate(components: Vec<AliasValue>) -> Self {
+        Self {
+            owners: LookupSet::new(),
+            components: Some(components),
+        }
+    }
+
+    fn flattened(&self) -> LookupSet<OwnerId> {
+        let mut owners = self.owners.clone();
+        if let Some(components) = &self.components {
+            for component in components {
+                owners.extend(component.flattened());
+            }
+        }
+        owners
+    }
+
+    fn project(&self, index: usize) -> Self {
+        let mut projected = self
+            .components
+            .as_ref()
+            .and_then(|components| components.get(index))
+            .cloned()
+            .unwrap_or_else(|| Self::leaf(self.flattened()));
+        projected.owners.extend(self.owners.iter().copied());
+        projected
+    }
+
+    fn union_with(&mut self, other: &AliasValue) {
+        self.owners.extend(other.owners.iter().copied());
+        match (&mut self.components, &other.components) {
+            (Some(left), Some(right)) if left.len() == right.len() => {
+                for (left, right) in left.iter_mut().zip(right) {
+                    left.union_with(right);
+                }
+            }
+            (Some(_), Some(_)) | (Some(_), None) | (None, Some(_)) => {
+                self.owners.extend(other.flattened());
+            }
+            (None, None) => {}
+        }
+    }
+}
+
 /// Provenance of an owner. Drives the mutability decision used by
 /// promotion: only mutable owners are eligible for in-place
 /// promotion, regardless of liveness.
@@ -99,21 +160,6 @@ impl Origin {
     }
 }
 
-/// Whether a parameter type carries a consuming `*` contract.
-///
-/// As in Futhark, a `*` nested in a tuple/record parameter makes the whole
-/// parameter consuming. An arrow is a boundary: a callback that itself has a
-/// consuming parameter does not cause the callback value to be consumed when
-/// passed to a higher-order function.
-fn is_consuming_param_type(ty: &Type<TypeName>) -> bool {
-    match ty {
-        Type::Constructed(TypeName::Unique, _) => true,
-        Type::Constructed(TypeName::Arrow, _) => false,
-        Type::Constructed(_, args) => args.iter().any(is_consuming_param_type),
-        Type::Variable(_) => false,
-    }
-}
-
 /// The result of the ownership analysis.
 ///
 /// Build phase fills `var_to_owner`, `origins`, `uses`, `kills`,
@@ -124,6 +170,13 @@ fn is_consuming_param_type(ty: &Type<TypeName>) -> bool {
 pub struct OwnershipModel {
     /// SymbolId → OwnerId. Populated as bindings are visited.
     pub var_to_owner: LookupMap<SymbolId, OwnerId>,
+    /// Every backing owner a value may alias. Aggregate values can carry
+    /// several owners (one per non-copy component); `var_to_owner` remains the
+    /// single-owner fast path used by in-place promotion.
+    pub var_aliases: LookupMap<SymbolId, LookupSet<OwnerId>>,
+    /// Component-sensitive form backing `var_aliases`. Kept private so
+    /// downstream optimization APIs continue to consume flat owner sets.
+    var_alias_values: LookupMap<SymbolId, AliasValue>,
     /// First binder name for each owner — makes use-after-move error
     /// messages user-readable. Populated when an owner is created, never
     /// overwritten.
@@ -156,6 +209,14 @@ impl OwnershipModel {
 
     pub fn owner_of(&self, sym: SymbolId) -> Option<OwnerId> {
         self.var_to_owner.get(&sym).copied()
+    }
+
+    pub fn aliases_of(&self, sym: SymbolId) -> LookupSet<OwnerId> {
+        self.var_aliases.get(&sym).cloned().unwrap_or_default()
+    }
+
+    fn alias_value_of(&self, sym: SymbolId) -> AliasValue {
+        self.var_alias_values.get(&sym).cloned().unwrap_or_else(|| AliasValue::leaf(self.aliases_of(sym)))
     }
 
     pub fn origin(&self, owner: OwnerId) -> Option<Origin> {
@@ -209,10 +270,42 @@ impl<'p> Builder<'p> {
     }
 
     fn bind(&mut self, sym: SymbolId, owner: OwnerId) {
-        self.model.var_to_owner.insert(sym, owner);
-        // First binder wins — keeps the most "canonical" name (param
-        // or fresh-let) for error messages.
-        self.model.owner_to_var.entry(owner).or_insert(sym);
+        self.bind_alias_value(sym, AliasValue::leaf(std::iter::once(owner).collect()));
+    }
+
+    fn bind_alias_value(&mut self, sym: SymbolId, value: AliasValue) {
+        let aliases = value.flattened();
+        self.model.var_alias_values.insert(sym, value);
+        self.model.var_aliases.insert(sym, aliases.clone());
+        if aliases.len() == 1 {
+            let owner = *aliases.iter().next().expect("one alias");
+            self.model.var_to_owner.insert(sym, owner);
+        } else {
+            self.model.var_to_owner.remove(&sym);
+        }
+        for owner in aliases {
+            self.model.owner_to_var.entry(owner).or_insert(sym);
+        }
+    }
+
+    fn fresh_alias_value_for_type(&mut self, ty: &Type<TypeName>, origin: Origin) -> AliasValue {
+        match ty {
+            Type::Constructed(TypeName::Unique, args) if args.len() == 1 => {
+                let value = self.fresh_alias_value_for_type(&args[0], origin);
+                if value.flattened().is_empty() {
+                    AliasValue::leaf(std::iter::once(self.fresh_owner(origin)).collect())
+                } else {
+                    value
+                }
+            }
+            Type::Constructed(TypeName::Tuple(_), args) | Type::Constructed(TypeName::Record(_), args) => {
+                AliasValue::aggregate(
+                    args.iter().map(|arg| self.fresh_alias_value_for_type(arg, origin)).collect(),
+                )
+            }
+            _ if types::is_copy(ty) => AliasValue::default(),
+            _ => AliasValue::leaf(std::iter::once(self.fresh_owner(origin)).collect()),
+        }
     }
 
     fn visit_def(&mut self, def: &Def) {
@@ -240,7 +333,7 @@ impl<'p> Builder<'p> {
             // ownership mark non-tail SOACs as consuming and rewrite
             // them to InputBuffer destinations that clobber the
             // caller's data.
-            let consuming = is_consuming_param_type(ty);
+            let consuming = types::is_consuming_parameter_type(ty);
             let origin = if is_entry && consuming {
                 Origin::Entry
             } else if consuming {
@@ -248,8 +341,8 @@ impl<'p> Builder<'p> {
             } else {
                 Origin::NonUniqueParam
             };
-            let owner = self.fresh_owner(origin);
-            self.bind(*sym, owner);
+            let value = self.fresh_alias_value_for_type(ty, origin);
+            self.bind_alias_value(*sym, value);
         }
     }
 
@@ -263,9 +356,8 @@ impl<'p> Builder<'p> {
         self.model.term_spans.insert(term.id, term.span);
         match &term.kind {
             TermKind::Var(VarRef::Symbol(sym)) => {
-                if let Some(owner) = self.model.owner_of(*sym) {
-                    self.model.uses.entry(term.id).or_default().insert(owner);
-                }
+                let aliases = self.model.aliases_of(*sym);
+                self.model.uses.entry(term.id).or_default().extend(aliases);
             }
             TermKind::Let {
                 name,
@@ -275,16 +367,16 @@ impl<'p> Builder<'p> {
             } => {
                 self.visit_term(rhs);
                 if !types::is_copy(name_ty) {
-                    let owner = match self.alias_target(rhs) {
-                        Some(target) => target,
-                        None => {
-                            let origin = self.origin_for_unaliased(rhs);
-                            let fresh = self.fresh_owner(origin);
-                            self.model.defs.entry(term.id).or_default().insert(fresh);
-                            fresh
-                        }
-                    };
-                    self.bind(*name, owner);
+                    let mut value = self.alias_value(rhs);
+                    let inherited = value.flattened();
+                    self.materialize_term_value(&mut value, name_ty, rhs);
+                    if value.flattened().is_empty() {
+                        value = self.fresh_alias_value_for_type(name_ty, self.origin_for_unaliased(rhs));
+                    }
+                    let introduced: LookupSet<OwnerId> =
+                        value.flattened().difference(&inherited).copied().collect();
+                    self.model.defs.entry(term.id).or_default().extend(introduced);
+                    self.bind_alias_value(*name, value);
                 }
                 self.visit_term(body);
             }
@@ -292,56 +384,56 @@ impl<'p> Builder<'p> {
                 self.visit_term(func);
                 let param_tys = collect_param_types(&func.ty, args.len());
                 let mut killed_this_call: LookupSet<OwnerId> = LookupSet::new();
-                for (arg, param_ty) in args.iter().zip(&param_tys) {
+                for (arg_index, arg) in args.iter().enumerate() {
                     self.visit_term(arg);
-                    if is_consuming_param_type(param_ty) {
-                        if let Some(owner) = self.alias_target(arg) {
-                            let origin = self.model.origin(owner);
-                            if !origin.map(Origin::is_mutable).unwrap_or(false) {
-                                let var_name = self
-                                    .model
-                                    .owner_to_var
-                                    .get(&owner)
-                                    .and_then(|s| self.program.symbols.get(*s).cloned())
-                                    .unwrap_or_else(|| "<value>".to_string());
-                                let span = self.model.term_spans.get(&arg.id).copied();
-                                self.model.build_errors.push((
-                                    format!(
-                                        "cannot consume observing value `{}`; \
-                                         consuming parameter requires an alias-free argument",
-                                        var_name
-                                    ),
-                                    span,
-                                ));
-                                continue;
+                    if param_tys.get(arg_index).map(types::is_consuming_parameter_type).unwrap_or(false) {
+                        let aliases = self.alias_targets(arg);
+                        if !aliases.is_empty() {
+                            let rejected: Vec<OwnerId> = aliases
+                                .iter()
+                                .copied()
+                                .filter(|owner| {
+                                    !self.model.origin(*owner).map(Origin::is_mutable).unwrap_or(false)
+                                })
+                                .collect();
+                            if !rejected.is_empty() {
+                                for owner in rejected {
+                                    let var_name = self
+                                        .model
+                                        .owner_to_var
+                                        .get(&owner)
+                                        .and_then(|s| self.program.symbols.get(*s).cloned())
+                                        .unwrap_or_else(|| "<value>".to_string());
+                                    let span = self.model.term_spans.get(&arg.id).copied();
+                                    self.model.build_errors.push((
+                                        format!(
+                                            "cannot consume observing value `{}`; \
+                                             consuming parameter requires an alias-free argument",
+                                            var_name
+                                        ),
+                                        span,
+                                    ));
+                                }
+                            } else {
+                                for owner in aliases.iter().copied() {
+                                    // A second `*T` arg resolving to an owner the
+                                    // call already consumed is a duplicate move.
+                                    if !killed_this_call.insert(owner) {
+                                        let var_name = self
+                                            .model
+                                            .owner_to_var
+                                            .get(&owner)
+                                            .and_then(|s| self.program.symbols.get(*s).cloned())
+                                            .unwrap_or_else(|| "<value>".to_string());
+                                        let span = self.model.term_spans.get(&arg.id).copied();
+                                        self.model
+                                            .build_errors
+                                            .push((format!("use of moved value `{}`", var_name), span));
+                                    }
+                                }
+                                self.model.kills.entry(term.id).or_default().extend(aliases);
                             }
-                            // A second `*T` arg resolving to the same
-                            // owner consumes a store the prior arg
-                            // already moved — use-after-move within
-                            // this call. Record at the offending
-                            // arg's term so the diagnostic span
-                            // points at the second occurrence.
-                            if !killed_this_call.insert(owner) {
-                                let var_name = self
-                                    .model
-                                    .owner_to_var
-                                    .get(&owner)
-                                    .and_then(|s| self.program.symbols.get(*s).cloned())
-                                    .unwrap_or_else(|| "<value>".to_string());
-                                let span = self.model.term_spans.get(&arg.id).copied();
-                                self.model
-                                    .build_errors
-                                    .push((format!("use of moved value `{}`", var_name), span));
-                            }
-                            self.model.kills.entry(term.id).or_default().insert(owner);
-                        } else if !is_consuming_param_type(&arg.ty)
-                            && !rhs_is_fresh_producer(arg, self.program)
-                        {
-                            // A compound argument with no tracked owner is
-                            // consumable only when its type promises
-                            // alias-freedom or its syntax is a recognized
-                            // fresh producer. Unknown non-copy calls may alias
-                            // observing inputs, so reject them conservatively.
+                        } else if !self.is_definitely_alias_free(arg) {
                             let span = self.model.term_spans.get(&arg.id).copied();
                             self.model.build_errors.push((
                                 "cannot consume observing value; consuming parameter requires an alias-free argument"
@@ -355,6 +447,12 @@ impl<'p> Builder<'p> {
             TermKind::Lambda(lam) => self.visit_lambda(lam),
             TermKind::Soac(op) => self.visit_soac(op, term.id),
             TermKind::ArrayExpr(ae) => self.visit_array_expr(ae),
+            TermKind::TupleProj { tuple, .. }
+                if matches!(&tuple.kind, TermKind::Var(VarRef::Symbol(_))) =>
+            {
+                let aliases = self.alias_targets(term);
+                self.model.uses.entry(term.id).or_default().extend(aliases);
+            }
             TermKind::Loop {
                 loop_var,
                 loop_var_ty,
@@ -371,16 +469,17 @@ impl<'p> Builder<'p> {
                 // alias of one. The liveness fixed-point still iterates
                 // correctly.
                 if !types::is_copy(loop_var_ty) {
-                    let owner = match self.alias_target(init) {
-                        Some(target) => target,
-                        None => {
-                            let origin = self.origin_for_unaliased(init);
-                            let fresh = self.fresh_owner(origin);
-                            self.model.defs.entry(term.id).or_default().insert(fresh);
-                            fresh
-                        }
-                    };
-                    self.bind(*loop_var, owner);
+                    let mut value = self.alias_value(init);
+                    let inherited = value.flattened();
+                    self.materialize_term_value(&mut value, loop_var_ty, init);
+                    if value.flattened().is_empty() {
+                        value =
+                            self.fresh_alias_value_for_type(loop_var_ty, self.origin_for_unaliased(init));
+                    }
+                    let introduced: LookupSet<OwnerId> =
+                        value.flattened().difference(&inherited).copied().collect();
+                    self.model.defs.entry(term.id).or_default().extend(introduced);
+                    self.bind_alias_value(*loop_var, value);
                 }
 
                 // Sub-bindings extracted from loop_var (e.g. tuple
@@ -388,16 +487,16 @@ impl<'p> Builder<'p> {
                 for (name, ty, extract) in init_bindings {
                     self.visit_term(extract);
                     if !types::is_copy(ty) {
-                        let owner = match self.alias_target(extract) {
-                            Some(target) => target,
-                            None => {
-                                let origin = self.origin_for_unaliased(extract);
-                                let fresh = self.fresh_owner(origin);
-                                self.model.defs.entry(term.id).or_default().insert(fresh);
-                                fresh
-                            }
-                        };
-                        self.bind(*name, owner);
+                        let mut value = self.alias_value(extract);
+                        let inherited = value.flattened();
+                        self.materialize_term_value(&mut value, ty, extract);
+                        if value.flattened().is_empty() {
+                            value = self.fresh_alias_value_for_type(ty, self.origin_for_unaliased(extract));
+                        }
+                        let introduced: LookupSet<OwnerId> =
+                            value.flattened().difference(&inherited).copied().collect();
+                        self.model.defs.entry(term.id).or_default().extend(introduced);
+                        self.bind_alias_value(*name, value);
                     }
                 }
 
@@ -463,11 +562,13 @@ impl<'p> Builder<'p> {
         for (capture_sym, capture_ty, capture_term) in &sb.captures {
             self.visit_term(capture_term);
             if !types::is_copy(capture_ty) {
-                let owner = match self.alias_target(capture_term) {
-                    Some(target) => target,
-                    None => self.fresh_owner(self.origin_for_unaliased(capture_term)),
-                };
-                self.bind(*capture_sym, owner);
+                let mut value = self.alias_value(capture_term);
+                self.materialize_term_value(&mut value, capture_ty, capture_term);
+                if value.flattened().is_empty() {
+                    value = self
+                        .fresh_alias_value_for_type(capture_ty, self.origin_for_unaliased(capture_term));
+                }
+                self.bind_alias_value(*capture_sym, value);
             }
         }
         self.visit_term(&sb.lam.body);
@@ -652,14 +753,18 @@ impl<'p> Builder<'p> {
             ArrayExpr::Var(vr, ty) => {
                 let mut ids = super::TermIdSource::new();
                 let t = super::atom_var_term(*vr, ty.clone(), &mut ids);
-                if let Some(owner) = self.alias_target(&t) {
-                    if self.model.origin(owner).map(|o| o.is_mutable()).unwrap_or(false) {
+                let aliases = self.alias_targets(&t);
+                if !aliases.is_empty() {
+                    if aliases
+                        .iter()
+                        .all(|owner| self.model.origin(*owner).map(|o| o.is_mutable()).unwrap_or(false))
+                    {
                         return Origin::BorrowedMutableElement;
                     }
                     return Origin::Borrowed;
                 }
                 // No tracked owner — fall back to the named input's static type.
-                if is_consuming_param_type(ty) {
+                if types::is_unique(ty) {
                     Origin::BorrowedMutableElement
                 } else {
                     Origin::Borrowed
@@ -709,8 +814,283 @@ impl<'p> Builder<'p> {
         }
     }
 
-    fn alias_target(&self, term: &Term) -> Option<OwnerId> {
-        alias_target_of(term, &self.model, self.program)
+    /// Every pre-existing backing owner that may be reachable through the
+    /// value produced by `term`. Aggregate projections deliberately retain
+    /// the complete set: this may suppress an optimization, but cannot make
+    /// observing storage consumable.
+    fn alias_targets(&self, term: &Term) -> LookupSet<OwnerId> {
+        self.alias_value(term).flattened()
+    }
+
+    fn alias_value(&self, term: &Term) -> AliasValue {
+        match &term.kind {
+            TermKind::Var(VarRef::Symbol(sym)) => self.model.alias_value_of(*sym),
+            TermKind::Var(_) => Self::empty_alias_value_for_type(&term.ty),
+            TermKind::Coerce { inner, .. } => self.alias_value(inner),
+            TermKind::Index { array, .. } => AliasValue::leaf(self.alias_targets(array)),
+            TermKind::TupleProj { tuple, idx } => self.alias_value(tuple).project(*idx),
+            TermKind::Tuple(parts) => {
+                AliasValue::aggregate(parts.iter().map(|part| self.alias_value(part)).collect())
+            }
+            TermKind::VecLit(parts) => AliasValue::leaf(self.aliases_of_terms(parts.iter())),
+            TermKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                let mut value = self.alias_value(then_branch);
+                value.union_with(&self.alias_value(else_branch));
+                value
+            }
+            TermKind::Loop { init, body, .. } => {
+                let mut value = self.alias_value(init);
+                value.union_with(&self.alias_value(body));
+                value
+            }
+            TermKind::Let { body, .. } => self.alias_value(body),
+            TermKind::App { func, args } => {
+                let known = catalog().known();
+                if var_term_builtin_id(func, &self.program.symbols) == Some(known.array_with_in_place) {
+                    return args
+                        .first()
+                        .map(|arg| self.alias_value(arg))
+                        .unwrap_or_else(|| Self::empty_alias_value_for_type(&term.ty));
+                }
+                if var_term_builtin_id(func, &self.program.symbols) == Some(known.array_with) {
+                    return Self::empty_alias_value_for_type(&term.ty);
+                }
+
+                // A top-level unique result cannot alias observing arguments.
+                // Storage surrendered by a consuming argument is represented
+                // by the returned value's new ownership slot instead.
+                if types::is_unique(&term.ty) {
+                    return Self::empty_alias_value_for_type(&term.ty);
+                }
+
+                let param_tys = collect_param_types(&func.ty, args.len());
+                let mut aliases = LookupSet::new();
+                for (index, arg) in args.iter().enumerate() {
+                    let consumes =
+                        param_tys.get(index).map(types::is_consuming_parameter_type).unwrap_or(false);
+                    if !consumes {
+                        aliases.extend(self.alias_targets(arg));
+                    }
+                }
+                Self::observing_alias_value_for_type(&term.ty, &aliases)
+            }
+            TermKind::ArrayExpr(ae) => AliasValue::leaf(self.array_expr_aliases(ae)),
+            TermKind::Soac(op) => {
+                let aliases = self.soac_result_aliases(op, &term.ty);
+                Self::observing_alias_value_for_type(&term.ty, &aliases)
+            }
+            TermKind::Lambda(_)
+            | TermKind::IntLit(_)
+            | TermKind::FloatLit(_)
+            | TermKind::BoolLit(_)
+            | TermKind::UnitLit
+            | TermKind::BinOp(_)
+            | TermKind::UnOp(_)
+            | TermKind::Extern(_)
+            | TermKind::OutputSlotStore { .. } => Self::empty_alias_value_for_type(&term.ty),
+        }
+    }
+
+    fn empty_alias_value_for_type(ty: &Type<TypeName>) -> AliasValue {
+        match ty {
+            Type::Constructed(TypeName::Unique, args) if args.len() == 1 => {
+                Self::empty_alias_value_for_type(&args[0])
+            }
+            Type::Constructed(TypeName::Tuple(_), args) | Type::Constructed(TypeName::Record(_), args) => {
+                AliasValue::aggregate(args.iter().map(Self::empty_alias_value_for_type).collect())
+            }
+            _ => AliasValue::default(),
+        }
+    }
+
+    /// Futhark's interprocedural rule: every non-alias-free result component
+    /// aliases all arguments passed to observing parameters. Components
+    /// marked `*` remain empty and receive fresh owners when bound.
+    fn observing_alias_value_for_type(ty: &Type<TypeName>, aliases: &LookupSet<OwnerId>) -> AliasValue {
+        match ty {
+            Type::Constructed(TypeName::Unique, args) if args.len() == 1 => {
+                Self::empty_alias_value_for_type(&args[0])
+            }
+            Type::Constructed(TypeName::Tuple(_), args) | Type::Constructed(TypeName::Record(_), args) => {
+                AliasValue::aggregate(
+                    args.iter().map(|arg| Self::observing_alias_value_for_type(arg, aliases)).collect(),
+                )
+            }
+            _ if types::is_copy(ty) => AliasValue::default(),
+            _ => AliasValue::leaf(aliases.clone()),
+        }
+    }
+
+    fn materialize_term_value(&mut self, value: &mut AliasValue, ty: &Type<TypeName>, term: &Term) {
+        match ty {
+            Type::Constructed(TypeName::Unique, args) if args.len() == 1 => {
+                self.materialize_all_missing(value, &args[0]);
+                if value.flattened().is_empty() {
+                    value.owners.insert(self.fresh_owner(Origin::Fresh));
+                }
+            }
+            Type::Constructed(TypeName::Tuple(_), args) | Type::Constructed(TypeName::Record(_), args) => {
+                if value.components.is_none() {
+                    *value = Self::empty_alias_value_for_type(ty);
+                }
+                if let Some(components) = value.components.as_mut() {
+                    let term_parts = match &term.kind {
+                        TermKind::Tuple(parts) if parts.len() == components.len() => Some(parts.as_slice()),
+                        _ => None,
+                    };
+                    for (index, (component, component_ty)) in components.iter_mut().zip(args).enumerate() {
+                        let component_term = term_parts.and_then(|parts| parts.get(index)).unwrap_or(term);
+                        self.materialize_term_value(component, component_ty, component_term);
+                    }
+                }
+            }
+            _ if types::is_copy(ty) => {}
+            _ => {
+                let allocates_outer = matches!(
+                    &term.kind,
+                    TermKind::ArrayExpr(ArrayExpr::Literal(_) | ArrayExpr::Range { .. })
+                        | TermKind::Soac(SoacOp::Map { .. })
+                        | TermKind::Soac(SoacOp::Scan { .. })
+                        | TermKind::Soac(SoacOp::Filter { .. })
+                ) || matches!(&term.kind, TermKind::Soac(SoacOp::Screma { .. }))
+                    && ty.strip_unique().is_array()
+                    || matches!(&term.kind, TermKind::App { func, .. }
+                        if var_term_builtin_id(func, &self.program.symbols)
+                            == Some(catalog().known().array_with));
+                if allocates_outer || value.owners.is_empty() && self.is_definitely_alias_free(term) {
+                    value.owners.insert(self.fresh_owner(Origin::Fresh));
+                }
+            }
+        }
+    }
+
+    fn materialize_all_missing(&mut self, value: &mut AliasValue, ty: &Type<TypeName>) {
+        match ty {
+            Type::Constructed(TypeName::Unique, args) if args.len() == 1 => {
+                self.materialize_all_missing(value, &args[0]);
+                if value.flattened().is_empty() {
+                    value.owners.insert(self.fresh_owner(Origin::Fresh));
+                }
+            }
+            Type::Constructed(TypeName::Tuple(_), args) | Type::Constructed(TypeName::Record(_), args) => {
+                if value.components.is_none() {
+                    *value = Self::empty_alias_value_for_type(ty);
+                }
+                if let Some(components) = value.components.as_mut() {
+                    for (component, component_ty) in components.iter_mut().zip(args) {
+                        self.materialize_all_missing(component, component_ty);
+                    }
+                }
+            }
+            _ if types::is_copy(ty) => {}
+            _ if value.owners.is_empty() => {
+                value.owners.insert(self.fresh_owner(Origin::Fresh));
+            }
+            _ => {}
+        }
+    }
+
+    fn aliases_of_terms<'a>(&self, terms: impl IntoIterator<Item = &'a Term>) -> LookupSet<OwnerId> {
+        let mut aliases = LookupSet::new();
+        for term in terms {
+            aliases.extend(self.alias_targets(term));
+        }
+        aliases
+    }
+
+    fn array_expr_aliases(&self, ae: &ArrayExpr) -> LookupSet<OwnerId> {
+        match ae {
+            ArrayExpr::Var(VarRef::Symbol(sym), _) => self.model.aliases_of(*sym),
+            ArrayExpr::Var(VarRef::Builtin { .. }, _) | ArrayExpr::StorageView(_) => LookupSet::new(),
+            ArrayExpr::Zip(parts) => {
+                let mut aliases = LookupSet::new();
+                for part in parts {
+                    aliases.extend(self.array_expr_aliases(part));
+                }
+                aliases
+            }
+            ArrayExpr::Literal(_) => LookupSet::new(),
+            ArrayExpr::Range { .. } => LookupSet::new(),
+        }
+    }
+
+    /// SOACs allocate fresh outer arrays. Existing aliases matter when a
+    /// result can itself contain non-copy elements, or when the SOAC returns
+    /// an accumulator directly.
+    fn soac_result_aliases(&self, op: &SoacOp, result_ty: &Type<TypeName>) -> LookupSet<OwnerId> {
+        if types::is_unique(result_ty) {
+            return LookupSet::new();
+        }
+        match op {
+            SoacOp::Map { .. } | SoacOp::Filter { .. } | SoacOp::Scan { .. } => LookupSet::new(),
+            SoacOp::Scatter { inputs, .. } => self.aliases_of_array_exprs(inputs),
+            SoacOp::Screma { accumulators, .. } => {
+                let mut aliases = LookupSet::new();
+                for acc in accumulators {
+                    aliases.extend(self.alias_targets(&acc.ne));
+                }
+                aliases
+            }
+            SoacOp::Reduce { ne, input, .. } => {
+                let mut aliases = self.alias_targets(ne);
+                aliases.extend(self.array_expr_aliases(input));
+                aliases
+            }
+            SoacOp::ReduceByIndex {
+                ne, indices, values, ..
+            } => {
+                let mut aliases = self.alias_targets(ne);
+                aliases.extend(self.array_expr_aliases(indices));
+                aliases.extend(self.array_expr_aliases(values));
+                aliases
+            }
+        }
+    }
+
+    fn aliases_of_array_exprs(&self, aes: &[ArrayExpr]) -> LookupSet<OwnerId> {
+        let mut aliases = LookupSet::new();
+        for ae in aes {
+            aliases.extend(self.array_expr_aliases(ae));
+        }
+        aliases
+    }
+
+    /// Whether an owner-less expression is known to construct an alias-free
+    /// value. Expressions with tracked aliases are judged by those aliases;
+    /// this predicate only justifies a new owner for allocating forms.
+    fn is_definitely_alias_free(&self, term: &Term) -> bool {
+        if types::is_copy(&term.ty) || types::is_unique(&term.ty) {
+            return true;
+        }
+        if !self.alias_targets(term).is_empty() {
+            return false;
+        }
+        match &term.kind {
+            TermKind::ArrayExpr(ArrayExpr::Literal(_) | ArrayExpr::Range { .. }) => true,
+            TermKind::Tuple(parts) | TermKind::VecLit(parts) => {
+                parts.iter().all(|part| types::is_copy(&part.ty) || self.is_definitely_alias_free(part))
+            }
+            TermKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => self.is_definitely_alias_free(then_branch) && self.is_definitely_alias_free(else_branch),
+            TermKind::Loop { body, .. } => self.is_definitely_alias_free(body),
+            // Function results alias every observing argument unless their
+            // return component is marked unique. The empty-alias guard above
+            // therefore proves this particular result alias-free.
+            TermKind::App { .. } => true,
+            TermKind::Soac(SoacOp::Map { .. })
+            | TermKind::Soac(SoacOp::Scan { .. })
+            | TermKind::Soac(SoacOp::Filter { .. })
+            | TermKind::Soac(SoacOp::Screma { .. }) => true,
+            TermKind::Coerce { inner, .. } => self.is_definitely_alias_free(inner),
+            _ => false,
+        }
     }
 
     /// The origin to assign when a Let / Loop binder produces a fresh
@@ -720,10 +1100,7 @@ impl<'p> Builder<'p> {
     /// can't classify (user function returning non-unique non-copy,
     /// lambda invocation, etc.).
     fn origin_for_unaliased(&self, rhs: &Term) -> Origin {
-        if is_consuming_param_type(&rhs.ty) {
-            return Origin::Fresh;
-        }
-        if rhs_is_fresh_producer(rhs, self.program) {
+        if types::is_unique(&rhs.ty) || self.is_definitely_alias_free(rhs) {
             return Origin::Fresh;
         }
         Origin::Borrowed
@@ -759,24 +1136,6 @@ pub(super) fn alias_target_of(term: &Term, model: &OwnershipModel, program: &Pro
             None
         }
         _ => None,
-    }
-}
-
-/// Recognize forms that *definitely* produce a fresh non-copy value.
-/// Used by `origin_for_unaliased` to keep promotion paths open for
-/// known fresh-producers while staying conservative about unknowns.
-///
-/// Functional `array_with` (catalog `BuiltinId`) allocates a new array;
-/// the in-place variant is deliberately absent — that one aliases its
-/// input. Structural literal/tuple constructors (`Tuple`, `VecLit`,
-/// `ArrayExpr`) also allocate fresh.
-fn rhs_is_fresh_producer(term: &Term, program: &Program) -> bool {
-    match &term.kind {
-        TermKind::ArrayExpr(_) | TermKind::Tuple(_) | TermKind::VecLit(_) => true,
-        TermKind::App { func, .. } => {
-            var_term_builtin_id(func, &program.symbols) == Some(catalog().known().array_with)
-        }
-        _ => false,
     }
 }
 
@@ -931,7 +1290,11 @@ impl<'m> Liveness<'m> {
             }
             TermKind::TupleProj { tuple, .. } => {
                 let live = self.transfer(term.id, live_after);
-                self.analyze(tuple, live)
+                if matches!(&tuple.kind, TermKind::Var(VarRef::Symbol(_))) {
+                    live
+                } else {
+                    self.analyze(tuple, live)
+                }
             }
             TermKind::Index { array, index } => {
                 let live = self.transfer(term.id, live_after);
@@ -1090,9 +1453,7 @@ impl<'m> Liveness<'m> {
             // placeholder id.
             ArrayExpr::Var(VarRef::Symbol(sym), _) => {
                 let mut live = live_after;
-                if let Some(owner) = self.model.owner_of(*sym) {
-                    live.insert(owner);
-                }
+                live.extend(self.model.aliases_of(*sym));
                 live
             }
             ArrayExpr::Var(VarRef::Builtin { .. }, _) => live_after,

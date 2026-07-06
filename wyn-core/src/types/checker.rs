@@ -16,8 +16,8 @@ use std::collections::BTreeSet;
 // Import type helper functions from parent module
 use super::patterns::coverage::{check_match, format_cov_pat, CoverageError};
 use super::{
-    as_arrow, bool_type, f32, function, i32, mat, no_region, record, sized_array, strip_unique, tuple,
-    unit, vec,
+    as_arrow, bool_type, f32, forget_value_uniqueness, function, i32, mat, no_region, record, sized_array,
+    strip_unique, tuple, unit, vec,
 };
 
 /// Render a single swizzle slot index as its `xyzw` letter. Used by
@@ -1130,12 +1130,7 @@ impl<'a> TypeChecker<'a> {
                 // an alias-free `*T` value may be observed as `T`, but an
                 // observing `T` value cannot be promoted to `*T`.
                 let actual_type = self.infer_expression(expr)?;
-                self.unify_or_err_weakening(
-                    &actual_type,
-                    expected_type,
-                    expr.h.span,
-                    &format!("Type mismatch: expected {}", self.format_type(expected_type)),
-                )?;
+                self.unify_or_err_weakening(&actual_type, expected_type, expr.h.span, "Type mismatch")?;
                 Ok(actual_type)
             }
         }
@@ -1302,15 +1297,7 @@ impl<'a> TypeChecker<'a> {
 
         // If we had an expected type, unify with it
         if let Some(exp) = expected {
-            self.unify_or_err_weakening(
-                &func_type,
-                exp,
-                expr.h.span,
-                &format!(
-                    "Lambda type doesn't match expected type {}",
-                    self.format_type(exp)
-                ),
-            )?;
+            self.unify_or_err_weakening(&func_type, exp, expr.h.span, "Lambda type mismatch")?;
             // Store in type table when checking against expected type
             self.type_table.insert(expr.h.id, TypeScheme::Monotype(func_type.clone()));
         }
@@ -2069,12 +2056,7 @@ impl<'a> TypeChecker<'a> {
                     &body_inner,
                     &expected_inner,
                     entry.body.h.span,
-                    &format!(
-                        "Entry point '{}' return type mismatch: declared {}, inferred {}",
-                        entry.name,
-                        self.format_type(&expected_type),
-                        self.format_type(&body_type)
-                    ),
+                    &format!("Entry point '{}' return type mismatch", entry.name),
                 )?;
 
                 Ok(())
@@ -2163,12 +2145,7 @@ impl<'a> TypeChecker<'a> {
             };
 
             if let Some(ref declared_type) = resolved_declared_type {
-                self.unify_or_err_weakening(
-                    &expr_type,
-                    declared_type,
-                    decl.body.h.span,
-                    &format!("Type mismatch: expected {}", self.format_type(declared_type)),
-                )?;
+                self.unify_or_err_weakening(&expr_type, declared_type, decl.body.h.span, "Type mismatch")?;
             }
 
             // Add to GlobalEnv (no scope_stack write — that's the
@@ -2736,8 +2713,11 @@ impl<'a> TypeChecker<'a> {
                 let then_ty = self.infer_expression(&if_expr.then_branch)?;
                 let else_ty = self.infer_expression(&if_expr.else_branch)?;
 
-                // Unify then and else types
-                self.context.unify(&then_ty, &else_ty).map_err(|_| {
+                // Join branch values. Two unique branches retain uniqueness;
+                // a mixed unique/observing pair weakens to the observing type.
+                let checkpoint = self.context.len();
+                let result_ty = self.join_value_types(&then_ty, &else_ty).map_err(|_| {
+                    self.context.rollback(checkpoint);
                     err_type_at!(
                         if_expr.else_branch.h.span,
                         "If branches have incompatible types: then={}, else={}",
@@ -2747,15 +2727,15 @@ impl<'a> TypeChecker<'a> {
                 })?;
 
                 // Futhark restriction: functions cannot be returned from if expressions
-                let resolved_then = then_ty.apply(&self.context);
-                if as_arrow(&resolved_then).is_some() {
+                let resolved_result = result_ty.apply(&self.context);
+                if as_arrow(&resolved_result).is_some() {
                     bail_type_at!(
                         expr.h.span,
                         "Functions cannot be returned from if expressions"
                     );
                 }
 
-                Ok(then_ty)
+                Ok(result_ty)
             }
 
             ExprKind::UnaryOp(op, operand) => {
@@ -2873,19 +2853,32 @@ impl<'a> TypeChecker<'a> {
                 // analysis (Maranget) handles the per-type universe.
                 let scrutinee_ty = self.infer_expression(&match_expr.scrutinee)?;
 
-                // All arms produce the same type; pick a fresh variable
-                // and unify each arm's body against it.
-                let result_var = self.context.new_variable();
-
                 if match_expr.cases.is_empty() {
                     bail_type_at!(expr.h.span, "match expression must have at least one arm");
                 }
 
+                let mut result_ty: Option<Type> = None;
                 for case in &match_expr.cases {
                     self.scope_stack.push_scope();
                     self.bind_pattern(&case.pattern, &scrutinee_ty, false)?;
-                    self.check_expression(&case.body, &result_var)?;
+                    let arm_ty = self.infer_expression(&case.body)?;
                     self.scope_stack.pop_scope();
+
+                    result_ty = Some(match result_ty {
+                        None => arm_ty,
+                        Some(previous) => {
+                            let checkpoint = self.context.len();
+                            self.join_value_types(&previous, &arm_ty).map_err(|_| {
+                                self.context.rollback(checkpoint);
+                                err_type_at!(
+                                    case.body.h.span,
+                                    "Match arms have incompatible types: expected {}, got {}",
+                                    self.format_type(&previous),
+                                    self.format_type(&arm_ty)
+                                )
+                            })?
+                        }
+                    });
                 }
 
                 // Coverage analysis: exhaustiveness + redundancy.
@@ -2907,7 +2900,7 @@ impl<'a> TypeChecker<'a> {
                     }
                 }
 
-                Ok(result_var)
+                Ok(result_ty.expect("non-empty match checked above"))
             }
 
             // A bare `#name(args)` doesn't pin down which sum type it
@@ -3325,13 +3318,62 @@ impl<'a> TypeChecker<'a> {
         })
     }
 
+    /// Least common value type for control-flow joins. Uniqueness survives
+    /// only when every incoming value has it at that structural position;
+    /// otherwise the join intentionally weakens to the observing type.
+    fn join_value_types(&mut self, left: &Type, right: &Type) -> std::result::Result<Type, ()> {
+        let left = left.apply(&self.context);
+        let right = right.apply(&self.context);
+
+        match (&left, &right) {
+            (Type::Variable(_), _) | (_, Type::Variable(_)) => {
+                self.context.unify(&left, &right).map_err(|_| ())?;
+                Ok(left.apply(&self.context))
+            }
+            (
+                Type::Constructed(TypeName::Unique, left_args),
+                Type::Constructed(TypeName::Unique, right_args),
+            ) if left_args.len() == 1 && right_args.len() == 1 => Ok(Type::Constructed(
+                TypeName::Unique,
+                vec![self.join_value_types(&left_args[0], &right_args[0])?],
+            )),
+            (Type::Constructed(TypeName::Unique, left_args), _) if left_args.len() == 1 => {
+                self.join_value_types(&left_args[0], &right)
+            }
+            (_, Type::Constructed(TypeName::Unique, right_args)) if right_args.len() == 1 => {
+                self.join_value_types(&left, &right_args[0])
+            }
+            (Type::Constructed(TypeName::Arrow, _), Type::Constructed(TypeName::Arrow, _)) => {
+                // Functions are rejected as control-flow results by the
+                // caller. Keep their effect-bearing signatures invariant.
+                self.context.unify(&left, &right).map_err(|_| ())?;
+                Ok(left.apply(&self.context))
+            }
+            (Type::Constructed(left_name, left_args), Type::Constructed(right_name, right_args))
+                if left_name == right_name && left_args.len() == right_args.len() =>
+            {
+                let args = left_args
+                    .iter()
+                    .zip(right_args)
+                    .map(|(left_arg, right_arg)| self.join_value_types(left_arg, right_arg))
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                Ok(Type::Constructed(left_name.clone(), args))
+            }
+            _ => {
+                self.context.unify(&left, &right).map_err(|_| ())?;
+                Ok(left.apply(&self.context))
+            }
+        }
+    }
+
     /// One-directional `*T → T` weakening: unify `actual` with `expected`.
     /// Uniqueness is information that can be discarded but not
     /// manufactured. The relation is structural for value containers, so
-    /// `(*A, B)` is a subtype of `(A, B)`. Function parameters are invariant
-    /// while results remain covariant: weakening must never turn a consuming
-    /// `*A -> B` function into an observing `A -> B` function, but an
-    /// alias-free function result may still be forgotten.
+    /// `(*A, B)` is a subtype of `(A, B)`. Function parameters are
+    /// contravariant and results covariant: weakening must never turn a
+    /// consuming `*A -> B` function into an observing `A -> B` function, but
+    /// an observing callback may satisfy a consuming callback contract and an
+    /// alias-free function result may be forgotten.
     ///
     ///   - expected `T`,  actual `*T`  → strip actual, unify (the weakening)
     ///   - expected `*T`, actual `*T`  → no strip, unify directly
@@ -3356,10 +3398,10 @@ impl<'a> TypeChecker<'a> {
             self.context.rollback(checkpoint);
             Err(err_type_at!(
                 span,
-                "{}, got {} and {}",
+                "{}: expected {}, got {}",
                 ctx,
-                self.format_type(&actual.apply(&self.context)),
-                self.format_type(&expected.apply(&self.context))
+                self.format_type(&expected.apply(&self.context)),
+                self.format_type(&actual.apply(&self.context))
             ))
         }
     }
@@ -3383,6 +3425,11 @@ impl<'a> TypeChecker<'a> {
             ) if actual_args.len() == 1 && expected_args.len() == 1 => {
                 self.unify_weakening_inner(&actual_args[0], &expected_args[0])
             }
+            // An as-yet unconstrained value parameter can infer a consuming
+            // type from a unique result/annotation contract.
+            (Type::Variable(_), Type::Constructed(TypeName::Unique, _)) => {
+                self.context.unify(&actual, &expected).map_err(|_| ())
+            }
             // A consuming/alias-free expectation is a real contract. It
             // cannot be manufactured from a plain value or unconstrained
             // type variable.
@@ -3393,14 +3440,16 @@ impl<'a> TypeChecker<'a> {
                 self.unify_weakening_inner(&actual_args[0], &expected)
             }
 
-            // Parameter annotations on a function describe effects at its
-            // call boundary and must match invariantly. Results are positive
-            // positions and retain ordinary uniqueness weakening.
+            // Function parameters are contravariant and results covariant.
+            // Thus an observing callback can safely stand in for a consuming
+            // callback (the caller gives it more ownership than it needs),
+            // while a consuming callback cannot hide behind an observing
+            // callback contract.
             (
                 Type::Constructed(TypeName::Arrow, actual_args),
                 Type::Constructed(TypeName::Arrow, expected_args),
             ) if actual_args.len() == 2 && expected_args.len() == 2 => {
-                self.context.unify(&actual_args[0], &expected_args[0]).map_err(|_| ())?;
+                self.unify_weakening_inner(&expected_args[0], &actual_args[0])?;
                 self.unify_weakening_inner(&actual_args[1], &expected_args[1])
             }
 
@@ -3421,7 +3470,7 @@ impl<'a> TypeChecker<'a> {
             // it after forgetting positive-position uniqueness, preserving
             // every function signature verbatim.
             (_, Type::Variable(_)) => {
-                let weakened = Self::forget_value_uniqueness(&actual);
+                let weakened = forget_value_uniqueness(&actual);
                 self.context.unify(&weakened, &expected).map_err(|_| ())
             }
 
@@ -3430,25 +3479,6 @@ impl<'a> TypeChecker<'a> {
             (Type::Variable(_), _) => self.context.unify(&actual, &expected).map_err(|_| ()),
 
             _ => self.context.unify(&actual, &expected).map_err(|_| ()),
-        }
-    }
-
-    /// Forget uniqueness in covariant value positions while treating an
-    /// arrow as opaque until it can be compared with another concrete arrow
-    /// using the parameter-invariant/result-covariant rule above. Used when
-    /// an observing expected type is still an unconstrained variable (for
-    /// example, polymorphic identity receiving a unique array).
-    fn forget_value_uniqueness(ty: &Type) -> Type {
-        match ty {
-            Type::Constructed(TypeName::Unique, args) if args.len() == 1 => {
-                Self::forget_value_uniqueness(&args[0])
-            }
-            Type::Constructed(TypeName::Arrow, _) => ty.clone(),
-            Type::Constructed(name, args) => Type::Constructed(
-                name.clone(),
-                args.iter().map(Self::forget_value_uniqueness).collect(),
-            ),
-            Type::Variable(_) => ty.clone(),
         }
     }
 
@@ -3716,8 +3746,8 @@ impl<'a> TypeChecker<'a> {
         // spelled `T`, while an observing `T` parameter is not. Function
         // arrows remain opaque here, so this shape check cannot hide a
         // consuming callback behind an observing callback type.
-        let arg_shape = Self::forget_value_uniqueness(&arg_for_check);
-        let param_shape = Self::forget_value_uniqueness(&param_applied);
+        let arg_shape = forget_value_uniqueness(&arg_for_check);
+        let param_shape = forget_value_uniqueness(&param_applied);
         let checkpoint = self.context.len();
         if self.unify_weakening_inner(&arg_shape, &param_shape).is_err() {
             self.context.rollback(checkpoint);
