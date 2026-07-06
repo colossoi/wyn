@@ -40,6 +40,8 @@ fn compile_to_tlc(source: &str) -> Program {
         .to_tlc(&module_manager, false)
         .pin_entry_regions()
         .expect("pin_entry_regions")
+        .validate_ownership()
+        .expect("validate_ownership")
         .partial_eval()
         .normalize_soacs();
     tlc.0.tlc

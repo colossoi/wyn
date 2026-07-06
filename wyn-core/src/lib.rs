@@ -308,6 +308,7 @@ pub type TypeTable = LookupMap<NodeId, TypeScheme<TypeName>>;
 // TLC stages (AST → SSA):
 //       .to_tlc(&module_manager, fill_holes)       -> TlcTransformed
 //       .pin_entry_regions()                       -> TlcRegionsPinned
+//       .validate_ownership()                      -> TlcOwnershipValidated
 //       .partial_eval()                            -> TlcPartialEvaled
 //       .normalize_soacs()                         -> TlcSoaNormalized
 //       .monomorphize()                            -> TlcMonomorphized
@@ -637,12 +638,26 @@ impl std::ops::Deref for TlcRegionsPinned {
 
 impl TlcRegionsPinned {
     /// Validate source-level consumption before any simplification or
-    /// inlining can erase the call boundary that carries the `*T` contract.
-    pub fn validate_ownership(self) -> Result<Self> {
+    /// inlining can erase the call boundary that carries the `*T`
+    /// contract. `partial_eval` is defined only on the resulting
+    /// typestate, so no pipeline reaches the optimizer unvalidated.
+    pub fn validate_ownership(self) -> Result<TlcOwnershipValidated> {
         tlc::ownership::check(&self.0.tlc)?;
-        Ok(self)
+        Ok(TlcOwnershipValidated(self.0))
     }
+}
 
+/// TLC whose source-level consumption has been validated.
+pub struct TlcOwnershipValidated(pub TlcEarlyInner);
+
+impl std::ops::Deref for TlcOwnershipValidated {
+    type Target = TlcEarlyInner;
+    fn deref(&self) -> &TlcEarlyInner {
+        &self.0
+    }
+}
+
+impl TlcOwnershipValidated {
     /// Constant folding and algebraic simplifications.
     pub fn partial_eval(self) -> TlcPartialEvaled {
         let mut inner = self.0;
@@ -652,17 +667,16 @@ impl TlcRegionsPinned {
 }
 
 #[cfg(test)]
-impl TlcRegionsPinned {
+impl TlcOwnershipValidated {
     /// Test-only: run the canonical TLC optimization pipeline to
     /// `TlcReachable` without the per-stage `time(...)` wrappers the
-    /// driver uses. Runs on the already-region-pinned state, so the
-    /// fallible `pin_entry_regions` step (and its merge-error) is the
-    /// caller's to propagate. The bool is forwarded as `parallelize_soacs(
-    /// disable=bool)`: `false` ⇒ parallelization enabled (default driver
-    /// mode, what most tests want); `true` ⇒ disabled (the `--single-stage`
-    /// flag).
+    /// driver uses. Runs on the already-validated state, so the
+    /// fallible `pin_entry_regions` / `validate_ownership` steps (and
+    /// their errors) are the caller's to propagate. The bool is
+    /// forwarded as `parallelize_soacs(disable=bool)`: `false` ⇒
+    /// parallelization enabled (default driver mode, what most tests
+    /// want); `true` ⇒ disabled (the `--single-stage` flag).
     pub fn optimize_for_test(self, disable_parallelize: bool) -> TlcReachable {
-        tlc::ownership::check(&self.0.tlc).expect("source ownership validation");
         self.optimize_for_test_thru_expose_producers()
             .fuse_static_indices()
             .float_runtime_index_nested_producers()

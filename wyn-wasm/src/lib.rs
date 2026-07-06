@@ -590,7 +590,11 @@ fn compile_to_wgsl_impl(source: &str) -> CompileResultWgsl {
         Err(e) => return CompileResultWgsl::err(e),
     };
 
-    let tlc_program = match type_checked.to_tlc(&module_manager, false).pin_entry_regions() {
+    let tlc_program = match type_checked
+        .to_tlc(&module_manager, false)
+        .pin_entry_regions()
+        .and_then(wyn_core::TlcRegionsPinned::validate_ownership)
+    {
         Ok(t) => t,
         Err(e) => return CompileResultWgsl::err(e),
     };

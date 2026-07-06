@@ -14,6 +14,8 @@ fn program_from(src: &str) -> Program {
     tc.to_tlc(&module_manager, false)
         .pin_entry_regions()
         .expect("pin_entry_regions")
+        .validate_ownership()
+        .expect("validate_ownership")
         .partial_eval()
         .0
         .tlc
