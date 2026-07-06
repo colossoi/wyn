@@ -128,23 +128,25 @@ def main(x: [4]i32) i32 = consume(x)
 }
 
 #[test]
-fn observing_return_cannot_satisfy_alias_free_contract() {
-    let result = try_typecheck_program("def bad(x: [4]i32) *[4]i32 = x");
-    assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
+fn observing_return_satisfies_shape_check_but_defers_to_ownership() {
+    // The checker only shape-checks a `*` return (uniqueness is a
+    // signature-level property forgotten in expression types); whether the
+    // body is actually alias-free is verified by the ownership pass. See
+    // `observing_return_rejected_by_ownership` in ownership_tests.
+    typecheck_program("def bad(x: [4]i32) *[4]i32 = x");
 }
 
 #[test]
-fn weakening_diagnostic_prints_each_type_once() {
-    let error = try_typecheck_program("def bad(x: [4]i32) *[4]i32 = x").unwrap_err();
+fn genuine_shape_mismatch_prints_each_type_once() {
+    let error = try_typecheck_program("def bad(x: [4]i32) [4]f32 = x").unwrap_err();
     let CompilerError::TypeError(message, _) = error else {
         panic!("expected type error");
     };
     assert_eq!(
         message.matches("Array[").count(),
         2,
-        "expected and actual should each be rendered once: {message}",
+        "both types should each be rendered once: {message}",
     );
-    assert_eq!(message.matches("expected").count(), 1, "{message}");
     assert_eq!(message.matches("got").count(), 1, "{message}");
 }
 
@@ -208,7 +210,13 @@ def pick(v: #a | #b, f: [4]i32 -> i32, g: [4]i32 -> i32) [4]i32 -> i32 =
 }
 
 #[test]
-fn unannotated_parameter_infers_unique_from_result_contract() {
+fn unannotated_parameter_does_not_infer_consumption() {
+    // Unlike an earlier design, a `*` return does not make an unannotated
+    // parameter consuming — uniqueness is not inferred. The body shape-
+    // checks (the parameter is observed as `[4]i32`), and the alias-free
+    // return obligation then fails in the ownership pass because an
+    // observing parameter is not alias-free (see ownership_tests). To
+    // return the argument alias-free, annotate it `x: *[4]i32`.
     typecheck_program("def pass(x) *[4]i32 = x");
 }
 
@@ -228,9 +236,6 @@ def choose_match(v: #left | #right, a: *[4]i32, b: *[4]i32) *[4]i32 =
 }
 
 #[test]
-#[ignore = "open bug: match arms are inferred independently, so a bare \
-            constructor arm no longer resolves its sum type from an earlier \
-            arm and fails 'ambiguous constructor'"]
 fn match_constructor_arm_resolves_from_sibling_arms() {
     typecheck_program(
         r#"
@@ -243,9 +248,6 @@ def f(x: #some(i32) | #none) #some(i32) | #none =
 }
 
 #[test]
-#[ignore = "open bug: match arms are inferred independently, so a bare integer \
-            literal arm defaults to i32 before the join instead of adopting a \
-            sibling arm's u32"]
 fn match_literal_arm_adopts_sibling_arm_type() {
     typecheck_program(
         r#"
@@ -258,20 +260,22 @@ def pick(v: #a | #b, x: u32) u32 =
 }
 
 #[test]
-fn control_flow_join_weakens_mixed_uniqueness() {
+fn control_flow_join_of_mixed_uniqueness_shape_checks() {
+    // Both branches have the same `*`-free value type, so the join always
+    // type-checks. Whether a `*` return is honored is left to ownership
+    // (see ownership_tests).
     typecheck_program(
         r#"
 def choose(c: bool, owned: *[4]i32, observed: [4]i32) [4]i32 =
     if c then owned else observed
 "#,
     );
-    let result = try_typecheck_program(
+    typecheck_program(
         r#"
 def choose(c: bool, owned: *[4]i32, observed: [4]i32) *[4]i32 =
     if c then owned else observed
 "#,
     );
-    assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
 }
 
 #[test]
@@ -1167,14 +1171,10 @@ def test: f32 = double_sum([1.0f32, 2.0f32])
 }
 
 #[test]
-fn test_unique_return_from_non_unique_param() {
-    // Returning *[4]f32 from a function that takes [4]f32 should be an error
-    // because we're claiming to return a unique/owned value but we only borrowed it
-    let result = try_typecheck_program("def id(a: [4]f32) *[4]f32 = a");
-    assert!(
-        result.is_err(),
-        "Should error: cannot return unique type from non-unique parameter"
-    );
+fn unique_return_from_non_unique_param_passes_shape_check() {
+    // Shape-checks at the type level; the alias-freedom obligation is an
+    // ownership concern (see ownership_tests).
+    typecheck_program("def id(a: [4]f32) *[4]f32 = a with [0] = a[1]");
 }
 
 // =============================================================================

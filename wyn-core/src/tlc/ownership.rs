@@ -321,7 +321,12 @@ impl<'p> Builder<'p> {
     ) {
         let mut value = self.alias_value(rhs);
         let inherited = value.flattened();
-        self.materialize_term_value(&mut value, ty, rhs);
+        // Materialize fresh owners against the producer's `*` structure,
+        // not the binder's annotation: expression types no longer carry
+        // uniqueness, so a `*`-returning call is recognized through its
+        // signature return type.
+        let shape = self.producer_shape_type(rhs);
+        self.materialize_term_value(&mut value, &shape, rhs);
         let mut owners = value.flattened();
         if owners.is_empty() {
             let origin = self.origin_for_unaliased(rhs);
@@ -335,6 +340,18 @@ impl<'p> Builder<'p> {
         self.bind_alias_value(sym, value);
     }
 
+    /// The `*`-bearing type describing what `rhs` produces. Expression
+    /// types are uniqueness-free, so a call's fresh components are read
+    /// from the callee's signature return type; other producers keep
+    /// their (already uniqueness-free) type.
+    fn producer_shape_type(&self, rhs: &Term) -> Type<TypeName> {
+        match &rhs.kind {
+            TermKind::App { func, args } => callee_return_type(&func.ty, args.len()),
+            TermKind::Coerce { inner, .. } => self.producer_shape_type(inner),
+            _ => rhs.ty.clone(),
+        }
+    }
+
     fn visit_def(&mut self, def: &Def) {
         // Term ids are unique within a def but restart across defs, so
         // the memo table must not outlive one.
@@ -343,10 +360,76 @@ impl<'p> Builder<'p> {
         // params field — Defs whose body is anything else are zero-arity
         // constants and have no slots to track here.
         if let TermKind::Lambda(lam) = &def.body.kind {
-            self.bind_params(lam, matches!(def.meta, DefMeta::EntryPoint(_)));
+            let is_entry = matches!(def.meta, DefMeta::EntryPoint(_));
+            self.bind_params(lam, is_entry);
             self.visit_term(&lam.body);
+            if !is_entry {
+                self.check_alias_free_return(&lam.ret_ty, &lam.body);
+            }
         } else {
             self.visit_term(&def.body);
+        }
+    }
+
+    /// A function that declares a `*` (alias-free) return must actually
+    /// produce one: the positive evidence the checker cannot supply once
+    /// uniqueness leaves expression types. Each `*`-marked return
+    /// component must be backed only by mutable storage — freshly
+    /// allocated, or ownership surrendered by a consuming parameter —
+    /// never by an observing parameter or a shared global.
+    fn check_alias_free_return(&mut self, ret_ty: &Type<TypeName>, body: &Term) {
+        if !types::is_consuming_parameter_type(ret_ty) {
+            return;
+        }
+        let value = self.alias_value(body);
+        if !self.return_component_ok(ret_ty, Some(body), &value) {
+            let span = self.model.term_spans.get(&body.id).copied();
+            self.model.build_errors.push((
+                "cannot prove the `*` (alias-free) result is alias-free; \
+                 it must be freshly allocated or a consumed parameter (take any \
+                 shared input as an explicit parameter, or use `copy`)"
+                    .to_string(),
+                span,
+            ));
+        }
+    }
+
+    /// Recursively check that every `*`-marked component of `ret_ty` is
+    /// alias-free. `term` is the sub-expression producing this component
+    /// when one is syntactically available (used to recognize a fresh
+    /// producer for an untracked component).
+    fn return_component_ok(
+        &mut self,
+        ret_ty: &Type<TypeName>,
+        term: Option<&Term>,
+        value: &AliasValue,
+    ) -> bool {
+        match ret_ty {
+            Type::Constructed(TypeName::Unique, args) if args.len() == 1 => {
+                let owners = value.flattened();
+                if owners.is_empty() {
+                    // No tracked storage: accept only a recognized fresh
+                    // producer (an untracked component of a call result is
+                    // vouched for by the callee's own checked signature).
+                    term.map_or(true, |t| self.is_definitely_alias_free(t))
+                } else {
+                    owners
+                        .iter()
+                        .all(|owner| self.model.origin(*owner).map(Origin::is_mutable).unwrap_or(false))
+                }
+            }
+            Type::Constructed(TypeName::Tuple(_), args) | Type::Constructed(TypeName::Record(_), args) => {
+                let parts = match term.map(|t| &t.kind) {
+                    Some(TermKind::Tuple(parts)) if parts.len() == args.len() => Some(parts.as_slice()),
+                    _ => None,
+                };
+                args.iter().enumerate().all(|(i, arg_ty)| {
+                    let component_term = parts.and_then(|p| p.get(i));
+                    let component_value = value.project(i);
+                    self.return_component_ok(arg_ty, component_term, &component_value)
+                })
+            }
+            _ => true,
         }
     }
 
@@ -865,11 +948,14 @@ impl<'p> Builder<'p> {
                     return Self::empty_alias_value_for_type(&term.ty);
                 }
 
-                // A top-level unique result cannot alias observing arguments.
-                // Storage surrendered by a consuming argument is represented
-                // by the returned value's new ownership slot instead.
-                if types::is_unique(&term.ty) {
-                    return Self::empty_alias_value_for_type(&term.ty);
+                // The result's per-component uniqueness comes from the
+                // callee's declared return type — expression types no
+                // longer carry `*`. A `*` component is fresh (alias-free);
+                // an observing component aliases every argument passed to a
+                // non-consuming parameter.
+                let return_ty = callee_return_type(&func.ty, args.len());
+                if types::is_unique(&return_ty) {
+                    return Self::empty_alias_value_for_type(&return_ty);
                 }
 
                 let param_tys = collect_param_types(&func.ty, args.len());
@@ -881,7 +967,7 @@ impl<'p> Builder<'p> {
                         aliases.extend(self.alias_targets(arg));
                     }
                 }
-                Self::observing_alias_value_for_type(&term.ty, &aliases)
+                Self::observing_alias_value_for_type(&return_ty, &aliases)
             }
             TermKind::ArrayExpr(ae) => AliasValue::leaf(self.array_expr_aliases(ae)),
             TermKind::Soac(op) => {
@@ -1073,7 +1159,7 @@ impl<'p> Builder<'p> {
     /// value. Expressions with tracked aliases are judged by those aliases;
     /// this predicate only justifies a new owner for allocating forms.
     fn is_definitely_alias_free(&mut self, term: &Term) -> bool {
-        if types::is_copy(&term.ty) || types::is_unique(&term.ty) {
+        if types::is_copy(&term.ty) {
             return true;
         }
         if !self.alias_targets(term).is_empty() {
@@ -1094,11 +1180,11 @@ impl<'p> Builder<'p> {
             TermKind::Loop { init, body, .. } => {
                 self.is_definitely_alias_free(init) && self.is_definitely_alias_free(body)
             }
-            // A call result may alias storage reachable through the callee
-            // (top-level constants, captured state) that no argument-derived
-            // alias set can see. Only a unique return type — handled by the
-            // is_unique early return above — proves a call result alias-free.
-            TermKind::App { .. } => false,
+            // A call result is alias-free only when the callee declares a
+            // `*` return; otherwise it may alias storage reachable through
+            // the callee (top-level constants, captured state) that no
+            // argument-derived alias set can see.
+            TermKind::App { func, args } => types::is_unique(&callee_return_type(&func.ty, args.len())),
             // A non-array Screma result is the accumulator; its aliases
             // are the `ne` aliases, which the empty-alias guard covered.
             TermKind::Soac(SoacOp::Screma { .. }) => true,
@@ -1114,7 +1200,7 @@ impl<'p> Builder<'p> {
     /// can't classify (user function returning non-unique non-copy,
     /// lambda invocation, etc.).
     fn origin_for_unaliased(&mut self, rhs: &Term) -> Origin {
-        if types::is_unique(&rhs.ty) || self.is_definitely_alias_free(rhs) {
+        if self.is_definitely_alias_free(rhs) {
             return Origin::Fresh;
         }
         Origin::Borrowed
@@ -1183,6 +1269,24 @@ fn collect_param_types(func_ty: &Type<TypeName>, expected: usize) -> Vec<Type<Ty
         }
     }
     out
+}
+
+/// The result type of applying `func_ty` to `n_args` arguments — the
+/// residue after peeling `n_args` arrows. This is where a function's
+/// `*` return contract lives now that expression types no longer carry
+/// uniqueness: ownership reads "does this call produce a fresh value"
+/// from the callee's signature, not the call's inferred type.
+fn callee_return_type(func_ty: &Type<TypeName>, n_args: usize) -> Type<TypeName> {
+    let mut current = func_ty.clone();
+    for _ in 0..n_args {
+        match current {
+            Type::Constructed(TypeName::Arrow, args) if args.len() == 2 => {
+                current = args[1].clone();
+            }
+            _ => break,
+        }
+    }
+    current
 }
 
 // =============================================================================

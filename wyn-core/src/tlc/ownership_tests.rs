@@ -756,9 +756,6 @@ def main(c: bool) i32 =
 }
 
 #[test]
-#[ignore = "open bug: join_value_types' (Variable, _) arm plain-unifies, binding an \
-            unannotated parameter's inference variable to *T when joined with a \
-            unique arm; the parameter becomes consuming and observing callers reject"]
 fn control_flow_join_keeps_unannotated_parameter_observing() {
     let source = r#"
 def f(x, y: *[4]i32, c: bool) [4]i32 =
@@ -769,7 +766,56 @@ def main(obs: [4]i32, own: *[4]i32, c: bool) i32 =
 "#;
     assert!(
         !has_use_after_move(source),
-        "joining with a unique arm must weaken the join, not promote `x` to *T",
+        "an if branch carries no uniqueness, so `x` stays observing and \
+         an observing caller argument is accepted",
+    );
+}
+
+#[test]
+fn observing_return_rejected_by_ownership() {
+    // A `*` return must be freshly allocated or a consumed parameter;
+    // returning an observing parameter directly is rejected.
+    let observing_param = r#"
+def bad(x: [4]i32) *[4]i32 = x
+def main(y: [4]i32) i32 = bad(y)[0]
+"#;
+    assert!(
+        has_use_after_move(observing_param),
+        "observing param is not alias-free"
+    );
+
+    // Unlike the observing case, returning a consumed unique parameter or
+    // a freshly allocated value satisfies the contract.
+    let consumed_param = r#"
+def ok(x: *[4]i32) *[4]i32 = x
+def main(x: *[4]i32) i32 = ok(x)[0]
+"#;
+    assert!(
+        !has_use_after_move(consumed_param),
+        "a consumed unique param is alias-free"
+    );
+
+    let fresh = r#"
+def ok(x: *[4]i32) *[4]i32 = x with [0] = 1
+def main(x: *[4]i32) i32 = ok(x)[0]
+"#;
+    assert!(
+        !has_use_after_move(fresh),
+        "a freshly updated array is alias-free"
+    );
+}
+
+#[test]
+fn unannotated_parameter_star_return_is_rejected() {
+    // `def pass(x) *[4]i32 = x` shape-checks (no uniqueness inference),
+    // but the observing parameter cannot satisfy the `*` return.
+    let source = r#"
+def pass(x) *[4]i32 = x
+def main(a: [4]i32) i32 = pass(a)[0]
+"#;
+    assert!(
+        has_use_after_move(source),
+        "uniqueness is not inferred; annotate the parameter to consume it",
     );
 }
 
