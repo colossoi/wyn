@@ -210,6 +210,19 @@ def pick(v: #a | #b, f: [4]i32 -> i32, g: [4]i32 -> i32) [4]i32 -> i32 =
 }
 
 #[test]
+fn polymorphic_function_accepts_unique_argument_without_instantiating_unique() {
+    // A type variable is never instantiated at a unique type; passing a
+    // `*[4]i32` to a polymorphic identity is fine and leaves the function
+    // observing.
+    typecheck_program(
+        r#"
+def id(x) = x
+def main(a: *[4]i32) i32 = id(a)[0]
+"#,
+    );
+}
+
+#[test]
 fn unannotated_parameter_does_not_infer_consumption() {
     // Unlike an earlier design, a `*` return does not make an unannotated
     // parameter consuming — uniqueness is not inferred. The body shape-

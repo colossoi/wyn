@@ -2091,10 +2091,9 @@ impl<'a> TypeChecker<'a> {
                 let expected_inner = self.instantiate_existential(expected_type.clone());
                 let body_inner = self.instantiate_existential(body_type.clone());
 
-                // Validate body type against the declared outputs.  As for
-                // ordinary function returns, an alias-free result may be
-                // exposed through a non-unique output contract, but not the
-                // other way around.
+                // Validate the body's value shape against the declared
+                // outputs; any `*` on the output contract is a signature
+                // property forgotten for this shape check.
                 self.unify_or_err_weakening(
                     &body_inner,
                     &expected_inner,

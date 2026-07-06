@@ -820,6 +820,21 @@ def main(a: [4]i32) i32 = pass(a)[0]
 }
 
 #[test]
+fn polymorphic_passthrough_does_not_launder_observing_storage() {
+    // A polymorphic function is never instantiated at a unique type, so
+    // its result aliases its (observing) argument and cannot be consumed.
+    let source = r#"
+def id(x) = x
+def consume(a: *[4]i32) i32 = a[0]
+def main(a: [4]i32) i32 = consume(id(a))
+"#;
+    assert!(
+        has_use_after_move(source),
+        "id(a) aliases the observing argument a; consuming it is illegal",
+    );
+}
+
+#[test]
 fn compile_pipeline_checks_consumption_before_optimization() {
     let source = r#"
 def consume(arr: *[4]i32) i32 = arr[0]
