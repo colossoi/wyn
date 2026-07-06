@@ -564,6 +564,35 @@ def main(arr: *[4]i32) i32 =
 }
 
 #[test]
+fn consuming_call_rejects_observing_parameter_origin() {
+    // Shape checking alone cannot distinguish a fresh local array from an
+    // observing parameter of the same `T`. The ownership model can: a
+    // NonUniqueParam is retained by the caller and must not be consumed.
+    let source = r#"
+def consume(arr: *[4]i32) i32 = arr[0]
+def main(arr: [4]i32) i32 = consume(arr)
+"#;
+    assert!(
+        has_use_after_move(source),
+        "an observing function parameter must not satisfy a consuming call",
+    );
+}
+
+#[test]
+fn consuming_call_accepts_fresh_local_origin() {
+    let source = r#"
+def consume(arr: *[4]i32) i32 = arr[0]
+def main: i32 =
+    let arr = [1, 2, 3, 4] in
+    consume(arr)
+"#;
+    assert!(
+        !has_use_after_move(source),
+        "a fresh alias-free local should satisfy a consuming call",
+    );
+}
+
+#[test]
 fn use_after_move_via_let_alias() {
     let source = r#"
 def consume(arr: *[4]i32) i32 = arr[0]
@@ -1173,26 +1202,18 @@ def f(a: [8]i32) ?k.[k]i32 = filter(|x: i32| x > 0, a)
 // =============================================================================
 
 #[test]
-fn map_body_consuming_element_param_is_accepted() {
-    // Each iteration of `map` receives a fresh element. A body
-    // that consumes that element via a `*T` call is sound: the
-    // consumption applies to one runtime value per iteration, and
-    // the next iteration receives a different value.
-    //
-    // This test is the false-positive case for an over-conservative
-    // SOAC fixed-point: if `lambda_body_fixed_point` doesn't
-    // subtract the element-param owner from the loop-back set, it
-    // treats the param as carried across iterations and the
-    // body's kill conflicts with the carried-live owner.
+fn map_body_consuming_fresh_element_param_is_accepted() {
+    // Each map iteration receives a distinct element view from a unique
+    // input. Alias analysis therefore classifies the element as mutable and
+    // permits it to flow to a consuming parameter even though its local
+    // surface type is written without `*`.
     let source = r#"
 def consume(x: *[4]i32) i32 = x[0]
 def main(rows: *[3][4]i32) [3]i32 = map(|row: [4]i32| consume(row), rows)
 "#;
     assert!(
         !has_use_after_move(source),
-        "SOAC body consuming its per-iteration element param is sound \
-         (each iteration's element is a fresh runtime value); \
-         analysis should accept",
+        "a distinct element view from a unique SOAC input should be consumable",
     );
 }
 

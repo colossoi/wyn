@@ -102,6 +102,65 @@ def main(arr: *[4]i32) ([4]i32, i32) =
 }
 
 #[test]
+fn unique_argument_may_flow_to_observing_parameter() {
+    // Futhark-style uniqueness subtyping: forgetting alias-freedom is
+    // permitted. `observe` does not consume its argument.
+    typecheck_program(
+        r#"
+def observe(x: [4]i32) i32 = x[0]
+def main(x: *[4]i32) i32 = observe(x)
+"#,
+    );
+}
+
+#[test]
+fn consuming_call_shapechecks_before_alias_analysis() {
+    // The type checker verifies the underlying value shape. Whether `x` is
+    // actually safe to consume depends on provenance and is rejected by the
+    // TLC ownership pass (covered in ownership_tests), while fresh values of
+    // the same inferred shape remain legal.
+    typecheck_program(
+        r#"
+def consume(x: *[4]i32) i32 = x[0]
+def main(x: [4]i32) i32 = consume(x)
+"#,
+    );
+}
+
+#[test]
+fn observing_return_cannot_satisfy_alias_free_contract() {
+    let result = try_typecheck_program("def bad(x: [4]i32) *[4]i32 = x");
+    assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
+}
+
+#[test]
+fn consuming_function_cannot_be_hidden_as_observing_function() {
+    // Weakening is covariant for values inside tuples/records, but it must
+    // not cross an arrow and erase the callee's consuming-input effect.
+    let result = try_typecheck_program(
+        r#"
+def consume(x: *[4]i32) i32 = x[0]
+def apply_observing(f: [4]i32 -> i32, x: *[4]i32) i32 = f(x)
+def main(x: *[4]i32) i32 = apply_observing(consume, x)
+"#,
+    );
+    assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
+}
+
+#[test]
+fn alias_free_callback_result_may_be_weakened() {
+    // Function parameters stay invariant, but returns are covariant: callers
+    // may forget that a callback result is alias-free.
+    typecheck_program(
+        r#"
+def update(x: *[4]i32) *[4]i32 = x with [0] = 1
+def apply_update(f: *[4]i32 -> [4]i32, x: *[4]i32) [4]i32 = f(x)
+def main(x: *[4]i32) [4]i32 = apply_update(update, x)
+"#,
+    );
+}
+
+#[test]
 fn test_mul_concrete_matrix_types() {
     // This test verifies that polymorphic mul works with concrete matrix types
     typecheck_program(

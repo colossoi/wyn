@@ -419,20 +419,6 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    /// Pure structural equality without applying substitution.
-    /// Used internally after types have already been resolved.
-    fn types_equal_structural(left: &Type, right: &Type) -> bool {
-        match (left, right) {
-            (Type::Constructed(l_name, l_args), Type::Constructed(r_name, r_args)) => {
-                l_name == r_name
-                    && l_args.len() == r_args.len()
-                    && l_args.iter().zip(r_args.iter()).all(|(l, r)| Self::types_equal_structural(l, r))
-            }
-            (Type::Variable(l_id), Type::Variable(r_id)) => l_id == r_id,
-            _ => false,
-        }
-    }
-
     /// Constrain the address space of an array type to Storage.
     /// Used for entry point parameters where []f32 means storage buffer.
     /// Sized arrays (e.g. [19]u32) stay Composite — only unsized arrays become View.
@@ -1139,16 +1125,17 @@ impl<'a> TypeChecker<'a> {
                 Ok(expected_type.clone())
             }
             _ => {
-                // For non-lambdas, infer and unify with expected
+                // For non-lambdas, infer and check the inferred value
+                // against the expected contract.  This is directional:
+                // an alias-free `*T` value may be observed as `T`, but an
+                // observing `T` value cannot be promoted to `*T`.
                 let actual_type = self.infer_expression(expr)?;
-                self.context.unify(&actual_type, expected_type).map_err(|_| {
-                    err_type_at!(
-                        expr.h.span,
-                        "Type mismatch: expected {}, got {}",
-                        self.format_type(expected_type),
-                        self.format_type(&actual_type)
-                    )
-                })?;
+                self.unify_or_err_weakening(
+                    &actual_type,
+                    expected_type,
+                    expr.h.span,
+                    &format!("Type mismatch: expected {}", self.format_type(expected_type)),
+                )?;
                 Ok(actual_type)
             }
         }
@@ -1315,14 +1302,15 @@ impl<'a> TypeChecker<'a> {
 
         // If we had an expected type, unify with it
         if let Some(exp) = expected {
-            self.context.unify(&func_type, exp).map_err(|_| {
-                err_type_at!(
-                    expr.h.span,
-                    "Lambda type {} doesn't match expected type {}",
-                    self.format_type(&func_type),
+            self.unify_or_err_weakening(
+                &func_type,
+                exp,
+                expr.h.span,
+                &format!(
+                    "Lambda type doesn't match expected type {}",
                     self.format_type(exp)
-                )
-            })?;
+                ),
+            )?;
             // Store in type table when checking against expected type
             self.type_table.insert(expr.h.id, TypeScheme::Monotype(func_type.clone()));
         }
@@ -2073,16 +2061,21 @@ impl<'a> TypeChecker<'a> {
                 let expected_inner = self.instantiate_existential(expected_type.clone());
                 let body_inner = self.instantiate_existential(body_type.clone());
 
-                // Validate body type matches declared outputs
-                self.context.unify(&body_inner, &expected_inner).map_err(|_| {
-                    err_type_at!(
-                        entry.body.h.span,
+                // Validate body type against the declared outputs.  As for
+                // ordinary function returns, an alias-free result may be
+                // exposed through a non-unique output contract, but not the
+                // other way around.
+                self.unify_or_err_weakening(
+                    &body_inner,
+                    &expected_inner,
+                    entry.body.h.span,
+                    &format!(
                         "Entry point '{}' return type mismatch: declared {}, inferred {}",
                         entry.name,
                         self.format_type(&expected_type),
                         self.format_type(&body_type)
-                    )
-                })?;
+                    ),
+                )?;
 
                 Ok(())
             }
@@ -2170,14 +2163,12 @@ impl<'a> TypeChecker<'a> {
             };
 
             if let Some(ref declared_type) = resolved_declared_type {
-                if !self.types_match(&expr_type, declared_type) {
-                    bail_type_at!(
-                        decl.body.h.span,
-                        "Type mismatch: expected {}, got {}",
-                        self.format_type(declared_type),
-                        self.format_type(&expr_type)
-                    );
-                }
+                self.unify_or_err_weakening(
+                    &expr_type,
+                    declared_type,
+                    decl.body.h.span,
+                    &format!("Type mismatch: expected {}", self.format_type(declared_type)),
+                )?;
             }
 
             // Add to GlobalEnv (no scope_stack write — that's the
@@ -3334,21 +3325,23 @@ impl<'a> TypeChecker<'a> {
         })
     }
 
-    /// One-directional `*T → T` weakening: unify `actual` with `expected`,
-    /// stripping `*` from `actual` only when `expected` is *not* unique.
+    /// One-directional `*T → T` weakening: unify `actual` with `expected`.
     /// Uniqueness is information that can be discarded but not
-    /// manufactured.
+    /// manufactured. The relation is structural for value containers, so
+    /// `(*A, B)` is a subtype of `(A, B)`. Function parameters are invariant
+    /// while results remain covariant: weakening must never turn a consuming
+    /// `*A -> B` function into an observing `A -> B` function, but an
+    /// alias-free function result may still be forgotten.
     ///
     ///   - expected `T`,  actual `*T`  → strip actual, unify (the weakening)
     ///   - expected `*T`, actual `*T`  → no strip, unify directly
     ///   - expected `T`,  actual `T`   → no strip, unify directly
     ///   - expected `*T`, actual `T`   → no strip; unification fails
     ///
-    /// Use this only at coercion sites where `expected` is a contract
-    /// and `actual` is a value being coerced to it. Symmetric
-    /// unifications (two branch results, two array elements unifying
-    /// to a common type) must use plain `unify_or_err` so neither
-    /// side silently loses uniqueness.
+    /// Use this only at coercion sites where `expected` is a contract and
+    /// `actual` is a value being coerced to it. Symmetric unifications (two
+    /// branch results, two array elements unifying to a common type) must use
+    /// plain `unify_or_err` so neither side silently loses uniqueness.
     fn unify_or_err_weakening(
         &mut self,
         actual: &Type,
@@ -3356,14 +3349,107 @@ impl<'a> TypeChecker<'a> {
         span: Span,
         ctx: &str,
     ) -> Result<()> {
-        let coerced_actual: Type;
-        let actual_to_unify = if super::is_unique(expected) {
-            actual
+        let checkpoint = self.context.len();
+        if self.unify_weakening_inner(actual, expected).is_ok() {
+            Ok(())
         } else {
-            coerced_actual = super::strip_unique(actual);
-            &coerced_actual
-        };
-        self.unify_or_err(actual_to_unify, expected, span, ctx)
+            self.context.rollback(checkpoint);
+            Err(err_type_at!(
+                span,
+                "{}, got {} and {}",
+                ctx,
+                self.format_type(&actual.apply(&self.context)),
+                self.format_type(&expected.apply(&self.context))
+            ))
+        }
+    }
+
+    /// Recursive implementation of Futhark-style uniqueness subtyping.
+    ///
+    /// This deliberately returns a small private error: the public wrapper
+    /// owns rollback and source diagnostics. Ordinary type variables still
+    /// use `polytype` unification, while a concrete `Unique` result/annotation
+    /// expectation must be matched by a concrete `Unique` actual value.
+    /// Function application first compares the underlying value shapes and
+    /// leaves the consuming-argument decision to alias-aware TLC ownership.
+    fn unify_weakening_inner(&mut self, actual: &Type, expected: &Type) -> std::result::Result<(), ()> {
+        let actual = actual.apply(&self.context);
+        let expected = expected.apply(&self.context);
+
+        match (&actual, &expected) {
+            (
+                Type::Constructed(TypeName::Unique, actual_args),
+                Type::Constructed(TypeName::Unique, expected_args),
+            ) if actual_args.len() == 1 && expected_args.len() == 1 => {
+                self.unify_weakening_inner(&actual_args[0], &expected_args[0])
+            }
+            // A consuming/alias-free expectation is a real contract. It
+            // cannot be manufactured from a plain value or unconstrained
+            // type variable.
+            (_, Type::Constructed(TypeName::Unique, _)) => Err(()),
+
+            // Forgetting alias-freedom is the sole subtyping step.
+            (Type::Constructed(TypeName::Unique, actual_args), _) if actual_args.len() == 1 => {
+                self.unify_weakening_inner(&actual_args[0], &expected)
+            }
+
+            // Parameter annotations on a function describe effects at its
+            // call boundary and must match invariantly. Results are positive
+            // positions and retain ordinary uniqueness weakening.
+            (
+                Type::Constructed(TypeName::Arrow, actual_args),
+                Type::Constructed(TypeName::Arrow, expected_args),
+            ) if actual_args.len() == 2 && expected_args.len() == 2 => {
+                self.context.unify(&actual_args[0], &expected_args[0]).map_err(|_| ())?;
+                self.unify_weakening_inner(&actual_args[1], &expected_args[1])
+            }
+
+            // Structural value constructors are covariant in their value
+            // components. Metadata positions contain no Unique wrapper and
+            // therefore simply unify through the same recursion.
+            (
+                Type::Constructed(actual_name, actual_args),
+                Type::Constructed(expected_name, expected_args),
+            ) if actual_name == expected_name && actual_args.len() == expected_args.len() => {
+                for (actual_arg, expected_arg) in actual_args.iter().zip(expected_args) {
+                    self.unify_weakening_inner(actual_arg, expected_arg)?;
+                }
+                Ok(())
+            }
+
+            // An unconstrained expected type is an observing context. Bind
+            // it after forgetting positive-position uniqueness, preserving
+            // every function signature verbatim.
+            (_, Type::Variable(_)) => {
+                let weakened = Self::forget_value_uniqueness(&actual);
+                self.context.unify(&weakened, &expected).map_err(|_| ())
+            }
+
+            // A plain actual variable may unify with an ordinary expected
+            // type. The Unique-expected case was rejected above.
+            (Type::Variable(_), _) => self.context.unify(&actual, &expected).map_err(|_| ()),
+
+            _ => self.context.unify(&actual, &expected).map_err(|_| ()),
+        }
+    }
+
+    /// Forget uniqueness in covariant value positions while treating an
+    /// arrow as opaque until it can be compared with another concrete arrow
+    /// using the parameter-invariant/result-covariant rule above. Used when
+    /// an observing expected type is still an unconstrained variable (for
+    /// example, polymorphic identity receiving a unique array).
+    fn forget_value_uniqueness(ty: &Type) -> Type {
+        match ty {
+            Type::Constructed(TypeName::Unique, args) if args.len() == 1 => {
+                Self::forget_value_uniqueness(&args[0])
+            }
+            Type::Constructed(TypeName::Arrow, _) => ty.clone(),
+            Type::Constructed(name, args) => Type::Constructed(
+                name.clone(),
+                args.iter().map(Self::forget_value_uniqueness).collect(),
+            ),
+            Type::Variable(_) => ty.clone(),
+        }
     }
 
     /// Destructure a `Mat` type into `(elem, cols, rows)`. None for non-Mat.
@@ -3605,9 +3691,8 @@ impl<'a> TypeChecker<'a> {
         // Get expected param type after unification
         let expected_param = param_var.apply(&self.context);
 
-        // Strip uniqueness for unification
-        let arg_stripped = strip_unique(arg_ty);
-        let param_stripped = strip_unique(&expected_param);
+        let arg_applied = arg_ty.apply(&self.context);
+        let param_applied = expected_param.apply(&self.context);
 
         // Open the argument's existential type at the use site if the
         // expected parameter is not itself existential. Existential
@@ -3617,31 +3702,67 @@ impl<'a> TypeChecker<'a> {
         // reduce(_, _, kept)` does. Don't open when the param is itself
         // existential — the existential type can flow through unchanged
         // in that case.
-        let arg_stripped = if matches!(&arg_stripped, Type::Constructed(TypeName::Existential(_), _))
-            && !matches!(&param_stripped, Type::Constructed(TypeName::Existential(_), _))
-        {
-            self.open_existential(arg_stripped)
-        } else {
-            arg_stripped
-        };
+        let arg_for_check =
+            if Self::is_top_existential(&arg_applied) && !Self::is_top_existential(&param_applied) {
+                self.open_top_existential_preserving_unique(arg_applied)
+            } else {
+                arg_applied
+            };
 
-        // Unify argument with expected param
-        self.context.unify(&arg_stripped, &param_stripped).map_err(|_| {
+        // Compare value shapes after forgetting uniqueness in data
+        // positions. Whether an argument is actually legal to consume is an
+        // alias/provenance question checked by `tlc::ownership`: fresh local
+        // arrays are consumable even when their inferred surface type is
+        // spelled `T`, while an observing `T` parameter is not. Function
+        // arrows remain opaque here, so this shape check cannot hide a
+        // consuming callback behind an observing callback type.
+        let arg_shape = Self::forget_value_uniqueness(&arg_for_check);
+        let param_shape = Self::forget_value_uniqueness(&param_applied);
+        let checkpoint = self.context.len();
+        if self.unify_weakening_inner(&arg_shape, &param_shape).is_err() {
+            self.context.rollback(checkpoint);
             let base = format!(
                 "Function argument type mismatch at argument {}: expected {}, got {}",
                 arg_index + 1,
-                self.format_type(&param_stripped),
-                self.format_type(&arg_stripped),
+                self.format_type(&param_applied),
+                self.format_type(&arg_for_check),
             );
             let error_msg = if arg.h.span.is_generated() {
                 format!("{base}\nGenerated expression: {:#?}", arg)
             } else {
                 base
             };
-            err_type_at!(arg.h.span, "{}", error_msg)
-        })?;
+            return Err(err_type_at!(arg.h.span, "{}", error_msg));
+        }
 
         Ok(result_var)
+    }
+
+    /// Whether `ty` is an existential after looking through a top-level
+    /// uniqueness marker. This is the application-site analogue of
+    /// `open_existential`, which otherwise intentionally opens only a bare
+    /// existential.
+    fn is_top_existential(ty: &Type) -> bool {
+        match ty {
+            Type::Constructed(TypeName::Unique, args) if args.len() == 1 => {
+                Self::is_top_existential(&args[0])
+            }
+            Type::Constructed(TypeName::Existential(_), _) => true,
+            _ => false,
+        }
+    }
+
+    /// Open a top-level existential while preserving any surrounding
+    /// uniqueness marker, so subtype checking still sees the ownership
+    /// contract after existential elimination.
+    fn open_top_existential_preserving_unique(&mut self, ty: Type) -> Type {
+        match ty {
+            Type::Constructed(TypeName::Unique, mut args) if args.len() == 1 => {
+                let inner = self.open_top_existential_preserving_unique(args.remove(0));
+                Type::Constructed(TypeName::Unique, vec![inner])
+            }
+            other => self.open_existential(other),
+        }
     }
 
     /// Constrain a type to be an Array and return its components.
@@ -3910,13 +4031,6 @@ impl<'a> TypeChecker<'a> {
         }
 
         Ok(func_type.apply(&self.context))
-    }
-
-    /// Check if two types match structurally after applying substitutions.
-    fn types_match(&self, t1: &Type, t2: &Type) -> bool {
-        let a = t1.apply(&self.context);
-        let b = t2.apply(&self.context);
-        Self::types_equal_structural(&a, &b)
     }
 }
 

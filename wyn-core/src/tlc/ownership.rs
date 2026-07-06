@@ -99,6 +99,21 @@ impl Origin {
     }
 }
 
+/// Whether a parameter type carries a consuming `*` contract.
+///
+/// As in Futhark, a `*` nested in a tuple/record parameter makes the whole
+/// parameter consuming. An arrow is a boundary: a callback that itself has a
+/// consuming parameter does not cause the callback value to be consumed when
+/// passed to a higher-order function.
+fn is_consuming_param_type(ty: &Type<TypeName>) -> bool {
+    match ty {
+        Type::Constructed(TypeName::Unique, _) => true,
+        Type::Constructed(TypeName::Arrow, _) => false,
+        Type::Constructed(_, args) => args.iter().any(is_consuming_param_type),
+        Type::Variable(_) => false,
+    }
+}
+
 /// The result of the ownership analysis.
 ///
 /// Build phase fills `var_to_owner`, `origins`, `uses`, `kills`,
@@ -225,9 +240,10 @@ impl<'p> Builder<'p> {
             // ownership mark non-tail SOACs as consuming and rewrite
             // them to InputBuffer destinations that clobber the
             // caller's data.
-            let origin = if is_entry && types::is_unique(ty) {
+            let consuming = is_consuming_param_type(ty);
+            let origin = if is_entry && consuming {
                 Origin::Entry
-            } else if types::is_unique(ty) {
+            } else if consuming {
                 Origin::UniqueParam
             } else {
                 Origin::NonUniqueParam
@@ -278,8 +294,27 @@ impl<'p> Builder<'p> {
                 let mut killed_this_call: LookupSet<OwnerId> = LookupSet::new();
                 for (arg, param_ty) in args.iter().zip(&param_tys) {
                     self.visit_term(arg);
-                    if types::is_unique(param_ty) {
+                    if is_consuming_param_type(param_ty) {
                         if let Some(owner) = self.alias_target(arg) {
+                            let origin = self.model.origin(owner);
+                            if !origin.map(Origin::is_mutable).unwrap_or(false) {
+                                let var_name = self
+                                    .model
+                                    .owner_to_var
+                                    .get(&owner)
+                                    .and_then(|s| self.program.symbols.get(*s).cloned())
+                                    .unwrap_or_else(|| "<value>".to_string());
+                                let span = self.model.term_spans.get(&arg.id).copied();
+                                self.model.build_errors.push((
+                                    format!(
+                                        "cannot consume observing value `{}`; \
+                                         consuming parameter requires an alias-free argument",
+                                        var_name
+                                    ),
+                                    span,
+                                ));
+                                continue;
+                            }
                             // A second `*T` arg resolving to the same
                             // owner consumes a store the prior arg
                             // already moved — use-after-move within
@@ -299,6 +334,20 @@ impl<'p> Builder<'p> {
                                     .push((format!("use of moved value `{}`", var_name), span));
                             }
                             self.model.kills.entry(term.id).or_default().insert(owner);
+                        } else if !is_consuming_param_type(&arg.ty)
+                            && !rhs_is_fresh_producer(arg, self.program)
+                        {
+                            // A compound argument with no tracked owner is
+                            // consumable only when its type promises
+                            // alias-freedom or its syntax is a recognized
+                            // fresh producer. Unknown non-copy calls may alias
+                            // observing inputs, so reject them conservatively.
+                            let span = self.model.term_spans.get(&arg.id).copied();
+                            self.model.build_errors.push((
+                                "cannot consume observing value; consuming parameter requires an alias-free argument"
+                                    .to_string(),
+                                span,
+                            ));
                         }
                     }
                 }
@@ -610,7 +659,7 @@ impl<'p> Builder<'p> {
                     return Origin::Borrowed;
                 }
                 // No tracked owner — fall back to the named input's static type.
-                if types::is_unique(ty) {
+                if is_consuming_param_type(ty) {
                     Origin::BorrowedMutableElement
                 } else {
                     Origin::Borrowed
@@ -671,7 +720,7 @@ impl<'p> Builder<'p> {
     /// can't classify (user function returning non-unique non-copy,
     /// lambda invocation, etc.).
     fn origin_for_unaliased(&self, rhs: &Term) -> Origin {
-        if types::is_unique(&rhs.ty) {
+        if is_consuming_param_type(&rhs.ty) {
             return Origin::Fresh;
         }
         if rhs_is_fresh_producer(rhs, self.program) {
