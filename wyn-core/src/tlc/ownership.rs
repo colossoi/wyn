@@ -1086,11 +1086,16 @@ impl<'p> Builder<'p> {
                 else_branch,
                 ..
             } => self.is_definitely_alias_free(then_branch) && self.is_definitely_alias_free(else_branch),
-            TermKind::Loop { body, .. } => self.is_definitely_alias_free(body),
-            // Function results alias every observing argument unless their
-            // return component is marked unique. The empty-alias guard above
-            // therefore proves this particular result alias-free.
-            TermKind::App { .. } => true,
+            // A zero-trip loop returns init unchanged, so the result is
+            // alias-free only when both init and body are.
+            TermKind::Loop { init, body, .. } => {
+                self.is_definitely_alias_free(init) && self.is_definitely_alias_free(body)
+            }
+            // A call result may alias storage reachable through the callee
+            // (top-level constants, captured state) that no argument-derived
+            // alias set can see. Only a unique return type — handled by the
+            // is_unique early return above — proves a call result alias-free.
+            TermKind::App { .. } => false,
             // A non-array Screma result is the accumulator; its aliases
             // are the `ne` aliases, which the empty-alias guard covered.
             TermKind::Soac(SoacOp::Screma { .. }) => true,

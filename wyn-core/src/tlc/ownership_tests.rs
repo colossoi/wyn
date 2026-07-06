@@ -674,10 +674,6 @@ def main(c: bool, a: *[4]i32, b: *[4]i32) i32 =
 }
 
 #[test]
-#[ignore = "open bug: a call whose arguments are all copy is judged alias-free, \
-            but its result may alias callee-reachable storage (a zero-arity \
-            top-level constant here); is_definitely_alias_free's App arm trusts \
-            an alias set that never sees the callee's own reachable stores"]
 fn call_result_aliasing_global_storage_is_not_consumable() {
     let source = r#"
 def table: [4]i32 = [1, 2, 3, 4]
@@ -692,8 +688,6 @@ def main(i: i32) i32 = consume(get(i))
 }
 
 #[test]
-#[ignore = "open bug: a zero-trip loop returns init unchanged, but \
-            is_definitely_alias_free's Loop arm inspects only the body"]
 fn zero_trip_loop_result_keeps_init_alias() {
     let source = r#"
 def table: [4]i32 = [1, 2, 3, 4]
