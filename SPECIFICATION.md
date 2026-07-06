@@ -1666,6 +1666,22 @@ def modify(a: *[]i32, i: i32, x: i32) *[]i32 =
   a with [i] = a[i] + x
 ```
 
+`*` is a property of a **signature only** — it may appear on function
+parameter and return types, and nowhere else. It is not part of a
+value's type: a `let` binding, a type ascription, or a plain (non-
+function) `def` may not carry `*`. Uniqueness is never inferred, so a
+`*` return does not make an unannotated parameter consuming — annotate
+the parameter to consume it. A function that declares a `*` return
+must actually produce an alias-free value: freshly allocated, or a
+parameter it consumed (a `with` update on a consumed array qualifies);
+returning an observing parameter or a global is an error.
+
+Because a consuming function's effect cannot be tracked when the
+function is used as a value, a **consuming function may not be passed
+as a value** — a parameter, lambda parameter, or argument whose type
+is a function mentioning `*` is rejected — and functions may not be
+returned from `if` or `match`.
+
 A parameter that is not consuming is called **observing**. The `*` in
 `a: *[]i32` means `modify` takes ownership of `a`; no caller may
 reference `a` (or any alias of it) after the call. This is what
