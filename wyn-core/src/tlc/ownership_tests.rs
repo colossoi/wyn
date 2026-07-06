@@ -674,6 +674,60 @@ def main(c: bool, a: *[4]i32, b: *[4]i32) i32 =
 }
 
 #[test]
+fn globals_may_be_freely_observed() {
+    // Globals are non-consumable observing values (they have no owner),
+    // so referencing one in any position is fine as long as it is never
+    // consumed — the consumption checks below are what keep it sound.
+    let index_base = r#"
+def table: [4]i32 = [1, 2, 3, 4]
+def main(i: i32) i32 = table[i]
+"#;
+    assert!(
+        !has_use_after_move(index_base),
+        "observing a global via index is fine"
+    );
+
+    let let_then_observe = r#"
+def table: [4]i32 = [1, 2, 3, 4]
+def main(i: i32) i32 = let t = table in t[i]
+"#;
+    assert!(
+        !has_use_after_move(let_then_observe),
+        "let-binding a global and observing it is fine",
+    );
+
+    let returned_then_observed = r#"
+def table: [4]i32 = [1, 2, 3, 4]
+def get(i: i32) [4]i32 = table
+def main(i: i32) i32 = get(i)[i]
+"#;
+    assert!(
+        !has_use_after_move(returned_then_observed),
+        "returning a global as a non-unique result and observing it is fine",
+    );
+}
+
+#[test]
+fn globals_cannot_be_consumed() {
+    let direct = r#"
+def table: [4]i32 = [1, 2, 3, 4]
+def consume(a: *[4]i32) i32 = a[0]
+def main(i: i32) i32 = consume(table)
+"#;
+    assert!(has_use_after_move(direct), "a global has no owner to surrender");
+
+    let via_let = r#"
+def table: [4]i32 = [1, 2, 3, 4]
+def consume(a: *[4]i32) i32 = a[0]
+def main(i: i32) i32 = let t = table in consume(t)
+"#;
+    assert!(
+        has_use_after_move(via_let),
+        "a let-bound global is borrowed, not consumable"
+    );
+}
+
+#[test]
 fn call_result_aliasing_global_storage_is_not_consumable() {
     let source = r#"
 def table: [4]i32 = [1, 2, 3, 4]

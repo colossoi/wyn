@@ -121,9 +121,11 @@ impl AliasValue {
 /// retains ownership, so mutating it would clobber the caller's
 /// memory. Promotion must reject these.
 ///
-/// `Entry` is the implicit-unique rule — entry parameters are
-/// handed by the host as exclusive ownership at the boundary, so they
-/// behave as `*T` regardless of how they're written in source.
+/// Entry parameters follow the same explicit-`*` rule as ordinary
+/// function parameters: a plain `T` entry input is observing — the
+/// host retains ownership of the buffer — and only a `*T` entry
+/// parameter (`Entry`) hands the shader exclusive ownership at the
+/// boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Origin {
     /// Allocated by this function: literal, range, generator, SOAC
@@ -133,7 +135,8 @@ pub enum Origin {
     UniqueParam,
     /// Bound from a `T` parameter — caller still owns. Not mutable.
     NonUniqueParam,
-    /// Entry parameter — implicitly unique.
+    /// Bound from a `*T` entry parameter — the host surrendered
+    /// ownership of the buffer at the pipeline boundary.
     Entry,
     /// Result of an unrecognized non-copy producer (e.g. a user
     /// function whose body might return an alias of one of its args,

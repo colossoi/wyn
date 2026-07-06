@@ -1714,6 +1714,26 @@ return value is declared alias-free (with `*`). If it is, the value
 has no aliases. Otherwise, it aliases all arguments passed for
 non-consumed parameters.
 
+#### Globals
+
+A top-level constant is a shared, immutable value: it carries no
+ownership, so it is never consumable. A function body may observe a
+global freely — index it, pass it as an argument, fold over it — but
+cannot consume it, and a function that returns a global as a
+non-unique result exposes it only for observation. Consequently a
+global can never satisfy a consuming parameter or an alias-free (`*`)
+return.
+
+```wyn
+def table: [4]i32 = [1, 2, 3, 4]
+
+def ok(i: i32) i32 = table[i]              -- observe: fine
+def get(i: i32) [4]i32 = table            -- return for observation: fine
+
+def bad(i: i32) i32 = consume(table)      -- error: cannot consume a global
+def worse(i: i32) *[4]i32 = table         -- error: not alias-free
+```
+
 ### In-place Updates and Higher-order Functions
 
 Consumption interacts inflexibly with higher-order functions: the
