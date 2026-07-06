@@ -20,6 +20,20 @@ use super::{
     strip_unique, tuple, unit, vec,
 };
 
+/// The variance policy `relate_value_types` applies to uniqueness.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UniquenessRelation {
+    /// Directional subtyping: an actual value coerces to an expected
+    /// contract. Forgetting alias-freedom (`*T → T`) is the sole
+    /// subtyping step; arrow parameters are contravariant, results
+    /// covariant.
+    Weaken,
+    /// Least upper bound at a control-flow join. Uniqueness survives
+    /// only where every incoming value carries it; arrows join by
+    /// plain (invariant) unification.
+    Join,
+}
+
 /// Render a single swizzle slot index as its `xyzw` letter. Used by
 /// VecWith diagnostics so error messages match the user's source.
 /// Map a primitive scalar type to its surface module name
@@ -2715,9 +2729,7 @@ impl<'a> TypeChecker<'a> {
 
                 // Join branch values. Two unique branches retain uniqueness;
                 // a mixed unique/observing pair weakens to the observing type.
-                let checkpoint = self.context.len();
-                let result_ty = self.join_value_types(&then_ty, &else_ty).map_err(|_| {
-                    self.context.rollback(checkpoint);
+                let result_ty = self.try_join_value_types(&then_ty, &else_ty).map_err(|_| {
                     err_type_at!(
                         if_expr.else_branch.h.span,
                         "If branches have incompatible types: then={}, else={}",
@@ -2866,18 +2878,14 @@ impl<'a> TypeChecker<'a> {
 
                     result_ty = Some(match result_ty {
                         None => arm_ty,
-                        Some(previous) => {
-                            let checkpoint = self.context.len();
-                            self.join_value_types(&previous, &arm_ty).map_err(|_| {
-                                self.context.rollback(checkpoint);
-                                err_type_at!(
-                                    case.body.h.span,
-                                    "Match arms have incompatible types: expected {}, got {}",
-                                    self.format_type(&previous),
-                                    self.format_type(&arm_ty)
-                                )
-                            })?
-                        }
+                        Some(previous) => self.try_join_value_types(&previous, &arm_ty).map_err(|_| {
+                            err_type_at!(
+                                case.body.h.span,
+                                "Match arms have incompatible types: expected {}, got {}",
+                                self.format_type(&previous),
+                                self.format_type(&arm_ty)
+                            )
+                        })?,
                     });
                 }
 
@@ -3318,51 +3326,33 @@ impl<'a> TypeChecker<'a> {
         })
     }
 
-    /// Least common value type for control-flow joins. Uniqueness survives
-    /// only when every incoming value has it at that structural position;
-    /// otherwise the join intentionally weakens to the observing type.
-    fn join_value_types(&mut self, left: &Type, right: &Type) -> std::result::Result<Type, ()> {
+    /// Join two control-flow branch types (least upper bound), rolling
+    /// back any unification bindings on failure so the caller reports
+    /// on unpolluted types.
+    fn try_join_value_types(&mut self, left: &Type, right: &Type) -> std::result::Result<Type, ()> {
+        let checkpoint = self.context.len();
         let left = left.apply(&self.context);
         let right = right.apply(&self.context);
+        match self.relate_value_types(&left, &right, UniquenessRelation::Join) {
+            Ok(ty) => Ok(ty),
+            Err(()) => {
+                self.context.rollback(checkpoint);
+                Err(())
+            }
+        }
+    }
 
-        match (&left, &right) {
-            (Type::Variable(_), _) | (_, Type::Variable(_)) => {
-                self.context.unify(&left, &right).map_err(|_| ())?;
-                Ok(left.apply(&self.context))
-            }
-            (
-                Type::Constructed(TypeName::Unique, left_args),
-                Type::Constructed(TypeName::Unique, right_args),
-            ) if left_args.len() == 1 && right_args.len() == 1 => Ok(Type::Constructed(
-                TypeName::Unique,
-                vec![self.join_value_types(&left_args[0], &right_args[0])?],
-            )),
-            (Type::Constructed(TypeName::Unique, left_args), _) if left_args.len() == 1 => {
-                self.join_value_types(&left_args[0], &right)
-            }
-            (_, Type::Constructed(TypeName::Unique, right_args)) if right_args.len() == 1 => {
-                self.join_value_types(&left, &right_args[0])
-            }
-            (Type::Constructed(TypeName::Arrow, _), Type::Constructed(TypeName::Arrow, _)) => {
-                // Functions are rejected as control-flow results by the
-                // caller. Keep their effect-bearing signatures invariant.
-                self.context.unify(&left, &right).map_err(|_| ())?;
-                Ok(left.apply(&self.context))
-            }
-            (Type::Constructed(left_name, left_args), Type::Constructed(right_name, right_args))
-                if left_name == right_name && left_args.len() == right_args.len() =>
-            {
-                let args = left_args
-                    .iter()
-                    .zip(right_args)
-                    .map(|(left_arg, right_arg)| self.join_value_types(left_arg, right_arg))
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(Type::Constructed(left_name.clone(), args))
-            }
-            _ => {
-                self.context.unify(&left, &right).map_err(|_| ())?;
-                Ok(left.apply(&self.context))
-            }
+    /// Check the weakening relation (`actual` coerces to `expected`),
+    /// rolling back all unification bindings on failure.
+    fn try_weaken_value_types(&mut self, actual: &Type, expected: &Type) -> bool {
+        let checkpoint = self.context.len();
+        let actual = actual.apply(&self.context);
+        let expected = expected.apply(&self.context);
+        if self.relate_value_types(&actual, &expected, UniquenessRelation::Weaken).is_ok() {
+            true
+        } else {
+            self.context.rollback(checkpoint);
+            false
         }
     }
 
@@ -3391,11 +3381,9 @@ impl<'a> TypeChecker<'a> {
         span: Span,
         ctx: &str,
     ) -> Result<()> {
-        let checkpoint = self.context.len();
-        if self.unify_weakening_inner(actual, expected).is_ok() {
+        if self.try_weaken_value_types(actual, expected) {
             Ok(())
         } else {
-            self.context.rollback(checkpoint);
             Err(err_type_at!(
                 span,
                 "{}: expected {}, got {}",
@@ -3406,79 +3394,127 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    /// Recursive implementation of Futhark-style uniqueness subtyping.
+    /// The single structural walker behind uniqueness subtyping and
+    /// control-flow joins; `mode` selects the variance policy (see
+    /// `UniquenessRelation`). Returns the related type — the joined
+    /// type for `Join`; `Weaken` callers use only success/failure.
     ///
-    /// This deliberately returns a small private error: the public wrapper
-    /// owns rollback and source diagnostics. Ordinary type variables still
-    /// use `polytype` unification, while a concrete `Unique` result/annotation
-    /// expectation must be matched by a concrete `Unique` actual value.
-    /// Function application first compares the underlying value shapes and
-    /// leaves the consuming-argument decision to alias-aware TLC ownership.
-    fn unify_weakening_inner(&mut self, actual: &Type, expected: &Type) -> std::result::Result<(), ()> {
-        let actual = actual.apply(&self.context);
-        let expected = expected.apply(&self.context);
-
-        match (&actual, &expected) {
-            (
-                Type::Constructed(TypeName::Unique, actual_args),
-                Type::Constructed(TypeName::Unique, expected_args),
-            ) if actual_args.len() == 1 && expected_args.len() == 1 => {
-                self.unify_weakening_inner(&actual_args[0], &expected_args[0])
+    /// This deliberately returns a small private error: the `try_*`
+    /// wrappers own rollback, and their callers own source diagnostics.
+    /// Ordinary type variables still use `polytype` unification.
+    /// Function application first compares the underlying value shapes
+    /// and leaves the consuming-argument decision to alias-aware TLC
+    /// ownership.
+    fn relate_value_types(
+        &mut self,
+        left: &Type,
+        right: &Type,
+        mode: UniquenessRelation,
+    ) -> std::result::Result<Type, ()> {
+        use UniquenessRelation::*;
+        // The `try_*` wrappers apply the full substitution at entry;
+        // during the recursion only a Variable head can have been bound
+        // since (by a sibling unification), so only heads re-resolve.
+        let left_resolved;
+        let left = match left {
+            Type::Variable(_) => {
+                left_resolved = left.apply(&self.context);
+                &left_resolved
             }
-            // An as-yet unconstrained value parameter can infer a consuming
-            // type from a unique result/annotation contract.
+            other => other,
+        };
+        let right_resolved;
+        let right = match right {
+            Type::Variable(_) => {
+                right_resolved = right.apply(&self.context);
+                &right_resolved
+            }
+            other => other,
+        };
+
+        match (left, right) {
+            // Join: a still-unconstrained side binds by plain
+            // unification, taking the other side verbatim — uniqueness
+            // included.
+            (Type::Variable(_), _) | (_, Type::Variable(_)) if mode == Join => {
+                self.context.unify(left, right).map_err(|_| ())?;
+                Ok(left.apply(&self.context))
+            }
+            (
+                Type::Constructed(TypeName::Unique, left_args),
+                Type::Constructed(TypeName::Unique, right_args),
+            ) if left_args.len() == 1 && right_args.len() == 1 => Ok(Type::Constructed(
+                TypeName::Unique,
+                vec![self.relate_value_types(&left_args[0], &right_args[0], mode)?],
+            )),
+            // Weaken: an as-yet unconstrained value parameter can infer
+            // a consuming type from a unique result/annotation contract...
             (Type::Variable(_), Type::Constructed(TypeName::Unique, _)) => {
-                self.context.unify(&actual, &expected).map_err(|_| ())
+                self.context.unify(left, right).map_err(|_| ())?;
+                Ok(left.apply(&self.context))
             }
-            // A consuming/alias-free expectation is a real contract. It
-            // cannot be manufactured from a plain value or unconstrained
-            // type variable.
-            (_, Type::Constructed(TypeName::Unique, _)) => Err(()),
+            // ...but a concrete plain value cannot manufacture one: a
+            // consuming/alias-free expectation is a real contract.
+            (_, Type::Constructed(TypeName::Unique, _)) if mode == Weaken => Err(()),
 
-            // Forgetting alias-freedom is the sole subtyping step.
-            (Type::Constructed(TypeName::Unique, actual_args), _) if actual_args.len() == 1 => {
-                self.unify_weakening_inner(&actual_args[0], &expected)
+            // Forgetting alias-freedom: the sole subtyping step under
+            // Weaken, and the weakening half of a mixed Join (the
+            // second arm is Join-only — Weaken rejected it above).
+            (Type::Constructed(TypeName::Unique, left_args), _) if left_args.len() == 1 => {
+                self.relate_value_types(&left_args[0], right, mode)
+            }
+            (_, Type::Constructed(TypeName::Unique, right_args)) if right_args.len() == 1 => {
+                self.relate_value_types(left, &right_args[0], mode)
             }
 
-            // Function parameters are contravariant and results covariant.
-            // Thus an observing callback can safely stand in for a consuming
-            // callback (the caller gives it more ownership than it needs),
-            // while a consuming callback cannot hide behind an observing
-            // callback contract.
             (
-                Type::Constructed(TypeName::Arrow, actual_args),
-                Type::Constructed(TypeName::Arrow, expected_args),
-            ) if actual_args.len() == 2 && expected_args.len() == 2 => {
-                self.unify_weakening_inner(&expected_args[0], &actual_args[0])?;
-                self.unify_weakening_inner(&actual_args[1], &expected_args[1])
-            }
+                Type::Constructed(TypeName::Arrow, left_args),
+                Type::Constructed(TypeName::Arrow, right_args),
+            ) if left_args.len() == 2 && right_args.len() == 2 => match mode {
+                // Function parameters are contravariant and results
+                // covariant: an observing callback can safely stand in
+                // for a consuming callback (the caller gives it more
+                // ownership than it needs), while a consuming callback
+                // cannot hide behind an observing callback contract.
+                Weaken => {
+                    self.relate_value_types(&right_args[0], &left_args[0], Weaken)?;
+                    self.relate_value_types(&left_args[1], &right_args[1], Weaken)
+                }
+                // Arrows join by plain (invariant) unification: the
+                // parameter meet — Join's dual — is not implemented.
+                Join => {
+                    self.context.unify(left, right).map_err(|_| ())?;
+                    Ok(left.apply(&self.context))
+                }
+            },
 
             // Structural value constructors are covariant in their value
             // components. Metadata positions contain no Unique wrapper and
             // therefore simply unify through the same recursion.
-            (
-                Type::Constructed(actual_name, actual_args),
-                Type::Constructed(expected_name, expected_args),
-            ) if actual_name == expected_name && actual_args.len() == expected_args.len() => {
-                for (actual_arg, expected_arg) in actual_args.iter().zip(expected_args) {
-                    self.unify_weakening_inner(actual_arg, expected_arg)?;
-                }
-                Ok(())
+            (Type::Constructed(left_name, left_args), Type::Constructed(right_name, right_args))
+                if left_name == right_name && left_args.len() == right_args.len() =>
+            {
+                let args = left_args
+                    .iter()
+                    .zip(right_args)
+                    .map(|(left_arg, right_arg)| self.relate_value_types(left_arg, right_arg, mode))
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                Ok(Type::Constructed(left_name.clone(), args))
             }
 
-            // An unconstrained expected type is an observing context. Bind
-            // it after forgetting positive-position uniqueness, preserving
-            // every function signature verbatim.
+            // Weaken with an unconstrained expected type: an observing
+            // context. Bind it after forgetting positive-position
+            // uniqueness, preserving every function signature verbatim.
             (_, Type::Variable(_)) => {
-                let weakened = forget_value_uniqueness(&actual);
-                self.context.unify(&weakened, &expected).map_err(|_| ())
+                let weakened = forget_value_uniqueness(left);
+                self.context.unify(&weakened, right).map_err(|_| ())?;
+                Ok(weakened)
             }
 
-            // A plain actual variable may unify with an ordinary expected
-            // type. The Unique-expected case was rejected above.
-            (Type::Variable(_), _) => self.context.unify(&actual, &expected).map_err(|_| ()),
-
-            _ => self.context.unify(&actual, &expected).map_err(|_| ()),
+            _ => {
+                self.context.unify(left, right).map_err(|_| ())?;
+                Ok(left.apply(&self.context))
+            }
         }
     }
 
@@ -3748,9 +3784,7 @@ impl<'a> TypeChecker<'a> {
         // consuming callback behind an observing callback type.
         let arg_shape = forget_value_uniqueness(&arg_for_check);
         let param_shape = forget_value_uniqueness(&param_applied);
-        let checkpoint = self.context.len();
-        if self.unify_weakening_inner(&arg_shape, &param_shape).is_err() {
-            self.context.rollback(checkpoint);
+        if !self.try_weaken_value_types(&arg_shape, &param_shape) {
             let base = format!(
                 "Function argument type mismatch at argument {}: expected {}, got {}",
                 arg_index + 1,
