@@ -149,6 +149,8 @@ pub enum CompilerResourceKind {
     FilterLenCell,
     FilterFlags,
     FilterOffsets,
+    FilterScanBlockSums,
+    FilterScanBlockOffsets,
     /// Scalar result produced by a compiler-hoisted prepass and consumed by a
     /// later source entry phase.
     ScalarHandoff,
@@ -284,9 +286,11 @@ fn allocate_filter_work_resources(
                 let buffers = FilterWorkBuffers {
                     flags: next_binding(),
                     offsets: next_binding(),
+                    block_sums: next_binding(),
+                    block_offsets: next_binding(),
                 };
                 *work_buffers = Some(buffers);
-                let size = match space.as_ref().and_then(|space| space.dims.first()) {
+                let element_count_size = match space.as_ref().and_then(|space| space.dims.first()) {
                     Some(SegExtent::Fixed(count)) if space.as_ref().is_some_and(|s| s.dims.len() == 1) => {
                         LogicalSize::FixedBytes(*count as u64 * 4)
                     }
@@ -299,13 +303,32 @@ fn allocate_filter_work_resources(
                     },
                     _ => LogicalSize::SameAsDispatch { elem_bytes: 4 },
                 };
+                let worker_count_size = LogicalSize::SameAsDispatch { elem_bytes: 4 };
                 let owner = effect.result.map(|result| SemanticOpId {
                     scope: entry.name.clone(),
                     result,
                 });
-                for (slot, (binding, kind)) in [
-                    (buffers.flags, CompilerResourceKind::FilterFlags),
-                    (buffers.offsets, CompilerResourceKind::FilterOffsets),
+                for (slot, (binding, kind, size)) in [
+                    (
+                        buffers.flags,
+                        CompilerResourceKind::FilterFlags,
+                        element_count_size.clone(),
+                    ),
+                    (
+                        buffers.offsets,
+                        CompilerResourceKind::FilterOffsets,
+                        element_count_size.clone(),
+                    ),
+                    (
+                        buffers.block_sums,
+                        CompilerResourceKind::FilterScanBlockSums,
+                        worker_count_size.clone(),
+                    ),
+                    (
+                        buffers.block_offsets,
+                        CompilerResourceKind::FilterScanBlockOffsets,
+                        worker_count_size.clone(),
+                    ),
                 ]
                 .into_iter()
                 .enumerate()
@@ -317,7 +340,7 @@ fn allocate_filter_work_resources(
                         origin: ResourceOrigin::Compiler(compiler),
                         legacy_binding: binding,
                         elem_ty: Type::Constructed(TypeName::UInt(32), vec![]),
-                        size: size.clone(),
+                        size,
                     });
                 }
             }
@@ -478,7 +501,19 @@ fn filter_resource_kinds(inner: &EgirInner) -> HashMap<crate::BindingRef, Compil
                         );
                         kinds.insert(
                             work.offsets,
-                            CompilerResource::new(CompilerResourceKind::FilterOffsets, owner, 3),
+                            CompilerResource::new(CompilerResourceKind::FilterOffsets, owner.clone(), 3),
+                        );
+                        kinds.insert(
+                            work.block_sums,
+                            CompilerResource::new(
+                                CompilerResourceKind::FilterScanBlockSums,
+                                owner.clone(),
+                                4,
+                            ),
+                        );
+                        kinds.insert(
+                            work.block_offsets,
+                            CompilerResource::new(CompilerResourceKind::FilterScanBlockOffsets, owner, 5),
                         );
                     }
                 }

@@ -1614,6 +1614,69 @@ fn build_filter_scan(
     let after = graph.skeleton.create_block();
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     let zero = intern_u32(graph, 0, None);
+    let one = intern_u32(graph, 1, None);
+    let gid = filter_thread_index(graph);
+    let input_len = graph.intern_pure(PureOp::StorageViewLen, smallvec![spec.arr_nid], u32_ty.clone());
+    let nwg = graph.intern_pure(
+        PureOp::Intrinsic {
+            id: catalog().known().num_workgroups,
+            overload_idx: 0,
+        },
+        smallvec![],
+        u32_ty.clone(),
+    );
+    let wg_width = graph.intern_pure(
+        PureOp::Uint(super::parallelize::REDUCE_PHASE1_WIDTH.to_string()),
+        smallvec![],
+        u32_ty.clone(),
+    );
+    let total_threads = graph.intern_pure(
+        PureOp::BinOp("*".into()),
+        smallvec![nwg, wg_width],
+        u32_ty.clone(),
+    );
+    let total_minus_one = graph.intern_pure(
+        PureOp::BinOp("-".into()),
+        smallvec![total_threads, one],
+        u32_ty.clone(),
+    );
+    let len_plus = graph.intern_pure(
+        PureOp::BinOp("+".into()),
+        smallvec![input_len, total_minus_one],
+        u32_ty.clone(),
+    );
+    let chunk_size = graph.intern_pure(
+        PureOp::BinOp("/".into()),
+        smallvec![len_plus, total_threads],
+        u32_ty.clone(),
+    );
+    let raw_chunk_start = graph.intern_pure(
+        PureOp::BinOp("*".into()),
+        smallvec![gid, chunk_size],
+        u32_ty.clone(),
+    );
+    let u32_min = catalog().lookup_by_any_name("u32.min").expect("catalog has u32.min");
+    let chunk_start = graph.intern_pure(
+        PureOp::Intrinsic {
+            id: u32_min.id,
+            overload_idx: 0,
+        },
+        smallvec![raw_chunk_start, input_len],
+        u32_ty.clone(),
+    );
+    let remaining = graph.intern_pure(
+        PureOp::BinOp("-".into()),
+        smallvec![input_len, chunk_start],
+        u32_ty.clone(),
+    );
+    let chunk_len = graph.intern_pure(
+        PureOp::Intrinsic {
+            id: u32_min.id,
+            overload_idx: 0,
+        },
+        smallvec![chunk_size, remaining],
+        u32_ty.clone(),
+    );
     graph.skeleton.blocks[bid].term = SkeletonTerminator::Branch {
         target: header,
         args: vec![zero, zero],
@@ -1621,10 +1684,9 @@ fn build_filter_scan(
     let i = graph.add_block_param(header, 0, u32_ty.clone());
     let acc = graph.add_block_param(header, 1, u32_ty.clone());
     graph.skeleton.blocks[header].params.extend([i, acc]);
-    let len = graph.intern_pure(PureOp::StorageViewLen, smallvec![spec.arr_nid], u32_ty.clone());
     let cond = graph.intern_pure(
         PureOp::BinOp("<".into()),
-        smallvec![i, len],
+        smallvec![i, chunk_len],
         Type::Constructed(TypeName::Bool, vec![]),
     );
     graph.skeleton.blocks[header].term = SkeletonTerminator::CondBranch {
@@ -1643,11 +1705,24 @@ fn build_filter_scan(
     );
     let flags = intern_storage_view(graph, work.flags, u32_ty.clone(), None);
     let offsets = intern_storage_view(graph, work.offsets, u32_ty.clone(), None);
-    let flag_place = graph.intern_pure(PureOp::ViewIndex, smallvec![flags, i], u32_ty.clone());
+    let global_i = graph.intern_pure(
+        PureOp::BinOp("+".into()),
+        smallvec![chunk_start, i],
+        u32_ty.clone(),
+    );
+    let flag_place = graph.intern_pure(PureOp::ViewIndex, smallvec![flags, global_i], u32_ty.clone());
     let flag = emit_load(graph, body, flag_place, u32_ty.clone(), next_effect, None);
     let next = graph.intern_pure(PureOp::BinOp("+".into()), smallvec![acc, flag], u32_ty.clone());
-    emit_storage_store(graph, body, offsets, i, next, u32_ty.clone(), next_effect, None);
-    let one = intern_u32(graph, 1, None);
+    emit_storage_store(
+        graph,
+        body,
+        offsets,
+        global_i,
+        next,
+        u32_ty.clone(),
+        next_effect,
+        None,
+    );
     let next_i = graph.intern_pure(PureOp::BinOp("+".into()), smallvec![i, one], u32_ty.clone());
     graph.skeleton.blocks[body].term = SkeletonTerminator::Branch {
         target: header,
@@ -1655,19 +1730,17 @@ fn build_filter_scan(
     };
     let final_count = graph.add_block_param(after, 0, u32_ty.clone());
     graph.skeleton.blocks[after].params.push(final_count);
-    if let Some(len_out) = spec.len_out {
-        let len_view = intern_storage_view(graph, len_out, u32_ty.clone(), None);
-        emit_storage_store(
-            graph,
-            after,
-            len_view,
-            zero,
-            final_count,
-            u32_ty.clone(),
-            next_effect,
-            None,
-        );
-    }
+    let block_sums = intern_storage_view(graph, work.block_sums, u32_ty.clone(), None);
+    emit_storage_store(
+        graph,
+        after,
+        block_sums,
+        gid,
+        final_count,
+        u32_ty.clone(),
+        next_effect,
+        None,
+    );
     graph.skeleton.blocks[after].term = SkeletonTerminator::Return(None);
     graph.nodes[spec.result_node] = ENode::Constant(crate::ssa::types::ConstantValue::Bool(false));
 }

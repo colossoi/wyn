@@ -563,9 +563,7 @@ fn segmented_resources(entry: &EgirEntry) -> Option<Vec<ScheduledResource>> {
                     crate::egir::types::FilterPhase::Scan => {
                         push(work.flags, ResourceAccess::Read);
                         push(work.offsets, ResourceAccess::Write);
-                        if let Some(binding) = len_out {
-                            push(*binding, ResourceAccess::Write);
-                        }
+                        push(work.block_sums, ResourceAccess::Write);
                     }
                     crate::egir::types::FilterPhase::Scatter => {
                         for input in &entry.inputs {
@@ -575,6 +573,7 @@ fn segmented_resources(entry: &EgirEntry) -> Option<Vec<ScheduledResource>> {
                         }
                         push(work.flags, ResourceAccess::Read);
                         push(work.offsets, ResourceAccess::Read);
+                        push(work.block_offsets, ResourceAccess::Read);
                         if let Some(binding) = len_out {
                             push(*binding, ResourceAccess::Read);
                         }

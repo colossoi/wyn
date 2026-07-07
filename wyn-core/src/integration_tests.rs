@@ -347,6 +347,8 @@ fn logical_manifest_covers_scan_and_filter_scratch() {
     assert!(filter_kinds.contains(&CompilerResourceKind::FilterLenCell));
     assert!(filter_kinds.contains(&CompilerResourceKind::FilterFlags));
     assert!(filter_kinds.contains(&CompilerResourceKind::FilterOffsets));
+    assert!(filter_kinds.contains(&CompilerResourceKind::FilterScanBlockSums));
+    assert!(filter_kinds.contains(&CompilerResourceKind::FilterScanBlockOffsets));
 
     let scalar_handoff = crate::compile_thru_tlc(
         r#"
@@ -382,20 +384,32 @@ entry r(xs: []u32) ?k. [k]u32 = filter(|x| x < 100u32, xs)
 "#;
     let converted = crate::compile_thru_ssa(r4).expect("runtime filter reaches SSA");
     let phases: Vec<_> = converted.kernel_schedule.phases().collect();
-    assert_eq!(phases.len(), 3);
+    assert_eq!(phases.len(), 5);
     assert_eq!(phases[0].entry_point, "r_filter_flags");
     assert_eq!(phases[1].entry_point, "r_filter_scan");
-    assert_eq!(phases[2].entry_point, "r");
+    assert_eq!(phases[2].entry_point, "r_filter_scan_phase2_scan_sums");
+    assert_eq!(phases[3].entry_point, "r_filter_scan_phase3_add_offsets");
+    assert_eq!(phases[4].entry_point, "r");
     assert!(matches!(phases[0].domain, KernelDomain::Elements(_)));
+    assert!(matches!(phases[1].domain, KernelDomain::Elements(_)));
+    assert_eq!(
+        phases[1].workgroup_size,
+        (crate::egir::parallelize::REDUCE_PHASE1_WIDTH, 1, 1)
+    );
     assert!(matches!(
-        phases[1].domain,
+        phases[2].domain,
         KernelDomain::Fixed { x: 1, y: 1, z: 1 }
     ));
-    assert_eq!(phases[1].workgroup_size, (1, 1, 1));
-    assert!(matches!(phases[2].domain, KernelDomain::Elements(_)));
+    assert!(matches!(phases[3].domain, KernelDomain::Elements(_)));
+    assert!(matches!(phases[4].domain, KernelDomain::Elements(_)));
 
     let thread_id = catalog().known().thread_id;
-    for name in ["r_filter_flags", "r"] {
+    for name in [
+        "r_filter_flags",
+        "r_filter_scan",
+        "r_filter_scan_phase3_add_offsets",
+        "r",
+    ] {
         let entry = converted
             .ssa
             .entry_points
@@ -430,8 +444,10 @@ entry r(xs: []u32) (?k. [k]u32, [1]u32) =
             _ => None,
         })
         .expect("filter compute pipeline");
-    assert_eq!(compute.stages.len(), 3);
+    assert_eq!(compute.stages.len(), 5);
     assert_eq!(compute.stages[1].entry_point, "r_filter_scan");
+    assert_eq!(compute.stages[2].entry_point, "r_filter_scan_phase2_scan_sums");
+    assert_eq!(compute.stages[3].entry_point, "r_filter_scan_phase3_add_offsets");
 }
 
 #[test]
@@ -5667,7 +5683,8 @@ entry filt_out(xs: []i32) ?k. [k]i32 =
 /// Pins the filter→output host ABI (the paired length buffer). The `filt_out`
 /// pipeline must expose: the input, a host-readable **Output** data buffer sized
 /// `LikeInput` of the input (capacity n), and a compiler-managed **Intermediate**
-/// length cell sized `Fixed { bytes: 4 }` (one u32) holding the surviving count.
+/// length cell sized `Fixed { bytes: 4 }` (one u32) holding the surviving count,
+/// plus compiler-managed u32 work buffers for the parallel prefix scan.
 #[test]
 fn filter_output_descriptor_has_paired_length_buffer() {
     use crate::pipeline_descriptor::{Binding, BufferLen, BufferUsage};
@@ -5713,8 +5730,8 @@ entry filt_out(xs: []i32) ?k. [k]i32 =
         .collect();
     assert_eq!(
         intermediates.len(),
-        3,
-        "length cell plus filter flags and offsets: {bufs:?}",
+        5,
+        "length cell plus filter flags, offsets, and scan block scratch: {bufs:?}",
     );
     assert!(intermediates.iter().any(|binding| matches!(
         binding,
@@ -5736,6 +5753,20 @@ entry filt_out(xs: []i32) ?k. [k]i32 =
             .count(),
         2,
         "flags and offsets are input-sized u32 buffers"
+    );
+    assert_eq!(
+        intermediates
+            .iter()
+            .filter(|binding| matches!(
+                binding,
+                Binding::StorageBuffer {
+                    length: Some(BufferLen::SameAsDispatch { .. }),
+                    ..
+                }
+            ))
+            .count(),
+        2,
+        "scan block sums and block offsets are sized to the scan dispatch"
     );
 }
 
@@ -8379,18 +8410,15 @@ entry g6(pxl: []u32,
     .expect("texture_load after an image_load loop inside a map lambda should lower");
 }
 
-/// A runtime filter whose host entry also binds a storage image keeps the
-/// serial scan stage at `Fixed {1,1,1}`. The filter stages are clones of
-/// the host entry, so they inherit its storage-image input — and the
-/// per-texel dispatch upgrade must not seize their domains: the scan's
-/// 1×1×1 is semantic (a serial prefix scan), not a placeholder. Regressed
-/// when the storage-buffer opt-out was dropped from the upgrade rule: the
-/// scan's dispatch length got wired to the unrelated image's pixel count
-/// (and emitted a `storage_image` len the host driver can't size).
+/// A runtime filter whose host entry also binds a storage image sizes the
+/// filter scan from the filtered storage-buffer input. The filter stages are
+/// clones of the host entry, so they inherit its storage-image input; the
+/// per-texel dispatch upgrade must not seize their domains and wire the scan to
+/// the unrelated image extent.
 #[test]
-fn filter_scan_stays_serial_when_entry_binds_storage_image() {
+fn filter_scan_domain_ignores_storage_image_entry_binding() {
     use crate::egir::parallelize::schedule::KernelDomain;
-    use crate::pipeline_descriptor::{DispatchSize, Pipeline};
+    use crate::pipeline_descriptor::{DispatchLen, DispatchSize, Pipeline};
 
     let src = r#"
 resource occ: image2d { format = r32float  size = 256x256  usages = [storage_read, storage_write] }
@@ -8410,9 +8438,16 @@ entry cull(xs: []u32,
         .find(|phase| phase.entry_point == "cull_filter_scan")
         .expect("scan phase scheduled");
     assert!(
-        matches!(scan.domain, KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
-        "scan domain must stay the serial 1x1x1, got {:?}",
+        matches!(
+            scan.domain,
+            KernelDomain::Elements(DispatchLen::InputBinding { .. })
+        ),
+        "scan domain must come from the filtered input buffer, got {:?}",
         scan.domain
+    );
+    assert_eq!(
+        scan.workgroup_size,
+        (crate::egir::parallelize::REDUCE_PHASE1_WIDTH, 1, 1)
     );
 
     let lowered = crate::compile_thru_spirv(src).expect("image-reading filter emits SPIR-V");
@@ -8428,8 +8463,14 @@ entry cull(xs: []u32,
         })
         .expect("scan stage published");
     assert!(
-        matches!(stage.dispatch_size, DispatchSize::Fixed { x: 1, y: 1, z: 1 }),
-        "scan dispatch must publish as fixed 1x1x1, got {:?}",
+        matches!(
+            stage.dispatch_size,
+            DispatchSize::DerivedFrom {
+                len: DispatchLen::InputBinding { .. },
+                ..
+            }
+        ),
+        "scan dispatch must publish from the input buffer, got {:?}",
         stage.dispatch_size
     );
 }

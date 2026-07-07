@@ -33,7 +33,7 @@ use super::types::{
 /// Per-workgroup width of a synthesized phase-2 tree reduce.
 pub const PHASE2_WIDTH: u32 = 256;
 /// Per-workgroup width used to chunk a phase-1 partial reduce.
-const REDUCE_PHASE1_WIDTH: u32 = 64;
+pub(crate) const REDUCE_PHASE1_WIDTH: u32 = 64;
 
 /// Reify every reachable Screma as a semantic segmented op.
 /// This pass performs no scheduling and allocates no bindings.
@@ -93,7 +93,7 @@ fn collect_graph_dependencies(scope: &str, graph: &EGraph, output: &mut Vec<Sema
                             });
                         }
                         if let Some(work) = work_buffers {
-                            for binding in [work.flags, work.offsets] {
+                            for binding in [work.flags, work.offsets, work.block_sums, work.block_offsets] {
                                 resources.push(SegResourceAccess {
                                     binding,
                                     access: SegResourceAccessKind::ReadWrite,
@@ -415,11 +415,10 @@ pub fn lower(inner: &mut EgirInner) {
     let mut regions = std::mem::take(&mut inner.region_interner);
     let mut schedule = KernelSchedule::seed(&inner.pipeline, &inner.entry_points);
     attach_materialization_prepasses(inner, &mut schedule);
-    let filter_phases = lower_runtime_filters(inner, &mut schedule);
+    let (filter_phases, mut new_functions, mut new_regions) =
+        lower_runtime_filters(inner, &mut schedule, &mut regions);
     inner.entry_points.extend(filter_phases);
     let mut new_entries: Vec<EgirEntry> = Vec::new();
-    let mut new_functions: Vec<EgirFunc> = Vec::new();
-    let mut new_regions: Vec<(RegionId, EgirRegion)> = Vec::new();
     // Snapshot ResourceId → physical binding (the manifest was built at
     // `allocate()`); the reduce/scan lowerings resolve their reserved scratch
     // through this instead of drawing fresh bindings.
@@ -524,10 +523,26 @@ pub fn lower(inner: &mut EgirInner) {
     inner.region_interner = regions;
 }
 
-fn lower_runtime_filters(inner: &mut EgirInner, schedule: &mut schedule::KernelSchedule) -> Vec<EgirEntry> {
+fn lower_runtime_filters(
+    inner: &mut EgirInner,
+    schedule: &mut schedule::KernelSchedule,
+    regions: &mut RegionInterner,
+) -> (Vec<EgirEntry>, Vec<EgirFunc>, Vec<(RegionId, EgirRegion)>) {
     use crate::interface::{StorageBindingDecl, StorageRole};
     use schedule::KernelDomain;
     let mut phases = Vec::new();
+    let mut functions = Vec::new();
+    let mut region_defs = Vec::new();
+    let resource_lengths: LookupMap<BindingRef, Option<crate::pipeline_descriptor::BufferLen>> = inner
+        .resources
+        .iter()
+        .map(|resource| {
+            (
+                resource.legacy_binding,
+                super::program::buffer_len(&resource.size),
+            )
+        })
+        .collect();
     for entry in &mut inner.entry_points {
         let runtime_filter_count = entry
             .graph
@@ -573,6 +588,9 @@ fn lower_runtime_filters(inner: &mut EgirInner, schedule: &mut schedule::KernelS
         let (space, work, len_out) = (space.clone(), *work, *len_out);
         let domain =
             schedule::domain_from_space(&space).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
+        let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+        let storage_len = |binding| resource_lengths.get(&binding).cloned().flatten();
+
         let mut flags = entry.clone();
         flags.origin = crate::interface::EntryOrigin::RuntimeFilter;
         flags.name = format!("{}_filter_flags", entry.name);
@@ -583,12 +601,8 @@ fn lower_runtime_filters(inner: &mut EgirInner, schedule: &mut schedule::KernelS
         flags.storage_bindings.push(StorageBindingDecl {
             binding: work.flags,
             role: StorageRole::Output,
-            elem_ty: Type::Constructed(TypeName::UInt(32), vec![]),
-            length: inner
-                .resources
-                .iter()
-                .find(|resource| resource.legacy_binding == work.flags)
-                .and_then(|resource| super::program::buffer_len(&resource.size)),
+            elem_ty: u32_ty.clone(),
+            length: storage_len(work.flags),
         });
         set_filter_phase(&mut flags, work, FilterPhase::Flags);
 
@@ -596,7 +610,7 @@ fn lower_runtime_filters(inner: &mut EgirInner, schedule: &mut schedule::KernelS
         scan.origin = crate::interface::EntryOrigin::RuntimeFilter;
         scan.name = format!("{}_filter_scan", entry.name);
         scan.execution_model = crate::ssa::types::ExecutionModel::Compute {
-            local_size: (1, 1, 1),
+            local_size: (REDUCE_PHASE1_WIDTH, 1, 1),
         };
         scan.outputs.clear();
         scan.slot_sources.clear();
@@ -605,57 +619,91 @@ fn lower_runtime_filters(inner: &mut EgirInner, schedule: &mut schedule::KernelS
         for (binding, role) in [
             (work.flags, StorageRole::Input),
             (work.offsets, StorageRole::Output),
-            (len_out, StorageRole::Output),
+            (work.block_sums, StorageRole::Output),
         ] {
-            let elem_ty = Type::Constructed(TypeName::UInt(32), vec![]);
-            let length = if binding == len_out {
-                Some(crate::pipeline_descriptor::BufferLen::Fixed { bytes: 4 })
-            } else {
-                inner
-                    .resources
-                    .iter()
-                    .find(|resource| resource.legacy_binding == binding)
-                    .and_then(|resource| super::program::buffer_len(&resource.size))
-            };
             scan.storage_bindings.push(StorageBindingDecl {
                 binding,
                 role,
-                elem_ty,
-                length,
+                elem_ty: u32_ty.clone(),
+                length: storage_len(binding),
             });
         }
+        let zero = graph_ops::intern_u32(&mut scan.graph, 0, None);
         set_filter_phase(&mut scan, work, FilterPhase::Scan);
+
+        let add_name = format!("{}_filter_scan_add", entry.name);
+        let add_fn = synthesize_u32_add_function(add_name.clone(), entry.span);
+        let add_region = regions.intern(&add_name);
+        region_defs.push((add_region, EgirRegion::from_function(&add_fn)));
+        functions.push(add_fn);
+
+        let phase2 = synthesize_phase2_scan(
+            &scan.name,
+            add_name.clone(),
+            u32_ty.clone(),
+            &scan.graph,
+            zero,
+            work.block_sums,
+            work.block_offsets,
+            Some(len_out),
+        )
+        .expect("filter scan phase-2 synthesis");
+        let swap_wrapper_name = format!("{}_filter_scan_add_offsets", entry.name);
+        let swap_wrapper =
+            synthesize_swap_wrapper(swap_wrapper_name.clone(), add_name, u32_ty.clone(), entry.span);
+        let swap_region = regions.intern(&swap_wrapper_name);
+        region_defs.push((swap_region, EgirRegion::from_function(&swap_wrapper)));
+        functions.push(swap_wrapper);
+        let phase3 = synthesize_phase3_scan(
+            &scan.name,
+            swap_region,
+            u32_ty.clone(),
+            work.offsets,
+            work.block_offsets,
+            REDUCE_PHASE1_WIDTH,
+        );
+
         entry.storage_bindings.push(StorageBindingDecl {
             binding: work.flags,
             role: StorageRole::Input,
-            elem_ty: Type::Constructed(TypeName::UInt(32), vec![]),
-            length: inner
-                .resources
-                .iter()
-                .find(|resource| resource.legacy_binding == work.flags)
-                .and_then(|resource| super::program::buffer_len(&resource.size)),
+            elem_ty: u32_ty.clone(),
+            length: storage_len(work.flags),
         });
         entry.storage_bindings.push(StorageBindingDecl {
             binding: work.offsets,
             role: StorageRole::Input,
-            elem_ty: Type::Constructed(TypeName::UInt(32), vec![]),
-            length: inner
-                .resources
-                .iter()
-                .find(|resource| resource.legacy_binding == work.offsets)
-                .and_then(|resource| super::program::buffer_len(&resource.size)),
+            elem_ty: u32_ty.clone(),
+            length: storage_len(work.offsets),
+        });
+        entry.storage_bindings.push(StorageBindingDecl {
+            binding: work.block_offsets,
+            role: StorageRole::Input,
+            elem_ty: u32_ty,
+            length: storage_len(work.block_offsets),
         });
         set_filter_phase(entry, work, FilterPhase::Scatter);
-        schedule.add_phase_before(&entry.name, &flags, schedule::DomainSelection::Explicit(domain));
+        schedule.add_phase_before(
+            &entry.name,
+            &flags,
+            schedule::DomainSelection::Explicit(domain.clone()),
+        );
         schedule.add_phase_before(
             &entry.name,
             &scan,
+            schedule::DomainSelection::Explicit(domain.clone()),
+        );
+        schedule.add_phase_before(
+            &entry.name,
+            &phase2,
             schedule::DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
         );
+        schedule.add_phase_before(&entry.name, &phase3, schedule::DomainSelection::Explicit(domain));
         phases.push(flags);
         phases.push(scan);
+        phases.push(phase2);
+        phases.push(phase3);
     }
-    phases
+    (phases, functions, region_defs)
 }
 
 fn set_filter_phase(entry: &mut EgirEntry, work: super::types::FilterWorkBuffers, phase: FilterPhase) {
@@ -2973,6 +3021,7 @@ fn lower_scan_entry(
         init_nid,
         block_sums_binding,
         block_offsets_binding,
+        None,
     )
     .ok()?;
     let swap_wrapper_name = format!("{}_scan_op_swap", entry.name);
@@ -3011,6 +3060,7 @@ pub fn synthesize_phase2_scan(
     phase1_ne_nid: NodeId,
     block_sums_binding: BindingRef,
     block_offsets_binding: BindingRef,
+    len_out: Option<BindingRef>,
 ) -> Result<EgirEntry, String> {
     use super::builder::EntryBuilder;
     let mut b = EntryBuilder::new_compute(
@@ -3021,6 +3071,13 @@ pub fn synthesize_phase2_scan(
     let scratch_len = dispatch_worker_buffer_len(&elem_ty);
     b.declare_intermediate_storage_sized(block_sums_binding, elem_ty.clone(), scratch_len.clone());
     b.declare_intermediate_storage_sized(block_offsets_binding, elem_ty.clone(), scratch_len);
+    if let Some(len_out) = len_out {
+        b.declare_output_storage_sized(
+            len_out,
+            elem_ty.clone(),
+            Some(crate::pipeline_descriptor::BufferLen::Fixed { bytes: 4 }),
+        );
+    }
 
     let init_nid = graph_ops::clone_pure_subgraph(phase1_graph, b.graph_mut(), phase1_ne_nid)?;
     build_exclusive_scan_phase2(
@@ -3030,6 +3087,7 @@ pub fn synthesize_phase2_scan(
         init_nid,
         block_sums_binding,
         block_offsets_binding,
+        len_out,
     );
     Ok(b.build())
 }
@@ -3041,6 +3099,7 @@ fn build_exclusive_scan_phase2(
     init_nid: NodeId,
     block_sums_binding: BindingRef,
     block_offsets_binding: BindingRef,
+    len_out: Option<BindingRef>,
 ) {
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
@@ -3080,7 +3139,7 @@ fn build_exclusive_scan_phase2(
         then_target: body,
         then_args: vec![],
         else_target: after,
-        else_args: vec![],
+        else_args: if len_out.is_some() { vec![acc] } else { vec![] },
     };
     b.control_headers_mut().insert(
         header,
@@ -3102,7 +3161,7 @@ fn build_exclusive_scan_phase2(
         None,
     );
     let value = graph_ops::emit_view_load(graph, body, sums, index, elem_ty.clone(), &mut effect, None);
-    let next_acc = graph.intern_pure(PureOp::Call(op_func), smallvec![acc, value], elem_ty);
+    let next_acc = graph.intern_pure(PureOp::Call(op_func), smallvec![acc, value], elem_ty.clone());
     graph.skeleton.blocks[body].term = SkeletonTerminator::Branch {
         target: cont,
         args: vec![next_acc],
@@ -3114,6 +3173,12 @@ fn build_exclusive_scan_phase2(
         target: header,
         args: vec![continued_acc, next_index],
     };
+    if let Some(len_out) = len_out {
+        let total = graph.add_block_param(after, 0, elem_ty.clone());
+        graph.skeleton.blocks[after].params.push(total);
+        let len_view = graph_ops::intern_storage_view(graph, len_out, elem_ty.clone(), None);
+        graph_ops::emit_storage_store(graph, after, len_view, zero, total, elem_ty, &mut effect, None);
+    }
     b.set_current_block(after);
 }
 
@@ -3223,6 +3288,28 @@ fn synthesize_swap_wrapper(
             (elem_ty.clone(), "b".to_string()),
         ],
         elem_ty,
+        graph,
+        LookupMap::new(),
+    )
+}
+
+fn synthesize_u32_add_function(name: String, span: crate::ast::Span) -> EgirFunc {
+    let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+    let mut graph = EGraph::new();
+    let a_nid = graph.add_func_param(0, u32_ty.clone());
+    let b_nid = graph.add_func_param(1, u32_ty.clone());
+    let sum = graph.intern_pure(PureOp::BinOp("+".into()), smallvec![a_nid, b_nid], u32_ty.clone());
+    let entry_block = graph.skeleton.entry;
+    graph.skeleton.blocks[entry_block].term = SkeletonTerminator::Return(Some(sum));
+    EgirFunc::new(
+        name,
+        span,
+        None,
+        vec![
+            (u32_ty.clone(), "a".to_string()),
+            (u32_ty.clone(), "b".to_string()),
+        ],
+        u32_ty,
         graph,
         LookupMap::new(),
     )
@@ -3339,6 +3426,7 @@ mod tests {
             neutral,
             sums,
             offsets,
+            None,
         )
         .expect("phase2 synthesis");
 

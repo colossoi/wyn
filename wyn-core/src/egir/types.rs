@@ -305,6 +305,8 @@ pub enum SegOpKind {
 pub struct FilterWorkBuffers {
     pub flags: crate::BindingRef,
     pub offsets: crate::BindingRef,
+    pub block_sums: crate::BindingRef,
+    pub block_offsets: crate::BindingRef,
 }
 
 /// Runtime filter algorithm selected only at terminal lowering. Semantic EGIR
