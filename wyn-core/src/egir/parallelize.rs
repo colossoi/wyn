@@ -3093,16 +3093,51 @@ pub fn synthesize_phase2_scan(
     }
 
     let init_nid = graph_ops::clone_pure_subgraph(phase1_graph, b.graph_mut(), phase1_ne_nid)?;
-    build_exclusive_scan_phase2(
+    let phase2 = build_exclusive_scan_phase2(
         &mut b,
         op_func,
-        elem_ty,
+        elem_ty.clone(),
         init_nid,
         block_sums_binding,
         block_offsets_binding,
-        len_out,
+        len_out.is_some(),
     );
+    // A runtime filter publishes the scan's grand total (its survivor count)
+    // into the length cell. The generic scan builder above stays oblivious to
+    // this; only the bridge that knows the filter's `len_out` wires it up.
+    if let (Some(len_out), Some(total)) = (len_out, phase2.total) {
+        let mut effect = phase2.effect;
+        let graph = b.graph_mut();
+        let len_view = graph_ops::intern_storage_view(graph, len_out, elem_ty.clone(), None);
+        graph_ops::emit_storage_store(
+            graph,
+            phase2.after,
+            len_view,
+            phase2.zero,
+            total,
+            elem_ty,
+            &mut effect,
+            None,
+        );
+    }
     Ok(b.build())
+}
+
+/// What an exclusive-scan phase-2 loop hands back to a caller that wants to
+/// append work (e.g. a runtime filter storing the survivor count) to the
+/// post-loop `after` block. The loop itself is generic — it knows nothing
+/// about where a total is stored.
+struct ExclusiveScanPhase2 {
+    /// The grand total of all block sums, exposed as an `after` block param.
+    /// `Some` only when `want_total` was requested.
+    total: Option<NodeId>,
+    /// The post-loop block (also left as the builder's current block).
+    after: BlockId,
+    /// Effect-chain cursor after the loop, so an appended store sequences after
+    /// the loop's own effects with the same token the loop would have used.
+    effect: u32,
+    /// The interned `0` node, reusable as a store index.
+    zero: NodeId,
 }
 
 fn build_exclusive_scan_phase2(
@@ -3112,8 +3147,8 @@ fn build_exclusive_scan_phase2(
     init_nid: NodeId,
     block_sums_binding: BindingRef,
     block_offsets_binding: BindingRef,
-    len_out: Option<BindingRef>,
-) {
+    want_total: bool,
+) -> ExclusiveScanPhase2 {
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
     let arr_ty = Type::Constructed(
@@ -3152,7 +3187,7 @@ fn build_exclusive_scan_phase2(
         then_target: body,
         then_args: vec![],
         else_target: after,
-        else_args: if len_out.is_some() { vec![acc] } else { vec![] },
+        else_args: if want_total { vec![acc] } else { vec![] },
     };
     b.control_headers_mut().insert(
         header,
@@ -3186,13 +3221,23 @@ fn build_exclusive_scan_phase2(
         target: header,
         args: vec![continued_acc, next_index],
     };
-    if let Some(len_out) = len_out {
+    // Expose the grand total as an `after` block param when requested; the
+    // caller (a filter compaction) appends its own store. The generic scan
+    // never touches a length cell.
+    let total = if want_total {
         let total = graph.add_block_param(after, 0, elem_ty.clone());
         graph.skeleton.blocks[after].params.push(total);
-        let len_view = graph_ops::intern_storage_view(graph, len_out, elem_ty.clone(), None);
-        graph_ops::emit_storage_store(graph, after, len_view, zero, total, elem_ty, &mut effect, None);
-    }
+        Some(total)
+    } else {
+        None
+    };
     b.set_current_block(after);
+    ExclusiveScanPhase2 {
+        total,
+        after,
+        effect,
+        zero,
+    }
 }
 
 /// Synthesize phase 3 of a parallel scan: a chunked compute entry where each
