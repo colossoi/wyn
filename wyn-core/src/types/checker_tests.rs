@@ -48,6 +48,133 @@ fn test_simple_def() {
 }
 
 #[test]
+fn pipe_desugars_to_saturated_call_and_typechecks() {
+    // `x |> f(a, b)` is the saturated call `f(a, b, x)` — no lambda, no
+    // currying. It only type-checks because the piped value fills f's
+    // final parameter exactly.
+    typecheck_program(
+        r#"
+def f(a: i32, b: i32, c: i32) i32 = a + b + c
+def use_pipe(x: i32) i32 = x |> f(1, 2)
+"#,
+    );
+}
+
+#[test]
+fn pipe_rhs_call_is_never_typechecked_standalone() {
+    // The right side of a pipe, `f(1, 2)`, is a *partial* application of
+    // an arity-3 function and has no valid type on its own — writing it
+    // bare is a type error:
+    let standalone = try_typecheck_program(
+        r#"
+def f(a: i32, b: i32, c: i32) i32 = a + b + c
+def bad(x: i32) i32 = f(1, 2)
+"#,
+    );
+    assert!(
+        matches!(&standalone, Err(CompilerError::TypeError(msg, _)) if msg.contains("Partial application")),
+        "bare f(1, 2) should be a partial-application error, got {:?}",
+        standalone
+    );
+
+    // But the pipe rewrites `f(1, 2)` to the saturated `f(1, 2, x)` during
+    // parsing, so the arity-2 fragment never reaches the type checker and
+    // the whole expression is well typed:
+    typecheck_program(
+        r#"
+def f(a: i32, b: i32, c: i32) i32 = a + b + c
+def ok(x: i32) i32 = x |> f(1, 2)
+"#,
+    );
+}
+
+#[test]
+#[ignore = "known shortcoming: `x |> f(a, b)` splices into the under-saturated \
+            call `f(a, b)` — which has no valid type on its own — and rescues it \
+            into `f(a, b, x)`. A stricter design might reject piping into a call \
+            that is not independently well-formed; the current parse-time splice \
+            accepts it, so this rejection expectation fails when force-run."]
+fn pipe_into_undersaturated_call_is_rejected() {
+    // `f` has arity 3, so the pipe's right-hand fragment `f(1, 2)` is a
+    // partial application with no standalone type. We would prefer the
+    // pipe to reject that rather than silently complete it.
+    let result = try_typecheck_program(
+        r#"
+def f(a: i32, b: i32, c: i32) i32 = a + b + c
+def piped(x: i32) i32 = x |> f(1, 2)
+"#,
+    );
+    assert!(
+        matches!(result, Err(CompilerError::TypeError(_, _))),
+        "piping into the under-saturated call f(1, 2) should be rejected, got {:?}",
+        result
+    );
+}
+
+#[test]
+fn pipe_into_map_typechecks() {
+    // The motivating case: a data pipeline through the array operators,
+    // splicing the array as map's last argument.
+    typecheck_program(
+        r#"
+def double(x: i32) i32 = x * 2
+def scale(xs: []i32) []i32 = xs |> map(double)
+"#,
+    );
+}
+
+#[test]
+fn pipe_chain_map_then_reduce_typechecks() {
+    typecheck_program(
+        r#"
+def double(x: i32) i32 = x * 2
+def add(a: i32, b: i32) i32 = a + b
+def sum_doubled(xs: []i32) i32 = xs |> map(double) |> reduce(add, 0)
+"#,
+    );
+}
+
+#[test]
+fn pipe_that_under_saturates_is_a_partial_application_error() {
+    // `x |> f(1)` is `f(1, x)` — only two arguments for an arity-3
+    // function, so the checker rejects it as a partial application. This
+    // proves the pipe adds exactly one real argument (not a curried one).
+    let result = try_typecheck_program(
+        r#"
+def f(a: i32, b: i32, c: i32) i32 = a + b + c
+def bad(x: i32) i32 = x |> f(1)
+"#,
+    );
+    match result {
+        Err(CompilerError::TypeError(msg, _)) => {
+            assert!(
+                msg.contains("Partial application"),
+                "expected a partial-application error, got: {msg}"
+            );
+        }
+        other => panic!("expected a TypeError, got {:?}", other),
+    }
+}
+
+#[test]
+fn pipe_that_over_saturates_is_a_call_arity_error() {
+    // `x |> g(1, 2)` is `g(1, 2, x)` — three arguments for an arity-2
+    // function, so the piped value really is a fourth-wall argument the
+    // checker counts and rejects.
+    let result = try_typecheck_program(
+        r#"
+def g(a: i32, b: i32) i32 = a + b
+def bad(x: i32) i32 = x |> g(1, 2)
+"#,
+    );
+    assert!(
+        matches!(result, Err(CompilerError::TypeError(_, _))),
+        "expected a TypeError for over-application, got {:?}",
+        result
+    );
+}
+
+#[test]
 fn test_two_length_and_replicate_calls() {
     // Simplified test: two calls to length/replicate with different array element types
     // This tests that type variables don't bleed between the two calls

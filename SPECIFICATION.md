@@ -920,6 +920,7 @@ in expressions; they remain in the table for ambiguity resolution.
 | left  | `,` |
 | left  | `:`, `:>` |
 | left  | `` `symbol` `` |
+| left  | `\|>` |
 | left  | `\|\|` |
 | left  | `&&` |
 | left  | `<= >= > < == != ! =` |
@@ -927,7 +928,6 @@ in expressions; they remain in the table for ambiguity resolution.
 | left  | `<< >> >>>` |
 | left  | `+ -` |
 | left  | `* / % // %%` |
-| left  | `\|>` |
 | right | `->` |
 | left  | `**` |
 
@@ -1091,6 +1091,20 @@ Apply the function `f` to the arguments `x`, `y`, and `z`. Function
 application is always fully saturated: every parameter of `f` is
 given a value at the call site. Partial application is not
 supported.
+
+#### x |> f(a, b)
+The pipe operator threads its left operand into the call on its
+right as the **last** argument: `x |> f(a, b)` is exactly
+`f(a, b, x)`, and `x |> f` (a bare callee) is `f(x)`. It is purely
+syntactic sugar for a fully-saturated application — because the
+piped value becomes an ordinary trailing argument, no partial
+application or currying is involved. `|>` is left-associative and
+has the lowest precedence of any operator, so everything to its left
+is grouped before being piped: `a + b |> f` is `f(a + b)`, and
+`xs |> map(g) |> filter(p)` is `filter(p, map(g, xs))`. Appending as
+the last argument matches the array-last convention of the built-in
+array operators (`map(f, xs)`, `filter(p, xs)`, `reduce(op, z, xs)`,
+`scan(op, z, xs)`), so those read naturally in a pipeline.
 
 #### #c(x, y, z)
 Apply the sum type constructor `#c` to the payload `x`, `y`, and

@@ -1936,6 +1936,65 @@ fn test_ambiguity_pipe_operator() {
 }
 
 #[test]
+fn test_pipe_splices_left_operand_as_last_argument() {
+    // x |> f(a, b) desugars to the saturated call f(a, b, x) — the piped
+    // value is appended as the final argument, never a partial application.
+    let decl = single_decl("def test = x |> f(a, b)");
+
+    let (func, args) = match &decl.body.kind {
+        ExprKind::Application(func, args) => (func, args),
+        kind => panic!("expected Application, got {:?}", kind),
+    };
+    assert!(matches!(&func.kind, ExprKind::Identifier(_, f) if f == "f"));
+    assert_eq!(args.len(), 3, "pipe should append to the existing call args");
+    assert!(matches!(&args[0].kind, ExprKind::Identifier(_, a) if a == "a"));
+    assert!(matches!(&args[1].kind, ExprKind::Identifier(_, b) if b == "b"));
+    assert!(matches!(&args[2].kind, ExprKind::Identifier(_, x) if x == "x"));
+}
+
+#[test]
+fn test_pipe_chains_left_associatively() {
+    // xs |> f(a) |> g  =>  g(f(a, xs))
+    let decl = single_decl("def test = xs |> f(a) |> g");
+
+    let (g, g_args) = match &decl.body.kind {
+        ExprKind::Application(func, args) => (func, args),
+        kind => panic!("expected outer Application, got {:?}", kind),
+    };
+    assert!(matches!(&g.kind, ExprKind::Identifier(_, name) if name == "g"));
+    assert_eq!(g_args.len(), 1, "g receives only the piped inner call");
+
+    // The single argument to g is the inner call f(a, xs).
+    let (f, f_args) = match &g_args[0].kind {
+        ExprKind::Application(func, args) => (func, args),
+        kind => panic!("expected inner Application f(a, xs), got {:?}", kind),
+    };
+    assert!(matches!(&f.kind, ExprKind::Identifier(_, name) if name == "f"));
+    assert_eq!(f_args.len(), 2);
+    assert!(matches!(&f_args[0].kind, ExprKind::Identifier(_, a) if a == "a"));
+    assert!(matches!(&f_args[1].kind, ExprKind::Identifier(_, xs) if xs == "xs"));
+}
+
+#[test]
+fn test_pipe_binds_looser_than_arithmetic() {
+    // `|>` is the lowest-precedence operator, so a + b |> f  =>  f(a + b),
+    // not a + f(b).
+    let decl = single_decl("def test = a + b |> f");
+
+    let (func, args) = match &decl.body.kind {
+        ExprKind::Application(func, args) => (func, args),
+        kind => panic!("expected Application f(a + b), got {:?}", kind),
+    };
+    assert!(matches!(&func.kind, ExprKind::Identifier(_, f) if f == "f"));
+    assert_eq!(args.len(), 1);
+    assert!(
+        matches!(&args[0].kind, ExprKind::BinaryOp(op, _, _) if op.op == "+"),
+        "the piped value should be the whole `a + b` sum, got {:?}",
+        &args[0].kind
+    );
+}
+
+#[test]
 fn test_function_call_tuple_syntax() {
     // Test that "vec3(1.0, 0.5, 0.25)" parses as an Application with 3 arguments
     let input = "def test = vec3(1.0f32, 0.5f32, 0.25f32)";

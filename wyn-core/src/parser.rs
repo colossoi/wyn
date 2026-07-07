@@ -1922,16 +1922,16 @@ impl<'a> Parser<'a> {
         // Returns (precedence, is_left_associative)
         // Dominating precedence (higher number) binds tighter than dominated precedence
         // Based on SPECIFICATION.md operator precedence table:
-        //   || (dominated) < && < comparisons < bitwise < shifts < +- < */% < |> < ** (dominating)
+        //   |> (dominated) < || < && < comparisons < bitwise < shifts < +- < */% < ** (dominating)
         match op {
-            "||" => Some((1, true)), // Logical or (most dominated)
+            "|>" => Some((0, true)), // Pipe operator (lowest precedence, left-associative)
+            "||" => Some((1, true)), // Logical or
             "&&" => Some((2, true)), // Logical and
             "==" | "!=" | "<" | ">" | "<=" | ">=" => Some((3, true)), // Comparison operators
             "&" | "^" | "|" => Some((4, true)), // Bitwise operators
             "<<" | ">>" | ">>>" => Some((5, true)), // Bitwise shifts
             "+" | "-" => Some((6, true)), // Addition and subtraction
             "*" | "/" | "%" | "//" | "%%" => Some((7, true)), // Multiplication, division, modulo
-            "|>" => Some((8, true)), // Pipe operator
             "**" => Some((9, true)), // Exponentiation (most dominating binary)
             _ => None,
         }
@@ -2149,8 +2149,20 @@ impl<'a> Parser<'a> {
             // Build the appropriate operation with span from left to right
             let span = left.h.span.merge(&right.h.span);
             left = if op_string == "|>" {
-                // Desugar pipe: a |> f  =>  f(a)
-                self.node_counter.mk_node(ExprKind::Application(Box::new(right), vec![left]), span)
+                // Desugar pipe by splicing the left operand as the final
+                // argument of the right-hand call — a fully-saturated
+                // application, never a partial one:
+                //   x |> f(a, b)  =>  f(a, b, x)
+                //   x |> f        =>  f(x)   (bare callee / lambda fallback)
+                match right.kind {
+                    ExprKind::Application(callee, mut args) => {
+                        args.push(left);
+                        self.node_counter.mk_node(ExprKind::Application(callee, args), span)
+                    }
+                    _ => self
+                        .node_counter
+                        .mk_node(ExprKind::Application(Box::new(right), vec![left]), span),
+                }
             } else {
                 // Regular binary operation
                 self.node_counter.mk_node(

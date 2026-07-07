@@ -1,0 +1,21 @@
+-- Exercises the |> pipe operator. Each pipe splices its left operand as
+-- the last argument of the right-hand call, so a pipeline reads left to
+-- right while lowering to the same saturated calls as the nested form.
+
+def double(x: f32) f32 = x * 2.0
+
+def add(a: f32, b: f32) f32 = a + b
+
+-- Bare-callee pipe: `data |> stage` is `stage(data)`.
+def scale_all(data: []f32) []f32 = data |> map(double)
+
+-- Multi-stage chain: map then reduce.
+--   data |> map(double) |> reduce(add, 0.0)  ==  reduce(add, 0.0, map(double, data))
+#[compute]
+entry sum_doubled(data: []f32) f32 =
+  data |> map(double) |> reduce(add, 0.0)
+
+-- Precedence: `|>` is looser than arithmetic, so the whole sum is piped.
+--   (n + 1) |> f32.i32  ==  f32.i32(n + 1)
+#[compute]
+entry piped_arith(n: i32) f32 = n + 1 |> f32.i32
