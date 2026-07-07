@@ -700,18 +700,18 @@ entry gen(bh: []vec4f32) []i32 =
     );
 }
 
-/// Compute entries that bind a `storage_image` and call `image_store`
+/// Compute entries that bind a `storage_image` and update it with `with`
 /// must lower to WGSL: a module-scope
 /// `var name: texture_storage_2d<format, access>` declaration plus a
 /// `textureStore(name, coord, value)` call.
 #[test]
-fn wgsl_compute_storage_image_store() {
+fn wgsl_compute_storage_image_with() {
     let source = r#"
 #[compute]
-entry paint(#[storage_image(set=0, binding=0, format=rgba8unorm, access=write_only)] img: storage_image,
+entry paint(#[storage_image(set=0, binding=0, format=rgba8unorm, access=write_only)] img: *storage_image,
             #[builtin(global_invocation_id)] gid: vec3u32) () =
   let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
-  image_store(img, xy, @[1.0, 0.0, 0.0, 1.0])
+  img with [xy] = @[1.0, 0.0, 0.0, 1.0]
 "#;
     let wgsl = compile_to_wgsl(source).expect("compile to WGSL");
     assert!(
@@ -724,7 +724,7 @@ entry paint(#[storage_image(set=0, binding=0, format=rgba8unorm, access=write_on
     );
     assert!(
         wgsl.contains("textureStore("),
-        "image_store must lower to textureStore:\n{wgsl}"
+        "storage-image update must lower to textureStore:\n{wgsl}"
     );
 }
 

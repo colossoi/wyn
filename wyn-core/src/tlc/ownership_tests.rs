@@ -678,6 +678,106 @@ def main(c: bool, a: *[4]i32, b: *[4]i32) i32 =
 }
 
 #[test]
+fn storage_image_with_threads_linear_handle() {
+    let source = r#"
+def update_twice(img: *storage_image, xy: vec2i32, color: vec4f32) *storage_image =
+    let img = img with [xy] = color in
+    img with [xy] = color
+"#;
+    assert!(
+        !has_use_after_move(source),
+        "threading the returned storage-image handle through another update is valid",
+    );
+}
+
+#[test]
+fn storage_image_with_rejects_old_handle_reuse() {
+    let source = r#"
+def bad(img: *storage_image, xy: vec2i32, color: vec4f32) *storage_image =
+    let next = img with [xy] = color in
+    img with [xy] = color
+"#;
+    assert!(
+        has_use_after_move(source),
+        "using the old image handle after an update must be rejected",
+    );
+}
+
+#[test]
+fn storage_image_with_result_must_be_threaded() {
+    let source = r#"
+def bad(img: *storage_image, xy: vec2i32, color: vec4f32) () =
+    let _ = img with [xy] = color in
+    ()
+"#;
+    assert!(
+        has_use_after_move(source),
+        "dropping the returned image handle must be rejected",
+    );
+}
+
+#[test]
+fn storage_image_with_inline_tuple_projection_must_not_drop_handle() {
+    let source = r#"
+def bad(img: *storage_image, xy: vec2i32, color: vec4f32) i32 =
+    (img with [xy] = color, 5).1
+"#;
+    assert!(
+        has_use_after_move(source),
+        "inline image updates must not be droppable through tuple projection",
+    );
+}
+
+#[test]
+fn storage_image_with_named_handle_may_be_observed() {
+    let source = r#"
+def read_after_write(img: *storage_image, xy: vec2i32, color: vec4f32) vec4f32 =
+    let img2 = img with [xy] = color in
+    image_load(img2, xy)
+"#;
+    assert!(
+        !has_use_after_move(source),
+        "observing the next storage-image handle with image_load should count as threading",
+    );
+}
+
+#[test]
+fn storage_image_with_inline_handle_may_be_observed() {
+    let source = r#"
+def read_after_write(img: *storage_image, xy: vec2i32, color: vec4f32) vec4f32 =
+    image_load(img with [xy] = color, xy)
+"#;
+    assert!(
+        !has_use_after_move(source),
+        "inline observation through image_load should be accepted consistently with named handles",
+    );
+}
+
+#[test]
+fn storage_image_with_rejects_observing_handle() {
+    let source = r#"
+def bad(img: storage_image, xy: vec2i32, color: vec4f32) storage_image =
+    img with [xy] = color
+"#;
+    assert!(
+        has_use_after_move(source),
+        "an observing storage_image parameter must not satisfy a linear update",
+    );
+}
+
+#[test]
+fn storage_image_with_rejects_soac_body() {
+    let source = r#"
+def bad(img: *storage_image, xs: [4]i32, color: vec4f32) [4]i32 =
+    map(|x: i32| let _ = img with [@[x, 0]] = color in x, xs)
+"#;
+    assert!(
+        has_use_after_move(source),
+        "linear image updates are serial-only in v1",
+    );
+}
+
+#[test]
 fn globals_may_be_freely_observed() {
     // Globals are non-consumable observing values (they have no owner),
     // so referencing one in any position is fine as long as it is never

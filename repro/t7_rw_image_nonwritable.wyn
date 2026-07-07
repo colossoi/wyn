@@ -8,5 +8,6 @@ entry reader(xs: []u32, #[view(shared, storage_read)] s: storage_image) []f32 =
   map(|e| let p = image_load(s, @[i32(e), 0]) in p.x, xs)
 
 #[compute]
-entry writer(xs: []u32, #[view(shared, storage_write)] d: storage_image) []u32 =
-  map(|e| let _ = image_store(d, @[i32(e), 0], @[1.0, 1.0, 1.0, 1.0]) in 0u32, xs)
+entry writer(#[builtin(global_invocation_id)] gid: vec3u32,
+             #[view(shared, storage_write)] d: *storage_image) () =
+  d with [@[i32.u32(gid.x), 0]] = @[1.0, 1.0, 1.0, 1.0]

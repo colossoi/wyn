@@ -318,7 +318,7 @@ resource acc: image2d {
 }
 
 #[compute]
-entry accumulate(#[view(acc, storage_write)] out_acc: storage_image,
+entry accumulate(#[view(acc, storage_write)] out_acc: *storage_image,
                  #[view(acc, sampled, previous)] prev_acc: texture2d,
                  #[builtin(global_invocation_id)] gid: vec3u32,
                  #[uniform(set=1, binding=0)] iResolution: vec3f32,
@@ -351,7 +351,7 @@ entry accumulate(#[view(acc, storage_write)] out_acc: storage_image,
       let sum = sum0 + batch.0 in
       @[sum.x, sum.y, sum.z, count0 + f32(SPP_PER_FRAME)]
   in
-  image_store(out_acc, xy, texel)
+  out_acc with [xy] = texel
 
 ------------------------------------------------------------
 -- Display pass: sum / count, gamma 2 (the book's sqrt write).

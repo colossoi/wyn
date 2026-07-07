@@ -548,8 +548,8 @@ fn convert_entry_point(
     )?;
     let is_unit_return = matches!(
         ret_type,
-        Type::Constructed(TypeName::Unit, _) | Type::Constructed(TypeName::SideEffect, _)
-    );
+        Type::Constructed(TypeName::Unit | TypeName::SideEffect, _)
+    ) || is_storage_image_ty(&ret_type);
 
     // Convert body. Output assignment (storing the result into the bound
     // storage views / graphics output slots, and retargeting tail
@@ -578,18 +578,23 @@ fn convert_entry_point(
     // function signature. Post-`normalize_outputs` the body's TLC
     // return type is `SideEffect`; reconstruct from `entry.outputs`
     // so the signature matches the declared output shape.
-    let ret_type = if was_slot_collected {
-        if entry.outputs.len() == 1 {
-            // Unwrap a `?k. [k]T` filter output to its runtime array, matching
-            // the `EntryOutput.ty` `build_entry_outputs` produced.
-            unwrap_existential_array(&entry.outputs[0].ty)
+    let ret_type =
+        if was_slot_collected && entry.outputs.iter().any(|output| is_storage_image_ty(&output.ty)) {
+            Type::Constructed(TypeName::Unit, vec![])
+        } else if was_slot_collected {
+            if entry.outputs.len() == 1 {
+                // Unwrap a `?k. [k]T` filter output to its runtime array, matching
+                // the `EntryOutput.ty` `build_entry_outputs` produced.
+                unwrap_existential_array(&entry.outputs[0].ty)
+            } else {
+                let component_tys: Vec<_> = entry.outputs.iter().map(|o| o.ty.clone()).collect();
+                Type::Constructed(TypeName::Tuple(component_tys.len()), component_tys)
+            }
+        } else if is_storage_image_ty(&ret_type) {
+            Type::Constructed(TypeName::Unit, vec![])
         } else {
-            let component_tys: Vec<_> = entry.outputs.iter().map(|o| o.ty.clone()).collect();
-            Type::Constructed(TypeName::Tuple(component_tys.len()), component_tys)
-        }
-    } else {
-        ret_type
-    };
+            ret_type
+        };
 
     let slot_sources = std::mem::take(&mut converter.slot_sources_accum);
     // Gather buffers declared in TLC (`lift_gathers`, on the `EntryDecl`) plus
@@ -613,6 +618,10 @@ fn convert_entry_point(
     entry.slot_sources = slot_sources;
 
     Ok(entry)
+}
+
+fn is_storage_image_ty(ty: &Type<TypeName>) -> bool {
+    matches!(ty, Type::Constructed(TypeName::StorageTexture, _))
 }
 
 // ============================================================================
@@ -1142,8 +1151,8 @@ impl<'a, 'b> Converter<'a, 'b> {
                     self.lower_storage_index(args, ty)
                 } else if *id == known.storage_store && args.len() == 4 {
                     self.lower_storage_store(args)
-                } else if *id == known.image_store && args.len() == 3 {
-                    self.lower_image_store(args)
+                } else if *id == known.image_with && args.len() == 3 {
+                    self.lower_image_with(args, ty)
                 } else if *id == known.image_load && args.len() == 2 {
                     let binding = crate::types::storage_image_region(&args[0].ty).ok_or_else(|| {
                         ConvertError::GraphError(
@@ -1318,13 +1327,15 @@ impl<'a, 'b> Converter<'a, 'b> {
         Ok(self.intern_pure(PureOp::Unit, smallvec![], unit_ty))
     }
 
-    /// Convert `image_store(image, ivec2, vec4) -> unit` into a
-    /// binding-qualified side effect. The image is a compile-time resource,
-    /// so only coordinate and texel remain as runtime operands.
-    fn lower_image_store(&mut self, args: &[Term]) -> Result<NodeId, ConvertError> {
+    /// Convert `img with [xy] = rgba` into the same image-write side effect as
+    /// the backend storage-image store, returning a compile-time-only placeholder for the next
+    /// linear image handle. The image handle itself has no runtime payload; the
+    /// concrete descriptor binding is carried by `args[0].ty`.
+    fn lower_image_with(&mut self, args: &[Term], ty: Type<TypeName>) -> Result<NodeId, ConvertError> {
         let binding = crate::types::storage_image_region(&args[0].ty).ok_or_else(|| {
             ConvertError::GraphError(
-                "image_store operand has no concrete storage-image region after monomorphization".into(),
+                "storage-image update operand has no concrete storage-image region after monomorphization"
+                    .into(),
             )
         })?;
         let arg_nids: SmallVec<[NodeId; 4]> =
@@ -1332,7 +1343,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let arg_vrefs: Vec<ValueRef> =
             (0..arg_nids.len()).map(|_| ValueRef::Ssa(crate::ssa::types::ValueId::default())).collect();
         let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
-        let result_nid = self.graph.alloc_side_effect_result(unit_ty.clone());
+        let effect_result = self.graph.alloc_side_effect_result(unit_ty);
         let effect_in = EffectToken(0);
         let effect_out = self.alloc_effect();
         self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
@@ -1341,11 +1352,11 @@ impl<'a, 'b> Converter<'a, 'b> {
                 operands: arg_vrefs,
             }),
             operand_nodes: arg_nids,
-            result: Some(result_nid),
+            result: Some(effect_result),
             effects: Some((effect_in, effect_out)),
             span: self.current_span,
         });
-        Ok(result_nid)
+        Ok(self.intern_pure(PureOp::Unit, smallvec![], ty))
     }
 
     // ========================================================================
@@ -1365,8 +1376,14 @@ impl<'a, 'b> Converter<'a, 'b> {
         let else_block = self.graph.skeleton.create_block();
         let merge_block = self.graph.skeleton.create_block();
 
-        let result_nid = self.graph.add_block_param(merge_block, 0, ty.clone());
-        self.graph.skeleton.blocks[merge_block].params.push(result_nid);
+        let storage_image_result = matches!(ty, Type::Constructed(TypeName::StorageTexture, _));
+        let result_nid = if storage_image_result {
+            None
+        } else {
+            let result_nid = self.graph.add_block_param(merge_block, 0, ty.clone());
+            self.graph.skeleton.blocks[merge_block].params.push(result_nid);
+            Some(result_nid)
+        };
 
         // Selection header for SPIR-V structured control flow.
         self.control_headers.insert(
@@ -1388,7 +1405,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let then_result = self.convert_term(then_branch)?;
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
             target: merge_block,
-            args: vec![then_result],
+            args: result_nid.map(|_| then_result).into_iter().collect(),
         };
 
         // Else branch.
@@ -1396,12 +1413,12 @@ impl<'a, 'b> Converter<'a, 'b> {
         let else_result = self.convert_term(else_branch)?;
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
             target: merge_block,
-            args: vec![else_result],
+            args: result_nid.map(|_| else_result).into_iter().collect(),
         };
 
         // Continue from merge.
         self.current_block = merge_block;
-        Ok(result_nid)
+        Ok(result_nid.unwrap_or_else(|| self.intern_pure(PureOp::Unit, smallvec![], ty)))
     }
 
     // ========================================================================
@@ -1418,6 +1435,38 @@ impl<'a, 'b> Converter<'a, 'b> {
         body: &Term,
         _result_ty: Type<TypeName>,
     ) -> Result<NodeId, ConvertError> {
+        if matches!(loop_var_ty, Type::Constructed(TypeName::StorageTexture, _)) {
+            return match kind {
+                LoopKind::While { cond } => self.convert_storage_image_while_loop(
+                    loop_var,
+                    loop_var_ty,
+                    init,
+                    init_bindings,
+                    cond,
+                    body,
+                ),
+                LoopKind::ForRange { var, var_ty, bound } => self.convert_storage_image_for_range_loop(
+                    loop_var,
+                    loop_var_ty,
+                    init,
+                    init_bindings,
+                    *var,
+                    var_ty,
+                    bound,
+                    body,
+                ),
+                LoopKind::For { var, var_ty, iter } => self.convert_storage_image_for_in_loop(
+                    loop_var,
+                    loop_var_ty,
+                    init,
+                    init_bindings,
+                    *var,
+                    var_ty,
+                    iter,
+                    body,
+                ),
+            };
+        }
         match kind {
             LoopKind::While { cond } => {
                 self.convert_while_loop(loop_var, loop_var_ty, init, init_bindings, cond, body)
@@ -1443,6 +1492,213 @@ impl<'a, 'b> Converter<'a, 'b> {
                 body,
             ),
         }
+    }
+
+    fn storage_image_placeholder(&mut self, ty: &Type<TypeName>) -> NodeId {
+        self.intern_pure(PureOp::Unit, smallvec![], ty.clone())
+    }
+
+    fn bind_storage_image_loop_var(
+        &mut self,
+        loop_var: SymbolId,
+        loop_var_ty: &Type<TypeName>,
+        init_bindings: &[(SymbolId, Type<TypeName>, Term)],
+    ) -> Result<(), ConvertError> {
+        let handle = self.storage_image_placeholder(loop_var_ty);
+        self.locals.insert(loop_var, handle);
+        for (sym, _ty, expr) in init_bindings {
+            let val = self.convert_term(expr)?;
+            self.locals.insert(*sym, val);
+        }
+        Ok(())
+    }
+
+    fn unbind_loop_vars(&mut self, loop_var: SymbolId, init_bindings: &[(SymbolId, Type<TypeName>, Term)]) {
+        self.locals.remove(&loop_var);
+        for (sym, _, _) in init_bindings {
+            self.locals.remove(sym);
+        }
+    }
+
+    fn convert_storage_image_while_loop(
+        &mut self,
+        loop_var: SymbolId,
+        loop_var_ty: &Type<TypeName>,
+        init: &Term,
+        init_bindings: &[(SymbolId, Type<TypeName>, Term)],
+        cond: &Term,
+        body: &Term,
+    ) -> Result<NodeId, ConvertError> {
+        let header = self.graph.skeleton.create_block();
+        let body_block = self.graph.skeleton.create_block();
+        let exit = self.graph.skeleton.create_block();
+
+        self.control_headers.insert(
+            header,
+            ControlHeader::Loop {
+                merge: exit,
+                continue_block: body_block,
+            },
+        );
+
+        let _init_nid = self.convert_term(init)?;
+        self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
+            target: header,
+            args: vec![],
+        };
+
+        self.current_block = header;
+        self.bind_storage_image_loop_var(loop_var, loop_var_ty, init_bindings)?;
+        let cond_nid = self.convert_term(cond)?;
+        self.graph.skeleton.blocks[header].term = SkeletonTerminator::CondBranch {
+            cond: cond_nid,
+            then_target: body_block,
+            then_args: vec![],
+            else_target: exit,
+            else_args: vec![],
+        };
+
+        self.current_block = body_block;
+        let _new_handle = self.convert_term(body)?;
+        self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
+            target: header,
+            args: vec![],
+        };
+
+        self.current_block = exit;
+        self.unbind_loop_vars(loop_var, init_bindings);
+        Ok(self.storage_image_placeholder(loop_var_ty))
+    }
+
+    fn convert_storage_image_for_range_loop(
+        &mut self,
+        loop_var: SymbolId,
+        loop_var_ty: &Type<TypeName>,
+        init: &Term,
+        init_bindings: &[(SymbolId, Type<TypeName>, Term)],
+        index_var: SymbolId,
+        _index_var_ty: &Type<TypeName>,
+        bound: &Term,
+        body: &Term,
+    ) -> Result<NodeId, ConvertError> {
+        let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+        let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+        let header = self.graph.skeleton.create_block();
+        let body_block = self.graph.skeleton.create_block();
+        let exit = self.graph.skeleton.create_block();
+        let idx_nid = self.graph.add_block_param(header, 0, i32_ty.clone());
+        self.graph.skeleton.blocks[header].params.push(idx_nid);
+
+        self.control_headers.insert(
+            header,
+            ControlHeader::Loop {
+                merge: exit,
+                continue_block: body_block,
+            },
+        );
+
+        let _init_nid = self.convert_term(init)?;
+        let bound_nid = self.convert_term(bound)?;
+        let zero = self.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty.clone());
+        self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
+            target: header,
+            args: vec![zero],
+        };
+
+        self.current_block = header;
+        self.bind_storage_image_loop_var(loop_var, loop_var_ty, init_bindings)?;
+        self.locals.insert(index_var, idx_nid);
+        let cond_nid = self.intern_pure(PureOp::BinOp("<".into()), smallvec![idx_nid, bound_nid], bool_ty);
+        self.graph.skeleton.blocks[header].term = SkeletonTerminator::CondBranch {
+            cond: cond_nid,
+            then_target: body_block,
+            then_args: vec![],
+            else_target: exit,
+            else_args: vec![],
+        };
+
+        self.current_block = body_block;
+        let _new_handle = self.convert_term(body)?;
+        let one = self.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty.clone());
+        let next_i = self.intern_pure(PureOp::BinOp("+".into()), smallvec![idx_nid, one], i32_ty);
+        self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
+            target: header,
+            args: vec![next_i],
+        };
+
+        self.current_block = exit;
+        self.unbind_loop_vars(loop_var, init_bindings);
+        self.locals.remove(&index_var);
+        Ok(self.storage_image_placeholder(loop_var_ty))
+    }
+
+    fn convert_storage_image_for_in_loop(
+        &mut self,
+        loop_var: SymbolId,
+        loop_var_ty: &Type<TypeName>,
+        init: &Term,
+        init_bindings: &[(SymbolId, Type<TypeName>, Term)],
+        elem_var: SymbolId,
+        elem_ty: &Type<TypeName>,
+        iter: &Term,
+        body: &Term,
+    ) -> Result<NodeId, ConvertError> {
+        let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+        let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+        let header = self.graph.skeleton.create_block();
+        let body_block = self.graph.skeleton.create_block();
+        let exit = self.graph.skeleton.create_block();
+        let idx_nid = self.graph.add_block_param(header, 0, i32_ty.clone());
+        self.graph.skeleton.blocks[header].params.push(idx_nid);
+
+        self.control_headers.insert(
+            header,
+            ControlHeader::Loop {
+                merge: exit,
+                continue_block: body_block,
+            },
+        );
+
+        let _init_nid = self.convert_term(init)?;
+        let iter_nid = self.convert_term(iter)?;
+        let length_name = crate::builtins::by_id(catalog().known().length).dispatch_name();
+        let len_nid = self.intern_pure(
+            PureOp::UnaryOp(length_name.into()),
+            smallvec![iter_nid],
+            i32_ty.clone(),
+        );
+        let zero = self.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty.clone());
+        self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
+            target: header,
+            args: vec![zero],
+        };
+
+        self.current_block = header;
+        self.bind_storage_image_loop_var(loop_var, loop_var_ty, init_bindings)?;
+        let cond_nid = self.intern_pure(PureOp::BinOp("<".into()), smallvec![idx_nid, len_nid], bool_ty);
+        self.graph.skeleton.blocks[header].term = SkeletonTerminator::CondBranch {
+            cond: cond_nid,
+            then_target: body_block,
+            then_args: vec![],
+            else_target: exit,
+            else_args: vec![],
+        };
+
+        self.current_block = body_block;
+        let elem_nid = self.intern_pure(PureOp::Index, smallvec![iter_nid, idx_nid], elem_ty.clone());
+        self.locals.insert(elem_var, elem_nid);
+        let _new_handle = self.convert_term(body)?;
+        let one = self.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty.clone());
+        let next_i = self.intern_pure(PureOp::BinOp("+".into()), smallvec![idx_nid, one], i32_ty);
+        self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
+            target: header,
+            args: vec![next_i],
+        };
+
+        self.current_block = exit;
+        self.unbind_loop_vars(loop_var, init_bindings);
+        self.locals.remove(&elem_var);
+        Ok(self.storage_image_placeholder(loop_var_ty))
     }
 
     fn convert_while_loop(
@@ -2730,13 +2986,17 @@ fn build_entry_outputs(
     // can still carry unresolved Array-variant type variables).
     // Source declared no return type (`entry foo(...) () = …`). For
     // both Unit (compute entries whose tail is a side-effectful builtin
-    // like `image_store` — `normalize_outputs` leaves the body Unit-
+    // like storage-image `with` — `normalize_outputs` leaves the body Unit-
     // typed when `n_outputs == 0`) and SideEffect (a normalised
     // `OutputSlotStore` chain that bottomed out empty), there's no
     // logical output slot to emit. Returning a synthetic Unit-typed
     // `EntryOutput` here would surface to the SPIR-V backend as an
     // `Output<void>` variable in the entry's interface — malformed and
     // rejected by naga / the Vulkan validation layer.
+    if is_storage_image_ty(ret_type) || entry.outputs.iter().any(|output| is_storage_image_ty(&output.ty)) {
+        return Ok(vec![]);
+    }
+
     if entry.outputs.is_empty()
         && matches!(
             ret_type,

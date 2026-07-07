@@ -2222,7 +2222,11 @@ impl<'a> Transformer<'a> {
                 let arr = self.transform_expr(array);
                 let idx = self.transform_expr(index);
                 let val = self.transform_expr(value);
-                let aw_id = catalog().known().array_with;
+                let aw_id = if matches!(ty, Type::Constructed(TypeName::StorageTexture, _)) {
+                    catalog().known().image_with
+                } else {
+                    catalog().known().array_with
+                };
                 self.build_call_by_id(aw_id, &[arr, idx, val], ty, span)
             }
 

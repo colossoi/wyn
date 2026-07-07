@@ -41,14 +41,14 @@
 --   -- gtao.screen_to_viewspace_depth(ndc, C); any other source works as
 --   -- long as texels are positive viewspace depth.
 --   #[compute]
---   entry write_depth(#[view(depth, storage_write)] outd: storage_image,
+--   entry write_depth(#[view(depth, storage_write)] outd: *storage_image,
 --                     #[builtin(global_invocation_id)] gid: vec3u32) () =
 --     let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
---     image_store(outd, xy, @[gtao.clamp_depth(my_depth(xy)), 0.0f32, 0.0f32, 1.0f32])
+--     outd with [xy] = @[gtao.clamp_depth(my_depth(xy)), 0.0f32, 0.0f32, 1.0f32]
 --
 --   -- Pass 2: AO. `.y` (packed edges) is only needed if you denoise.
 --   #[compute]
---   entry ao_main(#[view(ao, storage_write)] outa: storage_image,
+--   entry ao_main(#[view(ao, storage_write)] outa: *storage_image,
 --                 #[view(depth, sampled)] d: texture2d,
 --                 #[builtin(global_invocation_id)] gid: vec3u32,
 --                 #[uniform(set=1, binding=3)] iFrame: u32) () =
@@ -59,18 +59,18 @@
 --     let noise = gtao.spatiotemporal_noise(@[gid.x, gid.y], iFrame % 64u32) in
 --     let (slices, steps) = gtao.preset_high in
 --     let (vis, edges) = gtao.main_pass_single(xy, slices, steps, noise, n, C, d) in
---     image_store(outa, xy, @[vis, edges, 0.0f32, 1.0f32])
+--     outa with [xy] = @[vis, edges, 0.0f32, 1.0f32]
 --
 --   -- (optional) Denoise: 1-3 passes ping-ponging two ao-shaped
 --   -- textures, `final_apply = true` on the last. Skipping denoise
 --   -- entirely is fine — just `saturate` the raw term when compositing.
 --   #[compute]
---   entry ao_denoise(#[view(ao_out, storage_write)] outa: storage_image,
+--   entry ao_denoise(#[view(ao_out, storage_write)] outa: *storage_image,
 --                    #[view(ao, sampled)] a: texture2d,
 --                    #[builtin(global_invocation_id)] gid: vec3u32) () =
 --     let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
 --     let (v, e) = gtao.denoise(xy, a, C, true) in
---     image_store(outa, xy, @[v, e, 0.0f32, 1.0f32])
+--     outa with [xy] = @[v, e, 0.0f32, 1.0f32]
 --
 --   -- Composite: sample the final texture, multiply the AO term in.
 --

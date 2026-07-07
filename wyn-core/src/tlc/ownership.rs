@@ -263,6 +263,9 @@ struct Builder<'p> {
     /// the term's free variables are bound and a symbol's alias value
     /// is written exactly once.
     alias_cache: LookupMap<TermId, AliasValue>,
+    /// We deliberately do not model captured storage-image handles as
+    /// linearly consumable across parallel SOAC lanes in v1.
+    soac_body_depth: usize,
 }
 
 impl<'p> Builder<'p> {
@@ -274,6 +277,7 @@ impl<'p> Builder<'p> {
             program,
             def_index,
             alias_cache: LookupMap::new(),
+            soac_body_depth: 0,
         }
     }
 
@@ -295,9 +299,12 @@ impl<'p> Builder<'p> {
     }
 
     /// Whether the callee consumes (moves out) its `index`-th argument.
-    /// Builtins never do — the `array_with` intrinsics alias or freshly
-    /// copy their input, handled by `alias_value`, not by a kill.
+    /// Most builtins do not; `image_with` is the linear storage-image update
+    /// form and consumes its source handle.
     fn callee_param_consumes(&self, func: &Term, index: usize) -> bool {
+        if var_term_builtin_id(func, &self.program.symbols) == Some(catalog().known().image_with) {
+            return index == 0;
+        }
         self.callee_diet(func).and_then(|(p, _)| p.get(index)).map(Diet::is_consuming).unwrap_or(false)
     }
 
@@ -306,6 +313,10 @@ impl<'p> Builder<'p> {
         let known = catalog().known();
         if var_term_builtin_id(func, &self.program.symbols) == Some(known.array_with) {
             // A functional `array_with` returns a fresh (alias-free) array.
+            return Diet::Leaf(true);
+        }
+        if var_term_builtin_id(func, &self.program.symbols) == Some(known.image_with) {
+            // A storage-image update returns the next linear handle.
             return Diet::Leaf(true);
         }
         self.callee_diet(func).map(|(_, r)| r.clone()).unwrap_or_else(Diet::observing)
@@ -387,6 +398,9 @@ impl<'p> Builder<'p> {
                 callee_return_type(&func.ty, args.len()),
                 self.callee_return_diet(func),
             ),
+            TermKind::Loop { .. } if matches!(rhs.ty, Type::Constructed(TypeName::StorageTexture, _)) => {
+                (rhs.ty.clone(), Diet::Leaf(true))
+            }
             TermKind::Coerce { inner, .. } => self.producer_shape(inner),
             _ => (rhs.ty.clone(), Diet::observing()),
         }
@@ -529,6 +543,16 @@ impl<'p> Builder<'p> {
             }
             TermKind::App { func, args } => {
                 self.visit_term(func);
+                if var_term_builtin_id(func, &self.program.symbols) == Some(catalog().known().image_with)
+                    && self.soac_body_depth > 0
+                {
+                    let span = self.model.term_spans.get(&term.id).copied();
+                    self.model.build_errors.push((
+                        "`storage_image with [coord] = value` is linear and cannot be used inside a SOAC body in v1; use a serial loop or a future structured bulk image writer"
+                            .to_string(),
+                        span,
+                    ));
+                }
                 let mut killed_this_call: LookupSet<OwnerId> = LookupSet::new();
                 for (arg_index, arg) in args.iter().enumerate() {
                     self.visit_term(arg);
@@ -605,7 +629,15 @@ impl<'p> Builder<'p> {
                 // alias of one. The liveness fixed-point still iterates
                 // correctly.
                 if !types::is_copy(loop_var_ty) {
-                    self.bind_value_from_term(*loop_var, loop_var_ty, init, Some(term.id));
+                    if matches!(loop_var_ty, Type::Constructed(TypeName::StorageTexture, _)) {
+                        let init_aliases = self.alias_targets(init);
+                        let owner = self.fresh_owner(Origin::Fresh);
+                        self.model.defs.entry(term.id).or_default().insert(owner);
+                        self.model.kills.entry(term.id).or_default().extend(init_aliases);
+                        self.bind(*loop_var, owner);
+                    } else {
+                        self.bind_value_from_term(*loop_var, loop_var_ty, init, Some(term.id));
+                    }
                 }
 
                 // Sub-bindings extracted from loop_var (e.g. tuple
@@ -682,7 +714,9 @@ impl<'p> Builder<'p> {
                 self.bind_value_from_term(*capture_sym, capture_ty, capture_term, None);
             }
         }
+        self.soac_body_depth += 1;
         self.visit_term(&sb.lam.body);
+        self.soac_body_depth -= 1;
     }
 
     /// SOACs: each input array contributes uses; element params
@@ -971,6 +1005,9 @@ impl<'p> Builder<'p> {
                 value
             }
             TermKind::Loop { init, body, .. } => {
+                if matches!(term.ty, Type::Constructed(TypeName::StorageTexture, _)) {
+                    return Self::empty_alias_value_for_type(&term.ty);
+                }
                 let mut value = self.alias_value(init);
                 value.union_with(&self.alias_value(body));
                 value
@@ -1232,6 +1269,9 @@ impl<'p> Builder<'p> {
             // A zero-trip loop returns init unchanged, so the result is
             // alias-free only when both init and body are.
             TermKind::Loop { init, body, .. } => {
+                if matches!(term.ty, Type::Constructed(TypeName::StorageTexture, _)) {
+                    return true;
+                }
                 self.is_definitely_alias_free(init) && self.is_definitely_alias_free(body)
             }
             // A call result is alias-free only when the callee declares a
@@ -1239,6 +1279,7 @@ impl<'p> Builder<'p> {
             // the callee (top-level constants, captured state) that no
             // argument-derived alias set can see.
             TermKind::App { func, .. } => self.callee_return_diet(func).is_consuming(),
+            TermKind::Let { body, .. } => self.is_definitely_alias_free(body),
             // A non-array Screma result is the accumulator; its aliases
             // are the `ne` aliases, which the empty-alias guard covered.
             TermKind::Soac(SoacOp::Screma { .. }) => true,
@@ -1301,28 +1342,6 @@ pub(super) fn alias_target_of(term: &Term, model: &OwnershipModel, program: &Pro
         }
         _ => None,
     }
-}
-
-/// Walk a curried function type `a1 -> a2 -> ... -> aN -> ret`, returning
-/// the parameter types `[a1, a2, ..., aN]` (one per applied argument).
-///
-/// Stops after `expected` unwraps; if the type doesn't have enough arrows
-/// (e.g. type variable that hasn't been instantiated yet), returns what was
-/// found so far. Callers use the result for per-position effect classification
-/// (uniqueness, etc.) and gracefully handle a short result.
-fn collect_param_types(func_ty: &Type<TypeName>, expected: usize) -> Vec<Type<TypeName>> {
-    let mut out = Vec::with_capacity(expected);
-    let mut current = func_ty.clone();
-    for _ in 0..expected {
-        match current {
-            Type::Constructed(TypeName::Arrow, args) if args.len() == 2 => {
-                out.push(args[0].clone());
-                current = args[1].clone();
-            }
-            _ => break,
-        }
-    }
-    out
 }
 
 /// The result type of applying `func_ty` to `n_args` arguments — the
@@ -1434,6 +1453,7 @@ impl<'m> Liveness<'m> {
                 body,
                 ..
             } => {
+                let live_after = self.transfer(term.id, live_after);
                 let defs_here = self.defs(term.id);
                 let mut live_after_body = live_after.clone();
                 loop {
@@ -1713,6 +1733,9 @@ pub fn apply_ownership(mut program: Program) -> crate::error::Result<Program> {
     if let Some(err) = check_use_after_move(&program, &model) {
         return Err(err);
     }
+    if let Some(err) = check_linear_image_results(&program, &model) {
+        return Err(err);
+    }
     let consuming_soacs: LookupSet<TermId> =
         eligible_consuming_soacs(&program, &model).into_iter().collect();
 
@@ -1749,6 +1772,9 @@ pub fn check(program: &Program) -> crate::error::Result<()> {
     if let Some(err) = check_use_after_move(program, &model) {
         return Err(err);
     }
+    if let Some(err) = check_linear_image_results(program, &model) {
+        return Err(err);
+    }
     Ok(())
 }
 
@@ -1778,6 +1804,502 @@ fn check_use_after_move(program: &Program, model: &OwnershipModel) -> Option<Com
         format!("use of moved value `{}`", var_name),
         span,
     ))
+}
+
+fn check_linear_image_results(program: &Program, model: &OwnershipModel) -> Option<CompilerError> {
+    for def in &program.defs {
+        if let Some(err) =
+            check_linear_image_results_in_term(&def.body, program, model, LinearImageUseContext::Used)
+        {
+            return Some(err);
+        }
+    }
+    None
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LinearImageUseContext {
+    Used,
+    Discarded,
+}
+
+fn is_image_with_app(term: &Term, program: &Program) -> bool {
+    match &term.kind {
+        TermKind::App { func, args } if args.len() == 3 => {
+            var_term_builtin_id(func, &program.symbols) == Some(catalog().known().image_with)
+        }
+        _ => false,
+    }
+}
+
+fn is_image_load_app(term: &Term, program: &Program) -> bool {
+    match &term.kind {
+        TermKind::App { func, args } if args.len() == 2 => {
+            var_term_builtin_id(func, &program.symbols) == Some(catalog().known().image_load)
+        }
+        _ => false,
+    }
+}
+
+fn image_update_drop_error(term: &Term, model: &OwnershipModel) -> CompilerError {
+    CompilerError::AliasError(
+        "linear storage-image update result must be threaded to another update, observed, returned, or used as the unit entry tail"
+            .to_string(),
+        model.term_spans.get(&term.id).copied().or(Some(term.span)),
+    )
+}
+
+fn check_linear_image_results_in_term(
+    term: &Term,
+    program: &Program,
+    model: &OwnershipModel,
+    context: LinearImageUseContext,
+) -> Option<CompilerError> {
+    if is_image_with_app(term, program) && context == LinearImageUseContext::Discarded {
+        return Some(image_update_drop_error(term, model));
+    }
+
+    if let TermKind::Let {
+        name_ty, rhs, body, ..
+    } = &term.kind
+    {
+        if matches!(name_ty, Type::Constructed(TypeName::StorageTexture, _)) {
+            let introduced: LookupSet<OwnerId> = model
+                .defs
+                .get(&term.id)
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|owner| model.origin(*owner) == Some(Origin::Fresh))
+                .collect();
+            if !introduced.is_empty() && !linear_image_owner_is_threaded(body, &introduced, model) {
+                let span = model.term_spans.get(&rhs.id).copied().or(Some(rhs.span));
+                return Some(CompilerError::AliasError(
+                    "linear storage-image update result must be threaded to another update, observed, returned, or used as the unit entry tail"
+                        .to_string(),
+                    span,
+                ));
+            }
+        }
+    }
+
+    match &term.kind {
+        TermKind::Let {
+            name_ty, rhs, body, ..
+        } => {
+            let rhs_context = if matches!(name_ty, Type::Constructed(TypeName::StorageTexture, _)) {
+                LinearImageUseContext::Used
+            } else {
+                LinearImageUseContext::Discarded
+            };
+            check_linear_image_results_in_term(rhs, program, model, rhs_context)
+                .or_else(|| check_linear_image_results_in_term(body, program, model, context))
+        }
+        TermKind::Lambda(lam) => {
+            check_linear_image_results_in_term(&lam.body, program, model, LinearImageUseContext::Used)
+        }
+        TermKind::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => check_linear_image_results_in_term(cond, program, model, LinearImageUseContext::Discarded)
+            .or_else(|| check_linear_image_results_in_term(then_branch, program, model, context))
+            .or_else(|| check_linear_image_results_in_term(else_branch, program, model, context)),
+        TermKind::Loop {
+            init,
+            init_bindings,
+            kind,
+            body,
+            ..
+        } => {
+            let init_err =
+                check_linear_image_results_in_term(init, program, model, LinearImageUseContext::Used);
+            if init_err.is_some() {
+                return init_err;
+            }
+            for (_, _, extract) in init_bindings {
+                if let Some(err) =
+                    check_linear_image_results_in_term(extract, program, model, LinearImageUseContext::Used)
+                {
+                    return Some(err);
+                }
+            }
+            let kind_err = match kind {
+                LoopKind::For { iter, .. } => check_linear_image_results_in_term(
+                    iter,
+                    program,
+                    model,
+                    LinearImageUseContext::Discarded,
+                ),
+                LoopKind::ForRange { bound, .. } => check_linear_image_results_in_term(
+                    bound,
+                    program,
+                    model,
+                    LinearImageUseContext::Discarded,
+                ),
+                LoopKind::While { cond } => check_linear_image_results_in_term(
+                    cond,
+                    program,
+                    model,
+                    LinearImageUseContext::Discarded,
+                ),
+            };
+            kind_err.or_else(|| {
+                check_linear_image_results_in_term(body, program, model, LinearImageUseContext::Used)
+            })
+        }
+        TermKind::App { func, args } => {
+            if let Some(err) =
+                check_linear_image_results_in_term(func, program, model, LinearImageUseContext::Discarded)
+            {
+                return Some(err);
+            }
+            for (index, arg) in args.iter().enumerate() {
+                let arg_context = if (is_image_load_app(term, program) || is_image_with_app(term, program))
+                    && index == 0
+                {
+                    LinearImageUseContext::Used
+                } else if matches!(arg.ty, Type::Constructed(TypeName::StorageTexture, _)) {
+                    LinearImageUseContext::Used
+                } else {
+                    LinearImageUseContext::Discarded
+                };
+                if let Some(err) = check_linear_image_results_in_term(arg, program, model, arg_context) {
+                    return Some(err);
+                }
+            }
+            None
+        }
+        TermKind::Tuple(parts) | TermKind::VecLit(parts) => {
+            for part in parts {
+                let part_context = if matches!(part.ty, Type::Constructed(TypeName::StorageTexture, _)) {
+                    context
+                } else {
+                    LinearImageUseContext::Discarded
+                };
+                if let Some(err) = check_linear_image_results_in_term(part, program, model, part_context) {
+                    return Some(err);
+                }
+            }
+            None
+        }
+        TermKind::TupleProj { tuple, idx } => {
+            if let TermKind::Tuple(parts) = &tuple.kind {
+                for (i, part) in parts.iter().enumerate() {
+                    let part_context = if i == *idx { context } else { LinearImageUseContext::Discarded };
+                    if let Some(err) =
+                        check_linear_image_results_in_term(part, program, model, part_context)
+                    {
+                        return Some(err);
+                    }
+                }
+                None
+            } else {
+                check_linear_image_results_in_term(tuple, program, model, context)
+            }
+        }
+        TermKind::Index { array, index } => {
+            check_linear_image_results_in_term(array, program, model, LinearImageUseContext::Discarded)
+                .or_else(|| {
+                    check_linear_image_results_in_term(
+                        index,
+                        program,
+                        model,
+                        LinearImageUseContext::Discarded,
+                    )
+                })
+        }
+        TermKind::Coerce { inner, .. } => {
+            check_linear_image_results_in_term(inner, program, model, context)
+        }
+        TermKind::ArrayExpr(ae) => check_linear_image_results_in_array_expr(ae, program, model),
+        TermKind::Soac(op) => check_linear_image_results_in_soac(op, program, model),
+        TermKind::OutputSlotStore { value, .. } => {
+            check_linear_image_results_in_term(value, program, model, LinearImageUseContext::Discarded)
+        }
+        TermKind::Var(_)
+        | TermKind::IntLit(_)
+        | TermKind::FloatLit(_)
+        | TermKind::BoolLit(_)
+        | TermKind::UnitLit
+        | TermKind::BinOp(_)
+        | TermKind::UnOp(_)
+        | TermKind::Extern(_) => None,
+    }
+}
+
+fn check_linear_image_results_in_array_expr(
+    ae: &ArrayExpr,
+    program: &Program,
+    model: &OwnershipModel,
+) -> Option<CompilerError> {
+    match ae {
+        ArrayExpr::Literal(terms) => {
+            for term in terms {
+                if let Some(err) = check_linear_image_results_in_term(
+                    term,
+                    program,
+                    model,
+                    LinearImageUseContext::Discarded,
+                ) {
+                    return Some(err);
+                }
+            }
+            None
+        }
+        ArrayExpr::Range { start, len, step } => {
+            check_linear_image_results_in_term(start, program, model, LinearImageUseContext::Discarded)
+                .or_else(|| {
+                    check_linear_image_results_in_term(
+                        len,
+                        program,
+                        model,
+                        LinearImageUseContext::Discarded,
+                    )
+                })
+                .or_else(|| {
+                    step.as_ref().and_then(|s| {
+                        check_linear_image_results_in_term(
+                            s,
+                            program,
+                            model,
+                            LinearImageUseContext::Discarded,
+                        )
+                    })
+                })
+        }
+        ArrayExpr::StorageView(crate::tlc::StorageView { offset, len, .. }) => {
+            check_linear_image_results_in_term(offset, program, model, LinearImageUseContext::Discarded)
+                .or_else(|| {
+                    check_linear_image_results_in_term(
+                        len,
+                        program,
+                        model,
+                        LinearImageUseContext::Discarded,
+                    )
+                })
+        }
+        ArrayExpr::Zip(parts) => {
+            for part in parts {
+                if let Some(err) = check_linear_image_results_in_array_expr(part, program, model) {
+                    return Some(err);
+                }
+            }
+            None
+        }
+        ArrayExpr::Var(..) => None,
+    }
+}
+
+fn check_linear_image_results_in_soac(
+    op: &SoacOp,
+    program: &Program,
+    model: &OwnershipModel,
+) -> Option<CompilerError> {
+    let check_body = |sb: &super::SoacBody| {
+        for (_, _, capture) in &sb.captures {
+            if let Some(err) = check_linear_image_results_in_term(
+                capture,
+                program,
+                model,
+                LinearImageUseContext::Discarded,
+            ) {
+                return Some(err);
+            }
+        }
+        check_linear_image_results_in_term(&sb.lam.body, program, model, LinearImageUseContext::Used)
+    };
+    match op {
+        SoacOp::Map { lam, inputs, .. } => {
+            for input in inputs {
+                if let Some(err) = check_linear_image_results_in_array_expr(input, program, model) {
+                    return Some(err);
+                }
+            }
+            check_body(lam)
+        }
+        SoacOp::Reduce { op, ne, input } => {
+            check_linear_image_results_in_term(ne, program, model, LinearImageUseContext::Discarded)
+                .or_else(|| check_linear_image_results_in_array_expr(input, program, model))
+                .or_else(|| check_body(op))
+        }
+        SoacOp::Scan { op, ne, input, .. } => {
+            check_linear_image_results_in_term(ne, program, model, LinearImageUseContext::Discarded)
+                .or_else(|| check_linear_image_results_in_array_expr(input, program, model))
+                .or_else(|| check_body(op))
+        }
+        SoacOp::Filter {
+            map_lam, pred, input, ..
+        } => check_linear_image_results_in_array_expr(input, program, model)
+            .or_else(|| map_lam.as_ref().and_then(|m| check_body(m)))
+            .or_else(|| check_body(pred)),
+        SoacOp::Scatter { lam, inputs, .. } => {
+            for input in inputs {
+                if let Some(err) = check_linear_image_results_in_array_expr(input, program, model) {
+                    return Some(err);
+                }
+            }
+            check_body(lam)
+        }
+        SoacOp::ReduceByIndex {
+            op,
+            ne,
+            indices,
+            values,
+            ..
+        } => check_linear_image_results_in_term(ne, program, model, LinearImageUseContext::Discarded)
+            .or_else(|| check_linear_image_results_in_array_expr(indices, program, model))
+            .or_else(|| check_linear_image_results_in_array_expr(values, program, model))
+            .or_else(|| check_body(op)),
+        SoacOp::Screma {
+            lanes,
+            accumulators,
+            inputs,
+        } => {
+            for input in inputs {
+                if let Some(err) = check_linear_image_results_in_array_expr(input, program, model) {
+                    return Some(err);
+                }
+            }
+            for lane in lanes {
+                if let Some(err) = check_body(&lane.lam) {
+                    return Some(err);
+                }
+            }
+            for acc in accumulators {
+                if let Some(err) = check_linear_image_results_in_term(
+                    &acc.ne,
+                    program,
+                    model,
+                    LinearImageUseContext::Discarded,
+                ) {
+                    return Some(err);
+                }
+                if let Some(err) = check_body(&acc.step_lam) {
+                    return Some(err);
+                }
+                if let Some(err) = check_body(&acc.reduce_op) {
+                    return Some(err);
+                }
+            }
+            None
+        }
+    }
+}
+
+fn linear_image_owner_is_threaded(
+    term: &Term,
+    owners: &LookupSet<OwnerId>,
+    model: &OwnershipModel,
+) -> bool {
+    if term_consumes_owner_on_all_paths(term, owners, model) {
+        return true;
+    }
+    if term_observes_owner_on_all_paths(term, owners, model) {
+        return true;
+    }
+    term_returns_owner_on_all_paths(term, owners, model)
+}
+
+fn owner_sets_intersect(a: &LookupSet<OwnerId>, b: &LookupSet<OwnerId>) -> bool {
+    a.iter().any(|owner| b.contains(owner))
+}
+
+fn term_kills_owner(term: &Term, owners: &LookupSet<OwnerId>, model: &OwnershipModel) -> bool {
+    model.kills.get(&term.id).is_some_and(|kills| owner_sets_intersect(kills, owners))
+}
+
+fn term_consumes_owner_on_all_paths(
+    term: &Term,
+    owners: &LookupSet<OwnerId>,
+    model: &OwnershipModel,
+) -> bool {
+    if term_kills_owner(term, owners, model) {
+        return true;
+    }
+    match &term.kind {
+        TermKind::Let { rhs, body, .. } => {
+            term_consumes_owner_on_all_paths(rhs, owners, model)
+                || term_consumes_owner_on_all_paths(body, owners, model)
+        }
+        TermKind::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            term_consumes_owner_on_all_paths(then_branch, owners, model)
+                && term_consumes_owner_on_all_paths(else_branch, owners, model)
+        }
+        TermKind::Coerce { inner, .. } => term_consumes_owner_on_all_paths(inner, owners, model),
+        _ => false,
+    }
+}
+
+fn term_observes_owner_on_all_paths(
+    term: &Term,
+    owners: &LookupSet<OwnerId>,
+    model: &OwnershipModel,
+) -> bool {
+    match &term.kind {
+        TermKind::App { func, args } => {
+            let observes_here = matches!(&func.kind, TermKind::Var(VarRef::Builtin { id, .. }) if *id == catalog().known().image_load)
+                && args.first().is_some_and(|arg| owner_sets_intersect(&arg_aliases(arg, model), owners));
+            observes_here || args.iter().any(|arg| term_observes_owner_on_all_paths(arg, owners, model))
+        }
+        TermKind::Let { rhs, body, .. } => {
+            if term_consumes_owner_on_all_paths(rhs, owners, model) {
+                false
+            } else {
+                term_observes_owner_on_all_paths(rhs, owners, model)
+                    || term_observes_owner_on_all_paths(body, owners, model)
+            }
+        }
+        TermKind::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            term_observes_owner_on_all_paths(then_branch, owners, model)
+                && term_observes_owner_on_all_paths(else_branch, owners, model)
+        }
+        TermKind::Coerce { inner, .. } => term_observes_owner_on_all_paths(inner, owners, model),
+        _ => false,
+    }
+}
+
+fn arg_aliases(term: &Term, model: &OwnershipModel) -> LookupSet<OwnerId> {
+    match &term.kind {
+        TermKind::Var(VarRef::Symbol(sym)) => model.aliases_of(*sym),
+        TermKind::Coerce { inner, .. } => arg_aliases(inner, model),
+        _ => LookupSet::new(),
+    }
+}
+
+fn term_returns_owner_on_all_paths(
+    term: &Term,
+    owners: &LookupSet<OwnerId>,
+    model: &OwnershipModel,
+) -> bool {
+    match &term.kind {
+        TermKind::Var(VarRef::Symbol(sym)) => owner_sets_intersect(&model.aliases_of(*sym), owners),
+        TermKind::Coerce { inner, .. } => term_returns_owner_on_all_paths(inner, owners, model),
+        TermKind::Let { rhs, body, .. } => {
+            if term_consumes_owner_on_all_paths(rhs, owners, model) {
+                false
+            } else {
+                term_returns_owner_on_all_paths(body, owners, model)
+            }
+        }
+        TermKind::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            term_returns_owner_on_all_paths(then_branch, owners, model)
+                && term_returns_owner_on_all_paths(else_branch, owners, model)
+        }
+        _ => false,
+    }
 }
 
 struct Rewriter<'m> {

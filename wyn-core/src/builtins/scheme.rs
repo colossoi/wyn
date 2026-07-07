@@ -359,9 +359,6 @@ fn sampler_ty() -> Type {
 fn storage_image_ty(region: Type) -> Type {
     Type::Constructed(TypeName::StorageTexture, vec![region])
 }
-fn unit_ty_local() -> Type {
-    Type::Constructed(TypeName::Unit, vec![])
-}
 fn f32_ty() -> Type {
     Type::Constructed(TypeName::Float(32), vec![])
 }
@@ -388,22 +385,21 @@ pub fn texture_sample_scheme(_ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     TypeScheme::Monotype(arrow_chain(&[texture2d_ty(), sampler_ty(), uv, f32_ty()], result))
 }
 
-/// `storage_image -> vec2<i32> -> vec4<f32> -> unit` — write one texel
-/// to a storage image at integer coordinates. Bound via `#[storage_image]`;
-/// pixel format from the binding attribute decides on-GPU storage.
-pub fn image_store_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+/// `storage_image -> vec2<i32> -> vec4<f32> -> storage_image` — linear
+/// storage-image update used by `img with [xy] = rgba`. The type scheme
+/// carries the value shape; the consuming/returned-handle contract is enforced
+/// by TLC ownership from the builtin id.
+pub fn image_with_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+    let region = ctx.new_variable();
+    let image = storage_image_ty(region);
     let coord = vec_n(i32_ty(), 2);
     let texel = vec_n(f32_ty(), 4);
-    quantify(arrow_chain(
-        &[storage_image_ty(ctx.new_variable()), coord, texel],
-        unit_ty_local(),
-    ))
+    quantify(arrow_chain(&[image.clone(), coord, texel], image))
 }
 
 /// `storage_image -> vec2<i32> -> vec4<f32>` — point-read one texel
-/// from a storage image at integer coordinates. The companion to
-/// `image_store`; used by compute stages to read raw bytes without
-/// hardware filtering (filtering happens via `texture_sample` on a
+/// from a storage image at integer coordinates. Used by compute stages
+/// to read raw bytes without hardware filtering (filtering happens via `texture_sample` on a
 /// `texture2d` view of the same underlying resource).
 pub fn image_load_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     let coord = vec_n(i32_ty(), 2);

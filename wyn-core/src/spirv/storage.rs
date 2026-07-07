@@ -197,7 +197,7 @@ impl Constructor {
     /// `OpTypeImage` in `UniformConstant` storage, decorated with its
     /// descriptor set/binding and the source access qualifier. Registered in
     /// `storage_images` so both the entry (interface / `env`) and
-    /// `image_store`/`image_load` inside functions resolve the same
+    /// storage-image updates / `image_load` inside functions resolve the same
     /// module-scope variable. Idempotent — a binding shared across entries
     /// returns the existing var.
     pub(super) fn create_storage_image(

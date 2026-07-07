@@ -287,7 +287,7 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
             OpTag::StorageImageStore(binding) => {
                 let _ = write!(
                     out,
-                    "storage_image_store @({}, {})({}, {})",
+                    "storage_image_write @({}, {})({}, {})",
                     binding.set,
                     binding.binding,
                     format_ref(&operands[0]),

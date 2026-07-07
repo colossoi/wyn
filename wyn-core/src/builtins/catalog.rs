@@ -141,7 +141,7 @@ pub struct KnownBuiltinIds {
     pub texture_load: BuiltinId,
     pub texture_sample: BuiltinId,
     /// Storage-image ops dispatched by `ByBuiltinId`.
-    pub image_store: BuiltinId,
+    pub image_with: BuiltinId,
     pub image_load: BuiltinId,
 }
 
@@ -212,7 +212,7 @@ impl BuiltinCatalog {
             clamp: resolve("clamp"),
             texture_load: resolve(N::INTRINSIC_TEXTURE_LOAD),
             texture_sample: resolve(N::INTRINSIC_TEXTURE_SAMPLE),
-            image_store: resolve(N::INTRINSIC_IMAGE_STORE),
+            image_with: resolve(N::INTRINSIC_IMAGE_WITH),
             image_load: resolve(N::INTRINSIC_IMAGE_LOAD),
         };
 

@@ -2484,8 +2484,8 @@ resource color: image2d {
 }
 
 #[compute]
-entry paint(#[view(color, storage_write)] img: storage_image, …) () =
-  image_store(img, …)
+entry paint(#[view(color, storage_write)] img: *storage_image, …) () =
+  img with [xy] = rgba
 
 #[fragment]
 entry show(#[view(color, sampled)] tex: texture2d,
@@ -2524,7 +2524,9 @@ A `storage_image` is an opaque 2D image handle a compute entry writes (and may
 point-read). Element type is fixed to `vec4f32`; the binding's `format` decides
 the on-GPU pixel format.
 
-- `image_store(img: storage_image, coord: vec2i32, value: vec4f32) -> ()`
+- `img with [coord] = value`, where `img: *storage_image`,
+  `coord: vec2i32`, and `value: vec4f32`; returns the next
+  `*storage_image` handle
 - `image_load(img: storage_image, coord: vec2i32) -> vec4f32`
 
 The same physical image may be written as a `storage_image` in one pipeline and

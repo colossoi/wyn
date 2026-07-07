@@ -224,7 +224,7 @@ fn emit_slot_writes(
 ) -> Result<Term, NormalizeError> {
     // If the entry has zero outputs (unit return), there are no slot
     // writes to emit — but the tail may be a side-effectful expression
-    // (e.g. `image_store(img, xy, c)`) whose value is unit by type
+    // (e.g. a storage-image update tail) whose value sinks to unit
     // checking. Return it unchanged so the side effect survives. The
     // body's tail still has unit type, so the enclosing Lambda's
     // `ret_ty: Unit` rewrite stays consistent.

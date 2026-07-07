@@ -745,7 +745,7 @@ pub fn build_push_constant_bytes(
 // =============================================================================
 //
 // A `Binding::StorageTexture` declares a 2D wgpu::Texture that a compute
-// shader writes via `image_store` and a later stage samples via
+// shader writes via storage-image `with` and a later stage samples via
 // `texture_sample` on a sibling `Binding::Texture` at the same
 // `(set, binding)` slot. The host allocates ONE `wgpu::Texture` per
 // unique `(set, binding)` slot and binds it in each consuming pipeline

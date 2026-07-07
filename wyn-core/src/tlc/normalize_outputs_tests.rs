@@ -24,23 +24,22 @@ fn spirv_contains_opcode(spirv: &[u32], opcode: u32) -> bool {
     spirv.iter().skip(5).any(|w| (w & 0xFFFF) == opcode)
 }
 
-/// Compute entries that declare unit return (`()`) with a side-effectful
-/// tail (e.g. `image_store(img, xy, color)`) must preserve the tail
-/// through normalize_outputs. The pass has no slot writes to emit for a
-/// zero-output entry, but discarding the tail silently drops the
-/// imperative builtin's effect.
+/// Compute entries that declare unit return (`()`) with a linear
+/// storage-image update tail must preserve the tail through
+/// normalize_outputs. The pass has no slot writes to emit for a
+/// zero-output entry, but discarding the tail silently drops the write.
 ///
 /// Regression: prior to the fix, `emit_slot_writes`'s `n_outputs == 0`
-/// branch returned a fresh `UnitLit`, dropping the `image_store` App
+/// branch returned a fresh `UnitLit`, dropping the image update
 /// entirely; the compiled SPIR-V contained no `OpImageWrite` instruction.
 #[test]
-fn unit_return_compute_entry_preserves_image_store() {
+fn unit_return_compute_entry_preserves_image_with() {
     let source = r#"
 #[compute]
-entry paint(#[storage_image(set=0, binding=0, format=rgba8unorm, access=write_only)] img: storage_image,
+entry paint(#[storage_image(set=0, binding=0, format=rgba8unorm, access=write_only)] img: *storage_image,
             #[builtin(global_invocation_id)] gid: vec3u32) () =
   let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
-  image_store(img, xy, @[1.0, 0.0, 0.0, 1.0])
+  img with [xy] = @[1.0, 0.0, 0.0, 1.0]
 "#;
 
     let spirv = compile_to_spirv(source);

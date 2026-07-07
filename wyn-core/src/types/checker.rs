@@ -2054,12 +2054,20 @@ impl<'a> TypeChecker<'a> {
                 // Validate the body's value shape against the declared
                 // outputs; any `*` on the output contract is a signature
                 // property forgotten for this shape check.
-                self.unify_or_err_weakening(
-                    &body_inner,
-                    &expected_inner,
-                    entry.body.h.span,
-                    &format!("Entry point '{}' return type mismatch", entry.name),
-                )?;
+                let storage_image_tail_sinks_to_unit = entry.outputs.is_empty()
+                    && matches!(expected_inner, Type::Constructed(TypeName::Unit, _))
+                    && matches!(
+                        body_inner.apply(&self.context),
+                        Type::Constructed(TypeName::StorageTexture, _)
+                    );
+                if !storage_image_tail_sinks_to_unit {
+                    self.unify_or_err_weakening(
+                        &body_inner,
+                        &expected_inner,
+                        entry.body.h.span,
+                        &format!("Entry point '{}' return type mismatch", entry.name),
+                    )?;
+                }
 
                 Ok(())
             }
@@ -2412,41 +2420,64 @@ impl<'a> TypeChecker<'a> {
                 Ok(elem_var.apply(&self.context))
             }
             ExprKind::ArrayWith { array, index, value, .. } => {
-                // Type check: array must be Array[elem, addrspace, size], index must be i32, value must be elem
-                // Result type is Array[elem, addrspace, size]
+                // Type check either an array update (`arr with [i] = v`) or
+                // a linear storage-image update (`img with [xy] = rgba`).
                 let array_type = self.infer_expression(array)?;
                 let index_type = self.infer_expression(index)?;
                 let value_type = self.infer_expression(value)?;
 
-                // Unify index type with i32
-                self.context.unify(&index_type, &i32()).map_err(|_| {
-                    err_type_at!(
-                        index.h.span,
-                        "Array index must be an integer type, got {}",
-                        self.format_type(&index_type.apply(&self.context))
-                    )
-                })?;
+                let resolved_target = array_type.apply(&self.context);
+                if matches!(resolved_target, Type::Constructed(TypeName::StorageTexture, _)) {
+                    let coord_ty = vec(2, i32());
+                    self.context.unify(&index_type, &coord_ty).map_err(|_| {
+                        err_type_at!(
+                            index.h.span,
+                            "Storage image update index must be vec2i32, got {}",
+                            self.format_type(&index_type.apply(&self.context))
+                        )
+                    })?;
 
-                // Constrain array type - strip uniqueness
-                let array_type_stripped = array_type.clone();
-                let (elem_var, _, _, _) = self.constrain_array_type(
-                    &array_type_stripped,
-                    &array.h.span,
-                    "Cannot update non-array type",
-                )?;
+                    let texel_ty = vec(4, f32());
+                    self.context.unify(&value_type, &texel_ty).map_err(|_| {
+                        err_type_at!(
+                            value.h.span,
+                            "Storage image update value must be vec4f32, got {}",
+                            self.format_type(&value_type.apply(&self.context))
+                        )
+                    })?;
 
-                // Unify value type with element type
-                self.context.unify(&value_type, &elem_var).map_err(|_| {
-                    err_type_at!(
-                        value.h.span,
-                        "Array element type mismatch: expected {}, got {}",
-                        self.format_type(&elem_var.apply(&self.context)),
-                        self.format_type(&value_type.apply(&self.context))
-                    )
-                })?;
+                    Ok(resolved_target)
+                } else {
+                    // Unify index type with i32
+                    self.context.unify(&index_type, &i32()).map_err(|_| {
+                        err_type_at!(
+                            index.h.span,
+                            "Array index must be an integer type, got {}",
+                            self.format_type(&index_type.apply(&self.context))
+                        )
+                    })?;
 
-                // Return the array type (same type as input)
-                Ok(array_type.apply(&self.context))
+                    // Constrain array type - strip uniqueness
+                    let array_type_stripped = array_type.clone();
+                    let (elem_var, _, _, _) = self.constrain_array_type(
+                        &array_type_stripped,
+                        &array.h.span,
+                        "Cannot update non-array type",
+                    )?;
+
+                    // Unify value type with element type
+                    self.context.unify(&value_type, &elem_var).map_err(|_| {
+                        err_type_at!(
+                            value.h.span,
+                            "Array element type mismatch: expected {}, got {}",
+                            self.format_type(&elem_var.apply(&self.context)),
+                            self.format_type(&value_type.apply(&self.context))
+                        )
+                    })?;
+
+                    // Return the array type (same type as input)
+                    Ok(array_type.apply(&self.context))
+                }
             }
             ExprKind::RecordWith { record, path, value } => {
                 // Walk `path` segment-by-segment through nested records

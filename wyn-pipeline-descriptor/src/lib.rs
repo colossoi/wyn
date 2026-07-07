@@ -170,7 +170,7 @@ pub enum DispatchLen {
     },
     /// One iteration per texel of the storage texture at (`set`,
     /// `binding`) — used for compute entries whose primary output is a
-    /// storage image (`image_store`). The host reads the allocated
+    /// storage image update. The host reads the allocated
     /// `wgpu::Texture`'s `width × height` (the storage texture's
     /// resolution is set by the descriptor's `StorageTextureSize`
     /// policy at allocation time). 2D dispatch: the host divides by

@@ -26,7 +26,7 @@ resource canvas: image2d {
 }
 
 #[compute]
-entry paint(#[view(canvas, storage_write)] img: storage_image,
+entry paint(#[view(canvas, storage_write)] img: *storage_image,
             #[uniform(set=1, binding=4)] c: block,
             #[builtin(global_invocation_id)] gid: vec3u32) () =
   let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
@@ -35,7 +35,7 @@ entry paint(#[view(canvas, storage_write)] img: storage_image,
   let color = if d < c.radius
               then @[c.tint.x, c.tint.y, 0.25f32, 1.0f32]
               else @[0.08f32, 0.08f32, 0.10f32, 1.0f32] in
-  image_store(img, xy, color)
+  img with [xy] = color
 
 #[vertex]
 entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 =

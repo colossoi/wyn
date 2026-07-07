@@ -213,7 +213,7 @@ pub enum TypeName {
     /// (the empty tuple, `()`); `SideEffect` is the absence of a return
     /// value. It types functions whose only meaningful output is
     /// observable through side effects — imperative builtins like
-    /// `image_store` / `storage_store`, and compute entries post-
+    /// storage-image updates / `storage_store`, and compute entries post-
     /// `normalize_outputs` whose body produces nothing but a chain of
     /// `OutputSlotStore` writes. Lowering treats this as `void` in the
     /// SPIR-V / WGSL backends.
@@ -291,7 +291,7 @@ pub enum TypeName {
     /// `texture_sample`.
     Sampler,
     /// A 2D storage image with one hidden region argument — a texture a compute entry can write via
-    /// `image_store` (and point-read via `image_load`). Bound via
+    /// linear `with` update (and point-read via `image_load`). Bound via
     /// `#[storage_image(set, binding, format, access)]`. Element type
     /// is fixed to vec4f32; the binding's `format` attribute decides
     /// the on-GPU pixel format. The same `(set, binding)` slot can be

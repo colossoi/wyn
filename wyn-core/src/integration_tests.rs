@@ -7358,9 +7358,9 @@ fn cross_kind_image_aliasing_compiles() {
     let lowered = crate::compile_thru_spirv(
         r#"
 #[compute]
-entry paint(#[storage_image(set=0, binding=0, format=rgba8unorm, access=write_only)] img: storage_image,
+entry paint(#[storage_image(set=0, binding=0, format=rgba8unorm, access=write_only)] img: *storage_image,
             #[builtin(global_invocation_id)] gid: vec3u32) () =
-  image_store(img, @[i32.u32(gid.x), i32.u32(gid.y)], @[1.0, 0.0, 0.0, 1.0])
+  img with [@[i32.u32(gid.x), i32.u32(gid.y)]] = @[1.0, 0.0, 0.0, 1.0]
 #[vertex]
 entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 =
   let verts = [@[-1.0, -1.0, 0.0, 1.0], @[3.0, -1.0, 0.0, 1.0], @[-1.0, 3.0, 0.0, 1.0]] in
@@ -7391,9 +7391,9 @@ resource color: image2d {
 }
 
 #[compute]
-entry paint(#[view(color, storage_write)] img: storage_image,
+entry paint(#[view(color, storage_write)] img: *storage_image,
             #[builtin(global_invocation_id)] gid: vec3u32) () =
-  image_store(img, @[i32.u32(gid.x), i32.u32(gid.y)], @[1.0, 0.0, 0.0, 1.0])
+  img with [@[i32.u32(gid.x), i32.u32(gid.y)]] = @[1.0, 0.0, 0.0, 1.0]
 #[vertex]
 entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 =
   let verts = [@[-1.0, -1.0, 0.0, 1.0], @[3.0, -1.0, 0.0, 1.0], @[-1.0, 3.0, 0.0, 1.0]] in
@@ -7420,19 +7420,17 @@ fn loop_bodied_map_uses_storage_image_globals_not_function_parameters() {
         r#"
 #[compute]
 entry r(xs: []u32,
-        #[storage_image(set=1, binding=0, format=r32float, access=read_only)] src: storage_image,
-        #[storage_image(set=1, binding=1, format=rgba8unorm, access=write_only)] dst: storage_image) []u32 =
+        #[storage_image(set=1, binding=0, format=r32float, access=read_only)] src: storage_image) []u32 =
   map(|s|
         let x = i32(s) in
         let (_, total) = loop (j, total) = (0, 0.0) while j < 2 do
           let px = image_load(src, @[x, j]) in
-          (j + 1, total + px.x)
-        let _ = image_store(dst, @[x, 0], @[total, 0.0, 0.0, 1.0]) in
-        0u32,
+          (j + 1, total + px.x) in
+        if total > 0.0 then 1u32 else 0u32,
       xs)
 "#,
     )
-    .expect("loop-bodied map with two storage images compiles");
+    .expect("loop-bodied map with storage image compiles");
 
     assert_no_runtime_storage_image_handles(&lowered.spirv);
 
@@ -7496,10 +7494,10 @@ entry r(xs: []u32,
             globals.contains(global),
             "image load pointer is not a module-scope OpVariable"
         );
-        let expected_binding = if instruction.class.opcode == Op::ImageRead { 0 } else { 1 };
-        assert_eq!(global_bindings.get(global), Some(&expected_binding));
+        assert_eq!(instruction.class.opcode, Op::ImageRead);
+        assert_eq!(global_bindings.get(global), Some(&0));
     }
-    assert!(image_ops >= 2, "expected image_load and image_store");
+    assert!(image_ops >= 1, "expected image_load");
 }
 
 /// A storage image shared across entries with mixed access — read in one entry,
@@ -7517,9 +7515,9 @@ entry reader(xs: []u32,
              #[storage_image(set=1, binding=0, format=r32float, access=read_only)] img: storage_image) []f32 =
   map(|s| let p = image_load(img, @[i32(s), 0]) in p.x, xs)
 #[compute]
-entry writer(xs: []u32,
-             #[storage_image(set=1, binding=0, format=r32float, access=write_only)] img: storage_image) []u32 =
-  map(|s| let _ = image_store(img, @[i32(s), 0], @[1.0, 1.0, 1.0, 1.0]) in 0u32, xs)
+entry writer(#[builtin(global_invocation_id)] gid: vec3u32,
+             #[storage_image(set=1, binding=0, format=r32float, access=write_only)] img: *storage_image) () =
+  img with [@[i32.u32(gid.x), 0]] = @[1.0, 1.0, 1.0, 1.0]
 "#;
     let lowered = crate::compile_thru_spirv(source).expect("shared read+write storage image compiles");
     assert_no_runtime_storage_image_handles(&lowered.spirv);
@@ -7536,12 +7534,12 @@ resource acc: image2d {
   history = 1
 }
 #[compute]
-entry step(#[view(acc, storage_write)] out_acc: storage_image,
+entry step(#[view(acc, storage_write)] out_acc: *storage_image,
            #[view(acc, sampled, previous)] prev_acc: texture2d,
            #[builtin(global_invocation_id)] gid: vec3u32) () =
   let xy = @[i32(gid.x), i32(gid.y)] in
   let prev = texture_load(prev_acc, xy, 0) in
-  image_store(out_acc, xy, prev + @[1.0, 0.0, 0.0, 0.0])
+  out_acc with [xy] = prev + @[1.0, 0.0, 0.0, 0.0]
 "#;
 
 /// The `FeedbackPair` a `previous` view of a `history` resource records must
@@ -7609,14 +7607,14 @@ resource acc: image2d {
   history = 1
 }
 #[compute]
-entry step(#[view(acc, storage_write)] out_acc: storage_image,
+entry step(#[view(acc, storage_write)] out_acc: *storage_image,
            #[view(acc, sampled, previous)] prev_acc: texture2d,
            #[storage(set=2, binding=0, access=read)] keyboard: []u32,
            #[builtin(global_invocation_id)] gid: vec3u32) () =
   let xy = @[i32(gid.x), i32(gid.y)] in
   let prev = texture_load(prev_acc, xy, 0) in
   let bump = if keyboard[0] != 0u32 then 1.0 else 0.0 in
-  image_store(out_acc, xy, prev + @[bump, 0.0, 0.0, 0.0])
+  out_acc with [xy] = prev + @[bump, 0.0, 0.0, 0.0]
 "#;
     for source in [HISTORY_FEEDBACK_SOURCE, with_buffer_input] {
         let lowered = crate::compile_thru_ssa(source).expect("per-texel image pass compiles");
@@ -7645,58 +7643,11 @@ entry step(#[view(acc, storage_write)] out_acc: storage_image,
     }
 }
 
-/// KNOWN BUG: a unit-typed `if` whose branches both end in `image_store`
-/// lowers to an `OpPhi %void` at the merge — `image_store`'s placeholder `0`
-/// result id flows into the phi, and spirv-val rejects the module ("OpPhi
-/// must not have void result type"). Workaround until fixed: select the
-/// *value* and store once at the tail
-/// (`let v = if c then a else b in image_store(img, xy, v)`).
-/// Un-ignore when unit-typed merges stop materializing a phi.
+/// The former storage-image write function is no longer a surface builtin.
 #[test]
-#[ignore = "unit-typed if over image_store branches emits an OpPhi %void"]
-fn unit_if_over_image_store_has_no_void_phi() {
-    use wspirv::binary::parse_words;
-    use wspirv::dr::Loader;
-    use wspirv::spirv::Op;
-
-    let source = r#"
-resource o: image2d { format = r32float  size = 64x64  usages = [storage_write] }
-#[compute]
-entry r(#[view(o, storage_write)] img: storage_image,
-        #[builtin(global_invocation_id)] gid: vec3u32) () =
-  let xy = @[i32(gid.x), i32(gid.y)] in
-  if gid.x < 32u32 then
-    image_store(img, xy, @[0.0, 0.0, 0.0, 1.0])
-  else
-    image_store(img, xy, @[1.0, 1.0, 1.0, 1.0])
-"#;
-    let lowered = crate::compile_thru_spirv(source).expect("unit-if over image_store compiles");
-
-    let mut loader = Loader::new();
-    parse_words(&lowered.spirv, &mut loader).expect("parse generated SPIR-V");
-    let module = loader.module();
-    let void_ty = module
-        .types_global_values
-        .iter()
-        .find(|instruction| instruction.class.opcode == Op::TypeVoid)
-        .and_then(|instruction| instruction.result_id);
-    for function in &module.functions {
-        for block in &function.blocks {
-            for instruction in &block.instructions {
-                if instruction.class.opcode == Op::Phi {
-                    assert!(
-                        instruction.result_type != void_ty,
-                        "unit-typed if-merge materialized an OpPhi %void"
-                    );
-                }
-            }
-        }
-    }
-}
-
-#[test]
-fn straight_line_map_has_no_runtime_storage_image_handles() {
-    let source = r#"
+fn legacy_image_store_is_not_user_visible() {
+    let result = crate::compile_thru_spirv(
+        r#"
 #[compute]
 entry r(xs: []u32,
         #[storage_image(set=1, binding=0, format=r32float, access=write_only)] img: storage_image) []u32 =
@@ -7705,8 +7656,28 @@ entry r(xs: []u32,
         let _ = image_store(img, @[i, 0], @[1.0, 1.0, 1.0, 1.0]) in
         0u32,
       xs)
+"#,
+    );
+    let msg = match result {
+        Ok(_) => panic!("legacy image_store must not remain user-visible"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        msg.contains("image_store"),
+        "diagnostic should mention the removed builtin name, got: {msg}"
+    );
+}
+
+#[test]
+fn storage_image_with_tail_lowers_without_runtime_handle() {
+    let source = r#"
+#[compute]
+entry r(#[storage_image(set=1, binding=0, format=r32float, access=write_only)] img: *storage_image,
+        #[builtin(global_invocation_id)] gid: vec3u32) () =
+  let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
+  img with [xy] = @[1.0, 0.0, 0.0, 1.0]
 "#;
-    let lowered = crate::compile_thru_spirv(source).expect("straight-line image map compiles");
+    let lowered = crate::compile_thru_spirv(source).expect("linear image update compiles");
     assert_no_runtime_storage_image_handles(&lowered.spirv);
 
     let wgsl = crate::compile_thru_tlc(source)
@@ -7723,7 +7694,93 @@ entry r(xs: []u32,
         .expect("WGSL lowering");
     assert!(
         wgsl.contains("textureStore("),
-        "binding-qualified image store missing:\n{wgsl}"
+        "linear image update did not lower to textureStore:\n{wgsl}"
+    );
+}
+
+#[test]
+fn storage_image_with_explicit_entry_handle_return_erases_to_unit() {
+    let source = r#"
+#[compute]
+entry r(#[storage_image(set=1, binding=0, format=r32float, access=write_only)] img: *storage_image,
+        #[builtin(global_invocation_id)] gid: vec3u32) *storage_image =
+  let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
+  img with [xy] = @[1.0, 0.0, 0.0, 1.0]
+"#;
+    let lowered = crate::compile_thru_spirv(source)
+        .expect("explicit storage-image handle entry return should erase to unit");
+    assert_no_runtime_storage_image_handles(&lowered.spirv);
+}
+
+#[test]
+fn storage_image_with_if_tail_has_no_void_phi() {
+    use wspirv::binary::parse_words;
+    use wspirv::dr::Loader;
+    use wspirv::spirv::Op;
+
+    let source = r#"
+#[compute]
+entry r(#[storage_image(set=1, binding=0, format=r32float, access=write_only)] img: *storage_image,
+        #[builtin(global_invocation_id)] gid: vec3u32) () =
+  let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
+  if gid.x < 32u32 then
+    img with [xy] = @[0.0, 0.0, 0.0, 1.0]
+  else
+    img with [xy] = @[1.0, 1.0, 1.0, 1.0]
+"#;
+    let lowered = crate::compile_thru_spirv(source).expect("linear image-update if compiles");
+    assert_no_runtime_storage_image_handles(&lowered.spirv);
+
+    let mut loader = Loader::new();
+    parse_words(&lowered.spirv, &mut loader).expect("parse generated SPIR-V");
+    let module = loader.module();
+    let void_ty = module
+        .types_global_values
+        .iter()
+        .find(|instruction| instruction.class.opcode == Op::TypeVoid)
+        .and_then(|instruction| instruction.result_id);
+    for function in &module.functions {
+        for block in &function.blocks {
+            for instruction in &block.instructions {
+                if instruction.class.opcode == Op::Phi {
+                    assert!(
+                        instruction.result_type != void_ty,
+                        "linear image-update if materialized an OpPhi %void"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn storage_image_with_loop_tail_lowers_without_runtime_handle() {
+    let source = r#"
+#[compute]
+entry r(#[storage_image(set=1, binding=0, format=r32float, access=write_only)] img: *storage_image,
+        #[builtin(global_invocation_id)] gid: vec3u32) () =
+  let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
+  loop img = img for i < 2 do
+    img with [xy] = @[f32.i32(i), 0.0, 0.0, 1.0]
+"#;
+    let lowered = crate::compile_thru_spirv(source).expect("linear image-update loop compiles");
+    assert_no_runtime_storage_image_handles(&lowered.spirv);
+
+    let wgsl = crate::compile_thru_tlc(source)
+        .expect("WGSL TLC")
+        .infer_input_slice_bounds()
+        .to_egraph()
+        .expect("WGSL EGIR")
+        .lower_to_ssa(crate::LoweringProfile::new(
+            crate::CodegenTarget::Wgsl,
+            crate::SchedulePolicy::Parallel,
+        ))
+        .expect("WGSL SSA")
+        .lower_wgsl()
+        .expect("WGSL lowering");
+    assert!(
+        wgsl.contains("textureStore("),
+        "linear image-update loop did not lower to textureStore:\n{wgsl}"
     );
     assert!(
         !wgsl.lines().any(|line| line.starts_with("fn ") && line.contains("texture_storage_2d")),
@@ -7842,9 +7899,9 @@ fn view_of_unknown_resource_is_rejected() {
     let result = crate::compile_thru_spirv(
         r#"
 #[compute]
-entry paint(#[view(nope, storage_write)] img: storage_image,
+entry paint(#[view(nope, storage_write)] img: *storage_image,
             #[builtin(global_invocation_id)] gid: vec3u32) () =
-  image_store(img, @[i32.u32(gid.x), i32.u32(gid.y)], @[1.0, 0.0, 0.0, 1.0])
+  img with [@[i32.u32(gid.x), i32.u32(gid.y)]] = @[1.0, 0.0, 0.0, 1.0]
 "#,
     );
     let msg = match result {
@@ -7873,9 +7930,9 @@ fn raw_cross_kind_same_binding_is_rejected() {
     let result = crate::compile_thru_spirv(
         r#"
 #[compute]
-entry paint(#[storage_image(set=0, binding=0, format=rgba8unorm, access=write_only)] img: storage_image,
+entry paint(#[storage_image(set=0, binding=0, format=rgba8unorm, access=write_only)] img: *storage_image,
             #[builtin(global_invocation_id)] gid: vec3u32) () =
-  image_store(img, @[i32.u32(gid.x), i32.u32(gid.y)], @[1.0, 0.0, 0.0, 1.0])
+  img with [@[i32.u32(gid.x), i32.u32(gid.y)]] = @[1.0, 0.0, 0.0, 1.0]
 #[vertex]
 entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 =
   let verts = [@[-1.0, -1.0, 0.0, 1.0], @[3.0, -1.0, 0.0, 1.0], @[-1.0, 3.0, 0.0, 1.0]] in
@@ -8302,13 +8359,11 @@ fn texture_load_after_image_load_loop_in_map_lambda() {
 open f32
 resource src: image2d { format = r32float  size = window  usages = [storage_read, storage_write] }
 resource tex: image2d { format = r32float  size = window  usages = [storage_write, sampled] }
-resource dst: image2d { format = r32float  size = window  usages = [storage_read, storage_write] }
 
 #[compute]
 entry g6(pxl: []u32,
          #[view(src, storage_read)]  s: storage_image,
-         #[view(tex, sampled)]       tx: texture2d,
-         #[view(dst, storage_write)] d: storage_image)
+         #[view(tex, sampled)]       tx: texture2d)
   []u32 =
   map(|t|
     let i = i32(t)  let x = i % 1280  let y = i / 1280
@@ -8317,8 +8372,7 @@ entry g6(pxl: []u32,
         let v = image_load(s, @[x, y]).x in
         acc + v
     let base = texture_load(tx, @[x, y], 0).x in
-    let _ = image_store(d, @[x, y], @[acc + base, 0.0, 0.0, 1.0]) in
-    0u32
+    if acc + base > 0.0 then 1u32 else 0u32
     , pxl)
 "#,
     )

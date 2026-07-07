@@ -97,16 +97,16 @@ resource ao_final: image2d { format = rgba16float  size = 1920x1080  usages = [s
 -- would instead linearize its depth buffer here with
 -- gtao.screen_to_viewspace_depth.
 #[compute]
-entry derive_depth(#[view(depth, storage_write)] out0: storage_image,
+entry derive_depth(#[view(depth, storage_write)] out0: *storage_image,
                    #[builtin(global_invocation_id)] gid: vec3u32) () =
   let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
   let sp = @[(f32.u32(gid.x) + 0.5f32) / W, (f32.u32(gid.y) + 0.5f32) / H] in
   let (t, _, _) = scene_hit(ray_dir(sp)) in
-  image_store(out0, xy, @[gtao.clamp_depth(t), 0.0f32, 0.0f32, 1.0f32])
+  out0 with [xy] = @[gtao.clamp_depth(t), 0.0f32, 0.0f32, 1.0f32]
 
 -- Pass 2: the GTAO main pass (High preset), normals from depth.
 #[compute]
-entry gtao_main(#[view(ao_work, storage_write)] outw: storage_image,
+entry gtao_main(#[view(ao_work, storage_write)] outw: *storage_image,
                 #[view(depth, sampled)] d: texture2d,
                 #[builtin(global_invocation_id)] gid: vec3u32,
                 #[uniform(set=1, binding=3)] iFrame: u32) () =
@@ -115,24 +115,24 @@ entry gtao_main(#[view(ao_work, storage_write)] outw: storage_image,
   let noise = gtao.spatiotemporal_noise(@[gid.x, gid.y], iFrame % 64u32) in
   let (slices, steps) = gtao.preset_high in
   let (vis, edges) = gtao.main_pass_single(xy, slices, steps, noise, normal, C, d) in
-  image_store(outw, xy, @[vis, edges, 0.0f32, 1.0f32])
+  outw with [xy] = @[vis, edges, 0.0f32, 1.0f32]
 
 -- Passes 3-4: two denoise passes; the second saturates the final term.
 #[compute]
-entry denoise_a(#[view(ao_ping, storage_write)] outp: storage_image,
+entry denoise_a(#[view(ao_ping, storage_write)] outp: *storage_image,
                 #[view(ao_work, sampled)] work: texture2d,
                 #[builtin(global_invocation_id)] gid: vec3u32) () =
   let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
   let (ao, edges) = gtao.denoise(xy, work, C, false) in
-  image_store(outp, xy, @[ao, edges, 0.0f32, 1.0f32])
+  outp with [xy] = @[ao, edges, 0.0f32, 1.0f32]
 
 #[compute]
-entry denoise_b(#[view(ao_final, storage_write)] outf: storage_image,
+entry denoise_b(#[view(ao_final, storage_write)] outf: *storage_image,
                 #[view(ao_ping, sampled)] ping: texture2d,
                 #[builtin(global_invocation_id)] gid: vec3u32) () =
   let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
   let (ao, edges) = gtao.denoise(xy, ping, C, true) in
-  image_store(outf, xy, @[ao, edges, 0.0f32, 1.0f32])
+  outf with [xy] = @[ao, edges, 0.0f32, 1.0f32]
 
 #[vertex]
 entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 =

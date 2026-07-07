@@ -1660,6 +1660,38 @@ def test: [4]i32 =
 }
 
 #[test]
+fn storage_image_with_shapechecks() {
+    typecheck_program(
+        r#"
+def update(img: *storage_image, xy: vec2i32, color: vec4f32) storage_image =
+    img with [xy] = color
+        "#,
+    );
+}
+
+#[test]
+fn storage_image_with_rejects_bad_coord_type() {
+    let result = try_typecheck_program(
+        r#"
+def update(img: *storage_image, i: i32, color: vec4f32) storage_image =
+    img with [i] = color
+        "#,
+    );
+    assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
+}
+
+#[test]
+fn storage_image_with_rejects_bad_texel_type() {
+    let result = try_typecheck_program(
+        r#"
+def update(img: *storage_image, xy: vec2i32, color: vec3f32) storage_image =
+    img with [xy] = color
+        "#,
+    );
+    assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
+}
+
+#[test]
 fn test_array_with_in_loop() {
     // Array with inside a loop
     typecheck_program(

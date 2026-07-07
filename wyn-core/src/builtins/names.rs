@@ -17,6 +17,10 @@ pub const INTRINSIC_ARRAY_WITH: &str = "_w_intrinsic_array_with";
 /// array is dead-after-call and its owner is mutable.
 pub const INTRINSIC_ARRAY_WITH_INPLACE: &str = "_w_intrinsic_array_with_inplace";
 
+/// Linear storage-image update emitted for `img with [xy] = rgba`.
+/// Consumes the source image handle and returns the next handle.
+pub const INTRINSIC_IMAGE_WITH: &str = "_w_intrinsic_image_with";
+
 /// `length(arr)` — runtime length of an array (any variant).
 pub const INTRINSIC_LENGTH: &str = "_w_intrinsic_length";
 
@@ -134,10 +138,6 @@ pub const INTRINSIC_TEXTURE_LOAD: &str = "_w_intrinsic_texture_load";
 /// v2 note in the texture plan for gradient-based filtering
 /// (`texture_sample_grad`).
 pub const INTRINSIC_TEXTURE_SAMPLE: &str = "_w_intrinsic_texture_sample";
-
-/// Write one texel to a storage image at integer coordinates.
-/// `image_store(image, ivec2, vec4) -> unit`. Lowers to `OpImageWrite`.
-pub const INTRINSIC_IMAGE_STORE: &str = "_w_intrinsic_image_store";
 
 /// Point-read one texel from a storage image at integer coordinates.
 /// `image_load(image, ivec2) -> vec4`. Lowers to `OpImageRead`. No
