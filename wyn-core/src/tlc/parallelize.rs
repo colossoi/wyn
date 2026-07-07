@@ -938,6 +938,7 @@ pub(crate) fn make_entry_def(
         meta: DefMeta::EntryPoint(Box::new(interface::EntryDecl {
             origin,
             entry_type: Attribute::Compute,
+            compute_dispatch: None,
             name: name.to_string(),
             name_span: dummy_span,
             size_params: vec![],
@@ -991,12 +992,20 @@ pub fn run(
             })
             .collect();
         if decl.entry_type.is_compute() {
+            let dispatch_size = decl
+                .compute_dispatch
+                .map(|grid| DispatchSize::Fixed {
+                    x: grid.x,
+                    y: grid.y,
+                    z: grid.z,
+                })
+                .unwrap_or(DispatchSize::Fixed { x: 1, y: 1, z: 1 });
             pipelines.push(Pipeline::Compute(ComputePipeline {
                 bindings: Vec::new(),
                 stages: vec![ComputeStage {
                     entry_point: name,
                     workgroup_size: (64, 1, 1),
-                    dispatch_size: DispatchSize::Fixed { x: 1, y: 1, z: 1 },
+                    dispatch_size,
                     reads: vec![],
                     writes: vec![],
                 }],

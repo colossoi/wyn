@@ -125,21 +125,15 @@ impl KernelSchedule {
                 .stages
                 .iter()
                 .map(|stage| {
+                    let selection = domain_selection_from_stage(stage);
                     by_name
                         .get(stage.entry_point.as_str())
-                        .map(|entry| {
-                            phase_from_entry(
-                                entry,
-                                DomainSelection::Inferred(domain_from_dispatch(&stage.dispatch_size)),
-                            )
-                        })
+                        .map(|entry| phase_from_entry(entry, selection.clone()))
                         .unwrap_or_else(|| KernelPhase {
                             entry_point: stage.entry_point.clone(),
                             workgroup_size: stage.workgroup_size,
                             domain: domain_from_dispatch(&stage.dispatch_size),
-                            domain_selection: DomainSelection::Inferred(domain_from_dispatch(
-                                &stage.dispatch_size,
-                            )),
+                            domain_selection: selection,
                             resources: Vec::new(),
                             dependencies: Vec::new(),
                         })
@@ -623,6 +617,15 @@ fn domain_from_dispatch(dispatch: &DispatchSize) -> KernelDomain {
     match dispatch {
         DispatchSize::Fixed { x, y, z } => KernelDomain::Fixed { x: *x, y: *y, z: *z },
         DispatchSize::DerivedFrom { len, .. } => KernelDomain::Elements(len.clone()),
+    }
+}
+
+fn domain_selection_from_stage(stage: &ComputeStage) -> DomainSelection {
+    let domain = domain_from_dispatch(&stage.dispatch_size);
+    match stage.dispatch_size {
+        DispatchSize::Fixed { x: 1, y: 1, z: 1 } => DomainSelection::Inferred(domain),
+        DispatchSize::Fixed { .. } => DomainSelection::Explicit(domain),
+        DispatchSize::DerivedFrom { .. } => DomainSelection::Inferred(domain),
     }
 }
 

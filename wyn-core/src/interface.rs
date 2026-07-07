@@ -32,6 +32,9 @@ pub enum Attribute {
     Fragment,
     /// Compute shader entry point. Workgroup size is determined by the compiler.
     Compute,
+    /// Entry-only compute launch domain, written as `#[dispatch(x[, y[, z]])]`.
+    /// The values are fixed workgroup counts in the published descriptor.
+    Dispatch(ComputeDispatchGrid),
     Uniform {
         set: u32,
         binding: u32,
@@ -106,6 +109,13 @@ impl Attribute {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ComputeDispatchGrid {
+    pub x: u32,
+    pub y: u32,
+    pub z: u32,
+}
+
 pub trait AttrExt {
     fn has<F: Fn(&Attribute) -> bool>(&self, pred: F) -> bool;
     fn first_builtin(&self) -> Option<spirv::BuiltIn>;
@@ -116,6 +126,7 @@ pub trait AttrExt {
     fn has_sampler(&self) -> bool;
     fn has_storage_image(&self) -> bool;
     fn has_view(&self) -> bool;
+    fn has_dispatch(&self) -> bool;
 }
 
 impl AttrExt for [Attribute] {
@@ -145,6 +156,9 @@ impl AttrExt for [Attribute] {
     }
     fn has_view(&self) -> bool {
         self.has(|a| matches!(a, Attribute::View { .. }))
+    }
+    fn has_dispatch(&self) -> bool {
+        self.has(|a| matches!(a, Attribute::Dispatch(_)))
     }
 }
 
@@ -249,6 +263,9 @@ pub struct EntryDecl {
     /// passes must use this field for behavior.
     pub origin: EntryOrigin,
     pub entry_type: Attribute, // Attribute::Vertex, Attribute::Fragment, or Attribute::Compute
+    /// Optional source-authored compute launch grid. `None` means the compiler
+    /// infers the domain from SOACs, storage images, or the default serial shell.
+    pub compute_dispatch: Option<ComputeDispatchGrid>,
     pub name: String,
     pub name_span: Span,
     pub size_params: Vec<String>,  // Size type parameters: <[n], [m]>

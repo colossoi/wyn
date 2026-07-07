@@ -201,6 +201,12 @@ impl<'a> Parser<'a> {
                 "#[storage(...)] is only valid on entry-point parameters, not on top-level 'def' declarations"
             );
         }
+        if attributes.has_dispatch() {
+            bail_parse_at!(
+                self.current_span(),
+                "#[dispatch(...)] is only valid on compute entry points"
+            );
+        }
         if attributes.has_texture() {
             bail_parse_at!(
                 self.current_span(),
@@ -445,7 +451,7 @@ impl<'a> Parser<'a> {
 
     /// Parse an entry point declaration.
     /// Entry points have restrictive syntax: only `id: type` parameters, not general patterns.
-    /// Syntax: `#[vertex|fragment|compute(x,y,z)] entry name(id: type, ...) return_type = body`
+    /// Syntax: `#[vertex|fragment|compute] [#[dispatch(x,y,z)]] entry name(id: type, ...) return_type = body`
     fn parse_entry_decl(&mut self, attributes: Vec<Attribute>) -> Result<Declaration> {
         trace!("parse_entry_decl: next token = {:?}", self.peek());
 
@@ -459,6 +465,26 @@ impl<'a> Parser<'a> {
                 )
             })?
             .clone();
+        let dispatches: Vec<_> = attributes
+            .iter()
+            .filter_map(|attr| match attr {
+                Attribute::Dispatch(grid) => Some(*grid),
+                _ => None,
+            })
+            .collect();
+        if dispatches.len() > 1 {
+            bail_parse_at!(
+                self.current_span(),
+                "entry point has more than one #[dispatch(...)] attribute"
+            );
+        }
+        let compute_dispatch = dispatches.first().copied();
+        if compute_dispatch.is_some() && !entry_type.is_compute() {
+            bail_parse_at!(
+                self.current_span(),
+                "#[dispatch(...)] can only be used with #[compute] entries"
+            );
+        }
 
         self.expect(Token::Entry)?;
         let name = self.expect_identifier()?;
@@ -516,6 +542,7 @@ impl<'a> Parser<'a> {
         Ok(Declaration::Entry(EntryDecl {
             origin: crate::interface::EntryOrigin::Source,
             entry_type,
+            compute_dispatch,
             name,
             name_span,
             size_params,
@@ -818,6 +845,29 @@ impl<'a> Parser<'a> {
                 }
                 self.expect(Token::RightBracket)?;
                 Ok(Attribute::Compute)
+            }
+            "dispatch" => {
+                self.expect(Token::LeftParen)?;
+                let x = self.expect_nonzero_dispatch_dim("x")?;
+                let y = if self.check(&Token::Comma) {
+                    self.advance();
+                    self.expect_nonzero_dispatch_dim("y")?
+                } else {
+                    1
+                };
+                let z = if self.check(&Token::Comma) {
+                    self.advance();
+                    self.expect_nonzero_dispatch_dim("z")?
+                } else {
+                    1
+                };
+                self.expect(Token::RightParen)?;
+                self.expect(Token::RightBracket)?;
+                Ok(Attribute::Dispatch(crate::interface::ComputeDispatchGrid {
+                    x,
+                    y,
+                    z,
+                }))
             }
             "uniform" => {
                 // Parse uniform attribute: #[uniform(binding=N)] or #[uniform(set=M, binding=N)].
@@ -3163,6 +3213,15 @@ impl<'a> Parser<'a> {
             }
             _ => Err(err_parse_at!(span, "Expected integer")),
         }
+    }
+
+    fn expect_nonzero_dispatch_dim(&mut self, axis: &str) -> Result<u32> {
+        let span = self.current_span();
+        let value = self.expect_integer()?;
+        if value == 0 {
+            bail_parse_at!(span, "dispatch {} dimension must be greater than zero", axis);
+        }
+        Ok(value)
     }
 
     fn is_at_end(&self) -> bool {

@@ -418,6 +418,37 @@ fn test_parse_fragment_attribute() {
 }
 
 #[test]
+fn test_parse_compute_dispatch_attribute() {
+    let entry = single_entry("#[compute]\n#[dispatch(16, 9)] entry main() () = ()");
+    assert_eq!(entry.entry_type, Attribute::Compute);
+    assert_eq!(
+        entry.compute_dispatch,
+        Some(crate::interface::ComputeDispatchGrid { x: 16, y: 9, z: 1 })
+    );
+}
+
+#[test]
+fn dispatch_attribute_is_compute_entry_only() {
+    expect_parse_error("#[vertex]\n#[dispatch(4, 4)] entry main() () = ()", |err| {
+        let msg = err.to_string();
+        if msg.contains("#[dispatch(...)] can only be used with #[compute] entries") {
+            Ok(())
+        } else {
+            Err(format!("unexpected error: {msg}"))
+        }
+    });
+
+    expect_parse_error("#[dispatch(4)] def x: i32 = 1", |err| {
+        let msg = err.to_string();
+        if msg.contains("#[dispatch(...)] is only valid on compute entry points") {
+            Ok(())
+        } else {
+            Err(format!("unexpected error: {msg}"))
+        }
+    });
+}
+
+#[test]
 fn test_operator_precedence_and_associativity() {
     // Test expression: a + b * c - d / e + f
     // According to spec, * and / have higher precedence than + and -

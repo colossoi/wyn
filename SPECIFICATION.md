@@ -1950,6 +1950,7 @@ open import "file"
 
 ```ebnf
 attr ::= "vertex" | "fragment" | "compute"
+         | "dispatch" "(" decimal ("," decimal ("," decimal)?)? ")"
          | "builtin" "(" builtin_name ")"
          | "location" "(" decimal ")"
 
@@ -1987,6 +1988,17 @@ entry fs_main() #[location(0)] vec4f32 = result
 ```wyn
 #[compute]
 entry compute_main(data: []f32) []f32 = map(|x| x * 2.0, data)
+```
+
+**`#[dispatch(x[, y[, z]])]`** - On a `#[compute]` entry, declares a fixed
+compute launch grid in workgroup counts. Omitted axes default to `1`. If absent,
+the compiler infers the domain from the entry's SOACs, storage-image output, or
+the default serial shell.
+
+```wyn
+#[compute]
+#[dispatch(16, 9)]
+entry paint(#[builtin(global_invocation_id)] gid: vec3u32) () = ()
 ```
 
 #### Built-in Variables

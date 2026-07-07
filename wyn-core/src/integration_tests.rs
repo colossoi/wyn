@@ -7674,6 +7674,44 @@ entry step(#[view(acc, storage_write)] out_acc: *storage_image,
     }
 }
 
+#[test]
+fn explicit_compute_dispatch_grid_overrides_image_domain_inference() {
+    use crate::pipeline_descriptor::{DispatchSize, Pipeline};
+
+    let lowered = crate::compile_thru_ssa(
+        r#"
+resource color: image2d {
+  format = rgba8unorm
+  size   = 64x64
+  usages = [storage_write]
+}
+
+#[compute]
+#[dispatch(4, 8)]
+entry paint(#[view(color, storage_write)] img: *storage_image,
+            #[builtin(global_invocation_id)] gid: vec3u32) () =
+  let xy = @[i32.u32(gid.x), i32.u32(gid.y)] in
+  img with [xy] = @[1.0, 0.0, 0.0, 1.0]
+"#,
+    )
+    .expect("explicit-dispatch storage image pass compiles");
+
+    let stage = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .find_map(|pipeline| match pipeline {
+            Pipeline::Compute(compute) => compute.stages.iter().find(|stage| stage.entry_point == "paint"),
+            _ => None,
+        })
+        .expect("paint compute stage");
+    assert_eq!(
+        stage.dispatch_size,
+        DispatchSize::Fixed { x: 4, y: 8, z: 1 },
+        "source-authored #[dispatch] should be an explicit launch domain"
+    );
+}
+
 /// The former storage-image write function is no longer a surface builtin.
 #[test]
 fn legacy_image_store_is_not_user_visible() {
