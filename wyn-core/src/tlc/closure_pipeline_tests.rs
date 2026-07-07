@@ -576,3 +576,147 @@ fn test_nested_hof_passthrough() {
         def_names
     );
 }
+
+#[test]
+#[ignore = "known shortcut: hof_specialize stamps specialized functions with \
+            all-observing diets, so a consuming array data parameter of a user \
+            HOF loses its consuming contract (and, in the optimizer, its in-place \
+            promotion). Sound — validate_ownership checks consumption on the \
+            un-specialized program before this pass — but imprecise. Fixing it \
+            needs the real per-parameter diet remap in hof_specialize."]
+fn specialized_hof_preserves_consuming_data_param_diet() {
+    // A user HOF `apply(f, a)` with a callback `f` and a consuming array
+    // `a`. hof_specialize inlines the callback and drops `f`, leaving a
+    // specialized def whose retained `a` parameter is still consuming — its
+    // diet should stay consuming.
+    let mut b = TestBuilder::new();
+    let n_sym = b.sym("n");
+    let f_sym = b.sym("f");
+    let a_sym = b.sym("a");
+    let apply_sym = b.sym("apply");
+    let x_sym = b.sym("x");
+    let main_sym = b.sym("main");
+
+    let arr = array_ty(i32_ty());
+    let i2i = arrow(i32_ty(), i32_ty());
+
+    // callback: |n| n
+    let callback = Term {
+        id: b.next_id(),
+        ty: i2i.clone(),
+        span: b.span(),
+        kind: TermKind::Lambda(Lambda {
+            params: vec![(n_sym, i32_ty())],
+            body: Box::new(Term {
+                id: b.next_id(),
+                ty: i32_ty(),
+                span: b.span(),
+                kind: TermKind::Var(VarRef::Symbol(n_sym)),
+            }),
+            ret_ty: i32_ty(),
+        }),
+    };
+
+    // apply: |f, a| a[0]   (the consuming contract lives on the diet)
+    let apply_ty = arrow(i2i.clone(), arrow(arr.clone(), i32_ty()));
+    let apply_lam = Term {
+        id: b.next_id(),
+        ty: apply_ty.clone(),
+        span: b.span(),
+        kind: TermKind::Lambda(Lambda {
+            params: vec![(f_sym, i2i.clone()), (a_sym, arr.clone())],
+            body: Box::new(Term {
+                id: b.next_id(),
+                ty: i32_ty(),
+                span: b.span(),
+                kind: TermKind::Index {
+                    array: Box::new(Term {
+                        id: b.next_id(),
+                        ty: arr.clone(),
+                        span: b.span(),
+                        kind: TermKind::Var(VarRef::Symbol(a_sym)),
+                    }),
+                    index: Box::new(Term {
+                        id: b.next_id(),
+                        ty: i32_ty(),
+                        span: b.span(),
+                        kind: TermKind::IntLit("0".to_string()),
+                    }),
+                },
+            }),
+            ret_ty: i32_ty(),
+        }),
+    };
+
+    // main: |x| apply(callback, x)
+    let main_lam = Term {
+        id: b.next_id(),
+        ty: arrow(arr.clone(), i32_ty()),
+        span: b.span(),
+        kind: TermKind::Lambda(Lambda {
+            params: vec![(x_sym, arr.clone())],
+            body: Box::new(Term {
+                id: b.next_id(),
+                ty: i32_ty(),
+                span: b.span(),
+                kind: TermKind::App {
+                    func: Box::new(Term {
+                        id: b.next_id(),
+                        ty: apply_ty.clone(),
+                        span: b.span(),
+                        kind: TermKind::Var(VarRef::Symbol(apply_sym)),
+                    }),
+                    args: vec![
+                        callback,
+                        Term {
+                            id: b.next_id(),
+                            ty: arr.clone(),
+                            span: b.span(),
+                            kind: TermKind::Var(VarRef::Symbol(x_sym)),
+                        },
+                    ],
+                },
+            }),
+            ret_ty: i32_ty(),
+        }),
+    };
+
+    let symbols = b.finish();
+    let program = Program {
+        defs: vec![
+            Def {
+                name: apply_sym,
+                ty: apply_ty,
+                body: apply_lam,
+                meta: DefMeta::Function,
+                arity: 2,
+                param_diets: vec![crate::types::Diet::observing(), crate::types::Diet::Leaf(true)],
+                return_diet: crate::types::Diet::observing(),
+            },
+            Def {
+                name: main_sym,
+                ty: main_lam.ty.clone(),
+                body: main_lam,
+                meta: DefMeta::Function,
+                arity: 1,
+                param_diets: vec![crate::types::Diet::Leaf(true)],
+                return_diet: crate::types::Diet::observing(),
+            },
+        ],
+        symbols,
+        def_syms: HashMap::new(),
+    };
+
+    let result = defunctionalize(program, &HashSet::new());
+
+    // The specialized `apply` (callback removed) keeps only the array param.
+    let specialized = result
+        .defs
+        .iter()
+        .find(|d| matches!(d.meta, DefMeta::Function) && d.name != main_sym && d.arity == 1)
+        .expect("a specialized apply def with the callback removed should exist");
+    assert!(
+        specialized.param_diets.iter().any(|d| d.is_consuming()),
+        "specialized HOF must keep its consumed array parameter's consuming diet",
+    );
+}

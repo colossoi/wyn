@@ -137,6 +137,17 @@ fn observing_return_satisfies_shape_check_but_defers_to_ownership() {
 }
 
 #[test]
+#[ignore = "known gap: `*` on a value-position annotation (a `let` binding or a \
+            non-function `def`) is silently ignored — the parser lifts it into a \
+            diet that no consumer reads. It should be rejected, since uniqueness \
+            is a signature-only contract. M4 rejected it at the checker; re-adding \
+            a parser-level rejection where the diet is discarded is the fix."]
+fn value_position_uniqueness_annotation_is_rejected() {
+    let result = try_typecheck_program("def t: *[4]i32 = [1, 2, 3, 4]");
+    assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
+}
+
+#[test]
 fn genuine_shape_mismatch_prints_each_type_once() {
     let error = try_typecheck_program("def bad(x: [4]i32) [4]f32 = x").unwrap_err();
     let CompilerError::TypeError(message, _) = error else {
