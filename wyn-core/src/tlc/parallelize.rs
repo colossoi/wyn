@@ -992,14 +992,23 @@ pub fn run(
             })
             .collect();
         if decl.entry_type.is_compute() {
+            // A source `#[dispatch(...)]` is explicit — even `#[dispatch(1,1,1)]`
+            // — so domain inference must not override it. Absent the attribute,
+            // the `1x1x1` default is a placeholder inference may upgrade.
             let dispatch_size = decl
                 .compute_dispatch
                 .map(|grid| DispatchSize::Fixed {
                     x: grid.x,
                     y: grid.y,
                     z: grid.z,
+                    explicit: true,
                 })
-                .unwrap_or(DispatchSize::Fixed { x: 1, y: 1, z: 1 });
+                .unwrap_or(DispatchSize::Fixed {
+                    x: 1,
+                    y: 1,
+                    z: 1,
+                    explicit: false,
+                });
             pipelines.push(Pipeline::Compute(ComputePipeline {
                 bindings: Vec::new(),
                 stages: vec![ComputeStage {

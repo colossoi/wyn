@@ -34,6 +34,11 @@ use super::types::{
 pub const PHASE2_WIDTH: u32 = 256;
 /// Per-workgroup width used to chunk a phase-1 partial reduce.
 pub(crate) const REDUCE_PHASE1_WIDTH: u32 = 64;
+/// Fixed workgroup count for the runtime-filter prefix scan's phase-1. The
+/// scan runs `FILTER_SCAN_GROUPS * REDUCE_PHASE1_WIDTH` workers, each scanning
+/// a `ceil(len / workers)` chunk, so the serial phase-2 over the per-worker
+/// `block_sums` stays bounded by this constant instead of the input length.
+pub(crate) const FILTER_SCAN_GROUPS: u32 = 4;
 
 /// Reify every reachable Screma as a semantic segmented op.
 /// This pass performs no scheduling and allocates no bindings.
@@ -687,10 +692,18 @@ fn lower_runtime_filters(
             &flags,
             schedule::DomainSelection::Explicit(domain.clone()),
         );
+        // The scan runs a fixed worker grid so each worker scans a large
+        // chunk and `block_sums` stays `FILTER_SCAN_GROUPS * width`-sized,
+        // keeping the serial phase-2 bounded by that constant rather than by
+        // `len`. The flags and scatter phases stay per-element (`domain`).
         schedule.add_phase_before(
             &entry.name,
             &scan,
-            schedule::DomainSelection::Explicit(domain.clone()),
+            schedule::DomainSelection::Explicit(KernelDomain::Fixed {
+                x: FILTER_SCAN_GROUPS,
+                y: 1,
+                z: 1,
+            }),
         );
         schedule.add_phase_before(
             &entry.name,
@@ -3265,22 +3278,22 @@ pub fn synthesize_phase3_scan(
     b.build()
 }
 
-/// Build a two-argument helper function named `wrapper_name` whose body is
-/// `inner(b, a)` — an arg-swapped wrapper around a `T -> T -> T` combiner.
-fn synthesize_swap_wrapper(
-    wrapper_name: String,
-    inner: String,
+/// Build a two-argument (`a`, `b`) helper function of type `T -> T -> T` named
+/// `name`, whose body is produced by `body(graph, a_nid, b_nid)` and returned.
+fn synthesize_binary_fn(
+    name: String,
     elem_ty: Type<TypeName>,
     span: crate::ast::Span,
+    body: impl FnOnce(&mut EGraph, NodeId, NodeId) -> NodeId,
 ) -> EgirFunc {
     let mut graph = EGraph::new();
     let a_nid = graph.add_func_param(0, elem_ty.clone());
     let b_nid = graph.add_func_param(1, elem_ty.clone());
-    let call_nid = graph.intern_pure(PureOp::Call(inner), smallvec![b_nid, a_nid], elem_ty.clone());
+    let result = body(&mut graph, a_nid, b_nid);
     let entry_block = graph.skeleton.entry;
-    graph.skeleton.blocks[entry_block].term = SkeletonTerminator::Return(Some(call_nid));
+    graph.skeleton.blocks[entry_block].term = SkeletonTerminator::Return(Some(result));
     EgirFunc::new(
-        wrapper_name,
+        name,
         span,
         None,
         vec![
@@ -3293,26 +3306,26 @@ fn synthesize_swap_wrapper(
     )
 }
 
+/// A two-argument helper whose body is `inner(b, a)` — an arg-swapped wrapper
+/// around a `T -> T -> T` combiner.
+fn synthesize_swap_wrapper(
+    wrapper_name: String,
+    inner: String,
+    elem_ty: Type<TypeName>,
+    span: crate::ast::Span,
+) -> EgirFunc {
+    let result_ty = elem_ty.clone();
+    synthesize_binary_fn(wrapper_name, elem_ty, span, move |graph, a_nid, b_nid| {
+        graph.intern_pure(PureOp::Call(inner), smallvec![b_nid, a_nid], result_ty)
+    })
+}
+
 fn synthesize_u32_add_function(name: String, span: crate::ast::Span) -> EgirFunc {
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
-    let mut graph = EGraph::new();
-    let a_nid = graph.add_func_param(0, u32_ty.clone());
-    let b_nid = graph.add_func_param(1, u32_ty.clone());
-    let sum = graph.intern_pure(PureOp::BinOp("+".into()), smallvec![a_nid, b_nid], u32_ty.clone());
-    let entry_block = graph.skeleton.entry;
-    graph.skeleton.blocks[entry_block].term = SkeletonTerminator::Return(Some(sum));
-    EgirFunc::new(
-        name,
-        span,
-        None,
-        vec![
-            (u32_ty.clone(), "a".to_string()),
-            (u32_ty.clone(), "b".to_string()),
-        ],
-        u32_ty,
-        graph,
-        LookupMap::new(),
-    )
+    let result_ty = u32_ty.clone();
+    synthesize_binary_fn(name, u32_ty, span, move |graph, a_nid, b_nid| {
+        graph.intern_pure(PureOp::BinOp("+".into()), smallvec![a_nid, b_nid], result_ty)
+    })
 }
 
 #[cfg(test)]

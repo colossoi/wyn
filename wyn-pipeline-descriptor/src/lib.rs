@@ -100,21 +100,30 @@ impl FrameGraph {
                 }
                 Pipeline::Graphics(graphics) => {
                     let feedback_reads = feedback_read_slots(&graphics.feedback);
+                    // The descriptor's graphics binding table is flat — it does
+                    // not record which stage (vertex vs fragment) uses each
+                    // binding — so every stage is attributed the whole table's
+                    // declared accesses. This is a conservative over-
+                    // approximation: intra-pipeline `depends_on` edges between a
+                    // pipeline's own stages may be spurious. It is sound (no real
+                    // dependency is missed) and currently has no consumer; a
+                    // precise split would need per-binding stage visibility.
+                    // Computed once and shared, since the accesses are identical.
+                    let (reads, writes) = builder.binding_table_accesses(
+                        pipeline_index,
+                        &graphics.bindings,
+                        None,
+                        None,
+                        &feedback_reads,
+                    );
                     for (stage_index, stage) in graphics.stages.iter().enumerate() {
-                        let (reads, writes) = builder.binding_table_accesses(
-                            pipeline_index,
-                            &graphics.bindings,
-                            None,
-                            None,
-                            &feedback_reads,
-                        );
                         builder.push_pass(
                             FramePassKind::from_shader_stage(&stage.stage),
                             stage.entry_point.clone(),
                             pipeline_index,
                             stage_index,
-                            reads,
-                            writes,
+                            reads.clone(),
+                            writes.clone(),
                             &mut last_writer,
                             &mut last_readers,
                         );
@@ -218,7 +227,7 @@ pub struct FrameBindingRef {
     pub binding: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrameResourceExtent {
     StorageTexture {
@@ -378,6 +387,13 @@ pub enum DispatchSize {
         x: u32,
         y: u32,
         z: u32,
+        /// `true` when this grid was deliberately chosen (a source
+        /// `#[dispatch(...)]` or a compiler-pinned phase) rather than the
+        /// default `1x1x1` placeholder that domain inference may upgrade.
+        /// Lets the scheduler tell a user-pinned `#[dispatch(1,1,1)]` apart
+        /// from the unspecified default instead of guessing from the value.
+        #[serde(default)]
+        explicit: bool,
     },
     /// Dispatch `ceil(len / workgroup_size)` workgroups, where `len` is the
     /// number of iterations resolved from `DispatchLen`. Replaces the old
@@ -615,6 +631,17 @@ impl FrameGraphBuilder {
         };
 
         let resource = &mut self.graph.resources[index];
+        // Bindings merging onto one slot must be the same resource kind — the
+        // sole cross-kind case is a sampled texture view aliasing its
+        // storage-texture backing (keyed to the backing's StorageTexture slot).
+        debug_assert!(
+            binding_kind(binding) == resource.kind
+                || (matches!(binding, Binding::Texture { backing: Some(_), .. })
+                    && resource.kind == FrameResourceKind::StorageTexture),
+            "binding kind {:?} disagrees with merged resource kind {:?} at one slot",
+            binding_kind(binding),
+            resource.kind
+        );
         merge_extent(&mut resource.extent, binding_extent(binding));
         if matches!(binding, Binding::StorageTexture { .. }) {
             resource.name = binding_name(binding).to_string();
@@ -735,6 +762,14 @@ impl FrameGraphBuilder {
         }
 
         for (index, binding) in bindings.iter().enumerate() {
+            // In explicit mode the stage's read/write lists are the *complete*
+            // access spec for storage buffers — a storage buffer absent from
+            // them is not touched by this stage, so it must not auto-derive.
+            // Other binding kinds (textures, uniforms, samplers) are never in
+            // the lists and always auto-derive from their declared access. If a
+            // stage ever needs explicit read/write control over a non-buffer
+            // binding, the lists (populated upstream in EGIR) must be extended
+            // to name it and this carve-out generalized to "skip if listed".
             if explicit && matches!(binding, Binding::StorageBuffer { .. }) {
                 continue;
             }
@@ -953,10 +988,28 @@ fn binding_extent(binding: &Binding) -> Option<FrameResourceExtent> {
 fn merge_extent(target: &mut Option<FrameResourceExtent>, candidate: Option<FrameResourceExtent>) {
     match candidate {
         Some(FrameResourceExtent::StorageTexture { size }) => {
+            // A sampled texture view aliases its storage-texture backing onto
+            // one slot; the storage-texture extent wins. Distinct resources
+            // cannot share a slot (program-global allocation + the type-checker
+            // reject it), so a differing existing storage-texture size would
+            // signal a broken invariant.
+            debug_assert!(
+                !matches!(&target, Some(FrameResourceExtent::StorageTexture { size: existing }) if *existing != size),
+                "two storage-texture aliases at one slot disagree on size"
+            );
             *target = Some(FrameResourceExtent::StorageTexture { size });
         }
-        Some(extent) if target.is_none() => *target = Some(extent),
-        _ => {}
+        Some(extent) => match target {
+            None => *target = Some(extent),
+            // Same slot ⇒ same resource ⇒ same extent; a mismatch means two
+            // distinct resources collided (which the allocator/type-checker
+            // forbid).
+            Some(existing) => debug_assert_eq!(
+                *existing, extent,
+                "two bindings merging at one slot disagree on extent"
+            ),
+        },
+        None => {}
     }
 }
 

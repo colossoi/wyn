@@ -65,6 +65,10 @@ pub enum ConvertError {
     /// a panic so the caller can label it as an internal compiler error
     /// in user-facing output.
     Internal(String),
+    /// A source `#[dispatch(...)]` grid is incompatible with the entry — e.g.
+    /// it launches fewer threads than the entry's data-parallel domain has
+    /// elements, silently dropping the tail. A user error, not internal.
+    InvalidDispatch(String),
 }
 
 impl std::fmt::Display for ConvertError {
@@ -73,6 +77,7 @@ impl std::fmt::Display for ConvertError {
             ConvertError::GraphError(msg) => write!(f, "EGraph conversion error: {}", msg),
             ConvertError::Unsupported(msg) => write!(f, "Unsupported: {}", msg),
             ConvertError::Internal(msg) => write!(f, "internal compiler error: {}", msg),
+            ConvertError::InvalidDispatch(msg) => write!(f, "{}", msg),
         }
     }
 }

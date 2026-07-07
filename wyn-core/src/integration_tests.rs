@@ -391,7 +391,17 @@ entry r(xs: []u32) ?k. [k]u32 = filter(|x| x < 100u32, xs)
     assert_eq!(phases[3].entry_point, "r_filter_scan_phase3_add_offsets");
     assert_eq!(phases[4].entry_point, "r");
     assert!(matches!(phases[0].domain, KernelDomain::Elements(_)));
-    assert!(matches!(phases[1].domain, KernelDomain::Elements(_)));
+    // The scan runs a fixed worker grid so each worker scans a large chunk;
+    // dispatching it per-element (Elements) would collapse the chunk to 1 and
+    // leave phase-2 an O(len) serial scan.
+    assert!(matches!(
+        phases[1].domain,
+        KernelDomain::Fixed {
+            x: crate::egir::parallelize::FILTER_SCAN_GROUPS,
+            y: 1,
+            z: 1
+        }
+    ));
     assert_eq!(
         phases[1].workgroup_size,
         (crate::egir::parallelize::REDUCE_PHASE1_WIDTH, 1, 1)
@@ -2366,6 +2376,55 @@ entry geom(ids: []u32, params: []f32) ([]f32, []f32) =
         "captured same-domain maps should lower as one multi-output stage; stages = {:?}",
         compute.stages.iter().map(|s| &s.entry_point).collect::<Vec<_>>()
     );
+}
+
+/// Fusing two captured sibling maps must keep each lane's own body — not
+/// cross-wire both outputs to one lane's captures. The two lanes carry
+/// distinctive constants (`1000.0`, `7.0`); if either is missing from the
+/// single fused kernel, a lane collapsed onto the other. Value-level guard
+/// beyond the stage-count check above.
+#[test]
+fn fused_sibling_maps_keep_each_lanes_own_body() {
+    let source = r#"
+#[compute]
+entry two(ids: []u32, params: []f32) ([]f32, []f32) =
+  let a = params[0] in
+  let b = params[1] in
+  let lo = map(|id: u32| f32.u32(id) * 1000.0 + a, ids) in
+  let hi = map(|id: u32| f32.u32(id) * 7.0 + b, ids) in
+  (lo, hi)
+"#;
+
+    let wgsl = crate::compile_thru_tlc(source)
+        .expect("TLC")
+        .infer_input_slice_bounds()
+        .to_egraph()
+        .expect("EGIR")
+        .lower_to_ssa(crate::LoweringProfile::new(
+            crate::CodegenTarget::Wgsl,
+            crate::SchedulePolicy::Parallel,
+        ))
+        .expect("SSA")
+        .lower_wgsl()
+        .expect("WGSL lowering");
+
+    assert!(
+        wgsl.contains("1000.0"),
+        "first lane's body (× 1000.0) was lost when fusing:\n{wgsl}"
+    );
+    assert!(
+        wgsl.contains("7.0"),
+        "second lane's body (× 7.0) was lost when fusing:\n{wgsl}"
+    );
+
+    let module = naga::front::wgsl::parse_str(&wgsl)
+        .unwrap_or_else(|e| panic!("Naga rejected fused WGSL: {e:?}\n{wgsl}"));
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|e| panic!("Naga validation rejected fused WGSL: {e:?}\n{wgsl}"));
 }
 
 /// An in-place map that prepares a buffer consumed by a later `scatter` is an
@@ -5806,13 +5865,14 @@ entry filt_out(xs: []i32) ?k. [k]i32 =
             .filter(|binding| matches!(
                 binding,
                 Binding::StorageBuffer {
-                    length: Some(BufferLen::SameAsDispatch { .. }),
+                    length: Some(BufferLen::Fixed { bytes: 1024 }),
                     ..
                 }
             ))
             .count(),
         2,
-        "scan block sums and block offsets are sized to the scan dispatch"
+        "scan block sums and block offsets have a fixed length (FILTER_SCAN_GROUPS \
+         * REDUCE_PHASE1_WIDTH = 256 u32s = 1024 bytes), bounding the serial phase-2"
     );
 }
 
@@ -7794,9 +7854,93 @@ entry paint(#[view(color, storage_write)] img: *storage_image,
         .expect("paint compute stage");
     assert_eq!(
         stage.dispatch_size,
-        DispatchSize::Fixed { x: 4, y: 8, z: 1 },
+        DispatchSize::Fixed {
+            x: 4,
+            y: 8,
+            z: 1,
+            explicit: true
+        },
         "source-authored #[dispatch] should be an explicit launch domain"
     );
+}
+
+/// A source `#[dispatch(1,1,1)]` is the one grid value that collides with the
+/// unspecified-default placeholder, yet it must still win over storage-image
+/// domain inference — the explicit bit, not the value, decides.
+#[test]
+fn explicit_dispatch_one_one_one_survives_image_domain_inference() {
+    use crate::pipeline_descriptor::{DispatchSize, Pipeline};
+
+    let lowered = crate::compile_thru_ssa(
+        r#"
+resource color: image2d {
+  format = rgba8unorm
+  size   = 64x64
+  usages = [storage_write]
+}
+
+#[compute]
+#[dispatch(1, 1, 1)]
+entry paint(#[view(color, storage_write)] img: *storage_image) () =
+  img with [@[0, 0]] = @[1.0, 0.0, 0.0, 1.0]
+"#,
+    )
+    .expect("explicit 1x1x1 storage image pass compiles");
+
+    let stage = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .find_map(|pipeline| match pipeline {
+            Pipeline::Compute(compute) => compute.stages.iter().find(|stage| stage.entry_point == "paint"),
+            _ => None,
+        })
+        .expect("paint compute stage");
+    assert_eq!(
+        stage.dispatch_size,
+        DispatchSize::Fixed {
+            x: 1,
+            y: 1,
+            z: 1,
+            explicit: true
+        },
+        "explicit #[dispatch(1,1,1)] must stay a single invocation, not upgrade \
+         to the storage image's per-texel grid, got {:?}",
+        stage.dispatch_size
+    );
+}
+
+/// A `#[dispatch]` grid that provably under-covers a statically-sized
+/// data-parallel domain is rejected rather than silently dropping the tail.
+#[test]
+fn undercovering_dispatch_grid_is_rejected() {
+    // iota(100) is a fixed 100-element domain; #[dispatch(1,1,1)] at the
+    // default 64-wide workgroup launches only 64 threads, dropping 36.
+    let result = crate::compile_thru_ssa(
+        r#"
+#[compute]
+#[dispatch(1, 1, 1)]
+entry e() []i32 = map(|x| x * 2, iota(100))
+"#,
+    );
+    let msg = match result {
+        Ok(_) => panic!("under-covering #[dispatch] must be rejected"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        msg.contains("would be dropped") && msg.contains("#[dispatch"),
+        "diagnostic should explain the dropped elements, got: {msg}"
+    );
+
+    // A grid that covers the domain (2 * 64 = 128 >= 100) compiles.
+    crate::compile_thru_ssa(
+        r#"
+#[compute]
+#[dispatch(2, 1, 1)]
+entry e() []i32 = map(|x| x * 2, iota(100))
+"#,
+    )
+    .expect("a covering #[dispatch] grid compiles");
 }
 
 /// The former storage-image write function is no longer a surface builtin.
@@ -8535,15 +8679,16 @@ entry g6(pxl: []u32,
     .expect("texture_load after an image_load loop inside a map lambda should lower");
 }
 
-/// A runtime filter whose host entry also binds a storage image sizes the
-/// filter scan from the filtered storage-buffer input. The filter stages are
-/// clones of the host entry, so they inherit its storage-image input; the
-/// per-texel dispatch upgrade must not seize their domains and wire the scan to
-/// the unrelated image extent.
+/// A runtime filter whose host entry also binds a storage image schedules the
+/// filter scan over a fixed worker grid. The filter stages are clones of the
+/// host entry, so they inherit its storage-image input; the per-texel dispatch
+/// upgrade must not seize their domains and wire the scan to the unrelated
+/// image extent. Because the scan phase is scheduled `Explicit(Fixed)`, no
+/// domain inference can touch it.
 #[test]
 fn filter_scan_domain_ignores_storage_image_entry_binding() {
     use crate::egir::parallelize::schedule::KernelDomain;
-    use crate::pipeline_descriptor::{DispatchLen, DispatchSize, Pipeline};
+    use crate::pipeline_descriptor::{DispatchSize, Pipeline};
 
     let src = r#"
 resource occ: image2d { format = r32float  size = 256x256  usages = [storage_read, storage_write] }
@@ -8565,9 +8710,13 @@ entry cull(xs: []u32,
     assert!(
         matches!(
             scan.domain,
-            KernelDomain::Elements(DispatchLen::InputBinding { .. })
+            KernelDomain::Fixed {
+                x: crate::egir::parallelize::FILTER_SCAN_GROUPS,
+                y: 1,
+                z: 1
+            }
         ),
-        "scan domain must come from the filtered input buffer, got {:?}",
+        "scan domain must be the fixed worker grid, not the image extent, got {:?}",
         scan.domain
     );
     assert_eq!(
@@ -8588,14 +8737,8 @@ entry cull(xs: []u32,
         })
         .expect("scan stage published");
     assert!(
-        matches!(
-            stage.dispatch_size,
-            DispatchSize::DerivedFrom {
-                len: DispatchLen::InputBinding { .. },
-                ..
-            }
-        ),
-        "scan dispatch must publish from the input buffer, got {:?}",
+        matches!(stage.dispatch_size, DispatchSize::Fixed { x: 4, y: 1, z: 1, .. }),
+        "scan dispatch must publish the fixed worker grid, got {:?}",
         stage.dispatch_size
     );
 }

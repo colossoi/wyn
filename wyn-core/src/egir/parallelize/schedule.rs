@@ -260,6 +260,50 @@ impl KernelSchedule {
         }
     }
 
+    /// Reject an explicit `#[dispatch(...)]` grid that provably under-covers an
+    /// entry's data-parallel domain. Only statically-sized domains
+    /// (`DispatchLen::Fixed`) are decidable here; runtime-length domains keep
+    /// the generated per-element `tid < len` guard (which is over-launch safe
+    /// but cannot catch an under-launch at compile time). Compiler-pinned
+    /// phases (filter scan, reduce/scan combines) have no static SOAC domain,
+    /// so `segmented_domain` returns `None` for them and they are skipped.
+    pub fn check_explicit_dispatch_coverage(&self, entries: &[EgirEntry]) -> Result<(), String> {
+        let by_name: HashMap<&str, &EgirEntry> = entries.iter().map(|e| (e.name.as_str(), e)).collect();
+        for pipeline in &self.pipelines {
+            for phase in &pipeline.phases {
+                let DomainSelection::Explicit(KernelDomain::Fixed { x, y, z }) = &phase.domain_selection
+                else {
+                    continue;
+                };
+                let Some(entry) = by_name.get(phase.entry_point.as_str()) else {
+                    continue;
+                };
+                let Some(KernelDomain::Elements(DispatchLen::Fixed { count })) = segmented_domain(entry)
+                else {
+                    continue;
+                };
+                let (wx, wy, wz) = entry_workgroup(entry);
+                let total = x
+                    .saturating_mul(*y)
+                    .saturating_mul(*z)
+                    .saturating_mul(wx)
+                    .saturating_mul(wy)
+                    .saturating_mul(wz);
+                if total < count {
+                    return Err(format!(
+                        "#[dispatch({x}, {y}, {z})] launches {total} threads but entry '{}' \
+                         has a data-parallel domain of {count} elements, so {} would be \
+                         dropped; enlarge the grid or drop #[dispatch] to let the compiler \
+                         size the launch.",
+                        phase.entry_point,
+                        count - total
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Merge compiler-generated producer/consumer entries connected by a
     /// first-class `StorageRole::Output -> StorageRole::Input` edge. The
     /// resulting phases share one binding table and execute producer-first.
@@ -414,7 +458,12 @@ impl KernelSchedule {
                 .map(|phase| ComputeStage {
                     entry_point: phase.entry_point.clone(),
                     workgroup_size: phase.workgroup_size,
-                    dispatch_size: DispatchSize::Fixed { x: 1, y: 1, z: 1 },
+                    dispatch_size: DispatchSize::Fixed {
+                        x: 1,
+                        y: 1,
+                        z: 1,
+                        explicit: false,
+                    },
                     reads: Vec::new(),
                     writes: Vec::new(),
                 })
@@ -470,7 +519,12 @@ impl KernelSchedule {
                     entry_point: phase.entry_point.clone(),
                     workgroup_size: phase.workgroup_size,
                     dispatch_size: match &phase.domain {
-                        KernelDomain::Fixed { x, y, z } => DispatchSize::Fixed { x: *x, y: *y, z: *z },
+                        KernelDomain::Fixed { x, y, z } => DispatchSize::Fixed {
+                            x: *x,
+                            y: *y,
+                            z: *z,
+                            explicit: matches!(phase.domain_selection, DomainSelection::Explicit(_)),
+                        },
                         KernelDomain::Elements(len) => DispatchSize::DerivedFrom {
                             len: len.clone(),
                             workgroup_size: phase.workgroup_size.0,
@@ -615,7 +669,7 @@ fn entry_workgroup(entry: &EgirEntry) -> (u32, u32, u32) {
 
 fn domain_from_dispatch(dispatch: &DispatchSize) -> KernelDomain {
     match dispatch {
-        DispatchSize::Fixed { x, y, z } => KernelDomain::Fixed { x: *x, y: *y, z: *z },
+        DispatchSize::Fixed { x, y, z, .. } => KernelDomain::Fixed { x: *x, y: *y, z: *z },
         DispatchSize::DerivedFrom { len, .. } => KernelDomain::Elements(len.clone()),
     }
 }
@@ -623,8 +677,11 @@ fn domain_from_dispatch(dispatch: &DispatchSize) -> KernelDomain {
 fn domain_selection_from_stage(stage: &ComputeStage) -> DomainSelection {
     let domain = domain_from_dispatch(&stage.dispatch_size);
     match stage.dispatch_size {
-        DispatchSize::Fixed { x: 1, y: 1, z: 1 } => DomainSelection::Inferred(domain),
-        DispatchSize::Fixed { .. } => DomainSelection::Explicit(domain),
+        // Honor the source's explicit intent: a user-pinned `#[dispatch]` grid
+        // (including `1x1x1`) stays `Explicit` and is never re-inferred. Only
+        // the unpinned default `1x1x1` placeholder is `Inferred`.
+        DispatchSize::Fixed { explicit: true, .. } => DomainSelection::Explicit(domain),
+        DispatchSize::Fixed { explicit: false, .. } => DomainSelection::Inferred(domain),
         DispatchSize::DerivedFrom { .. } => DomainSelection::Inferred(domain),
     }
 }

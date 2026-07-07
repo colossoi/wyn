@@ -107,7 +107,10 @@ enum DriverError {
     #[error("Compilation error: {0}")]
     CompilationError(#[from] wyn_core::error::CompilerError),
 
-    #[error("EGraph conversion error: {0}")]
+    // `ConvertError`'s own Display carries the right per-variant label
+    // (EGraph/internal prefixes, or a clean user message for InvalidDispatch),
+    // so render it directly rather than force one prefix onto every variant.
+    #[error("{0}")]
     EgirConversionError(#[from] wyn_core::egir::from_tlc::ConvertError),
 }
 

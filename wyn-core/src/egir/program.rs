@@ -303,7 +303,16 @@ fn allocate_filter_work_resources(
                     },
                     _ => LogicalSize::SameAsDispatch { elem_bytes: 4 },
                 };
-                let worker_count_size = LogicalSize::SameAsDispatch { elem_bytes: 4 };
+                // The scan phase runs a fixed worker grid
+                // (`FILTER_SCAN_GROUPS * REDUCE_PHASE1_WIDTH` workers), so its
+                // per-worker `block_sums`/`block_offsets` have a fixed length
+                // independent of the input — which bounds the serial phase-2
+                // scan and decouples the buffer from any stage's dispatch.
+                let worker_count_size = LogicalSize::FixedBytes(
+                    (super::parallelize::FILTER_SCAN_GROUPS * super::parallelize::REDUCE_PHASE1_WIDTH)
+                        as u64
+                        * 4,
+                );
                 let owner = effect.result.map(|result| SemanticOpId {
                     scope: entry.name.clone(),
                     result,

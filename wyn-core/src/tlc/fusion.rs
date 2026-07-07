@@ -2411,8 +2411,9 @@ fn partition_by_domain(keys: &[Option<Type<TypeName>>]) -> Vec<Vec<usize>> {
     classes.into_iter().map(|(_, members)| members).collect()
 }
 
-/// One output slot recognised by the equal-domain fuser: a plain
-/// captureless `map(lam, ref)` over a single named entry-param array.
+/// One output slot recognised by the equal-domain fuser: a single-input
+/// `map(lam, ref)` over a named entry-param array. The lambda may capture
+/// free variables; each fused lane carries its own captures.
 struct FusibleMapSlot {
     slot_index: usize,
     input: ArrayExpr,
@@ -2468,9 +2469,10 @@ fn fusible_map_slot(slot_index: usize, term: &Term) -> Option<FusibleMapSlot> {
 ///
 /// Entries left untouched (handled by the per-slot split in
 /// `make_multidomain_map_plan`): those whose slots span more than one domain,
-/// and those with any slot that isn't a captureless single-input `map` over a
-/// named entry param. Per-domain fusion of a mixed-domain entry's matching
-/// slots is not done here — each slot becomes its own stage.
+/// and those with any slot that isn't a single-input `map` over a named entry
+/// param. A slot's `map` may capture free variables — each fused lane carries
+/// its own captures. Per-domain fusion of a mixed-domain entry's matching slots
+/// is not done here — each slot becomes its own stage.
 pub(crate) fn fuse_equal_domain_sibling_maps(program: &mut Program, term_ids: &mut TermIdSource) {
     let indices: Vec<usize> = program
         .defs

@@ -42,6 +42,11 @@ pub fn schedule(
     let _ = binding_ids;
     refresh_logical_resources(inner);
 
+    inner
+        .kernel_schedule
+        .check_explicit_dispatch_coverage(&inner.entry_points)
+        .map_err(ConvertError::InvalidDispatch)?;
+
     let mut descriptor = unpublished_descriptor;
     inner.kernel_schedule.install_phase_shells(&mut descriptor).map_err(ConvertError::Internal)?;
     descriptor.publish_implicit_bindings(&inner.entry_points);

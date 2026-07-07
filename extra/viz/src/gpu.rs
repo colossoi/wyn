@@ -438,7 +438,7 @@ pub fn resolve_dispatch_size_with_textures(
     storage_textures: &HashMap<(u32, u32), StorageTextureResource>,
 ) -> (u32, u32, u32) {
     match dispatch {
-        DispatchSize::Fixed { x, y, z } => (*x, *y, *z),
+        DispatchSize::Fixed { x, y, z, .. } => (*x, *y, *z),
         DispatchSize::DerivedFrom { len, workgroup_size } => {
             let wg_x = (*workgroup_size).max(1);
             match len {

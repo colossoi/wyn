@@ -1993,7 +1993,15 @@ entry compute_main(data: []f32) []f32 = map(|x| x * 2.0, data)
 **`#[dispatch(x[, y[, z]])]`** - On a `#[compute]` entry, declares a fixed
 compute launch grid in workgroup counts. Omitted axes default to `1`. If absent,
 the compiler infers the domain from the entry's SOACs, storage-image output, or
-the default serial shell.
+the default serial shell. An explicit grid always wins over inference — even
+`#[dispatch(1, 1, 1)]`, which pins a single-invocation launch rather than being
+treated as the unspecified default.
+
+If the entry has a data-parallel domain whose size is known at compile time
+(e.g. `map` over `iota(100)`) and the declared grid launches fewer threads than
+that domain has elements, compilation fails — the grid would silently drop the
+tail. For domains whose size is only known at runtime the launch is not
+checked, so a grid that under-covers a runtime-sized `map` drops elements.
 
 ```wyn
 #[compute]
