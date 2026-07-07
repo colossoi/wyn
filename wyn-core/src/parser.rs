@@ -2209,9 +2209,9 @@ impl<'a> Parser<'a> {
                         args.push(left);
                         self.node_counter.mk_node(ExprKind::Application(callee, args), span)
                     }
-                    _ => self
-                        .node_counter
-                        .mk_node(ExprKind::Application(Box::new(right), vec![left]), span),
+                    _ => {
+                        self.node_counter.mk_node(ExprKind::Application(Box::new(right), vec![left]), span)
+                    }
                 }
             } else {
                 // Regular binary operation
