@@ -2322,6 +2322,52 @@ entry r(a: []u32, b: []u32, c: []u32, st: []f32)
     );
 }
 
+/// Same-domain sibling maps should fuse even after defunctionalization has
+/// attached lexical captures to their bodies. The loop bodies exercise the
+/// light/GTAO shape where per-element code runs a local sequential loop while
+/// reading scalars computed outside the lambda.
+#[test]
+fn captured_loop_bodied_sibling_maps_fuse_to_one_stage() {
+    use crate::pipeline_descriptor::Pipeline;
+
+    let lowered = crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry geom(ids: []u32, params: []f32) ([]f32, []f32) =
+  let scale = params[0] in
+  let bias = params[1] in
+  let geom_pos = map(|id: u32|
+    let base = f32.u32(id) * scale in
+    loop acc = base for k < 4 do
+      acc + bias * f32.i32(k)
+    , ids) in
+  let geom_nrm = map(|id: u32|
+    let base = f32.u32(id) + bias in
+    loop acc = base for k < 4 do
+      acc - scale * f32.i32(k)
+    , ids) in
+  (geom_pos, geom_nrm)
+"#,
+    )
+    .expect("captured loop-bodied sibling maps should compile and fuse");
+
+    let compute = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .find_map(|p| match p {
+            Pipeline::Compute(c) => Some(c),
+            _ => None,
+        })
+        .expect("one compute pipeline");
+    assert_eq!(
+        compute.stages.len(),
+        1,
+        "captured same-domain maps should lower as one multi-output stage; stages = {:?}",
+        compute.stages.iter().map(|s| &s.entry_point).collect::<Vec<_>>()
+    );
+}
+
 /// An in-place map that prepares a buffer consumed by a later `scatter` is an
 /// internal producer, not an entry output. It must stay wired into the scatter
 /// pipeline — not reify into an independent output `SegMap` stage — otherwise
@@ -7590,6 +7636,47 @@ fn history_resource_feedback_pair_reaches_descriptor() {
         has_feedback,
         "no pipeline carries the previous-view feedback pair"
     );
+}
+
+/// Resource/view metadata should publish an executable frame graph: storage
+/// texture allocations carry their size, feedback views are marked as
+/// previous-frame reads, and pass lifetimes come from descriptor resources.
+#[test]
+fn resource_dependencies_publish_frame_graph() {
+    use crate::pipeline_descriptor::{
+        FrameAccessRole, FrameHistoryRoleKind, FrameResourceExtent, FrameResourceKind, StorageTextureSize,
+    };
+
+    let lowered = crate::compile_thru_ssa(HISTORY_FEEDBACK_SOURCE).expect("history feedback compiles");
+    let graph = &lowered.pipeline.frame_graph;
+    assert!(!graph.passes.is_empty(), "frame graph has no passes");
+    assert!(!graph.resources.is_empty(), "frame graph has no resources");
+    assert_eq!(graph.feedback.len(), 1, "history pair should reach frame graph");
+
+    let step = graph.passes.iter().find(|pass| pass.name == "step").expect("step pass reaches frame graph");
+    assert!(
+        step.reads.iter().any(|access| access.role == FrameAccessRole::Previous),
+        "previous view should be a previous-frame read: {:?}",
+        step.reads
+    );
+    assert!(!step.writes.is_empty(), "storage image write should be visible");
+
+    let resource_index =
+        graph.feedback[0].write_resource.expect("feedback write should resolve to a frame resource");
+    let resource = &graph.resources[resource_index];
+    assert_eq!(resource.kind, FrameResourceKind::StorageTexture);
+    assert_eq!(resource.first_pass, Some(0));
+    assert_eq!(resource.last_pass, Some(0));
+    assert!(matches!(
+        resource.extent.as_ref(),
+        Some(FrameResourceExtent::StorageTexture { size })
+            if *size == (StorageTextureSize::Fixed {
+                width: 64,
+                height: 64
+            })
+    ));
+    assert!(resource.history.iter().any(|role| role.role == FrameHistoryRoleKind::ReadPrevious));
+    assert!(resource.history.iter().any(|role| role.role == FrameHistoryRoleKind::WriteCurrent));
 }
 
 /// Descriptor bindings must be slot-unique — a duplicated (set, binding)

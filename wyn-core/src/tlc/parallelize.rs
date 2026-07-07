@@ -1032,7 +1032,10 @@ pub fn run(
     }
     Ok(ParallelizationResult {
         program,
-        pipeline: PipelineDescriptor { pipelines },
+        pipeline: PipelineDescriptor {
+            pipelines,
+            frame_graph: Default::default(),
+        },
         input_names,
     })
 }

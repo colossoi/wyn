@@ -2417,7 +2417,7 @@ struct FusibleMapSlot {
     slot_index: usize,
     input: ArrayExpr,
     input_sym: SymbolId,
-    lam: Lambda,
+    lam: super::SoacBody,
     output_ty: Type<TypeName>,
     domain: Type<TypeName>,
 }
@@ -2433,7 +2433,7 @@ fn fusible_map_slot(slot_index: usize, term: &Term) -> Option<FusibleMapSlot> {
     else {
         return None;
     };
-    if *destination != SoacDestination::Fresh || !lam.captures.is_empty() {
+    if *destination != SoacDestination::Fresh {
         return None;
     }
     if inputs.len() != 1 || lam.lam.params.len() != 1 {
@@ -2449,7 +2449,7 @@ fn fusible_map_slot(slot_index: usize, term: &Term) -> Option<FusibleMapSlot> {
         slot_index,
         input: input.clone(),
         input_sym,
-        lam: lam.lam.clone(),
+        lam: lam.clone(),
         output_ty: term.ty.clone(),
         domain,
     })
@@ -2558,10 +2558,7 @@ fn fuse_output_slot_chain(
                 .position(|(sym, _)| *sym == slot.input_sym)
                 .expect("union built from these lanes");
             super::ScremaLane {
-                lam: super::SoacBody {
-                    lam: slot.lam.clone(),
-                    captures: vec![],
-                },
+                lam: slot.lam.clone(),
                 input_indices: vec![pos],
             }
         })

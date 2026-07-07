@@ -9,6 +9,8 @@
 //! Vulkan/WebGPU pipeline accordingly. All algorithm knowledge lives in the
 //! compiler.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde::{Deserialize, Serialize};
 
 /// Top-level pipeline descriptor. One per compiled program.
@@ -16,6 +18,251 @@ use serde::{Deserialize, Serialize};
 pub struct PipelineDescriptor {
     /// Individual pipelines in this program (one per top-level entry or multi-dispatch SOAC).
     pub pipelines: Vec<Pipeline>,
+    /// Descriptor-derived pass/resource DAG. The compiler rebuilds this after
+    /// binding publication so host runtimes can drive scheduling and allocation
+    /// from data dependencies instead of hand-authored pass lists.
+    #[serde(default, skip_serializing_if = "FrameGraph::is_empty")]
+    pub frame_graph: FrameGraph,
+}
+
+impl PipelineDescriptor {
+    /// Rebuild the frame graph from the currently published pipelines.
+    pub fn rebuild_frame_graph(&mut self) {
+        self.frame_graph = FrameGraph::from_pipelines(&self.pipelines);
+    }
+}
+
+/// A descriptor-level frame graph: passes, logical resources, and the
+/// dependencies induced by same-frame reads/writes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FrameGraph {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub passes: Vec<FramePass>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resources: Vec<FrameResource>,
+    /// Ping-pong/history pairs resolved to logical frame-graph resources.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub feedback: Vec<FrameFeedback>,
+    /// Reserved for future indirect draw command buffers. Keeping this in the
+    /// schema lets runtimes consume the descriptor as the scheduling contract.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub indirect_draws: Vec<IndirectDrawDependency>,
+}
+
+impl FrameGraph {
+    pub fn is_empty(&self) -> bool {
+        self.passes.is_empty()
+            && self.resources.is_empty()
+            && self.feedback.is_empty()
+            && self.indirect_draws.is_empty()
+    }
+
+    pub fn from_pipelines(pipelines: &[Pipeline]) -> Self {
+        let mut builder = FrameGraphBuilder::default();
+
+        for (pipeline_index, pipeline) in pipelines.iter().enumerate() {
+            for (binding_index, binding) in pipeline_bindings(pipeline).iter().enumerate() {
+                builder.ensure_binding(pipeline_index, binding_index, binding);
+            }
+        }
+
+        for (pipeline_index, pipeline) in pipelines.iter().enumerate() {
+            match pipeline {
+                Pipeline::Compute(compute) => {
+                    builder.publish_feedback(pipeline_index, &compute.bindings, &compute.feedback);
+                }
+                Pipeline::Graphics(graphics) => {
+                    builder.publish_feedback(pipeline_index, &graphics.bindings, &graphics.feedback);
+                }
+            }
+        }
+
+        let mut last_writer = vec![None; builder.graph.resources.len()];
+        let mut last_readers = vec![BTreeSet::new(); builder.graph.resources.len()];
+        for (pipeline_index, pipeline) in pipelines.iter().enumerate() {
+            match pipeline {
+                Pipeline::Compute(compute) => {
+                    let feedback_reads = feedback_read_slots(&compute.feedback);
+                    for (stage_index, stage) in compute.stages.iter().enumerate() {
+                        let (reads, writes) =
+                            builder.compute_stage_accesses(pipeline_index, compute, stage, &feedback_reads);
+                        builder.push_pass(
+                            FramePassKind::Compute,
+                            stage.entry_point.clone(),
+                            pipeline_index,
+                            stage_index,
+                            reads,
+                            writes,
+                            &mut last_writer,
+                            &mut last_readers,
+                        );
+                    }
+                }
+                Pipeline::Graphics(graphics) => {
+                    let feedback_reads = feedback_read_slots(&graphics.feedback);
+                    for (stage_index, stage) in graphics.stages.iter().enumerate() {
+                        let (reads, writes) = builder.binding_table_accesses(
+                            pipeline_index,
+                            &graphics.bindings,
+                            None,
+                            None,
+                            &feedback_reads,
+                        );
+                        builder.push_pass(
+                            FramePassKind::from_shader_stage(&stage.stage),
+                            stage.entry_point.clone(),
+                            pipeline_index,
+                            stage_index,
+                            reads,
+                            writes,
+                            &mut last_writer,
+                            &mut last_readers,
+                        );
+                    }
+                }
+            }
+        }
+
+        builder.graph
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FramePass {
+    pub name: String,
+    pub kind: FramePassKind,
+    pub pipeline_index: usize,
+    pub stage_index: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reads: Vec<FrameAccess>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writes: Vec<FrameAccess>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FramePassKind {
+    Compute,
+    Vertex,
+    Fragment,
+}
+
+impl FramePassKind {
+    fn from_shader_stage(stage: &ShaderStage) -> Self {
+        match stage {
+            ShaderStage::Vertex => FramePassKind::Vertex,
+            ShaderStage::Fragment => FramePassKind::Fragment,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrameAccess {
+    pub resource: usize,
+    #[serde(default, skip_serializing_if = "FrameAccessRole::is_current")]
+    pub role: FrameAccessRole,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FrameAccessRole {
+    #[default]
+    Current,
+    Previous,
+}
+
+impl FrameAccessRole {
+    fn is_current(&self) -> bool {
+        matches!(self, FrameAccessRole::Current)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FrameResource {
+    pub name: String,
+    pub kind: FrameResourceKind,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bindings: Vec<FrameBindingRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extent: Option<FrameResourceExtent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_pass: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_pass: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<FrameHistoryRole>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FrameResourceKind {
+    StorageBuffer,
+    Uniform,
+    PushConstant,
+    Texture,
+    Sampler,
+    StorageTexture,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FrameBindingRef {
+    pub pipeline_index: usize,
+    pub binding_index: usize,
+    pub name: String,
+    pub kind: FrameResourceKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FrameResourceExtent {
+    StorageTexture {
+        size: StorageTextureSize,
+    },
+    StorageBuffer {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        length: Option<BufferLen>,
+    },
+    Uniform {
+        bytes: u32,
+    },
+    PushConstant {
+        bytes: u32,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct FrameHistoryRole {
+    pub feedback: usize,
+    pub role: FrameHistoryRoleKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FrameHistoryRoleKind {
+    ReadPrevious,
+    WriteCurrent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FrameFeedback {
+    pub pipeline_index: usize,
+    pub pair: FeedbackPair,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_resource: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_resource: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct IndirectDrawDependency {
+    pub draw_pass: usize,
+    pub buffer_resource: usize,
 }
 
 /// A single pipeline within the program.
@@ -324,6 +571,416 @@ impl Binding {
                 ..
             }
         )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ResourceKey {
+    Descriptor {
+        kind: FrameResourceKind,
+        set: u32,
+        binding: u32,
+    },
+    PushConstant {
+        pipeline_index: usize,
+        offset: u32,
+        size: u32,
+    },
+}
+
+#[derive(Default)]
+struct FrameGraphBuilder {
+    graph: FrameGraph,
+    resources: BTreeMap<ResourceKey, usize>,
+}
+
+impl FrameGraphBuilder {
+    fn ensure_binding(&mut self, pipeline_index: usize, binding_index: usize, binding: &Binding) -> usize {
+        let key = resource_key(pipeline_index, binding);
+        let index = if let Some(&index) = self.resources.get(&key) {
+            index
+        } else {
+            let index = self.graph.resources.len();
+            self.resources.insert(key, index);
+            self.graph.resources.push(FrameResource {
+                name: binding_name(binding).to_string(),
+                kind: resource_kind_from_key(key),
+                bindings: Vec::new(),
+                extent: binding_extent(binding),
+                first_pass: None,
+                last_pass: None,
+                history: Vec::new(),
+            });
+            index
+        };
+
+        let resource = &mut self.graph.resources[index];
+        merge_extent(&mut resource.extent, binding_extent(binding));
+        if matches!(binding, Binding::StorageTexture { .. }) {
+            resource.name = binding_name(binding).to_string();
+        }
+
+        let binding_ref = FrameBindingRef {
+            pipeline_index,
+            binding_index,
+            name: binding_name(binding).to_string(),
+            kind: binding_kind(binding),
+            set: binding_slot(binding).map(|(set, _)| set),
+            binding: binding_slot(binding).map(|(_, binding)| binding),
+        };
+        if !resource.bindings.iter().any(|existing| {
+            existing.pipeline_index == pipeline_index && existing.binding_index == binding_index
+        }) {
+            resource.bindings.push(binding_ref);
+        }
+        index
+    }
+
+    fn publish_feedback(&mut self, pipeline_index: usize, bindings: &[Binding], pairs: &[FeedbackPair]) {
+        for pair in pairs {
+            let read_resource =
+                self.resource_for_slot(pipeline_index, bindings, pair.read_set, pair.read_binding);
+            let write_resource =
+                self.resource_for_slot(pipeline_index, bindings, pair.write_set, pair.write_binding);
+            let feedback_index = self.graph.feedback.len();
+            if let Some(resource) = read_resource {
+                self.push_history_role(
+                    resource,
+                    FrameHistoryRole {
+                        feedback: feedback_index,
+                        role: FrameHistoryRoleKind::ReadPrevious,
+                    },
+                );
+            }
+            if let Some(resource) = write_resource {
+                self.push_history_role(
+                    resource,
+                    FrameHistoryRole {
+                        feedback: feedback_index,
+                        role: FrameHistoryRoleKind::WriteCurrent,
+                    },
+                );
+            }
+            self.graph.feedback.push(FrameFeedback {
+                pipeline_index,
+                pair: *pair,
+                read_resource,
+                write_resource,
+            });
+        }
+    }
+
+    fn push_history_role(&mut self, resource: usize, role: FrameHistoryRole) {
+        let roles = &mut self.graph.resources[resource].history;
+        if !roles.iter().any(|existing| existing.feedback == role.feedback && existing.role == role.role) {
+            roles.push(role);
+        }
+    }
+
+    fn resource_for_slot(
+        &mut self,
+        pipeline_index: usize,
+        bindings: &[Binding],
+        set: u32,
+        binding: u32,
+    ) -> Option<usize> {
+        bindings
+            .iter()
+            .enumerate()
+            .find(|(_, candidate)| binding_slot(candidate) == Some((set, binding)))
+            .map(|(binding_index, candidate)| self.ensure_binding(pipeline_index, binding_index, candidate))
+    }
+
+    fn compute_stage_accesses(
+        &mut self,
+        pipeline_index: usize,
+        compute: &ComputePipeline,
+        stage: &ComputeStage,
+        feedback_reads: &BTreeSet<(u32, u32)>,
+    ) -> (Vec<FrameAccess>, Vec<FrameAccess>) {
+        let explicit_reads = (!stage.reads.is_empty()).then_some(stage.reads.as_slice());
+        let explicit_writes = (!stage.writes.is_empty()).then_some(stage.writes.as_slice());
+        self.binding_table_accesses(
+            pipeline_index,
+            &compute.bindings,
+            explicit_reads,
+            explicit_writes,
+            feedback_reads,
+        )
+    }
+
+    fn binding_table_accesses(
+        &mut self,
+        pipeline_index: usize,
+        bindings: &[Binding],
+        explicit_reads: Option<&[usize]>,
+        explicit_writes: Option<&[usize]>,
+        feedback_reads: &BTreeSet<(u32, u32)>,
+    ) -> (Vec<FrameAccess>, Vec<FrameAccess>) {
+        let explicit = explicit_reads.is_some() || explicit_writes.is_some();
+        let mut reads = Vec::new();
+        let mut writes = Vec::new();
+
+        if explicit {
+            for index in explicit_reads.into_iter().flatten().copied() {
+                if let Some(binding) = bindings.get(index) {
+                    self.push_read(&mut reads, pipeline_index, index, binding, feedback_reads);
+                }
+            }
+            for index in explicit_writes.into_iter().flatten().copied() {
+                if let Some(binding) = bindings.get(index) {
+                    self.push_write(&mut writes, pipeline_index, index, binding);
+                }
+            }
+        }
+
+        for (index, binding) in bindings.iter().enumerate() {
+            if explicit && matches!(binding, Binding::StorageBuffer { .. }) {
+                continue;
+            }
+            let (read, write) = binding_declared_access(binding);
+            if read {
+                self.push_read(&mut reads, pipeline_index, index, binding, feedback_reads);
+            }
+            if write {
+                self.push_write(&mut writes, pipeline_index, index, binding);
+            }
+        }
+
+        (reads, writes)
+    }
+
+    fn push_read(
+        &mut self,
+        reads: &mut Vec<FrameAccess>,
+        pipeline_index: usize,
+        binding_index: usize,
+        binding: &Binding,
+        feedback_reads: &BTreeSet<(u32, u32)>,
+    ) {
+        let resource = self.ensure_binding(pipeline_index, binding_index, binding);
+        let role = if binding_slot(binding).is_some_and(|slot| feedback_reads.contains(&slot)) {
+            FrameAccessRole::Previous
+        } else {
+            FrameAccessRole::Current
+        };
+        push_unique_access(reads, FrameAccess { resource, role });
+    }
+
+    fn push_write(
+        &mut self,
+        writes: &mut Vec<FrameAccess>,
+        pipeline_index: usize,
+        binding_index: usize,
+        binding: &Binding,
+    ) {
+        let resource = self.ensure_binding(pipeline_index, binding_index, binding);
+        push_unique_access(
+            writes,
+            FrameAccess {
+                resource,
+                role: FrameAccessRole::Current,
+            },
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn push_pass(
+        &mut self,
+        kind: FramePassKind,
+        name: String,
+        pipeline_index: usize,
+        stage_index: usize,
+        reads: Vec<FrameAccess>,
+        writes: Vec<FrameAccess>,
+        last_writer: &mut Vec<Option<usize>>,
+        last_readers: &mut Vec<BTreeSet<usize>>,
+    ) {
+        let needed = self.graph.resources.len();
+        if last_writer.len() < needed {
+            last_writer.resize(needed, None);
+            last_readers.resize_with(needed, BTreeSet::new);
+        }
+
+        let mut depends_on = BTreeSet::new();
+        for access in &reads {
+            if access.role == FrameAccessRole::Current {
+                if let Some(writer) = last_writer[access.resource] {
+                    depends_on.insert(writer);
+                }
+            }
+        }
+        for access in &writes {
+            if let Some(writer) = last_writer[access.resource] {
+                depends_on.insert(writer);
+            }
+            depends_on.extend(last_readers[access.resource].iter().copied());
+        }
+
+        let pass_index = self.graph.passes.len();
+        for access in reads.iter().chain(writes.iter()) {
+            let resource = &mut self.graph.resources[access.resource];
+            resource.first_pass.get_or_insert(pass_index);
+            resource.last_pass = Some(pass_index);
+        }
+
+        for access in &writes {
+            last_writer[access.resource] = Some(pass_index);
+            last_readers[access.resource].clear();
+        }
+        for access in &reads {
+            if access.role == FrameAccessRole::Current
+                && !writes.iter().any(|write| write.resource == access.resource)
+            {
+                last_readers[access.resource].insert(pass_index);
+            }
+        }
+
+        self.graph.passes.push(FramePass {
+            name,
+            kind,
+            pipeline_index,
+            stage_index,
+            reads,
+            writes,
+            depends_on: depends_on.into_iter().collect(),
+        });
+    }
+}
+
+fn pipeline_bindings(pipeline: &Pipeline) -> &[Binding] {
+    match pipeline {
+        Pipeline::Compute(compute) => &compute.bindings,
+        Pipeline::Graphics(graphics) => &graphics.bindings,
+    }
+}
+
+fn resource_key(pipeline_index: usize, binding: &Binding) -> ResourceKey {
+    match binding {
+        Binding::StorageBuffer { set, binding, .. } => ResourceKey::Descriptor {
+            kind: FrameResourceKind::StorageBuffer,
+            set: *set,
+            binding: *binding,
+        },
+        Binding::Uniform { set, binding, .. } => ResourceKey::Descriptor {
+            kind: FrameResourceKind::Uniform,
+            set: *set,
+            binding: *binding,
+        },
+        Binding::PushConstant { offset, size, .. } => ResourceKey::PushConstant {
+            pipeline_index,
+            offset: *offset,
+            size: *size,
+        },
+        Binding::Texture {
+            set,
+            binding,
+            backing,
+            ..
+        } => {
+            let (kind, set, binding) = if let Some(backing) = backing {
+                (FrameResourceKind::StorageTexture, backing.set, backing.binding)
+            } else {
+                (FrameResourceKind::Texture, *set, *binding)
+            };
+            ResourceKey::Descriptor { kind, set, binding }
+        }
+        Binding::Sampler { set, binding, .. } => ResourceKey::Descriptor {
+            kind: FrameResourceKind::Sampler,
+            set: *set,
+            binding: *binding,
+        },
+        Binding::StorageTexture { set, binding, .. } => ResourceKey::Descriptor {
+            kind: FrameResourceKind::StorageTexture,
+            set: *set,
+            binding: *binding,
+        },
+    }
+}
+
+fn resource_kind_from_key(key: ResourceKey) -> FrameResourceKind {
+    match key {
+        ResourceKey::Descriptor { kind, .. } => kind,
+        ResourceKey::PushConstant { .. } => FrameResourceKind::PushConstant,
+    }
+}
+
+fn binding_kind(binding: &Binding) -> FrameResourceKind {
+    match binding {
+        Binding::StorageBuffer { .. } => FrameResourceKind::StorageBuffer,
+        Binding::Uniform { .. } => FrameResourceKind::Uniform,
+        Binding::PushConstant { .. } => FrameResourceKind::PushConstant,
+        Binding::Texture { .. } => FrameResourceKind::Texture,
+        Binding::Sampler { .. } => FrameResourceKind::Sampler,
+        Binding::StorageTexture { .. } => FrameResourceKind::StorageTexture,
+    }
+}
+
+fn binding_name(binding: &Binding) -> &str {
+    match binding {
+        Binding::StorageBuffer { name, .. }
+        | Binding::Uniform { name, .. }
+        | Binding::PushConstant { name, .. }
+        | Binding::Texture { name, .. }
+        | Binding::Sampler { name, .. }
+        | Binding::StorageTexture { name, .. } => name,
+    }
+}
+
+fn binding_slot(binding: &Binding) -> Option<(u32, u32)> {
+    match binding {
+        Binding::StorageBuffer { set, binding, .. }
+        | Binding::Uniform { set, binding, .. }
+        | Binding::Texture { set, binding, .. }
+        | Binding::Sampler { set, binding, .. }
+        | Binding::StorageTexture { set, binding, .. } => Some((*set, *binding)),
+        Binding::PushConstant { .. } => None,
+    }
+}
+
+fn binding_extent(binding: &Binding) -> Option<FrameResourceExtent> {
+    match binding {
+        Binding::StorageBuffer { length, .. } => Some(FrameResourceExtent::StorageBuffer {
+            length: length.clone(),
+        }),
+        Binding::Uniform { size, .. } => Some(FrameResourceExtent::Uniform { bytes: *size }),
+        Binding::PushConstant { size, .. } => Some(FrameResourceExtent::PushConstant { bytes: *size }),
+        Binding::StorageTexture { size, .. } => Some(FrameResourceExtent::StorageTexture { size: *size }),
+        Binding::Texture { .. } | Binding::Sampler { .. } => None,
+    }
+}
+
+fn merge_extent(target: &mut Option<FrameResourceExtent>, candidate: Option<FrameResourceExtent>) {
+    match candidate {
+        Some(FrameResourceExtent::StorageTexture { size }) => {
+            *target = Some(FrameResourceExtent::StorageTexture { size });
+        }
+        Some(extent) if target.is_none() => *target = Some(extent),
+        _ => {}
+    }
+}
+
+fn binding_declared_access(binding: &Binding) -> (bool, bool) {
+    match binding {
+        Binding::StorageBuffer { access, .. } | Binding::StorageTexture { access, .. } => match access {
+            Access::ReadOnly => (true, false),
+            Access::WriteOnly => (false, true),
+            Access::ReadWrite => (true, true),
+        },
+        Binding::Uniform { .. }
+        | Binding::PushConstant { .. }
+        | Binding::Texture { .. }
+        | Binding::Sampler { .. } => (true, false),
+    }
+}
+
+fn feedback_read_slots(feedback: &[FeedbackPair]) -> BTreeSet<(u32, u32)> {
+    feedback.iter().map(|pair| (pair.read_set, pair.read_binding)).collect()
+}
+
+fn push_unique_access(accesses: &mut Vec<FrameAccess>, access: FrameAccess) {
+    if !accesses.contains(&access) {
+        accesses.push(access);
     }
 }
 
@@ -646,6 +1303,137 @@ mod tests {
         };
         assert_eq!(size, 0);
         assert!(members.is_empty());
+    }
+
+    #[test]
+    fn frame_graph_aliases_storage_texture_views_and_orders_consumers() {
+        let mut descriptor = PipelineDescriptor {
+            pipelines: vec![
+                Pipeline::Compute(ComputePipeline {
+                    bindings: vec![Binding::StorageTexture {
+                        set: 1,
+                        binding: 0,
+                        name: "out_color".to_string(),
+                        format: StorageImageFormat::Rgba32Float,
+                        access: Access::WriteOnly,
+                        size: StorageTextureSize::Fixed {
+                            width: 64,
+                            height: 32,
+                        },
+                    }],
+                    stages: vec![ComputeStage {
+                        entry_point: "paint".to_string(),
+                        workgroup_size: (8, 8, 1),
+                        dispatch_size: DispatchSize::DerivedFrom {
+                            len: DispatchLen::StorageImage { set: 1, binding: 0 },
+                            workgroup_size: 8,
+                        },
+                        reads: vec![],
+                        writes: vec![],
+                    }],
+                    default_total_threads: None,
+                    feedback: vec![],
+                }),
+                Pipeline::Graphics(GraphicsPipeline {
+                    stages: vec![GraphicsStage {
+                        entry_point: "shade".to_string(),
+                        stage: ShaderStage::Fragment,
+                    }],
+                    bindings: vec![Binding::Texture {
+                        set: 2,
+                        binding: 0,
+                        name: "color_tex".to_string(),
+                        sample_type: TextureSampleType::Float { filterable: true },
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: false,
+                        backing: Some(BackingRef { set: 1, binding: 0 }),
+                    }],
+                    vertex_inputs: vec![],
+                    fragment_outputs: vec![],
+                    feedback: vec![],
+                }),
+            ],
+            frame_graph: FrameGraph::default(),
+        };
+
+        descriptor.rebuild_frame_graph();
+        let graph = &descriptor.frame_graph;
+        assert_eq!(graph.resources.len(), 1);
+        assert_eq!(graph.resources[0].kind, FrameResourceKind::StorageTexture);
+        assert_eq!(graph.resources[0].first_pass, Some(0));
+        assert_eq!(graph.resources[0].last_pass, Some(1));
+        assert!(matches!(
+            graph.resources[0].extent.as_ref(),
+            Some(FrameResourceExtent::StorageTexture { size })
+                if *size == (StorageTextureSize::Fixed {
+                    width: 64,
+                    height: 32
+                })
+        ));
+        assert_eq!(graph.passes.len(), 2);
+        assert_eq!(graph.passes[1].depends_on, vec![0]);
+    }
+
+    #[test]
+    fn frame_graph_marks_history_reads_without_self_dependency() {
+        let mut descriptor = PipelineDescriptor {
+            pipelines: vec![Pipeline::Compute(ComputePipeline {
+                bindings: vec![
+                    Binding::StorageTexture {
+                        set: 1,
+                        binding: 0,
+                        name: "out_acc".to_string(),
+                        format: StorageImageFormat::Rgba16Float,
+                        access: Access::WriteOnly,
+                        size: StorageTextureSize::SameAsWindow,
+                    },
+                    Binding::Texture {
+                        set: 1,
+                        binding: 1,
+                        name: "prev_acc".to_string(),
+                        sample_type: TextureSampleType::Float { filterable: true },
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: false,
+                        backing: Some(BackingRef { set: 1, binding: 0 }),
+                    },
+                ],
+                stages: vec![ComputeStage {
+                    entry_point: "step".to_string(),
+                    workgroup_size: (8, 8, 1),
+                    dispatch_size: DispatchSize::DerivedFrom {
+                        len: DispatchLen::StorageImage { set: 1, binding: 0 },
+                        workgroup_size: 8,
+                    },
+                    reads: vec![],
+                    writes: vec![],
+                }],
+                default_total_threads: None,
+                feedback: vec![FeedbackPair {
+                    read_set: 1,
+                    read_binding: 1,
+                    write_set: 1,
+                    write_binding: 0,
+                }],
+            })],
+            frame_graph: FrameGraph::default(),
+        };
+
+        descriptor.rebuild_frame_graph();
+        let graph = &descriptor.frame_graph;
+        assert_eq!(graph.resources.len(), 1);
+        assert_eq!(graph.feedback.len(), 1);
+        assert_eq!(graph.feedback[0].read_resource, Some(0));
+        assert_eq!(graph.feedback[0].write_resource, Some(0));
+        assert!(graph.resources[0]
+            .history
+            .iter()
+            .any(|role| role.role == FrameHistoryRoleKind::ReadPrevious));
+        assert!(graph.resources[0]
+            .history
+            .iter()
+            .any(|role| role.role == FrameHistoryRoleKind::WriteCurrent));
+        assert_eq!(graph.passes[0].depends_on, Vec::<usize>::new());
+        assert!(graph.passes[0].reads.iter().any(|access| access.role == FrameAccessRole::Previous));
     }
 
     #[test]

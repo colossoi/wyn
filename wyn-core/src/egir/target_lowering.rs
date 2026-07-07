@@ -48,6 +48,7 @@ pub fn schedule(
     descriptor.publish_graphics_io(&inner.entry_points);
     inner.kernel_schedule.publish(&mut descriptor).map_err(ConvertError::Internal)?;
     descriptor.relabel_input_storage_names(&inner.input_names);
+    descriptor.rebuild_frame_graph();
     inner.pipeline = descriptor;
     Ok(())
 }
