@@ -38,6 +38,7 @@ use super::program::{EgirEntry, EgirInner};
 use super::types::{NodeId, SkeletonTerminator};
 
 pub mod dispatch;
+pub mod reconcile;
 pub mod verify;
 
 /// Realize every entry's outputs into side-effect stores. After this
@@ -46,6 +47,10 @@ pub fn run(inner: &mut EgirInner) -> Result<(), ConvertError> {
     for entry in inner.entry_points.iter_mut() {
         realize_entry(entry)?;
     }
+    // Output retargeting can rewrite a captured `map` result from a Composite
+    // array to a storage view; sync each capturing region's parameter type so
+    // the region body lowers consistently.
+    reconcile::run(inner)?;
     if cfg!(debug_assertions) {
         verify::check(inner)?;
     }

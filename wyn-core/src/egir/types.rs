@@ -476,7 +476,7 @@ impl EgirSoac {
     /// Every `SegBody` this SOAC carries, in a stable order: map lanes first,
     /// then each accumulator's step and combine. Captures and the callee region
     /// live here, never inline in `SideEffect::operand_nodes`.
-    fn seg_bodies(&self) -> Vec<&SegBody> {
+    pub(crate) fn seg_bodies(&self) -> Vec<&SegBody> {
         match self {
             EgirSoac::Screma {
                 map_bodies,
