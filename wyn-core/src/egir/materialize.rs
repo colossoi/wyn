@@ -14,10 +14,21 @@
 //!
 //! Two `Index` nodes with the same array share a single `Materialize` node
 //! via hash-consing, so we don't need a separate dedup step either.
+//!
+//! Storage-view arrays are exempt: they are memory-backed already, so
+//! `lower_index` reads them with a dynamic `OpAccessChain` into the backing
+//! buffer (`lower_view_index`). Spilling a view to a Function-local composite
+//! and `DynamicExtract`ing it would both be wrong (a runtime-sized view has no
+//! in-register form) and invalid SPIR-V (a dynamic index into that spilled
+//! struct). Only in-register composites need the rewrite.
 
 use smallvec::smallvec;
 
+use polytype::Type;
+
+use crate::ast::TypeName;
 use crate::ssa::types::ConstantValue;
+use crate::types::TypeExt;
 
 use super::program::EgirInner;
 use super::types::{EGraph, ENode, NodeId, PureOp};
@@ -46,7 +57,7 @@ fn run_one_body(graph: &mut EGraph) {
             } if operands.len() == 2 => {
                 let arr = operands[0];
                 let idx = operands[1];
-                if is_const_int(graph, idx) {
+                if is_const_int(graph, idx) || is_view(graph, arr) {
                     None
                 } else {
                     Some((nid, arr, idx))
@@ -71,6 +82,17 @@ fn run_one_body(graph: &mut EGraph) {
             operands: smallvec![mat_nid, idx_nid],
         };
     }
+}
+
+/// Is `nid`'s array type a storage view? `lower_index` reads a view with a
+/// native dynamic `OpAccessChain`, so it must not be spilled to a composite.
+fn is_view(graph: &EGraph, nid: NodeId) -> bool {
+    graph.types.get(&nid).is_some_and(|ty| {
+        matches!(
+            ty.array_variant(),
+            Some(Type::Constructed(TypeName::ArrayVariantView, _))
+        )
+    })
 }
 
 /// Is this NodeId a compile-time integer constant? Includes both the inline

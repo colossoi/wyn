@@ -8523,6 +8523,38 @@ entry frame(occ_dom: []u32, sett_dom: []u32) []u32 =
     .expect("consuming a map output internally (not returned) should compile");
 }
 
+/// pr7_3e: a `map` output carried in a RECORD FIELD (`w.points`), then both
+/// read by a downstream map (through the whole-record capture) AND returned.
+/// Output realization retargets the producer `p` to the output view and the
+/// record is built holding that view (`tuple(view)`), but the drift is not
+/// propagated: the capturing lambda's parameter keeps its stale
+/// `Record([Composite])` type, and its internal `w.points` projection lowers a
+/// runtime-sized Composite array — panicking at `types_lowering.rs:139`.
+/// Byte-identical dataflow with plain arrays (pr7_3c) already compiles; the
+/// record indirection is the whole delta. Central to the PR9 `world` value.
+#[test]
+fn map_output_in_record_field_fed_and_returned_compiles() {
+    crate::compile_thru_spirv(
+        r#"
+open f32
+
+type world = { points: []vec2f32 }
+
+def build_geom(w: world, tdom: []u32) []vec4f32 =
+  map(|i| let j = i32(i) in @[w.points[j % 8].x, 0.0, w.points[j % 8].y, 1.0], tdom)
+
+#[compute]
+entry step(pdom: []u32, tdom: []u32, points_in: []vec2f32)
+  ([]vec2f32, []vec4f32) =
+  let p = map(|i| let j = i32(i) in points_in[j] + @[1.0, 0.0], pdom)
+  let w = { points = p }
+  let geom = build_geom(w, tdom) in
+  (w.points, geom)
+"#,
+    )
+    .expect("a map output in a record field, both fed and returned, should compile");
+}
+
 #[test]
 fn clear_then_scatter_on_consuming_write_storage_compiles() {
     crate::compile_thru_spirv(
