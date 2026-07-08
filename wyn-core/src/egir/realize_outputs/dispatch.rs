@@ -13,6 +13,7 @@
 //!     surfaces here it's a contract violation upstream.
 
 use crate::LookupMap;
+use crate::LookupSet;
 use polytype::Type;
 use smallvec::smallvec;
 
@@ -24,8 +25,42 @@ use crate::BindingRef;
 use super::super::from_tlc::ConvertError;
 use super::super::graph_ops;
 use super::super::types::{
-    EGraph, ENode, EgirSoac, NodeId, PureOp, SideEffectIndex, SideEffectKind, SoacDestination,
+    EGraph, ENode, EgirSoac, NodeId, PureOp, SideEffectIndex, SideEffectKind, SkeletonTerminator,
+    SoacDestination,
 };
+
+/// The set of Pure nodes reachable from an entry's live outputs — the operand
+/// of every `Return(Some(_))` terminator and the value operands of every
+/// non-SOAC side effect (stores), followed transitively through Pure operands.
+/// Mirrors the reachability the post-realization verifier walks
+/// (`realize_outputs::verify`). Nodes outside this set are dead: they have no
+/// runtime effect, so consuming `source` there must not fail a slot.
+fn reachable_from_outputs(graph: &EGraph) -> LookupSet<NodeId> {
+    let mut work: Vec<NodeId> = Vec::new();
+    for (_, block) in &graph.skeleton.blocks {
+        if let SkeletonTerminator::Return(Some(r)) = block.term {
+            work.push(r);
+        }
+        for se in &block.side_effects {
+            // A SOAC's array operands are inputs, not output writes — excluded,
+            // matching the verifier. Store operands carry written values.
+            match &se.kind {
+                SideEffectKind::Soac(_) => continue,
+                _ => work.extend(se.operand_nodes.iter().copied()),
+            }
+        }
+    }
+    let mut seen: LookupSet<NodeId> = LookupSet::new();
+    while let Some(nid) = work.pop() {
+        if !seen.insert(nid) {
+            continue;
+        }
+        if let ENode::Pure { operands, .. } = &graph.nodes[nid] {
+            work.extend(operands.iter().copied());
+        }
+    }
+    seen
+}
 
 #[cfg(test)]
 #[path = "dispatch_tests.rs"]
@@ -512,11 +547,18 @@ pub(crate) fn rewrite_sibling_index_consumers(
         }
     }
 
+    // Only *live* consumers matter. A `source` retargeted to an output view
+    // can still be an operand of a dead aggregate node — e.g. returning
+    // `(w.points, w.items)` from a helper's `{ points = map, items = map }`
+    // record leaves the record `Tuple` orphaned once its projections fold to
+    // the maps. Such a node has no runtime effect, so its reference to `source`
+    // must not fail the slot.
+    let live = reachable_from_outputs(graph);
     let consumers: Vec<NodeId> = graph
         .nodes
         .iter()
         .filter_map(|(nid, node)| match node {
-            ENode::Pure { operands, .. } if operands.contains(&source) => Some(nid),
+            ENode::Pure { operands, .. } if operands.contains(&source) && live.contains(&nid) => Some(nid),
             _ => None,
         })
         .collect();

@@ -8432,6 +8432,97 @@ entry e(#[storage(set=2, binding=1, access=write)] o: *[]point) () =
     .expect("compute scatter into *[]record should lower");
 }
 
+/// A record-of-runtime-arrays alias (`world`) passed as a function PARAM.
+/// The array fields' variant/region slots must be region-polymorphic across
+/// the call boundary (the alias body's placeholders freshen per use), so
+/// `world` unifies with a `{ points = view, items = view }` argument.
+/// (PR7 repro pr7_2a.)
+#[test]
+fn record_of_arrays_param_across_boundary_compiles() {
+    crate::compile_thru_spirv(
+        r#"
+open f32
+type world = { points: []vec2f32, items: []vec4f32 }
+
+def use_world(w: world, dom: []u32) ([]vec2f32, []vec4f32) =
+  let p = map(|i| let j = i32(i) in w.points[j] + @[1.0, 1.0], dom)
+  let it = map(|i| let j = i32(i) in w.items[j] * @[2.0, 2.0, 2.0, 2.0], dom) in
+  (p, it)
+
+#[compute]
+entry step(dom: []u32, points_in: []vec2f32, items_in: []vec4f32)
+  ([]vec2f32, []vec4f32) =
+  use_world({ points = points_in, items = items_in }, dom)
+"#,
+    )
+    .expect("record-of-arrays as a function param should compile");
+}
+
+/// Construct a record-of-runtime-arrays from `map` outputs and RETURN it.
+/// The declared `world` return must unify with the body's concrete
+/// `composite`/`no_region` map-result arrays. (PR7 repro pr7_2b.)
+#[test]
+fn record_of_arrays_construct_and_return_compiles() {
+    crate::compile_thru_spirv(
+        r#"
+open f32
+type world = { points: []vec2f32, items: []vec4f32 }
+
+def make_world(dom: []u32) world =
+  let p = map(|i| @[f32(i), f32(i)], dom)
+  let it = map(|i| @[f32(i), 0.0, 0.0, 1.0], dom) in
+  { points = p, items = it }
+
+#[compute]
+entry step(dom: []u32) ([]vec2f32, []vec4f32) =
+  let w = make_world(dom) in
+  (w.points, w.items)
+"#,
+    )
+    .expect("constructing and returning a record-of-arrays should compile");
+}
+
+/// A `map` output (`occ`) that is BOTH fed to another map (`occ[j%4]`) AND
+/// returned. `occ` must be materialized to storage rather than left an
+/// in-register runtime-sized Composite array. Currently panics in SPIR-V
+/// lowering ("Composite variant unsized arrays not supported"); goes green
+/// when the `lift_gathers` output-position materialization lands. (PR7 repro
+/// pr7_3c — the #2 showstopper.)
+#[test]
+fn map_output_fed_and_returned_compiles() {
+    crate::compile_thru_spirv(
+        r#"
+#[compute]
+entry frame(occ_dom: []u32, sett_dom: []u32) ([]u32, []u32) =
+  let occ = map(|i| i + 7u32, occ_dom)
+  let setts = map(|i| let j = i32(i) in i + occ[j % 4], sett_dom) in
+  (occ, setts)
+"#,
+    )
+    .expect("a map output both consumed and returned should compile");
+}
+
+/// Control for pr7_3c: the same producer→consumer dataflow, but only the
+/// dependent array (`setts`) is returned — `occ` is consumed solely via
+/// dynamic index, so `lift_gathers` materializes it and this compiles today.
+/// Bounds the pr7_3c trigger to the returned-AND-fed shape. (PR7 repro pr7_3b.)
+#[test]
+fn map_output_fed_but_only_dependent_returned_compiles() {
+    crate::compile_thru_spirv(
+        r#"
+def build(occ_dom: []u32, sett_dom: []u32) []u32 =
+  let occ = map(|i| i + 7u32, occ_dom)
+  let setts = map(|i| let j = i32(i) in i + occ[j % 4], sett_dom) in
+  setts
+
+#[compute]
+entry frame(occ_dom: []u32, sett_dom: []u32) []u32 =
+  build(occ_dom, sett_dom)
+"#,
+    )
+    .expect("consuming a map output internally (not returned) should compile");
+}
+
 #[test]
 fn clear_then_scatter_on_consuming_write_storage_compiles() {
     crate::compile_thru_spirv(

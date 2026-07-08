@@ -1146,6 +1146,55 @@ impl<'a> TypeChecker<'a> {
         self.resolve_type_aliases_scoped(ty, module)
     }
 
+    /// Expand aliases in an annotation *and* instantiate it: replace the
+    /// parser's residual `AddressPlaceholder` / `SizePlaceholder` sentinels
+    /// (array variant / region / size slots) with fresh type variables, so the
+    /// annotation is variant/region/size-polymorphic at this use site.
+    ///
+    /// `resolve_placeholders` already does this for inline `def`/`entry`
+    /// annotations, but it skips `type`-alias bodies, so an alias field like
+    /// `points: []vec2f32` keeps rigid `AddressPlaceholder`s that can't unify
+    /// with a concrete `view` / `composite` / `no_region`. Freshening on each
+    /// expansion treats the alias as a polymorphic scheme instantiated per use.
+    ///
+    /// Unlike `resolve_placeholders::resolve_type`, sizes are *not* linked here
+    /// — each `[]` slot gets an independent var — because a record/tuple of
+    /// arrays (`{ points: [], items: [] }`) generally spans distinct domains and
+    /// must not be forced to a single length.
+    pub(super) fn instantiate_annotation_type(&mut self, ty: &Type, module: Option<&str>) -> Type {
+        let expanded = self.resolve_type_aliases_scoped(ty, module);
+        self.freshen_placeholders(&expanded)
+    }
+
+    /// Structural walk replacing each residual array `AddressPlaceholder` /
+    /// `SizePlaceholder` with an independent fresh variable. A no-op on
+    /// annotations that already went through `resolve_placeholders` (they carry
+    /// no placeholders), so it only rewrites alias-expanded slots.
+    fn freshen_placeholders(&mut self, ty: &Type) -> Type {
+        match ty {
+            Type::Constructed(TypeName::AddressPlaceholder, _)
+            | Type::Constructed(TypeName::SizePlaceholder, _) => self.context.new_variable(),
+            // Sum carries its payload types inside the `TypeName`, not `args`.
+            Type::Constructed(TypeName::Sum(variants), args) => {
+                let variants = variants
+                    .iter()
+                    .map(|(ctor, payload)| {
+                        (
+                            ctor.clone(),
+                            payload.iter().map(|p| self.freshen_placeholders(p)).collect(),
+                        )
+                    })
+                    .collect();
+                Type::Constructed(TypeName::Sum(variants), args.clone())
+            }
+            Type::Constructed(name, args) => Type::Constructed(
+                name.clone(),
+                args.iter().map(|a| self.freshen_placeholders(a)).collect(),
+            ),
+            Type::Variable(_) => ty.clone(),
+        }
+    }
+
     /// Allocate a fresh type variable and return its ID.
     fn fresh_var(&mut self) -> polytype::Variable {
         match self.context.new_variable() {
@@ -1696,13 +1745,11 @@ impl<'a> TypeChecker<'a> {
         entry_stage: Option<&Attribute>,
     ) -> Result<(Vec<Type>, Type)> {
         // Create type variables or use explicit types for parameters
-        let param_types: Vec<Type> = params
-            .iter()
-            .map(|p| {
-                let ty = p.pattern_type().cloned().unwrap_or_else(|| self.context.new_variable());
-                self.normalize_annotation_type(&ty, module_name)
-            })
-            .collect();
+        let mut param_types: Vec<Type> = Vec::with_capacity(params.len());
+        for p in params {
+            let ty = p.pattern_type().cloned().unwrap_or_else(|| self.context.new_variable());
+            param_types.push(self.instantiate_annotation_type(&ty, module_name));
+        }
 
         // For entry point parameters, constrain array address spaces to Storage
         if is_entry {
@@ -2037,8 +2084,10 @@ impl<'a> TypeChecker<'a> {
                         entry.outputs.iter().map(|o| o.ty.clone()).collect(),
                     ),
                 };
-                // Resolve type aliases (e.g., rand.state -> f32)
-                let expected_type = self.resolve_type_aliases_scoped(&expected_type, None);
+                // Resolve type aliases (e.g., rand.state -> f32) and instantiate
+                // residual array placeholders so an alias return like `world`
+                // unifies against the body's concrete `view`/`composite` arrays.
+                let expected_type = self.instantiate_annotation_type(&expected_type, None);
 
                 // An existential return (`?k. T`) is *packed*: instantiate the
                 // declared bound size vars — and any existential the body
@@ -2198,7 +2247,7 @@ impl<'a> TypeChecker<'a> {
             // directly. Whether the body satisfies a `*` return is verified
             // by tlc::ownership from the diet.
             let return_type = if let Some(declared_type) = &decl.ty {
-                let normalized_return_type = self.normalize_annotation_type(declared_type, module_name);
+                let normalized_return_type = self.instantiate_annotation_type(declared_type, module_name);
                 let ctx = if !decl.params.is_empty() {
                     format!("Function return type mismatch for '{}'", decl.name)
                 } else {
