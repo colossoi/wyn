@@ -59,10 +59,18 @@ pub async fn validate_spirv(path: &Path, verbose: bool) -> Result<()> {
                 let module = loader.module();
                 for ep in &module.entry_points {
                     let name = ep.operands.iter().find_map(|op| {
-                        if let Operand::LiteralString(s) = op { Some(s.as_str()) } else { None }
+                        if let Operand::LiteralString(s) = op {
+                            Some(s.as_str())
+                        } else {
+                            None
+                        }
                     });
                     let model = ep.operands.iter().find_map(|op| {
-                        if let Operand::ExecutionModel(m) = op { Some(format!("{:?}", m)) } else { None }
+                        if let Operand::ExecutionModel(m) = op {
+                            Some(format!("{:?}", m))
+                        } else {
+                            None
+                        }
                     });
                     eprintln!(
                         "[validate] Entry point: {} ({})",

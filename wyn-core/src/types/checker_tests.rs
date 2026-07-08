@@ -2650,34 +2650,34 @@ fn builtin_step() {
     );
 }
 
-// --- Vertex-shader #[location(n)] input attributes ---------------------
+// --- Vertex-shader #[vertex_slot(n)] input attributes ------------------
 
 #[test]
-fn vertex_location_inputs_typecheck() {
+fn vertex_slot_inputs_typecheck() {
     typecheck_program(
         "#[vertex]\n\
-         entry vs(#[location(0)] position: vec3f32, #[location(1)] color: vec3f32)\n\
-           (#[builtin(position)] vec4f32, #[location(0)] vec3f32) =\n\
+         entry vs(#[vertex_slot(0)] position: vec3f32, #[vertex_slot(1)] color: vec3f32)\n\
+           (#[builtin(position)] vec4f32, #[varying(0)] vec3f32) =\n\
            (@[position.x, position.y, position.z, 1.0], color)",
     );
 }
 
 #[test]
-fn vertex_location_duplicate_rejected() {
+fn vertex_slot_duplicate_rejected() {
     let result = try_typecheck_program(
         "#[vertex]\n\
-         entry vs(#[location(0)] a: vec3f32, #[location(0)] b: vec3f32)\n\
+         entry vs(#[vertex_slot(0)] a: vec3f32, #[vertex_slot(0)] b: vec3f32)\n\
            #[builtin(position)] vec4f32 = @[a.x, a.y, a.z, 1.0]",
     );
     assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
 }
 
 #[test]
-fn vertex_location_non_format_type_rejected() {
+fn vertex_slot_non_format_type_rejected() {
     // [4]f32 is not a valid vertex-buffer attribute format.
     let result = try_typecheck_program(
         "#[vertex]\n\
-         entry vs(#[location(0)] a: [4]f32)\n\
+         entry vs(#[vertex_slot(0)] a: [4]f32)\n\
            #[builtin(position)] vec4f32 = @[a[0], a[1], a[2], 1.0]",
     );
     assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
@@ -2685,7 +2685,7 @@ fn vertex_location_non_format_type_rejected() {
 
 #[test]
 fn vertex_bare_param_rejected() {
-    // A vertex param with neither #[location] nor #[builtin] is an error.
+    // A vertex param with neither #[vertex_slot] nor #[builtin] is an error.
     let result = try_typecheck_program(
         "#[vertex]\n\
          entry vs(a: vec3f32) #[builtin(position)] vec4f32 = @[a.x, a.y, a.z, 1.0]",
@@ -2694,13 +2694,12 @@ fn vertex_bare_param_rejected() {
 }
 
 #[test]
-fn fragment_location_varying_still_typechecks() {
-    // Regression guard: #[location(n)] on a *fragment* param is a varying
-    // input, not a vertex attribute — the vertex-format restriction must
-    // not touch it.
+fn fragment_varying_still_typechecks() {
+    // A #[varying(n)] on a fragment param is an interpolated input, not a
+    // vertex attribute — the vertex-format restriction must not touch it.
     typecheck_program(
         "#[fragment]\n\
-         entry fs(#[location(0)] color: vec3f32) #[location(0)] vec4f32 =\n\
+         entry fs(#[varying(0)] color: vec3f32) #[target(screen)] vec4f32 =\n\
            @[color.x, color.y, color.z, 1.0]",
     );
 }

@@ -433,7 +433,7 @@ fn test_array_param_stack_overflow() {
 def first(arr: [4]i32) i32 = arr[0]
 
 #[fragment]
-entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32 =
     let x = first([1, 2, 3, 4]) in
     @[f32.i32(x), 0.0f32, 0.0f32, 1.0f32]
 "#,

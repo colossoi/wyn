@@ -1625,7 +1625,7 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::Program, stage: &str) {
 fn let_binding_substitution_survives_partial_eval() {
     let source = r#"
 #[fragment]
-entry frag() #[location(0)] vec4f32 =
+entry frag() #[target(screen)] vec4f32 =
     let range = [1, 2, 3, 4] in
     @[f32.i32(range[0]), 0.0, 0.0, 1.0]
 "#;
@@ -1704,7 +1704,7 @@ fn consuming_map_skips_fresh_allocation() {
     let dead_after_ssa = compile_to_ssa(
         r#"
 #[fragment]
-entry frag(c: vec4f32) #[location(0)] vec4f32 =
+entry frag(c: vec4f32) #[target(screen)] vec4f32 =
     let xs = [1, 2, 3, 4, 5, 6, 7, 8] in
     let r = map(|x: i32| x + 1, xs) in
     @[f32.i32(r[0]), f32.i32(r[1]), 0.0, 0.0]
@@ -1719,7 +1719,7 @@ entry frag(c: vec4f32) #[location(0)] vec4f32 =
     let aliased_ssa = compile_to_ssa(
         r#"
 #[fragment]
-entry frag(c: vec4f32) #[location(0)] vec4f32 =
+entry frag(c: vec4f32) #[target(screen)] vec4f32 =
     let xs = [1, 2, 3, 4, 5, 6, 7, 8] in
     let r = map(|x: i32| x + 1, xs) in
     -- `xs` aliased past the map → map must allocate a fresh buffer
@@ -1756,7 +1756,7 @@ fn consuming_scan_skips_fresh_allocation() {
     let dead_after_ssa = compile_to_ssa(
         r#"
 #[fragment]
-entry frag(c: vec4f32) #[location(0)] vec4f32 =
+entry frag(c: vec4f32) #[target(screen)] vec4f32 =
     let xs = [1, 2, 3, 4, 5, 6, 7, 8] in
     let r = scan(|acc: i32, x: i32| acc + x, 0, xs) in
     @[f32.i32(r[0]), f32.i32(r[1]), 0.0, 0.0]
@@ -1771,7 +1771,7 @@ entry frag(c: vec4f32) #[location(0)] vec4f32 =
     let aliased_ssa = compile_to_ssa(
         r#"
 #[fragment]
-entry frag(c: vec4f32) #[location(0)] vec4f32 =
+entry frag(c: vec4f32) #[target(screen)] vec4f32 =
     let xs = [1, 2, 3, 4, 5, 6, 7, 8] in
     let r = scan(|acc: i32, x: i32| acc + x, 0, xs) in
     @[f32.i32(r[0]), f32.i32(xs[0]), 0.0, 0.0]
@@ -2019,7 +2019,7 @@ fn filter_length_is_runtime_count_not_static_capacity() {
     let ssa = compile_to_ssa(
         r#"
 #[fragment]
-entry frag(c: vec4f32) #[location(0)] vec4f32 =
+entry frag(c: vec4f32) #[target(screen)] vec4f32 =
     let r = filter(|x: i32| x > 0, [1, -2, 3, -4]) in
     @[f32.i32(length(r)), f32.i32(r[0]), f32.i32(r[1]), 1.0]
 "#,
@@ -2049,7 +2049,7 @@ def myReduce(hits: [4]f32) f32 =
   reduce(|acc: f32, x: f32| if acc < x then acc else x, 999.0, hits)
 
 #[fragment]
-entry fragment_main() #[location(0)] vec4f32 =
+entry fragment_main() #[target(screen)] vec4f32 =
   let hits = myMap(1.0, 2.0) in
   let closest = myReduce(hits) in
   @[closest, 0.0, 0.0, 1.0]
@@ -3036,7 +3036,7 @@ def cands: [12]i32 = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
 
 #[fragment]
 entry fragment_main(#[builtin(position)] fragCoord: vec4f32)
-  #[location(0)] vec4f32 =
+  #[target(screen)] vec4f32 =
   let uv = fragCoord.x in
   let glows = map(|i: i32| uv + f32.i32(i), cands) in
   let total = reduce(|a: f32, b: f32| a + b, 0.0, glows) in
@@ -3125,7 +3125,7 @@ entry vertex_main(#[builtin(vertex_index)] vid: i32)
 entry fragment_main(
   #[uniform(set=1, binding=0)] iTime: f32,
   #[builtin(position)] fragCoord: vec4f32
-) #[location(0)] vec4f32 =
+) #[target(screen)] vec4f32 =
   let samples = map(|i: i32| f32.cos(iTime + f32.i32(i)), 0..<64) in
   let breath = reduce(|a: f32, b: f32| a + b, 0.0, samples) in
   @[breath, 0.0, 0.0, 1.0]
@@ -3171,7 +3171,7 @@ def samples: [12]f32 = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0,
 
 #[fragment]
 entry fragment_main(#[uniform(set=1, binding=0)] iTime: f32)
-  #[location(0)] vec4f32 =
+  #[target(screen)] vec4f32 =
   let scale = iTime * 2.0 in
   let total = reduce(
     |acc: f32, value: f32| acc + value,
@@ -3336,7 +3336,7 @@ def main_image(res: vec2f32, time: f32, fragCoord: vec2f32) vec4f32 =
     v4s[0]
 
 #[fragment]
-entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec2f32, #[uniform(set=1, binding=1)] iTime: f32, #[builtin(frag_coord)] pos: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec2f32, #[uniform(set=1, binding=1)] iTime: f32, #[builtin(frag_coord)] pos: vec4f32) #[target(screen)] vec4f32 =
     main_image(@[iResolution.x, iResolution.y], iTime, @[pos.x, pos.y])
 "#,
     );
@@ -3394,7 +3394,7 @@ def compute(x: f32, y: f32) f32 =
     a + b
 
 #[fragment]
-entry fragment_main(#[uniform(set=1, binding=0)] iTime: f32, #[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[uniform(set=1, binding=0)] iTime: f32, #[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32 =
     let s = compute(pos.x, pos.y) in
     @[s + iTime, 0.0, 0.0, 1.0]
 "#;
@@ -3466,7 +3466,7 @@ def m1 = @[[1.0f32, 0.0f32], [0.0f32, 1.0f32]]
 def m2 = @[[2.0f32, 0.0f32], [0.0f32, 2.0f32]]
 
 #[fragment]
-entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32 =
     let a: mat2f32 = m1 in
     let b: mat2f32 = m2 in
     let v: vec2f32 = @[pos.x, pos.y] in
@@ -3894,7 +3894,7 @@ def choose(a: f32, b: f32, c: f32, sel1: i32, sel2: i32) f32 =
     x + y
 
 #[fragment]
-entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32 =
     let r = choose(pos.x, pos.y, pos.z, 1, 2) in
     @[r, 0.0, 0.0, 1.0]
 "#;
@@ -3917,7 +3917,7 @@ def combine(t: (f32, f32, f32, f32)) f32 =
     a + b + c + d
 
 #[fragment]
-entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32 =
     let result = process(pos.x, pos.y, pos.z, pos.w, 1) in
     let s = combine(result) in
     @[s, 0.0, 0.0, 1.0]
@@ -4135,7 +4135,7 @@ def TAU: f32 = PI * 2.0
 def QUARTER_TAU: f32 = TAU / 4.0
 
 #[fragment]
-entry frag(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
+entry frag(#[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32 =
   @[QUARTER_TAU, PI, TAU, 1.0]
 "#;
     compile_to_spirv(source).expect("constants referencing constants should compile");
@@ -4164,7 +4164,7 @@ def PI: f32 = 3.141592
 def use_pi(x: f32) f32 = x * PI
 
 #[fragment]
-entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32 =
     let r = use_pi(pos.x) in
     @[r, 0.0, 0.0, 1.0]
 "#,
@@ -4352,7 +4352,7 @@ def pick(v: #left(f32) | #right(f32)) f32 =
     case #right(y) -> y * 2.0f32
 
 #[fragment]
-entry main() #[location(0)] vec4f32 =
+entry main() #[target(screen)] vec4f32 =
     let a = pick(#left(0.5f32)) in
     let b = pick(#right(0.25f32)) in
     @[a, b, 0.0f32, 1.0f32]
@@ -4373,7 +4373,7 @@ def length_sq(p: #point(f32, f32) | #origin) f32 =
     case #origin -> 0.0f32
 
 #[fragment]
-entry main() #[location(0)] vec4f32 =
+entry main() #[target(screen)] vec4f32 =
     let a = length_sq(#point(3.0f32, 4.0f32)) in
     let b = length_sq(#origin) in
     @[a, b, 0.0f32, 1.0f32]
@@ -4393,7 +4393,7 @@ fn swizzle_with_plain_assign_compiles_to_spirv() {
 def update(v: vec3f32, e: vec2f32) vec3f32 = v with .yz = e
 
 #[fragment]
-entry main() #[location(0)] vec4f32 =
+entry main() #[target(screen)] vec4f32 =
     let v = update(@[1.0f32, 2.0f32, 3.0f32], @[20.0f32, 30.0f32]) in
     @[v.x, v.y, v.z, 1.0f32]
 "#;
@@ -4409,7 +4409,7 @@ fn swizzle_with_compound_mul_compiles_to_spirv() {
 def update(v: vec3f32, m: mat2f32) vec3f32 = v with .yz *= m
 
 #[fragment]
-entry main() #[location(0)] vec4f32 =
+entry main() #[target(screen)] vec4f32 =
     let m: mat2f32 = @[[1.0f32, 0.0f32], [0.0f32, 1.0f32]] in
     let v = update(@[1.0f32, 2.0f32, 3.0f32], m) in
     @[v.x, v.y, v.z, 1.0f32]
@@ -4434,7 +4434,7 @@ def transform(dir0: vec3f32, mx: f32, my: f32) vec3f32 =
     d3 with .xz *= rot(mx)
 
 #[fragment]
-entry main() #[location(0)] vec4f32 =
+entry main() #[target(screen)] vec4f32 =
     let d = transform(@[0.0f32, 0.0f32, 1.0f32], 0.5f32, 0.3f32) in
     @[d.x, d.y, d.z, 1.0f32]
 "#;
@@ -7505,7 +7505,7 @@ entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f3
 #[fragment]
 entry fragment_main(#[builtin(position)] pos: vec4f32,
                     #[texture(set=0, binding=0)] tex: texture2d,
-                    #[sampler(set=0, binding=1)] samp: sampler) #[location(0)] vec4f32 =
+                    #[sampler(set=0, binding=1)] samp: sampler) #[target(screen)] vec4f32 =
   texture_sample(tex, samp, @[pos.x / 1024.0, pos.y / 1024.0], 0.0)
 "#,
     )
@@ -7538,7 +7538,7 @@ entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f3
 #[fragment]
 entry show(#[builtin(position)] pos: vec4f32,
            #[view(color, sampled)] tex: texture2d,
-           #[sampler(set=0, binding=1)] samp: sampler) #[location(0)] vec4f32 =
+           #[sampler(set=0, binding=1)] samp: sampler) #[target(screen)] vec4f32 =
   texture_sample(tex, samp, @[pos.x / 1024.0, pos.y / 1024.0], 0.0)
 "#,
     )
@@ -8240,7 +8240,7 @@ entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f3
 #[fragment]
 entry fragment_main(#[builtin(position)] pos: vec4f32,
                     #[texture(set=0, binding=0)] tex: texture2d,
-                    #[sampler(set=0, binding=1)] samp: sampler) #[location(0)] vec4f32 =
+                    #[sampler(set=0, binding=1)] samp: sampler) #[target(screen)] vec4f32 =
   texture_sample(tex, samp, @[pos.x / 1024.0, pos.y / 1024.0], 0.0)
 "#,
     );
@@ -8303,7 +8303,7 @@ def rotm(a: f32) mat3f32 =
 def eye: vec3f32 = rotm(ELEV) * @[0.0, 0.0, DIST]
 def use_eye(p: vec3f32) vec3f32 = p + eye
 #[fragment]
-entry f() #[location(0)] vec4f32 =
+entry f() #[target(screen)] vec4f32 =
   let q = use_eye(@[1.0, 2.0, 3.0]) in @[q.x, q.y, q.z, 1.0]
 "#,
     )
@@ -8415,7 +8415,7 @@ fn structural_record_lowers_through_spirv() {
         r#"
 type draw_args = {x: f32, y: f32, z: f32, w: f32}
 #[fragment]
-entry frag(#[uniform(set=1, binding=0)] iTime: f32) #[location(0)] draw_args =
+entry frag(#[uniform(set=1, binding=0)] iTime: f32) #[target(screen)] draw_args =
   {x = iTime, y = 0.0, z = 0.0, w = 1.0}
 "#,
     )
@@ -8994,7 +8994,7 @@ entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f3
 #[fragment]
 entry fragment_main(#[builtin(position)] pos: vec4f32,
                     #[uniform(set=1, binding=0)] c: block)
-  #[location(0)] vec4f32 =
+  #[target(screen)] vec4f32 =
   @[c.tint.x, c.tint.y, c.radius, 1.0]
 "#,
     )

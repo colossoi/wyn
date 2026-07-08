@@ -1113,16 +1113,34 @@ impl<'a> Parser<'a> {
                 };
                 Ok(Attribute::BuiltIn(builtin))
             }
-            "location" => {
+            "target" => {
                 self.expect(Token::LeftParen)?;
-                let location = if let Some(Token::IntLiteral(location)) = self.advance() {
-                    u32::try_from(location).map_err(|_| err_parse!("Invalid location number"))?
+                let name = self.expect_identifier()?;
+                self.expect(Token::RightParen)?;
+                self.expect(Token::RightBracket)?;
+                Ok(Attribute::Target(name))
+            }
+            "vertex_slot" => {
+                self.expect(Token::LeftParen)?;
+                let slot = if let Some(Token::IntLiteral(slot)) = self.advance() {
+                    u32::try_from(slot).map_err(|_| err_parse!("Invalid vertex_slot number"))?
                 } else {
-                    bail_parse_at!(self.current_span(), "Expected location number");
+                    bail_parse_at!(self.current_span(), "Expected vertex_slot number");
                 };
                 self.expect(Token::RightParen)?;
                 self.expect(Token::RightBracket)?;
-                Ok(Attribute::Location(location))
+                Ok(Attribute::VertexSlot(slot))
+            }
+            "varying" => {
+                self.expect(Token::LeftParen)?;
+                let channel = if let Some(Token::IntLiteral(channel)) = self.advance() {
+                    u32::try_from(channel).map_err(|_| err_parse!("Invalid varying number"))?
+                } else {
+                    bail_parse_at!(self.current_span(), "Expected varying number");
+                };
+                self.expect(Token::RightParen)?;
+                self.expect(Token::RightBracket)?;
+                Ok(Attribute::Varying(channel))
             }
             "storage" => {
                 // Parse storage attribute: #[storage(binding=N)] or #[storage(set=M, binding=N)].

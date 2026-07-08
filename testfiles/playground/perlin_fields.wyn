@@ -185,7 +185,7 @@ entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f3
 
 #[fragment]
 entry main_image(#[storage(set=2, binding=1, access=read)] fb: []vec4f32,
-                 #[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
+                 #[builtin(position)] fragCoord: vec4f32) #[target(screen)] vec4f32 =
   let x = clampi(i32.f32(fragCoord.x)) in
   let y = clampi(i32.f32(fragCoord.y)) in
   fb[y * RES + x]

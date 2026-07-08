@@ -132,8 +132,9 @@ pub fn compute_entry_binding_layout(
     out
 }
 
-/// Extract a `#[builtin(...)]` or `#[location(N)]` decoration from a
-/// param pattern. Recurses through `Attributed` / `Typed` wrappers.
+/// Extract a `#[builtin(...)]`, `#[vertex_slot(N)]`, or `#[varying(N)]`
+/// decoration from a param pattern. Recurses through `Attributed` / `Typed`
+/// wrappers.
 pub fn extract_io_decoration(pattern: &Pattern) -> Option<IoDecoration> {
     match &pattern.kind {
         PatternKind::Attributed(attrs, inner) => {
@@ -142,8 +143,8 @@ pub fn extract_io_decoration(pattern: &Pattern) -> Option<IoDecoration> {
                     Attribute::BuiltIn(builtin) => {
                         return Some(IoDecoration::BuiltIn(*builtin));
                     }
-                    Attribute::Location(loc) => {
-                        return Some(IoDecoration::Location(*loc));
+                    Attribute::VertexSlot(n) | Attribute::Varying(n) => {
+                        return Some(IoDecoration::Location(*n));
                     }
                     _ => {}
                 }

@@ -394,7 +394,7 @@ entry fragment_main(
   #[uniform(set=1, binding=1)] iTime: f32,
   #[uniform(set=1, binding=5)] iMouse: vec4f32,
   #[builtin(position)] fragCoord: vec4f32
-) #[location(0)] vec4f32 =
+) #[target(screen)] vec4f32 =
   let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
 
   let l_dir = normalize(@[0.0, 1.0, 0.0]) * rotz(0.5) in

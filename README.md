@@ -384,7 +384,7 @@ entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f3
   verts[vid]
 
 #[fragment]
-entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32 =
   @[0.529, 0.808, 0.922, 1.0]  -- Sky blue
 ```
 
@@ -440,7 +440,7 @@ def first(xs: []i32) i32 = xs[0]
 entry vs_main(#[builtin(vertex_index)] id: i32) #[builtin(position)] vec4f32 = ...
 
 #[fragment]
-entry fs_main(#[location(0)] color: vec3f32) #[location(0)] vec4f32 = ...
+entry fs_main(#[varying(0)] color: vec3f32) #[target(screen)] vec4f32 = ...
 
 #[compute]
 entry sum_array(#[size_hint(1024)] data: []f32) f32 =

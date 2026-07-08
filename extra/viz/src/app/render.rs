@@ -2,7 +2,7 @@
 //! `testpattern` modes: surface format selection, surface
 //! configuration, and the SPIR-V vs WGSL render-pipeline branches.
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use wgpu::{
     Adapter, BindGroup, Buffer, ColorTargetState, CompareFunction, DepthStencilState, FragmentState,
     PipelineLayoutDescriptor, PresentMode, PrimitiveState, RenderPipeline, Surface, SurfaceConfiguration,

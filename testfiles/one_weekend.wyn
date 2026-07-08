@@ -359,7 +359,7 @@ entry accumulate(#[view(acc, storage_write)] out_acc: *storage_image,
 
 #[fragment]
 entry fragment_main(#[builtin(position)] pos_in: vec4f32,
-                    #[view(acc, sampled)] tex_acc: texture2d) #[location(0)] vec4f32 =
+                    #[view(acc, sampled)] tex_acc: texture2d) #[target(screen)] vec4f32 =
   let xy = @[i32(pos_in.x), i32(pos_in.y)] in
   let v = texture_load(tex_acc, xy, 0) in
   let c = v.xyz * (1.0 / max(v.w, 1.0)) in

@@ -780,7 +780,7 @@ entry fragment_main(#[builtin(position)] pos_in: vec4f32,
                     #[uniform(set=1, binding=0)] iResolution: vec3f32,
                     #[uniform(set=1, binding=1)] iTime: f32,
                     #[uniform(set=1, binding=2)] iMouse: vec4f32)
-  #[location(0)] vec4f32 =
+  #[target(screen)] vec4f32 =
   -- Flip Y for Vulkan NDC -> Shadertoy convention.
   let fragCoord = @[pos_in.x, iResolution.y - pos_in.y] in
 

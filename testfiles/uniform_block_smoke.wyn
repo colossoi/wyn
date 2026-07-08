@@ -49,6 +49,6 @@ entry fragment_main(#[builtin(position)] pos: vec4f32,
                     #[view(canvas, sampled)] tex: texture2d,
                     #[sampler(set=0, binding=1)] samp: sampler,
                     #[uniform(set=1, binding=0)] iResolution: vec3f32)
-  #[location(0)] vec4f32 =
+  #[target(screen)] vec4f32 =
   let uv = @[pos.x / iResolution.x, pos.y / iResolution.y] in
   texture_sample(tex, samp, uv, 0.0f32)

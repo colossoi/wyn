@@ -11,7 +11,7 @@
 //! WGSL test pattern has its own simpler `build_test_pattern_uniforms`
 //! that hardcodes a single resolution uniform at (0, 0).
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingResource, BindingType, Buffer, BufferBindingType, BufferDescriptor,

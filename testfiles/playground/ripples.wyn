@@ -48,7 +48,7 @@ entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f3
 -- brightness modulated by a fragment-invariant reduce (hoisted).
 ------------------------------------------------------------
 #[fragment]
-entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[builtin(position)] fragCoord: vec4f32) #[target(screen)] vec4f32 =
   -- Fragment-invariant reduce: sums 512 cosines of time-shifted phases.
   -- Let-bind the map producer so fuse_maps sees it as a separate
   -- producer/consumer and fuses reduce-of-map into a Redomap — which

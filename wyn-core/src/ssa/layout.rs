@@ -9,7 +9,7 @@ use wyn_pipeline_descriptor::VertexFormat;
 mod layout_tests;
 
 /// Map a Wyn type to its vertex-buffer attribute format, for
-/// `#[location(n)]` vertex-shader input parameters. Only 32-bit
+/// `#[vertex_slot(n)]` vertex-shader input parameters. Only 32-bit
 /// float / signed / unsigned scalars and 2-4 wide vectors of them are
 /// valid vertex formats; everything else (arrays, tuples, matrices,
 /// non-32-bit scalars, `vec1`) returns `None`. This is the single

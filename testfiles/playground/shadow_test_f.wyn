@@ -131,7 +131,7 @@ def getRayDir(uv: vec2f32, p: vec3f32, l: vec3f32, z: f32) vec3f32 =
 -- Fragment shader.
 ------------------------------------------------------------
 #[fragment]
-entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[builtin(position)] fragCoord: vec4f32) #[target(screen)] vec4f32 =
   -- Flip Y for Vulkan / WebGPU.
   let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
   let uv = @[(fc.x - 0.5 * iResolution.x) / iResolution.y,

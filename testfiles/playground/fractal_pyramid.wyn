@@ -85,7 +85,7 @@ def rm(ro: vec3f32, rd: vec3f32, iTime: f32) vec4f32 =
 -- Fragment shader
 ------------------------------------------------------------
 #[fragment]
-entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[builtin(position)] fragCoord: vec4f32) #[target(screen)] vec4f32 =
   let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
   let half_res = iResolution.xy * 0.5 in
   let uv = @[(fc.x - half_res.x) / iResolution.x, (fc.y - half_res.y) / iResolution.x] in

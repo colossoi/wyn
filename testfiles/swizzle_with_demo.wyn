@@ -36,7 +36,7 @@ def transform(dir0: vec3f32, mx: f32, my: f32, rotview1: mat2f32, rotview2: mat2
   d3 with .xz *= rotview1
 
 #[fragment]
-entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[builtin(position)] fragCoord: vec4f32) #[target(screen)] vec4f32 =
   let coord = @[fragCoord.x, iResolution.y - fragCoord.y]
   let uv = @[coord.x / iResolution.x - 0.5f32, coord.y / iResolution.y - 0.5f32]
   let dir0 = @[uv.x * 0.8f32, uv.y * 0.8f32, 1.0f32]

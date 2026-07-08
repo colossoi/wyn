@@ -1,6 +1,6 @@
 //! CLI spec parser for `--push-constant` on the `pipeline` subcommand.
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 
 #[derive(Debug, Clone)]
 pub struct PushConstantSpec {

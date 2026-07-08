@@ -293,10 +293,10 @@ pub struct EntryInterface {
 pub struct EntryBinding {
     pub name: String,
     pub ty: String,
-    /// `"builtin(<name>)"`, `"location(<n>)"`, `"storage(<set>,<binding>)"`,
-    /// `"uniform(<set>,<binding>)"`, `"texture(<set>,<binding>)"`,
-    /// `"sampler(<set>,<binding>)"`, `"push_constant(<offset>)"`, or
-    /// `"unknown"`.
+    /// `"builtin(<name>)"`, `"slot(<n>)"`, `"target(<name>)"`,
+    /// `"storage(<set>,<binding>)"`, `"uniform(<set>,<binding>)"`,
+    /// `"texture(<set>,<binding>)"`, `"sampler(<set>,<binding>)"`,
+    /// `"push_constant(<offset>)"`, or `"unknown"`.
     pub decoration: String,
 }
 
@@ -332,7 +332,7 @@ fn entry_binding_from_input(input: &wyn_core::ssa::types::EntryInput) -> EntryBi
     } else {
         match &input.decoration {
             Some(IoDecoration::BuiltIn(b)) => format!("builtin({:?})", b),
-            Some(IoDecoration::Location(n)) => format!("location({})", n),
+            Some(IoDecoration::Location(n)) => format!("slot({})", n),
             None => "unknown".to_string(),
         }
     };
@@ -348,10 +348,12 @@ fn entry_binding_from_output(idx: usize, output: &wyn_core::ssa::types::EntryOut
     use wyn_core::BindingRef;
     let decoration = if let Some(BindingRef { set, binding }) = output.storage_binding {
         format!("storage({},{})", set, binding)
+    } else if let Some(name) = &output.target {
+        format!("target({})", name)
     } else {
         match &output.decoration {
             Some(IoDecoration::BuiltIn(b)) => format!("builtin({:?})", b),
-            Some(IoDecoration::Location(n)) => format!("location({})", n),
+            Some(IoDecoration::Location(n)) => format!("slot({})", n),
             None => "unknown".to_string(),
         }
     };
@@ -687,7 +689,7 @@ entry vertex_main(#[builtin(vertex_index)] vertex_id: i32)  #[builtin(position)]
 entry fragment_main(
   #[uniform(set=1, binding=0)] iResolution: vec3f32,
   #[uniform(set=1, binding=1)] iTime: f32,
-  #[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
+  #[builtin(position)] fragCoord: vec4f32) #[target(screen)] vec4f32 =
   -- Flip Y for Vulkan
   let coord = @[fragCoord.x, iResolution.y - fragCoord.y] in
   let uv = @[coord.x / iResolution.x, coord.y / iResolution.y] in

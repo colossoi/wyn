@@ -292,7 +292,7 @@ fn wgsl_fragment_trivial() {
     let wgsl = compile_to_wgsl(
         r#"
 #[fragment]
-entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32 =
     @[1.0, 0.5, 0.0, 1.0]
 "#,
     )
@@ -336,7 +336,7 @@ fn wgsl_vertex_multi_output_struct() {
         r#"
 #[vertex]
 entry vertex_main(#[builtin(vertex_index)] idx: i32)
-  (#[builtin(position)] vec4f32, #[location(0)] vec3f32) =
+  (#[builtin(position)] vec4f32, #[varying(0)] vec3f32) =
     let p: vec4f32 = @[0.0, 0.0, 0.0, 1.0] in
     let c: vec3f32 = @[1.0, 0.0, 0.0] in
     (p, c)
@@ -470,7 +470,7 @@ fn wgsl_uniforms_emit_bindings() {
     let wgsl = compile_to_wgsl(
         r#"
 #[fragment]
-entry fragment_main(#[uniform(set=1, binding=0)] iTime: f32, #[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[uniform(set=1, binding=0)] iTime: f32, #[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32 =
     @[iTime, 0.0, 0.0, 1.0]
 "#,
     )
@@ -621,7 +621,7 @@ def brighten(c: vec4f32, amount: f32) vec4f32 =
     @[c.x + amount, c.y + amount, c.z + amount, c.w]
 
 #[fragment]
-entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32 =
     brighten(@[0.1, 0.2, 0.3, 1.0], 0.5)
 "#,
     )
@@ -813,7 +813,7 @@ entry step(xs: []u32, #[uniform(set=1, binding=0)] c: block) []u32 =
 #[fragment]
 entry fragment_main(#[builtin(position)] pos: vec4f32,
                     #[uniform(set=1, binding=0)] c: block)
-  #[location(0)] vec4f32 =
+  #[target(screen)] vec4f32 =
   @[c.tint.x, c.tint.y, c.radius + c.center.x, 1.0]
 "#,
     )

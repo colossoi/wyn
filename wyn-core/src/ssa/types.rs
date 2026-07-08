@@ -579,6 +579,10 @@ pub struct EntryInput {
 pub struct EntryOutput {
     pub ty: Type<TypeName>,
     pub decoration: Option<IoDecoration>,
+    /// The render-target resource a fragment output writes, from
+    /// `#[target(name)]`. The color-attachment slot is the output's tuple
+    /// position; codegen derives the SPIR-V `Location` from it.
+    pub target: Option<String>,
     /// For compute shaders with unsized array outputs.
     pub storage_binding: Option<BindingRef>,
     /// Sizing policy for a runtime-sized storage output (a parallel map/scan

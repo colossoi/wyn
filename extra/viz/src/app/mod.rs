@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupLayoutDescriptor, Color, CommandEncoderDescriptor, Extent3d,
     InstanceFlags, LoadOp, Operations, PipelineLayoutDescriptor, PresentMode, RenderPipeline, StoreOp,
@@ -568,12 +568,10 @@ impl State {
                             } => textures.push(format!("'{name}' (set={set}, binding={binding})")),
                             wyn_pipeline_descriptor::Binding::StorageTexture {
                                 set, binding, name, ..
-                            } => storage_images
-                                .push(format!("'{name}' (set={set}, binding={binding})")),
+                            } => storage_images.push(format!("'{name}' (set={set}, binding={binding})")),
                             wyn_pipeline_descriptor::Binding::StorageBuffer {
                                 set, binding, name, ..
-                            } => storage_buffers
-                                .push(format!("'{name}' (set={set}, binding={binding})")),
+                            } => storage_buffers.push(format!("'{name}' (set={set}, binding={binding})")),
                             _ => {}
                         }
                     }
@@ -843,11 +841,7 @@ impl State {
                     anyhow::anyhow!(
                         "--uniform {}{}: no matching uniform member in the descriptor",
                         spec_value.name,
-                        spec_value
-                            .member
-                            .as_ref()
-                            .map(|m| format!(".{m}"))
-                            .unwrap_or_default()
+                        spec_value.member.as_ref().map(|m| format!(".{m}")).unwrap_or_default()
                     )
                 })?;
             if spec_value.data.len() as u32 != size {
@@ -958,8 +952,10 @@ impl State {
             }
 
             let bgl_borrows: Vec<&wgpu::BindGroupLayout> = bgls.iter().collect();
-            let layout_label =
-                format!("compute_layout_{}", cp.stages.first().map(|s| s.entry_point.as_str()).unwrap_or("?"));
+            let layout_label = format!(
+                "compute_layout_{}",
+                cp.stages.first().map(|s| s.entry_point.as_str()).unwrap_or("?")
+            );
             let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
                 label: Some(&layout_label),
                 bind_group_layouts: &bgl_borrows,
@@ -988,23 +984,22 @@ impl State {
                 // everything per-entry — the override is in TOTAL threads on each
                 // axis, so divide by the matching workgroup-size dim to get
                 // workgroup counts.
-                let workgroups =
-                    if let Some(&(w, h, d)) = spec.dispatch_overrides.get(&stage.entry_point) {
-                        let (wgx, wgy, wgz) = (
-                            stage.workgroup_size.0.max(1),
-                            stage.workgroup_size.1.max(1),
-                            stage.workgroup_size.2.max(1),
-                        );
-                        (w.div_ceil(wgx), h.div_ceil(wgy), d.div_ceil(wgz))
-                    } else {
-                        gpu::resolve_dispatch_size_with_textures(
-                            &stage.dispatch_size,
-                            stage.workgroup_size,
-                            &dispatch_buffer_sizes,
-                            &[],
-                            &storage_textures,
-                        )
-                    };
+                let workgroups = if let Some(&(w, h, d)) = spec.dispatch_overrides.get(&stage.entry_point) {
+                    let (wgx, wgy, wgz) = (
+                        stage.workgroup_size.0.max(1),
+                        stage.workgroup_size.1.max(1),
+                        stage.workgroup_size.2.max(1),
+                    );
+                    (w.div_ceil(wgx), h.div_ceil(wgy), d.div_ceil(wgz))
+                } else {
+                    gpu::resolve_dispatch_size_with_textures(
+                        &stage.dispatch_size,
+                        stage.workgroup_size,
+                        &dispatch_buffer_sizes,
+                        &[],
+                        &storage_textures,
+                    )
+                };
                 if verbose {
                     eprintln!(
                         "[viz pipeline-interactive] compute '{}': dispatch = {} × {} × {}",
@@ -1079,15 +1074,15 @@ impl State {
             push_constant_ranges: &[],
         });
         // One wgpu::VertexAttribute + matching VertexBufferLayout per
-        // declared `#[location(n)]` attribute. Owned locally so both
+        // declared `#[vertex_slot(n)]` attribute. Owned locally so both
         // arrays live until `create_render_pipeline` returns.
         let wgpu_attribs: Vec<wgpu::VertexAttribute> = vertex_buffer_pack
             .attribs
             .iter()
-            .map(|(fmt, location)| wgpu::VertexAttribute {
+            .map(|(fmt, slot)| wgpu::VertexAttribute {
                 format: vertex_buffers::wgpu_vertex_format(*fmt),
                 offset: 0,
-                shader_location: *location,
+                shader_location: *slot,
             })
             .collect();
         let vertex_buffer_layouts: Vec<wgpu::VertexBufferLayout> = wgpu_attribs
@@ -1216,7 +1211,10 @@ impl State {
                     }
                 }
                 Err(e) => {
-                    eprintln!("[viz pipeline] --dump-texture '{}': readback failed: {e:#}", t.name)
+                    eprintln!(
+                        "[viz pipeline] --dump-texture '{}': readback failed: {e:#}",
+                        t.name
+                    )
                 }
             }
         }
@@ -1270,7 +1268,10 @@ impl State {
 
                 // Wait for GPU to finish to get accurate frame timing (only when verbose)
                 if let Some(frame_start) = frame_start {
-                    let _ = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+                    let _ = self.device.poll(wgpu::PollType::Wait {
+                        submission_index: None,
+                        timeout: None,
+                    });
 
                     let frame_time_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
                     self.frame_times[self.frame_time_idx] = frame_time_ms;

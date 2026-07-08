@@ -80,7 +80,7 @@ entry vertex_main(#[builtin(vertex_index)] vid: i32)
 entry fragment_main(
   #[uniform(set=1, binding=0)] iTime: f32,
   #[builtin(position)] fragCoord: vec4f32
-) #[location(0)] vec4f32 =
+) #[target(screen)] vec4f32 =
   let samples = map(|i: i32| f32.cos(iTime + f32.i32(i)), 0..<64) in
   let breath = reduce(|a: f32, b: f32| a + b, 0.0, samples) in
   @[breath, 0.0, 0.0, 1.0]

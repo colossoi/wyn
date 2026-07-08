@@ -24,7 +24,7 @@ entry vertex_main(#[builtin(vertex_index)] vertex_id: i32)
 
 #[fragment]
 entry fragment_main(#[builtin(position)] fragCoord: vec4f32)
-  #[location(0)] vec4f32 =
+  #[target(screen)] vec4f32 =
   let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in   -- Y FLIP
   ...
 ```
@@ -93,7 +93,7 @@ def rot(a: f32) mat2f32 =
   let c = cos(a) in let s = sin(a) in
   @[[c, s], [0.0 - s, c]]
 #[fragment]
-entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[target(screen)] vec4f32 =
   let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
   let uv = (fc - 0.5 * iResolution.xy) / iResolution.y in
   let p = @[0.5, 0.0] * rot(iTime) in

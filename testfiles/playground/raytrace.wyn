@@ -321,7 +321,7 @@ def traceSample(fragCoord: vec4f32, offsetX: f32, offsetY: f32, iResolution: vec
   trace(camPos, rd, maxBounces)
 
 #[fragment]
-entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[uniform(set=1, binding=5)] iMouse: vec4f32, #[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[uniform(set=1, binding=5)] iMouse: vec4f32, #[builtin(position)] fragCoord: vec4f32) #[target(screen)] vec4f32 =
   let color = traceSample(fragCoord, 0.0, 0.0, iResolution, iTime, iMouse, MAX_REFLECTION_BOUNCES) in
   let gamma = 1.0 / 2.2 in
   @[color.x ** gamma, color.y ** gamma, color.z ** gamma, 1.0]

@@ -1,7 +1,7 @@
 //! `testpattern` subcommand — interactive viewer running a built-in
 //! WGSL test pattern (no shader file required, always validates).
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use winit::event_loop::EventLoop;
 
 use wgpu::PresentMode;

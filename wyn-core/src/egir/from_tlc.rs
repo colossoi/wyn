@@ -2800,7 +2800,17 @@ fn convert_to_io_decoration(attr: &interface::Attribute) -> Option<IoDecoration>
     use IoDecoration;
     match attr {
         interface::Attribute::BuiltIn(b) => Some(IoDecoration::BuiltIn(*b)),
-        interface::Attribute::Location(l) => Some(IoDecoration::Location(*l)),
+        interface::Attribute::VertexSlot(n) | interface::Attribute::Varying(n) => {
+            Some(IoDecoration::Location(*n))
+        }
+        _ => None,
+    }
+}
+
+/// The render-target resource name of a `#[target(name)]` output attribute.
+fn target_of(attr: Option<&interface::Attribute>) -> Option<String> {
+    match attr {
+        Some(interface::Attribute::Target(name)) => Some(name.clone()),
         _ => None,
     }
 }
@@ -3029,6 +3039,7 @@ fn build_entry_outputs(
                 Ok(EntryOutput {
                     ty,
                     decoration: output.attribute.as_ref().and_then(convert_to_io_decoration),
+                    target: target_of(output.attribute.as_ref()),
                     storage_binding,
                     length,
                 })
@@ -3044,6 +3055,7 @@ fn build_entry_outputs(
             Ok(vec![EntryOutput {
                 ty,
                 decoration: None,
+                target: None,
                 storage_binding,
                 length,
             }])
@@ -3062,6 +3074,7 @@ fn build_entry_outputs(
                 Ok(EntryOutput {
                     ty,
                     decoration: output.attribute.as_ref().and_then(convert_to_io_decoration),
+                    target: target_of(output.attribute.as_ref()),
                     storage_binding,
                     length,
                 })
@@ -3071,13 +3084,11 @@ fn build_entry_outputs(
         let ty = crate::types::canonical_storage_buffer_ty(ret_type);
         let storage_binding = storage_binding_for(&ty, is_compute);
         let length = length_for(storage_binding, &ty)?;
+        let first_attr = entry.outputs.first().and_then(|o| o.attribute.as_ref());
         Ok(vec![EntryOutput {
             ty,
-            decoration: entry
-                .outputs
-                .first()
-                .and_then(|o| o.attribute.as_ref())
-                .and_then(convert_to_io_decoration),
+            decoration: first_attr.and_then(convert_to_io_decoration),
+            target: target_of(first_attr),
             storage_binding,
             length,
         }])

@@ -281,7 +281,7 @@ def minPair(hits: [4](f32, i32)) (f32, i32) =
 def testHits: [4](f32, i32) = [(1.0, 1), (2.0, 2), (0.5, 3), (3.0, 4)]
 
 #[fragment]
-entry fragment_main(#[builtin(frag_coord)] pos: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[builtin(frag_coord)] pos: vec4f32) #[target(screen)] vec4f32 =
   let (t, m) = minPair(testHits) in
   @[t, t, 0.0, 1.0]
 "#,
@@ -343,7 +343,7 @@ def helper(x: f32, iTime: f32) f32 =
     weight
 
 #[fragment]
-entry fragment_main(#[uniform(set=1, binding=0)] iTime: f32, #[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[uniform(set=1, binding=0)] iTime: f32, #[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32 =
     -- Create multiple locals to ensure LocalId collision
     let a = pos.x in
     let b = pos.y in
@@ -383,7 +383,7 @@ def verts: [3]vec4f32 =
 entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 = verts[vertex_id]
 
 #[fragment]
-entry fragment_main() #[location(0)] vec4f32 =
+entry fragment_main() #[target(screen)] vec4f32 =
   let g = @[1.0, 2.0, 3.0] in
   let h = dot(g, @[127.1, 311.7, 74.7]) in
   @[h, h, h, 1.0]
@@ -406,7 +406,7 @@ fn test_nested_if_else_in_entry_point() {
     let result = compile_to_spirv(
         r#"
 #[fragment]
-entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[target(screen)] vec4f32 =
   let x = fragCoord.x in
   if x < 0.5 then @[1.0, 0.0, 0.0, 1.0]
   else if x < 1.5 then @[0.0, 1.0, 0.0, 1.0]
@@ -454,7 +454,7 @@ entry b(#[builtin(global_invocation_id)] gid: vec3u32) () = ()
 
 #[fragment]
 entry fragment_main(#[builtin(position)] _p: vec4f32)
-  #[location(0)] vec4f32 = @[0.0, 0.0, 0.0, 1.0]
+  #[target(screen)] vec4f32 = @[0.0, 0.0, 0.0, 1.0]
 ";
     let spirv = compile_to_spirv(src).expect("two-compute-entry shader should compile");
     // BuiltIn enum value for GlobalInvocationId is 28

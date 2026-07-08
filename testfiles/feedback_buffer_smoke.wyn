@@ -21,5 +21,5 @@ entry vertex_main(#[builtin(vertex_index)] vid: i32)
 
 #[fragment]
 entry frag_main(#[builtin(position)] pos: vec4f32)
-  #[location(0)] vec4f32 =
+  #[target(screen)] vec4f32 =
   @[0.1, 0.1, 0.1, 1.0]

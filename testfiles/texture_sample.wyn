@@ -12,16 +12,16 @@
 --   * `texture_load(tex, coord, lod)` — raw texel fetch.
 
 #[vertex]
-entry vertex_main(#[location(0)] pos: vec2f32)
-  (#[builtin(position)] vec4f32, #[location(0)] vec2f32) =
+entry vertex_main(#[vertex_slot(0)] pos: vec2f32)
+  (#[builtin(position)] vec4f32, #[varying(0)] vec2f32) =
   (@[pos.x, pos.y, 0.0, 1.0], @[pos.x * 0.5 + 0.5, pos.y * 0.5 + 0.5])
 
 #[fragment]
 entry fragment_main
-  ( #[location(0)] uv: vec2f32
+  ( #[varying(0)] uv: vec2f32
   , #[texture(set=0, binding=0)] tex: texture2d
   , #[sampler(set=0, binding=1)] samp: sampler
-  ) #[location(0)] vec4f32 =
+  ) #[target(screen)] vec4f32 =
   let filtered = texture_sample(tex, samp, uv, 0.0)
   let texel = texture_load(tex, @[0, 0], 0) in
   filtered + texel

@@ -7,18 +7,16 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use wgpu::{CommandEncoderDescriptor, PipelineLayoutDescriptor};
 use winit::event_loop::EventLoop;
 
 use crate::app::{App, InteractivePipelineSpec};
 use crate::gpu::{
-    ComputeExecutor, build_bind_group, build_push_constant_bytes, create_binding_buffers,
-    create_headless_device, readback_buffer, resolve_dispatch_size,
+    build_bind_group, build_push_constant_bytes, create_binding_buffers, create_headless_device,
+    readback_buffer, resolve_dispatch_size, ComputeExecutor,
 };
-use crate::json::{
-    Binding, BufferUsage, ComputePipeline, Pipeline, PipelineDescriptor, write_f32_json,
-};
+use crate::json::{write_f32_json, Binding, BufferUsage, ComputePipeline, Pipeline, PipelineDescriptor};
 use crate::specs::PushConstantSpec;
 use crate::spirv::load_spirv_module;
 use wyn_pipeline_descriptor::ShaderStage;
@@ -159,9 +157,8 @@ fn resolve_buffer_inits(
                  framebuffer size is computed from --size and format"
             ));
         }
-        let (w, h) = size.ok_or_else(|| {
-            anyhow!("--framebuffer {name} requires --size W×H to compute byte count")
-        })?;
+        let (w, h) =
+            size.ok_or_else(|| anyhow!("--framebuffer {name} requires --size W×H to compute byte count"))?;
         let bytes = w as u64 * h as u64 * format.bytes_per_texel();
         if let Some(&desc_bytes) = descriptor_bytes.get(name.as_str()) {
             if desc_bytes != bytes {
@@ -172,10 +169,13 @@ fn resolve_buffer_inits(
                 ));
             }
         }
-        out.insert(name.clone(), crate::gpu::BufferInit {
-            bytes,
-            spec: crate::gpu::BufferInitSpec::Zero,
-        });
+        out.insert(
+            name.clone(),
+            crate::gpu::BufferInit {
+                bytes,
+                spec: crate::gpu::BufferInitSpec::Zero,
+            },
+        );
     }
 
     for (name, &spec) in inits {
@@ -272,8 +272,17 @@ pub async fn run_pipeline(
     for (pi, pipeline) in desc.pipelines.iter().enumerate() {
         match pipeline {
             Pipeline::Compute(cp) => {
-                run_compute(&device, &queue, &module, cp, &inputs, &outputs, push_constants, verbose)
-                    .with_context(|| format!("Pipeline {} (compute) failed", pi))?;
+                run_compute(
+                    &device,
+                    &queue,
+                    &module,
+                    cp,
+                    &inputs,
+                    &outputs,
+                    push_constants,
+                    verbose,
+                )
+                .with_context(|| format!("Pipeline {} (compute) failed", pi))?;
             }
             Pipeline::Graphics(_) => {
                 // Unreachable now (caught above), kept for completeness
@@ -336,7 +345,13 @@ fn run_pipeline_interactive(
                 .to_rgba8();
             let (width, height) = img.dimensions();
             if verbose {
-                println!("[viz pipeline] --image {}: {} ({}x{})", name, path.display(), width, height);
+                println!(
+                    "[viz pipeline] --image {}: {} ({}x{})",
+                    name,
+                    path.display(),
+                    width,
+                    height
+                );
             }
             Ok((
                 name.clone(),
@@ -412,8 +427,15 @@ fn run_compute(
     // multi-stage case carries phase 1's, which is the size primary
     // outputs are tied to in current reduce/scan/scheduler layouts.
     let dispatch_hint = mp.stages.first().map(|s| &s.dispatch_size);
-    let buffers =
-        create_binding_buffers(device, queue, &mp.bindings, inputs, dispatch_hint, &pc_bytes, verbose)?;
+    let buffers = create_binding_buffers(
+        device,
+        queue,
+        &mp.bindings,
+        inputs,
+        dispatch_hint,
+        &pc_bytes,
+        verbose,
+    )?;
     let (layout, bind_group) = build_bind_group(device, &mp.bindings, &buffers)?;
 
     let pc_ranges: Vec<wgpu::PushConstantRange> = if total_pc_size > 0 {
@@ -464,7 +486,10 @@ fn run_compute(
         }
         .record(&mut encoder);
         queue.submit(Some(encoder.finish()));
-        let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        let _ = device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
     }
 
     // Read back and output results

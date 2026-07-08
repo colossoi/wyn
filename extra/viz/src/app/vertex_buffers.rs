@@ -14,7 +14,7 @@
 use std::fs;
 use std::path::Path;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use wgpu::{Buffer, BufferDescriptor, BufferUsages};
 use wyn_pipeline_descriptor::VertexFormat;
 
@@ -23,7 +23,7 @@ use crate::json::{Pipeline, PipelineDescriptor};
 /// One vertex-input attribute declared in the sidecar.
 #[derive(Debug, Clone)]
 struct VertexInputDecl {
-    location: u32,
+    slot: u32,
     name: String,
     format: VertexFormat,
 }
@@ -45,7 +45,7 @@ fn load_sidecar_vertex_inputs(spv_path: &Path) -> Vec<VertexInputDecl> {
                     .vertex_inputs
                     .iter()
                     .map(|v| VertexInputDecl {
-                        location: v.location,
+                        slot: v.slot,
                         name: v.name.clone(),
                         format: v.format,
                     })
@@ -102,8 +102,8 @@ pub fn build_vertex_buffers(
         let path = dir.join(format!("{}.bin", decl.name));
         let data = fs::read(&path).with_context(|| {
             format!(
-                "viz vf --storage-dir: vertex attribute '{}' (location {}) expects {:?}",
-                decl.name, decl.location, path,
+                "viz vf --storage-dir: vertex attribute '{}' (slot {}) expects {:?}",
+                decl.name, decl.slot, path,
             )
         })?;
         // Sanity: the file size must be a multiple of the format stride;
@@ -126,7 +126,7 @@ pub fn build_vertex_buffers(
         });
         queue.write_buffer(&buf, 0, &data);
         buffers.push(buf);
-        attribs.push((decl.format, decl.location));
+        attribs.push((decl.format, decl.slot));
     }
 
     Ok(VertexBuffers { buffers, attribs })

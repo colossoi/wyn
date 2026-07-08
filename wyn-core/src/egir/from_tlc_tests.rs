@@ -397,18 +397,18 @@ entry vertex_main() #[builtin(position)] vec4f32 =
     assert!(!program.entry_points.is_empty(), "Should have entry points");
 }
 
-// --- vertex_inputs population from #[location(n)] params ---------------
+// --- vertex_inputs population from #[vertex_slot(n)] params ------------
 
 #[test]
-fn vertex_inputs_populated_from_location_params() {
+fn vertex_inputs_populated_from_vertex_slot_params() {
     use crate::pipeline_descriptor::{Pipeline, VertexFormat};
 
     let src = "#[vertex]\n\
-               entry vs(#[location(0)] position: vec3f32, #[location(1)] color: vec3f32)\n\
-                 (#[builtin(position)] vec4f32, #[location(0)] vec3f32) =\n\
+               entry vs(#[vertex_slot(0)] position: vec3f32, #[vertex_slot(1)] color: vec3f32)\n\
+                 (#[builtin(position)] vec4f32, #[varying(0)] vec3f32) =\n\
                  (@[position.x, position.y, position.z, 1.0], color)\n\
                #[fragment]\n\
-               entry fs(#[location(0)] color: vec3f32) #[location(0)] vec4f32 =\n\
+               entry fs(#[varying(0)] color: vec3f32) #[target(screen)] vec4f32 =\n\
                  @[color.x, color.y, color.z, 1.0]";
     let converted = crate::compile_thru_ssa(src).expect("compile thru ssa");
 
@@ -419,34 +419,34 @@ fn vertex_inputs_populated_from_location_params() {
         })
     };
 
-    // Vertex stage: both #[location] params surface as vertex_inputs.
+    // Vertex stage: both #[vertex_slot] params surface as vertex_inputs.
     let vs = find("vs").expect("vertex graphics pipeline");
     assert_eq!(vs.vertex_inputs.len(), 2);
-    assert_eq!(vs.vertex_inputs[0].location, 0);
+    assert_eq!(vs.vertex_inputs[0].slot, 0);
     assert_eq!(vs.vertex_inputs[0].name, "position");
     assert_eq!(vs.vertex_inputs[0].format, VertexFormat::Float32x3);
-    assert_eq!(vs.vertex_inputs[1].location, 1);
+    assert_eq!(vs.vertex_inputs[1].slot, 1);
     assert_eq!(vs.vertex_inputs[1].name, "color");
     assert_eq!(vs.vertex_inputs[1].format, VertexFormat::Float32x3);
 
-    // Fragment stage: #[location] params there are varyings, not vertex
+    // Fragment stage: #[varying] params there are interpolants, not vertex
     // buffers — vertex_inputs stays empty.
     let fs = find("fs").expect("fragment graphics pipeline");
     assert!(fs.vertex_inputs.is_empty());
 }
 
-// --- fragment_outputs population from #[location(n)] returns ------------
+// --- fragment_outputs population from #[target(name)] returns ----------
 
 #[test]
-fn fragment_outputs_populated_from_location_returns() {
+fn fragment_outputs_populated_from_target_returns() {
     use crate::pipeline_descriptor::Pipeline;
 
     let src = "#[vertex]\n\
-               entry vs(#[location(0)] position: vec3f32)\n\
+               entry vs(#[vertex_slot(0)] position: vec3f32)\n\
                  #[builtin(position)] vec4f32 =\n\
                  @[position.x, position.y, position.z, 1.0]\n\
                #[fragment]\n\
-               entry fs() #[location(0)] vec4f32 =\n\
+               entry fs() #[target(screen)] vec4f32 =\n\
                  @[1.0, 0.0, 0.0, 1.0]";
     let converted = crate::compile_thru_ssa(src).expect("compile thru ssa");
 
@@ -460,10 +460,11 @@ fn fragment_outputs_populated_from_location_returns() {
         })
         .expect("fragment graphics pipeline");
 
-    // The single #[location(0)] return surfaces as one fragment output.
+    // The single #[target(screen)] return surfaces as one fragment output
+    // named for its resource, at position-derived slot 0.
     assert_eq!(fs.fragment_outputs.len(), 1);
     assert_eq!(fs.fragment_outputs[0].location, 0);
-    assert_eq!(fs.fragment_outputs[0].name, "fs_output");
+    assert_eq!(fs.fragment_outputs[0].name, "screen");
 }
 
 // --- vertex shaders may read #[uniform] params -------------------------
@@ -476,12 +477,12 @@ fn vertex_uniform_param_compiles_and_surfaces_binding() {
     // must not reject the `#[uniform]` param as a missing vertex
     // attribute, and the binding must surface in the descriptor.
     let src = "#[vertex]\n\
-               entry vs(#[location(0)] position: vec3f32,\n\
+               entry vs(#[vertex_slot(0)] position: vec3f32,\n\
                         #[uniform(set=1, binding=0)] scale: f32)\n\
                  #[builtin(position)] vec4f32 =\n\
                  @[position.x * scale, position.y * scale, position.z * scale, 1.0]\n\
                #[fragment]\n\
-               entry fs() #[location(0)] vec4f32 = @[1.0, 0.0, 0.0, 1.0]";
+               entry fs() #[target(screen)] vec4f32 = @[1.0, 0.0, 0.0, 1.0]";
     let converted = crate::compile_thru_ssa(src).expect("compile thru ssa");
 
     let vs = converted
@@ -514,14 +515,14 @@ fn texture_and_sampler_params_surface_bindings() {
     use crate::pipeline_descriptor::{Binding, Pipeline};
 
     let src = "#[vertex]\n\
-               entry vs(#[location(0)] pos: vec2f32)\n\
-                 (#[builtin(position)] vec4f32, #[location(0)] vec2f32) =\n\
+               entry vs(#[vertex_slot(0)] pos: vec2f32)\n\
+                 (#[builtin(position)] vec4f32, #[varying(0)] vec2f32) =\n\
                  (@[pos.x, pos.y, 0.0, 1.0], pos)\n\
                #[fragment]\n\
-               entry fs( #[location(0)] uv: vec2f32\n\
+               entry fs( #[varying(0)] uv: vec2f32\n\
                        , #[texture(set=0, binding=0)] tex: texture2d\n\
                        , #[sampler(set=0, binding=1)] samp: sampler\n\
-                       ) #[location(0)] vec4f32 =\n\
+                       ) #[target(screen)] vec4f32 =\n\
                  texture_sample(tex, samp, uv, 0.0) + texture_load(tex, @[0, 0], 0)";
     let converted = crate::compile_thru_ssa(src).expect("compile thru ssa");
 
@@ -576,8 +577,8 @@ fn graphics_entry_ret_type_comes_from_inner_body_not_def_ty() {
 
     let src = r#"
 #[vertex]
-entry vertex_main(#[location(0)] position: vec3f32, #[location(1)] color: vec3f32)
-  (#[builtin(position)] vec4f32, #[location(0)] vec3f32) =
+entry vertex_main(#[vertex_slot(0)] position: vec3f32, #[vertex_slot(1)] color: vec3f32)
+  (#[builtin(position)] vec4f32, #[varying(0)] vec3f32) =
   (@[position.x, position.y, position.z, 1.0], color)
 "#;
     let tlc = crate::test_pipeline::compile_to_reachable(src, false);

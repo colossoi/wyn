@@ -8,11 +8,11 @@
 use std::fs;
 use std::path::Path;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 
 pub use wyn_pipeline_descriptor::{
-    Access, Binding, BufferUsage, ComputePipeline, DispatchLen, DispatchSize, Pipeline,
-    PipelineDescriptor, StorageImageFormat,
+    Access, Binding, BufferUsage, ComputePipeline, DispatchLen, DispatchSize, Pipeline, PipelineDescriptor,
+    StorageImageFormat,
 };
 
 pub fn load_f32_json(path: &Path) -> Result<Vec<f32>> {

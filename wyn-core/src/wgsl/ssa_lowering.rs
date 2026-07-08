@@ -1229,7 +1229,7 @@ impl<'a> LowerCtx<'a> {
                     ));
                 }
                 if non_storage_outputs.len() == 1 {
-                    let (_, out) = non_storage_outputs[0];
+                    let (out_index, out) = non_storage_outputs[0];
                     let ty_str = self.type_emitter.type_to_wgsl(&out.ty)?;
                     let attr = match &out.decoration {
                         Some(IoDecoration::BuiltIn(b)) => {
@@ -1239,6 +1239,9 @@ impl<'a> LowerCtx<'a> {
                             format!("@builtin({}) ", wgsl_b)
                         }
                         Some(IoDecoration::Location(n)) => format!("@location({}) ", n),
+                        // A `#[target(name)]` render output takes its color
+                        // attachment slot from its position in the return tuple.
+                        None if out.target.is_some() => format!("@location({}) ", out_index),
                         None => String::new(),
                     };
                     (format!("{}{}", attr, ty_str), false)
@@ -1263,11 +1266,12 @@ impl<'a> LowerCtx<'a> {
                                 format!("@builtin({}) ", wgsl_b)
                             }
                             Some(IoDecoration::Location(n)) => format!("@location({}) ", n),
+                            None if out.target.is_some() => format!("@location({}) ", orig_index),
                             None => {
                                 return Err(crate::err_wgsl!(
                                     "entry '{}' output #{} has no decoration; multi-output \
-                                     WGSL entries require `@builtin(...)` or `@location(N)` on \
-                                     every field",
+                                     WGSL entries require `@builtin(...)`, `@location(N)`, or \
+                                     `#[target(name)]` on every field",
                                     entry.name,
                                     orig_index
                                 ));

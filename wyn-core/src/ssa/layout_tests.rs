@@ -1,5 +1,5 @@
 //! Tests for `ssa::layout` — currently the `vertex_format` mapping
-//! that drives `#[location(n)]` vertex-input attribute formats.
+//! that drives `#[vertex_slot(n)]` vertex-input attribute formats.
 
 use super::vertex_format;
 use crate::ast::{Type, TypeName};

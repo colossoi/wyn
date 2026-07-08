@@ -91,7 +91,7 @@ def sceneMap(p: vec3f32, iTime: f32) f32 =
 -- Fragment shader
 ------------------------------------------------------------
 #[fragment]
-entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[builtin(position)] fragCoord: vec4f32) #[target(screen)] vec4f32 =
   -- Flip Y for Vulkan so the screen-Y convention matches Shadertoy's.
   let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
   -- Screen-space UV ([-1,1] range, aspect-corrected)

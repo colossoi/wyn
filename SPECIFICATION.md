@@ -34,7 +34,8 @@ paradigm.
 - **Size-typed arrays**: array lengths participate in the type system;
   `def f(xs: [n]i32) [n]i32` declares a function whose output has the
   same length as its input.
-- **Attribute-driven shader interface**: attributes (`#[location]`,
+- **Attribute-driven shader interface**: attributes (`#[vertex_slot]`,
+  `#[varying]`, `#[target]`,
   `#[builtin]`, `#[storage]`, `#[uniform]`, `#[texture]`, `#[sampler]`,
   …) wire entry-point parameters and returns to GPU resources,
   built-ins, and inter-stage I/O.
@@ -96,7 +97,7 @@ stage that consumes the matched varyings and writes a color:
 ```wyn
 #[vertex]
 entry vs(#[builtin(vertex_index)] i: i32)
-  (#[builtin(position)] vec4f32, #[location(0)] vec3f32) =
+  (#[builtin(position)] vec4f32, #[varying(0)] vec3f32) =
   let pos = if i == 0 then @[-0.5, -0.5, 0.0, 1.0]
             else if i == 1 then @[ 0.5, -0.5, 0.0, 1.0]
             else                 @[ 0.0,  0.5, 0.0, 1.0] in
@@ -104,7 +105,7 @@ entry vs(#[builtin(vertex_index)] i: i32)
   (pos, color)
 
 #[fragment]
-entry fs(#[location(0)] color: vec3f32) #[location(0)] vec4f32 =
+entry fs(#[varying(0)] color: vec3f32) #[target(screen)] vec4f32 =
   @[color.x, color.y, color.z, 1.0]
 ```
 
@@ -649,7 +650,7 @@ entry vertex_main() #[builtin(position)] vec4f32 =
     @[0.0, 0.0, 0.0, 1.0]
 
 #[fragment]
-entry fragment_main() #[location(0)] vec4f32 =
+entry fragment_main() #[target(screen)] vec4f32 =
     @[1.0, 0.0, 0.0, 1.0]
 
 #[compute]
@@ -661,9 +662,10 @@ Entry-point declarations differ from `def` in three ways:
 - Parameters require the `name: type` form; pattern destructuring
   is not allowed.
 - Parameters and return positions accept attributes
-  (`#[builtin(...)]`, `#[location(n)]`, `#[storage]`, `#[uniform]`,
-  `#[texture]`, `#[sampler]`, `#[storage_image]`) that wire them to
-  GPU resources, built-ins, and inter-stage I/O.
+  (`#[builtin(...)]`, `#[vertex_slot(n)]`, `#[varying(n)]`,
+  `#[target(name)]`, `#[storage]`, `#[uniform]`, `#[texture]`,
+  `#[sampler]`, `#[storage_image]`) that wire them to GPU resources,
+  built-ins, and inter-stage I/O.
 - An empty parameter list still requires the parentheses:
   `entry foo() ret = ...`.
 
@@ -1952,7 +1954,9 @@ open import "file"
 attr ::= "vertex" | "fragment" | "compute"
          | "dispatch" "(" decimal ("," decimal ("," decimal)?)? ")"
          | "builtin" "(" builtin_name ")"
-         | "location" "(" decimal ")"
+         | "vertex_slot" "(" decimal ")"
+         | "varying" "(" decimal ")"
+         | "target" "(" identifier ")"
 
 builtin_name ::= "position" | "vertex_index" | "instance_index"
                | "front_facing" | "frag_depth" | "frag_coord"
@@ -1981,7 +1985,7 @@ entry vs_main() #[builtin(position)] vec4f32 = result
 **`#[fragment]`** - Marks an `entry` declaration as a fragment shader entry point
 ```wyn
 #[fragment]
-entry fs_main() #[location(0)] vec4f32 = result
+entry fs_main() #[target(screen)] vec4f32 = result
 ```
 
 **`#[compute]`** - Marks an `entry` declaration as a compute shader entry point
@@ -2035,21 +2039,34 @@ entry paint(#[builtin(global_invocation_id)] gid: vec3u32) () = ()
 - `#[builtin(num_workgroups)]` — total dispatched workgroup count
   along each axis (the value the host passed to `dispatch_workgroups`)
 
-#### Location-based Interface
+#### Stage Interface
 
-**`#[location(n)]`** - Maps parameters and return values to location-based interface variables for communication between shader stages.
+Three attributes wire the graphics stage interface. Each names one role:
+
+**`#[vertex_slot(n)]`** — a vertex-entry input fed from vertex-buffer
+attribute slot `n`. Every non-builtin vertex input must carry one, and slots
+must be unique; the type must be a 32-bit scalar or a 2–4 wide vector of
+`f32`/`i32`/`u32`.
+
+**`#[varying(n)]`** — an interpolated channel passed vertex→fragment. A vertex
+output `#[varying(n)]` is matched to the fragment input `#[varying(n)]` with
+the same number.
+
+**`#[target(name)]`** — a fragment output routed to the render-target resource
+`name` (use `screen` for the swapchain). The color-attachment slot is taken
+from the output's position in the return tuple.
 
 ```wyn
 #[vertex]
 entry vs(
     #[builtin(vertex_index)] vid: i32,
-    #[location(0)] pos: vec3f32
-) #[location(1)] vec3f32 = result
+    #[vertex_slot(0)] pos: vec3f32
+) (#[builtin(position)] vec4f32, #[varying(0)] vec3f32) = result
 
 #[fragment]
 entry fs(
-    #[location(1)] color: vec3f32
-) #[location(0)] vec4f32 = result
+    #[varying(0)] color: vec3f32
+) #[target(screen)] vec4f32 = result
 ```
 
 #### Resource Bindings
@@ -2070,10 +2087,10 @@ sampler resource. `set` defaults to 1; `binding` is required.
 ```wyn
 #[fragment]
 entry fs(
-    #[location(0)] uv: vec2f32,
+    #[varying(0)] uv: vec2f32,
     #[texture(set=0, binding=0)] tex: texture2d,
     #[sampler(set=0, binding=1)] samp: sampler
-) #[location(0)] vec4f32 =
+) #[target(screen)] vec4f32 =
     texture_sample(tex, samp, uv, 0.0)
 ```
 
@@ -2106,8 +2123,8 @@ is SPIR-V only.
 entry vertex_main(
     #[builtin(vertex_index)] vertex_id: i32,
     #[builtin(instance_index)] instance_id: i32,
-    #[location(0)] position: vec3f32,
-    #[location(1)] normal: vec3f32
+    #[vertex_slot(0)] position: vec3f32,
+    #[vertex_slot(1)] normal: vec3f32
 ) #[builtin(position)] vec4f32 =
     transform_position(position, vertex_id)
 ```
@@ -2116,10 +2133,10 @@ entry vertex_main(
 ```wyn
 #[fragment]
 entry fragment_main(
-    #[location(0)] world_pos: vec3f32,
-    #[location(1)] normal: vec3f32,
+    #[varying(0)] world_pos: vec3f32,
+    #[varying(1)] normal: vec3f32,
     #[builtin(front_facing)] is_front: bool
-) #[location(0)] vec4f32 =
+) #[target(screen)] vec4f32 =
     compute_color(world_pos, normal, is_front)
 ```
 
@@ -2267,14 +2284,15 @@ arithmetic; see [Matrix Types](#matrix-types).
 
 ### Constraints
 
-- Location numbers must be non-negative integers
+- `vertex_slot` / `varying` numbers must be non-negative integers
 - Each shader stage has specific allowed built-ins
 
 ### Type Safety
 
 The attribute system is statically type-checked:
 - Built-in attributes must be applied to compatible types
-- Location attributes can be used with any serializable type
+- `vertex_slot` inputs must have a valid vertex-buffer format; `varying`
+  channels may be any serializable type
 - Shader stage compatibility is verified at compile time
 - Interface matching between vertex and fragment shaders is validated
 
@@ -2351,10 +2369,10 @@ gradients — is planned future work.)
 ```wyn
 #[fragment]
 entry fs(
-    #[location(0)] uv: vec2f32,
+    #[varying(0)] uv: vec2f32,
     #[texture(set=0, binding=0)] tex: texture2d,
     #[sampler(set=0, binding=1)] samp: sampler
-) #[location(0)] vec4f32 =
+) #[target(screen)] vec4f32 =
     let filtered = texture_sample(tex, samp, uv, 0.0) in
     let texel    = texture_load(tex, @[0, 0], 0) in
     filtered + texel
@@ -2402,7 +2420,7 @@ entry main(
     #[uniform(set=1, binding=0)] iResolution: vec3f32,
     #[uniform(binding=1)]        iTime: f32,            -- set defaults to 1
     #[builtin(frag_coord)]       fragCoord: vec4f32
-) #[location(0)] vec4f32 = ...
+) #[target(screen)] vec4f32 = ...
 
 #[compute]
 entry sim(
@@ -2523,7 +2541,7 @@ entry paint(#[view(color, storage_write)] img: *storage_image, …) () =
 
 #[fragment]
 entry show(#[view(color, sampled)] tex: texture2d,
-           #[sampler(set=0, binding=1)] samp: sampler, …) #[location(0)] vec4f32 =
+           #[sampler(set=0, binding=1)] samp: sampler, …) #[target(screen)] vec4f32 =
   texture_sample(tex, samp, uv, 0.0)
 ```
 

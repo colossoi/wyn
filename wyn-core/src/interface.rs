@@ -27,7 +27,14 @@ use crate::{BindingRef, SymbolId};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Attribute {
     BuiltIn(spirv::BuiltIn),
-    Location(u32),
+    /// A fragment output routed to the named render-target resource. The color
+    /// attachment slot is derived from the output's position in the return tuple.
+    Target(String),
+    /// A vertex-entry input bound to numbered vertex-buffer attribute slot `n`.
+    VertexSlot(u32),
+    /// An interpolated channel matched between a vertex output and a fragment
+    /// input by the shared number `n`.
+    Varying(u32),
     Vertex,
     Fragment,
     /// Compute shader entry point. Workgroup size is determined by the compiler.
@@ -119,7 +126,15 @@ pub struct ComputeDispatchGrid {
 pub trait AttrExt {
     fn has<F: Fn(&Attribute) -> bool>(&self, pred: F) -> bool;
     fn first_builtin(&self) -> Option<spirv::BuiltIn>;
-    fn first_location(&self) -> Option<u32>;
+    /// The render-target resource name of a `#[target(name)]` output, if any.
+    fn first_target(&self) -> Option<&str>;
+    /// The vertex-buffer attribute slot of a `#[vertex_slot(n)]` input, if any.
+    fn first_vertex_slot(&self) -> Option<u32>;
+    /// The channel number of a `#[varying(n)]` interface value, if any.
+    fn first_varying(&self) -> Option<u32>;
+    /// The SPIR-V `Location` number of a numbered interface value — either a
+    /// `#[vertex_slot(n)]` or a `#[varying(n)]`, which share the SPIR-V decoration.
+    fn first_interface_location(&self) -> Option<u32>;
     fn has_uniform(&self) -> bool;
     fn has_storage(&self) -> bool;
     fn has_texture(&self) -> bool;
@@ -136,8 +151,20 @@ impl AttrExt for [Attribute] {
     fn first_builtin(&self) -> Option<spirv::BuiltIn> {
         self.iter().find_map(|a| if let Attribute::BuiltIn(b) = a { Some(*b) } else { None })
     }
-    fn first_location(&self) -> Option<u32> {
-        self.iter().find_map(|a| if let Attribute::Location(l) = a { Some(*l) } else { None })
+    fn first_target(&self) -> Option<&str> {
+        self.iter().find_map(|a| if let Attribute::Target(name) = a { Some(name.as_str()) } else { None })
+    }
+    fn first_vertex_slot(&self) -> Option<u32> {
+        self.iter().find_map(|a| if let Attribute::VertexSlot(n) = a { Some(*n) } else { None })
+    }
+    fn first_varying(&self) -> Option<u32> {
+        self.iter().find_map(|a| if let Attribute::Varying(n) = a { Some(*n) } else { None })
+    }
+    fn first_interface_location(&self) -> Option<u32> {
+        self.iter().find_map(|a| match a {
+            Attribute::VertexSlot(n) | Attribute::Varying(n) => Some(*n),
+            _ => None,
+        })
     }
     fn has_uniform(&self) -> bool {
         self.has(|a| matches!(a, Attribute::Uniform { .. }))

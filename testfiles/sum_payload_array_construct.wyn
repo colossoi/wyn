@@ -20,7 +20,7 @@ def shade(t: #big([4]i32) | #small(i32) | #empty) i32 =
   case #empty    -> 0
 
 #[fragment]
-entry fragment_main(#[builtin(position)] _fc: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[builtin(position)] _fc: vec4f32) #[target(screen)] vec4f32 =
   let a = shade(#big([1, 2, 3, 4]))
   let b = shade(#small(7))
   let c = shade(#empty) in

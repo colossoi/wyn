@@ -2,7 +2,7 @@ use super::{SkolemId, Type, TypeExt, TypeName, TypeScheme};
 use crate::ast::*;
 use crate::builtins::{by_id, BuiltinId};
 use crate::error::{CompilerError, Result};
-use crate::interface::Attribute;
+use crate::interface::{AttrExt, Attribute};
 use crate::module_manager::ModuleManager;
 use crate::name_resolution::NameResolution;
 use crate::scope::{IdentifierKind, ScopeEntry, ScopeStack};
@@ -1769,12 +1769,12 @@ impl<'a> TypeChecker<'a> {
             }
         }
 
-        // Vertex entries: validate `#[location(n)]` input parameters.
+        // Vertex entries: validate `#[vertex_slot(n)]` input parameters.
         // Each must carry a GPU vertex-buffer format (32-bit scalar or
-        // 2-4 wide vector of f32/i32/u32), locations must be unique, and
-        // every non-builtin vertex param must be explicitly located —
-        // the pipeline descriptor needs a stable location per attribute.
-        // Fragment `#[location(n)]` params are varyings and unaffected.
+        // 2-4 wide vector of f32/i32/u32), slots must be unique, and
+        // every non-builtin vertex param must have an explicit slot —
+        // the pipeline descriptor needs a stable slot per attribute.
+        // Fragment inputs are `#[varying(n)]` interpolants, validated below.
         if matches!(entry_stage, Some(Attribute::Vertex)) {
             // `parse_entry_params` builds `Typed(Attributed([attrs], Name), ty)`
             // — `Typed` outermost — so peel through `Typed` to reach the attrs.
@@ -1807,27 +1807,35 @@ impl<'a> TypeChecker<'a> {
                 }) {
                     continue;
                 }
-                let location = attrs.iter().find_map(|a| match a {
-                    Attribute::Location(n) => Some(*n),
+                if let Some(bad) = attrs.iter().find_map(|a| match a {
+                    Attribute::Varying(_) => Some("#[varying(n)]"),
+                    Attribute::Target(_) => Some("#[target(name)]"),
                     _ => None,
-                });
+                }) {
+                    bail_type_at!(
+                        param.h.span,
+                        "{} is not valid on a vertex input; vertex-buffer inputs use #[vertex_slot(n)]",
+                        bad
+                    );
+                }
+                let slot = attrs.first_vertex_slot();
                 let is_builtin = attrs.iter().any(|a| matches!(a, Attribute::BuiltIn(_)));
-                match location {
-                    Some(loc) => {
+                match slot {
+                    Some(slot) => {
                         if crate::ssa::layout::vertex_format(param_type).is_none() {
                             bail_type_at!(
                                 param.h.span,
-                                "vertex shader #[location({})] input must be an explicitly-typed \
+                                "vertex shader #[vertex_slot({})] input must be an explicitly-typed \
                                  32-bit scalar or vec2/3/4 of f32/i32/u32; got {:?}",
-                                loc,
+                                slot,
                                 param_type
                             );
                         }
-                        if !seen_locations.insert(loc) {
+                        if !seen_locations.insert(slot) {
                             bail_type_at!(
                                 param.h.span,
-                                "duplicate vertex shader input #[location({})]",
-                                loc
+                                "duplicate vertex shader input #[vertex_slot({})]",
+                                slot
                             );
                         }
                     }
@@ -1835,7 +1843,7 @@ impl<'a> TypeChecker<'a> {
                     None => {
                         bail_type_at!(
                             param.h.span,
-                            "vertex shader input parameter must have #[location(n)] or #[builtin(...)]"
+                            "vertex shader input parameter must have #[vertex_slot(n)] or #[builtin(...)]"
                         );
                     }
                 }

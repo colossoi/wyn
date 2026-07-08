@@ -30,7 +30,7 @@ entry fragment_main(#[builtin(position)] pos: vec4f32,
                     #[uniform(set=1, binding=0)] iTime: f32,
                     #[view(frame, sampled)] tex: texture2d,
                     #[sampler(set=0, binding=1)] samp: sampler)
-  #[location(0)] vec4f32 =
+  #[target(screen)] vec4f32 =
   let uv = @[pos.x / 1024.0, pos.y / 1024.0]
   let base = texture_sample(tex, samp, uv, 0.0) in
   @[base.x, 0.5 + 0.5 * f32.sin(iTime), 0.0, 1.0]

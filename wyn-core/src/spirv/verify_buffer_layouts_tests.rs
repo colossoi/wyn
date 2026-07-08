@@ -87,6 +87,7 @@ fn storage_output(set: u32, binding: u32, ty: Type<TypeName>) -> EntryOutput {
     EntryOutput {
         ty,
         decoration: None,
+        target: None,
         storage_binding: Some(BindingRef::new(set, binding)),
         length: None,
     }

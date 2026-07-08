@@ -11,9 +11,9 @@
 //!      `#[sampler]`, push constants) and compiler intermediates
 //!      (`lift_gathers` gather buffers, parallelize phase IO).
 //!
-//!   2. `publish_graphics_io` — thread `#[location(N)]` graphics
-//!      attributes from a vertex / fragment entry's inputs / outputs
-//!      into the descriptor's `vertex_inputs` / `fragment_outputs`.
+//!   2. `publish_graphics_io` — thread a vertex entry's `#[vertex_slot(n)]`
+//!      inputs and a fragment entry's `#[target(name)]` outputs into the
+//!      descriptor's `vertex_inputs` / `fragment_outputs`.
 //!
 //! Why an extension trait: `PipelineDescriptor` lives in the
 //! `wyn-pipeline-descriptor` crate (shared with host runtimes), so
@@ -40,8 +40,8 @@ pub trait PipelineDescriptorPublish {
     fn publish_implicit_bindings(&mut self, entries: &[EgirEntry]);
 
     /// Populate `vertex_inputs` and `fragment_outputs` on graphics
-    /// pipelines from `#[location(N)]` decorations on the matching
-    /// vertex/fragment entry's inputs/outputs.
+    /// pipelines from a vertex entry's `#[vertex_slot(n)]` inputs and a
+    /// fragment entry's `#[target(name)]` outputs.
     fn publish_graphics_io(&mut self, entries: &[EgirEntry]);
 
     /// Workgroup size the parallelizer chose for the compute entry
@@ -348,11 +348,11 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
 }
 
 /// Populate `vertex_inputs` of the Graphics pipeline backing a vertex
-/// entry from its `#[location(n)]` parameters. Each `IoDecoration::Location`
-/// input becomes a `VertexAttribute` carrying the location, name, and
-/// the format derived from the input's type. The type checker guarantees
-/// every such input has a valid vertex format, so `vertex_format`
-/// returning `None` here is a compiler bug.
+/// entry from its `#[vertex_slot(n)]` parameters. Each becomes a
+/// `VertexAttribute` carrying the slot, name, and the format derived from
+/// the input's type. The type checker guarantees every such input has a
+/// valid vertex format, so `vertex_format` returning `None` here is a
+/// compiler bug.
 fn publish_vertex_inputs(pipeline: &mut PipelineDescriptor, entry: &EgirEntry) {
     let vertex_inputs = match pipeline.pipelines.iter_mut().find(|p| match p {
         Pipeline::Graphics(gp) => gp.stages.iter().any(|s| s.entry_point == entry.name),
@@ -363,15 +363,15 @@ fn publish_vertex_inputs(pipeline: &mut PipelineDescriptor, entry: &EgirEntry) {
     };
 
     for input in &entry.inputs {
-        let Some(IoDecoration::Location(location)) = input.decoration else {
+        let Some(IoDecoration::Location(slot)) = input.decoration else {
             continue;
         };
         let format = crate::ssa::layout::vertex_format(&input.ty).expect(
-            "vertex #[location] param must have a valid vertex format \
+            "vertex #[vertex_slot] param must have a valid vertex format \
              (the type checker enforces this)",
         );
         vertex_inputs.push(VertexAttribute {
-            location,
+            slot,
             name: input.name.clone(),
             format,
         });
@@ -379,10 +379,9 @@ fn publish_vertex_inputs(pipeline: &mut PipelineDescriptor, entry: &EgirEntry) {
 }
 
 /// Populate `fragment_outputs` of the Graphics pipeline backing a
-/// fragment entry from its `#[location(n)]` outputs. Each
-/// `IoDecoration::Location` output becomes a `FragmentOutput` carrying
-/// the location and a synthesized name. `EntryOutput` has no name
-/// field, so the name is derived from the entry name + position.
+/// fragment entry from its `#[target(name)]` outputs. Each targeted output
+/// becomes a `FragmentOutput` naming the render-target resource, with the
+/// color-attachment slot taken from the output's position in the return tuple.
 fn publish_fragment_outputs(pipeline: &mut PipelineDescriptor, entry: &EgirEntry) {
     let fragment_outputs = match pipeline.pipelines.iter_mut().find(|p| match p {
         Pipeline::Graphics(gp) => gp.stages.iter().any(|s| s.entry_point == entry.name),
@@ -392,14 +391,14 @@ fn publish_fragment_outputs(pipeline: &mut PipelineDescriptor, entry: &EgirEntry
         _ => return,
     };
 
-    let multi = entry.outputs.len() > 1;
     for (i, output) in entry.outputs.iter().enumerate() {
-        let Some(IoDecoration::Location(location)) = output.decoration else {
+        let Some(name) = output.target.clone() else {
             continue;
         };
-        let name =
-            if multi { format!("{}_output_{}", entry.name, i) } else { format!("{}_output", entry.name) };
-        fragment_outputs.push(FragmentOutput { location, name });
+        fragment_outputs.push(FragmentOutput {
+            location: i as u32,
+            name,
+        });
     }
 }
 

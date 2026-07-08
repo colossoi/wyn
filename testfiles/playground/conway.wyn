@@ -74,7 +74,7 @@ entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] 
     verts[vertex_id]
 
 #[fragment]
-entry display(#[uniform(set = 1, binding = 0)] iResolution: vec3f32, #[uniform(set = 1, binding = 1)] grid_width: i32, #[uniform(set = 1, binding = 2)] grid_height: i32, #[storage(set = 1, binding = 3, access = read)] display_board: []i32, #[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
+entry display(#[uniform(set = 1, binding = 0)] iResolution: vec3f32, #[uniform(set = 1, binding = 1)] grid_width: i32, #[uniform(set = 1, binding = 2)] grid_height: i32, #[storage(set = 1, binding = 3, access = read)] display_board: []i32, #[builtin(position)] fragCoord: vec4f32) #[target(screen)] vec4f32 =
     -- Flip Y so (0, 0) renders at the top-left visually.
     let px = fragCoord.x in
     let py = iResolution.y - fragCoord.y in

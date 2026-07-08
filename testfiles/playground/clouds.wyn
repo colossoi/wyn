@@ -86,7 +86,7 @@ entry fragment_main(
   #[uniform(set=1, binding=0)] iResolution: vec3f32,
   #[uniform(set=1, binding=1)] iTime: f32,
   #[builtin(position)] fragCoord: vec4f32
-) #[location(0)] vec4f32 =
+) #[target(screen)] vec4f32 =
   -- Flip Y for Vulkan NDC
   let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
   let uv = (fc * 2.0 - iResolution.xy) / min(iResolution.x, iResolution.y) in

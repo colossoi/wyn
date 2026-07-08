@@ -210,7 +210,7 @@ def getPixel(coord: vec2f32, time: f32, iResolution: vec3f32, iTime: f32) vec3f3
 ------------------------------------------------------------
 
 #[fragment]
-entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[uniform(set=1, binding=5)] iMouse: vec4f32, #[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[uniform(set=1, binding=5)] iMouse: vec4f32, #[builtin(position)] fragCoord: vec4f32) #[target(screen)] vec4f32 =
   -- Flip Y coordinate for Vulkan
   let coord = @[fragCoord.x, iResolution.y - fragCoord.y] in
   let time = iTime * 0.3 + iMouse.x * 0.01 in

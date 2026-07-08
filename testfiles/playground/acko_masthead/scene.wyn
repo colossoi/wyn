@@ -110,20 +110,20 @@ def t_offset(time: f32, speed: f32, bend: f32, duration: f32) f32 =
 -- Vertex shader
 --
 --   Inputs (per-vertex):
---     location 0: position     (x, y, z, ao)
---     location 1: normal       (nx, ny, nz, _)
---     location 2: vertex_color (r, g, b, _)
---     location 3: vert_s       arc-length offset from track's `initial`
---     location 4: track_meta   (speed, bend, duration, length)
+--     slot 0: position     (x, y, z, ao)
+--     slot 1: normal       (nx, ny, nz, _)
+--     slot 2: vertex_color (r, g, b, _)
+--     slot 3: vert_s       arc-length offset from track's `initial`
+--     slot 4: track_meta   (speed, bend, duration, length)
 --
 --   Outputs (varyings):
---     location 0: view-space normal (un-normalized — the rasterizer's
+--     varying 0: view-space normal (un-normalized — the rasterizer's
 --                 interpolation produces nlen < 1 across facets, which
 --                 the fragment shader uses for the silhouette/outline
 --                 term and for silhouette darkening on the zenith dot).
---     location 1: vertex color
---     location 2: AO factor
---     location 3: view-space position (camera at origin in this frame,
+--     varying 1: vertex color
+--     varying 2: AO factor
+--     varying 3: view-space position (camera at origin in this frame,
 --                 so length(view_pos) is the per-fragment distance —
 --                 used for fog).
 --
@@ -135,19 +135,19 @@ def t_offset(time: f32, speed: f32, bend: f32, duration: f32) f32 =
 ------------------------------------------------------------
 #[vertex]
 entry vertex_main
-  ( #[location(0)] position    : vec4f32
-  , #[location(1)] normal      : vec4f32
-  , #[location(2)] vertex_color: vec4f32
-  , #[location(3)] vert_s      : f32
-  , #[location(4)] track_meta  : vec4f32
+  ( #[vertex_slot(0)] position    : vec4f32
+  , #[vertex_slot(1)] normal      : vec4f32
+  , #[vertex_slot(2)] vertex_color: vec4f32
+  , #[vertex_slot(3)] vert_s      : f32
+  , #[vertex_slot(4)] track_meta  : vec4f32
   , #[uniform(set=1, binding=0)] iResolution: vec3f32
   , #[uniform(set=1, binding=1)] iTime: f32
   )
   ( #[builtin(position)] vec4f32
-  , #[location(0)] vec3f32  -- view-space normal (un-normalized)
-  , #[location(1)] vec3f32  -- color
-  , #[location(2)] f32      -- AO
-  , #[location(3)] vec3f32  -- view-space position
+  , #[varying(0)] vec3f32  -- view-space normal (un-normalized)
+  , #[varying(1)] vec3f32  -- color
+  , #[varying(2)] f32      -- AO
+  , #[varying(3)] vec3f32  -- view-space position
   ) =
   let world    = @[position.x, position.y, position.z] in
   let n_world  = @[normal.x, normal.y, normal.z] in
@@ -195,11 +195,11 @@ def zenith_view: vec3f32 = @[0.0, 0.9636, 0.2667]
 
 #[fragment]
 entry fragment_main
-  ( #[location(0)] n_in    : vec3f32
-  , #[location(1)] color   : vec3f32
-  , #[location(2)] ao      : f32
-  , #[location(3)] view_pos: vec3f32
-  ) #[location(0)] vec4f32 =
+  ( #[varying(0)] n_in    : vec3f32
+  , #[varying(1)] color   : vec3f32
+  , #[varying(2)] ao      : f32
+  , #[varying(3)] view_pos: vec3f32
+  ) #[target(screen)] vec4f32 =
   let n_norm = normalize(n_in) in
 
   -- Diffuse: sun with normalized N, zenith with un-normalized N

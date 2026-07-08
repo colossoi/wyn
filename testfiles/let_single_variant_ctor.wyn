@@ -16,6 +16,6 @@ def unpack(b: #boxed(i32)) i32 =
   x + 1
 
 #[fragment]
-entry fragment_main(#[builtin(position)] _fc: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[builtin(position)] _fc: vec4f32) #[target(screen)] vec4f32 =
   let v = unpack(#boxed(41)) in
   @[f32.i32(v) / 255.0f32, 0.0f32, 0.0f32, 1.0f32]

@@ -379,7 +379,7 @@ def main_image(iResolution:vec2f32, iTime:f32, fragCoord:vec2f32) vec4f32 =
 
 -- Fragment shader entry point
 #[fragment]
-entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[builtin(frag_coord)] pos:vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[builtin(frag_coord)] pos:vec4f32) #[target(screen)] vec4f32 =
   let width = iResolution.x in
   let height = iResolution.y in
   let time = iTime in

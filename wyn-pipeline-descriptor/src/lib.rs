@@ -1216,7 +1216,7 @@ impl VertexFormat {
 /// offset/stride) are a later extension.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VertexAttribute {
-    pub location: u32,
+    pub slot: u32,
     pub name: String,
     pub format: VertexFormat,
 }
@@ -1492,7 +1492,7 @@ mod tests {
     #[test]
     fn vertex_attribute_serde_round_trip() {
         let attr = VertexAttribute {
-            location: 1,
+            slot: 1,
             name: "color".to_string(),
             format: VertexFormat::Float32x3,
         };
@@ -1500,7 +1500,7 @@ mod tests {
         // Format serializes snake_case.
         assert!(json.contains("\"float32x3\""), "got: {json}");
         let back: VertexAttribute = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.location, 1);
+        assert_eq!(back.slot, 1);
         assert_eq!(back.name, "color");
         assert_eq!(back.format, VertexFormat::Float32x3);
     }

@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use wgpu::{
     Adapter, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingResource, BindingType, BufferBindingType, BufferDescriptor, BufferUsages,
@@ -17,8 +17,8 @@ use wgpu::{
 };
 
 use crate::json::{
-    Access, Binding, BufferUsage, DispatchLen, DispatchSize, Pipeline, PipelineDescriptor,
-    StorageImageFormat, load_f32_json,
+    load_f32_json, Access, Binding, BufferUsage, DispatchLen, DispatchSize, Pipeline, PipelineDescriptor,
+    StorageImageFormat,
 };
 use crate::specs::PushConstantSpec;
 use wyn_pipeline_descriptor::StorageTextureSize;
@@ -515,14 +515,20 @@ pub fn readback_buffer(
     });
     encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, byte_size);
     queue.submit(Some(encoder.finish()));
-    let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+    let _ = device.poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: None,
+    });
 
     let slice = staging.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |result| {
         tx.send(result).unwrap();
     });
-    let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+    let _ = device.poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: None,
+    });
     rx.recv().unwrap()?;
 
     let data = slice.get_mapped_range();
@@ -586,14 +592,20 @@ pub fn readback_texture_rgba8(
         },
     );
     queue.submit(Some(encoder.finish()));
-    let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+    let _ = device.poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: None,
+    });
 
     let slice = staging.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |result| {
         tx.send(result).unwrap();
     });
-    let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+    let _ = device.poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: None,
+    });
     rx.recv().unwrap()?;
     let data = slice.get_mapped_range();
 

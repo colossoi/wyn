@@ -533,7 +533,7 @@ fn test_parse_single_attributed_return_type() {
 #[test]
 fn test_parse_tuple_attributed_return_type() {
     let entry = single_entry(
-        "#[vertex] entry vertex_main() (#[builtin(position)] vec4, #[location(0)] vec3) = result",
+        "#[vertex] entry vertex_main() (#[builtin(position)] vec4, #[varying(0)] vec3) = result",
     );
 
     assert_eq!(entry.outputs.len(), 2);
@@ -545,8 +545,8 @@ fn test_parse_tuple_attributed_return_type() {
         Some(Attribute::BuiltIn(spirv::BuiltIn::Position))
     );
 
-    // Check second element: [location(0)] vec3
-    assert_eq!(entry.outputs[1].attribute, Some(Attribute::Location(0)));
+    // Check second element: [varying(0)] vec3
+    assert_eq!(entry.outputs[1].attribute, Some(Attribute::Varying(0)));
 }
 
 #[test]
@@ -558,13 +558,16 @@ fn test_parse_unattributed_return_type() {
 }
 
 #[test]
-fn test_parse_location_attribute_on_return_type() {
-    let entry = single_entry("#[fragment] entry frag() #[location(0)] [4]f32 = result");
+fn test_parse_target_attribute_on_return_type() {
+    let entry = single_entry("#[fragment] entry frag() #[target(screen)] [4]f32 = result");
 
     assert_eq!(entry.entry_type, Attribute::Fragment);
     assert_eq!(entry.outputs.len(), 1);
     assert_eq!(entry.outputs.len(), 1);
-    assert_eq!(entry.outputs[0].attribute, Some(Attribute::Location(0)));
+    assert_eq!(
+        entry.outputs[0].attribute,
+        Some(Attribute::Target("screen".to_string()))
+    );
     assert_eq!(
         entry.outputs[0].ty,
         crate::types::sized_array_placeholder(4, crate::types::f32())
@@ -585,15 +588,15 @@ fn test_parse_parameter_with_builtin_attribute() {
 }
 
 #[test]
-fn test_parse_parameter_with_location_attribute() {
-    let entry = single_entry("#[fragment] entry frag(#[location(1)] color: [3]f32) [4]f32 = result");
+fn test_parse_parameter_with_varying_attribute() {
+    let entry = single_entry("#[fragment] entry frag(#[varying(1)] color: [3]f32) [4]f32 = result");
 
     assert_eq!(entry.params.len(), 1);
     assert_typed_param_with_attrs!(
         &entry.params[0],
         "color",
         crate::types::sized_array_placeholder(3, crate::types::f32()),
-        vec![Attribute::Location(1)]
+        vec![Attribute::Varying(1)]
     );
 }
 
@@ -965,7 +968,7 @@ fn test_parse_vector_arithmetic() {
 fn test_parse_multiple_shader_outputs() {
     let entry = single_entry(
         r#"
-            #[fragment] entry fragment_main() (#[location(0)] vec4, #[location(1)] vec3) =
+            #[fragment] entry fragment_main() (#[target(albedo)] vec4, #[target(normal)] vec3) =
               let color = vec4(1.0f32, 0.5f32, 0.2f32, 1.0f32) in
               let normal = vec3(0.0f32, 1.0f32, 0.0f32) in
               (color, normal)
@@ -978,11 +981,17 @@ fn test_parse_multiple_shader_outputs() {
     assert_eq!(entry.outputs.len(), 2);
     assert_eq!(entry.outputs.len(), 2);
 
-    // Check first output: [location(0)] vec4
-    assert_eq!(entry.outputs[0].attribute, Some(Attribute::Location(0)));
+    // Check first output: [target(albedo)] vec4
+    assert_eq!(
+        entry.outputs[0].attribute,
+        Some(Attribute::Target("albedo".to_string()))
+    );
 
-    // Check second output: [location(1)] vec3
-    assert_eq!(entry.outputs[1].attribute, Some(Attribute::Location(1)));
+    // Check second output: [target(normal)] vec3
+    assert_eq!(
+        entry.outputs[1].attribute,
+        Some(Attribute::Target("normal".to_string()))
+    );
 }
 
 #[test]
@@ -3801,7 +3810,7 @@ fn test_parse_rejects_uniform_with_set_zero() {
 entry frag(
     #[uniform(set=0, binding=0)] iTime: f32,
     #[builtin(position)] fragCoord: vec4f32
-) #[location(0)] vec4f32 = @[0.0, 0.0, 0.0, 1.0]
+) #[target(screen)] vec4f32 = @[0.0, 0.0, 0.0, 1.0]
 "#;
     expect_parse_error(src, |err| match err {
         CompilerError::ParseError(msg, _)
@@ -3839,7 +3848,7 @@ fn test_parse_accepts_uniform_with_set_one() {
 entry frag(
     #[uniform(set=1, binding=0)] iTime: f32,
     #[builtin(position)] fragCoord: vec4f32
-) #[location(0)] vec4f32 = @[0.0, 0.0, 0.0, 1.0]
+) #[target(screen)] vec4f32 = @[0.0, 0.0, 0.0, 1.0]
 "#;
     let tokens = tokenize(src).expect("tokenize");
     let mut nc = NodeCounter::new();

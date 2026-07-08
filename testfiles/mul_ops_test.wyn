@@ -26,7 +26,7 @@ def rot3z(a: f32) mat3f32 =
     [0.0, 0.0, 1.0]]
 
 #[fragment]
-entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[builtin(frag_coord)] fragCoord: vec4f32) #[location(0)] vec4f32 =
+entry fragment_main(#[uniform(set=1, binding=0)] iResolution: vec3f32, #[uniform(set=1, binding=1)] iTime: f32, #[builtin(frag_coord)] fragCoord: vec4f32) #[target(screen)] vec4f32 =
   let uv = @[(fragCoord.x / iResolution.x) * 2.0 - 1.0,
              (fragCoord.y / iResolution.y) * 2.0 - 1.0]
   let t = iTime in
