@@ -61,6 +61,10 @@ pub enum Attribute {
         set: u32,
         binding: u32,
         backing: Option<crate::BindingRef>,
+        /// The render-target `resource` this samples, from `#[view(name,
+        /// sampled)]` on a resource with no storage backing. Frame-graph
+        /// identity: a fragment `#[target(name)]` write and this read share it.
+        resource: Option<String>,
     },
     /// A sampler resource bound at (set, binding). Carried on an
     /// entry-point param of type `sampler`.

@@ -959,6 +959,7 @@ impl<'a> Parser<'a> {
                         set,
                         binding,
                         backing: None,
+                        resource: None,
                     })
                 } else {
                     Ok(Attribute::Sampler { set, binding })

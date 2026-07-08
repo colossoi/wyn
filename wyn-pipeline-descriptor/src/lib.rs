@@ -116,14 +116,30 @@ impl FrameGraph {
                         None,
                         &feedback_reads,
                     );
+                    // Each `#[target(name)]` fragment output writes a render
+                    // resource, keyed by name as a texture so it shares identity
+                    // with any downstream pass that samples it. Attributed to the
+                    // fragment stage, which produces the attachments.
+                    let target_writes: Vec<FrameAccess> = graphics
+                        .fragment_outputs
+                        .iter()
+                        .map(|output| FrameAccess {
+                            resource: builder.ensure_named(FrameResourceKind::Texture, &output.name),
+                            role: FrameAccessRole::Current,
+                        })
+                        .collect();
                     for (stage_index, stage) in graphics.stages.iter().enumerate() {
+                        let mut stage_writes = writes.clone();
+                        if matches!(stage.stage, ShaderStage::Fragment) {
+                            stage_writes.extend(target_writes.iter().cloned());
+                        }
                         builder.push_pass(
                             FramePassKind::from_shader_stage(&stage.stage),
                             stage.entry_point.clone(),
                             pipeline_index,
                             stage_index,
                             reads.clone(),
-                            writes.clone(),
+                            stage_writes,
                             &mut last_writer,
                             &mut last_readers,
                         );
@@ -509,6 +525,13 @@ pub enum Binding {
         multisampled: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         backing: Option<BackingRef>,
+        /// The logical render-target resource this samples, from
+        /// `#[view(name, sampled)]` on a resource with no storage backing. It
+        /// is the frame-graph identity — a fragment `#[target(name)]` write and
+        /// this read share the resource `name`, so a producer→consumer edge
+        /// forms. `None` for a host-provided texture or a storage-backed view.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resource: Option<String>,
     },
     /// Sampler (descriptor set binding). Bound from a
     /// `#[sampler(set, binding)]` entry-point param of type `sampler`.
@@ -632,7 +655,7 @@ impl FrameGraphBuilder {
             let kind = resource_kind_from_key(&key);
             self.resources.insert(key, index);
             self.graph.resources.push(FrameResource {
-                name: binding_name(binding).to_string(),
+                name: resource_name(binding).to_string(),
                 kind,
                 bindings: Vec::new(),
                 extent: binding_extent(binding),
@@ -673,6 +696,33 @@ impl FrameGraphBuilder {
         }) {
             resource.bindings.push(binding_ref);
         }
+        index
+    }
+
+    /// Ensure a resource that has no descriptor binding — a fragment render
+    /// target, identified by logical name. If a binding of the same name and
+    /// kind already created the resource (a downstream pass sampling it), this
+    /// returns that same resource, so the render write and the sampled read
+    /// share one identity and a producer→consumer edge forms.
+    fn ensure_named(&mut self, kind: FrameResourceKind, name: &str) -> usize {
+        let key = ResourceKey::Named {
+            kind,
+            name: name.to_string(),
+        };
+        if let Some(&index) = self.resources.get(&key) {
+            return index;
+        }
+        let index = self.graph.resources.len();
+        self.resources.insert(key, index);
+        self.graph.resources.push(FrameResource {
+            name: name.to_string(),
+            kind,
+            bindings: Vec::new(),
+            extent: None,
+            first_pass: None,
+            last_pass: None,
+            history: Vec::new(),
+        });
         index
     }
 
@@ -922,11 +972,17 @@ fn resource_key(pipeline_index: usize, binding: &Binding) -> ResourceKey {
             size: *size,
         },
         Binding::Texture {
-            name, backing, ..
+            name,
+            backing,
+            resource,
+            ..
         } => {
             // A sampled view aliasing a compute storage-texture keys to that
-            // backing slot (the identity is the write it reads). A plain sampled
-            // texture is one logical resource by name across its readers.
+            // backing slot (the identity is the write it reads). A view of a
+            // render-target `resource` keys to that resource name, so it shares
+            // identity with the fragment `#[target(name)]` that writes it. A
+            // plain sampled texture is one logical resource by name across
+            // its readers.
             if let Some(backing) = backing {
                 ResourceKey::Descriptor {
                     kind: FrameResourceKind::StorageTexture,
@@ -936,7 +992,7 @@ fn resource_key(pipeline_index: usize, binding: &Binding) -> ResourceKey {
             } else {
                 ResourceKey::Named {
                     kind: FrameResourceKind::Texture,
-                    name: name.clone(),
+                    name: resource.clone().unwrap_or_else(|| name.clone()),
                 }
             }
         }
@@ -979,6 +1035,20 @@ fn binding_name(binding: &Binding) -> &str {
         | Binding::Texture { name, .. }
         | Binding::Sampler { name, .. }
         | Binding::StorageTexture { name, .. } => name,
+    }
+}
+
+/// The binding's logical resource name — its frame-graph identity. A texture
+/// viewing a render-target `resource` reports that resource's name (shared with
+/// the fragment `#[target(name)]` write and any other reader), not its local
+/// param name. Everything else reports its own name.
+fn resource_name(binding: &Binding) -> &str {
+    match binding {
+        Binding::Texture {
+            resource: Some(resource),
+            ..
+        } => resource,
+        _ => binding_name(binding),
     }
 }
 
@@ -1420,6 +1490,7 @@ mod tests {
                         view_dimension: TextureViewDimension::D2,
                         multisampled: false,
                         backing: Some(BackingRef { set: 1, binding: 0 }),
+                        resource: None,
                     }],
                     vertex_inputs: vec![],
                     fragment_outputs: vec![],
@@ -1448,6 +1519,75 @@ mod tests {
     }
 
     #[test]
+    fn frame_graph_fragment_target_write_orders_downstream_reader() {
+        // A fragment `#[target(scene_depth)]` write and a later pass that
+        // samples a texture named `scene_depth` resolve to one resource, so the
+        // reader depends on the fragment that produced it.
+        let mut descriptor = PipelineDescriptor {
+            pipelines: vec![
+                Pipeline::Graphics(GraphicsPipeline {
+                    stages: vec![GraphicsStage {
+                        entry_point: "scene_fragment".to_string(),
+                        stage: ShaderStage::Fragment,
+                    }],
+                    bindings: vec![],
+                    vertex_inputs: vec![],
+                    fragment_outputs: vec![FragmentOutput {
+                        location: 0,
+                        name: "scene_depth".to_string(),
+                    }],
+                    feedback: vec![],
+                }),
+                Pipeline::Compute(ComputePipeline {
+                    bindings: vec![Binding::Texture {
+                        set: 0,
+                        binding: 0,
+                        name: "scene_depth".to_string(),
+                        sample_type: TextureSampleType::Float { filterable: true },
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: false,
+                        backing: None,
+                        resource: None,
+                    }],
+                    stages: vec![ComputeStage {
+                        entry_point: "occ_reduce".to_string(),
+                        workgroup_size: (8, 8, 1),
+                        dispatch_size: DispatchSize::Fixed {
+                            x: 1,
+                            y: 1,
+                            z: 1,
+                            explicit: false,
+                        },
+                        reads: vec![],
+                        writes: vec![],
+                    }],
+                    default_total_threads: None,
+                    feedback: vec![],
+                }),
+            ],
+            frame_graph: FrameGraph::default(),
+        };
+
+        descriptor.rebuild_frame_graph();
+        let graph = &descriptor.frame_graph;
+
+        // The render target and the sampled read are one resource.
+        let depth: Vec<_> = graph.resources.iter().filter(|r| r.name == "scene_depth").collect();
+        assert_eq!(depth.len(), 1, "target write and reader must share one resource");
+        let depth_index = graph.resources.iter().position(|r| r.name == "scene_depth").unwrap();
+
+        // The fragment pass writes it; the compute pass reads it and depends on
+        // the fragment.
+        let frag = &graph.passes[0];
+        assert_eq!(frag.name, "scene_fragment");
+        assert!(frag.writes.iter().any(|a| a.resource == depth_index));
+        let reader = &graph.passes[1];
+        assert_eq!(reader.name, "occ_reduce");
+        assert!(reader.reads.iter().any(|a| a.resource == depth_index));
+        assert_eq!(reader.depends_on, vec![0]);
+    }
+
+    #[test]
     fn frame_graph_marks_history_reads_without_self_dependency() {
         let mut descriptor = PipelineDescriptor {
             pipelines: vec![Pipeline::Compute(ComputePipeline {
@@ -1468,6 +1608,7 @@ mod tests {
                         view_dimension: TextureViewDimension::D2,
                         multisampled: false,
                         backing: Some(BackingRef { set: 1, binding: 0 }),
+                        resource: None,
                     },
                 ],
                 stages: vec![ComputeStage {

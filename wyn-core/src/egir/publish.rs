@@ -190,6 +190,7 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                             set: b.set,
                             binding: b.binding,
                         }),
+                        resource: input.texture_resource.clone(),
                     });
                 } else if let Some(br) = input.sampler_binding {
                     if claimed.contains(&(br.set, br.binding)) {

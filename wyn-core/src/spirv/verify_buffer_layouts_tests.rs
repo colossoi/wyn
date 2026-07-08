@@ -77,6 +77,7 @@ fn storage_input(name: &str, set: u32, binding: u32, ty: Type<TypeName>) -> Entr
         push_constant: None,
         texture_binding: None,
         texture_backing: None,
+        texture_resource: None,
         sampler_binding: None,
         storage_image_binding: None,
         length: None,

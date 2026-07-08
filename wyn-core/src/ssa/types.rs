@@ -552,6 +552,11 @@ pub struct EntryInput {
     /// aliases a compiler-managed `resource` allocation. `None` for host
     /// textures. Flows to the descriptor's `Binding::Texture.backing`.
     pub texture_backing: Option<BindingRef>,
+    /// The render-target `resource` name this texture samples, from
+    /// `#[view(name, sampled)]` on a resource with no storage backing. Flows to
+    /// `Binding::Texture.resource` — the frame-graph identity shared with the
+    /// fragment `#[target(name)]` write.
+    pub texture_resource: Option<String>,
     /// Programmer-attributed `#[sampler(set, binding)]` on a `sampler` param.
     pub sampler_binding: Option<BindingRef>,
     /// Programmer-attributed `#[storage_image(set, binding, format, access,

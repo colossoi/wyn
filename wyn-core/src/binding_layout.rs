@@ -239,6 +239,23 @@ pub fn extract_texture_backing(pattern: &Pattern) -> Option<BindingRef> {
     }
 }
 
+/// The render-target `resource` name a `#[view(name, sampled)]` texture samples,
+/// stamped by `resolve_resources`. `None` for a host texture or a storage view.
+pub fn extract_texture_resource(pattern: &Pattern) -> Option<String> {
+    match &pattern.kind {
+        PatternKind::Attributed(attrs, inner) => {
+            for attr in attrs {
+                if let Attribute::Texture { resource, .. } = attr {
+                    return resource.clone();
+                }
+            }
+            extract_texture_resource(inner)
+        }
+        PatternKind::Typed(inner, _) => extract_texture_resource(inner),
+        _ => None,
+    }
+}
+
 /// Extract a `#[sampler(set, binding)]` from a param pattern.
 pub fn extract_sampler_binding(pattern: &Pattern) -> Option<BindingRef> {
     match &pattern.kind {

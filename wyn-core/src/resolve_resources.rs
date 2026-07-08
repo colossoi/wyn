@@ -232,6 +232,10 @@ fn rewrite_view_param(
                     set: binding.set,
                     binding: binding.binding,
                     backing: res.current_storage,
+                    // A resource with no storage allocation is a render target;
+                    // carry its name as the frame-graph identity so a fragment
+                    // `#[target(name)]` write and this sampled read coalesce.
+                    resource: res.current_storage.is_none().then(|| resource.clone()),
                 }
             }
         };

@@ -940,6 +940,7 @@ mod tests {
             push_constant: None,
             texture_binding: None,
             texture_backing: None,
+            texture_resource: None,
             sampler_binding: None,
             storage_image_binding: Some((
                 image,
