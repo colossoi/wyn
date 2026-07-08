@@ -256,6 +256,24 @@ pub fn extract_texture_resource(pattern: &Pattern) -> Option<String> {
     }
 }
 
+/// The `resource` name a `#[view(name, storage_read|storage_write)]` storage
+/// image accesses, stamped by `resolve_resources`. `None` for a bare
+/// `#[storage_image(...)]` param.
+pub fn extract_storage_image_resource(pattern: &Pattern) -> Option<String> {
+    match &pattern.kind {
+        PatternKind::Attributed(attrs, inner) => {
+            for attr in attrs {
+                if let Attribute::StorageImage { resource, .. } = attr {
+                    return resource.clone();
+                }
+            }
+            extract_storage_image_resource(inner)
+        }
+        PatternKind::Typed(inner, _) => extract_storage_image_resource(inner),
+        _ => None,
+    }
+}
+
 /// Extract a `#[sampler(set, binding)]` from a param pattern.
 pub fn extract_sampler_binding(pattern: &Pattern) -> Option<BindingRef> {
     match &pattern.kind {
@@ -293,6 +311,7 @@ pub fn extract_storage_image_binding(
                     format,
                     access,
                     size,
+                    ..
                 } = attr
                 {
                     return Some((BindingRef::new(*set, *binding), *format, *access, *size));

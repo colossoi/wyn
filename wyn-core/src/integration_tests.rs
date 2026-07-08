@@ -7724,7 +7724,9 @@ fn resource_dependencies_publish_frame_graph() {
     let resource_index =
         graph.feedback[0].write_resource.expect("feedback write should resolve to a frame resource");
     let resource = &graph.resources[resource_index];
-    assert_eq!(resource.kind, FrameResourceKind::StorageTexture);
+    // Views of one `resource` collapse to a single texture-kind frame resource
+    // keyed by name; the storage allocation's size still rides on `extent`.
+    assert_eq!(resource.kind, FrameResourceKind::Texture);
     assert_eq!(resource.first_pass, Some(0));
     assert_eq!(resource.last_pass, Some(0));
     assert!(matches!(
@@ -7735,8 +7737,14 @@ fn resource_dependencies_publish_frame_graph() {
                 height: 64
             })
     ));
-    assert!(resource.history.iter().any(|role| role.role == FrameHistoryRoleKind::ReadPrevious));
+    // The current-frame write and the previous-frame read are distinct
+    // ping-pong buffers → distinct resources, linked by the feedback pair: the
+    // write resource carries `WriteCurrent`, the read resource `ReadPrevious`.
     assert!(resource.history.iter().any(|role| role.role == FrameHistoryRoleKind::WriteCurrent));
+    let read_index =
+        graph.feedback[0].read_resource.expect("feedback read should resolve to a frame resource");
+    let read_resource = &graph.resources[read_index];
+    assert!(read_resource.history.iter().any(|role| role.role == FrameHistoryRoleKind::ReadPrevious));
 }
 
 /// Descriptor bindings must be slot-unique — a duplicated (set, binding)

@@ -561,6 +561,12 @@ pub enum Binding {
         access: Access,
         #[serde(default)]
         size: StorageTextureSize,
+        /// The logical `resource` this storage view accesses, from
+        /// `#[view(name, storage_read|storage_write)]`. Frame-graph identity:
+        /// storage views, sampled views, and a fragment `#[target(name)]` of the
+        /// same resource collapse to one texture-kind resource keyed by `name`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resource: Option<String>,
     },
 }
 
@@ -667,20 +673,36 @@ impl FrameGraphBuilder {
         };
 
         let resource = &mut self.graph.resources[index];
-        // Bindings merging onto one slot must be the same resource kind — the
-        // sole cross-kind case is a sampled texture view aliasing its
-        // storage-texture backing (keyed to the backing's StorageTexture slot).
+        // Bindings merging onto one resource are normally the same kind. Two
+        // cross-kind cases exist: a sampled texture view aliasing its
+        // storage-texture backing (keyed to that StorageTexture slot), and the
+        // views of one named `resource` — storage and sampled reads plus a
+        // fragment `#[target]` write — which collapse to a Texture-kind resource.
+        let named_resource = matches!(
+            binding,
+            Binding::Texture {
+                resource: Some(_),
+                ..
+            } | Binding::StorageTexture {
+                resource: Some(_),
+                ..
+            }
+        );
         debug_assert!(
             binding_kind(binding) == resource.kind
                 || (matches!(binding, Binding::Texture { backing: Some(_), .. })
-                    && resource.kind == FrameResourceKind::StorageTexture),
+                    && resource.kind == FrameResourceKind::StorageTexture)
+                || (named_resource && resource.kind == FrameResourceKind::Texture),
             "binding kind {:?} disagrees with merged resource kind {:?} at one slot",
             binding_kind(binding),
             resource.kind
         );
         merge_extent(&mut resource.extent, binding_extent(binding));
+        // A storage-texture write names the resource (a sampled reader that
+        // merged first may have carried a stale placeholder name); the logical
+        // resource name wins over a local param name.
         if matches!(binding, Binding::StorageTexture { .. }) {
-            resource.name = binding_name(binding).to_string();
+            resource.name = resource_name(binding).to_string();
         }
 
         let binding_ref = FrameBindingRef {
@@ -1001,10 +1023,24 @@ fn resource_key(pipeline_index: usize, binding: &Binding) -> ResourceKey {
             set: *set,
             binding: *binding,
         },
-        Binding::StorageTexture { set, binding, .. } => ResourceKey::Descriptor {
-            kind: FrameResourceKind::StorageTexture,
-            set: *set,
-            binding: *binding,
+        // A storage view of a named `resource` shares identity with that
+        // resource's other views and its `#[target]` write — one texture-kind
+        // resource keyed by name. A compute-only storage texture keys by slot.
+        Binding::StorageTexture {
+            set,
+            binding,
+            resource,
+            ..
+        } => match resource {
+            Some(resource) => ResourceKey::Named {
+                kind: FrameResourceKind::Texture,
+                name: resource.clone(),
+            },
+            None => ResourceKey::Descriptor {
+                kind: FrameResourceKind::StorageTexture,
+                set: *set,
+                binding: *binding,
+            },
         },
     }
 }
@@ -1045,6 +1081,10 @@ fn binding_name(binding: &Binding) -> &str {
 fn resource_name(binding: &Binding) -> &str {
     match binding {
         Binding::Texture {
+            resource: Some(resource),
+            ..
+        }
+        | Binding::StorageTexture {
             resource: Some(resource),
             ..
         } => resource,
@@ -1463,6 +1503,7 @@ mod tests {
                             width: 64,
                             height: 32,
                         },
+                        resource: None,
                     }],
                     stages: vec![ComputeStage {
                         entry_point: "paint".to_string(),
@@ -1588,6 +1629,72 @@ mod tests {
     }
 
     #[test]
+    fn frame_graph_target_write_merges_with_storage_read_view() {
+        // A fragment `#[target(gbuf)]` and a compute `#[view(gbuf,
+        // storage_read)]` collapse to one texture-kind resource keyed by name,
+        // even though the read binding is a storage texture. The compute depends
+        // on the fragment.
+        let mut descriptor = PipelineDescriptor {
+            pipelines: vec![
+                Pipeline::Graphics(GraphicsPipeline {
+                    stages: vec![GraphicsStage {
+                        entry_point: "frag".to_string(),
+                        stage: ShaderStage::Fragment,
+                    }],
+                    bindings: vec![],
+                    vertex_inputs: vec![],
+                    fragment_outputs: vec![FragmentOutput {
+                        location: 0,
+                        name: "gbuf".to_string(),
+                    }],
+                    feedback: vec![],
+                }),
+                Pipeline::Compute(ComputePipeline {
+                    bindings: vec![Binding::StorageTexture {
+                        set: 1,
+                        binding: 0,
+                        name: "g".to_string(),
+                        format: StorageImageFormat::R32Float,
+                        access: Access::ReadOnly,
+                        size: StorageTextureSize::SameAsWindow,
+                        resource: Some("gbuf".to_string()),
+                    }],
+                    stages: vec![ComputeStage {
+                        entry_point: "reduce".to_string(),
+                        workgroup_size: (8, 8, 1),
+                        dispatch_size: DispatchSize::Fixed {
+                            x: 1,
+                            y: 1,
+                            z: 1,
+                            explicit: false,
+                        },
+                        reads: vec![],
+                        writes: vec![],
+                    }],
+                    default_total_threads: None,
+                    feedback: vec![],
+                }),
+            ],
+            frame_graph: FrameGraph::default(),
+        };
+
+        descriptor.rebuild_frame_graph();
+        let graph = &descriptor.frame_graph;
+
+        let gbuf: Vec<_> = graph.resources.iter().filter(|r| r.name == "gbuf").collect();
+        assert_eq!(
+            gbuf.len(),
+            1,
+            "storage read and target write must share one resource"
+        );
+        assert_eq!(gbuf[0].kind, FrameResourceKind::Texture);
+        let idx = graph.resources.iter().position(|r| r.name == "gbuf").unwrap();
+        assert!(graph.passes[0].writes.iter().any(|a| a.resource == idx));
+        assert!(graph.passes[1].reads.iter().any(|a| a.resource == idx));
+        assert_eq!(graph.passes[1].depends_on, vec![0]);
+    }
+
+    #[test]
     fn frame_graph_marks_history_reads_without_self_dependency() {
         let mut descriptor = PipelineDescriptor {
             pipelines: vec![Pipeline::Compute(ComputePipeline {
@@ -1599,6 +1706,7 @@ mod tests {
                         format: StorageImageFormat::Rgba16Float,
                         access: Access::WriteOnly,
                         size: StorageTextureSize::SameAsWindow,
+                        resource: None,
                     },
                     Binding::Texture {
                         set: 1,

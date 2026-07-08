@@ -568,6 +568,10 @@ pub struct EntryInput {
         crate::interface::StorageAccess,
         crate::pipeline_descriptor::StorageTextureSize,
     )>,
+    /// The `resource` name a `#[view(name, storage_*)]` storage image accesses.
+    /// Flows to `Binding::StorageTexture.resource` — the frame-graph identity
+    /// shared with the resource's other views and its `#[target]` write.
+    pub storage_image_resource: Option<String>,
     /// Minimum-required host allocation for a `storage_binding` input,
     /// inferred from the entry body's slice references to this param.
     /// `Some(Fixed { bytes: K * sizeof(elem) })` when every reference to

@@ -941,6 +941,7 @@ mod tests {
             texture_binding: None,
             texture_backing: None,
             texture_resource: None,
+            storage_image_resource: None,
             sampler_binding: None,
             storage_image_binding: Some((
                 image,

@@ -217,6 +217,7 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                             crate::interface::StorageAccess::ReadWrite => Access::ReadWrite,
                         },
                         size,
+                        resource: input.storage_image_resource.clone(),
                     });
                 }
             }

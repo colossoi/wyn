@@ -17,8 +17,8 @@ use super::types::EffectToken;
 use crate::ast::{Span, TypeName};
 use crate::binding_layout::{
     extract_io_decoration, extract_sampler_binding, extract_storage_access, extract_storage_binding,
-    extract_storage_image_binding, extract_texture_backing, extract_texture_binding,
-    extract_texture_resource, extract_uniform_binding,
+    extract_storage_image_binding, extract_storage_image_resource, extract_texture_backing,
+    extract_texture_binding, extract_texture_resource, extract_uniform_binding,
 };
 use crate::interface;
 use crate::interface::{EntryParamBinding, EntryParamBindingKind};
@@ -412,6 +412,7 @@ fn convert_entry_point(
         let texture_resource = entry.params.get(i).and_then(extract_texture_resource);
         let sampler_binding = entry.params.get(i).and_then(extract_sampler_binding);
         let storage_image_binding = entry.params.get(i).and_then(extract_storage_image_binding);
+        let storage_image_resource = entry.params.get(i).and_then(extract_storage_image_resource);
 
         // Uniqueness is an ownership-tracking concept that's already been
         // consumed by `apply_ownership`; codegen operates on the stripped
@@ -461,6 +462,7 @@ fn convert_entry_point(
                     texture_binding: None,
                     texture_backing: None,
                     texture_resource: None,
+                    storage_image_resource: None,
                     sampler_binding: None,
                     storage_image_binding: None,
                     length: None,
@@ -518,6 +520,7 @@ fn convert_entry_point(
             texture_resource,
             sampler_binding,
             storage_image_binding,
+            storage_image_resource,
             length: None,
         });
     }

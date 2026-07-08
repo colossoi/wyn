@@ -86,6 +86,10 @@ pub enum Attribute {
         format: crate::pipeline_descriptor::StorageImageFormat,
         access: StorageAccess,
         size: crate::pipeline_descriptor::StorageTextureSize,
+        /// The `resource` this storage view accesses, from `#[view(name,
+        /// storage_read|storage_write)]`. Frame-graph identity shared with the
+        /// resource's other views and any `#[target(name)]` write.
+        resource: Option<String>,
     },
     /// A view of a named top-level `resource`, e.g.
     /// `#[view(color, storage_write)]`. Transient: the resource-resolution

@@ -1045,6 +1045,7 @@ impl<'a> Parser<'a> {
                     format,
                     access,
                     size,
+                    resource: None,
                 })
             }
             "view" => {
