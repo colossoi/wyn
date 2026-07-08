@@ -590,8 +590,20 @@ impl Binding {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// Identity of a frame-graph resource. A resource is a *logical* buffer/texture,
+/// distinct from any one pipeline's `(set, binding)` contract for it: the same
+/// buffer bound by several pipelines (at possibly different slots) is one
+/// resource. Identity is the logical name for the kinds that are shared across
+/// pipelines (storage buffers, sampled textures); the physical slot is retained
+/// only where it *is* the identity — a sampled view aliasing a compute
+/// storage-texture keys to that backing slot, and push constants are inherently
+/// per-pipeline.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum ResourceKey {
+    Named {
+        kind: FrameResourceKind,
+        name: String,
+    },
     Descriptor {
         kind: FrameResourceKind,
         set: u32,
@@ -617,10 +629,11 @@ impl FrameGraphBuilder {
             index
         } else {
             let index = self.graph.resources.len();
+            let kind = resource_kind_from_key(&key);
             self.resources.insert(key, index);
             self.graph.resources.push(FrameResource {
                 name: binding_name(binding).to_string(),
-                kind: resource_kind_from_key(key),
+                kind,
                 bindings: Vec::new(),
                 extent: binding_extent(binding),
                 first_pass: None,
@@ -892,10 +905,11 @@ fn pipeline_bindings(pipeline: &Pipeline) -> &[Binding] {
 
 fn resource_key(pipeline_index: usize, binding: &Binding) -> ResourceKey {
     match binding {
-        Binding::StorageBuffer { set, binding, .. } => ResourceKey::Descriptor {
+        // A storage buffer is one logical resource across every pipeline that
+        // binds it, regardless of each pipeline's `(set, binding)` slot.
+        Binding::StorageBuffer { name, .. } => ResourceKey::Named {
             kind: FrameResourceKind::StorageBuffer,
-            set: *set,
-            binding: *binding,
+            name: name.clone(),
         },
         Binding::Uniform { set, binding, .. } => ResourceKey::Descriptor {
             kind: FrameResourceKind::Uniform,
@@ -908,17 +922,23 @@ fn resource_key(pipeline_index: usize, binding: &Binding) -> ResourceKey {
             size: *size,
         },
         Binding::Texture {
-            set,
-            binding,
-            backing,
-            ..
+            name, backing, ..
         } => {
-            let (kind, set, binding) = if let Some(backing) = backing {
-                (FrameResourceKind::StorageTexture, backing.set, backing.binding)
+            // A sampled view aliasing a compute storage-texture keys to that
+            // backing slot (the identity is the write it reads). A plain sampled
+            // texture is one logical resource by name across its readers.
+            if let Some(backing) = backing {
+                ResourceKey::Descriptor {
+                    kind: FrameResourceKind::StorageTexture,
+                    set: backing.set,
+                    binding: backing.binding,
+                }
             } else {
-                (FrameResourceKind::Texture, *set, *binding)
-            };
-            ResourceKey::Descriptor { kind, set, binding }
+                ResourceKey::Named {
+                    kind: FrameResourceKind::Texture,
+                    name: name.clone(),
+                }
+            }
         }
         Binding::Sampler { set, binding, .. } => ResourceKey::Descriptor {
             kind: FrameResourceKind::Sampler,
@@ -933,9 +953,9 @@ fn resource_key(pipeline_index: usize, binding: &Binding) -> ResourceKey {
     }
 }
 
-fn resource_kind_from_key(key: ResourceKey) -> FrameResourceKind {
+fn resource_kind_from_key(key: &ResourceKey) -> FrameResourceKind {
     match key {
-        ResourceKey::Descriptor { kind, .. } => kind,
+        ResourceKey::Named { kind, .. } | ResourceKey::Descriptor { kind, .. } => *kind,
         ResourceKey::PushConstant { .. } => FrameResourceKind::PushConstant,
     }
 }
