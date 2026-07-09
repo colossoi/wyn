@@ -9,7 +9,7 @@
 //! Vulkan/WebGPU pipeline accordingly. All algorithm knowledge lives in the
 //! compiler.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
@@ -57,6 +57,42 @@ impl FrameGraph {
             && self.indirect_draws.is_empty()
     }
 
+    /// An execution order satisfying every `depends_on`, or the passes that lie
+    /// on or behind a cycle.
+    ///
+    /// A cycle means no order runs each pass after the ones it depends on — a
+    /// producer and a consumer that each need the other's result within one
+    /// frame. Declaration order is one solution whenever the graph is acyclic,
+    /// but not the only one; passes with no path between them may overlap.
+    pub fn topological_order(&self) -> Result<Vec<usize>, Vec<usize>> {
+        let mut remaining: Vec<usize> = self.passes.iter().map(|pass| pass.depends_on.len()).collect();
+        let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); self.passes.len()];
+        for (index, pass) in self.passes.iter().enumerate() {
+            for &dependency in &pass.depends_on {
+                dependents[dependency].push(index);
+            }
+        }
+
+        let mut ready: VecDeque<usize> =
+            (0..self.passes.len()).filter(|&index| remaining[index] == 0).collect();
+        let mut order = Vec::with_capacity(self.passes.len());
+        while let Some(index) = ready.pop_front() {
+            order.push(index);
+            for &next in &dependents[index] {
+                remaining[next] -= 1;
+                if remaining[next] == 0 {
+                    ready.push_back(next);
+                }
+            }
+        }
+
+        if order.len() == self.passes.len() {
+            Ok(order)
+        } else {
+            Err((0..self.passes.len()).filter(|&index| remaining[index] > 0).collect())
+        }
+    }
+
     pub fn from_pipelines(pipelines: &[Pipeline]) -> Self {
         let mut builder = FrameGraphBuilder::default();
 
@@ -84,15 +120,16 @@ impl FrameGraph {
                 Pipeline::Compute(compute) => {
                     let feedback_reads = feedback_read_slots(&compute.feedback);
                     for (stage_index, stage) in compute.stages.iter().enumerate() {
-                        let (reads, writes) =
+                        let accesses =
                             builder.compute_stage_accesses(pipeline_index, compute, stage, &feedback_reads);
                         builder.push_pass(
                             FramePassKind::Compute,
                             stage.entry_point.clone(),
                             pipeline_index,
                             stage_index,
-                            reads,
-                            writes,
+                            accesses.reads,
+                            accesses.writes,
+                            accesses.produces,
                             &mut last_writer,
                             &mut last_readers,
                         );
@@ -109,13 +146,14 @@ impl FrameGraph {
                     // dependency is missed) and currently has no consumer; a
                     // precise split would need per-binding stage visibility.
                     // Computed once and shared, since the accesses are identical.
-                    let (reads, writes) = builder.binding_table_accesses(
+                    let accesses = builder.binding_table_accesses(
                         pipeline_index,
                         &graphics.bindings,
                         None,
                         None,
                         &feedback_reads,
                     );
+                    let (reads, writes) = (accesses.reads, accesses.writes);
                     // Each `#[target(name)]` fragment output writes a render
                     // resource, keyed by name as a texture so it shares identity
                     // with any downstream pass that samples it. Attributed to the
@@ -140,6 +178,7 @@ impl FrameGraph {
                             stage_index,
                             reads.clone(),
                             stage_writes,
+                            accesses.produces.clone(),
                             &mut last_writer,
                             &mut last_readers,
                         );
@@ -148,6 +187,7 @@ impl FrameGraph {
             }
         }
 
+        builder.link_producers_to_consumers();
         builder.graph
     }
 }
@@ -645,10 +685,26 @@ enum ResourceKey {
     },
 }
 
+/// One stage's accesses: the frame resources it reads, the ones it writes, and
+/// the subset of those writes that produce a value for another pass.
+#[derive(Default)]
+struct StageAccesses {
+    reads: Vec<FrameAccess>,
+    writes: Vec<FrameAccess>,
+    produces: BTreeSet<usize>,
+}
+
 #[derive(Default)]
 struct FrameGraphBuilder {
     graph: FrameGraph,
     resources: BTreeMap<ResourceKey, usize>,
+    /// Passes that *produce* each resource — they write a storage buffer the
+    /// descriptor labels an entry output. Producer and consumer are a fact
+    /// about the bindings, so the edge between them does not depend on the
+    /// order the two passes happen to be declared in.
+    producers: BTreeMap<usize, BTreeSet<usize>>,
+    /// Passes that read each resource this frame.
+    readers: BTreeMap<usize, BTreeSet<usize>>,
 }
 
 impl FrameGraphBuilder {
@@ -809,7 +865,7 @@ impl FrameGraphBuilder {
         compute: &ComputePipeline,
         stage: &ComputeStage,
         feedback_reads: &BTreeSet<(u32, u32)>,
-    ) -> (Vec<FrameAccess>, Vec<FrameAccess>) {
+    ) -> StageAccesses {
         let explicit_reads = (!stage.reads.is_empty()).then_some(stage.reads.as_slice());
         let explicit_writes = (!stage.writes.is_empty()).then_some(stage.writes.as_slice());
         self.binding_table_accesses(
@@ -828,20 +884,28 @@ impl FrameGraphBuilder {
         explicit_reads: Option<&[usize]>,
         explicit_writes: Option<&[usize]>,
         feedback_reads: &BTreeSet<(u32, u32)>,
-    ) -> (Vec<FrameAccess>, Vec<FrameAccess>) {
+    ) -> StageAccesses {
         let explicit = explicit_reads.is_some() || explicit_writes.is_some();
-        let mut reads = Vec::new();
-        let mut writes = Vec::new();
+        let mut accesses = StageAccesses::default();
 
         if explicit {
             for index in explicit_reads.into_iter().flatten().copied() {
                 if let Some(binding) = bindings.get(index) {
-                    self.push_read(&mut reads, pipeline_index, index, binding, feedback_reads);
+                    self.push_read(
+                        &mut accesses.reads,
+                        pipeline_index,
+                        index,
+                        binding,
+                        feedback_reads,
+                    );
                 }
             }
             for index in explicit_writes.into_iter().flatten().copied() {
                 if let Some(binding) = bindings.get(index) {
-                    self.push_write(&mut writes, pipeline_index, index, binding);
+                    let resource = self.push_write(&mut accesses.writes, pipeline_index, index, binding);
+                    if binding_is_produced(binding) {
+                        accesses.produces.insert(resource);
+                    }
                 }
             }
         }
@@ -860,14 +924,23 @@ impl FrameGraphBuilder {
             }
             let (read, write) = binding_declared_access(binding);
             if read {
-                self.push_read(&mut reads, pipeline_index, index, binding, feedback_reads);
+                self.push_read(
+                    &mut accesses.reads,
+                    pipeline_index,
+                    index,
+                    binding,
+                    feedback_reads,
+                );
             }
             if write {
-                self.push_write(&mut writes, pipeline_index, index, binding);
+                let resource = self.push_write(&mut accesses.writes, pipeline_index, index, binding);
+                if binding_is_produced(binding) {
+                    accesses.produces.insert(resource);
+                }
             }
         }
 
-        (reads, writes)
+        accesses
     }
 
     fn push_read(
@@ -893,7 +966,7 @@ impl FrameGraphBuilder {
         pipeline_index: usize,
         binding_index: usize,
         binding: &Binding,
-    ) {
+    ) -> usize {
         let resource = self.ensure_binding(pipeline_index, binding_index, binding);
         push_unique_access(
             writes,
@@ -902,6 +975,32 @@ impl FrameGraphBuilder {
                 role: FrameAccessRole::Current,
             },
         );
+        resource
+    }
+
+    /// Order every consumer of a produced resource after its producers.
+    ///
+    /// Producer and consumer are recorded in the bindings, so this edge holds
+    /// whichever order the two passes are declared in. The hazard sweep can only
+    /// see backwards, and would otherwise record a producer declared after its
+    /// consumer as a write-after-read — the same dependency, inverted.
+    fn link_producers_to_consumers(&mut self) {
+        for (resource, producers) in &self.producers {
+            let Some(readers) = self.readers.get(resource) else {
+                continue;
+            };
+            for &consumer in readers {
+                for &producer in producers {
+                    if producer != consumer {
+                        self.graph.passes[consumer].depends_on.push(producer);
+                    }
+                }
+            }
+        }
+        for pass in &mut self.graph.passes {
+            pass.depends_on.sort_unstable();
+            pass.depends_on.dedup();
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -913,6 +1012,7 @@ impl FrameGraphBuilder {
         stage_index: usize,
         reads: Vec<FrameAccess>,
         writes: Vec<FrameAccess>,
+        produces: BTreeSet<usize>,
         last_writer: &mut Vec<Option<usize>>,
         last_readers: &mut Vec<BTreeSet<usize>>,
     ) {
@@ -934,10 +1034,24 @@ impl FrameGraphBuilder {
             if let Some(writer) = last_writer[access.resource] {
                 depends_on.insert(writer);
             }
-            depends_on.extend(last_readers[access.resource].iter().copied());
+            // Writing a produced resource is the production. Its readers are
+            // consumers, ordered after it by `link_producers_to_consumers`, so
+            // an earlier reader is a consumer scheduled too early rather than
+            // one observing a prior value there is no reason to preserve.
+            if !produces.contains(&access.resource) {
+                depends_on.extend(last_readers[access.resource].iter().copied());
+            }
         }
 
         let pass_index = self.graph.passes.len();
+        for resource in produces {
+            self.producers.entry(resource).or_default().insert(pass_index);
+        }
+        for access in &reads {
+            if access.role == FrameAccessRole::Current {
+                self.readers.entry(access.resource).or_default().insert(pass_index);
+            }
+        }
         for access in reads.iter().chain(writes.iter()) {
             let resource = &mut self.graph.resources[access.resource];
             resource.first_pass.get_or_insert(pass_index);
@@ -1145,6 +1259,23 @@ fn merge_extent(target: &mut Option<FrameResourceExtent>, candidate: Option<Fram
         },
         None => {}
     }
+}
+
+/// True when writing `binding` produces a value for another pass to read,
+/// rather than overwriting shared state. A storage buffer the descriptor labels
+/// an entry output (or a pipeline-internal intermediate) is a produced value;
+/// its readers bind it as an input. Image views carry no such label — a
+/// `storage_write` view of a `resource` is a write to state, and whether a
+/// reader wants this frame's value or the last one is not recoverable from the
+/// bindings.
+fn binding_is_produced(binding: &Binding) -> bool {
+    matches!(
+        binding,
+        Binding::StorageBuffer {
+            usage: BufferUsage::Output | BufferUsage::Intermediate,
+            ..
+        }
+    )
 }
 
 fn binding_declared_access(binding: &Binding) -> (bool, bool) {
@@ -1630,6 +1761,139 @@ mod tests {
         assert_eq!(reader.name, "occ_reduce");
         assert!(reader.reads.iter().any(|a| a.resource == depth_index));
         assert_eq!(reader.depends_on, vec![0]);
+    }
+
+    /// Two compute passes sharing one storage buffer: `producer` writes it as an
+    /// entry output, `consumer` reads it as an input. The edge follows the
+    /// bindings, so it is the same whichever order the passes are declared in.
+    fn producer_consumer_descriptor(producer_first: bool) -> PipelineDescriptor {
+        let buffer = |access: Access, usage: BufferUsage| Binding::StorageBuffer {
+            set: 0,
+            binding: 0,
+            access,
+            usage,
+            name: "inst".to_string(),
+            length: None,
+        };
+        let stage = |entry: &str| ComputeStage {
+            entry_point: entry.to_string(),
+            workgroup_size: (64, 1, 1),
+            dispatch_size: DispatchSize::Fixed {
+                x: 1,
+                y: 1,
+                z: 1,
+                explicit: false,
+            },
+            reads: vec![],
+            writes: vec![],
+        };
+        let pipeline = |entry: &str, access, usage| {
+            Pipeline::Compute(ComputePipeline {
+                bindings: vec![buffer(access, usage)],
+                stages: vec![stage(entry)],
+                default_total_threads: None,
+                feedback: vec![],
+            })
+        };
+        let producer = pipeline("producer", Access::WriteOnly, BufferUsage::Output);
+        let consumer = pipeline("consumer", Access::ReadOnly, BufferUsage::Input);
+        let pipelines = if producer_first { vec![producer, consumer] } else { vec![consumer, producer] };
+
+        let mut descriptor = PipelineDescriptor {
+            pipelines,
+            frame_graph: FrameGraph::default(),
+        };
+        descriptor.rebuild_frame_graph();
+        descriptor
+    }
+
+    #[test]
+    fn frame_graph_orders_a_consumer_after_its_producer_in_either_declaration_order() {
+        for producer_first in [true, false] {
+            let descriptor = producer_consumer_descriptor(producer_first);
+            let graph = &descriptor.frame_graph;
+            let index = |name: &str| graph.passes.iter().position(|pass| pass.name == name).unwrap();
+            let (producer, consumer) = (index("producer"), index("consumer"));
+
+            assert!(
+                graph.passes[consumer].depends_on.contains(&producer),
+                "producer_first={producer_first}: consumer must depend on producer, got {:?}",
+                graph.passes[consumer].depends_on
+            );
+
+            let order = graph.topological_order().expect("producer/consumer is acyclic");
+            let position = |pass: usize| order.iter().position(|&p| p == pass).unwrap();
+            assert!(
+                position(producer) < position(consumer),
+                "producer_first={producer_first}: schedule runs the consumer first: {order:?}"
+            );
+        }
+    }
+
+    /// A consumer that also overwrites, this frame, the state its producer reads
+    /// has no valid single-frame order. The graph says so instead of emitting an
+    /// order that runs one of them too early.
+    #[test]
+    fn frame_graph_reports_a_producer_consumer_cycle() {
+        let inst = |access, usage| Binding::StorageBuffer {
+            set: 0,
+            binding: 0,
+            access,
+            usage,
+            name: "inst".to_string(),
+            length: None,
+        };
+        let occ = |access| Binding::StorageTexture {
+            set: 1,
+            binding: 0,
+            name: "occ".to_string(),
+            format: StorageImageFormat::R32Float,
+            access,
+            size: StorageTextureSize::SameAsWindow,
+            resource: Some("occ".to_string()),
+        };
+        let stage = |entry: &str| ComputeStage {
+            entry_point: entry.to_string(),
+            workgroup_size: (64, 1, 1),
+            dispatch_size: DispatchSize::Fixed {
+                x: 1,
+                y: 1,
+                z: 1,
+                explicit: false,
+            },
+            reads: vec![],
+            writes: vec![],
+        };
+        // `reduce` consumes `inst` and overwrites `occ`; `cull` produces `inst`
+        // and reads `occ`. Declared reduce-first, so the hazard sweep also wants
+        // `cull` after `reduce`.
+        let mut descriptor = PipelineDescriptor {
+            pipelines: vec![
+                Pipeline::Compute(ComputePipeline {
+                    bindings: vec![inst(Access::ReadOnly, BufferUsage::Input), occ(Access::WriteOnly)],
+                    stages: vec![stage("reduce")],
+                    default_total_threads: None,
+                    feedback: vec![],
+                }),
+                Pipeline::Compute(ComputePipeline {
+                    bindings: vec![
+                        inst(Access::WriteOnly, BufferUsage::Output),
+                        occ(Access::ReadOnly),
+                    ],
+                    stages: vec![stage("cull")],
+                    default_total_threads: None,
+                    feedback: vec![],
+                }),
+            ],
+            frame_graph: FrameGraph::default(),
+        };
+        descriptor.rebuild_frame_graph();
+
+        let cycle = descriptor
+            .frame_graph
+            .topological_order()
+            .expect_err("reduce needs cull's `inst`, cull needs the `occ` reduce overwrites");
+        assert_eq!(cycle.len(), 2, "both passes lie on the cycle: {cycle:?}");
     }
 
     #[test]
