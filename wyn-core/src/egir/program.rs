@@ -827,6 +827,19 @@ pub struct EgirInner {
     pub kernel_schedule: KernelSchedule,
 }
 
+/// Give `function` its region index and record its body under it. The index is
+/// the interned name, so calling this twice for one name refreshes the body
+/// rather than allocating a second region.
+fn record_region(
+    interner: &mut RegionInterner,
+    regions: &mut LookupMap<RegionId, EgirRegion>,
+    function: &EgirFunc,
+) -> RegionId {
+    let id = interner.intern(&function.name);
+    regions.insert(id, EgirRegion::from_function(function));
+    id
+}
+
 impl EgirInner {
     pub fn new(
         functions: Vec<EgirFunc>,
@@ -841,8 +854,7 @@ impl EgirInner {
         // here. The arena is then keyed by that index.
         let mut regions = LookupMap::new();
         for function in &functions {
-            let id = region_interner.intern(&function.name);
-            regions.insert(id, EgirRegion::from_function(function));
+            record_region(&mut region_interner, &mut regions, function);
         }
         EgirInner {
             functions,
@@ -877,6 +889,16 @@ impl EgirInner {
     /// regions created after construction obtain their index this way.
     pub fn intern_region(&mut self, name: impl AsRef<str>) -> RegionId {
         self.region_interner.intern(name)
+    }
+
+    /// Add a synthesized function to the program: record its body in the region
+    /// arena and make it callable. The returned index is the one a `SegBody`
+    /// must name to call it, and it equals `intern_region(&function.name)`, so a
+    /// caller that needed the index before the body existed may use either.
+    pub fn define_region(&mut self, function: EgirFunc) -> RegionId {
+        let id = record_region(&mut self.region_interner, &mut self.regions, &function);
+        self.functions.push(function);
+        id
     }
 
     /// SSA function name backing a region index (the `PureOp::Call` ABI).

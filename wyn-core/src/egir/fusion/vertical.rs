@@ -12,7 +12,7 @@ use smallvec::smallvec;
 
 use super::space::seg_space_fusable;
 use crate::ast::{Span, TypeName};
-use crate::egir::program::{EgirFunc, EgirInner, EgirRegion, SemanticOpId};
+use crate::egir::program::{EgirFunc, EgirInner, SemanticOpId};
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::types::{
     EGraph, ENode, EgirSoac, NodeId, PureOp, SegBinOp, SegBody, SegOpKind, SegResourceAccess,
@@ -393,9 +393,7 @@ fn apply_fusion(inner: &mut EgirInner, candidate: Candidate) {
     // Publish synthesized functions and their complete region bodies before
     // installing references to their RegionIds in the consumer.
     for function in synthesized {
-        let region = inner.region_interner.get(&function.name).expect("composed region was interned");
-        inner.regions.insert(region, EgirRegion::from_function(&function));
-        inner.functions.push(function);
+        inner.define_region(function);
     }
 
     let graph = graph_mut(inner, candidate.site);
