@@ -712,11 +712,19 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Compute all free type variables in the current environment (scope stack)
+    ///
+    /// Each scheme is solved against the context first. `generalize` takes
+    /// `fv(ty) \ fv(env)` on a `ty` that has already been solved, so an env
+    /// scheme still spelled with a variable that unification has since merged
+    /// away would name a different variable than the same slot in `ty`, and the
+    /// set difference would fail to remove it. Generalizing a variable that is
+    /// in fact still reachable from the environment makes every use of the
+    /// binding instantiate a fresh copy of it.
     fn env_free_type_vars(&self) -> BTreeSet<usize> {
         let mut acc = BTreeSet::new();
         // Local bindings (lambda params, let/loop/match locals).
         self.scope_stack.for_each_binding(|_name, entry| {
-            acc.extend(fv_scheme(&entry.value));
+            acc.extend(fv_scheme(&self.apply_scheme(&entry.value)));
         });
         // Globally-named environments — must be included so HM
         // generalization correctly excludes vars free in the
