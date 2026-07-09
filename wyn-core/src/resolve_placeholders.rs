@@ -31,16 +31,6 @@ pub struct PlaceholderResolver {
     /// Bindings for named type parameters within the current declaration scope.
     /// Maps size param names (e.g., "n") and type param names (e.g., "T") to type variables.
     type_param_bindings: LookupMap<String, Type<TypeName>>,
-    /// Outer `Option` distinguishes "inside a `resolve_decl` scope"
-    /// (`Some(_)`) from "outside any def scope" (`None`); inner `Option`
-    /// lazily allocates the shared variable on first `[]T`. Inside the
-    /// scope every bare `[]T` resolves to the same var, so `def f(a:
-    /// []i32, b: []i32) []i32` behaves like `def f<[n]>(a: [n]i32, b:
-    /// [n]i32) [n]i32`. Outside (entries, prelude specs, direct
-    /// `resolve_type` calls), each `[]T` gets a fresh var — entries
-    /// aren't size-polymorphic, every storage-buffer param is
-    /// independently runtime-sized.
-    decl_anon_size: Option<Option<Type<TypeName>>>,
     /// Pre-built TypeSchemes for module specs (e.g., "f32.sin" -> its polytype).
     /// Built during resolve_elaborated_modules so the type checker can use them directly.
     spec_schemes: LookupMap<String, TypeScheme<TypeName>>,
@@ -52,7 +42,6 @@ impl PlaceholderResolver {
         Self {
             context: Context::default(),
             type_param_bindings: LookupMap::new(),
-            decl_anon_size: None,
             spec_schemes: LookupMap::new(),
         }
     }
@@ -62,7 +51,6 @@ impl PlaceholderResolver {
         Self {
             context,
             type_param_bindings: LookupMap::new(),
-            decl_anon_size: None,
             spec_schemes: LookupMap::new(),
         }
     }
@@ -237,12 +225,6 @@ impl PlaceholderResolver {
             let var = self.context.new_variable();
             self.type_param_bindings.insert(type_param.clone(), var);
         }
-        // Enter def-scope sharing: bare `[]T` occurrences within this
-        // decl resolve to a single shared variable, lazily allocated
-        // on the first hit.
-        let saved_anon = self.decl_anon_size.take();
-        self.decl_anon_size = Some(None);
-
         // Resolve parameter patterns
         for param in &mut decl.params {
             self.resolve_pattern(param);
@@ -258,7 +240,6 @@ impl PlaceholderResolver {
 
         // Clear bindings after processing this declaration
         self.type_param_bindings.clear();
-        self.decl_anon_size = saved_anon;
     }
 
     fn resolve_entry(&mut self, entry: &mut EntryDecl) {
@@ -271,11 +252,6 @@ impl PlaceholderResolver {
             let var = self.context.new_variable();
             self.type_param_bindings.insert(type_param.clone(), var);
         }
-        // Entries are not size-polymorphic — each storage-buffer view
-        // param is independently runtime-sized. Leave decl_anon_size as
-        // `None` so every `[]T` here resolves to its own fresh variable.
-        debug_assert!(self.decl_anon_size.is_none());
-
         // Resolve parameter patterns
         for param in &mut entry.params {
             self.resolve_pattern(param);
@@ -469,21 +445,12 @@ impl PlaceholderResolver {
     /// Resolve placeholders in a type, replacing them with fresh type variables.
     pub fn resolve_type(&mut self, ty: &Type<TypeName>) -> Type<TypeName> {
         match ty {
-            // Unnamed size placeholder (`[]T`): inside a `def` scope all
-            // occurrences resolve to the *same* fresh variable, so
-            // `def f(a: []i32, b: []i32) []i32` is equivalent to
-            // `def f<[n]>(a: [n]i32, b: [n]i32) [n]i32`. Outside a def
-            // scope (entries, prelude, direct callers), every `[]T`
-            // gets a fresh var — entries aren't size-polymorphic.
-            Type::Constructed(TypeName::SizePlaceholder, _) => match &mut self.decl_anon_size {
-                Some(slot @ None) => {
-                    let var = self.context.new_variable();
-                    *slot = Some(var.clone());
-                    var
-                }
-                Some(Some(var)) => var.clone(),
-                None => self.context.new_variable(),
-            },
+            // Unnamed size placeholder (`[]T`): every occurrence is an
+            // independent runtime length, so each gets its own fresh
+            // variable. Two arrays share a length only when the source
+            // says so — `def f<[n]>(a: [n]i32, b: [n]i32)` — or when
+            // inference unifies them.
+            Type::Constructed(TypeName::SizePlaceholder, _) => self.context.new_variable(),
             // Unnamed address placeholders still get fresh variables each
             // time — they describe storage variant, not array length.
             Type::Constructed(TypeName::AddressPlaceholder, _) => self.context.new_variable(),
