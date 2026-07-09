@@ -10,7 +10,6 @@
 //! (acyclic, GVN'd, side-effect skeleton, scoped elaboration as
 //! extraction): <https://cfallin.org/blog/2026/04/09/aegraph/>.
 
-mod domtree;
 pub(crate) mod elaborate;
 mod extract;
 mod fold;

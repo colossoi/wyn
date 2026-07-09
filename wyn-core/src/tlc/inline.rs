@@ -9,7 +9,7 @@ use super::{
     collect_var_refs, extract_lambda_params, term_size, Def, DefMeta, Program, Term, TermIdSource, TermKind,
 };
 use crate::ast::{Span, TypeName};
-use crate::{LookupMap, LookupSet};
+use crate::LookupMap;
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
 
@@ -612,30 +612,19 @@ fn substitute_sym_and_retype(
 /// - All entry points and their transitive dependencies
 /// - Extern defs (linked SPIR-V functions, needed even if not directly referenced)
 pub fn dead_code_eliminate(defs: Vec<Def>) -> Vec<Def> {
-    let mut reachable: LookupSet<SymbolId> = LookupSet::new();
-    let mut worklist: Vec<SymbolId> = Vec::new();
-
-    // Seed with entry points and extern defs.
-    for def in &defs {
-        let is_root =
-            matches!(def.meta, DefMeta::EntryPoint(_)) || matches!(def.body.kind, TermKind::Extern(_));
-        if is_root {
-            reachable.insert(def.name);
-            worklist.push(def.name);
-        }
-    }
-
     let def_map: LookupMap<SymbolId, &Def> = defs.iter().map(|d| (d.name, d)).collect();
 
-    while let Some(sym) = worklist.pop() {
+    let roots = defs
+        .iter()
+        .filter(|def| {
+            matches!(def.meta, DefMeta::EntryPoint(_)) || matches!(def.body.kind, TermKind::Extern(_))
+        })
+        .map(|def| def.name);
+    let reachable = wyn_graph::reachable_from(roots, |sym, refs| {
         if let Some(def) = def_map.get(&sym) {
-            for r in collect_var_refs(&def.body) {
-                if def_map.contains_key(&r) && reachable.insert(r) {
-                    worklist.push(r);
-                }
-            }
+            refs.extend(collect_var_refs(&def.body).into_iter().filter(|r| def_map.contains_key(r)));
         }
-    }
+    });
 
     defs.into_iter().filter(|d| reachable.contains(&d.name)).collect()
 }

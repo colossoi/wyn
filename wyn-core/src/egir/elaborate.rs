@@ -21,7 +21,6 @@ use crate::LookupMap;
 use polytype::Type;
 use smallvec::SmallVec;
 
-use super::domtree::{DomTree, SkeletonCfgView};
 use super::extract;
 use super::loop_analysis::LoopAnalysis;
 use super::program::EgirInner;
@@ -80,9 +79,7 @@ fn elaborate_one_body(
     params: &[(Type<TypeName>, String)],
     return_ty: Type<TypeName>,
 ) -> FuncBody {
-    let skel_domtree = DomTree::build(&SkeletonCfgView {
-        skeleton: &graph.skeleton,
-    });
+    let skel_domtree = skeleton_domtree(&graph.skeleton);
     let identity_map: LookupMap<BlockId, BlockId> = graph.skeleton.blocks.keys().map(|b| (b, b)).collect();
     run(
         &graph,
@@ -95,6 +92,20 @@ fn elaborate_one_body(
     )
 }
 
+pub(super) fn skeleton_domtree(skeleton: &Skeleton) -> wyn_graph::DominatorTree<SkelBlockId> {
+    wyn_graph::DominatorTree::build(skeleton.entry, |block, successors| {
+        match &skeleton.blocks[block].term {
+            SkeletonTerminator::Return(_) | SkeletonTerminator::Unreachable => {}
+            SkeletonTerminator::Branch { target, .. } => successors.push(*target),
+            SkeletonTerminator::CondBranch {
+                then_target,
+                else_target,
+                ..
+            } => successors.extend([*then_target, *else_target]),
+        }
+    })
+}
+
 /// Elaborate an EGraph back into a FuncBody.
 ///
 /// `aliases` maps block-param NodeIds that were stripped by skeleton
@@ -104,7 +115,7 @@ fn elaborate_one_body(
 /// in its operands — transparently redirects to the replacement.
 pub fn run(
     graph: &EGraph,
-    domtree: &DomTree,
+    domtree: &wyn_graph::DominatorTree<SkelBlockId>,
     params: &[(Type<TypeName>, String)],
     return_ty: Type<TypeName>,
     control_headers: &LookupMap<BlockId, ControlHeader>,
@@ -226,7 +237,7 @@ struct LoopStackEntry {
 struct Elaborator<'a> {
     graph: &'a EGraph,
     best: LookupMap<NodeId, NodeId>,
-    domtree: &'a DomTree,
+    domtree: &'a wyn_graph::DominatorTree<SkelBlockId>,
     loop_analysis: &'a LoopAnalysis,
     loop_stack: SmallVec<[LoopStackEntry; 4]>,
     /// NodeId → (ValueId, skeleton block where it was placed) for
@@ -276,7 +287,7 @@ impl<'a> Elaborator<'a> {
         // Recurse into domtree children. Each child switches to its own block
         // on entry, so we re-set ours before emitting our terminator above, and
         // the child loop here just handles descent.
-        let children: Vec<SkelBlockId> = self.domtree.dom_children(skel_bid).to_vec();
+        let children: Vec<SkelBlockId> = self.domtree.children(skel_bid).to_vec();
         for child in children {
             self.elaborate_subtree(child);
         }

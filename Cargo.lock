@@ -1535,8 +1535,16 @@ dependencies = [
  "smallvec",
  "spirv",
  "thiserror 1.0.69",
+ "wyn-graph",
  "wyn-pipeline-descriptor",
  "wyn-spirv",
+]
+
+[[package]]
+name = "wyn-graph"
+version = "0.1.0"
+dependencies = [
+ "thiserror 1.0.69",
 ]
 
 [[package]]

@@ -13,7 +13,7 @@ pub type Cost = u32;
 
 /// Compute the best (cheapest) representative for each NodeId.
 ///
-/// Returns a map from NodeId → best concrete NodeId (the chosen representative).
+/// Returns a map from NodeId -> best concrete NodeId (the chosen representative).
 /// For non-union nodes, this maps to themselves.
 /// For union nodes, this maps to the best leaf of the union tree.
 pub fn extract(graph: &EGraph) -> LookupMap<NodeId, NodeId> {
@@ -99,62 +99,15 @@ fn op_cost(op: &PureOp) -> Cost {
     }
 }
 
-/// Kahn's algorithm for topological sort on the acyclic e-graph.
+/// Dependency-order sort of the acyclic e-graph.
 fn topological_sort(graph: &EGraph) -> Vec<NodeId> {
-    let mut in_degree: LookupMap<NodeId, usize> = LookupMap::new();
-    for (nid, _) in &graph.nodes {
-        in_degree.entry(nid).or_insert(0);
-    }
-
-    // Count incoming edges.
-    for (_, node) in &graph.nodes {
-        for child in node.children() {
-            *in_degree.entry(child).or_insert(0) += 1;
+    match wyn_graph::topo_sort_by_dependencies(graph.nodes.keys(), |node, dependencies| {
+        dependencies.extend(graph.nodes[node].children());
+    }) {
+        Ok(order) => order,
+        Err(err) => {
+            debug_assert!(false, "EGraph extraction expected an acyclic graph: {err}");
+            graph.nodes.keys().collect()
         }
     }
-
-    // Wait — this counts *uses* as in-degree, but we want to process
-    // leaves first (nodes with no children, i.e., no dependencies).
-    // For Kahn's algorithm on a DAG, in-degree means "number of
-    // predecessors/dependencies", not "number of users".
-    //
-    // Actually, we need to process nodes in dependency order: a node
-    // must be processed after all its children (operands). So the edges
-    // go from child → parent (operand → user). in_degree = number of
-    // operands that haven't been processed yet.
-
-    // Recompute correctly: in_degree = number of children (operands).
-    in_degree.clear();
-    for (nid, node) in &graph.nodes {
-        in_degree.insert(nid, node.children().len());
-    }
-
-    // Build reverse adjacency: child → list of parents that depend on it.
-    let mut users: LookupMap<NodeId, Vec<NodeId>> = LookupMap::new();
-    for (nid, node) in &graph.nodes {
-        for child in node.children() {
-            users.entry(child).or_default().push(nid);
-        }
-    }
-
-    // Start with leaves (nodes with 0 children = 0 in-degree).
-    let mut queue: Vec<NodeId> =
-        in_degree.iter().filter(|(_, &deg)| deg == 0).map(|(&nid, _)| nid).collect();
-
-    let mut result = Vec::with_capacity(graph.nodes.len());
-
-    while let Some(nid) = queue.pop() {
-        result.push(nid);
-        if let Some(parent_list) = users.get(&nid) {
-            for &parent in parent_list {
-                let deg = in_degree.get_mut(&parent).unwrap();
-                *deg -= 1;
-                if *deg == 0 {
-                    queue.push(parent);
-                }
-            }
-        }
-    }
-
-    result
 }

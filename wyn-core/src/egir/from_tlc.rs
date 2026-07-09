@@ -803,9 +803,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let (mut graph, mut control_headers) = self.into_graph_parts();
         super::soac_expand::run_one_body(&mut graph, &mut control_headers, &region_interner.borrow());
         let aliases = super::skel_opt::run_one_body(&mut graph);
-        let skel_domtree = super::domtree::DomTree::build(&super::domtree::SkeletonCfgView {
-            skeleton: &graph.skeleton,
-        });
+        let skel_domtree = super::elaborate::skeleton_domtree(&graph.skeleton);
         let identity_map: LookupMap<BlockId, BlockId> =
             graph.skeleton.blocks.keys().map(|b| (b, b)).collect();
         Some(super::elaborate::run(

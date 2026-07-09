@@ -138,13 +138,12 @@ fn collect_graph_dependencies(scope: &str, graph: &EGraph, output: &mut Vec<Sema
 
     for consumer_index in 0..records.len() {
         let consumer = &records[consumer_index];
-        let mut reachable = std::collections::HashSet::new();
-        let mut stack = consumer.effect.referenced_nodes().collect::<Vec<_>>();
-        while let Some(node) = stack.pop() {
-            if reachable.insert(node) {
-                stack.extend(graph.nodes[node].children());
-            }
-        }
+        let reachable: std::collections::HashSet<_> =
+            wyn_graph::reachable_from(consumer.effect.referenced_nodes(), |node, dependencies| {
+                dependencies.extend(graph.nodes[node].children());
+            })
+            .into_iter()
+            .collect();
         for producer in &records[..consumer_index] {
             if reachable.contains(&producer.id.result) {
                 push_dependency(output, &producer.id, &consumer.id, SemanticDependencyKind::Value);
@@ -786,23 +785,18 @@ fn side_effect_output_slots(entry: &EgirEntry, se: &SideEffect) -> Vec<usize> {
     if let SideEffectKind::Soac(EgirSoac::Seg { output_slots, .. }) = &se.kind {
         return output_slots.clone();
     }
-    use std::collections::HashSet;
-    let mut seen: HashSet<NodeId> = HashSet::new();
-    let mut stack: Vec<NodeId> = se.referenced_nodes().collect::<Vec<_>>();
     let mut slots: Vec<usize> = Vec::new();
-    while let Some(n) = stack.pop() {
-        if !seen.insert(n) {
-            continue;
+    for n in wyn_graph::reachable_from(se.referenced_nodes(), |node, dependencies| {
+        if let Some(node) = entry.graph.nodes.get(node) {
+            dependencies.extend(node.children());
         }
+    }) {
         if let Some(br) = graph_ops::extract_storage_view_source(&entry.graph, n) {
             if let Some(s) = entry.outputs.iter().position(|o| o.storage_binding == Some(br)) {
                 if !slots.contains(&s) {
                     slots.push(s);
                 }
             }
-        }
-        if let Some(node) = entry.graph.nodes.get(n) {
-            stack.extend(node.children());
         }
     }
     // Scalar/tuple reductions commonly feed a later Store instead of carrying
@@ -852,32 +846,24 @@ fn side_effect_output_slots(entry: &EgirEntry, se: &SideEffect) -> Vec<usize> {
 }
 
 fn storage_binding_reachable(graph: &EGraph, start: NodeId) -> Option<BindingRef> {
-    let mut seen = std::collections::HashSet::new();
-    let mut stack = vec![start];
-    while let Some(node) = stack.pop() {
-        if !seen.insert(node) {
-            continue;
+    for node in wyn_graph::reachable_from([start], |node, dependencies| {
+        if let Some(node) = graph.nodes.get(node) {
+            dependencies.extend(node.children());
         }
+    }) {
         if let Some(binding) = graph_ops::extract_storage_view_source(graph, node) {
             return Some(binding);
         }
-        stack.extend(graph.nodes[node].children());
     }
     None
 }
 
 fn node_reaches(graph: &EGraph, start: NodeId, target: NodeId) -> bool {
-    let mut seen = std::collections::HashSet::new();
-    let mut stack = vec![start];
-    while let Some(node) = stack.pop() {
-        if node == target {
-            return true;
+    wyn_graph::reaches(start, target, |node, dependencies| {
+        if let Some(node) = graph.nodes.get(node) {
+            dependencies.extend(node.children());
         }
-        if seen.insert(node) {
-            stack.extend(graph.nodes[node].children());
-        }
-    }
-    false
+    })
 }
 
 /// True for a pointwise `SegMap` side-effect (a parallel output domain).
