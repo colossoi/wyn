@@ -259,14 +259,19 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                 if !claimed.insert((br.set, br.binding)) {
                     continue;
                 }
-                // EntryOutput has no name field; synthesize from the entry
-                // name + position. Single-output is the common case and
-                // gets the cleaner `<entry>_output` form.
-                let name = if entry.outputs.len() == 1 {
-                    format!("{}_output", entry.name)
-                } else {
-                    format!("{}_output_{}", entry.name, i)
-                };
+                // This name is the buffer's frame-graph identity — a reader
+                // binding the same name reads the same resource — and is what
+                // `viz --output <name>` takes on the command line.
+                // `#[target(name)]` sets it. Otherwise it is derived from the
+                // entry, with the position omitted when there is only one
+                // output.
+                let name = output.target.clone().unwrap_or_else(|| {
+                    if entry.outputs.len() == 1 {
+                        format!("{}_output", entry.name)
+                    } else {
+                        format!("{}_output_{}", entry.name, i)
+                    }
+                });
                 bindings.push(Binding::StorageBuffer {
                     set: br.set,
                     binding: br.binding,
