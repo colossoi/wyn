@@ -2511,13 +2511,54 @@ fn fuse_entry_body(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdS
     }
 }
 
+/// Split a store chain into the `Let`s that precede its first `OutputSlotStore`
+/// and the remainder starting at that store.
+///
+/// The fused `Screma` takes the first store's position, so every binding the
+/// lanes read must already be in scope there. That holds for the prefix. It does
+/// not hold for an ordinary `Let` sitting *between* two stores — a later lane
+/// could read it — so such a chain does not fuse.
+fn split_chain_at_first_store(chain: &Term) -> Option<(Vec<&Term>, &Term)> {
+    let is_store = |t: &Term| matches!(t.kind, TermKind::OutputSlotStore { .. });
+
+    let mut prefix = Vec::new();
+    let mut cur = chain;
+    while let TermKind::Let { rhs, body, .. } = &cur.kind {
+        if is_store(rhs) {
+            break;
+        }
+        prefix.push(cur);
+        cur = body;
+    }
+    if !matches!(&cur.kind, TermKind::Let { rhs, .. } if is_store(rhs)) {
+        return None;
+    }
+
+    // Reject an ordinary `Let` interleaved among the stores. One after the last
+    // store is harmless — it stays below the Screma.
+    let mut kinds = Vec::new();
+    let mut scan = cur;
+    while let TermKind::Let { rhs, body, .. } = &scan.kind {
+        kinds.push(is_store(rhs));
+        scan = body;
+    }
+    let last_store = kinds.iter().rposition(|s| *s)?;
+    if kinds[..last_store].iter().any(|s| !*s) {
+        return None;
+    }
+
+    Some((prefix, cur))
+}
+
 fn fuse_output_slot_chain(
     chain: &Term,
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
 ) -> Option<Term> {
+    let (prefix, tail) = split_chain_at_first_store(chain)?;
+
     let mut slots: Vec<(usize, Term)> = Vec::new();
-    collect_extra_slot_stores(chain, &mut slots);
+    collect_extra_slot_stores(tail, &mut slots);
     if slots.len() < 2 {
         return None;
     }
@@ -2593,7 +2634,7 @@ fn fuse_output_slot_chain(
     for (lane, slot) in fusible.iter().enumerate() {
         slot_proj.insert(slot.slot_index, (proj_syms[lane], slot.output_ty.clone()));
     }
-    let mut acc = rewrite_output_slot_values(chain, &slot_proj, term_ids);
+    let mut acc = rewrite_output_slot_values(tail, &slot_proj, term_ids);
     for (lane, slot) in fusible.iter().enumerate().rev() {
         let proj = Term {
             id: term_ids.next_id(),
@@ -2619,7 +2660,21 @@ fn fuse_output_slot_chain(
         );
     }
 
-    Some(let_term(tuple_sym, tuple_ty, screma, acc, chain.span, term_ids))
+    // The Screma reads the prefix's bindings, so it goes below them.
+    acc = let_term(tuple_sym, tuple_ty, screma, acc, chain.span, term_ids);
+    for outer in prefix.into_iter().rev() {
+        let TermKind::Let {
+            name,
+            name_ty,
+            rhs,
+            body: _,
+        } = &outer.kind
+        else {
+            unreachable!("prefix holds only `Let` terms")
+        };
+        acc = let_term(*name, name_ty.clone(), (**rhs).clone(), acc, outer.span, term_ids);
+    }
+    Some(acc)
 }
 
 /// Clone an `OutputSlotStore` let-chain, replacing each store's value with a

@@ -6339,6 +6339,42 @@ entry go(dom: []u32, pdom: []u32, idom: []u32, pts_in: []f32, its_in: []f32)
     crate::compile_thru_spirv(src).expect("record of views indexed inside a map must compile");
 }
 
+/// The equal-domain fuser rewrites sibling output maps into one `Screma`. That
+/// `Screma` reads whatever the lanes captured, so it must sit *below* the `let`s
+/// that bind those captures — not above the whole store chain.
+///
+/// A let-bound scalar is enough to expose it: hoisted above `let k`, the fused
+/// body's reference to `k` resolves to `PureOp::Global("k")`, and SPIR-V
+/// lowering reports `Unknown global: k`.
+#[test]
+fn fused_maps_are_placed_below_the_bindings_they_capture() {
+    let src = "\
+open f32
+#[compute]
+entry go(dom: []u32, pts_in: []f32) ([]f32, []f32) =
+  let k = pts_in[0] in
+  (map(|s| pts_in[i32(s)] * 2.0, dom),
+   map(|s| k + f32(s), dom))
+";
+    let lowered = compile_parallel(src);
+
+    // Still one fused stage — the fix moves the Screma, it does not disable fusion.
+    let stages: Vec<&str> = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .find_map(|p| match p {
+            crate::pipeline_descriptor::Pipeline::Compute(cp) => Some(cp),
+            _ => None,
+        })
+        .expect("a compute pipeline")
+        .stages
+        .iter()
+        .map(|s| s.entry_point.as_str())
+        .collect();
+    assert_eq!(stages, vec!["go"], "both maps fuse into one stage");
+}
+
 /// Two maps over the same domain fuse into one stage. A record of views bound
 /// outside them must be carried into the fused stage; otherwise the field
 /// projection in the second map's body resolves to a global the fused stage
