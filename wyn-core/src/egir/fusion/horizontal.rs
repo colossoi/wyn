@@ -9,11 +9,11 @@
 use polytype::Type;
 use smallvec::SmallVec;
 
-use super::legality::SemanticGraph;
 use super::space::seg_space_fusable;
 use crate::ast::TypeName;
 use crate::egir::graph_ops;
 use crate::egir::program::{EgirInner, SemanticOpId};
+use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::types::{
     reify_seg_kind_operators, EGraph, EgirSoac, NodeId, PureOp, SegBody, SegOpKind, SegPlacement,
     SegResourceAccess, SideEffectKind, SoacDestination,

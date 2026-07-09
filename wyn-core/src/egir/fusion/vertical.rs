@@ -10,10 +10,10 @@
 use polytype::Type;
 use smallvec::smallvec;
 
-use super::legality::SemanticGraph;
 use super::space::seg_space_fusable;
 use crate::ast::{Span, TypeName};
 use crate::egir::program::{EgirFunc, EgirInner, EgirRegion, SemanticOpId};
+use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::types::{
     EGraph, ENode, EgirSoac, NodeId, PureOp, SegBinOp, SegBody, SegOpKind, SegResourceAccess,
     SegResourceAccessKind, SegSpace, SideEffectKind, SkeletonTerminator, SoacDestination,
@@ -848,7 +848,7 @@ mod tests {
             Default::default(),
             interner,
         );
-        crate::egir::parallelize::rebuild_semantic_dependencies(&mut inner);
+        crate::egir::semantic_graph::rebuild_dependencies(&mut inner);
         let oracle = SemanticGraph::new(&inner.semantic_dependencies);
         assert!(fuse_producer_into_consumer(&mut inner, &oracle));
         let block =

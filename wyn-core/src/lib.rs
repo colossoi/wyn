@@ -1372,7 +1372,7 @@ impl EgirOutputsRealized {
         let EgirOutputsRealized(mut inner) = self;
         egir::parallelize::reify(&mut inner);
         if cfg!(debug_assertions) {
-            egir::parallelize::verify_semantic(&inner).expect("invalid semantic EGIR");
+            egir::semantic_graph::verify(&inner).expect("invalid semantic EGIR");
         }
         EgirSegmented(inner)
     }
@@ -1397,7 +1397,7 @@ impl EgirOptimized {
     pub fn allocate(self, binding_ids: &IdSource<u32>) -> EgirAllocated {
         let mut inner = self.0;
         if cfg!(debug_assertions) {
-            egir::parallelize::verify_semantic(&inner).expect("invalid optimized semantic EGIR");
+            egir::semantic_graph::verify(&inner).expect("invalid optimized semantic EGIR");
         }
         // Draw scratch bindings for the manifest from a private clone so the
         // advanced counter travels into `EgirAllocated` (terminal lowering
@@ -1412,7 +1412,7 @@ impl EgirAllocated {
     /// Human-readable semantic IR including concrete spaces, region captures,
     /// output routing, and logical resource accesses.
     pub fn semantic_ir(&self) -> String {
-        egir::parallelize::semantic_summary(&self.inner)
+        egir::semantic_graph::summary(&self.inner)
     }
 
     pub fn logical_resources(&self) -> &[egir::program::LogicalResource] {

@@ -47,7 +47,7 @@ fn oracle_distinguishes_conflict_flow_and_value_edges() {
         "a value edge alone is fusable, not a conflict"
     );
 
-    // Reachability follows value edges only — not effect ordering or resource.
+    // Reachability follows value edges only, not effect ordering or resource.
     assert!(g.reachable_between(&a, &c), "a --Value--> c");
     assert!(
         !g.reachable_between(&b, &c),

@@ -42,7 +42,7 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
     )
     .expect("TLC");
     let allocated = tlc.infer_input_slice_bounds().to_egraph().expect("semantic EGIR allocation");
-    crate::egir::parallelize::verify_semantic(&allocated.inner).expect("complete semantic EGIR");
+    crate::egir::semantic_graph::verify(&allocated.inner).expect("complete semantic EGIR");
     let seg = allocated
         .inner
         .entry_points

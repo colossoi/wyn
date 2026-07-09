@@ -4,10 +4,10 @@
 //! gated by the semantic dependency DAG so two ops are never fused or reordered
 //! across a conflicting resource or effect.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use super::fusion::legality::SemanticGraph;
 use super::program::EgirInner;
+use super::semantic_graph::SemanticGraph;
 use super::types::{
     EGraph, EgirSoac, NodeId, SegResourceAccess, SegResourceAccessKind, SideEffectKind, SkeletonTerminator,
 };
@@ -24,7 +24,7 @@ pub fn run(inner: &mut EgirInner) {
     // between rewrites keeps the legality oracle sound — a stale DAG is the
     // top correctness risk. Dead elimination runs first to shrink the graph.
     loop {
-        super::parallelize::rebuild_semantic_dependencies(inner);
+        super::semantic_graph::rebuild_dependencies(inner);
         let deps = inner.semantic_dependencies.clone();
         let oracle = SemanticGraph::new(&deps);
 
@@ -40,11 +40,9 @@ pub fn run(inner: &mut EgirInner) {
         }
     }
 
-    super::parallelize::rebuild_semantic_dependencies(inner);
-    let mut seen = HashSet::new();
-    inner.semantic_dependencies.retain(|dependency| seen.insert(dependency.clone()));
+    super::semantic_graph::rebuild_dependencies(inner);
     if cfg!(debug_assertions) {
-        if let Err(error) = super::parallelize::verify_semantic(inner) {
+        if let Err(error) = super::semantic_graph::verify(inner) {
             panic!("semantic optimization produced invalid EGIR: {error}");
         }
     }

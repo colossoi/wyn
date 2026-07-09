@@ -39,13 +39,13 @@ struct InputReplacement {
 
 pub fn run(inner: &mut EgirInner, binding_ids: &mut IdSource<u32>) {
     loop {
-        super::parallelize::rebuild_semantic_dependencies(inner);
+        super::semantic_graph::rebuild_dependencies(inner);
         let Some(candidate) = find_candidate(inner) else {
             break;
         };
         materialize_candidate(inner, binding_ids, candidate);
     }
-    super::parallelize::rebuild_semantic_dependencies(inner);
+    super::semantic_graph::rebuild_dependencies(inner);
     if cfg!(debug_assertions) {
         verify_no_unallocated_multi_consumer_maps(inner);
     }
