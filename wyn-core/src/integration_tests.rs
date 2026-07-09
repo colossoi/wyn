@@ -6395,6 +6395,114 @@ entry go(dom: []u32, pts_in: []f32) ([]f32, []f32) =
     crate::compile_thru_spirv(src).expect("record of views must survive map fusion into one stage");
 }
 
+/// A fragment entry's storage-buffer parameters carry a concrete
+/// `Region(set, binding)` in their type, exactly as a compute entry's do. A
+/// helper that indexes them through a record is the shape that exposes it:
+/// the helper's region variable is generalized and instantiated per call, so
+/// the entry parameter is the only place a concrete region can be pinned.
+///
+/// Without that pin, `scene_sdf` reaches SPIR-V lowering holding
+/// `Array[vec2f32, View, ?size, ?region]` and there is no buffer to build an
+/// `OpAccessChain` into.
+#[test]
+fn fragment_storage_buffer_params_pin_a_buffer_region() {
+    let src = "\
+open f32
+
+type scene = {
+  points: []vec2f32,
+  items: []vec4f32,
+}
+
+def scene_sdf(sc: scene, x: f32) f32 =
+  loop acc = x for i < 4 do
+    let p = sc.points[i % 2]
+    let it = sc.items[i % 2] in
+    acc + p.x + p.y + it.x
+
+#[fragment]
+entry resolve_like(#[builtin(frag_coord)] fc: vec4f32,
+                   points: []vec2f32,
+                   items: []vec4f32)
+  #[target(surface)] vec4f32 =
+  let sc = { points = points, items = items }
+  let v = scene_sdf(sc, fc.x) in
+  @[v, v, v, 1.0]
+";
+    crate::compile_thru_spirv(src).expect("fragment storage-buffer reads must pin a buffer region");
+}
+
+/// A unique `*storage_image` handle threaded through both arms of an `if` is
+/// consumed once, not once per arm. Each arm yields the updated handle — one
+/// arm writes, the other passes it through — so the alias checker must treat
+/// the branch as a single use of `small`.
+#[test]
+fn conditional_branch_threads_a_unique_storage_image_once() {
+    let src = "\
+open f32
+
+resource small_img: image2d {
+  format = rgba32float
+  size   = 16x16
+  usages = [storage_write]
+}
+
+resource big_img: image2d {
+  format = rgba32float
+  size   = window
+  usages = [storage_write]
+}
+
+#[compute]
+entry fused(#[builtin(global_invocation_id)] gid: vec3u32,
+            #[view(small_img, storage_write)] small: *storage_image,
+            #[view(big_img, storage_write)]   big: *storage_image)
+  () =
+  let xy = @[i32(gid.x), i32(gid.y)]
+  let small2 =
+    if xy.x < 16 && xy.y < 16 then small with [xy] = @[1.0, 0.0, 0.0, 1.0]
+    else small in
+  let _ = small2 in
+  big with [xy] = @[0.0, 1.0, 0.0, 1.0]
+";
+    crate::compile_thru_spirv(src)
+        .expect("a unique storage-image handle may be threaded through both arms of an if");
+}
+
+/// Threading a storage image through a branch consumes it. Reaching past the
+/// branch for the original handle is still a use-after-move.
+#[test]
+fn storage_image_consumed_by_a_branch_cannot_be_reused() {
+    let src = "\
+open f32
+
+resource img: image2d {
+  format = rgba32float
+  size   = 16x16
+  usages = [storage_write]
+}
+
+#[compute]
+entry one(#[builtin(global_invocation_id)] gid: vec3u32,
+          #[view(img, storage_write)] small: *storage_image) () =
+  let xy = @[i32(gid.x), i32(gid.y)]
+  let x = if xy.x < 16 then small with [xy] = @[1.0, 0.0, 0.0, 1.0] else small
+  let y = small with [xy] = @[0.0, 1.0, 0.0, 1.0] in
+  y
+";
+    match crate::compile_thru_spirv(src) {
+        Ok(_) => panic!("`small` is consumed by the branch and must not be usable after it"),
+        Err(err) => {
+            let msg = err.to_string();
+            assert!(
+                msg.contains("use of moved value"),
+                "expected a move error, got: {msg}"
+            );
+            assert!(msg.contains("small"), "the message names the handle: {msg}");
+        }
+    }
+}
+
 /// Multiple gathers of the *same* computed array coalesce to one buffer: the
 /// lift keys on the let-bound symbol and rewrites every `arr[..]` use to the
 /// same storage binding, so a single pre-pass materializes `arr` once no

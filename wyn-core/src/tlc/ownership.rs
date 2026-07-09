@@ -1000,6 +1000,15 @@ impl<'p> Builder<'p> {
                 else_branch,
                 ..
             } => {
+                // A branch yielding a storage image yields *the* handle: one
+                // arm updates it, another may pass it through unchanged. The
+                // result is the sole live handle either way, so it is a fresh
+                // owner rather than an alias of the arms' inputs — otherwise
+                // the updating arm's `with` would consume an owner the merged
+                // result keeps live.
+                if matches!(term.ty, Type::Constructed(TypeName::StorageTexture, _)) {
+                    return Self::empty_alias_value_for_type(&term.ty);
+                }
                 let mut value = self.alias_value(then_branch);
                 value.union_with(&self.alias_value(else_branch));
                 value

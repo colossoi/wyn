@@ -42,18 +42,22 @@ pub fn runtime_sized_array_elem(ty: &Type<TypeName>) -> Option<(&Type<TypeName>,
     Some((elem, elem_bytes))
 }
 
-/// Walk a compute entry's params and produce the auto-storage binding
-/// layout. Non-compute entries return an empty layout (graphics
-/// pipeline params live in vertex attribs / fragment varyings, not
-/// storage bindings).
+/// Walk an entry's params and produce the auto-storage binding layout.
 ///
-/// Walk rules (compute entries only):
+/// A runtime-sized array param can only be a storage buffer — no vertex
+/// attribute, varying, or builtin has that shape — so the rules are the same
+/// whatever stage the entry runs at:
 /// - Each view-array param (`[]T`, runtime size) gets one slot.
 /// - Each tuple-of-views param gets one slot per field. Skipped if
 ///   the param is decorated `#[builtin(...)]` — builtins are not
 ///   user-supplied storage buffers.
 /// - Other params (scalars, fixed-size arrays, structs) are skipped
 ///   and will be routed to push constants by the caller.
+///
+/// The binding a param receives is written back into its view type by
+/// `pin_entry_regions`, which is the only place a concrete
+/// `Region(set, binding)` is born. A param left without one reaches the
+/// backend as `Array[_, View, _, ?region]` and cannot be indexed.
 ///
 /// Binding numbers come from `binding_ids` in declaration order.
 pub fn compute_entry_binding_layout(
@@ -62,10 +66,6 @@ pub fn compute_entry_binding_layout(
     set: u32,
     binding_ids: &mut crate::IdSource<u32>,
 ) -> Vec<Option<EntryParamBinding>> {
-    if !matches!(entry.entry_type, Attribute::Compute) {
-        return vec![None; body_params.len()];
-    }
-
     let mut out: Vec<Option<EntryParamBinding>> = Vec::with_capacity(body_params.len());
 
     for (i, (sym, ty)) in body_params.iter().enumerate() {
