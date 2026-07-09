@@ -830,7 +830,7 @@ fn build_gather_prepass(
         .cloned()
         .expect("try_lift's is_runtime_sized_array(name_ty) gate guarantees an array elem");
     // Each captured input was a view-array param of the outer entry, so it
-    // already has a binding pinned by `pin_entry_regions`. Re-use that binding
+    // already has a binding pinned by `pin_entry_buffers`. Re-use that binding
     // in the synthesized pre-pass so both entries reference the same SPIR-V
     // OpVariable at the same `(set, binding)`. Captures that don't match an
     // outer slot (scalars, etc.) keep `binding: None` and get push-constant

@@ -353,7 +353,7 @@ pub enum EgirSoac {
     ///   field is the count of accepted elements.
     /// - `Some(br)` (runtime-sized input): the result is a runtime-length
     ///   storage view over the reserved scratch buffer at `br`, typed
-    ///   `Array[T, View, _, Region(br)]`. The surviving count is the view's
+    ///   `Array[T, View, _, Buffer(br)]`. The surviving count is the view's
     ///   `len` operand (an SSA value). A runtime-sized input cannot back a
     ///   function-local array, so it compacts into a descriptor-bound buffer.
     Filter {

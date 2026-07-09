@@ -56,8 +56,8 @@ fn mat_type(elem: Type, n: Type, m: Type) -> Type {
     Type::Constructed(TypeName::Mat, vec![elem, n, m])
 }
 
-fn array_type(elem: Type, addrspace: Type, size: Type, region: Type) -> Type {
-    Type::Constructed(TypeName::Array, vec![elem, addrspace, size, region])
+fn array_type(elem: Type, addrspace: Type, size: Type, buffer: Type) -> Type {
+    Type::Constructed(TypeName::Array, vec![elem, addrspace, size, buffer])
 }
 
 fn arrow_chain(params: &[Type], ret: Type) -> Type {
@@ -356,8 +356,8 @@ fn texture2d_ty() -> Type {
 fn sampler_ty() -> Type {
     Type::Constructed(TypeName::Sampler, vec![])
 }
-fn storage_image_ty(region: Type) -> Type {
-    Type::Constructed(TypeName::StorageTexture, vec![region])
+fn storage_image_ty(buffer: Type) -> Type {
+    Type::Constructed(TypeName::StorageTexture, vec![buffer])
 }
 fn f32_ty() -> Type {
     Type::Constructed(TypeName::Float(32), vec![])
@@ -390,8 +390,8 @@ pub fn texture_sample_scheme(_ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
 /// carries the value shape; the consuming/returned-handle contract is enforced
 /// by TLC ownership from the builtin id.
 pub fn image_with_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
-    let region = ctx.new_variable();
-    let image = storage_image_ty(region);
+    let buffer = ctx.new_variable();
+    let image = storage_image_ty(buffer);
     let coord = vec_n(i32_ty(), 2);
     let texel = vec_n(f32_ty(), 4);
     quantify(arrow_chain(&[image.clone(), coord, texel], image))

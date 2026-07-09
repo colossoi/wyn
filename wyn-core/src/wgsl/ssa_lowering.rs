@@ -1690,18 +1690,18 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
     /// Uses the synthesized `_buf_{set}_{binding}` naming used for
     /// compiler-introduced compute-entry bindings.
     /// The WGSL buffer identifier a view value reads. A storage view's
-    /// descriptor is the concrete `Region(set, binding)` in its type, so the
+    /// descriptor is the concrete `Buffer(set, binding)` in its type, so the
     /// name comes from there — authoritative regardless of how the view was
     /// derived (slice, block param, call). A workgroup view's type is
-    /// `NoRegion`; its `_wg_<id>` name isn't in any type, so it is recovered
+    /// `NoBuffer`; its `_wg_<id>` name isn't in any type, so it is recovered
     /// from the `ViewHandle` set when the view was created.
     fn view_buffer_name(&self, view_ssa: ValueId) -> Result<String> {
-        match crate::types::array_view_region(self.body.get_value_type(view_ssa)) {
+        match crate::types::array_view_buffer(self.body.get_value_type(view_ssa)) {
             Some(br) => self.storage_name(br.set, br.binding),
             None => self.workgroup_view_name.get(&view_ssa).cloned().ok_or_else(|| {
                 crate::err_wgsl_at!(
                     self.blame_span(),
-                    "view {:?} has neither a concrete buffer region nor a workgroup name",
+                    "view {:?} has neither a concrete buffer nor a workgroup name",
                     view_ssa
                 )
             }),

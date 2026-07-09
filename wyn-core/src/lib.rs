@@ -307,7 +307,7 @@ pub type TypeTable = LookupMap<NodeId, TypeScheme<TypeName>>;
 //
 // TLC stages (AST → SSA):
 //       .to_tlc(&module_manager, fill_holes)       -> TlcTransformed
-//       .pin_entry_regions()                       -> TlcRegionsPinned
+//       .pin_entry_buffers()                       -> TlcBuffersPinned
 //       .validate_ownership()                      -> TlcOwnershipValidated
 //       .partial_eval()                            -> TlcPartialEvaled
 //       .normalize_soacs()                         -> TlcSoaNormalized
@@ -595,7 +595,7 @@ pub struct TlcEarlyInner {
     pub fill_hole_errors: Vec<error::CompilerError>,
     /// Module-wide id factory for compiler-auto-allocated storage
     /// bindings (the ones not pinned by a user `#[storage(set, binding)]`
-    /// attribute). `pin_entry_regions` draws inputs from it; `egir::from_tlc`
+    /// attribute). `pin_entry_buffers` draws inputs from it; `egir::from_tlc`
     /// draws outputs and scratch slots from the same factory. Sharing
     /// one counter across passes guarantees no two `OpVariable`s land
     /// on the same `(set, binding)` slot regardless of declared type.
@@ -614,29 +614,29 @@ impl std::ops::Deref for TlcTransformed {
 
 impl TlcTransformed {
     /// Pin each compute entry's storage-param buffer region into its type:
-    /// substitute the param's region variable → `Region(set, binding)` so a
+    /// substitute the param's buffer variable → `Buffer(set, binding)` so a
     /// view's descriptor is a statically-known property of its type, and every
     /// downstream view inherits its region by unification. This is the first
-    /// TLC pass; the resulting `TlcRegionsPinned` typestate is what `partial_eval`
+    /// TLC pass; the resulting `TlcBuffersPinned` typestate is what `partial_eval`
     /// consumes, so the rest of the pipeline cannot run without it.
-    pub fn pin_entry_regions(self) -> Result<TlcRegionsPinned> {
+    pub fn pin_entry_buffers(self) -> Result<TlcBuffersPinned> {
         let mut inner = self.0;
-        tlc::pin_entry_regions::run(&mut inner.tlc, &mut inner.auto_storage_binding_ids)?;
-        Ok(TlcRegionsPinned(inner))
+        tlc::pin_entry_buffers::run(&mut inner.tlc, &mut inner.auto_storage_binding_ids)?;
+        Ok(TlcBuffersPinned(inner))
     }
 }
 
 /// TLC after entry-param buffer regions are pinned into their types.
-pub struct TlcRegionsPinned(pub TlcEarlyInner);
+pub struct TlcBuffersPinned(pub TlcEarlyInner);
 
-impl std::ops::Deref for TlcRegionsPinned {
+impl std::ops::Deref for TlcBuffersPinned {
     type Target = TlcEarlyInner;
     fn deref(&self) -> &TlcEarlyInner {
         &self.0
     }
 }
 
-impl TlcRegionsPinned {
+impl TlcBuffersPinned {
     /// Validate source-level consumption before any simplification or
     /// inlining can erase the call boundary that carries the `*T`
     /// contract. `partial_eval` is defined only on the resulting
@@ -671,7 +671,7 @@ impl TlcOwnershipValidated {
     /// Test-only: run the canonical TLC optimization pipeline to
     /// `TlcReachable` without the per-stage `time(...)` wrappers the
     /// driver uses. Runs on the already-validated state, so the
-    /// fallible `pin_entry_regions` / `validate_ownership` steps (and
+    /// fallible `pin_entry_buffers` / `validate_ownership` steps (and
     /// their errors) are the caller's to propagate. The bool is
     /// forwarded as `parallelize_soacs(disable=bool)`: `false` ⇒
     /// parallelization enabled (default driver mode, what most tests
@@ -1571,7 +1571,7 @@ fn compile_thru_tlc_with(source: &str, disable_parallelize: bool) -> error::Resu
         .type_check(&mut module_manager)?;
     Ok(type_checked
         .to_tlc(&module_manager, false)
-        .pin_entry_regions()?
+        .pin_entry_buffers()?
         .validate_ownership()?
         .optimize_for_test(disable_parallelize))
 }

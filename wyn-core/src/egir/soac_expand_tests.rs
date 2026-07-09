@@ -70,7 +70,7 @@ fn plain_array_ty(elem: Type<TypeName>) -> Type<TypeName> {
             elem,
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Constructed(TypeName::Size(4), vec![]),
-            crate::types::no_region(),
+            crate::types::no_buffer(),
         ],
     )
 }

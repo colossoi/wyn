@@ -14,8 +14,7 @@ use crate::egir::from_tlc::AUTO_STORAGE_SET;
 use crate::interface::{self, Attribute, EntryParamBinding, EntryParamBindingKind};
 use crate::pipeline_descriptor::*;
 use crate::types::TypeExt;
-use crate::{BindingRef, SymbolId, SymbolTable};
-use crate::{LookupMap, LookupSet};
+use crate::{BindingRef, LookupMap, LookupSet, SymbolId, SymbolTable};
 use polytype::Type;
 
 use super::{
@@ -691,7 +690,7 @@ fn classify_input(input: &ArrayExpr, entry_slots: &[Option<EntryParamBinding>]) 
                 }
             }
             let ref_ty = ty.clone();
-            if let Some(binding) = crate::types::array_view_region(&ref_ty) {
+            if let Some(binding) = crate::types::array_view_buffer(&ref_ty) {
                 if let Some(elem_ty) = ref_ty.elem_type() {
                     let elem_bytes = crate::ssa::layout::type_byte_size(elem_ty)?;
                     return Some(ArrayProvenance::Storage {

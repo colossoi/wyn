@@ -733,7 +733,7 @@ mod tests {
                 int.clone(),
                 Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
                 Type::Constructed(TypeName::Size(8), vec![]),
-                Type::Constructed(TypeName::NoRegion, vec![]),
+                Type::Constructed(TypeName::NoBuffer, vec![]),
             ],
         );
         let tuple = Type::Constructed(TypeName::Tuple(1), vec![array.clone()]);

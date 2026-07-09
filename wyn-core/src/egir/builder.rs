@@ -8,10 +8,9 @@ use polytype::Type;
 use smallvec::smallvec;
 
 use crate::ast::{Span, TypeName};
-use crate::interface;
 use crate::ssa::framework::BlockId;
 use crate::ssa::types::{ConstantValue, ControlHeader, ExecutionModel};
-use crate::BindingRef;
+use crate::{interface, BindingRef};
 
 use super::graph_ops;
 use super::program::EgirEntry;
@@ -274,8 +273,8 @@ impl EntryBuilder {
                 elem_ty.clone(),
                 Type::Constructed(TypeName::ArrayVariantView, vec![]),
                 Type::Variable(0),
-                // region stamped from the binding by emit_storage_view.
-                crate::types::no_region(),
+                // buffer stamped from the binding by emit_storage_view.
+                crate::types::no_buffer(),
             ],
         );
         let view_nid = self.emit_storage_view(binding, arr_ty);

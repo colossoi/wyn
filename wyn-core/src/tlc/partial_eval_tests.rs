@@ -1,7 +1,6 @@
 //! Tests for TLC partial evaluation.
 
-use super::PartialEvaluator;
-use super::VarRef;
+use super::{PartialEvaluator, VarRef};
 use crate::ast::{BinaryOp, Span, TypeName};
 use crate::tlc::{Def, DefMeta, Lambda, Program, Term, TermId, TermIdSource, TermKind};
 use crate::{SymbolId, SymbolTable};
@@ -848,7 +847,7 @@ fn let_bound_array_substituted_through_soac_input() {
             i32_ty.clone(),
             Type::Constructed(TypeName::Size(3), vec![]),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
-            crate::types::no_region(),
+            crate::types::no_buffer(),
         ],
     );
 

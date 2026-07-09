@@ -22,7 +22,7 @@ pub mod ownership;
 pub mod parallelize;
 pub mod partial_eval;
 pub mod patterns;
-pub mod pin_entry_regions;
+pub mod pin_entry_buffers;
 pub mod producer_graph;
 pub mod rep_specialize;
 #[cfg(test)]
@@ -38,11 +38,9 @@ pub mod subst;
 use crate::ast::{self, NodeId, Span, TypeName};
 use crate::builtins::{by_id, catalog, BuiltinId};
 use crate::error::CompilerError;
-use crate::interface;
 use crate::name_resolution::{NameResolution, ResolvedValueRef, SoacKind};
 use crate::types::TypeExt;
-use crate::LookupMap;
-use crate::{BindingRef, SymbolId, SymbolTable, TypeTable};
+use crate::{interface, BindingRef, LookupMap, SymbolId, SymbolTable, TypeTable};
 use polytype::Type;
 
 // =============================================================================
@@ -768,13 +766,13 @@ impl ArrayExpr {
     /// types. Inverse of the per-variant `array_expr_type` recomputation that
     /// EGIR lowering and the representation passes each used to carry.
     pub fn array_type(&self) -> Type<TypeName> {
-        use crate::types::{make_array1, no_region, region_tag};
+        use crate::types::{buffer_tag, make_array1, no_buffer};
         let virtual_array = |elem: Type<TypeName>| {
             make_array1(
                 elem,
                 Type::Constructed(TypeName::ArrayVariantVirtual, vec![]),
                 Type::Constructed(TypeName::SizePlaceholder, vec![]),
-                no_region(),
+                no_buffer(),
             )
         };
         match self {
@@ -786,14 +784,14 @@ impl ArrayExpr {
                     .unwrap_or_else(|| Type::Constructed(TypeName::Unit, vec![])),
                 Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
                 Type::Constructed(TypeName::Size(terms.len()), vec![]),
-                no_region(),
+                no_buffer(),
             ),
             ArrayExpr::Range { start, .. } => virtual_array(start.ty.clone()),
             ArrayExpr::StorageView(sv) => make_array1(
                 sv.elem_ty.clone(),
                 Type::Constructed(TypeName::ArrayVariantView, vec![]),
                 Type::Constructed(TypeName::SizePlaceholder, vec![]),
-                region_tag(sv.binding),
+                buffer_tag(sv.binding),
             ),
             ArrayExpr::Zip(children) => {
                 let elems: Vec<Type<TypeName>> = children

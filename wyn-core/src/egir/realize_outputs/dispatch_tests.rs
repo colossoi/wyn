@@ -17,7 +17,7 @@ fn compute_slot_source_rejects_unsized_array_without_soac() {
             f32_ty.clone(),
             Type::Constructed(TypeName::ArrayVariantView, vec![]),
             Type::Variable(99),
-            crate::types::no_region(),
+            crate::types::no_buffer(),
         ],
     );
 
@@ -79,7 +79,7 @@ fn view_arr_ty(elem: Type<TypeName>, binding: crate::BindingRef) -> Type<TypeNam
             elem,
             Type::Constructed(TypeName::ArrayVariantView, vec![]),
             Type::Variable(0),
-            Type::Constructed(TypeName::Region(binding), vec![]),
+            Type::Constructed(TypeName::Buffer(binding), vec![]),
         ],
     )
 }
@@ -91,7 +91,7 @@ fn composite_arr_ty(elem: Type<TypeName>, n: usize) -> Type<TypeName> {
             elem,
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Constructed(TypeName::Size(n), vec![]),
-            crate::types::no_region(),
+            crate::types::no_buffer(),
         ],
     )
 }

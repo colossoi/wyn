@@ -3099,9 +3099,9 @@ def test: i32 = add_first([1, 2, 3], [4, 5])
 
 // ---- Representation-polymorphic existential array (filter output) ----
 //
-// `filter`'s return scheme is `?k. Array[a, Abstract, k, no_region]`.
+// `filter`'s return scheme is `?k. Array[a, Abstract, k, no_buffer]`.
 // After `open_existential` (let-binding), the bound value has type
-// `Array[a, Abstract, Skolem(k), no_region]`. Operations on the
+// `Array[a, Abstract, Skolem(k), no_buffer]`. Operations on the
 // Abstract-variant array must typecheck cleanly (length, index, slice,
 // passing to a size-poly helper). The previous Composite pinning froze
 // the consumer signature against Composite before the producer's

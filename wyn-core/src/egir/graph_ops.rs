@@ -17,8 +17,7 @@ use polytype::Type;
 use smallvec::{smallvec, SmallVec};
 
 use crate::ast::{Span, TypeName};
-use crate::builtins::catalog;
-use crate::builtins::BuiltinId;
+use crate::builtins::{catalog, BuiltinId};
 use crate::ssa::framework::BlockId;
 use crate::ssa::types::{ConstantValue, InstKind, ValueRef};
 use crate::BindingRef;
@@ -93,7 +92,7 @@ pub fn intern_storage_view(
         span,
     );
     let zero_nid = intern_u32(graph, 0, span);
-    let view_ty = crate::types::view_array_of(&view_ty, crate::types::region_tag(br));
+    let view_ty = crate::types::view_array_of(&view_ty, crate::types::buffer_tag(br));
     graph.intern_pure_with_span(
         PureOp::StorageView(PureViewSource::Storage(br)),
         smallvec![zero_nid, len_nid],
@@ -117,7 +116,7 @@ pub fn emit_workgroup_view(
     let zero_nid = intern_u32(graph, 0, span);
     let count_nid = intern_u32(graph, count, span);
     // Workgroup-shared memory is not descriptor-bound: no (set, binding) region.
-    let view_ty = crate::types::view_array_of(&view_ty, crate::types::no_region());
+    let view_ty = crate::types::view_array_of(&view_ty, crate::types::no_buffer());
     graph.intern_pure_with_span(
         PureOp::StorageView(PureViewSource::Workgroup { id, count }),
         smallvec![zero_nid, count_nid],
@@ -137,7 +136,7 @@ pub fn intern_chunked_storage_view(
     view_ty: Type<TypeName>,
     span: Option<Span>,
 ) -> NodeId {
-    let view_ty = crate::types::view_array_of(&view_ty, crate::types::region_tag(br));
+    let view_ty = crate::types::view_array_of(&view_ty, crate::types::buffer_tag(br));
     graph.intern_pure_with_span(
         PureOp::StorageView(PureViewSource::Storage(br)),
         smallvec![offset, len],

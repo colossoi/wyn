@@ -1364,8 +1364,8 @@ fn build_tree_reduce_phase2(
             elem_ty.clone(),
             Type::Constructed(TypeName::ArrayVariantView, vec![]),
             Type::Variable(0),
-            // region stamped from the binding by intern_storage_view.
-            crate::types::no_region(),
+            // buffer stamped from the binding by intern_storage_view.
+            crate::types::no_buffer(),
         ],
     );
 
@@ -2369,7 +2369,7 @@ fn lower_reduce_entry(
                 elem_ty.clone(),
                 Type::Constructed(TypeName::ArrayVariantView, vec![]),
                 Type::Variable(0),
-                crate::types::no_region(),
+                crate::types::no_buffer(),
             ],
         );
         let partials_view =
@@ -2654,7 +2654,7 @@ fn lower_scan_entry(
                 elem_ty.clone(),
                 Type::Constructed(TypeName::ArrayVariantView, vec![]),
                 Type::Variable(0),
-                crate::types::no_region(),
+                crate::types::no_buffer(),
             ],
         );
         let block_sums_view =
@@ -2814,7 +2814,7 @@ fn build_exclusive_scan_phase2(
             elem_ty.clone(),
             Type::Constructed(TypeName::ArrayVariantView, vec![]),
             Type::Variable(0),
-            crate::types::no_region(),
+            crate::types::no_buffer(),
         ],
     );
     let entry_block = b.graph_mut().skeleton.entry;
@@ -2930,7 +2930,7 @@ pub fn synthesize_phase3_scan(
             elem_ty.clone(),
             Type::Constructed(TypeName::ArrayVariantView, vec![]),
             Type::Variable(0),
-            crate::types::no_region(),
+            crate::types::no_buffer(),
         ],
     );
     let _output_view = b.emit_storage_view(output_binding, arr_ty.clone());

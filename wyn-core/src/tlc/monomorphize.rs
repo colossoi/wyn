@@ -22,13 +22,12 @@
 //! `Array[_, Abstract, _, _]` surviving past EGIR is caught by
 //! `egir::verify_no_abstract` before backend emission.
 
-use super::VarRef;
-use super::{ArrayExpr, Def, DefMeta, Lambda, LoopKind, Program, SoacOp, Term, TermIdSource, TermKind};
+use super::{
+    ArrayExpr, Def, DefMeta, Lambda, LoopKind, Program, SoacOp, Term, TermIdSource, TermKind, VarRef,
+};
 use crate::ast::TypeName;
-use crate::types::TypeExt;
-use crate::types::TypeScheme;
-use crate::{LookupMap, LookupSet};
-use crate::{SymbolId, SymbolTable};
+use crate::types::{TypeExt, TypeScheme};
+use crate::{LookupMap, LookupSet, SymbolId, SymbolTable};
 use polytype::Type;
 use std::collections::VecDeque;
 
@@ -198,8 +197,8 @@ impl TypeKey {
                     TypeName::ArrayVariantVirtual => "array_virtual".to_string(),
                     TypeName::ArrayVariantBounded => "array_bounded".to_string(),
                     TypeName::ArrayVariantAbstract => "array_abstract".to_string(),
-                    TypeName::Region(b) => format!("region_s{}_b{}", b.set, b.binding),
-                    TypeName::NoRegion => "no_region".to_string(),
+                    TypeName::Buffer(b) => format!("buffer_s{}_b{}", b.set, b.binding),
+                    TypeName::NoBuffer => "no_buffer".to_string(),
                     TypeName::Texture2D => "texture2d".to_string(),
                     TypeName::Sampler => "sampler".to_string(),
                     TypeName::AddressPlaceholder => {
@@ -268,19 +267,19 @@ impl TypeKey {
                     }
                     s if s.starts_with("sizevar_") => TypeName::SizeVar(s[8..].to_string()),
                     s if s.starts_with("uservar_") => TypeName::UserVar(s[8..].to_string()),
-                    s if s.starts_with("region_s") => {
-                        let rest = &s["region_s".len()..];
+                    s if s.starts_with("buffer_s") => {
+                        let rest = &s["buffer_s".len()..];
                         let (set_s, bind_s) = rest
                             .split_once("_b")
-                            .unwrap_or_else(|| panic!("BUG: invalid mangled region name: {}", s));
+                            .unwrap_or_else(|| panic!("BUG: invalid mangled buffer name: {}", s));
                         let set =
-                            set_s.parse().unwrap_or_else(|_| panic!("BUG: invalid region set in: {}", s));
+                            set_s.parse().unwrap_or_else(|_| panic!("BUG: invalid buffer set in: {}", s));
                         let binding = bind_s
                             .parse()
-                            .unwrap_or_else(|_| panic!("BUG: invalid region binding in: {}", s));
-                        TypeName::Region(crate::BindingRef::new(set, binding))
+                            .unwrap_or_else(|_| panic!("BUG: invalid buffer binding in: {}", s));
+                        TypeName::Buffer(crate::BindingRef::new(set, binding))
                     }
-                    "no_region" => TypeName::NoRegion,
+                    "no_buffer" => TypeName::NoBuffer,
                     s => TypeName::Named(s.to_string()),
                 };
                 Type::Constructed(type_name, type_args)
@@ -1185,8 +1184,8 @@ fn format_type_compact(ty: &Type<TypeName>) -> String {
             format!("{}_{}", name, args_str)
         }
         Type::Constructed(TypeName::ArrayVariantView, _) => "array_view".to_string(),
-        Type::Constructed(TypeName::Region(b), _) => format!("region_s{}_b{}", b.set, b.binding),
-        Type::Constructed(TypeName::NoRegion, _) => "no_region".to_string(),
+        Type::Constructed(TypeName::Buffer(b), _) => format!("buffer_s{}_b{}", b.set, b.binding),
+        Type::Constructed(TypeName::NoBuffer, _) => "no_buffer".to_string(),
         Type::Constructed(TypeName::ArrayVariantComposite, _) => "array_composite".to_string(),
         Type::Constructed(TypeName::ArrayVariantVirtual, _) => "array_virtual".to_string(),
         Type::Constructed(TypeName::ArrayVariantBounded, _) => "array_bounded".to_string(),

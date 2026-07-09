@@ -4,7 +4,7 @@
 //! We run the pass on a program compiled to the pre-defunctionalize stage
 //! (`lift_gathers`): there the producer calls are still present (no inlining
 //! yet) and SOAC operator lambdas are still inline (so the only `Var`-callee
-//! `App`s are user helper calls). Region concreteness — which the pass needs at
+//! `App`s are user helper calls). Buffer concreteness — which the pass needs at
 //! its real post-monomorphize position — is exercised by the end-to-end tests,
 //! not here; this fixes the *materialization decision*.
 

@@ -22,7 +22,7 @@ pub enum ArgKind {
     Variant,
     /// An array dimension size (`Size`/`SizeVar`/`SizePlaceholder`/`Skolem`).
     Size,
-    /// A buffer region (`Region` / `NoRegion`).
+    /// A buffer region (`Region` / `NoBuffer`).
     Region,
     /// A pointer address space.
     AddrSpace,
@@ -42,7 +42,7 @@ fn arg_kind_of_name(name: &TypeName) -> ArgKind {
         TypeName::Size(_) | TypeName::SizeVar(_) | TypeName::SizePlaceholder | TypeName::Skolem(_) => {
             ArgKind::Size
         }
-        TypeName::Region(_) | TypeName::NoRegion => ArgKind::Region,
+        TypeName::Buffer(_) | TypeName::NoBuffer => ArgKind::Region,
         TypeName::PointerFunction
         | TypeName::PointerInput
         | TypeName::PointerOutput

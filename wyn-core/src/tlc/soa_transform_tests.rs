@@ -23,7 +23,7 @@ fn array_ty(elem: Type<TypeName>, size: usize) -> Type<TypeName> {
             elem,
             composite_variant(),
             size_ty(size),
-            crate::types::no_region(),
+            crate::types::no_buffer(),
         ],
     )
 }

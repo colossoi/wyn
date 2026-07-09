@@ -19,8 +19,7 @@ use super::graph_ops::{
 use super::program::{EgirInner, RegionInterner};
 use crate::ast::TypeName;
 use crate::ssa::types::{ControlHeader, InstKind, ValueRef};
-use crate::types::TypeExt;
-use crate::types::{is_array_variant_view, is_virtual_array};
+use crate::types::{is_array_variant_view, is_virtual_array, TypeExt};
 
 use super::types::{
     EGraph, ENode, EgirSoac, NodeId, PureOp, SegOpKind, SideEffect, SideEffectKind, SkeletonTerminator,
@@ -332,7 +331,7 @@ fn expand_one(
             // an `array_with_inplace` node whose declared result
             // type disagrees with the carried block param's type;
             // the SPIR-V backend then panics trying to lower the
-            // bogus `Array[..., Composite, Variable, NoRegion]`.
+            // bogus `Array[..., Composite, Variable, NoBuffer]`.
             let mut map_carried_tys: Vec<Type<TypeName>> = Vec::with_capacity(n_maps);
 
             for map_idx in 0..n_maps {
@@ -1127,7 +1126,7 @@ fn build_filter_loop(
             spec.output_elem_ty.clone(),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             spec.capacity_size.clone(),
-            crate::types::no_region(),
+            crate::types::no_buffer(),
         ],
     );
 
@@ -1311,7 +1310,7 @@ fn build_filter_loop(
 /// stored into `scratch_out[count]` and `count` is bumped. The original result
 /// node is rebound to a runtime-length view `StorageView(scratch_out)[0, count]`
 /// over the buffer — its type (set by `convert_soac_filter`) already carries
-/// `Region(scratch_out)`, so the backend recovers the descriptor from the type.
+/// `Buffer(scratch_out)`, so the backend recovers the descriptor from the type.
 /// All offsets/lengths are `u32` to match the view `{offset, len}` convention.
 /// Inputs for a sequential `scatter` expansion. The per-element envelope
 /// `func` maps the read input elements (plus captures) to an `(index, value)`
@@ -2018,7 +2017,7 @@ fn build_runtime_filter_loop(
 
     // Rebind the original result NodeId to the runtime-length view
     // `StorageView(scratch_out)[offset = 0, len = after_count]`. The node's
-    // type (carrying `Region(scratch_out)`) is preserved from emit_soac.
+    // type (carrying `Buffer(scratch_out)`) is preserved from emit_soac.
     let zero_off_nid = intern_u32(graph, 0, None);
     graph.nodes[spec.result_node] = ENode::Pure {
         op: PureOp::StorageView(crate::op::PureViewSource::Storage(scratch_out)),

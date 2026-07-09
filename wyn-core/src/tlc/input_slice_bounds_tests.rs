@@ -12,8 +12,8 @@ fn program_from(src: &str) -> Program {
     let tc = crate::compile_thru_frontend(src).expect("frontend");
     let (_nc, module_manager) = crate::cached_compiler_init();
     tc.to_tlc(&module_manager, false)
-        .pin_entry_regions()
-        .expect("pin_entry_regions")
+        .pin_entry_buffers()
+        .expect("pin_entry_buffers")
         .validate_ownership()
         .expect("validate_ownership")
         .partial_eval()

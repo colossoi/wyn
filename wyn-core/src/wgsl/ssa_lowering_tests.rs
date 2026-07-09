@@ -195,7 +195,7 @@ fn type_array_sized() {
             scalar_ty(TypeName::Float(32)),
             PolyType::Constructed(TypeName::ArrayVariantComposite, vec![]),
             PolyType::Constructed(TypeName::Size(8), vec![]),
-            crate::types::no_region(),
+            crate::types::no_buffer(),
         ],
     );
     assert_eq!(e.type_to_wgsl(&ty).unwrap(), "array<f32, 8>");

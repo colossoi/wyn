@@ -113,8 +113,8 @@ fn build_soac_helper_candidates(program: &Program) -> LookupMap<SymbolId, Inline
 
 /// True if `ty` references an unresolved *value* type parameter (a free
 /// polytype `Type::Variable`). For an array, only the element slot can carry
-/// one; the variant / size / region slots carry representation, size, and
-/// region variables that are resolved on their own axes and don't leak to the
+/// one; the variant / size / buffer slots carry representation, size, and
+/// buffer variables that are resolved on their own axes and don't leak to the
 /// backend as "unresolved type variable", so they are not counted.
 fn type_contains_variable(ty: &Type<TypeName>) -> bool {
     match ty {
@@ -519,7 +519,7 @@ pub(crate) fn build_inline_lets(
             // Substituting the *symbol* alone is not enough: the param's
             // declared type may be polymorphic (e.g. `[]T` with a region
             // type-variable), while the call-site arg carries the
-            // concrete instantiation (a `Region(set, binding)`). If we
+            // concrete instantiation (a `Buffer(set, binding)`). If we
             // only rewrite the symbol, the substituted `Var` still
             // carries the param's polymorphic type and downstream type
             // walks (notably the SPIR-V backend's view-region check)

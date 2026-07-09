@@ -471,7 +471,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         crate::op::PureViewSource::Storage(br) => {
                             let (set, binding) = (&br.set, &br.binding);
                             // The descriptor rides in the result value's type
-                            // (`Region(set, binding)`); consumers recover the
+                            // (`Buffer(set, binding)`); consumers recover the
                             // buffer var from there. Validate the binding is a
                             // declared storage buffer and build the {offset,len}
                             // struct.

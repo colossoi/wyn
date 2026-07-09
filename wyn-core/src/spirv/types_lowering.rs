@@ -89,7 +89,7 @@ impl Constructor {
                         if let PolyType::Constructed(TypeName::ArrayVariantView, _) = variant {
                             // View variant: struct { offset: u32, len: u32 }. The
                             // backing storage buffer is identified by the concrete
-                            // `Region(set, binding)` in the view's type, not a
+                            // `Buffer(set, binding)` in the view's type, not a
                             // runtime field — so the descriptor survives phis and
                             // view-preserving intrinsics where reverse-mapping a
                             // runtime constant can't recover it.
@@ -195,8 +195,8 @@ impl Constructor {
                     }
                     TypeName::ArrayVariantComposite
                     | TypeName::ArrayVariantView
-                    | TypeName::Region(_)
-                    | TypeName::NoRegion
+                    | TypeName::Buffer(_)
+                    | TypeName::NoBuffer
                     | TypeName::PointerFunction
                     | TypeName::PointerInput
                     | TypeName::PointerOutput

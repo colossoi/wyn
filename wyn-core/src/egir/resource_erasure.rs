@@ -1,6 +1,6 @@
 //! Erase compile-time-only GPU resource handles before SSA construction.
 //!
-//! Region monomorphization makes a `StorageTexture` parameter's binding part
+//! Buffer monomorphization makes a `StorageTexture` parameter's binding part
 //! of its type. Binding-qualified image operations therefore need no runtime
 //! image value. This pass removes those zero-footprint parameters and the
 //! matching call operands after all SegOps have expanded, when the complete

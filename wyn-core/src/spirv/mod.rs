@@ -129,7 +129,7 @@ struct Constructor {
     current_entry_outputs: Vec<spirv::Word>,
 
     /// buffer_id → (buffer_var, elem_spirv_type). The buffer_id is recovered
-    /// from a view's type via `array_view_region` → `get_or_assign_buffer_id`.
+    /// from a view's type via `array_view_buffer` → `get_or_assign_buffer_id`.
     buffer_vars: Vec<(spirv::Word, spirv::Word)>,
     /// (set, binding) → buffer_id, for deduplication in get_or_assign_buffer_id.
     buffer_id_map: LookupMap<BindingRef, u32>,
@@ -241,7 +241,7 @@ impl Constructor {
     fn load_storage_image(&mut self, binding: BindingRef) -> Result<spirv::Word> {
         let &(var, img_type) = self.storage_images.get(&binding).ok_or_else(|| {
             err_spirv!(
-                "storage image region(set={}, binding={}) has no declared global",
+                "storage image binding(set={}, binding={}) has no declared global",
                 binding.set,
                 binding.binding
             )

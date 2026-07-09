@@ -5401,7 +5401,7 @@ entry filt_reduce(xs: []i32) i32 =
 ///
 ///   Function argument type mismatch at argument 3:
 ///   expected Array[i32, ?, ?, ?],
-///   got ?k. [Array[i32, abstract, k, no_region]]
+///   got ?k. [Array[i32, abstract, k, no_buffer]]
 ///
 /// because existential elimination only fired at `let` binders, not at
 /// general use sites. Fixed in `unify_apply_arg` by mirroring the let-
@@ -6309,7 +6309,7 @@ def render(a: []u32, b: []u32) ([]f32, []f32, []f32) =
 }
 
 /// A record whose fields are storage-buffer views, bound outside a map and
-/// indexed inside that map's body, keeps a concrete `Region(set, binding)` on
+/// indexed inside that map's body, keeps a concrete `Buffer(set, binding)` on
 /// each field. Passing the record to a helper that maps over its fields and
 /// returns a record of the results is what drives those field types view-ward.
 ///
@@ -6396,9 +6396,9 @@ entry go(dom: []u32, pts_in: []f32) ([]f32, []f32) =
 }
 
 /// A fragment entry's storage-buffer parameters carry a concrete
-/// `Region(set, binding)` in their type, exactly as a compute entry's do. A
+/// `Buffer(set, binding)` in their type, exactly as a compute entry's do. A
 /// helper that indexes them through a record is the shape that exposes it:
-/// the helper's region variable is generalized and instantiated per call, so
+/// the helper's buffer variable is generalized and instantiated per call, so
 /// the entry parameter is the only place a concrete region can be pinned.
 ///
 /// Without that pin, `scene_sdf` reaches SPIR-V lowering holding
@@ -7175,8 +7175,8 @@ fn scan_over_view_reads_own_buffer() {
 
 /// Merging two views at *distinct* descriptors — `if c then xs else ys` — has
 /// no single static binding, so it must not compile. Type inference unifies the
-/// two branches' region variables into one; `pin_entry_regions` then tries to
-/// pin that one variable to both `Region(2,0)` and `Region(2,1)`, detects the
+/// two branches' buffer variables into one; `pin_entry_buffers` then tries to
+/// pin that one variable to both `Buffer(2,0)` and `Buffer(2,1)`, detects the
 /// conflict, and rejects it — rather than silently reading the wrong buffer.
 #[test]
 fn merge_of_distinct_buffers_is_a_type_error() {
@@ -7267,7 +7267,7 @@ fn ctor_vec3_and_vec4_constructors_compile_to_spirv() {
 
 // ---- ArrayVariantAbstract — `filter` → size-polymorphic consumer ----
 //
-// `filter`'s return scheme is now `?k. Array[a, Abstract, k, no_region]`
+// `filter`'s return scheme is now `?k. Array[a, Abstract, k, no_buffer]`
 // (was `Composite`). The producer's EGIR lowering picks Bounded for
 // static-capacity inputs and View for runtime-sized ones; the consumer
 // can be a size-polymorphic helper that gets specialized against the
@@ -7684,7 +7684,7 @@ entry b(xs: []u32) []f32 = map(|x| f32.u32(x), xs)
 /// binding 0)` slot with DIFFERENT element types must each get a fresh
 /// slot — sharing one `OpVariable` between a `[]u32` and a `[]f32`
 /// trips `spirv-val: OpAccessChain result type '%float' does not match
-/// indexing into base '%uint'`. Fix: `pin_entry_regions` owns a single
+/// indexing into base '%uint'`. Fix: `pin_entry_buffers` owns a single
 /// `IdSource<u32>` across all entries so input bindings can't alias.
 #[test]
 fn two_compute_entries_with_differently_typed_inputs_do_not_alias() {
@@ -8672,7 +8672,7 @@ entry tick(#[storage(set=2, binding=0, access=readwrite)] buf: *[]u32) *[]u32 =
 
 /// A consuming `*[]T` map's `Project` and the carried buffer it
 /// drives must both carry the input view's type, not the TLC-
-/// default `Composite[Variable, NoRegion]`. Otherwise the SPIR-V
+/// default `Composite[Variable, NoBuffer]`. Otherwise the SPIR-V
 /// backend tries to lower a Composite array with a runtime size
 /// (the input view's runtime length) and panics. Wired in
 /// `egir::from_tlc::convert_soac_map` (`InputBuffer`-aware project
@@ -8707,7 +8707,7 @@ entry e(#[storage(set=2, binding=1, access=write)] o: *[]point) () =
 }
 
 /// A record-of-runtime-arrays alias (`world`) passed as a function PARAM.
-/// The array fields' variant/region slots must be region-polymorphic across
+/// The array fields' variant/buffer slots must be buffer-polymorphic across
 /// the call boundary (the alias body's placeholders freshen per use), so
 /// `world` unifies with a `{ points = view, items = view }` argument.
 /// (PR7 repro pr7_2a.)
@@ -8734,7 +8734,7 @@ entry step(dom: []u32, points_in: []vec2f32, items_in: []vec4f32)
 
 /// Construct a record-of-runtime-arrays from `map` outputs and RETURN it.
 /// The declared `world` return must unify with the body's concrete
-/// `composite`/`no_region` map-result arrays. (PR7 repro pr7_2b.)
+/// `composite`/`no_buffer` map-result arrays. (PR7 repro pr7_2b.)
 #[test]
 fn record_of_arrays_construct_and_return_compiles() {
     crate::compile_thru_spirv(

@@ -6,11 +6,8 @@
 //! back to `FuncBody` via demand-driven scheduling (giving DCE for free).
 
 use crate::builtins::catalog;
-use crate::ssa::types::EntryInput;
-use crate::ssa::types::EntryOutput;
-use crate::ssa::types::IoDecoration;
-use crate::tlc::SoacBody;
-use crate::tlc::VarRef;
+use crate::ssa::types::{EntryInput, EntryOutput, IoDecoration};
+use crate::tlc::{SoacBody, VarRef};
 use crate::{LookupMap, LookupSet};
 
 use super::types::EffectToken;
@@ -20,16 +17,14 @@ use crate::binding_layout::{
     extract_storage_image_binding, extract_storage_image_resource, extract_texture_backing,
     extract_texture_binding, extract_texture_resource, extract_uniform_binding,
 };
-use crate::interface;
 use crate::interface::{EntryParamBinding, EntryParamBindingKind};
 use crate::ssa::framework::BlockId;
 use crate::ssa::types::{ControlHeader, FuncBody, Function, InstKind, ValueRef};
 use crate::tlc::{
     ArrayExpr, Def as TlcDef, DefMeta, Lambda, LoopKind, Program as TlcProgram, SoacOp, Term, TermKind,
 };
-use crate::types::extract_function_signature;
-use crate::types::TypeExt;
-use crate::{BindingRef, SymbolId, SymbolTable};
+use crate::types::{extract_function_signature, TypeExt};
+use crate::{interface, BindingRef, SymbolId, SymbolTable};
 use polytype::Type;
 use smallvec::{smallvec, SmallVec};
 
@@ -1163,9 +1158,9 @@ impl<'a, 'b> Converter<'a, 'b> {
                 } else if *id == known.image_with && args.len() == 3 {
                     self.lower_image_with(args, ty)
                 } else if *id == known.image_load && args.len() == 2 {
-                    let binding = crate::types::storage_image_region(&args[0].ty).ok_or_else(|| {
+                    let binding = crate::types::storage_image_buffer(&args[0].ty).ok_or_else(|| {
                         ConvertError::GraphError(
-                            "image_load operand has no concrete storage-image region after monomorphization"
+                            "image_load operand has no concrete storage-image binding after monomorphization"
                                 .into(),
                         )
                     })?;
@@ -1341,9 +1336,9 @@ impl<'a, 'b> Converter<'a, 'b> {
     /// linear image handle. The image handle itself has no runtime payload; the
     /// concrete descriptor binding is carried by `args[0].ty`.
     fn lower_image_with(&mut self, args: &[Term], ty: Type<TypeName>) -> Result<NodeId, ConvertError> {
-        let binding = crate::types::storage_image_region(&args[0].ty).ok_or_else(|| {
+        let binding = crate::types::storage_image_buffer(&args[0].ty).ok_or_else(|| {
             ConvertError::GraphError(
-                "storage-image update operand has no concrete storage-image region after monomorphization"
+                "storage-image update operand has no concrete storage-image binding after monomorphization"
                     .into(),
             )
         })?;
@@ -2075,10 +2070,10 @@ impl<'a, 'b> Converter<'a, 'b> {
         // Emit as a singleton Screma + project field 0. For consuming
         // (`InputBuffer`) map the result aliases the input, so the
         // Project's type must match the input view's type (View
-        // variant + region) rather than the TLC-default `result_ty`
-        // (Composite variant with NoRegion). Mirrors the same handling
+        // variant + buffer) rather than the TLC-default `result_ty`
+        // (Composite variant with NoBuffer). Mirrors the same handling
         // in `convert_soac_scan` below — without it the SPIR-V backend
-        // panics trying to lower a `Composite[Variable, NoRegion]`
+        // panics trying to lower a `Composite[Variable, NoBuffer]`
         // array type that survives because the consumer-side Project
         // takes the TLC logical type even when the runtime tuple
         // carries a View.
@@ -2403,7 +2398,7 @@ impl<'a, 'b> Converter<'a, 'b> {
 
         // Emit as Screma { 0 maps, 1 Scan acc } + project field 0. For
         // consuming scan the result aliases the input, so the Project's
-        // type must match the input view's type (View variant + region)
+        // type must match the input view's type (View variant + buffer)
         // rather than the TLC-default result_ty (Composite variant).
         // Non-consuming scan keeps result_ty; realize_outputs fixes its
         // variant via retarget_array_projection.
@@ -2510,7 +2505,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                     output_elem_ty.clone(),
                     Type::Constructed(TypeName::ArrayVariantBounded, vec![]),
                     size.clone(),
-                    crate::types::no_region(),
+                    crate::types::no_buffer(),
                 ],
             );
             return Ok(self.emit_soac(
@@ -2544,9 +2539,9 @@ impl<'a, 'b> Converter<'a, 'b> {
         // interface and an unseeded cursor. A runtime `filter` reaching here in
         // a standalone function (one monomorphize/inlining didn't fold into its
         // caller) is caught at `convert_function` — see the guard there.
-        let input_binding = crate::types::array_view_region(&arr_ty).ok_or_else(|| {
+        let input_binding = crate::types::array_view_buffer(&arr_ty).ok_or_else(|| {
             ConvertError::GraphError(
-                "filter: runtime-sized input has no concrete buffer region — its size is \
+                "filter: runtime-sized input has no concrete buffer — its size is \
                  not statically known and it is not backed by a storage buffer"
                     .into(),
             )
@@ -2577,7 +2572,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             }),
         });
         let view_result_ty =
-            crate::types::view_array_of(&output_elem_ty, crate::types::region_tag(scratch_out));
+            crate::types::view_array_of(&output_elem_ty, crate::types::buffer_tag(scratch_out));
         Ok(self.emit_soac(
             EgirSoac::Filter {
                 space: None,
@@ -2658,7 +2653,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                         elem_ty.clone(),
                         Type::Constructed(TypeName::ArrayVariantView, vec![]),
                         Type::Constructed(TypeName::SizePlaceholder, vec![]),
-                        crate::types::region_tag(*binding),
+                        crate::types::buffer_tag(*binding),
                     ],
                 );
                 let result_nid = self.graph.alloc_side_effect_result(array_ty);
@@ -2727,7 +2722,7 @@ impl<'a, 'b> Converter<'a, 'b> {
     /// EGIR node's type reflects representation rewrites the TLC term type
     /// predates — notably a runtime `filter` whose result is a `View` even
     /// though its TLC type is the existential-opened `Composite`. So a SOAC
-    /// consumer reads the array shape (variant / region) off the node, falling
+    /// consumer reads the array shape (variant / buffer) off the node, falling
     /// back to the TLC-derived `array_expr_type` when the node isn't a concrete
     /// array (e.g. an opaque tuple handle). Mirrors how `length` dispatches on
     /// the value type rather than the source type.
@@ -2876,7 +2871,7 @@ fn unwrap_existential_array(ty: &Type<TypeName>) -> Type<TypeName> {
 /// When the TLC `result_ty` carries an unresolved existential `Skolem` size —
 /// the type of a `filter`-produced input opened by `open_existential`, which the
 /// backend can't lower — rebuild the result from the input array's
-/// representation (variant / size / region) with `output_elem_ty`. `map`/`scan`
+/// representation (variant / size / buffer) with `output_elem_ty`. `map`/`scan`
 /// are shape-preserving, so this is exactly the input's shape with a possibly
 /// different element type (e.g. `Bounded[N]`, whose runtime `len` a consuming
 /// SOAC needs).
@@ -2899,7 +2894,7 @@ fn shape_preserving_result_ty(
         output_elem_ty.clone(),
         input_arr_ty.array_variant()?.clone(),
         input_arr_ty.array_size()?.clone(),
-        input_arr_ty.array_region()?.clone(),
+        input_arr_ty.array_buffer()?.clone(),
     ))
 }
 

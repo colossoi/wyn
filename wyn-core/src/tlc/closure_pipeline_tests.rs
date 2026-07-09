@@ -58,7 +58,7 @@ fn array_ty(elem: Type<TypeName>) -> Type<TypeName> {
             elem,
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Variable(0),
-            crate::types::no_region(),
+            crate::types::no_buffer(),
         ],
     )
 }

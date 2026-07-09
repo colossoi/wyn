@@ -13,8 +13,9 @@
 //!
 //! Runs before fusion and defunctionalization.
 
-use super::VarRef;
-use super::{ArrayExpr, Def, Lambda, LoopKind, Place, Program, SoacOp, Term, TermIdSource, TermKind};
+use super::{
+    ArrayExpr, Def, Lambda, LoopKind, Place, Program, SoacOp, Term, TermIdSource, TermKind, VarRef,
+};
 use crate::ast::{Span, TypeName};
 use crate::builtins::{by_id, catalog};
 use crate::types::TypeExt;
@@ -34,7 +35,7 @@ pub fn soa_type(ty: &Type<TypeName>) -> Type<TypeName> {
         _ if ty.is_array() => {
             let elem = soa_type(ty.elem_type().expect("Array has elem"));
             let size = ty.array_size().expect("Array has size").clone();
-            let region = ty.array_region().expect("Array has region").clone();
+            let region = ty.array_buffer().expect("Array has region").clone();
             let variant = match ty.array_variant().expect("Array has variant") {
                 // Resolve unresolved variant variables to Composite when distributing.
                 Type::Variable(_) => Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
@@ -125,7 +126,7 @@ fn array_of_tuple_parts(
         Type::Constructed(TypeName::Tuple(n), components) => {
             let variant = ty.array_variant().expect("Array has variant").clone();
             let size = ty.array_size().expect("Array has size").clone();
-            let region = ty.array_region().expect("Array has region").clone();
+            let region = ty.array_buffer().expect("Array has region").clone();
             Some((*n, components.clone(), variant, size, region))
         }
         _ => None,

@@ -37,7 +37,7 @@ fn default_free_vars_in_type(ty: &mut Type<TypeName>, bound: &[usize]) {
             let last = args.len() - 1;
             default_free_vars_in_type(&mut args[0], bound);
             default_free_vars_in_array_variant(&mut args[1], bound);
-            default_free_vars_in_array_region(&mut args[last], bound);
+            default_free_vars_in_array_buffer(&mut args[last], bound);
             for dim in &mut args[2..last] {
                 default_free_vars_in_array_size(dim, bound);
             }
@@ -71,13 +71,13 @@ fn default_free_vars_in_array_variant(ty: &mut Type<TypeName>, bound: &[usize]) 
     }
 }
 
-/// Free variable in an Array region position → `NoRegion`. An unpinned region
+/// Free variable in an Array buffer position → `NoBuffer`. An unpinned buffer
 /// defaults to "no buffer" (the array isn't a storage view), matching the
 /// Composite-variant default chosen alongside it.
-fn default_free_vars_in_array_region(ty: &mut Type<TypeName>, bound: &[usize]) {
+fn default_free_vars_in_array_buffer(ty: &mut Type<TypeName>, bound: &[usize]) {
     if let Type::Variable(v) = ty {
         if !bound.contains(v) {
-            *ty = Type::Constructed(TypeName::NoRegion, vec![]);
+            *ty = Type::Constructed(TypeName::NoBuffer, vec![]);
         }
     }
 }

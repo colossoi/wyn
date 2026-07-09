@@ -1,10 +1,8 @@
 use super::super::SoacOp;
-use super::VarRef;
-use super::{analyze, build, eligible_consuming_soacs, Origin, OwnershipModel};
+use super::{analyze, build, eligible_consuming_soacs, Origin, OwnershipModel, VarRef};
 use crate::builtins::catalog;
 use crate::tlc::{Program, SoacDestination, Term, TermKind};
-use crate::Compiler;
-use crate::SymbolTable;
+use crate::{Compiler, SymbolTable};
 
 #[test]
 fn origin_mutability() {
@@ -38,8 +36,8 @@ fn compile_to_tlc(source: &str) -> Program {
         .expect("type_check");
     let tlc = type_checked
         .to_tlc(&module_manager, false)
-        .pin_entry_regions()
-        .expect("pin_entry_regions")
+        .pin_entry_buffers()
+        .expect("pin_entry_buffers")
         .validate_ownership()
         .expect("validate_ownership")
         .partial_eval()
@@ -129,7 +127,7 @@ fn synth_program_with_alias_let() -> (Program, crate::SymbolId, crate::SymbolId)
             i32_ty.clone(),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Variable(0),
-            crate::types::no_region(),
+            crate::types::no_buffer(),
         ],
     );
     // `*` is a signature diet now, not part of the type; the consuming
@@ -544,7 +542,7 @@ fn has_use_after_move(source: &str) -> bool {
         .fold_ast_constants()
         .type_check(&mut module_manager)
         .expect("type_check");
-    let tlc = type_checked.to_tlc(&module_manager, false).pin_entry_regions().expect("pin_entry_regions");
+    let tlc = type_checked.to_tlc(&module_manager, false).pin_entry_buffers().expect("pin_entry_buffers");
     super::check(&tlc.0.tlc).is_err()
 }
 
@@ -1623,7 +1621,7 @@ fn synth_program_with_with_through_index() -> Program {
             i32_ty.clone(),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Variable(0),
-            crate::types::no_region(),
+            crate::types::no_buffer(),
         ],
     );
     let outer_arr_ty = Type::Constructed(
@@ -1632,7 +1630,7 @@ fn synth_program_with_with_through_index() -> Program {
             inner_arr_ty.clone(),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Variable(0),
-            crate::types::no_region(),
+            crate::types::no_buffer(),
         ],
     );
     let unique_outer_ty = outer_arr_ty.clone();
@@ -1828,7 +1826,7 @@ fn synth_program_with_populated_soac_captures() -> Program {
             i32_ty.clone(),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Variable(0),
-            crate::types::no_region(),
+            crate::types::no_buffer(),
         ],
     );
     let unique_arr_ty = arr_ty.clone();
@@ -1924,7 +1922,7 @@ fn synth_program_with_populated_soac_captures() -> Program {
                 i32_ty.clone(),
                 Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
                 Type::Variable(0),
-                crate::types::no_region(),
+                crate::types::no_buffer(),
             ],
         ),
         span: Span::dummy(),
@@ -2054,7 +2052,7 @@ fn soac_capture_term_is_analyzed_for_liveness() {
             i32_ty.clone(),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Variable(0),
-            crate::types::no_region(),
+            crate::types::no_buffer(),
         ],
     );
 

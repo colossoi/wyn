@@ -1,13 +1,13 @@
 //! Pin each compute entry's storage-param buffer region into its type.
 //!
 //! After type inference a view-array entry param `xs: []f32` has an
-//! unresolved region *variable* in its type's region slot — the checker
+//! unresolved region *variable* in its type's buffer slot — the checker
 //! cannot know which descriptor `xs` reads, because the source never says
 //! so. The binding is decided separately, by `compute_entry_binding_layout`
 //! (auto-allocated `set, 0..N` in declaration order) or by an explicit
 //! `#[storage(set, binding)]` attribute. This pass takes that decided
 //! binding and writes it into the type: it substitutes the param's region
-//! variable → `Region(set, binding)` throughout the entry body.
+//! variable → `Buffer(set, binding)` throughout the entry body.
 //!
 //! The entry is the one place a region is genuinely born (a buffer attaches
 //! to a parameter); every other view — a slice of `xs`, `xs` passed into a
@@ -19,8 +19,8 @@
 //! Runs first in the TLC pipeline, before any pass that observes regions.
 
 #[cfg(test)]
-#[path = "pin_entry_regions_tests.rs"]
-mod pin_entry_regions_tests;
+#[path = "pin_entry_buffers_tests.rs"]
+mod pin_entry_buffers_tests;
 
 use super::{ArrayExpr, DefMeta, Lambda, LoopKind, Program, SoacOp, Term, TermKind, VarRef};
 use crate::ast::{Span, TypeName};
@@ -29,13 +29,12 @@ use crate::binding_layout::{
 };
 use crate::interface::{EntryDecl, EntryParamBindingKind};
 use crate::tlc::monomorphize::apply_subst;
-use crate::types::{region_tag, TypeExt};
-use crate::LookupMap;
-use crate::{BindingRef, SymbolId};
+use crate::types::{buffer_tag, TypeExt};
+use crate::{BindingRef, LookupMap, SymbolId};
 use polytype::Type;
 
-/// Region-variable → concrete `Region(set, binding)` substitution.
-type RegionSubst = LookupMap<usize, Type<TypeName>>;
+/// Buffer-variable → concrete `Buffer(set, binding)` substitution.
+type BufferSubst = LookupMap<usize, Type<TypeName>>;
 
 pub fn run(program: &mut Program, binding_ids: &mut crate::IdSource<u32>) -> crate::error::Result<()> {
     for def in program.defs.iter_mut() {
@@ -45,8 +44,8 @@ pub fn run(program: &mut Program, binding_ids: &mut crate::IdSource<u32>) -> cra
         let span = def.body.span;
         let (params, _) = extract_params(&def.body);
 
-        let mut subst = RegionSubst::new();
-        let mut region_env = LookupMap::new();
+        let mut subst = BufferSubst::new();
+        let mut buffer_env = LookupMap::new();
         if let DefMeta::EntryPoint(entry) = &mut def.meta {
             entry.param_bindings = compute_entry_binding_layout(
                 &params,
@@ -54,10 +53,10 @@ pub fn run(program: &mut Program, binding_ids: &mut crate::IdSource<u32>) -> cra
                 crate::egir::from_tlc::AUTO_STORAGE_SET,
                 &mut *binding_ids,
             );
-            collect_region_subst(&params, entry, &mut subst, &mut region_env, span)?;
+            collect_buffer_subst(&params, entry, &mut subst, &mut buffer_env, span)?;
         }
 
-        while collect_view_slice_region_subst(&def.body, &mut subst, &region_env)? {}
+        while collect_view_slice_buffer_subst(&def.body, &mut subst, &buffer_env)? {}
 
         if !subst.is_empty() {
             def.ty = apply_subst(&def.ty, &subst);
@@ -80,15 +79,15 @@ fn extract_params(term: &Term) -> (Vec<(SymbolId, Type<TypeName>)>, &Term) {
     }
 }
 
-/// Map each storage param's region variable to its concrete region. An
+/// Map each storage param's buffer variable to its concrete region. An
 /// explicit `#[storage(set, binding)]` wins; otherwise the auto-allocated
 /// layout decides. Non-view params contribute nothing (their type has no
-/// region slot variable to pin).
-fn collect_region_subst(
+/// buffer slot variable to pin).
+fn collect_buffer_subst(
     params: &[(SymbolId, Type<TypeName>)],
     entry: &EntryDecl,
-    subst: &mut RegionSubst,
-    region_env: &mut LookupMap<SymbolId, Type<TypeName>>,
+    subst: &mut BufferSubst,
+    buffer_env: &mut LookupMap<SymbolId, Type<TypeName>>,
     span: Span,
 ) -> crate::error::Result<()> {
     let layout = &entry.param_bindings;
@@ -97,27 +96,27 @@ fn collect_region_subst(
         let ty = ty;
 
         if let Some((binding, ..)) = entry.params.get(i).and_then(extract_storage_image_binding) {
-            pin_resource_region(ty, binding, subst, span)?;
-            region_env.insert(params[i].0, region_tag(binding));
+            pin_resource_buffer(ty, binding, subst, span)?;
+            buffer_env.insert(params[i].0, buffer_tag(binding));
             continue;
         }
 
         // Host-wired explicit binding: the region is the attribute's.
         if let Some(binding) = entry.params.get(i).and_then(extract_storage_binding) {
-            pin_resource_region(ty, binding, subst, span)?;
-            region_env.insert(params[i].0, region_tag(binding));
+            pin_resource_buffer(ty, binding, subst, span)?;
+            buffer_env.insert(params[i].0, buffer_tag(binding));
             continue;
         }
 
         match layout.get(i).and_then(|b| b.as_ref()).map(|b| &b.kind) {
             Some(EntryParamBindingKind::Single { binding, .. }) => {
-                pin_resource_region(ty, *binding, subst, span)?;
-                region_env.insert(params[i].0, region_tag(*binding));
+                pin_resource_buffer(ty, *binding, subst, span)?;
+                buffer_env.insert(params[i].0, buffer_tag(*binding));
             }
             Some(EntryParamBindingKind::TupleOfViews(fields)) => {
                 if let Type::Constructed(TypeName::Tuple(_), comps) = ty {
                     for (field, comp_ty) in fields.iter().zip(comps) {
-                        pin_resource_region(comp_ty, field.binding, subst, span)?;
+                        pin_resource_buffer(comp_ty, field.binding, subst, span)?;
                     }
                 }
             }
@@ -127,30 +126,30 @@ fn collect_region_subst(
     Ok(())
 }
 
-/// If `view_ty`'s region slot is a free variable, record `var → Region(binding)`.
+/// If `view_ty`'s buffer slot is a free variable, record `var → Region(binding)`.
 /// A region already concrete (or absent — a non-array) is left untouched.
 ///
-/// A region variable shared by two params (because type inference unified
+/// A buffer variable shared by two params (because type inference unified
 /// them — e.g. `if c then xs else ys` forces both branches to one type) being
 /// pinned to two *distinct* buffers is the merge-over-distinct-descriptors
 /// case: there's no single static binding, so it's a type error rather than a
 /// silent wrong-buffer read.
-fn pin_resource_region(
+fn pin_resource_buffer(
     view_ty: &Type<TypeName>,
     binding: BindingRef,
-    subst: &mut RegionSubst,
+    subst: &mut BufferSubst,
     span: Span,
 ) -> crate::error::Result<()> {
-    let region_slot = match view_ty {
+    let buffer_slot = match view_ty {
         Type::Constructed(TypeName::StorageTexture, args) => args.first(),
-        _ => view_ty.array_region(),
+        _ => view_ty.array_buffer(),
     };
-    if let Some(Type::Variable(id)) = region_slot {
-        let region = region_tag(binding);
+    if let Some(Type::Variable(id)) = buffer_slot {
+        let region = buffer_tag(binding);
         if let Some(existing) = subst.get(id) {
             if *existing != region {
                 let prev = match existing {
-                    Type::Constructed(TypeName::Region(b), _) => *b,
+                    Type::Constructed(TypeName::Buffer(b), _) => *b,
                     _ => unreachable!("region subst only holds Region tags"),
                 };
                 return Err(crate::err_type_at!(
@@ -172,10 +171,10 @@ fn pin_resource_region(
     Ok(())
 }
 
-fn collect_view_slice_region_subst(
+fn collect_view_slice_buffer_subst(
     term: &Term,
-    subst: &mut RegionSubst,
-    region_env: &LookupMap<SymbolId, Type<TypeName>>,
+    subst: &mut BufferSubst,
+    buffer_env: &LookupMap<SymbolId, Type<TypeName>>,
 ) -> crate::error::Result<bool> {
     if let TermKind::Let {
         name,
@@ -184,10 +183,10 @@ fn collect_view_slice_region_subst(
         body,
     } = &term.kind
     {
-        let mut changed = collect_view_slice_region_subst(rhs, subst, region_env)?;
-        let mut scoped_env = region_env.clone();
-        if let Some(region) = view_region_for_term(rhs, subst, region_env) {
-            if let Some(Type::Variable(id)) = apply_subst(name_ty, subst).array_region() {
+        let mut changed = collect_view_slice_buffer_subst(rhs, subst, buffer_env)?;
+        let mut scoped_env = buffer_env.clone();
+        if let Some(region) = view_buffer_for_term(rhs, subst, buffer_env) {
+            if let Some(Type::Variable(id)) = apply_subst(name_ty, subst).array_buffer() {
                 if !subst.contains_key(id) {
                     subst.insert(*id, region.clone());
                     changed = true;
@@ -195,14 +194,14 @@ fn collect_view_slice_region_subst(
             }
             scoped_env.insert(*name, region);
         }
-        changed |= collect_view_slice_region_subst(body, subst, &scoped_env)?;
+        changed |= collect_view_slice_buffer_subst(body, subst, &scoped_env)?;
         return Ok(changed);
     }
 
     let mut changed = false;
     let mut err = None;
     term.for_each_child(
-        &mut |child| match collect_view_slice_region_subst(child, subst, region_env) {
+        &mut |child| match collect_view_slice_buffer_subst(child, subst, buffer_env) {
             Ok(child_changed) => changed |= child_changed,
             Err(e) => err = Some(e),
         },
@@ -211,12 +210,12 @@ fn collect_view_slice_region_subst(
         return Err(e);
     }
 
-    if let Some(source_region) = view_region_for_term(term, subst, region_env) {
+    if let Some(source_buffer) = view_buffer_for_term(term, subst, buffer_env) {
         let result_ty = apply_subst(&term.ty, subst);
         if result_ty.array_variant().map(crate::types::is_array_variant_view).unwrap_or(false) {
-            if let Some(Type::Variable(id)) = result_ty.array_region() {
+            if let Some(Type::Variable(id)) = result_ty.array_buffer() {
                 if !subst.contains_key(id) {
-                    subst.insert(*id, source_region);
+                    subst.insert(*id, source_buffer);
                     changed = true;
                 }
             }
@@ -225,25 +224,25 @@ fn collect_view_slice_region_subst(
     Ok(changed)
 }
 
-fn view_region_for_term(
+fn view_buffer_for_term(
     term: &Term,
-    subst: &RegionSubst,
-    region_env: &LookupMap<SymbolId, Type<TypeName>>,
+    subst: &BufferSubst,
+    buffer_env: &LookupMap<SymbolId, Type<TypeName>>,
 ) -> Option<Type<TypeName>> {
-    if let Some(region @ Type::Constructed(TypeName::Region(_), _)) =
-        apply_subst(&term.ty, subst).array_region().cloned()
+    if let Some(region @ Type::Constructed(TypeName::Buffer(_), _)) =
+        apply_subst(&term.ty, subst).array_buffer().cloned()
     {
         return Some(region);
     }
 
     match &term.kind {
-        TermKind::Var(VarRef::Symbol(sym)) => region_env.get(sym).cloned(),
+        TermKind::Var(VarRef::Symbol(sym)) => buffer_env.get(sym).cloned(),
         TermKind::App { func, args } => {
             let TermKind::Var(VarRef::Builtin { id, .. }) = &func.kind else {
                 return None;
             };
             if *id == crate::builtins::catalog().known().slice && args.len() == 3 {
-                view_region_for_term(&args[0], subst, region_env)
+                view_buffer_for_term(&args[0], subst, buffer_env)
             } else {
                 None
             }
@@ -255,10 +254,10 @@ fn view_region_for_term(
 // ---------------------------------------------------------------------------
 // In-place type substitution over a term tree. Mirrors the type positions in
 // `monomorphize`'s `apply_subst_term` family, but mutates every type in place
-// (term ids unchanged — this only concretizes region variables).
+// (term ids unchanged — this only concretizes buffer variables).
 // ---------------------------------------------------------------------------
 
-fn subst_term(t: &mut Term, s: &RegionSubst) {
+fn subst_term(t: &mut Term, s: &BufferSubst) {
     t.ty = apply_subst(&t.ty, s);
     match &mut t.kind {
         TermKind::Var(_)
@@ -335,7 +334,7 @@ fn subst_term(t: &mut Term, s: &RegionSubst) {
     }
 }
 
-fn subst_lambda(lam: &mut Lambda, s: &RegionSubst) {
+fn subst_lambda(lam: &mut Lambda, s: &BufferSubst) {
     for (_, ty) in lam.params.iter_mut() {
         *ty = apply_subst(ty, s);
     }
@@ -343,7 +342,7 @@ fn subst_lambda(lam: &mut Lambda, s: &RegionSubst) {
     subst_term(&mut lam.body, s);
 }
 
-fn subst_soac_body(sb: &mut super::SoacBody, s: &RegionSubst) {
+fn subst_soac_body(sb: &mut super::SoacBody, s: &BufferSubst) {
     subst_lambda(&mut sb.lam, s);
     for (_, ty, t) in sb.captures.iter_mut() {
         *ty = apply_subst(ty, s);
@@ -351,7 +350,7 @@ fn subst_soac_body(sb: &mut super::SoacBody, s: &RegionSubst) {
     }
 }
 
-fn subst_soac(soac: &mut SoacOp, s: &RegionSubst) {
+fn subst_soac(soac: &mut SoacOp, s: &BufferSubst) {
     match soac {
         SoacOp::Map { lam, inputs, .. } => {
             subst_soac_body(lam, s);
@@ -419,7 +418,7 @@ fn subst_soac(soac: &mut SoacOp, s: &RegionSubst) {
     }
 }
 
-fn subst_array_expr(ae: &mut ArrayExpr, s: &RegionSubst) {
+fn subst_array_expr(ae: &mut ArrayExpr, s: &BufferSubst) {
     match ae {
         ArrayExpr::Var(_, ty) => *ty = apply_subst(ty, s),
         ArrayExpr::Zip(exprs) => exprs.iter_mut().for_each(|e| subst_array_expr(e, s)),

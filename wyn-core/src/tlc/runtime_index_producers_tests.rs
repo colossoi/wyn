@@ -39,7 +39,7 @@ fn runtime_array_ty(elem: Type<TypeName>) -> Type<TypeName> {
             elem,
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Variable(0),
-            crate::types::no_region(),
+            crate::types::no_buffer(),
         ],
     )
 }
@@ -51,7 +51,7 @@ fn static_array_ty(elem: Type<TypeName>, n: usize) -> Type<TypeName> {
             elem,
             Type::Constructed(TypeName::ArrayVariantVirtual, vec![]),
             Type::Constructed(TypeName::Size(n), vec![]),
-            crate::types::no_region(),
+            crate::types::no_buffer(),
         ],
     )
 }

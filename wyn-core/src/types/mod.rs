@@ -179,8 +179,8 @@ pub enum TypeName {
     /// - `dim_i`: per-dimension size term — `Size(n)` / `SizeVar(name)` /
     ///   `SizePlaceholder` / `Skolem` / `Variable`
     /// - `region`: buffer region — `Region(set,binding)` (a storage view),
-    ///   `NoRegion` (a non-view array), `AddressPlaceholder` (pre-resolution),
-    ///   or a type variable (a region-polymorphic view function). The region
+    ///   `NoBuffer` (a non-view array), `AddressPlaceholder` (pre-resolution),
+    ///   or a type variable (a buffer-polymorphic view function). The region
     ///   makes a view's buffer binding a statically-known property of its type.
     ///
     /// Rank is implicit: `args.len() - 3` (region is the trailing arg). All
@@ -273,11 +273,11 @@ pub enum TypeName {
     /// Introduced at EGIR lowering (where the binding is known), so the backend
     /// reads a view's descriptor off its type instead of a per-value side-map.
     /// Never appears in source/TLC types — views are nullary (`View[]`) there.
-    Region(crate::BindingRef),
-    /// The region slot's value for a non-view array (composite/virtual/bounded):
-    /// "this array is not buffer-backed, so it has no descriptor region." A
+    Buffer(crate::BindingRef),
+    /// The buffer slot's value for a non-view array (composite/virtual/bounded):
+    /// "this array is not buffer-backed, so it has no descriptor binding." A
     /// concrete tag (not a variable) so non-view arrays carry no free type var.
-    NoRegion,
+    NoBuffer,
 
     // --- Opaque GPU resources ---
     /// A 2D, float-sampled image. Nullary (no type args): the sampled
@@ -365,8 +365,8 @@ impl std::fmt::Display for TypeName {
             TypeName::ArrayVariantVirtual => write!(f, "virtual"),
             TypeName::ArrayVariantAbstract => write!(f, "abstract"),
             TypeName::AddressPlaceholder => write!(f, "?addrspace"),
-            TypeName::Region(b) => write!(f, "region(set={}, binding={})", b.set, b.binding),
-            TypeName::NoRegion => write!(f, "no_region"),
+            TypeName::Buffer(b) => write!(f, "buffer(set={}, binding={})", b.set, b.binding),
+            TypeName::NoBuffer => write!(f, "no_buffer"),
             TypeName::Texture2D => write!(f, "texture2d"),
             TypeName::Sampler => write!(f, "sampler"),
             TypeName::StorageTexture => write!(f, "storage_image"),
@@ -431,8 +431,8 @@ impl polytype::Name for TypeName {
             TypeName::ArrayVariantBounded => "bounded".to_string(),
             TypeName::ArrayVariantAbstract => "abstract".to_string(),
             TypeName::AddressPlaceholder => "?variant".to_string(),
-            TypeName::Region(b) => format!("region_s{}_b{}", b.set, b.binding),
-            TypeName::NoRegion => "no_region".to_string(),
+            TypeName::Buffer(b) => format!("buffer_s{}_b{}", b.set, b.binding),
+            TypeName::NoBuffer => "no_buffer".to_string(),
             TypeName::Texture2D => "texture2d".to_string(),
             TypeName::Sampler => "sampler".to_string(),
             TypeName::StorageTexture => "storage_image".to_string(),
@@ -519,9 +519,9 @@ pub trait TypeExt {
     fn array_dim(&self, i: usize) -> Option<&Type>;
 
     /// The array's buffer-region type (the trailing arg), or `None` if not an
-    /// Array. For a View this is `Region(set,binding)` (or a region variable);
-    /// for non-view arrays it is `NoRegion`.
-    fn array_region(&self) -> Option<&Type>;
+    /// Array. For a View this is `Region(set,binding)` (or a buffer variable);
+    /// for non-view arrays it is `NoBuffer`.
+    fn array_buffer(&self) -> Option<&Type>;
 }
 
 impl TypeExt for Type {
@@ -721,7 +721,7 @@ impl TypeExt for Type {
         self.array_dims().and_then(|dims| dims.get(i))
     }
 
-    fn array_region(&self) -> Option<&Type> {
+    fn array_buffer(&self) -> Option<&Type> {
         if let Type::Constructed(TypeName::Array, args) = self {
             debug_assert_array_args(args);
             return args.last();
@@ -851,25 +851,25 @@ pub fn matrix_type_constructors() -> LookupMap<String, Type> {
         .collect()
 }
 
-/// A concrete buffer-region tag `Region(set, binding)` for a View's region slot.
-pub fn region_tag(binding: crate::BindingRef) -> Type {
-    Type::Constructed(TypeName::Region(binding), vec![])
+/// A concrete buffer-buffer tag `Buffer(set, binding)` for a View's buffer slot.
+pub fn buffer_tag(binding: crate::BindingRef) -> Type {
+    Type::Constructed(TypeName::Buffer(binding), vec![])
 }
 
-/// The `NoRegion` tag — the region slot of a non-view array.
-pub fn no_region() -> Type {
-    Type::Constructed(TypeName::NoRegion, vec![])
+/// The `NoBuffer` tag — the buffer slot of a non-view array.
+pub fn no_buffer() -> Type {
+    Type::Constructed(TypeName::NoBuffer, vec![])
 }
 
-/// If `ty` is an array, return a copy with its region slot (the last arg)
+/// If `ty` is an array, return a copy with its buffer slot (the last arg)
 /// replaced by `region`; otherwise return `ty` unchanged. Used where the
-/// region authority is the buffer binding (the view-interning helpers): the
+/// buffer authority is the buffer binding (the view-interning helpers): the
 /// binding stamps the region into an array-typed view. A `StorageView`'s node
 /// type is the *element* type in output-slot paths and the *array* type in
 /// input-view paths; only the latter carries a region (and is what flows
 /// through block params / slices), so a non-array view type is left as-is —
 /// its binding rides the op tag locally at the point of creation.
-pub fn array_with_region(ty: &Type, region: Type) -> Type {
+pub fn array_with_buffer(ty: &Type, region: Type) -> Type {
     match ty {
         Type::Constructed(TypeName::Array, args) => {
             debug_assert_array_args(args);
@@ -882,14 +882,14 @@ pub fn array_with_region(ty: &Type, region: Type) -> Type {
 }
 
 /// A view-array type carrying `region`, for a `StorageView`'s result type. If
-/// `view_ty` is already an array, its region slot is set to `region`;
+/// `view_ty` is already an array, its buffer slot is set to `region`;
 /// otherwise `view_ty` is the *element* type and is wrapped into
 /// `Array[view_ty, View, SizePlaceholder, region]`. Either way the resulting
 /// view value's type carries its buffer binding, so the backend recovers the
 /// descriptor from the type instead of a side-map.
 pub fn view_array_of(view_ty: &Type, region: Type) -> Type {
     match view_ty {
-        Type::Constructed(TypeName::Array, _) => array_with_region(view_ty, region),
+        Type::Constructed(TypeName::Array, _) => array_with_buffer(view_ty, region),
         elem => make_array1(
             elem.clone(),
             Type::Constructed(TypeName::ArrayVariantView, vec![]),
@@ -899,11 +899,11 @@ pub fn view_array_of(view_ty: &Type, region: Type) -> Type {
     }
 }
 
-/// Read the concrete buffer region off an array type's region slot, if it has
-/// a concrete `Region` (not `NoRegion` and not a variable).
-pub fn array_view_region(ty: &Type) -> Option<crate::BindingRef> {
-    match ty.array_region()? {
-        Type::Constructed(TypeName::Region(b), _) => Some(*b),
+/// Read the concrete buffer off an array type's buffer slot, if it has
+/// a concrete `Region` (not `NoBuffer` and not a variable).
+pub fn array_view_buffer(ty: &Type) -> Option<crate::BindingRef> {
+    match ty.array_buffer()? {
+        Type::Constructed(TypeName::Buffer(b), _) => Some(*b),
         _ => None,
     }
 }
@@ -911,10 +911,10 @@ pub fn array_view_region(ty: &Type) -> Option<crate::BindingRef> {
 /// Concrete descriptor carried by a monomorphized storage-image type.
 /// Storage images have no runtime payload; this region is their complete
 /// identity during EGIR and backend lowering.
-pub fn storage_image_region(ty: &Type) -> Option<crate::BindingRef> {
+pub fn storage_image_buffer(ty: &Type) -> Option<crate::BindingRef> {
     match ty {
         Type::Constructed(TypeName::StorageTexture, args) => match args.first() {
-            Some(Type::Constructed(TypeName::Region(binding), _)) => Some(*binding),
+            Some(Type::Constructed(TypeName::Buffer(binding), _)) => Some(*binding),
             _ => None,
         },
         _ => None,
@@ -934,14 +934,14 @@ pub fn make_array1(elem: Type, variant: Type, size: Type, region: Type) -> Type 
     Type::Constructed(TypeName::Array, args)
 }
 
-/// Create a sized array: `Array[elem, Composite, Size(n), NoRegion]`. Defaults
+/// Create a sized array: `Array[elem, Composite, Size(n), NoBuffer]`. Defaults
 /// to Composite variant for local/value arrays (not buffer-backed).
 pub fn sized_array(size: usize, elem_type: Type) -> Type {
     make_array1(
         elem_type,
         Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
         Type::Constructed(TypeName::Size(size), vec![]),
-        no_region(),
+        no_buffer(),
     )
 }
 
@@ -1279,8 +1279,8 @@ pub fn debug_assert_top_level_type(ty: &Type, context: &str) {
             // (Region lives one level deeper, inside the View variant's args.)
             TypeName::ArrayVariantView
             | TypeName::ArrayVariantComposite
-            | TypeName::Region(_)
-            | TypeName::NoRegion
+            | TypeName::Buffer(_)
+            | TypeName::NoBuffer
             | TypeName::AddressPlaceholder => {
                 panic!(
                     "BUG: Address space type {:?} used as top-level type in {}. \
@@ -1507,7 +1507,7 @@ mod tests {
                 f32_ty(),
                 Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
                 Type::Constructed(TypeName::Size(size), vec![]),
-                no_region(),
+                no_buffer(),
             ],
         )
     }

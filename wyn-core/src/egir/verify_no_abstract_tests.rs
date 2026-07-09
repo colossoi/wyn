@@ -17,7 +17,7 @@ fn abstract_array_ty() -> Type<TypeName> {
             i32_ty(),
             types::array_variant_abstract(),
             Type::Constructed(TypeName::Size(4), vec![]),
-            types::no_region(),
+            types::no_buffer(),
         ],
     )
 }
@@ -29,7 +29,7 @@ fn composite_array_ty() -> Type<TypeName> {
             i32_ty(),
             types::array_variant_composite(),
             Type::Constructed(TypeName::Size(4), vec![]),
-            types::no_region(),
+            types::no_buffer(),
         ],
     )
 }
@@ -121,7 +121,7 @@ fn accepts_concrete_variants() {
             i32_ty(),
             types::array_variant_view(),
             Type::Variable(99),
-            types::no_region(),
+            types::no_buffer(),
         ],
     );
     let bounded_arr = Type::Constructed(
@@ -130,7 +130,7 @@ fn accepts_concrete_variants() {
             i32_ty(),
             types::array_variant_bounded(),
             Type::Constructed(TypeName::Size(8), vec![]),
-            types::no_region(),
+            types::no_buffer(),
         ],
     );
 

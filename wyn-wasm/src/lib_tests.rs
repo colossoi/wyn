@@ -18,8 +18,8 @@ fn compile_to_ssa(source: &str) -> wyn_core::ssa::types::Program {
         .expect("type_check failed");
     let ssa = type_checked
         .to_tlc(&module_manager, false)
-        .pin_entry_regions()
-        .expect("pin_entry_regions")
+        .pin_entry_buffers()
+        .expect("pin_entry_buffers")
         .validate_ownership()
         .expect("validate_ownership")
         .partial_eval()

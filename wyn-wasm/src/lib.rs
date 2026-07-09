@@ -594,8 +594,8 @@ fn compile_to_wgsl_impl(source: &str) -> CompileResultWgsl {
 
     let tlc_program = match type_checked
         .to_tlc(&module_manager, false)
-        .pin_entry_regions()
-        .and_then(wyn_core::TlcRegionsPinned::validate_ownership)
+        .pin_entry_buffers()
+        .and_then(wyn_core::TlcBuffersPinned::validate_ownership)
     {
         Ok(t) => t,
         Err(e) => return CompileResultWgsl::err(e),

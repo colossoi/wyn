@@ -12,8 +12,7 @@
 //!     vector / matrix in practice; if a runtime-sized array ever
 //!     surfaces here it's a contract violation upstream.
 
-use crate::LookupMap;
-use crate::LookupSet;
+use crate::{LookupMap, LookupSet};
 use polytype::Type;
 use smallvec::smallvec;
 
@@ -682,9 +681,9 @@ pub fn retarget_filter_output(
     }
 
     // Size the output buffer to the input's element count (capacity n). The
-    // input region is concrete after `pin_entry_regions`; if it isn't (no
+    // input region is concrete after `pin_entry_buffers`; if it isn't (no
     // host buffer to mirror), leave the host to size it.
-    let out_len = crate::types::array_view_region(&input_arr_ty).and_then(|in_binding| {
+    let out_len = crate::types::array_view_buffer(&input_arr_ty).and_then(|in_binding| {
         let src_elem_bytes = crate::ssa::layout::storage_elem_stride(&input_elem_ty)?;
         let elem_bytes = crate::ssa::layout::storage_elem_stride(&output_elem_ty)?;
         Some(BufferLen::LikeInput {

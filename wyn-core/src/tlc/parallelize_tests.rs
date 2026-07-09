@@ -9,8 +9,7 @@
 //! rejections for non-tail positions (If, Loop, App) and a plain
 //! literal tail, where `analyze_entry` returns `None`.
 
-use super::analyze_entry;
-use super::VarRef;
+use super::{analyze_entry, VarRef};
 use crate::ast::{self, Span, TypeName};
 use crate::tlc::{
     ArrayExpr, Def, DefMeta, Lambda, LoopKind, ScremaAccumulator, ScremaAccumulatorSpec, ScremaLane,
@@ -40,7 +39,7 @@ fn arr_i32_ty() -> Type<TypeName> {
             i32_ty(),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Constructed(TypeName::Size(8), vec![]),
-            crate::types::no_region(),
+            crate::types::no_buffer(),
         ],
     )
 }

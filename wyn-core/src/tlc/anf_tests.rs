@@ -26,7 +26,7 @@ fn arr_ty() -> Type<TypeName> {
             i32_ty(),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Variable(0),
-            crate::types::no_region(),
+            crate::types::no_buffer(),
         ],
     )
 }

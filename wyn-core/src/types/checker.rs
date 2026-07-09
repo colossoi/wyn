@@ -6,9 +6,9 @@ use crate::interface::{AttrExt, Attribute};
 use crate::module_manager::ModuleManager;
 use crate::name_resolution::NameResolution;
 use crate::scope::{IdentifierKind, ScopeEntry, ScopeStack};
-use crate::LookupMap;
-use crate::{bail_type_at, err_module, err_type, err_type_at, err_undef_at};
-use crate::{LookupSet, StableMap};
+use crate::{
+    bail_type_at, err_module, err_type, err_type_at, err_undef_at, LookupMap, LookupSet, StableMap,
+};
 use log::debug;
 use polytype::Context;
 use std::collections::BTreeSet;
@@ -16,7 +16,7 @@ use std::collections::BTreeSet;
 // Import type helper functions from parent module
 use super::patterns::coverage::{check_match, format_cov_pat, CoverageError};
 use super::{
-    as_arrow, bool_type, f32, function, i32, mat, no_region, record, sized_array, tuple, unit, vec, Diet,
+    as_arrow, bool_type, f32, function, i32, mat, no_buffer, record, sized_array, tuple, unit, vec, Diet,
 };
 
 /// Render a single swizzle slot index as its `xyzw` letter. Used by
@@ -286,7 +286,7 @@ fn fv_type_generalizable(ty: &Type) -> BTreeSet<usize> {
                 if let Some(elem) = t.elem_type() {
                     go(elem, acc);
                 }
-                if let Some(region) = t.array_region() {
+                if let Some(region) = t.array_buffer() {
                     go(region, acc);
                 }
             }
@@ -336,7 +336,7 @@ fn fv_type_generalizable_for_function(ty: &Type) -> BTreeSet<usize> {
                 if let Some(size) = t.array_size() {
                     go(size, acc);
                 }
-                if let Some(region) = t.array_region() {
+                if let Some(region) = t.array_buffer() {
                     go(region, acc);
                 }
             }
@@ -1173,7 +1173,7 @@ impl<'a> TypeChecker<'a> {
     /// `resolve_placeholders` already does this for inline `def`/`entry`
     /// annotations, but it skips `type`-alias bodies, so an alias field like
     /// `points: []vec2f32` keeps rigid `AddressPlaceholder`s that can't unify
-    /// with a concrete `view` / `composite` / `no_region`. Freshening on each
+    /// with a concrete `view` / `composite` / `no_buffer`. Freshening on each
     /// expansion treats the alias as a polymorphic scheme instantiated per use.
     ///
     /// Unlike `resolve_placeholders::resolve_type`, sizes are *not* linked here
@@ -1265,7 +1265,7 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Build an array type `Array[elem, variant, size, region]` for a builtin
-    /// scheme, allocating a fresh region variable so the array is polymorphic
+    /// scheme, allocating a fresh buffer variable so the array is polymorphic
     /// over *which buffer* it views — a view function is `∀r. View[…,r] → …`,
     /// each call site instantiating `r` to a concrete region. The variant slot
     /// is likewise a variable (the array may be a view or a composite); the
@@ -1281,7 +1281,7 @@ impl<'a> TypeChecker<'a> {
     /// Quantify a closed builtin body over *all* its free type variables.
     /// Every variable in a builtin scheme is meant to be polymorphic, so this
     /// equals listing them explicitly — and, unlike a hand-written `forall`
-    /// list, it cannot forget the region variable `array_ty` introduces for
+    /// list, it cannot forget the buffer variable `array_ty` introduces for
     /// each array.
     fn generalize_closed(body: Type) -> TypeScheme {
         let vars = fv_type(&body);
@@ -1412,7 +1412,7 @@ impl<'a> TypeChecker<'a> {
             ],
             Type::Constructed(
                 TypeName::Array,
-                vec![Self::var(b), composite, Self::var(n), no_region()],
+                vec![Self::var(b), composite, Self::var(n), no_buffer()],
             ),
         );
         self.define_builtin("map", Self::generalize_closed(body));
@@ -1469,12 +1469,12 @@ impl<'a> TypeChecker<'a> {
             &[op_ty, Self::var(a), self.array_ty(Self::var(a), s, n)],
             Type::Constructed(
                 TypeName::Array,
-                vec![Self::var(a), composite, Self::var(n), no_region()],
+                vec![Self::var(a), composite, Self::var(n), no_buffer()],
             ),
         );
         self.define_builtin("scan", Self::generalize_closed(body));
 
-        // filter: ∀a n s. (a -> bool) -> Array[a, s, n] -> ?k. Array[a, Abstract, k, no_region]
+        // filter: ∀a n s. (a -> bool) -> Array[a, s, n] -> ?k. Array[a, Abstract, k, no_buffer]
         //
         // Output variant is `Abstract` — representation-polymorphic at the
         // TLC level. The concrete runtime variant (Bounded for static-
@@ -1492,7 +1492,7 @@ impl<'a> TypeChecker<'a> {
         let abstract_variant = Type::Constructed(TypeName::ArrayVariantAbstract, vec![]);
         let result_array = Type::Constructed(
             TypeName::Array,
-            vec![Self::var(a), abstract_variant, k_var, no_region()],
+            vec![Self::var(a), abstract_variant, k_var, no_buffer()],
         );
         let existential_result = Type::Constructed(TypeName::Existential(vec![k]), vec![result_array]);
         let body = Self::arrow_chain(&[pred_ty, array_a], existential_result);
@@ -3116,7 +3116,7 @@ impl<'a> TypeChecker<'a> {
                 let addrspace = Type::Constructed(TypeName::ArrayVariantVirtual, vec![]);
                 Ok(Type::Constructed(
                     TypeName::Array,
-                    vec![elem_type, addrspace, size_type, no_region()],
+                    vec![elem_type, addrspace, size_type, no_buffer()],
                 ))
             }
 
@@ -3130,7 +3130,7 @@ impl<'a> TypeChecker<'a> {
                 let array_type_stripped = array_type.clone();
 
                 // Constrain array to be Array[elem, addrspace, size, region]
-                let (elem_var, addrspace_var, _, region_var) = self.constrain_array_type(
+                let (elem_var, addrspace_var, _, buffer_var) = self.constrain_array_type(
                     &array_type_stripped,
                     &slice.array.h.span,
                     "Cannot slice non-array type",
@@ -3172,14 +3172,14 @@ impl<'a> TypeChecker<'a> {
                 // is another view with adjusted offset/len, not an eager
                 // materialized Composite value. The size slot still records a
                 // constant length when both bounds are literal.
-                let result_region = array_type_stripped
-                    .array_region()
+                let result_buffer = array_type_stripped
+                    .array_buffer()
                     .cloned()
-                    .or_else(|| array_type_stripped.apply(&self.context).array_region().cloned())
-                    .unwrap_or_else(|| region_var.apply(&self.context));
+                    .or_else(|| array_type_stripped.apply(&self.context).array_buffer().cloned())
+                    .unwrap_or_else(|| buffer_var.apply(&self.context));
                 Ok(Type::Constructed(
                     TypeName::Array,
-                    vec![elem_type, addrspace, result_size, result_region],
+                    vec![elem_type, addrspace, result_size, result_buffer],
                 ))
             }
 
@@ -3755,14 +3755,14 @@ impl<'a> TypeChecker<'a> {
         let elem_var = self.context.new_variable();
         let addrspace_var = self.context.new_variable();
         let size_var = self.context.new_variable();
-        let region_var = self.context.new_variable();
+        let buffer_var = self.context.new_variable();
         let want_array = Type::Constructed(
             TypeName::Array,
             vec![
                 elem_var.clone(),
                 addrspace_var.clone(),
                 size_var.clone(),
-                region_var.clone(),
+                buffer_var.clone(),
             ],
         );
 
@@ -3775,7 +3775,7 @@ impl<'a> TypeChecker<'a> {
             )
         })?;
 
-        Ok((elem_var, addrspace_var, size_var, region_var))
+        Ok((elem_var, addrspace_var, size_var, buffer_var))
     }
 
     /// Infer the type of a field access on a base type.

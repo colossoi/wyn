@@ -1684,7 +1684,7 @@ impl<'a> Parser<'a> {
                     // Boolean
                     "bool" => TypeName::Bool,
                     // Opaque GPU resources. Storage images carry a hidden
-                    // region slot so their descriptor binding survives
+                    // buffer slot so their descriptor binding survives
                     // capture and monomorphization.
                     "texture2d" => TypeName::Texture2D,
                     "sampler" => TypeName::Sampler,

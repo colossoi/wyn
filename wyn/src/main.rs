@@ -263,7 +263,7 @@ fn compile_file(
 
     // Transform to TLC (including prelude code - transformed here for consistent type variables)
     let tlc_transformed = time("to_tlc", verbose, || {
-        type_checked.to_tlc(&module_manager, fill_holes).pin_entry_regions()
+        type_checked.to_tlc(&module_manager, fill_holes).pin_entry_buffers()
     })?;
 
     // Surface any hole-fill errors collected during TLC transform.
@@ -445,7 +445,7 @@ fn check_file(input: PathBuf, verbose: bool) -> Result<(), DriverError> {
 
     type_checked.print_warnings();
 
-    type_checked.to_tlc(&module_manager, false).pin_entry_regions()?.validate_ownership()?;
+    type_checked.to_tlc(&module_manager, false).pin_entry_buffers()?.validate_ownership()?;
 
     if verbose {
         info!("✓ {} is valid", input.display());

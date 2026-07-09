@@ -4,8 +4,7 @@ use crate::interface::{StorageBindingDecl, StorageRole};
 use crate::spirv::verify_buffer_layouts;
 use crate::ssa::builder::FuncBuilder;
 use crate::ssa::types::{EntryInput, EntryOutput, EntryPoint, ExecutionModel, Program};
-use crate::types;
-use crate::BindingRef;
+use crate::{types, BindingRef};
 use polytype::Type;
 
 fn u32_ty() -> Type<TypeName> {
@@ -21,12 +20,12 @@ fn runtime_u32_array() -> Type<TypeName> {
             u32_ty(),
             types::array_variant_composite(),
             Type::Variable(101),
-            types::no_region(),
+            types::no_buffer(),
         ],
     )
 }
 
-/// `Composite[Variable, NoRegion]` ARRAY whose element is itself a
+/// `Composite[Variable, NoBuffer]` ARRAY whose element is itself a
 /// runtime-sized array — the leaf has no fixed size. The shape that
 /// reproduces the `*[]u32 with [0] = 42` panic in
 /// `spirv/mod.rs::create_storage_buffer`.
@@ -37,7 +36,7 @@ fn runtime_array_of_runtime_array() -> Type<TypeName> {
             runtime_u32_array(),
             types::array_variant_composite(),
             Type::Variable(102),
-            types::no_region(),
+            types::no_buffer(),
         ],
     )
 }

@@ -169,7 +169,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                                 elem.clone(),
                                 PolyType::Constructed(TypeName::ArrayVariantComposite, vec![]),
                                 base_ty.array_size().expect("Array has size").clone(),
-                                crate::types::no_region(),
+                                crate::types::no_buffer(),
                             ],
                         );
                         self.lower_composite_index(buf_id, index_id, result_ty, &composite_ty)
@@ -224,16 +224,16 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
     }
 
     /// The SPIR-V storage-buffer variable backing a view value, recovered from
-    /// the concrete `Region(set, binding)` in the value's type. A view's
+    /// the concrete `Buffer(set, binding)` in the value's type. A view's
     /// descriptor is a static property of its type — pinned at the entry,
     /// carried by unification through slices, block params, and calls — so it
     /// is read here rather than tracked in a side-map.
     pub(super) fn view_buffer_var(&mut self, view_ssa: ValueId) -> Result<spirv::Word> {
         let ty = self.body.get_value_type(view_ssa).clone();
-        let br = crate::types::array_view_region(&ty).ok_or_else(|| {
+        let br = crate::types::array_view_buffer(&ty).ok_or_else(|| {
             err_spirv_at!(
                 self.blame_span(),
-                "view value {:?} has no concrete buffer region in its type: {:?}",
+                "view value {:?} has no concrete buffer in its type: {:?}",
                 view_ssa,
                 ty
             )
@@ -243,7 +243,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             self.constructor.buffer_vars.get(buf_id as usize).copied().ok_or_else(|| {
                 err_spirv_at!(
                     self.blame_span(),
-                    "view region (set={}, binding={}) → buffer_id {} not in buffer_vars",
+                    "view buffer (set={}, binding={}) → buffer_id {} not in buffer_vars",
                     br.set,
                     br.binding,
                     buf_id

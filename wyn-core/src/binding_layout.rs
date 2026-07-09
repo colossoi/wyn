@@ -55,9 +55,9 @@ pub fn runtime_sized_array_elem(ty: &Type<TypeName>) -> Option<(&Type<TypeName>,
 ///   and will be routed to push constants by the caller.
 ///
 /// The binding a param receives is written back into its view type by
-/// `pin_entry_regions`, which is the only place a concrete
-/// `Region(set, binding)` is born. A param left without one reaches the
-/// backend as `Array[_, View, _, ?region]` and cannot be indexed.
+/// `pin_entry_buffers`, which is the only place a concrete
+/// `Buffer(set, binding)` is born. A param left without one reaches the
+/// backend as `Array[_, View, _, ?buffer]` and cannot be indexed.
 ///
 /// Binding numbers come from `binding_ids` in declaration order.
 pub fn compute_entry_binding_layout(

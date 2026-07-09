@@ -7,7 +7,7 @@
 use crate::tlc::Program;
 use crate::{cached_compiler_init, Compiler};
 
-/// Front-end (parse → resolve → type-check → to_tlc → pin_entry_regions →
+/// Front-end (parse → resolve → type-check → to_tlc → pin_entry_buffers →
 /// validate_ownership) shared by every `compile_*` helper, so they differ only
 /// in how far down the `optimize_for_test` chain they run.
 fn front_end(src: &str) -> crate::TlcOwnershipValidated {
@@ -21,8 +21,8 @@ fn front_end(src: &str) -> crate::TlcOwnershipValidated {
         .expect("type_check");
     type_checked
         .to_tlc(&module_manager, false)
-        .pin_entry_regions()
-        .expect("pin_entry_regions")
+        .pin_entry_buffers()
+        .expect("pin_entry_buffers")
         .validate_ownership()
         .expect("validate_ownership")
 }

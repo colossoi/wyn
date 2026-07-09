@@ -86,7 +86,7 @@ fn vertex_format_rejects_aggregates() {
             scalar(TypeName::Float(32)),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Constructed(TypeName::Size(4), vec![]),
-            crate::types::no_region(),
+            crate::types::no_buffer(),
         ],
     );
     assert_eq!(vertex_format(&arr), None);
@@ -203,7 +203,7 @@ fn block_layout_rejects_unsupported_members() {
             f32t(),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Constructed(TypeName::Size(4), vec![]),
-            Type::Constructed(TypeName::NoRegion, vec![]),
+            Type::Constructed(TypeName::NoBuffer, vec![]),
         ],
     );
     let nested = record(&[("inner", record(&[("x", f32t())]))]);
