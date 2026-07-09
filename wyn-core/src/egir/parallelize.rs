@@ -855,11 +855,7 @@ fn storage_binding_reachable(graph: &EGraph, start: NodeId) -> Option<BindingRef
     wyn_graph::find_map_reachable(
         [start],
         wyn_graph::WalkOrder::DepthFirst,
-        |node, dependencies| {
-            if let Some(node) = graph.nodes.get(node) {
-                dependencies.extend(node.children());
-            }
-        },
+        |node, dependencies| dependencies.extend(graph.nodes[node].children()),
         |node| graph_ops::extract_storage_view_source(graph, node),
     )
 }
@@ -869,11 +865,7 @@ fn node_reaches(graph: &EGraph, start: NodeId, target: NodeId) -> bool {
         start,
         target,
         wyn_graph::WalkOrder::DepthFirst,
-        |node, dependencies| {
-            if let Some(node) = graph.nodes.get(node) {
-                dependencies.extend(node.children());
-            }
-        },
+        |node, dependencies| dependencies.extend(graph.nodes[node].children()),
     )
 }
 

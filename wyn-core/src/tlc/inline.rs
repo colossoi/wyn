@@ -620,7 +620,7 @@ pub fn dead_code_eliminate(defs: Vec<Def>) -> Vec<Def> {
             matches!(def.meta, DefMeta::EntryPoint(_)) || matches!(def.body.kind, TermKind::Extern(_))
         })
         .map(|def| def.name);
-    let reachable = wyn_graph::reachable_from(roots, |sym, refs| {
+    let reachable = wyn_graph::reachable_set(roots, wyn_graph::WalkOrder::DepthFirst, |sym, refs| {
         if let Some(def) = def_map.get(&sym) {
             refs.extend(collect_var_refs(&def.body).into_iter().filter(|r| def_map.contains_key(r)));
         }

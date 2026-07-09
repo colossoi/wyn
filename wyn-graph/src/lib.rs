@@ -19,15 +19,13 @@ pub enum WalkOrder {
 }
 
 impl WalkOrder {
+    /// Successors are always appended to the back; which end they come off is
+    /// the whole of the difference between the two orders.
     fn pop<N>(self, pending: &mut VecDeque<N>) -> Option<N> {
         match self {
             WalkOrder::BreadthFirst => pending.pop_front(),
             WalkOrder::DepthFirst => pending.pop_back(),
         }
-    }
-
-    fn push_all<N: Copy>(self, pending: &mut VecDeque<N>, nodes: &[N]) {
-        pending.extend(nodes.iter().copied());
     }
 }
 
@@ -95,7 +93,7 @@ where
             WalkDecision::Continue => {
                 next.clear();
                 successors(node, &mut next);
-                order.push_all(&mut pending, &next);
+                pending.extend(next.iter().copied());
             }
             WalkDecision::Prune => {}
             WalkDecision::Break(value) => return Some(value),
@@ -119,20 +117,10 @@ where
     });
 }
 
-/// Return every node reachable from `roots`, in breadth-first discovery order.
+/// Return every node reachable from `roots` in the requested traversal order.
 ///
 /// The `successors` callback appends outgoing neighbors for a node into the
 /// supplied buffer. Duplicate roots, duplicate edges, and cycles are harmless.
-pub fn reachable_from<N, I, F>(roots: I, mut successors: F) -> Vec<N>
-where
-    N: Copy + Eq + Hash,
-    I: IntoIterator<Item = N>,
-    F: FnMut(N, &mut Vec<N>),
-{
-    reachable_from_ordered(roots, WalkOrder::BreadthFirst, |node, out| successors(node, out))
-}
-
-/// Return every node reachable from `roots` in the requested traversal order.
 pub fn reachable_from_ordered<N, I, F>(roots: I, order: WalkOrder, successors: F) -> Vec<N>
 where
     N: Copy + Eq + Hash,
@@ -173,17 +161,6 @@ where
     })
 }
 
-/// True when `target` is reachable from `start`.
-pub fn reaches<N, F>(start: N, target: N, mut successors: F) -> bool
-where
-    N: Copy + Eq + Hash,
-    F: FnMut(N, &mut Vec<N>),
-{
-    reaches_ordered(start, target, WalkOrder::BreadthFirst, |node, out| {
-        successors(node, out);
-    })
-}
-
 /// True when `target` is reachable from `start` using the requested traversal
 /// order.
 pub fn reaches_ordered<N, F>(start: N, target: N, order: WalkOrder, successors: F) -> bool
@@ -199,47 +176,6 @@ where
         }
     })
     .is_some()
-}
-
-/// Topologically sort a graph where the callback lists outgoing edges.
-///
-/// If `successors(a)` includes `b`, then `a` appears before `b` in the
-/// returned order. Edges to nodes outside the supplied `nodes` universe are
-/// ignored, which makes it convenient to sort an induced subgraph.
-pub fn topo_sort<N, I, F>(nodes: I, mut successors: F) -> Result<Vec<N>, TopoError<N>>
-where
-    N: Copy + Eq + Hash,
-    I: IntoIterator<Item = N>,
-    F: FnMut(N, &mut Vec<N>),
-{
-    let nodes = unique_nodes(nodes);
-    let universe: HashSet<N> = nodes.iter().copied().collect();
-    let mut remaining: HashMap<N, usize> = nodes.iter().map(|&node| (node, 0)).collect();
-    let mut dependents: HashMap<N, Vec<N>> = nodes.iter().map(|&node| (node, Vec::new())).collect();
-    let mut next = Vec::new();
-
-    for &node in &nodes {
-        next.clear();
-        successors(node, &mut next);
-
-        let mut unique_edges = HashSet::new();
-        for successor in next.iter().copied() {
-            if !universe.contains(&successor) || !unique_edges.insert(successor) {
-                continue;
-            }
-            if let Some(count) = remaining.get_mut(&successor) {
-                *count += 1;
-            } else {
-                debug_assert!(
-                    false,
-                    "successor passed universe filter but has no remaining count"
-                );
-            }
-            dependents.entry(node).or_default().push(successor);
-        }
-    }
-
-    kahn(nodes, remaining, dependents)
 }
 
 /// Topologically sort a graph where the callback lists each node's
@@ -264,17 +200,15 @@ where
         deps.clear();
         dependencies(node, &mut deps);
 
+        // `remaining` and `dependents` are keyed by exactly `nodes`, and
+        // `universe` filters dependencies down to that same set.
         let mut unique_deps = HashSet::new();
         for dependency in deps.iter().copied() {
             if !universe.contains(&dependency) || !unique_deps.insert(dependency) {
                 continue;
             }
-            if let Some(count) = remaining.get_mut(&node) {
-                *count += 1;
-            } else {
-                debug_assert!(false, "node from node list has no remaining count");
-            }
-            dependents.entry(dependency).or_default().push(node);
+            *remaining.get_mut(&node).expect("node came from the node list") += 1;
+            dependents.get_mut(&dependency).expect("dependency passed the universe filter").push(node);
         }
     }
 
@@ -342,6 +276,9 @@ where
             }
         }
 
+        // `predecessors` and `doms` are keyed by exactly `reachable`, so every
+        // lookup below is total. Skipping a missing predecessor would widen the
+        // intersection and yield a wrong tree, so index rather than guard.
         loop {
             let mut changed = false;
             for &node in &reachable {
@@ -349,29 +286,17 @@ where
                     continue;
                 }
 
-                let Some(preds) = predecessors.get(&node) else {
-                    debug_assert!(false, "reachable node has no predecessor entry");
-                    continue;
-                };
-                let Some((first, rest)) = preds.split_first() else {
-                    debug_assert!(false, "reachable non-entry node has no reachable predecessor");
-                    continue;
-                };
-                let Some(first_doms) = doms.get(first) else {
-                    debug_assert!(false, "predecessor has no dominator set");
-                    continue;
-                };
-                let mut new_set = first_doms.clone();
+                let preds = &predecessors[&node];
+                let (first, rest) = preds
+                    .split_first()
+                    .expect("a reachable non-entry node was discovered from some predecessor");
+                let mut new_set = doms[first].clone();
                 for pred in rest {
-                    let Some(pred_doms) = doms.get(pred) else {
-                        debug_assert!(false, "predecessor has no dominator set");
-                        continue;
-                    };
-                    new_set = new_set.intersection(pred_doms).copied().collect();
+                    new_set = new_set.intersection(&doms[pred]).copied().collect();
                 }
                 new_set.insert(node);
 
-                if doms.get(&node) != Some(&new_set) {
+                if doms[&node] != new_set {
                     doms.insert(node, new_set);
                     changed = true;
                 }
@@ -382,27 +307,21 @@ where
             }
         }
 
+        // A node's dominators form a chain, so the strict dominator with the
+        // largest dominator set is the immediate one, and no two can tie.
         let mut idom = HashMap::new();
         for &node in &reachable {
             if node == entry {
                 continue;
             }
 
-            let Some(dom_set) = doms.get(&node) else {
-                debug_assert!(false, "reachable node has no dominator set");
-                continue;
-            };
             let mut best = None;
             let mut best_depth = 0;
-            for &dominator in dom_set {
+            for &dominator in &doms[&node] {
                 if dominator == node {
                     continue;
                 }
-                let Some(dominator_doms) = doms.get(&dominator) else {
-                    debug_assert!(false, "dominator is not in the dominator map");
-                    continue;
-                };
-                let depth = dominator_doms.len();
+                let depth = doms[&dominator].len();
                 if depth > best_depth {
                     best = Some(dominator);
                     best_depth = depth;
@@ -499,22 +418,18 @@ fn kahn<N>(
 where
     N: Copy + Eq + Hash,
 {
-    let mut ready: VecDeque<N> =
-        nodes.iter().copied().filter(|node| remaining.get(node).copied().unwrap_or(0) == 0).collect();
+    // Both maps are keyed by exactly `nodes`. A missed decrement would strand a
+    // node and report a cycle that isn't there, so index rather than guard.
+    let mut ready: VecDeque<N> = nodes.iter().copied().filter(|node| remaining[node] == 0).collect();
     let mut result = Vec::with_capacity(nodes.len());
 
     while let Some(node) = ready.pop_front() {
         result.push(node);
-        if let Some(next_nodes) = dependents.get(&node) {
-            for &next in next_nodes {
-                if let Some(count) = remaining.get_mut(&next) {
-                    *count -= 1;
-                    if *count == 0 {
-                        ready.push_back(next);
-                    }
-                } else {
-                    debug_assert!(false, "dependent has no remaining count");
-                }
+        for &next in &dependents[&node] {
+            let count = remaining.get_mut(&next).expect("dependent came from the node list");
+            *count -= 1;
+            if *count == 0 {
+                ready.push_back(next);
             }
         }
     }
@@ -522,8 +437,7 @@ where
     if result.len() == nodes.len() {
         Ok(result)
     } else {
-        let remaining =
-            nodes.into_iter().filter(|node| remaining.get(node).copied().unwrap_or(0) > 0).collect();
+        let remaining = nodes.into_iter().filter(|node| remaining[node] > 0).collect();
         Err(TopoError::Cycle { remaining })
     }
 }
@@ -551,9 +465,12 @@ mod tests {
             }
         }
 
-        assert_eq!(reachable_from([0], cyclic), vec![0, 1, 2, 3]);
-        assert!(reaches(0, 3, cyclic));
-        assert!(!reaches(3, 0, cyclic));
+        assert_eq!(
+            reachable_from_ordered([0], WalkOrder::BreadthFirst, cyclic),
+            vec![0, 1, 2, 3]
+        );
+        assert!(reaches_ordered(0, 3, WalkOrder::BreadthFirst, cyclic));
+        assert!(!reaches_ordered(3, 0, WalkOrder::BreadthFirst, cyclic));
     }
 
     #[test]
@@ -605,23 +522,6 @@ mod tests {
         assert_eq!(found, Some(40));
         assert!(reachable_set([0], WalkOrder::DepthFirst, tree).contains(&3));
         assert!(reaches_ordered(0, 4, WalkOrder::DepthFirst, tree));
-    }
-
-    #[test]
-    fn topological_sort_orders_successors_after_producers() {
-        let order = match topo_sort([0, 1, 2, 3], diamond) {
-            Ok(order) => order,
-            Err(err) => panic!("diamond should be acyclic: {err}"),
-        };
-        let pos = |node| match order.iter().position(|&candidate| candidate == node) {
-            Some(index) => index,
-            None => panic!("topological order is missing node {node}"),
-        };
-
-        assert!(pos(0) < pos(1));
-        assert!(pos(0) < pos(2));
-        assert!(pos(1) < pos(3));
-        assert!(pos(2) < pos(3));
     }
 
     #[test]

@@ -51,29 +51,23 @@ impl LoopAnalysis {
 /// is included; `merge` is not.
 fn collect_loop_body(skeleton: &Skeleton, header: BlockId, merge: BlockId) -> LookupSet<BlockId> {
     let mut body = LookupSet::new();
-    let _: Option<()> = wyn_graph::walk_reachable(
-        [header],
-        wyn_graph::WalkOrder::DepthFirst,
-        |b, out| match &skeleton.blocks[b].term {
+    let mut stack = vec![header];
+    while let Some(b) = stack.pop() {
+        if b == merge || !body.insert(b) {
+            continue;
+        }
+        match &skeleton.blocks[b].term {
             SkeletonTerminator::Return(_) | SkeletonTerminator::Unreachable => {}
-            SkeletonTerminator::Branch { target, .. } => out.push(*target),
+            SkeletonTerminator::Branch { target, .. } => stack.push(*target),
             SkeletonTerminator::CondBranch {
                 then_target,
                 else_target,
                 ..
             } => {
-                out.push(*then_target);
-                out.push(*else_target);
+                stack.push(*then_target);
+                stack.push(*else_target);
             }
-        },
-        |b| {
-            if b == merge {
-                wyn_graph::WalkDecision::Prune
-            } else {
-                body.insert(b);
-                wyn_graph::WalkDecision::Continue
-            }
-        },
-    );
+        }
+    }
     body
 }

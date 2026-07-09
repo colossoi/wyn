@@ -100,14 +100,20 @@ fn op_cost(op: &PureOp) -> Cost {
 }
 
 /// Dependency-order sort of the acyclic e-graph.
+///
+/// Extraction's bottom-up DP reads each node's children before the node, which
+/// only holds for a topological order. A cycle means an earlier pass interned a
+/// node into its own operand tree; there is no order to fall back on, so say so
+/// rather than hand the DP an arbitrary one.
 fn topological_sort(graph: &EGraph) -> Vec<NodeId> {
-    match wyn_graph::topo_sort_by_dependencies(graph.nodes.keys(), |node, dependencies| {
+    wyn_graph::topo_sort_by_dependencies(graph.nodes.keys(), |node, dependencies| {
         dependencies.extend(graph.nodes[node].children());
-    }) {
-        Ok(order) => order,
-        Err(err) => {
-            debug_assert!(false, "EGraph extraction expected an acyclic graph: {err}");
-            graph.nodes.keys().collect()
-        }
-    }
+    })
+    .unwrap_or_else(|err| {
+        panic!(
+            "EGraph extraction requires an acyclic graph; {} node(s) lie on or behind a cycle: {:?}",
+            err.remaining().len(),
+            err.remaining()
+        )
+    })
 }

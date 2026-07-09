@@ -365,34 +365,28 @@ fn dependency_effects(
         .enumerate()
         .filter_map(|(index, effect)| effect.result.map(|result| (result, index)))
         .collect();
-    let mut retained = HashSet::new();
-    let _: Option<()> = wyn_graph::walk_reachable(
-        [root],
-        wyn_graph::WalkOrder::DepthFirst,
-        |effect_index, effects| {
-            let _: Option<()> = wyn_graph::walk_reachable(
-                block.side_effects[effect_index].referenced_nodes(),
-                wyn_graph::WalkOrder::DepthFirst,
-                |node, nodes| {
-                    if let Some(definition) = graph.nodes.get(node) {
-                        nodes.extend(definition.children());
-                    }
-                },
-                |node| {
-                    if let Some(&producer) = producers.get(&node) {
-                        effects.push(producer);
-                        wyn_graph::WalkDecision::Prune
-                    } else {
-                        wyn_graph::WalkDecision::Continue
-                    }
-                },
-            );
-        },
-        |effect_index| {
-            retained.insert(effect_index);
-            wyn_graph::WalkDecision::Continue
-        },
-    );
+    let mut retained = HashSet::from([root]);
+    let mut effects = vec![root];
+    while let Some(effect_index) = effects.pop() {
+        let mut nodes: Vec<_> = block.side_effects[effect_index].referenced_nodes().collect();
+        let mut visited = HashSet::new();
+        while let Some(node) = nodes.pop() {
+            if !visited.insert(node) {
+                continue;
+            }
+            // Stop at a node that is another effect's result: that producer
+            // is retained whole, and its own operands belong to it.
+            if let Some(&producer) = producers.get(&node) {
+                if retained.insert(producer) {
+                    effects.push(producer);
+                }
+                continue;
+            }
+            if let Some(definition) = graph.nodes.get(node) {
+                nodes.extend(definition.children());
+            }
+        }
+    }
     retained
 }
 
