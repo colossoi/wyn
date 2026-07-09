@@ -6308,6 +6308,57 @@ def render(a: []u32, b: []u32) ([]f32, []f32, []f32) =
     );
 }
 
+/// A record whose fields are storage-buffer views, bound outside a map and
+/// indexed inside that map's body, keeps a concrete `Region(set, binding)` on
+/// each field. Passing the record to a helper that maps over its fields and
+/// returns a record of the results is what drives those field types view-ward.
+///
+/// Without this, `sc.pts` reaches `lower_index` as
+/// `Array[f32, View, ?size, ?region]` and SPIR-V lowering has no buffer to
+/// build an `OpAccessChain` into.
+#[test]
+fn record_of_views_indexed_in_map_body_compiles() {
+    let src = "\
+open f32
+
+type world = { pts: []f32, its: []f32 }
+
+def update(w: world, pdom: []u32, idom: []u32) world =
+  { pts = map(|s| w.pts[i32(s)] * 2.0, pdom),
+    its = map(|s| w.its[i32(s)] + 1.0, idom) }
+
+#[compute]
+entry go(dom: []u32, pdom: []u32, idom: []u32, pts_in: []f32, its_in: []f32)
+  ([]f32, []f32, []f32) =
+  let w  = { pts = pts_in, its = its_in }
+  let w2 = update(w, pdom, idom)
+  let sc = { pts = w.pts, its = w.its } in
+  (w2.pts, w2.its,
+   map(|s| sc.pts[0] + sc.its[0] + f32(s), dom))
+";
+    crate::compile_thru_spirv(src).expect("record of views indexed inside a map must compile");
+}
+
+/// Two maps over the same domain fuse into one stage. A record of views bound
+/// outside them must be carried into the fused stage; otherwise the field
+/// projection in the second map's body resolves to a global the fused stage
+/// never declared.
+#[test]
+fn record_of_views_survives_stage_fusion() {
+    let src = "\
+open f32
+type painted = { pts: []f32 }
+def sdf(sc: painted, x: f32) f32 = sc.pts[0] + x
+
+#[compute]
+entry go(dom: []u32, pts_in: []f32) ([]f32, []f32) =
+  let sc = { pts = pts_in } in
+  (map(|s| pts_in[i32(s)] * 2.0, dom),
+   map(|s| sdf(sc, f32(s)), dom))
+";
+    crate::compile_thru_spirv(src).expect("record of views must survive map fusion into one stage");
+}
+
 /// Multiple gathers of the *same* computed array coalesce to one buffer: the
 /// lift keys on the let-bound symbol and rewrites every `arr[..]` use to the
 /// same storage binding, so a single pre-pass materializes `arr` once no
