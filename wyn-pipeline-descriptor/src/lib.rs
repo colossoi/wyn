@@ -999,23 +999,27 @@ fn resource_key(pipeline_index: usize, binding: &Binding) -> ResourceKey {
             resource,
             ..
         } => {
-            // A sampled view aliasing a compute storage-texture keys to that
-            // backing slot (the identity is the write it reads). A view of a
-            // render-target `resource` keys to that resource name, so it shares
-            // identity with the fragment `#[target(name)]` that writes it. A
-            // plain sampled texture is one logical resource by name across
-            // its readers.
-            if let Some(backing) = backing {
-                ResourceKey::Descriptor {
+            // A view of a named `resource` keys to that name, sharing identity
+            // with the resource's storage views and with the fragment
+            // `#[target(name)]` that writes it — a sampled view records the
+            // storage allocation it aliases in `backing`, but the name is the
+            // identity. A view carrying only a `backing` (a `previous` frame of
+            // a history resource) keys to that slot. A plain sampled texture is
+            // one logical resource by name across its readers.
+            match (resource, backing) {
+                (Some(resource), _) => ResourceKey::Named {
+                    kind: FrameResourceKind::Texture,
+                    name: resource.clone(),
+                },
+                (None, Some(backing)) => ResourceKey::Descriptor {
                     kind: FrameResourceKind::StorageTexture,
                     set: backing.set,
                     binding: backing.binding,
-                }
-            } else {
-                ResourceKey::Named {
+                },
+                (None, None) => ResourceKey::Named {
                     kind: FrameResourceKind::Texture,
-                    name: resource.clone().unwrap_or_else(|| name.clone()),
-                }
+                    name: name.clone(),
+                },
             }
         }
         Binding::Sampler { set, binding, .. } => ResourceKey::Descriptor {

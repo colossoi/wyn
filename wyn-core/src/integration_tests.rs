@@ -8013,6 +8013,86 @@ fn resource_dependencies_publish_frame_graph() {
     assert!(read_resource.history.iter().any(|role| role.role == FrameHistoryRoleKind::ReadPrevious));
 }
 
+/// One `resource` written through a `storage_write` view and read through a
+/// `sampled` view is one frame-graph resource, so the write orders before the
+/// read. This is the write-then-sample pattern, and the only way to read a
+/// format a storage image cannot load.
+///
+/// Two `storage_*` views of one resource already unify; a sampled view must not
+/// key differently just because it also records the storage allocation it
+/// aliases.
+#[test]
+fn storage_write_and_sampled_views_of_one_resource_are_one_frame_resource() {
+    use crate::pipeline_descriptor::FrameResourceKind;
+
+    let src = "\
+open f32
+
+resource img: image2d {
+  format = rgba16float
+  size   = window
+  usages = [storage_write, sampled]
+}
+
+#[compute]
+entry produce(#[builtin(global_invocation_id)] gid: vec3u32,
+              #[view(img, storage_write)] o: *storage_image) () =
+  let xy = @[i32(gid.x) % 1280, i32(gid.x) / 1280] in
+  o with [xy] = @[1.0, 0.0, 0.0, 1.0]
+
+#[fragment]
+entry consume(#[builtin(frag_coord)] fc: vec4f32,
+              #[view(img, sampled)] t: texture2d)
+  #[target(surface)] vec4f32 =
+  texture_load(t, @[i32(fc.x), i32(fc.y)], 0)
+";
+    let lowered = crate::compile_thru_ssa(src).expect("write-then-sample compiles");
+    let graph = &lowered.pipeline.frame_graph;
+
+    let named: Vec<usize> = graph
+        .resources
+        .iter()
+        .enumerate()
+        .filter_map(|(index, resource)| (resource.name == "img").then_some(index))
+        .collect();
+    assert_eq!(
+        named.len(),
+        1,
+        "`img` must be one resource; resources are {:?}",
+        graph.resources.iter().map(|r| (r.name.clone(), r.kind)).collect::<Vec<_>>()
+    );
+    let img = named[0];
+
+    // Every view of one image resource is a texture; the storage allocation
+    // rides on `extent`, not on the kind.
+    assert_eq!(graph.resources[img].kind, FrameResourceKind::Texture);
+
+    let pass_index = |name: &str| {
+        graph.passes.iter().position(|pass| pass.name == name).unwrap_or_else(|| {
+            panic!(
+                "pass `{name}` missing: {:?}",
+                graph.passes.iter().map(|p| p.name.clone()).collect::<Vec<_>>()
+            )
+        })
+    };
+    let produce = pass_index("produce");
+    let consume = pass_index("consume");
+
+    assert!(
+        graph.passes[produce].writes.iter().any(|access| access.resource == img),
+        "the storage_write view writes `img`"
+    );
+    assert!(
+        graph.passes[consume].reads.iter().any(|access| access.resource == img),
+        "the sampled view reads `img`"
+    );
+    assert!(
+        graph.passes[consume].depends_on.contains(&produce),
+        "the sampled read must be ordered after the storage write, got depends_on {:?}",
+        graph.passes[consume].depends_on
+    );
+}
+
 /// Descriptor bindings must be slot-unique — a duplicated (set, binding)
 /// fails wgpu bind-group-layout creation ("Conflicting binding"). Regression
 /// test: the publication pass's claimed-slot snapshot skipped the texture /
