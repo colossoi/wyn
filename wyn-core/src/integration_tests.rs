@@ -6237,6 +6237,77 @@ entry g(xs: []i32) []i32 =
     );
 }
 
+/// A helper's size variables are generalized, so one caller equating two of
+/// its params' lengths does not equate them for every other caller.
+///
+/// `go2` passes `xc` for both of `slice_b`'s params, forcing `size(a) ==
+/// size(b)` *at that call*. `render` — dead, never called — applies both
+/// helpers to the same pair, which would chain `slice_b`'s size equation onto
+/// `slice_ab` and from there onto `go`. If sizes were monomorphic per
+/// declaration, `go`'s two outputs would both size `LikeInput` on binding 0
+/// and its two maps would fuse into one dispatch.
+#[test]
+fn helper_size_equation_does_not_leak_across_call_sites() {
+    use crate::pipeline_descriptor::{Binding, BufferLen, BufferUsage};
+    let src = "\
+open f32
+
+def slice_ab(a: []u32, b: []u32) ([]f32, []f32) =
+  (map(|s| f32(s), a),
+   map(|s| f32(s) * 2.0, b))
+
+def slice_b(a: []u32, b: []u32) []f32 =
+  map(|s| f32(s) * 3.0 + f32(a[0]), b)
+
+#[compute]
+entry go(xa: []u32, xb: []u32) ([]f32, []f32) =
+  slice_ab(xa, xb)
+
+#[compute]
+entry go2(xc: []u32) []f32 =
+  slice_b(xc, xc)
+
+def render(a: []u32, b: []u32) ([]f32, []f32, []f32) =
+  let (p, q) = slice_ab(a, b)
+  let r = slice_b(a, b) in
+  (p, q, r)
+";
+    let lowered = compile_parallel(src);
+    let outputs: Vec<(u32, BufferLen)> = compute_storage_buffers(&lowered.pipeline, "go")
+        .iter()
+        .filter_map(|b| match b {
+            Binding::StorageBuffer {
+                binding,
+                usage: BufferUsage::Output,
+                length: Some(len),
+                ..
+            } => Some((*binding, len.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        outputs.len(),
+        2,
+        "`go` returns two runtime-sized arrays: {outputs:?}"
+    );
+
+    // Output 0 is a map over `xa` (binding 0); output 1 over `xb` (binding 1).
+    let src_binding = |len: &BufferLen| match len {
+        BufferLen::LikeInput { binding, .. } => Some(*binding),
+        _ => None,
+    };
+    assert_eq!(
+        src_binding(&outputs[0].1),
+        Some(0),
+        "first output sizes like `xa`"
+    );
+    assert_eq!(
+        src_binding(&outputs[1].1),
+        Some(1),
+        "second output sizes like `xb`"
+    );
+}
+
 /// Multiple gathers of the *same* computed array coalesce to one buffer: the
 /// lift keys on the let-bound symbol and rewrites every `arr[..]` use to the
 /// same storage binding, so a single pre-pass materializes `arr` once no

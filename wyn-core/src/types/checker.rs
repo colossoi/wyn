@@ -304,9 +304,17 @@ fn fv_type_generalizable(ty: &Type) -> BTreeSet<usize> {
 /// Free type variables for a named function scheme. Function declarations are
 /// representation-polymorphic over fixed-size arrays: a helper taking `[4]T`
 /// can be specialized for a storage-backed View slice and for a local
-/// Composite literal at different call sites. Array sizes remain
-/// non-generalized for the same reason as `fv_type_generalizable`; for
-/// size-polymorphic/unsized arrays we also leave the variant pinned so
+/// Composite literal at different call sites.
+///
+/// Array **sizes** are generalized, so a helper is `∀n. [n]T → …` and each
+/// call site instantiates a fresh size var that unification pins to that
+/// call's actual length. Without this, one call passing the same array for
+/// two params would equate those params' sizes for every other caller too,
+/// and the equation would spread through the call graph. Monomorphization
+/// keys on the resulting substitution, so a call with `[4]T` and a call with
+/// a runtime-sized `[]T` get separate specializations.
+///
+/// For size-polymorphic/unsized arrays the **variant** stays pinned, so
 /// producer-specialization can resolve filter outputs without defaulting a
 /// Skolem-sized value to Composite.
 fn fv_type_generalizable_for_function(ty: &Type) -> BTreeSet<usize> {
@@ -324,6 +332,9 @@ fn fv_type_generalizable_for_function(ty: &Type) -> BTreeSet<usize> {
                     if let Some(variant) = t.array_variant() {
                         go(variant, acc);
                     }
+                }
+                if let Some(size) = t.array_size() {
+                    go(size, acc);
                 }
                 if let Some(region) = t.array_region() {
                     go(region, acc);

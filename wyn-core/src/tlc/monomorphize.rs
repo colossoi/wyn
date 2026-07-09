@@ -93,6 +93,9 @@ struct SpecKey {
 enum TypeKey {
     Var(usize),
     Size(usize),
+    /// A rigid existential size (e.g. a `filter` result's length). Distinct
+    /// skolems are distinct sizes, so each specializes its own copy.
+    Skolem(u32),
     Constructed(String, Vec<TypeKey>),
     Record(Vec<(String, TypeKey)>),
     Sum(Vec<(String, Vec<TypeKey>)>),
@@ -144,6 +147,7 @@ impl TypeKey {
                 // Handle types with nested structure that need full representation
                 match name {
                     TypeName::Size(n) => return TypeKey::Size(*n),
+                    TypeName::Skolem(id) => return TypeKey::Skolem(id.0),
                     TypeName::Record(fields) => {
                         // Field names are in RecordFields, field types are in args
                         let mut key_fields: Vec<_> = fields
@@ -213,6 +217,7 @@ impl TypeKey {
         match self {
             TypeKey::Var(id) => Type::Variable(*id),
             TypeKey::Size(n) => Type::Constructed(TypeName::Size(*n), vec![]),
+            TypeKey::Skolem(id) => Type::Constructed(TypeName::Skolem((*id).into()), vec![]),
             TypeKey::Record(fields) => {
                 let field_names: Vec<_> = fields.iter().map(|(k, _)| k.clone()).collect();
                 let field_types: Vec<_> = fields.iter().map(|(_, v)| v.to_type()).collect();
