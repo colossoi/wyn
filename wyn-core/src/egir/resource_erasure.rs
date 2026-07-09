@@ -170,33 +170,29 @@ fn erase_function_params(function: &mut EgirFunc) -> Result<(), ConvertError> {
 }
 
 fn live_nodes(graph: &EGraph) -> LookupSet<crate::egir::types::NodeId> {
-    let mut stack = Vec::new();
+    let mut roots = Vec::new();
     for (_, block) in &graph.skeleton.blocks {
         for effect in &block.side_effects {
-            stack.extend(effect.operand_nodes.iter().copied());
+            roots.extend(effect.operand_nodes.iter().copied());
         }
         match &block.term {
-            SkeletonTerminator::Return(Some(value)) => stack.push(*value),
+            SkeletonTerminator::Return(Some(value)) => roots.push(*value),
             SkeletonTerminator::Return(None) | SkeletonTerminator::Unreachable => {}
-            SkeletonTerminator::Branch { args, .. } => stack.extend(args.iter().copied()),
+            SkeletonTerminator::Branch { args, .. } => roots.extend(args.iter().copied()),
             SkeletonTerminator::CondBranch {
                 cond,
                 then_args,
                 else_args,
                 ..
             } => {
-                stack.push(*cond);
-                stack.extend(then_args.iter().copied());
-                stack.extend(else_args.iter().copied());
+                roots.push(*cond);
+                roots.extend(then_args.iter().copied());
+                roots.extend(else_args.iter().copied());
             }
         }
     }
 
-    let mut live = LookupSet::new();
-    while let Some(node) = stack.pop() {
-        if live.insert(node) {
-            stack.extend(graph.nodes[node].children());
-        }
-    }
-    live
+    wyn_graph::reachable_set(roots, wyn_graph::WalkOrder::DepthFirst, |node, out| {
+        out.extend(graph.nodes[node].children());
+    })
 }

@@ -94,35 +94,33 @@ pub(super) fn eliminate_dead_seg_ops_in_graph(graph: &mut EGraph) -> bool {
     // Live values are those reachable from an observable root.  Looking at
     // children of every interned node is too conservative: dead Project nodes
     // remain in an e-graph and would otherwise keep their producer alive.
-    let mut used = HashSet::<NodeId>::new();
-    let mut stack = Vec::<NodeId>::new();
+    let mut roots = Vec::<NodeId>::new();
     for (_, block) in &graph.skeleton.blocks {
         for effect in &block.side_effects {
-            stack.extend(effect.referenced_nodes());
+            roots.extend(effect.referenced_nodes());
         }
         match &block.term {
-            SkeletonTerminator::Return(value) => stack.extend(value.iter().copied()),
-            SkeletonTerminator::Branch { args, .. } => stack.extend(args.iter().copied()),
+            SkeletonTerminator::Return(value) => roots.extend(value.iter().copied()),
+            SkeletonTerminator::Branch { args, .. } => roots.extend(args.iter().copied()),
             SkeletonTerminator::CondBranch {
                 cond,
                 then_args,
                 else_args,
                 ..
             } => {
-                stack.push(*cond);
-                stack.extend(then_args.iter().copied());
-                stack.extend(else_args.iter().copied());
+                roots.push(*cond);
+                roots.extend(then_args.iter().copied());
+                roots.extend(else_args.iter().copied());
             }
             SkeletonTerminator::Unreachable => {}
         }
     }
-    while let Some(node) = stack.pop() {
-        if used.insert(node) {
-            if let Some(definition) = graph.nodes.get(node) {
-                stack.extend(definition.children());
-            }
+
+    let used = wyn_graph::reachable_set(roots, wyn_graph::WalkOrder::DepthFirst, |node, out| {
+        if let Some(definition) = graph.nodes.get(node) {
+            out.extend(definition.children());
         }
-    }
+    });
     let mut changed = false;
     for (_, block) in graph.skeleton.blocks.iter_mut() {
         let before = block.side_effects.len();

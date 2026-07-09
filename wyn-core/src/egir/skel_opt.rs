@@ -134,28 +134,27 @@ fn is_const_bool(nid: NodeId, nodes: &slotmap::SlotMap<NodeId, ENode>) -> Option
 /// The pure nodes and block-param nodes owned by dead blocks stay in the
 /// sea; with no reachable demand path to them, later stages ignore them.
 fn remove_unreachable_blocks(graph: &mut EGraph) -> bool {
-    let mut reachable: LookupSet<BlockId> = LookupSet::new();
-    let mut stack = vec![graph.skeleton.entry];
-    while let Some(bid) = stack.pop() {
-        if !reachable.insert(bid) {
-            continue;
-        }
-        let Some(block) = graph.skeleton.blocks.get(bid) else {
-            continue;
-        };
-        match &block.term {
-            SkeletonTerminator::Branch { target, .. } => stack.push(*target),
-            SkeletonTerminator::CondBranch {
-                then_target,
-                else_target,
-                ..
-            } => {
-                stack.push(*then_target);
-                stack.push(*else_target);
+    let reachable: LookupSet<BlockId> = wyn_graph::reachable_set(
+        [graph.skeleton.entry],
+        wyn_graph::WalkOrder::DepthFirst,
+        |bid, out| {
+            let Some(block) = graph.skeleton.blocks.get(bid) else {
+                return;
+            };
+            match &block.term {
+                SkeletonTerminator::Branch { target, .. } => out.push(*target),
+                SkeletonTerminator::CondBranch {
+                    then_target,
+                    else_target,
+                    ..
+                } => {
+                    out.push(*then_target);
+                    out.push(*else_target);
+                }
+                SkeletonTerminator::Return(_) | SkeletonTerminator::Unreachable => {}
             }
-            SkeletonTerminator::Return(_) | SkeletonTerminator::Unreachable => {}
-        }
-    }
+        },
+    );
 
     let dead: Vec<BlockId> = graph.skeleton.blocks.keys().filter(|bid| !reachable.contains(bid)).collect();
     if dead.is_empty() {

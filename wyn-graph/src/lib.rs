@@ -9,6 +9,39 @@ use std::hash::Hash;
 
 use thiserror::Error;
 
+/// Which frontier discipline a reachable-node walk should use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WalkOrder {
+    /// First-in, first-out traversal.
+    BreadthFirst,
+    /// Last-in, first-out traversal, matching the common `Vec` stack pattern.
+    DepthFirst,
+}
+
+impl WalkOrder {
+    fn pop<N>(self, pending: &mut VecDeque<N>) -> Option<N> {
+        match self {
+            WalkOrder::BreadthFirst => pending.pop_front(),
+            WalkOrder::DepthFirst => pending.pop_back(),
+        }
+    }
+
+    fn push_all<N: Copy>(self, pending: &mut VecDeque<N>, nodes: &[N]) {
+        pending.extend(nodes.iter().copied());
+    }
+}
+
+/// Control flow returned by a reachable-node visitor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WalkDecision<T = ()> {
+    /// Visit this node's successors.
+    Continue,
+    /// Keep this node in the visited set but do not visit its successors.
+    Prune,
+    /// Stop the traversal and return a value.
+    Break(T),
+}
+
 /// Error returned when a topological traversal finds a cycle.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum TopoError<N> {
@@ -30,6 +63,62 @@ impl<N> TopoError<N> {
     }
 }
 
+/// Walk nodes reachable from `roots`.
+///
+/// The `successors` callback appends outgoing neighbors for a node into the
+/// supplied buffer. Duplicate roots, duplicate edges, and cycles are harmless.
+/// `visit` runs once per discovered node; returning [`WalkDecision::Prune`]
+/// records the node but skips its outgoing edges, and
+/// [`WalkDecision::Break`] returns immediately.
+pub fn walk_reachable<N, I, S, V, T>(
+    roots: I,
+    order: WalkOrder,
+    mut successors: S,
+    mut visit: V,
+) -> Option<T>
+where
+    N: Copy + Eq + Hash,
+    I: IntoIterator<Item = N>,
+    S: FnMut(N, &mut Vec<N>),
+    V: FnMut(N) -> WalkDecision<T>,
+{
+    let mut seen = HashSet::new();
+    let mut pending: VecDeque<N> = roots.into_iter().collect();
+    let mut next = Vec::new();
+
+    while let Some(node) = order.pop(&mut pending) {
+        if !seen.insert(node) {
+            continue;
+        }
+
+        match visit(node) {
+            WalkDecision::Continue => {
+                next.clear();
+                successors(node, &mut next);
+                order.push_all(&mut pending, &next);
+            }
+            WalkDecision::Prune => {}
+            WalkDecision::Break(value) => return Some(value),
+        }
+    }
+
+    None
+}
+
+/// Run a visitor over every reachable node.
+pub fn for_each_reachable<N, I, S, V>(roots: I, order: WalkOrder, successors: S, mut visit: V)
+where
+    N: Copy + Eq + Hash,
+    I: IntoIterator<Item = N>,
+    S: FnMut(N, &mut Vec<N>),
+    V: FnMut(N),
+{
+    let _: Option<()> = walk_reachable(roots, order, successors, |node| {
+        visit(node);
+        WalkDecision::Continue
+    });
+}
+
 /// Return every node reachable from `roots`, in breadth-first discovery order.
 ///
 /// The `successors` callback appends outgoing neighbors for a node into the
@@ -40,23 +129,48 @@ where
     I: IntoIterator<Item = N>,
     F: FnMut(N, &mut Vec<N>),
 {
-    let mut seen = HashSet::new();
-    let mut order = Vec::new();
-    let mut queue: VecDeque<N> = roots.into_iter().collect();
-    let mut next = Vec::new();
+    reachable_from_ordered(roots, WalkOrder::BreadthFirst, |node, out| successors(node, out))
+}
 
-    while let Some(node) = queue.pop_front() {
-        if !seen.insert(node) {
-            continue;
-        }
+/// Return every node reachable from `roots` in the requested traversal order.
+pub fn reachable_from_ordered<N, I, F>(roots: I, order: WalkOrder, successors: F) -> Vec<N>
+where
+    N: Copy + Eq + Hash,
+    I: IntoIterator<Item = N>,
+    F: FnMut(N, &mut Vec<N>),
+{
+    let mut reached = Vec::new();
+    for_each_reachable(roots, order, successors, |node| reached.push(node));
+    reached
+}
 
-        order.push(node);
-        next.clear();
-        successors(node, &mut next);
-        queue.extend(next.iter().copied());
-    }
+/// Return every node reachable from `roots` as a set.
+pub fn reachable_set<N, I, F>(roots: I, order: WalkOrder, successors: F) -> HashSet<N>
+where
+    N: Copy + Eq + Hash,
+    I: IntoIterator<Item = N>,
+    F: FnMut(N, &mut Vec<N>),
+{
+    reachable_from_ordered(roots, order, successors).into_iter().collect()
+}
 
-    order
+/// Return the first mapped value produced while walking reachable nodes.
+pub fn find_map_reachable<N, I, F, V, T>(
+    roots: I,
+    order: WalkOrder,
+    successors: F,
+    mut visit: V,
+) -> Option<T>
+where
+    N: Copy + Eq + Hash,
+    I: IntoIterator<Item = N>,
+    F: FnMut(N, &mut Vec<N>),
+    V: FnMut(N) -> Option<T>,
+{
+    walk_reachable(roots, order, successors, |node| match visit(node) {
+        Some(value) => WalkDecision::Break(value),
+        None => WalkDecision::Continue,
+    })
 }
 
 /// True when `target` is reachable from `start`.
@@ -65,24 +179,26 @@ where
     N: Copy + Eq + Hash,
     F: FnMut(N, &mut Vec<N>),
 {
-    let mut seen = HashSet::new();
-    let mut queue = VecDeque::from([start]);
-    let mut next = Vec::new();
+    reaches_ordered(start, target, WalkOrder::BreadthFirst, |node, out| {
+        successors(node, out);
+    })
+}
 
-    while let Some(node) = queue.pop_front() {
+/// True when `target` is reachable from `start` using the requested traversal
+/// order.
+pub fn reaches_ordered<N, F>(start: N, target: N, order: WalkOrder, successors: F) -> bool
+where
+    N: Copy + Eq + Hash,
+    F: FnMut(N, &mut Vec<N>),
+{
+    walk_reachable([start], order, successors, |node| {
         if node == target {
-            return true;
+            WalkDecision::Break(())
+        } else {
+            WalkDecision::Continue
         }
-        if !seen.insert(node) {
-            continue;
-        }
-
-        next.clear();
-        successors(node, &mut next);
-        queue.extend(next.iter().copied());
-    }
-
-    false
+    })
+    .is_some()
 }
 
 /// Topologically sort a graph where the callback lists outgoing edges.
@@ -178,15 +294,30 @@ impl<N> DominatorTree<N>
 where
     N: Copy + Eq + Hash,
 {
-    /// Build a dominator tree from a root and successor callback.
+    /// Build a dominator tree from a root and successor callback, discovering
+    /// nodes depth-first.
     ///
     /// Unreachable nodes are excluded entirely: they have no immediate
     /// dominator and never appear in preorder traversal.
-    pub fn build<F>(entry: N, mut successors: F) -> Self
+    pub fn build<F>(entry: N, successors: F) -> Self
     where
         F: FnMut(N, &mut Vec<N>),
     {
-        let reachable = reachable_from([entry], |node, out| successors(node, out));
+        Self::build_ordered(entry, WalkOrder::DepthFirst, successors)
+    }
+
+    /// Build a dominator tree, choosing how nodes are discovered.
+    ///
+    /// `order` fixes the order of each node's [`children`](Self::children) and
+    /// hence of [`preorder`](Self::preorder). The tree itself — which node
+    /// dominates which — does not depend on it. Callers that emit code by
+    /// walking the tree see `order` in their output, so it is part of their
+    /// contract rather than an implementation detail.
+    pub fn build_ordered<F>(entry: N, order: WalkOrder, mut successors: F) -> Self
+    where
+        F: FnMut(N, &mut Vec<N>),
+    {
+        let reachable = reachable_from_ordered([entry], order, |node, out| successors(node, out));
         let reachable_set: HashSet<N> = reachable.iter().copied().collect();
 
         let mut predecessors: HashMap<N, Vec<N>> =
@@ -426,6 +557,57 @@ mod tests {
     }
 
     #[test]
+    fn ordered_reachability_supports_stack_order() {
+        fn tree(node: u8, out: &mut Vec<u8>) {
+            match node {
+                0 => out.extend([1, 2]),
+                1 => out.push(3),
+                2 => out.push(4),
+                _ => {}
+            }
+        }
+
+        assert_eq!(
+            reachable_from_ordered([0], WalkOrder::BreadthFirst, tree),
+            vec![0, 1, 2, 3, 4]
+        );
+        assert_eq!(
+            reachable_from_ordered([0], WalkOrder::DepthFirst, tree),
+            vec![0, 2, 4, 1, 3]
+        );
+    }
+
+    #[test]
+    fn traversal_can_prune_or_break() {
+        fn tree(node: u8, out: &mut Vec<u8>) {
+            match node {
+                0 => out.extend([1, 2]),
+                1 => out.push(3),
+                2 => out.push(4),
+                _ => {}
+            }
+        }
+
+        let mut visited = Vec::new();
+        let _: Option<()> = walk_reachable([0], WalkOrder::BreadthFirst, tree, |node| {
+            visited.push(node);
+            if node == 1 {
+                WalkDecision::Prune
+            } else {
+                WalkDecision::Continue
+            }
+        });
+        assert_eq!(visited, vec![0, 1, 2, 4]);
+
+        let found = find_map_reachable([0], WalkOrder::DepthFirst, tree, |node| {
+            (node == 4).then_some(node * 10)
+        });
+        assert_eq!(found, Some(40));
+        assert!(reachable_set([0], WalkOrder::DepthFirst, tree).contains(&3));
+        assert!(reaches_ordered(0, 4, WalkOrder::DepthFirst, tree));
+    }
+
+    #[test]
     fn topological_sort_orders_successors_after_producers() {
         let order = match topo_sort([0, 1, 2, 3], diamond) {
             Ok(order) => order,
@@ -469,7 +651,10 @@ mod tests {
             }
         }
 
-        let err = topo_sort_by_dependencies([0, 1, 2], deps).expect_err("cycle should be detected");
+        let err = match topo_sort_by_dependencies([0, 1, 2], deps) {
+            Ok(order) => panic!("cycle should be detected, got order {order:?}"),
+            Err(err) => err,
+        };
         assert_eq!(err.remaining(), &[0, 1]);
     }
 
@@ -491,10 +676,32 @@ mod tests {
         assert_eq!(tree.idom(2), Some(1));
         assert_eq!(tree.idom(3), Some(1));
         assert_eq!(tree.idom(4), None);
-        assert_eq!(tree.preorder(), &[0, 1, 2, 3]);
+        assert_eq!(tree.preorder(), &[0, 1, 3, 2]);
 
         assert!(tree.dominates(1, 3));
         assert!(!tree.dominates(2, 3));
         assert!(!tree.is_reachable(4));
+    }
+
+    #[test]
+    fn dominator_walk_order_selects_child_and_preorder_order() {
+        // `build` discovers depth-first, so `0`'s successors land in the
+        // reverse of the order the callback lists them.
+        let dfs = DominatorTree::build(0, diamond);
+        assert_eq!(dfs.children(0), &[2, 3, 1]);
+        assert_eq!(dfs.preorder(), &[0, 2, 3, 1]);
+
+        let bfs = DominatorTree::build_ordered(0, WalkOrder::BreadthFirst, diamond);
+        assert_eq!(bfs.children(0), &[1, 2, 3]);
+        assert_eq!(bfs.preorder(), &[0, 1, 2, 3]);
+
+        // Only the ordering moves; domination itself is order-independent.
+        for tree in [&dfs, &bfs] {
+            assert_eq!(tree.idom(1), Some(0));
+            assert_eq!(tree.idom(2), Some(0));
+            assert_eq!(tree.idom(3), Some(0));
+            assert!(tree.dominates(0, 3));
+            assert!(!tree.dominates(1, 3));
+        }
     }
 }

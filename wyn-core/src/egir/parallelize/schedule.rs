@@ -769,17 +769,16 @@ fn entry_resources(entry: &EgirEntry) -> Vec<ScheduledResource> {
     // read. Output/intermediate metadata above upgrades it when it is written.
     for (_, block) in &entry.graph.skeleton.blocks {
         for side_effect in &block.side_effects {
-            let mut seen = HashSet::new();
-            let mut stack = side_effect.referenced_nodes().collect::<Vec<_>>();
-            while let Some(node) = stack.pop() {
-                if !seen.insert(node) {
-                    continue;
-                }
-                if let Some(binding) = graph_ops::extract_storage_view_source(&entry.graph, node) {
-                    insert(binding, ResourceAccess::Read);
-                }
-                stack.extend(entry.graph.nodes[node].children());
-            }
+            wyn_graph::for_each_reachable(
+                side_effect.referenced_nodes(),
+                wyn_graph::WalkOrder::DepthFirst,
+                |node, out| out.extend(entry.graph.nodes[node].children()),
+                |node| {
+                    if let Some(binding) = graph_ops::extract_storage_view_source(&entry.graph, node) {
+                        insert(binding, ResourceAccess::Read);
+                    }
+                },
+            );
         }
     }
 

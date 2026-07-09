@@ -79,17 +79,9 @@ impl SemanticGraph {
         let (Some(&start), Some(&target)) = (self.index.get(a), self.index.get(b)) else {
             return false;
         };
-        let mut seen = HashSet::new();
-        let mut stack = vec![start];
-        while let Some(node) = stack.pop() {
-            if node == target {
-                return true;
-            }
-            if seen.insert(node) {
-                stack.extend(self.value_succ[node].iter().copied());
-            }
-        }
-        false
+        wyn_graph::reaches_ordered(start, target, wyn_graph::WalkOrder::DepthFirst, |node, out| {
+            out.extend(self.value_succ[node].iter().copied());
+        })
     }
 
     /// Number of semantic operations that directly consume `producer`'s

@@ -23,7 +23,6 @@
 //! calls `check` automatically. Release builds skip the check —
 //! production compilation is the same as today.
 
-use crate::LookupSet;
 use polytype::Type;
 
 use crate::ast::TypeName;
@@ -68,38 +67,31 @@ fn check_entry(entry_name: &str, graph: &super::super::types::EGraph) -> Result<
         }
     }
 
-    // BFS over Pure operand edges from each root, checking each
-    // node's type.
-    let mut seen: LookupSet<NodeId> = LookupSet::new();
-    let mut work: Vec<NodeId> = roots;
-    while let Some(nid) = work.pop() {
-        if !seen.insert(nid) {
-            continue;
-        }
-        let node = &graph.nodes[nid];
-        match node {
-            ENode::Pure { operands, .. } => {
-                // Type check.
-                let ty = node_type(graph, nid);
-                if let Some(ty) = ty {
-                    if is_runtime_sized_composite_array(ty) {
-                        return Err(ConvertError::Internal(format!(
-                            "realize_outputs verifier: entry `{}` leaks a \
-                             runtime-sized Composite array at NodeId {:?} \
-                             (type {:?}) reachable from an entry output or \
-                             output-side-effect operand. This would crash \
-                             the SPIR-V backend at codegen; investigate the \
-                             producer of this NodeId.",
-                            entry_name, nid, ty
-                        )));
-                    }
-                }
-                for op in operands {
-                    work.push(*op);
-                }
+    let leaked = wyn_graph::find_map_reachable(
+        roots,
+        wyn_graph::WalkOrder::DepthFirst,
+        |nid, out| {
+            if let ENode::Pure { operands, .. } = &graph.nodes[nid] {
+                out.extend(operands.iter().copied());
             }
-            _ => {}
-        }
+        },
+        |nid| {
+            let ENode::Pure { .. } = &graph.nodes[nid] else {
+                return None;
+            };
+            node_type(graph, nid).filter(|ty| is_runtime_sized_composite_array(ty)).map(|ty| (nid, ty))
+        },
+    );
+    if let Some((nid, ty)) = leaked {
+        return Err(ConvertError::Internal(format!(
+            "realize_outputs verifier: entry `{}` leaks a \
+             runtime-sized Composite array at NodeId {:?} \
+             (type {:?}) reachable from an entry output or \
+             output-side-effect operand. This would crash \
+             the SPIR-V backend at codegen; investigate the \
+             producer of this NodeId.",
+            entry_name, nid, ty
+        )));
     }
     Ok(())
 }

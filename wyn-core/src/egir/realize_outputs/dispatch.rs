@@ -36,30 +36,25 @@ use super::super::types::{
 /// (`realize_outputs::verify`). Nodes outside this set are dead: they have no
 /// runtime effect, so consuming `source` there must not fail a slot.
 fn reachable_from_outputs(graph: &EGraph) -> LookupSet<NodeId> {
-    let mut work: Vec<NodeId> = Vec::new();
+    let mut roots: Vec<NodeId> = Vec::new();
     for (_, block) in &graph.skeleton.blocks {
         if let SkeletonTerminator::Return(Some(r)) = block.term {
-            work.push(r);
+            roots.push(r);
         }
         for se in &block.side_effects {
             // A SOAC's array operands are inputs, not output writes — excluded,
             // matching the verifier. Store operands carry written values.
             match &se.kind {
                 SideEffectKind::Soac(_) => continue,
-                _ => work.extend(se.operand_nodes.iter().copied()),
+                _ => roots.extend(se.operand_nodes.iter().copied()),
             }
         }
     }
-    let mut seen: LookupSet<NodeId> = LookupSet::new();
-    while let Some(nid) = work.pop() {
-        if !seen.insert(nid) {
-            continue;
-        }
+    wyn_graph::reachable_set(roots, wyn_graph::WalkOrder::DepthFirst, |nid, out| {
         if let ENode::Pure { operands, .. } = &graph.nodes[nid] {
-            work.extend(operands.iter().copied());
+            out.extend(operands.iter().copied());
         }
-    }
-    seen
+    })
 }
 
 #[cfg(test)]

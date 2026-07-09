@@ -217,17 +217,9 @@ fn projection_of(graph: &EGraph, node: NodeId, root: NodeId) -> Option<usize> {
 }
 
 fn reaches(graph: &EGraph, start: NodeId, target: NodeId) -> bool {
-    let mut seen = std::collections::HashSet::new();
-    let mut stack = vec![start];
-    while let Some(node) = stack.pop() {
-        if node == target {
-            return true;
-        }
-        if seen.insert(node) {
-            stack.extend(graph.nodes[node].children());
-        }
-    }
-    false
+    wyn_graph::reaches_ordered(start, target, wyn_graph::WalkOrder::DepthFirst, |node, out| {
+        out.extend(graph.nodes[node].children());
+    })
 }
 
 fn producer_is_used_only_by(

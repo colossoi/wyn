@@ -365,26 +365,34 @@ fn dependency_effects(
         .enumerate()
         .filter_map(|(index, effect)| effect.result.map(|result| (result, index)))
         .collect();
-    let mut retained = HashSet::from([root]);
-    let mut effects = vec![root];
-    while let Some(effect_index) = effects.pop() {
-        let mut nodes: Vec<_> = block.side_effects[effect_index].referenced_nodes().collect();
-        let mut visited = HashSet::new();
-        while let Some(node) = nodes.pop() {
-            if !visited.insert(node) {
-                continue;
-            }
-            if let Some(&producer) = producers.get(&node) {
-                if retained.insert(producer) {
-                    effects.push(producer);
-                }
-                continue;
-            }
-            if let Some(definition) = graph.nodes.get(node) {
-                nodes.extend(definition.children());
-            }
-        }
-    }
+    let mut retained = HashSet::new();
+    let _: Option<()> = wyn_graph::walk_reachable(
+        [root],
+        wyn_graph::WalkOrder::DepthFirst,
+        |effect_index, effects| {
+            let _: Option<()> = wyn_graph::walk_reachable(
+                block.side_effects[effect_index].referenced_nodes(),
+                wyn_graph::WalkOrder::DepthFirst,
+                |node, nodes| {
+                    if let Some(definition) = graph.nodes.get(node) {
+                        nodes.extend(definition.children());
+                    }
+                },
+                |node| {
+                    if let Some(&producer) = producers.get(&node) {
+                        effects.push(producer);
+                        wyn_graph::WalkDecision::Prune
+                    } else {
+                        wyn_graph::WalkDecision::Continue
+                    }
+                },
+            );
+        },
+        |effect_index| {
+            retained.insert(effect_index);
+            wyn_graph::WalkDecision::Continue
+        },
+    );
     retained
 }
 
@@ -397,19 +405,20 @@ fn dependency_bindings(
     let mut bindings = HashSet::new();
     for &effect_index in effects {
         let effect = &block.side_effects[effect_index];
-        let mut nodes: Vec<_> = effect.referenced_nodes().collect();
-        let mut visited = HashSet::new();
-        while let Some(node) = nodes.pop() {
-            if !visited.insert(node) {
-                continue;
-            }
-            if let Some(binding) = graph_ops::extract_storage_view_source(graph, node) {
-                bindings.insert(binding);
-            }
-            if let Some(definition) = graph.nodes.get(node) {
-                nodes.extend(definition.children());
-            }
-        }
+        wyn_graph::for_each_reachable(
+            effect.referenced_nodes(),
+            wyn_graph::WalkOrder::DepthFirst,
+            |node, nodes| {
+                if let Some(definition) = graph.nodes.get(node) {
+                    nodes.extend(definition.children());
+                }
+            },
+            |node| {
+                if let Some(binding) = graph_ops::extract_storage_view_source(graph, node) {
+                    bindings.insert(binding);
+                }
+            },
+        );
         match &effect.kind {
             SideEffectKind::Soac(EgirSoac::Seg { resources, .. }) => {
                 bindings.extend(resources.iter().map(|resource| resource.binding));

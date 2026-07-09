@@ -138,12 +138,13 @@ fn collect_graph_dependencies(scope: &str, graph: &EGraph, output: &mut Vec<Sema
 
     for consumer_index in 0..records.len() {
         let consumer = &records[consumer_index];
-        let reachable: std::collections::HashSet<_> =
-            wyn_graph::reachable_from(consumer.effect.referenced_nodes(), |node, dependencies| {
+        let reachable = wyn_graph::reachable_set(
+            consumer.effect.referenced_nodes(),
+            wyn_graph::WalkOrder::DepthFirst,
+            |node, dependencies| {
                 dependencies.extend(graph.nodes[node].children());
-            })
-            .into_iter()
-            .collect();
+            },
+        );
         for producer in &records[..consumer_index] {
             if reachable.contains(&producer.id.result) {
                 push_dependency(output, &producer.id, &consumer.id, SemanticDependencyKind::Value);
@@ -786,19 +787,24 @@ fn side_effect_output_slots(entry: &EgirEntry, se: &SideEffect) -> Vec<usize> {
         return output_slots.clone();
     }
     let mut slots: Vec<usize> = Vec::new();
-    for n in wyn_graph::reachable_from(se.referenced_nodes(), |node, dependencies| {
-        if let Some(node) = entry.graph.nodes.get(node) {
-            dependencies.extend(node.children());
-        }
-    }) {
-        if let Some(br) = graph_ops::extract_storage_view_source(&entry.graph, n) {
-            if let Some(s) = entry.outputs.iter().position(|o| o.storage_binding == Some(br)) {
-                if !slots.contains(&s) {
-                    slots.push(s);
+    wyn_graph::for_each_reachable(
+        se.referenced_nodes(),
+        wyn_graph::WalkOrder::DepthFirst,
+        |node, dependencies| {
+            if let Some(node) = entry.graph.nodes.get(node) {
+                dependencies.extend(node.children());
+            }
+        },
+        |node| {
+            if let Some(br) = graph_ops::extract_storage_view_source(&entry.graph, node) {
+                if let Some(s) = entry.outputs.iter().position(|o| o.storage_binding == Some(br)) {
+                    if !slots.contains(&s) {
+                        slots.push(s);
+                    }
                 }
             }
-        }
-    }
+        },
+    );
     // Scalar/tuple reductions commonly feed a later Store instead of carrying
     // an OutputView operand themselves. Follow those value edges once, at
     // semantic construction time, so output routing remains attached to the
@@ -846,24 +852,29 @@ fn side_effect_output_slots(entry: &EgirEntry, se: &SideEffect) -> Vec<usize> {
 }
 
 fn storage_binding_reachable(graph: &EGraph, start: NodeId) -> Option<BindingRef> {
-    for node in wyn_graph::reachable_from([start], |node, dependencies| {
-        if let Some(node) = graph.nodes.get(node) {
-            dependencies.extend(node.children());
-        }
-    }) {
-        if let Some(binding) = graph_ops::extract_storage_view_source(graph, node) {
-            return Some(binding);
-        }
-    }
-    None
+    wyn_graph::find_map_reachable(
+        [start],
+        wyn_graph::WalkOrder::DepthFirst,
+        |node, dependencies| {
+            if let Some(node) = graph.nodes.get(node) {
+                dependencies.extend(node.children());
+            }
+        },
+        |node| graph_ops::extract_storage_view_source(graph, node),
+    )
 }
 
 fn node_reaches(graph: &EGraph, start: NodeId, target: NodeId) -> bool {
-    wyn_graph::reaches(start, target, |node, dependencies| {
-        if let Some(node) = graph.nodes.get(node) {
-            dependencies.extend(node.children());
-        }
-    })
+    wyn_graph::reaches_ordered(
+        start,
+        target,
+        wyn_graph::WalkOrder::DepthFirst,
+        |node, dependencies| {
+            if let Some(node) = graph.nodes.get(node) {
+                dependencies.extend(node.children());
+            }
+        },
+    )
 }
 
 /// True for a pointwise `SegMap` side-effect (a parallel output domain).
@@ -940,39 +951,34 @@ fn restrict_to_group(
 /// scatter) collapses fully; write-effects and producers still feeding a kept
 /// effect or an output are retained.
 fn prune_dead_side_effects(entry: &mut EgirEntry) {
-    use std::collections::HashSet;
     loop {
         // Live = every node reachable from a side-effect operand or a terminator.
-        let mut live: HashSet<NodeId> = HashSet::new();
-        let mut stack: Vec<NodeId> = Vec::new();
+        let mut roots: Vec<NodeId> = Vec::new();
         for (_, block) in &entry.graph.skeleton.blocks {
             for se in &block.side_effects {
-                stack.extend(se.referenced_nodes());
+                roots.extend(se.referenced_nodes());
             }
             match &block.term {
-                SkeletonTerminator::Return(Some(v)) => stack.push(*v),
-                SkeletonTerminator::Branch { args, .. } => stack.extend(args.iter().copied()),
+                SkeletonTerminator::Return(Some(v)) => roots.push(*v),
+                SkeletonTerminator::Branch { args, .. } => roots.extend(args.iter().copied()),
                 SkeletonTerminator::CondBranch {
                     cond,
                     then_args,
                     else_args,
                     ..
                 } => {
-                    stack.push(*cond);
-                    stack.extend(then_args.iter().copied());
-                    stack.extend(else_args.iter().copied());
+                    roots.push(*cond);
+                    roots.extend(then_args.iter().copied());
+                    roots.extend(else_args.iter().copied());
                 }
                 _ => {}
             }
         }
-        while let Some(n) = stack.pop() {
-            if !live.insert(n) {
-                continue;
-            }
+        let live = wyn_graph::reachable_set(roots, wyn_graph::WalkOrder::DepthFirst, |n, out| {
             if let Some(node) = entry.graph.nodes.get(n) {
-                stack.extend(node.children());
+                out.extend(node.children());
             }
-        }
+        });
 
         let dead = entry.graph.skeleton.blocks.iter().find_map(|(bid, block)| {
             block.side_effects.iter().enumerate().find_map(|(i, se)| {
@@ -1264,24 +1270,19 @@ fn reify_function_filter_spaces(function: &mut EgirFunc) {
 /// terminator or an output `Store`) is an output root and may reify into its
 /// own kernel.
 fn soac_consumed_nodes(entry: &EgirEntry) -> std::collections::HashSet<NodeId> {
-    let mut set: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
-    let mut stack: Vec<NodeId> = Vec::new();
+    let mut roots: Vec<NodeId> = Vec::new();
     for (_, block) in &entry.graph.skeleton.blocks {
         for se in &block.side_effects {
             if matches!(se.kind, SideEffectKind::Soac(_)) {
-                stack.extend(se.referenced_nodes());
+                roots.extend(se.referenced_nodes());
             }
         }
     }
-    while let Some(n) = stack.pop() {
-        if !set.insert(n) {
-            continue;
-        }
+    wyn_graph::reachable_set(roots, wyn_graph::WalkOrder::DepthFirst, |n, out| {
         if let Some(node) = entry.graph.nodes.get(n) {
-            stack.extend(node.children());
+            out.extend(node.children());
         }
-    }
-    set
+    })
 }
 
 fn reify_one_screma(entry: &mut EgirEntry, block_id: BlockId, idx: usize, placement: SegPlacement) {
@@ -1458,17 +1459,16 @@ fn semantic_space_for_graph(
 
 fn semantic_read_resources(graph: &EGraph, se: &SideEffect) -> Vec<SegResourceAccess> {
     let mut bindings = std::collections::HashSet::new();
-    let mut seen = std::collections::HashSet::new();
-    let mut stack = se.referenced_nodes().collect::<Vec<_>>();
-    while let Some(node) = stack.pop() {
-        if !seen.insert(node) {
-            continue;
-        }
-        if let Some(binding) = graph_ops::extract_storage_view_source(graph, node) {
-            bindings.insert(binding);
-        }
-        stack.extend(graph.nodes[node].children());
-    }
+    wyn_graph::for_each_reachable(
+        se.referenced_nodes(),
+        wyn_graph::WalkOrder::DepthFirst,
+        |node, out| out.extend(graph.nodes[node].children()),
+        |node| {
+            if let Some(binding) = graph_ops::extract_storage_view_source(graph, node) {
+                bindings.insert(binding);
+            }
+        },
+    );
     let mut result: Vec<_> = bindings
         .into_iter()
         .map(|binding| SegResourceAccess {
@@ -1506,17 +1506,16 @@ fn semantic_resources(
 ) -> Vec<SegResourceAccess> {
     use std::collections::HashMap;
     let mut accesses: HashMap<BindingRef, SegResourceAccessKind> = HashMap::new();
-    let mut seen = std::collections::HashSet::new();
-    let mut stack = se.referenced_nodes().collect::<Vec<_>>();
-    while let Some(node) = stack.pop() {
-        if !seen.insert(node) {
-            continue;
-        }
-        if let Some(binding) = graph_ops::extract_storage_view_source(&entry.graph, node) {
-            accesses.entry(binding).or_insert(SegResourceAccessKind::Read);
-        }
-        stack.extend(entry.graph.nodes[node].children());
-    }
+    wyn_graph::for_each_reachable(
+        se.referenced_nodes(),
+        wyn_graph::WalkOrder::DepthFirst,
+        |node, out| out.extend(entry.graph.nodes[node].children()),
+        |node| {
+            if let Some(binding) = graph_ops::extract_storage_view_source(&entry.graph, node) {
+                accesses.entry(binding).or_insert(SegResourceAccessKind::Read);
+            }
+        },
+    );
     for &slot in output_slots {
         if let Some(binding) = entry.outputs.get(slot).and_then(|output| output.storage_binding) {
             accesses
@@ -2314,18 +2313,12 @@ fn project_root_index(graph: &super::types::EGraph, value: NodeId, root: NodeId)
 }
 
 fn storage_binding_under(graph: &super::types::EGraph, root: NodeId) -> Option<BindingRef> {
-    let mut seen = std::collections::HashSet::new();
-    let mut stack = vec![root];
-    while let Some(node) = stack.pop() {
-        if !seen.insert(node) {
-            continue;
-        }
-        if let Some(binding) = graph_ops::extract_storage_view_source(graph, node) {
-            return Some(binding);
-        }
-        stack.extend(graph.nodes[node].children());
-    }
-    None
+    wyn_graph::find_map_reachable(
+        [root],
+        wyn_graph::WalkOrder::DepthFirst,
+        |node, out| out.extend(graph.nodes[node].children()),
+        |node| graph_ops::extract_storage_view_source(graph, node),
+    )
 }
 
 /// The scratch a Seg op owns if it will parallel-lower — reduce partials or
