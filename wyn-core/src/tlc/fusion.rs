@@ -98,58 +98,42 @@ fn collect_called_soac_helpers(
 /// 2. Computes function summaries for interprocedural analysis
 /// 3. Classifies producer uses, plans fusion groups, and rewrites them
 /// 4. Repeats until fixpoint
-pub fn run(program: Program) -> Program {
+pub fn run(program: &mut Program) {
     debug_assert!(
-        verify_soac_helpers_inlined(&program).is_ok(),
+        verify_soac_helpers_inlined(program).is_ok(),
         "fusion entered with a SOAC helper behind a call boundary; \
          force-inline (or a pass between it and fusion) failed to expose it: {:?}",
-        verify_soac_helpers_inlined(&program).err(),
+        verify_soac_helpers_inlined(program).err(),
     );
 
     // Normalize: lift SOACs out of nested positions into let bindings
-    let mut program = program;
-    super::normalize::normalize(&mut program);
+    super::normalize::normalize(program);
 
     let mut changed = true;
     while changed {
         changed = false;
 
-        let mut symbols = program.symbols;
-        let def_syms = program.def_syms;
         let mut term_ids = TermIdSource::new();
-
-        let defs = program
-            .defs
-            .into_iter()
-            .map(|def| {
-                // Bottom-up: fuse children first, then try one classified-use
-                // rewrite for this definition. The outer fixpoint reruns the
-                // analysis after each rewrite.
-                let (new_body, did_child_fuse) = fuse_term(def.body, &mut symbols, &mut term_ids);
-                if did_child_fuse {
-                    changed = true;
-                }
-                let (new_body, did_fuse) = fuse_def_body(new_body, &mut symbols, &mut term_ids);
-                if did_fuse {
-                    changed = true;
-                }
-                Def {
-                    body: new_body,
-                    ..def
-                }
-            })
-            .collect();
-
-        program = Program {
-            defs,
-            symbols,
-            def_syms: def_syms.clone(),
-            ..program
-        };
+        crate::map_in_place(&mut program.defs, |def| {
+            // Bottom-up: fuse children first, then try one classified-use
+            // rewrite for this definition. The outer fixpoint reruns the
+            // analysis after each rewrite.
+            let (new_body, did_child_fuse) = fuse_term(def.body, &mut program.symbols, &mut term_ids);
+            if did_child_fuse {
+                changed = true;
+            }
+            let (new_body, did_fuse) = fuse_def_body(new_body, &mut program.symbols, &mut term_ids);
+            if did_fuse {
+                changed = true;
+            }
+            Def {
+                body: new_body,
+                ..def
+            }
+        });
     }
 
-    super::anf::debug_check(&program, "fusion");
-    program
+    super::anf::debug_check(program, "fusion");
 }
 
 // =============================================================================

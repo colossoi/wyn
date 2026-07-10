@@ -376,7 +376,8 @@ fn test_simple_map_fusion() {
         def_syms: HashMap::new(),
     };
 
-    let fused = run(program);
+    let mut fused = program;
+    run(&mut fused);
 
     // Fusion eliminated the intermediate `b`: the two maps collapse to a single
     // SOAC region reading the original input `a` — regardless of whether that
@@ -474,7 +475,8 @@ fn test_horizontal_sibling_maps_merge_to_multi_output_screma() {
         def_syms: HashMap::new(),
     };
 
-    let fused = run(program);
+    let mut fused = program;
+    run(&mut fused);
 
     let TermKind::Let {
         name: merged_sym,
@@ -627,7 +629,8 @@ fn test_horizontal_sibling_maps_keep_different_inputs_separate() {
         def_syms: HashMap::new(),
     };
 
-    let fused = run(program);
+    let mut fused = program;
+    run(&mut fused);
     let TermKind::Let { name, rhs, body, .. } = &fused.defs[0].body.kind else {
         panic!("expected original outer let");
     };
@@ -753,7 +756,8 @@ fn test_horizontal_sibling_maps_merge_same_input_vector() {
         def_syms: HashMap::new(),
     };
 
-    let fused = run(program);
+    let mut fused = program;
+    run(&mut fused);
     let TermKind::Let { rhs: merged_rhs, .. } = &fused.defs[0].body.kind else {
         panic!("expected merged map let");
     };
@@ -885,7 +889,8 @@ fn test_horizontal_sibling_maps_enable_shared_producer_vertical_fusion() {
         def_syms: HashMap::new(),
     };
 
-    let fused = run(program);
+    let mut fused = program;
+    run(&mut fused);
     let TermKind::Let {
         name: merged_sym,
         rhs: merged_rhs,
@@ -1035,7 +1040,8 @@ fn test_screma_fuses_shared_map_producer_into_map_and_reduce() {
         def_syms: HashMap::new(),
     };
 
-    let fused = run(program);
+    let mut fused = program;
+    run(&mut fused);
     let TermKind::Let {
         name: screma_sym,
         rhs: screma_rhs,
@@ -1180,7 +1186,8 @@ fn test_screma_fuses_shared_map_producer_into_map_and_scan() {
         def_syms: HashMap::new(),
     };
 
-    let fused = run(program);
+    let mut fused = program;
+    run(&mut fused);
     let TermKind::Let {
         rhs: screma_rhs,
         body: c_let,
@@ -1346,7 +1353,8 @@ fn test_screma_fuses_across_independent_let() {
         def_syms: HashMap::new(),
     };
 
-    let fused = run(program);
+    let mut fused = program;
+    run(&mut fused);
     let TermKind::Let {
         rhs: screma_rhs,
         body: k_let,
@@ -1496,7 +1504,8 @@ fn test_screma_rejects_dependent_sibling() {
         def_syms: HashMap::new(),
     };
 
-    let fused = run(program);
+    let mut fused = program;
+    run(&mut fused);
     assert!(!contains_screma(&fused.defs[0].body));
 }
 
@@ -1665,7 +1674,8 @@ fn test_screma_rejects_unsupported_filter_consumer() {
         def_syms: HashMap::new(),
     };
 
-    let fused = run(program);
+    let mut fused = program;
+    run(&mut fused);
     assert!(!contains_screma(&fused.defs[0].body));
 }
 
@@ -1823,7 +1833,8 @@ fn test_screma_rejects_different_producers() {
         def_syms: HashMap::new(),
     };
 
-    let fused = run(program);
+    let mut fused = program;
+    run(&mut fused);
     // Vertical fusions are fine and expected (`c = map(g, b)` composes with its
     // producer `b`; `d = reduce(op, 0, e)` folds its producer `e`). What must NOT
     // happen is a *horizontal* merge of the two distinct producers (the
@@ -1968,7 +1979,8 @@ fn test_screma_rejects_tail_use_of_producer() {
         def_syms: HashMap::new(),
     };
 
-    let fused = run(program);
+    let mut fused = program;
+    run(&mut fused);
     assert!(!contains_screma(&fused.defs[0].body));
 }
 
@@ -2035,7 +2047,8 @@ fn test_filter_into_reduce_fuses_to_masked_screma() {
         def_syms: HashMap::new(),
     };
 
-    let fused = run(program);
+    let mut fused = program;
+    run(&mut fused);
 
     assert!(!contains_filter(&fused.defs[0].body));
     match find_first_screma(&fused.defs[0].body).expect("expected fused Screma") {
@@ -2171,7 +2184,7 @@ fn test_filter_into_reduce_and_length_fuses_to_one_screma() {
         &mut term_ids,
     );
 
-    let fused = run(Program {
+    let mut fused = Program {
         defs: vec![Def {
             name: symbols.alloc("main".to_string()),
             ty: tuple_ty,
@@ -2183,7 +2196,8 @@ fn test_filter_into_reduce_and_length_fuses_to_one_screma() {
         }],
         symbols,
         def_syms: HashMap::new(),
-    });
+    };
+    run(&mut fused);
 
     assert!(!contains_filter(&fused.defs[0].body));
     match find_first_screma(&fused.defs[0].body).expect("expected filtered Screma") {
@@ -2336,7 +2350,7 @@ fn test_filter_multiple_reduces_and_lengths_reuses_one_count_accumulator() {
         &mut term_ids,
     );
 
-    let fused = run(Program {
+    let mut fused = Program {
         defs: vec![Def {
             name: symbols.alloc("main".to_string()),
             ty: tuple_ty,
@@ -2348,7 +2362,8 @@ fn test_filter_multiple_reduces_and_lengths_reuses_one_count_accumulator() {
         }],
         symbols,
         def_syms: HashMap::new(),
-    });
+    };
+    run(&mut fused);
 
     match find_first_screma(&fused.defs[0].body).expect("expected filtered Screma") {
         SoacOp::Screma { accumulators, .. } => assert_eq!(accumulators.len(), 3),
@@ -2474,7 +2489,7 @@ fn test_filter_count_field_is_last_when_length_precedes_reduce() {
         &mut term_ids,
     );
 
-    let fused = run(Program {
+    let mut fused = Program {
         defs: vec![Def {
             name: symbols.alloc("main".to_string()),
             ty: tuple_ty,
@@ -2486,7 +2501,8 @@ fn test_filter_count_field_is_last_when_length_precedes_reduce() {
         }],
         symbols,
         def_syms: HashMap::new(),
-    });
+    };
+    run(&mut fused);
 
     assert!(!contains_filter(&fused.defs[0].body));
     match find_first_screma(&fused.defs[0].body).expect("expected filtered Screma") {
@@ -2576,7 +2592,7 @@ fn test_filter_whole_tail_length_rewrites_in_place() {
         &mut term_ids,
     );
 
-    let fused = run(Program {
+    let mut fused = Program {
         defs: vec![Def {
             name: symbols.alloc("main".to_string()),
             ty: i32_ty(),
@@ -2588,7 +2604,8 @@ fn test_filter_whole_tail_length_rewrites_in_place() {
         }],
         symbols,
         def_syms: HashMap::new(),
-    });
+    };
+    run(&mut fused);
 
     assert!(!contains_filter(&fused.defs[0].body));
     // Both the reduce and the whole-tail length folded in: the filter and the
@@ -2653,7 +2670,7 @@ fn test_filter_into_length_only_fuses_to_count_screma() {
         &mut term_ids,
     );
 
-    let fused = run(Program {
+    let mut fused = Program {
         defs: vec![Def {
             name: symbols.alloc("main".to_string()),
             ty: i32_ty(),
@@ -2665,7 +2682,8 @@ fn test_filter_into_length_only_fuses_to_count_screma() {
         }],
         symbols,
         def_syms: HashMap::new(),
-    });
+    };
+    run(&mut fused);
 
     assert!(!contains_filter(&fused.defs[0].body));
     match find_first_screma(&fused.defs[0].body).expect("expected count Screma") {
@@ -2747,7 +2765,7 @@ fn test_filter_escape_blocks_scalar_fusion() {
         &mut term_ids,
     );
 
-    let fused = run(Program {
+    let mut fused = Program {
         defs: vec![Def {
             name: symbols.alloc("main".to_string()),
             ty: tuple_ty,
@@ -2759,7 +2777,8 @@ fn test_filter_escape_blocks_scalar_fusion() {
         }],
         symbols,
         def_syms: HashMap::new(),
-    });
+    };
+    run(&mut fused);
 
     assert!(contains_filter(&fused.defs[0].body));
     assert!(!contains_screma(&fused.defs[0].body));
@@ -2834,7 +2853,7 @@ fn test_shadowed_filter_symbol_inside_lambda_is_not_an_escape() {
         &mut term_ids,
     );
 
-    let fused = run(Program {
+    let mut fused = Program {
         defs: vec![Def {
             name: symbols.alloc("main".to_string()),
             ty: i32_ty(),
@@ -2846,7 +2865,8 @@ fn test_shadowed_filter_symbol_inside_lambda_is_not_an_escape() {
         }],
         symbols,
         def_syms: HashMap::new(),
-    });
+    };
+    run(&mut fused);
 
     assert!(!contains_filter(&fused.defs[0].body));
     assert!(contains_screma(&fused.defs[0].body));
@@ -2945,7 +2965,8 @@ fn test_chain_of_three_maps() {
         def_syms: HashMap::new(),
     };
 
-    let fused = run(program);
+    let mut fused = program;
+    run(&mut fused);
 
     // All three maps collapse to one SOAC region reading the original input `a`.
     let body = &fused.defs[0].body;
@@ -3044,7 +3065,8 @@ fn test_multi_use_no_fusion() {
         def_syms: HashMap::new(),
     };
 
-    let result = run(program);
+    let mut result = program;
+    run(&mut result);
 
     // Should still be a Let (no fusion because b is used twice)
     assert!(matches!(&result.defs[0].body.kind, TermKind::Let { .. }));
@@ -3141,7 +3163,8 @@ fn test_zip_fused_producer() {
         def_syms: HashMap::new(),
     };
 
-    let fused = run(program);
+    let mut fused = program;
+    run(&mut fused);
 
     // map over a zip fuses to one region that preserves both source inputs.
     let body = &fused.defs[0].body;
@@ -3239,7 +3262,8 @@ fn test_consumer_multi_input_no_fusion() {
         def_syms: HashMap::new(),
     };
 
-    let result = run(program);
+    let mut result = program;
+    run(&mut result);
 
     // Should NOT fuse — consumer has multiple inputs
     assert!(matches!(&result.defs[0].body.kind, TermKind::Let { .. }));
@@ -3316,7 +3340,8 @@ fn test_raytrace_step1_local_map_reduce() {
         def_syms: HashMap::new(),
     };
 
-    let fused = run(program);
+    let mut fused = program;
+    run(&mut fused);
     let (op, inputs) = as_fused_map_reduce(&fused.defs[0].body);
     assert_eq!(inputs.len(), 1);
     match &inputs[0] {
@@ -3414,7 +3439,8 @@ fn test_map_into_scatter_fuses() {
         def_syms: HashMap::new(),
     };
 
-    let fused = run(program);
+    let mut fused = program;
+    run(&mut fused);
 
     match &fused.defs[0].body.kind {
         TermKind::Soac(SoacOp::Scatter { lam, inputs, .. }) => {
@@ -3561,7 +3587,8 @@ fn test_map_scatter_both_producers_fuse() {
         def_syms: HashMap::new(),
     };
 
-    let fused = run(program);
+    let mut fused = program;
+    run(&mut fused);
 
     match &fused.defs[0].body.kind {
         TermKind::Soac(SoacOp::Scatter { lam, inputs, .. }) => {
