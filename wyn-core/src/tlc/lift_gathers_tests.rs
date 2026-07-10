@@ -293,9 +293,9 @@ entry gen(bh: []vec4f32) ([]i32, []i32) =
      map(|i:i32| counts[i % 256], iota(6144)),
    iota(100))
 ";
-    let program = pre_residency(src);
-    let normalized = crate::tlc::normalize_outputs::run(program).expect("normalize_outputs");
-    let lifted = super::run(normalized, &mut crate::IdSource::<u32>::new());
+    let mut program = pre_residency(src);
+    crate::tlc::normalize_outputs::run(&mut program).expect("normalize_outputs");
+    let lifted = super::run(program, &mut crate::IdSource::<u32>::new());
     assert!(
         has_gather_prepass(&lifted),
         "gather producer inside an OutputSlotStore.value must still be lifted"

@@ -978,7 +978,7 @@ impl TlcOwnershipApplied {
     /// pre-slot-store form.
     pub fn normalize_outputs(self) -> Result<TlcOutputsNormalized> {
         let mut inner = self.0;
-        inner.tlc = tlc::normalize_outputs::run(inner.tlc)
+        tlc::normalize_outputs::run(&mut inner.tlc)
             .map_err(|e| crate::error::CompilerError::NormalizeOutputsError(format!("{e}"), None))?;
         Ok(TlcOutputsNormalized(inner))
     }

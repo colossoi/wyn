@@ -69,7 +69,7 @@ impl std::fmt::Display for NormalizeError {
 
 impl std::error::Error for NormalizeError {}
 
-pub fn run(mut program: Program) -> Result<Program, NormalizeError> {
+pub fn run(program: &mut Program) -> Result<(), NormalizeError> {
     let mut term_ids = TermIdSource::new();
     let entry_indices: Vec<usize> = program
         .defs
@@ -81,11 +81,11 @@ pub fn run(mut program: Program) -> Result<Program, NormalizeError> {
         })
         .collect();
 
-    let Program { defs, symbols, .. } = &mut program;
+    let Program { defs, symbols, .. } = program;
     for idx in entry_indices {
         normalize_entry(&mut defs[idx], &mut term_ids, symbols)?;
     }
-    Ok(program)
+    Ok(())
 }
 
 /// The tuple arity reachable by peeling existential / uniqueness markers off a
