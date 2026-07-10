@@ -10,6 +10,7 @@ pub mod patterns;
 pub mod run;
 
 use crate::LookupMap;
+use std::hash::{Hash, Hasher};
 
 /// Map a swizzle letter to its component index. Supports both the
 /// `xyzw` (position) and `rgba` (color) sets, following WGSL — `r`/`g`/
@@ -72,7 +73,7 @@ pub type TypeScheme = polytype::TypeScheme<TypeName>;
 
 /// Record field names that preserve source order but have order-independent equality.
 /// The actual field types are stored in Type::Constructed's type argument vector.
-#[derive(Debug, Clone, Hash)]
+#[derive(Debug, Clone)]
 pub struct RecordFields(pub Vec<String>);
 
 impl RecordFields {
@@ -119,20 +120,27 @@ impl FromIterator<String> for RecordFields {
 
 impl PartialEq for RecordFields {
     fn eq(&self, other: &Self) -> bool {
-        // Order-independent equality: check same field names exist
         if self.0.len() != other.0.len() {
             return false;
         }
-        for name in &self.0 {
-            if !other.0.contains(name) {
-                return false;
-            }
-        }
-        true
+
+        let mut self_fields: Vec<&str> = self.0.iter().map(String::as_str).collect();
+        let mut other_fields: Vec<&str> = other.0.iter().map(String::as_str).collect();
+        self_fields.sort_unstable();
+        other_fields.sort_unstable();
+        self_fields == other_fields
     }
 }
 
 impl Eq for RecordFields {}
+
+impl Hash for RecordFields {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let mut fields: Vec<&str> = self.0.iter().map(String::as_str).collect();
+        fields.sort_unstable();
+        fields.hash(state);
+    }
+}
 
 /// Unique identifier for skolem constants.
 /// Skolems are created when opening existential types and are rigid (only unify with themselves).
@@ -1473,6 +1481,8 @@ pub fn format_scheme(scheme: &TypeScheme) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
 
     fn i32_ty() -> Type {
         Type::Constructed(TypeName::Int(32), vec![])
@@ -1482,6 +1492,27 @@ mod tests {
     }
     fn arrow(a: Type, b: Type) -> Type {
         Type::Constructed(TypeName::Arrow, vec![a, b])
+    }
+
+    fn hash_value<T: Hash>(value: &T) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        value.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    #[test]
+    fn record_fields_hash_matches_order_independent_equality() {
+        let left = RecordFields::new(vec!["x".to_string(), "y".to_string()]);
+        let right = RecordFields::new(vec!["y".to_string(), "x".to_string()]);
+
+        assert_eq!(left, right);
+        assert_eq!(hash_value(&left), hash_value(&right));
+
+        let duplicate = RecordFields::new(vec!["x".to_string(), "x".to_string()]);
+        let distinct = RecordFields::new(vec!["x".to_string(), "y".to_string()]);
+
+        assert_ne!(duplicate, distinct);
+        assert_ne!(distinct, duplicate);
     }
 
     #[test]
