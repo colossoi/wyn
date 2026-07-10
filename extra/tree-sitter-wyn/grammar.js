@@ -291,7 +291,7 @@ module.exports = grammar({
     // or a module-expression application.
     open_declaration: $ => seq(
       'open',
-      field('module', $.qualified_name),
+      field('module', choice($.identifier, $.qualified_name)),
     ),
 
     import_declaration: $ => seq(

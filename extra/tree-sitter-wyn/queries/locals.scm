@@ -10,6 +10,8 @@
 
 (entry_declaration) @local.scope
 
+(extern_declaration) @local.scope
+
 (let_expression) @local.scope
 
 (lambda_expression) @local.scope
@@ -29,16 +31,46 @@
 (def_declaration
   name: (identifier) @local.definition)
 
+(binding_declaration
+  name: (identifier) @local.definition)
+
+(extern_declaration
+  name: (identifier) @local.definition)
+
 (entry_declaration
+  name: (identifier) @local.definition)
+
+(sig_declaration
   name: (identifier) @local.definition)
 
 (type_declaration
   name: (identifier) @local.definition)
 
+(module_declaration
+  name: (identifier) @local.definition)
+
+(module_type_declaration
+  name: (identifier) @local.definition)
+
+(functor_declaration
+  name: (identifier) @local.definition)
+
 (param
-  name: (pattern) @local.definition)
+  name: (identifier) @local.definition)
+
+(extern_param
+  name: (identifier) @local.definition)
+
+(functor_param
+  name: (identifier) @local.definition)
+
+(size_param
+  (identifier) @local.definition)
 
 (let_expression
+  pattern: (identifier) @local.definition)
+
+(loop_expression
   pattern: (identifier) @local.definition)
 
 (for_loop
@@ -47,8 +79,10 @@
 (for_in_loop
   pattern: (identifier) @local.definition)
 
-(lambda_param
-  pattern: (identifier) @local.definition)
+(lambda_expression
+  "|"
+  (identifier) @local.definition
+  "|")
 
 (case_clause
   pattern: (identifier) @local.definition)
