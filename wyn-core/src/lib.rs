@@ -675,7 +675,7 @@ impl TlcOwnershipValidated {
     /// Constant folding and algebraic simplifications.
     pub fn partial_eval(self) -> TlcPartialEvaled {
         let mut inner = self.0;
-        inner.tlc = tlc::partial_eval::PartialEvaluator::partial_eval(inner.tlc);
+        tlc::partial_eval::PartialEvaluator::partial_eval(&mut inner.tlc);
         TlcPartialEvaled(inner)
     }
 }

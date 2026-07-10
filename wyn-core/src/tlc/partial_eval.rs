@@ -9,7 +9,7 @@ use crate::ast::{BinaryOp, Span, TypeName, UnaryOp};
 use crate::types::TypeExt;
 use crate::LookupMap;
 use crate::LookupSet;
-use crate::{SymbolId, SymbolTable};
+use crate::SymbolId;
 use polytype::Type;
 
 // =============================================================================
@@ -53,8 +53,6 @@ impl Value {
 // =============================================================================
 
 pub struct PartialEvaluator {
-    /// Symbol table for name lookup
-    symbols: SymbolTable,
     /// Function definitions with their arities
     defs: LookupMap<SymbolId, Def>,
     /// Term ID source for generating new terms
@@ -64,32 +62,21 @@ pub struct PartialEvaluator {
 }
 
 impl PartialEvaluator {
-    pub fn partial_eval(program: Program) -> Program {
+    pub fn partial_eval(program: &mut Program) {
         program.assert_flat_apps();
         let mut eval = Self {
-            symbols: program.symbols,
             defs: program.defs.iter().map(|d| (d.name, d.clone())).collect(),
             term_ids: TermIdSource::new(),
             env: LookupMap::new(),
         };
 
-        let defs = program
-            .defs
-            .into_iter()
-            .map(|def| {
-                let body_val = eval.eval(&def.body);
-                let body = eval.reify(body_val, &def.body.ty, def.body.span);
-                Def { body, ..def }
-            })
-            .collect();
+        crate::map_in_place(&mut program.defs, |def| {
+            let body_val = eval.eval(&def.body);
+            let body = eval.reify(body_val, &def.body.ty, def.body.span);
+            Def { body, ..def }
+        });
 
-        let result = Program {
-            defs,
-            symbols: eval.symbols,
-            ..program
-        };
-        result.assert_flat_apps();
-        result
+        program.assert_flat_apps();
     }
 
     /// Evaluate a term to a Value.
