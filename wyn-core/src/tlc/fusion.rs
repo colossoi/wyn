@@ -107,7 +107,8 @@ pub fn run(program: Program) -> Program {
     );
 
     // Normalize: lift SOACs out of nested positions into let bindings
-    let mut program = super::normalize::normalize(program);
+    let mut program = program;
+    super::normalize::normalize(&mut program);
 
     let mut changed = true;
     while changed {

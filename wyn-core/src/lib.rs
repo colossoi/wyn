@@ -183,6 +183,20 @@ pub fn symbol_name_or_bug(symbols: &SymbolTable, sym: SymbolId) -> &str {
     })
 }
 
+/// Run a by-value transform over every element of a collection, in place.
+/// Each element is owned while it passes through `f`, so `f` can move,
+/// destructure, and rebuild it freely — the idiom for tree-restructuring
+/// passes whose walkers are `Term -> Term`. The collection is empty only
+/// for the duration of the call (`mem::take` leaves its `Default`).
+pub fn map_in_place<C, T, F>(collection: &mut C, f: F)
+where
+    C: Default + Extend<T> + IntoIterator<Item = T>,
+    F: FnMut(T) -> T,
+{
+    let items = std::mem::take(collection);
+    collection.extend(items.into_iter().map(f));
+}
+
 /// Arena that allocates IDs and stores associated items.
 ///
 /// Combines ID generation with storage, ensuring each item gets a unique ID.

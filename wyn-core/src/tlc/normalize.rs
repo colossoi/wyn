@@ -30,30 +30,19 @@ use super::{Def, Program, Term, TermIdSource, TermKind};
 mod normalize_tests;
 
 /// Normalize a TLC program into ANF-ish form for fusion analysis.
-pub fn normalize(program: Program) -> Program {
-    let mut symbols = program.symbols;
+pub fn normalize(program: &mut Program) {
     let mut term_ids = TermIdSource::new();
 
-    let defs = program
-        .defs
-        .into_iter()
-        .map(|def| {
-            let body = normalize_term(def.body, &mut symbols, &mut term_ids);
-            Def { body, ..def }
-        })
-        .collect();
+    crate::map_in_place(&mut program.defs, |def| {
+        let body = normalize_term(def.body, &mut program.symbols, &mut term_ids);
+        Def { body, ..def }
+    });
 
-    let result = Program {
-        defs,
-        symbols,
-        ..program
-    };
     debug_assert!(
-        verify_flattened(&result).is_ok(),
+        verify_flattened(program).is_ok(),
         "normalize postcondition: {}",
-        verify_flattened(&result).unwrap_err()
+        verify_flattened(program).unwrap_err()
     );
-    result
 }
 
 /// `debug_assert` the flat-chain invariant at a pass boundary (no-op in
