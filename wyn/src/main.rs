@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use log::info;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 use thiserror::Error;
@@ -112,6 +112,45 @@ enum DriverError {
     // so render it directly rather than force one prefix onto every variant.
     #[error("{0}")]
     EgirConversionError(#[from] wyn_core::egir::from_tlc::ConvertError),
+}
+
+struct FrontendFile {
+    type_checked: wyn_core::TypeChecked,
+    module_manager: wyn_core::module_manager::ModuleManager,
+}
+
+fn type_check_frontend_file(
+    input: &Path,
+    reject_holes: bool,
+    verbose: bool,
+) -> Result<FrontendFile, DriverError> {
+    let source = fs::read_to_string(input)?;
+    let (mut node_counter, mut module_manager) = time("frontend", verbose, wyn_core::init_compiler);
+    let parsed = time("parse", verbose, || Compiler::parse(&source, &mut node_counter))?;
+    // Resolve `import "..."` against the entry file's directory so
+    // user code can split across files. Imports are looked up
+    // relative to the file containing the import statement.
+    let base_dir = input.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
+    let parsed = time("resolve_imports", verbose, || {
+        parsed.resolve_imports(&base_dir, &mut node_counter)
+    })?;
+    // Elaborate inline modules so they're available during resolution.
+    let parsed = time("elaborate_modules", verbose, || {
+        parsed.elaborate_modules(&mut module_manager, &mut node_counter)
+    })?;
+    let resolved = time("resolve", verbose, || parsed.resolve(&module_manager))?;
+    let ast_folded = time("fold_ast_constants", verbose, || resolved.fold_ast_constants());
+    let type_checked = time("type_check", verbose, || {
+        ast_folded.type_check(&mut module_manager)
+    })?;
+
+    type_checked.print_warnings();
+    let type_checked = if reject_holes { type_checked.reject_type_holes()? } else { type_checked };
+
+    Ok(FrontendFile {
+        type_checked,
+        module_manager,
+    })
 }
 
 fn main() -> ExitCode {
@@ -231,35 +270,10 @@ fn compile_file(
     // Wall-clock start for the always-printed timing summary below.
     let compile_start = Instant::now();
 
-    // Read source file
-    let source = fs::read_to_string(&input)?;
-
-    let (mut node_counter, mut module_manager) = time("frontend", verbose, wyn_core::init_compiler);
-    let parsed = time("parse", verbose, || Compiler::parse(&source, &mut node_counter))?;
-    // Resolve `import "..."` against the entry file's directory so
-    // user code can split across files. Imports are looked up
-    // relative to the file containing the import statement.
-    let base_dir = input.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
-    let parsed = time("resolve_imports", verbose, || {
-        parsed.resolve_imports(&base_dir, &mut node_counter)
-    })?;
-    // Elaborate inline modules so they're available during resolution
-    let parsed = time("elaborate_modules", verbose, || {
-        parsed.elaborate_modules(&mut module_manager, &mut node_counter)
-    })?;
-    let resolved = time("resolve", verbose, || parsed.resolve(&module_manager))?;
-    let ast_folded = time("fold_ast_constants", verbose, || resolved.fold_ast_constants());
-    let type_checked = time("type_check", verbose, || {
-        ast_folded.type_check(&mut module_manager)
-    })?;
-
-    type_checked.print_warnings();
-    let type_checked = if fill_holes {
-        // `--fill-holes`: skip the hole-gate; TLC will default-fill.
-        type_checked
-    } else {
-        type_checked.reject_type_holes()?
-    };
+    let FrontendFile {
+        type_checked,
+        module_manager,
+    } = type_check_frontend_file(&input, !fill_holes, verbose)?;
 
     // Transform to TLC (including prelude code - transformed here for consistent type variables)
     let tlc_transformed = time("to_tlc", verbose, || {
@@ -432,18 +446,10 @@ fn check_file(input: PathBuf, verbose: bool) -> Result<(), DriverError> {
         info!("Checking {}...", input.display());
     }
 
-    // Read source file
-    let source = fs::read_to_string(&input)?;
-
-    // Type check and alias check, don't generate code
-    let (mut node_counter, mut module_manager) = wyn_core::init_compiler();
-    let parsed = Compiler::parse(&source, &mut node_counter)?;
-    let base_dir = input.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
-    let parsed = parsed.resolve_imports(&base_dir, &mut node_counter)?;
-    let resolved = parsed.resolve(&module_manager)?;
-    let type_checked = resolved.fold_ast_constants().type_check(&mut module_manager)?;
-
-    type_checked.print_warnings();
+    let FrontendFile {
+        type_checked,
+        module_manager,
+    } = type_check_frontend_file(&input, true, verbose)?;
 
     type_checked.to_tlc(&module_manager, false).pin_entry_buffers()?.validate_ownership()?;
 
