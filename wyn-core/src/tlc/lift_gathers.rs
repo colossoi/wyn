@@ -42,7 +42,7 @@ use polytype::Type;
 
 /// Lift every randomly-indexed computed array out of each compute entry into
 /// a gather pre-pass + a `storage_index` read.
-pub fn run(mut program: Program, binding_ids: &mut crate::IdSource<u32>) -> Program {
+pub fn run(program: &mut Program, binding_ids: &mut crate::IdSource<u32>) {
     let entry_indices: Vec<usize> = program
         .defs
         .iter()
@@ -55,11 +55,10 @@ pub fn run(mut program: Program, binding_ids: &mut crate::IdSource<u32>) -> Prog
 
     let mut new_defs: Vec<Def> = Vec::new();
     for idx in entry_indices {
-        lift_entry(&mut program, idx, &mut new_defs, binding_ids);
+        lift_entry(program, idx, &mut new_defs, binding_ids);
     }
     program.defs.extend(new_defs);
-    super::anf::debug_check(&program, "lift_gathers");
-    program
+    super::anf::debug_check(program, "lift_gathers");
 }
 
 /// Lift gather sites out of a single compute entry at `program.defs[idx]`.

@@ -970,7 +970,7 @@ impl TlcRuntimeIndexProducersFloated {
     /// are still in the same pre-defunctionalization term.
     pub fn plan_execute_gather_residency(self) -> TlcGathersLifted {
         let mut inner = self.0;
-        inner.tlc = tlc::lift_gathers::run(inner.tlc, &mut inner.auto_storage_binding_ids);
+        tlc::lift_gathers::run(&mut inner.tlc, &mut inner.auto_storage_binding_ids);
         TlcGathersLifted(inner)
     }
 }

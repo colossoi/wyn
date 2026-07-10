@@ -65,7 +65,8 @@ fn lifts_map_gather_into_prepass_and_storage_index() {
         "precondition: the consumer starts with a map-producing `let counts`"
     );
 
-    let lifted = super::run(program, &mut crate::IdSource::<u32>::new());
+    let mut lifted = program;
+    super::run(&mut lifted, &mut crate::IdSource::<u32>::new());
     let storage_index = catalog().known().storage_index;
 
     // The producer map became its own compute pre-pass with an Output decl.
@@ -132,7 +133,8 @@ entry g(xs: []i32) []i32 =
   let o = scan(|a:i32,b:i32| a+b, 0, xs) in
   map(|i:i32| o[i % 256], iota(6144))
 ";
-    let lifted = super::run(pre_residency(src), &mut crate::IdSource::<u32>::new());
+    let mut lifted = pre_residency(src);
+    super::run(&mut lifted, &mut crate::IdSource::<u32>::new());
     assert!(
         has_gather_prepass(&lifted),
         "scan over an input array must be lifted into a gather pre-pass"
@@ -152,7 +154,8 @@ entry gen(bh: []vec4f32) []i32 =
   let offsets = scan(|a:i32,b:i32| a+b, 0, counts) in
   map(|i:i32| offsets[i % 256], iota(6144))
 ";
-    let lifted = super::run(pre_residency(src), &mut crate::IdSource::<u32>::new());
+    let mut lifted = pre_residency(src);
+    super::run(&mut lifted, &mut crate::IdSource::<u32>::new());
     assert!(
         has_gather_prepass(&lifted),
         "a scan over a (map-fused) computed array must be lifted into a gather pre-pass"
@@ -174,7 +177,8 @@ entry gen(xs: []i32) []i32 =
   let outer = scan(|a:i32,b:i32| a*b, 1, mid) in
   map(|i:i32| outer[i % 256], iota(6144))
 ";
-    let lifted = super::run(pre_residency(src), &mut crate::IdSource::<u32>::new());
+    let mut lifted = pre_residency(src);
+    super::run(&mut lifted, &mut crate::IdSource::<u32>::new());
     let prepasses = lifted
         .defs
         .iter()
@@ -203,7 +207,8 @@ entry gen(bh: []vec4f32) []i32 =
       map(|i:i32| s1[i % 256], iota(6144))) in
   map(|i:i32| s2[i % 128], iota(2048))
 ";
-    let lifted = super::run(pre_residency(src), &mut crate::IdSource::<u32>::new());
+    let mut lifted = pre_residency(src);
+    super::run(&mut lifted, &mut crate::IdSource::<u32>::new());
     let prepasses = lifted
         .defs
         .iter()
@@ -236,7 +241,8 @@ entry gen(xs: []i32) []i32 =
   let n: i32 = length(counts) in
   map(|i: i32| counts[i % 256] + n, iota(6144))
 ";
-    let lifted = super::run(pre_residency(src), &mut crate::IdSource::<u32>::new());
+    let mut lifted = pre_residency(src);
+    super::run(&mut lifted, &mut crate::IdSource::<u32>::new());
     assert!(
         !has_gather_prepass(&lifted),
         "a bare Var(counts) in a non-materializable position must trip the bail \
@@ -260,7 +266,8 @@ entry gen(bh: []i32) []i32 =
 ";
     let program = pre_residency(src);
     let n_before = program.defs.len();
-    let lifted = super::run(program, &mut crate::IdSource::<u32>::new());
+    let mut lifted = program;
+    super::run(&mut lifted, &mut crate::IdSource::<u32>::new());
     assert_eq!(
         lifted.defs.len(),
         n_before,
@@ -295,7 +302,8 @@ entry gen(bh: []vec4f32) ([]i32, []i32) =
 ";
     let mut program = pre_residency(src);
     crate::tlc::normalize_outputs::run(&mut program).expect("normalize_outputs");
-    let lifted = super::run(program, &mut crate::IdSource::<u32>::new());
+    let mut lifted = program;
+    super::run(&mut lifted, &mut crate::IdSource::<u32>::new());
     assert!(
         has_gather_prepass(&lifted),
         "gather producer inside an OutputSlotStore.value must still be lifted"
