@@ -837,7 +837,7 @@ impl TlcProducerCanonicalized {
         let mut inner = self.0;
         tlc::fusion::run(&mut inner.tlc);
         tlc::if_over_producer::run(&mut inner.tlc);
-        inner.tlc = tlc::inline::run_reachable(inner.tlc);
+        tlc::inline::run_reachable(&mut inner.tlc);
         TlcFused(inner)
     }
 }
@@ -1063,7 +1063,7 @@ impl TlcRepSpecialized {
     /// Inline small user functions and constants at their call/reference sites.
     pub fn inline_small(self) -> TlcSmallInlined {
         let mut inner = self.0;
-        inner.tlc = tlc::inline::run_small(inner.tlc);
+        tlc::inline::run_small(&mut inner.tlc);
         TlcSmallInlined(inner)
     }
 }
@@ -1071,10 +1071,10 @@ impl TlcRepSpecialized {
 impl TlcGeneratedLambdasFolded {
     /// Eliminate unreachable defs (dead code elimination at TLC level).
     pub fn filter_reachable(self) -> TlcReachable {
-        let inner = self.0;
-        let tlc = tlc::inline::run_reachable(inner.tlc);
+        let mut inner = self.0;
+        tlc::inline::run_reachable(&mut inner.tlc);
         TlcReachable(TlcPipelineInner {
-            tlc,
+            tlc: inner.tlc,
             pipeline: pipeline_descriptor::PipelineDescriptor::default(),
             type_table: inner.type_table,
             input_names: LookupMap::new(),
@@ -1114,7 +1114,7 @@ impl TlcSmallInlined {
     /// and inlining opens every producer/consumer boundary for fusion.
     pub fn force_inline_soac_helpers(self) -> TlcSoacHelpersInlined {
         let mut inner = self.0;
-        inner.tlc = tlc::inline::run_force_soac_helpers(inner.tlc);
+        tlc::inline::run_force_soac_helpers(&mut inner.tlc);
         TlcSoacHelpersInlined(inner)
     }
 
@@ -1139,10 +1139,10 @@ impl TlcSmallInlined {
 
     /// Eliminate unreachable defs (dead code elimination at TLC level).
     pub fn filter_reachable(self) -> TlcReachable {
-        let inner = self.0;
-        let tlc = tlc::inline::run_reachable(inner.tlc);
+        let mut inner = self.0;
+        tlc::inline::run_reachable(&mut inner.tlc);
         TlcReachable(TlcPipelineInner {
-            tlc,
+            tlc: inner.tlc,
             pipeline: pipeline_descriptor::PipelineDescriptor::default(),
             type_table: inner.type_table,
             input_names: LookupMap::new(),
@@ -1181,7 +1181,7 @@ impl TlcParallelized {
     /// got rewritten to specialized siblings by `rep_specialize`.
     pub fn filter_reachable(self) -> TlcReachable {
         let mut inner = self.0;
-        inner.tlc = tlc::inline::run_reachable(inner.tlc);
+        tlc::inline::run_reachable(&mut inner.tlc);
         TlcReachable(inner)
     }
 
@@ -1222,7 +1222,7 @@ impl TlcDefunctionalized {
     /// then DCE. Runs after defunctionalize (which produces those lambdas).
     pub fn fold_generated_lambdas(self) -> TlcGeneratedLambdasFolded {
         let mut inner = self.0;
-        inner.tlc = tlc::inline::run_large(inner.tlc);
+        tlc::inline::run_large(&mut inner.tlc);
         TlcGeneratedLambdasFolded(inner)
     }
 }

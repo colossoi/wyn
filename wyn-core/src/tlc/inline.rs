@@ -28,49 +28,39 @@ const INLINE_SIZE_THRESHOLD: usize = 30;
 /// SOAC helper) fully expand: one round inlines `center`, the next sees
 /// `sum` calls inside the freshly-expanded clump body and inlines those
 /// too.
-pub fn run_force_soac_helpers(program: Program) -> Program {
-    let program = force_inline_soac_helpers_to_fixpoint(program);
+pub fn run_force_soac_helpers(program: &mut Program) {
+    force_inline_soac_helpers_to_fixpoint(program);
     debug_assert!(
-        super::fusion::verify_soac_helpers_inlined(&program).is_ok(),
+        super::fusion::verify_soac_helpers_inlined(program).is_ok(),
         "force-inline left a SOAC helper behind a call boundary; \
          fusion would need an interprocedural path: {:?}",
-        super::fusion::verify_soac_helpers_inlined(&program).err(),
+        super::fusion::verify_soac_helpers_inlined(program).err(),
     );
-    program
 }
 
-fn force_inline_soac_helpers_to_fixpoint(mut program: Program) -> Program {
+fn force_inline_soac_helpers_to_fixpoint(program: &mut Program) {
     // Bound iterations to guard against pathological recursion through
     // hand-crafted call graphs; typical wyn helper depth is 2–3.
     for _ in 0..8 {
-        let candidates = build_soac_helper_candidates(&program);
+        let candidates = build_soac_helper_candidates(program);
         if candidates.is_empty() {
-            return program;
+            return;
         }
         // Stop when nothing in the program calls any current candidate.
         // (Inlining one round may expose new candidates — e.g. inlining
         // `sum` into `center`'s body makes `center` SOAC-bearing and a
         // candidate next round — so we re-detect candidates each iter.)
-        if !any_def_calls_candidate(&program, &candidates) {
-            return program;
+        if !any_def_calls_candidate(program, &candidates) {
+            return;
         }
         let mut term_ids = TermIdSource::new();
-        let new_defs: Vec<Def> = program
-            .defs
-            .into_iter()
-            .map(|def| {
-                let body = inline_term(def.body, &candidates, &mut term_ids);
-                Def { body, ..def }
-            })
-            .collect();
-        let new_defs = dead_code_eliminate(new_defs);
-        program = Program {
-            defs: new_defs,
-            symbols: program.symbols,
-            ..program
-        };
+        crate::map_in_place(&mut program.defs, |def| {
+            let body = inline_term(def.body, &candidates, &mut term_ids);
+            Def { body, ..def }
+        });
+        let defs = std::mem::take(&mut program.defs);
+        program.defs = dead_code_eliminate(defs);
     }
-    program
 }
 
 fn build_soac_helper_candidates(program: &Program) -> LookupMap<SymbolId, InlineBody> {
@@ -203,20 +193,15 @@ fn any_def_calls_candidate(program: &Program, candidates: &LookupMap<SymbolId, I
 /// Eliminate unreachable defs from a TLC program.
 ///
 /// Preserves entry points, extern defs, and their transitive dependencies.
-pub fn run_reachable(program: Program) -> Program {
-    let defs = dead_code_eliminate(program.defs);
-    let result = Program {
-        defs,
-        symbols: program.symbols,
-        ..program
-    };
-    super::hof_specialize::verify_hof_specialized(&result).unwrap_or_else(|e| {
+pub fn run_reachable(program: &mut Program) {
+    let defs = std::mem::take(&mut program.defs);
+    program.defs = dead_code_eliminate(defs);
+    super::hof_specialize::verify_hof_specialized(program).unwrap_or_else(|e| {
         panic!(
             "hof-specialization verifier failed after filter_reachable: {:?}",
             e
         )
     });
-    result
 }
 
 /// Inline small user functions and constants at their call/reference sites.
@@ -227,12 +212,12 @@ pub fn run_reachable(program: Program) -> Program {
 /// - Constants (arity-0 defs, substituted at Var reference sites)
 ///
 /// Skips `LiftedLambda` defs (SOAC bodies) — handled by `inline()`.
-pub fn run_small(program: Program) -> Program {
-    let all_constants = find_all_constants(&program);
+pub fn run_small(program: &mut Program) {
+    let all_constants = find_all_constants(program);
     let mut small_candidates = find_small_candidates(&program.defs, &program.symbols);
 
     if small_candidates.is_empty() && all_constants.is_empty() {
-        return program;
+        return;
     }
 
     // Inline constants into small candidate bodies so that when we inline
@@ -243,50 +228,32 @@ pub fn run_small(program: Program) -> Program {
     }
 
     let mut term_ids = TermIdSource::new();
-    let defs: Vec<Def> = program
-        .defs
-        .into_iter()
-        .map(|def| {
-            // Constants are pure — inline them everywhere, including lambda bodies.
-            let body = inline_constants(def.body, &all_constants);
-            let body = inline_term(body, &small_candidates, &mut term_ids);
-            Def { body, ..def }
-        })
-        .collect();
+    crate::map_in_place(&mut program.defs, |def| {
+        // Constants are pure — inline them everywhere, including lambda bodies.
+        let body = inline_constants(def.body, &all_constants);
+        let body = inline_term(body, &small_candidates, &mut term_ids);
+        Def { body, ..def }
+    });
 
-    let defs = dead_code_eliminate(defs);
-
-    Program {
-        defs,
-        symbols: program.symbols,
-        ..program
-    }
+    let defs = std::mem::take(&mut program.defs);
+    program.defs = dead_code_eliminate(defs);
 }
 
 /// Inline compiler-generated lifted-lambda defs (`DefMeta::LiftedLambda`) in a TLC program.
-pub fn run_large(program: Program) -> Program {
+pub fn run_large(program: &mut Program) {
     let inline_candidates = find_inline_candidates(&program.defs, &program.symbols);
 
     let mut term_ids = TermIdSource::new();
-    let defs: Vec<Def> = program
-        .defs
-        .into_iter()
-        .map(|def| {
-            let body = inline_term(def.body, &inline_candidates, &mut term_ids);
-            Def { body, ..def }
-        })
-        .collect();
+    crate::map_in_place(&mut program.defs, |def| {
+        let body = inline_term(def.body, &inline_candidates, &mut term_ids);
+        Def { body, ..def }
+    });
 
     // DCE: remove defs not referenced by any entry point or reachable def.
-    let defs = dead_code_eliminate(defs);
+    let defs = std::mem::take(&mut program.defs);
+    program.defs = dead_code_eliminate(defs);
 
-    let result = Program {
-        defs,
-        symbols: program.symbols,
-        ..program
-    };
-    result.assert_flat_apps();
-    result
+    program.assert_flat_apps();
 }
 
 // =============================================================================
