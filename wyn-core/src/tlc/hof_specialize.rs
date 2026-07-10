@@ -911,7 +911,7 @@ fn substitute_var_array_expr(
 // =============================================================================
 
 struct HofSpecializer<'a> {
-    symbols: SymbolTable,
+    symbols: &'a mut SymbolTable,
     top_level: LookupSet<SymbolId>,
     closure_info: &'a ClosureInfo,
     hof_info: LookupMap<SymbolId, HofInfo>,
@@ -933,225 +933,32 @@ struct HofSpecializer<'a> {
 }
 
 impl<'a> HofSpecializer<'a> {
-    fn run(program: Program, closure_info: &'a ClosureInfo) -> Program {
-        let hof_info = detect_hofs(&program.defs);
-        let top_level: LookupSet<SymbolId> = program.defs.iter().map(|d| d.name).collect();
-
-        let mut hs = Self {
-            symbols: program.symbols,
-            top_level,
-            closure_info,
-            hof_info,
-            specialized_defs: vec![],
-            specialization_cache: LookupMap::new(),
-            closure_spec_cache: LookupMap::new(),
-            defs_by_sym: LookupMap::new(),
-            specialization_counter: 0,
-            term_ids: TermIdSource::new(),
-        };
-
-        let transformed: Vec<Def> = program
-            .defs
-            .into_iter()
-            .map(|def| Def {
-                body: hs.rewrite_def_body(def.body),
-                ..def
-            })
-            .collect();
-
-        // Cascade closure specialization. The main loop above eliminates
-        // function-typed params from outer HOFs by cloning + substituting
-        // the called code into the HOF body. But a HOF body that captures
-        // its function-typed param into a lifted closure (e.g. via a SOAC
-        // operand whose lambda is a separate top-level def) leaves the
-        // callable flowing into the closure as a runtime arg — and the
-        // closure itself still has a function-typed parameter for that
-        // slot. Walk every def's body and, at each `SoacBody` whose
-        // captures include `(_, arrow_ty, Var(known_callable))`, clone
-        // the lifted def referenced by `lam.body`, substitute the
-        // callable into its body, drop the callable param from its
-        // signature, and rewrite the SoacBody to reference the
-        // specialized variant with the callable capture removed.
-        // Recurses through the cloned bodies, so nested closures cascade
-        // until no callable captures remain.
-        for d in transformed.iter().chain(hs.specialized_defs.iter()) {
-            hs.defs_by_sym.insert(d.name, d.clone());
-        }
-        let transformed: Vec<Def> = transformed
-            .into_iter()
-            .map(|def| Def {
-                body: hs.cascade_specialize_term(def.body),
-                ..def
-            })
-            .collect();
-        let main_loop_specialized: Vec<Def> = std::mem::take(&mut hs.specialized_defs)
-            .into_iter()
-            .map(|def| Def {
-                body: hs.cascade_specialize_term(def.body),
-                ..def
-            })
-            .collect();
-        // Anything the cascade itself emitted while walking those bodies
-        // is in `hs.specialized_defs` now; chain them in too.
-        let cascade_specialized = std::mem::take(&mut hs.specialized_defs);
-
-        Program {
-            defs: transformed.into_iter().chain(main_loop_specialized).chain(cascade_specialized).collect(),
-            symbols: hs.symbols,
-            ..program
-        }
-    }
-
     /// Walk a def body, preserving the outer parameter-spine `Lambda`
     /// nodes (those carry the def's named parameters). Anything below
     /// the spine routes through `rewrite_term`, which scans App nodes
     /// for HOF calls.
-    fn rewrite_def_body(&mut self, term: Term) -> Term {
-        match term.kind {
-            TermKind::Lambda(Lambda { params, body, ret_ty }) => {
-                let new_body = self.rewrite_def_body(*body);
-                Term {
-                    id: self.term_ids.next_id(),
-                    ty: term.ty,
-                    span: term.span,
-                    kind: TermKind::Lambda(Lambda {
-                        params,
-                        body: Box::new(new_body),
-                        ret_ty,
-                    }),
-                }
+    fn rewrite_def_body(&mut self, term: &mut Term) {
+        match &mut term.kind {
+            TermKind::Lambda(Lambda { body, .. }) => {
+                self.rewrite_def_body(body);
             }
-            _ => self.rewrite_term(term),
+            _ => {
+                self.rewrite_term(term);
+                return;
+            }
         }
+        term.id = self.term_ids.next_id();
     }
 
-    /// Recursively walk a term. At every `App(Var(hof_sym), args)` whose
-    /// `hof_sym` is a HOF and whose func-arg-slot resolves through
+    /// Recursively walk a term in place. At every `App(Var(hof_sym), args)`
+    /// whose `hof_sym` is a HOF and whose func-arg-slot resolves through
     /// `ClosureInfo` to a callable, dispatch to `specialize_call`.
-    fn rewrite_term(&mut self, term: Term) -> Term {
-        let ty = term.ty.clone();
-        let span = term.span;
-        match term.kind {
+    fn rewrite_term(&mut self, term: &mut Term) {
+        match &mut term.kind {
             TermKind::App { func, args } => {
-                let new_func = self.rewrite_term(*func);
-                let new_args: Vec<Term> = args.into_iter().map(|a| self.rewrite_term(a)).collect();
-
-                if let TermKind::Var(VarRef::Symbol(sym)) = &new_func.kind {
-                    let hof_sym = *sym;
-                    if let Some(hof_info) = self.hof_info.get(&hof_sym).cloned() {
-                        for &func_param_idx in &hof_info.func_param_indices {
-                            if func_param_idx >= new_args.len() {
-                                continue;
-                            }
-                            let arg_sym = match &new_args[func_param_idx].kind {
-                                TermKind::Var(VarRef::Symbol(s)) => *s,
-                                _ => continue,
-                            };
-                            let (code, captures) = match self.closure_info.resolve_callable(arg_sym) {
-                                Some(CallableValue::Direct(code)) => (*code, Vec::new()),
-                                Some(CallableValue::Closure { code, captures, .. }) => {
-                                    (*code, captures.clone())
-                                }
-                                None => continue,
-                            };
-                            let hof_def =
-                                hof_info.def.as_ref().expect("BUG: user HOF should have def in hof_info");
-                            return self.specialize_call(
-                                hof_sym,
-                                hof_def,
-                                func_param_idx,
-                                code,
-                                &captures,
-                                &new_args,
-                                ty,
-                                span,
-                            );
-                        }
-                    }
-                }
-
-                Term {
-                    id: self.term_ids.next_id(),
-                    ty,
-                    span,
-                    kind: TermKind::App {
-                        func: Box::new(new_func),
-                        args: new_args,
-                    },
-                }
-            }
-
-            TermKind::Let {
-                name,
-                name_ty,
-                rhs,
-                body,
-            } => Term {
-                id: self.term_ids.next_id(),
-                ty,
-                span,
-                kind: TermKind::Let {
-                    name,
-                    name_ty,
-                    rhs: Box::new(self.rewrite_term(*rhs)),
-                    body: Box::new(self.rewrite_term(*body)),
-                },
-            },
-
-            TermKind::If {
-                cond,
-                then_branch,
-                else_branch,
-            } => Term {
-                id: self.term_ids.next_id(),
-                ty,
-                span,
-                kind: TermKind::If {
-                    cond: Box::new(self.rewrite_term(*cond)),
-                    then_branch: Box::new(self.rewrite_term(*then_branch)),
-                    else_branch: Box::new(self.rewrite_term(*else_branch)),
-                },
-            },
-
-            TermKind::Loop {
-                loop_var,
-                loop_var_ty,
-                init,
-                init_bindings,
-                kind,
-                body,
-            } => {
-                let init = self.rewrite_term(*init);
-                let init_bindings: Vec<_> =
-                    init_bindings.into_iter().map(|(n, ty, e)| (n, ty, self.rewrite_term(e))).collect();
-                let kind = match kind {
-                    LoopKind::For { var, var_ty, iter } => LoopKind::For {
-                        var,
-                        var_ty,
-                        iter: Box::new(self.rewrite_term(*iter)),
-                    },
-                    LoopKind::ForRange { var, var_ty, bound } => LoopKind::ForRange {
-                        var,
-                        var_ty,
-                        bound: Box::new(self.rewrite_term(*bound)),
-                    },
-                    LoopKind::While { cond } => LoopKind::While {
-                        cond: Box::new(self.rewrite_term(*cond)),
-                    },
-                };
-                let body = self.rewrite_term(*body);
-                Term {
-                    id: self.term_ids.next_id(),
-                    ty,
-                    span,
-                    kind: TermKind::Loop {
-                        loop_var,
-                        loop_var_ty,
-                        init: Box::new(init),
-                        init_bindings,
-                        kind,
-                        body: Box::new(body),
-                    },
+                self.rewrite_term(func);
+                for a in args.iter_mut() {
+                    self.rewrite_term(a);
                 }
             }
 
@@ -1168,62 +975,55 @@ impl<'a> HofSpecializer<'a> {
             | TermKind::UnitLit
             | TermKind::BinOp(_)
             | TermKind::UnOp(_)
-            | TermKind::Extern(_) => Term {
-                id: self.term_ids.next_id(),
-                ty,
-                span,
-                kind: term.kind,
-            },
+            | TermKind::Extern(_) => {}
 
-            TermKind::Coerce { inner, target_ty } => Term {
-                id: self.term_ids.next_id(),
-                ty,
-                span,
-                kind: TermKind::Coerce {
-                    inner: Box::new(self.rewrite_term(*inner)),
-                    target_ty,
-                },
-            },
+            _ => {
+                term.for_each_child_mut(&mut |child| self.rewrite_term(child));
+            }
+        }
+        term.id = self.term_ids.next_id();
+        self.maybe_specialize_hof_call(term);
+    }
 
-            TermKind::Tuple(parts) => Term {
-                id: self.term_ids.next_id(),
-                ty,
-                span,
-                kind: TermKind::Tuple(parts.into_iter().map(|p| self.rewrite_term(p)).collect()),
-            },
-            TermKind::TupleProj { tuple, idx } => Term {
-                id: self.term_ids.next_id(),
-                ty,
-                span,
-                kind: TermKind::TupleProj {
-                    tuple: Box::new(self.rewrite_term(*tuple)),
-                    idx,
-                },
-            },
-            TermKind::Index { array, index } => Term {
-                id: self.term_ids.next_id(),
-                ty,
-                span,
-                kind: TermKind::Index {
-                    array: Box::new(self.rewrite_term(*array)),
-                    index: Box::new(self.rewrite_term(*index)),
-                },
-            },
-            TermKind::VecLit(parts) => Term {
-                id: self.term_ids.next_id(),
-                ty,
-                span,
-                kind: TermKind::VecLit(parts.into_iter().map(|p| self.rewrite_term(p)).collect()),
-            },
-            TermKind::OutputSlotStore { slot_index, value } => Term {
-                id: self.term_ids.next_id(),
-                ty,
-                span,
-                kind: TermKind::OutputSlotStore {
-                    slot_index,
-                    value: Box::new(self.rewrite_term(*value)),
-                },
-            },
+    /// Call-site hook, applied after an `App`'s children are rewritten:
+    /// if the func is a HOF and a func-arg slot resolves to a callable,
+    /// replace the whole call with the specialized one.
+    fn maybe_specialize_hof_call(&mut self, term: &mut Term) {
+        let TermKind::App { func, args } = &term.kind else {
+            return;
+        };
+        let TermKind::Var(VarRef::Symbol(sym)) = &func.kind else {
+            return;
+        };
+        let hof_sym = *sym;
+        let Some(hof_info) = self.hof_info.get(&hof_sym).cloned() else {
+            return;
+        };
+        for &func_param_idx in &hof_info.func_param_indices {
+            if func_param_idx >= args.len() {
+                continue;
+            }
+            let arg_sym = match &args[func_param_idx].kind {
+                TermKind::Var(VarRef::Symbol(s)) => *s,
+                _ => continue,
+            };
+            let (code, captures) = match self.closure_info.resolve_callable(arg_sym) {
+                Some(CallableValue::Direct(code)) => (*code, Vec::new()),
+                Some(CallableValue::Closure { code, captures, .. }) => (*code, captures.clone()),
+                None => continue,
+            };
+            let hof_def = hof_info.def.as_ref().expect("BUG: user HOF should have def in hof_info");
+            *term = self.specialize_call(
+                hof_sym,
+                hof_def,
+                func_param_idx,
+                code,
+                &captures,
+                args,
+                term.ty.clone(),
+                term.span,
+            );
+            return;
         }
     }
 
@@ -1300,7 +1100,8 @@ impl<'a> HofSpecializer<'a> {
         // params. Threading is idempotent — when
         // `closure_calls_lower::run` later walks this body, it sees
         // `args.len() == param_count + captures.len()` and skips.
-        let rewritten_inner = self.rewrite_term(substituted_inner);
+        let mut rewritten_inner = substituted_inner;
+        self.rewrite_term(&mut rewritten_inner);
         let threaded_inner = super::closure_calls_lower::thread_captures_in_term(
             rewritten_inner,
             self.closure_info,
@@ -1356,105 +1157,47 @@ impl<'a> HofSpecializer<'a> {
     // reference the specialized variant and to omit the callable capture.
     // =========================================================================
 
-    fn cascade_specialize_term(&mut self, term: Term) -> Term {
-        let term = term.map_children(&mut |child| self.cascade_specialize_term(child));
-        match term.kind {
-            TermKind::Soac(soac) => Term {
-                kind: TermKind::Soac(self.cascade_specialize_soac(soac)),
-                ..term
-            },
-            // An `ArrayExpr`'s inputs are atoms — a producer is a `TermKind::Soac`
-            // (cascaded above), never nested in an array expression — so an
-            // `ArrayExpr` term passes through unchanged.
-            _ => term,
+    fn cascade_specialize_term(&mut self, term: &mut Term) {
+        term.for_each_child_mut(&mut |child| self.cascade_specialize_term(child));
+        // An `ArrayExpr`'s inputs are atoms — a producer is a `TermKind::Soac`
+        // (cascaded here), never nested in an array expression — so an
+        // `ArrayExpr` term passes through unchanged.
+        if let TermKind::Soac(soac) = &mut term.kind {
+            self.cascade_specialize_soac(soac);
         }
     }
 
-    fn cascade_specialize_soac(&mut self, soac: SoacOp) -> SoacOp {
+    fn cascade_specialize_soac(&mut self, soac: &mut SoacOp) {
         match soac {
-            SoacOp::Map {
-                lam,
-                inputs,
-                destination,
-            } => SoacOp::Map {
-                lam: self.cascade_specialize_soac_body(lam),
-                inputs,
-                destination,
-            },
-            SoacOp::Reduce { op, ne, input } => SoacOp::Reduce {
-                op: self.cascade_specialize_soac_body(op),
-                ne,
-                input,
-            },
-            SoacOp::Scan {
-                op,
-                reduce_op,
-                ne,
-                input,
-                destination,
-            } => SoacOp::Scan {
-                op: self.cascade_specialize_soac_body(op),
-                reduce_op: self.cascade_specialize_soac_body(reduce_op),
-                ne,
-                input,
-                destination,
-            },
-            SoacOp::Filter {
-                map_lam,
-                pred,
-                input,
-                destination,
-            } => SoacOp::Filter {
-                map_lam: map_lam.map(|ml| self.cascade_specialize_soac_body(ml)),
-                pred: self.cascade_specialize_soac_body(pred),
-                input,
-                destination,
-            },
-            SoacOp::Scatter { dest, lam, inputs } => SoacOp::Scatter {
-                dest,
-                lam: self.cascade_specialize_soac_body(lam),
-                inputs,
-            },
-            SoacOp::ReduceByIndex {
-                dest,
-                op,
-                ne,
-                indices,
-                values,
-            } => SoacOp::ReduceByIndex {
-                dest,
-                op: self.cascade_specialize_soac_body(op),
-                ne,
-                indices,
-                values,
-            },
+            SoacOp::Map { lam, .. } => self.cascade_specialize_soac_body(lam),
+            SoacOp::Reduce { op, .. } => self.cascade_specialize_soac_body(op),
+            SoacOp::Scan { op, reduce_op, .. } => {
+                self.cascade_specialize_soac_body(op);
+                self.cascade_specialize_soac_body(reduce_op);
+            }
+            SoacOp::Filter { map_lam, pred, .. } => {
+                if let Some(ml) = map_lam {
+                    self.cascade_specialize_soac_body(ml);
+                }
+                self.cascade_specialize_soac_body(pred);
+            }
+            SoacOp::Scatter { lam, .. } => self.cascade_specialize_soac_body(lam),
+            SoacOp::ReduceByIndex { op, .. } => self.cascade_specialize_soac_body(op),
             SoacOp::Screma {
-                lanes,
-                accumulators,
-                inputs,
-            } => SoacOp::Screma {
-                lanes: lanes
-                    .into_iter()
-                    .map(|lane| super::ScremaLane {
-                        lam: self.cascade_specialize_soac_body(lane.lam),
-                        input_indices: lane.input_indices,
-                    })
-                    .collect(),
-                accumulators: accumulators
-                    .into_iter()
-                    .map(|acc| super::ScremaAccumulatorSpec {
-                        kind: acc.kind,
-                        step_lam: self.cascade_specialize_soac_body(acc.step_lam),
-                        reduce_op: self.cascade_specialize_soac_body(acc.reduce_op),
-                        ne: acc.ne,
-                    })
-                    .collect(),
-                inputs,
-            },
+                lanes, accumulators, ..
+            } => {
+                for lane in lanes {
+                    self.cascade_specialize_soac_body(&mut lane.lam);
+                }
+                for acc in accumulators {
+                    self.cascade_specialize_soac_body(&mut acc.step_lam);
+                    self.cascade_specialize_soac_body(&mut acc.reduce_op);
+                }
+            }
         }
     }
 
-    fn cascade_specialize_soac_body(&mut self, sb: super::SoacBody) -> super::SoacBody {
+    fn cascade_specialize_soac_body(&mut self, sb: &mut super::SoacBody) {
         let callable_indices: Vec<usize> = sb
             .captures
             .iter()
@@ -1476,17 +1219,17 @@ impl<'a> HofSpecializer<'a> {
             .collect();
 
         if callable_indices.is_empty() {
-            return sb;
+            return;
         }
 
         let lifted_sym = match &sb.lam.body.kind {
             TermKind::Var(VarRef::Symbol(s)) => *s,
-            _ => return sb,
+            _ => return,
         };
         // Only specialize lifted defs we have a body for. Intrinsic SOAC
         // operators (no def) fall through.
         if !self.defs_by_sym.contains_key(&lifted_sym) {
-            return sb;
+            return;
         }
 
         let callable_syms: Vec<SymbolId> = callable_indices
@@ -1510,29 +1253,19 @@ impl<'a> HofSpecializer<'a> {
             .expect("just specialized def must be in defs_by_sym")
             .ty
             .clone();
-        let new_lam_body = Term {
+        *sb.lam.body = Term {
             id: self.term_ids.next_id(),
             ty: new_lifted_ty,
             span: sb.lam.body.span,
             kind: TermKind::Var(VarRef::Symbol(specialized_sym)),
         };
 
-        let new_captures: Vec<_> = sb
-            .captures
-            .into_iter()
-            .enumerate()
-            .filter(|(i, _)| !callable_indices.contains(i))
-            .map(|(_, c)| c)
-            .collect();
-
-        super::SoacBody {
-            lam: Lambda {
-                params: sb.lam.params,
-                body: Box::new(new_lam_body),
-                ret_ty: sb.lam.ret_ty,
-            },
-            captures: new_captures,
-        }
+        let mut i = 0;
+        sb.captures.retain(|_| {
+            let keep = !callable_indices.contains(&i);
+            i += 1;
+            keep
+        });
     }
 
     fn specialize_closure(
@@ -1560,7 +1293,7 @@ impl<'a> HofSpecializer<'a> {
 
         // Cascade into the cloned body: nested closures with their own
         // callable captures get specialised too.
-        let new_body = self.cascade_specialize_term(new_body);
+        self.cascade_specialize_term(&mut new_body);
 
         let rebuilt = super::closure_convert::rebuild_nested_lam(
             &new_params,
@@ -1594,11 +1327,65 @@ impl<'a> HofSpecializer<'a> {
     }
 }
 
-/// Run HOF specialization. Consumes the closure-converted program and
-/// the closure-info side-table; returns a program in which every
-/// reachable top-level def has zero function-typed parameters.
-pub fn run(program: Program, closure_info: &ClosureInfo) -> Program {
-    HofSpecializer::run(program, closure_info)
+/// Run HOF specialization in place. Takes the closure-converted program
+/// and the closure-info side-table; afterwards every reachable top-level
+/// def has zero function-typed parameters.
+pub fn run(program: &mut Program, closure_info: &ClosureInfo) {
+    let hof_info = detect_hofs(&program.defs);
+    let top_level: LookupSet<SymbolId> = program.defs.iter().map(|d| d.name).collect();
+
+    let mut hs = HofSpecializer {
+        symbols: &mut program.symbols,
+        top_level,
+        closure_info,
+        hof_info,
+        specialized_defs: vec![],
+        specialization_cache: LookupMap::new(),
+        closure_spec_cache: LookupMap::new(),
+        defs_by_sym: LookupMap::new(),
+        specialization_counter: 0,
+        term_ids: TermIdSource::new(),
+    };
+
+    for def in &mut program.defs {
+        hs.rewrite_def_body(&mut def.body);
+    }
+
+    // Cascade closure specialization. The main loop above eliminates
+    // function-typed params from outer HOFs by cloning + substituting
+    // the called code into the HOF body. But a HOF body that captures
+    // its function-typed param into a lifted closure (e.g. via a SOAC
+    // operand whose lambda is a separate top-level def) leaves the
+    // callable flowing into the closure as a runtime arg — and the
+    // closure itself still has a function-typed parameter for that
+    // slot. Walk every def's body and, at each `SoacBody` whose
+    // captures include `(_, arrow_ty, Var(known_callable))`, clone
+    // the lifted def referenced by `lam.body`, substitute the
+    // callable into its body, drop the callable param from its
+    // signature, and rewrite the SoacBody to reference the
+    // specialized variant with the callable capture removed.
+    // Recurses through the cloned bodies, so nested closures cascade
+    // until no callable captures remain.
+    for d in program.defs.iter() {
+        hs.defs_by_sym.insert(d.name, d.clone());
+    }
+    for i in 0..hs.specialized_defs.len() {
+        let d = hs.specialized_defs[i].clone();
+        hs.defs_by_sym.insert(d.name, d);
+    }
+    for def in &mut program.defs {
+        hs.cascade_specialize_term(&mut def.body);
+    }
+    let mut main_loop_specialized = std::mem::take(&mut hs.specialized_defs);
+    for def in &mut main_loop_specialized {
+        hs.cascade_specialize_term(&mut def.body);
+    }
+    // Anything the cascade itself emitted while walking those bodies
+    // is in `hs.specialized_defs` now; chain them in too.
+    let cascade_specialized = std::mem::take(&mut hs.specialized_defs);
+
+    program.defs.extend(main_loop_specialized);
+    program.defs.extend(cascade_specialized);
 }
 
 // =============================================================================
