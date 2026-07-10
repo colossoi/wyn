@@ -1404,7 +1404,9 @@ entry double(arr: []i32) []i32 = map(|x: i32| x + 1, arr)
 /// an uncalled `def f`, or force-inline a called soac helper away — neither of
 /// which is what the destination flag-flip under test depends on.
 fn compile_to_owned(source: &str) -> Program {
-    super::apply_ownership(compile_to_tlc(source)).expect("apply_ownership")
+    let mut program = compile_to_tlc(source);
+    super::apply_ownership(&mut program).expect("apply_ownership");
+    program
 }
 
 fn map_destination(program: &Program, fn_name: &str) -> Option<SoacDestination> {
@@ -1767,7 +1769,8 @@ fn array_with_promotes_when_source_is_aliasing_intrinsic() {
         "test setup: outer App must call the functional array_with intrinsic"
     );
 
-    let rewritten = super::apply_ownership(program).expect("apply_ownership");
+    let mut rewritten = program;
+    super::apply_ownership(&mut rewritten).expect("apply_ownership");
     let f_def = find_def(&rewritten, "f");
     let lam = match &f_def.body.kind {
         TermKind::Lambda(l) => l,

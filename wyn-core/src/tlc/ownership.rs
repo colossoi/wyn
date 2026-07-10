@@ -1737,16 +1737,16 @@ fn sub(a: &LiveSet, b: &LiveSet) -> LiveSet {
 /// Returns an error if the analysis detects a use-after-move: a
 /// `*T` consumption at a program point where the consumed owner is
 /// still in `live_out`.
-pub fn apply_ownership(mut program: Program) -> crate::error::Result<Program> {
-    let model = analyze(&program);
-    if let Some(err) = check_use_after_move(&program, &model) {
+pub fn apply_ownership(program: &mut Program) -> crate::error::Result<()> {
+    let model = analyze(program);
+    if let Some(err) = check_use_after_move(program, &model) {
         return Err(err);
     }
-    if let Some(err) = check_linear_image_results(&program, &model) {
+    if let Some(err) = check_linear_image_results(program, &model) {
         return Err(err);
     }
     let consuming_soacs: LookupSet<TermId> =
-        eligible_consuming_soacs(&program, &model).into_iter().collect();
+        eligible_consuming_soacs(program, &model).into_iter().collect();
 
     // Promotion of `array_with` → `array_with_inplace` is keyed by the
     // catalog (BuiltinId for the in-place form is looked up at the
@@ -1757,7 +1757,7 @@ pub fn apply_ownership(mut program: Program) -> crate::error::Result<Program> {
     let defs_in = std::mem::take(&mut program.defs);
     let mut rewriter = Rewriter {
         model: &model,
-        program: &program,
+        program,
         consuming_soacs: &consuming_soacs,
     };
     let new_defs: Vec<Def> = defs_in
@@ -1769,7 +1769,7 @@ pub fn apply_ownership(mut program: Program) -> crate::error::Result<Program> {
         .collect();
     drop(rewriter);
     program.defs = new_defs;
-    Ok(program)
+    Ok(())
 }
 
 /// Run the ownership analysis and report a use-after-move error if

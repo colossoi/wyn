@@ -910,7 +910,7 @@ impl TlcGeneratedLambdasFolded {
     /// introduces in the next step).
     pub fn apply_ownership(self) -> Result<TlcOwnershipApplied> {
         let mut inner = self.0;
-        inner.tlc = tlc::ownership::apply_ownership(inner.tlc)?;
+        tlc::ownership::apply_ownership(&mut inner.tlc)?;
         Ok(TlcOwnershipApplied(inner))
     }
 }
