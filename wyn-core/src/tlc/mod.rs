@@ -1299,6 +1299,82 @@ impl Term {
             TermKind::OutputSlotStore { value, .. } => f(value),
         }
     }
+
+    /// Visit every immediate `Term` child by mutable reference — the in-place
+    /// counterpart to `map_children`. The method itself writes nothing; it
+    /// hands each child out as `&mut Term` so the callback can rewrite (or
+    /// wholesale replace) children without rebuilding the tree.
+    pub fn for_each_child_mut<F>(&mut self, f: &mut F)
+    where
+        F: FnMut(&mut Term),
+    {
+        match &mut self.kind {
+            TermKind::Var(_)
+            | TermKind::BinOp(_)
+            | TermKind::UnOp(_)
+            | TermKind::IntLit(_)
+            | TermKind::FloatLit(_)
+            | TermKind::BoolLit(_)
+            | TermKind::UnitLit
+            | TermKind::Extern(_) => {}
+
+            TermKind::Coerce { inner, .. } => f(inner),
+
+            TermKind::App { func, args } => {
+                f(func);
+                for a in args {
+                    f(a);
+                }
+            }
+
+            TermKind::Let { rhs, body, .. } => {
+                f(rhs);
+                f(body);
+            }
+
+            TermKind::Lambda(lam) => visit_lambda_children_mut(lam, f),
+
+            TermKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                f(cond);
+                f(then_branch);
+                f(else_branch);
+            }
+
+            TermKind::Loop {
+                init,
+                init_bindings,
+                kind,
+                body,
+                ..
+            } => {
+                f(init);
+                for (_, _, e) in init_bindings {
+                    f(e);
+                }
+                visit_loop_kind_children_mut(kind, f);
+                f(body);
+            }
+
+            TermKind::Soac(soac) => visit_soac_children_mut(soac, f),
+            TermKind::ArrayExpr(ae) => visit_array_expr_children_mut(ae, f),
+
+            TermKind::Tuple(parts) | TermKind::VecLit(parts) => {
+                for p in parts {
+                    f(p);
+                }
+            }
+            TermKind::TupleProj { tuple, .. } => f(tuple),
+            TermKind::Index { array, index } => {
+                f(array);
+                f(index);
+            }
+            TermKind::OutputSlotStore { value, .. } => f(value),
+        }
+    }
 }
 
 fn visit_lambda_children<F>(lam: &Lambda, f: &mut F)
@@ -1445,6 +1521,163 @@ where
 fn visit_place_children<F>(place: &Place, f: &mut F)
 where
     F: FnMut(&Term),
+{
+    match place {
+        Place::BufferSlice { base, offset, .. } => {
+            f(base);
+            f(offset);
+        }
+        Place::LocalArray { .. } => {}
+    }
+}
+
+fn visit_lambda_children_mut<F>(lam: &mut Lambda, f: &mut F)
+where
+    F: FnMut(&mut Term),
+{
+    f(&mut lam.body);
+}
+
+fn visit_soac_body_children_mut<F>(sb: &mut SoacBody, f: &mut F)
+where
+    F: FnMut(&mut Term),
+{
+    visit_lambda_children_mut(&mut sb.lam, f);
+    for (_, _, e) in &mut sb.captures {
+        f(e);
+    }
+}
+
+fn visit_soac_children_mut<F>(soac: &mut SoacOp, f: &mut F)
+where
+    F: FnMut(&mut Term),
+{
+    match soac {
+        SoacOp::Map { lam, inputs, .. } => {
+            visit_soac_body_children_mut(lam, f);
+            for ae in inputs {
+                visit_array_expr_children_mut(ae, f);
+            }
+        }
+        SoacOp::Reduce { op, ne, input, .. } => {
+            visit_soac_body_children_mut(op, f);
+            f(ne);
+            visit_array_expr_children_mut(input, f);
+        }
+        SoacOp::Scan {
+            op,
+            reduce_op,
+            ne,
+            input,
+            ..
+        } => {
+            visit_soac_body_children_mut(op, f);
+            visit_soac_body_children_mut(reduce_op, f);
+            f(ne);
+            visit_array_expr_children_mut(input, f);
+        }
+        SoacOp::Filter {
+            map_lam, pred, input, ..
+        } => {
+            if let Some(map_lam) = map_lam {
+                visit_soac_body_children_mut(map_lam, f);
+            }
+            visit_soac_body_children_mut(pred, f);
+            visit_array_expr_children_mut(input, f);
+        }
+        SoacOp::Scatter { dest, lam, inputs } => {
+            visit_place_children_mut(dest, f);
+            visit_soac_body_children_mut(lam, f);
+            for input in inputs {
+                visit_array_expr_children_mut(input, f);
+            }
+        }
+        SoacOp::ReduceByIndex {
+            dest,
+            op,
+            ne,
+            indices,
+            values,
+            ..
+        } => {
+            visit_place_children_mut(dest, f);
+            visit_soac_body_children_mut(op, f);
+            f(ne);
+            visit_array_expr_children_mut(indices, f);
+            visit_array_expr_children_mut(values, f);
+        }
+        SoacOp::Screma {
+            lanes,
+            accumulators,
+            inputs,
+        } => {
+            for lane in lanes {
+                visit_soac_body_children_mut(&mut lane.lam, f);
+            }
+            for acc in accumulators {
+                visit_soac_body_children_mut(&mut acc.step_lam, f);
+                visit_soac_body_children_mut(&mut acc.reduce_op, f);
+                f(&mut acc.ne);
+            }
+            for ae in inputs {
+                visit_array_expr_children_mut(ae, f);
+            }
+        }
+    }
+}
+
+fn visit_array_expr_children_mut<F>(ae: &mut ArrayExpr, f: &mut F)
+where
+    F: FnMut(&mut Term),
+{
+    match ae {
+        // Feed the named input through a reconstructed var term (as
+        // `map_array_expr_children` does), so rewrites that rename or replace
+        // a variable reach SOAC inputs, then re-atomize the result.
+        ArrayExpr::Var(vr, ty) => {
+            let mut ids = TermIdSource::new();
+            let mut tmp = atom_var_term(*vr, ty.clone(), &mut ids);
+            f(&mut tmp);
+            *ae = term_as_input_atom(tmp);
+        }
+        ArrayExpr::Zip(aes) => {
+            for ae in aes {
+                visit_array_expr_children_mut(ae, f);
+            }
+        }
+        ArrayExpr::Literal(terms) => {
+            for t in terms {
+                f(t);
+            }
+        }
+        ArrayExpr::Range { start, len, step } => {
+            f(start);
+            f(len);
+            if let Some(s) = step {
+                f(s);
+            }
+        }
+        ArrayExpr::StorageView(sv) => {
+            f(&mut sv.offset);
+            f(&mut sv.len);
+        }
+    }
+}
+
+fn visit_loop_kind_children_mut<F>(kind: &mut LoopKind, f: &mut F)
+where
+    F: FnMut(&mut Term),
+{
+    match kind {
+        LoopKind::For { iter, .. } => f(iter),
+        LoopKind::ForRange { bound, .. } => f(bound),
+        LoopKind::While { cond } => f(cond),
+    }
+}
+
+fn visit_place_children_mut<F>(place: &mut Place, f: &mut F)
+where
+    F: FnMut(&mut Term),
 {
     match place {
         Place::BufferSlice { base, offset, .. } => {
