@@ -583,9 +583,9 @@ pub enum Binding {
     },
     /// Storage image (descriptor set binding). Bound from a
     /// `#[storage_image(set, binding, format, access)]` entry-point
-    /// param of type `storage_image`. The same `(set, binding)` slot
-    /// may also be declared as a `Texture` in another pipeline — viz
-    /// allocates one wgpu texture and binds it through two views.
+    /// param of type `storage_image`. A sampled view of the same allocation
+    /// is represented as a separate `Texture` descriptor slot whose
+    /// `backing` points at this storage texture binding.
     ///
     /// `size` is the resolution policy the host uses to allocate the
     /// backing `wgpu::Texture`. Defaults to `SameAsWindow` so a

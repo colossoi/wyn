@@ -76,10 +76,9 @@ pub enum Attribute {
     /// an entry-point param of type `storage_image`. The `format` pins
     /// the on-GPU pixel format; the `access` declares whether the
     /// shader writes, reads, or both; the `size` picks the host-side
-    /// resolution policy (defaults to `SameAsWindow`). The same
-    /// `(set, binding)` may be declared as `Texture { ... }` in a
-    /// sibling pipeline — the host allocates one wgpu texture and
-    /// binds it via two views.
+    /// resolution policy (defaults to `SameAsWindow`). A sampled view of
+    /// the same allocation must use a distinct `Texture` descriptor slot
+    /// whose `backing` points at this storage binding.
     StorageImage {
         set: u32,
         binding: u32,

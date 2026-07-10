@@ -7751,14 +7751,12 @@ entry ent_b(idx: []u32, #[storage(set=1, binding=0, access=read)] buf: []f32) []
     assert!(!lowered.spirv.is_empty());
 }
 
-/// A compute entry writing a `storage_image` and a fragment entry sampling a
-/// `texture2d` at the *same* `(set, binding)` is valid multi-pass aliasing —
-/// the runtime binds one image to both, written then sampled. Different
-/// resource kinds get separate per-entry SPIR-V variables, so this is not a
-/// conflict (the narrow guard only compares same-kind buffers).
+/// A raw compute `storage_image` and fragment `texture2d` cannot occupy the
+/// same descriptor slot. Use a named `resource` instead, which gives the
+/// sampled view a distinct texture descriptor with a backing reference.
 #[test]
-fn cross_kind_image_aliasing_compiles() {
-    let lowered = crate::compile_thru_spirv(
+fn raw_cross_kind_image_aliasing_is_rejected() {
+    let result = crate::compile_thru_spirv(
         r#"
 #[compute]
 entry paint(#[storage_image(set=0, binding=0, format=rgba8unorm, access=write_only)] img: *storage_image,
@@ -7774,9 +7772,15 @@ entry fragment_main(#[builtin(position)] pos: vec4f32,
                     #[sampler(set=0, binding=1)] samp: sampler) #[target(screen)] vec4f32 =
   texture_sample(tex, samp, @[pos.x / 1024.0, pos.y / 1024.0], 0.0)
 "#,
-    )
-    .expect("cross-kind image aliasing at one (set, binding) must compile");
-    assert!(!lowered.spirv.is_empty());
+    );
+    let msg = match result {
+        Ok(_) => panic!("storage_image + texture at one (set, binding) must be rejected"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        msg.contains("set") && msg.contains("binding"),
+        "expected a descriptor collision diagnostic, got: {msg}"
+    );
 }
 
 /// A named `resource` viewed `storage_write` by a compute entry and `sampled`
@@ -8571,15 +8575,9 @@ entry paint(#[view(nope, storage_write)] img: *storage_image,
 /// A raw `#[storage_image]` and `#[texture]` reusing one `(set, binding)` with
 /// different image types is invalid: it emits two descriptor variables of
 /// different types at one slot, which the runtime can't bind. The `resource`
-/// form makes this unrepresentable, but hand-written raw bindings can still
-/// express it; a future resolution-time check should reject it with an
-/// incompatible-descriptor-kind error.
-///
-/// `#[ignore]`d: the collision check is not implemented yet — the module
-/// currently compiles (and `cross_kind_image_aliasing_compiles` documents
-/// that). Un-ignore once the check lands.
+/// form makes this unrepresentable by giving sampled views their own descriptor
+/// slot plus a `backing` reference to the storage texture allocation.
 #[test]
-#[ignore = "collision check not implemented: raw storage_image+texture at one (set,binding) still compiles"]
 fn raw_cross_kind_same_binding_is_rejected() {
     let result = crate::compile_thru_spirv(
         r#"

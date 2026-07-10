@@ -20,7 +20,9 @@ pub fn schedule(
     // schedule validates and the returned program is committed.
     let unpublished_descriptor = inner.pipeline.clone();
     let mut source_descriptor = unpublished_descriptor.clone();
-    source_descriptor.publish_implicit_bindings(&inner.entry_points);
+    source_descriptor
+        .publish_implicit_bindings(&inner.entry_points)
+        .map_err(ConvertError::DescriptorLayout)?;
     source_descriptor.publish_graphics_io(&inner.entry_points);
     source_descriptor.relabel_input_storage_names(&inner.input_names);
     inner.pipeline = source_descriptor;
@@ -49,7 +51,7 @@ pub fn schedule(
 
     let mut descriptor = unpublished_descriptor;
     inner.kernel_schedule.install_phase_shells(&mut descriptor).map_err(ConvertError::Internal)?;
-    descriptor.publish_implicit_bindings(&inner.entry_points);
+    descriptor.publish_implicit_bindings(&inner.entry_points).map_err(ConvertError::DescriptorLayout)?;
     descriptor.publish_graphics_io(&inner.entry_points);
     inner.kernel_schedule.publish(&mut descriptor).map_err(ConvertError::Internal)?;
     descriptor.relabel_input_storage_names(&inner.input_names);

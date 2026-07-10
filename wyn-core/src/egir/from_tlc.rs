@@ -64,6 +64,9 @@ pub enum ConvertError {
     /// it launches fewer threads than the entry's data-parallel domain has
     /// elements, silently dropping the tail. A user error, not internal.
     InvalidDispatch(String),
+    /// Two declared descriptor resources claim the same `(set, binding)` with
+    /// incompatible descriptor classes or layout-relevant properties.
+    DescriptorLayout(String),
 }
 
 impl std::fmt::Display for ConvertError {
@@ -73,6 +76,7 @@ impl std::fmt::Display for ConvertError {
             ConvertError::Unsupported(msg) => write!(f, "Unsupported: {}", msg),
             ConvertError::Internal(msg) => write!(f, "internal compiler error: {}", msg),
             ConvertError::InvalidDispatch(msg) => write!(f, "{}", msg),
+            ConvertError::DescriptorLayout(msg) => write!(f, "{}", msg),
         }
     }
 }

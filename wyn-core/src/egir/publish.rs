@@ -21,7 +21,7 @@
 //! rule blocks a regular `impl` block here too. A trait owned by
 //! `wyn-core` is the standard workaround.
 
-use crate::{LookupMap, LookupSet};
+use crate::{BindingRef, LookupMap, LookupSet};
 
 use crate::egir::program::EgirEntry;
 use crate::pipeline_descriptor::{
@@ -37,7 +37,7 @@ pub trait PipelineDescriptorPublish {
     /// `EntryInput`s, `EntryOutput`s, and `storage_bindings` (gather
     /// intermediates). Bindings already present (e.g. those a
     /// `MultiCompute` parallelization path pre-populated) are skipped.
-    fn publish_implicit_bindings(&mut self, entries: &[EgirEntry]);
+    fn publish_implicit_bindings(&mut self, entries: &[EgirEntry]) -> Result<(), String>;
 
     /// Populate `vertex_inputs` and `fragment_outputs` on graphics
     /// pipelines from a vertex entry's `#[vertex_slot(n)]` inputs and a
@@ -60,7 +60,7 @@ pub trait PipelineDescriptorPublish {
 }
 
 impl PipelineDescriptorPublish for PipelineDescriptor {
-    fn publish_implicit_bindings(&mut self, entries: &[EgirEntry]) {
+    fn publish_implicit_bindings(&mut self, entries: &[EgirEntry]) -> Result<(), String> {
         // SPIR-V `NonWritable` is a module-level decoration on
         // `OpVariable`, not per-entry-point. The SPIR-V backend (see
         // `spirv/mod.rs` `written_bindings`) only emits `NonWritable`
@@ -102,6 +102,8 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
             }))
             .collect();
 
+        let mut layout = DescriptorLayout::from_pipeline(self)?;
+
         for entry in entries {
             // Find the bindings list backing this entry. A compute
             // entry matches any stage in a `Compute` (covers both the
@@ -117,22 +119,6 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                 _ => continue,
             };
 
-            // Snapshot existing (set, binding) and push-constant offsets to
-            // skip what `parallelize` (or an earlier publication pass) already
-            // surfaced. Every slotted kind must be collected — a kind missing
-            // here gets re-pushed on the next pass and the duplicate slot
-            // fails bind-group-layout creation at runtime.
-            let mut claimed: LookupSet<(u32, u32)> = bindings
-                .iter()
-                .filter_map(|b| match b {
-                    Binding::StorageBuffer { set, binding, .. } => Some((*set, *binding)),
-                    Binding::Uniform { set, binding, .. } => Some((*set, *binding)),
-                    Binding::Texture { set, binding, .. } => Some((*set, *binding)),
-                    Binding::Sampler { set, binding, .. } => Some((*set, *binding)),
-                    Binding::StorageTexture { set, binding, .. } => Some((*set, *binding)),
-                    Binding::PushConstant { .. } => None,
-                })
-                .collect();
             let claimed_pc_offsets: LookupSet<u32> = bindings
                 .iter()
                 .filter_map(|b| match b {
@@ -140,32 +126,44 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                     _ => None,
                 })
                 .collect();
+            let mut local_claimed: LookupSet<BindingRef> =
+                bindings.iter().filter_map(binding_slot).collect();
 
             for input in &entry.inputs {
                 if let Some(br) = input.uniform_binding {
-                    if claimed.contains(&(br.set, br.binding)) {
-                        continue;
-                    }
                     let (size, members) = uniform_block_members(&input.ty);
-                    bindings.push(Binding::Uniform {
+                    let binding = Binding::Uniform {
                         set: br.set,
                         binding: br.binding,
                         name: input.name.clone(),
                         size,
                         members,
-                    });
-                } else if let Some(br) = input.storage_binding {
-                    if claimed.contains(&(br.set, br.binding)) {
+                    };
+                    let Some(slot) = binding_slot(&binding) else {
+                        continue;
+                    };
+                    layout.reserve(&binding)?;
+                    if !local_claimed.insert(slot) {
                         continue;
                     }
-                    bindings.push(Binding::StorageBuffer {
+                    bindings.push(binding);
+                } else if let Some(br) = input.storage_binding {
+                    let binding = Binding::StorageBuffer {
                         set: br.set,
                         binding: br.binding,
                         access: Access::ReadOnly,
                         usage: BufferUsage::Input,
                         name: input.name.clone(),
                         length: input.length.clone(),
-                    });
+                    };
+                    let Some(slot) = binding_slot(&binding) else {
+                        continue;
+                    };
+                    layout.reserve(&binding)?;
+                    if !local_claimed.insert(slot) {
+                        continue;
+                    }
+                    bindings.push(binding);
                 } else if let Some(pc) = input.push_constant {
                     if claimed_pc_offsets.contains(&pc.offset) {
                         continue;
@@ -176,10 +174,7 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                         name: input.name.clone(),
                     });
                 } else if let Some(br) = input.texture_binding {
-                    if claimed.contains(&(br.set, br.binding)) {
-                        continue;
-                    }
-                    bindings.push(Binding::Texture {
+                    let binding = Binding::Texture {
                         set: br.set,
                         binding: br.binding,
                         name: input.name.clone(),
@@ -191,22 +186,32 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                             binding: b.binding,
                         }),
                         resource: input.texture_resource.clone(),
-                    });
-                } else if let Some(br) = input.sampler_binding {
-                    if claimed.contains(&(br.set, br.binding)) {
+                    };
+                    let Some(slot) = binding_slot(&binding) else {
+                        continue;
+                    };
+                    layout.reserve(&binding)?;
+                    if !local_claimed.insert(slot) {
                         continue;
                     }
-                    bindings.push(Binding::Sampler {
+                    bindings.push(binding);
+                } else if let Some(br) = input.sampler_binding {
+                    let binding = Binding::Sampler {
                         set: br.set,
                         binding: br.binding,
                         name: input.name.clone(),
                         binding_type: SamplerBindingType::Filtering,
-                    });
-                } else if let Some((br, format, access, size)) = input.storage_image_binding {
-                    if claimed.contains(&(br.set, br.binding)) {
+                    };
+                    let Some(slot) = binding_slot(&binding) else {
+                        continue;
+                    };
+                    layout.reserve(&binding)?;
+                    if !local_claimed.insert(slot) {
                         continue;
                     }
-                    bindings.push(Binding::StorageTexture {
+                    bindings.push(binding);
+                } else if let Some((br, format, access, size)) = input.storage_image_binding {
+                    let binding = Binding::StorageTexture {
                         set: br.set,
                         binding: br.binding,
                         name: input.name.clone(),
@@ -218,7 +223,15 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                         },
                         size,
                         resource: input.storage_image_resource.clone(),
-                    });
+                    };
+                    let Some(slot) = binding_slot(&binding) else {
+                        continue;
+                    };
+                    layout.reserve(&binding)?;
+                    if !local_claimed.insert(slot) {
+                        continue;
+                    }
+                    bindings.push(binding);
                 }
             }
 
@@ -230,15 +243,12 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
             // Output (it writes) and the consumer Input (it reads); both surface
             // as a compiler-managed `Intermediate`, with access from the role.
             for decl in &entry.storage_bindings {
-                if !claimed.insert((decl.binding.set, decl.binding.binding)) {
-                    continue;
-                }
                 let access = match decl.role {
                     crate::interface::StorageRole::Output => Access::WriteOnly,
                     crate::interface::StorageRole::Input => Access::ReadOnly,
                     crate::interface::StorageRole::Intermediate => Access::ReadWrite,
                 };
-                bindings.push(Binding::StorageBuffer {
+                let binding = Binding::StorageBuffer {
                     set: decl.binding.set,
                     binding: decl.binding.binding,
                     access,
@@ -249,16 +259,21 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                         format!("{}_intermediate_b{}", entry.name, decl.binding.binding)
                     },
                     length: decl.length.clone(),
-                });
+                };
+                let Some(slot) = binding_slot(&binding) else {
+                    continue;
+                };
+                layout.reserve(&binding)?;
+                if !local_claimed.insert(slot) {
+                    continue;
+                }
+                bindings.push(binding);
             }
 
             for (i, output) in entry.outputs.iter().enumerate() {
                 let Some(br) = output.storage_binding else {
                     continue;
                 };
-                if !claimed.insert((br.set, br.binding)) {
-                    continue;
-                }
                 // This name is the buffer's frame-graph identity — a reader
                 // binding the same name reads the same resource — and is what
                 // `viz --output <name>` takes on the command line.
@@ -272,14 +287,22 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                         format!("{}_output_{}", entry.name, i)
                     }
                 });
-                bindings.push(Binding::StorageBuffer {
+                let binding = Binding::StorageBuffer {
                     set: br.set,
                     binding: br.binding,
                     access: Access::WriteOnly,
                     usage: BufferUsage::Output,
                     name,
                     length: output.length.clone(),
-                });
+                };
+                let Some(slot) = binding_slot(&binding) else {
+                    continue;
+                };
+                layout.reserve(&binding)?;
+                if !local_claimed.insert(slot) {
+                    continue;
+                }
+                bindings.push(binding);
             }
         }
 
@@ -304,6 +327,8 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                 }
             }
         }
+
+        Ok(())
     }
 
     fn publish_graphics_io(&mut self, entries: &[EgirEntry]) {
@@ -352,6 +377,113 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
             }
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum DescriptorShape {
+    StorageBuffer,
+    Uniform {
+        size: u32,
+    },
+    Texture {
+        sample_type: TextureSampleType,
+        view_dimension: TextureViewDimension,
+        multisampled: bool,
+    },
+    Sampler {
+        binding_type: SamplerBindingType,
+    },
+    StorageTexture {
+        format: crate::pipeline_descriptor::StorageImageFormat,
+    },
+}
+
+impl DescriptorShape {
+    fn label(&self) -> &'static str {
+        match self {
+            DescriptorShape::StorageBuffer => "storage buffer",
+            DescriptorShape::Uniform { .. } => "uniform buffer",
+            DescriptorShape::Texture { .. } => "texture",
+            DescriptorShape::Sampler { .. } => "sampler",
+            DescriptorShape::StorageTexture { .. } => "storage texture",
+        }
+    }
+}
+
+struct DescriptorLayout {
+    slots: LookupMap<BindingRef, DescriptorShape>,
+}
+
+impl DescriptorLayout {
+    fn from_pipeline(pipeline: &PipelineDescriptor) -> Result<Self, String> {
+        let mut layout = Self {
+            slots: LookupMap::new(),
+        };
+        for pipeline in &pipeline.pipelines {
+            let bindings = match pipeline {
+                Pipeline::Compute(cp) => &cp.bindings,
+                Pipeline::Graphics(gp) => &gp.bindings,
+            };
+            for binding in bindings {
+                layout.reserve(binding)?;
+            }
+        }
+        Ok(layout)
+    }
+
+    fn reserve(&mut self, binding: &Binding) -> Result<bool, String> {
+        let Some(slot) = binding_slot(binding) else {
+            return Ok(true);
+        };
+        let Some(shape) = binding_shape(binding) else {
+            return Ok(true);
+        };
+        match self.slots.get(&slot) {
+            Some(existing) if existing == &shape => Ok(false),
+            Some(existing) => Err(format!(
+                "descriptor binding collision at {slot}: existing {} conflicts with {}",
+                existing.label(),
+                shape.label()
+            )),
+            None => {
+                self.slots.insert(slot, shape);
+                Ok(true)
+            }
+        }
+    }
+}
+
+fn binding_slot(binding: &Binding) -> Option<BindingRef> {
+    match binding {
+        Binding::StorageBuffer { set, binding, .. }
+        | Binding::Uniform { set, binding, .. }
+        | Binding::Texture { set, binding, .. }
+        | Binding::Sampler { set, binding, .. }
+        | Binding::StorageTexture { set, binding, .. } => Some(BindingRef::new(*set, *binding)),
+        Binding::PushConstant { .. } => None,
+    }
+}
+
+fn binding_shape(binding: &Binding) -> Option<DescriptorShape> {
+    Some(match binding {
+        Binding::StorageBuffer { .. } => DescriptorShape::StorageBuffer,
+        Binding::Uniform { size, .. } => DescriptorShape::Uniform { size: *size },
+        Binding::Texture {
+            sample_type,
+            view_dimension,
+            multisampled,
+            ..
+        } => DescriptorShape::Texture {
+            sample_type: sample_type.clone(),
+            view_dimension: view_dimension.clone(),
+            multisampled: *multisampled,
+        },
+        Binding::Sampler { binding_type, .. } => DescriptorShape::Sampler {
+            binding_type: binding_type.clone(),
+        },
+        Binding::StorageTexture { format, .. } => DescriptorShape::StorageTexture { format: *format },
+        Binding::PushConstant { .. } => return None,
+    })
 }
 
 /// Populate `vertex_inputs` of the Graphics pipeline backing a vertex
