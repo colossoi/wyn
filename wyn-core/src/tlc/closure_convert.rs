@@ -629,8 +629,8 @@ impl ClosureInfo {
 // ClosureConverter pass
 // =============================================================================
 
-struct ClosureConverter {
-    symbols: SymbolTable,
+struct ClosureConverter<'a> {
+    symbols: &'a mut SymbolTable,
     top_level: LookupSet<SymbolId>,
     /// Canonical symbols for registry-known definitions. Tracking these by
     /// SymbolId is essential: a lexical parameter may shadow a top-level name
@@ -642,8 +642,8 @@ struct ClosureConverter {
     term_ids: TermIdSource,
 }
 
-impl ClosureConverter {
-    fn run(program: Program, known_defs: &LookupSet<String>) -> (Program, ClosureInfo) {
+impl<'a> ClosureConverter<'a> {
+    fn run(program: &mut Program, known_defs: &LookupSet<String>) -> ClosureInfo {
         let top_level: LookupSet<SymbolId> = program.defs.iter().map(|d| d.name).collect();
         let known_def_symbols: LookupSet<SymbolId> = program
             .def_syms
@@ -658,8 +658,8 @@ impl ClosureConverter {
             }
         }
 
-        let mut cc = Self {
-            symbols: program.symbols,
+        let mut cc = ClosureConverter {
+            symbols: &mut program.symbols,
             top_level,
             known_def_symbols,
             lifted_defs: vec![],
@@ -668,25 +668,15 @@ impl ClosureConverter {
             term_ids: TermIdSource::new(),
         };
 
-        let transformed: Vec<Def> = program
-            .defs
-            .into_iter()
-            .map(|def| {
-                let body = cc.convert_def_body(def.body);
-                Def { body, ..def }
-            })
-            .collect();
+        crate::map_in_place(&mut program.defs, |def| {
+            let body = cc.convert_def_body(def.body);
+            Def { body, ..def }
+        });
+        program.defs.extend(cc.lifted_defs);
 
-        let result_program = Program {
-            defs: transformed.into_iter().chain(cc.lifted_defs).collect(),
-            symbols: cc.symbols,
-            ..program
-        };
-
-        let info = ClosureInfo {
+        ClosureInfo {
             callable_values: cc.callable_values,
-        };
-        (result_program, info)
+        }
     }
 
     /// Walk a def body, preserving the outer parameter-spine `Lambda`
@@ -1358,14 +1348,15 @@ fn collect_soac_bound_syms(soac: &SoacOp, out: &mut LookupSet<SymbolId>) {
     }
 }
 
-/// Run closure conversion. Lifts every `Lambda` node to a top-level def,
-/// substitutes let-aliased callable Vars away, and returns a side-table
-/// describing every callable symbol's captures (or lack thereof).
-pub fn run(program: Program, known_defs: &LookupSet<String>) -> (Program, ClosureInfo) {
-    let result = ClosureConverter::run(program, known_defs);
-    verify_closure_converted(&result.0)
+/// Run closure conversion in place. Lifts every `Lambda` node to a
+/// top-level def, substitutes let-aliased callable Vars away, and returns
+/// a side-table describing every callable symbol's captures (or lack
+/// thereof).
+pub fn run(program: &mut Program, known_defs: &LookupSet<String>) -> ClosureInfo {
+    let info = ClosureConverter::run(program, known_defs);
+    verify_closure_converted(program)
         .unwrap_or_else(|e| panic!("closure-conversion verifier failed: {:?}", e));
-    result
+    info
 }
 
 // =============================================================================

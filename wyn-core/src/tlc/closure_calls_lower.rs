@@ -575,28 +575,17 @@ pub fn thread_captures_in_term(
     result
 }
 
-/// Run closure-call lowering. Threads captures into call sites and
-/// runs the post-condition verifier.
-pub fn run(program: Program, closure_info: &ClosureInfo) -> Program {
+/// Run closure-call lowering in place. Threads captures into call sites
+/// and runs the post-condition verifier.
+pub fn run(program: &mut Program, closure_info: &ClosureInfo) {
     let mut lowerer = CallLowerer::new(closure_info);
-    let defs: Vec<_> = program
-        .defs
-        .into_iter()
-        .map(|def| super::Def {
-            body: lowerer.lower_def_body(def.body),
-            ..def
-        })
-        .collect();
+    crate::map_in_place(&mut program.defs, |def| super::Def {
+        body: lowerer.lower_def_body(def.body),
+        ..def
+    });
 
-    let result = Program {
-        defs,
-        symbols: program.symbols,
-        ..program
-    };
-
-    verify_closure_calls_lowered(&result)
+    verify_closure_calls_lowered(program)
         .unwrap_or_else(|e| panic!("closure-calls-lowered verifier failed: {:?}", e));
-    result
 }
 
 #[cfg(test)]

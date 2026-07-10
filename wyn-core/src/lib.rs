@@ -787,9 +787,9 @@ impl TlcScalarPrepassesHoisted {
     /// references. SOAC envelopes stay inline (not lowered to loops).
     pub fn defunctionalize(self) -> TlcDefunctionalized {
         let mut inner = self.0;
-        let (mut cc, closure_info) = tlc::closure_convert::run(inner.tlc, &inner.known_defs);
-        tlc::hof_specialize::run(&mut cc, &closure_info);
-        inner.tlc = tlc::closure_calls_lower::run(cc, &closure_info);
+        let closure_info = tlc::closure_convert::run(&mut inner.tlc, &inner.known_defs);
+        tlc::hof_specialize::run(&mut inner.tlc, &closure_info);
+        tlc::closure_calls_lower::run(&mut inner.tlc, &closure_info);
         TlcDefunctionalized(inner)
     }
 }

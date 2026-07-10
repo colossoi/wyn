@@ -7,10 +7,10 @@ use std::collections::{HashMap, HashSet};
 
 /// End-to-end runner for the three-phase closure pipeline. Mirrors what
 /// `TlcOwnershipApplied::defunctionalize` does in production.
-fn defunctionalize(program: Program, known_defs: &HashSet<String>) -> Program {
-    let (mut cc, closure_info) = super::super::closure_convert::run(program, known_defs);
-    super::super::hof_specialize::run(&mut cc, &closure_info);
-    super::super::closure_calls_lower::run(cc, &closure_info)
+fn defunctionalize(program: &mut Program, known_defs: &HashSet<String>) {
+    let closure_info = super::super::closure_convert::run(program, known_defs);
+    super::super::hof_specialize::run(program, &closure_info);
+    super::super::closure_calls_lower::run(program, &closure_info);
 }
 
 /// Test helper that manages symbol table and term ID generation.
@@ -216,7 +216,8 @@ fn test_defunc_simple_lambda_no_capture() {
     };
 
     let known_defs = HashSet::new();
-    let result = defunctionalize(program, &known_defs);
+    let mut result = program;
+    defunctionalize(&mut result, &known_defs);
 
     // Should preserve the parameter lambda (not lift it)
     assert_eq!(result.defs.len(), 1);
@@ -311,7 +312,8 @@ fn test_defunc_lambda_with_capture() {
     };
 
     let known_defs = HashSet::new();
-    let result = defunctionalize(program, &known_defs);
+    let mut result = program;
+    defunctionalize(&mut result, &known_defs);
 
     // Should have lifted the inner lambda
     assert!(result.defs.len() >= 2, "Expected lifted lambda def");
@@ -535,7 +537,8 @@ fn test_nested_hof_passthrough() {
     };
 
     let known_defs = HashSet::new();
-    let result = defunctionalize(program, &known_defs);
+    let mut result = program;
+    defunctionalize(&mut result, &known_defs);
 
     let def_names: Vec<&str> = result
         .defs
@@ -707,7 +710,8 @@ fn specialized_hof_preserves_consuming_data_param_diet() {
         def_syms: HashMap::new(),
     };
 
-    let result = defunctionalize(program, &HashSet::new());
+    let mut result = program;
+    defunctionalize(&mut result, &HashSet::new());
 
     // The specialized `apply` (callback removed) keeps only the array param.
     let specialized = result

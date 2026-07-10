@@ -326,7 +326,8 @@ fn reduce_with_operator(
         return_diet: crate::types::Diet::observing(),
     });
 
-    let (result, info) = run(program, &std::collections::HashSet::new());
+    let mut result = program;
+    let info = run(&mut result, &std::collections::HashSet::new());
     (result, info, g, main)
 }
 
