@@ -1001,7 +1001,7 @@ impl TlcSoaNormalized {
     pub fn monomorphize(self) -> TlcMonomorphized {
         let mut inner = self.0;
         tlc::specialize::run(&mut inner.tlc);
-        inner.tlc = tlc::monomorphize::run(inner.tlc, &inner.schemes);
+        tlc::monomorphize::run(&mut inner.tlc, &inner.schemes);
         TlcMonomorphized(inner)
     }
 }

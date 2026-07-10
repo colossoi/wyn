@@ -38,16 +38,15 @@ type Substitution = LookupMap<usize, Type<TypeName>>;
 ///
 /// This walks through all definitions starting from entry points, finds calls
 /// to polymorphic functions, and creates specialized versions with concrete types.
-pub fn run(program: Program, schemes: &LookupMap<SymbolId, TypeScheme>) -> Program {
-    let mono = Monomorphizer::new(program, schemes);
-    let result = mono.run();
-    result.assert_flat_apps();
-    result
+pub fn run(program: &mut Program, schemes: &LookupMap<SymbolId, TypeScheme>) {
+    let mono = Monomorphizer::new(&mut *program, schemes);
+    program.defs = mono.monomorphize();
+    program.assert_flat_apps();
 }
 
 struct Monomorphizer<'a> {
     /// Symbol table for name lookup and allocation
-    symbols: SymbolTable,
+    symbols: &'a mut SymbolTable,
     /// Original polymorphic functions by symbol
     poly_functions: LookupMap<SymbolId, Def>,
     /// Generated monomorphic functions
@@ -62,8 +61,6 @@ struct Monomorphizer<'a> {
     schemes: &'a LookupMap<SymbolId, TypeScheme>,
     /// Term ID source for creating new terms
     term_ids: TermIdSource,
-    /// Canonical function name → def SymbolId mapping (passed through unchanged)
-    def_syms: LookupMap<String, crate::SymbolId>,
 }
 
 struct WorkItem {
@@ -321,7 +318,7 @@ fn split_function_type(ty: &Type<TypeName>) -> (Vec<Type<TypeName>>, Type<TypeNa
 }
 
 impl<'a> Monomorphizer<'a> {
-    fn new(program: Program, schemes: &'a LookupMap<SymbolId, TypeScheme>) -> Self {
+    fn new(program: &'a mut Program, schemes: &'a LookupMap<SymbolId, TypeScheme>) -> Self {
         // Build function map and collect entry points
         let mut poly_functions = LookupMap::new();
         let mut entry_points = Vec::new();
@@ -345,7 +342,7 @@ impl<'a> Monomorphizer<'a> {
         worklist.extend(entry_points);
 
         Monomorphizer {
-            symbols: program.symbols,
+            symbols: &mut program.symbols,
             poly_functions,
             mono_functions: Vec::new(),
             specializations: LookupMap::new(),
@@ -353,11 +350,12 @@ impl<'a> Monomorphizer<'a> {
             processed: LookupSet::new(),
             schemes,
             term_ids: TermIdSource::new(),
-            def_syms: program.def_syms,
         }
     }
 
-    fn run(mut self) -> Program {
+    /// Drain the worklist, returning the reachable monomorphic defs that
+    /// replace the program's def list.
+    fn monomorphize(mut self) -> Vec<Def> {
         while let Some(work_item) = self.worklist.pop_front() {
             let key = (work_item.original_sym, work_item.spec_key.clone());
             if self.processed.contains(&key) {
@@ -370,11 +368,7 @@ impl<'a> Monomorphizer<'a> {
             self.mono_functions.push(def);
         }
 
-        Program {
-            defs: self.mono_functions,
-            symbols: self.symbols,
-            def_syms: self.def_syms,
-        }
+        self.mono_functions
     }
 
     /// Ensure a definition is in the worklist (for monomorphic callees and constants)
