@@ -8,7 +8,7 @@
 //! the conservative cases to one `Map` whose lambda contains the branch.
 
 use super::VarRef;
-use super::{ArrayExpr, Def, Lambda, Program, SoacBody, SoacDestination, SoacOp};
+use super::{ArrayExpr, Lambda, Program, SoacBody, SoacDestination, SoacOp};
 use super::{Term, TermIdSource, TermKind};
 use crate::ast::{Span, TypeName};
 use crate::builtins::{catalog, BuiltinId};
@@ -18,18 +18,12 @@ use crate::SymbolId;
 use crate::SymbolTable;
 use polytype::Type;
 
-pub fn run(mut program: Program) -> Program {
+pub fn run(program: &mut Program) {
     let mut term_ids = TermIdSource::new();
-    let defs = program
-        .defs
-        .into_iter()
-        .map(|def| Def {
-            body: rewrite_term(def.body, &mut program.symbols, &mut term_ids),
-            ..def
-        })
-        .collect();
-
-    Program { defs, ..program }
+    for idx in 0..program.defs.len() {
+        let body = program.defs[idx].body.clone();
+        program.defs[idx].body = rewrite_term(body, &mut program.symbols, &mut term_ids);
+    }
 }
 
 fn rewrite_term(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdSource) -> Term {

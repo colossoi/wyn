@@ -30,7 +30,7 @@ struct Binding {
     rhs: Term,
 }
 
-pub fn run(mut program: Program) -> Program {
+pub fn run(program: &mut Program) {
     let mut ids = TermIdSource::new();
     let blocked = LookupSet::new();
 
@@ -41,7 +41,6 @@ pub fn run(mut program: Program) -> Program {
     }
 
     super::anf::debug_check(&program, "runtime_index_producers");
-    program
 }
 
 fn float_term(

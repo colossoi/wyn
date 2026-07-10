@@ -1081,7 +1081,7 @@ struct ScalarPrepassHoister<'a> {
 /// parallelization recognition to discover the forced result binding without a
 /// side table. Defunctionalization then sees the generated entry as ordinary
 /// source-shaped TLC and attaches lambda captures in the correct scope.
-pub fn hoist_scalar_prepasses(mut program: Program, binding_ids: &mut crate::IdSource<u32>) -> Program {
+pub fn hoist_scalar_prepasses(program: &mut Program, binding_ids: &mut crate::IdSource<u32>) {
     let top_level_syms: LookupSet<SymbolId> = program.defs.iter().map(|d| d.name).collect();
     let entry_indices: Vec<usize> = program
         .defs
@@ -1141,7 +1141,7 @@ pub fn hoist_scalar_prepasses(mut program: Program, binding_ids: &mut crate::IdS
                 binding_ids,
                 added_decls: Vec::new(),
                 new_defs: Vec::new(),
-                program: &mut program,
+                program: &mut *program,
                 term_ids: &mut term_ids,
             };
             let body = hoister.rewrite(body);
@@ -1157,7 +1157,6 @@ pub fn hoist_scalar_prepasses(mut program: Program, binding_ids: &mut crate::IdS
 
     program.defs.extend(new_defs);
     super::anf::debug_check(&program, "hoist_scalar_prepasses");
-    program
 }
 
 impl ScalarPrepassHoister<'_> {

@@ -49,7 +49,7 @@ const MAX_DEPTH: usize = 64;
 /// A producer helper: its params + body (the `λparams. SOAC…`'s inner body).
 type Producer = (Vec<(SymbolId, Type<TypeName>)>, Term);
 
-pub fn run(mut program: Program) -> Program {
+pub fn run(program: &mut Program) {
     let summaries = summarize_program(&program);
     let sym_to_def = build_sym_to_def(&program.symbols, &program.def_syms);
 
@@ -81,7 +81,7 @@ pub fn run(mut program: Program) -> Program {
         .collect();
 
     if producers.is_empty() {
-        return program;
+        return;
     }
 
     let mut ids = TermIdSource::new();
@@ -97,7 +97,6 @@ pub fn run(mut program: Program) -> Program {
     // DCE (`inline::run_reachable`); we deliberately don't DCE here, so a lone
     // producer def with no entry caller (as in unit-test fragments) survives.
     super::anf::debug_check(&program, "materialize_entry_soacs");
-    program
 }
 
 /// Walk the entry's outer `Lambda` chain + top-level `Let` chain + tail value

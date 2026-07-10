@@ -69,7 +69,8 @@ entry e() [1]f32 = [g(256)[3]]
         "precondition: an unfused map(..)[3] is present"
     );
 
-    let fused = super::run(program);
+    let mut fused = program;
+    super::run(&mut fused);
     let after = entry_body(&fused);
     assert!(
         !has_index_into_map(&after),
@@ -91,7 +92,8 @@ entry e(xs: []i32) i32 =
 "#,
     );
     let before = entry_body(&program);
-    let fused = super::run(program.clone());
+    let mut fused = program.clone();
+    super::run(&mut fused);
     let after = entry_body(&fused);
     assert_eq!(
         format!("{before:?}"),

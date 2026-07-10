@@ -143,7 +143,8 @@ def g(n: i32) []f32 = map(|i: i32| f32.i32(i), 0i32 ..< n)
 entry e(j: i32) [1]f32 = [g(256)[j]]
 "#,
     );
-    let floated = run(program);
+    let mut floated = program;
+    run(&mut floated);
     let body = entry_body(&floated);
     assert!(
         let_bound_runtime_gather(&floated, body),
@@ -252,7 +253,8 @@ fn runtime_index_inside_fused_scatter_envelope_becomes_let_bound_gather_shape() 
         def_syms: std::collections::HashMap::new(),
     };
 
-    let floated = run(program);
+    let mut floated = program;
+    run(&mut floated);
     let body = &floated.defs[0].body;
     assert!(
         let_bound_runtime_gather(&floated, body),

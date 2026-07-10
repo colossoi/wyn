@@ -750,8 +750,7 @@ impl TlcGathersLifted {
     pub fn hoist_scalar_prepasses(self, disable: bool) -> TlcScalarPrepassesHoisted {
         let mut inner = self.0;
         if !disable {
-            inner.tlc =
-                tlc::parallelize::hoist_scalar_prepasses(inner.tlc, &mut inner.auto_storage_binding_ids);
+            tlc::parallelize::hoist_scalar_prepasses(&mut inner.tlc, &mut inner.auto_storage_binding_ids);
         }
         TlcScalarPrepassesHoisted(inner)
     }
@@ -801,7 +800,7 @@ impl TlcSoacHelpersInlined {
     pub fn canonicalize_producers(self) -> TlcProducerCanonicalized {
         let mut inner = self.0;
         inner.tlc = tlc::soa::run(inner.tlc);
-        inner.tlc = tlc::if_over_producer::run(inner.tlc);
+        tlc::if_over_producer::run(&mut inner.tlc);
         TlcProducerCanonicalized(inner)
     }
 }
@@ -823,7 +822,7 @@ impl TlcProducerCanonicalized {
     pub fn fuse_maps(self) -> TlcFused {
         let mut inner = self.0;
         inner.tlc = tlc::fusion::run(inner.tlc);
-        inner.tlc = tlc::if_over_producer::run(inner.tlc);
+        tlc::if_over_producer::run(&mut inner.tlc);
         inner.tlc = tlc::inline::run_reachable(inner.tlc);
         TlcFused(inner)
     }
@@ -845,7 +844,7 @@ impl TlcFused {
     /// indexed uses are still local in the entry body.
     pub fn expose_entry_producer_helpers(self) -> TlcEntryProducersExposed {
         let mut inner = self.0;
-        inner.tlc = tlc::materialize_entry_soacs::run(inner.tlc);
+        tlc::materialize_entry_soacs::run(&mut inner.tlc);
         TlcEntryProducersExposed(inner)
     }
 }
@@ -867,7 +866,7 @@ impl TlcOutputsNormalized {
     /// TLC pass in the experimental order). `disable` makes it a near no-op.
     pub fn parallelize_soacs(self, disable: bool) -> Result<TlcParallelized> {
         let mut inner = self.0;
-        inner.tlc = tlc::if_over_producer::run(inner.tlc);
+        tlc::if_over_producer::run(&mut inner.tlc);
         let result = tlc::parallelize::run(inner.tlc, disable, &mut inner.auto_storage_binding_ids)?;
         Ok(TlcParallelized(TlcPipelineInner {
             tlc: result.program,
@@ -917,7 +916,7 @@ impl TlcEntryProducersExposed {
     /// before the gather residency pass can materialize them.
     pub fn fuse_static_indices(self) -> TlcStaticIndexFused {
         let mut inner = self.0;
-        inner.tlc = tlc::static_index_fusion::run(inner.tlc);
+        tlc::static_index_fusion::run(&mut inner.tlc);
         TlcStaticIndexFused(inner)
     }
 }
@@ -937,7 +936,7 @@ impl TlcStaticIndexFused {
     /// gather residency can rewrite the indexed uses before defunctionalization.
     pub fn float_runtime_index_nested_producers(self) -> TlcRuntimeIndexProducersFloated {
         let mut inner = self.0;
-        inner.tlc = tlc::runtime_index_producers::run(inner.tlc);
+        tlc::runtime_index_producers::run(&mut inner.tlc);
         TlcRuntimeIndexProducersFloated(inner)
     }
 }
@@ -1113,7 +1112,7 @@ impl TlcSmallInlined {
     /// `.rep_specialize().parallelize_soacs(...)`.
     pub fn parallelize_soacs(self, disable: bool) -> Result<TlcParallelized> {
         let mut inner = self.0;
-        inner.tlc = tlc::if_over_producer::run(inner.tlc);
+        tlc::if_over_producer::run(&mut inner.tlc);
         let result = tlc::parallelize::run(inner.tlc, disable, &mut inner.auto_storage_binding_ids)?;
         Ok(TlcParallelized(TlcPipelineInner {
             tlc: result.program,
