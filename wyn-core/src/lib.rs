@@ -728,7 +728,7 @@ impl TlcPartialEvaled {
     /// flatten Map+Zip into multi-input Map, and convert standalone Zip to tuple.
     pub fn normalize_soacs(self) -> TlcSoaNormalized {
         let mut inner = self.0;
-        inner.tlc = tlc::soa::run(inner.tlc);
+        tlc::soa::run(&mut inner.tlc);
         TlcSoaNormalized(inner)
     }
 }
@@ -799,7 +799,7 @@ impl TlcSoacHelpersInlined {
     /// top-of-let-chain SOACs.
     pub fn canonicalize_producers(self) -> TlcProducerCanonicalized {
         let mut inner = self.0;
-        inner.tlc = tlc::soa::run(inner.tlc);
+        tlc::soa::run(&mut inner.tlc);
         tlc::if_over_producer::run(&mut inner.tlc);
         TlcProducerCanonicalized(inner)
     }

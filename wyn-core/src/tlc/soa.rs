@@ -173,41 +173,22 @@ fn has_type_variables(ty: &Type<TypeName>) -> bool {
 // =============================================================================
 
 /// SoA transformer state.
-struct SoaTransformer {
+struct SoaTransformer<'a> {
     term_ids: TermIdSource,
-    symbols: SymbolTable,
+    symbols: &'a mut SymbolTable,
 }
 
-impl SoaTransformer {
-    fn new(symbols: SymbolTable) -> Self {
+impl<'a> SoaTransformer<'a> {
+    fn new(symbols: &'a mut SymbolTable) -> Self {
         SoaTransformer {
             term_ids: TermIdSource::new(),
             symbols,
         }
     }
 
-    /// Main entry: transform a complete program.
-    fn transform_program(mut self, program: Program) -> Program {
-        let defs = program.defs.into_iter().map(|def| self.transform_def(def)).collect();
-        Program {
-            defs,
-            symbols: self.symbols,
-            ..program
-        }
-    }
-
-    fn transform_def(&mut self, def: Def) -> Def {
-        let new_ty = soa_type(&def.ty);
-        let new_body = self.transform_term(&def.body);
-        Def {
-            name: def.name,
-            ty: new_ty,
-            body: new_body,
-            meta: def.meta,
-            arity: def.arity,
-            param_diets: def.param_diets,
-            return_diet: def.return_diet,
-        }
+    fn transform_def(&mut self, def: &mut Def) {
+        def.ty = soa_type(&def.ty);
+        def.body = self.transform_term(&def.body);
     }
 
     /// Transform a term, rewriting types via soa_type and transforming
@@ -1129,9 +1110,11 @@ impl SoaTransformer {
 ///    that touch array-of-tuple types.
 /// 2. Flattens Map+Zip into multi-input Map with split lambda params.
 /// 3. Converts standalone Zip to tuple construction.
-pub fn run(program: Program) -> Program {
-    let transformer = SoaTransformer::new(program.symbols.clone());
-    transformer.transform_program(program)
+pub fn run(program: &mut Program) {
+    let mut transformer = SoaTransformer::new(&mut program.symbols);
+    for def in &mut program.defs {
+        transformer.transform_def(def);
+    }
 }
 
 // =============================================================================
