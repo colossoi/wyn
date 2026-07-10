@@ -82,7 +82,7 @@ fn test_specialize_sign_f32() {
 
     let symbols = b.finish();
 
-    let program = Program {
+    let mut program = Program {
         defs: vec![Def {
             name: test_sym,
             ty: f32_ty.clone(),
@@ -96,14 +96,14 @@ fn test_specialize_sign_f32() {
         def_syms: HashMap::new(),
     };
 
-    let specialized = run(program);
+    run(&mut program);
 
     // Check that sign became f32.sign
-    match &specialized.defs[0].body.kind {
+    match &program.defs[0].body.kind {
         TermKind::App { func, .. } => {
             let name = match &func.kind {
                 TermKind::Var(VarRef::Symbol(sym)) => {
-                    specialized.symbols.get(*sym).expect("BUG: symbol not in table").clone()
+                    program.symbols.get(*sym).expect("BUG: symbol not in table").clone()
                 }
                 TermKind::Var(VarRef::Builtin { id, .. }) => by_id(*id).raw.surface_name.to_string(),
                 _ => panic!("Expected Var, got {:?}", func.kind),
@@ -165,7 +165,7 @@ fn test_specialize_min_i32() {
 
     let symbols = b.finish();
 
-    let program = Program {
+    let mut program = Program {
         defs: vec![Def {
             name: test_sym,
             ty: i32_ty.clone(),
@@ -179,14 +179,14 @@ fn test_specialize_min_i32() {
         def_syms: HashMap::new(),
     };
 
-    let specialized = run(program);
+    run(&mut program);
 
     // Check that min became i32.min in the application
-    match &specialized.defs[0].body.kind {
+    match &program.defs[0].body.kind {
         TermKind::App { func, args } => {
             let name = match &func.kind {
                 TermKind::Var(VarRef::Symbol(sym)) => {
-                    specialized.symbols.get(*sym).expect("BUG: symbol not in table").clone()
+                    program.symbols.get(*sym).expect("BUG: symbol not in table").clone()
                 }
                 TermKind::Var(VarRef::Builtin { id, .. }) => by_id(*id).raw.surface_name.to_string(),
                 _ => panic!("Expected Var, got {:?}", func.kind),

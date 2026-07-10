@@ -1000,8 +1000,8 @@ impl TlcSoaNormalized {
     /// (region-specialized). After this no `Type::Variable` remains.
     pub fn monomorphize(self) -> TlcMonomorphized {
         let mut inner = self.0;
-        let specialized = tlc::specialize::run(inner.tlc);
-        inner.tlc = tlc::monomorphize::run(specialized, &inner.schemes);
+        tlc::specialize::run(&mut inner.tlc);
+        inner.tlc = tlc::monomorphize::run(inner.tlc, &inner.schemes);
         TlcMonomorphized(inner)
     }
 }

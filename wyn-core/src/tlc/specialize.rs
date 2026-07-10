@@ -4,7 +4,7 @@
 //! For example: `sign(x)` where `x: f32` becomes `f32.sign(x)`.
 
 use super::VarRef;
-use super::{Def, Program, Term, TermIdSource, TermKind};
+use super::{Program, Term, TermIdSource, TermKind};
 use crate::ast::TypeName;
 use crate::builtins::catalog::KnownBuiltinIds;
 use crate::builtins::{catalog, BuiltinId};
@@ -13,37 +13,24 @@ use crate::SymbolTable;
 use polytype::Type;
 
 /// Specialize polymorphic intrinsics in a TLC program.
-pub fn run(program: Program) -> Program {
-    let mut symbols = program.symbols;
+pub fn run(program: &mut Program) {
     let mut term_ids = TermIdSource::new();
-
-    let defs = program
-        .defs
-        .into_iter()
-        .map(|def| {
-            let body = specialize_term(def.body, &mut symbols, &mut term_ids);
-            Def { body, ..def }
-        })
-        .collect();
-
-    Program {
-        defs,
-        symbols,
-        ..program
+    for def in &mut program.defs {
+        specialize_term(&mut def.body, &mut program.symbols, &mut term_ids);
     }
 }
 
-/// Bottom-up: recurse into children, then specialize App nodes.
-fn specialize_term(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdSource) -> Term {
-    let term = term.map_children(&mut |child| specialize_term(child, symbols, term_ids));
+/// Bottom-up: recurse into children, then specialize App nodes in place.
+fn specialize_term(term: &mut Term, symbols: &mut SymbolTable, term_ids: &mut TermIdSource) {
+    term.for_each_child_mut(&mut |child| specialize_term(child, symbols, term_ids));
 
     // Only App nodes need specialization.
-    let TermKind::App { ref func, ref args } = term.kind else {
-        return term;
+    let TermKind::App { func, args } = &mut term.kind else {
+        return;
     };
 
     if args.is_empty() {
-        return term;
+        return;
     }
 
     // Only catalog references specialize. A `Var(Symbol)` is always a
@@ -51,7 +38,7 @@ fn specialize_term(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdS
     // pass through unchanged — user shadows of catalog names like
     // `let mul = ...` would otherwise be silently rewritten.
     let Some(id) = crate::tlc::var_term_builtin_id(func, symbols) else {
-        return term;
+        return;
     };
     let known = catalog().known();
 
@@ -65,17 +52,8 @@ fn specialize_term(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdS
             span: func.span,
             kind: TermKind::BinOp(crate::ast::BinaryOp { op: "*".to_string() }),
         };
-        let TermKind::App { func: _, args } = term.kind else {
-            unreachable!()
-        };
-        return Term {
-            id: term_ids.next_id(),
-            kind: TermKind::App {
-                func: Box::new(binop),
-                args,
-            },
-            ..term
-        };
+        **func = binop;
+        return;
     }
 
     if let Some(specialized_name) = specialize_name(id, known, &args[0].ty) {
@@ -99,19 +77,7 @@ fn specialize_term(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdS
                 overload_idx: 0,
             }),
         };
-        let TermKind::App { func: _, args } = term.kind else {
-            unreachable!()
-        };
-        Term {
-            id: term_ids.next_id(),
-            kind: TermKind::App {
-                func: Box::new(new_func),
-                args,
-            },
-            ..term
-        }
-    } else {
-        term
+        **func = new_func;
     }
 }
 
