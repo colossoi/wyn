@@ -479,19 +479,7 @@ pub fn replace_all_references(graph: &mut EGraph, old: NodeId, new: NodeId) {
             *slot = new;
         }
     };
-    for (_, node) in graph.nodes.iter_mut() {
-        match node {
-            ENode::Pure { operands, .. } => operands.iter_mut().for_each(swap),
-            ENode::Union { left, right } => {
-                swap(left);
-                swap(right);
-            }
-            ENode::FuncParam { .. }
-            | ENode::BlockParam { .. }
-            | ENode::Constant(_)
-            | ENode::SideEffectResult => {}
-        }
-    }
+    graph.replace_node_references(old, new);
     for (_, block) in graph.skeleton.blocks.iter_mut() {
         for effect in &mut block.side_effects {
             effect.operand_nodes.iter_mut().for_each(swap);

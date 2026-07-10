@@ -77,10 +77,7 @@ fn run_one_body(graph: &mut EGraph) {
         // Replace the original Index node in place with DynamicExtract(mat, idx).
         // The NodeId stays the same so all consumers continue to resolve through it.
         // graph.types[index_nid] is unchanged (still elem_ty).
-        graph.nodes[index_nid] = ENode::Pure {
-            op: PureOp::DynamicExtract,
-            operands: smallvec![mat_nid, idx_nid],
-        };
+        graph.replace_pure_node(index_nid, PureOp::DynamicExtract, smallvec![mat_nid, idx_nid]);
     }
 }
 

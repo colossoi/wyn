@@ -327,12 +327,12 @@ fn reproject(
         })
         .collect();
     for (project_nid, index) in projects {
-        if let crate::egir::types::ENode::Pure { op, operands } = &mut graph.nodes[project_nid] {
+        graph.update_pure_node(project_nid, |op, operands| {
             *op = PureOp::Project {
                 index: index + offset,
             };
             operands[0] = new_result;
-        }
+        });
     }
     // Preserve the old tuple type for whole-result users. Pointing those users
     // at the larger fused tuple would silently change their argument type.

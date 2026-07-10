@@ -242,7 +242,7 @@ fn recompute_aggregate_types(graph: &mut EGraph) {
             break;
         }
         for (nid, ty) in updates {
-            graph.types.insert(nid, ty);
+            graph.retype_node(nid, ty);
         }
     }
 }
@@ -272,6 +272,6 @@ fn retype_func_param(graph: &mut EGraph, index: usize, view_ty: &Type<TypeName>)
         _ => None,
     });
     if let Some(nid) = target {
-        graph.types.insert(nid, view_ty.clone());
+        graph.retype_node(nid, view_ty.clone());
     }
 }

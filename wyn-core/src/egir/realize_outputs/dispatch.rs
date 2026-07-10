@@ -127,7 +127,7 @@ pub fn compute_slot_source(
         // Update its type to match so verify_no_abstract doesn't flag
         // the Composite array type. Also alias for NodeId substitution.
         if let Some(view_ty) = graph.types.get(&view).cloned() {
-            graph.types.insert(source, view_ty);
+            graph.retype_node(source, view_ty);
         }
         aliases.insert(source, view);
         return Ok(());

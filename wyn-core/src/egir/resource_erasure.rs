@@ -49,15 +49,25 @@ fn rewrite_graph(graph: &mut EGraph, erasures: &LookupMap<String, Vec<bool>>) ->
     // Calls can be pure nodes or effect-anchored instructions. Rewrite both;
     // filtering by the callee's original signature keeps every positional ABI
     // change in one table.
-    for (_, node) in &mut graph.nodes {
-        if let ENode::Pure {
-            op: PureOp::Call(callee),
-            operands,
-        } = node
-        {
-            if let Some(mask) = erasures.get(callee) {
-                filter_smallvec(operands, mask, callee)?;
-            }
+    let pure_calls: Vec<_> = graph
+        .nodes
+        .iter()
+        .filter_map(|(nid, node)| match node {
+            ENode::Pure {
+                op: PureOp::Call(callee),
+                ..
+            } if erasures.contains_key(callee) => Some((nid, callee.clone())),
+            _ => None,
+        })
+        .collect();
+    for (nid, callee) in pure_calls {
+        let mask = &erasures[&callee];
+        let mut error = None;
+        graph.update_pure_node(nid, |_, operands| {
+            error = filter_smallvec(operands, mask, &callee).err();
+        });
+        if let Some(error) = error {
+            return Err(error);
         }
     }
 

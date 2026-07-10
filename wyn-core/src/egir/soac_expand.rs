@@ -414,7 +414,7 @@ fn expand_one(
                 }
             }
             let result_tuple_ty = Type::Constructed(TypeName::Tuple(n_maps + n_accs), result_field_tys);
-            graph.types.insert(result_nid, result_tuple_ty.clone());
+            graph.retype_node(result_nid, result_tuple_ty.clone());
             let result = ResultBinding::TupleFromCarried {
                 result_node: result_nid,
                 tuple_ty: result_tuple_ty,
@@ -859,14 +859,14 @@ where
         } => {
             let tuple_parts: smallvec::SmallVec<[NodeId; 4]> =
                 indices.iter().map(|idx| carried_nids[*idx]).collect();
-            graph.nodes[*result_node] = ENode::Pure {
-                op: PureOp::Tuple(tuple_parts.len()),
-                operands: tuple_parts,
-            };
-            graph.types.insert(*result_node, tuple_ty.clone());
+            graph.replace_pure_node(*result_node, PureOp::Tuple(tuple_parts.len()), tuple_parts);
+            graph.retype_node(*result_node, tuple_ty.clone());
         }
         ResultBinding::DummyBool { result_node } => {
-            graph.nodes[*result_node] = ENode::Constant(crate::ssa::types::ConstantValue::Bool(false));
+            graph.replace_node_preserving_type(
+                *result_node,
+                ENode::Constant(crate::ssa::types::ConstantValue::Bool(false)),
+            );
         }
     }
 
@@ -924,7 +924,10 @@ fn build_parallel_maps(
         control_headers.insert(after, header_meta);
     }
 
-    graph.nodes[spec.result_node] = ENode::Constant(crate::ssa::types::ConstantValue::Bool(false));
+    graph.replace_node_preserving_type(
+        spec.result_node,
+        ENode::Constant(crate::ssa::types::ConstantValue::Bool(false)),
+    );
 
     let body = graph.skeleton.create_block();
     let known = catalog().known();
@@ -1152,10 +1155,13 @@ fn build_filter_loop(
     // the result type of `length()` at the backend boundary, and
     // `Bounded`'s on-disk `len` field.
     let after_count_nid = graph.alloc_side_effect_result(i32_ty.clone());
-    graph.nodes[after_count_nid] = ENode::BlockParam {
-        block: after,
-        index: 0,
-    };
+    graph.replace_node_preserving_type(
+        after_count_nid,
+        ENode::BlockParam {
+            block: after,
+            index: 0,
+        },
+    );
     graph.skeleton.blocks[after].params.push(after_count_nid);
 
     // Build header, body, then, else_, sel_merge, continue blocks. The
@@ -1298,10 +1304,11 @@ fn build_filter_loop(
     // `Tuple(buf, count)` matching the `Bounded` struct layout.
     let buf_loaded_nid = emit_load(graph, after, buf_place_nid, buf_ty.clone(), next_effect, None);
     graph.skeleton.blocks[after].side_effects.extend(suffix);
-    graph.nodes[spec.result_node] = ENode::Pure {
-        op: PureOp::Tuple(2),
-        operands: smallvec![buf_loaded_nid, after_count_nid],
-    };
+    graph.replace_pure_node(
+        spec.result_node,
+        PureOp::Tuple(2),
+        smallvec![buf_loaded_nid, after_count_nid],
+    );
 }
 
 /// Runtime-sized `filter` lowering: a single-thread serial scatter into the
@@ -1441,7 +1448,10 @@ fn build_parallel_scatter(
         control_headers.insert(after, header_meta);
     }
 
-    graph.nodes[result_node] = ENode::Constant(crate::ssa::types::ConstantValue::Bool(false));
+    graph.replace_node_preserving_type(
+        result_node,
+        ENode::Constant(crate::ssa::types::ConstantValue::Bool(false)),
+    );
 
     let body = graph.skeleton.create_block();
     let known = catalog().known();
@@ -1594,7 +1604,10 @@ fn build_filter_flags(
         target: after,
         args: vec![],
     };
-    graph.nodes[spec.result_node] = ENode::Constant(crate::ssa::types::ConstantValue::Bool(false));
+    graph.replace_node_preserving_type(
+        spec.result_node,
+        ENode::Constant(crate::ssa::types::ConstantValue::Bool(false)),
+    );
 }
 
 fn build_filter_scan(
@@ -1741,7 +1754,10 @@ fn build_filter_scan(
         None,
     );
     graph.skeleton.blocks[after].term = SkeletonTerminator::Return(None);
-    graph.nodes[spec.result_node] = ENode::Constant(crate::ssa::types::ConstantValue::Bool(false));
+    graph.replace_node_preserving_type(
+        spec.result_node,
+        ENode::Constant(crate::ssa::types::ConstantValue::Bool(false)),
+    );
 }
 
 fn build_filter_scatter(
@@ -1839,10 +1855,11 @@ fn build_filter_scatter(
     let zero = intern_u32(graph, 0, None);
     let len_place = graph.intern_pure(PureOp::ViewIndex, smallvec![len_view, zero], u32_ty.clone());
     let count = emit_load(graph, bid, len_place, u32_ty.clone(), next_effect, None);
-    graph.nodes[spec.result_node] = ENode::Pure {
-        op: PureOp::StorageView(crate::op::PureViewSource::Storage(out_binding)),
-        operands: smallvec![zero, count],
-    };
+    graph.replace_pure_node(
+        spec.result_node,
+        PureOp::StorageView(crate::op::PureViewSource::Storage(out_binding)),
+        smallvec![zero, count],
+    );
 }
 
 fn build_runtime_filter_loop(
@@ -2019,10 +2036,11 @@ fn build_runtime_filter_loop(
     // `StorageView(scratch_out)[offset = 0, len = after_count]`. The node's
     // type (carrying `Buffer(scratch_out)`) is preserved from emit_soac.
     let zero_off_nid = intern_u32(graph, 0, None);
-    graph.nodes[spec.result_node] = ENode::Pure {
-        op: PureOp::StorageView(crate::op::PureViewSource::Storage(scratch_out)),
-        operands: smallvec![zero_off_nid, after_count_nid],
-    };
+    graph.replace_pure_node(
+        spec.result_node,
+        PureOp::StorageView(crate::op::PureViewSource::Storage(scratch_out)),
+        smallvec![zero_off_nid, after_count_nid],
+    );
 }
 
 /// Description of an accumulator-only SOAC (Reduce, reducing Screma): loop over one or
@@ -2121,14 +2139,14 @@ fn build_loop_skeleton(
                 graph.skeleton.blocks[after].params.push(part_nid);
                 operands.push(part_nid);
             }
-            graph.nodes[*result_node] = ENode::Pure {
-                op: PureOp::Tuple(operands.len()),
-                operands,
-            };
-            graph.types.insert(*result_node, tuple_ty.clone());
+            graph.replace_pure_node(*result_node, PureOp::Tuple(operands.len()), operands);
+            graph.retype_node(*result_node, tuple_ty.clone());
         }
         ResultBinding::DummyBool { result_node } => {
-            graph.nodes[*result_node] = ENode::Constant(crate::ssa::types::ConstantValue::Bool(false));
+            graph.replace_node_preserving_type(
+                *result_node,
+                ENode::Constant(crate::ssa::types::ConstantValue::Bool(false)),
+            );
         }
     }
 

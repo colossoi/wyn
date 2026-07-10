@@ -699,7 +699,7 @@ pub struct EGraph {
     /// Type of each node's result.
     pub types: LookupMap<NodeId, Type<TypeName>>,
     /// Hash-cons table: NodeKey → existing NodeId.
-    pub hash_cons: LookupMap<NodeKey, NodeId>,
+    hash_cons: LookupMap<NodeKey, NodeId>,
     /// Constant dedup cache.
     pub const_cache: LookupMap<ConstantValue, NodeId>,
     /// The CFG skeleton.
@@ -723,6 +723,164 @@ impl EGraph {
 
     pub fn side_effect_index(&self) -> SideEffectIndex {
         SideEffectIndex::build(self)
+    }
+
+    fn pure_node_key(&self, id: NodeId) -> Option<NodeKey> {
+        let ENode::Pure { op, operands } = self.nodes.get(id)? else {
+            return None;
+        };
+        Some(NodeKey {
+            op: op.clone(),
+            operands: operands.clone(),
+            ty: self.types.get(&id)?.clone(),
+        })
+    }
+
+    fn unindex_current_pure(&mut self, id: NodeId) {
+        let Some(key) = self.pure_node_key(id) else {
+            return;
+        };
+        if self.hash_cons.get(&key) == Some(&id) {
+            self.hash_cons.remove(&key);
+        }
+    }
+
+    fn index_current_pure(&mut self, id: NodeId) {
+        let Some(key) = self.pure_node_key(id) else {
+            return;
+        };
+        self.hash_cons.entry(key).or_insert(id);
+    }
+
+    /// Replace a node in place without changing its result type, keeping the
+    /// pure-node hash-cons table consistent across the mutation.
+    pub fn replace_node_preserving_type(&mut self, id: NodeId, node: ENode) {
+        self.unindex_current_pure(id);
+        self.nodes[id] = node;
+        self.index_current_pure(id);
+    }
+
+    /// Replace a pure node's operator and operands without changing its result
+    /// type, keeping the hash-cons table consistent across the mutation.
+    pub fn replace_pure_node(&mut self, id: NodeId, op: PureOp, operands: SmallVec<[NodeId; 4]>) {
+        self.replace_node_preserving_type(id, ENode::Pure { op, operands });
+    }
+
+    /// Mutate a pure node's operator and operands in place while maintaining
+    /// the hash-cons table. Returns false if `id` is not a pure node.
+    pub fn update_pure_node<F>(&mut self, id: NodeId, update: F) -> bool
+    where
+        F: FnOnce(&mut PureOp, &mut SmallVec<[NodeId; 4]>),
+    {
+        if !matches!(self.nodes.get(id), Some(ENode::Pure { .. })) {
+            return false;
+        }
+        self.unindex_current_pure(id);
+        if let ENode::Pure { op, operands } = &mut self.nodes[id] {
+            update(op, operands);
+        }
+        self.index_current_pure(id);
+        true
+    }
+
+    /// Change a node's result type while maintaining the pure-node hash-cons
+    /// key when the node is hash-consed.
+    pub fn retype_node(&mut self, id: NodeId, ty: Type<TypeName>) {
+        self.unindex_current_pure(id);
+        self.types.insert(id, ty);
+        self.index_current_pure(id);
+    }
+
+    /// Replace references inside graph-owned nodes. Skeleton side-effect
+    /// operands are handled by higher-level graph rewriting helpers.
+    pub fn replace_node_references(&mut self, old: NodeId, new: NodeId) {
+        if old == new {
+            return;
+        }
+
+        let ids: Vec<NodeId> = self.nodes.keys().collect();
+        for id in ids {
+            match self.nodes.get(id) {
+                Some(ENode::Pure { operands, .. }) if operands.contains(&old) => {
+                    self.update_pure_node(id, |_, operands| {
+                        for operand in operands {
+                            if *operand == old {
+                                *operand = new;
+                            }
+                        }
+                    });
+                }
+                Some(ENode::Union { .. }) => {
+                    if let ENode::Union { left, right } = &mut self.nodes[id] {
+                        if *left == old {
+                            *left = new;
+                        }
+                        if *right == old {
+                            *right = new;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Rebuild the pure-node hash-cons table after a bulk rewrite that may
+    /// have changed pure node operands, operators, or result types in place.
+    pub fn rebuild_hash_cons(&mut self) {
+        let mut rebuilt = LookupMap::new();
+        for (id, node) in self.nodes.iter() {
+            if matches!(node, ENode::Pure { .. }) {
+                if let Some(key) = self.pure_node_key(id) {
+                    rebuilt.entry(key).or_insert(id);
+                }
+            }
+        }
+        self.hash_cons = rebuilt;
+    }
+
+    /// Check that every hash-cons entry points to a pure node matching its key
+    /// and that every current pure-node key is represented in the table.
+    pub fn verify_hash_cons(&self) -> Result<(), String> {
+        for (key, &id) in &self.hash_cons {
+            let Some(current) = self.pure_node_key(id) else {
+                return Err(format!(
+                    "hash_cons key {:?} points to non-pure node {:?}",
+                    key, id
+                ));
+            };
+            if &current != key {
+                return Err(format!(
+                    "hash_cons key {:?} points to node {:?} with current key {:?}",
+                    key, id, current
+                ));
+            }
+        }
+
+        for (id, node) in self.nodes.iter() {
+            if matches!(node, ENode::Pure { .. }) {
+                let Some(key) = self.pure_node_key(id) else {
+                    return Err(format!("pure node {:?} has no type", id));
+                };
+                match self.hash_cons.get(&key) {
+                    Some(&indexed) if self.pure_node_key(indexed).as_ref() == Some(&key) => {}
+                    Some(&indexed) => {
+                        return Err(format!(
+                            "pure node {:?} key {:?} is represented by stale node {:?}",
+                            id, key, indexed
+                        ));
+                    }
+                    None => {
+                        return Err(format!(
+                            "pure node {:?} key {:?} is missing from hash_cons",
+                            id, key
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Allocate a function parameter node.
