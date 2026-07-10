@@ -30,11 +30,9 @@ use super::{Def, Program, Term, TermIdSource, TermKind};
 mod normalize_tests;
 
 /// Normalize a TLC program into ANF-ish form for fusion analysis.
-pub fn normalize(program: &mut Program) {
-    let mut term_ids = TermIdSource::new();
-
+pub fn normalize(program: &mut Program, term_ids: &mut TermIdSource) {
     crate::map_in_place(&mut program.defs, |def| {
-        let body = normalize_term(def.body, &mut program.symbols, &mut term_ids);
+        let body = normalize_term(def.body, &mut program.symbols, term_ids);
         Def { body, ..def }
     });
 

@@ -49,7 +49,7 @@ const MAX_DEPTH: usize = 64;
 /// A producer helper: its params + body (the `λparams. SOAC…`'s inner body).
 type Producer = (Vec<(SymbolId, Type<TypeName>)>, Term);
 
-pub fn run(program: &mut Program) {
+pub fn run(program: &mut Program, ids: &mut TermIdSource) {
     let summaries = summarize_program(&program);
     let sym_to_def = build_sym_to_def(&program.symbols, &program.def_syms);
 
@@ -84,13 +84,12 @@ pub fn run(program: &mut Program) {
         return;
     }
 
-    let mut ids = TermIdSource::new();
     for def in program.defs.iter_mut() {
         if !matches!(def.meta, DefMeta::EntryPoint(_)) {
             continue;
         }
         let body = def.body.clone();
-        def.body = expose(body, &producers, &sym_to_def, &mut ids, 0);
+        def.body = expose(body, &producers, &sym_to_def, ids, 0);
     }
 
     // Inlined-then-dead producer helpers are removed by the later reachability

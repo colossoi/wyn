@@ -327,7 +327,8 @@ fn reduce_with_operator(
     });
 
     let mut result = program;
-    let info = run(&mut result, &std::collections::HashSet::new());
+    let mut term_ids = crate::tlc::TermIdSource::new();
+    let info = run(&mut result, &std::collections::HashSet::new(), &mut term_ids);
     (result, info, g, main)
 }
 

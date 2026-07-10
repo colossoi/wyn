@@ -96,7 +96,8 @@ fn test_specialize_sign_f32() {
         def_syms: HashMap::new(),
     };
 
-    run(&mut program);
+    let mut term_ids = TermIdSource::new();
+    run(&mut program, &mut term_ids);
 
     // Check that sign became f32.sign
     match &program.defs[0].body.kind {
@@ -179,7 +180,8 @@ fn test_specialize_min_i32() {
         def_syms: HashMap::new(),
     };
 
-    run(&mut program);
+    let mut term_ids = TermIdSource::new();
+    run(&mut program, &mut term_ids);
 
     // Check that min became i32.min in the application
     match &program.defs[0].body.kind {

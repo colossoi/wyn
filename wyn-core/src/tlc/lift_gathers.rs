@@ -42,7 +42,7 @@ use polytype::Type;
 
 /// Lift every randomly-indexed computed array out of each compute entry into
 /// a gather pre-pass + a `storage_index` read.
-pub fn run(program: &mut Program, binding_ids: &mut crate::IdSource<u32>) {
+pub fn run(program: &mut Program, binding_ids: &mut crate::IdSource<u32>, term_ids: &mut TermIdSource) {
     let entry_indices: Vec<usize> = program
         .defs
         .iter()
@@ -55,7 +55,7 @@ pub fn run(program: &mut Program, binding_ids: &mut crate::IdSource<u32>) {
 
     let mut new_defs: Vec<Def> = Vec::new();
     for idx in entry_indices {
-        lift_entry(program, idx, &mut new_defs, binding_ids);
+        lift_entry(program, idx, &mut new_defs, binding_ids, term_ids);
     }
     program.defs.extend(new_defs);
     super::anf::debug_check(program, "lift_gathers");
@@ -67,6 +67,7 @@ fn lift_entry(
     idx: usize,
     new_defs: &mut Vec<Def>,
     binding_ids: &mut crate::IdSource<u32>,
+    term_ids: &mut TermIdSource,
 ) {
     let entry_name = crate::symbol_name_or_bug(&program.symbols, program.defs[idx].name).to_string();
     let body = program.defs[idx].body.clone();
@@ -87,6 +88,7 @@ fn lift_entry(
         new_defs,
         program,
         &[],
+        term_ids,
     );
 
     program.defs[idx].body = new_body;
@@ -106,6 +108,7 @@ fn lift_in_term(
     new_defs: &mut Vec<Def>,
     program: &mut Program,
     local_lets: &[(SymbolId, Type<TypeName>, Term)],
+    term_ids: &mut TermIdSource,
 ) -> Term {
     match term.kind {
         TermKind::Lambda(lam) => {
@@ -119,6 +122,7 @@ fn lift_in_term(
                 new_defs,
                 program,
                 local_lets,
+                term_ids,
             );
             Term {
                 kind: TermKind::Lambda(Lambda {
@@ -151,6 +155,7 @@ fn lift_in_term(
                 new_defs.len(),
                 program,
                 local_lets,
+                term_ids,
             ) {
                 let _ = binding_ids.next_id();
                 new_defs.push(prepass);
@@ -165,6 +170,7 @@ fn lift_in_term(
                     new_defs,
                     program,
                     local_lets,
+                    term_ids,
                 );
             }
             let rhs_for_scope = (*rhs).clone();
@@ -179,6 +185,7 @@ fn lift_in_term(
                 new_defs,
                 program,
                 &body_local_lets,
+                term_ids,
             );
             // After normalize_outputs, the rhs of a sequencing let is an
             // OutputSlotStore that may wrap further gather candidates
@@ -194,6 +201,7 @@ fn lift_in_term(
                     new_defs,
                     program,
                     local_lets,
+                    term_ids,
                 ))
             } else {
                 rhs
@@ -218,6 +226,7 @@ fn lift_in_term(
                 new_defs,
                 program,
                 local_lets,
+                term_ids,
             );
             Term {
                 kind: TermKind::OutputSlotStore {
@@ -246,6 +255,7 @@ fn try_lift(
     gather_idx: usize,
     program: &mut Program,
     local_lets: &[(SymbolId, Type<TypeName>, Term)],
+    term_ids: &mut TermIdSource,
 ) -> Option<(Def, StorageBindingDecl, Term)> {
     // Producer must be an array-yielding SOAC (`map` or `scan`) of a
     // runtime-sized array. Both preserve element count, so the gather buffer
@@ -284,10 +294,6 @@ fn try_lift(
     let mut bail = false;
     let mut dyn_uses = 0usize;
     let mut soac_uses = 0usize;
-    // Local ID source for the synthesized literals + App nodes. Per-pass
-    // restart matches the rest of the lift-gathers / parallelize style;
-    // TLC TermIds aren't load-bearing past parallelize.
-    let mut term_ids = TermIdSource::new();
     let rewritten = rewrite_uses(
         body,
         name,
@@ -296,7 +302,7 @@ fn try_lift(
         &mut bail,
         &mut dyn_uses,
         &mut soac_uses,
-        &mut term_ids,
+        term_ids,
     );
     if bail || (dyn_uses + soac_uses == 0) {
         return None;
@@ -324,7 +330,7 @@ fn try_lift(
         length.clone(),
         &chained,
         program,
-        &mut term_ids,
+        term_ids,
     );
     // The consumer *reads* the gather buffer: an Input-role decl carrying the
     // sizing policy. `from_tlc` emits any length-bearing storage binding as a

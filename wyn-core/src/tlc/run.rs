@@ -19,7 +19,7 @@ use crate::name_resolution::NameResolution;
 use crate::types::TypeName;
 use crate::{SymbolId, SymbolTable, TypeTable};
 
-use super::{defaults, Program, Transformer};
+use super::{defaults, Program, TermIdSource, Transformer};
 
 pub struct TlcOutput {
     pub program: Program,
@@ -27,6 +27,7 @@ pub struct TlcOutput {
     pub known_defs: LookupSet<String>,
     pub schemes: LookupMap<SymbolId, TypeScheme<TypeName>>,
     pub fill_hole_errors: Vec<CompilerError>,
+    pub term_ids: TermIdSource,
 }
 
 pub fn run(
@@ -52,6 +53,7 @@ pub fn run(
     }
 
     let mut fill_hole_errors: Vec<CompilerError> = Vec::new();
+    let mut term_ids = TermIdSource::new();
 
     let mut prelude_defs = Vec::new();
     for (module_name, elaborated) in module_manager.get_elaborated_modules() {
@@ -63,6 +65,7 @@ pub fn run(
             module_name,
             fill_holes,
             &mut fill_hole_errors,
+            &mut term_ids,
         );
         for item in &elaborated.items {
             if let module_manager::ElaboratedItem::Decl(decl) = item {
@@ -81,6 +84,7 @@ pub fn run(
             name_resolution,
             fill_holes,
             &mut fill_hole_errors,
+            &mut term_ids,
         );
         for decl in module_manager.get_prelude_function_declarations() {
             if let Some(def) = transformer.transform_decl(decl) {
@@ -96,6 +100,7 @@ pub fn run(
         name_resolution,
         fill_holes,
         &mut fill_hole_errors,
+        &mut term_ids,
     );
     let mut parts = transformer.transform_program(ast);
 
@@ -118,5 +123,6 @@ pub fn run(
         known_defs: registry.name_set(),
         schemes: schemes_by_sym,
         fill_hole_errors,
+        term_ids,
     }
 }

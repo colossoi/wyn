@@ -68,6 +68,11 @@ fn make_program(name_sym: SymbolId, body: Term, symbols: SymbolTable) -> Program
     }
 }
 
+fn partial_eval(program: &mut Program) {
+    let mut term_ids = TermIdSource::new();
+    PartialEvaluator::partial_eval(program, &mut term_ids);
+}
+
 fn make_int(ids: &mut TermIdSource, n: i64) -> Term {
     Term {
         id: ids.next_id(),
@@ -119,7 +124,7 @@ fn test_constant_folding_add() {
     let program = make_program(test_sym, term, b.finish());
 
     let mut result = program;
-    PartialEvaluator::partial_eval(&mut result);
+    partial_eval(&mut result);
     assert_eq!(result.defs.len(), 1);
 
     match &result.defs[0].body.kind {
@@ -140,7 +145,7 @@ fn test_constant_folding_mul() {
     let program = make_program(test_sym, term, b.finish());
 
     let mut result = program;
-    PartialEvaluator::partial_eval(&mut result);
+    partial_eval(&mut result);
 
     match &result.defs[0].body.kind {
         TermKind::IntLit(s) => assert_eq!(s, "28"),
@@ -166,7 +171,7 @@ fn test_algebraic_add_zero() {
     let program = make_program(test_sym, term, b.finish());
 
     let mut result = program;
-    PartialEvaluator::partial_eval(&mut result);
+    partial_eval(&mut result);
 
     // x + 0 should simplify to just x
     match &result.defs[0].body.kind {
@@ -196,7 +201,7 @@ fn test_algebraic_mul_one() {
     let program = make_program(test_sym, term, b.finish());
 
     let mut result = program;
-    PartialEvaluator::partial_eval(&mut result);
+    partial_eval(&mut result);
 
     // 1 * x should simplify to just x
     match &result.defs[0].body.kind {
@@ -226,7 +231,7 @@ fn test_algebraic_mul_zero() {
     let program = make_program(test_sym, term, b.finish());
 
     let mut result = program;
-    PartialEvaluator::partial_eval(&mut result);
+    partial_eval(&mut result);
 
     // x * 0 should simplify to 0
     match &result.defs[0].body.kind {
@@ -257,7 +262,7 @@ fn test_if_true_elimination() {
     let program = make_program(test_sym, term, b.finish());
 
     let mut result = program;
-    PartialEvaluator::partial_eval(&mut result);
+    partial_eval(&mut result);
 
     // if true then 1 else 2 should simplify to 1
     match &result.defs[0].body.kind {
@@ -288,7 +293,7 @@ fn test_if_false_elimination() {
     let program = make_program(test_sym, term, b.finish());
 
     let mut result = program;
-    PartialEvaluator::partial_eval(&mut result);
+    partial_eval(&mut result);
 
     // if false then 1 else 2 should simplify to 2
     match &result.defs[0].body.kind {
@@ -328,7 +333,7 @@ fn test_let_constant_propagation() {
     let program = make_program(test_sym, term, b.finish());
 
     let mut result = program;
-    PartialEvaluator::partial_eval(&mut result);
+    partial_eval(&mut result);
 
     // let x = 5 in x + 3 should simplify to 8
     match &result.defs[0].body.kind {
@@ -431,7 +436,7 @@ fn test_function_inlining() {
     };
 
     let mut result = program;
-    PartialEvaluator::partial_eval(&mut result);
+    partial_eval(&mut result);
 
     // bar should be inlined and folded to 17
     let bar_def = result
@@ -547,7 +552,7 @@ fn test_function_alias_inlining() {
     };
 
     let mut result = program;
-    PartialEvaluator::partial_eval(&mut result);
+    partial_eval(&mut result);
 
     // Find main's body - it should be simplified to just `42`
     // because g is identity and f aliases g, so f 42 = g 42 = 42
@@ -667,7 +672,7 @@ fn test_function_alias_partial_application() {
     };
 
     let mut result = program;
-    PartialEvaluator::partial_eval(&mut result);
+    partial_eval(&mut result);
 
     // Find main's body - it should be simplified to `1`
     // because g x y = x, so f 1 2 = g 1 2 = 1
@@ -749,7 +754,7 @@ fn test_intrinsic_alias_inlining() {
     };
 
     let mut result = program;
-    PartialEvaluator::partial_eval(&mut result);
+    partial_eval(&mut result);
     let main_def = result
         .defs
         .iter()
@@ -925,7 +930,7 @@ fn let_bound_array_substituted_through_soac_input() {
 
     let program = make_program(test_sym, let_term, b.finish());
     let mut result = program;
-    PartialEvaluator::partial_eval(&mut result);
+    partial_eval(&mut result);
 
     assert_eq!(result.defs.len(), 1);
     assert_no_free_reference_to(&result.defs[0].body, m_sym);

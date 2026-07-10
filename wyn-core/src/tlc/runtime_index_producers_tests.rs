@@ -144,7 +144,8 @@ entry e(j: i32) [1]f32 = [g(256)[j]]
 "#,
     );
     let mut floated = program;
-    run(&mut floated);
+    let mut ids = TermIdSource::new();
+    run(&mut floated, &mut ids);
     let body = entry_body(&floated);
     assert!(
         let_bound_runtime_gather(&floated, body),
@@ -254,7 +255,7 @@ fn runtime_index_inside_fused_scatter_envelope_becomes_let_bound_gather_shape() 
     };
 
     let mut floated = program;
-    run(&mut floated);
+    run(&mut floated, &mut ids);
     let body = &floated.defs[0].body;
     assert!(
         let_bound_runtime_gather(&floated, body),

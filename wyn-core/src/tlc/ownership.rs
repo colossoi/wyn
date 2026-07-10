@@ -896,8 +896,7 @@ impl<'p> Builder<'p> {
     fn element_origin_from_input(&mut self, ae: &ArrayExpr) -> Origin {
         match ae {
             ArrayExpr::Var(vr, ty) => {
-                let mut ids = super::TermIdSource::new();
-                let t = super::atom_var_term(*vr, ty.clone(), &mut ids);
+                let t = super::synthetic_atom_var_term(*vr, ty.clone());
                 let aliases = self.alias_targets(&t);
                 if !aliases.is_empty() {
                     if aliases

@@ -728,7 +728,6 @@ fn is_map_only_fresh_soac_term(t: &Term) -> bool {
 }
 
 pub struct ParallelizationResult {
-    pub program: Program,
     pub pipeline: PipelineDescriptor,
     /// Source-parameter name for each storage `(set, binding)`, captured
     /// from the original compute entries before they are replaced by phase
@@ -960,16 +959,16 @@ pub(crate) fn make_entry_def(
 /// Carries the program through with a serial default pipeline and no
 /// parallelization plans.
 pub fn run(
-    mut program: Program,
+    program: &mut Program,
     _disable: bool,
     _binding_ids: &mut crate::IdSource<u32>,
+    term_ids: &mut TermIdSource,
 ) -> crate::error::Result<ParallelizationResult> {
     let input_names = collect_entry_input_names(&program);
 
     // Equal-domain sibling maps remain a source-level fusion; EGIR derives
     // semantic placement and scheduling from the resulting program.
-    let mut term_ids = TermIdSource::new();
-    super::fusion::fuse_equal_domain_sibling_maps(&mut program, &mut term_ids);
+    super::fusion::fuse_equal_domain_sibling_maps(program, term_ids);
 
     let mut pipelines = Vec::new();
     for def in &program.defs {
@@ -1039,7 +1038,6 @@ pub fn run(
         }
     }
     Ok(ParallelizationResult {
-        program,
         pipeline: PipelineDescriptor {
             pipelines,
             frame_graph: Default::default(),
@@ -1081,7 +1079,11 @@ struct ScalarPrepassHoister<'a> {
 /// parallelization recognition to discover the forced result binding without a
 /// side table. Defunctionalization then sees the generated entry as ordinary
 /// source-shaped TLC and attaches lambda captures in the correct scope.
-pub fn hoist_scalar_prepasses(program: &mut Program, binding_ids: &mut crate::IdSource<u32>) {
+pub fn hoist_scalar_prepasses(
+    program: &mut Program,
+    binding_ids: &mut crate::IdSource<u32>,
+    term_ids: &mut TermIdSource,
+) {
     let top_level_syms: LookupSet<SymbolId> = program.defs.iter().map(|d| d.name).collect();
     let entry_indices: Vec<usize> = program
         .defs
@@ -1090,7 +1092,6 @@ pub fn hoist_scalar_prepasses(program: &mut Program, binding_ids: &mut crate::Id
         .filter_map(|(index, def)| matches!(def.meta, DefMeta::EntryPoint(_)).then_some(index))
         .collect();
 
-    let mut term_ids = TermIdSource::new();
     let mut new_defs = Vec::new();
 
     for index in entry_indices {
@@ -1142,7 +1143,7 @@ pub fn hoist_scalar_prepasses(program: &mut Program, binding_ids: &mut crate::Id
                 added_decls: Vec::new(),
                 new_defs: Vec::new(),
                 program: &mut *program,
-                term_ids: &mut term_ids,
+                term_ids,
             };
             let body = hoister.rewrite(body);
             (body, hoister.added_decls, hoister.new_defs)

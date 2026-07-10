@@ -70,7 +70,7 @@ entry e() [1]f32 = [g(256)[3]]
     );
 
     let mut fused = program;
-    super::run(&mut fused);
+    super::run(&mut fused, &mut crate::tlc::TermIdSource::new());
     let after = entry_body(&fused);
     assert!(
         !has_index_into_map(&after),
@@ -93,7 +93,7 @@ entry e(xs: []i32) i32 =
     );
     let before = entry_body(&program);
     let mut fused = program.clone();
-    super::run(&mut fused);
+    super::run(&mut fused, &mut crate::tlc::TermIdSource::new());
     let after = entry_body(&fused);
     assert_eq!(
         format!("{before:?}"),

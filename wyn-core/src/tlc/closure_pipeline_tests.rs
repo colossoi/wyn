@@ -8,9 +8,10 @@ use std::collections::{HashMap, HashSet};
 /// End-to-end runner for the three-phase closure pipeline. Mirrors what
 /// `TlcOwnershipApplied::defunctionalize` does in production.
 fn defunctionalize(program: &mut Program, known_defs: &HashSet<String>) {
-    let closure_info = super::super::closure_convert::run(program, known_defs);
-    super::super::hof_specialize::run(program, &closure_info);
-    super::super::closure_calls_lower::run(program, &closure_info);
+    let mut term_ids = TermIdSource::new();
+    let closure_info = super::super::closure_convert::run(program, known_defs, &mut term_ids);
+    super::super::hof_specialize::run(program, &closure_info, &mut term_ids);
+    super::super::closure_calls_lower::run(program, &closure_info, &mut term_ids);
 }
 
 /// Test helper that manages symbol table and term ID generation.

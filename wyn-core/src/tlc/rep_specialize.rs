@@ -89,9 +89,9 @@ impl ConcreteVariant {
 
 type SpecKey = Vec<Option<ConcreteVariant>>;
 
-struct RepSpecializer<'a> {
+struct RepSpecializer<'a, 'ids> {
     symbols: &'a mut SymbolTable,
-    term_ids: TermIdSource,
+    term_ids: &'ids mut TermIdSource,
     def_map: LookupMap<SymbolId, Def>,
     /// Cache: `(orig_callee_sym, spec_key) → specialized_sym`.
     specializations: LookupMap<(SymbolId, SpecKey), SymbolId>,
@@ -106,13 +106,13 @@ struct RepSpecializer<'a> {
 /// Entry point: rewrite every def's body in place to insert call-edge
 /// representation specializations, appending the new specialized defs
 /// to the program.
-pub fn run(program: &mut Program) {
+pub fn run(program: &mut Program, term_ids: &mut TermIdSource) {
     // Snapshot of the original defs: specialization clones a callee's
     // body while the defs themselves are being rewritten.
     let def_map: LookupMap<SymbolId, Def> = program.defs.iter().map(|d| (d.name, d.clone())).collect();
     let mut s = RepSpecializer {
         symbols: &mut program.symbols,
-        term_ids: TermIdSource::new(),
+        term_ids,
         def_map,
         specializations: LookupMap::new(),
         new_defs: Vec::new(),
@@ -125,7 +125,7 @@ pub fn run(program: &mut Program) {
     program.defs.append(&mut s.new_defs);
 }
 
-impl<'a> RepSpecializer<'a> {
+impl<'a, 'ids> RepSpecializer<'a, 'ids> {
     // ------------------------------------------------------------------
     // Scoped producer env
     // ------------------------------------------------------------------

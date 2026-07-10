@@ -310,23 +310,14 @@ fn collect_place_ids_in_soacs(term: &Term, refs: &mut Vec<SymbolId>) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TermId(pub u32);
 
-/// Counter for generating unique TermIds.
-#[derive(Debug, Clone, Default)]
-pub struct TermIdSource {
-    next: u32,
-}
-
-impl TermIdSource {
-    pub fn new() -> Self {
-        Self { next: 0 }
-    }
-
-    pub fn next_id(&mut self) -> TermId {
-        let id = TermId(self.next);
-        self.next += 1;
-        id
+impl From<u32> for TermId {
+    fn from(id: u32) -> Self {
+        TermId(id)
     }
 }
+
+/// The compiler-wide allocator for TLC term identifiers.
+pub type TermIdSource = crate::IdSource<TermId>;
 
 /// A typed term in the lambda calculus.
 #[derive(Debug, Clone)]
@@ -1479,10 +1470,7 @@ where
     match ae {
         // Visit the named input as a var term, so analyses (free-var / capture
         // collection, etc.) see the reference.
-        ArrayExpr::Var(vr, ty) => {
-            let mut ids = TermIdSource::new();
-            f(&atom_var_term(*vr, ty.clone(), &mut ids));
-        }
+        ArrayExpr::Var(vr, ty) => f(&synthetic_atom_var_term(*vr, ty.clone())),
         ArrayExpr::Zip(aes) => {
             for ae in aes {
                 visit_array_expr_children(ae, f);
@@ -1635,8 +1623,7 @@ where
         // `map_array_expr_children` does), so rewrites that rename or replace
         // a variable reach SOAC inputs, then re-atomize the result.
         ArrayExpr::Var(vr, ty) => {
-            let mut ids = TermIdSource::new();
-            let mut tmp = atom_var_term(*vr, ty.clone(), &mut ids);
+            let mut tmp = synthetic_atom_var_term(*vr, ty.clone());
             f(&mut tmp);
             *ae = term_as_input_atom(tmp);
         }
@@ -1809,6 +1796,15 @@ pub fn atom_var_term(vr: VarRef, ty: Type<TypeName>, term_ids: &mut TermIdSource
     }
 }
 
+pub(crate) fn synthetic_atom_var_term(vr: VarRef, ty: Type<TypeName>) -> Term {
+    Term {
+        id: TermId(u32::MAX),
+        ty,
+        span: Span::new(0, 0, 0, 0),
+        kind: TermKind::Var(vr),
+    }
+}
+
 /// Convert a `Term` standing in a SOAC-input position into an input atom: a bare
 /// name stays a name; an array expression is itself an atom; a tuple-of-arrays
 /// (the SoA form of a `zip`) becomes a `Zip` of atoms. Used where a `Term`-level
@@ -1849,10 +1845,7 @@ where
         // Apply `f` to the named input through a reconstructed var term, so
         // substitutions that rename (or inline) a variable reach SOAC inputs,
         // then re-atomize the result.
-        ArrayExpr::Var(vr, ty) => {
-            let mut ids = TermIdSource::new();
-            term_as_input_atom(f(atom_var_term(vr, ty, &mut ids)))
-        }
+        ArrayExpr::Var(vr, ty) => term_as_input_atom(f(synthetic_atom_var_term(vr, ty))),
         ArrayExpr::Zip(aes) => {
             ArrayExpr::Zip(aes.into_iter().map(|ae| map_array_expr_children(ae, f)).collect())
         }
@@ -1945,7 +1938,7 @@ pub(super) struct SumLayout {
 /// Context for transforming AST to TLC.
 pub struct Transformer<'a> {
     type_table: &'a TypeTable,
-    pub(super) term_ids: TermIdSource,
+    pub(super) term_ids: &'a mut TermIdSource,
     /// Shared symbol table: maps SymbolId to original name (for errors/debugging).
     symbols: &'a mut SymbolTable,
     /// Current scope for name resolution: maps string name to SymbolId.
@@ -1987,11 +1980,12 @@ impl<'a> Transformer<'a> {
         name_resolution: &'a NameResolution,
         fill_holes: bool,
         fill_hole_errors: &'a mut Vec<CompilerError>,
+        term_ids: &'a mut TermIdSource,
     ) -> Self {
         let placeholder_sym = symbols.alloc("_w_placeholder".to_string());
         Self {
             type_table,
-            term_ids: TermIdSource::new(),
+            term_ids,
             symbols,
             scope: LookupMap::new(),
             top_level_symbols,
@@ -2012,11 +2006,12 @@ impl<'a> Transformer<'a> {
         namespace: &str,
         fill_holes: bool,
         fill_hole_errors: &'a mut Vec<CompilerError>,
+        term_ids: &'a mut TermIdSource,
     ) -> Self {
         let placeholder_sym = symbols.alloc("_w_placeholder".to_string());
         Self {
             type_table,
-            term_ids: TermIdSource::new(),
+            term_ids,
             symbols,
             scope: LookupMap::new(),
             top_level_symbols,

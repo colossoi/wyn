@@ -69,8 +69,7 @@ impl std::fmt::Display for NormalizeError {
 
 impl std::error::Error for NormalizeError {}
 
-pub fn run(program: &mut Program) -> Result<(), NormalizeError> {
-    let mut term_ids = TermIdSource::new();
+pub fn run(program: &mut Program, term_ids: &mut TermIdSource) -> Result<(), NormalizeError> {
     let entry_indices: Vec<usize> = program
         .defs
         .iter()
@@ -83,7 +82,7 @@ pub fn run(program: &mut Program) -> Result<(), NormalizeError> {
 
     let Program { defs, symbols, .. } = program;
     for idx in entry_indices {
-        normalize_entry(&mut defs[idx], &mut term_ids, symbols)?;
+        normalize_entry(&mut defs[idx], term_ids, symbols)?;
     }
     Ok(())
 }

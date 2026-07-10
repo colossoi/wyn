@@ -38,13 +38,13 @@ type Substitution = LookupMap<usize, Type<TypeName>>;
 ///
 /// This walks through all definitions starting from entry points, finds calls
 /// to polymorphic functions, and creates specialized versions with concrete types.
-pub fn run(program: &mut Program, schemes: &LookupMap<SymbolId, TypeScheme>) {
-    let mono = Monomorphizer::new(&mut *program, schemes);
+pub fn run(program: &mut Program, schemes: &LookupMap<SymbolId, TypeScheme>, term_ids: &mut TermIdSource) {
+    let mono = Monomorphizer::new(&mut *program, schemes, term_ids);
     program.defs = mono.monomorphize();
     program.assert_flat_apps();
 }
 
-struct Monomorphizer<'a> {
+struct Monomorphizer<'a, 'ids> {
     /// Symbol table for name lookup and allocation
     symbols: &'a mut SymbolTable,
     /// Original polymorphic functions by symbol
@@ -60,7 +60,7 @@ struct Monomorphizer<'a> {
     /// Type schemes for polymorphic functions (keyed by SymbolId)
     schemes: &'a LookupMap<SymbolId, TypeScheme>,
     /// Term ID source for creating new terms
-    term_ids: TermIdSource,
+    term_ids: &'ids mut TermIdSource,
 }
 
 struct WorkItem {
@@ -317,8 +317,12 @@ fn split_function_type(ty: &Type<TypeName>) -> (Vec<Type<TypeName>>, Type<TypeNa
     (params, current)
 }
 
-impl<'a> Monomorphizer<'a> {
-    fn new(program: &'a mut Program, schemes: &'a LookupMap<SymbolId, TypeScheme>) -> Self {
+impl<'a, 'ids> Monomorphizer<'a, 'ids> {
+    fn new(
+        program: &'a mut Program,
+        schemes: &'a LookupMap<SymbolId, TypeScheme>,
+        term_ids: &'ids mut TermIdSource,
+    ) -> Self {
         // Build function map and collect entry points
         let mut poly_functions = LookupMap::new();
         let mut entry_points = Vec::new();
@@ -349,7 +353,7 @@ impl<'a> Monomorphizer<'a> {
             worklist,
             processed: LookupSet::new(),
             schemes,
-            term_ids: TermIdSource::new(),
+            term_ids,
         }
     }
 

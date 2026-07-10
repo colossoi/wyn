@@ -133,16 +133,16 @@ fn discriminant_name(kind: &TermKind) -> &'static str {
 // Closure-call lowering pass
 // =============================================================================
 
-struct CallLowerer<'a> {
+struct CallLowerer<'a, 'ids> {
     closure_info: &'a ClosureInfo,
-    term_ids: TermIdSource,
+    term_ids: &'ids mut TermIdSource,
 }
 
-impl<'a> CallLowerer<'a> {
-    fn new(closure_info: &'a ClosureInfo) -> Self {
+impl<'a, 'ids> CallLowerer<'a, 'ids> {
+    fn new(closure_info: &'a ClosureInfo, term_ids: &'ids mut TermIdSource) -> Self {
         Self {
             closure_info,
-            term_ids: TermIdSource::new(),
+            term_ids,
         }
     }
 
@@ -497,7 +497,7 @@ impl<'a> CallLowerer<'a> {
                 accumulators,
                 inputs,
             } => {
-                fn lower_body(this: &mut CallLowerer<'_>, body: super::SoacBody) -> super::SoacBody {
+                fn lower_body(this: &mut CallLowerer<'_, '_>, body: super::SoacBody) -> super::SoacBody {
                     super::SoacBody {
                         lam: body.lam,
                         captures: body
@@ -565,20 +565,13 @@ pub fn thread_captures_in_term(
     closure_info: &ClosureInfo,
     term_ids: &mut TermIdSource,
 ) -> Term {
-    let prev = std::mem::replace(term_ids, TermIdSource::new());
-    let mut lowerer = CallLowerer {
-        closure_info,
-        term_ids: prev,
-    };
-    let result = lowerer.lower_term(term);
-    *term_ids = lowerer.term_ids;
-    result
+    CallLowerer::new(closure_info, term_ids).lower_term(term)
 }
 
 /// Run closure-call lowering in place. Threads captures into call sites
 /// and runs the post-condition verifier.
-pub fn run(program: &mut Program, closure_info: &ClosureInfo) {
-    let mut lowerer = CallLowerer::new(closure_info);
+pub fn run(program: &mut Program, closure_info: &ClosureInfo, term_ids: &mut TermIdSource) {
+    let mut lowerer = CallLowerer::new(closure_info, term_ids);
     crate::map_in_place(&mut program.defs, |def| super::Def {
         body: lowerer.lower_def_body(def.body),
         ..def

@@ -30,14 +30,13 @@ struct Binding {
     rhs: Term,
 }
 
-pub fn run(program: &mut Program) {
-    let mut ids = TermIdSource::new();
+pub fn run(program: &mut Program, ids: &mut TermIdSource) {
     let blocked = LookupSet::new();
 
     for idx in 0..program.defs.len() {
         let body = program.defs[idx].body.clone();
-        let (floats, body) = float_term(body, &blocked, &mut ids, &mut program.symbols, false);
-        program.defs[idx].body = wrap_lets(floats, body, &mut ids);
+        let (floats, body) = float_term(body, &blocked, ids, &mut program.symbols, false);
+        program.defs[idx].body = wrap_lets(floats, body, ids);
     }
 
     super::anf::debug_check(&program, "runtime_index_producers");

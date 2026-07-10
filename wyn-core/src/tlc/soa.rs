@@ -173,17 +173,14 @@ fn has_type_variables(ty: &Type<TypeName>) -> bool {
 // =============================================================================
 
 /// SoA transformer state.
-struct SoaTransformer<'a> {
-    term_ids: TermIdSource,
+struct SoaTransformer<'a, 'ids> {
+    term_ids: &'ids mut TermIdSource,
     symbols: &'a mut SymbolTable,
 }
 
-impl<'a> SoaTransformer<'a> {
-    fn new(symbols: &'a mut SymbolTable) -> Self {
-        SoaTransformer {
-            term_ids: TermIdSource::new(),
-            symbols,
-        }
+impl<'a, 'ids> SoaTransformer<'a, 'ids> {
+    fn new(symbols: &'a mut SymbolTable, term_ids: &'ids mut TermIdSource) -> Self {
+        SoaTransformer { term_ids, symbols }
     }
 
     fn transform_def(&mut self, def: &mut Def) {
@@ -1110,8 +1107,8 @@ impl<'a> SoaTransformer<'a> {
 ///    that touch array-of-tuple types.
 /// 2. Flattens Map+Zip into multi-input Map with split lambda params.
 /// 3. Converts standalone Zip to tuple construction.
-pub fn run(program: &mut Program) {
-    let mut transformer = SoaTransformer::new(&mut program.symbols);
+pub fn run(program: &mut Program, term_ids: &mut TermIdSource) {
+    let mut transformer = SoaTransformer::new(&mut program.symbols, term_ids);
     for def in &mut program.defs {
         transformer.transform_def(def);
     }

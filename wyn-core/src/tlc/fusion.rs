@@ -98,7 +98,7 @@ fn collect_called_soac_helpers(
 /// 2. Computes function summaries for interprocedural analysis
 /// 3. Classifies producer uses, plans fusion groups, and rewrites them
 /// 4. Repeats until fixpoint
-pub fn run(program: &mut Program) {
+pub fn run(program: &mut Program, term_ids: &mut TermIdSource) {
     debug_assert!(
         verify_soac_helpers_inlined(program).is_ok(),
         "fusion entered with a SOAC helper behind a call boundary; \
@@ -107,22 +107,21 @@ pub fn run(program: &mut Program) {
     );
 
     // Normalize: lift SOACs out of nested positions into let bindings
-    super::normalize::normalize(program);
+    super::normalize::normalize(program, term_ids);
 
     let mut changed = true;
     while changed {
         changed = false;
 
-        let mut term_ids = TermIdSource::new();
         crate::map_in_place(&mut program.defs, |def| {
             // Bottom-up: fuse children first, then try one classified-use
             // rewrite for this definition. The outer fixpoint reruns the
             // analysis after each rewrite.
-            let (new_body, did_child_fuse) = fuse_term(def.body, &mut program.symbols, &mut term_ids);
+            let (new_body, did_child_fuse) = fuse_term(def.body, &mut program.symbols, term_ids);
             if did_child_fuse {
                 changed = true;
             }
-            let (new_body, did_fuse) = fuse_def_body(new_body, &mut program.symbols, &mut term_ids);
+            let (new_body, did_fuse) = fuse_def_body(new_body, &mut program.symbols, term_ids);
             if did_fuse {
                 changed = true;
             }

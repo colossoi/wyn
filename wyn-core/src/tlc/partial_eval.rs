@@ -52,21 +52,21 @@ impl Value {
 // Evaluator
 // =============================================================================
 
-pub struct PartialEvaluator {
+pub struct PartialEvaluator<'a> {
     /// Function definitions with their arities
     defs: LookupMap<SymbolId, Def>,
     /// Term ID source for generating new terms
-    term_ids: TermIdSource,
+    term_ids: &'a mut TermIdSource,
     /// Environment: symbol -> Value
     env: LookupMap<SymbolId, Value>,
 }
 
-impl PartialEvaluator {
-    pub fn partial_eval(program: &mut Program) {
+impl<'a> PartialEvaluator<'a> {
+    pub fn partial_eval(program: &mut Program, term_ids: &'a mut TermIdSource) {
         program.assert_flat_apps();
         let mut eval = Self {
             defs: program.defs.iter().map(|d| (d.name, d.clone())).collect(),
-            term_ids: TermIdSource::new(),
+            term_ids,
             env: LookupMap::new(),
         };
 

@@ -445,8 +445,7 @@ pub fn collect_free_vars_array_expr(
 ) {
     match ae {
         ArrayExpr::Var(vr, ty) => {
-            let mut ids = TermIdSource::new();
-            let t = crate::tlc::atom_var_term(*vr, ty.clone(), &mut ids);
+            let t = crate::tlc::synthetic_atom_var_term(*vr, ty.clone());
             collect_free_vars(&t, bound, top_level, known_defs, symbols, free, seen);
         }
         ArrayExpr::Zip(exprs) => {
@@ -629,7 +628,7 @@ impl ClosureInfo {
 // ClosureConverter pass
 // =============================================================================
 
-struct ClosureConverter<'a> {
+struct ClosureConverter<'a, 'ids> {
     symbols: &'a mut SymbolTable,
     top_level: LookupSet<SymbolId>,
     /// Canonical symbols for registry-known definitions. Tracking these by
@@ -639,11 +638,15 @@ struct ClosureConverter<'a> {
     lifted_defs: Vec<Def>,
     callable_values: LookupMap<SymbolId, CallableValue>,
     lambda_counter: u32,
-    term_ids: TermIdSource,
+    term_ids: &'ids mut TermIdSource,
 }
 
-impl<'a> ClosureConverter<'a> {
-    fn run(program: &mut Program, known_defs: &LookupSet<String>) -> ClosureInfo {
+impl<'a, 'ids> ClosureConverter<'a, 'ids> {
+    fn run(
+        program: &mut Program,
+        known_defs: &LookupSet<String>,
+        term_ids: &'ids mut TermIdSource,
+    ) -> ClosureInfo {
         let top_level: LookupSet<SymbolId> = program.defs.iter().map(|d| d.name).collect();
         let known_def_symbols: LookupSet<SymbolId> = program
             .def_syms
@@ -665,7 +668,7 @@ impl<'a> ClosureConverter<'a> {
             lifted_defs: vec![],
             callable_values,
             lambda_counter: 0,
-            term_ids: TermIdSource::new(),
+            term_ids,
         };
 
         crate::map_in_place(&mut program.defs, |def| {
@@ -1352,8 +1355,12 @@ fn collect_soac_bound_syms(soac: &SoacOp, out: &mut LookupSet<SymbolId>) {
 /// top-level def, substitutes let-aliased callable Vars away, and returns
 /// a side-table describing every callable symbol's captures (or lack
 /// thereof).
-pub fn run(program: &mut Program, known_defs: &LookupSet<String>) -> ClosureInfo {
-    let info = ClosureConverter::run(program, known_defs);
+pub fn run(
+    program: &mut Program,
+    known_defs: &LookupSet<String>,
+    term_ids: &mut TermIdSource,
+) -> ClosureInfo {
+    let info = ClosureConverter::run(program, known_defs, term_ids);
     verify_closure_converted(program)
         .unwrap_or_else(|e| panic!("closure-conversion verifier failed: {:?}", e));
     info

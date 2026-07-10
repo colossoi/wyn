@@ -30,11 +30,10 @@ use polytype::Type;
 
 /// Fuse every `Index(<directly-nested elementwise producer>, <literal>)` in the
 /// program into a scalar element computation.
-pub fn run(program: &mut Program) {
-    let mut ids = TermIdSource::new();
+pub fn run(program: &mut Program, ids: &mut TermIdSource) {
     for def in &mut program.defs {
         let body = def.body.clone();
-        def.body = fuse(body, &mut ids);
+        def.body = fuse(body, ids);
     }
 }
 

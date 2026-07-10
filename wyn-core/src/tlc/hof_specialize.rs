@@ -910,7 +910,7 @@ fn substitute_var_array_expr(
 // HofSpecializer pass
 // =============================================================================
 
-struct HofSpecializer<'a> {
+struct HofSpecializer<'a, 'ids> {
     symbols: &'a mut SymbolTable,
     top_level: LookupSet<SymbolId>,
     closure_info: &'a ClosureInfo,
@@ -929,10 +929,10 @@ struct HofSpecializer<'a> {
     /// added back in.
     defs_by_sym: LookupMap<SymbolId, Def>,
     specialization_counter: usize,
-    term_ids: TermIdSource,
+    term_ids: &'ids mut TermIdSource,
 }
 
-impl<'a> HofSpecializer<'a> {
+impl<'a, 'ids> HofSpecializer<'a, 'ids> {
     /// Walk a def body, preserving the outer parameter-spine `Lambda`
     /// nodes (those carry the def's named parameters). Anything below
     /// the spine routes through `rewrite_term`, which scans App nodes
@@ -1330,7 +1330,7 @@ impl<'a> HofSpecializer<'a> {
 /// Run HOF specialization in place. Takes the closure-converted program
 /// and the closure-info side-table; afterwards every reachable top-level
 /// def has zero function-typed parameters.
-pub fn run(program: &mut Program, closure_info: &ClosureInfo) {
+pub fn run(program: &mut Program, closure_info: &ClosureInfo, term_ids: &mut TermIdSource) {
     let hof_info = detect_hofs(&program.defs);
     let top_level: LookupSet<SymbolId> = program.defs.iter().map(|d| d.name).collect();
 
@@ -1344,7 +1344,7 @@ pub fn run(program: &mut Program, closure_info: &ClosureInfo) {
         closure_spec_cache: LookupMap::new(),
         defs_by_sym: LookupMap::new(),
         specialization_counter: 0,
-        term_ids: TermIdSource::new(),
+        term_ids,
     };
 
     for def in &mut program.defs {

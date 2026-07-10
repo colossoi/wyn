@@ -28,8 +28,8 @@ const INLINE_SIZE_THRESHOLD: usize = 30;
 /// SOAC helper) fully expand: one round inlines `center`, the next sees
 /// `sum` calls inside the freshly-expanded clump body and inlines those
 /// too.
-pub fn run_force_soac_helpers(program: &mut Program) {
-    force_inline_soac_helpers_to_fixpoint(program);
+pub fn run_force_soac_helpers(program: &mut Program, term_ids: &mut TermIdSource) {
+    force_inline_soac_helpers_to_fixpoint(program, term_ids);
     debug_assert!(
         super::fusion::verify_soac_helpers_inlined(program).is_ok(),
         "force-inline left a SOAC helper behind a call boundary; \
@@ -38,7 +38,7 @@ pub fn run_force_soac_helpers(program: &mut Program) {
     );
 }
 
-fn force_inline_soac_helpers_to_fixpoint(program: &mut Program) {
+fn force_inline_soac_helpers_to_fixpoint(program: &mut Program, term_ids: &mut TermIdSource) {
     // Bound iterations to guard against pathological recursion through
     // hand-crafted call graphs; typical wyn helper depth is 2–3.
     for _ in 0..8 {
@@ -53,9 +53,8 @@ fn force_inline_soac_helpers_to_fixpoint(program: &mut Program) {
         if !any_def_calls_candidate(program, &candidates) {
             return;
         }
-        let mut term_ids = TermIdSource::new();
         crate::map_in_place(&mut program.defs, |def| {
-            let body = inline_term(def.body, &candidates, &mut term_ids);
+            let body = inline_term(def.body, &candidates, term_ids);
             Def { body, ..def }
         });
         let defs = std::mem::take(&mut program.defs);
@@ -212,7 +211,7 @@ pub fn run_reachable(program: &mut Program) {
 /// - Constants (arity-0 defs, substituted at Var reference sites)
 ///
 /// Skips `LiftedLambda` defs (SOAC bodies) — handled by `inline()`.
-pub fn run_small(program: &mut Program) {
+pub fn run_small(program: &mut Program, term_ids: &mut TermIdSource) {
     let all_constants = find_all_constants(program);
     let mut small_candidates = find_small_candidates(&program.defs, &program.symbols);
 
@@ -227,11 +226,10 @@ pub fn run_small(program: &mut Program) {
         candidate.body = inline_constants(candidate.body.clone(), &all_constants);
     }
 
-    let mut term_ids = TermIdSource::new();
     crate::map_in_place(&mut program.defs, |def| {
         // Constants are pure — inline them everywhere, including lambda bodies.
         let body = inline_constants(def.body, &all_constants);
-        let body = inline_term(body, &small_candidates, &mut term_ids);
+        let body = inline_term(body, &small_candidates, term_ids);
         Def { body, ..def }
     });
 
@@ -240,12 +238,11 @@ pub fn run_small(program: &mut Program) {
 }
 
 /// Inline compiler-generated lifted-lambda defs (`DefMeta::LiftedLambda`) in a TLC program.
-pub fn run_large(program: &mut Program) {
+pub fn run_large(program: &mut Program, term_ids: &mut TermIdSource) {
     let inline_candidates = find_inline_candidates(&program.defs, &program.symbols);
 
-    let mut term_ids = TermIdSource::new();
     crate::map_in_place(&mut program.defs, |def| {
-        let body = inline_term(def.body, &inline_candidates, &mut term_ids);
+        let body = inline_term(def.body, &inline_candidates, term_ids);
         Def { body, ..def }
     });
 

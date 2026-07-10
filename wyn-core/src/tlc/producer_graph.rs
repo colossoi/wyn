@@ -110,6 +110,7 @@ pub fn build_producer_graph(
     body: &Term,
     summaries: &LookupMap<SymbolId, FunctionSummary>,
     sym_to_def: &LookupMap<SymbolId, SymbolId>,
+    term_ids: &mut TermIdSource,
 ) -> ProducerGraph {
     let mut builder = GraphBuilder {
         nodes: Vec::new(),
@@ -117,7 +118,7 @@ pub fn build_producer_graph(
         binding_map: LookupMap::new(),
         summaries,
         sym_to_def,
-        term_ids: TermIdSource::new(),
+        term_ids,
     };
 
     builder.walk_term(body);
@@ -139,7 +140,7 @@ struct GraphBuilder<'a> {
     /// lookup. Borrowed from the fusion pass's `FusionContext` so the map
     /// is built once per outer iteration, not once per graph build.
     sym_to_def: &'a LookupMap<SymbolId, SymbolId>,
-    term_ids: TermIdSource,
+    term_ids: &'a mut TermIdSource,
 }
 
 impl<'a> GraphBuilder<'a> {
@@ -199,7 +200,7 @@ impl<'a> GraphBuilder<'a> {
         // Apply all param→arg substitutions to every ArrayExpr and Lambda in the semantics
         let mut result = semantics.clone();
         for (&param_sym, &arg_sym) in &param_to_arg {
-            result = subst_in_semantics(result, param_sym, arg_sym, &mut self.term_ids);
+            result = subst_in_semantics(result, param_sym, arg_sym, self.term_ids);
         }
         result
     }

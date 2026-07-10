@@ -18,11 +18,10 @@ use crate::SymbolId;
 use crate::SymbolTable;
 use polytype::Type;
 
-pub fn run(program: &mut Program) {
-    let mut term_ids = TermIdSource::new();
+pub fn run(program: &mut Program, term_ids: &mut TermIdSource) {
     for idx in 0..program.defs.len() {
         let body = program.defs[idx].body.clone();
-        program.defs[idx].body = rewrite_term(body, &mut program.symbols, &mut term_ids);
+        program.defs[idx].body = rewrite_term(body, &mut program.symbols, term_ids);
     }
 }
 
@@ -365,8 +364,7 @@ fn array_expr_len_key(
 ) -> Option<LenKey> {
     match ae {
         ArrayExpr::Var(vr, ty) => {
-            let mut ids = TermIdSource::new();
-            let t = crate::tlc::atom_var_term(*vr, ty.clone(), &mut ids);
+            let t = crate::tlc::synthetic_atom_var_term(*vr, ty.clone());
             term_array_len_key(&t, env, resolving)
         }
         ArrayExpr::Range { len, .. } => len_key(len, env, resolving),
