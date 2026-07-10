@@ -1030,7 +1030,7 @@ impl TlcMonomorphized {
     /// order so fusion sees concrete reps.
     pub fn rep_specialize(self) -> TlcRepSpecialized {
         let mut inner = self.0;
-        inner.tlc = tlc::rep_specialize::run(inner.tlc);
+        tlc::rep_specialize::run(&mut inner.tlc);
         TlcRepSpecialized(inner)
     }
 }

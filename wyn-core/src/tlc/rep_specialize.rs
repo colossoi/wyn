@@ -28,7 +28,7 @@
 //! (partition, take_while if/when added) are out of scope; the
 //! verifier will flag them.
 
-use super::{Def, DefMeta, Lambda, LoopKind, Program, SoacOp, Term, TermIdSource, TermKind, VarRef};
+use super::{Def, DefMeta, Lambda, Program, SoacOp, Term, TermIdSource, TermKind, VarRef};
 use crate::ast::TypeName;
 use crate::tlc::ArrayExpr;
 use crate::LookupMap;
@@ -89,8 +89,8 @@ impl ConcreteVariant {
 
 type SpecKey = Vec<Option<ConcreteVariant>>;
 
-struct RepSpecializer {
-    symbols: SymbolTable,
+struct RepSpecializer<'a> {
+    symbols: &'a mut SymbolTable,
     term_ids: TermIdSource,
     def_map: LookupMap<SymbolId, Def>,
     /// Cache: `(orig_callee_sym, spec_key) → specialized_sym`.
@@ -103,42 +103,29 @@ struct RepSpecializer {
     env_stack: Vec<LookupMap<SymbolId, ConcreteVariant>>,
 }
 
-/// Entry point: rewrite every def's body to insert call-edge
-/// representation specializations; return the program with the new
-/// specialized defs appended.
-pub fn run(program: Program) -> Program {
-    let mut s = RepSpecializer::new(&program);
+/// Entry point: rewrite every def's body in place to insert call-edge
+/// representation specializations, appending the new specialized defs
+/// to the program.
+pub fn run(program: &mut Program) {
+    // Snapshot of the original defs: specialization clones a callee's
+    // body while the defs themselves are being rewritten.
+    let def_map: LookupMap<SymbolId, Def> = program.defs.iter().map(|d| (d.name, d.clone())).collect();
+    let mut s = RepSpecializer {
+        symbols: &mut program.symbols,
+        term_ids: TermIdSource::new(),
+        def_map,
+        specializations: LookupMap::new(),
+        new_defs: Vec::new(),
+        env_stack: Vec::new(),
+    };
 
-    let mut processed: Vec<Def> = Vec::with_capacity(program.defs.len());
-    for def in &program.defs {
-        let new_body = s.rewrite_def_body(def.body.clone());
-        processed.push(Def {
-            body: new_body,
-            ..def.clone()
-        });
+    for def in &mut program.defs {
+        s.rewrite_def_body(&mut def.body);
     }
-    processed.extend(s.new_defs.drain(..));
-
-    Program {
-        defs: processed,
-        symbols: s.symbols,
-        ..program
-    }
+    program.defs.append(&mut s.new_defs);
 }
 
-impl RepSpecializer {
-    fn new(program: &Program) -> Self {
-        let def_map: LookupMap<SymbolId, Def> = program.defs.iter().map(|d| (d.name, d.clone())).collect();
-        Self {
-            symbols: program.symbols.clone(),
-            term_ids: TermIdSource::new(),
-            def_map,
-            specializations: LookupMap::new(),
-            new_defs: Vec::new(),
-            env_stack: Vec::new(),
-        }
-    }
-
+impl<'a> RepSpecializer<'a> {
     // ------------------------------------------------------------------
     // Scoped producer env
     // ------------------------------------------------------------------
@@ -167,33 +154,26 @@ impl RepSpecializer {
 
     /// Preserve the outer parameter-spine `Lambda` nodes; rewrite their
     /// inner body. A fresh scope is pushed for the def's body.
-    fn rewrite_def_body(&mut self, term: Term) -> Term {
+    fn rewrite_def_body(&mut self, term: &mut Term) {
         self.push_scope();
-        let out = self.rewrite_def_body_inner(term);
+        self.rewrite_def_body_inner(term);
         self.pop_scope();
-        out
     }
 
-    fn rewrite_def_body_inner(&mut self, term: Term) -> Term {
-        match term.kind {
-            TermKind::Lambda(Lambda { params, body, ret_ty }) => {
-                let new_body = self.rewrite_def_body_inner(*body);
-                Term {
-                    id: self.term_ids.next_id(),
-                    ty: term.ty,
-                    span: term.span,
-                    kind: TermKind::Lambda(Lambda {
-                        params,
-                        body: Box::new(new_body),
-                        ret_ty,
-                    }),
-                }
+    fn rewrite_def_body_inner(&mut self, term: &mut Term) {
+        match &mut term.kind {
+            TermKind::Lambda(Lambda { body, .. }) => {
+                self.rewrite_def_body_inner(body);
             }
-            _ => self.rewrite_term(term),
+            _ => {
+                self.rewrite_term(term);
+                return;
+            }
         }
+        term.id = self.term_ids.next_id();
     }
 
-    /// Recursive term walker. Two hooks fire:
+    /// Recursive in-place term walker. Two hooks fire:
     ///   * `Let { rhs = filter(_, arr), ... }` — record the bound name
     ///     as a known producer in the current scope (Bounded/View based
     ///     on `arr`'s size).
@@ -201,308 +181,139 @@ impl RepSpecializer {
     ///     is a Var of a known-producer name and the callee's param
     ///     has `Abstract` at that position, specialize the callee and
     ///     rewrite the call site.
-    fn rewrite_term(&mut self, term: Term) -> Term {
-        let ty = term.ty.clone();
-        let span = term.span;
-        match term.kind {
-            TermKind::Var(v) => Term {
-                id: self.term_ids.next_id(),
-                ty,
-                span,
-                kind: TermKind::Var(v),
-            },
-            TermKind::BinOp(_)
-            | TermKind::UnOp(_)
-            | TermKind::IntLit(_)
-            | TermKind::FloatLit(_)
-            | TermKind::BoolLit(_)
-            | TermKind::UnitLit
-            | TermKind::Extern(_) => Term {
-                id: self.term_ids.next_id(),
-                ty,
-                span,
-                kind: term.kind,
-            },
-            TermKind::Coerce { inner, target_ty } => Term {
-                id: self.term_ids.next_id(),
-                ty,
-                span,
-                kind: TermKind::Coerce {
-                    inner: Box::new(self.rewrite_term(*inner)),
-                    target_ty,
-                },
-            },
-            TermKind::App { func, args } => self.rewrite_app(*func, args, ty, span),
+    fn rewrite_term(&mut self, term: &mut Term) {
+        match &mut term.kind {
             TermKind::Lambda(lam) => {
                 // Nested lambdas open a fresh scope — captures are
                 // tracked by the surrounding Let.
                 self.push_scope();
-                let new_lam = Lambda {
-                    params: lam.params.clone(),
-                    body: Box::new(self.rewrite_term(*lam.body)),
-                    ret_ty: lam.ret_ty.clone(),
-                };
+                self.rewrite_term(&mut lam.body);
                 self.pop_scope();
-                Term {
-                    id: self.term_ids.next_id(),
-                    ty,
-                    span,
-                    kind: TermKind::Lambda(new_lam),
-                }
             }
-            TermKind::Let {
-                name,
-                name_ty,
-                rhs,
-                body,
-            } => {
-                let new_rhs = self.rewrite_term(*rhs);
-                let producer_variant = self.detect_producer_variant(&new_rhs);
+            TermKind::Let { name, rhs, body, .. } => {
+                self.rewrite_term(rhs);
+                let producer_variant = self.detect_producer_variant(rhs);
                 self.push_scope();
                 if let Some(v) = producer_variant {
-                    self.bind(name, v);
+                    self.bind(*name, v);
                 }
-                let new_body = self.rewrite_term(*body);
+                self.rewrite_term(body);
                 self.pop_scope();
-                Term {
-                    id: self.term_ids.next_id(),
-                    ty,
-                    span,
-                    kind: TermKind::Let {
-                        name,
-                        name_ty,
-                        rhs: Box::new(new_rhs),
-                        body: Box::new(new_body),
-                    },
-                }
             }
-            TermKind::If {
-                cond,
-                then_branch,
-                else_branch,
-            } => Term {
-                id: self.term_ids.next_id(),
-                ty,
-                span,
-                kind: TermKind::If {
-                    cond: Box::new(self.rewrite_term(*cond)),
-                    then_branch: Box::new(self.rewrite_term(*then_branch)),
-                    else_branch: Box::new(self.rewrite_term(*else_branch)),
-                },
-            },
-            TermKind::Loop {
-                loop_var,
-                loop_var_ty,
-                init,
-                init_bindings,
-                kind,
-                body,
-            } => {
-                let new_init = self.rewrite_term(*init);
-                let new_bindings: Vec<_> =
-                    init_bindings.into_iter().map(|(n, t, e)| (n, t, self.rewrite_term(e))).collect();
-                let new_kind = match kind {
-                    LoopKind::For { var, var_ty, iter } => LoopKind::For {
-                        var,
-                        var_ty,
-                        iter: Box::new(self.rewrite_term(*iter)),
-                    },
-                    LoopKind::ForRange { var, var_ty, bound } => LoopKind::ForRange {
-                        var,
-                        var_ty,
-                        bound: Box::new(self.rewrite_term(*bound)),
-                    },
-                    LoopKind::While { cond } => LoopKind::While {
-                        cond: Box::new(self.rewrite_term(*cond)),
-                    },
-                };
-                let new_body = self.rewrite_term(*body);
-                Term {
-                    id: self.term_ids.next_id(),
-                    ty,
-                    span,
-                    kind: TermKind::Loop {
-                        loop_var,
-                        loop_var_ty,
-                        init: Box::new(new_init),
-                        init_bindings: new_bindings,
-                        kind: new_kind,
-                        body: Box::new(new_body),
-                    },
-                }
+            TermKind::Soac(soac) => self.rewrite_soac(soac),
+            _ => {
+                term.for_each_child_mut(&mut |child| self.rewrite_term(child));
             }
-            TermKind::Soac(soac) => Term {
-                id: self.term_ids.next_id(),
-                ty,
-                span,
-                kind: TermKind::Soac(self.rewrite_soac(soac)),
-            },
-            TermKind::ArrayExpr(ae) => Term {
-                id: self.term_ids.next_id(),
-                ty,
-                span,
-                kind: TermKind::ArrayExpr(self.rewrite_array_expr(ae)),
-            },
-            TermKind::Tuple(parts) => Term {
-                id: self.term_ids.next_id(),
-                ty,
-                span,
-                kind: TermKind::Tuple(parts.into_iter().map(|p| self.rewrite_term(p)).collect()),
-            },
-            TermKind::TupleProj { tuple, idx } => Term {
-                id: self.term_ids.next_id(),
-                ty,
-                span,
-                kind: TermKind::TupleProj {
-                    tuple: Box::new(self.rewrite_term(*tuple)),
-                    idx,
-                },
-            },
-            TermKind::Index { array, index } => Term {
-                id: self.term_ids.next_id(),
-                ty,
-                span,
-                kind: TermKind::Index {
-                    array: Box::new(self.rewrite_term(*array)),
-                    index: Box::new(self.rewrite_term(*index)),
-                },
-            },
-            TermKind::VecLit(parts) => Term {
-                id: self.term_ids.next_id(),
-                ty,
-                span,
-                kind: TermKind::VecLit(parts.into_iter().map(|p| self.rewrite_term(p)).collect()),
-            },
-            TermKind::OutputSlotStore { slot_index, value } => Term {
-                id: self.term_ids.next_id(),
-                ty,
-                span,
-                kind: TermKind::OutputSlotStore {
-                    slot_index,
-                    value: Box::new(self.rewrite_term(*value)),
-                },
-            },
         }
+        term.id = self.term_ids.next_id();
+        self.maybe_specialize_call(term);
     }
 
-    fn rewrite_soac(&mut self, soac: SoacOp) -> SoacOp {
+    fn rewrite_soac(&mut self, soac: &mut SoacOp) {
         match soac {
-            SoacOp::Map {
-                lam,
-                inputs,
-                destination,
-            } => SoacOp::Map {
-                lam: self.rewrite_soac_body(lam),
-                inputs: inputs.into_iter().map(|ae| self.rewrite_array_expr(ae)).collect(),
-                destination,
-            },
-            SoacOp::Reduce { op, ne, input } => SoacOp::Reduce {
-                op: self.rewrite_soac_body(op),
-                ne: Box::new(self.rewrite_term(*ne)),
-                input: self.rewrite_array_expr(input),
-            },
+            SoacOp::Map { lam, inputs, .. } => {
+                self.rewrite_soac_body(lam);
+                for ae in inputs {
+                    self.rewrite_array_expr(ae);
+                }
+            }
+            SoacOp::Reduce { op, ne, input } => {
+                self.rewrite_soac_body(op);
+                self.rewrite_term(ne);
+                self.rewrite_array_expr(input);
+            }
             SoacOp::Scan {
                 op,
                 reduce_op,
                 ne,
                 input,
-                destination,
-            } => SoacOp::Scan {
-                op: self.rewrite_soac_body(op),
-                reduce_op: self.rewrite_soac_body(reduce_op),
-                ne: Box::new(self.rewrite_term(*ne)),
-                input: self.rewrite_array_expr(input),
-                destination,
-            },
+                ..
+            } => {
+                self.rewrite_soac_body(op);
+                self.rewrite_soac_body(reduce_op);
+                self.rewrite_term(ne);
+                self.rewrite_array_expr(input);
+            }
             SoacOp::Filter {
-                map_lam,
-                pred,
-                input,
-                destination,
-            } => SoacOp::Filter {
-                map_lam: map_lam.map(|ml| self.rewrite_soac_body(ml)),
-                pred: self.rewrite_soac_body(pred),
-                input: self.rewrite_array_expr(input),
-                destination,
-            },
-            SoacOp::Scatter { dest, lam, inputs } => SoacOp::Scatter {
-                dest,
-                lam: self.rewrite_soac_body(lam),
-                inputs: inputs.into_iter().map(|ae| self.rewrite_array_expr(ae)).collect(),
-            },
+                map_lam, pred, input, ..
+            } => {
+                if let Some(ml) = map_lam {
+                    self.rewrite_soac_body(ml);
+                }
+                self.rewrite_soac_body(pred);
+                self.rewrite_array_expr(input);
+            }
+            SoacOp::Scatter { lam, inputs, .. } => {
+                self.rewrite_soac_body(lam);
+                for ae in inputs {
+                    self.rewrite_array_expr(ae);
+                }
+            }
             SoacOp::ReduceByIndex {
-                dest,
                 op,
                 ne,
                 indices,
                 values,
-            } => SoacOp::ReduceByIndex {
-                dest,
-                op: self.rewrite_soac_body(op),
-                ne: Box::new(self.rewrite_term(*ne)),
-                indices: self.rewrite_array_expr(indices),
-                values: self.rewrite_array_expr(values),
-            },
+                ..
+            } => {
+                self.rewrite_soac_body(op);
+                self.rewrite_term(ne);
+                self.rewrite_array_expr(indices);
+                self.rewrite_array_expr(values);
+            }
             SoacOp::Screma {
                 lanes,
                 accumulators,
                 inputs,
-            } => SoacOp::Screma {
-                lanes: lanes
-                    .into_iter()
-                    .map(|lane| super::ScremaLane {
-                        lam: self.rewrite_soac_body(lane.lam),
-                        input_indices: lane.input_indices,
-                    })
-                    .collect(),
-                accumulators: accumulators
-                    .into_iter()
-                    .map(|acc| super::ScremaAccumulatorSpec {
-                        kind: acc.kind,
-                        step_lam: self.rewrite_soac_body(acc.step_lam),
-                        reduce_op: self.rewrite_soac_body(acc.reduce_op),
-                        ne: Box::new(self.rewrite_term(*acc.ne)),
-                    })
-                    .collect(),
-                inputs: inputs.into_iter().map(|ae| self.rewrite_array_expr(ae)).collect(),
-            },
+            } => {
+                for lane in lanes {
+                    self.rewrite_soac_body(&mut lane.lam);
+                }
+                for acc in accumulators {
+                    self.rewrite_soac_body(&mut acc.step_lam);
+                    self.rewrite_soac_body(&mut acc.reduce_op);
+                    self.rewrite_term(&mut acc.ne);
+                }
+                for ae in inputs {
+                    self.rewrite_array_expr(ae);
+                }
+            }
         }
     }
 
-    fn rewrite_soac_body(&mut self, sb: super::SoacBody) -> super::SoacBody {
+    fn rewrite_soac_body(&mut self, sb: &mut super::SoacBody) {
         self.push_scope();
-        let new_lam = Lambda {
-            params: sb.lam.params.clone(),
-            body: Box::new(self.rewrite_term(*sb.lam.body)),
-            ret_ty: sb.lam.ret_ty.clone(),
-        };
+        self.rewrite_term(&mut sb.lam.body);
         self.pop_scope();
-        super::SoacBody {
-            lam: new_lam,
-            captures: sb.captures.into_iter().map(|(s, t, e)| (s, t, self.rewrite_term(e))).collect(),
+        for (_, _, e) in &mut sb.captures {
+            self.rewrite_term(e);
         }
     }
 
-    fn rewrite_array_expr(&mut self, ae: ArrayExpr) -> ArrayExpr {
+    fn rewrite_array_expr(&mut self, ae: &mut ArrayExpr) {
         match ae {
-            ArrayExpr::Var(vr, ty) => ArrayExpr::Var(vr, ty),
+            ArrayExpr::Var(..) => {}
             ArrayExpr::Zip(aes) => {
-                ArrayExpr::Zip(aes.into_iter().map(|a| self.rewrite_array_expr(a)).collect())
+                for a in aes {
+                    self.rewrite_array_expr(a);
+                }
             }
             ArrayExpr::Literal(terms) => {
-                ArrayExpr::Literal(terms.into_iter().map(|t| self.rewrite_term(t)).collect())
+                for t in terms {
+                    self.rewrite_term(t);
+                }
             }
-            ArrayExpr::Range { start, len, step } => ArrayExpr::Range {
-                start: Box::new(self.rewrite_term(*start)),
-                len: Box::new(self.rewrite_term(*len)),
-                step: step.map(|s| Box::new(self.rewrite_term(*s))),
-            },
-            ArrayExpr::StorageView(sv) => ArrayExpr::StorageView(super::StorageView {
-                binding: sv.binding,
-                offset: Box::new(self.rewrite_term(*sv.offset)),
-                len: Box::new(self.rewrite_term(*sv.len)),
-                elem_ty: sv.elem_ty,
-            }),
+            ArrayExpr::Range { start, len, step } => {
+                self.rewrite_term(start);
+                self.rewrite_term(len);
+                if let Some(s) = step {
+                    self.rewrite_term(s);
+                }
+            }
+            ArrayExpr::StorageView(sv) => {
+                self.rewrite_term(&mut sv.offset);
+                self.rewrite_term(&mut sv.len);
+            }
         }
     }
 
@@ -542,33 +353,24 @@ impl RepSpecializer {
     // Call-site dispatch
     // ------------------------------------------------------------------
 
-    fn rewrite_app(
-        &mut self,
-        func: Term,
-        args: Vec<Term>,
-        ty: Type<TypeName>,
-        span: crate::ast::Span,
-    ) -> Term {
-        let new_func = self.rewrite_term(func);
-        let new_args: Vec<Term> = args.into_iter().map(|a| self.rewrite_term(a)).collect();
-
-        let TermKind::Var(VarRef::Symbol(callee_sym)) = &new_func.kind else {
-            return Term {
-                id: self.term_ids.next_id(),
-                ty,
-                span,
-                kind: TermKind::App {
-                    func: Box::new(new_func),
-                    args: new_args,
-                },
-            };
+    /// Call-site hook, applied after a term's children are rewritten:
+    /// if this is an `App(Var(Symbol), args)` whose args match known
+    /// producer variants at representation-polymorphic callee params,
+    /// specialize the callee and repoint `func` at the specialization.
+    fn maybe_specialize_call(&mut self, term: &mut Term) {
+        let span = term.span;
+        let TermKind::App { func, args } = &mut term.kind else {
+            return;
+        };
+        let TermKind::Var(VarRef::Symbol(callee_sym)) = &func.kind else {
+            return;
         };
         let callee_sym = *callee_sym;
 
         // Build a positional spec key. None at every position with no
         // known concrete variant; Some(variant) when the arg is a `Var`
         // of a binding currently in the producer env.
-        let spec_key: SpecKey = new_args
+        let spec_key: SpecKey = args
             .iter()
             .map(|a| match &a.kind {
                 TermKind::Var(VarRef::Symbol(s)) => self.lookup(*s),
@@ -576,44 +378,20 @@ impl RepSpecializer {
             })
             .collect();
         if spec_key.iter().all(Option::is_none) {
-            return Term {
-                id: self.term_ids.next_id(),
-                ty,
-                span,
-                kind: TermKind::App {
-                    func: Box::new(new_func),
-                    args: new_args,
-                },
-            };
+            return;
         }
 
         // Check the callee actually has a representation-polymorphic array
         // at one of the matched positions; otherwise it's already concrete
         // for this arg, and there's nothing to specialize.
         let Some(callee_def) = self.def_map.get(&callee_sym).cloned() else {
-            return Term {
-                id: self.term_ids.next_id(),
-                ty,
-                span,
-                kind: TermKind::App {
-                    func: Box::new(new_func),
-                    args: new_args,
-                },
-            };
+            return;
         };
         if !matches!(callee_def.meta, DefMeta::Function | DefMeta::LiftedLambda) {
-            return Term {
-                id: self.term_ids.next_id(),
-                ty,
-                span,
-                kind: TermKind::App {
-                    func: Box::new(new_func),
-                    args: new_args,
-                },
-            };
+            return;
         }
         let (params, _body) = super::extract_lambda_params(&callee_def.body);
-        let mut effective_key = spec_key.clone();
+        let mut effective_key = spec_key;
         for (i, slot) in effective_key.iter_mut().enumerate() {
             if slot.is_some() {
                 let param_ty = match params.get(i) {
@@ -629,15 +407,7 @@ impl RepSpecializer {
             }
         }
         if effective_key.iter().all(Option::is_none) {
-            return Term {
-                id: self.term_ids.next_id(),
-                ty,
-                span,
-                kind: TermKind::App {
-                    func: Box::new(new_func),
-                    args: new_args,
-                },
-            };
+            return;
         }
 
         let spec_sym = self.get_or_create_specialization(callee_sym, &callee_def, &effective_key);
@@ -649,23 +419,17 @@ impl RepSpecializer {
                 .iter()
                 .find(|d| d.name == spec_sym)
                 .map(|d| d.ty.clone())
-                .unwrap_or(new_func.ty.clone()),
+                .unwrap_or(func.ty.clone()),
         };
-        let new_func_term = Term {
+        let TermKind::App { func, .. } = &mut term.kind else {
+            unreachable!()
+        };
+        **func = Term {
             id: self.term_ids.next_id(),
             ty: func_ty,
             span,
             kind: TermKind::Var(VarRef::Symbol(spec_sym)),
         };
-        Term {
-            id: self.term_ids.next_id(),
-            ty,
-            span,
-            kind: TermKind::App {
-                func: Box::new(new_func_term),
-                args: new_args,
-            },
-        }
     }
 
     // ------------------------------------------------------------------
@@ -731,7 +495,7 @@ impl RepSpecializer {
     /// env so calls inside the body that use those params as args
     /// also see their concrete variant.
     fn specialize_def_body(&mut self, body: &Term, spec_key: &SpecKey) -> Term {
-        let (params, inner) = super::extract_lambda_params(body);
+        let (params, mut inner) = super::extract_lambda_params(body);
         let new_params: Vec<(SymbolId, Type<TypeName>)> = params
             .iter()
             .enumerate()
@@ -754,15 +518,10 @@ impl RepSpecializer {
                 self.bind(*sym, *variant);
             }
         }
-        let rewritten_inner = self.rewrite_def_body(inner);
+        self.rewrite_def_body(&mut inner);
         self.pop_scope();
 
-        super::closure_convert::rebuild_nested_lam(
-            &new_params,
-            rewritten_inner,
-            body.span,
-            &mut self.term_ids,
-        )
+        super::closure_convert::rebuild_nested_lam(&new_params, inner, body.span, &mut self.term_ids)
     }
 }
 
