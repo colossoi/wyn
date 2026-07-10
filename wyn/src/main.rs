@@ -125,7 +125,7 @@ fn type_check_frontend_file(
     verbose: bool,
 ) -> Result<FrontendFile, DriverError> {
     let source = fs::read_to_string(input)?;
-    let (mut node_counter, mut module_manager) = time("frontend", verbose, wyn_core::init_compiler);
+    let (mut node_counter, mut module_manager) = time("frontend", verbose, wyn_core::init_compiler)?;
     let parsed = time("parse", verbose, || Compiler::parse(&source, &mut node_counter))?;
     // Resolve `import "..."` against the entry file's directory so
     // user code can split across files. Imports are looked up

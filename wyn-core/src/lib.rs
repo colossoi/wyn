@@ -361,16 +361,11 @@ pub type TypeTable = LookupMap<NodeId, TypeScheme<TypeName>>;
 /// shared between user code parsing and prelude loading so all NodeIds
 /// stay unique. The module manager comes pre-loaded with the parsed
 /// prelude.
-pub fn init_compiler() -> (NodeCounter, module_manager::ModuleManager) {
+pub fn init_compiler() -> Result<(NodeCounter, module_manager::ModuleManager)> {
     let mut node_counter = NodeCounter::new();
-    let module_manager = match module_manager::ModuleManager::create_prelude(&mut node_counter) {
-        Ok(prelude) => module_manager::ModuleManager::from_prelude(prelude),
-        Err(e) => {
-            eprintln!("ERROR creating prelude: {:?}", e);
-            module_manager::ModuleManager::new_empty()
-        }
-    };
-    (node_counter, module_manager)
+    let prelude = module_manager::ModuleManager::create_prelude(&mut node_counter)?;
+    let module_manager = module_manager::ModuleManager::from_prelude(prelude);
+    Ok((node_counter, module_manager))
 }
 
 /// Build a `(NodeCounter, ModuleManager)` pair from an already-elaborated
