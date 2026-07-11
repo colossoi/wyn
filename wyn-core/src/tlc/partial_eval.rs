@@ -6,6 +6,8 @@
 use super::VarRef;
 use super::{Def, Lambda, Program, Term, TermIdSource, TermKind};
 use crate::ast::{BinaryOp, Span, TypeName, UnaryOp};
+use crate::builtins::lowering::{BuiltinLowering, PrimOp};
+use crate::builtins::{by_id, Purity};
 use crate::types::TypeExt;
 use crate::LookupMap;
 use crate::LookupSet;
@@ -59,6 +61,9 @@ pub struct PartialEvaluator<'a> {
     term_ids: &'a mut TermIdSource,
     /// Environment: symbol -> Value
     env: LookupMap<SymbolId, Value>,
+    /// Definitions currently being evaluated. Re-entry means recursion, which
+    /// is deliberately left residual instead of recursing in the compiler.
+    active_defs: LookupSet<SymbolId>,
 }
 
 impl<'a> PartialEvaluator<'a> {
@@ -68,6 +73,7 @@ impl<'a> PartialEvaluator<'a> {
             defs: program.defs.iter().map(|d| (d.name, d.clone())).collect(),
             term_ids,
             env: LookupMap::new(),
+            active_defs: LookupSet::new(),
         };
 
         crate::map_in_place(&mut program.defs, |def| {
@@ -109,8 +115,13 @@ impl<'a> PartialEvaluator<'a> {
                     val.clone()
                 } else if let Some(def) = self.defs.get(&sym).cloned() {
                     if def.arity == 0 {
-                        // Constant - evaluate it
-                        self.eval(&def.body)
+                        if !self.active_defs.insert(sym) {
+                            Value::Unknown(term.clone())
+                        } else {
+                            let value = self.eval(&def.body);
+                            self.active_defs.remove(&sym);
+                            value
+                        }
                     } else {
                         // Function - create partial application with 0 args applied
                         Value::Partial {
@@ -310,13 +321,9 @@ impl<'a> PartialEvaluator<'a> {
 
             TermKind::Var(VarRef::Symbol(sym)) => self.apply_var(*sym, args, original),
 
-            TermKind::Var(VarRef::Builtin { .. }) => {
-                // Catalog builtin — opaque to partial_eval, but we
-                // still residualize via the args so let-binding
-                // substitutions performed by the inner `eval(arg)`
-                // calls survive into the residual term.
-                self.residualize_call(base.clone(), args, original)
-            }
+            TermKind::Var(VarRef::Builtin { id, overload_idx }) => self
+                .eval_builtin(*id, *overload_idx, &args, &original.ty)
+                .unwrap_or_else(|| self.residualize_call(base.clone(), args, original)),
 
             _ => {
                 // Higher-order or computed function - can't evaluate.
@@ -410,8 +417,13 @@ impl<'a> PartialEvaluator<'a> {
             let args_len = args.len();
             let all_known = args.iter().all(|(v, _)| v.is_known());
             if args_len >= def.arity && def.arity > 0 && all_known {
-                // Fully applied with known args - inline
-                self.inline(&def, args)
+                if !self.active_defs.insert(sym) {
+                    self.reify_call(sym, args, original)
+                } else {
+                    let value = self.inline(&def, args);
+                    self.active_defs.remove(&sym);
+                    value
+                }
             } else if args_len < def.arity {
                 // Partial application
                 Value::Partial {
@@ -480,15 +492,21 @@ impl<'a> PartialEvaluator<'a> {
             ("+", Value::Int(a), Value::Int(b)) => Value::Int(wrap_int(*a as i128 + *b as i128, ty)),
             ("-", Value::Int(a), Value::Int(b)) => Value::Int(wrap_int(*a as i128 - *b as i128, ty)),
             ("*", Value::Int(a), Value::Int(b)) => Value::Int(wrap_int(*a as i128 * *b as i128, ty)),
-            ("/", Value::Int(a), Value::Int(b)) if *b != 0 => {
-                Value::Int(wrap_int(*a as i128 / *b as i128, ty))
-            }
+            ("/", Value::Int(a), Value::Int(b)) if *b != 0 => match ty {
+                Type::Constructed(TypeName::UInt(_), _) => Value::Int(((*a as u64) / (*b as u64)) as i64),
+                _ => Value::Int(wrap_int(*a as i128 / *b as i128, ty)),
+            },
+            ("%", Value::Int(a), Value::Int(b)) if *b != 0 => match ty {
+                Type::Constructed(TypeName::UInt(_), _) => Value::Int(((*a as u64) % (*b as u64)) as i64),
+                _ => Value::Int(wrap_int(*a as i128 % *b as i128, ty)),
+            },
 
             // Float arithmetic
             ("+", Value::Float(a), Value::Float(b)) => Value::Float(a + b),
             ("-", Value::Float(a), Value::Float(b)) => Value::Float(a - b),
             ("*", Value::Float(a), Value::Float(b)) => Value::Float(a * b),
             ("/", Value::Float(a), Value::Float(b)) => Value::Float(a / b),
+            ("%", Value::Float(a), Value::Float(b)) => Value::Float(a % b),
 
             // Comparisons
             ("==", Value::Int(a), Value::Int(b)) => Value::Bool(a == b),
@@ -497,6 +515,16 @@ impl<'a> PartialEvaluator<'a> {
             (">", Value::Int(a), Value::Int(b)) => Value::Bool(a > b),
             ("<=", Value::Int(a), Value::Int(b)) => Value::Bool(a <= b),
             (">=", Value::Int(a), Value::Int(b)) => Value::Bool(a >= b),
+            ("==", Value::Float(a), Value::Float(b)) => Value::Bool(a == b),
+            ("!=", Value::Float(a), Value::Float(b)) => Value::Bool(!a.is_nan() && !b.is_nan() && a != b),
+            ("<", Value::Float(a), Value::Float(b)) => Value::Bool(a < b),
+            (">", Value::Float(a), Value::Float(b)) => Value::Bool(a > b),
+            ("<=", Value::Float(a), Value::Float(b)) => Value::Bool(a <= b),
+            (">=", Value::Float(a), Value::Float(b)) => Value::Bool(a >= b),
+            ("&&", Value::Bool(a), Value::Bool(b)) => Value::Bool(*a && *b),
+            ("||", Value::Bool(a), Value::Bool(b)) => Value::Bool(*a || *b),
+            ("==", Value::Bool(a), Value::Bool(b)) => Value::Bool(a == b),
+            ("!=", Value::Bool(a), Value::Bool(b)) => Value::Bool(a != b),
 
             // Algebraic identities (return a residual operand — a valid fold)
             ("+", Value::Int(0), _) => rhs.clone(),
@@ -517,6 +545,33 @@ impl<'a> PartialEvaluator<'a> {
             ("!", Value::Bool(b)) => Value::Bool(!b),
             _ => return None,
         })
+    }
+
+    /// Scalar catalog keyholes needed to finish constant defs and pure helper
+    /// calls. Operations not listed here remain ordinary residual calls.
+    fn eval_builtin(
+        &self,
+        id: crate::builtins::BuiltinId,
+        overload_idx: usize,
+        args: &[(Value, Type<TypeName>)],
+        result_ty: &Type<TypeName>,
+    ) -> Option<Value> {
+        let def = by_id(id);
+        if def.raw.purity != Purity::Pure || args.iter().any(|(v, _)| !v.is_known()) {
+            return None;
+        }
+        match &def.overloads().get(overload_idx)?.lowering {
+            BuiltinLowering::PrimOp(PrimOp::GlslExt(8)) => match &args.first()?.0 {
+                Value::Float(v) => Some(Value::Float(v.floor())),
+                _ => None,
+            },
+            BuiltinLowering::PrimOp(PrimOp::GlslExt(9)) => match &args.first()?.0 {
+                Value::Float(v) => Some(Value::Float(v.ceil())),
+                _ => None,
+            },
+            BuiltinLowering::PrimOp(prim) => fold_scalar_conversion(prim, args, result_ty),
+            _ => None,
+        }
     }
 
     // =========================================================================
@@ -890,6 +945,118 @@ fn is_duplicable(v: &Value) -> bool {
         // `Var(name)` instead would make `apply_var` self-alias and recurse.
         Value::Unknown(t) => matches!(t.kind, TermKind::Var(_) | TermKind::UnitLit | TermKind::Lambda(_)),
         Value::Tuple(es) | Value::Array(es) | Value::Vector(es) => es.iter().all(is_duplicable),
+    }
+}
+
+fn fold_scalar_conversion(
+    prim: &PrimOp,
+    args: &[(Value, Type<TypeName>)],
+    result_ty: &Type<TypeName>,
+) -> Option<Value> {
+    let (arg, arg_ty) = args.first()?;
+    match prim {
+        PrimOp::FPToSI => {
+            let Value::Float(v) = arg else { return None };
+            let Type::Constructed(TypeName::Int(bits), _) = result_ty else {
+                return None;
+            };
+            let truncated = v.trunc();
+            let (min, max) = signed_float_bounds(*bits)?;
+            (v.is_finite() && truncated >= min && truncated <= max)
+                .then(|| Value::Int(wrap_int(truncated as i128, result_ty)))
+        }
+        PrimOp::FPToUI => {
+            let Value::Float(v) = arg else { return None };
+            let Type::Constructed(TypeName::UInt(bits), _) = result_ty else {
+                return None;
+            };
+            let truncated = v.trunc();
+            let max = unsigned_float_max(*bits)?;
+            (v.is_finite() && truncated >= 0.0 && truncated <= max)
+                .then(|| Value::Int(wrap_int(truncated as i128, result_ty)))
+        }
+        PrimOp::SIToFP => {
+            let Value::Int(v) = arg else { return None };
+            int_to_float(*v as i128, result_ty).map(Value::Float)
+        }
+        PrimOp::UIToFP => {
+            let Value::Int(v) = arg else { return None };
+            int_to_float(*v as u64 as i128, result_ty).map(Value::Float)
+        }
+        PrimOp::FPConvert => {
+            let Value::Float(v) = arg else { return None };
+            match result_ty {
+                Type::Constructed(TypeName::Float(32), _) => Some(Value::Float((*v as f32) as f64)),
+                Type::Constructed(TypeName::Float(64), _) => Some(Value::Float(*v)),
+                _ => None,
+            }
+        }
+        PrimOp::SConvert | PrimOp::UConvert => {
+            let Value::Int(v) = arg else { return None };
+            Some(Value::Int(wrap_int(*v as i128, result_ty)))
+        }
+        PrimOp::Bitcast => fold_scalar_bitcast(arg, arg_ty, result_ty),
+        _ => None,
+    }
+}
+
+fn int_to_float(v: i128, ty: &Type<TypeName>) -> Option<f64> {
+    match ty {
+        Type::Constructed(TypeName::Float(32), _) => Some((v as f32) as f64),
+        Type::Constructed(TypeName::Float(64), _) => Some(v as f64),
+        _ => None,
+    }
+}
+
+fn signed_float_bounds(bits: usize) -> Option<(f64, f64)> {
+    match bits {
+        8 => Some((i8::MIN as f64, i8::MAX as f64)),
+        16 => Some((i16::MIN as f64, i16::MAX as f64)),
+        32 => Some((i32::MIN as f64, i32::MAX as f64)),
+        64 => Some((i64::MIN as f64, i64::MAX as f64)),
+        _ => None,
+    }
+}
+
+fn unsigned_float_max(bits: usize) -> Option<f64> {
+    match bits {
+        8 => Some(u8::MAX as f64),
+        16 => Some(u16::MAX as f64),
+        32 => Some(u32::MAX as f64),
+        64 => Some(u64::MAX as f64),
+        _ => None,
+    }
+}
+
+fn fold_scalar_bitcast(arg: &Value, arg_ty: &Type<TypeName>, result_ty: &Type<TypeName>) -> Option<Value> {
+    match (arg, arg_ty, result_ty) {
+        (v, a, b) if a == b => Some(v.clone()),
+        (
+            Value::Float(v),
+            Type::Constructed(TypeName::Float(32), _),
+            Type::Constructed(TypeName::Int(32), _),
+        ) => Some(Value::Int((*v as f32).to_bits() as i32 as i64)),
+        (
+            Value::Float(v),
+            Type::Constructed(TypeName::Float(32), _),
+            Type::Constructed(TypeName::UInt(32), _),
+        ) => Some(Value::Int((*v as f32).to_bits() as i64)),
+        (
+            Value::Int(v),
+            Type::Constructed(TypeName::Int(32) | TypeName::UInt(32), _),
+            Type::Constructed(TypeName::Float(32), _),
+        ) => Some(Value::Float(f32::from_bits(*v as u32) as f64)),
+        (
+            Value::Int(v),
+            Type::Constructed(TypeName::Int(32), _),
+            Type::Constructed(TypeName::UInt(32), _),
+        )
+        | (
+            Value::Int(v),
+            Type::Constructed(TypeName::UInt(32), _),
+            Type::Constructed(TypeName::Int(32), _),
+        ) => Some(Value::Int(*v)),
+        _ => None,
     }
 }
 

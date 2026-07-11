@@ -13,6 +13,8 @@
 //! operand values first, then interns the result.
 
 use crate::ast::TypeName;
+use crate::builtins::lowering::{BuiltinLowering, PrimOp};
+use crate::builtins::{by_id, Purity};
 use crate::ssa::types::ConstantValue;
 use polytype::Type;
 use smallvec::smallvec;
@@ -37,6 +39,9 @@ impl EGraph {
                     .or_else(|| self.fold_pow_to_mul_chain(name, a, b, result_ty))
             }
             PureOp::UnaryOp(name) if operands.len() == 1 => self.fold_unary(name, operands[0], result_ty),
+            PureOp::Intrinsic { id, overload_idx } => {
+                self.fold_intrinsic(*id, *overload_idx, operands, result_ty)
+            }
             _ => None,
         }
     }
@@ -100,6 +105,10 @@ impl EGraph {
         b: NodeId,
         result_ty: &Type<TypeName>,
     ) -> Option<NodeId> {
+        if matches!(result_ty, Type::Constructed(TypeName::Bool, _)) {
+            let value = self.eval_const_predicate(name, a, b)?;
+            return Some(self.intern_constant(ConstantValue::Bool(value), result_ty.clone()));
+        }
         match result_ty {
             Type::Constructed(TypeName::Int(32), _) => {
                 let (ai, bi) = (self.as_i32(a)?, self.as_i32(b)?);
@@ -197,6 +206,8 @@ impl EGraph {
             if let Some(v) = self.as_f32(inner) {
                 return Some(self.intern_constant(ConstantValue::F32((-v).to_bits()), result_ty.clone()));
             }
+        } else if let Some(v) = self.as_bool(inner) {
+            return Some(self.intern_constant(ConstantValue::Bool(!v), result_ty.clone()));
         }
         let ENode::Pure {
             op: PureOp::UnaryOp(inner_name),
@@ -206,6 +217,103 @@ impl EGraph {
             return None;
         };
         (inner_name == name && inner_ops.len() == 1).then(|| inner_ops[0])
+    }
+
+    fn fold_intrinsic(
+        &mut self,
+        id: crate::builtins::BuiltinId,
+        overload_idx: usize,
+        operands: &[NodeId],
+        result_ty: &Type<TypeName>,
+    ) -> Option<NodeId> {
+        let def = by_id(id);
+        if def.raw.purity != Purity::Pure {
+            return None;
+        }
+        let lowering = &def.overloads().get(overload_idx)?.lowering;
+        let value = match lowering {
+            BuiltinLowering::PrimOp(PrimOp::GlslExt(8)) if operands.len() == 1 => {
+                ConstantValue::from_f32(self.as_f32(operands[0])?.floor())
+            }
+            BuiltinLowering::PrimOp(PrimOp::GlslExt(9)) if operands.len() == 1 => {
+                ConstantValue::from_f32(self.as_f32(operands[0])?.ceil())
+            }
+            BuiltinLowering::PrimOp(prim) if operands.len() == 1 => {
+                self.fold_conversion_value(prim, operands[0], result_ty)?
+            }
+            _ => return None,
+        };
+        Some(self.intern_constant(value, result_ty.clone()))
+    }
+
+    fn fold_conversion_value(
+        &self,
+        prim: &PrimOp,
+        operand: NodeId,
+        result_ty: &Type<TypeName>,
+    ) -> Option<ConstantValue> {
+        match (prim, result_ty) {
+            (PrimOp::FPToSI, Type::Constructed(TypeName::Int(32), _)) => {
+                let v = self.as_f32(operand)?;
+                (v.is_finite() && v.trunc() >= i32::MIN as f32 && v.trunc() < 2147483648.0)
+                    .then(|| ConstantValue::I32(v.trunc() as i32))
+            }
+            (PrimOp::FPToUI, Type::Constructed(TypeName::UInt(32), _)) => {
+                let v = self.as_f32(operand)?;
+                (v.is_finite() && v.trunc() >= 0.0 && v.trunc() < 4294967296.0)
+                    .then(|| ConstantValue::U32(v.trunc() as u32))
+            }
+            (PrimOp::SIToFP, Type::Constructed(TypeName::Float(32), _)) => {
+                Some(ConstantValue::from_f32(self.as_i32(operand)? as f32))
+            }
+            (PrimOp::UIToFP, Type::Constructed(TypeName::Float(32), _)) => {
+                Some(ConstantValue::from_f32(self.as_u32(operand)? as f32))
+            }
+            (PrimOp::SConvert, Type::Constructed(TypeName::Int(32), _)) => {
+                self.as_i32(operand).map(ConstantValue::I32)
+            }
+            (PrimOp::UConvert, Type::Constructed(TypeName::UInt(32), _)) => {
+                self.as_u32(operand).map(ConstantValue::U32)
+            }
+            (PrimOp::FPConvert, Type::Constructed(TypeName::Float(32), _)) => {
+                self.as_f32(operand).map(ConstantValue::from_f32)
+            }
+            (PrimOp::Bitcast, _) => self.bitcast_constant(operand, result_ty),
+            _ => None,
+        }
+    }
+
+    fn bitcast_constant(&self, operand: NodeId, result_ty: &Type<TypeName>) -> Option<ConstantValue> {
+        match result_ty {
+            Type::Constructed(TypeName::Int(32), _) => self
+                .as_u32(operand)
+                .map(|v| ConstantValue::I32(v as i32))
+                .or_else(|| self.as_i32(operand).map(ConstantValue::I32))
+                .or_else(|| self.as_f32(operand).map(|v| ConstantValue::I32(v.to_bits() as i32))),
+            Type::Constructed(TypeName::UInt(32), _) => self
+                .as_i32(operand)
+                .map(|v| ConstantValue::U32(v as u32))
+                .or_else(|| self.as_u32(operand).map(ConstantValue::U32))
+                .or_else(|| self.as_f32(operand).map(|v| ConstantValue::U32(v.to_bits()))),
+            Type::Constructed(TypeName::Float(32), _) => self
+                .as_u32(operand)
+                .map(|v| ConstantValue::from_f32(f32::from_bits(v)))
+                .or_else(|| self.as_i32(operand).map(|v| ConstantValue::from_f32(f32::from_bits(v as u32))))
+                .or_else(|| self.as_f32(operand).map(ConstantValue::from_f32)),
+            _ => None,
+        }
+    }
+
+    fn eval_const_predicate(&self, op: &str, a: NodeId, b: NodeId) -> Option<bool> {
+        match self.types.get(&a)? {
+            Type::Constructed(TypeName::Int(32), _) => eval_i32_pred(op, self.as_i32(a)?, self.as_i32(b)?),
+            Type::Constructed(TypeName::UInt(32), _) => eval_u32_pred(op, self.as_u32(a)?, self.as_u32(b)?),
+            Type::Constructed(TypeName::Float(32), _) => {
+                eval_f32_pred(op, self.as_f32(a)?, self.as_f32(b)?)
+            }
+            Type::Constructed(TypeName::Bool, _) => eval_bool_pred(op, self.as_bool(a)?, self.as_bool(b)?),
+            _ => None,
+        }
     }
 
     // ---- literal predicates ------------------------------------------------
@@ -270,24 +378,43 @@ impl EGraph {
             _ => None,
         }
     }
+
+    fn as_bool(&self, nid: NodeId) -> Option<bool> {
+        match &self.nodes[nid] {
+            ENode::Constant(ConstantValue::Bool(v)) => Some(*v),
+            ENode::Pure {
+                op: PureOp::Bool(v),
+                operands,
+            } if operands.is_empty() => Some(*v),
+            _ => None,
+        }
+    }
 }
 
 fn eval_i32(op: &str, a: i32, b: i32) -> Option<i32> {
     match op {
-        "+" => a.checked_add(b),
-        "-" => a.checked_sub(b),
-        "*" => a.checked_mul(b),
+        "+" => Some(a.wrapping_add(b)),
+        "-" => Some(a.wrapping_sub(b)),
+        "*" => Some(a.wrapping_mul(b)),
         "/" if b != 0 => a.checked_div(b),
+        "%" if b != 0 => a.checked_rem(b),
+        "&" => Some(a & b),
+        "|" => Some(a | b),
+        "^" => Some(a ^ b),
         _ => None,
     }
 }
 
 fn eval_u32(op: &str, a: u32, b: u32) -> Option<u32> {
     match op {
-        "+" => a.checked_add(b),
-        "-" => a.checked_sub(b),
-        "*" => a.checked_mul(b),
+        "+" => Some(a.wrapping_add(b)),
+        "-" => Some(a.wrapping_sub(b)),
+        "*" => Some(a.wrapping_mul(b)),
         "/" if b != 0 => Some(a / b),
+        "%" if b != 0 => Some(a % b),
+        "&" => Some(a & b),
+        "|" => Some(a | b),
+        "^" => Some(a ^ b),
         _ => None,
     }
 }
@@ -297,9 +424,56 @@ fn eval_f32(op: &str, a: f32, b: f32) -> Option<f32> {
         "+" => Some(a + b),
         "-" => Some(a - b),
         "*" => Some(a * b),
-        "/" if b != 0.0 => Some(a / b),
+        "/" => Some(a / b),
+        "%" => Some(a % b),
         _ => None,
     }
+}
+
+fn eval_i32_pred(op: &str, a: i32, b: i32) -> Option<bool> {
+    Some(match op {
+        "==" => a == b,
+        "!=" => a != b,
+        "<" => a < b,
+        "<=" => a <= b,
+        ">" => a > b,
+        ">=" => a >= b,
+        _ => return None,
+    })
+}
+
+fn eval_u32_pred(op: &str, a: u32, b: u32) -> Option<bool> {
+    Some(match op {
+        "==" => a == b,
+        "!=" => a != b,
+        "<" => a < b,
+        "<=" => a <= b,
+        ">" => a > b,
+        ">=" => a >= b,
+        _ => return None,
+    })
+}
+
+fn eval_f32_pred(op: &str, a: f32, b: f32) -> Option<bool> {
+    Some(match op {
+        "==" => a == b,
+        "!=" => !a.is_nan() && !b.is_nan() && a != b,
+        "<" => a < b,
+        "<=" => a <= b,
+        ">" => a > b,
+        ">=" => a >= b,
+        _ => return None,
+    })
+}
+
+fn eval_bool_pred(op: &str, a: bool, b: bool) -> Option<bool> {
+    Some(match op {
+        "==" => a == b,
+        "!=" => a != b,
+        "&&" => a && b,
+        "||" => a || b,
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
