@@ -53,26 +53,23 @@ fn collect_graph_dependencies(scope: &str, graph: &EGraph, output: &mut Vec<Sema
             if let Some(result) = effect.result {
                 let resources = match soac {
                     EgirSoac::Seg { resources, .. } => resources.clone(),
-                    EgirSoac::Filter {
-                        scratch_out,
-                        len_out,
-                        work_buffers,
-                        ..
-                    } => {
+                    EgirSoac::Filter { output, .. } => {
                         let mut resources = read_resources(graph, effect);
-                        for binding in scratch_out.iter().chain(len_out.iter()) {
+                        let bindings: Vec<_> = match output {
+                            super::types::FilterOutput::Local { .. } => Vec::new(),
+                            super::types::FilterOutput::Runtime { scratch, length } => {
+                                let mut bindings = vec![*scratch];
+                                if let super::types::RuntimeFilterLength::EntryOutput(length) = length {
+                                    bindings.push(*length);
+                                }
+                                bindings
+                            }
+                        };
+                        for binding in bindings {
                             resources.push(SegResourceAccess {
-                                binding: *binding,
+                                binding,
                                 access: SegResourceAccessKind::Write,
                             });
-                        }
-                        if let Some(work) = work_buffers {
-                            for binding in [work.flags, work.offsets, work.block_sums, work.block_offsets] {
-                                resources.push(SegResourceAccess {
-                                    binding,
-                                    access: SegResourceAccessKind::ReadWrite,
-                                });
-                            }
                         }
                         resources
                     }
@@ -202,8 +199,11 @@ pub(crate) fn verify(inner: &EgirInner) -> Result<(), String> {
         if matches!(effect.kind, SideEffectKind::Soac(EgirSoac::Screma { .. })) {
             return Err(format!("{scope}: raw Screma survived semantic segmentation"));
         }
-        if let SideEffectKind::Soac(EgirSoac::Hist { space, body, .. }) = &effect.kind {
-            if space.as_ref().is_none_or(|space| space.dims.is_empty()) {
+        if let SideEffectKind::Soac(EgirSoac::Hist { execution, body, .. }) = &effect.kind {
+            let super::types::HistExecution::Segmented(space) = execution else {
+                return Err(format!("{scope}: semantic SegHist has no segmented execution"));
+            };
+            if space.dims.is_empty() {
                 return Err(format!("{scope}: semantic SegHist has no concrete dimensions"));
             }
             if !inner.regions.contains_key(&body.region) {
@@ -215,13 +215,18 @@ pub(crate) fn verify(inner: &EgirInner) -> Result<(), String> {
             return Ok(());
         }
         if let SideEffectKind::Soac(EgirSoac::Filter {
-            space,
+            state,
             map_body,
             pred_body,
             ..
         }) = &effect.kind
         {
-            if space.as_ref().is_none_or(|space| space.dims.is_empty()) {
+            let (super::types::FilterState::Semantic { space }
+            | super::types::FilterState::Scheduled { space, .. }) = state
+            else {
+                return Err(format!("{scope}: raw filter survived semantic segmentation"));
+            };
+            if space.dims.is_empty() {
                 return Err(format!("{scope}: semantic SegFilter has no concrete dimensions"));
             }
             for body in map_body.iter().chain(std::iter::once(pred_body)) {
@@ -311,7 +316,7 @@ pub(crate) fn summary(inner: &EgirInner) -> String {
                         );
                     }
                     SideEffectKind::Soac(EgirSoac::Filter {
-                        space,
+                        state,
                         map_body,
                         pred_body,
                         ..
@@ -319,11 +324,11 @@ pub(crate) fn summary(inner: &EgirInner) -> String {
                         use std::fmt::Write;
                         let _ = writeln!(
                             output,
-                            "{scope}: SegFilter space={space:?} map={map_body:?} predicate={pred_body:?}"
+                            "{scope}: SegFilter state={state:?} map={map_body:?} predicate={pred_body:?}"
                         );
                     }
                     SideEffectKind::Soac(EgirSoac::Hist {
-                        space,
+                        execution,
                         body,
                         update_policy,
                         ..
@@ -331,7 +336,7 @@ pub(crate) fn summary(inner: &EgirInner) -> String {
                         use std::fmt::Write;
                         let _ = writeln!(
                             output,
-                            "{scope}: SegHist space={space:?} body={body:?} update={update_policy:?}"
+                            "{scope}: SegHist execution={execution:?} body={body:?} update={update_policy:?}"
                         );
                     }
                     _ => {}

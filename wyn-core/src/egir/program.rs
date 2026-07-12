@@ -214,9 +214,9 @@ pub struct LogicalResource {
 /// Build the authoritative logical-resource manifest at the allocation
 /// boundary. Host storage (entry inputs/outputs plus pre-existing compiler
 /// intermediates) is mirrored as today; then every parallel `SegRed`/`SegScan`
-/// contributes its scratch as `Compiler` resources — fresh bindings are drawn
-/// here and their `ResourceId`s recorded on the owning Seg op, so terminal
-/// lowering consumes the manifest instead of allocating scratch ad hoc.
+/// contributes owner-tagged scratch `Compiler` resources. Terminal lowering
+/// resolves them directly from the manifest instead of storing phase-local
+/// resource ids on semantic Seg operations.
 pub fn plan_logical_resources(inner: &mut EgirInner, binding_ids: &mut crate::IdSource<u32>) {
     super::multi_consumer::run(inner, binding_ids);
     let mut filter_work = allocate_filter_work_resources(inner, binding_ids);
@@ -247,7 +247,7 @@ fn allocate_filter_work_resources(
     inner: &mut EgirInner,
     binding_ids: &mut crate::IdSource<u32>,
 ) -> Vec<LogicalResource> {
-    use super::types::{EgirSoac, FilterWorkBuffers, SegExtent, SideEffectKind};
+    use super::types::{EgirSoac, FilterOutput, FilterState, FilterWorkBuffers, SegExtent, SideEffectKind};
     let mut used: std::collections::HashSet<_> = inner
         .entry_points
         .iter()
@@ -261,21 +261,17 @@ fn allocate_filter_work_resources(
         })
         .collect();
     let mut resources = Vec::new();
-    for entry in &mut inner.entry_points {
-        for (_, block) in entry.graph.skeleton.blocks.iter_mut() {
-            for effect in &mut block.side_effects {
+    for entry in &inner.entry_points {
+        for (_, block) in &entry.graph.skeleton.blocks {
+            for effect in &block.side_effects {
                 let SideEffectKind::Soac(EgirSoac::Filter {
-                    space,
-                    scratch_out: Some(_),
-                    work_buffers,
+                    state: FilterState::Semantic { space },
+                    output: FilterOutput::Runtime { .. },
                     ..
-                }) = &mut effect.kind
+                }) = &effect.kind
                 else {
                     continue;
                 };
-                if work_buffers.is_some() {
-                    continue;
-                }
                 let mut next_binding = || loop {
                     let binding =
                         crate::BindingRef::new(super::from_tlc::AUTO_STORAGE_SET, binding_ids.next_id());
@@ -289,14 +285,13 @@ fn allocate_filter_work_resources(
                     block_sums: next_binding(),
                     block_offsets: next_binding(),
                 };
-                *work_buffers = Some(buffers);
-                let element_count_size = match space.as_ref().and_then(|space| space.dims.first()) {
-                    Some(SegExtent::Fixed(count)) if space.as_ref().is_some_and(|s| s.dims.len() == 1) => {
+                let element_count_size = match space.dims.first() {
+                    Some(SegExtent::Fixed(count)) if space.dims.len() == 1 => {
                         LogicalSize::FixedBytes(*count as u64 * 4)
                     }
                     Some(SegExtent::ResourceLength {
                         binding, elem_bytes, ..
-                    }) if space.as_ref().is_some_and(|s| s.dims.len() == 1) => LogicalSize::LikeBinding {
+                    }) if space.dims.len() == 1 => LogicalSize::LikeBinding {
                         binding: *binding,
                         elem_bytes: 4,
                         src_elem_bytes: *elem_bytes,
@@ -358,37 +353,9 @@ fn allocate_filter_work_resources(
     resources
 }
 
-fn attach_materialization_resources(inner: &mut EgirInner, resources: &[LogicalResource]) {
-    for resource in resources {
-        let ResourceOrigin::Compiler(compiler) = &resource.origin else {
-            continue;
-        };
-        if compiler.kind != CompilerResourceKind::MultiConsumerArray {
-            continue;
-        }
-        let Some(owner) = &compiler.owner else {
-            continue;
-        };
-        let Some(entry) = inner.entry_points.iter_mut().find(|entry| entry.name == owner.scope) else {
-            continue;
-        };
-        for (_, block) in entry.graph.skeleton.blocks.iter_mut() {
-            for effect in &mut block.side_effects {
-                if effect.result != Some(owner.result) {
-                    continue;
-                }
-                if let super::types::SideEffectKind::Soac(super::types::EgirSoac::Seg {
-                    scratch_resources,
-                    ..
-                }) = &mut effect.kind
-                {
-                    if !scratch_resources.contains(&resource.id) {
-                        scratch_resources.push(resource.id);
-                    }
-                }
-            }
-        }
-    }
+fn attach_materialization_resources(_inner: &mut EgirInner, _resources: &[LogicalResource]) {
+    // Resource ownership lives in the manifest; Seg operations no longer
+    // mirror resource ids in a phase-dependent scratch field.
 }
 
 /// Refresh the manifest after terminal lowering has introduced phase entries
@@ -481,9 +448,8 @@ fn filter_resource_kinds(inner: &EgirInner) -> HashMap<crate::BindingRef, Compil
         for (_, block) in &entry.graph.skeleton.blocks {
             for effect in &block.side_effects {
                 if let super::types::SideEffectKind::Soac(super::types::EgirSoac::Filter {
-                    scratch_out,
-                    len_out,
-                    work_buffers,
+                    output,
+                    state,
                     ..
                 }) = &effect.kind
                 {
@@ -491,39 +457,59 @@ fn filter_resource_kinds(inner: &EgirInner) -> HashMap<crate::BindingRef, Compil
                         scope: entry.name.clone(),
                         result,
                     });
-                    if let Some(scratch) = scratch_out {
+                    if let super::types::FilterOutput::Runtime { scratch, length } = output {
                         kinds.insert(
                             *scratch,
                             CompilerResource::new(CompilerResourceKind::FilterScratch, owner.clone(), 0),
                         );
+                        if let super::types::RuntimeFilterLength::EntryOutput(len) = length {
+                            kinds.insert(
+                                *len,
+                                CompilerResource::new(
+                                    CompilerResourceKind::FilterLenCell,
+                                    owner.clone(),
+                                    1,
+                                ),
+                            );
+                        }
                     }
-                    if let Some(len) = len_out {
-                        kinds.insert(
-                            *len,
-                            CompilerResource::new(CompilerResourceKind::FilterLenCell, owner.clone(), 1),
-                        );
-                    }
-                    if let Some(work) = work_buffers {
-                        kinds.insert(
-                            work.flags,
-                            CompilerResource::new(CompilerResourceKind::FilterFlags, owner.clone(), 2),
-                        );
-                        kinds.insert(
-                            work.offsets,
-                            CompilerResource::new(CompilerResourceKind::FilterOffsets, owner.clone(), 3),
-                        );
-                        kinds.insert(
-                            work.block_sums,
-                            CompilerResource::new(
-                                CompilerResourceKind::FilterScanBlockSums,
-                                owner.clone(),
-                                4,
-                            ),
-                        );
-                        kinds.insert(
-                            work.block_offsets,
-                            CompilerResource::new(CompilerResourceKind::FilterScanBlockOffsets, owner, 5),
-                        );
+                    if let super::types::FilterState::Scheduled { plan, .. } = state {
+                        let work = match plan {
+                            super::types::FilterPlan::Serial => None,
+                            super::types::FilterPlan::Flags(work)
+                            | super::types::FilterPlan::Scan(work)
+                            | super::types::FilterPlan::Scatter(work) => Some(work),
+                        };
+                        if let Some(work) = work {
+                            kinds.insert(
+                                work.flags,
+                                CompilerResource::new(CompilerResourceKind::FilterFlags, owner.clone(), 2),
+                            );
+                            kinds.insert(
+                                work.offsets,
+                                CompilerResource::new(
+                                    CompilerResourceKind::FilterOffsets,
+                                    owner.clone(),
+                                    3,
+                                ),
+                            );
+                            kinds.insert(
+                                work.block_sums,
+                                CompilerResource::new(
+                                    CompilerResourceKind::FilterScanBlockSums,
+                                    owner.clone(),
+                                    4,
+                                ),
+                            );
+                            kinds.insert(
+                                work.block_offsets,
+                                CompilerResource::new(
+                                    CompilerResourceKind::FilterScanBlockOffsets,
+                                    owner,
+                                    5,
+                                ),
+                            );
+                        }
                     }
                 }
             }

@@ -218,7 +218,6 @@ fn fuse_pair(graph: &mut EGraph, block_id: BlockId, i: usize, j: usize) {
         result_types,
         output_slots,
         resources,
-        scratch_resources: Vec::new(),
     };
 
     let block = &mut graph.skeleton.blocks[block_id];

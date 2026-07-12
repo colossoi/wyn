@@ -548,30 +548,24 @@ fn expand_one(
             );
         }
         SideEffectKind::Soac(EgirSoac::Filter {
-            space: _,
+            state,
             map_body,
             output_elem_type,
             pred_body,
             input_array_type,
             input_elem_type,
-            output_capacity_size,
-            destination,
-            scratch_out,
-            len_out,
-            work_buffers,
-            phase,
+            output,
         }) => {
             let map_func = map_body.as_ref().map(|body| regions.name(body.region).to_string());
             let output_elem_ty = output_elem_type.clone();
             let pred_func = regions.name(pred_body.region).to_string();
             let arr_ty = input_array_type.clone();
             let elem_ty = input_elem_type.clone();
-            let capacity_size = output_capacity_size.clone();
-            let destination = *destination;
-            let scratch_out = *scratch_out;
-            let len_out = *len_out;
-            let work_buffers = *work_buffers;
-            let phase = *phase;
+            let output = output.clone();
+            let plan = match state {
+                super::types::FilterState::Scheduled { plan, .. } => *plan,
+                _ => panic!("filter reached expansion before scheduling"),
+            };
 
             // Operand layout: [input, ...map_captures, ...pred_captures].
             let arr_nid = se.operand_nodes[0];
@@ -584,27 +578,26 @@ fn expand_one(
                 arr_ty,
                 elem_ty,
                 output_elem_ty,
-                capacity_size,
+                output,
                 map_func,
                 map_captures,
                 pred_func,
                 captures,
                 result_node: result_nid,
-                destination,
-                scratch_out,
-                len_out,
             };
-            match (phase, work_buffers) {
-                (super::types::FilterPhase::Flags, Some(work)) => {
+            match plan {
+                super::types::FilterPlan::Flags(work) => {
                     build_filter_flags(graph, control_headers, bid, idx, spec, work.flags, next_effect)
                 }
-                (super::types::FilterPhase::Scan, Some(work)) => {
+                super::types::FilterPlan::Scan(work) => {
                     build_filter_scan(graph, control_headers, bid, idx, spec, work, next_effect)
                 }
-                (super::types::FilterPhase::Scatter, Some(work)) => {
+                super::types::FilterPlan::Scatter(work) => {
                     build_filter_scatter(graph, control_headers, bid, idx, spec, work, next_effect)
                 }
-                _ => build_filter_loop(graph, control_headers, bid, idx, spec, next_effect),
+                super::types::FilterPlan::Serial => {
+                    build_filter_loop(graph, control_headers, bid, idx, spec, next_effect)
+                }
             }
         }
         SideEffectKind::Soac(EgirSoac::Hist {
@@ -615,7 +608,7 @@ fn expand_one(
             value_type,
             dest_elem_type,
             update_policy: _,
-            space,
+            execution,
         }) => {
             // Operands: [dest_view, inputs.., captures..].
             let dest_view = se.operand_nodes[0];
@@ -645,7 +638,7 @@ fn expand_one(
             // Ordered overwrite is non-commutative when indices conflict.
             // Preserve source order until a future update policy proves a
             // conflict-safe parallel implementation.
-            let _semantic_space = space;
+            let _execution = execution;
             build_scatter_loop(graph, control_headers, bid, idx, scatter, next_effect);
         }
         SideEffectKind::Soac(EgirSoac::Seg {
@@ -1060,7 +1053,7 @@ struct FilterLoop {
     output_elem_ty: Type<TypeName>,
     /// `Size(N)` — the input's static capacity, reused as the output buffer's
     /// capacity (the upper bound on filtered count).
-    capacity_size: Type<TypeName>,
+    output: super::types::FilterOutput,
     /// `Some(name)` folds a producer `map(f, …)` in: per element compute
     /// `v = f(elem, ...map_captures)` and keep/test `v` instead of `elem`.
     map_func: Option<String>,
@@ -1070,20 +1063,6 @@ struct FilterLoop {
     /// The original SOAC result NodeId. After expansion this becomes a
     /// `Tuple(buffer, count)` whose type is `Array[T, Size(N), Bounded]`.
     result_node: NodeId,
-    /// `Fresh` allocates a new capacity-N buffer via `uninit`. `InputBuffer`
-    /// reuses the input as the output buffer (the result `View` aliases
-    /// the input's backing slot). Ownership analysis decides which. Ignored
-    /// when `scratch_out` is set (runtime lowering always writes the scratch
-    /// buffer).
-    destination: SoacDestination,
-    /// `Some(br)` selects the runtime scratch-view lowering: compact kept
-    /// elements into the storage buffer at `br` and rebind the result to a
-    /// runtime-length view over it. `None` is the static Bounded lowering.
-    scratch_out: Option<crate::BindingRef>,
-    /// `Some(br)` (runtime lowering): also store the final surviving count into
-    /// `br[0]`, a host-readable length cell paired with the output buffer (set
-    /// when the filter is a compute-entry output). `None` otherwise.
-    len_out: Option<crate::BindingRef>,
 }
 
 /// The value the filter keeps and tests for a read element: `f(elem, ..caps)`
@@ -1107,18 +1086,29 @@ fn build_filter_loop(
     spec: FilterLoop,
     next_effect: &mut u32,
 ) {
-    if let Some(scratch_out) = spec.scratch_out {
+    let runtime_scratch = match &spec.output {
+        super::types::FilterOutput::Runtime { scratch, .. } => Some(*scratch),
+        super::types::FilterOutput::Local { .. } => None,
+    };
+    if let Some(scratch) = runtime_scratch {
         build_runtime_filter_loop(
             graph,
             control_headers,
             bid,
             idx_in_block,
             spec,
-            scratch_out,
+            scratch,
             next_effect,
         );
         return;
     }
+    let super::types::FilterOutput::Local {
+        ref capacity,
+        destination,
+    } = &spec.output
+    else {
+        unreachable!()
+    };
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
     // Composite buffer type — the underlying storage of the Bounded result. It
@@ -1128,7 +1118,7 @@ fn build_filter_loop(
         vec![
             spec.output_elem_ty.clone(),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
-            spec.capacity_size.clone(),
+            capacity.clone(),
             crate::types::no_buffer(),
         ],
     );
@@ -1189,9 +1179,9 @@ fn build_filter_loop(
     // surviving element is written through `PlaceIndex` before `count`
     // advances past it, so unread slots are never observed.
     let buf_place_nid = emit_alloca(graph, bid, buf_ty.clone(), next_effect, None);
-    if matches!(spec.destination, SoacDestination::InputBuffer) {
+    if matches!(destination, SoacDestination::InputBuffer) {
         let _ = emit_store(graph, bid, buf_place_nid, spec.arr_nid, next_effect, None);
-    } else if !matches!(spec.destination, SoacDestination::Fresh) {
+    } else if !matches!(destination, SoacDestination::Fresh) {
         panic!("Filter[OutputView] not supported — see filter-consuming-input.md");
     }
     let zero_i32_nid = graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty.clone());
@@ -1826,8 +1816,14 @@ fn build_filter_scatter(
         next_effect,
     );
     let kept = filter_kept_value(graph, elem, &spec);
-    let out_binding = spec.scratch_out.expect("parallel filter scatter has output storage");
-    let output = intern_storage_view(graph, out_binding, spec.output_elem_ty.clone(), None);
+    let (out_binding, len_binding) = match &spec.output {
+        super::types::FilterOutput::Runtime {
+            scratch,
+            length: super::types::RuntimeFilterLength::EntryOutput(length),
+        } => (scratch, length),
+        _ => panic!("parallel filter scatter requires runtime entry output"),
+    };
+    let output = intern_storage_view(graph, *out_binding, spec.output_elem_ty.clone(), None);
     emit_storage_store(
         graph,
         write,
@@ -1850,14 +1846,13 @@ fn build_filter_scatter(
         target: after,
         args: vec![],
     };
-    let len_binding = spec.len_out.expect("parallel filter scatter has count storage");
-    let len_view = intern_storage_view(graph, len_binding, u32_ty.clone(), None);
+    let len_view = intern_storage_view(graph, *len_binding, u32_ty.clone(), None);
     let zero = intern_u32(graph, 0, None);
     let len_place = graph.intern_pure(PureOp::ViewIndex, smallvec![len_view, zero], u32_ty.clone());
     let count = emit_load(graph, bid, len_place, u32_ty.clone(), next_effect, None);
     graph.replace_pure_node(
         spec.result_node,
-        PureOp::StorageView(crate::op::PureViewSource::Storage(out_binding)),
+        PureOp::StorageView(crate::op::PureViewSource::Storage(*out_binding)),
         smallvec![zero, count],
     );
 }
@@ -2017,8 +2012,12 @@ fn build_runtime_filter_loop(
     // When the filter is a compute-entry output, store the final surviving
     // count into the paired length cell `len_out[0]` so the host can read how
     // many elements are valid in the (capacity-n) output buffer.
-    if let Some(len_br) = spec.len_out {
-        let len_view = intern_storage_view(graph, len_br, u32_ty.clone(), None);
+    if let super::types::FilterOutput::Runtime {
+        length: super::types::RuntimeFilterLength::EntryOutput(len_br),
+        ..
+    } = &spec.output
+    {
+        let len_view = intern_storage_view(graph, *len_br, u32_ty.clone(), None);
         let zero_idx = intern_u32(graph, 0, None);
         emit_storage_store(
             graph,

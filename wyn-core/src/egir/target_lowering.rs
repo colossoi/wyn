@@ -38,6 +38,7 @@ pub fn schedule(
         schedule.coalesce_compiler_dependencies(&inner.entry_points);
         inner.kernel_schedule = schedule;
     }
+    parallelize::finalize_scheduled_states(inner);
     // Re-mirror after lowering (split clones / phase entries added new host and
     // intermediate storage); the parallel SegRed/SegScan ops are gone, so no
     // further scratch is drawn here.

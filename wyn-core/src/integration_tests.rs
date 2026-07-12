@@ -65,9 +65,8 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
     assert!(allocated.semantic_ir().contains("SegRed"));
     assert!(allocated.semantic_ir().contains("ResourceLength"));
 
-    // Milestone 5: the reduce's partial buffer is now an authoritative logical
-    // resource (drawn at the allocation boundary), and the SegRed op records the
-    // reserved `ResourceId` for terminal lowering to consume.
+    // The reduce's partial buffer is an authoritative owner-tagged logical
+    // resource; the semantic operation does not carry phase-local scratch ids.
     use crate::egir::program::{CompilerResourceKind, ResourceOrigin};
     let partials = allocated
         .inner
@@ -82,22 +81,11 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
         })
         .count();
     assert_eq!(partials, 1, "one reduce partial reserved as a logical resource");
-    let records_scratch = allocated
-        .inner
-        .entry_points
-        .iter()
-        .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
-        .any(|effect| {
-            matches!(
-                &effect.kind,
-                SideEffectKind::Soac(EgirSoac::Seg {
-                    kind: SegOpKind::SegRed { .. },
-                    scratch_resources,
-                    ..
-                }) if scratch_resources.len() == 1
-            )
-        });
-    assert!(records_scratch, "SegRed records its reserved partial ResourceId");
+    assert!(allocated.inner.resources.iter().any(|resource| matches!(
+        resource.origin,
+        ResourceOrigin::Compiler(ref compiler)
+            if compiler.kind == CompilerResourceKind::ReducePartial && compiler.owner.is_some()
+    )));
 }
 
 /// Milestone-5 horizontal fusion: the four same-space reductions of
@@ -282,7 +270,6 @@ entry e() [2]i32 =
 #[test]
 fn logical_manifest_covers_scan_and_filter_scratch() {
     use crate::egir::program::{CompilerResourceKind, ResourceOrigin};
-    use crate::egir::types::{EgirSoac, SegOpKind, SideEffectKind};
 
     let scan = crate::compile_thru_tlc(
         "#[compute] entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)",
@@ -302,30 +289,20 @@ fn logical_manifest_covers_scan_and_filter_scratch() {
     assert!(scan_kinds.contains(&CompilerResourceKind::ScanBlockSums));
     assert!(scan_kinds.contains(&CompilerResourceKind::ScanBlockOffsets));
     let scan_resources: Vec<_> = scan
-        .inner
-        .entry_points
+        .logical_resources()
         .iter()
-        .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
-        .find_map(|effect| match &effect.kind {
-            SideEffectKind::Soac(EgirSoac::Seg {
-                kind: SegOpKind::SegScan { .. },
-                scratch_resources,
-                resources,
-                ..
-            }) => Some((scratch_resources.clone(), resources.clone())),
+        .filter_map(|resource| match &resource.origin {
+            ResourceOrigin::Compiler(compiler)
+                if matches!(
+                    compiler.kind,
+                    CompilerResourceKind::ScanBlockSums | CompilerResourceKind::ScanBlockOffsets
+                ) =>
+            {
+                Some(resource.legacy_binding)
+            }
             _ => None,
         })
-        .map(|(ids, accesses)| {
-            assert_eq!(ids.len(), 2);
-            ids.into_iter()
-                .map(|id| {
-                    let binding = scan.inner.binding_of(id);
-                    assert!(accesses.iter().any(|access| access.binding == binding));
-                    binding
-                })
-                .collect()
-        })
-        .expect("semantic SegScan");
+        .collect();
     assert_eq!(scan_resources.len(), 2);
 
     let filter = crate::compile_thru_tlc(

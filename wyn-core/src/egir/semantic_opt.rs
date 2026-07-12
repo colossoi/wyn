@@ -183,7 +183,6 @@ mod tests {
                 result_types: vec![],
                 output_slots: vec![],
                 resources: vec![],
-                scratch_resources: vec![],
             }),
             operand_nodes: smallvec![],
             result: Some(result),

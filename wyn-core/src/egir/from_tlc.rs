@@ -2179,7 +2179,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                 value_type,
                 dest_elem_type: dest_elem_ty,
                 update_policy: HistUpdatePolicy::OrderedOverwrite,
-                space: None,
+                execution: super::types::HistExecution::Raw,
             },
             operands,
             result_ty,
@@ -2514,18 +2514,16 @@ impl<'a, 'b> Converter<'a, 'b> {
             );
             return Ok(self.emit_soac(
                 EgirSoac::Filter {
-                    space: None,
+                    state: super::types::FilterState::Raw,
                     map_body,
                     output_elem_type: output_elem_ty,
                     pred_body,
                     input_array_type: arr_ty,
                     input_elem_type: elem_ty,
-                    output_capacity_size: size,
-                    destination,
-                    scratch_out: None,
-                    len_out: None,
-                    work_buffers: None,
-                    phase: super::types::FilterPhase::Semantic,
+                    output: super::types::FilterOutput::Local {
+                        capacity: size,
+                        destination,
+                    },
                 },
                 operands,
                 bounded_result_ty,
@@ -2579,20 +2577,18 @@ impl<'a, 'b> Converter<'a, 'b> {
             crate::types::view_array_of(&output_elem_ty, crate::types::buffer_tag(scratch_out));
         Ok(self.emit_soac(
             EgirSoac::Filter {
-                space: None,
+                state: super::types::FilterState::Raw,
                 map_body,
                 output_elem_type: output_elem_ty,
                 pred_body,
                 input_array_type: arr_ty,
                 input_elem_type: elem_ty,
-                output_capacity_size: size,
-                destination,
-                scratch_out: Some(scratch_out),
+                output: super::types::FilterOutput::Runtime {
+                    scratch: scratch_out,
+                    length: super::types::RuntimeFilterLength::ViewOnly,
+                },
                 // Set by `realize_outputs` only when this filter is a compute
                 // entry's output (it then needs a host-readable length cell).
-                len_out: None,
-                work_buffers: None,
-                phase: super::types::FilterPhase::Semantic,
             },
             operands,
             view_result_ty,

@@ -309,14 +309,55 @@ pub struct FilterWorkBuffers {
     pub block_offsets: crate::BindingRef,
 }
 
-/// Runtime filter algorithm selected only at terminal lowering. Semantic EGIR
-/// remains `Semantic`; the target scheduler clones it into these three phases.
+#[derive(Clone, Debug)]
+/// Storage contract for a filter result; local and runtime-only fields cannot
+/// coexist.
+pub enum FilterOutput {
+    Local {
+        capacity: Type<TypeName>,
+        destination: SoacDestination,
+    },
+    Runtime {
+        scratch: crate::BindingRef,
+        length: RuntimeFilterLength,
+    },
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FilterPhase {
-    Semantic,
-    Flags,
-    Scan,
-    Scatter,
+/// Where a runtime filter's surviving count is observable.
+pub enum RuntimeFilterLength {
+    ViewOnly,
+    EntryOutput(crate::BindingRef),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// One executable filter lowering selected by terminal scheduling.
+pub enum FilterPlan {
+    Serial,
+    Flags(FilterWorkBuffers),
+    Scan(FilterWorkBuffers),
+    Scatter(FilterWorkBuffers),
+}
+
+#[derive(Clone, Debug)]
+/// Facts known about a filter at each compiler boundary.
+pub enum FilterState {
+    Raw,
+    Semantic {
+        space: SegSpace,
+    },
+    Scheduled {
+        space: SegSpace,
+        plan: FilterPlan,
+    },
+}
+
+#[derive(Clone, Debug)]
+/// Execution classification for scatter/histogram operations.
+pub enum HistExecution {
+    Raw,
+    Serial,
+    Segmented(SegSpace),
 }
 
 /// An unexpanded SOAC operation held in the skeleton until `soac_expand` rewrites
@@ -346,19 +387,11 @@ pub enum EgirSoac {
     /// satisfied the predicate, plus a runtime count.
     /// Operands: `[input, ...pred_captures]`.
     ///
-    /// Two lowerings, keyed by `scratch_out`:
-    /// - `None` (static-capacity input): the result is a function-local
-    ///   `Array[T, Size(N), Bounded]` `{buffer, len}` struct where N is the
-    ///   input's static size (`output_capacity_size`). The runtime `len`
-    ///   field is the count of accepted elements.
-    /// - `Some(br)` (runtime-sized input): the result is a runtime-length
-    ///   storage view over the reserved scratch buffer at `br`, typed
-    ///   `Array[T, View, _, Buffer(br)]`. The surviving count is the view's
-    ///   `len` operand (an SSA value). A runtime-sized input cannot back a
-    ///   function-local array, so it compacts into a descriptor-bound buffer.
+    /// `output` distinguishes bounded local storage from runtime scratch, and
+    /// `state` carries only the facts established at the current compiler
+    /// phase.
     Filter {
-        /// Concrete semantic iteration space, filled by segmentation.
-        space: Option<SegSpace>,
+        state: FilterState,
         /// `Some(body)` folds an elementwise producer `map(f, …)` in: per element
         /// the loop computes `v = f(x)` with the body's explicit captures,
         /// tests `pred(v)`, and keeps `v`. `None` is a plain
@@ -370,29 +403,8 @@ pub enum EgirSoac {
         pred_body: SegBody,
         input_array_type: Type<TypeName>,
         input_elem_type: Type<TypeName>,
-        /// `Size(N)` — the input's static capacity (static lowering only;
-        /// for the runtime lowering this is unused, the capacity is the
-        /// scratch buffer's host-sized length).
-        output_capacity_size: Type<TypeName>,
-        /// `Fresh` (allocate a new `[N]T` buffer) or `InputBuffer`
-        /// (reuse the input array's backing slot as the output —
-        /// the result `View` aliases the input). `OutputView` is
-        /// not yet supported for Filter. Ignored when `scratch_out` is set.
-        destination: SoacDestination,
-        /// `Some(br)` selects the runtime scratch-view lowering, compacting
-        /// kept elements into the storage buffer at `br`. `None` is the
-        /// static function-local Bounded lowering.
-        scratch_out: Option<crate::BindingRef>,
-        /// `Some(br)` (runtime lowering only) makes the loop also store the
-        /// surviving count into `br[0]` — a host-readable length cell paired
-        /// with the output buffer when the filter result is a compute-entry
-        /// output. `None` when the count flows only as the result view's `len`
-        /// operand (in-kernel consumers like `reduce` / `length`).
-        len_out: Option<crate::BindingRef>,
-        /// u32 keep flags and inclusive offsets, reserved by logical
-        /// allocation and consumed by terminal filter scheduling.
-        work_buffers: Option<FilterWorkBuffers>,
-        phase: FilterPhase,
+        /// Complete local or runtime output-storage contract.
+        output: FilterOutput,
     },
     /// `scatter`: over the parallel `input` arrays, the lifted `func` yields an
     /// `(index, value)` pair per element, written as `dest[index] = value`;
@@ -409,10 +421,8 @@ pub enum EgirSoac {
         value_type: Type<TypeName>,
         dest_elem_type: Type<TypeName>,
         update_policy: HistUpdatePolicy,
-        /// `Some` marks a thread-parallel scatter (Futhark's `SegHist` shape):
-        /// `soac_expand` lowers it via `build_parallel_scatter` over the space.
-        /// `None` is the serial `tid==0`-guarded loop (`build_scatter_loop`).
-        space: Option<SegSpace>,
+        /// Raw, serial, or segmented execution classification.
+        execution: HistExecution,
     },
     /// A reified parallel SOAC — the `SegOp`. Semantically a (1-D) map nest
     /// over `space`, with pointwise `map_funcs` lanes and optional reduce/scan
@@ -438,10 +448,6 @@ pub enum EgirSoac {
         output_slots: Vec<usize>,
         /// Conservative logical resource summary owned by the semantic op.
         resources: Vec<SegResourceAccess>,
-        /// Logical scratch this op owns (reduce partials / scan block scratch),
-        /// assigned by `plan_logical_resources` at the allocation boundary and
-        /// consumed by terminal lowering. Empty until then and for `SegMap`.
-        scratch_resources: Vec<super::program::ResourceId>,
     },
 }
 

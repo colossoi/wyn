@@ -10,7 +10,10 @@ use std::collections::{HashMap, HashSet};
 
 use crate::egir::graph_ops;
 use crate::egir::program::EgirEntry;
-use crate::egir::types::{EgirSoac, SegExtent, SegPlacement, SegResourceAccessKind, SideEffectKind};
+use crate::egir::types::{
+    EgirSoac, FilterOutput, FilterPlan, FilterState, RuntimeFilterLength, SegExtent, SegPlacement,
+    SegResourceAccessKind, SideEffectKind,
+};
 use crate::pipeline_descriptor::{
     Binding, ComputePipeline, ComputeStage, DispatchLen, DispatchSize, Pipeline, PipelineDescriptor,
 };
@@ -241,9 +244,7 @@ impl KernelSchedule {
                         matches!(
                             effect.kind,
                             SideEffectKind::Soac(EgirSoac::Filter {
-                                phase: crate::egir::types::FilterPhase::Flags
-                                    | crate::egir::types::FilterPhase::Scan
-                                    | crate::egir::types::FilterPhase::Scatter,
+                                state: FilterState::Scheduled { .. },
                                 ..
                             })
                         )
@@ -581,10 +582,8 @@ fn segmented_resources(entry: &EgirEntry) -> Option<Vec<ScheduledResource>> {
     for (_, block) in &entry.graph.skeleton.blocks {
         for side_effect in &block.side_effects {
             if let SideEffectKind::Soac(EgirSoac::Filter {
-                phase,
-                scratch_out,
-                len_out,
-                work_buffers: Some(work),
+                state: FilterState::Scheduled { plan, .. },
+                output,
                 ..
             }) = &side_effect.kind
             {
@@ -599,8 +598,8 @@ fn segmented_resources(entry: &EgirEntry) -> Option<Vec<ScheduledResource>> {
                         resources.push(ScheduledResource { binding, access });
                     }
                 };
-                match phase {
-                    crate::egir::types::FilterPhase::Flags => {
+                match plan {
+                    FilterPlan::Flags(work) => {
                         for input in &entry.inputs {
                             if let Some(binding) = input.storage_binding.or(input.uniform_binding) {
                                 push(binding, ResourceAccess::Read);
@@ -608,12 +607,12 @@ fn segmented_resources(entry: &EgirEntry) -> Option<Vec<ScheduledResource>> {
                         }
                         push(work.flags, ResourceAccess::Write);
                     }
-                    crate::egir::types::FilterPhase::Scan => {
+                    FilterPlan::Scan(work) => {
                         push(work.flags, ResourceAccess::Read);
                         push(work.offsets, ResourceAccess::Write);
                         push(work.block_sums, ResourceAccess::Write);
                     }
-                    crate::egir::types::FilterPhase::Scatter => {
+                    FilterPlan::Scatter(work) => {
                         for input in &entry.inputs {
                             if let Some(binding) = input.storage_binding.or(input.uniform_binding) {
                                 push(binding, ResourceAccess::Read);
@@ -622,14 +621,14 @@ fn segmented_resources(entry: &EgirEntry) -> Option<Vec<ScheduledResource>> {
                         push(work.flags, ResourceAccess::Read);
                         push(work.offsets, ResourceAccess::Read);
                         push(work.block_offsets, ResourceAccess::Read);
-                        if let Some(binding) = len_out {
-                            push(*binding, ResourceAccess::Read);
-                        }
-                        if let Some(binding) = scratch_out {
-                            push(*binding, ResourceAccess::Write);
+                        if let FilterOutput::Runtime { scratch, length } = output {
+                            if let RuntimeFilterLength::EntryOutput(binding) = length {
+                                push(*binding, ResourceAccess::Read);
+                            }
+                            push(*scratch, ResourceAccess::Write);
                         }
                     }
-                    crate::egir::types::FilterPhase::Semantic => continue,
+                    FilterPlan::Serial => continue,
                 }
                 resources.sort_by_key(|resource| (resource.binding.set, resource.binding.binding));
                 return Some(resources);
@@ -696,8 +695,11 @@ pub(crate) fn segmented_domain(entry: &EgirEntry) -> Option<KernelDomain> {
                     ..
                 }) => return domain_from_space(space),
                 SideEffectKind::Soac(EgirSoac::Filter {
-                    space: Some(space),
-                    phase: crate::egir::types::FilterPhase::Flags | crate::egir::types::FilterPhase::Scatter,
+                    state:
+                        FilterState::Scheduled {
+                            space,
+                            plan: FilterPlan::Flags(_) | FilterPlan::Scatter(_),
+                        },
                     ..
                 }) => return domain_from_space(space),
                 _ => {}

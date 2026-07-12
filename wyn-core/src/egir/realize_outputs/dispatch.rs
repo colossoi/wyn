@@ -613,8 +613,8 @@ pub(crate) fn reject_sibling_consumers(
     Ok(())
 }
 
-/// If `source` is produced by a runtime `filter` (a `EgirSoac::Filter` with
-/// `scratch_out = Some(_)`), retarget it so its serial compaction writes the
+/// If `source` is produced by a runtime filter, retarget its `FilterOutput` so
+/// serial compaction writes the
 /// entry's output buffer directly and skip the normal DPS store. Returns
 /// `false` (no retarget) for a static Bounded filter or any non-filter source —
 /// the caller then falls back to `compute_slot_source`.
@@ -641,25 +641,27 @@ pub fn retarget_filter_output(
                 continue;
             }
             if let SideEffectKind::Soac(EgirSoac::Filter {
-                scratch_out,
-                len_out,
+                output: filter_output,
                 input_array_type,
                 input_elem_type,
                 output_elem_type,
                 ..
             }) = &mut se.kind
             {
-                let Some(scratch) = *scratch_out else {
+                let super::super::types::FilterOutput::Runtime { scratch, .. } = filter_output else {
                     // Static Bounded filter — not a runtime scratch producer.
                     return Ok(false);
                 };
+                let scratch = *scratch;
                 let input_arr_ty = input_array_type.clone();
                 let input_elem_ty = input_elem_type.clone();
                 let output_elem_ty = output_elem_type.clone();
                 // Compact straight into the output buffer; reuse the scratch
                 // binding as the paired length cell.
-                *scratch_out = Some(out_binding);
-                *len_out = Some(scratch);
+                *filter_output = super::super::types::FilterOutput::Runtime {
+                    scratch: out_binding,
+                    length: super::super::types::RuntimeFilterLength::EntryOutput(scratch),
+                };
                 retargeted = Some((scratch, input_arr_ty, input_elem_ty, output_elem_ty));
             }
             break 'outer;

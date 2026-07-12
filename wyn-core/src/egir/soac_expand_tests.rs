@@ -91,7 +91,7 @@ fn scatter_handleability_checks_every_input() {
         value_type: f32_ty.clone(),
         dest_elem_type: f32_ty,
         update_policy: crate::egir::types::HistUpdatePolicy::OrderedOverwrite,
-        space: None,
+        execution: crate::egir::types::HistExecution::Raw,
     });
 
     assert!(

@@ -417,10 +417,13 @@ fn dependency_bindings(
             SideEffectKind::Soac(EgirSoac::Seg { resources, .. }) => {
                 bindings.extend(resources.iter().map(|resource| resource.binding));
             }
-            SideEffectKind::Soac(EgirSoac::Filter {
-                scratch_out, len_out, ..
-            }) => {
-                bindings.extend(scratch_out.iter().chain(len_out).copied());
+            SideEffectKind::Soac(EgirSoac::Filter { output, .. }) => {
+                if let super::types::FilterOutput::Runtime { scratch, length } = output {
+                    bindings.insert(*scratch);
+                    if let super::types::RuntimeFilterLength::EntryOutput(length) = length {
+                        bindings.insert(*length);
+                    }
+                }
             }
             _ => {}
         }
@@ -472,7 +475,7 @@ fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]
                     }
                 }
                 SideEffectKind::Soac(EgirSoac::Filter {
-                    space,
+                    state,
                     input_array_type,
                     input_elem_type,
                     ..
@@ -484,8 +487,12 @@ fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]
                         *input_array_type = replacement.view_ty.clone();
                         *input_elem_type = replacement.elem_ty.clone();
                     }
-                    if let Some(space) = space {
-                        replace_space_nodes(space, replacements);
+                    match state {
+                        super::types::FilterState::Semantic { space }
+                        | super::types::FilterState::Scheduled { space, .. } => {
+                            replace_space_nodes(space, replacements)
+                        }
+                        super::types::FilterState::Raw => {}
                     }
                 }
                 _ => {}
