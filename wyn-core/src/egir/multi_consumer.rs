@@ -215,7 +215,7 @@ fn materialize_candidate(inner: &mut EgirInner, binding_ids: &mut IdSource<u32>,
     producer.origin = crate::interface::EntryOrigin::MultiConsumerMaterialization;
     producer.name = fresh_entry_name(inner, &format!("{}_materialize_shared", entry.name));
     producer.outputs.clear();
-    producer.slot_sources.clear();
+    producer.output_routes.clear();
     producer.return_ty = Type::Constructed(TypeName::Unit, vec![]);
     producer.storage_bindings.retain(|declaration| {
         declaration.role == StorageRole::Input || dependency_bindings.contains(&declaration.binding)
@@ -326,11 +326,11 @@ fn materialize_candidate(inner: &mut EgirInner, binding_ids: &mut IdSource<u32>,
         result_ty,
     );
     graph_ops::replace_all_references(&mut entry.graph, candidate.result, replacement_tuple);
-    for source in entry.slot_sources.iter_mut().flatten() {
+    for route in &mut entry.output_routes {
         if let Some(replacement) =
-            project_views.iter().find(|replacement| replacement.project == source.value)
+            project_views.iter().find(|replacement| replacement.project == route.source.value)
         {
-            source.value = replacement.view;
+            route.source.value = replacement.view;
         }
     }
     entry.graph.skeleton.blocks[block_id].side_effects.remove(effect_index);

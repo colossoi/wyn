@@ -572,7 +572,7 @@ fn convert_entry_point(
     // Slot-collected entries (post-`normalize_outputs`) have their
     // writes recorded as per-slot `SlotSource`s rather than flowing
     // through a single Return value. `egir::realize_outputs` reads
-    // those sources directly off `EgirEntry.slot_sources` and
+    // those sources directly off `EgirEntry.output_routes` and
     // retargets each one. The body terminates with `Return(None)` —
     // there's no value to merge through the CFG.
     let was_slot_collected = !converter.slot_sources_accum.is_empty();
@@ -612,6 +612,7 @@ fn convert_entry_point(
     let mut storage_bindings = entry.storage_bindings.clone();
     storage_bindings.extend(std::mem::take(&mut converter.extra_storage_bindings));
     let (graph, control_headers) = converter.into_graph_parts();
+    let output_count = outputs.len();
     let mut entry = EgirEntry::new(
         entry.origin,
         def_name.to_string(),
@@ -625,7 +626,18 @@ fn convert_entry_point(
         graph,
         control_headers,
     );
-    entry.slot_sources = slot_sources;
+    entry.output_routes = slot_sources
+        .into_iter()
+        .enumerate()
+        .filter(|(slot, _)| *slot < output_count)
+        .flat_map(|(slot, sources)| {
+            sources.into_iter().map(move |source| crate::egir::program::OutputRoute {
+                source,
+                slot: crate::egir::program::OutputSlotId(slot),
+                writers: Vec::new(),
+            })
+        })
+        .collect();
 
     Ok(entry)
 }
@@ -668,7 +680,7 @@ struct Converter<'a, 'b> {
     /// from `OutputSlotStore` terms during entry-body conversion. Indexed
     /// by slot index. Populated by `convert_slot_store` (the
     /// `OutputSlotStore` arm of `convert_term_kind` delegates here);
-    /// consumed by `convert_entry_point` to populate `EgirEntry.slot_sources`
+    /// consumed by `convert_entry_point` to populate `EgirEntry.output_routes`
     /// and decide whether the body terminates with `Return(None)` (when
     /// all outputs were written via slot stores) or a value (legacy
     /// non-normalized entries).
@@ -3021,12 +3033,19 @@ fn build_entry_outputs(
     }
 
     if matches!(ret_type, Type::Constructed(TypeName::SideEffect, _)) {
-        return entry
-            .outputs
-            .iter()
-            .enumerate()
-            .map(|(i, output)| {
-                let raw = slot_value_tys.get(i).and_then(|t| t.as_ref()).unwrap_or(&output.ty);
+        let slot_count = slot_value_tys.len().max(entry.outputs.len());
+        return (0..slot_count)
+            .map(|i| {
+                let output = entry.outputs.get(i);
+                let raw = slot_value_tys
+                    .get(i)
+                    .and_then(|t| t.as_ref())
+                    .or_else(|| output.map(|output| &output.ty))
+                    .ok_or_else(|| {
+                        ConvertError::Internal(format!(
+                            "normalized output slot {i} has neither a value type nor a declaration"
+                        ))
+                    })?;
                 // Canonicalize for storage layout: strip `Unique<_>` and
                 // unwrap any top-level `Existential` (e.g. a runtime
                 // `filter` output declared `?k. [k]T`) so
@@ -3037,8 +3056,10 @@ fn build_entry_outputs(
                 let length = length_for(storage_binding, &ty)?;
                 Ok(EntryOutput {
                     ty,
-                    decoration: output.attribute.as_ref().and_then(convert_to_io_decoration),
-                    target: target_of(output.attribute.as_ref()),
+                    decoration: output
+                        .and_then(|output| output.attribute.as_ref())
+                        .and_then(convert_to_io_decoration),
+                    target: target_of(output.and_then(|output| output.attribute.as_ref())),
                     storage_binding,
                     length,
                 })

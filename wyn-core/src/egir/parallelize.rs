@@ -22,7 +22,7 @@ use crate::BindingRef;
 use super::graph_ops;
 use super::program::{
     CompilerResource, CompilerResourceKind, EgirEntry, EgirFunc, EgirInner, EgirRegion, LogicalResource,
-    RegionInterner, ResourceId, ResourceOrigin, SemanticOpId,
+    OutputWriter, RegionInterner, ResourceId, ResourceOrigin, SemanticOpId,
 };
 use super::types::{
     EGraph, ENode, EgirSoac, FilterOutput, FilterPlan, FilterState, HistExecution, NodeId, PureOp,
@@ -316,7 +316,7 @@ fn lower_runtime_filters(
         flags.origin = crate::interface::EntryOrigin::RuntimeFilter;
         flags.name = format!("{}_filter_flags", entry.name);
         flags.outputs.clear();
-        flags.slot_sources.clear();
+        flags.output_routes.clear();
         flags.return_ty = Type::Constructed(TypeName::Unit, vec![]);
         flags.storage_bindings.clear();
         flags.storage_bindings.push(StorageBindingDecl {
@@ -334,7 +334,7 @@ fn lower_runtime_filters(
             local_size: (REDUCE_PHASE1_WIDTH, 1, 1),
         };
         scan.outputs.clear();
-        scan.slot_sources.clear();
+        scan.output_routes.clear();
         scan.return_ty = Type::Constructed(TypeName::Unit, vec![]);
         scan.storage_bindings.clear();
         for (binding, role) in [
@@ -539,96 +539,30 @@ pub(crate) fn attach_materialization_prepasses(inner: &EgirInner, schedule: &mut
     }
 }
 
-/// The output slots a side-effect contributes to, found by scanning its operand
-/// subgraph for storage views that name the entry's output bindings. A pointwise
-/// map writes one slot; a fused equal-domain multi-lane map writes several (one
-/// per lane). Empty for a side-effect that touches no output — shared prefix
-/// computation, kept by every split stage.
+/// The output slots a side effect fulfils, taken from the explicit routes
+/// established by output realization. A pointwise map writes one slot; a fused
+/// equal-domain multi-lane map writes several (one per lane). Empty means the
+/// effect has no declared output ownership.
 fn side_effect_output_slots(entry: &EgirEntry, se: &SideEffect) -> Vec<usize> {
     if let SideEffectKind::Soac(EgirSoac::Seg { output_slots, .. }) = &se.kind {
         return output_slots.clone();
     }
-    let mut slots: Vec<usize> = Vec::new();
-    wyn_graph::for_each_reachable(
-        se.referenced_nodes(),
-        wyn_graph::WalkOrder::DepthFirst,
-        |node, dependencies| {
-            if let Some(node) = entry.graph.nodes.get(node) {
-                dependencies.extend(node.children());
-            }
-        },
-        |node| {
-            if let Some(br) = graph_ops::extract_storage_view_source(&entry.graph, node) {
-                if let Some(s) = entry.outputs.iter().position(|o| o.storage_binding == Some(br)) {
-                    if !slots.contains(&s) {
-                        slots.push(s);
-                    }
-                }
-            }
-        },
-    );
-    // Scalar/tuple reductions commonly feed a later Store instead of carrying
-    // an OutputView operand themselves. Follow those value edges once, at
-    // semantic construction time, so output routing remains attached to the
-    // SegOp and placement does not mistake an entry-root reduction for a
-    // lane-local helper.
-    let routes_scalar_result = matches!(
-        &se.kind,
-        SideEffectKind::Soac(EgirSoac::Screma { accumulators, .. }) if !accumulators.is_empty()
-    ) || matches!(
-        &se.kind,
-        SideEffectKind::Soac(EgirSoac::Seg {
-            kind: SegOpKind::SegRed { .. } | SegOpKind::SegScan { .. } | SegOpKind::SegComposite { .. },
-            ..
+    let value_writer = se.result.map(OutputWriter::Value);
+    let effect_writer = se.effects.map(|(_, output)| OutputWriter::Effect(output));
+    let mut slots: Vec<usize> = entry
+        .output_routes
+        .iter()
+        .filter(|route| {
+            route
+                .writers
+                .iter()
+                .any(|writer| Some(*writer) == value_writer || Some(*writer) == effect_writer)
         })
-    );
-    if let Some(result) = se.result.filter(|_| routes_scalar_result) {
-        for (_, block) in &entry.graph.skeleton.blocks {
-            for consumer in &block.side_effects {
-                let SideEffectKind::Inst(InstKind::Store { .. }) = &consumer.kind else {
-                    continue;
-                };
-                let (Some(&place), Some(&value)) =
-                    (consumer.operand_nodes.first(), consumer.operand_nodes.get(1))
-                else {
-                    continue;
-                };
-                if !node_reaches(&entry.graph, value, result) {
-                    continue;
-                }
-                let Some(binding) = storage_binding_reachable(&entry.graph, place) else {
-                    continue;
-                };
-                if let Some(slot) =
-                    entry.outputs.iter().position(|output| output.storage_binding == Some(binding))
-                {
-                    if !slots.contains(&slot) {
-                        slots.push(slot);
-                    }
-                }
-            }
-        }
-    }
+        .map(|route| route.slot.0)
+        .collect();
     slots.sort_unstable();
+    slots.dedup();
     slots
-}
-
-fn storage_binding_reachable(graph: &EGraph, start: NodeId) -> Option<BindingRef> {
-    wyn_graph::find_map_reachable(
-        [start],
-        wyn_graph::WalkOrder::DepthFirst,
-        |node, dependencies| dependencies.extend(graph.nodes[node].children()),
-        |node| graph_ops::extract_storage_view_source(graph, node),
-    )
-}
-
-fn node_reaches(graph: &EGraph, start: NodeId, target: NodeId) -> bool {
-    wyn_graph::reaches_ordered(
-        start,
-        target,
-        wyn_graph::WalkOrder::DepthFirst,
-        |node, dependencies| dependencies.extend(graph.nodes[node].children()),
-    )
 }
 
 /// True for a pointwise `SegMap` side-effect (a parallel output domain).
@@ -696,6 +630,13 @@ fn restrict_to_group(
         }
     }
     entry.outputs = keep_slots.iter().map(|&s| entry.outputs[s].clone()).collect();
+    entry.output_routes.retain_mut(|route| {
+        let Some(new_slot) = keep_slots.iter().position(|&old_slot| old_slot == route.slot.0) else {
+            return false;
+        };
+        route.slot = super::program::OutputSlotId(new_slot);
+        true
+    });
 }
 
 /// Remove pure producer side-effects left dead by a split. A side-effect is
@@ -3084,6 +3025,10 @@ fn synthesize_u32_add_function(name: String, span: crate::ast::Span) -> EgirFunc
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Span;
+    use crate::egir::program::{OutputRoute, OutputSlotId, SlotSource};
+    use crate::egir::types::EffectToken;
+    use crate::ssa::types::ExecutionModel;
     use crate::tlc::ScremaAccumulator;
 
     /// Region indices used by the operator fixtures below: step is region 0,
@@ -3113,6 +3058,49 @@ mod tests {
 
     fn neutral(graph: &mut EGraph, index: usize) -> NodeId {
         graph.add_func_param(index, Type::Constructed(TypeName::Unit, vec![]))
+    }
+
+    #[test]
+    fn output_ownership_comes_from_explicit_route_writer() {
+        let mut graph = EGraph::new();
+        let block = graph.skeleton.entry;
+        let source = neutral(&mut graph, 0);
+        let writer = EffectToken(9);
+        graph.skeleton.blocks[block].side_effects.push(SideEffect {
+            kind: SideEffectKind::Inst(InstKind::Store {
+                place: Default::default(),
+                value: crate::ssa::types::ValueRef::Ssa(Default::default()),
+            }),
+            operand_nodes: smallvec![],
+            result: None,
+            effects: Some((EffectToken(8), writer)),
+            span: None,
+        });
+        let mut entry = EgirEntry::new(
+            crate::interface::EntryOrigin::Source,
+            "route_test".into(),
+            Span::dummy(),
+            ExecutionModel::Compute {
+                local_size: (1, 1, 1),
+            },
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            Type::Constructed(TypeName::Unit, vec![]),
+            graph,
+            LookupMap::new(),
+        );
+        entry.output_routes.push(OutputRoute {
+            source: SlotSource { block, value: source },
+            slot: OutputSlotId(3),
+            writers: vec![OutputWriter::Effect(writer)],
+        });
+
+        assert_eq!(
+            side_effect_output_slots(&entry, &entry.graph.skeleton.blocks[block].side_effects[0]),
+            vec![3]
+        );
     }
 
     #[test]

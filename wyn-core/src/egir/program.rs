@@ -24,7 +24,7 @@ use crate::types::TypeExt;
 use std::collections::HashMap;
 
 use super::parallelize::schedule::KernelSchedule;
-use super::types::{EGraph, NodeId, RegionId};
+use super::types::{EGraph, EffectToken, NodeId, RegionId};
 
 #[cfg(test)]
 #[path = "program_tests.rs"]
@@ -721,6 +721,35 @@ pub struct SlotSource {
     pub value: NodeId,
 }
 
+/// Stable identity of a declared entry-output position.
+///
+/// Keeping this distinct from a raw vector index makes output ownership
+/// explicit in semantic records and prevents callers from confusing a result
+/// lane, a storage binding, and an entry-output position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct OutputSlotId(pub usize);
+
+/// The concrete side effect that fulfils an output route after realization.
+/// Value-producing effects (SOACs) are named by their result; stores, which do
+/// not produce an EGIR value, are named by their effect token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OutputWriter {
+    Value(NodeId),
+    Effect(EffectToken),
+}
+
+/// Declared output ownership carried from `OutputSlotStore` conversion through
+/// physicalization. `source.value` is the user-level value, `slot` is the
+/// declared output it fulfils, and `writers` are populated by output
+/// realization. The slot's `EntryOutput::storage_binding` then identifies the
+/// host resource until logical-resource allocation assigns a `ResourceId`.
+#[derive(Debug, Clone)]
+pub struct OutputRoute {
+    pub source: SlotSource,
+    pub slot: OutputSlotId,
+    pub writers: Vec<OutputWriter>,
+}
+
 #[derive(Clone)]
 pub struct EgirEntry {
     /// Source/compiler provenance. Generated names are not semantic tags.
@@ -736,13 +765,11 @@ pub struct EgirEntry {
     pub graph: EGraph,
     pub control_headers: LookupMap<BlockId, ControlHeader>,
     pub aliases: LookupMap<NodeId, NodeId>,
-    /// Per-slot list of (producing-block, value) pairs. Indexed by
-    /// declared output slot. A slot with one source has `vec![one]`;
-    /// a slot written from both arms of an `If` has two. Empty for
-    /// unit-returning entries. Phase 1 of the DPS migration: populated
-    /// only by code added in later phases; today's `from_tlc` leaves
-    /// it untouched.
-    pub slot_sources: Vec<Vec<SlotSource>>,
+    /// Explicit value-to-output routes. A slot can have several routes when
+    /// distinct CFG paths write it. Output realization fills `writers`; later
+    /// semantic passes consume these declarations instead of reconstructing
+    /// ownership from storage-view provenance and effect shape.
+    pub output_routes: Vec<OutputRoute>,
 }
 
 impl EgirEntry {
@@ -772,7 +799,7 @@ impl EgirEntry {
             graph,
             control_headers,
             aliases: LookupMap::new(),
-            slot_sources: Vec::new(),
+            output_routes: Vec::new(),
         }
     }
 }

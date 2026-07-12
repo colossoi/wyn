@@ -1378,8 +1378,8 @@ pub struct EgirAllocated {
 
 impl EgirRaw {
     /// Realize every entry's outputs into side-effect writes. For
-    /// compute entries: walk `EgirEntry.slot_sources` and emit a DPS
-    /// write per source against the slot's `OutputView` (Map/Scan
+    /// compute entries: walk `EgirEntry.output_routes` and emit a DPS
+    /// write per route against the slot's `OutputView` (Map/Scan
     /// retarget, fixed-aggregate element stores, scalar `Store` at
     /// index 0). For graphics entries: classify the body's
     /// `Return(Some(value))` and emit one store per declared

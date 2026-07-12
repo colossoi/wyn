@@ -34,7 +34,7 @@ use ExecutionModel as _;
 
 use super::from_tlc::ConvertError;
 use super::graph_ops;
-use super::program::{EgirEntry, EgirInner};
+use super::program::{EgirEntry, EgirInner, OutputRoute, OutputSlotId, OutputWriter, SlotSource};
 use super::types::{NodeId, SkeletonTerminator};
 
 pub mod dispatch;
@@ -61,7 +61,7 @@ fn realize_entry(entry: &mut EgirEntry) -> Result<(), ConvertError> {
     if entry.outputs.is_empty() {
         return Ok(());
     }
-    if !entry.slot_sources.is_empty() {
+    if !entry.output_routes.is_empty() {
         // DPS path: slot-collected entries (post-`normalize_outputs`).
         realize_compute_slots(entry)
     } else {
@@ -84,7 +84,7 @@ fn realize_compute_slots(entry: &mut EgirEntry) -> Result<(), ConvertError> {
         graph,
         outputs,
         aliases,
-        slot_sources,
+        output_routes,
         storage_bindings,
         ..
     } = entry;
@@ -95,7 +95,13 @@ fn realize_compute_slots(entry: &mut EgirEntry) -> Result<(), ConvertError> {
 
     for (slot_index, output) in outputs.iter_mut().enumerate() {
         let binding = output.storage_binding.expect("BUG: compute output without storage binding");
-        let sources = slot_sources.get(slot_index).cloned().unwrap_or_default();
+        let route_indices: Vec<usize> = output_routes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, route)| (route.slot == OutputSlotId(slot_index)).then_some(index))
+            .collect();
+        let sources: Vec<SlotSource> =
+            route_indices.iter().map(|&index| output_routes[index].source).collect();
         if sources.is_empty() {
             return Err(ConvertError::Unsupported(format!(
                 "compute output #{} has no source — `normalize_outputs` \
@@ -111,12 +117,14 @@ fn realize_compute_slots(entry: &mut EgirEntry) -> Result<(), ConvertError> {
         if sources.len() == 1
             && dispatch::retarget_filter_output(graph, storage_bindings, output, sources[0].value)?
         {
+            output_routes[route_indices[0]].writers = vec![OutputWriter::Value(sources[0].value)];
             continue;
         }
 
         let multi_source = sources.len() > 1;
-        for src in &sources {
-            dispatch::compute_slot_source(
+        for (&route_index, src) in route_indices.iter().zip(&sources) {
+            let mut writers = source_value_writers(graph, &effect_index, src.value);
+            writers.extend(dispatch::compute_slot_source(
                 graph,
                 &effect_index,
                 aliases,
@@ -127,7 +135,9 @@ fn realize_compute_slots(entry: &mut EgirEntry) -> Result<(), ConvertError> {
                 &output.ty,
                 binding,
                 multi_source,
-            )?;
+            )?);
+            dedup_output_writers(&mut writers);
+            output_routes[route_index].writers = writers;
         }
     }
     Ok(())
@@ -151,6 +161,7 @@ fn realize_legacy_return(entry: &mut EgirEntry) -> Result<(), ConvertError> {
         graph,
         outputs,
         aliases,
+        output_routes,
         ..
     } = entry;
 
@@ -181,7 +192,8 @@ fn realize_legacy_return(entry: &mut EgirEntry) -> Result<(), ConvertError> {
             // Single-source slot for legacy compute. Sibling-Index
             // rewrites are still valid (they're against the single
             // result NodeId).
-            dispatch::compute_slot_source(
+            let mut writers = source_value_writers(graph, &effect_index, source);
+            writers.extend(dispatch::compute_slot_source(
                 graph,
                 &effect_index,
                 aliases,
@@ -192,21 +204,76 @@ fn realize_legacy_return(entry: &mut EgirEntry) -> Result<(), ConvertError> {
                 &output.ty,
                 binding,
                 /* multi_source */ false,
-            )?;
+            )?);
+            dedup_output_writers(&mut writers);
+            output_routes.push(OutputRoute {
+                source: SlotSource {
+                    block: return_block,
+                    value: source,
+                },
+                slot: OutputSlotId(slot_index),
+                writers,
+            });
         } else {
-            dispatch::graphics_slot_source(
+            let mut writers = source_value_writers(graph, &effect_index, source);
+            writers.push(dispatch::graphics_slot_source(
                 graph,
                 return_block,
                 &mut next_effect,
                 source,
                 slot_index,
                 &output.ty,
-            );
+            ));
+            dedup_output_writers(&mut writers);
+            output_routes.push(OutputRoute {
+                source: SlotSource {
+                    block: return_block,
+                    value: source,
+                },
+                slot: OutputSlotId(slot_index),
+                writers,
+            });
         }
     }
 
     graph.skeleton.blocks[return_block].term = SkeletonTerminator::Return(None);
     Ok(())
+}
+
+fn source_value_writers(
+    graph: &super::types::EGraph,
+    effect_index: &super::types::SideEffectIndex,
+    source: NodeId,
+) -> Vec<OutputWriter> {
+    let mut writers = Vec::new();
+    wyn_graph::for_each_reachable(
+        [source],
+        wyn_graph::WalkOrder::DepthFirst,
+        |node, dependencies| {
+            if effect_index.site(node).is_none() {
+                dependencies.extend(graph.nodes[node].children());
+            }
+        },
+        |node| {
+            if effect_index
+                .effect(graph, node)
+                .is_some_and(|effect| matches!(effect.kind, super::types::SideEffectKind::Soac(_)))
+            {
+                writers.push(OutputWriter::Value(node));
+            }
+        },
+    );
+    writers
+}
+
+fn dedup_output_writers(writers: &mut Vec<OutputWriter>) {
+    let mut unique = Vec::with_capacity(writers.len());
+    for writer in writers.drain(..) {
+        if !unique.contains(&writer) {
+            unique.push(writer);
+        }
+    }
+    *writers = unique;
 }
 
 /// Per-output source nodes: the single result, the operands of a literal

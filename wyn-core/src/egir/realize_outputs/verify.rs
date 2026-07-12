@@ -3,6 +3,9 @@
 //! After `realize_outputs::run`, the following must hold for every
 //! `EgirEntry`:
 //!
+//!   * Every declared output has at least one explicit route, and every route
+//!     names at least one realized writer.
+//!
 //!   * No runtime-sized Composite array is reachable from any entry
 //!     output or from any output-side-effect operand.
 //!
@@ -29,7 +32,7 @@ use polytype::Type;
 use crate::ast::TypeName;
 
 use super::super::from_tlc::ConvertError;
-use super::super::program::EgirInner;
+use super::super::program::{EgirEntry, EgirInner};
 use super::super::types::{ENode, NodeId, SkeletonTerminator};
 
 /// Verify the post-realization invariant for every entry. Returns
@@ -37,7 +40,36 @@ use super::super::types::{ENode, NodeId, SkeletonTerminator};
 /// and offending NodeId.
 pub fn check(inner: &EgirInner) -> Result<(), ConvertError> {
     for entry in &inner.entry_points {
+        check_routes(entry)?;
         check_entry(&entry.name, &entry.graph)?;
+    }
+    Ok(())
+}
+
+fn check_routes(entry: &EgirEntry) -> Result<(), ConvertError> {
+    for route in &entry.output_routes {
+        if route.slot.0 >= entry.outputs.len() {
+            return Err(ConvertError::Internal(format!(
+                "realize_outputs verifier: entry `{}` has a route to output slot {} but declares only {} outputs",
+                entry.name,
+                route.slot.0,
+                entry.outputs.len()
+            )));
+        }
+        if route.writers.is_empty() {
+            return Err(ConvertError::Internal(format!(
+                "realize_outputs verifier: entry `{}` output slot {} has a source value but no realized writer",
+                entry.name, route.slot.0
+            )));
+        }
+    }
+    for slot in 0..entry.outputs.len() {
+        if !entry.output_routes.iter().any(|route| route.slot.0 == slot) {
+            return Err(ConvertError::Internal(format!(
+                "realize_outputs verifier: entry `{}` output slot {} has no explicit route",
+                entry.name, slot
+            )));
+        }
     }
     Ok(())
 }

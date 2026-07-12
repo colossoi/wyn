@@ -23,6 +23,7 @@ use crate::BindingRef;
 
 use super::super::from_tlc::ConvertError;
 use super::super::graph_ops;
+use super::super::program::OutputWriter;
 use super::super::types::{
     EGraph, ENode, EgirSoac, NodeId, PureOp, SideEffectIndex, SideEffectKind, SkeletonTerminator,
     SoacDestination,
@@ -94,10 +95,12 @@ pub fn compute_slot_source(
     slot_ty: &Type<TypeName>,
     binding: BindingRef,
     multi_source: bool,
-) -> Result<(), ConvertError> {
+) -> Result<Vec<OutputWriter>, ConvertError> {
     // 1. Consuming Scan: nothing to emit.
     if result_soac_is_consuming_scan(graph, effect_index, source) {
-        return Ok(());
+        let writer = projected_effect_result(graph, effect_index, source)
+            .expect("consuming scan projection must name its producing effect");
+        return Ok(vec![OutputWriter::Value(writer)]);
     }
 
     // 2. Retargetable array projection of Screma(Fresh). Field 0 is the
@@ -130,7 +133,7 @@ pub fn compute_slot_source(
             graph.retype_node(source, view_ty);
         }
         aliases.insert(source, view);
-        return Ok(());
+        return Ok(vec![OutputWriter::Value(screma_result)]);
     }
 
     // 3. Fixed-size aggregate.
@@ -143,13 +146,16 @@ pub fn compute_slot_source(
     });
     if let (Some(n), Some(et)) = (fixed_size, slot_ty.elem_type().cloned()) {
         let view = graph_ops::intern_storage_view(graph, binding, et.clone(), None);
+        let mut writers = Vec::with_capacity(n);
         for j in 0..n {
             let elem =
                 graph.intern_pure(PureOp::Project { index: j as u32 }, smallvec![source], et.clone());
             let idx = graph_ops::intern_u32(graph, j as u32, None);
-            graph_ops::emit_storage_store(graph, block, view, idx, elem, et.clone(), next_effect, None);
+            let effect =
+                graph_ops::emit_storage_store(graph, block, view, idx, elem, et.clone(), next_effect, None);
+            writers.push(OutputWriter::Effect(effect));
         }
-        return Ok(());
+        return Ok(writers);
     }
 
     // 4. Runtime-sized array not produced by a retargetable SOAC: error.
@@ -165,7 +171,7 @@ pub fn compute_slot_source(
     // 5. Scalar / vector / matrix.
     let view = graph_ops::intern_storage_view(graph, binding, slot_ty.clone(), None);
     let idx0 = graph_ops::intern_u32(graph, 0, None);
-    graph_ops::emit_storage_store(
+    let effect = graph_ops::emit_storage_store(
         graph,
         block,
         view,
@@ -175,7 +181,7 @@ pub fn compute_slot_source(
         next_effect,
         None,
     );
-    Ok(())
+    Ok(vec![OutputWriter::Effect(effect)])
 }
 
 /// Realise one graphics output as a store to the slot's
@@ -188,13 +194,34 @@ pub fn graphics_slot_source(
     source: NodeId,
     slot_index: usize,
     slot_ty: &Type<TypeName>,
-) {
+) -> OutputWriter {
     let place = graph.intern_pure(
         PureOp::OutputSlot { index: slot_index },
         smallvec![],
         slot_ty.clone(),
     );
-    graph_ops::emit_store(graph, block, place, source, next_effect, None);
+    OutputWriter::Effect(graph_ops::emit_store(
+        graph,
+        block,
+        place,
+        source,
+        next_effect,
+        None,
+    ))
+}
+
+fn projected_effect_result(
+    graph: &EGraph,
+    effect_index: &SideEffectIndex,
+    source: NodeId,
+) -> Option<NodeId> {
+    let ENode::Pure { operands, .. } = &graph.nodes[source] else {
+        return effect_index.effect(graph, source).is_some().then_some(source);
+    };
+    let [producer] = operands.as_slice() else {
+        return None;
+    };
+    effect_index.effect(graph, *producer).is_some().then_some(*producer)
 }
 
 // ----------------------------------------------------------------------------

@@ -224,10 +224,10 @@ pub fn emit_storage_store(
     elem_ty: Type<TypeName>,
     next_effect: &mut u32,
     span: Option<Span>,
-) {
+) -> EffectToken {
     let place_nid =
         graph.intern_pure_with_span(PureOp::ViewIndex, smallvec![view_nid, index_nid], elem_ty, span);
-    let _ = emit_store(graph, block, place_nid, value_nid, next_effect, span);
+    emit_store(graph, block, place_nid, value_nid, next_effect, span)
 }
 
 /// Emit a `Load` of `place_nid` (a place-producing pure op like `ViewIndex`)
