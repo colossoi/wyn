@@ -63,6 +63,9 @@ pub fn run(inner: &mut EgirInner) -> Result<(), ConvertError> {
     // callee parameter re-propagates inside that callee (`recompute_aggregate_types`
     // in `apply`), which can surface a fresh drift one level deeper — so iterate
     // to a fixpoint.
+    // TODO: Replace this bounded loop with a real worklist/fixed-point algorithm;
+    // report an error if progress becomes non-monotone instead of silently
+    // succeeding after 64 iterations with representation drift still present.
     for _ in 0..64 {
         let mut drifts: Vec<Retype> = Vec::new();
         collect_drifts(entry_points.iter().map(|e| &e.graph), regions, &mut drifts);

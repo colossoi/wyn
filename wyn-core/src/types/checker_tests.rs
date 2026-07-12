@@ -2933,6 +2933,22 @@ fn aspiration_size_coercion_statically_mismatched_rejected() {
     assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
 }
 
+#[test]
+#[ignore = "size coercion should reject a statically-known source/target mismatch even when the source is a parameter; today the checker accepts it"]
+fn aspiration_size_coercion_parameter_mismatch_rejected() {
+    let result = try_typecheck_program("def f(xs: [3]i32) [5]i32 = xs :> [5]i32");
+    assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
+}
+
+#[test]
+#[ignore = "passing a statically-known [3] array to a [5] parameter should be rejected; today size compatibility is not enforced at calls"]
+fn aspiration_static_array_argument_size_mismatch_rejected() {
+    let result = try_typecheck_program(
+        "def take_five(xs: [5]i32) i32 = xs[0]\ndef main() i32 = take_five([1, 2, 3])",
+    );
+    assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
+}
+
 // =============================================================================
 // Size variable sharing (spec section "Size Types", lines 956-1156)
 // =============================================================================
