@@ -57,7 +57,7 @@ fn canonicalize_resource_accesses(graph: &mut EGraph) {
             let mut merged = HashMap::new();
             for resource in resources.drain(..) {
                 merged
-                    .entry(resource.binding)
+                    .entry(resource.resource)
                     .and_modify(|access| {
                         if *access != resource.access {
                             *access = SegResourceAccessKind::ReadWrite;
@@ -65,9 +65,14 @@ fn canonicalize_resource_accesses(graph: &mut EGraph) {
                     })
                     .or_insert(resource.access);
             }
-            let mut normalized: Vec<_> =
-                merged.into_iter().map(|(binding, access)| SegResourceAccess { binding, access }).collect();
-            normalized.sort_by_key(|resource| (resource.binding.set, resource.binding.binding));
+            let mut normalized: Vec<_> = merged
+                .into_iter()
+                .map(|(resource, access)| SegResourceAccess { resource, access })
+                .collect();
+            normalized.sort_by_key(|resource| match resource.resource {
+                super::program::SemanticResourceRef::Binding(binding) => (0, binding.set, binding.binding),
+                super::program::SemanticResourceRef::Resource(id) => (1, id.0, 0),
+            });
             *resources = normalized;
         }
     }

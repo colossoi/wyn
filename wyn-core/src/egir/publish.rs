@@ -101,6 +101,28 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                 })
             }))
             .collect();
+        let read_bindings: LookupSet<(u32, u32)> = entries
+            .iter()
+            .flat_map(|entry| {
+                entry.inputs.iter().filter_map(|input| {
+                    let binding = input.storage_binding?;
+                    (!matches!(
+                        input.storage_access,
+                        Some(crate::interface::StorageAccess::WriteOnly)
+                    ))
+                    .then_some((binding.set, binding.binding))
+                })
+            })
+            .chain(entries.iter().flat_map(|entry| {
+                entry.storage_bindings.iter().filter_map(|declaration| {
+                    matches!(
+                        declaration.role,
+                        crate::interface::StorageRole::Input | crate::interface::StorageRole::Intermediate
+                    )
+                    .then_some((declaration.binding.set, declaration.binding.binding))
+                })
+            }))
+            .collect();
 
         let mut layout = DescriptorLayout::from_pipeline(self)?;
 
@@ -321,7 +343,10 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                     set, binding, access, ..
                 } = b
                 {
-                    if *access == Access::ReadOnly && written_bindings.contains(&(*set, *binding)) {
+                    let slot = (*set, *binding);
+                    if written_bindings.contains(&slot) && read_bindings.contains(&slot) {
+                        *access = Access::ReadWrite;
+                    } else if *access == Access::ReadOnly && written_bindings.contains(&slot) {
                         *access = Access::ReadWrite;
                     }
                 }

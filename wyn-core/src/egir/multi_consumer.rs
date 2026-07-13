@@ -12,15 +12,15 @@ use polytype::Type;
 
 use super::graph_ops;
 use super::program::{
-    buffer_len, CompilerResource, CompilerResourceKind, LogicalSize, SemanticDependencyKind, SemanticOpId,
-    SemanticProgram,
+    CompilerResource, CompilerResourceKind, LogicalSize, SemanticDependencyKind, SemanticOpId,
+    SemanticProgram, SemanticResourceDecl, SemanticResourceRef,
 };
 use super::types::{
     EGraph, EgirSoac, NodeId, PureOp, SegExtent, SegOpKind, SegPlacement, SegResourceAccess,
     SegResourceAccessKind, SideEffectKind, SoacDestination,
 };
 use crate::ast::TypeName;
-use crate::interface::{StorageBindingDecl, StorageRole};
+use crate::interface::StorageRole;
 use crate::{BindingRef, IdSource};
 
 #[derive(Clone)]
@@ -218,10 +218,14 @@ fn materialize_candidate(
     }
 
     let producer_storage = entry
-        .storage_bindings
+        .resource_declarations
         .iter()
         .filter(|declaration| {
-            declaration.role == StorageRole::Input || dependency_bindings.contains(&declaration.binding)
+            declaration.role == StorageRole::Input
+                || declaration
+                    .resource
+                    .binding()
+                    .is_some_and(|binding| dependency_bindings.contains(&binding))
         })
         .cloned()
         .collect();
@@ -234,7 +238,7 @@ fn materialize_candidate(
     let projected_result =
         projection.node(candidate.result).expect("multi-consumer producer result must be projected");
     let producer_aliases = projection.remap_aliases(&entry.aliases);
-    let mut producer = super::program::SemanticEntry::new(
+    let mut producer = super::program::SemanticEntry::new_with_resources(
         crate::interface::EntryOrigin::MultiConsumerMaterialization,
         fresh_entry_name(inner, &format!("{}_materialize_shared", entry.name)),
         entry.span,
@@ -254,11 +258,11 @@ fn materialize_candidate(
     for ((&binding, elem_ty), size) in bindings.iter().zip(map_output_elem_types).zip(&sizes) {
         let view = graph_ops::intern_storage_view(producer_graph, binding, elem_ty.clone(), None);
         output_views.push(view);
-        producer.storage_bindings.push(StorageBindingDecl {
-            binding,
+        producer.resource_declarations.push(SemanticResourceDecl {
+            resource: SemanticResourceRef::Binding(binding),
             role: StorageRole::Output,
             elem_ty: elem_ty.clone(),
-            length: buffer_len(size),
+            size: size.clone(),
         });
     }
     let retained_index = producer_graph.side_effect_index();
@@ -277,11 +281,13 @@ fn materialize_candidate(
         producer_effect.operand_nodes.extend(output_views.iter().copied());
         for &binding in &bindings {
             resources.push(SegResourceAccess {
-                binding,
+                resource: SemanticResourceRef::Binding(binding),
                 access: SegResourceAccessKind::Write,
             });
         }
-        resources.sort_by_key(|resource| (resource.binding.set, resource.binding.binding));
+        resources.sort_by_key(|resource| {
+            resource.resource.binding().map(|binding| (binding.set, binding.binding))
+        });
     }
 
     // Rewire the source entry to read the shared storage views and remove the
@@ -317,11 +323,11 @@ fn materialize_candidate(
             elem_ty: elem_ty.clone(),
             binding,
         });
-        entry.storage_bindings.push(StorageBindingDecl {
-            binding,
+        entry.resource_declarations.push(SemanticResourceDecl {
+            resource: SemanticResourceRef::Binding(binding),
             role: StorageRole::Input,
             elem_ty: elem_ty.clone(),
-            length: buffer_len(&sizes[lane]),
+            size: sizes[lane].clone(),
         });
     }
     retarget_input_metadata(&mut entry.graph, &project_views);
@@ -420,20 +426,26 @@ fn dependency_bindings(
                 }
             },
             |node| {
-                if let Some(binding) = graph_ops::extract_storage_view_source(graph, node) {
+                if let Some(binding) = graph_ops::extract_storage_view_source(graph, node)
+                    .and_then(SemanticResourceRef::binding)
+                {
                     bindings.insert(binding);
                 }
             },
         );
         match &effect.kind {
             SideEffectKind::Soac(EgirSoac::Seg { resources, .. }) => {
-                bindings.extend(resources.iter().map(|resource| resource.binding));
+                bindings.extend(resources.iter().filter_map(|resource| resource.resource.binding()));
             }
             SideEffectKind::Soac(EgirSoac::Filter { output, .. }) => {
                 if let super::types::FilterOutput::Runtime { scratch, length } = output {
-                    bindings.insert(*scratch);
+                    if let Some(scratch) = scratch.binding() {
+                        bindings.insert(scratch);
+                    }
                     if let super::types::RuntimeFilterLength::EntryOutput(length) = length {
-                        bindings.insert(*length);
+                        if let Some(length) = length.binding() {
+                            bindings.insert(length);
+                        }
                     }
                 }
             }
@@ -461,9 +473,12 @@ fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]
                         {
                             input_array_types[input] = replacement.view_ty.clone();
                             input_elem_types[input] = replacement.elem_ty.clone();
-                            if !resources.iter().any(|resource| resource.binding == replacement.binding) {
+                            if !resources
+                                .iter()
+                                .any(|resource| resource.resource.binding() == Some(replacement.binding))
+                            {
                                 resources.push(SegResourceAccess {
-                                    binding: replacement.binding,
+                                    resource: SemanticResourceRef::Binding(replacement.binding),
                                     access: SegResourceAccessKind::Read,
                                 });
                             }
@@ -523,12 +538,8 @@ fn replace_space_nodes(space: &mut super::types::SegSpace, replacements: &[Input
         };
         if let Some(replacement) = replacements.iter().find(|replacement| *node == replacement.project) {
             *node = replacement.view;
-            if let SegExtent::ResourceLength {
-                binding: extent_binding,
-                ..
-            } = extent
-            {
-                *extent_binding = replacement.binding;
+            if let SegExtent::ResourceLength { resource, .. } = extent {
+                *resource = SemanticResourceRef::Binding(replacement.binding);
             }
         }
     }
@@ -544,7 +555,12 @@ fn all_bindings(inner: &SemanticProgram) -> HashSet<BindingRef> {
                 .iter()
                 .filter_map(|input| input.storage_binding)
                 .chain(entry.outputs.iter().filter_map(|output| output.storage_binding))
-                .chain(entry.storage_bindings.iter().map(|declaration| declaration.binding))
+                .chain(
+                    entry
+                        .resource_declarations
+                        .iter()
+                        .filter_map(|declaration| declaration.resource.binding()),
+                )
         })
         .collect()
 }
@@ -568,11 +584,11 @@ fn size_for_space(space: &super::types::SegSpace, elem_ty: &Type<TypeName>) -> L
     }
     match space.dims.as_slice() {
         [SegExtent::ResourceLength {
-            binding,
+            resource,
             elem_bytes: source_elem_bytes,
             ..
-        }] => LogicalSize::LikeBinding {
-            binding: *binding,
+        }] => LogicalSize::PendingLikeBinding {
+            binding: resource.binding().expect("materialization runs before resource normalization"),
             elem_bytes,
             src_elem_bytes: *source_elem_bytes,
         },

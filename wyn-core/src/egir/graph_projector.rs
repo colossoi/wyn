@@ -61,6 +61,10 @@ impl<'a> GraphProjector<'a> {
     }
 
     pub fn all(&self) -> Result<GraphProjection, String> {
+        self.all_with_values(Vec::new())
+    }
+
+    pub fn all_with_values(&self, extra_values: Vec<NodeId>) -> Result<GraphProjection, String> {
         let selected = self
             .source
             .skeleton
@@ -70,7 +74,7 @@ impl<'a> GraphProjector<'a> {
                 (0..body.side_effects.len()).map(move |index| EffectSite { block, index })
             })
             .collect();
-        self.selected(selected)
+        self.selected_with_values(selected, extra_values)
     }
 
     pub fn selected(&self, roots: HashSet<EffectSite>) -> Result<GraphProjection, String> {

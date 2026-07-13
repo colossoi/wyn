@@ -10,10 +10,12 @@ use smallvec::smallvec;
 use crate::ast::{Span, TypeName};
 use crate::ssa::framework::BlockId;
 use crate::ssa::types::{ConstantValue, ControlHeader, ExecutionModel};
-use crate::{interface, BindingRef};
+use crate::{interface, ResourceId};
 
 use super::graph_ops;
-use super::program::{PhysicalEntry, SemanticEntry};
+use super::program::{
+    PhysicalEntry, PhysicalResourceTable, SemanticEntry, SemanticResourceDecl, SemanticResourceRef,
+};
 use super::types::{EGraph, EgirSoac, NodeId, SkeletonTerminator, SoacDestination};
 use crate::ssa::types::{EntryInput, EntryOutput};
 
@@ -30,7 +32,7 @@ pub struct EntryBuilder {
     execution_model: ExecutionModel,
     inputs: Vec<EntryInput>,
     outputs: Vec<EntryOutput>,
-    storage_bindings: Vec<interface::StorageBindingDecl>,
+    resource_declarations: Vec<SemanticResourceDecl>,
     params: Vec<(Type<TypeName>, String)>,
     return_ty: Type<TypeName>,
     next_effect: u32,
@@ -39,13 +41,14 @@ pub struct EntryBuilder {
 /// Commit builder for a fully planned physical entry. It consumes a complete
 /// semantic entry rather than exposing a partially initialized physical
 /// record, and is the only constructor used at the physical-program boundary.
-pub struct PhysicalEntryBuilder {
+pub struct PhysicalEntryBuilder<'a> {
     entry: SemanticEntry,
+    resources: &'a PhysicalResourceTable,
 }
 
-impl PhysicalEntryBuilder {
-    pub fn from_planned_entry(entry: SemanticEntry) -> Self {
-        Self { entry }
+impl<'a> PhysicalEntryBuilder<'a> {
+    pub fn from_planned_entry(entry: SemanticEntry, resources: &'a PhysicalResourceTable) -> Self {
+        Self { entry, resources }
     }
 
     pub fn build(self) -> Result<PhysicalEntry, String> {
@@ -61,6 +64,30 @@ impl PhysicalEntryBuilder {
                 ));
             }
         }
+        let storage_bindings = entry
+            .resource_declarations
+            .into_iter()
+            .map(|declaration| {
+                let resource = declaration.resource.resource().ok_or_else(|| {
+                    format!(
+                        "physical entry `{}` contains a pending resource binding",
+                        entry.name
+                    )
+                })?;
+                let binding = self.resources.binding(resource).ok_or_else(|| {
+                    format!(
+                        "physical entry `{}` references missing resource {:?}",
+                        entry.name, resource
+                    )
+                })?;
+                Ok(interface::StorageBindingDecl {
+                    binding,
+                    role: declaration.role,
+                    elem_ty: declaration.elem_ty,
+                    length: super::program::buffer_len(&declaration.size, self.resources),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         Ok(PhysicalEntry {
             origin: entry.origin,
             name: entry.name,
@@ -68,7 +95,7 @@ impl PhysicalEntryBuilder {
             execution_model: entry.execution_model,
             inputs: entry.inputs,
             outputs: entry.outputs,
-            storage_bindings: entry.storage_bindings,
+            storage_bindings,
             params: entry.params,
             return_ty: entry.return_ty,
             graph: entry.graph,
@@ -95,7 +122,7 @@ impl EntryBuilder {
             execution_model: ExecutionModel::Compute { local_size },
             inputs: Vec::new(),
             outputs: Vec::new(),
-            storage_bindings: Vec::new(),
+            resource_declarations: Vec::new(),
             params: Vec::new(),
             return_ty: Type::Constructed(TypeName::Unit, vec![]),
             next_effect: 1,
@@ -104,39 +131,67 @@ impl EntryBuilder {
 
     // ---- Storage interface declarations ----------------------------------
 
-    pub fn declare_intermediate_storage(&mut self, binding: BindingRef, elem_ty: Type<TypeName>) {
-        self.declare_intermediate_storage_sized(binding, elem_ty, None);
+    pub fn declare_intermediate_storage(&mut self, resource: ResourceId, elem_ty: Type<TypeName>) {
+        self.declare_intermediate_storage_sized(resource, elem_ty, None);
     }
 
     pub fn declare_intermediate_storage_sized(
         &mut self,
-        binding: BindingRef,
+        resource: ResourceId,
         elem_ty: Type<TypeName>,
         length: Option<crate::pipeline_descriptor::BufferLen>,
     ) {
-        self.storage_bindings.push(interface::StorageBindingDecl {
-            binding,
+        self.resource_declarations.push(SemanticResourceDecl {
+            resource: SemanticResourceRef::Resource(resource),
             role: interface::StorageRole::Intermediate,
             elem_ty,
-            length,
+            size: super::program::pending_logical_size(length.as_ref()),
         });
     }
 
-    pub fn declare_output_storage(&mut self, binding: BindingRef, elem_ty: Type<TypeName>) {
-        self.declare_output_storage_sized(binding, elem_ty, None);
+    pub fn declare_intermediate_resource(
+        &mut self,
+        resource: ResourceId,
+        elem_ty: Type<TypeName>,
+        size: super::program::LogicalSize,
+    ) {
+        self.resource_declarations.push(SemanticResourceDecl {
+            resource: SemanticResourceRef::Resource(resource),
+            role: interface::StorageRole::Intermediate,
+            elem_ty,
+            size,
+        });
+    }
+
+    pub fn declare_output_storage(&mut self, resource: ResourceId, elem_ty: Type<TypeName>) {
+        self.declare_output_storage_sized(resource, elem_ty, None);
     }
 
     pub fn declare_output_storage_sized(
         &mut self,
-        binding: BindingRef,
+        resource: ResourceId,
         elem_ty: Type<TypeName>,
         length: Option<crate::pipeline_descriptor::BufferLen>,
     ) {
-        self.storage_bindings.push(interface::StorageBindingDecl {
-            binding,
+        self.resource_declarations.push(SemanticResourceDecl {
+            resource: SemanticResourceRef::Resource(resource),
             role: interface::StorageRole::Output,
             elem_ty,
-            length,
+            size: super::program::pending_logical_size(length.as_ref()),
+        });
+    }
+
+    pub fn declare_output_resource(
+        &mut self,
+        resource: ResourceId,
+        elem_ty: Type<TypeName>,
+        size: super::program::LogicalSize,
+    ) {
+        self.resource_declarations.push(SemanticResourceDecl {
+            resource: SemanticResourceRef::Resource(resource),
+            role: interface::StorageRole::Output,
+            elem_ty,
+            size,
         });
     }
 
@@ -181,9 +236,9 @@ impl EntryBuilder {
         graph_ops::intern_constant(&mut self.graph, value, ty)
     }
 
-    pub fn emit_storage_view(&mut self, binding: BindingRef, view_ty: Type<TypeName>) -> NodeId {
+    pub fn emit_storage_view(&mut self, resource: ResourceId, view_ty: Type<TypeName>) -> NodeId {
         let span = self.span();
-        graph_ops::intern_storage_view(&mut self.graph, binding, view_ty, span)
+        graph_ops::intern_resource_view(&mut self.graph, resource, view_ty, span)
     }
 
     /// Emit a `EgirSoac::Screma { 0 maps, 1 Scan acc, OutputView }` —
@@ -306,7 +361,7 @@ impl EntryBuilder {
     /// Emit a `Store` of `value` to `storage[binding][index]`.
     pub fn emit_storage_store(
         &mut self,
-        binding: BindingRef,
+        resource: ResourceId,
         index_nid: NodeId,
         value_nid: NodeId,
         elem_ty: Type<TypeName>,
@@ -321,7 +376,7 @@ impl EntryBuilder {
                 crate::types::no_buffer(),
             ],
         );
-        let view_nid = self.emit_storage_view(binding, arr_ty);
+        let view_nid = self.emit_storage_view(resource, arr_ty);
         let span = self.span();
         graph_ops::emit_storage_store(
             &mut self.graph,
@@ -339,14 +394,14 @@ impl EntryBuilder {
     /// hand back an `SemanticEntry`.
     pub fn build(mut self) -> SemanticEntry {
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Return(None);
-        SemanticEntry::new(
+        SemanticEntry::new_with_resources(
             self.origin,
             self.name,
             self.span,
             self.execution_model,
             self.inputs,
             self.outputs,
-            self.storage_bindings,
+            self.resource_declarations,
             self.params,
             self.return_ty,
             self.graph,

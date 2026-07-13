@@ -298,7 +298,7 @@ fn logical_manifest_covers_scan_and_filter_scratch() {
                     CompilerResourceKind::ScanBlockSums | CompilerResourceKind::ScanBlockOffsets
                 ) =>
             {
-                Some(resource.semantic_binding)
+                Some(resource.id)
             }
             _ => None,
         })
@@ -320,7 +320,15 @@ fn logical_manifest_covers_scan_and_filter_scratch() {
             _ => None,
         })
         .collect();
-    assert!(filter_kinds.contains(&CompilerResourceKind::FilterScratch));
+    assert!(
+        filter
+            .logical_resources()
+            .iter()
+            .filter(|resource| matches!(resource.origin, ResourceOrigin::Host(_)))
+            .count()
+            >= 2,
+        "the input and returned filter capacity remain host ABI resources"
+    );
     assert!(filter_kinds.contains(&CompilerResourceKind::FilterLenCell));
     assert!(filter_kinds.contains(&CompilerResourceKind::FilterFlags));
     assert!(filter_kinds.contains(&CompilerResourceKind::FilterOffsets));
@@ -367,7 +375,7 @@ entry r(xs: []u32) ?k. [k]u32 = filter(|x| x < 100u32, xs)
     assert_eq!(phases[2].entry_point, "r_filter_scan_phase2_scan_sums");
     assert_eq!(phases[3].entry_point, "r_filter_scan_phase3_add_offsets");
     assert_eq!(phases[4].entry_point, "r");
-    assert!(matches!(phases[0].domain, KernelDomain::Elements(_)));
+    assert!(matches!(phases[0].domain, KernelDomain::ResourceElements { .. }));
     // The scan runs a fixed worker grid so each worker scans a large chunk;
     // dispatching it per-element (Elements) would collapse the chunk to 1 and
     // leave phase-2 an O(len) serial scan.
@@ -387,8 +395,8 @@ entry r(xs: []u32) ?k. [k]u32 = filter(|x| x < 100u32, xs)
         phases[2].domain,
         KernelDomain::Fixed { x: 1, y: 1, z: 1 }
     ));
-    assert!(matches!(phases[3].domain, KernelDomain::Elements(_)));
-    assert!(matches!(phases[4].domain, KernelDomain::Elements(_)));
+    assert!(matches!(phases[3].domain, KernelDomain::ResourceElements { .. }));
+    assert!(matches!(phases[4].domain, KernelDomain::ResourceElements { .. }));
 
     let thread_id = catalog().known().thread_id;
     for name in [
@@ -1324,7 +1332,7 @@ entry add_sum(xs: []i32) []i32 =
     assert_eq!(
         stages.len(),
         3,
-        "two reduction phases followed by the map consumer"
+        "two reduction phases followed by the map consumer: {stages:?}"
     );
     assert!(stages[0].entry_point.starts_with("add_sum_prepass_"));
     assert!(stages[1].entry_point.contains("phase2"));
@@ -1946,6 +1954,7 @@ fn inst_signature_multiset(ssa: &Program) -> std::collections::BTreeMap<String, 
                     OpTag::Materialize => "Materialize".to_string(),
                     OpTag::DynamicExtract => "DynamicExtract".to_string(),
                     OpTag::StorageView(_) => "StorageView".to_string(),
+                    OpTag::ResourceLen(_) => "ResourceLen".to_string(),
                     OpTag::StorageViewLen => "StorageViewLen".to_string(),
                     OpTag::StorageImageLoad(_) => "StorageImageLoad".to_string(),
                     OpTag::StorageImageStore(_) => "StorageImageStore".to_string(),

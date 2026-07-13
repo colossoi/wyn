@@ -282,6 +282,9 @@ pub enum TypeName {
     /// reads a view's descriptor off its type instead of a per-value side-map.
     /// Never appears in source/TLC types — views are nullary (`View[]`) there.
     Buffer(crate::BindingRef),
+    /// Target-independent storage identity used by allocated semantic EGIR.
+    /// Physicalization rewrites this to `Buffer` before SSA elaboration.
+    Resource(crate::ResourceId),
     /// The buffer slot's value for a non-view array (composite/virtual/bounded):
     /// "this array is not buffer-backed, so it has no descriptor binding." A
     /// concrete tag (not a variable) so non-view arrays carry no free type var.
@@ -374,6 +377,7 @@ impl std::fmt::Display for TypeName {
             TypeName::ArrayVariantAbstract => write!(f, "abstract"),
             TypeName::AddressPlaceholder => write!(f, "?addrspace"),
             TypeName::Buffer(b) => write!(f, "buffer(set={}, binding={})", b.set, b.binding),
+            TypeName::Resource(resource) => write!(f, "resource({})", resource.0),
             TypeName::NoBuffer => write!(f, "no_buffer"),
             TypeName::Texture2D => write!(f, "texture2d"),
             TypeName::Sampler => write!(f, "sampler"),
@@ -440,6 +444,7 @@ impl polytype::Name for TypeName {
             TypeName::ArrayVariantAbstract => "abstract".to_string(),
             TypeName::AddressPlaceholder => "?variant".to_string(),
             TypeName::Buffer(b) => format!("buffer_s{}_b{}", b.set, b.binding),
+            TypeName::Resource(resource) => format!("resource_{}", resource.0),
             TypeName::NoBuffer => "no_buffer".to_string(),
             TypeName::Texture2D => "texture2d".to_string(),
             TypeName::Sampler => "sampler".to_string(),
@@ -1288,6 +1293,7 @@ pub fn debug_assert_top_level_type(ty: &Type, context: &str) {
             TypeName::ArrayVariantView
             | TypeName::ArrayVariantComposite
             | TypeName::Buffer(_)
+            | TypeName::Resource(_)
             | TypeName::NoBuffer
             | TypeName::AddressPlaceholder => {
                 panic!(

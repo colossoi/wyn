@@ -70,7 +70,7 @@ fn collect_graph_dependencies(_scope: &str, graph: &EGraph, output: &mut Vec<Sem
                         };
                         for binding in bindings {
                             resources.push(SegResourceAccess {
-                                binding,
+                                resource: binding,
                                 access: SegResourceAccessKind::Write,
                             });
                         }
@@ -84,7 +84,7 @@ fn collect_graph_dependencies(_scope: &str, graph: &EGraph, output: &mut Vec<Sem
                             .and_then(|node| graph_ops::extract_storage_view_source(graph, *node))
                         {
                             if let Some(resource) =
-                                resources.iter_mut().find(|resource| resource.binding == destination)
+                                resources.iter_mut().find(|resource| resource.resource == destination)
                             {
                                 resource.access = SegResourceAccessKind::ReadWrite;
                             }
@@ -135,7 +135,7 @@ fn collect_graph_dependencies(_scope: &str, graph: &EGraph, output: &mut Vec<Sem
             }
             if producer.resources.iter().any(|left| {
                 consumer.resources.iter().any(|right| {
-                    left.binding == right.binding
+                    left.resource == right.resource
                         && (left.access != SegResourceAccessKind::Read
                             || right.access != SegResourceAccessKind::Read)
                 })
@@ -185,12 +185,15 @@ pub(crate) fn read_resources(graph: &EGraph, se: &SideEffect) -> Vec<SegResource
     );
     let mut result: Vec<_> = bindings
         .into_iter()
-        .map(|binding| SegResourceAccess {
-            binding,
+        .map(|resource| SegResourceAccess {
+            resource,
             access: SegResourceAccessKind::Read,
         })
         .collect();
-    result.sort_by_key(|resource| (resource.binding.set, resource.binding.binding));
+    result.sort_by_key(|resource| match resource.resource {
+        super::program::SemanticResourceRef::Binding(binding) => (0, binding.set, binding.binding),
+        super::program::SemanticResourceRef::Resource(id) => (1, id.0, 0),
+    });
     result
 }
 

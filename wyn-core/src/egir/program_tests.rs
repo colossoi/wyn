@@ -42,6 +42,65 @@ fn empty_entry(name: &str) -> SemanticEntry {
     )
 }
 
+fn allocated_program(reference: SemanticResourceRef, size: LogicalSize) -> SemanticProgram {
+    let binding = crate::BindingRef::new(0, 7);
+    let mut entry = empty_entry("main");
+    entry.resource_declarations.push(SemanticResourceDecl {
+        resource: reference,
+        role: crate::interface::StorageRole::Input,
+        elem_ty: unit_ty(),
+        size: size.clone(),
+    });
+    let mut program = SemanticProgram::new(
+        vec![],
+        vec![],
+        vec![entry],
+        vec![],
+        PipelineDescriptor::default(),
+        RegionInterner::default(),
+    );
+    program.resources.push(LogicalResource {
+        id: ResourceId(0),
+        origin: ResourceOrigin::Host(binding),
+        elem_ty: unit_ty(),
+        size,
+    });
+    program
+}
+
+#[test]
+fn allocated_resource_verifier_accepts_resource_only_program() {
+    let program = allocated_program(
+        SemanticResourceRef::Resource(ResourceId(0)),
+        LogicalSize::Unspecified,
+    );
+    verify_allocated_resources(&program).expect("resource-normalized program");
+}
+
+#[test]
+fn allocated_resource_verifier_rejects_pending_binding() {
+    let program = allocated_program(
+        SemanticResourceRef::Binding(crate::BindingRef::new(0, 7)),
+        LogicalSize::Unspecified,
+    );
+    let error = verify_allocated_resources(&program).expect_err("pending binding must be rejected");
+    assert!(error.contains("pending binding"), "{error}");
+}
+
+#[test]
+fn allocated_resource_verifier_rejects_missing_size_source() {
+    let program = allocated_program(
+        SemanticResourceRef::Resource(ResourceId(0)),
+        LogicalSize::LikeResource {
+            resource: ResourceId(1),
+            elem_bytes: 4,
+            src_elem_bytes: 4,
+        },
+    );
+    let error = verify_allocated_resources(&program).expect_err("missing size source must be rejected");
+    assert!(error.contains("missing source"), "{error}");
+}
+
 #[test]
 fn scalar_handoff_classification_uses_entry_origin_not_name() {
     let typed_binding = crate::BindingRef::new(0, 10);
@@ -61,14 +120,14 @@ fn scalar_handoff_classification_uses_entry_origin_not_name() {
 
     let mut typed = empty_entry("renamed_without_magic_marker");
     typed.origin = crate::interface::EntryOrigin::ScalarPrepass;
-    typed.storage_bindings.push(output(typed_binding));
+    typed.resource_declarations.push(SemanticResourceDecl::pending(output(typed_binding)));
 
     let mut misleading = empty_entry("user_prepass_name");
-    misleading.storage_bindings.push(output(misleading_binding));
+    misleading.resource_declarations.push(SemanticResourceDecl::pending(output(misleading_binding)));
 
     let mut consumer = empty_entry("consumer");
-    consumer.storage_bindings.push(input(typed_binding));
-    consumer.storage_bindings.push(input(misleading_binding));
+    consumer.resource_declarations.push(SemanticResourceDecl::pending(input(typed_binding)));
+    consumer.resource_declarations.push(SemanticResourceDecl::pending(input(misleading_binding)));
 
     let inner = SemanticProgram::new(
         vec![],

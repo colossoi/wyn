@@ -101,6 +101,62 @@ pub fn intern_storage_view(
     )
 }
 
+/// Target-independent storage view used after logical-resource allocation.
+pub fn intern_resource_view(
+    graph: &mut EGraph,
+    resource: crate::ResourceId,
+    view_ty: Type<TypeName>,
+    span: Option<Span>,
+) -> NodeId {
+    let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+    let len = graph.intern_pure_with_span(PureOp::ResourceLen(resource), smallvec![], u32_ty, span);
+    let zero = intern_u32(graph, 0, span);
+    let view_ty =
+        crate::types::view_array_of(&view_ty, Type::Constructed(TypeName::Resource(resource), vec![]));
+    graph.intern_pure_with_span(
+        PureOp::StorageView(PureViewSource::Resource(resource)),
+        smallvec![zero, len],
+        view_ty,
+        span,
+    )
+}
+
+pub fn intern_chunked_resource_view(
+    graph: &mut EGraph,
+    resource: crate::ResourceId,
+    offset: NodeId,
+    len: NodeId,
+    view_ty: Type<TypeName>,
+    span: Option<Span>,
+) -> NodeId {
+    let view_ty =
+        crate::types::view_array_of(&view_ty, Type::Constructed(TypeName::Resource(resource), vec![]));
+    graph.intern_pure_with_span(
+        PureOp::StorageView(PureViewSource::Resource(resource)),
+        smallvec![offset, len],
+        view_ty,
+        span,
+    )
+}
+
+pub fn intern_chunked_semantic_view(
+    graph: &mut EGraph,
+    resource: super::program::SemanticResourceRef,
+    offset: NodeId,
+    len: NodeId,
+    view_ty: Type<TypeName>,
+    span: Option<Span>,
+) -> NodeId {
+    match resource {
+        super::program::SemanticResourceRef::Binding(binding) => {
+            intern_chunked_storage_view(graph, binding, offset, len, view_ty, span)
+        }
+        super::program::SemanticResourceRef::Resource(resource) => {
+            intern_chunked_resource_view(graph, resource, offset, len, view_ty, span)
+        }
+    }
+}
+
 /// A workgroup-shared array view: `StorageView(Workgroup{id, count})` with
 /// `[offset=0, len=count]`. `view_ty` is the array type `[count]elem`; the
 /// backends recover the element type from it to declare a module-scope
@@ -376,14 +432,20 @@ pub fn emit_pending_soac(
 // Read-side inspection
 // ---------------------------------------------------------------------------
 
-/// If `view_nid` is a `PureOp::StorageView(Storage(br))`, return `br`.
-/// Otherwise `None`.
-pub fn extract_storage_view_source(graph: &EGraph, view_nid: NodeId) -> Option<BindingRef> {
+/// Return the semantic identity carried by a storage-view node.
+pub fn extract_storage_view_source(
+    graph: &EGraph,
+    view_nid: NodeId,
+) -> Option<super::program::SemanticResourceRef> {
     match &graph.nodes[view_nid] {
         ENode::Pure {
             op: PureOp::StorageView(PureViewSource::Storage(br)),
             ..
-        } => Some(*br),
+        } => Some(super::program::SemanticResourceRef::Binding(*br)),
+        ENode::Pure {
+            op: PureOp::StorageView(PureViewSource::Resource(resource)),
+            ..
+        } => Some(super::program::SemanticResourceRef::Resource(*resource)),
         _ => None,
     }
 }

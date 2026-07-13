@@ -1447,8 +1447,9 @@ impl EgirOptimized {
         // Draw scratch bindings for the manifest from a private clone so the
         // advanced counter travels into `EgirAllocated` (terminal lowering
         // resolves the reserved scratch through it) without mutating TLC state.
-        let mut binding_ids = binding_ids.clone();
-        egir::program::plan_logical_resources(&mut inner, &mut binding_ids);
+        let binding_ids = binding_ids.clone();
+        let mut provisional_bindings = binding_ids.clone();
+        egir::program::plan_logical_resources(&mut inner, &mut provisional_bindings);
         EgirAllocated { inner, binding_ids }
     }
 }

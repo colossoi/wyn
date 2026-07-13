@@ -653,7 +653,7 @@ pub(crate) fn reject_sibling_consumers(
 #[allow(clippy::too_many_arguments)]
 pub fn retarget_filter_output(
     graph: &mut EGraph,
-    storage_bindings: &mut [crate::interface::StorageBindingDecl],
+    resources: &mut [crate::egir::program::SemanticResourceDecl],
     output: &mut crate::ssa::types::EntryOutput,
     source: NodeId,
 ) -> Result<bool, ConvertError> {
@@ -686,10 +686,15 @@ pub fn retarget_filter_output(
                 // Compact straight into the output buffer; reuse the scratch
                 // binding as the paired length cell.
                 *filter_output = super::super::types::FilterOutput::Runtime {
-                    scratch: out_binding,
+                    scratch: crate::egir::program::SemanticResourceRef::Binding(out_binding),
                     length: super::super::types::RuntimeFilterLength::EntryOutput(scratch),
                 };
-                retargeted = Some((scratch, input_arr_ty, input_elem_ty, output_elem_ty));
+                retargeted = Some((
+                    scratch.binding().expect("output realization precedes resource normalization"),
+                    input_arr_ty,
+                    input_elem_ty,
+                    output_elem_ty,
+                ));
             }
             break 'outer;
         }
@@ -701,10 +706,10 @@ pub fn retarget_filter_output(
     // Repurpose the scratch binding's declaration as the u32 length cell.
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     let len_cell_len = BufferLen::Fixed { bytes: 4 };
-    for decl in storage_bindings.iter_mut() {
-        if decl.binding == scratch {
+    for decl in resources.iter_mut() {
+        if decl.resource.binding() == Some(scratch) {
             decl.elem_ty = u32_ty.clone();
-            decl.length = Some(len_cell_len.clone());
+            decl.size = crate::egir::program::pending_logical_size(Some(&len_cell_len));
             break;
         }
     }

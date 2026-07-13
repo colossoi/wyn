@@ -23,6 +23,7 @@ use super::graph_ops;
 use super::program::{
     CompilerResource, CompilerResourceKind, EgirFunc, EgirRegion, LogicalResource, OutputWriter,
     RegionInterner, ResourceId, ResourceOrigin, SemanticEntry, SemanticOpId, SemanticProgram,
+    SemanticResourceDecl, SemanticResourceRef,
 };
 use super::types::{
     EGraph, ENode, EgirSoac, FilterOutput, FilterPlan, FilterState, HistExecution, NodeId, PureOp,
@@ -161,7 +162,7 @@ pub fn lower(inner: &mut SemanticProgram) {
                     entry.execution_model.clone(),
                     entry.outputs.clone(),
                     entry.output_routes.clone(),
-                    entry.storage_bindings.clone(),
+                    entry.resource_declarations.clone(),
                     entry.return_ty.clone(),
                 );
                 if let Some(phases) = lower_reduce_entry(&mut candidate, &mut regions, &allocated_resources)
@@ -192,7 +193,7 @@ pub fn lower(inner: &mut SemanticProgram) {
                     entry.execution_model.clone(),
                     entry.outputs.clone(),
                     entry.output_routes.clone(),
-                    entry.storage_bindings.clone(),
+                    entry.resource_declarations.clone(),
                     entry.return_ty.clone(),
                 );
                 if let Some((phases, swap_wrapper)) =
@@ -289,21 +290,12 @@ fn lower_runtime_filters(
     schedule: &mut schedule::KernelPlan,
     regions: &mut RegionInterner,
 ) -> (Vec<SemanticEntry>, Vec<EgirFunc>, Vec<(RegionId, EgirRegion)>) {
-    use crate::interface::{StorageBindingDecl, StorageRole};
+    use crate::interface::StorageRole;
     use schedule::KernelDomain;
     let mut phases = Vec::new();
     let mut functions = Vec::new();
     let mut region_defs = Vec::new();
-    let resource_lengths: LookupMap<BindingRef, Option<crate::pipeline_descriptor::BufferLen>> = inner
-        .resources
-        .iter()
-        .map(|resource| {
-            (
-                resource.semantic_binding,
-                super::program::buffer_len(&resource.size),
-            )
-        })
-        .collect();
+    let logical_resources = inner.resources.clone();
     for entry in &mut inner.entry_points {
         let runtime_filter_count = entry
             .graph
@@ -354,7 +346,17 @@ fn lower_runtime_filters(
         let domain =
             schedule::domain_from_space(&space).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
         let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
-        let storage_len = |binding| resource_lengths.get(&binding).cloned().flatten();
+        let declaration = |reference: SemanticResourceRef, role| {
+            let resource =
+                reference.resource().expect("filter planning received a pending resource binding");
+            let logical = &logical_resources[resource.0 as usize];
+            SemanticResourceDecl {
+                resource: reference,
+                role,
+                elem_ty: u32_ty.clone(),
+                size: logical.size.clone(),
+            }
+        };
 
         let mut flags = project_entry(
             entry,
@@ -363,12 +365,7 @@ fn lower_runtime_filters(
             entry.execution_model.clone(),
             Vec::new(),
             Vec::new(),
-            vec![StorageBindingDecl {
-                binding: work.flags,
-                role: StorageRole::Output,
-                elem_ty: u32_ty.clone(),
-                length: storage_len(work.flags),
-            }],
+            vec![declaration(work.flags, StorageRole::Output)],
             Type::Constructed(TypeName::Unit, vec![]),
         );
         set_filter_plan(&mut flags, FilterPlan::Flags(work));
@@ -379,12 +376,7 @@ fn lower_runtime_filters(
             (work.block_sums, StorageRole::Output),
         ]
         .into_iter()
-        .map(|(binding, role)| StorageBindingDecl {
-            binding,
-            role,
-            elem_ty: u32_ty.clone(),
-            length: storage_len(binding),
-        })
+        .map(|(resource, role)| declaration(resource, role))
         .collect();
         let mut scan = project_entry(
             entry,
@@ -407,50 +399,37 @@ fn lower_runtime_filters(
         region_defs.push((add_region, EgirRegion::from_function(&add_fn)));
         functions.push(add_fn);
 
-        let phase2 = synthesize_phase2_scan(
+        let mut phase2 = synthesize_phase2_scan(
             &scan.name,
             add_name.clone(),
             u32_ty.clone(),
             &scan.graph,
             zero,
-            work.block_sums,
-            work.block_offsets,
-            Some(len_out),
+            required_resource(work.block_sums),
+            required_resource(work.block_offsets),
+            Some(required_resource(len_out)),
         )
         .expect("filter scan phase-2 synthesis");
+        apply_manifest_resource_sizes(&mut phase2, &logical_resources);
         let swap_wrapper_name = format!("{}_filter_scan_add_offsets", entry.name);
         let swap_wrapper =
             synthesize_swap_wrapper(swap_wrapper_name.clone(), add_name, u32_ty.clone(), entry.span);
         let swap_region = regions.intern(&swap_wrapper_name);
         region_defs.push((swap_region, EgirRegion::from_function(&swap_wrapper)));
         functions.push(swap_wrapper);
-        let phase3 = synthesize_phase3_scan(
+        let mut phase3 = synthesize_phase3_scan(
             &scan.name,
             swap_region,
             u32_ty.clone(),
-            work.offsets,
-            work.block_offsets,
+            required_resource(work.offsets),
+            required_resource(work.block_offsets),
             REDUCE_PHASE1_WIDTH,
         );
+        apply_manifest_resource_sizes(&mut phase3, &logical_resources);
 
-        entry.storage_bindings.push(StorageBindingDecl {
-            binding: work.flags,
-            role: StorageRole::Input,
-            elem_ty: u32_ty.clone(),
-            length: storage_len(work.flags),
-        });
-        entry.storage_bindings.push(StorageBindingDecl {
-            binding: work.offsets,
-            role: StorageRole::Input,
-            elem_ty: u32_ty.clone(),
-            length: storage_len(work.offsets),
-        });
-        entry.storage_bindings.push(StorageBindingDecl {
-            binding: work.block_offsets,
-            role: StorageRole::Input,
-            elem_ty: u32_ty,
-            length: storage_len(work.block_offsets),
-        });
+        entry.resource_declarations.push(declaration(work.flags, StorageRole::Input));
+        entry.resource_declarations.push(declaration(work.offsets, StorageRole::Input));
+        entry.resource_declarations.push(declaration(work.block_offsets, StorageRole::Input));
         set_filter_plan(entry, FilterPlan::Scatter(work));
         schedule.commit_kernel(entry, schedule::KernelRecipe::FilterScatter);
         schedule.add_phase_before(
@@ -516,11 +495,12 @@ fn project_entry(
     execution_model: crate::ssa::types::ExecutionModel,
     outputs: Vec<crate::ssa::types::EntryOutput>,
     output_routes: Vec<super::program::OutputRoute>,
-    storage_bindings: Vec<crate::interface::StorageBindingDecl>,
+    resource_declarations: Vec<SemanticResourceDecl>,
     return_ty: Type<TypeName>,
 ) -> SemanticEntry {
+    let route_values = output_routes.iter().map(|route| route.source.value).collect();
     let projection = super::graph_projector::GraphProjector::new(&source.graph, &source.control_headers)
-        .all()
+        .all_with_values(route_values)
         .expect("complete entry projection must be internally valid");
     finish_entry_projection(
         source,
@@ -530,7 +510,7 @@ fn project_entry(
         execution_model,
         outputs,
         output_routes,
-        storage_bindings,
+        resource_declarations,
         return_ty,
     )
 }
@@ -544,7 +524,7 @@ fn project_entry_effects(
     execution_model: crate::ssa::types::ExecutionModel,
     outputs: Vec<crate::ssa::types::EntryOutput>,
     output_routes: Vec<super::program::OutputRoute>,
-    storage_bindings: Vec<crate::interface::StorageBindingDecl>,
+    resource_declarations: Vec<SemanticResourceDecl>,
     return_ty: Type<TypeName>,
 ) -> SemanticEntry {
     let route_values = output_routes.iter().map(|route| route.source.value).collect();
@@ -559,7 +539,7 @@ fn project_entry_effects(
         execution_model,
         outputs,
         output_routes,
-        storage_bindings,
+        resource_declarations,
         return_ty,
     )
 }
@@ -573,7 +553,7 @@ fn finish_entry_projection(
     execution_model: crate::ssa::types::ExecutionModel,
     outputs: Vec<crate::ssa::types::EntryOutput>,
     output_routes: Vec<super::program::OutputRoute>,
-    storage_bindings: Vec<crate::interface::StorageBindingDecl>,
+    resource_declarations: Vec<SemanticResourceDecl>,
     return_ty: Type<TypeName>,
 ) -> SemanticEntry {
     let remap_route = |mut route: super::program::OutputRoute| {
@@ -597,14 +577,14 @@ fn finish_entry_projection(
     };
     let aliases = projection.remap_aliases(&source.aliases);
     let output_routes = output_routes.into_iter().map(remap_route).collect();
-    let mut projected = SemanticEntry::new(
+    let mut projected = SemanticEntry::new_with_resources(
         origin,
         name,
         source.span,
         execution_model,
         source.inputs.clone(),
         outputs,
-        storage_bindings,
+        resource_declarations,
         source.params.clone(),
         return_ty,
         projection.graph,
@@ -620,39 +600,51 @@ fn filter_work_buffers(
     resources: &[LogicalResource],
 ) -> Option<super::types::FilterWorkBuffers> {
     let owner_matches = |compiler: &CompilerResource| compiler.owner == Some(owner);
-    let binding = |kind| {
+    let resource_id = |kind| {
         resources.iter().find_map(|resource| {
             let ResourceOrigin::Compiler(compiler) = &resource.origin else {
                 return None;
             };
-            (compiler.kind == kind && owner_matches(compiler)).then_some(resource.semantic_binding)
+            (compiler.kind == kind && owner_matches(compiler))
+                .then_some(SemanticResourceRef::Resource(resource.id))
         })
     };
     Some(super::types::FilterWorkBuffers {
-        flags: binding(CompilerResourceKind::FilterFlags)?,
-        offsets: binding(CompilerResourceKind::FilterOffsets)?,
-        block_sums: binding(CompilerResourceKind::FilterScanBlockSums)?,
-        block_offsets: binding(CompilerResourceKind::FilterScanBlockOffsets)?,
+        flags: resource_id(CompilerResourceKind::FilterFlags)?,
+        offsets: resource_id(CompilerResourceKind::FilterOffsets)?,
+        block_sums: resource_id(CompilerResourceKind::FilterScanBlockSums)?,
+        block_offsets: resource_id(CompilerResourceKind::FilterScanBlockOffsets)?,
     })
 }
 
-fn owned_resource_bindings(
+fn required_resource(reference: SemanticResourceRef) -> ResourceId {
+    reference.resource().expect("target planning received a pending resource binding")
+}
+
+fn apply_manifest_resource_sizes(entry: &mut SemanticEntry, resources: &[LogicalResource]) {
+    for declaration in &mut entry.resource_declarations {
+        let resource =
+            declaration.resource.resource().expect("target planning received a pending resource binding");
+        declaration.size = resources[resource.0 as usize].size.clone();
+    }
+}
+
+fn owned_resource_ids(
     resources: &[LogicalResource],
     owner: SemanticOpId,
     kind: CompilerResourceKind,
-) -> Vec<BindingRef> {
-    let mut bindings: Vec<_> = resources
+) -> Vec<ResourceId> {
+    let mut ids: Vec<_> = resources
         .iter()
         .filter_map(|resource| {
             let ResourceOrigin::Compiler(compiler) = &resource.origin else {
                 return None;
             };
-            (compiler.kind == kind && compiler.owner == Some(owner))
-                .then_some((compiler.slot, resource.semantic_binding))
+            (compiler.kind == kind && compiler.owner == Some(owner)).then_some((compiler.slot, resource.id))
         })
         .collect();
-    bindings.sort_by_key(|(slot, _)| *slot);
-    bindings.into_iter().map(|(_, binding)| binding).collect()
+    ids.sort_by_key(|(slot, _)| *slot);
+    ids.into_iter().map(|(_, resource)| resource).collect()
 }
 
 /// Attach allocation-created materialization entries to their consumer's
@@ -674,19 +666,22 @@ pub(crate) fn attach_materialization_prepasses(
         .filter(|(_, producer)| !schedule.contains_entry(&producer.name))
         .find_map(|(producer_index, producer)| {
             let outputs: Vec<_> = producer
-                .storage_bindings
+                .resource_declarations
                 .iter()
                 .filter(|declaration| declaration.role == crate::interface::StorageRole::Output)
-                .map(|declaration| declaration.binding)
+                .filter_map(|declaration| declaration.resource.resource())
                 .collect();
             inner
                 .entry_points
                 .iter()
                 .find(|consumer| {
                     schedule.contains_entry(&consumer.name)
-                        && consumer.storage_bindings.iter().any(|declaration| {
+                        && consumer.resource_declarations.iter().any(|declaration| {
                             declaration.role == crate::interface::StorageRole::Input
-                                && outputs.contains(&declaration.binding)
+                                && declaration
+                                    .resource
+                                    .resource()
+                                    .is_some_and(|resource| outputs.contains(&resource))
                         })
                 })
                 .map(|consumer| (consumer.name.clone(), producer_index))
@@ -917,7 +912,7 @@ fn split_multidomain_seg_maps(entry: &SemanticEntry) -> Option<EntrySplit> {
             entry.execution_model.clone(),
             outputs,
             routes,
-            entry.storage_bindings.clone(),
+            entry.resource_declarations.clone(),
             entry.return_ty.clone(),
         )
     };
@@ -1233,12 +1228,12 @@ fn semantic_space(
 ) -> SegSpace {
     let primary = se.operand_nodes.first().copied();
     let extent = primary.map(|node| {
-        if let Some(binding) = graph_ops::extract_storage_view_source(&entry.graph, node) {
+        if let Some(resource) = graph_ops::extract_storage_view_source(&entry.graph, node) {
             let elem_bytes =
                 input_elem_types.first().and_then(crate::ssa::layout::type_byte_size).unwrap_or(1) as u32;
             return SegExtent::ResourceLength {
                 node,
-                binding,
+                resource,
                 elem_bytes,
             };
         }
@@ -1265,12 +1260,12 @@ fn semantic_space_for_graph(
     input_elem_types: &[Type<TypeName>],
 ) -> SegSpace {
     let extent = se.operand_nodes.first().copied().map(|node| {
-        if let Some(binding) = graph_ops::extract_storage_view_source(graph, node) {
+        if let Some(resource) = graph_ops::extract_storage_view_source(graph, node) {
             let elem_bytes =
                 input_elem_types.first().and_then(crate::ssa::layout::type_byte_size).unwrap_or(1) as u32;
             return SegExtent::ResourceLength {
                 node,
-                binding,
+                resource,
                 elem_bytes,
             };
         }
@@ -1323,22 +1318,25 @@ fn semantic_resources(
     output_slots: &[usize],
 ) -> Vec<SegResourceAccess> {
     use std::collections::HashMap;
-    let mut accesses: HashMap<BindingRef, SegResourceAccessKind> =
+    let mut accesses: HashMap<SemanticResourceRef, SegResourceAccessKind> =
         super::semantic_graph::read_resources(&entry.graph, se)
             .into_iter()
-            .map(|resource| (resource.binding, resource.access))
+            .map(|resource| (resource.resource, resource.access))
             .collect();
     for &slot in output_slots {
         if let Some(binding) = entry.outputs.get(slot).and_then(|output| output.storage_binding) {
             accesses
-                .entry(binding)
+                .entry(SemanticResourceRef::Binding(binding))
                 .and_modify(|access| *access = SegResourceAccessKind::ReadWrite)
                 .or_insert(SegResourceAccessKind::Write);
         }
     }
     let mut result: Vec<_> =
-        accesses.into_iter().map(|(binding, access)| SegResourceAccess { binding, access }).collect();
-    result.sort_by_key(|resource| (resource.binding.set, resource.binding.binding));
+        accesses.into_iter().map(|(resource, access)| SegResourceAccess { resource, access }).collect();
+    result.sort_by_key(|resource| match resource.resource {
+        SemanticResourceRef::Binding(binding) => (0, binding.set, binding.binding),
+        SemanticResourceRef::Resource(id) => (1, id.0, 0),
+    });
     result
 }
 
@@ -1423,7 +1421,7 @@ fn input_length_for_chunking(
     context: &str,
 ) -> Result<NodeId, String> {
     if let Some(br) = graph_ops::extract_storage_view_source(graph, view_nid) {
-        return Ok(emit_storage_len(graph, br));
+        return Ok(emit_semantic_resource_len(graph, br));
     }
     if matches!(kind, ChunkInputKind::StorageOrRange) {
         if let Some((_, len_nid, _)) = graph_ops::extract_array_range_operands(graph, view_nid) {
@@ -1443,7 +1441,7 @@ fn chunk_view_like(
     context: &str,
 ) -> Result<NodeId, String> {
     if let Some(br) = graph_ops::extract_storage_view_source(graph, view_nid) {
-        return Ok(graph_ops::intern_chunked_storage_view(
+        return Ok(graph_ops::intern_chunked_semantic_view(
             graph,
             br,
             chunk_start,
@@ -1484,7 +1482,7 @@ fn build_tree_reduce_phase2(
     op_func: String,
     elem_ty: Type<TypeName>,
     init_nid: NodeId,
-    partials_binding: BindingRef,
+    partials_resource: ResourceId,
     phase1_graph: &super::types::EGraph,
     accumulator_value: NodeId,
     output_stores: &[(NodeId, NodeId)],
@@ -1498,7 +1496,7 @@ fn build_tree_reduce_phase2(
             elem_ty.clone(),
             Type::Constructed(TypeName::ArrayVariantView, vec![]),
             Type::Variable(0),
-            // buffer stamped from the binding by intern_storage_view.
+            // resource stamped by `intern_resource_view`.
             crate::types::no_buffer(),
         ],
     );
@@ -1515,8 +1513,9 @@ fn build_tree_reduce_phase2(
         u32_ty.clone(),
         None,
     );
-    let partials_view = graph_ops::intern_storage_view(graph, partials_binding, view_arr_ty.clone(), None);
-    let len = emit_storage_len(graph, partials_binding);
+    let partials_view =
+        graph_ops::intern_resource_view(graph, partials_resource, view_arr_ty.clone(), None);
+    let len = emit_resource_len(graph, partials_resource);
     // Workgroup-shared `array<elem, W>` (id 0 within this entry).
     let shared_view = graph_ops::emit_workgroup_view(graph, 0, w, view_arr_ty.clone(), None);
     let w_nid = graph_ops::intern_u32(graph, w, None);
@@ -1877,17 +1876,29 @@ fn cast_u32_to_index(
     }
 }
 
-/// Emit a `_w_intrinsic_storage_len(set, binding)` node returning u32.
-fn emit_storage_len(graph: &mut super::types::EGraph, br: BindingRef) -> NodeId {
-    let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
-    let set_nid = graph_ops::intern_u32(graph, br.set, None);
-    let binding_nid = graph_ops::intern_u32(graph, br.binding, None);
-    graph_ops::intern_intrinsic(
-        graph,
-        catalog().known().storage_len,
-        smallvec![set_nid, binding_nid],
-        u32_ty,
-        None,
+fn emit_semantic_resource_len(graph: &mut super::types::EGraph, resource: SemanticResourceRef) -> NodeId {
+    match resource {
+        SemanticResourceRef::Resource(resource) => emit_resource_len(graph, resource),
+        SemanticResourceRef::Binding(binding) => {
+            let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+            let set_nid = graph_ops::intern_u32(graph, binding.set, None);
+            let binding_nid = graph_ops::intern_u32(graph, binding.binding, None);
+            graph_ops::intern_intrinsic(
+                graph,
+                catalog().known().storage_len,
+                smallvec![set_nid, binding_nid],
+                u32_ty,
+                None,
+            )
+        }
+    }
+}
+
+fn emit_resource_len(graph: &mut super::types::EGraph, resource: ResourceId) -> NodeId {
+    graph.intern_pure(
+        PureOp::ResourceLen(resource),
+        smallvec![],
+        Type::Constructed(TypeName::UInt(32), vec![]),
     )
 }
 
@@ -1916,14 +1927,10 @@ pub fn synthesize_phase2_reduce_cloning_ne_named(
     elem_ty: Type<TypeName>,
     phase1_graph: &super::types::EGraph,
     phase1_ne_nid: NodeId,
-    partials_binding: BindingRef,
+    partials_resource: ResourceId,
     accumulator_value: NodeId,
     output_stores: &[(NodeId, NodeId)],
-    output_decls: &[(
-        BindingRef,
-        Type<TypeName>,
-        Option<crate::pipeline_descriptor::BufferLen>,
-    )],
+    output_decls: &[(ResourceId, Type<TypeName>, super::program::LogicalSize)],
 ) -> Result<SemanticEntry, String> {
     use super::builder::EntryBuilder;
     let mut b = EntryBuilder::new_compute(
@@ -1932,12 +1939,12 @@ pub fn synthesize_phase2_reduce_cloning_ne_named(
         (PHASE2_WIDTH, 1, 1),
     );
     b.declare_intermediate_storage_sized(
-        partials_binding,
+        partials_resource,
         elem_ty.clone(),
         dispatch_worker_buffer_len(&elem_ty),
     );
-    for (binding, ty, length) in output_decls {
-        b.declare_output_storage_sized(*binding, ty.clone(), length.clone());
+    for (resource, ty, size) in output_decls {
+        b.declare_output_resource(*resource, ty.clone(), size.clone());
     }
 
     let init_nid = graph_ops::clone_pure_subgraph(phase1_graph, b.graph_mut(), phase1_ne_nid)?;
@@ -1946,7 +1953,7 @@ pub fn synthesize_phase2_reduce_cloning_ne_named(
         op_func,
         elem_ty,
         init_nid,
-        partials_binding,
+        partials_resource,
         phase1_graph,
         accumulator_value,
         output_stores,
@@ -2155,7 +2162,7 @@ fn project_root_index(graph: &super::types::EGraph, value: NodeId, root: NodeId)
     }
 }
 
-fn storage_binding_under(graph: &super::types::EGraph, root: NodeId) -> Option<BindingRef> {
+fn storage_resource_under(graph: &super::types::EGraph, root: NodeId) -> Option<SemanticResourceRef> {
     wyn_graph::find_map_reachable(
         [root],
         wyn_graph::WalkOrder::DepthFirst,
@@ -2227,7 +2234,7 @@ pub fn enumerate_seg_scratch(
     inner: &mut SemanticProgram,
     binding_ids: &mut crate::IdSource<u32>,
     first_id: u32,
-) -> Vec<LogicalResource> {
+) -> Vec<(BindingRef, LogicalResource)> {
     let mut resources = Vec::new();
     let mut next = first_id;
     let mut used_bindings: std::collections::HashSet<BindingRef> = inner
@@ -2239,7 +2246,12 @@ pub fn enumerate_seg_scratch(
                 .iter()
                 .filter_map(|input| input.storage_binding)
                 .chain(entry.outputs.iter().filter_map(|output| output.storage_binding))
-                .chain(entry.storage_bindings.iter().map(|declaration| declaration.binding))
+                .chain(
+                    entry
+                        .resource_declarations
+                        .iter()
+                        .filter_map(|declaration| declaration.resource.binding()),
+                )
         })
         .collect();
     for entry in &inner.entry_points {
@@ -2263,16 +2275,19 @@ pub fn enumerate_seg_scratch(
                         break candidate;
                     }
                 };
-                let size = super::program::logical_size(dispatch_worker_buffer_len(&elem_ty).as_ref());
+                let size =
+                    super::program::pending_logical_size(dispatch_worker_buffer_len(&elem_ty).as_ref());
                 let id = ResourceId(next);
                 next += 1;
-                resources.push(LogicalResource {
-                    id,
-                    origin: ResourceOrigin::Compiler(CompilerResource::new(kind, owner.clone(), slot)),
-                    semantic_binding: binding,
-                    elem_ty,
-                    size,
-                });
+                resources.push((
+                    binding,
+                    LogicalResource {
+                        id,
+                        origin: ResourceOrigin::Compiler(CompilerResource::new(kind, owner, slot)),
+                        elem_ty,
+                        size,
+                    },
+                ));
             }
         }
     }
@@ -2376,8 +2391,8 @@ fn lower_reduce_entry(
     // Partial buffers were reserved as owner-tagged logical resources at the
     // allocation boundary; resolve them from the manifest.
     let owner = entry.graph.skeleton.blocks[block_id].side_effects[idx].semantic_id?;
-    let partial_bindings = owned_resource_bindings(resources, owner, CompilerResourceKind::ReducePartial);
-    if partial_bindings.len() != n_accs {
+    let partial_resources = owned_resource_ids(resources, owner, CompilerResourceKind::ReducePartial);
+    if partial_resources.len() != n_accs {
         return None;
     }
 
@@ -2427,13 +2442,8 @@ fn lower_reduce_entry(
     // `(place, value)` nodes plus the distinct output bindings it targets and
     // their entry-output sizing.
     let mut acc_stores: Vec<Vec<(NodeId, NodeId)>> = vec![Vec::new(); n_accs];
-    let mut acc_output_decls: Vec<
-        Vec<(
-            BindingRef,
-            Type<TypeName>,
-            Option<crate::pipeline_descriptor::BufferLen>,
-        )>,
-    > = vec![Vec::new(); n_accs];
+    let mut acc_output_decls: Vec<Vec<(ResourceId, Type<TypeName>, super::program::LogicalSize)>> =
+        vec![Vec::new(); n_accs];
     let mut drop_locations: Vec<(BlockId, usize)> = Vec::new();
     for (bid, block) in &entry.graph.skeleton.blocks {
         for (i, se) in block.side_effects.iter().enumerate() {
@@ -2454,13 +2464,20 @@ fn lower_reduce_entry(
                 continue;
             }
             acc_stores[acc_i].push((place, value));
-            if let Some(binding) = storage_binding_under(&entry.graph, place) {
-                if !acc_output_decls[acc_i].iter().any(|(b, _, _)| *b == binding) {
-                    let Some(out) = entry.outputs.iter().find(|o| o.storage_binding == Some(binding))
-                    else {
-                        return None;
-                    };
-                    acc_output_decls[acc_i].push((binding, out.ty.clone(), out.length.clone()));
+            if let Some(resource) =
+                storage_resource_under(&entry.graph, place).and_then(SemanticResourceRef::resource)
+            {
+                if !acc_output_decls[acc_i].iter().any(|(candidate, _, _)| *candidate == resource) {
+                    let logical = resources.get(resource.0 as usize)?;
+                    let output_ty = entry
+                        .resource_declarations
+                        .iter()
+                        .find(|declaration| {
+                            declaration.role == crate::interface::StorageRole::Output
+                                && declaration.resource.resource() == Some(resource)
+                        })
+                        .map(|declaration| declaration.elem_ty.clone())?;
+                    acc_output_decls[acc_i].push((resource, output_ty, logical.size.clone()));
                 }
             }
             drop_locations.push((bid, i));
@@ -2503,7 +2520,7 @@ fn lower_reduce_entry(
             ],
         );
         let partials_view =
-            graph_ops::intern_storage_view(&mut entry.graph, partial_bindings[acc_i], arr_ty, None);
+            graph_ops::intern_resource_view(&mut entry.graph, partial_resources[acc_i], arr_ty, None);
         graph_ops::emit_storage_store(
             &mut entry.graph,
             block_id,
@@ -2515,26 +2532,29 @@ fn lower_reduce_entry(
             None,
         );
         // Clear the moved output bindings from phase 1; register partials.
-        for (binding, _, _) in &acc_output_decls[acc_i] {
-            for o in entry.outputs.iter_mut() {
-                if o.storage_binding == Some(*binding) {
-                    o.storage_binding = None;
+        for (resource, _, _) in &acc_output_decls[acc_i] {
+            if let ResourceOrigin::Host(binding) = resources[resource.0 as usize].origin {
+                for output in &mut entry.outputs {
+                    if output.storage_binding == Some(binding) {
+                        output.storage_binding = None;
+                    }
                 }
             }
         }
-        entry.storage_bindings.push(crate::interface::StorageBindingDecl {
-            binding: partial_bindings[acc_i],
+        entry.resource_declarations.push(SemanticResourceDecl {
+            resource: SemanticResourceRef::Resource(partial_resources[acc_i]),
             role: crate::interface::StorageRole::Intermediate,
             elem_ty: elem_tys[acc_i].clone(),
-            length: dispatch_worker_buffer_len(&elem_tys[acc_i]),
+            size: resources[partial_resources[acc_i].0 as usize].size.clone(),
         });
     }
     // A moved output binding may also carry an Output storage declaration (e.g. a
     // hoisted prepass result). Phase 1 no longer writes it; phase 2 owns it.
-    let moved: std::collections::HashSet<BindingRef> =
+    let moved: std::collections::HashSet<ResourceId> =
         acc_output_decls.iter().flatten().map(|(b, _, _)| *b).collect();
-    entry.storage_bindings.retain(|declaration| {
-        declaration.role != crate::interface::StorageRole::Output || !moved.contains(&declaration.binding)
+    entry.resource_declarations.retain(|declaration| {
+        declaration.role != crate::interface::StorageRole::Output
+            || !declaration.resource.resource().is_some_and(|resource| moved.contains(&resource))
     });
 
     // 6. Synthesize one phase 2 entry per accumulator. The phase-1 snapshot still
@@ -2554,7 +2574,7 @@ fn lower_reduce_entry(
             elem_tys[acc_i].clone(),
             &phase1_snapshot,
             init_nids[acc_i],
-            partial_bindings[acc_i],
+            partial_resources[acc_i],
             accumulator_values[acc_i],
             &acc_stores[acc_i],
             &acc_output_decls[acc_i],
@@ -2663,9 +2683,9 @@ fn lower_scan_entry(
     // Block scratch was reserved as `[ScanBlockSums, ScanBlockOffsets]` logical
     // resources at the allocation boundary; resolve them to their bindings.
     let owner = entry.graph.skeleton.blocks[block_id].side_effects[idx].semantic_id?;
-    let sums = owned_resource_bindings(resources, owner, CompilerResourceKind::ScanBlockSums);
-    let offsets = owned_resource_bindings(resources, owner, CompilerResourceKind::ScanBlockOffsets);
-    let (block_sums_binding, block_offsets_binding) = (*sums.first()?, *offsets.first()?);
+    let sums = owned_resource_ids(resources, owner, CompilerResourceKind::ScanBlockSums);
+    let offsets = owned_resource_ids(resources, owner, CompilerResourceKind::ScanBlockOffsets);
+    let (block_sums_resource, block_offsets_resource) = (*sums.first()?, *offsets.first()?);
 
     // Chunk the input and the scan output view; swap them into the operand list.
     let chunked = chunk_soac_inputs(
@@ -2707,7 +2727,7 @@ fn lower_scan_entry(
         let storage = graph_ops::extract_storage_view_source(&entry.graph, v)?;
         (storage, ty)
     };
-    let chunked_scan_output = graph_ops::intern_chunked_storage_view(
+    let chunked_scan_output = graph_ops::intern_chunked_semantic_view(
         &mut entry.graph,
         scan_output_storage,
         chunk_start,
@@ -2775,7 +2795,7 @@ fn lower_scan_entry(
             ],
         );
         let block_sums_view =
-            graph_ops::intern_storage_view(&mut entry.graph, block_sums_binding, arr_ty, None);
+            graph_ops::intern_resource_view(&mut entry.graph, block_sums_resource, arr_ty, None);
         graph_ops::emit_storage_store(
             &mut entry.graph,
             block_id,
@@ -2791,26 +2811,27 @@ fn lower_scan_entry(
     // Both intermediates are declared on phase 1 (block_sums is written here,
     // block_offsets is read by phase 3) so the verifiers and `realize_outputs`
     // see a consistent interface.
-    for binding in [block_sums_binding, block_offsets_binding] {
-        entry.storage_bindings.push(crate::interface::StorageBindingDecl {
-            binding,
+    for resource in [block_sums_resource, block_offsets_resource] {
+        entry.resource_declarations.push(SemanticResourceDecl {
+            resource: SemanticResourceRef::Resource(resource),
             role: crate::interface::StorageRole::Intermediate,
             elem_ty: elem_ty.clone(),
-            length: dispatch_worker_buffer_len(&elem_ty),
+            size: resources[resource.0 as usize].size.clone(),
         });
     }
 
-    let phase2 = synthesize_phase2_scan(
+    let mut phase2 = synthesize_phase2_scan(
         &entry.name,
         reduce_func.clone(),
         elem_ty.clone(),
         &phase1_snapshot,
         init_nid,
-        block_sums_binding,
-        block_offsets_binding,
+        block_sums_resource,
+        block_offsets_resource,
         None,
     )
     .ok()?;
+    apply_manifest_resource_sizes(&mut phase2, resources);
     let swap_wrapper_name = format!("{}_scan_op_swap", entry.name);
     let swap_wrapper = synthesize_swap_wrapper(
         swap_wrapper_name.clone(),
@@ -2821,14 +2842,15 @@ fn lower_scan_entry(
     // Intern the synthesized wrapper so `soac_expand` recovers its `Call` name;
     // the caller also publishes its complete body into the region arena.
     let swap_region = regions.intern(&swap_wrapper_name);
-    let phase3 = synthesize_phase3_scan(
+    let mut phase3 = synthesize_phase3_scan(
         &entry.name,
         swap_region,
         elem_ty,
-        scan_output_storage,
-        block_offsets_binding,
+        required_resource(scan_output_storage),
+        block_offsets_resource,
         total_threads,
     );
+    apply_manifest_resource_sizes(&mut phase3, resources);
 
     // Phase 1 is now a per-invocation Screma scan over the thread's chunk plus
     // the appended block-sum reduce; `soac_expand` lowers both.
@@ -2845,9 +2867,9 @@ pub fn synthesize_phase2_scan(
     elem_ty: Type<TypeName>,
     phase1_graph: &super::types::EGraph,
     phase1_ne_nid: NodeId,
-    block_sums_binding: BindingRef,
-    block_offsets_binding: BindingRef,
-    len_out: Option<BindingRef>,
+    block_sums_resource: ResourceId,
+    block_offsets_resource: ResourceId,
+    len_out: Option<ResourceId>,
 ) -> Result<SemanticEntry, String> {
     use super::builder::EntryBuilder;
     let mut b = EntryBuilder::new_compute(
@@ -2856,8 +2878,8 @@ pub fn synthesize_phase2_scan(
         (1, 1, 1),
     );
     let scratch_len = dispatch_worker_buffer_len(&elem_ty);
-    b.declare_intermediate_storage_sized(block_sums_binding, elem_ty.clone(), scratch_len.clone());
-    b.declare_intermediate_storage_sized(block_offsets_binding, elem_ty.clone(), scratch_len);
+    b.declare_intermediate_storage_sized(block_sums_resource, elem_ty.clone(), scratch_len.clone());
+    b.declare_intermediate_storage_sized(block_offsets_resource, elem_ty.clone(), scratch_len);
     if let Some(len_out) = len_out {
         b.declare_output_storage_sized(
             len_out,
@@ -2872,8 +2894,8 @@ pub fn synthesize_phase2_scan(
         op_func,
         elem_ty.clone(),
         init_nid,
-        block_sums_binding,
-        block_offsets_binding,
+        block_sums_resource,
+        block_offsets_resource,
         len_out.is_some(),
     );
     // A runtime filter publishes the scan's grand total (its survivor count)
@@ -2882,7 +2904,7 @@ pub fn synthesize_phase2_scan(
     if let (Some(len_out), Some(total)) = (len_out, phase2.total) {
         let mut effect = phase2.effect;
         let graph = b.graph_mut();
-        let len_view = graph_ops::intern_storage_view(graph, len_out, elem_ty.clone(), None);
+        let len_view = graph_ops::intern_resource_view(graph, len_out, elem_ty.clone(), None);
         graph_ops::emit_storage_store(
             graph,
             phase2.after,
@@ -2919,8 +2941,8 @@ fn build_exclusive_scan_phase2(
     op_func: String,
     elem_ty: Type<TypeName>,
     init_nid: NodeId,
-    block_sums_binding: BindingRef,
-    block_offsets_binding: BindingRef,
+    block_sums_resource: ResourceId,
+    block_offsets_resource: ResourceId,
     want_total: bool,
 ) -> ExclusiveScanPhase2 {
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
@@ -2936,9 +2958,9 @@ fn build_exclusive_scan_phase2(
     );
     let entry_block = b.graph_mut().skeleton.entry;
     let graph = b.graph_mut();
-    let sums = graph_ops::intern_storage_view(graph, block_sums_binding, arr_ty.clone(), None);
-    let offsets = graph_ops::intern_storage_view(graph, block_offsets_binding, arr_ty, None);
-    let len = emit_storage_len(graph, block_sums_binding);
+    let sums = graph_ops::intern_resource_view(graph, block_sums_resource, arr_ty.clone(), None);
+    let offsets = graph_ops::intern_resource_view(graph, block_offsets_resource, arr_ty, None);
+    let len = emit_resource_len(graph, block_sums_resource);
     let zero = graph_ops::intern_u32(graph, 0, None);
     let one = graph_ops::intern_u32(graph, 1, None);
     let mut effect = graph_ops::next_effect_token(graph);
@@ -3024,8 +3046,8 @@ pub fn synthesize_phase3_scan(
     entry_name: &str,
     swap_region: RegionId,
     elem_ty: Type<TypeName>,
-    output_binding: BindingRef,
-    block_offsets_binding: BindingRef,
+    output_resource: ResourceId,
+    block_offsets_resource: ResourceId,
     total_threads: u32,
 ) -> SemanticEntry {
     use super::builder::EntryBuilder;
@@ -3034,9 +3056,9 @@ pub fn synthesize_phase3_scan(
         format!("{}_phase3_add_offsets", entry_name),
         (total_threads, 1, 1),
     );
-    b.declare_output_storage(output_binding, elem_ty.clone());
+    b.declare_output_storage(output_resource, elem_ty.clone());
     b.declare_intermediate_storage_sized(
-        block_offsets_binding,
+        block_offsets_resource,
         elem_ty.clone(),
         dispatch_worker_buffer_len(&elem_ty),
     );
@@ -3050,21 +3072,10 @@ pub fn synthesize_phase3_scan(
             crate::types::no_buffer(),
         ],
     );
-    let _output_view = b.emit_storage_view(output_binding, arr_ty.clone());
-    let block_offsets_view = b.emit_storage_view(block_offsets_binding, arr_ty.clone());
+    let _output_view = b.emit_storage_view(output_resource, arr_ty.clone());
+    let block_offsets_view = b.emit_storage_view(block_offsets_resource, arr_ty.clone());
 
-    let output_len = {
-        let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
-        let set_nid = graph_ops::intern_u32(b.graph_mut(), output_binding.set, None);
-        let binding_nid = graph_ops::intern_u32(b.graph_mut(), output_binding.binding, None);
-        graph_ops::intern_intrinsic(
-            b.graph_mut(),
-            catalog().known().storage_len,
-            smallvec![set_nid, binding_nid],
-            u32_ty,
-            None,
-        )
-    };
+    let output_len = emit_resource_len(b.graph_mut(), output_resource);
     let (tid, chunk_start, chunk_len) = emit_chunk_arithmetic(b.graph_mut(), total_threads, output_len)
         .expect("phase3: chunk arithmetic must succeed (u32.min is in the prelude)");
 
@@ -3075,9 +3086,9 @@ pub fn synthesize_phase3_scan(
     );
     let off = b.emit_load(off_place, elem_ty.clone());
 
-    let chunked_output = graph_ops::intern_chunked_storage_view(
+    let chunked_output = graph_ops::intern_chunked_resource_view(
         b.graph_mut(),
-        output_binding,
+        output_resource,
         chunk_start,
         chunk_len,
         arr_ty.clone(),

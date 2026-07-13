@@ -65,6 +65,7 @@ pub fn extract(graph: &EGraph) -> LookupMap<NodeId, NodeId> {
 /// Static cost per operation kind.
 fn op_cost(op: &PureOp) -> Cost {
     match op {
+        PureOp::ResourceLen(_) => 0,
         // Leaves / free operations:
         PureOp::Int(_)
         | PureOp::Uint(_)

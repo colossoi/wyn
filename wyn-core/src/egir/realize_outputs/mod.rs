@@ -85,7 +85,7 @@ fn realize_compute_slots(entry: &mut SemanticEntry) -> Result<(), ConvertError> 
         outputs,
         aliases,
         output_routes,
-        storage_bindings,
+        resource_declarations,
         ..
     } = entry;
     let mut next_effect = graph_ops::next_effect_token(graph);
@@ -115,7 +115,7 @@ fn realize_compute_slots(entry: &mut SemanticEntry) -> Result<(), ConvertError> 
         // its serial loop compacts into the output buffer and writes a paired
         // length cell. No DPS store is emitted — the filter *is* the writer.
         if sources.len() == 1
-            && dispatch::retarget_filter_output(graph, storage_bindings, output, sources[0].value)?
+            && dispatch::retarget_filter_output(graph, resource_declarations, output, sources[0].value)?
         {
             output_routes[route_indices[0]].writers = vec![OutputWriter::Value(sources[0].value)];
             continue;

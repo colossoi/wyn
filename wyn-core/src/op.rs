@@ -77,6 +77,10 @@ pub enum OpTag {
     /// carried in the operands tail, not in this tag, so equivalent views
     /// with the same backing source hash-cons together.
     StorageView(PureViewSource),
+    /// EGIR-only logical storage length. Physicalization resolves the
+    /// `ResourceId` to a descriptor binding and rewrites this to the ordinary
+    /// storage-length intrinsic before SSA elaboration.
+    ResourceLen(crate::ResourceId),
     StorageViewLen,
     /// EGIR-only: place-producing view-index. Never appears in
     /// `InstKind::Op` — SSA uses `InstKind::ViewIndex` directly (carries

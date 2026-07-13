@@ -145,8 +145,8 @@ fn scan_phase2_writes_exclusive_prefix_before_combining_current_block() {
     let elem_ty = Type::Constructed(TypeName::Int(32), vec![]);
     let mut phase1 = EGraph::new();
     let neutral = phase1.intern_pure(PureOp::Int("0".into()), smallvec![], elem_ty.clone());
-    let sums = BindingRef::new(0, 40);
-    let offsets = BindingRef::new(0, 41);
+    let sums = ResourceId(40);
+    let offsets = ResourceId(41);
     let phase2 = synthesize_phase2_scan(
         "prefix",
         "combine".into(),
@@ -170,7 +170,8 @@ fn scan_phase2_writes_exclusive_prefix_before_combining_current_block() {
                 return None;
             }
             let place = *effect.operand_nodes.first()?;
-            (storage_binding_under(&phase2.graph, place) == Some(offsets)).then(|| effect.operand_nodes[1])
+            (storage_resource_under(&phase2.graph, place) == Some(SemanticResourceRef::Resource(offsets)))
+                .then(|| effect.operand_nodes[1])
         })
         .expect("block-offset store");
     assert!(matches!(

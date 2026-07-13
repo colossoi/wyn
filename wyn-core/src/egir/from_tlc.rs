@@ -2601,7 +2601,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                 input_array_type: arr_ty,
                 input_elem_type: elem_ty,
                 output: super::types::FilterOutput::Runtime {
-                    scratch: scratch_out,
+                    scratch: super::program::SemanticResourceRef::Binding(scratch_out),
                     length: super::types::RuntimeFilterLength::ViewOnly,
                 },
                 // Set by `realize_outputs` only when this filter is a compute

@@ -162,8 +162,13 @@ pub struct InputSlotId(pub usize);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LogicalSize {
     FixedBytes(u64),
-    LikeBinding {
+    PendingLikeBinding {
         binding: crate::BindingRef,
+        elem_bytes: u32,
+        src_elem_bytes: u32,
+    },
+    LikeResource {
+        resource: ResourceId,
         elem_bytes: u32,
         src_elem_bytes: u32,
     },
@@ -171,6 +176,54 @@ pub enum LogicalSize {
         elem_bytes: u32,
     },
     Unspecified,
+}
+
+/// Storage identity while EGIR crosses the allocation boundary. Raw and
+/// optimized EGIR may still contain a descriptor-shaped reference emitted by
+/// TLC. `plan_logical_resources` rewrites every such value to `Resource`
+/// before constructing `EgirAllocated`; target planning rejects `Binding`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SemanticResourceRef {
+    Binding(crate::BindingRef),
+    Resource(ResourceId),
+}
+
+impl SemanticResourceRef {
+    pub fn resource(self) -> Option<ResourceId> {
+        match self {
+            SemanticResourceRef::Binding(_) => None,
+            SemanticResourceRef::Resource(resource) => Some(resource),
+        }
+    }
+
+    pub fn binding(self) -> Option<crate::BindingRef> {
+        match self {
+            SemanticResourceRef::Binding(binding) => Some(binding),
+            SemanticResourceRef::Resource(_) => None,
+        }
+    }
+}
+
+/// Entry-local use of a logical resource. Unlike `StorageBindingDecl`, this is
+/// target independent after allocation and cannot assign a descriptor binding
+/// to a compiler-created resource.
+#[derive(Clone, Debug)]
+pub struct SemanticResourceDecl {
+    pub resource: SemanticResourceRef,
+    pub role: interface::StorageRole,
+    pub elem_ty: Type<TypeName>,
+    pub size: LogicalSize,
+}
+
+impl SemanticResourceDecl {
+    pub(crate) fn pending(declaration: interface::StorageBindingDecl) -> Self {
+        Self {
+            resource: SemanticResourceRef::Binding(declaration.binding),
+            role: declaration.role,
+            elem_ty: declaration.elem_ty,
+            size: pending_logical_size(declaration.length.as_ref()),
+        }
+    }
 }
 
 /// Why a compiler-introduced resource exists. The kind fixes its physical
@@ -246,9 +299,6 @@ pub enum ResourceOrigin {
 pub struct LogicalResource {
     pub id: ResourceId,
     pub origin: ResourceOrigin,
-    /// Transitional identity used by storage-view types until terminal
-    /// lowering rewrites compiler resources to their allocated binding.
-    pub semantic_binding: crate::BindingRef,
     pub elem_ty: Type<TypeName>,
     pub size: LogicalSize,
 }
@@ -261,57 +311,201 @@ pub struct LogicalResource {
 /// resource ids on semantic Seg operations.
 pub fn plan_logical_resources(inner: &mut SemanticProgram, binding_ids: &mut crate::IdSource<u32>) {
     let mut compiler_origins = super::multi_consumer::run(inner, binding_ids);
+    compiler_origins.extend(gather_prepass_resources(inner));
     let scalar_handoffs = scalar_handoff_resources(inner);
     compiler_origins.extend(scalar_handoffs);
     let filter_kinds = filter_resource_kinds(inner);
     compiler_origins.extend(filter_kinds);
     let mut filter_work = allocate_filter_work_resources(inner, binding_ids, &mut compiler_origins);
-    let mut host = mirror_storage_resources(inner, &compiler_origins);
-    host.sort_by_key(|resource| (resource.semantic_binding.set, resource.semantic_binding.binding));
-    for (index, resource) in host.iter_mut().enumerate() {
+    let mut pending = mirror_storage_resources(inner, &compiler_origins);
+    pending.sort_by_key(|(binding, _)| (binding.set, binding.binding));
+    for (index, (_, resource)) in pending.iter_mut().enumerate() {
         resource.id = ResourceId(index as u32);
     }
-    attach_materialization_resources(inner, &host);
-    let mut resources = host;
-    for resource in &mut filter_work {
-        resource.id = ResourceId(resources.len() as u32);
-        resources.push(resource.clone());
+    for (binding, mut resource) in filter_work.drain(..) {
+        resource.id = ResourceId(pending.len() as u32);
+        pending.push((binding, resource));
     }
-    let mut scratch = super::parallelize::enumerate_seg_scratch(inner, binding_ids, resources.len() as u32);
-    resources.append(&mut scratch);
-    inner.resources = resources;
-    normalize_semantic_resource_references(inner);
+    let mut scratch = super::parallelize::enumerate_seg_scratch(inner, binding_ids, pending.len() as u32);
+    pending.append(&mut scratch);
+    let by_binding =
+        pending.iter().map(|(binding, resource)| (*binding, resource.id)).collect::<HashMap<_, _>>();
+    inner.resources = pending.into_iter().map(|(_, resource)| resource).collect();
+    normalize_semantic_resource_references(inner, &by_binding);
     if cfg!(debug_assertions) {
-        verify_manifest_covers_storage(inner);
+        verify_allocated_resources(inner).expect("invalid allocated semantic resources");
     }
+}
+
+fn gather_prepass_resources(inner: &SemanticProgram) -> HashMap<crate::BindingRef, CompilerResource> {
+    let mut resources = HashMap::new();
+    for entry in &inner.entry_points {
+        if entry.origin != interface::EntryOrigin::GatherPrepass {
+            continue;
+        }
+        for (slot, declaration) in entry.resource_declarations.iter().enumerate() {
+            if declaration.role != interface::StorageRole::Output {
+                continue;
+            }
+            if let Some(binding) = pending_binding(declaration.resource) {
+                resources.insert(
+                    binding,
+                    CompilerResource::new(CompilerResourceKind::Staging, None, slot),
+                );
+            }
+        }
+    }
+    resources
 }
 
 /// Replace descriptor-shaped storage identities in semantic graphs with their
 /// target-independent `ResourceId`. Entry ABI declarations retain host
 /// bindings; executable graph values do not.
-fn normalize_semantic_resource_references(inner: &mut SemanticProgram) {
-    let by_binding = inner
+fn normalize_semantic_resource_references(
+    inner: &mut SemanticProgram,
+    by_binding: &HashMap<crate::BindingRef, ResourceId>,
+) {
+    let compiler_resources = inner
         .resources
         .iter()
-        .map(|resource| (resource.semantic_binding, resource.id))
-        .collect::<HashMap<_, _>>();
+        .filter_map(|resource| {
+            matches!(resource.origin, ResourceOrigin::Compiler(_)).then_some(resource.id)
+        })
+        .collect::<std::collections::HashSet<_>>();
     for entry in &mut inner.entry_points {
-        normalize_graph_resources(&mut entry.graph, &by_binding);
+        for input in &entry.inputs {
+            let Some(binding) = input.storage_binding else {
+                continue;
+            };
+            let resource = *by_binding.get(&binding).expect("entry input must be in manifest");
+            if !entry
+                .resource_declarations
+                .iter()
+                .any(|declaration| resolves_to_resource(declaration.resource, resource, by_binding))
+            {
+                entry.resource_declarations.push(SemanticResourceDecl {
+                    resource: SemanticResourceRef::Resource(resource),
+                    role: interface::StorageRole::Input,
+                    elem_ty: input.ty.elem_type().cloned().unwrap_or_else(|| input.ty.clone()),
+                    size: pending_logical_size(input.length.as_ref()),
+                });
+            }
+        }
+        for output in &entry.outputs {
+            let Some(binding) = output.storage_binding else {
+                continue;
+            };
+            let resource = *by_binding.get(&binding).expect("entry output must be in manifest");
+            if !entry
+                .resource_declarations
+                .iter()
+                .any(|declaration| resolves_to_resource(declaration.resource, resource, by_binding))
+            {
+                entry.resource_declarations.push(SemanticResourceDecl {
+                    resource: SemanticResourceRef::Resource(resource),
+                    role: interface::StorageRole::Output,
+                    elem_ty: output.ty.elem_type().cloned().unwrap_or_else(|| output.ty.clone()),
+                    size: pending_logical_size(output.length.as_ref()),
+                });
+            }
+        }
+        for declaration in &mut entry.resource_declarations {
+            if let SemanticResourceRef::Binding(binding) = declaration.resource {
+                declaration.resource = SemanticResourceRef::Resource(
+                    *by_binding.get(&binding).expect("entry resource declaration must be in manifest"),
+                );
+            }
+            normalize_logical_size(&mut declaration.size, by_binding);
+        }
+        for input in &mut entry.inputs {
+            if input
+                .storage_binding
+                .and_then(|binding| by_binding.get(&binding))
+                .is_some_and(|resource| compiler_resources.contains(resource))
+            {
+                input.storage_binding = None;
+            }
+        }
+        let mut output_slots = vec![None; entry.outputs.len()];
+        let mut host_outputs = Vec::with_capacity(entry.outputs.len());
+        for (slot, output) in std::mem::take(&mut entry.outputs).into_iter().enumerate() {
+            let compiler_output = output
+                .storage_binding
+                .and_then(|binding| by_binding.get(&binding))
+                .is_some_and(|resource| compiler_resources.contains(resource));
+            if !compiler_output {
+                output_slots[slot] = Some(host_outputs.len());
+                host_outputs.push(output);
+            }
+        }
+        entry.outputs = host_outputs;
+        entry.output_routes.retain_mut(|route| {
+            let Some(slot) = output_slots.get(route.slot.0).copied().flatten() else {
+                return false;
+            };
+            route.slot = OutputSlotId(slot);
+            true
+        });
+    }
+    for entry in &mut inner.entry_points {
+        normalize_graph_resources(&mut entry.graph, by_binding);
     }
     for function in &mut inner.functions {
-        normalize_graph_resources(&mut function.graph, &by_binding);
+        normalize_graph_resources(&mut function.graph, by_binding);
     }
     for region in inner.regions.values_mut() {
-        normalize_graph_resources(&mut region.graph, &by_binding);
+        normalize_graph_resources(&mut region.graph, by_binding);
+    }
+    normalize_structural_resources(inner, by_binding);
+}
+
+fn resolves_to_resource(
+    reference: SemanticResourceRef,
+    expected: ResourceId,
+    by_binding: &HashMap<crate::BindingRef, ResourceId>,
+) -> bool {
+    match reference {
+        SemanticResourceRef::Binding(binding) => by_binding.get(&binding).copied() == Some(expected),
+        SemanticResourceRef::Resource(resource) => resource == expected,
     }
 }
 
+fn normalize_logical_size(size: &mut LogicalSize, by_binding: &HashMap<crate::BindingRef, ResourceId>) {
+    let LogicalSize::PendingLikeBinding {
+        binding,
+        elem_bytes,
+        src_elem_bytes,
+    } = *size
+    else {
+        return;
+    };
+    *size = LogicalSize::LikeResource {
+        resource: *by_binding.get(&binding).expect("resource-size source must be in manifest"),
+        elem_bytes,
+        src_elem_bytes,
+    };
+}
+
 fn normalize_graph_resources(graph: &mut EGraph, by_binding: &HashMap<crate::BindingRef, ResourceId>) {
+    let logical_lens = by_binding
+        .iter()
+        .map(|(binding, resource)| {
+            let len = graph.intern_pure(
+                super::types::PureOp::ResourceLen(*resource),
+                smallvec::smallvec![],
+                Type::Constructed(TypeName::UInt(32), vec![]),
+            );
+            (*binding, len)
+        })
+        .collect::<HashMap<_, _>>();
     let pure_nodes = graph.nodes.keys().collect::<Vec<_>>();
     for node in pure_nodes {
-        graph.update_pure_node(node, |op, _| {
+        graph.update_pure_node(node, |op, operands| {
             if let super::types::PureOp::StorageView(crate::op::PureViewSource::Storage(binding)) = op {
                 if let Some(resource) = by_binding.get(binding) {
+                    if operands.len() >= 2 {
+                        operands[1] = logical_lens[binding];
+                    }
                     *op = super::types::PureOp::StorageView(crate::op::PureViewSource::Resource(*resource));
                 }
             }
@@ -324,28 +518,108 @@ fn normalize_graph_resources(graph: &mut EGraph, by_binding: &HashMap<crate::Bin
             {
                 if let crate::op::OpTag::StorageView(crate::op::PureViewSource::Storage(binding)) = tag {
                     if let Some(resource) = by_binding.get(binding) {
+                        if effect.operand_nodes.len() >= 2 {
+                            effect.operand_nodes[1] = logical_lens[binding];
+                        }
                         *tag =
                             crate::op::OpTag::StorageView(crate::op::PureViewSource::Resource(*resource));
                     }
                 }
             }
+            if let super::types::SideEffectKind::Soac(soac) = &mut effect.kind {
+                soac.visit_resource_refs_mut(|reference| {
+                    if let SemanticResourceRef::Binding(binding) = *reference {
+                        *reference = SemanticResourceRef::Resource(
+                            *by_binding.get(&binding).expect("SOAC resource must be in manifest"),
+                        );
+                    }
+                });
+                soac.visit_types_mut(|ty| normalize_type_resources(ty, by_binding));
+            }
         }
+    }
+    let nodes = graph.types.keys().copied().collect::<Vec<_>>();
+    for node in nodes {
+        let mut ty = graph.types[&node].clone();
+        normalize_type_resources(&mut ty, by_binding);
+        graph.retype_node(node, ty);
+    }
+}
+
+fn normalize_structural_resources(
+    inner: &mut SemanticProgram,
+    by_binding: &HashMap<crate::BindingRef, ResourceId>,
+) {
+    for resource in &mut inner.resources {
+        normalize_logical_size(&mut resource.size, by_binding);
+        normalize_type_resources(&mut resource.elem_ty, by_binding);
+    }
+    for entry in &mut inner.entry_points {
+        for input in &mut entry.inputs {
+            normalize_type_resources(&mut input.ty, by_binding);
+        }
+        for output in &mut entry.outputs {
+            normalize_type_resources(&mut output.ty, by_binding);
+        }
+        for (ty, _) in &mut entry.params {
+            normalize_type_resources(ty, by_binding);
+        }
+        normalize_type_resources(&mut entry.return_ty, by_binding);
+        for declaration in &mut entry.resource_declarations {
+            normalize_type_resources(&mut declaration.elem_ty, by_binding);
+        }
+    }
+    for function in &mut inner.functions {
+        for (ty, _) in &mut function.params {
+            normalize_type_resources(ty, by_binding);
+        }
+        normalize_type_resources(&mut function.return_ty, by_binding);
+    }
+    for region in inner.regions.values_mut() {
+        for (ty, _) in &mut region.params {
+            normalize_type_resources(ty, by_binding);
+        }
+        normalize_type_resources(&mut region.return_ty, by_binding);
+    }
+}
+
+fn normalize_type_resources(ty: &mut Type<TypeName>, by_binding: &HashMap<crate::BindingRef, ResourceId>) {
+    let Type::Constructed(name, arguments) = ty else {
+        return;
+    };
+    if let TypeName::Buffer(binding) = *name {
+        *name = TypeName::Resource(
+            *by_binding.get(&binding).expect("buffer type resource must be in manifest"),
+        );
+    }
+    if let TypeName::Sum(variants) = name {
+        for (_, fields) in variants {
+            for field in fields {
+                normalize_type_resources(field, by_binding);
+            }
+        }
+    }
+    for argument in arguments {
+        normalize_type_resources(argument, by_binding);
     }
 }
 
 /// Resolve semantic resource references immediately after validation and
 /// before any physical graph transformation or backend pass runs.
-pub fn physicalize_resource_references(inner: &mut SemanticProgram) -> Result<(), String> {
-    let bindings = PhysicalResourceTable::from_resources(&inner.resources);
+pub fn physicalize_resource_references(
+    inner: &mut SemanticProgram,
+    bindings: &PhysicalResourceTable,
+) -> Result<(), String> {
     for entry in &mut inner.entry_points {
-        physicalize_graph_resources(&mut entry.graph, &bindings)?;
+        physicalize_graph_resources(&mut entry.graph, bindings)?;
     }
     for function in &mut inner.functions {
-        physicalize_graph_resources(&mut function.graph, &bindings)?;
+        physicalize_graph_resources(&mut function.graph, bindings)?;
     }
     for region in inner.regions.values_mut() {
-        physicalize_graph_resources(&mut region.graph, &bindings)?;
+        physicalize_graph_resources(&mut region.graph, bindings)?;
     }
+    physicalize_structural_types(inner, bindings)?;
     Ok(())
 }
 
@@ -353,6 +627,30 @@ fn physicalize_graph_resources(graph: &mut EGraph, bindings: &PhysicalResourceTa
     let pure_nodes = graph.nodes.keys().collect::<Vec<_>>();
     let mut missing = None;
     for node in pure_nodes {
+        let resource_len = match graph.nodes.get(node) {
+            Some(super::types::ENode::Pure {
+                op: super::types::PureOp::ResourceLen(resource),
+                ..
+            }) => Some(*resource),
+            _ => None,
+        };
+        if let Some(resource) = resource_len {
+            let Some(binding) = bindings.binding(resource) else {
+                missing = Some(resource);
+                continue;
+            };
+            let set = super::graph_ops::intern_u32(graph, binding.set, None);
+            let slot = super::graph_ops::intern_u32(graph, binding.binding, None);
+            graph.replace_pure_node(
+                node,
+                super::types::PureOp::Intrinsic {
+                    id: crate::builtins::catalog().known().storage_len,
+                    overload_idx: 0,
+                },
+                smallvec::smallvec![set, slot],
+            );
+            continue;
+        }
         graph.update_pure_node(node, |op, _| {
             if let super::types::PureOp::StorageView(crate::op::PureViewSource::Resource(resource)) = op {
                 if let Some(binding) = bindings.binding(*resource) {
@@ -378,6 +676,25 @@ fn physicalize_graph_resources(graph: &mut EGraph, bindings: &PhysicalResourceTa
                     *tag = crate::op::OpTag::StorageView(crate::op::PureViewSource::Storage(binding));
                 }
             }
+            if let super::types::SideEffectKind::Soac(soac) = &mut effect.kind {
+                let mut error = None;
+                soac.visit_resource_refs_mut(|reference| {
+                    if let SemanticResourceRef::Resource(resource) = *reference {
+                        if let Some(binding) = bindings.binding(resource) {
+                            *reference = SemanticResourceRef::Binding(binding);
+                        } else {
+                            error = Some(resource);
+                        }
+                    }
+                });
+                if let Some(resource) = error {
+                    return Err(format!(
+                        "semantic resource {:?} has no physical binding",
+                        resource
+                    ));
+                }
+                soac.visit_types_mut(|ty| physicalize_type_resources(ty, bindings));
+            }
         }
     }
     if let Some(resource) = missing {
@@ -386,14 +703,75 @@ fn physicalize_graph_resources(graph: &mut EGraph, bindings: &PhysicalResourceTa
             resource
         ));
     }
+    let nodes = graph.types.keys().copied().collect::<Vec<_>>();
+    for node in nodes {
+        let mut ty = graph.types[&node].clone();
+        physicalize_type_resources(&mut ty, bindings);
+        graph.retype_node(node, ty);
+    }
     Ok(())
+}
+
+fn physicalize_structural_types(
+    inner: &mut SemanticProgram,
+    bindings: &PhysicalResourceTable,
+) -> Result<(), String> {
+    for entry in &mut inner.entry_points {
+        for input in &mut entry.inputs {
+            physicalize_type_resources(&mut input.ty, bindings);
+        }
+        for output in &mut entry.outputs {
+            physicalize_type_resources(&mut output.ty, bindings);
+        }
+        for (ty, _) in &mut entry.params {
+            physicalize_type_resources(ty, bindings);
+        }
+        physicalize_type_resources(&mut entry.return_ty, bindings);
+        for declaration in &mut entry.resource_declarations {
+            physicalize_type_resources(&mut declaration.elem_ty, bindings);
+        }
+    }
+    for function in &mut inner.functions {
+        for (ty, _) in &mut function.params {
+            physicalize_type_resources(ty, bindings);
+        }
+        physicalize_type_resources(&mut function.return_ty, bindings);
+    }
+    for region in inner.regions.values_mut() {
+        for (ty, _) in &mut region.params {
+            physicalize_type_resources(ty, bindings);
+        }
+        physicalize_type_resources(&mut region.return_ty, bindings);
+    }
+    Ok(())
+}
+
+fn physicalize_type_resources(ty: &mut Type<TypeName>, bindings: &PhysicalResourceTable) {
+    let Type::Constructed(name, arguments) = ty else {
+        return;
+    };
+    if let TypeName::Resource(resource) = *name {
+        *name = TypeName::Buffer(
+            bindings.binding(resource).expect("semantic type resource must have a physical binding"),
+        );
+    }
+    if let TypeName::Sum(variants) = name {
+        for (_, fields) in variants {
+            for field in fields {
+                physicalize_type_resources(field, bindings);
+            }
+        }
+    }
+    for argument in arguments {
+        physicalize_type_resources(argument, bindings);
+    }
 }
 
 fn allocate_filter_work_resources(
     inner: &mut SemanticProgram,
     binding_ids: &mut crate::IdSource<u32>,
     compiler_origins: &mut HashMap<crate::BindingRef, CompilerResource>,
-) -> Vec<LogicalResource> {
+) -> Vec<(crate::BindingRef, LogicalResource)> {
     use super::types::{EgirSoac, FilterOutput, FilterState, FilterWorkBuffers, SegExtent, SideEffectKind};
     let mut used: std::collections::HashSet<_> = inner
         .entry_points
@@ -404,7 +782,12 @@ fn allocate_filter_work_resources(
                 .iter()
                 .filter_map(|input| input.storage_binding)
                 .chain(entry.outputs.iter().filter_map(|output| output.storage_binding))
-                .chain(entry.storage_bindings.iter().map(|declaration| declaration.binding))
+                .chain(
+                    entry
+                        .resource_declarations
+                        .iter()
+                        .filter_map(|declaration| pending_binding(declaration.resource)),
+                )
         })
         .collect();
     let mut resources = Vec::new();
@@ -427,19 +810,20 @@ fn allocate_filter_work_resources(
                     }
                 };
                 let buffers = FilterWorkBuffers {
-                    flags: next_binding(),
-                    offsets: next_binding(),
-                    block_sums: next_binding(),
-                    block_offsets: next_binding(),
+                    flags: SemanticResourceRef::Binding(next_binding()),
+                    offsets: SemanticResourceRef::Binding(next_binding()),
+                    block_sums: SemanticResourceRef::Binding(next_binding()),
+                    block_offsets: SemanticResourceRef::Binding(next_binding()),
                 };
                 let element_count_size = match space.dims.first() {
                     Some(SegExtent::Fixed(count)) if space.dims.len() == 1 => {
                         LogicalSize::FixedBytes(*count as u64 * 4)
                     }
                     Some(SegExtent::ResourceLength {
-                        binding, elem_bytes, ..
-                    }) if space.dims.len() == 1 => LogicalSize::LikeBinding {
-                        binding: *binding,
+                        resource, elem_bytes, ..
+                    }) if space.dims.len() == 1 => LogicalSize::PendingLikeBinding {
+                        binding: pending_binding(*resource)
+                            .expect("filter work is allocated before resource normalization"),
                         elem_bytes: 4,
                         src_elem_bytes: *elem_bytes,
                     },
@@ -481,25 +865,24 @@ fn allocate_filter_work_resources(
                 .into_iter()
                 .enumerate()
                 {
-                    let compiler = CompilerResource::new(kind, owner.clone(), slot);
+                    let binding = pending_binding(binding)
+                        .expect("filter work is allocated before resource normalization");
+                    let compiler = CompilerResource::new(kind, owner, slot);
                     compiler_origins.insert(binding, compiler.clone());
-                    resources.push(LogicalResource {
-                        id: ResourceId(0),
-                        origin: ResourceOrigin::Compiler(compiler),
-                        semantic_binding: binding,
-                        elem_ty: Type::Constructed(TypeName::UInt(32), vec![]),
-                        size,
-                    });
+                    resources.push((
+                        binding,
+                        LogicalResource {
+                            id: ResourceId(0),
+                            origin: ResourceOrigin::Compiler(compiler),
+                            elem_ty: Type::Constructed(TypeName::UInt(32), vec![]),
+                            size,
+                        },
+                    ));
                 }
             }
         }
     }
     resources
-}
-
-fn attach_materialization_resources(_inner: &mut SemanticProgram, _resources: &[LogicalResource]) {
-    // Resource ownership lives in the manifest; Seg operations no longer
-    // mirror resource ids in a phase-dependent scratch field.
 }
 
 /// Bindings introduced by TLC scalar-prepass hoisting already have a stable
@@ -511,8 +894,10 @@ fn scalar_handoff_resources(inner: &SemanticProgram) -> HashMap<crate::BindingRe
         .entry_points
         .iter()
         .flat_map(|entry| {
-            entry.storage_bindings.iter().filter_map(|declaration| {
-                (declaration.role == interface::StorageRole::Input).then_some(declaration.binding)
+            entry.resource_declarations.iter().filter_map(|declaration| {
+                (declaration.role == interface::StorageRole::Input)
+                    .then(|| pending_binding(declaration.resource))
+                    .flatten()
             })
         })
         .collect();
@@ -527,13 +912,15 @@ fn scalar_handoff_resources(inner: &SemanticProgram) -> HashMap<crate::BindingRe
             .blocks
             .iter()
             .find_map(|(_, block)| block.side_effects.iter().find_map(|effect| effect.semantic_id));
-        for declaration in &entry.storage_bindings {
+        for declaration in &entry.resource_declarations {
             if declaration.role == interface::StorageRole::Output
-                && declaration.length.is_none()
-                && consumer_inputs.contains(&declaration.binding)
+                && matches!(declaration.size, LogicalSize::Unspecified)
+                && pending_binding(declaration.resource)
+                    .is_some_and(|binding| consumer_inputs.contains(&binding))
             {
+                let binding = pending_binding(declaration.resource).unwrap();
                 resources.insert(
-                    declaration.binding,
+                    binding,
                     CompilerResource::new(CompilerResourceKind::ScalarHandoff, owner.clone(), 0),
                 );
             }
@@ -557,19 +944,19 @@ fn filter_resource_kinds(inner: &SemanticProgram) -> HashMap<crate::BindingRef, 
                 {
                     let owner = effect.semantic_id;
                     if let super::types::FilterOutput::Runtime { scratch, length } = output {
-                        kinds.insert(
-                            *scratch,
-                            CompilerResource::new(CompilerResourceKind::FilterScratch, owner.clone(), 0),
-                        );
-                        if let super::types::RuntimeFilterLength::EntryOutput(len) = length {
+                        if let Some(scratch) = pending_binding(*scratch) {
                             kinds.insert(
-                                *len,
-                                CompilerResource::new(
-                                    CompilerResourceKind::FilterLenCell,
-                                    owner.clone(),
-                                    1,
-                                ),
+                                scratch,
+                                CompilerResource::new(CompilerResourceKind::FilterScratch, owner, 0),
                             );
+                        }
+                        if let super::types::RuntimeFilterLength::EntryOutput(len) = length {
+                            if let Some(len) = pending_binding(*len) {
+                                kinds.insert(
+                                    len,
+                                    CompilerResource::new(CompilerResourceKind::FilterLenCell, owner, 1),
+                                );
+                            }
                         }
                     }
                     if let super::types::FilterState::Scheduled { plan, .. } = state {
@@ -580,34 +967,20 @@ fn filter_resource_kinds(inner: &SemanticProgram) -> HashMap<crate::BindingRef, 
                             | super::types::FilterPlan::Scatter(work) => Some(work),
                         };
                         if let Some(work) = work {
-                            kinds.insert(
-                                work.flags,
-                                CompilerResource::new(CompilerResourceKind::FilterFlags, owner.clone(), 2),
-                            );
-                            kinds.insert(
-                                work.offsets,
-                                CompilerResource::new(
-                                    CompilerResourceKind::FilterOffsets,
-                                    owner.clone(),
-                                    3,
-                                ),
-                            );
-                            kinds.insert(
-                                work.block_sums,
-                                CompilerResource::new(
-                                    CompilerResourceKind::FilterScanBlockSums,
-                                    owner.clone(),
-                                    4,
-                                ),
-                            );
-                            kinds.insert(
-                                work.block_offsets,
-                                CompilerResource::new(
+                            for (resource, kind, slot) in [
+                                (work.flags, CompilerResourceKind::FilterFlags, 2),
+                                (work.offsets, CompilerResourceKind::FilterOffsets, 3),
+                                (work.block_sums, CompilerResourceKind::FilterScanBlockSums, 4),
+                                (
+                                    work.block_offsets,
                                     CompilerResourceKind::FilterScanBlockOffsets,
-                                    owner,
                                     5,
                                 ),
-                            );
+                            ] {
+                                if let Some(binding) = pending_binding(resource) {
+                                    kinds.insert(binding, CompilerResource::new(kind, owner, slot));
+                                }
+                            }
                         }
                     }
                 }
@@ -623,7 +996,7 @@ fn filter_resource_kinds(inner: &SemanticProgram) -> HashMap<crate::BindingRef, 
 fn mirror_storage_resources(
     inner: &SemanticProgram,
     filter_kinds: &HashMap<crate::BindingRef, CompilerResource>,
-) -> Vec<LogicalResource> {
+) -> Vec<(crate::BindingRef, LogicalResource)> {
     let mut resources: LookupMap<crate::BindingRef, LogicalResource> = LookupMap::new();
     let resource =
         |binding: crate::BindingRef, elem_ty: Type<TypeName>, size: LogicalSize| LogicalResource {
@@ -633,7 +1006,6 @@ fn mirror_storage_resources(
                 .cloned()
                 .map(ResourceOrigin::Compiler)
                 .unwrap_or(ResourceOrigin::Host(binding)),
-            semantic_binding: binding,
             elem_ty,
             size,
         };
@@ -641,91 +1013,261 @@ fn mirror_storage_resources(
         for input in &entry.inputs {
             if let Some(binding) = input.storage_binding {
                 resources.entry(binding).or_insert_with(|| {
-                    resource(
+                    let mut logical = resource(
                         binding,
                         input.ty.elem_type().cloned().unwrap_or_else(|| input.ty.clone()),
-                        logical_size(input.length.as_ref()),
-                    )
+                        pending_logical_size(input.length.as_ref()),
+                    );
+                    if !filter_kinds.contains_key(&binding) {
+                        logical.origin = ResourceOrigin::Host(binding);
+                    }
+                    logical
+                });
+            }
+            if let Some((binding, _, _, _)) = input.storage_image_binding {
+                resources.entry(binding).or_insert_with(|| {
+                    let mut logical = resource(binding, input.ty.clone(), LogicalSize::Unspecified);
+                    logical.origin = ResourceOrigin::Host(binding);
+                    logical
                 });
             }
         }
         for output in &entry.outputs {
             if let Some(binding) = output.storage_binding {
                 resources.entry(binding).or_insert_with(|| {
-                    resource(
+                    let mut logical = resource(
                         binding,
                         output.ty.elem_type().cloned().unwrap_or_else(|| output.ty.clone()),
-                        logical_size(output.length.as_ref()),
-                    )
+                        pending_logical_size(output.length.as_ref()),
+                    );
+                    if entry.origin == interface::EntryOrigin::Source
+                        || !filter_kinds.contains_key(&binding)
+                    {
+                        logical.origin = ResourceOrigin::Host(binding);
+                    }
+                    logical
                 });
             }
         }
-        for declaration in &entry.storage_bindings {
-            let origin = if let Some(kind) = filter_kinds.get(&declaration.binding) {
+        for declaration in &entry.resource_declarations {
+            let Some(binding) = pending_binding(declaration.resource) else {
+                continue;
+            };
+            let origin = if let Some(kind) = filter_kinds.get(&binding) {
                 ResourceOrigin::Compiler(kind.clone())
             } else if declaration.role == interface::StorageRole::Intermediate {
                 ResourceOrigin::Compiler(CompilerResource::new(CompilerResourceKind::Staging, None, 0))
             } else {
-                ResourceOrigin::Host(declaration.binding)
+                ResourceOrigin::Host(binding)
             };
-            resources.entry(declaration.binding).or_insert(LogicalResource {
+            resources.entry(binding).or_insert(LogicalResource {
                 id: ResourceId(0),
                 origin,
-                semantic_binding: declaration.binding,
                 elem_ty: declaration.elem_ty.clone(),
-                size: logical_size(declaration.length.as_ref()),
+                size: declaration.size.clone(),
             });
         }
     }
-    resources.into_values().collect()
+    resources.into_iter().collect()
 }
 
-/// Debug invariant: every physical storage binding the program declares is
-/// covered by a logical resource. Catches a scratch site that escaped the
-/// manifest before it can silently corrupt the descriptor.
-fn verify_manifest_covers_storage(inner: &SemanticProgram) {
-    let covered: std::collections::HashSet<crate::BindingRef> =
-        inner.resources.iter().map(|resource| resource.semantic_binding).collect();
+/// Verify the allocation typestate. From this boundary through validation,
+/// every executable storage identity is a `ResourceId`; bindings survive only
+/// in the host ABI fields and `ResourceOrigin::Host` constraints.
+pub(crate) fn verify_allocated_resources(inner: &SemanticProgram) -> Result<(), String> {
+    let covered =
+        inner.resources.iter().map(|resource| resource.id).collect::<std::collections::HashSet<_>>();
+    if covered.len() != inner.resources.len() {
+        return Err("resource manifest contains duplicate ids".to_string());
+    }
+    for (index, resource) in inner.resources.iter().enumerate() {
+        let expected = ResourceId(index as u32);
+        if resource.id != expected {
+            return Err(format!(
+                "resource manifest is not dense: position {index} contains {:?}",
+                resource.id
+            ));
+        }
+        verify_allocated_size(&resource.size, &covered)?;
+        verify_allocated_type(&resource.elem_ty, &covered)?;
+    }
     for entry in &inner.entry_points {
-        for declaration in &entry.storage_bindings {
-            debug_assert!(
-                covered.contains(&declaration.binding),
-                "storage binding {:?} ({:?}) is missing from the logical-resource manifest",
-                declaration.binding,
-                declaration.role,
-            );
+        for declaration in &entry.resource_declarations {
+            let id = declaration
+                .resource
+                .resource()
+                .ok_or_else(|| format!("allocated entry `{}` contains a pending binding", entry.name))?;
+            if !covered.contains(&id) {
+                return Err(format!(
+                    "entry `{}` references resource {:?}, which is missing from the manifest",
+                    entry.name, id
+                ));
+            }
+            verify_allocated_size(&declaration.size, &covered)?;
+            verify_allocated_type(&declaration.elem_ty, &covered)?;
             if declaration.role == interface::StorageRole::Intermediate {
                 let resource = inner
                     .resources
                     .iter()
-                    .find(|resource| resource.semantic_binding == declaration.binding)
-                    .expect("coverage checked above");
-                debug_assert!(
-                    matches!(resource.origin, ResourceOrigin::Compiler(_)),
-                    "intermediate binding {:?} is not compiler-owned",
-                    declaration.binding,
-                );
+                    .find(|resource| resource.id == id)
+                    .expect("resource coverage checked above");
+                if !matches!(resource.origin, ResourceOrigin::Compiler(_)) {
+                    return Err(format!("intermediate resource {:?} is not compiler-owned", id));
+                }
+            }
+        }
+        verify_allocated_type(&entry.return_ty, &covered)?;
+        for input in &entry.inputs {
+            verify_allocated_type(&input.ty, &covered)?;
+        }
+        for output in &entry.outputs {
+            verify_allocated_type(&output.ty, &covered)?;
+        }
+        for (ty, _) in &entry.params {
+            verify_allocated_type(ty, &covered)?;
+        }
+        verify_allocated_graph(&entry.graph, &covered, &format!("entry `{}`", entry.name))?;
+    }
+    for function in &inner.functions {
+        verify_allocated_type(&function.return_ty, &covered)?;
+        for (ty, _) in &function.params {
+            verify_allocated_type(ty, &covered)?;
+        }
+        verify_allocated_graph(
+            &function.graph,
+            &covered,
+            &format!("function `{}`", function.name),
+        )?;
+    }
+    for region in inner.regions.values() {
+        verify_allocated_type(&region.return_ty, &covered)?;
+        for (ty, _) in &region.params {
+            verify_allocated_type(ty, &covered)?;
+        }
+        verify_allocated_graph(&region.graph, &covered, &format!("region `{}`", region.name))?;
+    }
+    Ok(())
+}
+
+fn verify_allocated_size(
+    size: &LogicalSize,
+    covered: &std::collections::HashSet<ResourceId>,
+) -> Result<(), String> {
+    match size {
+        LogicalSize::PendingLikeBinding { .. } => {
+            Err("allocated resource has a pending binding-based size".to_string())
+        }
+        LogicalSize::LikeResource { resource, .. } if !covered.contains(resource) => {
+            Err(format!("resource size references missing source {:?}", resource))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn verify_allocated_type(
+    ty: &Type<TypeName>,
+    covered: &std::collections::HashSet<ResourceId>,
+) -> Result<(), String> {
+    let Type::Constructed(name, arguments) = ty else {
+        return Ok(());
+    };
+    match name {
+        TypeName::Buffer(binding) => {
+            return Err(format!(
+                "allocated semantic type still names storage binding {binding:?}"
+            ));
+        }
+        TypeName::Resource(resource) if !covered.contains(resource) => {
+            return Err(format!("semantic type references missing resource {resource:?}"));
+        }
+        TypeName::Sum(variants) => {
+            for (_, fields) in variants {
+                for field in fields {
+                    verify_allocated_type(field, covered)?;
+                }
+            }
+        }
+        _ => {}
+    }
+    for argument in arguments {
+        verify_allocated_type(argument, covered)?;
+    }
+    Ok(())
+}
+
+fn verify_allocated_graph(
+    graph: &EGraph,
+    covered: &std::collections::HashSet<ResourceId>,
+    owner: &str,
+) -> Result<(), String> {
+    let verify_resource = |resource: ResourceId| {
+        if covered.contains(&resource) {
+            Ok(())
+        } else {
+            Err(format!("{owner} references missing resource {resource:?}"))
+        }
+    };
+    for (_, node) in &graph.nodes {
+        if let super::types::ENode::Pure { op, .. } = node {
+            match op {
+                super::types::PureOp::StorageView(crate::op::PureViewSource::Storage(binding)) => {
+                    return Err(format!("{owner} still contains storage binding {binding:?}"));
+                }
+                super::types::PureOp::StorageView(crate::op::PureViewSource::Resource(resource))
+                | super::types::PureOp::ResourceLen(resource) => verify_resource(*resource)?,
+                _ => {}
             }
         }
     }
-    let unique = inner
-        .resources
-        .iter()
-        .map(|resource| resource.semantic_binding)
-        .collect::<std::collections::HashSet<_>>();
-    debug_assert_eq!(
-        unique.len(),
-        inner.resources.len(),
-        "resource manifest contains duplicate bindings: {:?}",
-        inner
-            .resources
-            .iter()
-            .map(|resource| (resource.semantic_binding, &resource.origin))
-            .collect::<Vec<_>>()
-    );
+    for ty in graph.types.values() {
+        verify_allocated_type(ty, covered)?;
+    }
+    for (_, block) in &graph.skeleton.blocks {
+        for effect in &block.side_effects {
+            match &effect.kind {
+                super::types::SideEffectKind::Inst(crate::ssa::types::InstKind::Op { tag, .. }) => {
+                    match tag {
+                        crate::op::OpTag::StorageView(crate::op::PureViewSource::Storage(binding)) => {
+                            return Err(format!("{owner} still contains storage binding {binding:?}"));
+                        }
+                        crate::op::OpTag::StorageView(crate::op::PureViewSource::Resource(resource))
+                        | crate::op::OpTag::ResourceLen(resource) => verify_resource(*resource)?,
+                        _ => {}
+                    }
+                }
+                super::types::SideEffectKind::Soac(soac) => {
+                    let mut soac = soac.clone();
+                    let mut error = None;
+                    soac.visit_resource_refs_mut(|reference| match *reference {
+                        SemanticResourceRef::Binding(binding) => {
+                            error.get_or_insert_with(|| {
+                                format!("{owner} SOAC still contains storage binding {binding:?}")
+                            });
+                        }
+                        SemanticResourceRef::Resource(resource) if !covered.contains(&resource) => {
+                            error.get_or_insert_with(|| {
+                                format!("{owner} SOAC references missing resource {resource:?}")
+                            });
+                        }
+                        SemanticResourceRef::Resource(_) => {}
+                    });
+                    soac.visit_types_mut(|ty| {
+                        if error.is_none() {
+                            error = verify_allocated_type(ty, covered).err();
+                        }
+                    });
+                    if let Some(error) = error {
+                        return Err(error);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
 }
 
-pub fn logical_size(length: Option<&crate::pipeline_descriptor::BufferLen>) -> LogicalSize {
+pub fn pending_logical_size(length: Option<&crate::pipeline_descriptor::BufferLen>) -> LogicalSize {
     match length {
         Some(crate::pipeline_descriptor::BufferLen::Fixed { bytes }) => LogicalSize::FixedBytes(*bytes),
         Some(crate::pipeline_descriptor::BufferLen::LikeInput {
@@ -733,7 +1275,7 @@ pub fn logical_size(length: Option<&crate::pipeline_descriptor::BufferLen>) -> L
             binding,
             elem_bytes,
             src_elem_bytes,
-        }) => LogicalSize::LikeBinding {
+        }) => LogicalSize::PendingLikeBinding {
             binding: crate::BindingRef::new(*set, *binding),
             elem_bytes: *elem_bytes,
             src_elem_bytes: *src_elem_bytes,
@@ -750,24 +1292,41 @@ pub fn logical_size(length: Option<&crate::pipeline_descriptor::BufferLen>) -> L
 /// Physical `BufferLen` for a logical size, or `None` for `Unspecified` (a
 /// host-supplied length). Inverse of `logical_size`, used when a compiler
 /// resource is published as a `StorageBindingDecl`.
-pub fn buffer_len(size: &LogicalSize) -> Option<crate::pipeline_descriptor::BufferLen> {
+pub fn buffer_len(
+    size: &LogicalSize,
+    resources: &PhysicalResourceTable,
+) -> Option<crate::pipeline_descriptor::BufferLen> {
     use crate::pipeline_descriptor::BufferLen;
     match size {
         LogicalSize::FixedBytes(bytes) => Some(BufferLen::Fixed { bytes: *bytes }),
-        LogicalSize::LikeBinding {
-            binding,
+        LogicalSize::PendingLikeBinding { .. } => {
+            panic!("pending binding size reached physical publication")
+        }
+        LogicalSize::LikeResource {
+            resource,
             elem_bytes,
             src_elem_bytes,
-        } => Some(BufferLen::LikeInput {
-            set: binding.set,
-            binding: binding.binding,
-            elem_bytes: *elem_bytes,
-            src_elem_bytes: *src_elem_bytes,
-        }),
+        } => {
+            let binding =
+                resources.binding(*resource).expect("size source resource must have a physical binding");
+            Some(BufferLen::LikeInput {
+                set: binding.set,
+                binding: binding.binding,
+                elem_bytes: *elem_bytes,
+                src_elem_bytes: *src_elem_bytes,
+            })
+        }
         LogicalSize::SameAsDispatch { elem_bytes } => Some(BufferLen::SameAsDispatch {
             elem_bytes: *elem_bytes,
         }),
         LogicalSize::Unspecified => None,
+    }
+}
+
+fn pending_binding(resource: SemanticResourceRef) -> Option<crate::BindingRef> {
+    match resource {
+        SemanticResourceRef::Binding(binding) => Some(binding),
+        SemanticResourceRef::Resource(_) => None,
     }
 }
 
@@ -857,7 +1416,7 @@ pub struct SemanticEntry {
     pub execution_model: ExecutionModel,
     pub inputs: Vec<EntryInput>,
     pub outputs: Vec<EntryOutput>,
-    pub storage_bindings: Vec<interface::StorageBindingDecl>,
+    pub resource_declarations: Vec<SemanticResourceDecl>,
     pub params: Vec<(Type<TypeName>, String)>,
     pub return_ty: Type<TypeName>,
     pub graph: EGraph,
@@ -884,6 +1443,35 @@ impl SemanticEntry {
         graph: EGraph,
         control_headers: LookupMap<BlockId, ControlHeader>,
     ) -> Self {
+        Self::new_with_resources(
+            origin,
+            name,
+            span,
+            execution_model,
+            inputs,
+            outputs,
+            storage_bindings.into_iter().map(SemanticResourceDecl::pending).collect(),
+            params,
+            return_ty,
+            graph,
+            control_headers,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_resources(
+        origin: interface::EntryOrigin,
+        name: String,
+        span: Span,
+        execution_model: ExecutionModel,
+        inputs: Vec<EntryInput>,
+        outputs: Vec<EntryOutput>,
+        resource_declarations: Vec<SemanticResourceDecl>,
+        params: Vec<(Type<TypeName>, String)>,
+        return_ty: Type<TypeName>,
+        graph: EGraph,
+        control_headers: LookupMap<BlockId, ControlHeader>,
+    ) -> Self {
         SemanticEntry {
             origin,
             name,
@@ -891,7 +1479,7 @@ impl SemanticEntry {
             execution_model,
             inputs,
             outputs,
-            storage_bindings,
+            resource_declarations,
             params,
             return_ty,
             graph,
@@ -901,19 +1489,67 @@ impl SemanticEntry {
         }
     }
 
-    pub fn publication(&self) -> EntryPublication {
-        EntryPublication {
+    pub fn publication(&self) -> PlannedEntryPublication {
+        PlannedEntryPublication {
             name: self.name.clone(),
             execution_model: self.execution_model.clone(),
             inputs: self.inputs.clone(),
             outputs: self.outputs.clone(),
-            storage_bindings: self.storage_bindings.clone(),
+            resources: self.resource_declarations.clone(),
         }
     }
 }
 
 /// The exact entry ABI consumed by descriptor publication. It deliberately
 /// contains no graph, routes, or mutable lowering state.
+#[derive(Clone, Debug)]
+pub struct PlannedEntryPublication {
+    pub name: String,
+    pub execution_model: ExecutionModel,
+    pub inputs: Vec<EntryInput>,
+    pub outputs: Vec<EntryOutput>,
+    pub resources: Vec<SemanticResourceDecl>,
+}
+
+impl PlannedEntryPublication {
+    pub fn physicalize(&self, resources: &PhysicalResourceTable) -> Result<EntryPublication, String> {
+        let storage_bindings =
+            self.resources
+                .iter()
+                .map(|declaration| {
+                    let resource = declaration.resource.resource().ok_or_else(|| {
+                        format!("entry `{}` contains a pending resource binding", self.name)
+                    })?;
+                    if !resources.is_compiler(resource) {
+                        return Ok(None);
+                    }
+                    let binding = resources.binding(resource).ok_or_else(|| {
+                        format!(
+                            "entry `{}` references unallocated resource {:?}",
+                            self.name, resource
+                        )
+                    })?;
+                    Ok(Some(interface::StorageBindingDecl {
+                        binding,
+                        role: declaration.role.clone(),
+                        elem_ty: declaration.elem_ty.clone(),
+                        length: buffer_len(&declaration.size, resources),
+                    }))
+                })
+                .collect::<Result<Vec<_>, String>>()?
+                .into_iter()
+                .flatten()
+                .collect();
+        Ok(EntryPublication {
+            name: self.name.clone(),
+            execution_model: self.execution_model.clone(),
+            inputs: self.inputs.clone(),
+            outputs: self.outputs.clone(),
+            storage_bindings,
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct EntryPublication {
     pub name: String,
@@ -946,19 +1582,48 @@ pub struct PhysicalEntry {
 #[derive(Clone, Debug, Default)]
 pub struct PhysicalResourceTable {
     bindings: Vec<crate::BindingRef>,
+    compiler_owned: Vec<bool>,
 }
 
 impl PhysicalResourceTable {
-    pub fn from_resources(resources: &[LogicalResource]) -> Self {
+    pub fn allocate(resources: &[LogicalResource], ids: &mut crate::IdSource<u32>) -> Self {
         let mut ordered = resources.iter().collect::<Vec<_>>();
         ordered.sort_by_key(|resource| resource.id.0);
+        let mut used = resources
+            .iter()
+            .filter_map(|resource| match resource.origin {
+                ResourceOrigin::Host(binding) => Some(binding),
+                ResourceOrigin::Compiler(_) => None,
+            })
+            .collect::<std::collections::HashSet<_>>();
+        let mut bindings = Vec::with_capacity(ordered.len());
+        let mut compiler_owned = Vec::with_capacity(ordered.len());
+        for resource in ordered {
+            compiler_owned.push(matches!(resource.origin, ResourceOrigin::Compiler(_)));
+            let binding = match resource.origin {
+                ResourceOrigin::Host(binding) => binding,
+                ResourceOrigin::Compiler(_) => loop {
+                    let candidate =
+                        crate::BindingRef::new(super::from_tlc::AUTO_STORAGE_SET, ids.next_id());
+                    if used.insert(candidate) {
+                        break candidate;
+                    }
+                },
+            };
+            bindings.push(binding);
+        }
         Self {
-            bindings: ordered.into_iter().map(|resource| resource.semantic_binding).collect(),
+            bindings,
+            compiler_owned,
         }
     }
 
     pub fn binding(&self, resource: ResourceId) -> Option<crate::BindingRef> {
         self.bindings.get(resource.0 as usize).copied()
+    }
+
+    pub fn is_compiler(&self, resource: ResourceId) -> bool {
+        self.compiler_owned.get(resource.0 as usize).copied().unwrap_or(false)
     }
 }
 
@@ -1013,12 +1678,17 @@ pub struct PhysicalProgram {
 }
 
 impl PhysicalProgram {
-    pub fn from_validated(program: SemanticProgram, plan: ValidatedKernelPlan) -> Result<Self, String> {
-        let physical_resources = PhysicalResourceTable::from_resources(&program.resources);
+    pub fn from_validated(
+        program: SemanticProgram,
+        plan: ValidatedKernelPlan,
+        physical_resources: PhysicalResourceTable,
+    ) -> Result<Self, String> {
         let entry_points = program
             .entry_points
             .into_iter()
-            .map(|entry| super::builder::PhysicalEntryBuilder::from_planned_entry(entry).build())
+            .map(|entry| {
+                super::builder::PhysicalEntryBuilder::from_planned_entry(entry, &physical_resources).build()
+            })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             functions: program.functions,
@@ -1113,13 +1783,5 @@ impl SemanticProgram {
     /// SSA function name backing a region index (the `PureOp::Call` ABI).
     pub fn region_name(&self, id: RegionId) -> &str {
         self.region_interner.name(id)
-    }
-
-    /// Physical binding currently backing a logical resource. Resources are
-    /// stored in `ResourceId` order, so this is a direct index. Until terminal
-    /// lowering rewrites compiler resources to allocated bindings, this returns
-    /// the `semantic_binding`.
-    pub fn binding_of(&self, id: ResourceId) -> crate::BindingRef {
-        self.resources[id.0 as usize].semantic_binding
     }
 }

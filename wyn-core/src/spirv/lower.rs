@@ -235,6 +235,9 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
 
         let spirv_result = match &inst.data {
             InstKind::Op { tag, operands } => match tag {
+                crate::op::OpTag::ResourceLen(_) => {
+                    panic!("logical resource length reached SPIR-V lowering")
+                }
                 crate::op::OpTag::Int(s) | crate::op::OpTag::Uint(s) => match ssa_result_ty.as_ref() {
                     Some(PolyType::Constructed(TypeName::UInt(32), _)) => {
                         let val: u32 = s

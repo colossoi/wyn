@@ -29,12 +29,12 @@ pub fn seg_extent_fusable(a: &SegExtent, b: &SegExtent) -> bool {
         // re-interned length node each op holds.
         (
             SegExtent::ResourceLength {
-                binding: ba,
+                resource: ba,
                 elem_bytes: ea,
                 ..
             },
             SegExtent::ResourceLength {
-                binding: bb,
+                resource: bb,
                 elem_bytes: eb,
                 ..
             },

@@ -205,7 +205,7 @@ pub enum SegExtent {
     },
     ResourceLength {
         node: NodeId,
-        binding: crate::BindingRef,
+        resource: super::program::SemanticResourceRef,
         elem_bytes: u32,
     },
     /// A concrete EGIR value whose provenance is not host-dispatchable. Such
@@ -255,7 +255,7 @@ pub enum HistUpdatePolicy {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SegResourceAccess {
-    pub binding: crate::BindingRef,
+    pub resource: super::program::SemanticResourceRef,
     pub access: SegResourceAccessKind,
 }
 
@@ -306,10 +306,10 @@ pub enum SegOpKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FilterWorkBuffers {
-    pub flags: crate::BindingRef,
-    pub offsets: crate::BindingRef,
-    pub block_sums: crate::BindingRef,
-    pub block_offsets: crate::BindingRef,
+    pub flags: super::program::SemanticResourceRef,
+    pub offsets: super::program::SemanticResourceRef,
+    pub block_sums: super::program::SemanticResourceRef,
+    pub block_offsets: super::program::SemanticResourceRef,
 }
 
 #[derive(Clone, Debug)]
@@ -321,7 +321,7 @@ pub enum FilterOutput {
         destination: SoacDestination,
     },
     Runtime {
-        scratch: crate::BindingRef,
+        scratch: super::program::SemanticResourceRef,
         length: RuntimeFilterLength,
     },
 }
@@ -330,7 +330,7 @@ pub enum FilterOutput {
 /// Where a runtime filter's surviving count is observable.
 pub enum RuntimeFilterLength {
     ViewOnly,
-    EntryOutput(crate::BindingRef),
+    EntryOutput(super::program::SemanticResourceRef),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -482,6 +482,119 @@ pub fn reify_seg_kind_operators(operators: Vec<SegBinOp>) -> SegOpKind {
 }
 
 impl EgirSoac {
+    pub fn visit_types_mut(&mut self, mut visit: impl FnMut(&mut Type<TypeName>)) {
+        let mut visit_many = |types: &mut Vec<Type<TypeName>>| {
+            for ty in types {
+                visit(ty);
+            }
+        };
+        match self {
+            EgirSoac::Screma {
+                input_array_types,
+                input_elem_types,
+                map_output_elem_types,
+                ..
+            } => {
+                visit_many(input_array_types);
+                visit_many(input_elem_types);
+                visit_many(map_output_elem_types);
+            }
+            EgirSoac::Filter {
+                output_elem_type,
+                input_array_type,
+                input_elem_type,
+                output,
+                ..
+            } => {
+                visit(output_elem_type);
+                visit(input_array_type);
+                visit(input_elem_type);
+                if let FilterOutput::Local { capacity, .. } = output {
+                    visit(capacity);
+                }
+            }
+            EgirSoac::Hist {
+                input_array_types,
+                input_elem_types,
+                index_type,
+                value_type,
+                dest_elem_type,
+                ..
+            } => {
+                visit_many(input_array_types);
+                visit_many(input_elem_types);
+                visit(index_type);
+                visit(value_type);
+                visit(dest_elem_type);
+            }
+            EgirSoac::Seg {
+                input_array_types,
+                input_elem_types,
+                map_output_elem_types,
+                result_types,
+                ..
+            } => {
+                visit_many(input_array_types);
+                visit_many(input_elem_types);
+                visit_many(map_output_elem_types);
+                visit_many(result_types);
+            }
+        }
+    }
+
+    pub fn visit_resource_refs_mut(
+        &mut self,
+        mut visit: impl FnMut(&mut super::program::SemanticResourceRef),
+    ) {
+        let mut visit_space = |space: &mut SegSpace| {
+            for extent in &mut space.dims {
+                if let SegExtent::ResourceLength { resource, .. } = extent {
+                    visit(resource);
+                }
+            }
+        };
+        match self {
+            EgirSoac::Seg { space, resources, .. } => {
+                visit_space(space);
+                for resource in resources {
+                    visit(&mut resource.resource);
+                }
+            }
+            EgirSoac::Filter { state, output, .. } => {
+                match state {
+                    FilterState::Semantic { space } => visit_space(space),
+                    FilterState::Scheduled { space, plan } => {
+                        visit_space(space);
+                        let work = match plan {
+                            FilterPlan::Serial => None,
+                            FilterPlan::Flags(work)
+                            | FilterPlan::Scan(work)
+                            | FilterPlan::Scatter(work) => Some(work),
+                        };
+                        if let Some(work) = work {
+                            visit(&mut work.flags);
+                            visit(&mut work.offsets);
+                            visit(&mut work.block_sums);
+                            visit(&mut work.block_offsets);
+                        }
+                    }
+                    FilterState::Raw => {}
+                }
+                if let FilterOutput::Runtime { scratch, length } = output {
+                    visit(scratch);
+                    if let RuntimeFilterLength::EntryOutput(resource) = length {
+                        visit(resource);
+                    }
+                }
+            }
+            EgirSoac::Hist {
+                execution: HistExecution::Segmented(space),
+                ..
+            } => visit_space(space),
+            EgirSoac::Screma { .. } | EgirSoac::Hist { .. } => {}
+        }
+    }
+
     /// Every `SegBody` this SOAC carries, in a stable order: map lanes first,
     /// then each accumulator's step and combine. Captures and the callee region
     /// live here, never inline in `SideEffect::operand_nodes`.

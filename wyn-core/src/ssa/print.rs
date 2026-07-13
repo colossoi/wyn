@@ -194,6 +194,9 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
     use crate::op::{OpTag, PureViewSource};
     match kind {
         InstKind::Op { tag, operands } => match tag {
+            crate::op::OpTag::ResourceLen(resource) => {
+                let _ = write!(out, "resource_len({})", resource.0);
+            }
             OpTag::Int(s) => {
                 let _ = write!(out, "int {s}");
             }

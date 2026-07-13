@@ -10,8 +10,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::egir::graph_ops;
 use crate::egir::program::{
-    EntryPublication, InputSlotId, LogicalResource, OutputSlotId, PhysicalResourceTable, SemanticEntry,
-    SemanticEntryId,
+    EntryPublication, InputSlotId, LogicalResource, OutputSlotId, PhysicalResourceTable,
+    PlannedEntryPublication, SemanticEntry, SemanticEntryId, SemanticResourceRef,
 };
 use crate::egir::types::{
     EgirSoac, FilterOutput, FilterPlan, FilterState, RuntimeFilterLength, SegExtent, SegPlacement,
@@ -27,11 +27,11 @@ use crate::{BindingRef, ResourceId};
 #[derive(Clone, Debug, Default)]
 pub struct KernelPlan {
     pipelines: Vec<ScheduledPipeline>,
+    graphics_passthroughs: Vec<KernelPhase>,
     next_kernel_id: u32,
-    resource_ids: HashMap<BindingRef, ResourceId>,
     semantic_entries: HashMap<String, SemanticEntryId>,
     semantic_abi: HashMap<SemanticEntryId, SemanticAbi>,
-    publications: HashMap<String, EntryPublication>,
+    publications: HashMap<String, PlannedEntryPublication>,
     publication_order: Vec<String>,
 }
 
@@ -66,8 +66,12 @@ impl ValidatedKernelPlan {
     /// Entry ABI records in deterministic descriptor-publication order. The
     /// validated plan, rather than physical graphs, is the sole authority for
     /// backend-visible entry metadata.
-    pub fn publications(&self) -> Vec<&EntryPublication> {
-        self.0.publications_in_order()
+    pub fn publications(&self, resources: &PhysicalResourceTable) -> Result<Vec<EntryPublication>, String> {
+        self.0
+            .publications_in_order()
+            .into_iter()
+            .map(|publication| publication.physicalize(resources))
+            .collect()
     }
 }
 
@@ -152,6 +156,12 @@ pub enum KernelDomain {
     },
     /// One logical invocation per element of a concrete length source.
     Elements(DispatchLen),
+    /// One invocation per element of a logical storage resource. The
+    /// descriptor binding is resolved only while publishing a validated plan.
+    ResourceElements {
+        resource: ResourceId,
+        elem_bytes: u32,
+    },
 }
 
 /// A domain together with the authority the caller assigns to it.
@@ -195,13 +205,17 @@ impl ResourceAccess {
 
 impl KernelPlan {
     pub fn phases(&self) -> impl Iterator<Item = &KernelPhase> {
-        self.pipelines.iter().flat_map(|pipeline| pipeline.phases.iter())
+        self.pipelines
+            .iter()
+            .flat_map(|pipeline| pipeline.phases.iter())
+            .chain(self.graphics_passthroughs.iter())
     }
 
     pub fn contains_entry(&self, entry_point: &str) -> bool {
         self.pipelines
             .iter()
             .any(|pipeline| pipeline.phases.iter().any(|phase| phase.entry_point == entry_point))
+            || self.graphics_passthroughs.iter().any(|phase| phase.entry_point == entry_point)
     }
 
     pub fn into_validated(
@@ -221,6 +235,9 @@ impl KernelPlan {
         resources: &[LogicalResource],
         descriptor: &PipelineDescriptor,
     ) -> Result<(), String> {
+        // The full-program check runs in `target_lowering` before validation;
+        // this local check keeps direct plan-validation tests honest about the
+        // resource arena passed to them.
         let resource_ids = resources.iter().map(|resource| resource.id).collect::<HashSet<_>>();
         let physical_entries =
             entries.iter().map(|entry| (entry.name.as_str(), entry)).collect::<HashMap<_, _>>();
@@ -325,6 +342,9 @@ impl KernelPlan {
         }
 
         for (&source, abi) in &self.semantic_abi {
+            if !recipes_by_source.contains_key(&source) {
+                continue;
+            }
             let required = &abi.routed_outputs;
             if required.is_empty() {
                 continue;
@@ -349,9 +369,12 @@ impl KernelPlan {
         entries: &[SemanticEntry],
         resources: &[LogicalResource],
     ) -> Self {
-        let resource_ids = resources
+        let host_resources = resources
             .iter()
-            .map(|resource| (resource.semantic_binding, resource.id))
+            .filter_map(|resource| match resource.origin {
+                crate::egir::program::ResourceOrigin::Host(binding) => Some((binding, resource.id)),
+                crate::egir::program::ResourceOrigin::Compiler(_) => None,
+            })
             .collect::<HashMap<_, _>>();
         let semantic_entries = entries
             .iter()
@@ -395,7 +418,7 @@ impl KernelPlan {
                 .map(|stage| {
                     let id = KernelId(next_kernel_id);
                     next_kernel_id += 1;
-                    let selection = domain_selection_from_stage(stage);
+                    let selection = domain_selection_from_stage(stage, &host_resources);
                     by_name
                         .get(stage.entry_point.as_str())
                         .map(|(source, entry)| {
@@ -404,7 +427,6 @@ impl KernelPlan {
                                 Some(*source),
                                 entry,
                                 selection.clone(),
-                                &resource_ids,
                                 analyze_source_recipe(entry),
                             )
                         })
@@ -418,7 +440,7 @@ impl KernelPlan {
                                 output_routes: Vec::new(),
                             },
                             workgroup_size: stage.workgroup_size,
-                            domain: domain_from_dispatch(&stage.dispatch_size),
+                            domain: domain_from_dispatch(&stage.dispatch_size, &host_resources),
                             domain_selection: selection,
                             resources: Vec::new(),
                             dependencies: Vec::new(),
@@ -431,10 +453,51 @@ impl KernelPlan {
                 phases,
             });
         }
+        let mut graphics_passthroughs = Vec::new();
+        for pipeline in &descriptor.pipelines {
+            let Pipeline::Graphics(graphics) = pipeline else {
+                continue;
+            };
+            for stage in &graphics.stages {
+                let id = KernelId(next_kernel_id);
+                next_kernel_id += 1;
+                let phase = by_name
+                    .get(stage.entry_point.as_str())
+                    .map(|(source, entry)| {
+                        phase_from_entry(
+                            id,
+                            Some(*source),
+                            entry,
+                            DomainSelection::Inferred(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+                            KernelRecipe::GraphicsPassthrough,
+                        )
+                    })
+                    .unwrap_or_else(|| KernelPhase {
+                        id,
+                        entry_point: stage.entry_point.clone(),
+                        recipe: KernelRecipe::GraphicsPassthrough,
+                        abi: EntryAbiProjection {
+                            source_entry: None,
+                            inputs: Vec::new(),
+                            output_routes: Vec::new(),
+                        },
+                        workgroup_size: (1, 1, 1),
+                        domain: KernelDomain::Fixed { x: 1, y: 1, z: 1 },
+                        domain_selection: DomainSelection::Inferred(KernelDomain::Fixed {
+                            x: 1,
+                            y: 1,
+                            z: 1,
+                        }),
+                        resources: Vec::new(),
+                        dependencies: Vec::new(),
+                    });
+                graphics_passthroughs.push(phase);
+            }
+        }
         Self {
             pipelines,
+            graphics_passthroughs,
             next_kernel_id,
-            resource_ids,
             semantic_entries,
             semantic_abi,
             publications,
@@ -476,16 +539,16 @@ impl KernelPlan {
                 publication.outputs.push(output.clone());
             }
         }
-        for declaration in &entry.storage_bindings {
-            if !publication.storage_bindings.iter().any(|existing| {
-                existing.binding == declaration.binding && existing.role == declaration.role
+        for declaration in &entry.resource_declarations {
+            if !publication.resources.iter().any(|existing| {
+                existing.resource == declaration.resource && existing.role == declaration.role
             }) {
-                publication.storage_bindings.push(declaration.clone());
+                publication.resources.push(declaration.clone());
             }
         }
     }
 
-    fn publications_in_order(&self) -> Vec<&EntryPublication> {
+    fn publications_in_order(&self) -> Vec<&PlannedEntryPublication> {
         let mut ordered = Vec::with_capacity(self.publications.len());
         let mut seen = HashSet::new();
         for pipeline in &self.pipelines {
@@ -536,7 +599,7 @@ impl KernelPlan {
             .or(pipeline.phases[parent_index].abi.source_entry);
         let id = KernelId(self.next_kernel_id);
         self.next_kernel_id += 1;
-        let mut phase = phase_from_entry(id, source_entry, entry, domain, &self.resource_ids, recipe);
+        let mut phase = phase_from_entry(id, source_entry, entry, domain, recipe);
         phase.dependencies = vec![parent_id];
         pipeline.phases.push(phase);
     }
@@ -572,7 +635,7 @@ impl KernelPlan {
             .or(pipeline.phases[consumer_index].abi.source_entry);
         let id = KernelId(self.next_kernel_id);
         self.next_kernel_id += 1;
-        let mut producer = phase_from_entry(id, consumer_source, entry, domain, &self.resource_ids, recipe);
+        let mut producer = phase_from_entry(id, consumer_source, entry, domain, recipe);
         producer.dependencies = inherited_dependencies;
         pipeline.phases.insert(consumer_index, producer);
         let consumer_phase = &mut pipeline.phases[consumer_index + 1];
@@ -607,7 +670,7 @@ impl KernelPlan {
         });
         let id = KernelId(self.next_kernel_id);
         self.next_kernel_id += 1;
-        let phase = phase_from_entry(id, source_entry, entry, domain, &self.resource_ids, recipe);
+        let phase = phase_from_entry(id, source_entry, entry, domain, recipe);
         pipeline.phases.push(phase);
     }
 
@@ -664,10 +727,9 @@ impl KernelPlan {
                 let semantic_resources = filter_phase
                     || entry.origin == crate::interface::EntryOrigin::MultiConsumerMaterialization;
                 phase.resources = if semantic_resources {
-                    segmented_resources(entry, &self.resource_ids)
-                        .unwrap_or_else(|| entry_resources(entry, &self.resource_ids))
+                    segmented_resources(entry).unwrap_or_else(|| entry_resources(entry))
                 } else {
-                    entry_resources(entry, &self.resource_ids)
+                    entry_resources(entry)
                 };
                 phase.recipe = recipe;
                 phase.abi.inputs = (0..entry.inputs.len()).map(InputSlotId).collect();
@@ -727,16 +789,18 @@ impl KernelPlan {
     /// User storage parameters do not create these declarations, so unrelated
     /// source entry points that happen to reuse a slot remain separate.
     pub fn coalesce_compiler_dependencies(&mut self, entries: &[SemanticEntry]) {
-        let mut producers: HashMap<BindingRef, Vec<&str>> = HashMap::new();
-        let mut consumers: HashMap<BindingRef, Vec<&str>> = HashMap::new();
+        let mut producers: HashMap<ResourceId, Vec<&str>> = HashMap::new();
+        let mut consumers: HashMap<ResourceId, Vec<&str>> = HashMap::new();
         for entry in entries {
-            for declaration in &entry.storage_bindings {
+            for declaration in &entry.resource_declarations {
+                let resource =
+                    declaration.resource.resource().expect("planner received a pending resource binding");
                 match declaration.role {
                     crate::interface::StorageRole::Output => {
-                        producers.entry(declaration.binding).or_default().push(&entry.name)
+                        producers.entry(resource).or_default().push(&entry.name)
                     }
                     crate::interface::StorageRole::Input => {
-                        consumers.entry(declaration.binding).or_default().push(&entry.name)
+                        consumers.entry(resource).or_default().push(&entry.name)
                     }
                     crate::interface::StorageRole::Intermediate => {}
                 }
@@ -786,8 +850,8 @@ impl KernelPlan {
 
     fn add_compiler_resource_dependencies(
         &mut self,
-        producers: &HashMap<BindingRef, Vec<&str>>,
-        consumers: &HashMap<BindingRef, Vec<&str>>,
+        producers: &HashMap<ResourceId, Vec<&str>>,
+        consumers: &HashMap<ResourceId, Vec<&str>>,
     ) {
         for (binding, producer_entries) in producers {
             let Some(consumer_entries) = consumers.get(binding) else {
@@ -852,6 +916,26 @@ impl KernelPlan {
                         phase.entry_point, phase.dependencies
                     ));
                 }
+            }
+        }
+        for phase in &self.graphics_passthroughs {
+            if !ids.insert(phase.id) {
+                return Err(format!("kernel id {:?} appears more than once", phase.id));
+            }
+            if !names.insert(phase.entry_point.as_str()) {
+                return Err(format!(
+                    "entry `{}` appears in more than one scheduled phase",
+                    phase.entry_point
+                ));
+            }
+            if phase.recipe != KernelRecipe::GraphicsPassthrough
+                || !phase.dependencies.is_empty()
+                || phase.domain != (KernelDomain::Fixed { x: 1, y: 1, z: 1 })
+            {
+                return Err(format!(
+                    "graphics entry `{}` is not an unchanged passthrough",
+                    phase.entry_point
+                ));
             }
         }
         Ok(())
@@ -959,6 +1043,22 @@ impl KernelPlan {
                             len: len.clone(),
                             workgroup_size: phase.workgroup_size.0,
                         },
+                        KernelDomain::ResourceElements { resource, elem_bytes } => {
+                            let binding = physical_resources.binding(*resource).ok_or_else(|| {
+                                format!(
+                                    "scheduled phase `{}` dispatches from unallocated resource {:?}",
+                                    phase.entry_point, resource
+                                )
+                            })?;
+                            DispatchSize::DerivedFrom {
+                                len: DispatchLen::InputBinding {
+                                    set: binding.set,
+                                    binding: binding.binding,
+                                    elem_bytes: *elem_bytes,
+                                },
+                                workgroup_size: phase.workgroup_size.0,
+                            }
+                        }
                     },
                     reads,
                     writes,
@@ -975,7 +1075,6 @@ fn phase_from_entry(
     source_entry: Option<SemanticEntryId>,
     entry: &SemanticEntry,
     selection: DomainSelection,
-    resource_ids: &HashMap<BindingRef, ResourceId>,
     recipe: KernelRecipe,
 ) -> KernelPhase {
     let domain = match &selection {
@@ -994,8 +1093,7 @@ fn phase_from_entry(
         workgroup_size: entry_workgroup(entry),
         domain,
         domain_selection: selection,
-        resources: segmented_resources(entry, resource_ids)
-            .unwrap_or_else(|| entry_resources(entry, resource_ids)),
+        resources: segmented_resources(entry).unwrap_or_else(|| entry_resources(entry)),
         dependencies: Vec::new(),
     }
 }
@@ -1109,10 +1207,7 @@ fn storage_image_domain(entry: &SemanticEntry, fallback: &KernelDomain) -> Optio
     }))
 }
 
-fn segmented_resources(
-    entry: &SemanticEntry,
-    resource_ids: &HashMap<BindingRef, ResourceId>,
-) -> Option<Vec<ScheduledResource>> {
+fn segmented_resources(entry: &SemanticEntry) -> Option<Vec<ScheduledResource>> {
     for (_, block) in &entry.graph.skeleton.blocks {
         for side_effect in &block.side_effects {
             if let SideEffectKind::Soac(EgirSoac::Filter {
@@ -1121,25 +1216,14 @@ fn segmented_resources(
                 ..
             }) = &side_effect.kind
             {
-                let mut resources = Vec::new();
-                let mut push = |binding: BindingRef, access: ResourceAccess| {
-                    let resource = resource_id_for(resource_ids, binding);
-                    if let Some(existing) = resources
-                        .iter_mut()
-                        .find(|candidate: &&mut ScheduledResource| candidate.resource == resource)
-                    {
-                        existing.access = existing.access.merge(access);
-                    } else {
-                        resources.push(ScheduledResource { resource, access });
-                    }
+                let mut resources = entry_resources(entry);
+                let mut push = |reference: SemanticResourceRef, access: ResourceAccess| {
+                    let resource =
+                        reference.resource().expect("planner received a pending filter resource binding");
+                    merge_scheduled_resource(&mut resources, resource, access);
                 };
                 match plan {
                     FilterPlan::Flags(work) => {
-                        for input in &entry.inputs {
-                            if let Some(binding) = input.storage_binding.or(input.uniform_binding) {
-                                push(binding, ResourceAccess::Read);
-                            }
-                        }
                         push(work.flags, ResourceAccess::Write);
                     }
                     FilterPlan::Scan(work) => {
@@ -1148,11 +1232,6 @@ fn segmented_resources(
                         push(work.block_sums, ResourceAccess::Write);
                     }
                     FilterPlan::Scatter(work) => {
-                        for input in &entry.inputs {
-                            if let Some(binding) = input.storage_binding.or(input.uniform_binding) {
-                                push(binding, ResourceAccess::Read);
-                            }
-                        }
                         push(work.flags, ResourceAccess::Read);
                         push(work.offsets, ResourceAccess::Read);
                         push(work.block_offsets, ResourceAccess::Read);
@@ -1180,7 +1259,10 @@ fn segmented_resources(
                 resources
                     .iter()
                     .map(|resource| ScheduledResource {
-                        resource: resource_id_for(resource_ids, resource.binding),
+                        resource: resource
+                            .resource
+                            .resource()
+                            .expect("planner received a pending Seg resource binding"),
                         access: match resource.access {
                             SegResourceAccessKind::Read => ResourceAccess::Read,
                             SegResourceAccessKind::Write => ResourceAccess::Write,
@@ -1201,15 +1283,35 @@ fn entry_workgroup(entry: &SemanticEntry) -> (u32, u32, u32) {
     }
 }
 
-fn domain_from_dispatch(dispatch: &DispatchSize) -> KernelDomain {
+fn domain_from_dispatch(
+    dispatch: &DispatchSize,
+    host_resources: &HashMap<BindingRef, ResourceId>,
+) -> KernelDomain {
     match dispatch {
         DispatchSize::Fixed { x, y, z, .. } => KernelDomain::Fixed { x: *x, y: *y, z: *z },
+        DispatchSize::DerivedFrom {
+            len:
+                DispatchLen::InputBinding {
+                    set,
+                    binding,
+                    elem_bytes,
+                },
+            ..
+        } => KernelDomain::ResourceElements {
+            resource: *host_resources
+                .get(&BindingRef::new(*set, *binding))
+                .expect("descriptor dispatch binding must be in the resource manifest"),
+            elem_bytes: *elem_bytes,
+        },
         DispatchSize::DerivedFrom { len, .. } => KernelDomain::Elements(len.clone()),
     }
 }
 
-fn domain_selection_from_stage(stage: &ComputeStage) -> DomainSelection {
-    let domain = domain_from_dispatch(&stage.dispatch_size);
+fn domain_selection_from_stage(
+    stage: &ComputeStage,
+    host_resources: &HashMap<BindingRef, ResourceId>,
+) -> DomainSelection {
+    let domain = domain_from_dispatch(&stage.dispatch_size, host_resources);
     match stage.dispatch_size {
         // Honor the source's explicit intent: a user-pinned `#[dispatch]` grid
         // (including `1x1x1`) stays `Explicit` and is never re-inferred. Only
@@ -1259,50 +1361,29 @@ pub(crate) fn domain_from_space(space: &crate::egir::types::SegSpace) -> Option<
             }))
         }
         [SegExtent::ResourceLength {
-            binding, elem_bytes, ..
-        }] => Some(KernelDomain::Elements(DispatchLen::InputBinding {
-            set: binding.set,
-            binding: binding.binding,
+            resource, elem_bytes, ..
+        }] => Some(KernelDomain::ResourceElements {
+            resource: resource.resource().expect("planner received a pending resource-length binding"),
             elem_bytes: *elem_bytes,
-        })),
+        }),
         _ => None,
     }
 }
 
-fn entry_resources(
-    entry: &SemanticEntry,
-    resource_ids: &HashMap<BindingRef, ResourceId>,
-) -> Vec<ScheduledResource> {
-    let mut accesses: HashMap<BindingRef, ResourceAccess> = HashMap::new();
-    let mut insert = |binding: BindingRef, access: ResourceAccess| {
-        accesses.entry(binding).and_modify(|old| *old = old.merge(access)).or_insert(access);
+fn entry_resources(entry: &SemanticEntry) -> Vec<ScheduledResource> {
+    let mut accesses: HashMap<ResourceId, ResourceAccess> = HashMap::new();
+    let mut insert = |reference: SemanticResourceRef, access: ResourceAccess| {
+        let resource = reference.resource().expect("planner received a pending entry resource binding");
+        accesses.entry(resource).and_modify(|old| *old = old.merge(access)).or_insert(access);
     };
 
-    for input in &entry.inputs {
-        if let Some(binding) = input.storage_binding {
-            let access = match input.storage_access {
-                Some(crate::interface::StorageAccess::WriteOnly) => ResourceAccess::Write,
-                Some(crate::interface::StorageAccess::ReadWrite) => ResourceAccess::ReadWrite,
-                _ => ResourceAccess::Read,
-            };
-            insert(binding, access);
-        }
-        if let Some(binding) = input.uniform_binding {
-            insert(binding, ResourceAccess::Read);
-        }
-    }
-    for output in &entry.outputs {
-        if let Some(binding) = output.storage_binding {
-            insert(binding, ResourceAccess::Write);
-        }
-    }
-    for declaration in &entry.storage_bindings {
+    for declaration in &entry.resource_declarations {
         let access = match declaration.role {
             crate::interface::StorageRole::Input => ResourceAccess::Read,
             crate::interface::StorageRole::Output => ResourceAccess::Write,
             crate::interface::StorageRole::Intermediate => ResourceAccess::ReadWrite,
         };
-        insert(declaration.binding, access);
+        insert(declaration.resource, access);
     }
 
     // A storage view reachable from an effect operand is conservatively a
@@ -1314,29 +1395,30 @@ fn entry_resources(
                 wyn_graph::WalkOrder::DepthFirst,
                 |node, out| out.extend(entry.graph.nodes[node].children()),
                 |node| {
-                    if let Some(binding) = graph_ops::extract_storage_view_source(&entry.graph, node) {
-                        insert(binding, ResourceAccess::Read);
+                    if let Some(resource) = graph_ops::extract_storage_view_source(&entry.graph, node) {
+                        insert(resource, ResourceAccess::Read);
                     }
                 },
             );
         }
     }
 
-    let mut resources: Vec<_> = accesses
-        .into_iter()
-        .map(|(binding, access)| ScheduledResource {
-            resource: resource_id_for(resource_ids, binding),
-            access,
-        })
-        .collect();
+    let mut resources: Vec<_> =
+        accesses.into_iter().map(|(resource, access)| ScheduledResource { resource, access }).collect();
     resources.sort_by_key(|resource| resource.resource);
     resources
 }
 
-fn resource_id_for(resource_ids: &HashMap<BindingRef, ResourceId>, binding: BindingRef) -> ResourceId {
-    *resource_ids
-        .get(&binding)
-        .unwrap_or_else(|| panic!("storage {binding} is absent from the logical-resource manifest"))
+fn merge_scheduled_resource(
+    resources: &mut Vec<ScheduledResource>,
+    resource: ResourceId,
+    access: ResourceAccess,
+) {
+    if let Some(existing) = resources.iter_mut().find(|candidate| candidate.resource == resource) {
+        existing.access = existing.access.merge(access);
+    } else {
+        resources.push(ScheduledResource { resource, access });
+    }
 }
 
 fn binding_ref(binding: &crate::pipeline_descriptor::Binding) -> Option<BindingRef> {
@@ -1523,7 +1605,7 @@ mod tests {
             Some(SemanticEntryId(0)),
             &entry,
             DomainSelection::Explicit(fixed.clone()),
-            &HashMap::new(),
+            KernelRecipe::SerialCompute,
         );
         assert_eq!(explicit.domain, fixed);
         assert_eq!(
@@ -1536,7 +1618,7 @@ mod tests {
             Some(SemanticEntryId(0)),
             &entry,
             DomainSelection::Inferred(fixed.clone()),
-            &HashMap::new(),
+            KernelRecipe::SerialCompute,
         );
         assert_eq!(
             inferred.domain,

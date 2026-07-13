@@ -1616,6 +1616,9 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         };
         match &inst.data {
             InstKind::Op { tag, operands } => match tag {
+                crate::op::OpTag::ResourceLen(_) => {
+                    panic!("logical resource length reached WGSL lowering")
+                }
                 OpTag::Int(_) | OpTag::Uint(_) | OpTag::Float(_) | OpTag::Bool(_) | OpTag::Unit => true,
                 OpTag::Tuple(_) | OpTag::Vector(_) | OpTag::ArrayLit(_) | OpTag::Matrix { .. } => {
                     operands.iter().all(|o| self.is_const_value(*o))
@@ -2296,6 +2299,9 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
 
         match &inst.data {
             InstKind::Op { tag, operands } => match tag {
+                crate::op::OpTag::ResourceLen(_) => {
+                    panic!("logical resource length reached WGSL lowering")
+                }
                 // Integer literals carry their type in the suffix:
                 //   `Nu` for `u32`, `Ni` for `i32`. WGSL has no implicit
                 //   int conversion, so respecting the SSA value's type is

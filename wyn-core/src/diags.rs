@@ -163,6 +163,7 @@ fn format_constructed_type(name: &TypeName, args: &[PolyType<TypeName>]) -> Stri
         TypeName::ArrayVariantAbstract => "abstract".to_string(),
         TypeName::AddressPlaceholder => "?variant".to_string(),
         TypeName::Buffer(b) => format!("buffer(set={}, binding={})", b.set, b.binding),
+        TypeName::Resource(resource) => format!("resource({})", resource.0),
         TypeName::NoBuffer => "no_buffer".to_string(),
         TypeName::Texture2D => "texture2d".to_string(),
         TypeName::Sampler => "sampler".to_string(),
