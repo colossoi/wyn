@@ -291,7 +291,7 @@ module.exports = grammar({
     // or a module-expression application.
     open_declaration: $ => seq(
       'open',
-      field('module', $.qualified_name),
+      field('module', choice($.identifier, $.qualified_name)),
     ),
 
     import_declaration: $ => seq(
@@ -514,10 +514,12 @@ module.exports = grammar({
 
     // Lambda: |params| body
     // Params are patterns (typically just identifiers)
+    lambda_params: $ => seq('|', commaSep($._pattern), '|'),
+
     lambda_expression: $ => prec.right(seq(
       choice(
-        seq('|', commaSep($._pattern), '|'),  // Regular: |x, y|
-        '||',  // Empty params: ||
+        field('params', $.lambda_params),
+        '||',
       ),
       field('body', $._expression),
     )),
