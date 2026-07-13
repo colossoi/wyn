@@ -144,7 +144,11 @@
   (typed_pattern type: (qualified_name) @type)
   (module_type_with type: (identifier) @type)
   (module_type_with type: (qualified_name) @type)
-] 
+  (let_expression type: (identifier) @type)
+  (let_expression type: (qualified_name) @type)
+  (binding_declaration type: (identifier) @type)
+  (binding_declaration type: (qualified_name) @type)
+]
 
 (record_field_type
   name: (identifier) @variable.other.member)
