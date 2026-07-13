@@ -231,9 +231,11 @@ impl SemanticResourceDecl {
 /// `StorageBindingDecl` without re-deriving it from the lowering site.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CompilerResourceKind {
-    /// A pre-existing intermediate surfaced from a `StorageBindingDecl`
-    /// (gather prepass / generic staging) — not owned by a Seg op.
+    /// A pre-existing generic intermediate surfaced from a
+    /// `StorageBindingDecl` and not owned by a Seg op.
     Staging,
+    /// Array result produced by a compiler-hoisted gather prepass.
+    GatherHandoff,
     /// One per-accumulator partial buffer of a parallel `SegRed`.
     ReducePartial,
     /// The two scratch buffers of a parallel `SegScan`.
@@ -259,6 +261,7 @@ impl CompilerResourceKind {
     pub fn role(self) -> interface::StorageRole {
         match self {
             CompilerResourceKind::FilterScratch
+            | CompilerResourceKind::GatherHandoff
             | CompilerResourceKind::ScalarHandoff
             | CompilerResourceKind::MultiConsumerArray => interface::StorageRole::Output,
             _ => interface::StorageRole::Intermediate,
@@ -276,6 +279,16 @@ pub struct CompilerResource {
     /// Stable resource position within the owner (accumulator/lane/scratch
     /// index, depending on `kind`).
     pub slot: usize,
+    /// Explicit producer/consumer relationship established at allocation.
+    /// Target planning consumes this edge directly instead of rediscovering
+    /// prepasses from entry provenance or storage roles.
+    pub flow: Option<CompilerResourceFlow>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompilerResourceFlow {
+    pub producer: SemanticEntryId,
+    pub consumers: Vec<SemanticEntryId>,
 }
 
 impl CompilerResource {
@@ -285,6 +298,7 @@ impl CompilerResource {
             kind,
             owner,
             slot,
+            flow: None,
         }
     }
 }
@@ -332,6 +346,7 @@ pub fn plan_logical_resources(inner: &mut SemanticProgram, binding_ids: &mut cra
         pending.iter().map(|(binding, resource)| (*binding, resource.id)).collect::<HashMap<_, _>>();
     inner.resources = pending.into_iter().map(|(_, resource)| resource).collect();
     normalize_semantic_resource_references(inner, &by_binding);
+    record_compiler_resource_flows(inner);
     if cfg!(debug_assertions) {
         verify_allocated_resources(inner).expect("invalid allocated semantic resources");
     }
@@ -350,12 +365,57 @@ fn gather_prepass_resources(inner: &SemanticProgram) -> HashMap<crate::BindingRe
             if let Some(binding) = pending_binding(declaration.resource) {
                 resources.insert(
                     binding,
-                    CompilerResource::new(CompilerResourceKind::Staging, None, slot),
+                    CompilerResource::new(CompilerResourceKind::GatherHandoff, None, slot),
                 );
             }
         }
     }
     resources
+}
+
+fn record_compiler_resource_flows(inner: &mut SemanticProgram) {
+    let mut producers: HashMap<ResourceId, Vec<SemanticEntryId>> = HashMap::new();
+    let mut consumers: HashMap<ResourceId, Vec<SemanticEntryId>> = HashMap::new();
+    for (index, entry) in inner.entry_points.iter().enumerate() {
+        let entry_id = SemanticEntryId(index as u32);
+        for declaration in &entry.resource_declarations {
+            let Some(resource) = declaration.resource.resource() else {
+                continue;
+            };
+            match declaration.role {
+                interface::StorageRole::Output => producers.entry(resource).or_default().push(entry_id),
+                interface::StorageRole::Input => consumers.entry(resource).or_default().push(entry_id),
+                interface::StorageRole::Intermediate => {}
+            }
+        }
+    }
+    for resource in &mut inner.resources {
+        let ResourceOrigin::Compiler(compiler) = &mut resource.origin else {
+            continue;
+        };
+        if !matches!(
+            compiler.kind,
+            CompilerResourceKind::GatherHandoff
+                | CompilerResourceKind::ScalarHandoff
+                | CompilerResourceKind::MultiConsumerArray
+        ) {
+            continue;
+        }
+        let mut resource_producers = producers.remove(&resource.id).unwrap_or_default();
+        resource_producers.sort_unstable();
+        resource_producers.dedup();
+        let [producer] = resource_producers.as_slice() else {
+            continue;
+        };
+        let mut resource_consumers = consumers.remove(&resource.id).unwrap_or_default();
+        resource_consumers.retain(|consumer| consumer != producer);
+        resource_consumers.sort_unstable();
+        resource_consumers.dedup();
+        compiler.flow = Some(CompilerResourceFlow {
+            producer: *producer,
+            consumers: resource_consumers,
+        });
+    }
 }
 
 /// Replace descriptor-shaped storage identities in semantic graphs with their
@@ -1090,6 +1150,7 @@ pub(crate) fn verify_allocated_resources(inner: &SemanticProgram) -> Result<(), 
         }
         verify_allocated_size(&resource.size, &covered)?;
         verify_allocated_type(&resource.elem_ty, &covered)?;
+        verify_compiler_resource_flow(inner, resource)?;
     }
     for entry in &inner.entry_points {
         for declaration in &entry.resource_declarations {
@@ -1145,6 +1206,69 @@ pub(crate) fn verify_allocated_resources(inner: &SemanticProgram) -> Result<(), 
             verify_allocated_type(ty, &covered)?;
         }
         verify_allocated_graph(&region.graph, &covered, &format!("region `{}`", region.name))?;
+    }
+    Ok(())
+}
+
+fn verify_compiler_resource_flow(
+    inner: &SemanticProgram,
+    resource: &LogicalResource,
+) -> Result<(), String> {
+    let ResourceOrigin::Compiler(compiler) = &resource.origin else {
+        return Ok(());
+    };
+    let requires_flow = matches!(
+        compiler.kind,
+        CompilerResourceKind::GatherHandoff
+            | CompilerResourceKind::ScalarHandoff
+            | CompilerResourceKind::MultiConsumerArray
+    );
+    let Some(flow) = &compiler.flow else {
+        return if requires_flow {
+            Err(format!(
+                "compiler resource {:?} has no explicit producer/consumer flow",
+                resource.id
+            ))
+        } else {
+            Ok(())
+        };
+    };
+    let producer = inner
+        .entry_points
+        .get(flow.producer.0 as usize)
+        .ok_or_else(|| format!("resource {:?} has an invalid producer id", resource.id))?;
+    let declares = |entry: &SemanticEntry, role| {
+        entry.resource_declarations.iter().any(|declaration| {
+            declaration.resource.resource() == Some(resource.id) && declaration.role == role
+        })
+    };
+    if !declares(producer, interface::StorageRole::Output) {
+        return Err(format!(
+            "resource {:?} producer `{}` does not declare its output",
+            resource.id, producer.name
+        ));
+    }
+    if flow.consumers.is_empty() {
+        return Err(format!("compiler resource {:?} has no consumers", resource.id));
+    }
+    let mut unique = std::collections::HashSet::new();
+    for consumer_id in &flow.consumers {
+        if !unique.insert(*consumer_id) || *consumer_id == flow.producer {
+            return Err(format!(
+                "compiler resource {:?} has an invalid consumer list",
+                resource.id
+            ));
+        }
+        let consumer = inner
+            .entry_points
+            .get(consumer_id.0 as usize)
+            .ok_or_else(|| format!("resource {:?} has an invalid consumer id", resource.id))?;
+        if !declares(consumer, interface::StorageRole::Input) {
+            return Err(format!(
+                "resource {:?} consumer `{}` does not declare its input",
+                resource.id, consumer.name
+            ));
+        }
     }
     Ok(())
 }

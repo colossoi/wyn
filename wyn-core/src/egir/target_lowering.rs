@@ -26,8 +26,8 @@ pub fn schedule(
         parallelize::restore_all_serial(&mut inner);
         let mut schedule =
             parallelize::schedule::KernelPlan::seed(&inner.pipeline, &inner.entry_points, &inner.resources);
-        parallelize::attach_materialization_prepasses(&inner, &mut schedule);
-        schedule.coalesce_compiler_dependencies(&inner.entry_points);
+        parallelize::attach_compiler_prepasses(&inner, &mut schedule);
+        schedule.coalesce_resource_flows(&inner.resources);
         inner.kernel_plan = schedule;
     }
     parallelize::finalize_scheduled_states(&mut inner);

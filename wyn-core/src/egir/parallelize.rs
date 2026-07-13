@@ -7,6 +7,8 @@
 //!    three-phase block scans.
 pub mod schedule;
 
+use std::collections::BTreeMap;
+
 use crate::LookupMap;
 
 use polytype::Type;
@@ -133,7 +135,7 @@ pub fn lower(inner: &mut SemanticProgram) {
     // points are mutated in place. Restored before returning.
     let mut regions = std::mem::take(&mut inner.region_interner);
     let mut schedule = KernelPlan::seed(&inner.pipeline, &inner.entry_points, &inner.resources);
-    attach_materialization_prepasses(inner, &mut schedule);
+    attach_compiler_prepasses(inner, &mut schedule);
     let (filter_phases, mut new_functions, mut new_regions) =
         lower_runtime_filters(inner, &mut schedule, &mut regions);
     inner.entry_points.extend(filter_phases);
@@ -280,7 +282,7 @@ pub fn lower(inner: &mut SemanticProgram) {
         split_clones.extend(split.entries.into_iter().map(|projected| projected.entry));
     }
     entry_points.extend(split_clones);
-    schedule.coalesce_compiler_dependencies(entry_points);
+    schedule.coalesce_resource_flows(&inner.resources);
     inner.kernel_plan = schedule;
     inner.region_interner = regions;
 }
@@ -651,53 +653,51 @@ fn owned_resource_ids(
 /// source pipeline. Used by single-stage lowering after SegOps have been
 /// restored to serial Scremas; the parallel lowering performs the equivalent
 /// attachment before selecting reduce/scan phases.
-pub(crate) fn attach_materialization_prepasses(
-    inner: &SemanticProgram,
-    schedule: &mut schedule::KernelPlan,
-) {
+pub(crate) fn attach_compiler_prepasses(inner: &SemanticProgram, schedule: &mut schedule::KernelPlan) {
     use schedule::KernelDomain;
-    // Insert one ready producer at a time. Repeating is important when a
-    // materialized producer itself depends on another compiler prepass: once
-    // its consumer is scheduled, the preceding producer becomes ready too.
-    while let Some((consumer, producer_index)) = inner
-        .entry_points
-        .iter()
-        .enumerate()
-        .filter(|(_, producer)| !schedule.contains_entry(&producer.name))
-        .find_map(|(producer_index, producer)| {
-            let outputs: Vec<_> = producer
-                .resource_declarations
-                .iter()
-                .filter(|declaration| declaration.role == crate::interface::StorageRole::Output)
-                .filter_map(|declaration| declaration.resource.resource())
-                .collect();
-            inner
-                .entry_points
-                .iter()
-                .find(|consumer| {
-                    schedule.contains_entry(&consumer.name)
-                        && consumer.resource_declarations.iter().any(|declaration| {
-                            declaration.role == crate::interface::StorageRole::Input
-                                && declaration
-                                    .resource
-                                    .resource()
-                                    .is_some_and(|resource| outputs.contains(&resource))
-                        })
-                })
-                .map(|consumer| (consumer.name.clone(), producer_index))
-        })
-    {
-        let producer = &inner.entry_points[producer_index];
-        let domain =
-            schedule::segmented_domain(producer).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
-        let recipe = match producer.origin {
-            crate::interface::EntryOrigin::ScalarPrepass => schedule::KernelRecipe::ScalarPrepass,
-            crate::interface::EntryOrigin::GatherPrepass => schedule::KernelRecipe::GatherPrepass,
-            crate::interface::EntryOrigin::MultiConsumerMaterialization => {
+    let mut prepasses = BTreeMap::new();
+    for resource in &inner.resources {
+        let ResourceOrigin::Compiler(compiler) = &resource.origin else {
+            continue;
+        };
+        let Some(flow) = &compiler.flow else {
+            continue;
+        };
+        let recipe = match compiler.kind {
+            CompilerResourceKind::ScalarHandoff => schedule::KernelRecipe::ScalarPrepass,
+            CompilerResourceKind::GatherHandoff => schedule::KernelRecipe::GatherPrepass,
+            CompilerResourceKind::MultiConsumerArray => {
                 schedule::KernelRecipe::MultiConsumerMaterialization
             }
-            _ => schedule::KernelRecipe::SerialCompute,
+            _ => continue,
         };
+        let pending = prepasses.entry(flow.producer).or_insert_with(|| (recipe.clone(), Vec::new()));
+        assert_eq!(pending.0, recipe, "one prepass cannot have mixed recipe kinds");
+        pending.1.extend(flow.consumers.iter().copied());
+        pending.1.sort_unstable();
+        pending.1.dedup();
+    }
+
+    // Insert one ready producer at a time. Repeating is important for chained
+    // materializations: scheduling a consumer can make its producer ready.
+    while let Some((producer_id, consumer_id, recipe)) =
+        prepasses.iter().find_map(|(producer, (recipe, consumers))| {
+            if schedule.contains_source_entry(*producer) {
+                return None;
+            }
+            consumers
+                .iter()
+                .find(|consumer| schedule.contains_source_entry(**consumer))
+                .map(|consumer| (*producer, *consumer, recipe.clone()))
+        })
+    {
+        let producer = &inner.entry_points[producer_id.0 as usize];
+        let consumer = schedule
+            .entry_point_for_source(consumer_id)
+            .expect("scheduled flow consumer has no entry point")
+            .to_string();
+        let domain =
+            schedule::segmented_domain(producer).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
         schedule.add_phase_before(
             &consumer,
             producer,

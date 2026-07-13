@@ -6,12 +6,13 @@
 //! lowering has finished; it is not mutated while an individual lowering is
 //! still speculative.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::egir::graph_ops;
 use crate::egir::program::{
-    EntryPublication, InputSlotId, LogicalResource, OutputSlotId, PhysicalResourceTable,
-    PlannedEntryPublication, SemanticEntry, SemanticEntryId, SemanticResourceRef,
+    CompilerResourceFlow, EntryPublication, InputSlotId, LogicalResource, OutputSlotId,
+    PhysicalResourceTable, PlannedEntryPublication, ResourceOrigin, SemanticEntry, SemanticEntryId,
+    SemanticResourceRef,
 };
 use crate::egir::types::{
     EgirSoac, FilterOutput, FilterPlan, FilterState, RuntimeFilterLength, SegExtent, SegPlacement,
@@ -218,6 +219,16 @@ impl KernelPlan {
             || self.graphics_passthroughs.iter().any(|phase| phase.entry_point == entry_point)
     }
 
+    pub fn contains_source_entry(&self, source: SemanticEntryId) -> bool {
+        self.phases().any(|phase| phase.abi.source_entry == Some(source))
+    }
+
+    pub fn entry_point_for_source(&self, source: SemanticEntryId) -> Option<&str> {
+        self.phases()
+            .find(|phase| phase.abi.source_entry == Some(source))
+            .map(|phase| phase.entry_point.as_str())
+    }
+
     pub fn into_validated(
         self,
         entries: &[SemanticEntry],
@@ -290,6 +301,72 @@ impl KernelPlan {
                     ));
                 }
                 projected_outputs.entry(source).or_default().insert(slot);
+            }
+        }
+
+        for resource in resources {
+            let ResourceOrigin::Compiler(compiler) = &resource.origin else {
+                continue;
+            };
+            let Some(flow) = &compiler.flow else {
+                continue;
+            };
+            if !self
+                .phases()
+                .any(|phase| phase.abi.source_entry.is_some_and(|source| flow.consumers.contains(&source)))
+            {
+                // Descriptor-less test/probe programs have executable EGIR
+                // entries but no published stages. Allocation still verifies
+                // their resource flow; there is no host schedule to check.
+                continue;
+            }
+            let writers =
+                self.phases()
+                    .filter(|phase| {
+                        phase.abi.source_entry == Some(flow.producer)
+                            && phase.resources.iter().any(|scheduled| {
+                                scheduled.resource == resource.id && scheduled.access.writes()
+                            })
+                    })
+                    .map(|phase| phase.id)
+                    .collect::<HashSet<_>>();
+            if writers.is_empty() {
+                return Err(format!(
+                    "resource {:?} ({:?}, flow {:?}) has no planned producer kernel",
+                    resource.id, compiler.kind, flow
+                ));
+            }
+            for consumer in &flow.consumers {
+                let readers = self
+                    .phases()
+                    .filter(|phase| {
+                        phase.abi.source_entry == Some(*consumer)
+                            && phase.resources.iter().any(|scheduled| {
+                                scheduled.resource == resource.id && scheduled.access.reads()
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                if readers.is_empty() {
+                    return Err(format!(
+                        "resource {:?} has no planned consumer kernel for {:?}",
+                        resource.id, consumer
+                    ));
+                }
+                for reader in readers {
+                    if reader.recipe == KernelRecipe::GraphicsPassthrough {
+                        continue;
+                    }
+                    if !reader.dependencies.iter().any(|dependency| writers.contains(dependency)) {
+                        return Err(format!(
+                            "kernel `{}` ({:?}) reads resource {:?} without depending on its producer {:?}; dependencies are {:?}",
+                            reader.entry_point,
+                            reader.id,
+                            resource.id,
+                            writers,
+                            reader.dependencies
+                        ));
+                    }
+                }
             }
         }
 
@@ -562,9 +639,9 @@ impl KernelPlan {
         ordered
     }
 
-    /// Add a generated phase after the current last phase of `parent`'s
-    /// pipeline.  Dependencies are explicit even though host publication
-    /// currently emits phases in topological order.
+    /// Insert a generated phase immediately after `parent`. Any later phase
+    /// that depended on `parent` is rewired to the new completion point, so a
+    /// prepass family inserted before its consumer remains wholly before it.
     pub fn add_phase_after(
         &mut self,
         parent: &str,
@@ -593,7 +670,16 @@ impl KernelPlan {
         self.next_kernel_id += 1;
         let mut phase = phase_from_entry(id, source_entry, entry, domain, recipe);
         phase.dependencies = vec![parent_id];
-        pipeline.phases.push(phase);
+        for dependent in pipeline.phases.iter_mut().skip(parent_index + 1) {
+            for dependency in &mut dependent.dependencies {
+                if *dependency == parent_id {
+                    *dependency = id;
+                }
+            }
+            dependent.dependencies.sort_unstable();
+            dependent.dependencies.dedup();
+        }
+        pipeline.phases.insert(parent_index + 1, phase);
     }
 
     /// Insert a compiler-generated producer immediately before `consumer` and
@@ -775,108 +861,147 @@ impl KernelPlan {
         Ok(())
     }
 
-    /// Merge compiler-generated producer/consumer entries connected by a
-    /// first-class `StorageRole::Output -> StorageRole::Input` edge. The
-    /// resulting phases share one binding table and execute producer-first.
-    /// User storage parameters do not create these declarations, so unrelated
-    /// source entry points that happen to reuse a slot remain separate.
-    pub fn coalesce_compiler_dependencies(&mut self, entries: &[SemanticEntry]) {
-        let mut producers: HashMap<ResourceId, Vec<&str>> = HashMap::new();
-        let mut consumers: HashMap<ResourceId, Vec<&str>> = HashMap::new();
-        for entry in entries {
-            for declaration in &entry.resource_declarations {
-                let resource =
-                    declaration.resource.resource().expect("planner received a pending resource binding");
-                match declaration.role {
-                    crate::interface::StorageRole::Output => {
-                        producers.entry(resource).or_default().push(&entry.name)
+    /// Coalesce pipelines and add dependencies from the resource manifest's
+    /// explicit producer/consumer edges. Entry provenance and declaration
+    /// roles are deliberately not consulted here.
+    pub fn coalesce_resource_flows(&mut self, resources: &[LogicalResource]) {
+        let mut flows = resources
+            .iter()
+            .filter_map(|resource| match &resource.origin {
+                ResourceOrigin::Compiler(compiler) => {
+                    compiler.flow.as_ref().map(|flow| (resource.id, flow.clone()))
+                }
+                ResourceOrigin::Host(_) => None,
+            })
+            .collect::<Vec<_>>();
+        flows.sort_by_key(|(resource, _)| resource.0);
+        self.complete_resource_flow_accesses(&flows);
+        self.add_resource_flow_dependencies(&flows);
+
+        let mut kernel_pipeline = HashMap::new();
+        for (pipeline_index, pipeline) in self.pipelines.iter().enumerate() {
+            for phase in &pipeline.phases {
+                kernel_pipeline.insert(phase.id, pipeline_index);
+            }
+        }
+        let mut parents = (0..self.pipelines.len()).collect::<Vec<_>>();
+        for (pipeline_index, pipeline) in self.pipelines.iter().enumerate() {
+            for phase in &pipeline.phases {
+                for dependency in &phase.dependencies {
+                    if let Some(&dependency_pipeline) = kernel_pipeline.get(dependency) {
+                        union_components(&mut parents, pipeline_index, dependency_pipeline);
                     }
-                    crate::interface::StorageRole::Input => {
-                        consumers.entry(resource).or_default().push(&entry.name)
-                    }
-                    crate::interface::StorageRole::Intermediate => {}
                 }
             }
         }
+        let mut components: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for index in 0..self.pipelines.len() {
+            let root = find_component(&mut parents, index);
+            components.entry(root).or_default().push(index);
+        }
+        let mut slots = std::mem::take(&mut self.pipelines).into_iter().map(Some).collect::<Vec<_>>();
+        let mut merged_pipelines = Vec::with_capacity(components.len());
+        for mut indices in components.into_values() {
+            indices.sort_by_key(|index| slots[*index].as_ref().expect("unclaimed pipeline").order);
+            let first = indices.remove(0);
+            let mut merged = slots[first].take().expect("component pipeline claimed once");
+            for index in indices {
+                let mut pipeline = slots[index].take().expect("component pipeline claimed once");
+                merged.order = merged.order.min(pipeline.order);
+                merge_bindings(&mut merged.template.bindings, pipeline.template.bindings);
+                if merged.template.default_total_threads.is_none() {
+                    merged.template.default_total_threads = pipeline.template.default_total_threads;
+                }
+                for feedback in pipeline.template.feedback {
+                    if !merged.template.feedback.contains(&feedback) {
+                        merged.template.feedback.push(feedback);
+                    }
+                }
+                merged.phases.append(&mut pipeline.phases);
+            }
+            merged.phases = topologically_order_phases(merged.phases);
+            merged_pipelines.push(merged);
+        }
+        merged_pipelines.sort_by_key(|pipeline| pipeline.order);
+        self.pipelines = merged_pipelines;
+    }
 
-        loop {
-            let mut merge = None;
-            for (binding, producer_entries) in &producers {
-                let Some(consumer_entries) = consumers.get(binding) else {
-                    continue;
-                };
-                let producer_pipelines = schedule_indices_for_entries(&self.pipelines, producer_entries);
-                let consumer_pipelines = schedule_indices_for_entries(&self.pipelines, consumer_entries);
-                if producer_pipelines.len() == 1
-                    && consumer_pipelines.len() == 1
-                    && producer_pipelines[0] != consumer_pipelines[0]
-                {
-                    merge = Some((producer_pipelines[0], consumer_pipelines[0]));
-                    break;
+    fn complete_resource_flow_accesses(&mut self, flows: &[(ResourceId, CompilerResourceFlow)]) {
+        for (resource, flow) in flows {
+            let has_writer = self.phases().any(|phase| {
+                phase.abi.source_entry == Some(flow.producer)
+                    && phase
+                        .resources
+                        .iter()
+                        .any(|scheduled| scheduled.resource == *resource && scheduled.access.writes())
+            });
+            if !has_writer {
+                let writer = self
+                    .phases()
+                    .filter(|phase| phase.abi.source_entry == Some(flow.producer))
+                    .map(|phase| phase.id)
+                    .last();
+                if let Some(writer) = writer {
+                    let phase = self.phase_mut(writer).expect("planned producer phase disappeared");
+                    merge_scheduled_resource(&mut phase.resources, *resource, ResourceAccess::Write);
                 }
             }
-            let Some((producer, consumer)) = merge else {
-                break;
-            };
-            self.merge_pipeline_into(producer, consumer);
-        }
-        self.add_compiler_resource_dependencies(&producers, &consumers);
-    }
-
-    fn merge_pipeline_into(&mut self, producer_index: usize, consumer_index: usize) {
-        let producer = self.pipelines.remove(producer_index);
-        let consumer_index =
-            if producer_index < consumer_index { consumer_index - 1 } else { consumer_index };
-        let consumer = &mut self.pipelines[consumer_index];
-        let mut phases = producer.phases;
-        phases.append(&mut consumer.phases);
-        consumer.phases = phases;
-        consumer.order = consumer.order.min(producer.order);
-        merge_bindings(&mut consumer.template.bindings, producer.template.bindings);
-        for feedback in producer.template.feedback {
-            if !consumer.template.feedback.contains(&feedback) {
-                consumer.template.feedback.push(feedback);
+            for consumer in &flow.consumers {
+                let has_reader = self.phases().any(|phase| {
+                    phase.abi.source_entry == Some(*consumer)
+                        && phase
+                            .resources
+                            .iter()
+                            .any(|scheduled| scheduled.resource == *resource && scheduled.access.reads())
+                });
+                if !has_reader {
+                    let reader = self
+                        .phases()
+                        .find(|phase| phase.abi.source_entry == Some(*consumer))
+                        .map(|phase| phase.id);
+                    if let Some(reader) = reader {
+                        let phase = self.phase_mut(reader).expect("planned consumer phase disappeared");
+                        merge_scheduled_resource(&mut phase.resources, *resource, ResourceAccess::Read);
+                    }
+                }
             }
         }
     }
 
-    fn add_compiler_resource_dependencies(
-        &mut self,
-        producers: &HashMap<ResourceId, Vec<&str>>,
-        consumers: &HashMap<ResourceId, Vec<&str>>,
-    ) {
-        for (binding, producer_entries) in producers {
-            let Some(consumer_entries) = consumers.get(binding) else {
-                continue;
-            };
+    fn phase_mut(&mut self, id: KernelId) -> Option<&mut KernelPhase> {
+        self.pipelines
+            .iter_mut()
+            .flat_map(|pipeline| pipeline.phases.iter_mut())
+            .chain(self.graphics_passthroughs.iter_mut())
+            .find(|phase| phase.id == id)
+    }
+
+    fn add_resource_flow_dependencies(&mut self, flows: &[(ResourceId, CompilerResourceFlow)]) {
+        for (resource, flow) in flows {
+            let producer_ids =
+                self.phases()
+                    .filter(|phase| {
+                        phase.abi.source_entry == Some(flow.producer)
+                            && phase.resources.iter().any(|scheduled| {
+                                scheduled.resource == *resource && scheduled.access.writes()
+                            })
+                    })
+                    .map(|phase| phase.id)
+                    .collect::<Vec<_>>();
             for pipeline in &mut self.pipelines {
-                let producer_phases: Vec<usize> = pipeline
-                    .phases
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, phase)| {
-                        producer_entries.iter().any(|entry| phase.entry_point == *entry).then_some(index)
-                    })
-                    .collect();
-                let consumer_phases: Vec<usize> = pipeline
-                    .phases
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, phase)| {
-                        consumer_entries.iter().any(|entry| phase.entry_point == *entry).then_some(index)
-                    })
-                    .collect();
-                for consumer_index in consumer_phases {
-                    for &producer_index in &producer_phases {
-                        // A merged producer pipeline is always placed before
-                        // its consumer. If both entries were already in one
-                        // pipeline, retain only a genuine forward dependency.
-                        let producer_id = pipeline.phases[producer_index].id;
-                        if producer_index < consumer_index
-                            && !pipeline.phases[consumer_index].dependencies.contains(&producer_id)
-                        {
-                            pipeline.phases[consumer_index].dependencies.push(producer_id);
+                for phase in &mut pipeline.phases {
+                    if phase.abi.source_entry.is_some_and(|source| flow.consumers.contains(&source))
+                        && phase
+                            .resources
+                            .iter()
+                            .any(|scheduled| scheduled.resource == *resource && scheduled.access.reads())
+                    {
+                        for producer in &producer_ids {
+                            if !phase.dependencies.contains(producer) {
+                                phase.dependencies.push(*producer);
+                            }
                         }
+                        phase.dependencies.sort_unstable();
                     }
                 }
             }
@@ -1446,18 +1571,46 @@ fn binding_ref(binding: &crate::pipeline_descriptor::Binding) -> Option<BindingR
     }
 }
 
-fn schedule_indices_for_entries(pipelines: &[ScheduledPipeline], entries: &[&str]) -> Vec<usize> {
-    pipelines
-        .iter()
-        .enumerate()
-        .filter_map(|(index, pipeline)| {
-            pipeline
-                .phases
-                .iter()
-                .any(|phase| entries.iter().any(|entry| phase.entry_point == *entry))
-                .then_some(index)
-        })
-        .collect()
+fn find_component(parents: &mut [usize], index: usize) -> usize {
+    if parents[index] != index {
+        parents[index] = find_component(parents, parents[index]);
+    }
+    parents[index]
+}
+
+fn union_components(parents: &mut [usize], left: usize, right: usize) {
+    let left = find_component(parents, left);
+    let right = find_component(parents, right);
+    if left != right {
+        parents[right] = left;
+    }
+}
+
+fn topologically_order_phases(phases: Vec<KernelPhase>) -> Vec<KernelPhase> {
+    let phase_ids = phases.iter().map(|phase| phase.id).collect::<HashSet<_>>();
+    let mut remaining = phases.into_iter().map(Some).collect::<Vec<_>>();
+    let mut emitted = HashSet::new();
+    let mut ordered = Vec::with_capacity(remaining.len());
+    while ordered.len() < remaining.len() {
+        let ready = remaining.iter().position(|candidate| {
+            candidate.as_ref().is_some_and(|phase| {
+                phase
+                    .dependencies
+                    .iter()
+                    .all(|dependency| !phase_ids.contains(dependency) || emitted.contains(dependency))
+            })
+        });
+        let Some(index) = ready else {
+            // Preserve stable order for the remainder. Validation reports the
+            // actual cycle or unresolved dependency with kernel identities.
+            ordered.extend(remaining.into_iter().flatten());
+            return ordered;
+        };
+        let phase = remaining[index].take().expect("ready phase exists");
+        emitted.insert(phase.id);
+        ordered.push(phase);
+    }
+    ordered
 }
 
 fn merge_bindings(target: &mut Vec<Binding>, source: Vec<Binding>) {
@@ -1569,6 +1722,34 @@ mod tests {
         assert_eq!(
             ResourceAccess::Read.merge(ResourceAccess::Read),
             ResourceAccess::Read
+        );
+    }
+
+    #[test]
+    fn resource_flow_topology_orders_chained_prepasses_before_consumer() {
+        let phase = |id, dependencies| KernelPhase {
+            id: KernelId(id),
+            entry_point: format!("phase_{id}"),
+            recipe: KernelRecipe::SerialCompute,
+            abi: EntryAbiProjection {
+                source_entry: Some(SemanticEntryId(id)),
+                inputs: Vec::new(),
+                output_routes: Vec::new(),
+            },
+            workgroup_size: (1, 1, 1),
+            domain: KernelDomain::Fixed { x: 1, y: 1, z: 1 },
+            domain_selection: DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+            resources: Vec::new(),
+            dependencies,
+        };
+        let ordered = topologically_order_phases(vec![
+            phase(1, vec![]),
+            phase(0, vec![KernelId(1), KernelId(2)]),
+            phase(2, vec![KernelId(1)]),
+        ]);
+        assert_eq!(
+            ordered.iter().map(|phase| phase.id).collect::<Vec<_>>(),
+            vec![KernelId(1), KernelId(2), KernelId(0)]
         );
     }
 

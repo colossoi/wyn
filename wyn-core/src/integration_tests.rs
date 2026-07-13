@@ -1349,6 +1349,41 @@ entry add_sum(xs: []i32) []i32 =
     );
 }
 
+#[test]
+fn scalar_prepass_flow_is_explicit_in_resource_manifest() {
+    use crate::egir::program::{CompilerResourceKind, ResourceOrigin};
+
+    let allocated = crate::compile_thru_tlc(
+        r#"
+#[compute]
+entry add_sum(xs: []i32) []i32 =
+  let total = reduce(|a: i32, b: i32| a + b, 0, xs) in
+  map(|x: i32| x + total, xs)
+"#,
+    )
+    .expect("scalar prepass TLC")
+    .infer_input_slice_bounds()
+    .to_egraph()
+    .expect("scalar prepass allocation");
+    let flow = allocated
+        .logical_resources()
+        .iter()
+        .find_map(|resource| match &resource.origin {
+            ResourceOrigin::Compiler(compiler) if compiler.kind == CompilerResourceKind::ScalarHandoff => {
+                compiler.flow.as_ref()
+            }
+            _ => None,
+        })
+        .expect("scalar handoff has an explicit resource flow");
+    let producer = &allocated.inner.entry_points[flow.producer.0 as usize];
+    assert!(producer.name.starts_with("add_sum_prepass_"));
+    assert_eq!(flow.consumers.len(), 1);
+    assert_eq!(
+        allocated.inner.entry_points[flow.consumers[0].0 as usize].name,
+        "add_sum"
+    );
+}
+
 // =============================================================================
 // Phase 2 regression: unbound `Var(Symbol(sym))` references through TLC passes
 // =============================================================================
