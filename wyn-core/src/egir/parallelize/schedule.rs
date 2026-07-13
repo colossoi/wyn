@@ -11,11 +11,12 @@ use std::sync::Arc;
 
 use crate::egir::graph_ops;
 use crate::egir::program::{
-    CompilerFlowEndpoint, CompilerResourceFlow, EntryPublication, InputSlotId, LogicalResource,
+    CompilerFlowEndpoint, CompilerResourceFlow, EgirFunc, EntryPublication, InputSlotId, LogicalResource,
     MaterializationRequirement, OutputSlotId, PhysicalResourceTable, PlannedEntryPublication,
-    PlannedKernelBody, PrepassKind, PrepassRequirement, ResourceOrigin, SemanticEntry, SemanticEntryId,
-    SemanticResourceDecl, SemanticResourceRef,
+    PlannedKernelBody, PrepassKind, PrepassRequirement, RegionInterner, ResourceOrigin, SemanticEntry,
+    SemanticEntryId, SemanticResourceDecl, SemanticResourceRef,
 };
+use crate::egir::types::RegionId;
 use crate::egir::types::{
     EgirSoac, FilterOutput, FilterPlan, FilterState, RuntimeFilterLength, SegExtent, SegPlacement,
     SegResourceAccessKind, SideEffectKind,
@@ -38,6 +39,13 @@ pub struct KernelPlan {
     semantic_abi: HashMap<SemanticEntryId, SemanticAbi>,
     publications: HashMap<String, PlannedEntryPublication>,
     publication_order: Vec<String>,
+    /// Callable helpers synthesized by target planning. They are not admitted
+    /// to semantic EGIR; physical construction publishes them only after the
+    /// plan has validated.
+    generated_callables: Vec<EgirFunc>,
+    /// Source callable identities plus planner-generated additions. Planned
+    /// Seg bodies use these stable ids before physical functions exist.
+    region_interner: RegionInterner,
 }
 
 #[derive(Clone, Debug)]
@@ -83,6 +91,14 @@ impl ValidatedKernelPlan {
         self.0
             .phases()
             .map(|phase| phase.body.as_deref().expect("validated kernel plan contains a construction body"))
+    }
+
+    pub(crate) fn generated_callables(&self) -> impl Iterator<Item = &EgirFunc> {
+        self.0.generated_callables.iter()
+    }
+
+    pub(crate) fn region_interner(&self) -> &RegionInterner {
+        &self.0.region_interner
     }
 }
 
@@ -223,6 +239,34 @@ impl ResourceAccess {
 }
 
 impl KernelPlan {
+    #[cfg(test)]
+    pub(crate) fn generated_callables(&self) -> impl Iterator<Item = &EgirFunc> {
+        self.generated_callables.iter()
+    }
+
+    pub(crate) fn intern_callable(&mut self, name: impl AsRef<str>) -> RegionId {
+        self.region_interner.intern(name)
+    }
+
+    pub(crate) fn callable_name(&self, id: RegionId) -> &str {
+        self.region_interner.name(id)
+    }
+
+    pub(crate) fn callable_names(&self, ids: impl IntoIterator<Item = RegionId>) -> Vec<String> {
+        self.region_interner.names(ids)
+    }
+
+    pub(crate) fn define_callable(&mut self, function: EgirFunc) -> RegionId {
+        assert!(
+            self.region_interner.get(&function.name).is_none(),
+            "planner-generated callable `{}` collides with a semantic callable",
+            function.name
+        );
+        let id = self.region_interner.intern(&function.name);
+        self.generated_callables.push(function);
+        id
+    }
+
     pub fn phases(&self) -> impl Iterator<Item = &KernelPhase> {
         self.pipelines
             .iter()
@@ -460,6 +504,7 @@ impl KernelPlan {
         entries: &[SemanticEntry],
         prepasses: &[PrepassRequirement],
         resources: &[LogicalResource],
+        region_interner: &RegionInterner,
     ) -> Self {
         let host_resources = resources
             .iter()
@@ -643,6 +688,8 @@ impl KernelPlan {
             semantic_abi,
             publications,
             publication_order,
+            generated_callables: Vec::new(),
+            region_interner: region_interner.clone(),
         }
     }
 
@@ -897,6 +944,37 @@ impl KernelPlan {
         }
     }
 
+    pub(crate) fn select_serial_bodies(&mut self, mut serialize: impl FnMut(&mut PlannedKernelBody)) {
+        for phase in self
+            .pipelines
+            .iter_mut()
+            .flat_map(|pipeline| pipeline.phases.iter_mut())
+            .chain(self.unpublished.iter_mut())
+        {
+            let Some(body) = &mut phase.body else {
+                continue;
+            };
+            let body = Arc::make_mut(body);
+            serialize(body);
+            phase.workgroup_size = body_workgroup(body);
+            if let DomainSelection::Inferred(fallback) = &phase.domain_selection {
+                phase.domain = inferred_body_domain(body, fallback.clone());
+            }
+            phase.resources = body_resources(body);
+            if phase.recipe == KernelRecipe::MultiConsumerMaterialization {
+                let domain = KernelDomain::Fixed { x: 1, y: 1, z: 1 };
+                phase.domain = domain.clone();
+                phase.domain_selection = DomainSelection::Explicit(domain);
+            }
+            if matches!(
+                phase.recipe,
+                KernelRecipe::ReducePhase1 | KernelRecipe::ScanPhase1
+            ) {
+                phase.recipe = KernelRecipe::SerialCompute;
+            }
+        }
+    }
+
     pub fn set_output_projection(&mut self, entry_point: &str, outputs: Vec<OutputSlotId>) {
         let phase = self
             .pipelines
@@ -1145,6 +1223,21 @@ impl KernelPlan {
 
     /// Validate graph-local invariants before publishing a host ABI.
     pub fn validate(&self) -> Result<(), String> {
+        let mut callable_names = HashSet::new();
+        for function in &self.generated_callables {
+            if !callable_names.insert(function.name.as_str()) {
+                return Err(format!(
+                    "planner-generated callable `{}` is defined more than once",
+                    function.name
+                ));
+            }
+            if self.region_interner.get(&function.name).is_none() {
+                return Err(format!(
+                    "planner-generated callable `{}` has no region identity",
+                    function.name
+                ));
+            }
+        }
         let mut names = HashSet::new();
         let mut ids = HashSet::new();
         for pipeline in &self.pipelines {
@@ -2155,7 +2248,7 @@ mod tests {
             )),
             length: None,
         };
-        let mut entry = SemanticEntry::new(
+        let mut entry = SemanticEntry::new_with_resources(
             "serial".into(),
             Span::dummy(),
             ExecutionModel::Compute {

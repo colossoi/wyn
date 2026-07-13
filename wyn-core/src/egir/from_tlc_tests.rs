@@ -2,7 +2,7 @@
 // Tests
 // ============================================================================
 
-use super::{run, Converter};
+use super::{run, Converter, ResourceRegistry};
 use crate::ast::TypeName;
 use crate::pipeline_descriptor::PipelineDescriptor;
 use crate::ssa::types::{FuncBody, InstKind, Program};
@@ -65,6 +65,7 @@ fn convert_simple_def(body: Term, params: Vec<(SymbolId, Type<TypeName>)>) -> Fu
 
     let mut binding_ids = crate::IdSource::<u32>::new();
     let region_interner = std::cell::RefCell::new(crate::egir::program::RegionInterner::default());
+    let resources = std::cell::RefCell::new(ResourceRegistry::default());
     let mut converter = Converter::new(
         &top_level,
         &constants_by_name,
@@ -72,6 +73,7 @@ fn convert_simple_def(body: Term, params: Vec<(SymbolId, Type<TypeName>)>) -> Fu
         pure_constants,
         &mut binding_ids,
         &region_interner,
+        &resources,
     );
     for (i, (sym, ty)) in params.iter().enumerate() {
         let nid = converter.graph.add_func_param(i, ty.clone());
@@ -120,6 +122,7 @@ fn test_add_roundtrip() {
 
     let mut binding_ids = crate::IdSource::<u32>::new();
     let region_interner = std::cell::RefCell::new(crate::egir::program::RegionInterner::default());
+    let resources = std::cell::RefCell::new(ResourceRegistry::default());
     let mut converter = Converter::new(
         &top_level,
         &constants_by_name,
@@ -127,6 +130,7 @@ fn test_add_roundtrip() {
         pure_constants,
         &mut binding_ids,
         &region_interner,
+        &resources,
     );
     let a_nid = converter.graph.add_func_param(0, i32_ty());
     converter.locals.insert(a_sym, a_nid);
@@ -193,6 +197,7 @@ fn test_gvn_via_let() {
 
     let mut binding_ids = crate::IdSource::<u32>::new();
     let region_interner = std::cell::RefCell::new(crate::egir::program::RegionInterner::default());
+    let resources = std::cell::RefCell::new(ResourceRegistry::default());
     let mut converter = Converter::new(
         &top_level,
         &constants_by_name,
@@ -200,6 +205,7 @@ fn test_gvn_via_let() {
         pure_constants,
         &mut binding_ids,
         &region_interner,
+        &resources,
     );
     let result = converter.convert_term(&outer_let).expect("conversion failed");
     converter.set_return(Some(result));
@@ -288,6 +294,7 @@ fn test_if_else_roundtrip() {
 
     let mut binding_ids = crate::IdSource::<u32>::new();
     let region_interner = std::cell::RefCell::new(crate::egir::program::RegionInterner::default());
+    let resources = std::cell::RefCell::new(ResourceRegistry::default());
     let mut converter = Converter::new(
         &top_level,
         &constants_by_name,
@@ -295,6 +302,7 @@ fn test_if_else_roundtrip() {
         pure_constants,
         &mut binding_ids,
         &region_interner,
+        &resources,
     );
     let c_nid = converter.graph.add_func_param(0, bool_ty);
     converter.locals.insert(c_sym, c_nid);

@@ -13,8 +13,8 @@ use polytype::Type;
 use super::graph_ops;
 use super::program::{
     CompilerResource, CompilerResourceKind, LogicalSize, MaterializationId, MaterializationRequirement,
-    MaterializationSubstitution, SemanticDependencyKind, SemanticOpId, SemanticProgram,
-    SemanticResourceDecl, SemanticResourceRef,
+    MaterializationSubstitution, ResourceId, ResourceOrigin, SemanticDependencyKind, SemanticOpId,
+    SemanticProgram, SemanticResourceDecl, SemanticResourceRef,
 };
 use super::types::{
     EGraph, EgirSoac, NodeId, PureOp, SegExtent, SegOpKind, SegPlacement, SegResourceAccess,
@@ -22,7 +22,6 @@ use super::types::{
 };
 use crate::ast::TypeName;
 use crate::interface::StorageRole;
-use crate::{BindingRef, IdSource};
 
 #[derive(Clone)]
 struct Candidate {
@@ -36,26 +35,21 @@ struct InputReplacement {
     view: NodeId,
     view_ty: Type<TypeName>,
     elem_ty: Type<TypeName>,
-    binding: BindingRef,
+    resource: ResourceId,
 }
 
-pub fn run(
-    inner: &mut SemanticProgram,
-    binding_ids: &mut IdSource<u32>,
-) -> HashMap<BindingRef, CompilerResource> {
-    let mut compiler_origins = HashMap::new();
+pub fn run(inner: &mut SemanticProgram) {
     loop {
         super::semantic_graph::rebuild_dependencies(inner);
         let Some(candidate) = find_candidate(inner) else {
             break;
         };
-        materialize_candidate(inner, binding_ids, candidate, &mut compiler_origins);
+        materialize_candidate(inner, candidate);
     }
     super::semantic_graph::rebuild_dependencies(inner);
     if cfg!(debug_assertions) {
         verify_no_unallocated_multi_consumer_maps(inner);
     }
-    compiler_origins
 }
 
 /// The allocation boundary promises that a pure internal SegMap is either
@@ -185,19 +179,14 @@ fn dependencies_are_cloneable(
     })
 }
 
-fn materialize_candidate(
-    inner: &mut SemanticProgram,
-    binding_ids: &mut IdSource<u32>,
-    candidate: Candidate,
-    compiler_origins: &mut HashMap<BindingRef, CompilerResource>,
-) {
+fn materialize_candidate(inner: &mut SemanticProgram, candidate: Candidate) {
     let entry = &inner.entry_points[candidate.entry];
     let producer_index = entry.graph.side_effect_index();
     let producer_site = producer_index.site(candidate.result).expect("multi-consumer producer disappeared");
     let (block_id, effect_index) = (producer_site.block, producer_site.index);
     let producer_effect = entry.graph.skeleton.blocks[block_id].side_effects[effect_index].clone();
     let producer_dependencies = dependency_effects(&entry.graph, block_id, effect_index);
-    let dependency_bindings = dependency_bindings(&entry.graph, block_id, &producer_dependencies);
+    let dependency_resources = dependency_resources(&entry.graph, block_id, &producer_dependencies);
     let SideEffectKind::Soac(EgirSoac::Seg {
         space,
         map_bodies,
@@ -208,13 +197,11 @@ fn materialize_candidate(
     else {
         unreachable!();
     };
-    let used_bindings = all_bindings(inner);
-    let mut bindings = Vec::with_capacity(map_bodies.len());
+    let first_resource = inner.resources.len() as u32;
+    let output_resources =
+        (0..map_bodies.len()).map(|slot| ResourceId(first_resource + slot as u32)).collect::<Vec<_>>();
     let mut sizes = Vec::with_capacity(map_bodies.len());
-    let mut used = used_bindings;
     for elem_ty in map_output_elem_types {
-        let binding = next_free_binding(binding_ids, &mut used);
-        bindings.push(binding);
         sizes.push(size_for_space(space, elem_ty));
     }
 
@@ -225,8 +212,8 @@ fn materialize_candidate(
             declaration.role == StorageRole::Input
                 || declaration
                     .resource
-                    .binding()
-                    .is_some_and(|binding| dependency_bindings.contains(&binding))
+                    .resource()
+                    .is_some_and(|resource| dependency_resources.contains(&resource))
         })
         .cloned()
         .collect();
@@ -257,17 +244,17 @@ fn materialize_candidate(
     let producer_owner = candidate.id;
     let producer_graph = &mut producer.graph;
     let mut output_views = Vec::new();
-    for ((&binding, elem_ty), size) in bindings.iter().zip(map_output_elem_types).zip(&sizes) {
-        let view = graph_ops::intern_storage_view(producer_graph, binding, elem_ty.clone(), None);
+    for ((&resource, elem_ty), size) in output_resources.iter().zip(map_output_elem_types).zip(&sizes) {
+        let view = graph_ops::intern_resource_view(producer_graph, resource, elem_ty.clone(), None);
         output_views.push(view);
         producer.resource_declarations.push(SemanticResourceDecl {
-            resource: SemanticResourceRef::Binding(binding),
+            resource: SemanticResourceRef::Resource(resource),
             role: StorageRole::Output,
             elem_ty: elem_ty.clone(),
             size: size.clone(),
         });
         producer.substitutions.push(MaterializationSubstitution {
-            resource: SemanticResourceRef::Binding(binding),
+            resource: SemanticResourceRef::Resource(resource),
             consumers: Vec::new(),
         });
     }
@@ -285,25 +272,23 @@ fn materialize_candidate(
         *placement = SegPlacement::Kernel;
         map_destinations.fill(SoacDestination::OutputView);
         producer_effect.operand_nodes.extend(output_views.iter().copied());
-        for &binding in &bindings {
+        for &resource in &output_resources {
             resources.push(SegResourceAccess {
-                resource: SemanticResourceRef::Binding(binding),
+                resource: SemanticResourceRef::Resource(resource),
                 access: SegResourceAccessKind::Write,
             });
         }
-        resources.sort_by_key(|resource| {
-            resource.resource.binding().map(|binding| (binding.set, binding.binding))
-        });
+        resources.sort_by_key(|access| access.resource.resource().map(|resource| resource.0));
     }
 
     // Rewire the source entry to read the shared storage views and remove the
     // now-separate producer operation.
     let entry = &mut inner.entry_points[candidate.entry];
     let mut project_views = Vec::new();
-    for (lane, ((&binding, elem_ty), result_ty)) in
-        bindings.iter().zip(map_output_elem_types).zip(result_types).enumerate()
+    for (lane, ((&resource, elem_ty), result_ty)) in
+        output_resources.iter().zip(map_output_elem_types).zip(result_types).enumerate()
     {
-        let view = graph_ops::intern_storage_view(&mut entry.graph, binding, elem_ty.clone(), None);
+        let view = graph_ops::intern_resource_view(&mut entry.graph, resource, elem_ty.clone(), None);
         let project = entry
             .graph
             .nodes
@@ -327,10 +312,10 @@ fn materialize_candidate(
             view,
             view_ty: entry.graph.types[&view].clone(),
             elem_ty: elem_ty.clone(),
-            binding,
+            resource,
         });
         entry.resource_declarations.push(SemanticResourceDecl {
-            resource: SemanticResourceRef::Binding(binding),
+            resource: SemanticResourceRef::Resource(resource),
             role: StorageRole::Input,
             elem_ty: elem_ty.clone(),
             size: sizes[lane].clone(),
@@ -360,15 +345,20 @@ fn materialize_candidate(
     entry.graph.skeleton.blocks[block_id].side_effects.remove(effect_index);
     super::semantic_opt::eliminate_dead_seg_ops_in_graph(&mut entry.graph);
 
-    for (slot, &binding) in bindings.iter().enumerate() {
-        compiler_origins.insert(
-            binding,
-            CompilerResource::new(
+    for (slot, ((&resource, elem_ty), size)) in
+        output_resources.iter().zip(map_output_elem_types).zip(&sizes).enumerate()
+    {
+        debug_assert_eq!(resource.0 as usize, inner.resources.len());
+        inner.resources.push(super::program::LogicalResource {
+            id: resource,
+            origin: ResourceOrigin::Compiler(CompilerResource::new(
                 CompilerResourceKind::MultiConsumerArray,
-                Some(producer_owner.clone()),
+                Some(producer_owner),
                 slot,
-            ),
-        );
+            )),
+            elem_ty: elem_ty.clone(),
+            size: size.clone(),
+        });
     }
     inner.materializations.push(producer);
 }
@@ -414,13 +404,13 @@ fn dependency_effects(
     retained
 }
 
-fn dependency_bindings(
+fn dependency_resources(
     graph: &EGraph,
     block_id: crate::ssa::framework::BlockId,
     effects: &HashSet<usize>,
-) -> HashSet<BindingRef> {
+) -> HashSet<ResourceId> {
     let block = &graph.skeleton.blocks[block_id];
-    let mut bindings = HashSet::new();
+    let mut dependencies = HashSet::new();
     for &effect_index in effects {
         let effect = &block.side_effects[effect_index];
         wyn_graph::for_each_reachable(
@@ -432,25 +422,25 @@ fn dependency_bindings(
                 }
             },
             |node| {
-                if let Some(binding) = graph_ops::extract_storage_view_source(graph, node)
-                    .and_then(SemanticResourceRef::binding)
+                if let Some(resource) = graph_ops::extract_storage_view_source(graph, node)
+                    .and_then(SemanticResourceRef::resource)
                 {
-                    bindings.insert(binding);
+                    dependencies.insert(resource);
                 }
             },
         );
         match &effect.kind {
             SideEffectKind::Soac(EgirSoac::Seg { resources, .. }) => {
-                bindings.extend(resources.iter().filter_map(|resource| resource.resource.binding()));
+                dependencies.extend(resources.iter().filter_map(|access| access.resource.resource()));
             }
             SideEffectKind::Soac(EgirSoac::Filter { output, .. }) => {
                 if let super::types::FilterOutput::Runtime { scratch, length } = output {
-                    if let Some(scratch) = scratch.binding() {
-                        bindings.insert(scratch);
+                    if let Some(scratch) = scratch.resource() {
+                        dependencies.insert(scratch);
                     }
                     if let super::types::RuntimeFilterLength::EntryOutput(length) = length {
-                        if let Some(length) = length.binding() {
-                            bindings.insert(length);
+                        if let Some(length) = length.resource() {
+                            dependencies.insert(length);
                         }
                     }
                 }
@@ -458,7 +448,7 @@ fn dependency_bindings(
             _ => {}
         }
     }
-    bindings
+    dependencies
 }
 
 fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]) {
@@ -481,10 +471,10 @@ fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]
                             input_elem_types[input] = replacement.elem_ty.clone();
                             if !resources
                                 .iter()
-                                .any(|resource| resource.resource.binding() == Some(replacement.binding))
+                                .any(|access| access.resource.resource() == Some(replacement.resource))
                             {
                                 resources.push(SegResourceAccess {
-                                    resource: SemanticResourceRef::Binding(replacement.binding),
+                                    resource: SemanticResourceRef::Resource(replacement.resource),
                                     access: SegResourceAccessKind::Read,
                                 });
                             }
@@ -545,43 +535,8 @@ fn replace_space_nodes(space: &mut super::types::SegSpace, replacements: &[Input
         if let Some(replacement) = replacements.iter().find(|replacement| *node == replacement.project) {
             *node = replacement.view;
             if let SegExtent::ResourceLength { resource, .. } = extent {
-                *resource = SemanticResourceRef::Binding(replacement.binding);
+                *resource = SemanticResourceRef::Resource(replacement.resource);
             }
-        }
-    }
-}
-
-fn all_bindings(inner: &SemanticProgram) -> HashSet<BindingRef> {
-    inner
-        .entry_points
-        .iter()
-        .flat_map(|entry| {
-            entry
-                .inputs
-                .iter()
-                .filter_map(|input| input.storage_binding)
-                .chain(entry.outputs.iter().filter_map(|output| output.storage_binding))
-                .chain(
-                    entry
-                        .resource_declarations
-                        .iter()
-                        .filter_map(|declaration| declaration.resource.binding()),
-                )
-        })
-        .chain(inner.materializations.iter().flat_map(|requirement| {
-            requirement
-                .resource_declarations
-                .iter()
-                .filter_map(|declaration| declaration.resource.binding())
-        }))
-        .collect()
-}
-
-fn next_free_binding(binding_ids: &mut IdSource<u32>, used: &mut HashSet<BindingRef>) -> BindingRef {
-    loop {
-        let binding = BindingRef::new(super::from_tlc::AUTO_STORAGE_SET, binding_ids.next_id());
-        if used.insert(binding) {
-            return binding;
         }
     }
 }
@@ -599,8 +554,8 @@ fn size_for_space(space: &super::types::SegSpace, elem_ty: &Type<TypeName>) -> L
             resource,
             elem_bytes: source_elem_bytes,
             ..
-        }] => LogicalSize::PendingLikeBinding {
-            binding: resource.binding().expect("materialization runs before resource normalization"),
+        }] => LogicalSize::LikeResource {
+            resource: resource.resource().expect("materialization requires normalized resources"),
             elem_bytes,
             src_elem_bytes: *source_elem_bytes,
         },

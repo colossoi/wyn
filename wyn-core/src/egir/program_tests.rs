@@ -25,7 +25,7 @@ fn empty_func(name: &str) -> EgirFunc {
 }
 
 fn empty_entry(name: &str) -> SemanticEntry {
-    SemanticEntry::new(
+    SemanticEntry::new_with_resources(
         name.to_string(),
         Span::dummy(),
         ExecutionModel::Compute {
@@ -104,28 +104,28 @@ fn allocated_resource_verifier_rejects_missing_size_source() {
 fn scalar_handoff_classification_uses_typed_prepass_role_not_name() {
     let typed_binding = crate::BindingRef::new(0, 10);
     let misleading_binding = crate::BindingRef::new(0, 11);
-    let output = |binding| crate::interface::StorageBindingDecl {
-        binding,
-        role: crate::interface::StorageRole::Output,
+    let declaration = |resource, role| SemanticResourceDecl {
+        resource: SemanticResourceRef::Resource(resource),
+        role,
         elem_ty: unit_ty(),
-        length: None,
-    };
-    let input = |binding| crate::interface::StorageBindingDecl {
-        binding,
-        role: crate::interface::StorageRole::Input,
-        elem_ty: unit_ty(),
-        length: None,
+        size: LogicalSize::Unspecified,
     };
 
     let mut typed = empty_entry("renamed_without_magic_marker");
-    typed.resource_declarations.push(SemanticResourceDecl::pending(output(typed_binding)));
+    typed.resource_declarations.push(declaration(ResourceId(0), crate::interface::StorageRole::Output));
 
     let mut misleading = empty_entry("user_prepass_name");
-    misleading.resource_declarations.push(SemanticResourceDecl::pending(output(misleading_binding)));
+    misleading
+        .resource_declarations
+        .push(declaration(ResourceId(1), crate::interface::StorageRole::Output));
 
     let mut consumer = empty_entry("consumer");
-    consumer.resource_declarations.push(SemanticResourceDecl::pending(input(typed_binding)));
-    consumer.resource_declarations.push(SemanticResourceDecl::pending(input(misleading_binding)));
+    consumer
+        .resource_declarations
+        .push(declaration(ResourceId(0), crate::interface::StorageRole::Input));
+    consumer
+        .resource_declarations
+        .push(declaration(ResourceId(1), crate::interface::StorageRole::Input));
 
     let mut inner = SemanticProgram::new(
         vec![],
@@ -135,14 +135,43 @@ fn scalar_handoff_classification_uses_typed_prepass_role_not_name() {
         PipelineDescriptor::default(),
         RegionInterner::default(),
     );
+    inner.resources = vec![
+        LogicalResource {
+            id: ResourceId(0),
+            origin: ResourceOrigin::Host(typed_binding),
+            elem_ty: unit_ty(),
+            size: LogicalSize::Unspecified,
+        },
+        LogicalResource {
+            id: ResourceId(1),
+            origin: ResourceOrigin::Host(misleading_binding),
+            elem_ty: unit_ty(),
+            size: LogicalSize::Unspecified,
+        },
+    ];
     inner.prepass_roles.insert("renamed_without_magic_marker".into(), PrepassKind::Scalar);
-    let resources = scalar_handoff_resources(&inner);
-
-    assert_eq!(
-        resources.get(&typed_binding).map(|resource| resource.kind),
-        Some(CompilerResourceKind::ScalarHandoff)
-    );
-    assert!(!resources.contains_key(&misleading_binding));
+    plan_logical_resources(&mut inner);
+    let typed_resource = inner.prepasses[0].body.resource_declarations[0].resource.resource().unwrap();
+    let misleading_resource = inner
+        .entry_points
+        .iter()
+        .find(|entry| entry.name == "user_prepass_name")
+        .unwrap()
+        .resource_declarations[0]
+        .resource
+        .resource()
+        .unwrap();
+    assert!(matches!(
+        &inner.resources[typed_resource.0 as usize].origin,
+        ResourceOrigin::Compiler(CompilerResource {
+            kind: CompilerResourceKind::ScalarHandoff,
+            ..
+        })
+    ));
+    assert!(matches!(
+        inner.resources[misleading_resource.0 as usize].origin,
+        ResourceOrigin::Host(_)
+    ));
 }
 
 #[test]

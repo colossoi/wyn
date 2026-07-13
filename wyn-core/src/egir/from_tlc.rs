@@ -27,8 +27,12 @@ use crate::types::{extract_function_signature, TypeExt};
 use crate::{interface, BindingRef, SymbolId, SymbolTable};
 use polytype::Type;
 use smallvec::{smallvec, SmallVec};
+use std::collections::HashMap;
 
-use super::program::{EgirFunc, SemanticEntry, SemanticProgram};
+use super::program::{
+    CompilerResource, CompilerResourceKind, EgirFunc, LogicalResource, LogicalSize, ResourceOrigin,
+    SemanticEntry, SemanticProgram, SemanticResourceDecl, SemanticResourceRef,
+};
 use super::publish::PipelineDescriptorPublish;
 use super::types::*;
 use crate::pipeline_descriptor::{BufferLen, PipelineDescriptor};
@@ -106,6 +110,7 @@ struct GlobalContext<'a> {
     constants_by_name: &'a LookupMap<String, SymbolId>,
     symbols: &'a SymbolTable,
     region_interner: &'a std::cell::RefCell<crate::egir::program::RegionInterner>,
+    resources: &'a std::cell::RefCell<ResourceRegistry>,
 }
 
 impl<'a> GlobalContext<'a> {
@@ -121,7 +126,93 @@ impl<'a> GlobalContext<'a> {
             pure_constants.clone(),
             binding_ids,
             self.region_interner,
+            self.resources,
         )
+    }
+}
+
+/// Dense semantic resource arena built as TLC is converted. Host bindings are
+/// interned only as ABI constraints; every executable reference receives its
+/// `ResourceId` immediately. Compiler resources bypass the binding namespace
+/// entirely.
+#[derive(Default)]
+struct ResourceRegistry {
+    by_binding: HashMap<BindingRef, crate::ResourceId>,
+    resources: Vec<Option<LogicalResource>>,
+}
+
+impl ResourceRegistry {
+    fn host_id(&mut self, binding: BindingRef) -> crate::ResourceId {
+        if let Some(resource) = self.by_binding.get(&binding) {
+            return *resource;
+        }
+        let resource = crate::ResourceId(self.resources.len() as u32);
+        self.by_binding.insert(binding, resource);
+        self.resources.push(None);
+        resource
+    }
+
+    fn declare_host(
+        &mut self,
+        binding: BindingRef,
+        elem_ty: Type<TypeName>,
+        size: LogicalSize,
+    ) -> crate::ResourceId {
+        let resource = self.host_id(binding);
+        let slot = &mut self.resources[resource.0 as usize];
+        match slot {
+            Some(existing) => {
+                if matches!(existing.size, LogicalSize::Unspecified)
+                    && !matches!(size, LogicalSize::Unspecified)
+                {
+                    existing.size = size;
+                }
+            }
+            None => {
+                *slot = Some(LogicalResource {
+                    id: resource,
+                    origin: ResourceOrigin::Host(binding),
+                    elem_ty,
+                    size,
+                });
+            }
+        }
+        resource
+    }
+
+    fn allocate_compiler(
+        &mut self,
+        compiler: CompilerResource,
+        elem_ty: Type<TypeName>,
+        size: LogicalSize,
+    ) -> crate::ResourceId {
+        let resource = crate::ResourceId(self.resources.len() as u32);
+        self.resources.push(Some(LogicalResource {
+            id: resource,
+            origin: ResourceOrigin::Compiler(compiler),
+            elem_ty,
+            size,
+        }));
+        resource
+    }
+
+    fn finish(
+        self,
+    ) -> Result<(HashMap<BindingRef, crate::ResourceId>, Vec<LogicalResource>), ConvertError> {
+        let resources = self
+            .resources
+            .into_iter()
+            .enumerate()
+            .map(|(index, resource)| {
+                resource.ok_or_else(|| {
+                    ConvertError::Internal(format!(
+                        "semantic resource {:?} was referenced but never declared",
+                        crate::ResourceId(index as u32)
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((self.by_binding, resources))
     }
 }
 
@@ -147,12 +238,14 @@ pub fn run(
     // Region interner shared by every converter, then handed to `SemanticProgram` so
     // the function arena keys agree with the SegBody indices built here.
     let region_interner = std::cell::RefCell::new(crate::egir::program::RegionInterner::default());
+    let resource_registry = std::cell::RefCell::new(ResourceRegistry::default());
 
     let ctx = GlobalContext {
         top_level: &top_level,
         constants_by_name: &constants_by_name,
         symbols,
         region_interner: &region_interner,
+        resources: &resource_registry,
     };
 
     // Phase 1: detect pure constants. We elaborate each arity-0 def's body
@@ -261,6 +354,8 @@ pub fn run(
         region_interner.into_inner(),
     );
     semantic.prepass_roles = prepass_roles;
+    let (by_binding, resources) = resource_registry.into_inner().finish()?;
+    super::program::finalize_converted_resources(&mut semantic, resources, &by_binding);
     Ok(semantic)
 }
 
@@ -317,18 +412,15 @@ fn convert_function<'a>(
     let result = converter.convert_term(inner_body)?;
     converter.set_return(Some(result));
 
-    // A runtime `filter` compacts into a reserved scratch storage buffer, which
-    // only an `SemanticEntry` can host (it owns a descriptor set + a binding
-    // namespace seeded above its params/outputs). An `EgirFunc` has neither, so
-    // a scratch binding accumulated during a function body's conversion has
-    // nowhere to be declared or sized — emitting it would silently mis-number
-    // the binding and drop its host declaration. In practice a function whose
+    // A runtime `filter` compacts into a compiler scratch resource, which only
+    // a `SemanticEntry` can own as a physicalization requirement. A standalone
+    // function has no entry interface to publish that requirement. In practice
+    // a function whose
     // result is a runtime filter is inlined into its caller before this pass
     // (see `filter_runtime_in_subroutine_compiles`), so this never fires. If it
-    // does, that inlining invariant broke: either restore it, or thread a
-    // caller-reserved scratch binding into the function's signature (like a
-    // param) so the buffer has a home.
-    if !converter.extra_storage_bindings.is_empty() {
+    // does, that inlining invariant broke: either restore it, or represent the
+    // scratch resource explicitly in the function's semantic ABI.
+    if !converter.extra_resource_declarations.is_empty() {
         return Err(ConvertError::GraphError(format!(
             "runtime `filter` in function `{def_name}` reserved a scratch storage buffer, but a \
              standalone function has no descriptor-set interface to host it — the call must be \
@@ -360,6 +452,91 @@ fn gather_prepass_forced_output(entry: &interface::EntryDecl) -> Option<BindingR
         .iter()
         .find(|d| matches!(d.role, interface::StorageRole::Output) && d.length.is_some())
         .map(|d| d.binding)
+}
+
+fn logical_size(
+    resources: &std::cell::RefCell<ResourceRegistry>,
+    length: Option<&BufferLen>,
+) -> LogicalSize {
+    match length {
+        Some(BufferLen::Fixed { bytes }) => LogicalSize::FixedBytes(*bytes),
+        Some(BufferLen::LikeInput {
+            set,
+            binding,
+            elem_bytes,
+            src_elem_bytes,
+        }) => LogicalSize::LikeResource {
+            resource: resources.borrow_mut().host_id(BindingRef::new(*set, *binding)),
+            elem_bytes: *elem_bytes,
+            src_elem_bytes: *src_elem_bytes,
+        },
+        Some(BufferLen::SameAsDispatch { elem_bytes }) => LogicalSize::SameAsDispatch {
+            elem_bytes: *elem_bytes,
+        },
+        None => LogicalSize::Unspecified,
+    }
+}
+
+fn entry_resource_declarations(
+    inputs: &[EntryInput],
+    outputs: &[EntryOutput],
+    abi_declarations: &[interface::StorageBindingDecl],
+    resources: &std::cell::RefCell<ResourceRegistry>,
+) -> Vec<SemanticResourceDecl> {
+    let mut declarations = Vec::new();
+    for declaration in abi_declarations {
+        let size = logical_size(resources, declaration.length.as_ref());
+        let resource = resources.borrow_mut().declare_host(
+            declaration.binding,
+            declaration.elem_ty.clone(),
+            size.clone(),
+        );
+        if !declarations
+            .iter()
+            .any(|item: &SemanticResourceDecl| item.resource == SemanticResourceRef::Resource(resource))
+        {
+            declarations.push(SemanticResourceDecl::from_abi(
+                declaration.clone(),
+                resource,
+                size,
+            ));
+        }
+    }
+    for input in inputs {
+        if let Some(binding) = input.storage_binding {
+            let size = logical_size(resources, input.length.as_ref());
+            let elem_ty = input.ty.elem_type().cloned().unwrap_or_else(|| input.ty.clone());
+            let resource = resources.borrow_mut().declare_host(binding, elem_ty.clone(), size.clone());
+            if !declarations.iter().any(|item| item.resource == SemanticResourceRef::Resource(resource)) {
+                declarations.push(SemanticResourceDecl {
+                    resource: SemanticResourceRef::Resource(resource),
+                    role: interface::StorageRole::Input,
+                    elem_ty,
+                    size,
+                });
+            }
+        }
+        if let Some((binding, _, _, _)) = input.storage_image_binding {
+            resources.borrow_mut().declare_host(binding, input.ty.clone(), LogicalSize::Unspecified);
+        }
+    }
+    for output in outputs {
+        let Some(binding) = output.storage_binding else {
+            continue;
+        };
+        let size = logical_size(resources, output.length.as_ref());
+        let elem_ty = output.ty.elem_type().cloned().unwrap_or_else(|| output.ty.clone());
+        let resource = resources.borrow_mut().declare_host(binding, elem_ty.clone(), size.clone());
+        if !declarations.iter().any(|item| item.resource == SemanticResourceRef::Resource(resource)) {
+            declarations.push(SemanticResourceDecl {
+                resource: SemanticResourceRef::Resource(resource),
+                role: interface::StorageRole::Output,
+                elem_ty,
+                size,
+            });
+        }
+    }
+    declarations
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -619,19 +796,18 @@ fn convert_entry_point(
         };
 
     let slot_sources = std::mem::take(&mut converter.slot_sources_accum);
-    // Gather buffers declared in TLC (`lift_gathers`, on the `EntryDecl`) plus
-    // scratch buffers allocated during body conversion (runtime `filter`).
-    let mut storage_bindings = entry.storage_bindings.clone();
-    storage_bindings.extend(std::mem::take(&mut converter.extra_storage_bindings));
+    let mut resource_declarations =
+        entry_resource_declarations(&inputs, &outputs, &entry.storage_bindings, ctx.resources);
+    resource_declarations.extend(std::mem::take(&mut converter.extra_resource_declarations));
     let (graph, control_headers) = converter.into_graph_parts();
     let output_count = outputs.len();
-    let mut entry = SemanticEntry::new(
+    let mut entry = SemanticEntry::new_with_resources(
         def_name.to_string(),
         def.body.span,
         execution_model,
         inputs,
         outputs,
-        storage_bindings,
+        resource_declarations,
         param_info,
         ret_type,
         graph,
@@ -701,20 +877,16 @@ struct Converter<'a, 'b> {
     /// same slot) has two. Empty for unit-returning entries that never
     /// went through `normalize_outputs`.
     slot_sources_accum: Vec<Vec<crate::egir::program::SlotSource>>,
-    /// Module-wide id factory for auto-storage binding numbers.
-    /// `alloc_scratch_binding` draws scratch slots (runtime `filter`
-    /// output buffers) from it during body conversion; the enclosing
-    /// `convert_entry_point` reborrows it through the converter to
-    /// allocate output bindings.
+    /// Module-wide id factory for host-visible auto-storage binding numbers.
+    /// Compiler resources never draw from this namespace.
     binding_ids: &'b mut crate::IdSource<u32>,
-    /// Compiler-introduced storage-binding declarations accumulated during
-    /// body conversion (runtime `filter` scratch buffers). Merged into the
-    /// `SemanticEntry.storage_bindings` at construction, where `publish.rs`
-    /// surfaces them to the host descriptor as `Intermediate`s.
-    extra_storage_bindings: Vec<crate::interface::StorageBindingDecl>,
+    /// Compiler-introduced logical resource declarations accumulated during
+    /// body conversion (runtime `filter` scratch buffers).
+    extra_resource_declarations: Vec<SemanticResourceDecl>,
     /// Program-wide region interner, shared across every converter so SegBody
     /// region indices agree with the final function arena.
     region_interner: &'a std::cell::RefCell<crate::egir::program::RegionInterner>,
+    resources: &'a std::cell::RefCell<ResourceRegistry>,
 }
 
 impl<'a, 'b> Converter<'a, 'b> {
@@ -725,6 +897,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         pure_constants: LookupSet<String>,
         binding_ids: &'b mut crate::IdSource<u32>,
         region_interner: &'a std::cell::RefCell<crate::egir::program::RegionInterner>,
+        resources: &'a std::cell::RefCell<ResourceRegistry>,
     ) -> Self {
         let graph = EGraph::new();
         let entry = graph.skeleton.entry;
@@ -742,20 +915,15 @@ impl<'a, 'b> Converter<'a, 'b> {
             current_span: None,
             slot_sources_accum: Vec::new(),
             binding_ids,
-            extra_storage_bindings: Vec::new(),
+            extra_resource_declarations: Vec::new(),
             region_interner,
+            resources,
         }
     }
 
     /// Resolve a callable name to its region index, interning it on first use.
     fn region(&self, name: impl AsRef<str>) -> RegionId {
         self.region_interner.borrow_mut().intern(name)
-    }
-
-    /// Reserve a fresh auto-storage binding for a compiler-introduced scratch
-    /// buffer (runtime `filter` output). Draws from the module-wide id factory.
-    fn alloc_scratch_binding(&mut self) -> BindingRef {
-        BindingRef::new(AUTO_STORAGE_SET, self.binding_ids.next_id())
     }
 
     /// Intern a pure node, attaching the current term's span (if any).
@@ -776,7 +944,9 @@ impl<'a, 'b> Converter<'a, 'b> {
     // -- Entry-point emission helpers (thin delegations to `graph_ops`) --
 
     fn emit_storage_view(&mut self, binding: BindingRef, view_ty: Type<TypeName>) -> NodeId {
-        super::graph_ops::intern_storage_view(&mut self.graph, binding, view_ty, self.current_span)
+        let elem_ty = view_ty.elem_type().cloned().unwrap_or_else(|| view_ty.clone());
+        let resource = self.resources.borrow_mut().declare_host(binding, elem_ty, LogicalSize::Unspecified);
+        super::graph_ops::intern_resource_view(&mut self.graph, resource, view_ty, self.current_span)
     }
 
     fn emit_storage_store(
@@ -1183,6 +1353,32 @@ impl<'a, 'b> Converter<'a, 'b> {
                     self.lower_storage_index(args, ty)
                 } else if *id == known.storage_store && args.len() == 4 {
                     self.lower_storage_store(args)
+                } else if *id == known.storage_len && args.len() == 2 {
+                    let binding = args
+                        .iter()
+                        .map(|arg| match &arg.kind {
+                            TermKind::IntLit(value) => value.parse::<u32>().ok(),
+                            _ => None,
+                        })
+                        .collect::<Option<Vec<_>>>()
+                        .filter(|parts| parts.len() == 2)
+                        .map(|parts| BindingRef::new(parts[0], parts[1]));
+                    if let Some(resource) =
+                        binding.map(|binding| self.resources.borrow_mut().host_id(binding))
+                    {
+                        Ok(self.intern_pure(PureOp::ResourceLen(resource), smallvec![], ty))
+                    } else {
+                        let arg_nids: SmallVec<[NodeId; 4]> =
+                            args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
+                        Ok(self.intern_pure(
+                            PureOp::Intrinsic {
+                                id: *id,
+                                overload_idx: *overload_idx,
+                            },
+                            arg_nids,
+                            ty,
+                        ))
+                    }
                 } else if *id == known.image_with && args.len() == 3 {
                     self.lower_image_with(args, ty)
                 } else if *id == known.image_load && args.len() == 2 {
@@ -2563,12 +2759,10 @@ impl<'a, 'b> Converter<'a, 'b> {
         // runtime-length view over it. The surviving count is the view's `len`
         // operand. A runtime-sized result cannot back a function-local array.
         //
-        // The scratch buffer must live in a descriptor set the host sees and a
-        // binding namespace seeded above the entry's params/outputs. Only an
-        // `SemanticEntry` provides both; an `EgirFunc` has no `storage_bindings`
-        // interface and an unseeded cursor. A runtime `filter` reaching here in
-        // a standalone function (one monomorphize/inlining didn't fold into its
-        // caller) is caught at `convert_function` — see the guard there.
+        // The scratch buffer is a compiler resource from birth. A runtime
+        // `filter` reaching here in a standalone function still has no entry
+        // interface that can own the requirement, so `convert_function`
+        // rejects that broken inlining state below.
         let input_binding = crate::types::array_view_buffer(&arr_ty).ok_or_else(|| {
             ConvertError::GraphError(
                 "filter: runtime-sized input has no concrete buffer — its size is \
@@ -2586,23 +2780,27 @@ impl<'a, 'b> Converter<'a, 'b> {
             crate::ssa::layout::storage_elem_stride(&output_elem_ty).ok_or_else(|| {
                 ConvertError::GraphError("filter: output element type has no static byte size".into())
             })?;
-        let scratch_out = self.alloc_scratch_binding();
-        self.extra_storage_bindings.push(crate::interface::StorageBindingDecl {
-            binding: scratch_out,
+        let input_resource = self.resources.borrow_mut().host_id(input_binding);
+        let scratch_size = LogicalSize::LikeResource {
+            resource: input_resource,
+            elem_bytes: output_elem_bytes,
+            src_elem_bytes: input_elem_bytes,
+        };
+        let scratch_out = self.resources.borrow_mut().allocate_compiler(
+            CompilerResource::new(CompilerResourceKind::FilterScratch, None, 0),
+            output_elem_ty.clone(),
+            scratch_size.clone(),
+        );
+        self.extra_resource_declarations.push(SemanticResourceDecl {
+            resource: SemanticResourceRef::Resource(scratch_out),
             role: crate::interface::StorageRole::Output,
             elem_ty: output_elem_ty.clone(),
-            // Host derives the element count from the input buffer
-            // (`src_elem_bytes`), then sizes the output buffer in output elements
-            // (`elem_bytes`); these differ when a fused map changes the element type.
-            length: Some(crate::pipeline_descriptor::BufferLen::LikeInput {
-                set: input_binding.set,
-                binding: input_binding.binding,
-                elem_bytes: output_elem_bytes,
-                src_elem_bytes: input_elem_bytes,
-            }),
+            size: scratch_size,
         });
-        let view_result_ty =
-            crate::types::view_array_of(&output_elem_ty, crate::types::buffer_tag(scratch_out));
+        let view_result_ty = crate::types::view_array_of(
+            &output_elem_ty,
+            Type::Constructed(TypeName::Resource(scratch_out), vec![]),
+        );
         Ok(self.emit_soac(
             EgirSoac::Filter {
                 state: super::types::FilterState::Raw,
@@ -2612,7 +2810,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                 input_array_type: arr_ty,
                 input_elem_type: elem_ty,
                 output: super::types::FilterOutput::Runtime {
-                    scratch: super::program::SemanticResourceRef::Binding(scratch_out),
+                    scratch: SemanticResourceRef::Resource(scratch_out),
                     length: super::types::RuntimeFilterLength::ViewOnly,
                 },
                 // Set by `realize_outputs` only when this filter is a compute
@@ -2673,6 +2871,11 @@ impl<'a, 'b> Converter<'a, 'b> {
                 len,
                 elem_ty,
             }) => {
+                let resource = self.resources.borrow_mut().declare_host(
+                    *binding,
+                    elem_ty.clone(),
+                    LogicalSize::Unspecified,
+                );
                 let offset_nid = self.convert_term(offset)?;
                 let len_nid = self.convert_term(len)?;
                 let array_ty = Type::Constructed(
@@ -2681,7 +2884,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                         elem_ty.clone(),
                         Type::Constructed(TypeName::ArrayVariantView, vec![]),
                         Type::Constructed(TypeName::SizePlaceholder, vec![]),
-                        crate::types::buffer_tag(*binding),
+                        Type::Constructed(TypeName::Resource(resource), vec![]),
                     ],
                 );
                 let result_nid = self.graph.alloc_side_effect_result(array_ty);
@@ -2690,7 +2893,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                 self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
                     semantic_id: None,
                     kind: SideEffectKind::Inst(InstKind::Op {
-                        tag: crate::op::OpTag::StorageView(crate::op::PureViewSource::Storage(*binding)),
+                        tag: crate::op::OpTag::StorageView(crate::op::PureViewSource::Resource(resource)),
                         operands: vec![
                             ValueRef::Ssa(Default::default()),
                             ValueRef::Ssa(Default::default()),

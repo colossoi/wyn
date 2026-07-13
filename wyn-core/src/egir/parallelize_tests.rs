@@ -51,7 +51,7 @@ fn output_ownership_comes_from_explicit_route_writer() {
         effects: Some((EffectToken(8), writer)),
         span: None,
     });
-    let mut entry = SemanticEntry::new(
+    let mut entry = SemanticEntry::new_with_resources(
         "route_test".into(),
         Span::dummy(),
         ExecutionModel::Compute {

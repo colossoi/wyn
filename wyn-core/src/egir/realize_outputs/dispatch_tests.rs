@@ -37,7 +37,7 @@ fn compute_slot_source_rejects_unsized_array_without_soac() {
         source,
         0,
         &unsized_arr_ty,
-        crate::BindingRef::new(0, 1),
+        crate::ResourceId(0),
         false,
     )
     .expect_err("runtime-sized array without a producing SOAC must be rejected");

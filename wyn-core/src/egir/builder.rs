@@ -171,20 +171,24 @@ impl EntryBuilder {
     // ---- Storage interface declarations ----------------------------------
 
     pub fn declare_intermediate_storage(&mut self, resource: ResourceId, elem_ty: Type<TypeName>) {
-        self.declare_intermediate_storage_sized(resource, elem_ty, None);
+        self.declare_intermediate_storage_sized(
+            resource,
+            elem_ty,
+            super::program::LogicalSize::Unspecified,
+        );
     }
 
     pub fn declare_intermediate_storage_sized(
         &mut self,
         resource: ResourceId,
         elem_ty: Type<TypeName>,
-        length: Option<crate::pipeline_descriptor::BufferLen>,
+        size: super::program::LogicalSize,
     ) {
         self.resource_declarations.push(SemanticResourceDecl {
             resource: SemanticResourceRef::Resource(resource),
             role: interface::StorageRole::Intermediate,
             elem_ty,
-            size: super::program::pending_logical_size(length.as_ref()),
+            size,
         });
     }
 
@@ -203,20 +207,20 @@ impl EntryBuilder {
     }
 
     pub fn declare_output_storage(&mut self, resource: ResourceId, elem_ty: Type<TypeName>) {
-        self.declare_output_storage_sized(resource, elem_ty, None);
+        self.declare_output_storage_sized(resource, elem_ty, super::program::LogicalSize::Unspecified);
     }
 
     pub fn declare_output_storage_sized(
         &mut self,
         resource: ResourceId,
         elem_ty: Type<TypeName>,
-        length: Option<crate::pipeline_descriptor::BufferLen>,
+        size: super::program::LogicalSize,
     ) {
         self.resource_declarations.push(SemanticResourceDecl {
             resource: SemanticResourceRef::Resource(resource),
             role: interface::StorageRole::Output,
             elem_ty,
-            size: super::program::pending_logical_size(length.as_ref()),
+            size,
         });
     }
 

@@ -19,7 +19,7 @@ use smallvec::smallvec;
 use crate::ast::TypeName;
 use crate::ssa::framework::BlockId;
 use crate::types::TypeExt;
-use crate::BindingRef;
+use crate::ResourceId;
 
 use super::super::from_tlc::ConvertError;
 use super::super::graph_ops;
@@ -93,7 +93,7 @@ pub fn compute_slot_source(
     source: NodeId,
     slot_index: usize,
     slot_ty: &Type<TypeName>,
-    binding: BindingRef,
+    resource: ResourceId,
     multi_source: bool,
 ) -> Result<Vec<OutputWriter>, ConvertError> {
     // 1. Consuming Scan: nothing to emit.
@@ -109,7 +109,7 @@ pub fn compute_slot_source(
         slot_ty.elem_type().cloned(),
         result_soac_is_array_projection(graph, effect_index, source),
     ) {
-        let view = graph_ops::intern_storage_view(graph, binding, elem_ty.clone(), None);
+        let view = graph_ops::intern_resource_view(graph, resource, elem_ty.clone(), None);
         if multi_source {
             reject_sibling_consumers(graph, source, slot_index)?;
         } else {
@@ -145,7 +145,7 @@ pub fn compute_slot_source(
         }
     });
     if let (Some(n), Some(et)) = (fixed_size, slot_ty.elem_type().cloned()) {
-        let view = graph_ops::intern_storage_view(graph, binding, et.clone(), None);
+        let view = graph_ops::intern_resource_view(graph, resource, et.clone(), None);
         let mut writers = Vec::with_capacity(n);
         for j in 0..n {
             let elem =
@@ -169,7 +169,7 @@ pub fn compute_slot_source(
     }
 
     // 5. Scalar / vector / matrix.
-    let view = graph_ops::intern_storage_view(graph, binding, slot_ty.clone(), None);
+    let view = graph_ops::intern_resource_view(graph, resource, slot_ty.clone(), None);
     let idx0 = graph_ops::intern_u32(graph, 0, None);
     let effect = graph_ops::emit_storage_store(
         graph,
@@ -646,22 +646,23 @@ pub(crate) fn reject_sibling_consumers(
 /// `false` (no retarget) for a static Bounded filter or any non-filter source —
 /// the caller then falls back to `compute_slot_source`.
 ///
-/// The filter's already-reserved scratch binding is repurposed as the paired
+/// The filter's already-reserved scratch resource is repurposed as the paired
 /// **length cell** (`u32`, 4 bytes): the loop stores the surviving count there
 /// so the host can read how many of the capacity-`n` output elements are valid.
 /// The output buffer is sized `LikeInput` on the filter's input (capacity `n`).
 #[allow(clippy::too_many_arguments)]
 pub fn retarget_filter_output(
     graph: &mut EGraph,
-    resources: &mut [crate::egir::program::SemanticResourceDecl],
+    declarations: &mut [crate::egir::program::SemanticResourceDecl],
+    resources: &mut [crate::egir::program::LogicalResource],
+    output_resource: ResourceId,
     output: &mut crate::ssa::types::EntryOutput,
     source: NodeId,
 ) -> Result<bool, ConvertError> {
     use crate::pipeline_descriptor::BufferLen;
-    let out_binding = output.storage_binding.expect("compute output has a storage binding");
 
     // Find the filter side-effect producing `source` and retarget it in place.
-    let mut retargeted: Option<(BindingRef, Type<TypeName>, Type<TypeName>, Type<TypeName>)> = None;
+    let mut retargeted: Option<(ResourceId, Type<TypeName>, Type<TypeName>, Type<TypeName>)> = None;
     'outer: for (_bid, block) in graph.skeleton.blocks.iter_mut() {
         for se in block.side_effects.iter_mut() {
             if se.result != Some(source) {
@@ -683,14 +684,14 @@ pub fn retarget_filter_output(
                 let input_arr_ty = input_array_type.clone();
                 let input_elem_ty = input_elem_type.clone();
                 let output_elem_ty = output_elem_type.clone();
-                // Compact straight into the output buffer; reuse the scratch
-                // binding as the paired length cell.
+                // Compact straight into the output resource; reuse the
+                // scratch resource as the paired length cell.
                 *filter_output = super::super::types::FilterOutput::Runtime {
-                    scratch: crate::egir::program::SemanticResourceRef::Binding(out_binding),
+                    scratch: crate::egir::program::SemanticResourceRef::Resource(output_resource),
                     length: super::super::types::RuntimeFilterLength::EntryOutput(scratch),
                 };
                 retargeted = Some((
-                    scratch.binding().expect("output realization precedes resource normalization"),
+                    scratch.resource().expect("raw filter scratch must be a semantic resource"),
                     input_arr_ty,
                     input_elem_ty,
                     output_elem_ty,
@@ -703,21 +704,36 @@ pub fn retarget_filter_output(
         return Ok(false);
     };
 
-    // Repurpose the scratch binding's declaration as the u32 length cell.
+    // Repurpose the scratch resource's declaration as the u32 length cell.
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
-    let len_cell_len = BufferLen::Fixed { bytes: 4 };
-    for decl in resources.iter_mut() {
-        if decl.resource.binding() == Some(scratch) {
+    for decl in declarations.iter_mut() {
+        if decl.resource.resource() == Some(scratch) {
             decl.elem_ty = u32_ty.clone();
-            decl.size = crate::egir::program::pending_logical_size(Some(&len_cell_len));
+            decl.size = crate::egir::program::LogicalSize::FixedBytes(4);
             break;
         }
+    }
+    if let Some(resource) = resources.iter_mut().find(|resource| resource.id == scratch) {
+        resource.elem_ty = u32_ty;
+        resource.size = crate::egir::program::LogicalSize::FixedBytes(4);
     }
 
     // Size the output buffer to the input's element count (capacity n). The
     // input region is concrete after `pin_entry_buffers`; if it isn't (no
     // host buffer to mirror), leave the host to size it.
-    let out_len = crate::types::array_view_buffer(&input_arr_ty).and_then(|in_binding| {
+    let out_len = input_arr_ty.array_buffer().and_then(|region| {
+        let Type::Constructed(TypeName::Resource(input_resource), _) = region else {
+            return None;
+        };
+        let in_binding = resources.iter().find_map(|resource| {
+            if resource.id != *input_resource {
+                return None;
+            }
+            match resource.origin {
+                crate::egir::program::ResourceOrigin::Host(binding) => Some(binding),
+                crate::egir::program::ResourceOrigin::Compiler(_) => None,
+            }
+        })?;
         let src_elem_bytes = crate::ssa::layout::storage_elem_stride(&input_elem_ty)?;
         let elem_bytes = crate::ssa::layout::storage_elem_stride(&output_elem_ty)?;
         Some(BufferLen::LikeInput {

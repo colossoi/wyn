@@ -36,6 +36,8 @@ use super::from_tlc::ConvertError;
 use super::graph_ops;
 use super::program::{OutputRoute, OutputSlotId, OutputWriter, SemanticEntry, SemanticProgram, SlotSource};
 use super::types::{NodeId, SkeletonTerminator};
+use crate::ResourceId;
+use std::collections::HashMap;
 
 pub mod dispatch;
 pub mod reconcile;
@@ -44,8 +46,17 @@ pub mod verify;
 /// Realize every entry's outputs into side-effect stores. After this
 /// pass, `verify::check` confirms the invariant.
 pub fn run(inner: &mut SemanticProgram) -> Result<(), ConvertError> {
+    let by_binding = inner
+        .resources
+        .iter()
+        .filter_map(|resource| match resource.origin {
+            super::program::ResourceOrigin::Host(binding) => Some((binding, resource.id)),
+            super::program::ResourceOrigin::Compiler(_) => None,
+        })
+        .collect::<HashMap<_, _>>();
+    let resources = &mut inner.resources;
     for entry in inner.entry_points.iter_mut() {
-        realize_entry(entry)?;
+        realize_entry(entry, &by_binding, resources)?;
     }
     // Output retargeting can rewrite a captured `map` result from a Composite
     // array to a storage view; sync each capturing region's parameter type so
@@ -57,13 +68,17 @@ pub fn run(inner: &mut SemanticProgram) -> Result<(), ConvertError> {
     Ok(())
 }
 
-fn realize_entry(entry: &mut SemanticEntry) -> Result<(), ConvertError> {
+fn realize_entry(
+    entry: &mut SemanticEntry,
+    by_binding: &HashMap<crate::BindingRef, ResourceId>,
+    resources: &mut [super::program::LogicalResource],
+) -> Result<(), ConvertError> {
     if entry.outputs.is_empty() {
         return Ok(());
     }
     if !entry.output_routes.is_empty() {
         // DPS path: slot-collected entries (post-`normalize_outputs`).
-        realize_compute_slots(entry)
+        realize_compute_slots(entry, by_binding, resources)
     } else {
         // Return-value classifier: graphics entries, plus compute
         // entries synthesised after `normalize_outputs` (gather
@@ -71,7 +86,7 @@ fn realize_entry(entry: &mut SemanticEntry) -> Result<(), ConvertError> {
         // intermediates from `parallelize`, etc.). These return a
         // value through `Return(Some(_))` and get classified the
         // old way.
-        realize_legacy_return(entry)
+        realize_legacy_return(entry, by_binding)
     }
 }
 
@@ -79,7 +94,11 @@ fn realize_entry(entry: &mut SemanticEntry) -> Result<(), ConvertError> {
 /// declared output's `SlotSource`s independently lower to a DPS write
 /// into the shared `OutputView`. Multi-source slots (`If`-forks etc.)
 /// share one view; runtime CFG picks which source's write fires.
-fn realize_compute_slots(entry: &mut SemanticEntry) -> Result<(), ConvertError> {
+fn realize_compute_slots(
+    entry: &mut SemanticEntry,
+    by_binding: &HashMap<crate::BindingRef, ResourceId>,
+    resources: &mut [super::program::LogicalResource],
+) -> Result<(), ConvertError> {
     let SemanticEntry {
         graph,
         outputs,
@@ -95,6 +114,7 @@ fn realize_compute_slots(entry: &mut SemanticEntry) -> Result<(), ConvertError> 
 
     for (slot_index, output) in outputs.iter_mut().enumerate() {
         let binding = output.storage_binding.expect("BUG: compute output without storage binding");
+        let resource = *by_binding.get(&binding).expect("compute output must have a semantic resource");
         let route_indices: Vec<usize> = output_routes
             .iter()
             .enumerate()
@@ -115,7 +135,14 @@ fn realize_compute_slots(entry: &mut SemanticEntry) -> Result<(), ConvertError> 
         // its serial loop compacts into the output buffer and writes a paired
         // length cell. No DPS store is emitted — the filter *is* the writer.
         if sources.len() == 1
-            && dispatch::retarget_filter_output(graph, resource_declarations, output, sources[0].value)?
+            && dispatch::retarget_filter_output(
+                graph,
+                resource_declarations,
+                resources,
+                resource,
+                output,
+                sources[0].value,
+            )?
         {
             output_routes[route_indices[0]].writers = vec![OutputWriter::Value(sources[0].value)];
             continue;
@@ -133,7 +160,7 @@ fn realize_compute_slots(entry: &mut SemanticEntry) -> Result<(), ConvertError> 
                 src.value,
                 slot_index,
                 &output.ty,
-                binding,
+                resource,
                 multi_source,
             )?);
             dedup_output_writers(&mut writers);
@@ -155,7 +182,10 @@ fn realize_compute_slots(entry: &mut SemanticEntry) -> Result<(), ConvertError> 
 ///     prepasses from `lift_gathers`, phase intermediates from
 ///     `parallelize`, etc.) — outputs are storage-buffer-bound; the
 ///     SOAC at the tail may need retargeting via `compute_slot_source`.
-fn realize_legacy_return(entry: &mut SemanticEntry) -> Result<(), ConvertError> {
+fn realize_legacy_return(
+    entry: &mut SemanticEntry,
+    by_binding: &HashMap<crate::BindingRef, ResourceId>,
+) -> Result<(), ConvertError> {
     let is_compute = matches!(entry.execution_model, ExecutionModel::Compute { .. });
     let SemanticEntry {
         graph,
@@ -189,6 +219,7 @@ fn realize_legacy_return(entry: &mut SemanticEntry) -> Result<(), ConvertError> 
         let source = sources[slot_index];
         if is_compute {
             let binding = output.storage_binding.expect("BUG: compute output without storage binding");
+            let resource = *by_binding.get(&binding).expect("compute output must have a semantic resource");
             // Single-source slot for legacy compute. Sibling-Index
             // rewrites are still valid (they're against the single
             // result NodeId).
@@ -202,7 +233,7 @@ fn realize_legacy_return(entry: &mut SemanticEntry) -> Result<(), ConvertError> 
                 source,
                 slot_index,
                 &output.ty,
-                binding,
+                resource,
                 /* multi_source */ false,
             )?);
             dedup_output_writers(&mut writers);

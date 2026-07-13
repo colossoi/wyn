@@ -823,7 +823,7 @@ mod tests {
             array.clone(),
         );
         graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(output));
-        let entry = SemanticEntry::new(
+        let entry = SemanticEntry::new_with_resources(
             "entry".into(),
             Span::new(0, 0, 0, 0),
             ExecutionModel::Compute {

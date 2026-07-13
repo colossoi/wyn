@@ -807,6 +807,15 @@ fn terminal_scan_helpers_are_complete_region_arena_members() {
     )
     .expect("TLC");
     let allocated = tlc.infer_input_slice_bounds().to_egraph().expect("semantic EGIR");
+    assert!(
+        !allocated.inner.functions.iter().any(|function| function.name.ends_with("_scan_op_swap")),
+        "planner-generated scan helper leaked into semantic EGIR"
+    );
+    let plan = crate::egir::parallelize::lower(&allocated.inner);
+    assert!(
+        plan.generated_callables().any(|function| function.name.ends_with("_scan_op_swap")),
+        "scan helper must be owned by the kernel plan"
+    );
     let mut binding_ids = allocated.binding_ids;
     let physical = crate::egir::target_lowering::schedule(
         allocated.inner,
