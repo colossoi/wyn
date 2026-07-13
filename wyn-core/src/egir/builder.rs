@@ -14,7 +14,8 @@ use crate::{interface, ResourceId};
 
 use super::graph_ops;
 use super::program::{
-    PhysicalEntry, PhysicalResourceTable, SemanticEntry, SemanticResourceDecl, SemanticResourceRef,
+    MaterializationRequirement, PhysicalEntry, PhysicalResourceTable, SemanticEntry, SemanticResourceDecl,
+    SemanticResourceRef,
 };
 use super::types::{EGraph, EgirSoac, NodeId, SkeletonTerminator, SoacDestination};
 use crate::ssa::types::{EntryInput, EntryOutput};
@@ -38,46 +39,108 @@ pub struct EntryBuilder {
     next_effect: u32,
 }
 
-/// Commit builder for a fully planned physical entry. It consumes a complete
-/// semantic entry rather than exposing a partially initialized physical
-/// record, and is the only constructor used at the physical-program boundary.
+/// Commit builder for a fully planned physical entry. It consumes either a
+/// semantic projection or a closed materialization recipe rather than
+/// exposing a partially initialized physical record.
 pub struct PhysicalEntryBuilder<'a> {
-    entry: SemanticEntry,
+    recipe: PlannedPhysicalEntry,
     resources: &'a PhysicalResourceTable,
+}
+
+enum PlannedPhysicalEntry {
+    Semantic(SemanticEntry),
+    Materialization(MaterializationRequirement),
+}
+
+struct PhysicalEntryDraft {
+    name: String,
+    span: Span,
+    execution_model: ExecutionModel,
+    inputs: Vec<EntryInput>,
+    outputs: Vec<EntryOutput>,
+    resources: Vec<SemanticResourceDecl>,
+    params: Vec<(Type<TypeName>, String)>,
+    return_ty: Type<TypeName>,
+    graph: EGraph,
+    control_headers: LookupMap<BlockId, ControlHeader>,
+    aliases: LookupMap<NodeId, NodeId>,
+    output_routes: Vec<super::program::OutputRoute>,
 }
 
 impl<'a> PhysicalEntryBuilder<'a> {
     pub fn from_planned_entry(entry: SemanticEntry, resources: &'a PhysicalResourceTable) -> Self {
-        Self { entry, resources }
+        Self {
+            recipe: PlannedPhysicalEntry::Semantic(entry),
+            resources,
+        }
+    }
+
+    pub fn from_materialization(
+        requirement: MaterializationRequirement,
+        resources: &'a PhysicalResourceTable,
+    ) -> Self {
+        Self {
+            recipe: PlannedPhysicalEntry::Materialization(requirement),
+            resources,
+        }
     }
 
     pub fn build(self) -> Result<PhysicalEntry, String> {
-        let entry = self.entry;
-        if entry.name.is_empty() {
+        let draft = match self.recipe {
+            PlannedPhysicalEntry::Semantic(entry) => PhysicalEntryDraft {
+                name: entry.name,
+                span: entry.span,
+                execution_model: entry.execution_model,
+                inputs: entry.inputs,
+                outputs: entry.outputs,
+                resources: entry.resource_declarations,
+                params: entry.params,
+                return_ty: entry.return_ty,
+                graph: entry.graph,
+                control_headers: entry.control_headers,
+                aliases: entry.aliases,
+                output_routes: entry.output_routes,
+            },
+            PlannedPhysicalEntry::Materialization(requirement) => PhysicalEntryDraft {
+                name: requirement.name,
+                span: requirement.span,
+                execution_model: requirement.execution_model,
+                inputs: requirement.inputs,
+                outputs: Vec::new(),
+                resources: requirement.resource_declarations,
+                params: requirement.params,
+                return_ty: requirement.return_ty,
+                graph: requirement.graph,
+                control_headers: requirement.control_headers,
+                aliases: requirement.aliases,
+                output_routes: Vec::new(),
+            },
+        };
+        if draft.name.is_empty() {
             return Err("physical entry has no publication name".into());
         }
-        for route in &entry.output_routes {
-            if route.slot.0 >= entry.outputs.len() {
+        for route in &draft.output_routes {
+            if route.slot.0 >= draft.outputs.len() {
                 return Err(format!(
                     "physical entry `{}` routes invalid output slot {}",
-                    entry.name, route.slot.0
+                    draft.name, route.slot.0
                 ));
             }
         }
-        let storage_bindings = entry
-            .resource_declarations
+        let storage_bindings = draft
+            .resources
             .into_iter()
             .map(|declaration| {
                 let resource = declaration.resource.resource().ok_or_else(|| {
                     format!(
                         "physical entry `{}` contains a pending resource binding",
-                        entry.name
+                        draft.name
                     )
                 })?;
                 let binding = self.resources.binding(resource).ok_or_else(|| {
                     format!(
                         "physical entry `{}` references missing resource {:?}",
-                        entry.name, resource
+                        draft.name, resource
                     )
                 })?;
                 Ok(interface::StorageBindingDecl {
@@ -89,19 +152,18 @@ impl<'a> PhysicalEntryBuilder<'a> {
             })
             .collect::<Result<Vec<_>, String>>()?;
         Ok(PhysicalEntry {
-            origin: entry.origin,
-            name: entry.name,
-            span: entry.span,
-            execution_model: entry.execution_model,
-            inputs: entry.inputs,
-            outputs: entry.outputs,
+            name: draft.name,
+            span: draft.span,
+            execution_model: draft.execution_model,
+            inputs: draft.inputs,
+            outputs: draft.outputs,
             storage_bindings,
-            params: entry.params,
-            return_ty: entry.return_ty,
-            graph: entry.graph,
-            control_headers: entry.control_headers,
-            aliases: entry.aliases,
-            output_routes: entry.output_routes,
+            params: draft.params,
+            return_ty: draft.return_ty,
+            graph: draft.graph,
+            control_headers: draft.control_headers,
+            aliases: draft.aliases,
+            output_routes: draft.output_routes,
         })
     }
 }

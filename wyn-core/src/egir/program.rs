@@ -155,6 +155,12 @@ pub use crate::ResourceId;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SemanticEntryId(pub u32);
 
+/// Stable identity of a semantic requirement to materialize a shared value.
+/// It is deliberately distinct from `SemanticEntryId`: a requirement is not
+/// an entry point and cannot be mutated by semantic entry passes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct MaterializationId(pub u32);
+
 /// Stable identity of an entry input position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct InputSlotId(pub usize);
@@ -287,8 +293,14 @@ pub struct CompilerResource {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompilerResourceFlow {
-    pub producer: SemanticEntryId,
-    pub consumers: Vec<SemanticEntryId>,
+    pub producer: CompilerFlowEndpoint,
+    pub consumers: Vec<CompilerFlowEndpoint>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum CompilerFlowEndpoint {
+    Entry(SemanticEntryId),
+    Materialization(MaterializationId),
 }
 
 impl CompilerResource {
@@ -374,8 +386,8 @@ fn gather_prepass_resources(inner: &SemanticProgram) -> HashMap<crate::BindingRe
 }
 
 fn record_compiler_resource_flows(inner: &mut SemanticProgram) {
-    let mut producers: HashMap<ResourceId, Vec<SemanticEntryId>> = HashMap::new();
-    let mut consumers: HashMap<ResourceId, Vec<SemanticEntryId>> = HashMap::new();
+    let mut producers: HashMap<ResourceId, Vec<CompilerFlowEndpoint>> = HashMap::new();
+    let mut consumers: HashMap<ResourceId, Vec<CompilerFlowEndpoint>> = HashMap::new();
     for (index, entry) in inner.entry_points.iter().enumerate() {
         let entry_id = SemanticEntryId(index as u32);
         for declaration in &entry.resource_declarations {
@@ -383,8 +395,25 @@ fn record_compiler_resource_flows(inner: &mut SemanticProgram) {
                 continue;
             };
             match declaration.role {
-                interface::StorageRole::Output => producers.entry(resource).or_default().push(entry_id),
-                interface::StorageRole::Input => consumers.entry(resource).or_default().push(entry_id),
+                interface::StorageRole::Output => {
+                    producers.entry(resource).or_default().push(CompilerFlowEndpoint::Entry(entry_id))
+                }
+                interface::StorageRole::Input => {
+                    consumers.entry(resource).or_default().push(CompilerFlowEndpoint::Entry(entry_id))
+                }
+                interface::StorageRole::Intermediate => {}
+            }
+        }
+    }
+    for requirement in &inner.materializations {
+        let endpoint = CompilerFlowEndpoint::Materialization(requirement.id);
+        for declaration in &requirement.resource_declarations {
+            let Some(resource) = declaration.resource.resource() else {
+                continue;
+            };
+            match declaration.role {
+                interface::StorageRole::Output => producers.entry(resource).or_default().push(endpoint),
+                interface::StorageRole::Input => consumers.entry(resource).or_default().push(endpoint),
                 interface::StorageRole::Intermediate => {}
             }
         }
@@ -415,6 +444,25 @@ fn record_compiler_resource_flows(inner: &mut SemanticProgram) {
             producer: *producer,
             consumers: resource_consumers,
         });
+    }
+    let flows = inner
+        .resources
+        .iter()
+        .filter_map(|resource| match &resource.origin {
+            ResourceOrigin::Compiler(compiler) => {
+                compiler.flow.as_ref().map(|flow| (resource.id, flow.consumers.clone()))
+            }
+            ResourceOrigin::Host(_) => None,
+        })
+        .collect::<HashMap<_, _>>();
+    for requirement in &mut inner.materializations {
+        for substitution in &mut requirement.substitutions {
+            let resource = substitution
+                .resource
+                .resource()
+                .expect("materialization substitution normalized before flow recording");
+            substitution.consumers = flows.get(&resource).cloned().unwrap_or_default();
+        }
     }
 }
 
@@ -506,6 +554,26 @@ fn normalize_semantic_resource_references(
             route.slot = OutputSlotId(slot);
             true
         });
+    }
+    for requirement in &mut inner.materializations {
+        for declaration in &mut requirement.resource_declarations {
+            if let SemanticResourceRef::Binding(binding) = declaration.resource {
+                declaration.resource = SemanticResourceRef::Resource(
+                    *by_binding
+                        .get(&binding)
+                        .expect("materialization resource declaration must be in manifest"),
+                );
+            }
+            normalize_logical_size(&mut declaration.size, by_binding);
+        }
+        for substitution in &mut requirement.substitutions {
+            if let SemanticResourceRef::Binding(binding) = substitution.resource {
+                substitution.resource = SemanticResourceRef::Resource(
+                    *by_binding.get(&binding).expect("materialization substitution must be in manifest"),
+                );
+            }
+        }
+        normalize_graph_resources(&mut requirement.graph, by_binding);
     }
     for entry in &mut inner.entry_points {
         normalize_graph_resources(&mut entry.graph, by_binding);
@@ -629,6 +697,18 @@ fn normalize_structural_resources(
             normalize_type_resources(&mut declaration.elem_ty, by_binding);
         }
     }
+    for requirement in &mut inner.materializations {
+        for input in &mut requirement.inputs {
+            normalize_type_resources(&mut input.ty, by_binding);
+        }
+        for (ty, _) in &mut requirement.params {
+            normalize_type_resources(ty, by_binding);
+        }
+        normalize_type_resources(&mut requirement.return_ty, by_binding);
+        for declaration in &mut requirement.resource_declarations {
+            normalize_type_resources(&mut declaration.elem_ty, by_binding);
+        }
+    }
     for function in &mut inner.functions {
         for (ty, _) in &mut function.params {
             normalize_type_resources(ty, by_binding);
@@ -672,6 +752,9 @@ pub fn physicalize_resource_references(
 ) -> Result<(), String> {
     for entry in &mut inner.entry_points {
         physicalize_graph_resources(&mut entry.graph, bindings)?;
+    }
+    for requirement in &mut inner.materializations {
+        physicalize_graph_resources(&mut requirement.graph, bindings)?;
     }
     for function in &mut inner.functions {
         physicalize_graph_resources(&mut function.graph, bindings)?;
@@ -788,6 +871,18 @@ fn physicalize_structural_types(
         }
         physicalize_type_resources(&mut entry.return_ty, bindings);
         for declaration in &mut entry.resource_declarations {
+            physicalize_type_resources(&mut declaration.elem_ty, bindings);
+        }
+    }
+    for requirement in &mut inner.materializations {
+        for input in &mut requirement.inputs {
+            physicalize_type_resources(&mut input.ty, bindings);
+        }
+        for (ty, _) in &mut requirement.params {
+            physicalize_type_resources(ty, bindings);
+        }
+        physicalize_type_resources(&mut requirement.return_ty, bindings);
+        for declaration in &mut requirement.resource_declarations {
             physicalize_type_resources(&mut declaration.elem_ty, bindings);
         }
     }
@@ -1128,6 +1223,24 @@ fn mirror_storage_resources(
             });
         }
     }
+    for requirement in &inner.materializations {
+        for declaration in &requirement.resource_declarations {
+            let Some(binding) = pending_binding(declaration.resource) else {
+                continue;
+            };
+            let origin = filter_kinds
+                .get(&binding)
+                .cloned()
+                .map(ResourceOrigin::Compiler)
+                .unwrap_or(ResourceOrigin::Host(binding));
+            resources.entry(binding).or_insert(LogicalResource {
+                id: ResourceId(0),
+                origin,
+                elem_ty: declaration.elem_ty.clone(),
+                size: declaration.size.clone(),
+            });
+        }
+    }
     resources.into_iter().collect()
 }
 
@@ -1189,6 +1302,56 @@ pub(crate) fn verify_allocated_resources(inner: &SemanticProgram) -> Result<(), 
         }
         verify_allocated_graph(&entry.graph, &covered, &format!("entry `{}`", entry.name))?;
     }
+    for (index, requirement) in inner.materializations.iter().enumerate() {
+        if requirement.id != MaterializationId(index as u32) {
+            return Err(format!(
+                "materialization arena is not dense: position {index} contains {:?}",
+                requirement.id
+            ));
+        }
+        for declaration in &requirement.resource_declarations {
+            let resource = declaration.resource.resource().ok_or_else(|| {
+                format!(
+                    "allocated materialization `{}` contains a pending binding",
+                    requirement.name
+                )
+            })?;
+            if !covered.contains(&resource) {
+                return Err(format!(
+                    "materialization `{}` references missing resource {:?}",
+                    requirement.name, resource
+                ));
+            }
+            verify_allocated_size(&declaration.size, &covered)?;
+            verify_allocated_type(&declaration.elem_ty, &covered)?;
+        }
+        for substitution in &requirement.substitutions {
+            let resource = substitution.resource.resource().ok_or_else(|| {
+                format!(
+                    "allocated materialization `{}` contains a pending substitution binding",
+                    requirement.name
+                )
+            })?;
+            if !covered.contains(&resource) {
+                return Err(format!(
+                    "materialization `{}` substitutes missing resource {:?}",
+                    requirement.name, resource
+                ));
+            }
+        }
+        verify_allocated_type(&requirement.return_ty, &covered)?;
+        for input in &requirement.inputs {
+            verify_allocated_type(&input.ty, &covered)?;
+        }
+        for (ty, _) in &requirement.params {
+            verify_allocated_type(ty, &covered)?;
+        }
+        verify_allocated_graph(
+            &requirement.graph,
+            &covered,
+            &format!("materialization `{}`", requirement.name),
+        )?;
+    }
     for function in &inner.functions {
         verify_allocated_type(&function.return_ty, &covered)?;
         for (ty, _) in &function.params {
@@ -1233,19 +1396,16 @@ fn verify_compiler_resource_flow(
             Ok(())
         };
     };
-    let producer = inner
-        .entry_points
-        .get(flow.producer.0 as usize)
-        .ok_or_else(|| format!("resource {:?} has an invalid producer id", resource.id))?;
-    let declares = |entry: &SemanticEntry, role| {
-        entry.resource_declarations.iter().any(|declaration| {
+    let (producer_name, producer_declarations) = flow_endpoint(inner, flow.producer, resource.id)?;
+    let declares = |declarations: &[SemanticResourceDecl], role| {
+        declarations.iter().any(|declaration| {
             declaration.resource.resource() == Some(resource.id) && declaration.role == role
         })
     };
-    if !declares(producer, interface::StorageRole::Output) {
+    if !declares(producer_declarations, interface::StorageRole::Output) {
         return Err(format!(
             "resource {:?} producer `{}` does not declare its output",
-            resource.id, producer.name
+            resource.id, producer_name
         ));
     }
     if flow.consumers.is_empty() {
@@ -1259,18 +1419,45 @@ fn verify_compiler_resource_flow(
                 resource.id
             ));
         }
-        let consumer = inner
-            .entry_points
-            .get(consumer_id.0 as usize)
-            .ok_or_else(|| format!("resource {:?} has an invalid consumer id", resource.id))?;
-        if !declares(consumer, interface::StorageRole::Input) {
+        let (consumer_name, consumer_declarations) = flow_endpoint(inner, *consumer_id, resource.id)?;
+        if !declares(consumer_declarations, interface::StorageRole::Input) {
             return Err(format!(
                 "resource {:?} consumer `{}` does not declare its input",
-                resource.id, consumer.name
+                resource.id, consumer_name
             ));
         }
     }
     Ok(())
+}
+
+fn flow_endpoint<'a>(
+    inner: &'a SemanticProgram,
+    endpoint: CompilerFlowEndpoint,
+    resource: ResourceId,
+) -> Result<(&'a str, &'a [SemanticResourceDecl]), String> {
+    match endpoint {
+        CompilerFlowEndpoint::Entry(id) => inner
+            .entry_points
+            .get(id.0 as usize)
+            .map(|entry| (entry.name.as_str(), entry.resource_declarations.as_slice()))
+            .ok_or_else(|| format!("resource {:?} has an invalid entry endpoint {:?}", resource, id)),
+        CompilerFlowEndpoint::Materialization(id) => inner
+            .materializations
+            .get(id.0 as usize)
+            .filter(|requirement| requirement.id == id)
+            .map(|requirement| {
+                (
+                    requirement.name.as_str(),
+                    requirement.resource_declarations.as_slice(),
+                )
+            })
+            .ok_or_else(|| {
+                format!(
+                    "resource {:?} has an invalid materialization endpoint {:?}",
+                    resource, id
+                )
+            }),
+    }
 }
 
 fn verify_allocated_size(
@@ -1624,6 +1811,43 @@ impl SemanticEntry {
     }
 }
 
+/// Semantic requirement to publish one shared array producer. This is a
+/// closed recipe, not an entry point: semantic entry passes cannot schedule,
+/// clone, clear, or otherwise partially mutate it.
+pub struct MaterializationRequirement {
+    pub id: MaterializationId,
+    pub producer: SemanticOpId,
+    pub name: String,
+    pub span: Span,
+    pub execution_model: ExecutionModel,
+    pub inputs: Vec<EntryInput>,
+    pub resource_declarations: Vec<SemanticResourceDecl>,
+    pub params: Vec<(Type<TypeName>, String)>,
+    pub return_ty: Type<TypeName>,
+    pub graph: EGraph,
+    pub control_headers: LookupMap<BlockId, ControlHeader>,
+    pub aliases: LookupMap<NodeId, NodeId>,
+    pub substitutions: Vec<MaterializationSubstitution>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MaterializationSubstitution {
+    pub resource: SemanticResourceRef,
+    pub consumers: Vec<CompilerFlowEndpoint>,
+}
+
+impl MaterializationRequirement {
+    pub fn publication(&self) -> PlannedEntryPublication {
+        PlannedEntryPublication {
+            name: self.name.clone(),
+            execution_model: self.execution_model.clone(),
+            inputs: self.inputs.clone(),
+            outputs: Vec::new(),
+            resources: self.resource_declarations.clone(),
+        }
+    }
+}
+
 /// The exact entry ABI consumed by descriptor publication. It deliberately
 /// contains no graph, routes, or mutable lowering state.
 #[derive(Clone, Debug)]
@@ -1687,7 +1911,6 @@ pub struct EntryPublication {
 /// This is intentionally a distinct type from `SemanticEntry`: downstream
 /// codegen passes cannot receive an entry that is still legal to reschedule.
 pub struct PhysicalEntry {
-    pub origin: interface::EntryOrigin,
     pub name: String,
     pub span: Span,
     pub execution_model: ExecutionModel,
@@ -1761,6 +1984,10 @@ pub struct SemanticProgram {
     /// pass straight through.
     pub externs: Vec<Function>,
     pub entry_points: Vec<SemanticEntry>,
+    /// Shared-producer requirements discovered during logical allocation.
+    /// These are planned and physicalized directly; they never join the
+    /// semantic entry arena.
+    pub materializations: Vec<MaterializationRequirement>,
     pub constants: Vec<Constant>,
     pub pipeline: PipelineDescriptor,
     /// Source names retained until the descriptor is published atomically at
@@ -1807,13 +2034,26 @@ impl PhysicalProgram {
         plan: ValidatedKernelPlan,
         physical_resources: PhysicalResourceTable,
     ) -> Result<Self, String> {
-        let entry_points = program
+        let mut entry_points = program
             .entry_points
             .into_iter()
             .map(|entry| {
                 super::builder::PhysicalEntryBuilder::from_planned_entry(entry, &physical_resources).build()
             })
             .collect::<Result<Vec<_>, _>>()?;
+        entry_points.extend(
+            program
+                .materializations
+                .into_iter()
+                .map(|requirement| {
+                    super::builder::PhysicalEntryBuilder::from_materialization(
+                        requirement,
+                        &physical_resources,
+                    )
+                    .build()
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        );
         Ok(Self {
             functions: program.functions,
             externs: program.externs,
@@ -1864,6 +2104,7 @@ impl SemanticProgram {
             functions,
             externs,
             entry_points,
+            materializations: Vec::new(),
             constants,
             pipeline,
             input_names: LookupMap::new(),

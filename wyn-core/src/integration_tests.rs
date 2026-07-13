@@ -622,6 +622,29 @@ entry e() [4]i32 =
         "the surviving producer owns one shared logical buffer"
     );
     let shared_resource = shared[0].id;
+    assert_eq!(
+        allocated.inner.materializations.len(),
+        1,
+        "shared producer is represented by one typed requirement"
+    );
+    assert!(
+        allocated.inner.entry_points.iter().all(|entry| entry.name != "e_materialize_shared"),
+        "materialization must not be synthesized into the semantic entry arena"
+    );
+    let requirement = &allocated.inner.materializations[0];
+    assert_eq!(requirement.name, "e_materialize_shared");
+    assert_eq!(requirement.substitutions.len(), 1);
+    assert_eq!(
+        requirement.substitutions[0].resource.resource(),
+        Some(shared_resource)
+    );
+    assert_eq!(requirement.substitutions[0].consumers.len(), 1);
+    let crate::egir::program::CompilerFlowEndpoint::Entry(consumer) =
+        requirement.substitutions[0].consumers[0]
+    else {
+        panic!("materialization consumer should be the source semantic entry")
+    };
+    assert_eq!(allocated.inner.entry_points[consumer.0 as usize].name, "e");
     let lowered =
         allocated.lower_to_ssa(crate::LoweringProfile::PORTABLE).expect("shared materialization lowers");
     let mir = crate::ssa::print::format_program(&lowered.ssa);
@@ -1375,11 +1398,20 @@ entry add_sum(xs: []i32) []i32 =
             _ => None,
         })
         .expect("scalar handoff has an explicit resource flow");
-    let producer = &allocated.inner.entry_points[flow.producer.0 as usize];
+    let crate::egir::program::CompilerFlowEndpoint::Entry(producer_id) = flow.producer else {
+        panic!("scalar prepass producer must be a semantic entry")
+    };
+    let producer = &allocated.inner.entry_points[producer_id.0 as usize];
     assert!(producer.name.starts_with("add_sum_prepass_"));
     assert_eq!(flow.consumers.len(), 1);
     assert_eq!(
-        allocated.inner.entry_points[flow.consumers[0].0 as usize].name,
+        allocated.inner.entry_points[match flow.consumers[0] {
+            crate::egir::program::CompilerFlowEndpoint::Entry(id) => id.0 as usize,
+            crate::egir::program::CompilerFlowEndpoint::Materialization(_) => {
+                panic!("scalar prepass consumer must be a semantic entry")
+            }
+        }]
+        .name,
         "add_sum"
     );
 }

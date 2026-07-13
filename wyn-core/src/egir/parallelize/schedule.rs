@@ -10,9 +10,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::egir::graph_ops;
 use crate::egir::program::{
-    CompilerResourceFlow, EntryPublication, InputSlotId, LogicalResource, OutputSlotId,
-    PhysicalResourceTable, PlannedEntryPublication, ResourceOrigin, SemanticEntry, SemanticEntryId,
-    SemanticResourceRef,
+    CompilerFlowEndpoint, CompilerResourceFlow, EntryPublication, InputSlotId, LogicalResource,
+    MaterializationRequirement, OutputSlotId, PhysicalResourceTable, PlannedEntryPublication,
+    ResourceOrigin, SemanticEntry, SemanticEntryId, SemanticResourceRef,
 };
 use crate::egir::types::{
     EgirSoac, FilterOutput, FilterPlan, FilterState, RuntimeFilterLength, SegExtent, SegPlacement,
@@ -132,6 +132,10 @@ pub struct ScheduledPipeline {
 #[derive(Clone, Debug)]
 pub struct KernelPhase {
     pub id: KernelId,
+    /// Typed identity used by compiler-resource flow edges. It is separate
+    /// from the projected source ABI because generated requirements have no
+    /// semantic entry ABI of their own.
+    pub flow_source: Option<CompilerFlowEndpoint>,
     pub entry_point: String,
     pub recipe: KernelRecipe,
     pub abi: EntryAbiProjection,
@@ -219,13 +223,13 @@ impl KernelPlan {
             || self.graphics_passthroughs.iter().any(|phase| phase.entry_point == entry_point)
     }
 
-    pub fn contains_source_entry(&self, source: SemanticEntryId) -> bool {
-        self.phases().any(|phase| phase.abi.source_entry == Some(source))
+    pub fn contains_flow_source(&self, source: CompilerFlowEndpoint) -> bool {
+        self.phases().any(|phase| phase.flow_source == Some(source))
     }
 
-    pub fn entry_point_for_source(&self, source: SemanticEntryId) -> Option<&str> {
+    pub fn entry_point_for_flow_source(&self, source: CompilerFlowEndpoint) -> Option<&str> {
         self.phases()
-            .find(|phase| phase.abi.source_entry == Some(source))
+            .find(|phase| phase.flow_source == Some(source))
             .map(|phase| phase.entry_point.as_str())
     }
 
@@ -313,7 +317,7 @@ impl KernelPlan {
             };
             if !self
                 .phases()
-                .any(|phase| phase.abi.source_entry.is_some_and(|source| flow.consumers.contains(&source)))
+                .any(|phase| phase.flow_source.is_some_and(|source| flow.consumers.contains(&source)))
             {
                 // Descriptor-less test/probe programs have executable EGIR
                 // entries but no published stages. Allocation still verifies
@@ -323,7 +327,7 @@ impl KernelPlan {
             let writers =
                 self.phases()
                     .filter(|phase| {
-                        phase.abi.source_entry == Some(flow.producer)
+                        phase.flow_source == Some(flow.producer)
                             && phase.resources.iter().any(|scheduled| {
                                 scheduled.resource == resource.id && scheduled.access.writes()
                             })
@@ -340,7 +344,7 @@ impl KernelPlan {
                 let readers = self
                     .phases()
                     .filter(|phase| {
-                        phase.abi.source_entry == Some(*consumer)
+                        phase.flow_source == Some(*consumer)
                             && phase.resources.iter().any(|scheduled| {
                                 scheduled.resource == resource.id && scheduled.access.reads()
                             })
@@ -509,6 +513,7 @@ impl KernelPlan {
                         })
                         .unwrap_or_else(|| KernelPhase {
                             id,
+                            flow_source: None,
                             entry_point: stage.entry_point.clone(),
                             recipe: KernelRecipe::SerialCompute,
                             abi: EntryAbiProjection {
@@ -543,6 +548,7 @@ impl KernelPlan {
                     .map(|(source, entry)| graphics_passthrough_phase(id, *source, entry))
                     .unwrap_or_else(|| KernelPhase {
                         id,
+                        flow_source: None,
                         entry_point: stage.entry_point.clone(),
                         recipe: KernelRecipe::GraphicsPassthrough,
                         abi: EntryAbiProjection {
@@ -723,6 +729,57 @@ impl KernelPlan {
         }
     }
 
+    /// Insert a typed shared-materialization recipe before its first ready
+    /// consumer. No semantic entry is synthesized or admitted to the entry
+    /// arena.
+    pub fn add_materialization_before(&mut self, consumer: &str, requirement: &MaterializationRequirement) {
+        self.publication_order.push(requirement.name.clone());
+        self.publications.insert(requirement.name.clone(), requirement.publication());
+        let pipeline = self
+            .pipelines
+            .iter_mut()
+            .find(|pipeline| pipeline.phases.iter().any(|phase| phase.entry_point == consumer))
+            .unwrap_or_else(|| {
+                panic!("no scheduled compute pipeline contains consumer entry `{consumer}`")
+            });
+        let consumer_index = pipeline
+            .phases
+            .iter()
+            .position(|phase| phase.entry_point == consumer)
+            .expect("consumer was found above");
+        let inherited_dependencies = pipeline.phases[consumer_index].dependencies.clone();
+        let id = KernelId(self.next_kernel_id);
+        self.next_kernel_id += 1;
+        let domain =
+            materialization_domain(requirement).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
+        let mut producer = KernelPhase {
+            id,
+            flow_source: Some(CompilerFlowEndpoint::Materialization(requirement.id)),
+            entry_point: requirement.name.clone(),
+            recipe: KernelRecipe::MultiConsumerMaterialization,
+            abi: EntryAbiProjection {
+                source_entry: None,
+                inputs: Vec::new(),
+                output_routes: Vec::new(),
+            },
+            workgroup_size: match requirement.execution_model {
+                ExecutionModel::Compute { local_size } => local_size,
+                _ => (1, 1, 1),
+            },
+            domain: domain.clone(),
+            domain_selection: DomainSelection::Explicit(domain),
+            resources: materialization_resources(requirement),
+            dependencies: inherited_dependencies,
+        };
+        producer.resources.sort_by_key(|resource| resource.resource);
+        pipeline.phases.insert(consumer_index, producer);
+        let consumer_phase = &mut pipeline.phases[consumer_index + 1];
+        if !consumer_phase.dependencies.contains(&id) {
+            consumer_phase.dependencies.push(id);
+            consumer_phase.dependencies.sort_unstable();
+        }
+    }
+
     /// Add an independent sibling kernel to the same host pipeline. This is
     /// used for distinct output domains: source order is retained by the
     /// published phase list, but no data dependency is fabricated.
@@ -802,8 +859,7 @@ impl KernelPlan {
                         )
                     })
                 });
-                let semantic_resources = filter_phase
-                    || entry.origin == crate::interface::EntryOrigin::MultiConsumerMaterialization;
+                let semantic_resources = filter_phase;
                 phase.resources = if semantic_resources {
                     segmented_resources(entry).unwrap_or_else(|| entry_resources(entry))
                 } else {
@@ -929,7 +985,7 @@ impl KernelPlan {
     fn complete_resource_flow_accesses(&mut self, flows: &[(ResourceId, CompilerResourceFlow)]) {
         for (resource, flow) in flows {
             let has_writer = self.phases().any(|phase| {
-                phase.abi.source_entry == Some(flow.producer)
+                phase.flow_source == Some(flow.producer)
                     && phase
                         .resources
                         .iter()
@@ -938,7 +994,7 @@ impl KernelPlan {
             if !has_writer {
                 let writer = self
                     .phases()
-                    .filter(|phase| phase.abi.source_entry == Some(flow.producer))
+                    .filter(|phase| phase.flow_source == Some(flow.producer))
                     .map(|phase| phase.id)
                     .last();
                 if let Some(writer) = writer {
@@ -948,7 +1004,7 @@ impl KernelPlan {
             }
             for consumer in &flow.consumers {
                 let has_reader = self.phases().any(|phase| {
-                    phase.abi.source_entry == Some(*consumer)
+                    phase.flow_source == Some(*consumer)
                         && phase
                             .resources
                             .iter()
@@ -957,7 +1013,7 @@ impl KernelPlan {
                 if !has_reader {
                     let reader = self
                         .phases()
-                        .find(|phase| phase.abi.source_entry == Some(*consumer))
+                        .find(|phase| phase.flow_source == Some(*consumer))
                         .map(|phase| phase.id);
                     if let Some(reader) = reader {
                         let phase = self.phase_mut(reader).expect("planned consumer phase disappeared");
@@ -981,7 +1037,7 @@ impl KernelPlan {
             let producer_ids =
                 self.phases()
                     .filter(|phase| {
-                        phase.abi.source_entry == Some(flow.producer)
+                        phase.flow_source == Some(flow.producer)
                             && phase.resources.iter().any(|scheduled| {
                                 scheduled.resource == *resource && scheduled.access.writes()
                             })
@@ -990,7 +1046,7 @@ impl KernelPlan {
                     .collect::<Vec<_>>();
             for pipeline in &mut self.pipelines {
                 for phase in &mut pipeline.phases {
-                    if phase.abi.source_entry.is_some_and(|source| flow.consumers.contains(&source))
+                    if phase.flow_source.is_some_and(|source| flow.consumers.contains(&source))
                         && phase
                             .resources
                             .iter()
@@ -1200,6 +1256,7 @@ fn phase_from_entry(
     };
     KernelPhase {
         id,
+        flow_source: source_entry.map(CompilerFlowEndpoint::Entry),
         entry_point: entry.name.clone(),
         recipe,
         abi: EntryAbiProjection {
@@ -1223,6 +1280,7 @@ fn graphics_passthrough_phase(
     let domain = KernelDomain::Fixed { x: 1, y: 1, z: 1 };
     KernelPhase {
         id,
+        flow_source: Some(CompilerFlowEndpoint::Entry(source_entry)),
         entry_point: entry.name.clone(),
         recipe: KernelRecipe::GraphicsPassthrough,
         abi: EntryAbiProjection {
@@ -1258,7 +1316,6 @@ fn analyze_source_recipe(entry: &SemanticEntry) -> KernelRecipe {
     match entry.origin {
         EntryOrigin::ScalarPrepass => KernelRecipe::ScalarPrepass,
         EntryOrigin::GatherPrepass => KernelRecipe::GatherPrepass,
-        EntryOrigin::MultiConsumerMaterialization => KernelRecipe::MultiConsumerMaterialization,
         EntryOrigin::ReducePhase2 => KernelRecipe::ReduceCombine,
         EntryOrigin::ScanPhase2 => KernelRecipe::ScanBlock,
         EntryOrigin::ScanPhase3 => KernelRecipe::ScanApplyOffsets,
@@ -1463,7 +1520,15 @@ fn domain_selection_from_stage(
 }
 
 pub(crate) fn segmented_domain(entry: &SemanticEntry) -> Option<KernelDomain> {
-    for (_, block) in &entry.graph.skeleton.blocks {
+    segmented_domain_graph(&entry.graph)
+}
+
+fn materialization_domain(requirement: &MaterializationRequirement) -> Option<KernelDomain> {
+    segmented_domain_graph(&requirement.graph)
+}
+
+fn segmented_domain_graph(graph: &crate::egir::types::EGraph) -> Option<KernelDomain> {
+    for (_, block) in &graph.skeleton.blocks {
         for side_effect in &block.side_effects {
             match &side_effect.kind {
                 SideEffectKind::Soac(EgirSoac::Seg {
@@ -1511,13 +1576,57 @@ pub(crate) fn domain_from_space(space: &crate::egir::types::SegSpace) -> Option<
 }
 
 fn entry_resources(entry: &SemanticEntry) -> Vec<ScheduledResource> {
+    graph_resources(&entry.graph, &entry.resource_declarations)
+}
+
+fn materialization_resources(requirement: &MaterializationRequirement) -> Vec<ScheduledResource> {
+    kernel_seg_resources(&requirement.graph)
+        .unwrap_or_else(|| graph_resources(&requirement.graph, &requirement.resource_declarations))
+}
+
+fn kernel_seg_resources(graph: &crate::egir::types::EGraph) -> Option<Vec<ScheduledResource>> {
+    for (_, block) in &graph.skeleton.blocks {
+        for side_effect in &block.side_effects {
+            let SideEffectKind::Soac(EgirSoac::Seg {
+                placement: SegPlacement::Kernel,
+                resources,
+                ..
+            }) = &side_effect.kind
+            else {
+                continue;
+            };
+            return Some(
+                resources
+                    .iter()
+                    .map(|resource| ScheduledResource {
+                        resource: resource
+                            .resource
+                            .resource()
+                            .expect("planner received a pending Seg resource binding"),
+                        access: match resource.access {
+                            SegResourceAccessKind::Read => ResourceAccess::Read,
+                            SegResourceAccessKind::Write => ResourceAccess::Write,
+                            SegResourceAccessKind::ReadWrite => ResourceAccess::ReadWrite,
+                        },
+                    })
+                    .collect(),
+            );
+        }
+    }
+    None
+}
+
+fn graph_resources(
+    graph: &crate::egir::types::EGraph,
+    declarations: &[crate::egir::program::SemanticResourceDecl],
+) -> Vec<ScheduledResource> {
     let mut accesses: HashMap<ResourceId, ResourceAccess> = HashMap::new();
     let mut insert = |reference: SemanticResourceRef, access: ResourceAccess| {
         let resource = reference.resource().expect("planner received a pending entry resource binding");
         accesses.entry(resource).and_modify(|old| *old = old.merge(access)).or_insert(access);
     };
 
-    for declaration in &entry.resource_declarations {
+    for declaration in declarations {
         let access = match declaration.role {
             crate::interface::StorageRole::Input => ResourceAccess::Read,
             crate::interface::StorageRole::Output => ResourceAccess::Write,
@@ -1528,14 +1637,14 @@ fn entry_resources(entry: &SemanticEntry) -> Vec<ScheduledResource> {
 
     // A storage view reachable from an effect operand is conservatively a
     // read. Output/intermediate metadata above upgrades it when it is written.
-    for (_, block) in &entry.graph.skeleton.blocks {
+    for (_, block) in &graph.skeleton.blocks {
         for side_effect in &block.side_effects {
             wyn_graph::for_each_reachable(
                 side_effect.referenced_nodes(),
                 wyn_graph::WalkOrder::DepthFirst,
-                |node, out| out.extend(entry.graph.nodes[node].children()),
+                |node, out| out.extend(graph.nodes[node].children()),
                 |node| {
-                    if let Some(resource) = graph_ops::extract_storage_view_source(&entry.graph, node) {
+                    if let Some(resource) = graph_ops::extract_storage_view_source(graph, node) {
                         insert(resource, ResourceAccess::Read);
                     }
                 },
@@ -1729,6 +1838,7 @@ mod tests {
     fn resource_flow_topology_orders_chained_prepasses_before_consumer() {
         let phase = |id, dependencies| KernelPhase {
             id: KernelId(id),
+            flow_source: Some(CompilerFlowEndpoint::Entry(SemanticEntryId(id))),
             entry_point: format!("phase_{id}"),
             recipe: KernelRecipe::SerialCompute,
             abi: EntryAbiProjection {

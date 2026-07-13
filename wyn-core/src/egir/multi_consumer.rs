@@ -12,8 +12,9 @@ use polytype::Type;
 
 use super::graph_ops;
 use super::program::{
-    CompilerResource, CompilerResourceKind, LogicalSize, SemanticDependencyKind, SemanticOpId,
-    SemanticProgram, SemanticResourceDecl, SemanticResourceRef,
+    CompilerResource, CompilerResourceKind, LogicalSize, MaterializationId, MaterializationRequirement,
+    MaterializationSubstitution, SemanticDependencyKind, SemanticOpId, SemanticProgram,
+    SemanticResourceDecl, SemanticResourceRef,
 };
 use super::types::{
     EGraph, EgirSoac, NodeId, PureOp, SegExtent, SegOpKind, SegPlacement, SegResourceAccess,
@@ -238,20 +239,21 @@ fn materialize_candidate(
     let projected_result =
         projection.node(candidate.result).expect("multi-consumer producer result must be projected");
     let producer_aliases = projection.remap_aliases(&entry.aliases);
-    let mut producer = super::program::SemanticEntry::new_with_resources(
-        crate::interface::EntryOrigin::MultiConsumerMaterialization,
-        fresh_entry_name(inner, &format!("{}_materialize_shared", entry.name)),
-        entry.span,
-        entry.execution_model.clone(),
-        entry.inputs.clone(),
-        Vec::new(),
-        producer_storage,
-        entry.params.clone(),
-        Type::Constructed(TypeName::Unit, vec![]),
-        projection.graph,
-        projection.control_headers,
-    );
-    producer.aliases = producer_aliases;
+    let mut producer = MaterializationRequirement {
+        id: MaterializationId(inner.materializations.len() as u32),
+        producer: candidate.id,
+        name: fresh_entry_name(inner, &format!("{}_materialize_shared", entry.name)),
+        span: entry.span,
+        execution_model: entry.execution_model.clone(),
+        inputs: entry.inputs.clone(),
+        resource_declarations: producer_storage,
+        params: entry.params.clone(),
+        return_ty: Type::Constructed(TypeName::Unit, vec![]),
+        graph: projection.graph,
+        control_headers: projection.control_headers,
+        aliases: producer_aliases,
+        substitutions: Vec::new(),
+    };
     let producer_owner = candidate.id;
     let producer_graph = &mut producer.graph;
     let mut output_views = Vec::new();
@@ -263,6 +265,10 @@ fn materialize_candidate(
             role: StorageRole::Output,
             elem_ty: elem_ty.clone(),
             size: size.clone(),
+        });
+        producer.substitutions.push(MaterializationSubstitution {
+            resource: SemanticResourceRef::Binding(binding),
+            consumers: Vec::new(),
         });
     }
     let retained_index = producer_graph.side_effect_index();
@@ -364,7 +370,7 @@ fn materialize_candidate(
             ),
         );
     }
-    inner.entry_points.push(producer);
+    inner.materializations.push(producer);
 }
 
 /// Return the transitive semantic producer closure needed to compute one
@@ -562,6 +568,12 @@ fn all_bindings(inner: &SemanticProgram) -> HashSet<BindingRef> {
                         .filter_map(|declaration| declaration.resource.binding()),
                 )
         })
+        .chain(inner.materializations.iter().flat_map(|requirement| {
+            requirement
+                .resource_declarations
+                .iter()
+                .filter_map(|declaration| declaration.resource.binding())
+        }))
         .collect()
 }
 
@@ -597,12 +609,16 @@ fn size_for_space(space: &super::types::SegSpace, elem_ty: &Type<TypeName>) -> L
 }
 
 fn fresh_entry_name(inner: &SemanticProgram, base: &str) -> String {
-    if inner.entry_points.iter().all(|entry| entry.name != base) {
+    let available = |name: &str| {
+        inner.entry_points.iter().all(|entry| entry.name != name)
+            && inner.materializations.iter().all(|requirement| requirement.name != name)
+    };
+    if available(base) {
         return base.to_string();
     }
     for suffix in 1.. {
         let candidate = format!("{base}_{suffix}");
-        if inner.entry_points.iter().all(|entry| entry.name != candidate) {
+        if available(&candidate) {
             return candidate;
         }
     }

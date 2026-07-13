@@ -682,20 +682,32 @@ pub(crate) fn attach_compiler_prepasses(inner: &SemanticProgram, schedule: &mut 
     // materializations: scheduling a consumer can make its producer ready.
     while let Some((producer_id, consumer_id, recipe)) =
         prepasses.iter().find_map(|(producer, (recipe, consumers))| {
-            if schedule.contains_source_entry(*producer) {
+            if schedule.contains_flow_source(*producer) {
                 return None;
             }
             consumers
                 .iter()
-                .find(|consumer| schedule.contains_source_entry(**consumer))
+                .find(|consumer| schedule.contains_flow_source(**consumer))
                 .map(|consumer| (*producer, *consumer, recipe.clone()))
         })
     {
-        let producer = &inner.entry_points[producer_id.0 as usize];
         let consumer = schedule
-            .entry_point_for_source(consumer_id)
+            .entry_point_for_flow_source(consumer_id)
             .expect("scheduled flow consumer has no entry point")
             .to_string();
+        if let super::program::CompilerFlowEndpoint::Materialization(id) = producer_id {
+            let requirement = inner
+                .materializations
+                .get(id.0 as usize)
+                .filter(|requirement| requirement.id == id)
+                .expect("materialization flow references a missing requirement");
+            schedule.add_materialization_before(&consumer, requirement);
+            continue;
+        }
+        let super::program::CompilerFlowEndpoint::Entry(producer_id) = producer_id else {
+            unreachable!()
+        };
+        let producer = &inner.entry_points[producer_id.0 as usize];
         let domain =
             schedule::segmented_domain(producer).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
         schedule.add_phase_before(
@@ -2066,6 +2078,20 @@ pub fn restore_all_serial(inner: &mut SemanticProgram) {
             restore_serial_seg_in_graph(&mut function.graph, block_id, index);
         }
     }
+    for requirement in &mut inner.materializations {
+        loop {
+            let location = requirement.graph.skeleton.blocks.iter().find_map(|(block_id, block)| {
+                block.side_effects.iter().enumerate().find_map(|(index, effect)| {
+                    matches!(effect.kind, SideEffectKind::Soac(EgirSoac::Seg { .. }))
+                        .then_some((block_id, index))
+                })
+            });
+            let Some((block_id, index)) = location else {
+                break;
+            };
+            restore_serial_seg_in_graph(&mut requirement.graph, block_id, index);
+        }
+    }
 }
 
 pub(crate) fn finalize_scheduled_states(inner: &mut SemanticProgram) {
@@ -2097,48 +2123,41 @@ pub(crate) fn finalize_scheduled_states(inner: &mut SemanticProgram) {
     for entry in &mut inner.entry_points {
         finish_graph(&mut entry.graph);
     }
+    for requirement in &mut inner.materializations {
+        finish_graph(&mut requirement.graph);
+    }
 }
 
 fn restore_lane_local(inner: &mut SemanticProgram) {
     for entry in &mut inner.entry_points {
-        loop {
-            let location = entry.graph.skeleton.blocks.iter().find_map(|(block_id, block)| {
-                block.side_effects.iter().enumerate().find_map(|(index, effect)| {
-                    matches!(
-                        effect.kind,
-                        SideEffectKind::Soac(EgirSoac::Seg {
-                            placement: SegPlacement::LaneLocal,
-                            ..
-                        })
-                    )
-                    .then_some((block_id, index))
-                })
-            });
-            let Some((block_id, index)) = location else {
-                break;
-            };
-            restore_serial_seg_in_graph(&mut entry.graph, block_id, index);
-        }
+        restore_lane_local_in_graph(&mut entry.graph);
     }
     for function in &mut inner.functions {
-        loop {
-            let location = function.graph.skeleton.blocks.iter().find_map(|(block_id, block)| {
-                block.side_effects.iter().enumerate().find_map(|(index, effect)| {
-                    matches!(
-                        effect.kind,
-                        SideEffectKind::Soac(EgirSoac::Seg {
-                            placement: SegPlacement::LaneLocal,
-                            ..
-                        })
-                    )
-                    .then_some((block_id, index))
-                })
-            });
-            let Some((block_id, index)) = location else {
-                break;
-            };
-            restore_serial_seg_in_graph(&mut function.graph, block_id, index);
-        }
+        restore_lane_local_in_graph(&mut function.graph);
+    }
+    for requirement in &mut inner.materializations {
+        restore_lane_local_in_graph(&mut requirement.graph);
+    }
+}
+
+fn restore_lane_local_in_graph(graph: &mut EGraph) {
+    loop {
+        let location = graph.skeleton.blocks.iter().find_map(|(block_id, block)| {
+            block.side_effects.iter().enumerate().find_map(|(index, effect)| {
+                matches!(
+                    effect.kind,
+                    SideEffectKind::Soac(EgirSoac::Seg {
+                        placement: SegPlacement::LaneLocal,
+                        ..
+                    })
+                )
+                .then_some((block_id, index))
+            })
+        });
+        let Some((block_id, index)) = location else {
+            break;
+        };
+        restore_serial_seg_in_graph(graph, block_id, index);
     }
 }
 

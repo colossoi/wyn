@@ -342,7 +342,6 @@ pub enum EntryOrigin {
     Source,
     ScalarPrepass,
     GatherPrepass,
-    MultiConsumerMaterialization,
     /// A compiler-created runtime-filter helper entry. The concrete phase is
     /// authoritative on the entry's `EgirSoac::Filter` side effect.
     RuntimeFilter,
