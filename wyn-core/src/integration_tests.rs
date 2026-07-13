@@ -7798,6 +7798,28 @@ entry show(#[builtin(position)] pos: vec4f32,
 }
 
 #[test]
+fn fragment_storage_read_resource_is_graphics_passthrough() {
+    let lowered = crate::compile_thru_spirv(
+        r#"
+open f32
+
+resource gbuf: image2d {
+  format = rgba8unorm
+  size   = window
+  usages = [storage_read]
+}
+
+#[fragment]
+entry fs(#[view(gbuf, storage_read)] g: storage_image)
+  #[target(surface)] vec4f32 =
+  image_load(g, @[0, 0])
+"#,
+    )
+    .expect("a fragment storage-read resource must remain a graphics passthrough");
+    assert!(!lowered.spirv.is_empty());
+}
+
+#[test]
 fn loop_bodied_map_uses_storage_image_globals_not_function_parameters() {
     use std::collections::{HashMap, HashSet};
     use wspirv::binary::parse_words;

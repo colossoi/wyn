@@ -463,15 +463,7 @@ impl KernelPlan {
                 next_kernel_id += 1;
                 let phase = by_name
                     .get(stage.entry_point.as_str())
-                    .map(|(source, entry)| {
-                        phase_from_entry(
-                            id,
-                            Some(*source),
-                            entry,
-                            DomainSelection::Inferred(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
-                            KernelRecipe::GraphicsPassthrough,
-                        )
-                    })
+                    .map(|(source, entry)| graphics_passthrough_phase(id, *source, entry))
                     .unwrap_or_else(|| KernelPhase {
                         id,
                         entry_point: stage.entry_point.clone(),
@@ -1094,6 +1086,29 @@ fn phase_from_entry(
         domain,
         domain_selection: selection,
         resources: segmented_resources(entry).unwrap_or_else(|| entry_resources(entry)),
+        dependencies: Vec::new(),
+    }
+}
+
+fn graphics_passthrough_phase(
+    id: KernelId,
+    source_entry: SemanticEntryId,
+    entry: &SemanticEntry,
+) -> KernelPhase {
+    let domain = KernelDomain::Fixed { x: 1, y: 1, z: 1 };
+    KernelPhase {
+        id,
+        entry_point: entry.name.clone(),
+        recipe: KernelRecipe::GraphicsPassthrough,
+        abi: EntryAbiProjection {
+            source_entry: Some(source_entry),
+            inputs: (0..entry.inputs.len()).map(InputSlotId).collect(),
+            output_routes: entry_output_projection(entry),
+        },
+        workgroup_size: (1, 1, 1),
+        domain: domain.clone(),
+        domain_selection: DomainSelection::Inferred(domain),
+        resources: entry_resources(entry),
         dependencies: Vec::new(),
     }
 }
