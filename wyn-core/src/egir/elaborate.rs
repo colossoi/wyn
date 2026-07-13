@@ -23,7 +23,7 @@ use smallvec::SmallVec;
 
 use super::extract;
 use super::loop_analysis::LoopAnalysis;
-use super::program::PhysicalProgram;
+use super::program::{PhysicalProgram, PhysicalResourceRef};
 use super::scoped_map::ScopedMap;
 use super::types::*;
 
@@ -73,7 +73,7 @@ pub fn run_program(inner: PhysicalProgram) -> (Program, PipelineDescriptor) {
 }
 
 fn elaborate_one_body(
-    graph: EGraph,
+    graph: EGraph<PhysicalResourceRef>,
     control_headers: &LookupMap<BlockId, ControlHeader>,
     aliases: &LookupMap<NodeId, NodeId>,
     params: &[(Type<TypeName>, String)],
@@ -92,7 +92,7 @@ fn elaborate_one_body(
     )
 }
 
-pub(super) fn skeleton_domtree(skeleton: &Skeleton) -> wyn_graph::DominatorTree<SkelBlockId> {
+pub(super) fn skeleton_domtree<R>(skeleton: &Skeleton<R>) -> wyn_graph::DominatorTree<SkelBlockId> {
     wyn_graph::DominatorTree::build(skeleton.entry, |block, successors| {
         match &skeleton.blocks[block].term {
             SkeletonTerminator::Return(_) | SkeletonTerminator::Unreachable => {}
@@ -114,7 +114,7 @@ pub(super) fn skeleton_domtree(skeleton: &Skeleton) -> wyn_graph::DominatorTree<
 /// a stripped param — e.g., via a Pure node hash-consed with the param
 /// in its operands — transparently redirects to the replacement.
 pub fn run(
-    graph: &EGraph,
+    graph: &EGraph<PhysicalResourceRef>,
     domtree: &wyn_graph::DominatorTree<SkelBlockId>,
     params: &[(Type<TypeName>, String)],
     return_ty: Type<TypeName>,
@@ -235,7 +235,7 @@ struct LoopStackEntry {
 }
 
 struct Elaborator<'a> {
-    graph: &'a EGraph,
+    graph: &'a EGraph<PhysicalResourceRef>,
     best: LookupMap<NodeId, NodeId>,
     domtree: &'a wyn_graph::DominatorTree<SkelBlockId>,
     loop_analysis: &'a LoopAnalysis,
@@ -320,7 +320,7 @@ impl<'a> Elaborator<'a> {
     /// Elaborate a side-effectful instruction. Side effects stay pinned to
     /// their containing skeleton block — only the operands go through
     /// demand() where LICM may move them.
-    fn elaborate_side_effect(&mut self, se: &SideEffect, skel_bid: SkelBlockId) {
+    fn elaborate_side_effect(&mut self, se: &SideEffect<PhysicalResourceRef>, skel_bid: SkelBlockId) {
         let inst_kind = match &se.kind {
             super::types::SideEffectKind::Inst(k) => k,
             super::types::SideEffectKind::Soac(p) => {
@@ -659,7 +659,7 @@ fn const_to_inst_kind(c: &ConstantValue) -> InstKind {
     }
 }
 
-fn pure_to_inst_kind(op: &PureOp, args: &[ValueId]) -> InstKind {
+fn pure_to_inst_kind(op: &PureOp<PhysicalResourceRef>, args: &[ValueId]) -> InstKind {
     super::types::rebuild_inst_kind(op, args)
 }
 

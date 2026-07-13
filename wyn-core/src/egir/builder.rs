@@ -80,7 +80,42 @@ impl<'a> PhysicalEntryBuilder<'a> {
             aliases: self.body.aliases.clone(),
             output_routes: self.body.output_routes.clone(),
         };
-        super::program::physicalize_graph_resources(&mut draft.graph, self.resources)?;
+        let (graph, node_map, block_map) =
+            super::program::physicalize_graph_resources(draft.graph, self.resources)?;
+        let control_headers = draft
+            .control_headers
+            .into_iter()
+            .map(|(block, header)| {
+                let block = block_map[&block];
+                let header = header.remap(&|target| block_map[&target]);
+                (block, header)
+            })
+            .collect();
+        let aliases =
+            draft.aliases.into_iter().map(|(from, to)| (node_map[&from], node_map[&to])).collect();
+        let output_routes = draft
+            .output_routes
+            .into_iter()
+            .map(|route| super::program::OutputRoute {
+                source: super::program::SlotSource {
+                    block: block_map[&route.source.block],
+                    value: node_map[&route.source.value],
+                },
+                slot: route.slot,
+                writers: route
+                    .writers
+                    .into_iter()
+                    .map(|writer| match writer {
+                        super::program::OutputWriter::Value(value) => {
+                            super::program::OutputWriter::Value(node_map[&value])
+                        }
+                        super::program::OutputWriter::Effect(effect) => {
+                            super::program::OutputWriter::Effect(effect)
+                        }
+                    })
+                    .collect(),
+            })
+            .collect::<Vec<_>>();
         for input in &mut draft.inputs {
             super::program::physicalize_type_resources(&mut input.ty, self.resources);
         }
@@ -97,7 +132,7 @@ impl<'a> PhysicalEntryBuilder<'a> {
         if draft.name.is_empty() {
             return Err("physical entry has no publication name".into());
         }
-        for route in &draft.output_routes {
+        for route in &output_routes {
             if route.slot.0 >= draft.outputs.len() {
                 return Err(format!(
                     "physical entry `{}` routes invalid output slot {}",
@@ -109,12 +144,7 @@ impl<'a> PhysicalEntryBuilder<'a> {
             .resources
             .into_iter()
             .map(|declaration| {
-                let resource = declaration.resource.resource().ok_or_else(|| {
-                    format!(
-                        "physical entry `{}` contains a pending resource binding",
-                        draft.name
-                    )
-                })?;
+                let resource = declaration.resource.0;
                 let binding = self.resources.binding(resource).ok_or_else(|| {
                     format!(
                         "physical entry `{}` references missing resource {:?}",
@@ -138,10 +168,10 @@ impl<'a> PhysicalEntryBuilder<'a> {
             storage_bindings,
             params: draft.params,
             return_ty: draft.return_ty,
-            graph: draft.graph,
-            control_headers: draft.control_headers,
-            aliases: draft.aliases,
-            output_routes: draft.output_routes,
+            graph,
+            control_headers,
+            aliases,
+            output_routes,
         })
     }
 }

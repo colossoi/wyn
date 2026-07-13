@@ -30,8 +30,8 @@ use smallvec::{smallvec, SmallVec};
 use std::collections::HashMap;
 
 use super::program::{
-    CompilerResource, CompilerResourceKind, EgirFunc, GraphResourceRef, LogicalResource, LogicalSize,
-    ResourceOrigin, SemanticEntry, SemanticProgram, SemanticResourceDecl, SemanticResourceRef,
+    CompilerResource, CompilerResourceKind, LogicalResource, LogicalSize, ResourceOrigin, SemanticEntry,
+    SemanticFunc, SemanticProgram, SemanticResourceDecl, SemanticResourceRef,
 };
 use super::publish::PipelineDescriptorPublish;
 use super::types::*;
@@ -278,7 +278,7 @@ pub fn run(
     }
 
     // Phase 2: convert functions and entry points into raw EGIR records.
-    let mut functions: Vec<EgirFunc> = Vec::new();
+    let mut functions: Vec<SemanticFunc> = Vec::new();
     let mut externs: Vec<Function> = Vec::new();
     let mut entry_points: Vec<SemanticEntry> = Vec::new();
     let mut prepass_roles = LookupMap::new();
@@ -361,7 +361,7 @@ pub fn run(
 
 enum ConvertedFunc {
     Extern(Function),
-    Regular(EgirFunc),
+    Regular(SemanticFunc),
 }
 
 // ============================================================================
@@ -429,7 +429,7 @@ fn convert_function<'a>(
     }
 
     let (graph, control_headers) = converter.into_graph_parts();
-    Ok(ConvertedFunc::Regular(EgirFunc::new(
+    Ok(ConvertedFunc::Regular(SemanticFunc::new(
         def_name,
         def.body.span,
         None,
@@ -971,7 +971,7 @@ impl<'a, 'b> Converter<'a, 'b> {
 
     /// Extract the built EGraph + control_headers, leaving the rest of the
     /// Converter state behind. Used by the top-level `convert_program`
-    /// phase to feed a ready-to-chain `EgirFunc` / `SemanticEntry`.
+    /// phase to feed a ready-to-chain `SemanticFunc` / `SemanticEntry`.
     fn into_graph_parts(self) -> (EGraph, LookupMap<BlockId, ControlHeader>) {
         (self.graph, self.control_headers)
     }
@@ -991,9 +991,16 @@ impl<'a, 'b> Converter<'a, 'b> {
         params: &[(Type<TypeName>, String)],
         return_ty: Type<TypeName>,
     ) -> Option<FuncBody> {
-        let region_interner = self.region_interner;
-        let (mut graph, mut control_headers) = self.into_graph_parts();
-        super::soac_expand::run_one_body(&mut graph, &mut control_headers, &region_interner.borrow());
+        let (graph, control_headers) = self.into_graph_parts();
+        let (mut graph, _, block_map) = graph.try_map_resources::<BindingRef, ()>(|_| Err(())).ok()?;
+        let control_headers = control_headers
+            .into_iter()
+            .map(|(block, header)| {
+                let block = block_map[&block];
+                let header = header.remap(&|target| block_map[&target]);
+                (block, header)
+            })
+            .collect();
         let aliases = super::skel_opt::run_one_body(&mut graph);
         let skel_domtree = super::elaborate::skeleton_domtree(&graph.skeleton);
         let identity_map: LookupMap<BlockId, BlockId> =
@@ -1366,7 +1373,11 @@ impl<'a, 'b> Converter<'a, 'b> {
                     if let Some(resource) =
                         binding.map(|binding| self.resources.borrow_mut().host_id(binding))
                     {
-                        Ok(self.intern_pure(PureOp::ResourceLen(resource), smallvec![], ty))
+                        Ok(self.intern_pure(
+                            PureOp::ResourceLen(SemanticResourceRef(resource)),
+                            smallvec![],
+                            ty,
+                        ))
                     } else {
                         let arg_nids: SmallVec<[NodeId; 4]> =
                             args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
@@ -1388,8 +1399,9 @@ impl<'a, 'b> Converter<'a, 'b> {
                                 .into(),
                         )
                     })?;
+                    let resource = SemanticResourceRef(self.resources.borrow_mut().host_id(binding));
                     let coord = self.convert_term(&args[1])?;
-                    Ok(self.intern_pure(PureOp::StorageImageLoad(binding), smallvec![coord], ty))
+                    Ok(self.intern_pure(PureOp::StorageImageLoad(resource), smallvec![coord], ty))
                 } else {
                     let arg_nids: SmallVec<[NodeId; 4]> =
                         args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
@@ -1569,6 +1581,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                     .into(),
             )
         })?;
+        let resource = SemanticResourceRef(self.resources.borrow_mut().host_id(binding));
         let arg_nids: SmallVec<[NodeId; 4]> =
             args[1..].iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
         let arg_vrefs: Vec<ValueRef> =
@@ -1580,7 +1593,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
             semantic_id: None,
             kind: SideEffectKind::Inst(InstKind::Op {
-                tag: crate::op::OpTag::StorageImageStore(binding),
+                tag: crate::op::OpTag::StorageImageStore(resource),
                 operands: arg_vrefs,
             }),
             operand_nodes: arg_nids,
@@ -2810,7 +2823,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                 input_array_type: arr_ty,
                 input_elem_type: elem_ty,
                 output: super::types::FilterOutput::Runtime {
-                    scratch: GraphResourceRef::Resource(scratch_out),
+                    scratch: super::program::SemanticResourceRef(scratch_out),
                     length: super::types::RuntimeFilterLength::ViewOnly,
                 },
                 // Set by `realize_outputs` only when this filter is a compute
@@ -2893,7 +2906,9 @@ impl<'a, 'b> Converter<'a, 'b> {
                 self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
                     semantic_id: None,
                     kind: SideEffectKind::Inst(InstKind::Op {
-                        tag: crate::op::OpTag::StorageView(crate::op::PureViewSource::Resource(resource)),
+                        tag: crate::op::OpTag::StorageView(crate::op::PureViewSource::Storage(
+                            SemanticResourceRef(resource),
+                        )),
                         operands: vec![
                             ValueRef::Ssa(Default::default()),
                             ValueRef::Ssa(Default::default()),

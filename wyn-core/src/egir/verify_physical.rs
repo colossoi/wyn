@@ -6,7 +6,7 @@ use polytype::Type;
 
 use crate::ast::TypeName;
 
-use super::program::{GraphResourceRef, PhysicalProgram};
+use super::program::{PhysicalProgram, PhysicalResourceRef};
 use super::types::{ENode, EgirSoac, FilterState, SegOpKind, SideEffectKind};
 
 pub fn check(program: &PhysicalProgram) -> Result<(), String> {
@@ -87,17 +87,16 @@ fn verify_physical_type(ty: &Type<TypeName>, owner: &str) -> Result<(), String> 
 }
 
 fn verify_physical_graph(
-    graph: &super::types::EGraph,
+    graph: &super::types::EGraph<PhysicalResourceRef>,
     owner: &str,
     require_scheduled: bool,
 ) -> Result<(), String> {
     for (_, node) in &graph.nodes {
         if let ENode::Pure { op, .. } = node {
             match op {
-                super::types::PureOp::StorageView(crate::op::PureViewSource::Resource(resource))
-                | super::types::PureOp::ResourceLen(resource) => {
+                super::types::PureOp::ResourceLen(resource) => {
                     return Err(format!(
-                        "physical body `{owner}` still contains semantic resource {resource:?}"
+                        "physical body `{owner}` still contains unresolved resource length {resource:?}"
                     ));
                 }
                 _ => {}
@@ -111,10 +110,9 @@ fn verify_physical_graph(
         for effect in &block.side_effects {
             match &effect.kind {
                 SideEffectKind::Inst(crate::ssa::types::InstKind::Op { tag, .. }) => match tag {
-                    crate::op::OpTag::StorageView(crate::op::PureViewSource::Resource(resource))
-                    | crate::op::OpTag::ResourceLen(resource) => {
+                    crate::op::OpTag::ResourceLen(resource) => {
                         return Err(format!(
-                            "physical body `{owner}` still contains semantic resource {resource:?}"
+                            "physical body `{owner}` still contains unresolved resource length {resource:?}"
                         ));
                     }
                     _ => {}
@@ -143,15 +141,6 @@ fn verify_physical_graph(
                     }
                     let mut soac = soac.clone();
                     let mut error = None;
-                    soac.visit_resource_refs_mut(|reference| {
-                        if let GraphResourceRef::Resource(resource) = *reference {
-                            error.get_or_insert_with(|| {
-                                format!(
-                                    "physical body `{owner}` still contains semantic resource {resource:?}"
-                                )
-                            });
-                        }
-                    });
                     soac.visit_types_mut(|ty| {
                         if error.is_none() {
                             error = verify_physical_type(ty, owner).err();

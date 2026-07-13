@@ -16,18 +16,22 @@ use smallvec::{smallvec, SmallVec};
 use super::graph_ops::{
     alloc_effect, emit_alloca, emit_load, emit_place_index_store, emit_store, next_effect_token,
 };
-use super::program::{PhysicalProgram, RegionInterner};
+use super::program::{PhysicalProgram, PhysicalResourceRef, RegionInterner};
 use crate::ast::TypeName;
 use crate::ssa::types::{ControlHeader, InstKind, ValueRef};
 use crate::types::{is_array_variant_view, is_virtual_array, TypeExt};
 
-use super::types::{
-    EGraph, ENode, EgirSoac, NodeId, PureOp, SegOpKind, SideEffect, SideEffectKind, SkeletonTerminator,
-    SoacDestination,
-};
+use super::types::{ENode, NodeId, PureOp, SegOpKind, SkeletonTerminator, SoacDestination};
 
-fn physical_binding(resource: super::program::GraphResourceRef) -> crate::BindingRef {
-    resource.binding().expect("logical resource reached SOAC expansion before physicalization")
+type EGraph = super::types::EGraph<PhysicalResourceRef>;
+type EgirSoac = super::types::EgirSoac<PhysicalResourceRef>;
+type SideEffect = super::types::SideEffect<PhysicalResourceRef>;
+type SideEffectKind = super::types::SideEffectKind<PhysicalResourceRef>;
+type SegSpace = super::types::SegSpace<PhysicalResourceRef>;
+type FilterWorkBuffers = super::types::FilterWorkBuffers<PhysicalResourceRef>;
+
+fn physical_binding(resource: PhysicalResourceRef) -> crate::BindingRef {
+    resource
 }
 
 /// Run `run_one_body` on every function and entry point in the program.
@@ -891,7 +895,7 @@ where
 /// writes every mapped output field to its corresponding output view —
 /// no loop, no phi.
 struct ScremaMapsIntoLoop {
-    space: crate::egir::types::SegSpace,
+    space: SegSpace,
     len_input: (NodeId, Type<TypeName>),
     read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)>,
     /// Which `read_inputs` each lane consumes: `func_input_indices[k]` lists the
@@ -1015,7 +1019,7 @@ fn build_parallel_maps(
 
 fn emit_seg_space_len(
     graph: &mut EGraph,
-    space: &crate::egir::types::SegSpace,
+    space: &SegSpace,
     fallback: &(NodeId, Type<TypeName>),
     i32_ty: &Type<TypeName>,
 ) -> NodeId {
@@ -1066,7 +1070,7 @@ struct FilterLoop {
     output_elem_ty: Type<TypeName>,
     /// `Size(N)` — the input's static capacity, reused as the output buffer's
     /// capacity (the upper bound on filtered count).
-    output: super::types::FilterOutput,
+    output: super::types::FilterOutput<PhysicalResourceRef>,
     /// `Some(name)` folds a producer `map(f, …)` in: per element compute
     /// `v = f(elem, ...map_captures)` and keep/test `v` instead of `elem`.
     map_func: Option<String>,
@@ -1619,7 +1623,7 @@ fn build_filter_scan(
     bid: BlockId,
     idx: usize,
     spec: FilterLoop,
-    work: super::types::FilterWorkBuffers,
+    work: FilterWorkBuffers,
     next_effect: &mut u32,
 ) {
     use super::graph_ops::{emit_load, emit_storage_store, intern_storage_view, intern_u32};
@@ -1769,7 +1773,7 @@ fn build_filter_scatter(
     bid: BlockId,
     idx: usize,
     spec: FilterLoop,
-    work: super::types::FilterWorkBuffers,
+    work: FilterWorkBuffers,
     next_effect: &mut u32,
 ) {
     use super::graph_ops::{emit_load, emit_storage_store, intern_storage_view, intern_u32};

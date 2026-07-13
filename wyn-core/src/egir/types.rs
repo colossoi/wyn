@@ -34,7 +34,7 @@ pub struct NodeId;
 ///
 /// Region *identity* is a checked arena index, never a re-derived string. A
 /// region still lowers to a named SSA function — that name is the call ABI and
-/// lives on `EgirRegion`/the `RegionInterner`, recovered via the arena when a
+/// lives on `SemanticRegion`/the `RegionInterner`, recovered via the arena when a
 /// `PureOp::Call` is emitted. Semantic SegOps carry only this index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RegionId(u32);
@@ -53,9 +53,9 @@ impl RegionId {
 // PureOp — operator identity for hash-consing (re-exported from `crate::op`)
 // ---------------------------------------------------------------------------
 
-/// Alias for the shared `OpTag` enum (operator identity without operands).
-/// Operands live in `ENode::Pure { operands }`.
-pub use crate::op::{OpTag as PureOp, PureViewSource};
+/// Phase-typed operator identity without operands.
+pub type PureOp<R = super::program::SemanticResourceRef> = crate::op::OpTag<R>;
+pub type PureViewSource<R = super::program::SemanticResourceRef> = crate::op::PureViewSource<R>;
 
 // ---------------------------------------------------------------------------
 // NodeKey — hash-cons key = operator + operands + result type
@@ -72,8 +72,8 @@ pub use crate::op::{OpTag as PureOp, PureViewSource};
 /// `PureOp::Int` / `PureOp::Uint` tags for literals, but uniformly for
 /// every pure op.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct NodeKey {
-    pub op: PureOp,
+pub struct NodeKey<R = super::program::SemanticResourceRef> {
+    pub op: PureOp<R>,
     pub operands: SmallVec<[NodeId; 4]>,
     pub ty: Type<TypeName>,
 }
@@ -84,10 +84,10 @@ pub struct NodeKey {
 
 /// A node in the e-graph.
 #[derive(Clone, Debug)]
-pub enum ENode {
+pub enum ENode<R = super::program::SemanticResourceRef> {
     /// A pure instruction, hash-consed and floating.
     Pure {
-        op: PureOp,
+        op: PureOp<R>,
         operands: SmallVec<[NodeId; 4]>,
     },
     /// Union of two equivalent representations (binary tree of eclasses).
@@ -111,7 +111,7 @@ pub enum ENode {
     SideEffectResult,
 }
 
-impl ENode {
+impl<R> ENode<R> {
     /// Return all child NodeIds referenced by this node.
     pub fn children(&self) -> SmallVec<[NodeId; 4]> {
         match self {
@@ -131,14 +131,14 @@ impl ENode {
 
 /// A side-effectful instruction anchored in the skeleton CFG.
 #[derive(Clone, Debug)]
-pub struct SideEffect {
+pub struct SideEffect<R = super::program::SemanticResourceRef> {
     /// Stable semantic identity assigned after segmentation and preserved by
     /// every projection. Synthesized physical-only effects use `None`.
     pub semantic_id: Option<super::program::SemanticOpId>,
     /// What this side-effect is. Either an SSA `InstKind` that survives into
     /// the final `FuncBody`, or an intermediate `EgirSoac` that must be
     /// rewritten by `soac_expand` before `elaborate` runs.
-    pub kind: SideEffectKind,
+    pub kind: SideEffectKind<R>,
     /// Operands resolved to NodeIds.
     pub operand_nodes: SmallVec<[NodeId; 4]>,
     /// Result value, if this instruction produces one.
@@ -152,14 +152,14 @@ pub struct SideEffect {
 
 /// A skeleton side-effect's concrete kind.
 #[derive(Clone, Debug)]
-pub enum SideEffectKind {
+pub enum SideEffectKind<R = super::program::SemanticResourceRef> {
     /// An SSA-level effectful instruction (`Alloca` / `Load` / `Store` /
     /// `Call` / `Intrinsic` / `StorageView*` / `OutputPtr` with effects).
     /// This is what lands in the final `FuncBody` after elaboration.
-    Inst(InstKind),
+    Inst(InstKind<R>),
     /// A placeholder for an unexpanded SOAC. Produced by `from_tlc` and
     /// consumed by `soac_expand`. Never reaches elaborate.
-    Soac(EgirSoac),
+    Soac(EgirSoac<R>),
 }
 
 /// Where an array-producing SOAC's per-iteration result is written.
@@ -197,7 +197,7 @@ pub enum SegLevel {
 
 /// One concrete dimension of a segmented iteration space.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SegExtent {
+pub enum SegExtent<R = super::program::SemanticResourceRef> {
     Fixed(u32),
     PushConstant {
         node: NodeId,
@@ -205,7 +205,7 @@ pub enum SegExtent {
     },
     ResourceLength {
         node: NodeId,
-        resource: super::program::GraphResourceRef,
+        resource: R,
         elem_bytes: u32,
     },
     /// A concrete EGIR value whose provenance is not host-dispatchable. Such
@@ -218,9 +218,9 @@ pub enum SegExtent {
 /// bound during expansion (`build_parallel_maps`/`chunk_soac_inputs`), not at
 /// node-construction time.
 #[derive(Clone, Debug)]
-pub struct SegSpace {
+pub struct SegSpace<R = super::program::SemanticResourceRef> {
     pub level: SegLevel,
-    pub dims: Vec<SegExtent>,
+    pub dims: Vec<SegExtent<R>>,
 }
 
 /// Placement selected independently of the backend scheduling strategy.
@@ -254,8 +254,8 @@ pub enum HistUpdatePolicy {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SegResourceAccess {
-    pub resource: super::program::GraphResourceRef,
+pub struct SegResourceAccess<R = super::program::SemanticResourceRef> {
+    pub resource: R,
     pub access: SegResourceAccessKind,
 }
 
@@ -305,69 +305,69 @@ pub enum SegOpKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FilterWorkBuffers {
-    pub flags: super::program::GraphResourceRef,
-    pub offsets: super::program::GraphResourceRef,
-    pub block_sums: super::program::GraphResourceRef,
-    pub block_offsets: super::program::GraphResourceRef,
+pub struct FilterWorkBuffers<R = super::program::SemanticResourceRef> {
+    pub flags: R,
+    pub offsets: R,
+    pub block_sums: R,
+    pub block_offsets: R,
 }
 
 #[derive(Clone, Debug)]
 /// Storage contract for a filter result; local and runtime-only fields cannot
 /// coexist.
-pub enum FilterOutput {
+pub enum FilterOutput<R = super::program::SemanticResourceRef> {
     Local {
         capacity: Type<TypeName>,
         destination: SoacDestination,
     },
     Runtime {
-        scratch: super::program::GraphResourceRef,
-        length: RuntimeFilterLength,
+        scratch: R,
+        length: RuntimeFilterLength<R>,
     },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// Where a runtime filter's surviving count is observable.
-pub enum RuntimeFilterLength {
+pub enum RuntimeFilterLength<R = super::program::SemanticResourceRef> {
     ViewOnly,
-    EntryOutput(super::program::GraphResourceRef),
+    EntryOutput(R),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// One executable filter lowering selected by terminal scheduling.
-pub enum FilterPlan {
+pub enum FilterPlan<R = super::program::SemanticResourceRef> {
     Serial,
-    Flags(FilterWorkBuffers),
-    Scan(FilterWorkBuffers),
-    Scatter(FilterWorkBuffers),
+    Flags(FilterWorkBuffers<R>),
+    Scan(FilterWorkBuffers<R>),
+    Scatter(FilterWorkBuffers<R>),
 }
 
 #[derive(Clone, Debug)]
 /// Facts known about a filter at each compiler boundary.
-pub enum FilterState {
+pub enum FilterState<R = super::program::SemanticResourceRef> {
     Raw,
     Semantic {
-        space: SegSpace,
+        space: SegSpace<R>,
     },
     Scheduled {
-        space: SegSpace,
-        plan: FilterPlan,
+        space: SegSpace<R>,
+        plan: FilterPlan<R>,
     },
 }
 
 #[derive(Clone, Debug)]
 /// Execution classification for scatter/histogram operations.
-pub enum HistExecution {
+pub enum HistExecution<R = super::program::SemanticResourceRef> {
     Raw,
     Serial,
-    Segmented(SegSpace),
+    Segmented(SegSpace<R>),
 }
 
 /// An unexpanded SOAC operation held in the skeleton until `soac_expand` rewrites
 /// it into an explicit loop. All operand NodeIds live in `SideEffect.operand_nodes`
 /// with a variant-specific layout (documented per-variant in `soac_expand`).
 #[derive(Clone, Debug)]
-pub enum EgirSoac {
+pub enum EgirSoac<R = super::program::SemanticResourceRef> {
     /// Multi-result map+accumulator: one pass writes mapped outputs and
     /// threads accumulator outputs. Operand layout:
     /// `[inputs..., init_accs..., map_captures..., acc_step_captures...,
@@ -394,7 +394,7 @@ pub enum EgirSoac {
     /// `state` carries only the facts established at the current compiler
     /// phase.
     Filter {
-        state: FilterState,
+        state: FilterState<R>,
         /// `Some(body)` folds an elementwise producer `map(f, …)` in: per element
         /// the loop computes `v = f(x)` with the body's explicit captures,
         /// tests `pred(v)`, and keeps `v`. `None` is a plain
@@ -407,7 +407,7 @@ pub enum EgirSoac {
         input_array_type: Type<TypeName>,
         input_elem_type: Type<TypeName>,
         /// Complete local or runtime output-storage contract.
-        output: FilterOutput,
+        output: FilterOutput<R>,
     },
     /// `scatter`: over the parallel `input` arrays, the lifted `func` yields an
     /// `(index, value)` pair per element, written as `dest[index] = value`;
@@ -425,7 +425,7 @@ pub enum EgirSoac {
         dest_elem_type: Type<TypeName>,
         update_policy: HistUpdatePolicy,
         /// Raw, serial, or segmented execution classification.
-        execution: HistExecution,
+        execution: HistExecution<R>,
     },
     /// A reified parallel SOAC — the `SegOp`. Semantically a (1-D) map nest
     /// over `space`, with pointwise `map_funcs` lanes and optional reduce/scan
@@ -435,7 +435,7 @@ pub enum EgirSoac {
     /// lowering (lane-indexed map kernel; chunked two-phase reduce; three-phase
     /// scan) from its fields. Operand layout matches the serial `Screma`'s.
     Seg {
-        space: SegSpace,
+        space: SegSpace<R>,
         placement: SegPlacement,
         kind: SegOpKind,
         map_bodies: Vec<SegBody>,
@@ -450,7 +450,7 @@ pub enum EgirSoac {
         /// construction time rather than recovered while scheduling.
         output_slots: Vec<usize>,
         /// Conservative logical resource summary owned by the semantic op.
-        resources: Vec<SegResourceAccess>,
+        resources: Vec<SegResourceAccess<R>>,
     },
 }
 
@@ -481,7 +481,196 @@ pub fn reify_seg_kind_operators(operators: Vec<SegBinOp>) -> SegOpKind {
     }
 }
 
-impl EgirSoac {
+impl<R> EgirSoac<R> {
+    pub fn try_map_resources<S, E>(self, mut map: impl FnMut(R) -> Result<S, E>) -> Result<EgirSoac<S>, E> {
+        fn map_space<R, S, E>(
+            space: SegSpace<R>,
+            map: &mut impl FnMut(R) -> Result<S, E>,
+        ) -> Result<SegSpace<S>, E> {
+            Ok(SegSpace {
+                level: space.level,
+                dims: space
+                    .dims
+                    .into_iter()
+                    .map(|extent| match extent {
+                        SegExtent::Fixed(value) => Ok(SegExtent::Fixed(value)),
+                        SegExtent::PushConstant { node, offset } => {
+                            Ok(SegExtent::PushConstant { node, offset })
+                        }
+                        SegExtent::ResourceLength {
+                            node,
+                            resource,
+                            elem_bytes,
+                        } => Ok(SegExtent::ResourceLength {
+                            node,
+                            resource: map(resource)?,
+                            elem_bytes,
+                        }),
+                        SegExtent::Value(node) => Ok(SegExtent::Value(node)),
+                    })
+                    .collect::<Result<Vec<_>, E>>()?,
+            })
+        }
+
+        fn map_work<R, S, E>(
+            work: FilterWorkBuffers<R>,
+            map: &mut impl FnMut(R) -> Result<S, E>,
+        ) -> Result<FilterWorkBuffers<S>, E> {
+            Ok(FilterWorkBuffers {
+                flags: map(work.flags)?,
+                offsets: map(work.offsets)?,
+                block_sums: map(work.block_sums)?,
+                block_offsets: map(work.block_offsets)?,
+            })
+        }
+
+        fn map_filter_state<R, S, E>(
+            state: FilterState<R>,
+            map: &mut impl FnMut(R) -> Result<S, E>,
+        ) -> Result<FilterState<S>, E> {
+            Ok(match state {
+                FilterState::Raw => FilterState::Raw,
+                FilterState::Semantic { space } => FilterState::Semantic {
+                    space: map_space(space, map)?,
+                },
+                FilterState::Scheduled { space, plan } => FilterState::Scheduled {
+                    space: map_space(space, map)?,
+                    plan: match plan {
+                        FilterPlan::Serial => FilterPlan::Serial,
+                        FilterPlan::Flags(work) => FilterPlan::Flags(map_work(work, map)?),
+                        FilterPlan::Scan(work) => FilterPlan::Scan(map_work(work, map)?),
+                        FilterPlan::Scatter(work) => FilterPlan::Scatter(map_work(work, map)?),
+                    },
+                },
+            })
+        }
+
+        fn map_filter_output<R, S, E>(
+            output: FilterOutput<R>,
+            map: &mut impl FnMut(R) -> Result<S, E>,
+        ) -> Result<FilterOutput<S>, E> {
+            Ok(match output {
+                FilterOutput::Local {
+                    capacity,
+                    destination,
+                } => FilterOutput::Local {
+                    capacity,
+                    destination,
+                },
+                FilterOutput::Runtime { scratch, length } => FilterOutput::Runtime {
+                    scratch: map(scratch)?,
+                    length: match length {
+                        RuntimeFilterLength::ViewOnly => RuntimeFilterLength::ViewOnly,
+                        RuntimeFilterLength::EntryOutput(resource) => {
+                            RuntimeFilterLength::EntryOutput(map(resource)?)
+                        }
+                    },
+                },
+            })
+        }
+
+        Ok(match self {
+            EgirSoac::Screma {
+                map_bodies,
+                accumulators,
+                input_array_types,
+                input_elem_types,
+                map_output_elem_types,
+                map_input_indices,
+                map_destinations,
+                acc_destinations,
+            } => EgirSoac::Screma {
+                map_bodies,
+                accumulators,
+                input_array_types,
+                input_elem_types,
+                map_output_elem_types,
+                map_input_indices,
+                map_destinations,
+                acc_destinations,
+            },
+            EgirSoac::Filter {
+                state,
+                map_body,
+                output_elem_type,
+                pred_body,
+                input_array_type,
+                input_elem_type,
+                output,
+            } => EgirSoac::Filter {
+                state: map_filter_state(state, &mut map)?,
+                map_body,
+                output_elem_type,
+                pred_body,
+                input_array_type,
+                input_elem_type,
+                output: map_filter_output(output, &mut map)?,
+            },
+            EgirSoac::Hist {
+                body,
+                input_array_types,
+                input_elem_types,
+                index_type,
+                value_type,
+                dest_elem_type,
+                update_policy,
+                execution,
+            } => EgirSoac::Hist {
+                body,
+                input_array_types,
+                input_elem_types,
+                index_type,
+                value_type,
+                dest_elem_type,
+                update_policy,
+                execution: match execution {
+                    HistExecution::Raw => HistExecution::Raw,
+                    HistExecution::Serial => HistExecution::Serial,
+                    HistExecution::Segmented(space) => {
+                        HistExecution::Segmented(map_space(space, &mut map)?)
+                    }
+                },
+            },
+            EgirSoac::Seg {
+                space,
+                placement,
+                kind,
+                map_bodies,
+                input_array_types,
+                input_elem_types,
+                map_output_elem_types,
+                map_input_indices,
+                map_destinations,
+                acc_destinations,
+                result_types,
+                output_slots,
+                resources,
+            } => EgirSoac::Seg {
+                space: map_space(space, &mut map)?,
+                placement,
+                kind,
+                map_bodies,
+                input_array_types,
+                input_elem_types,
+                map_output_elem_types,
+                map_input_indices,
+                map_destinations,
+                acc_destinations,
+                result_types,
+                output_slots,
+                resources: resources
+                    .into_iter()
+                    .map(|access| {
+                        Ok(SegResourceAccess {
+                            resource: map(access.resource)?,
+                            access: access.access,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, E>>()?,
+            },
+        })
+    }
+
     pub fn visit_types_mut(&mut self, mut visit: impl FnMut(&mut Type<TypeName>)) {
         let mut visit_many = |types: &mut Vec<Type<TypeName>>| {
             for ty in types {
@@ -542,11 +731,8 @@ impl EgirSoac {
         }
     }
 
-    pub fn visit_resource_refs_mut(
-        &mut self,
-        mut visit: impl FnMut(&mut super::program::GraphResourceRef),
-    ) {
-        let mut visit_space = |space: &mut SegSpace| {
+    pub fn visit_resource_refs_mut(&mut self, mut visit: impl FnMut(&mut R)) {
+        let mut visit_space = |space: &mut SegSpace<R>| {
             for extent in &mut space.dims {
                 if let SegExtent::ResourceLength { resource, .. } = extent {
                     visit(resource);
@@ -677,7 +863,7 @@ impl EgirSoac {
     /// must never rediscover them variant by variant.
     pub fn metadata_nodes(&self) -> Vec<NodeId> {
         let mut nodes = self.capture_nodes().collect::<Vec<_>>();
-        let mut add_space = |space: &SegSpace| {
+        let mut add_space = |space: &SegSpace<R>| {
             nodes.extend(space.dims.iter().filter_map(|extent| match extent {
                 SegExtent::PushConstant { node, .. }
                 | SegExtent::ResourceLength { node, .. }
@@ -708,7 +894,7 @@ impl EgirSoac {
 
     pub fn visit_metadata_nodes_mut(&mut self, mut visit: impl FnMut(&mut NodeId)) {
         self.visit_capture_nodes_mut(&mut visit);
-        let mut visit_space = |space: &mut SegSpace| {
+        let mut visit_space = |space: &mut SegSpace<R>| {
             for extent in &mut space.dims {
                 match extent {
                     SegExtent::PushConstant { node, .. }
@@ -748,7 +934,7 @@ impl EgirSoac {
     }
 }
 
-impl SideEffect {
+impl<R> SideEffect<R> {
     /// Every graph node this side-effect references: its operands plus, for a
     /// SOAC, its bodies' captures. This is the authoritative use-set for
     /// liveness and reachability now that captures are not inlined into
@@ -794,16 +980,16 @@ pub enum SkeletonTerminator {
 
 /// A block in the skeleton CFG.
 #[derive(Clone, Debug)]
-pub struct SkeletonBlock {
+pub struct SkeletonBlock<R = super::program::SemanticResourceRef> {
     /// Block parameters as NodeIds.
     pub params: Vec<NodeId>,
     /// Effectful instructions, in order.
-    pub side_effects: Vec<SideEffect>,
+    pub side_effects: Vec<SideEffect<R>>,
     /// Block terminator.
     pub term: SkeletonTerminator,
 }
 
-impl SkeletonBlock {
+impl<R> SkeletonBlock<R> {
     pub fn new() -> Self {
         SkeletonBlock {
             params: Vec::new(),
@@ -815,12 +1001,12 @@ impl SkeletonBlock {
 
 /// The skeleton CFG (blocks + effectful instructions).
 #[derive(Clone, Debug)]
-pub struct Skeleton {
+pub struct Skeleton<R = super::program::SemanticResourceRef> {
     pub entry: BlockId,
-    pub blocks: SlotMap<BlockId, SkeletonBlock>,
+    pub blocks: SlotMap<BlockId, SkeletonBlock<R>>,
 }
 
-impl Skeleton {
+impl<R> Skeleton<R> {
     pub fn new() -> Self {
         let mut blocks = SlotMap::with_key();
         let entry = blocks.insert(SkeletonBlock::new());
@@ -851,7 +1037,7 @@ pub struct SideEffectIndex {
 }
 
 impl SideEffectIndex {
-    pub fn build(graph: &EGraph) -> Self {
+    pub fn build<R>(graph: &EGraph<R>) -> Self {
         let mut by_result = LookupMap::new();
         for (block, skeleton_block) in &graph.skeleton.blocks {
             for (index, effect) in skeleton_block.side_effects.iter().enumerate() {
@@ -872,13 +1058,17 @@ impl SideEffectIndex {
         self.by_result.get(&result).copied()
     }
 
-    pub fn effect<'a>(&self, graph: &'a EGraph, result: NodeId) -> Option<&'a SideEffect> {
+    pub fn effect<'a, R>(&self, graph: &'a EGraph<R>, result: NodeId) -> Option<&'a SideEffect<R>> {
         let site = self.site(result)?;
         let effect = graph.skeleton.blocks.get(site.block)?.side_effects.get(site.index)?;
         (effect.result == Some(result)).then_some(effect)
     }
 
-    pub fn effect_mut<'a>(&self, graph: &'a mut EGraph, result: NodeId) -> Option<&'a mut SideEffect> {
+    pub fn effect_mut<'a, R>(
+        &self,
+        graph: &'a mut EGraph<R>,
+        result: NodeId,
+    ) -> Option<&'a mut SideEffect<R>> {
         let site = self.site(result)?;
         let effect = graph.skeleton.blocks.get_mut(site.block)?.side_effects.get_mut(site.index)?;
         (effect.result == Some(result)).then_some(effect)
@@ -891,24 +1081,28 @@ impl SideEffectIndex {
 
 /// The acyclic e-graph: a sea of pure nodes + a CFG skeleton of side effects.
 #[derive(Clone, Debug)]
-pub struct EGraph {
+pub struct EGraph<R = super::program::SemanticResourceRef> {
     /// All nodes (pure, union, params, constants, side-effect results).
-    pub nodes: SlotMap<NodeId, ENode>,
+    pub nodes: SlotMap<NodeId, ENode<R>>,
     /// Type of each node's result.
     pub types: LookupMap<NodeId, Type<TypeName>>,
     /// Hash-cons table: NodeKey → existing NodeId.
-    hash_cons: LookupMap<NodeKey, NodeId>,
+    hash_cons: LookupMap<NodeKey<R>, NodeId>,
     /// Constant dedup cache.
     pub const_cache: LookupMap<ConstantValue, NodeId>,
     /// The CFG skeleton.
-    pub skeleton: Skeleton,
+    pub skeleton: Skeleton<R>,
     /// Source span associated with each pure node (first-writer-wins —
     /// later interns of the same hash-consed node keep the original span).
     pub node_spans: LookupMap<NodeId, Span>,
 }
 
-impl EGraph {
-    pub fn new() -> Self {
+pub trait GraphResource: Clone + std::fmt::Debug + Eq + std::hash::Hash {}
+
+impl<T> GraphResource for T where T: Clone + std::fmt::Debug + Eq + std::hash::Hash {}
+
+impl<R: GraphResource> EGraph<R> {
+    fn new_typed() -> Self {
         EGraph {
             nodes: SlotMap::with_key(),
             types: LookupMap::new(),
@@ -919,11 +1113,138 @@ impl EGraph {
         }
     }
 
+    /// Consume a graph at one compiler phase and rebuild every resource-bearing
+    /// node and effect for the next phase. Both arena identity maps are
+    /// returned so graph-adjacent metadata can be projected atomically.
+    pub(crate) fn try_map_resources<S: GraphResource, E>(
+        self,
+        mut map_resource: impl FnMut(R) -> Result<S, E>,
+    ) -> Result<(EGraph<S>, LookupMap<NodeId, NodeId>, LookupMap<BlockId, BlockId>), E> {
+        let EGraph {
+            nodes,
+            types,
+            hash_cons: _,
+            const_cache,
+            skeleton,
+            node_spans,
+        } = self;
+
+        let old_blocks = skeleton.blocks.into_iter().collect::<Vec<_>>();
+        let mut blocks = SlotMap::with_key();
+        let mut block_map = LookupMap::new();
+        for (old_id, _) in &old_blocks {
+            block_map.insert(*old_id, blocks.insert(SkeletonBlock::new()));
+        }
+
+        let old_nodes = nodes.into_iter().collect::<Vec<_>>();
+        let mut new_nodes = SlotMap::with_key();
+        let mut node_map = LookupMap::new();
+        for (old_id, _) in &old_nodes {
+            node_map.insert(
+                *old_id,
+                new_nodes.insert(ENode::Constant(ConstantValue::Bool(false))),
+            );
+        }
+        for (old_id, node) in old_nodes {
+            let node = match node {
+                ENode::Pure { op, operands } => ENode::Pure {
+                    op: op.try_map_resource(&mut map_resource)?,
+                    operands: operands.into_iter().map(|node| node_map[&node]).collect(),
+                },
+                ENode::Union { left, right } => ENode::Union {
+                    left: node_map[&left],
+                    right: node_map[&right],
+                },
+                ENode::FuncParam { index } => ENode::FuncParam { index },
+                ENode::BlockParam { block, index } => ENode::BlockParam {
+                    block: block_map[&block],
+                    index,
+                },
+                ENode::Constant(value) => ENode::Constant(value),
+                ENode::SideEffectResult => ENode::SideEffectResult,
+            };
+            new_nodes[node_map[&old_id]] = node;
+        }
+
+        for (old_id, block) in old_blocks {
+            let side_effects = block
+                .side_effects
+                .into_iter()
+                .map(|effect| {
+                    let kind = match effect.kind {
+                        SideEffectKind::Inst(inst) => {
+                            SideEffectKind::Inst(inst.try_map_resource(&mut map_resource)?)
+                        }
+                        SideEffectKind::Soac(soac) => {
+                            let mut soac = soac.try_map_resources(&mut map_resource)?;
+                            soac.visit_metadata_nodes_mut(|node| *node = node_map[node]);
+                            SideEffectKind::Soac(soac)
+                        }
+                    };
+                    Ok(SideEffect {
+                        semantic_id: effect.semantic_id,
+                        kind,
+                        operand_nodes: effect
+                            .operand_nodes
+                            .into_iter()
+                            .map(|node| node_map[&node])
+                            .collect(),
+                        result: effect.result.map(|node| node_map[&node]),
+                        effects: effect.effects,
+                        span: effect.span,
+                    })
+                })
+                .collect::<Result<Vec<_>, E>>()?;
+            let term = match block.term {
+                SkeletonTerminator::Return(value) => {
+                    SkeletonTerminator::Return(value.map(|node| node_map[&node]))
+                }
+                SkeletonTerminator::Branch { target, args } => SkeletonTerminator::Branch {
+                    target: block_map[&target],
+                    args: args.into_iter().map(|node| node_map[&node]).collect(),
+                },
+                SkeletonTerminator::CondBranch {
+                    cond,
+                    then_target,
+                    then_args,
+                    else_target,
+                    else_args,
+                } => SkeletonTerminator::CondBranch {
+                    cond: node_map[&cond],
+                    then_target: block_map[&then_target],
+                    then_args: then_args.into_iter().map(|node| node_map[&node]).collect(),
+                    else_target: block_map[&else_target],
+                    else_args: else_args.into_iter().map(|node| node_map[&node]).collect(),
+                },
+                SkeletonTerminator::Unreachable => SkeletonTerminator::Unreachable,
+            };
+            blocks[block_map[&old_id]] = SkeletonBlock {
+                params: block.params.into_iter().map(|node| node_map[&node]).collect(),
+                side_effects,
+                term,
+            };
+        }
+
+        let mut graph = EGraph {
+            nodes: new_nodes,
+            types: types.into_iter().map(|(node, ty)| (node_map[&node], ty)).collect(),
+            hash_cons: LookupMap::new(),
+            const_cache: const_cache.into_iter().map(|(value, node)| (value, node_map[&node])).collect(),
+            skeleton: Skeleton {
+                entry: block_map[&skeleton.entry],
+                blocks,
+            },
+            node_spans: node_spans.into_iter().map(|(node, span)| (node_map[&node], span)).collect(),
+        };
+        graph.rebuild_hash_cons();
+        Ok((graph, node_map, block_map))
+    }
+
     pub fn side_effect_index(&self) -> SideEffectIndex {
         SideEffectIndex::build(self)
     }
 
-    fn pure_node_key(&self, id: NodeId) -> Option<NodeKey> {
+    fn pure_node_key(&self, id: NodeId) -> Option<NodeKey<R>> {
         let ENode::Pure { op, operands } = self.nodes.get(id)? else {
             return None;
         };
@@ -952,7 +1273,7 @@ impl EGraph {
 
     /// Replace a node in place without changing its result type, keeping the
     /// pure-node hash-cons table consistent across the mutation.
-    pub fn replace_node_preserving_type(&mut self, id: NodeId, node: ENode) {
+    pub fn replace_node_preserving_type(&mut self, id: NodeId, node: ENode<R>) {
         self.unindex_current_pure(id);
         self.nodes[id] = node;
         self.index_current_pure(id);
@@ -960,7 +1281,7 @@ impl EGraph {
 
     /// Replace a pure node's operator and operands without changing its result
     /// type, keeping the hash-cons table consistent across the mutation.
-    pub fn replace_pure_node(&mut self, id: NodeId, op: PureOp, operands: SmallVec<[NodeId; 4]>) {
+    pub fn replace_pure_node(&mut self, id: NodeId, op: PureOp<R>, operands: SmallVec<[NodeId; 4]>) {
         self.replace_node_preserving_type(id, ENode::Pure { op, operands });
     }
 
@@ -968,7 +1289,7 @@ impl EGraph {
     /// the hash-cons table. Returns false if `id` is not a pure node.
     pub fn update_pure_node<F>(&mut self, id: NodeId, update: F) -> bool
     where
-        F: FnOnce(&mut PureOp, &mut SmallVec<[NodeId; 4]>),
+        F: FnOnce(&mut PureOp<R>, &mut SmallVec<[NodeId; 4]>),
     {
         if !matches!(self.nodes.get(id), Some(ENode::Pure { .. })) {
             return false;
@@ -1110,7 +1431,7 @@ impl EGraph {
     /// Returns the existing NodeId if an equivalent node already exists (GVN).
     pub fn intern_pure(
         &mut self,
-        op: PureOp,
+        op: PureOp<R>,
         operands: SmallVec<[NodeId; 4]>,
         ty: Type<TypeName>,
     ) -> NodeId {
@@ -1122,7 +1443,7 @@ impl EGraph {
     /// keep the original span.
     pub fn intern_pure_with_span(
         &mut self,
-        op: PureOp,
+        op: PureOp<R>,
         operands: SmallVec<[NodeId; 4]>,
         ty: Type<TypeName>,
         span: Option<Span>,
@@ -1164,6 +1485,12 @@ impl EGraph {
     }
 }
 
+impl EGraph<super::program::SemanticResourceRef> {
+    pub fn new() -> Self {
+        Self::new_typed()
+    }
+}
+
 #[cfg(test)]
 #[path = "types_tests.rs"]
 mod types_tests;
@@ -1175,7 +1502,10 @@ mod types_tests;
 /// Build an `InstKind::Op` from a `PureOp` + operands as `ValueRef::Ssa(ValueId)`.
 /// Panics on the place-producing tags (`ViewIndex`, `PlaceIndex`, `OutputSlot`) —
 /// those need `elaborate`'s place-aware path which allocates a fresh `PlaceId`.
-pub fn rebuild_inst_kind(op: &PureOp, operands: &[crate::ssa::framework::ValueId]) -> InstKind {
+pub fn rebuild_inst_kind(
+    op: &PureOp<crate::BindingRef>,
+    operands: &[crate::ssa::framework::ValueId],
+) -> InstKind {
     use crate::ssa::types::ValueRef;
     if matches!(
         op,

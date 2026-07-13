@@ -16,7 +16,7 @@ pub type Cost = u32;
 /// Returns a map from NodeId -> best concrete NodeId (the chosen representative).
 /// For non-union nodes, this maps to themselves.
 /// For union nodes, this maps to the best leaf of the union tree.
-pub fn extract(graph: &EGraph) -> LookupMap<NodeId, NodeId> {
+pub fn extract<R>(graph: &EGraph<R>) -> LookupMap<NodeId, NodeId> {
     let mut best_cost: LookupMap<NodeId, Cost> = LookupMap::new();
     let mut best_node: LookupMap<NodeId, NodeId> = LookupMap::new();
 
@@ -63,7 +63,7 @@ pub fn extract(graph: &EGraph) -> LookupMap<NodeId, NodeId> {
 }
 
 /// Static cost per operation kind.
-fn op_cost(op: &PureOp) -> Cost {
+fn op_cost<R>(op: &PureOp<R>) -> Cost {
     match op {
         PureOp::ResourceLen(_) => 0,
         // Leaves / free operations:
@@ -106,7 +106,7 @@ fn op_cost(op: &PureOp) -> Cost {
 /// only holds for a topological order. A cycle means an earlier pass interned a
 /// node into its own operand tree; there is no order to fall back on, so say so
 /// rather than hand the DP an arbitrary one.
-fn topological_sort(graph: &EGraph) -> Vec<NodeId> {
+fn topological_sort<R>(graph: &EGraph<R>) -> Vec<NodeId> {
     wyn_graph::topo_sort_by_dependencies(graph.nodes.keys(), |node, dependencies| {
         dependencies.extend(graph.nodes[node].children());
     })

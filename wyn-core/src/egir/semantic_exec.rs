@@ -3,7 +3,7 @@
 //! This deliberately executes semantic values rather than scheduled kernels;
 //! optional adapter tests compare backend readback against the same oracle.
 
-use crate::egir::program::EgirRegion;
+use crate::egir::program::SemanticRegion;
 use crate::egir::types::{ENode, NodeId, PureOp, RegionId, SkeletonTerminator};
 use crate::LookupMap;
 
@@ -18,11 +18,11 @@ pub enum Value {
 /// typed region arena used by SegBody/SegBinOp, so semantic tests exercise the
 /// representation rather than parallel Rust closures alone.
 pub struct RegionExecutor<'a> {
-    regions: &'a LookupMap<RegionId, EgirRegion>,
+    regions: &'a LookupMap<RegionId, SemanticRegion>,
 }
 
 impl<'a> RegionExecutor<'a> {
-    pub fn new(regions: &'a LookupMap<RegionId, EgirRegion>) -> Self {
+    pub fn new(regions: &'a LookupMap<RegionId, SemanticRegion>) -> Self {
         Self { regions }
     }
 
@@ -40,7 +40,7 @@ impl<'a> RegionExecutor<'a> {
 
     fn eval_node(
         &self,
-        region: &EgirRegion,
+        region: &SemanticRegion,
         node: NodeId,
         arguments: &[Value],
         memo: &mut LookupMap<NodeId, Value>,
@@ -170,7 +170,7 @@ pub fn scatter<T: Clone>(initial: &[T], updates: &[(usize, T)]) -> Vec<T> {
 mod tests {
     use super::*;
     use crate::ast::TypeName;
-    use crate::egir::program::EgirRegion;
+    use crate::egir::program::SemanticRegion;
     use crate::egir::types::{EGraph, PureOp, SkeletonTerminator};
     use polytype::Type;
     use smallvec::smallvec;
@@ -184,7 +184,7 @@ mod tests {
         )
     }
 
-    fn affine_region() -> (RegionId, LookupMap<RegionId, EgirRegion>) {
+    fn affine_region() -> (RegionId, LookupMap<RegionId, SemanticRegion>) {
         let int = Type::Constructed(TypeName::Int(64), vec![]);
         let pair = Type::Constructed(TypeName::Tuple(2), vec![int.clone(), int.clone()]);
         let mut graph = EGraph::new();
@@ -203,7 +203,7 @@ mod tests {
         let mut regions = LookupMap::new();
         regions.insert(
             id,
-            EgirRegion {
+            SemanticRegion {
                 name: "affine_compose".to_string(),
                 params: vec![(pair.clone(), "left".into()), (pair.clone(), "right".into())],
                 return_ty: pair,

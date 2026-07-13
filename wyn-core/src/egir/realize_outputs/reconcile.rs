@@ -17,7 +17,7 @@
 //!   * **Call boundaries.** A `Seg` body capture — the record `w` passed to a
 //!     downstream `map`, or a bare array read by another `map` — binds a callee
 //!     parameter. The parameter type must equal the argument type, so retype the
-//!     callee (its semantic `EgirRegion`, its lowered `EgirFunc`, and the body's
+//!     callee (its semantic `SemanticRegion`, its lowered `SemanticFunc`, and the body's
 //!     `FuncParam` node) and re-propagate inside the callee. An `Index` over a
 //!     view — bare or projected out of a record parameter — then lowers as a
 //!     storage load, variant-generic like every other view read.
@@ -25,7 +25,7 @@
 use polytype::Type;
 
 use super::super::from_tlc::ConvertError;
-use super::super::program::{EgirFunc, EgirRegion, SemanticProgram};
+use super::super::program::{SemanticFunc, SemanticProgram, SemanticRegion};
 use super::super::types::{EGraph, ENode, NodeId, PureOp, RegionId, SideEffectKind};
 use crate::ast::TypeName;
 use crate::LookupMap;
@@ -86,7 +86,7 @@ pub fn run(inner: &mut SemanticProgram) -> Result<(), ConvertError> {
 /// view-ward from the callee parameter it binds, pushing a retype for each.
 fn collect_drifts<'a>(
     graphs: impl Iterator<Item = &'a EGraph>,
-    regions: &LookupMap<RegionId, EgirRegion>,
+    regions: &LookupMap<RegionId, SemanticRegion>,
     out: &mut Vec<Retype>,
 ) {
     for graph in graphs {
@@ -153,8 +153,8 @@ fn reject_shared_conflicts(drifts: &[Retype]) -> Result<(), ConvertError> {
 /// aggregate types inside the callee so a projection out of the parameter sees
 /// the view.
 fn apply(
-    regions: &mut LookupMap<RegionId, EgirRegion>,
-    functions: &mut [EgirFunc],
+    regions: &mut LookupMap<RegionId, SemanticRegion>,
+    functions: &mut [SemanticFunc],
     Retype {
         region,
         name,

@@ -1,7 +1,7 @@
 use super::*;
-use crate::egir::program::GraphResourceRef;
+use crate::egir::program::SemanticResourceRef;
 use crate::egir::types::{NodeId, SegExtent, SegLevel, SegSpace};
-use crate::BindingRef;
+use crate::ResourceId;
 use slotmap::SlotMap;
 
 fn two_nodes() -> (NodeId, NodeId) {
@@ -29,20 +29,20 @@ fn push_constant_compares_by_offset_ignoring_node() {
 }
 
 #[test]
-fn resource_length_compares_by_binding_and_stride_ignoring_node() {
+fn resource_length_compares_by_resource_and_stride_ignoring_node() {
     let (a, b) = two_nodes();
-    let mk = |node: NodeId, set: u32, binding: u32, elem_bytes: u32| SegExtent::ResourceLength {
+    let mk = |node: NodeId, resource: u32, elem_bytes: u32| SegExtent::ResourceLength {
         node,
-        resource: GraphResourceRef::Binding(BindingRef::new(set, binding)),
+        resource: SemanticResourceRef(ResourceId(resource)),
         elem_bytes,
     };
-    assert!(seg_extent_fusable(&mk(a, 0, 1, 4), &mk(b, 0, 1, 4)));
+    assert!(seg_extent_fusable(&mk(a, 1, 4), &mk(b, 1, 4)));
     assert!(
-        !seg_extent_fusable(&mk(a, 0, 1, 4), &mk(b, 0, 2, 4)),
-        "different binding"
+        !seg_extent_fusable(&mk(a, 1, 4), &mk(b, 2, 4)),
+        "different resource"
     );
     assert!(
-        !seg_extent_fusable(&mk(a, 0, 1, 4), &mk(b, 0, 1, 8)),
+        !seg_extent_fusable(&mk(a, 1, 4), &mk(b, 1, 8)),
         "different stride"
     );
 }

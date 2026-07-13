@@ -69,10 +69,7 @@ fn canonicalize_resource_accesses(graph: &mut EGraph) {
                 .into_iter()
                 .map(|(resource, access)| SegResourceAccess { resource, access })
                 .collect();
-            normalized.sort_by_key(|resource| match resource.resource {
-                super::program::GraphResourceRef::Binding(binding) => (0, binding.set, binding.binding),
-                super::program::GraphResourceRef::Resource(id) => (1, id.0, 0),
-            });
+            normalized.sort_by_key(|resource| resource.resource.0 .0);
             *resources = normalized;
         }
     }

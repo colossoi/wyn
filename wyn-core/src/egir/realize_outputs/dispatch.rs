@@ -687,15 +687,10 @@ pub fn retarget_filter_output(
                 // Compact straight into the output resource; reuse the
                 // scratch resource as the paired length cell.
                 *filter_output = super::super::types::FilterOutput::Runtime {
-                    scratch: crate::egir::program::GraphResourceRef::Resource(output_resource),
+                    scratch: crate::egir::program::SemanticResourceRef(output_resource),
                     length: super::super::types::RuntimeFilterLength::EntryOutput(scratch),
                 };
-                retargeted = Some((
-                    scratch.resource().expect("raw filter scratch must be a semantic resource"),
-                    input_arr_ty,
-                    input_elem_ty,
-                    output_elem_ty,
-                ));
+                retargeted = Some((scratch.0, input_arr_ty, input_elem_ty, output_elem_ty));
             }
             break 'outer;
         }
@@ -707,7 +702,7 @@ pub fn retarget_filter_output(
     // Repurpose the scratch resource's declaration as the u32 length cell.
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     for decl in declarations.iter_mut() {
-        if decl.resource.resource() == Some(scratch) {
+        if decl.resource.0 == scratch {
             decl.elem_ty = u32_ty.clone();
             decl.size = crate::egir::program::LogicalSize::FixedBytes(4);
             break;

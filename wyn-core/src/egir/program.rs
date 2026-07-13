@@ -1,9 +1,9 @@
 //! Whole-program EGIR container + per-body records.
 //!
-//! These are plain (non-generic) structs. State tracking happens at the
-//! public API boundary via the semantic `EgirRaw` / `EgirSegmented` /
-//! `EgirOptimized` / `EgirAllocated` newtypes in `crate::lib`, each
-//! of which wraps an `SemanticProgram`.
+//! Compiler state is explicit at both boundaries: public semantic pipeline
+//! newtypes wrap `SemanticProgram`, while each graph is parameterized by its
+//! phase-specific resource identity. Physicalization rebuilds those graphs as
+//! `EGraph<BindingRef>` inside a distinct `PhysicalProgram`.
 //!
 //! `SemanticProgram` carries, for each function and entry point, a per-body
 //! `EGraph` + control-headers + alias map, plus program-level metadata
@@ -126,7 +126,7 @@ pub struct SemanticDependency {
 
 /// Callable body arena entry used by semantic SegOps.
 #[derive(Clone)]
-pub struct EgirRegion {
+pub struct SemanticRegion {
     pub name: String,
     pub params: Vec<(Type<TypeName>, String)>,
     pub return_ty: Type<TypeName>,
@@ -134,8 +134,8 @@ pub struct EgirRegion {
     pub control_headers: LookupMap<BlockId, ControlHeader>,
 }
 
-impl EgirRegion {
-    pub fn from_function(function: &EgirFunc) -> Self {
+impl SemanticRegion {
+    pub fn from_function(function: &SemanticFunc) -> Self {
         Self {
             name: function.name.clone(),
             params: function.params.clone(),
@@ -187,41 +187,11 @@ pub enum LogicalSize {
     Unspecified,
 }
 
-/// Storage identity carried by the shared graph representation while it moves
-/// through the physicalization boundary. Semantic programs may construct only
-/// `Resource`; `Binding` is introduced only by physicalization.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum GraphResourceRef {
-    Binding(crate::BindingRef),
-    Resource(ResourceId),
-}
-
-impl GraphResourceRef {
-    pub fn resource(self) -> Option<ResourceId> {
-        match self {
-            GraphResourceRef::Binding(_) => None,
-            GraphResourceRef::Resource(resource) => Some(resource),
-        }
-    }
-
-    pub fn binding(self) -> Option<crate::BindingRef> {
-        match self {
-            GraphResourceRef::Binding(binding) => Some(binding),
-            GraphResourceRef::Resource(_) => None,
-        }
-    }
-}
-
-/// A semantic storage identity. Unlike the graph transport enum above, this
-/// type cannot represent a backend binding.
+/// A semantic storage identity. It cannot represent a backend binding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SemanticResourceRef(pub ResourceId);
 
-impl SemanticResourceRef {
-    pub fn resource(self) -> Option<ResourceId> {
-        Some(self.0)
-    }
-}
+pub type PhysicalResourceRef = crate::BindingRef;
 
 /// Entry-local use of a logical resource. Unlike `StorageBindingDecl`, this is
 /// target independent after allocation and cannot assign a descriptor binding
@@ -384,12 +354,10 @@ fn gather_prepass_resources(inner: &SemanticProgram) -> HashMap<ResourceId, Comp
             if declaration.role != interface::StorageRole::Output {
                 continue;
             }
-            if let Some(resource) = declaration.resource.resource() {
-                resources.insert(
-                    resource,
-                    CompilerResource::new(CompilerResourceKind::GatherHandoff, None, slot),
-                );
-            }
+            resources.insert(
+                declaration.resource.0,
+                CompilerResource::new(CompilerResourceKind::GatherHandoff, None, slot),
+            );
         }
     }
     resources
@@ -400,10 +368,7 @@ fn classify_existing_compiler_resources(inner: &mut SemanticProgram) {
     for entry in &inner.entry_points {
         for declaration in &entry.resource_declarations {
             if declaration.role == interface::StorageRole::Intermediate {
-                let resource = declaration
-                    .resource
-                    .resource()
-                    .expect("semantic construction must declare resources by identity");
+                let resource = declaration.resource.0;
                 classifications
                     .entry(resource)
                     .or_insert_with(|| CompilerResource::new(CompilerResourceKind::Staging, None, 0));
@@ -467,9 +432,7 @@ fn record_compiler_resource_flows(inner: &mut SemanticProgram) {
     for (index, entry) in inner.entry_points.iter().enumerate() {
         let entry_id = SemanticEntryId(index as u32);
         for declaration in &entry.resource_declarations {
-            let Some(resource) = declaration.resource.resource() else {
-                continue;
-            };
+            let resource = declaration.resource.0;
             match declaration.role {
                 interface::StorageRole::Output => {
                     producers.entry(resource).or_default().push(CompilerFlowEndpoint::Entry(entry_id))
@@ -484,9 +447,7 @@ fn record_compiler_resource_flows(inner: &mut SemanticProgram) {
     for prepass in &inner.prepasses {
         let endpoint = CompilerFlowEndpoint::Prepass(prepass.id);
         for declaration in &prepass.body.resource_declarations {
-            let Some(resource) = declaration.resource.resource() else {
-                continue;
-            };
+            let resource = declaration.resource.0;
             match declaration.role {
                 interface::StorageRole::Output => producers.entry(resource).or_default().push(endpoint),
                 interface::StorageRole::Input => consumers.entry(resource).or_default().push(endpoint),
@@ -497,9 +458,7 @@ fn record_compiler_resource_flows(inner: &mut SemanticProgram) {
     for requirement in &inner.materializations {
         let endpoint = CompilerFlowEndpoint::Materialization(requirement.id);
         for declaration in &requirement.resource_declarations {
-            let Some(resource) = declaration.resource.resource() else {
-                continue;
-            };
+            let resource = declaration.resource.0;
             match declaration.role {
                 interface::StorageRole::Output => producers.entry(resource).or_default().push(endpoint),
                 interface::StorageRole::Input => consumers.entry(resource).or_default().push(endpoint),
@@ -546,10 +505,7 @@ fn record_compiler_resource_flows(inner: &mut SemanticProgram) {
         .collect::<HashMap<_, _>>();
     for requirement in &mut inner.materializations {
         for substitution in &mut requirement.substitutions {
-            let resource = substitution
-                .resource
-                .resource()
-                .expect("materialization substitution must name a logical resource");
+            let resource = substitution.resource.0;
             substitution.consumers = flows.get(&resource).cloned().unwrap_or_default();
         }
     }
@@ -742,26 +698,34 @@ fn normalize_type_resources(ty: &mut Type<TypeName>, by_binding: &HashMap<crate:
 }
 
 pub(crate) fn physicalize_graph_resources(
-    graph: &mut EGraph,
+    graph: EGraph,
     bindings: &PhysicalResourceTable,
-) -> Result<(), String> {
+) -> Result<
+    (
+        EGraph<PhysicalResourceRef>,
+        LookupMap<NodeId, NodeId>,
+        LookupMap<BlockId, BlockId>,
+    ),
+    String,
+> {
+    let (mut graph, node_map, block_map) = graph.try_map_resources(|reference| {
+        let resource = reference.0;
+        bindings
+            .binding(resource)
+            .ok_or_else(|| format!("semantic resource {:?} has no physical binding", resource))
+    })?;
     let pure_nodes = graph.nodes.keys().collect::<Vec<_>>();
-    let mut missing = None;
     for node in pure_nodes {
         let resource_len = match graph.nodes.get(node) {
             Some(super::types::ENode::Pure {
-                op: super::types::PureOp::ResourceLen(resource),
+                op: super::types::PureOp::ResourceLen(binding),
                 ..
-            }) => Some(*resource),
+            }) => Some(*binding),
             _ => None,
         };
-        if let Some(resource) = resource_len {
-            let Some(binding) = bindings.binding(resource) else {
-                missing = Some(resource);
-                continue;
-            };
-            let set = super::graph_ops::intern_u32(graph, binding.set, None);
-            let slot = super::graph_ops::intern_u32(graph, binding.binding, None);
+        if let Some(binding) = resource_len {
+            let set = super::graph_ops::intern_u32(&mut graph, binding.set, None);
+            let slot = super::graph_ops::intern_u32(&mut graph, binding.binding, None);
             graph.replace_pure_node(
                 node,
                 super::types::PureOp::Intrinsic {
@@ -772,57 +736,13 @@ pub(crate) fn physicalize_graph_resources(
             );
             continue;
         }
-        graph.update_pure_node(node, |op, _| {
-            if let super::types::PureOp::StorageView(crate::op::PureViewSource::Resource(resource)) = op {
-                if let Some(binding) = bindings.binding(*resource) {
-                    *op = super::types::PureOp::StorageView(crate::op::PureViewSource::Storage(binding));
-                } else {
-                    missing = Some(*resource);
-                }
-            }
-        });
     }
     for (_, block) in graph.skeleton.blocks.iter_mut() {
         for effect in &mut block.side_effects {
-            if let super::types::SideEffectKind::Inst(crate::ssa::types::InstKind::Op { tag, .. }) =
-                &mut effect.kind
-            {
-                if let crate::op::OpTag::StorageView(crate::op::PureViewSource::Resource(resource)) = tag {
-                    let Some(binding) = bindings.binding(*resource) else {
-                        return Err(format!(
-                            "semantic resource {:?} has no physical binding",
-                            resource
-                        ));
-                    };
-                    *tag = crate::op::OpTag::StorageView(crate::op::PureViewSource::Storage(binding));
-                }
-            }
             if let super::types::SideEffectKind::Soac(soac) = &mut effect.kind {
-                let mut error = None;
-                soac.visit_resource_refs_mut(|reference| {
-                    if let GraphResourceRef::Resource(resource) = *reference {
-                        if let Some(binding) = bindings.binding(resource) {
-                            *reference = GraphResourceRef::Binding(binding);
-                        } else {
-                            error = Some(resource);
-                        }
-                    }
-                });
-                if let Some(resource) = error {
-                    return Err(format!(
-                        "semantic resource {:?} has no physical binding",
-                        resource
-                    ));
-                }
                 soac.visit_types_mut(|ty| physicalize_type_resources(ty, bindings));
             }
         }
-    }
-    if let Some(resource) = missing {
-        return Err(format!(
-            "semantic resource {:?} has no physical binding",
-            resource
-        ));
     }
     let nodes = graph.types.keys().copied().collect::<Vec<_>>();
     for node in nodes {
@@ -830,7 +750,7 @@ pub(crate) fn physicalize_graph_resources(
         physicalize_type_resources(&mut ty, bindings);
         graph.retype_node(node, ty);
     }
-    Ok(())
+    Ok((graph, node_map, block_map))
 }
 
 pub(crate) fn physicalize_type_resources(ty: &mut Type<TypeName>, bindings: &PhysicalResourceTable) {
@@ -875,7 +795,7 @@ fn allocate_filter_work_resources(inner: &mut SemanticProgram) {
                     Some(SegExtent::ResourceLength {
                         resource, elem_bytes, ..
                     }) if space.dims.len() == 1 => LogicalSize::LikeResource {
-                        resource: resource.resource().expect("filter work requires normalized resources"),
+                        resource: resource.0,
                         elem_bytes: 4,
                         src_elem_bytes: *elem_bytes,
                     },
@@ -931,9 +851,7 @@ fn scalar_handoff_resources(inner: &SemanticProgram) -> HashMap<ResourceId, Comp
         .iter()
         .flat_map(|entry| {
             entry.resource_declarations.iter().filter_map(|declaration| {
-                (declaration.role == interface::StorageRole::Input)
-                    .then(|| declaration.resource.resource())
-                    .flatten()
+                (declaration.role == interface::StorageRole::Input).then_some(declaration.resource.0)
             })
         })
         .collect();
@@ -951,12 +869,9 @@ fn scalar_handoff_resources(inner: &SemanticProgram) -> HashMap<ResourceId, Comp
         for declaration in &entry.resource_declarations {
             if declaration.role == interface::StorageRole::Output
                 && matches!(declaration.size, LogicalSize::Unspecified)
-                && declaration
-                    .resource
-                    .resource()
-                    .is_some_and(|resource| consumer_inputs.contains(&resource))
+                && consumer_inputs.contains(&declaration.resource.0)
             {
-                let resource = declaration.resource.resource().unwrap();
+                let resource = declaration.resource.0;
                 resources.insert(
                     resource,
                     CompilerResource::new(CompilerResourceKind::ScalarHandoff, owner.clone(), 0),
@@ -982,19 +897,15 @@ fn filter_resource_kinds(inner: &SemanticProgram) -> HashMap<ResourceId, Compile
                 {
                     let owner = effect.semantic_id;
                     if let super::types::FilterOutput::Runtime { scratch, length } = output {
-                        if let Some(scratch) = scratch.resource() {
-                            kinds.insert(
-                                scratch,
-                                CompilerResource::new(CompilerResourceKind::FilterScratch, owner, 0),
-                            );
-                        }
+                        kinds.insert(
+                            scratch.0,
+                            CompilerResource::new(CompilerResourceKind::FilterScratch, owner, 0),
+                        );
                         if let super::types::RuntimeFilterLength::EntryOutput(len) = length {
-                            if let Some(len) = len.resource() {
-                                kinds.insert(
-                                    len,
-                                    CompilerResource::new(CompilerResourceKind::FilterLenCell, owner, 1),
-                                );
-                            }
+                            kinds.insert(
+                                len.0,
+                                CompilerResource::new(CompilerResourceKind::FilterLenCell, owner, 1),
+                            );
                         }
                     }
                     if let super::types::FilterState::Scheduled { plan, .. } = state {
@@ -1015,9 +926,7 @@ fn filter_resource_kinds(inner: &SemanticProgram) -> HashMap<ResourceId, Compile
                                     5,
                                 ),
                             ] {
-                                if let Some(resource) = resource.resource() {
-                                    kinds.insert(resource, CompilerResource::new(kind, owner, slot));
-                                }
+                                kinds.insert(resource.0, CompilerResource::new(kind, owner, slot));
                             }
                         }
                     }
@@ -1051,10 +960,7 @@ pub(crate) fn verify_allocated_resources(inner: &SemanticProgram) -> Result<(), 
     }
     for entry in &inner.entry_points {
         for declaration in &entry.resource_declarations {
-            let id = declaration
-                .resource
-                .resource()
-                .ok_or_else(|| format!("allocated entry `{}` contains a pending binding", entry.name))?;
+            let id = declaration.resource.0;
             if !covered.contains(&id) {
                 return Err(format!(
                     "entry `{}` references resource {:?}, which is missing from the manifest",
@@ -1103,12 +1009,7 @@ pub(crate) fn verify_allocated_resources(inner: &SemanticProgram) -> Result<(), 
             ));
         }
         for declaration in &requirement.resource_declarations {
-            let resource = declaration.resource.resource().ok_or_else(|| {
-                format!(
-                    "allocated materialization `{}` contains a pending binding",
-                    requirement.name
-                )
-            })?;
+            let resource = declaration.resource.0;
             if !covered.contains(&resource) {
                 return Err(format!(
                     "materialization `{}` references missing resource {:?}",
@@ -1186,9 +1087,9 @@ fn verify_compiler_resource_flow(
     };
     let (producer_name, producer_declarations) = flow_endpoint(inner, flow.producer, resource.id)?;
     let declares = |declarations: &[SemanticResourceDecl], role| {
-        declarations.iter().any(|declaration| {
-            declaration.resource.resource() == Some(resource.id) && declaration.role == role
-        })
+        declarations
+            .iter()
+            .any(|declaration| declaration.resource.0 == resource.id && declaration.role == role)
     };
     if !declares(producer_declarations, interface::StorageRole::Output) {
         return Err(format!(
@@ -1265,10 +1166,7 @@ fn verify_allocated_planned_body(
     kind: &str,
 ) -> Result<(), String> {
     for declaration in &body.resource_declarations {
-        let resource = declaration
-            .resource
-            .resource()
-            .ok_or_else(|| format!("allocated {kind} `{}` contains a pending binding", body.name))?;
+        let resource = declaration.resource.0;
         if !covered.contains(&resource) {
             return Err(format!(
                 "{kind} `{}` references missing resource {:?}",
@@ -1349,11 +1247,8 @@ fn verify_allocated_graph(
     for (_, node) in &graph.nodes {
         if let super::types::ENode::Pure { op, .. } = node {
             match op {
-                super::types::PureOp::StorageView(crate::op::PureViewSource::Storage(binding)) => {
-                    return Err(format!("{owner} still contains storage binding {binding:?}"));
-                }
-                super::types::PureOp::StorageView(crate::op::PureViewSource::Resource(resource))
-                | super::types::PureOp::ResourceLen(resource) => verify_resource(*resource)?,
+                super::types::PureOp::StorageView(crate::op::PureViewSource::Storage(resource))
+                | super::types::PureOp::ResourceLen(resource) => verify_resource(resource.0)?,
                 _ => {}
             }
         }
@@ -1366,29 +1261,21 @@ fn verify_allocated_graph(
             match &effect.kind {
                 super::types::SideEffectKind::Inst(crate::ssa::types::InstKind::Op { tag, .. }) => {
                     match tag {
-                        crate::op::OpTag::StorageView(crate::op::PureViewSource::Storage(binding)) => {
-                            return Err(format!("{owner} still contains storage binding {binding:?}"));
-                        }
-                        crate::op::OpTag::StorageView(crate::op::PureViewSource::Resource(resource))
-                        | crate::op::OpTag::ResourceLen(resource) => verify_resource(*resource)?,
+                        crate::op::OpTag::StorageView(crate::op::PureViewSource::Storage(resource))
+                        | crate::op::OpTag::ResourceLen(resource) => verify_resource(resource.0)?,
                         _ => {}
                     }
                 }
                 super::types::SideEffectKind::Soac(soac) => {
                     let mut soac = soac.clone();
                     let mut error = None;
-                    soac.visit_resource_refs_mut(|reference| match *reference {
-                        GraphResourceRef::Binding(binding) => {
-                            error.get_or_insert_with(|| {
-                                format!("{owner} SOAC still contains storage binding {binding:?}")
-                            });
-                        }
-                        GraphResourceRef::Resource(resource) if !covered.contains(&resource) => {
+                    soac.visit_resource_refs_mut(|reference| {
+                        let resource = reference.0;
+                        if !covered.contains(&resource) {
                             error.get_or_insert_with(|| {
                                 format!("{owner} SOAC references missing resource {resource:?}")
                             });
                         }
-                        GraphResourceRef::Resource(_) => {}
                     });
                     soac.visit_types_mut(|ty| {
                         if error.is_none() {
@@ -1438,7 +1325,7 @@ pub fn buffer_len(
 }
 
 #[derive(Clone, Debug)]
-pub struct EgirFunc {
+pub struct SemanticFunc {
     pub name: String,
     pub span: Span,
     pub linkage_name: Option<String>,
@@ -1449,7 +1336,7 @@ pub struct EgirFunc {
     pub aliases: LookupMap<NodeId, NodeId>,
 }
 
-impl EgirFunc {
+impl SemanticFunc {
     pub fn new(
         name: String,
         span: Span,
@@ -1459,7 +1346,7 @@ impl EgirFunc {
         graph: EGraph,
         control_headers: LookupMap<BlockId, ControlHeader>,
     ) -> Self {
-        EgirFunc {
+        SemanticFunc {
             name,
             span,
             linkage_name,
@@ -1468,6 +1355,43 @@ impl EgirFunc {
             graph,
             control_headers,
             aliases: LookupMap::new(),
+        }
+    }
+}
+
+/// Callable after the semantic-to-physical resource boundary. Its graph can
+/// carry backend bindings only; constructing it requires consuming an
+/// `SemanticFunc` through physicalization.
+#[derive(Clone, Debug)]
+pub struct PhysicalFunc {
+    pub name: String,
+    pub span: Span,
+    pub linkage_name: Option<String>,
+    pub params: Vec<(Type<TypeName>, String)>,
+    pub return_ty: Type<TypeName>,
+    pub graph: EGraph<PhysicalResourceRef>,
+    pub control_headers: LookupMap<BlockId, ControlHeader>,
+    pub aliases: LookupMap<NodeId, NodeId>,
+}
+
+/// Callable-region projection owned by a physical program.
+#[derive(Clone)]
+pub struct PhysicalRegion {
+    pub name: String,
+    pub params: Vec<(Type<TypeName>, String)>,
+    pub return_ty: Type<TypeName>,
+    pub graph: EGraph<PhysicalResourceRef>,
+    pub control_headers: LookupMap<BlockId, ControlHeader>,
+}
+
+impl PhysicalRegion {
+    pub fn from_function(function: &PhysicalFunc) -> Self {
+        Self {
+            name: function.name.clone(),
+            params: function.params.clone(),
+            return_ty: function.return_ty.clone(),
+            graph: function.graph.clone(),
+            control_headers: function.control_headers.clone(),
         }
     }
 }
@@ -1735,33 +1659,31 @@ pub struct PlannedEntryPublication {
 
 impl PlannedEntryPublication {
     pub fn physicalize(&self, resources: &PhysicalResourceTable) -> Result<EntryPublication, String> {
-        let storage_bindings =
-            self.resources
-                .iter()
-                .map(|declaration| {
-                    let resource = declaration.resource.resource().ok_or_else(|| {
-                        format!("entry `{}` contains a pending resource binding", self.name)
-                    })?;
-                    if !resources.is_compiler(resource) {
-                        return Ok(None);
-                    }
-                    let binding = resources.binding(resource).ok_or_else(|| {
-                        format!(
-                            "entry `{}` references unallocated resource {:?}",
-                            self.name, resource
-                        )
-                    })?;
-                    Ok(Some(interface::StorageBindingDecl {
-                        binding,
-                        role: declaration.role.clone(),
-                        elem_ty: declaration.elem_ty.clone(),
-                        length: buffer_len(&declaration.size, resources),
-                    }))
-                })
-                .collect::<Result<Vec<_>, String>>()?
-                .into_iter()
-                .flatten()
-                .collect();
+        let storage_bindings = self
+            .resources
+            .iter()
+            .map(|declaration| {
+                let resource = declaration.resource.0;
+                if !resources.is_compiler(resource) {
+                    return Ok(None);
+                }
+                let binding = resources.binding(resource).ok_or_else(|| {
+                    format!(
+                        "entry `{}` references unallocated resource {:?}",
+                        self.name, resource
+                    )
+                })?;
+                Ok(Some(interface::StorageBindingDecl {
+                    binding,
+                    role: declaration.role.clone(),
+                    elem_ty: declaration.elem_ty.clone(),
+                    length: buffer_len(&declaration.size, resources),
+                }))
+            })
+            .collect::<Result<Vec<_>, String>>()?
+            .into_iter()
+            .flatten()
+            .collect();
         Ok(EntryPublication {
             name: self.name.clone(),
             execution_model: self.execution_model.clone(),
@@ -1793,7 +1715,7 @@ pub struct PhysicalEntry {
     pub storage_bindings: Vec<interface::StorageBindingDecl>,
     pub params: Vec<(Type<TypeName>, String)>,
     pub return_ty: Type<TypeName>,
-    pub graph: EGraph,
+    pub graph: EGraph<PhysicalResourceRef>,
     pub control_headers: LookupMap<BlockId, ControlHeader>,
     pub aliases: LookupMap<NodeId, NodeId>,
     pub output_routes: Vec<OutputRoute>,
@@ -1852,7 +1774,7 @@ impl PhysicalResourceTable {
 /// `EgirSegmented` / `EgirOptimized` / `EgirAllocated` newtypes at
 /// the public-API layer (see `crate::lib`).
 pub struct SemanticProgram {
-    pub functions: Vec<EgirFunc>,
+    pub functions: Vec<SemanticFunc>,
     /// Extern function stubs. These don't have a body that flows through EGIR;
     /// they're already `Function` records with a 1-block Unreachable body and
     /// pass straight through.
@@ -1873,7 +1795,7 @@ pub struct SemanticProgram {
     pub input_names: LookupMap<(u32, u32), String>,
     /// Complete callable regions referenced by semantic Seg bodies, keyed by
     /// their arena index.
-    pub regions: LookupMap<RegionId, EgirRegion>,
+    pub regions: LookupMap<RegionId, SemanticRegion>,
     /// Name ↔ index interner shared with construction. Synthesized regions
     /// (e.g. scan offset wrappers) intern here to obtain a fresh index.
     pub region_interner: RegionInterner,
@@ -1888,18 +1810,90 @@ pub struct SemanticProgram {
 /// EGIR after the plan has validated and every physical entry has been
 /// constructed. Only this type is accepted by expansion and SSA elaboration.
 pub struct PhysicalProgram {
-    pub functions: Vec<EgirFunc>,
+    pub functions: Vec<PhysicalFunc>,
     pub externs: Vec<Function>,
     pub entry_points: Vec<PhysicalEntry>,
     pub constants: Vec<Constant>,
     pub pipeline: PipelineDescriptor,
     pub input_names: LookupMap<(u32, u32), String>,
-    pub regions: LookupMap<RegionId, EgirRegion>,
+    pub regions: LookupMap<RegionId, PhysicalRegion>,
     pub region_interner: RegionInterner,
     pub resources: Vec<LogicalResource>,
     pub semantic_dependencies: Vec<SemanticDependency>,
     pub plan: ValidatedKernelPlan,
     pub physical_resources: PhysicalResourceTable,
+}
+
+fn physicalize_control_headers(
+    headers: LookupMap<BlockId, ControlHeader>,
+    block_map: &LookupMap<BlockId, BlockId>,
+) -> LookupMap<BlockId, ControlHeader> {
+    headers
+        .into_iter()
+        .map(|(block, header)| {
+            let block = block_map[&block];
+            let header = header.remap(&|target| block_map[&target]);
+            (block, header)
+        })
+        .collect()
+}
+
+fn physicalize_function(
+    function: SemanticFunc,
+    resources: &PhysicalResourceTable,
+    serial: bool,
+) -> Result<PhysicalFunc, String> {
+    let SemanticFunc {
+        name,
+        span,
+        linkage_name,
+        mut params,
+        mut return_ty,
+        graph,
+        control_headers,
+        aliases,
+    } = function;
+    let (mut graph, node_map, block_map) = physicalize_graph_resources(graph, resources)?;
+    for (ty, _) in &mut params {
+        physicalize_type_resources(ty, resources);
+    }
+    physicalize_type_resources(&mut return_ty, resources);
+    super::parallelize::prepare_physical_callable_graph(&mut graph, serial);
+    Ok(PhysicalFunc {
+        name,
+        span,
+        linkage_name,
+        params,
+        return_ty,
+        graph,
+        control_headers: physicalize_control_headers(control_headers, &block_map),
+        aliases: aliases.into_iter().map(|(from, to)| (node_map[&from], node_map[&to])).collect(),
+    })
+}
+
+fn physicalize_region(
+    region: SemanticRegion,
+    resources: &PhysicalResourceTable,
+) -> Result<PhysicalRegion, String> {
+    let SemanticRegion {
+        name,
+        mut params,
+        mut return_ty,
+        graph,
+        control_headers,
+    } = region;
+    let (graph, _, block_map) = physicalize_graph_resources(graph, resources)?;
+    for (ty, _) in &mut params {
+        physicalize_type_resources(ty, resources);
+    }
+    physicalize_type_resources(&mut return_ty, resources);
+    Ok(PhysicalRegion {
+        name,
+        params,
+        return_ty,
+        graph,
+        control_headers: physicalize_control_headers(control_headers, &block_map),
+    })
 }
 
 impl PhysicalProgram {
@@ -1914,39 +1908,29 @@ impl PhysicalProgram {
             .physical_bodies()
             .map(|body| super::builder::PhysicalEntryBuilder::new(body, &physical_resources).build())
             .collect::<Result<Vec<_>, _>>()?;
-        let mut functions = program.functions;
-        for function in &mut functions {
-            physicalize_graph_resources(&mut function.graph, &physical_resources)?;
-            for (ty, _) in &mut function.params {
-                physicalize_type_resources(ty, &physical_resources);
-            }
-            physicalize_type_resources(&mut function.return_ty, &physical_resources);
-            super::parallelize::prepare_physical_callable_graph(&mut function.graph, serial);
-        }
+        let mut functions = program
+            .functions
+            .into_iter()
+            .map(|function| physicalize_function(function, &physical_resources, serial))
+            .collect::<Result<Vec<_>, _>>()?;
         for generated in plan.generated_callables() {
-            let mut function = generated.clone();
-            physicalize_graph_resources(&mut function.graph, &physical_resources)?;
-            for (ty, _) in &mut function.params {
-                physicalize_type_resources(ty, &physical_resources);
-            }
-            physicalize_type_resources(&mut function.return_ty, &physical_resources);
-            super::parallelize::prepare_physical_callable_graph(&mut function.graph, serial);
-            functions.push(function);
+            functions.push(physicalize_function(
+                generated.clone(),
+                &physical_resources,
+                serial,
+            )?);
         }
         let region_interner = plan.region_interner().clone();
-        let mut regions = program.regions;
-        for region in regions.values_mut() {
-            physicalize_graph_resources(&mut region.graph, &physical_resources)?;
-            for (ty, _) in &mut region.params {
-                physicalize_type_resources(ty, &physical_resources);
-            }
-            physicalize_type_resources(&mut region.return_ty, &physical_resources);
-        }
+        let mut regions = program
+            .regions
+            .into_iter()
+            .map(|(id, region)| Ok((id, physicalize_region(region, &physical_resources)?)))
+            .collect::<Result<LookupMap<_, _>, String>>()?;
         for function in &functions {
             let id = region_interner
                 .get(&function.name)
                 .ok_or_else(|| format!("physical callable `{}` has no region identity", function.name))?;
-            regions.insert(id, EgirRegion::from_function(function));
+            regions.insert(id, PhysicalRegion::from_function(function));
         }
         Ok(Self {
             functions,
@@ -1970,17 +1954,17 @@ impl PhysicalProgram {
 /// rather than allocating a second region.
 fn record_region(
     interner: &mut RegionInterner,
-    regions: &mut LookupMap<RegionId, EgirRegion>,
-    function: &EgirFunc,
+    regions: &mut LookupMap<RegionId, SemanticRegion>,
+    function: &SemanticFunc,
 ) -> RegionId {
     let id = interner.intern(&function.name);
-    regions.insert(id, EgirRegion::from_function(function));
+    regions.insert(id, SemanticRegion::from_function(function));
     id
 }
 
 impl SemanticProgram {
     pub fn new(
-        functions: Vec<EgirFunc>,
+        functions: Vec<SemanticFunc>,
         externs: Vec<Function>,
         entry_points: Vec<SemanticEntry>,
         constants: Vec<Constant>,
@@ -2013,7 +1997,7 @@ impl SemanticProgram {
 
     /// Convenience: build an EGIR program wrapping a single function body.
     /// Used by the probe path in `from_tlc`.
-    pub fn single_function(func: EgirFunc) -> Self {
+    pub fn single_function(func: SemanticFunc) -> Self {
         Self::new(
             vec![func],
             vec![],
@@ -2034,7 +2018,7 @@ impl SemanticProgram {
     /// arena and make it callable. The returned index is the one a `SegBody`
     /// must name to call it, and it equals `intern_region(&function.name)`, so a
     /// caller that needed the index before the body existed may use either.
-    pub fn define_region(&mut self, function: EgirFunc) -> RegionId {
+    pub fn define_region(&mut self, function: SemanticFunc) -> RegionId {
         let id = record_region(&mut self.region_interner, &mut self.regions, &function);
         self.functions.push(function);
         id

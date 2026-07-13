@@ -22,7 +22,9 @@ use polytype::Type;
 /// Compile source through the pipeline to just-past `expand_soacs`,
 /// returning the EGraph for the (single) entry point so tests can
 /// introspect node structure.
-fn compile_to_expanded_egraph(input: &str) -> crate::egir::types::EGraph {
+fn compile_to_expanded_egraph(
+    input: &str,
+) -> crate::egir::types::EGraph<crate::egir::program::PhysicalResourceRef> {
     let tlc = crate::compile_thru_tlc(input).expect("compile_thru_tlc");
     let allocated = tlc.infer_input_slice_bounds().to_egraph().expect("to_egraph");
     let mut binding_ids = allocated.binding_ids;
@@ -43,7 +45,7 @@ fn compile_to_expanded_egraph(input: &str) -> crate::egir::types::EGraph {
 }
 
 /// Collect all `_w_intrinsic_array_with_inplace` nodes in the graph.
-fn array_with_nodes(graph: &crate::egir::types::EGraph) -> Vec<crate::egir::types::NodeId> {
+fn array_with_nodes<R>(graph: &crate::egir::types::EGraph<R>) -> Vec<crate::egir::types::NodeId> {
     let inplace_id = crate::builtins::catalog().known().array_with_in_place;
     graph
         .nodes

@@ -71,7 +71,7 @@ fn value_remap_preserves_place_identity() {
 
     // ViewIndex { view, index, result }: remap renames view & index (values)
     // but preserves the place result.
-    let view_index = InstKind::ViewIndex {
+    let view_index: InstKind = InstKind::ViewIndex {
         view: ValueRef::Ssa(value_a),
         index: ValueRef::Ssa(value_b),
         result: place_a,
@@ -90,7 +90,7 @@ fn value_remap_preserves_place_identity() {
     }
 
     // Store { place, value }: value operand remaps, place stays.
-    let store = InstKind::Store {
+    let store: InstKind = InstKind::Store {
         place: place_b,
         value: ValueRef::Ssa(value_a),
     };
@@ -104,12 +104,12 @@ fn value_remap_preserves_place_identity() {
     }
 
     // Load { place }: place stays.
-    let load = InstKind::Load { place: place_b };
+    let load: InstKind = InstKind::Load { place: place_b };
     let remapped = load.remap(&rv);
     assert!(matches!(remapped, InstKind::Load { place } if place == place_b));
 
     // OutputSlot { index, result }: no value operands; place stays.
-    let slot = InstKind::OutputSlot {
+    let slot: InstKind = InstKind::OutputSlot {
         index: 0,
         result: place_a,
     };
@@ -117,7 +117,7 @@ fn value_remap_preserves_place_identity() {
     assert!(matches!(remapped, InstKind::OutputSlot { result, .. } if result == place_a));
 
     // Alloca { elem_ty, result }: place stays.
-    let alloca = InstKind::Alloca {
+    let alloca: InstKind = InstKind::Alloca {
         elem_ty: Type::Constructed(TypeName::Int(32), vec![]),
         result: place_a,
     };
@@ -137,14 +137,14 @@ fn value_uses_does_not_traverse_places() {
     let place = PlaceId::from(KeyData::from_ffi(1));
     let v = ValueId::from(KeyData::from_ffi(10));
 
-    let load = InstKind::Load { place };
+    let load: InstKind = InstKind::Load { place };
     assert!(
         load.value_uses().is_empty(),
         "Load's place is a PlaceId operand, not a ValueRef"
     );
     assert_eq!(load.place_uses(), vec![place]);
 
-    let store = InstKind::Store {
+    let store: InstKind = InstKind::Store {
         place,
         value: ValueRef::Ssa(v),
     };
@@ -155,7 +155,7 @@ fn value_uses_does_not_traverse_places() {
     );
     assert_eq!(store.place_uses(), vec![place]);
 
-    let vi = InstKind::ViewIndex {
+    let vi: InstKind = InstKind::ViewIndex {
         view: ValueRef::Ssa(v),
         index: ValueRef::Ssa(v),
         result: place,

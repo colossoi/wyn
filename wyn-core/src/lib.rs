@@ -146,10 +146,10 @@ pub type SymbolTable = IdArena<SymbolId, String>;
 // =============================================================================
 
 /// A `(descriptor set, binding)` pair naming a host-runtime storage /
-/// uniform / texture / sampler resource. The one type carrying that pair
-/// through every layer (TLC `ArrayExpr`, SSA / EGIR `ViewSource`,
-/// `EntryInput`, `StorageBindingDecl`, `EntryParamBindingKind`, …),
-/// rather than parallel `(u32, u32)` fields. Deliberately no `Default` impl —
+/// uniform / texture / sampler resource. Semantic EGIR graphs use
+/// `ResourceId`; this pair remains the host ABI constraint and becomes the
+/// resource identity again only in physical EGIR and SSA. Deliberately no
+/// `Default` impl —
 /// `BindingRef { set: 0, binding: 0 }` is a meaningful binding, and a
 /// default value would silently mask construction bugs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

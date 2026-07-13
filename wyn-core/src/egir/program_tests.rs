@@ -12,8 +12,8 @@ fn unit_ty() -> Type<TypeName> {
     Type::Constructed(TypeName::Unit, vec![])
 }
 
-fn empty_func(name: &str) -> EgirFunc {
-    EgirFunc::new(
+fn empty_func(name: &str) -> SemanticFunc {
+    SemanticFunc::new(
         name.to_string(),
         Span::dummy(),
         None,
@@ -76,7 +76,44 @@ fn allocated_resource_verifier_accepts_resource_only_program() {
 #[test]
 fn semantic_resource_ref_has_no_binding_constructor() {
     let reference = SemanticResourceRef(ResourceId(0));
-    assert_eq!(reference.resource(), Some(ResourceId(0)));
+    assert_eq!(reference.0, ResourceId(0));
+}
+
+#[test]
+fn physicalization_rebuilds_resource_nodes_as_binding_nodes() {
+    let binding = crate::BindingRef::new(3, 5);
+    let resources = [LogicalResource {
+        id: ResourceId(0),
+        origin: ResourceOrigin::Host(binding),
+        elem_ty: Type::Constructed(TypeName::UInt(32), vec![]),
+        size: LogicalSize::Unspecified,
+    }];
+    let table = PhysicalResourceTable::allocate(&resources, &mut crate::IdSource::new());
+    let mut graph = EGraph::new();
+    let view = crate::egir::graph_ops::intern_resource_view(
+        &mut graph,
+        ResourceId(0),
+        Type::Constructed(TypeName::UInt(32), vec![]),
+        None,
+    );
+
+    let (physical, node_map, _) =
+        physicalize_graph_resources(graph, &table).expect("resource graph should physicalize");
+    let mapped_view = node_map[&view];
+    assert!(matches!(
+        &physical.nodes[mapped_view],
+        crate::egir::types::ENode::Pure {
+            op: crate::egir::types::PureOp::StorageView(crate::op::PureViewSource::Storage(found)),
+            ..
+        } if *found == binding
+    ));
+    assert!(physical.nodes.values().all(|node| !matches!(
+        node,
+        crate::egir::types::ENode::Pure {
+            op: crate::egir::types::PureOp::ResourceLen(_),
+            ..
+        }
+    )));
 }
 
 #[test]
@@ -144,7 +181,7 @@ fn scalar_handoff_classification_uses_typed_prepass_role_not_name() {
     ];
     inner.prepass_roles.insert("renamed_without_magic_marker".into(), PrepassKind::Scalar);
     plan_logical_resources(&mut inner);
-    let typed_resource = inner.prepasses[0].body.resource_declarations[0].resource.resource().unwrap();
+    let typed_resource = inner.prepasses[0].body.resource_declarations[0].resource.0;
     let misleading_resource = inner
         .entry_points
         .iter()
@@ -152,8 +189,7 @@ fn scalar_handoff_classification_uses_typed_prepass_role_not_name() {
         .unwrap()
         .resource_declarations[0]
         .resource
-        .resource()
-        .unwrap();
+        .0;
     assert!(matches!(
         &inner.resources[typed_resource.0 as usize].origin,
         ResourceOrigin::Compiler(CompilerResource {

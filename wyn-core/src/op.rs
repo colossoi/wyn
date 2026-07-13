@@ -19,8 +19,8 @@
 //! - `Materialize`: `[value]`
 //! - `DynamicExtract`: `[base, index]`
 //! - `Call(name)` / `Intrinsic { .. }`: variable-arity arg list
-//! - `StorageImageLoad(binding)`: `[coord]`
-//! - `StorageImageStore(binding)`: `[coord, texel]`
+//! - `StorageImageLoad(resource)`: `[coord]`
+//! - `StorageImageStore(resource)`: `[coord, texel]`
 //! - `StorageView(Storage)`: `[offset, len]`
 //! - `StorageView(Inherited)`: `[offset, len, parent]`
 //! - `StorageViewLen`: `[view]`
@@ -33,7 +33,7 @@ use crate::BindingRef;
 
 /// The operator identity shared by EGIR's pure nodes and SSA's `InstKind::Op`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum OpTag {
+pub enum OpTag<R = BindingRef> {
     /// Signed integer literal (i8, i16, i32, i64).
     Int(String),
     /// Unsigned integer literal (u8, u16, u32, u64).
@@ -66,21 +66,20 @@ pub enum OpTag {
         id: crate::builtins::BuiltinId,
         overload_idx: usize,
     },
-    /// Read a storage image whose descriptor is fixed by region
-    /// monomorphization. The image handle is absent from the runtime operands:
-    /// `binding` is the complete resource identity.
-    StorageImageLoad(BindingRef),
-    /// Write a storage image whose descriptor is fixed by region
+    /// Read a storage image whose resource is fixed by region
+    /// monomorphization. The image handle is absent from the runtime operands.
+    StorageImageLoad(R),
+    /// Write a storage image whose resource is fixed by region
     /// monomorphization. Runtime operands are coordinate and texel only.
-    StorageImageStore(BindingRef),
+    StorageImageStore(R),
     /// Storage buffer view creation. The `Inherited` parent (if any) is
     /// carried in the operands tail, not in this tag, so equivalent views
     /// with the same backing source hash-cons together.
-    StorageView(PureViewSource),
+    StorageView(PureViewSource<R>),
     /// EGIR-only logical storage length. Physicalization resolves the
     /// `ResourceId` to a descriptor binding and rewrites this to the ordinary
     /// storage-length intrinsic before SSA elaboration.
-    ResourceLen(crate::ResourceId),
+    ResourceLen(R),
     StorageViewLen,
     /// EGIR-only: place-producing view-index. Never appears in
     /// `InstKind::Op` — SSA uses `InstKind::ViewIndex` directly (carries
@@ -104,11 +103,8 @@ pub enum OpTag {
 /// `ValueId` from `Inherited` — that parent is stored as an operand in the
 /// containing `ENode::Pure` or `InstKind::Op`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum PureViewSource {
-    Storage(BindingRef),
-    /// Target-independent storage identity used only by semantic EGIR. The
-    /// physicalizer must rewrite this to `Storage` before SSA/backend lowering.
-    Resource(crate::ResourceId),
+pub enum PureViewSource<R = BindingRef> {
+    Storage(R),
     Inherited,
     /// Workgroup-shared array, `id`-th in the entry, of `count` elements.
     /// Unlike Storage there is no descriptor binding — the backend declares
@@ -119,4 +115,52 @@ pub enum PureViewSource {
         id: u32,
         count: u32,
     },
+}
+
+impl<R> PureViewSource<R> {
+    pub fn try_map_resource<S, E>(
+        self,
+        map: &mut impl FnMut(R) -> Result<S, E>,
+    ) -> Result<PureViewSource<S>, E> {
+        Ok(match self {
+            PureViewSource::Storage(resource) => PureViewSource::Storage(map(resource)?),
+            PureViewSource::Inherited => PureViewSource::Inherited,
+            PureViewSource::Workgroup { id, count } => PureViewSource::Workgroup { id, count },
+        })
+    }
+}
+
+impl<R> OpTag<R> {
+    pub fn try_map_resource<S, E>(self, map: &mut impl FnMut(R) -> Result<S, E>) -> Result<OpTag<S>, E> {
+        Ok(match self {
+            OpTag::Int(value) => OpTag::Int(value),
+            OpTag::Uint(value) => OpTag::Uint(value),
+            OpTag::Float(value) => OpTag::Float(value),
+            OpTag::Bool(value) => OpTag::Bool(value),
+            OpTag::Unit => OpTag::Unit,
+            OpTag::Global(value) => OpTag::Global(value),
+            OpTag::Extern(value) => OpTag::Extern(value),
+            OpTag::BinOp(value) => OpTag::BinOp(value),
+            OpTag::UnaryOp(value) => OpTag::UnaryOp(value),
+            OpTag::Tuple(value) => OpTag::Tuple(value),
+            OpTag::Vector(value) => OpTag::Vector(value),
+            OpTag::Matrix { rows, cols } => OpTag::Matrix { rows, cols },
+            OpTag::ArrayLit(value) => OpTag::ArrayLit(value),
+            OpTag::ArrayRange { has_step } => OpTag::ArrayRange { has_step },
+            OpTag::Project { index } => OpTag::Project { index },
+            OpTag::Index => OpTag::Index,
+            OpTag::Materialize => OpTag::Materialize,
+            OpTag::DynamicExtract => OpTag::DynamicExtract,
+            OpTag::Call(value) => OpTag::Call(value),
+            OpTag::Intrinsic { id, overload_idx } => OpTag::Intrinsic { id, overload_idx },
+            OpTag::StorageImageLoad(resource) => OpTag::StorageImageLoad(map(resource)?),
+            OpTag::StorageImageStore(resource) => OpTag::StorageImageStore(map(resource)?),
+            OpTag::StorageView(source) => OpTag::StorageView(source.try_map_resource(map)?),
+            OpTag::ResourceLen(resource) => OpTag::ResourceLen(map(resource)?),
+            OpTag::StorageViewLen => OpTag::StorageViewLen,
+            OpTag::ViewIndex => OpTag::ViewIndex,
+            OpTag::PlaceIndex => OpTag::PlaceIndex,
+            OpTag::OutputSlot { index } => OpTag::OutputSlot { index },
+        })
+    }
 }

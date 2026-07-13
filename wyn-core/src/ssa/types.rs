@@ -185,11 +185,11 @@ impl TerminatorExt for Terminator {
 /// variants stay separate because they carry a `PlaceId`, which can't
 /// fold into an operand list.
 #[derive(Debug, Clone)]
-pub enum InstKind {
+pub enum InstKind<R = crate::BindingRef> {
     /// A pure operation. Operand layout per tag is documented on
     /// `OpTag` in `crate::op`.
     Op {
-        tag: OpTag,
+        tag: OpTag<R>,
         operands: Vec<ValueRef>,
     },
 
@@ -247,7 +247,7 @@ pub enum InstKind {
     ControlBarrier,
 }
 
-impl InstKind {
+impl<R: Clone> InstKind<R> {
     /// Return all ValueRefs referenced by this instruction (read-only).
     /// Place operands (see `place_uses`) are traversed separately.
     pub fn value_uses(&self) -> Vec<ValueRef> {
@@ -331,12 +331,30 @@ impl InstKind {
     }
 
     /// Create a new InstKind with all ValueIds remapped.
-    pub fn remap(&self, rv: &impl Fn(ValueId) -> ValueId) -> InstKind {
+    pub fn remap(&self, rv: &impl Fn(ValueId) -> ValueId) -> InstKind<R> {
         let mut result = self.clone();
         result.substitute_values(&mut |vr| {
             *vr = vr.map_ssa(rv);
         });
         result
+    }
+}
+
+impl<R> InstKind<R> {
+    pub fn try_map_resource<S, E>(self, map: &mut impl FnMut(R) -> Result<S, E>) -> Result<InstKind<S>, E> {
+        Ok(match self {
+            InstKind::Op { tag, operands } => InstKind::Op {
+                tag: tag.try_map_resource(map)?,
+                operands,
+            },
+            InstKind::Alloca { elem_ty, result } => InstKind::Alloca { elem_ty, result },
+            InstKind::Load { place } => InstKind::Load { place },
+            InstKind::Store { place, value } => InstKind::Store { place, value },
+            InstKind::ViewIndex { view, index, result } => InstKind::ViewIndex { view, index, result },
+            InstKind::PlaceIndex { place, index, result } => InstKind::PlaceIndex { place, index, result },
+            InstKind::OutputSlot { index, result } => InstKind::OutputSlot { index, result },
+            InstKind::ControlBarrier => InstKind::ControlBarrier,
+        })
     }
 }
 

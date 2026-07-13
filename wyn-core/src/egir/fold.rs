@@ -19,13 +19,13 @@ use crate::ssa::types::ConstantValue;
 use polytype::Type;
 use smallvec::smallvec;
 
-use super::types::{EGraph, ENode, NodeId, PureOp};
+use super::types::{EGraph, ENode, GraphResource, NodeId, PureOp};
 
-impl EGraph {
+impl<R: GraphResource> EGraph<R> {
     /// Try every rewrite rule and return a substitute node if any fires.
     pub(super) fn try_algebraic_fold(
         &mut self,
-        op: &PureOp,
+        op: &PureOp<R>,
         operands: &[NodeId],
         result_ty: &Type<TypeName>,
     ) -> Option<NodeId> {

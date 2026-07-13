@@ -195,7 +195,7 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
     match kind {
         InstKind::Op { tag, operands } => match tag {
             crate::op::OpTag::ResourceLen(resource) => {
-                let _ = write!(out, "resource_len({})", resource.0);
+                let _ = write!(out, "resource_len({},{})", resource.set, resource.binding);
             }
             OpTag::Int(s) => {
                 let _ = write!(out, "int {s}");
@@ -302,7 +302,6 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
                     PureViewSource::Storage(br) => {
                         format!("storage({}, {})", br.set, br.binding)
                     }
-                    PureViewSource::Resource(resource) => format!("resource({})", resource.0),
                     PureViewSource::Inherited => format_ref(&operands[2]),
                     PureViewSource::Workgroup { id, count } => {
                         format!("workgroup({id}, {count})")

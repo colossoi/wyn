@@ -169,7 +169,7 @@ fn scan_phase2_writes_exclusive_prefix_before_combining_current_block() {
                 return None;
             }
             let place = *effect.operand_nodes.first()?;
-            (storage_resource_under(&phase2.graph, place) == Some(GraphResourceRef::Resource(offsets)))
+            (storage_resource_under(&phase2.graph, place) == Some(SemanticResourceRef(offsets)))
                 .then(|| effect.operand_nodes[1])
         })
         .expect("block-offset store");

@@ -12,7 +12,7 @@ use smallvec::smallvec;
 
 use super::space::seg_space_fusable;
 use crate::ast::{Span, TypeName};
-use crate::egir::program::{EgirFunc, SemanticProgram};
+use crate::egir::program::{SemanticFunc, SemanticProgram};
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::types::{
     EGraph, ENode, EgirSoac, NodeId, PureOp, SegBinOp, SegBody, SegOpKind, SegResourceAccess,
@@ -480,7 +480,7 @@ fn compose_map_region(
     replaced_inputs: &[usize],
     new_elem_types: &[Type<TypeName>],
     outer_types: &LookupMap<NodeId, Type<TypeName>>,
-) -> (SegBody, EgirFunc) {
+) -> (SegBody, SemanticFunc) {
     let element_types: Vec<_> = new_indices.iter().map(|&index| new_elem_types[index].clone()).collect();
     let capture_types = capture_types(
         outer_types,
@@ -541,7 +541,7 @@ fn compose_map_region(
     graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
     let name = fresh_region_name(inner, &format!("{scope}_vertical_map_{lane}"));
     let region = inner.region_interner.intern(&name);
-    let function = EgirFunc::new(
+    let function = SemanticFunc::new(
         name,
         span,
         None,
@@ -572,7 +572,7 @@ fn compose_step_region(
     replaced_inputs: &[usize],
     new_elem_types: &[Type<TypeName>],
     outer_types: &LookupMap<NodeId, Type<TypeName>>,
-) -> (SegBody, EgirFunc) {
+) -> (SegBody, SemanticFunc) {
     let producer_region = &inner.regions[&producer.body.region];
     let consumer_region = &inner.regions[&operator.step.region];
     let accumulator_ty = consumer_region.params[0].0.clone();
@@ -633,7 +633,7 @@ fn compose_step_region(
     graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
     let name = fresh_region_name(inner, &format!("{scope}_vertical_step_{operator_index}"));
     let region = inner.region_interner.intern(&name);
-    let function = EgirFunc::new(
+    let function = SemanticFunc::new(
         name,
         span,
         None,
@@ -691,10 +691,7 @@ fn merge_resources(a: &[SegResourceAccess], b: &[SegResourceAccess]) -> Vec<SegR
     }
     let mut resources: Vec<_> =
         merged.into_iter().map(|(resource, access)| SegResourceAccess { resource, access }).collect();
-    resources.sort_by_key(|resource| match resource.resource {
-        crate::egir::program::GraphResourceRef::Binding(binding) => (0, binding.set, binding.binding),
-        crate::egir::program::GraphResourceRef::Resource(id) => (1, id.0, 0),
-    });
+    resources.sort_by_key(|resource| resource.resource.0 .0);
     resources
 }
 
@@ -706,14 +703,14 @@ mod tests {
     use crate::egir::types::{EffectToken, SegExtent, SegLevel, SegPlacement, SideEffect};
     use crate::ssa::types::ExecutionModel;
 
-    fn captured_binary_function(name: &str, op: &str) -> EgirFunc {
+    fn captured_binary_function(name: &str, op: &str) -> SemanticFunc {
         let int = Type::Constructed(TypeName::Int(32), vec![]);
         let mut graph = EGraph::new();
         let left = graph.add_func_param(0, int.clone());
         let right = graph.add_func_param(1, int.clone());
         let result = graph.intern_pure(PureOp::BinOp(op.into()), smallvec![left, right], int.clone());
         graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
-        EgirFunc::new(
+        SemanticFunc::new(
             name.into(),
             Span::new(0, 0, 0, 0),
             None,

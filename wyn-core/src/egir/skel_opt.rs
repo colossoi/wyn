@@ -46,7 +46,7 @@ pub fn run(inner: &mut PhysicalProgram) {
 
 /// Run all enabled skeleton rewrites to fixpoint. Returns an alias map
 /// mapping stripped block-param NodeIds to their replacement NodeIds.
-pub fn run_one_body(graph: &mut EGraph) -> LookupMap<NodeId, NodeId> {
+pub fn run_one_body<R: super::types::GraphResource>(graph: &mut EGraph<R>) -> LookupMap<NodeId, NodeId> {
     let mut aliases: LookupMap<NodeId, NodeId> = LookupMap::new();
     loop {
         // Phase order: fold first, prune dead CFG second, phi-elim third.
@@ -74,7 +74,7 @@ pub fn run_one_body(graph: &mut EGraph) -> LookupMap<NodeId, NodeId> {
 /// Rewrite every `CondBranch` whose condition is a literal bool into a
 /// direct `Branch` to the chosen arm. Returns true if any block's
 /// terminator was rewritten.
-fn fold_constant_branches(graph: &mut EGraph) -> bool {
+fn fold_constant_branches<R: super::types::GraphResource>(graph: &mut EGraph<R>) -> bool {
     // Collect rewrites first so we don't hold a borrow of graph.nodes
     // while mutating skeleton.blocks.
     let mut rewrites: Vec<(BlockId, SkeletonTerminator)> = Vec::new();
@@ -119,7 +119,7 @@ fn fold_constant_branches(graph: &mut EGraph) -> bool {
 /// We do not consult the `best` map (doesn't exist yet at this stage).
 /// Only literal constants are recognized; union-extract winners are out
 /// of scope.
-fn is_const_bool(nid: NodeId, nodes: &slotmap::SlotMap<NodeId, ENode>) -> Option<bool> {
+fn is_const_bool<R>(nid: NodeId, nodes: &slotmap::SlotMap<NodeId, ENode<R>>) -> Option<bool> {
     match &nodes[nid] {
         ENode::Constant(ConstantValue::Bool(b)) => Some(*b),
         ENode::Pure {
@@ -133,7 +133,7 @@ fn is_const_bool(nid: NodeId, nodes: &slotmap::SlotMap<NodeId, ENode>) -> Option
 /// Remove skeleton blocks that cannot be reached from the entry block.
 /// The pure nodes and block-param nodes owned by dead blocks stay in the
 /// sea; with no reachable demand path to them, later stages ignore them.
-fn remove_unreachable_blocks(graph: &mut EGraph) -> bool {
+fn remove_unreachable_blocks<R: super::types::GraphResource>(graph: &mut EGraph<R>) -> bool {
     let reachable: LookupSet<BlockId> = wyn_graph::reachable_set(
         [graph.skeleton.entry],
         wyn_graph::WalkOrder::DepthFirst,
@@ -174,7 +174,9 @@ fn remove_unreachable_blocks(graph: &mut EGraph) -> bool {
 /// the `best` map. Hash-consing at intern time should have already
 /// dedup'd structurally-equal subtrees; mixing CFG rewriting with
 /// e-graph equivalence reasoning is where subtle bugs live.
-fn eliminate_redundant_params(graph: &mut EGraph) -> LookupMap<NodeId, NodeId> {
+fn eliminate_redundant_params<R: super::types::GraphResource>(
+    graph: &mut EGraph<R>,
+) -> LookupMap<NodeId, NodeId> {
     use smallvec::SmallVec;
 
     // incoming[B][i] = every distinct NodeId passed into B.params[i] by
@@ -324,7 +326,7 @@ fn eliminate_redundant_params(graph: &mut EGraph) -> LookupMap<NodeId, NodeId> {
 
 /// Debug check: for every terminator branching to a block, the arg list
 /// must have the same length as the target block's param list.
-fn check_branch_arity(graph: &EGraph) -> bool {
+fn check_branch_arity<R>(graph: &EGraph<R>) -> bool {
     for (_bid, block) in &graph.skeleton.blocks {
         match &block.term {
             SkeletonTerminator::Branch { target, args } => {

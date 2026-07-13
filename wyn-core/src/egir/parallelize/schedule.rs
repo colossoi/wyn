@@ -11,10 +11,10 @@ use std::sync::Arc;
 
 use crate::egir::graph_ops;
 use crate::egir::program::{
-    CompilerFlowEndpoint, CompilerResourceFlow, EgirFunc, EntryPublication, GraphResourceRef, InputSlotId,
-    LogicalResource, MaterializationRequirement, OutputSlotId, PhysicalResourceTable,
-    PlannedEntryPublication, PlannedKernelBody, PrepassKind, PrepassRequirement, RegionInterner,
-    ResourceOrigin, SemanticEntry, SemanticEntryId, SemanticResourceDecl,
+    CompilerFlowEndpoint, CompilerResourceFlow, EntryPublication, InputSlotId, LogicalResource,
+    MaterializationRequirement, OutputSlotId, PhysicalResourceTable, PlannedEntryPublication,
+    PlannedKernelBody, PrepassKind, PrepassRequirement, RegionInterner, ResourceOrigin, SemanticEntry,
+    SemanticEntryId, SemanticFunc, SemanticResourceDecl, SemanticResourceRef,
 };
 use crate::egir::types::RegionId;
 use crate::egir::types::{
@@ -42,7 +42,7 @@ pub struct KernelPlan {
     /// Callable helpers synthesized by target planning. They are not admitted
     /// to semantic EGIR; physical construction publishes them only after the
     /// plan has validated.
-    generated_callables: Vec<EgirFunc>,
+    generated_callables: Vec<SemanticFunc>,
     /// Source callable identities plus planner-generated additions. Planned
     /// Seg bodies use these stable ids before physical functions exist.
     region_interner: RegionInterner,
@@ -93,7 +93,7 @@ impl ValidatedKernelPlan {
             .map(|phase| phase.body.as_deref().expect("validated kernel plan contains a construction body"))
     }
 
-    pub(crate) fn generated_callables(&self) -> impl Iterator<Item = &EgirFunc> {
+    pub(crate) fn generated_callables(&self) -> impl Iterator<Item = &SemanticFunc> {
         self.0.generated_callables.iter()
     }
 
@@ -240,7 +240,7 @@ impl ResourceAccess {
 
 impl KernelPlan {
     #[cfg(test)]
-    pub(crate) fn generated_callables(&self) -> impl Iterator<Item = &EgirFunc> {
+    pub(crate) fn generated_callables(&self) -> impl Iterator<Item = &SemanticFunc> {
         self.generated_callables.iter()
     }
 
@@ -256,7 +256,7 @@ impl KernelPlan {
         self.region_interner.names(ids)
     }
 
-    pub(crate) fn define_callable(&mut self, function: EgirFunc) -> RegionId {
+    pub(crate) fn define_callable(&mut self, function: SemanticFunc) -> RegionId {
         assert!(
             self.region_interner.get(&function.name).is_none(),
             "planner-generated callable `{}` collides with a semantic callable",
@@ -1761,10 +1761,8 @@ fn segmented_graph_resources(
             }) = &side_effect.kind
             {
                 let mut resources = graph_resources(graph, declarations);
-                let mut push = |reference: GraphResourceRef, access: ResourceAccess| {
-                    let resource =
-                        reference.resource().expect("planner received a pending filter resource binding");
-                    merge_scheduled_resource(&mut resources, resource, access);
+                let mut push = |reference: SemanticResourceRef, access: ResourceAccess| {
+                    merge_scheduled_resource(&mut resources, reference.0, access);
                 };
                 match plan {
                     FilterPlan::Flags(work) => {
@@ -1803,10 +1801,7 @@ fn segmented_graph_resources(
                 resources
                     .iter()
                     .map(|resource| ScheduledResource {
-                        resource: resource
-                            .resource
-                            .resource()
-                            .expect("planner received a pending Seg resource binding"),
+                        resource: resource.resource.0,
                         access: match resource.access {
                             SegResourceAccessKind::Read => ResourceAccess::Read,
                             SegResourceAccessKind::Write => ResourceAccess::Write,
@@ -1922,7 +1917,7 @@ pub(crate) fn domain_from_space(space: &crate::egir::types::SegSpace) -> Option<
         [SegExtent::ResourceLength {
             resource, elem_bytes, ..
         }] => Some(KernelDomain::ResourceElements {
-            resource: resource.resource().expect("planner received a pending resource-length binding"),
+            resource: resource.0,
             elem_bytes: *elem_bytes,
         }),
         _ => None,
@@ -1957,10 +1952,7 @@ fn kernel_seg_resources(graph: &crate::egir::types::EGraph) -> Option<Vec<Schedu
                 resources
                     .iter()
                     .map(|resource| ScheduledResource {
-                        resource: resource
-                            .resource
-                            .resource()
-                            .expect("planner received a pending Seg resource binding"),
+                        resource: resource.resource.0,
                         access: match resource.access {
                             SegResourceAccessKind::Read => ResourceAccess::Read,
                             SegResourceAccessKind::Write => ResourceAccess::Write,
@@ -1979,9 +1971,8 @@ fn graph_resources(
     declarations: &[crate::egir::program::SemanticResourceDecl],
 ) -> Vec<ScheduledResource> {
     let mut accesses: HashMap<ResourceId, ResourceAccess> = HashMap::new();
-    let mut insert = |reference: GraphResourceRef, access: ResourceAccess| {
-        let resource = reference.resource().expect("planner received a pending entry resource binding");
-        accesses.entry(resource).and_modify(|old| *old = old.merge(access)).or_insert(access);
+    let mut insert = |reference: SemanticResourceRef, access: ResourceAccess| {
+        accesses.entry(reference.0).and_modify(|old| *old = old.merge(access)).or_insert(access);
     };
 
     for declaration in declarations {
@@ -1990,7 +1981,7 @@ fn graph_resources(
             crate::interface::StorageRole::Output => ResourceAccess::Write,
             crate::interface::StorageRole::Intermediate => ResourceAccess::ReadWrite,
         };
-        insert(GraphResourceRef::Resource(declaration.resource.0), access);
+        insert(declaration.resource, access);
     }
 
     // A storage view reachable from an effect operand is conservatively a

@@ -190,10 +190,7 @@ pub(crate) fn read_resources(graph: &EGraph, se: &SideEffect) -> Vec<SegResource
             access: SegResourceAccessKind::Read,
         })
         .collect();
-    result.sort_by_key(|resource| match resource.resource {
-        super::program::GraphResourceRef::Binding(binding) => (0, binding.set, binding.binding),
-        super::program::GraphResourceRef::Resource(id) => (1, id.0, 0),
-    });
+    result.sort_by_key(|resource| resource.resource.0 .0);
     result
 }
 

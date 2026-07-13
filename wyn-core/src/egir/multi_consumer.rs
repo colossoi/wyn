@@ -12,9 +12,9 @@ use polytype::Type;
 
 use super::graph_ops;
 use super::program::{
-    CompilerResource, CompilerResourceKind, GraphResourceRef, LogicalSize, MaterializationId,
-    MaterializationRequirement, MaterializationSubstitution, ResourceId, ResourceOrigin,
-    SemanticDependencyKind, SemanticOpId, SemanticProgram, SemanticResourceDecl, SemanticResourceRef,
+    CompilerResource, CompilerResourceKind, LogicalSize, MaterializationId, MaterializationRequirement,
+    MaterializationSubstitution, ResourceId, ResourceOrigin, SemanticDependencyKind, SemanticOpId,
+    SemanticProgram, SemanticResourceDecl, SemanticResourceRef,
 };
 use super::types::{
     EGraph, EgirSoac, NodeId, PureOp, SegExtent, SegOpKind, SegPlacement, SegResourceAccess,
@@ -209,11 +209,7 @@ fn materialize_candidate(inner: &mut SemanticProgram, candidate: Candidate) {
         .resource_declarations
         .iter()
         .filter(|declaration| {
-            declaration.role == StorageRole::Input
-                || declaration
-                    .resource
-                    .resource()
-                    .is_some_and(|resource| dependency_resources.contains(&resource))
+            declaration.role == StorageRole::Input || dependency_resources.contains(&declaration.resource.0)
         })
         .cloned()
         .collect();
@@ -274,11 +270,11 @@ fn materialize_candidate(inner: &mut SemanticProgram, candidate: Candidate) {
         producer_effect.operand_nodes.extend(output_views.iter().copied());
         for &resource in &output_resources {
             resources.push(SegResourceAccess {
-                resource: GraphResourceRef::Resource(resource),
+                resource: SemanticResourceRef(resource),
                 access: SegResourceAccessKind::Write,
             });
         }
-        resources.sort_by_key(|access| access.resource.resource().map(|resource| resource.0));
+        resources.sort_by_key(|access| access.resource.0 .0);
     }
 
     // Rewire the source entry to read the shared storage views and remove the
@@ -422,26 +418,20 @@ fn dependency_resources(
                 }
             },
             |node| {
-                if let Some(resource) =
-                    graph_ops::extract_storage_view_source(graph, node).and_then(GraphResourceRef::resource)
-                {
-                    dependencies.insert(resource);
+                if let Some(resource) = graph_ops::extract_storage_view_source(graph, node) {
+                    dependencies.insert(resource.0);
                 }
             },
         );
         match &effect.kind {
             SideEffectKind::Soac(EgirSoac::Seg { resources, .. }) => {
-                dependencies.extend(resources.iter().filter_map(|access| access.resource.resource()));
+                dependencies.extend(resources.iter().map(|access| access.resource.0));
             }
             SideEffectKind::Soac(EgirSoac::Filter { output, .. }) => {
                 if let super::types::FilterOutput::Runtime { scratch, length } = output {
-                    if let Some(scratch) = scratch.resource() {
-                        dependencies.insert(scratch);
-                    }
+                    dependencies.insert(scratch.0);
                     if let super::types::RuntimeFilterLength::EntryOutput(length) = length {
-                        if let Some(length) = length.resource() {
-                            dependencies.insert(length);
-                        }
+                        dependencies.insert(length.0);
                     }
                 }
             }
@@ -469,12 +459,9 @@ fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]
                         {
                             input_array_types[input] = replacement.view_ty.clone();
                             input_elem_types[input] = replacement.elem_ty.clone();
-                            if !resources
-                                .iter()
-                                .any(|access| access.resource.resource() == Some(replacement.resource))
-                            {
+                            if !resources.iter().any(|access| access.resource.0 == replacement.resource) {
                                 resources.push(SegResourceAccess {
-                                    resource: GraphResourceRef::Resource(replacement.resource),
+                                    resource: SemanticResourceRef(replacement.resource),
                                     access: SegResourceAccessKind::Read,
                                 });
                             }
@@ -535,7 +522,7 @@ fn replace_space_nodes(space: &mut super::types::SegSpace, replacements: &[Input
         if let Some(replacement) = replacements.iter().find(|replacement| *node == replacement.project) {
             *node = replacement.view;
             if let SegExtent::ResourceLength { resource, .. } = extent {
-                *resource = GraphResourceRef::Resource(replacement.resource);
+                *resource = SemanticResourceRef(replacement.resource);
             }
         }
     }
@@ -555,7 +542,7 @@ fn size_for_space(space: &super::types::SegSpace, elem_ty: &Type<TypeName>) -> L
             elem_bytes: source_elem_bytes,
             ..
         }] => LogicalSize::LikeResource {
-            resource: resource.resource().expect("materialization requires normalized resources"),
+            resource: resource.0,
             elem_bytes,
             src_elem_bytes: *source_elem_bytes,
         },

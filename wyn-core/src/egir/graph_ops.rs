@@ -23,7 +23,8 @@ use crate::ssa::types::{ConstantValue, InstKind, ValueRef};
 use crate::BindingRef;
 
 use super::types::{
-    EGraph, ENode, EffectToken, EgirSoac, NodeId, PureOp, PureViewSource, SideEffect, SideEffectKind,
+    EGraph, ENode, EffectToken, EgirSoac, GraphResource, NodeId, PureOp, PureViewSource, SideEffect,
+    SideEffectKind,
 };
 
 // ---------------------------------------------------------------------------
@@ -34,7 +35,7 @@ use super::types::{
 /// shape (`PureOp::Uint(n.to_string())`) as `from_tlc` produces from
 /// `TermKind::IntLit` so hash-consing deduplicates across the two
 /// emission paths.
-pub fn intern_u32(graph: &mut EGraph, n: u32, span: Option<Span>) -> NodeId {
+pub fn intern_u32<R: GraphResource>(graph: &mut EGraph<R>, n: u32, span: Option<Span>) -> NodeId {
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     graph.intern_pure_with_span(PureOp::Uint(n.to_string()), smallvec![], u32_ty, span)
 }
@@ -44,13 +45,17 @@ pub fn intern_u32(graph: &mut EGraph, n: u32, span: Option<Span>) -> NodeId {
 /// already (e.g. carrying a reduce's neutral element across passes).
 /// For freshly-typed-out integer/float literals from terms, prefer the
 /// `PureOp::Uint`/`Int`/`Float` form via the other helpers.
-pub fn intern_constant(graph: &mut EGraph, value: ConstantValue, ty: Type<TypeName>) -> NodeId {
+pub fn intern_constant<R: GraphResource>(
+    graph: &mut EGraph<R>,
+    value: ConstantValue,
+    ty: Type<TypeName>,
+) -> NodeId {
     graph.intern_constant(value, ty)
 }
 
 /// Generic intrinsic call (`PureOp::Intrinsic` with `overload_idx: 0`).
-pub fn intern_intrinsic(
-    graph: &mut EGraph,
+pub fn intern_intrinsic<R: GraphResource>(
+    graph: &mut EGraph<R>,
     id: BuiltinId,
     operands: SmallVec<[NodeId; 4]>,
     ty: Type<TypeName>,
@@ -61,8 +66,8 @@ pub fn intern_intrinsic(
 
 /// Binary op (`PureOp::BinOp`). `op` is the operator string (`"+"`,
 /// `"-"`, etc.) — matches the convention `from_tlc` uses.
-pub fn intern_binop(
-    graph: &mut EGraph,
+pub fn intern_binop<R: GraphResource>(
+    graph: &mut EGraph<R>,
     op: &str,
     lhs: NodeId,
     rhs: NodeId,
@@ -75,7 +80,7 @@ pub fn intern_binop(
 /// `StorageView(Storage(br))` with the default
 /// `[0, _w_intrinsic_storage_len(set, binding)]` operand pair.
 pub fn intern_storage_view(
-    graph: &mut EGraph,
+    graph: &mut EGraph<BindingRef>,
     br: BindingRef,
     view_ty: Type<TypeName>,
     span: Option<Span>,
@@ -109,12 +114,15 @@ pub fn intern_resource_view(
     span: Option<Span>,
 ) -> NodeId {
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+    let resource = super::program::SemanticResourceRef(resource);
     let len = graph.intern_pure_with_span(PureOp::ResourceLen(resource), smallvec![], u32_ty, span);
     let zero = intern_u32(graph, 0, span);
-    let view_ty =
-        crate::types::view_array_of(&view_ty, Type::Constructed(TypeName::Resource(resource), vec![]));
+    let view_ty = crate::types::view_array_of(
+        &view_ty,
+        Type::Constructed(TypeName::Resource(resource.0), vec![]),
+    );
     graph.intern_pure_with_span(
-        PureOp::StorageView(PureViewSource::Resource(resource)),
+        PureOp::StorageView(PureViewSource::Storage(resource)),
         smallvec![zero, len],
         view_ty,
         span,
@@ -132,7 +140,9 @@ pub fn intern_chunked_resource_view(
     let view_ty =
         crate::types::view_array_of(&view_ty, Type::Constructed(TypeName::Resource(resource), vec![]));
     graph.intern_pure_with_span(
-        PureOp::StorageView(PureViewSource::Resource(resource)),
+        PureOp::StorageView(PureViewSource::Storage(super::program::SemanticResourceRef(
+            resource,
+        ))),
         smallvec![offset, len],
         view_ty,
         span,
@@ -141,20 +151,13 @@ pub fn intern_chunked_resource_view(
 
 pub fn intern_chunked_semantic_view(
     graph: &mut EGraph,
-    resource: super::program::GraphResourceRef,
+    resource: super::program::SemanticResourceRef,
     offset: NodeId,
     len: NodeId,
     view_ty: Type<TypeName>,
     span: Option<Span>,
 ) -> NodeId {
-    match resource {
-        super::program::GraphResourceRef::Binding(binding) => {
-            intern_chunked_storage_view(graph, binding, offset, len, view_ty, span)
-        }
-        super::program::GraphResourceRef::Resource(resource) => {
-            intern_chunked_resource_view(graph, resource, offset, len, view_ty, span)
-        }
-    }
+    intern_chunked_resource_view(graph, resource.0, offset, len, view_ty, span)
 }
 
 /// A workgroup-shared array view: `StorageView(Workgroup{id, count})` with
@@ -162,8 +165,8 @@ pub fn intern_chunked_semantic_view(
 /// backends recover the element type from it to declare a module-scope
 /// `array<elem, count>` in workgroup storage. Indexed with the same
 /// `ViewIndex` + `Load`/`Store` machinery as storage views.
-pub fn emit_workgroup_view(
-    graph: &mut EGraph,
+pub fn emit_workgroup_view<R: GraphResource>(
+    graph: &mut EGraph<R>,
     id: u32,
     count: u32,
     view_ty: Type<TypeName>,
@@ -185,7 +188,7 @@ pub fn emit_workgroup_view(
 /// Builds a chunked sub-view of a larger storage buffer (phase1 of
 /// parallel reduce/scan).
 pub fn intern_chunked_storage_view(
-    graph: &mut EGraph,
+    graph: &mut EGraph<BindingRef>,
     br: BindingRef,
     offset: NodeId,
     len: NodeId,
@@ -208,7 +211,7 @@ pub fn intern_chunked_storage_view(
 /// Find the next unused `EffectToken` by scanning all skeleton blocks.
 /// Mirrors (and supersedes) `soac_expand::next_effect_token` and the
 /// `egir::parallelize::max_effect` helper.
-pub fn next_effect_token(graph: &EGraph) -> u32 {
+pub fn next_effect_token<R>(graph: &EGraph<R>) -> u32 {
     let mut max = 0u32;
     for (_, block) in &graph.skeleton.blocks {
         for se in &block.side_effects {
@@ -229,8 +232,8 @@ pub fn alloc_effect(next_effect: &mut u32) -> EffectToken {
 /// Emit a `Store` side-effect in `block`. `place_nid` must be a place-
 /// producing pure op (`ViewIndex`, `OutputSlot`). Returns the produced
 /// effect-out token.
-pub fn emit_store(
-    graph: &mut EGraph,
+pub fn emit_store<R: GraphResource>(
+    graph: &mut EGraph<R>,
     block: BlockId,
     place_nid: NodeId,
     value_nid: NodeId,
@@ -257,7 +260,11 @@ pub fn emit_store(
 /// in `block`. No operands or result; the effect token keeps it ordered
 /// against the workgroup-shared loads/stores it synchronizes. Returns the
 /// produced effect-out token.
-pub fn emit_workgroup_barrier(graph: &mut EGraph, block: BlockId, next_effect: &mut u32) -> EffectToken {
+pub fn emit_workgroup_barrier<R: GraphResource>(
+    graph: &mut EGraph<R>,
+    block: BlockId,
+    next_effect: &mut u32,
+) -> EffectToken {
     let effect_in = EffectToken(0); // placeholder; real chain is built by elaborate
     let effect_out = alloc_effect(next_effect);
     graph.skeleton.blocks[block].side_effects.push(SideEffect {
@@ -273,8 +280,8 @@ pub fn emit_workgroup_barrier(graph: &mut EGraph, block: BlockId, next_effect: &
 
 /// Emit a store through a `StorageView` at `index_nid`. Builds the
 /// `ViewIndex` pure node and the `Store` side-effect.
-pub fn emit_storage_store(
-    graph: &mut EGraph,
+pub fn emit_storage_store<R: GraphResource>(
+    graph: &mut EGraph<R>,
     block: BlockId,
     view_nid: NodeId,
     index_nid: NodeId,
@@ -290,8 +297,8 @@ pub fn emit_storage_store(
 
 /// Emit a `Load` of `place_nid` (a place-producing pure op like `ViewIndex`)
 /// in `block`; returns the loaded-value node (typed `elem_ty`).
-pub fn emit_load(
-    graph: &mut EGraph,
+pub fn emit_load<R: GraphResource>(
+    graph: &mut EGraph<R>,
     block: BlockId,
     place_nid: NodeId,
     elem_ty: Type<TypeName>,
@@ -319,8 +326,8 @@ pub fn emit_load(
 /// element-level addressing, or to `emit_load` / `emit_store` for whole-value
 /// access. The place's element type is `elem_ty`; for an `[T;N]` allocation
 /// `Load` returns the whole array and `PlaceIndex` produces `T`-typed sub-places.
-pub fn emit_alloca(
-    graph: &mut EGraph,
+pub fn emit_alloca<R: GraphResource>(
+    graph: &mut EGraph<R>,
     block: BlockId,
     elem_ty: Type<TypeName>,
     next_effect: &mut u32,
@@ -349,8 +356,8 @@ pub fn emit_alloca(
 /// sub-place addressing one element. The parent place can be an `Alloca`'d
 /// array or any other place-producing node; the result has element type
 /// `elem_ty` (e.g. `T` for an `[T;N]` parent).
-pub fn intern_place_index(
-    graph: &mut EGraph,
+pub fn intern_place_index<R: GraphResource>(
+    graph: &mut EGraph<R>,
     parent_place_nid: NodeId,
     index_nid: NodeId,
     elem_ty: Type<TypeName>,
@@ -367,8 +374,8 @@ pub fn intern_place_index(
 /// Emit `place[index] = value` as a `PlaceIndex` sub-place + `Store` in
 /// `block`. Companion to `emit_storage_store` for function-local Alloca'd
 /// arrays — no whole-array `Load`/`Store` round-trip.
-pub fn emit_place_index_store(
-    graph: &mut EGraph,
+pub fn emit_place_index_store<R: GraphResource>(
+    graph: &mut EGraph<R>,
     block: BlockId,
     parent_place_nid: NodeId,
     index_nid: NodeId,
@@ -383,8 +390,8 @@ pub fn emit_place_index_store(
 
 /// Emit `view[index]` as a `ViewIndex` place + `Load` in `block`; returns the
 /// loaded value. Companion to `emit_storage_store`.
-pub fn emit_view_load(
-    graph: &mut EGraph,
+pub fn emit_view_load<R: GraphResource>(
+    graph: &mut EGraph<R>,
     block: BlockId,
     view_nid: NodeId,
     index_nid: NodeId,
@@ -405,10 +412,10 @@ pub fn emit_view_load(
 /// the given operands; returns the allocated `result_nid` (typed as
 /// `result_ty`, which the SOAC's lowering recovers from
 /// `graph.types[result_nid]`).
-pub fn emit_pending_soac(
-    graph: &mut EGraph,
+pub fn emit_pending_soac<R: GraphResource>(
+    graph: &mut EGraph<R>,
     block: BlockId,
-    soac: EgirSoac,
+    soac: EgirSoac<R>,
     operands: SmallVec<[NodeId; 4]>,
     result_ty: Type<TypeName>,
     next_effect: &mut u32,
@@ -436,16 +443,12 @@ pub fn emit_pending_soac(
 pub fn extract_storage_view_source(
     graph: &EGraph,
     view_nid: NodeId,
-) -> Option<super::program::GraphResourceRef> {
+) -> Option<super::program::SemanticResourceRef> {
     match &graph.nodes[view_nid] {
         ENode::Pure {
-            op: PureOp::StorageView(PureViewSource::Storage(br)),
+            op: PureOp::StorageView(PureViewSource::Storage(resource)),
             ..
-        } => Some(super::program::GraphResourceRef::Binding(*br)),
-        ENode::Pure {
-            op: PureOp::StorageView(PureViewSource::Resource(resource)),
-            ..
-        } => Some(super::program::GraphResourceRef::Resource(*resource)),
+        } => Some(*resource),
         _ => None,
     }
 }
@@ -453,7 +456,7 @@ pub fn extract_storage_view_source(
 /// If `nid` is a `PureOp::ArrayRange`, return `(start, len, step?)`
 /// NodeIds. Otherwise `None`.
 pub fn extract_array_range_operands(
-    graph: &EGraph,
+    graph: &EGraph<impl Sized>,
     nid: NodeId,
 ) -> Option<(NodeId, NodeId, Option<NodeId>)> {
     match &graph.nodes[nid] {
@@ -482,7 +485,11 @@ pub fn extract_array_range_operands(
 /// Only pure nodes and constants are cloned; encountering a
 /// `SideEffectResult` or a `BlockParam` returns `Err` because those
 /// reference cross-block / cross-effect data that doesn't translate.
-pub fn clone_pure_subgraph(src: &EGraph, dst: &mut EGraph, root: NodeId) -> Result<NodeId, String> {
+pub fn clone_pure_subgraph<R: GraphResource>(
+    src: &EGraph<R>,
+    dst: &mut EGraph<R>,
+    root: NodeId,
+) -> Result<NodeId, String> {
     let mut memo: LookupMap<NodeId, NodeId> = LookupMap::new();
     clone_inner(src, dst, root, &mut memo)
 }
@@ -492,9 +499,9 @@ pub fn clone_pure_subgraph(src: &EGraph, dst: &mut EGraph, root: NodeId) -> Resu
 /// memo, so a reference to `from` in `src` becomes `to` in `dst`. Lets a value
 /// rooted at a non-pure node (e.g. a SOAC result) be re-expressed over a
 /// replacement `dst` value without rebuilding its projection structure by hand.
-pub fn clone_pure_subgraph_substituting(
-    src: &EGraph,
-    dst: &mut EGraph,
+pub fn clone_pure_subgraph_substituting<R: GraphResource>(
+    src: &EGraph<R>,
+    dst: &mut EGraph<R>,
     root: NodeId,
     subs: &[(NodeId, NodeId)],
 ) -> Result<NodeId, String> {
@@ -502,9 +509,9 @@ pub fn clone_pure_subgraph_substituting(
     clone_inner(src, dst, root, &mut memo)
 }
 
-fn clone_inner(
-    src: &EGraph,
-    dst: &mut EGraph,
+fn clone_inner<R: GraphResource>(
+    src: &EGraph<R>,
+    dst: &mut EGraph<R>,
     nid: NodeId,
     memo: &mut LookupMap<NodeId, NodeId>,
 ) -> Result<NodeId, String> {
@@ -536,7 +543,7 @@ fn clone_inner(
 /// node operands, side-effect operands, SOAC captures, and terminator args. The
 /// `old` node's definition is left intact (now unreferenced). Fusion uses this
 /// to rewire the results of a producer/sibling op onto the fused op's result.
-pub fn replace_all_references(graph: &mut EGraph, old: NodeId, new: NodeId) {
+pub fn replace_all_references<R: GraphResource>(graph: &mut EGraph<R>, old: NodeId, new: NodeId) {
     use super::types::SkeletonTerminator;
     if old == new {
         return;
