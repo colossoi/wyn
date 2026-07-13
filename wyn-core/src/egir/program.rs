@@ -766,7 +766,10 @@ pub fn physicalize_resource_references(
     Ok(())
 }
 
-fn physicalize_graph_resources(graph: &mut EGraph, bindings: &PhysicalResourceTable) -> Result<(), String> {
+pub(crate) fn physicalize_graph_resources(
+    graph: &mut EGraph,
+    bindings: &PhysicalResourceTable,
+) -> Result<(), String> {
     let pure_nodes = graph.nodes.keys().collect::<Vec<_>>();
     let mut missing = None;
     for node in pure_nodes {
@@ -901,7 +904,7 @@ fn physicalize_structural_types(
     Ok(())
 }
 
-fn physicalize_type_resources(ty: &mut Type<TypeName>, bindings: &PhysicalResourceTable) {
+pub(crate) fn physicalize_type_resources(ty: &mut Type<TypeName>, bindings: &PhysicalResourceTable) {
     let Type::Constructed(name, arguments) = ty else {
         return;
     };
@@ -1740,6 +1743,86 @@ pub struct SemanticEntry {
     pub output_routes: Vec<OutputRoute>,
 }
 
+/// Closed graph and ABI recipe owned by a planned physical kernel. It is
+/// intentionally distinct from `SemanticEntry`: once constructed it carries
+/// no semantic provenance tag and cannot re-enter semantic optimization or
+/// scheduling.
+#[derive(Clone, Debug)]
+pub struct PlannedKernelBody {
+    pub name: String,
+    pub span: Span,
+    pub execution_model: ExecutionModel,
+    pub inputs: Vec<EntryInput>,
+    pub outputs: Vec<EntryOutput>,
+    pub resource_declarations: Vec<SemanticResourceDecl>,
+    pub params: Vec<(Type<TypeName>, String)>,
+    pub return_ty: Type<TypeName>,
+    pub graph: EGraph,
+    pub control_headers: LookupMap<BlockId, ControlHeader>,
+    pub aliases: LookupMap<NodeId, NodeId>,
+    pub output_routes: Vec<OutputRoute>,
+}
+
+impl PlannedKernelBody {
+    /// Project a complete semantic entry into fresh graph identities. This is
+    /// the only whole-entry admission path into a kernel plan.
+    pub fn from_semantic(entry: &SemanticEntry) -> Result<Self, String> {
+        let projection = super::graph_projector::GraphProjector::new(&entry.graph, &entry.control_headers)
+            .all_with_values(entry.output_routes.iter().map(|route| route.source.value).collect())?;
+        let output_routes = entry
+            .output_routes
+            .iter()
+            .map(|route| {
+                Ok(OutputRoute {
+                    source: SlotSource {
+                        block: projection
+                            .block(route.source.block)
+                            .ok_or_else(|| "planned route block was not projected".to_string())?,
+                        value: projection
+                            .node(route.source.value)
+                            .ok_or_else(|| "planned route value was not projected".to_string())?,
+                    },
+                    slot: route.slot,
+                    writers: route
+                        .writers
+                        .iter()
+                        .filter_map(|writer| match writer {
+                            OutputWriter::Value(value) => projection.node(*value).map(OutputWriter::Value),
+                            OutputWriter::Effect(effect) => {
+                                projection.effect(*effect).map(OutputWriter::Effect)
+                            }
+                        })
+                        .collect(),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(Self {
+            name: entry.name.clone(),
+            span: entry.span,
+            execution_model: entry.execution_model.clone(),
+            inputs: entry.inputs.clone(),
+            outputs: entry.outputs.clone(),
+            resource_declarations: entry.resource_declarations.clone(),
+            params: entry.params.clone(),
+            return_ty: entry.return_ty.clone(),
+            aliases: projection.remap_aliases(&entry.aliases),
+            graph: projection.graph,
+            control_headers: projection.control_headers,
+            output_routes,
+        })
+    }
+
+    pub fn publication(&self) -> PlannedEntryPublication {
+        PlannedEntryPublication {
+            name: self.name.clone(),
+            execution_model: self.execution_model.clone(),
+            inputs: self.inputs.clone(),
+            outputs: self.outputs.clone(),
+            resources: self.resource_declarations.clone(),
+        }
+    }
+}
+
 impl SemanticEntry {
     pub fn new(
         origin: interface::EntryOrigin,
@@ -1845,6 +1928,25 @@ impl MaterializationRequirement {
             outputs: Vec::new(),
             resources: self.resource_declarations.clone(),
         }
+    }
+
+    pub fn planned_body(&self) -> Result<PlannedKernelBody, String> {
+        let projection =
+            super::graph_projector::GraphProjector::new(&self.graph, &self.control_headers).all()?;
+        Ok(PlannedKernelBody {
+            name: self.name.clone(),
+            span: self.span,
+            execution_model: self.execution_model.clone(),
+            inputs: self.inputs.clone(),
+            outputs: Vec::new(),
+            resource_declarations: self.resource_declarations.clone(),
+            params: self.params.clone(),
+            return_ty: self.return_ty.clone(),
+            aliases: projection.remap_aliases(&self.aliases),
+            graph: projection.graph,
+            control_headers: projection.control_headers,
+            output_routes: Vec::new(),
+        })
     }
 }
 
@@ -2034,26 +2136,10 @@ impl PhysicalProgram {
         plan: ValidatedKernelPlan,
         physical_resources: PhysicalResourceTable,
     ) -> Result<Self, String> {
-        let mut entry_points = program
-            .entry_points
-            .into_iter()
-            .map(|entry| {
-                super::builder::PhysicalEntryBuilder::from_planned_entry(entry, &physical_resources).build()
-            })
+        let entry_points = plan
+            .physical_bodies()
+            .map(|body| super::builder::PhysicalEntryBuilder::new(body, &physical_resources).build())
             .collect::<Result<Vec<_>, _>>()?;
-        entry_points.extend(
-            program
-                .materializations
-                .into_iter()
-                .map(|requirement| {
-                    super::builder::PhysicalEntryBuilder::from_materialization(
-                        requirement,
-                        &physical_resources,
-                    )
-                    .build()
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        );
         Ok(Self {
             functions: program.functions,
             externs: program.externs,

@@ -1,4 +1,4 @@
-//! Programmatic `SemanticEntry` synthesis API used by the EGIR-side
+//! Programmatic planned-kernel synthesis API used by the EGIR-side
 //! parallelization phases that synthesize extra compute entries (phase
 //! 2 / phase 3 of the Screma transform).
 
@@ -14,20 +14,18 @@ use crate::{interface, ResourceId};
 
 use super::graph_ops;
 use super::program::{
-    MaterializationRequirement, PhysicalEntry, PhysicalResourceTable, SemanticEntry, SemanticResourceDecl,
-    SemanticResourceRef,
+    PhysicalEntry, PhysicalResourceTable, PlannedKernelBody, SemanticResourceDecl, SemanticResourceRef,
 };
 use super::types::{EGraph, EgirSoac, NodeId, SkeletonTerminator, SoacDestination};
 use crate::ssa::types::{EntryInput, EntryOutput};
 
-/// Build a synthesized `SemanticEntry` programmatically. Mirrors the
+/// Build a closed `PlannedKernelBody` programmatically. Mirrors the
 /// primitive operations `from_tlc::Converter` exposes, but holds no
 /// TLC-side state.
 pub struct EntryBuilder {
     graph: EGraph,
     control_headers: LookupMap<BlockId, ControlHeader>,
     current_block: BlockId,
-    origin: interface::EntryOrigin,
     name: String,
     span: Span,
     execution_model: ExecutionModel,
@@ -43,13 +41,8 @@ pub struct EntryBuilder {
 /// semantic projection or a closed materialization recipe rather than
 /// exposing a partially initialized physical record.
 pub struct PhysicalEntryBuilder<'a> {
-    recipe: PlannedPhysicalEntry,
+    body: &'a PlannedKernelBody,
     resources: &'a PhysicalResourceTable,
-}
-
-enum PlannedPhysicalEntry {
-    Semantic(SemanticEntry),
-    Materialization(MaterializationRequirement),
 }
 
 struct PhysicalEntryDraft {
@@ -68,54 +61,39 @@ struct PhysicalEntryDraft {
 }
 
 impl<'a> PhysicalEntryBuilder<'a> {
-    pub fn from_planned_entry(entry: SemanticEntry, resources: &'a PhysicalResourceTable) -> Self {
-        Self {
-            recipe: PlannedPhysicalEntry::Semantic(entry),
-            resources,
-        }
-    }
-
-    pub fn from_materialization(
-        requirement: MaterializationRequirement,
-        resources: &'a PhysicalResourceTable,
-    ) -> Self {
-        Self {
-            recipe: PlannedPhysicalEntry::Materialization(requirement),
-            resources,
-        }
+    pub fn new(body: &'a PlannedKernelBody, resources: &'a PhysicalResourceTable) -> Self {
+        Self { body, resources }
     }
 
     pub fn build(self) -> Result<PhysicalEntry, String> {
-        let draft = match self.recipe {
-            PlannedPhysicalEntry::Semantic(entry) => PhysicalEntryDraft {
-                name: entry.name,
-                span: entry.span,
-                execution_model: entry.execution_model,
-                inputs: entry.inputs,
-                outputs: entry.outputs,
-                resources: entry.resource_declarations,
-                params: entry.params,
-                return_ty: entry.return_ty,
-                graph: entry.graph,
-                control_headers: entry.control_headers,
-                aliases: entry.aliases,
-                output_routes: entry.output_routes,
-            },
-            PlannedPhysicalEntry::Materialization(requirement) => PhysicalEntryDraft {
-                name: requirement.name,
-                span: requirement.span,
-                execution_model: requirement.execution_model,
-                inputs: requirement.inputs,
-                outputs: Vec::new(),
-                resources: requirement.resource_declarations,
-                params: requirement.params,
-                return_ty: requirement.return_ty,
-                graph: requirement.graph,
-                control_headers: requirement.control_headers,
-                aliases: requirement.aliases,
-                output_routes: Vec::new(),
-            },
+        let mut draft = PhysicalEntryDraft {
+            name: self.body.name.clone(),
+            span: self.body.span,
+            execution_model: self.body.execution_model.clone(),
+            inputs: self.body.inputs.clone(),
+            outputs: self.body.outputs.clone(),
+            resources: self.body.resource_declarations.clone(),
+            params: self.body.params.clone(),
+            return_ty: self.body.return_ty.clone(),
+            graph: self.body.graph.clone(),
+            control_headers: self.body.control_headers.clone(),
+            aliases: self.body.aliases.clone(),
+            output_routes: self.body.output_routes.clone(),
         };
+        super::program::physicalize_graph_resources(&mut draft.graph, self.resources)?;
+        for input in &mut draft.inputs {
+            super::program::physicalize_type_resources(&mut input.ty, self.resources);
+        }
+        for output in &mut draft.outputs {
+            super::program::physicalize_type_resources(&mut output.ty, self.resources);
+        }
+        for (ty, _) in &mut draft.params {
+            super::program::physicalize_type_resources(ty, self.resources);
+        }
+        super::program::physicalize_type_resources(&mut draft.return_ty, self.resources);
+        for declaration in &mut draft.resources {
+            super::program::physicalize_type_resources(&mut declaration.elem_ty, self.resources);
+        }
         if draft.name.is_empty() {
             return Err("physical entry has no publication name".into());
         }
@@ -171,14 +149,13 @@ impl<'a> PhysicalEntryBuilder<'a> {
 impl EntryBuilder {
     /// New compute-shader entry. Always returns Unit; effectful writes
     /// happen via `emit_storage_store`.
-    pub fn new_compute(origin: interface::EntryOrigin, name: String, local_size: (u32, u32, u32)) -> Self {
+    pub fn new_compute(name: String, local_size: (u32, u32, u32)) -> Self {
         let graph = EGraph::new();
         let entry = graph.skeleton.entry;
         EntryBuilder {
             graph,
             control_headers: LookupMap::new(),
             current_block: entry,
-            origin,
             name,
             span: Span::new(0, 0, 0, 0),
             execution_model: ExecutionModel::Compute { local_size },
@@ -453,22 +430,23 @@ impl EntryBuilder {
     }
 
     /// Finalize: set the entry block's terminator to `Return(None)` and
-    /// hand back an `SemanticEntry`.
-    pub fn build(mut self) -> SemanticEntry {
+    /// hand back a closed planned-kernel body.
+    pub fn build(mut self) -> PlannedKernelBody {
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Return(None);
-        SemanticEntry::new_with_resources(
-            self.origin,
-            self.name,
-            self.span,
-            self.execution_model,
-            self.inputs,
-            self.outputs,
-            self.resource_declarations,
-            self.params,
-            self.return_ty,
-            self.graph,
-            self.control_headers,
-        )
+        PlannedKernelBody {
+            name: self.name,
+            span: self.span,
+            execution_model: self.execution_model,
+            inputs: self.inputs,
+            outputs: self.outputs,
+            resource_declarations: self.resource_declarations,
+            params: self.params,
+            return_ty: self.return_ty,
+            graph: self.graph,
+            control_headers: self.control_headers,
+            aliases: LookupMap::new(),
+            output_routes: Vec::new(),
+        }
     }
 }
 

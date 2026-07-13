@@ -333,22 +333,15 @@ pub struct EntryDecl {
 
 /// Provenance and semantic role of an entry point.
 ///
-/// Source entries normally retain `Source`; entries split out or rewritten as
-/// semantically distinct compiler phases receive a precise variant at the
-/// point where that happens.
+/// Source entries retain `Source`; TLC-originated producer entries carry the
+/// only remaining semantic provenance. Target-generated phases live solely in
+/// the kernel plan and therefore cannot acquire an `EntryOrigin`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EntryOrigin {
     #[default]
     Source,
     ScalarPrepass,
     GatherPrepass,
-    /// A compiler-created runtime-filter helper entry. The concrete phase is
-    /// authoritative on the entry's `EgirSoac::Filter` side effect.
-    RuntimeFilter,
-    ReducePhase2,
-    ScanPhase2,
-    ScanPhase3,
-    OutputDomainSplit,
 }
 
 // ---------------------------------------------------------------------------
