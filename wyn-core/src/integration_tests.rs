@@ -632,7 +632,7 @@ entry e() [4]i32 =
         "materialization must not be synthesized into the semantic entry arena"
     );
     let requirement = &allocated.inner.materializations[0];
-    assert_eq!(requirement.name, "e_materialize_shared");
+    assert_eq!(requirement.entry.name, "e_materialize_shared");
     assert_eq!(requirement.substitutions.len(), 1);
     assert_eq!(requirement.substitutions[0].resource.0, shared_resource);
     assert_eq!(requirement.substitutions[0].consumers.len(), 1);
@@ -1408,7 +1408,7 @@ entry add_sum(xs: []i32) []i32 =
         panic!("scalar prepass producer must be a typed prepass requirement")
     };
     let producer = &allocated.inner.prepasses[producer_id.0 as usize];
-    assert!(producer.body.name.starts_with("add_sum_prepass_"));
+    assert!(producer.entry.name.starts_with("add_sum_prepass_"));
     assert_eq!(flow.consumers.len(), 1);
     assert_eq!(
         allocated.inner.entry_points[match flow.consumers[0] {

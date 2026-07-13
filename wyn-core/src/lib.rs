@@ -1506,7 +1506,7 @@ pub struct SsaConverted {
     pub ssa: ssa::types::Program,
     pub pipeline: pipeline_descriptor::PipelineDescriptor,
     pub profile: LoweringProfile,
-    pub kernel_plan: egir::parallelize::schedule::KernelPlan,
+    pub kernel_plan: egir::parallelize::schedule::PublishedKernelPlan,
 }
 
 impl SsaConverted {

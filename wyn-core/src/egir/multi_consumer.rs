@@ -225,25 +225,33 @@ fn materialize_candidate(inner: &mut SemanticProgram, candidate: Candidate) {
     let mut producer = MaterializationRequirement {
         id: MaterializationId(inner.materializations.len() as u32),
         producer: candidate.id,
-        name: fresh_entry_name(inner, &format!("{}_materialize_shared", entry.name)),
-        span: entry.span,
-        execution_model: entry.execution_model.clone(),
-        inputs: entry.inputs.clone(),
-        resource_declarations: producer_storage,
-        params: entry.params.clone(),
-        return_ty: Type::Constructed(TypeName::Unit, vec![]),
-        graph: projection.graph,
-        control_headers: projection.control_headers,
-        aliases: producer_aliases,
+        entry: super::program::SemanticEntry {
+            name: fresh_entry_name(inner, &format!("{}_materialize_shared", entry.name)),
+            span: entry.span,
+            execution_model: entry.execution_model.clone(),
+            inputs: entry.inputs.clone(),
+            outputs: Vec::new(),
+            resource_abi: super::program::EntryResourceAbi {
+                inputs: entry.resource_abi.inputs.clone(),
+                outputs: Vec::new(),
+            },
+            resource_declarations: producer_storage,
+            params: entry.params.clone(),
+            return_ty: Type::Constructed(TypeName::Unit, vec![]),
+            graph: projection.graph,
+            control_headers: projection.control_headers,
+            aliases: producer_aliases,
+            output_routes: Vec::new(),
+        },
         substitutions: Vec::new(),
     };
     let producer_owner = candidate.id;
-    let producer_graph = &mut producer.graph;
+    let producer_graph = &mut producer.entry.graph;
     let mut output_views = Vec::new();
     for ((&resource, elem_ty), size) in output_resources.iter().zip(map_output_elem_types).zip(&sizes) {
         let view = graph_ops::intern_resource_view(producer_graph, resource, elem_ty.clone(), None);
         output_views.push(view);
-        producer.resource_declarations.push(SemanticResourceDecl {
+        producer.entry.resource_declarations.push(SemanticResourceDecl {
             resource: SemanticResourceRef(resource),
             role: StorageRole::Output,
             elem_ty: elem_ty.clone(),
@@ -553,7 +561,7 @@ fn size_for_space(space: &super::types::SegSpace, elem_ty: &Type<TypeName>) -> L
 fn fresh_entry_name(inner: &SemanticProgram, base: &str) -> String {
     let available = |name: &str| {
         inner.entry_points.iter().all(|entry| entry.name != name)
-            && inner.materializations.iter().all(|requirement| requirement.name != name)
+            && inner.materializations.iter().all(|requirement| requirement.entry.name != name)
     };
     if available(base) {
         return base.to_string();

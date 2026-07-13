@@ -1,29 +1,16 @@
-//! Programmatic planned-kernel synthesis API used by the EGIR-side
-//! parallelization phases that synthesize extra compute entries (phase
-//! 2 / phase 3 of the Screma transform).
-
-use crate::LookupMap;
-
-use polytype::Type;
-use smallvec::smallvec;
+//! Focused construction API for planner-generated kernel entries.
 
 use crate::ast::{Span, TypeName};
 use crate::ssa::framework::BlockId;
-use crate::ssa::types::{ConstantValue, ControlHeader, ExecutionModel};
-use crate::{interface, ResourceId};
+use crate::ssa::types::{ControlHeader, EntryInput, EntryOutput, ExecutionModel};
+use crate::{interface, LookupMap, ResourceId};
+use polytype::Type;
+use smallvec::smallvec;
 
 use super::graph_ops;
-use super::parallelize::schedule::KernelPhase;
-use super::program::{
-    KernelDraft, KernelGraphRecipe, PhysicalEntry, PhysicalResourceTable, PlannedEntryPublication,
-    SemanticResourceDecl, SemanticResourceRef,
-};
+use super::program::{LogicalSize, PlannedEntry, SemanticResourceDecl, SemanticResourceRef};
 use super::types::{EGraph, EgirSoac, NodeId, SkeletonTerminator, SoacDestination};
-use crate::ssa::types::{EntryInput, EntryOutput};
 
-/// Build an ephemeral `KernelDraft` programmatically. Mirrors the
-/// primitive operations `from_tlc::Converter` exposes, but holds no
-/// TLC-side state.
 pub struct EntryBuilder {
     graph: EGraph,
     control_headers: LookupMap<BlockId, ControlHeader>,
@@ -39,148 +26,14 @@ pub struct EntryBuilder {
     next_effect: u32,
 }
 
-/// Commit builder for a fully planned physical entry. It consumes either a
-/// semantic projection or a closed materialization recipe rather than
-/// exposing a partially initialized physical record.
-pub struct PhysicalEntryBuilder<'a> {
-    phase: &'a KernelPhase,
-    publication: &'a PlannedEntryPublication,
-    resources: &'a PhysicalResourceTable,
-}
-
-impl<'a> PhysicalEntryBuilder<'a> {
-    pub fn new(
-        phase: &'a KernelPhase,
-        publication: &'a PlannedEntryPublication,
-        resources: &'a PhysicalResourceTable,
-    ) -> Self {
-        Self {
-            phase,
-            publication,
-            resources,
-        }
-    }
-
-    pub fn build(self) -> Result<PhysicalEntry, String> {
-        let recipe = self
-            .phase
-            .recipe
-            .as_ref()
-            .ok_or_else(|| format!("kernel `{}` has no construction recipe", self.phase.entry_point))?;
-        let KernelGraphRecipe {
-            span,
-            mut params,
-            mut return_ty,
-            graph,
-            control_headers,
-            aliases,
-            output_routes,
-        } = recipe.graph().clone();
-        let mut inputs = self.publication.inputs.clone();
-        let mut outputs = self.publication.outputs.clone();
-        let mut declarations = self.publication.resources.clone();
-        let (graph, node_map, block_map) =
-            super::program::physicalize_graph_resources(graph, self.resources)?;
-        let control_headers = control_headers
-            .into_iter()
-            .map(|(block, header)| {
-                let block = block_map[&block];
-                let header = header.remap(&|target| block_map[&target]);
-                (block, header)
-            })
-            .collect();
-        let aliases = aliases.into_iter().map(|(from, to)| (node_map[&from], node_map[&to])).collect();
-        let output_routes = output_routes
-            .into_iter()
-            .map(|route| super::program::OutputRoute {
-                source: super::program::SlotSource {
-                    block: block_map[&route.source.block],
-                    value: node_map[&route.source.value],
-                },
-                slot: route.slot,
-                writers: route
-                    .writers
-                    .into_iter()
-                    .map(|writer| match writer {
-                        super::program::OutputWriter::Value(value) => {
-                            super::program::OutputWriter::Value(node_map[&value])
-                        }
-                        super::program::OutputWriter::Effect(effect) => {
-                            super::program::OutputWriter::Effect(effect)
-                        }
-                    })
-                    .collect(),
-            })
-            .collect::<Vec<_>>();
-        for input in &mut inputs {
-            super::program::physicalize_type_resources(&mut input.ty, self.resources);
-        }
-        for output in &mut outputs {
-            super::program::physicalize_type_resources(&mut output.ty, self.resources);
-        }
-        for (ty, _) in &mut params {
-            super::program::physicalize_type_resources(ty, self.resources);
-        }
-        super::program::physicalize_type_resources(&mut return_ty, self.resources);
-        for declaration in &mut declarations {
-            super::program::physicalize_type_resources(&mut declaration.elem_ty, self.resources);
-        }
-        if self.phase.entry_point.is_empty() {
-            return Err("physical entry has no publication name".into());
-        }
-        for route in &output_routes {
-            if route.slot.0 >= outputs.len() {
-                return Err(format!(
-                    "physical entry `{}` routes invalid output slot {}",
-                    self.phase.entry_point, route.slot.0
-                ));
-            }
-        }
-        let storage_bindings = declarations
-            .into_iter()
-            .map(|declaration| {
-                let resource = declaration.resource.0;
-                let binding = self.resources.binding(resource).ok_or_else(|| {
-                    format!(
-                        "physical entry `{}` references missing resource {:?}",
-                        self.phase.entry_point, resource
-                    )
-                })?;
-                Ok(interface::StorageBindingDecl {
-                    binding,
-                    role: declaration.role,
-                    elem_ty: declaration.elem_ty,
-                    length: super::program::buffer_len(&declaration.size, self.resources),
-                })
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        Ok(PhysicalEntry {
-            name: self.phase.entry_point.clone(),
-            span,
-            execution_model: self.publication.execution_model.clone(),
-            inputs,
-            outputs,
-            storage_bindings,
-            params,
-            return_ty,
-            graph,
-            control_headers,
-            aliases,
-            output_routes,
-        })
-    }
-}
-
 impl EntryBuilder {
-    /// New compute-shader entry. Always returns Unit; effectful writes
-    /// happen via `emit_storage_store`.
     pub fn new_compute(name: String, local_size: (u32, u32, u32)) -> Self {
         let graph = EGraph::new();
-        let entry = graph.skeleton.entry;
-        EntryBuilder {
+        let current_block = graph.skeleton.entry;
+        Self {
             graph,
             control_headers: LookupMap::new(),
-            current_block: entry,
+            current_block,
             name,
             span: Span::new(0, 0, 0, 0),
             execution_model: ExecutionModel::Compute { local_size },
@@ -193,201 +46,86 @@ impl EntryBuilder {
         }
     }
 
-    // ---- Storage interface declarations ----------------------------------
-
-    pub fn declare_intermediate_storage(&mut self, resource: ResourceId, elem_ty: Type<TypeName>) {
-        self.declare_intermediate_storage_sized(
-            resource,
+    fn declare(
+        &mut self,
+        resource: ResourceId,
+        role: interface::StorageRole,
+        elem_ty: Type<TypeName>,
+        size: LogicalSize,
+    ) {
+        self.resource_declarations.push(SemanticResourceDecl {
+            resource: SemanticResourceRef(resource),
+            role,
             elem_ty,
-            super::program::LogicalSize::Unspecified,
-        );
+            size,
+        });
     }
 
     pub fn declare_intermediate_storage_sized(
         &mut self,
         resource: ResourceId,
         elem_ty: Type<TypeName>,
-        size: super::program::LogicalSize,
+        size: LogicalSize,
     ) {
-        self.resource_declarations.push(SemanticResourceDecl {
-            resource: SemanticResourceRef(resource),
-            role: interface::StorageRole::Intermediate,
-            elem_ty,
-            size,
-        });
-    }
-
-    pub fn declare_intermediate_resource(
-        &mut self,
-        resource: ResourceId,
-        elem_ty: Type<TypeName>,
-        size: super::program::LogicalSize,
-    ) {
-        self.resource_declarations.push(SemanticResourceDecl {
-            resource: SemanticResourceRef(resource),
-            role: interface::StorageRole::Intermediate,
-            elem_ty,
-            size,
-        });
+        self.declare(resource, interface::StorageRole::Intermediate, elem_ty, size);
     }
 
     pub fn declare_output_storage(&mut self, resource: ResourceId, elem_ty: Type<TypeName>) {
-        self.declare_output_storage_sized(resource, elem_ty, super::program::LogicalSize::Unspecified);
+        self.declare_output_storage_sized(resource, elem_ty, LogicalSize::Unspecified);
     }
 
     pub fn declare_output_storage_sized(
         &mut self,
         resource: ResourceId,
         elem_ty: Type<TypeName>,
-        size: super::program::LogicalSize,
+        size: LogicalSize,
     ) {
-        self.resource_declarations.push(SemanticResourceDecl {
-            resource: SemanticResourceRef(resource),
-            role: interface::StorageRole::Output,
-            elem_ty,
-            size,
-        });
+        self.declare(resource, interface::StorageRole::Output, elem_ty, size);
     }
 
     pub fn declare_output_resource(
         &mut self,
         resource: ResourceId,
         elem_ty: Type<TypeName>,
-        size: super::program::LogicalSize,
+        size: LogicalSize,
     ) {
-        self.resource_declarations.push(SemanticResourceDecl {
-            resource: SemanticResourceRef(resource),
-            role: interface::StorageRole::Output,
-            elem_ty,
-            size,
-        });
+        self.declare(resource, interface::StorageRole::Output, elem_ty, size);
     }
 
-    // ---- Pure-op primitives ----------------------------------------------
-    //
-    // Thin wrappers over `graph_ops::*` that pre-fill the builder's
-    // current span. All graph manipulation goes through the shared
-    // module so the three EGIR-construction contexts stay consistent.
-
-    fn span(&self) -> Option<Span> {
-        Some(self.span)
-    }
-
-    /// Direct mutable access to the underlying EGraph — used when a
-    /// caller needs `graph_ops` operations not yet wrapped on the
-    /// builder (e.g. `clone_pure_subgraph` for copying a reducing Screma's
-    /// neutral-element subgraph across entries).
     pub fn graph_mut(&mut self) -> &mut EGraph {
         &mut self.graph
     }
 
-    /// Mutable access to the control-header map — used when hand-building
-    /// structured control flow (loops / selections) directly on the graph,
-    /// e.g. the workgroup-parallel phase2 tree reduce.
     pub fn control_headers_mut(&mut self) -> &mut LookupMap<BlockId, ControlHeader> {
         &mut self.control_headers
     }
 
-    /// Repoint the "current" block. `build()` finalizes the current block
-    /// with `Return(None)`, so a multi-block body must set this to its exit
-    /// block before calling `build()`.
     pub fn set_current_block(&mut self, block: BlockId) {
         self.current_block = block;
     }
 
-    pub fn emit_u32(&mut self, n: u32) -> NodeId {
-        let span = self.span();
-        graph_ops::intern_u32(&mut self.graph, n, span)
+    pub fn emit_storage_view(&mut self, resource: ResourceId, ty: Type<TypeName>) -> NodeId {
+        graph_ops::intern_resource_view(&mut self.graph, resource, ty, Some(self.span))
     }
 
-    pub fn emit_constant(&mut self, value: ConstantValue, ty: Type<TypeName>) -> NodeId {
-        graph_ops::intern_constant(&mut self.graph, value, ty)
-    }
-
-    pub fn emit_storage_view(&mut self, resource: ResourceId, view_ty: Type<TypeName>) -> NodeId {
-        let span = self.span();
-        graph_ops::intern_resource_view(&mut self.graph, resource, view_ty, span)
-    }
-
-    /// Emit a `EgirSoac::Screma { 0 maps, 1 Scan acc, OutputView }` —
-    /// the consolidated shape used by `synthesize_phase2_scan` for the
-    /// sequential block-sum scan. Operand layout:
-    /// `[input_array, init, ...captures, output_view]`. Result is a
-    /// 1-tuple of the output_view's type (Screma's expansion requires a
-    /// tuple result).
-    pub fn emit_pending_scan_into(
-        &mut self,
-        region: super::types::RegionId,
-        input_array_nid: NodeId,
-        input_array_ty: Type<TypeName>,
-        input_elem_ty: Type<TypeName>,
-        init_nid: NodeId,
-        captures: Vec<NodeId>,
-        output_view_nid: NodeId,
-        output_view_ty: Type<TypeName>,
-    ) -> NodeId {
-        let step_body = super::types::SegBody { region, captures };
-        // `[input, init, output_view]` — captures live on `step_body`.
-        let operands: smallvec::SmallVec<[NodeId; 4]> =
-            smallvec![input_array_nid, init_nid, output_view_nid];
-        let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![output_view_ty]);
-        let span = self.span();
-        graph_ops::emit_pending_soac(
-            &mut self.graph,
-            self.current_block,
-            EgirSoac::Screma {
-                map_bodies: vec![],
-                accumulators: vec![super::types::ScremaOperator {
-                    kind: crate::tlc::ScremaAccumulator::Scan,
-                    // A serial into-scan is never re-parallelized, so the step
-                    // and combine reference the same region.
-                    step: step_body,
-                    combine: super::types::SegBody {
-                        region,
-                        captures: vec![],
-                    },
-                    input_indices: vec![0],
-                }],
-                input_array_types: vec![input_array_ty],
-                input_elem_types: vec![input_elem_ty],
-                map_output_elem_types: vec![],
-                map_input_indices: vec![],
-                map_destinations: vec![],
-                acc_destinations: vec![SoacDestination::OutputView],
-            },
-            operands,
-            tuple_ty,
-            &mut self.next_effect,
-            span,
-        )
-    }
-
-    /// Emit a `EgirSoac::Screma { 1 map (OutputView), 0 accs }` — the
-    /// consolidated shape used by `synthesize_phase3_scan` for the
-    /// chunked apply-offsets pass. Operand layout:
-    /// `[input_array, ...captures, output_view]`. Result is a 1-tuple
-    /// of the output_view's type.
+    #[allow(clippy::too_many_arguments)]
     pub fn emit_pending_map_into(
         &mut self,
         region: super::types::RegionId,
-        input_array_nid: NodeId,
+        input_array: NodeId,
         input_array_ty: Type<TypeName>,
         input_elem_ty: Type<TypeName>,
         output_elem_ty: Type<TypeName>,
         captures: Vec<NodeId>,
-        output_view_nid: NodeId,
+        output_view: NodeId,
         output_view_ty: Type<TypeName>,
     ) -> NodeId {
-        let map_body = super::types::SegBody { region, captures };
-        // `[input, output_view]` — captures live on `map_body`.
-        let operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![input_array_nid, output_view_nid];
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![output_view_ty]);
-        let span = self.span();
         graph_ops::emit_pending_soac(
             &mut self.graph,
             self.current_block,
             EgirSoac::Screma {
-                map_bodies: vec![map_body],
+                map_bodies: vec![super::types::SegBody { region, captures }],
                 accumulators: vec![],
                 input_array_types: vec![input_array_ty],
                 input_elem_types: vec![input_elem_ty],
@@ -396,72 +134,38 @@ impl EntryBuilder {
                 map_destinations: vec![SoacDestination::OutputView],
                 acc_destinations: vec![],
             },
-            operands,
+            smallvec![input_array, output_view],
             tuple_ty,
             &mut self.next_effect,
-            span,
+            Some(self.span),
         )
     }
 
-    /// Emit a `Load` from a place (typically a `ViewIndex` node).
-    /// Returns the loaded value's NodeId.
-    pub fn emit_load(&mut self, place_nid: NodeId, elem_ty: Type<TypeName>) -> NodeId {
+    pub fn emit_load(&mut self, place: NodeId, elem_ty: Type<TypeName>) -> NodeId {
         use super::graph_ops::alloc_effect;
         use super::types::{SideEffect, SideEffectKind};
         use crate::ssa::types::InstKind;
-        let span = self.span();
         let result = self.graph.alloc_side_effect_result(elem_ty);
-        let eff_in = alloc_effect(&mut self.next_effect);
-        let eff_out = alloc_effect(&mut self.next_effect);
+        let effects = (
+            alloc_effect(&mut self.next_effect),
+            alloc_effect(&mut self.next_effect),
+        );
         self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
             semantic_id: None,
             kind: SideEffectKind::Inst(InstKind::Load {
                 place: Default::default(),
             }),
-            operand_nodes: smallvec![place_nid],
+            operand_nodes: smallvec![place],
             result: Some(result),
-            effects: Some((eff_in, eff_out)),
-            span,
+            effects: Some(effects),
+            span: Some(self.span),
         });
         result
     }
 
-    /// Emit a `Store` of `value` to `storage[binding][index]`.
-    pub fn emit_storage_store(
-        &mut self,
-        resource: ResourceId,
-        index_nid: NodeId,
-        value_nid: NodeId,
-        elem_ty: Type<TypeName>,
-    ) {
-        let arr_ty = Type::Constructed(
-            TypeName::Array,
-            vec![
-                elem_ty.clone(),
-                Type::Constructed(TypeName::ArrayVariantView, vec![]),
-                Type::Variable(0),
-                // buffer stamped from the binding by emit_storage_view.
-                crate::types::no_buffer(),
-            ],
-        );
-        let view_nid = self.emit_storage_view(resource, arr_ty);
-        let span = self.span();
-        graph_ops::emit_storage_store(
-            &mut self.graph,
-            self.current_block,
-            view_nid,
-            index_nid,
-            value_nid,
-            elem_ty,
-            &mut self.next_effect,
-            span,
-        );
-    }
-
-    /// Finalize the synthesized planner draft.
-    pub fn build(mut self) -> KernelDraft {
+    pub fn build(mut self) -> PlannedEntry {
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Return(None);
-        KernelDraft {
+        PlannedEntry {
             name: self.name,
             span: self.span,
             execution_model: self.execution_model,
@@ -477,7 +181,3 @@ impl EntryBuilder {
         }
     }
 }
-
-#[cfg(test)]
-#[path = "builder_tests.rs"]
-mod builder_tests;

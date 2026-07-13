@@ -45,16 +45,8 @@ pub(crate) const FILTER_SCAN_GROUPS: u32 = 4;
 /// Reify every reachable Screma as a semantic segmented op.
 /// This pass performs no scheduling and allocates no bindings.
 pub fn reify(inner: &mut SemanticProgram) {
-    let by_binding = inner
-        .resources
-        .iter()
-        .filter_map(|resource| match resource.origin {
-            super::program::ResourceOrigin::Host(binding) => Some((binding, resource.id)),
-            super::program::ResourceOrigin::Compiler(_) => None,
-        })
-        .collect::<std::collections::HashMap<_, _>>();
     for entry in inner.entry_points.iter_mut() {
-        reify_tail_soac(entry, &by_binding);
+        reify_tail_soac(entry);
     }
     for function in inner.functions.iter_mut() {
         reify_function_soacs(function);
@@ -147,12 +139,12 @@ pub fn lower(inner: &SemanticProgram) -> schedule::KernelPlan {
     lower_runtime_filters(inner, &mut schedule);
     for entry in &inner.entry_points {
         let body =
-            super::program::KernelDraft::from_semantic(entry).expect("segmented semantic entry projection");
+            super::program::PlannedEntry::project(entry).expect("segmented semantic entry projection");
         plan_segmented_kernel_body(body, &mut schedule, &inner.resources);
     }
     for prepass in &inner.prepasses {
-        let body = super::program::KernelDraft::from_semantic(&prepass.entry)
-            .expect("segmented prepass projection");
+        let body =
+            super::program::PlannedEntry::project(&prepass.entry).expect("segmented prepass projection");
         plan_segmented_kernel_body(body, &mut schedule, &inner.resources);
     }
     schedule.coalesce_resource_flows(&inner.resources);
@@ -160,7 +152,7 @@ pub fn lower(inner: &SemanticProgram) -> schedule::KernelPlan {
 }
 
 fn plan_segmented_kernel_body(
-    mut body: super::program::KernelDraft,
+    mut body: super::program::PlannedEntry,
     schedule: &mut schedule::KernelPlan,
     resources: &[LogicalResource],
 ) {
@@ -179,7 +171,7 @@ fn plan_segmented_kernel_body(
             if let Some(split) = split_multidomain_seg_maps(&body) {
                 let primary_slots = split.primary_slots;
                 if !split.entries.is_empty() {
-                    schedule.commit_kernel(split.primary, schedule::KernelRecipe::OutputDomainProjection);
+                    schedule.commit_kernel(split.primary, schedule::KernelKind::OutputDomainProjection);
                 }
                 schedule.set_output_projection(
                     &parent,
@@ -191,7 +183,7 @@ fn plan_segmented_kernel_body(
                         &parent,
                         projected.entry,
                         schedule::DomainSelection::Inferred(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
-                        schedule::KernelRecipe::OutputDomainProjection,
+                        schedule::KernelKind::OutputDomainProjection,
                     );
                     schedule.set_output_projection(
                         &projected_name,
@@ -204,21 +196,21 @@ fn plan_segmented_kernel_body(
                     );
                 }
             } else {
-                schedule.commit_kernel(body, schedule::KernelRecipe::SerialCompute);
+                schedule.commit_kernel(body, schedule::KernelKind::SerialCompute);
             }
         }
         SegOpKind::SegRed { .. } => {
             if let Some(plan) = analyze_reduce_entry(&body, resources) {
                 let phases = emit_reduce_entry(&mut body, plan, schedule, resources);
                 let mut predecessor = body.name.clone();
-                schedule.commit_kernel(body, schedule::KernelRecipe::ReducePhase1);
+                schedule.commit_kernel(body, schedule::KernelKind::ReducePhase1);
                 for phase in phases {
                     let phase_name = phase.name.clone();
                     schedule.add_phase_after(
                         &predecessor,
                         phase,
                         schedule::DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
-                        schedule::KernelRecipe::ReduceCombine,
+                        schedule::KernelKind::ReduceCombine,
                     );
                     predecessor = phase_name;
                 }
@@ -232,7 +224,7 @@ fn plan_segmented_kernel_body(
                 let mut predecessor = body.name.clone();
                 let phase1_domain =
                     schedule.domain_of(&body.name).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
-                schedule.commit_kernel(body, schedule::KernelRecipe::ScanPhase1);
+                schedule.commit_kernel(body, schedule::KernelKind::ScanPhase1);
                 for (phase_index, phase) in phases.into_iter().enumerate() {
                     let phase_name = phase.name.clone();
                     schedule.add_phase_after(
@@ -244,9 +236,9 @@ fn plan_segmented_kernel_body(
                             phase1_domain.clone()
                         }),
                         if phase_index == 0 {
-                            schedule::KernelRecipe::ScanBlock
+                            schedule::KernelKind::ScanBlock
                         } else {
-                            schedule::KernelRecipe::ScanApplyOffsets
+                            schedule::KernelKind::ScanApplyOffsets
                         },
                     );
                     predecessor = phase_name;
@@ -261,11 +253,11 @@ fn plan_segmented_kernel_body(
     }
 }
 
-fn commit_serial_kernel(mut body: super::program::KernelDraft, schedule: &mut schedule::KernelPlan) {
+fn commit_serial_kernel(mut body: super::program::PlannedEntry, schedule: &mut schedule::KernelPlan) {
     let (block, effect) = find_pending_kernel_seg_graph(&body.graph)
         .expect("serial recipe requires one pending kernel SegOp");
     replace_seg_with_screma(&mut body.graph, block, effect);
-    schedule.commit_kernel(body, schedule::KernelRecipe::SerialCompute);
+    schedule.commit_kernel(body, schedule::KernelKind::SerialCompute);
 }
 
 fn lower_runtime_filters(inner: &SemanticProgram, schedule: &mut schedule::KernelPlan) {
@@ -367,12 +359,12 @@ fn lower_runtime_filters(inner: &SemanticProgram, schedule: &mut schedule::Kerne
             entry.return_ty.clone(),
         );
         set_filter_plan_in_graph(&mut scatter.graph, FilterPlan::Scatter(work));
-        schedule.commit_kernel(scatter, schedule::KernelRecipe::FilterScatter);
+        schedule.commit_kernel(scatter, schedule::KernelKind::FilterScatter);
         schedule.add_phase_before(
             &entry.name,
             flags,
             schedule::DomainSelection::Explicit(domain.clone()),
-            schedule::KernelRecipe::FilterFlags,
+            schedule::KernelKind::FilterFlags,
         );
         // The scan runs a fixed worker grid so each worker scans a large
         // chunk and `block_sums` stays `FILTER_SCAN_GROUPS * width`-sized,
@@ -386,19 +378,19 @@ fn lower_runtime_filters(inner: &SemanticProgram, schedule: &mut schedule::Kerne
                 y: 1,
                 z: 1,
             }),
-            schedule::KernelRecipe::FilterScan,
+            schedule::KernelKind::FilterScan,
         );
         schedule.add_phase_before(
             &entry.name,
             phase2,
             schedule::DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
-            schedule::KernelRecipe::FilterCombine,
+            schedule::KernelKind::FilterCombine,
         );
         schedule.add_phase_before(
             &entry.name,
             phase3,
             schedule::DomainSelection::Explicit(domain),
-            schedule::KernelRecipe::FilterScan,
+            schedule::KernelKind::FilterScan,
         );
     }
 }
@@ -463,7 +455,7 @@ fn project_kernel_body(
     output_routes: Vec<super::program::OutputRoute>,
     resource_declarations: Vec<SemanticResourceDecl>,
     return_ty: Type<TypeName>,
-) -> super::program::KernelDraft {
+) -> super::program::PlannedEntry {
     let route_values = output_routes.iter().map(|route| route.source.value).collect();
     let projection = super::graph_projector::GraphProjector::new(&source.graph, &source.control_headers)
         .all_with_values(route_values)
@@ -483,7 +475,7 @@ fn project_kernel_body(
 
 #[allow(clippy::too_many_arguments)]
 fn project_kernel_body_effects(
-    source: &super::program::KernelDraft,
+    source: &super::program::PlannedEntry,
     selected: std::collections::HashSet<super::graph_projector::EffectSite>,
     name: String,
     execution_model: crate::ssa::types::ExecutionModel,
@@ -491,7 +483,7 @@ fn project_kernel_body_effects(
     output_routes: Vec<super::program::OutputRoute>,
     resource_declarations: Vec<SemanticResourceDecl>,
     return_ty: Type<TypeName>,
-) -> super::program::KernelDraft {
+) -> super::program::PlannedEntry {
     let route_values = output_routes.iter().map(|route| route.source.value).collect();
     let projection = super::graph_projector::GraphProjector::new(&source.graph, &source.control_headers)
         .selected_with_values(selected, route_values)
@@ -514,7 +506,7 @@ fn project_kernel_body_effects(
         route
     };
     let output_routes = output_routes.into_iter().map(remap_route).collect();
-    super::program::KernelDraft {
+    super::program::PlannedEntry {
         name,
         span: source.span,
         execution_model,
@@ -540,7 +532,7 @@ fn finish_entry_projection(
     output_routes: Vec<super::program::OutputRoute>,
     resource_declarations: Vec<SemanticResourceDecl>,
     return_ty: Type<TypeName>,
-) -> super::program::KernelDraft {
+) -> super::program::PlannedEntry {
     let remap_route = |mut route: super::program::OutputRoute| {
         route.source.block =
             projection.block(route.source.block).expect("output route block must be projected");
@@ -562,7 +554,7 @@ fn finish_entry_projection(
     };
     let aliases = projection.remap_aliases(&source.aliases);
     let output_routes = output_routes.into_iter().map(remap_route).collect();
-    super::program::KernelDraft {
+    super::program::PlannedEntry {
         name,
         span: source.span,
         execution_model,
@@ -603,7 +595,7 @@ fn required_resource(reference: SemanticResourceRef) -> ResourceId {
     reference.0
 }
 
-fn apply_manifest_resource_sizes(entry: &mut super::program::KernelDraft, resources: &[LogicalResource]) {
+fn apply_manifest_resource_sizes(entry: &mut super::program::PlannedEntry, resources: &[LogicalResource]) {
     for declaration in &mut entry.resource_declarations {
         let resource = declaration.resource.0;
         declaration.size = resources[resource.0 as usize].size.clone();
@@ -686,7 +678,7 @@ fn side_effect_output_slots(entry: &SemanticEntry, se: &SideEffect) -> Vec<usize
     side_effect_output_slots_from_routes(&entry.output_routes, se)
 }
 
-fn side_effect_output_slots_body(entry: &super::program::KernelDraft, se: &SideEffect) -> Vec<usize> {
+fn side_effect_output_slots_body(entry: &super::program::PlannedEntry, se: &SideEffect) -> Vec<usize> {
     side_effect_output_slots_from_routes(&entry.output_routes, se)
 }
 
@@ -771,17 +763,17 @@ fn is_write_effectful(se: &SideEffect) -> bool {
 /// when at least two groups contain a parallel `SegMap`, so a single map
 /// alongside fixed slots stays one sharding kernel. Returns the new clones.
 struct SplitEntry {
-    entry: super::program::KernelDraft,
+    entry: super::program::PlannedEntry,
     semantic_slots: Vec<usize>,
 }
 
 struct EntrySplit {
-    primary: super::program::KernelDraft,
+    primary: super::program::PlannedEntry,
     primary_slots: Vec<usize>,
     entries: Vec<SplitEntry>,
 }
 
-fn split_multidomain_seg_maps(entry: &super::program::KernelDraft) -> Option<EntrySplit> {
+fn split_multidomain_seg_maps(entry: &super::program::PlannedEntry) -> Option<EntrySplit> {
     let n_out = entry.outputs.len();
     if n_out <= 1 {
         return None;
@@ -916,10 +908,7 @@ fn split_multidomain_seg_maps(entry: &super::program::KernelDraft) -> Option<Ent
     })
 }
 
-fn reify_tail_soac(
-    entry: &mut SemanticEntry,
-    by_binding: &std::collections::HashMap<crate::BindingRef, ResourceId>,
-) {
+fn reify_tail_soac(entry: &mut SemanticEntry) {
     // A multi-output entry returning a tuple of sibling maps over distinct
     // domains carries one Screma side-effect per output (TLC fusion already
     // merged equal-domain siblings into a single multi-lane Screma). Reify each
@@ -959,7 +948,7 @@ fn reify_tail_soac(
         return;
     }
     for (block_id, idx, placement) in locs {
-        reify_one_screma(entry, block_id, idx, placement, by_binding);
+        reify_one_screma(entry, block_id, idx, placement);
     }
     // Several kernel reductions/scans in one entry write fields of a shared
     // aggregate output; independently parallel-lowering each would need its own
@@ -1098,13 +1087,7 @@ fn soac_consumed_nodes(entry: &SemanticEntry) -> std::collections::HashSet<NodeI
     })
 }
 
-fn reify_one_screma(
-    entry: &mut SemanticEntry,
-    block_id: BlockId,
-    idx: usize,
-    placement: SegPlacement,
-    by_binding: &std::collections::HashMap<crate::BindingRef, ResourceId>,
-) {
+fn reify_one_screma(entry: &mut SemanticEntry, block_id: BlockId, idx: usize, placement: SegPlacement) {
     let se = entry.graph.skeleton.blocks[block_id].side_effects[idx].clone();
     let SideEffectKind::Soac(EgirSoac::Screma {
         map_bodies,
@@ -1150,7 +1133,7 @@ fn reify_one_screma(
     } else {
         placement
     };
-    let resources = semantic_resources(entry, &se, &output_slots, by_binding);
+    let resources = semantic_resources(entry, &se, &output_slots);
     let seg = EgirSoac::Seg {
         space: semantic_space(entry, &se, input_array_types, input_elem_types),
         placement,
@@ -1295,12 +1278,11 @@ fn extent_from_node(entry: &SemanticEntry, node: NodeId) -> SegExtent {
 }
 
 /// The reads reachable from `se`'s operands, upgraded where `output_slots`
-/// routes a written buffer through the same binding.
+/// routes a written logical resource through the entry ABI.
 fn semantic_resources(
     entry: &SemanticEntry,
     se: &SideEffect,
     output_slots: &[usize],
-    by_binding: &std::collections::HashMap<crate::BindingRef, ResourceId>,
 ) -> Vec<SegResourceAccess> {
     use std::collections::HashMap;
     let mut accesses: HashMap<SemanticResourceRef, SegResourceAccessKind> =
@@ -1309,14 +1291,7 @@ fn semantic_resources(
             .map(|resource| (resource.resource, resource.access))
             .collect();
     for &slot in output_slots {
-        let resource = entry.outputs.get(slot).and_then(|output| {
-            output.storage_binding.and_then(|binding| by_binding.get(&binding).copied()).or_else(|| {
-                let Type::Constructed(TypeName::Resource(resource), _) = output.ty.array_buffer()? else {
-                    return None;
-                };
-                Some(*resource)
-            })
-        });
+        let resource = entry.resource_abi.outputs.get(slot).copied().flatten();
         if let Some(resource) = resource {
             accesses
                 .entry(SemanticResourceRef(resource))
@@ -1940,7 +1915,7 @@ pub fn synthesize_phase2_reduce_cloning_ne_named(
     accumulator_value: NodeId,
     output_stores: &[(NodeId, NodeId)],
     output_decls: &[(ResourceId, Type<TypeName>, super::program::LogicalSize)],
-) -> Result<super::program::KernelDraft, String> {
+) -> Result<super::program::PlannedEntry, String> {
     use super::builder::EntryBuilder;
     let mut b = EntryBuilder::new_compute(full_name, (PHASE2_WIDTH, 1, 1));
     b.declare_intermediate_storage_sized(
@@ -2207,7 +2182,7 @@ struct ReduceAnalysis {
 }
 
 fn analyze_reduce_entry(
-    entry: &super::program::KernelDraft,
+    entry: &super::program::PlannedEntry,
     resources: &[LogicalResource],
 ) -> Option<ReduceAnalysis> {
     let (block, effect) = find_pending_kernel_seg_graph(&entry.graph)?;
@@ -2300,11 +2275,11 @@ fn analyze_reduce_entry(
 }
 
 fn emit_reduce_entry(
-    entry: &mut super::program::KernelDraft,
+    entry: &mut super::program::PlannedEntry,
     analysis: ReduceAnalysis,
     schedule: &schedule::KernelPlan,
     resources: &[LogicalResource],
-) -> Vec<super::program::KernelDraft> {
+) -> Vec<super::program::PlannedEntry> {
     debug_assert_eq!(
         find_pending_kernel_seg_graph(&entry.graph),
         Some((analysis.block, analysis.effect))
@@ -2578,7 +2553,7 @@ struct ScanAnalysis {
 }
 
 fn analyze_scan_entry(
-    entry: &super::program::KernelDraft,
+    entry: &super::program::PlannedEntry,
     resources: &[LogicalResource],
 ) -> Option<ScanAnalysis> {
     let (block, effect) = find_pending_kernel_seg_graph(&entry.graph)?;
@@ -2636,11 +2611,11 @@ fn analyze_scan_entry(
 }
 
 fn emit_scan_entry(
-    entry: &mut super::program::KernelDraft,
+    entry: &mut super::program::PlannedEntry,
     analysis: ScanAnalysis,
     schedule: &mut schedule::KernelPlan,
     resources: &[LogicalResource],
-) -> Vec<super::program::KernelDraft> {
+) -> Vec<super::program::PlannedEntry> {
     debug_assert_eq!(
         find_pending_kernel_seg_graph(&entry.graph),
         Some((analysis.block, analysis.effect))
@@ -2887,7 +2862,7 @@ pub fn synthesize_phase2_scan(
     block_sums_resource: ResourceId,
     block_offsets_resource: ResourceId,
     len_out: Option<ResourceId>,
-) -> Result<super::program::KernelDraft, String> {
+) -> Result<super::program::PlannedEntry, String> {
     use super::builder::EntryBuilder;
     let mut b = EntryBuilder::new_compute(format!("{}_phase2_scan_sums", entry_name), (1, 1, 1));
     let scratch_len = dispatch_worker_logical_size(&elem_ty);
@@ -3062,7 +3037,7 @@ pub fn synthesize_phase3_scan(
     output_resource: ResourceId,
     block_offsets_resource: ResourceId,
     total_threads: u32,
-) -> super::program::KernelDraft {
+) -> super::program::PlannedEntry {
     use super::builder::EntryBuilder;
     let mut b = EntryBuilder::new_compute(
         format!("{}_phase3_add_offsets", entry_name),

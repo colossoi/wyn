@@ -323,25 +323,56 @@ pub struct LogicalResource {
 /// scratch required by segmented operations, extracts typed prepasses, and
 /// records explicit producer/consumer flows.
 pub fn plan_logical_resources(inner: &mut SemanticProgram) {
-    let abi_resources = inner
-        .resources
-        .iter()
-        .filter_map(|resource| match resource.origin {
-            ResourceOrigin::Host(binding) => Some((binding, resource.id)),
-            ResourceOrigin::Compiler(_) => None,
-        })
-        .collect::<HashMap<_, _>>();
     classify_existing_compiler_resources(inner);
     super::multi_consumer::run(inner);
     allocate_filter_work_resources(inner);
     let mut scratch = super::parallelize::enumerate_seg_scratch(inner, inner.resources.len() as u32);
     inner.resources.append(&mut scratch);
     extract_prepass_requirements(inner);
-    strip_compiler_abi(inner, &abi_resources);
+    strip_compiler_abi(inner);
     record_compiler_resource_flows(inner);
     if cfg!(debug_assertions) {
         verify_allocated_resources(inner).expect("invalid allocated semantic resources");
     }
+}
+
+pub(crate) fn verify_allocated_resources(inner: &SemanticProgram) -> Result<(), String> {
+    let ids = inner.resources.iter().map(|resource| resource.id).collect::<std::collections::HashSet<_>>();
+    if ids.len() != inner.resources.len()
+        || inner.resources.iter().enumerate().any(|(index, resource)| resource.id.0 as usize != index)
+    {
+        return Err("resource manifest is not dense and unique".into());
+    }
+    let check_size = |size: &LogicalSize| match size {
+        LogicalSize::LikeResource { resource, .. } if !ids.contains(resource) => {
+            Err(format!("resource size references missing source {resource:?}"))
+        }
+        _ => Ok(()),
+    };
+    for resource in &inner.resources {
+        check_size(&resource.size)?;
+    }
+    let declarations = inner
+        .entry_points
+        .iter()
+        .map(|entry| entry.resource_declarations.as_slice())
+        .chain(inner.prepasses.iter().map(|prepass| prepass.entry.resource_declarations.as_slice()))
+        .chain(
+            inner
+                .materializations
+                .iter()
+                .map(|requirement| requirement.entry.resource_declarations.as_slice()),
+        );
+    for declaration in declarations.flatten() {
+        if !ids.contains(&declaration.resource.0) {
+            return Err(format!(
+                "entry references missing resource {:?}",
+                declaration.resource.0
+            ));
+        }
+        check_size(&declaration.size)?;
+    }
+    Ok(())
 }
 
 fn gather_prepass_resources(inner: &SemanticProgram) -> HashMap<ResourceId, CompilerResource> {
@@ -381,13 +412,7 @@ fn classify_existing_compiler_resources(inner: &mut SemanticProgram) {
         .entry_points
         .iter()
         .filter(|entry| !inner.prepass_roles.contains_key(&entry.name))
-        .flat_map(|entry| entry.outputs.iter().filter_map(|output| output.storage_binding))
-        .filter_map(|binding| {
-            inner.resources.iter().find_map(|resource| match resource.origin {
-                ResourceOrigin::Host(candidate) if candidate == binding => Some(resource.id),
-                _ => None,
-            })
-        })
+        .flat_map(|entry| entry.resource_abi.outputs.iter().flatten().copied())
         .collect::<std::collections::HashSet<_>>();
     classifications.extend(
         filter_resource_kinds(inner).into_iter().filter(|(resource, _)| !source_outputs.contains(resource)),
@@ -455,7 +480,7 @@ fn record_compiler_resource_flows(inner: &mut SemanticProgram) {
     }
     for requirement in &inner.materializations {
         let endpoint = CompilerFlowEndpoint::Materialization(requirement.id);
-        for declaration in &requirement.resource_declarations {
+        for declaration in &requirement.entry.resource_declarations {
             let resource = declaration.resource.0;
             match declaration.role {
                 interface::StorageRole::Output => producers.entry(resource).or_default().push(endpoint),
@@ -529,9 +554,33 @@ pub(crate) fn finalize_converted_resources(
         normalize_converted_graph_types(&mut region.graph, by_binding);
     }
     normalize_structural_resources(inner, by_binding);
+    for entry in &mut inner.entry_points {
+        entry.resource_abi = EntryResourceAbi {
+            inputs: entry
+                .inputs
+                .iter()
+                .map(|input| {
+                    input
+                        .storage_binding
+                        .and_then(|binding| by_binding.get(&binding).copied())
+                        .or_else(|| semantic_type_resource(&input.ty))
+                })
+                .collect(),
+            outputs: entry
+                .outputs
+                .iter()
+                .map(|output| {
+                    output
+                        .storage_binding
+                        .and_then(|binding| by_binding.get(&binding).copied())
+                        .or_else(|| semantic_type_resource(&output.ty))
+                })
+                .collect(),
+        };
+    }
 }
 
-fn strip_compiler_abi(inner: &mut SemanticProgram, abi_resources: &HashMap<crate::BindingRef, ResourceId>) {
+fn strip_compiler_abi(inner: &mut SemanticProgram) {
     let compiler_resources = inner
         .resources
         .iter()
@@ -541,30 +590,28 @@ fn strip_compiler_abi(inner: &mut SemanticProgram, abi_resources: &HashMap<crate
         .collect::<std::collections::HashSet<_>>();
     let strip = |inputs: &mut Vec<EntryInput>,
                  outputs: &mut Vec<EntryOutput>,
+                 resource_abi: &mut EntryResourceAbi,
                  routes: &mut Vec<OutputRoute>| {
-        for input in inputs {
-            let resource = input
-                .storage_binding
-                .and_then(|binding| abi_resources.get(&binding).copied())
-                .or_else(|| semantic_type_resource(&input.ty));
+        for (input, resource) in inputs.iter_mut().zip(&resource_abi.inputs) {
             if resource.is_some_and(|resource| compiler_resources.contains(&resource)) {
                 input.storage_binding = None;
             }
         }
         let mut output_slots = vec![None; outputs.len()];
         let mut host_outputs = Vec::with_capacity(outputs.len());
-        for (slot, output) in std::mem::take(outputs).into_iter().enumerate() {
-            let resource = output
-                .storage_binding
-                .and_then(|binding| abi_resources.get(&binding).copied())
-                .or_else(|| semantic_type_resource(&output.ty));
+        let mut host_resources = Vec::with_capacity(resource_abi.outputs.len());
+        for (slot, (output, resource)) in
+            std::mem::take(outputs).into_iter().zip(std::mem::take(&mut resource_abi.outputs)).enumerate()
+        {
             let compiler_output = resource.is_some_and(|resource| compiler_resources.contains(&resource));
             if !compiler_output {
                 output_slots[slot] = Some(host_outputs.len());
                 host_outputs.push(output);
+                host_resources.push(resource);
             }
         }
         *outputs = host_outputs;
+        resource_abi.outputs = host_resources;
         routes.retain_mut(|route| {
             let Some(slot) = output_slots.get(route.slot.0).copied().flatten() else {
                 return false;
@@ -574,12 +621,18 @@ fn strip_compiler_abi(inner: &mut SemanticProgram, abi_resources: &HashMap<crate
         });
     };
     for entry in &mut inner.entry_points {
-        strip(&mut entry.inputs, &mut entry.outputs, &mut entry.output_routes);
+        strip(
+            &mut entry.inputs,
+            &mut entry.outputs,
+            &mut entry.resource_abi,
+            &mut entry.output_routes,
+        );
     }
     for prepass in &mut inner.prepasses {
         strip(
             &mut prepass.entry.inputs,
             &mut prepass.entry.outputs,
+            &mut prepass.entry.resource_abi,
             &mut prepass.entry.output_routes,
         );
     }
@@ -634,14 +687,14 @@ fn normalize_structural_resources(
         }
     }
     for requirement in &mut inner.materializations {
-        for input in &mut requirement.inputs {
+        for input in &mut requirement.entry.inputs {
             normalize_type_resources(&mut input.ty, by_binding);
         }
-        for (ty, _) in &mut requirement.params {
+        for (ty, _) in &mut requirement.entry.params {
             normalize_type_resources(ty, by_binding);
         }
-        normalize_type_resources(&mut requirement.return_ty, by_binding);
-        for declaration in &mut requirement.resource_declarations {
+        normalize_type_resources(&mut requirement.entry.return_ty, by_binding);
+        for declaration in &mut requirement.entry.resource_declarations {
             normalize_type_resources(&mut declaration.elem_ty, by_binding);
         }
     }
@@ -938,431 +991,6 @@ fn filter_resource_kinds(inner: &SemanticProgram) -> HashMap<ResourceId, Compile
 /// Verify the allocation typestate. From this boundary through validation,
 /// every executable storage identity is a `ResourceId`; bindings survive only
 /// in the host ABI fields and `ResourceOrigin::Host` constraints.
-pub(crate) fn verify_allocated_resources(inner: &SemanticProgram) -> Result<(), String> {
-    let covered =
-        inner.resources.iter().map(|resource| resource.id).collect::<std::collections::HashSet<_>>();
-    if covered.len() != inner.resources.len() {
-        return Err("resource manifest contains duplicate ids".to_string());
-    }
-    for (index, resource) in inner.resources.iter().enumerate() {
-        let expected = ResourceId(index as u32);
-        if resource.id != expected {
-            return Err(format!(
-                "resource manifest is not dense: position {index} contains {:?}",
-                resource.id
-            ));
-        }
-        verify_allocated_size(&resource.size, &covered)?;
-        verify_allocated_type(&resource.elem_ty, &covered)?;
-        verify_compiler_resource_flow(inner, resource)?;
-    }
-    for entry in &inner.entry_points {
-        for declaration in &entry.resource_declarations {
-            let id = declaration.resource.0;
-            if !covered.contains(&id) {
-                return Err(format!(
-                    "entry `{}` references resource {:?}, which is missing from the manifest",
-                    entry.name, id
-                ));
-            }
-            verify_allocated_size(&declaration.size, &covered)?;
-            verify_allocated_type(&declaration.elem_ty, &covered)?;
-            if declaration.role == interface::StorageRole::Intermediate {
-                let resource = inner
-                    .resources
-                    .iter()
-                    .find(|resource| resource.id == id)
-                    .expect("resource coverage checked above");
-                if !matches!(resource.origin, ResourceOrigin::Compiler(_)) {
-                    return Err(format!("intermediate resource {:?} is not compiler-owned", id));
-                }
-            }
-        }
-        verify_allocated_type(&entry.return_ty, &covered)?;
-        for input in &entry.inputs {
-            verify_allocated_type(&input.ty, &covered)?;
-        }
-        for output in &entry.outputs {
-            verify_allocated_type(&output.ty, &covered)?;
-        }
-        for (ty, _) in &entry.params {
-            verify_allocated_type(ty, &covered)?;
-        }
-        verify_allocated_graph(&entry.graph, &covered, &format!("entry `{}`", entry.name))?;
-    }
-    for (index, prepass) in inner.prepasses.iter().enumerate() {
-        if prepass.id != PrepassId(index as u32) {
-            return Err(format!(
-                "prepass arena is not dense: position {index} contains {:?}",
-                prepass.id
-            ));
-        }
-        verify_allocated_entry(&prepass.entry, &covered, "prepass")?;
-    }
-    for (index, requirement) in inner.materializations.iter().enumerate() {
-        if requirement.id != MaterializationId(index as u32) {
-            return Err(format!(
-                "materialization arena is not dense: position {index} contains {:?}",
-                requirement.id
-            ));
-        }
-        for declaration in &requirement.resource_declarations {
-            let resource = declaration.resource.0;
-            if !covered.contains(&resource) {
-                return Err(format!(
-                    "materialization `{}` references missing resource {:?}",
-                    requirement.name, resource
-                ));
-            }
-            verify_allocated_size(&declaration.size, &covered)?;
-            verify_allocated_type(&declaration.elem_ty, &covered)?;
-        }
-        for substitution in &requirement.substitutions {
-            let resource = substitution.resource.0;
-            if !covered.contains(&resource) {
-                return Err(format!(
-                    "materialization `{}` substitutes missing resource {:?}",
-                    requirement.name, resource
-                ));
-            }
-        }
-        verify_allocated_type(&requirement.return_ty, &covered)?;
-        for input in &requirement.inputs {
-            verify_allocated_type(&input.ty, &covered)?;
-        }
-        for (ty, _) in &requirement.params {
-            verify_allocated_type(ty, &covered)?;
-        }
-        verify_allocated_graph(
-            &requirement.graph,
-            &covered,
-            &format!("materialization `{}`", requirement.name),
-        )?;
-    }
-    for function in &inner.functions {
-        verify_allocated_type(&function.return_ty, &covered)?;
-        for (ty, _) in &function.params {
-            verify_allocated_type(ty, &covered)?;
-        }
-        verify_allocated_graph(
-            &function.graph,
-            &covered,
-            &format!("function `{}`", function.name),
-        )?;
-    }
-    for region in inner.regions.values() {
-        verify_allocated_type(&region.return_ty, &covered)?;
-        for (ty, _) in &region.params {
-            verify_allocated_type(ty, &covered)?;
-        }
-        verify_allocated_graph(&region.graph, &covered, &format!("region `{}`", region.name))?;
-    }
-    Ok(())
-}
-
-fn verify_compiler_resource_flow(
-    inner: &SemanticProgram,
-    resource: &LogicalResource,
-) -> Result<(), String> {
-    let ResourceOrigin::Compiler(compiler) = &resource.origin else {
-        return Ok(());
-    };
-    let requires_flow = matches!(
-        compiler.kind,
-        CompilerResourceKind::GatherHandoff
-            | CompilerResourceKind::ScalarHandoff
-            | CompilerResourceKind::MultiConsumerArray
-    );
-    let Some(flow) = &compiler.flow else {
-        return if requires_flow {
-            Err(format!(
-                "compiler resource {:?} has no explicit producer/consumer flow",
-                resource.id
-            ))
-        } else {
-            Ok(())
-        };
-    };
-    let (producer_name, producer_declarations) = flow_endpoint(inner, flow.producer, resource.id)?;
-    let declares = |declarations: &[SemanticResourceDecl], role| {
-        declarations
-            .iter()
-            .any(|declaration| declaration.resource.0 == resource.id && declaration.role == role)
-    };
-    if !declares(producer_declarations, interface::StorageRole::Output) {
-        return Err(format!(
-            "resource {:?} producer `{}` does not declare its output",
-            resource.id, producer_name
-        ));
-    }
-    if flow.consumers.is_empty() {
-        return Err(format!("compiler resource {:?} has no consumers", resource.id));
-    }
-    let mut unique = std::collections::HashSet::new();
-    for consumer_id in &flow.consumers {
-        if !unique.insert(*consumer_id) || *consumer_id == flow.producer {
-            return Err(format!(
-                "compiler resource {:?} has an invalid consumer list",
-                resource.id
-            ));
-        }
-        let (consumer_name, consumer_declarations) = flow_endpoint(inner, *consumer_id, resource.id)?;
-        if !declares(consumer_declarations, interface::StorageRole::Input) {
-            return Err(format!(
-                "resource {:?} consumer `{}` does not declare its input",
-                resource.id, consumer_name
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn flow_endpoint<'a>(
-    inner: &'a SemanticProgram,
-    endpoint: CompilerFlowEndpoint,
-    resource: ResourceId,
-) -> Result<(&'a str, &'a [SemanticResourceDecl]), String> {
-    match endpoint {
-        CompilerFlowEndpoint::Entry(id) => inner
-            .entry_points
-            .get(id.0 as usize)
-            .map(|entry| (entry.name.as_str(), entry.resource_declarations.as_slice()))
-            .ok_or_else(|| format!("resource {:?} has an invalid entry endpoint {:?}", resource, id)),
-        CompilerFlowEndpoint::Prepass(id) => inner
-            .prepasses
-            .get(id.0 as usize)
-            .filter(|prepass| prepass.id == id)
-            .map(|prepass| {
-                (
-                    prepass.entry.name.as_str(),
-                    prepass.entry.resource_declarations.as_slice(),
-                )
-            })
-            .ok_or_else(|| format!("resource {:?} has an invalid prepass endpoint {:?}", resource, id)),
-        CompilerFlowEndpoint::Materialization(id) => inner
-            .materializations
-            .get(id.0 as usize)
-            .filter(|requirement| requirement.id == id)
-            .map(|requirement| {
-                (
-                    requirement.name.as_str(),
-                    requirement.resource_declarations.as_slice(),
-                )
-            })
-            .ok_or_else(|| {
-                format!(
-                    "resource {:?} has an invalid materialization endpoint {:?}",
-                    resource, id
-                )
-            }),
-    }
-}
-
-fn verify_allocated_entry(
-    entry: &SemanticEntry,
-    covered: &std::collections::HashSet<ResourceId>,
-    kind: &str,
-) -> Result<(), String> {
-    verify_allocated_body(
-        &entry.resource_declarations,
-        &entry.inputs,
-        &entry.outputs,
-        &entry.params,
-        &entry.return_ty,
-        &entry.graph,
-        covered,
-        &format!("{kind} `{}`", entry.name),
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn verify_allocated_body(
-    declarations: &[SemanticResourceDecl],
-    inputs: &[EntryInput],
-    outputs: &[EntryOutput],
-    params: &[(Type<TypeName>, String)],
-    return_ty: &Type<TypeName>,
-    graph: &EGraph,
-    covered: &std::collections::HashSet<ResourceId>,
-    owner: &str,
-) -> Result<(), String> {
-    for declaration in declarations {
-        let resource = declaration.resource.0;
-        if !covered.contains(&resource) {
-            return Err(format!("{owner} references missing resource {resource:?}"));
-        }
-        verify_allocated_size(&declaration.size, covered)?;
-        verify_allocated_type(&declaration.elem_ty, covered)?;
-    }
-    verify_allocated_type(return_ty, covered)?;
-    for input in inputs {
-        verify_allocated_type(&input.ty, covered)?;
-    }
-    for output in outputs {
-        verify_allocated_type(&output.ty, covered)?;
-    }
-    for (ty, _) in params {
-        verify_allocated_type(ty, covered)?;
-    }
-    verify_allocated_graph(graph, covered, owner)
-}
-
-pub(crate) fn verify_kernel_recipe(
-    graph: &KernelGraphRecipe,
-    publication: &PlannedEntryPublication,
-    covered: &std::collections::HashSet<ResourceId>,
-) -> Result<(), String> {
-    let owner = format!("kernel `{}`", publication.name);
-    verify_allocated_body(
-        &publication.resources,
-        &publication.inputs,
-        &publication.outputs,
-        &graph.params,
-        &graph.return_ty,
-        &graph.graph,
-        covered,
-        &owner,
-    )?;
-
-    let effects = graph
-        .graph
-        .skeleton
-        .blocks
-        .values()
-        .flat_map(|block| block.side_effects.iter())
-        .flat_map(|effect| effect.effects.into_iter().flat_map(|(input, output)| [input, output]))
-        .collect::<std::collections::HashSet<_>>();
-    for route in &graph.output_routes {
-        if route.slot.0 >= publication.outputs.len()
-            || !graph.graph.skeleton.blocks.contains_key(route.source.block)
-            || !graph.graph.nodes.contains_key(route.source.value)
-        {
-            return Err(format!("{owner} contains an invalid output route"));
-        }
-        for writer in &route.writers {
-            let valid = match writer {
-                OutputWriter::Value(value) => graph.graph.nodes.contains_key(*value),
-                OutputWriter::Effect(effect) => effects.contains(effect),
-            };
-            if !valid {
-                return Err(format!("{owner} contains an invalid output writer"));
-            }
-        }
-    }
-    if graph
-        .aliases
-        .iter()
-        .any(|(from, to)| !graph.graph.nodes.contains_key(*from) || !graph.graph.nodes.contains_key(*to))
-    {
-        return Err(format!("{owner} contains an invalid alias"));
-    }
-    Ok(())
-}
-
-fn verify_allocated_size(
-    size: &LogicalSize,
-    covered: &std::collections::HashSet<ResourceId>,
-) -> Result<(), String> {
-    match size {
-        LogicalSize::LikeResource { resource, .. } if !covered.contains(resource) => {
-            Err(format!("resource size references missing source {:?}", resource))
-        }
-        _ => Ok(()),
-    }
-}
-
-fn verify_allocated_type(
-    ty: &Type<TypeName>,
-    covered: &std::collections::HashSet<ResourceId>,
-) -> Result<(), String> {
-    let Type::Constructed(name, arguments) = ty else {
-        return Ok(());
-    };
-    match name {
-        TypeName::Buffer(binding) => {
-            return Err(format!(
-                "allocated semantic type still names storage binding {binding:?}"
-            ));
-        }
-        TypeName::Resource(resource) if !covered.contains(resource) => {
-            return Err(format!("semantic type references missing resource {resource:?}"));
-        }
-        TypeName::Sum(variants) => {
-            for (_, fields) in variants {
-                for field in fields {
-                    verify_allocated_type(field, covered)?;
-                }
-            }
-        }
-        _ => {}
-    }
-    for argument in arguments {
-        verify_allocated_type(argument, covered)?;
-    }
-    Ok(())
-}
-
-fn verify_allocated_graph(
-    graph: &EGraph,
-    covered: &std::collections::HashSet<ResourceId>,
-    owner: &str,
-) -> Result<(), String> {
-    let verify_resource = |resource: ResourceId| {
-        if covered.contains(&resource) {
-            Ok(())
-        } else {
-            Err(format!("{owner} references missing resource {resource:?}"))
-        }
-    };
-    for (_, node) in &graph.nodes {
-        if let super::types::ENode::Pure { op, .. } = node {
-            match op {
-                super::types::PureOp::StorageView(crate::op::PureViewSource::Storage(resource))
-                | super::types::PureOp::ResourceLen(resource) => verify_resource(resource.0)?,
-                _ => {}
-            }
-        }
-    }
-    for ty in graph.types.values() {
-        verify_allocated_type(ty, covered)?;
-    }
-    for (_, block) in &graph.skeleton.blocks {
-        for effect in &block.side_effects {
-            match &effect.kind {
-                super::types::SideEffectKind::Inst(crate::ssa::types::InstKind::Op { tag, .. }) => {
-                    match tag {
-                        crate::op::OpTag::StorageView(crate::op::PureViewSource::Storage(resource))
-                        | crate::op::OpTag::ResourceLen(resource) => verify_resource(resource.0)?,
-                        _ => {}
-                    }
-                }
-                super::types::SideEffectKind::Soac(soac) => {
-                    let mut soac = soac.clone();
-                    let mut error = None;
-                    soac.visit_resource_refs_mut(|reference| {
-                        let resource = reference.0;
-                        if !covered.contains(&resource) {
-                            error.get_or_insert_with(|| {
-                                format!("{owner} SOAC references missing resource {resource:?}")
-                            });
-                        }
-                    });
-                    soac.visit_types_mut(|ty| {
-                        if error.is_none() {
-                            error = verify_allocated_type(ty, covered).err();
-                        }
-                    });
-                    if let Some(error) = error {
-                        return Err(error);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Physical `BufferLen` for a logical size, or `None` for `Unspecified` (a
 /// host-supplied length). Inverse of `logical_size`, used when a compiler
 /// resource is published as a `StorageBindingDecl`.
@@ -1516,6 +1144,9 @@ pub struct SemanticEntry {
     pub execution_model: ExecutionModel,
     pub inputs: Vec<EntryInput>,
     pub outputs: Vec<EntryOutput>,
+    /// Logical resources associated with ABI slots. Host bindings are only a
+    /// publication constraint; semantic passes use these identities directly.
+    pub resource_abi: EntryResourceAbi,
     pub resource_declarations: Vec<SemanticResourceDecl>,
     pub params: Vec<(Type<TypeName>, String)>,
     pub return_ty: Type<TypeName>,
@@ -1529,123 +1160,10 @@ pub struct SemanticEntry {
     pub output_routes: Vec<OutputRoute>,
 }
 
-/// Ephemeral planner output. A draft is immediately decomposed into a
-/// publication record and a payload-bearing `KernelRecipe`; it is never
-/// retained by `KernelPlan` or accepted by physicalization.
-#[derive(Debug)]
-pub struct KernelDraft {
-    pub name: String,
-    pub span: Span,
-    pub execution_model: ExecutionModel,
-    pub inputs: Vec<EntryInput>,
-    pub outputs: Vec<EntryOutput>,
-    pub resource_declarations: Vec<SemanticResourceDecl>,
-    pub params: Vec<(Type<TypeName>, String)>,
-    pub return_ty: Type<TypeName>,
-    pub graph: EGraph,
-    pub control_headers: LookupMap<BlockId, ControlHeader>,
-    pub aliases: LookupMap<NodeId, NodeId>,
-    pub output_routes: Vec<OutputRoute>,
-}
-
-impl KernelDraft {
-    /// Project a complete semantic entry into fresh graph identities. This is
-    /// the only whole-entry admission path into a kernel plan.
-    pub fn from_semantic(entry: &SemanticEntry) -> Result<Self, String> {
-        let projection = super::graph_projector::GraphProjector::new(&entry.graph, &entry.control_headers)
-            .all_with_values(entry.output_routes.iter().map(|route| route.source.value).collect())?;
-        let output_routes = entry
-            .output_routes
-            .iter()
-            .map(|route| {
-                Ok(OutputRoute {
-                    source: SlotSource {
-                        block: projection
-                            .block(route.source.block)
-                            .ok_or_else(|| "planned route block was not projected".to_string())?,
-                        value: projection
-                            .node(route.source.value)
-                            .ok_or_else(|| "planned route value was not projected".to_string())?,
-                    },
-                    slot: route.slot,
-                    writers: route
-                        .writers
-                        .iter()
-                        .filter_map(|writer| match writer {
-                            OutputWriter::Value(value) => projection.node(*value).map(OutputWriter::Value),
-                            OutputWriter::Effect(effect) => {
-                                projection.effect(*effect).map(OutputWriter::Effect)
-                            }
-                        })
-                        .collect(),
-                })
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        Ok(Self {
-            name: entry.name.clone(),
-            span: entry.span,
-            execution_model: entry.execution_model.clone(),
-            inputs: entry.inputs.clone(),
-            outputs: entry.outputs.clone(),
-            resource_declarations: entry.resource_declarations.clone(),
-            params: entry.params.clone(),
-            return_ty: entry.return_ty.clone(),
-            aliases: projection.remap_aliases(&entry.aliases),
-            graph: projection.graph,
-            control_headers: projection.control_headers,
-            output_routes,
-        })
-    }
-}
-
-/// Resource-independent graph construction payload retained by a closed
-/// kernel recipe. Host ABI and scheduling facts live on `KernelPhase`, not in
-/// this graph record.
-#[derive(Clone, Debug)]
-pub struct KernelGraphRecipe {
-    pub span: Span,
-    pub params: Vec<(Type<TypeName>, String)>,
-    pub return_ty: Type<TypeName>,
-    pub graph: EGraph,
-    pub control_headers: LookupMap<BlockId, ControlHeader>,
-    pub aliases: LookupMap<NodeId, NodeId>,
-    pub output_routes: Vec<OutputRoute>,
-}
-
-impl KernelDraft {
-    pub fn into_recipe_parts(self) -> (PlannedEntryPublication, KernelGraphRecipe) {
-        let Self {
-            name,
-            span,
-            execution_model,
-            inputs,
-            outputs,
-            resource_declarations,
-            params,
-            return_ty,
-            graph,
-            control_headers,
-            aliases,
-            output_routes,
-        } = self;
-        let publication = PlannedEntryPublication {
-            name,
-            execution_model,
-            inputs,
-            outputs,
-            resources: resource_declarations,
-        };
-        let graph = KernelGraphRecipe {
-            span,
-            params,
-            return_ty,
-            graph,
-            control_headers,
-            aliases,
-            output_routes,
-        };
-        (publication, graph)
-    }
+#[derive(Clone, Debug, Default)]
+pub struct EntryResourceAbi {
+    pub inputs: Vec<Option<ResourceId>>,
+    pub outputs: Vec<Option<ResourceId>>,
 }
 
 /// TLC-originated scalar or gather producer removed from the semantic entry
@@ -1677,6 +1195,7 @@ impl SemanticEntry {
             execution_model,
             inputs,
             outputs,
+            resource_abi: EntryResourceAbi::default(),
             resource_declarations,
             params,
             return_ty,
@@ -1686,34 +1205,158 @@ impl SemanticEntry {
             output_routes: Vec::new(),
         }
     }
-
-    pub fn publication(&self) -> PlannedEntryPublication {
-        PlannedEntryPublication {
-            name: self.name.clone(),
-            execution_model: self.execution_model.clone(),
-            inputs: self.inputs.clone(),
-            outputs: self.outputs.clone(),
-            resources: self.resource_declarations.clone(),
-        }
-    }
 }
 
-/// Semantic requirement to publish one shared array producer. This is a
-/// closed recipe, not an entry point: semantic entry passes cannot schedule,
-/// clone, clear, or otherwise partially mutate it.
-pub struct MaterializationRequirement {
-    pub id: MaterializationId,
-    pub producer: SemanticOpId,
+/// A complete, fresh entry projection owned by a kernel recipe. This is the
+/// sole entry-shaped planner record: publication and physical construction
+/// both read it, so fields cannot drift between parallel representations.
+#[derive(Clone, Debug)]
+pub struct PlannedEntry {
     pub name: String,
     pub span: Span,
     pub execution_model: ExecutionModel,
     pub inputs: Vec<EntryInput>,
+    pub outputs: Vec<EntryOutput>,
     pub resource_declarations: Vec<SemanticResourceDecl>,
     pub params: Vec<(Type<TypeName>, String)>,
     pub return_ty: Type<TypeName>,
     pub graph: EGraph,
     pub control_headers: LookupMap<BlockId, ControlHeader>,
     pub aliases: LookupMap<NodeId, NodeId>,
+    pub output_routes: Vec<OutputRoute>,
+}
+
+/// Backend-visible entry metadata retained by the plan without retaining a
+/// second copy of the semantic graph.
+#[derive(Clone, Debug)]
+pub struct PlannedPublication {
+    pub name: String,
+    pub execution_model: ExecutionModel,
+    pub inputs: Vec<EntryInput>,
+    pub outputs: Vec<EntryOutput>,
+    pub resource_declarations: Vec<SemanticResourceDecl>,
+}
+
+impl PlannedPublication {
+    pub fn from_semantic(entry: &SemanticEntry) -> Self {
+        Self {
+            name: entry.name.clone(),
+            execution_model: entry.execution_model.clone(),
+            inputs: entry.inputs.clone(),
+            outputs: entry.outputs.clone(),
+            resource_declarations: entry.resource_declarations.clone(),
+        }
+    }
+
+    pub fn publication(&self, resources: &PhysicalResourceTable) -> Result<EntryPublication, String> {
+        publish_entry(
+            &self.name,
+            &self.execution_model,
+            &self.inputs,
+            &self.outputs,
+            &self.resource_declarations,
+            resources,
+        )
+    }
+}
+
+impl PlannedEntry {
+    pub fn project(entry: &SemanticEntry) -> Result<Self, String> {
+        let projection = super::graph_projector::GraphProjector::new(&entry.graph, &entry.control_headers)
+            .all_with_values(entry.output_routes.iter().map(|route| route.source.value).collect())?;
+        let output_routes = entry
+            .output_routes
+            .iter()
+            .map(|route| {
+                Ok(OutputRoute {
+                    source: SlotSource {
+                        block: projection
+                            .block(route.source.block)
+                            .ok_or_else(|| "planned route block was not projected".to_string())?,
+                        value: projection
+                            .node(route.source.value)
+                            .ok_or_else(|| "planned route value was not projected".to_string())?,
+                    },
+                    slot: route.slot,
+                    writers: route
+                        .writers
+                        .iter()
+                        .filter_map(|writer| match writer {
+                            OutputWriter::Value(value) => projection.node(*value).map(OutputWriter::Value),
+                            OutputWriter::Effect(effect) => {
+                                projection.effect(*effect).map(OutputWriter::Effect)
+                            }
+                        })
+                        .collect(),
+                })
+            })
+            .collect::<Result<_, String>>()?;
+        Ok(Self {
+            name: entry.name.clone(),
+            span: entry.span,
+            execution_model: entry.execution_model.clone(),
+            inputs: entry.inputs.clone(),
+            outputs: entry.outputs.clone(),
+            resource_declarations: entry.resource_declarations.clone(),
+            params: entry.params.clone(),
+            return_ty: entry.return_ty.clone(),
+            aliases: projection.remap_aliases(&entry.aliases),
+            graph: projection.graph,
+            control_headers: projection.control_headers,
+            output_routes,
+        })
+    }
+
+    pub fn publication(&self, resources: &PhysicalResourceTable) -> Result<EntryPublication, String> {
+        publish_entry(
+            &self.name,
+            &self.execution_model,
+            &self.inputs,
+            &self.outputs,
+            &self.resource_declarations,
+            resources,
+        )
+    }
+}
+
+fn publish_entry(
+    name: &str,
+    execution_model: &ExecutionModel,
+    inputs: &[EntryInput],
+    outputs: &[EntryOutput],
+    declarations: &[SemanticResourceDecl],
+    resources: &PhysicalResourceTable,
+) -> Result<EntryPublication, String> {
+    let storage_bindings = declarations
+        .iter()
+        .filter(|declaration| resources.is_compiler(declaration.resource.0))
+        .map(|declaration| {
+            let binding = resources
+                .binding(declaration.resource.0)
+                .ok_or_else(|| format!("entry `{name}` references an unallocated resource"))?;
+            Ok(interface::StorageBindingDecl {
+                binding,
+                role: declaration.role.clone(),
+                elem_ty: declaration.elem_ty.clone(),
+                length: buffer_len(&declaration.size, resources),
+            })
+        })
+        .collect::<Result<_, String>>()?;
+    Ok(EntryPublication {
+        name: name.to_string(),
+        execution_model: execution_model.clone(),
+        inputs: inputs.to_vec(),
+        outputs: outputs.to_vec(),
+        storage_bindings,
+    })
+}
+
+/// A semantic shared-value requirement. Nesting the single semantic entry
+/// representation avoids maintaining another entry-shaped record.
+pub struct MaterializationRequirement {
+    pub id: MaterializationId,
+    pub producer: SemanticOpId,
+    pub entry: SemanticEntry,
     pub substitutions: Vec<MaterializationSubstitution>,
 }
 
@@ -1721,85 +1364,6 @@ pub struct MaterializationRequirement {
 pub struct MaterializationSubstitution {
     pub resource: SemanticResourceRef,
     pub consumers: Vec<CompilerFlowEndpoint>,
-}
-
-impl MaterializationRequirement {
-    pub fn publication(&self) -> PlannedEntryPublication {
-        PlannedEntryPublication {
-            name: self.name.clone(),
-            execution_model: self.execution_model.clone(),
-            inputs: self.inputs.clone(),
-            outputs: Vec::new(),
-            resources: self.resource_declarations.clone(),
-        }
-    }
-
-    pub fn project_kernel(&self) -> Result<KernelDraft, String> {
-        let projection =
-            super::graph_projector::GraphProjector::new(&self.graph, &self.control_headers).all()?;
-        Ok(KernelDraft {
-            name: self.name.clone(),
-            span: self.span,
-            execution_model: self.execution_model.clone(),
-            inputs: self.inputs.clone(),
-            outputs: Vec::new(),
-            resource_declarations: self.resource_declarations.clone(),
-            params: self.params.clone(),
-            return_ty: self.return_ty.clone(),
-            aliases: projection.remap_aliases(&self.aliases),
-            graph: projection.graph,
-            control_headers: projection.control_headers,
-            output_routes: Vec::new(),
-        })
-    }
-}
-
-/// The exact entry ABI consumed by descriptor publication. It deliberately
-/// contains no graph, routes, or mutable lowering state.
-#[derive(Clone, Debug)]
-pub struct PlannedEntryPublication {
-    pub name: String,
-    pub execution_model: ExecutionModel,
-    pub inputs: Vec<EntryInput>,
-    pub outputs: Vec<EntryOutput>,
-    pub resources: Vec<SemanticResourceDecl>,
-}
-
-impl PlannedEntryPublication {
-    pub fn physicalize(&self, resources: &PhysicalResourceTable) -> Result<EntryPublication, String> {
-        let storage_bindings = self
-            .resources
-            .iter()
-            .map(|declaration| {
-                let resource = declaration.resource.0;
-                if !resources.is_compiler(resource) {
-                    return Ok(None);
-                }
-                let binding = resources.binding(resource).ok_or_else(|| {
-                    format!(
-                        "entry `{}` references unallocated resource {:?}",
-                        self.name, resource
-                    )
-                })?;
-                Ok(Some(interface::StorageBindingDecl {
-                    binding,
-                    role: declaration.role.clone(),
-                    elem_ty: declaration.elem_ty.clone(),
-                    length: buffer_len(&declaration.size, resources),
-                }))
-            })
-            .collect::<Result<Vec<_>, String>>()?
-            .into_iter()
-            .flatten()
-            .collect();
-        Ok(EntryPublication {
-            name: self.name.clone(),
-            execution_model: self.execution_model.clone(),
-            inputs: self.inputs.clone(),
-            outputs: self.outputs.clone(),
-            storage_bindings,
-        })
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -2004,6 +1568,88 @@ fn physicalize_region(
     })
 }
 
+fn physicalize_entry(
+    entry: &PlannedEntry,
+    resources: &PhysicalResourceTable,
+) -> Result<PhysicalEntry, String> {
+    let mut inputs = entry.inputs.clone();
+    let mut outputs = entry.outputs.clone();
+    let mut declarations = entry.resource_declarations.clone();
+    let mut params = entry.params.clone();
+    let mut return_ty = entry.return_ty.clone();
+    let (graph, nodes, blocks) = physicalize_graph_resources(entry.graph.clone(), resources)?;
+    for input in &mut inputs {
+        physicalize_type_resources(&mut input.ty, resources);
+    }
+    for output in &mut outputs {
+        physicalize_type_resources(&mut output.ty, resources);
+    }
+    for (ty, _) in &mut params {
+        physicalize_type_resources(ty, resources);
+    }
+    physicalize_type_resources(&mut return_ty, resources);
+    for declaration in &mut declarations {
+        physicalize_type_resources(&mut declaration.elem_ty, resources);
+    }
+    let storage_bindings = declarations
+        .into_iter()
+        .map(|declaration| {
+            let binding = resources
+                .binding(declaration.resource.0)
+                .ok_or_else(|| format!("entry `{}` references an unallocated resource", entry.name))?;
+            Ok(interface::StorageBindingDecl {
+                binding,
+                role: declaration.role,
+                elem_ty: declaration.elem_ty,
+                length: buffer_len(&declaration.size, resources),
+            })
+        })
+        .collect::<Result<_, String>>()?;
+    let output_routes = entry
+        .output_routes
+        .iter()
+        .map(|route| {
+            Ok(OutputRoute {
+                source: SlotSource {
+                    block: *blocks
+                        .get(&route.source.block)
+                        .ok_or_else(|| "planned output block was not physicalized".to_string())?,
+                    value: *nodes
+                        .get(&route.source.value)
+                        .ok_or_else(|| "planned output value was not physicalized".to_string())?,
+                },
+                slot: route.slot,
+                writers: route
+                    .writers
+                    .iter()
+                    .map(|writer| match writer {
+                        OutputWriter::Value(value) => nodes
+                            .get(value)
+                            .copied()
+                            .map(OutputWriter::Value)
+                            .ok_or_else(|| "planned output writer was not physicalized".to_string()),
+                        OutputWriter::Effect(effect) => Ok(OutputWriter::Effect(*effect)),
+                    })
+                    .collect::<Result<_, String>>()?,
+            })
+        })
+        .collect::<Result<_, String>>()?;
+    Ok(PhysicalEntry {
+        name: entry.name.clone(),
+        span: entry.span,
+        execution_model: entry.execution_model.clone(),
+        inputs,
+        outputs,
+        storage_bindings,
+        params,
+        return_ty,
+        graph,
+        control_headers: physicalize_control_headers(entry.control_headers.clone(), &blocks),
+        aliases: entry.aliases.iter().map(|(from, to)| (nodes[from], nodes[to])).collect(),
+        output_routes,
+    })
+}
+
 impl PhysicalProgram {
     pub fn from_validated(
         program: SemanticProgram,
@@ -2014,9 +1660,7 @@ impl PhysicalProgram {
     ) -> Result<Self, String> {
         let entry_points = plan
             .physical_kernels()
-            .map(|(phase, publication)| {
-                super::builder::PhysicalEntryBuilder::new(phase, publication, &physical_resources).build()
-            })
+            .map(|phase| physicalize_entry(phase.recipe.entry(), &physical_resources))
             .collect::<Result<Vec<_>, _>>()?;
         let mut functions = program
             .functions

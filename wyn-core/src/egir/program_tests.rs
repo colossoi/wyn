@@ -181,7 +181,7 @@ fn scalar_handoff_classification_uses_typed_prepass_role_not_name() {
     ];
     inner.prepass_roles.insert("renamed_without_magic_marker".into(), PrepassKind::Scalar);
     plan_logical_resources(&mut inner);
-    let typed_resource = inner.prepasses[0].body.resource_declarations[0].resource.0;
+    let typed_resource = inner.prepasses[0].entry.resource_declarations[0].resource.0;
     let misleading_resource = inner
         .entry_points
         .iter()

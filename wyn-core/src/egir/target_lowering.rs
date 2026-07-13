@@ -15,7 +15,6 @@ pub fn schedule(
     binding_ids: &mut IdSource<u32>,
     profile: LoweringProfile,
 ) -> Result<PhysicalProgram, ConvertError> {
-    super::program::verify_allocated_resources(&inner).map_err(ConvertError::Internal)?;
     let unpublished_descriptor = inner.pipeline.clone();
 
     let kernel_plan = if profile.schedule == SchedulePolicy::Parallel {
