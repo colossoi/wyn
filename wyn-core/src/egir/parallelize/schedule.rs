@@ -11,10 +11,10 @@ use std::sync::Arc;
 
 use crate::egir::graph_ops;
 use crate::egir::program::{
-    CompilerFlowEndpoint, CompilerResourceFlow, EntryPublication, InputSlotId, LogicalResource,
-    MaterializationRequirement, OutputSlotId, PhysicalResourceTable, PlannedEntryPublication,
-    PlannedKernelBody, PrepassKind, PrepassRequirement, RegionInterner, ResourceOrigin, SemanticEntry,
-    SemanticEntryId, SemanticFunc, SemanticResourceDecl, SemanticResourceRef,
+    CompilerFlowEndpoint, CompilerResourceFlow, EntryPublication, InputSlotId, KernelDraft,
+    KernelGraphRecipe, LogicalResource, MaterializationRequirement, OutputSlotId, PhysicalResourceTable,
+    PlannedEntryPublication, PrepassKind, PrepassRequirement, RegionInterner, ResourceOrigin,
+    SemanticEntry, SemanticEntryId, SemanticFunc, SemanticResourceDecl, SemanticResourceRef,
 };
 use crate::egir::types::RegionId;
 use crate::egir::types::{
@@ -24,7 +24,7 @@ use crate::egir::types::{
 use crate::pipeline_descriptor::{
     Binding, ComputePipeline, ComputeStage, DispatchLen, DispatchSize, Pipeline, PipelineDescriptor,
 };
-use crate::ssa::types::{EntryInput, EntryOutput, ExecutionModel};
+use crate::ssa::types::{EntryInput, ExecutionModel};
 use crate::{BindingRef, ResourceId};
 
 /// A complete module-level compute schedule.
@@ -37,8 +37,7 @@ pub struct KernelPlan {
     unpublished: Vec<KernelPhase>,
     next_kernel_id: u32,
     semantic_abi: HashMap<SemanticEntryId, SemanticAbi>,
-    publications: HashMap<String, PlannedEntryPublication>,
-    publication_order: Vec<String>,
+    source_publications: Vec<PlannedEntryPublication>,
     /// Callable helpers synthesized by target planning. They are not admitted
     /// to semantic EGIR; physical construction publishes them only after the
     /// plan has validated.
@@ -87,10 +86,10 @@ impl ValidatedKernelPlan {
             .collect()
     }
 
-    pub(crate) fn physical_bodies(&self) -> impl Iterator<Item = &PlannedKernelBody> {
-        self.0
-            .phases()
-            .map(|phase| phase.body.as_deref().expect("validated kernel plan contains a construction body"))
+    pub(crate) fn physical_kernels(
+        &self,
+    ) -> impl Iterator<Item = (&KernelPhase, &PlannedEntryPublication)> {
+        self.0.phases().map(|phase| (phase, &phase.publication))
     }
 
     pub(crate) fn generated_callables(&self) -> impl Iterator<Item = &SemanticFunc> {
@@ -110,23 +109,55 @@ pub struct KernelId(pub u32);
 /// The only supported ways to construct a physical entry. Keeping this enum
 /// closed prevents new lowering sites from falling back to arbitrary
 /// clone-and-patch entry mutation.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+/// Closed construction recipe retained by a planned kernel. The payload is a
+/// graph-only projection; ABI, publication, dispatch and resources remain
+/// first-class `KernelPhase` facts.
+#[derive(Clone, Debug)]
 pub enum KernelRecipe {
-    GraphicsPassthrough,
-    SerialCompute,
-    OutputDomainProjection,
-    MultiConsumerMaterialization,
-    ScalarPrepass,
-    GatherPrepass,
-    FilterFlags,
-    FilterScan,
-    FilterCombine,
-    FilterScatter,
-    ReducePhase1,
-    ReduceCombine,
-    ScanPhase1,
-    ScanBlock,
-    ScanApplyOffsets,
+    GraphicsPassthrough(Arc<KernelGraphRecipe>),
+    SerialCompute(Arc<KernelGraphRecipe>),
+    OutputDomainProjection(Arc<KernelGraphRecipe>),
+    MultiConsumerMaterialization(Arc<KernelGraphRecipe>),
+    ScalarPrepass(Arc<KernelGraphRecipe>),
+    GatherPrepass(Arc<KernelGraphRecipe>),
+    FilterFlags(Arc<KernelGraphRecipe>),
+    FilterScan(Arc<KernelGraphRecipe>),
+    FilterCombine(Arc<KernelGraphRecipe>),
+    FilterScatter(Arc<KernelGraphRecipe>),
+    ReducePhase1(Arc<KernelGraphRecipe>),
+    ReduceCombine(Arc<KernelGraphRecipe>),
+    ScanPhase1(Arc<KernelGraphRecipe>),
+    ScanBlock(Arc<KernelGraphRecipe>),
+    ScanApplyOffsets(Arc<KernelGraphRecipe>),
+}
+
+impl KernelRecipe {
+    pub(crate) fn graph(&self) -> &KernelGraphRecipe {
+        match self {
+            Self::GraphicsPassthrough(graph)
+            | Self::SerialCompute(graph)
+            | Self::OutputDomainProjection(graph)
+            | Self::MultiConsumerMaterialization(graph)
+            | Self::ScalarPrepass(graph)
+            | Self::GatherPrepass(graph)
+            | Self::FilterFlags(graph)
+            | Self::FilterScan(graph)
+            | Self::FilterCombine(graph)
+            | Self::FilterScatter(graph)
+            | Self::ReducePhase1(graph)
+            | Self::ReduceCombine(graph)
+            | Self::ScanPhase1(graph)
+            | Self::ScanBlock(graph)
+            | Self::ScanApplyOffsets(graph) => graph,
+        }
+    }
+}
+
+type RecipeConstructor = fn(Arc<KernelGraphRecipe>) -> KernelRecipe;
+
+fn close_recipe(constructor: RecipeConstructor, mut graph: KernelGraphRecipe) -> KernelRecipe {
+    super::prepare_executable_graph(&mut graph.graph, false);
+    constructor(Arc::new(graph))
 }
 
 /// Host ABI elements projected onto one physical entry. Slots are stable
@@ -163,17 +194,13 @@ pub struct KernelPhase {
     /// semantic entry ABI of their own.
     pub flow_source: Option<CompilerFlowEndpoint>,
     pub entry_point: String,
-    pub recipe: KernelRecipe,
-    /// Closed construction payload consumed by physicalization. Metadata and
-    /// the graph are captured when the recipe is committed, so physical EGIR
-    /// never depends on a mutated semantic entry arena.
-    pub(crate) body: Option<Arc<PlannedKernelBody>>,
+    pub recipe: Option<KernelRecipe>,
+    pub(crate) publication: PlannedEntryPublication,
     pub abi: EntryAbiProjection,
     pub workgroup_size: (u32, u32, u32),
     pub domain: KernelDomain,
     /// The authoritative selection request. Inferred selections retain their
-    /// original fallback so reconciliation can recompute the complete domain
-    /// after entry rewrites.
+    /// descriptor baseline while the recipe establishes its final domain.
     pub domain_selection: DomainSelection,
     pub resources: Vec<ScheduledResource>,
     /// Stable kernel identities that must complete first.
@@ -315,8 +342,62 @@ impl KernelPlan {
         let resource_ids = resources.iter().map(|resource| resource.id).collect::<HashSet<_>>();
         let mut planned_names = HashSet::new();
         let mut projected_outputs: HashMap<SemanticEntryId, HashSet<OutputSlotId>> = HashMap::new();
+        let mut route_owners: HashMap<(SemanticEntryId, OutputSlotId), KernelId> = HashMap::new();
+        let mut primary_projections: HashMap<SemanticEntryId, usize> = HashMap::new();
         for phase in self.phases() {
             planned_names.insert(phase.entry_point.as_str());
+            let recipe = phase
+                .recipe
+                .as_ref()
+                .ok_or_else(|| format!("kernel `{}` has no closed recipe", phase.entry_point))?;
+            if phase.publication.name != phase.entry_point {
+                return Err(format!(
+                    "kernel `{}` publication is named `{}`",
+                    phase.entry_point, phase.publication.name
+                ));
+            }
+            crate::egir::program::verify_kernel_recipe(recipe.graph(), &phase.publication, &resource_ids)?;
+            match (
+                matches!(recipe, KernelRecipe::GraphicsPassthrough(_)),
+                &phase.publication.execution_model,
+            ) {
+                (true, ExecutionModel::Compute { .. }) => {
+                    return Err(format!(
+                        "compute kernel `{}` uses a graphics passthrough recipe",
+                        phase.entry_point
+                    ));
+                }
+                (false, ExecutionModel::Vertex | ExecutionModel::Fragment) => {
+                    return Err(format!(
+                        "graphics kernel `{}` uses a compute recipe",
+                        phase.entry_point
+                    ));
+                }
+                _ => {}
+            }
+            let actual_resources =
+                segmented_graph_resources(&recipe.graph().graph, &phase.publication.resources)
+                    .unwrap_or_else(|| {
+                        graph_resources(&recipe.graph().graph, &phase.publication.resources)
+                    });
+            for actual in actual_resources {
+                let Some(planned) =
+                    phase.resources.iter().find(|planned| planned.resource == actual.resource)
+                else {
+                    return Err(format!(
+                        "kernel `{}` omits graph resource {:?}",
+                        phase.entry_point, actual.resource
+                    ));
+                };
+                if actual.access.reads() && !planned.access.reads()
+                    || actual.access.writes() && !planned.access.writes()
+                {
+                    return Err(format!(
+                        "kernel `{}` understates access to resource {:?}",
+                        phase.entry_point, actual.resource
+                    ));
+                }
+            }
             for required in &phase.resources {
                 if !resource_ids.contains(&required.resource) {
                     return Err(format!(
@@ -334,13 +415,16 @@ impl KernelPlan {
                     phase.entry_point, source
                 ));
             };
+            if phase.entry_point == abi.name {
+                *primary_projections.entry(source).or_default() += 1;
+            }
             if phase.abi.inputs.iter().any(|slot| slot.0 >= abi.input_count) {
                 return Err(format!(
                     "kernel `{}` has an invalid input projection",
                     phase.entry_point
                 ));
             }
-            let physical_output_count = phase.body.as_deref().map(|body| body.outputs.len()).unwrap_or(0);
+            let physical_output_count = phase.publication.outputs.len();
             let mut physical_slots = HashSet::new();
             for route in &phase.abi.output_routes {
                 let slot = route.semantic_slot;
@@ -358,7 +442,22 @@ impl KernelPlan {
                         phase.entry_point
                     ));
                 }
+                if let Some(owner) = route_owners.insert((source, slot), phase.id) {
+                    return Err(format!(
+                        "semantic output {:?}/{} is owned by both {:?} and {:?}",
+                        source, slot.0, owner, phase.id
+                    ));
+                }
                 projected_outputs.entry(source).or_default().insert(slot);
+            }
+        }
+
+        for (&source, abi) in &self.semantic_abi {
+            if primary_projections.get(&source).copied().unwrap_or(0) != 1 {
+                return Err(format!(
+                    "semantic entry `{}` does not have exactly one primary kernel projection",
+                    abi.name
+                ));
             }
         }
 
@@ -413,7 +512,7 @@ impl KernelPlan {
                     ));
                 }
                 for reader in readers {
-                    if reader.recipe == KernelRecipe::GraphicsPassthrough {
+                    if matches!(reader.recipe, Some(KernelRecipe::GraphicsPassthrough(_))) {
                         continue;
                     }
                     if !reader.dependencies.iter().any(|dependency| writers.contains(dependency)) {
@@ -446,33 +545,39 @@ impl KernelPlan {
             }
         }
 
-        let mut recipes_by_flow: HashMap<CompilerFlowEndpoint, HashSet<KernelRecipe>> = HashMap::new();
+        let mut recipes_by_flow = HashMap::<CompilerFlowEndpoint, Vec<&KernelRecipe>>::new();
         for phase in self.phases() {
-            if let Some(source) = phase.flow_source {
-                recipes_by_flow.entry(source).or_default().insert(phase.recipe.clone());
-            }
+            let (Some(source), Some(recipe)) = (phase.flow_source, &phase.recipe) else {
+                continue;
+            };
+            recipes_by_flow.entry(source).or_default().push(recipe);
         }
         for (source, recipes) in &recipes_by_flow {
-            let require = |recipe: KernelRecipe, context: &str| {
-                if recipes.contains(&recipe) {
-                    Ok(())
-                } else {
-                    Err(format!(
-                        "compiler flow endpoint {source:?} has an incomplete {context} kernel family"
-                    ))
-                }
-            };
-            if recipes.contains(&KernelRecipe::FilterFlags) {
-                require(KernelRecipe::FilterScan, "filter")?;
-                require(KernelRecipe::FilterCombine, "filter")?;
-                require(KernelRecipe::FilterScatter, "filter")?;
+            macro_rules! has {
+                ($pattern:pat) => {
+                    recipes.iter().any(|recipe| matches!(*recipe, $pattern))
+                };
             }
-            if recipes.contains(&KernelRecipe::ReducePhase1) {
-                require(KernelRecipe::ReduceCombine, "reduce")?;
+            let complete = !has!(KernelRecipe::FilterFlags(_))
+                || has!(KernelRecipe::FilterScan(_))
+                    && has!(KernelRecipe::FilterCombine(_))
+                    && has!(KernelRecipe::FilterScatter(_));
+            if !complete {
+                return Err(format!(
+                    "compiler flow endpoint {source:?} has an incomplete filter kernel family"
+                ));
             }
-            if recipes.contains(&KernelRecipe::ScanPhase1) {
-                require(KernelRecipe::ScanBlock, "scan")?;
-                require(KernelRecipe::ScanApplyOffsets, "scan")?;
+            if has!(KernelRecipe::ReducePhase1(_)) && !has!(KernelRecipe::ReduceCombine(_)) {
+                return Err(format!(
+                    "compiler flow endpoint {source:?} has an incomplete reduce kernel family"
+                ));
+            }
+            if has!(KernelRecipe::ScanPhase1(_))
+                && !(has!(KernelRecipe::ScanBlock(_)) && has!(KernelRecipe::ScanApplyOffsets(_)))
+            {
+                return Err(format!(
+                    "compiler flow endpoint {source:?} has an incomplete scan kernel family"
+                ));
             }
         }
 
@@ -528,15 +633,11 @@ impl KernelPlan {
                 )
             })
             .collect::<HashMap<_, _>>();
-        let mut publications = entries
+        let source_publications = entries
             .iter()
-            .map(|entry| (entry.name.clone(), entry.publication()))
-            .collect::<HashMap<_, _>>();
-        publications.extend(
-            prepasses.iter().map(|prepass| (prepass.body.name.clone(), prepass.body.publication())),
-        );
-        let mut publication_order = entries.iter().map(|entry| entry.name.clone()).collect::<Vec<_>>();
-        publication_order.extend(prepasses.iter().map(|prepass| prepass.body.name.clone()));
+            .map(SemanticEntry::publication)
+            .chain(prepasses.iter().map(|prepass| prepass.entry.publication()))
+            .collect();
         let by_name: HashMap<&str, (SemanticEntryId, &SemanticEntry)> = entries
             .iter()
             .enumerate()
@@ -544,7 +645,7 @@ impl KernelPlan {
             .collect();
         let prepass_by_name = prepasses
             .iter()
-            .map(|prepass| (prepass.body.name.as_str(), prepass))
+            .map(|prepass| (prepass.entry.name.as_str(), prepass))
             .collect::<HashMap<_, _>>();
         let mut pipelines = Vec::new();
         let mut next_kernel_id = 0u32;
@@ -567,7 +668,7 @@ impl KernelPlan {
                                 Some(*source),
                                 entry,
                                 selection.clone(),
-                                analyze_source_recipe(entry),
+                                source_recipe(entry),
                             )
                         })
                         .or_else(|| {
@@ -579,8 +680,16 @@ impl KernelPlan {
                             id,
                             flow_source: None,
                             entry_point: stage.entry_point.clone(),
-                            recipe: KernelRecipe::SerialCompute,
-                            body: None,
+                            recipe: None,
+                            publication: PlannedEntryPublication {
+                                name: stage.entry_point.clone(),
+                                execution_model: ExecutionModel::Compute {
+                                    local_size: stage.workgroup_size,
+                                },
+                                inputs: Vec::new(),
+                                outputs: Vec::new(),
+                                resources: Vec::new(),
+                            },
                             abi: EntryAbiProjection {
                                 source_entry: None,
                                 inputs: Vec::new(),
@@ -615,8 +724,14 @@ impl KernelPlan {
                         id,
                         flow_source: None,
                         entry_point: stage.entry_point.clone(),
-                        recipe: KernelRecipe::GraphicsPassthrough,
-                        body: None,
+                        recipe: None,
+                        publication: PlannedEntryPublication {
+                            name: stage.entry_point.clone(),
+                            execution_model: ExecutionModel::Fragment,
+                            inputs: Vec::new(),
+                            outputs: Vec::new(),
+                            resources: Vec::new(),
+                        },
                         abi: EntryAbiProjection {
                             source_entry: None,
                             inputs: Vec::new(),
@@ -661,7 +776,7 @@ impl KernelPlan {
                     Some(source),
                     entry,
                     DomainSelection::Inferred(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
-                    analyze_source_recipe(entry),
+                    source_recipe(entry),
                 )
             } else {
                 graphics_passthrough_phase(id, source, entry)
@@ -669,7 +784,7 @@ impl KernelPlan {
             unpublished.push(phase);
         }
         for prepass in prepasses {
-            if published_names.contains(prepass.body.name.as_str()) {
+            if published_names.contains(prepass.entry.name.as_str()) {
                 continue;
             }
             let id = KernelId(next_kernel_id);
@@ -686,47 +801,21 @@ impl KernelPlan {
             unpublished,
             next_kernel_id,
             semantic_abi,
-            publications,
-            publication_order,
+            source_publications,
             generated_callables: Vec::new(),
             region_interner: region_interner.clone(),
         }
     }
 
-    fn record_planned_publication(&mut self, body: &PlannedKernelBody) {
-        if !self.publications.contains_key(&body.name) {
-            self.publication_order.push(body.name.clone());
-            self.publications.insert(body.name.clone(), body.publication());
-            return;
-        }
-        let publication = self.publications.get_mut(&body.name).expect("checked above");
-        merge_publication(
-            publication,
-            &body.inputs,
-            &body.outputs,
-            &body.resource_declarations,
-        );
-    }
-
     fn publications_in_order(&self) -> Vec<&PlannedEntryPublication> {
-        let mut ordered = Vec::with_capacity(self.publications.len());
-        let mut seen = HashSet::new();
+        let mut ordered = self.source_publications.iter().collect::<Vec<_>>();
         for pipeline in &self.pipelines {
             for phase in &pipeline.phases {
-                if seen.insert(phase.entry_point.as_str()) {
-                    if let Some(publication) = self.publications.get(&phase.entry_point) {
-                        ordered.push(publication);
-                    }
-                }
+                ordered.push(&phase.publication);
             }
         }
-        for name in &self.publication_order {
-            if seen.insert(name.as_str()) {
-                if let Some(publication) = self.publications.get(name) {
-                    ordered.push(publication);
-                }
-            }
-        }
+        ordered.extend(self.graphics_passthroughs.iter().map(|phase| &phase.publication));
+        ordered.extend(self.unpublished.iter().map(|phase| &phase.publication));
         ordered
     }
 
@@ -736,11 +825,10 @@ impl KernelPlan {
     pub fn add_phase_after(
         &mut self,
         parent: &str,
-        body: &PlannedKernelBody,
+        body: KernelDraft,
         domain: DomainSelection,
-        recipe: KernelRecipe,
+        recipe: RecipeConstructor,
     ) {
-        self.record_planned_publication(body);
         if let Some(parent_index) = self.unpublished.iter().position(|phase| phase.entry_point == parent) {
             let parent_id = self.unpublished[parent_index].id;
             let source_entry = self.unpublished[parent_index].abi.source_entry;
@@ -787,11 +875,10 @@ impl KernelPlan {
     pub fn add_phase_before(
         &mut self,
         consumer: &str,
-        body: &PlannedKernelBody,
+        body: KernelDraft,
         domain: DomainSelection,
-        recipe: KernelRecipe,
+        recipe: RecipeConstructor,
     ) {
-        self.record_planned_publication(body);
         if let Some(consumer_index) =
             self.unpublished.iter().position(|phase| phase.entry_point == consumer)
         {
@@ -837,8 +924,6 @@ impl KernelPlan {
     /// consumer. No semantic entry is synthesized or admitted to the entry
     /// arena.
     pub fn add_materialization_before(&mut self, consumer: &str, requirement: &MaterializationRequirement) {
-        self.publication_order.push(requirement.name.clone());
-        self.publications.insert(requirement.name.clone(), requirement.publication());
         if let Some(consumer_index) =
             self.unpublished.iter().position(|phase| phase.entry_point == consumer)
         {
@@ -882,11 +967,10 @@ impl KernelPlan {
     pub fn add_sibling(
         &mut self,
         parent: &str,
-        body: &PlannedKernelBody,
+        body: KernelDraft,
         domain: DomainSelection,
-        recipe: KernelRecipe,
+        recipe: RecipeConstructor,
     ) {
-        self.record_planned_publication(body);
         if let Some(parent) = self.unpublished.iter().find(|phase| phase.entry_point == parent) {
             let source_entry = parent.abi.source_entry;
             let flow_source = parent.flow_source;
@@ -925,53 +1009,54 @@ impl KernelPlan {
             .map(|phase| phase.domain.clone())
     }
 
-    pub(crate) fn planned_body(&self, entry_point: &str) -> Option<&PlannedKernelBody> {
-        self.phases().find(|phase| phase.entry_point == entry_point).and_then(|phase| phase.body.as_deref())
-    }
-
-    pub(crate) fn for_each_body_mut(&mut self, mut visit: impl FnMut(&mut PlannedKernelBody)) {
-        for pipeline in &mut self.pipelines {
-            for phase in &mut pipeline.phases {
-                if let Some(body) = &mut phase.body {
-                    visit(Arc::make_mut(body));
-                }
-            }
-        }
-        for phase in self.graphics_passthroughs.iter_mut().chain(self.unpublished.iter_mut()) {
-            if let Some(body) = &mut phase.body {
-                visit(Arc::make_mut(body));
-            }
-        }
-    }
-
-    pub(crate) fn select_serial_bodies(&mut self, mut serialize: impl FnMut(&mut PlannedKernelBody)) {
+    /// Select a one-kernel recipe for every compute body without mutating a
+    /// semantic entry or retaining a speculative parallel construction.
+    pub(crate) fn select_sequential_recipes(&mut self) {
         for phase in self
             .pipelines
             .iter_mut()
             .flat_map(|pipeline| pipeline.phases.iter_mut())
             .chain(self.unpublished.iter_mut())
         {
-            let Some(body) = &mut phase.body else {
+            let Some(recipe) = phase.recipe.take() else {
                 continue;
             };
-            let body = Arc::make_mut(body);
-            serialize(body);
-            phase.workgroup_size = body_workgroup(body);
-            if let DomainSelection::Inferred(fallback) = &phase.domain_selection {
-                phase.domain = inferred_body_domain(body, fallback.clone());
+            let mut graph = recipe.graph().clone();
+            let materialization = matches!(&recipe, KernelRecipe::MultiConsumerMaterialization(_));
+            let constructor: RecipeConstructor = match recipe {
+                KernelRecipe::GraphicsPassthrough(_) => KernelRecipe::GraphicsPassthrough,
+                KernelRecipe::SerialCompute(_)
+                | KernelRecipe::ReducePhase1(_)
+                | KernelRecipe::ScanPhase1(_) => KernelRecipe::SerialCompute,
+                KernelRecipe::OutputDomainProjection(_) => KernelRecipe::OutputDomainProjection,
+                KernelRecipe::MultiConsumerMaterialization(_) => KernelRecipe::MultiConsumerMaterialization,
+                KernelRecipe::ScalarPrepass(_) => KernelRecipe::ScalarPrepass,
+                KernelRecipe::GatherPrepass(_) => KernelRecipe::GatherPrepass,
+                KernelRecipe::FilterFlags(_) => KernelRecipe::FilterFlags,
+                KernelRecipe::FilterScan(_) => KernelRecipe::FilterScan,
+                KernelRecipe::FilterCombine(_) => KernelRecipe::FilterCombine,
+                KernelRecipe::FilterScatter(_) => KernelRecipe::FilterScatter,
+                KernelRecipe::ReduceCombine(_) => KernelRecipe::ReduceCombine,
+                KernelRecipe::ScanBlock(_) => KernelRecipe::ScanBlock,
+                KernelRecipe::ScanApplyOffsets(_) => KernelRecipe::ScanApplyOffsets,
+            };
+            super::prepare_executable_graph(&mut graph.graph, true);
+            phase.workgroup_size = match phase.publication.execution_model {
+                ExecutionModel::Compute { local_size } => local_size,
+                _ => (1, 1, 1),
+            };
+            if let DomainSelection::Inferred(baseline) = &phase.domain_selection {
+                phase.domain = segmented_domain_graph(&graph.graph)
+                    .or_else(|| storage_image_domain_inputs(&phase.publication.inputs, baseline))
+                    .unwrap_or_else(|| baseline.clone());
             }
-            phase.resources = body_resources(body);
-            if phase.recipe == KernelRecipe::MultiConsumerMaterialization {
+            phase.resources = graph_resources(&graph.graph, &phase.publication.resources);
+            if materialization {
                 let domain = KernelDomain::Fixed { x: 1, y: 1, z: 1 };
                 phase.domain = domain.clone();
                 phase.domain_selection = DomainSelection::Explicit(domain);
             }
-            if matches!(
-                phase.recipe,
-                KernelRecipe::ReducePhase1 | KernelRecipe::ScanPhase1
-            ) {
-                phase.recipe = KernelRecipe::SerialCompute;
-            }
+            phase.recipe = Some(close_recipe(constructor, graph));
         }
     }
 
@@ -992,11 +1077,8 @@ impl KernelPlan {
             .collect();
     }
 
-    /// Commit the facts for one kernel at the same boundary that commits its
-    /// physical recipe. This is deliberately per-entry: a later global
-    /// reconciliation pass would make the entry list authoritative again.
-    pub fn commit_kernel(&mut self, body: &PlannedKernelBody, recipe: KernelRecipe) {
-        self.record_planned_publication(body);
+    /// Commit scheduling facts and the closed physical recipe atomically.
+    pub fn commit_kernel(&mut self, body: KernelDraft, recipe: RecipeConstructor) {
         let phase = self
             .pipelines
             .iter_mut()
@@ -1004,9 +1086,9 @@ impl KernelPlan {
             .chain(self.unpublished.iter_mut())
             .find(|phase| phase.entry_point == body.name)
             .unwrap_or_else(|| panic!("no planned kernel named `{}`", body.name));
-        phase.workgroup_size = body_workgroup(body);
-        if let DomainSelection::Inferred(fallback) = &phase.domain_selection {
-            phase.domain = inferred_body_domain(body, fallback.clone());
+        phase.workgroup_size = execution_workgroup(&body.execution_model);
+        if let DomainSelection::Inferred(baseline) = &phase.domain_selection {
+            phase.domain = inferred_body_domain(&body, baseline.clone());
         }
         let filter_phase = body.graph.skeleton.blocks.iter().any(|(_, block)| {
             block.side_effects.iter().any(|effect| {
@@ -1020,14 +1102,16 @@ impl KernelPlan {
             })
         });
         phase.resources = if filter_phase {
-            segmented_body_resources(body).unwrap_or_else(|| body_resources(body))
+            segmented_graph_resources(&body.graph, &body.resource_declarations)
+                .unwrap_or_else(|| graph_resources(&body.graph, &body.resource_declarations))
         } else {
-            body_resources(body)
+            graph_resources(&body.graph, &body.resource_declarations)
         };
-        phase.recipe = recipe;
-        phase.body = Some(Arc::new(body.clone()));
         phase.abi.inputs = (0..body.inputs.len()).map(InputSlotId).collect();
-        phase.abi.output_routes = body_output_projection(body);
+        phase.abi.output_routes = output_projection(&body.output_routes);
+        let (publication, graph) = body.into_recipe_parts();
+        phase.recipe = Some(close_recipe(recipe, graph));
+        phase.publication = publication;
     }
 
     /// Reject an explicit `#[dispatch(...)]` grid that provably under-covers an
@@ -1052,7 +1136,7 @@ impl KernelPlan {
                 else {
                     continue;
                 };
-                let (wx, wy, wz) = entry_workgroup(entry);
+                let (wx, wy, wz) = execution_workgroup(&entry.execution_model);
                 let total = x
                     .saturating_mul(*y)
                     .saturating_mul(*z)
@@ -1244,7 +1328,7 @@ impl KernelPlan {
             let positions: HashMap<KernelId, usize> =
                 pipeline.phases.iter().enumerate().map(|(index, phase)| (phase.id, index)).collect();
             for (index, phase) in pipeline.phases.iter().enumerate() {
-                if phase.body.is_none() {
+                if phase.recipe.is_none() {
                     return Err(format!(
                         "kernel `{}` has no closed construction body",
                         phase.entry_point
@@ -1270,7 +1354,7 @@ impl KernelPlan {
             }
         }
         for phase in &self.graphics_passthroughs {
-            if phase.body.is_none() {
+            if phase.recipe.is_none() {
                 return Err(format!(
                     "graphics entry `{}` has no closed construction body",
                     phase.entry_point
@@ -1285,7 +1369,7 @@ impl KernelPlan {
                     phase.entry_point
                 ));
             }
-            if phase.recipe != KernelRecipe::GraphicsPassthrough
+            if !matches!(phase.recipe, Some(KernelRecipe::GraphicsPassthrough(_)))
                 || !phase.dependencies.is_empty()
                 || phase.domain != (KernelDomain::Fixed { x: 1, y: 1, z: 1 })
             {
@@ -1302,7 +1386,7 @@ impl KernelPlan {
             .map(|(index, phase)| (phase.id, index))
             .collect::<HashMap<_, _>>();
         for (index, phase) in self.unpublished.iter().enumerate() {
-            if phase.body.is_none() {
+            if phase.recipe.is_none() {
                 return Err(format!(
                     "unpublished entry `{}` has no closed construction body",
                     phase.entry_point
@@ -1460,74 +1544,39 @@ impl KernelPlan {
     }
 }
 
-fn merge_publication(
-    publication: &mut PlannedEntryPublication,
-    inputs: &[EntryInput],
-    outputs: &[EntryOutput],
-    declarations: &[SemanticResourceDecl],
-) {
-    for input in inputs {
-        if !publication.inputs.iter().any(|existing| {
-            existing.storage_binding == input.storage_binding
-                && existing.uniform_binding == input.uniform_binding
-                && existing.texture_binding == input.texture_binding
-                && existing.sampler_binding == input.sampler_binding
-                && existing.storage_image_binding == input.storage_image_binding
-                && existing.name == input.name
-        }) {
-            publication.inputs.push(input.clone());
-        }
-    }
-    for output in outputs {
-        if output.storage_binding.is_none() && output.target.is_none() {
-            continue;
-        }
-        if !publication.outputs.iter().any(|existing| {
-            existing.storage_binding == output.storage_binding && existing.target == output.target
-        }) {
-            publication.outputs.push(output.clone());
-        }
-    }
-    for declaration in declarations {
-        if !publication
-            .resources
-            .iter()
-            .any(|existing| existing.resource == declaration.resource && existing.role == declaration.role)
-        {
-            publication.resources.push(declaration.clone());
-        }
-    }
-}
-
 fn phase_from_entry(
     id: KernelId,
     source_entry: Option<SemanticEntryId>,
     entry: &SemanticEntry,
     selection: DomainSelection,
-    recipe: KernelRecipe,
+    recipe: RecipeConstructor,
 ) -> KernelPhase {
     let domain = match &selection {
-        DomainSelection::Inferred(fallback) => inferred_domain(entry, fallback.clone()),
+        DomainSelection::Inferred(baseline) => inferred_domain(entry, baseline.clone()),
         DomainSelection::Explicit(domain) => domain.clone(),
     };
     KernelPhase {
         id,
         flow_source: source_entry.map(CompilerFlowEndpoint::Entry),
         entry_point: entry.name.clone(),
-        recipe,
-        body: Some(Arc::new(
-            PlannedKernelBody::from_semantic(entry)
-                .expect("validated semantic entry projection must be constructible"),
+        recipe: Some(close_recipe(
+            recipe,
+            KernelDraft::from_semantic(entry)
+                .expect("validated semantic entry projection must be constructible")
+                .into_recipe_parts()
+                .1,
         )),
+        publication: entry.publication(),
         abi: EntryAbiProjection {
             source_entry,
             inputs: (0..entry.inputs.len()).map(InputSlotId).collect(),
-            output_routes: entry_output_projection(entry),
+            output_routes: output_projection(&entry.output_routes),
         },
-        workgroup_size: entry_workgroup(entry),
+        workgroup_size: execution_workgroup(&entry.execution_model),
         domain,
         domain_selection: selection,
-        resources: segmented_resources(entry).unwrap_or_else(|| entry_resources(entry)),
+        resources: segmented_graph_resources(&entry.graph, &entry.resource_declarations)
+            .unwrap_or_else(|| graph_resources(&entry.graph, &entry.resource_declarations)),
         dependencies: Vec::new(),
     }
 }
@@ -1536,29 +1585,36 @@ fn phase_from_body(
     id: KernelId,
     flow_source: Option<CompilerFlowEndpoint>,
     source_entry: Option<SemanticEntryId>,
-    body: &PlannedKernelBody,
+    body: KernelDraft,
     selection: DomainSelection,
-    recipe: KernelRecipe,
+    recipe: RecipeConstructor,
 ) -> KernelPhase {
     let domain = match &selection {
-        DomainSelection::Inferred(fallback) => inferred_body_domain(body, fallback.clone()),
+        DomainSelection::Inferred(baseline) => inferred_body_domain(&body, baseline.clone()),
         DomainSelection::Explicit(domain) => domain.clone(),
     };
+    let entry_point = body.name.clone();
+    let inputs = (0..body.inputs.len()).map(InputSlotId).collect();
+    let output_routes = output_projection(&body.output_routes);
+    let workgroup_size = execution_workgroup(&body.execution_model);
+    let resources = segmented_graph_resources(&body.graph, &body.resource_declarations)
+        .unwrap_or_else(|| graph_resources(&body.graph, &body.resource_declarations));
+    let (publication, graph) = body.into_recipe_parts();
     KernelPhase {
         id,
         flow_source,
-        entry_point: body.name.clone(),
-        recipe,
-        body: Some(Arc::new(body.clone())),
+        entry_point,
+        recipe: Some(close_recipe(recipe, graph)),
+        publication,
         abi: EntryAbiProjection {
             source_entry,
-            inputs: (0..body.inputs.len()).map(InputSlotId).collect(),
-            output_routes: body_output_projection(body),
+            inputs,
+            output_routes,
         },
-        workgroup_size: body_workgroup(body),
+        workgroup_size,
         domain,
         domain_selection: selection,
-        resources: segmented_body_resources(body).unwrap_or_else(|| body_resources(body)),
+        resources,
         dependencies: Vec::new(),
     }
 }
@@ -1576,7 +1632,8 @@ fn phase_from_prepass(
         id,
         Some(CompilerFlowEndpoint::Prepass(prepass.id)),
         None,
-        &prepass.body,
+        KernelDraft::from_semantic(&prepass.entry)
+            .expect("validated prepass projection must be constructible"),
         selection,
         recipe,
     )
@@ -1592,10 +1649,15 @@ fn phase_from_materialization(
         id,
         flow_source: Some(CompilerFlowEndpoint::Materialization(requirement.id)),
         entry_point: requirement.name.clone(),
-        recipe: KernelRecipe::MultiConsumerMaterialization,
-        body: Some(Arc::new(
-            requirement.planned_body().expect("validated materialization projection must be constructible"),
+        recipe: Some(close_recipe(
+            KernelRecipe::MultiConsumerMaterialization,
+            requirement
+                .project_kernel()
+                .expect("validated materialization projection must be constructible")
+                .into_recipe_parts()
+                .1,
         )),
+        publication: requirement.publication(),
         abi: EntryAbiProjection {
             source_entry: None,
             inputs: Vec::new(),
@@ -1624,26 +1686,29 @@ fn graphics_passthrough_phase(
         id,
         flow_source: Some(CompilerFlowEndpoint::Entry(source_entry)),
         entry_point: entry.name.clone(),
-        recipe: KernelRecipe::GraphicsPassthrough,
-        body: Some(Arc::new(
-            PlannedKernelBody::from_semantic(entry)
-                .expect("validated graphics entry projection must be constructible"),
+        recipe: Some(close_recipe(
+            KernelRecipe::GraphicsPassthrough,
+            KernelDraft::from_semantic(entry)
+                .expect("validated graphics entry projection must be constructible")
+                .into_recipe_parts()
+                .1,
         )),
+        publication: entry.publication(),
         abi: EntryAbiProjection {
             source_entry: Some(source_entry),
             inputs: (0..entry.inputs.len()).map(InputSlotId).collect(),
-            output_routes: entry_output_projection(entry),
+            output_routes: output_projection(&entry.output_routes),
         },
         workgroup_size: (1, 1, 1),
         domain: domain.clone(),
         domain_selection: DomainSelection::Inferred(domain),
-        resources: entry_resources(entry),
+        resources: graph_resources(&entry.graph, &entry.resource_declarations),
         dependencies: Vec::new(),
     }
 }
 
-fn entry_output_projection(entry: &SemanticEntry) -> Vec<OutputRouteProjection> {
-    let mut slots = entry.output_routes.iter().map(|route| route.slot).collect::<Vec<_>>();
+fn output_projection(routes: &[crate::egir::program::OutputRoute]) -> Vec<OutputRouteProjection> {
+    let mut slots = routes.iter().map(|route| route.slot).collect::<Vec<_>>();
     slots.sort_unstable();
     slots.dedup();
     slots
@@ -1656,25 +1721,7 @@ fn entry_output_projection(entry: &SemanticEntry) -> Vec<OutputRouteProjection> 
         .collect()
 }
 
-fn body_output_projection(body: &PlannedKernelBody) -> Vec<OutputRouteProjection> {
-    let mut slots = body.output_routes.iter().map(|route| route.slot).collect::<Vec<_>>();
-    slots.sort_unstable();
-    slots.dedup();
-    slots
-        .into_iter()
-        .enumerate()
-        .map(|(physical, semantic_slot)| OutputRouteProjection {
-            semantic_slot,
-            physical_slot: OutputSlotId(physical),
-        })
-        .collect()
-}
-
-fn analyze_source_recipe(entry: &SemanticEntry) -> KernelRecipe {
-    source_recipe(entry)
-}
-
-fn source_recipe(entry: &SemanticEntry) -> KernelRecipe {
+fn source_recipe(entry: &SemanticEntry) -> RecipeConstructor {
     if !matches!(entry.execution_model, ExecutionModel::Compute { .. }) {
         return KernelRecipe::GraphicsPassthrough;
     }
@@ -1708,14 +1755,14 @@ fn source_recipe(entry: &SemanticEntry) -> KernelRecipe {
     KernelRecipe::SerialCompute
 }
 
-fn inferred_domain(entry: &SemanticEntry, fallback: KernelDomain) -> KernelDomain {
-    segmented_domain(entry).or_else(|| storage_image_domain(entry, &fallback)).unwrap_or(fallback)
+fn inferred_domain(entry: &SemanticEntry, baseline: KernelDomain) -> KernelDomain {
+    segmented_domain(entry).or_else(|| storage_image_domain(entry, &baseline)).unwrap_or(baseline)
 }
 
-fn inferred_body_domain(body: &PlannedKernelBody, fallback: KernelDomain) -> KernelDomain {
+fn inferred_body_domain(body: &KernelDraft, baseline: KernelDomain) -> KernelDomain {
     segmented_domain_graph(&body.graph)
-        .or_else(|| storage_image_domain_inputs(&body.inputs, &fallback))
-        .unwrap_or(fallback)
+        .or_else(|| storage_image_domain_inputs(&body.inputs, &baseline))
+        .unwrap_or(baseline)
 }
 
 /// A compute entry with no SOAC-derived domain and a `#[storage_image]` param
@@ -1725,12 +1772,12 @@ fn inferred_body_domain(body: &PlannedKernelBody, fallback: KernelDomain) -> Ker
 /// don't opt out; the image is the domain. Only upgrades the single-workgroup
 /// placeholder domain; an explicit fixed grid stays as scheduled.
 ///
-fn storage_image_domain(entry: &SemanticEntry, fallback: &KernelDomain) -> Option<KernelDomain> {
-    storage_image_domain_inputs(&entry.inputs, fallback)
+fn storage_image_domain(entry: &SemanticEntry, baseline: &KernelDomain) -> Option<KernelDomain> {
+    storage_image_domain_inputs(&entry.inputs, baseline)
 }
 
-fn storage_image_domain_inputs(inputs: &[EntryInput], fallback: &KernelDomain) -> Option<KernelDomain> {
-    if !matches!(fallback, KernelDomain::Fixed { x: 1, y: 1, z: 1 }) {
+fn storage_image_domain_inputs(inputs: &[EntryInput], baseline: &KernelDomain) -> Option<KernelDomain> {
+    if !matches!(baseline, KernelDomain::Fixed { x: 1, y: 1, z: 1 }) {
         return None;
     }
     let (binding, ..) = inputs.iter().find_map(|input| input.storage_image_binding)?;
@@ -1738,14 +1785,6 @@ fn storage_image_domain_inputs(inputs: &[EntryInput], fallback: &KernelDomain) -
         set: binding.set,
         binding: binding.binding,
     }))
-}
-
-fn segmented_resources(entry: &SemanticEntry) -> Option<Vec<ScheduledResource>> {
-    segmented_graph_resources(&entry.graph, &entry.resource_declarations)
-}
-
-fn segmented_body_resources(body: &PlannedKernelBody) -> Option<Vec<ScheduledResource>> {
-    segmented_graph_resources(&body.graph, &body.resource_declarations)
 }
 
 fn segmented_graph_resources(
@@ -1815,16 +1854,9 @@ fn segmented_graph_resources(
     None
 }
 
-fn entry_workgroup(entry: &SemanticEntry) -> (u32, u32, u32) {
-    match entry.execution_model {
-        ExecutionModel::Compute { local_size } => local_size,
-        _ => (1, 1, 1),
-    }
-}
-
-fn body_workgroup(body: &PlannedKernelBody) -> (u32, u32, u32) {
-    match body.execution_model {
-        ExecutionModel::Compute { local_size } => local_size,
+fn execution_workgroup(model: &ExecutionModel) -> (u32, u32, u32) {
+    match model {
+        ExecutionModel::Compute { local_size } => *local_size,
         _ => (1, 1, 1),
     }
 }
@@ -1922,14 +1954,6 @@ pub(crate) fn domain_from_space(space: &crate::egir::types::SegSpace) -> Option<
         }),
         _ => None,
     }
-}
-
-fn entry_resources(entry: &SemanticEntry) -> Vec<ScheduledResource> {
-    graph_resources(&entry.graph, &entry.resource_declarations)
-}
-
-fn body_resources(body: &PlannedKernelBody) -> Vec<ScheduledResource> {
-    graph_resources(&body.graph, &body.resource_declarations)
 }
 
 fn materialization_resources(requirement: &MaterializationRequirement) -> Vec<ScheduledResource> {
@@ -2189,8 +2213,16 @@ mod tests {
             id: KernelId(id),
             flow_source: Some(CompilerFlowEndpoint::Entry(SemanticEntryId(id))),
             entry_point: format!("phase_{id}"),
-            recipe: KernelRecipe::SerialCompute,
-            body: None,
+            recipe: None,
+            publication: PlannedEntryPublication {
+                name: format!("phase_{id}"),
+                execution_model: ExecutionModel::Compute {
+                    local_size: (1, 1, 1),
+                },
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+                resources: Vec::new(),
+            },
             abi: EntryAbiProjection {
                 source_entry: Some(SemanticEntryId(id)),
                 inputs: Vec::new(),
@@ -2211,6 +2243,79 @@ mod tests {
             ordered.iter().map(|phase| phase.id).collect::<Vec<_>>(),
             vec![KernelId(1), KernelId(2), KernelId(0)]
         );
+    }
+
+    fn closed_test_phase(id: u32, recipe: RecipeConstructor) -> KernelPhase {
+        let unit = Type::Constructed(TypeName::Unit, vec![]);
+        KernelPhase {
+            id: KernelId(id),
+            flow_source: None,
+            entry_point: format!("phase_{id}"),
+            recipe: Some(close_recipe(
+                recipe,
+                KernelGraphRecipe {
+                    span: Span::dummy(),
+                    params: Vec::new(),
+                    return_ty: unit,
+                    graph: EGraph::new(),
+                    control_headers: LookupMap::new(),
+                    aliases: LookupMap::new(),
+                    output_routes: Vec::new(),
+                },
+            )),
+            publication: PlannedEntryPublication {
+                name: format!("phase_{id}"),
+                execution_model: ExecutionModel::Compute {
+                    local_size: (1, 1, 1),
+                },
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+                resources: Vec::new(),
+            },
+            abi: EntryAbiProjection {
+                source_entry: None,
+                inputs: Vec::new(),
+                output_routes: Vec::new(),
+            },
+            workgroup_size: (1, 1, 1),
+            domain: KernelDomain::Fixed { x: 1, y: 1, z: 1 },
+            domain_selection: DomainSelection::Explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+            resources: Vec::new(),
+            dependencies: Vec::new(),
+        }
+    }
+
+    fn validation_error(phase: KernelPhase) -> String {
+        let mut plan = KernelPlan::default();
+        plan.unpublished.push(phase);
+        plan.into_validated(&[], &[], &PipelineDescriptor::default()).unwrap_err()
+    }
+
+    #[test]
+    fn validator_rejects_open_or_inconsistent_recipes() {
+        let mut missing_recipe = closed_test_phase(0, KernelRecipe::SerialCompute);
+        missing_recipe.recipe = None;
+        assert!(validation_error(missing_recipe).contains("no closed construction body"));
+
+        let mut missing_resource = closed_test_phase(0, KernelRecipe::SerialCompute);
+        missing_resource.resources.push(ScheduledResource {
+            resource: ResourceId(99),
+            access: ResourceAccess::Read,
+        });
+        assert!(validation_error(missing_resource).contains("missing logical resource"));
+
+        let mut invalid_alias = closed_test_phase(0, KernelRecipe::SerialCompute);
+        let graph = Arc::make_mut(match invalid_alias.recipe.as_mut().unwrap() {
+            KernelRecipe::SerialCompute(graph) => graph,
+            _ => unreachable!(),
+        });
+        graph.aliases.insert(Default::default(), Default::default());
+        assert!(validation_error(invalid_alias).contains("invalid alias"));
+
+        let mut incomplete_filter = closed_test_phase(0, KernelRecipe::FilterFlags);
+        incomplete_filter.flow_source =
+            Some(CompilerFlowEndpoint::Prepass(crate::egir::program::PrepassId(0)));
+        assert!(validation_error(incomplete_filter).contains("incomplete filter kernel family"));
     }
 
     #[test]
@@ -2285,13 +2390,13 @@ mod tests {
         assert_eq!(inferred.domain_selection, DomainSelection::Inferred(fixed));
 
         entry.inputs[0].storage_image_binding = None;
-        let DomainSelection::Inferred(fallback) = &inferred.domain_selection else {
+        let DomainSelection::Inferred(baseline) = &inferred.domain_selection else {
             unreachable!()
         };
         assert_eq!(
-            inferred_domain(&entry, fallback.clone()),
+            inferred_domain(&entry, baseline.clone()),
             KernelDomain::Fixed { x: 1, y: 1, z: 1 },
-            "reconciliation must recompute from the retained fallback, not the old resolved domain"
+            "inference must use the retained descriptor baseline, not an old resolved domain"
         );
     }
 }

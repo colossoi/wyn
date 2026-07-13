@@ -18,7 +18,7 @@ pub fn schedule(
     super::program::verify_allocated_resources(&inner).map_err(ConvertError::Internal)?;
     let unpublished_descriptor = inner.pipeline.clone();
 
-    let mut kernel_plan = if profile.schedule == SchedulePolicy::Parallel {
+    let kernel_plan = if profile.schedule == SchedulePolicy::Parallel {
         parallelize::lower(&inner)
     } else {
         let mut schedule = parallelize::schedule::KernelPlan::seed(
@@ -29,11 +29,10 @@ pub fn schedule(
             &inner.region_interner,
         );
         parallelize::attach_compiler_prepasses(&inner, &mut schedule);
-        parallelize::restore_plan_serial(&mut schedule);
+        schedule.select_sequential_recipes();
         schedule.coalesce_resource_flows(&inner.resources);
         schedule
     };
-    parallelize::finalize_plan_states(&mut kernel_plan);
     kernel_plan
         .check_explicit_dispatch_coverage(&inner.entry_points)
         .map_err(ConvertError::InvalidDispatch)?;

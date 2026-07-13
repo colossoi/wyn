@@ -410,12 +410,10 @@ fn extract_prepass_requirements(inner: &mut SemanticProgram) {
             source_entries.push(entry);
             continue;
         };
-        let body = PlannedKernelBody::from_semantic(&entry)
-            .expect("optimized prepass graph must be projectable into a typed requirement");
         prepasses.push(PrepassRequirement {
             id: PrepassId(prepasses.len() as u32),
             kind,
-            body,
+            entry,
         });
     }
     assert!(
@@ -446,7 +444,7 @@ fn record_compiler_resource_flows(inner: &mut SemanticProgram) {
     }
     for prepass in &inner.prepasses {
         let endpoint = CompilerFlowEndpoint::Prepass(prepass.id);
-        for declaration in &prepass.body.resource_declarations {
+        for declaration in &prepass.entry.resource_declarations {
             let resource = declaration.resource.0;
             match declaration.role {
                 interface::StorageRole::Output => producers.entry(resource).or_default().push(endpoint),
@@ -580,9 +578,9 @@ fn strip_compiler_abi(inner: &mut SemanticProgram, abi_resources: &HashMap<crate
     }
     for prepass in &mut inner.prepasses {
         strip(
-            &mut prepass.body.inputs,
-            &mut prepass.body.outputs,
-            &mut prepass.body.output_routes,
+            &mut prepass.entry.inputs,
+            &mut prepass.entry.outputs,
+            &mut prepass.entry.output_routes,
         );
     }
 }
@@ -648,17 +646,17 @@ fn normalize_structural_resources(
         }
     }
     for prepass in &mut inner.prepasses {
-        for input in &mut prepass.body.inputs {
+        for input in &mut prepass.entry.inputs {
             normalize_type_resources(&mut input.ty, by_binding);
         }
-        for output in &mut prepass.body.outputs {
+        for output in &mut prepass.entry.outputs {
             normalize_type_resources(&mut output.ty, by_binding);
         }
-        for (ty, _) in &mut prepass.body.params {
+        for (ty, _) in &mut prepass.entry.params {
             normalize_type_resources(ty, by_binding);
         }
-        normalize_type_resources(&mut prepass.body.return_ty, by_binding);
-        for declaration in &mut prepass.body.resource_declarations {
+        normalize_type_resources(&mut prepass.entry.return_ty, by_binding);
+        for declaration in &mut prepass.entry.resource_declarations {
             normalize_type_resources(&mut declaration.elem_ty, by_binding);
         }
     }
@@ -999,7 +997,7 @@ pub(crate) fn verify_allocated_resources(inner: &SemanticProgram) -> Result<(), 
                 prepass.id
             ));
         }
-        verify_allocated_planned_body(&prepass.body, &covered, "prepass")?;
+        verify_allocated_entry(&prepass.entry, &covered, "prepass")?;
     }
     for (index, requirement) in inner.materializations.iter().enumerate() {
         if requirement.id != MaterializationId(index as u32) {
@@ -1136,8 +1134,8 @@ fn flow_endpoint<'a>(
             .filter(|prepass| prepass.id == id)
             .map(|prepass| {
                 (
-                    prepass.body.name.as_str(),
-                    prepass.body.resource_declarations.as_slice(),
+                    prepass.entry.name.as_str(),
+                    prepass.entry.resource_declarations.as_slice(),
                 )
             })
             .ok_or_else(|| format!("resource {:?} has an invalid prepass endpoint {:?}", resource, id)),
@@ -1160,33 +1158,105 @@ fn flow_endpoint<'a>(
     }
 }
 
-fn verify_allocated_planned_body(
-    body: &PlannedKernelBody,
+fn verify_allocated_entry(
+    entry: &SemanticEntry,
     covered: &std::collections::HashSet<ResourceId>,
     kind: &str,
 ) -> Result<(), String> {
-    for declaration in &body.resource_declarations {
+    verify_allocated_body(
+        &entry.resource_declarations,
+        &entry.inputs,
+        &entry.outputs,
+        &entry.params,
+        &entry.return_ty,
+        &entry.graph,
+        covered,
+        &format!("{kind} `{}`", entry.name),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_allocated_body(
+    declarations: &[SemanticResourceDecl],
+    inputs: &[EntryInput],
+    outputs: &[EntryOutput],
+    params: &[(Type<TypeName>, String)],
+    return_ty: &Type<TypeName>,
+    graph: &EGraph,
+    covered: &std::collections::HashSet<ResourceId>,
+    owner: &str,
+) -> Result<(), String> {
+    for declaration in declarations {
         let resource = declaration.resource.0;
         if !covered.contains(&resource) {
-            return Err(format!(
-                "{kind} `{}` references missing resource {:?}",
-                body.name, resource
-            ));
+            return Err(format!("{owner} references missing resource {resource:?}"));
         }
         verify_allocated_size(&declaration.size, covered)?;
         verify_allocated_type(&declaration.elem_ty, covered)?;
     }
-    verify_allocated_type(&body.return_ty, covered)?;
-    for input in &body.inputs {
+    verify_allocated_type(return_ty, covered)?;
+    for input in inputs {
         verify_allocated_type(&input.ty, covered)?;
     }
-    for output in &body.outputs {
+    for output in outputs {
         verify_allocated_type(&output.ty, covered)?;
     }
-    for (ty, _) in &body.params {
+    for (ty, _) in params {
         verify_allocated_type(ty, covered)?;
     }
-    verify_allocated_graph(&body.graph, covered, &format!("{kind} `{}`", body.name))
+    verify_allocated_graph(graph, covered, owner)
+}
+
+pub(crate) fn verify_kernel_recipe(
+    graph: &KernelGraphRecipe,
+    publication: &PlannedEntryPublication,
+    covered: &std::collections::HashSet<ResourceId>,
+) -> Result<(), String> {
+    let owner = format!("kernel `{}`", publication.name);
+    verify_allocated_body(
+        &publication.resources,
+        &publication.inputs,
+        &publication.outputs,
+        &graph.params,
+        &graph.return_ty,
+        &graph.graph,
+        covered,
+        &owner,
+    )?;
+
+    let effects = graph
+        .graph
+        .skeleton
+        .blocks
+        .values()
+        .flat_map(|block| block.side_effects.iter())
+        .flat_map(|effect| effect.effects.into_iter().flat_map(|(input, output)| [input, output]))
+        .collect::<std::collections::HashSet<_>>();
+    for route in &graph.output_routes {
+        if route.slot.0 >= publication.outputs.len()
+            || !graph.graph.skeleton.blocks.contains_key(route.source.block)
+            || !graph.graph.nodes.contains_key(route.source.value)
+        {
+            return Err(format!("{owner} contains an invalid output route"));
+        }
+        for writer in &route.writers {
+            let valid = match writer {
+                OutputWriter::Value(value) => graph.graph.nodes.contains_key(*value),
+                OutputWriter::Effect(effect) => effects.contains(effect),
+            };
+            if !valid {
+                return Err(format!("{owner} contains an invalid output writer"));
+            }
+        }
+    }
+    if graph
+        .aliases
+        .iter()
+        .any(|(from, to)| !graph.graph.nodes.contains_key(*from) || !graph.graph.nodes.contains_key(*to))
+    {
+        return Err(format!("{owner} contains an invalid alias"));
+    }
+    Ok(())
 }
 
 fn verify_allocated_size(
@@ -1459,12 +1529,11 @@ pub struct SemanticEntry {
     pub output_routes: Vec<OutputRoute>,
 }
 
-/// Closed graph and ABI recipe owned by a planned physical kernel. It is
-/// intentionally distinct from `SemanticEntry`: once constructed it carries
-/// no semantic provenance tag and cannot re-enter semantic optimization or
-/// scheduling.
-#[derive(Clone, Debug)]
-pub struct PlannedKernelBody {
+/// Ephemeral planner output. A draft is immediately decomposed into a
+/// publication record and a payload-bearing `KernelRecipe`; it is never
+/// retained by `KernelPlan` or accepted by physicalization.
+#[derive(Debug)]
+pub struct KernelDraft {
     pub name: String,
     pub span: Span,
     pub execution_model: ExecutionModel,
@@ -1479,7 +1548,7 @@ pub struct PlannedKernelBody {
     pub output_routes: Vec<OutputRoute>,
 }
 
-impl PlannedKernelBody {
+impl KernelDraft {
     /// Project a complete semantic entry into fresh graph identities. This is
     /// the only whole-entry admission path into a kernel plan.
     pub fn from_semantic(entry: &SemanticEntry) -> Result<Self, String> {
@@ -1527,26 +1596,65 @@ impl PlannedKernelBody {
             output_routes,
         })
     }
+}
 
-    pub fn publication(&self) -> PlannedEntryPublication {
-        PlannedEntryPublication {
-            name: self.name.clone(),
-            execution_model: self.execution_model.clone(),
-            inputs: self.inputs.clone(),
-            outputs: self.outputs.clone(),
-            resources: self.resource_declarations.clone(),
-        }
+/// Resource-independent graph construction payload retained by a closed
+/// kernel recipe. Host ABI and scheduling facts live on `KernelPhase`, not in
+/// this graph record.
+#[derive(Clone, Debug)]
+pub struct KernelGraphRecipe {
+    pub span: Span,
+    pub params: Vec<(Type<TypeName>, String)>,
+    pub return_ty: Type<TypeName>,
+    pub graph: EGraph,
+    pub control_headers: LookupMap<BlockId, ControlHeader>,
+    pub aliases: LookupMap<NodeId, NodeId>,
+    pub output_routes: Vec<OutputRoute>,
+}
+
+impl KernelDraft {
+    pub fn into_recipe_parts(self) -> (PlannedEntryPublication, KernelGraphRecipe) {
+        let Self {
+            name,
+            span,
+            execution_model,
+            inputs,
+            outputs,
+            resource_declarations,
+            params,
+            return_ty,
+            graph,
+            control_headers,
+            aliases,
+            output_routes,
+        } = self;
+        let publication = PlannedEntryPublication {
+            name,
+            execution_model,
+            inputs,
+            outputs,
+            resources: resource_declarations,
+        };
+        let graph = KernelGraphRecipe {
+            span,
+            params,
+            return_ty,
+            graph,
+            control_headers,
+            aliases,
+            output_routes,
+        };
+        (publication, graph)
     }
 }
 
 /// TLC-originated scalar or gather producer removed from the semantic entry
 /// arena at allocation. Its graph remains target-independent until the
 /// planner selects and commits a kernel recipe.
-#[derive(Clone, Debug)]
 pub struct PrepassRequirement {
     pub id: PrepassId,
     pub kind: PrepassKind,
-    pub body: PlannedKernelBody,
+    pub entry: SemanticEntry,
 }
 
 impl SemanticEntry {
@@ -1626,10 +1734,10 @@ impl MaterializationRequirement {
         }
     }
 
-    pub fn planned_body(&self) -> Result<PlannedKernelBody, String> {
+    pub fn project_kernel(&self) -> Result<KernelDraft, String> {
         let projection =
             super::graph_projector::GraphProjector::new(&self.graph, &self.control_headers).all()?;
-        Ok(PlannedKernelBody {
+        Ok(KernelDraft {
             name: self.name.clone(),
             span: self.span,
             execution_model: self.execution_model.clone(),
@@ -1858,7 +1966,7 @@ fn physicalize_function(
         physicalize_type_resources(ty, resources);
     }
     physicalize_type_resources(&mut return_ty, resources);
-    super::parallelize::prepare_physical_callable_graph(&mut graph, serial);
+    super::parallelize::prepare_executable_graph(&mut graph, serial);
     Ok(PhysicalFunc {
         name,
         span,
@@ -1905,8 +2013,10 @@ impl PhysicalProgram {
         pipeline: PipelineDescriptor,
     ) -> Result<Self, String> {
         let entry_points = plan
-            .physical_bodies()
-            .map(|body| super::builder::PhysicalEntryBuilder::new(body, &physical_resources).build())
+            .physical_kernels()
+            .map(|(phase, publication)| {
+                super::builder::PhysicalEntryBuilder::new(phase, publication, &physical_resources).build()
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let mut functions = program
             .functions

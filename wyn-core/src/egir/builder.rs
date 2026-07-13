@@ -13,13 +13,15 @@ use crate::ssa::types::{ConstantValue, ControlHeader, ExecutionModel};
 use crate::{interface, ResourceId};
 
 use super::graph_ops;
+use super::parallelize::schedule::KernelPhase;
 use super::program::{
-    PhysicalEntry, PhysicalResourceTable, PlannedKernelBody, SemanticResourceDecl, SemanticResourceRef,
+    KernelDraft, KernelGraphRecipe, PhysicalEntry, PhysicalResourceTable, PlannedEntryPublication,
+    SemanticResourceDecl, SemanticResourceRef,
 };
 use super::types::{EGraph, EgirSoac, NodeId, SkeletonTerminator, SoacDestination};
 use crate::ssa::types::{EntryInput, EntryOutput};
 
-/// Build a closed `PlannedKernelBody` programmatically. Mirrors the
+/// Build an ephemeral `KernelDraft` programmatically. Mirrors the
 /// primitive operations `from_tlc::Converter` exposes, but holds no
 /// TLC-side state.
 pub struct EntryBuilder {
@@ -41,49 +43,45 @@ pub struct EntryBuilder {
 /// semantic projection or a closed materialization recipe rather than
 /// exposing a partially initialized physical record.
 pub struct PhysicalEntryBuilder<'a> {
-    body: &'a PlannedKernelBody,
+    phase: &'a KernelPhase,
+    publication: &'a PlannedEntryPublication,
     resources: &'a PhysicalResourceTable,
 }
 
-struct PhysicalEntryDraft {
-    name: String,
-    span: Span,
-    execution_model: ExecutionModel,
-    inputs: Vec<EntryInput>,
-    outputs: Vec<EntryOutput>,
-    resources: Vec<SemanticResourceDecl>,
-    params: Vec<(Type<TypeName>, String)>,
-    return_ty: Type<TypeName>,
-    graph: EGraph,
-    control_headers: LookupMap<BlockId, ControlHeader>,
-    aliases: LookupMap<NodeId, NodeId>,
-    output_routes: Vec<super::program::OutputRoute>,
-}
-
 impl<'a> PhysicalEntryBuilder<'a> {
-    pub fn new(body: &'a PlannedKernelBody, resources: &'a PhysicalResourceTable) -> Self {
-        Self { body, resources }
+    pub fn new(
+        phase: &'a KernelPhase,
+        publication: &'a PlannedEntryPublication,
+        resources: &'a PhysicalResourceTable,
+    ) -> Self {
+        Self {
+            phase,
+            publication,
+            resources,
+        }
     }
 
     pub fn build(self) -> Result<PhysicalEntry, String> {
-        let mut draft = PhysicalEntryDraft {
-            name: self.body.name.clone(),
-            span: self.body.span,
-            execution_model: self.body.execution_model.clone(),
-            inputs: self.body.inputs.clone(),
-            outputs: self.body.outputs.clone(),
-            resources: self.body.resource_declarations.clone(),
-            params: self.body.params.clone(),
-            return_ty: self.body.return_ty.clone(),
-            graph: self.body.graph.clone(),
-            control_headers: self.body.control_headers.clone(),
-            aliases: self.body.aliases.clone(),
-            output_routes: self.body.output_routes.clone(),
-        };
+        let recipe = self
+            .phase
+            .recipe
+            .as_ref()
+            .ok_or_else(|| format!("kernel `{}` has no construction recipe", self.phase.entry_point))?;
+        let KernelGraphRecipe {
+            span,
+            mut params,
+            mut return_ty,
+            graph,
+            control_headers,
+            aliases,
+            output_routes,
+        } = recipe.graph().clone();
+        let mut inputs = self.publication.inputs.clone();
+        let mut outputs = self.publication.outputs.clone();
+        let mut declarations = self.publication.resources.clone();
         let (graph, node_map, block_map) =
-            super::program::physicalize_graph_resources(draft.graph, self.resources)?;
-        let control_headers = draft
-            .control_headers
+            super::program::physicalize_graph_resources(graph, self.resources)?;
+        let control_headers = control_headers
             .into_iter()
             .map(|(block, header)| {
                 let block = block_map[&block];
@@ -91,10 +89,8 @@ impl<'a> PhysicalEntryBuilder<'a> {
                 (block, header)
             })
             .collect();
-        let aliases =
-            draft.aliases.into_iter().map(|(from, to)| (node_map[&from], node_map[&to])).collect();
-        let output_routes = draft
-            .output_routes
+        let aliases = aliases.into_iter().map(|(from, to)| (node_map[&from], node_map[&to])).collect();
+        let output_routes = output_routes
             .into_iter()
             .map(|route| super::program::OutputRoute {
                 source: super::program::SlotSource {
@@ -116,39 +112,38 @@ impl<'a> PhysicalEntryBuilder<'a> {
                     .collect(),
             })
             .collect::<Vec<_>>();
-        for input in &mut draft.inputs {
+        for input in &mut inputs {
             super::program::physicalize_type_resources(&mut input.ty, self.resources);
         }
-        for output in &mut draft.outputs {
+        for output in &mut outputs {
             super::program::physicalize_type_resources(&mut output.ty, self.resources);
         }
-        for (ty, _) in &mut draft.params {
+        for (ty, _) in &mut params {
             super::program::physicalize_type_resources(ty, self.resources);
         }
-        super::program::physicalize_type_resources(&mut draft.return_ty, self.resources);
-        for declaration in &mut draft.resources {
+        super::program::physicalize_type_resources(&mut return_ty, self.resources);
+        for declaration in &mut declarations {
             super::program::physicalize_type_resources(&mut declaration.elem_ty, self.resources);
         }
-        if draft.name.is_empty() {
+        if self.phase.entry_point.is_empty() {
             return Err("physical entry has no publication name".into());
         }
         for route in &output_routes {
-            if route.slot.0 >= draft.outputs.len() {
+            if route.slot.0 >= outputs.len() {
                 return Err(format!(
                     "physical entry `{}` routes invalid output slot {}",
-                    draft.name, route.slot.0
+                    self.phase.entry_point, route.slot.0
                 ));
             }
         }
-        let storage_bindings = draft
-            .resources
+        let storage_bindings = declarations
             .into_iter()
             .map(|declaration| {
                 let resource = declaration.resource.0;
                 let binding = self.resources.binding(resource).ok_or_else(|| {
                     format!(
                         "physical entry `{}` references missing resource {:?}",
-                        draft.name, resource
+                        self.phase.entry_point, resource
                     )
                 })?;
                 Ok(interface::StorageBindingDecl {
@@ -160,14 +155,14 @@ impl<'a> PhysicalEntryBuilder<'a> {
             })
             .collect::<Result<Vec<_>, String>>()?;
         Ok(PhysicalEntry {
-            name: draft.name,
-            span: draft.span,
-            execution_model: draft.execution_model,
-            inputs: draft.inputs,
-            outputs: draft.outputs,
+            name: self.phase.entry_point.clone(),
+            span,
+            execution_model: self.publication.execution_model.clone(),
+            inputs,
+            outputs,
             storage_bindings,
-            params: draft.params,
-            return_ty: draft.return_ty,
+            params,
+            return_ty,
             graph,
             control_headers,
             aliases,
@@ -463,11 +458,10 @@ impl EntryBuilder {
         );
     }
 
-    /// Finalize: set the entry block's terminator to `Return(None)` and
-    /// hand back a closed planned-kernel body.
-    pub fn build(mut self) -> PlannedKernelBody {
+    /// Finalize the synthesized planner draft.
+    pub fn build(mut self) -> KernelDraft {
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Return(None);
-        PlannedKernelBody {
+        KernelDraft {
             name: self.name,
             span: self.span,
             execution_model: self.execution_model,
